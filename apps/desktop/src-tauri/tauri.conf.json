@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MOSS",
+  "version": "0.1.0",
+  "identifier": "com.moss.laser",
+  "build": {
+    "frontendDist": "../../../frontend/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "MOSS",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 640,
+        "label": "main"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "gcode": {
+    "cases": [
+      "outline",
+      "raster"
+    ]
+  },
+  "materials_and_safety": {
+    "material_keys": [
+      "backup_path",
+      "defaults",
+      "error",
+      "materials",
+      "prototype",
+      "source_path",
+      "version"
+    ],
+    "safety_cases": [
+      "plastic",
+      "pvc",
+      "soft_card"
+    ]
+  },
+  "mcp": {
+    "count": 20,
+    "names": [
+      "check_laser_connection_tool",
+      "laser_safe_action_tool",
+      "laser_workflow_tool",
+      "material_params_tool",
+      "recommend_laser_params_tool",
+      "run_calibration_grid_tool",
+      "select_calibration_cell_tool",
+      "start_tuned_job_tool",
+      "generate_text_laser_task_tool",
+      "refine_laser_params_from_feedback_tool",
+      "regenerate_text_laser_task_tool",
+      "generate_text_image_gcode_tool",
+      "laser_grbl_tool",
+      "laser_network_grbl_tool",
+      "command_execution_tool",
+      "ai_laser_gcode_tool",
+      "open_app_tool",
+      "open_jsjds_website_tool",
+      "shortcut_key_execution_tool",
+      "generate_text_image_tool"
+    ]
+  },
+  "python_tests": {
+    "returncode": 0,
+    "summary": "Ran 625 tests in 10.199s"
+  },
+  "source_root": "94c46b9ca05f"
+}

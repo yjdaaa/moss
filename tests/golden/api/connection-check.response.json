@@ -1,0 +1,35 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "result": {
+      "preferred_mode": "network",
+      "selected_mode": null,
+      "fallback_used": false,
+      "attempts": [
+        {
+          "mode": "network",
+          "connected": false,
+          "laser_mode_ok": false,
+          "summary": "参数无效: 请填写设备 host/IP",
+          "target": ""
+        },
+        {
+          "mode": "serial",
+          "connected": false,
+          "laser_mode_ok": false,
+          "summary": "未尝试: 未选择串口且未发现任何系统串口，请插入 USB 线并点击刷新",
+          "target": ""
+        }
+      ],
+      "connected": false,
+      "machine_limits": null,
+      "features": null,
+      "firmware_settings": [],
+      "timeout_seconds": 3,
+      "serial_connected": false,
+      "network_connected": false,
+      "summary": "网络 参数无效: 请填写设备 host/IP"
+    }
+  }
+}

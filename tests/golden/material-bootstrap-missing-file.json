@@ -1,0 +1,180 @@
+{
+  "backup_path": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-golden-runtime-pbhj_k33\\missing-materials.json.bak",
+  "defaults": {
+    "network_host": "",
+    "network_telnet_port": 23
+  },
+  "error": null,
+  "materials": {
+    "亚克力": {
+      "aliases": [
+        "acrylic",
+        "plexiglass",
+        "有机玻璃"
+      ],
+      "thicknesses": {
+        "3": {
+          "cut": {
+            "feed_rate": 260,
+            "laser_max_power": 850,
+            "laser_min_power": 0,
+            "passes": 1,
+            "pixel_size_mm": 0.1,
+            "threshold": 128,
+            "travel_rate": 3000
+          },
+          "engrave": {
+            "outline": {
+              "feed_rate": 1600,
+              "laser_max_power": 340,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            },
+            "raster": {
+              "feed_rate": 1600,
+              "laser_max_power": 340,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            }
+          }
+        }
+      }
+    },
+    "椴木": {
+      "aliases": [
+        "basswood",
+        "wood",
+        "plywood",
+        "木头",
+        "木板",
+        "木料",
+        "木牌",
+        "木片",
+        "木质",
+        "椴木板"
+      ],
+      "thicknesses": {
+        "3": {
+          "cut": {
+            "feed_rate": 360,
+            "laser_max_power": 900,
+            "laser_min_power": 0,
+            "passes": 1,
+            "pixel_size_mm": 0.1,
+            "threshold": 128,
+            "travel_rate": 3000
+          },
+          "engrave": {
+            "outline": {
+              "feed_rate": 1800,
+              "laser_max_power": 420,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            },
+            "raster": {
+              "feed_rate": 1800,
+              "laser_max_power": 420,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            }
+          }
+        }
+      }
+    },
+    "皮革": {
+      "aliases": [
+        "leather",
+        "皮料"
+      ],
+      "thicknesses": {
+        "1.5": {
+          "cut": {
+            "feed_rate": 520,
+            "laser_max_power": 650,
+            "laser_min_power": 0,
+            "passes": 1,
+            "pixel_size_mm": 0.1,
+            "threshold": 128,
+            "travel_rate": 3000
+          },
+          "engrave": {
+            "outline": {
+              "feed_rate": 1900,
+              "laser_max_power": 280,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            },
+            "raster": {
+              "feed_rate": 1900,
+              "laser_max_power": 280,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            }
+          }
+        }
+      }
+    },
+    "纸板": {
+      "aliases": [
+        "cardboard",
+        "paperboard",
+        "瓦楞纸",
+        "卡纸"
+      ],
+      "thicknesses": {
+        "1": {
+          "cut": {
+            "feed_rate": 760,
+            "laser_max_power": 520,
+            "laser_min_power": 0,
+            "passes": 1,
+            "pixel_size_mm": 0.1,
+            "threshold": 128,
+            "travel_rate": 3000
+          },
+          "engrave": {
+            "outline": {
+              "feed_rate": 2500,
+              "laser_max_power": 220,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            },
+            "raster": {
+              "feed_rate": 2500,
+              "laser_max_power": 220,
+              "laser_min_power": 0,
+              "passes": 1,
+              "pixel_size_mm": 0.1,
+              "threshold": -1,
+              "travel_rate": 3000
+            }
+          }
+        }
+      }
+    }
+  },
+  "prototype": false,
+  "source_path": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-golden-runtime-pbhj_k33\\missing-materials.json",
+  "version": 1
+}

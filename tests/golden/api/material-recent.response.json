@@ -1,0 +1,22 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "result": {
+      "workflow_id": "wf_36d66293e5354bb388c28de3eb0b76a7",
+      "material": "亚克力",
+      "thickness_mm": 3.0,
+      "laser_mode": "engrave",
+      "engraving_mode": "raster",
+      "params": {
+        "laser_min_power": 0,
+        "laser_max_power": 340,
+        "feed_rate": 1600,
+        "travel_rate": 3000,
+        "threshold": -1,
+        "passes": 1,
+        "pixel_size_mm": 0.1
+      }
+    }
+  }
+}

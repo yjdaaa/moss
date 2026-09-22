@@ -1,0 +1,133 @@
+name: MOSS Multi-Platform CI/CD
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  # 1. 前端构建与测试
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install and test frontend
+        run: |
+          cd frontend
+          npm ci
+          npm test
+          npm run build
+      - name: Upload frontend assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+  # 2. Rust Workspace 核心检查与 Windows 桌面构建
+  windows-desktop:
+    needs: frontend
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      # 类型边界守卫已内置为 crates/laser-contracts/tests/type_boundary.rs，随 workspace 测试一起执行
+      - name: Run Workspace Tests
+        run: cargo test --workspace
+      - name: Build Release moss-desktop & moss-host
+        run: cargo build --release -p moss-desktop -p moss-host
+      - name: Upload Windows Executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-windows-binaries
+          path: |
+            target/release/moss-desktop.exe
+            target/release/moss-host.exe
+
+  # 3. Android APK 云端自动编译
+  android-build:
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'microsoft'
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Install cargo-ndk & tauri-cli
+        run: |
+          cargo install cargo-ndk --locked
+          cargo install tauri-cli --locked --version 2.11.4
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - name: Build Android APK
+        run: |
+          cd apps/desktop/src-tauri
+          cargo tauri android init --ci
+          cargo ndk -t arm64-v8a -P 24 build --lib
+          cd gen/android
+          ./gradlew assembleArm64Debug --stacktrace
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-android-apk
+          path: apps/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+
+  # 4. iOS 云端 Mac 矩阵编译 (Apple Silicon macOS-14)
+  ios-build:
+    needs: frontend
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios aarch64-apple-ios-sim
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --locked --version 2.11.4
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - name: Build iOS Application (Simulator & Unsigned Archive)
+        run: |
+          cd apps/desktop/src-tauri
+          cargo tauri ios init --ci
+          # 构建未签名 iOS 模拟器/调试包
+          cargo tauri ios build --debug --target aarch64-apple-ios-sim
+      - name: Package iOS Bundle
+        run: |
+          mkdir -p target/ios-artifacts
+          find apps/desktop/src-tauri/gen/apple/build -name "*.app" -exec cp -r {} target/ios-artifacts/ \; 2>/dev/null || true
+          tar -czf target/moss-ios-app.tar.gz -C target/ios-artifacts . 2>/dev/null || true
+      - name: Upload iOS Application Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-ios-app
+          path: |
+            target/moss-ios-app.tar.gz
+            apps/desktop/src-tauri/gen/apple/build/**/*.app

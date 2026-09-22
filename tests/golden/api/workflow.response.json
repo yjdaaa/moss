@@ -1,0 +1,10 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "result": {
+      "workflows": [],
+      "speech": "已列出最近的激光 workflow；可以用 workflow_id 继续查询、反馈或重生成。"
+    }
+  }
+}

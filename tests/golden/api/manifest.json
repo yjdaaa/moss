@@ -1,0 +1,24 @@
+{
+  "get": {
+    "material-lab-export": "/api/material-lab/export",
+    "health": "/api/health",
+    "runtime-config": "/api/ui/runtime-config",
+    "serial-ports": "/api/ui/serial-ports",
+    "material-options": "/api/ui/material-options",
+    "material-recommendation": "/api/ui/material-recommendation?material=%E7%BA%B8%E6%9D%BF&thickness_mm=3&laser_mode=engrave&engraving_mode=outline",
+    "preview-missing": "/preview"
+  },
+  "post": {
+    "upload": "/api/upload",
+    "draw-preview": "/api/draw/preview",
+    "material-preview": "/api/material-lab/preview",
+    "material-manage": "/api/material-lab/manage",
+    "material-recent": "/api/material-lab/recent",
+    "material-send": "/api/material-lab/send",
+    "material-select-cell": "/api/material-lab/select-cell",
+    "connection-check": "/api/connection/check",
+    "text-generate": "/api/text-task/generate",
+    "text-send": "/api/text-task/send",
+    "workflow": "/api/workflow"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "result": {
+      "material": "纸板",
+      "thickness_mm": 3.0,
+      "matched_thickness_mm": 1.0,
+      "match": "nearest_thickness",
+      "laser_mode": "engrave",
+      "laser_max_power": 220,
+      "feed_rate": 2500,
+      "passes": 1,
+      "engraving_mode": "outline"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "result": {
+      "ports": [],
+      "default_port": "",
+      "baudrate": 115200
+    }
+  }
+}

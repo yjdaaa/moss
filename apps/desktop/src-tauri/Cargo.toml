@@ -1,0 +1,19 @@
+[package]
+name = "moss-desktop"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lib]
+name = "moss_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+laser-host = { path = "../../../crates/laser-host" }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }

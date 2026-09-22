@@ -1,0 +1,86 @@
+﻿{
+  "contract_version": 1,
+  "job_type": "calibration_matrix",
+  "material": "椴木",
+  "thickness_mm": 3,
+  "task_type": "engrave_photo",
+  "machine_profile_id": "yisu-v1-100x100",
+  "output_format": "gcode",
+  "can_send": false,
+  "next_action": "run_sample_test",
+  "message": "校准矩阵仅用于小样测试，请观察结果后显式保存成功参数。",
+  "files": {
+    "gcode": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\2\\椴木_engrave_photo_calibration.gcode",
+    "preview": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\2\\椴木_engrave_photo_calibration_preview.png",
+    "summary": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\2\\椴木_engrave_photo_calibration_summary.json"
+  },
+  "calibration_matrix": {
+    "rows": 3,
+    "columns": 3,
+    "cells": {
+      "A1": {
+        "power": 200,
+        "speed": 1100,
+        "passes": 1,
+        "pixel_size_mm": 0.16,
+        "line_interval_mm": 0.16
+      },
+      "A2": {
+        "power": 240,
+        "speed": 1100,
+        "passes": 1,
+        "pixel_size_mm": 0.2,
+        "line_interval_mm": 0.2
+      },
+      "A3": {
+        "power": 280,
+        "speed": 1100,
+        "passes": 1,
+        "pixel_size_mm": 0.24,
+        "line_interval_mm": 0.24
+      },
+      "B1": {
+        "power": 200,
+        "speed": 900,
+        "passes": 1,
+        "pixel_size_mm": 0.16,
+        "line_interval_mm": 0.16
+      },
+      "B2": {
+        "power": 240,
+        "speed": 900,
+        "passes": 1,
+        "pixel_size_mm": 0.2,
+        "line_interval_mm": 0.2
+      },
+      "B3": {
+        "power": 280,
+        "speed": 900,
+        "passes": 1,
+        "pixel_size_mm": 0.24,
+        "line_interval_mm": 0.24
+      },
+      "C1": {
+        "power": 200,
+        "speed": 700,
+        "passes": 1,
+        "pixel_size_mm": 0.16,
+        "line_interval_mm": 0.16
+      },
+      "C2": {
+        "power": 240,
+        "speed": 700,
+        "passes": 1,
+        "pixel_size_mm": 0.2,
+        "line_interval_mm": 0.2
+      },
+      "C3": {
+        "power": 280,
+        "speed": 700,
+        "passes": 1,
+        "pixel_size_mm": 0.24,
+        "line_interval_mm": 0.24
+      }
+    }
+  }
+}

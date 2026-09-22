@@ -1,0 +1,380 @@
+{
+  "schema": "birdview.constraint-catalog/v1",
+  "project": {
+    "id": "moss-rust",
+    "name": "MOSS-Rust",
+    "revision": "workspace"
+  },
+  "architectureBinding": {
+    "mapId": "moss-rust-architecture",
+    "mapRevision": 1,
+    "sourceRevision": "workspace"
+  },
+  "coverage": {
+    "checkedAt": "2026-09-21T08:33:29.113Z",
+    "semanticReview": "reviewed",
+    "uninspectedPaths": [],
+    "unresolved": [],
+    "excluded": [],
+    "limitations": [
+      "覆盖 docs/developer/standards.md 与 docs/developer/safety.md 的核心规范与安全红线；底层 Crate 实现细节仍需代码测试覆盖。"
+    ]
+  },
+  "references": [],
+  "sources": [
+    {
+      "id": "source-standards",
+      "kind": "reference",
+      "path": "docs/developer/standards.md",
+      "text": "# 开发规范\n\n这份文档面向项目贡献者，说明代码组织、测试、安全和文档维护要求。具体行为以源码、测试和公开文档为准。\n\n## 项目结构\n\n- moss_mcp/：MCP 桥接、工具注册和本地 Web 服务入口\n- core/：可复用的共享逻辑和硬件集成\n- tools/：MCP 工具模块，每个模块提供 register_tool(mcp)\n- apps/：Web 应用和 Excalidraw 画板\n- tests/：黄金样本（`golden/`）、字体夹具（`fixtures/`）与视觉基线（`visual-baseline/`）；Rust 单元测试与各 crate 同源\n- docs/：用户、开发者、激光和集成文档\n- scripts/：平台启动脚本\n\n不要为了“看起来整齐”新增重复的发送器、配置层或通用工具。只有当多个模块确实需要复用时，才把逻辑放入 core/。\n\n## 代码约定\n\n- 新增 MCP 工具必须实现 register_tool(mcp)。\n- 将校验、转换、依赖加载和外部调用放在可测试的模块级函数中，保持注册 wrapper 简单。\n- 环境变量读取集中在模块级常量或配置 helper 中，避免同一配置在多处重复解析。\n- Windows、macOS 和 Linux 行为有差异时，显式分支并返回清晰的“不支持”原因。\n- 保持已有模块名和公开工具名兼容；不要随意修正历史拼写导致导入链路失效。\n\n## 安全边界\n\n- .env 只存本机配置，真实 token、密码、设备 IP、串口号和私有路径不得提交。\n- 激光、串口、网络设备、摄像头、桌面自动化和本地命令都按高风险能力处理。\n- 生成图片、G-code、预览和推荐参数不等于启动机器。\n- 完整文件发送、运动、开激光、切割和危险单命令必须经过代码中的确认门禁。\n- 发送前应使用只读设备探测；设备不可达时直接结束，不重试、不继续发送。\n- 前端只能调用后端 workflow，不得直接连接激光控制器或发送任意控制命令。\n- Web 服务默认只绑定本机，不要暴露到公网。\n\n## 测试要求\n\nRust 使用 `#[cfg(test)]` 单元测试与 `FakeGrbl` 传输桩，前端使用 `node --test`：\n\n    cargo test --workspace\n    cd frontend && npm test\n\n- 串口、HTTP、Telnet、摄像头、GUI、子进程和本地应用必须 mock。\n- 测试成功、无效输入、缺少依赖、平台差异和安全门禁。\n- 不依赖本机可变的材料库、运行时目录或真实设备状态。\n- 前端测试在对应应用目录执行 npm test，构建执行 npm run build。\n\n## 文档维护\n\n- 用户可见功能变化同步 docs/developer/feature-glossary.md 和相关用户文档。\n- 激光硬件、命令和安全说明统一放在 docs/laser/。\n- 小智/MOSS 提示词只维护在 docs/integration/xiaozhi-prompts/，修改时更新 latest.md 和日期快照。\n- 文档示例使用 <device-ip>、<token>、<path> 等占位符，不写真实连接信息。\n- 提交前检查 Markdown 链接、旧路径、绝对路径、局域网 IP 和敏感字段。\n\n## Pull Request 检查清单\n\n- [ ] 变更范围与目录职责一致。\n- [ ] 新工具包含 register_tool(mcp)，并有对应测试。\n- [ ] 外部效果使用 mock，没有连接真实设备。\n- [ ] 没有提交 .env、运行产物、虚拟环境或个人配置。\n- [ ] README 和相关 docs/ 链接仍然有效。\n- [ ] 已运行受影响的测试和前端构建。\n",
+      "applicability": "applicable",
+      "scope": "开发规范与架构约定",
+      "sections": [
+        {
+          "id": "source-standards-sec-1",
+          "level": 1,
+          "title": "开发规范",
+          "line": 1,
+          "endLine": 4,
+          "text": "# 开发规范\n\n这份文档面向项目贡献者，说明代码组织、测试、安全和文档维护要求。具体行为以源码、测试和公开文档为准。\n"
+        },
+        {
+          "id": "source-standards-sec-2",
+          "level": 2,
+          "title": "项目结构",
+          "line": 5,
+          "endLine": 16,
+          "text": "## 项目结构\n\n- moss_mcp/：MCP 桥接、工具注册和本地 Web 服务入口\n- core/：可复用的共享逻辑和硬件集成\n- tools/：MCP 工具模块，每个模块提供 register_tool(mcp)\n- apps/：Web 应用和 Excalidraw 画板\n- tests/：黄金样本（`golden/`）、字体夹具（`fixtures/`）与视觉基线（`visual-baseline/`）；Rust 单元测试与各 crate 同源\n- docs/：用户、开发者、激光和集成文档\n- scripts/：平台启动脚本\n\n不要为了“看起来整齐”新增重复的发送器、配置层或通用工具。只有当多个模块确实需要复用时，才把逻辑放入 core/。\n"
+        },
+        {
+          "id": "source-standards-sec-3",
+          "level": 2,
+          "title": "代码约定",
+          "line": 17,
+          "endLine": 24,
+          "text": "## 代码约定\n\n- 新增 MCP 工具必须实现 register_tool(mcp)。\n- 将校验、转换、依赖加载和外部调用放在可测试的模块级函数中，保持注册 wrapper 简单。\n- 环境变量读取集中在模块级常量或配置 helper 中，避免同一配置在多处重复解析。\n- Windows、macOS 和 Linux 行为有差异时，显式分支并返回清晰的“不支持”原因。\n- 保持已有模块名和公开工具名兼容；不要随意修正历史拼写导致导入链路失效。\n"
+        },
+        {
+          "id": "source-standards-sec-4",
+          "level": 2,
+          "title": "安全边界",
+          "line": 25,
+          "endLine": 34,
+          "text": "## 安全边界\n\n- .env 只存本机配置，真实 token、密码、设备 IP、串口号和私有路径不得提交。\n- 激光、串口、网络设备、摄像头、桌面自动化和本地命令都按高风险能力处理。\n- 生成图片、G-code、预览和推荐参数不等于启动机器。\n- 完整文件发送、运动、开激光、切割和危险单命令必须经过代码中的确认门禁。\n- 发送前应使用只读设备探测；设备不可达时直接结束，不重试、不继续发送。\n- 前端只能调用后端 workflow，不得直接连接激光控制器或发送任意控制命令。\n- Web 服务默认只绑定本机，不要暴露到公网。\n"
+        },
+        {
+          "id": "source-standards-sec-5",
+          "level": 2,
+          "title": "测试要求",
+          "line": 35,
+          "endLine": 46,
+          "text": "## 测试要求\n\nRust 使用 `#[cfg(test)]` 单元测试与 `FakeGrbl` 传输桩，前端使用 `node --test`：\n\n    cargo test --workspace\n    cd frontend && npm test\n\n- 串口、HTTP、Telnet、摄像头、GUI、子进程和本地应用必须 mock。\n- 测试成功、无效输入、缺少依赖、平台差异和安全门禁。\n- 不依赖本机可变的材料库、运行时目录或真实设备状态。\n- 前端测试在对应应用目录执行 npm test，构建执行 npm run build。\n"
+        },
+        {
+          "id": "source-standards-sec-6",
+          "level": 2,
+          "title": "文档维护",
+          "line": 47,
+          "endLine": 54,
+          "text": "## 文档维护\n\n- 用户可见功能变化同步 docs/developer/feature-glossary.md 和相关用户文档。\n- 激光硬件、命令和安全说明统一放在 docs/laser/。\n- 小智/MOSS 提示词只维护在 docs/integration/xiaozhi-prompts/，修改时更新 latest.md 和日期快照。\n- 文档示例使用 <device-ip>、<token>、<path> 等占位符，不写真实连接信息。\n- 提交前检查 Markdown 链接、旧路径、绝对路径、局域网 IP 和敏感字段。\n"
+        },
+        {
+          "id": "source-standards-sec-7",
+          "level": 2,
+          "title": "Pull Request 检查清单",
+          "line": 55,
+          "endLine": 63,
+          "text": "## Pull Request 检查清单\n\n- [ ] 变更范围与目录职责一致。\n- [ ] 新工具包含 register_tool(mcp)，并有对应测试。\n- [ ] 外部效果使用 mock，没有连接真实设备。\n- [ ] 没有提交 .env、运行产物、虚拟环境或个人配置。\n- [ ] README 和相关 docs/ 链接仍然有效。\n- [ ] 已运行受影响的测试和前端构建。\n"
+        }
+      ]
+    },
+    {
+      "id": "source-safety",
+      "kind": "reference",
+      "path": "docs/developer/safety.md",
+      "text": "# 开发者安全入口\n\n改高风险工具前先读这页，再进入源码、测试和相关项目文档。这里是入口，不替代底层契约。\n\n## 1. 先确认运行时现实\n\n- `moss_mcp/bridge.py` 只负责把本地 stdio MCP 脚本桥接到 `.env` 的 `MCP_ENDPOINT`。\n- `moss_mcp/server.py` 才负责创建 `FastMCP(\"YOKO_MCP_SERVER\")`、扫描 `tools/` 并调用 `register_tool(mcp)`。\n- `tools.homeasstant_tool` 和 `tools.lasergrbl_gui_tool` 当前默认禁用。\n- `tools.camera_tool` 只有在 `ENABLED_IP_CAMERA=true` 时注册，比较的是小写字符串 `true`。\n- 不要因为 `tools/` 里有某个文件，就在文档、提示词或代码里写成默认可用。\n\n## 2. 高风险类别\n\n这些改动默认按高风险处理：\n\n- 本地命令执行：`tools/command_execution_tool.py`；Rust 版默认不注册，仅本机显式开发者调试开关启用时可用。\n- 本地应用、快捷键、GUI 自动化：`tools/open_app_tool.py`、`tools/shortcut_key_execution_tool.py`、`tools/lasergrbl_gui_tool.py`。\n- 串口、网络、G-code、GRBL、材料调参、文字激光任务：所有激光相关工具。\n- 本机 Web 和 Android 原生激光入口：`moss_mcp/web_server.py` 和 `android/laser-native-app` 只能复用后端 workflow、文字任务生成和既有发送门禁，不能变成前端直连设备通道。\n- 摄像头和 Home Assistant：`tools/camera_tool.py`、`core/camera.py`、`tools/homeasstant_tool.py`、`core/ha.py`。\n\n不要用 `command_execution_tool`、桌面自动化或 HTTP 逐行发送来绕过激光专用工具的确认门和在线检查。\n\n## 3. 激光安全门\n\n- Rust 完整任务发送前必须完整消费 `$$` 的终止 `ok`，校验 `$30=1000` 并通过 `?` 确认 Idle；不得自动改写 FluidNC 配置或换算已确认文件。\n- 行 ACK 全部收到后仍保持作业占用；`G4 P0` 同步 ACK 和后续 Idle 均通过才标记完成。断线/复位/无法确认状态是执行结果未知，不自动重发。\n- 翼宿采购清单及待核验 YAML 的边界见 [FluidNC 适配说明](../laser/fluidnc-yisu-v1.md)；0x18 软件复位不能替代硬件急停。\n\n- 生成文件不等于启动机器。图片/G-code/NC 生成、文字任务、材料推荐、反馈调参和重生成默认不发送硬件。\n- 文字任务、Web 预览和 Android 原生预览可通过 `reuse_prepared_gcode=true` 复用 `LASER_PREPARED_GCODE_DIR` 中唯一匹配的 `.gcode` / `.nc` 文件；这是预览/准备行为，不能绕过 `confirmed` 门和发送前在线检查。\n- `send_file` 是完整任务路径；`send_command` 只适合单条手动查询或受控命令，不能代替完整雕刻/切割任务。\n- 底层 `send_file` 默认 `confirmed=false` 只返回预览，不访问设备。\n- `confirmed=true` 后仍必须先做只读在线探测；串口和网络完整任务都不能在探测失败后继续发送。\n- 网络完整任务强制走 Telnet。HTTP 只用于只读查询或单条受控命令。\n- 浏览器、手机页面、后续画板或 Android 入口都不能直接向激光控制器发送任意命令或逐行流式发送完整 G-code。\n- 不猜串口号、设备 host、文件名、材料、厚度、密码、token 或用户私有路径。\n\n具体安全规则见 [激光文档索引](../laser/README.md)、[网络控制命令参考](../laser/grbl-esp32-network-commands.md) 和 [开发规范](standards.md)。\n\n## 4. 测试要求\n\n- 默认验证命令：`cargo test --workspace` 与 `cd frontend && npm test`；涉及发送链路时再跑 `npm run test:e2e`。\n- 单元测试必须 mock 串口、HTTP、Telnet、摄像头、Home Assistant、GUI 点击、本地应用启动和 subprocess 副作用。\n- 测试优先调用模块级 helper 或 fake MCP，不为了单元测试启动真实 MCP 服务。\n- 运行时状态使用临时目录或 mock，不依赖本机 `.env`、真实材料库、真实设备或私有文件。\n\n## 5. 文档和提示词同步\n\n- 改工具名、参数、注册开关、默认连接方式或安全确认规则时，检查 Xiaozhi/MOSS 控制台提示词是否需要同步。\n- 需要更新提示词或知识库时，同步修改 `docs/integration/xiaozhi-prompts/latest.md`，并在 `docs/integration/xiaozhi-prompts/history/` 新增日期化快照；粘贴正文须满足控制台 ≤2000、知识库 ≤200 总字符（空格与换行计入）。\n- 功能可见变化同步 `docs/developer/feature-glossary.md`；维护规则变化同步 `docs/developer/standards.md`。\n- 文档只写占位符和规则，不写真实 token、IP、串口号、账号密码或本机路径。\n",
+      "applicability": "applicable",
+      "scope": "激光与外设安全红线",
+      "sections": [
+        {
+          "id": "source-safety-sec-1",
+          "level": 1,
+          "title": "开发者安全入口",
+          "line": 1,
+          "endLine": 4,
+          "text": "# 开发者安全入口\n\n改高风险工具前先读这页，再进入源码、测试和相关项目文档。这里是入口，不替代底层契约。\n"
+        },
+        {
+          "id": "source-safety-sec-2",
+          "level": 2,
+          "title": "1. 先确认运行时现实",
+          "line": 5,
+          "endLine": 12,
+          "text": "## 1. 先确认运行时现实\n\n- `moss_mcp/bridge.py` 只负责把本地 stdio MCP 脚本桥接到 `.env` 的 `MCP_ENDPOINT`。\n- `moss_mcp/server.py` 才负责创建 `FastMCP(\"YOKO_MCP_SERVER\")`、扫描 `tools/` 并调用 `register_tool(mcp)`。\n- `tools.homeasstant_tool` 和 `tools.lasergrbl_gui_tool` 当前默认禁用。\n- `tools.camera_tool` 只有在 `ENABLED_IP_CAMERA=true` 时注册，比较的是小写字符串 `true`。\n- 不要因为 `tools/` 里有某个文件，就在文档、提示词或代码里写成默认可用。\n"
+        },
+        {
+          "id": "source-safety-sec-3",
+          "level": 2,
+          "title": "2. 高风险类别",
+          "line": 13,
+          "endLine": 24,
+          "text": "## 2. 高风险类别\n\n这些改动默认按高风险处理：\n\n- 本地命令执行：`tools/command_execution_tool.py`；Rust 版默认不注册，仅本机显式开发者调试开关启用时可用。\n- 本地应用、快捷键、GUI 自动化：`tools/open_app_tool.py`、`tools/shortcut_key_execution_tool.py`、`tools/lasergrbl_gui_tool.py`。\n- 串口、网络、G-code、GRBL、材料调参、文字激光任务：所有激光相关工具。\n- 本机 Web 和 Android 原生激光入口：`moss_mcp/web_server.py` 和 `android/laser-native-app` 只能复用后端 workflow、文字任务生成和既有发送门禁，不能变成前端直连设备通道。\n- 摄像头和 Home Assistant：`tools/camera_tool.py`、`core/camera.py`、`tools/homeasstant_tool.py`、`core/ha.py`。\n\n不要用 `command_execution_tool`、桌面自动化或 HTTP 逐行发送来绕过激光专用工具的确认门和在线检查。\n"
+        },
+        {
+          "id": "source-safety-sec-4",
+          "level": 2,
+          "title": "3. 激光安全门",
+          "line": 25,
+          "endLine": 41,
+          "text": "## 3. 激光安全门\n\n- Rust 完整任务发送前必须完整消费 `$$` 的终止 `ok`，校验 `$30=1000` 并通过 `?` 确认 Idle；不得自动改写 FluidNC 配置或换算已确认文件。\n- 行 ACK 全部收到后仍保持作业占用；`G4 P0` 同步 ACK 和后续 Idle 均通过才标记完成。断线/复位/无法确认状态是执行结果未知，不自动重发。\n- 翼宿采购清单及待核验 YAML 的边界见 [FluidNC 适配说明](../laser/fluidnc-yisu-v1.md)；0x18 软件复位不能替代硬件急停。\n\n- 生成文件不等于启动机器。图片/G-code/NC 生成、文字任务、材料推荐、反馈调参和重生成默认不发送硬件。\n- 文字任务、Web 预览和 Android 原生预览可通过 `reuse_prepared_gcode=true` 复用 `LASER_PREPARED_GCODE_DIR` 中唯一匹配的 `.gcode` / `.nc` 文件；这是预览/准备行为，不能绕过 `confirmed` 门和发送前在线检查。\n- `send_file` 是完整任务路径；`send_command` 只适合单条手动查询或受控命令，不能代替完整雕刻/切割任务。\n- 底层 `send_file` 默认 `confirmed=false` 只返回预览，不访问设备。\n- `confirmed=true` 后仍必须先做只读在线探测；串口和网络完整任务都不能在探测失败后继续发送。\n- 网络完整任务强制走 Telnet。HTTP 只用于只读查询或单条受控命令。\n- 浏览器、手机页面、后续画板或 Android 入口都不能直接向激光控制器发送任意命令或逐行流式发送完整 G-code。\n- 不猜串口号、设备 host、文件名、材料、厚度、密码、token 或用户私有路径。\n\n具体安全规则见 [激光文档索引](../laser/README.md)、[网络控制命令参考](../laser/grbl-esp32-network-commands.md) 和 [开发规范](standards.md)。\n"
+        },
+        {
+          "id": "source-safety-sec-5",
+          "level": 2,
+          "title": "4. 测试要求",
+          "line": 42,
+          "endLine": 48,
+          "text": "## 4. 测试要求\n\n- 默认验证命令：`cargo test --workspace` 与 `cd frontend && npm test`；涉及发送链路时再跑 `npm run test:e2e`。\n- 单元测试必须 mock 串口、HTTP、Telnet、摄像头、Home Assistant、GUI 点击、本地应用启动和 subprocess 副作用。\n- 测试优先调用模块级 helper 或 fake MCP，不为了单元测试启动真实 MCP 服务。\n- 运行时状态使用临时目录或 mock，不依赖本机 `.env`、真实材料库、真实设备或私有文件。\n"
+        },
+        {
+          "id": "source-safety-sec-6",
+          "level": 2,
+          "title": "5. 文档和提示词同步",
+          "line": 49,
+          "endLine": 55,
+          "text": "## 5. 文档和提示词同步\n\n- 改工具名、参数、注册开关、默认连接方式或安全确认规则时，检查 Xiaozhi/MOSS 控制台提示词是否需要同步。\n- 需要更新提示词或知识库时，同步修改 `docs/integration/xiaozhi-prompts/latest.md`，并在 `docs/integration/xiaozhi-prompts/history/` 新增日期化快照；粘贴正文须满足控制台 ≤2000、知识库 ≤200 总字符（空格与换行计入）。\n- 功能可见变化同步 `docs/developer/feature-glossary.md`；维护规则变化同步 `docs/developer/standards.md`。\n- 文档只写占位符和规则，不写真实 token、IP、串口号、账号密码或本机路径。\n"
+        }
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "id": "rule-no-useless-abstraction",
+      "targetRole": "backend",
+      "roleReason": "约束后端各模块的抽象层级与代码组织，防止无用封装。",
+      "name": "避免无用抽象，复用优先",
+      "condition": "新增类、接口或通用工具层时",
+      "explanation": "只有多个模块明确需要复用时才提取公共逻辑；避免为形式规整增加额外的胶水层。",
+      "verification": "审查新增抽象是否有至少两个独立消费方；单模块逻辑保留在所属模块内。",
+      "modules": [
+        "laser-core",
+        "laser-tools",
+        "moss-host"
+      ],
+      "sourcePath": "docs/developer/standards.md",
+      "line": 15,
+      "endLine": 15,
+      "category": "configuration",
+      "topic": {
+        "id": "architecture-rules",
+        "name": "架构与代码约定"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-mcp-tool-registration",
+      "targetRole": "backend",
+      "roleReason": "约束 MCP 工具模块对外的标准导出契约与框架生命周期管理。",
+      "name": "MCP 工具统一注册接口",
+      "condition": "新增或修改 MCP 工具模块时",
+      "explanation": "每个工具模块必须实现并导出 register_tool 供框架统一注册与依赖注入。",
+      "verification": "检查工具模块是否导出 register_tool，并运行工具发现与单元测试。",
+      "modules": [
+        "laser-mcp",
+        "laser-tools"
+      ],
+      "sourcePath": "docs/developer/standards.md",
+      "line": 19,
+      "endLine": 19,
+      "category": "interfaces",
+      "topic": {
+        "id": "mcp-contracts",
+        "name": "接口契约"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-never-commit-secrets",
+      "targetRole": "security",
+      "roleReason": "保障敏感凭据、硬件串口与网络地址安全，防止硬编码泄露。",
+      "name": "严禁凭据与私有路径入库",
+      "condition": "配置环境变量或修改持久化配置时",
+      "explanation": "敏感连接信息与私有路径仅存在于本机环境变量或受忽略的 .env 中，不提交至仓库。",
+      "verification": "Git 暂存区检查与环境变量扫描，确认无真实敏感参数。",
+      "modules": [
+        "moss-host",
+        "laser-runtime"
+      ],
+      "sourcePath": "docs/developer/standards.md",
+      "line": 27,
+      "endLine": 27,
+      "category": "security",
+      "topic": {
+        "id": "secrets-and-permissions",
+        "name": "凭据与隔离"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-frontend-no-direct-device",
+      "targetRole": "security",
+      "roleReason": "系统边界隔离，防止浏览器端因注入或误操作向控制器透传未审计的 G-code。",
+      "name": "前端仅允许通过受控 Workflow 间接操作设备",
+      "condition": "编写前端与后端交互或图纸操作逻辑时",
+      "explanation": "前端 UI 严禁建立直连硬件的传输通道，必须经由后端校验、预检后的受控 workflow 间接执行。",
+      "verification": "检查前端通信接口，确保所有请求均通过 laser-api 的受控端点。",
+      "modules": [
+        "frontend",
+        "laser-api"
+      ],
+      "sourcePath": "docs/developer/standards.md",
+      "line": 32,
+      "endLine": 32,
+      "category": "security",
+      "topic": {
+        "id": "secrets-and-permissions",
+        "name": "凭据与隔离"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-unit-tests-mock-hardware",
+      "targetRole": "generic",
+      "name": "单元测试强制 Mock 外部副作用与硬件连接",
+      "condition": "编写或运行单元测试与集成测试时",
+      "explanation": "测试必须通过桩实现（如 FakeGrbl）或 mock 对象完成，不得依赖真实设备、物理端口或外部网络。",
+      "verification": "运行 cargo test --workspace 与 npm test，检查有无物理网络或串口依赖。",
+      "modules": [
+        "laser-device",
+        "laser-core",
+        "laser-tools"
+      ],
+      "sourcePath": "docs/developer/standards.md",
+      "line": 42,
+      "endLine": 42,
+      "category": "testing",
+      "topic": {
+        "id": "testing-standards",
+        "name": "测试规范"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-laser-safety-gate",
+      "targetRole": "security",
+      "roleReason": "物理硬件控制的强安全阻断保障，防止误触发激光射击或非预期运动。",
+      "name": "激光与运动操作前置确认门禁",
+      "condition": "执行出光、物理运动或完整加工文件发送时",
+      "explanation": "所有危险动作必须经过代码中的确认门禁（安全快照与显式 confirmed=true 标志），禁止静默执行。",
+      "verification": "模拟未确认调用，验证设备驱动拒绝下发物理指令并返回阻断状态。",
+      "modules": [
+        "laser-device",
+        "laser-tools"
+      ],
+      "sourcePath": "docs/developer/safety.md",
+      "line": 34,
+      "endLine": 34,
+      "category": "security",
+      "topic": {
+        "id": "laser-safety-gate",
+        "name": "激光设备安全门"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-readonly-device-probe",
+      "targetRole": "backend",
+      "roleReason": "通信通道前置探测，避免在异常链路或离线设备上下发可能阻塞的加工流。",
+      "name": "发送前执行只读探测，不可达时即刻终止",
+      "condition": "向串口或网络设备发起加工任务前",
+      "explanation": "先通过轻量只读命令探测设备联通性；若无应答或离线，立即中止流程，严禁无限重试或继续发送。",
+      "verification": "模拟设备无响应或异常断连，验证流程直接终止并报告探测失败。",
+      "modules": [
+        "laser-device"
+      ],
+      "sourcePath": "docs/developer/safety.md",
+      "line": 35,
+      "endLine": 35,
+      "category": "security",
+      "topic": {
+        "id": "laser-safety-gate",
+        "name": "激光设备安全门"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-cmd-exec-default-disabled",
+      "targetRole": "security",
+      "roleReason": "防止宿主命令执行逃逸，严格限制高危工具的暴露面。",
+      "name": "本地命令执行工具默认禁用",
+      "condition": "启动 Host 服务并暴露工具集时",
+      "explanation": "本地命令执行工具默认绝不注册，仅允许在本机启动时通过显式开发者调试开关开启。",
+      "verification": "默认启动下查询工具列表，验证 command_execution_tool 未注册。",
+      "modules": [
+        "laser-mcp",
+        "laser-tools"
+      ],
+      "sourcePath": "docs/developer/safety.md",
+      "line": 17,
+      "endLine": 17,
+      "category": "security",
+      "topic": {
+        "id": "laser-safety-gate",
+        "name": "激光设备安全门"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-generation-is-not-starting",
+      "targetRole": "security",
+      "roleReason": "清晰切分数据计算阶段与执行阶段的权限和副作用。",
+      "name": "数据计算与文件生成阶段禁止触发硬件动作",
+      "condition": "处理排版预览、G-code 生成或调参计算时",
+      "explanation": "计算、渲染、生成 G-code 属于纯数据操作，严禁夹带启动激光或下发运动的副作用。",
+      "verification": "执行各类生成与预览 API，验证物理设备驱动未产生任何发送调用。",
+      "modules": [
+        "laser-core",
+        "laser-tools"
+      ],
+      "sourcePath": "docs/developer/safety.md",
+      "line": 31,
+      "endLine": 31,
+      "category": "security",
+      "topic": {
+        "id": "laser-safety-gate",
+        "name": "激光设备安全门"
+      },
+      "applicability": "conditional"
+    },
+    {
+      "id": "rule-telnet-for-network-jobs",
+      "targetRole": "backend",
+      "roleReason": "网络传输协议规范，保障流式 G-code 发送的严格时序与背压响应。",
+      "name": "网络雕刻长任务强制采用 Telnet 协议",
+      "condition": "通过网络向 FluidNC/GRBL 设备下发长作业文件时",
+      "explanation": "长加工任务必须经由 Telnet 建立全双工流式通道，HTTP 接口仅限轻量状态查询或单步受控指令。",
+      "verification": "测试网络发送逻辑，确认连接建立为 Telnet 协议流。",
+      "modules": [
+        "laser-device"
+      ],
+      "sourcePath": "docs/developer/safety.md",
+      "line": 36,
+      "endLine": 36,
+      "category": "interfaces",
+      "topic": {
+        "id": "network-protocols",
+        "name": "传输协议"
+      },
+      "applicability": "conditional"
+    }
+  ],
+  "ruleReview": {
+    "scope": "本轮提炼涵盖核心架构抽象、接口与 MCP 契约、激光安全门禁及测试 Mock 要求的 10 条高优先级约束规则",
+    "sourcePaths": [
+      "docs/developer/standards.md",
+      "docs/developer/safety.md"
+    ],
+    "reviewedAt": "2026-09-21T08:33:29.115Z",
+    "implementationVerification": "unverified"
+  }
+}

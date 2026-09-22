@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "success": false,
+    "result": "calibration_id 不能为空"
+  }
+}

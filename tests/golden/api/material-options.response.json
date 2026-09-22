@@ -1,0 +1,34 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "result": {
+      "materials": [
+        {
+          "name": "亚克力",
+          "thicknesses": [
+            3
+          ]
+        },
+        {
+          "name": "椴木",
+          "thicknesses": [
+            3
+          ]
+        },
+        {
+          "name": "皮革",
+          "thicknesses": [
+            1.5
+          ]
+        },
+        {
+          "name": "纸板",
+          "thicknesses": [
+            1
+          ]
+        }
+      ]
+    }
+  }
+}

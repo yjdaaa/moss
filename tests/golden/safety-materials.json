@@ -1,0 +1,20 @@
+{
+  "plastic": {
+    "decision": "clarify",
+    "material": "塑料",
+    "message": "材料仅写“塑料”或成分不明，请提供明确且可安全加工的材料名称；在明确前不能生成可发送预览。",
+    "reason": "ambiguous_plastic"
+  },
+  "pvc": {
+    "decision": "block",
+    "material": "PVC",
+    "message": "PVC/聚氯乙烯及明确危险塑料禁止激光加工，已拒绝生成可发送预览。",
+    "reason": "pvc_or_hazardous_plastic"
+  },
+  "soft_card": {
+    "decision": "clarify",
+    "material": "软卡",
+    "message": "“软卡”可能是纸质或塑料，请先说明是纸质软卡还是塑料软卡；在明确前不能生成可发送预览。",
+    "reason": "soft_card_ambiguous"
+  }
+}

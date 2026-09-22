@@ -1,0 +1,86 @@
+﻿{
+  "contract_version": 1,
+  "job_type": "calibration_matrix",
+  "material": "椴木",
+  "thickness_mm": 3,
+  "task_type": "cut_contour",
+  "machine_profile_id": "yisu-v1-100x100",
+  "output_format": "gcode",
+  "can_send": false,
+  "next_action": "run_sample_test",
+  "message": "校准矩阵仅用于小样测试，请观察结果后显式保存成功参数。",
+  "files": {
+    "gcode": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\3\\椴木_cut_contour_calibration.gcode",
+    "preview": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\3\\椴木_cut_contour_calibration_preview.png",
+    "summary": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\3\\椴木_cut_contour_calibration_summary.json"
+  },
+  "calibration_matrix": {
+    "rows": 3,
+    "columns": 3,
+    "cells": {
+      "A1": {
+        "power": 140,
+        "speed": 800,
+        "passes": 1,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "A2": {
+        "power": 180,
+        "speed": 800,
+        "passes": 2,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "A3": {
+        "power": 220,
+        "speed": 800,
+        "passes": 3,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "B1": {
+        "power": 140,
+        "speed": 600,
+        "passes": 1,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "B2": {
+        "power": 180,
+        "speed": 600,
+        "passes": 2,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "B3": {
+        "power": 220,
+        "speed": 600,
+        "passes": 3,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "C1": {
+        "power": 140,
+        "speed": 400,
+        "passes": 1,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "C2": {
+        "power": 180,
+        "speed": 400,
+        "passes": 2,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      },
+      "C3": {
+        "power": 220,
+        "speed": 400,
+        "passes": 3,
+        "pixel_size_mm": null,
+        "line_interval_mm": null
+      }
+    }
+  }
+}

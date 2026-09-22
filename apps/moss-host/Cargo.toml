@@ -1,0 +1,10 @@
+[package]
+name = "moss-host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+laser-api = { path = "../../crates/laser-api" }
+laser-mcp = { path = "../../crates/laser-mcp" }
+laser-runtime = { path = "../../crates/laser-runtime" }
+laser-host = { path = "../../crates/laser-host" }

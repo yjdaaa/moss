@@ -1,0 +1,427 @@
+{
+  "schemaVersion": 1,
+  "mapId": "moss-rust-architecture",
+  "revision": 1,
+  "project": {
+    "id": "moss-rust",
+    "name": "MOSS-Rust"
+  },
+  "modules": [
+    {
+      "id": "frontend",
+      "role": "frontend",
+      "name": "Web & Excalidraw UI",
+      "kind": "local",
+      "responsibility": "基于 React 18 与 Excalidraw 画板的前端交互界面，提供激光雕刻排版、材料参数调优与加工状态预览。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "frontend"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "frontend/package.json",
+          "note": "React 18 + Vite + Excalidraw 前端工程入口"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 0,
+        "column": 0
+      }
+    },
+    {
+      "id": "desktop",
+      "role": "frontend",
+      "name": "Tauri Desktop App",
+      "kind": "local",
+      "responsibility": "基于 Tauri 的跨平台桌面客户端，封装系统托盘、本地窗口与前端画板，提供免安装独立运行体验。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "apps/desktop"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "apps/desktop/src-tauri/Cargo.toml",
+          "note": "Tauri 桌面端应用配置与依赖"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 0,
+        "column": 1
+      }
+    },
+    {
+      "id": "moss-host",
+      "role": "backend",
+      "name": "MOSS Host Service",
+      "kind": "local",
+      "responsibility": "后端统一主进程入口，编排并启动 Web API、MCP 服务与硬件后台任务。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "apps/moss-host"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "apps/moss-host/Cargo.toml",
+          "note": "Host 进程依赖 laser-api、laser-mcp、laser-runtime 与 laser-host"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 1,
+        "column": 0
+      }
+    },
+    {
+      "id": "laser-api",
+      "role": "backend",
+      "name": "Laser HTTP Web API",
+      "kind": "local",
+      "responsibility": "实现 17 个兼容路由的 Web HTTP/WebSocket 服务，处理前端交互请求、图纸文件上传与运行状态流。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-api"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "docs/developer/api-contracts.md",
+          "note": "定义 17 个 /api 路由与新增 /v1 接口的机器契约"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 1,
+        "column": 1
+      }
+    },
+    {
+      "id": "laser-mcp",
+      "role": "backend",
+      "name": "FastMCP & Xiaozhi Bridge",
+      "kind": "local",
+      "responsibility": "实现 JSON-RPC 协议与 FastMCP 工具注册契约，对接小智语音助手与 MOSS MCP 客户端。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-mcp"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "crates/laser-mcp/Cargo.toml",
+          "note": "MCP 协议序列化与工具分发实现"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 1,
+        "column": 2
+      }
+    },
+    {
+      "id": "laser-tools",
+      "role": "backend",
+      "name": "Laser Business Tools",
+      "kind": "local",
+      "responsibility": "实现 20 个注册 MCP 工具的业务逻辑，包括材料参数推荐、校准测试网格与文字雕刻任务生成。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-tools"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "docs/archive/rust-rebuild-spec.md",
+          "note": "冻结 20 个 MCP 工具功能范围与入参契约"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 2,
+        "column": 1
+      }
+    },
+    {
+      "id": "laser-core",
+      "role": "backend",
+      "name": "G-code Engine & Core Algorithms",
+      "kind": "local",
+      "responsibility": "纯算法计算核心：文字字形轮廓渲染、位图灰度栅格化、矢量边缘追踪与 G-code 指令生成及加工时间估算。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-core"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "crates/laser-core/Cargo.toml",
+          "note": "图像处理 image/imageproc 与字体解析 ttf-parser 依赖"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 2,
+        "column": 2
+      }
+    },
+    {
+      "id": "laser-device",
+      "role": "backend",
+      "name": "Hardware Driver & GRBL Bridge",
+      "kind": "local",
+      "responsibility": "硬件设备驱动与通信：管理串口/网络 GRBL 与 FluidNC 通信、设备探测、硬件安全门禁与 FakeGrbl 测试桩。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-device"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "docs/developer/safety.md",
+          "note": "定义激光安全门、只读探测与 Telnet/串口传输要求"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 3,
+        "column": 1
+      }
+    },
+    {
+      "id": "laser-runtime",
+      "role": "database",
+      "name": "SQLite Runtime & Storage",
+      "kind": "local",
+      "responsibility": "持久化存储与运行环境：管理 SQLite 数据库（材料库、校准记录、历史任务状态与配置参数）。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-runtime"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "docs/developer/db-schema.md",
+          "note": "SQLite 表结构与旧 JSON 数据非破坏性迁移定义"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 3,
+        "column": 2
+      }
+    },
+    {
+      "id": "laser-contracts",
+      "role": "generic",
+      "roleAssessment": {
+        "basis": "out-of-taxonomy",
+        "note": "跨模块共享的纯数据模型、机器契约、DTO 结构体与公共错误类型定义，不承担独立运行时或存储职能。"
+      },
+      "name": "Contracts & Common DTOs",
+      "kind": "local",
+      "responsibility": "跨所有 crates 共享的机器契约、序列化类型、请求/响应结构与通用协议常量。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-contracts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "crates/laser-contracts/Cargo.toml",
+          "note": "底层无依赖公共契约包"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 2,
+        "column": 0
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "id": "desktop-frontend",
+      "from": "desktop",
+      "to": "frontend",
+      "label": "嵌入前端静态资源",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "apps/desktop/src-tauri/Cargo.toml",
+          "note": "Tauri webview 窗口承载前端画板页面"
+        }
+      ]
+    },
+    {
+      "id": "frontend-api",
+      "from": "frontend",
+      "to": "laser-api",
+      "label": "发起 HTTP / WebSocket 请求",
+      "kind": "request",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "docs/developer/api-contracts.md",
+          "note": "前端通过 17 个 /api 路由进行图纸上传、状态查询与工作流预览"
+        }
+      ]
+    },
+    {
+      "id": "moss-host-api",
+      "from": "moss-host",
+      "to": "laser-api",
+      "label": "启动并承载 Web 服务",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "apps/moss-host/Cargo.toml",
+          "note": "moss-host 直接依赖 laser-api"
+        }
+      ]
+    },
+    {
+      "id": "moss-host-mcp",
+      "from": "moss-host",
+      "to": "laser-mcp",
+      "label": "启动并暴露 MCP 桥接",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "apps/moss-host/Cargo.toml",
+          "note": "moss-host 直接依赖 laser-mcp"
+        }
+      ]
+    },
+    {
+      "id": "laser-mcp-tools",
+      "from": "laser-mcp",
+      "to": "laser-tools",
+      "label": "分发 MCP 工具调用",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "docs/developer/standards.md",
+          "note": "MCP 框架通过 register_tool 挂载工具并分发调用"
+        }
+      ]
+    },
+    {
+      "id": "laser-api-tools",
+      "from": "laser-api",
+      "to": "laser-tools",
+      "label": "触发业务工作流",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "docs/developer/api-contracts.md",
+          "note": "Web 路由调用底层工作流与材料管理逻辑"
+        }
+      ]
+    },
+    {
+      "id": "laser-tools-core",
+      "from": "laser-tools",
+      "to": "laser-core",
+      "label": "调用核心算法生成 G-code",
+      "kind": "dependency",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-tools/Cargo.toml",
+          "note": "工具层依赖核心算法库生成加工轨迹"
+        }
+      ]
+    },
+    {
+      "id": "laser-tools-device",
+      "from": "laser-tools",
+      "to": "laser-device",
+      "label": "经安全门禁向设备发送指令",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "docs/developer/safety.md",
+          "note": "工作流通过安全校验与只读探测后调用设备层"
+        }
+      ]
+    },
+    {
+      "id": "laser-tools-runtime",
+      "from": "laser-tools",
+      "to": "laser-runtime",
+      "label": "查询/存储材料与历史记录",
+      "kind": "request",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "docs/developer/db-schema.md",
+          "note": "工具执行时读取材料库与任务历史持久化"
+        }
+      ]
+    },
+    {
+      "id": "laser-api-runtime",
+      "from": "laser-api",
+      "to": "laser-runtime",
+      "label": "读写持久化数据与状态",
+      "kind": "request",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "apps/moss-host/Cargo.toml",
+          "note": "API 服务需要直接读取任务状态与运行时配置"
+        }
+      ]
+    }
+  ]
+}

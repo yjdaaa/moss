@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/moss-host",
+    "apps/desktop/src-tauri",
+    "crates/laser-api",
+    "crates/laser-contracts",
+    "crates/laser-core",
+    "crates/laser-device",
+    "crates/laser-host",
+    "crates/laser-mcp",
+    "crates/laser-runtime",
+    "crates/laser-tools",
+]

@@ -1,0 +1,1393 @@
+<title>MOSS Laser Studio</title>
+<!-- Google Fonts: 引入工业科幻感与代码等宽字体 -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Rajdhani:wght@500;600;700&display=swap">
+
+<style>
+  :root {
+    --bg-base: #0a0e14;
+    --bg-surface: #10161f;
+    --bg-surface-raised: #16202c;
+    --bg-surface-hover: #1e2b3b;
+    --border-subtle: #1e2c3d;
+    --border-bright: #2d4159;
+    --laser-cyan: #00f0ff;
+    --laser-cyan-glow: rgba(0, 240, 255, 0.2);
+    --laser-cyan-dim: rgba(0, 240, 255, 0.08);
+    --alert-red: #ff334b;
+    --alert-red-glow: rgba(255, 51, 75, 0.25);
+    --warn-amber: #ffaa00;
+    --success-green: #00ff88;
+    --text-main: #e2ecf7;
+    --text-muted: #7c90a6;
+    --text-dim: #43556b;
+    --font-ui: "Chakra Petch", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-heading: "Rajdhani", sans-serif;
+    --font-mono: "JetBrains Mono", monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+  }
+
+  body {
+    background-color: var(--bg-base);
+    color: var(--text-main);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.4;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    letter-spacing: 0.02em;
+  }
+
+  /* 背景细腻科幻工业网格纹理 */
+  .bg-grid-overlay {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(0, 240, 255, 0.02) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(0, 240, 255, 0.02) 1px, transparent 1px);
+    background-size: 40px 40px;
+    z-index: 0;
+  }
+
+  /* 顶部全局仪表顶栏 */
+  header.hud-header {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 52px;
+    padding: 0 20px;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-subtle);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  }
+
+  .brand-area {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .moss-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-heading);
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.1em;
+  }
+
+  .moss-eye {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: radial-gradient(circle, var(--alert-red) 35%, #880010 75%, transparent 100%);
+    box-shadow: 0 0 10px var(--alert-red-glow), 0 0 20px var(--alert-red);
+    position: relative;
+    animation: pulseEye 3s infinite ease-in-out;
+  }
+
+  @keyframes pulseEye {
+    0%, 100% { opacity: 0.85; transform: scale(0.96); }
+    50% { opacity: 1; transform: scale(1.05); }
+  }
+
+  .system-badge {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--laser-cyan);
+    background: var(--laser-cyan-dim);
+    border: 1px solid rgba(0, 240, 255, 0.3);
+    padding: 2px 6px;
+    border-radius: 2px;
+    letter-spacing: 0.05em;
+  }
+
+  /* 导航选项卡 */
+  .nav-tabs {
+    display: flex;
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 3px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+  }
+
+  .tab-btn {
+    font-family: var(--font-ui);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
+    padding: 6px 16px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.15s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    letter-spacing: 0.05em;
+  }
+
+  .tab-btn:hover {
+    color: var(--text-main);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .tab-btn.active {
+    color: #000;
+    background: var(--laser-cyan);
+    font-weight: 700;
+    box-shadow: 0 0 12px var(--laser-cyan-glow);
+  }
+
+  /* 状态指示与急停控制 */
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    background: rgba(0, 255, 136, 0.08);
+    border: 1px solid rgba(0, 255, 136, 0.25);
+    border-radius: 2px;
+    color: var(--success-green);
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success-green);
+    box-shadow: 0 0 6px var(--success-green);
+  }
+
+  .btn-estop {
+    background: linear-gradient(180deg, #ff2640, #b30018);
+    color: #fff;
+    border: 1px solid #ff6677;
+    font-family: var(--font-heading);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 5px 14px;
+    border-radius: 3px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 0 15px var(--alert-red-glow);
+    transition: all 0.1s ease;
+  }
+
+  .btn-estop:hover {
+    background: linear-gradient(180deg, #ff4055, #cc001c);
+    box-shadow: 0 0 20px rgba(255, 51, 75, 0.6);
+  }
+
+  .btn-estop:active {
+    transform: translateY(1px);
+  }
+
+  /* 主工作区视图切换容器 */
+  main.hud-main {
+    position: relative;
+    z-index: 1;
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+  }
+
+  .view-container {
+    display: none;
+    width: 100%;
+    height: 100%;
+  }
+
+  .view-container.active {
+    display: flex;
+  }
+
+  /* ---------------- 视图 1：主工作台 WORKSPACE ---------------- */
+  .workspace-layout {
+    display: grid;
+    grid-template-columns: 340px 1fr 340px;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .hud-panel {
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .hud-panel.right-panel {
+    border-right: none;
+    border-left: 1px solid var(--border-subtle);
+  }
+
+  .panel-header {
+    padding: 12px 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-title {
+    font-family: var(--font-heading);
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.08em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .panel-title::before {
+    content: "";
+    display: inline-block;
+    width: 3px;
+    height: 12px;
+    background: var(--laser-cyan);
+    box-shadow: 0 0 6px var(--laser-cyan);
+  }
+
+  .panel-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* 输入控件与分组 */
+  .control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .control-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .control-label span.value-badge {
+    font-family: var(--font-mono);
+    color: var(--laser-cyan);
+  }
+
+  .hud-input, .hud-select {
+    background: var(--bg-surface-raised);
+    border: 1px solid var(--border-bright);
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 7px 10px;
+    border-radius: 3px;
+    outline: none;
+    transition: all 0.15s;
+    width: 100%;
+  }
+
+  .hud-input:focus, .hud-select:focus {
+    border-color: var(--laser-cyan);
+    box-shadow: 0 0 8px var(--laser-cyan-glow);
+  }
+
+  .radio-pill-group {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    background: var(--bg-surface-raised);
+    padding: 3px;
+    border-radius: 3px;
+    border: 1px solid var(--border-subtle);
+  }
+
+  .radio-pill {
+    text-align: center;
+    padding: 6px 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+  }
+
+  .radio-pill.active {
+    background: rgba(0, 240, 255, 0.15);
+    color: var(--laser-cyan);
+    font-weight: 600;
+    border: 1px solid rgba(0, 240, 255, 0.4);
+  }
+
+  /* 滑块控件 */
+  .hud-slider-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .hud-range {
+    flex: 1;
+    accent-color: var(--laser-cyan);
+    cursor: pointer;
+  }
+
+  /* 材料快速卡片 */
+  .material-preset-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .mat-preset-card {
+    background: var(--bg-surface-raised);
+    border: 1px solid var(--border-subtle);
+    padding: 8px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .mat-preset-card:hover {
+    border-color: var(--border-bright);
+    background: var(--bg-surface-hover);
+  }
+
+  .mat-preset-card.active {
+    border-color: var(--laser-cyan);
+    background: rgba(0, 240, 255, 0.08);
+  }
+
+  .mat-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  .mat-detail {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  /* 中间工作台加工监视舱 */
+  .viewport-center {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #080c11;
+    position: relative;
+  }
+
+  .canvas-stage-wrapper {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  canvas#laserCanvas {
+    background: #06090d;
+    border: 1px solid var(--border-subtle);
+    box-shadow: inset 0 0 30px rgba(0, 0, 0, 0.8);
+  }
+
+  /* 悬浮覆盖坐标与遥测 HUD */
+  .hud-telemetry-bar {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    right: 14px;
+    display: flex;
+    justify-content: space-between;
+    pointer-events: none;
+  }
+
+  .hud-stat-box {
+    background: rgba(16, 22, 31, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border-subtle);
+    padding: 8px 14px;
+    border-radius: 3px;
+    pointer-events: auto;
+    display: flex;
+    gap: 16px;
+  }
+
+  .stat-item {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .stat-label {
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+  }
+
+  .stat-val {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  .stat-val.accent {
+    color: var(--laser-cyan);
+  }
+
+  /* 底部加工控制条 */
+  .canvas-bottom-controls {
+    height: 48px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+  }
+
+  .tool-btn-group {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn-hud-sm {
+    background: var(--bg-surface-raised);
+    border: 1px solid var(--border-bright);
+    color: var(--text-main);
+    font-family: var(--font-ui);
+    font-size: 11px;
+    padding: 5px 10px;
+    border-radius: 2px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    transition: all 0.15s;
+  }
+
+  .btn-hud-sm:hover {
+    background: var(--bg-surface-hover);
+    border-color: var(--laser-cyan);
+    color: #fff;
+  }
+
+  /* 右侧门禁与发送执行区 */
+  .security-gate-box {
+    background: rgba(255, 170, 0, 0.05);
+    border: 1px solid rgba(255, 170, 0, 0.25);
+    padding: 12px;
+    border-radius: 3px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .gate-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+    font-size: 12px;
+    color: var(--warn-amber);
+  }
+
+  .gate-checklist {
+    font-size: 11px;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .gate-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .gate-item.checked {
+    color: var(--success-green);
+  }
+
+  .btn-send-execute {
+    background: linear-gradient(180deg, #00f0ff, #0099cc);
+    color: #000;
+    border: none;
+    font-family: var(--font-heading);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    padding: 12px 16px;
+    border-radius: 3px;
+    cursor: pointer;
+    box-shadow: 0 0 15px var(--laser-cyan-glow);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: all 0.15s;
+  }
+
+  .btn-send-execute:hover {
+    background: linear-gradient(180deg, #33f3ff, #00b3ee);
+    box-shadow: 0 0 25px rgba(0, 240, 255, 0.5);
+  }
+
+  .btn-send-execute:active {
+    transform: translateY(1px);
+  }
+
+  /* 终端日志流 */
+  .terminal-box {
+    background: #06090d;
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    padding: 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    height: 160px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .log-line {
+    display: flex;
+    gap: 8px;
+  }
+
+  .log-time {
+    color: var(--text-dim);
+  }
+
+  .log-msg.ok { color: var(--success-green); }
+  .log-msg.info { color: var(--laser-cyan); }
+  .log-msg.warn { color: var(--warn-amber); }
+
+  /* ---------------- 视图 2：材料实验室 MATERIAL LAB ---------------- */
+  .lab-layout {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    width: 100%;
+    height: 100%;
+  }
+
+  .matrix-canvas-card {
+    background: var(--bg-surface);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .matrix-preview-grid {
+    display: grid;
+    gap: 6px;
+    margin: auto;
+    padding: 24px;
+    background: #080c12;
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+  }
+
+  .matrix-cell {
+    width: 64px;
+    height: 64px;
+    background: var(--bg-surface-raised);
+    border: 1px solid var(--border-bright);
+    border-radius: 3px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    transition: all 0.15s;
+    position: relative;
+  }
+
+  .matrix-cell:hover {
+    border-color: var(--laser-cyan);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  }
+
+  .matrix-cell.selected {
+    border-color: var(--laser-cyan);
+    background: rgba(0, 240, 255, 0.18);
+    box-shadow: 0 0 12px var(--laser-cyan-glow);
+  }
+
+  .cell-power { color: var(--alert-red); font-weight: 700; }
+  .cell-speed { color: var(--laser-cyan); }
+
+  /* ---------------- 视图 3：画板 DRAW LAB ---------------- */
+  .draw-layout {
+    display: flex;
+    width: 100%;
+    height: 100%;
+  }
+
+  .draw-toolbar {
+    width: 54px;
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px 0;
+    gap: 8px;
+  }
+
+  .draw-tool-btn {
+    width: 38px;
+    height: 38px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .draw-tool-btn:hover {
+    background: var(--bg-surface-raised);
+    color: #fff;
+  }
+
+  .draw-tool-btn.active {
+    background: var(--laser-cyan-dim);
+    border-color: var(--laser-cyan);
+    color: var(--laser-cyan);
+  }
+
+  .draw-canvas-container {
+    flex: 1;
+    position: relative;
+    background: #06090d;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  canvas#sketchCanvas {
+    background: #0a0e14;
+    border: 1px solid var(--border-subtle);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+    cursor: crosshair;
+  }
+
+  /* 底部状态条 */
+  footer.hud-footer {
+    height: 28px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-subtle);
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    z-index: 10;
+  }
+
+  .footer-segment {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .footer-segment span.highlight {
+    color: var(--text-muted);
+  }
+</style>
+
+<div class="bg-grid-overlay"></div>
+
+<!-- 顶部导航与控制栏 -->
+<header class="hud-header">
+  <div class="brand-area">
+    <div class="moss-logo">
+      <div class="moss-eye"></div>
+      MOSS 550W
+    </div>
+    <div class="system-badge">LASER CREATIVE CORE</div>
+  </div>
+
+  <div class="nav-tabs">
+    <button class="tab-btn active" onclick="switchView('workspace')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+      主工作台
+    </button>
+    <button class="tab-btn" onclick="switchView('draw')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>
+      矢量画板
+    </button>
+    <button class="tab-btn" onclick="switchView('material')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="1"/><rect x="2" y="14" width="20" height="8" rx="1"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>
+      材料实验室
+    </button>
+    <button class="tab-btn" onclick="switchView('settings')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      系统设置
+    </button>
+  </div>
+
+  <div class="header-actions">
+    <div class="status-pill">
+      <div class="status-dot"></div>
+      GRBL 1.1h ONLINE (TCP: 127.0.0.1:23)
+    </div>
+    <button class="btn-estop" onclick="triggerEmergencyStop()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 22 22 22 12 2"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      0x18 急停制动
+    </button>
+  </div>
+</header>
+
+<main class="hud-main">
+  <!-- 视图 1：主工作台 -->
+  <div id="view-workspace" class="view-container active">
+    <div class="workspace-layout">
+      <!-- 左侧控制面板 -->
+      <aside class="hud-panel">
+        <div class="panel-header">
+          <div class="panel-title">加工任务配置 (JOB SETUP)</div>
+          <span class="system-badge">ID: WF-2026-09</span>
+        </div>
+        <div class="panel-body">
+          <div class="control-group">
+            <label class="control-label">雕刻/加工模式 (PROCESS MODE)</label>
+            <div class="radio-pill-group">
+              <div class="radio-pill active" onclick="setMode(this, 'text')">文字排版</div>
+              <div class="radio-pill" onclick="setMode(this, 'raster')">位图光栅</div>
+              <div class="radio-pill" onclick="setMode(this, 'vector')">矢量轮廓</div>
+            </div>
+          </div>
+
+          <div class="control-group" id="textInputGroup">
+            <label class="control-label">刻写文字内容 (INPUT TEXT)</label>
+            <input type="text" id="engraveText" class="hud-input" value="MOSS 550W // 领航员空间站" oninput="updateSimulation()">
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">预设材料库 (MATERIAL SELECTION)</label>
+            <div class="material-preset-grid">
+              <div class="mat-preset-card active" onclick="selectMaterial(this, '椴木', 3, 420, 1800)">
+                <div class="mat-name">椴木板 (3mm)</div>
+                <div class="mat-detail">S420 F1800 · 光栅</div>
+              </div>
+              <div class="mat-preset-card" onclick="selectMaterial(this, '亚克力', 3, 340, 1600)">
+                <div class="mat-name">黑亚克力 (3mm)</div>
+                <div class="mat-detail">S340 F1600 · 切割/线雕</div>
+              </div>
+              <div class="mat-preset-card" onclick="selectMaterial(this, '皮革', 1.5, 280, 1900)">
+                <div class="mat-name">牛皮料 (1.5mm)</div>
+                <div class="mat-detail">S280 F1900 · 浅雕</div>
+              </div>
+              <div class="mat-preset-card" onclick="selectMaterial(this, '纸板', 1, 220, 2500)">
+                <div class="mat-name">高密卡纸 (1mm)</div>
+                <div class="mat-detail">S220 F2500 · 极速</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">
+              <span>最大激光功率 (S-MAX)</span>
+              <span class="value-badge" id="valPower">420 PWM</span>
+            </label>
+            <div class="hud-slider-wrap">
+              <input type="range" class="hud-range" min="50" max="1000" value="420" oninput="updateSlider('valPower', this.value, ' PWM'); updateSimulation()">
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">
+              <span>加工进给速率 (FEED RATE)</span>
+              <span class="value-badge" id="valSpeed">1800 mm/min</span>
+            </label>
+            <div class="hud-slider-wrap">
+              <input type="range" class="hud-range" min="300" max="4000" value="1800" oninput="updateSlider('valSpeed', this.value, ' mm/min'); updateSimulation()">
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">
+              <span>走刀循环次数 (PASSES)</span>
+              <span class="value-badge" id="valPasses">1 CYCLE</span>
+            </label>
+            <div class="hud-slider-wrap">
+              <input type="range" class="hud-range" min="1" max="5" value="1" oninput="updateSlider('valPasses', this.value, ' CYCLE'); updateSimulation()">
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 中间监视舱与加工仿真画布 -->
+      <section class="viewport-center">
+        <!-- 悬浮遥测数据栏 -->
+        <div class="hud-telemetry-bar">
+          <div class="hud-stat-box">
+            <div class="stat-item">
+              <span class="stat-label">X 轴坐标</span>
+              <span class="stat-val" id="pos-x">120.450</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Y 轴坐标</span>
+              <span class="stat-val" id="pos-y">085.200</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">激光状态</span>
+              <span class="stat-val accent" id="laser-active">M4 S420 (ON)</span>
+            </div>
+          </div>
+
+          <div class="hud-stat-box">
+            <div class="stat-item">
+              <span class="stat-label">有效工件范围</span>
+              <span class="stat-val">160 × 42 mm</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">预估耗时</span>
+              <span class="stat-val accent">01m 24s</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">G-CODE 行数</span>
+              <span class="stat-val">1,248 行</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="canvas-stage-wrapper">
+          <canvas id="laserCanvas" width="680" height="460"></canvas>
+        </div>
+
+        <div class="canvas-bottom-controls">
+          <div class="tool-btn-group">
+            <button class="btn-hud-sm" onclick="resetCanvasOrigin()">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              复位视图 (G92 X0 Y0)
+            </button>
+            <button class="btn-hud-sm" onclick="toggleSimulate()">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <span id="simBtnText">开始轨迹仿真</span>
+            </button>
+          </div>
+
+          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">
+            工作行程范围: 400 × 400 mm | 安全边界边距: 5.0 mm
+          </div>
+        </div>
+      </section>
+
+      <!-- 右侧安全门禁与发送执行区 -->
+      <aside class="hud-panel right-panel">
+        <div class="panel-header">
+          <div class="panel-title">执行器与控制台 (DISPATCH)</div>
+          <span class="system-badge">READY</span>
+        </div>
+        <div class="panel-body">
+          <div class="security-gate-box">
+            <div class="gate-header">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              物理安全硬门禁 (PREFLIGHT GATE)
+            </div>
+            <div class="gate-checklist">
+              <div class="gate-item checked">✓ 固件激光安全模式已激活 ($32=1)</div>
+              <div class="gate-item checked">✓ 物理刀路 SHA-256 指纹已冻结比对</div>
+              <div class="gate-item checked">✓ 设备未处于在途繁忙态 (Single-Job Guard)</div>
+              <div class="gate-item checked">✓ 已连接光防护箱互锁开关</div>
+            </div>
+          </div>
+
+          <button class="btn-send-execute" onclick="executeJobWorkerSend()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            启动 JobWorker 逐行下发
+          </button>
+
+          <div class="control-group">
+            <label class="control-label">下发实时进度 (STREAMING PROGRESS)</label>
+            <div style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-subtle); height: 8px; border-radius: 4px; overflow: hidden;">
+              <div id="jobProgressBar" style="width: 0%; height: 100%; background: var(--laser-cyan); box-shadow: 0 0 8px var(--laser-cyan); transition: width 0.2s;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-top: 4px;">
+              <span id="jobProgressLines">0 / 1248 行</span>
+              <span id="jobProgressPercent">0%</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">底层通信与状态流 (SERIAL/TCP TELEMETRY)</label>
+            <div class="terminal-box" id="terminalLog">
+              <div class="log-line"><span class="log-time">14:20:01</span><span class="log-msg info">[HOST] MOSS 550W Core Online.</span></div>
+              <div class="log-line"><span class="log-time">14:20:02</span><span class="log-msg ok">[GRBL] Connected to 127.0.0.1:23.</span></div>
+              <div class="log-line"><span class="log-time">14:20:02</span><span class="log-msg ok">[GRBL] Probe response: $32=1 confirmed.</span></div>
+              <div class="log-line"><span class="log-time">14:20:05</span><span class="log-msg info">[PREVIEW] Generated 1248 G-code lines.</span></div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- 视图 2：矢量画板 DRAW LAB -->
+  <div id="view-draw" class="view-container">
+    <div class="draw-layout">
+      <div class="draw-toolbar">
+        <button class="draw-tool-btn active" title="画笔 (Brush)" onclick="setDrawTool(this, 'brush')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>
+        </button>
+        <button class="draw-tool-btn" title="直线 (Line)" onclick="setDrawTool(this, 'line')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="19" x2="19" y2="5"/></svg>
+        </button>
+        <button class="draw-tool-btn" title="矩形 (Rect)" onclick="setDrawTool(this, 'rect')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+        </button>
+        <button class="draw-tool-btn" title="圆形 (Circle)" onclick="setDrawTool(this, 'circle')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
+        </button>
+        <button class="draw-tool-btn" title="清空画布" onclick="clearSketch()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
+      </div>
+
+      <div class="draw-canvas-container">
+        <canvas id="sketchCanvas" width="700" height="500"></canvas>
+        <div style="position: absolute; bottom: 20px; right: 20px; display: flex; gap: 10px;">
+          <button class="btn-hud-sm" onclick="syncDrawToWorkspace()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+            解算路径并同步到主工作台
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 视图 3：材料实验室 MATERIAL LAB -->
+  <div id="view-material" class="view-container">
+    <div class="lab-layout">
+      <!-- 左侧材料库管理 -->
+      <aside class="hud-panel">
+        <div class="panel-header">
+          <div class="panel-title">材料工艺参数库 (LIBRARY)</div>
+          <button class="btn-hud-sm" onclick="exportMaterials()">导出 JSON</button>
+        </div>
+        <div class="panel-body">
+          <div class="control-group">
+            <label class="control-label">搜索材料 (SEARCH)</label>
+            <input type="text" class="hud-input" placeholder="输入材料名称或别名 (如 椴木 / basswood)..." oninput="filterMaterials(this.value)">
+          </div>
+
+          <div class="control-group" style="display: flex; flex-direction: column; gap: 8px;" id="materialListContainer">
+            <!-- 动态注入材料卡片 -->
+          </div>
+        </div>
+      </aside>
+
+      <!-- 右侧标定测试矩阵生成与点选 -->
+      <section class="matrix-canvas-card">
+        <div class="panel-header">
+          <div class="panel-title">标定测试矩阵生成与点选套用 (CALIBRATION MATRIX)</div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn-hud-sm" onclick="generateMatrixGrid()">重新计算矩阵网格</button>
+            <button class="btn-send-execute" style="padding: 5px 12px; font-size: 12px;" onclick="sendCalibrationGrid()">实机下发测试</button>
+          </div>
+        </div>
+
+        <div style="padding: 16px; border-bottom: 1px solid var(--border-subtle); display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
+          <div class="control-group">
+            <label class="control-label">功率测试区间 (S)</label>
+            <input type="text" class="hud-input" value="100 - 600 PWM" readonly>
+          </div>
+          <div class="control-group">
+            <label class="control-label">速度测试区间 (F)</label>
+            <input type="text" class="hud-input" value="600 - 2400 mm/min" readonly>
+          </div>
+          <div class="control-group">
+            <label class="control-label">矩阵规模 (GRID)</label>
+            <input type="text" class="hud-input" value="5 行 × 5 列 (25格)" readonly>
+          </div>
+          <div class="control-group">
+            <label class="control-label">当前选定套用参数</label>
+            <input type="text" id="selectedCellInfo" class="hud-input" value="尚未点选单元格" readonly style="color: var(--laser-cyan);">
+          </div>
+        </div>
+
+        <div style="flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center;">
+          <div class="matrix-preview-grid" id="matrixGrid" style="grid-template-columns: repeat(5, 64px);">
+            <!-- 5x5 矩阵单元格在 JS 中动态渲染 -->
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 视图 4：系统设置 SETTINGS -->
+  <div id="view-settings" class="view-container">
+    <div style="padding: 30px; max-width: 720px; margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 20px;">
+      <h2 style="font-family: var(--font-heading); font-size: 20px; color: #fff; border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px;">
+        MOSS 激光控制核心 · 系统全局配置
+      </h2>
+
+      <div class="control-group">
+        <label class="control-label">默认连接模式 (DEFAULT CONNECTION MODE)</label>
+        <select class="hud-select">
+          <option>network (TCP Telnet 端口 23)</option>
+          <option>serial (COM3 / 115200 波特率)</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">小智/MOSS MCP 接入点 (MCP_ENDPOINT)</label>
+        <input type="text" class="hud-input" value="wss://api.xiaozhi.me/mcp/?token=***" readonly>
+        <span style="font-size: 10px; color: var(--text-muted);">配置于本地 .env；启动时自动以 WebSocket 建立双向安全通信。</span>
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">看门狗超时中断与心跳保持 (WATCHDOG TIMEOUT)</label>
+        <input type="text" class="hud-input" value="500 ms (失联 500ms 内先发 ? 状态查询，连续超时进入 Lost 态)">
+      </div>
+
+      <div class="control-group">
+        <label class="control-label">开发者命令安全开关 (MOSS_ENABLE_DEVELOPER_COMMANDS)</label>
+        <input type="text" class="hud-input" value="false (生产安全锁定：已禁用直接 Shell 执行)" readonly>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- 底部微型状态栏 -->
+<footer class="hud-footer">
+  <div class="footer-segment">
+    <span>SYSTEM: <span class="highlight">NORMAL</span></span>
+    <span>BUFFER POOL: <span class="highlight">100% (FREE)</span></span>
+    <span>SAFETY CHANNEL: <span class="highlight">ACTIVE (0x18 DUAL-READY)</span></span>
+  </div>
+  <div class="footer-segment">
+    <span>MOSS XIAOZHI MCP // RUST CORE v0.1.0</span>
+    <span>LATENCY: <span class="highlight">&lt; 0.8ms</span></span>
+  </div>
+</footer>
+
+<script>
+  // 视图切换
+  function switchView(viewName) {
+    document.querySelectorAll('.view-container').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
+    const target = document.getElementById(`view-${viewName}`);
+    if (target) target.classList.add('active');
+
+    const clickedBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.getAttribute('onclick').includes(viewName));
+    if (clickedBtn) clickedBtn.classList.add('active');
+
+    if (viewName === 'draw') initSketchCanvas();
+  }
+
+  function updateSlider(id, val, unit) {
+    document.getElementById(id).textContent = val + unit;
+  }
+
+  function setMode(el, mode) {
+    el.parentElement.querySelectorAll('.radio-pill').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    const textGroup = document.getElementById('textInputGroup');
+    textGroup.style.display = (mode === 'text') ? 'flex' : 'none';
+    updateSimulation();
+  }
+
+  function selectMaterial(el, name, thick, p, s) {
+    document.querySelectorAll('.mat-preset-card').forEach(c => c.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('valPower').textContent = p + ' PWM';
+    document.getElementById('valSpeed').textContent = s + ' mm/min';
+    logMessage(`已套用预置材料参数: ${name} (${thick}mm) - S${p} F${s}`, 'info');
+    updateSimulation();
+  }
+
+  function logMessage(msg, tone = 'info') {
+    const box = document.getElementById('terminalLog');
+    const now = new Date().toTimeString().split(' ')[0];
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.innerHTML = `<span class="log-time">${now}</span><span class="log-msg ${tone}">${msg}</span>`;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function triggerEmergencyStop() {
+    logMessage('[ALERT] 用户触发 0x18 紧急制动软复位！', 'warn');
+    alert('【MOSS 安全停机】已通过实时信道发送 0x18 单字节软复位，所有轴运动与激光已强制终止！');
+  }
+
+  // ---------------- 仿真画板逻辑 ----------------
+  const canvas = document.getElementById('laserCanvas');
+  const ctx = canvas.getContext('2d');
+  let simTimer = null;
+  let simProgress = 0;
+
+  function drawGrid() {
+    ctx.fillStyle = '#06090d';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = 'rgba(0, 240, 255, 0.05)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < canvas.width; x += 40) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height);
+      ctx.stroke();
+    }
+    for (let y = 0; y < canvas.height; y += 40) {
+      ctx.beginPath();
+      ctx.moveTo(0, y); ctx.lineTo(canvas.width, y);
+      ctx.stroke();
+    }
+
+    // 中心原点与刻度
+    ctx.strokeStyle = 'rgba(0, 240, 255, 0.3)';
+    ctx.beginPath();
+    ctx.moveTo(canvas.width / 2, 0); ctx.lineTo(canvas.width / 2, canvas.height);
+    ctx.moveTo(0, canvas.height / 2); ctx.lineTo(canvas.width, canvas.height / 2);
+    ctx.stroke();
+  }
+
+  function updateSimulation() {
+    drawGrid();
+    const text = document.getElementById('engraveText').value || 'MOSS 550W';
+
+    ctx.font = 'bold 24px "Chakra Petch", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // 激光轨迹模拟轮廓线
+    ctx.strokeStyle = 'rgba(0, 240, 255, 0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
+
+    // 外包围安全边框
+    const metrics = ctx.measureText(text);
+    const w = metrics.width + 30;
+    const h = 50;
+    ctx.strokeStyle = 'rgba(255, 170, 0, 0.4)';
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect((canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+    ctx.setLineDash([]);
+  }
+
+  function toggleSimulate() {
+    const btn = document.getElementById('simBtnText');
+    if (simTimer) {
+      clearInterval(simTimer);
+      simTimer = null;
+      btn.textContent = '开始轨迹仿真';
+      logMessage('仿真已暂停');
+    } else {
+      btn.textContent = '暂停轨迹仿真';
+      logMessage('开始逐行轨迹模拟...');
+      simTimer = setInterval(() => {
+        simProgress += 0.02;
+        if (simProgress > 1) simProgress = 0;
+        updateSimulation();
+
+        // 绘制运动激光头
+        const text = document.getElementById('engraveText').value || 'MOSS';
+        const metrics = ctx.measureText(text);
+        const startX = (canvas.width - metrics.width) / 2;
+        const currentX = startX + metrics.width * simProgress;
+        const currentY = canvas.height / 2;
+
+        ctx.fillStyle = '#ff2244';
+        ctx.shadowColor = '#ff2244';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.arc(currentX, currentY, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        document.getElementById('pos-x').textContent = (currentX * 0.4).toFixed(3);
+        document.getElementById('pos-y').textContent = (currentY * 0.4).toFixed(3);
+      }, 30);
+    }
+  }
+
+  function resetCanvasOrigin() {
+    simProgress = 0;
+    updateSimulation();
+    logMessage('已重设坐标系 G92 X0 Y0', 'ok');
+  }
+
+  function executeJobWorkerSend() {
+    logMessage('[DISPATCH] 门禁通过，启动 JobWorker 后台线程...', 'info');
+    let p = 0;
+    const bar = document.getElementById('jobProgressBar');
+    const lines = document.getElementById('jobProgressLines');
+    const percent = document.getElementById('jobProgressPercent');
+
+    const interval = setInterval(() => {
+      p += 5;
+      if (p > 100) {
+        clearInterval(interval);
+        logMessage('[SUCCESS] 1248 行 G-code 全部收到设备 ok 确认，加工完成！', 'ok');
+        return;
+      }
+      bar.style.width = p + '%';
+      lines.textContent = `${Math.round(1248 * p / 100)} / 1248 行`;
+      percent.textContent = p + '%';
+      if (p % 25 === 0) {
+        logMessage(`[STREAM] 进度同步: ${p}% (${Math.round(1248 * p / 100)} 行)`, 'info');
+      }
+    }, 150);
+  }
+
+  // ---------------- 材料实验室网格生成 ----------------
+  function generateMatrixGrid() {
+    const container = document.getElementById('matrixGrid');
+    container.innerHTML = '';
+    const powers = [100, 220, 350, 480, 600];
+    const speeds = [600, 1000, 1500, 2000, 2400];
+
+    for (let r = 0; r < 5; r++) {
+      for (let c = 0; c < 5; c++) {
+        const cell = document.createElement('div');
+        cell.className = 'matrix-cell';
+        cell.innerHTML = `
+          <div style="font-size:9px; color:var(--text-dim);">#${r * 5 + c + 1}</div>
+          <div class="cell-power">S${powers[c]}</div>
+          <div class="cell-speed">F${speeds[r]}</div>
+        `;
+        cell.onclick = () => {
+          document.querySelectorAll('.matrix-cell').forEach(el => el.classList.remove('selected'));
+          cell.classList.add('selected');
+          document.getElementById('selectedCellInfo').value = `单元格 #${r * 5 + c + 1} (S${powers[c]} / F${speeds[r]})`;
+          logMessage(`已点选单元格 #${r * 5 + c + 1}，可保存为推荐工艺`, 'ok');
+        };
+        container.appendChild(cell);
+      }
+    }
+  }
+
+  function sendCalibrationGrid() {
+    logMessage('[LAB] 下发 25 格标定测试矩阵 G-code 至执行器...', 'info');
+    alert('【标定矩阵下发】5x5 标定矩阵已开始逐行下发，请在设备旁佩戴护目镜观察测试效果。');
+  }
+
+  // 初始预置材料列表
+  const materials = [
+    { name: '椴木板 (Basswood)', thick: '3.0mm', power: '420', speed: '1800', mode: '光栅雕刻' },
+    { name: '透明/黑亚克力 (Acrylic)', thick: '3.0mm', power: '340', speed: '1600', mode: '矢量切割' },
+    { name: '植鞣皮革 (Leather)', thick: '1.5mm', power: '280', speed: '1900', mode: '浅层雕刻' },
+    { name: '高密瓦楞纸板 (Cardboard)', thick: '1.0mm', power: '220', speed: '2500', mode: '高速线雕' }
+  ];
+
+  function renderMaterialList(list) {
+    const c = document.getElementById('materialListContainer');
+    c.innerHTML = '';
+    list.forEach(m => {
+      const card = document.createElement('div');
+      card.className = 'mat-preset-card';
+      card.innerHTML = `
+        <div style="display:flex; justify-content:space-between;">
+          <span class="mat-name">${m.name}</span>
+          <span style="font-family:var(--font-mono); font-size:11px; color:var(--laser-cyan);">${m.thick}</span>
+        </div>
+        <div class="mat-detail">${m.mode} · 功率 S${m.power} · 速度 F${m.speed}</div>
+      `;
+      c.appendChild(card);
+    });
+  }
+
+  function filterMaterials(q) {
+    const filtered = materials.filter(m => m.name.toLowerCase().includes(q.toLowerCase()));
+    renderMaterialList(filtered);
+  }
+
+  // ---------------- 简易画板逻辑 ----------------
+  let sketchInited = false;
+  function initSketchCanvas() {
+    if (sketchInited) return;
+    sketchInited = true;
+    const sCanvas = document.getElementById('sketchCanvas');
+    const sCtx = sCanvas.getContext('2d');
+    let drawing = false;
+
+    sCtx.strokeStyle = '#00f0ff';
+    sCtx.lineWidth = 2;
+    sCtx.lineCap = 'round';
+
+    sCanvas.onmousedown = (e) => {
+      drawing = true;
+      const rect = sCanvas.getBoundingClientRect();
+      sCtx.beginPath();
+      sCtx.moveTo(e.clientX - rect.left, e.clientY - rect.top);
+    };
+
+    sCanvas.onmousemove = (e) => {
+      if (!drawing) return;
+      const rect = sCanvas.getBoundingClientRect();
+      sCtx.lineTo(e.clientX - rect.left, e.clientY - rect.top);
+      sCtx.stroke();
+    };
+
+    window.onmouseup = () => { drawing = false; };
+  }
+
+  function clearSketch() {
+    const sCanvas = document.getElementById('sketchCanvas');
+    const sCtx = sCanvas.getContext('2d');
+    sCtx.clearRect(0, 0, sCanvas.width, sCanvas.height);
+  }
+
+  function syncDrawToWorkspace() {
+    logMessage('[DRAW] 矢量画板路径解算完成，已生成最优 TSP 走刀 G-code！', 'ok');
+    switchView('workspace');
+  }
+
+  // 初始化
+  window.onload = () => {
+    updateSimulation();
+    generateMatrixGrid();
+    renderMaterialList(materials);
+  };
+</script>

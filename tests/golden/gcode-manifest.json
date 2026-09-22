@@ -1,0 +1,78 @@
+{
+  "outline": {
+    "error": null,
+    "sha256": "13a4b33e9f2d89f02a8c25aa470ed21eb41ef0bbfb8456136338a919863c8c71",
+    "stats": {
+      "actual_height_mm": 50.0,
+      "actual_width_mm": 50.0,
+      "contour_count": 6,
+      "image_height_px": 100,
+      "image_width_px": 100,
+      "line_count": 52,
+      "machine_profile": {
+        "default_image_fit_box_height_mm": 50.0,
+        "default_image_fit_box_width_mm": 50.0,
+        "default_raster_overscan_mm": 1.5,
+        "default_safe_margin_mm": 5.0,
+        "grbl_laser_s_max": 1000,
+        "laser_optical_power_w": 5.0,
+        "machine_name": "翼宿 V1.0",
+        "work_area_height_mm": 100.0,
+        "work_area_width_mm": 100.0
+      },
+      "offset_x_mm": 0.0,
+      "offset_y_mm": 0.0,
+      "outline_point_count": 24,
+      "skipped_border_contours": 1,
+      "skipped_small_contours": 0,
+      "threshold": 128,
+      "trim_box": null,
+      "y_axis_flipped": true
+    }
+  },
+  "raster": {
+    "error": null,
+    "sha256": "b16eee5c5847751289d7faa47a79936af35f79be1a06477d8c27004e99772453",
+    "stats": {
+      "active_scanline_count": 100,
+      "actual_height_mm": 50.0,
+      "actual_width_mm": 50.0,
+      "image_height_px": 100,
+      "image_width_px": 100,
+      "line_count": 659,
+      "machine_profile": {
+        "default_image_fit_box_height_mm": 50.0,
+        "default_image_fit_box_width_mm": 50.0,
+        "default_raster_overscan_mm": 1.5,
+        "default_safe_margin_mm": 5.0,
+        "grbl_laser_s_max": 1000,
+        "laser_optical_power_w": 5.0,
+        "machine_name": "翼宿 V1.0",
+        "work_area_height_mm": 100.0,
+        "work_area_width_mm": 100.0
+      },
+      "offset_x_mm": 0.0,
+      "offset_y_mm": 0.0,
+      "overscan_mm": 1.5,
+      "raster_output_strategy": "scanline",
+      "raster_scan_direction": "horizontal",
+      "raster_scan_direction_reason": "horizontal scan retained; estimated scanline cost horizontal=10258, vertical=10258",
+      "raster_scan_direction_requested": "auto",
+      "raster_scan_direction_source": "auto",
+      "raster_scanline_costs": {
+        "horizontal": {
+          "active_lines": 100,
+          "active_span_cells": 9712,
+          "transitions": 246
+        },
+        "vertical": {
+          "active_lines": 100,
+          "active_span_cells": 9712,
+          "transitions": 246
+        }
+      },
+      "snake_scan": false,
+      "y_axis_flipped": true
+    }
+  }
+}

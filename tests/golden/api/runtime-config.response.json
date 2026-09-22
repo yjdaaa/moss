@@ -1,0 +1,32 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "result": {
+      "connection": {
+        "default_mode": "network",
+        "preferred_modes": [
+          "network",
+          "serial"
+        ],
+        "serial": {
+          "default_port": "",
+          "baudrate": 115200
+        },
+        "network": {
+          "default_host": "",
+          "transport": "telnet",
+          "http_port": 80,
+          "telnet_port": 23,
+          "timeout": 5.0
+        }
+      },
+      "upload": {
+        "gcode_suffixes": [
+          ".gcode",
+          ".nc"
+        ]
+      }
+    }
+  }
+}

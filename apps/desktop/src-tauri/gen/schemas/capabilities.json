@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for the MOSS desktop window","remote":{"urls":["http://127.0.0.1:*","http://localhost:*"]},"local":true,"windows":["*"],"permissions":["core:default","core:event:default","core:event:allow-listen","core:event:allow-emit","allow-minimize-to-tray","allow-exit-application"]}}

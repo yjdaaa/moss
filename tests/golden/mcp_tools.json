@@ -1,0 +1,2659 @@
+{
+  "tools": [
+    {
+      "annotations": null,
+      "description": "\n只检查激光雕刻机串口和网络是否连通，并返回极简摘要。\n\n适用于“检查激光雕刻机是否打开 / 看看连接没连接”。本工具只使用只读探测：\n串口发送 ?，网络默认使用 Telnet 发送 ?。不要用它执行雕刻、运动、开激光或配置写入。\n默认不返回 GRBL 配置、固件详情或完整设备响应；需要排障时才设置 include_detail=true。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "host": {
+            "default": "",
+            "title": "Host",
+            "type": "string"
+          },
+          "http_port": {
+            "default": 80,
+            "title": "Http Port",
+            "type": "integer"
+          },
+          "include_detail": {
+            "default": false,
+            "title": "Include Detail",
+            "type": "boolean"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "telnet_port": {
+            "default": 23,
+            "title": "Telnet Port",
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 5.0,
+            "title": "Timeout",
+            "type": "number"
+          },
+          "transport": {
+            "default": "telnet",
+            "title": "Transport",
+            "type": "string"
+          }
+        },
+        "title": "check_laser_connection_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "check_laser_connection_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n激光雕刻机安全语义动作工具，只封装现有串口/网络单命令安全发送路径。\n\naction 支持:\n- 状态与急停: status, emergency_stop, soft_reset\n- 实时倍率微调（支持边刻边调，不停机即时生效，无需 confirmed）: feed_plus_10, feed_minus_10, feed_reset, feed_plus_1, feed_minus_1, power_plus_10, power_minus_10, power_reset, power_plus_1, power_minus_1\n- 顺序运动与控制（改变机床状态，空闲时生效，必须 confirmed=true）: unlock, home, set_origin, laser_off, absolute_move, relative_move\n网络模式必须提供 host 或配置 LASER_NETWORK_HOST。未指定 connection_mode 时按 LASER_DEFAULT_CONNECTION_MODE 路由。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "connection_mode": {
+            "default": "",
+            "title": "Connection Mode",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "feed_rate": {
+            "default": 0,
+            "title": "Feed Rate",
+            "type": "number"
+          },
+          "host": {
+            "default": "",
+            "title": "Host",
+            "type": "string"
+          },
+          "http_port": {
+            "default": 80,
+            "title": "Http Port",
+            "type": "integer"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "power": {
+            "default": 0,
+            "title": "Power",
+            "type": "number"
+          },
+          "telnet_port": {
+            "default": 23,
+            "title": "Telnet Port",
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 5.0,
+            "title": "Timeout",
+            "type": "number"
+          },
+          "transport": {
+            "default": "telnet",
+            "title": "Transport",
+            "type": "string"
+          },
+          "x": {
+            "default": null,
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "default": null,
+            "title": "Y",
+            "type": "number"
+          },
+          "z": {
+            "default": null,
+            "title": "Z",
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "laser_safe_action_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "laser_safe_action_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n统一激光 workflow 状态入口：预览、确认发送、状态、取消、反馈和重生成。\npreview/feedback/regenerate 不连接真实设备；confirm_send 只委托现有 sender 门禁。\n仅当 manual_params_confirmed=true 时，页面/请求中的功率、速度、点距、次数等才会覆盖材料库。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "default": "status",
+            "title": "Action",
+            "type": "string"
+          },
+          "auto_size": {
+            "default": null,
+            "title": "Auto Size",
+            "type": "boolean"
+          },
+          "auto_trim": {
+            "default": null,
+            "title": "Auto Trim",
+            "type": "boolean"
+          },
+          "auto_wrap": {
+            "default": null,
+            "title": "Auto Wrap",
+            "type": "boolean"
+          },
+          "baudrate": {
+            "default": null,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "bidirectional": {
+            "default": null,
+            "title": "Bidirectional",
+            "type": "boolean"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "connection_mode": {
+            "default": "",
+            "title": "Connection Mode",
+            "type": "string"
+          },
+          "dpi": {
+            "default": null,
+            "title": "Dpi",
+            "type": "number"
+          },
+          "engraving_mode": {
+            "default": null,
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "feed_rate": {
+            "default": null,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "feedback_text": {
+            "default": "",
+            "title": "Feedback Text",
+            "type": "string"
+          },
+          "font_path": {
+            "default": "",
+            "title": "Font Path",
+            "type": "string"
+          },
+          "font_size": {
+            "default": null,
+            "title": "Font Size",
+            "type": "integer"
+          },
+          "gcode_file": {
+            "default": "",
+            "title": "Gcode File",
+            "type": "string"
+          },
+          "height_mm": {
+            "default": null,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "image_file": {
+            "default": "",
+            "title": "Image File",
+            "type": "string"
+          },
+          "image_height": {
+            "default": null,
+            "title": "Image Height",
+            "type": "integer"
+          },
+          "image_url": {
+            "default": "",
+            "title": "Image Url",
+            "type": "string"
+          },
+          "image_width": {
+            "default": null,
+            "title": "Image Width",
+            "type": "integer"
+          },
+          "invert": {
+            "default": null,
+            "title": "Invert",
+            "type": "boolean"
+          },
+          "laser_max_power": {
+            "default": null,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": null,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "laser_mode": {
+            "default": null,
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "layout_mode": {
+            "default": null,
+            "title": "Layout Mode",
+            "type": "string"
+          },
+          "lock_aspect_ratio": {
+            "default": null,
+            "title": "Lock Aspect Ratio",
+            "type": "boolean"
+          },
+          "manual_params_confirmed": {
+            "default": null,
+            "title": "Manual Params Confirmed",
+            "type": "boolean"
+          },
+          "material": {
+            "default": "",
+            "title": "Material",
+            "type": "string"
+          },
+          "max_lines": {
+            "default": null,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "mode": {
+            "default": null,
+            "title": "Mode",
+            "type": "string"
+          },
+          "network_host": {
+            "default": "",
+            "title": "Network Host",
+            "type": "string"
+          },
+          "network_http_port": {
+            "default": null,
+            "title": "Network Http Port",
+            "type": "integer"
+          },
+          "network_telnet_port": {
+            "default": null,
+            "title": "Network Telnet Port",
+            "type": "integer"
+          },
+          "network_timeout": {
+            "default": null,
+            "title": "Network Timeout",
+            "type": "number"
+          },
+          "network_transport": {
+            "default": null,
+            "title": "Network Transport",
+            "type": "string"
+          },
+          "offset_x_mm": {
+            "default": null,
+            "title": "Offset X Mm",
+            "type": "number"
+          },
+          "offset_y_mm": {
+            "default": null,
+            "title": "Offset Y Mm",
+            "type": "number"
+          },
+          "overscan_mm": {
+            "default": null,
+            "title": "Overscan Mm",
+            "type": "number"
+          },
+          "passes": {
+            "default": null,
+            "title": "Passes",
+            "type": "integer"
+          },
+          "pixel_size_mm": {
+            "default": null,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "power_percent": {
+            "default": null,
+            "title": "Power Percent",
+            "type": "number"
+          },
+          "prepared_gcode_dir": {
+            "default": "",
+            "title": "Prepared Gcode Dir",
+            "type": "string"
+          },
+          "prompt": {
+            "default": "",
+            "title": "Prompt",
+            "type": "string"
+          },
+          "raster_quality_strategy": {
+            "default": null,
+            "title": "Raster Quality Strategy",
+            "type": "string"
+          },
+          "raster_scan_direction": {
+            "default": null,
+            "title": "Raster Scan Direction",
+            "type": "string"
+          },
+          "reuse_prepared_gcode": {
+            "default": null,
+            "title": "Reuse Prepared Gcode",
+            "type": "boolean"
+          },
+          "run_in_background": {
+            "default": null,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "safe_margin_mm": {
+            "default": null,
+            "title": "Safe Margin Mm",
+            "type": "number"
+          },
+          "size_mm": {
+            "default": null,
+            "title": "Size Mm",
+            "type": "number"
+          },
+          "source_type": {
+            "default": "",
+            "title": "Source Type",
+            "type": "string"
+          },
+          "strategy": {
+            "default": "recommended",
+            "title": "Strategy",
+            "type": "string"
+          },
+          "summary_path": {
+            "default": "",
+            "title": "Summary Path",
+            "type": "string"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "default": null,
+            "title": "Thickness Mm",
+            "type": "number"
+          },
+          "threshold": {
+            "default": null,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "travel_rate": {
+            "default": null,
+            "title": "Travel Rate",
+            "type": "integer"
+          },
+          "trim_tolerance": {
+            "default": null,
+            "title": "Trim Tolerance",
+            "type": "number"
+          },
+          "wait_for_response": {
+            "default": null,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": null,
+            "title": "Width Mm",
+            "type": "number"
+          },
+          "workflow_id": {
+            "default": "",
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "title": "laser_workflow_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "laser_workflow_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n管理激光材料参数库。用于按材料、厚度、雕刻/切割模式保存或读取推荐参数。\nlaser_mode='engrave' 时，engraving_mode='raster' 和 'outline' 是分开的参数集。\n\naction:\n    list - 列出材料库\n    get/recommend - 读取指定 material + thickness_mm + laser_mode + engraving_mode 的推荐参数\n    save/upsert/set - 保存参数\n    delete - 删除指定参数\n    export - 导出材料库 JSON\n    import - 导入材料库 JSON；import_mode=merge 或 replace\nparams_json 可一次传入完整参数对象；单独字段会作为默认值并被 params_json 覆盖。\nversion_mode=new_version 时保留当前版本到 history，再写入新版本；默认 update 更新当前版本。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "default": "list",
+            "title": "Action",
+            "type": "string"
+          },
+          "aliases_json": {
+            "default": "",
+            "title": "Aliases Json",
+            "type": "string"
+          },
+          "confidence": {
+            "default": "",
+            "title": "Confidence",
+            "type": "string"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "evidence_json": {
+            "default": "",
+            "title": "Evidence Json",
+            "type": "string"
+          },
+          "feed_rate": {
+            "default": 1200,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "import_mode": {
+            "default": "merge",
+            "title": "Import Mode",
+            "type": "string"
+          },
+          "laser_max_power": {
+            "default": 800,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": 0,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "library_json": {
+            "default": "",
+            "title": "Library Json",
+            "type": "string"
+          },
+          "machine_profile_id": {
+            "default": "yisu-v1-100x100",
+            "title": "Machine Profile Id",
+            "type": "string"
+          },
+          "material": {
+            "default": "",
+            "title": "Material",
+            "type": "string"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "params_json": {
+            "default": "",
+            "title": "Params Json",
+            "type": "string"
+          },
+          "passes": {
+            "default": 1,
+            "title": "Passes",
+            "type": "integer"
+          },
+          "pixel_size_mm": {
+            "default": 0.1,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "source": {
+            "default": "manual",
+            "title": "Source",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "default": 0.0,
+            "title": "Thickness Mm",
+            "type": "number"
+          },
+          "threshold": {
+            "default": -1,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "travel_rate": {
+            "default": 3000,
+            "title": "Travel Rate",
+            "type": "integer"
+          },
+          "version_mode": {
+            "default": "update",
+            "title": "Version Mode",
+            "type": "string"
+          }
+        },
+        "title": "material_params_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "material_params_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "根据材料、厚度、雕刻/切割模式和雕刻策略推荐功率、速度、次数等参数。",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "material": {
+            "title": "Material",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "title": "Thickness Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "material",
+          "thickness_mm"
+        ],
+        "title": "recommend_laser_params_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "recommend_laser_params_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n生成 5x5 等测试矩阵；confirmed=false 时只生成 G-code 和调参会话，不发送到机器。\n第一次返回 calibration_id 后，用户确认开始时可只传 calibration_id 和 confirmed=true 继续发送上次生成的测试矩阵。\n格子编号按从左到右、从上到下计数，select_calibration_cell_tool 使用该编号保存最佳参数。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "calibration_id": {
+            "default": "",
+            "title": "Calibration Id",
+            "type": "string"
+          },
+          "cell_size_mm": {
+            "default": 5.0,
+            "title": "Cell Size Mm",
+            "type": "number"
+          },
+          "columns": {
+            "default": 5,
+            "title": "Columns",
+            "type": "integer"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "connection_mode": {
+            "default": "",
+            "title": "Connection Mode",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "fill_step_mm": {
+            "default": 0.8,
+            "title": "Fill Step Mm",
+            "type": "number"
+          },
+          "gap_mm": {
+            "default": 2.0,
+            "title": "Gap Mm",
+            "type": "number"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "material": {
+            "default": "",
+            "title": "Material",
+            "type": "string"
+          },
+          "matrix_kind": {
+            "default": "",
+            "title": "Matrix Kind",
+            "type": "string"
+          },
+          "network_host": {
+            "default": "",
+            "title": "Network Host",
+            "type": "string"
+          },
+          "network_http_port": {
+            "default": 80,
+            "title": "Network Http Port",
+            "type": "integer"
+          },
+          "network_telnet_port": {
+            "default": 23,
+            "title": "Network Telnet Port",
+            "type": "integer"
+          },
+          "network_timeout": {
+            "default": 5.0,
+            "title": "Network Timeout",
+            "type": "number"
+          },
+          "network_transport": {
+            "default": "telnet",
+            "title": "Network Transport",
+            "type": "string"
+          },
+          "output_file": {
+            "default": "",
+            "title": "Output File",
+            "type": "string"
+          },
+          "pass_max": {
+            "default": 0,
+            "title": "Pass Max",
+            "type": "integer"
+          },
+          "pass_min": {
+            "default": 1,
+            "title": "Pass Min",
+            "type": "integer"
+          },
+          "passes": {
+            "default": 0,
+            "title": "Passes",
+            "type": "integer"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "power_max": {
+            "default": -1,
+            "title": "Power Max",
+            "type": "integer"
+          },
+          "power_min": {
+            "default": -1,
+            "title": "Power Min",
+            "type": "integer"
+          },
+          "rows": {
+            "default": 5,
+            "title": "Rows",
+            "type": "integer"
+          },
+          "run_in_background": {
+            "default": true,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "speed_max": {
+            "default": -1,
+            "title": "Speed Max",
+            "type": "integer"
+          },
+          "speed_min": {
+            "default": -1,
+            "title": "Speed Min",
+            "type": "integer"
+          },
+          "thickness_mm": {
+            "default": 0.0,
+            "title": "Thickness Mm",
+            "type": "number"
+          },
+          "wait_for_response": {
+            "default": true,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "x0": {
+            "default": 0.0,
+            "title": "X0",
+            "type": "number"
+          },
+          "y0": {
+            "default": 0.0,
+            "title": "Y0",
+            "type": "number"
+          }
+        },
+        "title": "run_calibration_grid_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "run_calibration_grid_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "选择测试矩阵中效果最好的格子，并保存为该材料/厚度/模式的推荐参数。",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "calibration_id": {
+            "title": "Calibration Id",
+            "type": "string"
+          },
+          "cell_number": {
+            "title": "Cell Number",
+            "type": "integer"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "laser_mode": {
+            "default": "",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "material": {
+            "default": "",
+            "title": "Material",
+            "type": "string"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "default": 0.0,
+            "title": "Thickness Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "calibration_id",
+          "cell_number"
+        ],
+        "title": "select_calibration_cell_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "select_calibration_cell_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n使用材料推荐参数或已选择的调参结果启动正式任务。\ntask_id 可引用 generate_text_laser_task_tool 保存的文字激光任务，工具会使用最新 attempt 的 gcode_file。\nconfirmed=false/dry_run=true 时只返回将使用的参数，不发送到 GRBL 设备。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "auto_size": {
+            "default": true,
+            "title": "Auto Size",
+            "type": "boolean"
+          },
+          "auto_trim": {
+            "default": true,
+            "title": "Auto Trim",
+            "type": "boolean"
+          },
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "bidirectional": {
+            "default": false,
+            "title": "Bidirectional",
+            "type": "boolean"
+          },
+          "calibration_id": {
+            "default": "",
+            "title": "Calibration Id",
+            "type": "string"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "connection_mode": {
+            "default": "",
+            "title": "Connection Mode",
+            "type": "string"
+          },
+          "dpi": {
+            "default": 300.0,
+            "title": "Dpi",
+            "type": "number"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "gcode_file": {
+            "default": "",
+            "title": "Gcode File",
+            "type": "string"
+          },
+          "height_mm": {
+            "default": 0.0,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "image_file": {
+            "default": "",
+            "title": "Image File",
+            "type": "string"
+          },
+          "invert": {
+            "default": false,
+            "title": "Invert",
+            "type": "boolean"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "lock_aspect_ratio": {
+            "default": true,
+            "title": "Lock Aspect Ratio",
+            "type": "boolean"
+          },
+          "material": {
+            "default": "",
+            "title": "Material",
+            "type": "string"
+          },
+          "network_host": {
+            "default": "",
+            "title": "Network Host",
+            "type": "string"
+          },
+          "network_http_port": {
+            "default": 80,
+            "title": "Network Http Port",
+            "type": "integer"
+          },
+          "network_telnet_port": {
+            "default": 23,
+            "title": "Network Telnet Port",
+            "type": "integer"
+          },
+          "network_timeout": {
+            "default": 5.0,
+            "title": "Network Timeout",
+            "type": "number"
+          },
+          "network_transport": {
+            "default": "telnet",
+            "title": "Network Transport",
+            "type": "string"
+          },
+          "offset_x_mm": {
+            "default": 0.0,
+            "title": "Offset X Mm",
+            "type": "number"
+          },
+          "offset_y_mm": {
+            "default": 0.0,
+            "title": "Offset Y Mm",
+            "type": "number"
+          },
+          "output_file": {
+            "default": "",
+            "title": "Output File",
+            "type": "string"
+          },
+          "overscan_mm": {
+            "default": 1.5,
+            "title": "Overscan Mm",
+            "type": "number"
+          },
+          "overwrite": {
+            "default": true,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "raster_scan_direction": {
+            "default": "auto",
+            "title": "Raster Scan Direction",
+            "type": "string"
+          },
+          "run_in_background": {
+            "default": true,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "safe_margin_mm": {
+            "default": 5.0,
+            "title": "Safe Margin Mm",
+            "type": "number"
+          },
+          "task_id": {
+            "default": "",
+            "title": "Task Id",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "default": 0.0,
+            "title": "Thickness Mm",
+            "type": "number"
+          },
+          "trim_tolerance": {
+            "default": 20,
+            "title": "Trim Tolerance",
+            "type": "number"
+          },
+          "wait_for_response": {
+            "default": true,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": 0.0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "title": "start_tuned_job_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "start_tuned_job_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "生成文字激光任务：可传 auto_wrap/max_lines 控制文字排版；默认不发送到机器。",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "auto_size": {
+            "default": true,
+            "title": "Auto Size",
+            "type": "boolean"
+          },
+          "auto_trim": {
+            "default": true,
+            "title": "Auto Trim",
+            "type": "boolean"
+          },
+          "auto_wrap": {
+            "default": false,
+            "title": "Auto Wrap",
+            "type": "boolean"
+          },
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "bidirectional": {
+            "default": false,
+            "title": "Bidirectional",
+            "type": "boolean"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "connection_mode": {
+            "default": "",
+            "title": "Connection Mode",
+            "type": "string"
+          },
+          "dpi": {
+            "default": 300.0,
+            "title": "Dpi",
+            "type": "number"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "feed_rate": {
+            "default": null,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "font_path": {
+            "default": "",
+            "title": "Font Path",
+            "type": "string"
+          },
+          "font_size": {
+            "default": 320,
+            "title": "Font Size",
+            "type": "integer"
+          },
+          "gcode_output_file": {
+            "default": "",
+            "title": "Gcode Output File",
+            "type": "string"
+          },
+          "height_mm": {
+            "default": 0.0,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "image_height": {
+            "default": 1024,
+            "title": "Image Height",
+            "type": "integer"
+          },
+          "image_output_file": {
+            "default": "",
+            "title": "Image Output File",
+            "type": "string"
+          },
+          "image_width": {
+            "default": 1024,
+            "title": "Image Width",
+            "type": "integer"
+          },
+          "invert": {
+            "default": false,
+            "title": "Invert",
+            "type": "boolean"
+          },
+          "laser_max_power": {
+            "default": null,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": null,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "layout_mode": {
+            "default": "",
+            "title": "Layout Mode",
+            "type": "string"
+          },
+          "lock_aspect_ratio": {
+            "default": true,
+            "title": "Lock Aspect Ratio",
+            "type": "boolean"
+          },
+          "material": {
+            "title": "Material",
+            "type": "string"
+          },
+          "max_lines": {
+            "default": 0,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "network_host": {
+            "default": "",
+            "title": "Network Host",
+            "type": "string"
+          },
+          "network_http_port": {
+            "default": 80,
+            "title": "Network Http Port",
+            "type": "integer"
+          },
+          "network_telnet_port": {
+            "default": 23,
+            "title": "Network Telnet Port",
+            "type": "integer"
+          },
+          "network_timeout": {
+            "default": 5.0,
+            "title": "Network Timeout",
+            "type": "number"
+          },
+          "network_transport": {
+            "default": "telnet",
+            "title": "Network Transport",
+            "type": "string"
+          },
+          "offset_x_mm": {
+            "default": 0.0,
+            "title": "Offset X Mm",
+            "type": "number"
+          },
+          "offset_y_mm": {
+            "default": 0.0,
+            "title": "Offset Y Mm",
+            "type": "number"
+          },
+          "overscan_mm": {
+            "default": 1.5,
+            "title": "Overscan Mm",
+            "type": "number"
+          },
+          "overwrite": {
+            "default": true,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "passes": {
+            "default": null,
+            "title": "Passes",
+            "type": "integer"
+          },
+          "pixel_size_mm": {
+            "default": null,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "power_percent": {
+            "default": null,
+            "title": "Power Percent",
+            "type": "number"
+          },
+          "prepared_gcode_dir": {
+            "default": "",
+            "title": "Prepared Gcode Dir",
+            "type": "string"
+          },
+          "raster_scan_direction": {
+            "default": "auto",
+            "title": "Raster Scan Direction",
+            "type": "string"
+          },
+          "reuse_prepared_gcode": {
+            "default": true,
+            "title": "Reuse Prepared Gcode",
+            "type": "boolean"
+          },
+          "run_in_background": {
+            "default": true,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "safe_margin_mm": {
+            "default": 5.0,
+            "title": "Safe Margin Mm",
+            "type": "number"
+          },
+          "send_after_generate": {
+            "default": false,
+            "title": "Send After Generate",
+            "type": "boolean"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "title": "Thickness Mm",
+            "type": "number"
+          },
+          "threshold": {
+            "default": null,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "travel_rate": {
+            "default": null,
+            "title": "Travel Rate",
+            "type": "integer"
+          },
+          "trim_tolerance": {
+            "default": 20,
+            "title": "Trim Tolerance",
+            "type": "number"
+          },
+          "wait_for_response": {
+            "default": true,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": 0.0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "text",
+          "material",
+          "thickness_mm"
+        ],
+        "title": "generate_text_laser_task_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "generate_text_laser_task_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "根据“太焦、太浅、切不透、毛边、断线”等反馈给出有界调参建议，不生成文件、不发送硬件。",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "feed_rate": {
+            "default": null,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "feedback_text": {
+            "title": "Feedback Text",
+            "type": "string"
+          },
+          "laser_max_power": {
+            "default": null,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": null,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "passes": {
+            "default": null,
+            "title": "Passes",
+            "type": "integer"
+          },
+          "pixel_size_mm": {
+            "default": null,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "power_percent": {
+            "default": null,
+            "title": "Power Percent",
+            "type": "number"
+          },
+          "task_id": {
+            "default": "",
+            "title": "Task Id",
+            "type": "string"
+          },
+          "threshold": {
+            "default": null,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "travel_rate": {
+            "default": null,
+            "title": "Travel Rate",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "feedback_text"
+        ],
+        "title": "refine_laser_params_from_feedback_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "refine_laser_params_from_feedback_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "基于已保存 task_id 和反馈策略/手动覆盖参数重新生成一次文字激光 G-code，默认不发送。",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "auto_size": {
+            "default": null,
+            "title": "Auto Size",
+            "type": "boolean"
+          },
+          "auto_trim": {
+            "default": null,
+            "title": "Auto Trim",
+            "type": "boolean"
+          },
+          "auto_wrap": {
+            "default": null,
+            "title": "Auto Wrap",
+            "type": "boolean"
+          },
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "bidirectional": {
+            "default": null,
+            "title": "Bidirectional",
+            "type": "boolean"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "connection_mode": {
+            "default": "",
+            "title": "Connection Mode",
+            "type": "string"
+          },
+          "dpi": {
+            "default": null,
+            "title": "Dpi",
+            "type": "number"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "engraving_mode": {
+            "default": null,
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "feed_rate": {
+            "default": null,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "feedback_text": {
+            "default": "",
+            "title": "Feedback Text",
+            "type": "string"
+          },
+          "font_path": {
+            "default": null,
+            "title": "Font Path",
+            "type": "string"
+          },
+          "font_size": {
+            "default": null,
+            "title": "Font Size",
+            "type": "integer"
+          },
+          "gcode_output_file": {
+            "default": "",
+            "title": "Gcode Output File",
+            "type": "string"
+          },
+          "height_mm": {
+            "default": null,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "image_height": {
+            "default": null,
+            "title": "Image Height",
+            "type": "integer"
+          },
+          "image_output_file": {
+            "default": "",
+            "title": "Image Output File",
+            "type": "string"
+          },
+          "image_width": {
+            "default": null,
+            "title": "Image Width",
+            "type": "integer"
+          },
+          "invert": {
+            "default": null,
+            "title": "Invert",
+            "type": "boolean"
+          },
+          "laser_max_power": {
+            "default": null,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": null,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "layout_mode": {
+            "default": null,
+            "title": "Layout Mode",
+            "type": "string"
+          },
+          "lock_aspect_ratio": {
+            "default": null,
+            "title": "Lock Aspect Ratio",
+            "type": "boolean"
+          },
+          "max_lines": {
+            "default": null,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "network_host": {
+            "default": "",
+            "title": "Network Host",
+            "type": "string"
+          },
+          "network_http_port": {
+            "default": 80,
+            "title": "Network Http Port",
+            "type": "integer"
+          },
+          "network_telnet_port": {
+            "default": 23,
+            "title": "Network Telnet Port",
+            "type": "integer"
+          },
+          "network_timeout": {
+            "default": 5.0,
+            "title": "Network Timeout",
+            "type": "number"
+          },
+          "network_transport": {
+            "default": "telnet",
+            "title": "Network Transport",
+            "type": "string"
+          },
+          "offset_x_mm": {
+            "default": null,
+            "title": "Offset X Mm",
+            "type": "number"
+          },
+          "offset_y_mm": {
+            "default": null,
+            "title": "Offset Y Mm",
+            "type": "number"
+          },
+          "overscan_mm": {
+            "default": null,
+            "title": "Overscan Mm",
+            "type": "number"
+          },
+          "overwrite": {
+            "default": true,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "passes": {
+            "default": null,
+            "title": "Passes",
+            "type": "integer"
+          },
+          "pixel_size_mm": {
+            "default": null,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "power_percent": {
+            "default": null,
+            "title": "Power Percent",
+            "type": "number"
+          },
+          "raster_scan_direction": {
+            "default": null,
+            "title": "Raster Scan Direction",
+            "type": "string"
+          },
+          "run_in_background": {
+            "default": true,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "safe_margin_mm": {
+            "default": null,
+            "title": "Safe Margin Mm",
+            "type": "number"
+          },
+          "send_after_generate": {
+            "default": false,
+            "title": "Send After Generate",
+            "type": "boolean"
+          },
+          "strategy": {
+            "default": "recommended",
+            "title": "Strategy",
+            "type": "string"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          },
+          "threshold": {
+            "default": null,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "travel_rate": {
+            "default": null,
+            "title": "Travel Rate",
+            "type": "integer"
+          },
+          "trim_tolerance": {
+            "default": null,
+            "title": "Trim Tolerance",
+            "type": "number"
+          },
+          "wait_for_response": {
+            "default": true,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": null,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "title": "regenerate_text_laser_task_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "regenerate_text_laser_task_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n一步生成文字图片并转换为 G-code。\n适合用户说“把某个文字直接做成图片和 G-code”时使用。\n用户说“帮我刻 xxx”且有材料/厚度时，优先用 generate_text_laser_task_tool 生成带材料参数和反馈历史的任务。\n该工具只生成图片和 G-code 文件，不连接串口、不开始雕刻。\n\n参数:\n    text: 要写入图片的文字，例如“佳佳”\n    image_output_file: 可选图片输出路径；为空时使用 generated_images/text_image.png\n    gcode_output_file: 可选 G-code 输出路径；为空时与图片同名并改为 .gcode\n    image_width/image_height/font_size/font_path: 文字图片生成参数；font_size 单位是 px\n    auto_wrap/max_lines/layout_mode: 文字排版参数；可用于长文本自动换行或指定行数\n    width_mm/height_mm/pixel_size_mm/feed_rate/travel_rate: G-code 尺寸和速度参数；默认按裁边后图片 DPI 换算自然尺寸，超过安全区才等比例缩小\n    auto_trim/trim_tolerance/auto_size/dpi/lock_aspect_ratio/offset_x_mm/offset_y_mm/safe_margin_mm: 图片导入裁边、DPI 尺寸、安全限幅和摆放偏移参数\n    laser_mode: 'engrave'/'雕刻' 为雕刻，'cut'/'切割' 为激光切割轮廓\n    engraving_mode: 雕刻策略；默认 raster/线扫填充，用户明确要求 outline/轮廓/线雕时传 'outline'\n    material/thickness_mm/use_material_params/params_file: 提供材料和厚度，或 use_material_params=true 时，先从材料库推荐功率、速度、像素步距、阈值等参数\n    auto_layout/target_char_height_mm/max_layout_width_mm/max_layout_height_mm: outline 长中文自动多行排版；默认只换行并按字号 px + DPI 换算物理尺寸，明确传入 target_char_height_mm>0 才按目标字高缩放\n    laser_min_power/laser_max_power/threshold/invert/bidirectional/overscan_mm/raster_scan_direction: 图像转 G-code 参数；raster 时 threshold=-1 使用灰度功率映射，并按 scanline 连续行扫输出；outline 时 threshold=-1 使用默认轮廓阈值\n    overwrite: 是否覆盖已有 G-code 文件\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "auto_layout": {
+            "default": true,
+            "title": "Auto Layout",
+            "type": "boolean"
+          },
+          "auto_size": {
+            "default": true,
+            "title": "Auto Size",
+            "type": "boolean"
+          },
+          "auto_trim": {
+            "default": true,
+            "title": "Auto Trim",
+            "type": "boolean"
+          },
+          "auto_wrap": {
+            "default": false,
+            "title": "Auto Wrap",
+            "type": "boolean"
+          },
+          "bidirectional": {
+            "default": false,
+            "title": "Bidirectional",
+            "type": "boolean"
+          },
+          "dpi": {
+            "default": 300.0,
+            "title": "Dpi",
+            "type": "number"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "feed_rate": {
+            "default": 1200,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "font_path": {
+            "default": "",
+            "title": "Font Path",
+            "type": "string"
+          },
+          "font_size": {
+            "default": 320,
+            "title": "Font Size",
+            "type": "integer"
+          },
+          "gcode_output_file": {
+            "default": "",
+            "title": "Gcode Output File",
+            "type": "string"
+          },
+          "height_mm": {
+            "default": 0.0,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "image_height": {
+            "default": 1024,
+            "title": "Image Height",
+            "type": "integer"
+          },
+          "image_output_file": {
+            "default": "",
+            "title": "Image Output File",
+            "type": "string"
+          },
+          "image_width": {
+            "default": 1024,
+            "title": "Image Width",
+            "type": "integer"
+          },
+          "invert": {
+            "default": false,
+            "title": "Invert",
+            "type": "boolean"
+          },
+          "laser_max_power": {
+            "default": 800,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": 0,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "layout_mode": {
+            "default": "",
+            "title": "Layout Mode",
+            "type": "string"
+          },
+          "lock_aspect_ratio": {
+            "default": true,
+            "title": "Lock Aspect Ratio",
+            "type": "boolean"
+          },
+          "material": {
+            "default": "",
+            "title": "Material",
+            "type": "string"
+          },
+          "max_layout_height_mm": {
+            "default": 90.0,
+            "title": "Max Layout Height Mm",
+            "type": "number"
+          },
+          "max_layout_width_mm": {
+            "default": 90.0,
+            "title": "Max Layout Width Mm",
+            "type": "number"
+          },
+          "max_lines": {
+            "default": 0,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "offset_x_mm": {
+            "default": 0.0,
+            "title": "Offset X Mm",
+            "type": "number"
+          },
+          "offset_y_mm": {
+            "default": 0.0,
+            "title": "Offset Y Mm",
+            "type": "number"
+          },
+          "overscan_mm": {
+            "default": 1.5,
+            "title": "Overscan Mm",
+            "type": "number"
+          },
+          "overwrite": {
+            "default": true,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "params_file": {
+            "default": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-golden-runtime-pbhj_k33\\missing-materials.json",
+            "title": "Params File",
+            "type": "string"
+          },
+          "pixel_size_mm": {
+            "default": 0.1,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "raster_scan_direction": {
+            "default": "auto",
+            "title": "Raster Scan Direction",
+            "type": "string"
+          },
+          "safe_margin_mm": {
+            "default": 5.0,
+            "title": "Safe Margin Mm",
+            "type": "number"
+          },
+          "target_char_height_mm": {
+            "default": 0.0,
+            "title": "Target Char Height Mm",
+            "type": "number"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "default": 0.0,
+            "title": "Thickness Mm",
+            "type": "number"
+          },
+          "threshold": {
+            "default": -1,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "travel_rate": {
+            "default": 3000,
+            "title": "Travel Rate",
+            "type": "integer"
+          },
+          "trim_tolerance": {
+            "default": 20,
+            "title": "Trim Tolerance",
+            "type": "number"
+          },
+          "use_material_params": {
+            "default": false,
+            "title": "Use Material Params",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": 0.0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "generate_text_image_gcode_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "generate_text_image_gcode_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\nGRBL 串口激光雕刻机工具。不要因为用户说\"帮我刻 xxx\"调用本工具 send_file；文字内容必须先用 generate_text_laser_task_tool 生成任务草稿。\n关键语义：send_file 是完整雕刻任务入口；它会在需要时先把图片转为 G-code，再先发送零点命令，然后逐行发送整份 G-code 文件。\nsend_command 只发送一条手动 G-code 命令，不能替代 send_file 来执行整份雕刻任务。\n重要：send_file 只用于用户明确要求发送已有文件或明确要求使用默认雕刻文件；必须 confirmed=true，且发送前会先用只读 ? 检查设备在线。\n完整文件发送/状态/取消强制委托 core.laser_execution；后台 worker 仅由 core._laser_execution_backend 提供。\n\naction 操作类型:\n    'machine_profile' - 查看当前软件采用的激光雕刻机硬件基线、行程范围和 GRBL S 值上限\n    'send_file' - 发送完整雕刻任务到雕刻机。只用于用户明确发送已有 G-code/图片文件或明确使用默认雕刻文件；必须 confirmed=true。默认创建后台任务并等待每行 GRBL ok；如需同步等待完成，传 run_in_background=false。\n    'job_status' - 查询后台雕刻任务状态，需要 job_id\n    'cancel_job' - 仅当用户明确说\"中断/停止/取消雕刻任务\"时调用，需要 job_id；会终止独立发送进程并停止发送后续 G-code\n    'list_ports' - 列出可用串口（无需其他参数）\n    'image_to_gcode' - 仅将图片转换为 G-code 文件保存到本地（不连接串口，需要 image_file 为真实存在的绝对路径）。laser_mode='engrave' 默认使用 raster/线扫填充雕刻；用户明确要求 outline/轮廓时传 engraving_mode='outline'；laser_mode='cut' 为激光切割轮廓\n    'send_command' - 连接串口并发送单条手动 G-code 命令（需要 gcode_command，port 可选自动检测）；它不会发送整份文件，也不会执行图片雕刻任务\n\n使用示例:\n    用户说\"帮我刻 佳佳\" -> 不要调用本工具，改用 generate_text_laser_task_tool 生成文字任务草稿\n    用户说\"打印三角形文件\" -> action='send_file'，gcode_file='三角形'；系统只会在 LASERGRBL_JOB_DIR 对应目录查找三角形.gcode/.nc/图片文件\n    用户说\"发送 xxx.png 文件\" -> action='send_file'，image_file 填该图片的绝对路径或默认雕刻目录内的文件名\n    用户说\"发送 $$ 查看配置\" -> action='send_command'，gcode_command='$$'\n    用户说\"查看串口\" -> action='list_ports'\n\nport: 串口号，如 'COM3'，不指定则使用 GRBL_DEFAULT_PORT 或自动检测 GRBL 设备\nbaudrate: 波特率，默认读取 GRBL_BAUDRATE，未配置则 115200\ngcode_file: 待发送 G-code 文件路径（.nc/.gcode）或默认雕刻目录内的文件名；不指定则使用默认雕刻文件\ngcode_command: 单条 G-code 命令，如 'G0 X10 Y10' 或 '$$'（查看设置）；仅用于手动控制，不用于发送整份雕刻任务\nimage_file: 图片绝对路径，仅在用户明确提供了图片时使用\noutput_file: 输出 .gcode/.nc 路径，仅在 image_to_gcode 时使用\nwidth_mm/height_mm/pixel_size_mm: 输出尺寸与像素步距。默认先自动裁边并按图片 DPI 或 dpi=300 换算自然尺寸；超过安全区时等比例缩小。\n    默认硬件基线是翼宿 V1.0，行程 100mm x 100mm；safe_margin_mm=5 时安全雕刻区为 90mm x 90mm。\nauto_trim/trim_tolerance: 是否自动裁掉白边、透明边或纯色背景边，以及背景容差。\nauto_size/dpi/lock_aspect_ratio: 是否优先用图片内置 DPI；无内置 DPI 或 auto_size=false 时使用 dpi；手动只给宽或高时 lock_aspect_ratio=true 会按图片比例补齐另一边。\noffset_x_mm/offset_y_mm: 图片相对当前原点的摆放偏移；偏移加最终尺寸超过安全区会返回错误。\nfeed_rate/travel_rate: 雕刻速度和空移速度，单位 mm/min\nlaser_min_power/laser_max_power: GRBL S 功率范围，默认最大值受 GRBL_LASER_S_MAX=1000 限制\nlaser_mode: 'engrave'/'雕刻' 生成雕刻 G-code；'cut'/'切割' 生成轮廓切割 G-code。\nengraving_mode: 雕刻策略，默认 raster/线扫填充；用户明确要求 outline/轮廓/线雕时传 'outline'。\nthreshold: -1 使用灰度功率映射；0-255 表示指定黑白阈值；outline 模式下 -1 会使用默认 128 轮廓阈值；invert: 是否反相；overwrite: 是否覆盖输出文件\nbidirectional: raster 行扫是否蛇形往返；overscan_mm: raster 每条有效扫描线开光前后的空跑缓冲；raster_scan_direction: auto/horizontal/vertical\nwait_for_response: 仅 send_file 使用；true 表示每行等待 ok/error，false 表示逐行直接写入串口不等待响应\nrun_in_background: 仅 send_file 使用；true 表示立即返回 job_id，false 表示兼容旧行为同步等待发送完成\nconfirmed: 仅 send_file 使用；必须 true 才会检查设备并发送，默认 false 只返回确认预览\njob_id: job_status/cancel_job 使用；send_file 后台模式返回的任务 ID\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "auto_size": {
+            "default": true,
+            "title": "Auto Size",
+            "type": "boolean"
+          },
+          "auto_trim": {
+            "default": true,
+            "title": "Auto Trim",
+            "type": "boolean"
+          },
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "bidirectional": {
+            "default": false,
+            "title": "Bidirectional",
+            "type": "boolean"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "dpi": {
+            "default": 300.0,
+            "title": "Dpi",
+            "type": "number"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "feed_rate": {
+            "default": 1200,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "gcode_command": {
+            "default": "",
+            "title": "Gcode Command",
+            "type": "string"
+          },
+          "gcode_file": {
+            "default": "",
+            "title": "Gcode File",
+            "type": "string"
+          },
+          "height_mm": {
+            "default": 0.0,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "image_file": {
+            "default": "",
+            "title": "Image File",
+            "type": "string"
+          },
+          "invert": {
+            "default": false,
+            "title": "Invert",
+            "type": "boolean"
+          },
+          "job_id": {
+            "default": "",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "laser_max_power": {
+            "default": 800,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": 0,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "lock_aspect_ratio": {
+            "default": true,
+            "title": "Lock Aspect Ratio",
+            "type": "boolean"
+          },
+          "offset_x_mm": {
+            "default": 0.0,
+            "title": "Offset X Mm",
+            "type": "number"
+          },
+          "offset_y_mm": {
+            "default": 0.0,
+            "title": "Offset Y Mm",
+            "type": "number"
+          },
+          "output_file": {
+            "default": "",
+            "title": "Output File",
+            "type": "string"
+          },
+          "overscan_mm": {
+            "default": 1.5,
+            "title": "Overscan Mm",
+            "type": "number"
+          },
+          "overwrite": {
+            "default": true,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "pixel_size_mm": {
+            "default": 0.1,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "raster_scan_direction": {
+            "default": "auto",
+            "title": "Raster Scan Direction",
+            "type": "string"
+          },
+          "run_in_background": {
+            "default": true,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "safe_margin_mm": {
+            "default": 5.0,
+            "title": "Safe Margin Mm",
+            "type": "number"
+          },
+          "threshold": {
+            "default": -1,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "travel_rate": {
+            "default": 3000,
+            "title": "Travel Rate",
+            "type": "integer"
+          },
+          "trim_tolerance": {
+            "default": 20,
+            "title": "Trim Tolerance",
+            "type": "number"
+          },
+          "wait_for_response": {
+            "default": true,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": 0.0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "laser_grbl_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "laser_grbl_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n通过 Grbl_ESP32/ESP3D 网络通道控制激光雕刻机。\n不要因为用户说\"帮我刻 xxx\"调用本工具 send_file；文字内容必须先用 generate_text_laser_task_tool 生成任务草稿。\n完整文件发送/状态/取消强制委托 core.laser_execution；后台 worker 仅由 core._laser_execution_backend 提供。\n\naction:\n    send_command - 通过 HTTP /command 或 Telnet 发送单条命令。只读命令可直接发送；运动、激光、配置、文件运行等必须 confirmed=true。\n    send_file - 只用于用户明确发送已有 G-code/图片文件或明确使用默认雕刻文件；必须 confirmed=true，且发送前会先用只读命令检查设备在线。\n    job_status - 查询后台网络雕刻任务，需要 job_id。\n    cancel_job - 取消后台网络雕刻任务，需要 job_id。\n\ntransport: http 使用 /command?commandText=...；telnet 使用 TCP/Telnet GRBL 通道。\nhost 必须显式提供或通过 LASER_NETWORK_HOST 配置，工具不会猜测真实设备地址。\n用户说\"帮我刻 佳佳\"时，佳佳是文字内容，不是文件名；必须先生成文字任务草稿，不要直接查找默认文件或发送旧文件。\n图片雕刻默认 raster/线扫填充；用户明确要求 outline/轮廓时传 engraving_mode='outline'。\n图片文件会默认自动裁边，按 DPI 或 dpi=300 换算实际雕刻尺寸，并限制在默认 90mm x 90mm 安全区内；offset_x_mm/offset_y_mm 控制摆放偏移。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "auto_size": {
+            "default": true,
+            "title": "Auto Size",
+            "type": "boolean"
+          },
+          "auto_trim": {
+            "default": true,
+            "title": "Auto Trim",
+            "type": "boolean"
+          },
+          "bidirectional": {
+            "default": false,
+            "title": "Bidirectional",
+            "type": "boolean"
+          },
+          "command": {
+            "default": "",
+            "title": "Command",
+            "type": "string"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "dpi": {
+            "default": 300.0,
+            "title": "Dpi",
+            "type": "number"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "engraving_mode": {
+            "default": "",
+            "title": "Engraving Mode",
+            "type": "string"
+          },
+          "feed_rate": {
+            "default": 1200,
+            "title": "Feed Rate",
+            "type": "integer"
+          },
+          "gcode_file": {
+            "default": "",
+            "title": "Gcode File",
+            "type": "string"
+          },
+          "height_mm": {
+            "default": 0.0,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "host": {
+            "default": "",
+            "title": "Host",
+            "type": "string"
+          },
+          "http_port": {
+            "default": 80,
+            "title": "Http Port",
+            "type": "integer"
+          },
+          "image_file": {
+            "default": "",
+            "title": "Image File",
+            "type": "string"
+          },
+          "invert": {
+            "default": false,
+            "title": "Invert",
+            "type": "boolean"
+          },
+          "job_id": {
+            "default": "",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "laser_max_power": {
+            "default": 800,
+            "title": "Laser Max Power",
+            "type": "integer"
+          },
+          "laser_min_power": {
+            "default": 0,
+            "title": "Laser Min Power",
+            "type": "integer"
+          },
+          "laser_mode": {
+            "default": "engrave",
+            "title": "Laser Mode",
+            "type": "string"
+          },
+          "lock_aspect_ratio": {
+            "default": true,
+            "title": "Lock Aspect Ratio",
+            "type": "boolean"
+          },
+          "offset_x_mm": {
+            "default": 0.0,
+            "title": "Offset X Mm",
+            "type": "number"
+          },
+          "offset_y_mm": {
+            "default": 0.0,
+            "title": "Offset Y Mm",
+            "type": "number"
+          },
+          "output_file": {
+            "default": "",
+            "title": "Output File",
+            "type": "string"
+          },
+          "overscan_mm": {
+            "default": 1.5,
+            "title": "Overscan Mm",
+            "type": "number"
+          },
+          "overwrite": {
+            "default": true,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "pixel_size_mm": {
+            "default": 0.1,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "raster_scan_direction": {
+            "default": "auto",
+            "title": "Raster Scan Direction",
+            "type": "string"
+          },
+          "run_in_background": {
+            "default": true,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "safe_margin_mm": {
+            "default": 5.0,
+            "title": "Safe Margin Mm",
+            "type": "number"
+          },
+          "telnet_port": {
+            "default": 23,
+            "title": "Telnet Port",
+            "type": "integer"
+          },
+          "threshold": {
+            "default": -1,
+            "title": "Threshold",
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 5.0,
+            "title": "Timeout",
+            "type": "number"
+          },
+          "transport": {
+            "default": "http",
+            "title": "Transport",
+            "type": "string"
+          },
+          "travel_rate": {
+            "default": 3000,
+            "title": "Travel Rate",
+            "type": "integer"
+          },
+          "trim_tolerance": {
+            "default": 20,
+            "title": "Trim Tolerance",
+            "type": "number"
+          },
+          "wait_for_response": {
+            "default": true,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": 0.0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "laser_network_grbl_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "laser_network_grbl_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n执行终端命令的工具\n:param command: 要执行的命令字符串\n:return: 包含执行结果的字典\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "command_execution_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "command_execution_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n统一图片/文字素材转 G-code/NC 工具。生成和检查只落盘，不直接启动机器；\n发送已有 summary 时继续复用串口/网络 send_file 的确认门禁。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "default": "generate",
+            "title": "Action",
+            "type": "string"
+          },
+          "baudrate": {
+            "default": 115200,
+            "title": "Baudrate",
+            "type": "integer"
+          },
+          "candidate_id": {
+            "default": "",
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "candidate_index": {
+            "default": null,
+            "title": "Candidate Index",
+            "type": "integer"
+          },
+          "candidate_selection": {
+            "default": "",
+            "title": "Candidate Selection",
+            "type": "string"
+          },
+          "candidates": {
+            "default": "",
+            "title": "Candidates",
+            "type": "string"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "connection_mode": {
+            "default": "serial",
+            "title": "Connection Mode",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "height_mm": {
+            "default": null,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "host": {
+            "default": "",
+            "title": "Host",
+            "type": "string"
+          },
+          "http_port": {
+            "default": 80,
+            "title": "Http Port",
+            "type": "integer"
+          },
+          "image_file": {
+            "default": "",
+            "title": "Image File",
+            "type": "string"
+          },
+          "image_url": {
+            "default": "",
+            "title": "Image Url",
+            "type": "string"
+          },
+          "inspect": {
+            "default": false,
+            "title": "Inspect",
+            "type": "boolean"
+          },
+          "material": {
+            "default": "",
+            "title": "Material",
+            "type": "string"
+          },
+          "material_library": {
+            "default": "",
+            "title": "Material Library",
+            "type": "string"
+          },
+          "mode": {
+            "default": "",
+            "title": "Mode",
+            "type": "string"
+          },
+          "output_dir": {
+            "default": "",
+            "title": "Output Dir",
+            "type": "string"
+          },
+          "output_format": {
+            "default": "",
+            "title": "Output Format",
+            "type": "string"
+          },
+          "pixel_size_mm": {
+            "default": null,
+            "title": "Pixel Size Mm",
+            "type": "number"
+          },
+          "port": {
+            "default": "",
+            "title": "Port",
+            "type": "string"
+          },
+          "prompt": {
+            "default": "",
+            "title": "Prompt",
+            "type": "string"
+          },
+          "query": {
+            "default": "",
+            "title": "Query",
+            "type": "string"
+          },
+          "raster_quality_strategy": {
+            "default": "auto",
+            "title": "Raster Quality Strategy",
+            "type": "string"
+          },
+          "run_in_background": {
+            "default": true,
+            "title": "Run In Background",
+            "type": "boolean"
+          },
+          "size_mm": {
+            "default": null,
+            "title": "Size Mm",
+            "type": "number"
+          },
+          "source_type": {
+            "default": "file",
+            "title": "Source Type",
+            "type": "string"
+          },
+          "summary_path": {
+            "default": "",
+            "title": "Summary Path",
+            "type": "string"
+          },
+          "task_type": {
+            "default": "",
+            "title": "Task Type",
+            "type": "string"
+          },
+          "telnet_port": {
+            "default": 23,
+            "title": "Telnet Port",
+            "type": "integer"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          },
+          "thickness_mm": {
+            "default": null,
+            "title": "Thickness Mm",
+            "type": "number"
+          },
+          "timeout": {
+            "default": 5.0,
+            "title": "Timeout",
+            "type": "number"
+          },
+          "transport": {
+            "default": "telnet",
+            "title": "Transport",
+            "type": "string"
+          },
+          "wait_for_response": {
+            "default": true,
+            "title": "Wait For Response",
+            "type": "boolean"
+          },
+          "width_mm": {
+            "default": null,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "title": "ai_laser_gcode_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "ai_laser_gcode_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n提供打开电脑应用的功能。\nargument 为应用名称或路径，payload 为可选参数（如 URL）。\n\nWindows 常用应用名称（可直接使用的别名）：\n    终端: 'terminal' 或 'cmd'\n    PowerShell: 'powershell'\n    微信: '微信' 或 'WeChat'\n    企业微信: '企业微信'\n    浏览器/Chrome: '浏览器' 或 'Chrome'\n    Edge: 'Edge'\n    汽水音乐: '汽水音乐'\n    VSCode: 'VSCode'\n如需打开指定网站，提供第二个参数 payload（URL），例如：\n    打开B站搜索: open_app_tool('Chrome', 'https://search.bilibili.com/all?keyword=搜索内容')\n    打开淘宝搜索: open_app_tool('Chrome', 'https://s.taobao.com/search?q=商品名称')\n    打开Bing搜索: open_app_tool('Chrome', 'https://cn.bing.com/search?q=搜索问题')\n    打开中国大学生计算机设计大赛官网: open_app_tool('浏览器', 'https://jsjds.blcu.edu.cn/index.htm')\n    或直接说/传入: open_app_tool('打开4c')\n    如果上游仍传入旧地址 https://www.44g.com.cn，也会自动改写为中国大学生计算机设计大赛官网\n如果应用不在列表中，可直接传入完整路径，如 'C:\\xxx\\app.exe'\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "argument": {
+            "title": "Argument",
+            "type": "string"
+          },
+          "payload": {
+            "default": "",
+            "title": "payload",
+            "type": "string"
+          }
+        },
+        "required": [
+          "argument"
+        ],
+        "title": "open_app_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "open_app_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n打开中国大学生计算机设计大赛官网。当用户想访问中国大学生计算机设计大赛官网、官方主页时使用此工具。\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {},
+        "title": "open_jsjds_website_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "open_jsjds_website_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n当前工具适用于电脑端快捷键执行(注意仅允许下列已经注册的快捷键控制)，支持的快捷键控制如下:\n1、音乐播放快捷键控制:\n    播放音乐: action='播放音乐'\n    暂停音乐: action='暂停音乐'\n    切换下一首: action='切换下一首'\n    切换上一首: action='切换上一首'\n    音乐音量加: action='音乐音量加'\n    音乐音量减: action='音乐音量减'\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "shortcut_key_execution_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "shortcut_key_execution_tool",
+      "outputSchema": null,
+      "title": null
+    },
+    {
+      "annotations": null,
+      "description": "\n生成纯白底、纯黑字的文字图片工具。\n适合用户只需要类似“佳佳”这种名字图片的场景，不调用任何 AI 文生图服务。\n\n参数:\n    text: 要写入图片的文字，例如“佳佳”\n    output_file: 输出图片路径；为空时默认保存到 generated_images/text_image.png\n    width: 图片宽度，默认 1024\n    height: 图片高度，默认 1024\n    font_size: 初始字号，默认 320；如果文字过大，会自动缩小适配画布\n    font_path: 可选字体路径；为空时自动选择系统常见中文黑体/无衬线字体\n    line_spacing: 多行文字行距，按字号比例计算；默认 0.18\n    auto_wrap: 是否自动把长文本按画布宽度换行；默认 false，保持旧行为\n    max_lines: 指定目标行数；例如 3 表示尽量均衡分成三行，默认 0 不指定\n    layout_mode: 可选 manual/auto_wrap/balanced；为空时由 auto_wrap/max_lines 决定\n",
+      "execution": null,
+      "icons": null,
+      "inputSchema": {
+        "properties": {
+          "auto_wrap": {
+            "default": false,
+            "title": "Auto Wrap",
+            "type": "boolean"
+          },
+          "font_path": {
+            "default": "",
+            "title": "Font Path",
+            "type": "string"
+          },
+          "font_size": {
+            "default": 320,
+            "title": "Font Size",
+            "type": "integer"
+          },
+          "height": {
+            "default": 1024,
+            "title": "Height",
+            "type": "integer"
+          },
+          "layout_mode": {
+            "default": "",
+            "title": "Layout Mode",
+            "type": "string"
+          },
+          "line_spacing": {
+            "default": 0.18,
+            "title": "Line Spacing",
+            "type": "number"
+          },
+          "max_lines": {
+            "default": 0,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "output_file": {
+            "default": "",
+            "title": "Output File",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "width": {
+            "default": 1024,
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "generate_text_image_toolArguments",
+        "type": "object"
+      },
+      "meta": null,
+      "name": "generate_text_image_tool",
+      "outputSchema": null,
+      "title": null
+    }
+  ]
+}

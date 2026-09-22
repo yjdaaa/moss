@@ -1,0 +1,544 @@
+{
+  "bootstrap-missing-file": {
+    "version": 1,
+    "source_path": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-material-golden-o0en04zz\\missing.json",
+    "backup_path": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-material-golden-o0en04zz\\missing.json.bak",
+    "materials": {
+      "椴木": {
+        "aliases": [
+          "basswood",
+          "wood",
+          "plywood",
+          "木头",
+          "木板",
+          "木料",
+          "木牌",
+          "木片",
+          "木质",
+          "椴木板"
+        ],
+        "thicknesses": {
+          "3": {
+            "engrave": {
+              "raster": {
+                "laser_min_power": 0,
+                "laser_max_power": 420,
+                "feed_rate": 1800,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              },
+              "outline": {
+                "laser_min_power": 0,
+                "laser_max_power": 420,
+                "feed_rate": 1800,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              }
+            },
+            "cut": {
+              "laser_min_power": 0,
+              "laser_max_power": 900,
+              "feed_rate": 360,
+              "travel_rate": 3000,
+              "pixel_size_mm": 0.1,
+              "threshold": 128,
+              "passes": 1
+            }
+          }
+        }
+      },
+      "亚克力": {
+        "aliases": [
+          "acrylic",
+          "plexiglass",
+          "有机玻璃"
+        ],
+        "thicknesses": {
+          "3": {
+            "engrave": {
+              "raster": {
+                "laser_min_power": 0,
+                "laser_max_power": 340,
+                "feed_rate": 1600,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              },
+              "outline": {
+                "laser_min_power": 0,
+                "laser_max_power": 340,
+                "feed_rate": 1600,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              }
+            },
+            "cut": {
+              "laser_min_power": 0,
+              "laser_max_power": 850,
+              "feed_rate": 260,
+              "travel_rate": 3000,
+              "pixel_size_mm": 0.1,
+              "threshold": 128,
+              "passes": 1
+            }
+          }
+        }
+      },
+      "皮革": {
+        "aliases": [
+          "leather",
+          "皮料"
+        ],
+        "thicknesses": {
+          "1.5": {
+            "engrave": {
+              "raster": {
+                "laser_min_power": 0,
+                "laser_max_power": 280,
+                "feed_rate": 1900,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              },
+              "outline": {
+                "laser_min_power": 0,
+                "laser_max_power": 280,
+                "feed_rate": 1900,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              }
+            },
+            "cut": {
+              "laser_min_power": 0,
+              "laser_max_power": 650,
+              "feed_rate": 520,
+              "travel_rate": 3000,
+              "pixel_size_mm": 0.1,
+              "threshold": 128,
+              "passes": 1
+            }
+          }
+        }
+      },
+      "纸板": {
+        "aliases": [
+          "cardboard",
+          "paperboard",
+          "瓦楞纸",
+          "卡纸"
+        ],
+        "thicknesses": {
+          "1": {
+            "engrave": {
+              "raster": {
+                "laser_min_power": 0,
+                "laser_max_power": 220,
+                "feed_rate": 2500,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              },
+              "outline": {
+                "laser_min_power": 0,
+                "laser_max_power": 220,
+                "feed_rate": 2500,
+                "travel_rate": 3000,
+                "pixel_size_mm": 0.1,
+                "threshold": -1,
+                "passes": 1
+              }
+            },
+            "cut": {
+              "laser_min_power": 0,
+              "laser_max_power": 520,
+              "feed_rate": 760,
+              "travel_rate": 3000,
+              "pixel_size_mm": 0.1,
+              "threshold": 128,
+              "passes": 1
+            }
+          }
+        }
+      }
+    },
+    "error": null,
+    "prototype": false,
+    "defaults": {
+      "network_host": "",
+      "network_telnet_port": 23
+    }
+  },
+  "export-default": {
+    "success": true,
+    "result": {
+      "params_file": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-material-golden-o0en04zz\\materials.json",
+      "library": {
+        "version": 1,
+        "materials": {
+          "椴木": {
+            "aliases": [
+              "basswood",
+              "wood",
+              "plywood",
+              "木头",
+              "木板",
+              "木料",
+              "木牌",
+              "木片",
+              "木质",
+              "椴木板"
+            ],
+            "thicknesses": {
+              "3": {
+                "engrave": {
+                  "raster": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 420,
+                    "feed_rate": 1800,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  },
+                  "outline": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 420,
+                    "feed_rate": 1800,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  }
+                },
+                "cut": {
+                  "laser_min_power": 0,
+                  "laser_max_power": 900,
+                  "feed_rate": 360,
+                  "travel_rate": 3000,
+                  "pixel_size_mm": 0.1,
+                  "threshold": 128,
+                  "passes": 1
+                }
+              }
+            }
+          },
+          "亚克力": {
+            "aliases": [
+              "acrylic",
+              "plexiglass",
+              "有机玻璃"
+            ],
+            "thicknesses": {
+              "3": {
+                "engrave": {
+                  "raster": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 340,
+                    "feed_rate": 1600,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  },
+                  "outline": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 340,
+                    "feed_rate": 1600,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  }
+                },
+                "cut": {
+                  "laser_min_power": 0,
+                  "laser_max_power": 850,
+                  "feed_rate": 260,
+                  "travel_rate": 3000,
+                  "pixel_size_mm": 0.1,
+                  "threshold": 128,
+                  "passes": 1
+                }
+              }
+            }
+          },
+          "皮革": {
+            "aliases": [
+              "leather",
+              "皮料"
+            ],
+            "thicknesses": {
+              "1.5": {
+                "engrave": {
+                  "raster": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 280,
+                    "feed_rate": 1900,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  },
+                  "outline": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 280,
+                    "feed_rate": 1900,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  }
+                },
+                "cut": {
+                  "laser_min_power": 0,
+                  "laser_max_power": 650,
+                  "feed_rate": 520,
+                  "travel_rate": 3000,
+                  "pixel_size_mm": 0.1,
+                  "threshold": 128,
+                  "passes": 1
+                }
+              }
+            }
+          },
+          "纸板": {
+            "aliases": [
+              "cardboard",
+              "paperboard",
+              "瓦楞纸",
+              "卡纸"
+            ],
+            "thicknesses": {
+              "1": {
+                "engrave": {
+                  "raster": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 220,
+                    "feed_rate": 2500,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  },
+                  "outline": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 220,
+                    "feed_rate": 2500,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": -1,
+                    "passes": 1
+                  }
+                },
+                "cut": {
+                  "laser_min_power": 0,
+                  "laser_max_power": 520,
+                  "feed_rate": 760,
+                  "travel_rate": 3000,
+                  "pixel_size_mm": 0.1,
+                  "threshold": 128,
+                  "passes": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "import-invalid-version": {
+    "version-string-1": {
+      "success": false,
+      "result": "导入材料库格式不支持：需要 version=1 的 JSON 对象"
+    },
+    "version-number-2": {
+      "success": false,
+      "result": "导入材料库格式不支持：需要 version=1 的 JSON 对象"
+    },
+    "version-missing": {
+      "success": false,
+      "result": "导入材料库格式不支持：需要 version=1 的 JSON 对象"
+    }
+  },
+  "import-tombstone": {
+    "import": {
+      "success": true,
+      "result": {
+        "params_file": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-material-golden-o0en04zz\\materials.json",
+        "import_mode": "replace",
+        "materials": {
+          "椴木": {
+            "thicknesses": {
+              "3": {
+                "engrave": null,
+                "cut": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "export": {
+      "success": true,
+      "result": {
+        "params_file": "C:\\Users\\19454\\AppData\\Local\\Temp\\moss-material-golden-o0en04zz\\materials.json",
+        "library": {
+          "version": 1,
+          "materials": {
+            "椴木": {
+              "aliases": [
+                "basswood",
+                "wood",
+                "plywood",
+                "木头",
+                "木板",
+                "木料",
+                "木牌",
+                "木片",
+                "木质",
+                "椴木板"
+              ],
+              "thicknesses": {
+                "3": {
+                  "engrave": null,
+                  "cut": {}
+                }
+              }
+            },
+            "亚克力": {
+              "aliases": [
+                "acrylic",
+                "plexiglass",
+                "有机玻璃"
+              ],
+              "thicknesses": {
+                "3": {
+                  "engrave": {
+                    "raster": {
+                      "laser_min_power": 0,
+                      "laser_max_power": 340,
+                      "feed_rate": 1600,
+                      "travel_rate": 3000,
+                      "pixel_size_mm": 0.1,
+                      "threshold": -1,
+                      "passes": 1
+                    },
+                    "outline": {
+                      "laser_min_power": 0,
+                      "laser_max_power": 340,
+                      "feed_rate": 1600,
+                      "travel_rate": 3000,
+                      "pixel_size_mm": 0.1,
+                      "threshold": -1,
+                      "passes": 1
+                    }
+                  },
+                  "cut": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 850,
+                    "feed_rate": 260,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": 128,
+                    "passes": 1
+                  }
+                }
+              }
+            },
+            "皮革": {
+              "aliases": [
+                "leather",
+                "皮料"
+              ],
+              "thicknesses": {
+                "1.5": {
+                  "engrave": {
+                    "raster": {
+                      "laser_min_power": 0,
+                      "laser_max_power": 280,
+                      "feed_rate": 1900,
+                      "travel_rate": 3000,
+                      "pixel_size_mm": 0.1,
+                      "threshold": -1,
+                      "passes": 1
+                    },
+                    "outline": {
+                      "laser_min_power": 0,
+                      "laser_max_power": 280,
+                      "feed_rate": 1900,
+                      "travel_rate": 3000,
+                      "pixel_size_mm": 0.1,
+                      "threshold": -1,
+                      "passes": 1
+                    }
+                  },
+                  "cut": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 650,
+                    "feed_rate": 520,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": 128,
+                    "passes": 1
+                  }
+                }
+              }
+            },
+            "纸板": {
+              "aliases": [
+                "cardboard",
+                "paperboard",
+                "瓦楞纸",
+                "卡纸"
+              ],
+              "thicknesses": {
+                "1": {
+                  "engrave": {
+                    "raster": {
+                      "laser_min_power": 0,
+                      "laser_max_power": 220,
+                      "feed_rate": 2500,
+                      "travel_rate": 3000,
+                      "pixel_size_mm": 0.1,
+                      "threshold": -1,
+                      "passes": 1
+                    },
+                    "outline": {
+                      "laser_min_power": 0,
+                      "laser_max_power": 220,
+                      "feed_rate": 2500,
+                      "travel_rate": 3000,
+                      "pixel_size_mm": 0.1,
+                      "threshold": -1,
+                      "passes": 1
+                    }
+                  },
+                  "cut": {
+                    "laser_min_power": 0,
+                    "laser_max_power": 520,
+                    "feed_rate": 760,
+                    "travel_rate": 3000,
+                    "pixel_size_mm": 0.1,
+                    "threshold": 128,
+                    "passes": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "laser-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+getrandom = "0.3"
+image = "0.25"
+imageproc = { version = "=0.25.0", default-features = false }
+laser-contracts = { path = "../laser-contracts" }
+ttf-parser = "0.25"
+num-bigint = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+ryu = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bench]]
+name = "raster_2000"
+harness = false

@@ -1,0 +1,20 @@
+{
+  "status": 400,
+  "body": {
+    "success": false,
+    "result": "不支持上传该文件类型",
+    "detail": {
+      "filename": "upload",
+      "allowed": [
+        ".bmp",
+        ".gcode",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".nc",
+        ".png",
+        ".webp"
+      ]
+    }
+  }
+}

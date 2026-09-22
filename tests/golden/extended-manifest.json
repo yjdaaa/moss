@@ -1,0 +1,789 @@
+﻿{
+  "text": {
+    "1": {
+      "result": {
+        "success": true,
+        "result": {
+          "task_id": "8a8df5f18d00412f9d862caa95eba59c",
+          "task_file": "C:\\Users\\19454\\Desktop\\流浪地球\\开源项目资料\\moss-xiaozhi-mcp-main（框架待修改版本）\\.runtime\\lasergrbl_text_tasks\\8a8df5f18d00412f9d862caa95eba59c\\task.json",
+          "attempt_no": 1,
+          "image_file": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\text\\text-1.png",
+          "gcode_file": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\text\\text-1.gcode",
+          "params": {
+            "laser_min_power": 0,
+            "laser_max_power": 420,
+            "feed_rate": 1800,
+            "travel_rate": 3000,
+            "threshold": -1,
+            "passes": 1,
+            "pixel_size_mm": 0.1,
+            "s_max": 1000,
+            "power_percent": 42.0
+          },
+          "recommendation": {
+            "material": "椴木",
+            "requested_material": "椴木",
+            "thickness_mm": 3.0,
+            "matched_thickness_mm": 3.0,
+            "match": "exact",
+            "laser_mode": "engrave",
+            "params": {
+              "laser_min_power": 0,
+              "laser_max_power": 420,
+              "feed_rate": 1800,
+              "travel_rate": 3000,
+              "threshold": -1,
+              "passes": 1,
+              "pixel_size_mm": 0.1
+            },
+            "warnings": [],
+            "can_send": true,
+            "send_blocked_reason": "",
+            "engraving_mode": "raster"
+          },
+          "send_after_generate": false,
+          "confirmation_required": true,
+          "send_result": {
+            "success": true,
+            "result": "已生成文件，未请求发送到激光机。",
+            "skipped": true,
+            "reason": "not_requested",
+            "connection_mode": "network",
+            "confirmation_required": true
+          },
+          "next_step": "观察实物效果后，可用 refine_laser_params_from_feedback_tool 描述太焦、太浅、切不透等问题。",
+          "auto_trim": {
+            "enabled": true,
+            "trimmed": true,
+            "tolerance": 20.0,
+            "original_width_px": 1024,
+            "original_height_px": 1024,
+            "trimmed_width_px": 614,
+            "trimmed_height_px": 218,
+            "crop_box": {
+              "x_px": 203,
+              "y_px": 401,
+              "width_px": 614,
+              "height_px": 218
+            },
+            "background_gray": 255.0
+          },
+          "placement": {
+            "size_source": "dpi",
+            "auto_size": true,
+            "lock_aspect_ratio": true,
+            "dpi": {
+              "dpi_x": 300.0,
+              "dpi_y": 300.0,
+              "source": "parameter",
+              "embedded_status": "missing"
+            },
+            "source_width_px": 614,
+            "source_height_px": 218,
+            "natural_width_mm": 51.985,
+            "natural_height_mm": 18.457,
+            "requested_width_mm": 51.985,
+            "requested_height_mm": 18.457,
+            "final_width_mm": 52.0,
+            "final_height_mm": 18.5,
+            "offset_x_mm": 0.0,
+            "offset_y_mm": 0.0,
+            "safe_margin_mm": 5.0,
+            "safe_width_mm": 90.0,
+            "safe_height_mm": 90.0,
+            "scaled_to_safe_area": false,
+            "safe_scale": 1.0,
+            "actual_width_mm": 52.0,
+            "actual_height_mm": 18.5
+          },
+          "text_layout": {
+            "mode": "manual",
+            "auto_wrap": false,
+            "max_lines": 0,
+            "manual_line_breaks": false,
+            "source_line_count": 1,
+            "line_count": 1,
+            "lines": [
+              "MOSS"
+            ],
+            "font_size": 320
+          },
+          "time_estimate": {
+            "estimated_seconds": 303.2,
+            "estimated_minutes": 5.05,
+            "laser_seconds": 148.1,
+            "non_laser_seconds": 155.1,
+            "laser_distance_mm": 4441.9,
+            "non_laser_distance_mm": 11372.111,
+            "method": "lasergrbl_style_gcode_motion_estimate",
+            "note": "按最终 G-code/NC 的 G0/G1、模态进给、M3/M4/M5 和 G4 暂停估算，对齐 LaserGRBL 离线 estimated time；不包含控制器加减速和人工操作时间。"
+          },
+          "speech": "文件已生成，预计需要 5 分 3 秒。材料 椴木，厚度 3 毫米，模式 雕刻，功率 S420，速度 F1800。实际尺寸 52 x 18.5 毫米，偏移 X0 Y0 毫米。确认开始后才发送。"
+        }
+      },
+      "sha256": "8569d7761c42c0319fc1a6f7ee40f868d4bc32e0c3188211c2ca2e81910af654"
+    },
+    "2": {
+      "result": {
+        "success": true,
+        "result": {
+          "task_id": "956b111e8c1c42dc9a05a98b711480d7",
+          "task_file": "C:\\Users\\19454\\Desktop\\流浪地球\\开源项目资料\\moss-xiaozhi-mcp-main（框架待修改版本）\\.runtime\\lasergrbl_text_tasks\\956b111e8c1c42dc9a05a98b711480d7\\task.json",
+          "attempt_no": 1,
+          "image_file": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\text\\text-2.png",
+          "gcode_file": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\text\\text-2.gcode",
+          "params": {
+            "laser_min_power": 0,
+            "laser_max_power": 420,
+            "feed_rate": 1800,
+            "travel_rate": 3000,
+            "threshold": -1,
+            "passes": 1,
+            "pixel_size_mm": 0.1,
+            "s_max": 1000,
+            "power_percent": 42.0
+          },
+          "recommendation": {
+            "material": "椴木",
+            "requested_material": "椴木",
+            "thickness_mm": 3.0,
+            "matched_thickness_mm": 3.0,
+            "match": "exact",
+            "laser_mode": "engrave",
+            "params": {
+              "laser_min_power": 0,
+              "laser_max_power": 420,
+              "feed_rate": 1800,
+              "travel_rate": 3000,
+              "threshold": -1,
+              "passes": 1,
+              "pixel_size_mm": 0.1
+            },
+            "warnings": [],
+            "can_send": true,
+            "send_blocked_reason": "",
+            "engraving_mode": "raster"
+          },
+          "send_after_generate": false,
+          "confirmation_required": true,
+          "send_result": {
+            "success": true,
+            "result": "已生成文件，未请求发送到激光机。",
+            "skipped": true,
+            "reason": "not_requested",
+            "connection_mode": "network",
+            "confirmation_required": true
+          },
+          "next_step": "观察实物效果后，可用 refine_laser_params_from_feedback_tool 描述太焦、太浅、切不透等问题。",
+          "auto_trim": {
+            "enabled": true,
+            "trimmed": true,
+            "tolerance": 20.0,
+            "original_width_px": 1024,
+            "original_height_px": 1024,
+            "trimmed_width_px": 855,
+            "trimmed_height_px": 275,
+            "crop_box": {
+              "x_px": 88,
+              "y_px": 374,
+              "width_px": 855,
+              "height_px": 275
+            },
+            "background_gray": 255.0
+          },
+          "placement": {
+            "size_source": "dpi",
+            "auto_size": true,
+            "lock_aspect_ratio": true,
+            "dpi": {
+              "dpi_x": 300.0,
+              "dpi_y": 300.0,
+              "source": "parameter",
+              "embedded_status": "missing"
+            },
+            "source_width_px": 855,
+            "source_height_px": 275,
+            "natural_width_mm": 72.39,
+            "natural_height_mm": 23.283,
+            "requested_width_mm": 72.39,
+            "requested_height_mm": 23.283,
+            "final_width_mm": 72.4,
+            "final_height_mm": 23.3,
+            "offset_x_mm": 0.0,
+            "offset_y_mm": 0.0,
+            "safe_margin_mm": 5.0,
+            "safe_width_mm": 90.0,
+            "safe_height_mm": 90.0,
+            "scaled_to_safe_area": false,
+            "safe_scale": 1.0,
+            "actual_width_mm": 72.4,
+            "actual_height_mm": 23.3
+          },
+          "text_layout": {
+            "mode": "manual",
+            "auto_wrap": false,
+            "max_lines": 0,
+            "manual_line_breaks": false,
+            "source_line_count": 1,
+            "line_count": 1,
+            "lines": [
+              "阶段一"
+            ],
+            "font_size": 298
+          },
+          "time_estimate": {
+            "estimated_seconds": 340.0,
+            "estimated_minutes": 5.67,
+            "laser_seconds": 147.5,
+            "non_laser_seconds": 192.5,
+            "laser_distance_mm": 4423.7,
+            "non_laser_distance_mm": 13310.94,
+            "method": "lasergrbl_style_gcode_motion_estimate",
+            "note": "按最终 G-code/NC 的 G0/G1、模态进给、M3/M4/M5 和 G4 暂停估算，对齐 LaserGRBL 离线 estimated time；不包含控制器加减速和人工操作时间。"
+          },
+          "speech": "文件已生成，预计需要 5 分 40 秒。材料 椴木，厚度 3 毫米，模式 雕刻，功率 S420，速度 F1800。实际尺寸 72.4 x 23.3 毫米，偏移 X0 Y0 毫米。确认开始后才发送。"
+        }
+      },
+      "sha256": "f7d8ed4d829bda3443b950717f80ba959c8a6cadc74eaa1d47324f6d670a636a"
+    },
+    "3": {
+      "result": {
+        "success": true,
+        "result": {
+          "task_id": "e9b4263507eb4fc483da4c18730e80a3",
+          "task_file": "C:\\Users\\19454\\Desktop\\流浪地球\\开源项目资料\\moss-xiaozhi-mcp-main（框架待修改版本）\\.runtime\\lasergrbl_text_tasks\\e9b4263507eb4fc483da4c18730e80a3\\task.json",
+          "attempt_no": 1,
+          "image_file": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\text\\text-3.png",
+          "gcode_file": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\text\\text-3.gcode",
+          "params": {
+            "laser_min_power": 0,
+            "laser_max_power": 420,
+            "feed_rate": 1800,
+            "travel_rate": 3000,
+            "threshold": -1,
+            "passes": 1,
+            "pixel_size_mm": 0.1,
+            "s_max": 1000,
+            "power_percent": 42.0
+          },
+          "recommendation": {
+            "material": "椴木",
+            "requested_material": "椴木",
+            "thickness_mm": 3.0,
+            "matched_thickness_mm": 3.0,
+            "match": "exact",
+            "laser_mode": "engrave",
+            "params": {
+              "laser_min_power": 0,
+              "laser_max_power": 420,
+              "feed_rate": 1800,
+              "travel_rate": 3000,
+              "threshold": -1,
+              "passes": 1,
+              "pixel_size_mm": 0.1
+            },
+            "warnings": [],
+            "can_send": true,
+            "send_blocked_reason": "",
+            "engraving_mode": "raster"
+          },
+          "send_after_generate": false,
+          "confirmation_required": true,
+          "send_result": {
+            "success": true,
+            "result": "已生成文件，未请求发送到激光机。",
+            "skipped": true,
+            "reason": "not_requested",
+            "connection_mode": "network",
+            "confirmation_required": true
+          },
+          "next_step": "观察实物效果后，可用 refine_laser_params_from_feedback_tool 描述太焦、太浅、切不透等问题。",
+          "auto_trim": {
+            "enabled": true,
+            "trimmed": true,
+            "tolerance": 20.0,
+            "original_width_px": 1024,
+            "original_height_px": 1024,
+            "trimmed_width_px": 874,
+            "trimmed_height_px": 131,
+            "crop_box": {
+              "x_px": 75,
+              "y_px": 446,
+              "width_px": 874,
+              "height_px": 131
+            },
+            "background_gray": 255.0
+          },
+          "placement": {
+            "size_source": "dpi",
+            "auto_size": true,
+            "lock_aspect_ratio": true,
+            "dpi": {
+              "dpi_x": 300.0,
+              "dpi_y": 300.0,
+              "source": "parameter",
+              "embedded_status": "missing"
+            },
+            "source_width_px": 874,
+            "source_height_px": 131,
+            "natural_width_mm": 73.999,
+            "natural_height_mm": 11.091,
+            "requested_width_mm": 73.999,
+            "requested_height_mm": 11.091,
+            "final_width_mm": 74.0,
+            "final_height_mm": 11.1,
+            "offset_x_mm": 0.0,
+            "offset_y_mm": 0.0,
+            "safe_margin_mm": 5.0,
+            "safe_width_mm": 90.0,
+            "safe_height_mm": 90.0,
+            "scaled_to_safe_area": false,
+            "safe_scale": 1.0,
+            "actual_width_mm": 74.0,
+            "actual_height_mm": 11.1
+          },
+          "text_layout": {
+            "mode": "manual",
+            "auto_wrap": false,
+            "max_lines": 0,
+            "manual_line_breaks": false,
+            "source_line_count": 1,
+            "line_count": 1,
+            "lines": [
+              "Laser Forge"
+            ],
+            "font_size": 162
+          },
+          "time_estimate": {
+            "estimated_seconds": 155.9,
+            "estimated_minutes": 2.6,
+            "laser_seconds": 60.5,
+            "non_laser_seconds": 95.4,
+            "laser_distance_mm": 1815.9,
+            "non_laser_distance_mm": 6319.593,
+            "method": "lasergrbl_style_gcode_motion_estimate",
+            "note": "按最终 G-code/NC 的 G0/G1、模态进给、M3/M4/M5 和 G4 暂停估算，对齐 LaserGRBL 离线 estimated time；不包含控制器加减速和人工操作时间。"
+          },
+          "speech": "文件已生成，预计需要 2 分 36 秒。材料 椴木，厚度 3 毫米，模式 雕刻，功率 S420，速度 F1800。实际尺寸 74 x 11.1 毫米，偏移 X0 Y0 毫米。确认开始后才发送。"
+        }
+      },
+      "sha256": "277b72453756101cfacda9240189a46eb4117ee3748fb6fedefe33df7ba0b25c"
+    }
+  },
+  "calibration": {
+    "1": {
+      "gcode": "椴木_engrave_photo_calibration.gcode",
+      "sha256": "405ba66a5a25b6d796f221e42c154a2f3aab059f9b4325dbd87299addd03a690",
+      "summary": {
+        "contract_version": 1,
+        "job_type": "calibration_matrix",
+        "material": "椴木",
+        "thickness_mm": 3,
+        "task_type": "engrave_photo",
+        "machine_profile_id": "yisu-v1-100x100",
+        "output_format": "gcode",
+        "can_send": false,
+        "next_action": "run_sample_test",
+        "message": "校准矩阵仅用于小样测试，请观察结果后显式保存成功参数。",
+        "files": {
+          "gcode": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\1\\椴木_engrave_photo_calibration.gcode",
+          "preview": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\1\\椴木_engrave_photo_calibration_preview.png",
+          "summary": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\1\\椴木_engrave_photo_calibration_summary.json"
+        },
+        "calibration_matrix": {
+          "rows": 3,
+          "columns": 3,
+          "cells": {
+            "A1": {
+              "power": 80,
+              "speed": 1400,
+              "passes": 1,
+              "pixel_size_mm": 0.16,
+              "line_interval_mm": 0.16
+            },
+            "A2": {
+              "power": 120,
+              "speed": 1400,
+              "passes": 1,
+              "pixel_size_mm": 0.2,
+              "line_interval_mm": 0.2
+            },
+            "A3": {
+              "power": 160,
+              "speed": 1400,
+              "passes": 1,
+              "pixel_size_mm": 0.24,
+              "line_interval_mm": 0.24
+            },
+            "B1": {
+              "power": 80,
+              "speed": 1200,
+              "passes": 1,
+              "pixel_size_mm": 0.16,
+              "line_interval_mm": 0.16
+            },
+            "B2": {
+              "power": 120,
+              "speed": 1200,
+              "passes": 1,
+              "pixel_size_mm": 0.2,
+              "line_interval_mm": 0.2
+            },
+            "B3": {
+              "power": 160,
+              "speed": 1200,
+              "passes": 1,
+              "pixel_size_mm": 0.24,
+              "line_interval_mm": 0.24
+            },
+            "C1": {
+              "power": 80,
+              "speed": 1000,
+              "passes": 1,
+              "pixel_size_mm": 0.16,
+              "line_interval_mm": 0.16
+            },
+            "C2": {
+              "power": 120,
+              "speed": 1000,
+              "passes": 1,
+              "pixel_size_mm": 0.2,
+              "line_interval_mm": 0.2
+            },
+            "C3": {
+              "power": 160,
+              "speed": 1000,
+              "passes": 1,
+              "pixel_size_mm": 0.24,
+              "line_interval_mm": 0.24
+            }
+          }
+        }
+      }
+    },
+    "2": {
+      "gcode": "椴木_engrave_logo_calibration.gcode",
+      "sha256": "aef6b89d7aa58040ae1b3af7aa1de51cc0fc0c011c46f07c3c70694f17c181ec",
+      "summary": {
+        "contract_version": 1,
+        "job_type": "calibration_matrix",
+        "material": "椴木",
+        "thickness_mm": 3,
+        "task_type": "engrave_logo",
+        "machine_profile_id": "yisu-v1-100x100",
+        "output_format": "gcode",
+        "can_send": false,
+        "next_action": "run_sample_test",
+        "message": "校准矩阵仅用于小样测试，请观察结果后显式保存成功参数。",
+        "files": {
+          "gcode": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\2\\椴木_engrave_logo_calibration.gcode",
+          "preview": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\2\\椴木_engrave_logo_calibration_preview.png",
+          "summary": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\2\\椴木_engrave_logo_calibration_summary.json"
+        },
+        "calibration_matrix": {
+          "rows": 3,
+          "columns": 3,
+          "cells": {
+            "A1": {
+              "power": 200,
+              "speed": 1100,
+              "passes": 2,
+              "pixel_size_mm": 0.16,
+              "line_interval_mm": 0.16
+            },
+            "A2": {
+              "power": 240,
+              "speed": 1100,
+              "passes": 2,
+              "pixel_size_mm": 0.2,
+              "line_interval_mm": 0.2
+            },
+            "A3": {
+              "power": 280,
+              "speed": 1100,
+              "passes": 2,
+              "pixel_size_mm": 0.24,
+              "line_interval_mm": 0.24
+            },
+            "B1": {
+              "power": 200,
+              "speed": 900,
+              "passes": 2,
+              "pixel_size_mm": 0.16,
+              "line_interval_mm": 0.16
+            },
+            "B2": {
+              "power": 240,
+              "speed": 900,
+              "passes": 2,
+              "pixel_size_mm": 0.2,
+              "line_interval_mm": 0.2
+            },
+            "B3": {
+              "power": 280,
+              "speed": 900,
+              "passes": 2,
+              "pixel_size_mm": 0.24,
+              "line_interval_mm": 0.24
+            },
+            "C1": {
+              "power": 200,
+              "speed": 700,
+              "passes": 2,
+              "pixel_size_mm": 0.16,
+              "line_interval_mm": 0.16
+            },
+            "C2": {
+              "power": 240,
+              "speed": 700,
+              "passes": 2,
+              "pixel_size_mm": 0.2,
+              "line_interval_mm": 0.2
+            },
+            "C3": {
+              "power": 280,
+              "speed": 700,
+              "passes": 2,
+              "pixel_size_mm": 0.24,
+              "line_interval_mm": 0.24
+            }
+          }
+        }
+      }
+    },
+    "3": {
+      "gcode": "椴木_cut_contour_calibration.gcode",
+      "sha256": "a743a36242022fd742035bf928776a8f5ea20418fae1fde24693d499fd27e80b",
+      "summary": {
+        "contract_version": 1,
+        "job_type": "calibration_matrix",
+        "material": "椴木",
+        "thickness_mm": 3,
+        "task_type": "cut_contour",
+        "machine_profile_id": "yisu-v1-100x100",
+        "output_format": "gcode",
+        "can_send": false,
+        "next_action": "run_sample_test",
+        "message": "校准矩阵仅用于小样测试，请观察结果后显式保存成功参数。",
+        "files": {
+          "gcode": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\3\\椴木_cut_contour_calibration.gcode",
+          "preview": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\3\\椴木_cut_contour_calibration_preview.png",
+          "summary": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\calibration\\3\\椴木_cut_contour_calibration_summary.json"
+        },
+        "calibration_matrix": {
+          "rows": 3,
+          "columns": 3,
+          "cells": {
+            "A1": {
+              "power": 140,
+              "speed": 800,
+              "passes": 1,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "A2": {
+              "power": 180,
+              "speed": 800,
+              "passes": 2,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "A3": {
+              "power": 220,
+              "speed": 800,
+              "passes": 3,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "B1": {
+              "power": 140,
+              "speed": 600,
+              "passes": 1,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "B2": {
+              "power": 180,
+              "speed": 600,
+              "passes": 2,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "B3": {
+              "power": 220,
+              "speed": 600,
+              "passes": 3,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "C1": {
+              "power": 140,
+              "speed": 400,
+              "passes": 1,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "C2": {
+              "power": 180,
+              "speed": 400,
+              "passes": 2,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            },
+            "C3": {
+              "power": 220,
+              "speed": 400,
+              "passes": 3,
+              "pixel_size_mm": null,
+              "line_interval_mm": null
+            }
+          }
+        }
+      }
+    }
+  },
+  "prepared": {
+    "1": {
+      "sha256": "724812a304806e3ae66a0aed8c9a5e2b01e9c74e79aae5c1f9d3aad725ab6cd2",
+      "time": {
+        "estimated_seconds": 0.0,
+        "estimated_minutes": 0.0,
+        "laser_seconds": 0.0,
+        "non_laser_seconds": 0.0,
+        "laser_distance_mm": 0.0,
+        "non_laser_distance_mm": 0.0,
+        "method": "lasergrbl_style_gcode_motion_estimate",
+        "note": "按最终 G-code/NC 的 G0/G1、模态进给、M3/M4/M5 和 G4 暂停估算，对齐 LaserGRBL 离线 estimated time；不包含控制器加减速和人工操作时间。"
+      }
+    },
+    "2": {
+      "sha256": "d236032826ca89d05bd64d8efc0783f60c0504864db67635b3c0e15596357e53",
+      "time": {
+        "estimated_seconds": 1.1,
+        "estimated_minutes": 0.02,
+        "laser_seconds": 1.1,
+        "non_laser_seconds": 0.0,
+        "laser_distance_mm": 14.142,
+        "non_laser_distance_mm": 0.0,
+        "method": "lasergrbl_style_gcode_motion_estimate",
+        "note": "按最终 G-code/NC 的 G0/G1、模态进给、M3/M4/M5 和 G4 暂停估算，对齐 LaserGRBL 离线 estimated time；不包含控制器加减速和人工操作时间。"
+      }
+    },
+    "3": {
+      "sha256": "6c7b8de3643a1e273463cda5b1ffa6c9d219cd386300f2cdfdafae6d8ead12cf",
+      "time": {
+        "estimated_seconds": 1.1,
+        "estimated_minutes": 0.02,
+        "laser_seconds": 1.1,
+        "non_laser_seconds": 0.0,
+        "laser_distance_mm": 14.142,
+        "non_laser_distance_mm": 0.0,
+        "method": "lasergrbl_style_gcode_motion_estimate",
+        "note": "按最终 G-code/NC 的 G0/G1、模态进给、M3/M4/M5 和 G4 暂停估算，对齐 LaserGRBL 离线 estimated time；不包含控制器加减速和人工操作时间。"
+      }
+    }
+  },
+  "safety": {
+    "s_over_limit": {
+      "accepted": false,
+      "error": "Power S value must stay within configured GRBL range S1-S1000"
+    },
+    "negative_size": {
+      "accepted": false,
+      "error": "Size must be between 5mm and 120mm for MVP safety"
+    },
+    "unconfirmed_send": {
+      "success": true,
+      "result": {
+        "prepared": {
+          "gcode_file": "C:\\Users\\19454\\Desktop\\moss-rust\\tests\\golden\\prepared\\prepared-1.gcode"
+        },
+        "confirmation_required": true,
+        "result": "雕刻文件已准备，但未发送。确认文件、材料/参数和设备安全后，才可用 confirmed=true 启动。"
+      }
+    }
+  },
+  "materials": {
+    "椴木-3": {
+      "recommendation": {
+        "success": true,
+        "result": {
+          "material": "椴木",
+          "requested_material": "椴木",
+          "thickness_mm": 3.0,
+          "matched_thickness_mm": 3.0,
+          "match": "exact",
+          "laser_mode": "engrave",
+          "params": {
+            "laser_min_power": 0,
+            "laser_max_power": 420,
+            "feed_rate": 1800,
+            "travel_rate": 3000,
+            "threshold": -1,
+            "passes": 1,
+            "pixel_size_mm": 0.1
+          },
+          "warnings": [],
+          "can_send": true,
+          "send_blocked_reason": "",
+          "engraving_mode": "raster"
+        }
+      }
+    },
+    "亚克力-3": {
+      "recommendation": {
+        "success": true,
+        "result": {
+          "material": "亚克力",
+          "requested_material": "亚克力",
+          "thickness_mm": 3.0,
+          "matched_thickness_mm": 3.0,
+          "match": "exact",
+          "laser_mode": "engrave",
+          "params": {
+            "laser_min_power": 0,
+            "laser_max_power": 340,
+            "feed_rate": 1600,
+            "travel_rate": 3000,
+            "threshold": -1,
+            "passes": 1,
+            "pixel_size_mm": 0.1
+          },
+          "warnings": [],
+          "can_send": true,
+          "send_blocked_reason": "",
+          "engraving_mode": "raster"
+        }
+      }
+    },
+    "纸板-2": {
+      "recommendation": {
+        "success": true,
+        "result": {
+          "material": "纸板",
+          "requested_material": "纸板",
+          "thickness_mm": 2.0,
+          "matched_thickness_mm": 1.0,
+          "match": "nearest_thickness",
+          "laser_mode": "engrave",
+          "params": {
+            "laser_min_power": 0,
+            "laser_max_power": 220,
+            "feed_rate": 2500,
+            "travel_rate": 3000,
+            "threshold": -1,
+            "passes": 1,
+            "pixel_size_mm": 0.1
+          },
+          "warnings": [
+            "没有 2mm 的精确参数，已使用最接近的 1mm 参数"
+          ],
+          "can_send": true,
+          "send_blocked_reason": "",
+          "engraving_mode": "raster"
+        }
+      }
+    }
+  },
+  "time": {}
+}

@@ -1,0 +1,16 @@
+# Build artifacts
+target/
+dist/
+
+# Test temporary directories, caches, and spike fixtures
+.tmp-*
+.runtime/
+crates/laser-api/fixture/payload.bin
+*.bin
+
+# Environment and local configurations
+.env
+*.local
+
+# Node
+node_modules/

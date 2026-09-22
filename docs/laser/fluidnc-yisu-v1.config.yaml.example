@@ -1,0 +1,27 @@
+# INCOMPLETE COMMISSIONING TEMPLATE. DO NOT INSTALL OR FLASH.
+# UNVERIFIED values are intentionally invalid for FluidNC.
+# See fluidnc-yisu-v1.md for workbook evidence and required hardware details.
+# No pins, polarity, steps, feed rates or homing settings may be guessed.
+name: "Yisu V1.0 - UNVERIFIED G3"
+board: "UNVERIFIED_G3_BOARD_REVISION_AND_MCU"
+
+axes:
+  x:
+    max_travel_mm: 100.0
+    steps_per_mm: UNVERIFIED_STEPS_PER_MM
+    max_rate_mm_per_min: UNVERIFIED_MAX_RATE
+    acceleration_mm_per_sec2: UNVERIFIED_ACCELERATION
+    # Motor mapping, drivers, pins, limits and homing intentionally omitted.
+  y:
+    max_travel_mm: 100.0
+    steps_per_mm: UNVERIFIED_STEPS_PER_MM
+    max_rate_mm_per_min: UNVERIFIED_MAX_RATE
+    acceleration_mm_per_sec2: UNVERIFIED_ACCELERATION
+    # Motor mapping, drivers, pins, limits and homing intentionally omitted.
+
+Laser:
+  output_pin: UNVERIFIED_PWM_PIN_AND_POLARITY
+  pwm_hz: UNVERIFIED_PWM_FREQUENCY
+  # Proposed host-compatible scale, NOT a measured optical-power calibration.
+  speed_map: "0=0% 1000=100%"
+  # Enable wiring and interlocks intentionally omitted.
