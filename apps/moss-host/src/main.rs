@@ -12,8 +12,8 @@ fn main() {
         let (server, actual_port) = host.spawn_http_server().expect("failed to spawn http server");
         println!("moss-host serving on {}:{}", host.settings.web_host, actual_port);
         match host.spawn_mcp_bridge() {
-            Some(_bridge) => println!("moss-host mcp bridge connecting to MCP_ENDPOINT"),
-            None => println!("moss-host mcp bridge disabled (MCP_ENDPOINT 未配置)"),
+            0 => println!("moss-host mcp bridge disabled (MCP_ENDPOINT 未配置)"),
+            count => println!("moss-host mcp bridge connecting to {count} endpoint(s)"),
         }
         let _ = server.join();
         return;
@@ -27,7 +27,8 @@ fn main() {
 fn run_migrate(args: &[String]) -> Result<(), String> {
     let mut source_root = None;
     let mut source_roots = Vec::new();
-    let mut target_root = std::env::current_dir().map_err(|e| e.to_string())?.join(".runtime");
+    // 默认目标与程序实际使用的数据目录一致（Windows 为 %APPDATA%\moss），避免迁到一个程序不读的目录。
+    let mut target_root = laser_runtime::RuntimeRoot::default_base().map_err(|e| e.to_string())?;
     let mut historical_roots = Vec::new();
     let mut dry_run = false;
     let mut on_conflict = laser_runtime::ConflictPolicy::Keep;

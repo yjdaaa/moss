@@ -4,19 +4,112 @@ use std::sync::{Mutex, OnceLock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod approval;
 pub mod geometry;
+pub mod risk;
+
+pub use risk::{ALWAYS_ENABLED_TOOLS, RiskLevel, tool_can_be_disabled, tool_never_exposed, tool_risk};
+
+pub use approval::{
+    APPROVAL_ID_PREFIX, ApprovalConnection, ApprovalKind, ApprovalOutcome, ApprovalPhase, ApprovalRecord, ApprovalSource,
+    ApprovalStatus, AuditAction, AuditDetail, AuditEntry, AuditResult, approval_ttl_seconds, audit_client,
+    safe_action_requires_approval,
+};
 
 pub const MATERIAL_LIBRARY_VERSION: u32 = 1;
 pub const DEFAULT_POWER_SCALE: u32 = 1000;
 
+/// 调用方上下文（技术书 §6.4）：由 HTTP 入口或进程内调用方**构造**，绝不从请求体读取。
+/// P1-00 只做传递，不参与任何判定；严格模式（P1-04）将据此决定 R3 动作是否放行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallerContext {
+    /// `X-Moss-Desktop-Session` 校验通过的桌面会话（P1-07 接入）
+    Desktop,
+    /// 审批服务在桌面批准后发起的执行
+    Approval { approval_id: String },
+    /// `/v1/gateway/*` 网关令牌（可选 P2b）
+    Gateway { session_id: String },
+    /// 进程内 `InProcessBackend`（小智 MCP 桥 / 接入点转发）
+    McpBridge,
+    /// 局域网配对 token
+    Lan { pairing_id: String },
+    /// MOSS 内置语音服务（内置语音技术书 §5.2，NV4）：设备与会话由语音服务提供，审计记为 `voice:<设备>`
+    Voice { device_id: String, session_id: String },
+    /// 回环且无任何凭据（本机其他进程或网页、测试）
+    Loopback,
+}
+
+impl CallerContext {
+    /// 审计与日志用的稳定标签
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Approval { .. } => "approval",
+            Self::Gateway { .. } => "gateway",
+            Self::McpBridge => "mcp_bridge",
+            Self::Lan { .. } => "lan",
+            Self::Voice { .. } => "voice",
+            Self::Loopback => "loopback",
+        }
+    }
+}
+
+/// 小智 MCP 桥接遥测快照。只记录真实发生的事情，没有数据时保持空值（技术书 §9.5.3）。
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct McpTelemetrySnapshot {
+    /// 桥当前是否与接入点保持 WebSocket 连接（握手成功后为真，断开后为假）。
+    #[serde(default)]
+    pub connected: bool,
     pub client_name: String,
     pub client_version: String,
     pub last_request: String,
     pub last_request_time: String,
+    /// 从接入点收到的 JSON-RPC 文本帧数量（真实计数）。
     pub messages_count: u64,
     pub recent_events: Vec<String>,
+    /// 每个接入点的连接状态（NV8 多接入点；`connected` 为其中任一已连接）。
+    #[serde(default)]
+    pub endpoints: Vec<EndpointLink>,
+    /// 工具调用统计（NV8；本次运行以来，重启后清零）。键为工具名。
+    #[serde(default)]
+    pub tool_stats: BTreeMap<String, ToolCallStat>,
+}
+
+/// 一个接入点的连接状态。`endpoint` 已脱敏（token 显示为 `***`）。
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EndpointLink {
+    /// 接入点编号：`primary` 为顶层 `mcp_endpoint`，附加接入点为 `extra-1`、`extra-2`……
+    pub id: String,
+    pub endpoint: String,
+    pub connected: bool,
+    /// 本次连接建立的时间（Unix 秒）；未连接时为空
+    pub connected_at: Option<f64>,
+    /// 累计成功连接次数（大于 1 表示发生过断线重连）
+    pub connections: u64,
+    /// 最近一次断开或连接失败的原因（不含 token）
+    pub last_error: Option<String>,
+    /// 当前连接上对方 initialize 时上报的客户端（没有上报时为空）
+    pub client: String,
+}
+
+/// 一个工具的调用统计。`denied` 为因开关关闭或安全分级被拒绝的次数（不计入失败）。
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallStat {
+    pub calls: u64,
+    pub failures: u64,
+    pub denied: u64,
+    /// 最近一次调用的时间（Unix 秒）
+    pub last_at: f64,
+    /// 最近一次调用方（审计标签：`mcp`、`voice:<设备>`……）
+    pub last_caller: String,
+}
+
+/// 一次工具调用的结果分类（统计用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallOutcome {
+    Ok,
+    Failed,
+    Denied,
 }
 
 pub struct McpTelemetry {
@@ -26,9 +119,41 @@ pub struct McpTelemetry {
 static MCP_TELEMETRY: OnceLock<McpTelemetry> = OnceLock::new();
 
 pub fn global_mcp_telemetry() -> &'static McpTelemetry {
-    MCP_TELEMETRY.get_or_init(|| McpTelemetry {
-        data: Mutex::new(McpTelemetrySnapshot::default()),
-    })
+    MCP_TELEMETRY.get_or_init(McpTelemetry::new)
+}
+
+/// 自建链路的设备会话数（技术书 §9.4.5）：由桌面端语音中心轮询接入点 health 后写入，
+/// `/api/system/info` 读取。负数表示未知（未配置健康检查地址、查询失败或官方链路）。
+pub struct VoiceTelemetry {
+    device_sessions: std::sync::atomic::AtomicI64,
+}
+
+impl VoiceTelemetry {
+    const fn new() -> Self {
+        Self { device_sessions: std::sync::atomic::AtomicI64::new(-1) }
+    }
+
+    pub fn set_device_sessions(&self, sessions: Option<u32>) {
+        let value = sessions.map(i64::from).unwrap_or(-1);
+        self.device_sessions.store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn device_sessions(&self) -> Option<u32> {
+        u32::try_from(self.device_sessions.load(std::sync::atomic::Ordering::SeqCst)).ok()
+    }
+}
+
+static VOICE_TELEMETRY: VoiceTelemetry = VoiceTelemetry::new();
+
+pub fn global_voice_telemetry() -> &'static VoiceTelemetry {
+    &VOICE_TELEMETRY
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 fn current_time_str() -> String {
@@ -41,14 +166,42 @@ fn current_time_str() -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+impl Default for McpTelemetry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpTelemetry {
+    pub fn new() -> Self {
+        Self { data: Mutex::new(McpTelemetrySnapshot::default()) }
+    }
+
+    /// 记录一条事件日志（只进日志，不计入消息数）。
     pub fn record_event(&self, event: &str) {
         if let Ok(mut lock) = self.data.lock() {
-            lock.messages_count += 1;
             let now = current_time_str();
             lock.recent_events.push(format!("{now} {event}"));
             if lock.recent_events.len() > 30 {
                 lock.recent_events.remove(0);
+            }
+        }
+    }
+
+    /// 收到一条来自接入点的消息。
+    pub fn record_message(&self) {
+        if let Ok(mut lock) = self.data.lock() {
+            lock.messages_count += 1;
+        }
+    }
+
+    /// WebSocket 连接建立或断开。断开时清空客户端标识（它只对当前连接有效），保留历史事件与计数。
+    pub fn set_connected(&self, connected: bool) {
+        if let Ok(mut lock) = self.data.lock() {
+            lock.connected = connected;
+            if !connected {
+                lock.client_name.clear();
+                lock.client_version.clear();
             }
         }
     }
@@ -69,6 +222,93 @@ impl McpTelemetry {
 
     pub fn snapshot(&self) -> McpTelemetrySnapshot {
         self.data.lock().map(|d| d.clone()).unwrap_or_default()
+    }
+
+    /// 登记本次要连接的接入点（`(编号, 脱敏地址)`，重启桥时调用）：列表外的旧条目删除，
+    /// 编号与地址都没变的保留计数，否则重置。
+    pub fn register_endpoints(&self, endpoints: &[(String, String)]) {
+        if let Ok(mut lock) = self.data.lock() {
+            let previous = std::mem::take(&mut lock.endpoints);
+            lock.endpoints = endpoints
+                .iter()
+                .map(|(id, endpoint)| {
+                    previous
+                        .iter()
+                        .find(|link| &link.id == id && &link.endpoint == endpoint)
+                        .cloned()
+                        .unwrap_or_else(|| EndpointLink { id: id.clone(), endpoint: endpoint.clone(), ..EndpointLink::default() })
+                })
+                .collect();
+            lock.connected = lock.endpoints.iter().any(|link| link.connected);
+        }
+    }
+
+    /// 接入点 `id`（脱敏地址 `endpoint`）已连接；未登记过的编号自动登记。
+    pub fn link_up(&self, id: &str, endpoint: &str) {
+        if let Ok(mut lock) = self.data.lock() {
+            if !lock.endpoints.iter().any(|link| link.id == id) {
+                lock.endpoints.push(EndpointLink { id: id.to_owned(), endpoint: endpoint.to_owned(), ..EndpointLink::default() });
+            }
+        }
+        self.update_link(id, |link| {
+            link.endpoint = endpoint.to_owned();
+            link.connected = true;
+            link.connected_at = Some(unix_now());
+            link.connections += 1;
+            link.last_error = None;
+        });
+    }
+
+    /// 接入点 `id` 断开或连接失败（`error` 为空表示正常关闭）。
+    pub fn link_down(&self, id: &str, error: Option<&str>) {
+        self.update_link(id, |link| {
+            link.connected = false;
+            link.connected_at = None;
+            link.client.clear();
+            if let Some(error) = error {
+                link.last_error = Some(error.chars().take(200).collect());
+            }
+        });
+    }
+
+    /// 接入点 `id` 上对方 initialize 时上报的客户端名称与版本。
+    pub fn record_link_client(&self, id: &str, name: &str, version: &str) {
+        let shown = match (name.is_empty(), version.is_empty()) {
+            (true, _) => String::new(),
+            (false, true) => name.to_owned(),
+            (false, false) => format!("{name} v{version}"),
+        };
+        self.update_link(id, |link| link.client = shown);
+    }
+
+    /// 改一个接入点的状态并重算总连接状态；全部断开时清空客户端标识（与 `set_connected(false)` 一致）。
+    fn update_link(&self, id: &str, change: impl FnOnce(&mut EndpointLink)) {
+        if let Ok(mut lock) = self.data.lock() {
+            if let Some(link) = lock.endpoints.iter_mut().find(|link| link.id == id) {
+                change(link);
+            }
+            let any = lock.endpoints.iter().any(|link| link.connected);
+            if !any {
+                lock.client_name.clear();
+                lock.client_version.clear();
+            }
+            lock.connected = any;
+        }
+    }
+
+    /// 记一次工具调用（接入点与内置语音共用）。
+    pub fn record_tool_call(&self, name: &str, caller: &str, outcome: ToolCallOutcome) {
+        if let Ok(mut lock) = self.data.lock() {
+            let stat = lock.tool_stats.entry(name.chars().take(64).collect()).or_default();
+            stat.calls += 1;
+            match outcome {
+                ToolCallOutcome::Ok => {}
+                ToolCallOutcome::Failed => stat.failures += 1,
+                ToolCallOutcome::Denied => stat.denied += 1,
+            }
+            stat.last_at = unix_now();
+            stat.last_caller = caller.chars().take(80).collect();
+        }
     }
 }
 
@@ -689,5 +929,109 @@ mod tests {
         let raster = wood.engrave.as_ref().unwrap().raster.as_ref().unwrap();
         assert_eq!(raster.power_scale, Some(255));
         assert_eq!(raster.laser_max_power, 107);
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn telemetry_starts_empty_and_tracks_real_link_state() {
+        let telemetry = McpTelemetry::new();
+        let fresh = telemetry.snapshot();
+        assert!(!fresh.connected);
+        assert!(fresh.client_name.is_empty());
+        assert!(fresh.last_request.is_empty());
+        assert!(fresh.recent_events.is_empty());
+        assert_eq!(fresh.messages_count, 0);
+
+        telemetry.set_connected(true);
+        telemetry.record_client_info("client-a", "1.2");
+        telemetry.record_message();
+        telemetry.record_message();
+        telemetry.record_event("[RECV] initialize");
+        let live = telemetry.snapshot();
+        assert!(live.connected);
+        assert_eq!(live.client_name, "client-a");
+        assert_eq!(live.messages_count, 2, "事件日志不得计入消息数");
+        assert_eq!(live.recent_events.len(), 1);
+
+        telemetry.set_connected(false);
+        let after = telemetry.snapshot();
+        assert!(!after.connected);
+        assert!(after.client_name.is_empty() && after.client_version.is_empty());
+        assert_eq!(after.messages_count, 2);
+        assert_eq!(after.recent_events.len(), 1);
+    }
+
+    /// NV8：多个接入点各自记录状态；任一连接即为已连接，全部断开才算断开；重新登记时保留同地址的计数。
+    #[test]
+    fn telemetry_tracks_each_endpoint_separately() {
+        let telemetry = McpTelemetry::new();
+        telemetry.register_endpoints(&[
+            ("primary".to_owned(), "wss://a.test/mcp/?token=***".to_owned()),
+            ("extra-1".to_owned(), "wss://b.test/mcp/?token=***".to_owned()),
+        ]);
+        telemetry.link_up("primary", "wss://a.test/mcp/?token=***");
+        telemetry.link_up("extra-1", "wss://b.test/mcp/?token=***");
+        telemetry.record_link_client("extra-1", "xiaozhi", "2.0");
+        telemetry.record_client_info("xiaozhi", "2.0");
+        telemetry.link_down("primary", Some("连接被重置"));
+        let snapshot = telemetry.snapshot();
+        assert!(snapshot.connected, "另一个接入点仍在线");
+        assert_eq!(snapshot.client_name, "xiaozhi");
+        assert_eq!(snapshot.endpoints[0].last_error.as_deref(), Some("连接被重置"));
+        assert!(!snapshot.endpoints[0].connected && snapshot.endpoints[0].connected_at.is_none());
+        assert_eq!(snapshot.endpoints[1].client, "xiaozhi v2.0");
+        telemetry.link_up("primary", "wss://a.test/mcp/?token=***");
+        assert_eq!(telemetry.snapshot().endpoints[0].connections, 2, "重连后计数增加");
+        assert!(telemetry.snapshot().endpoints[0].last_error.is_none());
+        telemetry.link_down("extra-1", None);
+        telemetry.link_down("primary", None);
+        let snapshot = telemetry.snapshot();
+        assert!(!snapshot.connected);
+        assert!(snapshot.client_name.is_empty(), "全部断开后清空客户端标识");
+        telemetry.link_down("nope", Some("x"));
+        assert_eq!(telemetry.snapshot().endpoints.len(), 2, "断开未登记的编号不新增条目");
+        telemetry.link_up("solo", "ws://127.0.0.1/mcp/");
+        assert!(telemetry.snapshot().connected, "单独运行的桥自动登记");
+        telemetry.link_down("solo", None);
+        // 重新登记：编号与地址都没变的保留计数，新的从零开始，列表外的删除
+        telemetry.register_endpoints(&[
+            ("primary".to_owned(), "wss://a.test/mcp/?token=***".to_owned()),
+            ("extra-2".to_owned(), "wss://c.test/mcp/".to_owned()),
+        ]);
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.endpoints.len(), 2);
+        assert_eq!(snapshot.endpoints[0].connections, 2);
+        assert_eq!((snapshot.endpoints[1].id.as_str(), snapshot.endpoints[1].connections), ("extra-2", 0));
+    }
+
+    #[test]
+    fn telemetry_counts_tool_calls_by_outcome() {
+        let telemetry = McpTelemetry::new();
+        telemetry.record_tool_call("laser_workflow_tool", "mcp", ToolCallOutcome::Ok);
+        telemetry.record_tool_call("laser_workflow_tool", "voice:aa", ToolCallOutcome::Failed);
+        telemetry.record_tool_call("laser_workflow_tool", "mcp", ToolCallOutcome::Denied);
+        let stat = telemetry.snapshot().tool_stats["laser_workflow_tool"].clone();
+        assert_eq!((stat.calls, stat.failures, stat.denied), (3, 1, 1));
+        assert_eq!(stat.last_caller, "mcp");
+        assert!(stat.last_at > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod caller_context_tests {
+    use super::CallerContext;
+
+    #[test]
+    fn caller_context_labels_are_stable() {
+        assert_eq!(CallerContext::Desktop.label(), "desktop");
+        assert_eq!(CallerContext::Approval { approval_id: "apr_1".into() }.label(), "approval");
+        assert_eq!(CallerContext::Gateway { session_id: "s".into() }.label(), "gateway");
+        assert_eq!(CallerContext::McpBridge.label(), "mcp_bridge");
+        assert_eq!(CallerContext::Lan { pairing_id: "p".into() }.label(), "lan");
+        assert_eq!(CallerContext::Loopback.label(), "loopback");
     }
 }

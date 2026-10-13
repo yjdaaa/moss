@@ -1,0 +1,19 @@
+[package]
+name = "moss-voice-local"
+version = "0.1.0"
+edition = "2024"
+description = "MOSS 本地模型辅助程序（内置语音技术书 §11.2，NV6）：Silero 判停、SenseVoice 识别、Kokoro 合成。经标准输入输出与 MOSS 通信。因静态链接的 sherpa-onnx 含 GPL-3.0 的 espeak-ng，本程序以 GPL-3.0-or-later 单独发布；MOSS 本体仍为 MIT。"
+license = "GPL-3.0-or-later"
+publish = false
+
+# 独立工作区：不加入 MOSS 根 workspace，MOSS 的构建与测试不编译 sherpa-onnx
+[workspace]
+
+[dependencies]
+moss-voice-local-proto = { path = "../../crates/moss-voice-local-proto" }
+# 官方 Rust 绑定，默认静态链接；构建时从 GitHub 下载预编译静态库（离线构建可设 SHERPA_ONNX_LIB_DIR）
+sherpa-onnx = "=1.13.8"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3

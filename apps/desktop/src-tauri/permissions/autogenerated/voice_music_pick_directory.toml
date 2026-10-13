@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-music-pick-directory"
+description = "Enables the voice_music_pick_directory command without any pre-configured scope."
+commands.allow = ["voice_music_pick_directory"]
+
+[[permission]]
+identifier = "deny-voice-music-pick-directory"
+description = "Denies the voice_music_pick_directory command without any pre-configured scope."
+commands.deny = ["voice_music_pick_directory"]

@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice-mcp",
+  "description": "External MCP management in the main desktop window; commands additionally pin the exact running backend origin.",
+  "windows": ["main"],
+  "platforms": ["windows", "macOS", "linux"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["allow-voice-mcp-status", "allow-voice-mcp-save", "allow-voice-mcp-delete", "allow-voice-mcp-reconnect"]
+}

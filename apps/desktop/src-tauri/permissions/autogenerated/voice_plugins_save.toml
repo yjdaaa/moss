@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-plugins-save"
+description = "Enables the voice_plugins_save command without any pre-configured scope."
+commands.allow = ["voice_plugins_save"]
+
+[[permission]]
+identifier = "deny-voice-plugins-save"
+description = "Denies the voice_plugins_save command without any pre-configured scope."
+commands.deny = ["voice_plugins_save"]

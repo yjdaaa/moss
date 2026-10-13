@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-home-save"
+description = "Enables the voice_home_save command without any pre-configured scope."
+commands.allow = ["voice_home_save"]
+
+[[permission]]
+identifier = "deny-voice-home-save"
+description = "Denies the voice_home_save command without any pre-configured scope."
+commands.deny = ["voice_home_save"]

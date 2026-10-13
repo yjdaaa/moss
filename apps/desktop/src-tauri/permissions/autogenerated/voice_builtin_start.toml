@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-builtin-start"
+description = "Enables the voice_builtin_start command without any pre-configured scope."
+commands.allow = ["voice_builtin_start"]
+
+[[permission]]
+identifier = "deny-voice-builtin-start"
+description = "Denies the voice_builtin_start command without any pre-configured scope."
+commands.deny = ["voice_builtin_start"]

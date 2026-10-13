@@ -1,0 +1,22 @@
+{
+  "status": "cache",
+  "id": "synthetic-source",
+  "updatedTime": 1720000000000,
+  "items": [
+    {
+      "id": "one",
+      "title": "合成标题",
+      "url": "https://source.example.test/one",
+      "pubDate": "2026-10-12"
+    },
+    {
+      "id": "two",
+      "title": "合成第二条",
+      "url": "https://source.example.test/two",
+      "pubDate": 1720000000000,
+      "extra": {
+        "secret": "must-not-expose"
+      }
+    }
+  ]
+}

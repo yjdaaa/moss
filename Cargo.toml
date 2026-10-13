@@ -11,4 +11,10 @@ members = [
     "crates/laser-mcp",
     "crates/laser-runtime",
     "crates/laser-tools",
+    "crates/moss-mcp-client",
+    "crates/moss-voice",
+    "crates/moss-voice-local-proto",
+    "crates/moss-voice-providers",
+    "crates/moss-voice-server",
+    "crates/moss-xiaozhi-proto",
 ]

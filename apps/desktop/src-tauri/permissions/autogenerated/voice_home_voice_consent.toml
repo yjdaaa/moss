@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-home-voice-consent"
+description = "Enables the voice_home_voice_consent command without any pre-configured scope."
+commands.allow = ["voice_home_voice_consent"]
+
+[[permission]]
+identifier = "deny-voice-home-voice-consent"
+description = "Denies the voice_home_voice_consent command without any pre-configured scope."
+commands.deny = ["voice_home_voice_consent"]

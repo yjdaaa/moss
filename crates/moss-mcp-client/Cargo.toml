@@ -1,0 +1,20 @@
+[package]
+name = "moss-mcp-client"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "NV9 third-party MCP client foundation; explicit configuration and fail-closed authorization. Not yet wired into the desktop voice center."
+publish = false
+
+[dependencies]
+rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+url = "2"
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "test-util"] }

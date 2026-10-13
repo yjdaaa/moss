@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-mcp-delete"
+description = "Enables the voice_mcp_delete command without any pre-configured scope."
+commands.allow = ["voice_mcp_delete"]
+
+[[permission]]
+identifier = "deny-voice-mcp-delete"
+description = "Denies the voice_mcp_delete command without any pre-configured scope."
+commands.deny = ["voice_mcp_delete"]

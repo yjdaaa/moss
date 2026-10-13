@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.moss.laser",
   "build": {
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "../../../frontend"
+    },
     "frontendDist": "../../../frontend/dist"
   },
   "app": {
@@ -23,10 +27,32 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
-    ]
+    ],
+    "targets": [
+      "nsis"
+    ],
+    "shortDescription": "MOSS 激光雕刻上位机",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "both",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "startMenuFolder": "MOSS",
+        "installerHooks": "installer/hooks.nsh"
+      }
+    }
   }
 }

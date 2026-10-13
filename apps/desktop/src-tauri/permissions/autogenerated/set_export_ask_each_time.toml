@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-export-ask-each-time"
+description = "Enables the set_export_ask_each_time command without any pre-configured scope."
+commands.allow = ["set_export_ask_each_time"]
+
+[[permission]]
+identifier = "deny-set-export-ask-each-time"
+description = "Denies the set_export_ask_each_time command without any pre-configured scope."
+commands.deny = ["set_export_ask_each_time"]

@@ -25,7 +25,8 @@ export function AppDialogHost() {
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        resolveDialog(dialog.id, false);
+        // Esc 等同关闭：confirm 视为取消；choice 返回 "dismiss"
+        resolveDialog(dialog.id, null);
       } else if (e.key === "Enter") {
         e.preventDefault();
         resolveDialog(dialog.id, true);
@@ -42,7 +43,7 @@ export function AppDialogHost() {
 
   const meta = TONE_META[dialog.tone] || TONE_META.info;
   const { Icon } = meta;
-  const isConfirm = dialog.kind === "confirm";
+  const isConfirm = dialog.kind === "confirm" || dialog.kind === "choice";
   const confirmClass = dialog.danger
     ? "btn btn-danger"
     : dialog.tone === "error"
@@ -69,7 +70,7 @@ export function AppDialogHost() {
           <button
             type="button"
             className="mat-modal-close"
-            onClick={() => resolveDialog(dialog.id, false)}
+            onClick={() => resolveDialog(dialog.id, null)}
             title={isConfirm ? "取消" : "关闭"}
           >
             <X size={16} />

@@ -1,0 +1,27 @@
+[package]
+name = "moss-voice-providers"
+version = "0.1.0"
+edition = "2024"
+description = "MOSS 内置语音服务的模型提供方（内置语音技术书 NV3 起）：ASR / LLM / TTS 接口与 OpenAI 兼容、本地模型、豆包流式实现，以及切句、Markdown 清洗、对话历史截断、WAV 编解码、重采样等纯函数。仅桌面端使用。"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+serde_json = "1"
+# 异步客户端：在内置语音服务的专用 tokio 运行时中调用；与仓库其他 crate 相同使用 rustls，不跟随重定向由代码设置
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "net", "macros"] }
+# 本地模型辅助程序的帧协议（NV6）
+moss-voice-local-proto = { path = "../moss-voice-local-proto" }
+# 豆包流式识别与合成（NV7）：WebSocket 客户端与 axum 共用 tokio-tungstenite 0.29；TLS 用 rustls（明确指定 ring 与内置根证书）
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# 豆包识别帧的 gzip 压缩
+flate2 = "1"
+getrandom = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }

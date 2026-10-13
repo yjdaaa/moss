@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "mapId": "moss-rust-architecture",
-  "revision": 1,
+  "revision": 5,
   "project": {
     "id": "moss-rust",
     "name": "MOSS-Rust"
@@ -37,7 +37,7 @@
       "role": "frontend",
       "name": "Tauri Desktop App",
       "kind": "local",
-      "responsibility": "基于 Tauri 的跨平台桌面客户端，封装系统托盘、本地窗口与前端画板，提供免安装独立运行体验。",
+      "responsibility": "Tauri 桌面与 Android 外壳，在进程内启动统一宿主并承载前端资源；系统托盘只用于桌面平台。",
       "ownership": [
         {
           "kind": "directory",
@@ -62,7 +62,7 @@
       "role": "backend",
       "name": "MOSS Host Service",
       "kind": "local",
-      "responsibility": "后端统一主进程入口，编排并启动 Web API、MCP 服务与硬件后台任务。",
+      "responsibility": "命令行入口，提供 serve、migrate 和启动自检；serve 复用 laser-host 组装 HTTP 与 MCP。",
       "ownership": [
         {
           "kind": "directory",
@@ -87,7 +87,7 @@
       "role": "backend",
       "name": "Laser HTTP Web API",
       "kind": "local",
-      "responsibility": "实现 17 个兼容路由的 Web HTTP/WebSocket 服务，处理前端交互请求、图纸文件上传与运行状态流。",
+      "responsibility": "实现 HTTP/1.1 API 与静态资源服务，处理前端交互请求、图纸文件上传、工作流编排、局域网配对与运行状态查询。",
       "ownership": [
         {
           "kind": "directory",
@@ -97,7 +97,7 @@
       "evidence": [
         {
           "path": "docs/developer/api-contracts.md",
-          "note": "定义 17 个 /api 路由与新增 /v1 接口的机器契约"
+          "note": "定义 /api 与 /v1 路由、字段、错误码及鉴权契约"
         }
       ],
       "status": "supported",
@@ -110,9 +110,9 @@
     {
       "id": "laser-mcp",
       "role": "backend",
-      "name": "FastMCP & Xiaozhi Bridge",
+      "name": "MCP JSON-RPC & Xiaozhi Bridge",
       "kind": "local",
-      "responsibility": "实现 JSON-RPC 协议与 FastMCP 工具注册契约，对接小智语音助手与 MOSS MCP 客户端。",
+      "responsibility": "实现 JSON-RPC 2.0 MCP 协议、工具列表/调用分发，以及连接小智控制台的 WebSocket 客户端桥。",
       "ownership": [
         {
           "kind": "directory",
@@ -137,7 +137,7 @@
       "role": "backend",
       "name": "Laser Business Tools",
       "kind": "local",
-      "responsibility": "实现 20 个注册 MCP 工具的业务逻辑，包括材料参数推荐、校准测试网格与文字雕刻任务生成。",
+      "responsibility": "维护工具目录及无宿主依赖的工具实现；持久化和正式作业经 MCP HostBackend 转发至 API。",
       "ownership": [
         {
           "kind": "directory",
@@ -146,8 +146,8 @@
       ],
       "evidence": [
         {
-          "path": "docs/archive/rust-rebuild-spec.md",
-          "note": "冻结 20 个 MCP 工具功能范围与入参契约"
+          "path": "crates/laser-tools/src/lib.rs",
+          "note": "ToolCatalog 及独立工具实现；需要存储的操作由 MCP 分发层委托宿主后端"
         }
       ],
       "status": "supported",
@@ -260,6 +260,202 @@
         "row": 2,
         "column": 0
       }
+    },
+    {
+      "id": "laser-host",
+      "role": "backend",
+      "name": "Host Assembly & Shutdown",
+      "kind": "local",
+      "responsibility": "组装运行目录、配置、SQLite、HTTP API 与 MCP 桥，统一启动编排、端口回退、退出协调及活动作业中止。",
+      "ownership": [
+        {
+          "kind": "directory",
+          "path": "crates/laser-host"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "crates/laser-host/src/lib.rs",
+          "note": "HostApplication、InProcessBackend、ShutdownCoordinator 与 HTTP/MCP 启动入口"
+        },
+        {
+          "path": "docs/developer/architecture.md",
+          "note": "架构文档将 laser-host 定义为组装层与全局退出协调器"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 1,
+        "column": 3
+      }
+    },
+    {
+      "id": "fluidnc-grbl",
+      "role": "generic",
+      "roleAssessment": {
+        "basis": "out-of-taxonomy",
+        "note": "外部控制器不是本地 frontend/backend/database 等运行模块，保留为 generic 并通过 kind=external 表达边界。"
+      },
+      "name": "FluidNC / GRBL Controller",
+      "kind": "external",
+      "responsibility": "外部激光控制器，提供串口或 Telnet GRBL 通道、FluidNC 配置/状态报告、G-code 执行与实时急停字节。",
+      "ownership": [],
+      "evidence": [
+        {
+          "path": "docs/developer/safety.md",
+          "note": "规定握手、Idle/引脚预检、G-code SHA 门禁、Telnet/串口传输与 0x18 实时通道"
+        },
+        {
+          "path": "docs/laser/grbl-esp32-network-commands.md",
+          "note": "记录 FluidNC/GRBL 网络入口与命令边界"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 4,
+        "column": 0
+      }
+    },
+    {
+      "id": "openrouter-jev",
+      "role": "generic",
+      "roleAssessment": {
+        "basis": "out-of-taxonomy",
+        "note": "外部 OpenRouter 服务不是本地 frontend/backend/database 等运行模块，保留为 generic 并通过 kind=external 表达边界。"
+      },
+      "name": "OpenRouter Jev Service",
+      "kind": "external",
+      "responsibility": "通过 OpenRouter Decisions API 对加工反馈进行分类判断；只返回判断结果，不生成 G-code、不连接或控制激光设备。",
+      "ownership": [],
+      "evidence": [
+        {
+          "path": "crates/laser-api/src/lib.rs",
+          "note": "Jev 调用由 laser-api 统一发起，使用 OpenRouter Decisions 接口与 typesafe/jev-1.13 模型。"
+        },
+        {
+          "path": "docs/developer/api-contracts.md",
+          "note": "反馈判断属于建议阶段，不能绕过 workflow 确认、材料安全和 SHA 门禁。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 4,
+        "column": 2
+      }
+    },
+    {
+      "id": "xiaozhi-console",
+      "role": "generic",
+      "roleAssessment": {
+        "basis": "out-of-taxonomy",
+        "note": "外部小智控制台不是本地 frontend/backend/database 等运行模块，保留为 generic 并通过 kind=external 表达边界。"
+      },
+      "name": "Xiaozhi MCP Console",
+      "kind": "external",
+      "responsibility": "外部小智/MOSS 控制台，通过 MCP_ENDPOINT 提供 WebSocket MCP 连接并发起工具调用。",
+      "ownership": [],
+      "evidence": [
+        {
+          "path": "docs/developer/architecture.md",
+          "note": "MCP 桥在有效 MCP_ENDPOINT 时连接小智控制台，断线指数退避重连"
+        },
+        {
+          "path": "docs/integration/xiaozhi-prompts/latest.md",
+          "note": "定义小智侧工具调用与激光工作流边界"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 4,
+        "column": 1
+      }
+    }
+  ],
+  "constraints": [
+    {
+      "id": "jev-no-device-bypass",
+      "name": "Jev 不得绕过激光安全门禁",
+      "note": "Jev 只提供反馈分类和调参建议；真实 G-code、设备动作、确认和 SHA 门禁仍由 MOSS 的确定性代码负责。",
+      "origin": "local",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "laser-api",
+        "laser-mcp"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "docs/developer/safety.md",
+          "note": "完整发送必须经过 confirmed、SHA-256、握手、Idle 与设备预检门禁。"
+        }
+      ],
+      "verification": "审查 Jev 调用路径，并用测试确认 Jev 失败或返回异常时不会发送设备指令。"
+    },
+    {
+      "id": "jev-secret-no-logging",
+      "name": "Jev API Key 不得进入日志或普通状态响应",
+      "note": "API Key 仅由后端在调用 Jev 或明确的查看动作中读取；状态、遥测和日志只返回已配置或遮罩值。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "frontend",
+        "laser-api",
+        "laser-runtime"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "AGENTS.md",
+          "note": "不得写入凭据、令牌等用户特定敏感值。"
+        }
+      ],
+      "verification": "测试设置状态、日志和前端初始化响应不包含完整 API Key；眼睛按钮只在明确请求后显示。"
+    },
+    {
+      "id": "jev-sqlite-migration",
+      "name": "Jev 密钥表必须走现有 SQLite 迁移",
+      "note": "app_secrets 是运行时数据库的一部分，已有数据库升级和内存测试数据库都必须自动创建该表。",
+      "origin": "local",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "laser-runtime"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "crates/laser-runtime/src/db.rs",
+          "note": "RuntimeDb::migrate 统一创建运行时表并维护 schema_version。"
+        }
+      ],
+      "verification": "运行 laser-runtime 的迁移与密钥读写单测，覆盖 open_memory 和已有数据库。"
+    },
+    {
+      "id": "jev-changelog-required",
+      "name": "功能变更必须记录到 CHANGELOG",
+      "note": "Jev 设置、SQLite 存储契约、遮罩查看行为和验证结果必须同步记录。",
+      "origin": "local",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "project",
+      "modules": [],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "AGENTS.md",
+          "note": "每个代码修复或功能变更都必须同步记录到 CHANGELOG.md。"
+        }
+      ],
+      "verification": "检查 CHANGELOG.md 条目包含现象/影响、根因、修复、验证和关联文件。"
     }
   ],
   "relationships": [
@@ -280,18 +476,34 @@
       ]
     },
     {
+      "id": "desktop-host",
+      "from": "desktop",
+      "to": "laser-host",
+      "label": "初始化并承载 HostApplication",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "apps/desktop/src-tauri/src/lib.rs",
+          "note": "Tauri 入口安装钩子后初始化 laser_host::HostApplication"
+        }
+      ]
+    },
+    {
       "id": "frontend-api",
       "from": "frontend",
       "to": "laser-api",
-      "label": "发起 HTTP / WebSocket 请求",
+      "label": "发起 HTTP 请求并轮询状态",
       "kind": "request",
       "visibility": "overview",
       "status": "supported",
       "openQuestions": [],
       "evidence": [
         {
-          "path": "docs/developer/api-contracts.md",
-          "note": "前端通过 17 个 /api 路由进行图纸上传、状态查询与工作流预览"
+          "path": "frontend/src/api/client.js",
+          "note": "统一的 HTTP 请求封装，向后端路由发送页面请求"
         }
       ]
     },
@@ -299,15 +511,79 @@
       "id": "moss-host-api",
       "from": "moss-host",
       "to": "laser-api",
-      "label": "启动并承载 Web 服务",
+      "label": "启动自检引用 API 嵌入资源",
+      "kind": "dependency",
+      "visibility": "detail",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "apps/moss-host/src/main.rs",
+          "note": "无参数启动自检调用 laser_api::embedded_fixture_is_valid；serve 的实际启动委托 laser-host"
+        }
+      ]
+    },
+    {
+      "id": "moss-host-assembly",
+      "from": "moss-host",
+      "to": "laser-host",
+      "label": "复用统一宿主组装层",
       "kind": "control",
       "visibility": "overview",
       "status": "supported",
       "openQuestions": [],
       "evidence": [
         {
-          "path": "apps/moss-host/Cargo.toml",
-          "note": "moss-host 直接依赖 laser-api"
+          "path": "apps/moss-host/src/main.rs",
+          "note": "命令行宿主通过 HostApplication::init 复用统一启动路径"
+        }
+      ]
+    },
+    {
+      "id": "host-api",
+      "from": "laser-host",
+      "to": "laser-api",
+      "label": "组装并启动 HTTP API",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-host/src/lib.rs",
+          "note": "HostApplication 初始化 ApiService 并启动监听线程"
+        }
+      ]
+    },
+    {
+      "id": "host-mcp",
+      "from": "laser-host",
+      "to": "laser-mcp",
+      "label": "按配置启动 MCP 桥",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-host/src/lib.rs",
+          "note": "MCP_ENDPOINT 有效时由 HostApplication::spawn_mcp_bridge 启动桥接线程"
+        }
+      ]
+    },
+    {
+      "id": "host-runtime",
+      "from": "laser-host",
+      "to": "laser-runtime",
+      "label": "解析运行目录并初始化数据库",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-host/src/lib.rs",
+          "note": "HostApplication::init 调用 RuntimeRoot::resolve 与 RuntimeDb::open"
         }
       ]
     },
@@ -315,15 +591,15 @@
       "id": "moss-host-mcp",
       "from": "moss-host",
       "to": "laser-mcp",
-      "label": "启动并暴露 MCP 桥接",
-      "kind": "control",
-      "visibility": "overview",
+      "label": "启动自检查询工具清单",
+      "kind": "dependency",
+      "visibility": "detail",
       "status": "supported",
       "openQuestions": [],
       "evidence": [
         {
-          "path": "apps/moss-host/Cargo.toml",
-          "note": "moss-host 直接依赖 laser-mcp"
+          "path": "apps/moss-host/src/main.rs",
+          "note": "无参数启动自检查询 tools_list_json；serve 的桥接启动委托 laser-host"
         }
       ]
     },
@@ -344,6 +620,26 @@
       ]
     },
     {
+      "id": "mcp-api-through-host",
+      "from": "laser-mcp",
+      "to": "laser-api",
+      "label": "经宿主 HostBackend 委托持久化工具",
+      "kind": "request",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-host/src/lib.rs",
+          "note": "InProcessBackend 实现 HostBackend 并将请求交给共享 ApiService"
+        },
+        {
+          "path": "crates/laser-mcp/src/lib.rs",
+          "note": "工具分发对 workflow、材料库、标定及文字任务调用 backend.request"
+        }
+      ]
+    },
+    {
       "id": "laser-api-tools",
       "from": "laser-api",
       "to": "laser-tools",
@@ -356,6 +652,22 @@
         {
           "path": "docs/developer/api-contracts.md",
           "note": "Web 路由调用底层工作流与材料管理逻辑"
+        }
+      ]
+    },
+    {
+      "id": "laser-api-core",
+      "from": "laser-api",
+      "to": "laser-core",
+      "label": "生成 G-code 并检查材料安全",
+      "kind": "dependency",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-api/src/lib.rs",
+          "note": "workflow 预览调用 laser_core 算法及 evaluate_material"
         }
       ]
     },
@@ -392,18 +704,18 @@
       ]
     },
     {
-      "id": "laser-tools-runtime",
-      "from": "laser-tools",
-      "to": "laser-runtime",
-      "label": "查询/存储材料与历史记录",
-      "kind": "request",
+      "id": "laser-api-device",
+      "from": "laser-api",
+      "to": "laser-device",
+      "label": "调度 JobWorker 与发送前设备预检",
+      "kind": "control",
       "visibility": "overview",
       "status": "supported",
       "openQuestions": [],
       "evidence": [
         {
-          "path": "docs/developer/db-schema.md",
-          "note": "工具执行时读取材料库与任务历史持久化"
+          "path": "docs/developer/architecture.md",
+          "note": "完整发送由 laser-api 编排 authorize_send、握手、预检与 JobWorker"
         }
       ]
     },
@@ -420,6 +732,86 @@
         {
           "path": "apps/moss-host/Cargo.toml",
           "note": "API 服务需要直接读取任务状态与运行时配置"
+        }
+      ]
+    },
+    {
+      "id": "device-fluidnc",
+      "from": "laser-device",
+      "to": "fluidnc-grbl",
+      "label": "串口/Telnet 握手、状态读取与受控 G-code",
+      "kind": "control",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-device/src/lib.rs",
+          "note": "DeviceTransport、SerialGrbl、TcpGrbl、实时命令与 FluidNC 解析实现"
+        }
+      ]
+    },
+    {
+      "id": "mcp-xiaozhi",
+      "from": "laser-mcp",
+      "to": "xiaozhi-console",
+      "label": "WebSocket MCP JSON-RPC 桥",
+      "kind": "event",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-mcp/src/lib.rs",
+          "note": "run_bridge 连接 MCP_ENDPOINT 并转发工具调用与结果"
+        }
+      ]
+    },
+    {
+      "id": "xiaozhi-mcp-calls",
+      "from": "xiaozhi-console",
+      "to": "laser-mcp",
+      "label": "发起 JSON-RPC 工具请求",
+      "kind": "request",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-mcp/src/lib.rs",
+          "note": "run_bridge 从 WebSocket 读取消息并交给 handle_json_rpc_with"
+        }
+      ]
+    },
+    {
+      "id": "api-openrouter-jev",
+      "from": "laser-api",
+      "to": "openrouter-jev",
+      "label": "发送加工反馈并接收分类判断",
+      "kind": "request",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-api/src/lib.rs",
+          "note": "反馈入口统一由 laser-api 调用 OpenRouter Decisions API；失败时返回本地规则回退。"
+        }
+      ]
+    },
+    {
+      "id": "api-feedback-runtime",
+      "from": "laser-api",
+      "to": "laser-runtime",
+      "label": "保存反馈判断与参数采用历史",
+      "kind": "request",
+      "visibility": "overview",
+      "status": "supported",
+      "openQuestions": [],
+      "evidence": [
+        {
+          "path": "crates/laser-runtime/src/store.rs",
+          "note": "统一通过 RuntimeStore 更新 workflow payload，保留原反馈、判断来源、建议参数和最终采用状态。"
         }
       ]
     }

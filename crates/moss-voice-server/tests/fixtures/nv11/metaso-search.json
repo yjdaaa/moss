@@ -1,0 +1,22 @@
+{
+  "errCode": 0,
+  "data": {
+    "text": "合成回答",
+    "references": [
+      {
+        "title": "合成来源",
+        "url": "https://source.example.test/article",
+        "index": 1
+      },
+      {
+        "title": "上传文件",
+        "file_meta": {
+          "url": "/private-preview",
+          "token": "must-not-expose"
+        }
+      }
+    ],
+    "sessionId": "must-not-expose",
+    "balance": 99
+  }
+}

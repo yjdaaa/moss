@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-server-log"
+description = "Enables the voice_server_log command without any pre-configured scope."
+commands.allow = ["voice_server_log"]
+
+[[permission]]
+identifier = "deny-voice-server-log"
+description = "Denies the voice_server_log command without any pre-configured scope."
+commands.deny = ["voice_server_log"]

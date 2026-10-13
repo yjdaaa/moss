@@ -1,0 +1,17 @@
+{
+  "query": "合成问题",
+  "results": [
+    {
+      "title": "合成来源",
+      "url": "https://source.example.test/article",
+      "content": "合成摘要",
+      "score": 0.8,
+      "raw_content": null
+    }
+  ],
+  "request_id": "synthetic-request",
+  "usage": {
+    "credits": 1
+  },
+  "answer": "must-not-expose"
+}

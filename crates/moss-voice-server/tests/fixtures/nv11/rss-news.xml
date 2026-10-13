@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>合成源</title><item><title><![CDATA[合成标题]]></title><link>https://source.example.test/one?a=1&amp;b=2</link><pubDate>Mon, 12 Oct 2026 00:00:00 GMT</pubDate><description><![CDATA[<b>合成摘要</b>]]></description></item><item><title>第二条 &amp; 更多</title><link>https://source.example.test/two</link><description>空白日期</description></item></channel></rss>

@@ -14,3 +14,16 @@ crates/laser-api/fixture/payload.bin
 
 # Node
 node_modules/
+
+# 本机私人笔记（含本机路径，不进仓库）
+docs/notes/
+
+# 构建生成：NV18 专用包暂存、helper 二进制、上游源码与许可证收集（脚本可重新生成）
+apps/desktop/src-tauri/bundle-resources/
+apps/desktop/src-tauri/binaries/
+apps/moss-voice-local/native-license-evidence/
+apps/moss-voice-local/rust-license-evidence/
+
+# 本机工具状态与生成的可视化（含本机路径）；已跟踪的 .birdview 文件不受影响
+.agents/skills/.skill-learning/
+.birdview/*

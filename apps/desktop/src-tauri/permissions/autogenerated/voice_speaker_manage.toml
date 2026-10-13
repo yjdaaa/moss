@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-speaker-manage"
+description = "Enables the voice_speaker_manage command without any pre-configured scope."
+commands.allow = ["voice_speaker_manage"]
+
+[[permission]]
+identifier = "deny-voice-speaker-manage"
+description = "Denies the voice_speaker_manage command without any pre-configured scope."
+commands.deny = ["voice_speaker_manage"]

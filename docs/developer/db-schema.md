@@ -1,14 +1,14 @@
 # 数据库表结构与旧 JSON 字段映射
 
-状态：设计于 2026-09-14；2026-09-21 按 `crates/laser-runtime/src/db.rs` 现状核对并标注未接线项
+状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）
 代码：`crates/laser-runtime/src/{db,store,root,migration}.rs`
-历史依据：[重构规格](../archive/rust-rebuild-spec.md) §7（已归档）；旧 `.runtime/` 数据统计（652 条 workflow、379 个文字任务、65 个 job、22 个校准）来自迁移前的一次性采样
+历史依据：旧 `.runtime/` 数据统计（652 条 workflow、379 个文字任务、65 个 job、22 个校准）来自迁移前的一次性采样
 
 ---
 
 ## 1. 总原则
 
-1. 一个数据库文件 `<RuntimeRoot>/moss.sqlite`，WAL 模式，`schema_version` 表记录版本。`InstallRoot` 只存放程序文件；数据库绝不默认写入 `InstallRoot`。`RuntimeRoot::resolve` 的解析顺序：显式参数 → 可执行文件同级 `.runtime/` → `%APPDATA%\moss` → 当前目录 `.runtime/`；宿主与桌面端都不传显式参数。没有 `MOSS_RUNTIME_DIR` 环境变量。
+1. 一个数据库文件 `<RuntimeRoot>/moss.sqlite`，WAL 模式，`schema_version` 表记录版本。`InstallRoot` 只存放程序文件；数据库绝不默认写入 `InstallRoot`。`RuntimeRoot::resolve` 的解析顺序：显式参数 → 可执行文件同级 `.runtime/` → `%APPDATA%\moss` → 当前目录 `.runtime/`；宿主与桌面端都传 `(None, None)`，因此 Windows 上实际为 `%APPDATA%\moss`。没有 `MOSS_RUNTIME_DIR` 环境变量。
 2. G-code、预览图、上传图片、生成图片仍是文件，目录布局与现在一致；数据库只存相对路径与 SHA-256。
 3. 旧 JSON 里字段类型不稳定（同一字段有时是字符串有时是数字，见 §8），所以**所有业务记录整条 JSON 以保真为目标存入 `payload` 列，另抽少量字段做索引列**。除 §7 明确规定的路径重映射、旧任务安全终止和字段补记外，其余字段保持原值；所有变换必须进入迁移报告。`payload` 是存储与迁移层面的保真手段，不是业务层的数据模型：`laser-runtime` 在读取入口把 `payload` 反序列化并做宽松类型映射（字符串数字转数值、缺省补齐），产出 `laser-contracts` 中的强类型 struct；转换失败的记录标 `stale` 并给出字段级原因，不静默吞掉。`laser-tools`、`laser-device`、`laser-core` 不得直接持有或解析 `serde_json::Value` 形式的 `payload`。写回时由 struct 序列化生成新的 `payload`，保证工具和接口的对外行为不变；索引列只用于查询和列表。
 4. 时间统一存 Unix 秒浮点（`REAL`），与旧数据一致，不转 ISO。
@@ -32,10 +32,20 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 2。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表 |
+| version | INTEGER PK | 当前 8（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13） |
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
+
+### 3.9 `app_secrets`
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| name | TEXT PK | 密钥名称：`jev_api_key`；`voice.device_token_secret`（内置语音服务签发设备 token 的密钥，首次启动内置服务时随机生成，任何接口都不返回） |
+| value | TEXT | 按用户确认的桌面自用方案保存 API Key 原文；普通状态接口只返回遮罩值 |
+| updated_at | REAL | Unix 秒时间 |
+
+该表只保存应用密钥，不保存普通界面设置。桌面端默认显示遮罩，用户点击眼睛后才调用 `/api/jev/reveal` 请求完整值。
 
 ### 3.2 `workflows`（对应 `.runtime/laser_workflows/*.json`）
 
@@ -228,17 +238,84 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 
 ### 3.11 `audit_log`（新增，对应规格 §8 安全操作记录）
 
-已建表，当前无写入方；`laser-contracts` 中没有 `AuditDetail` 类型。下表为原设计。
+已建表。`RuntimeDb::append_audit` / `recent_audit` 按 `laser-contracts::AuditEntry` 读写；2026-10-06（P1-08）起审批服务与小智接入点写入。`client` 另有 `system`（审批过期、执行失败等由服务自身触发的变化）。`detail` 只放审批 ID、类别、摘要、工具名、错误码、原因与被删除的字段名，不放设备地址、凭据或文件路径。
 
 | 列 | 类型 |
 |---|---|
 | id | INTEGER PK |
 | at | REAL |
-| client | TEXT（local / mcp / pairing_id） |
-| action | TEXT（confirm_send / cancel / safe_action / material_overwrite …） |
+| client | TEXT（desktop / gateway / mcp / 配对 ID / local，由 `audit_client(&CallerContext)` 得出） |
+| action | TEXT（`AuditAction`：approval_created / approval_approved / approval_rejected / approval_expired / approval_executed / approval_failed / confirmed_field_stripped / r4_denied / strict_mode_blocked） |
 | target | TEXT（workflow_id / job_id / 材料格） |
-| result | TEXT |
+| result | TEXT（`AuditResult`：ok / denied / failed） |
 | detail | TEXT（JSON，不含凭据；由 `laser-contracts::AuditDetail` 序列化而来，工具层不拼裸 JSON） |
+
+### 3.12 `approvals`（schema v4，技术书 §7.1）
+
+桌面审批记录。类型见 `laser-contracts::ApprovalRecord`；状态迁移规则 `ApprovalStatus::can_transition_to`：pending → approved / rejected / expired，approved → executed / expired / failed，executed → failed；任何状态都回不到 pending 或 approved，所以一次授权最多执行一次。
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| approval_id | TEXT PK | `apr_` + 随机 |
+| status | TEXT | pending / approved / rejected / expired / executed / failed |
+| kind | TEXT | workflow_confirm_send / calibration_send / safe_action / framing |
+| target_record | TEXT | workflow_id / calibration_id |
+| digest | TEXT | 技术书 §5.4 摘要 |
+| summary | TEXT | 人类可读摘要，不含路径和凭据 |
+| source | TEXT | gateway / mcp_bridge / lan / voice（内置语音，NV4；`session_id` 记发起设备的 Device-Id） |
+| session_id / request_id | TEXT | 可空；UNIQUE(source, request_id) 保持不变。2026-10-10 起 request_id 存 scope-v1 哈希（可信调用方/会话 + 原编号），不接受客户端自报身份；旧值保留可读但不与新键复用。不能验证独立来源的旧 MCP 桥接请求以 NULL 禁用编号复用。 |
+| connection | TEXT | JSON（`ApprovalConnection`），创建时解析出的连接参数，执行时直接使用。只在本地库，`ApprovalRecord` 序列化时不输出 |
+| created_at / decided_at / expires_at / updated_at | REAL | Unix 秒；`decided_at` 可空 |
+| outcome | TEXT | JSON（`ApprovalOutcome`），执行结果摘要，可空；`phase` 为 `running` / `completed` / `failed` / `cancelled` / `unknown`（进程在发送中中断，`error_code=result_unknown`） |
+| request | TEXT | v5。JSON，原始执行参数（已去掉连接字段、身份字段与 `request_id`），批准后据此重放执行并重算摘要；只在本地库，`ApprovalRecord` 序列化时不输出。v4 时创建的行为空 |
+
+旧版程序打开 v4 库：迁移只执行 `current < N` 的步骤、不拒绝更高版本，因此忽略这张新表；旧表结构未改。`gateway_requests` 随可选网关（P2b）再加。
+
+撤销语音设备时，设备状态与该设备来源、尚为 pending/approved 的审批一起更新为 revoked/expired；重新允许不恢复审批。审批创建在同一数据库锁下校验设备状态与已登记会话的有效标记。新同编号请求必须匹配原摘要与保存参数，否则返回冲突；本次不清空记录、不升级 schema。
+
+### 3.13 `voice_devices`（schema v6，内置语音技术书 NV1）
+
+内置语音服务登记的小智设备。新设备第一次请求 OTA 或连接时登记为待允许，桌面端允许后才签发 token。
+
+| 列 | 类型 | 说明 |
+| --- | --- | --- |
+| device_id | TEXT PK | 设备 MAC（固件请求头 `Device-Id`） |
+| client_id | TEXT | 设备 UUID（`Client-Id`）。与已登记值不同时，已允许的设备退回待允许（防止他人冒用 MAC 取得 token），已撤销的保持撤销 |
+| status | TEXT | `pending` 待允许 / `allowed` 已允许 / `revoked` 已撤销 |
+| name | TEXT | 用户起的名字（最长 32 字），默认空 |
+| model / firmware_version | TEXT | OTA 上报的型号（`board.type`）与固件版本；空值不覆盖已有记录 |
+| last_ip | TEXT | 最近来访的局域网地址（只在本机显示） |
+| first_seen / last_seen / decided_at | REAL | Unix 秒；`decided_at` 为最近一次允许或撤销的时间，可空 |
+
+### 3.14 `voice_memory`（schema v7，NV10-1）
+
+仅保存用户选择启用后的设备级文字摘要，不保存完整录音、原始聊天、审批或密钥。`summary` 最长 1500 Unicode 字符；后续 NV10-2/3/4 才接入配置开关、异步总结与桌面编辑功能，不能因数据库表存在就认定记忆已启用。
+
+| 列 | 类型 | 说明 |
+| --- | --- | --- |
+| device_id | TEXT PK | 设备登记标识，上层必须校验许可/身份 |
+| summary | TEXT NOT NULL | 默认空字符串 |
+| revision | INTEGER NOT NULL | 从 0 开始；编辑、清空或总结成功均递增 |
+| updated_at | REAL NOT NULL | Unix 秒 |
+
+`RuntimeDb::ensure_voice_memory` 仅首次插入，不改旧摘要；`voice_memory` / `voice_memories` 查询；`update_voice_memory_if_revision` 使用 SQL `UPDATE ... WHERE device_id=? AND revision=?`，过期结果返回 `None` 而不是无条件 UPSERT。迁移单事务、可重试；NV10-1 有针对性迁移失败与清空竞态单测，完整会话/配置/真实模型验证仍未开始。
+
+### 3.15 voice_agent_runs（schema v8，NV13）
+
+独立存储 AgentRun 状态/摘要/输出，不保存完整 prompt、CLI 密钥或继承的环境变量。approval_id 有 UNIQUE 约束，单次审批至多对应一条 run；task_digest/config_revision 为 SHA-256 指纹。
+
+| 列 | 类型 | 含义 |
+|---|---|---|
+| id | TEXT PK | 独立 AgentRun 编号 |
+| approval_id | TEXT UNIQUE NOT NULL | 对应的唯一审批 |
+| provider / workspace | TEXT | codex/claude_code，本地隐蔽路径；桌面返回目录名 |
+| task_digest / config_revision | TEXT | 任务及当前配置指纹 |
+| status | TEXT | running、completed、failed、cancelled、timed_out、result_unknown |
+| output / truncated | TEXT / INTEGER | 最多 256 KiB 的有界结果及是否截断 |
+| started_at / finished_at | REAL / REAL NULL | Unix 秒 |
+| error_code | TEXT NULL | 短错误码 |
+
+插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。该表存在不表示真实 CLI 执行器已被启用；真实进程树隔离未验证前维持 fail-closed。
 
 ## 4. 废弃的旧结构
 
@@ -272,7 +349,8 @@ pub trait RuntimeStore {
 | jobs | 无（仅迁移器；启动恢复批量置 `failed`） | 无 |
 | calibrations | `/api/material-lab/preview` / `send` / `select-cell`、发送线程终态回写 | `/api/material-lab/status` |
 | materials / material_aliases / material_params(_history) | `/api/material-lab/manage`（save/delete/import）、`select-cell` | `/v1/material-lab/bootstrap`、`/api/material-lab/export`、`/api/ui/material-*` |
-| ai_state、gui_calibration、uploads、auth_pairings、audit_log | 无（`uploads` 仅迁移器） | 无 |
+| ai_state、gui_calibration、uploads、auth_pairings | 无（`uploads` 仅迁移器） | 无 |
+| audit_log | `laser-api` 审批服务（`ApprovalService`）、`laser-host` 进程内后端（接入点 R4 拒绝） | `RuntimeDb::recent_audit`（测试） |
 
 ## 7. 迁移流程（`moss-host migrate --from <旧根>`）
 
@@ -286,7 +364,7 @@ pub trait RuntimeStore {
 8. 输出迁移报告到目标运行目录的 `migration-<时间戳>.json`。
 9. 幂等：重复执行结果相同。
 
-材料冲突规则见已归档的 [重构规格](../archive/rust-rebuild-spec.md) §7.2；命令行入口 `moss-host migrate --from <旧根> [--target <运行目录>] [--dry-run] [--on-conflict keep|overwrite]`。
+材料冲突规则见 §3.6；命令行入口 `moss-host migrate --from <旧根> [--target <运行目录>] [--dry-run] [--on-conflict keep|overwrite]`。
 
 ## 8. 旧数据类型不一致清单（导入时需容错）
 
@@ -305,6 +383,10 @@ pub trait RuntimeStore {
 
 这份清单同时是 Rust 侧反序列化的容错测试用例来源。
 
-## 9. 与规格的对应
+## 8.1 NV9 第三方 MCP 持久字段（2026-10-10）
 
-以下“规格”指已归档的 [重构规格](../archive/rust-rebuild-spec.md)。规格 §7.1 表中"文字任务、校准记录、AI 状态"三项在本文 §3.3、§3.5、§3.7 落实；§7.2 材料冲突规则由 §3.6 的按格拆表支撑；§22 的材料库缺失（A1）、`version` 归一化、Schema 冻结三项由 §3.6.1、§3.6.2 落实，路径脱敏由 §1 第 5 条落实；§8 的审计要求由 §3.11 落实；§17 配对由 §3.10 落实。
+本次没有 ALTER TABLE，schema 仍为 6。`approvals.kind` 新增 `external_tool`，`target_record` 为前缀工具名；隐藏 `connection` 使用 `{mode:"external",server,fingerprint}`，隐藏 request 保存参数、客户端摘要、device_id 和 voice_session_id。外部配置／凭据／策略变化使未消费审批过期；消费与 `outcome.phase=running` 在同一事务，执行期间异常退出后恢复为 failed/unknown，不重试。完成的结果只记受控摘要，不存下游完整响应。
+
+`audit_log.action` 新增 `external_mcp_config_changed`、`external_tool_requested`、`external_tool_completed`、`external_tool_denied`；复用已有审批事件。`app_secrets` 使用 `voice.mcp.<服务>.<env或header>.<字段>.v-<标识>`。普通 settings.json 仅保存引用；先写新版本凭据再原子替换配置，避免跨文件失败使目标与密钥错配。崩溃时可能残留不可达旧版本，暂不做全库扫描删除。
+
+**兼容性**：虽然表版本未变，旧程序不认识新枚举值；回退旧版应用需使用升级前备份。配置和凭据修改、查询字段及限制见 [第三方 MCP 契约](../integration/moss-external-mcp.md)。

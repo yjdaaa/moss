@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice-agent-local-main",
+  "description": "NV13 private inert Claude Code / Codex directory configuration and bounded task records",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-voice-agent-status",
+    "allow-voice-agent-save"
+  ]
+}

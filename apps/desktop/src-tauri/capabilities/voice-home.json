@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice-home-private-only",
+  "description": "NV15 Home Assistant commands are packaged voice-private-window-only; production control grant, planning and sending fail closed",
+  "windows": [
+    "voice-private"
+  ],
+  "permissions": [
+    "allow-voice-home-status",
+    "allow-voice-home-save",
+    "allow-voice-home-backup-export",
+    "allow-voice-home-backup-audit",
+    "allow-voice-home-backup-restore",
+    "allow-voice-home-token-save",
+    "allow-voice-home-voice-consent",
+    "allow-voice-home-discover",
+    "allow-voice-home-approvals",
+    "allow-voice-home-approval-cancel",
+    "allow-voice-home-control-consent",
+    "allow-voice-home-approval-approve"
+  ]
+}

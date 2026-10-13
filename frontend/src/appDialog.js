@@ -63,13 +63,13 @@ export function isHostMounted() {
 
 /**
  * 通用入口。options:
- *  - kind: "alert" | "confirm"
+ *  - kind: "alert" | "confirm" | "choice"（choice 区分“确认 / 取消按钮 / 直接关闭”三种结果）
  *  - title, message, tone
  *  - confirmText, cancelText
  *  - danger: 确认按钮是否使用危险样式
  */
 export function showDialog(options = {}) {
-  const kind = options.kind === "confirm" ? "confirm" : "alert";
+  const kind = options.kind === "confirm" || options.kind === "choice" ? options.kind : "alert";
   const parsed = parseLegacyMessage(options.message);
   const tone = normalizeTone(options.tone);
   const title = (options.title || parsed.title || defaultTitle(kind, tone)).trim();
@@ -103,12 +103,27 @@ export function showConfirm(message, options = {}) {
   return showDialog({ ...options, kind: "confirm", message });
 }
 
+/**
+ * 两个动作 + 关闭：返回 "confirm"（确认按钮）、"cancel"（取消按钮，可作为第二个动作）或 "dismiss"（× / Esc）。
+ */
+export function showChoice(message, options = {}) {
+  return showDialog({ ...options, kind: "choice", message });
+}
+
+function choiceValue(value) {
+  if (value === true) return "confirm";
+  if (value === false) return "cancel";
+  return "dismiss";
+}
+
 /** Host 在用户点击后调用；alert 固定 resolve(true)，confirm 传入布尔值。 */
 export function resolveDialog(id, value) {
   const index = queue.findIndex((d) => d.id === id);
   if (index === -1) return false;
   const [dialog] = queue.splice(index, 1);
-  dialog.resolve(dialog.kind === "confirm" ? Boolean(value) : true);
+  dialog.resolve(
+    dialog.kind === "confirm" ? Boolean(value) : dialog.kind === "choice" ? choiceValue(value) : true,
+  );
   notify();
   return true;
 }
@@ -117,7 +132,7 @@ export function resolveDialog(id, value) {
 export function resetDialogs() {
   while (queue.length) {
     const dialog = queue.shift();
-    dialog.resolve(dialog.kind === "confirm" ? false : true);
+    dialog.resolve(dialog.kind === "confirm" ? false : dialog.kind === "choice" ? "dismiss" : true);
   }
   notify();
 }
@@ -138,9 +153,13 @@ function defaultTitle(kind, tone) {
 
 function fallbackNative(kind, title, message) {
   const text = title && message ? `${title}\n\n${message}` : title || message;
-  if (typeof window === "undefined") return kind === "confirm" ? false : true;
+  if (typeof window === "undefined") return kind === "confirm" ? false : kind === "choice" ? "dismiss" : true;
   if (kind === "confirm") {
     return typeof window.confirm === "function" ? window.confirm(text) : false;
+  }
+  if (kind === "choice") {
+    if (typeof window.confirm !== "function") return "dismiss";
+    return window.confirm(text) ? "confirm" : "cancel";
   }
   if (typeof window.alert === "function") window.alert(text);
   return true;

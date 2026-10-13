@@ -225,6 +225,12 @@ fn send_gcode_lines<T: DeviceTransport>(device: &mut DeviceConnection<T>, lines:
 }
 
 pub fn execute_laser_safe_action_with(args: &LaserSafeActionArgs, opener: &TransportOpener) -> ToolCallResult {
+    execute_laser_safe_action_with_gate(args, opener, &|| true)
+}
+
+/// The host can invalidate a queued request during device opening or read-only preflight.
+/// The gate does not replace confirmation, strict-mode approval or device safety checks.
+pub fn execute_laser_safe_action_with_gate(args: &LaserSafeActionArgs, opener: &TransportOpener, allowed: &dyn Fn() -> bool) -> ToolCallResult {
     let action = args.action.trim().to_ascii_lowercase();
     let confirmed = args.confirmed.unwrap_or(false);
     let dry_run = args.dry_run.unwrap_or(false);
@@ -343,11 +349,13 @@ pub fn execute_laser_safe_action_with(args: &LaserSafeActionArgs, opener: &Trans
         };
         return ToolCallResult::with_detail(true, format!("dry_run: 将向 {target} 发送 {description}"), "未连接设备，未发送任何字节");
     }
+    if !allowed() { return ToolCallResult::err("语音设备授权已失效，操作未执行"); }
     let timeout = timeout_from(args.timeout);
     let transport = match opener(&spec, timeout) {
         Ok(transport) => transport,
         Err(error) => return ToolCallResult::err(format!("设备连接失败 ({target}): {error}")),
     };
+    if !allowed() { return ToolCallResult::err("连接期间设备授权已失效，操作未执行"); }
     let mut device = DeviceConnection::new(transport);
     match plan {
         Plan::Status => {
@@ -387,6 +395,7 @@ pub fn execute_laser_safe_action_with(args: &LaserSafeActionArgs, opener: &Trans
             }
             // FluidNC：读取 $CD 以感知 after_unlock / after_homing 自动宏；旧 GRBL 静默跳过
             device.load_features(timeout);
+            if !allowed() { return ToolCallResult::err("预检期间设备授权已失效，操作未执行"); }
             let outcome = match action.as_str() {
                 // 解锁 / 回零：等 ok 后继续等到 Idle（FluidNC 会在其后执行自动宏，Home 状态视为忙碌）
                 "unlock" => device.unlock(),

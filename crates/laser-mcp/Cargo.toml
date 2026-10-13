@@ -11,3 +11,5 @@ serde_json = "1"
 # 小智 MCP_ENDPOINT 为 wss://，同步客户端 + rustls（ring）+ 内置根证书，无需系统 OpenSSL
 tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# 接入点身份显示（NV8）：解码 token 中 JWT 的载荷部分（只读字段，不校验签名）
+base64 = "0.22"

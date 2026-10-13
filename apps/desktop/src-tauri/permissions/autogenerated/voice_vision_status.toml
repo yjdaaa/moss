@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-vision-status"
+description = "Enables the voice_vision_status command without any pre-configured scope."
+commands.allow = ["voice_vision_status"]
+
+[[permission]]
+identifier = "deny-voice-vision-status"
+description = "Denies the voice_vision_status command without any pre-configured scope."
+commands.deny = ["voice_vision_status"]

@@ -87,17 +87,36 @@ if ($env:MOSS_START_MODE -eq "server") {
         exit 1
     }
     Write-Host "[启动] 正在以独立后台服务模式启动 MOSS Host..." -ForegroundColor Green
-    Write-Host "[地址] http://127.0.0.1:8766" -ForegroundColor Cyan
-    Start-Process "http://127.0.0.1:8766"
-    & $HostExe serve
+    function Run-HostAndOpenBrowser {
+        & $HostExe serve 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            Write-Host $line
+            if ($line -match 'moss-host serving on (?<host>[^:]+):(?<port>[0-9]+)') {
+                $url = "http://$($Matches['host']):$($Matches['port'])/"
+                Write-Host "[地址] $url" -ForegroundColor Cyan
+                Start-Process $url
+            }
+        }
+    }
+    Run-HostAndOpenBrowser
 } else {
     if ($DesktopExe) {
         Write-Host "[启动] 正在启动 MOSS 原生桌面创作系统..." -ForegroundColor Green
         & $DesktopExe
     } elseif ($HostExe) {
         Write-Host "[提示] 未检测到桌面图形客户端，自动切换为服务模式..." -ForegroundColor Yellow
-        Start-Process "http://127.0.0.1:8766"
-        & $HostExe serve
+        function Run-HostAndOpenBrowser {
+            & $HostExe serve 2>&1 | ForEach-Object {
+                $line = $_.ToString()
+                Write-Host $line
+                if ($line -match 'moss-host serving on (?<host>[^:]+):(?<port>[0-9]+)') {
+                    $url = "http://$($Matches['host']):$($Matches['port'])/"
+                    Write-Host "[地址] $url" -ForegroundColor Cyan
+                    Start-Process $url
+                }
+            }
+        }
+        Run-HostAndOpenBrowser
     } else {
         Write-Host "[错误] 无法找到可执行程序！" -ForegroundColor Red
         exit 1

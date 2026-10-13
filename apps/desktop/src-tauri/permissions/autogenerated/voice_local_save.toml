@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-local-save"
+description = "Enables the voice_local_save command without any pre-configured scope."
+commands.allow = ["voice_local_save"]
+
+[[permission]]
+identifier = "deny-voice-local-save"
+description = "Denies the voice_local_save command without any pre-configured scope."
+commands.deny = ["voice_local_save"]

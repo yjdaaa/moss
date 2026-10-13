@@ -388,10 +388,155 @@ def render_tech_stack_image(output_path):
     img.save(output_path, "PNG")
     print(f"Tech stack image rendered successfully: {output_path}")
 
+
+# ==============================================================================
+# 渲染图 3：五重安全防线与硬件通信拓扑图
+# ==============================================================================
+def render_safety_hardware_image(output_path):
+    W, H = 2500, 1650
+    img = Image.new("RGBA", (W, H), (7, 11, 22, 255))
+    draw = ImageDraw.Draw(img)
+    fonts = get_fonts()
+
+    # 1. 顶部标题栏
+    draw.ellipse([45, 38, 75, 68], fill=(255, 42, 68, 255), outline=(255, 255, 255, 200), width=2)
+    draw.ellipse([54, 47, 66, 59], fill=(255, 255, 255, 255))
+    draw.text((90, 32), "MOSS 激光数控系统 · 五重安全防线与自适应硬件流控拓扑图", font=fonts["title"], fill=(241, 245, 253))
+    draw.text((92, 74), "PROJECT MOSS 550W · 5-STAGE PHYSICAL SAFETY GATES & DUAL-CHANNEL HARDWARE CONTROL", font=fonts["subtitle"], fill=(159, 176, 204))
+
+    # 顶栏右侧状态徽章
+    draw.rounded_rectangle([W - 350, 35, W - 50, 75], radius=6, fill=(16, 28, 52, 240), outline=(255, 42, 68, 200), width=1)
+    draw.text((W - 330, 46), "● FAIL-SAFE INTERLOCK // ACTIVE", font=fonts["badge"], fill=(255, 42, 68))
+
+    # ---------------- 板块 1: 5 重物理与逻辑安全前置门禁流水线 ----------------
+    draw_hud_card(draw, 50, 115, 2400, 375, border_color=(255, 42, 68, 180))
+    draw.text((70, 130), "01 · 五重物理与逻辑出光前置安全防御门禁 (5-Stage Physical Safety Gates)", font=fonts["header"], fill=(255, 42, 68))
+    draw.line([(70, 160), (2430, 160)], fill=(255, 42, 68, 80), width=1)
+
+    gates = [
+        ("Gate 1 · 任务与参数锁定", "【状态唯一校验】\n• 必须处于 pending 待确认\n• 冻结文字/图纸/工艺快照\n• 单设备互斥 (409 忙熔断)\n• 阻断重复下发防烧穿起火", (255, 42, 68)),
+        ("Gate 2 · 物理文件 SHA 重算", "【物理防篡改校验】\n• 真实重读物理磁盘 G-code\n• 实时重算 SHA-256 并比对\n• 剥离注释/丢弃非法空行\n• 拦截非 ASCII 与超长行", (255, 170, 0)),
+        ("Gate 3 · 有界握手与模式", "【固件激光模式校验】\n• 3000ms 有界握手发送 \n• 强制校验 =1 (激光模式)\n• 若为 0 拒绝出光防止撞刀\n• 读取  标尺与  掩码", (0, 229, 255)),
+        ("Gate 4 · FluidNC 行程预检", "【机床极限防撞机】\n• 发送  嗅探 YAML 配置\n• 提取 max_travel_mm 行程\n• 超出机床物理范围直接熔断\n• 感知速度映射与宏指令", (0, 245, 155)),
+        ("Gate 5 · 空闲态与引脚互锁", "【实时硬件信号互锁】\n• 发 ? 轮询，严苛要求 Idle\n• 拒绝 Run/Jog/Alarm 态\n• 扫描 Pn: 门开 D / 故障 F\n• 扫描急停 E 信号立即熔断", (255, 42, 68)),
+    ]
+
+    card_w = (2400 - 40 - 40) // 5
+    for i, (g_title, g_desc, g_col) in enumerate(gates):
+        gx = 70 + i * (card_w + 10)
+        draw.rounded_rectangle([gx, 175, gx + card_w, 470], radius=6, fill=(20, 28, 46, 220), outline=(*g_col, 160))
+        draw.text((gx + 16, 190), g_title, font=fonts["subhead"], fill=g_col)
+        draw.line([(gx + 16, 218), (gx + card_w - 16, 218)], fill=(*g_col, 60), width=1)
+        lines = g_desc.split("\n")
+        ly = 230
+        for line in lines:
+            draw.text((gx + 16, ly), line, font=fonts["caption"], fill=(195, 210, 230))
+            ly += 22
+
+    # ---------------- 板块 2: 中间左右双栏 ----------------
+    # 左栏: 双信道通信与自适应流控引擎
+    draw_hud_card(draw, 50, 505, 1190, 580, border_color=(0, 229, 255, 180))
+    draw.text((70, 520), "02 · 双信道硬件通信与自适应流控引擎 (Dual-Channel Protocol & Stream Controller)", font=fonts["header"], fill=(0, 229, 255))
+    draw.line([(70, 550), (1220, 550)], fill=(0, 229, 255, 80), width=1)
+
+    left_cards = [
+        ("【串口 & 网络双信道驱动】", "• 跨平台原生物理串口 (CH340 / CP2102, 115200bps)\n• 局域网无线 Telnet 数控专线 (TCP 端口 23)\n• 统一抽象为 DeviceTransport 硬件驱动接口", (0, 229, 255)),
+        ("【自适应字符计数滑动窗口】", "• 网络初始 1024B、串口初始 255B 字符滑窗\n• 实时解析固件 |Bf:blocks,rx_bytes 动态自适应伸缩\n• 彻底规避控制器缓冲区溢出 (Buffer Overflow)", (0, 245, 155)),
+        ("【S 轴激光功率在线自适应换算】", "• 绝不改写固件只读配置 (保护机床出厂参数)\n• 自动感知主轴功率标尺  (如 255 / 10000)\n• 发送流水线在线缩放 S = S * ( / 1000)", (255, 170, 0)),
+        ("【全闭环制造终态确认机制】", "• 100% 行发送完毕仅代表接收，任务保持占用\n• 注入 G4 P0 规划器同步驻留指令，排空机械缓冲\n• 机床再次确认回到 Idle 态才宣告作业完成", (241, 245, 253)),
+    ]
+
+    for idx, (ltitle, ldesc, lcol) in enumerate(left_cards):
+        cy = 565 + idx * 122
+        draw.rounded_rectangle([70, cy, 1220, cy + 110], radius=6, fill=(18, 28, 48, 200), outline=(50, 75, 110, 160))
+        draw.text((85, cy + 12), ltitle, font=fonts["subhead"], fill=lcol)
+        lines = ldesc.split("\n")
+        ly = cy + 36
+        for line in lines:
+            draw.text((85, ly), line, font=fonts["caption"], fill=(185, 202, 225))
+            ly += 22
+
+    # 右栏: 脱机加工与全域紧急制动安全保障
+    draw_hud_card(draw, 1260, 505, 1190, 580, border_color=(255, 170, 0, 180))
+    draw.text((1280, 520), "03 · 脱机加工与全域紧急制动安全保障 (Offline SD Mode & OOB E-STOP)", font=fonts["header"], fill=(255, 170, 0))
+    draw.line([(1280, 550), (2430, 550)], fill=(255, 170, 0, 80), width=1)
+
+    right_cards = [
+        ("【SD 卡脱机防断网加工】", "• 耗时浮雕/切割作业规避 USB 拔脱或局域网断网报废\n• 已校验 G-code 经 HTTP /upload 直传 SD 卡\n• 调 /ShowHash 哈希比对后发 /Run 脱机执行", (255, 170, 0)),
+        ("【带外 0x18 瞬发物理急停】", "• 传输层独立注入实时单字节 0x18 (Grbl 软复位)\n• 彻底跳过 G-code 发送队列与流控排队，0ms 延时\n• 瞬态切断高压出光 (M05) 与步进电机急刹制动", (255, 42, 68)),
+        ("【全域退出安全协调器】", "• 拦截窗口关闭/托盘退出/Ctrl+C/Panic/前端退出 5 路\n• 统一调度 abort_all_active_jobs，切断在途加工\n• 内存置取消并注入 0x18 熔断，严防孤儿任务失控", (241, 245, 253)),
+        ("【执行结果未知防御体系】", "• 遇到物理断网、固件报警、复位横幅 (Restarting) 时\n• 统一标记为“执行结果未知”，严禁系统盲目重发\n• 必须由操作员现场排查物理工件，保障人身安全", (0, 245, 155)),
+    ]
+
+    for idx, (rtitle, rdesc, rcol) in enumerate(right_cards):
+        cy = 565 + idx * 122
+        draw.rounded_rectangle([1280, cy, 2430, cy + 110], radius=6, fill=(24, 32, 50, 200), outline=(70, 85, 110, 160))
+        draw.text((1295, cy + 12), rtitle, font=fonts["subhead"], fill=rcol)
+        lines = rdesc.split("\n")
+        ly = cy + 36
+        for line in lines:
+            draw.text((1295, ly), line, font=fonts["caption"], fill=(185, 202, 225))
+            ly += 22
+
+    # ---------------- 板块 3: 现已实装的原生 MCP 20 个工业工具矩阵 ----------------
+    draw_hud_card(draw, 50, 1100, 2400, 520, border_color=(0, 245, 155, 180))
+    draw.text((70, 1115), "04 · 原生 Model Context Protocol (MCP 2024-11-05) 20 个工业数控工具矩阵 (已全部实装)", font=fonts["header"], fill=(0, 245, 155))
+    draw.line([(70, 1145), (2430, 1145)], fill=(0, 245, 155, 80), width=1)
+
+    mcp_groups = [
+        ("激光工作流与底层通信组", [
+            ("laser_workflow_tool", "多步工作流 (preview/confirm_send/status/cancel)"),
+            ("check_laser_connection_tool", "物理串口与网络连通性及激光模式实机探测"),
+            ("start_tuned_job_tool", "参数微调优化后的正式物理切削作业下发"),
+            ("laser_grbl_tool", "串口 Grbl 底层状态探针与安全作业取消"),
+            ("laser_network_grbl_tool", "网络 Telnet 底层状态探针与安全作业取消"),
+        ], (0, 229, 255)),
+        ("安全动作与机床调控组", [
+            ("laser_safe_action_tool", "解轴 unlock / 回零 home / 对刀 set_origin / 灭光"),
+            ("emergency_stop (0x18)", "独立带外信道 0 毫秒延时瞬发物理急停"),
+            ("soft_reset (Ctrl-X)", "数控控制器软件复位与故障状态清除"),
+            ("feed_rate_override", "切削进给速度实时在线微调 (±10% / 重置)"),
+            ("laser_power_override", "激光输出功率实时在线微调 (±10% / 重置)"),
+        ], (255, 42, 68)),
+        ("材料工艺与矩阵标定组", [
+            ("material_params_tool", "材料工艺数据库读取、更新与持久化"),
+            ("recommend_laser_params_tool", "厚度/材料自动推荐最优加工功率与进给速度"),
+            ("run_calibration_grid_tool", "生成功率-速度测试阵列矩阵预览与正式下发"),
+            ("select_calibration_cell_tool", "拾取最优标定矩阵网格单元并写入工艺库"),
+            ("refine_laser_params_tool", "基于实际烧蚀反馈智能闭环自适应微调参数"),
+        ], (255, 170, 0)),
+        ("生成式任务与系统工具组", [
+            ("ai_laser_gcode_tool", "空间智能意图直出高精度矢量数控加工任务"),
+            ("generate_text_laser_task", "文本字体轮廓物理拟合排版与 G-code 渲染"),
+            ("generate_text_image_gcode", "文字位图光栅轮廓多模态混合切削任务"),
+            ("regenerate_text_laser_task", "基于效果反馈重新生成优化版安全预览"),
+            ("open_app / shortcut_key", "宿主系统应用调用与快捷键辅助控制通道"),
+        ], (0, 245, 155)),
+    ]
+
+    gw = (2400 - 40 - 30) // 4
+    for gi, (gname, tools, gcolor) in enumerate(mcp_groups):
+        gx = 70 + gi * (gw + 10)
+        draw.rounded_rectangle([gx, 1160, gx + gw, 1600], radius=6, fill=(18, 28, 48, 200), outline=(*gcolor, 150))
+        draw.text((gx + 16, 1175), gname, font=fonts["subhead"], fill=gcolor)
+        draw.line([(gx + 16, 1205), (gx + gw - 16, 1205)], fill=(*gcolor, 60), width=1)
+        ty = 1218
+        for tname, tdesc in tools:
+            draw.rounded_rectangle([gx + 12, ty, gx + gw - 12, ty + 68], radius=4, fill=(12, 20, 36, 200), outline=(45, 65, 95, 120))
+            draw.text((gx + 20, ty + 8), tname, font=fonts["code"], fill=(241, 245, 253))
+            draw.text((gx + 20, ty + 36), tdesc, font=fonts["caption"], fill=(170, 188, 210))
+            ty += 75
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    img.save(output_path, "PNG")
+    print(f"Safety & Hardware image rendered successfully: {output_path}")
+
 if __name__ == "__main__":
-    print("Rendering Architecture & Pipeline Images...")
+    print("Rendering Architecture & Pipeline Images (All 3 Core Diagrams)...")
     p1 = os.path.abspath("assets/moss-project-pipeline.png")
     p2 = os.path.abspath("assets/moss-tech-stack-architecture.png")
+    p3 = os.path.abspath("assets/moss-safety-hardware-architecture.png")
     render_pipeline_image(p1)
     render_tech_stack_image(p2)
-    print("All images generated successfully!")
+    render_safety_hardware_image(p3)
+    print("All 3 Core Architecture Images generated successfully!")

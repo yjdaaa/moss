@@ -1,64 +1,87 @@
 # Project Instructions
 
-本文件是仓库级、跨工具的共享基线，供 Codex、Claude Code、Cursor
-等 AI 工具使用。Claude Code 的项目补充说明见 [`CLAUDE.md`](./CLAUDE.md)；
-项目技术细节以代码和 `docs/` 为准。
+仓库级唯一规则源，供 Codex、Claude Code、Cursor 等工具共用。实现约定见
+[`docs/developer/standards.md`](docs/developer/standards.md)，高风险代码先读
+[`docs/developer/safety.md`](docs/developer/safety.md)。其他文档只引用本文件，不复制规则。
 
-## 工作范围
+## 项目
 
-- 先读待改文件、直接依赖、相关测试和对应文档；不要默认扫描无关目录。
-- 优先复用现有接口、注册方式、命名和错误处理；避免无必要的新抽象。
-- 未经明确授权，不提交、推送、重置、覆盖无关改动或大范围清理。
-- 不猜测或写入设备地址、凭据、令牌、串口、私有路径等用户特定值。
+MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版），面向 FluidNC/GRBL 与 ESP32 下位机。
+
+- 激光主链路：`crates/laser-*`（contracts、core、device、runtime、tools、mcp、api、host）。
+- 内置语音：`crates/moss-voice*`、`moss-xiaozhi-proto`、`moss-mcp-client`；本地模型 helper `apps/moss-voice-local` 是 GPL 独立工作区。
+- 宿主：`apps/desktop`（Tauri 2 桌面/Android）、`apps/moss-host`（HTTP/WS）；前端 `frontend/`（React + Vite）。
+- 文档入口 [`docs/README.md`](docs/README.md)；实施进度只看 [实施 TODO](docs/integration/moss-fusion-implementation-todo.md)。结构以代码为准。
+
+## 工作方式
+
+- 先读待改文件、直接依赖、相关测试和对应文档；不扫描无关目录。
+- 复用现有接口、注册方式、命名和错误处理，不为整齐新增抽象。
+- 未经明确授权，不提交、推送、重置或覆盖他人改动。
+- 提交信息格式 `<类型>: <中文结论>`，类型取 `feat`、`fix`、`refactor`、`docs`、`test`、`build`、`chore`；破坏性变更在类型后加 `!`。
+- 不写入真实设备地址、凭据、令牌、串口号或本机绝对路径；文档用 `<device-ip>`、`<token>`、`<path>` 占位。
 
 ## 安全边界
 
-- 命令执行、GUI 自动化、摄像头、网络/串口控制、G-code、GRBL、材料校准和激光流程均视为高风险。
-- 运动、出光、完整文件发送、文件执行、删除、格式化、重启、固件更新、上传和网络重配置，必须先获得用户明确确认，并完成适用的在线或项目检查。
-- 生成和预览默认不得向硬件发送数据。
-- 测试中的硬件、网络、GUI、子进程和文件系统副作用必须使用 mock、fake 或临时目录。
+- 运动、出光、发送或执行 G-code 文件、急停实测、删除、格式化、重启、固件刷写/OTA、上传、网络重配置、部署服务、填写真实密钥：每次先获得用户明确同意。
+- 生成和预览不得向硬件发送数据；前端只能调用后端路由。
+- 测试中的硬件、网络、GUI、子进程、文件系统副作用一律用 mock、`FakeGrbl` 或临时目录。
+- 急停 `0x18` 走实时通道，不得排在 G-code 队列之后；刀路门禁对物理 G-code 文件重新计算 SHA-256。
+- 不为全绿放宽断言、伪造预期数据或添加虚假桩代码。
+- 新的外部控制或隐私能力（家居、Agent 执行、声纹、固件、联网插件）默认关闭；真实验收通过前生产门禁保持关闭，mock 结果不能用来打开它。
 
 ## 开发约束
 
-- MCP 工具通过 `laser_tools::ToolCatalog` 注册，并由 `laser_mcp::dispatch_tool_call` 分发；启动编排放在 `laser-host`。
-- 改变契约、默认值、工具注册、提示词或用户可见行为时，保持实现、文档和测试一致。
-- 高风险改动先阅读 `docs/developer/safety.md`，再按需阅读相关 laser、runtime 或 integration 文档。
-- 不为“全绿”放宽断言、伪造预期数据或添加虚假桩代码。
+- 激光 MCP 工具在 `laser_tools::ToolCatalog` 登记，由 `laser_mcp::dispatch_tool_call_with` 分发；启动编排在 `laser-host`。
+- 改变契约、默认值、工具注册、提示词或用户可见行为时，同一次改动内同步实现、测试和 `docs/`。
+- 用户在对话中确认的设计决定，写入对应技术书的修订记录并注明日期，后续以此为准。
 
 ## 验证
 
-- 以下命令的 `cd` 均从仓库根目录开始，各项独立执行；不要连续切换相对目录。
-- 小范围改动运行针对性检查；跨模块、注册、运行时或安全改动运行完整检查。
-- Rust：`cargo test --workspace`
-- 前端单测：`cd frontend; npm test`
-- E2E：`cd frontend; npm run test:e2e`
-- 代码修复或功能变更完成后，除相关测试外，必须重新构建：
-  - 前端：`cd frontend; npm run build`
-  - Windows App：`cd apps/desktop/src-tauri; cargo tauri build --debug`
-  - Android APK：`cd apps/desktop/src-tauri; cargo tauri android build --debug --target aarch64 --apk`
-- 仅修改文档、注释或测试本身时，可不执行 App/Android 构建，但必须在结果中说明跳过原因。
-- 构建命令因环境、依赖或硬件条件无法执行时，必须报告具体原因，并将结果标为 `partial` 或 `unverified`。
-- 构建失败同样标记为 `partial`，不得用旧产物充当本次结果；成功时报告实际产物路径。构建成功不等于已完成实机验证，安装、发布或设备操作仍需另行授权。
-- 未连接硬件、未实机出光或未跑通物理链路必须标为 `unverified` 或 `partial`，不得宣称 PASS。
-- 连通性探测应真实握手或在 FakeGrbl 中进行字节级校验；刀路门禁应对物理 G-code 文件重新计算 SHA-256；急停 `0x18` 不得排在 G-code 队列之后。
+命令均从仓库根目录出发，各自独立执行。
+
+| 时机 | 必须执行 |
+| --- | --- |
+| 每次代码改动 | 受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build` |
+| 改 HTTP 行为、前端或发送链路 | `cd frontend; npm run test:e2e`（需先构建 `moss-host`，使用回环 GRBL 模拟器） |
+| 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`；根工作区测试不覆盖它 |
+| 阶段收尾、交付 | 以上全部，加三端 release 构建（见下） |
+
+三端 release 构建：
+
+- 前端：`cd frontend; npm run build`
+- Windows：`cd apps/desktop/src-tauri; cargo tauri build`，产物 `target/release/moss-desktop.exe` 与 `target/release/bundle/nsis/MOSS_<版本>_x64-setup.exe`
+- Android：`cd apps/desktop/src-tauri; cargo tauri android build --target aarch64 --apk`，产物在 `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/`
+
+`--debug` 构建只用于临时调试，不算验证证据。带语音 helper 的专用安装包流程见
+[`packaging-install.md`](docs/developer/packaging-install.md)。
+
+## 结果状态
+
+| 状态 | 含义 |
+| --- | --- |
+| `PASS` | 要求的测试与构建在本次改动后实际通过，且不依赖未做的实机验证 |
+| `partial` | 部分检查通过；有构建失败、环境阻塞或未执行项（写明原因） |
+| `unverified` | 软件检查通过，但未连接硬件、未实机出光、未用真实账号或设备 |
+
+不得用旧产物充当本次结果。构建成功不等于实机通过；安装、发布、设备操作另需授权。
 
 ## 变更记录
 
-- 每个代码修复或功能变更都必须同步记录到 `CHANGELOG.md`；文档-only
-  或测试-only 改动不要求新增条目。
-- 修复条目采用“标题即结论”的因果闭环，至少包含：
-  - **现象与影响**：触发条件、实际错误和用户/硬件影响；
-  - **根因**：协议、状态机、时序、数据结构或算法原因；
-  - **修复**：关键代码行为以及如何避免同类问题；
-  - **验证**：测试名称、模拟器/夹具、边界、构建结果和未验证项；
-  - **关联**：文件、符号以及必要的 issue 或提交索引。
-- 新功能或行为变更还要记录默认值、数据契约、安全门禁、跨端影响和升级动作；
-  破坏性变更必须显式标注。
+每个代码修复或功能变更在 `CHANGELOG.md` 的 `[Unreleased]` 下加一条（文档-only、测试-only 不需要）。标题直接写结论，正文四项，各一两句：
+
+- **现象**：触发条件与影响。
+- **根因与修复**：原因、关键改动；行为变更另写默认值、契约、安全门禁、跨端影响，破坏性变更显式标注。
+- **验证**：测试名或数量、未验证项。
+- **关联**：主要文件与符号。
+
+交付构建的时间、大小、SHA-256 写入 [`docs/developer/build-receipts.md`](docs/developer/build-receipts.md)，不写进 CHANGELOG。
 
 ## 完成标准
 
-- 用相关测试、检查或实际验证对照验收标准。
-- 代码修复或功能变更只有在 `CHANGELOG.md` 已更新、相关测试通过，
-  且前端、Windows App 与 Android APK 均重新构建成功后，才能报告为完成。
-- 报告实际运行的检查、跳过项、环境阻塞和未验证风险。
-- 只有当前任务创建的临时文件才可清理，并先核对精确路径。
+- 代码修复或功能变更：CHANGELOG 已更新、对应验证已通过、文档已同步，才能报告完成；阶段收尾还要求三端 release 构建成功。
+- 报告实际运行的检查、跳过项及原因、未验证风险。
+
+## 构建缓存清理
+
+阶段收尾或磁盘紧张时运行 `powershell -File scripts/clean-build-cache.ps1`（先加 `-WhatIf` 预览）。它删除 `incremental`、`target/tmp`、`codex-*`、子目录误生成的 `target/`，以及 `deps` 里本仓库 crate 的旧哈希产物；保留第三方依赖、交付产物、`node_modules`、源码和 `.runtime/`。

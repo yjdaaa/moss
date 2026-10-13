@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-music-status"
+description = "Enables the voice_music_status command without any pre-configured scope."
+commands.allow = ["voice_music_status"]
+
+[[permission]]
+identifier = "deny-voice-music-status"
+description = "Denies the voice_music_status command without any pre-configured scope."
+commands.deny = ["voice_music_status"]

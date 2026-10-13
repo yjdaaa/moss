@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-home-approvals"
+description = "Enables the voice_home_approvals command without any pre-configured scope."
+commands.allow = ["voice_home_approvals"]
+
+[[permission]]
+identifier = "deny-voice-home-approvals"
+description = "Denies the voice_home_approvals command without any pre-configured scope."
+commands.deny = ["voice_home_approvals"]

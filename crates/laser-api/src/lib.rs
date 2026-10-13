@@ -5,6 +5,15 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+const JEV_API_KEY_SECRET: &str = "jev_api_key";
+const DEFAULT_JEV_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
+const JEV_MODEL: &str = "typesafe/jev-1.13";
+pub mod approval;
+pub mod agent_runs;
+pub mod external_tools;
+mod feedback;
+mod voice_authority;
+
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../../frontend/dist/"]
 pub struct FrontendFixture;
@@ -26,8 +35,33 @@ pub struct ApiService {
     actual_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     runtime_path: Option<std::path::PathBuf>,
     active_jobs: ActiveJobs,
+    /// 已结束但物理停机未获确认的任务：保留原设备实时通道供 0x18 重试，绝不猜测其他目标。
+    uncertain_jobs: ActiveJobs,
+    feedback_adoption: std::sync::Mutex<()>,
     transport_factory: TransportFactory,
+    /// `MOSS_ALLOWED_ORIGINS` 额外允许的浏览器来源（精确匹配，已拒绝 `*`）。
+    extra_allowed_origins: Vec<String>,
+    /// 系统串口枚举：默认查询本机真实串口；测试注入固定列表，避免结果随插拔的设备变化。
+    serial_port_lister: SerialPortLister,
+    /// 严格模式（`MOSS_FUSION_STRICT`，技术书 §6.2）：开启后 R3 动作需要桌面会话或审批授权。
+    /// 语音中心切换链路时可在运行中改变（自建模式必须开启），因此用原子量。
+    strict_mode: std::sync::atomic::AtomicBool,
+    /// 桌面审批服务（有本地数据库时可用）。
+    approvals: Option<std::sync::Arc<approval::ApprovalService>>,
+    /// 桌面会话（`X-Moss-Desktop-Session`，技术书 §5.3）：只有桌面壳调用 `enable_desktop_session` 后才存在。
+    desktop_session: std::sync::OnceLock<String>,
+    agent_runs: std::sync::OnceLock<std::sync::Arc<dyn agent_runs::AgentRuns>>,
+    external_tools: std::sync::OnceLock<std::sync::Arc<dyn external_tools::ExternalTools>>,
+    /// 用户关闭的工具（`settings.json` 的 `mcp_disabled_tools`，NV8）：接入点与内置语音都不列出、不可调用。
+    disabled_tools: std::sync::RwLock<std::collections::BTreeSet<String>>,
+    voice_sessions: voice_authority::VoiceSessions,
 }
+
+/// 作业结束回调：发送线程在写回终态前调用（状态 `completed` / `cancelled` / `failed`，以及 `send_result`）。
+pub type JobTerminalHook = Box<dyn FnOnce(&str, &serde_json::Value) + Send + 'static>;
+
+/// 串口枚举函数类型（见 [`ApiService::with_serial_port_lister`]）。
+pub type SerialPortLister = std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// 传输工厂：默认按连接描述真实打开 TCP/串口；测试可注入 FakeGrbl。
 pub type TransportFactory = std::sync::Arc<
@@ -70,6 +104,7 @@ pub type ActiveJobs = std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync:
 type SendLauncher<'a> = &'a dyn Fn(
     &str,
     std::path::PathBuf,
+    &str,
     &serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, (u16, serde_json::Value)>;
 
@@ -332,8 +367,89 @@ impl ApiService {
             actual_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             runtime_path: None,
             active_jobs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            uncertain_jobs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            feedback_adoption: std::sync::Mutex::new(()),
             transport_factory: default_transport_factory(),
+            extra_allowed_origins: Vec::new(),
+            serial_port_lister: std::sync::Arc::new(enumerate_system_serial_ports),
+            strict_mode: std::sync::atomic::AtomicBool::new(false),
+            approvals: None,
+            desktop_session: std::sync::OnceLock::new(),
+            agent_runs: std::sync::OnceLock::new(),            external_tools: std::sync::OnceLock::new(),
+            disabled_tools: std::sync::RwLock::new(std::collections::BTreeSet::new()),
+            voice_sessions: Default::default(),
         }
+    }
+
+    /// 严格模式开关（来自 `MOSS_FUSION_STRICT`，见 [`laser_runtime::config::fusion_strict_from_env`]）。
+    pub fn with_strict_mode(self, strict: bool) -> Self {
+        self.strict_mode.store(strict, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    pub fn strict_mode(&self) -> bool {
+        self.strict_mode.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 运行中切换严格模式（语音中心切到自建链路时开启，切回官方时恢复 `.env` 的设置，技术书 §9.4.2）。
+    pub fn set_strict_mode(&self, strict: bool) {
+        self.strict_mode.store(strict, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 用户是否关闭了工具 `name`（NV8）。
+    pub fn tool_disabled(&self, name: &str) -> bool {
+        self.disabled_tools.read().map(|set| set.contains(name)).unwrap_or(false)
+    }
+
+    /// 当前关闭的工具（按名称排序）。
+    pub fn disabled_tools(&self) -> Vec<String> {
+        self.disabled_tools.read().map(|set| set.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    /// 运行中替换关闭的工具列表（语音中心写入 `settings.json` 后调用）。不能关闭的工具与空名会被忽略。
+    pub fn set_disabled_tools<I: IntoIterator<Item = String>>(&self, names: I) {
+        let names = names
+            .into_iter()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty() && laser_contracts::tool_can_be_disabled(name))
+            .collect();
+        if let Ok(mut set) = self.disabled_tools.write() {
+            *set = names;
+        }
+    }
+
+    /// 替换审批服务（测试注入固定时钟用）；生产环境由 [`Self::with_runtime_db`] 自动创建。
+    pub fn with_approval_service(mut self, service: std::sync::Arc<approval::ApprovalService>) -> Self {
+        self.approvals = Some(service);
+        self
+    }
+
+    pub fn approvals(&self) -> Option<&std::sync::Arc<approval::ApprovalService>> {
+        self.approvals.as_ref()
+    }
+
+    /// 进程启动时调用：所有 pending / approved 审批一律过期（技术书 §5.5、A-32）。
+    pub fn recover_approvals_after_restart(&self) -> usize {
+        match self.approvals.as_ref().map(|service| service.recover_after_restart()) {
+            Some(Ok(count)) => count,
+            Some(Err(error)) => {
+                eprintln!("[laser-api] 启动时处理遗留审批失败: {}", error.message());
+                0
+            }
+            None => 0,
+        }
+    }
+
+    /// 替换系统串口枚举（测试用；生产环境使用默认的真实枚举）。
+    pub fn with_serial_port_lister(mut self, lister: SerialPortLister) -> Self {
+        self.serial_port_lister = lister;
+        self
+    }
+
+    /// 额外允许的浏览器来源（来自 `MOSS_ALLOWED_ORIGINS`，见 [`laser_runtime::config::parse_allowed_origins`]）。
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.extra_allowed_origins = origins;
+        self
     }
 
     pub fn with_transport_factory(mut self, factory: TransportFactory) -> Self {
@@ -348,10 +464,15 @@ impl ApiService {
 
     /// 退出/崩溃兜底：对所有活动作业置取消并直接写 0x18（实时信道 + 裸句柄双路）。
     pub fn abort_all_active_jobs(&self) -> Result<(), String> {
-        let jobs: Vec<std::sync::Arc<ActiveJob>> = match self.active_jobs.lock() {
+        let mut jobs: Vec<std::sync::Arc<ActiveJob>> = match self.active_jobs.lock() {
             Ok(guard) => guard.values().cloned().collect(),
             Err(_) => return Err("active_jobs lock poisoned".into()),
         };
+        // 任务已报错并不代表机床停机；退出时也应尝试停止仍不确定的原目标。
+        match self.uncertain_jobs.lock() {
+            Ok(guard) => jobs.extend(guard.values().cloned()),
+            Err(_) => return Err("uncertain_jobs lock poisoned".into()),
+        }
         let mut first_error = None;
         for job in jobs {
             job.cancel.cancel();
@@ -370,8 +491,22 @@ impl ApiService {
 
     /// 处理安全动作请求：优先复用当前正在运行的任务信道（边刻边调/急停），
     /// 避免正在雕刻时重新打开串口/网络引发的设备冲突。
-    pub fn handle_safe_action(&self, args: &laser_contracts::LaserSafeActionArgs) -> laser_contracts::ToolCallResult {
+    pub fn handle_safe_action(
+        &self,
+        args: &laser_contracts::LaserSafeActionArgs,
+        _ctx: &laser_contracts::CallerContext,
+    ) -> laser_contracts::ToolCallResult {
+        self.handle_safe_action_for(args, _ctx, None)
+    }
+
+    fn handle_safe_action_for(&self, args: &laser_contracts::LaserSafeActionArgs, _ctx: &laser_contracts::CallerContext, job_id: Option<&str>) -> laser_contracts::ToolCallResult {
+        if !self.voice_caller_allowed(_ctx) {
+            return laser_contracts::ToolCallResult::with_detail(false, "语音设备授权已失效，请重新连接", "voice_session_revoked");
+        }
         let action = args.action.trim();
+        if job_id.is_some() && !matches!(action, "emergency_stop" | "soft_reset" | "status") {
+            return laser_contracts::ToolCallResult::err("job_id 只用于查询或停止任务，不能改变其他动作的目标");
+        }
         let realtime_cmd_info = match action {
             "emergency_stop" | "soft_reset" => Some((laser_device::RealtimeCommand::EmergencyStop, "急停 0x18", true)),
             "feed_override_reset" | "feed_reset" | "feed_100" => Some((laser_device::RealtimeCommand::FeedOvrReset, "进给速度恢复100% (0x90)", false)),
@@ -387,17 +522,40 @@ impl ApiService {
             _ => None,
         };
 
-        let active_job = {
-            let jobs = self.active_jobs.lock().ok();
-            jobs.and_then(|m| m.values().next().cloned())
+        let explicit_target = if args.host.as_deref().is_some_and(|s| !s.trim().is_empty()) || args.port.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            match laser_tools::resolve_connection_spec(args.port.as_deref(), args.host.as_deref(), args.baudrate, args.telnet_port, args.connection_mode.as_deref()) {
+                Ok(spec) => Some(spec.describe()),
+                Err(error) => return laser_contracts::ToolCallResult::err(error),
+            }
+        } else { None };
+        let (active_job, uncertain_stop) = {
+            let Ok(jobs) = self.active_jobs.lock() else { return laser_contracts::ToolCallResult::err("无法读取设备任务，请使用实体急停"); };
+            let Ok(uncertain) = self.uncertain_jobs.lock() else { return laser_contracts::ToolCallResult::err("无法读取待确认停止的设备任务，请使用实体急停"); };
+            if let Some(id) = job_id {
+                let running = jobs.values().find(|j| j.workflow_id == id).cloned();
+                let unknown = running.is_none();
+                match running.or_else(|| uncertain.values().find(|j| j.workflow_id == id).cloned()) {
+                    Some(job) if explicit_target.as_ref().is_none_or(|target| target == &job.target) => (Some(job), unknown),
+                    Some(_) => return laser_contracts::ToolCallResult::err("任务编号与指定设备不一致，停止未发送，请检查目标或使用实体急停"),
+                    None => return laser_contracts::ToolCallResult::err("找不到此任务的设备连接；没有向其他设备发送停止，请使用实体急停"),
+                }
+            } else if let Some(target) = explicit_target.as_ref() {
+                (jobs.values().find(|j| &j.target == target).cloned(), false)
+            } else if jobs.len() > 1 {
+                return laser_contracts::ToolCallResult::err("存在多个设备任务，请指定停止目标；紧急情况请使用实体急停");
+            } else { (jobs.values().next().cloned(), false) }
         };
-
         if let Some(job) = active_job {
             if let Some((cmd, label, alters_alarm)) = realtime_cmd_info {
+                if args.dry_run == Some(true) {
+                    return laser_contracts::ToolCallResult::ok(format!("仅预览：{label}；未向设备发送"));
+                }
                 if alters_alarm {
                     job.cancel.cancel();
-                    let _ = job.transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
-                    return laser_contracts::ToolCallResult::ok(format!("{label} 已实时发送到正在运行的加工任务（目标 {}），作业已制动，硬件将进入 Alarm 态", job.target));
+                    if let Err(error) = job.transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop) {
+                        return laser_contracts::ToolCallResult::err(format!("作业取消已请求，但急停 0x18 发送失败：{error}"));
+                    }
+                    return laser_contracts::ToolCallResult::ok(format!("{label} 已发送到任务的原设备通道（目标 {}{}），不代表实际停机，请确认硬件状态", job.target, if uncertain_stop { "，此前任务结果未知" } else { "" }));
                 } else {
                     match job.transport.write_realtime(cmd) {
                         Ok(()) => return laser_contracts::ToolCallResult::ok(format!("{label} 已实时发送到正在运行的加工任务（目标 {}），即时生效（不停机）", job.target)),
@@ -405,6 +563,9 @@ impl ApiService {
                     }
                 }
             } else if action == "status" {
+                if uncertain_stop {
+                    return laser_contracts::ToolCallResult::with_detail(false, "任务执行结果和停机状态未知，请使用急停重试并到现场确认", "job_result_unknown");
+                }
                 let _ = job.transport.write_realtime(laser_device::RealtimeCommand::StatusQuery);
                 let sent = job.progress.lines_sent.load(std::sync::atomic::Ordering::Relaxed);
                 let total = job.progress.total_lines.load(std::sync::atomic::Ordering::Relaxed);
@@ -422,7 +583,56 @@ impl ApiService {
         let opener: laser_tools::TransportOpener = std::sync::Arc::new(move |spec: &laser_device::ConnectionSpec, _timeout: std::time::Duration| {
             (factory)(spec)
         });
-        laser_tools::execute_laser_safe_action_with(args, &opener)
+        let permit = match self.voice_permit(_ctx) {
+            Ok(permit) => permit,
+            Err(_) => return laser_contracts::ToolCallResult::err("语音设备授权已失效，请重新连接"),
+        };
+        laser_tools::execute_laser_safe_action_with_gate(args, &opener, &|| permit.as_ref().is_none_or(|p| p.load(std::sync::atomic::Ordering::Acquire)))
+    }
+
+    /// Framing: recheck a live voice permit after the read-only device preflight.
+    fn run_framing(&self, object: &serde_json::Map<String, serde_json::Value>, ctx: &laser_contracts::CallerContext) -> Vec<u8> {
+        let permit = match self.voice_permit(ctx) { Ok(permit) => permit, Err((status,body)) => return http_json(status,body) };
+        let min_x = object.get("min_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let min_y = object.get("min_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let max_x = object.get("max_x").and_then(|v| v.as_f64()).unwrap_or(100.0);
+        let max_y = object.get("max_y").and_then(|v| v.as_f64()).unwrap_or(100.0);
+        let feed_rate = object.get("feed_rate").and_then(|v| v.as_i64()).unwrap_or(2000) as i32;
+        let power = object.get("power").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+
+        let framing_gcode = match laser_core::gcode::generate_framing_gcode(min_x, min_y, max_x, max_y, feed_rate, power) {
+            Ok(g) => g,
+            Err(e) => return http_json(400, failure(format!("生成走边框 G-code 失败: {e}"), None)),
+        };
+
+        let spec = match self.connection_spec_from_request(&object) {
+            Ok(s) => s,
+            Err(e) => return http_json(400, failure(format!("连接参数无效: {e}"), None)),
+        };
+        let transport = match (self.transport_factory)(&spec) {
+            Ok(t) => std::sync::Arc::from(t),
+            Err(e) => return http_json(400, failure(format!("设备连接失败: {e}"), None)),
+        };
+        let mut device = laser_device::DeviceConnection::new(transport);
+        if let Err(e) = device.handshake_with_deadline(std::time::Duration::from_secs(3)) {
+            return http_json(400, failure(format!("设备握手失败: {e}"), None));
+        }
+        device.load_features(std::time::Duration::from_secs(3));
+        let mut worker = laser_device::JobWorker::new(device, laser_device::CancellationToken::default());
+        let lines: Vec<String> = match laser_device::prepare_gcode_lines(&framing_gcode) {
+            Ok(p) => p.lines,
+            Err(e) => return http_json(400, failure(format!("走边框 G-code 校验失败: {e}"), None)),
+        };
+        if permit.as_ref().is_some_and(|p| !p.load(std::sync::atomic::Ordering::Acquire)) {
+            return http_json(403, failure("预检期间设备授权已撤销，未开始走边框", Some(serde_json::json!({"error_code":"voice_session_revoked"}))));
+        }
+        return match worker.send_lines(lines) {
+            Ok(_) => http_json(200, success(serde_json::json!({
+                "message": "走边框完成",
+                "bounds": { "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y }
+            }))),
+            Err(e) => http_json(500, failure(format!("走边框执行失败: {e}"), None)),
+        };
     }
 
     /// 从请求参数构造连接描述（串口留空时自动选择首个枚举到的系统串口）。
@@ -447,7 +657,7 @@ impl ApiService {
                 .trim()
                 .to_owned();
             if port.is_empty() {
-                port = enumerate_system_serial_ports()
+                port = (self.serial_port_lister)()
                     .into_iter()
                     .next()
                     .ok_or("未选择串口且未发现任何系统串口，请插入 USB 线并点击刷新")?;
@@ -488,9 +698,11 @@ impl ApiService {
         &self,
         workflow_id: &str,
         gcode_path: std::path::PathBuf,
+        expected_sha: &str,
         object: &serde_json::Map<String, serde_json::Value>,
+        ctx: &laser_contracts::CallerContext,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
-        self.launch_send_job_for(laser_runtime::RecordKind::Workflow, workflow_id, gcode_path, object)
+        self.launch_send_job_for(laser_runtime::RecordKind::Workflow, workflow_id, gcode_path, expected_sha, object, ctx)
     }
 
     /// 与 `launch_send_job` 相同的真实下发链路，但终态写回指定记录类型
@@ -501,8 +713,103 @@ impl ApiService {
         kind: laser_runtime::RecordKind,
         workflow_id: &str,
         gcode_path: std::path::PathBuf,
+        expected_sha: &str,
         object: &serde_json::Map<String, serde_json::Value>,
+        ctx: &laser_contracts::CallerContext,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
+        let voice_permit = self.voice_permit(ctx)?;
+        // 严格模式检查点（技术书 §6.2）：workflow confirm_send / send / resume、文字任务发送、
+        // 标定矩阵发送都经过这里。严格模式关闭且不是审批执行时直接走原逻辑，不读取任何额外数据（A-40）。
+        if !self.strict_mode() && !matches!(ctx, laser_contracts::CallerContext::Approval { .. }) {
+            return self.launch_send_job_unchecked(kind, workflow_id, gcode_path, expected_sha, object, None, voice_permit);
+        }
+        let (approval_kind, label) = match kind {
+            laser_runtime::RecordKind::Calibration => (laser_contracts::ApprovalKind::CalibrationSend, "发送标定矩阵"),
+            _ => (laser_contracts::ApprovalKind::WorkflowConfirmSend, "发送加工任务"),
+        };
+        let facts = self.send_digest_facts(kind, expected_sha, workflow_id, object);
+        let summary = send_approval_summary(label, workflow_id, &facts);
+        let authority = self.require_r3_authority(
+            ctx,
+            approval::R3Action { kind: approval_kind, target_record: workflow_id, facts, request: object, summary },
+        )?;
+        let result = match &authority {
+            approval::R3Authority::Approval(record) => match record.connection.as_ref() {
+                Some(connection) => {
+                    let effective = approval::object_with_connection(object, connection);
+                    // 先记“发送中”，作业结束时由发送线程写回结果；进程若在此期间中断，
+                    // 重启时据此把审批记为“结果未知”，不重放（技术书 §5.5，A-33）
+                    let hook: Option<JobTerminalHook> = self.approvals.clone().map(|service| {
+                        if let Err(error) = service.mark_running(&record.approval_id, workflow_id) {
+                            eprintln!("[laser-api] 审批 {} 记录发送中状态失败: {}", record.approval_id, error.message());
+                        }
+                        let approval_id = record.approval_id.clone();
+                        Box::new(move |status: &str, send_result: &serde_json::Value| {
+                            service.record_job_result(&approval_id, status, send_result);
+                        }) as JobTerminalHook
+                    });
+                    self.launch_send_job_unchecked(kind, workflow_id, gcode_path, expected_sha, &effective, hook, voice_permit)
+                }
+                None => Err(approval::error_response(&approval::ApprovalError::Mismatch)),
+            },
+            _ => self.launch_send_job_unchecked(kind, workflow_id, gcode_path, expected_sha, object, None, voice_permit),
+        };
+        // 成功时的结果由发送线程在作业结束时写回；这里只记录没能启动的情况
+        if result.is_err() {
+            self.finish_r3_authority(&authority, &result, Some(workflow_id));
+        }
+        result
+    }
+
+    /// 发送摘要要素：记录中的材料、厚度、参数 + 门禁核对过的 G-code SHA + 发送方式（技术书 §5.4）。
+    /// 只读持久化存储，不碰内存表（调用方可能正持有内存表的锁）。
+    fn send_digest_facts(
+        &self,
+        kind: laser_runtime::RecordKind,
+        expected_sha: &str,
+        record_id: &str,
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let payload = self
+            .store
+            .as_ref()
+            .and_then(|store| store.get(kind, record_id).ok().flatten())
+            .map(|stored| stored.payload)
+            .unwrap_or(serde_json::Value::Null);
+        let mut facts = approval::record_digest_facts(&payload, object);
+        facts.insert(
+            "gcode_sha256".into(),
+            serde_json::Value::String(expected_sha.trim().to_ascii_lowercase()),
+        );
+        facts
+    }
+
+    /// 原有的真实下发链路（不含授权检查，只能经 [`Self::launch_send_job_for`] 调用）。
+    fn launch_send_job_unchecked(
+        &self,
+        kind: laser_runtime::RecordKind,
+        workflow_id: &str,
+        gcode_path: std::path::PathBuf,
+        expected_sha: &str,
+        object: &serde_json::Map<String, serde_json::Value>,
+        on_terminal: Option<JobTerminalHook>,
+        voice_permit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
+        if let Some(material) = object
+            .get("material")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            if let Err(error) = validate_material_safety(material) {
+                return Err((
+                    400,
+                    failure(
+                        error,
+                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                    ),
+                ));
+            }
+        }
         use std::sync::atomic::Ordering;
         let spec = self.connection_spec_from_request(object).map_err(|e| {
             (400, failure(format!("连接参数无效: {e}"), Some(serde_json::json!({"error_code": "connection_params_invalid"}))))
@@ -520,6 +827,9 @@ impl ApiService {
                 ));
             }
         }
+        if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
+            return Err((403, failure("语音设备授权已撤销，未开始加工", Some(serde_json::json!({"error_code":"voice_session_revoked"})))));
+        }
         let transport = (self.transport_factory)(&spec).map_err(|e| {
             (400, failure(format!("设备连接失败 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_unreachable"}))))
         })?;
@@ -536,12 +846,26 @@ impl ApiService {
             (400, failure(format!("加工前检查未通过 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_preflight_failed"}))))
         })?;
         let scale_factor = device_scale / 1000.0;
+        // 设备重新通过实时 Idle 预检后，旧的不确定停止记录不再占用此目标的设备通道。
+        if let Ok(mut uncertain) = self.uncertain_jobs.lock() {
+            uncertain.retain(|_, old| old.target != target);
+        }
         let text = std::fs::read_to_string(&gcode_path).map_err(|e| {
             (500, failure(format!("读取 G-code 文件失败: {e}"), None))
         })?;
         let gcode_bytes = text.as_bytes().to_vec();
         use sha2::Digest;
-        let expected_sha = hex::encode(sha2::Sha256::digest(&gcode_bytes));
+        let actual_sha = hex::encode(sha2::Sha256::digest(&gcode_bytes));
+        if !actual_sha.eq_ignore_ascii_case(expected_sha) {
+            return Err((
+                400,
+                failure(
+                    "G-code SHA-256 与确认快照不一致，拒绝发送",
+                    Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                ),
+            ));
+        }
+        let expected_sha = actual_sha;
 
         let is_offline_sd = object
             .get("offline_sd")
@@ -570,6 +894,9 @@ impl ApiService {
         if start_from_line >= lines.len() {
             return Err((400, failure(format!("断点行号 {start_from_line} 超出总行数 {}", lines.len()), Some(serde_json::json!({"error_code": "invalid_resume_line"})))));
         }
+        if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
+            return Err((403, failure("预检期间设备授权已撤销，未开始加工", Some(serde_json::json!({"error_code":"voice_session_revoked"})))));
+        }
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
         progress.total_lines.store(lines.len(), Ordering::Relaxed);
         progress.lines_sent.store(start_from_line, Ordering::Relaxed);
@@ -593,6 +920,7 @@ impl ApiService {
             _ => self.workflows.clone(),
         };
         let jobs_registry = self.active_jobs.clone();
+        let uncertain_registry = self.uncertain_jobs.clone();
         let wf_id = workflow_id.to_owned();
         let total = lines.len();
         let obj_clone = object.clone();
@@ -602,7 +930,9 @@ impl ApiService {
             .name(format!("laser-send-{wf_id}"))
             .spawn(move || {
                 let sent_mode = if is_offline_sd { "sd_offline" } else { mode };
-                let outcome = if is_offline_sd {
+                let outcome = if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
+                    Err("语音授权已撤销，排队中的加工未执行".to_owned())
+                } else if is_offline_sd {
                     // SD 离线加工流程：
                     // 1. 唯一指纹文件名 /sd/moss_{workflow_id}_{short_sha}.gcode
                     // 2. HTTP POST /upload 上传文件内容到机床 SD 卡
@@ -653,12 +983,18 @@ impl ApiService {
                                 eprintln!("[laser-api] workflow {wf_id}: 固件未返回 SD 文件哈希（HashFS 未启用），本次脱机作业未做物理 SHA 校验");
                                 sd_hash_unverified.store(true, Ordering::Relaxed);
                             }
-                            // $SD/Run 走顺序信道并等 ok；固件在 Alarm 态会回 error:8
-                            match device.send_line_wait_ack(&format!("$SD/Run={remote_path}")) {
+                            // 上传和哈希校验可能耗时很久；真正启动机器前必须再次检查撤销和取消。
+                            // 不论结果是否已经上传到 SD，都不能在授权失效后发送 $SD/Run。
+                            if cancel.is_cancelled() || voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
+                                Err("SD 启动前加工已取消或语音授权已撤销，未发送 $SD/Run".to_owned())
+                            } else {
+                                // $SD/Run 走顺序信道并等 ok；固件在 Alarm 态会回 error:8
+                                match device.send_line_wait_ack(&format!("$SD/Run={remote_path}")) {
                                 Err(e) => Err(format!("启动 SD 脱机任务失败: {e}")),
                                 Ok(()) => device
                                     .wait_until_sd_completed(std::time::Duration::from_secs(7200), Some(&progress), Some(&cancel))
                                     .map(|_| total),
+                                }
                             }
                         }
                     }
@@ -716,7 +1052,16 @@ impl ApiService {
                         )
                     }
                 };
+                if let Some(hook) = on_terminal {
+                    hook(status, &send_result);
+                }
                 finalize_workflow_record(store.as_deref(), &workflows, kind, &wf_id, status, send_result);
+                if status != "completed" {
+                    // cancelled/failed 都不能证明激光已物理停止；保留原设备以供重试 0x18。
+                    if let Ok(mut uncertain) = uncertain_registry.lock() {
+                        uncertain.insert(wf_id.clone(), job.clone());
+                    }
+                }
                 if let Ok(mut jobs) = jobs_registry.lock() {
                     jobs.remove(&wf_id);
                 }
@@ -735,6 +1080,17 @@ impl ApiService {
     }
 
     /// 读取标定矩阵记录（SQLite 优先，否则内存表）。
+    /// 读取 workflow / 标定记录（持久化存储优先，否则内存表）。调用方不得持有内存表的锁。
+    fn load_record_payload(&self, kind: laser_runtime::RecordKind, id: &str) -> Option<serde_json::Value> {
+        if kind == laser_runtime::RecordKind::Calibration {
+            return self.load_calibration(id);
+        }
+        if let Some(store) = self.store.as_ref() {
+            return store.get(kind, id).ok().flatten().map(|record| record.payload);
+        }
+        self.workflows.lock().ok()?.get(id).cloned()
+    }
+
     fn load_calibration(&self, calibration_id: &str) -> Option<serde_json::Value> {
         if let Some(store) = self.store.as_ref() {
             return store
@@ -783,6 +1139,15 @@ impl ApiService {
             .trim();
         if material.is_empty() {
             return Err((400, failure("material 不能为空", None)));
+        }
+        if let Err(error) = validate_material_safety(material) {
+            return Err((
+                400,
+                failure(
+                    error,
+                    Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                ),
+            ));
         }
         let thickness_mm = parse_float(object.get("thickness_mm"), "thickness_mm", 0.0).unwrap_or(0.0);
         if !thickness_mm.is_finite() || thickness_mm <= 0.0 {
@@ -942,6 +1307,7 @@ impl ApiService {
     fn material_lab_send(
         &self,
         object: &serde_json::Map<String, serde_json::Value>,
+        ctx: &laser_contracts::CallerContext,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
         let calibration_id = object
             .get("calibration_id")
@@ -973,6 +1339,15 @@ impl ApiService {
         let mut record = self
             .load_calibration(&calibration_id)
             .ok_or_else(|| (404, failure("未找到标定矩阵，请先生成", Some(serde_json::json!({"error_code": "calibration_missing"})))))?;
+        if let Err(error) = validate_material_safety_in_payload(&record) {
+            return Err((
+                400,
+                failure(
+                    error,
+                    Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                ),
+            ));
+        }
         let current_status = record.get("status").and_then(|v| v.as_str());
         if let Some(reason) = workflow_send_blocked_reason(current_status) {
             return Err((400, failure(reason, Some(serde_json::json!({"error_code": "calibration_not_sendable"})))));
@@ -987,7 +1362,9 @@ impl ApiService {
             laser_runtime::RecordKind::Calibration,
             &calibration_id,
             gcode_path,
+            &gcode_sha,
             &request,
+            ctx,
         )?;
         if let Some(map) = record.as_object_mut() {
             map.insert("status".into(), serde_json::Value::String("sending".into()));
@@ -1224,6 +1601,12 @@ impl ApiService {
     }
 
     pub fn with_runtime_path(mut self, runtime_path: std::path::PathBuf) -> Self {
+        let disabled = read_runtime_settings(Some(&runtime_path))
+            .get("mcp_disabled_tools")
+            .and_then(serde_json::Value::as_array)
+            .map(|names| names.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.set_disabled_tools(disabled);
         self.runtime_path = Some(runtime_path);
         self
     }
@@ -1269,6 +1652,9 @@ impl ApiService {
         runtime_db: std::sync::Arc<std::sync::Mutex<laser_runtime::RuntimeDb>>,
     ) -> Self {
         self.runtime_db = Some(runtime_db.clone());
+        if self.approvals.is_none() {
+            self.approvals = Some(std::sync::Arc::new(approval::ApprovalService::new(runtime_db.clone())));
+        }
         self.with_store(runtime_db)
     }
 
@@ -1384,7 +1770,7 @@ impl ApiService {
                 let loopback = peer.ip().is_loopback();
                 if let Ok(request) = read_http_request(&mut stream) {
                     if !request.is_empty() {
-                        let response = service.handle_http_from(&request, loopback, &source);
+                        let response = service.handle_http_from(&request, loopback, &source, None);
                         let _ = stream.write_all(&response);
                         let _ = stream.flush();
                     }
@@ -1450,10 +1836,79 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
 impl ApiService {
 
     pub fn handle_http(&self, request: &[u8]) -> Vec<u8> {
-        self.handle_http_from(request, true, "127.0.0.1")
+        self.handle_http_from(request, true, "127.0.0.1", None)
     }
 
-    fn handle_http_from(&self, request: &[u8], loopback: bool, source_ip: &str) -> Vec<u8> {
+    /// 进程内调用方显式声明身份（技术书 §6.4 规则 2）：`InProcessBackend` 传 `McpBridge`，
+    /// 网关分发传 `Gateway`。按本机回环处理鉴权，但上下文用调用方给的值，不借用 `Loopback`。
+    pub fn handle_http_with_ctx(&self, request: &[u8], ctx: laser_contracts::CallerContext) -> Vec<u8> {
+        self.handle_http_from(request, true, "127.0.0.1", Some(ctx))
+    }
+
+    /// HTTP 入口：先做 Host 校验与浏览器来源校验（技术书 §6.5 / D11），再进入路由。
+    ///
+    /// - 回环连接的 `Host` 必须是 IP 字面量、`localhost` 或 `MOSS_ALLOWED_ORIGINS` 中的主机名，
+    ///   否则 403 `host_not_allowed`（防 DNS 重绑定：攻击者域名解析到 127.0.0.1 时 `Host` 仍是其域名）；
+    /// - 不带 `Origin` 的请求（插件、MCP 桥接、curl、局域网配对客户端、进程内调用）行为不变，响应不带 CORS 头；
+    /// - 带 `Origin` 且允许：正常路由，响应回显该来源并加 `Vary: Origin`；
+    /// - 带 `Origin` 且不允许：`GET`/`HEAD` 正常路由但不带任何 CORS 头（跨站页面读不到响应），
+    ///   其他方法（含 `OPTIONS` 预检与 `text/plain` 简单请求）一律 403 `origin_not_allowed`，不进入路由。
+    fn handle_http_from(
+        &self,
+        request: &[u8],
+        loopback: bool,
+        source_ip: &str,
+        ctx_override: Option<laser_contracts::CallerContext>,
+    ) -> Vec<u8> {
+        let head = request_head(request);
+        let method = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or("")
+            .to_owned();
+        let host = header_value(&head, "host");
+        if loopback
+            && host
+                .as_deref()
+                .is_some_and(|host| !is_allowed_loopback_host(host, &self.extra_allowed_origins))
+        {
+            return http_json(
+                403,
+                failure(
+                    "请求的主机名不在允许范围内，请用 127.0.0.1 或 localhost 访问",
+                    Some(serde_json::json!({"error_code": "host_not_allowed"})),
+                ),
+            );
+        }
+        let Some(origin) = header_value(&head, "origin") else {
+            return self.route_http(request, loopback, source_ip, ctx_override.clone());
+        };
+        if !is_allowed_origin(&origin, host.as_deref(), loopback, &self.extra_allowed_origins) {
+            if method == "GET" || method == "HEAD" {
+                return self.route_http(request, loopback, source_ip, ctx_override.clone());
+            }
+            return http_json(
+                403,
+                failure(
+                    "请求来源不在允许范围内",
+                    Some(serde_json::json!({"error_code": "origin_not_allowed"})),
+                ),
+            );
+        }
+        if method == "OPTIONS" {
+            return http_options(Some(&origin));
+        }
+        with_cors_headers(self.route_http(request, loopback, source_ip, ctx_override.clone()), &origin)
+    }
+
+    fn route_http(
+        &self,
+        request: &[u8],
+        loopback: bool,
+        source_ip: &str,
+        ctx_override: Option<laser_contracts::CallerContext>,
+    ) -> Vec<u8> {
         let Some(separator) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
             return http_json(400, failure("请求格式错误", None));
         };
@@ -1485,7 +1940,7 @@ impl ApiService {
         }
         let route = path.split('?').next().unwrap_or(path);
         if method == "OPTIONS" {
-            return http_options();
+            return http_options(None);
         }
         if method == "POST" && route == "/v1/auth/challenge" {
             if !loopback {
@@ -1543,6 +1998,7 @@ impl ApiService {
                     || route == "/material-lab"
                     || route.starts_with("/assets/")
                     || route.starts_with("/vendor/")));
+        let mut pairing_id = None;
         if !loopback && !public_route {
             let Some(auth) = self.auth.as_ref() else {
                 return http_json(401, failure("需要 Bearer 鉴权", None));
@@ -1550,9 +2006,83 @@ impl ApiService {
             let Some(token) = authorization.as_deref() else {
                 return http_json(401, failure("需要 Bearer 鉴权", None));
             };
-            if auth.authorize(token).is_err() {
-                return http_json(401, failure("Bearer 鉴权失败", None));
+            match auth.authorize(token) {
+                Ok(id) => pairing_id = Some(id),
+                Err(_) => return http_json(401, failure("Bearer 鉴权失败", None)),
             }
+        }
+        // 桌面会话头（技术书 §5.3）：只在回环连接上有效，值不对时 403，前端重新取会话后只重试一次
+        let desktop = match self.check_desktop_session(&head, loopback) {
+            Ok(desktop) => desktop,
+            Err(response) => return response,
+        };
+        // 调用方上下文只由入口构造（技术书 §6.4）：进程内调用方显式声明优先，其次桌面会话
+        let ctx = if desktop && ctx_override.is_none() {
+            laser_contracts::CallerContext::Desktop
+        } else {
+            caller_context_for(ctx_override, loopback, pairing_id)
+        };
+        if !self.voice_caller_allowed(&ctx) {
+            return http_json(403, failure("语音设备授权已失效，请重新连接", Some(serde_json::json!({"error_code":"voice_session_revoked"}))));
+        }
+        // 手机 / 局域网连接（技术书 §9.8）：可以操作雕刻机，但材料、校准参数与系统设置只读，只能在电脑上修改
+        if matches!(ctx, laser_contracts::CallerContext::Lan { .. })
+            && is_reference_data_write(method, route, &body[..content_length])
+        {
+            return http_json(
+                403,
+                failure(
+                    "手机 / 局域网连接为只读：材料、校准参数和系统设置请在电脑上修改",
+                    Some(serde_json::json!({"error_code": "lan_read_only"})),
+                ),
+            );
+        }
+        if route == "/v1/approvals" || route.starts_with("/v1/approvals/") {
+            let query = path.split_once('?').map(|(_, query)| query).unwrap_or("");
+            return self.handle_approval_route(method, route, query, &body[..content_length], &ctx);
+        }
+        if method == "POST" && matches!(route, "/api/text-task/generate" | "/api/draw/preview" | "/api/workflow")
+            && serde_json::from_slice::<serde_json::Value>(&body[..content_length])
+                .ok().is_some_and(|value| value.get("feedback_params").is_some())
+        {
+            return http_json(400, failure("feedback_params 为内部字段，请通过已保存反馈确认采用", None));
+        }
+        if method == "GET" && route == "/api/system/lan-info" {
+            // 只给电脑本机看：偏好设置“手机连接”分区显示本机局域网地址与端口
+            if !loopback {
+                return http_json(403, failure("仅允许在电脑本机查看", None));
+            }
+            let saved = read_runtime_settings(self.runtime_path.as_deref())
+                .get("lan_access")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let listening_all = matches!(self.settings.web_host.as_str(), "0.0.0.0" | "::" | "[::]");
+            let port = self.get_actual_port();
+            let addresses: Vec<String> = primary_lan_ipv4().into_iter().map(|ip| ip.to_string()).collect();
+            return http_json(
+                200,
+                success(serde_json::json!({
+                    "lan_access_saved": saved,
+                    "lan_access_active": listening_all,
+                    "web_host": self.settings.web_host,
+                    "port": port,
+                    "addresses": addresses,
+                    "restart_required": saved != listening_all,
+                })),
+            );
+        }
+        if method == "GET" && route == "/api/jobs/stop-targets" {
+            // 顶栏急停不依赖 React 页面的生命周期，从后端读取精确任务和原连接目标。
+            let Ok(running) = self.active_jobs.lock() else { return http_json(500, failure("设备任务表不可用", None)); };
+            let Ok(uncertain) = self.uncertain_jobs.lock() else { return http_json(500, failure("待确认停止任务表不可用", None)); };
+            let mut targets = std::collections::BTreeMap::<String, serde_json::Value>::new();
+            for (id, job) in uncertain.iter() {
+                targets.insert(id.clone(), serde_json::json!({"job_id": id, "target": job.target, "state": "unknown"}));
+            }
+            for (id, job) in running.iter() {
+                targets.insert(id.clone(), serde_json::json!({"job_id": id, "target": job.target, "state": "running"}));
+            }
+            return http_json(200, success(serde_json::json!({"jobs": targets.into_values().collect::<Vec<_>>() })));
         }
         if method == "GET" && route == "/api/system/info" {
             let actual = self.get_actual_port();
@@ -1564,45 +2094,16 @@ impl ApiService {
                 .map(|p| p as u16);
             let preferred = preferred_from_file.unwrap_or(self.settings.web_port);
 
-            let mcp_env = std::env::var("MCP_ENDPOINT").ok().filter(|v| {
-                let s = v.trim();
-                !s.is_empty() && !s.contains('<') && (s.starts_with("ws://") || s.starts_with("wss://"))
-            });
+            let mcp_endpoint = configured_mcp_endpoint(self.runtime_path.as_deref());
             let telemetry = laser_contracts::global_mcp_telemetry().snapshot();
-            let has_activity = !telemetry.client_name.is_empty() || telemetry.messages_count > 0;
-            let mcp_configured = mcp_env.is_some() || has_activity;
-            let mcp_endpoint_display = if let Some(ep) = mcp_env.as_deref() {
-                if let Some((head, _)) = ep.split_once("token=") {
-                    format!("{head}token=***")
-                } else {
-                    ep.to_string()
-                }
-            } else if has_activity {
-                "进程内回环 / 外部 WebSocket 客户端 (Connected)".into()
-            } else {
-                "未配置 (环境变量 MCP_ENDPOINT 未设置)".into()
-            };
-
-            let client_name = if !telemetry.client_name.is_empty() {
-                format!("{} v{}", telemetry.client_name, telemetry.client_version)
-            } else if mcp_configured {
-                "xz-mcp-broker v0.0.1".into()
-            } else {
-                "未连接".into()
-            };
-
-            let recent_events = if telemetry.recent_events.is_empty() && mcp_configured {
-                vec![
-                    "16:00:02 [MCP_PIPE] Successfully connected to WebSocket server".into(),
-                    "16:00:02 [RECV] initialize (client: xz-mcp-broker v0.0.1)".into(),
-                    "16:00:02 [SEND] initialize 握手完成 (protocol: 2024-11-05)".into(),
-                    "16:00:02 [RECV] notifications/initialized".into(),
-                    "16:00:02 [RECV] tools/list (ListToolsRequest) -> 已分发 20 项工具".into(),
-                ]
-            } else {
-                telemetry.recent_events
-            };
-
+            // 严格模式下接入点不列出永不开放的 R4 工具（与 laser_mcp::tools_list_for 一致）
+            // 用户关闭的工具同样不列出（NV8）
+            let tools_count = laser_tools::ToolCatalog::from_environment()
+                .specs()
+                .iter()
+                .filter(|spec| !(self.strict_mode() && laser_contracts::tool_never_exposed(spec.name)))
+                .filter(|spec| !self.tool_disabled(spec.name))
+                .count();
             return http_json(
                 200,
                 success(serde_json::json!({
@@ -1610,26 +2111,100 @@ impl ApiService {
                     "preferred_port": preferred,
                     "is_fallback": actual != preferred,
                     "web_host": self.settings.web_host,
-                    "mcp": {
-                        "configured": mcp_configured,
-                        "endpoint": mcp_endpoint_display,
-                        "client_info": client_name,
-                        "last_request": if telemetry.last_request.is_empty() { "tools/list (查询工具清单)".into() } else { telemetry.last_request },
-                        "messages_count": telemetry.messages_count.max(if mcp_configured { 3 } else { 0 }),
-                        "tools_count": 20,
-                        "protocol_version": "2024-11-05",
-                        "recent_events": recent_events,
-                        "core_tool": "laser_workflow_tool",
-                        "safety_gate": "强制物理 SHA-256 指纹比对",
-                        "estop_channel": "0x18 软复位 (优先中断级)"
-                    }
+                    "mcp": mcp_status_json(mcp_endpoint.as_deref(), &telemetry, tools_count),
+                    // 链路模式来自 settings.json 的 voice.mode（语音中心写入）；设备会话数由桌面端语音中心
+                    // 轮询自建接入点 health 后提供，官方链路或未知时为 null（技术书 §9.4.5）
+                    "voice": voice_status_json(self.runtime_path.as_deref())
                 })),
             );
+        }
+        if method == "GET" && route == "/api/jev/status" {
+            let settings = read_runtime_settings(self.runtime_path.as_deref());
+            let api_key = match self.runtime_db.as_ref() {
+                Some(db) => match db.lock().map_err(|_| "运行时数据库锁失败".to_owned()).and_then(|db| {
+                    db.get_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}"))
+                }) {
+                    Ok(value) => value,
+                    Err(error) => return http_json(500, failure(error, None)),
+                },
+                None => None,
+            };
+            return http_json(
+                200,
+                success(serde_json::json!({
+                    "enabled": settings.get("jev_enabled").and_then(|value| value.as_bool()).unwrap_or(false),
+                    "endpoint": DEFAULT_JEV_ENDPOINT,
+                    "model": JEV_MODEL,
+                    "provider": "OpenRouter",
+                    "configured": api_key.as_deref().is_some_and(|value| !value.trim().is_empty()),
+                    "masked_key": api_key.as_deref().map(mask_secret).unwrap_or_default(),
+                })),
+            );
+        }
+        if method == "POST" && route == "/api/jev/test" {
+            let Some(db) = self.runtime_db.as_ref() else {
+                return http_json(503, failure("运行时数据库未启用", None));
+            };
+            let api_key = match db.lock().map_err(|_| "运行时数据库锁失败".to_owned()).and_then(|db| {
+                db.get_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}"))
+            }) {
+                Ok(Some(value)) if !value.trim().is_empty() => value,
+                Ok(_) => return http_json(404, failure("请先保存 Jev API Key", None)),
+                Err(error) => return http_json(500, failure(error, None)),
+            };
+            return match feedback::call_jev(DEFAULT_JEV_ENDPOINT, &api_key, &serde_json::json!({
+                "feedback_text": "效果正常，无需调整"
+            })) {
+                Ok(_) => http_json(200, success(serde_json::json!({"message": "Jev 连接正常"}))),
+                Err(error) => http_json(502, failure(format!("Jev 连接失败: {error}"), None)),
+            };
+        }
+        if (method == "POST" && matches!(route, "/api/feedback" | "/api/jev/feedback" | "/api/feedback/accept"))
+            || (method == "GET" && route == "/api/feedback/history")
+        {
+            return self.handle_feedback_route(route, path, &body[..content_length]);
+        }
+        if method == "POST" && route == "/api/jev/reveal" {
+            let Some(db) = self.runtime_db.as_ref() else {
+                return http_json(503, failure("运行时数据库未启用", None));
+            };
+            let api_key = match db.lock().map_err(|_| "运行时数据库锁失败".to_owned()).and_then(|db| {
+                db.get_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}"))
+            }) {
+                Ok(Some(value)) if !value.trim().is_empty() => value,
+                Ok(_) => return http_json(404, failure("Jev API Key 尚未配置", None)),
+                Err(error) => return http_json(500, failure(error, None)),
+            };
+            return http_json(200, success(serde_json::json!({ "api_key": api_key })));
         }
         if method == "POST" && route == "/api/settings" {
             let object = match parse_json_object(&body[..content_length], 64 * 1024) {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
+            };
+            if let Some(endpoint) = object.get("jev_endpoint") {
+                if !endpoint.as_str().is_some_and(|s| s.trim().is_empty() || s.trim() == DEFAULT_JEV_ENDPOINT) {
+                    return http_json(400, failure("Jev 仅支持固定 OpenRouter Decisions 地址", None));
+                }
+            }
+            if object.get("jev_enabled").is_some_and(|v| !v.is_boolean())
+                || object.get("jev_api_key").is_some_and(|v| !v.is_string())
+            {
+                return http_json(400, failure("jev_enabled 必须是布尔值，jev_api_key 必须是字符串", None));
+            }
+            let mcp_endpoint = match object.get("mcp_endpoint") {
+                None => None,
+                Some(serde_json::Value::String(value)) if value.trim().is_empty() => Some(None),
+                Some(serde_json::Value::String(value)) => {
+                    let Some(normalized) = normalize_mcp_endpoint(value) else {
+                        return http_json(
+                            400,
+                            failure("小智 MCP 端点必须是 ws:// 或 wss:// 地址，且不能包含模板占位符", None),
+                        );
+                    };
+                    Some(Some(normalized))
+                }
+                Some(_) => return http_json(400, failure("mcp_endpoint 必须是字符串", None)),
             };
             if let Some(port) = object.get("web_port").and_then(|v| v.as_u64()) {
                 if port < 1024 || port > 65535 {
@@ -1647,10 +2222,90 @@ impl ApiService {
                     }
                 }
             }
+            if let Some(enabled) = object.get("jev_enabled").and_then(|value| value.as_bool()) {
+                persist_runtime_setting(self.runtime_path.as_deref(), "jev_enabled", serde_json::json!(enabled));
+            }
+            if let Some(value) = object.get("lan_access") {
+                let Some(enabled) = value.as_bool() else {
+                    return http_json(400, failure("lan_access 必须是布尔值", None));
+                };
+                persist_runtime_setting(self.runtime_path.as_deref(), "lan_access", serde_json::json!(enabled));
+            }
+            if let Some(endpoint) = object.get("jev_endpoint") {
+                let Some(endpoint) = endpoint.as_str() else {
+                    return http_json(400, failure("jev_endpoint 必须是字符串", None));
+                };
+                let endpoint = endpoint.trim();
+                if !endpoint.is_empty() && endpoint != DEFAULT_JEV_ENDPOINT {
+                    return http_json(400, failure("Jev 仅支持固定 OpenRouter Decisions 地址", None));
+                }
+                if endpoint.is_empty() {
+                    remove_runtime_setting(self.runtime_path.as_deref(), "jev_endpoint");
+                } else {
+                    persist_runtime_setting(self.runtime_path.as_deref(), "jev_endpoint", serde_json::json!(endpoint));
+                }
+            }
+            if let Some(api_key) = object.get("jev_api_key") {
+                let Some(api_key) = api_key.as_str() else {
+                    return http_json(400, failure("jev_api_key 必须是字符串", None));
+                };
+                if !api_key.trim().is_empty() {
+                    let Some(db) = self.runtime_db.as_ref() else {
+                        return http_json(503, failure("运行时数据库未启用，无法保存 Jev API Key", None));
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs_f64())
+                        .unwrap_or(0.0);
+                    if let Err(error) = db
+                        .lock()
+                        .map_err(|_| "运行时数据库锁失败".to_owned())
+                        .and_then(|db| db.set_secret(JEV_API_KEY_SECRET, api_key.trim(), now).map_err(|error| format!("{error:?}")))
+                    {
+                        return http_json(500, failure(error, None));
+                    }
+                }
+            }
+            if object.get("jev_delete_api_key").and_then(|value| value.as_bool()).unwrap_or(false) {
+                if let Some(db) = self.runtime_db.as_ref() {
+                    if let Err(error) = db
+                        .lock()
+                        .map_err(|_| "运行时数据库锁失败".to_owned())
+                        .and_then(|db| db.delete_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}")))
+                    {
+                        return http_json(500, failure(error, None));
+                    }
+                }
+            }
+            let has_mcp_setting = mcp_endpoint.is_some();
+            if let Some(endpoint) = mcp_endpoint {
+                if let Some(runtime_path) = self.runtime_path.as_ref() {
+                    let settings_file = runtime_path.join("settings.json");
+                    let mut current: serde_json::Map<String, serde_json::Value> = std::fs::read(&settings_file)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                        .unwrap_or_default();
+                    match endpoint {
+                        Some(value) => {
+                            current.insert("mcp_endpoint".into(), serde_json::Value::String(value));
+                        }
+                        None => {
+                            current.remove("mcp_endpoint");
+                        }
+                    }
+                    if let Ok(data) = serde_json::to_vec_pretty(&current) {
+                        let _ = std::fs::write(&settings_file, data);
+                    }
+                }
+            }
             return http_json(
                 200,
                 success(serde_json::json!({
-                    "message": "设置已保存，将在下次启动时生效"
+                    "message": if has_mcp_setting {
+                        "设置已保存，小智 MCP 端点将在下次启动时生效"
+                    } else {
+                        "设置已保存，将在下次启动时生效"
+                    }
                 })),
             );
         }
@@ -1817,6 +2472,7 @@ impl ApiService {
                 Err(error) => return http_json(400, failure(error, None)),
             };
             let mut object = object;
+            strip_identity_fields(&mut object);
             if route == "/api/text-task/generate" {
                 match generate_text_artifacts(
                     &object,
@@ -1852,8 +2508,9 @@ impl ApiService {
             let send_roots = self.send_gcode_roots();
             let launcher = |workflow_id: &str,
                             gcode_path: std::path::PathBuf,
+                            expected_sha: &str,
                             request: &serde_json::Map<String, serde_json::Value>| {
-                self.launch_send_job(workflow_id, gcode_path, request)
+                self.launch_send_job(workflow_id, gcode_path, expected_sha, request, &ctx)
             };
             if let Some(store) = self.store.as_ref() {
                 return handle_workflow_store_request(
@@ -1875,15 +2532,48 @@ impl ApiService {
             );
         }
         if method == "POST" && route == "/api/safe-action" {
-            let object = match parse_json_object(&body[..content_length], 64 * 1024) {
+            let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
             };
-            let args: laser_contracts::LaserSafeActionArgs = match serde_json::from_value(serde_json::Value::Object(object)) {
+            strip_identity_fields(&mut object);
+            let mut args: laser_contracts::LaserSafeActionArgs = match serde_json::from_value(serde_json::Value::Object(object.clone())) {
                 Ok(a) => a,
                 Err(e) => return http_json(400, failure(format!("参数解析失败: {e}"), None)),
             };
-            let res = self.handle_safe_action(&args);
+            // 严格模式检查点（技术书 §6.2）：只对 R3 动作；急停、软复位、关激光、降低倍率永不追加条件（A-27）
+            let mut authority = approval::R3Authority::Unchecked;
+            if laser_contracts::safe_action_requires_approval(&args.action) {
+                let action = args.action.trim().to_owned();
+                let facts = approval::safe_action_digest_facts(&object);
+                let summary = safe_action_approval_summary(&action, &facts);
+                authority = match self.require_r3_authority(
+                    &ctx,
+                    approval::R3Action {
+                        kind: laser_contracts::ApprovalKind::SafeAction,
+                        target_record: &action,
+                        facts,
+                        request: &object,
+                        summary,
+                    },
+                ) {
+                    Ok(authority) => authority,
+                    Err((status, body)) => return http_json(status, body),
+                };
+                if let approval::R3Authority::Approval(record) = &authority {
+                    if let Some(connection) = record.connection.as_ref() {
+                        apply_connection_to_safe_action(&mut args, connection);
+                    }
+                }
+            }
+            let job_id = object.get("job_id").and_then(serde_json::Value::as_str);
+            let res = self.handle_safe_action_for(&args, &ctx, job_id);
+            let outcome: Result<serde_json::Value, (u16, serde_json::Value)> = if res.success {
+                Ok(serde_json::Value::Null)
+            } else {
+                Err((400, failure(res.result.clone(), None)))
+            };
+            self.finish_r3_authority(&authority, &outcome, None);
             return http_json(
                 if res.success { 200 } else { 400 },
                 serde_json::json!({
@@ -1901,47 +2591,41 @@ impl ApiService {
             return http_json(200, success(self.probe_connections(&object)));
         }
         if method == "POST" && route == "/api/device/framing" {
-            let object = match parse_json_object(&body[..content_length], 64 * 1024) {
+            let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
             };
-            let min_x = object.get("min_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let min_y = object.get("min_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let max_x = object.get("max_x").and_then(|v| v.as_f64()).unwrap_or(100.0);
-            let max_y = object.get("max_y").and_then(|v| v.as_f64()).unwrap_or(100.0);
-            let feed_rate = object.get("feed_rate").and_then(|v| v.as_i64()).unwrap_or(2000) as i32;
-            let power = object.get("power").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
-
-            let framing_gcode = match laser_core::gcode::generate_framing_gcode(min_x, min_y, max_x, max_y, feed_rate, power) {
-                Ok(g) => g,
-                Err(e) => return http_json(400, failure(format!("生成走边框 G-code 失败: {e}"), None)),
+            strip_identity_fields(&mut object);
+            // 严格模式检查点（技术书 §6.2）：走边框真实驱动机器
+            let framing_facts = approval::framing_digest_facts(&object);
+            let framing_summary = framing_approval_summary(&framing_facts);
+            let framing_authority = match self.require_r3_authority(
+                &ctx,
+                approval::R3Action {
+                    kind: laser_contracts::ApprovalKind::Framing,
+                    target_record: "framing",
+                    facts: framing_facts,
+                    request: &object,
+                    summary: framing_summary,
+                },
+            ) {
+                Ok(authority) => authority,
+                Err((status, body)) => return http_json(status, body),
             };
-
-            let spec = match self.connection_spec_from_request(&object) {
-                Ok(s) => s,
-                Err(e) => return http_json(400, failure(format!("连接参数无效: {e}"), None)),
-            };
-            let transport = match (self.transport_factory)(&spec) {
-                Ok(t) => std::sync::Arc::from(t),
-                Err(e) => return http_json(400, failure(format!("设备连接失败: {e}"), None)),
-            };
-            let mut device = laser_device::DeviceConnection::new(transport);
-            if let Err(e) = device.handshake_with_deadline(std::time::Duration::from_secs(3)) {
-                return http_json(400, failure(format!("设备握手失败: {e}"), None));
+            if let approval::R3Authority::Approval(record) = &framing_authority {
+                match record.connection.as_ref() {
+                    Some(connection) => object = approval::object_with_connection(&object, connection),
+                    None => {
+                        let (status, body) = approval::error_response(&approval::ApprovalError::Mismatch);
+                        return http_json(status, body);
+                    }
+                }
             }
-            device.load_features(std::time::Duration::from_secs(3));
-            let mut worker = laser_device::JobWorker::new(device, laser_device::CancellationToken::default());
-            let lines: Vec<String> = match laser_device::prepare_gcode_lines(&framing_gcode) {
-                Ok(p) => p.lines,
-                Err(e) => return http_json(400, failure(format!("走边框 G-code 校验失败: {e}"), None)),
-            };
-            return match worker.send_lines(lines) {
-                Ok(_) => http_json(200, success(serde_json::json!({
-                    "message": "走边框完成",
-                    "bounds": { "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y }
-                }))),
-                Err(e) => http_json(500, failure(format!("走边框执行失败: {e}"), None)),
-            };
+            let response = self.run_framing(&object, &ctx);
+            let outcome: Result<serde_json::Value, (u16, serde_json::Value)> =
+                if response.starts_with(b"HTTP/1.1 200") { Ok(serde_json::Value::Null) } else { Err((400, failure("走边框未完成", None))) };
+            self.finish_r3_authority(&framing_authority, &outcome, None);
+            return response;
         }
         if method == "POST" && route == "/api/draw/preview" {
             let object = match parse_json_object(&body[..content_length], 10 * 1024 * 1024) {
@@ -1972,10 +2656,13 @@ impl ApiService {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
 
-            let record = serde_json::json!({
+            let mut input = object.clone();
+            input.remove("image_data_url");
+            let mut record = serde_json::json!({
                 "workflow_id": workflow_id,
                 "status": "preview_ready",
                 "source_type": "draw",
+                "input": input,
                 "material": material,
                 "thickness_mm": thickness_mm,
                 "artifacts": artifacts,
@@ -2003,6 +2690,7 @@ impl ApiService {
                 "created_at": unix_seconds(),
                 "updated_at": unix_seconds()
             });
+            feedback::add_draw_view(&mut record);
             if let Some(store) = self.store.as_ref() {
                 let stored = laser_runtime::StoredRecord {
                     kind: laser_runtime::RecordKind::Workflow,
@@ -2010,7 +2698,9 @@ impl ApiService {
                     status: Some("preview_ready".into()),
                     payload: record.clone(),
                 };
-                let _ = store.put(&stored);
+                if store.put(&stored).is_err() {
+                    return http_json(500, failure("画板预览保存失败", None));
+                }
             } else {
                 let mut map = self.workflows.lock().unwrap();
                 map.insert(workflow_id.clone(), record.clone());
@@ -2028,11 +2718,12 @@ impl ApiService {
             };
         }
         if method == "POST" && route == "/api/material-lab/send" {
-            let object = match parse_json_object(&body[..content_length], 64 * 1024) {
+            let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
             };
-            return match self.material_lab_send(&object) {
+            strip_identity_fields(&mut object);
+            return match self.material_lab_send(&object, &ctx) {
                 Ok(record) => http_json(200, success(record)),
                 Err((status, body)) => http_json(status, body),
             };
@@ -2172,7 +2863,7 @@ impl ApiService {
                 )
             }
             ("GET", "/api/ui/serial-ports") => {
-                let ports = enumerate_system_serial_ports();
+                let ports = (self.serial_port_lister)();
                 let default_port = ports.first().cloned().unwrap_or_default();
                 (
                     200,
@@ -2290,6 +2981,7 @@ fn generate_text_artifacts(
         .get("material")
         .and_then(|value| value.as_str())
         .unwrap_or("");
+    validate_material_safety(material)?;
     let thickness = parse_float(object.get("thickness_mm"), "thickness_mm", 0.0)
         .map_err(|_| "thickness_mm 必须是大于 0 的数字")?;
     if material.is_empty() || !thickness.is_finite() || thickness <= 0.0 {
@@ -2317,17 +3009,20 @@ fn generate_text_artifacts(
     )
     .ok_or("读取材料推荐失败")?;
 
+    let params = feedback::generation_params(object, recommendation.params.laser_max_power as f64, recommendation.params.feed_rate as f64)?;
     let spec = laser_core::TextTaskSpec {
         text,
         font_path,
         font_size_mm: font_size,
         letter_spacing_mm: spacing,
-        power: recommendation.params.laser_max_power,
-        feed_rate: recommendation.params.feed_rate,
+        power: params.power as i32,
+        feed_rate: params.feed as i32,
         preview_width_px: 800,
         preview_height_px: 600,
     };
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
+    let gcode = feedback::repeat_generated(&artifacts.gcode, params.passes);
+    let estimate = laser_core::gcode::estimate_time(&gcode, 3000.0);
 
     let root = generated_root.ok_or("生成目录未配置")?;
     std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
@@ -2338,17 +3033,18 @@ fn generate_text_artifacts(
     let id = format!("text-{}-{}-{}", unix_seconds(), nanos, std::process::id());
     let gcode_path = root.join(format!("{id}.gcode"));
     let preview_path = root.join(format!("{id}.png"));
-    std::fs::write(&gcode_path, artifacts.gcode.as_bytes()).map_err(|error| error.to_string())?;
+    std::fs::write(&gcode_path, gcode.as_bytes()).map_err(|error| error.to_string())?;
     artifacts
         .preview
         .save(&preview_path)
         .map_err(|error| error.to_string())?;
 
-    let gcode_sha = hex::encode(sha2::Sha256::digest(artifacts.gcode.as_bytes()));
+    let gcode_sha = hex::encode(sha2::Sha256::digest(gcode.as_bytes()));
 
     Ok(serde_json::json!({
         "gcode_file": gcode_path.file_name().and_then(|value| value.to_str()).unwrap_or(""),
         "gcode_sha256": gcode_sha,
+        "actual_params": params.json(),
         "image_file": preview_path.file_name().and_then(|value| value.to_str()).unwrap_or(""),
         "font_path": std::path::Path::new(font_path).file_name().and_then(|value| value.to_str()).unwrap_or(""),
         "material": recommendation.material,
@@ -2358,10 +3054,10 @@ fn generate_text_artifacts(
         "glyphs": artifacts.glyphs,
         "path_optimization": artifacts.path_optimization,
         "time_estimate": {
-            "estimated_seconds": artifacts.estimate.estimated_seconds,
-            "estimated_minutes": artifacts.estimate.estimated_minutes,
-            "laser_seconds": artifacts.estimate.laser_seconds,
-            "non_laser_seconds": artifacts.estimate.non_laser_seconds
+            "estimated_seconds": estimate.estimated_seconds,
+            "estimated_minutes": estimate.estimated_minutes,
+            "laser_seconds": estimate.laser_seconds,
+            "non_laser_seconds": estimate.non_laser_seconds
         }
     }).as_object().cloned().unwrap_or_default())
 }
@@ -2382,6 +3078,7 @@ fn generate_draw_artifacts(
         .get("material")
         .and_then(|value| value.as_str())
         .unwrap_or("");
+    validate_material_safety(material)?;
     let thickness = parse_float(object.get("thickness_mm"), "thickness_mm", 0.0)
         .map_err(|_| "thickness_mm 必须是大于 0 的数字")?;
     if material.is_empty() || !thickness.is_finite() || thickness <= 0.0 {
@@ -2442,12 +3139,15 @@ fn generate_draw_artifacts(
     );
     let power = recommendation.as_ref().map(|r| r.params.laser_max_power).unwrap_or(400);
     let feed_rate = recommendation.as_ref().map(|r| r.params.feed_rate).unwrap_or(1500);
+    let params = feedback::generation_params(object, power as f64, feed_rate as f64)?;
+    let power = params.power as i32;
+    let feed_rate = params.feed as i32;
 
     let mut bitmap = Vec::with_capacity(img_h as usize);
     for y in 0..img_h {
         let mut row = Vec::with_capacity(img_w as usize);
         for x in 0..img_w {
-            row.push(if luma_img.get_pixel(x, y).0[0] < 128 { 1 } else { 0 });
+            row.push(if luma_img.get_pixel(x, y).0[0] < 128 { 0 } else { 255 });
         }
         bitmap.push(row);
     }
@@ -2458,7 +3158,7 @@ fn generate_draw_artifacts(
         let mut bin = image::GrayImage::from_pixel(img_w, img_h, image::Luma([255]));
         for (y, row) in bitmap.iter().enumerate() {
             for (x, &v) in row.iter().enumerate() {
-                if v == 1 {
+                if v == 0 {
                     bin.put_pixel(x as u32, y as u32, image::Luma([0]));
                 }
             }
@@ -2487,6 +3187,7 @@ fn generate_draw_artifacts(
         },
     ).map_err(|e| e.to_string())?;
 
+    let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
     let gcode_path = root.join(format!("{id}.gcode"));
     std::fs::write(&gcode_path, gcode_str.as_bytes()).map_err(|error| error.to_string())?;
 
@@ -2498,6 +3199,7 @@ fn generate_draw_artifacts(
     let gcode_name = format!("{id}.gcode");
 
     let mut res_map = serde_json::Map::new();
+    res_map.insert("actual_params".into(), params.json());
     res_map.insert("image_file".into(), serde_json::Value::String(img_name));
     res_map.insert("gcode_file".into(), serde_json::Value::String(gcode_name));
     res_map.insert(
@@ -2587,12 +3289,15 @@ fn generate_image_or_gcode_artifacts(
         let recommendation = laser_core::material::recommend(material, thickness, "engrave", Some("raster"));
         let power = recommendation.as_ref().map(|r| r.params.laser_max_power).unwrap_or(400);
         let feed_rate = recommendation.as_ref().map(|r| r.params.feed_rate).unwrap_or(1500);
+        let params = feedback::generation_params(object, power as f64, feed_rate as f64)?;
+        let power = params.power as i32;
+        let feed_rate = params.feed as i32;
 
         let mut bitmap = Vec::with_capacity(img_h as usize);
         for y in 0..img_h {
             let mut row = Vec::with_capacity(img_w as usize);
             for x in 0..img_w {
-                row.push(if luma_img.get_pixel(x, y).0[0] < 128 { 1 } else { 0 });
+                row.push(if luma_img.get_pixel(x, y).0[0] < 128 { 0 } else { 255 });
             }
             bitmap.push(row);
         }
@@ -2619,6 +3324,7 @@ fn generate_image_or_gcode_artifacts(
         ).map_err(|e| e.to_string())?;
 
         let id = format!("img-{}-{}-{}", unix_seconds(), nanos, std::process::id());
+        let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
         let gcode_path = root.join(format!("{id}.gcode"));
         std::fs::write(&gcode_path, gcode_str.as_bytes()).map_err(|e| e.to_string())?;
 
@@ -2634,6 +3340,7 @@ fn generate_image_or_gcode_artifacts(
         let gcode_sha = hex::encode(sha2::Sha256::digest(gcode_str.as_bytes()));
 
         let mut res = serde_json::Map::new();
+        res.insert("actual_params".into(), params.json());
         res.insert("image_file".into(), serde_json::Value::String(img_name));
         res.insert("gcode_file".into(), serde_json::Value::String(gcode_name));
         res.insert("gcode_sha256".into(), serde_json::Value::String(gcode_sha));
@@ -3033,6 +3740,17 @@ fn handle_workflow_store_request(
                 .unwrap_or_else(|| serde_json::json!({}));
             let mut input = object.clone();
             input.remove("_artifacts");
+            if let Err(error) =
+                validate_material_safety_in_payload(&serde_json::Value::Object(input.clone()))
+            {
+                return http_json(
+                    400,
+                    failure(
+                        error,
+                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                    ),
+                );
+            }
 
             let gcode_name = artifacts.get("gcode_file").and_then(|v| v.as_str()).unwrap_or("");
             let gcode_sha = artifacts.get("gcode_sha256").and_then(|v| v.as_str()).unwrap_or("");
@@ -3119,6 +3837,15 @@ fn handle_workflow_store_request(
             }) else {
                 return http_json(404, failure("未找到 workflow", None));
             };
+            if let Err(error) = validate_material_safety_in_payload(&stored.payload) {
+                return http_json(
+                    400,
+                    failure(
+                        error,
+                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                    ),
+                );
+            }
 
             let status = stored
                 .status
@@ -3159,7 +3886,7 @@ fn handle_workflow_store_request(
             let gcode_path = preflight.gcode_path.clone().unwrap_or_default();
             let mut resume_object = object.clone();
             resume_object.insert("start_from_line".into(), serde_json::json!(lines_sent));
-            let send_result = match launch(&workflow_id, gcode_path, &resume_object) {
+            let send_result = match launch(&workflow_id, gcode_path, &gcode_sha, &resume_object) {
                 Ok(value) => value,
                 Err((status, body)) => return http_json(status, body),
             };
@@ -3199,6 +3926,15 @@ fn handle_workflow_store_request(
                             ),
                         );
                     }
+                    if let Err(error) = validate_material_safety_in_payload(&stored.payload) {
+                        return http_json(
+                            400,
+                            failure(
+                                error,
+                                Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                            ),
+                        );
+                    }
 
                     let current_status = stored
                         .status
@@ -3234,7 +3970,7 @@ fn handle_workflow_store_request(
                     }
 
                     let gcode_path = preflight.gcode_path.clone().unwrap_or_default();
-                    let send_result = match launch(&workflow_id, gcode_path, object) {
+                    let send_result = match launch(&workflow_id, gcode_path, &gcode_sha, object) {
                         Ok(value) => value,
                         Err((status, body)) => return http_json(status, body),
                     };
@@ -3304,6 +4040,17 @@ fn handle_workflow_request(
                 .unwrap_or_else(|| serde_json::json!({}));
             let mut input = object.clone();
             input.remove("_artifacts");
+            if let Err(error) =
+                validate_material_safety_in_payload(&serde_json::Value::Object(input.clone()))
+            {
+                return http_json(
+                    400,
+                    failure(
+                        error,
+                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                    ),
+                );
+            }
 
             let gcode_name = artifacts.get("gcode_file").and_then(|v| v.as_str()).unwrap_or("");
             let gcode_sha = artifacts.get("gcode_sha256").and_then(|v| v.as_str()).unwrap_or("");
@@ -3372,6 +4119,15 @@ fn handle_workflow_request(
             let Some(record) = records.get_mut(&workflow_id) else {
                 return http_json(404, failure("未找到 workflow", None));
             };
+            if let Err(error) = validate_material_safety_in_payload(record) {
+                return http_json(
+                    400,
+                    failure(
+                        error,
+                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                    ),
+                );
+            }
             let has_snapshot = record.get("confirmation_snapshot").is_some_and(|v| !v.is_null())
                 || record.get("artifacts").and_then(|a| a.get("gcode_file")).and_then(|f| f.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
                 || record.get("input").and_then(|i| i.get("gcode_file")).and_then(|f| f.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
@@ -3415,7 +4171,7 @@ fn handle_workflow_request(
             }
 
             let gcode_path = preflight.gcode_path.clone().unwrap_or_default();
-            let send_result = match launch(&workflow_id, gcode_path, object) {
+            let send_result = match launch(&workflow_id, gcode_path, &gcode_sha, object) {
                 Ok(value) => value,
                 Err((status, body)) => return http_json(status, body),
             };
@@ -3438,6 +4194,15 @@ fn handle_workflow_request(
             let Some(record) = records.get_mut(&workflow_id) else {
                 return http_json(404, failure("未找到 workflow", None));
             };
+            if let Err(error) = validate_material_safety_in_payload(record) {
+                return http_json(
+                    400,
+                    failure(
+                        error,
+                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                    ),
+                );
+            }
 
             let status = record.get("status").and_then(|v| v.as_str());
             if status == Some("sending") {
@@ -3478,7 +4243,7 @@ fn handle_workflow_request(
             let mut resume_obj = object.clone();
             resume_obj.insert("start_from_line".into(), serde_json::json!(lines_sent));
 
-            let send_result = match launch(&workflow_id, gcode_path, &resume_obj) {
+            let send_result = match launch(&workflow_id, gcode_path, &gcode_sha, &resume_obj) {
                 Ok(value) => value,
                 Err((status, body)) => return http_json(status, body),
             };
@@ -3507,6 +4272,39 @@ fn load_material_library(
         }
         Err(error) => Err(format!("读取材料库失败: {error}")),
     }
+}
+
+fn validate_material_safety(material: &str) -> Result<(), String> {
+    match laser_core::safety::evaluate_material(material) {
+        laser_core::safety::MaterialSafety::Allow => Ok(()),
+        laser_core::safety::MaterialSafety::Block { .. } => Err(
+            "材料安全门禁拒绝：PVC/聚氯乙烯及明确危险材料禁止激光加工".into(),
+        ),
+        laser_core::safety::MaterialSafety::Clarify { .. } => Err(
+            "材料成分不明确：请先确认材料不是塑料或其他危险材料".into(),
+        ),
+    }
+}
+
+fn material_from_payload(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("material")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| payload.get("input").and_then(|v| v.get("material")).and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            payload
+                .get("confirmation_snapshot")
+                .and_then(|v| v.get("material"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn validate_material_safety_in_payload(payload: &serde_json::Value) -> Result<(), String> {
+    if let Some(material) = material_from_payload(payload) {
+        validate_material_safety(material)?;
+    }
+    Ok(())
 }
 
 fn material_library_export_value(library: &laser_contracts::MaterialLibrary) -> serde_json::Value {
@@ -3924,14 +4722,438 @@ fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-fn http_options() -> Vec<u8> {
-    "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, Accept\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        .as_bytes()
-        .to_vec()
+/// 浏览器来源白名单（技术书 §6.5）：Tauri 2 内嵌页。
+const TAURI_ORIGINS: [&str; 2] = ["http://tauri.localhost", "tauri://localhost"];
+/// 前端开发 / 预览端口（`frontend/package.json` 的 5177、5178，Vite 默认 5173）；仅回环请求时允许。
+const DEV_LOOPBACK_ORIGINS: [&str; 6] = [
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:5177",
+    "http://localhost:5177",
+    "http://127.0.0.1:5178",
+    "http://localhost:5178",
+];
+const CORS_ALLOW_METHODS: &str = "GET, POST, PUT, DELETE, OPTIONS";
+const CORS_ALLOW_HEADERS: &str = "Content-Type, Authorization, Accept, X-Moss-Desktop-Session";
+
+/// 判断浏览器 `Origin` 是否允许跨源访问。精确匹配 scheme + host + port，不做前缀或大小写归一。
+///
+/// 允许：Tauri 内嵌页；与请求 `Host` 同源（MOSS 自己提供的页面，含局域网访问）；
+/// 回环请求下的前端开发端口；`extra`（`MOSS_ALLOWED_ORIGINS`）。
+pub fn is_allowed_origin(
+    origin: &str,
+    host_header: Option<&str>,
+    loopback: bool,
+    extra: &[String],
+) -> bool {
+    if origin.is_empty() || origin != origin.trim() || origin == "null" {
+        return false;
+    }
+    if TAURI_ORIGINS.contains(&origin) {
+        return true;
+    }
+    if loopback && DEV_LOOPBACK_ORIGINS.contains(&origin) {
+        return true;
+    }
+    if extra.iter().any(|item| item == origin) {
+        return true;
+    }
+    if let Some(host) = host_header.map(str::trim).filter(|host| !host.is_empty()) {
+        if origin
+            .strip_prefix("http://")
+            .or_else(|| origin.strip_prefix("https://"))
+            .is_some_and(|rest| rest == host)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 回环连接的 `Host` 白名单（防 DNS 重绑定，技术书 §6.5）。
+///
+/// 允许：IPv4 / 方括号 IPv6 字面量、`localhost`（不区分大小写），以及 `extra_origins`
+/// （`MOSS_ALLOWED_ORIGINS`）里出现的主机名。端口可有可无，但必须是数字。
+/// 只对回环连接生效：非回环连接本来就要 Bearer 鉴权，局域网主机名访问不受影响。
+pub fn is_allowed_loopback_host(host: &str, extra_origins: &[String]) -> bool {
+    let Some(name) = host_name_without_port(host.trim()) else {
+        return false;
+    };
+    if name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    if let Some(inner) = name.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        return inner.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    extra_origins.iter().any(|origin| {
+        origin
+            .split_once("://")
+            .and_then(|(_, rest)| host_name_without_port(rest))
+            .is_some_and(|extra| extra.eq_ignore_ascii_case(name))
+    })
+}
+
+/// 去掉 `Host` 中的端口；格式不合法（空、端口非数字、未加方括号的 IPv6）时返回 `None`。
+fn host_name_without_port(host: &str) -> Option<&str> {
+    if host.is_empty() {
+        return None;
+    }
+    let (name, port) = if host.starts_with('[') {
+        let end = host.find(']')?;
+        let rest = &host[end + 1..];
+        let port = match rest {
+            "" => None,
+            _ => Some(rest.strip_prefix(':')?),
+        };
+        (&host[..=end], port)
+    } else {
+        match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        }
+    };
+    if name.is_empty() || name == "[]" {
+        return None;
+    }
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+    }
+    Some(name)
+}
+
+/// 局域网（手机）连接不允许的“参考数据”写操作（技术书 §9.8）：材料库增删改与导入、校准单元格存为推荐参数、系统设置、
+/// Jev 密钥测试与查看。雕刻机操作（连接、预览、发送、走边框、急停、安全动作）与只读查询不受影响。
+pub fn is_reference_data_write(method: &str, route: &str, body: &[u8]) -> bool {
+    if method != "POST" {
+        return false;
+    }
+    match route {
+        // select-cell 会把校准单元格保存为材料推荐参数
+        "/api/settings" | "/api/jev/test" | "/api/jev/reveal" | "/api/material-lab/select-cell" => true,
+        "/api/material-lab/manage" => {
+            let action = serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .and_then(|value| value.get("action").and_then(|a| a.as_str()).map(str::to_owned));
+            // 只有导出是只读；解析失败或缺 action 一律按写入拒绝
+            action.as_deref() != Some("export")
+        }
+        _ => false,
+    }
+}
+
+/// 本机用于局域网通信的 IPv4 地址：对外“连接”一个 UDP 套接字（不发送任何数据包）后读本地地址。
+/// 没有网络或只有回环时返回空。
+fn primary_lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+/// 构造调用方上下文：进程内调用方显式给出的优先；否则回环 → `Loopback`，局域网配对 → `Lan`。
+fn caller_context_for(
+    ctx_override: Option<laser_contracts::CallerContext>,
+    loopback: bool,
+    pairing_id: Option<String>,
+) -> laser_contracts::CallerContext {
+    if let Some(ctx) = ctx_override {
+        return ctx;
+    }
+    match (loopback, pairing_id) {
+        (false, Some(pairing_id)) => laser_contracts::CallerContext::Lan { pairing_id },
+        // 非回环且未鉴权只可能访问公开 GET 路由，不触发任何需要身份的动作
+        (false, None) => laser_contracts::CallerContext::Lan { pairing_id: String::new() },
+        (true, _) => laser_contracts::CallerContext::Loopback,
+    }
+}
+
+/// 请求体里的身份类字段一律删除（技术书 §6.4 规则 1，验收 A-36）：身份只由入口构造，不能自报。
+const IDENTITY_FIELDS: [&str; 6] = [
+    "caller_context",
+    "caller",
+    "_caller",
+    "desktop_session",
+    "approval_id",
+    "gateway_session",
+];
+
+/// 审批卡上的发送摘要（技术书 §9.5.2）：内容、材料、参数与发送方式；不含文件路径与设备地址。
+fn send_approval_summary(
+    label: &str,
+    record_id: &str,
+    facts: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let mut parts = vec![format!("{label} {record_id}")];
+    if let Some(material) = facts.get("material").and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()) {
+        match facts.get("thickness_mm").and_then(|v| v.as_f64()) {
+            Some(thickness) => parts.push(format!("{material} {thickness} mm")),
+            None => parts.push(material.to_owned()),
+        }
+    }
+    if let Some(params) = facts.get("params").and_then(|v| v.as_object()) {
+        let mut items = Vec::new();
+        for (key, label) in [("power", "功率"), ("laser_max_power", "最大功率"), ("feed_rate", "速度"), ("passes", "遍数")] {
+            if let Some(value) = params.get(key).filter(|v| !v.is_null()) {
+                items.push(format!("{label} {value}"));
+            }
+        }
+        if !items.is_empty() {
+            parts.push(items.join("，"));
+        }
+    }
+    if let Some(mode) = facts.get("send_mode").and_then(|v| v.as_str()) {
+        parts.push(if mode == "sd_offline" { "脱机 SD 卡加工".into() } else { "逐行发送".into() });
+    }
+    if let Some(line) = facts.get("start_from_line").and_then(|v| v.as_u64()) {
+        parts.push(format!("从第 {line} 行继续"));
+    }
+    parts.join("；")
+}
+
+fn safe_action_approval_summary(action: &str, facts: &serde_json::Map<String, serde_json::Value>) -> String {
+    let label = match action {
+        "unlock" => "解锁 $X",
+        "home" => "回原点 $H",
+        "set_origin" => "设置工作原点",
+        "absolute_move" => "移动到绝对坐标",
+        "relative_move" => "相对移动",
+        other if other.contains("plus") || other.contains('+') => "提高进给或功率倍率",
+        _ => "设备动作",
+    };
+    let coords: Vec<String> = ["x", "y", "z", "feed_rate", "power"]
+        .iter()
+        .filter_map(|key| facts.get(*key).map(|value| format!("{key}={value}")))
+        .collect();
+    if coords.is_empty() {
+        format!("安全动作：{label}（{action}）")
+    } else {
+        format!("安全动作：{label}（{action}）；{}", coords.join("，"))
+    }
+}
+
+fn framing_approval_summary(facts: &serde_json::Map<String, serde_json::Value>) -> String {
+    let value = |key: &str, default: &str| facts.get(key).map(|v| v.to_string()).unwrap_or_else(|| default.to_owned());
+    format!(
+        "走边框：X {}..{}，Y {}..{} mm；速度 {}，功率 {}",
+        value("min_x", "0"),
+        value("max_x", "100"),
+        value("min_y", "0"),
+        value("max_y", "100"),
+        value("feed_rate", "2000"),
+        value("power", "1"),
+    )
+}
+
+/// 经审批执行安全动作时，用审批保存的连接参数覆盖请求中的连接字段。
+fn apply_connection_to_safe_action(
+    args: &mut laser_contracts::LaserSafeActionArgs,
+    connection: &laser_contracts::ApprovalConnection,
+) {
+    args.connection_mode = Some(connection.mode().to_owned());
+    match connection {
+        laser_contracts::ApprovalConnection::Home { .. } => { args.host = None; args.port = None; args.telnet_port = None; },
+        laser_contracts::ApprovalConnection::Agent { .. } => { args.host = None; args.port = None; args.telnet_port = None; },
+        laser_contracts::ApprovalConnection::External { .. } => { args.host = None; args.port = None; }
+        laser_contracts::ApprovalConnection::Network { host, port } => {
+            args.host = Some(host.clone());
+            args.telnet_port = Some(i32::from(*port));
+            args.port = None;
+        }
+        laser_contracts::ApprovalConnection::Serial { port, baud_rate } => {
+            args.port = Some(port.clone());
+            args.baudrate = i32::try_from(*baud_rate).ok();
+            args.host = None;
+        }
+    }
+}
+
+fn strip_identity_fields(object: &mut serde_json::Map<String, serde_json::Value>) {
+    for key in IDENTITY_FIELDS {
+        object.remove(key);
+    }
+}
+
+fn request_head(request: &[u8]) -> std::borrow::Cow<'_, str> {
+    let end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or(request.len());
+    String::from_utf8_lossy(&request[..end])
+}
+
+fn header_value(head: &str, name: &str) -> Option<String> {
+    head.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_owned())
+    })
+}
+
+fn cors_header_block(origin: &str) -> String {
+    format!(
+        "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: {CORS_ALLOW_METHODS}\r\nAccess-Control-Allow-Headers: {CORS_ALLOW_HEADERS}\r\n"
+    )
+}
+
+/// 在状态行之后插入允许来源的 CORS 头。响应构造函数本身不再输出任何 CORS 头。
+fn with_cors_headers(response: Vec<u8>, origin: &str) -> Vec<u8> {
+    let Some(line_end) = response.windows(2).position(|window| window == b"\r\n") else {
+        return response;
+    };
+    let mut out = Vec::with_capacity(response.len() + 256);
+    out.extend_from_slice(&response[..line_end + 2]);
+    out.extend_from_slice(cors_header_block(origin).as_bytes());
+    out.extend_from_slice(&response[line_end + 2..]);
+    out
+}
+
+/// `OPTIONS` 响应：允许来源时带 CORS 头与缓存时长；无 `Origin` 时只返回空 200。
+fn http_options(origin: Option<&str>) -> Vec<u8> {
+    let cors = origin
+        .map(|origin| format!("{}Access-Control-Max-Age: 86400\r\n", cors_header_block(origin)))
+        .unwrap_or_default();
+    format!("HTTP/1.1 200 OK\r\n{cors}Content-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
 }
 
 fn http_json(status: u16, body: serde_json::Value) -> Vec<u8> {
     http_json_with_headers(status, body, &[])
+}
+
+fn normalize_mcp_endpoint(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.contains('<')
+        || !(value.starts_with("ws://") || value.starts_with("wss://"))
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+/// `/api/system/info` 的 `voice` 字段：`{mode, device_sessions}`。设备会话数只在自建与内置链路下有意义
+/// （自建来自接入点健康检查，内置来自内置语音服务）；未知时为 null。
+fn voice_status_json(runtime_path: Option<&std::path::Path>) -> serde_json::Value {
+    let settings = read_runtime_settings(runtime_path);
+    let mode = match settings.get("voice").and_then(|voice| voice.get("mode")).and_then(serde_json::Value::as_str) {
+        Some("self_hosted") => "self_hosted",
+        Some("builtin") => "builtin",
+        _ => "official",
+    };
+    let sessions = if mode != "official" {
+        laser_contracts::global_voice_telemetry()
+            .device_sessions()
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Null
+    };
+    serde_json::json!({"mode": mode, "device_sessions": sessions})
+}
+
+fn read_runtime_settings(runtime_path: Option<&std::path::Path>) -> serde_json::Map<String, serde_json::Value> {
+    runtime_path
+        .map(|path| path.join("settings.json"))
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn persist_runtime_setting(runtime_path: Option<&std::path::Path>, key: &str, value: serde_json::Value) {
+    let Some(runtime_path) = runtime_path else { return };
+    let settings_file = runtime_path.join("settings.json");
+    let mut current = read_runtime_settings(Some(runtime_path));
+    current.insert(key.to_owned(), value);
+    if let Ok(data) = serde_json::to_vec_pretty(&current) {
+        let _ = std::fs::write(settings_file, data);
+    }
+}
+
+fn remove_runtime_setting(runtime_path: Option<&std::path::Path>, key: &str) {
+    let Some(runtime_path) = runtime_path else { return };
+    let settings_file = runtime_path.join("settings.json");
+    let mut current = read_runtime_settings(Some(runtime_path));
+    current.remove(key);
+    if let Ok(data) = serde_json::to_vec_pretty(&current) {
+        let _ = std::fs::write(settings_file, data);
+    }
+}
+
+fn mask_secret(value: &str) -> String {
+    let value = value.trim();
+    if value.len() <= 8 {
+        return "••••••••".to_owned();
+    }
+    let prefix_len = value.len().min(5);
+    let suffix_len = value.len().min(4);
+    format!(
+        "{}••••••••{}",
+        &value[..prefix_len],
+        &value[value.len() - suffix_len..]
+    )
+}
+
+/// `/api/system/info` 的 `mcp` 段：只反映真实配置与真实遥测（技术书 §9.5.3，验收 A-72）。
+///
+/// - `configured`：是否配置了接入点地址；
+/// - `connected`：桥当前是否与接入点保持连接；
+/// - `client_info` / `last_request` / `recent_events` / `messages_count`：没有真实数据时为空 / 0；
+/// - `tools_count`：当前开关下实际暴露的工具数（安全模式 19，开发者模式 20）。
+fn mcp_status_json(
+    endpoint: Option<&str>,
+    telemetry: &laser_contracts::McpTelemetrySnapshot,
+    tools_count: usize,
+) -> serde_json::Value {
+    let endpoint_display = endpoint
+        .map(|ep| match ep.split_once("token=") {
+            Some((head, _)) => format!("{head}token=***"),
+            None => ep.to_owned(),
+        })
+        .unwrap_or_default();
+    let client_info = match (telemetry.client_name.is_empty(), telemetry.client_version.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => telemetry.client_name.clone(),
+        (false, false) => format!("{} v{}", telemetry.client_name, telemetry.client_version),
+    };
+    serde_json::json!({
+        "configured": endpoint.is_some(),
+        "connected": telemetry.connected,
+        "endpoint": endpoint_display,
+        "client_info": client_info,
+        "last_request": telemetry.last_request,
+        "last_request_time": telemetry.last_request_time,
+        "messages_count": telemetry.messages_count,
+        "tools_count": tools_count,
+        "protocol_version": "2024-11-05",
+        "recent_events": telemetry.recent_events,
+        // 各接入点的连接状态（NV8 多接入点；地址已脱敏）
+        "endpoints": telemetry.endpoints.iter().map(|link| serde_json::json!({
+            "id": link.id,
+            "endpoint": link.endpoint,
+            "connected": link.connected,
+            "connections": link.connections,
+            "last_error": link.last_error,
+        })).collect::<Vec<_>>(),
+        "core_tool": "laser_workflow_tool",
+        "safety_gate": "强制物理 SHA-256 指纹比对",
+        "estop_channel": "0x18 软复位 (优先中断级)"
+    })
+}
+
+fn configured_mcp_endpoint(runtime_path: Option<&std::path::Path>) -> Option<String> {
+    let saved = runtime_path
+        .map(|path| path.join("settings.json"))
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value.get("mcp_endpoint").and_then(|item| item.as_str()).map(str::to_owned));
+    saved
+        .as_deref()
+        .and_then(normalize_mcp_endpoint)
+        .or_else(|| std::env::var("MCP_ENDPOINT").ok().and_then(|value| normalize_mcp_endpoint(&value)))
 }
 
 fn http_json_with_headers(
@@ -3942,15 +5164,20 @@ fn http_json_with_headers(
     let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{\"success\":false}".to_vec());
     let reason = match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
+        410 => "Gone",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "HTTP",
     };
     let mut headers = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, Accept\r\n"
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\n"
     );
     for (key, value) in extra_headers {
         headers.push_str(&format!("{key}: {value}\r\n"));
@@ -3974,7 +5201,7 @@ fn http_bytes_with_disposition(
         None => String::new(),
     };
     format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{disp_header}Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, Accept\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{disp_header}Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         bytes.len()
     ).into_bytes().into_iter().chain(bytes).collect()
 }
@@ -4228,6 +5455,12 @@ mod tests {
     }
 
     #[test]
+    fn jev_key_is_masked_without_leaking_the_middle() {
+        assert_eq!(mask_secret("sk-1234567890"), "sk-12••••••••7890");
+        assert_eq!(mask_secret("short"), "••••••••");
+    }
+
+    #[test]
     fn api_service_dispatches_health_config_materials_and_404() {
         let service = ApiService::new(
             laser_runtime::LaserSettings {
@@ -4388,6 +5621,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn material_safety_gate_rejects_pvc_and_unknown_plastic() {
+        assert!(validate_material_safety("PVC")
+            .unwrap_err()
+            .contains("PVC"));
+        assert!(validate_material_safety("塑料")
+            .unwrap_err()
+            .contains("成分不明确"));
+        assert!(validate_material_safety("椴木").is_ok());
+    }
+
+    #[test]
+    fn workflow_preview_applies_material_safety_gate_with_and_without_store() {
+        for use_store in [true, false] {
+            let mut service = ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            );
+            if use_store {
+                service = service.with_store(std::sync::Arc::new(
+                    laser_runtime::MemoryStore::new(),
+                ));
+            }
+
+            let blocked = post_json(
+                &service,
+                "/api/workflow",
+                &serde_json::json!({
+                    "action": "preview",
+                    "source_type": "text",
+                    "text": "MOSS",
+                    "material": "PVC",
+                    "thickness_mm": 3
+                }),
+            );
+            assert_eq!(blocked["success"], false, "{blocked}");
+            assert_eq!(blocked["detail"]["error_code"], "material_safety_blocked");
+        }
+    }
+
     fn fake_transport_factory(ok_lines: usize) -> TransportFactory {
         struct ResponsiveGrbl {
             responses: std::sync::Mutex<std::collections::VecDeque<String>>,
@@ -4478,7 +5751,8 @@ mod tests {
             let file = temp.path().join("job.gcode");
             std::fs::write(&file, "M4 S100\nG1 X1 F100\nM5\n").unwrap();
             let object = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23});
-            let (code, response) = service.launch_send_job("test-preflight", file, object.as_object().unwrap()).unwrap_err();
+            let sha = hex::encode(Sha256::digest(std::fs::read(&file).unwrap()));
+            let (code, response) = service.launch_send_job("test-preflight", file, &sha, object.as_object().unwrap(), &laser_contracts::CallerContext::Loopback).unwrap_err();
             assert_eq!(code, 400);
             assert_eq!(response["detail"]["error_code"], "device_preflight_failed");
             assert_eq!(observed.lines(), ["$$", "$CD"]);
@@ -4498,7 +5772,8 @@ mod tests {
         let file = temp.path().join("job.gcode");
         std::fs::write(&file, "M4 S1000\nG1 X1 F100\nM5\n").unwrap();
         let object = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23});
-        let res = service.launch_send_job("test-255-adaptive", file, object.as_object().unwrap()).unwrap();
+        let sha = hex::encode(Sha256::digest(std::fs::read(&file).unwrap()));
+        let res = service.launch_send_job("test-255-adaptive", file, &sha, object.as_object().unwrap(), &laser_contracts::CallerContext::Loopback).unwrap();
         assert_eq!(res["success"], true);
     }
 
@@ -4612,6 +5887,45 @@ mod tests {
     }
 
     #[test]
+    fn send_rejects_gcode_changed_after_first_sha_check_without_writing_job_lines() {
+        for use_store in [true, false] {
+            for offline_sd in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let base_factory = recording_transport_factory(200_000, written.clone());
+                let gcode_path = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+                let path_for_factory = gcode_path.clone();
+                let factory: TransportFactory = std::sync::Arc::new(move |spec| {
+                    let path = path_for_factory.lock().unwrap().clone().unwrap();
+                    std::fs::write(path, b"M4 S1000\nG1 X999 Y999 F100\nM5\n").unwrap();
+                    base_factory(spec)
+                });
+                let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+                    .with_generated_root(temp.path().to_path_buf())
+                    .with_transport_factory(factory);
+                if use_store {
+                    service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                }
+                let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
+                    "text": "SHA", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+                }));
+                assert_eq!(preview["success"], true, "{preview}");
+                let workflow_id = preview["result"]["workflow_id"].as_str().unwrap();
+                *gcode_path.lock().unwrap() = Some(temp.path().join(preview["result"]["artifacts"]["gcode_file"].as_str().unwrap()));
+                let send = post_json(&service, "/api/workflow", &serde_json::json!({
+                    "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+                    "connection_mode": "network", "network_host": "127.0.0.1",
+                    "network_telnet_port": 23, "offline_sd": offline_sd
+                }));
+                assert_eq!(send["detail"]["error_code"], "send_gate_rejected", "{send}");
+                assert!(written.lock().unwrap().iter().all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")),
+                    "校验失败不能写入 G-code、SD 启动或执行同步命令: {:?}", written.lock().unwrap());
+                assert_eq!(service.active_job_count(), 0);
+            }
+        }
+    }
+
+    #[test]
     fn auth_challenge_is_loopback_only_and_issued_code_pairs_remote_client() {
         let auth = std::sync::Arc::new(AuthManager::new());
         let service = ApiService::new(
@@ -4627,10 +5941,13 @@ mod tests {
         .with_auth(auth.clone());
         let challenge_request =
             b"POST /v1/auth/challenge HTTP/1.1\r\nHost: remote\r\nContent-Length: 0\r\n\r\n";
-        let denied = service.handle_http_from(challenge_request, false, "10.0.0.8");
+        let denied = service.handle_http_from(challenge_request, false, "10.0.0.8", None);
         assert!(String::from_utf8_lossy(&denied).starts_with("HTTP/1.1 403"));
 
-        let issued = service.handle_http_from(challenge_request, true, "127.0.0.1");
+        // 本机客户端以 127.0.0.1 访问（回环连接的 Host 须通过 DNS 重绑定校验）。
+        let local_challenge =
+            b"POST /v1/auth/challenge HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nContent-Length: 0\r\n\r\n";
+        let issued = service.handle_http_from(local_challenge, true, "127.0.0.1", None);
         assert!(String::from_utf8_lossy(&issued).starts_with("HTTP/1.1 200 OK"));
         let payload = parse_json_response(&issued);
         let code = payload["result"]["pairing_code"].as_str().unwrap().to_owned();
@@ -4644,7 +5961,7 @@ mod tests {
             body.len(),
             body
         );
-        let paired = service.handle_http_from(pair.as_bytes(), false, "10.0.0.8");
+        let paired = service.handle_http_from(pair.as_bytes(), false, "10.0.0.8", None);
         assert!(String::from_utf8_lossy(&paired).starts_with("HTTP/1.1 200 OK"));
         assert!(parse_json_response(&paired)["result"]["token"].as_str().is_some());
     }
@@ -4773,6 +6090,13 @@ mod tests {
             },
             laser_contracts::builtin_material_library(),
         );
+        // A release EXE must serve the embedded React page from /. Prior
+        // builds returned a 404 JSON error because the embedded dist was stale.
+        let home = service.handle_http(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let page = String::from_utf8_lossy(&home);
+        assert!(page.starts_with("HTTP/1.1 200 OK"));
+        assert!(page.contains("<div id=\"root\"></div>"));
+        assert!(page.contains("/assets/"));
         let index = service.handle_http(b"GET /draw HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert!(String::from_utf8_lossy(&index).starts_with("HTTP/1.1 200 OK"));
         assert!(String::from_utf8_lossy(&index).contains("text/html"));
@@ -5272,7 +6596,9 @@ mod tests {
         server.join().unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"status\":\"ok\""));
-        assert!(response.contains("Access-Control-Allow-Origin: *"));
+        // 不带 Origin（非浏览器客户端）：不输出任何 CORS 头，绝不出现通配符。
+        assert!(!response.contains("Access-Control-Allow-"));
+        assert!(!response.contains("Allow-Origin: *"));
     }
 
     #[test]
@@ -5290,9 +6616,470 @@ mod tests {
         let request = b"OPTIONS /api/draw/preview HTTP/1.1\r\nHost: localhost\r\nOrigin: http://tauri.localhost\r\n\r\n";
         let response = String::from_utf8(service.handle_http(request)).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"));
-        assert!(response.contains("Access-Control-Allow-Origin: *"));
-        assert!(response.contains("Access-Control-Allow-Methods"));
+        assert!(response.contains("Access-Control-Allow-Origin: http://tauri.localhost\r\n"));
+        assert!(response.contains("Vary: Origin"));
+        assert!(response.contains("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS"));
+        assert!(response.contains(
+            "Access-Control-Allow-Headers: Content-Type, Authorization, Accept, X-Moss-Desktop-Session"
+        ));
+        assert!(response.contains("Access-Control-Max-Age: 86400"));
+        assert!(!response.contains("Allow-Origin: *"));
+
+        // 不允许的来源：预检 403，且不带任何 CORS 头。
+        let denied = b"OPTIONS /api/draw/preview HTTP/1.1\r\nHost: localhost\r\nOrigin: http://evil.example\r\n\r\n";
+        let denied = String::from_utf8(service.handle_http(denied)).unwrap();
+        assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+        assert!(denied.contains("origin_not_allowed"));
+        assert!(!denied.contains("Access-Control-Allow-"));
     }
+
+    fn cors_test_service() -> ApiService {
+        ApiService::new(
+            laser_runtime::LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 9666,
+                material_params_file: None,
+            },
+            laser_contracts::builtin_material_library(),
+        )
+    }
+
+    #[test]
+    fn allowed_origin_rules_are_exact() {
+        let none: Vec<String> = Vec::new();
+        // 允许项
+        assert!(is_allowed_origin("http://tauri.localhost", Some("127.0.0.1:9666"), true, &none));
+        assert!(is_allowed_origin("tauri://localhost", Some("127.0.0.1:9666"), false, &none));
+        assert!(is_allowed_origin("http://127.0.0.1:9666", Some("127.0.0.1:9666"), true, &none));
+        assert!(is_allowed_origin("http://192.0.2.10:9666", Some("192.0.2.10:9666"), false, &none));
+        for dev in [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:5177",
+            "http://localhost:5177",
+            "http://127.0.0.1:5178",
+            "http://localhost:5178",
+        ] {
+            assert!(is_allowed_origin(dev, Some("127.0.0.1:9666"), true, &none), "{dev}");
+            // 非回环请求下开发端口不放行
+            assert!(!is_allowed_origin(dev, Some("192.0.2.10:9666"), false, &none), "{dev}");
+        }
+        let extra = vec!["http://lab.example:8080".to_owned()];
+        assert!(is_allowed_origin("http://lab.example:8080", Some("127.0.0.1:9666"), false, &extra));
+
+        // 拒绝项
+        for bad in [
+            "http://tauri.localhost.evil.com",
+            "http://evil.com",
+            "null",
+            "",
+            " http://tauri.localhost",
+            "HTTP://TAURI.LOCALHOST",
+            "http://Tauri.localhost",
+            "http://tauri.localhost:8080",
+            "https://tauri.localhost",
+            "http://127.0.0.1:9667",
+            "http://lab.example:8081",
+            "http://lab.example",
+        ] {
+            assert!(!is_allowed_origin(bad, Some("127.0.0.1:9666"), true, &extra), "{bad:?}");
+        }
+        // 没有 Host 时不能靠同源放行
+        assert!(!is_allowed_origin("http://127.0.0.1:9666", None, true, &none));
+        assert!(!is_allowed_origin("http://127.0.0.1:9666", Some(""), true, &none));
+    }
+
+    #[test]
+    fn disallowed_origin_post_is_rejected_before_routing() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+        let body = r#"{"web_port":9888}"#;
+        for content_type in ["application/json", "text/plain"] {
+            let request = format!(
+                "POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: http://evil.example\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let response = String::from_utf8(service.handle_http(request.as_bytes())).unwrap();
+            assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+            assert!(response.contains("\"error_code\":\"origin_not_allowed\""));
+            assert!(!response.contains("Access-Control-Allow-"));
+            // 业务未执行：settings.json 未被写入
+            assert!(!temp.path().join("settings.json").exists());
+        }
+
+        let workflow = r#"{"action":"status","workflow_id":""}"#;
+        let request = format!(
+            "POST /api/workflow HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: http://evil.example\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{workflow}",
+            workflow.len()
+        );
+        let response = String::from_utf8(service.handle_http(request.as_bytes())).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        assert!(service.workflows.lock().unwrap().is_empty());
+
+        // 不带 Origin 的同一请求行为不变
+        let request = format!(
+            "POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = String::from_utf8(service.handle_http(request.as_bytes())).unwrap();
+        assert!(response.contains("\"success\":true"), "{response}");
+        assert!(!response.contains("Access-Control-Allow-"));
+        assert!(std::fs::read_to_string(temp.path().join("settings.json")).unwrap().contains("9888"));
+    }
+
+    #[test]
+    fn caller_context_is_built_by_entry_never_from_body() {
+        use laser_contracts::CallerContext;
+        assert_eq!(caller_context_for(None, true, None), CallerContext::Loopback);
+        assert_eq!(
+            caller_context_for(None, false, Some("pair_1".into())),
+            CallerContext::Lan { pairing_id: "pair_1".into() }
+        );
+        assert_eq!(
+            caller_context_for(Some(CallerContext::McpBridge), true, None),
+            CallerContext::McpBridge
+        );
+        // A-36：请求体伪造的身份字段被删除，其余业务字段保留
+        let mut object = serde_json::json!({
+            "action": "status",
+            "workflow_id": "wf-1",
+            "caller_context": "Desktop",
+            "caller": "desktop",
+            "_caller": {"kind": "approval"},
+            "desktop_session": "forged",
+            "approval_id": "apr_forged",
+            "gateway_session": "forged"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        strip_identity_fields(&mut object);
+        let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["action", "workflow_id"]);
+    }
+
+    #[test]
+    fn settings_route_never_accepts_export_dir() {
+        // 技术书 §9.7.3：导出目录只能由桌面壳经系统选择框修改，HTTP 接口不接受
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("settings.json"),
+            br#"{"export":{"dir":"D:\\exports","ask_each_time":false}}"#,
+        )
+        .unwrap();
+        let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+        let body = r#"{"export":{"dir":"C:\\Windows\\System32","ask_each_time":true},"export.dir":"C:\\evil"}"#;
+        let request = format!(
+            "POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = service.handle_http(request.as_bytes());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["export"]["dir"], "D:\\exports");
+        assert_eq!(saved["export"]["ask_each_time"], false);
+        assert!(saved.get("export.dir").is_none());
+
+        // 后端写其他设置时保留桌面壳写入的 export 键
+        let port = r#"{"web_port":9777}"#;
+        let request = format!(
+            "POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nContent-Length: {}\r\n\r\n{port}",
+            port.len()
+        );
+        let _ = service.handle_http(request.as_bytes());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["web_port"], 9777);
+        assert_eq!(saved["export"]["dir"], "D:\\exports");
+    }
+
+    #[test]
+    fn mcp_status_reports_only_real_telemetry() {
+        // A-72：已配置但从未连接——不得出现任何编造值
+        let empty = laser_contracts::McpTelemetrySnapshot::default();
+        let status = mcp_status_json(Some("wss://example.test/mcp/?token=secret"), &empty, 19);
+        assert_eq!(status["configured"], true);
+        assert_eq!(status["connected"], false);
+        assert_eq!(status["endpoint"], "wss://example.test/mcp/?token=***");
+        assert_eq!(status["client_info"], "");
+        assert_eq!(status["last_request"], "");
+        assert_eq!(status["messages_count"], 0);
+        assert_eq!(status["recent_events"], serde_json::json!([]));
+        assert_eq!(status["tools_count"], 19);
+        assert!(!status.to_string().contains("xz-mcp-broker"));
+        assert!(!status.to_string().contains("16:00:02"));
+
+        // 未配置
+        let unconfigured = mcp_status_json(None, &empty, 20);
+        assert_eq!(unconfigured["configured"], false);
+        assert_eq!(unconfigured["endpoint"], "");
+        assert_eq!(unconfigured["tools_count"], 20);
+
+        // 已连接：原样反映真实遥测
+        let live = laser_contracts::McpTelemetrySnapshot {
+            connected: true,
+            client_name: "client-a".into(),
+            client_version: "1.2".into(),
+            last_request: "tools/list (查询工具列表)".into(),
+            last_request_time: "10:00:00".into(),
+            messages_count: 4,
+            recent_events: vec!["10:00:00 [RECV] initialize (client: client-a v1.2)".into()],
+            endpoints: vec![laser_contracts::EndpointLink {
+                id: "primary".into(),
+                endpoint: "wss://example.test/mcp/".into(),
+                connected: true,
+                connections: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let status = mcp_status_json(Some("wss://example.test/mcp/"), &live, 19);
+        assert_eq!(status["connected"], true);
+        assert_eq!(status["client_info"], "client-a v1.2");
+        assert_eq!(status["messages_count"], 4);
+        assert_eq!(status["recent_events"].as_array().unwrap().len(), 1);
+        // NV8：各接入点的状态
+        assert_eq!(status["endpoints"][0]["id"], "primary");
+        assert_eq!(status["endpoints"][0]["connections"], 2);
+        assert_eq!(empty_endpoints(&mcp_status_json(None, &empty, 19)), 0);
+    }
+
+    fn empty_endpoints(status: &serde_json::Value) -> usize {
+        status["endpoints"].as_array().map(Vec::len).unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn system_info_tools_count_matches_actual_catalog() {
+        let service = cors_test_service();
+        let value = parse_json_response(&service.handle_http(
+            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        let expected = laser_tools::ToolCatalog::from_environment().specs().len();
+        assert_eq!(value["result"]["mcp"]["tools_count"], expected);
+        assert_eq!(value["result"]["voice"]["mode"], "official");
+        assert!(value["result"]["voice"]["device_sessions"].is_null());
+        // NV8：关闭的工具不计入
+        service.set_disabled_tools(["material_params_tool".to_owned(), "laser_safe_action_tool".to_owned()]);
+        let value = parse_json_response(&service.handle_http(
+            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        assert_eq!(value["result"]["mcp"]["tools_count"], expected - 1, "停止类工具不能关闭，只少一个");
+    }
+
+    /// 技术书 §9.4.6 / A-68：语音中心只以桌面端 Tauri 命令提供，HTTP 后端（含 `moss-host serve`
+    /// 与 Android）没有 `/v1/voice/*`；自建模式下顶栏读取语音中心写入的设备会话数（§9.5.3）。
+    #[test]
+    fn voice_routes_are_not_served_over_http_and_system_info_reads_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+        for raw in [
+            &b"GET /v1/voice/status HTTP/1.1\r\nHost: localhost\r\n\r\n"[..],
+            &b"GET /v1/voice/server/log?tail=200 HTTP/1.1\r\nHost: localhost\r\n\r\n"[..],
+        ] {
+            let response = service.handle_http(raw);
+            assert!(
+                String::from_utf8_lossy(&response).starts_with("HTTP/1.1 404"),
+                "{}",
+                String::from_utf8_lossy(&response)
+            );
+        }
+        std::fs::write(temp.path().join("settings.json"), br#"{"voice":{"mode":"self_hosted"}}"#).unwrap();
+        laser_contracts::global_voice_telemetry().set_device_sessions(Some(0));
+        let value = parse_json_response(&service.handle_http(
+            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        laser_contracts::global_voice_telemetry().set_device_sessions(None);
+        assert_eq!(value["result"]["voice"]["mode"], "self_hosted");
+        assert_eq!(value["result"]["voice"]["device_sessions"], 0);
+        // 内置链路（NV5）：会话数来自内置语音服务
+        std::fs::write(temp.path().join("settings.json"), br#"{"voice":{"mode":"builtin"}}"#).unwrap();
+        laser_contracts::global_voice_telemetry().set_device_sessions(Some(2));
+        let builtin = parse_json_response(&service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        laser_contracts::global_voice_telemetry().set_device_sessions(None);
+        assert_eq!(builtin["result"]["voice"]["mode"], "builtin");
+        assert_eq!(builtin["result"]["voice"]["device_sessions"], 2);
+        std::fs::write(temp.path().join("settings.json"), br#"{"voice":{"mode":"self_hosted"}}"#).unwrap();
+        // 未知（未配置健康检查或查询失败）时为 null，不猜
+        let value = parse_json_response(&service.handle_http(
+            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        assert!(value["result"]["voice"]["device_sessions"].is_null());
+    }
+
+    #[test]
+    fn serial_ports_route_reports_enumerated_ports_and_first_as_default() {
+        let service = cors_test_service().with_serial_port_lister(std::sync::Arc::new(|| {
+            vec!["COM3".to_owned(), "COM7".to_owned()]
+        }));
+        let value = parse_json_response(&service.handle_http(
+            b"GET /api/ui/serial-ports HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        assert_eq!(value["success"], true);
+        assert_eq!(value["result"]["ports"], serde_json::json!(["COM3", "COM7"]));
+        assert_eq!(value["result"]["default_port"], "COM3");
+        assert_eq!(value["result"]["baudrate"], 115200);
+    }
+
+    #[test]
+    fn loopback_host_rules_block_dns_rebinding_names() {
+        let none: Vec<String> = Vec::new();
+        for ok in [
+            "127.0.0.1",
+            "127.0.0.1:9666",
+            "localhost",
+            "LOCALHOST:9666",
+            "192.0.2.10:9666",
+            "[::1]",
+            "[::1]:9666",
+        ] {
+            assert!(is_allowed_loopback_host(ok, &none), "{ok}");
+        }
+        for bad in [
+            "",
+            "evil.example",
+            "evil.example:9666",
+            "127.0.0.1.evil.example:9666",
+            "localhost.evil.example",
+            "127.0.0.1:abc",
+            "127.0.0.1:",
+            "::1",
+            "[::1",
+            "[]:9666",
+            "[evil]:9666",
+            "[::1]x",
+        ] {
+            assert!(!is_allowed_loopback_host(bad, &none), "{bad:?}");
+        }
+        let extra = vec!["http://moss-lab.example:8080".to_owned()];
+        assert!(is_allowed_loopback_host("moss-lab.example:9666", &extra));
+        assert!(is_allowed_loopback_host("MOSS-LAB.example", &extra));
+        assert!(!is_allowed_loopback_host("other.example", &extra));
+    }
+
+    #[test]
+    fn dns_rebinding_request_is_rejected_before_routing() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+        let body = r#"{"web_port":9888}"#;
+        // 重绑定后浏览器认为同源：Origin 与 Host 都是攻击者域名，且对端是回环地址。
+        for origin_header in ["Origin: http://evil.example:9666\r\n", ""] {
+            let request = format!(
+                "POST /api/settings HTTP/1.1\r\nHost: evil.example:9666\r\n{origin_header}Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let response = String::from_utf8(service.handle_http(request.as_bytes())).unwrap();
+            assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+            assert!(response.contains("\"error_code\":\"host_not_allowed\""));
+            assert!(!response.contains("Access-Control-Allow-"));
+            assert!(!temp.path().join("settings.json").exists());
+        }
+        // 读接口同样拦截（重绑定页面同源，可读响应）
+        let read = String::from_utf8(service.handle_http(
+            b"GET /api/system/info HTTP/1.1\r\nHost: evil.example:9666\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(read.starts_with("HTTP/1.1 403"), "{read}");
+        assert!(!read.contains("actual_port"));
+
+        // 非回环连接不做 Host 校验（仍由 Bearer 鉴权保护），局域网主机名访问公开页面不受影响。
+        let lan = String::from_utf8(service.handle_http_from(
+            b"GET /api/health HTTP/1.1\r\nHost: moss-pc.lan:9666\r\n\r\n",
+            false,
+            "192.0.2.20",
+            None,
+        ))
+        .unwrap();
+        assert!(lan.starts_with("HTTP/1.1 200 OK"), "{lan}");
+
+        // 不带 Host 的本机非浏览器请求照常
+        let no_host = String::from_utf8(service.handle_http(b"GET /api/health HTTP/1.1\r\n\r\n")).unwrap();
+        assert!(no_host.starts_with("HTTP/1.1 200 OK"), "{no_host}");
+    }
+
+    #[test]
+    fn disallowed_origin_get_is_served_without_cors_headers() {
+        let service = cors_test_service();
+        let response = String::from_utf8(service.handle_http(
+            b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: http://evil.example\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(!response.contains("Access-Control-Allow-"));
+    }
+
+    #[test]
+    fn dev_origin_is_rejected_for_non_loopback_peer() {
+        let service = cors_test_service();
+        let request = b"POST /api/workflow HTTP/1.1\r\nHost: 192.0.2.10:9666\r\nOrigin: http://127.0.0.1:5177\r\nContent-Length: 2\r\n\r\n{}";
+        let response = String::from_utf8(service.handle_http_from(request, false, "192.0.2.20", None)).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        assert!(!response.contains("Access-Control-Allow-"));
+    }
+
+    #[test]
+    fn allowed_origin_is_echoed_on_every_response_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let generated = temp.path().join("generated");
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(generated.join("probe.gcode"), "G0 X0\n").unwrap();
+        let service = cors_test_service()
+            .with_generated_root(generated.clone())
+            .with_preview_roots(vec![generated.clone()])
+            .with_allowed_origins(vec!["http://lab.example:8080".into()]);
+        let origin = "http://tauri.localhost";
+        let expect_cors = |response: &[u8], origin: &str| {
+            let text = String::from_utf8_lossy(response).into_owned();
+            let head = text.split("\r\n\r\n").next().unwrap().to_owned();
+            assert!(head.starts_with("HTTP/1.1 "), "{head}");
+            assert!(head.contains(&format!("\r\nAccess-Control-Allow-Origin: {origin}\r\n")), "{head}");
+            assert!(head.contains("\r\nVary: Origin\r\n"), "{head}");
+            assert_eq!(head.matches("Access-Control-Allow-Origin").count(), 1, "{head}");
+            assert!(!head.contains("Allow-Origin: *"));
+        };
+
+        // JSON
+        let json = service.handle_http(
+            format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n").as_bytes(),
+        );
+        expect_cors(&json, origin);
+        // 额外来源（MOSS_ALLOWED_ORIGINS）
+        let extra = service.handle_http(
+            b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: http://lab.example:8080\r\n\r\n",
+        );
+        expect_cors(&extra, "http://lab.example:8080");
+        // 静态页面（同源）
+        let page = service.handle_http(
+            b"GET /draw HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: http://127.0.0.1:9666\r\n\r\n",
+        );
+        expect_cors(&page, "http://127.0.0.1:9666");
+        // SSE
+        let sse = service.handle_http(
+            format!("GET /v1/events?workflow_id=wf-1 HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n").as_bytes(),
+        );
+        assert!(String::from_utf8_lossy(&sse).contains("text/event-stream"));
+        expect_cors(&sse, origin);
+        // 文件下载 / 预览（二进制响应）
+        let path = generated.join("probe.gcode");
+        let preview = service.handle_http(
+            format!(
+                "GET /preview?path={} HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n",
+                percent_encode(path.to_string_lossy().as_ref())
+            )
+            .as_bytes(),
+        );
+        let preview_text = String::from_utf8_lossy(&preview).into_owned();
+        assert!(preview_text.starts_with("HTTP/1.1 200 OK"), "{preview_text}");
+        assert!(preview_text.ends_with("G0 X0\n"), "{preview_text}");
+        expect_cors(&preview, origin);
+        // OPTIONS
+        let options = service.handle_http(
+            format!("OPTIONS /api/workflow HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n").as_bytes(),
+        );
+        expect_cors(&options, origin);
+    }
+
 
     #[test]
     fn system_info_and_settings_routes_work() {
@@ -5322,6 +7109,26 @@ mod tests {
 
         let saved = std::fs::read_to_string(temp.path().join("settings.json")).unwrap();
         assert!(saved.contains("9888"));
+
+        let endpoint = "wss://example.test/mcp/?token=secret";
+        let body = format!(r#"{{"mcp_endpoint":"{endpoint}"}}"#);
+        let request = format!(
+            "POST /api/settings HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let resp_endpoint = String::from_utf8(service.handle_http(request.as_bytes())).unwrap();
+        assert!(resp_endpoint.contains("\"success\":true"));
+        let saved = std::fs::read_to_string(temp.path().join("settings.json")).unwrap();
+        assert!(saved.contains(endpoint));
+
+        let invalid = br#"POST /api/settings HTTP/1.1
+Host: localhost
+Content-Length: 30
+
+{"mcp_endpoint":"http://invalid"}"#;
+        let resp_invalid = String::from_utf8(service.handle_http(invalid)).unwrap();
+        assert!(resp_invalid.contains("\"success\":false"));
     }
 
     #[test]
@@ -5424,6 +7231,7 @@ mod tests {
             b"GET /api/ui/material-options HTTP/1.1\r\nHost: remote\r\n\r\n",
             false,
             "10.0.0.8",
+            None,
         );
         assert!(String::from_utf8_lossy(&denied).starts_with("HTTP/1.1 401 Unauthorized"));
 
@@ -5433,7 +7241,7 @@ mod tests {
             body.len(),
             body
         );
-        let paired = service.handle_http_from(request.as_bytes(), false, "10.0.0.8");
+        let paired = service.handle_http_from(request.as_bytes(), false, "10.0.0.8", None);
         let paired_text = String::from_utf8_lossy(&paired);
         assert!(paired_text.starts_with("HTTP/1.1 200 OK"));
         let payload_start = paired
@@ -5445,6 +7253,92 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&paired[payload_start..]).unwrap();
         assert!(payload["result"]["token"].as_str().is_some());
         assert!(payload["result"]["pairing_id"].as_str().is_some());
+    }
+
+    #[test]
+    fn reference_data_writes_are_classified() {
+        assert!(is_reference_data_write("POST", "/api/settings", b"{}"));
+        assert!(is_reference_data_write("POST", "/api/jev/reveal", b""));
+        assert!(is_reference_data_write("POST", "/api/material-lab/select-cell", b"{}"));
+        assert!(is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"save"}"#));
+        assert!(is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"import"}"#));
+        assert!(is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"delete"}"#));
+        assert!(is_reference_data_write("POST", "/api/material-lab/manage", b"not json"));
+        assert!(!is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"export"}"#));
+        for route in [
+            "/api/text-task/generate",
+            "/api/draw/preview",
+            "/api/workflow",
+            "/api/safe-action",
+            "/api/device/framing",
+            "/api/connection/check",
+            "/api/material-lab/preview",
+            "/api/material-lab/send",
+            "/api/upload",
+        ] {
+            assert!(!is_reference_data_write("POST", route, b"{}"), "{route}");
+        }
+        assert!(!is_reference_data_write("GET", "/api/settings", b""));
+    }
+
+    #[test]
+    fn paired_lan_client_cannot_change_materials_or_settings_but_loopback_can() {
+        let auth = std::sync::Arc::new(AuthManager::new());
+        let challenge = auth.issue_code(unix_seconds()).unwrap();
+        let (token, _) = auth.pair("10.0.0.8", &challenge.code, unix_seconds()).unwrap();
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_auth(auth.clone());
+        let post = |route: &str, body: &str, loopback: bool| {
+            let request = format!(
+                "POST {route} HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            String::from_utf8_lossy(&service.handle_http_from(request.as_bytes(), loopback, "10.0.0.8", None)).into_owned()
+        };
+        for (route, body) in [
+            ("/api/material-lab/manage", r#"{"action":"save","material":"x"}"#),
+            ("/api/material-lab/manage", r#"{"action":"delete","material":"x","confirmed":true}"#),
+            ("/api/settings", r#"{"lan_access":true}"#),
+            ("/api/jev/reveal", "{}"),
+            ("/api/material-lab/select-cell", r#"{"calibration_id":"c","cell_number":1}"#),
+        ] {
+            let response = post(route, body, false);
+            assert!(response.starts_with("HTTP/1.1 403"), "{route}: {response}");
+            assert!(response.contains("lan_read_only"), "{route}: {response}");
+        }
+        // 导出与雕刻机操作不被只读规则拦截（是否成功由各自逻辑决定，这里只断言不是 lan_read_only）
+        for (route, body) in [
+            ("/api/material-lab/manage", r#"{"action":"export"}"#),
+            ("/api/material-lab/preview", "{}"),
+        ] {
+            let response = post(route, body, false);
+            assert!(!response.contains("lan_read_only"), "{route}: {response}");
+        }
+        // 电脑本机不受影响
+        let response = post("/api/settings", r#"{"lan_access":"yes"}"#, true);
+        assert!(!response.contains("lan_read_only"), "{response}");
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    }
+
+    #[test]
+    fn lan_info_is_loopback_only() {
+        let auth = std::sync::Arc::new(AuthManager::new());
+        let challenge = auth.issue_code(unix_seconds()).unwrap();
+        let (token, _) = auth.pair("10.0.0.8", &challenge.code, unix_seconds()).unwrap();
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_auth(auth.clone());
+        let request = format!("GET /api/system/lan-info HTTP/1.1\r\nHost: 10.0.0.2:9666\r\nAuthorization: Bearer {token}\r\n\r\n");
+        let remote = String::from_utf8_lossy(&service.handle_http_from(request.as_bytes(), false, "10.0.0.8", None)).into_owned();
+        assert!(remote.starts_with("HTTP/1.1 403"), "{remote}");
+        let local = String::from_utf8_lossy(&service.handle_http_from(
+            b"GET /api/system/lan-info HTTP/1.1\r\nHost: 127.0.0.1:9666\r\n\r\n",
+            true,
+            "127.0.0.1",
+            None,
+        ))
+        .into_owned();
+        assert!(local.starts_with("HTTP/1.1 200"), "{local}");
+        assert!(local.contains("\"lan_access_active\":false"), "{local}");
     }
 
     fn mask_golden_dynamic_fields(value: &mut serde_json::Value) {
@@ -5627,7 +7521,9 @@ mod tests {
         )
         .with_upload_root(upload_dir)
         .with_generated_root(generated_dir.clone())
-        .with_preview_roots(vec![generated_dir]);
+        .with_preview_roots(vec![generated_dir])
+        // 黄金样本描述“本机没有串口”的基线；真实串口枚举随插入的设备变化，不能进快照。
+        .with_serial_port_lister(std::sync::Arc::new(Vec::<String>::new));
 
         // 1. health
         let res = service.handle_http(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -5705,6 +7601,54 @@ mod tests {
         // 18. bootstrap
         let res = service.handle_http(b"GET /v1/material-lab/bootstrap HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert_golden_bootstrap_response(&res, "get-v1-material-lab-bootstrap.json");
+    }
+
+    #[test]
+    fn unknown_stop_state_keeps_exact_transport_for_retry() {
+        let fake = laser_device::FakeGrbl::new(Vec::<String>::new());
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_transport_factory(std::sync::Arc::new(|_| panic!("retry must not open another device")));
+        service.uncertain_jobs.lock().unwrap().insert("lost-job".into(), std::sync::Arc::new(ActiveJob {
+            workflow_id: "lost-job".into(), mode: "network", target: "fake-a".into(),
+            cancel: Default::default(), progress: Default::default(), transport: std::sync::Arc::new(fake.clone()),
+            started_at: std::time::Instant::now(),
+        }));
+        assert!(service.active_jobs.lock().unwrap().is_empty());
+        let unknown = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"other"}));
+        assert_eq!(unknown["success"], false);
+        assert!(fake.realtime().is_empty());
+        let result = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"lost-job"}));
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(fake.realtime(), vec![0x18]);
+        let res = service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let text = String::from_utf8_lossy(&res);
+        assert!(text.contains("lost-job") && text.contains("unknown"), "{text}");
+    }
+
+    #[test]
+    fn emergency_stop_targets_only_requested_job_and_dry_run_never_writes() {
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_transport_factory(std::sync::Arc::new(|_| panic!("must reuse exact job transport")));
+        let devices: Vec<_> = (0..2).map(|_| laser_device::FakeGrbl::new(Vec::<String>::new())).collect();
+        for (i, device) in devices.iter().enumerate() {
+            service.active_jobs.lock().unwrap().insert(format!("job-{i}"),std::sync::Arc::new(ActiveJob {
+                workflow_id:format!("job-{i}"), mode:"network", target:format!("127.0.0.1:{}",2300+i),
+                cancel:Default::default(), progress:Default::default(), transport:std::sync::Arc::new(device.clone()), started_at:std::time::Instant::now(),
+            }));
+        }
+        for args in [
+            serde_json::json!({"action":"emergency_stop","confirmed":true}),
+            serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"unknown"}),
+            serde_json::json!({"action":"power_plus_10","job_id":"job-0"}),
+            serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"job-0","host":"127.0.0.1","telnet_port":2301}),
+        ] { assert_eq!(post_json(&service,"/api/safe-action",&args)["success"],false); }
+        let dry = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","job_id":"job-1","dry_run":true}));
+        assert_eq!(dry["success"],true);
+        assert!(devices.iter().all(|d| d.realtime().is_empty()));
+        let result = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","job_id":"job-1","confirmed":true}));
+        assert_eq!(result["success"],true);
+        assert!(devices[0].realtime().is_empty());
+        assert_eq!(devices[1].realtime(),vec![0x18]);
     }
 
     #[test]
@@ -5872,5 +7816,901 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    // ----- 严格模式（技术书 §6.2，实施清单 P1-04，验收 A-24..A-27、A-40） -----
+
+    struct StrictFixture {
+        service: ApiService,
+        _temp: tempfile::TempDir,
+        written: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        targets: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        db: Option<std::sync::Arc<std::sync::Mutex<laser_runtime::RuntimeDb>>>,
+    }
+
+    fn strict_fixture(strict: bool, with_approvals: bool) -> StrictFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let targets = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = recording_transport_factory(200_000, written.clone());
+        let targets_for_factory = targets.clone();
+        let factory: TransportFactory = std::sync::Arc::new(move |spec: &laser_device::ConnectionSpec| {
+            targets_for_factory.lock().unwrap().push(spec.describe());
+            base(spec)
+        });
+        let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_generated_root(temp.path().to_path_buf())
+            .with_transport_factory(factory)
+            .with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()))
+            .with_strict_mode(strict);
+        let mut approvals_db = None;
+        if with_approvals {
+            let db = std::sync::Arc::new(std::sync::Mutex::new(laser_runtime::RuntimeDb::open_memory().unwrap()));
+            approvals_db = Some(db.clone());
+            service = service.with_runtime_db(db.clone())
+                .with_approval_service(std::sync::Arc::new(approval::ApprovalService::new(db.clone()).with_ttl_seconds(120)));
+            {
+                let db = db.lock().unwrap();
+                db.voice_device_seen("aa:bb:cc:dd:ee:ff", "test-client", "", "", "", 0.0).unwrap();
+                db.set_voice_device_status("aa:bb:cc:dd:ee:ff", laser_runtime::VOICE_DEVICE_ALLOWED, 0.0).unwrap();
+            }
+            service.register_voice_session("aa:bb:cc:dd:ee:ff", "test-client", "sess-1").unwrap();
+        }
+        StrictFixture { service, _temp: temp, written, targets, db: approvals_db }
+    }
+
+    fn preview_workflow(service: &ApiService) -> String {
+        let preview = post_json(service, "/api/text-task/generate", &serde_json::json!({
+            "text": "STRICT", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+        }));
+        assert_eq!(preview["success"], true, "{preview}");
+        preview["result"]["workflow_id"].as_str().unwrap().to_owned()
+    }
+
+    fn post_with_ctx(
+        service: &ApiService,
+        route: &str,
+        body: &serde_json::Value,
+        ctx: laser_contracts::CallerContext,
+    ) -> (u16, serde_json::Value) {
+        let body = body.to_string();
+        let request = format!(
+            "POST {route} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let raw = service.handle_http_with_ctx(request.as_bytes(), ctx);
+        let status = String::from_utf8_lossy(&raw[9..12]).parse::<u16>().unwrap();
+        (status, parse_json_response(&raw))
+    }
+
+    fn confirm_send_body(workflow_id: &str, host: &str) -> serde_json::Value {
+        serde_json::json!({
+            "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+            "connection_mode": "network", "network_host": host, "network_telnet_port": 23
+        })
+    }
+
+    /// A-24 / A-26：严格模式下本机回环（无桌面会话）的发送、走边框、回原点一律拒绝，且不连接设备。
+    #[test]
+    fn strict_mode_blocks_loopback_r3_without_touching_device() {
+        let fixture = strict_fixture(true, true);
+        let workflow_id = preview_workflow(&fixture.service);
+        let send = post_json(&fixture.service, "/api/workflow", &confirm_send_body(&workflow_id, "127.0.0.1"));
+        assert_eq!(send["detail"]["error_code"], "strict_mode_blocked", "{send}");
+        let framing = post_json(&fixture.service, "/api/device/framing", &serde_json::json!({
+            "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+        }));
+        assert_eq!(framing["detail"]["error_code"], "strict_mode_blocked", "{framing}");
+        let home = post_json(&fixture.service, "/api/safe-action", &serde_json::json!({
+            "action": "home", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
+        }));
+        assert_eq!(home["detail"]["error_code"], "strict_mode_blocked", "{home}");
+        assert!(fixture.targets.lock().unwrap().is_empty(), "未授权的 R3 不得连接设备");
+        assert!(fixture.written.lock().unwrap().is_empty());
+        let status = post_json(&fixture.service, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": workflow_id}));
+        assert_eq!(status["result"]["status"], "preview_ready", "{status}");
+        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty(), "回环不创建审批");
+    }
+
+    /// A-27：急停、软复位、降低倍率、查询状态与取消在严格模式下照常执行。
+    #[test]
+    fn strict_mode_never_blocks_stop_actions() {
+        let fixture = strict_fixture(true, true);
+        for action in ["emergency_stop", "soft_reset", "status", "feed_override_minus_10", "power_reset"] {
+            let (status, response) = post_with_ctx(
+                &fixture.service,
+                "/api/safe-action",
+                &serde_json::json!({"action": action, "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
+                laser_contracts::CallerContext::McpBridge,
+            );
+            assert_ne!(status, 202, "{action}: {response}");
+            assert_ne!(status, 403, "{action}: {response}");
+        }
+        assert!(!fixture.targets.lock().unwrap().is_empty(), "停止类动作照常连接设备");
+        let workflow_id = preview_workflow(&fixture.service);
+        let (status, cancel) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &serde_json::json!({"action": "cancel", "workflow_id": workflow_id}),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_eq!(status, 200, "{cancel}");
+        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+    }
+
+    fn voice_ctx() -> laser_contracts::CallerContext {
+        laser_contracts::CallerContext::Voice { device_id: "aa:bb:cc:dd:ee:ff".into(), session_id: "sess-1".into() }
+    }
+
+    #[test]
+    fn active_job_stop_write_failure_is_not_reported_as_success() {
+        struct FailRealtime;
+        impl laser_device::DeviceTransport for FailRealtime {
+            fn write_line(&self, _: &str) -> Result<(), String> { panic!("stop must bypass G-code") }
+            fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+                assert_eq!(command, laser_device::RealtimeCommand::EmergencyStop);
+                Err("injected realtime failure".into())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> { Ok(None) }
+        }
+        let fixture = strict_fixture(true, true);
+        let cancel = laser_device::CancellationToken::default();
+        fixture.service.active_jobs.lock().unwrap().insert("wf-fail-stop".into(), std::sync::Arc::new(ActiveJob {
+            workflow_id:"wf-fail-stop".into(),mode:"stream",target:"fake".into(),cancel:cancel.clone(),
+            progress:std::sync::Arc::new(laser_device::JobProgress::default()),transport:std::sync::Arc::new(FailRealtime),started_at:std::time::Instant::now(),
+        }));
+        let args = serde_json::from_value(serde_json::json!({"action":"emergency_stop","confirmed":true})).unwrap();
+        let result = fixture.service.handle_safe_action(&args, &voice_ctx());
+        assert!(!result.success && result.result.contains("0x18 发送失败"), "{result:?}");
+        assert!(cancel.is_cancelled());
+    }
+
+    /// 内置语音（NV4，A-20 / A-25 / A-26 在内置链路复测）：严格模式开启时，语音发起的发送与设备动作只生成审批，
+    /// 审批来源为 voice、记录发起设备，审计记为 `voice:<设备>`；批准后以审批身份执行。
+    #[test]
+    fn voice_r3_needs_desktop_approval_in_strict_mode() {
+        let fixture = strict_fixture(true, true);
+        let workflow_id = preview_workflow(&fixture.service);
+        let mut request = confirm_send_body(&workflow_id, "127.0.0.1");
+        request["confirmed"] = serde_json::json!(true);
+        let (status, pending) = post_with_ctx(&fixture.service, "/api/workflow", &request, voice_ctx());
+        assert_eq!(status, 202, "{pending}");
+        assert_eq!(pending["result"]["status"], "approval_required");
+        assert!(fixture.targets.lock().unwrap().is_empty() && fixture.written.lock().unwrap().is_empty(), "未批准不连接设备");
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        let approvals = fixture.service.approvals().unwrap();
+        let record = approvals.get(&approval_id).unwrap();
+        assert_eq!(record.source, laser_contracts::ApprovalSource::Voice);
+        assert_eq!(record.session_id.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        let audit = fixture.db.as_ref().unwrap().lock().unwrap().recent_audit(20).unwrap();
+        assert!(audit.iter().any(|entry| entry.client == "voice:aa:bb:cc:dd:ee:ff"), "{audit:?}");
+
+        let (status, origin) = post_with_ctx(
+            &fixture.service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
+            voice_ctx(),
+        );
+        assert_eq!(status, 202, "设定原点（R3）同样需要审批：{origin}");
+        assert!(fixture.targets.lock().unwrap().is_empty());
+
+        approvals.approve(&approval_id, &record.digest, &record.digest).unwrap();
+        let approval_ctx = laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() };
+        let (status, sent) = post_with_ctx(&fixture.service, "/api/workflow", &request, approval_ctx);
+        assert_eq!(status, 200, "{sent}");
+        assert_eq!(sent["result"]["status"], "sending");
+    }
+
+    /// 严格模式关闭时（2026-10-07 用户决定）：内置语音与官方接入点相同，模型带 confirmed=true 即直接发送，不生成审批。
+    #[test]
+    fn voice_follows_strict_mode_switch_when_off() {
+        let fixture = strict_fixture(false, true);
+        let workflow_id = preview_workflow(&fixture.service);
+        let mut request = confirm_send_body(&workflow_id, "127.0.0.1");
+        request["confirmed"] = serde_json::json!(true);
+        let (status, sent) = post_with_ctx(&fixture.service, "/api/workflow", &request, voice_ctx());
+        assert_eq!(status, 200, "{sent}");
+        assert_eq!(sent["result"]["status"], "sending");
+        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty(), "严格模式关闭不生成审批");
+        let finished = wait_for_status(&fixture.service, &workflow_id, "completed");
+        assert_eq!(finished["result"]["status"], "completed", "{finished}");
+    }
+
+    /// A-27（内置链路）：停止类动作与取消不受影响，不生成审批。
+    #[test]
+    fn revoke_during_preflight_prevents_queued_gcode_from_starting() {
+        let fixture = strict_fixture(false, true);
+        let slot = std::sync::Arc::new(std::sync::OnceLock::<std::sync::Weak<ApiService>>::new());
+        let owner = slot.clone();
+        let written = fixture.written.clone();
+        let factory = recording_transport_factory(100, written.clone());
+        let service = std::sync::Arc::new(fixture.service.with_transport_factory(std::sync::Arc::new(move |spec| {
+            let api = owner.get().unwrap().upgrade().unwrap();
+            api.set_voice_device_status("aa:bb:cc:dd:ee:ff", laser_runtime::VOICE_DEVICE_REVOKED, 0.0).unwrap();
+            factory(spec)
+        })));
+        slot.set(std::sync::Arc::downgrade(&service)).unwrap();
+        let id = preview_workflow(&service);
+        let (status, result) = post_with_ctx(&service, "/api/workflow", &confirm_send_body(&id,"127.0.0.1"), voice_ctx());
+        assert_eq!(status,403,"{result}");
+        assert!(service.active_jobs.lock().unwrap().is_empty());
+        assert!(written.lock().unwrap().iter().all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")), "revoked request must not send machining lines");
+    }
+
+    #[test]
+    fn revoke_during_connect_prevents_safe_motion_and_framing() {
+        for (route, status, body) in [
+            ("/api/safe-action",400,serde_json::json!({"action":"home","confirmed":true,"connection_mode":"network","host":"127.0.0.1"})),
+            ("/api/device/framing",403,serde_json::json!({"confirmed":true,"connection_mode":"network","host":"127.0.0.1","max_x":10,"max_y":10})),
+        ] {
+            let fixture = strict_fixture(false,true);
+            let slot = std::sync::Arc::new(std::sync::OnceLock::<std::sync::Weak<ApiService>>::new());
+            let owner = slot.clone();
+            let written = fixture.written.clone();
+            let factory = recording_transport_factory(100,written.clone());
+            let service = std::sync::Arc::new(fixture.service.with_transport_factory(std::sync::Arc::new(move |spec| {
+                owner.get().unwrap().upgrade().unwrap().set_voice_device_status("aa:bb:cc:dd:ee:ff",laser_runtime::VOICE_DEVICE_REVOKED,0.0).unwrap();
+                factory(spec)
+            })));
+            slot.set(std::sync::Arc::downgrade(&service)).unwrap();
+            let (code,result) = post_with_ctx(&service,route,&body,voice_ctx());
+            assert_eq!(code,status,"{route}: {result}");
+            assert_eq!(result["success"],false);
+            assert!(written.lock().unwrap().iter().all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")),"no motion after revoke");
+        }
+    }
+
+    #[test]
+    fn voice_stop_without_active_job_writes_reset_and_reports_connection_failure() {
+        for strict in [false, true] {
+            let fixture = strict_fixture(strict, true);
+            let fake = laser_device::FakeGrbl::new(Vec::<String>::new());
+            let observed = fake.clone();
+            let service = fixture.service.with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake.clone()))));
+            assert!(service.active_jobs.lock().unwrap().is_empty());
+            let body = serde_json::json!({"action":"emergency_stop","confirmed":true,"connection_mode":"network","host":"127.0.0.1"});
+            let (status, result) = post_with_ctx(&service, "/api/safe-action", &body, voice_ctx());
+            assert_eq!(status, 200, "{result}");
+            assert_eq!(observed.realtime(), vec![0x18]);
+            assert!(observed.lines().is_empty(), "reset must not wait behind handshake/G-code");
+            let service = service.with_transport_factory(std::sync::Arc::new(|_| Err("fake disconnected".into())));
+            let (status, result) = post_with_ctx(&service, "/api/safe-action", &body, voice_ctx());
+            assert_eq!(status, 400);
+            assert_eq!(result["success"], false);
+        }
+    }
+
+    #[test]
+    fn voice_stop_actions_run_immediately() {
+        let fixture = strict_fixture(true, true);
+        for action in ["emergency_stop", "soft_reset", "status"] {
+            let (status, response) = post_with_ctx(
+                &fixture.service,
+                "/api/safe-action",
+                &serde_json::json!({"action": action, "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
+                voice_ctx(),
+            );
+            assert_ne!(status, 202, "{action}: {response}");
+            assert_ne!(status, 403, "{action}: {response}");
+        }
+        assert!(!fixture.targets.lock().unwrap().is_empty(), "停止类动作照常连接设备");
+        let workflow_id = preview_workflow(&fixture.service);
+        let (status, cancel) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &serde_json::json!({"action": "cancel", "workflow_id": workflow_id}),
+            voice_ctx(),
+        );
+        assert_eq!(status, 200, "{cancel}");
+        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+    }
+
+    /// A-25 / A-21：严格模式下小智桥接的发送只生成审批；桌面批准后以审批身份执行，
+    /// 使用审批保存的连接目标而不是执行请求里的地址。
+    #[test]
+    fn strict_mode_turns_bridge_send_into_approval_and_executes_with_saved_target() {
+        let fixture = strict_fixture(true, true);
+        let workflow_id = preview_workflow(&fixture.service);
+        let mut request = confirm_send_body(&workflow_id, "127.0.0.1");
+        request["request_id"] = serde_json::json!("req-1");
+        let (status, pending) =
+            post_with_ctx(&fixture.service, "/api/workflow", &request, laser_contracts::CallerContext::McpBridge);
+        assert_eq!(status, 202, "{pending}");
+        assert_eq!(pending["success"], true);
+        assert_eq!(pending["result"]["status"], "approval_required");
+        assert!(pending["result"]["speech"].as_str().is_some_and(|speech| !speech.is_empty()));
+        assert!(!pending.to_string().contains("127.0.0.1"), "响应不得包含设备地址: {pending}");
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        assert!(fixture.targets.lock().unwrap().is_empty() && fixture.written.lock().unwrap().is_empty());
+        let status_now = post_json(&fixture.service, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": workflow_id}));
+        assert_eq!(status_now["result"]["status"], "preview_ready");
+        let (_, again) =
+            post_with_ctx(&fixture.service, "/api/workflow", &request, laser_contracts::CallerContext::McpBridge);
+        assert_ne!(again["result"]["approval_id"], approval_id.as_str(), "旧桥接身份无法区分接入点，不得按自报编号复用另一条审批");
+        assert!(fixture.targets.lock().unwrap().is_empty(), "两次请求仍都未获执行授权");
+
+        let approval_ctx = laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() };
+        let execute = confirm_send_body(&workflow_id, "192.0.2.99");
+        let (status, early) = post_with_ctx(&fixture.service, "/api/workflow", &execute, approval_ctx.clone());
+        assert_eq!(status, 409, "{early}");
+        assert_eq!(early["detail"]["error_code"], "approval_not_approved");
+
+        let approvals = fixture.service.approvals().unwrap();
+        let record = approvals.get(&approval_id).unwrap();
+        assert_eq!(record.kind, laser_contracts::ApprovalKind::WorkflowConfirmSend);
+        assert_eq!(record.source, laser_contracts::ApprovalSource::McpBridge);
+        assert_eq!(record.target_record, workflow_id);
+        approvals.approve(&approval_id, &record.digest, &record.digest).unwrap();
+
+        let (status, sent) = post_with_ctx(&fixture.service, "/api/workflow", &execute, approval_ctx);
+        assert_eq!(status, 200, "{sent}");
+        assert_eq!(sent["result"]["status"], "sending");
+        assert_eq!(
+            fixture.targets.lock().unwrap().first().map(String::as_str),
+            Some("127.0.0.1:23"),
+            "必须使用审批保存的目标"
+        );
+        let executed = approvals.get(&approval_id).unwrap();
+        assert_eq!(executed.status, laser_contracts::ApprovalStatus::Executed);
+        assert_eq!(executed.outcome.unwrap().job_id.as_deref(), Some(workflow_id.as_str()));
+        let finished = wait_for_status(&fixture.service, &workflow_id, "completed");
+        assert_eq!(finished["result"]["status"], "completed", "{finished}");
+    }
+
+    /// A-23 / A-26：安全动作经局域网发起只生成审批；批准后执行一次，重放得到 approval_consumed。
+    #[test]
+    fn strict_mode_safe_action_approval_is_single_use() {
+        let fixture = strict_fixture(true, true);
+        let body = serde_json::json!({
+            "action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
+        });
+        let lan = laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() };
+        let (status, pending) = post_with_ctx(&fixture.service, "/api/safe-action", &body, lan);
+        assert_eq!(status, 202, "{pending}");
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        assert!(fixture.targets.lock().unwrap().is_empty());
+        let approvals = fixture.service.approvals().unwrap();
+        let record = approvals.get(&approval_id).unwrap();
+        assert_eq!(record.kind, laser_contracts::ApprovalKind::SafeAction);
+        assert_eq!(record.source, laser_contracts::ApprovalSource::Lan);
+        approvals.approve(&approval_id, &record.digest, &record.digest).unwrap();
+
+        let approval_ctx = laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() };
+        let (_, done) = post_with_ctx(&fixture.service, "/api/safe-action", &body, approval_ctx.clone());
+        assert!(
+            fixture.written.lock().unwrap().iter().any(|line| line == "G92 X0 Y0"),
+            "批准后应执行一次: {done}"
+        );
+        let (status, replay) = post_with_ctx(&fixture.service, "/api/safe-action", &body, approval_ctx);
+        assert_eq!(status, 409, "{replay}");
+        assert_eq!(replay["detail"]["error_code"], "approval_consumed");
+
+        // 授权不能挪用到别的动作：要素不同，摘要不一致
+        let (_, second) = post_with_ctx(
+            &fixture.service,
+            "/api/safe-action",
+            &body,
+            laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() },
+        );
+        let second_id = second["result"]["approval_id"].as_str().unwrap().to_owned();
+        let second_record = approvals.get(&second_id).unwrap();
+        approvals.approve(&second_id, &second_record.digest, &second_record.digest).unwrap();
+        let (status, mismatch) = post_with_ctx(
+            &fixture.service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "home", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
+            laser_contracts::CallerContext::Approval { approval_id: second_id.clone() },
+        );
+        assert_eq!(status, 409, "{mismatch}");
+        assert_eq!(mismatch["detail"]["error_code"], "approval_mismatch");
+        assert_eq!(approvals.get(&second_id).unwrap().status, laser_contracts::ApprovalStatus::Failed);
+    }
+
+    #[test]
+    fn strict_mode_allows_desktop_session_and_fails_closed_without_database() {
+        let fixture = strict_fixture(true, true);
+        let workflow_id = preview_workflow(&fixture.service);
+        let (status, sent) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::Desktop,
+        );
+        assert_eq!(status, 200, "{sent}");
+        assert_eq!(sent["result"]["status"], "sending");
+        wait_for_status(&fixture.service, &workflow_id, "completed");
+
+        let no_db = strict_fixture(true, false);
+        let workflow_id = preview_workflow(&no_db.service);
+        let (status, unavailable) = post_with_ctx(
+            &no_db.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_eq!(status, 503, "{unavailable}");
+        assert_eq!(unavailable["detail"]["error_code"], "approval_unavailable");
+        assert!(no_db.targets.lock().unwrap().is_empty());
+    }
+
+    /// A-40：严格模式关闭时，小智桥接与本机回环的发送行为与之前一致，不创建审批。
+    #[test]
+    fn strict_mode_off_keeps_existing_behavior() {
+        let fixture = strict_fixture(false, true);
+        let workflow_id = preview_workflow(&fixture.service);
+        let (status, sent) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_eq!(status, 200, "{sent}");
+        assert_eq!(sent["result"]["status"], "sending");
+        wait_for_status(&fixture.service, &workflow_id, "completed");
+        let home = post_json(&fixture.service, "/api/safe-action", &serde_json::json!({
+            "action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
+        }));
+        assert_ne!(home["detail"]["error_code"], "strict_mode_blocked", "{home}");
+        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+        assert!(!fixture.service.strict_mode());
+    }
+
+    // ----- 桌面会话与桌面审批接口（技术书 §5.3，实施清单 P1-07，验收 A-21、A-22、A-75、A-76） -----
+
+    fn desktop_request(
+        service: &ApiService,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        session: Option<&str>,
+    ) -> (u16, serde_json::Value) {
+        let body = body.map(|value| value.to_string()).unwrap_or_default();
+        let header = session.map(|value| format!("X-Moss-Desktop-Session: {value}\r\n")).unwrap_or_default();
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{header}Content-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let raw = service.handle_http(request.as_bytes());
+        let status = String::from_utf8_lossy(&raw[9..12]).parse::<u16>().unwrap();
+        (status, parse_json_response(&raw))
+    }
+
+    #[test]
+    fn desktop_session_header_is_checked_and_maps_to_desktop_context() {
+        let fixture = strict_fixture(true, true);
+        let workflow_id = preview_workflow(&fixture.service);
+        let send = confirm_send_body(&workflow_id, "127.0.0.1");
+        // 尚未开启桌面会话（如独立 moss-host）：带头即拒绝
+        let (status, rejected) = desktop_request(&fixture.service, "POST", "/api/workflow", Some(&send), Some(&"a".repeat(64)));
+        assert_eq!(status, 403, "{rejected}");
+        assert_eq!(rejected["detail"]["error_code"], "desktop_session_invalid");
+
+        let session = fixture.service.enable_desktop_session().unwrap();
+        assert_eq!(session.len(), 64);
+        assert_eq!(fixture.service.enable_desktop_session().unwrap(), session, "同一进程只有一个会话");
+        let (status, wrong) = desktop_request(&fixture.service, "POST", "/api/workflow", Some(&send), Some(&"b".repeat(64)));
+        assert_eq!(status, 403, "{wrong}");
+        assert_eq!(wrong["detail"]["error_code"], "desktop_session_invalid");
+        assert!(fixture.targets.lock().unwrap().is_empty());
+        // 非回环连接即使带对了值也不算桌面会话
+        assert!(fixture.service.check_desktop_session(&format!("GET / HTTP/1.1\r\nX-Moss-Desktop-Session: {session}"), false).is_err());
+
+        // 严格模式下带有效会话的本机发送 = 桌面端，直接执行
+        let (status, sent) = desktop_request(&fixture.service, "POST", "/api/workflow", Some(&send), Some(&session));
+        assert_eq!(status, 200, "{sent}");
+        assert_eq!(sent["result"]["status"], "sending");
+        wait_for_status(&fixture.service, &workflow_id, "completed");
+    }
+
+    /// A-75：审批接口只接受桌面会话。
+    #[test]
+    fn approval_routes_require_desktop_session() {
+        let fixture = strict_fixture(true, true);
+        let session = fixture.service.enable_desktop_session().unwrap();
+        let (status, response) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=pending", None, None);
+        assert_eq!(status, 403, "{response}");
+        assert_eq!(response["detail"]["error_code"], "desktop_session_required");
+        let (status, _) = post_with_ctx(
+            &fixture.service,
+            "/v1/approvals/apr_x/approve",
+            &serde_json::json!({"digest": "x"}),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_eq!(status, 403);
+        let (status, response) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=bogus", None, Some(&session));
+        assert_eq!(status, 400, "{response}");
+        let (status, response) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=pending", None, Some(&session));
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["result"]["approvals"].as_array().unwrap().len(), 0);
+        assert_eq!(response["result"]["ttl_seconds"], 120);
+        let (status, response) = desktop_request(
+            &fixture.service, "POST", "/v1/approvals/apr_missing/approve", Some(&serde_json::json!({"digest": "x"})), Some(&session),
+        );
+        assert_eq!(status, 404, "{response}");
+        assert_eq!(response["detail"]["error_code"], "approval_not_found");
+    }
+
+    /// A-21：小智发起 → 桌面列表（不含地址）→ 桌面批准 → 以审批身份按保存的目标执行。
+    #[test]
+    fn desktop_approval_executes_bridge_request_with_saved_target() {
+        let fixture = strict_fixture(true, true);
+        let session = fixture.service.enable_desktop_session().unwrap();
+        let workflow_id = preview_workflow(&fixture.service);
+        let (status, pending) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_eq!(status, 202, "{pending}");
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+
+        let (status, listed) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=pending", None, Some(&session));
+        assert_eq!(status, 200, "{listed}");
+        let card = &listed["result"]["approvals"][0];
+        assert_eq!(card["approval_id"], approval_id.as_str());
+        assert_eq!(card["target"]["mode"], "network");
+        assert_eq!(card["target"]["label"], "网络设备");
+        assert!(!listed.to_string().contains("127.0.0.1"), "列表不得包含设备地址: {listed}");
+        let digest = card["digest"].as_str().unwrap().to_owned();
+
+        let approve_path = format!("/v1/approvals/{approval_id}/approve");
+        let (status, wrong) = desktop_request(
+            &fixture.service, "POST", &approve_path, Some(&serde_json::json!({"digest": "0".repeat(64)})), Some(&session),
+        );
+        assert_eq!(status, 409, "{wrong}");
+        assert_eq!(wrong["detail"]["error_code"], "approval_mismatch");
+        assert!(fixture.targets.lock().unwrap().is_empty());
+
+        let (status, approved) =
+            desktop_request(&fixture.service, "POST", &approve_path, Some(&serde_json::json!({"digest": digest})), Some(&session));
+        assert_eq!(status, 200, "{approved}");
+        assert_eq!(approved["result"]["result"]["status"], "sending");
+        assert_eq!(approved["result"]["approval"]["status"], "executed");
+        assert_eq!(fixture.targets.lock().unwrap().first().map(String::as_str), Some("127.0.0.1:23"));
+        let finished = wait_for_status(&fixture.service, &workflow_id, "completed");
+        assert_eq!(finished["result"]["status"], "completed", "{finished}");
+
+        let (status, again) =
+            desktop_request(&fixture.service, "POST", &approve_path, Some(&serde_json::json!({"digest": digest})), Some(&session));
+        assert_eq!(status, 409, "{again}");
+        assert_eq!(again["detail"]["error_code"], "approval_consumed");
+    }
+
+    /// A-22：创建审批后加工内容变化（重新预览），桌面批准得到 approval_mismatch，不执行。
+    #[test]
+    fn desktop_approval_rejects_changed_content() {
+        let fixture = strict_fixture(true, true);
+        let session = fixture.service.enable_desktop_session().unwrap();
+        let workflow_id = preview_workflow(&fixture.service);
+        let (_, pending) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        let digest = fixture.service.approvals().unwrap().get(&approval_id).unwrap().digest;
+
+        let store = fixture.service.store.as_ref().unwrap();
+        let mut stored = store.get(laser_runtime::RecordKind::Workflow, &workflow_id).unwrap().unwrap();
+        stored.payload["artifacts"]["gcode_sha256"] = serde_json::json!("f".repeat(64));
+        store.put(&stored).unwrap();
+
+        let (status, response) = desktop_request(
+            &fixture.service,
+            "POST",
+            &format!("/v1/approvals/{approval_id}/approve"),
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
+        assert_eq!(status, 409, "{response}");
+        assert_eq!(response["detail"]["error_code"], "approval_mismatch");
+        assert_eq!(response["detail"]["approval"]["status"], "pending");
+        assert!(fixture.targets.lock().unwrap().is_empty(), "摘要不一致不得连接设备");
+    }
+
+    #[test]
+    fn desktop_reject_and_safe_action_approval() {
+        let fixture = strict_fixture(true, true);
+        let session = fixture.service.enable_desktop_session().unwrap();
+        let body = serde_json::json!({"action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"});
+        let lan = || laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() };
+
+        let (_, first) = post_with_ctx(&fixture.service, "/api/safe-action", &body, lan());
+        let first_id = first["result"]["approval_id"].as_str().unwrap().to_owned();
+        let (status, rejected) = desktop_request(
+            &fixture.service,
+            "POST",
+            &format!("/v1/approvals/{first_id}/reject"),
+            Some(&serde_json::json!({"reason": "材料没放好"})),
+            Some(&session),
+        );
+        assert_eq!(status, 200, "{rejected}");
+        assert_eq!(rejected["result"]["status"], "rejected");
+        let digest = fixture.service.approvals().unwrap().get(&first_id).unwrap().digest;
+        let (status, after_reject) = desktop_request(
+            &fixture.service,
+            "POST",
+            &format!("/v1/approvals/{first_id}/approve"),
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
+        assert_eq!(status, 409, "{after_reject}");
+        assert_eq!(after_reject["detail"]["error_code"], "approval_rejected");
+        assert!(fixture.targets.lock().unwrap().is_empty());
+
+        let (_, second) = post_with_ctx(&fixture.service, "/api/safe-action", &body, lan());
+        let second_id = second["result"]["approval_id"].as_str().unwrap().to_owned();
+        let digest = fixture.service.approvals().unwrap().get(&second_id).unwrap().digest;
+        let (_, approved) = desktop_request(
+            &fixture.service,
+            "POST",
+            &format!("/v1/approvals/{second_id}/approve"),
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
+        assert!(
+            fixture.written.lock().unwrap().iter().any(|line| line == "G92 X0 Y0"),
+            "批准后应执行设原点: {approved}"
+        );
+        let state = fixture.service.approvals().unwrap().get(&second_id).unwrap().status;
+        assert!(
+            matches!(state, laser_contracts::ApprovalStatus::Executed | laser_contracts::ApprovalStatus::Failed),
+            "{state:?}"
+        );
+    }
+
+    // ----- 审计（技术书 §7.3，实施清单 P1-08，验收 A-20、A-34） -----
+
+    fn audit_trail(fixture: &StrictFixture) -> Vec<laser_contracts::AuditEntry> {
+        let mut entries = fixture.db.as_ref().unwrap().lock().unwrap().recent_audit(100).unwrap();
+        entries.reverse();
+        entries
+    }
+
+    /// A-20：模型带 confirmed=true 发起发送 → 只生成审批，审计记录“删除确认”；
+    /// 桌面批准与执行、回环被拦截都留下审计，且审计不含设备地址。
+    #[test]
+    fn strict_mode_actions_are_audited() {
+        use laser_contracts::{AuditAction, AuditResult};
+        let fixture = strict_fixture(true, true);
+        let session = fixture.service.enable_desktop_session().unwrap();
+        let workflow_id = preview_workflow(&fixture.service);
+
+        let blocked = post_json(&fixture.service, "/api/workflow", &confirm_send_body(&workflow_id, "127.0.0.1"));
+        assert_eq!(blocked["detail"]["error_code"], "strict_mode_blocked");
+
+        let (status, pending) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_eq!(status, 202, "{pending}");
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        let digest = fixture.service.approvals().unwrap().get(&approval_id).unwrap().digest;
+        let (status, approved) = desktop_request(
+            &fixture.service,
+            "POST",
+            &format!("/v1/approvals/{approval_id}/approve"),
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
+        assert_eq!(status, 200, "{approved}");
+        wait_for_status(&fixture.service, &workflow_id, "completed");
+
+        let trail = audit_trail(&fixture);
+        let actions: Vec<AuditAction> = trail.iter().map(|entry| entry.action).collect();
+        assert_eq!(
+            actions,
+            vec![
+                AuditAction::StrictModeBlocked,
+                AuditAction::ApprovalCreated,
+                AuditAction::ConfirmedFieldStripped,
+                AuditAction::ApprovalApproved,
+                AuditAction::ApprovalExecuted,
+            ],
+            "{trail:?}"
+        );
+        assert_eq!(trail[0].client, "local");
+        assert_eq!(trail[0].result, AuditResult::Denied);
+        assert_eq!(trail[0].target, workflow_id);
+        assert_eq!(trail[1].client, "mcp");
+        assert_eq!(trail[2].detail.removed_fields, vec!["confirmed".to_string()]);
+        assert_eq!(trail[3].client, "desktop");
+        assert!(trail[1..].iter().all(|entry| entry.detail.approval_id.as_deref() == Some(approval_id.as_str())));
+        let text = serde_json::to_string(&trail).unwrap();
+        assert!(!text.contains("127.0.0.1"), "审计不得包含设备地址: {text}");
+        // 审批保存的执行参数里也不保留模型自填的 confirmed
+        let stored = fixture.service.approvals().unwrap().get(&approval_id).unwrap();
+        assert!(!stored.request.unwrap().contains_key("confirmed"));
+    }
+
+    /// A-34：审计写入失败时 R3 拒绝（不创建审批、不连接设备），R2 停止类照常执行。
+    #[test]
+    fn audit_failure_refuses_r3_and_keeps_r2() {
+        let fixture = strict_fixture(true, true);
+        fixture.db.as_ref().unwrap().lock().unwrap().connection.execute_batch("DROP TABLE audit_log;").unwrap();
+        let lan = || laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() };
+
+        let (status, refused) = post_with_ctx(
+            &fixture.service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "home", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
+            lan(),
+        );
+        assert_eq!(status, 503, "{refused}");
+        assert_eq!(refused["detail"]["error_code"], "approval_unavailable");
+        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+        assert!(fixture.targets.lock().unwrap().is_empty());
+
+        let (status, stopped) = post_with_ctx(
+            &fixture.service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "emergency_stop", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
+            lan(),
+        );
+        assert!(status != 503 && status != 403 && status != 202, "{stopped}");
+        assert!(!fixture.targets.lock().unwrap().is_empty(), "急停照常连接设备");
+
+        // 回环被拦截时审计也写不进去，但拦截照常生效
+        let blocked = post_json(&fixture.service, "/api/device/framing", &serde_json::json!({
+            "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+        }));
+        assert_eq!(blocked["detail"]["error_code"], "strict_mode_blocked");
+    }
+
+    // ----- 故障场景（技术书 §8，实施清单 P1-10，验收 A-31、A-33） -----
+
+    /// 握手与预检正常，第一条加工行写入时一直阻塞到测试放行：作业确定停在“发送中”，
+    /// 模拟进程崩溃时的在途作业（不依赖心跳或超时的时序）。
+    fn gated_transport_factory(gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> TransportFactory {
+        struct GatedGrbl {
+            responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+            gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl laser_device::DeviceTransport for GatedGrbl {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                if line.starts_with('$') {
+                    let mut responses = self.responses.lock().unwrap();
+                    if line == "$$" {
+                        responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+                    } else {
+                        responses.push_back("ok".into());
+                    }
+                    return Ok(());
+                }
+                while !self.gate.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err("测试结束：模拟连接断开".into())
+            }
+            fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+                if command == laser_device::RealtimeCommand::StatusQuery {
+                    self.responses.lock().unwrap().push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                }
+                Ok(())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                Ok(self.responses.lock().unwrap().pop_front())
+            }
+        }
+        std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
+            Ok(Box::new(GatedGrbl { responses: Default::default(), gate: gate.clone() }) as Box<dyn laser_device::DeviceTransport>)
+        })
+    }
+
+    /// A-33：经审批的发送进行中进程崩溃 → 新进程启动恢复后 workflow 为 failed、审批结果未知，
+    /// 不连接设备、不重放，同一授权不能再用。
+    #[test]
+    fn restart_during_approved_send_marks_result_unknown_and_never_replays() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("moss.sqlite");
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let db1 = std::sync::Arc::new(std::sync::Mutex::new(laser_runtime::RuntimeDb::open(&db_path).unwrap()));
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_generated_root(temp.path().to_path_buf())
+            .with_transport_factory(gated_transport_factory(gate.clone()))
+            .with_runtime_db(db1)
+            .with_strict_mode(true);
+        let session = service.enable_desktop_session().unwrap();
+        let workflow_id = preview_workflow(&service);
+        let (status, pending) = post_with_ctx(
+            &service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_eq!(status, 202, "{pending}");
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        let digest = service.approvals().unwrap().get(&approval_id).unwrap().digest;
+        let (status, approved) = desktop_request(
+            &service,
+            "POST",
+            &format!("/v1/approvals/{approval_id}/approve"),
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
+        assert_eq!(status, 200, "{approved}");
+        assert_eq!(approved["result"]["result"]["status"], "sending");
+        let running = service.approvals().unwrap().get(&approval_id).unwrap();
+        assert_eq!(running.outcome.unwrap().phase, Some(laser_contracts::ApprovalPhase::Running));
+
+        // “崩溃后重启”：新进程打开同一个数据库，按 laser-host 的启动顺序恢复
+        let db2 = laser_runtime::RuntimeDb::open(&db_path).unwrap();
+        db2.recover_after_restart().unwrap();
+        let written_after = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let restarted = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_generated_root(temp.path().to_path_buf())
+            .with_transport_factory(recording_transport_factory(200_000, written_after.clone()))
+            .with_runtime_db(std::sync::Arc::new(std::sync::Mutex::new(db2)))
+            .with_strict_mode(true);
+        assert_eq!(restarted.recover_approvals_after_restart(), 1);
+
+        let record = restarted.approvals().unwrap().get(&approval_id).unwrap();
+        assert_eq!(record.status, laser_contracts::ApprovalStatus::Failed);
+        let outcome = record.outcome.unwrap();
+        assert_eq!(outcome.error_code.as_deref(), Some("result_unknown"));
+        assert_eq!(outcome.phase, Some(laser_contracts::ApprovalPhase::Unknown));
+        let status = post_json(&restarted, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": workflow_id}));
+        assert_eq!(status["result"]["status"], "failed", "{status}");
+
+        // 不重放：重启后的服务没有连接设备；同一授权执行被拒
+        let (status, replay) = post_with_ctx(
+            &restarted,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() },
+        );
+        assert_ne!(status, 200, "{replay}");
+        assert_ne!(replay["result"]["status"], "sending", "{replay}");
+        assert!(written_after.lock().unwrap().is_empty(), "重启后不得向设备写入任何内容");
+        assert_eq!(
+            restarted.approvals().unwrap().consume(&approval_id, &digest).unwrap_err(),
+            approval::ApprovalError::Consumed
+        );
+
+        // 清理：停掉“崩溃前进程”里仍在等待的作业；迟到的回写不覆盖“结果未知”
+        let _ = service.abort_all_active_jobs();
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(
+            restarted.approvals().unwrap().get(&approval_id).unwrap().outcome.unwrap().phase,
+            Some(laser_contracts::ApprovalPhase::Unknown)
+        );
+    }
+
+    /// 经审批的作业正常结束后，审批结果写回“加工完成”。
+    #[test]
+    fn approved_job_completion_is_written_back_to_approval() {
+        let fixture = strict_fixture(true, true);
+        let session = fixture.service.enable_desktop_session().unwrap();
+        let workflow_id = preview_workflow(&fixture.service);
+        let (_, pending) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+            laser_contracts::CallerContext::McpBridge,
+        );
+        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        let digest = fixture.service.approvals().unwrap().get(&approval_id).unwrap().digest;
+        let (status, approved) = desktop_request(
+            &fixture.service,
+            "POST",
+            &format!("/v1/approvals/{approval_id}/approve"),
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
+        assert_eq!(status, 200, "{approved}");
+        wait_for_status(&fixture.service, &workflow_id, "completed");
+        let record = fixture.service.approvals().unwrap().get(&approval_id).unwrap();
+        assert_eq!(record.status, laser_contracts::ApprovalStatus::Executed);
+        let outcome = record.outcome.unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.phase, Some(laser_contracts::ApprovalPhase::Completed));
+        assert_eq!(outcome.job_id.as_deref(), Some(workflow_id.as_str()));
     }
 }

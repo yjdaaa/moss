@@ -1,3 +1,4 @@
+import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import React, { useState, useEffect, useRef } from "react";
 import {
   Layers,
@@ -18,8 +19,11 @@ import {
   Settings2,
 } from "lucide-react";
 import { getJson, postJson, fetchPreviewBlobUrl } from "../api/client.js";
+import { isRemoteMode } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { showAlert } from "../appDialog.js";
+import { exportFile } from "../saveFile.js";
+import { FoldHeader } from "../components/FoldHeader.jsx";
 
 export function MaterialLabPage({ onNavigate }) {
   const [bootstrapData, setBootstrapData] = useState(null);
@@ -68,7 +72,7 @@ export function MaterialLabPage({ onNavigate }) {
   useEffect(() => {
     loadBootstrap();
     return () => {
-      if (matrixPollRef.current) clearInterval(matrixPollRef.current);
+      matrixPollRef.current?.();
     };
   }, []);
 
@@ -120,6 +124,9 @@ export function MaterialLabPage({ onNavigate }) {
       setNotes(cell.notes ?? "");
     }
   };
+
+  // 手机连接电脑 MOSS 时材料与校准结果只读（后端同样拒绝）：修改类按钮不显示，参数只能查看
+  const readOnly = isRemoteMode();
 
   const handleSelectMaterialAndThick = (matName, thickKey) => {
     setSelectedMaterial(matName);
@@ -201,11 +208,12 @@ export function MaterialLabPage({ onNavigate }) {
     try {
       const res = await getJson("/api/material-lab/export");
       if (res.ok && res.data?.success) {
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(res.data.result?.library || {}, null, 2));
-        const dl = document.createElement("a");
-        dl.setAttribute("href", dataStr);
-        dl.setAttribute("download", "lasergrbl_materials.json");
-        dl.click();
+        const blob = new Blob([JSON.stringify(res.data.result?.library || {}, null, 2)], { type: "application/json" });
+        const saved = await exportFile(blob, "lasergrbl_materials.json", "材料库 ");
+        // 桌面端由 exportFile 弹出带“打开所在文件夹”的完成提示；浏览器里由浏览器下载提示
+        if (!saved.path && !saved.cancelled) {
+          showAlert("材料库已导出（见浏览器下载）", { title: "导出完成", tone: "success" });
+        }
       } else {
         showAlert(res.data?.result || "读取材料库失败", { title: "导出失败", tone: "error" });
       }
@@ -315,49 +323,30 @@ export function MaterialLabPage({ onNavigate }) {
     }
   };
 
-  // Poll calibration send progress until a terminal status
+  // One bounded request at a time; loss of contact is not a completed/failed job.
   const startMatrixPolling = (calibrationId) => {
-    if (matrixPollRef.current) clearInterval(matrixPollRef.current);
-    let failures = 0;
-    matrixPollRef.current = setInterval(async () => {
-      try {
-        const res = await postJson("/api/material-lab/status", { calibration_id: calibrationId });
-        if (!(res.ok && res.data?.success)) {
-          failures += 1;
-          if (failures >= 5) {
-            clearInterval(matrixPollRef.current);
-            matrixPollRef.current = null;
-            setMatrixStatus("状态查询连续失败，已停止轮询");
-          }
+    matrixPollRef.current?.();
+    let state = { id:calibrationId, kind:"calibration", status:"sending", progress:null };
+    const stop = startJobPolling(
+      (signal) => postJson("/api/material-lab/status", { calibration_id:calibrationId }, { signal }),
+      (res) => {
+        state = applyJobPoll(state, calibrationId, "calibration", res);
+        if (state.connectionLost) {
+          setMatrixStatus("状态未知：暂时无法查询设备，正在重试；机器可能仍在运行，请到现场确认。");
           return;
         }
-        failures = 0;
-        const record = res.data.result || {};
-        const sr = record.send_result || {};
-        const status = record.status || "sending";
-        setMatrixSendState({ status, lines_sent: sr.lines_sent || 0, total_lines: sr.total_lines || 0, error: sr.error });
-        if (status === "completed" || status === "failed" || status === "cancelled") {
-          clearInterval(matrixPollRef.current);
-          matrixPollRef.current = null;
-          if (status === "completed") {
-            setMatrixStatus(`标定矩阵加工完成 (${sr.lines_sent || 0}/${sr.total_lines || 0} 行已确认)，请观察样板并点选最佳单元格`);
-          } else {
-            setMatrixStatus(`标定矩阵${status === "cancelled" ? "已取消" : "发送失败"}${sr.error ? `: ${sr.error}` : ""}`);
-          }
-        } else {
-          setMatrixStatus(`正在逐行下发 (${sr.lines_sent || 0}/${sr.total_lines || 0} 行)…`);
-        }
-      } catch (_e) {
-        failures += 1;
-        if (failures >= 5) {
-          clearInterval(matrixPollRef.current);
-          matrixPollRef.current = null;
-          setMatrixStatus("网络异常，已停止状态轮询");
-        }
-      }
-    }, 1000);
+        const sr = res.data.result?.send_result || {};
+        setMatrixSendState((previous) => ({ ...previous, status:state.status, lines_sent:state.progress?.sent ?? previous?.lines_sent ?? 0, total_lines:state.progress?.total ?? previous?.total_lines ?? 0, error:sr.error }));
+        if (["completed", "failed", "cancelled"].includes(state.status)) {
+          stop(); matrixPollRef.current = null;
+          setMatrixStatus(state.status === "completed"
+            ? `标定矩阵加工完成 (${sr.lines_sent || 0}/${sr.total_lines || 0} 行已确认)，请观察样板并点选最佳单元格`
+            : `标定矩阵记录为${state.status === "cancelled" ? "已取消" : "发送失败"}，请确认设备状态${sr.error ? `: ${sr.error}` : ""}`);
+        } else { setMatrixStatus(`正在逐行下发 (${state.progress?.sent || 0}/${state.progress?.total || 0} 行)…`); }
+      },
+    );
+    matrixPollRef.current = stop;
   };
-
   // Select Best Cell and Save
   const handleSaveBestCell = async (cellIndex) => {
     if (!matrixId) return;
@@ -390,51 +379,57 @@ export function MaterialLabPage({ onNavigate }) {
   );
 
   return (
-    <div className="material-lab-page" style={{ padding: "16px 24px", maxWidth: "1440px", margin: "0 auto" }}>
-      {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", borderBottom: "1px solid var(--line, #242b35)", paddingBottom: "12px" }}>
-        <div>
-          <div style={{ fontSize: "11px", letterSpacing: "2px", color: "var(--laser, #35e0ff)", textTransform: "uppercase" }}>
-            02 · Material Laboratory
-          </div>
-          <h1 style={{ fontSize: "20px", fontWeight: "bold", margin: "2px 0 0", color: "var(--ink, #fff)" }}>
-            材料参数与<span style={{ color: "var(--laser, #35e0ff)" }}>校准矩阵 Lab</span>
-          </h1>
-          {sourcePath && (
-            <div style={{ fontSize: "12px", color: "var(--ink-dim, #94a3b8)", marginTop: "2px" }}>
-              当前存储源: <span style={{ fontFamily: "var(--font-mono)", color: "var(--ink, #fff)" }}>{sourcePath}</span>
-            </div>
+    <div className="material-lab-page ob-page">
+      {readOnly && (
+        <div role="note" style={{ margin: "0 0 12px", padding: "8px 12px", borderRadius: "6px", fontSize: "12px", background: "rgba(255, 170, 0, 0.08)", border: "1px solid rgba(255, 170, 0, 0.25)", color: "var(--gold)" }}>
+          已连接电脑 MOSS：材料只能查看和用于加工，修改请在电脑上进行。
+        </div>
+      )}
+      {/* 工具条：页面标题已在顶栏；这里保留存储源与库操作 */}
+      <div className="ob-toolbar">
+        <div className="ob-toolbar-info">
+          {sourcePath ? (
+            <>
+              当前存储源: <span className="mono">{sourcePath}</span>
+            </>
+          ) : (
+            <span>材料库 · 校准矩阵</span>
           )}
         </div>
 
         <div style={{ display: "flex", gap: "8px" }}>
-          <button className="btn btn-ghost" onClick={handleSaveRecent} title="从最近的工作流提取材料参数">
-            <Bookmark size={13} style={{ marginRight: 4 }} />
-            套用最近
-          </button>
+          {!readOnly && (
+            <button className="btn btn-ghost" onClick={handleSaveRecent} title="从最近的工作流提取材料参数">
+              <Bookmark size={13} style={{ marginRight: 4 }} />
+              套用最近
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={handleExport} title="导出材料库 JSON">
             <Download size={13} style={{ marginRight: 4 }} />
             导出库
           </button>
-          <label className="btn btn-ghost" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }} title="导入外部材料库">
-            <Upload size={13} style={{ marginRight: 4 }} />
-            导入
-            <input type="file" accept=".json" onChange={handleImportFile} style={{ display: "none" }} />
-          </label>
+          {!readOnly && (
+            <label className="btn btn-ghost" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }} title="导入外部材料库">
+              <Upload size={13} style={{ marginRight: 4 }} />
+              导入
+              <input type="file" accept=".json" onChange={handleImportFile} style={{ display: "none" }} />
+            </label>
+          )}
         </div>
       </div>
 
-      {/* Three Column Grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "280px 1fr 1.1fr", gap: "16px", minHeight: "560px" }}>
+      {/* 三栏：材料库表格、材料参数、校准矩阵（技术书 §9.5.5 B） */}
+      <div className="ob-lab">
         {/* Left Column: Material Tree */}
         <div
-          className="hud-card"
+          className="hud-card ob-card"
           style={{
             padding: "12px",
             display: "flex",
             flexDirection: "column",
           }}
         >
+          <FoldHeader id="lab-library" title="材料库" k="LIBRARY" n={1} />
           <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
             <div style={{ position: "relative", flex: 1 }}>
               <Search size={14} style={{ position: "absolute", left: 8, top: 10, color: "var(--ink-dim, #94a3b8)" }} />
@@ -447,89 +442,87 @@ export function MaterialLabPage({ onNavigate }) {
                 style={{ width: "100%", paddingLeft: "28px", fontSize: "12px" }}
               />
             </div>
-            <button
-              className="btn btn-hud-primary"
-              onClick={() => {
-                setMaterialModalData(null);
-                setShowMaterialModal(true);
-              }}
-              title="添加新材料到材料库"
-              style={{ padding: "4px 8px", fontSize: "12px", display: "flex", alignItems: "center", gap: "2px" }}
-            >
-              <Plus size={13} />
-              <span>新建</span>
-            </button>
+            {!readOnly && (
+              <button
+                className="btn btn-hud-primary"
+                onClick={() => {
+                  setMaterialModalData(null);
+                  setShowMaterialModal(true);
+                }}
+                title="添加新材料到材料库"
+                style={{ padding: "4px 8px", fontSize: "12px", display: "flex", alignItems: "center", gap: "2px" }}
+              >
+                <Plus size={13} />
+                <span>新建</span>
+              </button>
+            )}
           </div>
 
-          <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" }}>
-            {filteredMaterials.map((matName) => {
-              const matObj = materials[matName];
-              const thickKeys = Object.keys(matObj?.thicknesses || {});
-              const isSelected = selectedMaterial === matName;
-
-              return (
-                <div key={matName} style={{ borderRadius: "4px", overflow: "hidden", border: isSelected ? "1px solid rgba(53,224,255,0.3)" : "1px solid transparent" }}>
-                  <div
-                    onClick={() => handleSelectMaterialAndThick(matName, thickKeys[0] || "3")}
-                    style={{
-                      padding: "6px 10px",
-                      background: isSelected ? "rgba(53,224,255,0.12)" : "rgba(0,0,0,0.15)",
-                      cursor: "pointer",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      fontWeight: isSelected ? "bold" : "normal",
-                      color: isSelected ? "var(--laser, #35e0ff)" : "var(--ink, #fff)",
-                      fontSize: "13px",
-                    }}
-                  >
-                    <span>{matName}</span>
-                    <span style={{ fontSize: "11px", color: "var(--ink-dim, #94a3b8)" }}>{thickKeys.length} 档厚度</span>
-                  </div>
-
-                  {isSelected && (
-                    <div style={{ padding: "4px 8px", background: "rgba(0,0,0,0.25)", display: "flex", flexWrap: "wrap", gap: "4px" }}>
-                      {thickKeys.map((th) => (
-                        <button
-                          key={th}
-                          onClick={() => handleSelectMaterialAndThick(matName, th)}
-                          style={{
-                            background: selectedThickness === th ? "var(--laser, #35e0ff)" : "rgba(255,255,255,0.06)",
-                            color: selectedThickness === th ? "#000" : "var(--ink, #fff)",
-                            border: "none",
-                            borderRadius: "3px",
-                            padding: "2px 8px",
-                            fontSize: "11px",
-                            cursor: "pointer",
-                            fontWeight: selectedThickness === th ? "bold" : "normal",
-                          }}
-                        >
-                          {th} mm
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+          <div className="ob-tbl ob-mtbl">
+            <table>
+              <thead>
+                <tr>
+                  <th>材料</th>
+                  <th>厚度</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredMaterials.map((matName) => {
+                  const matObj = materials[matName];
+                  const thickKeys = Object.keys(matObj?.thicknesses || {});
+                  const isSelected = selectedMaterial === matName;
+                  return (
+                    <tr
+                      key={matName}
+                      className={isSelected ? "on" : ""}
+                      onClick={() => handleSelectMaterialAndThick(matName, thickKeys[0] || "3")}
+                      aria-selected={isSelected}
+                    >
+                      <td>
+                        <b>{matName}</b>
+                        <div className="ob-sub">{thickKeys.length} 档厚度</div>
+                      </td>
+                      <td>
+                        <div className="ob-chips">
+                          {thickKeys.map((th) => (
+                            <button
+                              type="button"
+                              key={th}
+                              className={`ob-chip${isSelected && selectedThickness === th ? " on" : ""}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleSelectMaterialAndThick(matName, th);
+                              }}
+                            >
+                              {th} mm
+                            </button>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
 
         {/* Middle Column: Parameter Editor */}
         <div
-          className="hud-card"
+          className="hud-card ob-card"
           style={{
             padding: "16px",
             display: "flex",
             flexDirection: "column",
           }}
         >
+          <FoldHeader id="lab-params" title="材料参数" k="PARAMS" n={2} />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               <h3 style={{ margin: 0, fontSize: "15px", color: "var(--ink, #fff)" }}>
-                {selectedMaterial} · {selectedThickness} mm 参数编辑
+                {selectedMaterial} · {selectedThickness} mm {readOnly ? "参数" : "参数编辑"}
               </h3>
-              <button
+              {!readOnly && (<button
                 className="btn btn-ghost"
                 onClick={() => {
                   const curMat = materials[selectedMaterial];
@@ -547,7 +540,7 @@ export function MaterialLabPage({ onNavigate }) {
               >
                 <Settings2 size={12} />
                 <span>管理材料</span>
-              </button>
+              </button>)}
             </div>
             {editorStatus && (
               <span style={{ fontSize: "12px", color: editorStatus.includes("失败") || editorStatus.includes("异常") ? "var(--danger)" : "var(--green, #10b981)" }}>
@@ -571,9 +564,9 @@ export function MaterialLabPage({ onNavigate }) {
                   flex: 1,
                   fontSize: "12px",
                   padding: "4px 8px",
-                  background: activeMode === m.id ? "rgba(53,224,255,0.15)" : "transparent",
-                  color: activeMode === m.id ? "var(--laser, #35e0ff)" : "var(--ink-dim, #94a3b8)",
-                  border: activeMode === m.id ? "1px solid rgba(53,224,255,0.3)" : "1px solid var(--line, #242b35)",
+                  background: activeMode === m.id ? "rgba(139, 123, 255,0.15)" : "transparent",
+                  color: activeMode === m.id ? "var(--laser, #8b7bff)" : "var(--ink-dim, #94a3b8)",
+                  border: activeMode === m.id ? "1px solid rgba(139, 123, 255,0.3)" : "1px solid var(--line, #242b35)",
                 }}
               >
                 {m.label}
@@ -591,6 +584,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="number"
                 value={minPower}
                 onChange={(e) => setMinPower(Number(e.target.value))}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
               />
@@ -604,6 +598,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="number"
                 value={maxPower}
                 onChange={(e) => setMaxPower(Number(e.target.value))}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
               />
@@ -617,6 +612,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="number"
                 value={feedRate}
                 onChange={(e) => setFeedRate(Number(e.target.value))}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
               />
@@ -630,6 +626,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="number"
                 value={travelRate}
                 onChange={(e) => setTravelRate(Number(e.target.value))}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
               />
@@ -643,6 +640,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="number"
                 value={passes}
                 onChange={(e) => setPasses(Number(e.target.value))}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
               />
@@ -657,6 +655,7 @@ export function MaterialLabPage({ onNavigate }) {
                 step="0.01"
                 value={pixelSize}
                 onChange={(e) => setPixelSize(Number(e.target.value))}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
               />
@@ -670,6 +669,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="number"
                 value={threshold}
                 onChange={(e) => setThreshold(Number(e.target.value))}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
               />
@@ -683,6 +683,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="text"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
+                readOnly={readOnly}
                 className="text-input"
                 style={{ width: "100%" }}
                 placeholder="例如：双面覆膜、浅色木纹..."
@@ -690,28 +691,31 @@ export function MaterialLabPage({ onNavigate }) {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: "8px", marginTop: "16px" }}>
-            <button className="btn btn-primary" onClick={handleSaveParams} style={{ flex: 1 }}>
-              <Save size={14} style={{ marginRight: 4 }} />
-              保存到材料库
-            </button>
-          </div>
+          {!readOnly && (
+            <div style={{ display: "flex", gap: "8px", marginTop: "16px" }}>
+              <button className="btn btn-primary" onClick={handleSaveParams} style={{ flex: 1 }}>
+                <Save size={14} style={{ marginRight: 4 }} />
+                保存到材料库
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Right Column: Calibration Grid Matrix */}
         <div
-          className="hud-card"
+          className="hud-card ob-card"
           style={{
             padding: "16px",
             display: "flex",
             flexDirection: "column",
           }}
         >
+          <FoldHeader id="lab-matrix" title="校准矩阵" k="MATRIX" n={3} />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-            <h3 style={{ margin: 0, fontSize: "15px", color: "var(--ink, #fff)" }}>
-              校准矩阵生成与实机测试
+            <h3 style={{ margin: 0, fontSize: "13px", color: "var(--ink-dim, #b4b4bd)", fontWeight: 500 }}>
+              生成校准矩阵并实机测试
             </h3>
-            <span style={{ fontSize: "12px", color: "var(--laser, #35e0ff)" }}>{matrixStatus}</span>
+            <span style={{ fontSize: "12px", color: "var(--laser, #8b7bff)" }}>{matrixStatus}</span>
           </div>
 
           {/* Matrix Parameters */}
@@ -777,7 +781,7 @@ export function MaterialLabPage({ onNavigate }) {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px" }}>
             <input
               type="text"
               placeholder="设备 host / IP"
@@ -818,7 +822,7 @@ export function MaterialLabPage({ onNavigate }) {
             {matrixPreview ? (
               <div style={{ textAlign: "center" }}>
                 <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "6px" }}>
-                  点击下方单元格选择最佳测试效果并套用：
+                  {readOnly ? "校准结果（保存最佳单元格请在电脑上操作）：" : "点击下方单元格选择最佳测试效果并套用："}
                 </div>
                 <div
                   style={{
@@ -831,11 +835,11 @@ export function MaterialLabPage({ onNavigate }) {
                   {(matrixPreview.cells || []).map((cell, i) => (
                     <div
                       key={cell.id || i}
-                      onClick={() => handleSaveBestCell(i)}
+                      onClick={readOnly ? undefined : () => handleSaveBestCell(i)}
                       style={{
                         width: "44px",
                         height: "44px",
-                        background: selectedCellNum === i + 1 ? "var(--laser, #35e0ff)" : "rgba(255,255,255,0.08)",
+                        background: selectedCellNum === i + 1 ? "var(--laser, #8b7bff)" : "rgba(255,255,255,0.08)",
                         color: selectedCellNum === i + 1 ? "#000" : "#fff",
                         display: "flex",
                         flexDirection: "column",
@@ -843,7 +847,7 @@ export function MaterialLabPage({ onNavigate }) {
                         justifyContent: "center",
                         fontSize: "9px",
                         lineHeight: 1.15,
-                        cursor: "pointer",
+                        cursor: readOnly ? "default" : "pointer",
                         borderRadius: "2px",
                         border: "1px solid rgba(255,255,255,0.1)",
                       }}
@@ -874,7 +878,7 @@ export function MaterialLabPage({ onNavigate }) {
 
       {/* Material Add / Edit / Delete Modal */}
       <MaterialModal
-        visible={showMaterialModal}
+        visible={showMaterialModal && !readOnly}
         initialData={materialModalData}
         onClose={() => setShowMaterialModal(false)}
         onSaved={() => {

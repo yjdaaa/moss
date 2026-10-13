@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-memory-set-enabled"
+description = "Enables the voice_memory_set_enabled command without any pre-configured scope."
+commands.allow = ["voice_memory_set_enabled"]
+
+[[permission]]
+identifier = "deny-voice-memory-set-enabled"
+description = "Denies the voice_memory_set_enabled command without any pre-configured scope."
+commands.deny = ["voice_memory_set_enabled"]

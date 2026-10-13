@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice-music-local-main",
+  "description": "NV14 local music folder configuration is accessible only from desktop main window",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-voice-music-status",
+    "allow-voice-music-save",
+    "allow-voice-music-pick-directory"
+  ]
+}

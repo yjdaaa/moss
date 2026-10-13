@@ -1,0 +1,16 @@
+{
+  "code": 0,
+  "data": {
+    "chunks": [
+      {
+        "content": "合成检索段落",
+        "document_id": "synthetic-document",
+        "dataset_id": "allowed",
+        "similarity": 0.9,
+        "vector_similarity": 0.8
+      }
+    ],
+    "total": 1,
+    "doc_aggs": []
+  }
+}

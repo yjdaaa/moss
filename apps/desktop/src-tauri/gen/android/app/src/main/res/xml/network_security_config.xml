@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MOSS 只用明文 HTTP 访问两类地址：手机自己内置的后端（127.0.0.1），以及“连接电脑 MOSS”模式下
+  用户填写的电脑局域网地址（技术书 §9.8，IP 不固定，Android 无法按网段配置）。因此允许明文；
+  App 不访问互联网 HTTP 地址，小智接入点使用 wss:// 加密连接。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

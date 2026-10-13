@@ -1,0 +1,37 @@
+[package]
+name = "moss-voice-server"
+version = "0.1.0"
+edition = "2024"
+description = "MOSS 内置语音服务（内置语音技术书 NV1 起）：小智设备的 OTA 与 WebSocket 服务、设备允许流程、会话。仅桌面端使用，不进入 laser-api / moss-host / Android。"
+license = "MIT"
+
+[dependencies]
+moss-xiaozhi-proto = { path = "../moss-xiaozhi-proto" }
+moss-voice-providers = { path = "../moss-voice-providers" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 专用运行时：只在启用内置语音时创建，与 MOSS 现有线程模型隔离（技术书 §4）
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "pcm"] }
+sha2 = "0.10"
+getrandom = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Opus 编解码：纯 Rust 后端 mousiki，不需要 CMake（NV0 实测，技术书 §11.3）
+opus2 = { version = "0.4", default-features = false, features = ["backend-mousiki"] }
+
+# NV11 bounded, non-redirecting external information adapters; no device/network side effects in tests.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+quick-xml = "=0.42.0"
+lunar_rust = "=1.0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+moss-voice-local-proto = { path = "../moss-voice-local-proto" }
+tempfile = "3"
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }

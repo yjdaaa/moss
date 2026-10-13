@@ -24,53 +24,29 @@
 |---|---|
 | Pure Rust Core | Completely eliminates Python runtime dependencies, delivering microsecond-level motion planning and zero-garbage-collection execution. |
 | FluidNC & GRBL Integration | Automatic YAML config extraction ($CD), dynamic Rx buffer streaming (1024B), and offline SD execution with real-time status telemetry. |
-| Strict Safety Gates | Physical SHA-256 G-code recalculation before firing, non-blocking 0x18 emergency stop (<100ms response), and automatic PVC hazard blocking. |
+| Strict Safety Gates | Physical SHA-256 G-code recalculation before firing, non-blocking 0x18 software-reset channel, and backend material safety gates that block PVC and require clarification for unknown plastics. |
 | Cross-Platform Desktop & Mobile | Tauri 2.0 desktop shell on Windows and standard single-command reproducible Android APK packaging. |
 | Xiaozhi AI Voice Control | Native Model Context Protocol (MCP JSON-RPC 2.0) server bridging AI assistants to physical tool execution. |
 
 ## Architecture
 
+For installation, upgrades and uninstall behavior, see the
+[installation guide](docs/user/quick-start.md#安装与卸载).
+
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│                 Presentation & Host Shell                   │
-│  ┌───────────────────────────────┐  ┌────────────────────┐  │
-│  │     Frontend (React/Vite)     │  │   Tauri 2.0 Host   │  │
-│  │  Excalidraw / Telemetry / HUD │  │ Windows / Android  │  │
-│  └───────────────────────────────┘  └────────────────────┘  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ IPC / HTTP REST / SSE
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 Core Services (laser-host)                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │  laser-api   │  │  laser-mcp   │  │  Global Exit      │  │
-│  │ REST/SSE API │  │ JSON-RPC 2.0 │  │  Coordinator      │  │
-│  └──────┬───────┘  └──────┬───────┘  └───────────────────┘  │
-└─────────┼─────────────────┼─────────────────────────────────┘
-          │                 │
-          ▼                 ▼
-┌──────────────────┐  ┌──────────────────┐  ┌─────────────────┐
-│    laser-core    │  │   laser-tools    │  │  laser-runtime  │
-│ G-code / Vectors │  │ Safety Actions   │  │ SQLite Storage  │
-│ Raster Dithering │  │ Material Params  │  │ Path Remapping  │
-└─────────┬────────┘  └────────┬─────────┘  └─────────────────┘
-          │                    │
-          └───────────┬────────┘
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│               Hardware Transport (laser-device)             │
-│  ┌───────────────────────────────┐  ┌────────────────────┐  │
-│  │   Serial / TCP Streaming      │  │ Realtime E-STOP    │  │
-│  │ Dynamic Adaptive Buffer (Bf)  │  │ Non-blocking 0x18  │  │
-│  └───────────────────────────────┘  └────────────────────┘  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Serial (COM) / Telnet (Port 23)
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│            Physical Machine (Dayu DIY Yisu V1.0)            │
-│         FluidNC (v3.x+) / ESP32  ──  24V 5W Laser Head      │
-└─────────────────────────────────────────────────────────────┘
+Web / Tauri Desktop and Android ── HTTP + polling ──► laser-api
+Tauri shell ── starts ──► laser-host ── assembles ──► laser-api / laser-mcp
+                              └── initializes ──► laser-runtime (SQLite)
+Xiaozhi console ◄── WebSocket ──► laser-mcp ── catalog ──► laser-tools
+                                   └── HostBackend (in laser-host)
+                                           └──► laser-api (persistence/jobs)
+laser-api ──► laser-core (toolpaths) / laser-runtime (records)
+laser-api ── confirmation, file SHA, device preflight ──► laser-device
+laser-tools ── standalone safety actions / probes ──────────► laser-device
+laser-device ── serial / Telnet ──► FluidNC / GRBL controller
 ```
+
+`laser-core` calculates toolpaths but never connects to the machine. MCP tools requiring persistence or job execution return through the host's `HostBackend` to `laser-api`. `0x18` is a software reset request, not a substitute for the machine's physical emergency-stop switch.
 
 ## Usage Example
 
@@ -78,17 +54,17 @@ The following demonstrates generating an outline toolpath from vector text and c
 
 ```bash
 # 1. Preview vector task via local API (generates G-code without firing laser)
-curl -X POST http://127.0.0.1:3000/api/workflow/preview \
+curl -X POST http://127.0.0.1:9666/api/workflow \
   -H "Content-Type: application/json" \
-  -d '{"source_type":"text","text":"MOSS","engraving_mode":"outline","material":"Basswood","thickness_mm":3}'
+  -d '{"action":"preview","source_type":"text","text":"MOSS","engraving_mode":"outline","material":"Basswood","thickness_mm":3}'
 
 # Expected response contains:
 # {"status":"prepared","gcode_sha256":"<computed-hash>","workflow_id":"wf-..."}
 
 # 2. Execute send gate (fails if file was altered on disk or unconfirmed)
-curl -X POST http://127.0.0.1:3000/api/workflow/confirm_send \
+curl -X POST http://127.0.0.1:9666/api/workflow \
   -H "Content-Type: application/json" \
-  -d '{"workflow_id":"wf-...","confirmed":true}'
+  -d '{"action":"confirm_send","workflow_id":"wf-...","confirmed":true}'
 
 # Hardware executes only after strict SHA-256 verification and idle probe handshake.
 ```

@@ -1,3 +1,15 @@
+// NV15 restricted mock Home Assistant policy; NOT registered for control.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod voice_home;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod home_control;
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod voice_agent;
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod external_mcp;
+
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -6,6 +18,9 @@ use std::time::{Duration, Instant};
 use laser_api::ApiService;
 use laser_contracts::builtin_material_library;
 use laser_runtime::{LaserSettings, RuntimeDb, RuntimeRoot};
+
+/// 附加接入点数量上限（语音中心据此限制输入，NV8）。
+pub use laser_mcp::MAX_EXTRA_ENDPOINTS;
 
 pub type RawAbortCallback = Box<dyn Fn() -> Result<(), String> + Send + Sync + 'static>;
 
@@ -157,27 +172,135 @@ pub struct InProcessBackend {
     pub api: Arc<ApiService>,
 }
 
+/// 以给定身份调用进程内 HTTP 处理器，返回（状态码, JSON 响应体）。
+fn in_process_request(
+    api: &ApiService,
+    method: &str,
+    route: &str,
+    body: &serde_json::Value,
+    caller: laser_contracts::CallerContext,
+) -> Result<(u16, serde_json::Value), String> {
+    let payload = if body.is_null() { String::new() } else { body.to_string() };
+    let request = format!(
+        "{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    );
+    let raw = api.handle_http_with_ctx(request.as_bytes(), caller);
+    let separator = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("后端响应缺少头部分隔符")?;
+    let head = String::from_utf8_lossy(&raw[..separator]);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or("后端响应状态行无法解析")?;
+    let body = serde_json::from_slice(&raw[separator + 4..])
+        .unwrap_or_else(|_| serde_json::json!({"success": status < 400, "result": String::from_utf8_lossy(&raw[separator + 4..])}));
+    Ok((status, body))
+}
+
 impl laser_mcp::HostBackend for InProcessBackend {
     fn request(&self, method: &str, route: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value), String> {
-        let payload = if body.is_null() { String::new() } else { body.to_string() };
-        let request = format!(
-            "{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            payload.len(),
-            payload
-        );
-        let raw = self.api.handle_http(request.as_bytes());
-        let separator = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("后端响应缺少头部分隔符")?;
-        let head = String::from_utf8_lossy(&raw[..separator]);
-        let status = head
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|code| code.parse::<u16>().ok())
-            .ok_or("后端响应状态行无法解析")?;
-        let body = serde_json::from_slice(&raw[separator + 4..])
-            .unwrap_or_else(|_| serde_json::json!({"success": status < 400, "result": String::from_utf8_lossy(&raw[separator + 4..])}));
-        Ok((status, body))
+        // 技术书 §6.4 规则 2：进程内 MCP 转发显式声明身份，不借用回环语义
+        in_process_request(&self.api, method, route, body, laser_contracts::CallerContext::McpBridge)
     }
+
+    fn strict_mode(&self) -> bool {
+        self.api.strict_mode()
+    }
+
+    fn audit(&self, entry: &laser_contracts::AuditEntry) -> Result<(), String> {
+        self.api.record_audit(entry)
+    }
+
+    fn tool_disabled(&self, name: &str) -> bool {
+        self.api.tool_disabled(name)
+    }
+}
+
+/// 内置语音服务调用 MOSS 工具时的后端（内置语音技术书 §5.2，NV4）：身份为 `CallerContext::Voice`，审计记为 `voice:<设备>`。
+/// R4 与未分级工具始终拒绝；运动与出光（R3）跟随全局严格模式——开启时只生成桌面审批，关闭时与官方接入点相同，
+/// 模型带 `confirmed=true` 即执行（2026-10-07 用户决定）。
+pub struct VoiceBackend {
+    pub api: Arc<ApiService>,
+    pub device_id: String,
+    pub session_id: String,
+}
+
+impl VoiceBackend {
+    fn caller(&self) -> laser_contracts::CallerContext {
+        laser_contracts::CallerContext::Voice { device_id: self.device_id.clone(), session_id: self.session_id.clone() }
+    }
+}
+
+impl laser_mcp::HostBackend for VoiceBackend {
+    fn request(&self, method: &str, route: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value), String> {
+        in_process_request(&self.api, method, route, body, self.caller())
+    }
+
+    fn strict_mode(&self) -> bool {
+        self.api.strict_mode()
+    }
+
+    fn always_deny_r4(&self) -> bool {
+        true
+    }
+
+    fn audit(&self, entry: &laser_contracts::AuditEntry) -> Result<(), String> {
+        self.api.record_audit(entry)
+    }
+
+    fn audit_client(&self) -> String {
+        laser_contracts::audit_client(&self.caller())
+    }
+
+    fn tool_disabled(&self, name: &str) -> bool {
+        self.api.tool_disabled(name)
+    }
+}
+
+/// 内置语音可用的 MOSS 工具清单（MCP `tools` 格式）：与严格模式下的接入点相同，不含永不开放的工具、开发者工具
+/// 与用户关闭的工具（NV8）。
+pub fn voice_tools_list(api: &ApiService) -> serde_json::Value {
+    let mut list = laser_mcp::tools_list_for(false, true);
+    if let Some(tools) = list["tools"].as_array_mut() {
+        tools.retain(|tool| !api.tool_disabled(tool["name"].as_str().unwrap_or("")));
+        if let Some(external) = api.external_tools_list()["tools"].as_array() { tools.extend(external.iter().filter(|tool| !api.tool_disabled(tool["name"].as_str().unwrap_or(""))).cloned()); }
+    }
+    list
+}
+
+/// 以内置语音身份调用一个 MOSS 工具（同步；可能访问设备或生成文件，调用方放到阻塞线程执行）。
+pub fn voice_tool_call(
+    api: &Arc<ApiService>,
+    device_id: &str,
+    session_id: &str,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> laser_contracts::ToolCallResult {
+    if !api.voice_session_allowed(device_id, session_id) {
+        return laser_contracts::ToolCallResult::with_detail(false, "语音设备授权已失效，请重新连接", "voice_session_revoked");
+    }
+    if name.contains("__") {
+        if api.tool_disabled(name) { return laser_contracts::ToolCallResult::err("该工具已关闭"); }
+        return api.call_external_tool(&laser_contracts::CallerContext::Voice { device_id:device_id.into(),session_id:session_id.into() }, name, arguments);
+    }
+    let backend = VoiceBackend { api: api.clone(), device_id: device_id.to_owned(), session_id: session_id.to_owned() };
+    let result = laser_mcp::dispatch_tool_call_with(name, arguments, false, Some(&backend));
+    if name == "laser_safe_action_tool" && arguments["action"] == "emergency_stop" {
+        // 执行优先：审计存储失败不能阻止停止请求。不记录识别文本、设备地址或返回原文。
+        let entry = laser_contracts::AuditEntry {
+            at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
+            client: laser_contracts::audit_client(&backend.caller()),
+            action: laser_contracts::AuditAction::VoiceStopRequested,
+            target: session_id.to_owned(),
+            result: if result.success { laser_contracts::AuditResult::Ok } else { laser_contracts::AuditResult::Failed },
+            detail: laser_contracts::AuditDetail { tool: Some(name.into()), reason: Some("emergency_stop request; physical state unverified".into()), ..Default::default() },
+        };
+        if api.record_audit(&entry).is_err() { eprintln!("[moss-host] voice stop audit write failed"); }
+    }
+    result
 }
 
 pub struct HostApplication {
@@ -186,14 +309,172 @@ pub struct HostApplication {
     pub db: Arc<Mutex<RuntimeDb>>,
     pub api_service: Arc<ApiService>,
     pub coordinator: &'static ShutdownCoordinator,
+    /// `.env` 中配置的严格模式（`MOSS_FUSION_STRICT`）。语音中心切回官方链路时恢复为该值。
+    pub strict_from_env: bool,
+    /// 当前各条小智桥（每个接入点一条，NV8）的停止开关与结束标记（语音中心切换链路时先断旧桥再接新桥，技术书 §9.4.2）。
+    bridge: Mutex<Vec<BridgeControl>>,
 }
+
+struct BridgeControl {
+    shutdown: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
+
+/// 小智桥当前是否已与接入点握手（语音中心状态卡用；多接入点时任一已连接即为真）。
+pub fn mcp_bridge_connected() -> bool {
+    laser_contracts::global_mcp_telemetry().snapshot().connected
+}
+
+fn read_runtime_settings(runtime_dir: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read(runtime_dir.join("settings.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// 运行目录 `settings.json` 中配置的接入点（NV8）：`(编号, 地址, 是否连接)`。
+///
+/// - `primary`：顶层 `mcp_endpoint`，未配置时回退环境变量 `MCP_ENDPOINT`；
+/// - `extra-N`：`mcp_extra_endpoints` 的第 N 项（最多 [`laser_mcp::MAX_EXTRA_ENDPOINTS`] 个）。附加接入点是官方接入点，
+///   自建模式下（主接入点指向自建接入点）暂不连接；无效地址与重复地址跳过。
+pub fn configured_mcp_endpoints(runtime_dir: &std::path::Path) -> Vec<(String, String, bool)> {
+    let settings = read_runtime_settings(runtime_dir);
+    let mut endpoints = Vec::new();
+    let primary = settings
+        .get("mcp_endpoint")
+        .and_then(serde_json::Value::as_str)
+        .and_then(laser_mcp::endpoint_from_value)
+        .or_else(laser_mcp::endpoint_from_env);
+    if let Some(primary) = primary {
+        endpoints.push(("primary".to_owned(), primary, true));
+    }
+    let extras_active = !voice_mode_is_self_hosted(runtime_dir);
+    let extras = settings.get("mcp_extra_endpoints").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    for (index, value) in extras.iter().take(laser_mcp::MAX_EXTRA_ENDPOINTS).enumerate() {
+        let Some(endpoint) = value.as_str().and_then(laser_mcp::endpoint_from_value) else { continue };
+        if endpoints.iter().any(|(_, existing, _)| existing == &endpoint) {
+            continue;
+        }
+        endpoints.push((format!("extra-{}", index + 1), endpoint, extras_active));
+    }
+    endpoints
+}
+
+/// 语音中心写入的自建链路设备会话数（`/api/system/info` 的 `voice.device_sessions`，`None` 为未知）。
+pub fn set_voice_device_sessions(sessions: Option<u32>) {
+    laser_contracts::global_voice_telemetry().set_device_sessions(sessions);
+}
+
+/// 运行目录 `settings.json` 中语音链路是否为自建模式（自建模式必须开启严格模式，技术书 §9.4.2）。
+pub fn voice_mode_is_self_hosted(runtime_dir: &std::path::Path) -> bool {
+    std::fs::read(runtime_dir.join("settings.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value.get("voice")?.get("mode")?.as_str().map(|mode| mode == "self_hosted"))
+        .unwrap_or(false)
+}
+
+/// 语音中心“接入点与工具”卡片的数据（NV8）：各接入点的状态与身份、每个工具的开关与调用统计。地址均已脱敏。
+pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_json::Value {
+    let telemetry = laser_contracts::global_mcp_telemetry().snapshot();
+    let endpoints: Vec<serde_json::Value> = configured_mcp_endpoints(runtime_dir)
+        .into_iter()
+        .map(|(id, endpoint, active)| {
+            let link = telemetry.endpoints.iter().find(|link| link.id == id).cloned().unwrap_or_default();
+            serde_json::json!({
+                "id": id,
+                "endpoint": laser_mcp::redact_endpoint(&endpoint),
+                "active": active,
+                "connected": active && link.connected,
+                "connected_at": link.connected_at,
+                "connections": link.connections,
+                "last_error": link.last_error,
+                "client": link.client,
+                "identity": laser_mcp::endpoint_identity(&endpoint),
+            })
+        })
+        .collect();
+    let developer_mode = laser_tools::developer_mode_enabled();
+    let tools: Vec<serde_json::Value> = laser_mcp::tools_list_json(developer_mode)["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|tool| {
+            let name = tool["name"].as_str()?.to_owned();
+            let description: String = tool["description"].as_str().unwrap_or("").chars().take(80).collect();
+            let stat = telemetry.tool_stats.get(&name).cloned().unwrap_or_default();
+            Some(serde_json::json!({
+                "name": name,
+                "description": description,
+                "enabled": !api.tool_disabled(&name),
+                "can_disable": laser_mcp::tool_can_be_disabled(&name),
+                "voice_hidden": laser_contracts::tool_never_exposed(&name),
+                "calls": stat.calls,
+                "failures": stat.failures,
+                "denied": stat.denied,
+                "last_at": (stat.calls > 0).then_some(stat.last_at),
+                "last_caller": stat.last_caller,
+            }))
+        })
+        .collect();
+    serde_json::json!({
+        "endpoints": endpoints,
+        "extras_paused": voice_mode_is_self_hosted(runtime_dir),
+        "max_extra_endpoints": laser_mcp::MAX_EXTRA_ENDPOINTS,
+        "tools": tools,
+    })
+}
+
+/// 校验关闭的工具名单：只接受工具清单里可关闭的工具，去重并排序。
+pub fn validate_disabled_tools(names: &[String]) -> Result<Vec<String>, String> {
+    let known = laser_mcp::tools_list_json(true);
+    let known: Vec<&str> = known["tools"].as_array().map(|tools| tools.iter().filter_map(|tool| tool["name"].as_str()).collect()).unwrap_or_default();
+    let mut accepted = Vec::new();
+    for name in names {
+        let name = name.trim();
+        if !known.contains(&name) {
+            return Err(format!("没有名为 {name} 的工具"));
+        }
+        if !laser_mcp::tool_can_be_disabled(name) {
+            return Err(format!("{name} 负责停止与急停，不能关闭"));
+        }
+        if !accepted.iter().any(|existing: &String| existing == name) {
+            accepted.push(name.to_owned());
+        }
+    }
+    accepted.sort();
+    Ok(accepted)
+}
+
 
 impl HostApplication {
     pub fn init() -> Result<Self, String> {
-        let runtime_root = RuntimeRoot::resolve(None, None)
-            .map_err(|e| format!("运行时目录初始化失败: {e:?}"))?;
+        Self::init_with_runtime_dir(None)
+    }
+
+    /// 与 [`init`](Self::init) 相同，但可显式指定运行时数据目录。
+    ///
+    /// Android 进程的当前目录是只读的 `/`，也没有 `APPDATA`，默认规则会落到 `/.runtime`
+    /// 而初始化失败（Read-only file system）；移动端必须传入应用私有数据目录。
+    pub fn init_with_runtime_dir(runtime_dir: Option<&std::path::Path>) -> Result<Self, String> {
+        let runtime_root = RuntimeRoot::resolve(runtime_dir, None).map_err(|e| match e {
+            laser_runtime::RuntimeRootError::AlreadyLocked(lock) => format!(
+                "已有 MOSS 实例正在运行（数据目录锁 {} 被占用）。请从托盘图标右键“退出程序”，或在任务管理器结束 moss-desktop.exe / moss-host.exe 后重试",
+                lock.display()
+            ),
+            other => format!("运行时目录初始化失败: {other:?}"),
+        })?;
         let settings = LaserSettings::from_env_with_runtime_dir(Some(&runtime_root.path))
             .map_err(|e| format!("配置读取失败: {e}"))?;
+        // 浏览器额外允许来源（技术书 §6.5）；写了 `*` 时启动失败，不静默放开。
+        let allowed_origins = laser_runtime::config::allowed_origins_from_env()
+            .map_err(|e| format!("配置读取失败: {e}"))?;
+        // 严格模式（技术书 §6.2）；开启网关却关闭严格模式、或写错取值时启动失败。
+        let strict_from_env = laser_runtime::config::fusion_strict_from_env()
+            .map_err(|e| format!("配置读取失败: {e}"))?;
+        // 语音中心选择了自建链路时，严格模式必须开启（技术书 §9.4.2）
+        let strict_mode = strict_from_env || voice_mode_is_self_hosted(&runtime_root.path);
         let db = RuntimeDb::open(&runtime_root.database)
             .map_err(|e| format!("数据库打开失败: {e:?}"))?;
         // 落实 D6 规范：启动时对未完成残留任务执行安全清零，注明"host 重启中断，任务安全终止"
@@ -219,8 +500,18 @@ impl HostApplication {
                     runtime_root.generated_assets.clone(),
                 ])
                 .with_runtime_db(db_arc.clone())
-                .with_auth(Arc::new(laser_api::AuthManager::new())),
+                .with_auth(Arc::new(laser_api::AuthManager::new()))
+                .with_allowed_origins(allowed_origins)
+                .with_strict_mode(strict_mode),
         );
+        // 技术书 §5.5：重启后所有待批准 / 已批准未执行的审批一律过期（A-32）
+        let expired = api_service.recover_approvals_after_restart();
+        if expired > 0 {
+            eprintln!("启动时已将 {expired} 个未完成的审批标记为过期");
+        }
+        if strict_mode {
+            eprintln!("严格模式已开启：运动或出光动作需要桌面会话或桌面审批");
+        }
 
         // 五条退出路径统一兜底：对所有正在下发的作业置取消并直接写 0x18（实时信道 + 裸句柄）
         let abort_service = api_service.clone();
@@ -232,22 +523,82 @@ impl HostApplication {
             db: db_arc,
             api_service,
             coordinator,
+            strict_from_env,
+            bridge: Mutex::new(Vec::new()),
         })
     }
 
-    /// 小智 MCP 桥接：把 `MCP_ENDPOINT`（wss://）上的 JSON-RPC 工具调用转发到进程内 ApiService。
-    /// 未配置或仍为模板占位符时返回 None，不启动任何网络连接。
-    pub fn spawn_mcp_bridge(&self) -> Option<std::thread::JoinHandle<()>> {
-        let endpoint = laser_mcp::endpoint_from_env()?;
-        let backend: laser_mcp::SharedBackend = Arc::new(InProcessBackend { api: self.api_service.clone() });
+    /// 停止当前所有小智桥并等待其退出（最多 `wait`）。返回旧桥是否都已确认退出。
+    pub fn stop_mcp_bridge(&self, wait: Duration) -> bool {
+        let controls = self.bridge.lock().map(|mut guard| std::mem::take(&mut *guard)).unwrap_or_default();
+        for control in &controls {
+            control.shutdown.store(true, Ordering::SeqCst);
+        }
+        let all_done = || controls.iter().all(|control| control.done.load(Ordering::SeqCst));
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if all_done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        all_done()
+    }
+
+    /// 先断旧桥再按当前 settings.json 的地址接新桥（语音中心切换链路、改接入点或工具开关后用）。
+    /// 返回是否启动了至少一条新桥。
+    pub fn restart_mcp_bridge(&self) -> bool {
+        if !self.stop_mcp_bridge(Duration::from_secs(5)) {
+            eprintln!("提示：旧的小智桥 5 秒内未退出，将在其下次检查时停止");
+        }
+        self.spawn_mcp_bridge() > 0
+    }
+
+    /// 小智 MCP 桥接：把各接入点（wss://）上的 JSON-RPC 工具调用转发到进程内 ApiService，每个接入点一条线程。
+    /// 接入点见 [`configured_mcp_endpoints`]。返回启动的桥数量（0 表示未配置）。
+    pub fn spawn_mcp_bridge(&self) -> usize {
+        let endpoints = configured_mcp_endpoints(&self.runtime_root.path);
+        let redacted: Vec<(String, String)> =
+            endpoints.iter().map(|(id, endpoint, _)| (id.clone(), laser_mcp::redact_endpoint(endpoint))).collect();
+        laser_contracts::global_mcp_telemetry().register_endpoints(&redacted);
         let developer_mode = laser_tools::developer_mode_enabled();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let stats = Arc::new(laser_mcp::BridgeStats::default());
-        let handle = std::thread::Builder::new()
-            .name("mcp-bridge".into())
-            .spawn(move || laser_mcp::run_bridge(&endpoint, Some(backend), developer_mode, shutdown, stats))
-            .ok()?;
-        Some(handle)
+        let mut controls = Vec::new();
+        for (id, endpoint, active) in endpoints {
+            if !active {
+                continue;
+            }
+            let backend: laser_mcp::SharedBackend = Arc::new(InProcessBackend { api: self.api_service.clone() });
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let done = Arc::new(AtomicBool::new(false));
+            let stats = Arc::new(laser_mcp::BridgeStats::default());
+            let (thread_shutdown, thread_done) = (shutdown.clone(), done.clone());
+            let spawned = std::thread::Builder::new().name(format!("mcp-bridge-{id}")).spawn(move || {
+                laser_mcp::run_bridge(&id, &endpoint, Some(backend), developer_mode, thread_shutdown, stats);
+                thread_done.store(true, Ordering::SeqCst);
+            });
+            if spawned.is_ok() {
+                controls.push(BridgeControl { shutdown, done });
+            }
+        }
+        let count = controls.len();
+        if let Ok(mut guard) = self.bridge.lock() {
+            // 调用方未先停止旧桥时，通知旧桥退出，只保留这一批
+            for previous in guard.drain(..) {
+                previous.shutdown.store(true, Ordering::SeqCst);
+            }
+            *guard = controls;
+        }
+        count
+    }
+
+    /// 语音中心“接入点与工具”卡片的数据（NV8），见 [`mcp_overview`]。
+    pub fn mcp_overview(&self) -> serde_json::Value {
+        mcp_overview(&self.runtime_root.path, &self.api_service)
+    }
+
+    /// 校验关闭的工具名单（语音中心保存 `mcp_disabled_tools` 前调用），见 [`validate_disabled_tools`]。
+    pub fn validate_disabled_tools(&self, names: &[String]) -> Result<Vec<String>, String> {
+        validate_disabled_tools(names)
     }
 
     pub fn spawn_http_server(&self) -> Result<(std::thread::JoinHandle<()>, u16), String> {
@@ -312,6 +663,172 @@ mod tests {
         );
         assert!(!result.success, "不存在的 workflow 必须失败: {result:?}");
         assert!(result.result.contains("未找到"), "{result:?}");
+    }
+
+    /// NV4：内置语音后端——永不开放的工具不列出，即使全局严格模式关闭，调用也被拒并记审计（`voice:<设备>`）；
+    /// 只读工具照常执行。
+    #[test]
+    fn voice_backend_denies_desktop_control_tools_and_audits() {
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let service = Arc::new(
+            ApiService::new(
+                LaserSettings {
+                    default_connection_mode: "network".into(),
+                    engraving_mode: "raster".into(),
+                    web_host: "127.0.0.1".into(),
+                    web_port: 8766,
+                    material_params_file: None,
+                },
+                builtin_material_library(),
+            )
+            .with_strict_mode(false)
+            .with_runtime_db(db.clone())
+            .with_approval_service(Arc::new(laser_api::approval::ApprovalService::new(db.clone()))),
+        );
+        let names: Vec<String> = voice_tools_list(&service)["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(names.iter().any(|name| name == "laser_workflow_tool"));
+        for hidden in ["command_execution_tool", "open_app_tool", "shortcut_key_execution_tool", "open_jsjds_website_tool"] {
+            assert!(!names.iter().any(|name| name == hidden), "{hidden} 不对内置语音开放");
+        }
+        allow_test_voice(&service, &db, "aa:bb:cc:dd:ee:ff", "s1");
+        let denied = voice_tool_call(&service, "aa:bb:cc:dd:ee:ff", "s1", "open_app_tool", &serde_json::json!({"app_name": "notepad"}));
+        assert!(!denied.success);
+        assert!(denied.detail.as_deref().unwrap_or("").contains("tool_not_allowed"), "{denied:?}");
+        let audit = db.lock().unwrap().recent_audit(10).unwrap();
+        assert!(audit.iter().any(|entry| entry.client == "voice:aa:bb:cc:dd:ee:ff" && entry.target == "open_app_tool"), "{audit:?}");
+        let status = voice_tool_call(&service, "aa:bb:cc:dd:ee:ff", "s1", "laser_workflow_tool", &serde_json::json!({"action": "status", "workflow_id": "wf-missing"}));
+        assert!(!status.success && status.result.contains("未找到"), "只读工具照常执行: {status:?}");
+        // 关闭连接的 fake factory；不能触及真实设备。停止失败仍必须留下有界审计。
+        let service = Arc::new(plain_service().with_runtime_db(db.clone()).with_approval_service(Arc::new(laser_api::approval::ApprovalService::new(db.clone())))
+            .with_transport_factory(Arc::new(|_| Err("injected connection failure".into()))));
+        allow_test_voice(&service, &db, "fake-device", "s-stop");
+        let stopped = voice_tool_call(&service, "fake-device", "s-stop", "laser_safe_action_tool", &serde_json::json!({"action":"emergency_stop","connection_mode":"network","host":"127.0.0.1"}));
+        assert!(!stopped.success);
+        let audit = db.lock().unwrap().recent_audit(10).unwrap();
+        let entry = audit.iter().find(|entry| entry.action == laser_contracts::AuditAction::VoiceStopRequested).unwrap();
+        assert_eq!(entry.client, "voice:fake-device");
+        assert_eq!(entry.target, "s-stop");
+        assert_eq!(entry.result, laser_contracts::AuditResult::Failed);
+        assert!(!serde_json::to_string(entry).unwrap().contains("127.0.0.1"));
+    }
+
+    fn allow_test_voice(service: &ApiService, db: &Arc<Mutex<RuntimeDb>>, device: &str, session: &str) {
+        db.lock().unwrap().voice_device_seen(device, "test-client", "", "", "", 0.0).unwrap();
+        service.set_voice_device_status(device, laser_runtime::VOICE_DEVICE_ALLOWED, 0.0).unwrap();
+        service.register_voice_session(device, "test-client", session).unwrap();
+    }
+
+    fn plain_service() -> ApiService {
+        ApiService::new(
+            LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 8766,
+                material_params_file: None,
+            },
+            builtin_material_library(),
+        )
+    }
+
+    /// 测试专用的临时运行目录（本 crate 没有 tempfile 依赖）。
+    struct TempRuntime(std::path::PathBuf);
+
+    impl TempRuntime {
+        fn new(name: &str, settings: serde_json::Value) -> Self {
+            let dir = std::env::temp_dir().join(format!("laser-host-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempRuntime {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// NV8：主接入点加附加接入点；无效、重复与超出上限的跳过；自建模式下附加接入点暂停连接。
+    #[test]
+    fn configured_endpoints_include_extras_and_pause_them_in_self_hosted_mode() {
+        let primary = "wss://official.example/mcp/?token=primary";
+        let runtime = TempRuntime::new("endpoints", serde_json::json!({
+            "mcp_endpoint": primary,
+            "mcp_extra_endpoints": [
+                "wss://official.example/mcp/?token=a",
+                "http://not-websocket.example/",
+                primary,
+                "wss://official.example/mcp/?token=b",
+                "wss://official.example/mcp/?token=c",
+                "wss://official.example/mcp/?token=d"
+            ]
+        }));
+        let endpoints = configured_mcp_endpoints(&runtime.0);
+        let ids: Vec<&str> = endpoints.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, ["primary", "extra-1", "extra-4"], "无效与重复跳过，只看前 {MAX_EXTRA_ENDPOINTS} 项");
+        assert!(endpoints.iter().all(|(_, _, active)| *active));
+
+        let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(runtime.0.join("settings.json")).unwrap()).unwrap();
+        settings["voice"] = serde_json::json!({"mode": "self_hosted"});
+        std::fs::write(runtime.0.join("settings.json"), settings.to_string()).unwrap();
+        let endpoints = configured_mcp_endpoints(&runtime.0);
+        assert!(endpoints[0].2, "主接入点照常连接");
+        assert!(endpoints[1..].iter().all(|(_, _, active)| !active), "自建模式下附加接入点暂停");
+
+        // 总览：地址脱敏、带身份字段；自建模式标记暂停
+        let overview = mcp_overview(&runtime.0, &plain_service());
+        assert_eq!(overview["extras_paused"], true);
+        assert_eq!(overview["endpoints"][0]["endpoint"], "wss://official.example/mcp/?token=***");
+        assert!(!overview.to_string().contains("token=primary"), "总览不得含 token");
+        assert_eq!(overview["endpoints"][1]["connected"], false);
+    }
+
+    /// NV8：工具开关从 settings.json 读入；关闭的工具不出现在内置语音清单里，调用被拒绝；停止类工具不能关闭。
+    #[test]
+    fn disabled_tools_are_hidden_from_voice_and_refused() {
+        let runtime = TempRuntime::new("switches", serde_json::json!({
+            "mcp_disabled_tools": ["material_params_tool", "laser_safe_action_tool", ""]
+        }));
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let service = Arc::new(plain_service().with_runtime_path(runtime.0.clone()).with_runtime_db(db.clone()));
+        allow_test_voice(&service, &db, "aa:bb:cc:dd:ee:ff", "s1");
+        assert_eq!(service.disabled_tools(), vec!["material_params_tool".to_string()], "停止类工具与空名被忽略");
+        let names: Vec<String> = voice_tools_list(&service)["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(!names.contains(&"material_params_tool".to_owned()));
+        assert!(names.contains(&"laser_safe_action_tool".to_owned()));
+        let refused = voice_tool_call(&service, "aa:bb:cc:dd:ee:ff", "s1", "material_params_tool", &serde_json::json!({"action": "list"}));
+        assert!(!refused.success && refused.detail.as_deref().unwrap_or("").contains("tool_disabled"), "{refused:?}");
+        let backend = InProcessBackend { api: service.clone() };
+        assert!(laser_mcp::HostBackend::tool_disabled(&backend, "material_params_tool"));
+        let listed = laser_mcp::tools_list_with(false, Some(&backend));
+        assert!(!listed.to_string().contains("\"material_params_tool\""));
+        let overview = mcp_overview(&runtime.0, &service);
+        let tool = overview["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "material_params_tool").unwrap();
+        assert_eq!(tool["enabled"], false);
+        let stop = overview["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "laser_safe_action_tool").unwrap();
+        assert_eq!(stop["can_disable"], false);
+
+        service.set_disabled_tools(Vec::new());
+        assert!(!service.tool_disabled("material_params_tool"), "运行中可重新打开");
+
+        assert_eq!(
+            validate_disabled_tools(&["open_app_tool".into(), "material_params_tool".into(), "open_app_tool".into()]).unwrap(),
+            vec!["material_params_tool".to_string(), "open_app_tool".to_string()]
+        );
+        assert!(validate_disabled_tools(&["laser_safe_action_tool".into()]).unwrap_err().contains("不能关闭"));
+        assert!(validate_disabled_tools(&["no_such_tool".into()]).unwrap_err().contains("没有名为"));
     }
 
     #[test]

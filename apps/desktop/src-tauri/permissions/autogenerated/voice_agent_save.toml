@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-agent-save"
+description = "Enables the voice_agent_save command without any pre-configured scope."
+commands.allow = ["voice_agent_save"]
+
+[[permission]]
+identifier = "deny-voice-agent-save"
+description = "Denies the voice_agent_save command without any pre-configured scope."
+commands.deny = ["voice_agent_save"]

@@ -1,14 +1,16 @@
 import React, { useState } from "react";
 import { AlertCircle, X } from "lucide-react";
 
-export function CloseConfirmModal({ visible, onClose, onConfirm }) {
+export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunning = false }) {
   const [selectedAction, setSelectedAction] = useState("tray");
   const [remember, setRemember] = useState(false);
+  // 技术书 §9.4.3：完全退出时询问是否同时停止 MOSS 启动的语音服务端，默认“是”
+  const [stopServer, setStopServer] = useState(true);
 
   if (!visible) return null;
 
   const handleConfirm = () => {
-    onConfirm(selectedAction, remember);
+    onConfirm(selectedAction, remember, stopServer);
   };
 
   return (
@@ -16,7 +18,7 @@ export function CloseConfirmModal({ visible, onClose, onConfirm }) {
       <div className="mat-modal" style={{ maxWidth: "420px" }} role="dialog">
         <div className="mat-modal-head">
           <h3 style={{ display: "flex", alignItems: "center", gap: "8px", margin: 0 }}>
-            <AlertCircle size={18} style={{ color: "var(--laser, #35e0ff)" }} />
+            <AlertCircle size={18} style={{ color: "var(--laser, #8b7bff)" }} />
             <span>关闭主窗口</span>
           </h3>
           <button className="mat-modal-close" onClick={onClose} title="取消">
@@ -37,8 +39,8 @@ export function CloseConfirmModal({ visible, onClose, onConfirm }) {
                 gap: "10px",
                 padding: "10px 12px",
                 borderRadius: "8px",
-                background: selectedAction === "tray" ? "rgba(53, 224, 255, 0.08)" : "rgba(255, 255, 255, 0.02)",
-                border: `1px solid ${selectedAction === "tray" ? "rgba(53, 224, 255, 0.3)" : "var(--line, #242b35)"}`,
+                background: selectedAction === "tray" ? "rgba(139, 123, 255, 0.08)" : "rgba(255, 255, 255, 0.02)",
+                border: `1px solid ${selectedAction === "tray" ? "rgba(139, 123, 255, 0.3)" : "var(--line, #242b35)"}`,
                 cursor: "pointer",
                 transition: "all 0.15s ease"
               }}
@@ -92,6 +94,13 @@ export function CloseConfirmModal({ visible, onClose, onConfirm }) {
               </div>
             </label>
           </div>
+
+          {voiceServerRunning && selectedAction === "exit" && (
+            <label className="close-voice-option" id="close-stop-voice-server">
+              <input type="checkbox" checked={stopServer} onChange={(e) => setStopServer(e.target.checked)} style={{ marginTop: "2px" }} />
+              <span>同时停止语音服务端（由 MOSS 启动的 xiaozhi-server）。取消勾选则退出后服务端继续运行，其输出不再记录。</span>
+            </label>
+          )}
 
           <div style={{ marginTop: "16px", paddingTop: "12px", borderTop: "1px solid var(--line, #242b35)" }}>
             <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "12px", color: "var(--ink-dim, #94a3b8)" }}>

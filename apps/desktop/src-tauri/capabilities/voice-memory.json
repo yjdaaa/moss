@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice-memory-local-main",
+  "description": "NV10 private voice memory management only from the packaged voice-private webview; no remote origins",
+  "windows": [
+    "voice-private"
+  ],
+  "permissions": [
+    "allow-voice-memory-list",
+    "allow-voice-memory-set-enabled",
+    "allow-voice-memory-save",
+    "allow-voice-memory-clear",
+    "allow-voice-speaker-manage",
+    "allow-voice-firmware-status"
+  ]
+}

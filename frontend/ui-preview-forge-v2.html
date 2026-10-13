@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MOSS 指挥舱 2.0</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800;900&family=Geist+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700;900&display=swap">
+<style>
+/* 布局：左侧导航 → 顶部状态条 → 内容区。设计方向「曜石 Obsidian」：近纯黑底 + 顶部紫蓝极光，
+   金属渐变大标题，卡片随光标出现聚光，激光紫为唯一强调色；绿色只给“开始加工”，红色只给急停与危险。
+   表格采用加粗表头 + 斑马纹 + 悬停高亮 + 柔和状态胶囊。刻意单一深色主题。 */
+:root{
+  color-scheme:dark;
+  --bg:#09090b; --panel:rgba(14,14,18,.72); --panel-2:rgba(20,20,26,.66); --raise:#18181b; --raise-2:#1f1f24; --well:#0b0b0e;
+  --line:rgba(255,255,255,.08); --line-2:rgba(255,255,255,.14); --line-3:rgba(255,255,255,.22);
+  --ink:#fafafa; --ink-2:#b4b4bd; --ink-3:#7a7a85;
+  --cyan:#8b7bff; --cyan-2:#b7acff; --cyan-bg:rgba(139,123,255,.14); --cyan-ink:#fff;
+  --grad:linear-gradient(135deg,#a78bfa 0%,#7c6cff 45%,#5b8cff 100%);
+  --red:#ff3b5c; --red-2:#ff7a90; --red-bg:rgba(255,59,92,.12);
+  --green:#34d399; --green-2:#6ee7b7; --green-bg:rgba(52,211,153,.12);
+  --amber:#fbbf24; --amber-bg:rgba(251,191,36,.12); --amber-bd:rgba(251,191,36,.45);
+  --info:#7cb4ff; --info-bg:rgba(124,180,255,.12);
+  --bd:var(--line-2); --bd-2:var(--cyan); --bd-soft:var(--line);
+  --f-d:"Geist","Noto Sans SC",system-ui,sans-serif;
+  --f-b:"Geist","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --f-m:"Geist Mono","JetBrains Mono",Consolas,monospace;
+  --side-w:224px; --r:16px; --ease:cubic-bezier(.22,1,.36,1);
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-b);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--cyan-2);outline-offset:2px}
+.mono{font-family:var(--f-m)}
+::selection{background:rgba(139,123,255,.45)}
+
+/* 背景：流浪地球太空舱（动画）——三层视差星场、流星、远处 550W 赤红核心（呼吸 + 旋转光环）、底部地球（云带流动、大气辉光、行星发动机等离子光柱）+ 细噪点。Canvas 绘制，减少动态效果时静止。 */
+.bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;background:radial-gradient(140% 90% at 70% 0%,#0d0b1c 0%,#07070d 45%,#040408 100%)}
+.bg canvas{position:absolute;inset:0;width:100%;height:100%}
+html:not([data-bg="earth"]) .bg .neb,html:not([data-bg="earth"]) .bg .core,html:not([data-bg="earth"]) .bg .ring2{display:none}
+#gl{display:none;image-rendering:auto;filter:saturate(1.15)}
+.bg .neb{position:absolute;inset:0;background:radial-gradient(900px 420px at 30% 18%,rgba(91,140,255,.10),transparent 65%),radial-gradient(700px 380px at 78% 30%,rgba(124,108,255,.12),transparent 65%)}
+.bg .core{position:absolute;right:14%;top:18%;width:240px;height:240px;border-radius:50%;background:radial-gradient(circle,#fff 0,#ffd0d8 6%,#ff3b5c 18%,rgba(255,59,92,.45) 34%,rgba(255,59,92,.12) 55%,transparent 72%);filter:blur(1px);animation:corepulse 5s ease-in-out infinite}
+.bg .core::after{content:"";position:absolute;inset:-120px;border-radius:50%;background:radial-gradient(circle,rgba(255,59,92,.16),transparent 62%)}
+@keyframes corepulse{50%{transform:scale(1.08);opacity:.85}}
+.bg .core::before{content:"";position:absolute;inset:-34px;border-radius:50%;border:1px solid rgba(255,120,140,.35);border-top-color:rgba(255,200,210,.9);border-right-color:transparent;animation:spin 9s linear infinite;box-shadow:0 0 30px rgba(255,59,92,.25)}
+.bg .ring2{position:absolute;right:calc(14% - 40px);top:calc(18% - 40px);width:320px;height:320px;border-radius:50%;border:1px dashed rgba(255,90,110,.25);animation:spin 26s linear infinite reverse}
+.bg::after{content:"";position:absolute;inset:0;opacity:.06;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes breathe{50%{opacity:.6;transform:scale(.94)}}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+.shell{position:relative;z-index:1;display:grid;grid-template-columns:var(--side-w) minmax(0,1fr);min-height:100%}
+.proto{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px 14px;font-size:12.5px;color:var(--ink-2);padding-block:7px;padding-inline:16px;border-bottom:1px solid var(--line);background:linear-gradient(90deg,rgba(251,191,36,.08),rgba(139,123,255,.08))}
+.proto b{color:var(--amber);font-weight:600}
+.bgsw{display:inline-flex;align-items:center;gap:4px;padding:3px;border:1px solid var(--line-2);border-radius:999px;background:rgba(0,0,0,.35)}
+.bgsw>span{padding:0 6px 0 8px;color:var(--ink-3)}
+.proto .bgsw button{border:0;background:transparent;color:var(--ink-2);padding:3px 10px}
+.proto .bgsw button.on{background:var(--grad);color:#fff}
+.proto button{background:var(--raise);border:1px solid var(--line-2);border-radius:999px;color:var(--ink);padding:3px 12px;font-size:12px}
+.proto button:hover{border-color:var(--cyan)}
+
+/* 侧栏 */
+.side{background:rgba(9,9,11,.72);backdrop-filter:blur(18px);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:2px;padding:18px 12px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.logo{display:flex;align-items:center;gap:12px;padding:2px 8px 18px;margin-bottom:6px;border-bottom:1px solid var(--line)}
+.eye{width:30px;height:30px;border-radius:50%;flex:none;background:radial-gradient(circle at 38% 34%,#fff 0,#ffb3c0 12%,#ff3b5c 34%,#a0001c 66%,#2a0006 100%);box-shadow:0 0 0 3px rgba(255,59,92,.12),0 0 24px rgba(255,59,92,.55);animation:breathe 3.2s ease-in-out infinite}
+.logo b{display:block;font-family:var(--f-d);font-weight:800;font-size:19px;letter-spacing:4px;line-height:1.05;background:linear-gradient(180deg,#fff,#a1a1aa);-webkit-background-clip:text;background-clip:text;color:transparent}
+.logo small{font-family:var(--f-m);font-size:9.5px;letter-spacing:2px;color:var(--ink-3)}
+.nav-l{font-family:var(--f-m);font-size:10px;letter-spacing:2.2px;color:var(--ink-3);padding:12px 10px 6px;text-transform:uppercase}
+.nv{display:flex;align-items:center;gap:11px;width:100%;text-align:left;padding:10px 12px;border-radius:10px;border:1px solid transparent;background:transparent;color:var(--ink-2);font-size:14px;font-weight:500;position:relative;transition:background .25s var(--ease),color .25s}
+.nv svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.nv:hover{background:rgba(255,255,255,.04);color:var(--ink)}
+.nv.on{background:linear-gradient(90deg,rgba(139,123,255,.16),rgba(139,123,255,.03));border-color:rgba(139,123,255,.28);color:#fff;font-weight:600}
+.nv.on svg{color:var(--cyan-2)}
+.nv.on::before{content:"";position:absolute;left:-13px;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:var(--grad);box-shadow:0 0 12px rgba(139,123,255,.8)}
+.nv .nb{margin-left:auto;font-family:var(--f-m);font-size:9.5px;padding:1px 6px;border-radius:5px;background:var(--raise);border:1px solid var(--line);color:var(--ink-3)}
+.nv .new{background:var(--red);border-color:transparent;color:#fff}
+.side .grow{flex:1}
+.side-foot{border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:2px}
+
+/* 顶栏 */
+.main{min-width:0;display:flex;flex-direction:column}
+.top{position:sticky;top:0;z-index:30;display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px;padding-block:14px;padding-inline:28px;background:rgba(9,9,11,.62);border-bottom:1px solid var(--line);backdrop-filter:blur(18px) saturate(140%)}
+.top h1{font-family:var(--f-d);font-weight:800;font-size:24px;letter-spacing:-.02em;margin:0;background:linear-gradient(180deg,#fff 30%,#9a9aa6);-webkit-background-clip:text;background-clip:text;color:transparent}
+.top h1 small{font-family:var(--f-m);font-size:10.5px;letter-spacing:2px;margin-left:12px;font-weight:400;-webkit-text-fill-color:var(--ink-3)}
+.top .sp{flex:1}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;padding:6px 12px;border-radius:999px;border:1px solid transparent;background:var(--raise);white-space:nowrap}
+.pill i{width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}
+.ok{color:var(--green);background:var(--green-bg);border-color:rgba(52,211,153,.2)}
+.bad{color:var(--red-2);background:var(--red-bg);border-color:rgba(255,59,92,.25)}
+.warn{color:var(--amber);background:var(--amber-bg);border-color:rgba(251,191,36,.25)}
+.info{color:var(--cyan-2);background:var(--cyan-bg);border-color:rgba(139,123,255,.28)}
+.off{color:var(--ink-2);background:var(--raise);border-color:var(--line)}
+.badge{min-width:19px;height:19px;border-radius:10px;background:var(--red);color:#fff;font-size:11px;display:inline-grid;place-items:center;padding:0 5px;box-shadow:0 0 12px rgba(255,59,92,.7)}
+.estop{position:relative;display:inline-flex;align-items:center;gap:8px;font-weight:800;font-size:13px;letter-spacing:.06em;color:#fff;padding:9px 16px;border-radius:11px;border:1px solid rgba(255,140,160,.5);background:linear-gradient(180deg,#ff4d6b,#d6123a);box-shadow:0 8px 24px -6px rgba(255,59,92,.65),inset 0 1px 0 rgba(255,255,255,.35)}
+.estop:hover{transform:translateY(-1px);box-shadow:0 12px 30px -6px rgba(255,59,92,.85),inset 0 1px 0 rgba(255,255,255,.35)}
+
+/* 版面 */
+.content{padding-block:26px 72px;padding-inline:28px;display:flex;flex-direction:column;gap:18px}
+.page{display:flex;flex-direction:column;gap:18px;animation:rise .5s var(--ease)}
+.cols{display:grid;gap:18px}
+.wb{grid-template-columns:minmax(300px,360px) minmax(0,1fr) minmax(280px,340px)}
+@media (max-width:1400px){.wb{grid-template-columns:minmax(300px,360px) minmax(0,1fr)}.wb>.rail{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}}
+@media (max-width:900px){.shell{grid-template-columns:minmax(0,1fr)}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;border-right:0;border-bottom:1px solid var(--line)}.side .grow,.nav-l{display:none}.logo{border:0;padding:0;margin:0 8px 0 0}.nv{width:auto;padding:8px 10px}.nv.on::before{display:none}.side-foot{border:0;padding:0;flex-direction:row}.wb{grid-template-columns:minmax(0,1fr)}.content,.top{padding-inline:16px}}
+.stack{display:flex;flex-direction:column;gap:18px;min-width:0}
+
+/* 卡片：聚光 + 渐变描边 */
+.card{position:relative;isolation:isolate;backdrop-filter:blur(16px) saturate(130%);-webkit-backdrop-filter:blur(16px) saturate(130%);background:linear-gradient(180deg,var(--panel-2),var(--panel));border:1px solid var(--line);border-radius:var(--r);padding:18px;display:flex;flex-direction:column;gap:14px;min-width:0;box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 30px 60px -30px rgba(0,0,0,.8)}
+.card::before{content:"";position:absolute;inset:0;border-radius:inherit;z-index:-1;opacity:0;transition:opacity .4s var(--ease);background:radial-gradient(520px circle at var(--mx,50%) var(--my,0%),rgba(139,123,255,.10),transparent 42%)}
+.card::after{content:"";position:absolute;inset:-1px;border-radius:inherit;padding:1px;pointer-events:none;opacity:0;transition:opacity .4s var(--ease);background:radial-gradient(360px circle at var(--mx,50%) var(--my,0%),rgba(183,172,255,.55),transparent 45%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude}
+.card:hover::before,.card:hover::after{opacity:1}
+.card-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.card-h h2{margin:0;font-family:var(--f-d);font-size:15.5px;font-weight:700;letter-spacing:-.01em;display:flex;align-items:center;gap:10px}
+.card-h h2 .n{display:inline-grid;place-items:center;width:22px;height:22px;font-family:var(--f-m);font-size:11px;color:#fff;background:var(--grad);border-radius:7px;font-weight:600;box-shadow:0 4px 14px -2px rgba(124,108,255,.7)}
+.card-h .k{font-family:var(--f-m);font-size:10px;letter-spacing:2px;color:var(--ink-3);text-transform:uppercase}
+.card-h .r{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sub{font-size:12.5px;color:var(--ink-3)}
+
+/* 控件 */
+.seg{display:flex;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--well);padding:4px;gap:4px}
+.seg button{flex:1;border:0;border-radius:8px;background:transparent;padding:8px 10px;color:var(--ink-3);font-weight:500;font-size:13.5px;white-space:nowrap;transition:all .25s var(--ease)}
+.seg button:hover{color:var(--ink)}
+.seg button.on{background:var(--raise-2);color:#fff;font-weight:600;box-shadow:0 1px 0 rgba(255,255,255,.08) inset,0 4px 12px -4px rgba(0,0,0,.8),0 0 0 1px var(--line-2)}
+.tabs4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.tabs4 button{position:relative;border:1px solid var(--line);background:var(--well);color:var(--ink-3);border-radius:12px;padding:12px 4px 10px;font-size:12.5px;display:flex;flex-direction:column;align-items:center;gap:6px;transition:all .25s var(--ease)}
+.tabs4 button svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.7}
+.tabs4 button:hover{color:var(--ink);border-color:var(--line-2);transform:translateY(-1px)}
+.tabs4 button.on{color:#fff;border-color:rgba(139,123,255,.55);background:linear-gradient(180deg,rgba(139,123,255,.22),rgba(139,123,255,.06));box-shadow:0 10px 30px -12px rgba(124,108,255,.9)}
+.tabs4 button.on svg{color:var(--cyan-2)}
+.f{display:flex;flex-direction:column;gap:7px;min-width:0}
+.f label{font-size:12.5px;color:var(--ink-2);font-weight:500;display:flex;justify-content:space-between;gap:8px}
+.f label em{font-style:normal;color:var(--ink-3);font-family:var(--f-m);font-size:11px}
+.in,select.in,textarea.in{width:100%;min-width:0;background:var(--well);border:1px solid var(--line-2);border-radius:10px;padding:10px 12px;color:var(--ink);font-size:13.5px;transition:border-color .2s,box-shadow .2s}
+.in:hover{border-color:var(--line-3)}
+.in:focus{border-color:var(--cyan);box-shadow:0 0 0 4px rgba(139,123,255,.18);outline:none}
+select.in{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2.5'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+textarea.in{resize:vertical;min-height:70px}
+.in::placeholder{color:#5c5c66}
+.row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+.row>.f{flex:1;min-width:110px}
+.g2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.g3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:520px){.g2,.g3{grid-template-columns:minmax(0,1fr)}}
+.btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;border-radius:11px;padding:10px 16px;font-size:13.5px;font-weight:600;border:1px solid var(--line-2);background:linear-gradient(180deg,var(--raise-2),var(--raise));color:var(--ink);white-space:nowrap;box-shadow:0 1px 0 rgba(255,255,255,.06) inset,0 6px 16px -8px rgba(0,0,0,.9);transition:transform .2s var(--ease),box-shadow .2s,border-color .2s,filter .2s}
+.btn:hover{border-color:var(--line-3);transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn[disabled]{opacity:.35;cursor:not-allowed;transform:none;filter:grayscale(.4)}
+.btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.btn.sm{padding:7px 11px;font-size:12.5px;border-radius:9px}
+.btn.ic{padding:9px;width:42px}
+.btn.ghost{background:transparent;box-shadow:none}
+.btn.ghost:hover{background:rgba(255,255,255,.04)}
+.btn.pri{background:linear-gradient(180deg,#fff,#dcdce4);color:#0a0a0c;border-color:#fff;box-shadow:0 10px 28px -10px rgba(255,255,255,.55),inset 0 -1px 0 rgba(0,0,0,.12)}
+.btn.pri:hover{filter:brightness(1.04)}
+.btn.fire{background:linear-gradient(180deg,#5eead4,#22c55e);color:#03140a;border-color:rgba(167,243,208,.8);font-weight:800;letter-spacing:.02em;box-shadow:0 12px 32px -10px rgba(52,211,153,.85),inset 0 1px 0 rgba(255,255,255,.5)}
+.btn.fire:not([disabled])::after{content:"";position:absolute;inset:-3px;border-radius:14px;border:1px solid rgba(110,231,183,.5);animation:ring 2.4s var(--ease) infinite}
+@keyframes ring{0%{opacity:.9;transform:scale(1)}100%{opacity:0;transform:scale(1.08)}}
+.btn.danger{background:linear-gradient(180deg,#ff4d6b,#d6123a);color:#fff;border-color:rgba(255,140,160,.5);box-shadow:0 12px 30px -10px rgba(255,59,92,.75),inset 0 1px 0 rgba(255,255,255,.3)}
+.btn.warnb{background:linear-gradient(180deg,rgba(251,191,36,.2),rgba(251,191,36,.08));border-color:var(--amber-bd);color:#fde68a}
+.btn.wide{width:100%}
+.link{background:none;border:0;color:var(--cyan-2);text-decoration:underline;text-underline-offset:3px;padding:0;font-size:12.5px}
+.link.red{color:var(--red-2)}
+.chk{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--ink);cursor:pointer}
+.chk input{margin-top:2px;width:17px;height:17px;accent-color:var(--cyan)}
+.hint{font-size:12.5px;padding:10px 12px;border-radius:11px;border:1px solid;display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line-2);background:var(--well);color:var(--ink-2);border-radius:999px;padding:4px 11px;font-size:12px;font-family:var(--f-m);transition:all .2s}
+.chip:hover{border-color:var(--line-3);color:#fff}
+.chip.on{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 6px 18px -6px rgba(124,108,255,.9)}
+.drop{display:block;border:1.5px dashed var(--line-3);border-radius:14px;padding:22px;text-align:center;color:var(--ink-2);background:radial-gradient(120% 100% at 50% 0%,rgba(139,123,255,.08),transparent 60%),var(--well);font-size:13px;cursor:pointer;transition:border-color .2s}
+.drop:hover{border-color:var(--cyan)}
+.drop b{color:#fff}
+
+/* 监视舱 */
+.monitor{min-height:560px}
+.stage{position:relative;flex:1;min-height:340px;border-radius:14px;border:1px solid var(--line);background:radial-gradient(rgba(255,255,255,.07) 1px,transparent 1px) 0 0/16px 16px,radial-gradient(80% 70% at 50% 40%,#16161c,#0a0a0d);overflow:hidden;display:grid;place-items:center}
+.stage::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,transparent 60%,rgba(139,123,255,.06))}
+.stage svg{width:min(82%,560px);height:auto;position:relative;z-index:1}
+.stage .empty{text-align:center;color:var(--ink-3);position:relative;z-index:1}
+.stage .empty b{display:block;font-family:var(--f-d);font-weight:800;font-size:22px;letter-spacing:-.02em;margin-bottom:6px;background:linear-gradient(180deg,#fff,#8a8a96);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hl-line{stroke:#9d8fff} .hl-text{stroke:#c4b5fd;stroke-dasharray:600;stroke-dashoffset:600;animation:draw 1.6s var(--ease) forwards} .hl-box{stroke:var(--amber);opacity:.7}
+@keyframes draw{to{stroke-dashoffset:0}}
+.head{fill:#fff;filter:drop-shadow(0 0 6px #ff3b5c) drop-shadow(0 0 14px #ff3b5c);animation:head 1.4s linear infinite}
+@keyframes head{0%{transform:translate(20px,30px)}100%{transform:translate(180px,90px)}}
+.axis{position:absolute;z-index:1;font-family:var(--f-m);font-size:10.5px;color:var(--ink-3)}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:760px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.stat{background:var(--well);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
+.stat span{display:block;font-size:11px;color:var(--ink-3);letter-spacing:.04em}
+.stat b{display:block;margin-top:4px;font-family:var(--f-m);font-weight:600;font-size:clamp(14px,1.15vw,18px);letter-spacing:-.02em;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;background:linear-gradient(180deg,#fff,#a1a1aa);-webkit-background-clip:text;background-clip:text;color:transparent}
+.prog{height:8px;border-radius:999px;background:var(--well);overflow:hidden;border:1px solid var(--line)}
+.prog i{display:block;height:100%;width:0;background:var(--grad);box-shadow:0 0 16px rgba(139,123,255,.8);transition:width .3s var(--ease)}
+.actions{display:grid;grid-template-columns:1fr 1fr auto;gap:10px}
+@media (max-width:760px){.actions{grid-template-columns:minmax(0,1fr)}}
+
+/* 控制台 */
+.console{background:#050506;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;box-shadow:0 30px 60px -30px rgba(0,0,0,.8)}
+.ctabs{display:flex;flex-wrap:wrap;gap:4px;padding:6px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
+.ctabs button{border:0;background:transparent;color:var(--ink-3);padding:6px 11px;font-size:12px;border-radius:7px}
+.ctabs button:hover{color:var(--ink)}
+.ctabs button.on{color:#fff;background:var(--raise-2);box-shadow:0 0 0 1px var(--line-2)}
+.ctabs .sp{flex:1}
+.term{font-family:var(--f-m);font-size:12px;color:#c4c4cc;background:#050506;padding:12px 14px;max-height:210px;min-height:150px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.term .s{color:var(--green-2)} .term .w{color:var(--amber)} .term .e{color:var(--red-2)} .term .c{color:var(--cyan-2)}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 16px;font-size:12.5px;padding:12px 14px;margin:0}
+.kv dt{color:var(--ink-3)} .kv dd{margin:0;font-family:var(--f-m);overflow-wrap:anywhere;color:#e4e4ea}
+
+/* 表格（加粗表头 + 斑马纹 + 悬停） */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--well)}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+thead th{position:sticky;top:0;background:linear-gradient(180deg,#1d1d22,#17171b);color:#e9e9ef;text-align:left;font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;padding:12px 14px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+tbody td{padding:12px 14px;border-bottom:1px solid var(--line);white-space:nowrap;color:var(--ink-2);transition:background .18s}
+tbody tr:nth-child(even) td{background:rgba(255,255,255,.022)}
+tbody tr:hover td{background:rgba(139,123,255,.09);color:#fff}
+tbody tr:last-child td{border-bottom:0}
+tbody tr.on td{background:rgba(139,123,255,.14);color:#fff}
+tbody tr.on td:first-child{box-shadow:inset 3px 0 0 var(--cyan)}
+td b{color:#fff;font-weight:600}
+.tag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid transparent}
+.tag::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+
+/* 画板 */
+.draw{grid-template-columns:minmax(0,1fr) 350px}
+@media (max-width:1100px){.draw{grid-template-columns:minmax(0,1fr)}}
+.canvasbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.tool{display:flex;gap:4px;padding:4px;border:1px solid var(--line);border-radius:12px;background:var(--well)}
+.tool button{width:36px;height:34px;border-radius:8px;border:0;background:transparent;color:var(--ink-3);display:grid;place-items:center;transition:all .2s}
+.tool button:hover{color:#fff}
+.tool button.on{background:var(--grad);color:#fff;box-shadow:0 6px 16px -6px rgba(124,108,255,.9)}
+.tool svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2}
+.board{min-height:540px;border-radius:14px;border:1px solid var(--line-2);background:#fcfcfd;position:relative;overflow:hidden;background-image:radial-gradient(#d5d7de 1px,transparent 1px);background-size:20px 20px;box-shadow:0 30px 80px -30px rgba(124,108,255,.35)}
+.board svg{position:absolute;inset:0;width:100%;height:100%}
+.summary{font-size:13px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:0}
+.summary dt{color:var(--ink-3)} .summary dd{margin:0;font-family:var(--f-m);font-size:12.5px;color:#e4e4ea}
+details.diag{border:1px solid var(--line);border-radius:11px;padding:9px 12px;background:var(--well)}
+details.diag summary{cursor:pointer;color:var(--ink-2);font-size:13px}
+
+/* 材料实验室 */
+.lab{grid-template-columns:minmax(300px,360px) minmax(0,1fr) minmax(0,1fr)}
+@media (max-width:1300px){.lab{grid-template-columns:minmax(300px,360px) minmax(0,1fr)}.lab>.matrix{grid-column:1/-1}}
+@media (max-width:820px){.lab{grid-template-columns:minmax(0,1fr)}}
+.mtbl{max-height:520px;overflow:auto}
+.mtx{display:grid;gap:6px}
+.cell{aspect-ratio:1;border-radius:9px;border:1px solid rgba(255,255,255,.08);display:grid;place-items:center;font-family:var(--f-m);font-size:10px;color:rgba(255,255,255,.92);cursor:pointer;text-align:center;line-height:1.25;transition:transform .2s var(--ease)}
+.cell:hover{transform:scale(1.05)}
+.cell.on{outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 6px rgba(139,123,255,.35)}
+
+/* 语音中心 */
+.vgrid{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:1100px){.vgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.vgrid{grid-template-columns:minmax(0,1fr)}}
+.vs{position:relative;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);background:linear-gradient(180deg,var(--panel-2),var(--panel));border:1px solid var(--line);border-radius:var(--r);padding:16px;display:flex;flex-direction:column;gap:9px;min-width:0}
+#models .vs{background:var(--well)}
+.vs .t{font-family:var(--f-m);font-size:10px;letter-spacing:2px;color:var(--ink-3);text-transform:uppercase}
+.vs .d{font-size:12.5px;color:var(--ink-2);overflow-wrap:anywhere}
+.vs .pill{align-self:flex-start}
+
+/* 浮层 */
+.ov{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.62);backdrop-filter:blur(10px);display:grid;place-items:center;padding:16px;animation:rise .3s var(--ease)}
+.modal{position:relative;width:min(640px,100%);max-height:calc(100% - 32px);overflow:auto;background:linear-gradient(180deg,#16161b,#0e0e11);border:1px solid var(--line-2);border-radius:20px;box-shadow:0 40px 120px -20px rgba(0,0,0,.9),0 0 0 1px rgba(255,255,255,.03) inset;display:flex;flex-direction:column}
+.modal.red{border-color:transparent;background:linear-gradient(#141418,#0e0e11) padding-box,conic-gradient(from var(--a,0deg),#ff3b5c,#7c6cff,#ff3b5c 60%,#fbbf24,#ff3b5c) border-box;border:1.5px solid transparent;animation:rot 6s linear infinite;box-shadow:0 40px 120px -20px rgba(255,59,92,.35)}
+@property --a{syntax:"<angle>";inherits:false;initial-value:0deg}
+@keyframes rot{to{--a:360deg}}
+.mh{display:flex;align-items:center;gap:10px;padding:18px 22px;border-bottom:1px solid var(--line)}
+.mh h3{margin:0;font-family:var(--f-d);font-size:18px;font-weight:700;letter-spacing:-.01em;flex:1}
+.x{background:var(--raise);border:1px solid var(--line-2);border-radius:9px;color:var(--ink-2);width:34px;height:34px}
+.x:hover{color:#fff}
+.mb{padding:18px 22px;display:flex;flex-direction:column;gap:16px}
+.mf{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px;padding:16px 22px;border-top:1px solid var(--line)}
+.opt{display:flex;gap:11px;align-items:flex-start;border:1px solid var(--line);border-radius:13px;padding:12px 14px;cursor:pointer;background:var(--well);transition:all .2s}
+.opt:has(input:checked){border-color:rgba(139,123,255,.6);background:linear-gradient(180deg,rgba(139,123,255,.14),rgba(139,123,255,.04))}
+.opt input{margin-top:4px;accent-color:var(--cyan)}
+.opt b{display:block;font-size:13.5px}
+.opt span{font-size:12.5px;color:var(--ink-3)}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.steps span{text-align:center;padding:9px 4px;border-radius:10px;font-size:12.5px;font-weight:600;background:var(--well);color:var(--ink-3);border:1px solid var(--line)}
+.steps .on{background:var(--cyan-bg);color:#fff;border-color:rgba(139,123,255,.55);box-shadow:0 8px 24px -10px rgba(124,108,255,.9)}
+.steps .ok{background:var(--green-bg);color:var(--green-2);border-color:rgba(52,211,153,.4)}
+.steps .er{background:var(--red-bg);color:var(--red-2);border-color:rgba(255,59,92,.45)}
+.apg{display:grid;grid-template-columns:150px minmax(0,1fr);gap:18px}
+@media (max-width:540px){.apg{grid-template-columns:minmax(0,1fr)}}
+.pv{background:linear-gradient(135deg,#f6e7c8,#e9d3a6);border-radius:14px;aspect-ratio:1;display:grid;place-items:center;box-shadow:0 20px 40px -16px rgba(251,191,36,.45),inset 0 0 0 1px rgba(0,0,0,.08)}
+.dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 16px;font-size:13.5px;margin:0}
+.dl dt{color:var(--ink-3)} .dl dd{margin:0;overflow-wrap:anywhere}
+.cd{display:flex;align-items:center;gap:12px;font-family:var(--f-m);font-size:12.5px;color:var(--ink-2)}
+.cd b{color:var(--red-2);min-width:46px;font-size:15px}
+.cd .bar{flex:1;height:5px;border-radius:999px;background:var(--well);overflow:hidden}
+.cd .bar i{display:block;height:100%;background:linear-gradient(90deg,#ff3b5c,#fbbf24);transition:width 1s linear}
+.site{border:1px dashed var(--amber-bd);background:var(--amber-bg);border-radius:13px;padding:11px 13px}
+.code6{display:flex;gap:9px;justify-content:center}
+.code6 input{width:48px;height:58px;text-align:center;font-family:var(--f-m);font-size:24px;font-weight:600;background:var(--well);border:1px solid var(--line-2);border-radius:12px;color:#fff}
+.code6 input:focus{border-color:var(--cyan);box-shadow:0 0 0 4px rgba(139,123,255,.2);outline:none}
+
+/* 对照清单 */
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(450px,100%);z-index:65;background:rgba(12,12,15,.94);backdrop-filter:blur(20px);border-left:1px solid var(--line-2);box-shadow:-30px 0 80px rgba(0,0,0,.6);display:flex;flex-direction:column;animation:slide .4s var(--ease)}
+@keyframes slide{from{transform:translateX(30px);opacity:0}}
+.dbody{overflow:auto;padding:14px 16px;display:flex;flex-direction:column;gap:14px}
+.grp h4{margin:0 0 8px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan-2)}
+.fn{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;align-items:center;padding:9px 11px;border-radius:11px;border:1px solid var(--line);background:var(--well);margin-bottom:6px;font-size:13px}
+.fn small{grid-column:1/-1;color:var(--ink-3);font-size:11.5px}
+.fn.ok-done{border-color:rgba(52,211,153,.45)}
+.fn .new{color:var(--red-2);font-size:11px;font-weight:700}
+.hl{outline:2px solid var(--amber)!important;outline-offset:4px;box-shadow:0 0 0 8px rgba(251,191,36,.18),0 0 40px rgba(251,191,36,.35)!important}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:90;background:rgba(24,24,27,.92);backdrop-filter:blur(14px);border:1px solid var(--line-2);color:#fff;border-radius:999px;padding:10px 18px;font-size:13.5px;max-width:calc(100% - 32px);box-shadow:0 20px 50px -10px rgba(0,0,0,.8);animation:rise .3s var(--ease)}
+.lowfx *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+.lowfx .card,.lowfx .vs{background:linear-gradient(180deg,#16161c,#101014)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}.hl-text{stroke-dashoffset:0}}
+</style>
+</head><body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7Z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3M17 6l3 3M14 9l2 2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></symbol>
+  <symbol id="i-img" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9Z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5M5 3h14"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-frame" viewBox="0 0 24 24"><path d="M3 7V3h4M17 3h4v4M21 17v4h-4M7 21H3v-4"/></symbol>
+  <symbol id="i-sq" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1"/></symbol>
+  <symbol id="i-circ" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></symbol>
+  <symbol id="i-cursor" viewBox="0 0 24 24"><path d="m4 4 7 17 2.5-7.5L21 11Z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+</svg>
+
+<div class="bg" aria-hidden="true"><canvas id="gl"></canvas><div class="neb"></div><canvas id="stars"></canvas><div class="ring2"></div><div class="core"></div></div>
+<div class="shell">
+
+  <aside class="side">
+    <div class="logo"><div class="eye" aria-hidden="true"></div><div><b>MOSS</b><small>LASER FORGE 2.0</small></div></div>
+    <div class="nav-l">工作区</div>
+    <button class="nv on" data-go="wb" data-fn="G1"><svg><use href="#i-cpu"/></svg>雕刻工作台<span class="nb">HOST</span></button>
+    <button class="nv" data-go="draw" data-fn="G3"><svg><use href="#i-pen"/></svg>创作画板<span class="nb">CAD</span></button>
+    <button class="nv" data-go="lab" data-fn="G2"><svg><use href="#i-layers"/></svg>材料实验室<span class="nb">LAB</span></button>
+    <button class="nv" data-go="voice" data-fn="N1"><svg><use href="#i-mic"/></svg>语音中心<span class="nb new">新</span></button>
+    <div class="grow"></div>
+    <div class="side-foot">
+      <button class="nv" id="btnSettings" data-fn="G4"><svg><use href="#i-gear"/></svg>偏好设置</button>
+      <button class="nv" id="btnAuth" data-fn="G5"><svg><use href="#i-key"/></svg><span id="authLabel">配对认证</span></button>
+    </div>
+  </aside>
+
+  <div class="main">
+  <div class="proto"><span><b>全新前端原型</b> · 曜石设计 · 演示数据，不连后端与设备 · 原有按钮功能全部保留</span><span class="bgsw" role="group" aria-label="背景动画"><span>背景</span><button data-bgm="plasma">等离子流体</button><button data-bgm="galaxy">流动星河</button><button data-bgm="warp">超空间跃迁</button><button data-bgm="earth">太空舱</button></span><button id="openChecklist">功能对照清单 →</button></div>
+    <header class="top">
+      <h1 id="pageTitle">雕刻工作台<small id="pageSub">HOST · 激光创作控制台</small></h1>
+      <span class="sp"></span>
+      <button class="pill ok" id="pillHw" data-fn="G6" title="点击回到工作台检查连接"><i></i>硬件 在线</button>
+      <span class="pill ok" id="pillXz" data-fn="G7"><i></i>小智 · 自建 · 已连接</span>
+      <button class="pill off" id="pillAp" data-fn="N3">审批 <span class="badge" id="apCount" hidden>0</span></button>
+      <button class="estop" id="topEstop" data-fn="N4" title="向控制器请求 0x18 软件复位；不能替代硬件急停">■ 急停 0x18</button>
+    </header>
+
+    <div class="content">
+<!-- ================= 雕刻工作台 ================= -->
+<section class="page" id="pg-wb">
+  <div class="cols wb">
+    <div class="stack">
+      <div class="card">
+        <div class="card-h"><h2><span class="n">1</span>通信链路</h2><span class="k">LINK</span></div>
+        <div class="seg" data-fn="H1"><button class="on" data-conn="net">网络 Telnet/TCP</button><button data-conn="ser">串口 USB/Serial</button></div>
+        <div id="connNet" class="row">
+          <div class="f"><label for="ip">控制器 IP</label><input class="in mono" id="ip" placeholder="例 192.168.1.10" value="fluidnc.local" data-fn="H5"></div>
+          <div class="f" style="max-width:90px;min-width:80px"><label for="tport">端口</label><input class="in mono" id="tport" value="23"></div>
+          <button class="btn ghost ic" title="通过 mDNS 在局域网内查找 FluidNC" data-fn="H6" id="btnScan"><svg><use href="#i-search"/></svg></button>
+        </div>
+        <div id="connSer" class="row" hidden>
+          <div class="f"><label for="port">串口</label><select class="in mono" id="port" data-fn="H3"><option>COM5 · USB-SERIAL CH340</option><option>✎ 手动输入串口…</option></select></div>
+          <button class="btn ghost ic" title="立即重新扫描系统串口" data-fn="H2" id="btnPorts"><svg><use href="#i-refresh"/></svg></button>
+          <div class="f" style="min-width:150px"><label for="baud">波特率</label><select class="in mono" id="baud" data-fn="H4"><option>9600</option><option>19200</option><option>38400</option><option>57600</option><option selected>115200（默认）</option><option>230400</option><option>250000</option><option>460800</option><option>921600</option></select></div>
+        </div>
+        <button class="btn wide" id="btnProbe" data-fn="H7"><svg><use href="#i-check"/></svg>握手探测</button>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2><span class="n">2</span>加工内容</h2><span class="k">SOURCE</span></div>
+        <div class="tabs4" data-fn="H8">
+          <button class="on" data-src="text"><svg><use href="#i-text"/></svg>矢量文字</button>
+          <button data-src="img"><svg><use href="#i-img"/></svg>图片处理</button>
+          <button data-src="gc"><svg><use href="#i-file"/></svg>已有 G 码</button>
+          <button data-src="draw"><svg><use href="#i-pen"/></svg>创意画板</button>
+        </div>
+        <div id="srcText" class="stack" style="gap:10px">
+          <div class="f"><label for="txt">输入文本内容 <em id="txtCount">2 / 24</em></label><input class="in" id="txt" maxlength="24" value="你好" placeholder="输入要雕刻的字符..." data-fn="H9"></div>
+          <div class="g2">
+            <div class="f"><label for="fh">字高尺寸 (mm)</label><input class="in mono" id="fh" type="number" value="20" data-fn="H10"></div>
+            <div class="f"><label for="lay">排版模式</label><select class="in" id="lay" data-fn="H11"><option>光栅填充 (Raster)</option><option>轮廓扫描 (Outline)</option><option>边缘切割 (Cut)</option></select></div>
+          </div>
+        </div>
+        <div id="srcImg" hidden><label class="drop" data-fn="H12">拖入或<b>点击上传图像文件</b><br><span class="sub">PNG / JPG / BMP / WebP</span><input type="file" accept="image/*" hidden></label></div>
+        <div id="srcGc" hidden><label class="drop" data-fn="H13">拖入或<b>导入现有 G-code / NC 刀路文件</b><br><span class="sub">.gcode / .nc / .txt</span><input type="file" hidden></label></div>
+        <div id="srcDraw" hidden class="stack" style="gap:10px"><p class="sub" style="margin:0">Excalidraw 矢量创作画板：支持自由手绘、几何轮廓、图形拼接并一键转为激光切割 / 光栅雕刻 G-code。</p><button class="btn" data-go="draw" data-fn="H14"><svg><use href="#i-pen"/></svg>进入画板全屏创作</button></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2><span class="n">3</span>材质与参数</h2><span class="k">MATERIAL</span><span class="r"><button class="btn ghost sm" id="btnMatEdit" data-fn="H17">调整库内参数</button></span></div>
+        <div class="g2">
+          <div class="f"><label for="mat">材料类型</label><select class="in" id="mat" data-fn="H15"><option>椴木板</option><option>牛皮纸</option><option>亚克力（黑）</option><option>皮革</option></select></div>
+          <div class="f"><label for="thk">厚度规格</label><select class="in mono" id="thk" data-fn="H16"><option>3 mm</option><option>5 mm</option></select></div>
+        </div>
+        <p class="sub" style="margin:0">只显示材料名与厚度；功率、速度由材料库决定。</p>
+      </div>
+    </div>
+
+    <div class="card monitor">
+      <div class="card-h"><h2><span class="n">4</span>加工监视舱</h2><span class="k">MONITOR</span><span class="r"><span class="pill off" id="wfState"><i></i>待计算加工轨迹</span></span></div>
+      <div class="stage" id="stage">
+        <span class="axis" style="left:10px;top:8px">Y+</span><span class="axis" style="right:10px;bottom:8px">X+ · 100 × 100 mm</span>
+        <div class="empty" id="stageEmpty"><b>加工监视舱就绪</b>在左侧设定参数后点击【计算加工轨迹】</div>
+        <svg id="stageSvg" viewBox="0 0 200 120" hidden aria-label="刀路预览">
+          <defs><pattern id="hatch" width="200" height="2.2" patternUnits="userSpaceOnUse"><line class="hl-line" x1="0" y1="1" x2="200" y2="1" stroke-width="1.1"/></pattern></defs>
+          <rect class="hl-box" x="18" y="22" width="164" height="76" fill="none" stroke-dasharray="3 3" stroke-width=".8"/>
+          <text x="100" y="82" text-anchor="middle" font-size="56" font-weight="900" font-family="Noto Sans SC, sans-serif" fill="url(#hatch)" class="hl-text" stroke-width=".6">你好</text>
+        <g id="headG" style="display:none"><circle class="head" r="2.4"/></g>
+        </svg>
+      </div>
+      <div class="stats" data-fn="H21">
+        <div class="stat"><span>几何轮廓包络</span><b id="stBox">—</b></div>
+        <div class="stat"><span>预估加工耗时</span><b id="stTime">—</b></div>
+        <div class="stat"><span>刀路总行数</span><b id="stLines">—</b></div>
+        <div class="stat"><span>物理 SHA-256</span><b id="stSha">待计算比对</b></div>
+      </div>
+      <div class="f"><label>下发实时进度 <em id="progText">0 / 0 行</em></label><div class="prog"><i id="progBar"></i></div></div>
+      <div class="actions">
+        <button class="btn pri" id="btnGen" data-fn="H18"><svg><use href="#i-cpu"/></svg><span>计算加工轨迹</span></button>
+        <button class="btn fire" id="btnSend" data-fn="H19" disabled><svg><use href="#i-play"/></svg><span>启动 JobWorker 逐行下发</span></button>
+        <button class="btn danger" id="btnEstop" data-fn="H20" title="向控制器请求 0x18 软件复位；不能替代硬件急停">0x18 软件复位</button>
+      </div>
+    </div>
+
+    <div class="rail stack">
+      <div class="card">
+        <div class="card-h"><h2>加工反馈</h2><span class="k">FEEDBACK</span></div>
+        <div class="f"><label for="fb">加工效果反馈</label><textarea class="in" id="fb" placeholder="例如：文字太浅，边缘清晰" data-fn="H22"></textarea></div>
+        <button class="btn" id="btnFb">提交反馈</button>
+        <div id="fbResult" hidden class="stack" style="gap:8px">
+          <dl class="summary"><dt>原参数</dt><dd>300/1000 · 1500 mm/min · 1 遍</dd><dt>建议参数</dt><dd style="color:var(--green)">360/1000 · 1300 mm/min · 1 遍</dd></dl>
+          <button class="btn ghost" id="btnAdopt" data-fn="H23">采用建议并生成新预览</button>
+        </div>
+      </div>
+      <div class="console" data-fn="H26">
+        <div class="ctabs"><button class="on" data-ct="term">通信终端</button><button data-ct="gc">G-code 行视图</button><button data-ct="mcp">小智网关</button><span class="sp"></span><button id="clrTerm" data-fn="H24" title="清空控制台日志">清空终端</button><button id="clrView" data-fn="H25" title="清空当前 G-code 刀路视图">清空视图</button></div>
+        <div class="term" id="term"></div>
+        <div class="term" id="gcView" hidden>&gt; 暂无 G-code 刀路数据 · 请先计算加工轨迹</div>
+        <dl class="kv" id="mcpView" hidden><dt>连接状态</dt><dd style="color:var(--green)">已握手（真实遥测）</dd><dt>客户端标识</dt><dd>xiaozhi-server（接入点）</dd><dt>网关端点</dt><dd>ws://&lt;本机&gt;:8004/mcp_endpoint/mcp/?token=***</dd><dt>协议版本</dt><dd>2024-11-05</dd><dt>工具数</dt><dd>19</dd><dt>最新请求</dt><dd>tools/call laser_workflow_tool(preview)</dd><dt>安全门禁</dt><dd>物理 SHA-256 重算 · 严格模式</dd><dt>急停信道</dt><dd>0x18 实时通道</dd></dl>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 创作画板 ================= -->
+<section class="page" id="pg-draw" hidden>
+  <div class="cols draw">
+    <div class="card">
+      <div class="canvasbar">
+        <button class="btn ghost sm" data-go="wb" data-fn="D1">← 工作台</button>
+        <div class="tool" role="toolbar" aria-label="画板工具"><button class="on" title="选择"><svg><use href="#i-cursor"/></svg></button><button title="矩形"><svg><use href="#i-sq"/></svg></button><button title="椭圆"><svg><use href="#i-circ"/></svg></button><button title="手绘"><svg><use href="#i-pen"/></svg></button><button title="文字"><svg><use href="#i-text"/></svg></button></div>
+        <span class="sp" style="flex:1"></span>
+        <button class="btn ghost sm" data-fn="D2" data-toast="场景 JSON 已导出"><svg><use href="#i-down"/></svg>场景</button>
+        <button class="btn ghost sm" data-fn="D3" data-toast="PNG 已导出"><svg><use href="#i-down"/></svg>PNG</button>
+      </div>
+      <div class="board" aria-label="Excalidraw 激光画板（示意）">
+        <svg viewBox="0 0 600 420" preserveAspectRatio="xMidYMid meet"><rect x="150" y="90" width="300" height="220" rx="6" fill="none" stroke="#1e1e1e" stroke-width="3"/><circle cx="300" cy="200" r="70" fill="none" stroke="#1e1e1e" stroke-width="3"/><path d="M190 280 Q300 130 410 280" fill="none" stroke="#c92a2a" stroke-width="3"/><text x="300" y="360" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="26" fill="#1e1e1e">MOSS</text></svg>
+      </div>
+      <p class="sub" style="margin:0">画板区为 Excalidraw，保持原有绘图能力，此处为示意。</p>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <div class="card-h"><h2><span class="n">1</span>材料与尺寸</h2><span class="r"><button class="btn ghost ic sm" title="刷新材料库" data-fn="D4" data-toast="材料库已刷新"><svg><use href="#i-refresh"/></svg></button></span></div>
+        <div class="f"><label for="dmat">材料库</label><select class="in" id="dmat" data-fn="D6"><option>椴木板 · 3 mm</option><option>牛皮纸 · 0.5 mm</option><option>✎ 手动输入</option></select></div>
+        <div id="dManual" hidden class="g2"><div class="f"><label>材料名称</label><input class="in" value="自定义"></div><div class="f"><label>厚度 mm</label><input class="in mono" value="3"></div><button class="link" id="backLib" data-fn="D5">返回材料库</button></div>
+        <div class="g2" data-fn="D7"><div class="f"><label>宽 mm</label><input class="in mono" value="80"></div><div class="f"><label>高 mm</label><input class="in mono" value="56"></div></div>
+        <div class="f"><label>生成策略</label><select class="in" data-fn="D8"><option>光栅雕刻 raster</option><option>轮廓雕刻 outline</option><option>自动判断 auto</option></select></div>
+        <div class="f"><label>轮廓简化 <em>vector_simplify_factor</em></label><input class="in mono" placeholder="默认 3" data-fn="D9"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2><span class="n">2</span>设备</h2></div>
+        <div class="row" data-fn="D10"><div class="f"><label>设备 host/IP</label><input class="in mono" placeholder="例如 laser.local" value="fluidnc.local"></div><div class="f" style="max-width:96px;min-width:80px"><label>Telnet 端口</label><input class="in mono" value="23"></div></div>
+        <div class="g2"><button class="btn ghost" data-fn="D11" data-toast="握手通过（$32=1）">测试连接</button><button class="btn ghost" data-fn="D12" data-toast="画板配置已保存">保存配置</button></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2><span class="n">3</span>预览与发送</h2></div>
+        <div class="g2"><button class="btn pri" id="dGen" data-fn="D13">生成预览</button><button class="btn fire" id="dSend" data-fn="D14" disabled>确认发送</button></div>
+        <button class="btn warnb" data-fn="D15" title="控制激光头沿工件外接边框空走一圈，用于对齐摆放材料" data-toast="走边框完成（power=1）">走边框 (Framing)</button>
+        <div class="g2"><button class="btn ghost sm" data-fn="D16" data-toast="状态：preview_ready">状态</button><button class="btn ghost sm" data-fn="D17" data-toast="已取消后续发送">取消</button></div>
+        <div class="g2"><button class="btn ghost sm" data-fn="D18" data-toast="G-code 已下载"><svg><use href="#i-down"/></svg>下载 G-code</button><button class="btn ghost sm" data-fn="D19" data-toast="场景 JSON 已下载"><svg><use href="#i-down"/></svg>下载场景 JSON</button></div>
+        <div class="f" data-fn="D21"><label>作业摘要</label><dl class="summary" id="dSum"><dt>状态</dt><dd>生成预览后显示材料、尺寸、参数和预计时间。</dd></dl></div>
+        <details class="diag" data-fn="D20"><summary>诊断输出</summary><pre class="term" style="max-height:120px;min-height:0;padding:6px 0;margin:0">content_fingerprint: 9c2e…41af
+raster_strategy: raster · machine_limits 400×400</pre></details>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 材料实验室 ================= -->
+<section class="page" id="pg-lab" hidden>
+  <div class="cols lab">
+    <div class="card">
+      <div class="card-h"><h2>材料库</h2><span class="k">当前存储源：SQLite</span></div>
+      <div class="row"><div class="f"><input class="in" placeholder="搜索材料名称..." aria-label="搜索材料名称" data-fn="L1" id="mSearch"></div><button class="btn ic" title="添加新材料到材料库" data-fn="L2" id="btnNewMat"><svg><use href="#i-plus"/></svg></button></div>
+      <div class="g3"><button class="btn ghost sm" title="从最近的工作流提取材料参数" data-fn="L5" data-toast="已套用最近工作流参数">套用最近</button><button class="btn ghost sm" title="导入外部材料库" data-fn="L3" data-toast="导入成功"><svg><use href="#i-up"/></svg>导入</button><button class="btn ghost sm" title="导出材料库 JSON" data-fn="L4" data-toast="材料库已导出"><svg><use href="#i-down"/></svg>导出库</button></div>
+      <div class="tbl mtbl" data-fn="L6"><table><thead><tr><th>材料</th><th>厚度</th><th style="text-align:right">操作</th></tr></thead><tbody id="mlist"></tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>材料参数</h2><span class="k" id="labTitle">椴木板 · 3 mm</span></div>
+      <div class="seg" data-fn="L8"><button class="on">光栅雕刻 Raster</button><button>轮廓扫描 Outline</button><button>边缘切割 Cut</button></div>
+      <div class="g2" data-fn="L9">
+        <div class="f"><label>最小激光功率 <em>0-1000</em></label><input class="in mono" value="0"></div>
+        <div class="f"><label>最大激光功率 <em>0-1000</em></label><input class="in mono" value="300"></div>
+        <div class="f"><label>加工进给速度 <em>mm/min</em></label><input class="in mono" value="1500"></div>
+        <div class="f"><label>空移速度 <em>mm/min</em></label><input class="in mono" value="3000"></div>
+        <div class="f"><label>加工循环次数 <em>Passes</em></label><input class="in mono" value="1"></div>
+        <div class="f"><label>点距 / 像素尺寸 <em>mm</em></label><input class="in mono" value="0.1"></div>
+        <div class="f"><label>二值阈值 <em>-1 为自动</em></label><input class="in mono" value="-1"></div>
+      </div>
+      <div class="f"><label>工艺与材质备注</label><input class="in" placeholder="例如：双面覆膜、浅色木纹..."></div>
+      <button class="btn pri" data-fn="L10" data-toast="已保存到材料库，其他页面已同步">保存到材料库</button>
+    </div>
+    <div class="card matrix">
+      <div class="card-h"><h2>校准矩阵生成与实机测试</h2><span class="k">MATRIX</span></div>
+      <div class="g2" data-fn="L11">
+        <div class="f"><label>功率区间 <em>Min-Max</em></label><div class="row" style="flex-wrap:nowrap"><input class="in mono" value="200"><input class="in mono" value="600"></div></div>
+        <div class="f"><label>速度区间 <em>Min-Max</em></label><div class="row" style="flex-wrap:nowrap"><input class="in mono" value="800"><input class="in mono" value="2000"></div></div>
+        <div class="f"><label>矩阵行列 <em id="rcTxt">4 × 4</em></label><input type="range" min="2" max="6" value="4" id="rc" style="accent-color:var(--cyan)"></div>
+        <div class="f"><label>设备 host / IP</label><input class="in mono" value="fluidnc.local" data-fn="L12"></div>
+      </div>
+      <div class="g2"><button class="btn" id="btnMtx" data-fn="L13">生成矩阵</button><button class="btn fire" id="btnMtxSend" data-fn="L15" disabled>发送测试</button></div>
+      <p class="sub" style="margin:0" id="mtxHint">配置区间并点击【生成矩阵】预览校准网格</p>
+      <div class="mtx" id="mtx" data-fn="L14"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 语音中心 ================= -->
+<section class="page" id="pg-voice" hidden>
+  <div class="card">
+    <div class="card-h"><h2>语音链路</h2><span class="k">MODE</span></div>
+    <div class="row" style="align-items:center"><div class="seg" style="min-width:280px" data-fn="N2"><button id="vOff">官方小智</button><button id="vSelf" class="on">自建服务端</button></div><span class="sub">同一时间只启用一条链路；自建模式强制开启严格模式，开始加工必须在本机审批。</span></div>
+    <div class="hint ok" id="otaHint">✓ 设备已连到自建服务端（接入点检测到 1 个设备会话）。</div>
+  </div>
+  <div class="cols vgrid">
+    <div class="vs"><span class="t">SERVER</span><span class="pill ok" id="vSv"><i></i>运行中</span><span class="d" id="vSvD">由 MOSS 启动 · 已运行 1 小时 12 分</span><div class="row"><button class="btn ghost sm" id="vStart" disabled>启动</button><button class="btn ghost sm" id="vStop">停止</button><button class="btn ghost sm" id="vRestart">重启</button></div></div>
+    <div class="vs"><span class="t">MCP 接入点</span><span class="pill ok"><i></i>正常</span><span class="d mono">:8004 · 工具连接 1 · 设备会话 1</span></div>
+    <div class="vs"><span class="t">设备</span><span class="pill ok"><i></i>在线</span><span class="d">实战派 ESP32-S3</span></div>
+    <div class="vs"><span class="t">严格模式</span><span class="pill info"><i></i>已开启</span><span class="d">自建模式下不可关闭</span></div>
+  </div>
+  <div class="card">
+    <div class="card-h"><h2>模型配置</h2><span class="k">LLM · ASR · TTS</span><span class="r sub">密钥只写入服务端 data/.config.yaml，MOSS 不保存</span></div>
+    <div class="g3" id="models"></div>
+  </div>
+  <div class="cols" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">
+    <div class="card"><div class="card-h"><h2>审批记录</h2><span class="k">APPROVALS</span></div><div class="tbl"><table><thead><tr><th>时间</th><th>内容</th><th>来源</th><th>状态</th></tr></thead><tbody id="apLog"><tr><td colspan="4" class="sub">还没有审批请求。</td></tr></tbody></table></div></div>
+    <div class="card"><div class="card-h"><h2>服务端日志</h2><span class="k">已脱敏</span></div><div class="term" style="background:#02050d;border:1px solid var(--bd);border-radius:9px" id="vLog"></div></div>
+  </div>
+</section>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 浮层 ============ -->
+<div class="ov" id="ovSettings" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="stT">
+  <div class="mh"><h3 id="stT">偏好设置</h3><button class="x" data-close="ovSettings" title="关闭">✕</button></div>
+  <div class="mb">
+    <div class="f" data-fn="S1"><label>服务监听端口 (Web Port)</label><div class="row" style="flex-wrap:nowrap"><input class="in mono" value="9666"><button class="btn sm" data-toast="端口已保存，重启后生效">保存端口设置</button></div><span class="sub">上位机 HTTP 服务端口，供桌面端同源访问及手机 / 局域网连接。</span></div>
+    <div class="hint info" data-fn="S2">小智连接地址已移到「语音中心」统一管理。<button class="link" data-go="voice" data-close="ovSettings">前往语音中心</button></div>
+    <div class="f"><label>OpenRouter · Jev 判断服务</label><span class="sub">只帮助判断“太焦、太浅、切不透”等加工反馈，不直接控制激光机。</span>
+      <label class="chk" data-fn="S3"><input type="checkbox" checked> 启用 Jev 判断</label>
+      <div class="row" style="flex-wrap:nowrap"><input class="in mono" id="jevKey" type="password" value="sk-or-demo-key-0000"><button class="btn ghost ic sm" title="查看 Jev API Key" data-fn="S4" id="jevEye">👁</button><button class="btn ghost ic sm" title="删除 Jev API Key" data-fn="S5" data-toast="已删除 Jev API Key">🗑</button></div>
+      <div class="g2"><button class="btn sm" data-fn="S6" data-toast="Jev 设置已保存">保存 Jev 设置</button><button class="btn ghost sm" data-fn="S7" data-toast="Jev 连接测试通过">测试连接</button></div></div>
+    <div class="f" data-fn="S8"><label>窗口关闭行为</label>
+      <label class="opt"><input type="radio" name="close" checked><div><b>每次询问（推荐）</b><span>点击关闭时弹出对话框，临时决定最小化还是退出</span></div></label>
+      <label class="opt"><input type="radio" name="close"><div><b>最小化到系统托盘</b><span>后台作业不中断，可在托盘右键退出</span></div></label>
+      <label class="opt"><input type="radio" name="close"><div><b>完全退出程序</b><span>安全停止激光并结束主进程</span></div></label></div>
+  </div>
+  <div class="mf"><button class="btn pri" data-close="ovSettings" data-fn="S9">完成设置</button></div>
+</div></div>
+
+<div class="ov" id="ovAuth" hidden><div class="modal" style="width:min(440px,100%)" role="dialog" aria-modal="true" aria-labelledby="auT">
+  <div class="mh"><h3 id="auT">局域网配对认证</h3><button class="x" data-close="ovAuth" title="关闭">✕</button></div>
+  <div class="mb"><span class="sub">在本机生成的 6 位配对码，5 分钟内有效。用于手机或其他电脑访问。</span>
+    <div class="code6" data-fn="A1"><input maxlength="1" aria-label="第1位"><input maxlength="1" aria-label="第2位"><input maxlength="1" aria-label="第3位"><input maxlength="1" aria-label="第4位"><input maxlength="1" aria-label="第5位"><input maxlength="1" aria-label="第6位"></div>
+    <button class="link red" data-fn="A2" id="authClear" style="align-self:flex-start">撤销清除已保存的授权</button></div>
+  <div class="mf"><button class="btn ghost" data-close="ovAuth">取消</button><button class="btn pri" id="authSubmit" data-fn="A3">提交配对</button></div>
+</div></div>
+
+<div class="ov" id="ovClose" hidden><div class="modal" style="width:min(480px,100%)" role="dialog" aria-modal="true" aria-labelledby="clT">
+  <div class="mh"><h3 id="clT">关闭主窗口</h3><button class="x" data-close="ovClose" title="取消">✕</button></div>
+  <div class="mb" data-fn="C1">
+    <label class="opt"><input type="radio" name="cl" checked><div><b>最小化到系统托盘</b><span>后台继续保持激光作业与网络服务</span></div></label>
+    <label class="opt"><input type="radio" name="cl"><div><b>完全退出程序</b><span>停止加工任务，触发安全急停软复位并结束进程</span></div></label>
+    <label class="chk"><input type="checkbox"> 记住我的选择，以后不再询问（可在偏好设置中更改）</label>
+  </div>
+  <div class="mf"><button class="btn ghost" data-close="ovClose">取消</button><button class="btn pri" data-close="ovClose" data-toast="已最小化到托盘">确定</button></div>
+</div></div>
+
+<div class="ov" id="ovMat" hidden><div class="modal" style="width:min(480px,100%)" role="dialog" aria-modal="true" aria-labelledby="mtT">
+  <div class="mh"><h3 id="mtT">编辑材料</h3><button class="x" data-close="ovMat" title="关闭">✕</button></div>
+  <div class="mb"><div class="g2"><div class="f"><label>材料名称</label><input class="in" value="椴木板"></div><div class="f"><label>厚度（mm）</label><input class="in mono" value="3"></div><div class="f"><label>功率（%）</label><input class="in mono" value="30"></div><div class="f"><label>速度（mm/s）</label><input class="in mono" value="25"></div></div></div>
+  <div class="mf"><button class="btn danger" style="margin-right:auto" data-close="ovMat" data-toast="材料已删除" data-fn="L7">删除材料</button><button class="btn ghost" data-close="ovMat">取消</button><button class="btn pri" data-close="ovMat" data-toast="已保存修改">保存修改</button></div>
+</div></div>
+
+<div class="ov" id="ovDSend" hidden><div class="modal" style="width:min(480px,100%)" role="dialog" aria-modal="true" aria-labelledby="dsT">
+  <div class="mh"><h3 id="dsT">确认开始雕刻</h3><button class="x" data-close="ovDSend" title="关闭">✕</button></div>
+  <div class="mb">
+    <dl class="dl"><dt>材料</dt><dd>椴木板 · 3 mm</dd><dt>尺寸</dt><dd>80 × 56 mm</dd><dt>参数</dt><dd class="mono">300/1000 · 1500 mm/min · 1 遍</dd><dt>预计</dt><dd>约 6 分钟</dd></dl>
+    <label class="chk"><input type="checkbox" id="offSd"> 脱机离线加工（推荐，防电脑休眠 / 网络抖动）</label>
+    <label class="chk site"><input type="checkbox" id="moved"> 已移动材料或原点（相同图案再次发送前必须勾选）</label>
+  </div>
+  <div class="mf"><button class="btn ghost" data-close="ovDSend">取消</button><button class="btn fire" id="dConfirm" disabled>在线流式发送</button></div>
+</div></div>
+
+<div class="ov" id="ovAp" hidden><div class="modal red" role="dialog" aria-modal="true" aria-labelledby="apT">
+  <div class="mh"><h3 id="apT"><span style="color:var(--red)">●</span> 小智请求开始加工</h3><span class="tag" style="color:var(--red-2);border-color:var(--red)">R3 · 运动与出光</span></div>
+  <div class="mb">
+    <div class="apg"><div class="pv"><svg viewBox="0 0 100 100" width="100%"><text x="50" y="62" text-anchor="middle" font-size="30" font-weight="900" fill="#3b2412" font-family="Noto Sans SC, sans-serif">你好</text></svg></div>
+      <dl class="dl"><dt>内容</dt><dd>文字“你好”（光栅）</dd><dt>材料</dt><dd>椴木板 · 3 mm</dd><dt>参数</dt><dd class="mono">300/1000 · 1500 mm/min · 1 遍</dd><dt>时长</dt><dd>约 4 分钟</dd><dt>目标设备</dt><dd>网络 · Telnet · 已配置的激光机</dd><dt>来源</dt><dd>小智（MCP 接入点）</dd><dt>摘要</dt><dd class="mono">sha256 a3f9…c41e</dd></dl></div>
+    <div class="cd"><b id="apLeft">120 s</b><div class="bar"><i id="apBar" style="width:100%"></i></div><span>过期后需重新发起</span></div>
+    <label class="chk site"><input type="checkbox" id="apChk"> 我在机器旁，材料已放好、原点已确认，排风已开启</label>
+    <div class="hint bad" id="apErr" hidden></div>
+  </div>
+  <div class="mf"><button class="btn ghost" id="apLater">稍后处理</button><button class="btn danger" id="apRej">拒绝</button><button class="btn fire" id="apOk" disabled>批准并开始</button></div>
+</div></div>
+
+<div class="ov" id="ovSend" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="sdT">
+  <div class="mh"><h3 id="sdT">正在向设备发送 · 请勿关闭页面</h3></div>
+  <div class="mb" data-fn="O1"><div class="steps"><span id="k0">校验</span><span id="k1">生成</span><span id="k2">传输</span><span id="k3">执行</span></div><div class="prog"><i id="sdBar"></i></div><div class="mono sub" id="sdTxt">0 / 1240 行</div><div class="hint warn" id="sdHint" hidden></div></div>
+  <div class="mf"><button class="btn ghost" id="sdCancel">取消任务</button><button class="btn danger" id="sdStop">■ 急停 0x18</button><button class="btn" id="sdClose" hidden>关闭窗口</button></div>
+</div></div>
+
+<aside class="drawer" id="drawer" hidden aria-label="功能对照清单">
+  <div class="mh"><h3>功能对照清单</h3><button class="x" id="drawerX" title="关闭">✕</button></div>
+  <div class="dbody"><p class="sub" style="margin:0">左边是原有前端的按钮或功能，点“定位”跳到新界面中的位置并高亮。标 <span style="color:var(--red-2)">新增</span> 的是本次新加的。</p><div id="fnList"></div></div>
+</aside>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const now = () => new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  let tT;
+  const toast = (m) => { const t = $("#toast"); t.textContent = m; t.hidden = false; clearTimeout(tT); tT = setTimeout(() => (t.hidden = true), 2400); };
+  const log = (m, c = "") => { const d = document.createElement("div"); if (c) d.className = c; d.textContent = `${now()} ${m}`; $("#term").appendChild(d); $("#term").scrollTop = 1e9; };
+  const vlog = (m, c = "") => { const d = document.createElement("div"); if (c) d.className = c; d.textContent = `${now()} ${m}`; $("#vLog").appendChild(d); $("#vLog").scrollTop = 1e9; };
+  const open = (id) => ($("#" + id).hidden = false);
+  const close = (id) => ($("#" + id).hidden = true);
+
+  // ---------- 页面 ----------
+  const PAGES = { wb: ["雕刻工作台", "HOST · 激光创作控制台"], draw: ["创作画板", "CAD · Excalidraw 激光画板"], lab: ["材料实验室", "LAB · 材料参数与校准矩阵"], voice: ["语音中心", "VOICE · 小智链路与模型"] };
+  function go(p) {
+    Object.keys(PAGES).forEach((k) => ($("#pg-" + k).hidden = k !== p));
+    $$(".nv[data-go]").forEach((b) => b.classList.toggle("on", b.dataset.go === p));
+    $("#pageTitle").firstChild.textContent = PAGES[p][0]; $("#pageSub").textContent = PAGES[p][1];
+    window.scrollTo({ top: 0 });
+  }
+  document.addEventListener("click", (e) => {
+    const g = e.target.closest("[data-go]"); if (g) go(g.dataset.go);
+    const c = e.target.closest("[data-close]"); if (c) close(c.dataset.close);
+    const t = e.target.closest("[data-toast]"); if (t && !t.disabled) toast(t.dataset.toast);
+  });
+  $("#btnSettings").onclick = () => open("ovSettings");
+  $("#btnAuth").onclick = () => open("ovAuth");
+  $("#pillHw").onclick = () => go("wb");
+
+  // ---------- 工作台：连接 ----------
+  $$("[data-conn]").forEach((b) => b.onclick = () => {
+    $$("[data-conn]").forEach((x) => x.classList.toggle("on", x === b));
+    $("#connNet").hidden = b.dataset.conn !== "net"; $("#connSer").hidden = b.dataset.conn !== "ser";
+  });
+  $("#btnScan").onclick = () => { toast("扫描中…"); setTimeout(() => { toast("发现 FluidNC：fluidnc.local"); log("[mDNS] 发现控制器 fluidnc.local", "s"); }, 900); };
+  $("#btnPorts").onclick = () => { toast("已重新扫描串口：1 个"); log("[串口] 扫描到 COM5 · USB-SERIAL CH340", "c"); };
+  $("#btnProbe").onclick = () => { log("[握手] $$ → ok · $32=1 · $30=1000", "s"); toast("握手通过（$32=1）"); $("#pillHw").className = "pill ok"; $("#pillHw").innerHTML = "<i></i>硬件 在线"; };
+
+  // ---------- 工作台：来源 ----------
+  const SRC = { text: "#srcText", img: "#srcImg", gc: "#srcGc", draw: "#srcDraw" };
+  $$("[data-src]").forEach((b) => b.onclick = () => {
+    $$("[data-src]").forEach((x) => x.classList.toggle("on", x === b));
+    Object.entries(SRC).forEach(([k, s]) => ($(s).hidden = k !== b.dataset.src));
+  });
+  $("#txt").oninput = () => ($("#txtCount").textContent = `${[...$("#txt").value].length} / 24`);
+  $("#btnMatEdit").onclick = () => { $("#mtT").textContent = "调整库内参数"; open("ovMat"); };
+
+  // ---------- 工作台：生成与发送 ----------
+  let generated = false, resumeAt = 0;
+  $("#btnGen").onclick = () => {
+    const b = $("#btnGen"); b.disabled = true; b.querySelector("span").textContent = "正在解算...";
+    setTimeout(() => {
+      generated = true; b.disabled = false; b.querySelector("span").textContent = "重新生成轨迹";
+      $("#stageEmpty").hidden = true; $("#stageSvg").removeAttribute("hidden");
+      $("#stBox").textContent = "40.0 × 20.0 mm"; $("#stTime").textContent = "约 4 分 05 秒"; $("#stLines").textContent = "1,240 行"; $("#stSha").textContent = "a3f9…c41e";
+      $("#wfState").className = "pill info"; $("#wfState").innerHTML = "<i></i>预览就绪 preview_ready";
+      $("#btnSend").disabled = false; resumeAt = 0; $("#btnSend").querySelector("span").textContent = "启动 JobWorker 逐行下发";
+      $("#gcView").textContent = "G21\nG90\nM4 S0\nG0 X18.0 Y22.0\nG1 X182.0 S300 F1500\n…（共 1,240 行）";
+      log("[workflow] preview 完成 · 冻结 SHA-256 a3f9…c41e", "s");
+    }, 800);
+  };
+  $("#btnSend").onclick = () => startSend("wb");
+  $("#btnEstop").onclick = $("#topEstop").onclick = () => estop();
+  function estop() { log("[安全] 0x18 已经通过实时通道写入（不能替代硬件急停）", "e"); toast("0x18 已发送：写入成功不代表机器已物理停止"); if (sending) stopSend("急停"); }
+
+  // ---------- 反馈 ----------
+  $("#btnFb").onclick = () => { if (!$("#fb").value.trim()) { toast("请先写下加工效果"); return; } $("#fbResult").hidden = false; log("[反馈] 分类 too_light（本地规则）→ 建议提高功率", "c"); };
+  $("#btnAdopt").onclick = () => { toast("已生成新的独立预览，发送仍需单独确认"); $("#btnGen").click(); };
+
+  // ---------- 控制台 ----------
+  $$("[data-ct]").forEach((b) => b.onclick = () => {
+    $$("[data-ct]").forEach((x) => x.classList.toggle("on", x === b));
+    $("#term").hidden = b.dataset.ct !== "term"; $("#gcView").hidden = b.dataset.ct !== "gc"; $("#mcpView").hidden = b.dataset.ct !== "mcp";
+  });
+  $("#clrTerm").onclick = () => ($("#term").innerHTML = "");
+  $("#clrView").onclick = () => { $("#gcView").textContent = "> 已清空当前 G-code 刀路视图"; toast("已清空当前 G-code 刀路视图"); };
+
+  // ---------- 发送覆盖层 ----------
+  let sending = false, sTimer;
+  function steps(i, cls) { for (let k = 0; k < 4; k++) $("#k" + k).className = k < i ? "ok" : k === i ? cls : ""; }
+  function startSend(from, label = "桌面会话") {
+    open("ovSend"); sending = true; if (from === "wb") $("#headG").style.display = ""; $("#sdClose").hidden = true; $("#sdCancel").hidden = false; $("#sdStop").hidden = false; $("#sdHint").hidden = true;
+    $("#sdT").textContent = "正在向设备发送 · 请勿关闭页面";
+    const total = 1240; let sent = resumeAt; steps(0, "on");
+    log(`[发送] ${label} · 重算 SHA → 握手 → $CD → Idle 预检`, "c");
+    setTimeout(() => steps(1, "on"), 500);
+    setTimeout(() => {
+      steps(2, "on");
+      sTimer = setInterval(() => {
+        sent = Math.min(total, sent + 62); const pct = (sent / total) * 100;
+        $("#sdBar").style.width = pct + "%"; $("#progBar").style.width = pct + "%";
+        $("#sdTxt").textContent = `${sent} / ${total} 行 · ${sent < total ? "streaming" : "awaiting_completion"}`; $("#progText").textContent = `${sent} / ${total} 行`;
+        resumeAt = sent;
+        if (sent >= total) { clearInterval(sTimer); steps(3, "on"); setTimeout(() => { steps(4, ""); $$(".steps span").forEach((s) => (s.className = "ok")); $("#sdT").textContent = "发送完成"; $("#sdTxt").textContent = "G4 P0 同步与 Idle 已确认 · completed"; done("已完成"); resumeAt = 0; }, 900); }
+      }, 150);
+    }, 1000);
+  }
+  function done(st) { $("#headG").style.display = "none"; sending = false; $("#sdCancel").hidden = true; $("#sdStop").hidden = true; $("#sdClose").hidden = false; markAp(st); log(`[发送] ${st}`, st === "已完成" ? "s" : "w"); }
+  function stopSend(kind) {
+    clearInterval(sTimer); steps(2, "er");
+    $("#sdT").textContent = kind === "急停" ? "已急停" : "任务已取消";
+    $("#sdHint").hidden = false; $("#sdHint").textContent = kind === "急停" ? "0x18 已通过实时通道发送，没有排在 G-code 后面；软件急停不能代替硬件急停按钮。" : "已停止后续发送。取消不等于物理停机，请观察机器。";
+    if (resumeAt > 0) $("#btnSend").querySelector("span").textContent = `断点续雕（从第 ${resumeAt} 行）`;
+    done(kind === "急停" ? "急停" : "已取消");
+  }
+  $("#sdCancel").onclick = () => stopSend("取消");
+  $("#sdStop").onclick = () => estop();
+  $("#sdClose").onclick = () => close("ovSend");
+
+  // ---------- 画板 ----------
+  let dSent = 0;
+  $("#dmat").onchange = () => { const m = $("#dmat").value.startsWith("✎"); $("#dManual").hidden = !m; };
+  $("#backLib").onclick = () => { $("#dmat").selectedIndex = 0; $("#dManual").hidden = true; };
+  $("#dGen").onclick = () => { $("#dSend").disabled = false; $("#dSum").innerHTML = "<dt>材料</dt><dd>椴木板 · 3 mm</dd><dt>尺寸</dt><dd>80 × 56 mm</dd><dt>参数</dt><dd>300/1000 · 1500 mm/min · 1 遍</dd><dt>预计</dt><dd>约 6 分钟</dd><dt>策略</dt><dd>光栅（实际生成）</dd>"; toast("预览已生成"); };
+  $("#dSend").onclick = () => { $("#moved").checked = false; $("#offSd").checked = false; $("#dConfirm").textContent = "在线流式发送"; $("#moved").closest("label").hidden = dSent === 0; $("#dConfirm").disabled = dSent > 0; open("ovDSend"); };
+  $("#moved").onchange = () => ($("#dConfirm").disabled = !$("#moved").checked);
+  $("#offSd").onchange = () => ($("#dConfirm").textContent = $("#offSd").checked ? "离线脱机发送" : "在线流式发送");
+  $("#dConfirm").onclick = () => { close("ovDSend"); dSent++; resumeAt = 0; startSend("draw"); };
+  $$(".tool button").forEach((b) => b.onclick = () => $$(".tool button").forEach((x) => x.classList.toggle("on", x === b)));
+
+  // ---------- 材料实验室 ----------
+  const MATS = [["椴木板", ["3 mm", "5 mm"]], ["牛皮纸", ["0.5 mm"]], ["亚克力（黑）", ["2 mm", "3 mm"]], ["皮革", ["1.5 mm"]], ["竹板", ["4 mm"]]];
+  let selM = 0, selT = 0;
+  function renderMats() {
+    const q = $("#mSearch").value.trim();
+    $("#mlist").innerHTML = MATS.map(([n, ts], i) => q && !n.includes(q) ? "" :
+      `<tr class="${i === selM ? "on" : ""}" data-row="${i}"><td><b>${n}</b></td><td><div class="chips">${ts.map((t, j) => `<button class="chip ${i === selM && j === selT ? "on" : ""}" data-m="${i}" data-t="${j}">${t}</button>`).join("")}</div></td><td style="text-align:right"><button class="btn ghost sm" data-edit="${i}" title="编辑或删除此材料">编辑</button></td></tr>`).join("");
+    $("#labTitle").textContent = `${MATS[selM][0]} · ${MATS[selM][1][selT]}`;
+  }
+  $("#mlist").onclick = (e) => {
+    const ed = e.target.closest("[data-edit]"); if (ed) { $("#mtT").textContent = `编辑材料 · ${MATS[+ed.dataset.edit][0]}`; open("ovMat"); return; }
+    const c = e.target.closest("[data-m]"); if (c) { selM = +c.dataset.m; selT = +c.dataset.t; renderMats(); return; }
+    const row = e.target.closest("[data-row]"); if (row) { selM = +row.dataset.row; selT = 0; renderMats(); }
+  };
+  $("#mSearch").oninput = renderMats;
+  $("#btnNewMat").onclick = () => { $("#mtT").textContent = "新建材料"; open("ovMat"); };
+  $$("#pg-lab .seg button").forEach((b) => b.onclick = () => $$("#pg-lab .seg button").forEach((x) => x.classList.toggle("on", x === b)));
+  $("#rc").oninput = () => ($("#rcTxt").textContent = `${$("#rc").value} × ${$("#rc").value}`);
+  $("#btnMtx").onclick = () => {
+    const n = +$("#rc").value; const m = $("#mtx"); m.style.gridTemplateColumns = `repeat(${n},minmax(0,1fr))`;
+    let h = ""; for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) { const p = Math.round(200 + (400 * c) / (n - 1)), s = Math.round(2000 - (1200 * r) / (n - 1)); const d = 0.25 + 0.6 * (c / (n - 1)) * (1 - 0.6 * r / (n - 1)); h += `<div class="cell" data-p="${p}" data-s="${s}" style="background:rgba(${Math.round(120 - 90 * d)},${Math.round(70 - 50 * d)},${Math.round(30 - 20 * d)},1)">${p}<br>${s}</div>`; }
+    m.innerHTML = h; $("#mtxHint").textContent = "点击单元格选择最佳测试效果并套用："; $("#btnMtxSend").disabled = false;
+  };
+  $("#mtx").onclick = (e) => { const c = e.target.closest(".cell"); if (!c) return; $$(".cell").forEach((x) => x.classList.toggle("on", x === c)); toast(`已套用：功率 ${c.dataset.p} · 速度 ${c.dataset.s}`); };
+  $("#btnMtxSend").onclick = () => { resumeAt = 0; startSend("lab", "材料矩阵 · 桌面会话"); };
+
+  // ---------- 语音中心 ----------
+  let vRun = true;
+  function vRender() { $("#vSv").className = "pill " + (vRun ? "ok" : "off"); $("#vSv").innerHTML = `<i></i>${vRun ? "运行中" : "未运行"}`; $("#vSvD").textContent = vRun ? "由 MOSS 启动 · 已运行 1 小时 12 分" : "点击启动：先启动接入点，再启动服务端"; $("#vStart").disabled = vRun; $("#vStop").disabled = !vRun; $("#vRestart").disabled = !vRun;
+    const xz = $("#pillXz"); const off = $("#vOff").classList.contains("on");
+    xz.className = "pill " + (off ? "info" : vRun ? "ok" : "bad"); xz.innerHTML = `<i></i>小智 · ${off ? "官方" : "自建"} · ${off || vRun ? "已连接" : "未连接"}`; }
+  $("#vStart").onclick = () => { vlog("[MOSS] 启动 mcp-endpoint-server → xiaozhi-server: python app.py", "s"); vRun = true; vRender(); };
+  $("#vStop").onclick = () => { vlog("[MOSS] 已停止 xiaozhi-server", "w"); vRun = false; vRender(); };
+  $("#vRestart").onclick = () => { vlog("[MOSS] 重启 xiaozhi-server", "w"); };
+  [["#vOff", "官方小智"], ["#vSelf", "自建服务端"]].forEach(([id, n]) => $(id).onclick = () => {
+    if ($(id).classList.contains("on")) return;
+    $("#vOff").classList.toggle("on", id === "#vOff"); $("#vSelf").classList.toggle("on", id === "#vSelf");
+    const h = $("#otaHint"); if (id === "#vOff") { h.className = "hint warn"; h.textContent = "⚠ 已切到官方小智。请把设备的 OTA 地址改回官方服务器，MOSS 无法替你修改设备。"; } else { h.className = "hint ok"; h.textContent = "✓ 设备已连到自建服务端（接入点检测到 1 个设备会话）。"; }
+    toast(`已切换到${n}`); vlog(`[MOSS] 切换链路：${n}`, "c"); vRender();
+  });
+  const MODELS = [["大模型", "LLM.MossLLM", [["地址（基础 URL）", "https://<你的云端>/v1"], ["模型名", "my-llm"], ["密钥", ""]], "url"], ["语音识别", "ASR.MossASR", [["地址（基础 URL）", "https://<你的云端>/v1"], ["模型名", "my-asr"], ["密钥", ""]], "/audio/transcriptions"], ["语音合成", "TTS.MossTTS", [["地址（基础 URL）", "https://<你的云端>/v1"], ["模型名", "my-tts"], ["音色", "xiaoyun"], ["密钥", ""]], "/audio/speech"]];
+  $("#models").innerHTML = MODELS.map(([n, key, fs, suf], i) => `<div class="vs"><span class="t">${n}</span>${fs.map(([l, v]) => `<div class="f"><label>${l}</label><input class="in mono" ${l === "密钥" ? 'type="password" placeholder="已保存（不回显）"' : `value="${v}"`}></div>`).join("")}<span class="d mono">写入 ${key}${suf === "url" ? "" : " · " + suf}</span><div class="row"><button class="btn sm" data-test="${i}">测试连接</button><button class="btn ghost sm" data-save="${i}" disabled>保存</button></div><span class="d" id="mr${i}"></span></div>`).join("");
+  $("#models").onclick = (e) => {
+    const t = e.target.closest("[data-test]"); if (t) { const i = t.dataset.test; $("#mr" + i).textContent = "测试中…"; setTimeout(() => { $("#mr" + i).innerHTML = '<span style="color:var(--green)">✓ 连接成功</span>'; $(`[data-save="${i}"]`).disabled = false; vlog(`[MOSS] 测试${MODELS[i][0]}成功（密钥仅在内存中使用）`, "s"); }, 600); }
+    const s = e.target.closest("[data-save]"); if (s && !s.disabled) { vlog(`[MOSS] 已备份并写入 ${MODELS[s.dataset.save][1]} · api_key=***`, "s"); toast("已保存，重启服务端后生效"); }
+  };
+
+  // ---------- 审批 ----------
+  let ap = null, apT, apRows = [];
+  function apRender() { $("#apCount").hidden = !ap; $("#apCount").textContent = ap ? 1 : 0; $("#pillAp").className = "pill " + (ap ? "bad" : "off");
+    $("#apLog").innerHTML = apRows.length ? apRows.slice().reverse().map((r) => `<tr><td class="mono">${r.t}</td><td>雕刻“你好” · 椴木板 3 mm</td><td>小智 · 自建</td><td><span class="tag" style="color:${r.c};border-color:${r.c}">${r.s}</span></td></tr>`).join("") : '<tr><td colspan="4" class="sub">还没有审批请求。</td></tr>'; }
+  function markAp(s) { const r = apRows[apRows.length - 1]; if (r && r.s === "执行中") { r.s = s; r.c = s === "已完成" ? "var(--green)" : "var(--red-2)"; apRender(); } }
+  function addRow(s, c) { apRows.push({ t: now(), s, c }); apRender(); }
+  function apOpen(ttl = 120) { clearInterval(apT); ap = { left: ttl, ttl }; $("#apChk").checked = false; $("#apOk").disabled = true; $("#apErr").hidden = true; apRender(); open("ovAp"); tick(); apT = setInterval(tick, 1000); log("[MCP] confirm_send 来自小智（模型自填 confirmed 不算授权）→ 创建审批", "w"); }
+  function tick() { if (!ap) return; $("#apLeft").textContent = ap.left + " s"; $("#apBar").style.width = (ap.left / ap.ttl) * 100 + "%"; if (ap.left-- <= 0) { clearInterval(apT); ap = null; close("ovAp"); addRow("已过期", "var(--ink-3)"); toast("审批已过期，未发送任何指令"); } }
+  $("#apChk").onchange = () => ($("#apOk").disabled = !$("#apChk").checked);
+  $("#apLater").onclick = () => close("ovAp");
+  $("#apRej").onclick = () => { clearInterval(apT); ap = null; close("ovAp"); addRow("已拒绝", "var(--red-2)"); };
+  $("#apOk").onclick = () => { clearInterval(apT); ap = null; close("ovAp"); addRow("执行中", "var(--cyan-2)"); resumeAt = 0; startSend("voice", "Approval 授权"); };
+  $("#pillAp").onclick = () => (ap ? open("ovAp") : toast("当前没有待审批的请求"));
+
+  // ---------- 配对 ----------
+  $$(".code6 input").forEach((inp, i, all) => inp.oninput = () => { inp.value = inp.value.replace(/\D/g, ""); if (inp.value && all[i + 1]) all[i + 1].focus(); });
+  $("#authSubmit").onclick = () => { const code = $$(".code6 input").map((x) => x.value).join(""); if (code.length < 6) { toast("请输入 6 位配对码"); return; } close("ovAuth"); $("#authLabel").textContent = "授权已通"; toast("配对成功"); };
+  $("#authClear").onclick = () => { $("#authLabel").textContent = "配对认证"; toast("已清除保存的授权"); };
+  $("#jevEye").onclick = () => { const k = $("#jevKey"); k.type = k.type === "password" ? "text" : "password"; };
+
+  // ---------- 功能对照清单 ----------
+  const FN = [
+    ["全局", [["G1", "导航 · 雕刻工作台", "左侧导航第 1 项"], ["G3", "导航 · 创作画板", "左侧导航第 2 项"], ["G2", "导航 · 材料实验室", "左侧导航第 3 项"], ["G4", "偏好设置", "左侧导航底部"], ["G5", "配对认证 / 授权已通", "左侧导航底部"], ["G6", "硬件状态胶囊（点击回工作台）", "顶栏"], ["G7", "小智状态胶囊", "顶栏，改为真实四态", 1], ["C1", "关闭窗口：托盘 / 退出 / 记住选择", "关闭确认弹窗", 0, "ovClose"]]],
+    ["雕刻工作台", [["H1", "通信链路：网络 / 串口", "① 通信链路"], ["H2", "刷新串口", "串口模式右侧按钮"], ["H3", "串口选择 / 手动输入", "串口模式"], ["H4", "波特率 9600–921600", "串口模式"], ["H5", "控制器 IP + 端口", "网络模式"], ["H6", "扫描局域网（mDNS）", "IP 右侧按钮"], ["H7", "握手探测", "① 底部"], ["H8", "来源：矢量文字 / 图片 / 已有 G 码 / 画板", "② 加工内容"], ["H9", "文本输入（≤24 字）", "②"], ["H10", "字高尺寸", "②"], ["H11", "排版模式 Raster/Outline/Cut", "②"], ["H12", "上传图像", "② 图片处理"], ["H13", "导入 G-code", "② 已有 G 码"], ["H14", "进入画板全屏创作", "② 创意画板"], ["H15", "材料类型", "③"], ["H16", "厚度规格", "③"], ["H17", "调整库内参数", "③ 右上"], ["H18", "计算加工轨迹 / 重新生成轨迹", "④ 监视舱"], ["H19", "启动 JobWorker 逐行下发 / 断点续雕", "④ 监视舱"], ["H20", "0x18 软件复位", "④ 监视舱"], ["H21", "包络 / 耗时 / 行数 / SHA / 实时进度", "④ 监视舱"], ["H22", "提交加工反馈", "右栏 加工反馈"], ["H23", "采用建议并生成新预览", "提交反馈后出现"], ["H24", "清空终端", "右栏 控制台"], ["H25", "清空 G-code 视图", "右栏 控制台"], ["H26", "小智网关信息 / RPC 日志", "控制台“小智网关”页签"]]],
+    ["创作画板", [["D1", "返回工作台", "画布左上"], ["D2", "导出场景", "画布右上"], ["D3", "导出 PNG", "画布右上"], ["D4", "刷新材料库", "① 右上"], ["D5", "手动输入 / 返回材料库", "① 选“手动输入”后出现"], ["D6", "材料名称 / 厚度", "①"], ["D7", "宽 / 高", "①"], ["D8", "生成策略 raster/outline/auto", "①"], ["D9", "轮廓简化", "①"], ["D10", "设备 host / Telnet 端口", "②"], ["D11", "测试连接", "②"], ["D12", "保存配置", "②"], ["D13", "生成预览", "③"], ["D14", "确认发送（脱机 / 已移动材料 / 在线发送）", "③ → 确认弹窗"], ["D15", "走边框 Framing", "③"], ["D16", "状态", "③"], ["D17", "取消", "③"], ["D18", "下载 G-code", "③"], ["D19", "下载场景 JSON", "③"], ["D20", "诊断输出", "③ 底部折叠"], ["D21", "作业摘要", "③"]]],
+    ["材料实验室", [["L1", "搜索材料", "左栏"], ["L2", "新建材料", "左栏 +"], ["L3", "导入", "左栏"], ["L4", "导出库", "左栏"], ["L5", "套用最近", "左栏"], ["L6", "选择材料与厚度", "左栏列表"], ["L7", "编辑 / 删除材料", "列表“编辑” → 弹窗", 0, "ovMat"], ["L8", "模式 Raster/Outline/Cut", "中栏"], ["L9", "功率 / 速度 / 空移 / 次数 / 点距 / 阈值", "中栏"], ["L10", "保存到材料库", "中栏"], ["L11", "功率区间 / 速度区间 / 行列", "右栏 矩阵"], ["L12", "设备 host", "右栏 矩阵"], ["L13", "生成矩阵", "右栏"], ["L14", "选择单元格套用", "右栏网格"], ["L15", "发送测试", "右栏"]]],
+    ["弹窗", [["S1", "Web 端口保存", "偏好设置", 0, "ovSettings"], ["S2", "小智 MCP 端点", "移到语音中心（设置里留跳转）", 1, "ovSettings"], ["S3", "启用 Jev", "偏好设置", 0, "ovSettings"], ["S4", "查看 Jev Key", "偏好设置", 0, "ovSettings"], ["S5", "删除 Jev Key", "偏好设置", 0, "ovSettings"], ["S6", "保存 Jev 设置", "偏好设置", 0, "ovSettings"], ["S7", "测试 Jev 连接", "偏好设置", 0, "ovSettings"], ["S8", "窗口关闭行为", "偏好设置", 0, "ovSettings"], ["S9", "完成设置", "偏好设置", 0, "ovSettings"], ["A1", "6 位配对码", "配对弹窗", 0, "ovAuth"], ["A2", "撤销清除授权", "配对弹窗", 0, "ovAuth"], ["A3", "提交配对", "配对弹窗", 0, "ovAuth"], ["O1", "发送进度：校验 / 生成 / 传输 / 执行、取消任务、关闭窗口", "发送覆盖层", 0, "ovSend"]]],
+    ["新增", [["N1", "语音中心页", "左侧导航第 4 项", 1], ["N2", "官方 / 自建链路切换", "语音中心", 1], ["N3", "审批按钮与红色角标", "顶栏", 1], ["N4", "全局急停 0x18", "顶栏右侧（原按钮仍保留在监视舱）", 1], ["N5", "全局审批卡", "小智请求加工时弹出", 1, "ovAp"]]],
+  ];
+  const PAGE_OF = (id) => id[0] === "H" ? "wb" : id[0] === "D" ? "draw" : id[0] === "L" ? "lab" : id === "N2" ? "voice" : null;
+  $("#fnList").innerHTML = FN.map(([g, items]) => `<div class="grp"><h4>${g} · ${items.length} 项</h4>${items.map(([id, old, nw, isNew, modal]) => `<div class="fn" id="fn-${id}"><span>${isNew ? '<span class="new">新增 </span>' : ""}${old}</span><button class="btn sm ghost" data-loc="${id}" data-modal="${modal || ""}">定位</button><small>${id} · 新位置：${nw}</small></div>`).join("")}</div>`).join("")
+    + `<div class="grp"><h4>模拟场景</h4><div class="fn"><span>小智请求开始加工（审批卡）</span><button class="btn sm" id="simAp">运行</button><small>勾选现场确认 → 批准 → 发送 → 可急停</small></div><div class="fn"><span>审批过期（6 秒）</span><button class="btn sm" id="simExp">运行</button><small>到期自动关闭，不发送</small></div><div class="fn"><span>点击窗口关闭按钮</span><button class="btn sm" id="simClose">运行</button><small>弹出托盘 / 退出选择</small></div></div>`;
+  $("#fnList").onclick = (e) => {
+    const b = e.target.closest("[data-loc]"); if (!b) return;
+    const id = b.dataset.loc, modal = b.dataset.modal;
+    $("#drawer").hidden = true;
+    const p = PAGE_OF(id); if (p) go(p);
+    if (id === "D5") { $("#dmat").value = "✎ 手动输入"; $("#dmat").onchange(); }
+    if (id === "H12") $('[data-src="img"]').click(); if (id === "H13") $('[data-src="gc"]').click(); if (id === "H14") $('[data-src="draw"]').click();
+    if (["H2", "H3", "H4"].includes(id)) $('[data-conn="ser"]').click(); if (["H5", "H6"].includes(id)) $('[data-conn="net"]').click();
+    if (id === "H23") $("#fbResult").hidden = false;
+    if (id === "H26") $('[data-ct="mcp"]').click();
+    if (id === "N5") { apOpen(120); }
+    else if (modal) open(modal);
+    if (id === "O1") { $("#sdClose").hidden = false; }
+    setTimeout(() => { const el = document.querySelector(`[data-fn="${id}"]`); if (el) { el.scrollIntoView({ block: "center", behavior: "smooth" }); el.classList.add("hl"); setTimeout(() => el.classList.remove("hl"), 2200); } }, 80);
+    $("#fn-" + id).classList.add("ok-done");
+  };
+  $("#openChecklist").onclick = () => ($("#drawer").hidden = false);
+  $("#drawerX").onclick = () => ($("#drawer").hidden = true);
+  document.addEventListener("click", (e) => {
+    if (e.target.id === "simAp") { $("#drawer").hidden = true; apOpen(120); }
+    if (e.target.id === "simExp") { $("#drawer").hidden = true; apOpen(6); }
+    if (e.target.id === "simClose") { $("#drawer").hidden = true; open("ovClose"); }
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") ["ovSettings", "ovAuth", "ovClose", "ovMat", "ovDSend"].forEach(close); });
+
+  // ---------- 动画背景（四种可切换：流动星河 / 等离子流体 / 超空间跃迁 / 太空舱） ----------
+  const BG = (() => {
+    const cv = $("#stars"), g = cv.getContext("2d"), glc = $("#gl");
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const R = () => Math.random();
+    let W = 0, H = 0, d = 1, mode = "plasma", raf = 0, last = 0, mx = 0, my = 0, tx = 0, ty = 0;
+    let probeN = 0, probeT0 = 0, low = false;
+    addEventListener("pointermove", (e) => { tx = e.clientX / innerWidth - 0.5; ty = e.clientY / innerHeight - 0.5; });
+
+    // ---- 公共：星场 ----
+    let stars = [];
+    function makeStars(k = 1) { const n = innerWidth * innerHeight / 2200 * k * (low ? 0.5 : 1); stars = Array.from({ length: Math.round(n) }, () => ({ x: R() * W, y: R() * H, r: (0.3 + R() ** 2 * 1.4) * d, p: R() * 6.28, s: 0.5 + R() * 1.5, z: [0.25, 0.6, 1][Math.floor(R() * 3)], c: R() < 0.1 ? "255,190,200" : R() < 0.25 ? "190,205,255" : "255,255,255" })); }
+    function drawStars(t, drift = 0.03) {
+      for (const s of stars) { if (!reduce) { s.x -= drift * s.z * d; if (s.x < -5) s.x = W + 5; }
+        const a = 0.3 + 0.7 * Math.abs(Math.sin(s.p + t / 1000 * s.s)); const x = s.x - mx * 40 * s.z * d, y = s.y - my * 30 * s.z * d;
+        g.fillStyle = `rgba(${s.c},${a})`; g.beginPath(); g.arc(x, y, s.r, 0, 6.283); g.fill(); }
+    }
+
+    // ---- 模式 1：流动星河 ----
+    const G = {};
+    G.init = () => {
+      makeStars(1.1);
+      // 预渲染银河星云带（离屏）
+      const s = 1024, c = document.createElement("canvas"); c.width = s; c.height = s; const x = c.getContext("2d");
+      const cols = ["124,108,255", "91,140,255", "255,90,140", "180,120,255", "120,200,255"];
+      for (let i = 0; i < 260; i++) {
+        const u = R(), px = u * s, py = s / 2 + (R() - 0.5) * s * 0.28 * (1 - Math.abs(u - 0.5)) + Math.sin(u * 6) * 40, rr = 30 + R() * 120;
+        const gr = x.createRadialGradient(px, py, 0, px, py, rr); const col = cols[Math.floor(R() * cols.length)];
+        gr.addColorStop(0, `rgba(${col},${0.05 + R() * 0.08})`); gr.addColorStop(1, `rgba(${col},0)`); x.fillStyle = gr; x.beginPath(); x.arc(px, py, rr, 0, 6.283); x.fill();
+      }
+      for (let i = 0; i < 2600; i++) { const u = R(), px = u * s, py = s / 2 + (R() - 0.5) * s * 0.16 * (1 - Math.abs(u - 0.5) * 1.2) + Math.sin(u * 6) * 40; x.fillStyle = `rgba(255,255,255,${0.2 + R() * 0.7})`; x.fillRect(px, py, R() < 0.9 ? 1 : 2, R() < 0.9 ? 1 : 2); }
+      for (let i = 0; i < 40; i++) { const u = R(), px = u * s, py = s / 2 + Math.sin(u * 6) * 40 + (R() - 0.5) * 30; const gr = x.createRadialGradient(px, py, 0, px, py, 26 + R() * 30); gr.addColorStop(0, "rgba(10,6,20,.55)"); gr.addColorStop(1, "rgba(10,6,20,0)"); x.fillStyle = gr; x.fillRect(px - 60, py - 60, 120, 120); }
+      G.neb = c;
+      // 沿流场流动的星尘粒子
+      G.p = Array.from({ length: low ? 520 : 1100 }, () => G.spawn({}));
+      G.met = []; G.next = 0;
+    };
+    G.spawn = (p) => { p.x = R() * W; p.y = R() * H; p.life = 0; p.max = 200 + R() * 400; p.sz = (0.5 + R() * 1.3) * d; p.c = R() < 0.15 ? "255,150,190" : R() < 0.5 ? "170,160,255" : "200,225,255"; return p; };
+    G.draw = (t) => {
+      const bg = g.createLinearGradient(0, 0, W, H); bg.addColorStop(0, "#070512"); bg.addColorStop(0.5, "#0a0820"); bg.addColorStop(1, "#04040b");
+      g.fillStyle = bg; g.fillRect(0, 0, W, H);
+      // 银河带：缓慢旋转、漂移、呼吸
+      const diag = Math.hypot(W, H) * 1.25, rot = -0.55 + Math.sin(t / 30000) * 0.06 + mx * 0.05;
+      g.save(); g.translate(W / 2 - mx * 30 * d, H / 2 - my * 20 * d); g.rotate(rot); g.globalAlpha = 0.85 + 0.15 * Math.sin(t / 4000);
+      const off = ((t / 1000) * 6 * d) % diag;
+      g.drawImage(G.neb, -diag / 2 - off, -diag / 2, diag, diag); g.drawImage(G.neb, diag / 2 - off, -diag / 2, diag, diag);
+      g.restore(); g.globalAlpha = 1;
+      drawStars(t, 0.02);
+      // 星尘沿流场流动（带拖尾）
+      g.lineCap = "round";
+      const ts = t / 1000;
+      for (const p of G.p) {
+        const nx = p.x / W, ny = p.y / H;
+        const a = Math.sin(nx * 3.1 + ts * 0.15) * 1.2 + Math.cos(ny * 4.3 - ts * 0.11) * 1.1 - 0.6;
+        const vx = Math.cos(a) * 1.1 * d, vy = Math.sin(a) * 0.7 * d;
+        const ox = p.x, oy = p.y; if (!reduce) { p.x += vx; p.y += vy; p.life++; }
+        const fade = Math.sin(Math.min(1, p.life / p.max) * Math.PI);
+        g.strokeStyle = `rgba(${p.c},${0.55 * fade})`; g.lineWidth = p.sz;
+        g.beginPath(); g.moveTo(ox - vx * 5, oy - vy * 5); g.lineTo(p.x, p.y); g.stroke();
+        if (p.life > p.max || p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20) G.spawn(p);
+      }
+      // 流星
+      if (!reduce && t > G.next) { G.met.push({ x: W * (0.3 + R() * 0.7), y: H * R() * 0.4, v: (10 + R() * 8) * d, l: 1 }); G.next = t + 1800 + R() * 3500; }
+      G.met = G.met.filter((m) => m.l > 0);
+      for (const m of G.met) { const len = 160 * d * m.l, gr = g.createLinearGradient(m.x, m.y, m.x + len, m.y - len * 0.42); gr.addColorStop(0, `rgba(255,255,255,${m.l})`); gr.addColorStop(1, "rgba(170,160,255,0)"); g.strokeStyle = gr; g.lineWidth = 1.6 * d; g.beginPath(); g.moveTo(m.x, m.y); g.lineTo(m.x + len, m.y - len * 0.42); g.stroke(); m.x -= m.v; m.y += m.v * 0.42; m.l -= 0.017; }
+      // 远处 550W 红色核心
+      const cx = W * 0.88, cy = H * 0.14, pulse = 1 + 0.15 * Math.sin(t / 700);
+      const core = g.createRadialGradient(cx, cy, 0, cx, cy, 80 * d * pulse); core.addColorStop(0, "rgba(255,255,255,.95)"); core.addColorStop(0.1, "rgba(255,80,110,.85)"); core.addColorStop(1, "rgba(255,59,92,0)");
+      g.fillStyle = core; g.beginPath(); g.arc(cx, cy, 80 * d * pulse, 0, 6.283); g.fill();
+    };
+
+    // ---- 模式 2：等离子流体（WebGL 着色器） ----
+    const P = { gl: null };
+    P.init = () => {
+      if (P.gl) return true;
+      const gl = glc.getContext("webgl", { premultipliedAlpha: false, antialias: false }); if (!gl) return false;
+      const vs = "attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}";
+      const fs = `precision mediump float;uniform vec2 r;uniform float t;uniform vec2 m;
+      float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+      float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y);}
+      float fbm(vec2 p){float v=0.,a=.5;mat2 R=mat2(.8,.6,-.6,.8);for(int i=0;i<5;i++){v+=a*n(p);p=R*p*2.02;a*=.5;}return v;}
+      void main(){vec2 p=(gl_FragCoord.xy-.5*r)/r.y;p+=m*.08;
+        vec2 q=vec2(fbm(p*1.6+t*.04),fbm(p*1.6+vec2(5.2,1.3)-t*.035));
+        vec2 w=vec2(fbm(p*1.6+3.8*q+vec2(1.7,9.2)+t*.07),fbm(p*1.6+3.8*q+vec2(8.3,2.8)-t*.05));
+        float f=fbm(p*1.6+4.*w);
+        vec3 c=mix(vec3(.02,.015,.05),vec3(.33,.22,.95),clamp(f*f*2.2,0.,1.));
+        c=mix(c,vec3(1.,.23,.36),clamp(length(q)*.95-.38,0.,1.)*.85);
+        c=mix(c,vec3(.23,.45,1.),clamp(w.y*w.y*1.2,0.,1.)*.55);
+        c+=pow(clamp(f,0.,1.),5.)*vec3(1.,.82,.92)*1.6;
+        c*=smoothstep(1.5,.15,length(p-vec2(.15,.1)))*.78;
+        gl_FragColor=vec4(c,1.);}`;
+      const sh = (ty, src) => { const s = gl.createShader(ty); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+      const pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) return false;
+      gl.useProgram(pr); const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(pr, "a"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      P.gl = gl; P.u = { r: gl.getUniformLocation(pr, "r"), t: gl.getUniformLocation(pr, "t"), m: gl.getUniformLocation(pr, "m") }; return true;
+    };
+    P.draw = (t) => {
+      const gl = P.gl, s = low ? 0.33 : 0.5; const w = Math.round(innerWidth * s), h = Math.round(innerHeight * s);
+      if (glc.width !== w || glc.height !== h) { glc.width = w; glc.height = h; gl.viewport(0, 0, w, h); }
+      gl.uniform2f(P.u.r, w, h); gl.uniform1f(P.u.t, t / 1000); gl.uniform2f(P.u.m, mx, -my); gl.drawArrays(gl.TRIANGLES, 0, 3);
+      g.clearRect(0, 0, W, H); drawStars(t, 0.01);
+    };
+
+    // ---- 模式 3：超空间跃迁 ----
+    const X = {};
+    X.init = () => { X.p = Array.from({ length: low ? 380 : 760 }, () => X.spawn({})); };
+    X.spawn = (s) => { s.x = (R() - 0.5) * 2; s.y = (R() - 0.5) * 2; s.z = R() * 1 + 0.05; s.pz = s.z; s.c = R() < 0.18 ? "255,90,120" : R() < 0.55 ? "160,140,255" : "200,220,255"; return s; };
+    X.draw = (t) => {
+      g.fillStyle = "rgba(5,4,10,.35)"; g.fillRect(0, 0, W, H);
+      const cx = W / 2 + mx * 120 * d, cy = H * 0.45 + my * 80 * d, k = Math.max(W, H) * 0.5, sp = reduce ? 0 : 0.008 + 0.004 * Math.sin(t / 3000);
+      const core = g.createRadialGradient(cx, cy, 0, cx, cy, 220 * d); core.addColorStop(0, "rgba(255,255,255,.35)"); core.addColorStop(0.2, "rgba(139,123,255,.25)"); core.addColorStop(1, "rgba(139,123,255,0)");
+      g.fillStyle = core; g.beginPath(); g.arc(cx, cy, 220 * d, 0, 6.283); g.fill();
+      for (const s of X.p) {
+        s.pz = s.z; s.z -= sp; if (s.z <= 0.02) { X.spawn(s); s.z = s.pz = 1; continue; }
+        const x = cx + s.x / s.z * k, y = cy + s.y / s.z * k, px = cx + s.x / s.pz * k, py = cy + s.y / s.pz * k;
+        if (x < -50 || x > W + 50 || y < -50 || y > H + 50) { X.spawn(s); s.z = s.pz = 1; continue; }
+        const a = Math.min(1, (1 - s.z) * 1.4); g.strokeStyle = `rgba(${s.c},${a})`; g.lineWidth = (1 - s.z) * 2.6 * d + 0.4;
+        g.beginPath(); g.moveTo(px, py); g.lineTo(x, y); g.stroke();
+      }
+    };
+
+    // ---- 模式 4：太空舱（上一版） ----
+    const E = {};
+    E.init = () => { makeStars(1); const ER = Math.max(W, H) * 1.15; E.ER = ER; E.cx = W / 2; E.cy = H + ER - H * 0.2;
+      const c = document.createElement("canvas"); c.width = W; c.height = H; const x = c.getContext("2d");
+      const gl2 = x.createRadialGradient(E.cx, E.cy, ER * 0.985, E.cx, E.cy, ER * 1.07); gl2.addColorStop(0, "rgba(120,170,255,.55)"); gl2.addColorStop(0.25, "rgba(91,140,255,.22)"); gl2.addColorStop(1, "rgba(124,108,255,0)");
+      x.fillStyle = gl2; x.beginPath(); x.arc(E.cx, E.cy, ER * 1.07, 0, 6.283); x.fill();
+      x.save(); x.beginPath(); x.arc(E.cx, E.cy, ER, 0, 6.283); x.clip(); const b = x.createRadialGradient(E.cx, E.cy - ER, 0, E.cx, E.cy - ER, ER * 0.5); b.addColorStop(0, "#14204a"); b.addColorStop(0.5, "#070b1d"); b.addColorStop(1, "#03040a"); x.fillStyle = b; x.fillRect(0, H * 0.6, W, H * 0.4);
+      const sun = x.createRadialGradient(E.cx, E.cy - ER, 0, E.cx, E.cy - ER, 260 * d); sun.addColorStop(0, "rgba(255,180,110,.32)"); sun.addColorStop(1, "rgba(255,180,110,0)"); x.fillStyle = sun; x.fillRect(E.cx - 300 * d, E.cy - ER - 20 * d, 600 * d, 300 * d); x.restore();
+      x.strokeStyle = "rgba(180,210,255,.75)"; x.lineWidth = 1.2 * d; x.beginPath(); x.arc(E.cx, E.cy, ER, Math.PI * 1.25, Math.PI * 1.75); x.stroke(); E.c = c; };
+    E.draw = (t) => {
+      g.clearRect(0, 0, W, H); drawStars(t); g.drawImage(E.c, 0, 0);
+      [-0.22, -0.12, -0.05, 0.03, 0.1, 0.19].forEach((a, i) => { const ang = -Math.PI / 2 + a, bx = E.cx + Math.cos(ang) * E.ER, by = E.cy + Math.sin(ang) * E.ER;
+        const len = (H * 0.32 + (i % 3) * 40 * d) * (0.75 + 0.25 * Math.sin(t / 180 + i * 1.7)), w = (2.2 + (i % 2)) * d;
+        g.save(); g.translate(bx, by); g.rotate(ang + Math.PI / 2); const bm = g.createLinearGradient(0, 0, 0, -len); bm.addColorStop(0, "rgba(220,240,255,.95)"); bm.addColorStop(0.08, "rgba(120,190,255,.7)"); bm.addColorStop(0.5, "rgba(91,140,255,.22)"); bm.addColorStop(1, "rgba(91,140,255,0)");
+        g.fillStyle = bm; g.fillRect(-w, -len, w * 2, len); g.restore(); });
+    };
+
+    const MODES = { galaxy: G, plasma: P, warp: X, earth: E };
+    function size() { d = Math.min(devicePixelRatio || 1, 1.25); W = cv.width = innerWidth * d; H = cv.height = innerHeight * d; }
+    function frame(t) {
+      if (!probeT0) probeT0 = t; probeN++;
+      if (probeT0 > 0 && t - probeT0 > 2000) { if (probeN / ((t - probeT0) / 1000) < 28 && !low) { low = true; document.documentElement.classList.add("lowfx"); MODES[mode].init(); } probeT0 = -1; }
+      if (!reduce && t - last < 24) { raf = requestAnimationFrame(frame); return; } last = t;
+      mx += (tx - mx) * 0.04; my += (ty - my) * 0.04;
+      MODES[mode].draw(t);
+      if (!reduce) raf = requestAnimationFrame(frame);
+    }
+    function set(m) {
+      if (m === "plasma" && !P.init()) m = "galaxy";
+      mode = m; document.documentElement.dataset.bg = m; glc.style.display = m === "plasma" ? "block" : "none";
+      g.clearRect(0, 0, W, H); if (m !== "plasma") MODES[m].init(); else makeStars(0.35);
+      cancelAnimationFrame(raf); raf = requestAnimationFrame(frame);
+    }
+    size(); addEventListener("resize", () => { size(); set(mode); });
+    return { set };
+  })();
+  $$("[data-bgm]").forEach((b) => b.onclick = () => { $$("[data-bgm]").forEach((x) => x.classList.toggle("on", x === b)); BG.set(b.dataset.bgm); try { localStorage.setItem("moss-proto-bg2", b.dataset.bgm); } catch (e) {} });
+  { let m = "plasma"; try { m = localStorage.getItem("moss-proto-bg2") || "plasma"; } catch (e) {} const btn = $(`[data-bgm="${m}"]`) || $('[data-bgm="plasma"]'); btn.click(); }
+
+  // ---------- 卡片聚光 ----------
+  document.addEventListener("pointermove", (e) => { const c = e.target.closest(".card"); if (!c) return; const r = c.getBoundingClientRect(); c.style.setProperty("--mx", `${e.clientX - r.left}px`); c.style.setProperty("--my", `${e.clientY - r.top}px`); });
+
+  // ---------- 初始化 ----------
+  log("[MOSS] 后端回环端口 9666 · 桌面会话已建立", "s");
+  log("[MCP] 接入点已握手 · tools/list → 19 项", "c");
+  vlog("[MOSS] 启动 mcp-endpoint-server（:8004）", "s"); vlog("[server] 初始化组件 asr MossASR / llm MossLLM / tts MossTTS"); vlog("[server] mcp接入点 ws://<本机>:8004/mcp_endpoint/mcp/?token=***");
+  renderMats(); vRender(); apRender();
+})();
+</script>
+</body></html>

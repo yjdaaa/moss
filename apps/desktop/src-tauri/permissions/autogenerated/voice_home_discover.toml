@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-home-discover"
+description = "Enables the voice_home_discover command without any pre-configured scope."
+commands.allow = ["voice_home_discover"]
+
+[[permission]]
+identifier = "deny-voice-home-discover"
+description = "Denies the voice_home_discover command without any pre-configured scope."
+commands.deny = ["voice_home_discover"]

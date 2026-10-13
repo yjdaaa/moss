@@ -1,0 +1,35 @@
+{
+  "metadata": {
+    "tag": "fixture-version",
+    "attributions": [
+      "和风天气"
+    ]
+  },
+  "temperature": {
+    "value": 19.5,
+    "unit": "°C"
+  },
+  "condition": {
+    "text": "晴朗",
+    "code": "100"
+  },
+  "humidity": 0.5,
+  "wind": {
+    "speed": {
+      "value": 9,
+      "unit": "km/h"
+    },
+    "direction": {
+      "degree": 90
+    }
+  },
+  "feelsLike": {
+    "value": 20,
+    "unit": "°C"
+  },
+  "precipitation": {
+    "amount": {"value": 0, "unit": "mm"},
+    "intensity": {"value": 0, "unit": "mm/h"},
+    "type": "none"
+  }
+}

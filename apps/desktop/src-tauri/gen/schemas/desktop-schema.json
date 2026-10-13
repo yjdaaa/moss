@@ -183,10 +183,46 @@
           "markdownDescription": "Enables the exit_application command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_backend_origin command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-backend-origin",
+          "markdownDescription": "Enables the get_backend_origin command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_desktop_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-desktop-session",
+          "markdownDescription": "Enables the get_desktop_session command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_export_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-export-settings",
+          "markdownDescription": "Enables the get_export_settings command without any pre-configured scope."
+        },
+        {
           "description": "Enables the minimize_to_tray command without any pre-configured scope.",
           "type": "string",
           "const": "allow-minimize-to-tray",
           "markdownDescription": "Enables the minimize_to_tray command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_export_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-export-dir",
+          "markdownDescription": "Enables the open_export_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_voice_private command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-voice-private",
+          "markdownDescription": "Enables the open_voice_private command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pick_export_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pick-export-dir",
+          "markdownDescription": "Enables the pick_export_dir command without any pre-configured scope."
         },
         {
           "description": "Enables the request_shutdown command without any pre-configured scope.",
@@ -195,10 +231,370 @@
           "markdownDescription": "Enables the request_shutdown command without any pre-configured scope."
         },
         {
+          "description": "Enables the reset_export_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reset-export-dir",
+          "markdownDescription": "Enables the reset_export_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reveal_exported_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reveal-exported-file",
+          "markdownDescription": "Enables the reveal_exported_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_export_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-export-file",
+          "markdownDescription": "Enables the save_export_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_export_ask_each_time command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-export-ask-each-time",
+          "markdownDescription": "Enables the set_export_ask_each_time command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_agent_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-agent-save",
+          "markdownDescription": "Enables the voice_agent_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_agent_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-agent-status",
+          "markdownDescription": "Enables the voice_agent_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_builtin_models_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-builtin-models-save",
+          "markdownDescription": "Enables the voice_builtin_models_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_builtin_models_test command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-builtin-models-test",
+          "markdownDescription": "Enables the voice_builtin_models_test command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_builtin_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-builtin-start",
+          "markdownDescription": "Enables the voice_builtin_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_builtin_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-builtin-status",
+          "markdownDescription": "Enables the voice_builtin_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_builtin_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-builtin-stop",
+          "markdownDescription": "Enables the voice_builtin_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_device_rename command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-device-rename",
+          "markdownDescription": "Enables the voice_device_rename command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_device_set_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-device-set-status",
+          "markdownDescription": "Enables the voice_device_set_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_firmware_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-firmware-status",
+          "markdownDescription": "Enables the voice_firmware_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_approval_approve command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-approval-approve",
+          "markdownDescription": "Enables the voice_home_approval_approve command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_approval_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-approval-cancel",
+          "markdownDescription": "Enables the voice_home_approval_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_approvals command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-approvals",
+          "markdownDescription": "Enables the voice_home_approvals command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_backup_audit command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-backup-audit",
+          "markdownDescription": "Enables the voice_home_backup_audit command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_backup_export command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-backup-export",
+          "markdownDescription": "Enables the voice_home_backup_export command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_backup_restore command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-backup-restore",
+          "markdownDescription": "Enables the voice_home_backup_restore command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_control_consent command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-control-consent",
+          "markdownDescription": "Enables the voice_home_control_consent command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_discover command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-discover",
+          "markdownDescription": "Enables the voice_home_discover command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-save",
+          "markdownDescription": "Enables the voice_home_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-status",
+          "markdownDescription": "Enables the voice_home_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_token_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-token-save",
+          "markdownDescription": "Enables the voice_home_token_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_home_voice_consent command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-home-voice-consent",
+          "markdownDescription": "Enables the voice_home_voice_consent command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_local_model_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-local-model-cancel",
+          "markdownDescription": "Enables the voice_local_model_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_local_model_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-local-model-delete",
+          "markdownDescription": "Enables the voice_local_model_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_local_model_download command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-local-model-download",
+          "markdownDescription": "Enables the voice_local_model_download command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_local_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-local-save",
+          "markdownDescription": "Enables the voice_local_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_mcp_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-mcp-delete",
+          "markdownDescription": "Enables the voice_mcp_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_mcp_reconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-mcp-reconnect",
+          "markdownDescription": "Enables the voice_mcp_reconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_mcp_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-mcp-save",
+          "markdownDescription": "Enables the voice_mcp_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_mcp_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-mcp-status",
+          "markdownDescription": "Enables the voice_mcp_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_memory_clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-memory-clear",
+          "markdownDescription": "Enables the voice_memory_clear command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_memory_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-memory-list",
+          "markdownDescription": "Enables the voice_memory_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_memory_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-memory-save",
+          "markdownDescription": "Enables the voice_memory_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_memory_set_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-memory-set-enabled",
+          "markdownDescription": "Enables the voice_memory_set_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_mode_changes command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-mode-changes",
+          "markdownDescription": "Enables the voice_mode_changes command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_models_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-models-save",
+          "markdownDescription": "Enables the voice_models_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_models_test command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-models-test",
+          "markdownDescription": "Enables the voice_models_test command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_music_pick_directory command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-music-pick-directory",
+          "markdownDescription": "Enables the voice_music_pick_directory command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_music_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-music-save",
+          "markdownDescription": "Enables the voice_music_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_music_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-music-status",
+          "markdownDescription": "Enables the voice_music_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_plugins_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-plugins-save",
+          "markdownDescription": "Enables the voice_plugins_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_plugins_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-plugins-status",
+          "markdownDescription": "Enables the voice_plugins_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_save_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-save-settings",
+          "markdownDescription": "Enables the voice_save_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_server_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-server-log",
+          "markdownDescription": "Enables the voice_server_log command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_server_restart command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-server-restart",
+          "markdownDescription": "Enables the voice_server_restart command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_server_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-server-start",
+          "markdownDescription": "Enables the voice_server_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_server_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-server-stop",
+          "markdownDescription": "Enables the voice_server_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_set_mode command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-set-mode",
+          "markdownDescription": "Enables the voice_set_mode command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_speaker_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-speaker-manage",
+          "markdownDescription": "Enables the voice_speaker_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-status",
+          "markdownDescription": "Enables the voice_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_vision_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-vision-save",
+          "markdownDescription": "Enables the voice_vision_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_vision_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-vision-status",
+          "markdownDescription": "Enables the voice_vision_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_vision_test command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-vision-test",
+          "markdownDescription": "Enables the voice_vision_test command without any pre-configured scope."
+        },
+        {
           "description": "Denies the exit_application command without any pre-configured scope.",
           "type": "string",
           "const": "deny-exit-application",
           "markdownDescription": "Denies the exit_application command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_backend_origin command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-backend-origin",
+          "markdownDescription": "Denies the get_backend_origin command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_desktop_session command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-desktop-session",
+          "markdownDescription": "Denies the get_desktop_session command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_export_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-export-settings",
+          "markdownDescription": "Denies the get_export_settings command without any pre-configured scope."
         },
         {
           "description": "Denies the minimize_to_tray command without any pre-configured scope.",
@@ -207,10 +603,370 @@
           "markdownDescription": "Denies the minimize_to_tray command without any pre-configured scope."
         },
         {
+          "description": "Denies the open_export_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-export-dir",
+          "markdownDescription": "Denies the open_export_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_voice_private command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-voice-private",
+          "markdownDescription": "Denies the open_voice_private command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pick_export_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pick-export-dir",
+          "markdownDescription": "Denies the pick_export_dir command without any pre-configured scope."
+        },
+        {
           "description": "Denies the request_shutdown command without any pre-configured scope.",
           "type": "string",
           "const": "deny-request-shutdown",
           "markdownDescription": "Denies the request_shutdown command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reset_export_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reset-export-dir",
+          "markdownDescription": "Denies the reset_export_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reveal_exported_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reveal-exported-file",
+          "markdownDescription": "Denies the reveal_exported_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_export_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-export-file",
+          "markdownDescription": "Denies the save_export_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_export_ask_each_time command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-export-ask-each-time",
+          "markdownDescription": "Denies the set_export_ask_each_time command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_agent_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-agent-save",
+          "markdownDescription": "Denies the voice_agent_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_agent_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-agent-status",
+          "markdownDescription": "Denies the voice_agent_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_builtin_models_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-builtin-models-save",
+          "markdownDescription": "Denies the voice_builtin_models_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_builtin_models_test command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-builtin-models-test",
+          "markdownDescription": "Denies the voice_builtin_models_test command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_builtin_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-builtin-start",
+          "markdownDescription": "Denies the voice_builtin_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_builtin_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-builtin-status",
+          "markdownDescription": "Denies the voice_builtin_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_builtin_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-builtin-stop",
+          "markdownDescription": "Denies the voice_builtin_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_device_rename command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-device-rename",
+          "markdownDescription": "Denies the voice_device_rename command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_device_set_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-device-set-status",
+          "markdownDescription": "Denies the voice_device_set_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_firmware_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-firmware-status",
+          "markdownDescription": "Denies the voice_firmware_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_approval_approve command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-approval-approve",
+          "markdownDescription": "Denies the voice_home_approval_approve command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_approval_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-approval-cancel",
+          "markdownDescription": "Denies the voice_home_approval_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_approvals command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-approvals",
+          "markdownDescription": "Denies the voice_home_approvals command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_backup_audit command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-backup-audit",
+          "markdownDescription": "Denies the voice_home_backup_audit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_backup_export command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-backup-export",
+          "markdownDescription": "Denies the voice_home_backup_export command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_backup_restore command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-backup-restore",
+          "markdownDescription": "Denies the voice_home_backup_restore command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_control_consent command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-control-consent",
+          "markdownDescription": "Denies the voice_home_control_consent command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_discover command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-discover",
+          "markdownDescription": "Denies the voice_home_discover command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-save",
+          "markdownDescription": "Denies the voice_home_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-status",
+          "markdownDescription": "Denies the voice_home_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_token_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-token-save",
+          "markdownDescription": "Denies the voice_home_token_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_home_voice_consent command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-home-voice-consent",
+          "markdownDescription": "Denies the voice_home_voice_consent command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_local_model_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-local-model-cancel",
+          "markdownDescription": "Denies the voice_local_model_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_local_model_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-local-model-delete",
+          "markdownDescription": "Denies the voice_local_model_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_local_model_download command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-local-model-download",
+          "markdownDescription": "Denies the voice_local_model_download command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_local_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-local-save",
+          "markdownDescription": "Denies the voice_local_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_mcp_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-mcp-delete",
+          "markdownDescription": "Denies the voice_mcp_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_mcp_reconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-mcp-reconnect",
+          "markdownDescription": "Denies the voice_mcp_reconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_mcp_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-mcp-save",
+          "markdownDescription": "Denies the voice_mcp_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_mcp_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-mcp-status",
+          "markdownDescription": "Denies the voice_mcp_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_memory_clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-memory-clear",
+          "markdownDescription": "Denies the voice_memory_clear command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_memory_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-memory-list",
+          "markdownDescription": "Denies the voice_memory_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_memory_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-memory-save",
+          "markdownDescription": "Denies the voice_memory_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_memory_set_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-memory-set-enabled",
+          "markdownDescription": "Denies the voice_memory_set_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_mode_changes command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-mode-changes",
+          "markdownDescription": "Denies the voice_mode_changes command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_models_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-models-save",
+          "markdownDescription": "Denies the voice_models_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_models_test command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-models-test",
+          "markdownDescription": "Denies the voice_models_test command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_music_pick_directory command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-music-pick-directory",
+          "markdownDescription": "Denies the voice_music_pick_directory command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_music_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-music-save",
+          "markdownDescription": "Denies the voice_music_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_music_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-music-status",
+          "markdownDescription": "Denies the voice_music_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_plugins_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-plugins-save",
+          "markdownDescription": "Denies the voice_plugins_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_plugins_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-plugins-status",
+          "markdownDescription": "Denies the voice_plugins_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_save_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-save-settings",
+          "markdownDescription": "Denies the voice_save_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_server_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-server-log",
+          "markdownDescription": "Denies the voice_server_log command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_server_restart command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-server-restart",
+          "markdownDescription": "Denies the voice_server_restart command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_server_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-server-start",
+          "markdownDescription": "Denies the voice_server_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_server_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-server-stop",
+          "markdownDescription": "Denies the voice_server_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_set_mode command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-set-mode",
+          "markdownDescription": "Denies the voice_set_mode command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_speaker_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-speaker-manage",
+          "markdownDescription": "Denies the voice_speaker_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-status",
+          "markdownDescription": "Denies the voice_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_vision_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-vision-save",
+          "markdownDescription": "Denies the voice_vision_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_vision_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-vision-status",
+          "markdownDescription": "Denies the voice_vision_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_vision_test command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-vision-test",
+          "markdownDescription": "Denies the voice_vision_test command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
@@ -247,6 +1003,12 @@
           "type": "string",
           "const": "core:app:allow-default-window-icon",
           "markdownDescription": "Enables the default_window_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the exit command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:allow-exit",
+          "markdownDescription": "Enables the exit command without any pre-configured scope."
         },
         {
           "description": "Enables the fetch_data_store_identifiers command without any pre-configured scope.",
@@ -337,6 +1099,12 @@
           "type": "string",
           "const": "core:app:deny-default-window-icon",
           "markdownDescription": "Denies the default_window_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the exit command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:app:deny-exit",
+          "markdownDescription": "Denies the exit command without any pre-configured scope."
         },
         {
           "description": "Denies the fetch_data_store_identifiers command without any pre-configured scope.",
@@ -1599,6 +2367,12 @@
           "markdownDescription": "Enables the set_fullscreen command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_fullscreen_on_monitor command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:allow-set-fullscreen-on-monitor",
+          "markdownDescription": "Enables the set_fullscreen_on_monitor command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_icon command without any pre-configured scope.",
           "type": "string",
           "const": "core:window:allow-set-icon",
@@ -2067,6 +2841,12 @@
           "markdownDescription": "Denies the set_fullscreen command without any pre-configured scope."
         },
         {
+          "description": "Denies the set_fullscreen_on_monitor command without any pre-configured scope.",
+          "type": "string",
+          "const": "core:window:deny-set-fullscreen-on-monitor",
+          "markdownDescription": "Denies the set_fullscreen_on_monitor command without any pre-configured scope."
+        },
+        {
           "description": "Denies the set_icon command without any pre-configured scope.",
           "type": "string",
           "const": "core:window:deny-set-icon",
@@ -2227,6 +3007,72 @@
           "type": "string",
           "const": "core:window:deny-unminimize",
           "markdownDescription": "Denies the unminimize command without any pre-configured scope."
+        },
+        {
+          "description": "This permission set configures the types of dialogs\navailable from the dialog plugin.\n\n#### Granted Permissions\n\nAll dialog types are enabled.\n\n\n\n#### This default permission set includes:\n\n- `allow-message`\n- `allow-save`\n- `allow-open`",
+          "type": "string",
+          "const": "dialog:default",
+          "markdownDescription": "This permission set configures the types of dialogs\navailable from the dialog plugin.\n\n#### Granted Permissions\n\nAll dialog types are enabled.\n\n\n\n#### This default permission set includes:\n\n- `allow-message`\n- `allow-save`\n- `allow-open`"
+        },
+        {
+          "description": "Enables the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:allow-ask",
+          "markdownDescription": "Enables the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)"
+        },
+        {
+          "description": "Enables the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:allow-confirm",
+          "markdownDescription": "Enables the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)"
+        },
+        {
+          "description": "Enables the message command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:allow-message",
+          "markdownDescription": "Enables the message command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:allow-open",
+          "markdownDescription": "Enables the open command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:allow-save",
+          "markdownDescription": "Enables the save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:deny-ask",
+          "markdownDescription": "Denies the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)"
+        },
+        {
+          "description": "Denies the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:deny-confirm",
+          "markdownDescription": "Denies the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)"
+        },
+        {
+          "description": "Denies the message command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:deny-message",
+          "markdownDescription": "Denies the message command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:deny-open",
+          "markdownDescription": "Denies the open command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:deny-save",
+          "markdownDescription": "Denies the save command without any pre-configured scope."
         }
       ]
     },

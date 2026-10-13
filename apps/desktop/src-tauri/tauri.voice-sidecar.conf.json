@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/moss-voice-local"],
+    "resources": {
+      "bundle-resources/voice-local/": "licenses/voice-local/"
+    }
+  }
+}

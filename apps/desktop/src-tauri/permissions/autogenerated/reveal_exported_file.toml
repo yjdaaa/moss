@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reveal-exported-file"
+description = "Enables the reveal_exported_file command without any pre-configured scope."
+commands.allow = ["reveal_exported_file"]
+
+[[permission]]
+identifier = "deny-reveal-exported-file"
+description = "Denies the reveal_exported_file command without any pre-configured scope."
+commands.deny = ["reveal_exported_file"]

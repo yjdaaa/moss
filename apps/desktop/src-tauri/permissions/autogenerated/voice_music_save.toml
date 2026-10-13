@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-music-save"
+description = "Enables the voice_music_save command without any pre-configured scope."
+commands.allow = ["voice_music_save"]
+
+[[permission]]
+identifier = "deny-voice-music-save"
+description = "Denies the voice_music_save command without any pre-configured scope."
+commands.deny = ["voice_music_save"]

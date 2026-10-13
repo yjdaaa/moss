@@ -7,7 +7,7 @@ For the minimal user startup path, see [docs/user/quick-start.md](../../user/qui
 ## Files
 
 - `latest.md`: current paste-ready Xiaozhi/MOSS console prompt and knowledge-base text.
-- `history/`: dated snapshots of previous and current prompt versions. Snapshots dated before 2026-09-19 describe the Python-era tool surface (camera, Home Assistant, `send_file`, prepared G-code lookup); keep them as history, do not paste them.
+- `history/`: dated snapshots of previous and current prompt versions (Rust tool surface, from 2026-09-19).
 
 ## Maintenance Rules
 
@@ -19,4 +19,4 @@ For the minimal user startup path, see [docs/user/quick-start.md](../../user/qui
 
 ## Snapshot Naming
 
-Use `history/YYYY-MM-DD-short-topic.md`, for example `history/2026-07-01-initial.md`.
+Use `history/YYYY-MM-DD-short-topic.md`, for example `history/2026-09-19-fluidnc.md`.

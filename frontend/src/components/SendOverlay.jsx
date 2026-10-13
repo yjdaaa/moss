@@ -2,7 +2,23 @@ import React from "react";
 import { Check, Cpu, Flame, UploadCloud, X } from "lucide-react";
 import { getSendOverlayStage } from "../state/statusNormalize.js";
 
-export function SendOverlay({ visible, status, onCancel, onClose, progress = null }) {
+/**
+ * 发送覆盖层（STAGE_MAP 四步映射见 statusNormalize.js，前端行为契约 §2）。
+ * 可选 `onEmergencyStop`：发送全程显示“急停 0x18”（审批执行时使用，技术书 §9.5.2）；
+ * 可选 `cancelLabel` / `badge`：取消按钮文字与标题旁标签。不传时与原来完全一致。
+ */
+export function SendOverlay({
+  visible,
+  status,
+  onCancel,
+  onClose,
+  progress = null,
+  onEmergencyStop = null,
+  cancelLabel = "取消任务",
+  badge = "",
+  safetyNotice = "",
+  keepEmergencyStop = false,
+}) {
   if (!visible) return null;
 
   const stage = getSendOverlayStage(status);
@@ -44,6 +60,7 @@ export function SendOverlay({ visible, status, onCancel, onClose, progress = nul
 
       <div className="send-title" id="send-title">
         {stage.title}
+        {badge && <span className="send-badge">{badge}</span>}
       </div>
 
       <div className="send-desc">
@@ -91,17 +108,26 @@ export function SendOverlay({ visible, status, onCancel, onClose, progress = nul
         })}
       </div>
 
-      <div style={{ display: "flex", gap: "10px", marginTop: "14px" }}>
+      <div style={{ display: "flex", gap: "10px", marginTop: "14px", alignItems: "center" }}>
         {!stage.terminal ? (
-          <button className="send-cancel" id="send-cancel" onClick={onCancel}>
-            取消任务
-          </button>
+          <>
+            <button className="send-cancel" id="send-cancel" onClick={onCancel}>
+              {cancelLabel}
+            </button>
+          </>
         ) : (
           <button className="send-cancel" style={{ borderColor: "var(--line)" }} onClick={onClose}>
             关闭窗口
           </button>
         )}
+        {onEmergencyStop && (!stage.terminal || keepEmergencyStop) && (
+          <button type="button" className="ob-estop" id="send-estop" onClick={onEmergencyStop}>急停 0x18</button>
+        )}
       </div>
+      {safetyNotice && <div className="send-desc" role="alert">{safetyNotice}</div>}
+      {onEmergencyStop && (!stage.terminal || keepEmergencyStop) && (
+        <div className="send-desc send-estop-note">0x18 走实时通道立即复位控制器，不代替控制器上的硬件急停按钮。</div>
+      )}
     </div>
   );
 }

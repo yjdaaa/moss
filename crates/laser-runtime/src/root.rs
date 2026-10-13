@@ -26,15 +26,26 @@ impl From<std::io::Error> for RuntimeRootError {
 }
 
 impl RuntimeRoot {
+    /// 未显式指定时的默认运行时数据目录（不创建、不加锁）。
+    ///
+    /// - Windows：`%APPDATA%\moss`（与安装目录无关，覆盖升级、卸载重装都不会碰到数据）；
+    /// - 没有 `APPDATA` 的平台：当前目录下的 `.runtime`。
+    ///
+    /// `resolve(None, None)` 与 `moss-host migrate` 的默认目标都用这个函数，保证两处一致。
+    pub fn default_base() -> std::io::Result<PathBuf> {
+        match std::env::var_os("APPDATA") {
+            Some(appdata) if !appdata.is_empty() => Ok(PathBuf::from(appdata).join("moss")),
+            _ => Ok(std::env::current_dir()?.join(".runtime")),
+        }
+    }
+
     pub fn resolve(explicit: Option<&Path>, exe: Option<&Path>) -> Result<Self, RuntimeRootError> {
         let base = if let Some(path) = explicit {
             path.to_path_buf()
         } else if let Some(path) = exe {
             path.parent().unwrap_or(path).join(".runtime")
-        } else if let Ok(appdata) = std::env::var("APPDATA") {
-            PathBuf::from(appdata).join("moss")
         } else {
-            std::env::current_dir()?.join(".runtime")
+            Self::default_base()?
         };
         fs::create_dir_all(&base)?;
         let path = fs::canonicalize(&base)?;
@@ -89,5 +100,16 @@ mod tests {
         let file = root.uploads.join("sample.png");
         assert_eq!(root.exposed_path(&file, true), "uploads/sample.png");
         assert_eq!(root.exposed_path(&file, false), "sample.png");
+    }
+
+    #[test]
+    fn default_base_matches_platform_rule() {
+        let base = RuntimeRoot::default_base().unwrap();
+        match std::env::var_os("APPDATA") {
+            Some(appdata) if !appdata.is_empty() => {
+                assert_eq!(base, PathBuf::from(appdata).join("moss"));
+            }
+            _ => assert_eq!(base, std::env::current_dir().unwrap().join(".runtime")),
+        }
     }
 }

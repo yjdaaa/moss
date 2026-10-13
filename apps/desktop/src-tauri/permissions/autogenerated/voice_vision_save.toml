@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-vision-save"
+description = "Enables the voice_vision_save command without any pre-configured scope."
+commands.allow = ["voice_vision_save"]
+
+[[permission]]
+identifier = "deny-voice-vision-save"
+description = "Denies the voice_vision_save command without any pre-configured scope."
+commands.deny = ["voice_vision_save"]

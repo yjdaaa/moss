@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-local-model-cancel"
+description = "Enables the voice_local_model_cancel command without any pre-configured scope."
+commands.allow = ["voice_local_model_cancel"]
+
+[[permission]]
+identifier = "deny-voice-local-model-cancel"
+description = "Denies the voice_local_model_cancel command without any pre-configured scope."
+commands.deny = ["voice_local_model_cancel"]

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { KeyRound, X, Check } from "lucide-react";
-import { storeAuthToken, clearAuthToken, readAuthToken } from "../authSession.js";
+import { storeAuthToken, clearAuthToken, readAuthToken, isRemoteMode } from "../authSession.js";
 import { postJson } from "../api/client.js";
 
 export function AuthModal({ visible, onClose, onAuthenticated }) {
@@ -31,6 +31,8 @@ export function AuthModal({ visible, onClose, onAuthenticated }) {
           storeAuthToken(token);
           if (onAuthenticated) onAuthenticated(token);
           onClose();
+          // 手机连接电脑：配对前各页面的数据请求都被拒绝了，刷新一次重新加载
+          if (isRemoteMode()) window.location.reload();
         } else {
           setError("服务端未返回有效授权 Token");
         }
@@ -65,7 +67,7 @@ export function AuthModal({ visible, onClose, onAuthenticated }) {
 
         <div className="mat-modal-body">
           <p style={{ fontSize: "13px", color: "var(--ink-dim, #94a3b8)", marginTop: 0 }}>
-            在非本机回环（手机/平板/局域网设备）访问时，需输入 Host 控制台显示的 6 位一次性配对码。
+            手机或局域网设备访问电脑 MOSS 时需要配对：在电脑 MOSS 的“偏好设置 → 手机连接”中点“生成配对码”，把 6 位数字输入下面（5 分钟内有效）。电脑重启后需重新配对。
           </p>
 
           <div className="mat-field">

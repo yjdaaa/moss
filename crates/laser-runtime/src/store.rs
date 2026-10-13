@@ -44,6 +44,9 @@ pub trait RuntimeStore {
     ) -> Result<bool, SchemaError>;
     fn list_recent(&self, kind: RecordKind, limit: usize)
     -> Result<Vec<StoredRecord>, SchemaError>;
+    /// Atomically append or replace only feedback history, without overwriting job state.
+    fn save_feedback(&self, workflow_id: &str, feedback: &Value) -> Result<bool, SchemaError>;
+    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError>;
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +61,22 @@ impl MemoryStore {
 }
 
 impl RuntimeStore for MemoryStore {
+    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError> {
+        let mut records = self.records.lock().map_err(|_| SchemaError::Busy)?;
+        let Some(record) = records.get_mut(&(RecordKind::Workflow, workflow_id.to_owned())) else { return Ok(false); };
+        if !feedback_adoptable(&record.payload, feedback) { return Ok(false); }
+        merge_feedback(&mut record.payload, feedback);
+        records.insert((preview.kind, preview.id.clone()), preview.clone());
+        Ok(true)
+    }
+    fn save_feedback(&self, workflow_id: &str, feedback: &Value) -> Result<bool, SchemaError> {
+        let mut records = self.records.lock().map_err(|_| SchemaError::Busy)?;
+        let Some(record) = records.get_mut(&(RecordKind::Workflow, workflow_id.to_owned())) else {
+            return Ok(false);
+        };
+        merge_feedback(&mut record.payload, feedback);
+        Ok(true)
+    }
     fn get(&self, kind: RecordKind, id: &str) -> Result<Option<StoredRecord>, SchemaError> {
         Ok(self
             .records
@@ -68,10 +87,16 @@ impl RuntimeStore for MemoryStore {
     }
 
     fn put(&self, record: &StoredRecord) -> Result<(), SchemaError> {
-        self.records
-            .lock()
-            .expect("memory store lock")
-            .insert((record.kind, record.id.clone()), record.clone());
+        let mut records = self.records.lock().expect("memory store lock");
+        let mut record = record.clone();
+        if record.kind == RecordKind::Workflow {
+            if let Some(history) = records.get(&(record.kind, record.id.clone()))
+                .and_then(|previous| previous.payload.get("feedback_history")).filter(|v| v.is_array())
+            {
+                record.payload["feedback_history"] = history.clone();
+            }
+        }
+        records.insert((record.kind, record.id.clone()), record);
         Ok(())
     }
 
@@ -131,6 +156,47 @@ impl<'a> SqliteStore<'a> {
 }
 
 impl RuntimeStore for SqliteStore<'_> {
+    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError> {
+        let tx = self.db.connection.unchecked_transaction()?;
+        let changed = tx.execute("UPDATE workflows SET payload=payload WHERE workflow_id=?1", [workflow_id])?;
+        if changed == 0 { return Ok(false); }
+        let raw: String = tx.query_row("SELECT payload FROM workflows WHERE workflow_id=?1", [workflow_id], |row| row.get(0))?;
+        let mut payload: Value = serde_json::from_str(&raw)?;
+        if !feedback_adoptable(&payload, feedback) { return Ok(false); }
+        merge_feedback(&mut payload, feedback);
+        put_record(&tx, preview)?;
+        tx.execute("UPDATE workflows SET payload=json_set(payload,'$.feedback_history',json(?2)) WHERE workflow_id=?1",
+            rusqlite::params![workflow_id, payload["feedback_history"].to_string()])?;
+        tx.commit()?;
+        Ok(true)
+    }
+    fn save_feedback(&self, workflow_id: &str, feedback: &Value) -> Result<bool, SchemaError> {
+        let tx = self.db.connection.unchecked_transaction()?;
+        // An UPDATE acquires the write lock before reading; only feedback_history changes.
+        let changed = tx.execute(
+            "UPDATE workflows SET payload=json_set(payload,'$.feedback_history',
+             COALESCE(json_extract(payload,'$.feedback_history'),json('[]')))
+             WHERE workflow_id=?1",
+            [workflow_id],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        let raw: String = tx.query_row(
+            "SELECT payload FROM workflows WHERE workflow_id=?1",
+            [workflow_id],
+            |row| row.get(0),
+        )?;
+        let mut payload: Value = serde_json::from_str(&raw)?;
+        merge_feedback(&mut payload, feedback);
+        tx.execute(
+            "UPDATE workflows SET payload=json_set(payload,'$.feedback_history',json(?2))
+             WHERE workflow_id=?1",
+            rusqlite::params![workflow_id, payload["feedback_history"].to_string()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
     fn get(&self, kind: RecordKind, id: &str) -> Result<Option<StoredRecord>, SchemaError> {
         let (table, key) = Self::table(kind);
         let payload = self.db.read_payload(table, key, id)?;
@@ -199,6 +265,14 @@ impl RuntimeStore for SqliteStore<'_> {
 }
 
 impl RuntimeStore for std::sync::Mutex<RuntimeDb> {
+    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError> {
+        let db = self.lock().map_err(|_| SchemaError::Busy)?;
+        SqliteStore::new(&db).adopt_feedback(workflow_id, feedback, preview)
+    }
+    fn save_feedback(&self, workflow_id: &str, feedback: &Value) -> Result<bool, SchemaError> {
+        let db = self.lock().map_err(|_| SchemaError::Busy)?;
+        SqliteStore::new(&db).save_feedback(workflow_id, feedback)
+    }
     fn get(&self, kind: RecordKind, id: &str) -> Result<Option<StoredRecord>, SchemaError> {
         let db = self.lock().map_err(|_| SchemaError::Busy)?;
         SqliteStore::new(&db).get(kind, id)
@@ -227,6 +301,29 @@ impl RuntimeStore for std::sync::Mutex<RuntimeDb> {
     ) -> Result<Vec<StoredRecord>, SchemaError> {
         let db = self.lock().map_err(|_| SchemaError::Busy)?;
         SqliteStore::new(&db).list_recent(kind, limit)
+    }
+}
+
+fn feedback_adoptable(payload: &Value, feedback: &Value) -> bool {
+    payload["stale"] != true
+        && !matches!(payload["status"].as_str(), Some("sending" | "running" | "preparing"))
+        && payload["feedback_history"].as_array().is_some_and(|entries| entries.iter().any(|entry|
+            entry["feedback_id"] == feedback["feedback_id"] && entry["adopted_params"].is_null()
+        ))
+}
+
+fn merge_feedback(payload: &mut Value, feedback: &Value) {
+    if !payload["feedback_history"].is_array() {
+        payload["feedback_history"] = serde_json::json!([]);
+    }
+    let history = payload["feedback_history"].as_array_mut().unwrap();
+    if let Some(existing) = history.iter_mut().find(|item| item["feedback_id"] == feedback["feedback_id"]) {
+        // Adoption is monotonic: concurrent stale responses cannot erase a completed adoption.
+        if existing["adopted_params"].is_null() && !feedback["adopted_params"].is_null() {
+            *existing = feedback.clone();
+        }
+    } else {
+        history.push(feedback.clone());
     }
 }
 
@@ -466,7 +563,13 @@ pub(crate) fn put_record(connection: &rusqlite::Connection, record: &StoredRecor
         }
     }
     let placeholders = (1..=values.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
-    let updates = columns.iter().skip(1).map(|c| format!("{c}=excluded.{c}")).collect::<Vec<_>>().join(",");
+    let updates = columns.iter().skip(1).map(|c| {
+        if record.kind == RecordKind::Workflow && *c == "payload" {
+            "payload=CASE WHEN json_type(workflows.payload,'$.feedback_history')='array'
+             THEN json_set(excluded.payload,'$.feedback_history',json_extract(workflows.payload,'$.feedback_history'))
+             ELSE excluded.payload END".to_owned()
+        } else { format!("{c}=excluded.{c}") }
+    }).collect::<Vec<_>>().join(",");
     connection.execute(
         &format!("INSERT INTO {table}({}) VALUES({placeholders}) ON CONFLICT({key}) DO UPDATE SET {updates}", columns.join(",")),
         rusqlite::params_from_iter(values),
@@ -519,6 +622,55 @@ mod tests {
                 .set_status(RecordKind::Workflow, "wf_1", "completed", 3.0)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn feedback_merge_preserves_status_and_first_adoption_in_all_stores() {
+        let db = RuntimeDb::open_memory().unwrap();
+        let stores: Vec<Box<dyn RuntimeStore + '_>> = vec![
+            Box::new(MemoryStore::new()), Box::new(SqliteStore::new(&db)),
+        ];
+        for store in stores {
+            store.put(&record("wf-feedback", "preview_ready")).unwrap();
+            let entry = serde_json::json!({"feedback_id":"fb-1","adopted_params":null});
+            assert!(!store.save_feedback("missing", &entry).unwrap());
+            store.save_feedback("wf-feedback", &entry).unwrap();
+            store.set_status(RecordKind::Workflow, "wf-feedback", "completed", 42.0).unwrap();
+            let adopted = serde_json::json!({"feedback_id":"fb-1","adopted_params":{"passes":2}});
+            store.save_feedback("wf-feedback", &adopted).unwrap();
+            store.save_feedback("wf-feedback", &entry).unwrap();
+            store.save_feedback("wf-feedback", &serde_json::json!({"feedback_id":"fb-2","adopted_params":null})).unwrap();
+            let mut stale = record("wf-feedback", "completed");
+            stale.payload["updated_at"] = serde_json::json!(42.0);
+            store.put(&stale).unwrap();
+            let saved = store.get(RecordKind::Workflow, "wf-feedback").unwrap().unwrap();
+            assert_eq!(saved.status.as_deref(), Some("completed"));
+            assert_eq!(saved.payload["updated_at"], 42.0);
+            assert_eq!(saved.payload["feedback_history"].as_array().unwrap().len(), 2);
+            assert_eq!(saved.payload["feedback_history"][0], adopted);
+        }
+    }
+
+    #[test]
+    fn feedback_adoption_is_transactional_and_rejects_busy_workflows() {
+        let db = RuntimeDb::open_memory().unwrap();
+        let store = SqliteStore::new(&db);
+        store.put(&record("original", "completed")).unwrap();
+        store.save_feedback("original", &serde_json::json!({"feedback_id":"fb-1","adopted_params":null})).unwrap();
+        let adopted = serde_json::json!({"feedback_id":"fb-1","adopted_params":{"passes":2}});
+        db.connection.execute_batch("CREATE TRIGGER fail_feedback BEFORE UPDATE ON workflows
+            WHEN json_extract(NEW.payload,'$.feedback_history[0].adopted_params') IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+        assert!(store.adopt_feedback("original", &adopted, &record("preview", "preview_ready")).is_err());
+        assert!(store.get(RecordKind::Workflow, "preview").unwrap().is_none());
+        assert!(store.get(RecordKind::Workflow, "original").unwrap().unwrap().payload["feedback_history"][0]["adopted_params"].is_null());
+        db.connection.execute_batch("DROP TRIGGER fail_feedback").unwrap();
+        store.set_status(RecordKind::Workflow, "original", "sending", 1.0).unwrap();
+        assert!(!store.adopt_feedback("original", &adopted, &record("preview", "preview_ready")).unwrap());
+        store.set_status(RecordKind::Workflow, "original", "completed", 2.0).unwrap();
+        assert!(store.adopt_feedback("original", &adopted, &record("preview", "preview_ready")).unwrap());
+        assert!(!store.adopt_feedback("original", &adopted, &record("duplicate", "preview_ready")).unwrap());
+        assert!(store.get(RecordKind::Workflow, "duplicate").unwrap().is_none());
     }
 
     #[test]

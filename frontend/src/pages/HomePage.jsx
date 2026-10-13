@@ -22,13 +22,18 @@ import {
   Radio,
   Square,
 } from "lucide-react";
-import { getJson, postJson, fetchPreviewBlobUrl, resolveApiUrl } from "../api/client.js";
+import { apiFetch, getJson, postJson, fetchPreviewBlobUrl, resolveApiUrl } from "../api/client.js";
+import { isRemoteMode } from "../authSession.js";
 import { SendOverlay } from "../components/SendOverlay.jsx";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
+import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { canResumeJob, formatResumeActionLabel } from "../estopResumeState.js";
+import { onEmergencyStop } from "../estopBus.js";
+import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
+import { FoldHeader } from "../components/FoldHeader.jsx";
 
 export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) {
   // Connection state
@@ -86,6 +91,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
   const [overlayStatus, setOverlayStatus] = useState("pending");
   const [sendProgress, setSendProgress] = useState(null);
   const [pollIntervalId, setPollIntervalId] = useState(null);
+  const [pollSafetyNotice, setPollSafetyNotice] = useState("");
+  const pollingCleanupRef = useRef(null);
+  useEffect(() => () => pollingCleanupRef.current?.(), []);
   const [showMaterialModal, setShowMaterialModal] = useState(false);
   const [materialModalData, setMaterialModalData] = useState(null);
 
@@ -379,12 +387,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         if (artifacts.image_file) {
           const directUrl = resolveApiUrl(`/preview?path=${encodeURIComponent(artifacts.image_file)}`);
           const blobUrl = await fetchPreviewBlobUrl(artifacts.image_file);
-          setPreviewUrl(directUrl || blobUrl);
+          // 连接电脑时图片需要带配对 token，<img> 直链拿不到，只能用经鉴权取回的 blob
+          setPreviewUrl(isRemoteMode() ? blobUrl : (directUrl || blobUrl));
         }
         if (artifacts.gcode_file) {
           try {
-            const gcodeUrl = resolveApiUrl(`/preview?path=${encodeURIComponent(artifacts.gcode_file)}`);
-            fetch(gcodeUrl)
+            apiFetch(`/preview?path=${encodeURIComponent(artifacts.gcode_file)}`)
               .then((r) => r.text())
               .then((t) => {
                 setGcodeText(t);
@@ -525,83 +533,69 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     }
   };
 
-  // Status Polling
+  // Query errors preserve the last known job state and never remove its stop controls.
   const startStatusPolling = (workflowId) => {
-    if (pollIntervalId) clearInterval(pollIntervalId);
-    let failureCount = 0;
-
-    const id = setInterval(async () => {
-      try {
-        const res = await postJson("/api/workflow", {
-          action: "status",
-          workflow_id: workflowId,
-        });
-
-        if (res.ok && res.data?.success) {
-          failureCount = 0;
-          const info = extractWorkflowInfo(res.data.result);
-          const sendResult = res.data.result?.send_result || {};
-          if (typeof sendResult.total_lines === "number" && sendResult.total_lines > 0) {
-            const sent = sendResult.lines_sent || 0;
-            const total = sendResult.total_lines;
-            setSendProgress({ sent, total, target: sendResult.target || "", phase: sendResult.phase });
-
-            const pct = Math.min(100, Math.round((sent / total) * 100));
-            if (pct % 25 === 0 && pct !== lastLoggedPctRef.current && pct > 0) {
-              lastLoggedPctRef.current = pct;
-              addLog("STREAM", `进度同步: ${pct}% (${sent} 行)`, "info");
-            }
-          }
-          setOverlayStatus(info.status);
-          if (TERMINAL_STATUSES.has(info.status)) {
-            clearInterval(id);
-            setPollIntervalId(null);
-            const total = sendResult.total_lines || sendProgress?.total || 0;
-            if (info.status === "completed") {
-              addLog("SUCCESS", `[成功] ${total} 行 G-code 已全量接收，控制器执行同步及 Idle 核验通过，加工完成！`, "ok");
-              if (sendResult.sd_hash_verified === false || sendResult.warning) {
-                addLog("WARN", sendResult.warning || "固件未启用 HashFS，脱机文件未经物理 SHA-256 校验", "warn");
-              }
-            } else if (info.status === "failed") {
-              const errorText = sendResult.error || "机床报告异常执行失败";
-              addLog("ERROR", `[加工异常] ${errorText}`, "error");
-            } else if (info.status === "cancelled") {
-              const cancelText = sendResult.error || "任务已被用户取消/急停";
-              addLog("ESTOP", `[任务停机] ${cancelText}`, "warn");
-            } else {
-              const detail = sendResult.error ? ` · ${sendResult.error}` : "";
-              addLog("TERMINAL", `任务已结束: ${info.status}${detail}`, "warn");
-            }
-          }
-        } else {
-          failureCount += 1;
-          if (failureCount >= 5) {
-            clearInterval(id);
-            setPollIntervalId(null);
-            setOverlayStatus("failed");
-            addLog("POLL", "连续 5 次查询失败，已自动终止轮询", "warn");
+    pollingCleanupRef.current?.();
+    let state = { id:workflowId, kind:"workflow", status:"sending", progress:sendProgress };
+    const stop = startJobPolling(
+      (signal) => postJson("/api/workflow", { action:"status", workflow_id:workflowId }, { signal }),
+      (res) => {
+        state = applyJobPoll(state, workflowId, "workflow", res);
+        if (state.connectionLost) {
+          setPollSafetyNotice("状态未知：无法查询设备，机器可能仍在运行。正在重试，请保留急停并到现场确认。");
+          if (state.pollFailures === 1) addLog("POLL", "设备状态暂时未知，继续查询；不把通信异常当作停机", "warn");
+          return;
+        }
+        setPollSafetyNotice((notice) => notice.startsWith("状态未知") ? "" : notice);
+        const sr = res.data.result?.send_result || {};
+        if (state.progress) {
+          setSendProgress({ ...state.progress, target:sr.target || "", phase:sr.phase });
+          const pct = Math.min(100, Math.round(state.progress.sent / state.progress.total * 100));
+          if (pct > 0 && pct % 25 === 0 && pct !== lastLoggedPctRef.current) {
+            lastLoggedPctRef.current = pct;
+            addLog("STREAM", `进度同步: ${pct}% (${state.progress.sent} 行)`, "info");
           }
         }
-      } catch (_e) {
-        failureCount += 1;
-        if (failureCount >= 5) {
-          clearInterval(id);
-          setPollIntervalId(null);
-          setOverlayStatus("failed");
-          addLog("POLL", "网络异常，已自动终止轮询", "warn");
+        setOverlayStatus(state.status);
+        if (TERMINAL_STATUSES.has(state.status)) {
+          stop(); setPollIntervalId(null);
+          if (state.status === "completed") {
+            addLog("SUCCESS", `[成功] ${sr.total_lines || state.progress?.total || 0} 行已确认，控制器完成状态已核验`, "ok");
+            if (sr.sd_hash_verified === false || sr.warning) addLog("WARN", sr.warning || "固件未启用 HashFS，脱机文件未经物理 SHA-256 校验", "warn");
+          } else {
+            addLog("TERMINAL", `任务记录为 ${state.status}：${sr.error || "请到设备旁确认实际状态"}`, "warn");
+          }
         }
-      }
-    }, 1000);
-
-    setPollIntervalId(id);
+      },
+    );
+    pollingCleanupRef.current = stop;
+    setPollIntervalId(() => stop);
   };
 
-  // E-STOP 急停软复位
   const handleEStop = async () => {
-    addLog("ESTOP", "0x18 软复位急停已下发！硬件进入 Alarm 锁定态！", "error");
-    await handleCancel();
-    showAlert("0x18 软复位指令已发送，电机运动与激光已停机！当前断点已保留，可随时点击【断点续雕】继续执行。", { title: "紧急制动已触发（断点已锁定）", tone: "error" });
+    const id = currentWorkflow?.workflow_id;
+    if (!id) return;
+    const res = await postJson("/api/safe-action", { action:"emergency_stop", confirmed:true, job_id:id });
+    const sent = res.ok && res.data?.success;
+    const message = sent
+      ? "停止请求已发送，但尚未确认设备已停止。请到设备旁确认，软件复位不能代替实体急停。"
+      : `${res.data?.result || "停止请求发送失败"}。请立即使用实体急停。`;
+    setPollSafetyNotice(message);
+    addLog("ESTOP", message, sent ? "warn" : "error");
+    showAlert(message, { title:sent ? "停止请求已发送" : "停止未确认", tone:sent ? "warning" : "error" });
   };
+  // 顶栏常驻急停：有当前工作流时执行与监视舱急停按钮完全相同的 handleEStop
+  const estopRef = useRef(null);
+  estopRef.current = currentWorkflow?.workflow_id ? handleEStop : null;
+  useEffect(
+    () =>
+      onEmergencyStop(() => {
+        if (!estopRef.current) return false;
+        void estopRef.current();
+        return true;
+      }),
+    [],
+  );
 
   // Cancel Job
   const handleCancel = async () => {
@@ -613,7 +607,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         workflow_id: currentWorkflow.workflow_id,
       });
       if (res.ok && res.data?.success) {
-        setOverlayStatus("cancelled");
+        setPollSafetyNotice("停止请求已发送，但尚未确认设备已停止；急停按钮仍保留。");
+        startStatusPolling(currentWorkflow.workflow_id);
         const sr = res.data.result?.send_result;
         if (sr && typeof sr.lines_sent === "number") {
           setSendProgress((prev) => ({
@@ -622,10 +617,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             total: sr.total_lines || prev?.total || 0,
           }));
           if (sr.lines_sent > 0 && sr.lines_sent < sr.total_lines) {
-            addLog("ESTOP", `已在第 ${sr.lines_sent}/${sr.total_lines} 行安全制动，支持点击【从第 ${sr.lines_sent + 1} 行继续加工】`, "warn");
+            addLog("ESTOP", `取消请求已提交；记录进度 ${sr.lines_sent}/${sr.total_lines}，恢复前必须确认设备与材料状态`, "warn");
           }
         }
-        addLog("CANCEL", "工作流任务已安全中止并释放通道", "ok");
+        addLog("CANCEL", "已收到取消请求回复，正在查询最终状态；不代表物理停机", "ok");
       } else {
         addLog("CANCEL", res.data?.result || "请求取消失败", "error");
       }
@@ -635,35 +630,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
   };
 
   return (
-    <div className="home-page" style={{ padding: "16px 24px", maxWidth: "1400px", margin: "0 auto" }}>
-      {/* Hero Section */}
-      <section className="hero-section" style={{ marginBottom: "18px", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
-            <span style={{ fontSize: "11px", letterSpacing: "2px", color: "var(--laser, #00e5ff)", textTransform: "uppercase", fontWeight: "700" }}>
-              01 · MOSS LASER WORKBENCH
-            </span>
-            <span style={{ fontSize: "10px", padding: "1px 6px", borderRadius: "3px", background: "rgba(255, 42, 68, 0.15)", border: "1px solid rgba(255, 42, 68, 0.45)", color: "var(--moss-red, #ff2a44)", fontFamily: "var(--font-mono)" }}>
-              UEG-550W COMMAND
-            </span>
-          </div>
-          <h1 style={{ fontSize: "26px", fontWeight: "800", margin: 0, color: "var(--ink, #fff)" }}>
-            激光创作<span style={{ color: "var(--laser, #00e5ff)" }}>控制台</span>
-          </h1>
-          <p style={{ margin: "4px 0 0", fontSize: "13px", color: "var(--ink-dim, #a0b3cc)" }}>
-            全闭环 Rust 激光工业控制器 · 包含文字排版、矢量轮廓、光栅二值抖动与高压物理急停
-          </p>
-        </div>
-      </section>
-
-      {/* Main Console Box (HUD Card) */}
-      <div className="console-box hud-card" style={{ position: "relative" }}>
-        {/* HUD 科技四角准星 */}
-        <div className="hud-corner-tl" />
-        <div className="hud-corner-tr" />
-        <div className="hud-corner-bl" />
-        <div className="hud-corner-br" />
-
+    <div className="home-page ob-page">
+      {/* 三栏：左 ①②③ 输入；中 ④ 加工监视舱；右 反馈 + 控制台（技术书 §9.5.5 B） */}
+      <div className="ob-wb">
+        <div className="ob-stack">
+        <section className="hud-card ob-card" aria-label="通信链路">
+          <FoldHeader id="wb-link" title="通信链路" k="LINK" n={1} />
         {/* Connection Bar */}
         <div
           className="connection-bar"
@@ -679,7 +651,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ color: "var(--laser, #35e0ff)", fontFamily: "var(--font-mono)", fontSize: "11px", fontWeight: "700", letterSpacing: "1px" }}>
+            <span style={{ color: "var(--laser, #8b7bff)", fontFamily: "var(--font-mono)", fontSize: "11px", fontWeight: "700", letterSpacing: "1px" }}>
               [LINK]
             </span>
             <span style={{ color: "var(--ink-dim, #94a3b8)" }}>通信链路:</span>
@@ -777,11 +749,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             <span>握手探测</span>
           </button>
         </div>
+        </section>
 
-        {/* Workbench Body */}
-        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", minHeight: "520px" }}>
-          {/* Left Column: Form & Tools */}
-          <div style={{ padding: "20px", borderRight: "1px solid var(--line, rgba(140, 175, 255, 0.14))" }}>
+        <section className="hud-card ob-card" aria-label="加工内容">
+          <FoldHeader id="wb-source" title="加工内容" k="SOURCE" n={2} />
             {/* Tool selection cards */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "8px", marginBottom: "20px" }}>
               {[
@@ -967,7 +938,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             )}
 
             {activeTool === "draw" && (
-              <div className="tool-body" style={{ marginBottom: "20px", padding: "16px", background: "rgba(53, 224, 255, 0.05)", border: "1px dashed rgba(53, 224, 255, 0.3)", borderRadius: "8px", textAlign: "center" }}>
+              <div className="tool-body" style={{ marginBottom: "20px", padding: "16px", background: "rgba(139, 123, 255, 0.05)", border: "1px dashed rgba(139, 123, 255, 0.3)", borderRadius: "8px", textAlign: "center" }}>
                 <div style={{ fontSize: "14px", fontWeight: "700", color: "var(--ink)", marginBottom: "6px" }}>
                   Excalidraw 矢量创作画板
                 </div>
@@ -985,20 +956,23 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </button>
               </div>
             )}
+        </section>
 
+        <section className="hud-card ob-card" aria-label="材质与参数">
+          <FoldHeader id="wb-material" title="材质与参数" k="MATERIAL" n={3} />
             {/* Material & Specs selection Deck */}
             <div
               style={{
-                background: "rgba(6, 10, 20, 0.7)",
+                background: "rgba(14, 14, 17, 0.7)",
                 padding: "14px 16px",
                 borderRadius: "8px",
-                border: "1px solid rgba(53, 224, 255, 0.2)",
+                border: "1px solid rgba(139, 123, 255, 0.2)",
                 marginBottom: "24px",
                 boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.05)",
               }}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-                <span style={{ fontSize: "12px", fontWeight: "800", color: "var(--laser, #35e0ff)", letterSpacing: "1px", display: "flex", alignItems: "center", gap: "6px" }}>
+                <span style={{ fontSize: "12px", fontWeight: "800", color: "var(--laser, #8b7bff)", letterSpacing: "1px", display: "flex", alignItems: "center", gap: "6px" }}>
                   <span style={{ width: "6px", height: "6px", background: "var(--laser)", borderRadius: "50%", display: "inline-block" }} />
                   加工材质与物理参数联动
                 </span>
@@ -1090,10 +1064,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 );
               })()}
             </div>
-          </div>
+        </section>
+        </div>
 
-          {/* Right Column: Holographic Chamber Viewport */}
-          <div style={{ padding: "20px", display: "flex", flexDirection: "column" }}>
+        <section className="hud-card ob-card ob-monitor" aria-label="加工监视舱">
+          <FoldHeader id="wb-monitor" title="加工监视舱" k="MONITOR" n={4} />
             <div className="chamber-viewport">
               {/* 坐标雷达网格背景 */}
               <div className="chamber-grid" />
@@ -1114,7 +1089,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       maxWidth: "92%",
                       maxHeight: "92%",
                       objectFit: "contain",
-                      filter: "drop-shadow(0 0 14px rgba(0, 229, 255, 0.65))",
+                      filter: "drop-shadow(0 0 14px rgba(139, 123, 255, 0.65))",
                       pointerEvents: "none",
                     }}
                   />
@@ -1126,8 +1101,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       fontSize: "10px",
                       fontFamily: "var(--font-mono)",
                       color: "var(--laser)",
-                      background: "rgba(0, 229, 255, 0.12)",
-                      border: "1px solid rgba(0, 229, 255, 0.35)",
+                      background: "rgba(139, 123, 255, 0.12)",
+                      border: "1px solid rgba(139, 123, 255, 0.35)",
                       borderRadius: "3px",
                       padding: "2px 8px",
                       letterSpacing: "1px",
@@ -1144,14 +1119,14 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       width: "60px",
                       height: "60px",
                       borderRadius: "50%",
-                      border: "1px dashed rgba(53, 224, 255, 0.4)",
+                      border: "1px dashed rgba(139, 123, 255, 0.4)",
                       display: "grid",
                       placeItems: "center",
                       margin: "0 auto 12px",
-                      background: "rgba(53, 224, 255, 0.05)",
+                      background: "rgba(139, 123, 255, 0.05)",
                     }}
                   >
-                    <Cpu size={28} style={{ color: "var(--laser, #35e0ff)", opacity: 0.6 }} />
+                    <Cpu size={28} style={{ color: "var(--laser, #8b7bff)", opacity: 0.6 }} />
                   </div>
                   <div style={{ fontSize: "14px", fontWeight: "700", color: "var(--ink)" }}>
                     加工监视舱就绪
@@ -1167,7 +1142,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "14px" }}>
               <div
                 style={{
-                  background: "rgba(6, 10, 20, 0.75)",
+                  background: "rgba(14, 14, 17, 0.75)",
                   padding: "10px 14px",
                   borderRadius: "6px",
                   border: "1px solid var(--line)",
@@ -1184,7 +1159,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
               <div
                 style={{
-                  background: "rgba(6, 10, 20, 0.75)",
+                  background: "rgba(14, 14, 17, 0.75)",
                   padding: "10px 14px",
                   borderRadius: "6px",
                   border: "1px solid var(--line)",
@@ -1199,8 +1174,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
               </div>
             </div>
-
-            {/* 数控中控台与 JobWorker 实时执行卡片 */}
             <div className="job-dispatch-card">
               {/* 刀路摘要胶囊 */}
               <div className="toolpath-capsule">
@@ -1218,7 +1191,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
                 <div className="toolpath-item">
                   <span className="toolpath-label">物理 SHA-256</span>
-                  <span className="toolpath-value" style={{ fontSize: "11px", color: "var(--laser-cyan, #00e5ff)" }}>
+                  <span className="toolpath-value" style={{ fontSize: "11px", color: "var(--laser-cyan, #8b7bff)" }}>
                     {currentWorkflow?.confirmation_snapshot?.gcode_sha256
                       ? `${currentWorkflow.confirmation_snapshot.gcode_sha256.slice(0, 10)}...`
                       : currentWorkflow?.artifacts?.gcode_sha256
@@ -1228,7 +1201,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
                 <div className="toolpath-item">
                   <span className="toolpath-label">预估耗时</span>
-                  <span className="toolpath-value" style={{ color: "var(--gold, #ffb84d)" }}>
+                  <span className="toolpath-value" style={{ color: "var(--gold, #fbbf24)" }}>
                     {timeEstimate ? `${timeEstimate.estimated_seconds}s` : "—"}
                   </span>
                 </div>
@@ -1250,7 +1223,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
               <div className="streaming-progress-group">
                 <div className="streaming-progress-header">
                   <span>下发实时进度 (STREAMING PROGRESS)</span>
-                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--laser-cyan, #00e5ff)" }}>
+                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--laser-cyan, #8b7bff)" }}>
                     {sendProgress && sendProgress.total > 0
                       ? `${Math.min(100, Math.round((sendProgress.sent / sendProgress.total) * 100))}%`
                       : "0%"}
@@ -1284,9 +1257,45 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
               </div>
             </div>
-          </div>
-        </div>
-      </div>
+        </section>
+
+        <div className="ob-stack ob-rail">
+        <section className="hud-card ob-card" aria-label="加工反馈">
+          <FoldHeader id="wb-feedback" title="加工反馈" k="FEEDBACK" />
+          {!currentWorkflow?.workflow_id && (
+            <p className="ob-sub" style={{ margin: 0 }}>生成加工轨迹后，可在这里记录加工效果并获取调参建议。</p>
+          )}
+            {/* 数控中控台与 JobWorker 实时执行卡片 */}
+            <FeedbackPanel workflowId={currentWorkflow?.workflow_id} origin={currentWorkflow?.feedback_origin}
+              disabled={busy || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)}
+              onAdopt={async (workflow) => {
+                if (pollIntervalId) pollIntervalId();
+                setPollIntervalId(null);
+                setCurrentWorkflow(workflow);
+                setOverlayStatus("pending");
+                setShowSendOverlay(false);
+                setSendProgress(null);
+                const artifacts = workflow.artifacts || {};
+                setPreviewUrl(await fetchPreviewBlobUrl(artifacts.image_file));
+                setGcodeText("");
+                if (artifacts.gcode_file) {
+                  try {
+                    const response = await apiFetch(`/preview?path=${encodeURIComponent(artifacts.gcode_file)}`);
+                    if (!response.ok) throw new Error("资源读取失败");
+                    setGcodeText(await response.text());
+                  } catch (_error) {
+                    addLog("PREVIEW", "调参预览已生成，但刀路资源加载失败，请重新打开任务", "error");
+                  }
+                }
+                if (artifacts.actual_params) {
+                  setPowerPercent(artifacts.actual_params.laser_max_power / artifacts.actual_params.power_scale * 100);
+                  setSpeedMms(artifacts.actual_params.feed_rate / 60);
+                }
+                setTimeEstimate(artifacts.time_estimate || null);
+                setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm });
+                addLog("PREVIEW", `调参预览已生成：${workflow.workflow_id}，尚未发送`, "ok");
+              }} />
+        </section>
 
       {/* 底部三标签遥测控制台抽屉 (ConsoleDrawer) */}
       <ConsoleDrawer
@@ -1301,17 +1310,23 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         totalLines={sendProgress?.total || 0}
         mcpStatus={mcpStatus}
       />
+        </div>
+      </div>
 
+      {pollSafetyNotice && <p role="alert" className="send-desc">{pollSafetyNotice}</p>}
       {/* Send Overlay */}
       <SendOverlay
         visible={showSendOverlay}
         status={overlayStatus}
         progress={sendProgress}
         onCancel={handleCancel}
+        onEmergencyStop={currentWorkflow?.workflow_id ? handleEStop : null}
+        keepEmergencyStop={Boolean(currentWorkflow?.workflow_id)}
+        safetyNotice={pollSafetyNotice}
         onClose={() => {
           setShowSendOverlay(false);
           if (pollIntervalId) {
-            clearInterval(pollIntervalId);
+            pollIntervalId();
             setPollIntervalId(null);
           }
         }}

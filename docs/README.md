@@ -1,8 +1,6 @@
 # MOSS 文档索引
 
-本目录描述 MOSS 的 Rust 重构版：`crates/` 下的 8 个 crate、`apps/desktop`（Tauri 2）、`apps/moss-host`（HTTP/MCP 宿主）和 `frontend/`（React + Vite）。文档与代码不一致时，以代码、测试和 `CHANGELOG.md` 为准；发现偏差请一并修文档。
-
-仓库级共享规则在根目录 [`AGENTS.md`](../AGENTS.md)，Claude Code 补充说明在 [`CLAUDE.md`](../CLAUDE.md)，本目录不重复这些规则。
+文档与代码不一致时以代码和测试为准，并顺手修文档。仓库规则只在根目录 [`AGENTS.md`](../AGENTS.md)。
 
 ## 用户
 
@@ -11,7 +9,9 @@
 ## 开发者
 
 - [架构总览](developer/architecture.md)：进程与入口、crate 分层与依赖方向、HTTP/SSE/MCP 桥、设备层、存储、退出与急停路径、与早期规划稿的已知偏差。
-- [开发规范](developer/standards.md)：目录职责、工具注册与分层约定、测试与构建命令、文档维护规则、PR 检查清单。
+- [安装包与卸载规范](developer/packaging-install.md)：通用 Windows NSIS 已实施；自定义安装目录、快捷方式、升级和可选保留数据。签名、干净 VM 验收及 NV18 原生依赖许可仍未完成，普通 NSIS 与语音 helper 专用包分别验收。
+- [开发规范](developer/standards.md)：目录职责、代码约定、文档约定、PR 检查清单。
+- [构建回执](developer/build-receipts.md)：阶段收尾与交付构建的时间、大小、SHA-256。
 - [安全入口](developer/safety.md)：改高风险代码前必读。运行时现实、高风险类别、完整发送链路的每一道门禁、已知未接线项、测试与提示词同步要求。
 - [Web API 契约](developer/api-contracts.md)：`/api/*` 与 `/v1/*` 路由的请求、响应、错误码与鉴权规则。
 - [数据库结构](developer/db-schema.md)：SQLite 表、schema 版本、材料库 JSON 冻结格式、旧数据迁移流程。
@@ -29,8 +29,9 @@
 
 ## 小智集成
 
+- [融合实施 TODO](integration/moss-fusion-implementation-todo.md)：**唯一进度记录**，先看这里。
+- [融合技术书](integration/moss-desktop-fusion-technical-spec.md)：外部自建链路、审批、CORS、语音中心、安装、导出、手机连接的设计。
+- [内置语音技术书](integration/moss-native-voice-spec.md)：内置语音总体设计与安全边界（含 NV19 规划）。
+- [NV10～NV19 实施细则](integration/moss-native-voice-implementation.md)：各 NV 的模块、接口、安全与验收标准。
+- [外部链路实施细则](integration/moss-self-hosted-extension-implementation.md)：P2b / P3 / P5。
 - [提示词归档](integration/xiaozhi-prompts/README.md)：控制台提示词与知识库文本的唯一维护处；`latest.md` 为当前版本，`history/` 为日期快照。
-
-## 历史归档
-
-- [归档说明](archive/README.md)：重构期的需求规格、迁移进度、验收报告与旧前端盘点。只读，不再维护，不作为当前架构依据。

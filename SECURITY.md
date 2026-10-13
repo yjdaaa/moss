@@ -12,6 +12,4 @@
 
 ## Laser & Hardware Safety
 
-- 激光加工严禁使用含氯材料（如 PVC），上位机算法强制拦截。
-- 急停操作（E-STOP / 0x18）通过实时通道无阻塞下发，不依赖排队消费。
-- 任何未确认的指令序列或未经 SHA-256 物理重算校验的文件，严禁触发硬件出光。
+硬件安全门禁与开发约束见 [`docs/developer/safety.md`](docs/developer/safety.md) 和 [`AGENTS.md`](AGENTS.md)。

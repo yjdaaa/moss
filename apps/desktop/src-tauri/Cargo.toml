@@ -14,6 +14,22 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 laser-host = { path = "../../../crates/laser-host" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+# 导出目录选择与“另存为”框（技术书 §9.7）；Android 本期不做
+tauri-plugin-dialog = "2"
+# 语音中心：自建 xiaozhi-server 的设置、进程管理、模型向导（技术书 §9.4）；Android 不编译（A-69）
+moss-voice = { path = "../../../crates/moss-voice" }
+# 内置语音服务（内置语音技术书 NV1 起）：设备 OTA 与 WebSocket、设备登记；Android 不编译
+moss-voice-server = { path = "../../../crates/moss-voice-server" }
+# 内置语音服务的模型提供方（NV5：对话模式的识别 / 大模型 / 合成）；Android 不编译
+moss-voice-providers = { path = "../../../crates/moss-voice-providers" }
+laser-contracts = { path = "../../../crates/laser-contracts" }
+laser-api = { path = "../../../crates/laser-api" }
+laser-runtime = { path = "../../../crates/laser-runtime" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+getrandom = "0.3"
+tokio = { version = "1", features = ["sync"] }

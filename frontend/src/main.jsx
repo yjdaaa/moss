@@ -1,36 +1,65 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { Navbar } from "./components/Navbar.jsx";
+import { SideNav } from "./components/SideNav.jsx";
+import { requestEmergencyStop } from "./estopBus.js";
+import { stopKnownJob } from "./globalEstop.js";
+import { installCardSpotlight } from "./spotlight.js";
 import { AuthModal } from "./components/AuthModal.jsx";
 import { CloseConfirmModal } from "./components/CloseConfirmModal.jsx";
 import { SettingsModal } from "./components/SettingsModal.jsx";
 import { CyberBackground } from "./components/CyberBackground.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
 import { showAlert, showConfirm } from "./appDialog.js";
-import { getJson } from "./api/client.js";
+import { getJson, postJson } from "./api/client.js";
+import { backendStartupErrorText, hasDesktopSession, initializeBackendOrigin, isRemoteMode, refreshDesktopSession } from "./authSession.js";
+import { ApprovalCenter } from "./components/ApprovalCenter.jsx";
+import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
 import { MaterialLabPage } from "./pages/MaterialLabPage.jsx";
 import { DrawPage } from "./pages/DrawPage.jsx";
+import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
+import { VoicePage } from "./pages/VoicePage.jsx";
+import { isVoiceCenterAvailable, voiceApi } from "./voiceApi.js";
 import "./styles.css";
 
+function pathToRoute(pathname, voiceEnabled) {
+  if (pathname.startsWith("/material-lab")) return "/material-lab";
+  if (pathname.startsWith("/draw")) return "/draw";
+  // 语音中心只在 MOSS 桌面端可用（技术书 §9.4.7）；其他环境回到工作台
+  if (pathname.startsWith("/voice") && voiceEnabled) return "/voice";
+  return "/";
+}
+
 function App() {
-  const [currentPath, setCurrentPath] = useState(() => {
-    const p = window.location.pathname;
-    if (p.startsWith("/material-lab")) return "/material-lab";
-    if (p.startsWith("/draw")) return "/draw";
-    return "/";
-  });
+  // 桌面会话在首次渲染前已取得（见文件末尾），这里只需判断一次
+  const voiceEnabled = isVoiceCenterAvailable();
+  const [currentPath, setCurrentPath] = useState(() => pathToRoute(window.location.pathname, voiceEnabled));
 
   const [connectionStatus, setConnectionStatus] = useState({
     connected: false,
     summary: "未连接",
   });
   const [mcpStatus, setMcpStatus] = useState(null);
+  const [voiceStatus, setVoiceStatus] = useState(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
+  // 退出时是否有 MOSS 启动的语音服务端在运行（决定关闭弹窗是否显示“同时停止语音服务端”）
+  const [voiceServerOwned, setVoiceServerOwned] = useState(false);
+  // 全局审批卡（技术书 §9.5.2）：只在桌面端（有桌面会话）显示
+  const [approvalOpen, setApprovalOpen] = useState(false);
+  const [approvalCount, setApprovalCount] = useState(0);
+  const approvalsEnabled = hasDesktopSession();
+  const openApprovals = useCallback(() => {
+    if (approvalCount > 0) {
+      setApprovalOpen(true);
+    } else {
+      void showAlert("当前没有待批准的请求。小智或局域网设备请求开始加工时，审批卡会自动弹出。", { title: "审批", tone: "info" });
+    }
+  }, [approvalCount]);
 
-  const executeDesktopAction = useCallback(async (action) => {
+  const executeDesktopAction = useCallback(async (action, { stopServer = true } = {}) => {
     const invoke = window.__TAURI__?.core?.invoke;
     const command = action === "tray"
       ? "minimize_to_tray"
@@ -42,7 +71,7 @@ function App() {
       if (action === "exit") {
         if (await showConfirm("确定要退出 MOSS 激光控制系统吗？", { title: "退出程序", tone: "warning", danger: true, confirmText: "退出" })) {
           window.close();
-          document.body.innerHTML = "<div style='display:grid;place-items:center;height:100vh;background:#05070d;color:#ff2a44;font-family:sans-serif;'><h2>MOSS 会话已安全终止，请关闭本页面</h2></div>";
+          document.body.innerHTML = "<div style='display:grid;place-items:center;height:100vh;background:#09090b;color:#ff3b5c;font-family:sans-serif;'><h2>MOSS 会话已安全终止，请关闭本页面</h2></div>";
         }
         return true;
       }
@@ -50,7 +79,8 @@ function App() {
     }
 
     try {
-      await invoke(command);
+      // 完全退出时告诉桌面端是否一并停止 MOSS 启动的语音服务端（默认是，技术书 §9.4.3）
+      await invoke(command, command === "exit_application" ? { stopServer } : undefined);
       return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -60,22 +90,33 @@ function App() {
     }
   }, []);
 
-  const triggerCloseHandling = useCallback(() => {
+  const triggerCloseHandling = useCallback(async () => {
     const pref = localStorage.getItem("moss_close_action") || "ask";
+    let owned = false;
+    if (voiceEnabled) {
+      try {
+        const status = await voiceApi.status();
+        owned = status?.server?.state === "running" && Boolean(status?.server?.owned);
+      } catch {
+        owned = false;
+      }
+    }
+    setVoiceServerOwned(owned);
     if (pref === "tray") {
       void executeDesktopAction("tray");
-    } else if (pref === "exit") {
+    } else if (pref === "exit" && !owned) {
       void executeDesktopAction("exit");
     } else {
+      // 记住了“退出”但语音服务端在运行时仍弹窗，让用户决定是否一并停止
       setShowCloseModal(true);
     }
-  }, [executeDesktopAction]);
+  }, [executeDesktopAction, voiceEnabled]);
 
-  const handleCloseConfirm = useCallback(async (action, remember) => {
+  const handleCloseConfirm = useCallback(async (action, remember, stopServer = true) => {
     if (remember) {
       localStorage.setItem("moss_close_action", action);
     }
-    const succeeded = await executeDesktopAction(action);
+    const succeeded = await executeDesktopAction(action, { stopServer });
     if (succeeded) {
       setShowCloseModal(false);
     }
@@ -83,10 +124,7 @@ function App() {
 
   useEffect(() => {
     const handlePopState = () => {
-      const p = window.location.pathname;
-      if (p.startsWith("/material-lab")) setCurrentPath("/material-lab");
-      else if (p.startsWith("/draw")) setCurrentPath("/draw");
-      else setCurrentPath("/");
+      setCurrentPath(pathToRoute(window.location.pathname, voiceEnabled));
     };
 
     window.addEventListener("popstate", handlePopState);
@@ -111,7 +149,7 @@ function App() {
       window.removeEventListener("moss:close-requested", triggerCloseHandling);
       if (unlistenTauri) unlistenTauri();
     };
-  }, [triggerCloseHandling]);
+  }, [triggerCloseHandling, voiceEnabled]);
 
   // 定期同步小智 MCP 真实运行状态
   useEffect(() => {
@@ -120,6 +158,7 @@ function App() {
       const res = await getJson("/api/system/info");
       if (!cancelled && res.ok && res.data?.success && res.data?.result?.mcp) {
         setMcpStatus(res.data.result.mcp);
+        setVoiceStatus(res.data.result.voice ?? null);
       }
     }
     syncMcp();
@@ -130,6 +169,35 @@ function App() {
     };
   }, []);
 
+  useEffect(() => installCardSpotlight(), []);
+
+  // 顶栏急停先读后端全局任务（含执行结果未知的作业），跨页面也可停止原目标。
+  // 状态查询失败才尝试旧的页面处理器；软件 0x18 不等于物理停机。
+  const estopBusy = useRef(false);
+  const handleGlobalEmergencyStop = useCallback(async () => {
+    if (estopBusy.current) return;
+    estopBusy.current = true;
+    try {
+      const outcome = await stopKnownJob(getJson, postJson);
+      if (outcome.kind === "sent") {
+        await showAlert(`${outcome.message || "急停 0x18 已写出"}。停止尚未确认，请现场检查机床状态；必要时按实体急停。`, { title: "已发送急停", tone: "warning" });
+      } else if (outcome.kind === "failed") {
+        await showAlert(`${outcome.message || "急停发送失败"}。请立即使用实体急停，并检查设备连接。`, { title: "急停未确认", tone: "error" });
+      } else if (outcome.kind === "ambiguous") {
+        await showAlert(`检测到 ${outcome.jobs.length} 个可能仍在运行的任务。无法安全地猜测要停止哪台设备，请在对应任务中按急停；紧急情况使用实体急停。`, { title: "多个停止目标", tone: "warning" });
+      } else if (!requestEmergencyStop()) {
+        await showAlert(
+          outcome.kind === "lookup_failed"
+            ? "无法查询后端当前任务，不能确认软件急停能否发送。请立即使用实体急停。"
+            : "没有找到正在下发的任务。如设备仍在运动或出光，请立即使用实体急停。",
+          { title: "停止状态未知", tone: "warning" },
+        );
+      }
+    } finally {
+      estopBusy.current = false;
+    }
+  }, []);
+
   const navigateTo = (path) => {
     if (window.location.pathname !== path) {
       window.history.pushState({}, "", path);
@@ -138,32 +206,49 @@ function App() {
   };
 
   return (
-    <div className="laser-app-root" style={{ minHeight: "100vh", position: "relative", color: "var(--ink, #e8ecf6)" }}>
+    <div className="laser-app-root ob-shell" style={{ minHeight: "100vh", position: "relative", color: "var(--ink, #e8ecf6)" }}>
       <CyberBackground />
-      <Navbar
+      <SideNav
         currentPath={currentPath}
         onNavigate={navigateTo}
-        connectionStatus={connectionStatus}
-        mcpStatus={mcpStatus}
         onAuthClick={() => setShowAuthModal(true)}
         onSettingsClick={() => setShowSettingsModal(true)}
+        showVoice={voiceEnabled}
       />
+      <div className="ob-main">
+        <Navbar
+          currentPath={currentPath}
+          onNavigate={navigateTo}
+          connectionStatus={connectionStatus}
+          mcpStatus={mcpStatus}
+          voiceStatus={voiceStatus}
+          onEmergencyStop={handleGlobalEmergencyStop}
+          showApprovals={approvalsEnabled}
+          approvalCount={approvalCount}
+          onApprovalsClick={openApprovals}
+        />
 
-      <main className="main-content-viewport">
-        {currentPath === "/material-lab" && (
-          <MaterialLabPage onNavigate={navigateTo} />
-        )}
-        {currentPath === "/draw" && (
-          <DrawPage onNavigate={navigateTo} />
-        )}
-        {currentPath === "/" && (
-          <HomePage
-            onNavigate={navigateTo}
-            connectionStatus={connectionStatus}
-            setConnectionStatus={setConnectionStatus}
-          />
-        )}
-      </main>
+        <main className="main-content-viewport" key={currentPath}>
+          {currentPath === "/material-lab" && (
+            <MaterialLabPage onNavigate={navigateTo} />
+          )}
+          {currentPath === "/draw" && (
+            <DrawPage onNavigate={navigateTo} />
+          )}
+          {currentPath === "/voice" && voiceEnabled && (
+            <VoiceErrorBoundary onBack={navigateTo}>
+              <VoicePage />
+            </VoiceErrorBoundary>
+          )}
+          {currentPath === "/" && (
+            <HomePage
+              onNavigate={navigateTo}
+              connectionStatus={connectionStatus}
+              setConnectionStatus={setConnectionStatus}
+            />
+          )}
+        </main>
+      </div>
 
       <AuthModal
         visible={showAuthModal}
@@ -174,12 +259,27 @@ function App() {
       <SettingsModal
         visible={showSettingsModal}
         onClose={() => setShowSettingsModal(false)}
+        onOpenVoice={
+          voiceEnabled
+            ? () => {
+                setShowSettingsModal(false);
+                navigateTo("/voice");
+              }
+            : null
+        }
       />
 
       <CloseConfirmModal
         visible={showCloseModal}
         onClose={() => setShowCloseModal(false)}
         onConfirm={handleCloseConfirm}
+        voiceServerRunning={voiceServerOwned}
+      />
+
+      <ApprovalCenter
+        open={approvalOpen}
+        onOpenChange={setApprovalOpen}
+        onPendingCountChange={setApprovalCount}
       />
 
       <AppDialogHost />
@@ -187,4 +287,36 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+const root = createRoot(document.getElementById("root"));
+initializeBackendOrigin()
+  // 桌面会话取不到（浏览器、Android、后端未开启会话）不影响启动
+  .then(() => refreshDesktopSession())
+  .then(() => root.render(<App />))
+  .catch((error) => {
+    console.error("后端启动失败", error);
+    const remote = isRemoteMode();
+    root.render(
+      <main role="alert" style={{ minHeight: "100vh", display: "grid", placeContent: "center", padding: 24, background: "#111820", color: "#f0f3f5", textAlign: "center" }}>
+        <h1 style={{ fontSize: 24 }}>{remote ? "无法连接电脑 MOSS" : "MOSS 后端无法启动"}</h1>
+        <p>{remote ? "手机当前设置为连接电脑上的 MOSS。" : "无法连接本机服务，请检查是否已有 MOSS 实例运行。"}</p>
+        {backendStartupErrorText(error) && (
+          <pre style={{ maxWidth: 640, whiteSpace: "pre-wrap", wordBreak: "break-all", textAlign: "left", fontSize: 13, opacity: 0.85 }}>
+            {backendStartupErrorText(error)}
+          </pre>
+        )}
+        <button type="button" onClick={() => window.location.reload()}>重试</button>
+        {remote && (
+          <button
+            type="button"
+            style={{ marginTop: 12 }}
+            onClick={() => {
+              clearRemoteOrigin();
+              window.location.reload();
+            }}
+          >
+            改用手机本机模式
+          </button>
+        )}
+      </main>,
+    );
+  });

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-memory-list"
+description = "Enables the voice_memory_list command without any pre-configured scope."
+commands.allow = ["voice_memory_list"]
+
+[[permission]]
+identifier = "deny-voice-memory-list"
+description = "Denies the voice_memory_list command without any pre-configured scope."
+commands.deny = ["voice_memory_list"]

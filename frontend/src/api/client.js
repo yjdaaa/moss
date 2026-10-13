@@ -1,12 +1,13 @@
-import { fetchWithAuth, readAuthToken, storeAuthToken, clearAuthToken, resolveApiUrl, getApiBaseUrl } from "../authSession.js";
+import { fetchWithDesktopSession, readAuthToken, storeAuthToken, clearAuthToken, resolveApiUrl, getApiBaseUrl } from "../authSession.js";
 
 export { readAuthToken, storeAuthToken, clearAuthToken, resolveApiUrl, getApiBaseUrl };
 
 /**
- * 统一 API fetch 客户端，自动注入 Bearer Token 并拦截 401
+ * 统一 API fetch 客户端：自动注入 Bearer Token 与桌面会话，拦截 401；
+ * 桌面会话失效（403 desktop_session_invalid）时重新取会话并只重试一次。
  */
 export async function apiFetch(input, init = {}) {
-  const response = await fetchWithAuth(fetch, input, init);
+  const response = await fetchWithDesktopSession(fetch, input, init);
   if (response.status === 401) {
     window.dispatchEvent(new CustomEvent("laser-auth-required"));
   }
@@ -40,7 +41,7 @@ export async function getJson(path) {
 /**
  * POST JSON 请求并解析响应体
  */
-export async function postJson(path, body = {}) {
+export async function postJson(path, body = {}, options = {}) {
   try {
     const response = await apiFetch(path, {
       method: "POST",
@@ -49,6 +50,7 @@ export async function postJson(path, body = {}) {
         Accept: "application/json",
       },
       body: JSON.stringify(body),
+      signal: options.signal,
     });
     const data = await response.json().catch(() => ({
       success: false,

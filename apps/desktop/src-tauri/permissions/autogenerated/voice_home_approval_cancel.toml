@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-home-approval-cancel"
+description = "Enables the voice_home_approval_cancel command without any pre-configured scope."
+commands.allow = ["voice_home_approval_cancel"]
+
+[[permission]]
+identifier = "deny-voice-home-approval-cancel"
+description = "Denies the voice_home_approval_cancel command without any pre-configured scope."
+commands.deny = ["voice_home_approval_cancel"]

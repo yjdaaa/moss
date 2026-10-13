@@ -47,8 +47,13 @@ import {
   requiresMovedMaterialAcknowledgement,
   setMovedMaterialAcknowledged,
 } from "../repeatSendGuard.js";
-import { fetchWithAuth, resolveApiUrl } from "../authSession.js";
-import { showConfirm } from "../appDialog.js";
+import { fetchWithDesktopSession, isRemoteMode, resolveApiUrl } from "../authSession.js";
+import { fetchPreviewBlobUrl } from "../api/client.js";
+import { showAlert, showConfirm } from "../appDialog.js";
+import { exportFile, savedMessage } from "../saveFile.js";
+import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
+import { onEmergencyStop } from "../estopBus.js";
+import { FoldHeader } from "../components/FoldHeader.jsx";
 
 const CONFIG_KEYS = [
   "material",
@@ -62,7 +67,7 @@ const CONFIG_KEYS = [
 ];
 const EXCALIDRAW_LANG_CODE = "zh-CN";
 const MATERIAL_CHANNEL_NAME = "laser-material-library-v1";
-const apiFetch = (...args) => fetchWithAuth(fetch, ...args);
+const apiFetch = (...args) => fetchWithDesktopSession(fetch, ...args);
 
 const DEFAULT_FORM = {
   material: localStorage.getItem("laserLab.material") || "椴木",
@@ -502,6 +507,19 @@ export function DrawPage({ onNavigate }) {
     }
   }
 
+  // 顶栏常驻急停：有当前工作流时执行与本页“取消”按钮相同的 workflow cancel
+  const estopRef = useRef(null);
+  estopRef.current = workflowId ? () => workflowAction("cancel") : null;
+  useEffect(
+    () =>
+      onEmergencyStop(() => {
+        if (!estopRef.current) return false;
+        void estopRef.current();
+        return true;
+      }),
+    [],
+  );
+
   async function workflowAction(action) {
     if (!workflowId) return;
     setBusy(true);
@@ -520,10 +538,12 @@ export function DrawPage({ onNavigate }) {
   async function downloadPng() {
     try {
       const { blob } = await exportScene();
-      downloadBlob(blob, "excalidraw-laser-lab.png");
-      setStatus("PNG 已导出");
+      const saved = await exportFile(blob, "excalidraw-laser-lab.png", "PNG ");
+      setStatus(savedMessage("PNG ", saved));
     } catch (error) {
-      setStatus(`导出 PNG 失败：${error.message || error}`);
+      const message = `导出 PNG 失败：${error.message || error}`;
+      setStatus(message);
+      void showAlert(message, { title: "导出失败", tone: "error" });
     }
   }
 
@@ -531,16 +551,33 @@ export function DrawPage({ onNavigate }) {
     try {
       const { scene } = lastScene ? { scene: lastScene } : await exportScene();
       const blob = new Blob([JSON.stringify(scene, null, 2)], { type: "application/json" });
-      downloadBlob(blob, "excalidraw-laser-lab.excalidraw.json");
-      setStatus("场景 JSON 已导出");
+      const saved = await exportFile(blob, "excalidraw-laser-lab.excalidraw.json", "场景 JSON ");
+      setStatus(savedMessage("场景 JSON ", saved));
     } catch (error) {
-      setStatus(`导出场景失败：${error.message || error}`);
+      const message = `导出场景失败：${error.message || error}`;
+      setStatus(message);
+      void showAlert(message, { title: "导出失败", tone: "error" });
+    }
+  }
+
+  // 预览结果里的 G-code / 场景下载：经鉴权请求取回文件，再统一保存（桌面端写入“下载”文件夹）
+  async function downloadFromUrl(url, fallbackName, label) {
+    try {
+      const response = await apiFetch(url);
+      if (!response.ok) throw new Error(`读取文件失败（HTTP ${response.status}）`);
+      const blob = await response.blob();
+      const saved = await exportFile(blob, fileNameFromUrl(url, fallbackName), label);
+      setStatus(savedMessage(label, saved));
+    } catch (error) {
+      const message = `下载${label}失败：${error.message || error}`;
+      setStatus(message);
+      void showAlert(message, { title: "下载失败", tone: "error" });
     }
   }
 
   return (
-    <main className="app-shell">
-      <section className="topbar">
+    <main className="app-shell ob-page ob-draw-page">
+      <section className="topbar ob-canvasbar">
         <div>
           <h1 style={{ fontSize: "18px", margin: 0 }}>Excalidraw 激光画板</h1>
           <p style={{ fontSize: "12px", margin: "2px 0 0", color: "var(--ink-dim, #94a3b8)" }}>{status}</p>
@@ -561,8 +598,15 @@ export function DrawPage({ onNavigate }) {
         </div>
       </section>
 
-      <section className="workspace">
-        <aside className="control-panel">
+      {/* 左侧大画布，右侧三张卡：材料与尺寸、设备、预览与发送（技术书 §9.5.5 B） */}
+      <section className="workspace ob-draw">
+        <section className="hud-card ob-card canvas-panel ob-board" aria-label="画布">
+          <Excalidraw excalidrawAPI={setExcalidrawAPI} theme="dark" langCode={EXCALIDRAW_LANG_CODE} />
+        </section>
+
+        <div className="ob-stack">
+        <section className="hud-card ob-card control-panel" aria-label="材料与尺寸">
+          <FoldHeader id="draw-material" title="材料与尺寸" k="MATERIAL" n={1} />
           <div className="material-library-label">
             <span>材料库</span>
             <div className="material-library-row">
@@ -684,6 +728,10 @@ export function DrawPage({ onNavigate }) {
             </label>
           ) : null}
 
+        </section>
+
+        <section className="hud-card ob-card control-panel" aria-label="设备">
+          <FoldHeader id="draw-device" title="设备" k="DEVICE" n={2} />
           <label>
             设备 host/IP
             <input
@@ -720,6 +768,10 @@ export function DrawPage({ onNavigate }) {
             保存配置
           </button>
 
+        </section>
+
+        <section className="hud-card ob-card control-panel result-panel" aria-label="预览与发送">
+          <FoldHeader id="draw-send" title="预览与发送" k="PREVIEW · SEND" n={3} />
           <div className="action-stack">
             <button type="button" className="primary-button" onClick={generatePreview} disabled={busy || !excalidrawAPI}>
               <UploadCloud size={18} />
@@ -732,7 +784,7 @@ export function DrawPage({ onNavigate }) {
             <button
               type="button"
               className="secondary-button"
-              style={{ borderColor: "var(--accent-cyan, #00e5ff)", color: "var(--accent-cyan, #00e5ff)" }}
+              style={{ borderColor: "var(--accent-cyan, #8b7bff)", color: "var(--accent-cyan, #8b7bff)" }}
               onClick={runFraming}
               disabled={busy || !hostReady || !jobSummary?.actual_width_mm}
               title="控制激光头沿工件外接边框空走一圈，用于对齐摆放材料"
@@ -760,28 +812,39 @@ export function DrawPage({ onNavigate }) {
             <RefreshCw size={16} />
             <span>{workflowId || "暂无 workflow"}</span>
           </div>
-        </aside>
 
-        <section className="canvas-panel">
-          <Excalidraw excalidrawAPI={setExcalidrawAPI} theme="dark" langCode={EXCALIDRAW_LANG_CODE} />
-        </section>
-
-        <aside className="result-panel">
           <JobSummaryCard summary={jobSummary} />
+          <FeedbackPanel workflowId={workflowId} origin={result?.result?.feedback_origin}
+            disabled={busy || ["sending", "running", "preparing", "awaiting_completion"].includes(result?.result?.status)}
+            onAdopt={(workflow) => {
+              setWorkflowId(workflow.workflow_id);
+              setResult({ success: true, result: workflow });
+              setConfirmOpen(false);
+              setRepeatSend((current) => applyPreviewFingerprintSuccess(current, workflow.draw_lab?.content_fingerprint || ""));
+              setStatus("调参预览已生成，尚未发送");
+            }} />
           <PreviewImage title="素材预览" url={web.material_preview_url || web.uploaded_image_url} />
           <PreviewImage title="路径预览" url={web.gcode_preview_url || web.image_preview_url} />
           <div className="link-list">
             {web.gcode_download_url && (
-              <a href={web.gcode_download_url} target="_blank" rel="noreferrer">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => downloadFromUrl(web.gcode_download_url, "laser-job.gcode", "G-code ")}
+              >
                 <Save size={16} />
                 下载 G-code
-              </a>
+              </button>
             )}
             {web.scene_download_url && (
-              <a href={web.scene_download_url} target="_blank" rel="noreferrer">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => downloadFromUrl(web.scene_download_url, "excalidraw-laser-lab.excalidraw.json", "场景 JSON ")}
+              >
                 <FileJson size={16} />
                 下载场景 JSON
-              </a>
+              </button>
             )}
           </div>
           <details className="diagnostics">
@@ -791,7 +854,8 @@ export function DrawPage({ onNavigate }) {
             </summary>
             <pre>{rawText || "等待预览结果..."}</pre>
           </details>
-        </aside>
+        </section>
+        </div>
       </section>
 
       {confirmOpen && (
@@ -923,7 +987,7 @@ function SendConfirmDialog({
           <Wifi size={17} />
           <span>设备：{host}:{telnetPort || "23"}</span>
         </div>
-        <label className="checkbox-row confirm-moved-ack" style={{ marginTop: "8px", color: "var(--accent-cyan, #00e5ff)" }}>
+        <label className="checkbox-row confirm-moved-ack" style={{ marginTop: "8px", color: "var(--accent-cyan, #8b7bff)" }}>
           <input
             type="checkbox"
             checked={offlineSd}
@@ -961,10 +1025,34 @@ function SendConfirmDialog({
 }
 
 function PreviewImage({ title, url }) {
+  // 连接电脑时 <img> 直链不带配对 token，改为经鉴权取回 blob 再显示
+  const remote = isRemoteMode();
+  const [blobUrl, setBlobUrl] = useState("");
+  useEffect(() => {
+    if (!remote || !url) {
+      setBlobUrl("");
+      return undefined;
+    }
+    let cancelled = false;
+    let created = "";
+    fetchPreviewBlobUrl(url).then((value) => {
+      created = value;
+      if (cancelled) {
+        if (value) URL.revokeObjectURL(value);
+      } else {
+        setBlobUrl(value);
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [remote, url]);
+  const src = remote ? blobUrl : (url ? cacheBust(resolveApiUrl(url)) : "");
   return (
     <div className="preview-box">
       <div className="preview-title">{title}</div>
-      {url ? <img src={cacheBust(resolveApiUrl(url))} alt={title} /> : <div className="preview-empty">暂无</div>}
+      {src ? <img src={src} alt={title} /> : <div className="preview-empty">暂无</div>}
     </div>
   );
 }
@@ -1000,15 +1088,16 @@ async function postJson(url, payload) {
   return data;
 }
 
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
+/** 从 `/preview?path=...` 下载地址取出文件名；取不到时用默认名 */
+function fileNameFromUrl(url, fallback) {
+  try {
+    const parsed = new URL(url, "http://localhost");
+    const path = parsed.searchParams.get("path") || parsed.pathname;
+    const name = path.split(/[\\/]/).pop();
+    return name && name.includes(".") ? name : fallback;
+  } catch (_error) {
+    return fallback;
+  }
 }
 
 function cacheBust(url) {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-mode-changes"
+description = "Enables the voice_mode_changes command without any pre-configured scope."
+commands.allow = ["voice_mode_changes"]
+
+[[permission]]
+identifier = "deny-voice-mode-changes"
+description = "Denies the voice_mode_changes command without any pre-configured scope."
+commands.deny = ["voice_mode_changes"]

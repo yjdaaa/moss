@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-home-backup-audit"
+description = "Enables the voice_home_backup_audit command without any pre-configured scope."
+commands.allow = ["voice_home_backup_audit"]
+
+[[permission]]
+identifier = "deny-voice-home-backup-audit"
+description = "Denies the voice_home_backup_audit command without any pre-configured scope."
+commands.deny = ["voice_home_backup_audit"]

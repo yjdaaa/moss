@@ -1,0 +1,286 @@
+{
+  "archive_sha256": "56ffcf3c454c1f14f7bc9887286cc8143e7e542dc632804e1c447d5f8d534eaf",
+  "review_status": "pending",
+  "limitations": [
+    "ORT source tar does not contain all recursive submodules or all pinned cmake/deps.txt archives",
+    "Rust/native transitive correspondence and license obligations require review; registry collection alone does not prove closure",
+    "Binary/source correspondence requires independent review"
+  ],
+  "reviewed_by": "",
+  "libraries": [
+    {
+      "license_file": "sherpa-LICENSE.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "sherpa-onnx-c-api",
+      "source_bytes": 11642707,
+      "source_sha256": "b0374cc56dbc186d442ae73d5de743bb092470b640c4c50ce7b029044c0c4fa8",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "sherpa.tar.gz",
+      "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "additional_licenses": [
+        {
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "file": "sherpa-LICENSE.txt",
+          "source_entry": "sherpa-onnx-1.13.8/LICENSE"
+        }
+      ],
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/archive/refs/tags/v1.13.8.tar.gz"
+    },
+    {
+      "license_file": "sherpa-LICENSE.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "sherpa-onnx-core",
+      "source_bytes": 11642707,
+      "source_sha256": "b0374cc56dbc186d442ae73d5de743bb092470b640c4c50ce7b029044c0c4fa8",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "sherpa.tar.gz",
+      "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "additional_licenses": [
+        {
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "file": "sherpa-LICENSE.txt",
+          "source_entry": "sherpa-onnx-1.13.8/LICENSE"
+        }
+      ],
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/archive/refs/tags/v1.13.8.tar.gz"
+    },
+    {
+      "license_file": "decoder-LICENSE.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "kaldi-decoder-core",
+      "source_bytes": 51199,
+      "source_sha256": "b9f34cfb4fd3b1344100eead79ef4d37aa15962274b9e3056de345021f76a1b0",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "decoder.tar.gz",
+      "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "additional_licenses": [
+        {
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "file": "decoder-LICENSE.txt",
+          "source_entry": "kaldi-decoder-0.3.0/LICENSE"
+        }
+      ],
+      "source_url": "https://github.com/k2-fsa/kaldi-decoder/archive/refs/tags/v0.3.0.tar.gz"
+    },
+    {
+      "license_file": "kaldifst-LICENSE.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "sherpa-onnx-kaldifst-core",
+      "source_bytes": 172147,
+      "source_sha256": "3f247b7e5a2409071202f5e2bc6200060f66728c0a3443c03923ad2723e040b3",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "kaldifst.tar.gz",
+      "license_sha256": "a682d6efd1ee5dee08a8e405c233c2c198ea70ae0718129daa83ab58cfe31c5d",
+      "additional_licenses": [
+        {
+          "sha256": "a682d6efd1ee5dee08a8e405c233c2c198ea70ae0718129daa83ab58cfe31c5d",
+          "file": "kaldifst-LICENSE.txt",
+          "source_entry": "kaldifst-1.8.0/LICENSE"
+        }
+      ],
+      "source_url": "https://github.com/k2-fsa/kaldifst/archive/refs/tags/v1.8.0.tar.gz"
+    },
+    {
+      "license_file": "openfst-COPYING.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "sherpa-onnx-fst",
+      "source_bytes": 1500835,
+      "source_sha256": "c3549940384cbe4fa9f18c2bcfb1bfbd0a80492fd1b0bfa27433cee395a6a199",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "openfst.tar.gz",
+      "license_sha256": "4300529197035fd3452350718a0b8cee984e9412c9932d7f35fcde849fc97a4b",
+      "additional_licenses": [
+        {
+          "sha256": "4300529197035fd3452350718a0b8cee984e9412c9932d7f35fcde849fc97a4b",
+          "file": "openfst-COPYING.txt",
+          "source_entry": "openfst-1.8.5-2026-04-10/COPYING"
+        }
+      ],
+      "source_url": "https://github.com/csukuangfj/openfst/archive/refs/tags/v1.8.5-2026-04-10.tar.gz"
+    },
+    {
+      "license_file": "openfst-COPYING.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "sherpa-onnx-fstfar",
+      "source_bytes": 1500835,
+      "source_sha256": "c3549940384cbe4fa9f18c2bcfb1bfbd0a80492fd1b0bfa27433cee395a6a199",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "openfst.tar.gz",
+      "license_sha256": "4300529197035fd3452350718a0b8cee984e9412c9932d7f35fcde849fc97a4b",
+      "additional_licenses": [
+        {
+          "sha256": "4300529197035fd3452350718a0b8cee984e9412c9932d7f35fcde849fc97a4b",
+          "file": "openfst-COPYING.txt",
+          "source_entry": "openfst-1.8.5-2026-04-10/COPYING"
+        }
+      ],
+      "source_url": "https://github.com/csukuangfj/openfst/archive/refs/tags/v1.8.5-2026-04-10.tar.gz"
+    },
+    {
+      "license_file": "fbank-LICENSE.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "kaldi-native-fbank-core",
+      "source_bytes": 71144,
+      "source_sha256": "9176cc66fc7ce1edf85cf355b06e320c57db6297df74277f575183468893cf61",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "fbank.tar.gz",
+      "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "additional_licenses": [
+        {
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "file": "fbank-LICENSE.txt",
+          "source_entry": "kaldi-native-fbank-1.22.3/LICENSE"
+        }
+      ],
+      "source_url": "https://github.com/csukuangfj/kaldi-native-fbank/archive/refs/tags/v1.22.3.tar.gz"
+    },
+    {
+      "license_file": "kissfft-COPYING.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "kissfft-float",
+      "source_bytes": 74252,
+      "source_sha256": "497103e664168ebe39580b757adbe616f6cf85a16572af581ca7bc42d0ab13fd",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "kissfft.zip",
+      "license_sha256": "a2840585f8411be8e6826a31ef15ae65c950bd74a2437a73b013398a934ad0c6",
+      "additional_licenses": [
+        {
+          "sha256": "a2840585f8411be8e6826a31ef15ae65c950bd74a2437a73b013398a934ad0c6",
+          "file": "kissfft-COPYING.txt",
+          "source_entry": "kissfft-febd4caeed32e33ad8b2e0bb5ea77542c40f18ec/COPYING"
+        }
+      ],
+      "source_url": "https://github.com/mborgerding/kissfft/archive/febd4caeed32e33ad8b2e0bb5ea77542c40f18ec.zip"
+    },
+    {
+      "license_file": "piper-LICENSE.md.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "piper_phonemize",
+      "source_bytes": 9805962,
+      "source_sha256": "d9cca4e2bdc7d6dd8dffb96a4668283dbd3f77a9c194a3e530c1e8eba9406a5d",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "piper.zip",
+      "license_sha256": "13746d509d74e55ea2265fbef204bb7cdbf84a8315b0207e988326cb54387028",
+      "additional_licenses": [
+        {
+          "sha256": "13746d509d74e55ea2265fbef204bb7cdbf84a8315b0207e988326cb54387028",
+          "file": "piper-LICENSE.md.txt",
+          "source_entry": "piper-phonemize-f3ff95afc03640bc1399e113e83361192a2fafb4/LICENSE.md"
+        },
+        {
+          "sha256": "c55648b02873556d6ab2de14938998101fda3a0f293337542af9196435def318",
+          "file": "piper-licenses_uni-algo_LICENSE.md.txt",
+          "source_entry": "piper-phonemize-f3ff95afc03640bc1399e113e83361192a2fafb4/licenses/uni-algo/LICENSE.md"
+        }
+      ],
+      "source_url": "https://github.com/csukuangfj/piper-phonemize/archive/f3ff95afc03640bc1399e113e83361192a2fafb4.zip"
+    },
+    {
+      "license_file": "espeak-COPYING.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "espeak-ng",
+      "source_bytes": 18011501,
+      "source_sha256": "e4e262cbe34f7fe21f91f1ba3397f2728e1f30eafbae7853f2b753a9ed13f0dd",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "espeak.zip",
+      "license_sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "additional_licenses": [
+        {
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+          "file": "espeak-COPYING.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING"
+        },
+        {
+          "sha256": "be029c50df83105a810e391778b6edcb522d6cb4b4e142332aca54437a499bf7",
+          "file": "espeak-COPYING.UCD.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING.UCD"
+        },
+        {
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+          "file": "espeak-src_ucd-tools_COPYING.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/src/ucd-tools/COPYING"
+        },
+        {
+          "sha256": "be029c50df83105a810e391778b6edcb522d6cb4b4e142332aca54437a499bf7",
+          "file": "espeak-src_ucd-tools_COPYING.UCD.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/src/ucd-tools/COPYING.UCD"
+        }
+      ],
+      "source_url": "https://github.com/csukuangfj/espeak-ng/archive/ed530aa113046142eb5115cf2fc9157854d0ffe1.zip"
+    },
+    {
+      "license_file": "espeak-COPYING.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "ucd",
+      "source_bytes": 18011501,
+      "source_sha256": "e4e262cbe34f7fe21f91f1ba3397f2728e1f30eafbae7853f2b753a9ed13f0dd",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "espeak.zip",
+      "license_sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "additional_licenses": [
+        {
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+          "file": "espeak-COPYING.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING"
+        },
+        {
+          "sha256": "be029c50df83105a810e391778b6edcb522d6cb4b4e142332aca54437a499bf7",
+          "file": "espeak-COPYING.UCD.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING.UCD"
+        },
+        {
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+          "file": "espeak-src_ucd-tools_COPYING.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/src/ucd-tools/COPYING"
+        },
+        {
+          "sha256": "be029c50df83105a810e391778b6edcb522d6cb4b4e142332aca54437a499bf7",
+          "file": "espeak-src_ucd-tools_COPYING.UCD.txt",
+          "source_entry": "espeak-ng-ed530aa113046142eb5115cf2fc9157854d0ffe1/src/ucd-tools/COPYING.UCD"
+        }
+      ],
+      "source_url": "https://github.com/csukuangfj/espeak-ng/archive/ed530aa113046142eb5115cf2fc9157854d0ffe1.zip"
+    },
+    {
+      "license_file": "sentencepiece-LICENSE.txt",
+      "hash_basis": "pinned_upstream_or_independently_measured_archive",
+      "name": "ssentencepiece_core",
+      "source_bytes": 355335,
+      "source_sha256": "1748a822060a35baa9f6609f84efc8eb54dc0e74b9ece3d82367b7119fdc75af",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "sentencepiece.tar.gz",
+      "license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "additional_licenses": [
+        {
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "file": "sentencepiece-LICENSE.txt",
+          "source_entry": "simple-sentencepiece-0.7/LICENSE"
+        }
+      ],
+      "source_url": "https://github.com/pkufool/simple-sentencepiece/archive/refs/tags/v0.7.tar.gz"
+    },
+    {
+      "license_file": "ort-LICENSE.txt",
+      "hash_basis": "download_measured_unreviewed",
+      "name": "onnxruntime",
+      "source_bytes": 278677335,
+      "source_sha256": "a5003dfd85d66a4d45bd2757c7f813f9e835142e9a936ac04877c788d6afe938",
+      "correspondence": "upstream_build_candidate_pending_review",
+      "source_file": "ort.tar.gz",
+      "license_sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+      "additional_licenses": [
+        {
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+          "file": "ort-LICENSE.txt",
+          "source_entry": "onnxruntime-1.28.2/LICENSE"
+        },
+        {
+          "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2",
+          "file": "ort-ThirdPartyNotices.txt.txt",
+          "source_entry": "onnxruntime-1.28.2/ThirdPartyNotices.txt"
+        }
+      ],
+      "source_url": "https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.28.2.tar.gz"
+    }
+  ]
+}

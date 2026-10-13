@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MOSS 语音中心原型</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<style>
+/* 布局：沿用 MOSS 现有 HUD 视觉并整体提亮——固定科幻背景层（红/青/金光场 + 透视网格 + 扫描线 + 角标）→ 顶栏 → 左侧语音中心 + 右侧测试场景；审批卡与发送覆盖层为全局浮层。刻意单一深色主题。 */
+:root{
+  color-scheme:dark;
+  --bg-0:#050813; --bg-1:#0a1124; --bg-2:#111c36;
+  --panel:rgba(16,26,50,.86); --panel-strong:#13203d; --inset:rgba(6,12,28,.85);
+  --ink:#f6f9ff; --ink-dim:#c4d3ea; --ink-faint:#8aa0c0;
+  --laser:#00e5ff; --laser-2:#7ef9ff; --laser-soft:rgba(0,229,255,.18); --laser-glow:rgba(0,229,255,.55);
+  --moss-red:#ff2a44; --red-2:#ff6b7d; --red-soft:rgba(255,42,68,.2);
+  --gold:#ffb21a; --gold-soft:rgba(255,178,26,.18);
+  --green:#00f59b; --green-soft:rgba(0,245,155,.18);
+  --line:rgba(0,229,255,.38); --line-bright:rgba(0,229,255,.75);
+  --f-display:"Space Grotesk","Noto Sans SC","Segoe UI",system-ui,sans-serif;
+  --f-body:"Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono","Cascadia Code",Consolas,monospace;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{background:var(--bg-0);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.55}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--laser-2);outline-offset:2px}
+
+/* ---------- 背景层 ---------- */
+.bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.bg-atmo{position:absolute;inset:0;background:
+  radial-gradient(900px 620px at 88% 8%,rgba(255,42,68,.34),transparent 65%),
+  radial-gradient(1000px 700px at 8% 95%,rgba(0,229,255,.30),transparent 62%),
+  radial-gradient(700px 500px at 55% 45%,rgba(255,178,26,.10),transparent 70%),
+  linear-gradient(180deg,#071026 0%,#050813 60%,#03050c 100%)}
+.bg-grid{position:absolute;inset:-2px;background-image:linear-gradient(rgba(0,229,255,.22) 1px,transparent 1px),linear-gradient(90deg,rgba(0,229,255,.22) 1px,transparent 1px);background-size:56px 56px;-webkit-mask-image:radial-gradient(ellipse 100% 80% at 50% 25%,#000 35%,transparent 85%);mask-image:radial-gradient(ellipse 100% 80% at 50% 25%,#000 35%,transparent 85%)}
+.bg-horizon{position:absolute;left:-10%;right:-10%;bottom:-30%;height:70%;background-image:linear-gradient(rgba(0,229,255,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(0,229,255,.35) 1px,transparent 1px);background-size:80px 80px;transform:perspective(500px) rotateX(62deg);-webkit-mask-image:linear-gradient(to top,#000 10%,transparent 85%);mask-image:linear-gradient(to top,#000 10%,transparent 85%)}
+.bg-scan{position:absolute;left:0;right:0;top:0;height:3px;background:linear-gradient(90deg,transparent,rgba(0,229,255,.95),transparent);filter:drop-shadow(0 0 14px rgba(0,229,255,.95));animation:scan 7s linear infinite}
+@keyframes scan{from{transform:translateY(0)}to{transform:translateY(100vh)}}
+.bg-core{position:absolute;right:6%;top:9%;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(255,90,110,.55) 0%,rgba(255,42,68,.25) 30%,transparent 68%);filter:blur(4px);animation:pulse 4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.6;transform:scale(1.08)}}
+.hud{position:absolute;font-family:var(--f-mono);font-size:10.5px;letter-spacing:1.5px;color:rgba(0,229,255,.7);padding:8px 12px;border:1px solid rgba(0,229,255,.35);background:rgba(0,229,255,.05)}
+.hud b{display:block;color:var(--laser-2);font-weight:500}
+@media (max-width:1700px){.hud{display:none}}
+.hud.tl{left:16px;bottom:16px} .hud.tr{right:16px;bottom:16px;text-align:right;color:rgba(255,107,125,.8);border-color:rgba(255,42,68,.4);background:rgba(255,42,68,.06)}
+.hud.tr b{color:var(--red-2)}
+.page{position:relative;z-index:1}
+
+.proto-bar{background:linear-gradient(90deg,rgba(255,178,26,.25),rgba(255,178,26,.12));border-bottom:1px solid rgba(255,178,26,.55);color:#ffd27a;font-size:12.5px;font-weight:500;padding-block:7px;padding-inline:16px;text-align:center}
+
+/* ---------- 顶栏 ---------- */
+.nav{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;padding-block:10px;padding-inline:16px;background:linear-gradient(180deg,rgba(10,18,40,.96),rgba(6,10,24,.92));border-bottom:1px solid var(--line-bright);box-shadow:0 0 28px rgba(0,229,255,.18),0 6px 24px rgba(0,0,0,.6);backdrop-filter:blur(14px)}
+.brand{display:flex;align-items:center;gap:12px}
+.eye{width:20px;height:20px;border-radius:50%;background:radial-gradient(circle at 40% 38%,#fff2f4,#ff4b62 38%,#8a0016 72%);box-shadow:0 0 18px 3px rgba(255,42,68,.85);animation:pulse 2.6s ease-in-out infinite}
+.brand b{font-family:var(--f-display);letter-spacing:2px;font-size:17px}
+.brand small{display:block;font-family:var(--f-mono);font-size:9.5px;color:var(--ink-faint);letter-spacing:1.2px}
+.brand em{font-style:normal;font-size:11.5px;color:var(--laser);letter-spacing:2.5px;margin-left:6px;font-weight:700;text-shadow:0 0 10px var(--laser-glow)}
+.tabs{display:flex;flex-wrap:wrap;gap:8px}
+.tab{display:flex;align-items:center;gap:7px;padding:8px 15px;border-radius:7px;border:1px solid rgba(0,229,255,.28);background:rgba(0,229,255,.06);color:var(--ink-dim);font-size:13.5px;font-weight:500;transition:all .2s}
+.tab:hover{color:var(--ink);border-color:var(--line-bright);background:rgba(0,229,255,.14)}
+.tab .bd{font-family:var(--f-mono);font-size:9.5px;padding:1px 5px;border-radius:3px;background:rgba(0,229,255,.14);color:var(--laser)}
+.tab.active{color:#031018;border-color:var(--laser-2);background:linear-gradient(135deg,#5ff4ff,#00c3e0);font-weight:700;box-shadow:0 0 22px rgba(0,229,255,.55),inset 0 1px 0 rgba(255,255,255,.6)}
+.tab.active .bd{background:rgba(3,16,24,.2);color:#031018}
+.tab.new::after{content:"新";font-size:10px;color:#fff;background:var(--moss-red);border-radius:3px;padding:0 4px;margin-left:2px;box-shadow:0 0 8px var(--moss-red)}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--f-mono);font-size:11.5px;font-weight:500;padding:6px 11px;border-radius:7px;border:1px solid;letter-spacing:.3px;background:transparent}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor,0 0 2px currentColor}
+.p-ok{color:var(--green);border-color:rgba(0,245,155,.6);background:var(--green-soft);box-shadow:0 0 14px rgba(0,245,155,.2)}
+.p-bad{color:var(--red-2);border-color:rgba(255,42,68,.7);background:var(--red-soft);box-shadow:0 0 14px rgba(255,42,68,.25)}
+.p-warn{color:var(--gold);border-color:rgba(255,178,26,.65);background:var(--gold-soft);box-shadow:0 0 14px rgba(255,178,26,.2)}
+.p-info{color:var(--laser-2);border-color:var(--line-bright);background:var(--laser-soft);box-shadow:0 0 14px rgba(0,229,255,.22)}
+.p-off{color:var(--ink-dim);border-color:rgba(196,211,234,.35);background:rgba(196,211,234,.08)}
+.approve-btn{position:relative}
+.approve-btn .count{position:absolute;top:-8px;right:-8px;min-width:19px;height:19px;border-radius:10px;background:var(--moss-red);color:#fff;font-size:11px;display:grid;place-items:center;padding:0 4px;box-shadow:0 0 12px var(--moss-red);animation:pulse 1.4s ease-in-out infinite}
+
+/* ---------- 版面 ---------- */
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:20px;max-width:1440px;margin:0 auto;padding-block:22px 64px;padding-inline:16px}
+@media (max-width:1080px){.layout{grid-template-columns:minmax(0,1fr)}}
+.page-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px;margin-bottom:16px}
+h1{font-family:var(--f-display);font-size:26px;margin:0;letter-spacing:1px;text-shadow:0 0 18px rgba(0,229,255,.45)}
+h1 small{display:block;font-family:var(--f-mono);font-size:11px;color:var(--laser);letter-spacing:3px;font-weight:400;text-shadow:none;opacity:.85}
+h2{font-size:15.5px;margin:0;display:flex;align-items:center;gap:8px}
+h2::before{content:"";width:4px;height:15px;border-radius:2px;background:var(--laser);box-shadow:0 0 8px var(--laser)}
+h2 .k{font-family:var(--f-mono);font-size:10.5px;color:var(--laser);opacity:.75;letter-spacing:1.5px;font-weight:400}
+.card{position:relative;background:linear-gradient(180deg,rgba(22,36,68,.9),rgba(12,20,42,.88));border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0;display:flex;flex-direction:column;gap:12px;box-shadow:0 0 0 1px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.45),inset 0 1px 0 rgba(126,249,255,.12)}
+.card::before,.card::after{content:"";position:absolute;width:14px;height:14px;border:2px solid var(--laser);pointer-events:none;filter:drop-shadow(0 0 4px var(--laser))}
+.card::before{top:-1px;left:-1px;border-right:0;border-bottom:0;border-top-left-radius:10px}
+.card::after{bottom:-1px;right:-1px;border-left:0;border-top:0;border-bottom-right-radius:10px}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.muted{color:var(--ink-dim)}
+.faint{color:var(--ink-faint);font-size:12.5px}
+.mono{font-family:var(--f-mono);font-size:12px}
+.seg{display:inline-flex;border:1px solid var(--line-bright);border-radius:8px;overflow:hidden;background:rgba(0,229,255,.06);box-shadow:0 0 14px rgba(0,229,255,.15)}
+.seg button{border:0;background:transparent;padding:10px 20px;color:var(--ink-dim);font-weight:500}
+.seg button:hover{color:var(--ink);background:rgba(0,229,255,.1)}
+.seg button[aria-pressed="true"]{background:linear-gradient(135deg,#5ff4ff,#00c3e0);color:#031018;font-weight:700;box-shadow:inset 0 1px 0 rgba(255,255,255,.6)}
+.hint{display:flex;gap:8px;align-items:flex-start;font-size:13px;font-weight:500;padding:10px 12px;border-radius:8px;border:1px solid}
+.hint.warn{color:#ffd27a;border-color:rgba(255,178,26,.6);background:var(--gold-soft)}
+.hint.ok{color:#5dffc0;border-color:rgba(0,245,155,.55);background:var(--green-soft)}
+.hint.bad{color:var(--red-2);border-color:rgba(255,42,68,.65);background:var(--red-soft)}
+.stat{position:relative;background:var(--inset);border:1px solid rgba(0,229,255,.3);border-radius:9px;padding:13px;display:flex;flex-direction:column;gap:7px;min-width:0;box-shadow:inset 0 0 24px rgba(0,229,255,.06)}
+.stat .t{font-size:11.5px;color:var(--laser);font-family:var(--f-mono);letter-spacing:1.5px}
+.stat .v{display:flex;align-items:center;gap:8px;font-weight:700}
+.stat .sub{font-size:12.5px;color:var(--ink-dim);overflow-wrap:anywhere}
+.btns{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.btn{border:1px solid var(--line-bright);background:linear-gradient(180deg,rgba(0,229,255,.24),rgba(0,229,255,.12));color:var(--laser-2);border-radius:7px;padding:7px 14px;font-size:13px;font-weight:500;box-shadow:0 0 12px rgba(0,229,255,.18),inset 0 1px 0 rgba(126,249,255,.25);transition:all .18s}
+.btn:hover{background:linear-gradient(180deg,rgba(0,229,255,.38),rgba(0,229,255,.2));color:#fff;box-shadow:0 0 20px rgba(0,229,255,.45);transform:translateY(-1px)}
+.btn[disabled]{opacity:.38;cursor:not-allowed;transform:none;box-shadow:none}
+.btn.ghost{border-color:rgba(196,211,234,.45);background:rgba(196,211,234,.1);color:var(--ink);box-shadow:none}
+.btn.ghost:hover{border-color:var(--line-bright);background:rgba(0,229,255,.16)}
+.btn.danger{border-color:rgba(255,90,110,.85);background:linear-gradient(180deg,rgba(255,42,68,.4),rgba(255,42,68,.2));color:#fff;box-shadow:0 0 16px rgba(255,42,68,.35)}
+.btn.danger:hover{background:linear-gradient(180deg,rgba(255,42,68,.6),rgba(255,42,68,.35));box-shadow:0 0 24px rgba(255,42,68,.6)}
+.btn.primary{background:linear-gradient(135deg,#5ff4ff,#00b8d6);color:#031018;border-color:var(--laser-2);font-weight:700;box-shadow:0 0 20px rgba(0,229,255,.5),inset 0 1px 0 rgba(255,255,255,.6)}
+.btn.primary:hover{background:linear-gradient(135deg,#9ffbff,#35e0ff);color:#031018}
+.btn.fire{background:linear-gradient(135deg,#3dffb8,#00b874);color:#02140c;border-color:#7dffd0;font-weight:800;letter-spacing:.04em;box-shadow:0 0 22px rgba(0,245,155,.55),inset 0 1px 0 rgba(255,255,255,.6)}
+.btn.fire:not([disabled]){animation:fire 2.2s ease-in-out infinite}
+.btn.fire:hover{background:linear-gradient(135deg,#7dffd0,#00d68a);color:#02140c}
+@keyframes fire{50%{box-shadow:0 0 34px rgba(0,245,155,.85),inset 0 1px 0 rgba(255,255,255,.6)}}
+.mtabs{display:flex;gap:8px;flex-wrap:wrap}
+.mtabs button{border:1px solid rgba(0,229,255,.35);background:rgba(0,229,255,.07);color:var(--ink-dim);border-radius:7px;padding:7px 14px;font-size:13px;display:flex;gap:7px;align-items:center}
+.mtabs button:hover{color:var(--ink);border-color:var(--line-bright)}
+.mtabs button[aria-selected="true"]{border-color:var(--laser-2);color:#fff;background:linear-gradient(180deg,rgba(0,229,255,.35),rgba(0,229,255,.16));box-shadow:0 0 16px rgba(0,229,255,.35)}
+.mtabs .st{width:8px;height:8px;border-radius:50%;background:var(--ink-faint)}
+.mtabs .st.ok{background:var(--green);box-shadow:0 0 6px var(--green)} .mtabs .st.bad{background:var(--moss-red);box-shadow:0 0 6px var(--moss-red)}
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 14px}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.field label{font-size:12.5px;color:var(--ink-dim);font-weight:500}
+.field input{background:rgba(3,8,20,.9);border:1px solid rgba(0,229,255,.4);border-radius:7px;padding:9px 11px;color:var(--ink);font-family:var(--f-mono);font-size:12.5px;min-width:0;width:100%;box-shadow:inset 0 0 12px rgba(0,229,255,.06)}
+.field input:focus{border-color:var(--laser-2);box-shadow:0 0 0 3px rgba(0,229,255,.18)}
+.field input::placeholder{color:#7d93b3}
+.final{font-family:var(--f-mono);font-size:12px;color:var(--ink-dim);overflow-wrap:anywhere;padding:8px 10px;border-radius:6px;background:rgba(0,229,255,.06);border:1px dashed rgba(0,229,255,.35)}
+.final b{color:var(--laser-2);font-weight:500}
+.result{font-size:13px;min-height:20px;font-weight:500}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:9px 6px;border-bottom:1px solid rgba(0,229,255,.14);white-space:nowrap}
+th{color:var(--laser);font-weight:500;font-family:var(--f-mono);font-size:11px;letter-spacing:1px;opacity:.85}
+.tbl{overflow-x:auto}
+.tag{font-family:var(--f-mono);font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid;font-weight:500}
+.log{background:rgba(1,4,10,.92);border:1px solid rgba(0,229,255,.28);border-radius:8px;padding:10px 12px;font-family:var(--f-mono);font-size:12px;color:#b9cbe4;max-height:190px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;box-shadow:inset 0 0 20px rgba(0,0,0,.6)}
+.log .e{color:var(--red-2)} .log .w{color:var(--gold)} .log .s{color:#4dffbf}
+
+/* ---------- 测试场景 ---------- */
+.side{display:flex;flex-direction:column;gap:12px;align-self:start;position:sticky;top:84px}
+@media (max-width:1080px){.side{position:static}}
+.case{border:1px solid rgba(0,229,255,.3);border-radius:9px;padding:11px 13px;background:var(--inset);display:flex;flex-direction:column;gap:6px;transition:border-color .2s}
+.case:hover{border-color:var(--line-bright)}
+.case-h{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.case-h b{font-size:13.5px}
+.case-id{font-family:var(--f-mono);font-size:11px;color:var(--laser);opacity:.8}
+.case p{margin:0;font-size:12.5px;color:var(--ink-dim)}
+.case .exp{color:var(--ink-faint)}
+.case .exp::before{content:"预期：";color:var(--laser-2);font-weight:500}
+.case.done{border-color:rgba(0,245,155,.65);box-shadow:0 0 14px rgba(0,245,155,.15)}
+.case.done .case-id::after{content:" · 已演示";color:var(--green)}
+
+/* ---------- 浮层 ---------- */
+.overlay{position:fixed;inset:0;z-index:60;background:rgba(2,4,12,.78);backdrop-filter:blur(6px);display:grid;place-items:center;padding:16px}
+.modal{width:min(660px,100%);max-height:calc(100% - 32px);overflow:auto;background:linear-gradient(180deg,#1a1f3a,#10162c);border:1.5px solid rgba(255,70,95,.85);border-radius:12px;box-shadow:0 0 50px rgba(255,42,68,.35),0 24px 70px rgba(0,0,0,.7);display:flex;flex-direction:column}
+.modal.info{border-color:var(--line-bright);box-shadow:0 0 50px rgba(0,229,255,.3),0 24px 70px rgba(0,0,0,.7)}
+.m-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid rgba(255,255,255,.12);background:linear-gradient(90deg,rgba(255,42,68,.22),transparent)}
+.modal.info .m-head{background:linear-gradient(90deg,rgba(0,229,255,.2),transparent)}
+.m-head h3{margin:0;font-size:17px;display:flex;align-items:center;gap:8px}
+.m-body{padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.m-foot{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px;padding:14px 18px;border-top:1px solid rgba(255,255,255,.12)}
+.ap-grid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px}
+@media (max-width:560px){.ap-grid{grid-template-columns:minmax(0,1fr)}}
+.preview{background:#f3e3c6;border-radius:7px;aspect-ratio:1;max-width:100%;display:grid;place-items:center;border:2px solid rgba(255,178,26,.6);box-shadow:0 0 18px rgba(255,178,26,.25)}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 14px;font-size:13.5px}
+.kv dt{color:var(--ink-faint)} .kv dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;color:var(--ink)}
+.ring{display:flex;align-items:center;gap:10px;font-family:var(--f-mono);font-size:12.5px;color:var(--ink-dim)}
+.ring #apLeft{color:var(--red-2);font-weight:500;min-width:48px}
+.bar{flex:1;height:6px;border-radius:3px;background:rgba(255,255,255,.1);overflow:hidden}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,#ff2a44,#ff8a5c);box-shadow:0 0 10px var(--moss-red);transition:width 1s linear}
+.check{display:flex;gap:9px;align-items:flex-start;font-size:13.5px;color:var(--ink);padding:10px 12px;border:1px dashed rgba(255,178,26,.6);border-radius:8px;background:rgba(255,178,26,.08)}
+.check input{margin-top:3px;width:16px;height:16px;accent-color:var(--green)}
+.steps{display:flex;gap:6px}
+.steps span{flex:1;text-align:center;font-size:12px;font-weight:500;padding:7px 4px;border-radius:6px;background:rgba(255,255,255,.06);color:var(--ink-faint);border:1px solid rgba(255,255,255,.08)}
+.steps span.on{background:var(--laser-soft);color:var(--laser-2);border-color:var(--line-bright);box-shadow:0 0 12px rgba(0,229,255,.3)}
+.steps span.ok{background:var(--green-soft);color:var(--green);border-color:rgba(0,245,155,.5)}
+.steps span.err{background:var(--red-soft);color:var(--red-2);border-color:rgba(255,42,68,.6)}
+.prog{height:10px;border-radius:5px;background:rgba(255,255,255,.08);overflow:hidden;border:1px solid rgba(0,229,255,.25)}
+.prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,#00b8d6,#7ef9ff);box-shadow:0 0 12px var(--laser);transition:width .3s}
+.placeholder{display:grid;place-items:center;min-height:300px;color:var(--ink-faint);text-align:center}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:80;background:#13203d;border:1px solid var(--line-bright);box-shadow:0 0 24px rgba(0,229,255,.35);border-radius:8px;padding:10px 16px;font-size:13.5px;max-width:calc(100% - 32px)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head><body>
+
+<div class="bg" aria-hidden="true"><div class="bg-atmo"></div><div class="bg-grid"></div><div class="bg-horizon"></div><div class="bg-core"></div><div class="bg-scan"></div>
+  <div class="hud tl"><b>UEG · 550W</b>QUANTUM CORE // ONLINE</div><div class="hud tr"><b>VOICE LINK</b>STRICT MODE // ARMED</div></div>
+<div class="page">
+<div class="proto-bar">交互原型 · 全部为演示数据，不连接后端与设备 · 对应技术书 r5（§9.4 语音中心、§5.3 审批）</div>
+
+<header class="nav">
+  <div class="brand">
+    <div class="eye" aria-hidden="true"></div>
+    <div><b>MOSS</b><em>LASER FORGE</em><small>550W · QUANTUM INDUSTRIAL COMMAND</small></div>
+  </div>
+  <nav class="tabs" aria-label="页面">
+    <button class="tab" data-page="home">雕刻工作台 <span class="bd">HOST</span></button>
+    <button class="tab" data-page="lab">材料实验室 <span class="bd">LAB</span></button>
+    <button class="tab" data-page="draw">创作画板 <span class="bd">CAD</span></button>
+    <button class="tab new active" data-page="voice">语音中心 <span class="bd">VOICE</span></button>
+  </nav>
+  <div class="tools">
+    <button class="pill p-off approve-btn" id="navApprove" title="待审批的加工请求">审批 <span class="count" id="navApproveCount" hidden>0</span></button>
+    <span class="pill p-ok" id="navHw"><span class="dot"></span>硬件 ONLINE</span>
+    <span class="pill p-ok" id="navXz"><span class="dot"></span>小智 · 自建 · 已连接</span>
+  </div>
+</header>
+
+<div class="layout">
+  <main id="main">
+    <!-- 语音中心 -->
+    <section id="page-voice">
+      <div class="page-head">
+        <h1>语音中心<small>VOICE LINK CONTROL</small></h1>
+        <div class="faint">最后刷新 <span class="mono" id="refreshAt">--:--:--</span></div>
+      </div>
+
+      <div class="grid" style="gap:14px">
+        <div class="card">
+          <h2>语音链路 <span class="k">MODE</span></h2>
+          <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center">
+            <div class="seg" role="group" aria-label="语音链路模式">
+              <button id="modeOfficial" aria-pressed="false">官方小智</button>
+              <button id="modeSelf" aria-pressed="true">自建服务端</button>
+            </div>
+            <span class="faint" id="modeDesc">同一时间只启用一条链路。自建模式强制开启严格模式：开始加工必须在本机审批。</span>
+          </div>
+          <div class="hint ok" id="otaHint">✓ 设备已经连到自建服务端（接入点检测到 1 个设备会话）。</div>
+        </div>
+
+        <div class="grid g4">
+          <div class="stat"><span class="t">SERVER</span><div class="v" id="svState"><span class="pill p-ok"><span class="dot"></span>运行中</span></div><span class="sub" id="svSub">由 MOSS 启动 · 已运行 1 小时 12 分</span>
+            <div class="btns"><button class="btn ghost" id="svStart" disabled>启动</button><button class="btn ghost" id="svStop">停止</button><button class="btn ghost" id="svRestart">重启</button></div></div>
+          <div class="stat"><span class="t">MCP 接入点</span><div class="v" id="epState"><span class="pill p-ok"><span class="dot"></span>正常</span></div><span class="sub mono" id="epSub">:8004 · 工具连接 1 · 设备会话 1</span></div>
+          <div class="stat"><span class="t">设备</span><div class="v" id="devState"><span class="pill p-ok"><span class="dot"></span>在线</span></div><span class="sub">实战派 ESP32-S3（依据接入点设备会话数）</span></div>
+          <div class="stat"><span class="t">严格模式</span><div class="v"><span class="pill p-info" id="strictPill"><span class="dot"></span>已开启</span></div><span class="sub" id="strictSub">自建模式下不可关闭</span></div>
+        </div>
+
+        <div class="card">
+          <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:center">
+            <h2>模型配置 <span class="k">ASR · LLM · TTS</span></h2>
+            <span class="faint">密钥只写入服务端的 data/.config.yaml，MOSS 不保存</span>
+          </div>
+          <div class="mtabs" role="tablist">
+            <button role="tab" aria-selected="true" data-m="llm"><span class="st ok" id="st-llm"></span>大模型</button>
+            <button role="tab" aria-selected="false" data-m="asr"><span class="st ok" id="st-asr"></span>语音识别</button>
+            <button role="tab" aria-selected="false" data-m="tts"><span class="st" id="st-tts"></span>语音合成</button>
+          </div>
+          <div class="form" id="mForm"></div>
+          <div class="final" id="mFinal"></div>
+          <div class="btns">
+            <button class="btn" id="mTest">测试连接</button>
+            <button class="btn ghost" id="mSave">保存到服务端配置</button>
+            <span class="result" id="mResult"></span>
+          </div>
+        </div>
+
+        <div class="grid g2">
+          <div class="card">
+            <h2>审批记录 <span class="k">APPROVALS</span></h2>
+            <div class="tbl"><table>
+              <thead><tr><th>时间</th><th>内容</th><th>来源</th><th>状态</th></tr></thead>
+              <tbody id="apLog"></tbody>
+            </table></div>
+          </div>
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2>服务端日志 <span class="k">已脱敏</span></h2><span class="faint mono">logs/xiaozhi-server.log</span></div>
+            <div class="log" id="log"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-other" hidden>
+      <div class="card placeholder"><div><h2 style="justify-content:center">此页面保持现状</h2><p class="faint">原型只演示新增的语音中心、导航状态与全局审批卡。<br>审批卡在任何页面都会弹出。</p></div></div>
+    </section>
+  </main>
+
+  <aside class="side">
+    <div class="card">
+      <h2>测试场景 <span class="k">TEST CASES</span></h2>
+      <p class="faint" style="margin:0">点“运行”按步骤演示，核对界面是否符合预期。</p>
+      <div id="cases" style="display:flex;flex-direction:column;gap:8px"></div>
+      <button class="btn ghost" id="resetAll">重置演示</button>
+    </div>
+  </aside>
+</div>
+
+</div>
+
+<!-- 审批卡 -->
+<div class="overlay" id="apOverlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="apTitle">
+    <div class="m-head"><h3 id="apTitle"><span style="color:var(--moss-red)">●</span> 小智请求开始加工</h3><span class="tag" style="color:var(--moss-red);border-color:rgba(255,42,68,.4)">R3 · 运动与出光</span></div>
+    <div class="m-body">
+      <div class="ap-grid">
+        <div class="preview" aria-label="刀路预览">
+          <svg viewBox="0 0 120 120" width="100%" role="img"><rect x="8" y="8" width="104" height="104" fill="none" stroke="#8a6a3a" stroke-dasharray="3 3"/><text x="60" y="74" text-anchor="middle" font-size="34" font-family="Noto Sans SC, sans-serif" font-weight="700" fill="#3b2412">你好</text></svg>
+        </div>
+        <dl class="kv">
+          <dt>内容</dt><dd>文字“你好”（光栅雕刻）</dd>
+          <dt>材料</dt><dd>椴木板 · 3 mm</dd>
+          <dt>参数</dt><dd class="mono">功率 300/1000（30%）· 1500 mm/min · 1 遍</dd>
+          <dt>尺寸 / 时长</dt><dd>40 × 20 mm · 约 4 分钟</dd>
+          <dt>目标设备</dt><dd>网络 · Telnet · 已配置的激光机</dd>
+          <dt>来源</dt><dd>小智语音（MCP 接入点）· 会话 xz-…7f2</dd>
+          <dt>摘要</dt><dd class="mono" id="apDigest">sha256 a3f9…c41e</dd>
+        </dl>
+      </div>
+      <div class="ring"><span id="apLeft">120 s</span><div class="bar"><i id="apBar" style="width:100%"></i></div><span>过期后需重新发起</span></div>
+      <label class="check"><input type="checkbox" id="apCheck"> 我在机器旁，材料已放好、原点已确认，排风已开启</label>
+      <div class="hint bad" id="apErr" hidden></div>
+    </div>
+    <div class="m-foot">
+      <button class="btn ghost" id="apLater">稍后处理</button>
+      <button class="btn danger" id="apReject">拒绝</button>
+      <button class="btn fire" id="apApprove" disabled>批准并开始</button>
+    </div>
+  </div>
+</div>
+
+<!-- 发送覆盖层（沿用现有 STAGE_MAP 四步） -->
+<div class="overlay" id="sendOverlay" hidden>
+  <div class="modal info" role="dialog" aria-modal="true" aria-labelledby="sdTitle">
+    <div class="m-head"><h3 id="sdTitle">正在向设备发送</h3><span class="tag mono" style="color:var(--laser);border-color:var(--line)">Approval 授权</span></div>
+    <div class="m-body">
+      <div class="steps"><span id="s0">等待</span><span id="s1">准备</span><span id="s2">发送中</span><span id="s3">完成</span></div>
+      <div class="prog"><i id="sdProg"></i></div>
+      <div class="mono muted" id="sdText">0 / 1240 行 · phase: streaming</div>
+      <div class="hint warn" id="sdHint" hidden></div>
+    </div>
+    <div class="m-foot">
+      <button class="btn ghost" id="sdCancel">取消后续发送</button>
+      <button class="btn danger" id="sdEstop">■ 急停 0x18</button>
+      <button class="btn" id="sdClose" hidden>关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 通用确认框 -->
+<div class="overlay" id="cfOverlay" hidden>
+  <div class="modal info" role="dialog" aria-modal="true" aria-labelledby="cfTitle">
+    <div class="m-head"><h3 id="cfTitle">切换语音链路</h3></div>
+    <div class="m-body" id="cfBody"></div>
+    <div class="m-foot"><button class="btn ghost" id="cfNo">取消</button><button class="btn primary" id="cfYes">确认切换</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const S = { mode: "self", server: "running", endpoint: true, device: true, approvals: [], pending: null, timer: null, sendTimer: null, mTab: "llm", tested: { llm: true, asr: true, tts: false } };
+
+  // ---------- 通用 ----------
+  let toastT;
+  function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2600); }
+  const now = () => new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  function log(text, cls = "") {
+    const el = $("log"); const line = document.createElement("div");
+    if (cls) line.className = cls; line.textContent = `${now()} ${text}`; el.appendChild(line); el.scrollTop = el.scrollHeight;
+  }
+  function pill(cls, text) { return `<span class="pill ${cls}"><span class="dot"></span>${text}</span>`; }
+
+  // ---------- 页面切换 ----------
+  document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === b));
+    const v = b.dataset.page === "voice"; $("page-voice").hidden = !v; $("page-other").hidden = v;
+  }));
+
+  // ---------- 状态渲染 ----------
+  function render() {
+    $("refreshAt").textContent = now();
+    $("modeOfficial").setAttribute("aria-pressed", S.mode === "official");
+    $("modeSelf").setAttribute("aria-pressed", S.mode === "self");
+    const self = S.mode === "self";
+    // 服务端
+    const sv = S.server;
+    $("svState").innerHTML = sv === "running" ? pill("p-ok", "运行中") : sv === "crashed" ? pill("p-bad", "已退出（代码 1）") : pill("p-off", "未运行");
+    $("svSub").textContent = sv === "running" ? "由 MOSS 启动 · 已运行 1 小时 12 分" : sv === "crashed" ? "意外退出，未自动重启。查看日志后手动启动" : "点击启动；将先启动接入点再启动服务端";
+    $("svStart").disabled = sv === "running"; $("svStop").disabled = sv !== "running"; $("svRestart").disabled = sv !== "running";
+    // 接入点与设备
+    const epOk = S.endpoint && sv === "running";
+    $("epState").innerHTML = S.endpoint ? pill("p-ok", "正常") : pill("p-bad", "无法连接");
+    $("epSub").textContent = S.endpoint ? `:8004 · 工具连接 1 · 设备会话 ${epOk && S.device ? 1 : 0}` : ":8004 · 健康检查失败";
+    const devOn = epOk && S.device;
+    $("devState").innerHTML = !S.endpoint ? pill("p-off", "未知") : devOn ? pill("p-ok", "在线") : pill("p-warn", "未连接");
+    // 严格模式
+    $("strictPill").outerHTML; $("strictSub").textContent = self ? "自建模式下不可关闭" : "官方模式下可选，建议开启";
+    // OTA 一致性提示
+    const h = $("otaHint");
+    if (!self) { h.className = "hint warn"; h.textContent = "⚠ 已切到官方小智。请确认设备的 OTA 地址已改回官方服务器，MOSS 无法替你修改设备。"; }
+    else if (!S.endpoint) { h.className = "hint bad"; h.textContent = "✕ 无法访问 MCP 接入点，设备是否连到自建服务端未知。"; }
+    else if (!devOn) { h.className = "hint warn"; h.textContent = "⚠ 接入点没有设备会话：设备可能仍连着官方服务器，或服务端未运行。"; }
+    else { h.className = "hint ok"; h.textContent = "✓ 设备已经连到自建服务端（接入点检测到 1 个设备会话）。"; }
+    // 顶栏
+    const xz = $("navXz");
+    if (!self) { xz.className = "pill p-info"; xz.innerHTML = '<span class="dot"></span>小智 · 官方 · 已连接'; }
+    else if (!S.endpoint || sv !== "running") { xz.className = "pill p-bad"; xz.innerHTML = '<span class="dot"></span>小智 · 自建 · 未连接'; }
+    else if (!devOn) { xz.className = "pill p-warn"; xz.innerHTML = '<span class="dot"></span>小智 · 自建 · 等待设备'; }
+    else { xz.className = "pill p-ok"; xz.innerHTML = '<span class="dot"></span>小智 · 自建 · 已连接'; }
+    const pend = S.pending ? 1 : 0;
+    $("navApproveCount").hidden = !pend; $("navApproveCount").textContent = pend;
+    $("navApprove").className = "pill approve-btn " + (pend ? "p-bad" : "p-off");
+    // 审批记录
+    $("apLog").innerHTML = S.approvals.length ? S.approvals.slice().reverse().map((a) =>
+      `<tr><td class="mono">${a.t}</td><td>${a.what}</td><td>${a.src}</td><td><span class="tag" style="color:${a.c};border-color:${a.c}">${a.s}</span></td></tr>`).join("")
+      : `<tr><td colspan="4" class="faint">还没有审批请求。小智要求开始加工时会出现在这里。</td></tr>`;
+  }
+  const C = { ok: "var(--green)", bad: "var(--moss-red)", warn: "var(--gold)", info: "var(--laser)", off: "var(--ink-faint)" };
+  function addAp(s, c) { const a = S.pending; S.approvals.push({ t: now(), what: "雕刻“你好” · 椴木板 3 mm", src: "小智 · 接入点", s, c }); }
+
+  // ---------- 链路切换 ----------
+  function confirmBox(title, html, yes) {
+    $("cfTitle").textContent = title; $("cfBody").innerHTML = html; $("cfOverlay").hidden = false;
+    $("cfYes").onclick = () => { $("cfOverlay").hidden = true; yes(); };
+    $("cfNo").onclick = () => { $("cfOverlay").hidden = true; };
+  }
+  function switchMode(to) {
+    if (to === S.mode) return;
+    const list = to === "official"
+      ? ["断开自建接入点的 MCP 连接", "<code class='mono'>mcp_endpoint</code> 恢复为切换前备份的官方地址", "严格模式保持你的选择（官方模式下可关闭）", "询问是否停止由 MOSS 启动的服务端"]
+      : ["断开官方 MCP 连接", "<code class='mono'>mcp_endpoint</code> 指向自建接入点", "开启严格模式（必选）", "按需启动接入点与服务端"];
+    confirmBox(to === "official" ? "切换到官方小智" : "切换到自建服务端",
+      `<p style="margin:0">将修改以下设置（写入 settings.json）：</p><ul style="margin:0;padding-left:1.2em">${list.map((x) => `<li>${x}</li>`).join("")}</ul><div class="hint warn">设备的 OTA 地址需要你另外修改，MOSS 无法替你改。</div>`,
+      () => { S.mode = to; log(to === "official" ? "[MOSS] 已切换到官方链路，自建桥已断开" : "[MOSS] 已切换到自建链路，严格模式开启", "s"); render(); toast("已切换"); });
+  }
+  $("modeOfficial").onclick = () => switchMode("official");
+  $("modeSelf").onclick = () => switchMode("self");
+
+  // ---------- 服务端启停 ----------
+  $("svStart").onclick = () => { log("[MOSS] 启动 mcp-endpoint-server …"); log("[MOSS] 启动 xiaozhi-server: python app.py"); setTimeout(() => { S.server = "running"; S.endpoint = true; log("[server] OTA 接口 http://<本机>:8003/xiaozhi/ota/", "s"); log("[server] 已从接入点获取 19 个工具", "s"); render(); }, 900); };
+  $("svStop").onclick = () => { S.server = "stopped"; log("[MOSS] 已停止 xiaozhi-server（正常退出）", "w"); render(); };
+  $("svRestart").onclick = () => { S.server = "stopped"; render(); log("[MOSS] 重启 xiaozhi-server …", "w"); $("svStart").onclick(); };
+
+  // ---------- 模型配置 ----------
+  const M = {
+    llm: { label: "大模型", fields: [["地址（基础 URL）", "url", "https://<你的云端>/v1"], ["模型名", "model_name", "my-llm-32b"], ["密钥", "api_key", "", "password"]], final: (v) => `写入 <b>LLM.MossLLM</b> · type: openai · url = <b>${v.url || "…"}</b>` },
+    asr: { label: "语音识别", fields: [["地址（基础 URL）", "url", "https://<你的云端>/v1"], ["模型名", "model_name", "my-asr"], ["密钥", "api_key", "", "password"]], final: (v) => `写入 <b>ASR.MossASR</b> · base_url = <b>${(v.url || "…").replace(/\/$/, "")}/audio/transcriptions</b>（自动补全完整地址）` },
+    tts: { label: "语音合成", fields: [["地址（基础 URL）", "url", "https://<你的云端>/v1"], ["模型名", "model", "my-tts"], ["音色", "voice", "xiaoyun"], ["语速", "speed", "1.0"], ["密钥", "api_key", "", "password"]], final: (v) => `写入 <b>TTS.MossTTS</b> · api_url = <b>${(v.url || "…").replace(/\/$/, "")}/audio/speech</b> · voice = <b>${v.voice || "…"}</b>` },
+  };
+  const vals = { llm: {}, asr: {}, tts: {} };
+  function renderForm() {
+    const m = M[S.mTab];
+    $("mForm").innerHTML = m.fields.map(([lab, key, ph, type]) =>
+      `<div class="field"><label for="f-${S.mTab}-${key}">${lab}</label><input id="f-${S.mTab}-${key}" data-k="${key}" type="${type || "text"}" placeholder="${type === "password" ? "已保存（不回显）· 输入则替换" : ph}" value="${type === "password" ? "" : (vals[S.mTab][key] ?? ph)}" autocomplete="off"></div>`).join("");
+    $("mForm").querySelectorAll("input").forEach((i) => { vals[S.mTab][i.dataset.k] ??= i.type === "password" ? "" : i.value; i.addEventListener("input", () => { vals[S.mTab][i.dataset.k] = i.value; $("mFinal").innerHTML = m.final(vals[S.mTab]); }); });
+    $("mFinal").innerHTML = m.final(vals[S.mTab]);
+    $("mResult").textContent = "";
+  }
+  document.querySelectorAll(".mtabs button").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll(".mtabs button").forEach((x) => x.setAttribute("aria-selected", x === b)); S.mTab = b.dataset.m; renderForm();
+  }));
+  $("mTest").onclick = () => {
+    const tab = S.mTab; $("mResult").innerHTML = '<span class="muted">测试中…</span>';
+    setTimeout(() => {
+      const ok = tab !== "tts" || (vals.tts.voice || "").trim() !== "";
+      S.tested[tab] = ok; $(`st-${tab}`).className = "st " + (ok ? "ok" : "bad");
+      const ms = { llm: "首字 0.9 s · 返回 tool_calls ✓", asr: "识别样例音频 1.4 s ✓", tts: "合成一句 1.1 s ✓" }[tab];
+      $("mResult").innerHTML = ok ? `<span style="color:var(--green)">${ms}</span>` : '<span style="color:var(--moss-red)">失败：音色为空</span>';
+      log(`[MOSS] 测试 ${M[tab].label}：${ok ? "成功" : "失败"}（密钥仅在内存中使用，已丢弃）`, ok ? "s" : "e");
+    }, 700);
+  };
+  $("mSave").onclick = () => {
+    if (!S.tested[S.mTab]) { $("mResult").innerHTML = '<span style="color:var(--gold)">请先测试成功再保存</span>'; return; }
+    log("[MOSS] 已备份 data/.config.yaml → data/.config.yaml.bak", "s");
+    log(`[MOSS] 已写入 ${S.mTab.toUpperCase()} 配置，api_key=***`, "s");
+    $("mResult").innerHTML = '<span style="color:var(--green)">已保存。重启服务端后生效</span> <button class="btn ghost" id="mRestart">立即重启</button>';
+    $("mRestart").onclick = () => $("svRestart").onclick();
+  };
+
+  // ---------- 审批卡 ----------
+  function openApproval(ttl = 120, mismatch = false) {
+    clearInterval(S.timer);
+    S.pending = { left: ttl, ttl, mismatch };
+    $("apCheck").checked = false; $("apApprove").disabled = true; $("apErr").hidden = true; $("apApprove").hidden = false; $("apReject").hidden = false; $("apLater").textContent = "稍后处理";
+    $("apOverlay").hidden = false; render(); tick();
+    log("[MOSS] MCP 桥收到 laser_workflow_tool confirm_send（模型填写 confirmed=true，严格模式不认可）→ 创建审批", "w");
+    S.timer = setInterval(tick, 1000);
+  }
+  function tick() {
+    const p = S.pending; if (!p) return;
+    $("apLeft").textContent = `${p.left} s`; $("apBar").style.width = `${(p.left / p.ttl) * 100}%`;
+    if (p.left <= 0) { clearInterval(S.timer); addAp("已过期", C.off); S.pending = null; $("apOverlay").hidden = true; render(); log("[MOSS] 审批已过期，未发送任何指令", "w"); toast("审批已过期：小智会提示“请重新发起”"); return; }
+    p.left--;
+  }
+  $("apCheck").onchange = () => $("apApprove").disabled = !$("apCheck").checked;
+  $("apLater").onclick = () => { $("apOverlay").hidden = true; if (S.pending) toast("审批仍在等待，可从顶栏“审批”重新打开"); };
+  $("navApprove").onclick = () => { if (S.pending) $("apOverlay").hidden = false; else toast("当前没有待审批的请求"); };
+  $("apReject").onclick = () => { clearInterval(S.timer); addAp("已拒绝", C.bad); S.pending = null; $("apOverlay").hidden = true; render(); log("[MOSS] 审批已拒绝"); toast("已拒绝"); };
+  $("apApprove").onclick = () => {
+    if (S.pending?.mismatch) {
+      clearInterval(S.timer);
+      $("apErr").hidden = false; $("apErr").textContent = "无法执行：批准后任务已被重新预览（参数或文件变化），摘要不一致（approval_mismatch）。没有向设备发送任何指令，请让小智重新发起。";
+      addAp("摘要不一致", C.warn); S.pending = null; render(); log("[MOSS] approval_mismatch：摘要不一致，拒绝执行", "e");
+      $("apApprove").hidden = true; $("apReject").hidden = true; $("apLater").textContent = "关闭"; return;
+    }
+    clearInterval(S.timer); addAp("已批准 · 执行中", C.info); S.pending = null; $("apOverlay").hidden = true; render();
+    log("[MOSS] 审批通过，以 Approval 身份进入发送门禁", "s"); startSend();
+  };
+
+  // ---------- 发送覆盖层 ----------
+  function setStep(i, cls) { for (let k = 0; k < 4; k++) $("s" + k).className = k < i ? "ok" : k === i ? cls : ""; }
+  function startSend() {
+    const total = 1240; let sent = 0; $("sendOverlay").hidden = false; $("sdClose").hidden = true; $("sdCancel").hidden = false; $("sdEstop").hidden = false; $("sdHint").hidden = true;
+    $("sdTitle").textContent = "准备发送"; setStep(1, "on"); $("sdText").textContent = "SHA 复核 → 握手 $$ → $CD → Idle 预检 …"; $("sdProg").style.width = "0";
+    clearInterval(S.sendTimer);
+    setTimeout(() => {
+      $("sdTitle").textContent = "正在向设备发送"; setStep(2, "on");
+      S.sendTimer = setInterval(() => {
+        sent = Math.min(total, sent + 62); $("sdProg").style.width = `${(sent / total) * 100}%`;
+        $("sdText").textContent = `${sent} / ${total} 行 · phase: ${sent < total ? "streaming" : "awaiting_completion"}`;
+        if (sent >= total) { clearInterval(S.sendTimer); setTimeout(() => { setStep(3, "ok"); $("s3").className = "ok"; $("sdTitle").textContent = "发送完成"; $("sdText").textContent = "G4 P0 同步与 Idle 已确认 · phase: completed"; finish("已完成", C.ok); }, 900); }
+      }, 160);
+    }, 900);
+  }
+  function finish(s, c) {
+    $("sdCancel").hidden = true; $("sdEstop").hidden = true; $("sdClose").hidden = false;
+    const last = S.approvals[S.approvals.length - 1]; if (last) { last.s = s; last.c = c; } render();
+  }
+  $("sdCancel").onclick = () => { clearInterval(S.sendTimer); setStep(2, "err"); $("sdTitle").textContent = "任务已取消"; $("sdHint").hidden = false; $("sdHint").textContent = "已停止后续发送。取消不等于物理停机，请观察机器。"; log("[MOSS] cancel：停止后续发送", "w"); finish("已取消", C.warn); };
+  $("sdEstop").onclick = () => { clearInterval(S.sendTimer); setStep(2, "err"); $("sdTitle").textContent = "已急停"; $("sdHint").hidden = false; $("sdHint").textContent = "0x18 已经通过实时通道发送，没有排在 G-code 后面。写入成功不代表机器已物理停止；软件急停不能代替硬件急停按钮。"; log("[MOSS] emergency_stop：0x18 实时写入", "e"); finish("急停", C.bad); };
+  $("sdClose").onclick = () => $("sendOverlay").hidden = true;
+
+  // ---------- 测试场景 ----------
+  const cases = [
+    { id: "TC-01", t: "语音请求加工 → 桌面批准", d: "小智说“开始吧”，模型调用 confirm_send 并自带 confirmed=true。", e: "弹出审批卡，必须勾选现场确认才能批准；批准后进入四步发送并完成。", run: () => openApproval(120) },
+    { id: "TC-02", t: "审批过期", d: "审批卡无人处理（演示把 120 秒缩短为 6 秒）。", e: "倒计时归零后自动关闭，记录“已过期”，没有发送任何指令。", run: () => openApproval(6) },
+    { id: "TC-03", t: "批准前任务被改动", d: "审批期间任务被重新预览，摘要变化。", e: "勾选并批准后提示 approval_mismatch，不发送。", run: () => openApproval(120, true) },
+    { id: "TC-04", t: "加工中急停", d: "先批准一次加工，在发送中点击“急停 0x18”。", e: "立刻停止进度，说明 0x18 走实时通道且不代替硬件急停。", run: () => { $("apCheck").checked = true; openApproval(120); toast("勾选现场确认后批准，再在发送中点急停"); } },
+    { id: "TC-05", t: "服务端崩溃", d: "xiaozhi-server 意外退出。", e: "服务端显示退出码，不自动重启；顶栏小智变为“未连接”；日志显示错误。", run: () => { S.server = "crashed"; log("[server] Traceback … ConnectionError: api_key=*** 无效", "e"); log("[MOSS] xiaozhi-server 退出，代码 1；不自动重启", "e"); render(); } },
+    { id: "TC-06", t: "设备仍连着官方服务器", d: "自建模式下，接入点没有设备会话。", e: "设备显示“未连接”，提示检查 OTA 地址；顶栏显示“等待设备”。", run: () => { S.server = "running"; S.endpoint = true; S.device = false; render(); } },
+    { id: "TC-07", t: "切换回官方小智", d: "点击“官方小智”。", e: "弹出确认框列出要改的设置；切换后提示需手动改设备 OTA。", run: () => switchMode("official") },
+    { id: "TC-08", t: "模型配置测试与保存", d: "切到“语音合成”，清空音色后测试，再填写后测试、保存。", e: "失败时不能保存；保存后日志只出现 api_key=***，提示重启生效。", run: () => { document.querySelector('.mtabs [data-m="tts"]').click(); toast("清空“音色”后点“测试连接”，再补上重试"); } },
+  ];
+  $("cases").innerHTML = cases.map((c, i) => `<div class="case" id="case-${i}"><div class="case-h"><b>${c.t}</b><button class="btn" data-i="${i}">运行</button></div><span class="case-id">${c.id}</span><p>${c.d}</p><p class="exp">${c.e}</p></div>`).join("");
+  $("cases").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { const i = +b.dataset.i; $("case-" + i).classList.add("done"); cases[i].run(); }));
+  $("resetAll").onclick = () => { clearInterval(S.timer); clearInterval(S.sendTimer); Object.assign(S, { mode: "self", server: "running", endpoint: true, device: true, approvals: [], pending: null }); ["apOverlay", "sendOverlay", "cfOverlay"].forEach((x) => $(x).hidden = true); document.querySelectorAll(".case").forEach((c) => c.classList.remove("done")); $("log").innerHTML = ""; seedLog(); render(); };
+
+  function seedLog() {
+    log("[MOSS] 启动 mcp-endpoint-server（:8004）", "s");
+    log("[MOSS] 启动 xiaozhi-server: python app.py", "s");
+    log("[server] 初始化组件: asr MossASR / llm MossLLM / tts MossTTS");
+    log("[server] mcp接入点 ws://<本机>:8004/mcp_endpoint/mcp/?token=***");
+    log("[server] 已从接入点获取 19 个工具", "s");
+  }
+  seedLog(); renderForm(); render();
+})();
+</script>
+</body></html>
