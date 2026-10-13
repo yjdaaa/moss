@@ -49,7 +49,7 @@
 | --- | --- |
 | PKG-01 打包配置 | 已写入 `apps/desktop/src-tauri/tauri.conf.json`：`bundle.active=true`、`targets=["nsis"]`、`installMode="both"`、简体中文 + 英文（不显示语言选择）、开始菜单文件夹 `MOSS`、`embedBootstrapper`、安装器图标与横幅 / 侧栏图、`installerHooks`。`publisher`、`copyright` 未填写（等用户提供真实信息，不预填） |
 | PKG-02 安装版配置读取 | 已实施（见 §2 `.env` 行） |
-| PKG-03 安装/卸载钩子 | 已写 `apps/desktop/src-tauri/installer/hooks.nsh`：安装与卸载前用 `nsis_tauri_utils::FindProcess` 检测 `moss-desktop.exe`（卸载另查 `moss-host.exe`），运行中只提示退出并取消。钩子位于 Tauri 模板 `CheckIfAppIsRunning` 之前，后者“询问后强行结束”的流程不会被触发。卸载时复用模板的“删除应用程序数据”复选框（`$DeleteAppDataCheckboxState`，默认不勾选），勾选且非更新模式时删除固定路径 `%APPDATA%\moss`（`APPDATA` 为空则跳过）。依据 Tauri `dev` 分支 `installer.nsi` / `utils.nsh` 核对；以用户本机 tauri-bundler 实际版本打包结果为准 |
+| PKG-03 安装/卸载钩子 | 已写 `apps/desktop/src-tauri/installer/hooks.nsh`：安装与卸载前用 `nsis_tauri_utils::FindProcess` 检测 `moss-desktop.exe`、`moss-host.exe` 与本地模型辅助程序 `moss-voice-local.exe`（2026-10-13 补），运行中只提示退出并取消。钩子位于 Tauri 模板 `CheckIfAppIsRunning` 之前，后者“询问后强行结束”的流程不会被触发。卸载时复用模板的“删除应用程序数据”复选框（`$DeleteAppDataCheckboxState`，默认不勾选），勾选且非更新模式时删除固定路径 `%APPDATA%\moss`（`APPDATA` 为空则跳过）。依据 Tauri `dev` 分支 `installer.nsi` / `utils.nsh` 核对；以用户本机 tauri-bundler 实际版本打包结果为准 |
 | PKG-04 安装器图片 | 已生成 `installer/header.bmp`（150×57）与 `installer/sidebar.bmp`（164×314），曜石配色 + MOSS 红眼 |
 | PKG-05 文档 | 快速开始“安装与卸载”已改为实际步骤；安装包产物检查见 §0 |
 | PKG-06 签名 / PKG-07 干净虚拟机验收 | 未开始 |
@@ -132,7 +132,7 @@
 
 1. 语言（默认简体中文）→ 2. 安装范围（只为我 / 所有用户）→ 3. **选择安装目录**（可改）→ 4. 是否创建桌面快捷方式 → 5. 安装 → 6. 完成页“立即运行 MOSS”。
 
-安装前检查：若 `%APPDATA%\moss\moss.lock` 被占用（MOSS 正在运行），提示“请先退出 MOSS（托盘图标右键 → 退出）”，不强行结束进程（I-7）。
+安装前检查：按进程名检测 `moss-desktop.exe`、`moss-host.exe`、`moss-voice-local.exe`，任一在运行即提示“请先退出 MOSS（托盘图标右键 → 退出）”并取消，不强行结束进程（I-7）。实例锁 `moss.lock` 由程序自身使用，安装器不读取它。
 
 ### 3.5 卸载流程
 
@@ -143,7 +143,7 @@
 | 1. 运行检查 | MOSS 正在运行时提示先退出；**不得强行结束正在加工的进程**（强杀会跳过 `ShutdownCoordinator` 的急停顺序） |
 | 2. 数据选项 | 复选框“同时删除我的数据（材料库、任务记录、设置、上传文件）”，**默认不勾选** |
 | 3. 删除程序 | 删除安装目录下的程序文件、快捷方式、开始菜单项、卸载注册表项 |
-| 4. 删除数据（仅勾选时） | 删除 `%APPDATA%\moss`（含 `moss.sqlite`、`settings.json`、`.env`、`uploads/`、`previews/`、`generated_assets/`、`logs/`、迁移报告）；删除前在安装钩子中再确认一次路径确实以 `\moss` 结尾，避免误删 |
+| 4. 删除数据（仅勾选时） | 删除 `%APPDATA%\moss`（含 `moss.sqlite`、`settings.json`、`.env`、`uploads/`、`previews/`、`generated_assets/`、`logs/`、迁移报告）；钩子只删除固定路径 `$APPDATA\moss`，`APPDATA` 为空时跳过，不拼接其他来源的路径，避免误删 |
 | 5. 不删除 | 用户自备的 `xiaozhi-server`、`mcp-endpoint-server` 目录；用户导出的材料库 JSON；`LASER_MATERIAL_PARAMS_FILE` 指向的外部文件；小智设备与激光机上的任何配置 |
 
 说明：Tauri 卸载器自带的“删除应用数据”选项针对的是以 `identifier`（`com.moss.laser`）命名的目录，**覆盖不到 MOSS 实际使用的 `%APPDATA%\moss`**，因此数据删除必须在 `installer/hooks.nsh` 的卸载钩子中显式实现（实施时以实际 Tauri 版本的卸载器行为为准再核对一次）。

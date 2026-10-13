@@ -144,6 +144,10 @@ HomeControl 专用持久审批在消费后至多提交一次。设备许可若�
 
 NV14 音乐已增加敏感子目录跳过，重名候选仅显示非路径索引 ID 与编号，不明确选择就不播放。S1-09 Android 实际来源必须经安装设备核验，不得用 APK 构建通过冒充实机来源验收。
 
+### 4.16 主窗口特权命令固定到本进程后端地址（2026-10-13）
+
+主窗口导航到 `http://127.0.0.1:<端口>/` 后是 remote 来源，capability 的 `remote` 只能写 `http://127.0.0.1:*`，静态配置挡不住其他本机端口的页面。凡能取得桌面会话、改写配置或密钥、启停进程的命令（`get_desktop_session`、语音中心与内置语音的改写类命令、视觉/音乐/Agent 命令、第三方 MCP 管理），必须在函数开头用 `window_is_trusted_main` 校验 `main` 标签与精确来源，失败即拒绝；新增此类命令照此处理，并加入 `main_window_commands_pin_backend_origin` 的清单。只给主窗口用的 capability 必须声明回环 `remote`，否则 Tauri 只对本地打包页授权、主窗口调用全部被拒。私密数据仍只走 §4.13 的 `voice-private` 窗口。
+
 ## 5. 测试要求
 
 测试隔离、`FakeGrbl` 字节级校验、SHA-256 重算、`0x18` 优先级和结果状态见 [`AGENTS.md`](../../AGENTS.md)。

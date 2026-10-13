@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### 视觉/音乐/Agent 配置卡在真实桌面窗口可用，主窗口特权命令固定到本进程后端地址（2026-10-13）
+
+- **现象与影响**：主窗口启动后导航到 `http://127.0.0.1:<端口>`，对 Tauri 属于 remote 来源；`voice-vision` / `voice-music` / `voice-agent` 三个 capability 未声明 `remote`，Tauri 只对本地打包页授权，真实 App 中这三张配置卡的命令会被 ACL 拒绝（此前只在假桥页面验证）。另一方面 `default.json` 以 `windows:["*"]` + `127.0.0.1:*` 授权 `get_desktop_session`、`voice_save_settings`、`voice_server_start`、模型密钥保存等命令，命令本身不校验来源：任何本机端口的页面一旦进入桌面窗口，就能取得可批准 R3 的桌面会话，或改写服务端 Python 路径后启动任意程序。
+- **根因与修复**：把 `voice_mcp.rs` 已有的来源判定提为共用 `is_trusted_main` / `window_is_trusted_main`（`main` 窗口 + 来源等于本进程后端地址）。`get_desktop_session`、语音中心 8 个改写/日志命令、内置语音 18 个改写及视觉/音乐/Agent 命令在函数开头校验，失败返回 `voice_acl_denied`；三个 capability 补 `remote: http://127.0.0.1:*`，端口由命令内固定。只读状态命令（`voice_status`、`voice_mode_changes`、`voice_builtin_status`）不变，隐私窗口仍可读状态。
+- **契约与安全**：命令参数不变（`window` 由 Tauri 注入，前端无改动）；非主窗口或其他来源调用上述命令改为报错。原测试断言这三个 capability “不得有 remote”，把缺陷固化为预期，已替换为更严格的断言（remote 只能是回环通配，且命令必须先校验来源）。默认值与安全门禁不变。
+- **验证**：`moss-desktop` 新增 `trusted_main_requires_main_label_and_exact_backend_origin`、`main_window_commands_pin_backend_origin`，桌面 crate 27 项通过；`cargo test --workspace` 716 通过 / 7 忽略，前端 `npm test` 109 通过。**未在真实桌面窗口点击验证**（HW-14），未构建安装包。
+- **关联**：`apps/desktop/src-tauri/src/{lib,voice,voice_builtin,voice_mcp}.rs`、`capabilities/voice-{vision,music,agent}.json`、`docs/developer/{api-contracts,safety}.md`。
+
+### 模型、视觉、插件保存不再出现“设置已改、密钥未写”的半写状态（2026-10-13）
+
+- **现象与影响**：密钥存 SQLite `app_secrets`、其余配置存 `settings.json`。插件保存先写设置再逐条写密钥，中途失败会留下“插件已开启但缺密钥”；模型与视觉保存先逐条写密钥再写设置，设置写入失败会留下“密钥已换、设置未变”。插件保存还在校验与写入之间释放数据库锁，并发保存可改掉校验时看到的密钥状态（NV11-4 记录的“跨存储原子性未验”）。
+- **根因与修复**：`RuntimeDb::apply_secret_changes` 在一个事务内批量写入/删除并返回原值，`restore_secrets` 逆序还原；桌面 `commit_secrets_then_settings` 先提交密钥事务再写设置，设置失败即还原密钥。三处保存统一改用它，并持锁到提交完成。
+- **契约与安全**：接口与错误码不变；无 schema 迁移。还原本身失败时返回合并错误提示重新保存。
+- **验证**：`laser-runtime` 新增 `tests/secret_changes.rs` 2 项（先确认缺方法编译失败再实现），`moss-desktop` 新增 `settings_failure_restores_secrets`、`settings_success_keeps_new_secrets`。未模拟磁盘满等真实写入故障。
+- **关联**：`crates/laser-runtime/src/db.rs`、`apps/desktop/src-tauri/src/voice_builtin.rs`。
+
+### 安装与卸载前检查本地模型辅助程序是否在运行（2026-10-13）
+
+- **现象与影响**：NSIS 钩子安装前只查 `moss-desktop.exe`、卸载前另查 `moss-host.exe`；带 helper 的专用包里 `moss-voice-local.exe` 运行时文件被占用，覆盖升级或卸载会失败或残留。
+- **根因与修复**：安装与卸载前统一检查 `moss-desktop.exe`、`moss-host.exe`、`moss-voice-local.exe`，任一运行即提示退出并取消，不强杀。打包规范中“检测 `moss.lock`”“删除前校验路径以 `\moss` 结尾”的旧描述与实现不符，已改为实际行为（按进程名检测、删除固定路径 `%APPDATA%\moss`）。
+- **验证**：未构建安装包、未实际安装（PKG-07 / FINAL-01）。
+- **关联**：`apps/desktop/src-tauri/installer/hooks.nsh`、`docs/developer/packaging-install.md`。
+
 ### NV11六类供应商契约补齐，缺来源、异常额度与RSS损坏不再伪装成功（2026-10-12）
 
 - **现象与影响**：已有Metaso模块/独立凭据/供应商选择，但任务书仍写未集成；供应商测试仅最小样本。RAG缺来源或返回非白名单数据集仍可能回填；新闻字段类型错误被当默认值，RSS在满足条数后提前返回导致坏尾部未验证，quick-xml GeneralRef被跳过会损坏含`&amp;`的URL；截断未计算JSON转义后长度；Tavily额度及Metaso HTTP200应用错误被泛化为网络/schema问题。

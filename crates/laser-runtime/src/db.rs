@@ -1155,6 +1155,39 @@ impl RuntimeDb {
             > 0)
     }
 
+    /// 在一个事务内写入（`Some`）或删除（`None`）多项密钥，任一项失败整批不生效。
+    /// 返回每项修改前的值，调用方后续步骤（如写 `settings.json`）失败时交给 [`Self::restore_secrets`] 还原。
+    pub fn apply_secret_changes(
+        &self,
+        changes: &[(String, Option<String>)],
+        now: f64,
+    ) -> Result<Vec<(String, Option<String>)>, SchemaError> {
+        let tx = self.connection.unchecked_transaction()?;
+        let mut previous = Vec::with_capacity(changes.len());
+        for (name, value) in changes {
+            let old: Option<String> = tx
+                .query_row("SELECT value FROM app_secrets WHERE name=?1", [name], |row| row.get(0))
+                .optional()?;
+            match value {
+                Some(value) => tx.execute(
+                    "INSERT INTO app_secrets(name,value,updated_at) VALUES(?1,?2,?3)
+                     ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    params![name, value, now],
+                )?,
+                None => tx.execute("DELETE FROM app_secrets WHERE name=?1", [name])?,
+            };
+            previous.push((name.clone(), old));
+        }
+        tx.commit()?;
+        Ok(previous)
+    }
+
+    /// 按 [`Self::apply_secret_changes`] 返回的原值还原（逆序应用，同名多次修改也回到批次前的值）。
+    pub fn restore_secrets(&self, previous: &[(String, Option<String>)], now: f64) -> Result<(), SchemaError> {
+        let reversed: Vec<_> = previous.iter().rev().cloned().collect();
+        self.apply_secret_changes(&reversed, now).map(|_| ())
+    }
+
     fn seed_builtin_materials(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), SchemaError> {
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
         let library = builtin_material_library();

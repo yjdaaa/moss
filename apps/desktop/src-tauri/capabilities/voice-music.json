@@ -1,10 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "voice-music-local-main",
-  "description": "NV14 local music folder configuration is accessible only from desktop main window",
+  "description": "NV14 local music folder configuration in the main window; commands additionally pin the exact running backend origin.",
   "windows": [
     "main"
   ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*"
+    ]
+  },
   "permissions": [
     "allow-voice-music-status",
     "allow-voice-music-save",

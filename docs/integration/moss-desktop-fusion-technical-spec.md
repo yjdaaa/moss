@@ -1,6 +1,6 @@
 # MOSS 自建小智语音链路与多项目融合技术书
 
-状态：技术书 r13（2026-10-10）。本文是拟实施方案，不代表当前能力：“现有”指已在代码中核实的行为，“拟新增”指未实现的契约。进度只看 [实施 TODO](moss-fusion-implementation-todo.md)；内置语音设计见 [内置语音技术书](moss-native-voice-spec.md)，r11 起它取代本文部分非目标与决定。外部服务端链路实施前须完成 §10 的 P0 前置验证。
+状态：技术书 r14（2026-10-13）。本文是拟实施方案，不代表当前能力：“现有”指已在代码中核实的行为，“拟新增”指未实现的契约。进度只看 [实施 TODO](moss-fusion-implementation-todo.md)；内置语音设计见 [内置语音技术书](moss-native-voice-spec.md)，r11 起它取代本文部分非目标与决定。外部服务端链路实施前须完成 §10 的 P0 前置验证。
 
 修订记录：
 
@@ -19,6 +19,7 @@
 | r11 | 用户决定（2026-10-07）：把 xiaozhi-esp32-server、海门、xiaozhi-client 的功能做进 MOSS 本身（“内置语音服务”），取各项目最优实现，本地与云端模型都支持；范围含第三方 MCP、记忆、视觉、插件（天气、新闻、农历、搜索、RAGFlow、音乐、Home Assistant）、Claude Code / Codex 调用、声纹、固件下发；设备端口 8000 / 8003；模型与插件密钥存 SQLite `app_secrets`；外部服务端链路保留作兼容。方案见 [MOSS 内置语音服务技术书](moss-native-voice-spec.md)（n3）。本文 §1.3 第一条非目标取消；D1、D7 中“由 xiaozhi-esp32-server 编排 / 只由 xiaozhi-server 调用模型”改为“内置服务或外部服务端二选一”；§9.4.4“MOSS 不保存密钥”与 A-67 只适用于外部服务端链路，内置链路的规则见该书 §6；其余安全决定（D3、D4、D8、D10、D11）不变 |
 | r12 | 文档同步（2026-10-10）：当前版本引用统一为融合 r12 / 内置语音 n18 / 实施细则 i1；新增 NV10～NV18 可执行实施入口；§9.5.5 落地方式改为已选定 WebGL 等离子流体，Canvas 星点仅作叠加；NV18 helper 打包的配置接线与源码/许可/安装验收分别记录。保留历史版本与既有实机未验项，不把文档更新视为功能完成 |
 | r13 | 剩余技术实施说明（2026-10-10）：修正内置语音严格模式交叉引用、P4 对可选 P2b 的错误硬前置；新增 P2b/P3/P5 六项实施细则 s1（模块/步骤/接口/异常/验证），保留 P2b/P5 的可选地位；UI-2 旧太空舱表述对齐已选 WebGL 等离子流体。NV18 helper 已有接线与待完成交付条件不冒充实际安装通过 |
+| r14 | 用户决定（2026-10-13）：完成项复核后再次确认 `MOSS_FUSION_STRICT` **保持默认关闭**——P1 审批、审计与 R3 门禁只在开启严格模式（或切到自建链路）时生效，默认配置下语音、接入点、局域网客户端的 R3 仍按 `confirmed` 契约执行；文档不得把 P1 完成表述为默认已生效。同日补充：主窗口特权 Tauri 命令固定 `main` 标签与本进程后端来源（安全规范 §4.16）。 |
 范围：Windows 桌面宿主（`moss-desktop`）+ 内置语音服务或外部自建小智服务端（xiaozhi-esp32-server）+ 自有云端模型（ASR/LLM/TTS，OpenAI/Anthropic 协议）+ 可选的海门 Agent 与 xiaozhi-client。Android 保持现有行为，只做兼容回归。
 依据：[架构总览](../developer/architecture.md)、[开发者安全入口](../developer/safety.md)、[Web API 契约](../developer/api-contracts.md)、[数据库结构](../developer/db-schema.md)、[小智 GRBL 工具边界](../laser/xiaozhi-grbl-tool-boundary.md)、仓库根 `AGENTS.md`。与代码不一致时以代码为准并回修本文。
 

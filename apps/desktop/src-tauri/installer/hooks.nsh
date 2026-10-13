@@ -18,13 +18,20 @@
   ${EndIf}
 !macroend
 
-!macro NSIS_HOOK_PREINSTALL
+; 安装（含覆盖升级）与卸载检查同一组进程：主程序、独立后端，以及与主程序同目录的本地模型
+; 辅助程序 moss-voice-local.exe（NV6/NV18 专用包）；辅助程序运行时其文件被占用，覆盖会失败。
+!macro MOSS_ABORT_IF_ANY_RUNNING
   !insertmacro MOSS_ABORT_IF_RUNNING "moss-desktop.exe"
+  !insertmacro MOSS_ABORT_IF_RUNNING "moss-host.exe"
+  !insertmacro MOSS_ABORT_IF_RUNNING "moss-voice-local.exe"
+!macroend
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro MOSS_ABORT_IF_ANY_RUNNING
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  !insertmacro MOSS_ABORT_IF_RUNNING "moss-desktop.exe"
-  !insertmacro MOSS_ABORT_IF_RUNNING "moss-host.exe"
+  !insertmacro MOSS_ABORT_IF_ANY_RUNNING
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

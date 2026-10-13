@@ -26,16 +26,55 @@ fn get_backend_origin(state: tauri::State<'_, BackendOrigin>) -> Result<String, 
     state.0.clone()
 }
 
+/// 主窗口特权命令的来源判定：只认 `main` 窗口，且页面来源与本进程后端地址完全一致。
+///
+/// 主窗口启动后导航到 `http://127.0.0.1:<端口>`，capability 的 `remote` 只能写成
+/// `http://127.0.0.1:*`；端口在命令内固定，其他本机端口的页面即使进入窗口也拿不到特权命令。
+#[cfg(desktop)]
+pub(crate) fn is_trusted_main(label: &str, url: &tauri::Url, expected: &str) -> bool {
+    label == "main"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.origin().ascii_serialization() == expected
+}
+
+/// 按 [`is_trusted_main`] 校验调用窗口；后端未启动时一律拒绝。
+#[cfg(desktop)]
+pub(crate) fn window_is_trusted_main(window: &tauri::WebviewWindow) -> bool {
+    let Some(expected) = window
+        .app_handle()
+        .try_state::<BackendOrigin>()
+        .and_then(|state| state.0.as_ref().ok().cloned())
+    else {
+        return false;
+    };
+    window.url().is_ok_and(|url| is_trusted_main(window.label(), &url, &expected))
+}
+
 /// 桌面会话值（技术书 §5.3）：每次启动随机生成，只交给本窗口的页面并保存在其内存中，
 /// 后端据 `X-Moss-Desktop-Session` 头识别桌面端。Android 没有桌面会话。
 struct DesktopSession(Option<String>);
 
 #[tauri::command]
-fn get_desktop_session(state: tauri::State<'_, DesktopSession>) -> Result<String, String> {
-    if cfg!(mobile) {
-        return Err("移动端没有桌面会话".into());
+fn get_desktop_session(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, DesktopSession>,
+) -> Result<String, String> {
+    #[cfg(mobile)]
+    {
+        let _ = (window, state);
+        Err("移动端没有桌面会话".into())
     }
-    state.0.clone().ok_or_else(|| "桌面会话不可用：本机后端未启动".into())
+    #[cfg(desktop)]
+    {
+        // 会话值能批准 R3 动作，只交给后端地址上的主窗口
+        if !window_is_trusted_main(&window) {
+            return Err("桌面会话只提供给 MOSS 主窗口".into());
+        }
+        state.0.clone().ok_or_else(|| "桌面会话不可用：本机后端未启动".into())
+    }
 }
 
 impl ShutdownState {
@@ -515,8 +554,7 @@ mod tests {
         let private:serde_json::Value = serde_json::from_str(
             include_str!("../capabilities/voice-music.json")).unwrap();
         let general = include_str!("../capabilities/default.json");
-        assert_eq!(private["windows"], serde_json::json!(["main"]));
-        assert!(private.get("remote").is_none());
+        assert_main_window_loopback_capability(&private);
         for permission in private["permissions"].as_array().unwrap() {
             assert!(!general.contains(permission.as_str().unwrap()));
         }
@@ -537,8 +575,7 @@ mod tests {
     fn agent_approval_configuration_main_window_only(){
         let private:serde_json::Value=serde_json::from_str(include_str!("../capabilities/voice-agent.json")).unwrap();
         let general=include_str!("../capabilities/default.json");
-        assert_eq!(private["windows"],serde_json::json!(["main"]));
-        assert!(private.get("remote").is_none());
+        assert_main_window_loopback_capability(&private);
         for permission in private["permissions"].as_array().unwrap(){
             assert!(!general.contains(permission.as_str().unwrap()));
         }
@@ -548,10 +585,66 @@ mod tests {
     fn vision_credentials_private_capability() {
         let private:serde_json::Value=serde_json::from_str(include_str!("../capabilities/voice-vision.json")).unwrap();
         let default=include_str!("../capabilities/default.json");
-        assert_eq!(private["windows"],serde_json::json!(["main"]));
-        assert!(private.get("remote").is_none());
+        assert_main_window_loopback_capability(&private);
         for value in private["permissions"].as_array().unwrap(){
             assert!(!default.contains(value.as_str().unwrap()));
+        }
+    }
+
+    /// 主窗口导航到 `http://127.0.0.1:<端口>` 后属于远程来源：主窗口专用 capability 必须声明
+    /// 回环 remote，否则 Tauri 只对本地打包页授权、主窗口调用一律被 ACL 拒绝（2026-10-13 审查）。
+    /// 端口无法写进静态 capability，由命令内 `require_main_window` 固定为本进程后端地址。
+    fn assert_main_window_loopback_capability(capability: &serde_json::Value) {
+        assert_eq!(capability["windows"], serde_json::json!(["main"]));
+        assert_eq!(capability["remote"]["urls"], serde_json::json!(["http://127.0.0.1:*"]));
+        assert!(capability.get("webviews").is_none());
+    }
+
+    /// 改写设置、启停进程、保存密钥与读取私有配置的命令必须在函数开头固定主窗口来源。
+    #[test]
+    fn main_window_commands_pin_backend_origin() {
+        let sources = [
+            (include_str!("voice.rs"), &[
+                "voice_save_settings", "voice_set_mode", "voice_server_start", "voice_server_stop",
+                "voice_server_restart", "voice_server_log", "voice_models_test", "voice_models_save",
+            ][..]),
+            (include_str!("voice_builtin.rs"), &[
+                "voice_builtin_start", "voice_builtin_stop", "voice_device_set_status", "voice_device_rename",
+                "voice_builtin_models_test", "voice_builtin_models_save", "voice_local_save",
+                "voice_local_model_download", "voice_local_model_cancel", "voice_local_model_delete",
+                "voice_agent_status", "voice_agent_save", "voice_music_pick_directory", "voice_music_status",
+                "voice_music_save", "voice_vision_status", "voice_vision_save", "voice_vision_test",
+            ][..]),
+        ];
+        for (source, commands) in sources {
+            for command in commands {
+                let start = source.find(&format!("pub async fn {command}(")).expect(command);
+                let body = &source[start..start + source[start..].find("
+}
+").expect(command)];
+                let guard = body.find("require_main_window(&window)?;").unwrap_or_else(|| panic!("{command} 未校验主窗口来源"));
+                assert!(guard < body.find("imp::run").or(body.find("spawn_blocking")).unwrap(), "{command} 须先校验来源");
+            }
+        }
+        let session = include_str!("lib.rs");
+        let start = session.find("fn get_desktop_session(").unwrap();
+        assert!(session[start..start + 800].contains("window_is_trusted_main(&window)"));
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn trusted_main_requires_main_label_and_exact_backend_origin() {
+        let expected = "http://127.0.0.1:19666";
+        assert!(super::is_trusted_main("main", &"http://127.0.0.1:19666/voice".parse().unwrap(), expected));
+        for (label, url) in [
+            ("voice-private", "http://127.0.0.1:19666/"),
+            ("main", "http://127.0.0.1:8003/"),
+            ("main", "http://localhost:19666/"),
+            ("main", "http://tauri.localhost/"),
+            ("main", "https://127.0.0.1:19666/"),
+            ("main", "http://u@127.0.0.1:19666/"),
+        ] {
+            assert!(!super::is_trusted_main(label, &url.parse().unwrap(), expected), "{label} {url}");
         }
     }
 

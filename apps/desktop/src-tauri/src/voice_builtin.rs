@@ -47,6 +47,18 @@ fn require_voice_private_asset(window: &tauri::WebviewWindow) -> Result<(), Valu
     Ok(())
 }
 
+/// 主窗口专用命令：只接受后端地址上的 `main` 窗口（见 [`crate::is_trusted_main`]）。
+#[cfg(desktop)]
+fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
+    if crate::window_is_trusted_main(window) {
+        return Ok(());
+    }
+    Err(serde_json::json!({
+        "code": "voice_acl_denied",
+        "message": "只能在 MOSS 主窗口修改内置语音设置"
+    }))
+}
+
 #[cfg(all(test, desktop))]
 #[test]
 fn sensitive_voice_commands_require_packaged_private_window_origin() {
@@ -115,6 +127,59 @@ mod imp {
 
     fn internal(message: impl Into<String>) -> CenterError {
         CenterError::new("voice_internal", 500, message)
+    }
+
+    /// 密钥存 `app_secrets`、其余配置存 `settings.json`，两处无法共用一个事务：先在事务内写密钥，
+    /// 再写设置；设置写入失败时按原值还原密钥，不留下“已开启但缺密钥”或“密钥已换、设置未变”的
+    /// 半写状态（2026-10-13 审查，NV11-4）。调用方须持有数据库锁，避免校验与写入之间被并发保存改动。
+    pub(super) fn commit_secrets_then_settings(
+        db: &laser_runtime::db::RuntimeDb,
+        changes: &[(String, Option<String>)],
+        save_settings: impl FnOnce() -> Result<(), CenterError>,
+    ) -> Result<(), CenterError> {
+        let previous = db.apply_secret_changes(changes, now()).map_err(|error| internal(db_error(error)))?;
+        let Err(error) = save_settings() else { return Ok(()) };
+        if let Err(restore) = db.restore_secrets(&previous, now()) {
+            return Err(internal(format!("{}；密钥还原也失败，请重新保存：{}", error.message, db_error(restore))));
+        }
+        Err(error)
+    }
+
+    #[cfg(test)]
+    mod commit_tests {
+        use super::{CenterError, commit_secrets_then_settings};
+        use laser_runtime::db::RuntimeDb;
+
+        #[test]
+        fn settings_failure_restores_secrets() {
+            let db = RuntimeDb::open_memory().unwrap();
+            db.set_secret("voice.plugin.weather", "old", 1.).unwrap();
+            let changes = vec![
+                ("voice.plugin.weather".to_owned(), None),
+                ("voice.plugin.rag".to_owned(), Some("new-rag".to_owned())),
+            ];
+            let error = commit_secrets_then_settings(&db, &changes, || {
+                Err(CenterError::new("plugin_settings_failed", 500, "插件配置保存失败"))
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "plugin_settings_failed");
+            assert_eq!(db.get_secret("voice.plugin.weather").unwrap().as_deref(), Some("old"));
+            assert_eq!(db.get_secret("voice.plugin.rag").unwrap(), None);
+        }
+
+        #[test]
+        fn settings_success_keeps_new_secrets() {
+            let db = RuntimeDb::open_memory().unwrap();
+            let changes = vec![("voice.vision.main".to_owned(), Some("key".to_owned()))];
+            let mut saved = false;
+            commit_secrets_then_settings(&db, &changes, || {
+                saved = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(saved);
+            assert_eq!(db.get_secret("voice.vision.main").unwrap().as_deref(), Some("key"));
+        }
     }
 
     use moss_voice_server::memory::{MemoryRecord, MemoryService, VoiceMemoryStore};
@@ -846,22 +911,26 @@ mod imp {
             let mut settings = self.settings();
             let plan = builtin::plan_save(&settings.builtin_models, input, clear)
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
+            let changes: Vec<(String, Option<String>)> = plan
+                .keys
+                .iter()
+                .filter_map(|(section, change)| {
+                    let name = builtin_secret_name(*section).to_owned();
+                    match change {
+                        KeyChange::Keep => None,
+                        KeyChange::Set(value) => Some((name, Some(value.clone()))),
+                        KeyChange::Clear => Some((name, None)),
+                    }
+                })
+                .collect();
+            settings.builtin_models = plan.models;
             {
                 let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-                for (section, change) in &plan.keys {
-                    let name = builtin_secret_name(*section);
-                    match change {
-                        KeyChange::Keep => {}
-                        KeyChange::Set(value) => db.set_secret(name, value, now()).map_err(|error| internal(db_error(error)))?,
-                        KeyChange::Clear => {
-                            db.delete_secret(name).map_err(|error| internal(db_error(error)))?;
-                        }
-                    }
-                }
+                commit_secrets_then_settings(&db, &changes, || {
+                    moss_voice::settings::save(&self.settings_file(), &settings)
+                        .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
+                })?;
             }
-            settings.builtin_models = plan.models;
-            moss_voice::settings::save(&self.settings_file(), &settings)
-                .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
             let restarted = self.running();
             if restarted {
                 self.stop();
@@ -1327,7 +1396,7 @@ mod imp {
                 return Err(invalid("请填写有效的模型名称和 HTTPS 地址（或本地明确的 HTTP 地址）"));
             }
             let action=input["key"]["action"].as_str().unwrap_or("keep");
-            let mut db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
+            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
             let existing=db.get_secret("voice.vision.main").map_err(|e|internal(db_error(e)))?.is_some_and(|s|!s.is_empty());
             let new_key=match action{
                 "keep"=>None,
@@ -1341,17 +1410,14 @@ mod imp {
             };
             let has_key=match &new_key{None=>existing,Some(Some(_))=>true,Some(None)=>false};
             if next.enabled&&!has_key{return Err(invalid("启用视觉前必须保存对应模型密钥"));}
-            if let Some(change)=new_key {
-                match change {
-                    Some(key)=>{db.set_secret("voice.vision.main",&key,now()).map_err(|e|internal(db_error(e)))?;},
-                    None=>{db.delete_secret("voice.vision.main").map_err(|e|internal(db_error(e)))?;},
-                }
-            }
-            drop(db);
+            let changes:Vec<(String,Option<String>)>=new_key.into_iter().map(|key|("voice.vision.main".to_owned(),key)).collect();
             let mut settings=self.settings();
             settings.builtin_vision=next;
-            moss_voice::settings::save(&self.settings_file(),&settings)
-                .map_err(|_|CenterError::new("vision_save_failed",500,"视觉配置保存失败"))?;
+            commit_secrets_then_settings(&db,&changes,||{
+                moss_voice::settings::save(&self.settings_file(),&settings)
+                    .map_err(|_|CenterError::new("vision_save_failed",500,"视觉配置保存失败"))
+            })?;
+            drop(db);
             Ok(self.vision_status())
         }
 
@@ -1475,19 +1541,14 @@ mod imp {
                     return Err(invalid("开启需要 API 密钥的插件前必须设置密钥"));
                 }
             }
-            drop(db);
 
+            // 持锁到提交完成：校验时看到的密钥状态不会被并发保存改掉
             let mut settings=self.settings();
             settings.builtin_plugins=config;
-            moss_voice::settings::save(&self.settings_file(),&settings)
-                .map_err(|_|CenterError::new("plugin_settings_failed",500,"插件配置保存失败"))?;
-            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-            for (name,value) in operations {
-                match value {
-                    Some(secret)=> { db.set_secret(&name,&secret,now()).map_err(|e|internal(db_error(e)))?; },
-                    None=> { db.delete_secret(&name).map_err(|e|internal(db_error(e)))?; },
-                }
-            }
+            commit_secrets_then_settings(&db,&operations,||{
+                moss_voice::settings::save(&self.settings_file(),&settings)
+                    .map_err(|_|CenterError::new("plugin_settings_failed",500,"插件配置保存失败"))
+            })?;
             drop(db);
             Ok(self.plugins_status())
         }
@@ -1662,45 +1723,55 @@ pub async fn voice_builtin_status(app: tauri::AppHandle) -> CmdResult {
 }
 
 #[tauri::command]
-pub async fn voice_builtin_start(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_builtin_start(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |builtin| builtin.start()).await;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 
 #[tauri::command]
-pub async fn voice_builtin_stop(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_builtin_stop(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |builtin| Ok(builtin.stop())).await;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 
 /// 允许（`allowed`）或撤销（`revoked`）设备。允许后设备需重启以重新获取 token。
 #[tauri::command]
-pub async fn voice_device_set_status(app: tauri::AppHandle, device_id: String, status: String) -> CmdResult {
+pub async fn voice_device_set_status(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, status: String) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| builtin.set_device_status(&device_id, &status)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, device_id, status));
+    let result = desktop_only((app, window, device_id, status));
     result
 }
 
 #[tauri::command]
-pub async fn voice_device_rename(app: tauri::AppHandle, device_id: String, name: String) -> CmdResult {
+pub async fn voice_device_rename(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, name: String) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| builtin.rename_device(&device_id, &name)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, device_id, name));
+    let result = desktop_only((app, window, device_id, name));
     result
 }
 
 /// 测试内置服务的一个模型分区（`llm` / `asr` / `tts`）；密钥留空时用已保存的密钥。
 #[tauri::command]
-pub async fn voice_builtin_models_test(app: tauri::AppHandle, section: String, input: Value) -> CmdResult {
+pub async fn voice_builtin_models_test(app: tauri::AppHandle, window: tauri::WebviewWindow, section: String, input: Value) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| {
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
@@ -1710,13 +1781,15 @@ pub async fn voice_builtin_models_test(app: tauri::AppHandle, section: String, i
     })
     .await;
     #[cfg(mobile)]
-    let result = desktop_only((app, section, input));
+    let result = desktop_only((app, window, section, input));
     result
 }
 
 /// 保存内置服务的模型设置。`clear` 中的分区删除设置与密钥。
 #[tauri::command]
-pub async fn voice_builtin_models_save(app: tauri::AppHandle, input: Value, clear: Option<Vec<String>>) -> CmdResult {
+pub async fn voice_builtin_models_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value, clear: Option<Vec<String>>) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| {
         let input: moss_voice::ModelsInput = serde_json::from_value(input)
@@ -1726,45 +1799,53 @@ pub async fn voice_builtin_models_save(app: tauri::AppHandle, input: Value, clea
     })
     .await;
     #[cfg(mobile)]
-    let result = desktop_only((app, input, clear));
+    let result = desktop_only((app, window, input, clear));
     result
 }
 
 /// 保存本地模型设置（`asr` / `tts` / `vad` 开关、`tts_speaker`、`tts_speed`、`mirror`）。
 #[tauri::command]
-pub async fn voice_local_save(app: tauri::AppHandle, settings: Value) -> CmdResult {
+pub async fn voice_local_save(app: tauri::AppHandle, window: tauri::WebviewWindow, settings: Value) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| builtin.local_save(&settings)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, settings));
+    let result = desktop_only((app, window, settings));
     result
 }
 
 /// 开始下载本地模型（id 见 `local_models::CATALOG`）；进度在状态的 `local.models` 中。
 #[tauri::command]
-pub async fn voice_local_model_download(app: tauri::AppHandle, id: String) -> CmdResult {
+pub async fn voice_local_model_download(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| builtin.model_download(&id)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, id));
+    let result = desktop_only((app, window, id));
     result
 }
 
 #[tauri::command]
-pub async fn voice_local_model_cancel(app: tauri::AppHandle, id: String) -> CmdResult {
+pub async fn voice_local_model_cancel(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| Ok(builtin.model_cancel(&id))).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, id));
+    let result = desktop_only((app, window, id));
     result
 }
 
 #[tauri::command]
-pub async fn voice_local_model_delete(app: tauri::AppHandle, id: String) -> CmdResult {
+pub async fn voice_local_model_delete(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| builtin.model_delete(&id)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, id));
+    let result = desktop_only((app, window, id));
     result
 }
 
@@ -1781,26 +1862,32 @@ fn doubao_defaults_match_the_provider() {
 }
 
 #[tauri::command]
-pub async fn voice_agent_status(app:tauri::AppHandle)->CmdResult{
+pub async fn voice_agent_status(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult{
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|Ok(voice.agent_status())).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result=desktop_only((app, window));
     result
 }
 #[tauri::command]
-pub async fn voice_agent_save(app:tauri::AppHandle,input:Value)->CmdResult{
+pub async fn voice_agent_save(app:tauri::AppHandle, window: tauri::WebviewWindow,input:Value)->CmdResult{
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.agent_save(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result=desktop_only((app, window,input));
     result
 }
 
 
 
 #[tauri::command]
-pub async fn voice_music_pick_directory(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_music_pick_directory(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = tauri::async_runtime::spawn_blocking(move || {
         use tauri_plugin_dialog::DialogExt;
@@ -1825,24 +1912,28 @@ pub async fn voice_music_pick_directory(app: tauri::AppHandle) -> CmdResult {
         "code":"voice_internal","message":"选择音乐目录失败"
     }))?;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 
 #[tauri::command]
-pub async fn voice_music_status(app:tauri::AppHandle)->CmdResult {
+pub async fn voice_music_status(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|Ok(voice.music_status())).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result=desktop_only((app, window));
     result
 }
 #[tauri::command]
-pub async fn voice_music_save(app:tauri::AppHandle,input:Value)->CmdResult {
+pub async fn voice_music_save(app:tauri::AppHandle, window: tauri::WebviewWindow,input:Value)->CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.music_save(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result=desktop_only((app, window,input));
     result
 }
 
@@ -2004,27 +2095,33 @@ pub async fn voice_home_approval_approve(app:tauri::AppHandle,window:tauri::Webv
     result
 }
 #[tauri::command]
-pub async fn voice_vision_status(app:tauri::AppHandle)->CmdResult{
+pub async fn voice_vision_status(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult{
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|Ok(voice.vision_status())).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result=desktop_only((app, window));
     result
 }
 #[tauri::command]
-pub async fn voice_vision_save(app:tauri::AppHandle,input:Value)->CmdResult{
+pub async fn voice_vision_save(app:tauri::AppHandle, window: tauri::WebviewWindow,input:Value)->CmdResult{
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.vision_save(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result=desktop_only((app, window,input));
     result
 }
 #[tauri::command]
-pub async fn voice_vision_test(app:tauri::AppHandle)->CmdResult{
+pub async fn voice_vision_test(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult{
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|voice.vision_test()).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result=desktop_only((app, window));
     result
 }
 

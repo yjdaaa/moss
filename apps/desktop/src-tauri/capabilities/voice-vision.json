@@ -1,10 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "voice-vision-local-main",
-  "description": "NV12 vision model configuration, test and credential management only in packaged main window",
+  "description": "NV12 vision model configuration, test and credential management in the main window; commands additionally pin the exact running backend origin.",
   "windows": [
     "main"
   ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*"
+    ]
+  },
   "permissions": [
     "allow-voice-vision-status",
     "allow-voice-vision-save",

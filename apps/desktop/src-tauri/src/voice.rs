@@ -19,6 +19,16 @@ fn desktop_only<T>(_: T) -> CmdResult {
     Err(error_value("voice_desktop_only", "语音中心仅在 MOSS 桌面端可用"))
 }
 
+/// 改写设置、启停进程、读日志的命令只接受后端地址上的主窗口（见 [`crate::is_trusted_main`]）。
+#[cfg(desktop)]
+fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
+    if crate::window_is_trusted_main(window) {
+        Ok(())
+    } else {
+        Err(error_value("voice_acl_denied", "只能在 MOSS 主窗口修改语音中心"))
+    }
+}
+
 #[cfg(desktop)]
 mod imp {
     use std::sync::Arc;
@@ -169,11 +179,13 @@ pub async fn voice_status(app: tauri::AppHandle) -> CmdResult {
 
 /// 保存服务端目录、Python、启动参数、端口、自建接入点与健康检查地址（不含任何模型密钥）。
 #[tauri::command]
-pub async fn voice_save_settings(app: tauri::AppHandle, settings: Value) -> CmdResult {
+pub async fn voice_save_settings(app: tauri::AppHandle, window: tauri::WebviewWindow, settings: Value) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| center.save_settings(&settings)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, settings));
+    let result = desktop_only((app, window, settings));
     result
 }
 
@@ -192,54 +204,66 @@ pub async fn voice_mode_changes(app: tauri::AppHandle, mode: String) -> CmdResul
 }
 
 #[tauri::command]
-pub async fn voice_set_mode(app: tauri::AppHandle, mode: String) -> CmdResult {
+pub async fn voice_set_mode(app: tauri::AppHandle, window: tauri::WebviewWindow, mode: String) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| center.set_mode(imp::parse_mode(&mode)?)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, mode));
+    let result = desktop_only((app, window, mode));
     result
 }
 
 #[tauri::command]
-pub async fn voice_server_start(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_server_start(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |center| center.server_start()).await;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 
 #[tauri::command]
-pub async fn voice_server_stop(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_server_stop(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |center| center.server_stop()).await;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 
 #[tauri::command]
-pub async fn voice_server_restart(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_server_restart(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |center| center.server_restart()).await;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 
 /// 已脱敏的服务端日志尾部（默认 200 行）。
 #[tauri::command]
-pub async fn voice_server_log(app: tauri::AppHandle, tail: Option<usize>) -> CmdResult {
+pub async fn voice_server_log(app: tauri::AppHandle, window: tauri::WebviewWindow, tail: Option<usize>) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| Ok(serde_json::json!({"lines": center.log_tail(tail.unwrap_or(200))}))).await;
     #[cfg(mobile)]
-    let result = desktop_only((app, tail));
+    let result = desktop_only((app, window, tail));
     result
 }
 
 /// 测试一个分区。请求体中的密钥只在本次调用的内存中使用，结果不回显密钥。
 #[tauri::command]
-pub async fn voice_models_test(app: tauri::AppHandle, section: String, input: Value) -> CmdResult {
+pub async fn voice_models_test(app: tauri::AppHandle, window: tauri::WebviewWindow, section: String, input: Value) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| {
         let section = imp::parse_section(&section)?;
@@ -250,13 +274,15 @@ pub async fn voice_models_test(app: tauri::AppHandle, section: String, input: Va
     })
     .await;
     #[cfg(mobile)]
-    let result = desktop_only((app, section, input));
+    let result = desktop_only((app, window, section, input));
     result
 }
 
 /// 保存到服务端 `data/.config.yaml`（每个非空分区须与测试通过的内容一致）。
 #[tauri::command]
-pub async fn voice_models_save(app: tauri::AppHandle, input: Value) -> CmdResult {
+pub async fn voice_models_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| {
         let input: moss_voice::ModelsInput = serde_json::from_value(input)
@@ -265,7 +291,7 @@ pub async fn voice_models_save(app: tauri::AppHandle, input: Value) -> CmdResult
     })
     .await;
     #[cfg(mobile)]
-    let result = desktop_only((app, input));
+    let result = desktop_only((app, window, input));
     result
 }
 

@@ -30,14 +30,7 @@ pub fn shutdown(app: &tauri::AppHandle) {
     }
 }
 #[cfg(desktop)]
-fn trusted_window(label: &str, url: &tauri::Url, expected: &str) -> bool {
-    label == "main"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.scheme() == "http"
-        && url.host_str() == Some("127.0.0.1")
-        && url.origin().ascii_serialization() == expected
-}
+use crate::is_trusted_main as trusted_window;
 fn error(message: impl Into<String>) -> Value {
     json!({"code":"voice_mcp_error","message":message.into()})
 }
