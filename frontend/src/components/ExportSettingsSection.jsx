@@ -48,9 +48,9 @@ function ExportSettingsPanel() {
   };
 
   return (
-    <div className="ob-fold" style={{ marginBottom: "20px", paddingBottom: "18px", borderBottom: "1px solid var(--line)" }}>
+    <div className="ob-fold export-settings-box">
       <FoldHeader variant="section" id="settings-export" icon={FolderOpen} title="导出" defaultOpen={false} />
-      <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "10px" }}>
+      <div className="export-settings-box-2">
         画板 PNG、场景 JSON、G-code 下载、材料库导出都会保存到这里。不影响运行数据目录。
       </div>
       <div className="ob-export-path">
@@ -62,7 +62,7 @@ function ExportSettingsPanel() {
           </span>
         )}
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", margin: "10px 0" }}>
+      <div className="export-settings-row">
         <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => run("pick_export_dir")}>
           <FolderSearch size={14} /> 选择文件夹…
         </button>
@@ -73,7 +73,7 @@ function ExportSettingsPanel() {
           <FolderOpen size={14} /> 打开文件夹
         </button>
       </div>
-      <label className="checkbox-row" style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
+      <label className="checkbox-row export-settings-label">
         <input
           type="checkbox"
           checked={Boolean(view?.ask_each_time)}

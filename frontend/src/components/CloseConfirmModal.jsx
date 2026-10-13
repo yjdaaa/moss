@@ -14,11 +14,11 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
   };
 
   return (
-    <div className="mat-modal-backdrop" style={{ zIndex: 120 }}>
-      <div className="mat-modal" style={{ maxWidth: "420px" }} role="dialog">
+    <div className="mat-modal-backdrop close-confirm-box">
+      <div className="mat-modal close-confirm-box-2" role="dialog">
         <div className="mat-modal-head">
-          <h3 style={{ display: "flex", alignItems: "center", gap: "8px", margin: 0 }}>
-            <AlertCircle size={18} style={{ color: "var(--laser, #8b7bff)" }} />
+          <h3 className="close-confirm-heading">
+            <AlertCircle size={18} className="close-confirm-icon" />
             <span>关闭主窗口</span>
           </h3>
           <button className="mat-modal-close" onClick={onClose} title="取消">
@@ -27,11 +27,11 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
         </div>
 
         <div className="mat-modal-body">
-          <p style={{ fontSize: "13px", color: "var(--ink-dim, #94a3b8)", marginTop: 0, marginBottom: "16px" }}>
+          <p className="close-confirm-note">
             您点击了关闭窗口，请选择您期望的操作：
           </p>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div className="close-confirm-row">
             <label
               style={{
                 display: "flex",
@@ -51,13 +51,13 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
                 value="tray"
                 checked={selectedAction === "tray"}
                 onChange={() => setSelectedAction("tray")}
-                style={{ marginTop: "3px" }}
+                className="close-confirm-field"
               />
               <div>
-                <div style={{ fontWeight: 600, fontSize: "13px", color: "var(--ink, #fff)" }}>
+                <div className="close-confirm-box-3">
                   最小化到系统托盘
                 </div>
-                <div style={{ fontSize: "12px", color: "var(--ink-dim, #94a3b8)", marginTop: "2px" }}>
+                <div className="close-confirm-box-4">
                   窗口隐藏到任务栏托盘区，后台继续保持激光作业与网络服务
                 </div>
               </div>
@@ -82,13 +82,13 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
                 value="exit"
                 checked={selectedAction === "exit"}
                 onChange={() => setSelectedAction("exit")}
-                style={{ marginTop: "3px" }}
+                className="close-confirm-field"
               />
               <div>
-                <div style={{ fontWeight: 600, fontSize: "13px", color: "var(--ink, #fff)" }}>
+                <div className="close-confirm-box-3">
                   完全退出程序
                 </div>
-                <div style={{ fontSize: "12px", color: "var(--ink-dim, #94a3b8)", marginTop: "2px" }}>
+                <div className="close-confirm-box-4">
                   停止激光加工任务，触发安全急停软复位并彻底杀死进程
                 </div>
               </div>
@@ -97,13 +97,13 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
 
           {voiceServerRunning && selectedAction === "exit" && (
             <label className="close-voice-option" id="close-stop-voice-server">
-              <input type="checkbox" checked={stopServer} onChange={(e) => setStopServer(e.target.checked)} style={{ marginTop: "2px" }} />
+              <input type="checkbox" checked={stopServer} onChange={(e) => setStopServer(e.target.checked)} className="close-confirm-field-2" />
               <span>同时停止语音服务端（由 MOSS 启动的 xiaozhi-server）。取消勾选则退出后服务端继续运行，其输出不再记录。</span>
             </label>
           )}
 
-          <div style={{ marginTop: "16px", paddingTop: "12px", borderTop: "1px solid var(--line, #242b35)" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "12px", color: "var(--ink-dim, #94a3b8)" }}>
+          <div className="close-confirm-box-5">
+            <label className="close-confirm-label">
               <input
                 type="checkbox"
                 checked={remember}

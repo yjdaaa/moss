@@ -196,11 +196,11 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
   };
 
   return (
-    <div className="mat-modal-backdrop" style={{ zIndex: 110 }}>
-      <div className="mat-modal settings-modal" style={{ maxWidth: "480px" }} role="dialog" aria-modal="true">
+    <div className="mat-modal-backdrop settings-box">
+      <div className="mat-modal settings-modal settings-box-2" role="dialog" aria-modal="true">
         <div className="mat-modal-head">
-          <h3 style={{ display: "flex", alignItems: "center", gap: "8px", margin: 0 }}>
-            <Settings size={18} style={{ color: "var(--laser, #8b7bff)" }} />
+          <h3 className="settings-heading">
+            <Settings size={18} className="settings-icon" />
             <span>系统偏好设置</span>
           </h3>
           <button className="mat-modal-close" onClick={onClose} title="关闭">
@@ -215,35 +215,33 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
           {/* 连接电脑时这些设置属于电脑，手机只读（后端也会拒绝），直接隐藏 */}
           {!isRemoteMode() && (<>
           {/* 网络与服务端口设置 */}
-          <div className="ob-fold" style={{ marginBottom: "20px", paddingBottom: "18px", borderBottom: "1px solid var(--line)" }}>
+          <div className="ob-fold settings-box-3">
             <FoldHeader variant="section" id="settings-port" icon={Network} title="服务监听端口 (Web Port)" defaultOpen={false} />
 
-            <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "12px" }}>
+            <div className="settings-box-4">
               上位机 HTTP 服务监听端口，供本桌面端同源访问及手机/局域网连接：
             </div>
 
-            <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
+            <div className="settings-row">
               <input
                 type="number"
                 min={1024}
                 max={65535}
                 value={portInput}
                 onChange={(e) => setPortInput(e.target.value)}
-                className="text-input"
-                style={{ width: "130px", fontFamily: "var(--font-mono)", fontWeight: "700" }}
+                className="text-input settings-field"
                 placeholder="9666"
               />
               <button
                 type="button"
-                className="btn btn-hud-primary"
+                className="btn btn-hud-primary settings-btn"
                 onClick={handleSavePort}
                 disabled={savingPort}
-                style={{ padding: "6px 14px", fontSize: "12px" }}
               >
                 <span>{savingPort ? "保存中..." : "保存端口设置"}</span>
               </button>
               {saveStatus && (
-                <span style={{ fontSize: "11px", color: "var(--green)", fontWeight: 600 }}>
+                <span className="settings-text">
                   {saveStatus}
                 </span>
               )}
@@ -277,54 +275,52 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
           {/* 小智 MCP 桥接设置：桌面端统一在语音中心修改（技术书 §9.5.1，A-77）；
               独立 moss-host、手机等没有语音中心的环境仍在此填写（/api/settings 保持兼容） */}
           {onOpenVoice ? (
-            <div className="ob-fold" id="settings-mcp-moved" style={{ marginBottom: "20px", paddingBottom: "18px", borderBottom: "1px solid var(--line)" }}>
+            <div className="ob-fold settings-box-3" id="settings-mcp-moved">
               <FoldHeader variant="section" id="settings-mcp" icon={Link2} title="小智 MCP 网关端点" defaultOpen={false} />
-              <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", fontSize: "12px", color: "var(--ink-dim)" }}>
+              <div className="settings-row-2">
                 <span>小智连接在语音中心设置（官方 / 自建链路、接入点地址、服务端与模型）。</span>
-                <button type="button" className="btn btn-hud-primary" onClick={onOpenVoice} style={{ padding: "6px 14px", fontSize: "12px" }} id="settings-open-voice">
+                <button type="button" className="btn btn-hud-primary settings-btn" onClick={onOpenVoice} id="settings-open-voice">
                   前往语音中心
                 </button>
               </div>
               {systemInfo?.mcp && (
-                <div style={{ fontSize: "11px", color: "var(--ink-dim)", lineHeight: "1.4", marginTop: "8px" }}>
+                <div className="settings-box-5">
                   当前状态：{systemInfo.mcp.configured ? (systemInfo.mcp.connected ? "已连接" : "已配置，未连接") : "未配置"}
                 </div>
               )}
             </div>
           ) : (
-            <div className="ob-fold" style={{ marginBottom: "20px", paddingBottom: "18px", borderBottom: "1px solid var(--line)" }}>
+            <div className="ob-fold settings-box-3">
               <FoldHeader variant="section" id="settings-mcp" icon={Link2} title="小智 MCP 网关端点" defaultOpen={false} />
-              <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "12px" }}>
+              <div className="settings-box-4">
                 输入小智控制台生成的完整 WebSocket 地址；保存后重启 MOSS 生效。留空并保存可关闭桥接。
               </div>
-              <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "8px" }}>
+              <div className="settings-row-3">
                 <input
                   type="text"
                   value={mcpEndpointInput}
                   onChange={(e) => setMcpEndpointInput(e.target.value)}
-                  className="text-input"
-                  style={{ flex: 1, minWidth: 0, fontFamily: "var(--font-mono)", fontSize: "12px" }}
+                  className="text-input settings-field-2"
                   placeholder="wss://example.com/mcp/?token=..."
                   spellCheck="false"
                   autoComplete="off"
                 />
                 <button
                   type="button"
-                  className="btn btn-hud-primary"
+                  className="btn btn-hud-primary settings-btn-2"
                   onClick={handleSaveMcpEndpoint}
                   disabled={savingMcpEndpoint}
-                  style={{ padding: "6px 14px", fontSize: "12px", whiteSpace: "nowrap" }}
                 >
                   {savingMcpEndpoint ? "保存中..." : "保存端点"}
                 </button>
               </div>
               {mcpSaveStatus && (
-                <div style={{ fontSize: "11px", color: "var(--green)", fontWeight: 600, marginBottom: "8px" }}>
+                <div className="settings-box-6">
                   {mcpSaveStatus}
                 </div>
               )}
               {systemInfo?.mcp && (
-                <div style={{ fontSize: "11px", color: "var(--ink-dim)", lineHeight: "1.4" }}>
+                <div className="settings-box-7">
                   当前状态：{systemInfo.mcp.configured ? (systemInfo.mcp.connected ? "已连接" : "已配置，未连接") : "未配置"}
                   {systemInfo.mcp.endpoint ? `；${systemInfo.mcp.endpoint}` : ""}
                 </div>
@@ -333,19 +329,19 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
           )}
 
           {/* Jev 判断服务设置 */}
-          <div className="ob-fold" style={{ marginBottom: "20px", paddingBottom: "18px", borderBottom: "1px solid var(--line)" }}>
+          <div className="ob-fold settings-box-3">
             <FoldHeader variant="section" id="settings-jev" icon={Link2} title="OpenRouter · Jev 判断服务" defaultOpen={false} />
-            <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "12px" }}>
+            <div className="settings-box-4">
               Jev 只帮助判断“太焦、太浅、切不透”等加工反馈，不直接控制激光机。
             </div>
-            <label style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px", fontSize: "13px", color: "var(--ink)" }}>
+            <label className="settings-label">
               <input type="checkbox" checked={jevEnabled} onChange={(e) => setJevEnabled(e.target.checked)} />
               <span>启用 Jev 判断</span>
             </label>
-            <div style={{ fontSize: "12px", marginBottom: "8px", overflowWrap: "anywhere" }}>
+            <div className="settings-box-8">
               typesafe/jev-1.13
             </div>
-            <div style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "8px" }}>
+            <div className="settings-row-4">
               <input
                 type={jevKeyVisible ? "text" : "password"}
                 value={jevKeyVisible ? jevRevealedKey : jevApiKeyInput}
@@ -357,54 +353,49 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
                     setJevApiKeyInput(e.target.value);
                   }
                 }}
-                className="text-input"
-                style={{ flex: 1, minWidth: 0, fontFamily: "var(--font-mono)", fontSize: "12px" }}
+                className="text-input settings-field-2"
                 placeholder={jevMaskedKey || "输入 OpenRouter API Key"}
                 spellCheck="false"
                 autoComplete="new-password"
               />
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-ghost settings-btn-3"
                 onClick={handleRevealJevKey}
                 title={jevKeyVisible ? "隐藏 Jev API Key" : "查看 Jev API Key"}
                 aria-label={jevKeyVisible ? "隐藏 Jev API Key" : "查看 Jev API Key"}
-                style={{ padding: "7px 9px" }}
               >
                 {jevKeyVisible ? <EyeOff size={15} /> : <Eye size={15} />}
               </button>
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-ghost settings-btn-4"
                 onClick={handleDeleteJevKey}
                 disabled={savingJev || testingJev}
                 title="删除 Jev API Key"
                 aria-label="删除 Jev API Key"
-                style={{ padding: "7px 9px", color: "var(--red, #ff3b5c)" }}
               >
                 <Trash2 size={15} />
               </button>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <div className="settings-row-5">
               <button
                 type="button"
-                className="btn btn-hud-primary"
+                className="btn btn-hud-primary settings-btn"
                 onClick={handleSaveJev}
                 disabled={savingJev}
-                style={{ padding: "6px 14px", fontSize: "12px" }}
               >
                 {savingJev ? "保存中..." : "保存 Jev 设置"}
               </button>
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn btn-ghost settings-btn-5"
                 onClick={handleTestJev}
                 disabled={testingJev || savingJev}
-                style={{ padding: "6px 12px", fontSize: "12px" }}
               >
                 {testingJev ? "测试中..." : "测试连接"}
               </button>
-              {jevSaveStatus && <span style={{ fontSize: "11px", color: "var(--green)", fontWeight: 600 }}>{jevSaveStatus}</span>}
+              {jevSaveStatus && <span className="settings-text">{jevSaveStatus}</span>}
             </div>
           </div>
 
@@ -414,14 +405,14 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
           <ExportSettingsSection />
 
           {/* 桌面客户端关闭行为 */}
-          <div className="ob-fold" style={{ marginBottom: "18px" }}>
+          <div className="ob-fold settings-spacer">
             <FoldHeader variant="section" id="settings-close" icon={Monitor} title="窗口关闭行为" defaultOpen={false} />
 
-            <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "12px" }}>
+            <div className="settings-box-4">
               点击主窗口右上角关闭按钮（[X]）时的默认行为：
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <div className="settings-row-6">
               <label
                 style={{
                   display: "flex",
@@ -440,13 +431,13 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
                   value="ask"
                   checked={closeAction === "ask"}
                   onChange={() => handleActionChange("ask")}
-                  style={{ marginTop: "3px" }}
+                  className="settings-field-3"
                 />
                 <div>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--ink)" }}>
+                  <div className="settings-box-9">
                     每次询问（推荐）
                   </div>
-                  <div style={{ fontSize: "11px", color: "var(--ink-dim)" }}>
+                  <div className="settings-box-10">
                     点击关闭时弹出对话框，由您临时决定是最小化还是完全退出
                   </div>
                 </div>
@@ -470,13 +461,13 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
                   value="tray"
                   checked={closeAction === "tray"}
                   onChange={() => handleActionChange("tray")}
-                  style={{ marginTop: "3px" }}
+                  className="settings-field-3"
                 />
                 <div>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--ink)" }}>
+                  <div className="settings-box-9">
                     最小化到系统托盘
                   </div>
-                  <div style={{ fontSize: "11px", color: "var(--ink-dim)" }}>
+                  <div className="settings-box-10">
                     直接隐藏窗口到右下角托盘区，后台作业不中断，可在托盘右键退出
                   </div>
                 </div>
@@ -500,13 +491,13 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
                   value="exit"
                   checked={closeAction === "exit"}
                   onChange={() => handleActionChange("exit")}
-                  style={{ marginTop: "3px" }}
+                  className="settings-field-3"
                 />
                 <div>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--ink)" }}>
+                  <div className="settings-box-9">
                     完全退出程序
                   </div>
-                  <div style={{ fontSize: "11px", color: "var(--ink-dim)" }}>
+                  <div className="settings-box-10">
                     直接安全停止激光并杀死主进程（适合习惯直接关闭窗口的用户）
                   </div>
                 </div>
@@ -514,16 +505,16 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
             </div>
           </div>
 
-          <div style={{ padding: "10px 12px", background: "rgba(255, 170, 0, 0.08)", border: "1px solid rgba(255, 170, 0, 0.2)", borderRadius: "6px", display: "flex", gap: "8px", alignItems: "flex-start" }}>
-            <ShieldAlert size={16} style={{ color: "var(--gold)", flexShrink: 0, marginTop: "2px" }} />
-            <div style={{ fontSize: "11px", color: "var(--gold)", lineHeight: "1.4" }}>
+          <div className="settings-row-7">
+            <ShieldAlert size={16} className="settings-icon-2" />
+            <div className="settings-box-11">
               <strong>安全机制提示</strong>：当选择完全退出程序时，系统会自动向激光下位机发送 0x18 软复位指令并清零任务，确保激光器熄灭断电，杜绝静止出光火灾隐患。
             </div>
           </div>
         </div>
 
         <div className="mat-modal-foot">
-          <button className="btn btn-hud-primary" onClick={onClose} style={{ padding: "8px 24px" }}>
+          <button className="btn btn-hud-primary settings-btn-6" onClick={onClose}>
             完成设置
           </button>
         </div>

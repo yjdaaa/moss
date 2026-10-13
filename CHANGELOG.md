@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### 前端组件内联样式迁为类名，外观不变（UI-02，2026-10-13）
+
+- **现象与影响**：UI-2 改版计划把组件里的 `style={{…}}` 收进 `styles.css`，但只迁移了顶栏，其余 17 个组件仍有 322 处内联样式，同一种样式散落多处、改设计要逐个找，另有一段 `!important` 规则专门用来压过这些内联样式。
+- **根因与修复**：用脚本把 299 处纯静态样式按 React 的数值规则（非无单位属性补 `px`、`0` 不补）原样转为 217 个类，按组件分段追加在 `styles.css` 末尾，类名为“组件前缀-元素角色”；内联样式原本能压过所有普通规则，其中 90 个类会输给已有更高优先级的选择器，改为重复书写类名（如 `.x.x`）以保持原效果。依赖运行时值的 29 处保留内联。
+- **契约与安全**：纯样式重构，组件结构、接口与行为不变；无默认值或门禁变化。
+- **验证**：迁移前后两版在同一浏览器、同一隔离后端下逐元素比对 12 个界面状态的全部计算样式，迁移相关差异 0（其余为呼吸灯动画与过渡时序）；`npm test` 109 通过、`npm run build` 成功、E2E 32/32 通过。`LogPanel`（未被引用）、`CloseConfirmModal` 与导出设置（仅 Tauri）未渲染实测；未在 Tauri 窗口目视检查。
+- **关联**：`frontend/src/styles.css`（文件末 UI-02 段）、`frontend/src/{main,voicePrivate}.jsx`、`frontend/src/pages/{HomePage,MaterialLabPage,DrawPage}.jsx`、`frontend/src/components/` 下 12 个组件。
+
+### 审查修复：“暂停”不再触发急停，注释中的实时字节不再漏到控制器（2026-10-13）
+
+- **现象**：语音说“暂停一下”走本地快速通道发出 `emergency_stop`（0x18 复位），任务无法继续；串口/TCP 单行发送只检查 `;` 前的指令部分，注释里的 `!`/`~`/`?` 原样发给 GRBL，可能暂停或继续机器且不报错。另有：导出后“在文件夹中显示”遇到含空格路径失效；同名导出存在覆盖竞态；真实 TCP 入口的回环请求缺少 `Host` 时跳过防 DNS 重绑定检查；跨站页面可用不带 Origin 的 GET 反复触发 2 秒 mDNS 扫描。
+- **根因与修复**：`fast::is_stop` 去掉“暂停”（MOSS 无可恢复的暂停动作，交给大模型）；`laser-device` 新增 `contains_realtime_byte` 按整行检查，串口、TCP、FakeGrbl 三处统一；`reveal_exported_file` 用 `raw_arg` 传 `/select,"路径"`；`write_new_export` 以 `create_new` 原子占位；`serve` 入口新增 `missing_host_rejection`，回环请求无 `Host` 返回 403 `host_not_allowed`（进程内调用不受影响）。清理：删除未授权且无调用方的 `request_shutdown` 命令、审批 `consume` 中不可达的 AgentRun 分支。新增 `scripts/clean-build-cache.ps1`（删除增量缓存、子目录 target、Android 中间产物与 debug APK、旧 NV18 暂存副本、本仓库 crate 的旧哈希产物）。
+- **契约变更（破坏性）**：`/api/ui/discover-controllers` 由 GET 改为 **POST**（body `{}`），返回结构不变；自建前端或脚本需改用 POST。
+- **验证**：新增 `realtime_bytes_in_comments_are_rejected_on_sequential_channel`、`missing_host_rejection` 断言、GET 发现接口 404 断言，更新 `stops_are_whole_phrases_and_negations_are_not_stops` 与 `export_paths_never_overwrite_existing_files`；Rust 全量与前端单测见下方。未重新执行三端 release 构建与 E2E，未实机验证 explorer 定位与语音体验。
+- **关联**：`crates/moss-voice-server/src/fast.rs`、`crates/laser-device/src/lib.rs`、`crates/laser-api/src/{lib,approval}.rs`、`apps/desktop/src-tauri/src/{export,lib}.rs`、`apps/desktop/src-tauri/build.rs`、`frontend/src/pages/HomePage.jsx`、API 契约与内置语音技术书 §8.1。
+
 ### 视觉/音乐/Agent 配置卡在真实桌面窗口可用，主窗口特权命令固定到本进程后端地址（2026-10-13）
 
 - **现象与影响**：主窗口启动后导航到 `http://127.0.0.1:<端口>`，对 Tauri 属于 remote 来源；`voice-vision` / `voice-music` / `voice-agent` 三个 capability 未声明 `remote`，Tauri 只对本地打包页授权，真实 App 中这三张配置卡的命令会被 ACL 拒绝（此前只在假桥页面验证）。另一方面 `default.json` 以 `windows:["*"]` + `127.0.0.1:*` 授权 `get_desktop_session`、`voice_save_settings`、`voice_server_start`、模型密钥保存等命令，命令本身不校验来源：任何本机端口的页面一旦进入桌面窗口，就能取得可批准 R3 的桌面会话，或改写服务端 Python 路径后启动任意程序。

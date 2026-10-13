@@ -5,9 +5,11 @@ pub fn normalized(text: &str) -> String {
     text.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
+/// 只收会被理解为“立即停止”的说法；“暂停”的本意是可恢复的暂停，不能映射为不可恢复的急停（0x18 复位），
+/// 交给正常对话处理。
 pub fn is_stop(text: &str) -> bool {
     let text = normalized(text);
-    let words = ["停", "停止", "停下", "停机", "急停", "快停", "别打了", "关掉激光", "暂停"];
+    let words = ["停", "停止", "停下", "停机", "急停", "快停", "别打了", "关掉激光"];
     words.iter().any(|word| text == *word || ["吧", "啊", "了", "一下", "快"].iter().any(|end| text == format!("{word}{end}")))
 }
 
@@ -35,8 +37,8 @@ mod tests {
     use super::*;
     #[test]
     fn stops_are_whole_phrases_and_negations_are_not_stops() {
-        for text in ["停！", "急停", "停止吧", "关掉激光", "暂停一下"] { assert!(is_stop(text), "{text}"); }
-        for text in ["不要停止", "别停", "停止之后怎么办", "如何停止", "我想知道机器停止的原因", "", "停止机器"] { assert!(!is_stop(text), "{text}"); }
+        for text in ["停！", "急停", "停止吧", "关掉激光"] { assert!(is_stop(text), "{text}"); }
+        for text in ["不要停止", "别停", "停止之后怎么办", "如何停止", "我想知道机器停止的原因", "", "停止机器", "暂停", "暂停一下"] { assert!(!is_stop(text), "{text}"); }
         assert_eq!(read_intent("当前进度？"), Some(ReadIntent::Progress));
         assert_eq!(read_intent("当前进度怎么样，顺便开始加工"), None);
     }

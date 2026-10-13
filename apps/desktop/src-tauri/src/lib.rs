@@ -85,11 +85,6 @@ impl ShutdownState {
 }
 
 #[tauri::command]
-fn request_shutdown(state: tauri::State<'_, ShutdownState>) -> bool {
-    state.request()
-}
-
-#[tauri::command]
 fn minimize_to_tray(window: tauri::WebviewWindow) {
     let _ = window.hide();
 }
@@ -243,7 +238,6 @@ pub fn run() {
             export::set_export_ask_each_time,
             export::open_export_dir,
             export::reveal_exported_file,
-            request_shutdown,
             minimize_to_tray,
             exit_application,
             voice::voice_status,

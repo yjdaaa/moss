@@ -54,21 +54,27 @@ fn check_export_extension(path: &Path) -> Result<(), String> {
 }
 
 /// 同名文件已存在时追加 “ (1)”、“ (2)”…，不覆盖用户已有文件。
-pub(crate) fn unique_export_path(dir: &Path, name: &str) -> PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
+/// 在 `dir` 下新建导出文件并写入：重名时依次尝试 `名 (1).扩展名`……；用 `create_new` 原子占位，
+/// 两次同名导出同时进行也不会互相覆盖。
+pub(crate) fn write_new_export(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    use std::io::Write;
     let path = Path::new(name);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("export");
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-    for n in 1..10_000 {
-        let candidate = dir.join(format!("{stem} ({n}).{ext}"));
-        if !candidate.exists() {
-            return candidate;
+    let candidates = std::iter::once(dir.join(name))
+        .chain((1..10_000).map(|n| dir.join(format!("{stem} ({n}).{ext}"))));
+    for candidate in candidates {
+        ensure_inside(dir, &candidate)?;
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(mut file) => {
+                file.write_all(bytes).map_err(|e| format!("写入文件失败: {e}"))?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("写入文件失败: {e}")),
         }
     }
-    dir.join(format!("{stem} ({}).{ext}", std::process::id()))
+    Err("同名导出文件过多，请清理导出目录后重试".into())
 }
 
 /// 读取 settings.json 中的 `export` 设置；文件缺失或格式不对时返回默认值。
@@ -311,9 +317,11 @@ pub fn reveal_exported_file(path: String) -> Result<(), String> {
 
 #[cfg(windows)]
 fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     let mut cmd = std::process::Command::new("explorer.exe");
     if select {
-        cmd.arg(format!("/select,{}", path.display()));
+        // explorer 只认 `/select,"路径"`；整个参数被加引号时（路径含空格）会忽略选择、打开默认目录
+        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
     } else {
         cmd.arg(path);
     }
@@ -372,9 +380,7 @@ pub async fn save_export_file(
         return save_via_dialog(&app, &dir, &name, &bytes);
     }
 
-    let target = unique_export_path(&dir, &name);
-    ensure_inside(&dir, &target)?;
-    std::fs::write(&target, &bytes).map_err(|e| format!("写入文件失败: {e}"))?;
+    let target = write_new_export(&dir, &name, &bytes)?;
     Ok(Some(target.display().to_string()))
 }
 
@@ -432,11 +438,11 @@ mod tests {
     #[test]
     fn export_paths_never_overwrite_existing_files() {
         let dir = temp_dir("unique");
-        let first = unique_export_path(&dir, "scene.json");
+        let first = write_new_export(&dir, "scene.json", b"{}").unwrap();
         assert_eq!(first, dir.join("scene.json"));
-        std::fs::write(&first, b"{}").unwrap();
-        let second = unique_export_path(&dir, "scene.json");
+        let second = write_new_export(&dir, "scene.json", b"[]").unwrap();
         assert_eq!(second, dir.join("scene (1).json"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"{}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

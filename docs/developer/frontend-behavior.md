@@ -6,7 +6,7 @@
 
 | 路径 | 页面 | 主要调用 |
 | --- | --- | --- |
-| `/` | `HomePage` | `/api/ui/runtime-config`、`/api/ui/serial-ports`、`/api/ui/discover-controllers`、`/api/ui/material-options`、`/api/connection/check`、`/api/text-task/generate`、`/api/upload`、`/api/workflow`、`/api/system/info` |
+| `/` | `HomePage` | `/api/ui/runtime-config`、`/api/ui/serial-ports`、`POST /api/ui/discover-controllers`、`/api/ui/material-options`、`/api/connection/check`、`/api/text-task/generate`、`/api/upload`、`/api/workflow`、`/api/system/info` |
 | `/draw` | `DrawPage` | `/api/draw/preview`、`/api/connection/check`、`/api/device/framing`、`/api/workflow` |
 | `/material-lab` | `MaterialLabPage` | `/v1/material-lab/bootstrap`（首屏一次）、`/api/material-lab/manage` / `recent` / `export` / `preview` / `send` / `status` / `select-cell` |
 

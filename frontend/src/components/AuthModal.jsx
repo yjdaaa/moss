@@ -53,10 +53,10 @@ export function AuthModal({ visible, onClose, onAuthenticated }) {
   };
 
   return (
-    <div className="mat-modal-backdrop" style={{ zIndex: 100 }}>
-      <div className="mat-modal" style={{ maxWidth: "380px" }} role="dialog">
+    <div className="mat-modal-backdrop auth-box">
+      <div className="mat-modal auth-box-2" role="dialog">
         <div className="mat-modal-head">
-          <h3 style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <h3 className="auth-heading">
             <KeyRound size={18} />
             <span>局域网访问配对认证</span>
           </h3>
@@ -66,7 +66,7 @@ export function AuthModal({ visible, onClose, onAuthenticated }) {
         </div>
 
         <div className="mat-modal-body">
-          <p style={{ fontSize: "13px", color: "var(--ink-dim, #94a3b8)", marginTop: 0 }}>
+          <p className="auth-note">
             手机或局域网设备访问电脑 MOSS 时需要配对：在电脑 MOSS 的“偏好设置 → 手机连接”中点“生成配对码”，把 6 位数字输入下面（5 分钟内有效）。电脑重启后需重新配对。
           </p>
 
@@ -79,28 +79,23 @@ export function AuthModal({ visible, onClose, onAuthenticated }) {
               placeholder="例如：123456"
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-              style={{
-                fontSize: "20px",
-                letterSpacing: "4px",
-                textAlign: "center",
-                fontFamily: "var(--font-mono, monospace)"
-              }}
+              className="auth-field"
               autoComplete="off"
             />
           </div>
 
           {error && (
-            <div style={{ color: "var(--danger, #ef4444)", fontSize: "12px", marginTop: "8px" }}>
+            <div className="auth-box-3">
               {error}
             </div>
           )}
 
           {currentToken && (
-            <div style={{ marginTop: "12px", padding: "8px", background: "rgba(16, 185, 129, 0.08)", border: "1px solid rgba(16, 185, 129, 0.2)", borderRadius: "4px", fontSize: "12px", color: "#10b981", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div className="auth-row">
               <span>当前会话已持有有效 Token</span>
               <button
                 onClick={handleClearToken}
-                style={{ background: "transparent", border: "none", color: "#ef4444", cursor: "pointer", fontSize: "11px", textDecoration: "underline" }}
+                className="auth-btn"
               >
                 撤销清除
               </button>

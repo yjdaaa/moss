@@ -579,20 +579,20 @@ export function DrawPage({ onNavigate }) {
     <main className="app-shell ob-page ob-draw-page">
       <section className="topbar ob-canvasbar">
         <div>
-          <h1 style={{ fontSize: "18px", margin: 0 }}>Excalidraw 激光画板</h1>
-          <p style={{ fontSize: "12px", margin: "2px 0 0", color: "var(--ink-dim, #94a3b8)" }}>{status}</p>
+          <h1 className="draw-heading">Excalidraw 激光画板</h1>
+          <p className="draw-note">{status}</p>
         </div>
         <div className="topbar-actions">
           <button type="button" className="ghost-button" onClick={() => onNavigate("/")}>
-            <Home size={16} style={{ marginRight: 4 }} />
+            <Home size={16} className="draw-icon" />
             工作台
           </button>
           <button type="button" className="ghost-button" onClick={downloadScene} disabled={busy || !excalidrawAPI}>
-            <FileJson size={16} style={{ marginRight: 4 }} />
+            <FileJson size={16} className="draw-icon" />
             场景
           </button>
           <button type="button" className="ghost-button" onClick={downloadPng} disabled={busy || !excalidrawAPI}>
-            <Download size={16} style={{ marginRight: 4 }} />
+            <Download size={16} className="draw-icon" />
             PNG
           </button>
         </div>
@@ -783,8 +783,7 @@ export function DrawPage({ onNavigate }) {
             </button>
             <button
               type="button"
-              className="secondary-button"
-              style={{ borderColor: "var(--accent-cyan, #8b7bff)", color: "var(--accent-cyan, #8b7bff)" }}
+              className="secondary-button draw-btn"
               onClick={runFraming}
               disabled={busy || !hostReady || !jobSummary?.actual_width_mm}
               title="控制激光头沿工件外接边框空走一圈，用于对齐摆放材料"
@@ -987,7 +986,7 @@ function SendConfirmDialog({
           <Wifi size={17} />
           <span>设备：{host}:{telnetPort || "23"}</span>
         </div>
-        <label className="checkbox-row confirm-moved-ack" style={{ marginTop: "8px", color: "var(--accent-cyan, #8b7bff)" }}>
+        <label className="checkbox-row confirm-moved-ack draw-label">
           <input
             type="checkbox"
             checked={offlineSd}

@@ -287,7 +287,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     setDiscovering(true);
     addLog("DEVICE", "正在通过 mDNS 扫描局域网控制器（约 2 秒）...", "info");
     try {
-      const res = await getJson("/api/ui/discover-controllers");
+      const res = await postJson("/api/ui/discover-controllers", {});
       const list = res.ok && res.data?.success ? res.data.result?.controllers || [] : [];
       if (list.length === 0) {
         addLog("DEVICE", res.data?.result?.hint || "未发现控制器", "warn");
@@ -638,28 +638,17 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           <FoldHeader id="wb-link" title="通信链路" k="LINK" n={1} />
         {/* Connection Bar */}
         <div
-          className="connection-bar"
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            gap: "12px",
-            padding: "12px 18px",
-            background: "rgba(0,0,0,0.25)",
-            borderBottom: "1px solid var(--line, rgba(140, 175, 255, 0.14))",
-            fontSize: "13px",
-          }}
+          className="connection-bar wb-row"
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ color: "var(--laser, #8b7bff)", fontFamily: "var(--font-mono)", fontSize: "11px", fontWeight: "700", letterSpacing: "1px" }}>
+          <div className="wb-row-2">
+            <span className="wb-text">
               [LINK]
             </span>
-            <span style={{ color: "var(--ink-dim, #94a3b8)" }}>通信链路:</span>
+            <span className="wb-text-2">通信链路:</span>
             <select
               value={connectionMode}
               onChange={(e) => setConnectionMode(e.target.value)}
-              className="select-input"
-              style={{ fontWeight: "600" }}
+              className="select-input wb-field"
             >
               <option value="network">网络 (Telnet/TCP)</option>
               <option value="serial">串口 (USB/Serial)</option>
@@ -667,7 +656,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           </div>
 
           {connectionMode === "serial" ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <div className="wb-row-2">
               <select
                 value={serialPort}
                 onChange={(e) => {
@@ -715,22 +704,20 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
               </button>
             </div>
           ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <div className="wb-row-2">
               <input
                 type="text"
                 placeholder="控制器 IP (例 192.168.1.10)"
                 value={networkHost}
                 onChange={(e) => setNetworkHost(e.target.value)}
-                className="text-input"
-                style={{ width: "220px", fontFamily: "var(--font-mono)" }}
+                className="text-input wb-field-2"
               />
-              <span style={{ color: "var(--ink-dim, #94a3b8)" }}>端口:</span>
+              <span className="wb-text-2">端口:</span>
               <input
                 type="number"
                 value={telnetPort}
                 onChange={(e) => setTelnetPort(Number(e.target.value))}
-                className="text-input"
-                style={{ width: "70px", fontFamily: "var(--font-mono)" }}
+                className="text-input wb-field-3"
               />
               <button
                 className="btn btn-ghost"
@@ -738,14 +725,14 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 disabled={discovering}
                 title="通过 mDNS 在局域网内查找 FluidNC（fluidnc.local），自动填入 IP 与端口"
               >
-                <RefreshCw size={13} style={{ marginRight: 4 }} />
+                <RefreshCw size={13} className="wb-icon" />
                 <span>{discovering ? "扫描中…" : "扫描局域网"}</span>
               </button>
             </div>
           )}
 
-          <button className="btn btn-ghost" onClick={handleTestConnection} style={{ marginLeft: "auto" }}>
-            <RefreshCw size={13} style={{ marginRight: 4 }} />
+          <button className="btn btn-ghost wb-btn" onClick={handleTestConnection}>
+            <RefreshCw size={13} className="wb-icon" />
             <span>握手探测</span>
           </button>
         </div>
@@ -754,7 +741,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         <section className="hud-card ob-card" aria-label="加工内容">
           <FoldHeader id="wb-source" title="加工内容" k="SOURCE" n={2} />
             {/* Tool selection cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "8px", marginBottom: "20px" }}>
+            <div className="wb-grid">
               {[
                 { id: "text", label: "矢量文字", sub: "TEXT", icon: Type },
                 { id: "image", label: "图片处理", sub: "RASTER", icon: ImageIcon },
@@ -783,10 +770,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
             {/* Tool specific parameters */}
             {activeTool === "text" && (
-              <div className="tool-body" style={{ marginBottom: "20px" }}>
-                <div style={{ marginBottom: "12px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "5px" }}>
-                    <label style={{ fontSize: "12px", fontWeight: "600", color: "var(--ink)" }}>
+              <div className="tool-body wb-spacer">
+                <div className="wb-spacer-2">
+                  <div className="wb-row-3">
+                    <label className="wb-label">
                       输入文本内容
                     </label>
                     <span style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: textContent.length > 20 ? "var(--gold)" : "var(--ink-dim)" }}>
@@ -798,14 +785,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                     maxLength={24}
                     value={textContent}
                     onChange={(e) => setTextContent(e.target.value)}
-                    className="text-input"
-                    style={{ width: "100%", fontSize: "15px", padding: "10px 14px", fontFamily: "var(--font-mono)" }}
+                    className="text-input wb-field-4"
                     placeholder="输入要雕刻的字符..."
                   />
                 </div>
-                <div style={{ display: "flex", gap: "12px" }}>
-                  <div style={{ flex: 1 }}>
-                    <label style={{ display: "block", fontSize: "12px", fontWeight: "600", color: "var(--ink)", marginBottom: "5px" }}>
+                <div className="wb-row-4">
+                  <div className="wb-box">
+                    <label className="wb-label-2">
                       字高尺寸 (mm)
                     </label>
                     <input
@@ -814,19 +800,17 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       max={120}
                       value={fontSizeMm}
                       onChange={(e) => setFontSizeMm(Number(e.target.value))}
-                      className="text-input"
-                      style={{ width: "100%", fontFamily: "var(--font-mono)" }}
+                      className="text-input wb-field-5"
                     />
                   </div>
-                  <div style={{ flex: 1 }}>
-                    <label style={{ display: "block", fontSize: "12px", fontWeight: "600", color: "var(--ink)", marginBottom: "5px" }}>
+                  <div className="wb-box">
+                    <label className="wb-label-2">
                       排版模式
                     </label>
                     <select
                       value={engravingMode}
                       onChange={(e) => setEngravingMode(e.target.value)}
-                      className="select-input"
-                      style={{ width: "100%" }}
+                      className="select-input wb-field-6"
                     >
                       <option value="raster">光栅填充 (Raster)</option>
                       <option value="outline">轮廓扫描 (Outline)</option>
@@ -838,9 +822,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             )}
 
             {activeTool === "image" && (
-              <div className="tool-body" style={{ marginBottom: "20px" }}>
-                <div style={{ marginBottom: "12px" }}>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: "600", color: "var(--ink)", marginBottom: "5px" }}>
+              <div className="tool-body wb-spacer">
+                <div className="wb-spacer-2">
+                  <label className="wb-label-2">
                     上传图像文件 (PNG / JPG / BMP / WebP)
                   </label>
                   <input
@@ -875,11 +859,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       };
                       reader.readAsDataURL(file);
                     }}
-                    className="file-input"
-                    style={{ width: "100%" }}
+                    className="file-input wb-field-6"
                   />
                   {uploadedFilePath && (
-                    <div style={{ fontSize: "11px", color: "var(--green)", marginTop: "6px", fontFamily: "var(--font-mono)" }}>
+                    <div className="wb-box-2">
                       ✓ 当前素材: {uploadedFilePath}
                     </div>
                   )}
@@ -888,9 +871,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             )}
 
             {activeTool === "gcode" && (
-              <div className="tool-body" style={{ marginBottom: "20px" }}>
-                <div style={{ marginBottom: "12px" }}>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: "600", color: "var(--ink)", marginBottom: "5px" }}>
+              <div className="tool-body wb-spacer">
+                <div className="wb-spacer-2">
+                  <label className="wb-label-2">
                     导入现有 G-code / NC 刀路文件 (.gcode / .nc / .txt)
                   </label>
                   <input
@@ -925,11 +908,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       };
                       reader.readAsDataURL(file);
                     }}
-                    className="file-input"
-                    style={{ width: "100%" }}
+                    className="file-input wb-field-6"
                   />
                   {uploadedFilePath && (
-                    <div style={{ fontSize: "11px", color: "var(--green)", marginTop: "6px", fontFamily: "var(--font-mono)" }}>
+                    <div className="wb-box-2">
                       ✓ 载入刀路: {uploadedFilePath}
                     </div>
                   )}
@@ -938,18 +920,17 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             )}
 
             {activeTool === "draw" && (
-              <div className="tool-body" style={{ marginBottom: "20px", padding: "16px", background: "rgba(139, 123, 255, 0.05)", border: "1px dashed rgba(139, 123, 255, 0.3)", borderRadius: "8px", textAlign: "center" }}>
-                <div style={{ fontSize: "14px", fontWeight: "700", color: "var(--ink)", marginBottom: "6px" }}>
+              <div className="tool-body wb-box-3">
+                <div className="wb-box-4">
                   Excalidraw 矢量创作画板
                 </div>
-                <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "14px" }}>
+                <div className="wb-box-5">
                   支持自由手绘、几何轮廓、图形拼接并一键转为激光切割/光栅雕刻 G-code
                 </div>
                 <button
                   type="button"
-                  className="btn btn-hud-primary"
+                  className="btn btn-hud-primary wb-btn-2"
                   onClick={() => onNavigate("/draw")}
-                  style={{ padding: "8px 20px" }}
                 >
                   <PenTool size={15} />
                   <span>进入画板全屏创作</span>
@@ -962,23 +943,15 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           <FoldHeader id="wb-material" title="材质与参数" k="MATERIAL" n={3} />
             {/* Material & Specs selection Deck */}
             <div
-              style={{
-                background: "rgba(14, 14, 17, 0.7)",
-                padding: "14px 16px",
-                borderRadius: "8px",
-                border: "1px solid rgba(139, 123, 255, 0.2)",
-                marginBottom: "24px",
-                boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.05)",
-              }}
+              className="wb-box-6"
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-                <span style={{ fontSize: "12px", fontWeight: "800", color: "var(--laser, #8b7bff)", letterSpacing: "1px", display: "flex", alignItems: "center", gap: "6px" }}>
-                  <span style={{ width: "6px", height: "6px", background: "var(--laser)", borderRadius: "50%", display: "inline-block" }} />
+              <div className="wb-row-5">
+                <span className="wb-row-6">
+                  <span className="wb-text-3" />
                   加工材质与物理参数联动
                 </span>
                 <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: "11px", padding: "3px 8px" }}
+                  className="btn btn-ghost wb-btn-3"
                   onClick={() => {
                     setMaterialModalData({
                       name: selectedMaterial,
@@ -989,21 +962,20 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                     setShowMaterialModal(true);
                   }}
                 >
-                  <Sliders size={12} style={{ marginRight: 4 }} />
+                  <Sliders size={12} className="wb-icon" />
                   调整库内参数
                 </button>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: "12px" }}>
+              <div className="wb-grid-2">
                 <div>
-                  <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim, #94a3b8)", marginBottom: "4px" }}>
+                  <label className="wb-label-3">
                     材料类型
                   </label>
                   <select
                     value={selectedMaterial}
                     onChange={(e) => setSelectedMaterial(e.target.value)}
-                    className="select-input"
-                    style={{ width: "100%", fontWeight: "600" }}
+                    className="select-input wb-field-7"
                   >
                     {materials.map((m) => (
                       <option key={m.name} value={m.name}>{m.name}</option>
@@ -1012,14 +984,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
 
                 <div>
-                  <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim, #94a3b8)", marginBottom: "4px" }}>
+                  <label className="wb-label-3">
                     厚度规格
                   </label>
                   <select
                     value={selectedThickness}
                     onChange={(e) => setSelectedThickness(e.target.value)}
-                    className="select-input"
-                    style={{ width: "100%", fontFamily: "var(--font-mono)", fontWeight: "600" }}
+                    className="select-input wb-field-8"
                   >
                     {availableThicknesses.map((th) => (
                       <option key={th} value={String(th)}>{th} mm</option>
@@ -1030,12 +1001,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             </div>
 
             {/* Action Buttons: HUD Primary + HUD Fire Trigger */}
-            <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1.3fr", gap: "14px" }}>
+            <div className="wb-grid-3">
               <button
-                className="btn btn-hud-primary"
+                className="btn btn-hud-primary wb-btn-4"
                 onClick={handleGeneratePreview}
                 disabled={busy}
-                style={{ padding: "12px" }}
               >
                 <Cpu size={16} />
                 <span>{busy ? "正在解算..." : currentWorkflow ? "重新生成轨迹" : "计算加工轨迹"}</span>
@@ -1074,7 +1044,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
               <div className="chamber-grid" />
 
               {previewUrl ? (
-                <div style={{ position: "relative", width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2 }}>
+                <div className="wb-row-7">
                   <img
                     src={previewUrl}
                     alt="加工轨迹预览"
@@ -1085,53 +1055,25 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                         e.currentTarget.src = resolveApiUrl(`/preview?path=${encodeURIComponent(imgFile)}&t=${Date.now()}`);
                       }
                     }}
-                    style={{
-                      maxWidth: "92%",
-                      maxHeight: "92%",
-                      objectFit: "contain",
-                      filter: "drop-shadow(0 0 14px rgba(139, 123, 255, 0.65))",
-                      pointerEvents: "none",
-                    }}
+                    className="wb-box-7"
                   />
                   <div
-                    style={{
-                      position: "absolute",
-                      bottom: "12px",
-                      right: "14px",
-                      fontSize: "10px",
-                      fontFamily: "var(--font-mono)",
-                      color: "var(--laser)",
-                      background: "rgba(139, 123, 255, 0.12)",
-                      border: "1px solid rgba(139, 123, 255, 0.35)",
-                      borderRadius: "3px",
-                      padding: "2px 8px",
-                      letterSpacing: "1px",
-                      fontWeight: "700",
-                    }}
+                    className="wb-box-8"
                   >
                     TOOLPATH PREVIEW · READY
                   </div>
                 </div>
               ) : (
-                <div style={{ textAlign: "center", color: "var(--ink-dim, #94a3b8)", position: "relative", zIndex: 2 }}>
+                <div className="wb-box-9">
                   <div
-                    style={{
-                      width: "60px",
-                      height: "60px",
-                      borderRadius: "50%",
-                      border: "1px dashed rgba(139, 123, 255, 0.4)",
-                      display: "grid",
-                      placeItems: "center",
-                      margin: "0 auto 12px",
-                      background: "rgba(139, 123, 255, 0.05)",
-                    }}
+                    className="wb-grid-4"
                   >
-                    <Cpu size={28} style={{ color: "var(--laser, #8b7bff)", opacity: 0.6 }} />
+                    <Cpu size={28} className="wb-icon-2" />
                   </div>
-                  <div style={{ fontSize: "14px", fontWeight: "700", color: "var(--ink)" }}>
+                  <div className="wb-box-10">
                     加工监视舱就绪
                   </div>
-                  <div style={{ fontSize: "12px", marginTop: "4px", color: "var(--ink-faint)" }}>
+                  <div className="wb-box-11">
                     请在左侧设定参数后点击【计算加工轨迹】
                   </div>
                 </div>
@@ -1139,37 +1081,27 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             </div>
 
             {/* Metrics cards (HUD Data Capsules) */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "14px" }}>
+            <div className="wb-grid-5">
               <div
-                style={{
-                  background: "rgba(14, 14, 17, 0.75)",
-                  padding: "10px 14px",
-                  borderRadius: "6px",
-                  border: "1px solid var(--line)",
-                }}
+                className="wb-box-12"
               >
-                <div style={{ fontSize: "11px", color: "var(--ink-dim, #94a3b8)", display: "flex", alignItems: "center", gap: "5px" }}>
-                  <Ruler size={13} style={{ color: "var(--laser)" }} />
+                <div className="wb-row-8">
+                  <Ruler size={13} className="wb-icon-3" />
                   <span>几何轮廓包络</span>
                 </div>
-                <div style={{ fontSize: "15px", fontWeight: "700", fontFamily: "var(--font-mono)", marginTop: "3px" }}>
+                <div className="wb-box-13">
                   {dimensions ? `${dimensions.width.toFixed(1)} × ${dimensions.height.toFixed(1)} mm` : "—"}
                 </div>
               </div>
 
               <div
-                style={{
-                  background: "rgba(14, 14, 17, 0.75)",
-                  padding: "10px 14px",
-                  borderRadius: "6px",
-                  border: "1px solid var(--line)",
-                }}
+                className="wb-box-12"
               >
-                <div style={{ fontSize: "11px", color: "var(--ink-dim, #94a3b8)", display: "flex", alignItems: "center", gap: "5px" }}>
-                  <Clock size={13} style={{ color: "var(--gold)" }} />
+                <div className="wb-row-8">
+                  <Clock size={13} className="wb-icon-4" />
                   <span>预估加工耗时</span>
                 </div>
-                <div style={{ fontSize: "15px", fontWeight: "700", fontFamily: "var(--font-mono)", marginTop: "3px", color: "var(--laser)" }}>
+                <div className="wb-box-14">
                   {timeEstimate ? `${timeEstimate.estimated_seconds}s (${timeEstimate.estimated_minutes} min)` : "—"}
                 </div>
               </div>
@@ -1191,7 +1123,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
                 <div className="toolpath-item">
                   <span className="toolpath-label">物理 SHA-256</span>
-                  <span className="toolpath-value" style={{ fontSize: "11px", color: "var(--laser-cyan, #8b7bff)" }}>
+                  <span className="toolpath-value wb-text-4">
                     {currentWorkflow?.confirmation_snapshot?.gcode_sha256
                       ? `${currentWorkflow.confirmation_snapshot.gcode_sha256.slice(0, 10)}...`
                       : currentWorkflow?.artifacts?.gcode_sha256
@@ -1201,7 +1133,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
                 <div className="toolpath-item">
                   <span className="toolpath-label">预估耗时</span>
-                  <span className="toolpath-value" style={{ color: "var(--gold, #fbbf24)" }}>
+                  <span className="toolpath-value wb-text-5">
                     {timeEstimate ? `${timeEstimate.estimated_seconds}s` : "—"}
                   </span>
                 </div>
@@ -1223,7 +1155,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
               <div className="streaming-progress-group">
                 <div className="streaming-progress-header">
                   <span>下发实时进度 (STREAMING PROGRESS)</span>
-                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--laser-cyan, #8b7bff)" }}>
+                  <span className="wb-text-6">
                     {sendProgress && sendProgress.total > 0
                       ? `${Math.min(100, Math.round((sendProgress.sent / sendProgress.total) * 100))}%`
                       : "0%"}
@@ -1263,7 +1195,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         <section className="hud-card ob-card" aria-label="加工反馈">
           <FoldHeader id="wb-feedback" title="加工反馈" k="FEEDBACK" />
           {!currentWorkflow?.workflow_id && (
-            <p className="ob-sub" style={{ margin: 0 }}>生成加工轨迹后，可在这里记录加工效果并获取调参建议。</p>
+            <p className="ob-sub wb-note">生成加工轨迹后，可在这里记录加工效果并获取调参建议。</p>
           )}
             {/* 数控中控台与 JobWorker 实时执行卡片 */}
             <FeedbackPanel workflowId={currentWorkflow?.workflow_id} origin={currentWorkflow?.feedback_origin}

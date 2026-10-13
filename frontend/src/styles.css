@@ -2026,7 +2026,7 @@ button.ob-pill {
   }
 }
 
-/* 原组件内联样式在新卡片里的收敛（!important 用于压过组件内联样式，后续逐步改为类名） */
+/* 原组件内联样式在新卡片里的收敛（!important 原用于压过组件内联样式；2026-10-13 静态内联样式已迁为类名（见文件末 UI-02 段），这些规则保留以维持现有外观） */
 .ob-card .connection-bar {
   padding: 0 !important;
   background: none !important;
@@ -2791,3 +2791,261 @@ input:not([type]):focus {
 @media (max-width: 720px) {
   .voice-mode-row, .voice-status-grid, .voice-form-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ============================================================
+   UI-02 组件内联样式迁移（2026-10-13）
+   由组件 style={{...}} 原样转换：数值按 React 规则补 px，类名按“组件前缀-元素角色”命名。
+   仍依赖运行时值的样式（进度宽度、按状态着色等）保留在组件内联。
+   原内联样式能压过所有普通规则；与已有更高优先级选择器冲突的类名重复书写（如 .x.x）以保持原效果。
+   ============================================================ */
+
+/* ---- 应用对话框 AppDialog（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.app-dialog-ext-box { z-index: 140; }
+
+/* ---- 审批中心 ApprovalCenter（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.approval-center-box { z-index: 125; }
+.approval-center-code.approval-center-code { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+
+/* ---- 配对认证 AuthModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.auth-box { z-index: 100; }
+.auth-box-2 { max-width: 380px; }
+.auth-heading.auth-heading { display: flex; align-items: center; gap: 6px; }
+.auth-note.auth-note { font-size: 13px; color: var(--ink-dim, #94a3b8); margin-top: 0; }
+.auth-field.auth-field { font-size: 20px; letter-spacing: 4px; text-align: center; font-family: var(--font-mono, monospace); }
+.auth-box-3 { color: var(--danger, #ef4444); font-size: 12px; margin-top: 8px; }
+.auth-row { margin-top: 12px; padding: 8px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 4px; font-size: 12px; color: #10b981; display: flex; justify-content: space-between; align-items: center; }
+.auth-btn.auth-btn.auth-btn { background: transparent; border: none; color: #ef4444; cursor: pointer; font-size: 11px; text-decoration: underline; }
+
+/* ---- 关闭确认 CloseConfirmModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.close-confirm-box { z-index: 120; }
+.close-confirm-box-2 { max-width: 420px; }
+.close-confirm-heading.close-confirm-heading { display: flex; align-items: center; gap: 8px; margin: 0; }
+.close-confirm-icon.close-confirm-icon.close-confirm-icon { color: var(--laser, #8b7bff); }
+.close-confirm-note.close-confirm-note { font-size: 13px; color: var(--ink-dim, #94a3b8); margin-top: 0; margin-bottom: 16px; }
+.close-confirm-row.close-confirm-row.close-confirm-row { display: flex; flex-direction: column; gap: 10px; }
+.close-confirm-field.close-confirm-field { margin-top: 3px; }
+.close-confirm-box-3 { font-weight: 600; font-size: 13px; color: var(--ink, #fff); }
+.close-confirm-box-4 { font-size: 12px; color: var(--ink-dim, #94a3b8); margin-top: 2px; }
+.close-confirm-field-2.close-confirm-field-2 { margin-top: 2px; }
+.close-confirm-box-5 { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line, #242b35); }
+.close-confirm-label.close-confirm-label.close-confirm-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; color: var(--ink-dim, #94a3b8); }
+
+/* ---- 遥测控制台 ConsoleDrawer（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.drawer-icon { margin-right: 6px; }
+.drawer-text { margin-left: 6px; font-size: 11px; font-family: var(--font-mono); color: var(--laser-cyan, #8b7bff); }
+.drawer-row { margin-left: auto; display: flex; align-items: center; padding-right: 10px; }
+.drawer-btn.drawer-btn.drawer-btn { padding: 2px 8px; font-size: 11px; height: auto; color: var(--text-muted, #94a3b8); }
+.drawer-icon-2 { margin-right: 4px; }
+.drawer-btn-2.drawer-btn-2.drawer-btn-2 { padding: 2px 8px; font-size: 11px; height: auto; color: var(--laser-cyan, #8b7bff); border-color: rgba(139, 123, 255, 0.3); }
+.drawer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.drawer-row-2 { display: flex; align-items: center; gap: 8px; }
+.drawer-icon-3.drawer-icon-3.drawer-icon-3 { color: var(--laser-green, #34d399); }
+.drawer-icon-4.drawer-icon-4.drawer-icon-4 { color: var(--laser-red, #ff3b5c); }
+.drawer-text-2 { font-weight: 700; font-size: 13px; }
+.drawer-text-3.drawer-text-3 { font-size: 11px; color: var(--laser-cyan, #8b7bff); }
+.drawer-text-4 { font-size: 11px; }
+.drawer-icon-5.drawer-icon-5.drawer-icon-5 { color: var(--laser-cyan, #8b7bff); }
+.drawer-text-5.drawer-text-5 { font-size: 11px; color: var(--laser-green, #34d399); }
+.drawer-spacer { margin-top: 14px; }
+.drawer-row-3 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.drawer-text-6 { font-size: 11px; font-weight: 700; color: var(--laser-cyan, #8b7bff); letter-spacing: 0.5px; }
+.drawer-text-7 { font-size: 10px; font-family: var(--font-mono); color: var(--ink-dim, #94a3b8); }
+.drawer-box { min-height: 100px; max-height: 140px; padding: 8px 12px; }
+.drawer-box-2 { font-size: 11px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.drawer-text-8 { font-family: var(--font-mono); color: #c4b5fd; }
+.drawer-spacer-2 { padding: 10px 0; }
+
+/* ---- 导出设置 ExportSettingsSection（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.export-settings-box { margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.export-settings-box-2 { font-size: 12px; color: var(--ink-dim); margin-bottom: 10px; }
+.export-settings-row.export-settings-row.export-settings-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.export-settings-label.export-settings-label.export-settings-label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+
+/* ---- 日志面板 LogPanel（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.log-panel-row { display: flex; justify-content: space-between; align-items: center; }
+.log-panel-row-2 { display: flex; align-items: center; gap: 6px; }
+.log-panel-btn.log-panel-btn.log-panel-btn { padding: 2px 8px; font-size: 12px; height: auto; }
+.log-panel-icon { margin-right: 4px; }
+.log-panel-box { max-height: 240px; overflow-y: auto; }
+.log-panel-box-2 { padding: 12px; color: var(--ink-faint, #667085); font-size: 12px; }
+.log-panel-row-3 { display: flex; gap: 8px; padding: 4px 8px; font-size: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.log-panel-text { color: var(--ink-faint, #667085); font-family: var(--font-mono); }
+.log-panel-text-2 { padding: 0 4px; border-radius: 3px; font-size: 10px; font-weight: bold; }
+.log-panel-text-3 { flex: 1; word-break: break-all; }
+
+/* ---- 材料编辑 MaterialModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.mat-form-icon { margin-right: 6px; vertical-align: middle; }
+.mat-form-box { display: block; color: var(--danger); margin-top: 8px; }
+.mat-form-btn.mat-form-btn.mat-form-btn { color: var(--danger); }
+.mat-form-icon-2 { margin-right: 4px; vertical-align: middle; }
+
+/* ---- 手机连接 PhoneLinkSection（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.phone-link-label.phone-link-label.phone-link-label { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 10px; }
+.phone-link-box { font-size: 12px; color: var(--gold); margin-bottom: 10px; }
+.phone-link-box-2 { font-size: 12px; margin-bottom: 10px; }
+.phone-link-text { font-weight: 700; }
+.phone-link-text-2 { color: var(--ink-dim); }
+.phone-link-row.phone-link-row.phone-link-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.phone-link-btn.phone-link-btn.phone-link-btn { padding: 6px 14px; font-size: 12px; }
+.phone-link-text-3 { font-size: 20px; font-weight: 800; letter-spacing: 4px; }
+.phone-link-box-3 { font-size: 11px; color: var(--ink-dim); margin-top: 6px; }
+.phone-link-field.phone-link-field.phone-link-field.phone-link-field { flex: 1 1 180px; font-family: var(--font-mono); }
+
+/* ---- 发送覆盖层 SendOverlay（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.send-overlay-box { margin-top: 6px; font-family: var(--font-mono); }
+.send-overlay-row { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
+.send-overlay-btn.send-overlay-btn.send-overlay-btn { border-color: var(--line); }
+
+/* ---- 偏好设置 SettingsModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.settings-box { z-index: 110; }
+.settings-box-2 { max-width: 480px; }
+.settings-heading.settings-heading { display: flex; align-items: center; gap: 8px; margin: 0; }
+.settings-icon.settings-icon.settings-icon { color: var(--laser, #8b7bff); }
+.settings-box-3 { margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.settings-box-4 { font-size: 12px; color: var(--ink-dim); margin-bottom: 12px; }
+.settings-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.settings-field.settings-field { width: 130px; font-family: var(--font-mono); font-weight: 700; }
+.settings-btn.settings-btn.settings-btn { padding: 6px 14px; font-size: 12px; }
+.settings-text { font-size: 11px; color: var(--green); font-weight: 600; }
+.settings-row-2.settings-row-2.settings-row-2 { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--ink-dim); }
+.settings-box-5 { font-size: 11px; color: var(--ink-dim); line-height: 1.4; margin-top: 8px; }
+.settings-row-3 { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.settings-field-2.settings-field-2.settings-field-2.settings-field-2 { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; }
+.settings-btn-2.settings-btn-2.settings-btn-2 { padding: 6px 14px; font-size: 12px; white-space: nowrap; }
+.settings-box-6 { font-size: 11px; color: var(--green); font-weight: 600; margin-bottom: 8px; }
+.settings-box-7 { font-size: 11px; color: var(--ink-dim); line-height: 1.4; }
+.settings-label.settings-label.settings-label { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13px; color: var(--ink); }
+.settings-box-8 { font-size: 12px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.settings-row-4 { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.settings-btn-3.settings-btn-3.settings-btn-3 { padding: 7px 9px; }
+.settings-btn-4.settings-btn-4.settings-btn-4 { padding: 7px 9px; color: var(--red, #ff3b5c); }
+.settings-row-5 { display: flex; align-items: center; gap: 10px; }
+.settings-btn-5.settings-btn-5.settings-btn-5 { padding: 6px 12px; font-size: 12px; }
+.settings-spacer { margin-bottom: 18px; }
+.settings-row-6.settings-row-6.settings-row-6 { display: flex; flex-direction: column; gap: 8px; }
+.settings-field-3.settings-field-3 { margin-top: 3px; }
+.settings-box-9 { font-size: 13px; font-weight: 600; color: var(--ink); }
+.settings-box-10 { font-size: 11px; color: var(--ink-dim); }
+.settings-row-7 { padding: 10px 12px; background: rgba(255, 170, 0, 0.08); border: 1px solid rgba(255, 170, 0, 0.2); border-radius: 6px; display: flex; gap: 8px; align-items: flex-start; }
+.settings-icon-2.settings-icon-2.settings-icon-2 { color: var(--gold); flex-shrink: 0; margin-top: 2px; }
+.settings-box-11 { font-size: 11px; color: var(--gold); line-height: 1.4; }
+.settings-btn-6.settings-btn-6.settings-btn-6 { padding: 8px 24px; }
+
+/* ---- 第三方 MCP VoiceMcpCard（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.voice-mcp-cell { overflow-wrap: anywhere; max-width: 320px; }
+.voice-mcp-cell-2 { overflow-wrap: anywhere; }
+
+/* ---- 启动页 main.jsx（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.boot-box { min-height: 100vh; position: relative; color: var(--ink, #e8ecf6); }
+.boot-grid { min-height: 100vh; display: grid; place-content: center; padding: 24px; background: #111820; color: #f0f3f5; text-align: center; }
+.boot-heading.boot-heading { font-size: 24px; }
+.boot-code.boot-code { max-width: 640px; white-space: pre-wrap; word-break: break-all; text-align: left; font-size: 13px; opacity: 0.85; }
+.boot-btn.boot-btn.boot-btn { margin-top: 12px; }
+
+/* ---- 创作画板 DrawPage（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.draw-heading.draw-heading { font-size: 18px; margin: 0; }
+.draw-note.draw-note { font-size: 12px; margin: 2px 0 0; color: var(--ink-dim, #94a3b8); }
+.draw-icon { margin-right: 4px; }
+.draw-btn.draw-btn.draw-btn { border-color: var(--accent-cyan, #8b7bff); color: var(--accent-cyan, #8b7bff); }
+.draw-label.draw-label.draw-label { margin-top: 8px; color: var(--accent-cyan, #8b7bff); }
+
+/* ---- 雕刻工作台 HomePage（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.wb-row.wb-row.wb-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 18px; background: rgba(0,0,0,0.25); border-bottom: 1px solid var(--line, rgba(140, 175, 255, 0.14)); font-size: 13px; }
+.wb-row-2 { display: flex; align-items: center; gap: 8px; }
+.wb-text { color: var(--laser, #8b7bff); font-family: var(--font-mono); font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+.wb-text-2 { color: var(--ink-dim, #94a3b8); }
+.wb-field { font-weight: 600; }
+.wb-field-2.wb-field-2 { width: 220px; font-family: var(--font-mono); }
+.wb-field-3.wb-field-3 { width: 70px; font-family: var(--font-mono); }
+.wb-icon { margin-right: 4px; }
+.wb-btn.wb-btn.wb-btn { margin-left: auto; }
+.wb-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+.wb-spacer { margin-bottom: 20px; }
+.wb-spacer-2 { margin-bottom: 12px; }
+.wb-row-3 { display: flex; justify-content: space-between; margin-bottom: 5px; }
+.wb-label.wb-label.wb-label { font-size: 12px; font-weight: 600; color: var(--ink); }
+.wb-field-4.wb-field-4 { width: 100%; font-size: 15px; padding: 10px 14px; font-family: var(--font-mono); }
+.wb-row-4 { display: flex; gap: 12px; }
+.wb-box.wb-box.wb-box { flex: 1; }
+.wb-label-2.wb-label-2.wb-label-2 { display: block; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 5px; }
+.wb-field-5.wb-field-5 { width: 100%; font-family: var(--font-mono); }
+.wb-field-6 { width: 100%; }
+.wb-box-2 { font-size: 11px; color: var(--green); margin-top: 6px; font-family: var(--font-mono); }
+.wb-box-3 { margin-bottom: 20px; padding: 16px; background: rgba(139, 123, 255, 0.05); border: 1px dashed rgba(139, 123, 255, 0.3); border-radius: 8px; text-align: center; }
+.wb-box-4 { font-size: 14px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+.wb-box-5 { font-size: 12px; color: var(--ink-dim); margin-bottom: 14px; }
+.wb-btn-2.wb-btn-2.wb-btn-2 { padding: 8px 20px; }
+.wb-box-6 { background: rgba(14, 14, 17, 0.7); padding: 14px 16px; border-radius: 8px; border: 1px solid rgba(139, 123, 255, 0.2); margin-bottom: 24px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+.wb-row-5 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.wb-row-6.wb-row-6 { font-size: 12px; font-weight: 800; color: var(--laser, #8b7bff); letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
+.wb-text-3.wb-text-3 { width: 6px; height: 6px; background: var(--laser); border-radius: 50%; display: inline-block; }
+.wb-btn-3.wb-btn-3.wb-btn-3 { font-size: 11px; padding: 3px 8px; }
+.wb-grid-2 { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; }
+.wb-label-3.wb-label-3.wb-label-3 { display: block; font-size: 11px; color: var(--ink-dim, #94a3b8); margin-bottom: 4px; }
+.wb-field-7 { width: 100%; font-weight: 600; }
+.wb-field-8 { width: 100%; font-family: var(--font-mono); font-weight: 600; }
+.wb-grid-3 { display: grid; grid-template-columns: 1.1fr 1.3fr; gap: 14px; }
+.wb-btn-4.wb-btn-4.wb-btn-4 { padding: 12px; }
+.wb-row-7 { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; z-index: 2; }
+.wb-box-7.wb-box-7 { max-width: 92%; max-height: 92%; object-fit: contain; filter: drop-shadow(0 0 14px rgba(139, 123, 255, 0.65)); pointer-events: none; }
+.wb-box-8 { position: absolute; bottom: 12px; right: 14px; font-size: 10px; font-family: var(--font-mono); color: var(--laser); background: rgba(139, 123, 255, 0.12); border: 1px solid rgba(139, 123, 255, 0.35); border-radius: 3px; padding: 2px 8px; letter-spacing: 1px; font-weight: 700; }
+.wb-box-9 { text-align: center; color: var(--ink-dim, #94a3b8); position: relative; z-index: 2; }
+.wb-grid-4 { width: 60px; height: 60px; border-radius: 50%; border: 1px dashed rgba(139, 123, 255, 0.4); display: grid; place-items: center; margin: 0 auto 12px; background: rgba(139, 123, 255, 0.05); }
+.wb-icon-2.wb-icon-2.wb-icon-2 { color: var(--laser, #8b7bff); opacity: 0.6; }
+.wb-box-10 { font-size: 14px; font-weight: 700; color: var(--ink); }
+.wb-box-11 { font-size: 12px; margin-top: 4px; color: var(--ink-faint); }
+.wb-grid-5 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+.wb-box-12 { background: rgba(14, 14, 17, 0.75); padding: 10px 14px; border-radius: 6px; border: 1px solid var(--line); }
+.wb-row-8 { font-size: 11px; color: var(--ink-dim, #94a3b8); display: flex; align-items: center; gap: 5px; }
+.wb-icon-3.wb-icon-3.wb-icon-3 { color: var(--laser); }
+.wb-box-13 { font-size: 15px; font-weight: 700; font-family: var(--font-mono); margin-top: 3px; }
+.wb-icon-4.wb-icon-4.wb-icon-4 { color: var(--gold); }
+.wb-box-14 { font-size: 15px; font-weight: 700; font-family: var(--font-mono); margin-top: 3px; color: var(--laser); }
+.wb-text-4 { font-size: 11px; color: var(--laser-cyan, #8b7bff); }
+.wb-text-5 { color: var(--gold, #fbbf24); }
+.wb-text-6 { font-family: var(--font-mono); color: var(--laser-cyan, #8b7bff); }
+.wb-note.wb-note { margin: 0; }
+
+/* ---- 材料实验室 MaterialLabPage（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.lab-box { margin: 0 0 12px; padding: 8px 12px; border-radius: 6px; font-size: 12px; background: rgba(255, 170, 0, 0.08); border: 1px solid rgba(255, 170, 0, 0.25); color: var(--gold); }
+.lab-row { display: flex; gap: 8px; }
+.lab-icon { margin-right: 4px; }
+.lab-label.lab-label { cursor: pointer; display: inline-flex; align-items: center; }
+.lab-field { display: none; }
+.lab-row-2.lab-row-2.lab-row-2 { padding: 12px; display: flex; flex-direction: column; }
+.lab-row-3 { display: flex; gap: 6px; margin-bottom: 10px; }
+.lab-box-2.lab-box-2.lab-box-2 { position: relative; flex: 1; }
+.lab-icon-2.lab-icon-2.lab-icon-2 { position: absolute; left: 8px; top: 10px; color: var(--ink-dim, #94a3b8); }
+.lab-field-2.lab-field-2 { width: 100%; padding-left: 28px; font-size: 12px; }
+.lab-btn.lab-btn.lab-btn { padding: 4px 8px; font-size: 12px; display: flex; align-items: center; gap: 2px; }
+.lab-row-4.lab-row-4.lab-row-4 { padding: 16px; display: flex; flex-direction: column; }
+.lab-row-5 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.lab-row-6 { display: flex; align-items: center; gap: 8px; }
+.lab-heading.lab-heading { margin: 0; font-size: 15px; color: var(--ink, #fff); }
+.lab-btn-2.lab-btn-2.lab-btn-2 { font-size: 11px; padding: 2px 8px; display: flex; align-items: center; gap: 4px; }
+.lab-row-7 { display: flex; gap: 6px; margin-bottom: 14px; }
+.lab-grid.lab-grid.lab-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: 1; }
+.lab-label-2.lab-label-2.lab-label-2 { display: block; font-size: 11px; color: var(--ink-dim); margin-bottom: 3px; }
+.lab-field-3.lab-field-3 { width: 100%; }
+.lab-box-3.lab-box-3 { grid-column: span 2; }
+.lab-row-8 { display: flex; gap: 8px; margin-top: 16px; }
+.lab-btn-3.lab-btn-3.lab-btn-3 { flex: 1; }
+.lab-row-9 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.lab-heading-2.lab-heading-2 { margin: 0; font-size: 13px; color: var(--ink-dim, #b4b4bd); font-weight: 500; }
+.lab-text { font-size: 12px; color: var(--laser, #8b7bff); }
+.lab-grid-2 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.lab-label-3.lab-label-3.lab-label-3 { font-size: 10px; color: var(--ink-dim); }
+.lab-row-10 { display: flex; gap: 2px; }
+.lab-field-4.lab-field-4 { width: 50%; padding: 4px; }
+.lab-row-11.lab-row-11.lab-row-11 { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.lab-field-5.lab-field-5.lab-field-5.lab-field-5 { flex: 1; padding: 4px 8px; }
+.lab-row-12.lab-row-12.lab-row-12 { flex: 1; background: rgba(0,0,0,0.3); border-radius: 4px; border: 1px solid var(--line, #242b35); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px; min-height: 220px; }
+.lab-box-4 { text-align: center; }
+.lab-box-5 { font-size: 12px; color: var(--ink-dim); margin-bottom: 6px; }
+.lab-text-2 { font-weight: bold; font-size: 11px; }
+.lab-box-6 { margin-top: 8px; font-size: 11px; color: var(--ink-dim); }
+.lab-box-7 { color: var(--ink-dim); text-align: center; font-size: 12px; }
+.lab-icon-3 { opacity: 0.3; margin-bottom: 4px; }
+
+/* ---- 语音隐私窗口 voicePrivate（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+.voice-private-box { max-width: 900px; margin: 0 auto; padding: 24px; }

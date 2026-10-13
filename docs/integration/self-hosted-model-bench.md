@@ -25,6 +25,24 @@
 
 具体运行结果只在实施 TODO §9 追加，不从测试存在推断本轮通过。
 
+### 2.1 上游配置加载离线校验（P4-06 / A-67，2026-10-13）
+
+用户授权下载 §1 固定版本源码包（`codeload.github.com/xinnan-tech/xiaozhi-esp32-server/zip/87c6df7…`，155,609,600 字节，SHA-256 `548ceb1cdc6d2e9e4c92a4726fcaff07ade413593aa6fbe575109193157fba77`），解压到仓库外 `<path>`，不入库。
+
+- 生成：`cargo run -p moss-voice --example p4_06_config_yaml -- <写入前.yaml> <写出.yaml>`，调用语音中心真实的 `edits_for` + `apply`，假地址、假密钥。
+- 校验：`python -I scripts/verify-p4-06-upstream-config.py --server-dir <上游>/main/xiaozhi-server --original <写入前.yaml> --custom <写出.yaml>`。导入上游原版 `config/config_loader.py`，只把智控台 HTTP 客户端 `config.manage_api_client` 换成空桩（单模块部署不调用）；用其 `read_config` + `merge_configs` 与默认 `config.yaml` 合并，按 `modules_initialize.py` 的 `config[模块][selected_module[模块]]["type"]` 规则核对 provider 文件存在。
+- 字段与上游 provider 读取一致：`llm/openai/openai.py` 读 `url`/`api_key`/`model_name`；`asr/openai.py` 读 `base_url`（直接 POST 到完整 `/audio/transcriptions`）/`api_key`/`model_name`/`output_dir`；`tts/openai.py` 读 `api_url`/`model`/`voice`/`speed`/`output_dir`；`Intent.function_call` 与顶层 `mcp_endpoint` 存在于默认 `config.yaml`。
+
+| 写入前文件 | 结果 |
+| --- | --- |
+| 最小覆盖文件（server + selected_module + 已有 LLM 分区 + 多行 prompt） | 29 项 PASS |
+| 上游完整 `config.yaml` 原样作为自定义文件 | 29 项 PASS；diff 仅 5 处取值与 3 个新增 Moss 块，其余内容与注释不变 |
+| 只有注释的新文件 | 29 项 PASS |
+| 上游 `config_from_api.yaml`（含 `manager-api.url`） | 生成端按规则拒绝写入（退出码 2） |
+| 反向对照：把写出的 `base_url` 手改为 `url` | 校验 FAIL、退出码 1 |
+
+边界：只证明上游加载器能解析合并、字段名与 provider 读取一致；未安装上游依赖、未启动服务、未连接真实模型或设备，运行兼容仍归 P2a / HW-11。
+
 ## 3. 真实模型验证表（P0-01～04 / P3，均未验收）
 
 | 项目 | 协议要求 | 需记录的非敏感结果 | 状态 |

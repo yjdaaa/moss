@@ -206,7 +206,7 @@ function App() {
   };
 
   return (
-    <div className="laser-app-root ob-shell" style={{ minHeight: "100vh", position: "relative", color: "var(--ink, #e8ecf6)" }}>
+    <div className="laser-app-root ob-shell boot-box">
       <CyberBackground />
       <SideNav
         currentPath={currentPath}
@@ -296,11 +296,11 @@ initializeBackendOrigin()
     console.error("后端启动失败", error);
     const remote = isRemoteMode();
     root.render(
-      <main role="alert" style={{ minHeight: "100vh", display: "grid", placeContent: "center", padding: 24, background: "#111820", color: "#f0f3f5", textAlign: "center" }}>
-        <h1 style={{ fontSize: 24 }}>{remote ? "无法连接电脑 MOSS" : "MOSS 后端无法启动"}</h1>
+      <main role="alert" className="boot-grid">
+        <h1 className="boot-heading">{remote ? "无法连接电脑 MOSS" : "MOSS 后端无法启动"}</h1>
         <p>{remote ? "手机当前设置为连接电脑上的 MOSS。" : "无法连接本机服务，请检查是否已有 MOSS 实例运行。"}</p>
         {backendStartupErrorText(error) && (
-          <pre style={{ maxWidth: 640, whiteSpace: "pre-wrap", wordBreak: "break-all", textAlign: "left", fontSize: 13, opacity: 0.85 }}>
+          <pre className="boot-code">
             {backendStartupErrorText(error)}
           </pre>
         )}
@@ -308,7 +308,7 @@ initializeBackendOrigin()
         {remote && (
           <button
             type="button"
-            style={{ marginTop: 12 }}
+            className="boot-btn"
             onClick={() => {
               clearRemoteOrigin();
               window.location.reload();

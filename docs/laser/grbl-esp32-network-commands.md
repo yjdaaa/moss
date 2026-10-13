@@ -295,7 +295,7 @@ $N
 - 任意单条命令不对外开放。`laser_grbl_tool` / `laser_network_grbl_tool` 的 `send_command` 与 `send_file` 一律拒绝；受控动作走 `laser_safe_action_tool` / `/api/safe-action`，其中 `status` 与进给/功率倍率不需确认，`unlock`、`home`、`set_origin`、`laser_off`、移动、`0x18` 需要 `confirmed=true`。
 - 完整任务只走 workflow：`preview` 冻结 SHA-256 与参数，`confirm_send` 重算 SHA、握手、读 `$30`、`$CD`、Idle 与引脚预检后逐行发送；网络任务强制 Telnet。
 - SD 脱机模式用固件 HTTP `/upload` 把文件写入 SD 卡，用 `$File/ShowHash` 比对哈希后 `$SD/Run`；这是 HTTP 在本仓库唯一的用途。
-- 局域网发现用 mDNS（`/api/ui/discover-controllers`），只读。
+- 局域网发现用 mDNS（`POST /api/ui/discover-controllers`），只读。
 - 上位机不写 `$30`、`$32`、`$100` 等只读代理；FluidNC 对这些写入回 `error:162`。
 
 ## 9. 当前 MCP 网络工具边界

@@ -51,7 +51,7 @@ export function AppDialogHost() {
       : "btn btn-primary";
 
   return (
-    <div className="mat-modal-backdrop app-dialog-backdrop" style={{ zIndex: 140 }}>
+    <div className="mat-modal-backdrop app-dialog-backdrop app-dialog-ext-box">
       <div
         className={`mat-modal app-dialog app-dialog--${dialog.tone}`}
         role={isConfirm ? "alertdialog" : "dialog"}

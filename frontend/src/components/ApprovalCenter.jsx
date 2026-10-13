@@ -244,7 +244,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
   return (
     <>
       {approvalOpen && (
-        <div className="mat-modal-backdrop approval-backdrop" style={{ zIndex: 125 }}>
+        <div className="mat-modal-backdrop approval-backdrop approval-center-box">
           <div className="mat-modal approval-card" role="dialog" aria-modal="true" aria-labelledby="approval-title" id="approval-card">
             <div className="mat-modal-head">
               <h3 id="approval-title" className="approval-title">
@@ -295,7 +295,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                   <dd className="mono" title={shown.digest}>sha256 {shortDigest(shown.digest)}</dd>
                 </dl>
               </div>
-              {shown.kind === "external_tool" && <div className="voice-hint"><b>参数预览（敏感字段已隐藏，长内容可能截断）</b><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 180, overflow: "auto" }}>{JSON.stringify(shown.external?.arguments ?? {}, null, 2)}</pre><span>这是第三方操作，不代表 MOSS 验证过该服务的安全性。不确定时请选择拒绝。</span></div>}
+              {shown.kind === "external_tool" && <div className="voice-hint"><b>参数预览（敏感字段已隐藏，长内容可能截断）</b><pre className="approval-center-code">{JSON.stringify(shown.external?.arguments ?? {}, null, 2)}</pre><span>这是第三方操作，不代表 MOSS 验证过该服务的安全性。不确定时请选择拒绝。</span></div>}
               <p className="approval-summary">{shown.summary}</p>
               {!failure && (
                 <div className="approval-timer" aria-live="polite">

@@ -83,7 +83,7 @@ function ComputerHostPanel() {
         开启后，同一 WiFi 下的手机 App 可以连接这台电脑，用电脑的数据操作雕刻机（连接、预览、发送、急停）。
         手机上材料、校准参数和系统设置只读，只能在电脑上修改。
       </div>
-      <label style={{ display: "flex", gap: "8px", alignItems: "center", fontSize: "13px", marginBottom: "10px" }}>
+      <label className="phone-link-label">
         <input
           type="checkbox"
           checked={Boolean(info.lan_access_saved)}
@@ -93,28 +93,28 @@ function ComputerHostPanel() {
         <span>允许手机连接（保存后重启 MOSS 生效）</span>
       </label>
       {info.restart_required && (
-        <div style={{ fontSize: "12px", color: "var(--gold)", marginBottom: "10px" }}>设置已保存，重启 MOSS 后生效。</div>
+        <div className="phone-link-box">设置已保存，重启 MOSS 后生效。</div>
       )}
       {info.lan_access_active && (
         <>
-          <div style={{ fontSize: "12px", marginBottom: "10px" }}>
+          <div className="phone-link-box-2">
             手机 App 中填写的电脑地址：{" "}
-            <span className="mono" style={{ fontWeight: 700 }}>{address || `本机 IP:${info.port}`}</span>
-            {!address && <span style={{ color: "var(--ink-dim)" }}>（未检测到局域网地址，请在 Windows 网络设置中查看本机 IPv4）</span>}
+            <span className="mono phone-link-text">{address || `本机 IP:${info.port}`}</span>
+            {!address && <span className="phone-link-text-2">（未检测到局域网地址，请在 Windows 网络设置中查看本机 IPv4）</span>}
           </div>
-          <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
-            <button type="button" className="btn btn-hud-primary" disabled={busy} onClick={() => void generateCode()} style={{ padding: "6px 14px", fontSize: "12px" }}>
+          <div className="phone-link-row">
+            <button type="button" className="btn btn-hud-primary phone-link-btn" disabled={busy} onClick={() => void generateCode()}>
               <KeyRound size={13} />
               <span>生成配对码</span>
             </button>
             {code && (
-              <span className="mono" style={{ fontSize: "20px", fontWeight: 800, letterSpacing: "4px" }}>
+              <span className="mono phone-link-text-3">
                 {code.value}
               </span>
             )}
           </div>
           {code && (
-            <div style={{ fontSize: "11px", color: "var(--ink-dim)", marginTop: "6px" }}>
+            <div className="phone-link-box-3">
               5 分钟内在手机上输入；电脑重启后手机需要重新配对。
             </div>
           )}
@@ -153,17 +153,16 @@ function ConnectToComputerPanel() {
         连接后手机使用电脑上的数据（材料库、任务记录），通过电脑操作雕刻机；手机上材料与设置只读。
         需要电脑开着 MOSS 并在“偏好设置 → 手机连接”中允许手机连接，手机与电脑在同一个 WiFi。
       </div>
-      <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+      <div className="phone-link-row">
         <input
           type="text"
           inputMode="url"
-          className="text-input"
+          className="text-input phone-link-field"
           value={input}
           placeholder="例如 192.168.1.20:9666"
           onChange={(event) => setInput(event.target.value)}
-          style={{ flex: "1 1 180px", fontFamily: "var(--font-mono)" }}
         />
-        <button type="button" className="btn btn-hud-primary" disabled={busy} onClick={() => void connect()} style={{ padding: "6px 14px", fontSize: "12px" }}>
+        <button type="button" className="btn btn-hud-primary phone-link-btn" disabled={busy} onClick={() => void connect()}>
           <RefreshCw size={13} />
           <span>{busy ? "连接中…" : "连接"}</span>
         </button>
@@ -190,11 +189,11 @@ function RemoteConnectedPanel() {
     <div className="ob-fold" style={foldStyle}>
       <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="连接电脑 MOSS" defaultOpen />
       <div style={hintStyle}>
-        已连接电脑：<span className="mono" style={{ fontWeight: 700 }}>{remoteOriginLabel()}</span>
+        已连接电脑：<span className="mono phone-link-text">{remoteOriginLabel()}</span>
         <br />
         材料、校准参数和系统设置只读，请在电脑上修改；以下其他设置项已隐藏。
       </div>
-      <button type="button" className="btn btn-ghost" onClick={() => void disconnect()} style={{ padding: "6px 14px", fontSize: "12px" }}>
+      <button type="button" className="btn btn-ghost phone-link-btn" onClick={() => void disconnect()}>
         <Unlink size={13} />
         <span>断开，改用手机本机模式</span>
       </button>

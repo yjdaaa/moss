@@ -13,7 +13,7 @@
 | GET | `/api/jobs/stop-targets` | 顶栏急停的后端原始任务目标：`result.jobs` 数组，包含 `job_id`、`target`、`state` (`running` / `unknown`)；状态未知不代表已停机，多个目标不得随机选择 | §2 |
 | GET | `/api/ui/runtime-config` | 连接默认值与上传后缀 | §2 |
 | GET | `/api/ui/serial-ports` | 系统串口列表 | §2 |
-| GET | `/api/ui/discover-controllers` | mDNS 发现 FluidNC | §2 |
+| POST | `/api/ui/discover-controllers` | mDNS 发现 FluidNC（2026-10-13 起由 GET 改为 POST） | §2 |
 | GET | `/api/ui/material-options` | 材料名与厚度 | §2 |
 | GET | `/api/ui/material-recommendation` | 材料推荐参数 | §2 |
 | GET | `/api/material-lab/export` | 材料库导出 | §2 |
@@ -173,7 +173,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | `/api/system/info` | 无 | `{actual_port, preferred_port, is_fallback, web_host, mcp:{configured, connected, endpoint(token 脱敏，未配置为空串), client_info, last_request, last_request_time, messages_count, tools_count, protocol_version, recent_events[], endpoints[], core_tool, safety_gate, estop_channel}, voice:{mode, device_sessions}}`。`configured` 只表示填了接入点地址；`connected` 表示桥当前与接入点保持连接；`client_info`、`last_request`、`recent_events` 无真实数据时为空，`messages_count` 为真实收到的帧数（无则 0），`tools_count` 为当前开关下实际暴露的工具数（安全 19 / 开发者 20，再减去严格模式不开放的与用户关闭的工具）；`endpoints[]`（NV8）为每个接入点的 `{id, endpoint(脱敏), connected, connections, last_error}`，`id` 为 `primary` 或 `extra-N`，`connected` 为任一接入点已连接。`voice.mode` 为 `official` / `self_hosted` / `builtin`（取自运行目录 `settings.json`）；`device_sessions` 在自建链路下来自接入点健康检查，在内置链路下来自内置语音服务（未运行为 `null`），官方链路为 `null` | 无；非回环也免鉴权 |
 | `/api/ui/runtime-config` | 无 | `{connection:{default_mode, preferred_modes:[默认, 另一], serial:{default_port:"", baudrate:115200}, network:{default_host:"", transport:"telnet", http_port:80, telnet_port:23, timeout:5.0}}, upload:{gcode_suffixes:[".gcode",".nc"]}}` | 无 |
 | `/api/ui/serial-ports` | 无 | `{ports:[…], default_port, baudrate}`；只列系统真实识别到的串口 | 无 |
-| `/api/ui/discover-controllers` | 无 | `{controllers:[{hostname, ip, telnet_port, http_port}], hint}`；mDNS 浏览约 2 秒，不向设备发命令 | 无 |
+| `/api/ui/discover-controllers`（**POST**，body `{}`；用 POST 防止跨站页面用无 Origin 的 GET 触发扫描） | 无 | `{controllers:[{hostname, ip, telnet_port, http_port}], hint}`；mDNS 浏览约 2 秒，不向设备发命令 | 无 |
 | `/api/ui/material-options` | 无 | `{materials:[{name, thicknesses:[数字升序]}]}` 按 name 排序 | 500 `读取材料选项失败` |
 | `/api/ui/material-recommendation` | `material` 必填、`laser_mode` 必填、`thickness_mm`、`engraving_mode` 可选、`power_scale` 可选 | 白名单投影：`material, thickness_mm, matched_thickness_mm, match, laser_mode, laser_max_power, feed_rate, passes`；engrave 且有值时加 `engraving_mode` | 400 `material 和 laser_mode 不能为空` / `读取材料推荐失败` |
 | `/api/material-lab/export` | 无 | `{params_file, library:{version:1, power_scale, materials}}` | 500 |

@@ -635,7 +635,7 @@ impl ApprovalService {
             drop(tx);
             return Err(status_error(&db, approval_id)?);
         }
-        if matches!(record.kind, ApprovalKind::ExternalTool | ApprovalKind::AgentRun) {
+        if record.kind == ApprovalKind::ExternalTool {
             db.set_approval_outcome(approval_id, &ApprovalOutcome { success:false, message:"外部调用正在执行，尚未收到结果".into(),phase:Some(ApprovalPhase::Running),..Default::default() }, now)?;
         }
         db.append_audit(&audit_entry(

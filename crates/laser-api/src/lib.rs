@@ -1770,7 +1770,8 @@ impl ApiService {
                 let loopback = peer.ip().is_loopback();
                 if let Ok(request) = read_http_request(&mut stream) {
                     if !request.is_empty() {
-                        let response = service.handle_http_from(&request, loopback, &source, None);
+                        let response = missing_host_rejection(&request, loopback)
+                            .unwrap_or_else(|| service.handle_http_from(&request, loopback, &source, None));
                         let _ = stream.write_all(&response);
                         let _ = stream.flush();
                     }
@@ -1779,6 +1780,21 @@ impl ApiService {
         }
         Ok(())
     }
+}
+
+/// 真实 TCP 入口上的回环请求必须带 `Host`：否则 `is_allowed_loopback_host` 的防 DNS 重绑定检查无从执行。
+/// 进程内调用（`handle_http` / `handle_http_with_ctx`）不经过这里。
+fn missing_host_rejection(request: &[u8], loopback: bool) -> Option<Vec<u8>> {
+    if !loopback || header_value(&request_head(request), "host").is_some() {
+        return None;
+    }
+    Some(http_json(
+        403,
+        failure(
+            "请求缺少 Host 头，请用 127.0.0.1 或 localhost 访问",
+            Some(serde_json::json!({"error_code": "host_not_allowed"})),
+        ),
+    ))
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
@@ -2842,8 +2858,9 @@ impl ApiService {
                         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
                 })),
             ),
-            ("GET", "/api/ui/discover-controllers") => {
-                // mDNS 只读浏览 _telnet._tcp / _http._tcp，约 2 秒；不向设备发送任何命令
+            ("POST", "/api/ui/discover-controllers") => {
+                // mDNS 只读浏览 _telnet._tcp / _http._tcp，约 2 秒；不向设备发送任何命令。
+                // 用 POST：跨站页面无法用不带 Origin 的 GET（如 <img>）反复触发局域网扫描
                 let controllers = laser_device::discover_controllers(std::time::Duration::from_millis(2000));
                 let list: Vec<serde_json::Value> = controllers
                     .iter()
@@ -5478,6 +5495,8 @@ mod tests {
             true
         );
         assert_eq!(service.handle("GET", "/missing", b"").status, 404);
+        // 局域网扫描只接受 POST：不带 Origin 的跨站 GET 不能触发 mDNS
+        assert_eq!(service.handle("GET", "/api/ui/discover-controllers", b"").status, 404);
         assert_eq!(
             service.handle("GET", "/api/health", b"").headers[0].0,
             "Cache-Control"
@@ -6982,6 +7001,22 @@ mod tests {
         .unwrap();
         assert!(read.starts_with("HTTP/1.1 403"), "{read}");
         assert!(!read.contains("actual_port"));
+
+        // 真实 TCP 入口：回环请求缺少 Host 同样拒绝；带 Host 或非回环的请求交给正常入口
+        let missing = missing_host_rejection(b"POST /api/settings HTTP/1.0
+Content-Length: 0
+
+", true)
+            .map(|bytes| String::from_utf8(bytes).unwrap())
+            .expect("missing Host must be rejected on loopback");
+        assert!(missing.starts_with("HTTP/1.1 403") && missing.contains("host_not_allowed"), "{missing}");
+        assert!(missing_host_rejection(b"GET / HTTP/1.1
+Host: 127.0.0.1:9666
+
+", true).is_none());
+        assert!(missing_host_rejection(b"GET / HTTP/1.0
+
+", false).is_none());
 
         // 非回环连接不做 Host 校验（仍由 Bearer 鉴权保护），局域网主机名访问公开页面不受影响。
         let lan = String::from_utf8(service.handle_http_from(

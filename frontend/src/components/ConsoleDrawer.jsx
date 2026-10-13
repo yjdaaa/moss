@@ -84,7 +84,7 @@ export function ConsoleDrawer({
           onClick={() => setActiveTab("console")}
           id="tab-console-feed"
         >
-          <Terminal size={13} style={{ marginRight: 6 }} />
+          <Terminal size={13} className="drawer-icon" />
           <span title="通信终端与状态监控 (CONSOLE FEED)">终端</span>
         </div>
 
@@ -93,7 +93,7 @@ export function ConsoleDrawer({
           onClick={() => setActiveTab("mcp")}
           id="tab-mcp-bridge"
         >
-          <Radio size={13} style={{ marginRight: 6 }} />
+          <Radio size={13} className="drawer-icon" />
           <span title={`小智 MCP 桥接状态（${isMcpOnline ? "已连接" : "未连接"}）`}>小智网关</span>
           <span
             style={{
@@ -113,16 +113,11 @@ export function ConsoleDrawer({
           onClick={() => setActiveTab("gcode")}
           id="tab-gcode-view"
         >
-          <FileCode size={13} style={{ marginRight: 6 }} />
+          <FileCode size={13} className="drawer-icon" />
           <span title="G-CODE 实时行视图">G 码行视图</span>
           {gcodeLines.length > 0 && (
             <span
-              style={{
-                marginLeft: 6,
-                fontSize: "11px",
-                fontFamily: "var(--font-mono)",
-                color: "var(--laser-cyan, #8b7bff)",
-              }}
+              className="drawer-text"
             >
               [{currentLine}/{gcodeLines.length} 行]
             </span>
@@ -131,14 +126,13 @@ export function ConsoleDrawer({
 
         {/* 辅助工具：清空控制台日志 */}
         {activeTab === "console" && onClear && (
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", paddingRight: 10 }}>
+          <div className="drawer-row">
             <button
-              className="btn btn-ghost"
-              style={{ padding: "2px 8px", fontSize: "11px", height: "auto", color: "var(--text-muted, #94a3b8)" }}
+              className="btn btn-ghost drawer-btn"
               onClick={onClear}
               title="清空控制台日志"
             >
-              <Trash2 size={12} style={{ marginRight: 4 }} />
+              <Trash2 size={12} className="drawer-icon-2" />
               清空终端
             </button>
           </div>
@@ -146,15 +140,14 @@ export function ConsoleDrawer({
 
         {/* 辅助工具：清空 G-code 刀路视图 */}
         {activeTab === "gcode" && onClearGcode && gcodeLines.length > 0 && (
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", paddingRight: 10 }}>
+          <div className="drawer-row">
             <button
-              className="btn btn-ghost"
-              style={{ padding: "2px 8px", fontSize: "11px", height: "auto", color: "var(--laser-cyan, #8b7bff)", borderColor: "rgba(139, 123, 255, 0.3)" }}
+              className="btn btn-ghost drawer-btn-2"
               onClick={onClearGcode}
               title="清空当前 G-code 刀路视图"
               id="btn-clear-gcode"
             >
-              <Trash2 size={12} style={{ marginRight: 4 }} />
+              <Trash2 size={12} className="drawer-icon-2" />
               清空视图 ({gcodeLines.length} 行)
             </button>
           </div>
@@ -196,16 +189,16 @@ export function ConsoleDrawer({
       {/* Tab 2: 小智 MCP 桥接状态 */}
       {activeTab === "mcp" && (
         <div className="mcp-bridge-panel">
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+          <div className="drawer-grid">
             <div className="mcp-card">
               <div className="mcp-card-header">
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div className="drawer-row-2">
                   {isMcpOnline ? (
-                    <Wifi size={16} style={{ color: "var(--laser-green, #34d399)" }} />
+                    <Wifi size={16} className="drawer-icon-3" />
                   ) : (
-                    <WifiOff size={16} style={{ color: "var(--laser-red, #ff3b5c)" }} />
+                    <WifiOff size={16} className="drawer-icon-4" />
                   )}
-                  <span style={{ fontWeight: 700, fontSize: "13px" }}>WebSocket 协议网关</span>
+                  <span className="drawer-text-2">WebSocket 协议网关</span>
                 </div>
                 <span className={`badge ${isMcpOnline ? "badge-success" : "badge-error"}`}>
                   {isMcpOnline ? "ONLINE" : "OFFLINE"}
@@ -214,13 +207,13 @@ export function ConsoleDrawer({
               <div className="mcp-card-body">
                 <div className="mcp-row">
                   <span className="mcp-label">客户端标识</span>
-                  <span className="mcp-val mono" style={{ fontSize: "11px", color: "var(--laser-cyan, #8b7bff)" }}>
+                  <span className="mcp-val mono drawer-text-3">
                     {mcpStatus?.client_info || "—"}
                   </span>
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">网关端点</span>
-                  <span className="mcp-val mono" style={{ fontSize: "11px" }}>{mcpEndpoint}</span>
+                  <span className="mcp-val mono drawer-text-4">{mcpEndpoint}</span>
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">协议版本</span>
@@ -237,9 +230,9 @@ export function ConsoleDrawer({
 
             <div className="mcp-card">
               <div className="mcp-card-header">
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <Cpu size={16} style={{ color: "var(--laser-cyan, #8b7bff)" }} />
-                  <span style={{ fontWeight: 700, fontSize: "13px" }}>AI 工具路由与安全执行</span>
+                <div className="drawer-row-2">
+                  <Cpu size={16} className="drawer-icon-5" />
+                  <span className="drawer-text-2">AI 工具路由与安全执行</span>
                 </div>
                 <span className="badge badge-info">{mcpStatus?.tools_count ?? "—"} 项工具</span>
               </div>
@@ -250,19 +243,19 @@ export function ConsoleDrawer({
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">最新处理请求</span>
-                  <span className="mcp-val mono" style={{ fontSize: "11px", color: "var(--laser-green, #34d399)" }}>
+                  <span className="mcp-val mono drawer-text-5">
                     {mcpStatus?.last_request || "—"}
                   </span>
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">安全门禁校验</span>
-                  <span className="mcp-val" style={{ color: "var(--laser-cyan, #8b7bff)" }}>
+                  <span className="mcp-val drawer-icon-5">
                     {mcpStatus?.safety_gate || "强制物理 SHA-256 指纹比对"}
                   </span>
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">急停拦截信道</span>
-                  <span className="mcp-val mono" style={{ color: "var(--laser-red, #ff3b5c)" }}>
+                  <span className="mcp-val mono drawer-icon-4">
                     {mcpStatus?.estop_channel || "0x18 软复位 (优先中断级)"}
                   </span>
                 </div>
@@ -271,26 +264,26 @@ export function ConsoleDrawer({
           </div>
 
           {/* 真实 JSON-RPC 交互流审计终端 */}
-          <div style={{ marginTop: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <span style={{ fontSize: "11px", fontWeight: 700, color: "var(--laser-cyan, #8b7bff)", letterSpacing: "0.5px" }}>
+          <div className="drawer-spacer">
+            <div className="drawer-row-3">
+              <span className="drawer-text-6">
                 小智 JSON-RPC 实时交互流 (RPC AUDIT LOG)
               </span>
-              <span style={{ fontSize: "10px", fontFamily: "var(--font-mono)", color: "var(--ink-dim, #94a3b8)" }}>
+              <span className="drawer-text-7">
                 已收到: {mcpStatus?.messages_count ?? 0} 帧
               </span>
             </div>
-            <div className="console-feed" style={{ minHeight: "100px", maxHeight: "140px", padding: "8px 12px" }}>
+            <div className="console-feed drawer-box">
               {mcpStatus?.recent_events && mcpStatus.recent_events.length > 0 ? (
                 mcpStatus.recent_events.map((evt, i) => (
-                  <div key={i} className="console-line" style={{ fontSize: "11px", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
-                    <span className="console-msg" style={{ fontFamily: "var(--font-mono)", color: "#c4b5fd" }}>
+                  <div key={i} className="console-line drawer-box-2">
+                    <span className="console-msg drawer-text-8">
                       {evt}
                     </span>
                   </div>
                 ))
               ) : (
-                <div className="console-empty" style={{ padding: "10px 0" }}>
+                <div className="console-empty drawer-spacer-2">
                   &gt; 暂无小智 MCP 交互记录
                 </div>
               )}

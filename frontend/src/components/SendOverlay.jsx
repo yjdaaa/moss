@@ -67,7 +67,7 @@ export function SendOverlay({
         STATUS <span className="pct" id="send-pct">{stage.normalized.toUpperCase()}</span> · 请勿关闭页面
       </div>
       {progress && progress.total > 0 && (
-        <div className="send-desc" style={{ marginTop: "6px", fontFamily: "var(--font-mono)" }}>
+        <div className="send-desc send-overlay-box">
           {progress.target ? `${progress.target} · ` : ""}
           已确认 <span className="pct">{progress.sent}</span> / {progress.total} 行
           {" "}({Math.min(100, Math.round((progress.sent / progress.total) * 100))}%)
@@ -108,7 +108,7 @@ export function SendOverlay({
         })}
       </div>
 
-      <div style={{ display: "flex", gap: "10px", marginTop: "14px", alignItems: "center" }}>
+      <div className="send-overlay-row">
         {!stage.terminal ? (
           <>
             <button className="send-cancel" id="send-cancel" onClick={onCancel}>
@@ -116,7 +116,7 @@ export function SendOverlay({
             </button>
           </>
         ) : (
-          <button className="send-cancel" style={{ borderColor: "var(--line)" }} onClick={onClose}>
+          <button className="send-cancel send-overlay-btn" onClick={onClose}>
             关闭窗口
           </button>
         )}

@@ -155,13 +155,15 @@ impl TcpGrbl {
     }
 }
 
+/// 控制器在字节流任意位置（包括 `;` 注释内）都会立即执行实时单字节，所以顺序信道按整行检查。
+fn contains_realtime_byte(line: &str) -> bool {
+    line.bytes()
+        .any(|byte| matches!(byte, 0x18 | b'!' | b'~' | 0x85 | b'?' | 0x90..=0x97 | 0x99..=0x9D | 0xA0))
+}
+
 impl DeviceTransport for TcpGrbl {
     fn write_line(&self, line: &str) -> Result<(), String> {
-        let code_part = line.split(';').next().unwrap_or("").trim();
-        if code_part
-            .bytes()
-            .any(|byte| matches!(byte, 0x18 | b'!' | b'~' | 0x85 | b'?' | 0x90..=0x97 | 0x99..=0x9D | 0xA0))
-        {
+        if contains_realtime_byte(line) {
             return Err("实时单字节禁止混入顺序 G-code 信道".into());
         }
         let mut writer = self
@@ -286,11 +288,7 @@ impl SerialGrbl {
 
 impl DeviceTransport for SerialGrbl {
     fn write_line(&self, line: &str) -> Result<(), String> {
-        let code_part = line.split(';').next().unwrap_or("").trim();
-        if code_part
-            .bytes()
-            .any(|byte| matches!(byte, 0x18 | b'!' | b'~' | 0x85 | b'?' | 0x90..=0x97 | 0x99..=0x9D | 0xA0))
-        {
+        if contains_realtime_byte(line) {
             return Err("实时单字节禁止混入顺序 G-code 信道".into());
         }
         let mut writer = self
@@ -850,10 +848,7 @@ impl FakeGrbl {
 
 impl DeviceTransport for FakeGrbl {
     fn write_line(&self, line: &str) -> Result<(), String> {
-        if line
-            .bytes()
-            .any(|byte| matches!(byte, 0x18 | b'!' | b'~' | 0x85 | b'?' | 0x90..=0x97 | 0x99..=0x9D | 0xA0))
-        {
+        if contains_realtime_byte(line) {
             return Err("实时单字节禁止混入顺序 G-code 信道".into());
         }
         let delay = *self.artificial_backpressure.lock().unwrap();
@@ -2114,6 +2109,16 @@ pub mod optional_capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_bytes_in_comments_are_rejected_on_sequential_channel() {
+        for line in ["G0 X10 ; check!", "G1 X1 ;?", "M5 ; resume ~"] {
+            assert!(contains_realtime_byte(line), "{line}");
+        }
+        for line in ["G0 X10 ; plain comment", "$$", "$RI=200"] {
+            assert!(!contains_realtime_byte(line), "{line}");
+        }
+    }
 
     #[test]
     fn tcp_realtime_write_bypasses_blocked_sequential_writer() {

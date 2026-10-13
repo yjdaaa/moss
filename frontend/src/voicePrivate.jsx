@@ -30,7 +30,7 @@ export function VoicePrivatePage() {
   }, []);
 
   return (
-    <main className="voice-private-page" style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
+    <main className="voice-private-page voice-private-box">
       <h1>语音隐私设置</h1>
       <p>此窗口由 MOSS 桌面安装包直接加载，专用于私人记忆、信息插件和 Home Assistant 凭据及白名单设置。令牌不会回显，普通网页无法调用敏感命令。</p>
       {error && <p role="alert">{error}</p>}

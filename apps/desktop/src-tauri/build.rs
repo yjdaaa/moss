@@ -14,7 +14,6 @@ fn main() {
         "set_export_ask_each_time",
         "open_export_dir",
         "reveal_exported_file",
-        "request_shutdown",
         "minimize_to_tray",
         "exit_application",
         // 语音中心（技术书 §9.4.6，仅桌面端可用；移动端命令直接返回错误）

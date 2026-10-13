@@ -4,39 +4,38 @@ import { Terminal, Trash2 } from "lucide-react";
 export function LogPanel({ logs = [], onClear }) {
   return (
     <div className="log-console">
-      <div className="log-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+      <div className="log-head log-panel-row">
+        <div className="log-panel-row-2">
           <Terminal size={15} />
           <span>MOSS · 事件流</span>
         </div>
         {onClear && (
           <button
-            className="btn btn-ghost"
-            style={{ padding: "2px 8px", fontSize: "12px", height: "auto" }}
+            className="btn btn-ghost log-panel-btn"
             onClick={onClear}
             title="清空日志"
           >
-            <Trash2 size={12} style={{ marginRight: 4 }} />
+            <Trash2 size={12} className="log-panel-icon" />
             清空
           </button>
         )}
       </div>
 
-      <div className="log-body" id="log-body" style={{ maxHeight: "240px", overflowY: "auto" }}>
+      <div className="log-body log-panel-box" id="log-body">
         {logs.length === 0 ? (
-          <div className="log-empty" style={{ padding: "12px", color: "var(--ink-faint, #667085)", fontSize: "12px" }}>
+          <div className="log-empty log-panel-box-2">
             暂无事件记录 · 操作工作台后实时日志将在此呈现
           </div>
         ) : (
           logs.map((item, idx) => (
-            <div key={idx} className={`log-item log-${item.level || "info"}`} style={{ display: "flex", gap: "8px", padding: "4px 8px", fontSize: "12px", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
-              <span className="log-time" style={{ color: "var(--ink-faint, #667085)", fontFamily: "var(--font-mono)" }}>
+            <div key={idx} className={`log-item log-${item.level || "info"} log-panel-row-3`}>
+              <span className="log-time log-panel-text">
                 {item.time}
               </span>
-              <span className={`log-badge badge-${item.level || "info"}`} style={{ padding: "0 4px", borderRadius: "3px", fontSize: "10px", fontWeight: "bold" }}>
+              <span className={`log-badge badge-${item.level || "info"} log-panel-text-2`}>
                 {item.tag || "系统"}
               </span>
-              <span className="log-msg" style={{ flex: 1, wordBreak: "break-all" }}>
+              <span className="log-msg log-panel-text-3">
                 {item.message}
               </span>
             </div>

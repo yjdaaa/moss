@@ -381,7 +381,7 @@ export function MaterialLabPage({ onNavigate }) {
   return (
     <div className="material-lab-page ob-page">
       {readOnly && (
-        <div role="note" style={{ margin: "0 0 12px", padding: "8px 12px", borderRadius: "6px", fontSize: "12px", background: "rgba(255, 170, 0, 0.08)", border: "1px solid rgba(255, 170, 0, 0.25)", color: "var(--gold)" }}>
+        <div role="note" className="lab-box">
           已连接电脑 MOSS：材料只能查看和用于加工，修改请在电脑上进行。
         </div>
       )}
@@ -397,22 +397,22 @@ export function MaterialLabPage({ onNavigate }) {
           )}
         </div>
 
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div className="lab-row">
           {!readOnly && (
             <button className="btn btn-ghost" onClick={handleSaveRecent} title="从最近的工作流提取材料参数">
-              <Bookmark size={13} style={{ marginRight: 4 }} />
+              <Bookmark size={13} className="lab-icon" />
               套用最近
             </button>
           )}
           <button className="btn btn-ghost" onClick={handleExport} title="导出材料库 JSON">
-            <Download size={13} style={{ marginRight: 4 }} />
+            <Download size={13} className="lab-icon" />
             导出库
           </button>
           {!readOnly && (
-            <label className="btn btn-ghost" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }} title="导入外部材料库">
-              <Upload size={13} style={{ marginRight: 4 }} />
+            <label className="btn btn-ghost lab-label" title="导入外部材料库">
+              <Upload size={13} className="lab-icon" />
               导入
-              <input type="file" accept=".json" onChange={handleImportFile} style={{ display: "none" }} />
+              <input type="file" accept=".json" onChange={handleImportFile} className="lab-field" />
             </label>
           )}
         </div>
@@ -422,35 +422,28 @@ export function MaterialLabPage({ onNavigate }) {
       <div className="ob-lab">
         {/* Left Column: Material Tree */}
         <div
-          className="hud-card ob-card"
-          style={{
-            padding: "12px",
-            display: "flex",
-            flexDirection: "column",
-          }}
+          className="hud-card ob-card lab-row-2"
         >
           <FoldHeader id="lab-library" title="材料库" k="LIBRARY" n={1} />
-          <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
-            <div style={{ position: "relative", flex: 1 }}>
-              <Search size={14} style={{ position: "absolute", left: 8, top: 10, color: "var(--ink-dim, #94a3b8)" }} />
+          <div className="lab-row-3">
+            <div className="lab-box-2">
+              <Search size={14} className="lab-icon-2" />
               <input
                 type="text"
                 placeholder="搜索材料名称..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="text-input"
-                style={{ width: "100%", paddingLeft: "28px", fontSize: "12px" }}
+                className="text-input lab-field-2"
               />
             </div>
             {!readOnly && (
               <button
-                className="btn btn-hud-primary"
+                className="btn btn-hud-primary lab-btn"
                 onClick={() => {
                   setMaterialModalData(null);
                   setShowMaterialModal(true);
                 }}
                 title="添加新材料到材料库"
-                style={{ padding: "4px 8px", fontSize: "12px", display: "flex", alignItems: "center", gap: "2px" }}
               >
                 <Plus size={13} />
                 <span>新建</span>
@@ -509,21 +502,16 @@ export function MaterialLabPage({ onNavigate }) {
 
         {/* Middle Column: Parameter Editor */}
         <div
-          className="hud-card ob-card"
-          style={{
-            padding: "16px",
-            display: "flex",
-            flexDirection: "column",
-          }}
+          className="hud-card ob-card lab-row-4"
         >
           <FoldHeader id="lab-params" title="材料参数" k="PARAMS" n={2} />
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <h3 style={{ margin: 0, fontSize: "15px", color: "var(--ink, #fff)" }}>
+          <div className="lab-row-5">
+            <div className="lab-row-6">
+              <h3 className="lab-heading">
                 {selectedMaterial} · {selectedThickness} mm {readOnly ? "参数" : "参数编辑"}
               </h3>
               {!readOnly && (<button
-                className="btn btn-ghost"
+                className="btn btn-ghost lab-btn-2"
                 onClick={() => {
                   const curMat = materials[selectedMaterial];
                   const thicks = curMat?.thicknesses ? Object.keys(curMat.thicknesses) : [selectedThickness];
@@ -536,7 +524,6 @@ export function MaterialLabPage({ onNavigate }) {
                   setShowMaterialModal(true);
                 }}
                 title="编辑或删除此材料"
-                style={{ fontSize: "11px", padding: "2px 8px", display: "flex", alignItems: "center", gap: "4px" }}
               >
                 <Settings2 size={12} />
                 <span>管理材料</span>
@@ -550,7 +537,7 @@ export function MaterialLabPage({ onNavigate }) {
           </div>
 
           {/* Mode Tabs */}
-          <div style={{ display: "flex", gap: "6px", marginBottom: "14px" }}>
+          <div className="lab-row-7">
             {[
               { id: "raster", label: "光栅雕刻 (Raster)" },
               { id: "outline", label: "轮廓扫描 (Outline)" },
@@ -575,9 +562,9 @@ export function MaterialLabPage({ onNavigate }) {
           </div>
 
           {/* Form Fields */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", flex: 1 }}>
+          <div className="lab-grid">
             <div>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+              <label className="lab-label-2">
                 最小激光功率 (0-1000)
               </label>
               <input
@@ -585,13 +572,12 @@ export function MaterialLabPage({ onNavigate }) {
                 value={minPower}
                 onChange={(e) => setMinPower(Number(e.target.value))}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
               />
             </div>
 
             <div>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+              <label className="lab-label-2">
                 最大激光功率 (0-1000)
               </label>
               <input
@@ -599,13 +585,12 @@ export function MaterialLabPage({ onNavigate }) {
                 value={maxPower}
                 onChange={(e) => setMaxPower(Number(e.target.value))}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
               />
             </div>
 
             <div>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+              <label className="lab-label-2">
                 加工进给速度 (mm/min)
               </label>
               <input
@@ -613,13 +598,12 @@ export function MaterialLabPage({ onNavigate }) {
                 value={feedRate}
                 onChange={(e) => setFeedRate(Number(e.target.value))}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
               />
             </div>
 
             <div>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+              <label className="lab-label-2">
                 空移速度 (mm/min)
               </label>
               <input
@@ -627,13 +611,12 @@ export function MaterialLabPage({ onNavigate }) {
                 value={travelRate}
                 onChange={(e) => setTravelRate(Number(e.target.value))}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
               />
             </div>
 
             <div>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+              <label className="lab-label-2">
                 加工循环次数 (Passes)
               </label>
               <input
@@ -641,13 +624,12 @@ export function MaterialLabPage({ onNavigate }) {
                 value={passes}
                 onChange={(e) => setPasses(Number(e.target.value))}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
               />
             </div>
 
             <div>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+              <label className="lab-label-2">
                 点距 / 像素尺寸 (mm)
               </label>
               <input
@@ -656,13 +638,12 @@ export function MaterialLabPage({ onNavigate }) {
                 value={pixelSize}
                 onChange={(e) => setPixelSize(Number(e.target.value))}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
               />
             </div>
 
-            <div style={{ gridColumn: "span 2" }}>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+            <div className="lab-box-3">
+              <label className="lab-label-2">
                 二值阈值 (-1 为自动)
               </label>
               <input
@@ -670,13 +651,12 @@ export function MaterialLabPage({ onNavigate }) {
                 value={threshold}
                 onChange={(e) => setThreshold(Number(e.target.value))}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
               />
             </div>
 
-            <div style={{ gridColumn: "span 2" }}>
-              <label style={{ display: "block", fontSize: "11px", color: "var(--ink-dim)", marginBottom: "3px" }}>
+            <div className="lab-box-3">
+              <label className="lab-label-2">
                 工艺与材质备注
               </label>
               <input
@@ -684,17 +664,16 @@ export function MaterialLabPage({ onNavigate }) {
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 readOnly={readOnly}
-                className="text-input"
-                style={{ width: "100%" }}
+                className="text-input lab-field-3"
                 placeholder="例如：双面覆膜、浅色木纹..."
               />
             </div>
           </div>
 
           {!readOnly && (
-            <div style={{ display: "flex", gap: "8px", marginTop: "16px" }}>
-              <button className="btn btn-primary" onClick={handleSaveParams} style={{ flex: 1 }}>
-                <Save size={14} style={{ marginRight: 4 }} />
+            <div className="lab-row-8">
+              <button className="btn btn-primary lab-btn-3" onClick={handleSaveParams}>
+                <Save size={14} className="lab-icon" />
                 保存到材料库
               </button>
             </div>
@@ -703,85 +682,74 @@ export function MaterialLabPage({ onNavigate }) {
 
         {/* Right Column: Calibration Grid Matrix */}
         <div
-          className="hud-card ob-card"
-          style={{
-            padding: "16px",
-            display: "flex",
-            flexDirection: "column",
-          }}
+          className="hud-card ob-card lab-row-4"
         >
           <FoldHeader id="lab-matrix" title="校准矩阵" k="MATRIX" n={3} />
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-            <h3 style={{ margin: 0, fontSize: "13px", color: "var(--ink-dim, #b4b4bd)", fontWeight: 500 }}>
+          <div className="lab-row-9">
+            <h3 className="lab-heading-2">
               生成校准矩阵并实机测试
             </h3>
-            <span style={{ fontSize: "12px", color: "var(--laser, #8b7bff)" }}>{matrixStatus}</span>
+            <span className="lab-text">{matrixStatus}</span>
           </div>
 
           {/* Matrix Parameters */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", marginBottom: "10px" }}>
+          <div className="lab-grid-2">
             <div>
-              <label style={{ fontSize: "10px", color: "var(--ink-dim)" }}>功率区间 (Min-Max)</label>
-              <div style={{ display: "flex", gap: "2px" }}>
+              <label className="lab-label-3">功率区间 (Min-Max)</label>
+              <div className="lab-row-10">
                 <input
                   type="number"
                   value={matrixPowerMin}
                   onChange={(e) => setMatrixPowerMin(Number(e.target.value))}
-                  className="text-input"
-                  style={{ width: "50%", padding: "4px" }}
+                  className="text-input lab-field-4"
                 />
                 <input
                   type="number"
                   value={matrixPowerMax}
                   onChange={(e) => setMatrixPowerMax(Number(e.target.value))}
-                  className="text-input"
-                  style={{ width: "50%", padding: "4px" }}
+                  className="text-input lab-field-4"
                 />
               </div>
             </div>
 
             <div>
-              <label style={{ fontSize: "10px", color: "var(--ink-dim)" }}>速度区间 (Min-Max)</label>
-              <div style={{ display: "flex", gap: "2px" }}>
+              <label className="lab-label-3">速度区间 (Min-Max)</label>
+              <div className="lab-row-10">
                 <input
                   type="number"
                   value={matrixSpeedMin}
                   onChange={(e) => setMatrixSpeedMin(Number(e.target.value))}
-                  className="text-input"
-                  style={{ width: "50%", padding: "4px" }}
+                  className="text-input lab-field-4"
                 />
                 <input
                   type="number"
                   value={matrixSpeedMax}
                   onChange={(e) => setMatrixSpeedMax(Number(e.target.value))}
-                  className="text-input"
-                  style={{ width: "50%", padding: "4px" }}
+                  className="text-input lab-field-4"
                 />
               </div>
             </div>
 
             <div>
-              <label style={{ fontSize: "10px", color: "var(--ink-dim)" }}>矩阵行列 ({matrixRows}x{matrixCols})</label>
-              <div style={{ display: "flex", gap: "2px" }}>
+              <label className="lab-label-3">矩阵行列 ({matrixRows}x{matrixCols})</label>
+              <div className="lab-row-10">
                 <input
                   type="number"
                   value={matrixRows}
                   onChange={(e) => setMatrixRows(Number(e.target.value))}
-                  className="text-input"
-                  style={{ width: "50%", padding: "4px" }}
+                  className="text-input lab-field-4"
                 />
                 <input
                   type="number"
                   value={matrixCols}
                   onChange={(e) => setMatrixCols(Number(e.target.value))}
-                  className="text-input"
-                  style={{ width: "50%", padding: "4px" }}
+                  className="text-input lab-field-4"
                 />
               </div>
             </div>
           </div>
 
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px" }}>
+          <div className="lab-row-11">
             <input
               type="text"
               placeholder="设备 host / IP"
@@ -791,37 +759,25 @@ export function MaterialLabPage({ onNavigate }) {
                 setMatrixHost(val);
                 localStorage.setItem("laser-forge-host", val);
               }}
-              className="text-input"
-              style={{ flex: 1, padding: "4px 8px" }}
+              className="text-input lab-field-5"
             />
             <button className="btn btn-ghost" onClick={handleGenerateMatrix} disabled={matrixBusy}>
-              <Grid size={13} style={{ marginRight: 4 }} />
+              <Grid size={13} className="lab-icon" />
               生成矩阵
             </button>
             <button className="btn btn-primary" onClick={handleSendMatrix} disabled={matrixBusy || !matrixId}>
-              <Send size={13} style={{ marginRight: 4 }} />
+              <Send size={13} className="lab-icon" />
               发送测试
             </button>
           </div>
 
           {/* Matrix interactive preview grid */}
           <div
-            style={{
-              flex: 1,
-              background: "rgba(0,0,0,0.3)",
-              borderRadius: "4px",
-              border: "1px solid var(--line, #242b35)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: "10px",
-              minHeight: "220px",
-            }}
+            className="lab-row-12"
           >
             {matrixPreview ? (
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: "12px", color: "var(--ink-dim)", marginBottom: "6px" }}>
+              <div className="lab-box-4">
+                <div className="lab-box-5">
                   {readOnly ? "校准结果（保存最佳单元格请在电脑上操作）：" : "点击下方单元格选择最佳测试效果并套用："}
                 </div>
                 <div
@@ -853,22 +809,22 @@ export function MaterialLabPage({ onNavigate }) {
                       }}
                       title={`#${i + 1} ${cell.id}: S${cell.power} F${cell.speed} × ${cell.passes}`}
                     >
-                      <span style={{ fontWeight: "bold", fontSize: "11px" }}>{i + 1}</span>
+                      <span className="lab-text-2">{i + 1}</span>
                       <span>S{cell.power}</span>
                       <span>F{cell.speed}</span>
                     </div>
                   ))}
                 </div>
                 {matrixSendState ? (
-                  <div style={{ marginTop: "8px", fontSize: "11px", color: "var(--ink-dim)" }}>
+                  <div className="lab-box-6">
                     发送状态: {matrixSendState.status} · {matrixSendState.lines_sent}/{matrixSendState.total_lines} 行
                     {matrixSendState.error ? ` · ${matrixSendState.error}` : ""}
                   </div>
                 ) : null}
               </div>
             ) : (
-              <div style={{ color: "var(--ink-dim)", textAlign: "center", fontSize: "12px" }}>
-                <Grid size={28} style={{ opacity: 0.3, marginBottom: "4px" }} />
+              <div className="lab-box-7">
+                <Grid size={28} className="lab-icon-3" />
                 <div>配置区间并点击【生成矩阵】预览校准网格</div>
               </div>
             )}

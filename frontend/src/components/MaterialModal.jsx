@@ -131,7 +131,7 @@ export function MaterialModal({ visible, initialData, onClose, onSaved, onDelete
       <div className="mat-modal" role="dialog" aria-modal="true">
         <div className="mat-modal-head">
           <h3 id="mat-modal-title">
-            <Layers size={18} style={{ marginRight: 6, verticalAlign: "middle" }} />
+            <Layers size={18} className="mat-form-icon" />
             <span>{isEditing ? "编辑材料" : "添加材料"}</span>
           </h3>
           <button className="mat-modal-close" onClick={onClose} title="关闭">
@@ -199,7 +199,7 @@ export function MaterialModal({ visible, initialData, onClose, onSaved, onDelete
           </p>
 
           {error && (
-            <div className="mat-modal-err" style={{ display: "block", color: "var(--danger)", marginTop: 8 }}>
+            <div className="mat-modal-err mat-form-box">
               {error}
             </div>
           )}
@@ -208,12 +208,11 @@ export function MaterialModal({ visible, initialData, onClose, onSaved, onDelete
         <div className="mat-modal-foot">
           {isEditing && (
             <button
-              className="btn btn-ghost mat-del-btn"
+              className="btn btn-ghost mat-del-btn mat-form-btn"
               onClick={handleDelete}
               disabled={busy}
-              style={{ color: "var(--danger)" }}
             >
-              <Trash2 size={14} style={{ marginRight: 4, verticalAlign: "middle" }} />
+              <Trash2 size={14} className="mat-form-icon-2" />
               删除材料
             </button>
           )}
