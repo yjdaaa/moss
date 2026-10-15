@@ -334,6 +334,10 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             }else if let Some(memory) = &conversation.memory {
                 memory.queue_summary(&device_id, &session.history, conversation.llm.clone());
             }
+            // NV19-03: independent of the NV10 summary; off unless the user enabled it.
+            if let Some(extraction) = &conversation.context_extraction {
+                extraction.session_closed(&ToolContext{device_id:device_id.clone(),session_id:session_id.clone()}, &session.history, conversation.llm.clone());
+            }
         }
     }
     session.finish_timing("disconnected");

@@ -68,6 +68,41 @@ try{
   if(process.argv[2])await page.screenshot({path:process.argv[2],fullPage:true});
   await page.setViewportSize({width:390,height:850});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'No horizontal overflow on narrow viewport');
+  // 简易标定（2026-10-14）：两人各录三段测试音 → 计算阈值 → 识别开启后才能勾选按人记忆
+  const calib=await browser.newPage({viewport:{width:1100,height:900}});
+  calib.on('pageerror',e=>errors.push(e.message));calib.on('dialog',dialog=>dialog.accept());
+  await calib.addInitScript(()=>{
+    window.__calls=[];const clips={a:0,b:0};let calibration={state:'none'};
+    window.__TAURI__={core:{invoke:async(command,{input})=>{
+      if(command!=='voice_speaker_manage')throw Error('Unexpected command');
+      window.__calls.push(input);
+      if(input.action==='begin_test')clips[input.id]=3;
+      if(input.action==='calibrate')calibration={state:'valid',report:{threshold:0.62,margin:0.05,people:2,genuine_trials:6,genuine_accepted:6,impostor_trials:6,false_accepts:0,max_impostor_score:0.31}};
+      const valid=calibration.state==='valid';
+      return {sessions:[{device_id:'synthetic-a',session_id:'same'}],speakers:[{id:'a',revision:1,name:'甲',dimension:192,memory_summary:'',memory_revision:0},{id:'b',revision:1,name:'乙',dimension:192,memory_summary:'',memory_revision:0}],
+        recognition_enabled:valid,personal_memory_enabled:false,calibration,test_clips:{...clips},enrollment:{active:false,collected:0,processing:false,message:'未登记'}};
+    }}};
+  });
+  await calib.goto(server.resolvedUrls.local[0]+'__nv16_fixture.html');
+  await calib.getByText('未标定：身份识别与按人记忆保持关闭').waitFor();
+  const compute=calib.getByRole('button',{name:'计算阈值并自检'});
+  assert(await compute.isDisabled(),'没录测试音不能计算');
+  assert(await calib.getByRole('checkbox').isDisabled(),'未标定不能开启按人记忆');
+  await calib.getByLabel('采集设备').selectOption(JSON.stringify(['synthetic-a','same']));
+  const recordButtons=calib.getByRole('button',{name:'录测试音'});
+  await recordButtons.nth(0).click();
+  await calib.getByText('标定测试音 3/3').first().waitFor();
+  assert(await compute.isDisabled(),'乙还没录');
+  await recordButtons.nth(1).click();
+  await calib.waitForFunction(()=>window.__calls.filter(c=>c.action==='begin_test').length===2);
+  await calib.waitForFunction(()=>!document.querySelector('#voice-speaker-calibration button').disabled);
+  await compute.click();
+  await calib.getByText(/已标定（2 人）：阈值 0\.62 · 本人认对 6\/6 · 认成别人 0\/6/).waitFor();
+  assert.deepEqual(await calib.evaluate(()=>window.__calls.filter(c=>c.action==='begin_test')),[
+    {action:'begin_test',id:'a',device_id:'synthetic-a',session_id:'same',confirmed:true},
+    {action:'begin_test',id:'b',device_id:'synthetic-a',session_id:'same',confirmed:true}]);
+  assert(!(await calib.getByRole('checkbox').isDisabled()),'标定通过后可以开启按人记忆');
+  await calib.close();
   assert.equal(errors.length,0,errors.join('\n'));
-  console.log('NV16 actual React: confirmation, device/session binding, cancel, disabled identity, summary CAS conflict preserves draft/error across polls, reload/save PASS');
+  console.log('NV16 actual React: confirmation, device/session binding, cancel, disabled identity, summary CAS conflict preserves draft/error across polls, reload/save, easy calibration gate PASS');
 }finally{await browser.close();await server.close();}

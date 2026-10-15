@@ -52,7 +52,7 @@ export default function VoiceHomeApprovalCard() {
   return (
     <section className="voice-card" aria-label="HomeControl 独立审批收件箱">
       <h3>家居控制审批（NV15）</h3>
-      <p role="status">正式 Home Assistant 控制尚未完成网络与审批安全验收，所有实际控制发送均被强制禁用。这里只允许查看或撤销历史审批，不允许批准执行。</p>
+      <p role="status">语音申请的家居动作在这里逐个批准；批准后会实际控制设备，结果未知时不会自动重发。不确定时请拒绝。</p>
       <button type="button" disabled={!!busy} onClick={refresh}>刷新家居审批</button>
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
@@ -67,7 +67,9 @@ export default function VoiceHomeApprovalCard() {
             {item.outcome && <p>结果：{item.outcome.phase || "未知"} · {item.outcome.message}</p>}
             {item.can_revoke && <button type="button" disabled={!!busy}
               onClick={() => cancel(item)}>拒绝 / 撤销此请求</button>}
-            <button type="button" disabled title="正式控制安全门禁未通过">批准执行一次（尚未开放）</button>
+            {item.status === "pending" && <button type="button" disabled={!!busy || !item.can_approve}
+              title={item.can_approve ? "批准后实际执行一次" : "家居控制未开启、配置已变化或请求已失效"}
+              onClick={() => approve(item)}>批准执行一次</button>}
           </li>)}
         </ul>
       )}

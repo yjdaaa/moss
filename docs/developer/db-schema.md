@@ -32,7 +32,7 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 8（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13） |
+| version | INTEGER PK | 当前 12（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17） |
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
@@ -316,6 +316,40 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | error_code | TEXT NULL | 短错误码 |
 
 插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。该表存在不表示真实 CLI 执行器已被启用；真实进程树隔离未验证前维持 fail-closed。
+
+### 3.16 `context_memories` / `context_extraction_runs`（schema v10，NV19-02）
+
+结构化长期记忆，与 NV10 `voice_memory` 并存：迁移不搬迁、不修改旧摘要，旧摘要只能由用户在私有窗口导入为候选（`ContextService::import_legacy`）。取值约定见 [内置语音实施细则 §11 NV19-01](../integration/moss-native-voice-implementation.md#nv19)；规则先由 `moss-voice-server::context` 检查，表上的 CHECK 约束是最后一道关。
+
+| 列 | 类型 | 含义 |
+|---|---|---|
+| id | TEXT PK | `ctx-` + 32 位随机十六进制 |
+| scope_kind / scope_id | TEXT | device / person / project / workspace + 宿主生成的编号（1～64） |
+| category | TEXT | preference、device_fact、technical_note、task_context、troubleshooting_experience |
+| content | TEXT | 有效记录 1～1000 字（去空白后非空）；删除后为空串 |
+| verification | TEXT | candidate、confirmed、invalidated |
+| source_kind / source_ref | TEXT / TEXT NULL | 六种来源 + `<前缀>:<token>` 内部引用（≤128），不含 URL、路径或凭据 |
+| device_model / firmware | TEXT NULL | 适用机型 / 固件（固件不能脱离机型单独出现） |
+| revision | INTEGER | 从 1 开始，每次修改 +1 |
+| created_at / updated_at / expires_at / deleted_at | REAL | Unix 秒；`deleted_at` 非空即为墓碑 |
+
+索引 `context_memories_scope(scope_kind,scope_id,category,verification,deleted_at)`、`context_memories_source(scope_kind,scope_id,source_ref)`。`RuntimeDb`（`context_store.rs`）：`insert_context_memory` 只接受 revision 1 的有效行；`update_context_memory_if_revision` 只改未删除、未作废的行，已确认不能降回候选，冲突返回 `None`；删除 / `clear_context_scope` 只留墓碑（清空内容与适用范围、revision+1），让迟到的后台写入因版本不符失败；`context_source_seen` 连墓碑一起查，删掉的导入不会被重新导入。
+
+v11（NV19-04）：外部内容 FTS5 虚表 `context_memories_fts(content)`，`tokenize='trigram'`，以 `context_memories.rowid` 关联；触发器 `context_memories_fts_ai` / `_ad` / `_au`（仅正文变化时）同步，迁移末尾 `rebuild` 一次。墓碑正文为空，删除后索引不留内容。检索接口 `match_context_memories`（每个词恰为 3 字以上的短语、OR、bm25 排序）与 `like_context_memories`（多个短词 OR，`!` 为转义字符），都只返回本范围未删除、未作废、未到期的记录。
+
+`context_extraction_runs` 保存每次候选提取的变更清单及 `reverted_at`（NV19-03）。提取只能新增候选，所以 `adds_json` 只有 `{id,revision}`，`skipped_json` 只有 `{op,reason}`，`updates_json` / `deletes_json` 恒为 `[]`，清单不含记忆正文；四列都必须是不超过 16 KiB 的 JSON 数组。接口：`insert_context_extraction_run`（不能直接写入已撤销）、`context_extraction_run`、`list_context_extraction_runs`（按范围，新的在前）、`mark_context_extraction_reverted`（只能成功一次）。
+
+### 3.17 `context_knowledge_*`（schema v12，NV19-05）
+
+用户明确选择的资料目录。只存目录级摘要与文件指纹，原文（L2）不入库。
+
+| 表 | 列 | 说明 |
+|---|---|---|
+| `context_knowledge_roots` | id、scope_kind（project / workspace）、scope_id、label（目录名，≤128）、root_path（规范化本机路径，≤1024，不进提示词）、revision（≥1）、created_at、indexed_at | 同一范围同一路径唯一 |
+| `context_knowledge_dirs` | id、root_id、rel_dir（`/` 分隔，根目录为空串）、l0（1～256 字）、l1（1～4000 字）、file_count（≥1） | `(root_id, rel_dir)` 唯一；FTS5 外部内容表 `context_knowledge_fts(l0, l1)`，trigram，三个触发器同步 |
+| `context_knowledge_files` | id、root_id、dir_id、rel_path、sha256（64）、size（>0）、mtime | `(root_id, rel_path)` 唯一；索引 `(dir_id)` |
+
+`RuntimeDb`（`knowledge_store.rs`）：`insert_knowledge_root`（revision 1、未建索引）、`knowledge_root(s)`、`replace_knowledge_index`（单事务：revision 相符才整体替换目录与文件并 revision+1，文件必须属于本次的目录，任何约束失败整体回滚）、`delete_knowledge_root_if_revision`（单事务删除三张表的行；数据库未开外键，不依赖级联）、`knowledge_dirs`、`knowledge_files`、`search_knowledge_dirs`（本范围内 L0 / L1 命中三字片段（FTS5）或短词（LIKE，`!` 转义）的目录，去重合并）。
 
 ## 4. 废弃的旧结构
 

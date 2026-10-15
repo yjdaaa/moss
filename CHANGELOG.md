@@ -4,6 +4,119 @@
 
 ## [Unreleased]
 
+### 家居控制与声纹识别改为用户自己开启（2026-10-14 用户决定）
+
+- **现象**：家居控制和声纹识别的代码大部分已写好，但被源码写死关闭（`PRODUCTION_CONTROL_READY=false`、真实发送函数在生产中直接返回失败、`calibration: None`），界面上填什么都打不开，用户希望和其他扩展功能一样“配置好就能用”。
+- **根因与修复**：
+  - 家居控制：删除 `PRODUCTION_CONTROL_READY`，`HttpsHomeTransport::submit_once` 在生产中真实发送。开启条件是用户在私密窗口填好 HTTPS 地址与令牌、勾选白名单实体并点“开启家居语音控制”（确认后写入绑定白名单与凭据版本的同意记录）。每个动作仍生成审批：全局审批卡对 `home_control` 只提供“去私密窗口审批”和“拒绝”，批准在私密窗口“家居控制审批”里进行；至多一次 POST，结果未知不重发。
+  - 声纹：`speaker_enrollment` 增加测试音采集（`begin_test`，复用三段采集与质量检查，只交给 `save_test`）；`person_context::calibrate` 按“认成别人的最高分 + 0.05”（下限 0.5、上限 0.95）算阈值，要求测试集零误认、本人认对不少于三分之二。结果存 `app_secrets`（`voice.speaker.calibration`），只对标定时的登记名单有效，名单变化即失效。`speaker_manage` 新增 `begin_test` / `calibrate` / `reset_calibration`，状态返回 `calibration{state,report}` 与 `test_clips`。声纹卡新增“简易标定”区。
+  - 规则变化：`AGENTS.md` 安全边界与安全入口 §4.17 记录该决定；内置语音技术书 n23。Agent 执行与固件下发不变，仍硬关闭。
+- **验证**：
+  - 新增 `calibration_derives_threshold_and_rejects_confusable_or_incomplete_sets`、`test_capture_hands_three_clips_to_save_test_without_enrolling`、`configured_but_unconsented_home_control_stays_off`、桌面 `directory_key_changes_when_anyone_is_added_removed_or_re_enrolled`；原“生产门禁拒绝”测试改为“未配置或未同意不规划、不批准”。`laser-host` home 41 项、`moss-voice-server` speaker 11 项通过。
+  - 前端 `npm test` 124 通过（新增标定显示与家居审批路由测试）；`voice-speaker.browser.mjs` 新增两人录测试音 → 计算阈值 → 才能勾选按人记忆的流程并通过。
+  - 未用真实 Home Assistant、真人声纹验收（HW-18）。
+- **关联**：`crates/laser-host/src/{home_control.rs,voice_home/https_transport.rs}`、`crates/moss-voice-server/src/{person_context.rs,person_context/tests.rs,speaker_enrollment.rs}`、`apps/desktop/src-tauri/src/voice_builtin.rs`（`Calibration`、`speaker_directory`、`DesktopIdentity::valid_calibration`、`speaker_manage`）、`frontend/src/{components/VoiceHomeCard.jsx,components/VoiceHomeApprovalCard.jsx,components/ApprovalCenter.jsx,components/VoiceSpeakerCard.jsx,approvalState.js,voiceState.js}`；`AGENTS.md`、`docs/developer/{safety,frontend-behavior}.md`、`docs/integration/moss-native-voice-spec.md`。
+
+### NV19-08 长期记忆接入桌面：私有窗口管理页面、对话检索与提取接线，默认全部关闭（2026-10-15）
+
+- **现象**：NV19-01～07 的模型、存储、提取、检索、资料库、故障经验和恢复摘要都只有库代码与测试，桌面端没有任何入口，语音对话也不会用到它们。
+- **根因与修复**：新增 `apps/desktop/src-tauri/src/voice_context.rs`：`ContextHost` 以 schema v12 实现记忆、资料与只读恢复核对三套存储，并由宿主复核可信范围（设备 = 当前已允许且授权代次不变；项目 = 设置中的当前项目与切换代次一致；个人与工作区暂不受信）。两条私有命令 `voice_context_manage`（按 `action` 分发）与 `voice_context_pick_folder`（原生对话框选文件夹并在本机建立索引，路径不回传前端）。`BuiltinVoice` 组装对话时挂上检索与提取钩子，会话正常断开时在 NV10 摘要之后排队提取；设备允许 / 撤销会让该设备进行中的提取作废。`settings.json` 新增 `builtin_context`（检索、提取开关与全局“当前项目”），切换项目时递增代次。私有窗口新增 `VoiceContextCard`：开关与当前项目、存储用量、记忆查看 / 查找 / 深度检索 / 新增 / 编辑 / 确认 / 作废 / 删除 / 清空 / 导入旧摘要 / 导出备份、提取记录与整批撤销、资料目录、故障经验、项目恢复摘要。
+- **契约与安全**：新增 Tauri 命令与独立 capability `voice-context.json`（只授 `voice-private`，无 `remote`），处理函数再校验打包页面来源；主窗口 `voice_save_settings` 不接受 `builtin_context`。检索与提取默认关闭，旧配置读出也是关闭；开启提取须在私有窗口确认数据会发给已配置的大模型。语音检索结果、资料与经验都只作为带标签的参考数据，不进入工具参数、审批或授权。破坏性变更：无。
+- **验证**：`moss-desktop` 宿主测试 5 项（默认关闭与提取须确认、记忆 CRUD / 检索 / 导入 / 导出、撤销设备与切换项目后旧范围失效、资料 / 经验 / 恢复摘要全流程且恢复不改审批、深度检索无模型时报错）与权限测试 1 项；`moss-voice` 主窗口不能改 `builtin_context` 1 项；会话关闭钩子 1 项；前端 `voiceContextState` 3 项、`voicePrivacyAcl` 新增 1 项、私有卡片真实浏览器测试 1 套；`cargo test --workspace` 804 通过 / 7 忽略，`npm test` 124 通过，`npm run build` 成功，其余 5 个语音浏览器测试通过；`cargo build -p moss-host --release` 后 E2E 32/32。Windows release / NSIS 与 Android aarch64 APK 构建通过（见构建回执）；真实 WebView2 点击（HW-17）、真实模型 / 设备 / 资料未验证。
+- **关联**：`apps/desktop/src-tauri/{src/voice_context.rs,src/voice_context/host/tests.rs,src/voice_builtin.rs,src/lib.rs,build.rs,Cargo.toml,capabilities/voice-context.json}`、`crates/moss-voice/src/{settings.rs,center.rs}`、`crates/moss-voice-server/src/{session.rs,conversation.rs,context/extract.rs}`、`frontend/src/{components/VoiceContextCard.jsx,voiceContextState.js,voiceApi.js,voicePrivate.jsx,styles.css}`、`frontend/tests/{voiceContextState.test.mjs,voice-context.browser.mjs,voicePrivacyAcl.test.mjs}`；`docs/developer/{api-contracts,frontend-behavior}.md`、`docs/integration/{voice-private-acl,moss-native-voice-implementation,moss-native-voice-spec}.md`、`docs/user/quick-start.md`。
+
+### NV19-07 跨会话项目只读恢复：四节摘要，引用逐条重新核对，绝不重放（2026-10-14）
+
+- **现象**：换一次会话就不知道项目上次做到哪里；如果只凭旧摘要继续，会把已过期的审批、结果未知的加工或已停止的任务当成可以接着执行的事项。
+- **根因与修复**：新增 `moss-voice-server::context::resume`：每个项目 / 工作区一份恢复摘要（`task_context` 记录，标题行加决策 / 待办 / 证据 / 未验证四节，条目可引用 `[approval:…]`、`[job:…]`、`[agent_run:…]`、`[test:…]`）。`save_resume` 只在私有窗口可用并带版本检查；只有用户保存的已确认记录才算摘要，对话提取的候选模仿标题也不算。`resume` 通过宿主的只读接口 `ResumeFacts` 逐条核对引用的当前状态，核实不了的证据移到“未验证”；`format_resume` 写明须重新核对代码、数据库与设备实际状态，结果未知、已撤销、已停止的不会自动重试或重放。
+- **契约与安全**：不改表结构，没有新的 Tauri 命令、HTTP 接口或设置项；核对接口只有读取方法，模块没有任何执行路径，NV13 生产 Runner 仍由 `REAL_CLI_SANDBOX_VERIFIED=false` 锁定。代码仓库的实际状态无法在运行时核实，输出一律提示重新核对。
+- **验证**：恢复单测 4 项（格式往返与引用解析、逐条核对与降级、私有 / 范围 / 版本检查、模仿标题的提取文字不算摘要），真实 SQLite 参考适配器 1 项（真实审批 / 任务 / Agent 表映射，恢复前后三表不变，重启中断的 Agent 运行为结果未知）；`cargo test --workspace` 793 通过 / 7 忽略。无真实项目或设备验证。
+- **关联**：`crates/moss-voice-server/src/context/{resume.rs,resume/tests.rs}`、`crates/moss-voice-server/src/context.rs`、`crates/moss-voice-server/tests/nv19_context_sqlite.rs`、实施细则 i11 §11、内置语音技术书 n22。
+
+### 功能真实性审查修复：画板尺寸与轮廓真正生效、走边框纳入急停、SD 无哈希拒绝执行（2026-10-14）
+
+- **现象**：5 路静态审查发现几处“界面能填、后端没用”或“看似状态实为固定值”。创作画板的宽 / 高被忽略，成品尺寸只取决于导出像素（最大约 204.8 mm）；“轮廓”模式实际仍是光栅；“自动判断”没有实现；画板写死网口，串口用户无法发送。走边框默认以 S1 出弱光，不登记为活动作业，顶栏急停找不到，也不做 Idle 预检、不可取消。SD 脱机在固件未启用 HashFS 时照常执行。此外：Android“连接电脑”被 CSP 拦截；语音中心按 F5 返回 404；设置写盘失败仍提示“已保存”；托盘退出漏停内置语音与第三方 MCP；顶栏“硬件在线”只是上次探测结果；退出提示宣称 0x18 能确保断电。
+- **根因与修复**：
+  - 画板：`generate_draw_artifacts` 按 `width_mm` / `height_mm` 出成品（锁定比例放进框内；留空按 0.1 mm/像素；超出 400 mm 工作区返回 400）。光栅先缩放到成品尺寸；`outline` 改用 `trace_grayscale` + `optimize_with_threshold` + `write_outline` 描边。前端去掉“自动判断”（旧值按光栅），宽 / 高留空传 null。新增 `drawConnection.js`，支持网口与串口；串口时不提供 SD 脱机。
+  - 走边框（用户决定）：`power` 缺省为 0（不出光），勾选“弱光指示”才传 1。补同设备占用检查（409 `device_busy`）和 Idle 预检（`device_preflight_failed`）。运行时登记为活动作业 `framing-…`，`/api/jobs/stop-targets` 可见、急停可停。返回值新增 `framing_cancelled` / `framing_failed`，失败或被停止后保留为待确认停止目标。
+  - SD 脱机（用户决定）：`verify_sd_file_hash` 返回无哈希时不发 `$SD/Run`，任务记为 failed。`send_result` 去掉 `sd_hash_verified` / `warning`。
+  - Android：新增 `tauri.android.conf.json`，只在 Android 的 `connect-src` 追加 `http: ws:`。
+  - `/voice` 加入前端页面兜底（`is_spa_route`）。
+  - `/api/settings` 先校验、再一次写入 `settings.json`（临时文件 + 改名），失败返回 500 `settings_write_failed`。
+  - 托盘退出与窗口退出统一走 `shutdown_and_exit`。
+  - 顶栏硬件胶囊改为“未探测 / 握手通过 / 未连接”并标注探测时间（`state/hardwareStatus.js`）。`/api/system/info` 的 `safety_gate` / `estop_channel` 改为准确的固定说明，控制台标“固定规则”。退出提示改为“0x18 只是软件停止请求，不代表已熄灭或断电”。
+  - 契约变化：走边框默认不出光、SD 无哈希拒绝执行，两者都是行为变更。已记入技术书 r16。
+- **验证**：
+  - 新增 laser-api 测试：`draw_preview_honors_target_size_and_outline_mode`、`framing_defaults_to_laser_off_and_requires_idle_preflight`、`framing_is_listed_in_stop_targets_and_can_be_emergency_stopped`、`sd_offline_refuses_to_run_when_firmware_returns_no_file_hash`、`settings_save_reports_write_failure_instead_of_success`；SPA 路由测试加入 `/voice`；桌面新增 `android_csp_only_adds_lan_connect_sources`。
+  - 前端新增 `drawConnection`、`hardwareStatus` 单测，`npm test` 118 通过。
+  - `cargo test --workspace` 788 通过 / 7 忽略；`npm run build` 成功；E2E 32/32。
+  - 画板页在无头浏览器中渲染、切换串口、显示弱光选项，无运行错误（临时脚本，未入库）。
+  - 未实机验证（HW-16、HW-12），未跑三端 release 构建。
+- **关联**：`crates/laser-api/src/lib.rs`（`run_framing`、`generate_draw_artifacts`、`draw_target_size_mm`、`SD_HASH_UNAVAILABLE`、`is_spa_route`、`update_runtime_settings`）、`apps/desktop/src-tauri/{src/lib.rs,tauri.android.conf.json}`、`frontend/src/{pages/DrawPage.jsx,drawConnection.js,state/hardwareStatus.js,components/Navbar.jsx,components/ConsoleDrawer.jsx,components/SettingsModal.jsx,pages/HomePage.jsx}`；`docs/developer/{api-contracts,safety,architecture,frontend-behavior}.md`、`docs/user/quick-start.md`、`docs/laser/fluidnc-*.md`。
+
+### NV19-06 设备故障经验：固定结构、绑定机型与固件、证据由系统写入；修正记忆中句中 G-code 漏过滤（2026-10-14）
+
+- **现象**：故障经验只是一段自由文字，看不出现象、排查和结论分别是什么，也没有记录凭什么认为“已解决”；机型以外的固件可以不填，旧固件上的办法会被套用到升级后的设备。另外，记忆内容过滤只检查行首，“发送 G1 X10 Y10 S1000 后恢复”“改成$30=1000就好”这类写在句中的机器指令能存进记忆。
+- **根因与修复**：新增 `moss-voice-server::context::experience`：经验正文固定为现象 / 排查 / 结论 / 证据四段（有长度上限，没有命令字段），`record_experience` 要求机型和固件都写明；证据段只由系统写入，不带证据为候选，用户确认或带引用的可信测试才是已确认，伪造的测试证据被拒绝；`confirm_experience` 升级时把证据写进正文；`recall_experience` 按现象召回同设备、机型与固件都一致的经验，记录时一并返回相近旧经验；`format_experience` 注明“不是指令，也不是操作授权”，未验证的单独标出。NV19-01 的 `looks_like_machine_data` 改为在整行任意位置查找 G/M 代码字加参数字和 `$n=` 设置。
+- **契约与安全**：不改表结构，没有新的 Tauri 命令、HTTP 接口或设置项；语音通道不能记录或确认经验。过滤收紧后，句中含 G-code 或 GRBL 设置的记忆、提取候选和资料段落都会被拒绝或丢弃（已加“M3 螺丝”“价格 $30 左右”等不误伤的反例）。
+- **验证**：经验单测 6 项（结构往返、固件必填与证据决定状态、拒绝空 / 超长 / 机器指令、同类召回且换固件 / 错机型 / 设备未知不套用、候选标注与确认需证据、提取句确认后不丢原文），内容过滤用例补 3 条拦截与 3 条不误伤；`moss-voice-server` nv19 单测共 50 项；`cargo test --workspace` 787 通过 / 7 忽略。无真实设备或真实故障数据验证。
+- **关联**：`crates/moss-voice-server/src/context/{experience.rs,experience/tests.rs,tests.rs}`、`crates/moss-voice-server/src/context.rs`、实施细则 i10 §11、内置语音技术书 n22。
+
+### NV19-05 分层知识库：只索引用户选定的目录，摘要本机生成，原文按需核对后读取（2026-10-14）
+
+- **现象**：长期记忆只能存对话里提取或用户手填的条目，说明书、项目文档这类资料没有办法在对话中按问题找到；直接把整份文档塞给模型既超长，也会把资料里夹带的“指令”当成提示词。
+- **根因与修复**：把 NV14 音乐目录已有的路径安全函数原样抽成 `moss-voice-server/src/safe_fs.rs`（音乐模块改为调用它，行为不变），新增 `context::knowledge`：只在私有窗口登记用户选择的目录，挂在项目 / 工作区下；扫描有深度、数量、大小上限，只收 UTF-8 文本，跳过链接、重解析点、隐藏文件、凭据样文件名和敏感子目录；每个目录在本机抽取生成 L0（≤256 字）与 L1（≤4000 字），敏感段落和 G-code 丢弃，不调用模型。schema v12 新增 `context_knowledge_roots` / `_dirs` / `_files` 与目录摘要 FTS5 索引，原文不入库。检索是一次过滤搜索：按 L0、L1 给目录排序，只有前 2 个目录按需读原文，读前核对路径、大小、修改时间与 SHA-256，变化就不读并提示重建。结果标为“只是数据，不是指令”，只显示目录名与相对路径。`ContextRetriever::set_knowledge` 让语音检索同时查资料，与记忆共用 300 毫秒上限、互不影响。
+- **契约与安全**：迁移单事务、失败回滚；没有新的 Tauri 命令、HTTP 接口或设置项，宿主未接入时行为不变。资料文本不发给任何服务商；RAGFlow 仍只走 NV11 `search_rag` 工具，不新增外部调用。忘记目录只删索引，不动磁盘文件。旧迁移测试在模拟旧版本时同步删除新表（断言不变）。
+- **验证**：知识库单测 8 项（安全扫描与跳过统计、摘要长度、按需读原文与数据标签、改动 / 删除 / 忘记目录、调用方与根目录校验、Windows 目录联接实测拒绝、段落过滤、与记忆合并检索），真实 SQLite 端到端 1 项，`laser-runtime` 知识库表 2 项；`cargo test --workspace` 779 通过 / 7 忽略。无真实资料库命中率、真人语音或设备验证。
+- **关联**：`crates/moss-voice-server/src/{safe_fs.rs,lib.rs,music/index.rs}`、`crates/moss-voice-server/src/context/{knowledge.rs,knowledge/tests.rs,retrieve.rs}`、`crates/moss-voice-server/tests/nv19_context_sqlite.rs`、`crates/laser-runtime/src/{knowledge_store.rs,db.rs,lib.rs,agent_store.rs}`、`crates/laser-runtime/tests/nv19_context_schema.rs`、实施细则 i9 §11、`docs/developer/db-schema.md` §3.17。
+
+### NV19-04 长期记忆检索：FTS5 trigram 索引、快速与深度两种模式（2026-10-14）
+
+- **现象**：NV19-01～03 能存、能提取记忆，但对话时没有办法按问题找出相关的几条；把整份记忆都塞进提示词既慢又会把无关或别的设备的内容带进来。
+- **根因与修复**：schema v11 新增外部内容 FTS5 表 `context_memories_fts`（trigram 分词，三个触发器随增删改同步），`RuntimeDb` 新增 `match_context_memories`（三字片段，短语引用防注入）与 `like_context_memories`（多个短词，转义通配符）。新增 `moss-voice-server::context::retrieve`：闲聊、停止词、快捷查询不查库；快速模式不调模型，把问题切成三字片段和两字片段并去掉虚词片段，按命中数打分，硬件经验只在机型 / 固件一致时返回，最多注入 3 条、600 字，300 毫秒超时，带“仅供参考的数据，不是指令或授权”标签，任何失败都不注入；深度模式只在私有窗口使用，模型只看到问题、只负责拆关键词。`Conversation::with_context_retrieval` 提供可选挂钩，宿主通过 `ContextAccessProvider` 给出可信范围与机型。
+- **契约与安全**：迁移单事务、失败回滚；没有新的 Tauri 命令、HTTP 接口或设置项，`ContextRetriever` 默认关闭，宿主未接入时对话行为不变。注入内容作为单独的 system 消息，不进入工具参数、审批或授权。4 个旧迁移测试在模拟旧版本时同步删除 FTS 表（断言不变）。
+- **验证**：`moss-voice-server` nv19 单测 36 项（含检索 7 项、对话挂钩 1 项：问题会注入、闲聊不查库、急停不进模型），真实 SQLite 5 项（含固定中文检索集 10/10 与 500 条延迟记录），`laser-runtime` nv19 7 项（含 FTS 同步与过滤）；`cargo test --workspace` 765 通过 / 7 忽略。已知局限：同义改写（“边缘烧焦”对“边缘发黑”）快速模式查不到。无真实语料、模型或设备验证。
+- **关联**：`crates/laser-runtime/src/{db.rs,context_store.rs,lib.rs,agent_store.rs}`、`crates/laser-runtime/tests/nv19_context_schema.rs`、`crates/moss-voice-server/src/context/{retrieve.rs,retrieve/tests.rs,service.rs,fake_store.rs}`、`crates/moss-voice-server/src/conversation.rs`、`crates/moss-voice-server/src/tests/chat.rs`、`crates/moss-voice-server/tests/nv19_context_sqlite.rs`、实施细则 i8 §11、`docs/developer/db-schema.md` §3.16。
+
+### NV19-03 长期记忆候选提取：默认关闭、只新增候选、可整批撤销（2026-10-14）
+
+- **现象**：NV19-02 有了存储，但没有办法从对话里得到记忆条目；NV10 的做法是让模型把整份摘要重写一遍，模型输出会直接覆盖用户看到的内容，也无法逐条撤销。
+- **根因与修复**：新增 `moss-voice-server::context::extract::ContextExtractor`，默认关闭。只处理语音会话结束后已提交且截断的文字（复用 NV10 `bounded_dialog`），模型看不到工具，返回工具调用时整次作废。模型只能提出 `add`，每次最多 8 条，其他操作一律拒绝并记下原因；每条候选按类别落到个人 / 设备 / 项目范围，缺项目或机型记录时跳过不猜，重复的跳过，90 天未确认自动到期，并且仍经 `ContextService::create` 套用全部契约与宿主复核。删除、清空、撤销设备、切换项目通过 `scope_changed` 与提交互斥，进行中的提取整次丢弃。每次提取写一份清单（schema v10 `context_extraction_runs`，只存 id、revision、操作名与原因码，不含正文）；`ContextService::revert_extraction` 只在私有窗口可用、每份只能撤销一次，用户已编辑、确认或删除的记录保留。
+- **契约与安全**：没有新的 Tauri 命令、HTTP 接口、设置项或默认值变化；没有任何生产路径会触发提取（会话调用与开关界面随 NV19-08 接入）。模型无法修改或删除记忆；设备参数、材料与校准结果不在可提取类别内。`ContextStore` 接口新增 4 个清单方法（宿主实现尚未接入）。
+- **验证**：`moss-voice-server` nv19 单测 29 项（含提取 9 项：默认关闭、只新增、范围与去重、坏输出与工具调用、清空 / 关闭 / 切换项目时作废、宿主撤销时只写清单、整批撤销、按人范围、解析器上限），真实 SQLite 参考适配器 3 项，`laser-runtime` nv19 6 项；这些测试都不依赖固定等待时间。`cargo test --workspace` 755 通过 / 7 忽略。无真实模型、真人语音或设备验证。
+- **关联**：`crates/moss-voice-server/src/context/{extract.rs,extract/tests.rs,service.rs,fake_store.rs}`、`crates/moss-voice-server/src/context.rs`、`crates/laser-runtime/src/context_store.rs`、`crates/laser-runtime/tests/nv19_context_schema.rs`、`crates/moss-voice-server/tests/nv19_context_sqlite.rs`、实施细则 i7 §11、内置语音技术书 n22、`docs/developer/db-schema.md` §3.16。
+
+### NV19-02 长期记忆存储：schema v10 与受信增删改查（2026-10-14）
+
+- **现象**：NV19-01 只定了数据契约，没有地方存放结构化记忆，也没有在读写前统一复核权限的接口；直接让后续的提取、检索各自读写数据库，容易绕过范围与来源规则。
+- **根因与修复**：`RuntimeDb` 升到 schema v10，新增 `context_memories`（类别、范围、状态、来源取值用 CHECK 约束兜底；适用机型 / 固件列；删除只留无内容的墓碑）与 `context_extraction_runs`（只建表，供 NV19-03）；`context_store.rs` 提供插入、按范围列出、条件更新（拒绝修改已作废记录、拒绝已确认降为候选）、墓碑删除、清空范围、来源是否出现过。`moss-voice-server::context::service` 新增 `ContextStore` 接口与 `ContextService`：每次读写前由宿主 `current` 复核设备授权 / 声纹 / 桌面选择是否仍有效，再套用 NV19-01 的全部规则；编辑、确认（需证据）、删除、清空、导入 NV10 旧摘要、导出只允许私有窗口；旧摘要按行过滤敏感内容后导入为候选，同一版本只导入一次，删除后也不会重新导入。
+- **契约与安全**：迁移在单事务内完成，失败回滚到 v9；NV10 `voice_memory` 不搬迁、不修改。没有新的 Tauri 命令、HTTP 接口或默认值变化，语音对话不读写新表，新能力仍默认关闭。4 个旧迁移测试在模拟旧版本时同步删除新表（断言不变）。
+- **验证**：`laser-runtime` 新增 `tests/nv19_context_schema.rs` 5 项（v9 升级保留 NV10、失败回滚与重试、CHECK 约束、条件 CRUD 与墓碑、清空与来源）；`moss-voice-server` 服务单测 8 项、真实 SQLite 参考适配器 `tests/nv19_context_sqlite.rs` 2 项，nv19 共 22 项通过；`cargo test --workspace` 744 通过 / 7 忽略（首次全量时 NV10 `memory` 与 NV16 `speaker_enrollment` 各 1 项固定等待 100～110 ms 的既有测试在高负载下失败，单独重跑 3 次均通过、第二次全量通过，未改动这两项）。未接桌面端存储实现与界面（NV19-08），无真实模型或设备验证。
+- **关联**：`crates/laser-runtime/src/{context_store.rs,db.rs,lib.rs,agent_store.rs}`、`crates/moss-voice-server/src/context/{service.rs,service/tests.rs}`、`crates/moss-voice-server/src/context.rs`、`crates/moss-voice-server/Cargo.toml`（测试依赖）、`docs/developer/db-schema.md` §3.16、实施细则 i6 §11。
+
+### NV19-01 长期记忆结构化模型：范围、来源、确认状态的数据契约（2026-10-14）
+
+- **现象**：NV10 只有每台设备一份 1500 字摘要，无法区分偏好、设备事实、技术资料、任务上下文和故障经验，也无法标出来源、是否经过验证、适用哪台设备；NV19 后续的存储、提取和检索没有统一的边界可依。
+- **根因与修复**：新增 `moss-voice-server::context`（纯数据，不接存储与界面）。五类记忆各有允许存放的范围（设备 / 个人 / 项目 / 工作区）；`TrustedScope` 只能由宿主从设备授权代次、已校准说话人或私有窗口的明确选择产生，模型输出不能成为身份；`AccessContext` 读写按 kind+id 精确匹配，未识别说话人不回退到他人记录；六种来源规定通道、可写类别、能否直接为已确认和引用格式（对话提取只能生成候选）；候选升为已确认需用户确认或可信测试证据，作废为终态；设备事实与故障经验必须带适用机型，机型 / 固件不符或当前固件未知时不当作事实；内容拒绝敏感词、G-code 行和 GRBL `$n=` 设置。
+- **契约与安全**：没有新接口、数据表或默认值变化；新能力仍默认关闭，NV10 原有记忆路径不变。实施细则 i5 记录了完整矩阵与来源表，并修正候选 SQL（需增加适用机型 / 固件列）。
+- **验证**：`cargo test -p moss-voice-server --lib nv19_` 12 项通过（边界矩阵、来源契约、状态转换、内容过滤、适用范围、错误码）；`cargo test --workspace` 729 通过 / 7 忽略。未接 SQLite、提取、检索、界面，无真实模型或设备验证。
+- **关联**：`crates/moss-voice-server/src/{context.rs,context/tests.rs,lib.rs}`；`docs/integration/moss-native-voice-implementation.md` §11、内置语音技术书 n22。
+
+### 语音中心保存提示与未保存标记不再与实际不符（UI-3 审查，2026-10-14）
+
+- **现象**：只改健康检查地址或重复保存同一接入点时，提示“已重新连接”但后端没有重连（且即使重连也只是发起、尚未握手）；保存或测试进行中，按钮旁误显示“先测试连接”；一组本地设置的保存会被另一组已保存的值挡住；“体验”“本地模型”折叠摘要显示未保存的草稿；视觉、Agent 保存成功但读回状态失败时报“保存失败”；音乐选目录时保存按钮显示“保存中…”；第三方 MCP 打开编辑表单不改也标“未保存”。
+- **根因与修复**：`center.rs save_settings` 的返回另含 `reconnected`（本次是否重新发起了连接且有桥启动，取 `restart_bridge` 的返回值），前端 `settingsSaveEffect` 据此写“正在重新连接”或“没有重新连接”；`canSaveSection` 去掉 `busy`，进行中只禁用按钮；`localSettingsError` 拆为 `experienceSettingsError` / `localModelSettingsError`，每组只检查本组字段；折叠摘要改用已保存值；视觉、Agent 把保存与读回分开；音乐分出 `picking` / `saving`；MCP 与打开时的内容比较；`formDirty` 缺省比较两边字段并集。删除未使用的 `VoiceOtherModes`。契约为新增返回字段，不改参数与默认值，向后兼容。
+- **验证**：`cargo test -p moss-voice` center 12 项通过（新增 `reconnected` 断言）；`npm test` 115 通过（新增 2 项、补充 1 项）；`tests/voice-center.browser.mjs` 通过并重新生成视觉基线；`npm run build` 成功；`cargo test --workspace` 742 通过 / 7 忽略；E2E 32/32。未在真实桌面窗口操作，未跑三端 release 构建。
+- **关联**：`crates/moss-voice/src/center.rs`、`frontend/src/voiceState.js`、`frontend/src/pages/VoicePage.jsx`、`frontend/src/components/{VoiceBuiltinCard,VoiceVisionCard,VoiceAgentCard,VoiceMusicCard,VoiceMcpCard,VoiceLayout}.jsx`；`docs/developer/api-contracts.md` §5、`docs/developer/frontend-behavior.md` §9。
+
+### 语音中心按链路分组、每组单独保存（UI-3，2026-10-14）
+
+- **现象**：语音中心把三种链路的所有内容一次铺开（内置服务大卡里套着音乐、视觉、Agent、两套模型、本地模型、耗时），用户看不过来；“服务端与接入点设置”9 个字段共用一个“保存设置”，内置服务和外部服务端各有一套都叫“模型配置”的三栏表单，“保存模型与体验设置”同时提交两类设置，保存按钮文字和保存后的提示各不相同，用户不知道保存的是哪一项。
+- **根因与修复**：页面改为顶部选链路 + 一行状态，下分服务与设备 / 模型 / 连接 / 功能扩展 / 记录与诊断五个标签；当前链路用不到的设置折叠在后、需要时展开，且只用 CSS 调整位置，切换链路不重建组件、不丢填写。新增 `VoiceLayout.jsx`（`VoiceGroup` 可折叠分组 + 一行摘要、`SaveBar`“保存{对象}”、没改动不可点、分组与标签“未保存”标记、结果显示在按钮旁）。设置拆为官方接入点、自建服务端程序、自建接入点、内置服务端口四组，只提交本组字段；本地模型与语音体验分两组保存，各自只取本组草稿；内置云端模型三项各自一组。音乐、视觉、Agent 卡补齐样式，Agent 放入默认折叠的“实验功能”；界面文字去掉内部任务编号。内置服务状态刷新失败时保留上次状态，不卸载分组。
+- **契约与安全**：Tauri 命令与参数不变（后端 `save_settings` 本就按字段合并）；密钥不回显、先测试后保存、切换链路与设备允许/撤销的确认框、严格模式与各项默认关闭不变。用户可见变化：链路选项顺序改为内置 / 官方 / 自建，成功保存不再弹窗（失败显示在按钮旁，启停等操作失败仍弹窗）。
+- **验证**：新增 4 项单测，`npm test` 113 通过；新增 `tests/voice-center.browser.mjs`（链路切换与停止服务端询问、服务端启停与意外退出、分组只提交本组字段、未保存标记跨标签保留、先测试后保存、窄屏无溢出）通过，voiceMcp / plugins / speaker 浏览器测试与渲染冒烟测试通过；`npm run build` 成功；E2E 32/32。未在真实桌面窗口操作（HW-15），未跑三端 release 构建。
+- **关联**：`frontend/src/pages/VoicePage.jsx`、`frontend/src/components/{VoiceLayout,VoiceBuiltinCard,VoiceMusicCard,VoiceVisionCard,VoiceAgentCard,VoiceMcpCard,VoiceEndpointsCard}.jsx`、`frontend/src/voiceState.js`、`frontend/src/styles.css`；技术书 §9.5.1 r15、`docs/developer/frontend-behavior.md` §9、`docs/user/quick-start.md`。
+
 ### 前端组件内联样式迁为类名，外观不变（UI-02，2026-10-13）
 
 - **现象与影响**：UI-2 改版计划把组件里的 `style={{…}}` 收进 `styles.css`，但只迁移了顶栏，其余 17 个组件仍有 322 处内联样式，同一种样式散落多处、改设计要逐个找，另有一段 `!important` 规则专门用来压过这些内联样式。

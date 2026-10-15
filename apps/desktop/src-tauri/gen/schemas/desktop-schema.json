@@ -291,6 +291,18 @@
           "markdownDescription": "Enables the voice_builtin_stop command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_context_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-context-manage",
+          "markdownDescription": "Enables the voice_context_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_context_pick_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-context-pick-folder",
+          "markdownDescription": "Enables the voice_context_pick_folder command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voice_device_rename command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-device-rename",
@@ -679,6 +691,18 @@
           "type": "string",
           "const": "deny-voice-builtin-stop",
           "markdownDescription": "Denies the voice_builtin_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_context_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-context-manage",
+          "markdownDescription": "Denies the voice_context_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_context_pick_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-context-pick-folder",
+          "markdownDescription": "Denies the voice_context_pick_folder command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_device_rename command without any pre-configured scope.",

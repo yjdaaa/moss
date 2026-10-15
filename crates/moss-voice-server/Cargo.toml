@@ -31,6 +31,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 rcgen = "0.13"
+# NV19-02: reference store adapter over the real schema v10 (test only; no runtime dependency).
+laser-runtime = { path = "../laser-runtime" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 moss-voice-local-proto = { path = "../moss-voice-local-proto" }
 tempfile = "3"

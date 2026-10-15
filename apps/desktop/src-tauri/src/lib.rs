@@ -8,6 +8,7 @@ use tauri::{Emitter, Manager};
 mod export;
 mod voice;
 mod voice_builtin;
+mod voice_context;
 mod voice_mcp;
 
 #[derive(Clone, Default)]
@@ -98,19 +99,24 @@ async fn exit_application(app: tauri::AppHandle, stop_server: Option<bool>) -> R
     let stop = stop_server.unwrap_or(true);
     let handle = app.clone();
     // 停止服务端最长约 5 秒，放到阻塞线程，避免卡住窗口
-    let _ = tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(desktop)]
-        {
-            voice::shutdown(&handle, stop);
-            voice_builtin::shutdown(&handle);
-            voice_mcp::shutdown(&handle);
-        }
-        #[cfg(mobile)]
-        let _ = stop;
-        handle.exit(0);
-    })
-    .await;
+    let _ = tauri::async_runtime::spawn_blocking(move || shutdown_and_exit(&handle, stop)).await;
     Ok(())
+}
+
+/// 退出的唯一收尾顺序：先急停，再停止（或放开）语音服务端、内置语音服务与第三方 MCP 子进程，最后退出。
+/// 关闭窗口退出与托盘退出都走这里（2026-10-14 前托盘在没有自有服务端时直接退出，漏了后两项）。
+fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
+    use tauri::Manager;
+    handle.state::<ShutdownState>().request();
+    #[cfg(desktop)]
+    {
+        voice::shutdown(handle, stop_server);
+        voice_builtin::shutdown(handle);
+        voice_mcp::shutdown(handle);
+    }
+    #[cfg(mobile)]
+    let _ = stop_server;
+    handle.exit(0);
 }
 
 /// Opens a second packaged Tauri webview for private voice settings.
@@ -279,6 +285,8 @@ pub fn run() {
             voice_builtin::voice_memory_set_enabled,
             voice_builtin::voice_memory_save,
             voice_builtin::voice_memory_clear,
+            voice_context::voice_context_manage,
+            voice_context::voice_context_pick_folder,
             voice_builtin::voice_builtin_status,
             voice_builtin::voice_builtin_start,
             voice_builtin::voice_builtin_stop,
@@ -365,9 +373,9 @@ pub fn run() {
                     }
                     "quit" => {
                         if !voice::owns_running_server(app) {
-                            let state = app.state::<ShutdownState>();
-                            state.request();
-                            app.exit(0);
+                            app.state::<ShutdownState>().request();
+                            let handle = app.clone();
+                            std::thread::spawn(move || shutdown_and_exit(&handle, true));
                             return;
                         }
                         // MOSS 启动的语音服务端在运行：询问是否一并停止（默认停止，技术书 §9.4.3）
@@ -382,14 +390,7 @@ pub fn run() {
                                 "保留服务端并退出".into(),
                             ))
                             .show(move |stop| {
-                                std::thread::spawn(move || {
-                                    // 先急停，再处理服务端
-                                    handle.state::<ShutdownState>().request();
-                                    voice::shutdown(&handle, stop);
-                                    voice_builtin::shutdown(&handle);
-            voice_mcp::shutdown(&handle);
-                                    handle.exit(0);
-                                });
+                                std::thread::spawn(move || shutdown_and_exit(&handle, stop));
                             });
                     }
                     _ => {}
@@ -447,7 +448,7 @@ mod tests {
     #[test]
     fn frontend_invoked_commands_are_registered_and_granted() {
         let build_rs = include_str!("../build.rs");
-        let capability = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}", include_str!("../capabilities/default.json"), include_str!("../capabilities/voice-memory.json"), include_str!("../capabilities/voice-plugins.json"), include_str!("../capabilities/voice-vision.json"), include_str!("../capabilities/voice-agent.json"), include_str!("../capabilities/voice-music.json"), include_str!("../capabilities/voice-home.json"));
+        let capability = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}", include_str!("../capabilities/default.json"), include_str!("../capabilities/voice-memory.json"), include_str!("../capabilities/voice-plugins.json"), include_str!("../capabilities/voice-vision.json"), include_str!("../capabilities/voice-agent.json"), include_str!("../capabilities/voice-music.json"), include_str!("../capabilities/voice-home.json")) + "\n" + include_str!("../capabilities/voice-context.json");
         for command in [
             "open_voice_private",
             "get_backend_origin",
@@ -465,10 +466,30 @@ mod tests {
         .into_iter()
         .chain(crate::voice::COMMANDS)
         .chain(crate::voice_builtin::COMMANDS)
+        .chain(crate::voice_context::COMMANDS)
         {
             assert!(build_rs.contains(&format!("\"{command}\"")), "build.rs 未登记 {command}");
             let permission = format!("\"allow-{}\"", command.replace('_', "-"));
             assert!(capability.contains(&permission), "capability 未授权 {permission}");
+        }
+    }
+
+    /// NV19-08: long-term context commands exist only for the packaged private window.
+    #[test]
+    fn voice_context_permissions_are_packaged_private_window_only() {
+        let private: serde_json::Value = serde_json::from_str(include_str!("../capabilities/voice-context.json")).unwrap();
+        let general = include_str!("../capabilities/default.json");
+        assert_eq!(private["windows"], serde_json::json!(["voice-private"]));
+        assert!(private.get("remote").is_none() && private.get("webviews").is_none());
+        assert_eq!(private["permissions"], serde_json::json!(["allow-voice-context-manage", "allow-voice-context-pick-folder"]));
+        for permission in ["allow-voice-context-manage", "allow-voice-context-pick-folder"] {
+            assert!(!general.contains(permission), "{permission} must not reach the loopback main window");
+        }
+        let source = include_str!("voice_context.rs");
+        for command in ["pub async fn voice_context_manage", "pub async fn voice_context_pick_folder"] {
+            let body = &source[source.find(command).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(body.contains("require_voice_private_asset(&window)?"), "{command} must check the packaged private page");
         }
     }
 
@@ -659,5 +680,19 @@ mod tests {
         let state = ShutdownState::default();
         state.request();
         assert!(laser_host::global_shutdown_coordinator().is_shutdown_requested());
+    }
+    /// Android 版“连接电脑”要访问局域网里任意 IP 的 MOSS（http://<电脑>:9666），只在 Android 覆盖配置里放开 connect-src；
+    /// 桌面版保持只连本机。两份 CSP 除了这一处必须一致（2026-10-14）。
+    #[test]
+    fn android_csp_only_adds_lan_connect_sources() {
+        let csp = |text: &str| -> String {
+            let value: serde_json::Value = serde_json::from_str(text).unwrap();
+            value["app"]["security"]["csp"].as_str().unwrap().to_owned()
+        };
+        let desktop = csp(include_str!("../tauri.conf.json"));
+        let android = csp(include_str!("../tauri.android.conf.json"));
+        assert!(!desktop.split([' ', ';']).any(|token| token == "http:"), "桌面版不能放开任意 http 来源: {desktop}");
+        assert_eq!(android, format!("{desktop} http: ws:"), "Android 只在 connect-src 末尾追加 http: ws:");
+        assert!(desktop.trim_end().split(';').last().unwrap().trim_start().starts_with("connect-src"), "connect-src 必须是最后一条指令: {desktop}");
     }
 }

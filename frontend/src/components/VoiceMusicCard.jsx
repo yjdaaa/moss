@@ -1,79 +1,99 @@
 import React, { useEffect, useState } from "react";
+import { FolderOpen } from "lucide-react";
 import { voiceApi } from "../voiceApi.js";
+import { formDirty, savedNoteText } from "../voiceState.js";
+import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
 
 const EMPTY = { enabled: false, directory: "" };
 
 export default function VoiceMusicCard() {
+  const [saved, setSaved] = useState(EMPTY);
   const [config, setConfig] = useState(EMPTY);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
+  const [picking, setPicking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [result, setResult] = useState(null);
   const [loaded, setLoaded] = useState(false);
+  const busy = picking || saving;
+  const dirty = loaded && formDirty(saved, config);
 
   useEffect(() => {
     let alive = true;
     voiceApi.musicStatus().then((state) => {
       if (!alive) return;
-      setConfig({ ...EMPTY, ...(state.settings || {}) });
+      const next = { ...EMPTY, ...(state.settings || {}) };
+      setSaved(next);
+      setConfig(next);
       setLoaded(true);
-    }).catch((e) => { if (alive) setError(e?.message || "本地音乐状态读取失败"); });
+    }).catch((e) => { if (alive) setLoadError(e?.message || "本地音乐状态读取失败"); });
     return () => { alive = false; };
   }, []);
 
+  const change = (key, value) => {
+    setConfig((current) => ({ ...current, [key]: value }));
+    setResult(null);
+  };
+
   const pick = async () => {
-    setBusy(true); setError(""); setMessage("");
+    setPicking(true);
     try {
       const selected = await voiceApi.musicPickDirectory();
-      if (selected?.directory) {
-        setConfig((current) => ({ ...current, directory: selected.directory }));
-        setMessage("目录已选择；点击保存后才会验证和索引歌曲。");
-      }
+      if (selected?.directory) change("directory", selected.directory);
     } catch (e) {
-      setError(e?.message || "选择音乐目录失败");
+      setResult({ ok: false, text: e?.message || "选择音乐目录失败" });
     } finally {
-      setBusy(false);
+      setPicking(false);
     }
   };
 
   const save = async () => {
-    setBusy(true); setMessage(""); setError("");
+    setSaving(true);
     try {
-      const result = await voiceApi.musicSave({ settings: config });
-      setConfig({ ...EMPTY, ...(result.settings || {}) });
-      setMessage(config.enabled
-        ? "已保存，索引 " + (result.track_count || 0) + " 首歌曲。" +
-          (result.restarted ? "内置语音服务已安全重启。" : "启动内置对话服务后生效。")
-        : "音乐功能已关闭。" + (result.restarted ? "内置语音服务已重启。" : ""));
+      const response = await voiceApi.musicSave({ settings: config });
+      const next = { ...EMPTY, ...(response.settings || {}) };
+      setSaved(next);
+      setConfig(next);
+      const effect = config.enabled
+        ? `索引 ${response.track_count || 0} 首 · ${response.restarted ? "内置服务已重启" : "启动内置服务后生效"}`
+        : `音乐已关闭${response.restarted ? " · 内置服务已重启" : ""}`;
+      setResult({ ok: true, text: savedNoteText("音乐设置", effect) });
     } catch (e) {
-      setError(e?.message || "保存音乐配置失败");
+      setResult({ ok: false, text: `保存失败：${e?.message || "保存音乐配置失败"}` });
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   };
 
-  return <section className="voice-card" aria-label="本地音乐">
-    <h3>本地音乐（NV14）</h3>
-    <p>默认关闭。仅扫描你明确配置的<strong>本机音乐目录</strong>，不上传歌曲到模型，也不打开麦克风、摄像头或激光设备。需要先配置可用的内置语音对话模型。</p>
-    <label className="voice-form-group">
-      <input type="checkbox" checked={!!config.enabled}
-        disabled={!loaded || busy}
-        onChange={(event) => setConfig((current) => ({ ...current, enabled: event.target.checked }))} />
-      启用本地音乐播放
-    </label>
-    <label className="voice-form-group">
-      <span>音乐目录（现有本地文件夹的完整路径）</span>
-      <input value={config.directory} disabled={!loaded || busy}
-        placeholder="例如 D:\Music（不会自动读取）"
-        autoComplete="off"
-        onChange={(event) => setConfig((current) => ({ ...current, directory: event.target.value }))} />
-    </label>
-    {error && <p role="alert">{error}</p>}    <button type="button" disabled={!loaded || busy} onClick={pick}>
-      {busy ? "正在处理…" : "选择音乐文件夹…"}
-    </button>
-
-    {message && <p role="status">{message}</p>}
-    <button type="button" disabled={busy || !loaded || (config.enabled && !config.directory.trim())}
-      onClick={save}>{busy ? "验证目录并保存中…" : "保存音乐配置"}</button>
-    <p>歌名完全匹配优先；重名时先询问，不会随机猜一首。只在启用后建立索引；设备掉线、插话、切歌或撤销权限时，旧歌曲缓冲会被清除。实际音质仍需最后进行设备验收。</p>
-  </section>;
+  const summary = loadError ? "读取失败" : !loaded ? "读取中…" : saved.enabled ? `已开启 · ${saved.directory}` : "未开启";
+  return (
+    <VoiceGroup id="music" title="本地音乐" label="本地音乐" summary={summary} tone={saved.enabled ? "ok" : undefined} dirty={dirty}>
+      <p className="voice-muted">默认关闭。只扫描你指定的本机目录，歌曲不上传给模型。歌名重复时先询问，不随机猜。</p>
+      {loadError && <div className="voice-hint voice-hint--bad" role="alert">{loadError}</div>}
+      <div className="voice-form-grid">
+        <label className="voice-check voice-wide">
+          <input type="checkbox" checked={!!config.enabled} disabled={!loaded || busy} onChange={(event) => change("enabled", event.target.checked)} id="voice-music-enabled" />
+          <span>启用本地音乐播放（需要内置服务已配好对话模型）</span>
+        </label>
+        <label className="voice-wide">
+          <span>音乐目录（本机文件夹的完整路径，保存时才验证并建立索引）</span>
+          <span className="voice-inline">
+            <input className="text-input mono" value={config.directory} disabled={!loaded || busy} placeholder="例如 D:\Music" autoComplete="off" onChange={(event) => change("directory", event.target.value)} id="voice-music-dir" />
+            <button type="button" className="btn btn-ghost" disabled={!loaded || busy} onClick={pick}>
+              <FolderOpen size={13} /> 选择…
+            </button>
+          </span>
+        </label>
+      </div>
+      <SaveBar
+        id="voice-music-save"
+        target="音乐设置"
+        dirty={dirty}
+        busy={busy}
+        saving={saving}
+        blocked={config.enabled && !config.directory.trim() ? "开启时需要填写音乐目录" : ""}
+        result={result}
+        onSave={save}
+      />
+    </VoiceGroup>
+  );
 }

@@ -110,7 +110,7 @@ mod tests{
  #[test]fn schema_v8_migration_is_atomic(){
    let db=RuntimeDb::open_memory().unwrap();
    db.connection.execute_batch(
-    "DROP TABLE voice_agent_runs; DELETE FROM schema_version WHERE version>=8; CREATE TABLE voice_agent_runs(unexpected TEXT);"
+    "DROP TABLE context_knowledge_fts; DROP TABLE context_knowledge_roots; DROP TABLE context_knowledge_dirs; DROP TABLE context_knowledge_files; DROP TABLE context_memories_fts; DROP TABLE context_memories; DROP TABLE context_extraction_runs; DROP TABLE voice_agent_runs; DELETE FROM schema_version WHERE version>=8; CREATE TABLE voice_agent_runs(unexpected TEXT);"
    ).unwrap();
    assert_eq!(db.schema_version().unwrap(),7);
    assert!(db.migrate().is_err());

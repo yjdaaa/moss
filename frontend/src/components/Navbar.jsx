@@ -1,6 +1,7 @@
 import React from "react";
 import { Zap, Radio, OctagonAlert, ShieldCheck } from "lucide-react";
 import { mcpPillState } from "../state/mcpStatus.js";
+import { hardwarePillView } from "../state/hardwareStatus.js";
 
 // 顶栏（技术书 §9.5.5 B）：页面标题 + 硬件状态 + 小智四态 + 审批（仅桌面端）+ 常驻急停。
 
@@ -33,7 +34,7 @@ export function Navbar({
   const mcpPill = mcpPillState(mcpStatus, voiceStatus);
   const pillClass =
     mcpPill.key === "connected" && mcpPill.link === "自建" ? "ob-pill--ok" : MCP_PILL_CLASS[mcpPill.key];
-  const hardwareOnline = Boolean(connectionStatus?.connected);
+  const hardware = hardwarePillView(connectionStatus);
 
   return (
     <header className="ob-top">
@@ -46,12 +47,12 @@ export function Navbar({
       <button
         type="button"
         onClick={() => onNavigate("/")}
-        className={`ob-pill conn-pill ${hardwareOnline ? "ob-pill--ok online" : "ob-pill--bad offline"}`}
-        title="激光雕刻机硬件状态（点击前往工作台进行握手探测）"
+        className={`ob-pill conn-pill ${hardware.online ? "ob-pill--ok online" : "ob-pill--bad offline"}`}
+        title={hardware.title}
         id="nav-hardware-status"
       >
         <Zap size={13} aria-hidden="true" />
-        <span>硬件 · {hardwareOnline ? "在线" : "离线"}</span>
+        <span>{hardware.text}</span>
       </button>
 
       <div

@@ -124,8 +124,8 @@ export function sectionInputError(section, form) {
  * “保存到服务端配置”是否可点：该分区最近一次测试成功，且测试后没有改动（先测试后保存）。
  * `test` 为 `{ok, fingerprint}`。
  */
-export function canSaveSection(section, form, test, { fullModule = false, busy = false } = {}) {
-  if (fullModule || busy) return false;
+export function canSaveSection(section, form, test, { fullModule = false } = {}) {
+  if (fullModule) return false;
   if (isSectionBlank(form) || sectionInputError(section, form)) return false;
   return Boolean(test && test.ok && test.fingerprint === sectionFingerprint(section, form));
 }
@@ -157,7 +157,7 @@ export function deviceView(mode, device) {
     return {
       text: "见内置服务",
       tone: "info",
-      hint: "内置链路：设备的 OTA 地址应指向本机（见下方“内置语音服务”卡片），设备连接情况也在那里显示。",
+      hint: "内置链路：设备的 OTA 地址应指向本机，地址与设备连接情况见“服务与设备”。",
     };
   }
   if (mode !== "self_hosted") {
@@ -293,7 +293,7 @@ export function builtinModeView(status) {
     tone: chat ? "ok" : "info",
     hint: chat
       ? "已配置识别、大模型与合成：设备说话后由 MOSS 识别、回答并朗读。开始加工前会先复述参数等你口头确认；开启严格模式时还需在电脑上批准。"
-      : "识别、大模型、合成三项没有配置齐全：先以回声测试运行（说完稍停即把你的声音播回）。在下方“模型配置”（识别、合成也可用“本地模型”）中配齐后自动切换为对话。",
+      : "识别、大模型、合成三项没有配置齐全：先以回声测试运行（说完稍停即把你的声音播回）。识别、合成也可用本地模型；在“模型”标签配齐后自动切换为对话。",
     autostart: linked
       ? "语音链路为“MOSS 内置服务”：随 MOSS 自动启动。"
       : "语音链路切到“MOSS 内置服务”后会随 MOSS 自动启动；现在也可以手动启动测试。",
@@ -391,8 +391,8 @@ export function selectedVoices(form, models) {
   return model?.voices || null;
 }
 
-/** 前端先做的检查；返回错误文字或空串。`models` 为状态里的模型列表，用于按所选合成模型检查音色编号。 */
-export function localSettingsError(form, models = []) {
+/** 前端先做的检查，按保存分组拆开；返回错误文字或空串。语音体验分组（插话、热词）： */
+export function experienceSettingsError(form) {
   const bargeMs = Number(form.barge_in_ms ?? 400);
   if (!Number.isInteger(bargeMs) || bargeMs < 300 || bargeMs > 600) return "插话时长须为 300 ~ 600 毫秒的整数";
   const words = String(form.custom_hotwords || "").split(/\r?\n/);
@@ -401,6 +401,11 @@ export function localSettingsError(form, models = []) {
   if (effective.length > 64) return "自定义热词最多 64 条";
   if (effective.some((word) => [...word].length > 32)) return "每条热词最多 32 个字符";
   if (new TextEncoder().encode(effective.join("")).length > 4096) return "热词总长度超过 4096 字节";
+  return "";
+}
+
+/** 本地模型分组（音色、语速、下载地址）。`models` 为状态里的模型列表，用于按所选合成模型检查音色编号。 */
+export function localModelSettingsError(form, models = []) {
   const voices = selectedVoices(form, models);
   const max = voices ? voices.max : 999;
   const speaker = Number(form.tts_speaker);
@@ -410,6 +415,11 @@ export function localSettingsError(form, models = []) {
   const mirror = String(form.mirror || "").trim();
   if (mirror && (!/^https?:\/\//i.test(mirror) || /\s/.test(mirror))) return "下载地址必须以 http:// 或 https:// 开头";
   return "";
+}
+
+/** 两组合起来的检查。 */
+export function localSettingsError(form, models = []) {
+  return experienceSettingsError(form) || localModelSettingsError(form, models);
 }
 
 export function localSettingsPayload(form) {
@@ -522,4 +532,140 @@ export function extraEndpointError(url, endpoints = [], max = 4) {
   const extras = (Array.isArray(endpoints) ? endpoints : []).filter((endpoint) => String(endpoint?.id || "").startsWith("extra-"));
   if (extras.length >= max) return `附加接入点最多 ${max} 个`;
   return "";
+}
+
+// ---------- 语音中心分组与保存（UI-3，技术书 §9.5.1 r15） ----------
+
+/** 页面标签。所有标签内容始终挂载、只隐藏，切换标签不会丢失未保存的填写。 */
+export const VOICE_TABS = [
+  { key: "service", label: "服务与设备" },
+  { key: "models", label: "模型" },
+  { key: "connect", label: "连接" },
+  { key: "features", label: "功能扩展" },
+  { key: "records", label: "记录与诊断" },
+];
+
+export const VOICE_MODE_LABEL = { official: "官方小智", self_hosted: "自建服务端", builtin: "MOSS 内置服务" };
+
+/**
+ * 链路与服务端设置拆成独立保存的分组：每组只提交自己的字段（后端按字段合并，见 center.rs save_settings）。
+ * `secret` 字段带令牌，不回填；填了才算改动，留空表示不改。
+ */
+export const SETTINGS_GROUPS = {
+  official: { mode: "official", title: "官方接入点", keys: ["official_mcp_endpoint"], secret: ["official_mcp_endpoint"] },
+  selfHostedServer: { mode: "self_hosted", title: "自建服务端程序", keys: ["server_dir", "python", "args", "server_port"], secret: [] },
+  selfHostedEndpoint: {
+    mode: "self_hosted",
+    title: "自建接入点",
+    keys: ["self_hosted_mcp_endpoint", "endpoint_health_url"],
+    secret: ["self_hosted_mcp_endpoint", "endpoint_health_url"],
+  },
+  builtinPorts: { mode: "builtin", title: "内置服务端口", keys: ["builtin_ws_port", "builtin_http_port"], secret: [] },
+};
+
+const PORT_KEYS = new Set(["server_port", "builtin_ws_port", "builtin_http_port"]);
+
+/** 表单值与已保存值逐项比较（都按去首尾空白的字符串比较）；`keys` 缺省为两边字段的并集。 */
+export function formDirty(baseline, form, keys) {
+  if (!baseline || !form) return false;
+  return (keys || [...new Set([...Object.keys(baseline), ...Object.keys(form)])]).some((key) => String(form[key] ?? "").trim() !== String(baseline[key] ?? "").trim());
+}
+
+/**
+ * 设置分组保存后按钮旁的生效说明。`reconnected` 取自后端返回（center.rs save_settings），
+ * 只在真的重新发起了连接时才说“正在重新连接”；是否连上看页面顶部的连接状态。
+ */
+export function settingsSaveEffect(group, mode, reconnected) {
+  if (group === "selfHostedServer") return "下次启动服务端时生效";
+  if (group === "builtinPorts") return "重启内置服务后生效";
+  if (reconnected) return group === "official" ? "正在重新连接小智" : "正在重新连接自建接入点";
+  if (group === "official") return mode === "self_hosted" ? "切回官方链路时使用" : "接入点未变，没有重新连接";
+  return mode === "self_hosted" ? "接入点未变，没有重新连接" : "切到自建链路时使用";
+}
+
+/** 某个设置分组是否有未保存的改动。 */
+export function settingsGroupDirty(group, form, baseline) {
+  const spec = SETTINGS_GROUPS[group];
+  if (!spec || !form) return false;
+  const plain = spec.keys.filter((key) => !spec.secret.includes(key));
+  return spec.secret.some((key) => String(form[key] || "").trim() !== "") || formDirty(baseline, form, plain);
+}
+
+/** 某个设置分组的保存内容：只含本组字段，端口转为数字，带令牌的字段留空时不提交。 */
+export function settingsGroupPayload(group, form) {
+  const spec = SETTINGS_GROUPS[group];
+  const payload = {};
+  for (const key of spec.keys) {
+    const value = String(form[key] ?? "").trim();
+    if (spec.secret.includes(key)) {
+      if (value) payload[key] = value;
+    } else if (PORT_KEYS.has(key)) {
+      const port = Number(value);
+      payload[key] = Number.isFinite(port) ? port : 0;
+    } else {
+      payload[key] = value;
+    }
+  }
+  return payload;
+}
+
+/** 本地模型设置拆成两组分别保存：模型选择与语音体验。 */
+export const LOCAL_MODEL_KEYS = ["vad", "vad_model", "asr", "asr_model", "tts", "tts_model", "tts_speaker", "tts_speed", "mirror"];
+export const EXPERIENCE_KEYS = ["read_only_shortcuts", "asr_beam_search", "barge_in", "barge_in_ms", "custom_hotwords"];
+
+/** 只取草稿中本组字段，其余用已保存的值，避免保存一组时顺带提交另一组未保存的改动。 */
+export function mergeGroup(baseline, draft, keys) {
+  const next = { ...baseline };
+  for (const key of keys) next[key] = draft[key];
+  return next;
+}
+
+function clock(at) {
+  return at.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+/** 保存成功后按钮旁的一行结果：保存了什么、几点、什么时候生效。 */
+export function savedNoteText(target, effect, at = new Date()) {
+  return [`已保存${target}`, clock(at), effect].filter(Boolean).join(" · ");
+}
+
+/** 有未保存改动的分组所在的标签（显示标签上的提示点）。`dirty` 为 {分组 id: 标签 key}。 */
+export function dirtyTabs(dirty) {
+  return new Set(Object.values(dirty || {}).filter(Boolean));
+}
+
+/** 内置服务模型分组折叠时的一行摘要。 */
+export function builtinModelSummary(section, entry, localOn = false) {
+  if (localOn && section !== "llm") return entry?.configured ? "使用本地模型（云端设置作备用）" : "使用本地模型";
+  if (!entry?.configured) return "未配置";
+  const kind = entry.kind === "doubao" ? "豆包流式" : "";
+  return ["已配置", kind, entry.model].filter(Boolean).join(" · ");
+}
+
+/** 外部服务端模型分组折叠时的一行摘要（MOSS 不读回服务端配置，只能显示最近一次测试）。 */
+export function externalModelSummary(record) {
+  if (!record) return "未测试";
+  return `上次测试${record.ok ? "通过" : "未通过"}`;
+}
+
+// ---------- 声纹简易标定（2026-10-14 用户决定，取代“源码写死不开放”） ----------
+
+/** 标定区的显示：状态文字、每人测试音条数、能否计算阈值。 */
+export function speakerCalibrationView(data) {
+  const speakers = Array.isArray(data?.speakers) ? data.speakers : [];
+  const clips = data?.test_clips && typeof data.test_clips === "object" ? data.test_clips : {};
+  const calibration = data?.calibration || { state: "none" };
+  const report = calibration.report;
+  const result = report
+    ? `阈值 ${Number(report.threshold).toFixed(2)} · 本人认对 ${report.genuine_accepted}/${report.genuine_trials} · 认成别人 ${report.false_accepts}/${report.impostor_trials}`
+    : "";
+  const status = {
+    valid: `已标定（${report?.people ?? 0} 人）：${result}`,
+    stale: "登记名单在标定后变过（有人新增、删除或重新登记），需要重新标定；在此之前不识别身份",
+    none: "未标定：身份识别与按人记忆保持关闭",
+  }[calibration.state] || "未标定：身份识别与按人记忆保持关闭";
+  const counts = Object.fromEntries(speakers.map((row) => [row.id, Number(clips[row.id]) || 0]));
+  const ready = speakers.length >= 2 && speakers.every((row) => counts[row.id] >= 3);
+  const blocked = speakers.length < 2 ? "至少需要两个已登记的人" : ready ? "" : "每个人都要录满三段测试音";
+  return { state: calibration.state || "none", status, counts, ready, blocked };
 }

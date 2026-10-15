@@ -33,3 +33,7 @@ laser-runtime = { path = "../../../crates/laser-runtime" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 getrandom = "0.3"
 tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+# NV19-08 host tests use temporary settings files and folders only.
+tempfile = "3"

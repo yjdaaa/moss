@@ -508,7 +508,7 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
           <div className="settings-row-7">
             <ShieldAlert size={16} className="settings-icon-2" />
             <div className="settings-box-11">
-              <strong>安全机制提示</strong>：当选择完全退出程序时，系统会自动向激光下位机发送 0x18 软复位指令并清零任务，确保激光器熄灭断电，杜绝静止出光火灾隐患。
+              <strong>安全机制提示</strong>：完全退出程序时，会停止正在下发的任务，并向正在加工的设备发送 0x18 软复位。0x18 只是软件停止请求，发送成功也不代表激光已经熄灭或断电；请以设备实际状态为准，紧急情况使用硬件急停。
             </div>
           </div>
         </div>

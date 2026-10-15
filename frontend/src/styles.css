@@ -2712,7 +2712,7 @@ input:not([type]):focus {
 .voice-bad { color: var(--ob-red-2); }
 .voice-break { word-break: break-all; }
 .voice-push { margin-left: auto; }
-.voice-mode-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.voice-mode-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .voice-mode-option {
   display: flex; align-items: flex-start; gap: 12px; text-align: left;
   padding: 14px 16px; border-radius: 14px; border: 1px solid var(--ob-line-2);
@@ -2724,7 +2724,7 @@ input:not([type]):focus {
 .voice-mode-option:hover:not(:disabled) { border-color: var(--ob-line-3); }
 .voice-mode-option.on { border-color: rgba(139, 123, 255, 0.6); background: var(--ob-accent-bg); }
 .voice-mode-option:disabled { opacity: 0.6; cursor: wait; }
-.voice-mode-option:focus-visible, .voice-tab:focus-visible { outline: 2px solid var(--ob-accent-2); outline-offset: 2px; }
+.voice-mode-option:focus-visible, .voice-pagetab:focus-visible, .voice-group-h:focus-visible, .voice-other-toggle:focus-visible { outline: 2px solid var(--ob-accent-2); outline-offset: 2px; }
 .voice-radio {
   flex: none; width: 16px; height: 16px; margin-top: 2px; border-radius: 50%;
   border: 2px solid var(--ob-line-3); box-sizing: border-box;
@@ -2737,9 +2737,6 @@ input:not([type]):focus {
 .voice-hint--ok { border-color: rgba(52, 211, 153, 0.35); background: var(--ob-green-bg); color: var(--ob-green-2); }
 .voice-hint--warn { border-color: var(--ob-amber-bd); background: var(--ob-amber-bg); color: var(--ob-amber); }
 .voice-hint--bad { border-color: rgba(255, 59, 92, 0.4); background: var(--ob-red-bg); color: var(--ob-red-2); }
-.voice-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
-.voice-stat .ob-card-h h2 { font-size: 14px; }
-.voice-stat .ob-card-h .ob-pill { margin-left: auto; }
 .voice-kv { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--ob-ink-2); min-width: 0; }
 .voice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .voice-actions .btn { display: inline-flex; align-items: center; gap: 5px; text-decoration: none; }
@@ -2752,8 +2749,8 @@ input:not([type]):focus {
 .voice-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
 .voice-form-grid label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; color: var(--ob-ink-2); }
 .voice-form-grid .voice-wide { grid-column: 1 / -1; }
+.voice-form-grid .voice-check { flex-direction: row; align-items: flex-start; gap: 8px; font-size: 13px; }
 .voice-form-grid .text-input { width: 100%; box-sizing: border-box; }
-.voice-tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--ob-line); padding-bottom: 8px; }
 /* 内置语音服务卡片中的模型配置（NV5） */
 .voice-builtin-models { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--ob-line); }
 .voice-builtin-models h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ob-ink); }
@@ -2771,11 +2768,6 @@ input:not([type]):focus {
 .voice-check input { margin-top: 2px; }
 .voice-progress { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--ob-line); overflow: hidden; max-width: 160px; }
 .voice-progress span { display: block; height: 100%; background: var(--ob-ink-2); transition: width 0.3s; }
-.voice-tab {
-  padding: 7px 14px; border-radius: 9px; border: 1px solid transparent; background: transparent;
-  color: var(--ob-ink-2); font-size: 13px; cursor: pointer;
-}
-.voice-tab.on { color: var(--ob-ink); border-color: rgba(139, 123, 255, 0.45); background: var(--ob-accent-bg); }
 .voice-final { font-size: 12px; color: var(--ob-ink-2); padding: 8px 10px; border-radius: 9px; background: var(--ob-well); border: 1px solid var(--ob-line); word-break: break-all; }
 .voice-tbl { max-height: 320px; }
 .voice-tbl tbody tr { cursor: default; }
@@ -2785,11 +2777,64 @@ input:not([type]):focus {
   font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all;
 }
 .close-voice-option { margin-top: 12px; display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--ob-amber); cursor: pointer; }
-@media (max-width: 1280px) {
-  .voice-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* 语音中心分组与保存（UI-3，技术书 §9.5.1 r15） */
+.voice-statusline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.voice-pagetabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.voice-pagetab {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 10px;
+  border: 1px solid var(--ob-line-2); background: var(--ob-panel-2); color: var(--ob-ink-2);
+  font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.voice-pagetab:hover { border-color: var(--ob-line-3); color: var(--ob-ink); }
+.voice-pagetab.on { color: var(--ob-ink); border-color: rgba(139, 123, 255, 0.6); background: var(--ob-accent-bg); }
+.voice-tab-dot { color: var(--ob-amber); font-size: 10px; line-height: 1; }
+.voice-tabpanel[hidden], .voice-part[hidden], .voice-group-body[hidden] { display: none !important; }
+.voice-stack, .voice-modesplit { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.voice-part { min-width: 0; }
+.voice-part--other { order: 2; opacity: 0.85; }
+.voice-other-toggle {
+  order: 1; display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 8px 4px 0;
+  border: 0; border-top: 1px dashed var(--ob-line-2); background: none; color: var(--ob-ink-3);
+  font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.voice-other-toggle .voice-muted { margin-left: auto; }
+.voice-other-toggle[aria-expanded="false"] .voice-group-chevron { transform: rotate(-90deg); }
+.voice-section-h { margin: 6px 0 0; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--ob-ink-3); }
+.voice-group { border: 1px solid var(--ob-line); border-radius: 12px; background: rgba(255, 255, 255, 0.02); min-width: 0; }
+.voice-group.open { border-color: var(--ob-line-2); }
+.voice-group--plain { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.voice-group-h {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; border: 0; border-radius: 12px;
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; min-width: 0;
+}
+.voice-group-h:hover { background: rgba(255, 255, 255, 0.03); }
+.voice-group-chevron { flex: none; color: var(--ob-ink-3); transition: transform 0.2s var(--ob-ease); }
+.voice-group-h[aria-expanded="false"] .voice-group-chevron { transform: rotate(-90deg); }
+.voice-group-title { flex: none; font-size: 14px; font-weight: 600; color: var(--ob-ink); }
+.voice-group-summary { flex: 1; min-width: 0; margin-left: auto; text-align: right; font-size: 12px; color: var(--ob-ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-group-summary.voice-ok { font-weight: 500; }
+.voice-dirty { flex: none; font-size: 11px; padding: 1px 8px; }
+.voice-group-body { display: flex; flex-direction: column; gap: 10px; padding: 2px 14px 14px; min-width: 0; }
+.voice-savebar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--ob-line); }
+.voice-savebar .btn { display: inline-flex; align-items: center; gap: 5px; }
+.voice-savebar [role="status"], .voice-savebar [role="alert"] { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
+.voice-inline-btn { padding: 3px 10px; font-size: 12px; }
+.voice-inline { display: flex; gap: 8px; align-items: center; }
+.voice-inline .text-input { flex: 1; min-width: 0; }
+.voice-block { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 4px 0 8px; }
+.voice-block + .voice-block { border-top: 1px solid var(--ob-line); padding-top: 12px; }
+.voice-block-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.voice-block-h h3 { margin: 0; font-size: 14.5px; font-weight: 600; color: var(--ob-ink); }
+.voice-table-wrap { overflow-x: auto; }
+.voice-table { border-collapse: collapse; font-size: 12px; }
+.voice-table th, .voice-table td { padding: 4px 12px 4px 0; text-align: left; }
+.voice-agent-run { padding: 6px 0; border-bottom: 1px solid var(--ob-line); }
+@media (max-width: 960px) {
+  .voice-mode-row { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {
-  .voice-mode-row, .voice-status-grid, .voice-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .voice-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .voice-group-summary { display: none; }
 }
 
 /* ============================================================
@@ -2948,6 +2993,8 @@ input:not([type]):focus {
 .draw-icon { margin-right: 4px; }
 .draw-btn.draw-btn.draw-btn { border-color: var(--accent-cyan, #8b7bff); color: var(--accent-cyan, #8b7bff); }
 .draw-label.draw-label.draw-label { margin-top: 8px; color: var(--accent-cyan, #8b7bff); }
+.draw-inline { display: flex; gap: 8px; align-items: center; }
+.draw-inline select { flex: 1; min-width: 0; }
 
 /* ---- 雕刻工作台 HomePage（UI-02：原组件内联样式迁移，2026-10-13） ---- */
 .wb-row.wb-row.wb-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 18px; background: rgba(0,0,0,0.25); border-bottom: 1px solid var(--line, rgba(140, 175, 255, 0.14)); font-size: 13px; }
@@ -3049,3 +3096,10 @@ input:not([type]):focus {
 
 /* ---- 语音隐私窗口 voicePrivate（UI-02：原组件内联样式迁移，2026-10-13） ---- */
 .voice-private-box { max-width: 900px; margin: 0 auto; padding: 24px; }
+
+/* NV19 长期记忆私有页面（VoiceContextCard） */
+.voice-context-row { padding: 8px 0; border-bottom: 1px solid var(--ob-line); }
+.voice-context-row p { margin: 4px 0; }
+.voice-context-content { white-space: pre-wrap; word-break: break-word; }
+.voice-context-run { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0; }
+.voice-context-text { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; padding: 8px; border: 1px solid var(--ob-line); border-radius: 8px; }

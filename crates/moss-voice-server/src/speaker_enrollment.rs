@@ -8,8 +8,12 @@ use tokio::sync::Semaphore;
 pub trait EnrollmentBackend:Send+Sync {
     fn embedding(&self,pcm:&[i16],generation:u64)->Result<Vec<f32>,String>;
     fn save(&self,name:&str,clips:&[Vec<f32>])->Result<(),String>;
+    /// 简易标定：已登记的人另录的三段测试音向量（只用于计算阈值，不改登记模板）。
+    fn save_test(&self,_speaker_id:&str,_clips:&[Vec<f32>])->Result<(),String>{Err("不支持声纹标定".into())}
 }
-struct Capture {device:String,session:String,name:String,permit:Arc<AtomicBool>,expires:Instant,generation:u64,clips:Vec<Vec<f32>>,hashes:Vec<[u8;32]>,busy:bool}
+/// 采集用途：登记新的人，或给已登记的人录标定测试音。
+enum Purpose {Enroll(String),Test(String)}
+struct Capture {device:String,session:String,purpose:Purpose,permit:Arc<AtomicBool>,expires:Instant,generation:u64,clips:Vec<Vec<f32>>,hashes:Vec<[u8;32]>,busy:bool}
 struct State {generation:u64,capture:Option<Capture>,message:&'static str}
 #[derive(Serialize)]
 pub struct EnrollmentStatus {pub active:bool,pub collected:usize,pub processing:bool,pub message:&'static str,pub recognition_enabled:bool}
@@ -23,14 +27,22 @@ impl SpeakerEnrollment {
         EnrollmentStatus{active:capture.is_some(),collected:capture.map_or(0,|c|c.clips.len()),processing:capture.is_some_and(|c|c.busy)||self.worker.available_permits()==0,message:state.message,recognition_enabled:false}
     }
     pub fn begin(&self,device:&str,session:&str,name:&str,permit:Arc<AtomicBool>,confirmed:bool)->Result<(),&'static str>{
-        if !confirmed || !permit.load(Ordering::Acquire) || device.is_empty() || session.is_empty()
-            || name.is_empty() || name.trim()!=name || name.chars().count()>64 || name.chars().any(char::is_control){return Err("speaker_enrollment_invalid");}
+        if name.is_empty() || name.trim()!=name || name.chars().count()>64 || name.chars().any(char::is_control){return Err("speaker_enrollment_invalid");}
+        self.start(device,session,Purpose::Enroll(name.into()),permit,confirmed,"请说三段不同的完整句子，每段2～10秒")
+    }
+    /// 简易标定：让已登记的人再说三段测试句；向量交给 `save_test`，不改登记模板。
+    pub fn begin_test(&self,device:&str,session:&str,speaker_id:&str,permit:Arc<AtomicBool>,confirmed:bool)->Result<(),&'static str>{
+        if speaker_id.is_empty() || speaker_id.len()>64 || !speaker_id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return Err("speaker_enrollment_invalid");}
+        self.start(device,session,Purpose::Test(speaker_id.into()),permit,confirmed,"请这位登记人再说三段测试句（换不同的话），每段2～10秒")
+    }
+    fn start(&self,device:&str,session:&str,purpose:Purpose,permit:Arc<AtomicBool>,confirmed:bool,message:&'static str)->Result<(),&'static str>{
+        if !confirmed || !permit.load(Ordering::Acquire) || device.is_empty() || session.is_empty(){return Err("speaker_enrollment_invalid");}
         let mut state=self.state.lock().map_err(|_|"speaker_unavailable")?;
         if self.worker.available_permits()==0{return Err("speaker_worker_finishing");}
         if state.capture.as_ref().is_some_and(|c|c.expires>Instant::now() && c.permit.load(Ordering::Acquire)){return Err("speaker_enrollment_busy");}
         state.generation=state.generation.wrapping_add(1);
-        state.capture=Some(Capture{device:device.into(),session:session.into(),name:name.into(),permit,expires:Instant::now()+Duration::from_secs(90),generation:state.generation,clips:vec![],hashes:vec![],busy:false});
-        state.message="请说三段不同的完整句子，每段2～10秒";
+        state.capture=Some(Capture{device:device.into(),session:session.into(),purpose,permit,expires:Instant::now()+Duration::from_secs(90),generation:state.generation,clips:vec![],hashes:vec![],busy:false});
+        state.message=message;
         Ok(())
     }
     pub fn cancel(&self)->Result<(),&'static str>{let mut state=self.state.lock().map_err(|_|"speaker_unavailable")?;state.generation=state.generation.wrapping_add(1);state.capture=None;state.message="已取消，未保存片段";Ok(())}
@@ -70,8 +82,11 @@ impl SpeakerEnrollment {
             if capture.clips.len()==3 {
                 // Hold enrollment lock through the atomic local DB commit:
                 // cancel cannot return before an earlier save has completed.
-                let result=this.backend.save(&capture.name,&capture.clips);
-                state.capture=None;state.message=if result.is_ok(){"已保存三段一致声纹；身份识别仍关闭"}else{"三段不一致、名称重复或保存失败，未登记"};
+                state.message=match &capture.purpose {
+                    Purpose::Enroll(name)=>if this.backend.save(name,&capture.clips).is_ok(){"已保存三段一致声纹；完成简易标定后才会识别身份"}else{"三段不一致、名称重复或保存失败，未登记"},
+                    Purpose::Test(id)=>if this.backend.save_test(id,&capture.clips).is_ok(){"已采集三段测试音"}else{"测试音保存失败，请重录"},
+                };
+                state.capture=None;
             } else {state.message="片段已采集，请继续下一句";}
         });
     }
@@ -131,5 +146,33 @@ mod tests {
         assert_eq!(slow.begin("d","s","乙",permit.clone(),true),Err("speaker_worker_finishing"));
         tokio::time::sleep(Duration::from_millis(300)).await;
         slow.begin("d","s","乙",permit,true).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod calibration_capture_tests {
+    use super::*;
+    #[derive(Default)]
+    struct Recorder{enrolled:Mutex<usize>,tests:Mutex<Vec<(String,usize)>>}
+    impl EnrollmentBackend for Recorder {
+        fn embedding(&self,_:&[i16],_:u64)->Result<Vec<f32>,String>{Ok(vec![1.;192])}
+        fn save(&self,_:&str,_:&[Vec<f32>])->Result<(),String>{*self.enrolled.lock().unwrap()+=1;Ok(())}
+        fn save_test(&self,id:&str,clips:&[Vec<f32>])->Result<(),String>{self.tests.lock().unwrap().push((id.into(),clips.len()));Ok(())}
+    }
+    /// 标定测试音走同一套采集与质量检查，只交给 save_test，不新增登记（2026-10-14）。
+    #[tokio::test]
+    async fn test_capture_hands_three_clips_to_save_test_without_enrolling(){
+        let backend=Arc::new(Recorder::default());let service=SpeakerEnrollment::new(backend.clone());
+        let permit=Arc::new(AtomicBool::new(true));
+        assert!(service.begin_test("d","s","bad id!",permit.clone(),true).is_err());
+        assert!(service.begin_test("d","s","abc",permit.clone(),false).is_err());
+        service.begin_test("d","s","abc",permit,true).unwrap();
+        for i in 0..3 {
+            service.submit("d","s",&vec![300+i;32000],16000);
+            tokio::time::timeout(Duration::from_secs(2),async{while service.status().processing{tokio::time::sleep(Duration::from_millis(2)).await;}}).await.unwrap();
+        }
+        assert_eq!(*backend.tests.lock().unwrap(),vec![("abc".to_owned(),3)]);
+        assert_eq!(*backend.enrolled.lock().unwrap(),0);
+        assert!(!service.status().active);
     }
 }

@@ -225,12 +225,6 @@
           "markdownDescription": "Enables the pick_export_dir command without any pre-configured scope."
         },
         {
-          "description": "Enables the request_shutdown command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-request-shutdown",
-          "markdownDescription": "Enables the request_shutdown command without any pre-configured scope."
-        },
-        {
           "description": "Enables the reset_export_dir command without any pre-configured scope.",
           "type": "string",
           "const": "allow-reset-export-dir",
@@ -295,6 +289,18 @@
           "type": "string",
           "const": "allow-voice-builtin-stop",
           "markdownDescription": "Enables the voice_builtin_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_context_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-context-manage",
+          "markdownDescription": "Enables the voice_context_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_context_pick_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-context-pick-folder",
+          "markdownDescription": "Enables the voice_context_pick_folder command without any pre-configured scope."
         },
         {
           "description": "Enables the voice_device_rename command without any pre-configured scope.",
@@ -621,12 +627,6 @@
           "markdownDescription": "Denies the pick_export_dir command without any pre-configured scope."
         },
         {
-          "description": "Denies the request_shutdown command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-request-shutdown",
-          "markdownDescription": "Denies the request_shutdown command without any pre-configured scope."
-        },
-        {
           "description": "Denies the reset_export_dir command without any pre-configured scope.",
           "type": "string",
           "const": "deny-reset-export-dir",
@@ -691,6 +691,18 @@
           "type": "string",
           "const": "deny-voice-builtin-stop",
           "markdownDescription": "Denies the voice_builtin_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_context_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-context-manage",
+          "markdownDescription": "Denies the voice_context_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_context_pick_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-context-pick-folder",
+          "markdownDescription": "Denies the voice_context_pick_folder command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_device_rename command without any pre-configured scope.",

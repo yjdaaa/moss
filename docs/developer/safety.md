@@ -6,7 +6,7 @@
 
 - MCP 工具由 `laser_tools::ToolCatalog` 登记、`laser_mcp::dispatch_tool_call_with` 分发；小智连接由 `laser_host::HostApplication::spawn_mcp_bridge` 在 `MCP_ENDPOINT` 有效时启动。桌面端与 `moss-host serve` 走同一条路径。
 - 目录共 20 个工具。`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时进入列表并允许执行；`/v1/capabilities` 的 `command_execution` 字段反映该开关。
-- 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制在生产中硬关闭，见 §4.10。
+- 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制默认关闭，由用户在私密窗口同意后开启、每个动作逐次桌面批准，见 §4.17。
 - `laser_grbl_tool` / `laser_network_grbl_tool` 只保留 `status` / `check` / `probe` 与 `cancel`；`send_file` 与 `send_command` 一律拒绝并引导走 workflow 或 `laser_safe_action_tool`。
 - `ai_laser_gcode_tool`、`generate_text_image_gcode_tool`、`generate_text_laser_task_tool` 只接受 `text` 素材，都转发到 `/api/text-task/generate`；图片素材只能从网页或桌面端上传后走 workflow。
 - 设备传输只有串口与 Telnet。没有 HTTP `/command`、`[ESP800]` 或 WebSocket 设备通道。
@@ -43,10 +43,10 @@
 
 其他固定规则：
 
-- 生成、预览、推荐参数、反馈调参、走边框预览 G-code 都不等于启动机器。例外是 `/api/device/framing`：它真实驱动机器沿外接矩形运动（默认 `power=1`），改动时按发送链路对待。
+- 生成、预览、推荐参数、反馈调参、走边框预览 G-code 都不等于启动机器。例外是 `/api/device/framing`：它真实驱动机器沿外接矩形运动，改动时按发送链路对待。2026-10-14 起默认 `power=0` 不出光（弱光需显式传 `power`），与完整发送相同做同设备占用检查、握手与 Idle 预检，运行期间登记为活动作业 `framing-…`，顶栏急停与带 `job_id` 的 `emergency_stop` 可停止；失败或被停止后保留为“待确认停止”目标。
 - `laser_safe_action_tool` 中 `status` 与进给/功率倍率不需要确认；其余动作必须 `confirmed=true`（或 `dry_run=true` 只返回计划）。
 - 网络完整任务只走 Telnet；SD 脱机模式的 HTTP 只用于把文件上传到 SD 卡。
-- SD 上传后核对固件返回的文件哈希；HashFS 不可用时现有流程会标记 `sd_hash_verified=false` 并警告，不能宣称机器端文件已验证，也不能把软件比对当作实机验收。
+- SD 上传后核对固件返回的文件哈希；固件不返回哈希（未启用 HashFS）时**拒绝 `$SD/Run`**，任务记为 failed（2026-10-14 用户决定，此前为继续执行并警告）。软件比对通过也不能当作实机验收。
 - 不猜串口号、设备 host、文件名、材料、厚度、密码、token 或用户私有路径；`resolve_connection_spec` 只在参数缺失时回退到 `GRBL_DEFAULT_PORT` / `LASER_NETWORK_HOST`，且忽略含 `<` 的占位值。
 - 局域网 token 只在内存；配对码只允许回环签发。
 
@@ -147,6 +147,14 @@ NV14 音乐已增加敏感子目录跳过，重名候选仅显示非路径索引
 ### 4.16 主窗口特权命令固定到本进程后端地址（2026-10-13）
 
 主窗口导航到 `http://127.0.0.1:<端口>/` 后是 remote 来源，capability 的 `remote` 只能写 `http://127.0.0.1:*`，静态配置挡不住其他本机端口的页面。凡能取得桌面会话、改写配置或密钥、启停进程的命令（`get_desktop_session`、语音中心与内置语音的改写类命令、视觉/音乐/Agent 命令、第三方 MCP 管理），必须在函数开头用 `window_is_trusted_main` 校验 `main` 标签与精确来源，失败即拒绝；新增此类命令照此处理，并加入 `main_window_commands_pin_backend_origin` 的清单。只给主窗口用的 capability 必须声明回环 `remote`，否则 Tauri 只对本地打包页授权、主窗口调用全部被拒。私密数据仍只走 §4.13 的 `voice-private` 窗口。
+
+### 4.17 家居控制与声纹识别改为用户开启（2026-10-14 用户决定）
+
+本节取代 §4.10、§4.11 中“生产硬关闭 / 未校准恒为 Unknown”的表述，其余约束不变。
+
+- **家居控制**：删除源码常量 `PRODUCTION_CONTROL_READY`，`HttpsHomeTransport::submit_once` 在生产中真实发送。开启条件全部由用户在私密窗口完成：HTTPS 地址、令牌、勾选白名单实体、明确同意语音控制（GRANT 绑定当前白名单与凭据版本，改任一项即失效）。语音只能生成审批；每个动作都要在私密窗口“家居控制审批”里批准，全局审批卡只提醒并打开私密窗口（主窗口的通用批准接口按设计拒绝 HomeControl）。至多一次 POST，结果未知不重发，批准前重新读取并核对状态与白名单。未用真实 Home Assistant 验收，界面提示先用无害设备试用。
+- **声纹识别**：删除写死的 `calibration: None`。用户登记至少两人后，每人另录三段测试音，`person_context::calibrate` 以“认成别人”的最高分加 0.05 为阈值（下限 0.5、上限 0.95），自检要求测试集内零误认、本人认对不少于三分之二；结果存于 `app_secrets`（`voice.speaker.calibration`），只对标定时的登记名单（编号与版本）有效，名单变化即失效。只拿已登记的人互比，测不到陌生人；这是候选身份提示，**永远不能授权加工、家居或任何设备动作**，按人记忆仍需另行明确开启。
+- Agent 执行（§4.2～4.8）与固件下发（§4.11）不变：仍硬关闭。
 
 ## 5. 测试要求
 

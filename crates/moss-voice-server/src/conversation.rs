@@ -163,6 +163,10 @@ pub struct Conversation {
     pub memory: Option<Arc<crate::memory::MemoryService>>,
     pub speaker_enrollment: Option<Arc<crate::speaker_enrollment::SpeakerEnrollment>>,
     pub personal_context:Option<Arc<crate::person_context::PersonContext>>,
+    /// NV19-04 长期记忆检索；宿主不接入时为空，NV10 摘要照常使用
+    pub context_retrieval: Option<crate::context::retrieve::ContextRetrieval>,
+    /// NV19-03 会话结束后的候选提取；宿主不接入时为空
+    pub context_extraction: Option<crate::context::extract::ContextExtraction>,
     /// 固定话术（唤醒回应、再见）的合成结果缓存
     cache: Mutex<Vec<(String, Pcm)>>,
 }
@@ -193,6 +197,8 @@ impl Conversation {
             memory: None,
             speaker_enrollment: None,
             personal_context:None,
+            context_retrieval: None,
+            context_extraction: None,
             cache: Mutex::new(Vec::new()),
         }
     }
@@ -207,6 +213,14 @@ impl Conversation {
     }
     pub fn with_personal_context(mut self,context:Arc<crate::person_context::PersonContext>)->Self {
         self.personal_context=Some(context);self
+    }
+    pub fn with_context_retrieval(mut self, retrieval: crate::context::retrieve::ContextRetrieval) -> Self {
+        self.context_retrieval = Some(retrieval);
+        self
+    }
+    pub fn with_context_extraction(mut self, extraction: crate::context::extract::ContextExtraction) -> Self {
+        self.context_extraction = Some(extraction);
+        self
     }
 
     /// 启用流式识别（NV7）。
@@ -810,6 +824,15 @@ impl Turn {
         }else if let Some(memory) = &self.conversation.memory {
             if let Some(context) = memory.prompt_for(&self.context.device_id).await {
                 messages.push(ChatMessage::system(context));
+            }
+        }
+        // NV19-04: bounded, labelled read-only data; skipped for small talk; never blocks
+        // beyond its own short timeout and adds nothing on any failure.
+        if let Some(retrieval) = &self.conversation.context_retrieval {
+            if let Some((access, device)) = retrieval.access.access(&self.context, scope.as_ref()) {
+                if let Some(context) = retrieval.retriever.prompt_for(access, &text, device).await {
+                    messages.push(ChatMessage::system(context));
+                }
             }
         }
         messages.extend(history);

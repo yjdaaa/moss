@@ -165,7 +165,7 @@ export default function VoiceHomeCard() {
         enabled, policy_revision: revision, credential_revision: credentialRevision,
       });
       setVoiceReadEnabled(!!state.voice_read_enabled);
-      setMessage(enabled ? "已授权语音模型只读查询白名单实体，真实家居控制仍禁用。" : "已撤销语音模型的只读家居查询权限。");
+      setMessage(enabled ? "已授权语音模型只读查询白名单实体；控制设备需另外开启“家居语音控制”。" : "已撤销语音模型的只读家居查询权限。");
     } catch (e) {
       setVoiceReadEnabled(false);
       setError(e?.message || "Home Assistant 语音只读授权操作失败，请重新加载。");
@@ -388,9 +388,9 @@ export default function VoiceHomeCard() {
       {Number.isSafeInteger(revision) && <p>离线配置版本：{revision}</p>}
       {message && <p role="status">{message}</p>}
       {error && <p role="alert">{error}</p>}
-      <p role="status">NV15 正式控制安全门禁未通过：实际设备控制和新控制授权均不可用；可撤销已有授权和旧审批。更改白名单或令牌也会使旧审批失效。</p>
-      <button type="button" disabled={!loaded || busy || !voiceControlEnabled} onClick={() => controlConsent(false)}>
-        {voiceControlEnabled ? "撤销已有家居控制授权" : "家居控制授权未开放"}
+      <p role="status">语音控制家居：填好地址和令牌、勾选白名单实体后，在这里明确开启。开启后语音只能申请控制白名单里的设备，每次都要在电脑上批准才会执行；结果未知时不会自动重发。更改白名单或令牌会使旧审批失效。此功能尚未用真实 Home Assistant 验收，请先用无害设备（如一盏灯）试用。</p>
+      <button type="button" disabled={!loaded || busy} onClick={() => controlConsent(!voiceControlEnabled)} id="voice-home-control-consent">
+        {voiceControlEnabled ? "关闭家居语音控制" : "开启家居语音控制"}
       </button>
     </section>
   );

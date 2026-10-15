@@ -108,6 +108,14 @@ type SendLauncher<'a> = &'a dyn Fn(
     &serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, (u16, serde_json::Value)>;
 
+/// 前端页面路由：刷新这些地址时返回 index.html，由前端决定显示哪一页（语音中心只在桌面端显示）。
+fn is_spa_route(route: &str) -> bool {
+    matches!(route, "/draw" | "/material-lab" | "/voice") || route.starts_with("/draw/")
+}
+
+/// SD 脱机：固件没有返回文件哈希时拒绝 `$SD/Run`（无法确认机器端文件就是确认过的刀路）。
+const SD_HASH_UNAVAILABLE: &str = "固件没有返回 SD 文件的哈希（未启用 HashFS），无法确认机器端文件与确认的刀路一致，已拒绝启动；请在固件中启用 HashFS，或改用逐行发送";
+
 fn default_transport_factory() -> TransportFactory {
     std::sync::Arc::new(|spec: &laser_device::ConnectionSpec| {
         laser_device::open_transport(spec, std::time::Duration::from_secs(3))
@@ -590,49 +598,111 @@ impl ApiService {
         laser_tools::execute_laser_safe_action_with_gate(args, &opener, &|| permit.as_ref().is_none_or(|p| p.load(std::sync::atomic::Ordering::Acquire)))
     }
 
-    /// Framing: recheck a live voice permit after the read-only device preflight.
+    /// 走边框：真实驱动机器沿外接矩形运动，按发送链路对待（2026-10-14）。
+    /// 与完整发送相同的设备占用检查、握手与 Idle 预检；运行期间登记为活动作业（`framing-…`），
+    /// 顶栏 / 页面急停与取消都能找到它。默认不出光（`power` 缺省 0），弱光指示需显式传 `power`。
     fn run_framing(&self, object: &serde_json::Map<String, serde_json::Value>, ctx: &laser_contracts::CallerContext) -> Vec<u8> {
+        use std::sync::atomic::Ordering;
         let permit = match self.voice_permit(ctx) { Ok(permit) => permit, Err((status,body)) => return http_json(status,body) };
         let min_x = object.get("min_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let min_y = object.get("min_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let max_x = object.get("max_x").and_then(|v| v.as_f64()).unwrap_or(100.0);
         let max_y = object.get("max_y").and_then(|v| v.as_f64()).unwrap_or(100.0);
         let feed_rate = object.get("feed_rate").and_then(|v| v.as_i64()).unwrap_or(2000) as i32;
-        let power = object.get("power").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+        let power = object.get("power").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
         let framing_gcode = match laser_core::gcode::generate_framing_gcode(min_x, min_y, max_x, max_y, feed_rate, power) {
             Ok(g) => g,
             Err(e) => return http_json(400, failure(format!("生成走边框 G-code 失败: {e}"), None)),
         };
-
-        let spec = match self.connection_spec_from_request(&object) {
-            Ok(s) => s,
-            Err(e) => return http_json(400, failure(format!("连接参数无效: {e}"), None)),
-        };
-        let transport = match (self.transport_factory)(&spec) {
-            Ok(t) => std::sync::Arc::from(t),
-            Err(e) => return http_json(400, failure(format!("设备连接失败: {e}"), None)),
-        };
-        let mut device = laser_device::DeviceConnection::new(transport);
-        if let Err(e) = device.handshake_with_deadline(std::time::Duration::from_secs(3)) {
-            return http_json(400, failure(format!("设备握手失败: {e}"), None));
-        }
-        device.load_features(std::time::Duration::from_secs(3));
-        let mut worker = laser_device::JobWorker::new(device, laser_device::CancellationToken::default());
         let lines: Vec<String> = match laser_device::prepare_gcode_lines(&framing_gcode) {
             Ok(p) => p.lines,
             Err(e) => return http_json(400, failure(format!("走边框 G-code 校验失败: {e}"), None)),
         };
-        if permit.as_ref().is_some_and(|p| !p.load(std::sync::atomic::Ordering::Acquire)) {
+
+        let spec = match self.connection_spec_from_request(object) {
+            Ok(s) => s,
+            Err(e) => return http_json(400, failure(format!("连接参数无效: {e}"), Some(serde_json::json!({"error_code": "connection_params_invalid"})))),
+        };
+        let target = spec.describe();
+        if let Ok(jobs) = self.active_jobs.lock() {
+            if let Some(job) = jobs.values().find(|job| job.target == target) {
+                return http_json(409, failure(
+                    format!("设备 {target} 正在执行 {}，请等待完成或先取消", job.workflow_id),
+                    Some(serde_json::json!({"error_code": "device_busy"})),
+                ));
+            }
+        }
+        let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = match (self.transport_factory)(&spec) {
+            Ok(t) => std::sync::Arc::from(t),
+            Err(e) => return http_json(400, failure(format!("设备连接失败 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_unreachable"})))),
+        };
+        let mut device = laser_device::DeviceConnection::new(transport.clone());
+        if let Err(e) = device.handshake_with_deadline(std::time::Duration::from_secs(3)) {
+            return http_json(400, failure(format!("设备握手失败 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_not_ready"}))));
+        }
+        device.load_features(std::time::Duration::from_secs(3));
+        let device_scale = match device.verify_job_ready_adaptive(std::time::Duration::from_secs(3)) {
+            Ok(scale) => scale,
+            Err(e) => return http_json(400, failure(format!("走边框前检查未通过 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_preflight_failed"})))),
+        };
+        if let Ok(mut uncertain) = self.uncertain_jobs.lock() {
+            uncertain.retain(|_, old| old.target != target);
+        }
+        if permit.as_ref().is_some_and(|p| !p.load(Ordering::Acquire)) {
             return http_json(403, failure("预检期间设备授权已撤销，未开始走边框", Some(serde_json::json!({"error_code":"voice_session_revoked"}))));
         }
-        return match worker.send_lines(lines) {
-            Ok(_) => http_json(200, success(serde_json::json!({
+
+        let job_id = next_workflow_id().replacen("wf-", "framing-", 1);
+        let progress = std::sync::Arc::new(laser_device::JobProgress::default());
+        progress.total_lines.store(lines.len(), Ordering::Relaxed);
+        let cancel = laser_device::CancellationToken::default();
+        let job = std::sync::Arc::new(ActiveJob {
+            workflow_id: job_id.clone(),
+            mode: spec.mode(),
+            target: target.clone(),
+            cancel: cancel.clone(),
+            progress: progress.clone(),
+            transport: transport.clone(),
+            started_at: std::time::Instant::now(),
+        });
+        if let Ok(mut jobs) = self.active_jobs.lock() {
+            jobs.insert(job_id.clone(), job.clone());
+        }
+        let mut worker = laser_device::JobWorker::with_progress(device, cancel.clone(), progress)
+            .with_scale_factor(device_scale / 1000.0);
+        let outcome = worker.send_lines(lines);
+        if let Ok(mut jobs) = self.active_jobs.lock() {
+            jobs.remove(&job_id);
+        }
+        let bounds = serde_json::json!({ "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y });
+        match outcome {
+            Ok(_) if !cancel.is_cancelled() => http_json(200, success(serde_json::json!({
                 "message": "走边框完成",
-                "bounds": { "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y }
+                "job_id": job_id,
+                "laser_on": power > 0,
+                "bounds": bounds,
             }))),
-            Err(e) => http_json(500, failure(format!("走边框执行失败: {e}"), None)),
-        };
+            result => {
+                // 取消或失败都不能证明机器已停：保留原设备通道，供顶栏急停重试 0x18。
+                if !cancel.is_cancelled() {
+                    let _ = transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop);
+                }
+                if let Ok(mut uncertain) = self.uncertain_jobs.lock() {
+                    uncertain.insert(job_id.clone(), job);
+                }
+                match result {
+                    Err(e) if !cancel.is_cancelled() => http_json(500, failure(
+                        format!("走边框执行失败，已发送急停 0x18，请到设备旁确认: {e}"),
+                        Some(serde_json::json!({"error_code": "framing_failed", "job_id": job_id})),
+                    )),
+                    _ => http_json(409, failure(
+                        "走边框已取消，急停 0x18 已发送，请到设备旁确认机器已停",
+                        Some(serde_json::json!({"error_code": "framing_cancelled", "job_id": job_id})),
+                    )),
+                }
+            }
+        }
     }
 
     /// 从请求参数构造连接描述（串口留空时自动选择首个枚举到的系统串口）。
@@ -924,8 +994,6 @@ impl ApiService {
         let wf_id = workflow_id.to_owned();
         let total = lines.len();
         let obj_clone = object.clone();
-        let sd_hash_unverified = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let sd_hash_flag = sd_hash_unverified.clone();
         std::thread::Builder::new()
             .name(format!("laser-send-{wf_id}"))
             .spawn(move || {
@@ -936,7 +1004,7 @@ impl ApiService {
                     // SD 离线加工流程：
                     // 1. 唯一指纹文件名 /sd/moss_{workflow_id}_{short_sha}.gcode
                     // 2. HTTP POST /upload 上传文件内容到机床 SD 卡
-                    // 3. 发送 $File/ShowHash 校验硬件计算的 SHA-256 物理一致性
+                    // 3. 发送 $File/ShowHash 校验硬件计算的 SHA-256 物理一致性；固件不返回哈希（未启用 HashFS）时拒绝启动（2026-10-14 用户决定）
                     // 4. 发送 $SD/Run 并进入 wait_until_sd_completed 监控
                     let short_sha = if expected_sha.len() >= 8 { &expected_sha[..8] } else { &expected_sha };
                     let safe_wf_id = wf_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_");
@@ -978,11 +1046,8 @@ impl ApiService {
                     };
                     match verified {
                         Err(e) => Err(e),
-                        Ok(hash_verified) => {
-                            if !hash_verified {
-                                eprintln!("[laser-api] workflow {wf_id}: 固件未返回 SD 文件哈希（HashFS 未启用），本次脱机作业未做物理 SHA 校验");
-                                sd_hash_unverified.store(true, Ordering::Relaxed);
-                            }
+                        Ok(false) => Err(SD_HASH_UNAVAILABLE.to_owned()),
+                        Ok(true) => {
                             // 上传和哈希校验可能耗时很久；真正启动机器前必须再次检查撤销和取消。
                             // 不论结果是否已经上传到 SD，都不能在授权失效后发送 $SD/Run。
                             if cancel.is_cancelled() || voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
@@ -1037,7 +1102,7 @@ impl ApiService {
                     Ok(_) if cancel.is_cancelled() => ("cancelled", cancelled_result()),
                     Ok(_) => (
                         "completed",
-                        serde_json::json!({"success": true, "running": false, "phase": "completed", "mode": sent_mode, "target": target, "lines_sent": sent, "total_lines": total, "elapsed_ms": elapsed_ms, "sd_hash_verified": !sd_hash_flag.load(Ordering::Relaxed), "warning": if sd_hash_flag.load(Ordering::Relaxed) { serde_json::Value::String("固件未启用 HashFS，脱机文件未经物理 SHA-256 校验".into()) } else { serde_json::Value::Null }}),
+                        serde_json::json!({"success": true, "running": false, "phase": "completed", "mode": sent_mode, "target": target, "lines_sent": sent, "total_lines": total, "elapsed_ms": elapsed_ms}),
                     ),
                     Err(_error) if cancel.is_cancelled() => ("cancelled", cancelled_result()),
                     Err(error) => {
@@ -2010,8 +2075,7 @@ impl ApiService {
             && (route == "/api/health" || route == "/v1/capabilities" || route == "/api/system/info"))
             || (method == "GET"
                 && (route == "/"
-                    || route == "/draw"
-                    || route == "/material-lab"
+                    || is_spa_route(route)
                     || route.starts_with("/assets/")
                     || route.starts_with("/vendor/")));
         let mut pairing_id = None;
@@ -2222,30 +2286,22 @@ impl ApiService {
                 }
                 Some(_) => return http_json(400, failure("mcp_endpoint 必须是字符串", None)),
             };
+            // 先校验全部字段，再一次写入 settings.json；写不进去就报错，不能显示“已保存”
+            let mut file_changes: Vec<(&str, Option<serde_json::Value>)> = Vec::new();
             if let Some(port) = object.get("web_port").and_then(|v| v.as_u64()) {
                 if port < 1024 || port > 65535 {
                     return http_json(400, failure("端口号必须在 1024 ~ 65535 之间", None));
                 }
-                if let Some(runtime_path) = self.runtime_path.as_ref() {
-                    let settings_file = runtime_path.join("settings.json");
-                    let mut current: serde_json::Map<String, serde_json::Value> = std::fs::read(&settings_file)
-                        .ok()
-                        .and_then(|b| serde_json::from_slice(&b).ok())
-                        .unwrap_or_default();
-                    current.insert("web_port".into(), serde_json::json!(port));
-                    if let Ok(data) = serde_json::to_vec_pretty(&current) {
-                        let _ = std::fs::write(&settings_file, data);
-                    }
-                }
+                file_changes.push(("web_port", Some(serde_json::json!(port))));
             }
             if let Some(enabled) = object.get("jev_enabled").and_then(|value| value.as_bool()) {
-                persist_runtime_setting(self.runtime_path.as_deref(), "jev_enabled", serde_json::json!(enabled));
+                file_changes.push(("jev_enabled", Some(serde_json::json!(enabled))));
             }
             if let Some(value) = object.get("lan_access") {
                 let Some(enabled) = value.as_bool() else {
                     return http_json(400, failure("lan_access 必须是布尔值", None));
                 };
-                persist_runtime_setting(self.runtime_path.as_deref(), "lan_access", serde_json::json!(enabled));
+                file_changes.push(("lan_access", Some(serde_json::json!(enabled))));
             }
             if let Some(endpoint) = object.get("jev_endpoint") {
                 let Some(endpoint) = endpoint.as_str() else {
@@ -2255,10 +2311,23 @@ impl ApiService {
                 if !endpoint.is_empty() && endpoint != DEFAULT_JEV_ENDPOINT {
                     return http_json(400, failure("Jev 仅支持固定 OpenRouter Decisions 地址", None));
                 }
-                if endpoint.is_empty() {
-                    remove_runtime_setting(self.runtime_path.as_deref(), "jev_endpoint");
-                } else {
-                    persist_runtime_setting(self.runtime_path.as_deref(), "jev_endpoint", serde_json::json!(endpoint));
+                file_changes.push(("jev_endpoint", (!endpoint.is_empty()).then(|| serde_json::json!(endpoint))));
+            }
+            let has_mcp_setting = mcp_endpoint.is_some();
+            if let Some(endpoint) = mcp_endpoint {
+                file_changes.push(("mcp_endpoint", endpoint.map(serde_json::Value::String)));
+            }
+            if !file_changes.is_empty() {
+                let written = update_runtime_settings(self.runtime_path.as_deref(), |current| {
+                    for (key, value) in file_changes {
+                        match value {
+                            Some(value) => current.insert(key.to_owned(), value),
+                            None => current.remove(key),
+                        };
+                    }
+                });
+                if let Err(error) = written {
+                    return http_json(500, failure(format!("设置没有保存：{error}"), Some(serde_json::json!({"error_code": "settings_write_failed"}))));
                 }
             }
             if let Some(api_key) = object.get("jev_api_key") {
@@ -2290,27 +2359,6 @@ impl ApiService {
                         .and_then(|db| db.delete_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}")))
                     {
                         return http_json(500, failure(error, None));
-                    }
-                }
-            }
-            let has_mcp_setting = mcp_endpoint.is_some();
-            if let Some(endpoint) = mcp_endpoint {
-                if let Some(runtime_path) = self.runtime_path.as_ref() {
-                    let settings_file = runtime_path.join("settings.json");
-                    let mut current: serde_json::Map<String, serde_json::Value> = std::fs::read(&settings_file)
-                        .ok()
-                        .and_then(|b| serde_json::from_slice(&b).ok())
-                        .unwrap_or_default();
-                    match endpoint {
-                        Some(value) => {
-                            current.insert("mcp_endpoint".into(), serde_json::Value::String(value));
-                        }
-                        None => {
-                            current.remove("mcp_endpoint");
-                        }
-                    }
-                    if let Ok(data) = serde_json::to_vec_pretty(&current) {
-                        let _ = std::fs::write(&settings_file, data);
                     }
                 }
             }
@@ -2355,7 +2403,7 @@ impl ApiService {
             ));
         }
         if method == "GET" {
-            let asset = if route == "/" || route == "/material-lab" || route == "/draw" || route.starts_with("/draw/") {
+            let asset = if route == "/" || is_spa_route(route) {
                 Some("index.html".to_owned())
             } else if let Some(path) = route.strip_prefix("/assets/") {
                 safe_asset_path(path).map(|value| format!("assets/{value}"))
@@ -2369,7 +2417,7 @@ impl ApiService {
                     Some(file) => {
                         http_bytes(200, embedded_content_type(&asset), file.data.to_vec())
                     }
-                    None if route == "/draw" || route == "/material-lab" => http_bytes(
+                    None if is_spa_route(route) => http_bytes(
                         200,
                         "text/html; charset=utf-8",
                         FrontendFixture::get("index.html")
@@ -3160,19 +3208,77 @@ fn generate_draw_artifacts(
     let power = params.power as i32;
     let feed_rate = params.feed as i32;
 
-    let mut bitmap = Vec::with_capacity(img_h as usize);
-    for y in 0..img_h {
-        let mut row = Vec::with_capacity(img_w as usize);
-        for x in 0..img_w {
-            row.push(if luma_img.get_pixel(x, y).0[0] < 128 { 0 } else { 255 });
-        }
-        bitmap.push(row);
-    }
-
-    // 路径预览：二值化后的实际烧蚀像素（黑=出光），与素材预览区分
+    // 成品尺寸：填了宽 / 高按填的尺寸（锁定比例，取能放进去的最大尺寸）；都没填按导出图 0.1 mm/像素
+    let (width_mm, height_mm) = draw_target_size_mm(
+        img_w,
+        img_h,
+        optional_positive_mm(object.get("width_mm"), "width_mm")?,
+        optional_positive_mm(object.get("height_mm"), "height_mm")?,
+    )?;
     let path_preview_name = format!("{id}.path.png");
-    {
-        let mut bin = image::GrayImage::from_pixel(img_w, img_h, image::Luma([255]));
+    let gcode_str = if mode == "outline" {
+        // 轮廓雕刻：深色区域描边（与 Python 版相同的灰度描摹、简化与点数预算），按成品尺寸缩放
+        let gray: Vec<Vec<u8>> = (0..img_h)
+            .map(|y| (0..img_w).map(|x| luma_img.get_pixel(x, y).0[0]).collect())
+            .collect();
+        let simplify_factor = parse_float(object.get("vector_simplify_factor"), "vector_simplify_factor", 3.0)?;
+        if !(0.25..=8.0).contains(&simplify_factor) {
+            return Err("vector_simplify_factor 必须在 0.25 ~ 8 之间".into());
+        }
+        let traced = laser_core::trace::trace_grayscale(&gray, &laser_core::trace::TraceOptions {
+            size_mm: width_mm.max(height_mm),
+            width_mm: Some(width_mm),
+            height_mm: Some(height_mm),
+            lock_aspect_ratio: true,
+            work_area_width_mm: DRAW_WORK_AREA_MM,
+            work_area_height_mm: DRAW_WORK_AREA_MM,
+            simplify_factor,
+        })
+        .map_err(|e| e.to_string())?;
+        if traced.paths.is_empty() {
+            return Err("画板里没有可描边的深色图形，请改用光栅雕刻或加深线条".into());
+        }
+        let optimized = laser_core::path_opt::optimize_with_threshold(&traced.paths, width_mm.max(height_mm))
+            .map_err(|e| e.to_string())?;
+        let preview_scale = (1024.0 / width_mm.max(height_mm)).max(1.0);
+        laser_core::gcode::preview_outline_rgba(
+            &optimized.paths,
+            (width_mm * preview_scale).ceil() as u32,
+            (height_mm * preview_scale).ceil() as u32,
+            width_mm,
+            height_mm,
+        )?
+        .save(root.join(&path_preview_name))
+        .map_err(|e| e.to_string())?;
+        laser_core::gcode::write_outline(&optimized.paths, &laser_core::gcode::WriterOptions {
+            width_mm,
+            height_mm,
+            power,
+            feed_rate,
+            auto_close: true,
+            laser_mode: "M4",
+            power_scale: None,
+        })?
+    } else {
+        // 光栅：先把导出图缩放到成品尺寸（每像素 0.1 mm），再二值化逐行扫描
+        let raster_w = ((width_mm / DRAW_PIXEL_MM).round() as u32).max(1);
+        let raster_h = ((height_mm / DRAW_PIXEL_MM).round() as u32).max(1);
+        let scaled = if (raster_w, raster_h) == (img_w, img_h) {
+            luma_img.clone()
+        } else {
+            image::imageops::resize(&luma_img, raster_w, raster_h, image::imageops::FilterType::Triangle)
+        };
+        let mut bitmap = Vec::with_capacity(raster_h as usize);
+        for y in 0..raster_h {
+            let mut row = Vec::with_capacity(raster_w as usize);
+            for x in 0..raster_w {
+                row.push(if scaled.get_pixel(x, y).0[0] < 128 { 0 } else { 255 });
+            }
+            bitmap.push(row);
+        }
+
+        // 路径预览：二值化后的实际烧蚀像素（黑=出光），与素材预览区分
+        let mut bin = image::GrayImage::from_pixel(raster_w, raster_h, image::Luma([255]));
         for (y, row) in bitmap.iter().enumerate() {
             for (x, &v) in row.iter().enumerate() {
                 if v == 0 {
@@ -3181,36 +3287,34 @@ fn generate_draw_artifacts(
             }
         }
         bin.save(root.join(&path_preview_name)).map_err(|e| e.to_string())?;
-    }
 
-    let plan = laser_core::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
-        .map_err(|e| e.to_string())?;
-    let gcode_str = laser_core::gcode::write_raster(
-        &plan,
-        img_w as usize,
-        img_h as usize,
-        &laser_core::gcode::RasterWriterOptions {
-            pixel_size_mm: 0.1,
-            overscan_mm: 1.0,
-            work_area_width_mm: 400.0,
-            work_area_height_mm: 400.0,
-            power,
-            feed_rate,
-            laser_mode: "M4",
-            snake_scan: true,
-            material: Some(material.to_string()),
-            safety_note: None,
-            power_scale: None,
-        },
-    ).map_err(|e| e.to_string())?;
+        let plan = laser_core::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
+            .map_err(|e| e.to_string())?;
+        laser_core::gcode::write_raster(
+            &plan,
+            raster_w as usize,
+            raster_h as usize,
+            &laser_core::gcode::RasterWriterOptions {
+                pixel_size_mm: DRAW_PIXEL_MM,
+                overscan_mm: 1.0,
+                work_area_width_mm: DRAW_WORK_AREA_MM,
+                work_area_height_mm: DRAW_WORK_AREA_MM,
+                power,
+                feed_rate,
+                laser_mode: "M4",
+                snake_scan: true,
+                material: Some(material.to_string()),
+                safety_note: None,
+                power_scale: None,
+            },
+        ).map_err(|e| e.to_string())?
+    };
 
     let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
     let gcode_path = root.join(format!("{id}.gcode"));
     std::fs::write(&gcode_path, gcode_str.as_bytes()).map_err(|error| error.to_string())?;
 
     let estimate = laser_core::gcode::estimate_time(&gcode_str, 3000.0);
-    let width_mm = img_w as f64 * 0.1;
-    let height_mm = img_h as f64 * 0.1;
 
     let img_name = format!("{id}.png");
     let gcode_name = format!("{id}.gcode");
@@ -3229,6 +3333,7 @@ fn generate_draw_artifacts(
     res_map.insert("thickness_mm".into(), serde_json::json!(thickness));
     res_map.insert("width_mm".into(), serde_json::json!(width_mm));
     res_map.insert("height_mm".into(), serde_json::json!(height_mm));
+    res_map.insert("mode".into(), serde_json::Value::String(mode.to_string()));
     res_map.insert("time_estimate".into(), serde_json::json!({
         "estimated_seconds": estimate.estimated_seconds,
         "estimated_minutes": estimate.estimated_minutes,
@@ -3238,6 +3343,48 @@ fn generate_draw_artifacts(
     res_map.insert("fingerprint".into(), serde_json::Value::String(fingerprint));
 
     Ok(res_map)
+}
+
+/// 画板光栅每像素对应的物理尺寸与工作区上限（见 safety.md §4）。
+const DRAW_PIXEL_MM: f64 = 0.1;
+const DRAW_WORK_AREA_MM: f64 = 400.0;
+
+/// 可选的正数尺寸：缺省、null、空串或 0 表示“自动”。
+fn optional_positive_mm(value: Option<&serde_json::Value>, field: &str) -> Result<Option<f64>, String> {
+    let number = match value {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::String(text)) if text.trim().is_empty() => return Ok(None),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<f64>().map_err(|_| format!("{field} 必须是数字"))?,
+        Some(other) => other.as_f64().ok_or_else(|| format!("{field} 必须是数字"))?,
+    };
+    if !number.is_finite() || number < 0.0 {
+        return Err(format!("{field} 必须是不小于 0 的数字"));
+    }
+    Ok((number > 0.0).then_some(number))
+}
+
+/// 画板成品尺寸（毫米）：宽高都填时锁定比例放进该框内；只填一边按比例算另一边；
+/// 都没填按导出图每像素 0.1 mm。超出工作区直接拒绝，不悄悄缩小。
+fn draw_target_size_mm(img_w: u32, img_h: u32, width: Option<f64>, height: Option<f64>) -> Result<(f64, f64), String> {
+    let (w, h) = (f64::from(img_w), f64::from(img_h));
+    let (target_w, target_h) = match (width, height) {
+        (Some(tw), Some(th)) => {
+            let scale = (tw / w).min(th / h);
+            (w * scale, h * scale)
+        }
+        (Some(tw), None) => (tw, tw * h / w),
+        (None, Some(th)) => (th * w / h, th),
+        (None, None) => (w * DRAW_PIXEL_MM, h * DRAW_PIXEL_MM),
+    };
+    if target_w > DRAW_WORK_AREA_MM + 1e-9 || target_h > DRAW_WORK_AREA_MM + 1e-9 {
+        return Err(format!(
+            "成品尺寸 {target_w:.1} × {target_h:.1} mm 超出工作区 {DRAW_WORK_AREA_MM:.0} × {DRAW_WORK_AREA_MM:.0} mm，请减小宽或高"
+        ));
+    }
+    if target_w < DRAW_PIXEL_MM || target_h < DRAW_PIXEL_MM {
+        return Err("成品尺寸太小，宽和高都至少 0.1 mm".into());
+    }
+    Ok((target_w, target_h))
 }
 
 fn generate_image_or_gcode_artifacts(
@@ -4961,7 +5108,7 @@ fn framing_approval_summary(facts: &serde_json::Map<String, serde_json::Value>) 
         value("min_y", "0"),
         value("max_y", "100"),
         value("feed_rate", "2000"),
-        value("power", "1"),
+        value("power", "0（不出光）"),
     )
 }
 
@@ -5080,24 +5227,23 @@ fn read_runtime_settings(runtime_path: Option<&std::path::Path>) -> serde_json::
         .unwrap_or_default()
 }
 
-fn persist_runtime_setting(runtime_path: Option<&std::path::Path>, key: &str, value: serde_json::Value) {
-    let Some(runtime_path) = runtime_path else { return };
-    let settings_file = runtime_path.join("settings.json");
+/// 读-改-写运行目录的 settings.json（先写临时文件再改名，保留其他键）。
+/// 没有运行目录或写入失败时返回错误，调用方不能报告“已保存”。
+fn update_runtime_settings(
+    runtime_path: Option<&std::path::Path>,
+    change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<(), String> {
+    let runtime_path = runtime_path.ok_or("没有配置运行目录")?;
     let mut current = read_runtime_settings(Some(runtime_path));
-    current.insert(key.to_owned(), value);
-    if let Ok(data) = serde_json::to_vec_pretty(&current) {
-        let _ = std::fs::write(settings_file, data);
-    }
-}
-
-fn remove_runtime_setting(runtime_path: Option<&std::path::Path>, key: &str) {
-    let Some(runtime_path) = runtime_path else { return };
-    let settings_file = runtime_path.join("settings.json");
-    let mut current = read_runtime_settings(Some(runtime_path));
-    current.remove(key);
-    if let Ok(data) = serde_json::to_vec_pretty(&current) {
-        let _ = std::fs::write(settings_file, data);
-    }
+    change(&mut current);
+    let data = serde_json::to_vec_pretty(&current).map_err(|error| error.to_string())?;
+    let temp = runtime_path.join("settings.json.tmp");
+    std::fs::write(&temp, data)
+        .and_then(|()| std::fs::rename(&temp, runtime_path.join("settings.json")))
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            format!("写入 settings.json 失败：{error}")
+        })
 }
 
 fn mask_secret(value: &str) -> String {
@@ -5155,9 +5301,10 @@ fn mcp_status_json(
             "connections": link.connections,
             "last_error": link.last_error,
         })).collect::<Vec<_>>(),
+        // 以下三项是固定的设计说明，不是检测结果
         "core_tool": "laser_workflow_tool",
-        "safety_gate": "强制物理 SHA-256 指纹比对",
-        "estop_channel": "0x18 软复位 (优先中断级)"
+        "safety_gate": "发送前重新计算 G-code 文件 SHA-256，与确认时的快照比对",
+        "estop_channel": "0x18 软复位走实时通道、不排队；写出成功不代表已停机"
     })
 }
 
@@ -5621,6 +5768,79 @@ mod tests {
         assert_eq!(send_json["result"]["status"], "sending");
     }
 
+    /// 200×100 像素、中间一块黑色矩形的 PNG data URL。
+    fn draw_test_png() -> String {
+        use base64::Engine;
+        let mut img = image::GrayImage::from_pixel(200, 100, image::Luma([255]));
+        for y in 25..75 {
+            for x in 50..150 {
+                img.put_pixel(x, y, image::Luma([0]));
+            }
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    fn gcode_max_xy(gcode: &str) -> (f64, f64) {
+        let mut max = (0.0_f64, 0.0_f64);
+        for line in gcode.lines().filter(|line| line.starts_with("G0") || line.starts_with("G1")) {
+            for word in line.split_whitespace() {
+                if let Some(value) = word.strip_prefix('X').and_then(|v| v.parse::<f64>().ok()) { max.0 = max.0.max(value); }
+                if let Some(value) = word.strip_prefix('Y').and_then(|v| v.parse::<f64>().ok()) { max.1 = max.1.max(value); }
+            }
+        }
+        max
+    }
+
+    /// 画板按填写的宽 / 高出成品（锁定比例）；不填按 0.1 mm/像素；超出工作区拒绝；轮廓模式真的描边（2026-10-14）。
+    #[test]
+    fn draw_preview_honors_target_size_and_outline_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_generated_root(temp.path().to_path_buf());
+        let png = draw_test_png();
+        let preview = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({"image_data_url": png, "material": "椴木", "thickness_mm": 3.0, "mode": "raster"});
+            for (key, value) in extra.as_object().unwrap() { body[key] = value.clone(); }
+            post_json(&service, "/api/draw/preview", &body)
+        };
+        let gcode_of = |response: &serde_json::Value| {
+            std::fs::read_to_string(temp.path().join(response["result"]["artifacts"]["gcode_file"].as_str().unwrap())).unwrap()
+        };
+
+        let natural = preview(serde_json::json!({}));
+        assert_eq!(natural["success"], true, "{natural}");
+        assert_eq!(natural["result"]["artifacts"]["width_mm"], 20.0);
+        assert_eq!(natural["result"]["artifacts"]["height_mm"], 10.0);
+
+        let sized = preview(serde_json::json!({"width_mm": 50, "height_mm": ""}));
+        assert_eq!(sized["result"]["artifacts"]["width_mm"], 50.0, "{sized}");
+        assert_eq!(sized["result"]["artifacts"]["height_mm"], 25.0);
+        let (max_x, max_y) = gcode_max_xy(&gcode_of(&sized));
+        // 黑块占中间一半：出光段约在 12.5..37.5 × 6.25..18.75 mm 内，X 另有过扫
+        assert!((36.0..=40.0).contains(&max_x) && (17.5..=20.0).contains(&max_y), "光栅没有按 50 mm 缩放（含 1 mm 过扫）: {max_x} {max_y}");
+
+        let boxed = preview(serde_json::json!({"width_mm": 30, "height_mm": 30}));
+        assert_eq!(boxed["result"]["artifacts"]["width_mm"], 30.0, "锁定比例放进框内: {boxed}");
+        assert_eq!(boxed["result"]["artifacts"]["height_mm"], 15.0);
+
+        let too_big = preview(serde_json::json!({"width_mm": 500}));
+        assert_eq!(too_big["success"], false);
+        assert!(too_big.to_string().contains("超出工作区"), "{too_big}");
+
+        let outline = preview(serde_json::json!({"mode": "outline", "width_mm": 40}));
+        assert_eq!(outline["success"], true, "{outline}");
+        assert_eq!(outline["result"]["artifacts"]["mode"], "outline");
+        let gcode = gcode_of(&outline);
+        let cuts = gcode.lines().filter(|line| line.starts_with("G1")).count();
+        assert!((4..=40).contains(&cuts), "轮廓应是少量矢量线段，不是逐行扫描: {cuts} 行");
+        let (max_x, max_y) = gcode_max_xy(&gcode);
+        assert!((29.0..=31.0).contains(&max_x) && (14.0..=16.0).contains(&max_y), "轮廓没有按 40 mm 缩放: {max_x} {max_y}");
+    }
+
     fn parse_json_response(response: &[u8]) -> serde_json::Value {
         let start = response
             .windows(4)
@@ -5905,6 +6125,45 @@ mod tests {
         }
     }
 
+    /// SD 脱机：上传成功但固件不返回文件哈希（未启用 HashFS）时不得发送 `$SD/Run`（2026-10-14）。
+    #[test]
+    fn sd_offline_refuses_to_run_when_firmware_returns_no_file_hash() {
+        use std::io::{Read, Write};
+        let upload = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_port = upload.local_addr().unwrap().port();
+        let uploads = std::thread::spawn(move || {
+            let (mut stream, _) = upload.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+            let mut buffer = [0u8; 4096];
+            while let Ok(n) = stream.read(&mut buffer) {
+                if n == 0 { break; }
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_generated_root(temp.path().to_path_buf())
+            .with_transport_factory(recording_transport_factory(200_000, written.clone()));
+        let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
+            "text": "SD", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+        }));
+        let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
+        let send = post_json(&service, "/api/workflow", &serde_json::json!({
+            "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+            "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
+            "network_http_port": http_port, "offline_sd": true
+        }));
+        assert_eq!(send["success"], true, "{send}");
+        let status = wait_for_status(&service, &workflow_id, "failed");
+        uploads.join().unwrap();
+        assert_eq!(status["result"]["status"], "failed", "{status}");
+        assert!(status["result"]["send_result"]["error"].as_str().unwrap_or("").contains("HashFS"), "{status}");
+        let lines = written.lock().unwrap().clone();
+        assert!(lines.iter().any(|line| line.starts_with("$File/ShowHash=")), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.starts_with("$SD/Run")), "没有固件哈希不能启动 SD 作业: {lines:?}");
+    }
+
     #[test]
     fn send_rejects_gcode_changed_after_first_sha_check_without_writing_job_lines() {
         for use_store in [true, false] {
@@ -6116,9 +6375,12 @@ mod tests {
         assert!(page.starts_with("HTTP/1.1 200 OK"));
         assert!(page.contains("<div id=\"root\"></div>"));
         assert!(page.contains("/assets/"));
-        let index = service.handle_http(b"GET /draw HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        assert!(String::from_utf8_lossy(&index).starts_with("HTTP/1.1 200 OK"));
-        assert!(String::from_utf8_lossy(&index).contains("text/html"));
+        for route in ["/draw", "/material-lab", "/voice"] {
+            // 在任一页面按 F5 刷新都应回到前端页面，而不是 404
+            let index = service.handle_http(format!("GET {route} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
+            assert!(String::from_utf8_lossy(&index).starts_with("HTTP/1.1 200 OK"), "{route}");
+            assert!(String::from_utf8_lossy(&index).contains("text/html"), "{route}");
+        }
         let traversal =
             service.handle_http(b"GET /assets/../index.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert!(String::from_utf8_lossy(&traversal).starts_with("HTTP/1.1 404 Not Found"));
@@ -6708,6 +6970,32 @@ mod tests {
         // 没有 Host 时不能靠同源放行
         assert!(!is_allowed_origin("http://127.0.0.1:9666", None, true, &none));
         assert!(!is_allowed_origin("http://127.0.0.1:9666", Some(""), true, &none));
+    }
+
+    /// 设置写不进 settings.json 时返回错误，不显示“已保存”；能写时一次写入并保留其他键（2026-10-14）。
+    #[test]
+    fn settings_save_reports_write_failure_instead_of_success() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("settings.json"), r#"{"voice":{"mode":"official"}}"#).unwrap();
+        let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+        let saved = post_json(&service, "/api/settings", &serde_json::json!({"web_port": 9888, "lan_access": true, "jev_enabled": false}));
+        assert_eq!(saved["success"], true, "{saved}");
+        let file: serde_json::Value = serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap()).unwrap();
+        assert_eq!(file["web_port"], 9888);
+        assert_eq!(file["lan_access"], true);
+        assert_eq!(file["voice"]["mode"], "official", "其他键必须保留");
+        assert!(!temp.path().join("settings.json.tmp").exists());
+
+        // 运行目录指向一个文件：无法写入 settings.json
+        let blocker = temp.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let broken = cors_test_service().with_runtime_path(blocker);
+        let failed = post_json(&broken, "/api/settings", &serde_json::json!({"lan_access": false}));
+        assert_eq!(failed["success"], false, "{failed}");
+        assert_eq!(failed["detail"]["error_code"], "settings_write_failed");
+
+        let no_runtime = post_json(&cors_test_service(), "/api/settings", &serde_json::json!({"web_port": 9888}));
+        assert_eq!(no_runtime["detail"]["error_code"], "settings_write_failed", "{no_runtime}");
     }
 
     #[test]
@@ -8636,6 +8924,118 @@ Content-Length: 30
         std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
             Ok(Box::new(GatedGrbl { responses: Default::default(), gate: gate.clone() }) as Box<dyn laser_device::DeviceTransport>)
         })
+    }
+
+    /// 走边框用的假设备：实时状态固定为 `status`，记录写入的每一行。
+    fn status_transport_factory(status: &'static str, written: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> TransportFactory {
+        struct StatusGrbl {
+            status: &'static str,
+            responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+            written: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        impl laser_device::DeviceTransport for StatusGrbl {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                self.written.lock().unwrap().push(line.to_owned());
+                let mut responses = self.responses.lock().unwrap();
+                if line == "$$" {
+                    responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+                } else {
+                    responses.push_back("ok".into());
+                }
+                Ok(())
+            }
+            fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+                if command == laser_device::RealtimeCommand::StatusQuery {
+                    self.responses.lock().unwrap().push_back(format!("<{}|MPos:0,0,0|FS:0,0>", self.status));
+                }
+                Ok(())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                Ok(self.responses.lock().unwrap().pop_front())
+            }
+        }
+        std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
+            Ok(Box::new(StatusGrbl { status, responses: Default::default(), written: written.clone() }) as Box<dyn laser_device::DeviceTransport>)
+        })
+    }
+
+    /// 走边框默认不出光，勾选弱光才写 M4 S1；设备不在 Idle 时不运动（2026-10-14）。
+    #[test]
+    fn framing_defaults_to_laser_off_and_requires_idle_preflight() {
+        let framing = |service: &ApiService, power: Option<i64>| {
+            let mut body = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "max_x": 20, "max_y": 10});
+            if let Some(power) = power { body["power"] = power.into(); }
+            post_json(service, "/api/device/framing", &body)
+        };
+        let motion = |lines: &[String]| lines.iter().filter(|line| line.starts_with("G0") || line.starts_with("G1") || line.starts_with("M4")).cloned().collect::<Vec<_>>();
+
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_transport_factory(status_transport_factory("Idle", written.clone()));
+        let off = framing(&service, None);
+        assert_eq!(off["success"], true, "{off}");
+        assert_eq!(off["result"]["laser_on"], false);
+        let lines = written.lock().unwrap().clone();
+        assert!(!lines.iter().any(|line| line.starts_with("M4")), "默认不能出光: {lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("G1 X20")), "{lines:?}");
+        assert_eq!(service.active_job_count(), 0, "完成后不再占用设备");
+
+        written.lock().unwrap().clear();
+        let weak = framing(&service, Some(1));
+        assert_eq!(weak["result"]["laser_on"], true, "{weak}");
+        assert!(written.lock().unwrap().iter().any(|line| line == "M4 S1"), "{:?}", written.lock().unwrap());
+
+        let alarm_written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let alarm = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_transport_factory(status_transport_factory("Alarm", alarm_written.clone()));
+        let refused = framing(&alarm, Some(1));
+        assert_eq!(refused["detail"]["error_code"], "device_preflight_failed", "{refused}");
+        assert!(motion(&alarm_written.lock().unwrap()).is_empty(), "预检失败不能运动: {:?}", alarm_written.lock().unwrap());
+    }
+
+    /// 走边框运行中登记为活动作业：顶栏急停能找到并停止它，结束后保留为“待确认停止”（2026-10-14）。
+    #[test]
+    fn framing_is_listed_in_stop_targets_and_can_be_emergency_stopped() {
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let service = std::sync::Arc::new(
+            ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+                .with_transport_factory(gated_transport_factory(gate.clone())),
+        );
+        let runner = {
+            let service = service.clone();
+            std::thread::spawn(move || post_json(&service, "/api/device/framing", &serde_json::json!({
+                "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+            })))
+        };
+        let targets_request = b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let start = std::time::Instant::now();
+        let job_id = loop {
+            let targets = parse_json_response(&service.handle_http(targets_request));
+            if let Some(id) = targets["result"]["jobs"][0]["job_id"].as_str() {
+                assert_eq!(targets["result"]["jobs"][0]["state"], "running");
+                break id.to_owned();
+            }
+            if runner.is_finished() || start.elapsed() > std::time::Duration::from_secs(5) {
+                gate.store(true, std::sync::atomic::Ordering::SeqCst);
+                panic!("走边框没有登记为活动作业: {}", runner.join().unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(job_id.starts_with("framing-"), "{job_id}");
+        let busy = post_json(&service, "/api/device/framing", &serde_json::json!({
+            "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+        }));
+        assert_eq!(busy["detail"]["error_code"], "device_busy", "{busy}");
+        let stop = post_json(&service, "/api/safe-action", &serde_json::json!({
+            "action": "emergency_stop", "confirmed": true, "job_id": job_id
+        }));
+        assert_eq!(stop["success"], true, "{stop}");
+        gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = runner.join().unwrap();
+        assert_eq!(result["detail"]["error_code"], "framing_cancelled", "{result}");
+        assert_eq!(service.active_job_count(), 0);
+        let targets = parse_json_response(&service.handle_http(targets_request));
+        assert_eq!(targets["result"]["jobs"][0]["state"], "unknown", "停止未确认，保留原通道供重试急停: {targets}");
     }
 
     /// A-33：经审批的发送进行中进程崩溃 → 新进程启动恢复后 workflow 为 failed、审批结果未知，

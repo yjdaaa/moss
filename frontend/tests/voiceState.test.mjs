@@ -74,6 +74,20 @@ import {
   toolSwitchPayload,
   toolStatText,
   extraEndpointError,
+  SETTINGS_GROUPS,
+  LOCAL_MODEL_KEYS,
+  EXPERIENCE_KEYS,
+  formDirty,
+  settingsGroupDirty,
+  settingsGroupPayload,
+  settingsSaveEffect,
+  experienceSettingsError,
+  localModelSettingsError,
+  mergeGroup,
+  savedNoteText,
+  dirtyTabs,
+  builtinModelSummary,
+  externalModelSummary,
 } from "../src/voiceState.js";
 
 test("语音中心只在桌面端（有 invoke、有桌面会话、非手机远程模式）可用（A-69）", () => {
@@ -121,7 +135,6 @@ test("先测试后保存：测试成功且内容未改动才可保存（A-78）"
   assert.equal(canSaveSection("llm", { ...form, url: "https://h/v1/" }, ok), true);
   assert.equal(canSaveSection("llm", form, { ok: false, fingerprint: ok.fingerprint }), false);
   assert.equal(canSaveSection("llm", form, ok, { fullModule: true }), false, "全模块部署只测试不写");
-  assert.equal(canSaveSection("llm", form, ok, { busy: true }), false);
 });
 
 test("服务端按钮：外部实例不显示停止（A-63），崩溃可重新启动（A-65）", () => {
@@ -377,4 +390,100 @@ test("NV8: 接入点状态、身份、工具开关名单与新增校验", () => 
   const full = [1, 2, 3, 4].map((n) => ({ id: `extra-${n}` })).concat([{ id: "primary" }]);
   assert.match(extraEndpointError("wss://x/mcp/?token=t", full, 4), /最多 4 个/);
   assert.equal(extraEndpointError("wss://x/mcp/?token=t", [{ id: "primary" }], 4), "");
+});
+
+test("UI-3 设置分组：只提交本组字段，带令牌的字段留空不提交，端口转数字", () => {
+  const form = {
+    server_dir: " D:/xz ", python: "py", args: "app.py", server_port: "8000",
+    builtin_ws_port: "8100", builtin_http_port: "8103",
+    self_hosted_mcp_endpoint: "", endpoint_health_url: "  ", official_mcp_endpoint: " wss://example.test/mcp/?token=t ",
+  };
+  assert.deepEqual(settingsGroupPayload("official", form), { official_mcp_endpoint: "wss://example.test/mcp/?token=t" });
+  assert.deepEqual(settingsGroupPayload("selfHostedEndpoint", form), {});
+  assert.deepEqual(settingsGroupPayload("builtinPorts", form), { builtin_ws_port: 8100, builtin_http_port: 8103 });
+  assert.deepEqual(settingsGroupPayload("selfHostedServer", form), { server_dir: "D:/xz", python: "py", args: "app.py", server_port: 8000 });
+  // 各组字段互不重叠：保存一组不会顺带提交另一组
+  const keys = Object.values(SETTINGS_GROUPS).flatMap((group) => group.keys);
+  assert.equal(new Set(keys).size, keys.length);
+});
+
+test("UI-3 设置分组改动判断：普通字段与已保存值比较，令牌字段填了才算改动", () => {
+  const saved = { server_dir: "D:/xz", python: "", args: "app.py", server_port: "8000", builtin_ws_port: "8000", builtin_http_port: "8003", self_hosted_mcp_endpoint: "", endpoint_health_url: "", official_mcp_endpoint: "" };
+  assert.equal(settingsGroupDirty("selfHostedServer", { ...saved, server_dir: " D:/xz " }, saved), false);
+  assert.equal(settingsGroupDirty("selfHostedServer", { ...saved, server_port: "8001" }, saved), true);
+  assert.equal(settingsGroupDirty("builtinPorts", { ...saved, server_port: "8001" }, saved), false);
+  assert.equal(settingsGroupDirty("official", { ...saved, official_mcp_endpoint: "wss://x" }, saved), true);
+  assert.equal(settingsGroupDirty("official", saved, saved), false);
+});
+
+test("UI-3 本地模型与语音体验分开保存：合并时只取本组草稿", () => {
+  assert.equal(LOCAL_MODEL_KEYS.filter((key) => EXPERIENCE_KEYS.includes(key)).length, 0);
+  const saved = localSettingsForm({});
+  const draft = { ...saved, tts_speed: "1.5", barge_in: true };
+  const local = mergeGroup(saved, draft, LOCAL_MODEL_KEYS);
+  assert.equal(local.tts_speed, "1.5");
+  assert.equal(local.barge_in, false, "保存本地模型时不带上未保存的体验改动");
+  const experience = mergeGroup(saved, draft, EXPERIENCE_KEYS);
+  assert.equal(experience.barge_in, true);
+  assert.equal(experience.tts_speed, saved.tts_speed);
+  assert.equal(formDirty(saved, draft, LOCAL_MODEL_KEYS), true);
+  assert.equal(formDirty(saved, { ...saved }, EXPERIENCE_KEYS), false);
+  assert.equal(formDirty(null, draft), false);
+  // 只出现在表单里的字段（如切到豆包时加上的 kind）也算改动
+  assert.equal(formDirty({ url: "u", model: "m" }, { url: "u", model: "m", kind: "doubao" }), true);
+  assert.equal(formDirty({ url: "u", kind: "doubao" }, { url: "u" }), true);
+});
+
+test("UI-3 两组本地设置各自只检查本组字段", () => {
+  const saved = localSettingsForm({});
+  const badHotword = { ...saved, custom_hotwords: "木".repeat(33) };
+  assert.match(experienceSettingsError(badHotword), /32/);
+  assert.equal(localModelSettingsError(badHotword), "", "体验组的错误不挡本地模型组保存");
+  const badSpeed = { ...saved, tts_speed: "3" };
+  assert.match(localModelSettingsError(badSpeed), /0.5/);
+  assert.equal(experienceSettingsError(badSpeed), "", "本地模型组的错误不挡体验组保存");
+});
+
+test("UI-3 连接设置保存后，只有后端真的重新发起连接才说正在重新连接", () => {
+  assert.equal(settingsSaveEffect("selfHostedEndpoint", "self_hosted", true), "正在重新连接自建接入点");
+  assert.equal(settingsSaveEffect("selfHostedEndpoint", "self_hosted", false), "接入点未变，没有重新连接");
+  assert.equal(settingsSaveEffect("selfHostedEndpoint", "official", false), "切到自建链路时使用");
+  assert.equal(settingsSaveEffect("official", "official", true), "正在重新连接小智");
+  assert.equal(settingsSaveEffect("official", "builtin", false), "接入点未变，没有重新连接");
+  assert.equal(settingsSaveEffect("official", "self_hosted", false), "切回官方链路时使用");
+  assert.equal(settingsSaveEffect("builtinPorts", "builtin", false), "重启内置服务后生效");
+  assert.equal(settingsSaveEffect("selfHostedServer", "self_hosted", false), "下次启动服务端时生效");
+});
+
+test("UI-3 保存结果、未保存标签与分组摘要", () => {
+  const at = new Date(2026, 9, 14, 9, 5, 7);
+  assert.equal(savedNoteText("大模型设置", "下次启动内置服务时生效", at), "已保存大模型设置 · 09:05:07 · 下次启动内置服务时生效");
+  assert.equal(savedNoteText("路径", "", at), "已保存路径 · 09:05:07");
+  assert.deepEqual([...dirtyTabs({ a: "models", b: "", c: "models", d: "connect" })].sort(), ["connect", "models"]);
+  assert.equal(dirtyTabs(null).size, 0);
+  assert.equal(builtinModelSummary("llm", null), "未配置");
+  assert.equal(builtinModelSummary("llm", { configured: true, model: "m1" }), "已配置 · m1");
+  assert.equal(builtinModelSummary("tts", { configured: true, kind: "doubao", model: "r" }), "已配置 · 豆包流式 · r");
+  assert.equal(builtinModelSummary("asr", null, true), "使用本地模型");
+  assert.equal(builtinModelSummary("llm", null, true), "未配置", "大模型没有本地选项");
+  assert.equal(externalModelSummary(null), "未测试");
+  assert.equal(externalModelSummary({ ok: false }), "上次测试未通过");
+});
+
+test("声纹简易标定：至少两人且每人三段测试音才能计算；名单变化提示重新标定", async () => {
+  const { speakerCalibrationView } = await import("../src/voiceState.js");
+  const speakers = [{ id: "a" }, { id: "b" }];
+  const none = speakerCalibrationView({ speakers: [{ id: "a" }], test_clips: { a: 3 }, calibration: { state: "none" } });
+  assert.equal(none.ready, false);
+  assert.equal(none.blocked, "至少需要两个已登记的人");
+  assert.match(none.status, /未标定/);
+  const partial = speakerCalibrationView({ speakers, test_clips: { a: 3, b: 2 } });
+  assert.equal(partial.ready, false);
+  assert.deepEqual(partial.counts, { a: 3, b: 2 });
+  const ready = speakerCalibrationView({ speakers, test_clips: { a: 3, b: 3 } });
+  assert.equal(ready.ready, true);
+  const report = { threshold: 0.6123, people: 2, genuine_accepted: 6, genuine_trials: 6, false_accepts: 0, impostor_trials: 6 };
+  const valid = speakerCalibrationView({ speakers, calibration: { state: "valid", report } });
+  assert.match(valid.status, /阈值 0\.61 · 本人认对 6\/6 · 认成别人 0\/6/);
+  assert.match(speakerCalibrationView({ speakers, calibration: { state: "stale", report } }).status, /需要重新标定/);
 });

@@ -78,7 +78,7 @@ $SD/Status     → 用脱机模式时应回 SD card detected
 | 没开 | 窗口固定 256，握手摘要提示 |
 | 跑 SD 卡文件 | 上位机只允许急停/暂停/继续/查状态，其他命令直接拒绝并提示"请先急停"（固件会静默丢弃这些命令，不回 ok） |
 | SD 文件读完 | 状态报 `SD: 文件名: Sent`，进度条到 100%，再等 `Idle` 才算完成 |
-| 固件没开 HashFS | 脱机模式仍会跑，但结果里带 `sd_hash_verified=false` 和警告 |
+| 固件没开 HashFS | 脱机模式拒绝执行（不发 `$SD/Run`），提示启用 HashFS 或改用逐行发送 |
 | 机器重启（`$Bye`、断电） | 收到 `Grbl ...`、`[MSG:INFO: Restarting]` 或 `[VER:` 任一行都判为"任务中复位"，不自动重发 |
 | 报警 | `[MSG:INFO: ALARM: 原因]` 那行会拼进报错，例如 `ALARM:14 (Unhomed)` |
 

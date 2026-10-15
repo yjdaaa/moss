@@ -238,7 +238,7 @@ export function ConsoleDrawer({
               </div>
               <div className="mcp-card-body">
                 <div className="mcp-row">
-                  <span className="mcp-label">核心调度工具</span>
+                  <span className="mcp-label">核心调度工具（固定）</span>
                   <span className="mcp-val mono">{mcpStatus?.core_tool || "laser_workflow_tool"}</span>
                 </div>
                 <div className="mcp-row">
@@ -248,15 +248,15 @@ export function ConsoleDrawer({
                   </span>
                 </div>
                 <div className="mcp-row">
-                  <span className="mcp-label">安全门禁校验</span>
+                  <span className="mcp-label">发送门禁（固定规则）</span>
                   <span className="mcp-val drawer-icon-5">
-                    {mcpStatus?.safety_gate || "强制物理 SHA-256 指纹比对"}
+                    {mcpStatus?.safety_gate || "发送前重新计算 G-code 文件 SHA-256，与确认时的快照比对"}
                   </span>
                 </div>
                 <div className="mcp-row">
-                  <span className="mcp-label">急停拦截信道</span>
-                  <span className="mcp-val mono drawer-icon-4">
-                    {mcpStatus?.estop_channel || "0x18 软复位 (优先中断级)"}
+                  <span className="mcp-label">急停方式（固定规则）</span>
+                  <span className="mcp-val drawer-icon-4">
+                    {mcpStatus?.estop_channel || "0x18 软复位走实时通道、不排队；写出成功不代表已停机"}
                   </span>
                 </div>
               </div>

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { Cable, Plus, Trash2, Wrench } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
+import { VoiceGroup } from "./VoiceLayout.jsx";
 import { showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { endpointLabel, endpointView, extraEndpointError, identityView, toolStatText, toolSwitchPayload } from "../voiceState.js";
@@ -42,16 +43,14 @@ export function VoiceEndpointsCard({ overview, busy, run }) {
   const switchTool = (tool, enabled) =>
     run("切换工具", () => voiceApi.saveSettings({ disabled_tools: toolSwitchPayload(tools, tool.name, enabled) }));
 
+  const connected = endpoints.filter((endpoint) => endpoint.connected).length;
+  const disabled = tools.filter((tool) => tool.enabled === false).length;
   return (
-    <section className="ob-card" id="voice-endpoints-card">
-      <div className="ob-card-h">
-        <h2>
-          <Cable size={16} aria-hidden="true" /> 接入点与工具
-        </h2>
-        <span className="ob-k">ENDPOINTS · TOOLS</span>
-      </div>
+    <>
+    <VoiceGroup id="endpoints" title="接入点状态" dirty={Boolean(extra.trim())} summary={endpoints.length ? `${connected} / ${endpoints.length} 已连接` : "未配置"} tone={endpoints.length && connected === endpoints.length ? "ok" : undefined}>
+      <div id="voice-endpoints-card" className="voice-stack">
       <p className="voice-muted">
-        MOSS 以工具提供方身份连接下列小智接入点，同一套工具同时提供给它们；断线后自动重连（1 秒起逐次加倍，最长 60 秒；90 秒收不到任何数据也判定断线）。
+        MOSS 作为工具提供方连接这些小智接入点，断线后自动重连。
         {overview.extras_paused && " 当前为自建模式：附加接入点暂停连接。"}
       </p>
       <div className="ob-tbl voice-tbl">
@@ -67,7 +66,7 @@ export function VoiceEndpointsCard({ overview, busy, run }) {
           <tbody>
             {endpoints.length === 0 ? (
               <tr>
-                <td colSpan={4} className="voice-muted">未配置接入点：在“服务端与接入点设置”中填写官方接入点</td>
+                <td colSpan={4} className="voice-muted">未配置接入点：在上面的“官方接入点”中填写</td>
               </tr>
             ) : (
               endpoints.map((endpoint) => {
@@ -101,7 +100,7 @@ export function VoiceEndpointsCard({ overview, busy, run }) {
       </div>
       <div className="voice-form-grid">
         <label className="voice-wide">
-          <span>添加附加接入点（同一账号的其他智能体，或别的账号；最多 {max} 个。主接入点在“服务端与接入点设置”中修改）</span>
+          <span>添加附加接入点（同一账号的其他智能体或别的账号，最多 {max} 个，添加后立即连接）</span>
           <input
             className="text-input mono"
             value={extra}
@@ -115,17 +114,15 @@ export function VoiceEndpointsCard({ overview, busy, run }) {
       </div>
       <div className="voice-actions">
         <button type="button" className="btn btn-ghost" onClick={addExtra} disabled={Boolean(busy) || !extra.trim()} id="voice-extra-endpoint-add">
-          <Plus size={13} /> 添加
+          <Plus size={13} /> 添加并连接
         </button>
         {extraError && <span className="voice-bad">{extraError}</span>}
       </div>
 
-      <h3 className="voice-subhead">
-        <Wrench size={14} aria-hidden="true" /> 工具开关与调用统计
-      </h3>
-      <p className="voice-muted">
-        关闭的工具不会提供给任何接入点和内置语音，调用也会被拒绝；改动后 MOSS 会重连接入点以更新工具列表。停止与急停工具不能关闭。统计为本次运行以来的数据。
-      </p>
+      </div>
+    </VoiceGroup>
+    <VoiceGroup id="tools" title="工具开关与调用统计" summary={disabled ? `${disabled} 个工具已关闭` : `${tools.length} 个工具全部开启`}>
+      <p className="voice-muted">勾选立即生效。关闭的工具不提供给任何接入点和内置语音；停止与急停工具不能关闭。统计为本次运行以来。</p>
       <div className="ob-tbl voice-tbl">
         <table>
           <thead>
@@ -164,6 +161,7 @@ export function VoiceEndpointsCard({ overview, busy, run }) {
           </tbody>
         </table>
       </div>
-    </section>
+    </VoiceGroup>
+    </>
   );
 }

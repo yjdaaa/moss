@@ -35,6 +35,9 @@ export async function invokeVoice(command, args = {}) {
 
 export const voiceApi = {
   speakerManage: (input) => invokeVoice("voice_speaker_manage", { input }),
+  // NV19 长期记忆（仅私有窗口）：按 action 分发；选资料文件夹后在本机直接建立索引，路径不回传
+  contextManage: (input) => invokeVoice("voice_context_manage", { input }),
+  contextPickFolder: () => invokeVoice("voice_context_pick_folder"),
   firmwareStatus: () => invokeVoice("voice_firmware_status"),
   mcpStatus: () => invokeVoice("voice_mcp_status"),
   mcpSave: (input) => invokeVoice("voice_mcp_save", { input }),

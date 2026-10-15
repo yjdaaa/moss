@@ -106,3 +106,21 @@ test("native guard covers reads and writes without changing main loopback naviga
   assert.match(lib, /if window\.label\(\) != "main"/);
   assert.match(manifest, /"open_voice_private"/);
 });
+
+test("NV19 long-term context UI and commands live only in the packaged private window", () => {
+  const context = JSON.parse(desktop("capabilities/voice-context.json"));
+  const fallback = JSON.parse(desktop("capabilities/default.json"));
+  assert.deepEqual(context.windows, ["voice-private"]);
+  assert.equal(Object.hasOwn(context, "remote"), false);
+  assert.equal(Object.hasOwn(context, "webviews"), false);
+  for (const permission of context.permissions) assert.equal(fallback.permissions.includes(permission), false, permission);
+  assert.match(frontend("src/voicePrivate.jsx"), /<VoiceContextCard\b/);
+  for (const main of ["src/pages/VoicePage.jsx", "src/components/VoiceBuiltinCard.jsx"]) {
+    assert.doesNotMatch(frontend(main), /VoiceContextCard|contextManage|contextPickFolder/, main);
+  }
+  const native = desktop("src/voice_context.rs");
+  for (const command of ["voice_context_manage", "voice_context_pick_folder"]) {
+    const body = native.slice(native.indexOf(`pub async fn ${command}`));
+    assert.match(body.slice(0, body.indexOf("\n}\n")), /require_voice_private_asset\(&window\)\?/, command);
+  }
+});

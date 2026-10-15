@@ -32,7 +32,7 @@ pub(crate) fn is_voice_private_asset(
 }
 
 #[cfg(desktop)]
-fn require_voice_private_asset(window: &tauri::WebviewWindow) -> Result<(), Value> {
+pub(crate) fn require_voice_private_asset(window: &tauri::WebviewWindow) -> Result<(), Value> {
     let fail = || serde_json::json!({
         "code": "voice_acl_denied",
         "message": "私人记忆和插件配置只能在 MOSS 本地安全设置窗口访问"
@@ -82,6 +82,17 @@ fn sensitive_voice_commands_require_packaged_private_window_origin() {
         assert!(!allowed(label, scheme, host, port, path, query, fragment),
             "unexpectedly allowed: {label}/{scheme}/{host:?}/{path}");
     }
+}
+
+/// NV19-08: entry points for `voice_context.rs` commands (the backend type stays private).
+#[cfg(desktop)]
+pub(crate) async fn context_manage(app: tauri::AppHandle, input: Value) -> CmdResult {
+    imp::run(app, move |voice| voice.context_manage(&input)).await
+}
+
+#[cfg(desktop)]
+pub(crate) async fn context_add_folder(app: tauri::AppHandle, path: std::path::PathBuf) -> CmdResult {
+    imp::run(app, move |voice| voice.context_add_folder(&path)).await
 }
 
 #[cfg(mobile)]
@@ -185,8 +196,15 @@ mod imp {
     use moss_voice_server::memory::{MemoryRecord, MemoryService, VoiceMemoryStore};
 
     struct DbMemoryStore { db: Arc<Mutex<laser_runtime::RuntimeDb>> }
-    struct DesktopSpeakerBackend {db:Arc<Mutex<laser_runtime::RuntimeDb>>,helper:Mutex<Option<moss_voice_providers::local::SpeakerHelper>>,personal:Mutex<Option<std::sync::Weak<moss_voice_server::person_context::PersonContext>>>}
+    /// `tests`：简易标定时每人另录的测试音向量，只在内存里，算完阈值或删除声纹即丢弃。
+    struct DesktopSpeakerBackend {db:Arc<Mutex<laser_runtime::RuntimeDb>>,helper:Mutex<Option<moss_voice_providers::local::SpeakerHelper>>,personal:Mutex<Option<std::sync::Weak<moss_voice_server::person_context::PersonContext>>>,tests:Mutex<std::collections::HashMap<String,Vec<Vec<f32>>>>}
     impl moss_voice_server::speaker_enrollment::EnrollmentBackend for DesktopSpeakerBackend {
+        fn save_test(&self,speaker_id:&str,clips:&[Vec<f32>])->Result<(),String>{
+            let known=self.db.lock().map_err(|_|"数据库不可用")?.list_voice_speakers().map_err(|_|"读取声纹失败")?.iter().any(|r|r.id==speaker_id);
+            if !known{return Err("这个人的声纹已删除".into());}
+            self.tests.lock().map_err(|_|"标定数据不可用")?.insert(speaker_id.into(),clips.to_vec());
+            Ok(())
+        }
         fn embedding(&self,pcm:&[i16],generation:u64)->Result<Vec<f32>,String>{
             let helper=self.helper.lock().map_err(|_|"声纹辅助程序不可用")?.clone().ok_or("声纹辅助程序未准备")?;
             helper.embedding_blocking(pcm,16000,generation).map_err(|_|"声纹计算失败".into())
@@ -199,15 +217,44 @@ mod imp {
             Ok(())
         }
     }
-    use moss_voice_server::person_context::{IdentityResolver,IdentityRequest,PersonScope,PersonContext,PersonMemoryStore,PersonSummary,SpeakerTemplate,match_embedding};
-    /// None until real-person threshold/margin calibration is accepted. A
-    /// settings boolean cannot manufacture calibration or enable matching.
-    struct Calibration {threshold:f32,margin:f32}
-    struct DesktopIdentity {host:std::sync::Weak<laser_host::HostApplication>,backend:Arc<DesktopSpeakerBackend>,calibration:Option<Calibration>,workers:Arc<tokio::sync::Semaphore>}
+    use moss_voice_server::person_context::{IdentityResolver,IdentityRequest,PersonScope,PersonContext,PersonMemoryStore,PersonSummary,SpeakerTemplate,match_embedding,CalibrationReport,CalibrationSample};
+    const SPEAKER_CALIBRATION_KEY:&str="voice.speaker.calibration";
+    const SPEAKER_MODEL:&str="campplus_sv_zh_cn_16k_common";
+    /// 简易标定结果（2026-10-14 用户决定，取代“源码写死 None”）：没有标定就不识别身份。
+    /// 只对标定时的登记名单（编号 + 版本）有效；增删或重新登记任何人都会让它失效，需要重新标定。
+    #[derive(Clone,serde::Serialize,serde::Deserialize)]
+    struct Calibration {report:CalibrationReport,directory:String,calibrated_at:f64}
+    /// 登记名单的比较键：CampPlus 192 维声纹的“编号:版本”，排序后拼接。
+    fn speaker_directory<'a>(items:impl Iterator<Item=(&'a str,i64)>)->String{
+        let mut keys=items.map(|(id,revision)|format!("{id}:{revision}")).collect::<Vec<_>>();keys.sort();keys.join(",")
+    }
+    #[cfg(test)]
+    mod speaker_directory_tests {
+        /// 标定只对当时的登记名单有效：顺序无关，增删人或重新登记（版本变）都会得到不同的键。
+        #[test]
+        fn directory_key_changes_when_anyone_is_added_removed_or_re_enrolled(){
+            let key=|items:&[(&str,i64)]|super::speaker_directory(items.iter().copied());
+            assert_eq!(key(&[("a",1),("b",1)]),key(&[("b",1),("a",1)]));
+            assert_ne!(key(&[("a",1),("b",1)]),key(&[("a",1)]));
+            assert_ne!(key(&[("a",1),("b",1)]),key(&[("a",1),("b",1),("c",1)]));
+            assert_ne!(key(&[("a",1),("b",1)]),key(&[("a",2),("b",1)]));
+        }
+    }
+    struct DesktopIdentity {host:std::sync::Weak<laser_host::HostApplication>,backend:Arc<DesktopSpeakerBackend>,calibration:Mutex<Option<Calibration>>,workers:Arc<tokio::sync::Semaphore>}
+    impl DesktopIdentity {
+        /// 有标定且登记名单没变时返回标定结果。
+        fn valid_calibration(&self)->Option<Calibration>{
+            let calibration=self.calibration.lock().ok()?.clone()?;
+            let rows=self.backend.db.lock().ok()?.list_voice_speakers().ok()?;
+            let current=speaker_directory(rows.iter().filter(|r|r.model_id==SPEAKER_MODEL&&r.dimension==192).map(|r|(r.id.as_str(),r.revision)));
+            (current==calibration.directory).then_some(calibration)
+        }
+    }
     impl IdentityResolver for DesktopIdentity {
         fn identify<'a>(&'a self,_:&'a ToolContext,pcm:&'a [i16],rate:u32,request:IdentityRequest)->moss_voice_providers::BoxFuture<'a,Option<PersonScope>>{
             Box::pin(async move {
-                let calibration=self.calibration.as_ref()?;let (threshold,margin)=(calibration.threshold,calibration.margin);
+                let calibration=self.calibration.lock().ok()?.clone()?;
+                let (threshold,margin,directory)=(calibration.report.threshold,calibration.report.margin,calibration.directory);
                 // Keep the physical worker slot until a cancelled blocking
                 // helper operation actually finishes; no unbounded queue.
                 let worker=self.workers.clone().try_acquire_owned().ok()?;
@@ -218,6 +265,8 @@ mod imp {
                     let helper=backend.helper.lock().ok()?.clone()?;
                     let embedding=helper.embedding_blocking(&pcm,16000,request.utterance_generation).ok()?;
                     let templates=backend.db.lock().ok()?.native_voice_speaker_templates().ok()?.into_iter().map(|t|SpeakerTemplate{id:t.id,revision:t.revision,embedding:t.embedding}).collect::<Vec<_>>();
+                    // 登记名单在标定后变过：阈值不再可信，不识别
+                    if speaker_directory(templates.iter().map(|t|(t.id.as_str(),t.revision)))!=directory{return None;}
                     match_embedding(&embedding,&templates,request.directory_generation,threshold,margin)
                 }).await.ok().flatten()
             })
@@ -472,6 +521,8 @@ mod imp {
         models: ModelManager,
         /// 运行中的本地模型辅助程序（随内置服务启停）
         helper: Mutex<Option<LocalHelper>>,
+        /// NV19 长期记忆、资料与恢复摘要；检索与提取默认关闭
+        context: Arc<crate::voice_context::host::ContextHost>,
     }
 
     /// 本次启动用到的本地模型。
@@ -500,7 +551,7 @@ mod imp {
         BuiltinState(host.map(|host| {
             let setting_path=host.runtime_root.path.join("settings.json");
             if let Err(error)=laser_host::voice_agent::AgentCoordinator::attach(
-                &host.api_service,host.db.clone(),setting_path,vec![host.runtime_root.path.clone()]
+                &host.api_service,host.db.clone(),setting_path.clone(),vec![host.runtime_root.path.clone()]
             ) {
                 eprintln!("[moss-desktop] AgentRun 只读工具不可用：{error}");
             }
@@ -509,13 +560,15 @@ mod imp {
             let enabled = moss_voice::settings::load(&host.runtime_root.path.join("settings.json")).builtin_memory_enabled;
             let _ = memory.configure(enabled, || Ok(()));
             let home_control=laser_host::home_control::HomeControlCoordinator::attach(&host);
-            let speaker_backend=Arc::new(DesktopSpeakerBackend{db:host.db.clone(),helper:Mutex::new(None),personal:Mutex::new(None)});
+            let speaker_backend=Arc::new(DesktopSpeakerBackend{db:host.db.clone(),helper:Mutex::new(None),personal:Mutex::new(None),tests:Mutex::new(Default::default())});
             let speaker=moss_voice_server::speaker_enrollment::SpeakerEnrollment::new(speaker_backend.clone());
-            let identity=Arc::new(DesktopIdentity{host:Arc::downgrade(&host),backend:speaker_backend.clone(),calibration:None,workers:Arc::new(tokio::sync::Semaphore::new(2))});
+            let saved_calibration=host.db.lock().ok().and_then(|db|db.get_secret(SPEAKER_CALIBRATION_KEY).ok().flatten()).and_then(|text|serde_json::from_str::<Calibration>(&text).ok());
+            let identity=Arc::new(DesktopIdentity{host:Arc::downgrade(&host),backend:speaker_backend.clone(),calibration:Mutex::new(saved_calibration),workers:Arc::new(tokio::sync::Semaphore::new(2))});
             let personal=PersonContext::new(identity.clone(),Arc::new(DbPersonStore{db:host.db.clone()}));
             if let Ok(mut slot)=speaker_backend.personal.lock(){*slot=Some(Arc::downgrade(&personal));}
             if let Ok(db)=host.db.lock(){if db.recover_firmware_downloads(now()).is_err(){eprintln!("[moss-desktop] 固件下载记录恢复失败，固件传输仍禁用");}}
-            Arc::new(BuiltinVoice { host, memory, speaker,speaker_backend,personal,identity,home_control, server: Mutex::new(None), last_error: Mutex::new(None), models, helper: Mutex::new(None) })
+            let context = crate::voice_context::host::ContextHost::new(host.db.clone(), setting_path.clone());
+            Arc::new(BuiltinVoice { host, memory, speaker,speaker_backend,personal,identity,home_control, server: Mutex::new(None), last_error: Mutex::new(None), models, helper: Mutex::new(None), context })
         }))
     }
 
@@ -677,7 +730,10 @@ mod imp {
                 original:combined, home:Arc::new(DesktopHomeHost{host:self.host.clone(),control:self.home_control.clone()})
             });
             let mut conversation = Conversation::new(asr, Arc::new(llm), tts, tools, ConversationSettings { read_only_shortcuts: experience.read_only_shortcuts, model_labels: labels, ..Default::default() }).with_memory(self.memory.clone()).with_speaker_enrollment(self.speaker.clone());
-            if self.identity.calibration.is_some() && self.settings().builtin_person_memory_enabled {
+            // NV19: both hooks stay inert until the user switches them on in the private window.
+            let (retrieval, extraction) = self.context.hooks();
+            conversation = conversation.with_context_retrieval(retrieval).with_context_extraction(extraction);
+            if self.identity.valid_calibration().is_some() && self.settings().builtin_person_memory_enabled {
                 self.prepare_speaker_helper()?;
                 conversation=conversation.with_personal_context(self.personal.clone());
             }
@@ -948,10 +1004,28 @@ mod imp {
                 _ => return Err(CenterError::new("voice_device_invalid", 400, "设备状态只能是 allowed 或 revoked")),
             };
             let found = self.personal.device_changed(device_id,||self.memory.device_changed(device_id, || self.host.api_service.set_voice_device_status(device_id, status, now()))).map_err(internal)?;
+            self.context.device_changed(device_id);
             if !found {
                 return Err(CenterError::new("voice_device_not_found", 404, "找不到该设备"));
             }
             Ok(self.status())
+        }
+
+        /// NV19 private-window management (`voice_context_manage`).
+        pub fn context_manage(&self, input: &Value) -> Result<Value, CenterError> {
+            self.context.manage(input, || self.chat_llm())
+        }
+
+        pub fn context_add_folder(&self, path: &std::path::Path) -> Result<Value, CenterError> {
+            self.context.add_folder(path)
+        }
+
+        /// The configured cloud LLM for NV19 deep search; `None` when not configured.
+        fn chat_llm(&self) -> Option<Arc<dyn moss_voice_providers::Llm>> {
+            let settings = self.settings();
+            let llm = settings.builtin_models.llm.as_ref()?;
+            let key = self.secret(Section::Llm).ok()?.unwrap_or_default();
+            OpenAiLlm::new(&llm.url, &key, &llm.model).ok().map(|llm| Arc::new(llm) as Arc<dyn moss_voice_providers::Llm>)
         }
 
         /// NV13 desktop-only inert configuration. Live execution remains locked
@@ -1578,7 +1652,7 @@ mod imp {
             let invalid=||CenterError::new("speaker_invalid",400,"声纹操作格式无效");
             let object=input.as_object().ok_or_else(invalid)?;
             let action=input["action"].as_str().ok_or_else(invalid)?;
-            let allowed:&[&str]=match action {"status"|"cancel"=>&["action"],"begin"=>&["action","device_id","session_id","name","confirmed"],"delete"=>&["action","id","revision","confirmed"],"save_memory"=>&["action","id","revision","summary"],"personal_mode"=>&["action","enabled","confirmed"],_=>return Err(invalid())};
+            let allowed:&[&str]=match action {"status"|"cancel"=>&["action"],"begin"=>&["action","device_id","session_id","name","confirmed"],"delete"=>&["action","id","revision","confirmed"],"save_memory"=>&["action","id","revision","summary"],"personal_mode"=>&["action","enabled","confirmed"],"begin_test"=>&["action","device_id","session_id","id","confirmed"],"calibrate"|"reset_calibration"=>&["action","confirmed"],_=>return Err(invalid())};
             if object.len()!=allowed.len() || object.keys().any(|k|!allowed.contains(&k.as_str())){return Err(invalid());}
             match action {
                 "begin"=>{
@@ -1596,6 +1670,47 @@ mod imp {
                     self.speaker.begin(device,session,name,permit,true).map_err(|code|CenterError::new(code,409,"登记无法启动，请检查会话、名称或正在进行的登记"))?;
                 },
                 "cancel"=>{self.speaker.cancel().map_err(|_|internal("取消声纹登记失败"))?;},
+                // 简易标定（2026-10-14）：已登记的人各录三段测试音 → 计算阈值并自检 → 通过才开放识别
+                "begin_test"=>{
+                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
+                    let device=input["device_id"].as_str().ok_or_else(invalid)?;
+                    let session=input["session_id"].as_str().ok_or_else(invalid)?;
+                    let id=input["id"].as_str().ok_or_else(invalid)?;
+                    let known=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.list_voice_speakers().map_err(|_|internal("读取声纹失败"))?.iter().any(|r|r.id==id);
+                    if !known{return Err(CenterError::new("speaker_conflict",409,"这个人的声纹已不存在，请刷新"));}
+                    let chat=self.server.lock().map_err(|_|internal("语音服务锁失败"))?.as_ref().is_some_and(|s|{
+                        let status=s.status();status.mode==ServerMode::Chat && status.sessions.iter().any(|r|r.device_id==device&&r.session_id==session)
+                    });
+                    if !chat{return Err(CenterError::new("speaker_session_required",409,"请选择已连接的对话模式设备"));}
+                    let context=laser_contracts::CallerContext::Voice{device_id:device.into(),session_id:session.into()};
+                    let permit=self.host.api_service.external_voice_permit(&context).map_err(|_|CenterError::new("speaker_revoked",403,"当前设备会话已撤销"))?;
+                    self.prepare_speaker_helper()?;
+                    self.speaker.begin_test(device,session,id,permit,true).map_err(|code|CenterError::new(code,409,"测试音采集无法启动，请检查会话或正在进行的登记"))?;
+                },
+                "calibrate"=>{
+                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
+                    let templates=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.native_voice_speaker_templates().map_err(|_|internal("读取声纹失败"))?
+                        .into_iter().map(|t|SpeakerTemplate{id:t.id,revision:t.revision,embedding:t.embedding}).collect::<Vec<_>>();
+                    let samples=self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.iter()
+                        .flat_map(|(id,clips)|clips.iter().map(|clip|CalibrationSample{speaker_id:id.clone(),embedding:clip.clone()}))
+                        .collect::<Vec<_>>();
+                    let report=moss_voice_server::person_context::calibrate(&templates,&samples).map_err(|reason|CenterError::new("speaker_calibration_failed",409,reason))?;
+                    let calibration=Calibration{report,directory:speaker_directory(templates.iter().map(|t|(t.id.as_str(),t.revision))),calibrated_at:now()};
+                    let text=serde_json::to_string(&calibration).map_err(|_|internal("标定结果序列化失败"))?;
+                    self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.set_secret(SPEAKER_CALIBRATION_KEY,&text,now()).map_err(|_|internal("保存标定结果失败"))?;
+                    *self.identity.calibration.lock().map_err(|_|internal("标定状态锁失败"))?=Some(calibration);
+                    self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.clear();
+                    self.personal.directory_changed();
+                    if self.settings().builtin_person_memory_enabled{self.restart_if_running()?;}
+                },
+                "reset_calibration"=>{
+                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
+                    self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.delete_secret(SPEAKER_CALIBRATION_KEY).map_err(|_|internal("清除标定结果失败"))?;
+                    *self.identity.calibration.lock().map_err(|_|internal("标定状态锁失败"))?=None;
+                    self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.clear();
+                    self.personal.directory_changed();
+                    if self.settings().builtin_person_memory_enabled{self.restart_if_running()?;}
+                },
                 "delete"=>{
                     if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
                     let id=input["id"].as_str().ok_or_else(invalid)?;let revision=input["revision"].as_i64().ok_or_else(invalid)?;
@@ -1603,6 +1718,7 @@ mod imp {
                     if !self.personal.person_deleted(id,||self.host.db.lock().map_err(|_|"数据库锁失败".to_owned())?.delete_voice_speaker_if_revision(id,revision).map_err(db_error)).map_err(internal)? {
                         return Err(CenterError::new("speaker_conflict",409,"声纹记录已变化，请刷新"));
                     }
+                    if let Ok(mut tests)=self.speaker_backend.tests.lock(){tests.remove(id);}
                 },
                 "save_memory"=>{
                     let id=input["id"].as_str().ok_or_else(invalid)?;let revision=input["revision"].as_i64().ok_or_else(invalid)?;
@@ -1614,8 +1730,8 @@ mod imp {
                 "personal_mode"=>{
                     let enabled=input["enabled"].as_bool().ok_or_else(invalid)?;
                     input["confirmed"].as_bool().ok_or_else(invalid)?;
-                    if enabled && (input["confirmed"].as_bool()!=Some(true)||self.identity.calibration.is_none()) {
-                        return Err(CenterError::new("speaker_calibration_required",409,"真人阈值未标定，不开放个人识别与记忆模式"));
+                    if enabled && (input["confirmed"].as_bool()!=Some(true)||self.identity.valid_calibration().is_none()) {
+                        return Err(CenterError::new("speaker_calibration_required",409,"请先完成声纹简易标定（登记名单变化后需重新标定）"));
                     }
                     if enabled{self.prepare_speaker_helper()?;}
                     self.personal.directory_changed();
@@ -1629,7 +1745,14 @@ mod imp {
                 rows.into_iter().map(|row|{let (summary,revision)=db.voice_person_summary(&row.id).map_err(|_|internal("读取个人记忆失败"))?.unwrap_or((String::new(),0));
                     let mut value=serde_json::to_value(row).map_err(|_|internal("声纹元数据序列化失败"))?;value["memory_summary"]=Value::String(summary);value["memory_revision"]=Value::from(revision);Ok(value)}).collect::<Result<Vec<_>,CenterError>>()?};
             let sessions=self.server.lock().map_err(|_|internal("语音服务锁失败"))?.as_ref().map(|s|s.status().sessions).unwrap_or_default().into_iter().map(|r|serde_json::json!({"device_id":r.device_id,"session_id":r.session_id})).collect::<Vec<_>>();
-            Ok(serde_json::json!({"enrollment":self.speaker.status(),"speakers":rows,"sessions":sessions,"recognition_enabled":self.identity.calibration.is_some(),"personal_memory_enabled":self.identity.calibration.is_some()&&self.settings().builtin_person_memory_enabled,"calibration":"unverified"}))
+            let valid=self.identity.valid_calibration();
+            let calibration=match (&valid,self.identity.calibration.lock().ok().and_then(|c|c.clone())) {
+                (Some(c),_)=>serde_json::json!({"state":"valid","report":c.report,"calibrated_at":c.calibrated_at}),
+                (None,Some(c))=>serde_json::json!({"state":"stale","report":c.report,"calibrated_at":c.calibrated_at}),
+                (None,None)=>serde_json::json!({"state":"none"}),
+            };
+            let test_clips=self.speaker_backend.tests.lock().map(|tests|tests.iter().map(|(id,clips)|(id.clone(),Value::from(clips.len()))).collect::<serde_json::Map<_,_>>()).unwrap_or_default();
+            Ok(serde_json::json!({"enrollment":self.speaker.status(),"speakers":rows,"sessions":sessions,"recognition_enabled":valid.is_some(),"personal_memory_enabled":valid.is_some()&&self.settings().builtin_person_memory_enabled,"calibration":calibration,"test_clips":test_clips}))
         }
 
         pub fn rename_device(&self, device_id: &str, name: &str) -> Result<Value, CenterError> {

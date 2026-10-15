@@ -327,6 +327,19 @@ pub struct BuiltinVision {
     pub model: String,
 }
 
+/// NV19: long-term context. Retrieval and extraction are separately opt-in and off for every
+/// existing and new installation. The current project is chosen in the private window; its
+/// generation changes on every switch so in-flight work for the old project is discarded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuiltinContext {
+    pub retrieval: bool,
+    pub extraction: bool,
+    pub project_id: String,
+    pub project_name: String,
+    pub project_generation: u64,
+}
+
 /// NV14: local music stays disabled for all existing installations.
 /// The directory is an explicitly selected local path; never probe user home.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,6 +506,9 @@ pub struct VoiceSettings {
     /// Private opt-in only; calibration is a separate fail-closed prerequisite.
     #[serde(default)]
     pub builtin_person_memory_enabled:bool,
+    /// NV19: long-term context switches and current project, all off by default.
+    #[serde(default)]
+    pub builtin_context: BuiltinContext,
     /// 内置语音服务的本地模型开关（NV6）
     #[serde(default, skip_serializing_if = "BuiltinLocal::is_default")]
     pub builtin_local: BuiltinLocal,
@@ -520,6 +536,7 @@ impl Default for VoiceSettings {
             builtin_vision: BuiltinVision::default(),
             builtin_memory_enabled: false,
             builtin_person_memory_enabled:false,
+            builtin_context: BuiltinContext::default(),
             builtin_local: BuiltinLocal::default(),
         }
     }
@@ -1116,6 +1133,7 @@ mod tests {
         assert_eq!(load(&file).builtin_local, BuiltinLocal::default());
         assert!(!load(&file).builtin_memory_enabled, "旧配置不能自动开启会话记忆");
         assert!(!load(&file).builtin_person_memory_enabled, "旧配置不能自动开启按人记忆");
+        assert_eq!(load(&file).builtin_context, BuiltinContext::default(), "旧配置不能自动开启长期记忆检索或提取");
         assert!(!load(&file).builtin_home.enabled);
         assert!(load(&file).builtin_home.entities.is_empty());
         assert!(!load(&file).builtin_music.enabled);
@@ -1172,6 +1190,7 @@ mod tests {
             builtin_vision: BuiltinVision::default(),
             builtin_memory_enabled: false,
             builtin_person_memory_enabled:false,
+            builtin_context: BuiltinContext::default(),
             builtin_local: BuiltinLocal { asr: true, mirror: Some("https://mirror.test/x".into()), ..BuiltinLocal::default() },
         };
         save(&file, &voice).unwrap();

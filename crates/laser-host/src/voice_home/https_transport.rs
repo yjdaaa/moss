@@ -134,11 +134,7 @@ fn read_limited(response: reqwest::blocking::Response) -> Result<Vec<u8>, ()> {
 }
 impl HomeControlTransport for HttpsHomeTransport {
     fn submit_once(&mut self, path: &str, body: &serde_json::Value) -> Result<(), ()> {
-        // Fail-closed even if another caller bypasses the coordinator.
-        #[cfg(not(test))]
-        return Err(());
-        #[cfg(test)]
-        {
+        // 只由 HomeControlCoordinator 在桌面批准后调用（2026-10-14 起生产启用）；路径仍按白名单独立校验。
         let url = self.url(path, true)?;
         if body.as_object().is_none() || body.to_string().len() > 4096 {
             return Err(());
@@ -157,7 +153,6 @@ impl HomeControlTransport for HttpsHomeTransport {
             return Err(());
         }
         Ok(())
-    }
     }
     fn read_target_state(&mut self, entity: &str, budget: Duration) -> Result<String, ()> {
         if budget.is_zero() || budget > Duration::from_millis(900) {

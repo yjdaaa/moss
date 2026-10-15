@@ -1,67 +1,93 @@
 import React, { useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
+import { formDirty, savedNoteText } from "../voiceState.js";
+import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
 
 const EMPTY = { enabled: false, workspace: "", codex_executable: "", claude_executable: "" };
+const PATH_KEYS = ["workspace", "codex_executable", "claude_executable"];
 
 export default function VoiceAgentCard() {
+  const [saved, setSaved] = useState(EMPTY);
   const [config, setConfig] = useState(EMPTY);
   const [info, setInfo] = useState({ enabled: false, sandbox_verified: false, runs: [] });
+  const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const load = async () => {
-    const data = await voiceApi.agentStatus();
-    setConfig({ ...EMPTY, ...(data.settings || {}), enabled: false });
+  const [loadError, setLoadError] = useState("");
+  const [result, setResult] = useState(null);
+  const dirty = loaded && formDirty(saved, config, PATH_KEYS);
+
+  const apply = (data) => {
+    const next = { ...EMPTY, ...(data.settings || {}), enabled: false };
+    setSaved(next);
+    setConfig(next);
     setInfo(data);
+    setLoaded(true);
   };
   useEffect(() => {
     let active = true;
-    voiceApi.agentStatus().then((data) => {
-      if (!active) return;
-      setConfig({ ...EMPTY, ...(data.settings || {}), enabled: false });
-      setInfo(data);
-    }).catch((e) => { if (active) setError(e.message || "读取 Agent 配置失败"); });
+    voiceApi.agentStatus().then((data) => { if (active) apply(data); }).catch((e) => { if (active) setLoadError(e.message || "读取 Agent 配置失败"); });
     return () => { active = false; };
   }, []);
-  const change = (name, value) => setConfig((value0) => ({ ...value0, [name]: value }));
-  const save = async () => {
-    setBusy(true); setError(""); setMessage("");
-    try {
-      await voiceApi.agentSave({ ...config, enabled: false });
-      await load();
-      setMessage("已保存路径。真实 CLI 沙箱验收未完成，执行开关仍保持关闭。");
-    } catch (e) { setError(e.message || "保存失败"); }
-    finally { setBusy(false); }
+  const change = (name, value) => {
+    setConfig((current) => ({ ...current, [name]: value }));
+    setResult(null);
   };
-  return <section className="voice-card" aria-label="只读编程代理">
-    <h3>Claude Code / Codex（NV13）</h3>
-    <p><strong>CLI 执行已锁定。</strong> 当前只允许查看与保存路径，不启动 Claude Code、Codex 或其他子进程。只读沙箱、命令与 MCP 禁止、进程树终止必须完成真实权限负向验收后才能开放。</p>
-    <p role="status">沙箱安全状态：{info.sandbox_verified ? "已标记验收（仍需核对审批）" : "未验证，禁止执行"}</p>
-    {[
-      ["workspace", "专用工作目录（不应包含 MOSS 数据或账号密钥）", "C:\\agent-workspace"],
-      ["codex_executable", "Codex 可执行文件（codex.exe）", "codex.exe 的完整路径"],
-      ["claude_executable", "Claude Code 可执行文件（claude.exe）", "claude.exe 的完整路径"],
-    ].map(([name, label, hint]) =>
-      <label className="voice-form-group" key={name}>
-        <span>{label}</span>
-        <input value={config[name] || ""} placeholder={hint} disabled={busy}
-          onChange={(e) => change(name, e.target.value)} />
-      </label>
-    )}
-    {error && <p role="alert">{error}</p>}
-    {message && <p role="status">{message}</p>}
-    <button type="button" onClick={save} disabled={busy}>{busy ? "保存中…" : "保存路径（不启用执行）"}</button>
-    <h4>最近任务记录（最多 50 条）</h4>
-    {(info.runs || []).length === 0
-      ? <p>暂无 Agent 执行记录。</p>
-      : <div className="voice-form-group">
-        {(info.runs || []).slice(0, 50).map((item) =>
-          <article key={item.id}>
-            <strong>{item.provider === "codex" ? "Codex" : "Claude Code"}</strong>
-            <span> · {item.status} · {item.workspace_name || "未知工作区"}</span>
-            <p>{item.output ? String(item.output).slice(0, 200) : item.error_code || "无结果摘要"}</p>
-          </article>)}
-      </div>}
-    <p>任务需授权设备和桌面单次审批；权限、工作目录或配置改变后，原批准不得执行。实际运行可能使用你的 CLI 账户并产生费用。</p>
-  </section>;
+  const save = async () => {
+    setBusy(true);
+    const submitted = { ...config, enabled: false };
+    try {
+      await voiceApi.agentSave(submitted);
+    } catch (e) {
+      setResult({ ok: false, text: `保存失败：${e.message || "保存失败"}` });
+      setBusy(false);
+      return;
+    }
+    let effect = "执行仍保持锁定";
+    try {
+      apply(await voiceApi.agentStatus());
+    } catch (e) {
+      // 已经保存成功，只是读回状态失败：按提交的内容记为已保存，不能报“保存失败”
+      setSaved(submitted);
+      setConfig(submitted);
+      effect += ` · 读取最新状态失败：${e.message || "未知错误"}`;
+    }
+    setResult({ ok: true, text: savedNoteText("路径", effect) });
+    setBusy(false);
+  };
+  const runs = Array.isArray(info.runs) ? info.runs.slice(0, 50) : [];
+  return (
+    <VoiceGroup id="agent" title="Claude Code / Codex" label="只读编程代理" summary="执行已锁定" dirty={dirty}>
+      <div className="voice-hint voice-hint--warn">
+        执行已锁定：只能保存路径，不会启动 Claude Code、Codex 或其他程序。沙箱安全状态：{info.sandbox_verified ? "已标记验收（仍需审批）" : "未验证，禁止执行"}。
+      </div>
+      {loadError && <div className="voice-hint voice-hint--bad" role="alert">{loadError}</div>}
+      <div className="voice-form-grid">
+        {[
+          ["workspace", "专用工作目录（不要包含 MOSS 数据或账号密钥）", "C:\\agent-workspace"],
+          ["codex_executable", "Codex 可执行文件（codex.exe）", "codex.exe 的完整路径"],
+          ["claude_executable", "Claude Code 可执行文件（claude.exe）", "claude.exe 的完整路径"],
+        ].map(([name, label, hint]) => (
+          <label className="voice-wide" key={name}>
+            <span>{label}</span>
+            <input className="text-input mono" value={config[name] || ""} placeholder={hint} disabled={busy} onChange={(e) => change(name, e.target.value)} />
+          </label>
+        ))}
+      </div>
+      <SaveBar id="voice-agent-save" target="路径" dirty={dirty} busy={busy} saving={busy} result={result} onSave={save} />
+      <details>
+        <summary>最近任务记录（{runs.length} 条）</summary>
+        {runs.length === 0 ? (
+          <p className="voice-muted">暂无执行记录。</p>
+        ) : (
+          runs.map((item) => (
+            <article key={item.id} className="voice-agent-run">
+              <strong>{item.provider === "codex" ? "Codex" : "Claude Code"}</strong>
+              <span> · {item.status} · {item.workspace_name || "未知工作区"}</span>
+              <p className="voice-muted">{item.output ? String(item.output).slice(0, 200) : item.error_code || "无结果摘要"}</p>
+            </article>
+          ))
+        )}
+      </details>
+    </VoiceGroup>
+  );
 }

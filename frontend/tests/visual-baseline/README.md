@@ -12,8 +12,17 @@
 | `approval-card.png` | 全局审批卡（未勾选现场确认，“批准并开始”不可点） | 1440 × 900 |
 | `approval-mismatch.png` | 审批卡显示 `approval_mismatch` 原因，按钮收起为“关闭” | 1440 × 900 |
 | `approval-sending.png` | 批准后的发送覆盖层（四步 + 取消后续发送 + 急停 0x18） | 1440 × 900 |
+| `voice-official.png` | 语音中心 · 官方链路 · 服务与设备（其他链路折叠） | 1440 × 1000 |
+| `voice-mode-confirm.png` | 切换到自建链路前的确认框 | 1440 × 1000 |
+| `voice-self-hosted.png` | 自建链路 · 服务端运行中（停止 / 重启） | 1440 × 1000 |
+| `voice-crashed.png` | 自建服务端意外退出（退出码、不自动重启） | 1440 × 1000 |
+| `voice-builtin.png` | 内置链路 · 模型标签：本地模型“未保存”、语音体验保存结果 | 1440 × 1000 |
+| `voice-narrow.png` | 窄屏 · 连接标签（各组摘要、官方接入点保存结果） | 820 × 1000 |
+| `voice-close-exit.png` | 关闭窗口时“同时停止语音服务端”（2026-10-07，未随 UI-3 更新） | 1440 × 900 |
 
 ## 生成方式与局限
+
+- 语音中心 `voice-*.png`（除 `voice-close-exit.png`）于 2026-10-14 随 UI-3 重新生成：`cd frontend; node tests/voice-center.browser.mjs --baseline`（Vite 回环 + 有状态假 Tauri 桥，Edge 无头渲染）。
 
 - 截图于 2026-10-06 生成：用 esbuild 打包 `frontend/src`，在 Chromium（SwiftShader WebGL）中渲染。
 - 后端接口使用**预览桩数据**（固定的材料列表、端口 9666、小智“已配置未连接”），不是真实设备状态。

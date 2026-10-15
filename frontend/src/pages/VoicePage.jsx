@@ -1,53 +1,65 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Radio,
-  Server,
-  Cable,
-  Smartphone,
-  ShieldCheck,
-  Play,
-  Square,
-  RotateCcw,
-  FlaskConical,
-  Save,
-  RefreshCw,
-  ScrollText,
-  ListChecks,
-  FolderCog,
-} from "lucide-react";
+import { Radio, Play, Square, RotateCcw, FlaskConical, RefreshCw, ChevronDown } from "lucide-react";
 import { getJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
+import { readFoldOpen, writeFoldOpen } from "../foldState.js";
 import { voiceApi } from "../voiceApi.js";
-import { VoiceBuiltinCard } from "../components/VoiceBuiltinCard.jsx";
+import {
+  BuiltinEvents,
+  BuiltinModelGroups,
+  BuiltinServicePanel,
+  ExperienceGroup,
+  LocalModelsGroup,
+  PrivateSettingsEntry,
+  TurnTimings,
+  useBuiltinStatus,
+} from "../components/VoiceBuiltinCard.jsx";
+import VoiceMusicCard from "../components/VoiceMusicCard.jsx";
+import VoiceAgentCard from "../components/VoiceAgentCard.jsx";
+import VoiceVisionCard from "../components/VoiceVisionCard.jsx";
 import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
 import { VoiceEndpointsCard } from "../components/VoiceEndpointsCard.jsx";
+import { SaveBar, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel } from "../components/VoiceLayout.jsx";
 import {
   SECTIONS,
+  SETTINGS_GROUPS,
+  VOICE_MODE_LABEL,
   VOICE_POLL_MS,
+  VOICE_TABS,
   approvalHistoryStatus,
   canSaveSection,
   deviceView,
+  dirtyTabs,
   emptyForm,
+  externalModelSummary,
   finalUrl,
+  formDirty,
   isSectionBlank,
   maskLogLine,
   modeConfirmText,
+  savedNoteText,
   sectionFingerprint,
   sectionInputError,
   sectionPayload,
   serverStateView,
+  settingsGroupDirty,
+  settingsGroupPayload,
+  settingsSaveEffect,
   voiceErrorText,
 } from "../voiceState.js";
 
-// 语音中心（技术书 §9.4 / §9.5.1，实施清单 P4-08）。只在 MOSS 桌面端显示（A-69）。
+// 语音中心（技术书 §9.5.1，实施清单 P4-08；r15 起按标签与链路分组，UI-3）。只在 MOSS 桌面端显示（A-69）。
 // 所有操作经 Tauri 命令执行；模型密钥只在本页内存中，提交后清空，不回显已保存的密钥（A-67）。
+// 顶部选链路，下面五个标签；每个标签里当前链路用得到的分组在前，其他链路的分组折叠在后。
+// 标签和分组都只隐藏、不卸载，切换标签、收起分组或切换链路都不会丢失未保存的填写。
 
 const TONE_CLASS = { ok: "ob-pill--ok", info: "ob-pill--info", warn: "ob-pill--warn", bad: "ob-pill--bad", off: "ob-pill--off" };
+const TAB_KEY = "moss_voice_tab";
 
-function Pill({ tone = "off", children, id }) {
+function Pill({ tone = "off", children, id, title }) {
   return (
-    <span className={`ob-pill ${TONE_CLASS[tone] || TONE_CLASS.off}`} id={id}>
+    <span className={`ob-pill ${TONE_CLASS[tone] || TONE_CLASS.off}`} id={id} title={title}>
       {children}
     </span>
   );
@@ -57,6 +69,24 @@ function formatTime(seconds) {
   if (!seconds) return "—";
   const date = new Date(seconds * 1000);
   return date.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function readTab() {
+  try {
+    const value = globalThis.localStorage?.getItem(TAB_KEY);
+    if (VOICE_TABS.some((item) => item.key === value)) return value;
+  } catch (_error) {
+    // 存储不可用时打开第一个标签
+  }
+  return VOICE_TABS[0].key;
+}
+
+function writeTab(value) {
+  try {
+    globalThis.localStorage?.setItem(TAB_KEY, value);
+  } catch (_error) {
+    // 只影响下次打开时的默认标签
+  }
 }
 
 function settingsForm(status) {
@@ -75,18 +105,253 @@ function settingsForm(status) {
   };
 }
 
+/**
+ * 按链路摆放的一组内容：当前链路用得到的在前；其他链路的排在后面，默认折叠。
+ * 所有部分始终在同一父元素下按固定顺序渲染（只用 CSS order 调整位置），切换链路不会重建组件、不丢填写。
+ */
+function ModeSplit({ id, mode, parts, title = "其他链路的设置（当前链路用不到）" }) {
+  const [open, setOpen] = useState(() => readFoldOpen(`voice-other-${id}`, false));
+  const hasOther = parts.some((part) => !part.modes.includes(mode));
+  const toggle = () => {
+    setOpen((current) => {
+      writeFoldOpen(`voice-other-${id}`, !current);
+      return !current;
+    });
+  };
+  return (
+    <div className="voice-modesplit" id={`voice-split-${id}`}>
+      {parts.map((part) => {
+        const current = part.modes.includes(mode);
+        return (
+          <div key={part.key} className={current ? "voice-part" : "voice-part voice-part--other"} hidden={!current && !open} data-part={part.key}>
+            {part.node}
+          </div>
+        );
+      })}
+      {hasOther && (
+        <button type="button" className="voice-other-toggle" onClick={toggle} aria-expanded={open} id={`voice-other-${id}`}>
+          <ChevronDown size={15} className="voice-group-chevron" aria-hidden="true" />
+          {title}
+          <span className="voice-muted">{open ? "点击收起" : "点击展开"}</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+const FIELD = {
+  official_mcp_endpoint: { label: "官方接入点（小智控制台生成的 wss:// 地址）", wide: true, mono: true, secret: true, placeholder: "wss://…/mcp/?token=…", id: "voice-official-endpoint" },
+  server_dir: { label: "xiaozhi-server 目录（main/xiaozhi-server）", wide: true, mono: true, id: "voice-server-dir" },
+  python: { label: "Python 3.10 解释器路径", mono: true, id: "voice-python" },
+  args: { label: "启动参数", mono: true },
+  server_port: { label: "服务端端口（识别外部实例）", numeric: true },
+  self_hosted_mcp_endpoint: { label: "自建接入点（ws://…/mcp_endpoint/mcp/?token=…）", wide: true, mono: true, secret: true, placeholder: "ws://<接入点地址>:8004/mcp_endpoint/mcp/?token=…", id: "voice-self-endpoint" },
+  endpoint_health_url: { label: "接入点健康检查地址（用来判断设备在线，可不填）", wide: true, mono: true, secret: true, placeholder: "http://<接入点地址>:8004/mcp_endpoint/health?key=…" },
+  builtin_ws_port: { label: "设备连接端口（默认 8000）", numeric: true, id: "voice-builtin-ws-port" },
+  builtin_http_port: { label: "OTA 端口（默认 8003）", numeric: true, id: "voice-builtin-http-port" },
+};
+
+/** 链路与服务端设置的一个分组：只提交本组字段，按钮写明保存对象。 */
+function SettingsGroup({ group, mode, status, form, baseline, onChange, onSaved, busy, setBusy }) {
+  const spec = SETTINGS_GROUPS[group];
+  const settings = status.settings || {};
+  const [result, setResult] = useState(null);
+  const dirty = settingsGroupDirty(group, form, baseline);
+  const label = `saving-${group}`;
+
+  const summary = {
+    official: settings.official_mcp_endpoint ? `已设置 · ${settings.official_mcp_endpoint}` : "未设置",
+    selfHostedServer: settings.server_dir ? settings.server_dir : "未设置目录",
+    selfHostedEndpoint: settings.self_hosted_mcp_endpoint ? `已设置 · ${settings.self_hosted_mcp_endpoint}` : "未设置",
+    builtinPorts: `设备连接 ${settings.builtin_ws_port || 8000} · OTA ${settings.builtin_http_port || 8003}`,
+  }[group];
+
+  const save = async () => {
+    setBusy(label);
+    try {
+      const next = await voiceApi.saveSettings(settingsGroupPayload(group, form));
+      onSaved(group, next);
+      setResult({ ok: true, text: savedNoteText(spec.title, settingsSaveEffect(group, mode, Boolean(next?.reconnected))) });
+    } catch (error) {
+      setResult({ ok: false, text: `保存失败：${voiceErrorText(error)}` });
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <VoiceGroup id={`settings-${group}`} title={spec.title} summary={summary} dirty={dirty}>
+      <div className="voice-form-grid">
+        {spec.keys.map((key) => {
+          const field = FIELD[key];
+          const current = settings[key];
+          return (
+            <label key={key} className={field.wide ? "voice-wide" : undefined}>
+              <span>
+                {field.label}
+                {field.secret && current ? `；当前：${current}` : ""}
+              </span>
+              <input
+                className={`text-input${field.mono ? " mono" : ""}`}
+                inputMode={field.numeric ? "numeric" : undefined}
+                value={form[key]}
+                onChange={(e) => {
+                  onChange(key, e.target.value);
+                  setResult(null);
+                }}
+                placeholder={field.secret ? (settings[`${key}_set`] ? "留空表示不改" : field.placeholder) : undefined}
+                spellCheck="false"
+                autoComplete="off"
+                id={field.id}
+              />
+            </label>
+          );
+        })}
+      </div>
+      <SaveBar id={`voice-settings-save-${group}`} target={spec.title} dirty={dirty} busy={Boolean(busy)} saving={busy === label} result={result} onSave={save} />
+    </VoiceGroup>
+  );
+}
+
+/** 外部 xiaozhi-server 的一项模型：先测试、后保存，写入服务端 data/.config.yaml。 */
+function ExternalModelGroup({ section, status, fullModule, busy, setBusy, refresh, run }) {
+  const current = SECTIONS.find((item) => item.key === section);
+  const [baseline, setBaseline] = useState(() => emptyForm(section));
+  const [form, setForm] = useState(() => emptyForm(section));
+  const [test, setTest] = useState(null);
+  const [result, setResult] = useState(null);
+  const dirty = formDirty(baseline, form);
+  const saveEnabled = canSaveSection(section, form, test);
+  const preview = finalUrl(section, form.url);
+  const saved = status.models?.[section];
+  const n = (suffix) => `voice-model-${suffix}-${section}`;
+
+  const update = (key, value) => {
+    setForm((all) => ({ ...all, [key]: value }));
+    setResult(null);
+  };
+
+  const runTest = async () => {
+    const inputError = sectionInputError(section, form);
+    if (inputError) {
+      setTest({ ok: false, detail: inputError, fingerprint: "" });
+      return;
+    }
+    const fingerprint = sectionFingerprint(section, form);
+    setBusy(`test-${section}`);
+    try {
+      const outcome = await voiceApi.modelsTest(section, sectionPayload(section, form));
+      setTest({ ...outcome, fingerprint });
+    } catch (error) {
+      setTest({ ok: false, detail: voiceErrorText(error), fingerprint: "" });
+    } finally {
+      setBusy("");
+      refresh();
+    }
+  };
+
+  const save = async () => {
+    setBusy(`save-${section}`);
+    try {
+      const outcome = await voiceApi.modelsSave({ [section]: sectionPayload(section, form) });
+      // 密钥只在提交时使用：保存后清空输入框，之后也不回显
+      const next = { ...form, api_key: "" };
+      setForm(next);
+      setBaseline(next);
+      setTest(null);
+      const backup = outcome.backup ? "原文件已备份为 .config.yaml.bak" : "新建了 data/.config.yaml";
+      setResult({
+        ok: true,
+        text: savedNoteText(`${current.label}到服务端配置`, `${backup} · ${outcome.restart_hint ? "重启服务端后生效" : "服务端下次启动时生效"}`),
+        action: outcome.restart_hint ? { label: "立即重启服务端", onClick: () => run("重启服务端", () => voiceApi.serverRestart()) } : undefined,
+      });
+    } catch (error) {
+      setResult({ ok: false, text: `保存失败：${voiceErrorText(error)}` });
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const blocked = fullModule ? "全模块部署由智控台管理，这里只能测试" : saveEnabled ? "" : "先测试连接，通过后才能保存";
+  return (
+    <VoiceGroup id={`external-model-${section}`} title={current.label} summary={externalModelSummary(saved)} tone={saved?.ok ? "ok" : undefined} dirty={dirty}>
+      <div className="voice-form-grid">
+        <label className="voice-wide">
+          <span>地址（{current.hint}）</span>
+          <input className="text-input mono" value={form.url} onChange={(e) => update("url", e.target.value)} spellCheck="false" autoComplete="off" id={n("url")} />
+        </label>
+        <label>
+          <span>密钥（不显示已保存的密钥；留空保留服务端原密钥）</span>
+          <input className="text-input" type="password" value={form.api_key} onChange={(e) => update("api_key", e.target.value)} autoComplete="new-password" spellCheck="false" id={n("key")} />
+        </label>
+        <label>
+          <span>模型</span>
+          <input className="text-input mono" value={form.model} onChange={(e) => update("model", e.target.value)} spellCheck="false" id={n("name")} />
+        </label>
+        {section === "tts" && (
+          <>
+            <label>
+              <span>音色</span>
+              <input className="text-input" value={form.voice} onChange={(e) => update("voice", e.target.value)} spellCheck="false" id={n("voice")} />
+            </label>
+            <label>
+              <span>语速（0.25 ~ 4.0）</span>
+              <input className="text-input" inputMode="decimal" value={form.speed} onChange={(e) => update("speed", e.target.value)} />
+            </label>
+          </>
+        )}
+      </div>
+      <div className="voice-final mono" id={n("final")}>
+        写入地址：{preview || "—"}
+      </div>
+      {test ? (
+        <div className={`voice-hint voice-hint--${test.ok ? "ok" : "bad"}`} id={n("result")}>
+          {test.ok ? "测试通过" : "测试未通过"}
+          {typeof test.elapsed_ms === "number" ? ` · ${(test.elapsed_ms / 1000).toFixed(1)} s` : ""} · {test.detail}
+          {test.ok && test.fingerprint !== sectionFingerprint(section, form) && "（测试后内容已修改，请重新测试）"}
+        </div>
+      ) : saved ? (
+        <p className="voice-muted">
+          上次测试：{saved.ok ? "通过" : "未通过"} · {(saved.elapsed_ms / 1000).toFixed(1)} s · {formatTime(saved.at)}
+        </p>
+      ) : (
+        <p className="voice-muted">测试只用这里填写的值发一次最小请求（15 秒超时），不写文件。</p>
+      )}
+      <SaveBar
+        id={n("save")}
+        target={`${current.label}到服务端配置`}
+        dirty={dirty}
+        busy={Boolean(busy)}
+        saving={busy === `save-${section}`}
+        blocked={blocked}
+        result={result}
+        onSave={save}
+        extra={
+          <button type="button" className="btn btn-ghost" onClick={runTest} disabled={Boolean(busy) || isSectionBlank(form)} id={n("test")}>
+            <FlaskConical size={13} /> {busy === `test-${section}` ? "测试中…" : "测试连接"}
+          </button>
+        }
+      />
+    </VoiceGroup>
+  );
+}
+
 export function VoicePage() {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
   const [form, setForm] = useState(null);
-  const [tab, setTab] = useState("llm");
-  const [models, setModels] = useState(() => ({ llm: emptyForm("llm"), asr: emptyForm("asr"), tts: emptyForm("tts") }));
-  const [tests, setTests] = useState({});
-  const [saveNote, setSaveNote] = useState("");
+  const [baseline, setBaseline] = useState(null);
+  const [tab, setTab] = useState(readTab);
+  const [dirty, setDirty] = useState({});
   const [logLines, setLogLines] = useState([]);
   const [approvals, setApprovals] = useState([]);
   const mounted = useRef(true);
+  const builtin = useBuiltinStatus();
+
+  const reportDirty = useCallback((id, where) => {
+    setDirty((current) => ((current[id] || "") === where ? current : { ...current, [id]: where }));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -95,6 +360,7 @@ export function VoicePage() {
       setStatus(next);
       setLoadError("");
       setForm((current) => current || settingsForm(next));
+      setBaseline((current) => current || settingsForm(next));
     } catch (error) {
       if (mounted.current) setLoadError(voiceErrorText(error));
     }
@@ -155,6 +421,11 @@ export function VoicePage() {
   const device = deviceView(mode, status?.device);
   const fullModule = Boolean(status?.server_config?.full_module);
 
+  const selectTab = (key) => {
+    setTab(key);
+    writeTab(key);
+  };
+
   const switchMode = async (target) => {
     if (target === mode || busy) return;
     let changes;
@@ -178,77 +449,22 @@ export function VoicePage() {
     }
   };
 
-  const saveSettings = async () => {
-    if (!form) return;
-    const port = Number(form.server_port);
-    const builtinWs = Number(form.builtin_ws_port);
-    const builtinHttp = Number(form.builtin_http_port);
-    const payload = {
-      server_dir: form.server_dir,
-      python: form.python,
-      args: form.args,
-      server_port: Number.isFinite(port) ? port : 0,
-      builtin_ws_port: Number.isFinite(builtinWs) ? builtinWs : 0,
-      builtin_http_port: Number.isFinite(builtinHttp) ? builtinHttp : 0,
-    };
-    for (const key of ["self_hosted_mcp_endpoint", "endpoint_health_url", "official_mcp_endpoint"]) {
-      if (form[key].trim()) payload[key] = form[key].trim();
-    }
-    const result = await run("保存设置", () => voiceApi.saveSettings(payload));
-    if (result) {
-      setForm(settingsForm(result));
-      setSaveNote("服务端设置已保存");
-      setTimeout(() => mounted.current && setSaveNote(""), 4000);
-    }
+  const changeSetting = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+
+  // 保存一组后只重置这组字段，其他组未保存的填写保留
+  const settingsSaved = (group, next) => {
+    setStatus(next);
+    const fresh = settingsForm(next);
+    const keys = SETTINGS_GROUPS[group].keys;
+    setBaseline(fresh);
+    setForm((current) => {
+      const merged = { ...current };
+      for (const key of keys) merged[key] = fresh[key];
+      return merged;
+    });
   };
 
-  const updateModel = (section, key, value) => {
-    setModels((current) => ({ ...current, [section]: { ...current[section], [key]: value } }));
-  };
-
-  const testSection = async (section) => {
-    const formValue = models[section];
-    const inputError = sectionInputError(section, formValue);
-    if (inputError) {
-      setTests((current) => ({ ...current, [section]: { ok: false, detail: inputError, fingerprint: "" } }));
-      return;
-    }
-    const fingerprint = sectionFingerprint(section, formValue);
-    setBusy(`test-${section}`);
-    try {
-      const result = await voiceApi.modelsTest(section, sectionPayload(section, formValue));
-      if (mounted.current) setTests((current) => ({ ...current, [section]: { ...result, fingerprint } }));
-    } catch (error) {
-      if (mounted.current) setTests((current) => ({ ...current, [section]: { ok: false, detail: voiceErrorText(error), fingerprint: "" } }));
-    } finally {
-      if (mounted.current) setBusy("");
-      refresh();
-    }
-  };
-
-  const saveSection = async (section) => {
-    const result = await run("保存模型配置", () => voiceApi.modelsSave({ [section]: sectionPayload(section, models[section]) }));
-    if (!result) return;
-    // 密钥只在提交时使用：保存后清空输入框，之后也不回显
-    setModels((current) => ({ ...current, [section]: { ...current[section], api_key: "" } }));
-    setTests((current) => ({ ...current, [section]: { ...current[section], fingerprint: "" } }));
-    if (result.restart_hint) {
-      const restart = await showConfirm("已写入服务端配置（原文件已备份为 .config.yaml.bak）。需要重启服务端才能生效，现在重启？", {
-        title: "保存成功",
-        tone: "info",
-        confirmText: "重启服务端",
-        cancelText: "稍后",
-      });
-      if (restart) await run("重启服务端", () => voiceApi.serverRestart());
-    } else {
-      await showAlert(
-        `已写入服务端配置${result.backup ? "（原文件已备份为 .config.yaml.bak）" : "（新建 data/.config.yaml）"}。服务端下次启动时生效。`,
-        { title: "保存成功", tone: "success" },
-      );
-    }
-  };
-
-  if (!status) {
+  if (!status || !form) {
     return (
       <div className="ob-page voice-page">
         <section className="ob-card">
@@ -263,349 +479,317 @@ export function VoicePage() {
     );
   }
 
-  const currentTab = SECTIONS.find((item) => item.key === tab) || SECTIONS[0];
-  const currentForm = models[tab];
-  const currentTest = tests[tab];
-  const savedTest = status.models?.[tab];
-  const preview = finalUrl(tab, currentForm.url);
-  const saveEnabled = canSaveSection(tab, currentForm, currentTest, { fullModule, busy: Boolean(busy) });
   const endpointHealth = status.endpoint?.health;
+  const builtinStatus = builtin.status && !builtin.status.error ? builtin.status : null;
+  const builtinSessions = Array.isArray(builtinStatus?.sessions) ? builtinStatus.sessions.length : 0;
+  const unsaved = dirtyTabs(dirty);
+
+  const serviceView = {
+    builtin: builtinStatus?.running ? { text: "内置服务运行中", tone: "ok" } : { text: "内置服务未运行", tone: "off" },
+    self_hosted: { text: `服务端${server.text}`, tone: server.tone },
+    official: status.bridge?.connected ? { text: "小智桥已连接", tone: "ok" } : { text: "小智桥未连接", tone: "bad" },
+  }[mode];
+  const deviceLine = mode === "builtin" ? { text: `${builtinSessions} 台设备在线`, tone: builtinSessions ? "ok" : "warn" } : { text: `设备：${device.text}`, tone: device.tone };
+
+  const groupProps = { mode, status, form, baseline, onChange: changeSetting, onSaved: settingsSaved, busy, setBusy };
+  const modelProps = { status, fullModule, busy, setBusy, refresh, run };
+
+  const serverBlock = (
+    <div className="voice-block" id="voice-server-card">
+      <div className="voice-block-h">
+        <h3>自建服务端</h3>
+        <Pill tone={server.tone} id="voice-server-state">
+          {server.text}
+        </Pill>
+        <span className="voice-actions voice-push">
+          {server.canStart && (
+            <button type="button" className="btn btn-primary" onClick={() => run("启动服务端", () => voiceApi.serverStart())} disabled={Boolean(busy)} id="voice-server-start">
+              <Play size={13} /> 启动
+            </button>
+          )}
+          {server.canStop && (
+            <button type="button" className="btn btn-danger" onClick={() => run("停止服务端", () => voiceApi.serverStop())} disabled={Boolean(busy)} id="voice-server-stop">
+              <Square size={13} /> 停止
+            </button>
+          )}
+          {server.canRestart && (
+            <button type="button" className="btn btn-ghost" onClick={() => run("重启服务端", () => voiceApi.serverRestart())} disabled={Boolean(busy)} id="voice-server-restart">
+              <RotateCcw size={13} /> 重启
+            </button>
+          )}
+        </span>
+      </div>
+      <div className="voice-kv">
+        {status.server?.pid && <span>进程 {status.server.pid}</span>}
+        {status.server?.started_at && <span>启动于 {formatTime(status.server.started_at)}</span>}
+        {server.state === "exited" && <span className="voice-bad">退出码 {status.server.exit_code ?? "未知"}，不会自动重启（日志见“记录与诊断”）</span>}
+        {status.server?.message && server.state !== "exited" && <span>{status.server.message}</span>}
+        {!status.server_config?.exists && <span className="voice-warn">缺少 data/.config.yaml，请先在“模型”标签完成配置</span>}
+        <span>
+          设备：<Pill tone={device.tone} id="voice-device-state">{device.text}</Pill>
+        </span>
+        {endpointHealth?.error ? (
+          <span className="voice-warn">接入点健康检查：{endpointHealth.error}</span>
+        ) : endpointHealth ? (
+          <span>
+            工具连接 {endpointHealth.tool_connections ?? "—"} · 设备会话 {endpointHealth.robot_connections ?? "—"}
+          </span>
+        ) : (
+          <span className="voice-muted">未填写接入点健康检查地址，无法判断设备是否在线（在“连接”标签填写）</span>
+        )}
+      </div>
+    </div>
+  );
+
+  const officialBlock = (
+    <div className="voice-block" id="voice-endpoint-card">
+      <div className="voice-block-h">
+        <h3>小智接入点</h3>
+        <Pill tone={status.bridge?.connected ? "ok" : "bad"}>{status.bridge?.connected ? "MOSS 桥已连接" : "MOSS 桥未连接"}</Pill>
+      </div>
+      <div className="voice-kv">
+        <span className="mono voice-break">{status.mcp_endpoint || "未设置接入点（在“连接”标签填写）"}</span>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="ob-page voice-page">
-      {/* 1. 语音链路 */}
-      <section className="ob-card" id="voice-mode-card">
-        <div className="ob-card-h">
-          <h2>
-            <span className="ob-n">1</span> 语音链路
-          </h2>
-          <span className="ob-k">VOICE LINK</span>
-        </div>
-        <div className="voice-mode-row" role="radiogroup" aria-label="语音链路">
-          {[
-            { key: "official", title: "官方小智", desc: "设备连官方服务器；MOSS 作为工具接入官方接入点" },
-            { key: "self_hosted", title: "自建服务端", desc: "设备连自建 xiaozhi-server；严格模式必开，运动与出光需桌面审批" },
-            { key: "builtin", title: "MOSS 内置服务", desc: "设备直连 MOSS，不需要外部服务端；随 MOSS 启动，加工确认规则与官方链路相同" },
-          ].map((item) => (
+    <VoiceDirtyProvider report={reportDirty}>
+      <div className="ob-page voice-page">
+        <section className="ob-card" id="voice-mode-card">
+          <div className="ob-card-h">
+            <h2>
+              <Radio size={16} aria-hidden="true" /> 语音链路
+            </h2>
+            <span className="ob-k">VOICE LINK</span>
+          </div>
+          <div className="voice-mode-row" role="radiogroup" aria-label="语音链路">
+            {[
+              { key: "builtin", desc: "设备直连 MOSS，不需要外部服务端" },
+              { key: "official", desc: "设备连官方服务器，MOSS 作为工具接入" },
+              { key: "self_hosted", desc: "设备连自建 xiaozhi-server，运动与出光需桌面审批" },
+            ].map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                role="radio"
+                aria-checked={mode === item.key}
+                className={`voice-mode-option${mode === item.key ? " on" : ""}`}
+                onClick={() => switchMode(item.key)}
+                disabled={Boolean(busy)}
+                id={`voice-mode-${item.key}`}
+              >
+                <span className="voice-radio" aria-hidden="true" />
+                <span>
+                  <b>{VOICE_MODE_LABEL[item.key]}</b>
+                  <small>{item.desc}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="voice-statusline" id="voice-statusline">
+            <Pill tone={serviceView.tone}>{serviceView.text}</Pill>
+            <Pill tone={deviceLine.tone}>{deviceLine.text}</Pill>
+            <Pill
+              tone={status.strict?.enabled ? "ok" : "warn"}
+              id="voice-strict-state"
+              title={status.strict?.locked ? "自建模式下必须开启，不可关闭" : status.strict?.from_env ? "由 .env 的 MOSS_FUSION_STRICT 开启" : "官方与内置链路下可选，在 .env 设置 MOSS_FUSION_STRICT=1"}
+            >
+              严格模式{status.strict?.enabled ? "已开启" : "未开启"}
+            </Pill>
+          </div>
+          <div className={`voice-hint voice-hint--${device.tone}`} id="voice-ota-hint">
+            {device.hint}
+          </div>
+          {mode === "official" && !status.strict?.enabled && (
+            <div className="voice-hint voice-hint--warn">严格模式未开启：大模型可以自行确认加工任务。需要每次在本机批准时，在 .env 中设置 MOSS_FUSION_STRICT=1。</div>
+          )}
+        </section>
+
+        <div className="voice-pagetabs" role="tablist" aria-label="语音中心">
+          {VOICE_TABS.map((item) => (
             <button
               key={item.key}
               type="button"
-              role="radio"
-              aria-checked={mode === item.key}
-              className={`voice-mode-option${mode === item.key ? " on" : ""}`}
-              onClick={() => switchMode(item.key)}
-              disabled={Boolean(busy)}
-              id={`voice-mode-${item.key}`}
+              role="tab"
+              aria-selected={tab === item.key}
+              aria-controls={`voice-panel-${item.key}`}
+              className={`voice-pagetab${tab === item.key ? " on" : ""}`}
+              onClick={() => selectTab(item.key)}
+              id={`voice-page-tab-${item.key}`}
             >
-              <span className="voice-radio" aria-hidden="true" />
-              <span>
-                <b>{item.title}</b>
-                <small>{item.desc}</small>
-              </span>
+              {item.label}
+              {unsaved.has(item.key) && (
+                <span className="voice-tab-dot" title="有未保存的修改" aria-label="有未保存的修改">
+                  ●
+                </span>
+              )}
             </button>
           ))}
         </div>
-        <div className={`voice-hint voice-hint--${device.tone}`} id="voice-ota-hint">
-          设备 OTA 一致性：{device.hint}
-        </div>
-        {mode === "official" && !status.strict?.enabled && (
-          <div className="voice-hint voice-hint--warn">
-            官方链路下严格模式未开启：大模型可以自行确认发送加工任务。建议在 .env 中设置 MOSS_FUSION_STRICT=1，使运动与出光都需要在本机批准。
-          </div>
-        )}
-      </section>
 
-      {/* 内置语音服务（NV1 起；NV5 起配齐模型后为对话模式） */}
-      <VoiceBuiltinCard />
-      <VoiceMcpCard />
+        <section className="ob-card voice-panels">
+          <VoiceTabPanel tab="service" active={tab === "service"}>
+            <ModeSplit
+              id="service"
+              mode={mode}
+              title="其他链路的服务状态"
+              parts={[
+                { key: "builtin", modes: ["builtin"], node: <BuiltinServicePanel builtin={builtin} /> },
+                { key: "server", modes: ["self_hosted"], node: serverBlock },
+                { key: "endpoint", modes: ["official", "self_hosted"], node: officialBlock },
+              ]}
+            />
+          </VoiceTabPanel>
 
-      {/* 2. 四张状态卡 */}
-      <div className="voice-status-grid">
-        <section className="ob-card voice-stat" id="voice-server-card">
-          <div className="ob-card-h">
-            <h2>
-              <Server size={16} aria-hidden="true" /> 服务端
-            </h2>
-            <Pill tone={server.tone} id="voice-server-state">{server.text}</Pill>
-          </div>
-          <div className="voice-kv">
-            {status.server?.pid && <span>进程 {status.server.pid}</span>}
-            {status.server?.started_at && <span>启动于 {formatTime(status.server.started_at)}</span>}
-            {server.state === "exited" && <span className="voice-bad">退出码 {status.server.exit_code ?? "未知"}，不会自动重启</span>}
-            {status.server?.message && server.state !== "exited" && <span>{status.server.message}</span>}
-            {!status.server_config?.exists && <span className="voice-warn">缺少 data/.config.yaml，请先完成模型配置</span>}
-          </div>
-          <div className="voice-actions">
-            {server.canStart && (
-              <button type="button" className="btn btn-primary" onClick={() => run("启动服务端", () => voiceApi.serverStart())} disabled={Boolean(busy)} id="voice-server-start">
-                <Play size={13} /> 启动
-              </button>
-            )}
-            {server.canStop && (
-              <button type="button" className="btn btn-danger" onClick={() => run("停止服务端", () => voiceApi.serverStop())} disabled={Boolean(busy)} id="voice-server-stop">
-                <Square size={13} /> 停止
-              </button>
-            )}
-            {server.canRestart && (
-              <button type="button" className="btn btn-ghost" onClick={() => run("重启服务端", () => voiceApi.serverRestart())} disabled={Boolean(busy)} id="voice-server-restart">
-                <RotateCcw size={13} /> 重启
-              </button>
-            )}
-            <a className="btn btn-ghost" href="#voice-log-card" onClick={refreshLog}>
-              <ScrollText size={13} /> 日志
-            </a>
-          </div>
-        </section>
+          <VoiceTabPanel tab="models" active={tab === "models"}>
+            <ModeSplit
+              id="models"
+              mode={mode}
+              title="其他链路的模型设置"
+              parts={[
+                {
+                  key: "official-note",
+                  modes: ["official"],
+                  node: <p className="voice-hint">官方链路的模型在小智控制台设置，这里不用配置。</p>,
+                },
+                {
+                  key: "builtin",
+                  modes: ["builtin"],
+                  node: (
+                    <div className="voice-stack">
+                      <h3 className="voice-section-h">内置服务 · 云端模型（密钥存本机）</h3>
+                      <BuiltinModelGroups builtin={builtin} />
+                      {builtinStatus && (
+                        <>
+                          <h3 className="voice-section-h">内置服务 · 本地模型与体验</h3>
+                          <LocalModelsGroup builtin={builtin} />
+                          <ExperienceGroup builtin={builtin} />
+                        </>
+                      )}
+                    </div>
+                  ),
+                },
+                {
+                  key: "external",
+                  modes: ["self_hosted"],
+                  node: (
+                    <div className="voice-stack" id="voice-models-card">
+                      <h3 className="voice-section-h">自建服务端 · 模型（写入 data/.config.yaml）</h3>
+                      {fullModule && <div className="voice-hint voice-hint--warn">检测到全模块部署（manager-api.url）：模型由智控台管理，这里只能测试连接，不会写文件。</div>}
+                      {SECTIONS.map((item) => (
+                        <ExternalModelGroup key={item.key} section={item.key} {...modelProps} />
+                      ))}
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          </VoiceTabPanel>
 
-        <section className="ob-card voice-stat" id="voice-endpoint-card">
-          <div className="ob-card-h">
-            <h2>
-              <Cable size={16} aria-hidden="true" /> MCP 接入点
-            </h2>
-            <Pill tone={status.bridge?.connected ? "ok" : "bad"}>{status.bridge?.connected ? "MOSS 桥已连接" : "MOSS 桥未连接"}</Pill>
-          </div>
-          <div className="voice-kv">
-            <span className="mono voice-break">{status.mcp_endpoint || "未设置 mcp_endpoint"}</span>
-            {endpointHealth ? (
-              endpointHealth.error ? (
-                <span className="voice-warn">健康检查：{endpointHealth.error}</span>
-              ) : (
-                <span>
-                  工具连接 {endpointHealth.tool_connections ?? "—"} · 设备会话 {endpointHealth.robot_connections ?? "—"}
-                </span>
-              )
-            ) : (
-              <span className="voice-muted">
-                {mode === "self_hosted" ? "未填写健康检查地址，设备会话未知" : mode === "builtin" ? "内置链路的设备连接见“内置语音服务”卡片" : "官方接入点不提供会话数"}
-              </span>
-            )}
-          </div>
-        </section>
+          <VoiceTabPanel tab="connect" active={tab === "connect"}>
+            <ModeSplit
+              id="connect"
+              mode={mode}
+              title="其他链路的连接设置"
+              parts={[
+                { key: "official", modes: ["official", "builtin"], node: <SettingsGroup group="official" {...groupProps} /> },
+                { key: "builtinPorts", modes: ["builtin"], node: <SettingsGroup group="builtinPorts" {...groupProps} /> },
+                { key: "selfHostedEndpoint", modes: ["self_hosted"], node: <SettingsGroup group="selfHostedEndpoint" {...groupProps} /> },
+                { key: "selfHostedServer", modes: ["self_hosted"], node: <SettingsGroup group="selfHostedServer" {...groupProps} /> },
+                { key: "endpoints", modes: ["official", "self_hosted", "builtin"], node: <VoiceEndpointsCard overview={status.mcp} busy={busy} run={run} /> },
+              ]}
+            />
+          </VoiceTabPanel>
 
-        <section className="ob-card voice-stat" id="voice-device-card">
-          <div className="ob-card-h">
-            <h2>
-              <Smartphone size={16} aria-hidden="true" /> 设备
-            </h2>
-            <Pill tone={device.tone} id="voice-device-state">{device.text}</Pill>
-          </div>
-          <div className="voice-kv">
-            <span>
-              {mode === "self_hosted" ? "依据接入点的设备会话（robot_connections）判断" : mode === "builtin" ? "内置链路：设备连接由内置语音服务显示" : "官方链路无法得知设备会话"}
-            </span>
-          </div>
-        </section>
+          <VoiceTabPanel tab="features" active={tab === "features"}>
+            <div className="voice-stack">
+              {mode !== "builtin" && <p className="voice-hint">以下功能只在“MOSS 内置服务”链路下生效。</p>}
+              <VoiceMusicCard />
+              <VoiceVisionCard />
+              <VoiceMcpCard defaultOpen={false} />
+              <PrivateSettingsEntry />
+              <VoiceGroup id="experimental" title="实验功能（尚未通过安全验收）" summary="默认锁定">
+                <div className="voice-stack">
+                  <VoiceAgentCard />
+                </div>
+              </VoiceGroup>
+            </div>
+          </VoiceTabPanel>
 
-        <section className="ob-card voice-stat" id="voice-strict-card">
-          <div className="ob-card-h">
-            <h2>
-              <ShieldCheck size={16} aria-hidden="true" /> 严格模式
-            </h2>
-            <Pill tone={status.strict?.enabled ? "ok" : "warn"} id="voice-strict-state">{status.strict?.enabled ? "已开启" : "未开启"}</Pill>
-          </div>
-          <div className="voice-kv">
-            <span>{status.strict?.locked ? "自建模式下必须开启，不可关闭" : status.strict?.from_env ? "由 .env 的 MOSS_FUSION_STRICT 开启" : "官方链路下可选（在 .env 设置）"}</span>
-            <span className="voice-muted">网关：{status.gateway?.enabled ? "已开启" : "未启用（可选 P2b）"}</span>
-          </div>
+          <VoiceTabPanel tab="records" active={tab === "records"}>
+            <ModeSplit
+              id="records"
+              mode={mode}
+              title="其他链路的记录"
+              parts={[
+                {
+                  key: "approvals",
+                  modes: ["official", "self_hosted", "builtin"],
+                  node: (
+                    <VoiceGroup id="approvals" title="审批记录" summary={approvals.length ? `${approvals.length} 条` : "暂无"} defaultOpen>
+                      <div className="ob-tbl voice-tbl" id="voice-approvals-card">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>时间</th>
+                              <th>内容</th>
+                              <th>来源</th>
+                              <th>状态</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {approvals.length === 0 ? (
+                              <tr>
+                                <td colSpan={4} className="voice-muted">暂无审批记录</td>
+                              </tr>
+                            ) : (
+                              approvals.map((record) => {
+                                const view = approvalHistoryStatus(record);
+                                return (
+                                  <tr key={record.approval_id}>
+                                    <td className="mono">{formatTime(record.created_at)}</td>
+                                    <td>
+                                      {kindLabel(record.kind)} · {record.summary || "—"}
+                                    </td>
+                                    <td>{sourceLabel(record.source, record.session_id)}</td>
+                                    <td>
+                                      <Pill tone={view.tone}>{view.text}</Pill>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </VoiceGroup>
+                  ),
+                },
+                { key: "timings", modes: ["builtin"], node: <TurnTimings timings={builtinStatus?.timings} /> },
+                { key: "events", modes: ["builtin"], node: <BuiltinEvents status={builtinStatus} /> },
+                {
+                  key: "log",
+                  modes: ["self_hosted"],
+                  node: (
+                    <VoiceGroup id="server-log" title="自建服务端日志" summary={logLines.length ? `${logLines.length} 行（已脱敏）` : "暂无"}>
+                      <div className="voice-actions">
+                        <button type="button" className="btn btn-ghost" onClick={refreshLog} id="voice-log-refresh">
+                          <RefreshCw size={13} /> 刷新
+                        </button>
+                        <span className="voice-muted">api_key、Authorization、token 等已替换为 ***</span>
+                      </div>
+                      <pre className="voice-log mono" id="voice-log">
+                        {logLines.length ? logLines.map(maskLogLine).join("\n") : "暂无日志"}
+                      </pre>
+                    </VoiceGroup>
+                  ),
+                },
+              ]}
+            />
+          </VoiceTabPanel>
         </section>
       </div>
-
-      {/* 3. 服务端设置 */}
-      <section className="ob-card" id="voice-settings-card">
-        <div className="ob-card-h">
-          <h2>
-            <span className="ob-n">2</span> 服务端与接入点设置
-          </h2>
-          <span className="ob-k">SETTINGS</span>
-        </div>
-        {form && (
-          <div className="voice-form-grid">
-            <label>
-              <span>xiaozhi-server 目录（main/xiaozhi-server）</span>
-              <input className="text-input" value={form.server_dir} onChange={(e) => setForm({ ...form, server_dir: e.target.value })} spellCheck="false" id="voice-server-dir" />
-            </label>
-            <label>
-              <span>Python 3.10 解释器路径</span>
-              <input className="text-input" value={form.python} onChange={(e) => setForm({ ...form, python: e.target.value })} spellCheck="false" id="voice-python" />
-            </label>
-            <label>
-              <span>启动参数</span>
-              <input className="text-input" value={form.args} onChange={(e) => setForm({ ...form, args: e.target.value })} spellCheck="false" />
-            </label>
-            <label>
-              <span>服务端端口（识别外部实例）</span>
-              <input className="text-input" inputMode="numeric" value={form.server_port} onChange={(e) => setForm({ ...form, server_port: e.target.value })} />
-            </label>
-            <label>
-              <span>内置服务设备连接端口（默认 8000，修改后重启内置服务生效）</span>
-              <input className="text-input" inputMode="numeric" value={form.builtin_ws_port} onChange={(e) => setForm({ ...form, builtin_ws_port: e.target.value })} id="voice-builtin-ws-port" />
-            </label>
-            <label>
-              <span>内置服务 OTA 端口（默认 8003）</span>
-              <input className="text-input" inputMode="numeric" value={form.builtin_http_port} onChange={(e) => setForm({ ...form, builtin_http_port: e.target.value })} id="voice-builtin-http-port" />
-            </label>
-            <label className="voice-wide">
-              <span>自建接入点（单模块 MCP 接入点 ws://…/mcp_endpoint/mcp/?token=…）{status.settings?.self_hosted_mcp_endpoint ? `；当前：${status.settings.self_hosted_mcp_endpoint}` : ""}</span>
-              <input className="text-input mono" value={form.self_hosted_mcp_endpoint} onChange={(e) => setForm({ ...form, self_hosted_mcp_endpoint: e.target.value })} placeholder={status.settings?.self_hosted_mcp_endpoint_set ? "留空表示不改" : "ws://<接入点地址>:8004/mcp_endpoint/mcp/?token=…"} spellCheck="false" autoComplete="off" id="voice-self-endpoint" />
-            </label>
-            <label className="voice-wide">
-              <span>接入点健康检查地址（用于判断设备在线，可不填）{status.settings?.endpoint_health_url ? `；当前：${status.settings.endpoint_health_url}` : ""}</span>
-              <input className="text-input mono" value={form.endpoint_health_url} onChange={(e) => setForm({ ...form, endpoint_health_url: e.target.value })} placeholder={status.settings?.endpoint_health_url_set ? "留空表示不改" : "http://<接入点地址>:8004/mcp_endpoint/health?key=…"} spellCheck="false" autoComplete="off" />
-            </label>
-            <label className="voice-wide">
-              <span>
-                官方接入点（小智控制台生成的 wss:// 地址）{status.settings?.official_mcp_endpoint ? `；${mode === "official" ? "当前" : "切回官方时恢复"}：${status.settings.official_mcp_endpoint}` : ""}
-              </span>
-              <input className="text-input mono" value={form.official_mcp_endpoint} onChange={(e) => setForm({ ...form, official_mcp_endpoint: e.target.value })} placeholder={status.settings?.official_mcp_endpoint_set ? "留空表示不改" : "wss://…/mcp/?token=…"} spellCheck="false" autoComplete="off" id="voice-official-endpoint" />
-            </label>
-          </div>
-        )}
-        <div className="voice-actions">
-          <button type="button" className="btn btn-hud-primary" onClick={saveSettings} disabled={Boolean(busy)} id="voice-settings-save">
-            <FolderCog size={13} /> 保存设置
-          </button>
-          {saveNote && <span className="voice-ok">{saveNote}</span>}
-          <span className="voice-muted">官方模式下修改官方接入点会立即重连小智桥。</span>
-        </div>
-      </section>
-
-      {/* 接入点与工具（NV8）：附加接入点、连接状态与身份、工具开关与调用统计 */}
-      <VoiceEndpointsCard overview={status.mcp} busy={busy} run={run} />
-
-      {/* 4. 模型配置向导 */}
-      <section className="ob-card" id="voice-models-card">
-        <div className="ob-card-h">
-          <h2>
-            <span className="ob-n">3</span> 模型配置
-          </h2>
-          <span className="ob-k">MODELS</span>
-        </div>
-        {fullModule && (
-          <div className="voice-hint voice-hint--warn">检测到全模块部署（manager-api.url）：模型配置由智控台管理，这里只能测试连接，不会写文件。</div>
-        )}
-        <div className="voice-tabs" role="tablist">
-          {SECTIONS.map((item) => {
-            const record = status.models?.[item.key];
-            return (
-              <button key={item.key} type="button" role="tab" aria-selected={tab === item.key} className={`voice-tab${tab === item.key ? " on" : ""}`} onClick={() => setTab(item.key)} id={`voice-tab-${item.key}`}>
-                {item.label}
-                <span className={record ? (record.ok ? "voice-ok" : "voice-bad") : "voice-muted"}>{record ? (record.ok ? " ✓" : " ✗") : ""}</span>
-              </button>
-            );
-          })}
-        </div>
-        <div className="voice-form-grid">
-          <label className="voice-wide">
-            <span>地址（{currentTab.hint}）</span>
-            <input className="text-input mono" value={currentForm.url} onChange={(e) => updateModel(tab, "url", e.target.value)} spellCheck="false" autoComplete="off" id="voice-model-url" />
-          </label>
-          <label>
-            <span>密钥（不回显已保存的密钥；留空则保留服务端配置中的原密钥）</span>
-            <input className="text-input" type="password" value={currentForm.api_key} onChange={(e) => updateModel(tab, "api_key", e.target.value)} autoComplete="new-password" spellCheck="false" id="voice-model-key" />
-          </label>
-          <label>
-            <span>模型</span>
-            <input className="text-input mono" value={currentForm.model} onChange={(e) => updateModel(tab, "model", e.target.value)} spellCheck="false" id="voice-model-name" />
-          </label>
-          {tab === "tts" && (
-            <>
-              <label>
-                <span>音色</span>
-                <input className="text-input" value={currentForm.voice} onChange={(e) => updateModel(tab, "voice", e.target.value)} spellCheck="false" id="voice-model-voice" />
-              </label>
-              <label>
-                <span>语速（0.25 ~ 4.0）</span>
-                <input className="text-input" inputMode="decimal" value={currentForm.speed} onChange={(e) => updateModel(tab, "speed", e.target.value)} />
-              </label>
-            </>
-          )}
-        </div>
-        <div className="voice-final mono" id="voice-model-final">
-          写入地址：{preview || "—"}
-        </div>
-        <div className="voice-actions">
-          <button type="button" className="btn btn-ghost" onClick={() => testSection(tab)} disabled={Boolean(busy) || isSectionBlank(currentForm)} id="voice-model-test">
-            <FlaskConical size={13} /> {busy === `test-${tab}` ? "测试中…" : "测试连接"}
-          </button>
-          <button type="button" className="btn btn-primary" onClick={() => saveSection(tab)} disabled={!saveEnabled} id="voice-model-save" title={saveEnabled ? "写入服务端 data/.config.yaml" : "先用当前填写的内容测试连接并成功后才能保存"}>
-            <Save size={13} /> 保存到服务端配置
-          </button>
-        </div>
-        {currentTest ? (
-          <div className={`voice-hint voice-hint--${currentTest.ok ? "ok" : "bad"}`} id="voice-model-result">
-            {currentTest.ok ? "测试通过" : "测试未通过"}
-            {typeof currentTest.elapsed_ms === "number" ? ` · ${(currentTest.elapsed_ms / 1000).toFixed(1)} s` : ""} · {currentTest.detail}
-            {currentTest.ok && currentTest.fingerprint !== sectionFingerprint(tab, currentForm) && "（测试后内容已修改，请重新测试）"}
-          </div>
-        ) : savedTest ? (
-          <div className="voice-muted">
-            上次测试：{savedTest.ok ? "通过" : "未通过"} · {(savedTest.elapsed_ms / 1000).toFixed(1)} s · {formatTime(savedTest.at)}
-          </div>
-        ) : (
-          <div className="voice-muted">未测试。测试只用本页填写的值发一次最小请求（15 秒超时、不跟随重定向），不落盘。</div>
-        )}
-      </section>
-
-      {/* 5. 审批记录 */}
-      <section className="ob-card" id="voice-approvals-card">
-        <div className="ob-card-h">
-          <h2>
-            <ListChecks size={16} aria-hidden="true" /> 审批记录
-          </h2>
-          <span className="ob-k">APPROVALS</span>
-        </div>
-        <div className="ob-tbl voice-tbl">
-          <table>
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>内容</th>
-                <th>来源</th>
-                <th>状态</th>
-              </tr>
-            </thead>
-            <tbody>
-              {approvals.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="voice-muted">暂无审批记录</td>
-                </tr>
-              ) : (
-                approvals.map((record) => {
-                  const view = approvalHistoryStatus(record);
-                  return (
-                    <tr key={record.approval_id}>
-                      <td className="mono">{formatTime(record.created_at)}</td>
-                      <td>
-                        {kindLabel(record.kind)} · {record.summary || "—"}
-                      </td>
-                      <td>{sourceLabel(record.source, record.session_id)}</td>
-                      <td>
-                        <Pill tone={view.tone}>{view.text}</Pill>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* 6. 服务端日志 */}
-      <section className="ob-card" id="voice-log-card">
-        <div className="ob-card-h">
-          <h2>
-            <ScrollText size={16} aria-hidden="true" /> 服务端日志
-          </h2>
-          <span className="voice-muted">已脱敏（api_key、Authorization、token 等替换为 ***）</span>
-          <button type="button" className="btn btn-ghost voice-push" onClick={refreshLog} id="voice-log-refresh">
-            <RefreshCw size={13} /> 刷新
-          </button>
-        </div>
-        <pre className="voice-log mono" id="voice-log">
-          {logLines.length ? logLines.map(maskLogLine).join("\n") : "暂无日志"}
-        </pre>
-      </section>
-    </div>
+    </VoiceDirtyProvider>
   );
 }

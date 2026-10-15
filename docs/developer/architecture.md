@@ -98,7 +98,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 7. 设备预检后重新读取物理文件并与确认快照 SHA-256 比对；不一致返回 `send_gate_rejected`，不发送加工行。`prepare_gcode_lines` 只处理这份已验证的内存内容：剥离 `;` 与 `( )` 注释、丢弃空行，单行超过 254 字节或含非 ASCII 即拒绝整个文件（`gcode_line_invalid`），空文件拒绝（`gcode_empty`）。SHA 门禁校验的仍是原文件。
 8. `JobWorker` 逐行流式发送：字符计数流控，网络初始窗口 1024 字节、串口 255 字节，收到 `|Bf:` 后按固件报告自适应；S 值按第 6 步系数在线换算；`lines_sent` 只统计原文件行。
 9. 全部 ACK 后发送 `G4 P0` 同步规划器，再查询 Idle，通过才写 `completed`；中间状态为 `awaiting_completion`。
-10. SD 脱机模式（`offline_sd=true` 或 `send_mode=sd_offline`）：已验证的内存文件经 FluidNC HTTP `/upload` 写入 SD 卡，用 `$File/ShowHash` 比对固件哈希，再 `$SD/Run`，进度来自状态报告的 `SD:` 字段；固件未启用 HashFS 时继续执行但标记 `sd_hash_verified=false`。
+10. SD 脱机模式（`offline_sd=true` 或 `send_mode=sd_offline`）：已验证的内存文件经 FluidNC HTTP `/upload` 写入 SD 卡，用 `$File/ShowHash` 比对固件哈希，再 `$SD/Run`，进度来自状态报告的 `SD:` 字段；固件未启用 HashFS、拿不到文件哈希时拒绝 `$SD/Run`（2026-10-14 起）。
 
 取消与急停：`0x18` 通过 `RealtimeCommand::EmergencyStop` 走实时通道，不排在 G-code 队列之后；进程退出的五条路径（前端退出命令、托盘退出、窗口关闭、panic、控制台关闭或 Unix 信号）都经 `ShutdownCoordinator::trigger_shutdown` 调用 `abort_all_active_jobs`，先置取消再写 `0x18`。`0x18` 是软件复位请求，不替代硬件急停。
 

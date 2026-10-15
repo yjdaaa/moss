@@ -37,7 +37,13 @@ export const KIND_LABEL = {
   calibration_send: "发送标定矩阵",
   safe_action: "设备动作",
   framing: "走边框",
+  home_control: "控制家居设备",
 };
+
+/** 家居控制只能在私密设置窗口批准（主窗口的批准接口按设计拒绝），全局审批卡只负责提醒并打开那里。 */
+export function approvedInPrivateWindow(kind) {
+  return kind === "home_control";
+}
 
 export const SOURCE_LABEL = {
   mcp_bridge: "小智语音（MCP 接入点）",

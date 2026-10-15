@@ -98,7 +98,11 @@ impl ApprovalRow {
 /// v6：内置语音服务的设备登记表 `voice_devices`，内置语音技术书 NV1）。
 /// v7：按设备存储用户可编辑的语音摘要（NV10），带 revision 防后台旧总结覆盖。
 /// v8：按 AgentRun 审批记录可恢复的有界只读 CLI 历史（NV13）。
-pub const SCHEMA_VERSION: i64 = 9;
+/// v9：NV16 声纹登记与按人摘要、NV17 固件交付记录。
+/// v10：NV19 结构化长期记忆 `context_memories` 与提取变更清单 `context_extraction_runs`。
+/// v11：NV19-04 记忆正文的 FTS5 trigram 全文索引 `context_memories_fts`（触发器同步）。
+/// v12：NV19-05 分层知识库：资料根目录、目录 L0/L1 摘要与文件指纹，目录摘要 FTS5 索引。
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -505,6 +509,121 @@ impl RuntimeDb {
                  );
                  CREATE INDEX IF NOT EXISTS voice_firmware_device ON voice_firmware_delivery(device_id);
                  INSERT INTO schema_version(version,applied_at) VALUES(9,unixepoch());"
+            )?;
+        }
+        if current.unwrap_or(0) < 10 {
+            // NV19-02：独立的长期记忆条目，不搬迁、不修改 NV10 的 voice_memory。
+            // 取值约束与 moss-voice-server::context 的名称一致；删除只留无内容的墓碑，
+            // 让迟到的后台任务因 revision 不符而失败，不能复活已删内容。
+            // 不带 IF NOT EXISTS：同名但结构未知的表会让迁移整体回滚。
+            tx.execute_batch(
+                "CREATE TABLE context_memories(
+                   id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 64),
+                   scope_kind TEXT NOT NULL CHECK(scope_kind IN ('device','person','project','workspace')),
+                   scope_id TEXT NOT NULL CHECK(length(scope_id) BETWEEN 1 AND 64),
+                   category TEXT NOT NULL CHECK(category IN ('preference','device_fact','technical_note','task_context','troubleshooting_experience')),
+                   content TEXT NOT NULL CHECK(length(content) <= 1000),
+                   verification TEXT NOT NULL CHECK(verification IN ('candidate','confirmed','invalidated')),
+                   source_kind TEXT NOT NULL CHECK(source_kind IN ('user_edit','conversation_extraction','legacy_nv10_import','document_index','trusted_test','agent_run_record')),
+                   source_ref TEXT CHECK(source_ref IS NULL OR length(source_ref) BETWEEN 1 AND 128),
+                   device_model TEXT CHECK(device_model IS NULL OR length(device_model) BETWEEN 1 AND 64),
+                   firmware TEXT CHECK(firmware IS NULL OR (device_model IS NOT NULL AND length(firmware) BETWEEN 1 AND 64)),
+                   revision INTEGER NOT NULL CHECK(revision >= 1),
+                   created_at REAL NOT NULL,
+                   updated_at REAL NOT NULL,
+                   expires_at REAL,
+                   deleted_at REAL,
+                   CHECK((deleted_at IS NULL AND length(trim(content)) > 0) OR (deleted_at IS NOT NULL AND content = ''))
+                 );
+                 CREATE INDEX context_memories_scope ON context_memories(scope_kind,scope_id,category,verification,deleted_at);
+                 CREATE INDEX context_memories_source ON context_memories(scope_kind,scope_id,source_ref);
+                 CREATE TABLE context_extraction_runs(
+                   id TEXT PRIMARY KEY NOT NULL,
+                   scope_kind TEXT NOT NULL CHECK(scope_kind IN ('device','person','project','workspace')),
+                   scope_id TEXT NOT NULL CHECK(length(scope_id) BETWEEN 1 AND 64),
+                   started_at REAL NOT NULL,
+                   finished_at REAL,
+                   adds_json TEXT NOT NULL DEFAULT '[]',
+                   updates_json TEXT NOT NULL DEFAULT '[]',
+                   deletes_json TEXT NOT NULL DEFAULT '[]',
+                   skipped_json TEXT NOT NULL DEFAULT '[]',
+                   reverted_at REAL
+                 );
+                 CREATE INDEX context_extraction_runs_scope ON context_extraction_runs(scope_kind,scope_id,started_at DESC);
+                 INSERT INTO schema_version(version,applied_at) VALUES(10,unixepoch());"
+            )?;
+        }
+        if current.unwrap_or(0) < 11 {
+            // NV19-04：外部内容 FTS5 索引，trigram 分词支持中文子串检索（内置 SQLite 3.46.0）。
+            // 触发器随插入 / 修改 / 删除同步；删除留下的墓碑正文为空，索引条目随之清掉。
+            tx.execute_batch(
+                "CREATE VIRTUAL TABLE context_memories_fts USING fts5(
+                   content, content='context_memories', content_rowid='rowid', tokenize='trigram'
+                 );
+                 CREATE TRIGGER context_memories_fts_ai AFTER INSERT ON context_memories BEGIN
+                   INSERT INTO context_memories_fts(rowid, content) VALUES (new.rowid, new.content);
+                 END;
+                 CREATE TRIGGER context_memories_fts_ad AFTER DELETE ON context_memories BEGIN
+                   INSERT INTO context_memories_fts(context_memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+                 END;
+                 CREATE TRIGGER context_memories_fts_au AFTER UPDATE OF content ON context_memories BEGIN
+                   INSERT INTO context_memories_fts(context_memories_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+                   INSERT INTO context_memories_fts(rowid, content) VALUES (new.rowid, new.content);
+                 END;
+                 INSERT INTO context_memories_fts(context_memories_fts) VALUES ('rebuild');
+                 INSERT INTO schema_version(version,applied_at) VALUES(11,unixepoch());"
+            )?;
+        }
+        if current.unwrap_or(0) < 12 {
+            // NV19-05：用户明确选择的资料目录。只存目录级摘要（L0 ≤256 字、L1 ≤4000 字）与
+            // 文件指纹；原文（L2）不入库，检索时按需从磁盘读并核对指纹。外键未开启，
+            // 删除由 context_store 在同一事务内显式清理。
+            tx.execute_batch(
+                "CREATE TABLE context_knowledge_roots(
+                   id TEXT PRIMARY KEY NOT NULL,
+                   scope_kind TEXT NOT NULL CHECK(scope_kind IN ('project','workspace')),
+                   scope_id TEXT NOT NULL CHECK(length(scope_id) BETWEEN 1 AND 64),
+                   label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 128),
+                   root_path TEXT NOT NULL CHECK(length(root_path) BETWEEN 1 AND 1024),
+                   revision INTEGER NOT NULL CHECK(revision >= 1),
+                   created_at REAL NOT NULL,
+                   indexed_at REAL,
+                   UNIQUE(scope_kind, scope_id, root_path)
+                 );
+                 CREATE TABLE context_knowledge_dirs(
+                   id TEXT PRIMARY KEY NOT NULL,
+                   root_id TEXT NOT NULL,
+                   rel_dir TEXT NOT NULL CHECK(length(rel_dir) <= 1024),
+                   l0 TEXT NOT NULL CHECK(length(l0) BETWEEN 1 AND 256),
+                   l1 TEXT NOT NULL CHECK(length(l1) BETWEEN 1 AND 4000),
+                   file_count INTEGER NOT NULL CHECK(file_count >= 1),
+                   UNIQUE(root_id, rel_dir)
+                 );
+                 CREATE TABLE context_knowledge_files(
+                   id TEXT PRIMARY KEY NOT NULL,
+                   root_id TEXT NOT NULL,
+                   dir_id TEXT NOT NULL,
+                   rel_path TEXT NOT NULL CHECK(length(rel_path) BETWEEN 1 AND 1024),
+                   sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+                   size INTEGER NOT NULL CHECK(size > 0),
+                   mtime REAL NOT NULL,
+                   UNIQUE(root_id, rel_path)
+                 );
+                 CREATE INDEX context_knowledge_files_dir ON context_knowledge_files(dir_id);
+                 CREATE VIRTUAL TABLE context_knowledge_fts USING fts5(
+                   l0, l1, content='context_knowledge_dirs', content_rowid='rowid', tokenize='trigram'
+                 );
+                 CREATE TRIGGER context_knowledge_fts_ai AFTER INSERT ON context_knowledge_dirs BEGIN
+                   INSERT INTO context_knowledge_fts(rowid, l0, l1) VALUES (new.rowid, new.l0, new.l1);
+                 END;
+                 CREATE TRIGGER context_knowledge_fts_ad AFTER DELETE ON context_knowledge_dirs BEGIN
+                   INSERT INTO context_knowledge_fts(context_knowledge_fts, rowid, l0, l1) VALUES ('delete', old.rowid, old.l0, old.l1);
+                 END;
+                 CREATE TRIGGER context_knowledge_fts_au AFTER UPDATE ON context_knowledge_dirs BEGIN
+                   INSERT INTO context_knowledge_fts(context_knowledge_fts, rowid, l0, l1) VALUES ('delete', old.rowid, old.l0, old.l1);
+                   INSERT INTO context_knowledge_fts(rowid, l0, l1) VALUES (new.rowid, new.l0, new.l1);
+                 END;
+                 INSERT INTO schema_version(version,applied_at) VALUES(12,unixepoch());"
             )?;
         }
         tx.commit()?;

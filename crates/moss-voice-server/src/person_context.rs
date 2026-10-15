@@ -123,6 +123,105 @@ pub fn match_embedding(
     let second = scores.get(1).map_or(-1., |s| s.0);
     (*score >= threshold && *score - second >= margin).then(|| scope.clone())
 }
+
+/// 简易标定（2026-10-14 用户决定）：每个已登记的人另录的测试音向量。
+pub struct CalibrationSample {
+    pub speaker_id: String,
+    pub embedding: Vec<f32>,
+}
+/// 标定结果：阈值取“认成别人”的最高分再加余量，保证这批测试音里没有一次认错人。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CalibrationReport {
+    pub threshold: f32,
+    pub margin: f32,
+    pub people: usize,
+    /// 本人测试音条数与其中认对的条数
+    pub genuine_trials: usize,
+    pub genuine_accepted: usize,
+    /// 拿每条测试音去比其他人的次数，以及其中被认成别人的次数（必须为 0）
+    pub impostor_trials: usize,
+    pub false_accepts: usize,
+    pub max_impostor_score: f32,
+}
+pub const CALIBRATION_MIN_PEOPLE: usize = 2;
+pub const CALIBRATION_MIN_CLIPS: usize = 3;
+const CALIBRATION_GUARD: f32 = 0.05;
+const CALIBRATION_MARGIN: f32 = 0.05;
+const CALIBRATION_MAX_THRESHOLD: f32 = 0.95;
+/// 只拿已登记的人互相比，测不到陌生人；阈值不低于这个下限，减少把陌生人认成已登记的人。
+const CALIBRATION_MIN_THRESHOLD: f32 = 0.5;
+
+/// 用测试音算阈值并自检：至少两个人、每人至少三条；任何一条被认成别人或认对不足三分之二都不通过。
+/// 只说明“这批测试音里能区分”，不是安全身份认证；结果仍不授予任何操作权限。
+pub fn calibrate(
+    templates: &[SpeakerTemplate],
+    samples: &[CalibrationSample],
+) -> Result<CalibrationReport, &'static str> {
+    if templates.len() < CALIBRATION_MIN_PEOPLE {
+        return Err("至少需要两个已登记的人");
+    }
+    for template in templates {
+        if samples.iter().filter(|s| s.speaker_id == template.id).count() < CALIBRATION_MIN_CLIPS {
+            return Err("每个已登记的人都要录满三段测试音");
+        }
+    }
+    let unit = |v: &[f32]| -> Option<Vec<f32>> {
+        if v.len() != 192 || v.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        let norm = v.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
+        (norm.is_finite() && norm > 1e-8).then(|| v.iter().map(|x| (f64::from(*x) / norm) as f32).collect())
+    };
+    let templates = templates
+        .iter()
+        .map(|t| unit(&t.embedding).map(|e| (t.id.as_str(), e)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("声纹模板无效")?;
+    let mut trials = Vec::new();
+    for sample in samples.iter().filter(|s| templates.iter().any(|(id, _)| *id == s.speaker_id)) {
+        let vector = unit(&sample.embedding).ok_or("测试音向量无效")?;
+        let scores = templates
+            .iter()
+            .map(|(id, e)| (*id, vector.iter().zip(e).map(|(a, b)| a * b).sum::<f32>().clamp(-1., 1.)))
+            .collect::<Vec<_>>();
+        trials.push((sample.speaker_id.as_str(), scores));
+    }
+    let max_impostor = trials
+        .iter()
+        .flat_map(|(own, scores)| scores.iter().filter(move |(id, _)| id != own).map(|(_, s)| *s))
+        .fold(-1.0_f32, f32::max);
+    let threshold = (max_impostor + CALIBRATION_GUARD).max(CALIBRATION_MIN_THRESHOLD);
+    if threshold > CALIBRATION_MAX_THRESHOLD {
+        return Err("不同的人声音太像，区分不开；请在安静环境重新登记");
+    }
+    let (mut accepted, mut false_accepts) = (0, 0);
+    for (own, scores) in &trials {
+        let mut ranked = scores.clone();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let (top_id, top) = ranked[0];
+        let second = ranked.get(1).map_or(-1., |s| s.1);
+        if top >= threshold && top - second >= CALIBRATION_MARGIN {
+            if top_id == *own { accepted += 1 } else { false_accepts += 1 }
+        }
+    }
+    let report = CalibrationReport {
+        threshold,
+        margin: CALIBRATION_MARGIN,
+        people: templates.len(),
+        genuine_trials: trials.len(),
+        genuine_accepted: accepted,
+        impostor_trials: trials.len() * (templates.len() - 1),
+        false_accepts,
+        max_impostor_score: max_impostor,
+    };
+    if report.false_accepts > 0 {
+        return Err("测试音里有人被认成了别人，未通过");
+    }
+    if report.genuine_accepted * 3 < report.genuine_trials * 2 {
+        return Err("本人被认出的比例低于三分之二，未通过；请重录测试音或重新登记");
+    }
+    Ok(report)
+}
 #[derive(Clone)]
 pub struct PersonSummary {
     pub text: String,

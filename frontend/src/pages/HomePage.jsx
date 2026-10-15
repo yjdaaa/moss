@@ -253,7 +253,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         const result = res.data.result;
         const isConnected =
           connectionMode === "serial" ? result.serial_connected : result.network_connected;
-        setConnectionStatus({ connected: isConnected, summary: result.summary });
+        setConnectionStatus({ connected: isConnected, summary: result.summary, checkedAt: Date.now() });
         if (isConnected) {
           addLog("DEVICE", `硬件握手通过: ${result.summary || "控制器已连接 ($32=1 就绪)"}`, "ok");
         } else if (!silent) {
@@ -262,14 +262,14 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         return isConnected;
       } else {
         const errorMsg = res.data?.result || "探测失败：未检测到控制器连接";
-        setConnectionStatus({ connected: false, summary: errorMsg });
+        setConnectionStatus({ connected: false, summary: errorMsg, checkedAt: Date.now() });
         if (!silent) {
           addLog("DEVICE", errorMsg, "error");
         }
         return false;
       }
     } catch (e) {
-      setConnectionStatus({ connected: false, summary: "连接探测网络异常" });
+      setConnectionStatus({ connected: false, summary: "连接探测网络异常", checkedAt: Date.now() });
       if (!silent) {
         addLog("DEVICE", `探测网络异常: ${e.message}`, "error");
       }
@@ -561,7 +561,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           stop(); setPollIntervalId(null);
           if (state.status === "completed") {
             addLog("SUCCESS", `[成功] ${sr.total_lines || state.progress?.total || 0} 行已确认，控制器完成状态已核验`, "ok");
-            if (sr.sd_hash_verified === false || sr.warning) addLog("WARN", sr.warning || "固件未启用 HashFS，脱机文件未经物理 SHA-256 校验", "warn");
           } else {
             addLog("TERMINAL", `任务记录为 ${state.status}：${sr.error || "请到设备旁确认实际状态"}`, "warn");
           }

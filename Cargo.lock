@@ -2855,6 +2855,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tempfile",
  "tokio",
 ]
 
@@ -2932,6 +2933,7 @@ dependencies = [
  "chrono",
  "getrandom 0.3.4",
  "image",
+ "laser-runtime",
  "lunar_rust",
  "moss-voice-local-proto",
  "moss-voice-providers",

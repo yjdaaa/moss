@@ -2,6 +2,18 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## NV19 长期记忆、UI-3 语音中心、家居控制与声纹用户开启（2026-10-15）
+
+**本次回执**：同一工作树合并两个会话的改动（NV19-01～08、UI-3 语音中心改版；家居控制与声纹改为用户开启、功能真实性审查修复）。`cargo test --workspace` **804 PASS / 7 ignored**，前端 `npm test` **124 PASS**，`npm run build` 成功，6 个语音浏览器测试通过，release `moss-host` 的 FakeGrbl E2E **32/32 PASS**；`cargo tauri build`（含前端构建）与 `cargo tauri android build --target aarch64 --apk` 均 exit 0。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-15） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 07:38:51 | 59,948,544 | `0807a82493c7a0fa6489a6caf488a493406714bb1da140882b37879cbc571933` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 07:38:51 | 18,931,857 | `37f4b28353f33fafd171569e78d589a437f9b5b1ebc8a69dcc2ace0d3291fe17` |
+| `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 07:42:46 | 52,870,898 | `02417a0701e3fed311134e0d9acd2dccbf04b4740c12b3d143b48b5d3b802dbc` |
+
+APK 内 `lib/arm64-v8a/libmoss_desktop_lib.so` 与本次 `target/aarch64-linux-android/release/libmoss_desktop_lib.so`（47,149,800 B，07:41:34）SHA 一致：`d45eb4178ae47cb8712188723e2d15d493e3576b5fa0d86a2472f058a6a6745c`。未构建带 helper 的专用内部 NSIS；未签名、未安装、未发布；GUI（HW-15、HW-17、HW-18）与真实设备验收未做。
+
 ## NV11 六类供应商契约（2026-10-12）
 
 **NV11 本次最终回执（2026-10-12）**：定向插件 **33/33 PASS**；最终workspace **710 PASS / 7 ignored**（含最新RSS坏尾部和Metaso应用码），前端 **109 PASS**，新release moss-host的FakeGrbl E2E **32 PASS**。实际React假native、前端build、普通Windows release/NSIS、Android aarch64 release APK全部exit0；5份文档/46本地链接与围栏检查、5份Markdown渲染无横向溢出通过。只读复核确认六类TLS夹具经过实际生产adapter、证书验证未关闭、DNS固定本机且无真实账号请求。配置存储故障原子性与真实供应商仍未验收，NV11整体保留partial。

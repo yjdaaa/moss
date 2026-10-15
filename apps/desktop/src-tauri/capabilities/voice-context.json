@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice-context-private",
+  "description": "NV19 long-term context management only from the packaged voice-private webview; no remote origins",
+  "windows": [
+    "voice-private"
+  ],
+  "permissions": [
+    "allow-voice-context-manage",
+    "allow-voice-context-pick-folder"
+  ]
+}

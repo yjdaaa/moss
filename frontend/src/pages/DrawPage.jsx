@@ -54,6 +54,15 @@ import { exportFile, savedMessage } from "../saveFile.js";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { onEmergencyStop } from "../estopBus.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
+import {
+  drawConnectionPayload,
+  drawSizeValue,
+  drawTargetLabel,
+  drawTargetMissingText,
+  drawTargetReady,
+  isSerial,
+  normalizeDrawMode,
+} from "../drawConnection.js";
 
 const CONFIG_KEYS = [
   "material",
@@ -61,8 +70,11 @@ const CONFIG_KEYS = [
   "width_mm",
   "height_mm",
   "mode",
+  "connection_mode",
   "network_host",
   "network_telnet_port",
+  "port",
+  "baudrate",
   "vector_simplify_factor",
 ];
 const EXCALIDRAW_LANG_CODE = "zh-CN";
@@ -74,9 +86,12 @@ const DEFAULT_FORM = {
   thickness_mm: localStorage.getItem("laserLab.thickness_mm") || "3",
   width_mm: localStorage.getItem("laserLab.width_mm") || "",
   height_mm: localStorage.getItem("laserLab.height_mm") || "",
-  mode: localStorage.getItem("laserLab.mode") || "raster",
+  mode: normalizeDrawMode(localStorage.getItem("laserLab.mode")),
+  connection_mode: localStorage.getItem("laserLab.connection_mode") === "serial" ? "serial" : "network",
   network_host: localStorage.getItem("laserLab.network_host") || "",
   network_telnet_port: localStorage.getItem("laserLab.network_telnet_port") || "23",
+  port: localStorage.getItem("laserLab.port") || "",
+  baudrate: localStorage.getItem("laserLab.baudrate") || "115200",
   vector_simplify_factor: localStorage.getItem("laserLab.vector_simplify_factor") || "3",
   output_format: "gcode",
 };
@@ -97,6 +112,8 @@ export function DrawPage({ onNavigate }) {
   const [materialSelectValue, setMaterialSelectValue] = useState(CUSTOM_OPTION_VALUE);
   const [materialRefreshBusy, setMaterialRefreshBusy] = useState(false);
   const [repeatSend, setRepeatSend] = useState(() => createRepeatSendState(window.localStorage));
+  const [serialPorts, setSerialPorts] = useState([]);
+  const [framingLight, setFramingLight] = useState(false);
   const materialLibraryRef = useRef(materialLibrary);
   const materialModeRef = useRef(materialMode);
   const formRef = useRef(form);
@@ -118,7 +135,7 @@ export function DrawPage({ onNavigate }) {
   const jobSummary = lab.job_summary || null;
   const rawText = useMemo(() => (result ? JSON.stringify(result, null, 2) : ""), [result]);
   const canActOnWorkflow = Boolean(workflowId);
-  const hostReady = Boolean(form.network_host.trim());
+  const hostReady = drawTargetReady(form);
   const nextActions = Array.isArray(result?.result?.next_actions) ? result.result.next_actions : [];
   const summaryAllowsSend = summaryAllowsConfirmSend(jobSummary, nextActions);
   const canConfirmSend = canActOnWorkflow && hostReady && summaryAllowsSend;
@@ -354,13 +371,12 @@ export function DrawPage({ onNavigate }) {
         scene_json: scene,
         material: form.material,
         thickness_mm: Number(form.thickness_mm) || 3.0,
-        width_mm: Number(form.width_mm) || 1.0,
-        height_mm: Number(form.height_mm) || 1.0,
+        width_mm: drawSizeValue(form.width_mm),
+        height_mm: drawSizeValue(form.height_mm),
         mode: form.mode,
         output_format: form.output_format,
         task_type: taskTypeForMode(form.mode),
-        network_host: form.network_host,
-        network_telnet_port: Number(form.network_telnet_port) || 23,
+        ...drawConnectionPayload(form),
         lock_aspect_ratio: true,
       };
       if (form.mode === "raster") {
@@ -396,7 +412,7 @@ export function DrawPage({ onNavigate }) {
   function openSendConfirmation() {
     if (!workflowId) return;
     if (!hostReady) {
-      setStatus("请先填写设备 host/IP");
+      setStatus(drawTargetMissingText(form));
       return;
     }
     if (!summaryAllowsSend) {
@@ -411,7 +427,7 @@ export function DrawPage({ onNavigate }) {
 
   async function confirmSend(offlineSd = false) {
     if (!workflowId || !hostReady) {
-      setStatus("请先生成预览并填写设备 host/IP");
+      setStatus(workflowId ? drawTargetMissingText(form) : "请先生成预览");
       return;
     }
     if (!summaryAllowsSend) {
@@ -429,10 +445,8 @@ export function DrawPage({ onNavigate }) {
         action: "confirm_send",
         workflow_id: workflowId,
         confirmed: true,
-        connection_mode: "network",
-        network_host: form.network_host,
-        network_telnet_port: form.network_telnet_port,
-        offline_sd: Boolean(offlineSd),
+        ...drawConnectionPayload(form),
+        offline_sd: Boolean(offlineSd) && !isSerial(form),
         run_in_background: true,
         wait_for_response: true,
       });
@@ -449,29 +463,28 @@ export function DrawPage({ onNavigate }) {
 
   async function runFraming() {
     if (!hostReady) {
-      setStatus("请先填写设备 host/IP");
+      setStatus(drawTargetMissingText(form));
       return;
     }
     const width = jobSummary?.actual_width_mm || 100;
     const height = jobSummary?.actual_height_mm || 100;
     setBusy(true);
-    setStatus("正在执行走边框预览 (Framing)...");
+    setStatus(framingLight ? "正在走边框（弱光指示）…顶栏急停可随时停止" : "正在走边框（激光关闭，只移动激光头）…顶栏急停可随时停止");
     try {
+      // 默认不出光；勾选“弱光指示”才以 S1 出极弱的光（2026-10-14）
       const res = await postJson("/api/device/framing", {
-        connection_mode: "network",
-        network_host: form.network_host,
-        network_telnet_port: form.network_telnet_port,
+        ...drawConnectionPayload(form),
         min_x: 0,
         min_y: 0,
         max_x: width,
         max_y: height,
         feed_rate: 2000,
-        power: 1,
+        power: framingLight ? 1 : 0,
       });
       if (res.data?.success) {
-        setStatus(`走边框完成 (${width.toFixed(1)} x ${height.toFixed(1)} mm)`);
+        setStatus(`走边框完成 (${width.toFixed(1)} x ${height.toFixed(1)} mm${framingLight ? "，弱光" : "，未出光"})`);
       } else {
-        setStatus(`走边框失败：${res.data?.result || res.data?.detail || "未知错误"}`);
+        setStatus(`走边框未完成：${res.data?.result || "未知错误"}`);
       }
     } catch (e) {
       setStatus(`走边框请求失败：${e.message || e}`);
@@ -482,17 +495,16 @@ export function DrawPage({ onNavigate }) {
 
   async function testConnection() {
     if (!hostReady) {
-      setConnectionResult({ success: false, result: "设备 host/IP 不能为空" });
-      setStatus("请先填写设备 host/IP");
+      setConnectionResult({ success: false, result: drawTargetMissingText(form) });
+      setStatus(drawTargetMissingText(form));
       return;
     }
     setConnectionBusy(true);
     setStatus("测试设备连接...");
     try {
       const data = await postJson("/api/connection/check", {
-        network_host: form.network_host,
+        ...drawConnectionPayload(form),
         network_transport: "telnet",
-        network_telnet_port: form.network_telnet_port,
         network_timeout: 3,
         include_detail: false,
       });
@@ -504,6 +516,19 @@ export function DrawPage({ onNavigate }) {
       setStatus(`连接检查失败：${message}`);
     } finally {
       setConnectionBusy(false);
+    }
+  }
+
+  async function loadSerialPorts() {
+    try {
+      const response = await apiFetch("/api/ui/serial-ports");
+      const data = await response.json();
+      const ports = Array.isArray(data?.result?.ports) ? data.result.ports : [];
+      setSerialPorts(ports);
+      if (ports.length && !ports.includes(formRef.current.port)) updateForm("port", ports[0]);
+      setStatus(ports.length ? `发现串口：${ports.join(", ")}` : "未检测到可用串口");
+    } catch (error) {
+      setStatus(`读取串口列表失败：${error.message || error}`);
     }
   }
 
@@ -707,9 +732,8 @@ export function DrawPage({ onNavigate }) {
           <label>
             生成策略
             <select value={form.mode} onChange={(event) => updateForm("mode", event.target.value)}>
-              <option value="raster">光栅雕刻 raster</option>
-              <option value="outline">轮廓雕刻 outline</option>
-              <option value="auto">自动判断 auto</option>
+              <option value="raster">光栅雕刻 raster（逐行扫描填充）</option>
+              <option value="outline">轮廓雕刻 outline（沿深色图形边缘描线）</option>
             </select>
           </label>
 
@@ -733,24 +757,66 @@ export function DrawPage({ onNavigate }) {
         <section className="hud-card ob-card control-panel" aria-label="设备">
           <FoldHeader id="draw-device" title="设备" k="DEVICE" n={2} />
           <label>
-            设备 host/IP
-            <input
-              value={form.network_host}
-              onChange={(event) => updateForm("network_host", event.target.value)}
-              placeholder="例如 laser.local"
-            />
+            连接方式
+            <select value={form.connection_mode} onChange={(event) => updateForm("connection_mode", event.target.value)}>
+              <option value="network">网络 (Telnet/TCP)</option>
+              <option value="serial">串口 (USB/Serial)</option>
+            </select>
           </label>
 
-          <label>
-            Telnet 端口
-            <input
-              type="number"
-              min="1"
-              step="1"
-              value={form.network_telnet_port}
-              onChange={(event) => updateForm("network_telnet_port", event.target.value)}
-            />
-          </label>
+          {isSerial(form) ? (
+            <>
+              <label>
+                串口
+                <span className="draw-inline">
+                  <select value={form.port} onChange={(event) => updateForm("port", event.target.value)}>
+                    {form.port && !serialPorts.includes(form.port) ? <option value={form.port}>{form.port}</option> : null}
+                    {serialPorts.length === 0 && !form.port ? <option value="">未检测到串口，请点刷新</option> : null}
+                    {serialPorts.map((port) => (
+                      <option key={port} value={port}>
+                        {port}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className="ghost-button" onClick={loadSerialPorts} disabled={busy}>
+                    <RefreshCw size={15} /> 刷新
+                  </button>
+                </span>
+              </label>
+              <label>
+                波特率
+                <select value={form.baudrate} onChange={(event) => updateForm("baudrate", event.target.value)}>
+                  {["9600", "19200", "38400", "57600", "115200", "230400", "250000", "460800", "921600"].map((rate) => (
+                    <option key={rate} value={rate}>
+                      {rate}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                设备 host/IP
+                <input
+                  value={form.network_host}
+                  onChange={(event) => updateForm("network_host", event.target.value)}
+                  placeholder="例如 laser.local"
+                />
+              </label>
+
+              <label>
+                Telnet 端口
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={form.network_telnet_port}
+                  onChange={(event) => updateForm("network_telnet_port", event.target.value)}
+                />
+              </label>
+            </>
+          )}
 
           <button
             type="button"
@@ -786,12 +852,16 @@ export function DrawPage({ onNavigate }) {
               className="secondary-button draw-btn"
               onClick={runFraming}
               disabled={busy || !hostReady || !jobSummary?.actual_width_mm}
-              title="控制激光头沿工件外接边框空走一圈，用于对齐摆放材料"
+              title="控制激光头沿工件外接边框走一圈，用于对齐摆放材料；默认不出光"
             >
               <Eye size={18} />
               走边框 (Framing)
             </button>
-            {canActOnWorkflow && !hostReady && <div className="inline-hint">请填写设备 host/IP 后再发送</div>}
+            <label className="checkbox-row draw-label" title="勾选后走边框时以 S1（约 0.1% 功率）出极弱的光，便于在材料上看到边框">
+              <input type="checkbox" checked={framingLight} onChange={(event) => setFramingLight(event.target.checked)} />
+              走边框时弱光指示（默认不出光）
+            </label>
+            {canActOnWorkflow && !hostReady && <div className="inline-hint">{drawTargetMissingText(form)}后再发送</div>}
             {canActOnWorkflow && hostReady && !summaryAllowsSend && (
               <div className="inline-hint">当前不可发送：请检查精确厚度参数与服务端确认权限</div>
             )}
@@ -860,8 +930,8 @@ export function DrawPage({ onNavigate }) {
       {confirmOpen && (
         <SendConfirmDialog
           summary={jobSummary}
-          host={form.network_host}
-          telnetPort={form.network_telnet_port}
+          target={hostReady ? drawTargetLabel(form) : ""}
+          sdAvailable={!isSerial(form)}
           busy={busy}
           sendAllowed={summaryAllowsSend}
           onCancel={() => setConfirmOpen(false)}
@@ -957,8 +1027,8 @@ function ConnectionStatus({ result }) {
 
 function SendConfirmDialog({
   summary,
-  host,
-  telnetPort,
+  target,
+  sdAvailable = true,
   busy,
   sendAllowed = false,
   onCancel,
@@ -967,7 +1037,9 @@ function SendConfirmDialog({
   movedAcknowledged = false,
   onMovedAckChange,
 }) {
-  const [offlineSd, setOfflineSd] = React.useState(true);
+  const [offlineSdChoice, setOfflineSd] = React.useState(true);
+  // SD 脱机只能经网口上传；串口只能逐行发送
+  const offlineSd = sdAvailable && offlineSdChoice;
   const canConfirm = !requireMovedAck || movedAcknowledged;
   return (
     <div className="modal-backdrop" role="presentation">
@@ -984,16 +1056,18 @@ function SendConfirmDialog({
         <JobSummaryCard summary={summary} compact />
         <div className="confirm-device">
           <Wifi size={17} />
-          <span>设备：{host}:{telnetPort || "23"}</span>
+          <span>设备：{target}</span>
         </div>
-        <label className="checkbox-row confirm-moved-ack draw-label">
-          <input
-            type="checkbox"
-            checked={offlineSd}
-            onChange={(e) => setOfflineSd(e.target.checked)}
-          />
-          脱机离线加工 (推荐，防电脑休眠/网络抖动)
-        </label>
+        {sdAvailable ? (
+          <label className="checkbox-row confirm-moved-ack draw-label">
+            <input
+              type="checkbox"
+              checked={offlineSd}
+              onChange={(e) => setOfflineSd(e.target.checked)}
+            />
+            脱机离线加工 (推荐，防电脑休眠/网络抖动；固件须启用 HashFS)
+          </label>
+        ) : null}
         {requireMovedAck ? (
           <label className="checkbox-row confirm-moved-ack">
             <input
@@ -1012,7 +1086,7 @@ function SendConfirmDialog({
             type="button"
             className="danger-button"
             onClick={() => onConfirm(offlineSd)}
-            disabled={busy || !host || !sendAllowed || !canConfirm}
+            disabled={busy || !target || !sendAllowed || !canConfirm}
           >
             <Send size={18} />
             {busy ? "发送中..." : (offlineSd ? "离线脱机发送" : "在线流式发送")}

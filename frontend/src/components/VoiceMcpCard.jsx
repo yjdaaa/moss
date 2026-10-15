@@ -1,18 +1,20 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Plus, Save, X, RefreshCw, Trash2 } from "lucide-react";
 import { voiceApi } from "../voiceApi.js";
-import { voiceErrorText, VOICE_POLL_MS } from "../voiceState.js";
-import { showAlert, showConfirm } from "../appDialog.js";
+import { savedNoteText, voiceErrorText, VOICE_POLL_MS } from "../voiceState.js";
+import { showConfirm } from "../appDialog.js";
+import { VoiceGroup } from "./VoiceLayout.jsx";
 import { MCP_POLICIES, mcpForm, mcpFormError, mcpSavePayload, mcpConfirmation, mcpConnectionText } from "../voiceMcpState.js";
 
 const time = (seconds) => seconds ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false }) : "未调用";
 const AUDIT = { external_mcp_config_changed: "配置更新", external_tool_requested: "开始调用", external_tool_completed: "调用返回", external_tool_denied: "调用被拒绝", approval_created: "生成审批", approval_approved: "已批准", approval_executed: "消费授权", approval_expired: "审批已过期", approval_rejected: "已拒绝", approval_failed: "执行未完成" };
-export function VoiceMcpCard() {
+export function VoiceMcpCard({ defaultOpen = true }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(null);
+  const [note, setNote] = useState("");
   const alive = useRef(true);
   const busyRef = useRef(false);
   const epoch = useRef(0);
@@ -37,14 +39,15 @@ export function VoiceMcpCard() {
     catch (e) { if (alive.current) setError(voiceErrorText(e)); return false; }
     finally { epoch.current += 1; busyRef.current = false; if (alive.current) setBusy(false); }
   };
-  const edit = (record) => { setEditing({ name: record?.config.name || "", revision: status.revision }); setForm(mcpForm(record)); };
+  // pristine：打开表单时的内容，只有改过才算未保存
+  const edit = (record) => { const initial = mcpForm(record); setEditing({ name: record?.config.name || "", revision: status.revision, pristine: JSON.stringify(initial) }); setForm(initial); };
   const change = (key, value) => setForm((old) => ({ ...old, [key]: value }));
   const credential = (index, key, value) => setForm((old) => ({ ...old, credentials: old.credentials.map((item, i) => i === index ? { ...item, [key]: value, ...(key === "key" ? { saved: false, reference: "" } : {}) } : item) }));
   const save = async () => {
     if (!form || mcpFormError(form)) return;
     if (!(await showConfirm(mcpConfirmation(form), { title: "保存第三方 MCP？", tone: "warning", confirmText: "确认保存" }))) return;
     const payload = mcpSavePayload(form, editing.revision);
-    if (await act(() => voiceApi.mcpSave(payload))) { setForm(null); setEditing(null); await showAlert("已保存。启用的服务会开始连接，未启用的服务不会启动。", { title: "第三方 MCP", tone: "success" }); }
+    if (await act(() => voiceApi.mcpSave(payload))) { setNote(savedNoteText(`服务 ${form.name}`, form.enabled ? "开始连接" : "未启用，不会启动")); setForm(null); setEditing(null); }
   };
   const policy = async (record, tool, value) => {
     const next = mcpForm(record);
@@ -67,12 +70,13 @@ export function VoiceMcpCard() {
   const connections = Array.isArray(status?.connections) ? status.connections : [];
   const audit = Array.isArray(status?.audit) ? status.audit : [];
   const maxServers = Number.isInteger(status?.max_servers) ? status.max_servers : 8;
-  return <section className="ob-card" id="voice-mcp-card">
-    <div className="ob-card-h"><h2>第三方 MCP</h2><span className="ob-k">EXTERNAL TOOLS</span></div>
-    <p className="voice-muted">只接入 MOSS 内置语音。服务默认停用，工具默认每次需批准。密钥填在凭据栏，不要放进地址或启动参数。</p>
+  const formChanged = Boolean(form && editing && JSON.stringify(form) !== editing.pristine);
+  const summary = !status ? "读取中…" : servers.length ? `${servers.length} 个服务 · ${servers.filter((item) => item.config.enabled).length} 个启用` : "未添加";
+  return <VoiceGroup id="mcp" title="第三方 MCP 工具" summary={summary} dirty={formChanged} defaultOpen={defaultOpen}><div id="voice-mcp-card" className="voice-stack">
+    <p className="voice-muted">服务默认停用，工具默认每次需批准。密钥填在凭据栏，不要放进地址或启动参数。</p>
     {error && <div className="voice-hint voice-hint--bad" role="alert">{error}</div>}
     {status?.last_error && <div className="voice-hint voice-hint--warn">{status.last_error}</div>}
-    <div className="voice-actions"><button className="btn btn-ghost" disabled={busy || !status || Boolean(form) || servers.length >= maxServers} onClick={() => edit(null)} id="voice-mcp-add"><Plus size={14} />添加服务</button><span className="voice-muted">最多 8 个服务、64 个外部工具。统计为本次运行，审批和审计保存在本机。</span></div>
+    <div className="voice-actions"><button className="btn btn-ghost" disabled={busy || !status || Boolean(form) || servers.length >= maxServers} onClick={() => { setNote(""); edit(null); }} id="voice-mcp-add"><Plus size={14} />添加服务</button><span className="voice-muted">最多 8 个服务、64 个工具。</span>{note && <span className="voice-ok" role="status">✓ {note}</span>}</div>
     {form && <div className="voice-builtin-models" id="voice-mcp-form">
       <h3>{editing.name ? `编辑 ${editing.name}` : "添加第三方服务"}</h3>
       <div className="voice-form-grid">
@@ -89,7 +93,7 @@ export function VoiceMcpCard() {
       </div>)}
       <div className="voice-actions"><button className="btn btn-ghost" disabled={busy || form.credentials.length >= 32} onClick={() => change("credentials", [...form.credentials, { key: "", value: "", saved: false, reference: "" }])} id="voice-mcp-add-secret">添加凭据</button></div>
       {mcpFormError(form) && <p className="voice-hint voice-hint--warn">{mcpFormError(form)}</p>}
-      <div className="voice-actions"><button className="btn btn-primary" disabled={busy || Boolean(mcpFormError(form))} onClick={save} id="voice-mcp-save"><Save size={14} />保存</button><button className="btn btn-ghost" disabled={busy} onClick={() => { setForm(null); setEditing(null); }}><X size={14} />取消</button></div>
+      <div className="voice-actions"><button className="btn btn-primary" disabled={busy || Boolean(mcpFormError(form))} onClick={save} id="voice-mcp-save"><Save size={14} />保存此服务</button><button className="btn btn-ghost" disabled={busy} onClick={() => { setForm(null); setEditing(null); }}><X size={14} />取消</button></div>
     </div>}
     {!status && !error && <p>正在读取第三方服务…</p>}
     {status && servers.length === 0 && <p className="voice-muted">尚未添加第三方 MCP 服务。</p>}
@@ -100,10 +104,10 @@ export function VoiceMcpCard() {
         <h3>{config.name} <span className="ob-pill">{config.enabled ? mcpConnectionText(connection) : "已停用"}</span></h3>
         <p className="voice-muted">{config.transport?.type === "stdio" ? "本机程序" : "Streamable HTTP"} · 连接成功 {connection?.connections || 0} 次{connection?.retry_seconds ? ` · ${connection.retry_seconds} 秒退避重连` : ""}</p>
         {connection?.last_error && <p className="voice-hint voice-hint--warn">{connection.last_error}</p>}
-        <div className="voice-actions"><button className="btn btn-ghost" disabled={busy || Boolean(form)} onClick={() => edit(record)}>编辑设置</button><button className="btn btn-ghost" disabled={busy || !config.enabled} onClick={() => reconnect(config.name)}><RefreshCw size={14} />重新连接</button><button className="btn btn-ghost" disabled={busy} onClick={() => remove(record)}><Trash2 size={14} />移除</button></div>
+        <div className="voice-actions"><button className="btn btn-ghost" disabled={busy || Boolean(form)} onClick={() => { setNote(""); edit(record); }}>编辑设置</button><button className="btn btn-ghost" disabled={busy || !config.enabled} onClick={() => reconnect(config.name)}><RefreshCw size={14} />重新连接</button><button className="btn btn-ghost" disabled={busy} onClick={() => remove(record)}><Trash2 size={14} />移除</button></div>
         {Array.isArray(connection?.tools) && connection.tools.length > 0 && <div className="ob-tbl voice-tbl"><table><thead><tr><th>工具</th><th>权限</th><th>本次运行</th><th>最近调用</th></tr></thead><tbody>{connection.tools.map((tool) => <tr key={tool.name}><td className="voice-mcp-cell"><b>{tool.name}</b><div className="ob-sub">{tool.description}</div>{tool.blocked_reason && <div className="voice-bad">{tool.blocked_reason}</div>}</td><td><select className="text-input" value={tool.permission} disabled={busy || Boolean(form)} aria-label={`${tool.name} 权限`} onChange={(e) => policy(record, tool, e.target.value)}>{Object.entries(MCP_POLICIES).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></td><td>调用 {tool.stats.calls} 次<br />失败 {tool.stats.failures} 次</td><td>{time(tool.stats.last_call_at)}</td></tr>)}</tbody></table></div>}
       </div>;
     })}
     {audit.length > 0 && <details className="voice-builtin-models"><summary>最近审批与审计（最多 50 条）</summary><div className="ob-tbl voice-tbl"><table><thead><tr><th>时间</th><th>操作</th><th>工具／服务</th><th>结果</th></tr></thead><tbody>{audit.map((entry, index) => <tr key={index}><td>{time(entry.at)}</td><td>{AUDIT[entry.action] || entry.action}<div className="ob-sub">{entry.detail?.reason}</div></td><td className="voice-mcp-cell-2">{entry.target}</td><td>{entry.result === "ok" ? "已记录" : entry.result === "denied" ? "已拒绝" : "未完成"}</td></tr>)}</tbody></table></div></details>}
-  </section>;
+  </div></VoiceGroup>;
 }

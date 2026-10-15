@@ -6,6 +6,7 @@ import VoiceHomeCard from "./components/VoiceHomeCard.jsx";
 import VoiceHomeApprovalCard from "./components/VoiceHomeApprovalCard.jsx";
 import VoiceSpeakerCard from "./components/VoiceSpeakerCard.jsx";
 import VoiceFirmwareCard from "./components/VoiceFirmwareCard.jsx";
+import VoiceContextCard from "./components/VoiceContextCard.jsx";
 import { voiceApi } from "./voiceApi.js";
 import "./styles.css";
 
@@ -36,6 +37,7 @@ export function VoicePrivatePage() {
       {error && <p role="alert">{error}</p>}
       <VoicePluginsCard />
       <VoiceMemoryCard status={status} />
+      <VoiceContextCard />
       <VoiceSpeakerCard />
       <VoiceFirmwareCard />
       <VoiceHomeCard />

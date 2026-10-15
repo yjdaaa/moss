@@ -1,5 +1,7 @@
 //! NV15 trusted desktop coordinator. Defaults to no control grant. Voice can
 //! only create an inert plan; a private desktop command must approve each plan.
+//! 2026-10-14 用户决定：不再用源码常量锁住。用户在私密窗口填好地址、令牌、勾选实体并
+//! 明确同意语音控制后即开启；每个动作仍逐次在桌面批准，结果未知时不自动重发。
 use std::{collections::HashMap,sync::{Arc,Mutex,Weak,atomic::{AtomicBool,Ordering}}};
 use laser_api::approval::{ApprovalService,NewApproval};
 use laser_contracts::{CallerContext,ApprovalKind,ApprovalSource,ApprovalConnection,ApprovalStatus};
@@ -10,8 +12,6 @@ use crate::{HostApplication,voice_home::{HomeCatalog,HomeAction,HomeControlPlan,
 use crate::voice_home::{approved::{HomeControlTransport,dispatch_approved},https_transport::HttpsHomeTransport};
 
 const GRANT:&str="voice.homeassistant.voice_control_consent";
-/// Actual control stays disabled until coordinator and transport acceptance.
-const PRODUCTION_CONTROL_READY:bool=false;
 fn now()->f64{std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64()}
 #[derive(Clone)]
 struct Pending { device:String,session:String,permit:Arc<AtomicBool>,active:Arc<AtomicBool>,fingerprint:String,plan:HomeControlPlan }
@@ -24,10 +24,6 @@ impl HomeControlCoordinator {
     pub fn attach(host:&Arc<HostApplication>)->Arc<Self>{Arc::new(Self{host:Arc::downgrade(host),pending:Mutex::new(HashMap::new()),send_fence:Mutex::new(()),
         #[cfg(test)] test_fixture:None,
     })}
-    fn control_ready(&self)->bool{
-        #[cfg(test)] if self.test_fixture.is_some(){return true;}
-        PRODUCTION_CONTROL_READY
-    }
     /// Stop queued approval execution immediately, even if an earlier network
     /// request is waiting. Does not revoke the unrelated voice session permit.
     pub fn invalidate_pending(&self)->Result<(),&'static str>{
@@ -70,9 +66,9 @@ impl HomeControlCoordinator {
             || nonce.is_none() {return Err("home_disabled");}
         Ok((config,policy,credential,grant))
     }
-    pub fn enabled(&self)->bool{self.control_ready() && self.profile().is_ok()}
+    /// 用户同意（GRANT）且地址、令牌、实体白名单齐全时开启；任一缺失即关闭。
+    pub fn enabled(&self)->bool{self.profile().is_ok()}
     pub fn consent(&self,enabled:bool,policy:u64,credential:u64,confirmed:bool)->Result<(),&'static str>{
-        if enabled && !self.control_ready(){return Err("home_control_disabled");}
         let host=self.host.upgrade().ok_or("home_disabled")?;
         if enabled && !confirmed{return Err("home_confirmation_required");}
         let _fence=self.send_fence.lock().map_err(|_|"home_unavailable")?;
@@ -136,7 +132,6 @@ impl HomeControlCoordinator {
         Ok((action,Value::Object(params)))
     }
     pub fn prepare(&self,device:&str,session:&str,name:&str,args:&Value)->Result<Value,&'static str>{
-        if !self.control_ready(){return Err("home_control_disabled");}
         let host=self.host.upgrade().ok_or("home_disabled")?;
         let context=CallerContext::Voice{device_id:device.into(),session_id:session.into()};
         let permit=host.api_service.external_voice_permit(&context).map_err(|_|"voice_session_revoked")?;
@@ -155,7 +150,6 @@ impl HomeControlCoordinator {
         Ok(json!({"approval_required":true,"approval_id":record.approval_id,"status":"pending"}))
     }
     pub fn can_approve(&self,id:&str)->bool{
-        if !self.control_ready(){return false;}
         let Ok(profile)=self.profile() else{return false;};
         let Ok(pending)=self.pending.lock() else{return false;};
         let Some(item)=pending.get(id) else{return false;};
@@ -165,9 +159,6 @@ impl HomeControlCoordinator {
             && ApprovalService::new(host.db.clone()).get(id).is_ok_and(|r|r.status==ApprovalStatus::Pending && r.expires_at>now())
     }
     pub fn approve(&self,id:&str,digest:&str,confirmed:bool)->Result<Value,&'static str>{
-        // Production HA control is not security-accepted. Never consume an
-        // approval or construct a network client while this gate is closed.
-        if !self.control_ready(){return Err("home_control_disabled");}
         if !confirmed{return Err("home_confirmation_required");}
         let host=self.host.upgrade().ok_or("home_disabled")?;
         let item=self.pending.lock().map_err(|_|"home_unavailable")?.get(id).cloned().ok_or("home_approval_unavailable")?;
@@ -311,14 +302,26 @@ mod tests {
     }
 
     #[test]
-    fn production_gate_rejects_grant_plan_and_approval_before_host_access() {
+    fn without_configuration_or_consent_nothing_is_planned_or_approved() {
         let manager=coordinator();
         assert!(!manager.enabled());
         assert!(!manager.can_approve("missing"));
-        assert_eq!(manager.consent(true,1,1,true),Err("home_control_disabled"));
-        assert_eq!(manager.prepare("fake","fake","hass_set_state",&json!({})),Err("home_control_disabled"));
-        assert_eq!(manager.approve("fake","fake",true),Err("home_control_disabled"));
+        assert_eq!(manager.consent(true,1,1,true),Err("home_disabled"));
+        assert_eq!(manager.prepare("fake","fake","hass_set_state",&json!({})),Err("home_disabled"));
+        assert_eq!(manager.approve("fake","fake",false),Err("home_confirmation_required"));
+        assert_eq!(manager.approve("fake","fake",true),Err("home_disabled"));
         assert!(manager.pending.lock().unwrap().is_empty());
+    }
+
+    /// 2026-10-14 起：配置齐全但用户没有同意（没有 GRANT）时，语音不能发起控制，也不显示为已开启。
+    #[test]
+    fn configured_but_unconsented_home_control_stays_off(){
+        let f=integrated(false);
+        f.host.db.lock().unwrap().delete_secret(GRANT).unwrap();
+        let plain=Arc::new(HomeControlCoordinator{host:Arc::downgrade(&f.host),pending:Mutex::new(HashMap::new()),send_fence:Mutex::new(()),test_fixture:None});
+        assert!(!plain.enabled());
+        assert_eq!(plain.prepare("synthetic-device","synthetic-session","hass_set_state",&json!({"entity":"台灯","action":"turn_on"})),Err("home_disabled"));
+        assert_eq!(f.calls.lock().unwrap().sends,0);
     }
 
     #[derive(Default)]

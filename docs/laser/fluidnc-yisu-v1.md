@@ -58,7 +58,7 @@ FluidNC 上游的 example_configs 中没有可证明匹配这块 G3 的样例。
   均不能被当作完成；失败不会自动重新发送文件。`failed` 可能意味着执行结果未知，不意味着机器已经停止。
 - 固件在 `ALARM:N` / `error:N` 之前发的说明行（`[MSG:INFO: ALARM: ...]`、`[MSG:ERR: ...]`）会拼进报错，
   例如 `ALARM:14 (Unhomed)`；错误码表覆盖 Grbl 1–40 与 FluidNC 60–181。
-- SD 脱机：`$File/ShowHash` 无返回哈希（固件未启用 HashFS）时仍执行，但结果带 `sd_hash_verified=false` 与警告；
+- SD 脱机：`$File/ShowHash` 无返回哈希（固件未启用 HashFS）时拒绝执行，不发 `$SD/Run`；
   文件读完的 `SD: <name>: Sent` 置进度 100%，再等 Idle 才 `completed`。
 - 0x18 是软件复位请求，写入成功不能证明物理停机，也不能替代独立硬件急停。
 

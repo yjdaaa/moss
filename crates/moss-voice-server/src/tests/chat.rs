@@ -923,3 +923,56 @@ fn real_local_fast_models_end_to_end() {
         tts: ("matcha-icefall-zh-en", TtsEngine::Matcha, 0),
     });
 }
+
+/// NV19-04: the optional retrieval hook injects labelled memory for real questions only;
+/// small talk still reaches the model without a search, stop words never reach either.
+#[tokio::test]
+async fn nv19_context_retrieval_hook_injects_memory_only_for_questions() {
+    use crate::context::fake_store::FakeStore;
+    use crate::context::retrieve::{ContextAccessProvider, ContextRetrieval, ContextRetriever};
+    use crate::context::service::ContextService;
+    use crate::context::{AccessContext, Applicability, Category, MemoryDraft, ScopeKey, ScopeKind, Source, SourceKind, TrustedScope, Verification};
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+    use crate::person_context::PersonScope;
+
+    struct Access;
+    impl ContextAccessProvider for Access {
+        fn access(&self, context: &ToolContext, _person: Option<&PersonScope>) -> Option<(AccessContext, Option<Applicability>)> {
+            let device = TrustedScope::device_grant(&context.device_id, 1).ok()?;
+            Some((AccessContext::voice(device, None, None).ok()?, Applicability::new("MOSS-550W", Some("1.2.0")).ok()))
+        }
+    }
+    let service = ContextService::new(Arc::new(FakeStore::default()));
+    let owner = AccessContext::desktop_private(vec![TrustedScope::device_grant("fake-device", 1).unwrap()]);
+    service
+        .create(&owner, MemoryDraft {
+            scope: ScopeKey::new(ScopeKind::Device, "fake-device").unwrap(),
+            category: Category::TroubleshootingExperience,
+            content: "边缘发黑时降低功率后改善".into(),
+            verification: Verification::Confirmed,
+            source: Source::new(SourceKind::UserEdit, None).unwrap(),
+            applicability: Some(Applicability::new("MOSS-550W", Some("1.2.0")).unwrap()),
+            expires_at: None,
+        }, 1.0)
+        .unwrap();
+    let retriever = ContextRetriever::new(service);
+    retriever.set_enabled(true);
+
+    for (text, expect_llm, expect_memory) in [("上次边缘发黑是怎么解决的", true, true), ("你好", true, false), ("急停", false, false)] {
+        let llm = Arc::new(FakeLlm::default());
+        let asr = Arc::new(FakeAsr { replies: Mutex::new(VecDeque::from([Ok(text.into())])), ..Default::default() });
+        let conversation = Conversation::new(asr, llm.clone(), Arc::new(FakeTts::default()), Arc::new(FastTools::default()), ConversationSettings::default())
+            .with_context_retrieval(ContextRetrieval { retriever: retriever.clone(), access: Arc::new(Access) });
+        let context = ToolContext { device_id: "fake-device".into(), session_id: "fake-session".into() };
+        let (handle, mut events) = spawn_turn(Arc::new(conversation), context, TurnInput::Utterance { pcm: vec![0; 960], sample_rate: UP, stream: None }, vec![], None);
+        while let Some(event) = events.recv().await {
+            let _: TurnEvent = event;
+        }
+        handle.await.unwrap();
+        let seen = llm.seen.lock().unwrap();
+        assert_eq!(!seen.is_empty(), expect_llm, "{text}");
+        let injected = seen.iter().flat_map(|(messages, _)| messages.iter()).any(|m| m.role == Role::System && m.content.as_deref().is_some_and(|c| c.contains("长期记忆检索结果") && c.contains("降低功率")));
+        assert_eq!(injected, expect_memory, "{text}");
+    }
+    assert_eq!(retriever.searches(), 1, "只有真正的问题会查库");
+}

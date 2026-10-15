@@ -85,3 +85,12 @@ test("workflow details are read from the record without inventing values", () =>
   assert.equal(empty.material, null);
   assert.equal(empty.duration, null);
 });
+
+test("家居控制只在私密窗口批准，全局审批卡只提醒并打开那里（2026-10-14）", async () => {
+  const { approvedInPrivateWindow, kindLabel } = await import("../src/approvalState.js");
+  assert.equal(approvedInPrivateWindow("home_control"), true);
+  for (const kind of ["workflow_confirm_send", "calibration_send", "safe_action", "framing", "external_tool"]) {
+    assert.equal(approvedInPrivateWindow(kind), false, kind);
+  }
+  assert.equal(kindLabel("home_control"), "控制家居设备");
+});

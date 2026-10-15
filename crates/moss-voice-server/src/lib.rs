@@ -18,6 +18,7 @@
 
 pub mod audio;
 mod barge;
+mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
 pub mod conversation;
 pub mod fast;
 pub mod vision;
@@ -28,6 +29,7 @@ pub mod person_context;
 pub mod home_tools;
 pub mod music;
 pub mod memory;
+pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod plugins;
 mod ota;
 mod session;

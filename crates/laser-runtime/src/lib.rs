@@ -1,5 +1,7 @@
 pub mod agent_store;
 pub mod config;
+pub mod context_store;
+pub mod knowledge_store;
 pub mod db;
 mod home_secret;
 pub mod migration;
@@ -7,6 +9,8 @@ pub mod root;
 pub mod store;
 
 pub use agent_store::AgentRunRecord;
+pub use context_store::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow};
+pub use knowledge_store::{KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
 pub use config::LaserSettings;
 pub use db::{
     MaterialConflictPolicy, RuntimeDb, SCHEMA_VERSION, SchemaError, VOICE_DEVICE_ALLOWED, VOICE_DEVICE_PENDING,
@@ -306,7 +310,14 @@ mod tests {
         // 退回 v3 状态，并放一张同名但结构未知的表让 v4 步骤失败
         db.connection
             .execute_batch(
-                "DROP TABLE approvals;
+                "DROP TABLE context_knowledge_fts;
+                 DROP TABLE context_knowledge_roots;
+                 DROP TABLE context_knowledge_dirs;
+                 DROP TABLE context_knowledge_files;
+                 DROP TABLE context_memories_fts;
+                 DROP TABLE context_memories;
+                 DROP TABLE context_extraction_runs;
+                 DROP TABLE approvals;
                  DROP TABLE voice_devices;
                  DROP TABLE voice_memory;
                  DROP TABLE voice_agent_runs;
@@ -385,6 +396,13 @@ mod tests {
             .execute_batch(
                 "ALTER TABLE approvals DROP COLUMN request;
                  DELETE FROM schema_version WHERE version>=5;
+                 DROP TABLE context_knowledge_fts;
+                 DROP TABLE context_knowledge_roots;
+                 DROP TABLE context_knowledge_dirs;
+                 DROP TABLE context_knowledge_files;
+                 DROP TABLE context_memories_fts;
+                 DROP TABLE context_memories;
+                 DROP TABLE context_extraction_runs;
                  DROP TABLE voice_devices;
                  DROP TABLE voice_memory;
                  DROP TABLE voice_agent_runs;
@@ -429,7 +447,7 @@ mod tests {
     #[test]
     fn nv10_voice_memory_v7_migration_failure_is_atomic() {
         let db = RuntimeDb::open_memory().unwrap();
-        db.connection.execute_batch("DROP TABLE voice_memory; DROP TABLE voice_agent_runs; DELETE FROM schema_version WHERE version>=7; CREATE TABLE voice_memory(unexpected TEXT);").unwrap();
+        db.connection.execute_batch("DROP TABLE context_knowledge_fts; DROP TABLE context_knowledge_roots; DROP TABLE context_knowledge_dirs; DROP TABLE context_knowledge_files; DROP TABLE context_memories_fts; DROP TABLE context_memories; DROP TABLE context_extraction_runs; DROP TABLE voice_memory; DROP TABLE voice_agent_runs; DELETE FROM schema_version WHERE version>=7; CREATE TABLE voice_memory(unexpected TEXT);").unwrap();
         assert_eq!(db.schema_version().unwrap(), 6);
         assert!(db.migrate().is_err());
         assert_eq!(db.schema_version().unwrap(), 6);

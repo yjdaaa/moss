@@ -36,6 +36,12 @@ MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 - 仅在明确点击后，Rust 原生系统文件选择器选单个文件；命令不接受路径参数，也不把路径交给前端。只读有界分类返回固定风险类别、字节数和 `safe_to_share=false`，未知始终视为敏感；不能用于验证历史备份已完全脱敏，不读取真实文件进行自动化验收。
 - Windows 实际文件选择、取消、拒绝链接和 GUI 错误呈现仍需用户使用安装版手工确认。
 
+### 2026-10-14 NV19-08 长期记忆
+
+- 新增 `capabilities/voice-context.json`，只授予 `voice-private`、没有 `remote` 与 `webviews`；两条命令 `voice_context_manage`、`voice_context_pick_folder` 开头都调用 `require_voice_private_asset`。资料文件夹只能经原生对话框选择，路径不回传前端。
+- `VoiceContextCard` 只挂在 `voicePrivate.jsx`，主窗口 `/voice` 页面不引用它，也不调用这两条命令（`voicePrivacyAcl.test.mjs` 与 `moss-desktop` 的 `voice_context_permissions_are_packaged_private_window_only` 检查）。主窗口的 `voice_save_settings` 不接受 `builtin_context`，不能打开检索 / 提取或更换当前项目（`moss-voice` center 测试）。
+- 仍需在安装版的真实 WebView2 中点击验收（HW-17）。
+
 ## 验证
 
 - Rust `moss-desktop` ACL 检查：remote/wildcard/default 中没有敏感权限，专用 capability 限定 `voice-private` 且缺省不启用 remote；敏感函数额外校验页面来源，恶意主窗口、其他 HTTP、伪造端口、路径与 query/fragment 均拒绝。

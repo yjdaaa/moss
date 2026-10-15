@@ -386,13 +386,16 @@ impl VoiceCenter {
             }
             return Err(CenterError::new("voice_settings_write_failed", 500, error));
         }
-        if reconnect {
-            self.hooks.restart_bridge();
-        }
+        // `reconnected`：本次保存是否重新发起了接入点连接（且有桥启动）；握手结果看 `bridge.connected`
+        let reconnected = reconnect && self.hooks.restart_bridge();
         if let Ok(mut health) = self.health.lock() {
             *health = HealthSnapshot::default();
         }
-        Ok(self.status())
+        let mut status = self.status();
+        if let Some(object) = status.as_object_mut() {
+            object.insert("reconnected".into(), reconnected.into());
+        }
+        Ok(status)
     }
 
     // ---------- 链路切换 ----------
@@ -911,9 +914,11 @@ mod tests {
         assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(other));
         assert_eq!(host.restarts.load(Ordering::SeqCst), 1);
         assert_eq!(status["settings"]["official_mcp_endpoint"], "wss://official.example/mcp/?token=***");
+        assert_eq!(status["reconnected"], true);
         // 相同地址再保存不重连
-        center.save_settings(&serde_json::json!({"official_mcp_endpoint": other})).unwrap();
+        let status = center.save_settings(&serde_json::json!({"official_mcp_endpoint": other})).unwrap();
         assert_eq!(host.restarts.load(Ordering::SeqCst), 1);
+        assert_eq!(status["reconnected"], false);
         center.save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED})).unwrap();
         center.set_mode(VoiceMode::SelfHosted).unwrap();
         let restarts = host.restarts.load(Ordering::SeqCst);
@@ -983,15 +988,28 @@ mod tests {
         assert_eq!(voice.server_port, 8100);
         center.save_settings(&serde_json::json!({"builtin_person_memory_enabled":true})).unwrap();
         assert!(!center.settings().builtin_person_memory_enabled, "普通窗口设置不能绕过私有窗口的标定与同意门禁");
+        center.save_settings(&serde_json::json!({"builtin_context":{"retrieval":true,"extraction":true,"project_id":"p-x"}})).unwrap();
+        assert_eq!(center.settings().builtin_context, crate::settings::BuiltinContext::default(), "主窗口设置不能打开长期记忆或改当前项目");
         center.set_mode(VoiceMode::SelfHosted).unwrap();
         let restarts = host.restarts.load(Ordering::SeqCst);
         // 留空表示不改
-        center.save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": ""})).unwrap();
+        let status = center.save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": ""})).unwrap();
         assert_eq!(host.restarts.load(Ordering::SeqCst), restarts);
+        assert_eq!(status["reconnected"], false, "没有重连时不能报告已重连");
+        let status = center.save_settings(&serde_json::json!({"endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=k"})).unwrap();
+        assert_eq!(host.restarts.load(Ordering::SeqCst), restarts);
+        assert_eq!(status["reconnected"], false, "只改健康检查地址不重连");
         let other = "ws://127.0.0.1:8005/mcp_endpoint/mcp/?token=other";
-        center.save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": other})).unwrap();
+        let status = center.save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": other})).unwrap();
         assert_eq!(host.restarts.load(Ordering::SeqCst), restarts + 1);
+        assert_eq!(status["reconnected"], true);
         assert_eq!(host.endpoints.lock().unwrap().last().unwrap().as_deref(), Some(other));
+        // 发起了重连但没有桥启动：不能报告正在重连
+        host.bridge_ok.store(false, Ordering::SeqCst);
+        let status = center.save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED})).unwrap();
+        assert_eq!(host.restarts.load(Ordering::SeqCst), restarts + 2);
+        assert_eq!(status["reconnected"], false);
+        host.bridge_ok.store(true, Ordering::SeqCst);
         assert_eq!(center.save_settings(&serde_json::json!({"clear_self_hosted_mcp_endpoint": true})).unwrap_err().code, "voice_settings_invalid");
     }
 

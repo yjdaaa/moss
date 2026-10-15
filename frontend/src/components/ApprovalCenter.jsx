@@ -8,6 +8,7 @@ import { extractWorkflowInfo, normalizeWorkflowStatus, TERMINAL_STATUSES } from 
 import {
   APPROVAL_POLL_MS,
   approvalCheckText,
+  approvedInPrivateWindow,
   approvalErrorText,
   canApprove,
   clockOffsetSeconds,
@@ -21,6 +22,7 @@ import {
   workflowDetails,
 } from "../approvalState.js";
 import { SendOverlay } from "./SendOverlay.jsx";
+import { voiceApi } from "../voiceApi.js";
 import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } from "../approvalJobMonitor.js";
 
 const SOURCE_SHORT = { mcp_bridge: "小智", lan: "局域网设备", gateway: "小智" };
@@ -240,6 +242,15 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
   const approvalOpen = open && shown;
   const percent = shown && ttl > 0 ? Math.max(0, Math.min(100, (remaining / ttl) * 100)) : 0;
   const isWorkflow = shown?.kind === "workflow_confirm_send";
+  const privateOnly = approvedInPrivateWindow(shown?.kind);
+  const openPrivateApproval = async () => {
+    try {
+      await voiceApi.openPrivateSettings();
+      onOpenChange?.(false);
+    } catch (error) {
+      setFailure({ code: "", text: `无法打开私密设置窗口：${error?.message || error}` });
+    }
+  };
 
   return (
     <>
@@ -251,7 +262,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                 <ShieldAlert size={18} aria-hidden="true" />
                 <span>{SOURCE_SHORT[shown.source] || "远程"}请求{kindLabel(shown.kind)}</span>
               </h3>
-              <span className="approval-tag">{shown.kind === "external_tool" ? "第三方工具 · 本次批准" : "R3 · 运动与出光"}</span>
+              <span className="approval-tag">{shown.kind === "external_tool" ? "第三方工具 · 本次批准" : privateOnly ? "家居控制 · 私密窗口批准" : "R3 · 运动与出光"}</span>
             </div>
             <div className="mat-modal-body">
               {pending.length > 1 && (
@@ -304,6 +315,9 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                   <span>过期后需重新发起</span>
                 </div>
               )}
+              {privateOnly ? (
+                <div className="voice-hint" id="approval-private-hint">家居控制要在“私密设置”窗口的“家居控制审批”里核对参数后批准；批准后会实际操作设备。不确定时请拒绝。</div>
+              ) : (
               <label className="approval-check">
                 <input
                   type="checkbox"
@@ -314,6 +328,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                 />
                 <span>{approvalCheckText(shown.kind)}</span>
               </label>
+              )}
               {failure && (
                 <div className="approval-error" role="alert" id="approval-error">{failure.text}</div>
               )}
@@ -331,6 +346,11 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                   <button type="button" className="btn btn-danger" id="approval-reject" onClick={handleReject} disabled={busy}>
                     拒绝
                   </button>
+                  {privateOnly ? (
+                    <button type="button" className="btn btn-primary" id="approval-open-private" onClick={openPrivateApproval} disabled={busy}>
+                      去私密窗口审批
+                    </button>
+                  ) : (
                   <button
                     type="button"
                     className="btn btn-primary"
@@ -340,6 +360,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                   >
                     {busy ? "正在处理…" : shown.kind === "external_tool" ? "批准本次调用" : "批准并开始"}
                   </button>
+                  )}
                 </>
               )}
             </div>
