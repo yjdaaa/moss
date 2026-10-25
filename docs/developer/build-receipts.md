@@ -2,6 +2,22 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 私有仓库 `v0.1.0` 交付安装包构建（Windows 完整离线语音版 / 常规版 / Android 签名版，2026-10-25）
+
+基于 `main` 分支（含 macOS 跨平台运行与打包脚本、Unix 本机 Agent 进程组与 CLI 自动读取、换设备迁移路径降级兜底、Windows 静态内嵌 VC++ 运行库、跨电脑系统字体按字形选字及中英文双语 README）完成全量测试后，重新执行前端生产构建、带 `moss-voice-local` sidecar 的 Windows 专用 NSIS 构建、常规 Windows NSIS 构建与 Android `aarch64` 签名 APK 构建，并经用户授权上传至私有仓库 `yjdaaa/moss` 的 `v0.1.0` Release。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-25） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| 专用 `target/x86_64-pc-windows-msvc/release/moss-voice-local.exe` | 08:58:27 | 20,862,464 | `4799237bad7d9b1589fd8d14aed92772bc8d36777cfe7700cb1c66d423191945` |
+| 专用 `target/x86_64-pc-windows-msvc/release/moss-desktop.exe` | 09:21:25 | 61,456,896 | `53d907af148bf13d069fb73ce1a1906c365285d6925f52675e18bf399026be1e` |
+| 专用带离线语音 `target/x86_64-pc-windows-msvc/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 09:21:25 | 735,182,650 | `e9cd328e13d544f69a1d1b3c7d2b4713b51b2ed93fa14ecb371f31cdc146f412` |
+| 常规 `target/release/moss-desktop.exe` | 09:25:27 | 61,465,600 | `71a3882de3785785d93c2d8ee20a0cda8503b5451e7dd5a9bfa392cfd9d65537` |
+| 常规 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 09:25:27 | 19,381,014 | `c5bbcbcccf04d337e1d69ca6913a4709b946eb48765b8b611a5feca45a77aca9` |
+| Android `target/aarch64-linux-android/release/libmoss_desktop_lib.so` | 09:29:44 | 48,250,072 | `4236c4956342e57d262da0c4ffdda7ba42b62e46d353e64b458b3b54075f53ab` |
+| Android `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 09:31:12 | 53,971,214 | `0b29908b59488b3aec17cebe8e566fbc79053289d4e8b1360f963837491a8bd3` |
+
+**未验证**：当前构建宿主为 Windows，macOS `.app`/`.dmg` 未在本机编译；全新干净 Windows 虚拟机安装/卸载、Android 手机实机覆盖安装与连接真实激光雕刻硬件未在本轮执行；专用包仅供用户私有仓库内部使用（上游静态依赖许可证公开分发审计仍受 §2c 约束）。
+
 ## 雕刻工作台默认布局改为「左窄右宽」双栏排布并自动对齐左右底边（2026-10-23）
 
 更新 `workbenchLayout.js`、`WorkbenchCanvas.jsx`、`HomePage.jsx`、`styles.css`：① `DEFAULT_LAYOUT` 由三栏改为**左窄右宽双栏**默认排布——左栏（16 列）竖排「通信链路 (`h: 23`)」「加工内容 (`h: 27`)」「材质与参数 (`h: 23`)」，右栏（32 列）上方「加工监视舱 (`h: 64`)」、下方紧贴「加工反馈 (`h: 10`)」，并将 `LAYOUT_VERSION` 升至 `5` 使旧三栏缓存自动切换为新双栏默认布局，彻底消除原独立第三列下半截的大块空位；② `WorkbenchCanvas.jsx` 新增 `alignDualColumns`（配合 `.ob-monitor .chamber-viewport` 最小高度调至 `180px`），在双栏默认列位置且未手动拖拽过 `monitor` 高度时，让 `monitor` 自动随左栏总高度伸缩，保持首屏、切换加工内容模式及折叠/展开左栏卡片时左右两栏底边始终齐平。本次工作树：前端 `npm test` **145 PASS**、`tests/workbench-layout.browser.mjs` **PASS**、`npm run build` 成功、`npm run test:e2e` **32/32 PASS**；Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布。
