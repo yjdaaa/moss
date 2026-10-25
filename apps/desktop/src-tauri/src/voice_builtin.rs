@@ -47,6 +47,27 @@ pub(crate) fn require_voice_private_asset(window: &tauri::WebviewWindow) -> Resu
     Ok(())
 }
 
+/// 敏感语音设置窗口：打包的私密页，或经 [`crate::window_is_trusted_main`] 确认的 MOSS 主窗口。
+///
+/// 2026-10-18 用户决定（技术书 n26）：记忆、信息服务、声纹、家居四项在主语音页就地展开，
+/// 主窗口因此获得这些设置命令；固件导入与推送不在此列，仍只认 [`require_voice_private_asset`]。
+#[cfg(desktop)]
+pub(crate) fn require_private_settings_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
+    let packaged_private = window.url().is_ok_and(|url| {
+        is_voice_private_asset(
+            window.label(), url.scheme(), url.host_str(), url.port(),
+            url.path(), url.query(), url.fragment(),
+        )
+    });
+    if packaged_private || crate::window_is_trusted_main(window) {
+        return Ok(());
+    }
+    Err(serde_json::json!({
+        "code": "voice_acl_denied",
+        "message": "私人记忆、信息服务、声纹与家居设置只能在 MOSS 主窗口或本机安全设置窗口修改"
+    }))
+}
+
 /// 主窗口专用命令：只接受后端地址上的 `main` 窗口（见 [`crate::is_trusted_main`]）。
 #[cfg(desktop)]
 fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
@@ -190,6 +211,56 @@ mod imp {
             .unwrap();
             assert!(saved);
             assert_eq!(db.get_secret("voice.vision.main").unwrap().as_deref(), Some("key"));
+        }
+    }
+
+    #[cfg(test)]
+    mod vision_credentials_tests {
+        use super::vision_credentials;
+        use moss_voice::models::ProviderKind;
+        use moss_voice::settings::{BuiltinProvider, BuiltinVision};
+
+        fn provider(kind: ProviderKind) -> BuiltinProvider {
+            BuiltinProvider {
+                kind,
+                url: "https://llm.example.test/v1".into(),
+                model: "main-model".into(),
+                voice: String::new(),
+                speed: 1.0,
+            }
+        }
+
+        #[test]
+        fn independent_vision_needs_its_own_key() {
+            let setting = BuiltinVision { enabled: true, url: "https://vision.example.test/v1".into(), model: "vl-1".into(), use_dialog_llm: false, keep_in_history: false };
+            assert!(vision_credentials(&setting, None, None, Some("llm-key")).is_none(), "独立的视觉模型没有密钥就不能用");
+            assert_eq!(
+                vision_credentials(&setting, None, Some("vision-key"), Some("llm-key")),
+                Some(("https://vision.example.test/v1".into(), "vl-1".into(), "vision-key".into()))
+            );
+        }
+
+        #[test]
+        fn dialog_llm_mode_uses_the_conversation_model_and_key() {
+            let setting = BuiltinVision { enabled: true, url: String::new(), model: String::new(), use_dialog_llm: true, keep_in_history: false };
+            let openai = provider(ProviderKind::Openai);
+            assert_eq!(
+                vision_credentials(&setting, Some(&openai), Some("vision-key"), Some("llm-key")),
+                Some(("https://llm.example.test/v1".into(), "main-model".into(), "llm-key".into())),
+                "多模态模式用对话模型的地址 / 模型名 / 密钥，视觉专用密钥与地址都不参与"
+            );
+            assert!(vision_credentials(&setting, Some(&openai), Some("vision-key"), None).is_none(), "对话模型没有密钥就不能用");
+            assert!(vision_credentials(&setting, None, Some("vision-key"), Some("llm-key")).is_none(), "没有配置对话模型就不能用");
+        }
+
+        #[test]
+        fn dialog_llm_mode_refuses_non_openai_and_disabled() {
+            let mut setting = BuiltinVision { enabled: true, url: String::new(), model: String::new(), use_dialog_llm: true, keep_in_history: false };
+            let doubao = provider(ProviderKind::Doubao);
+            assert!(vision_credentials(&setting, Some(&doubao), None, Some("llm-key")).is_none(), "非 OpenAI 兼容的对话模型不能看图");
+            setting.enabled = false;
+            let openai = provider(ProviderKind::Openai);
+            assert!(vision_credentials(&setting, Some(&openai), Some("k"), Some("k")).is_none(), "总开关关着就不提供");
         }
     }
 
@@ -399,33 +470,136 @@ mod imp {
 
     /// NV12: fresh signed-in device permission and fresh user configuration are
     /// consulted for every image; snapshots are never logged or stored as conversation history.
+    /// 2026-10-16：`use_dialog_llm` 打开时改用当前对话大模型的地址 / 模型名与 `voice.llm.main` 密钥，
+    /// 仍然只发这一次请求、不进对话历史；对话模型必须 OpenAI 兼容且支持看图。
+    fn vision_credentials(
+        setting:&moss_voice::settings::BuiltinVision,
+        llm:Option<&moss_voice::settings::BuiltinProvider>,
+        vision_key:Option<&str>,
+        llm_key:Option<&str>,
+    )->Option<(String,String,String)>{
+        if !setting.enabled{return None;}
+        let usable=|url:&str,model:&str,key:&str|{
+            !model.trim().is_empty()&&!key.trim().is_empty()
+                &&moss_voice_providers::vision::endpoint(url).is_ok()
+        };
+        if setting.use_dialog_llm{
+            let llm=llm.filter(|llm|llm.kind.is_openai())?;
+            let key=llm_key?;
+            return usable(&llm.url,&llm.model,key).then(||(llm.url.clone(),llm.model.clone(),key.to_owned()));
+        }
+        let key=vision_key?;
+        usable(&setting.url,&setting.model,key).then(||(setting.url.clone(),setting.model.clone(),key.to_owned()))
+    }
     struct DesktopVisionFactory { host: Arc<laser_host::HostApplication> }
     impl DesktopVisionFactory {
-        fn profile(&self) -> Option<(moss_voice::settings::BuiltinVision, String, u64)> {
+        fn vision_setting(&self)->moss_voice::settings::BuiltinVision {
+            moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json")).builtin_vision
+        }
+        /// 返回（地址、模型、密钥、配置修订号）。
+        fn profile(&self) -> Option<(String,String,String,u64)> {
             use std::hash::{Hash,Hasher};
-            let setting=moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json")).builtin_vision;
-            if !setting.enabled || setting.model.trim().is_empty()
-                || moss_voice_providers::vision::endpoint(&setting.url).is_err() {return None;}
-            let key=self.host.db.lock().ok()?.get_secret("voice.vision.main").ok()??;
-            if key.trim().is_empty(){return None;}
+            let settings=moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json"));
+            let setting=settings.builtin_vision;
+            let (vision_key,llm_key)={
+                let db=self.host.db.lock().ok()?;
+                (db.get_secret("voice.vision.main").ok().flatten(),db.get_secret("voice.llm.main").ok().flatten())
+            };
+            let (url,model,key)=vision_credentials(&setting,settings.builtin_models.llm.as_ref(),vision_key.as_deref(),llm_key.as_deref())?;
             let mut hasher=std::collections::hash_map::DefaultHasher::new();
-            setting.url.hash(&mut hasher);
-            setting.model.hash(&mut hasher);
             setting.enabled.hash(&mut hasher);
+            setting.use_dialog_llm.hash(&mut hasher);
+            url.hash(&mut hasher);
+            model.hash(&mut hasher);
             key.hash(&mut hasher);
-            let revision=hasher.finish();
-            Some((setting,key,revision))
+            Some((url,model,key,hasher.finish()))
         }
     }
     impl moss_voice_server::vision::VisionFactory for DesktopVisionFactory {
         fn ready(&self)->bool {self.profile().is_some()}
         fn open(&self)->Option<moss_voice_server::vision::VisionSession>{
-            let (setting,key,generation)=self.profile()?;
-            let provider=moss_voice_providers::vision::OpenAiVision::new(&setting.url,&setting.model,&key).ok()?;
+            let (url,model,key,generation)=self.profile()?;
+            let provider=moss_voice_providers::vision::OpenAiVision::new(&url,&model,&key).ok()?;
             Some(moss_voice_server::vision::VisionSession{provider:Arc::new(provider),generation})
         }
         fn still_current(&self,generation:u64)->bool{
-            self.profile().is_some_and(|(_,_,revision)|revision==generation)
+            self.profile().is_some_and(|(_,_,_,revision)|revision==generation)
+        }
+        /// 2026-10-16：视觉卡片打开“把照片留在对话上下文里”时，服务端才会把这张照片交给会话。
+        fn keep_in_history(&self)->bool{
+            let setting=self.vision_setting();
+            setting.enabled&&setting.keep_in_history
+        }
+    }
+
+    /// NV17 固件 OTA（2026-10-15）：推送记录在 SQLite，固件文件在运行目录 `firmware/<sha256>.bin`。
+    struct DesktopFirmwareHost { db: Arc<Mutex<laser_runtime::RuntimeDb>>, dir: std::path::PathBuf }
+    /// 推送有效期：设备在这段时间内开机检查更新才会拿到。
+    const FIRMWARE_OFFER_SECONDS: f64 = 24.0 * 3600.0;
+    use moss_voice_server::firmware::sha256_hex;
+    fn random_hex(len: usize) -> Result<String, CenterError> {
+        let mut bytes = vec![0u8; len / 2];
+        getrandom::fill(&mut bytes).map_err(|_| internal("随机数生成失败"))?;
+        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    }
+    impl moss_voice_server::firmware::FirmwareHost for DesktopFirmwareHost {
+        fn offer(&self, device_id: &str, current_version: &str) -> Option<(String, String)> {
+            let (version, token) = self.db.lock().ok()?.active_firmware_offer(device_id, now()).ok()??;
+            moss_voice_server::firmware::is_newer(&version, current_version).then_some((version, token))
+        }
+        fn fetch(&self, token: &str, peer: &str) -> Option<Vec<u8>> {
+            let db = self.db.lock().ok()?;
+            let offer = db.firmware_offer_by_token(token, now()).ok()??;
+            // 令牌只给这台设备：下载方必须是这台已允许设备最近一次请求 OTA 的地址
+            let device = db.voice_device(&offer.device_id).ok()??;
+            if !device.is_allowed() || device.last_ip != peer {
+                return None;
+            }
+            drop(db);
+            let bytes = std::fs::read(self.dir.join(format!("{}.bin", offer.artifact_sha256))).ok()?;
+            if sha256_hex(&bytes) != offer.artifact_sha256 {
+                return None;
+            }
+            let db = self.db.lock().ok()?;
+            if offer.download_status == "pending" {
+                let _ = db.update_firmware_download_if_revision(&offer.delivery_id, offer.revision, "downloading", now());
+            }
+            Some(bytes)
+        }
+        fn reported(&self, device_id: &str, version: &str) {
+            if let Ok(db) = self.db.lock() {
+                let _ = db.firmware_device_reported(device_id, version, now());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod firmware_host_tests {
+        use super::*;
+        use moss_voice_server::firmware::FirmwareHost;
+        /// 下载必须来自这台已允许设备最近请求 OTA 的地址，文件按 SHA-256 核对，第一次下载记为“已开始下载”。
+        #[test]
+        fn download_is_bound_to_device_ip_and_verified_by_hash(){
+            let dir=tempfile::tempdir().unwrap();
+            let db=Arc::new(Mutex::new(laser_runtime::RuntimeDb::open_memory().unwrap()));
+            let bytes=vec![0xE9u8;2048];let sha=sha256_hex(&bytes);
+            std::fs::write(dir.path().join(format!("{sha}.bin")),&bytes).unwrap();
+            {let db=db.lock().unwrap();
+             db.voice_device_seen("dev","client","board","1.0.0","192.168.1.9",now()).unwrap();
+             db.set_voice_device_status("dev",laser_runtime::VOICE_DEVICE_ALLOWED,now()).unwrap();
+             db.add_firmware_artifact(&sha,"1.1.0","",2048,now()).unwrap();
+             db.create_firmware_offer("fw-1","dev",&sha,"1.1.0",&"a".repeat(32),now()+60.0,now()).unwrap();}
+            let host=DesktopFirmwareHost{db:db.clone(),dir:dir.path().to_path_buf()};
+            assert_eq!(host.offer("dev","1.0.0"),Some(("1.1.0".into(),"a".repeat(32))));
+            assert_eq!(host.offer("dev","1.1.0"),None,"不比设备新就不下发");
+            assert!(host.fetch(&"a".repeat(32),"192.168.1.50").is_none(),"别的地址拿不到");
+            assert_eq!(host.fetch(&"a".repeat(32),"192.168.1.9").unwrap().len(),2048);
+            assert_eq!(db.lock().unwrap().list_firmware_deliveries().unwrap()[0].download_status,"downloading");
+            std::fs::write(dir.path().join(format!("{sha}.bin")),b"tampered").unwrap();
+            assert!(host.fetch(&"a".repeat(32),"192.168.1.9").is_none(),"文件被改动就不发");
+            host.reported("dev","1.1.0");
+            assert_eq!(db.lock().unwrap().list_firmware_deliveries().unwrap()[0].device_report_status,"reported");
+            assert!(host.offer("dev","1.0.0").is_none(),"升级完成后不再下发");
         }
     }
 
@@ -517,6 +691,10 @@ mod imp {
         home_control:Arc<laser_host::home_control::HomeControlCoordinator>,
         /// 最近一次自动启动失败的原因（语音链路为内置服务时随 MOSS 启动）
         last_error: Mutex<Option<String>>,
+        /// 本地音乐目录换机或拔盘不可用时的降级提示（不阻断内置语音主服务启动）
+        music_warning: Mutex<Option<String>>,
+        /// 声纹模型或辅助程序未就绪时的降级提示（保持个人上下文隔离，不回退共享设备记忆）
+        speaker_warning: Mutex<Option<String>>,
         /// 本地模型下载与安装（运行目录 `models/`）
         models: ModelManager,
         /// 运行中的本地模型辅助程序（随内置服务启停）
@@ -568,7 +746,22 @@ mod imp {
             if let Ok(mut slot)=speaker_backend.personal.lock(){*slot=Some(Arc::downgrade(&personal));}
             if let Ok(db)=host.db.lock(){if db.recover_firmware_downloads(now()).is_err(){eprintln!("[moss-desktop] 固件下载记录恢复失败，固件传输仍禁用");}}
             let context = crate::voice_context::host::ContextHost::new(host.db.clone(), setting_path.clone());
-            Arc::new(BuiltinVoice { host, memory, speaker,speaker_backend,personal,identity,home_control, server: Mutex::new(None), last_error: Mutex::new(None), models, helper: Mutex::new(None), context })
+            Arc::new(BuiltinVoice {
+                host,
+                memory,
+                speaker,
+                speaker_backend,
+                personal,
+                identity,
+                home_control,
+                server: Mutex::new(None),
+                last_error: Mutex::new(None),
+                music_warning: Mutex::new(None),
+                speaker_warning: Mutex::new(None),
+                models,
+                helper: Mutex::new(None),
+                context,
+            })
         }))
     }
 
@@ -734,8 +927,20 @@ mod imp {
             let (retrieval, extraction) = self.context.hooks();
             conversation = conversation.with_context_retrieval(retrieval).with_context_extraction(extraction);
             if self.identity.valid_calibration().is_some() && self.settings().builtin_person_memory_enabled {
-                self.prepare_speaker_helper()?;
-                conversation=conversation.with_personal_context(self.personal.clone());
+                // 换设备后若尚未下载声纹模型，仍必须挂上个人上下文：未知身份绝不回退共享设备记忆，同时不阻断语音服务启动
+                match self.prepare_speaker_helper() {
+                    Ok(()) => {
+                        if let Ok(mut slot) = self.speaker_warning.lock() { *slot = None; }
+                    }
+                    Err(error) => {
+                        let warning = format!("声纹按人记忆暂未生效（{}）：当前按未知身份处理、不会回退共享设备记忆，请下载声纹模型后重启内置服务", error.message);
+                        eprintln!("[moss-desktop] {warning}");
+                        if let Ok(mut slot) = self.speaker_warning.lock() { *slot = Some(warning); }
+                    }
+                }
+                conversation = conversation.with_personal_context(self.personal.clone());
+            } else if let Ok(mut slot) = self.speaker_warning.lock() {
+                *slot = None;
             }
             if let Some(streaming) = streaming_asr {
                 conversation = conversation.with_streaming_asr(streaming);
@@ -798,16 +1003,11 @@ mod imp {
                     let settings = self.settings();
                     let (mut local, helper) = self.local_parts(&settings.builtin_local)?;
                     let mut conversation = self.conversation(&settings.builtin_models, &mut local, &settings.builtin_local)?;
-                    // No music scanning while disabled or chat unavailable.
-                    let music = if settings.builtin_music.enabled && conversation.is_some() {
-                        let index = Arc::new(moss_voice_server::music::MusicIndex::scan(
-                            std::path::Path::new(&settings.builtin_music.directory)
-                        ).map_err(|_| CenterError::new("music_invalid",400,"音乐目录不安全、不可读取或数量超出限制"))?);
-                        if let Some((chat,_)) = conversation.as_mut() {
-                            chat.tools = Arc::new(moss_voice_server::music::MusicTools::new(chat.tools.clone(),index.clone()));
-                        }
-                        Some(index)
-                    } else {None};
+                    // No music scanning while disabled or chat unavailable;换机或拔盘目录不可用时跳过音乐索引，不阻断内置语音主服务启动。
+                    let (music, next_music_warning) = scan_music_for_start(&settings.builtin_music, conversation.is_some());
+                    if let (Some(index), Some((chat, _))) = (&music, conversation.as_mut()) {
+                        chat.tools = Arc::new(moss_voice_server::music::MusicTools::new(chat.tools.clone(), index.clone()));
+                    }
                     let defaults = ServerConfig::default();
                     let playback_start_ms = match &conversation {
                         Some((_, true)) => STREAMING_PLAYBACK_START_MS,
@@ -820,6 +1020,7 @@ mod imp {
                         conversation: conversation.map(|(conversation, _)| Arc::new(conversation)),
                         music,
                         vision: Some(Arc::new(DesktopVisionFactory { host: self.host.clone() })),
+                        firmware: Some(Arc::new(DesktopFirmwareHost { db: self.host.db.clone(), dir: self.firmware_dir() })),
                         vad_factory: local.vad.take(),
                         barge_in: settings.builtin_local.barge_in,
                         barge_in_ms: settings.builtin_local.barge_in_ms,
@@ -832,6 +1033,9 @@ mod imp {
                     *guard = Some(server);
                     if let Ok(mut slot) = self.helper.lock() {
                         *slot = helper;
+                    }
+                    if let Ok(mut slot) = self.music_warning.lock() {
+                        *slot = next_music_warning;
                     }
                     // 顶栏：服务已运行、还没有设备连接
                     laser_host::set_voice_device_sessions(Some(0));
@@ -847,6 +1051,8 @@ mod imp {
             self.personal.directory_changed();
             let _=self.speaker.cancel();
             if let Ok(mut helper)=self.speaker_backend.helper.lock(){*helper=None;}
+            if let Ok(mut slot)=self.music_warning.lock(){*slot=None;}
+            if let Ok(mut slot)=self.speaker_warning.lock(){*slot=None;}
             let server = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
             if let Some(server) = server {
                 server.stop();
@@ -1030,36 +1236,29 @@ mod imp {
 
         /// NV13 desktop-only inert configuration. Live execution remains locked
         /// until separately authorized real CLI sandbox-negative tests succeed.
+        pub fn agent_stop(&self,run_id:&str)->Value{
+            let stopped=self.host.api_service.agent_stop(run_id);
+            let mut status=self.agent_status();
+            status["stopped"]=Value::Bool(stopped);
+            status
+        }
         pub fn agent_status(&self)->Value{
             let mut status=self.host.api_service.agent_status();
             status["settings"]=serde_json::to_value(self.settings().builtin_agents).unwrap_or(Value::Null);
             status
         }
+        /// NV13 Agent 配置（2026-10-15 起可开启；2026-10-25 支持留空自动读取本机 CLI 与换机自动适配）：
+        /// 开启时必须有工作目录，且本机至少有一个手动填写或自动检测到的 CLI；每次运行仍要桌面批准并要求严格模式。
         pub fn agent_save(&self,input:&Value)->Result<Value,CenterError>{
+            use laser_host::voice_agent::detect_cli;
             use moss_voice::settings::BuiltinAgents;
             let invalid=|message:&str|CenterError::new("agent_config_invalid",400,message);
-            let config:BuiltinAgents=serde_json::from_value(input.clone())
+            let raw:BuiltinAgents=serde_json::from_value(input.clone())
                 .map_err(|_|invalid("Agent 配置格式无效"))?;
-            if config.enabled {
-                return Err(CenterError::new("agent_sandbox_unavailable",409,"CLI 只读沙箱尚未通过权限负向测试，暂不允许启动 Agent"));
-            }
-            for text in [&config.workspace,&config.codex_executable,&config.claude_executable] {
-                if text.len()>1024{return Err(invalid("Agent 路径最长 1024 字节"));}
-            }
+            let mut settings=self.settings();
             let sensitive=[self.host.runtime_root.path.clone()];
-            if !config.workspace.is_empty() {
-                laser_host::voice_agent::workspace(std::path::Path::new(&config.workspace),&sensitive)
-                    .map_err(|_|invalid("工作目录必须为现有、独立、非敏感的本地目录"))?;
-            }
-            if !config.codex_executable.is_empty() {
-                laser_host::voice_agent::executable(std::path::Path::new(&config.codex_executable),laser_host::voice_agent::Provider::Codex)
-                    .map_err(|_|invalid("Codex 必须是明确选定的 codex.exe，不接受脚本或快捷方式"))?;
-            }
-            if !config.claude_executable.is_empty() {
-                laser_host::voice_agent::executable(std::path::Path::new(&config.claude_executable),laser_host::voice_agent::Provider::ClaudeCode)
-                    .map_err(|_|invalid("Claude 必须是明确选定的 claude.exe，不接受脚本或快捷方式"))?;
-            }
-            let mut settings=self.settings();settings.builtin_agents=config;
+            let config=normalize_agent_save(raw,&settings.builtin_agents,&sensitive,detect_cli)?;
+            settings.builtin_agents=config;
             moss_voice::settings::save(&self.settings_file(),&settings)
                 .map_err(|_|CenterError::new("agent_save_failed",500,"Agent 配置保存失败"))?;
             Ok(self.agent_status())
@@ -1071,10 +1270,16 @@ mod imp {
         /// validates only the requested local folder.
         pub fn music_status(&self) -> Value {
             let settings = self.settings();
+            let warning = if settings.builtin_music.enabled {
+                self.music_warning.lock().ok().and_then(|slot| slot.clone())
+            } else {
+                None
+            };
             serde_json::json!({
                 "settings":settings.builtin_music,
                 "running":self.running(),
-                "requires_chat":true
+                "requires_chat":true,
+                "warning":warning
             })
         }
         pub fn music_save(&self, input:&Value) -> Result<Value, CenterError> {
@@ -1098,6 +1303,9 @@ mod imp {
             settings.builtin_music=config;
             moss_voice::settings::save(&self.settings_file(),&settings)
                 .map_err(|_|CenterError::new("music_save_failed",500,"音乐配置写入失败"))?;
+            if let Ok(mut slot) = self.music_warning.lock() {
+                *slot = None;
+            }
             let restarted=self.running();
             if restarted { self.stop(); self.start()?; }
             let mut result=self.music_status();
@@ -1113,8 +1321,8 @@ mod imp {
             let (key_configured,credential_revision)=match credentials {
                 Some(status)=>status,
                 None=>{
-                    // A copied SQLite file may hold an un-decryptable DPAPI
-                    // blob from another Windows account. Permit ONLY private
+                    // A copied SQLite file may hold an un-decryptable DPAPI or Keychain
+                    // envelope from another device or OS account. Permit ONLY private
                     // window import/recovery with revision CAS, not use of the
                     // foreign bearer nor any read/control authority.
                     let recover=self.host.db.lock().ok()
@@ -1127,7 +1335,7 @@ mod imp {
                             "key_configured":false,"ready":false,"can_control":false,
                             "voice_read_enabled":false,"voice_control_enabled":false,
                             "recovery_only":true,
-                            "reason":"旧凭据可能属于其他 Windows 账户或已损坏；只能导入安全配置并撤销旧密文，随后重新设置令牌。旧控制和只读授权不可用"
+                            "reason":"旧凭据可能来自其他设备、其他系统账户或已损坏；只能导入安全配置并撤销旧密文，随后重新设置令牌。旧控制和只读授权不可用"
                         });
                     }
                     return serde_json::json!({
@@ -1454,10 +1662,23 @@ mod imp {
         /// NV12: private desktop-only settings and API-key presence. Never return the key.
         pub fn vision_status(&self)->Value{
             use moss_voice_server::vision::VisionFactory;
-            let settings=self.settings().builtin_vision;
-            let key_configured=self.host.db.lock().ok().and_then(|db|db.get_secret("voice.vision.main").ok().flatten()).is_some_and(|s|!s.is_empty());
+            let settings=self.settings();
+            let vision=settings.builtin_vision;
+            let key_configured=self.host.db.lock().ok().and_then(|db|db.get_secret("voice.vision.main").ok().flatten()).is_some_and(|s|!s.trim().is_empty());
+            // 2026-10-16：只回对话模型的地址与模型名，用于卡片显示“照片会发给谁”，不回密钥。
+            let dialog_llm=match settings.builtin_models.llm.as_ref(){
+                Some(llm)=>{
+                    let key=self.host.db.lock().ok().and_then(|db|db.get_secret("voice.llm.main").ok().flatten()).is_some_and(|s|!s.trim().is_empty());
+                    serde_json::json!({
+                        "configured":llm.kind.is_openai()&&!llm.model.trim().is_empty()
+                            &&moss_voice_providers::vision::endpoint(&llm.url).is_ok()&&key,
+                        "url":llm.url,"model":llm.model,
+                    })
+                },
+                None=>serde_json::json!({"configured":false,"url":"","model":""}),
+            };
             let ready=DesktopVisionFactory{host:self.host.clone()}.ready();
-            serde_json::json!({"settings":settings,"key_configured":key_configured,"ready":ready})
+            serde_json::json!({"settings":vision,"key_configured":key_configured,"ready":ready,"dialog_llm":dialog_llm})
         }
 
         pub fn vision_save(&self,input:&Value)->Result<Value,CenterError>{
@@ -1466,7 +1687,15 @@ mod imp {
             let next:BuiltinVision=serde_json::from_value(input.get("settings").cloned().unwrap_or(Value::Null))
                 .map_err(|_|invalid("视觉配置格式错误"))?;
             if next.url.len()>1024||next.model.len()>200 {return Err(invalid("模型名称或地址太长"));}
-            if next.enabled && (next.model.trim().is_empty() || moss_voice_providers::vision::endpoint(&next.url).is_err()){
+            // 2026-10-16：对话大模型看图模式不校验视觉模型地址，改为要求对话模型可用且已存密钥。
+            if next.enabled&&next.use_dialog_llm{
+                let llm_ok=self.settings().builtin_models.llm.as_ref().is_some_and(|llm|
+                    llm.kind.is_openai()&&!llm.model.trim().is_empty()
+                        &&moss_voice_providers::vision::endpoint(&llm.url).is_ok());
+                if !llm_ok{return Err(invalid("请先在模型设置里填写 OpenAI 兼容的对话模型地址与模型名，再用它看照片"));}
+                let llm_key=self.host.db.lock().ok().and_then(|db|db.get_secret("voice.llm.main").ok().flatten()).is_some_and(|s|!s.trim().is_empty());
+                if !llm_key{return Err(invalid("请先保存对话大模型的密钥"));}
+            } else if next.enabled&&(next.model.trim().is_empty()||moss_voice_providers::vision::endpoint(&next.url).is_err()){
                 return Err(invalid("请填写有效的模型名称和 HTTPS 地址（或本地明确的 HTTP 地址）"));
             }
             let action=input["key"]["action"].as_str().unwrap_or("keep");
@@ -1483,7 +1712,7 @@ mod imp {
                 _=>return Err(invalid("密钥操作只能保留、更新或清除")),
             };
             let has_key=match &new_key{None=>existing,Some(Some(_))=>true,Some(None)=>false};
-            if next.enabled&&!has_key{return Err(invalid("启用视觉前必须保存对应模型密钥"));}
+            if next.enabled&&!next.use_dialog_llm&&!has_key{return Err(invalid("启用视觉前必须保存对应模型密钥"));}
             let changes:Vec<(String,Option<String>)>=new_key.into_iter().map(|key|("voice.vision.main".to_owned(),key)).collect();
             let mut settings=self.settings();
             settings.builtin_vision=next;
@@ -1500,7 +1729,8 @@ mod imp {
         pub fn vision_test(&self)->Result<Value,CenterError>{
             use moss_voice_server::vision::VisionFactory;
             let factory=DesktopVisionFactory{host:self.host.clone()};
-            let session=factory.open().ok_or_else(||CenterError::new("vision_disabled",409,"请先启用并保存视觉模型与密钥"))?;
+            let missing=if self.settings().builtin_vision.use_dialog_llm{"请先启用视觉，并在模型设置里配好支持看图的对话模型与密钥"}else{"请先启用并保存视觉模型与密钥"};
+            let session=factory.open().ok_or_else(||CenterError::new("vision_disabled",409,missing))?;
             let mut output=std::io::Cursor::new(Vec::new());
             image::DynamicImage::new_rgb8(8,8).write_to(&mut output,image::ImageFormat::Png)
                 .map_err(|_|internal("生成内存测试图片失败"))?;
@@ -1643,9 +1873,82 @@ mod imp {
             Ok(serde_json::json!({"enabled": enabled}))
         }
 
+        fn firmware_dir(&self) -> std::path::PathBuf {
+            self.host.runtime_root.path.join("firmware")
+        }
+
         pub fn firmware_status(&self)->Result<Value,CenterError>{
-            let records=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.list_firmware_deliveries().map_err(|_|internal("读取固件记录失败"))?;
-            Ok(serde_json::json!({"enabled":false,"trusted_download_protocol":false,"records":records,"reason":"当前固件下载未提供可信设备鉴权及哈希验证协议；OTA offer保持空"}))
+            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
+            let records=db.list_firmware_deliveries().map_err(|_|internal("读取固件记录失败"))?;
+            let artifacts=db.list_firmware_artifacts().map_err(|_|internal("读取固件清单失败"))?;
+            let devices=db.voice_devices().map_err(|_|internal("读取设备失败"))?.into_iter().filter(|d|d.is_allowed())
+                .map(|d|serde_json::json!({"device_id":d.device_id,"name":d.name,"model":d.model,"firmware_version":d.firmware_version,"last_seen":d.last_seen}))
+                .collect::<Vec<_>>();
+            Ok(serde_json::json!({"enabled":true,"records":records,"artifacts":artifacts,"devices":devices,"now":now(),"offer_hours":FIRMWARE_OFFER_SECONDS/3600.0}))
+        }
+
+        /// 导入用户选中的固件：必须是 ESP32 应用镜像，版本号与项目名取自固件头。
+        pub fn firmware_import(&self,path:&std::path::Path)->Result<Value,CenterError>{
+            let invalid=|message:&str|CenterError::new("firmware_invalid",400,message);
+            let meta=std::fs::metadata(path).map_err(|_|invalid("无法读取所选文件"))?;
+            if !meta.is_file() || meta.len() as usize>moss_voice_server::firmware::FIRMWARE_MAX_BYTES {return Err(invalid("请选择 16 MB 以内的固件文件"));}
+            let bytes=std::fs::read(path).map_err(|_|invalid("无法读取所选文件"))?;
+            let image=moss_voice_server::firmware::parse_app_image(&bytes).map_err(invalid)?;
+            let sha=sha256_hex(&bytes);
+            let dir=self.firmware_dir();
+            std::fs::create_dir_all(&dir).map_err(|e|internal(format!("创建固件目录失败：{e}")))?;
+            let target=dir.join(format!("{sha}.bin"));
+            if !target.exists() {
+                let temp=dir.join(format!(".{sha}.part"));
+                std::fs::write(&temp,&bytes).and_then(|()|std::fs::rename(&temp,&target)).map_err(|e|{let _=std::fs::remove_file(&temp);internal(format!("保存固件失败：{e}"))})?;
+            }
+            let project:String=image.project.chars().take(32).collect();
+            self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.add_firmware_artifact(&sha,&image.version,&project,bytes.len() as i64,now()).map_err(|_|internal("登记固件失败"))?;
+            Ok(serde_json::json!({"sha256":sha,"version":image.version,"project":project,"size":bytes.len()}))
+        }
+
+        /// 推送 / 取消 / 删除固件。推送必须逐台、明确确认，且固件版本比设备当前版本新（否则设备不会升级）。
+        pub fn firmware_manage(&self,input:&Value)->Result<Value,CenterError>{
+            let invalid=||CenterError::new("firmware_invalid",400,"固件操作格式无效");
+            let object=input.as_object().ok_or_else(invalid)?;
+            let action=input["action"].as_str().ok_or_else(invalid)?;
+            let allowed:&[&str]=match action {"offer"=>&["action","device_id","sha256","confirmed"],"cancel"=>&["action","delivery_id"],"delete"=>&["action","sha256","confirmed"],_=>return Err(invalid())};
+            if object.len()!=allowed.len() || object.keys().any(|k|!allowed.contains(&k.as_str())){return Err(invalid());}
+            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
+            match action {
+                "offer"=>{
+                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
+                    let device_id=input["device_id"].as_str().ok_or_else(invalid)?;
+                    let sha=input["sha256"].as_str().ok_or_else(invalid)?;
+                    let device=db.voice_device(device_id).map_err(|_|internal("读取设备失败"))?.filter(|d|d.is_allowed())
+                        .ok_or_else(||CenterError::new("firmware_device_invalid",409,"只能推送给已允许的设备"))?;
+                    let artifact=db.list_firmware_artifacts().map_err(|_|internal("读取固件清单失败"))?.into_iter().find(|a|a.sha256==sha)
+                        .ok_or_else(||CenterError::new("firmware_missing",404,"找不到这个固件"))?;
+                    if !moss_voice_server::firmware::is_newer(&artifact.version,&device.firmware_version) {
+                        return Err(CenterError::new("firmware_not_newer",409,"固件版本不比设备当前版本新，设备不会升级"));
+                    }
+                    let (delivery,token)=(format!("fw-{}",random_hex(16)?),random_hex(32)?);
+                    db.create_firmware_offer(&delivery,device_id,sha,&artifact.version,&token,now()+FIRMWARE_OFFER_SECONDS,now()).map_err(|_|internal("创建推送失败"))?;
+                },
+                "cancel"=>{
+                    let id=input["delivery_id"].as_str().ok_or_else(invalid)?;
+                    if !db.cancel_firmware_offer(id,now()).map_err(|_|internal("取消推送失败"))? {
+                        return Err(CenterError::new("firmware_conflict",409,"这条推送已完成或已取消"));
+                    }
+                },
+                "delete"=>{
+                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
+                    let sha=input["sha256"].as_str().ok_or_else(invalid)?;
+                    if sha.len()!=64 || !sha.bytes().all(|b|b.is_ascii_hexdigit()){return Err(invalid());}
+                    if !db.delete_firmware_artifact(sha,now()).map_err(|_|internal("删除固件失败"))? {
+                        return Err(CenterError::new("firmware_in_use",409,"还有推送在用这个固件，请先取消推送"));
+                    }
+                    let _=std::fs::remove_file(self.firmware_dir().join(format!("{sha}.bin")));
+                },
+                _=>{}
+            }
+            drop(db);
+            self.firmware_status()
         }
 
         pub fn speaker_manage(&self,input:&Value)->Result<Value,CenterError>{
@@ -1752,7 +2055,8 @@ mod imp {
                 (None,None)=>serde_json::json!({"state":"none"}),
             };
             let test_clips=self.speaker_backend.tests.lock().map(|tests|tests.iter().map(|(id,clips)|(id.clone(),Value::from(clips.len()))).collect::<serde_json::Map<_,_>>()).unwrap_or_default();
-            Ok(serde_json::json!({"enrollment":self.speaker.status(),"speakers":rows,"sessions":sessions,"recognition_enabled":valid.is_some(),"personal_memory_enabled":valid.is_some()&&self.settings().builtin_person_memory_enabled,"calibration":calibration,"test_clips":test_clips}))
+            let warning=self.speaker_warning.lock().ok().and_then(|slot|slot.clone());
+            Ok(serde_json::json!({"enrollment":self.speaker.status(),"speakers":rows,"sessions":sessions,"recognition_enabled":valid.is_some(),"personal_memory_enabled":valid.is_some()&&self.settings().builtin_person_memory_enabled,"calibration":calibration,"test_clips":test_clips,"warning":warning}))
         }
 
         pub fn rename_device(&self, device_id: &str, name: &str) -> Result<Value, CenterError> {
@@ -1763,6 +2067,217 @@ mod imp {
                 return Err(CenterError::new("voice_device_not_found", 404, "找不到该设备"));
             }
             Ok(self.status())
+        }
+    }
+
+    /// 启动内置语音服务时尝试扫描本地音乐目录；换电脑或拔盘导致目录不可用时只返回提示，不阻断内置语音主服务启动。
+    fn scan_music_for_start(
+        config: &moss_voice::settings::BuiltinMusic,
+        chat_ready: bool,
+    ) -> (Option<Arc<moss_voice_server::music::MusicIndex>>, Option<String>) {
+        if !config.enabled || !chat_ready {
+            return (None, None);
+        }
+        match moss_voice_server::music::MusicIndex::scan(std::path::Path::new(&config.directory)) {
+            Ok(found) => (Some(Arc::new(found)), None),
+            Err(_) => {
+                let warning = "本地音乐目录当前不可用（换电脑或移动盘拔出时请重新选择音乐文件夹），本次启动已跳过本地音乐".to_owned();
+                eprintln!("[moss-desktop] {warning}");
+                (None, Some(warning))
+            }
+        }
+    }
+
+    /// 校验并清理 Agent 保存输入：
+    /// 1. 关闭开关（`enabled = false`）时只检查长度与控制字符，不因旧电脑遗留的目录或命令路径拦住保存；
+    /// 2. 开启状态下，若 CLI 路径明显来自异构系统，或沿用上次保存的旧路径但在本机已失效，自动清空切回自动读取；
+    /// 3. 开启状态下，新填写或仍保留的手动路径及工作目录照常严格校验。
+    fn normalize_agent_save(
+        mut config: moss_voice::settings::BuiltinAgents,
+        previous: &moss_voice::settings::BuiltinAgents,
+        sensitive: &[std::path::PathBuf],
+        detect: impl Fn(laser_host::voice_agent::Provider) -> Option<std::path::PathBuf>,
+    ) -> Result<moss_voice::settings::BuiltinAgents, CenterError> {
+        use laser_host::voice_agent::{Provider, executable, is_foreign_os_path, workspace};
+        let invalid = |message: &str| CenterError::new("agent_config_invalid", 400, message);
+        for text in [&config.workspace, &config.codex_executable, &config.claude_executable] {
+            if text.len() > 1024 || text.chars().any(char::is_control) {
+                return Err(invalid("Agent 路径最长 1024 字节且不能包含控制字符"));
+            }
+        }
+        if !config.enabled {
+            return Ok(config);
+        }
+        if config.workspace.trim().is_empty() {
+            return Err(invalid("开启 Agent 前必须先填写工作目录"));
+        }
+        for (field, old_field, provider) in [
+            (&mut config.codex_executable, &previous.codex_executable, Provider::Codex),
+            (&mut config.claude_executable, &previous.claude_executable, Provider::ClaudeCode),
+        ] {
+            let trimmed = field.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let inherited_broken = trimmed == old_field.trim()
+                && executable(std::path::Path::new(trimmed), provider).is_err();
+            if is_foreign_os_path(trimmed) || inherited_broken {
+                field.clear();
+            }
+        }
+        if config.codex_executable.trim().is_empty()
+            && config.claude_executable.trim().is_empty()
+            && detect(Provider::Codex).is_none()
+            && detect(Provider::ClaudeCode).is_none()
+        {
+            return Err(invalid("未在本机自动检测到 Codex 或 Claude Code，请先安装或手动填写路径"));
+        }
+        workspace(std::path::Path::new(&config.workspace), sensitive)
+            .map_err(|_| invalid("工作目录必须为现有、独立、非敏感的本地目录"))?;
+        if !config.codex_executable.trim().is_empty() {
+            executable(std::path::Path::new(config.codex_executable.trim()), Provider::Codex)
+                .map_err(|_| invalid("Codex 路径无效：请填写本机原生可执行文件，或留空自动读取"))?;
+        }
+        if !config.claude_executable.trim().is_empty() {
+            executable(std::path::Path::new(config.claude_executable.trim()), Provider::ClaudeCode)
+                .map_err(|_| invalid("Claude Code 路径无效：请填写本机原生可执行文件，或留空自动读取"))?;
+        }
+        Ok(config)
+    }
+
+    #[cfg(test)]
+    mod device_switch_tests {
+        use super::*;
+        use laser_host::voice_agent::Provider;
+        use moss_voice::models::ProviderKind;
+        use moss_voice::settings::{BuiltinAgents, BuiltinModels, BuiltinMusic, BuiltinProvider};
+
+        #[test]
+        fn agent_save_allows_disabling_with_stale_paths_and_clears_inherited_dead_cli() {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = temp.path().join("runtime");
+            let work = temp.path().join("work");
+            std::fs::create_dir_all(&runtime).unwrap();
+            std::fs::create_dir_all(&work).unwrap();
+            let sensitive = [runtime];
+
+            let old = BuiltinAgents {
+                enabled: true,
+                workspace: "C:\\old-device\\agent-work".into(),
+                codex_executable: "C:\\old-device\\codex.exe".into(),
+                claude_executable: "/Users/old-user/.local/bin/claude".into(),
+            };
+
+            // 1. 换电脑后直接关掉开关点保存：不被旧工作目录或旧命令路径拦住
+            let mut turn_off = old.clone();
+            turn_off.enabled = false;
+            let saved_off = normalize_agent_save(turn_off.clone(), &old, &sensitive, |_| None).unwrap();
+            assert!(!saved_off.enabled);
+            assert_eq!(saved_off.workspace, turn_off.workspace);
+
+            // 2. 换电脑后保持开启、只改新电脑的工作目录：沿用的旧失效 CLI 路径自动清空并走自动读取
+            let mut migrated = old.clone();
+            migrated.workspace = work.display().to_string();
+            let detected_claude = temp.path().join("claude-auto");
+            let saved_on = normalize_agent_save(migrated, &old, &sensitive, |kind| {
+                (kind == Provider::ClaudeCode).then(|| detected_claude.clone())
+            })
+            .unwrap();
+            assert!(saved_on.enabled);
+            assert!(saved_on.codex_executable.is_empty(), "旧设备的失效 Codex 路径应清空回退自动读取");
+            assert!(saved_on.claude_executable.is_empty(), "旧账户的失效 Claude 路径应清空回退自动读取");
+
+            // 3. 开启状态下若用户新填了一个不存在的手动路径，照常报错拦截
+            let freshly_typed_bad = BuiltinAgents {
+                enabled: true,
+                workspace: work.display().to_string(),
+                codex_executable: temp.path().join("nonexistent-codex.exe").display().to_string(),
+                claude_executable: String::new(),
+            };
+            let err = normalize_agent_save(freshly_typed_bad, &BuiltinAgents::default(), &sensitive, |_| {
+                Some(detected_claude.clone())
+            })
+            .unwrap_err();
+            assert_eq!(err.code, "agent_config_invalid");
+
+            // 4. 开启状态下若工作目录仍是旧电脑不存在的路径，照常报错拦截
+            let stale_work = BuiltinAgents {
+                enabled: true,
+                workspace: temp.path().join("missing-work").display().to_string(),
+                codex_executable: String::new(),
+                claude_executable: String::new(),
+            };
+            assert!(normalize_agent_save(stale_work, &old, &sensitive, |_| Some(detected_claude.clone())).is_err());
+        }
+
+        #[test]
+        fn builtin_voice_starts_cleanly_when_migrated_music_dir_and_speaker_model_are_missing() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let ws_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let http_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+
+            // 模拟从旧电脑拷来的数据库与配置：配齐云端对话三件套、开启了不存在的旧音乐目录、开启了声纹按人记忆但新电脑还没装声纹模型
+            {
+                let db = host.db.lock().unwrap();
+                db.set_secret("voice.llm.main", "sk-test-llm", 1.0).unwrap();
+                db.set_secret("voice.asr.main", "sk-test-asr", 1.0).unwrap();
+                db.set_secret("voice.tts.main", "sk-test-tts", 1.0).unwrap();
+
+                let mut v1 = vec![0.0f32; 192];
+                v1[0] = 1.0;
+                let mut v2 = vec![0.0f32; 192];
+                v2[1] = 1.0;
+                db.enroll_voice_speaker("sp-a", "甲", SPEAKER_MODEL, &[v1.clone(), v1.clone(), v1], 1.0).unwrap();
+                db.enroll_voice_speaker("sp-b", "乙", SPEAKER_MODEL, &[v2.clone(), v2.clone(), v2], 1.0).unwrap();
+                let cal = Calibration {
+                    report: CalibrationReport {
+                        threshold: 0.72,
+                        margin: 0.05,
+                        people: 2,
+                        genuine_trials: 6,
+                        genuine_accepted: 6,
+                        impostor_trials: 6,
+                        false_accepts: 0,
+                        max_impostor_score: 0.2,
+                    },
+                    directory: speaker_directory([("sp-a", 1), ("sp-b", 1)].into_iter()),
+                    calibrated_at: 2.0,
+                };
+                db.set_secret(SPEAKER_CALIBRATION_KEY, &serde_json::to_string(&cal).unwrap(), 2.0).unwrap();
+            }
+
+            let mut voice_settings = moss_voice::VoiceSettings::default();
+            voice_settings.builtin_ws_port = ws_port;
+            voice_settings.builtin_http_port = http_port;
+            voice_settings.builtin_models = BuiltinModels {
+                llm: Some(BuiltinProvider { kind: ProviderKind::Openai, url: "https://llm.example.test/v1".into(), model: "gpt-test".into(), voice: String::new(), speed: 1.0 }),
+                asr: Some(BuiltinProvider { kind: ProviderKind::Openai, url: "https://asr.example.test/v1/audio/transcriptions".into(), model: "whisper-1".into(), voice: String::new(), speed: 1.0 }),
+                tts: Some(BuiltinProvider { kind: ProviderKind::Openai, url: "https://tts.example.test/v1/audio/speech".into(), model: "tts-1".into(), voice: "alloy".into(), speed: 1.0 }),
+            };
+            voice_settings.builtin_music = BuiltinMusic {
+                enabled: true,
+                directory: temp.path().join("unplugged-old-music-drive").display().to_string(),
+            };
+            voice_settings.builtin_person_memory_enabled = true;
+            moss_voice::settings::save(&temp.path().join("settings.json"), &voice_settings).unwrap();
+
+            let state = init(Some(host));
+            let builtin = state.0.unwrap();
+
+            let status = builtin.start().expect("旧音乐目录缺失与声纹模型未安装不应阻断内置语音主服务启动");
+            assert_eq!(status["running"], true);
+            assert_eq!(status["mode"], "chat");
+
+            let music_view = builtin.music_status();
+            assert!(music_view["warning"].as_str().unwrap_or_default().contains("本地音乐目录当前不可用"), "{music_view}");
+
+            let speaker_view = builtin.speaker_manage(&serde_json::json!({"action": "status"})).unwrap();
+            assert!(speaker_view["warning"].as_str().unwrap_or_default().contains("声纹按人记忆暂未生效"), "{speaker_view}");
+
+            builtin.stop();
+            assert!(builtin.music_status()["warning"].is_null());
+            assert!(builtin.speaker_manage(&serde_json::json!({"action": "status"})).unwrap()["warning"].is_null());
         }
     }
 
@@ -2004,6 +2519,17 @@ pub async fn voice_agent_save(app:tauri::AppHandle, window: tauri::WebviewWindow
     let result=desktop_only((app, window,input));
     result
 }
+/// 停止正在运行的 Agent 任务（进程树随 Job Object 结束）。
+#[tauri::command]
+pub async fn voice_agent_stop(app:tauri::AppHandle, window: tauri::WebviewWindow,run_id:String)->CmdResult{
+    #[cfg(desktop)]
+    require_main_window(&window)?;
+    #[cfg(desktop)]
+    let result=imp::run(app,move|voice|Ok(voice.agent_stop(&run_id))).await;
+    #[cfg(mobile)]
+    let result=desktop_only((app, window,run_id));
+    result
+}
 
 
 
@@ -2063,7 +2589,7 @@ pub async fn voice_music_save(app:tauri::AppHandle, window: tauri::WebviewWindow
 #[tauri::command]
 pub async fn voice_home_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |voice| Ok(voice.home_status())).await;
     #[cfg(mobile)]
@@ -2073,7 +2599,7 @@ pub async fn voice_home_status(app: tauri::AppHandle, window: tauri::WebviewWind
 #[tauri::command]
 pub async fn voice_home_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.home_save(&input)).await;
     #[cfg(mobile)]
@@ -2084,7 +2610,7 @@ pub async fn voice_home_save(app: tauri::AppHandle, window: tauri::WebviewWindow
 #[tauri::command]
 pub async fn voice_home_backup_export(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|voice.home_backup_export()).await;
     #[cfg(mobile)]
@@ -2095,7 +2621,7 @@ pub async fn voice_home_backup_export(app:tauri::AppHandle,window:tauri::Webview
 #[tauri::command]
 pub async fn voice_home_backup_audit(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=tauri::async_runtime::spawn_blocking(move || {
         use tauri_plugin_dialog::DialogExt;
@@ -2120,7 +2646,7 @@ pub async fn voice_home_backup_audit(app:tauri::AppHandle,window:tauri::WebviewW
 #[tauri::command]
 pub async fn voice_home_backup_restore(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.home_backup_restore(&input)).await;
     #[cfg(mobile)]
@@ -2130,7 +2656,7 @@ pub async fn voice_home_backup_restore(app:tauri::AppHandle,window:tauri::Webvie
 #[tauri::command]
 pub async fn voice_home_token_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.home_token_save(&input)).await;
     #[cfg(mobile)]
@@ -2140,7 +2666,7 @@ pub async fn voice_home_token_save(app: tauri::AppHandle, window: tauri::Webview
 #[tauri::command]
 pub async fn voice_home_voice_consent(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.home_voice_consent(&input)).await;
     #[cfg(mobile)]
@@ -2150,7 +2676,7 @@ pub async fn voice_home_voice_consent(app:tauri::AppHandle,window:tauri::Webview
 #[tauri::command]
 pub async fn voice_home_discover(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |voice| voice.home_discover()).await;
     #[cfg(mobile)]
@@ -2160,7 +2686,7 @@ pub async fn voice_home_discover(app: tauri::AppHandle, window: tauri::WebviewWi
 #[tauri::command]
 pub async fn voice_home_approvals(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|voice.home_approvals()).await;
     #[cfg(mobile)]
@@ -2170,7 +2696,7 @@ pub async fn voice_home_approvals(app:tauri::AppHandle,window:tauri::WebviewWind
 #[tauri::command]
 pub async fn voice_home_approval_cancel(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.home_approval_cancel(&input)).await;
     #[cfg(mobile)]
@@ -2180,7 +2706,7 @@ pub async fn voice_home_approval_cancel(app:tauri::AppHandle,window:tauri::Webvi
 #[tauri::command]
 pub async fn voice_home_control_consent(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.home_control_consent(&input)).await;
     #[cfg(mobile)]
@@ -2190,7 +2716,7 @@ pub async fn voice_home_control_consent(app:tauri::AppHandle,window:tauri::Webvi
 #[tauri::command]
 pub async fn voice_speaker_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.speaker_manage(&input)).await;
     #[cfg(mobile)]
@@ -2207,10 +2733,41 @@ pub async fn voice_firmware_status(app:tauri::AppHandle,window:tauri::WebviewWin
     let result=desktop_only(app);
     result
 }
+/// 弹出文件选择框导入固件；路径和内容都不来自网页。
+#[tauri::command]
+pub async fn voice_firmware_import(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+    #[cfg(desktop)]
+    require_voice_private_asset(&window)?;
+    #[cfg(desktop)]
+    let result={
+        let picker=app.clone();
+        let picked=tauri::async_runtime::spawn_blocking(move||{
+            use tauri_plugin_dialog::DialogExt;
+            picker.dialog().file().set_title("选择 ESP32 应用固件（.bin）").add_filter("固件",&["bin"]).blocking_pick_file().and_then(|p|p.into_path().ok())
+        }).await.map_err(|_|serde_json::json!({"code":"firmware_invalid","message":"选择固件失败"}))?;
+        match picked {
+            None=>Ok(Value::Null),
+            Some(path)=>imp::run(app,move|voice|voice.firmware_import(&path)).await,
+        }
+    };
+    #[cfg(mobile)]
+    let result=desktop_only(app);
+    result
+}
+#[tauri::command]
+pub async fn voice_firmware_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+    #[cfg(desktop)]
+    require_voice_private_asset(&window)?;
+    #[cfg(desktop)]
+    let result=imp::run(app,move|voice|voice.firmware_manage(&input)).await;
+    #[cfg(mobile)]
+    let result=desktop_only((app,input));
+    result
+}
 #[tauri::command]
 pub async fn voice_home_approval_approve(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.home_approval_approve(&input)).await;
     #[cfg(mobile)]
@@ -2251,7 +2808,7 @@ pub async fn voice_vision_test(app:tauri::AppHandle, window: tauri::WebviewWindo
 #[tauri::command]
 pub async fn voice_plugins_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |voice| Ok(voice.plugins_status())).await;
     #[cfg(mobile)]
@@ -2262,7 +2819,7 @@ pub async fn voice_plugins_status(app: tauri::AppHandle, window: tauri::WebviewW
 #[tauri::command]
 pub async fn voice_plugins_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.plugins_save(&input)).await;
     #[cfg(mobile)]
@@ -2273,7 +2830,7 @@ pub async fn voice_plugins_save(app: tauri::AppHandle, window: tauri::WebviewWin
 #[tauri::command]
 pub async fn voice_memory_list(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |voice| voice.memory_list()).await;
     #[cfg(mobile)]
@@ -2284,7 +2841,7 @@ pub async fn voice_memory_list(app: tauri::AppHandle, window: tauri::WebviewWind
 #[tauri::command]
 pub async fn voice_memory_set_enabled(app: tauri::AppHandle, window: tauri::WebviewWindow, enabled: bool) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.memory_enable(enabled)).await;
     #[cfg(mobile)]
@@ -2295,7 +2852,7 @@ pub async fn voice_memory_set_enabled(app: tauri::AppHandle, window: tauri::Webv
 #[tauri::command]
 pub async fn voice_memory_save(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, expected_revision: i64, summary: String) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.memory_edit(&device_id, expected_revision, &summary)).await;
     #[cfg(mobile)]
@@ -2306,7 +2863,7 @@ pub async fn voice_memory_save(app: tauri::AppHandle, window: tauri::WebviewWind
 #[tauri::command]
 pub async fn voice_memory_clear(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, expected_revision: i64) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.memory_edit(&device_id, expected_revision, "")).await;
     #[cfg(mobile)]
@@ -2316,8 +2873,10 @@ pub async fn voice_memory_clear(app: tauri::AppHandle, window: tauri::WebviewWin
 
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 39] = [
+pub const COMMANDS: [&str; 42] = [
     "voice_firmware_status",
+    "voice_firmware_import",
+    "voice_firmware_manage",
     "voice_speaker_manage",
     "voice_music_pick_directory",
     "voice_music_status",
@@ -2336,6 +2895,7 @@ pub const COMMANDS: [&str; 39] = [
     "voice_home_discover",
     "voice_agent_status",
     "voice_agent_save",
+    "voice_agent_stop",
     "voice_vision_status",
     "voice_vision_save",
     "voice_vision_test",

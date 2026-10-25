@@ -183,7 +183,7 @@ export function deviceView(mode, device) {
 const ERROR_TEXT = {
   voice_unavailable: "语音中心不可用：本机后端未启动。",
   voice_desktop_only: "语音中心仅在 MOSS 桌面端可用。",
-  self_hosted_endpoint_missing: "请先在“服务端设置”中填写自建接入点地址。",
+  self_hosted_endpoint_missing: "还没有可用的自建接入点：在“服务 → 自建接入点”填好 ws:// 地址并保存。",
   server_not_owned: "正在运行的服务端不是 MOSS 启动的，请在启动它的地方关闭。",
   server_external: "服务端端口已被其他程序占用（外部运行的服务端），MOSS 不会再启动一个。",
   model_test_required: "请先用当前填写的内容测试连接并成功后再保存。",
@@ -536,14 +536,23 @@ export function extraEndpointError(url, endpoints = [], max = 4) {
 
 // ---------- 语音中心分组与保存（UI-3，技术书 §9.5.1 r15） ----------
 
-/** 页面标签。所有标签内容始终挂载、只隐藏，切换标签不会丢失未保存的填写。 */
+/** 页面标签。**当前链路用不到的部分不渲染**（2026-10-18 用户决定）；切标签不会丢失未保存的填写。 */
 export const VOICE_TABS = [
-  { key: "service", label: "服务与设备" },
+  { key: "service", label: "服务" },
   { key: "models", label: "模型" },
-  { key: "connect", label: "连接" },
-  { key: "features", label: "功能扩展" },
+  { key: "devices", label: "设备与工具" },
+  { key: "features", label: "扩展" },
+  { key: "privacy", label: "隐私与家居" },
   { key: "records", label: "记录与诊断" },
 ];
+
+/**
+ * 当前链路要显示的标签（2026-10-18 用户决定）：官方链路的模型在小智控制台配置，
+ * 语音中心不显示“模型”标签；其余链路保留全部标签。当前链路用不到的卡片不渲染。
+ */
+export function voiceTabsFor(mode) {
+  return mode === "official" ? VOICE_TABS.filter((item) => item.key !== "models") : VOICE_TABS;
+}
 
 export const VOICE_MODE_LABEL = { official: "官方小智", self_hosted: "自建服务端", builtin: "MOSS 内置服务" };
 
@@ -553,7 +562,7 @@ export const VOICE_MODE_LABEL = { official: "官方小智", self_hosted: "自建
  */
 export const SETTINGS_GROUPS = {
   official: { mode: "official", title: "官方接入点", keys: ["official_mcp_endpoint"], secret: ["official_mcp_endpoint"] },
-  selfHostedServer: { mode: "self_hosted", title: "自建服务端程序", keys: ["server_dir", "python", "args", "server_port"], secret: [] },
+  selfHostedServer: { mode: "self_hosted", title: "自建服务端程序", keys: ["server_dir", "python", "args", "server_port"], secret: [], advanced: ["args"] },
   selfHostedEndpoint: {
     mode: "self_hosted",
     title: "自建接入点",
@@ -668,4 +677,66 @@ export function speakerCalibrationView(data) {
   const ready = speakers.length >= 2 && speakers.every((row) => counts[row.id] >= 3);
   const blocked = speakers.length < 2 ? "至少需要两个已登记的人" : ready ? "" : "每个人都要录满三段测试音";
   return { state: calibration.state || "none", status, counts, ready, blocked };
+}
+
+// ---------- 固件 OTA 推送记录（2026-10-15） ----------
+
+/** 推送记录的显示：只有设备上报了新版本才算升级完成；下载开始不等于刷写成功。 */
+export function firmwareDeliveryView(row, now = Date.now() / 1000) {
+  if (row?.device_report_status === "reported") return { text: "已升级（设备已上报新版本）", cancellable: false };
+  const started = row?.download_status === "downloading" || row?.download_status === "unknown";
+  if (!(Number(row?.expires_at) > Number(now))) {
+    return { text: started ? "推送已失效；设备曾开始下载，请核对设备当前版本" : "推送已失效（已取消或已过期）", cancellable: false };
+  }
+  if (row.download_status === "pending") return { text: "等待设备检查更新（重启设备即可）", cancellable: true };
+  if (row.download_status === "downloading") return { text: "设备已开始下载，等待上报新版本", cancellable: true };
+  return { text: "下载结果未知（下载时 MOSS 重启过），等待设备上报版本", cancellable: true };
+}
+
+// ---------- Agent（Claude Code / Codex，2026-10-15 起可用） ----------
+
+const AGENT_ERROR_TEXT = {
+  agent_disabled: "未开启",
+  agent_strict_mode_required: "需要先开启严格模式",
+  agent_path_denied: "路径不可用（工作目录或程序路径不符合要求）",
+  agent_capability_missing: "无法识别这个 CLI，或缺少需要的安全参数",
+  agent_run_failed: "运行失败",
+  agent_timeout: "超时（5 分钟）已停止",
+  agent_stopped: "已手动停止",
+  agent_permission_expired: "设备授权或配置变化，已停止",
+  agent_sandbox_unavailable: "当前系统不支持",
+  agent_thread_spawn_failed: "Agent 任务线程启动失败，已记为失败",
+};
+
+export function agentErrorText(code) {
+  return AGENT_ERROR_TEXT[code] || code || "";
+}
+
+const RUN_STATUS = { running: "运行中", completed: "已完成", failed: "失败", cancelled: "已停止" };
+
+/** Agent 卡的显示：总状态、每个 CLI 能否用、每条运行记录。 */
+export function agentView(info) {
+  const providers = (Array.isArray(info?.providers) ? info.providers : []).map((item) => {
+    const sourceTag = item.source === "auto_fallback"
+      ? " · 已自动适配当前设备"
+      : item.source === "auto"
+        ? " · 自动读取"
+        : "";
+    return {
+      name: item.provider === "codex" ? "Codex" : "Claude Code",
+      ready: Boolean(item.ready),
+      source: item.source || "configured",
+      executable: item.executable || "",
+      text: item.ready
+        ? `可用${item.version ? `（${item.version}）` : ""}${sourceTag}`
+        : agentErrorText(item.error_code),
+    };
+  });
+  const summary = !info?.configured ? "未开启" : !info?.strict_mode ? "已开启 · 需要严格模式" : providers.some((p) => p.ready) ? "可用" : "已开启 · 没有可用的 CLI";
+  const runs = (Array.isArray(info?.runs) ? info.runs : []).slice(0, 50).map((run) => ({
+    ...run,
+    statusText: RUN_STATUS[run.status] || run.status,
+    detail: run.output ? String(run.output) : agentErrorText(run.error_code) || "无结果",
+  }));
+  return { summary, providers, runs, strictMissing: Boolean(info?.configured) && !info?.strict_mode };
 }

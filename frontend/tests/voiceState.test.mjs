@@ -487,3 +487,39 @@ test("声纹简易标定：至少两人且每人三段测试音才能计算；�
   assert.match(valid.status, /阈值 0\.61 · 本人认对 6\/6 · 认成别人 0\/6/);
   assert.match(speakerCalibrationView({ speakers, calibration: { state: "stale", report } }).status, /需要重新标定/);
 });
+
+test("固件推送记录：只有设备上报新版本才算升级；到期或取消后不能再取消", async () => {
+  const { firmwareDeliveryView } = await import("../src/voiceState.js");
+  const base = { device_report_status: "not_reported", download_status: "pending", expires_at: 200 };
+  assert.deepEqual(firmwareDeliveryView(base, 100), { text: "等待设备检查更新（重启设备即可）", cancellable: true });
+  assert.match(firmwareDeliveryView({ ...base, download_status: "downloading" }, 100).text, /已开始下载/);
+  assert.equal(firmwareDeliveryView({ ...base, download_status: "downloading" }, 100).cancellable, true);
+  assert.match(firmwareDeliveryView({ ...base, download_status: "unknown" }, 100).text, /结果未知/);
+  assert.match(firmwareDeliveryView(base, 300).text, /已失效/);
+  assert.equal(firmwareDeliveryView(base, 300).cancellable, false);
+  assert.match(firmwareDeliveryView({ ...base, download_status: "downloading" }, 300).text, /核对设备当前版本/);
+  assert.match(firmwareDeliveryView({ ...base, device_report_status: "reported", download_status: "downloaded" }, 300).text, /已升级/);
+  assert.match(firmwareDeliveryView({ device_report_status: "not_reported", download_status: "pending", expires_at: 0 }, 1).text, /已失效/, "旧记录没有到期时间");
+});
+
+test("Agent 卡：严格模式未开时提示；CLI 不可用时给原因；运行记录可读", async () => {
+  const { agentView } = await import("../src/voiceState.js");
+  assert.equal(agentView({ configured: false }).summary, "未开启");
+  const noStrict = agentView({ configured: true, strict_mode: false, providers: [{ provider: "codex", ready: false, error_code: "agent_strict_mode_required" }] });
+  assert.equal(noStrict.summary, "已开启 · 需要严格模式");
+  assert.equal(noStrict.strictMissing, true);
+  assert.equal(noStrict.providers[0].text, "需要先开启严格模式");
+  const ready = agentView({ configured: true, strict_mode: true, providers: [
+    { provider: "claude_code", ready: true, version: "2.1.283 (Claude Code)" },
+    { provider: "codex", ready: true, version: "codex-cli 0.157.1", source: "auto" },
+  ],
+    runs: [{ id: "r", status: "cancelled", error_code: "agent_stopped", output: "" }, { id: "s", status: "running", stoppable: true }] });
+  assert.equal(ready.summary, "可用");
+  assert.equal(ready.providers[0].text, "可用（2.1.283 (Claude Code)）");
+  assert.equal(ready.providers[1].text, "可用（codex-cli 0.157.1） · 自动读取");
+  const fallback = agentView({ configured: true, strict_mode: true, providers: [{ provider: "codex", ready: true, version: "codex-cli 0.157.1", source: "auto_fallback" }] });
+  assert.equal(fallback.providers[0].text, "可用（codex-cli 0.157.1） · 已自动适配当前设备");
+  assert.equal(ready.runs[0].statusText, "已停止");
+  assert.equal(ready.runs[0].detail, "已手动停止");
+  assert.equal(ready.runs[1].stoppable, true);
+});

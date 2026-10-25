@@ -524,3 +524,43 @@ fn port_in_use_is_reported() {
 }
 
 mod chat;
+
+/// NV17 固件 OTA（2026-10-15）：只给已允许的设备下发用户推送的固件地址；令牌错误下载 404；设备上报版本交给宿主。
+#[test]
+fn firmware_offer_is_sent_only_to_allowed_device_and_download_uses_token() {
+    struct FakeFirmware { reported: std::sync::Mutex<Vec<(String, String)>>, fetched: std::sync::Mutex<Vec<String>> }
+    impl crate::firmware::FirmwareHost for FakeFirmware {
+        fn offer(&self, device: &str, current: &str) -> Option<(String, String)> {
+            (device == DEVICE && crate::firmware::is_newer("1.9.3", current)).then(|| ("1.9.3".into(), "a".repeat(32)))
+        }
+        fn fetch(&self, token: &str, peer: &str) -> Option<Vec<u8>> {
+            self.fetched.lock().unwrap().push(peer.into());
+            (token == "a".repeat(32)).then(|| vec![0xE9; 2048])
+        }
+        fn reported(&self, device: &str, version: &str) { self.reported.lock().unwrap().push((device.into(), version.into())); }
+    }
+    let host = Arc::new(FakeFirmware { reported: Default::default(), fetched: Default::default() });
+    let registry = Arc::new(FakeRegistry::default());
+    let config = ServerConfig { bind: IpAddr::V4(Ipv4Addr::LOCALHOST), ws_port: 0, http_port: 0, firmware: Some(host.clone()), ..ServerConfig::default() };
+    let server = VoiceServer::start(config, registry.clone()).unwrap();
+
+    let (_, body) = ota(&server, Some(DEVICE));
+    assert_eq!(body["firmware"]["url"], "", "未允许的设备拿不到固件");
+    assert!(host.reported.lock().unwrap().is_empty(), "未允许的设备上报版本不记录");
+
+    registry.set(DEVICE, DeviceStatus::Allowed);
+    let (_, body) = ota(&server, Some(DEVICE));
+    assert_eq!(body["firmware"]["version"], "1.9.3");
+    let url = body["firmware"]["url"].as_str().unwrap().to_owned();
+    assert_eq!(url, format!("http://127.0.0.1:{}/xiaozhi/firmware/{}.bin", server.http_port(), "a".repeat(32)));
+    assert_eq!(*host.reported.lock().unwrap(), vec![(DEVICE.to_owned(), "1.9.2".to_owned())]);
+
+    let response = reqwest::blocking::get(&url).unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.bytes().unwrap().len(), 2048);
+    assert_eq!(host.fetched.lock().unwrap()[0], "127.0.0.1", "宿主拿到下载方地址用于核对设备");
+    let wrong = reqwest::blocking::get(format!("http://127.0.0.1:{}/xiaozhi/firmware/{}.bin", server.http_port(), "b".repeat(32))).unwrap();
+    assert_eq!(wrong.status().as_u16(), 404);
+    let bad = reqwest::blocking::get(format!("http://127.0.0.1:{}/xiaozhi/firmware/..%2Fsecret", server.http_port())).unwrap();
+    assert_eq!(bad.status().as_u16(), 404);
+}

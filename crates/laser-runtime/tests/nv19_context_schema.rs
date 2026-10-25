@@ -33,7 +33,7 @@ fn count(db: &RuntimeDb, sql: &str) -> i64 {
 
 #[test]
 fn nv19_v10_upgrades_v9_database_and_keeps_nv10_summaries() {
-    assert_eq!(SCHEMA_VERSION, 12);
+    assert!(SCHEMA_VERSION >= 12, "NV19 表在 schema 10～12 引入");
     let db = RuntimeDb::open_memory().unwrap();
     db.connection
         .execute_batch("DROP TABLE context_knowledge_fts; DROP TABLE context_knowledge_roots; DROP TABLE context_knowledge_dirs; DROP TABLE context_knowledge_files; DROP TABLE context_memories_fts; DROP TABLE context_memories; DROP TABLE context_extraction_runs; DELETE FROM schema_version WHERE version>=10;")
@@ -43,7 +43,7 @@ fn nv19_v10_upgrades_v9_database_and_keeps_nv10_summaries() {
     assert_eq!(db.schema_version().unwrap(), 9);
 
     db.migrate().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
     let legacy = db.voice_memory("aa:bb:cc:dd:ee:ff").unwrap().unwrap();
     assert_eq!((legacy.summary.as_str(), legacy.revision), ("喜欢简短回答", 1), "NV10 摘要原样保留");
     assert_eq!(count(&db, "SELECT COUNT(*) FROM context_memories"), 0, "迁移不自动搬迁旧摘要");
@@ -67,7 +67,7 @@ fn nv19_v10_failure_rolls_back_and_retry_succeeds() {
 
     db.connection.execute_batch("DROP TABLE context_extraction_runs;").unwrap();
     db.migrate().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
 }
 
 #[test]

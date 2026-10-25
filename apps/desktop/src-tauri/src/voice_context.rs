@@ -735,12 +735,12 @@ pub(crate) mod host {
 }
 
 #[cfg(desktop)]
-use crate::voice_builtin::require_voice_private_asset;
+use crate::voice_builtin::require_private_settings_window;
 
 #[tauri::command]
 pub async fn voice_context_manage(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = crate::voice_builtin::context_manage(app, input).await;
     #[cfg(mobile)]
@@ -753,7 +753,7 @@ pub async fn voice_context_manage(app: tauri::AppHandle, window: tauri::WebviewW
 #[tauri::command]
 pub async fn voice_context_pick_folder(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = {
         let picker = app.clone();

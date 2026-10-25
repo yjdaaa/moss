@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Cpu, Layers, PenTool, Settings, KeyRound, ShieldCheck, AudioLines } from "lucide-react";
+import { Cpu, Layers, PenTool, Settings, KeyRound, ShieldCheck, AudioLines, Box } from "lucide-react";
 import { readAuthToken } from "../api/client.js";
 
 // 左侧竖向导航（技术书 §9.5.5 B）。窄屏（≤900px）由 CSS 折叠为顶部横排。
@@ -8,6 +8,7 @@ export const NAV_ITEMS = [
   { path: "/", label: "雕刻工作台", icon: Cpu, tag: "HOST" },
   { path: "/draw", label: "创作画板", icon: PenTool, tag: "CAD" },
   { path: "/material-lab", label: "材料实验室", icon: Layers, tag: "LAB" },
+  { path: "/twin", label: "数字孪生", icon: Box, tag: "TWIN" },
   { path: "/voice", label: "语音中心", icon: AudioLines, tag: "VOICE", desktopOnly: true },
 ];
 

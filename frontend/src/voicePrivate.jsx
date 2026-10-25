@@ -7,14 +7,37 @@ import VoiceHomeApprovalCard from "./components/VoiceHomeApprovalCard.jsx";
 import VoiceSpeakerCard from "./components/VoiceSpeakerCard.jsx";
 import VoiceFirmwareCard from "./components/VoiceFirmwareCard.jsx";
 import VoiceContextCard from "./components/VoiceContextCard.jsx";
+import { AppDialogHost } from "./components/AppDialog.jsx";
 import { voiceApi } from "./voiceApi.js";
 import "./styles.css";
 
-// This is a separate packaged Tauri page, not a route on the remotely
-// loaded /voice page. Its native commands are separately origin-gated.
+// This is a separately packaged Tauri page, never a route on the loopback-hosted /voice page.
+const PRIVATE_TASKS = [
+  { key: "memory", title: "记忆", description: "看小智记住了什么，决定是否继续记住" },
+  { key: "plugins", title: "信息服务", description: "按需要选择天气、新闻或搜索" },
+  { key: "speaker", title: "声纹", description: "登记家人，完成标定后再开启" },
+  { key: "home", title: "家居", description: "连接设备；每次动作仍需你批准" },
+];
+const PRIVATE_SECTIONS = new Set([...PRIVATE_TASKS.map((item) => item.key), "firmware", "approvals", "overview"]);
+const initialPrivateSection = () => PRIVATE_SECTIONS.has(window.__MOSS_PRIVATE_TARGET__) ? window.__MOSS_PRIVATE_TARGET__ : null;
+
 export function VoicePrivatePage() {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
+  const [section, setSection] = useState(() => initialPrivateSection() === "overview" ? null : initialPrivateSection());
+  const [visited, setVisited] = useState(() => new Set(initialPrivateSection() && initialPrivateSection() !== "overview" ? [initialPrivateSection()] : []));
+  const [longMemoryOpened, setLongMemoryOpened] = useState(false);
+  const select = (next) => {
+    setSection(next);
+    if (next) setVisited((old) => new Set([...old, next]));
+  };
+  useEffect(() => {
+    const onSelection = (event) => { if (PRIVATE_SECTIONS.has(event.detail)) select(event.detail === "overview" ? null : event.detail); };
+    window.addEventListener("moss:voice-private-selection", onSelection);
+    const initial = initialPrivateSection();
+    if (initial) select(initial === "overview" ? null : initial);
+    return () => window.removeEventListener("moss:voice-private-selection", onSelection);
+  }, []);
   useEffect(() => {
     let alive = true;
     const refresh = async () => {
@@ -30,18 +53,46 @@ export function VoicePrivatePage() {
     return () => { alive = false; clearInterval(timer); };
   }, []);
 
+  const title = section === "firmware" ? "设备维护" : section === "approvals" ? "家居审批" : PRIVATE_TASKS.find((item) => item.key === section)?.title;
   return (
     <main className="voice-private-page voice-private-box">
-      <h1>语音隐私设置</h1>
-      <p>此窗口由 MOSS 桌面安装包直接加载，专用于私人记忆、信息插件和 Home Assistant 凭据及白名单设置。令牌不会回显，普通网页无法调用敏感命令。</p>
+      {section ? (
+        <header className="voice-private-header">
+          <button type="button" className="btn btn-ghost" onClick={() => select(null)}>‹ 返回选择</button>
+          <h1>{title}</h1>
+          <p>仅在 MOSS 本机安全页面管理。</p>
+        </header>
+      ) : (
+        <>
+          <h1>隐私与家居</h1>
+          <p className="voice-muted">一次只设置一件事。敏感内容不会在语音中心的普通页面显示。</p>
+          <div className="voice-private-tasks">
+            {PRIVATE_TASKS.map((item) => (
+              <button key={item.key} type="button" className="voice-private-task" onClick={() => select(item.key)}>
+                <span><strong>{item.title}</strong><small>{item.description}</small></span><span aria-hidden="true">进入 ›</span>
+              </button>
+            ))}
+          </div>
+          <button type="button" className="btn btn-ghost voice-private-secondary" onClick={() => select("firmware")}>设备维护：固件升级…</button>
+        </>
+      )}
       {error && <p role="alert">{error}</p>}
-      <VoicePluginsCard />
-      <VoiceMemoryCard status={status} />
-      <VoiceContextCard />
-      <VoiceSpeakerCard />
-      <VoiceFirmwareCard />
-      <VoiceHomeCard />
-      <VoiceHomeApprovalCard />
+      {visited.has("memory") && <div className="voice-private-panel" hidden={section !== "memory"}>
+        <VoiceMemoryCard status={status} />
+        <details className="voice-private-more" onToggle={(event) => { if (event.currentTarget.open) setLongMemoryOpened(true); }}>
+          <summary>长期记忆、资料与恢复摘要</summary>
+          {longMemoryOpened && <VoiceContextCard />}
+        </details>
+      </div>}
+      {visited.has("plugins") && <div className="voice-private-panel" hidden={section !== "plugins"}><VoicePluginsCard /></div>}
+      {visited.has("speaker") && <div className="voice-private-panel" hidden={section !== "speaker"}><VoiceSpeakerCard /></div>}
+      {visited.has("home") && <div className="voice-private-panel" hidden={section !== "home"}>
+        <VoiceHomeCard />
+        <button type="button" className="btn btn-ghost" onClick={() => select("approvals")}>查看家居审批</button>
+      </div>}
+      {visited.has("approvals") && <div className="voice-private-panel" hidden={section !== "approvals"}><VoiceHomeApprovalCard /></div>}
+      {visited.has("firmware") && <div className="voice-private-panel" hidden={section !== "firmware"}><VoiceFirmwareCard /></div>}
+      <AppDialogHost />
     </main>
   );
 }

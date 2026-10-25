@@ -41,7 +41,7 @@ impl ToolCall {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     /// 助手消息只有工具调用时为 `null`
@@ -50,30 +50,68 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 2026-10-16：多模态图片（`data:<mime>;base64,...`）。
+    /// 只有用户在视觉卡片里明确打开“把照片留在对话上下文里”才会有值；
+    /// 只在会话内存里，随历史截断丢弃，不落盘、不进日志。序列化成 OpenAI 的
+    /// `content` parts 数组（本类型只用于请求，不回读多模态消息）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+        if self.images.is_empty() {
+            map.serialize_entry("content", &self.content)?;
+        } else {
+            let mut parts: Vec<Value> = Vec::with_capacity(self.images.len() + 1);
+            if let Some(text) = self.content.as_deref().filter(|text| !text.trim().is_empty()) {
+                parts.push(serde_json::json!({"type": "text", "text": text}));
+            }
+            for url in &self.images {
+                parts.push(serde_json::json!({"type": "image_url", "image_url": {"url": url}}));
+            }
+            map.serialize_entry("content", &parts)?;
+        }
+        if !self.tool_calls.is_empty() {
+            map.serialize_entry("tool_calls", &self.tool_calls)?;
+        }
+        if let Some(id) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", id)?;
+        }
+        map.end()
+    }
 }
 
 impl ChatMessage {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: Role::System, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None }
+        Self { role: Role::System, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: Vec::new() }
     }
 
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None }
+        Self { role: Role::User, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: Vec::new() }
     }
 
     pub fn assistant(text: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None }
+        Self { role: Role::Assistant, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: Vec::new() }
     }
 
     pub fn assistant_tools(text: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: Role::Assistant, content: text.filter(|text| !text.is_empty()), tool_calls, tool_call_id: None }
+        Self { role: Role::Assistant, content: text.filter(|text| !text.is_empty()), tool_calls, tool_call_id: None, images: Vec::new() }
     }
 
     pub fn tool(call_id: impl Into<String>, result: impl Into<String>) -> Self {
-        Self { role: Role::Tool, content: Some(result.into()), tool_calls: Vec::new(), tool_call_id: Some(call_id.into()) }
+        Self { role: Role::Tool, content: Some(result.into()), tool_calls: Vec::new(), tool_call_id: Some(call_id.into()), images: Vec::new() }
     }
 
-    /// 估算长度：中文约 1 字 1 token，取字符数作为保守估计。
+    /// 带一张图片的用户消息（data URL）。只在“把照片留在对话上下文里”打开时由服务端构造。
+    pub fn photo(text: impl Into<String>, data_url: impl Into<String>) -> Self {
+        Self { role: Role::User, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: vec![data_url.into()] }
+    }
+
+    /// 估算长度：中文约 1 字 1 token，取字符数作为保守估计；一张照片按 1500 token 计。
     pub fn weight(&self) -> usize {
         self.content.as_deref().map(|text| text.chars().count()).unwrap_or(0)
             + self
@@ -81,6 +119,7 @@ impl ChatMessage {
                 .iter()
                 .map(|call| call.function.name.chars().count() + call.function.arguments.chars().count())
                 .sum::<usize>()
+            + self.images.len() * 1500
             + 4
     }
 }
@@ -172,5 +211,24 @@ mod tests {
         let mut empty: Vec<ChatMessage> = Vec::new();
         truncate_history(&mut empty, 10);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn photo_message_uses_content_parts_and_weights_more() {
+        let photo = ChatMessage::photo("（用户刚用摄像头拍了照片）", "data:image/jpeg;base64,QUJD");
+        let value = serde_json::to_value(&photo).unwrap();
+        assert_eq!(value["role"], "user");
+        assert_eq!(value["content"][0]["type"], "text");
+        assert_eq!(value["content"][1]["type"], "image_url");
+        assert_eq!(value["content"][1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+        // 普通文字消息仍是字符串 content，不带 parts
+        let text = serde_json::to_value(ChatMessage::user("你好")).unwrap();
+        assert_eq!(text["content"], "你好");
+        // 图片按 1500 token 估算，截断时优先丢旧照片
+        assert!(photo.weight() >= 1500);
+        assert!(ChatMessage::user("你好").weight() < 100);
+        let mut history = vec![photo, ChatMessage::assistant("这是刚才那张照片")];
+        truncate_history(&mut history, 1);
+        assert_eq!(history.len(), 2, "最后一轮总是保留");
     }
 }

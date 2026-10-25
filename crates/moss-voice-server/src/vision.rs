@@ -32,6 +32,8 @@ pub trait VisionFactory:Send+Sync {
     fn ready(&self)->bool;
     fn open(&self)->Option<VisionSession>;
     fn still_current(&self,generation:u64)->bool;
+    /// 是否把这张照片留进该设备的对话上下文（2026-10-16，默认否）。
+    fn keep_in_history(&self)->bool{false}
 }
 
 #[derive(Default)]
@@ -60,6 +62,48 @@ impl VisionQuotas {
         if !active.insert(device.to_owned()){return None;}
         drop(active);
         Some(QuotaGuard{_total:total,device:device.to_owned(),devices:self.devices.clone()})
+    }
+}
+
+/// 2026-10-16：视觉卡片打开“把照片留在对话上下文里”时，这一张照片暂存在这里，
+/// 由同一台设备的会话在下一轮开始时取走，作为一条多模态用户消息接进对话历史。
+/// 只在内存、按设备只留最新一张、总量与单张大小都有上限；不落盘、不进日志与事件。
+#[derive(Debug, Default)]
+pub struct VisionPhotos(Mutex<std::collections::HashMap<String,Photo>>);
+
+#[derive(Debug, Clone)]
+pub struct Photo {
+    pub question:String,
+    pub text:String,
+    pub data_url:String,
+}
+
+/// 单张照片 data URL 的上限；超过就不留进上下文，避免内存与每轮费用失控。
+const MAX_PHOTO_DATA_URL:usize=4*1024*1024;
+const MAX_PHOTO_DEVICES:usize=8;
+
+impl Photo {
+    /// 转成一条多模态用户消息：只复述问题与当时的解释，不伪造新内容。
+    pub fn into_message(self)->moss_voice_providers::ChatMessage {
+        let question=self.question.chars().take(200).collect::<String>();
+        let text=self.text.chars().take(400).collect::<String>();
+        moss_voice_providers::ChatMessage::photo(
+            format!("（用户刚用摄像头拍了照片，问的是：{question}。当时的解释：{text}）"),
+            self.data_url,
+        )
+    }
+}
+
+impl VisionPhotos {
+    pub fn put(&self,device:&str,photo:Photo){
+        if photo.data_url.len()>MAX_PHOTO_DATA_URL{return;}
+        let Ok(mut photos)=self.0.lock() else{return};
+        if photos.len()>=MAX_PHOTO_DEVICES&&!photos.contains_key(device){return;}
+        photos.insert(device.to_owned(),photo);
+    }
+    /// 取走这台设备待接进上下文的照片（只交付一次）。
+    pub fn take(&self,device:&str)->Option<Photo>{
+        self.0.lock().ok()?.remove(device)
     }
 }
 
@@ -216,7 +260,9 @@ async fn explain(
                 }
                 question=Some(text);
             },
-            Some("image") if image.is_none()=>{
+            // 上游 xiaozhi-esp32 固件的 `Esp32Camera::Explain` 用 `name="file"; filename="camera.jpg"`；
+            // 本服务早期只按 `name="image"` 实现，两种都接受，否则真机 upload 会被 422 拒绝（2026-10-16 对照固件源码修复）。
+            Some("image")|Some("file") if image.is_none()=>{
                 let mime=field.content_type().unwrap_or("").to_owned();
                 if !matches!(mime.as_str(),"image/png"|"image/jpeg"){
                     return fail(StatusCode::UNSUPPORTED_MEDIA_TYPE,"vision_image_format");
@@ -247,6 +293,8 @@ async fn explain(
     let Ok(Some(snapshot))=tokio::task::spawn_blocking(move||factory_for_open.open()).await else{
         return fail(StatusCode::FORBIDDEN,"vision_disabled");
     }; 
+    // 只有用户显式打开“把照片留在对话上下文里”时才需要这张照片的 data URL。
+    let keep={let factory=factory.clone();tokio::task::spawn_blocking(move||factory.keep_in_history()).await.ok().unwrap_or(false)};
     let result=guarded_explain(&snapshot,&permit,factory.clone(),&question,&mime,&bytes,MODEL_TIMEOUT).await;
     if !permit.current().await{return fail(StatusCode::FORBIDDEN,"vision_revoked");}
     let generation=snapshot.generation;
@@ -254,7 +302,18 @@ async fn explain(
         return fail(StatusCode::FORBIDDEN,"vision_disabled");
     }
     match result{
-        Ok(Ok(text)) if !text.trim().is_empty()=>response(StatusCode::OK,json!({"success":true,"text":text.chars().take(2000).collect::<String>()})),
+        Ok(Ok(text)) if !text.trim().is_empty()=>{
+            if keep{
+                // 2026-10-16：只有用户明确打开“把照片留在对话上下文里”才交给会话；
+                // 只留内存、按设备只留最新一张，不落盘、不进日志与事件。
+                shared.vision_photos.put(&permit.device,Photo{
+                    question:question.chars().take(200).collect(),
+                    text:text.chars().take(400).collect(),
+                    data_url:moss_voice_providers::vision::data_url(&mime,&bytes),
+                });
+            }
+            response(StatusCode::OK,json!({"success":true,"text":text.chars().take(2000).collect::<String>()}))
+        },
         Err(GuardedVisionError::Revoked)=>fail(StatusCode::FORBIDDEN,"vision_revoked"),
         Err(GuardedVisionError::Disabled)=>fail(StatusCode::FORBIDDEN,"vision_disabled"),
         Err(GuardedVisionError::Timeout)|Ok(Err(VisionFailure::Timeout))=>fail(StatusCode::GATEWAY_TIMEOUT,"vision_model_timeout"),
@@ -313,7 +372,7 @@ mod http_tests {
             ->BoxFuture<'a,Result<String,VisionFailure>>{
             Box::pin(async move{
                 assert_eq!(question,"这是什么？");
-                assert_eq!(mime,"image/png");
+                assert!(matches!(mime,"image/png"|"image/jpeg"),"只允许两种图片格式：{mime}");
                 assert!(!data.is_empty());
                 self.calls.fetch_add(1,Ordering::SeqCst);
                 tokio::time::sleep(self.wait).await;
@@ -357,6 +416,20 @@ mod http_tests {
         image::DynamicImage::new_rgba8(8,8).write_to(&mut bytes,ImageFormat::Png).unwrap();
         bytes.into_inner()
     }
+    fn jpeg()->Vec<u8>{
+        let mut bytes=Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(8,8).write_to(&mut bytes,ImageFormat::Jpeg).unwrap();
+        bytes.into_inner()
+    }
+    /// 上游固件 `Esp32Camera::Explain` 的真实报文形状：question 段 + `name="file"; filename="camera.jpg"` 段。
+    fn firmware_multipart(image:&[u8])->Vec<u8>{
+        let mut body=Vec::new();
+        part(&mut body,"question",None,"这是什么？".as_bytes());
+        body.extend_from_slice(b"--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n");
+        body.extend_from_slice(image);
+        body.extend_from_slice(b"\r\n--boundary--\r\n");
+        body
+    }
     fn part(body:&mut Vec<u8>,name:&str,mime:Option<&str>,value:&[u8]){
         let mime=mime.map(|s|format!("; filename=\"test.png\"\r\nContent-Type: {s}")).unwrap_or_default();
         body.extend_from_slice(format!("--boundary\r\nContent-Disposition: form-data; name=\"{name}\"{mime}\r\n\r\n").as_bytes());
@@ -399,6 +472,22 @@ mod http_tests {
         factory.active.store(false,Ordering::Release);
         assert_eq!(post(server.http_port(),Some(&good),body).status().as_u16(),403);
         assert_eq!(factory.provider.calls.load(Ordering::SeqCst),1);
+    }
+    /// 上游固件用 `name="file"` 上传，只认 `image` 会让每一台真机都被 422 拒绝。
+    #[test]
+    fn upstream_firmware_file_field_is_accepted(){
+        let (server,_,factory)=start_server(0);
+        let token=token();
+        let response=post(server.http_port(),Some(&token),firmware_multipart(&jpeg()));
+        assert_eq!(response.status().as_u16(),200,"固件报文（name=\"file\"）必须被接受");
+        assert_eq!(response.json::<Value>().unwrap()["text"],"这是一张测试图片。");
+        assert_eq!(factory.provider.calls.load(Ordering::SeqCst),1);
+        // 未知字段名仍然拒绝
+        let mut body=Vec::new();
+        part(&mut body,"question",None,"这是什么？".as_bytes());
+        part(&mut body,"photo",Some("image/jpeg"),&jpeg());
+        body.extend_from_slice(b"--boundary--\r\n");
+        assert_eq!(post(server.http_port(),Some(&token),body).status().as_u16(),422);
     }
 
     #[test]
@@ -490,5 +579,23 @@ mod http_tests {
         assert_eq!(validate_image(&vec![0;MAX_IMAGE_BYTES+1],"image/png"),Err(StatusCode::PAYLOAD_TOO_LARGE));
         assert_eq!(validate_image(b"not png","image/png"),Err(StatusCode::UNSUPPORTED_MEDIA_TYPE));
         assert_eq!(validate_image(b"jpeg bytes","image/svg+xml"),Err(StatusCode::UNSUPPORTED_MEDIA_TYPE));
+    }
+    /// 2026-10-16：照片只在内存、按设备只留最新一张、取走即删；转成的一条多模态用户消息
+    /// 只复述问题与当时解释，不伪造内容。
+    #[test]fn photo_store_keeps_latest_per_device_and_is_taken_once(){
+        let photos=VisionPhotos::default();
+        photos.put("d1",Photo{question:"这是什么".into(),text:"一张桌子".into(),data_url:"data:image/jpeg;base64,QQ==".into()});
+        photos.put("d1",Photo{question:"换个角度".into(),text:"还是桌子".into(),data_url:"data:image/jpeg;base64,Qg==".into()});
+        let photo=photos.take("d1").expect("应能取到最新一张");
+        assert_eq!(photo.question,"换个角度","同一设备只保留最新一张");
+        assert!(photos.take("d1").is_none(),"只交付一次");
+        assert!(photos.take("other").is_none(),"不串设备");
+        let message=Photo{question:"这是什么".into(),text:"一张桌子".into(),data_url:"data:image/jpeg;base64,QQ==".into()}.into_message();
+        assert_eq!(message.role,moss_voice_providers::Role::User);
+        assert_eq!(message.images.len(),1);
+        assert!(message.content.as_deref().unwrap_or("").contains("一张桌子"));
+        // 超过上限（约 4 MiB 的 data URL）就不留，避免内存与每轮费用失控
+        photos.put("big",Photo{question:"q".into(),text:"t".into(),data_url:"x".repeat(MAX_PHOTO_DATA_URL+1)});
+        assert!(photos.take("big").is_none());
     }
 }

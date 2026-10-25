@@ -42,7 +42,7 @@ New-Item -ItemType Directory -Path $binaryDir -Force | Out-Null
 Copy-Required $helper $sidecar
 if (Test-Path -LiteralPath $resourceDir) { Remove-Item -LiteralPath $resourceDir -Recurse -Force }
 # GPL helper corresponding source, MIT IPC dependency, and lockfile, without target or local settings.
-$helperSources = @('Cargo.toml','Cargo.lock','COPYING','README.md')
+$helperSources = @('Cargo.toml','Cargo.lock','build.rs','COPYING','README.md')
 foreach ($item in $helperSources) { Copy-Required (Join-Path $helperRoot $item) (Join-Path $sourceDir "apps/moss-voice-local/$item") }
 New-Item -ItemType Directory -Path (Join-Path $sourceDir 'apps/moss-voice-local') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $helperRoot 'src') -Destination (Join-Path $sourceDir 'apps/moss-voice-local/src') -Recurse -Force

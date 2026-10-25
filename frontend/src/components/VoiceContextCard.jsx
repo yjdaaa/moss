@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
+import { showConfirm } from "../appDialog.js";
 import {
   CATEGORY_LABEL,
   CATEGORY_SCOPES,
@@ -18,6 +19,9 @@ import {
 // 所有操作经 `voice_context_manage`，资料文件夹经 `voice_context_pick_folder` 在本机建立索引。
 
 const call = (action, extra = {}) => voiceApi.contextManage({ action, ...extra });
+// Always awaited: in the desktop app window.confirm is async (Tauri dialog plugin) and would
+// otherwise read as "confirmed" before the user answers.
+const ask = (message) => showConfirm(message, { title: "请确认", tone: "warning" });
 const key = (scope) => (scope ? `${scope.kind}:${scope.id}` : "");
 const parseKey = (value) => {
   const at = value.indexOf(":");
@@ -55,8 +59,8 @@ function useAction(onDone) {
 function Switches({ status, refresh }) {
   const { busy, result, run } = useAction(refresh);
   const [name, setName] = useState("");
-  const toggle = (field, value) => {
-    if (field === "extraction" && value && !window.confirm("开启后，每次语音会话结束时，过滤后的对话文字会发给你在内置服务里配置的大模型，用来提取候选记忆，可能产生费用。提取结果只是候选，需要你在这里确认。确定开启？")) return;
+  const toggle = async (field, value) => {
+    if (field === "extraction" && value && !(await ask("开启后，每次语音会话结束时，过滤后的对话文字会发给你在内置服务里配置的大模型，用来提取候选记忆，可能产生费用。提取结果只是候选，需要你在这里确认。确定开启？"))) return;
     run(() => call("set_options", { [field]: value, confirmed: field === "extraction" && value }), value ? "已开启" : "已关闭");
   };
   return (
@@ -78,7 +82,7 @@ function Switches({ status, refresh }) {
           设为当前项目
         </button>
         {status.project && (
-          <button type="button" disabled={busy} onClick={() => window.confirm("取消当前项目？语音将查不到该项目的任务和资料，已存内容保留。") && run(() => call("clear_project"), "已取消当前项目")}>
+          <button type="button" disabled={busy} onClick={async () => (await ask("取消当前项目？语音将查不到该项目的任务和资料，已存内容保留。")) && run(() => call("clear_project"), "已取消当前项目")}>
             取消当前项目
           </button>
         )}
@@ -123,9 +127,9 @@ function MemoryRow({ row, devices, busy, act }) {
           <button type="button" disabled={busy} onClick={() => act(() => call("verify", { id: row.id, revision: row.revision, to: "confirmed" }), "已确认")}>确认属实</button>
         )}
         {live && row.verification !== "invalidated" && (
-          <button type="button" disabled={busy} onClick={() => window.confirm("作废后不能恢复，如需更正请另建一条。确定作废？") && act(() => call("verify", { id: row.id, revision: row.revision, to: "invalidated" }), "已作废")}>作废</button>
+          <button type="button" disabled={busy} onClick={async () => (await ask("作废后不能恢复，如需更正请另建一条。确定作废？")) && act(() => call("verify", { id: row.id, revision: row.revision, to: "invalidated" }), "已作废")}>作废</button>
         )}
-        <button type="button" disabled={busy} onClick={() => window.confirm("删除这条记忆？") && act(() => call("delete", { id: row.id, revision: row.revision }), "已删除")}>删除</button>
+        <button type="button" disabled={busy} onClick={async () => (await ask("删除这条记忆？")) && act(() => call("delete", { id: row.id, revision: row.revision }), "已删除")}>删除</button>
       </span>
     </article>
   );
@@ -170,6 +174,8 @@ function Memories({ status, refresh }) {
   const devices = scope?.kind === "device" ? (status.devices || []).filter((d) => d.id === scope.id) : [];
   const categories = Object.keys(CATEGORY_LABEL).filter((c) => scope && CATEGORY_SCOPES[c].includes(scope.kind) && c !== "technical_note");
   const legacy = scope?.kind === "device" && (status.legacy_summaries || []).includes(scope.id);
+  // The chosen category may not fit the scope just selected (a project only takes tasks).
+  const addCategory = categories.includes(newCategory) ? newCategory : categories[0] || "";
 
   return (
     <div className="voice-form-group" id="context-memories">
@@ -187,7 +193,7 @@ function Memories({ status, refresh }) {
             </select>
             <input value={query} placeholder="查找（快速检索）" onChange={(e) => setQuery(e.target.value)} aria-label="查找记忆" />
             <button type="button" disabled={busy} onClick={() => run(() => load("list", query), null, { reload: false })}>查找</button>
-            <button type="button" disabled={busy || !query.trim()} onClick={() => window.confirm("深度检索会把这个问题发给你配置的大模型来拆分关键词（不发送记忆内容），可能产生费用。继续？") && run(() => load("deep", query), null, { reload: false })}>
+            <button type="button" disabled={busy || !query.trim()} onClick={async () => (await ask("深度检索会把这个问题发给你配置的大模型来拆分关键词（不发送记忆内容），可能产生费用。继续？")) && run(() => load("deep", query), null, { reload: false })}>
               深度检索
             </button>
           </span>
@@ -195,19 +201,19 @@ function Memories({ status, refresh }) {
           {rows.length === 0 ? <p>没有记录。</p> : rows.map((row) => <MemoryRow key={row.id} row={row} devices={devices} busy={busy} act={act} />)}
           <h4>新增一条</h4>
           <span>
-            <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} aria-label="新记忆类别">
+            <select value={addCategory} onChange={(e) => setNewCategory(e.target.value)} aria-label="新记忆类别">
               {categories.map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
             </select>
             <label><input type="checkbox" checked={newConfirmed} onChange={(e) => setNewConfirmed(e.target.checked)} />直接标为已确认</label>
           </span>
           <textarea rows={3} maxLength={1000} value={newContent} placeholder="不要写密码、网址、审批或 G-code" onChange={(e) => setNewContent(e.target.value)} aria-label="新记忆内容" />
           <span>
-            <button type="button" disabled={busy || !newContent.trim() || !categories.includes(newCategory)} onClick={() => act(() => call("create", { scope, category: newCategory, content: newContent, confirmed: newConfirmed, ...(NEEDS_DEVICE.has(newCategory) ? { device_id: scope.id } : {}) }), "已新增").then((ok) => ok && setNewContent(""))}>
+            <button type="button" disabled={busy || !newContent.trim() || !addCategory} onClick={() => act(() => call("create", { scope, category: addCategory, content: newContent, confirmed: newConfirmed, ...(NEEDS_DEVICE.has(addCategory) ? { device_id: scope.id } : {}) }), "已新增").then((ok) => ok && setNewContent(""))}>
               保存新记忆
             </button>
             {legacy && <button type="button" disabled={busy} onClick={() => run(() => call("import_legacy", { device_id: scope.id }), (r) => `从旧摘要导入 ${r.created} 条候选${r.skipped?.length ? `（跳过：${r.skipped.map(skipReasonText).join("、")}）` : ""}`)}>导入旧摘要为候选</button>}
             <button type="button" disabled={busy} onClick={() => run(async () => setExported(JSON.stringify((await call("export", { scope })).memories, null, 2)), "已生成备份，请复制保存")}>导出备份</button>
-            <button type="button" disabled={busy} onClick={() => window.confirm(`清空“${scopeLabel(scope, status)}”的全部记忆？不能恢复。`) && run(() => call("clear", { scope, confirmed: true }), (r) => `已清空 ${r.cleared} 条`)}>清空本范围</button>
+            <button type="button" disabled={busy} onClick={async () => (await ask(`清空“${scopeLabel(scope, status)}”的全部记忆？不能恢复。`)) && run(() => call("clear", { scope, confirmed: true }), (r) => `已清空 ${r.cleared} 条`)}>清空本范围</button>
           </span>
           {exported && <textarea readOnly rows={6} value={exported} aria-label="导出的记忆备份" />}
           {scope.kind === "device" && (
@@ -218,7 +224,7 @@ function Memories({ status, refresh }) {
                   {new Date(r.started_at * 1000).toLocaleString("zh-CN", { hour12: false })} · 新增 {r.added} 条
                   {r.skipped.length > 0 && ` · 跳过：${r.skipped.map((s) => skipReasonText(s.reason)).join("、")}`}
                   {r.reverted_at ? " · 已撤销" : (
-                    <button type="button" disabled={busy || r.added === 0} onClick={() => window.confirm("撤销这次提取新增的候选？你已编辑或确认过的会保留。") && run(() => call("revert", { run_id: r.id }), (x) => `已撤销 ${x.removed} 条，保留 ${x.kept.length} 条`)}>
+                    <button type="button" disabled={busy || r.added === 0} onClick={async () => (await ask("撤销这次提取新增的候选？你已编辑或确认过的会保留。")) && run(() => call("revert", { run_id: r.id }), (x) => `已撤销 ${x.removed} 条，保留 ${x.kept.length} 条`)}>
                       整批撤销
                     </button>
                   )}
@@ -250,7 +256,7 @@ function Knowledge({ status }) {
             <p key={r.id} className="voice-context-run">
               <b>{r.label}</b> · {r.directories} 个目录、{r.files} 个文件 · {r.indexed_at ? `索引于 ${new Date(r.indexed_at * 1000).toLocaleString("zh-CN", { hour12: false })}` : "未建立索引"}
               <button type="button" disabled={busy} onClick={() => run(() => call("knowledge_reindex", { id: r.id }), (x) => `已重建：${x.files} 个文件`)}>重建索引</button>
-              <button type="button" disabled={busy} onClick={() => window.confirm("移除这个资料目录的索引？磁盘上的文件不会被删除。") && run(() => call("knowledge_remove", { id: r.id, revision: r.revision }), "已移除")}>移除</button>
+              <button type="button" disabled={busy} onClick={async () => (await ask("移除这个资料目录的索引？磁盘上的文件不会被删除。")) && run(() => call("knowledge_remove", { id: r.id, revision: r.revision }), "已移除")}>移除</button>
             </p>
           ))}
         </>

@@ -53,6 +53,8 @@
 
 **当前生产门禁必须保持**：`REAL_CLI_SANDBOX_VERIFIED=false`，`DisabledRunner`，GUI 的 `enabled:true` 拒绝。所有测试镜像、容器和内网不能替代已审批的生产执行器。
 
+> **2026-10-15 更新**：本节当时的“生产门禁必须保持”已被用户决定取代——真实 CLI 改为“用户开启 + 每次运行桌面批准 + 只在严格模式运行”，见 [安全入口 §4.18](../developer/safety.md)。本文件描述的那套 Docker 沙箱 / 假模型代理路线**没有**接入生产，仍然只是离线夹具；不在用户开启路径上的部分（容器内执行、受控模型出口代理）保持未接线。
+
 ### NV13 模型代理 HTTP 安全核心（2026-10-11：离线 mock，仅软件验收）
 
 新增 `crates/laser-host/src/voice_agent/model_proxy.rs`。该 Rust 模块在所有构建中都**没有真实网络上游或凭据**，生产 `AgentCoordinator` 未注册它；只在 Rust 测试中通过系统随机临时回环 TCP socket 验证真实 HTTP 字节往返。它不代表可用的 Codex API 代理。

@@ -9,6 +9,7 @@ const PAGE_TITLES = {
   "/": { title: "雕刻工作台", sub: "LASER FORGE" },
   "/draw": { title: "创作画板", sub: "CANVAS" },
   "/material-lab": { title: "材料实验室", sub: "MATERIAL LAB" },
+  "/twin": { title: "数字孪生舱", sub: "DIGITAL TWIN 3D" },
   "/voice": { title: "语音中心", sub: "VOICE CENTER" },
 };
 
@@ -29,6 +30,7 @@ export function Navbar({
   showApprovals = false,
   approvalCount = 0,
   onApprovalsClick,
+  hideStatusPills = false,
 }) {
   const page = PAGE_TITLES[currentPath] || PAGE_TITLES["/"];
   const mcpPill = mcpPillState(mcpStatus, voiceStatus);
@@ -44,45 +46,49 @@ export function Navbar({
       </h1>
       <div className="ob-top-spacer" />
 
-      <button
-        type="button"
-        onClick={() => onNavigate("/")}
-        className={`ob-pill conn-pill ${hardware.online ? "ob-pill--ok online" : "ob-pill--bad offline"}`}
-        title={hardware.title}
-        id="nav-hardware-status"
-      >
-        <Zap size={13} aria-hidden="true" />
-        <span>{hardware.text}</span>
-      </button>
+      {!hideStatusPills && (
+        <>
+          <button
+            type="button"
+            onClick={() => onNavigate("/")}
+            className={`ob-pill conn-pill ${hardware.online ? "ob-pill--ok online" : "ob-pill--bad offline"}`}
+            title={hardware.title}
+            id="nav-hardware-status"
+          >
+            <Zap size={13} aria-hidden="true" />
+            <span>{hardware.text}</span>
+          </button>
 
-      <div
-        className={`ob-pill conn-pill mcp-pill--${mcpPill.key} ${pillClass}`}
-        title={
-          mcpPill.key === "unconfigured"
-            ? "小智 MCP 网关未配置（桌面端在语音中心填写接入点；独立 moss-host 在偏好设置中填写，或设置 MCP_ENDPOINT）"
-            : `小智 MCP 网关：${mcpPill.label}${mcpStatus?.client_info ? ` · ${mcpStatus.client_info}` : ""}${mcpStatus?.endpoint ? ` · ${mcpStatus.endpoint}` : ""}`
-        }
-        id="nav-mcp-status"
-        data-state={mcpPill.key}
-      >
-        <Radio size={13} aria-hidden="true" />
-        <span>{mcpPill.text}</span>
-      </div>
+          <div
+            className={`ob-pill conn-pill mcp-pill--${mcpPill.key} ${pillClass}`}
+            title={
+              mcpPill.key === "unconfigured"
+                ? "小智 MCP 网关未配置（桌面端在语音中心填写接入点；独立 moss-host 在偏好设置中填写，或设置 MCP_ENDPOINT）"
+                : `小智 MCP 网关：${mcpPill.label}${mcpStatus?.client_info ? ` · ${mcpStatus.client_info}` : ""}${mcpStatus?.endpoint ? ` · ${mcpStatus.endpoint}` : ""}`
+            }
+            id="nav-mcp-status"
+            data-state={mcpPill.key}
+          >
+            <Radio size={13} aria-hidden="true" />
+            <span>{mcpPill.text}</span>
+          </div>
 
-      {showApprovals && (
-        <button
-          type="button"
-          className={`ob-pill approval-pill ${approvalCount > 0 ? "ob-pill--bad" : "ob-pill--off"}`}
-          onClick={onApprovalsClick}
-          id="nav-approvals"
-          title={approvalCount > 0 ? `${approvalCount} 个加工请求等待在本机批准` : "当前没有待批准的请求"}
-        >
-          <ShieldCheck size={13} aria-hidden="true" />
-          <span>审批</span>
-          {approvalCount > 0 && (
-            <span className="approval-count" aria-label={`${approvalCount} 个待批准`}>{approvalCount}</span>
+          {showApprovals && (
+            <button
+              type="button"
+              className={`ob-pill approval-pill ${approvalCount > 0 ? "ob-pill--bad" : "ob-pill--off"}`}
+              onClick={onApprovalsClick}
+              id="nav-approvals"
+              title={approvalCount > 0 ? `${approvalCount} 个加工请求等待在本机批准` : "当前没有待批准的请求"}
+            >
+              <ShieldCheck size={13} aria-hidden="true" />
+              <span>审批</span>
+              {approvalCount > 0 && (
+                <span className="approval-count" aria-label={`${approvalCount} 个待批准`}>{approvalCount}</span>
+              )}
+            </button>
           )}
-        </button>
+        </>
       )}
 
       <button

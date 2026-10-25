@@ -21,6 +21,7 @@ const parseLines = (text) => text.split(/\r?\n/).map((line) => line.trim()).filt
 
 export default function VoicePluginsCard() {
   const [config, setConfig] = useState(INITIAL);
+  const [selectedService, setSelectedService] = useState("lunar");
   const [keyStatus, setKeyStatus] = useState({});
   const [keyChanges, setKeyChanges] = useState(emptyKeys);
   const [sources, setSources] = useState("");
@@ -97,51 +98,70 @@ export default function VoicePluginsCard() {
     </div>
   );
   return <section className="voice-card" aria-label="语音信息插件">
-    <h3>信息插件（NV11）</h3>
-    <p>全部默认关闭。启用后，你的天气位置、搜索词或知识库问题会发送到已配置的服务商，可能产生 API 费用。外部资料不授予任何控制设备的权限。</p>
-    {loading ? <p>正在读取插件配置…</p> : <>
-      <h4>天气 · 和风天气</h4>
-      {toggle("weather_enabled", "启用实时天气")}
-      {field("weather_host", "和风 API Host", "https://你的专属host")}
-      {field("weather_latitude", "默认纬度", "39.9", "number")}
-      {field("weather_longitude", "默认经度", "116.4", "number")}
-      <label className="voice-form-group">鉴权方式
-        <select value={config.weather_auth} disabled={saving} onChange={(e) => set("weather_auth", e.target.value)}>
-          <option value="api_key">X-QW-Api-Key</option><option value="bearer">Bearer JWT</option>
+    <h3>信息服务</h3>
+    <p>只选择需要的服务。联网服务可能把查询内容发给服务商，并产生 API 费用；所有服务默认关闭。</p>
+    {loading ? <p>正在读取服务设置…</p> : <>
+      <label className="voice-form-group">要设置的服务
+        <select aria-label="要设置的服务" value={selectedService} onChange={(event) => setSelectedService(event.target.value)}>
+          <option value="lunar">农历（本机）</option>
+          <option value="weather">天气</option>
+          <option value="news">新闻</option>
+          <option value="search">联网搜索</option>
+          <option value="rag">知识库</option>
         </select>
       </label>
-      {keyField("weather", "天气 API 密钥")}
-      <h4>农历</h4>
-      {toggle("lunar_enabled", "启用本机农历（不联网）")}
-      {field("lunar_utc_offset_minutes", "时区 UTC 偏移（分钟，北京 480）", "480", "number")}
-      <h4>新闻 · RSS</h4>
-      {toggle("news_enabled", "启用新闻 RSS")}
-      <label className="voice-form-group">新闻来源白名单：RSS「编号|HTTPS地址」或 NewsNow「编号|newsnow|服务地址|来源ID」
-        <textarea rows={3} disabled={saving} value={sources} onChange={(e) => setSources(e.target.value)}
-          placeholder={"tech|https://example.com/feed.xml"} />
-      </label>
-      <h4>联网搜索</h4>
-      {toggle("search_enabled", "启用联网搜索")}
-      <label className="voice-form-group">搜索服务
-        <select aria-label="搜索服务" value={config.search_provider} disabled={saving} onChange={(e) => set("search_provider", e.target.value)}>
-          <option value="tavily">Tavily</option><option value="metaso">秘塔 Metaso</option>
-        </select>
-      </label>
-      {field("search_host", "Tavily API Host", "https://api.tavily.com")}
-      {keyField("search", "Tavily API 密钥")}
-      {field("metaso_host", "秘塔 API Host", "https://metaso.cn")}
-      {keyField("metaso", "秘塔 API 密钥")}
-      <p>两家服务分别保存密钥，只调用当前选择的一家；超时或失败不会自动切换或重试。</p>
-      <h4>知识库 · RAGFlow</h4>
-      {toggle("rag_enabled", "启用知识库检索")}
-      {field("rag_host", "RAGFlow Host", "https://rag.example.com")}
-      <label className="voice-form-group">数据集白名单，每行一个 Dataset ID
-        <textarea rows={3} disabled={saving} value={datasets} onChange={(e) => setDatasets(e.target.value)} />
-      </label>
-      {keyField("rag", "RAGFlow API 密钥")}
+      {selectedService === "lunar" && <div className="voice-private-service">
+        {toggle("lunar_enabled", "启用本机农历")}
+        <details className="voice-private-more"><summary>修改时区</summary>
+          {field("lunar_utc_offset_minutes", "时区 UTC 偏移（分钟，北京 480）", "480", "number")}
+        </details>
+      </div>}
+      {selectedService === "weather" && <div className="voice-private-service">
+        {toggle("weather_enabled", "启用实时天气")}
+        {field("weather_host", "和风天气专属 API 地址", "https://你的专属host")}
+        <div className="voice-form-grid">
+          {field("weather_latitude", "默认纬度", "39.9", "number")}
+          {field("weather_longitude", "默认经度", "116.4", "number")}
+        </div>
+        <label className="voice-form-group">鉴权方式
+          <select value={config.weather_auth} disabled={saving} onChange={(e) => set("weather_auth", e.target.value)}>
+            <option value="api_key">X-QW-Api-Key</option><option value="bearer">Bearer JWT</option>
+          </select>
+        </label>
+        {keyField("weather", "天气 API 密钥")}
+      </div>}
+      {selectedService === "news" && <div className="voice-private-service">
+        {toggle("news_enabled", "启用新闻 RSS")}
+        <label className="voice-form-group">新闻来源，每行一个：RSS「编号|HTTPS地址」或 NewsNow「编号|newsnow|服务地址|来源ID」
+          <textarea rows={3} disabled={saving} value={sources} onChange={(e) => setSources(e.target.value)} placeholder="tech|https://example.com/feed.xml" />
+        </label>
+      </div>}
+      {selectedService === "search" && <div className="voice-private-service">
+        {toggle("search_enabled", "启用联网搜索")}
+        <label className="voice-form-group">搜索服务
+          <select aria-label="搜索服务" value={config.search_provider} disabled={saving} onChange={(e) => set("search_provider", e.target.value)}>
+            <option value="tavily">Tavily</option><option value="metaso">秘塔 Metaso</option>
+          </select>
+        </label>
+        {config.search_provider === "metaso" ? <>
+          {field("metaso_host", "秘塔 API 地址", "https://metaso.cn")}
+          {keyField("metaso", "秘塔 API 密钥")}
+        </> : <>
+          {field("search_host", "Tavily API 地址", "https://api.tavily.com")}
+          {keyField("search", "Tavily API 密钥")}
+        </>}
+      </div>}
+      {selectedService === "rag" && <div className="voice-private-service">
+        {toggle("rag_enabled", "启用知识库检索")}
+        {field("rag_host", "RAGFlow 地址", "https://rag.example.com")}
+        <label className="voice-form-group">数据集白名单，每行一个 Dataset ID
+          <textarea rows={3} disabled={saving} value={datasets} onChange={(e) => setDatasets(e.target.value)} />
+        </label>
+        {keyField("rag", "RAGFlow API 密钥")}
+      </div>}
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
-      <button type="button" className="btn btn-primary" disabled={saving} onClick={save}>{saving ? "正在保存…" : "保存插件设置"}</button>
+      <button type="button" className="btn btn-primary" disabled={saving} onClick={save}>{saving ? "正在保存…" : "保存信息服务"}</button>
     </>}
   </section>;
 }

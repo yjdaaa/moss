@@ -151,16 +151,30 @@ function defaultTitle(kind, tone) {
   }
 }
 
-function fallbackNative(kind, title, message) {
+/**
+ * 原生降级。桌面端 Tauri 的对话框插件把 window.confirm 换成了返回 Promise 的异步函数，
+ * 直接当布尔值用会永远判为“确认”（2026-10-15 实机发现）；所以一律 await，出错按取消处理。
+ */
+async function fallbackNative(kind, title, message) {
   const text = title && message ? `${title}\n\n${message}` : title || message;
   if (typeof window === "undefined") return kind === "confirm" ? false : kind === "choice" ? "dismiss" : true;
-  if (kind === "confirm") {
-    return typeof window.confirm === "function" ? window.confirm(text) : false;
-  }
+  const ask = async () => {
+    if (typeof window.confirm !== "function") return null;
+    try {
+      return (await window.confirm(text)) === true;
+    } catch (_error) {
+      return null;
+    }
+  };
+  if (kind === "confirm") return (await ask()) === true;
   if (kind === "choice") {
-    if (typeof window.confirm !== "function") return "dismiss";
-    return window.confirm(text) ? "confirm" : "cancel";
+    const answer = await ask();
+    return answer === null ? "dismiss" : answer ? "confirm" : "cancel";
   }
-  if (typeof window.alert === "function") window.alert(text);
+  try {
+    if (typeof window.alert === "function") await window.alert(text);
+  } catch (_error) {
+    // 提示失败不影响流程
+  }
   return true;
 }

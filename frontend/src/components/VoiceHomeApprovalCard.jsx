@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
+import { showConfirm } from "../appDialog.js";
 
 export default function VoiceHomeApprovalCard() {
   const [items, setItems] = useState([]);
@@ -40,7 +41,8 @@ export default function VoiceHomeApprovalCard() {
     finally { setBusy(""); }
   };
   const approve = async (item) => {
-    if (!item.can_approve || !window.confirm(`批准 ${item.entity_id} 的 ${item.service}？\n参数：${JSON.stringify(item.parameters)}\n这将实际控制设备；结果未知时不会自动重发。`)) return;
+    // 桌面端 window.confirm 被替换成异步函数，必须 await showConfirm，否则确认会被跳过
+    if (!item.can_approve || !(await showConfirm(`批准 ${item.entity_id} 的 ${item.service}？\n参数：${JSON.stringify(item.parameters)}\n这将实际控制设备；结果未知时不会自动重发。`, { title: "批准家居动作？", tone: "warning", danger: true, confirmText: "批准执行一次" }))) return;
     setBusy(item.approval_id);setError("");setMessage("");
     try {
       const result=await voiceApi.homeApprovalApprove({approval_id:item.approval_id,digest:item.digest,confirmed:true});

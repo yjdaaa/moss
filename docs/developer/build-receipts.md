@@ -2,6 +2,171 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## 雕刻工作台默认布局改为「左窄右宽」双栏排布并自动对齐左右底边（2026-10-23）
+
+更新 `workbenchLayout.js`、`WorkbenchCanvas.jsx`、`HomePage.jsx`、`styles.css`：① `DEFAULT_LAYOUT` 由三栏改为**左窄右宽双栏**默认排布——左栏（16 列）竖排「通信链路 (`h: 23`)」「加工内容 (`h: 27`)」「材质与参数 (`h: 23`)」，右栏（32 列）上方「加工监视舱 (`h: 64`)」、下方紧贴「加工反馈 (`h: 10`)」，并将 `LAYOUT_VERSION` 升至 `5` 使旧三栏缓存自动切换为新双栏默认布局，彻底消除原独立第三列下半截的大块空位；② `WorkbenchCanvas.jsx` 新增 `alignDualColumns`（配合 `.ob-monitor .chamber-viewport` 最小高度调至 `180px`），在双栏默认列位置且未手动拖拽过 `monitor` 高度时，让 `monitor` 自动随左栏总高度伸缩，保持首屏、切换加工内容模式及折叠/展开左栏卡片时左右两栏底边始终齐平。本次工作树：前端 `npm test` **145 PASS**、`tests/workbench-layout.browser.mjs` **PASS**、`npm run build` 成功、`npm run test:e2e` **32/32 PASS**；Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-23） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 08:19:50 | 61,484,032 | `d69862f164ae4879a651251fbbd91b0b1671b5cc63be3bc41bbbdbbc414b8fae` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 08:19:49 | 19,351,484 | `65398b9d649b962528473c6aac1c35cfa3365f09e8bf9444585976bb349e5710` |
+
+**未验证**：真实桌面窗口不同分辨率下的目视观感与连接物理硬件；本轮无实机操作、外部发布或提交推送。
+
+## `/twin` 3D 工作台上下拖拽放大缩小、材料宽 W / 高 H 滑块与激光头联动、默认关闭循环推演并显式提示、雕刻工作台与创作画板自由画布收起贴合/自适应高度消除卡片空白（2026-10-20）
+
+更新 `twinState.js`、`workbenchLayout.js`、`TwinPage.jsx`、`TwinStage3D.jsx`、`WorkbenchCanvas.jsx`、`DrawPage.jsx`、`styles.css`：① `TwinStage3D.jsx` 底部边框新增 `.twin-stage-resize-handle` 上下拖拽手柄（支持 `220px ~ 960px` 放大/缩小 3D 工作台高度，拖拽过程同步更新 DOM 高度、`renderer.setSize(w, h, false)` 并立即执行 `renderer.render(scene, camera)`，同时在 `h < 520` 时对垂直 `fov` 做平滑补偿，双击恢复默认 `520px`，高度存 `localStorage` 键 `moss_yisu_stage_height_v1`）；② `resolveMachineWorkspace` 放开 `minMatWidthMm / minMatHeightMm` 至 `1mm` 并计算 `toolpathScaleX / toolpathScaleY`，`TwinPage.jsx` 为 `材料宽 W (mm)`、`材料高 H (mm)` 增加拖动滑块（`10 ~ 机台行程`）与草稿态输入缓冲，调节宽高时 3D 材料板、刀路与 5W 激光头实时跟随移动；③ `simLoop` 默认值改为 `false`，按钮 `#btn-twin-loop` 显示 `循环：开启 / 循环：关闭` 并在紧邻右侧新增 `#twin-loop-status-pill` 状态胶囊（`已开启循环雕刻 / 单次推演（不循环）`），未开启循环时推演到达 `100%` 立即停止并不再循环雕刻；④ 底部收起态按钮文字由「展开推演栏」改为「展开」；⑤ 雕刻工作台与创作画板 (`WorkbenchCanvas.jsx` / `DrawPage.jsx` / `styles.css` / `workbenchLayout.js`) 收起卡片后彻底隐藏 `.ob-card-h` 以外的所有内容、锁定 `overflow: hidden` 禁止滚轮下滑、移除纵向缩放把手，并通过 `reflowVertical` 让同列下方卡片自动往上贴合；同时通过 `.wb-card-content` + `ResizeObserver`（`fitCardRows`）让表单类卡片自动贴合内容高度，并将 `.ob-monitor .chamber-viewport` 设为弹性伸展（`flex: 1 1 260px`）、`.job-dispatch-card` 设为 `margin-top: auto`，彻底消除「加工监视舱」`0 / 0 行 PENDING` 下方与「加工反馈」等卡片底部的大片空白框。本次工作树：前端 `npm test` **145 PASS**、`tests/workbench-layout.browser.mjs` **PASS**、`npm run build` 成功、`npm run test:e2e` **32/32 PASS**；Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布；同日 13:29、14:54、15:12 与 15:43 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-20） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 16:25:37 | 61,484,032 | `a4b68f37c58327fa27c36a523805e64cdc6f6acef38b46365d0ebfafda325d90` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 16:25:37 | 19,353,892 | `6dbdad21a8d4e66b6d0c6c508267ed1a8fd832ce1dc37e031bf82169e654f23d` |
+
+**未验证**：真实桌面窗口目视拖拽手感与连接物理硬件；本轮无实机操作、外部发布或提交推送。
+
+## 偏好设置新增「隐藏右上角状态胶囊（硬件 / 小智 / 审批）」开关（2026-10-20）
+
+在 `SettingsModal.jsx` 新增「顶栏右上角状态显示」分区与 `#settings-hide-top-pills` 复选框（持久化至 `localStorage` 键 `moss_hide_top_pills`，默认 `false` 不隐藏），由 `main.jsx` 同步至 `Navbar.jsx` 的 `hideStatusPills` 属性；开启时隐藏 `#nav-hardware-status`、`#nav-mcp-status` 与 `#nav-approvals` 三个状态胶囊，常驻 `#nav-estop`（急停 0x18）按钮与 `ApprovalCenter` 新审批自动弹窗保持不变。本次工作树：前端 `npm test` **144 PASS**、`npm run build` 成功、`npm run test:e2e` **32/32 PASS**；Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布；同日 13:18 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-20） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 13:29:43 | 61,467,648 | `4d7792aa4ddfa7b403aefaf00c29323e6cb9e060502c35d0f1f55d62a6807367` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 13:29:43 | 19,348,377 | `87391be1ce90941df550df9d059d6f1ecb46aaabf45cc7f79bc63de2ec984380` |
+
+**未验证**：真实桌面窗口目视点击体验与连接物理硬件；本轮无实机操作、外部发布或提交推送。
+
+## `/twin` 数字孪生舱支持激光雕刻文字在材料内任意调整位置并严格钳制不出材料边界、G-code 真实雕刻时长 1:1 实时同步推演、3D 视口浮层与底部推演进度栏可一键收起、同步大鱼 DIY 翼宿 V1.0 真实打印件总成（2026-10-20）
+
+按用户要求与《B站【大鱼DIY】激光雕刻机_翼宿 V1.0 图纸包》全套 STEP/DXF 更新 `twinState.js`、`TwinPage.jsx`、`TwinStage3D.jsx`、`DrawPage.jsx`、`HomePage.jsx`、`styles.css`：① **G-code 雕刻时长精确推算与 1:1 实时同步推演（移除倍速缩放）**：`parseGcodeToolpath` 按每段位移长度与实际有效进给速度 `F`（`mm/min`）推算物理耗时 `durationSeconds`、累计时长 `cumulativeSeconds`、出光雕刻耗时 `cutSeconds` 与空移耗时 `rapidSeconds`；`resolvePoseAtProgress` 改为严格按物理时间 `targetSec = ratio * estimatedSeconds` 在 `cumulativeSeconds` 上二分查找并插值；`TwinPage.jsx` 移除 `0.5x~10x` 倍速按钮与人为时长缩放，`requestAnimationFrame` 回放周期严格 1:1 等于 `toolpath.estimatedSeconds`，实时展示 `已走秒数 / 总计秒数（剩余秒数）` 及 `雕刻耗时 + 空移耗时` 明细；② **激光雕刻文字在材料内位置可调且 100% 钳制不出材料边界**：`resolveMachineWorkspace` 将材料台面起点 (`offsetX, offsetY`) 与文字在材料内的相对偏移 (`textOffsetX, textOffsetY`) 解耦，强制材料外框不小于刀路包络（`materialWidthMm >= spanX`、`materialHeightMm >= spanY`），并将 `textOffsetX / textOffsetY` 严格钳制在材料内；③ **3D 视口浮层与底部刀路推演控制栏均支持一键收起/展开**：`TwinStage3D.jsx` 左上角新增「`收起浮层` / `展开浮层`」切换按钮；`TwinPage.jsx` 底部仿真控制、进度条与 G-code 指令栏（`.twin-timeline-bar`）右上角新增「`收起` / `展开推演栏`」切换按钮（通过 `foldState.js` 按 `twin-timeline` 记忆折叠状态）；④ 默认工作区设为翼宿 V1.0 的 `100×100×20mm`，并按图纸包 1:1 还原全套打印件与 5W 激光头总成。本次工作树：前端 `npm test` **143 PASS**、`npm run build` 成功、`npm run test:e2e` **32/32 PASS**；Windows `cargo tauri build` exit 0。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-20） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 13:18:29 | 61,467,648 | `82dac72b60c878031941ba76aa9423dce64a82a05a4b32e81c6acf532b7b0ec7` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 13:18:29 | 19,349,149 | `10747f778486c5e5295d9ae9da035f261c7d102ab3f08425b4c0a127adc7c3bf` |
+
+**未验证**：桌面真实窗口内翼宿 V1.0 3D 视口目视交互与连接真实 FluidNC 硬件时的周期遥测采样；本轮无实机操作、外部发布或提交推送。
+## 切到自建链路允许先切后填（2026-10-19）
+
+修掉 n29 收敛引入的死锁：切换校验不再要求“先有自建接入点”，缺地址也允许切过去，切完在「服务 → 自建接入点」填好保存即重连；地址非空但格式不对仍拒绝。旧文案“服务端设置”统一改为新标签名。本次工作树：`cargo test -p moss-voice` **74 PASS / 1 忽略**（新增空地址可切换的用例）、前端 `npm test` **138 PASS**、`npm run build` 成功、`tests/voice-center.browser.mjs` **PASS**、`npm run test:e2e` **32/32 PASS**。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布；同日 01:03 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 17:29:47 | 60,713,984 | `1dafd33a82c9bb2d6b05c878a48e8f4072f1ba4d093af328c470fc2d5841b3b7` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 17:29:47 | 19,078,344 | `e44712acf9391ecffb3f9f4e5a3937a24d866ddace0e6bf83e178d84ef9ad48b` |
+
+**未验证**：真实窗口里“先切后填→自动重连”的完整观感；本轮无实机操作、外部发布或提交推送。
+
+## 语音中心按链路做减法（2026-10-19）
+
+纯前端信息架构调整：非当前链路的卡片不再渲染（删掉 4 个「其他链路的…设置」折叠），标签按链路动态（官方 5 个、自建/内置 6 个），链路的配置集中到「服务」，「连接」改名「设备与工具」，音乐/视觉只在内置链路出现。未改后端命令、ACL 与安全契约。本次工作树：前端 `npm test` **138 PASS**（新增 `voiceTabs.test.mjs`）、`npm run build` 成功、`tests/voice-center.browser.mjs` **PASS**（官方链路 5 标签、内置/自建面板 `count=0`）、`npm run test:e2e` **32/32 PASS**。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布；同日 00:29 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 17:03:26 | 60,713,984 | `6bd5800f8e4fc8b708a5405bf225f5719ef6adf477e79cf02cb8b2141351c56d` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 17:03:25 | 19,076,729 | `a7b526d3ca25f6b3de4463b71e1921bdbe33278c531e864f00ffcadb65b2c151` |
+
+**未验证**：真实窗口里逐链路点一遍的观感、触摸/小屏下的标签换行；本轮无实机操作、外部发布或提交推送。
+
+## 工作台：48 列栅格 + 拖动像素跟手（2026-10-19）
+
+用户要求“再细一点”：栅格 24 → **48 列**，并把拖动改成**过程按像素跟手、松手才吸附**（拖动中直接写 `transform` / `width` / `height`，不触发重排；松手按 `Math.round` 吸附到整格再 `settle` 让位）。落点步进约 27–33px（宽）/ 12px（高）。默认布局与最小列宽同步换算（×2），折叠仍为 8 行；布局存储键升到 `moss_wb_layout_v3`（旧 v2 自动失效）。本次工作树：前端 `npm test` **137 PASS**、`npm run build` 成功、`tests/workbench-layout.browser.mjs` **PASS**、`npm run test:e2e` **32/32 PASS**。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布；同日 00:12 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 16:29:13 | 60,713,984 | `e3ae1b0f80104010bf30aee8761ad1dafa7c4df550a51a6abaa239e2b021009a` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 16:29:13 | 19,083,477 | `57515ce6af9bba47743f0696b188b1e1180598704ae007277df44beb1d140f00` |
+
+**未验证**：真实窗口里的拖动手感与帧率、触摸屏拖动、多显示器 / 超宽屏表现；本轮无实机操作、外部发布或提交推送。
+
+## 工作台栅格加密：边框步进减半（2026-10-19）
+
+用户反馈“边框步进太大”，把画布栅格从 12 列 / 8px 行加密到 **24 列 / 4px 行**（行距仍 8px）：宽度步进由约 110px 降到约 55px，高度步进由 16px 降到 12px。默认布局、最小尺寸、折叠高度（8 行 ≈ 88px）同步换算；布局存储键升到 `moss_wb_layout_v2`，旧 `v1` 布局因列数变化自动失效、回默认排布。本次工作树：前端 `npm test` **137 PASS**、`npm run build` 成功、`tests/workbench-layout.browser.mjs` **PASS**（默认 `span 32`、折叠 `span 8`、拖右边框改宽度、记忆与还原、锁定），`npm run test:e2e` **32/32 PASS**。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布；同日 05:10 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 16:12:33 | 60,713,984 | `d161874fe40a27bd7fc243b83c1d0b84f225f5efcc7894a3430605c23ba2524f` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 16:12:33 | 19,085,618 | `f3ee3230e2dc5044b4ee573fb02c315c6e97be1b5cf7119cbecd62653d8f561c` |
+
+**未验证**：真实窗口里的拖动手感与帧率、触摸屏拖动、多显示器 / 超宽屏表现；本轮无实机操作、外部发布或提交推送。
+
+## 工作台自由画布补齐：折叠收缩与八向边框（2026-10-18）
+
+用户试用反馈后的修补：① 折叠卡片时高度收成标题条（`WbCard` 用 MutationObserver 盯 `FoldHeader` 的 `data-open`，交给画布把行数换成 6 行，展开还原用户拖过的行数）；② 卡片四条边与四个角共 8 个 resize 把手（原来只有右下角一个小热区）；③ 滚动移进卡片内层 `.wb-card-body`，边缘留给把手，避免滚动条盖住右/下边框。本次工作树：前端 `npm test` **137 PASS**、`npm run build` 成功、`tests/workbench-layout.browser.mjs` **PASS**（新增“折叠收成标题条 / 展开恢复”“拖右边框改宽度”两条断言）、`npm run test:e2e` **32/32 PASS**。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布；同日 04:46 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 05:10:26 | 60,713,984 | `5197a4f784f4f53a82c99597e85ebe2db8f01b0fe3ccab020822a8b303a77e29` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 05:10:25 | 19,080,614 | `7d6c39132aad342b55e4eb051869916d1ee5f70756f40887dee4ea27f0c0ccce` |
+
+**未验证**：真实窗口里的拖动手感与帧率、触摸屏拖动、多显示器 / 超宽屏表现；本轮无实机操作、外部发布或提交推送。
+
+## 激光工作台自由画布（2026-10-18）
+
+纯前端布局重构：三栏 grid 换成 12 列自由画布（拖动 / 缩放 / 自动让位 / 布局记忆 / 锁定 / 还原），未改后端与 Tauri 命令。本次工作树：前端 `npm test` **137 PASS**（新增 `workbenchLayout.test.mjs` 7 项）、`npm run build` 成功、新增 `tests/workbench-layout.browser.mjs` **PASS**（Playwright 真拖动：落盘、刷新保持、还原、锁定）、`npm run test:e2e` **32/32 PASS**（用当天已构建的 release `moss-host`，本轮未重建）。Windows `cargo tauri build`（含前端）exit 0；首次尝试因 MOSS 正在运行、`moss-desktop.exe` 被占用而失败（`os error 5`），退出 MOSS 后重建成功。未跑 Android 与带语音 helper 的专用包；未安装、未签名、未发布。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 04:46:07 | 60,710,400 | `2a322cd7a3ad5821df808591df051cf4661ae585e00519ade2c12d497121c3b0` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 04:46:06 | 19,079,031 | `7e87e30b53341d0d2e5332fd201feba45665fa5524c613131a4ba02ecfc1dad9` |
+
+**未验证**：真实窗口里的拖动手感与帧率、触摸屏拖动、多显示器 / 超宽屏表现；本轮无实机操作、外部发布或提交推送。
+
+## 严格模式开关热开热关 n28（2026-10-18）
+
+在 n27 的四项降噪之上，把“关闭严格模式需重启”改成立即生效（`HostApplication.strict_from_env` 改为 `AtomicBool` 并在命令里同步更新）。本次工作树：`cargo test --workspace` **816 PASS / 0 失败 / 9 忽略**，`cargo test -p moss-desktop --lib` **41 通过**；前端 `npm test` **130 PASS**、`npm run build` 成功、`tests/voice-center.browser.mjs` **PASS**、`npm run test:e2e` **32/32 PASS**（用当天已构建的 release `moss-host`，本轮未重建）。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包。未安装、未签名、未发布；同日 03:54 的产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 04:08:31 | 60,701,696 | `0d96cb2c13c535658a31e6d8d0f95b9cba399ef1f8d9a1ce027e44ac709f36b2` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 04:08:30 | 19,072,153 | `8555561b56b38f10768a87a20efe58b838022529e2fbf3e4097d41c8d0c09693` |
+
+**未验证**：真实窗口里热开热关的实际效果与 `.env` 写入、自建链路下拒绝关闭的界面表现、Python 探测在用户机器上的命中率、家居“允许查询”自动同步与真实 Home Assistant、真实设备固件推送；本轮无实机操作、外部发布或提交推送。
+
+## 语音中心降噪：严格模式开关、Python 探测、家居合并、固件移位 n27（2026-10-18）
+
+含两个新 Tauri 命令（`voice_strict_set` 写运行目录 `.env`、`voice_detect_python` 只查文件）。本次工作树：`cargo test --workspace` **816 PASS / 0 失败 / 9 忽略**（新增 `.env` 单行改写测试），`cargo test -p moss-desktop --lib` **41 通过**；前端 `npm test` **130 PASS**、`npm run build` 成功、`tests/voice-center.browser.mjs` **PASS**、`npm run test:e2e` **32/32 PASS**（用当天已构建的 release `moss-host`，本轮未重建）。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包。未安装、未签名、未发布。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 03:54:49 | 60,701,184 | `21799c3cd779dffc7ff965b0d8d49fc053fbab5a8b1acdf67bf01ed5dec5c90e` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 03:54:49 | 19,071,611 | `f8d5c5962f54cb4fecb2068a6f1ef4c8523ec63e38a95347ed92bd59694fa178` |
+
+**未验证**：真实窗口里点严格模式开关后的 `.env` 写入与重启生效、Python 探测在用户机器上的命中率、家居“允许查询”自动同步与真实 Home Assistant、真实设备固件推送；本轮无实机操作、外部发布或提交推送。
+
+## 隐私与家居四项下拉就地展开 n26（2026-10-18）
+
+含权限与原生来源门禁改动（详见 [`voice-private-acl.md`](../integration/voice-private-acl.md) 的 n26 节）。本次工作树：`cargo test --workspace` **815 PASS / 0 失败 / 9 忽略**（含改写后的 ACL 契约测试），`cargo test -p moss-desktop --lib` 40 通过；前端 `npm test` **130 PASS**、`npm run build` 成功、`tests/voice-center.browser.mjs` **PASS**、`npm run test:e2e` **32/32 PASS**（用当天已构建的 release `moss-host`，本轮未重建）。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包。核对：生成的 `gen/schemas/capabilities.json` 已含新 capability `voice-private-settings-main`，`moss-desktop.exe` 内可检索到新增的 `voice-private-home-approvals`。下列为本次生成的普通交付产物，未安装、未签名、未发布；同日 10:44 的旧产物已被本次覆盖。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 03:12:23 | 60,506,624 | `963c72185fc13fea5095bc1921c40af5d7a4de2fc398de27169cf33aedce3ee1` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 03:12:22 | 19,035,645 | `6480968dad9111d4073a3efb66ad05ee5292fc57afb268cbf1ca7a02f5235672` |
+
+真实 Windows WebView2 窗口内的目视点击与家居/设备实机验收未做；本轮无实机操作、外部发布或提交推送。
+
+## 隐私与家居入口改默认收起的下拉（2026-10-18）
+
+纯前端 UI 调整（主语音页入口折叠），未改后端、私密窗口页面与 ACL。本次工作树前端 `npm test` **130 PASS**、`npm run build` 成功、`tests/voice-center.browser.mjs` **PASS**（新增“下拉默认收起、点标题展开”断言）、`npm run test:e2e` **32/32 PASS**（用当天早先构建的 release `moss-host`，本轮未重建）。Windows `cargo tauri build`（含前端）exit 0；未跑 Android 与带语音 helper 的专用包。产物已核对内嵌资源：在 `moss-desktop.exe` 中能检索到 `voice-private-dropdown`，确认新页面已嵌入二进制。下列为本次生成的普通交付产物，未安装、未签名、未发布。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 02:44:47 | 60,433,920 | `5f841c3ffec16f7167f31c0fc6179945a3af89c49dcbeb4d7ebcad5463ca622d` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 02:44:47 | 19,022,802 | `35588c6e9f8f1a2c6b7566e567ed08f729422099517164224da8db94cc1f5bfc` |
+
+真实 Windows WebView2 窗口内的目视确认未做；本轮无实机操作、外部发布或提交推送。
+
+## UI-4 隐私与家居任务入口（2026-10-18）
+
+本次工作树的前端 `npm test`、`npm run build`、私密任务/信息服务/声纹/长期记忆/语音中心浏览器测试通过；`cargo test --workspace` 通过。重新构建 release `moss-host` 后，回环 FakeGrbl E2E **32/32 PASS**。Windows `cargo tauri build`（含前端）及 Android `cargo tauri android build --target aarch64 --apk` 均 exit 0。Android Studio 默认 JBR 25.0.3 使 Gradle `:buildSrc` 配置失败；仅在重试命令进程内设置 `JAVA_HOME` 为本机 JDK 17 后成功，不改全局 Java。下列均为本次生成的普通交付产物，未安装或发布。
+
+| 本次产物（0.1.0） | UTC时间（2026-10-18） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `target/release/moss-desktop.exe` | 13:16:52 | 60,429,824 | `b55a8b6c38ad0ccd02fc59c08f1a4c9ed84dce14a8a14782decee368158da163` |
+| 普通 `target/release/bundle/nsis/MOSS_0.1.0_x64-setup.exe` | 13:16:52 | 19,029,493 | `ead286045bf392e4d7d17f8af2ca056024efdb4b0c742df1f197410b0a153d06` |
+| `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 13:27:51 | 53,008,066 | `5cf994485a4872e1004b871dc7fc29f8d2e13b48792d74aba046da34344adbcc` |
+
+Android arm64 Rust 库 `target/aarch64-linux-android/release/libmoss_desktop_lib.so` 本次编译 47,286,960 B（13:27:27 UTC），SHA-256 `69d6484ed1e4cfb12e53a6404d9c750b934bc400e80fa9e580423aa831a1083e`；未另行比对 APK 内嵌字节。真实 Windows WebView2 点击、真实 HA/声纹/设备、安装与签名均未验收；普通 NSIS 不代表带 helper 的专用包。本轮无实机操作、外部发布或提交推送。
+
 ## NV19 长期记忆、UI-3 语音中心、家居控制与声纹用户开启（2026-10-15）
 
 **本次回执**：同一工作树合并两个会话的改动（NV19-01～08、UI-3 语音中心改版；家居控制与声纹改为用户开启、功能真实性审查修复）。`cargo test --workspace` **804 PASS / 7 ignored**，前端 `npm test` **124 PASS**，`npm run build` 成功，6 个语音浏览器测试通过，release `moss-host` 的 FakeGrbl E2E **32/32 PASS**；`cargo tauri build`（含前端构建）与 `cargo tauri android build --target aarch64 --apk` 均 exit 0。

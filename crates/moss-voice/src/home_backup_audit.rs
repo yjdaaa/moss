@@ -6,7 +6,7 @@ pub enum BackupRisk{SuspectedLegacyCredential,EncryptedCredentialMaterial,Unknow
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub struct BackupAudit{pub risk:BackupRisk,pub inspected_bytes:u64}
 const LIMIT:u64=64*1024*1024;
-const MARKERS:[&[u8];4]=[b"voice.homeassistant.token",b"long_lived_access_token",b"access_token",b"dpapi-user-v1:"];
+const MARKERS:[&[u8];5]=[b"voice.homeassistant.token",b"long_lived_access_token",b"access_token",b"dpapi-user-v1:",b"keychain-user-v1:"];
 pub fn audit_selected_file(path:&Path)->Result<BackupAudit,&'static str>{
     // Refuse network/relative paths and redirected parent directories. Never scan a root.
     if !path.is_absolute() || path.components().any(|part| matches!(part,std::path::Component::ParentDir)) {
@@ -31,7 +31,7 @@ pub fn audit_selected_file(path:&Path)->Result<BackupAudit,&'static str>{
     let info=std::fs::symlink_metadata(path).map_err(|_|"file metadata failed")?;
     if !info.file_type().is_file()||info.len()==0||info.len()>LIMIT{return Err("invalid bounded regular file");}
     let mut f=File::open(path).map_err(|_|"file opening failed")?;
-    let mut buffer=[0u8;16384];let mut tail=Vec::new();let mut size=0u64;let mut seen=[false;4];
+    let mut buffer=[0u8;16384];let mut tail=Vec::new();let mut size=0u64;let mut seen=[false;5];
     loop{
         let n=f.read(&mut buffer).map_err(|_|"file read failed")?;
         if n==0{break;}
@@ -46,7 +46,7 @@ pub fn audit_selected_file(path:&Path)->Result<BackupAudit,&'static str>{
     }
     if size!=info.len(){return Err("file changed during inspection");}
     let risk=if seen[0]||seen[1]||seen[2]{BackupRisk::SuspectedLegacyCredential}
-    else if seen[3]{BackupRisk::EncryptedCredentialMaterial}
+    else if seen[3]||seen[4]{BackupRisk::EncryptedCredentialMaterial}
     else{BackupRisk::UnknownTreatAsSensitive};
     Ok(BackupAudit{risk,inspected_bytes:size})
 }
@@ -58,6 +58,8 @@ mod tests{
         std::fs::write(&f,format!("{}voice.homeassistant.token{}", "x".repeat(16376),"synthetic_token_no_real_credentials")).unwrap();
         assert_eq!(audit_selected_file(&f).unwrap().risk,BackupRisk::SuspectedLegacyCredential);
         let other=temp.path().join("cipher");std::fs::write(&other,b"dpapi-user-v1:fake").unwrap();
+        assert_eq!(audit_selected_file(&other).unwrap().risk,BackupRisk::EncryptedCredentialMaterial);
+        std::fs::write(&other,b"keychain-user-v1:fake").unwrap();
         assert_eq!(audit_selected_file(&other).unwrap().risk,BackupRisk::EncryptedCredentialMaterial);
         std::fs::write(&other,b"unknown data").unwrap();
         assert_eq!(audit_selected_file(&other).unwrap().risk,BackupRisk::UnknownTreatAsSensitive);

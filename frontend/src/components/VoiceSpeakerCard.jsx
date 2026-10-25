@@ -39,6 +39,7 @@ export default function VoiceSpeakerCard() {
     }}/><span>按人使用对话记忆（完成下方简易标定后可开启）</span></label>
     <p>声纹仅是个人记忆的候选身份提示，不能授权加工或家居动作。个人摘要可在本机维护；完成简易标定并明确开启前不会用于对话，当前沿用既有设备记忆开关。</p>
     <p>请先在语音中心下载 CampPlus 模型，准备协议4辅助程序，并启动对话模式。每人说三段不同句子，避开多人同时说话、噪声和削波。删除声纹会同时删除其个人摘要。</p>
+    {data?.warning&&<p className="voice-hint voice-hint--warn" role="status">{data.warning}</p>}
     {error&&<p role="alert">{error}</p>}
     {pollError&&<p role="alert">状态刷新失败：{pollError}</p>}
     <div className="voice-form-grid">

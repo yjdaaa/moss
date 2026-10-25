@@ -39,6 +39,8 @@ export const voiceApi = {
   contextManage: (input) => invokeVoice("voice_context_manage", { input }),
   contextPickFolder: () => invokeVoice("voice_context_pick_folder"),
   firmwareStatus: () => invokeVoice("voice_firmware_status"),
+  firmwareImport: () => invokeVoice("voice_firmware_import"),
+  firmwareManage: (input) => invokeVoice("voice_firmware_manage", { input }),
   mcpStatus: () => invokeVoice("voice_mcp_status"),
   mcpSave: (input) => invokeVoice("voice_mcp_save", { input }),
   mcpDelete: (name, revision, confirmed) => invokeVoice("voice_mcp_delete", { name, revision, confirmed }),
@@ -69,11 +71,12 @@ export const voiceApi = {
   homeApprovalApprove: (input) => invokeVoice("voice_home_approval_approve", { input }),
   homeDiscover: () => invokeVoice("voice_home_discover"),
   agentStatus: () => invokeVoice("voice_agent_status"),
+  agentStop: (runId) => invokeVoice("voice_agent_stop", { runId }),
   agentSave: (input) => invokeVoice("voice_agent_save", { input }),
   visionStatus: () => invokeVoice("voice_vision_status"),
   visionSave: (input) => invokeVoice("voice_vision_save", { input }),
   visionTest: () => invokeVoice("voice_vision_test"),
-  openPrivateSettings: () => invokeVoice("open_voice_private"),
+  openPrivateSettings: (section) => invokeVoice("open_voice_private", { section }),
   pluginsStatus: () => invokeVoice("voice_plugins_status"),
   pluginsSave: (input) => invokeVoice("voice_plugins_save", { input }),
   memoryList: () => invokeVoice("voice_memory_list"),
@@ -94,4 +97,8 @@ export const voiceApi = {
   localDownload: (id) => invokeVoice("voice_local_model_download", { id }),
   localCancel: (id) => invokeVoice("voice_local_model_cancel", { id }),
   localDelete: (id) => invokeVoice("voice_local_model_delete", { id }),
+  // 自建服务端向导：自动探测本机 Python 3 解释器路径（只查文件，不执行程序）
+  // 严格模式开关：写运行目录 .env；开启立即生效，关闭重启后生效
+  strictSet: (enabled, confirmed) => invokeVoice("voice_strict_set", { enabled, confirmed }),
+  detectPython: () => invokeVoice("voice_detect_python"),
 };

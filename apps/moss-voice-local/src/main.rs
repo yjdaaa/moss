@@ -467,8 +467,21 @@ fn speaker_worker(jobs:Receiver<Job>,out:Out){
                             return Err("声纹模型目录已变化".into());
                         }
                     }
-                    #[cfg(not(windows))]
-                    return Err("当前声纹模型安全加载仅支持 Windows".into());
+                    #[cfg(unix)] {
+                        for directory in root.ancestors() {
+                            let dir_meta=std::fs::symlink_metadata(directory).map_err(|_|"声纹模型目录不可读")?;
+                            if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
+                                return Err("声纹模型目录不得包含符号链接".into());
+                            }
+                            let guard=std::fs::File::open(directory).map_err(|_|"声纹模型目录无法打开")?;
+                            directory_guards.push(guard);
+                        }
+                        if std::fs::canonicalize(&models_root).map_err(|_|"声纹模型目录失效")?!=root {
+                            return Err("声纹模型目录已变化".into());
+                        }
+                    }
+                    #[cfg(not(any(windows, unix)))]
+                    return Err("当前声纹模型安全加载仅支持桌面操作系统".into());
                     let path=root.join(SPEAKER_MODEL_FILE);
                     let metadata=std::fs::symlink_metadata(&path).map_err(|_|"声纹模型未安装")?;
                     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len()!=SPEAKER_MODEL_BYTES{return Err("声纹模型大小或文件类型不匹配".into());}
@@ -478,11 +491,26 @@ fn speaker_worker(jobs:Receiver<Job>,out:Out){
                     }
                     let mut options=std::fs::OpenOptions::new();options.read(true);
                     #[cfg(windows)] { use std::os::windows::fs::OpenOptionsExt; options.share_mode(1); }
+                    #[cfg(target_os = "macos")] { use std::os::unix::fs::OpenOptionsExt; options.custom_flags(0x0100); }
                     let mut file=options.open(&path).map_err(|_|"声纹模型不可读或正被修改")?;
-                    if file.metadata().map_err(|_|"声纹模型不可读")?.len()!=SPEAKER_MODEL_BYTES{return Err("声纹模型大小不匹配".into());}
+                    let opened_meta=file.metadata().map_err(|_|"声纹模型不可读")?;
+                    if opened_meta.len()!=SPEAKER_MODEL_BYTES{return Err("声纹模型大小不匹配".into());}
+                    #[cfg(unix)] {
+                        use std::os::unix::fs::MetadataExt;
+                        if opened_meta.nlink()!=1 || opened_meta.dev()!=metadata.dev() || opened_meta.ino()!=metadata.ino() {
+                            return Err("声纹模型文件链接状态异常".into());
+                        }
+                    }
                     let mut digest=Sha256::new();let mut total=0u64;let mut block=[0;65536];
                     loop {use std::io::Read;let n=file.read(&mut block).map_err(|_|"声纹模型读取失败")?;if n==0{break;}total+=n as u64;if total>SPEAKER_MODEL_BYTES{return Err("声纹模型过大".into());}digest.update(&block[..n]);}
                     if total!=SPEAKER_MODEL_BYTES || format!("{:x}",digest.finalize())!=SPEAKER_MODEL_SHA256{return Err("声纹模型 SHA-256 不匹配".into());}
+                    #[cfg(unix)] {
+                        use std::os::unix::fs::MetadataExt;
+                        let recheck=std::fs::symlink_metadata(&path).map_err(|_|"声纹模型校验后失效")?;
+                        if recheck.file_type().is_symlink() || recheck.dev()!=opened_meta.dev() || recheck.ino()!=opened_meta.ino() || recheck.len()!=SPEAKER_MODEL_BYTES {
+                            return Err("声纹模型加载前发生变更".into());
+                        }
+                    }
                     let config=SpeakerEmbeddingExtractorConfig{model:Some(path.to_string_lossy().into_owned()),num_threads:1,debug:false,provider:Some("cpu".into())};
                     let created=SpeakerEmbeddingExtractor::create(&config).ok_or("声纹模型加载失败")?;
                     if created.dim()!=SPEAKER_DIMENSION as i32{return Err("声纹模型输出维度不匹配".into());}

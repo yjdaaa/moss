@@ -5,7 +5,11 @@
 
 export const APPROVAL_POLL_MS = 4000;
 export const SITE_CHECK_TEXT = "我在机器旁，材料已放好、原点已确认，排风已开启";
-export function approvalCheckText(kind) { return kind === "external_tool" ? "我已核对第三方工具、参数及数据访问范围，同意本次执行" : SITE_CHECK_TEXT; }
+export function approvalCheckText(kind) {
+  if (kind === "external_tool") return "我已核对第三方工具、参数及数据访问范围，同意本次执行";
+  if (kind === "agent_run") return "我看过这个任务，同意在本机工作目录里运行 Agent（可能产生模型费用）";
+  return SITE_CHECK_TEXT;
+}
 
 const ERROR_TEXT = {
   approval_request_conflict: "同一请求编号的内容或目标发生变化，请重新发起审批。旧审批没有用于本次操作。",
@@ -19,6 +23,10 @@ const ERROR_TEXT = {
   approval_unavailable: "审批服务不可用（本地数据库或审计记录无法写入），没有向设备发送任何指令。",
   desktop_session_required: "只能在 MOSS 桌面端批准。",
   desktop_session_invalid: "桌面会话已失效，请重新打开 MOSS 桌面端。",
+  agent_strict_mode_required: "严格模式未开启，Agent 没有运行。请点语音中心顶部的“严格模式”开关开启。",
+  agent_config_changed: "工作目录或 CLI 配置已变化，没有运行；请重新发起。",
+  agent_capability_missing: "这个 CLI 不能识别或缺少需要的安全参数，没有运行。",
+  agent_result_unknown: "运行记录写入失败，结果未知；不会自动重跑，请到语音中心的 Agent 卡核对。",
 };
 
 /** 批准失败时在卡内显示的原因：已知错误码用固定说明，其他用后端返回的文字。 */
@@ -38,6 +46,7 @@ export const KIND_LABEL = {
   safe_action: "设备动作",
   framing: "走边框",
   home_control: "控制家居设备",
+  agent_run: "运行本机 Agent（Claude Code / Codex）",
 };
 
 /** 家居控制只能在私密设置窗口批准（主窗口的批准接口按设计拒绝），全局审批卡只负责提醒并打开那里。 */

@@ -941,6 +941,14 @@ impl<'a> Session<'a> {
             device_id: self.device_id.to_owned(),
             session_id: self.session_id.to_owned(),
         };
+        // 2026-10-16：视觉卡片打开“把照片留在对话上下文里”时，把这一张作为多模态用户消息
+        // 接进历史；只在会话内存里，随历史截断丢弃，不落盘。
+        if kind == TurnKind::Answer {
+            if let Some(photo) = self.shared.vision_photos.take(&self.device_id) {
+                self.history.push(photo.into_message());
+                append_history(&mut self.history, Vec::new(), conversation.settings.history_budget);
+            }
+        }
         let history = if kind == TurnKind::Answer {
             self.history.clone()
         } else {

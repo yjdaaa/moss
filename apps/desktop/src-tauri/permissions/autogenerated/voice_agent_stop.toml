@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-agent-stop"
+description = "Enables the voice_agent_stop command without any pre-configured scope."
+commands.allow = ["voice_agent_stop"]
+
+[[permission]]
+identifier = "deny-voice-agent-stop"
+description = "Denies the voice_agent_stop command without any pre-configured scope."
+commands.deny = ["voice_agent_stop"]

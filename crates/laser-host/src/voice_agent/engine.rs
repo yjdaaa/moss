@@ -1,41 +1,51 @@
-//! NV13 host-owned approval bridge. Production remains inert until OS sandbox
-//! negative tests have independently passed; help/version checks are insufficient.
+//! NV13 host-owned approval bridge（2026-10-15 起生产启用；2026-10-25 开通 macOS / Unix 并支持本机自动读取 CLI）。
+//! 每次运行都要桌面批准；只在严格模式开启时运行（Agent 即使调用本机 MOSS 接口也动不了激光机）；
+//! 批准后在后台线程运行，进程树受系统级隔离（Windows Job Object / Unix 独立进程组）、有时长与输出上限，可随时停止。
+//! 剩余风险（已告知用户）：CLI 自身的沙箱不能阻止读取工作目录外的文件。
+use std::collections::HashMap;
 use std::path::{Path,PathBuf};
 use std::sync::{Arc,Mutex,Weak,atomic::{AtomicBool,Ordering}};
 use laser_api::{ApiService,approval::{ApprovalError,NewApproval,approval_digest},agent_runs::AgentRuns};
 use laser_contracts::{ApprovalConnection,ApprovalKind,ApprovalRecord,ApprovalSource,CallerContext,ToolCallResult,audit_client};
 use laser_runtime::{RuntimeDb,AgentRunRecord};
 use serde_json::{Value,json};
-use super::{Provider,ReadOnlyPlan,AgentError,build_plan,executable,workspace,intent_digest,MAX_RUN_RECORDS};
+use super::{Provider,AgentPlan,AgentError,build_plan,resolve_with_detector,workspace,intent_digest,MAX_RUN_RECORDS};
 
 #[derive(Clone)]
 pub struct CapabilitySnapshot{pub version:String,pub help:String}
 pub trait AgentRunner:Send+Sync{
-    /// This is only called after atomic desktop approval consumption.
-    /// Real subprocess implementation stays disabled until separately authorized
-    /// and verified with negative sandbox, process-tree and revocation tests.
-    fn run(&self,plan:&ReadOnlyPlan,alive:&dyn Fn()->bool)->Result<String,AgentError>;
+    /// Only called after atomic desktop approval consumption. `alive` turns false on
+    /// stop, revocation, strict-mode off or configuration change. Err carries output so far.
+    fn run(&self,plan:&AgentPlan,alive:&dyn Fn()->bool)->Result<String,(AgentError,String)>;
 }
-struct DisabledRunner;
-impl AgentRunner for DisabledRunner{
- fn run(&self,_:&ReadOnlyPlan,_:&dyn Fn()->bool)->Result<String,AgentError>{Err(AgentError::SandboxUnverified)}
-}
+/// 读取 CLI 的版本与帮助文本（只运行 --version / --help，不执行任务）。
+pub type CapabilityProbe=Arc<dyn Fn(Provider,&Path)->Option<CapabilitySnapshot>+Send+Sync>;
+/// 自动扫描本机已安装的 CLI 可执行文件（不启动子进程）。
+pub type CliDetector=Arc<dyn Fn(Provider)->Option<PathBuf>+Send+Sync>;
+type CachedSnapshot=(Option<std::time::SystemTime>,u64,CapabilitySnapshot);
+
 pub struct AgentCoordinator {
     api:Weak<ApiService>,
     db:Arc<Mutex<RuntimeDb>>,
     settings_file:PathBuf,
     sensitive:Vec<PathBuf>,
-    sandbox_verified:bool,
-    snapshots:[Option<CapabilitySnapshot>;2],
+    probe:CapabilityProbe,
+    detector:CliDetector,
+    /// 按可执行文件路径缓存；文件大小或修改时间变了就重新探测
+    snapshots:Mutex<HashMap<PathBuf,CachedSnapshot>>,
     runner:Arc<dyn AgentRunner>,
+    /// 正在运行的任务：运行编号 → 停止标志
+    running:Mutex<HashMap<String,Arc<AtomicBool>>>,
+    me:Weak<Self>,
 }
 impl AgentCoordinator {
     pub fn attach(api:&Arc<ApiService>,db:Arc<Mutex<RuntimeDb>>,settings_file:PathBuf,
                   sensitive:Vec<PathBuf>)->Result<Arc<Self>,String>{
-        let manager=Arc::new(Self {
+        let manager=Arc::new_cyclic(|me|Self {
             api:Arc::downgrade(api),db,settings_file,sensitive,
-            sandbox_verified:super::REAL_CLI_SANDBOX_VERIFIED,
-            snapshots:[None,None],runner:Arc::new(DisabledRunner),
+            probe:Arc::new(super::probe_cli),detector:Arc::new(super::detect_cli),
+            snapshots:Mutex::new(HashMap::new()),
+            runner:super::production_runner(),running:Mutex::new(HashMap::new()),me:me.clone(),
         });
         api.set_agent_runs(manager.clone())?;
         Ok(manager)
@@ -43,25 +53,33 @@ impl AgentCoordinator {
     fn configuration(&self)->moss_voice::settings::BuiltinAgents{
        moss_voice::settings::load(&self.settings_file).builtin_agents
     }
-    fn snapshot(&self,kind:Provider)->Result<&CapabilitySnapshot,AgentError>{
-       self.snapshots[match kind{Provider::Codex=>0,Provider::ClaudeCode=>1}]
-          .as_ref().ok_or(AgentError::CapabilityMissing)
+    fn snapshot(&self,kind:Provider,exe:&Path)->Result<CapabilitySnapshot,AgentError>{
+       let meta=std::fs::metadata(exe).map_err(|_|AgentError::CapabilityMissing)?;
+       let key=(meta.modified().ok(),meta.len());
+       let mut cache=self.snapshots.lock().map_err(|_|AgentError::CapabilityMissing)?;
+       if let Some((modified,len,snapshot))=cache.get(exe) {
+           if (*modified,*len)==key {return Ok(snapshot.clone());}
+       }
+       let snapshot=(self.probe)(kind,exe).ok_or(AgentError::CapabilityMissing)?;
+       cache.insert(exe.to_path_buf(),(key.0,key.1,snapshot.clone()));
+       Ok(snapshot)
     }
-    fn prepare(&self,kind:Provider,task:&str)->Result<ReadOnlyPlan,AgentError>{
-       if !self.sandbox_verified{return Err(AgentError::SandboxUnverified);}
+    fn prepare(&self,kind:Provider,task:&str)->Result<AgentPlan,AgentError>{
        let config=self.configuration();
        if !config.enabled{return Err(AgentError::Disabled);}
+       let api=self.api.upgrade().ok_or(AgentError::Disabled)?;
+       if !api.strict_mode(){return Err(AgentError::StrictModeRequired);}
        let cli=match kind{Provider::Codex=>&config.codex_executable,Provider::ClaudeCode=>&config.claude_executable};
-       let executable=executable(Path::new(cli),kind)?;
+       let (executable,_source)=resolve_with_detector(cli,kind,&*self.detector)?;
        let workspace=workspace(Path::new(&config.workspace),&self.sensitive)?;
-       let snapshot=self.snapshot(kind)?;
+       let snapshot=self.snapshot(kind,&executable)?;
        build_plan(kind,executable,workspace,task,&snapshot.version,&snapshot.help)
     }
     fn kind_from(name:&str)->Result<Provider,AgentError>{
        match name{"agent_codex"=>Ok(Provider::Codex),"agent_claude_code"=>Ok(Provider::ClaudeCode),_=>Err(AgentError::Disabled)}
     }
     fn err_code(error:AgentError)->String {error.code().to_owned()}
-    fn prepare_record(&self,record:&ApprovalRecord)->Result<(ReadOnlyPlan,CallerContext,Arc<AtomicBool>),ApprovalError>{
+    fn prepare_record(&self,record:&ApprovalRecord)->Result<(AgentPlan,CallerContext,Arc<AtomicBool>),ApprovalError>{
        if record.kind!=ApprovalKind::AgentRun||record.source!=ApprovalSource::Voice {
            return Err(ApprovalError::Mismatch);
        }
@@ -89,17 +107,44 @@ impl AgentCoordinator {
     fn response(status:u16,message:&str,code:&str)->(u16,Value){
        (status,json!({"success":false,"result":message,"detail":{"error_code":code}}))
     }
+    /// 停止正在运行的任务（进程树随系统隔离组一起结束）。
+    pub fn stop(&self,run_id:&str)->bool{
+       self.running.lock().ok().and_then(|running|running.get(run_id).cloned()).is_some_and(|flag|{flag.store(true,Ordering::Release);true})
+    }
+    /// 每个已配置或本机自动读取到的 CLI 现在能不能用（不能用时给出原因代码）。
+    fn providers(&self)->Vec<Value>{
+       let config=self.configuration();
+       [(Provider::Codex,&config.codex_executable),(Provider::ClaudeCode,&config.claude_executable)].into_iter()
+         .filter(|(kind,path)|!path.trim().is_empty()||(self.detector)(*kind).is_some())
+         .map(|(kind,path)|{
+            let resolved=resolve_with_detector(path,kind,&*self.detector).ok();
+            let source=resolved.as_ref().map(|(_,src)|src.as_str()).unwrap_or("configured");
+            let exe_str=resolved.as_ref().map(|(exe,_)|exe.to_string_lossy().into_owned());
+            let version=resolved.as_ref().and_then(|(exe,_)|self.snapshot(kind,exe).ok()).map(|s|s.version);
+            match self.prepare(kind,"检测") {
+              Ok(_)=>json!({"provider":kind.as_str(),"ready":true,"version":version,"source":source,"executable":exe_str}),
+              Err(error)=>json!({"provider":kind.as_str(),"ready":false,"version":version,"source":source,"executable":exe_str,"error_code":error.code()}),
+            }
+         }).collect()
+    }
     #[cfg(test)]
     fn fake_for_tests(api:&Arc<ApiService>,db:Arc<Mutex<RuntimeDb>>,settings_file:PathBuf,
           sensitive:Vec<PathBuf>,snapshots:[Option<CapabilitySnapshot>;2],runner:Arc<dyn AgentRunner>)->Arc<Self>{
-       Arc::new(Self{api:Arc::downgrade(api),db,settings_file,sensitive,sandbox_verified:true,snapshots,runner})
+       Self::fake_for_tests_with_detector(api,db,settings_file,sensitive,snapshots,Arc::new(|_|None),runner)
+    }
+    #[cfg(test)]
+    fn fake_for_tests_with_detector(api:&Arc<ApiService>,db:Arc<Mutex<RuntimeDb>>,settings_file:PathBuf,
+          sensitive:Vec<PathBuf>,snapshots:[Option<CapabilitySnapshot>;2],detector:CliDetector,runner:Arc<dyn AgentRunner>)->Arc<Self>{
+       let probe:CapabilityProbe=Arc::new(move |kind,_:&Path|snapshots[match kind{Provider::Codex=>0,Provider::ClaudeCode=>1}].clone());
+       Arc::new_cyclic(|me|Self{api:Arc::downgrade(api),db,settings_file,sensitive,probe,detector,snapshots:Mutex::new(HashMap::new()),
+          runner,running:Mutex::new(HashMap::new()),me:me.clone()})
     }
 }
 impl AgentRuns for AgentCoordinator{
  fn tools(&self)->Value{
     let names=[("agent_codex",Provider::Codex),("agent_claude_code",Provider::ClaudeCode)];
     let tools=names.iter().filter(|(_,kind)|self.prepare(*kind,"测试").is_ok()).map(|(name,_)|{
-        json!({"name":name,"description":"对选定工作区发起需桌面批准的只读 Agent 任务；使用已安装 CLI 账户，可能产生模型费用。",
+        json!({"name":name,"description":"让本机 Agent 在选定的工作目录里完成任务（可以读写该目录的文件），每次都要在电脑上批准；使用已安装 CLI 的账户，可能产生模型费用。",
             "inputSchema":{"type":"object","properties":{"task":{"type":"string","maxLength":4000}},"required":["task"],"additionalProperties":false}})
     }).collect::<Vec<_>>();
     json!({"tools":tools})
@@ -116,13 +161,14 @@ impl AgentRuns for AgentCoordinator{
     if active.len()>=256||active.iter().filter(|r|r.source==ApprovalSource::Voice&&r.session_id.as_deref()==Some(device_id)).count()>=16{
         return ToolCallResult::err("待审批队列已满");
     }
+    let snapshot_version=self.snapshot(provider,&plan.executable).map(|s|s.version).unwrap_or_default();
     let request=json!({"device_id":device_id,"voice_session_id":session_id,"task":task,
         "workspace":plan.workspace.to_string_lossy(),"executable":plan.executable.to_string_lossy(),
-        "version":self.snapshot(provider).map(|s|s.version.as_str()).unwrap_or(""),
+        "version":snapshot_version,
         "config_revision":plan.config_revision,"task_digest":intent_digest(&plan)})
       .as_object().cloned().unwrap_or_default();
-    let summary=format!("请求 {} 在受限目录执行只读任务：{}；使用本机 CLI 账户，可能产生费用",
-       provider.as_str(),task.chars().take(110).collect::<String>());
+    let summary=format!("请求 {} 在工作目录 {} 执行任务（可修改该目录的文件）：{}；使用本机 CLI 账户，可能产生费用",
+       provider.as_str(),plan.workspace.file_name().and_then(|n|n.to_str()).unwrap_or(""),task.chars().take(110).collect::<String>());
     let record=match service.create(NewApproval{
         owner:Some(json!([device_id,session_id]).to_string()),voice_permit:Some(permit),
         kind:ApprovalKind::AgentRun,target_record:name.into(),source:ApprovalSource::Voice,
@@ -131,7 +177,7 @@ impl AgentRuns for AgentCoordinator{
              provider:provider.as_str().into(),fingerprint:plan.config_revision.clone()},
         request,client:audit_client(context),removed_fields:Vec::new(),
     }){Ok(r)=>r,Err(e)=>return ToolCallResult::err(e.message())};
-    let speech="已发送到电脑待批准，目前没有启动任何 Agent 程序。";
+    let speech="已发送到电脑待批准，批准前不会执行 Agent 任务。";
     ToolCallResult::with_detail(true,speech,json!({"result":{"status":"approval_required","approval_id":record.approval_id,"speech":speech}}).to_string())
  }
  fn current_digest(&self,record:&ApprovalRecord)->Result<String,ApprovalError>{
@@ -146,7 +192,8 @@ impl AgentRuns for AgentCoordinator{
          Ok(p)=>p,Err(e)=>return Self::response(e.http_status(),&e.message(),e.code()),
      };
      let Some(api)=self.api.upgrade() else{return Self::response(503,"MOSS 已停止","agent_unavailable")};
-     let Some(approvals)=api.agent_approvals() else{return Self::response(503,"审批服务不可用","agent_unavailable")};
+     if api.agent_approvals().is_none(){return Self::response(503,"审批服务不可用","agent_unavailable");}
+     let Some(me)=self.me.upgrade() else{return Self::response(503,"Agent 服务不可用","agent_unavailable")};
      let digest=approval_digest(record.kind,&record.target_record,record.request.as_ref().unwrap(),&ApprovalConnection::Agent{
          provider:plan.provider.as_str().into(),fingerprint:plan.config_revision.clone(),
      });
@@ -157,39 +204,72 @@ impl AgentRuns for AgentCoordinator{
         status:"running".into(),output:String::new(),truncated:false,
         started_at:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0),
         finished_at:None,error_code:None};
-     if let Err(e)=approvals.consume_agent_run(&record.approval_id,&digest,&run,&permit){
+     if let Err(e)=api.agent_approvals().map_or(Err(ApprovalError::Mismatch),|approvals|approvals.consume_agent_run(&record.approval_id,&digest,&run,&permit)){
          return Self::response(e.http_status(),&e.message(),e.code());
      }
-     // No real-process runner is registered in production. Even a forged
-     // approved record cannot bypass the sandbox_verified gate.
-     let alive=||permit.load(Ordering::Acquire)&&api.voice_session_allowed(&ctx_device(&ctx),&ctx_session(&ctx))
-         &&self.prepare(plan.provider,&plan.stdin).is_ok_and(|current|current.config_revision==plan.config_revision);
-     let result=self.runner.run(&plan,&alive);
-     let (status,output,code)=match result{
-       Ok(output) if alive()=>("completed",output,None),
-       Ok(_)=>("cancelled",String::new(),Some("agent_permission_expired")),
-       Err(error)=>("failed",String::new(),Some(error.code())),
-     };
-     let (truncated,output)=bounded_text(&output,256*1024);
-     if approvals.finish_agent_run(&id,status,&output,truncated,code).is_err(){
-        return Self::response(500,"执行结果无法安全记账","agent_result_unknown");
-     }
-     if status=="completed" {
-        (200,json!({"success":true,"result":"已完成只读 Agent 任务，请在电脑查看有界执行记录"}))
-     } else {
-        Self::response(409,"只读 Agent 任务未成功完成",code.unwrap_or("agent_failed"))
-     }
+     let stop=Arc::new(AtomicBool::new(false));
+     if let Ok(mut running)=self.running.lock(){running.insert(id.clone(),stop.clone());}
+     // 批准后在后台运行，审批卡不必等最长 5 分钟；结果写进运行记录，在语音中心 Agent 卡查看。
+    // 批准后在后台运行，审批卡不必等最长 5 分钟；结果写进运行记录，在语音中心 Agent 卡查看。
+    // spawn 失败时闭包被丢弃，api 句柄不归还，先克隆一份用于失败收口。
+    let api_on_spawn_failure=api.clone();
+    let id_on_spawn_failure=id.clone();
+    let spawned=std::thread::Builder::new().name(format!("agent-{id}")).spawn(move||{
+        // 停止与语音授权是原子位，每次轮询立即检查；会话、严格模式与配置（工作目录、CLI、开关）
+        // 每秒核对一次，改了就停。核对全部收进这 1 秒窗口，避免运行器 40ms 轮询反复抢全局 DB 锁
+        // （2026-10-17 审查发现；首次调用立即做全套核对）。
+        let checked_at=std::cell::Cell::new(None::<std::time::Instant>);
+        let checks_ok=std::cell::Cell::new(false);
+        let alive=||{
+            if stop.load(Ordering::Acquire)||!permit.load(Ordering::Acquire){return false;}
+            if checked_at.get().is_some_and(|checked|checked.elapsed()<std::time::Duration::from_secs(1)){
+                return checks_ok.get();
+            }
+            checked_at.set(Some(std::time::Instant::now()));
+            let ok=api.voice_session_allowed(&ctx_device(&ctx),&ctx_session(&ctx))
+                &&api.strict_mode()
+                &&me.prepare(plan.provider,&plan.stdin).is_ok_and(|current|current.config_revision==plan.config_revision);
+            checks_ok.set(ok);
+            ok
+        };
+        let result=me.runner.run(&plan,&alive);
+        let stopped=stop.load(Ordering::Acquire);
+        let (status,output,code)=match result{
+          Ok(output) if alive()=>("completed",output,None),
+          Ok(output)=>("cancelled",output,Some(if stopped{"agent_stopped"}else{"agent_permission_expired"})),
+          Err((error,output))=>(if stopped{"cancelled"}else{"failed"},output,Some(if stopped{"agent_stopped"}else{error.code()})),
+        };
+        let (truncated,output)=bounded_text(&output,256*1024);
+        if let Some(approvals)=api.agent_approvals(){let _=approvals.finish_agent_run(&id,status,&output,truncated,code);}
+        if let Ok(mut running)=me.running.lock(){running.remove(&id);}
+    });
+    if spawned.is_err(){
+        // 运行记录已经以 running 写入：必须当场收口，否则本次进程内既停不了也永远显示运行中
+        // （2026-10-17 审查发现；此前只返回 500，把记录留在 running）。
+        if let Ok(mut running)=self.running.lock(){running.remove(&id_on_spawn_failure);}
+        if let Some(approvals)=api_on_spawn_failure.agent_approvals(){
+            let _=approvals.finish_agent_run(&id_on_spawn_failure,"failed","",false,Some("agent_thread_spawn_failed"));
+        }
+        return Self::response(500,"无法启动 Agent 任务线程，已记为失败","agent_thread_spawn_failed");
+    }
+     (200,json!({"success":true,"result":"已开始运行 Agent 任务；完成后在语音中心的 Agent 卡查看结果，运行中可以随时停止"}))
  }
+ fn stop(&self,run_id:&str)->bool{AgentCoordinator::stop(self,run_id)}
  fn status(&self)->Value{
     let config=self.configuration();
+    let strict=self.api.upgrade().is_some_and(|api|api.strict_mode());
+    let running=self.running.lock().map(|r|r.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
     let records=self.db.lock().ok().and_then(|db|db.agent_runs(MAX_RUN_RECORDS).ok()).unwrap_or_default();
     let safe=records.into_iter().map(|r|json!({"id":r.id,"approval_id":r.approval_id,"provider":r.provider,
         "workspace_name":Path::new(&r.workspace).file_name().and_then(|s|s.to_str()).unwrap_or(""),
         "status":r.status,"output":r.output,"truncated":r.truncated,"started_at":r.started_at,
-        "finished_at":r.finished_at,"error_code":r.error_code})).collect::<Vec<_>>();
-    json!({"enabled":config.enabled && self.sandbox_verified,
-        "configured":config.enabled,"sandbox_verified":self.sandbox_verified,
-        "providers":[],"runs":safe,"reason":if self.sandbox_verified {"configured_or_pending"}else{"agent_sandbox_unavailable"}})
+        "finished_at":r.finished_at,"error_code":r.error_code,"stoppable":running.contains(&r.id)})).collect::<Vec<_>>();
+    let detected=json!({
+        "codex_executable":(self.detector)(Provider::Codex).map(|p|p.to_string_lossy().into_owned()),
+        "claude_executable":(self.detector)(Provider::ClaudeCode).map(|p|p.to_string_lossy().into_owned()),
+    });
+    json!({"enabled":config.enabled && strict,"configured":config.enabled,"strict_mode":strict,
+        "detected":detected,"providers":self.providers(),"runs":safe,"reason":if strict {"configured_or_pending"}else{"agent_strict_mode_required"}})
  }
 }
 fn ctx_device(ctx:&CallerContext)->String{
@@ -210,9 +290,18 @@ mod tests{
     use laser_api::approval::ApprovalService;
     use laser_contracts::{ApprovalStatus,builtin_material_library};
 
+    /// 运行到被停止为止的假执行器：验证“停止”能让正在运行的任务结束并记为已停止。
+    struct BlockingRunner;
+    impl AgentRunner for BlockingRunner{
+      fn run(&self,_:&AgentPlan,alive:&dyn Fn()->bool)->Result<String,(AgentError,String)>{
+          let started=std::time::Instant::now();
+          while alive() && started.elapsed()<std::time::Duration::from_secs(5){std::thread::sleep(std::time::Duration::from_millis(5));}
+          Err((AgentError::PermissionExpired,"partial output".into()))
+      }
+    }
     struct FakeRunner{calls:AtomicUsize}
     impl AgentRunner for FakeRunner{
-      fn run(&self,plan:&ReadOnlyPlan,alive:&dyn Fn()->bool)->Result<String,AgentError>{
+      fn run(&self,plan:&AgentPlan,alive:&dyn Fn()->bool)->Result<String,(AgentError,String)>{
           assert!(alive(),"取消/撤销后绝不能启动任务");
           assert_eq!(plan.provider,Provider::Codex);
           assert_eq!(plan.argv.last().map(String::as_str),Some("-"));
@@ -229,6 +318,86 @@ mod tests{
         let cut=response.windows(4).position(|w|w==b"\r\n\r\n").unwrap();
         let status=String::from_utf8_lossy(&response[..cut]).split_whitespace().nth(1).unwrap().parse().unwrap();
         (status,serde_json::from_slice(&response[cut+4..]).unwrap())
+    }
+
+    /// 运行中的任务可以在桌面停止，记录为已停止并保留已有输出（2026-10-15）。
+    #[test]
+    fn running_task_can_be_stopped_from_desktop(){
+        let dir=tempfile::tempdir().unwrap();
+        let db=Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let approvals=Arc::new(ApprovalService::new(db.clone()));
+        let api=Arc::new(ApiService::new(
+            laser_runtime::LaserSettings{default_connection_mode:"network".into(),engraving_mode:"raster".into(),
+                web_host:"127.0.0.1".into(),web_port:9666,material_params_file:None},builtin_material_library(),
+        ).with_runtime_db(db.clone()).with_approval_service(approvals.clone()).with_strict_mode(true));
+        db.lock().unwrap().voice_device_seen("d","c","","","",100.0).unwrap();
+        api.set_voice_device_status("d",laser_runtime::VOICE_DEVICE_ALLOWED,101.0).unwrap();
+        let _permit=api.register_voice_session("d","c","s").unwrap();
+        let workdir=dir.path().join("agent-workspace");std::fs::create_dir(&workdir).unwrap();
+        let binary=dir.path().join(Provider::Codex.expected_binary());std::fs::write(&binary,b"fixture").unwrap();
+        let mut settings=moss_voice::settings::VoiceSettings::default();
+        settings.builtin_agents=moss_voice::settings::BuiltinAgents{enabled:true,workspace:workdir.to_string_lossy().into_owned(),
+            codex_executable:binary.to_string_lossy().into_owned(),claude_executable:String::new()};
+        let path=dir.path().join("settings.json");moss_voice::settings::save(&path,&settings).unwrap();
+        let help="--ask-for-approval --sandbox --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --cd --json --color";
+        let manager=AgentCoordinator::fake_for_tests(&api,db.clone(),path,vec![],
+           [Some(CapabilitySnapshot{version:"codex-cli 0.157.1".into(),help:help.into()}),None],Arc::new(BlockingRunner));
+        api.set_agent_runs(manager.clone()).unwrap();
+        let ctx=CallerContext::Voice{device_id:"d".into(),session_id:"s".into()};
+        assert!(api.call_agent_tool(&ctx,"agent_codex",&json!({"task":"long task"})).success);
+        let pending=approvals.list(Some(ApprovalStatus::Pending),5).unwrap();
+        assert_eq!(approval_http(&api,&format!("/v1/approvals/{}/approve",pending[0].approval_id),&pending[0].digest).0,200);
+        let run_id=format!("agentrun-{}",pending[0].approval_id);
+        assert_eq!(manager.status()["runs"][0]["stoppable"],true);
+        assert!(manager.stop(&run_id));
+        let started=std::time::Instant::now();
+        while db.lock().unwrap().agent_runs(50).unwrap()[0].status=="running" {
+            assert!(started.elapsed()<std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let run=&db.lock().unwrap().agent_runs(50).unwrap()[0];
+        assert_eq!((run.status.as_str(),run.error_code.as_deref(),run.output.as_str()),("cancelled",Some("agent_stopped"),"partial output"));
+        assert!(!manager.stop(&run_id),"已结束的任务不能再停止");
+    }
+
+    /// 设备授权在数据库侧被撤销后，运行中的任务必须被 1 秒节流窗口内的核对停下并记为失败
+    /// （2026-10-17：会话/严格模式/配置核对改为每秒一次，此测试防止 DB 级撤销被漏检）。
+    #[test]
+    fn revoked_device_stops_a_running_task_within_the_throttled_window(){
+        let dir=tempfile::tempdir().unwrap();
+        let db=Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let approvals=Arc::new(ApprovalService::new(db.clone()));
+        let api=Arc::new(ApiService::new(
+            laser_runtime::LaserSettings{default_connection_mode:"network".into(),engraving_mode:"raster".into(),
+                web_host:"127.0.0.1".into(),web_port:9666,material_params_file:None},builtin_material_library(),
+        ).with_runtime_db(db.clone()).with_approval_service(approvals.clone()).with_strict_mode(true));
+        db.lock().unwrap().voice_device_seen("d","c","","","",100.0).unwrap();
+        api.set_voice_device_status("d",laser_runtime::VOICE_DEVICE_ALLOWED,101.0).unwrap();
+        let _permit=api.register_voice_session("d","c","s").unwrap();
+        let workdir=dir.path().join("agent-workspace");std::fs::create_dir(&workdir).unwrap();
+        let binary=dir.path().join(Provider::Codex.expected_binary());std::fs::write(&binary,b"fixture").unwrap();
+        let mut settings=moss_voice::settings::VoiceSettings::default();
+        settings.builtin_agents=moss_voice::settings::BuiltinAgents{enabled:true,workspace:workdir.to_string_lossy().into_owned(),
+            codex_executable:binary.to_string_lossy().into_owned(),claude_executable:String::new()};
+        let path=dir.path().join("settings.json");moss_voice::settings::save(&path,&settings).unwrap();
+        let help="--ask-for-approval --sandbox --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --cd --json --color";
+        let manager=AgentCoordinator::fake_for_tests(&api,db.clone(),path,vec![],
+           [Some(CapabilitySnapshot{version:"codex-cli 0.157.1".into(),help:help.into()}),None],Arc::new(BlockingRunner));
+        api.set_agent_runs(manager.clone()).unwrap();
+        let ctx=CallerContext::Voice{device_id:"d".into(),session_id:"s".into()};
+        assert!(api.call_agent_tool(&ctx,"agent_codex",&json!({"task":"long task"})).success);
+        let pending=approvals.list(Some(ApprovalStatus::Pending),5).unwrap();
+        assert_eq!(approval_http(&api,&format!("/v1/approvals/{}/approve",pending[0].approval_id),&pending[0].digest).0,200);
+        assert_eq!(db.lock().unwrap().agent_runs(50).unwrap()[0].status,"running");
+        // 运行中撤销设备授权：不碰停止位与语音原子位，只有 DB 状态变化
+        api.set_voice_device_status("d",laser_runtime::VOICE_DEVICE_REVOKED,150.0).unwrap();
+        let started=std::time::Instant::now();
+        while db.lock().unwrap().agent_runs(50).unwrap()[0].status=="running" {
+            assert!(started.elapsed()<std::time::Duration::from_secs(5),"节流核对没有在预算内停下任务");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let run=&db.lock().unwrap().agent_runs(50).unwrap()[0];
+        assert_eq!((run.status.as_str(),run.error_code.as_deref()),("failed",Some("agent_permission_expired")));
     }
 
     #[test]
@@ -249,7 +418,7 @@ mod tests{
 
         let workdir=dir.path().join("agent-workspace");std::fs::create_dir(&workdir).unwrap();
         let sensitive=dir.path().join("private-data");std::fs::create_dir(&sensitive).unwrap();
-        let binary=dir.path().join("codex.exe");std::fs::write(&binary,b"not-executed-fixture").unwrap();
+        let binary=dir.path().join(Provider::Codex.expected_binary());std::fs::write(&binary,b"not-executed-fixture").unwrap();
         let mut settings=moss_voice::settings::VoiceSettings::default();
         settings.builtin_agents=moss_voice::settings::BuiltinAgents{
             enabled:true,workspace:workdir.to_string_lossy().into_owned(),
@@ -264,6 +433,10 @@ mod tests{
            fake.clone());
         api.set_agent_runs(manager.clone()).unwrap();
         let ctx=CallerContext::Voice{device_id:device.into(),session_id:session.into()};
+        // 严格模式关闭时不提供 Agent 工具（2026-10-15：Agent 只在严格模式下运行）
+        assert_eq!(manager.tools()["tools"].as_array().unwrap().len(),0);
+        assert_eq!(manager.status()["reason"],"agent_strict_mode_required");
+        api.set_strict_mode(true);
         assert_eq!(manager.tools()["tools"].as_array().unwrap().len(),1);
         let task="read README and summarize; do not write";
         let sent=api.call_agent_tool(&ctx,"agent_codex",&json!({"task":task}));
@@ -277,6 +450,12 @@ mod tests{
         assert_eq!(fake.calls.load(AtomicOrdering::SeqCst),0);
         let (status,result)=approval_http(&api,&format!("/v1/approvals/{id}/approve"),&pending[0].digest);
         assert_eq!(status,200,"{}",result);
+        // 批准后在后台运行：等运行记录写完
+        let started=std::time::Instant::now();
+        while db.lock().unwrap().agent_runs(50).unwrap()[0].status=="running" {
+            assert!(started.elapsed()<std::time::Duration::from_secs(5),"后台任务没有结束");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(fake.calls.load(AtomicOrdering::SeqCst),1);
         assert_eq!(db.lock().unwrap().agent_runs(50).unwrap()[0].status,"completed");
         assert_ne!(approval_http(&api,&format!("/v1/approvals/{id}/approve"),&pending[0].digest).0,200);
@@ -295,6 +474,66 @@ mod tests{
         permit.store(false,AtomicOrdering::Release);
         assert!(!api.voice_session_allowed(device,session));
         assert!(!api.call_agent_tool(&ctx,"agent_codex",&json!({"task":"should be denied"})).success);
+        assert_eq!(fake.calls.load(AtomicOrdering::SeqCst),1);
+    }
+
+    #[test]
+    fn auto_detected_and_switched_device_clis_work_with_approval_binding(){
+        let dir=tempfile::tempdir().unwrap();
+        let db=Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let approvals=Arc::new(ApprovalService::new(db.clone()));
+        let api=Arc::new(ApiService::new(
+            laser_runtime::LaserSettings{default_connection_mode:"network".into(),engraving_mode:"raster".into(),
+                web_host:"127.0.0.1".into(),web_port:9666,material_params_file:None},builtin_material_library(),
+        ).with_runtime_db(db.clone()).with_approval_service(approvals.clone()).with_strict_mode(true));
+        db.lock().unwrap().voice_device_seen("d","c","","","",100.0).unwrap();
+        api.set_voice_device_status("d",laser_runtime::VOICE_DEVICE_ALLOWED,101.0).unwrap();
+        let _permit=api.register_voice_session("d","c","s").unwrap();
+
+        let workdir=dir.path().join("agent-workspace");std::fs::create_dir(&workdir).unwrap();
+        let auto_codex=dir.path().join(Provider::Codex.expected_binary());std::fs::write(&auto_codex,b"native-codex").unwrap();
+        let mut settings=moss_voice::settings::VoiceSettings::default();
+        // 留空 codex_executable：验证本机自动读取；claude_executable 填异构设备路径：验证换设备自动适配
+        let auto_claude=dir.path().join(Provider::ClaudeCode.expected_binary());std::fs::write(&auto_claude,b"native-claude").unwrap();
+        let foreign_claude=if cfg!(windows){"/opt/homebrew/bin/claude"}else{r"C:\Users\alice\.local\bin\claude.exe"};
+        settings.builtin_agents=moss_voice::settings::BuiltinAgents{
+            enabled:true,workspace:workdir.to_string_lossy().into_owned(),
+            codex_executable:String::new(),claude_executable:foreign_claude.into(),
+        };
+        let path=dir.path().join("settings.json");moss_voice::settings::save(&path,&settings).unwrap();
+        let codex_help="--ask-for-approval --sandbox --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --cd --json --color";
+        let claude_help="--print --restricted --permission-mode --permission-prompts --tools --strict-mcp-config --mcp-config --setting-sources --no-session-persistence --output-format --verbose";
+        let detector_codex=auto_codex.clone();
+        let detector_claude=auto_claude.clone();
+        let detector:CliDetector=Arc::new(move|kind|match kind{
+            Provider::Codex=>Some(detector_codex.clone()),
+            Provider::ClaudeCode=>Some(detector_claude.clone()),
+        });
+        let fake=Arc::new(FakeRunner{calls:AtomicUsize::new(0)});
+        let manager=AgentCoordinator::fake_for_tests_with_detector(&api,db.clone(),path,vec![],
+            [Some(CapabilitySnapshot{version:"codex-cli 0.157.1".into(),help:codex_help.into()}),
+             Some(CapabilitySnapshot{version:"2.1.283 (Claude Code)".into(),help:claude_help.into()})],
+            detector,fake.clone());
+        api.set_agent_runs(manager.clone()).unwrap();
+
+        let status=manager.status();
+        assert_eq!(status["detected"]["codex_executable"],auto_codex.to_string_lossy().as_ref());
+        assert_eq!(status["providers"][0]["source"],"auto");
+        assert_eq!(status["providers"][0]["ready"],true);
+        assert_eq!(status["providers"][1]["source"],"auto_fallback");
+        assert_eq!(status["providers"][1]["ready"],true);
+        assert_eq!(manager.tools()["tools"].as_array().unwrap().len(),2);
+
+        let ctx=CallerContext::Voice{device_id:"d".into(),session_id:"s".into()};
+        assert!(api.call_agent_tool(&ctx,"agent_codex",&json!({"task":"auto-detected task"})).success);
+        let pending=approvals.list(Some(ApprovalStatus::Pending),5).unwrap();
+        assert_eq!(pending[0].request.as_ref().unwrap()["executable"],auto_codex.canonicalize().unwrap().to_string_lossy().as_ref());
+        assert_eq!(approval_http(&api,&format!("/v1/approvals/{}/approve",pending[0].approval_id),&pending[0].digest).0,200);
+        let started=std::time::Instant::now();
+        while db.lock().unwrap().agent_runs(50).unwrap()[0].status=="running" {
+            assert!(started.elapsed()<std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(fake.calls.load(AtomicOrdering::SeqCst),1);
     }
 }

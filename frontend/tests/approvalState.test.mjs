@@ -94,3 +94,14 @@ test("家居控制只在私密窗口批准，全局审批卡只提醒并打开�
   }
   assert.equal(kindLabel("home_control"), "控制家居设备");
 });
+
+test("Agent 审批卡用任务确认文案，不用加工现场确认文案（2026-10-15）", async () => {
+  const { approvalCheckText, approvalErrorText, approvedInPrivateWindow, kindLabel, SITE_CHECK_TEXT } = await import("../src/approvalState.js");
+  assert.match(approvalCheckText("agent_run"), /同意在本机工作目录里运行 Agent/);
+  assert.notEqual(approvalCheckText("agent_run"), SITE_CHECK_TEXT, "Agent 不是激光机现场作业");
+  assert.match(approvalCheckText("workflow_confirm_send"), /材料已放好/);
+  assert.equal(kindLabel("agent_run"), "运行本机 Agent（Claude Code / Codex）");
+  assert.equal(approvedInPrivateWindow("agent_run"), false);
+  assert.match(approvalErrorText("agent_strict_mode_required", "后端原话"), /严格模式/);
+  assert.equal(approvalErrorText("something_new", "后端原话"), "后端原话");
+});

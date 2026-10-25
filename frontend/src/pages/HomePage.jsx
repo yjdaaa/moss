@@ -21,6 +21,7 @@ import {
   Ruler,
   Radio,
   Square,
+  Box,
 } from "lucide-react";
 import { apiFetch, getJson, postJson, fetchPreviewBlobUrl, resolveApiUrl } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
@@ -34,6 +35,8 @@ import { canResumeJob, formatResumeActionLabel } from "../estopResumeState.js";
 import { onEmergencyStop } from "../estopBus.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
+import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
+import { defaultSerialPortHint } from "../platform.js";
 
 export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) {
   // Connection state
@@ -630,10 +633,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
   return (
     <div className="home-page ob-page">
-      {/* 三栏：左 ①②③ 输入；中 ④ 加工监视舱；右 反馈 + 控制台（技术书 §9.5.5 B） */}
-      <div className="ob-wb">
-        <div className="ob-stack">
-        <section className="hud-card ob-card" aria-label="通信链路">
+      {/* 左窄右宽双栏：左 ①②③ 输入（16 列）；右 ④ 加工监视舱 + 加工反馈（32 列）；底部 控制台抽屉 */}
+      <WorkbenchCanvas>
+        <WbCard id="link" className="hud-card ob-card" label="通信链路">
           <FoldHeader id="wb-link" title="通信链路" k="LINK" n={1} />
         {/* Connection Bar */}
         <div
@@ -660,7 +662,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 value={serialPort}
                 onChange={(e) => {
                   if (e.target.value === "__custom__") {
-                    const custom = window.prompt("请输入串口名称 (例如 COM3 或 /dev/ttyUSB0):", serialPort || "COM3");
+                    const serialHint = defaultSerialPortHint();
+                    const custom = window.prompt(serialHint.prompt, serialPort || serialHint.fallback);
                     if (custom && custom.trim()) {
                       const p = custom.trim();
                       if (!serialPorts.includes(p)) {
@@ -735,9 +738,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             <span>握手探测</span>
           </button>
         </div>
-        </section>
+        </WbCard>
 
-        <section className="hud-card ob-card" aria-label="加工内容">
+        <WbCard id="source" className="hud-card ob-card" label="加工内容">
           <FoldHeader id="wb-source" title="加工内容" k="SOURCE" n={2} />
             {/* Tool selection cards */}
             <div className="wb-grid">
@@ -796,7 +799,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                     <input
                       type="number"
                       min={1}
-                      max={120}
+                      max={100}
                       value={fontSizeMm}
                       onChange={(e) => setFontSizeMm(Number(e.target.value))}
                       className="text-input wb-field-5"
@@ -936,9 +939,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </button>
               </div>
             )}
-        </section>
+        </WbCard>
 
-        <section className="hud-card ob-card" aria-label="材质与参数">
+        <WbCard id="material" className="hud-card ob-card" label="材质与参数">
           <FoldHeader id="wb-material" title="材质与参数" k="MATERIAL" n={3} />
             {/* Material & Specs selection Deck */}
             <div
@@ -1033,10 +1036,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 );
               })()}
             </div>
-        </section>
-        </div>
+        </WbCard>
 
-        <section className="hud-card ob-card ob-monitor" aria-label="加工监视舱">
+        <WbCard id="monitor" className="hud-card ob-card ob-monitor" label="加工监视舱">
           <FoldHeader id="wb-monitor" title="加工监视舱" k="MONITOR" n={4} />
             <div className="chamber-viewport">
               {/* 坐标雷达网格背景 */}
@@ -1138,6 +1140,16 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
               </div>
 
+              <button
+                type="button"
+                className="btn btn-ghost twin-jump-btn"
+                onClick={() => onNavigate("/twin")}
+                id="btn-open-twin"
+              >
+                <Box size={14} />
+                <span>进入 3D 数字孪生舱 (刀路仿真 / 实机遥测)</span>
+              </button>
+
               {/* 大号醒目急停安全制动按钮 */}
               <button
                 type="button"
@@ -1188,10 +1200,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </div>
               </div>
             </div>
-        </section>
+        </WbCard>
 
-        <div className="ob-stack ob-rail">
-        <section className="hud-card ob-card" aria-label="加工反馈">
+        <WbCard id="feedback" className="hud-card ob-card" label="加工反馈">
           <FoldHeader id="wb-feedback" title="加工反馈" k="FEEDBACK" />
           {!currentWorkflow?.workflow_id && (
             <p className="ob-sub wb-note">生成加工轨迹后，可在这里记录加工效果并获取调参建议。</p>
@@ -1226,8 +1237,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm });
                 addLog("PREVIEW", `调参预览已生成：${workflow.workflow_id}，尚未发送`, "ok");
               }} />
-        </section>
+        </WbCard>
 
+      </WorkbenchCanvas>
       {/* 底部三标签遥测控制台抽屉 (ConsoleDrawer) */}
       <ConsoleDrawer
         logs={logs}
@@ -1241,8 +1253,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         totalLines={sendProgress?.total || 0}
         mcpStatus={mcpStatus}
       />
-        </div>
-      </div>
 
       {pollSafetyNotice && <p role="alert" className="send-desc">{pollSafetyNotice}</p>}
       {/* Send Overlay */}

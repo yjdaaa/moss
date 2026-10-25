@@ -46,39 +46,187 @@ impl Default for TextLayoutOptions {
     }
 }
 
+pub const WINDOWS_FONT_FILENAMES: &[&str] = &[
+    "simhei.ttf",
+    "msyhbd.ttc",
+    "msyh.ttc",
+    "msyhl.ttc",
+    "simsun.ttc",
+    "deng.ttf",
+    "simkai.ttf",
+    "segoeui.ttf",
+    "segoeuib.ttf",
+    "arialbd.ttf",
+    "arial.ttf",
+    "tahoma.ttf",
+];
+
 pub const WINDOWS_FONT_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\msyhbd.ttc",
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\simsun.ttc",
+    r"C:\Windows\Fonts\segoeui.ttf",
+    r"C:\Windows\Fonts\arial.ttf",
 ];
 pub const MACOS_FONT_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/System/Library/Fonts/Supplemental/STSong.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
 ];
 pub const LINUX_FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
 ];
 
-pub fn find_system_font() -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    let candidates = WINDOWS_FONT_CANDIDATES;
-    #[cfg(target_os = "macos")]
-    let candidates = MACOS_FONT_CANDIDATES;
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let candidates = LINUX_FONT_CANDIDATES;
+fn push_unique_path(list: &mut Vec<std::path::PathBuf>, candidate: std::path::PathBuf) {
+    if !list.iter().any(|existing| existing == &candidate) {
+        list.push(candidate);
+    }
+}
 
-    for candidate in candidates {
-        let path = std::path::Path::new(candidate);
-        if path.exists() {
-            return Some(path.to_path_buf());
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn windows_font_candidates_from_env(
+    system_root: Option<&std::ffi::OsStr>,
+    windir: Option<&std::ffi::OsStr>,
+    local_app_data: Option<&std::ffi::OsStr>,
+) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    for root in [system_root, windir].into_iter().flatten() {
+        if !root.is_empty() {
+            push_unique_path(&mut dirs, Path::new(root).join("Fonts"));
         }
     }
-    None
+    push_unique_path(&mut dirs, std::path::PathBuf::from(r"C:\Windows\Fonts"));
+    if let Some(local) = local_app_data.filter(|v| !v.is_empty()) {
+        push_unique_path(
+            &mut dirs,
+            Path::new(local).join("Microsoft").join("Windows").join("Fonts"),
+        );
+    }
+    let mut out = Vec::new();
+    for file in WINDOWS_FONT_FILENAMES {
+        for dir in &dirs {
+            push_unique_path(&mut out, dir.join(file));
+        }
+    }
+    for raw in WINDOWS_FONT_CANDIDATES {
+        push_unique_path(&mut out, std::path::PathBuf::from(raw));
+    }
+    out
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn macos_font_candidates_with_assets(assets_v2_root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let direct_pingfang = Path::new("/System/Library/Fonts/PingFang.ttc");
+    if direct_pingfang.exists() {
+        push_unique_path(&mut out, direct_pingfang.to_path_buf());
+    }
+    // macOS Sonoma / Sequoia 将 PingFang.ttc 移至 AssetsV2 动态字体包目录
+    for bucket in [
+        "com_apple_MobileAsset_Font8",
+        "com_apple_MobileAsset_Font7",
+        "com_apple_MobileAsset_Font6",
+    ] {
+        let dir = assets_v2_root.join(bucket);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut subdirs: Vec<_> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("asset"))
+                .collect();
+            subdirs.sort();
+            for asset in subdirs {
+                let pf = asset.join("AssetData").join("PingFang.ttc");
+                if pf.is_file() {
+                    push_unique_path(&mut out, pf);
+                }
+            }
+        }
+    }
+    for raw in MACOS_FONT_CANDIDATES {
+        push_unique_path(&mut out, std::path::PathBuf::from(raw));
+    }
+    out
+}
+
+pub fn system_font_candidates() -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_font_candidates_from_env(
+            std::env::var_os("SystemRoot").as_deref(),
+            std::env::var_os("WINDIR").as_deref(),
+            std::env::var_os("LOCALAPPDATA").as_deref(),
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_font_candidates_with_assets(Path::new("/System/Library/AssetsV2"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        LINUX_FONT_CANDIDATES
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect()
+    }
+}
+
+pub(crate) fn select_font_from_candidates(
+    candidates: &[std::path::PathBuf],
+    text: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let required_chars: Vec<char> = text
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| !matches!(ch, '\n' | '\r'))
+        .collect();
+    let mut first_valid: Option<std::path::PathBuf> = None;
+
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(face) = Face::parse(&bytes, 0) else {
+            continue;
+        };
+        if first_valid.is_none() {
+            first_valid = Some(path.clone());
+        }
+        if required_chars.is_empty()
+            || required_chars.iter().all(|&ch| face.glyph_index(ch).is_some())
+        {
+            return Some(path.clone());
+        }
+    }
+    first_valid
+}
+
+pub fn find_system_font() -> Option<std::path::PathBuf> {
+    let candidates = system_font_candidates();
+    select_font_from_candidates(&candidates, None)
+}
+
+pub fn find_system_font_for_text(text: &str) -> Option<std::path::PathBuf> {
+    let candidates = system_font_candidates();
+    select_font_from_candidates(&candidates, Some(text))
 }
 
 struct Builder {
@@ -463,5 +611,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(wrapped.glyphs, 4);
+    }
+
+    #[test]
+    fn cross_device_font_candidates_cover_custom_windir_macos_assets_v2_and_glyph_coverage() {
+        let win_candidates = windows_font_candidates_from_env(
+            Some(std::ffi::OsStr::new(r"D:\Windows")),
+            None,
+            Some(std::ffi::OsStr::new(r"D:\Users\demo\AppData\Local")),
+        );
+        assert_eq!(
+            win_candidates.first().and_then(|p| p.to_str()),
+            Some(r"D:\Windows\Fonts\simhei.ttf")
+        );
+        assert!(win_candidates.iter().any(|p| p == Path::new(r"D:\Windows\Fonts\arial.ttf")));
+        assert!(win_candidates.iter().any(|p| {
+            p == Path::new(r"D:\Users\demo\AppData\Local\Microsoft\Windows\Fonts\msyh.ttc")
+        }));
+
+        let mut stamp = [0u8; 8];
+        getrandom::fill(&mut stamp).unwrap();
+        let hex: String = stamp.iter().map(|b| format!("{b:02x}")).collect();
+        let temp = std::env::temp_dir().join(format!("moss-font-test-{hex}"));
+        let asset_pf = temp
+            .join("com_apple_MobileAsset_Font7")
+            .join("demo.asset")
+            .join("AssetData")
+            .join("PingFang.ttc");
+        std::fs::create_dir_all(asset_pf.parent().unwrap()).unwrap();
+        let fixture_bytes = include_bytes!("../../../tests/fixtures/fonts/geometry.ttf");
+        std::fs::write(&asset_pf, fixture_bytes).unwrap();
+
+        let mac_candidates = macos_font_candidates_with_assets(&temp);
+        assert!(
+            mac_candidates.iter().any(|p| p == &asset_pf),
+            "macOS Sonoma/Sequoia AssetsV2 PingFang.ttc 应被发现"
+        );
+
+        let broken_font = temp.join("corrupted.ttf");
+        std::fs::write(&broken_font, b"not-a-real-font").unwrap();
+        let valid_font = temp.join("geometry.ttf");
+        std::fs::write(&valid_font, fixture_bytes).unwrap();
+        let candidates = vec![temp.join("missing.ttf"), broken_font, valid_font.clone()];
+
+        assert_eq!(
+            select_font_from_candidates(&candidates, Some("A")).as_ref(),
+            Some(&valid_font)
+        );
+        assert_eq!(
+            select_font_from_candidates(&candidates, Some("缺字兜底")).as_ref(),
+            Some(&valid_font),
+            "没有任何字体完整覆盖时仍应回退首个合法字体文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

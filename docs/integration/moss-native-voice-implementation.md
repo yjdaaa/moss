@@ -160,7 +160,13 @@ Client-Id: <与配对记录一致的标识>
 Content-Type: multipart/form-data; boundary=<自动生成>
 ```
 
-multipart 仅有 `question`（UTF-8，1..2000 字符）和 `image`（单个 JPEG/PNG，解码前≤5 MiB，最大 4096×4096 且总像素≤1600 万）；总 body≤5 MiB+64 KiB，拒绝重复字段、额外文件、远程图片 URL 与 MIME/魔数不一致。实施时先对照所用固件的 multipart fixture；若其响应要求不同，调整兼容映射并同步本契约，不在服务端默默接受多种无限制格式。
+multipart 仅有 `question`（UTF-8，1..2000 字符）和一个图片字段（单个 JPEG/PNG，解码前≤5 MiB，最大 4096×4096 且总像素≤1600 万）；总 body≤5 MiB+64 KiB，拒绝重复字段、额外文件、远程图片 URL 与 MIME/魔数不一致。
+
+**2026-10-16 对照上游固件的兼容修正**：`78/xiaozhi-esp32` 的 `Esp32Camera::Explain`（`main/boards/common/esp32_camera.cc`）发的是 `name="file"; filename="camera.jpg"` + `Content-Type: image/jpeg`，并带 `Transfer-Encoding: chunked`；本服务早期只接受 `name="image"`，真机会被 422 拒绝。现已接受 `image` 与 `file` 两种名字（其他名字仍 422），并新增按固件真实报文形状构造的回归测试 `upstream_firmware_file_field_is_accepted`。同一固件的握手与触发方式与本设计一致：MCP `initialize` 的 **params.capabilities.vision={url,token}** 被固件 `ParseCapabilities` 读取并 `SetExplainUrl`；设备注册的 `self.camera.take_photo(question)` 工具由服务端大模型调用，固件拍照后 POST 到该 url，再把响应正文当作工具结果回传（因此 MOSS 的 JSON 正文会被模型看到）。`Device-Id` 用设备 MAC、`Client-Id` 用板子 UUID，与 WS/OTA 同一对身份，token 也由同一 signer 绑定该对身份。
+
+**2026-10-16 用户要求：可选用“当前对话大模型”看照片（多模态）**。视觉卡片新增开关 `use_dialog_llm`（默认关闭）。关闭时行为不变：用独立视觉模型的 `url` / `model` 与 `voice.vision.main` 密钥。打开后改用 `builtin_models.llm` 的地址、模型名与 `voice.llm.main` 密钥，`voice_vision_status()` 额外返回 `dialog_llm{configured,url,model}`（不含密钥）供卡片显示“照片会发给谁”；`vision_save` 在该模式下不再要求视觉模型地址/密钥，改为要求对话模型已配置 OpenAI 兼容地址、模型名与密钥，否则返回 `vision_invalid` 挡住保存。两条硬边界不变：①默认下图片只用于这一次解释（要留在上下文需另开下面的 `keep_in_history`），不落盘；②模型调用失败照常报错（`vision_model_*`），**不会**用对话模型编造“看见了”代替失败的视觉请求。对话模型必须 OpenAI 兼容（`ProviderKind::Openai`）并自身支持看图，豆包等非 OpenAI 兼容对话模型会被拒绝。凭据选择集中成纯函数 `vision_credentials`（`apps/desktop/src-tauri/src/voice_builtin.rs`），单测覆盖独立模式、对话模式、非 OpenAI 与总开关关闭四种情况。
+
+**2026-10-16 再增开关：把这张照片留在对话上下文里**（`BuiltinVision.keep_in_history`，默认关闭）。打开后，`/mcp/vision/explain` 成功时把这张照片编成 `data:` URL（`moss_voice_providers::vision::data_url`）暂存进 `Shared.vision_photos`（`vision::VisionPhotos`：按设备只留最新一张、最多 8 台设备、单张 ≤ 4 MiB，超限直接不留），该设备下一轮语音开始时由 `session.rs` 取走（只交付一次），`Photo::into_message` 生成一条**多模态用户消息**（文字只复述问题与当时的解释）接进对话历史；历史截断按一张图 1500 token 估算。为此 `ChatMessage` 增加 `images` 字段并改为手写 `Serialize`：无图片时序列化与以前完全一致（字符串 `content`），有图片时输出 OpenAI `content` parts（`text` + `image_url`）。**边界**：图片只在内存、不落盘、不进日志与事件；是否保留完全由用户开关决定，不做模型自动判断；对话模型不支持看图时每轮请求会失败（卡片已写明）。
 
 provider body：`{model,stream:false,messages:[{role:"user",content:[{type:"text",text:question},{type:"image_url",image_url:{url:"data:<mime>;base64,<image>"}}]}],max_tokens:512}`，请求已有规范化的 `/chat/completions` 地址。设备成功响应 `{success:true,text:<最多2000字符>}`；失败 `{success:false,error:{code,message}}`。401 未认证、403 未允许/已撤销、413 超大、415 格式错误、422 解码或参数错误、429 忙、502 模型错误、504 超时；`Cache-Control:no-store`。
 
@@ -274,7 +280,24 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 - 使用 `scripts/build-nv13-fake-api-gateway-image.ps1`、`scripts/test-nv13-internal-model-gateway.ps1` 运行一个只返回人工固定 HTTP 200 内容的临时代理：Codex 镜像所在客户端只连接 `docker network --internal` 内的假服务，网络无默认外网路由，未连接本轮 Windows 测试监听器；无工作区写权限、宿主机凭据或 Docker socket，测试结束后容器、Docker 网络和 canary 清理。**该测试没有访问真实 OpenAI、没有模型费用/登录，也未验证 TLS、DNS/IP 防绕过、正式代理密钥隔离或跨进程撤销。**
 - 后续受控模型代理、单次审批、外联授权与必须通过的负向测试列在 [`NV13 Codex Docker 安全设计与验收`](nv13-codex-docker-security.md)。Docker 基础隔离与假 HTTP 路径可用不等于“Codex 真实可运行”。
 
-**NV19 衔接**：仅把 Agent 任务记录作为可检索的只读证据；不解锁 CLI，不重放 `result_unknown` 或已消费审批（[NV19](#nv19)）。
+**NV19 衔接**：仅把 Agent 任务记录作为可检索的只读证据；不重放 `result_unknown` 或已消费审批（[NV19](#nv19)）。
+
+### 2026-10-15 用户决定：开放真实执行（取代“不解锁 CLI”）
+
+用户要求把 Agent 功能做完，选定“用户自己开启 + 每次运行桌面批准 + 只在严格模式运行”，取代 2026-10-11 的“沙箱负向测试通过前不得开启”。现在生效的实现：
+
+- `crates/laser-host/src/voice_agent.rs`：删除 `REAL_CLI_SANDBOX_VERIFIED`；`parse_help` 不再比对固定版本，但必须能识别 CLI 且 `--help` 列出全部安全参数（缺一个就 `agent_capability_missing`）；`build_plan` 用 Codex `exec --sandbox workspace-write` 与 Claude Code `--restricted --permission-mode acceptEdits --tools Read,Glob,Grep,Edit,Write`（不开放 Bash 与网络工具），环境白名单增加 `PATH`/`PATHEXT`/`ComSpec`/`HOMEDRIVE`/`HOMEPATH`（Codex 在沙箱里执行命令需要，仍不含任何 MOSS/MCP 变量）；新增 `probe_cli`（只跑 `--version` / `--help`，15 秒超时，不执行任务）、`final_answer`（从 CLI 的 JSON 行输出取最终回答）与 `production_runner()`（Windows 用 Job Object 执行器，非 Windows 返回 `agent_sandbox_unavailable`）。
+- `crates/laser-host/src/voice_agent/engine.rs`：`prepare` 增加严格模式要求；探测结果按可执行文件大小与修改时间缓存；批准后在后台线程运行，`stop(run_id)` 置停止标志，运行中每秒复核配置 revision；取消、超时、撤销设备授权、关闭严格模式或改配置都会结束进程树并写短错误码。`status()` 返回 `configured` / `enabled` / `strict_mode` / `providers` / `runs`（运行中的带 `stoppable`）。新增错误码 `agent_strict_mode_required`、`agent_run_failed`、`agent_timeout`、`agent_stopped`。
+- 桌面：`voice_agent_save` 不再把开关强制改回关闭，开启时要求工作目录与至少一个 CLI；新增 `voice_agent_stop`（main 窗口，capability `voice-agent.json` 授权）；`voice_agent_status` 不再返回 `sandbox_verified`。
+- 界面：Agent 卡改为可开启，显示分组摘要、每个 CLI 的可用情况与原因码、运行记录与“停止”按钮；严格模式未开时明确提示去 `.env` 设置 `MOSS_FUSION_STRICT=1`。
+
+**已告知并接受的剩余风险**：CLI 自身的沙箱在 Windows 上不能阻止读取工作目录以外的文件，Job Object 也不限制文件读取与网络。工作目录必须是可公开给模型看的目录。真实账号、模型费用与实机体验见 [实机验证手册](moss-hardware-acceptance-plan.md) HW-19。
+
+**2026-10-16 实机发现与修复（HW-19）**：用用户本机已登录的真实 CLI 跑生产 `JobRunner`，任务在 0.4 毫秒内以 `agent_run_failed` 结束、输出为空。根因是 `windows_process::environment_block` 的允许列表比 `build_plan()` / `minimal_env()` 所列环境变量少 4 个键（`PATHEXT`、`ComSpec`、`HOMEDRIVE`、`HOMEPATH`），于是 `run_fixture_process` 一律返回 `InvalidInput`、`JobRunner` 映射为 `agent_run_failed`——真实 CLI 一个都起不来；夹具测试自己构造环境变量，所以全绿也发现不了。修复：允许列表收敛为 `voice_agent::CLI_ENV_KEYS` 单一常量，构建计划、探测、运行三处共用，`CODEX_HOME` 与仅测试用的夹具键单独放行；回归测试 `runner_environment_whitelist_accepts_every_key_the_plan_sets` 断言计划里的每个键都被运行器接受、探测与运行共用同一套变量、`MOSS_API_TOKEN` / `MCP_URL` / `MOSS_DEVICE_TOKEN` 仍被拒绝。
+
+**手动实机探针（默认跳过，与 `NV13_DOCKER_TEST_EXE` 同类 opt-in）**：`crates/laser-host/src/voice_agent.rs` 的 `manual_real_plan` / `manual_real_cli_roundtrip` / `manual_real_cli_stop` 需 `--ignored` 且显式给出 `MOSS_REAL_CLI`、`MOSS_REAL_WORKSPACE`、`MOSS_REAL_TASK`（可选 `MOSS_REAL_PROVIDER=codex|claude_code`，默认 codex）；它们会调用真实账号并修改工作目录，只在人工验收时运行（用法见[实机验证手册](moss-hardware-acceptance-plan.md)阶段 1）。2026-10-16 实测：codex 经生产 runner 跑通 31.4 秒任务并取回回答；8 秒处的停止在 8.03 秒取消且无残留进程。
+
+**2026-10-16 本机环境阻塞（不是 MOSS 侧缺陷，记录备查）**：①本机 `codex-cli 0.162.0-alpha.17.2` 的 `.sandbox-bin` 缺 `codex-code-mode-host.exe`（只有旧版 `codex-command-runner-0.158.0-alpha.2.1.exe`），模型能回答但无法执行工具，改文件失败；②本机 `claude.exe 2.1.300` 返回 403 `oauth_not_allowed_for_organization`（组织已禁用订阅访问），需要 API key 或管理员放行；③运行器输出遮盖按整行匹配 `token` / `password` / `api_key` / `sk-` / `.env` 等词，命中即整行替换为 `[redacted]`，上面那条 403 文本因为含 “API key” 被整行吞掉——失败原因在界面/记录里只能看到 `[redacted]`。遮盖是**保守安全策略**，未按本次测试放宽；是否改成“只在像凭据赋值时遮盖”需要单独决定。
 
 <a id="nv14"></a>
 
@@ -524,6 +547,17 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 **测试结果**：`cargo test -p moss-voice-server firmware --lib` **8/8 PASS**，覆盖正确绑定、重放、错 client、密钥版本变化、到期/撤销、禁用固件、文件被改、全局/设备并发和接收期间中止。测试不创建下载 HTTP 路由、不读取真实设备请求，不发固件 offer，更不会刷机；仍需正式 DeviceRegistry 登录身份、受信 OTA 请求 fixture、持久记录和权限 revocation 设计及验证。此轮仅测试代码与文档，未改变生产编译/协议，依项目规则可不执行 Windows/Android 重建。
 **NV17-1 设备请求身份核查结论**：当前 `moss-xiaozhi-proto::OtaInfo::from_request` 从 OTA 明文 `Device-Id` / `Client-Id` 请求头和 body 读取设备身份、型号与版本（默认还会回退到 `default` / `0.0.0`），**这些都是客户端自报数据，没有加密签名或凭据校验**。`moss-voice-server/src/ota.rs::ota_post` 在解析后会调用 `registry.seen` 登记并在已允许时**签发** WebSocket token，但 OTA 请求本身并未提交用 `TokenSigner::verify` 核验的 Bearer 凭据。因此，即使数据库里该设备当前是 allowed，也**不能将这个 OTA POST 单独作为签发固件下载授权的身份证明**。后续下载如果设备端不支持附加签名/header，需要独立可信绑定流程和具体固件请求 fixture；无法验证时保持 `firmware:None`。上面的 mock ticket 接收的 `FakeGrant` 只是可信边界的测试替身，不得从 HTTP 头直接构造后用于真实发放。未连接设备、未发送固件。
+
+### 2026-10-15 用户决定：逐台确认推送（取代“保持 firmware:None”）
+
+用户要求把固件 OTA 做完，选定“导入自己编译的 ESP32 应用固件 → 选一台已允许设备确认推送 → 设备下次开机自动下载刷写 → 上报新版本才算升级”，取代上面“没有独立可信下载绑定就保持 `firmware:None`”的结论：
+
+- `crates/moss-voice-server/src/firmware.rs` 从 `cfg(test)` 夹具重写为生产模块：`FirmwareHost` 三个方法（`offer(device, current_version)`、`fetch(token, peer)`、`reported(device, version)`）、`parse_app_image`（`0xE9` 头 + 偏移 32 的 `0xABCD5432` + 1～5 段数字版本，≤16 MiB，整片烧录包与引导程序被拒）、`is_newer`、`sha256_hex`、`token_ok`（32 位十六进制）与 `GET /xiaozhi/firmware/{file}` 下载路由；旧的 `ArtifactStore` / `download_mock.rs` 合成夹具删除。
+- `ServerConfig::firmware`（`None` 时一律不下发）与 `ota.rs`：设备已允许且存在有效推送时，回包带 `firmware{version, url}`，url 指向同一 HTTP 端口的下载路由；每次 OTA 都把设备上报版本交给宿主，用于判断是否已升级。
+- 桌面 `voice_builtin.rs`：`DesktopFirmwareHost` 用 SQLite 与运行目录 `firmware/<sha256>.bin`；`fetch` 要求下载方地址等于该设备最近一次 OTA 来源地址、设备仍处于已允许、文件 SHA-256 与登记一致，第一次下载记为“下载中”。私密窗口命令：`voice_firmware_status`、`voice_firmware_import`、`voice_firmware_manage`（offer / cancel / delete）。
+- schema v13：新增 `voice_firmware_artifacts`，并为 `voice_firmware_delivery` 增加 `firmware_version` / `token` / `expires_at`（详见 [数据库结构](../developer/db-schema.md) §3.18）。
+- 验证：`laser-runtime` 固件 2 项、`moss-voice-server` 固件 2 项与 OTA 回环 HTTP 1 项（错误令牌与路径穿越一律 404）、`moss-desktop` 宿主 1 项（换地址下载与篡改文件都拒绝）、前端记录视图单测与语音中心浏览器测试。
+- **仍然没做**：固件端签名鉴权与下载并发上限——按用户决定用“逐台人工确认 + 一次性令牌 + 来源地址绑定 + 24 小时到期”替代；真实板子拿包、刷写、断电恢复与升级后上报见 [实机验证手册](moss-hardware-acceptance-plan.md) HW-20，刷写前必须单独授权并准备串口重刷兜底。下载完成不等于刷写成功，回退固件不在本流程内。
 <a id="nv18"></a>
 
 ## 10. NV18 收尾与交付
@@ -703,7 +737,7 @@ OpenViking 的 Resource/Memory/Skill 分类与 L0 目录摘要、L1 目录概览
 - **只认用户自己的摘要**：只有私有窗口里用户保存、状态为已确认的记录才算恢复摘要；对话提取出的候选即使模仿了标题格式也不算（测试覆盖）。首次保存不带版本，之后必须指明要改的记录和版本，两个窗口不会互相覆盖。语音不能保存或读取。
 - **恢复时重新核对**：`resume` 对每条引用调用宿主的 `ResumeFacts::state`（只读接口，没有任何执行方法），得到已完成 / 失败 / 进行中 / 结果未知 / 已撤销 / 已停止 / 找不到 / 无法核实。证据里引用核实不了的条目移到“未验证”并注明。`format_resume` 开头写明“仅供参考；开始前须重新核对代码、数据库与设备的实际状态；结果未知、已撤销或已停止的任务不会自动重试或重放”，每条引用后面写出当前状态和“不会自动批准 / 重试 / 重放 / 重新启动”。
 - **宿主映射**（参考实现 `crates/moss-voice-server/tests/nv19_context_sqlite.rs`，只用 SELECT）：审批 pending / approved → 进行中，expired / rejected / cancelled → 已撤销，executed 按 outcome.phase 分为结果未知 / 失败 / 已停止 / 已完成；加工任务与 Agent 运行 completed → 已完成，failed / timed_out → 失败，cancelled → 已停止，result_unknown → 结果未知，running / pending / queued → 进行中；测试引用目前没有可查的表，为“无法核实”。测试确认恢复前后三张表的行完全不变。
-- **NV13**：本模块不依赖、也不调用 Agent 执行；NV13 生产 Runner 仍由 `laser-host` 的 `REAL_CLI_SANDBOX_VERIFIED=false` 及其测试锁定。
+- **NV13**：本模块不依赖、也不调用 Agent 执行；恢复摘要不重启 CLI、不继承旧审批。生产 Runner 自 2026-10-15 起按用户决定启用（严格模式 + 逐次批准，见 [安全入口 §4.18](../developer/safety.md)），本模块仍然只读。
 - **“重新核实代码”的范围**：MOSS 运行时只能核对自己数据库里的审批、任务和 Agent 记录；代码仓库的实际状态无法由这里核实，所以输出一律提示“开始前须重新核对代码”，并把核实不了的证据降为未验证。
 - **尚未接线**：桌面端 `ResumeFacts` 实现与私有窗口的摘要编辑 / 恢复页面随 NV19-08 接入。
 

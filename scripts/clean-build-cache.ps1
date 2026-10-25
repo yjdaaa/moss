@@ -28,6 +28,20 @@ function Remove-Cache([string]$path) {
 
 if (-not (Test-Path -LiteralPath $target)) { Write-Host 'No target/ directory; nothing to clean.'; exit 0 }
 
+# 0. Clean build artifacts older than 3 days via cargo-sweep
+if (Get-Command cargo-sweep.exe -CommandType Application -ErrorAction SilentlyContinue) {
+    Push-Location $repo
+    try {
+        if ($WhatIfPreference) {
+            & cargo sweep --time 3 --dry-run
+        } else {
+            & cargo sweep --time 3
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 # 1. Incremental caches and temporary check dirs
 Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 2 -Filter incremental | ForEach-Object { Remove-Cache $_.FullName }
 Get-ChildItem -LiteralPath $target -Directory | Where-Object { $_.Name -eq 'tmp' -or $_.Name -like 'codex-*' } |

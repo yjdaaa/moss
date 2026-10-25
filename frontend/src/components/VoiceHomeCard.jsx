@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
+import { showConfirm } from "../appDialog.js";
 
 // NV15 stores inert settings and a separate local token, never connecting to
 // HA or issuing control requests before the dedicated production gate.
@@ -107,7 +108,7 @@ export default function VoiceHomeCard() {
     finally { setBusy(false); }
   };
   const restorePortable = async () => {
-    if (!window.confirm("恢复会清除本机 Home Assistant 令牌、全部语音家居授权和待审批动作；白名单实体需重新勾选，恢复后必须重新输入令牌。确定继续？")) return;
+    if (!(await showConfirm("恢复会清除本机 Home Assistant 令牌、全部语音家居授权和待审批动作；白名单实体需重新勾选，恢复后必须重新输入令牌。确定继续？", { title: "恢复家居配置？", tone: "warning", danger: true, confirmText: "恢复" }))) return;
     setBusy(true);setError("");setMessage("");setSyncEnabled(false);setDiscovery(null);
     try {
       if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(credentialRevision))
@@ -165,14 +166,21 @@ export default function VoiceHomeCard() {
         enabled, policy_revision: revision, credential_revision: credentialRevision,
       });
       setVoiceReadEnabled(!!state.voice_read_enabled);
-      setMessage(enabled ? "已授权语音模型只读查询白名单实体；控制设备需另外开启“家居语音控制”。" : "已撤销语音模型的只读家居查询权限。");
+      setMessage(enabled ? "已允许小智查询白名单里的设备状态；控制设备需另外开启“家居语音控制”。" : "已撤销小智的只读查询权限。");
+      return true;
     } catch (e) {
       setVoiceReadEnabled(false);
       setError(e?.message || "Home Assistant 语音只读授权操作失败，请重新加载。");
+      return false;
     } finally { setBusy(false); }
   };
+  /// 允许查询的同时顺手做一次只读同步，省掉用户再点一次「同步」。
+  const allowReadOnlyQuery = async () => {
+    if (!(await consent(true))) return;
+    if (credentialConfigured && form.base_url.trim()) await discover();
+  };
   const controlConsent = async (enabled) => {
-    if (enabled && !window.confirm("允许语音创建白名单家居控制审批？每次仍须在电脑批准。批准后会实际操作对应设备，包括门锁和报警器。")) return;
+    if (enabled && !(await showConfirm("允许语音创建白名单家居控制审批？每次仍须在电脑批准。批准后会实际操作对应设备，包括门锁和报警器。", { title: "开启家居语音控制？", tone: "warning", confirmText: "开启" }))) return;
     setBusy(true);setError("");setMessage("");
     try {
       const result=await voiceApi.homeControlConsent({enabled,confirmed:true,policy_revision:revision,credential_revision:credentialRevision});
@@ -278,7 +286,7 @@ export default function VoiceHomeCard() {
       setForm(asForm(result.settings));
       setDiscovery(null);
       setSyncEnabled(false);
-      setMessage("离线白名单已保存。Home Assistant 控制仍被禁用；没有连接任何真实设备。");
+      setMessage("白名单已保存。白名单或令牌变化会撤销旧授权；继续使用前请重新确认。");
     } catch (e) {
       setError(e?.code === "home_conflict" ? "白名单已在其他窗口更新。请点击重新加载，核对后再次保存。" : e?.message || "Home Assistant 白名单保存失败");
     } finally {
@@ -288,59 +296,22 @@ export default function VoiceHomeCard() {
 
   return (
     <section className="voice-card" aria-label="Home Assistant 离线白名单">
-      <h3>Home Assistant（NV15）</h3>
-      <p>
-        <strong>生产控制禁用。</strong>
-        可设置 HTTPS 地址、白名单和独立加密的长期令牌。只有你明确点击同步时才会通过 HTTPS 读取设备状态；不发送控制命令，任何实际设备动作仍须独立桌面审批。
-      </p>
-      {recoveryOnly && <p role="alert">检测到旧 HA 令牌密文无法由当前 Windows 账户解密。设备查询和控制均已禁用。请先使用下方安全配置备份恢复（会撤销旧密文与授权），或重新设置长期访问令牌；不能继续使用旧审批。</p>}
-      <div className="voice-form-group">
-        <p>Home Assistant 访问令牌：{credentialConfigured ? "已设置" : "未设置"}（凭据版本 {credentialRevision ?? "未知"}）。令牌不写入普通设置，也不会回显。</p>
+      <h3>连接 Home Assistant</h3>
+      <p>先设置 HTTPS 地址与令牌，再选择能交给小智的设备。语音控制需要你明确开启，每次动作仍须在本机批准。</p>
+      {recoveryOnly && <p role="alert">检测到旧 HA 令牌密文无法由当前系统账户解密。设备查询和控制均已禁用。请先使用下方安全配置备份恢复（会撤销旧密文与授权），或重新设置长期访问令牌；不能继续使用旧审批。</p>}
+      <details className="voice-private-more" open={!credentialConfigured}>
+        <summary>访问令牌：{credentialConfigured ? "已设置（更换或撤销）" : "未设置（需要填写）"}</summary>
+        <p>令牌只保存在本机，不会回显。更改令牌会撤销现有授权。</p>
         <label><span>长期访问令牌（不会自动连接家居）</span>
           <input type="password" value={token} disabled={!loaded || busy} autoComplete="new-password"
             onChange={(event) => setToken(event.target.value)} placeholder="输入新令牌以替换" />
         </label>
         <div className="voice-form-actions">
           <button type="button" disabled={!loaded || busy || token.length < 20} onClick={() => saveToken("set")}>保存 / 更换令牌</button>
-          <button type="button" disabled={!loaded || busy || !credentialConfigured} onClick={() => saveToken("clear")}>撤销令牌</button>
+          {credentialConfigured && <button type="button" disabled={!loaded || busy} onClick={() => saveToken("clear")}>撤销令牌</button>}
         </div>
-      </div>
+      </details>
 
-      <div className="voice-form-group">
-        <h4>安全备份与跨电脑迁移</h4>
-        <p>这里只导出已保存的 HTTPS 地址和白名单，不导出令牌、DPAPI 密文、审批或设备授权。不要直接复制原始 SQLite/WAL/SHM 作为可移植凭据备份。</p>
-        <div className="voice-form-actions">
-          <button type="button" disabled={!loaded || busy} onClick={exportPortable}>生成脱敏配置备份</button>
-          <button type="button" disabled={busy} onClick={auditHistoricalBackup}>选择历史备份文件并审计（只读）</button>
-          <button type="button" disabled={!loaded || busy || !portableBackup.trim() || portableBackup.length > 65536}
-            onClick={restorePortable}>从粘贴的备份恢复（撤销旧令牌）</button>
-        </div>
-        {backupAudit && <p role="status">历史文件只读审计：{backupAudit.risk === "suspected_legacy_credential" ? "疑似包含旧访问令牌" : backupAudit.risk === "encrypted_credential_material" ? "包含凭据加密材料标记" : "无法确认安全，按敏感文件处理"}；读取 {backupAudit.inspected_bytes} 字节。请勿公开分享；若疑似泄漏应在 HA 服务端撤销并更换令牌。未读取或显示令牌内容。</p>}
-        <label><span>配置备份 JSON（手动复制或粘贴，最多 64 KiB）</span>
-          <textarea value={portableBackup} disabled={busy} rows={5} spellCheck={false}
-            onChange={(event) => setPortableBackup(event.target.value)} />
-        </label>
-        <p>恢复后所有实体处于未选中状态，控制权限不自动启用，必须重新输入令牌并重新审批。</p>
-      </div>
-      <div className="voice-form-group">
-        <p>可手动读取已保存 HTTPS 地址上的设备与服务状态；只发送 GET，不自动添加设备或执行动作。</p>
-        <p>语音模型只读查询：{voiceReadEnabled ? "已单独授权" : "关闭"}。该授权绑定当前白名单与令牌版本，任何变更都会使旧授权失效。</p>
-        <button type="button" disabled={!loaded || busy || (!credentialConfigured && !voiceReadEnabled)}
-          onClick={() => consent(!voiceReadEnabled)}>{voiceReadEnabled ? "撤销语音只读权限" : "授权语音只读查询"}</button>
-        <button type="button" disabled={!loaded || busy || !credentialConfigured || !form.base_url.trim()}
-          onClick={discover}>只读同步设备状态（不执行控制）</button>
-        <label><input type="checkbox" checked={syncEnabled} disabled={!loaded || busy || !credentialConfigured || !revision}
-          onChange={(event) => setSyncEnabled(event.target.checked)} />
-          开启每 15 秒只读刷新（关闭窗口或改变授权后停止）
-        </label>
-        {syncedAt && <p role="status">上次只读同步时间：{syncedAt}</p>}
-        {Array.isArray(discovery) && <ul aria-label="Home Assistant 已选设备的同步状态">
-          {discovery.map((entity) => <li key={entity.entity_id}>
-            <strong>{entity.entity_id}</strong>：{entity.state}
-            {entity.actions_available?.length ? " · 可用服务：" + entity.actions_available.join("、") : " · 无可用控制服务"}
-          </li>)}
-        </ul>}
-      </div>
       <label className="voice-form-group">
         <span>Home Assistant HTTPS 地址（保存后可手动只读同步）</span>
         <input value={form.base_url} disabled={!loaded || busy} autoComplete="off"
@@ -349,7 +320,13 @@ export default function VoiceHomeCard() {
             ...current, base_url: event.target.value,
           }))} />
       </label>
-      <p>设备白名单（最多 128 项；每一项都必须经独立审批，绝不自动解锁门锁或解除报警）</p>
+      <div className="voice-form-actions"><button type="button" disabled={!loaded || busy}
+        onClick={save}>{busy ? "正在保存…" : "保存地址与设备设置"}</button></div>
+      {message && <p role="status">{message}</p>}
+      {error && <p role="alert">{error}</p>}
+      <details className="voice-private-more" open={voiceControlEnabled}>
+        <summary>选择设备并开启控制</summary>
+        <p>只允许所选设备；每次操作仍须在本机批准。请先用无害设备试用。</p>
       {form.entities.map((entity, index) => (
         <div className="voice-form-group" key={index}>
           <label>
@@ -382,16 +359,60 @@ export default function VoiceHomeCard() {
       ))}
       <button type="button" disabled={!loaded || busy || form.entities.length >= 128}
         onClick={add}>添加白名单实体</button>
-      <button type="button" disabled={!loaded || busy}
-        onClick={save}>{busy ? "正在校验与保存…" : "保存离线白名单（不连接设备）"}</button>
-      <button type="button" disabled={busy} onClick={reload}>重新加载最新白名单</button>
-      {Number.isSafeInteger(revision) && <p>离线配置版本：{revision}</p>}
-      {message && <p role="status">{message}</p>}
-      {error && <p role="alert">{error}</p>}
-      <p role="status">语音控制家居：填好地址和令牌、勾选白名单实体后，在这里明确开启。开启后语音只能申请控制白名单里的设备，每次都要在电脑上批准才会执行；结果未知时不会自动重发。更改白名单或令牌会使旧审批失效。此功能尚未用真实 Home Assistant 验收，请先用无害设备（如一盏灯）试用。</p>
+      <button type="button" disabled={busy} onClick={reload}>重新加载设备设置</button>
+      <p>更改设备或令牌会撤销旧审批；结果未知时不会自动重发。尚未用真实 Home Assistant 验收。</p>
       <button type="button" disabled={!loaded || busy} onClick={() => controlConsent(!voiceControlEnabled)} id="voice-home-control-consent">
         {voiceControlEnabled ? "关闭家居语音控制" : "开启家居语音控制"}
       </button>
+      </details>
+      <details className="voice-private-more" open={recoveryOnly}>
+        <summary>其他管理（备份、只读同步）</summary>
+      <details className="voice-private-more" open={recoveryOnly}>
+        <summary>备份与迁移</summary>
+        <p>这里只导出已保存的 HTTPS 地址和白名单，不导出令牌、DPAPI 密文、审批或设备授权。不要直接复制原始 SQLite/WAL/SHM 作为可移植凭据备份。</p>
+        <div className="voice-form-actions">
+          <button type="button" disabled={!loaded || busy} onClick={exportPortable}>生成脱敏配置备份</button>
+          <button type="button" disabled={busy} onClick={auditHistoricalBackup}>选择历史备份文件并审计（只读）</button>
+          <button type="button" disabled={!loaded || busy || !portableBackup.trim() || portableBackup.length > 65536}
+            onClick={restorePortable}>从粘贴的备份恢复（撤销旧令牌）</button>
+        </div>
+        {backupAudit && <p role="status">历史文件只读审计：{backupAudit.risk === "suspected_legacy_credential" ? "疑似包含旧访问令牌" : backupAudit.risk === "encrypted_credential_material" ? "包含凭据加密材料标记" : "无法确认安全，按敏感文件处理"}；读取 {backupAudit.inspected_bytes} 字节。请勿公开分享；若疑似泄漏应在 HA 服务端撤销并更换令牌。未读取或显示令牌内容。</p>}
+        <label><span>配置备份 JSON（手动复制或粘贴，最多 64 KiB）</span>
+          <textarea value={portableBackup} disabled={busy} rows={5} spellCheck={false}
+            onChange={(event) => setPortableBackup(event.target.value)} />
+        </label>
+        <p>恢复后所有实体处于未选中状态，控制权限不自动启用，必须重新输入令牌并重新审批。</p>
+      </details>
+      <details className="voice-private-more">
+        <summary>只读查询与同步</summary>
+        <p>只发送 GET 读取白名单设备的当前状态，不自动添加设备、不执行任何动作。</p>
+        <p>小智查询家里状态：{voiceReadEnabled ? "已允许" : "未允许"}。该授权绑定当前白名单与令牌版本，任何变更都会使旧授权失效。</p>
+        {voiceReadEnabled ? (
+          <div className="voice-form-actions">
+            <button type="button" disabled={!loaded || busy || !credentialConfigured || !form.base_url.trim()}
+              onClick={discover} id="voice-home-read-sync">重新同步设备状态</button>
+            <button type="button" disabled={!loaded || busy}
+              onClick={() => consent(false)} id="voice-home-read-revoke">撤销查询权限</button>
+          </div>
+        ) : (
+          <button type="button" disabled={!loaded || busy || !credentialConfigured || !form.base_url.trim()}
+            onClick={allowReadOnlyQuery} id="voice-home-read-allow" title="允许后立即做一次只读同步">
+            允许小智查询家里的状态（只读）
+          </button>
+        )}
+        <label><input type="checkbox" checked={syncEnabled} disabled={!loaded || busy || !credentialConfigured || !revision}
+          onChange={(event) => setSyncEnabled(event.target.checked)} />
+          开启每 15 秒只读刷新（关闭窗口或改变授权后停止）
+        </label>
+        {syncedAt && <p role="status">上次只读同步时间：{syncedAt}</p>}
+        {Array.isArray(discovery) && <ul aria-label="Home Assistant 已选设备的同步状态">
+          {discovery.map((entity) => <li key={entity.entity_id}>
+            <strong>{entity.entity_id}</strong>：{entity.state}
+            {entity.actions_available?.length ? " · 可用服务：" + entity.actions_available.join("、") : " · 无可用控制服务"}
+          </li>)}
+        </ul>}
+      </details>
+      </details>
     </section>
   );
 }

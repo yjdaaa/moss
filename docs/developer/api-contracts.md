@@ -19,7 +19,7 @@
 | GET | `/api/material-lab/export` | 材料库导出 | §2 |
 | GET / POST | `/api/material-lab/recent` | 最近一条含完整参数的 workflow | §3.11 |
 | GET | `/preview` | 受控文件服务 | §2.1 |
-| GET | `/`、`/draw`、`/material-lab`、`/assets/*` | 嵌入的前端 | §2.2 |
+| GET | `/`、`/draw`、`/material-lab`、`/twin`、`/assets/*` | 嵌入的前端 | §2.2 |
 | POST | `/api/upload` | 上传图片或 G-code | §3.1 |
 | POST | `/api/draw/preview` | 画板预览 | §3.2 |
 | POST | `/api/connection/check` | 连接检查与设备能力 | §3.3 |
@@ -75,21 +75,37 @@
 
 只有独立视觉设置启用、模型地址与密钥齐备时，才允许已授权设备通过 MCP initialize 收到 capabilities.vision={url,token}；地址使用实际监听端口。默认不启用电脑或设备摄像头；是否主动采集图片完全由设备自身固件负责。不会把图像写入对话历史、文件或日志。
 
-HTTP POST /mcp/vision/explain，Header 必须包含 Authorization: Bearer <设备 token>、Device-Id、Client-Id；multipart/form-data 仅允许 question（UTF-8，1..2000字）和一个 image（PNG/JPEG）字段，顺序任意但不能重复。最多 5MiB 图片，body 最多 5MiB+64KiB；MIME/魔数匹配，实际解码尺寸最大 4096×4096、总像素≤1600万。先在 middleware 验签，再由后台只读 DeviceRegistry.authorize_http 校验当前允许状态、匹配 client 和授权代次，不调用会改 last_seen 的 seen；返回前按同一代次复核，撤销再允许也不复活在途请求。全局并发2、同设备1、满额不排队；模型最长30秒，响应最大1MiB，文本最多2000字，不重定向。
+HTTP POST /mcp/vision/explain，Header 必须包含 Authorization: Bearer <设备 token>、Device-Id、Client-Id；multipart/form-data 仅允许 question（UTF-8，1..2000字）和一个图片字段，顺序任意但不能重复。图片字段名上游 `xiaozhi-esp32` 固件用的是 `file`（`filename="camera.jpg"`、`Content-Type: image/jpeg`），本服务两种名字 `image` / `file` 都接受（2026-10-16 对照固件源码后补的兼容）；其他字段名一律 422。最多 5MiB 图片，body 最多 5MiB+64KiB；MIME/魔数匹配，实际解码尺寸最大 4096×4096、总像素≤1600万。先在 middleware 验签，再由后台只读 DeviceRegistry.authorize_http 校验当前允许状态、匹配 client 和授权代次，不调用会改 last_seen 的 seen；返回前按同一代次复核，撤销再允许也不复活在途请求。全局并发2、同设备1、满额不排队；模型最长30秒，响应最大1MiB，文本最多2000字，不重定向。
 
 成功：HTTP 200，JSON {success:true,text}。失败：{success:false,error:{code,message}}；401 无效 token，403 拒绝/已撤销/关闭，413 超大，415 格式不匹配，422 其他图片/请求错误，429 已满（Retry-After:1），502 上游异常，504 超时。所有响应 Cache-Control:no-store。视觉模型结果属于不可信资料，不赋予任何设备控制权限。
 
-桌面仅本地 main 窗口具有 voice_vision_status() / voice_vision_save({input:{settings:{enabled,url,model},key:{action:keep|set|clear,value?}}}) / voice_vision_test() 权限。状态只返回 settings、key_configured、ready，不返回原始密钥；保存默认不开启视觉。测试按钮只使用程序在内存生成的测试 PNG 向已配置模型发起请求，可能产生费用，但不会使用摄像头。Android 命令仅返回不支持；真实固件、真实模型与实机延迟留 FINAL 验收。
+桌面仅本地 main 窗口具有 voice_vision_status() / voice_vision_save({input:{settings:{enabled,url,model,use_dialog_llm,keep_in_history},key:{action:keep|set|clear,value?}}}) / voice_vision_test() 权限。`use_dialog_llm`（2026-10-16，默认 false）打开后改用当前对话大模型看图：凭据取 `builtin_models.llm` 的地址 / 模型名与 `voice.llm.main` 密钥，`url` / `model` 与 `voice.vision.main` 不再使用；保存时要求对话模型是 OpenAI 兼容且已存密钥，否则 `vision_invalid`。`keep_in_history`（2026-10-16，默认 false）打开后，视觉请求成功的那一张照片会暂存在服务端内存 `vision::VisionPhotos`（按设备只留最新一张、最多 8 台设备、单张 data URL ≤ 4 MiB），该设备下一轮语音开始时取走并作为一条多模态用户消息接进对话历史，用于后续追问；图片只在内存、不落盘、不进日志与事件，历史按长度预算截断（一张图按 1500 token 计）。要求当前对话模型支持看图，否则每轮请求会失败。状态返回 settings、key_configured、ready 与 `dialog_llm{configured,url,model}`，不返回任何原始密钥；保存默认不开启视觉。测试按钮只使用程序在内存生成的测试 PNG 向当前生效的模型发起请求（独立视觉模型或对话模型），可能产生费用，但不会使用摄像头。Android 命令仅返回不支持；真实固件、真实模型与实机延迟留 FINAL 验收。
 
-### NV13 Claude Code / Codex 专用 AgentRun（部分完成，CLI 执行锁定）
+### NV13 Claude Code / Codex 专用 AgentRun（2026-10-15 起可开启）
 
-AgentRun 是独立 ApprovalKind，和原有 ExternalTool、激光动作分开。语音调用只有已授权设备及有效 voice session 可以准备任务；模型不能通过参数指定 executable、工作目录、shell、凭据、MCP 配置或者 confirmed。任务为最多 4000 字符的 task，全部经 stdin 传递，固定只读 argv，不由 cmd/PowerShell 解释。
+AgentRun 是独立 ApprovalKind，和原有 ExternalTool、激光动作分开。语音调用只有已授权设备及有效 voice session 可以准备任务；模型不能通过参数指定 executable、工作目录、shell、凭据、MCP 配置或者 confirmed。任务为最多 4000 字符的 task，全部经 stdin 传递，不由 cmd/PowerShell 解释。argv 由实现固定：Codex 为 `exec --sandbox workspace-write --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --cd <工作目录> --json --color never -`；Claude Code 为 `--print --restricted --permission-mode acceptEdits --permission-prompts none --tools Read,Glob,Grep,Edit,Write --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources "" --no-session-persistence --output-format stream-json --verbose`（不开放 Bash 与网络工具）。CLI 版本不再锁死，但 `--version`/`--help` 必须能识别且列出全部安全参数，否则返回 `agent_capability_missing`；探测按可执行文件的大小与修改时间缓存，文件变了会重新探测。
 
-审批摘要绑定 provider、workspace、executable、版本、argv/配置版本和任务；批准时按当前设置重新计算，不一致拒绝。审批卡的 agent 节点只展示 task、provider、工作目录名、版本、read_only_plan 和费用提醒，不返回目录全路径、密钥或内部 request。ApprovalService.consume_agent_run 是专用事务，验证 voice permit、数据库设备 allowed、摘要、期限和批准状态后单次消费，连同 run 记录和审计原子写入；另一条路径不能把 AgentRun 当普通 ExternalTool 或激光动作执行。
+审批摘要绑定 provider、工作目录、executable、CLI 版本、argv/配置版本和任务；批准时按当前设置重新计算，不一致拒绝。审批卡的 agent 节点只展示任务、provider、工作目录名、版本和费用提醒，不返回目录全路径、密钥或内部 request；批准时仍须勾选确认，Agent 的确认文案是“我看过这个任务，同意在本机工作目录里运行 Agent（可能产生模型费用）”，卡片标题为“运行本机 Agent（Claude Code / Codex）”，不是激光机的现场确认文案。ApprovalService.consume_agent_run 是专用事务，验证 voice permit、数据库设备 allowed、摘要、期限和批准状态后单次消费，连同 run 记录和审计原子写入；另一条路径不能把 AgentRun 当普通 ExternalTool 或激光动作执行。
+
+门禁：`prepare` 要求 `ApiService::strict_mode()`（`.env` 的 `MOSS_FUSION_STRICT=1`），未开启返回 `agent_strict_mode_required`，工具列表里也不出现 `agent_codex` / `agent_claude_code`；非 Windows 平台没有验证过的进程树约束，返回 `agent_sandbox_unavailable`。批准后在后台线程运行，进程树受 Windows Job Object 约束，运行中可停止。
 
 schema v8 的 voice_agent_runs 最近 50 条记录包含 run id、approval id、提供者、工作目录（桌面状态仅目录名）、摘要指纹、状态、最多 256 KiB 输出、时间和短错误码；启动后 running -> result_unknown，不能自动重新执行。
 
-桌面 Tauri voice_agent_status() 返回 settings、sandbox_verified=false、reason=agent_sandbox_unavailable、runs（最多50）；voice_agent_save({input:{enabled:false,workspace,codex_executable,claude_executable}}) 只保存本机已有路径并验证敏感目录和明确 exe。命令只经 capabilities/voice-agent.json 授权 main 主窗口（remote 回环，命令内固定本进程后端地址）；Android 不支持。enabled:true 一律拒绝。生产 REAL_CLI_SANDBOX_VERIFIED=false、未注册生产真实 CLI 子进程 runner。配置目录、执行参数和真实进程负向安全测试仍待实现/完成后再授权；不能把 help 单测当作实际沙箱，通过前不会执行 Claude Code/Codex。
+桌面 Tauri：`voice_agent_status()` 返回 `configured`（配置里的开关）、`enabled`（配置开启**且**严格模式开启）、`strict_mode`、`providers`（每个已填 CLI 现在能不能用及原因码）与 `runs`（最多 50 条，运行中的带 `stoppable`）；`voice_agent_save({input:{enabled,workspace,codex_executable,claude_executable}})` 保存本机已有路径并验证敏感目录和明确的 exe，**开启时必须有工作目录和至少一个 CLI**，否则 `agent_config_invalid`；`voice_agent_stop({runId})` 停止正在运行的任务（进程树一起结束），返回状态并带 `stopped`，任务已结束时为 false。命令只经 capabilities/voice-agent.json 授权 main 主窗口（remote 回环，命令内固定本进程后端地址）；Android 不支持。短错误码：`agent_disabled`、`agent_strict_mode_required`、`agent_path_denied`、`agent_capability_missing`、`agent_task_invalid`、`agent_run_failed`、`agent_timeout`、`agent_stopped`、`agent_permission_expired`、`agent_config_changed`、`agent_approval_consumed`、`agent_result_unknown`、`agent_unavailable`、`agent_thread_spawn_failed`（2026-10-17 新增：批准后任务线程起不来时当场把运行记录收口为 failed，不再永远停在运行中）。探测（`--version` / `--help`）的 stdout / stderr 并发读取且进程受 kill-on-close Job Object 约束。
+
+**剩余风险（已告知用户）**：CLI 自身的沙箱在 Windows 上不能阻止读取工作目录以外的文件；工作目录必须选成可公开给模型看的目录，界面上已写明。不得声称已实现机密文件隔离。
+
+### NV17 固件 OTA（内置语音 HTTP 路由 + 私密窗口 Tauri 命令）
+
+内置语音服务在 `POST /xiaozhi/ota/` 的回包里带 `firmware{version,url}`：只有设备已允许**且**存在用户确认过的有效推送、并且推送版本比设备上报版本新时才给出，否则 `firmware` 为空（`ServerConfig::firmware` 为 `None` 时也一律为空）。`url` 是 `http://<OTA 回包 Host 或本机地址>:<HTTP 端口>/xiaozhi/firmware/<token>.bin`。
+
+`GET /xiaozhi/firmware/{token}.bin`：令牌必须是 32 位十六进制（其他形式、包含 `../` 等一律 404）；令牌对应一条未取消、未到期、设备尚未上报新版本的推送；请求方地址必须等于这台设备最近一次 OTA 请求的来源地址，设备当前必须是已允许状态；发送前重新读文件并核对 SHA-256，不一致不发。第一次下载会把记录标为“下载中”。成功返回 `application/octet-stream`，其余情况一律 404（不区分原因，避免探测）。下载本身不代表刷写成功。
+
+桌面 Tauri 命令只在 `voice-private`（“安全设置窗口”）可用，capability `voice-memory.json` 授权，处理函数再校验打包页面来源；Android 与主窗口都不行：
+
+- `voice_firmware_status()`：返回 `enabled`、`artifacts`（已导入固件：sha256/version/project/size/created_at）、`devices`（已允许设备的型号与当前版本）、`records`（推送记录：delivery_id、device_id、firmware_version、download_status、device_report_status、expires_at、revision）与 `now`、`offer_hours`。
+- `voice_firmware_import()`：弹本机文件框（只筛 `.bin`，不接受前端给的路径），校验 ESP32 应用镜像头与数字版本（≤16 MB），按 SHA-256 存到运行目录 `firmware/<sha256>.bin` 并登记；文件完全重复时只登记不重写。取消选择返回 `null`，校验失败返回 `firmware_invalid`。
+- `voice_firmware_manage({input})`：只接受三种 action，字段集合必须完全匹配，否则 `firmware_invalid`。`offer{device_id,sha256,confirmed:true}` 要求设备已允许、固件已导入、版本比设备当前版本新，否则分别返回 `firmware_device_invalid` / `firmware_missing` / `firmware_not_newer`；成功时生成一次性令牌，有效期 24 小时。`cancel{delivery_id}` 未开始下载的直接删除，已开始下载的保留记录并让令牌失效；已完成或已取消返回 `firmware_conflict`。`delete{sha256,confirmed:true}` 在还有有效推送时返回 `firmware_in_use`，否则删除记录与文件，返回最新的 status。
 ### NV14 本地音乐（桌面 Tauri 命令，非公共 HTTP）
 
 `voice.builtin_music` 为默认关闭的配置 `{enabled:false,directory:""}`；现有用户升级后不会自动扫描任何目录。所有命令仅由桌面主窗口的 `capabilities/voice-music.json` 授权（remote 回环，命令内固定本进程后端地址）；普通远程 Web 和 Android 没有真实实现。
@@ -434,7 +450,7 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 | `/v1/approvals/{id}/approve` | POST | `{digest}`：按当前记录重算摘要，与审批卡提交值和创建时的值都一致才批准，随后立即以审批身份重放原请求（使用审批保存的连接参数，走全部现有门禁）。成功 200 `result:{approval, result}`；失败透传执行错误码，`detail.approval` 为最新审批状态 | 桌面会话 |
 | `/v1/approvals/{id}/reject` | POST | `{reason?}` → `result` 为拒绝后的审批 | 桌面会话 |
 
-认证规则（在 §1.6 来源校验之后）：来源为回环地址时所有路由免认证。非回环时，`GET /api/health`、`/v1/capabilities`、`/api/system/info`、页面与静态资源（`/`、`/draw`、`/material-lab`、`/assets/*`、`/vendor/*`）公开，`POST /v1/auth/pair` 免 Bearer，其余数据接口（`/api/*`、`/v1/*`、`/preview`）要求 `Authorization: Bearer <token>`，缺失返回 401 `需要 Bearer 鉴权`，无效返回 401 `Bearer 鉴权失败`。
+认证规则（在 §1.6 来源校验之后）：来源为回环地址时所有路由免认证。非回环时，`GET /api/health`、`/v1/capabilities`、`/api/system/info`、页面与静态资源（`/`、`/draw`、`/material-lab`、`/twin`、`/assets/*`、`/vendor/*`）公开，`POST /v1/auth/pair` 免 Bearer，其余数据接口（`/api/*`、`/v1/*`、`/preview`）要求 `Authorization: Bearer <token>`，缺失返回 401 `需要 Bearer 鉴权`，无效返回 401 `Bearer 鉴权失败`。
 
 审批请求编号（2026-10-10）：可信语音 device/session、局域网 pairing_id 或网关 session 构成调用方作用域；新记录 `request_id` 为 `scope-v1:` 哈希。相同作用域和编号仅在执行参数及摘要一致时复用，不一致返回 409 `approval_request_conflict`；超过 128 字符拒绝。旧记录保持可读；旧 McpBridge 没有独立可信身份，不按自报编号复用审批。`voice_session_revoked` 表示旧语音会话不再有调用权，重新允许设备不恢复旧会话和旧审批。
 

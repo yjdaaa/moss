@@ -12,7 +12,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use moss_xiaozhi_proto::{OtaInfo, OtaReply};
+use moss_xiaozhi_proto::{FirmwareOffer, OtaInfo, OtaReply};
 
 use crate::{DeviceStatus, DeviceVisit, Shared, unix_now};
 
@@ -94,6 +94,24 @@ async fn ota_post(
     } else {
         String::new()
     };
+    // NV17：只对已允许的设备核对上报版本、下发用户确认过的推送
+    let firmware = match (&shared.config.firmware, status == DeviceStatus::Allowed) {
+        (Some(host), true) => {
+            let host = host.clone();
+            let (device, version) = (info.device_id.clone(), info.version.clone());
+            tokio::task::spawn_blocking(move || {
+                host.reported(&device, &version);
+                host.offer(&device, &version)
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        _ => None,
+    };
+    if let Some((version, _)) = &firmware {
+        shared.state.event(format!("OTA：向设备 {} 下发固件 {version}（用户已确认推送）", info.device_id));
+    }
     shared.state.event(format!(
         "OTA：设备 {}（{}，固件 {}）{}",
         info.device_id,
@@ -112,7 +130,10 @@ async fn ota_post(
         now_ms: unix_now().saturating_mul(1000),
         timezone_offset_minutes: timezone_offset_minutes(),
         current_version: info.version,
-        firmware: None,
+        firmware: firmware.map(|(version, token)| FirmwareOffer {
+            version,
+            url: format!("http://{host}:{}/xiaozhi/firmware/{token}.bin", shared.http_port),
+        }),
     };
     axum::Json(reply.to_json()).into_response()
 }

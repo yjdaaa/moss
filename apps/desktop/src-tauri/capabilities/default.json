@@ -33,6 +33,8 @@
     "allow-voice-server-log",
     "allow-voice-models-test",
     "allow-voice-models-save",
+    "allow-voice-detect-python",
+    "allow-voice-strict-set",
     "allow-voice-builtin-status",
     "allow-voice-builtin-start",
     "allow-voice-builtin-stop",

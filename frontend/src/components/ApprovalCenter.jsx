@@ -245,7 +245,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
   const privateOnly = approvedInPrivateWindow(shown?.kind);
   const openPrivateApproval = async () => {
     try {
-      await voiceApi.openPrivateSettings();
+      await voiceApi.openPrivateSettings("approvals");
       onOpenChange?.(false);
     } catch (error) {
       setFailure({ code: "", text: `无法打开私密设置窗口：${error?.message || error}` });

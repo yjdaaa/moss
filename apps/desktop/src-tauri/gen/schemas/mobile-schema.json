@@ -261,6 +261,12 @@
           "markdownDescription": "Enables the voice_agent_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_agent_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-agent-stop",
+          "markdownDescription": "Enables the voice_agent_stop command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voice_builtin_models_save command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-builtin-models-save",
@@ -313,6 +319,18 @@
           "type": "string",
           "const": "allow-voice-device-set-status",
           "markdownDescription": "Enables the voice_device_set_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_firmware_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-firmware-import",
+          "markdownDescription": "Enables the voice_firmware_import command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_firmware_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-firmware-manage",
+          "markdownDescription": "Enables the voice_firmware_manage command without any pre-configured scope."
         },
         {
           "description": "Enables the voice_firmware_status command without any pre-configured scope.",
@@ -663,6 +681,12 @@
           "markdownDescription": "Denies the voice_agent_status command without any pre-configured scope."
         },
         {
+          "description": "Denies the voice_agent_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-agent-stop",
+          "markdownDescription": "Denies the voice_agent_stop command without any pre-configured scope."
+        },
+        {
           "description": "Denies the voice_builtin_models_save command without any pre-configured scope.",
           "type": "string",
           "const": "deny-voice-builtin-models-save",
@@ -715,6 +739,18 @@
           "type": "string",
           "const": "deny-voice-device-set-status",
           "markdownDescription": "Denies the voice_device_set_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_firmware_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-firmware-import",
+          "markdownDescription": "Denies the voice_firmware_import command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_firmware_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-firmware-manage",
+          "markdownDescription": "Denies the voice_firmware_manage command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_firmware_status command without any pre-configured scope.",

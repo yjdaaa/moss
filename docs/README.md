@@ -30,6 +30,7 @@
 ## 小智集成
 
 - [融合实施 TODO](integration/moss-fusion-implementation-todo.md)：**唯一进度记录**，先看这里。
+- [实机验证顺序与操作手册](integration/moss-hardware-acceptance-plan.md)：从单电脑到三件套的六个阶段，每档的目的、准备、操作与判据。接设备前先看这个。
 - [融合技术书](integration/moss-desktop-fusion-technical-spec.md)：外部自建链路、审批、CORS、语音中心、安装、导出、手机连接的设计。
 - [内置语音技术书](integration/moss-native-voice-spec.md)：内置语音总体设计与安全边界（含 NV19 规划）。
 - [NV10～NV19 实施细则](integration/moss-native-voice-implementation.md)：各 NV 的模块、接口、安全与验收标准。

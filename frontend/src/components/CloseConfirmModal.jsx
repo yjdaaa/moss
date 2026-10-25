@@ -1,11 +1,13 @@
 import React, { useState } from "react";
 import { AlertCircle, X } from "lucide-react";
+import { trayActionCopy } from "../platform.js";
 
 export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunning = false }) {
   const [selectedAction, setSelectedAction] = useState("tray");
   const [remember, setRemember] = useState(false);
   // 技术书 §9.4.3：完全退出时询问是否同时停止 MOSS 启动的语音服务端，默认“是”
   const [stopServer, setStopServer] = useState(true);
+  const trayCopy = trayActionCopy();
 
   if (!visible) return null;
 
@@ -55,10 +57,10 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
               />
               <div>
                 <div className="close-confirm-box-3">
-                  最小化到系统托盘
+                  {trayCopy.title}
                 </div>
                 <div className="close-confirm-box-4">
-                  窗口隐藏到任务栏托盘区，后台继续保持激光作业与网络服务
+                  {trayCopy.modalDetail}
                 </div>
               </div>
             </label>

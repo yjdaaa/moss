@@ -417,15 +417,19 @@ impl VoiceCenter {
         let link = format!("语音链路：{} → {}", label(voice.mode), label(target));
         match target {
             VoiceMode::SelfHosted => {
-                let endpoint = voice.self_hosted_mcp_endpoint.as_deref().ok_or_else(|| {
-                    CenterError::new("self_hosted_endpoint_missing", 400, "请先在“服务端设置”中填写自建接入点地址")
-                })?;
+                let endpoint = voice.self_hosted_mcp_endpoint.as_deref();
+                if endpoint.is_none() {
+                    changes.push("尚未填写自建接入点：切换后在“服务 → 自建接入点”填好并保存才会连接".into());
+                }
                 changes.push(link);
                 if voice.mode == VoiceMode::Builtin {
                     changes.push("停止 MOSS 内置语音服务".into());
                 }
                 changes.push("严格模式：开启（自建模式下不可关闭；运动与出光需要桌面审批）".into());
-                changes.push(format!("MOSS 小智接入点（mcp_endpoint）：{} → {}", show(current_endpoint.as_deref()), redact_url(endpoint)));
+                changes.push(match endpoint {
+                    Some(ep) => format!("MOSS 小智接入点（mcp_endpoint）：{} → {}", show(current_endpoint.as_deref()), redact_url(ep)),
+                    None => "MOSS 小智接入点（mcp_endpoint）：保持未设置，填好自建接入点后连接".into(),
+                });
                 changes.push("备份当前官方接入点，切回官方时恢复".into());
                 changes.push("断开当前小智桥，再连接自建接入点".into());
                 let extras = settings::extra_mcp_endpoints(&self.settings_file).len();
@@ -490,17 +494,20 @@ impl VoiceCenter {
             // 从官方切到内置：接入点与严格模式不变
             VoiceMode::Builtin if old_voice.mode == VoiceMode::Official => (old_endpoint.clone(), old_strict),
             VoiceMode::SelfHosted => {
-                let endpoint = old_voice.self_hosted_mcp_endpoint.clone().ok_or_else(|| {
-                    CenterError::new("self_hosted_endpoint_missing", 400, "请先在“服务端设置”中填写自建接入点地址")
-                })?;
-                if !valid_ws(&endpoint) {
-                    return Err(CenterError::new("voice_settings_invalid", 400, "自建接入点地址无效"));
+                // n30（2026-10-19 用户决定）：没填自建接入点也允许切换——切过去后由用户在
+                // “服务 → 自建接入点”填好保存再连接，避免“看不见就填不了、不填又不许切”的死锁。
+                // 地址非空但格式不对仍然拒绝，因为那更像笔误。
+                let endpoint = old_voice.self_hosted_mcp_endpoint.clone();
+                if let Some(value) = endpoint.as_deref() {
+                    if !valid_ws(value) {
+                        return Err(CenterError::new("voice_settings_invalid", 400, "自建接入点地址无效：需要 ws:// 或 wss:// 地址"));
+                    }
+                    // 只备份官方地址（当前值若已是自建接入点则保留原备份）
+                    if old_endpoint.as_deref() != Some(value) {
+                        new_voice.official_mcp_endpoint = old_endpoint.clone();
+                    }
                 }
-                // 只备份官方地址（当前值若已是自建接入点则保留原备份）
-                if old_endpoint.as_deref() != Some(endpoint.as_str()) {
-                    new_voice.official_mcp_endpoint = old_endpoint.clone();
-                }
-                (Some(endpoint), true)
+                (endpoint, true)
             }
             VoiceMode::Official | VoiceMode::Builtin => match old_voice.mode {
                 VoiceMode::SelfHosted => (old_voice.official_mcp_endpoint.clone(), self.hooks.strict_from_env()),
@@ -639,7 +646,7 @@ impl VoiceCenter {
         let voice = self.settings();
         let config_path = voice
             .config_path()
-            .ok_or_else(|| CenterError::new("voice_config_invalid", 400, "请先在“服务端设置”中填写 xiaozhi-server 目录"))?;
+            .ok_or_else(|| CenterError::new("voice_config_invalid", 400, "请先在“服务 → 自建服务端程序”中填写 xiaozhi-server 目录"))?;
         if !voice.server_dir.as_deref().map(Path::new).map(Path::is_dir).unwrap_or(false) {
             return Err(CenterError::new("voice_config_invalid", 400, "xiaozhi-server 目录不存在"));
         }
@@ -819,7 +826,6 @@ mod tests {
     fn mode_switch_round_trip_restores_official_endpoint() {
         let (dir, host, center) = fixture();
         let file = dir.path().join("settings.json");
-        assert_eq!(center.set_mode(VoiceMode::SelfHosted).unwrap_err().code, "self_hosted_endpoint_missing");
         center.save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED})).unwrap();
         assert_eq!(host.restarts.load(Ordering::SeqCst), 0, "官方模式下保存自建地址不重连");
         let changes = center.mode_changes(VoiceMode::SelfHosted).unwrap();
@@ -1170,5 +1176,20 @@ mod tests {
         assert_eq!(host.restarts.load(Ordering::SeqCst), 2);
         let root: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert!(root.get("mcp_disabled_tools").is_none(), "全部打开后不留空键");
+    }
+
+    /// n30（2026-10-19 用户决定）：没填自建接入点也能切换，切过去后由用户填；填好保存后才连接。
+    #[test]
+    fn empty_self_hosted_endpoint_switches_then_connects_after_saving() {
+        let (_dir, host, center) = fixture();
+        let status = center.set_mode(VoiceMode::SelfHosted).unwrap();
+        assert_eq!(status["mode"], "self_hosted");
+        assert!(status["mcp_endpoint"].is_null(), "未填接入点时不连接：{status}");
+        assert_eq!(status["strict"]["enabled"], true, "自建链路仍强制严格模式");
+        let restarts = host.restarts.load(Ordering::SeqCst);
+        center
+            .save_settings(&serde_json::json!({"self_hosted_mcp_endpoint": SELF_HOSTED}))
+            .unwrap();
+        assert!(host.restarts.load(Ordering::SeqCst) > restarts, "填好地址后应重连自建接入点");
     }
 }

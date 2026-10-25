@@ -1,8 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, Trash2, Download, Lock } from "lucide-react";
+import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, Trash2, Download, Lock, ChevronDown, Copy } from "lucide-react";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
+import VoiceMemoryCard from "./VoiceMemoryCard.jsx";
+import VoicePluginsCard from "./VoicePluginsCard.jsx";
+import VoiceSpeakerCard from "./VoiceSpeakerCard.jsx";
+import VoiceHomeCard from "./VoiceHomeCard.jsx";
+import VoiceHomeApprovalCard from "./VoiceHomeApprovalCard.jsx";
+import VoiceContextCard from "./VoiceContextCard.jsx";
 import {
   EXPERIENCE_KEYS,
   LOCAL_MODEL_KEYS,
@@ -124,6 +130,15 @@ export function BuiltinServicePanel({ builtin }) {
     await act("修改名称", () => voiceApi.deviceRename(id, name));
   };
 
+  const copyOta = async () => {
+    if (!status.ota_url) return;
+    try {
+      await navigator.clipboard.writeText(status.ota_url);
+      await showAlert("设备 OTA 地址已复制，粘贴到设备配网页面即可", { title: "已复制", tone: "success" });
+    } catch {
+      await showAlert("无法访问剪贴板，请手动选中地址复制", { title: "复制失败", tone: "error" });
+    }
+  };
   return (
     <div className="voice-block" id="voice-builtin-card">
       <div className="voice-block-h">
@@ -157,8 +172,13 @@ export function BuiltinServicePanel({ builtin }) {
         </div>
       )}
       <div className="voice-kv">
-        <span>
+        <span className="voice-inline">
           设备 OTA 地址：<b className="mono voice-break" id="voice-builtin-ota">{status.ota_url || "未能获取本机局域网地址"}</b>
+          {status.ota_url && (
+            <button type="button" className="btn btn-ghost voice-inline-btn" onClick={copyOta} id="voice-builtin-ota-copy" title="复制设备 OTA 地址">
+              <Copy size={13} /> 复制
+            </button>
+          )}
         </span>
         <span className="voice-muted">
           在设备配网页面填入这个地址并重启设备，再在下面的列表中点“允许”。端口 {status.ws_port} / {status.http_port}，在“连接”标签修改。
@@ -687,29 +707,79 @@ export function BuiltinEvents({ status }) {
   );
 }
 
-/** 私人记忆、信息插件、声纹、家居等敏感设置只在本机打包的安全窗口中显示；主窗口不读取这些数据。 */
-export function PrivateSettingsEntry() {
+/** 主窗口只提供任务入口；私人数据与授权仍由打包的本机窗口处理。 */
+async function openPrivateTask(section) {
+  try {
+    await voiceApi.openPrivateSettings(section);
+  } catch (error) {
+    await showAlert(voiceErrorText(error), { title: "无法打开本机设置", tone: "error" });
+  }
+}
+
+const PRIVATE_TASKS = [
+  { key: "memory", title: "记忆", description: "查看和管理小智记住的内容" },
+  { key: "plugins", title: "信息服务", description: "选择天气、新闻和搜索等服务" },
+  { key: "speaker", title: "声纹", description: "登记家人，完成标定后再启用" },
+  { key: "home", title: "家居", description: "连接设备；每次控制仍需批准" },
+];
+
+export function PrivateSettingsEntry({ status }) {
+  const [opened, setOpened] = useState(() => new Set());
+  const [advanced, setAdvanced] = useState(() => new Set());
+  const expand = (key) => setOpened((old) => (old.has(key) ? old : new Set([...old, key])));
+  const expandAdvanced = (key) => setAdvanced((old) => (old.has(key) ? old : new Set([...old, key])));
   return (
-    <section className="voice-group voice-group--plain" aria-label="私人记忆与信息插件">
-      <div className="voice-block-h">
-        <Lock size={15} aria-hidden="true" />
-        <h3>私人记忆、信息插件、声纹与家居</h3>
-        <button
-          type="button"
-          className="btn btn-ghost voice-push"
-          id="voice-private-settings-open"
-          onClick={async () => {
-            try {
-              await voiceApi.openPrivateSettings();
-            } catch (error) {
-              await showAlert(voiceErrorText(error), { title: "无法打开安全设置", tone: "error" });
-            }
-          }}
-        >
-          打开安全设置窗口
-        </button>
+    <section className="voice-private-entry" aria-label="隐私与家居">
+      <div className="voice-private-entry-heading">
+        <Lock size={17} aria-hidden="true" />
+        <div><h3>你想让小智做什么？</h3><p>点开哪一项就设置哪一项，不用一次看完所有选项。</p></div>
       </div>
-      <p className="voice-muted">这些内容只在单独的本机安全窗口中显示和保存，主窗口不会读取。</p>
+      <div className="voice-private-tasks">
+        {PRIVATE_TASKS.map(({ key, title, description }) => (
+          <details key={key} className="voice-private-item" id={`voice-private-${key}-item`}
+            onToggle={(event) => { if (event.currentTarget.open) expand(key); }}>
+            <summary>
+              <span><strong>{title}</strong><small>{description}</small></span>
+              <ChevronDown className="voice-private-item-arrow" size={18} aria-hidden="true" />
+            </summary>
+            <div className="voice-private-item-body">
+              {key === "memory" && opened.has("memory") && (
+                <>
+                  <VoiceMemoryCard status={status} />
+                  <details className="voice-private-more" id="voice-private-memory-advanced"
+                    onToggle={(event) => { if (event.currentTarget.open) expandAdvanced("memory"); }}>
+                    <summary>长期记忆、资料与恢复摘要</summary>
+                    {advanced.has("memory") && <VoiceContextCard />}
+                  </details>
+                </>
+              )}
+              {key === "plugins" && opened.has("plugins") && <VoicePluginsCard />}
+              {key === "speaker" && opened.has("speaker") && <VoiceSpeakerCard />}
+              {key === "home" && opened.has("home") && (
+                <>
+                  <VoiceHomeCard />
+                  <details className="voice-private-more" id="voice-private-home-approvals"
+                    onToggle={(event) => { if (event.currentTarget.open) expandAdvanced("home"); }}>
+                    <summary>家居审批</summary>
+                    {advanced.has("home") && <VoiceHomeApprovalCard />}
+                  </details>
+                </>
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+      <p className="voice-muted">内容只保存在本机，不上传；家居每次动作仍需你在电脑上批准，语音报告只作参考。</p>
     </section>
+  );
+}
+
+export function PrivateFirmwareEntry() {
+  return (
+    <div className="voice-private-maintenance">
+      <span>固件升级仅在本机逐台操作。</span>
+      <button type="button" className="btn btn-ghost" id="voice-private-settings-open"
+        onClick={() => openPrivateTask("firmware")}>管理固件…</button>
+    </div>
   );
 }

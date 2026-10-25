@@ -11,6 +11,8 @@
     "allow-voice-memory-save",
     "allow-voice-memory-clear",
     "allow-voice-speaker-manage",
-    "allow-voice-firmware-status"
+    "allow-voice-firmware-status",
+    "allow-voice-firmware-import",
+    "allow-voice-firmware-manage"
   ]
 }

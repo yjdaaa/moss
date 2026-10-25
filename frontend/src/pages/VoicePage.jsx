@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Radio, Play, Square, RotateCcw, FlaskConical, RefreshCw, ChevronDown } from "lucide-react";
+import { Radio, Play, Square, RotateCcw, FlaskConical, RefreshCw } from "lucide-react";
 import { getJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
-import { readFoldOpen, writeFoldOpen } from "../foldState.js";
 import { voiceApi } from "../voiceApi.js";
 import {
   BuiltinEvents,
@@ -12,6 +11,7 @@ import {
   ExperienceGroup,
   LocalModelsGroup,
   PrivateSettingsEntry,
+  PrivateFirmwareEntry,
   TurnTimings,
   useBuiltinStatus,
 } from "../components/VoiceBuiltinCard.jsx";
@@ -27,6 +27,7 @@ import {
   VOICE_MODE_LABEL,
   VOICE_POLL_MS,
   VOICE_TABS,
+  voiceTabsFor,
   approvalHistoryStatus,
   canSaveSection,
   deviceView,
@@ -51,7 +52,7 @@ import {
 
 // 语音中心（技术书 §9.5.1，实施清单 P4-08；r15 起按标签与链路分组，UI-3）。只在 MOSS 桌面端显示（A-69）。
 // 所有操作经 Tauri 命令执行；模型密钥只在本页内存中，提交后清空，不回显已保存的密钥（A-67）。
-// 顶部选链路，下面五个标签；每个标签里当前链路用得到的分组在前，其他链路的分组折叠在后。
+// 顶部选链路，下面按任务分标签；每个标签里当前链路用得到的分组在前，其他链路的分组折叠在后。
 // 标签和分组都只隐藏、不卸载，切换标签、收起分组或切换链路都不会丢失未保存的填写。
 
 const TONE_CLASS = { ok: "ob-pill--ok", info: "ob-pill--info", warn: "ob-pill--warn", bad: "ob-pill--bad", off: "ob-pill--off" };
@@ -109,32 +110,16 @@ function settingsForm(status) {
  * 按链路摆放的一组内容：当前链路用得到的在前；其他链路的排在后面，默认折叠。
  * 所有部分始终在同一父元素下按固定顺序渲染（只用 CSS order 调整位置），切换链路不会重建组件、不丢填写。
  */
-function ModeSplit({ id, mode, parts, title = "其他链路的设置（当前链路用不到）" }) {
-  const [open, setOpen] = useState(() => readFoldOpen(`voice-other-${id}`, false));
-  const hasOther = parts.some((part) => !part.modes.includes(mode));
-  const toggle = () => {
-    setOpen((current) => {
-      writeFoldOpen(`voice-other-${id}`, !current);
-      return !current;
-    });
-  };
+/** 只渲染当前链路用得到的那部分：没选中的链路卡片直接不出现（2026-10-18 用户决定）。 */
+function ModeSplit({ id, mode, parts }) {
+  const visible = parts.filter((part) => part.modes.includes(mode));
   return (
     <div className="voice-modesplit" id={`voice-split-${id}`}>
-      {parts.map((part) => {
-        const current = part.modes.includes(mode);
-        return (
-          <div key={part.key} className={current ? "voice-part" : "voice-part voice-part--other"} hidden={!current && !open} data-part={part.key}>
-            {part.node}
-          </div>
-        );
-      })}
-      {hasOther && (
-        <button type="button" className="voice-other-toggle" onClick={toggle} aria-expanded={open} id={`voice-other-${id}`}>
-          <ChevronDown size={15} className="voice-group-chevron" aria-hidden="true" />
-          {title}
-          <span className="voice-muted">{open ? "点击收起" : "点击展开"}</span>
-        </button>
-      )}
+      {visible.map((part) => (
+        <div key={part.key} className="voice-part" data-part={part.key}>
+          {part.node}
+        </div>
+      ))}
     </div>
   );
 }
@@ -179,35 +164,72 @@ function SettingsGroup({ group, mode, status, form, baseline, onChange, onSaved,
     }
   };
 
+  const advancedKeys = new Set(spec.advanced || []);
+  /// 自建服务端要的 Python 路径不该让用户自己去安装目录里翻，直接探测后填入。
+  const detectPython = async () => {
+    setResult(null);
+    try {
+      const found = await voiceApi.detectPython();
+      const suggested = found?.suggested;
+      if (!suggested) {
+        setResult({ ok: false, text: "没找到 Python 3：装好后再试，或者手动填写解释器路径" });
+        return;
+      }
+      onChange("python", suggested);
+      setResult({ ok: true, text: `已填入探测到的解释器：${suggested}` });
+    } catch (error) {
+      setResult({ ok: false, text: `探测失败：${voiceErrorText(error)}` });
+    }
+  };
+  const renderField = (key) => {
+    const field = FIELD[key];
+    const current = settings[key];
+    const input = (
+      <input
+        className={`text-input${field.mono ? " mono" : ""}`}
+        inputMode={field.numeric ? "numeric" : undefined}
+        value={form[key]}
+        onChange={(e) => {
+          onChange(key, e.target.value);
+          setResult(null);
+        }}
+        placeholder={field.secret ? (settings[`${key}_set`] ? "留空表示不改" : field.placeholder) : undefined}
+        spellCheck="false"
+        autoComplete="off"
+        id={field.id}
+      />
+    );
+    return (
+      <label key={key} className={field.wide ? "voice-wide" : undefined}>
+        <span>
+          {field.label}
+          {field.secret && current ? `；当前：${current}` : ""}
+        </span>
+        {key === "python" ? (
+          <span className="voice-inline">
+            {input}
+            <button type="button" className="btn btn-ghost" onClick={detectPython} id="voice-settings-detect-python">
+              自动探测
+            </button>
+          </span>
+        ) : input}
+      </label>
+    );
+  };
+
   return (
     <VoiceGroup id={`settings-${group}`} title={spec.title} summary={summary} dirty={dirty}>
       <div className="voice-form-grid">
-        {spec.keys.map((key) => {
-          const field = FIELD[key];
-          const current = settings[key];
-          return (
-            <label key={key} className={field.wide ? "voice-wide" : undefined}>
-              <span>
-                {field.label}
-                {field.secret && current ? `；当前：${current}` : ""}
-              </span>
-              <input
-                className={`text-input${field.mono ? " mono" : ""}`}
-                inputMode={field.numeric ? "numeric" : undefined}
-                value={form[key]}
-                onChange={(e) => {
-                  onChange(key, e.target.value);
-                  setResult(null);
-                }}
-                placeholder={field.secret ? (settings[`${key}_set`] ? "留空表示不改" : field.placeholder) : undefined}
-                spellCheck="false"
-                autoComplete="off"
-                id={field.id}
-              />
-            </label>
-          );
-        })}
+        {spec.keys.filter((key) => !advancedKeys.has(key)).map(renderField)}
       </div>
+      {advancedKeys.size > 0 && (
+        <details className="voice-private-more" id={`voice-settings-${group}-advanced`}>
+          <summary>高级选项（启动参数等，一般不用改）</summary>
+          <div className="voice-form-grid">
+            {spec.keys.filter((key) => advancedKeys.has(key)).map(renderField)}
+          </div>
+        </details>
+      )}
       <SaveBar id={`voice-settings-save-${group}`} target={spec.title} dirty={dirty} busy={Boolean(busy)} saving={busy === label} result={result} onSave={save} />
     </VoiceGroup>
   );
@@ -375,6 +397,40 @@ export function VoicePage() {
     }
   }, []);
 
+  /// 严格模式开关（技术书 §6.2）：写运行目录 `.env`；开启立即生效，关闭需重启 MOSS。
+  const toggleStrict = async () => {
+    if (!status?.strict) return;
+    if (status.strict.locked) {
+      await showAlert("自建链路必须开启严格模式，不能在这里关闭。", { title: "不可关闭", tone: "warning" });
+      return;
+    }
+    const enabled = !status.strict.enabled;
+    const ok = await showConfirm(
+      enabled
+        ? "开启后，小智、局域网与网关要求运动或出光时只生成待批准请求，必须在电脑上批准才执行；急停、取消与降低倍率不受影响。确定开启？"
+        : "关闭后立即生效：语音与局域网在模型带上确认参数时就能直接让机器运动、出光，没有桌面批准。确定关闭？",
+      {
+        title: enabled ? "开启严格模式？" : "关闭严格模式？",
+        tone: enabled ? "warning" : "error",
+        danger: !enabled,
+        confirmText: enabled ? "开启" : "关闭",
+      },
+    );
+    if (!ok) return;
+    try {
+      const result = await voiceApi.strictSet(enabled, true);
+      const text = result?.needs_restart
+        ? `已写入 ${result.env_file}。这次运行仍保持原状态，重启 MOSS 后生效。`
+        : enabled
+          ? "严格模式已开启，立即生效。"
+          : "严格模式已关闭，立即生效。";
+      await showAlert(text, { title: "严格模式", tone: result?.needs_restart ? "warning" : "success" });
+      await refresh();
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: "设置失败", tone: "error" });
+    }
+  };
+
   const refreshApprovals = useCallback(async () => {
     const res = await getJson("/v1/approvals?status=all");
     if (mounted.current && res.ok && res.data?.success) {
@@ -417,6 +473,9 @@ export function VoicePage() {
   );
 
   const mode = status?.mode || "official";
+  // 当前链路要显示的标签：官方链路没有“模型”标签；记住的标签若当前链路没有，回退到第一个
+  const tabs = voiceTabsFor(mode);
+  const activeTab = tabs.some((item) => item.key === tab) ? tab : tabs[0].key;
   const server = serverStateView(status?.server);
   const device = deviceView(mode, status?.device);
   const fullModule = Boolean(status?.server_config?.full_module);
@@ -525,6 +584,7 @@ export function VoicePage() {
         {server.state === "exited" && <span className="voice-bad">退出码 {status.server.exit_code ?? "未知"}，不会自动重启（日志见“记录与诊断”）</span>}
         {status.server?.message && server.state !== "exited" && <span>{status.server.message}</span>}
         {!status.server_config?.exists && <span className="voice-warn">缺少 data/.config.yaml，请先在“模型”标签完成配置</span>}
+        {!status.mcp_endpoint && (<span className="voice-warn">尚未填写自建接入点：在下面“自建接入点”组填好后保存，MOSS 才会连接</span>)}
         <span>
           设备：<Pill tone={device.tone} id="voice-device-state">{device.text}</Pill>
         </span>
@@ -535,7 +595,7 @@ export function VoicePage() {
             工具连接 {endpointHealth.tool_connections ?? "—"} · 设备会话 {endpointHealth.robot_connections ?? "—"}
           </span>
         ) : (
-          <span className="voice-muted">未填写接入点健康检查地址，无法判断设备是否在线（在“连接”标签填写）</span>
+        <span className="voice-muted">未填写接入点健康检查地址，无法判断设备是否在线（在“服务”标签填写）</span>
         )}
       </div>
     </div>
@@ -548,7 +608,7 @@ export function VoicePage() {
         <Pill tone={status.bridge?.connected ? "ok" : "bad"}>{status.bridge?.connected ? "MOSS 桥已连接" : "MOSS 桥未连接"}</Pill>
       </div>
       <div className="voice-kv">
-        <span className="mono voice-break">{status.mcp_endpoint || "未设置接入点（在“连接”标签填写）"}</span>
+        <span className="mono voice-break">{status.mcp_endpoint || "未设置接入点（在“服务”标签填写）"}</span>
       </div>
     </div>
   );
@@ -590,24 +650,29 @@ export function VoicePage() {
           <div className="voice-statusline" id="voice-statusline">
             <Pill tone={serviceView.tone}>{serviceView.text}</Pill>
             <Pill tone={deviceLine.tone}>{deviceLine.text}</Pill>
-            <Pill
-              tone={status.strict?.enabled ? "ok" : "warn"}
+            <button
+              type="button"
+              className={`ob-pill voice-strict-toggle ${TONE_CLASS[status.strict?.enabled ? "ok" : "warn"] || TONE_CLASS.off}`}
               id="voice-strict-state"
-              title={status.strict?.locked ? "自建模式下必须开启，不可关闭" : status.strict?.from_env ? "由 .env 的 MOSS_FUSION_STRICT 开启" : "官方与内置链路下可选，在 .env 设置 MOSS_FUSION_STRICT=1"}
+              onClick={toggleStrict}
+              disabled={!status.strict}
+              title={status.strict?.locked ? "自建模式下必须开启，不可关闭" : status.strict?.from_env ? "当前由 .env 开启；点这里可以切换" : "点这里切换（会自动写入运行目录的 .env）"}
             >
-              严格模式{status.strict?.enabled ? "已开启" : "未开启"}
-            </Pill>
+              严格模式{status.strict?.enabled ? "已开启" : "未开启"} · 点此切换
+            </button>
           </div>
-          <div className={`voice-hint voice-hint--${device.tone}`} id="voice-ota-hint">
-            {device.hint}
-          </div>
-          {mode === "official" && !status.strict?.enabled && (
-            <div className="voice-hint voice-hint--warn">严格模式未开启：大模型可以自行确认加工任务。需要每次在本机批准时，在 .env 中设置 MOSS_FUSION_STRICT=1。</div>
+          {(device.hint || (mode === "official" && !status.strict?.enabled)) && (
+            <div className={`voice-hint voice-hint--${mode === "official" && !status.strict?.enabled ? "warn" : device.tone}`} id="voice-ota-hint">
+              {[
+                device.hint,
+                mode === "official" && !status.strict?.enabled ? "严格模式未开启：大模型可以自行确认加工任务；要每次批准就点上面的开关。" : "",
+              ].filter(Boolean).join(" · ")}
+            </div>
           )}
         </section>
 
         <div className="voice-pagetabs" role="tablist" aria-label="语音中心">
-          {VOICE_TABS.map((item) => (
+          {tabs.map((item) => (
             <button
               key={item.key}
               type="button"
@@ -629,30 +694,51 @@ export function VoicePage() {
         </div>
 
         <section className="ob-card voice-panels">
-          <VoiceTabPanel tab="service" active={tab === "service"}>
+          <VoiceTabPanel tab="service" active={activeTab === "service"}>
             <ModeSplit
               id="service"
               mode={mode}
-              title="其他链路的服务状态"
               parts={[
-                { key: "builtin", modes: ["builtin"], node: <BuiltinServicePanel builtin={builtin} /> },
-                { key: "server", modes: ["self_hosted"], node: serverBlock },
-                { key: "endpoint", modes: ["official", "self_hosted"], node: officialBlock },
+                {
+                  key: "official",
+                  modes: ["official"],
+                  node: (
+                    <div className="voice-stack">
+                      {officialBlock}
+                      <SettingsGroup group="official" {...groupProps} />
+                    </div>
+                  ),
+                },
+                {
+                  key: "selfHosted",
+                  modes: ["self_hosted"],
+                  node: (
+                    <div className="voice-stack">
+                      {serverBlock}
+                      <SettingsGroup group="selfHostedServer" {...groupProps} />
+                      <SettingsGroup group="selfHostedEndpoint" {...groupProps} />
+                    </div>
+                  ),
+                },
+                {
+                  key: "builtin",
+                  modes: ["builtin"],
+                  node: (
+                    <div className="voice-stack">
+                      <BuiltinServicePanel builtin={builtin} />
+                      <SettingsGroup group="builtinPorts" {...groupProps} />
+                    </div>
+                  ),
+                },
               ]}
             />
           </VoiceTabPanel>
 
-          <VoiceTabPanel tab="models" active={tab === "models"}>
+          <VoiceTabPanel tab="models" active={activeTab === "models"}>
             <ModeSplit
               id="models"
               mode={mode}
-              title="其他链路的模型设置"
               parts={[
-                {
-                  key: "official-note",
-                  modes: ["official"],
-                  node: <p className="voice-hint">官方链路的模型在小智控制台设置，这里不用配置。</p>,
-                },
                 {
                   key: "builtin",
                   modes: ["builtin"],
@@ -687,41 +773,35 @@ export function VoicePage() {
             />
           </VoiceTabPanel>
 
-          <VoiceTabPanel tab="connect" active={tab === "connect"}>
-            <ModeSplit
-              id="connect"
-              mode={mode}
-              title="其他链路的连接设置"
-              parts={[
-                { key: "official", modes: ["official", "builtin"], node: <SettingsGroup group="official" {...groupProps} /> },
-                { key: "builtinPorts", modes: ["builtin"], node: <SettingsGroup group="builtinPorts" {...groupProps} /> },
-                { key: "selfHostedEndpoint", modes: ["self_hosted"], node: <SettingsGroup group="selfHostedEndpoint" {...groupProps} /> },
-                { key: "selfHostedServer", modes: ["self_hosted"], node: <SettingsGroup group="selfHostedServer" {...groupProps} /> },
-                { key: "endpoints", modes: ["official", "self_hosted", "builtin"], node: <VoiceEndpointsCard overview={status.mcp} busy={busy} run={run} /> },
-              ]}
-            />
-          </VoiceTabPanel>
-
-          <VoiceTabPanel tab="features" active={tab === "features"}>
-            <div className="voice-stack">
-              {mode !== "builtin" && <p className="voice-hint">以下功能只在“MOSS 内置服务”链路下生效。</p>}
-              <VoiceMusicCard />
-              <VoiceVisionCard />
-              <VoiceMcpCard defaultOpen={false} />
-              <PrivateSettingsEntry />
-              <VoiceGroup id="experimental" title="实验功能（尚未通过安全验收）" summary="默认锁定">
-                <div className="voice-stack">
-                  <VoiceAgentCard />
-                </div>
-              </VoiceGroup>
+          <VoiceTabPanel tab="devices" active={activeTab === "devices"}>
+            <div className="voice-stack" id="voice-devices-panel">
+              <VoiceEndpointsCard overview={status.mcp} busy={busy} run={run} />
             </div>
           </VoiceTabPanel>
 
-          <VoiceTabPanel tab="records" active={tab === "records"}>
+          <VoiceTabPanel tab="features" active={activeTab === "features"}>
+            <div className="voice-stack">
+              {mode === "builtin" && (
+                <>
+                  <h3 className="voice-section-h">内置服务能力（只在“MOSS 内置服务”链路生效）</h3>
+                  <VoiceMusicCard />
+                  <VoiceVisionCard />
+                </>
+              )}
+              <h3 className="voice-section-h">第三方工具（与链路无关）</h3>
+              <VoiceMcpCard defaultOpen={false} />
+              <VoiceAgentCard />
+            </div>
+          </VoiceTabPanel>
+
+          <VoiceTabPanel tab="privacy" active={activeTab === "privacy"}>
+            <PrivateSettingsEntry status={builtinStatus} />
+          </VoiceTabPanel>
+
+          <VoiceTabPanel tab="records" active={activeTab === "records"}>
             <ModeSplit
               id="records"
               mode={mode}
-              title="其他链路的记录"
               parts={[
                 {
                   key: "approvals",
@@ -782,6 +862,15 @@ export function VoicePage() {
                       <pre className="voice-log mono" id="voice-log">
                         {logLines.length ? logLines.map(maskLogLine).join("\n") : "暂无日志"}
                       </pre>
+                    </VoiceGroup>
+                  ),
+                },
+                {
+                  key: "maintenance",
+                  modes: ["official", "self_hosted", "builtin"],
+                  node: (
+                    <VoiceGroup id="device-maintenance" title="设备维护（固件升级）" summary="只在本机安全窗口逐台操作">
+                      <PrivateFirmwareEntry />
                     </VoiceGroup>
                   ),
                 },

@@ -309,10 +309,25 @@ pub struct HostApplication {
     pub db: Arc<Mutex<RuntimeDb>>,
     pub api_service: Arc<ApiService>,
     pub coordinator: &'static ShutdownCoordinator,
-    /// `.env` 中配置的严格模式（`MOSS_FUSION_STRICT`）。语音中心切回官方链路时恢复为该值。
-    pub strict_from_env: bool,
+    /// `.env` 中配置的严格模式（`MOSS_FUSION_STRICT`）。语音中心切回官方链路时恢复为该值；
+    /// n27 起语音中心的关闭开关会把它一起置为 false（否则 `enabled || from_env` 会把热关挡回去）。
+    pub strict_from_env: std::sync::atomic::AtomicBool,
     /// 当前各条小智桥（每个接入点一条，NV8）的停止开关与结束标记（语音中心切换链路时先断旧桥再接新桥，技术书 §9.4.2）。
     bridge: Mutex<Vec<BridgeControl>>,
+}
+
+impl HostApplication {
+    /// 启动时 `.env` 快照的严格模式。
+    pub fn strict_from_env(&self) -> bool {
+        self.strict_from_env
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 语音中心热关/热开时同步这份快照，避免启动值把运行时的开关挡回去。
+    pub fn set_strict_from_env(&self, value: bool) {
+        self.strict_from_env
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 struct BridgeControl {
@@ -459,10 +474,16 @@ impl HostApplication {
     /// 而初始化失败（Read-only file system）；移动端必须传入应用私有数据目录。
     pub fn init_with_runtime_dir(runtime_dir: Option<&std::path::Path>) -> Result<Self, String> {
         let runtime_root = RuntimeRoot::resolve(runtime_dir, None).map_err(|e| match e {
-            laser_runtime::RuntimeRootError::AlreadyLocked(lock) => format!(
-                "已有 MOSS 实例正在运行（数据目录锁 {} 被占用）。请从托盘图标右键“退出程序”，或在任务管理器结束 moss-desktop.exe / moss-host.exe 后重试",
-                lock.display()
-            ),
+            laser_runtime::RuntimeRootError::AlreadyLocked(lock) => {
+                let stop_hint = if cfg!(target_os = "windows") {
+                    "请从托盘图标右键“退出程序”，或在任务管理器结束 moss-desktop.exe / moss-host.exe 后重试"
+                } else if cfg!(target_os = "macos") {
+                    "请从菜单栏图标选择“退出程序”，或在“活动监视器”结束 moss-desktop / moss-host 后重试"
+                } else {
+                    "请先退出正在运行的 MOSS，或结束 moss-desktop / moss-host 进程后重试"
+                };
+                format!("已有 MOSS 实例正在运行（数据目录锁 {} 被占用）。{stop_hint}", lock.display())
+            }
             other => format!("运行时目录初始化失败: {other:?}"),
         })?;
         let settings = LaserSettings::from_env_with_runtime_dir(Some(&runtime_root.path))
@@ -523,7 +544,7 @@ impl HostApplication {
             db: db_arc,
             api_service,
             coordinator,
-            strict_from_env,
+            strict_from_env: std::sync::atomic::AtomicBool::new(strict_from_env),
             bridge: Mutex::new(Vec::new()),
         })
     }

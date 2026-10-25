@@ -215,11 +215,15 @@ def create_moss_icon(size=1024):
     # 10. 底部精工刻印 MOSS 与 550W 品牌字样
     # 在金属下环绘制流浪地球标志性微字
     try:
-        # 优先寻找常见无衬线英文字体
+        # 优先寻找常见无衬线英文字体（Windows / macOS / Linux）
         font_paths = [
             "C:/Windows/Fonts/segoeuib.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
-            "C:/Windows/Fonts/consola.ttf"
+            "C:/Windows/Fonts/consola.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         ]
         font = None
         for fp in font_paths:
@@ -267,6 +271,11 @@ def export_all_icons(canvas, output_dir):
         append_images=ico_images[1:]
     )
     print(f"Saved: {icon_ico_path} with sizes: {ico_sizes}")
+
+    # 4. 保存 macOS ICNS 文件（Pillow 支持 ICNS，或可用 cargo tauri icon 生成）
+    icon_icns_path = os.path.join(output_dir, "icon.icns")
+    canvas.save(icon_icns_path, format="ICNS")
+    print(f"Saved: {icon_icns_path}")
 
 if __name__ == "__main__":
     print("Generating MOSS Quantum Eye icon...")

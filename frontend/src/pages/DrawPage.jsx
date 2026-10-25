@@ -54,6 +54,8 @@ import { exportFile, savedMessage } from "../saveFile.js";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { onEmergencyStop } from "../estopBus.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
+import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
+import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
 import {
   drawConnectionPayload,
   drawSizeValue,
@@ -119,6 +121,17 @@ export function DrawPage({ onNavigate }) {
   const formRef = useRef(form);
   const materialLoadedOnceRef = useRef(false);
   const materialRefreshGenerationRef = useRef(0);
+  const boardStageRef = useRef(null);
+
+  useEffect(() => {
+    const stage = boardStageRef.current;
+    if (!stage || !excalidrawAPI || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => {
+      excalidrawAPI.refresh?.();
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [excalidrawAPI]);
 
   useEffect(() => {
     materialLibraryRef.current = materialLibrary;
@@ -623,14 +636,17 @@ export function DrawPage({ onNavigate }) {
         </div>
       </section>
 
-      {/* 左侧大画布，右侧三张卡：材料与尺寸、设备、预览与发送（技术书 §9.5.5 B） */}
+      {/* 左侧大画布，右侧三张卡：材料与尺寸、设备、预览与发送（技术书 §9.5.5 B；支持自由缩放/拖动/折叠） */}
       <section className="workspace ob-draw">
-        <section className="hud-card ob-card canvas-panel ob-board" aria-label="画布">
-          <Excalidraw excalidrawAPI={setExcalidrawAPI} theme="dark" langCode={EXCALIDRAW_LANG_CODE} />
-        </section>
+        <WorkbenchCanvas defaultLayout={DRAW_DEFAULT_LAYOUT} storageKey={DRAW_STORAGE_KEY}>
+        <WbCard id="board" className="hud-card ob-card canvas-panel ob-board" label="画布">
+          <FoldHeader id="draw-board" title="创作画布" k="CANVAS" />
+          <div className="ob-board-stage" ref={boardStageRef}>
+            <Excalidraw excalidrawAPI={setExcalidrawAPI} theme="dark" langCode={EXCALIDRAW_LANG_CODE} />
+          </div>
+        </WbCard>
 
-        <div className="ob-stack">
-        <section className="hud-card ob-card control-panel" aria-label="材料与尺寸">
+        <WbCard id="draw-material" className="hud-card ob-card control-panel" label="材料与尺寸">
           <FoldHeader id="draw-material" title="材料与尺寸" k="MATERIAL" n={1} />
           <div className="material-library-label">
             <span>材料库</span>
@@ -708,11 +724,11 @@ export function DrawPage({ onNavigate }) {
               <input
                 type="number"
                 min="0"
-                max="120"
+                max="100"
                 step="0.1"
                 value={form.width_mm}
                 onChange={(event) => updateForm("width_mm", event.target.value)}
-                placeholder="自动"
+                placeholder="自动 (≤100)"
               />
             </label>
             <label>
@@ -720,11 +736,11 @@ export function DrawPage({ onNavigate }) {
               <input
                 type="number"
                 min="0"
-                max="120"
+                max="100"
                 step="0.1"
                 value={form.height_mm}
                 onChange={(event) => updateForm("height_mm", event.target.value)}
-                placeholder="自动"
+                placeholder="自动 (≤100)"
               />
             </label>
           </div>
@@ -752,9 +768,9 @@ export function DrawPage({ onNavigate }) {
             </label>
           ) : null}
 
-        </section>
+        </WbCard>
 
-        <section className="hud-card ob-card control-panel" aria-label="设备">
+        <WbCard id="draw-device" className="hud-card ob-card control-panel" label="设备">
           <FoldHeader id="draw-device" title="设备" k="DEVICE" n={2} />
           <label>
             连接方式
@@ -834,9 +850,9 @@ export function DrawPage({ onNavigate }) {
             保存配置
           </button>
 
-        </section>
+        </WbCard>
 
-        <section className="hud-card ob-card control-panel result-panel" aria-label="预览与发送">
+        <WbCard id="draw-send" className="hud-card ob-card control-panel result-panel" label="预览与发送">
           <FoldHeader id="draw-send" title="预览与发送" k="PREVIEW · SEND" n={3} />
           <div className="action-stack">
             <button type="button" className="primary-button" onClick={generatePreview} disabled={busy || !excalidrawAPI}>
@@ -923,8 +939,8 @@ export function DrawPage({ onNavigate }) {
             </summary>
             <pre>{rawText || "等待预览结果..."}</pre>
           </details>
-        </section>
-        </div>
+        </WbCard>
+        </WorkbenchCanvas>
       </section>
 
       {confirmOpen && (

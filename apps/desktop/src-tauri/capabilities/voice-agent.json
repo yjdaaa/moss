@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "voice-agent-local-main",
-  "description": "NV13 inert Claude Code / Codex directory configuration and bounded task records in the main window; commands additionally pin the exact running backend origin.",
+  "description": "NV13 Claude Code / Codex configuration, bounded task records and stopping a running task in the main window; commands additionally pin the exact running backend origin.",
   "windows": [
     "main"
   ],
@@ -12,6 +12,7 @@
   },
   "permissions": [
     "allow-voice-agent-status",
-    "allow-voice-agent-save"
+    "allow-voice-agent-save",
+    "allow-voice-agent-stop"
   ]
 }

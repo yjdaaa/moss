@@ -32,7 +32,7 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 12（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17） |
+| version | INTEGER PK | 当前 13（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at` | 
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
@@ -315,7 +315,7 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | started_at / finished_at | REAL / REAL NULL | Unix 秒 |
 | error_code | TEXT NULL | 短错误码 |
 
-插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。该表存在不表示真实 CLI 执行器已被启用；真实进程树隔离未验证前维持 fail-closed。
+插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。自 2026-10-15 起真实 CLI 执行器在严格模式且用户开启后可用（见 [安全入口](safety.md) §4.18）；非 Windows 平台仍拒绝运行。
 
 ### 3.16 `context_memories` / `context_extraction_runs`（schema v10，NV19-02）
 
@@ -350,6 +350,21 @@ v11（NV19-04）：外部内容 FTS5 虚表 `context_memories_fts(content)`，`t
 | `context_knowledge_files` | id、root_id、dir_id、rel_path、sha256（64）、size（>0）、mtime | `(root_id, rel_path)` 唯一；索引 `(dir_id)` |
 
 `RuntimeDb`（`knowledge_store.rs`）：`insert_knowledge_root`（revision 1、未建索引）、`knowledge_root(s)`、`replace_knowledge_index`（单事务：revision 相符才整体替换目录与文件并 revision+1，文件必须属于本次的目录，任何约束失败整体回滚）、`delete_knowledge_root_if_revision`（单事务删除三张表的行；数据库未开外键，不依赖级联）、`knowledge_dirs`、`knowledge_files`、`search_knowledge_dirs`（本范围内 L0 / L1 命中三字片段（FTS5）或短词（LIKE，`!` 转义）的目录，去重合并）。
+
+### 3.18 `voice_firmware_artifacts` 与固件推送列（schema v13，NV17）
+
+固件文件本身不入库，只登记 SHA-256 与来源信息；文件存在运行目录 `firmware/<sha256>.bin`，发送前重新读取并核对 SHA-256。
+
+| 表 / 列 | 类型 | 含义 |
+|---|---|---|
+| `voice_firmware_artifacts.sha256` | TEXT PK | 固件文件 SHA-256（64 位十六进制，CHECK 长度） |
+| `voice_firmware_artifacts.version` / `project` | TEXT | 从 ESP32 应用镜像头读出的版本（1～32 字符）与项目名（≤32 字符） |
+| `voice_firmware_artifacts.size` / `created_at` | INTEGER / REAL | 字节数（>0）与导入时间 |
+| `voice_firmware_delivery.firmware_version` | TEXT NOT NULL DEFAULT '' | 这次推送的固件版本；设备上报同版本才算升级（旧记录为空串） |
+| `voice_firmware_delivery.token` | TEXT NULL | 一次性下载令牌（32 位十六进制），部分唯一索引 `voice_firmware_token`；取消或上报后置空 |
+| `voice_firmware_delivery.expires_at` | REAL NOT NULL DEFAULT 0 | 推送到期时间；过期的推送不再下发也不再可下载（旧记录为 0，视为已失效） |
+
+`RuntimeDb`（`firmware_store.rs`）：`add_firmware_artifact`（同 SHA-256 重复导入不变）、`list_firmware_artifacts`、`delete_firmware_artifact`（还有有效推送时返回 false 不删除）、`create_firmware_offer`（同一设备尚未开始下载的旧推送被替换；版本必须与已导入固件一致）、`active_firmware_offer`、`firmware_offer_by_token`、`firmware_device_reported`（上报新版本即置为已上报并作废令牌）、`cancel_firmware_offer`（未开始下载的删除，已开始下载的作废令牌并保留记录）。v13 迁移在事务内先查 `pragma_table_info` 再决定是否加列，失败回滚后可以重试。
 
 ## 4. 废弃的旧结构
 

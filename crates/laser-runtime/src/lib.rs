@@ -1,4 +1,5 @@
 pub mod agent_store;
+pub mod firmware_store;
 pub mod config;
 pub mod context_store;
 pub mod knowledge_store;
@@ -9,6 +10,7 @@ pub mod root;
 pub mod store;
 
 pub use agent_store::AgentRunRecord;
+pub use firmware_store::{FirmwareArtifactRow, FirmwareOfferRow};
 pub use context_store::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow};
 pub use knowledge_store::{KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
 pub use config::LaserSettings;

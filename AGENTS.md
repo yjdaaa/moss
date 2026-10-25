@@ -1,6 +1,6 @@
 # Project Instructions
 
-仓库级唯一规则源，供 Codex、Claude Code、Cursor 等工具共用。实现约定见
+仓库级唯一规则源，供 Antigravity (agy)、Codex、Claude Code、Cursor 等工具共用。实现约定见
 [`docs/developer/standards.md`](docs/developer/standards.md)，高风险代码先读
 [`docs/developer/safety.md`](docs/developer/safety.md)。其他文档只引用本文件，不复制规则。
 
@@ -28,7 +28,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 - 测试中的硬件、网络、GUI、子进程、文件系统副作用一律用 mock、`FakeGrbl` 或临时目录。
 - 急停 `0x18` 走实时通道，不得排在 G-code 队列之后；刀路门禁对物理 G-code 文件重新计算 SHA-256。
 - 不为全绿放宽断言、伪造预期数据或添加虚假桩代码。
-- 新的外部控制或隐私能力（家居、Agent 执行、声纹、固件、联网插件）默认关闭。Agent 执行与固件下发在真实验收通过前生产门禁保持关闭，mock 结果不能用来打开它；家居控制与声纹识别改由用户自己开启：家居控制须在私密窗口填好地址、令牌、勾选实体并明确同意，每个动作仍逐次在桌面批准；声纹识别须完成简易标定（2026-10-14 用户决定）。
+- 新的外部控制或隐私能力（家居、Agent 执行、声纹、固件、联网插件）默认关闭，改由用户自己显式开启（2026-10-14 / 2026-10-15 用户决定）：家居控制须在私密窗口填好地址、令牌、勾选实体并明确同意，每个动作仍逐次在私密窗口批准；声纹识别须完成简易标定（仅作候选身份提示，不授权任何动作）；本机 Agent 执行仅在严格模式下开放，每次运行须在桌面审批卡单独批准；固件导入与按台推送仅在私密窗口由用户确认。mock 结果不能充当实机验收。
 
 ## 开发约束
 
@@ -84,4 +84,5 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 ## 构建缓存清理
 
-阶段收尾或磁盘紧张时运行 `powershell -File scripts/clean-build-cache.ps1`（先加 `-WhatIf` 预览）。它删除 `incremental`、`target/tmp`、`codex-*`、子目录误生成的 `target/`，以及 `deps` 里本仓库 crate 的旧哈希产物；保留第三方依赖、交付产物、`node_modules`、源码和 `.runtime/`。
+- **3 天自动清理历史编译缓存（必须）**：每次构建／验证收尾或日常维护时，必须执行 `cargo sweep --time 3` 或运行 `powershell -File scripts/clean-build-cache.ps1`（脚本已内置 `cargo sweep --time 3`，可先加 `-WhatIf` 预览），自动清理超过 3 天未使用的历史编译缓存。`Cargo.toml` 的 `[profile.dev]` 保持 `debug = "line-tables-only"` 以精简 `.pdb` 体积。
+- `scripts/clean-build-cache.ps1` 会一并清理超过 3 天的编译产物、`incremental`、`target/tmp`、`codex-*`、子目录误生成的 `target/`，以及 `deps` 里本仓库 crate 的旧哈希产物；保留近 3 天活跃的第三方依赖、交付产物、`node_modules`、源码和 `.runtime/`。

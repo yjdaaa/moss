@@ -2,8 +2,8 @@
 
 适用工程：
 
-- 上位机：`C:\Users\19454\Desktop\moss-rust`
-- 下位机：`C:\Users\19454\Desktop\流浪地球\开源项目资料\FluidNC-main`
+- 上位机：`<path>/moss`
+- 下位机：`<path>/FluidNC-main`
 - 当前 FluidNC 配置：`FluidNC\data\config.yaml`
 - 当前测试对象：ESP32 / FluidNC / 激光机 / SD 卡脱机加工
 

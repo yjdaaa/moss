@@ -7,6 +7,8 @@
 //! 错误统一为 `{code, message, status}`，页面据 `code` 显示原因。
 
 use serde_json::Value;
+#[cfg(desktop)]
+use tauri::Manager as _;
 
 type CmdResult = Result<Value, Value>;
 
@@ -41,7 +43,120 @@ mod imp {
     use super::{CmdResult, error_value};
 
     /// Tauri 托管状态：后端未启动时为空。
-    pub struct VoiceState(pub Option<Arc<VoiceCenter>>);
+    pub struct VoiceState(
+    pub Option<Arc<VoiceCenter>>,
+    /// 同一份后端句柄：严格模式开关要写运行目录 `.env` 并即时生效（n27）。
+    pub Option<Arc<laser_host::HostApplication>>,
+);
+
+    /// 自动探测本机 Python 3：只检查文件是否存在，不启动任何程序。
+    ///
+    /// 自建服务端向导要填「Python 解释器」，不该让用户自己去安装目录里找路径。
+    /// 兼容 Windows（`python.exe`、`%LOCALAPPDATA%\Programs\Python`）与 macOS / Linux
+    /// （`std::env::split_paths`、Homebrew、Python.framework、pyenv / conda 等常见位置）。
+    pub fn detect_python() -> Value {
+        let local = std::env::var_os("LOCALAPPDATA");
+        let pf = std::env::var_os("ProgramFiles");
+        let pf86 = std::env::var_os("ProgramFiles(x86)");
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        let candidates = detect_python_candidates(
+            cfg!(windows),
+            std::env::var_os("PATH").as_deref(),
+            local.as_deref(),
+            &[pf.as_deref(), pf86.as_deref()],
+            home.as_deref(),
+            &[
+                std::path::Path::new("/opt/homebrew/bin/python3"),
+                std::path::Path::new("/usr/local/bin/python3"),
+                std::path::Path::new("/usr/bin/python3"),
+            ],
+            Some(std::path::Path::new("/Library/Frameworks/Python.framework/Versions")),
+        );
+        serde_json::json!({ "candidates": candidates, "suggested": candidates.first().cloned() })
+    }
+
+    pub(crate) fn detect_python_candidates(
+        is_windows: bool,
+        path_env: Option<&std::ffi::OsStr>,
+        local_app_data: Option<&std::ffi::OsStr>,
+        program_files: &[Option<&std::ffi::OsStr>],
+        home: Option<&std::ffi::OsStr>,
+        unix_static_bins: &[&std::path::Path],
+        macos_framework_versions: Option<&std::path::Path>,
+    ) -> Vec<String> {
+        fn collect_versioned_dirs(root: &std::path::Path, prefix: &str, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else { return };
+            let mut dirs: Vec<std::path::PathBuf> = entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|dir| {
+                    dir.is_dir()
+                        && dir
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with(prefix))
+                })
+                .collect();
+            dirs.sort();
+            dirs.reverse();
+            out.extend(dirs);
+        }
+        let mut candidates: Vec<String> = Vec::new();
+        let push = |path: std::path::PathBuf, list: &mut Vec<String>| {
+            if path.is_file() {
+                let text = path.to_string_lossy().to_string();
+                if !list.contains(&text) {
+                    list.push(text);
+                }
+            }
+        };
+        let names: &[&str] = if is_windows {
+            &["python.exe", "python3.exe", "py.exe"]
+        } else {
+            &["python3", "python"]
+        };
+        if let Some(paths) = path_env {
+            for dir in std::env::split_paths(paths).filter(|dir| !dir.as_os_str().is_empty()) {
+                for name in names {
+                    push(dir.join(name), &mut candidates);
+                }
+            }
+        }
+        if is_windows {
+            let mut version_dirs: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(local) = local_app_data {
+                let root = std::path::PathBuf::from(local).join("Programs").join("Python");
+                collect_versioned_dirs(&root, "Python3", &mut version_dirs);
+            }
+            for root in program_files.iter().flatten() {
+                collect_versioned_dirs(&std::path::PathBuf::from(root), "Python3", &mut version_dirs);
+            }
+            for dir in version_dirs {
+                push(dir.join("python.exe"), &mut candidates);
+            }
+        } else {
+            for bin in unix_static_bins {
+                push((*bin).to_path_buf(), &mut candidates);
+            }
+            if let Some(versions_root) = macos_framework_versions {
+                let mut version_dirs = Vec::new();
+                collect_versioned_dirs(versions_root, "3.", &mut version_dirs);
+                for dir in version_dirs {
+                    push(dir.join("bin").join("python3"), &mut candidates);
+                }
+            }
+            if let Some(home) = home.filter(|h| !h.is_empty()).map(std::path::PathBuf::from) {
+                for parts in [
+                    &[".pyenv", "shims", "python3"][..],
+                    &["miniforge3", "bin", "python3"][..],
+                    &["miniconda3", "bin", "python3"][..],
+                    &["anaconda3", "bin", "python3"][..],
+                ] {
+                    push(parts.iter().fold(home.clone(), |acc, part| acc.join(part)), &mut candidates);
+                }
+            }
+        }
+        candidates
+    }
 
     /// 把进程内 MOSS 后端的能力交给语音中心。
     struct DesktopHooks {
@@ -57,11 +172,11 @@ mod imp {
 
         fn set_strict_mode(&self, enabled: bool) {
             // `.env` 开启的严格模式不能被语音中心关闭
-            self.host.api_service.set_strict_mode(enabled || self.host.strict_from_env);
+            self.host.api_service.set_strict_mode(enabled || self.host.strict_from_env());
         }
 
         fn strict_from_env(&self) -> bool {
-            self.host.strict_from_env
+            self.host.strict_from_env()
         }
 
         fn restart_bridge(&self) -> bool {
@@ -108,13 +223,44 @@ mod imp {
         host: Option<Arc<laser_host::HostApplication>>,
         builtin: Option<Arc<crate::voice_builtin::BuiltinVoice>>,
     ) -> VoiceState {
-        VoiceState(host.map(|host| {
-            let runtime_dir = host.runtime_root.path.clone();
-            let center = Arc::new(VoiceCenter::new(&runtime_dir, Arc::new(DesktopHooks { host, builtin })));
-            // 自建模式下每 5 秒查一次接入点 health，供状态卡与顶栏“等待设备”使用
-            center.spawn_health_poller(Duration::from_secs(5));
-            center
-        }))
+        let host_ref = host.clone();
+        VoiceState(
+            host.map(|host| {
+                let runtime_dir = host.runtime_root.path.clone();
+                let center = Arc::new(VoiceCenter::new(&runtime_dir, Arc::new(DesktopHooks { host, builtin })));
+                // 自建模式下每 5 秒查一次接入点 health，供状态卡与顶栏“等待设备”使用
+                center.spawn_health_poller(Duration::from_secs(5));
+                center
+            }),
+            host_ref,
+        )
+    }
+
+    /// 运行目录 `.env` 只改一个布尔项，保留其他行；先写临时文件再改名，避免半截文件。
+    pub fn write_env_flag(
+        path: &std::path::Path,
+        key: &str,
+        value: &str,
+    ) -> std::io::Result<std::path::PathBuf> {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let prefix = format!("{key}=");
+        let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+        let mut replaced = false;
+        for line in lines.iter_mut() {
+            if line.trim_start().starts_with(&prefix) {
+                *line = format!("{key}={value}");
+                replaced = true;
+            }
+        }
+        if !replaced {
+            lines.push(format!("{key}={value}"));
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        let temp = path.with_file_name(".env.tmp");
+        std::fs::write(&temp, text)?;
+        std::fs::rename(&temp, path)?;
+        Ok(path.to_path_buf())
     }
 
     fn center(app: &tauri::AppHandle) -> Result<Arc<VoiceCenter>, Value> {
@@ -295,9 +441,76 @@ pub async fn voice_models_save(app: tauri::AppHandle, window: tauri::WebviewWind
     result
 }
 
+/// 自动探测本机 Python 3 解释器路径（只检查文件存在，不执行程序）。
+#[tauri::command]
+pub async fn voice_detect_python(window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
+    #[cfg(desktop)]
+    let result = Ok(imp::detect_python());
+    #[cfg(mobile)]
+    let result = {
+        let _ = window;
+        Err(error_value("voice_desktop_only", "语音中心仅在 MOSS 桌面端可用"))
+    };
+    result
+}
+
+/// 严格模式开关（技术书 §6.2）：写运行目录 `.env`，开与关都立即生效（n27，2026-10-18 用户要求）。
+///
+/// 唯一例外是自建链路：那里严格模式必须开着，命令与界面都不允许关闭。关闭时同步启动时的
+/// `.env` 快照，否则 `enabled || from_env` 会把热关挡回去；`.env` 仍写入，重启后以文件为准。
+#[tauri::command]
+pub async fn voice_strict_set(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    enabled: bool,
+    confirmed: bool,
+) -> CmdResult {
+    #[cfg(desktop)]
+    {
+        require_main_window(&window)?;
+        if !confirmed {
+            return Err(error_value("strict_confirm_required", "开启或关闭严格模式前需要先确认"));
+        }
+        let Some(state) = app.try_state::<imp::VoiceState>() else {
+            return Err(error_value("voice_unavailable", "严格模式开关不可用：本机后端未启动"));
+        };
+        let host = state
+            .1
+            .clone()
+            .ok_or_else(|| error_value("voice_unavailable", "严格模式开关不可用：本机后端未启动"))?;
+        let locked = state
+            .0
+            .clone()
+            .map(|center| center.status()["strict"]["locked"].as_bool().unwrap_or(false))
+            .unwrap_or(false);
+        if !enabled && locked {
+            return Err(error_value("strict_mode_locked", "自建链路必须开启严格模式，不能在语音中心关闭"));
+        }
+        let env_file = host.runtime_root.path.join(".env");
+        imp::write_env_flag(&env_file, "MOSS_FUSION_STRICT", if enabled { "true" } else { "false" })
+            .map_err(|error| error_value("strict_write_failed", &format!("写入 .env 失败：{error}")))?;
+        host.set_strict_from_env(enabled);
+        host.api_service.set_strict_mode(enabled);
+        let active = host.api_service.strict_mode();
+        return Ok(serde_json::json!({
+            "enabled": enabled,
+            "applied": active == enabled,
+            "needs_restart": active != enabled,
+            "env_file": env_file.display().to_string(),
+        }));
+    }
+    #[cfg(mobile)]
+    {
+        let _ = (app, window, enabled, confirmed);
+        Err(error_value("voice_desktop_only", "语音中心仅在 MOSS 桌面端可用"))
+    }
+}
+
 /// 前端调用的语音中心命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 10] = [
+pub const COMMANDS: [&str; 12] = [
     "voice_status",
     "voice_save_settings",
     "voice_mode_changes",
@@ -308,6 +521,8 @@ pub const COMMANDS: [&str; 10] = [
     "voice_server_log",
     "voice_models_test",
     "voice_models_save",
+    "voice_detect_python",
+    "voice_strict_set",
 ];
 
 #[cfg(all(test, desktop))]
@@ -322,5 +537,55 @@ mod tests {
         assert_eq!(parse_mode("gateway").unwrap_err().code, "voice_mode_invalid");
         assert_eq!(parse_section("tts").unwrap(), moss_voice::Section::Tts);
         assert!(parse_section("vad").is_err());
+    }
+
+    /// 严格模式开关只改 `.env` 里的一行，其他配置与注释必须原样保留。
+    #[test]
+    fn env_flag_replaces_one_line_and_appends_when_missing() {
+        let dir = std::env::temp_dir().join(format!("moss-env-flag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        std::fs::write(&path, "MOSS_PORT=8080\nMOSS_FUSION_STRICT=false\n# 注释\n").unwrap();
+        super::imp::write_env_flag(&path, "MOSS_FUSION_STRICT", "true").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("MOSS_FUSION_STRICT=true"));
+        assert!(!text.contains("MOSS_FUSION_STRICT=false"));
+        assert!(text.contains("MOSS_PORT=8080"), "其他键必须保留");
+        assert!(text.contains("# 注释"), "注释必须保留");
+        super::imp::write_env_flag(&path, "MOSS_GATEWAY_ENABLED", "false").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("MOSS_GATEWAY_ENABLED=false"), "缺失的键要追加");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_python_supports_unix_and_macos_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let brew = root.path().join("homebrew-python3");
+        std::fs::write(&brew, b"").unwrap();
+        let fw_310 = root.path().join("Versions").join("3.10").join("bin");
+        let fw_312 = root.path().join("Versions").join("3.12").join("bin");
+        std::fs::create_dir_all(&fw_310).unwrap();
+        std::fs::create_dir_all(&fw_312).unwrap();
+        std::fs::write(fw_310.join("python3"), b"").unwrap();
+        std::fs::write(fw_312.join("python3"), b"").unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join("miniconda3").join("bin")).unwrap();
+        std::fs::write(home.join("miniconda3").join("bin").join("python3"), b"").unwrap();
+
+        let found = super::imp::detect_python_candidates(
+            false,
+            None,
+            None,
+            &[],
+            Some(home.as_os_str()),
+            &[brew.as_path()],
+            Some(&root.path().join("Versions")),
+        );
+        assert_eq!(found.len(), 4);
+        assert_eq!(found[0], brew.to_string_lossy());
+        assert_eq!(found[1], fw_312.join("python3").to_string_lossy(), "更高版本在前");
+        assert_eq!(found[2], fw_310.join("python3").to_string_lossy());
+        assert_eq!(found[3], home.join("miniconda3").join("bin").join("python3").to_string_lossy());
     }
 }

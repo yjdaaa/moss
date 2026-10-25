@@ -43,7 +43,7 @@ Copy-New $helper $bin
 
 # Only NEW unique resource directories are created. Old untracked source,
 # licenses, executable and installer inputs are NOT removed or overwritten.
-foreach($file in @('Cargo.toml','Cargo.lock','COPYING','README.md')){
+foreach($file in @('Cargo.toml','Cargo.lock','build.rs','COPYING','README.md')){
   Copy-New (Join-Path $helperRoot $file) (Join-Path $src "apps/moss-voice-local/$file")
 }
 Copy-Item -LiteralPath (Join-Path $helperRoot 'src') -Destination (Join-Path $src 'apps/moss-voice-local/src') -Recurse -ErrorAction Stop

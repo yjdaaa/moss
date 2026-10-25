@@ -119,15 +119,35 @@ fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
     handle.exit(0);
 }
 
+#[cfg(desktop)]
+fn private_section_script(section: &str) -> String {
+    // `section` has already matched the closed set in `open_voice_private`.
+    format!("window.__MOSS_PRIVATE_TARGET__ = '{section}'; window.dispatchEvent(new CustomEvent('moss:voice-private-selection', {{ detail: '{section}' }}));")
+}
+
 /// Opens a second packaged Tauri webview for private voice settings.
 /// The loopback-hosted main page can only request the window, not sensitive data.
+/// Must stay `async`: on Windows, building a webview window inside a synchronous command
+/// deadlocks the main thread (the window stays white and the app stops responding).
 #[tauri::command]
-fn open_voice_private(
+async fn open_voice_private(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
+    section: Option<String>,
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
+        // Navigation hint only. Never interpreted as a command or an URL.
+        let section = match section.as_deref() {
+            None | Some("overview") => "overview",
+            Some("memory") => "memory",
+            Some("plugins") => "plugins",
+            Some("speaker") => "speaker",
+            Some("home") => "home",
+            Some("approvals") => "approvals",
+            Some("firmware") => "firmware",
+            _ => return Err("未知的语音隐私设置类别".into()),
+        };
         let current = window.url().map_err(|_| "无法校验当前窗口来源")?;
         let backend = app.state::<BackendOrigin>();
         let on_expected_backend = backend.0.as_ref().ok()
@@ -144,14 +164,22 @@ fn open_voice_private(
         if let Some(existing) = app.get_webview_window("voice-private") {
             existing.show().map_err(|_| "无法显示语音隐私窗口")?;
             existing.set_focus().map_err(|_| "无法聚焦语音隐私窗口")?;
+            existing.eval(private_section_script(section))
+                .map_err(|_| "无法切换本机设置类别")?;
             return Ok(());
         }
+        let first_section = section.to_owned();
         let private = tauri::WebviewWindowBuilder::new(
             &app, "voice-private", tauri::WebviewUrl::App("voice-private.html".into()),
         )
         .title("MOSS · 语音隐私设置")
         .inner_size(980.0, 760.0)
         .min_inner_size(700.0, 500.0)
+        .on_page_load(move |view, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let _ = view.eval(private_section_script(&first_section));
+            }
+        })
         .on_navigation(|url| {
             voice_builtin::is_voice_private_asset(
                 "voice-private", url.scheme(), url.host_str(), url.port(),
@@ -165,7 +193,7 @@ fn open_voice_private(
     }
     #[cfg(mobile)]
     {
-        let _ = (app, window);
+        let _ = (app, window, section);
         Err("语音隐私设置仅支持 MOSS 桌面端".into())
     }
 }
@@ -207,8 +235,9 @@ pub fn run() {
     // 路径 4: Windows 控制台关闭事件
     laser_host::install_console_ctrl_handler();
 
-    // 桌面端：在进程内启动并持有 laser-host 后端服务（规格 §16），数据目录按默认规则（Windows 为 %APPDATA%\moss）。
-    // 移动端：当前目录只读且没有 APPDATA，必须等 setup 拿到应用私有数据目录后再启动（见下方 mobile setup）。
+    // 桌面端：在进程内启动并持有 laser-host 后端服务（规格 §16），数据目录按平台默认规则
+    // （Windows 为 %APPDATA%\moss，macOS 为 ~/Library/Application Support/moss，Linux 为 ~/.local/share/moss）。
+    // 移动端：当前目录只读且无桌面用户环境变量，必须等 setup 拿到应用私有数据目录后再启动（见下方 mobile setup）。
     #[cfg(desktop)]
     let (_host_handle, backend_origin, export_state) = start_backend(None);
 
@@ -247,6 +276,8 @@ pub fn run() {
             minimize_to_tray,
             exit_application,
             voice::voice_status,
+            voice::voice_detect_python,
+            voice::voice_strict_set,
             voice::voice_save_settings,
             voice::voice_mode_changes,
             voice::voice_set_mode,
@@ -272,9 +303,12 @@ pub fn run() {
             voice_builtin::voice_home_approval_approve,
             voice_builtin::voice_speaker_manage,
             voice_builtin::voice_firmware_status,
+            voice_builtin::voice_firmware_import,
+            voice_builtin::voice_firmware_manage,
             voice_builtin::voice_home_discover,
             voice_builtin::voice_agent_status,
             voice_builtin::voice_agent_save,
+            voice_builtin::voice_agent_stop,
             voice_builtin::voice_vision_status,
             voice_builtin::voice_vision_save,
             voice_builtin::voice_vision_test,
@@ -435,8 +469,30 @@ pub fn run() {
         });
 
     builder
-        .run(tauri::generate_context!())
-        .expect("error while running MOSS desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building MOSS desktop")
+        .run(|app_handle, event| match event {
+            // macOS：窗口隐藏到菜单栏图标后，点击 Dock 图标重新唤醒并聚焦主窗口
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            // 应用级退出（含 macOS Cmd+Q / Dock 退出）：幂等触发急停 0x18 与任务状态收尾
+            tauri::RunEvent::Exit => {
+                use tauri::Manager;
+                app_handle.state::<ShutdownState>().request();
+            }
+            _ => {
+                let _ = app_handle;
+            }
+        });
 }
 
 #[cfg(test)]
@@ -448,7 +504,7 @@ mod tests {
     #[test]
     fn frontend_invoked_commands_are_registered_and_granted() {
         let build_rs = include_str!("../build.rs");
-        let capability = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}", include_str!("../capabilities/default.json"), include_str!("../capabilities/voice-memory.json"), include_str!("../capabilities/voice-plugins.json"), include_str!("../capabilities/voice-vision.json"), include_str!("../capabilities/voice-agent.json"), include_str!("../capabilities/voice-music.json"), include_str!("../capabilities/voice-home.json")) + "\n" + include_str!("../capabilities/voice-context.json");
+        let capability = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}", include_str!("../capabilities/default.json"), include_str!("../capabilities/voice-memory.json"), include_str!("../capabilities/voice-plugins.json"), include_str!("../capabilities/voice-vision.json"), include_str!("../capabilities/voice-agent.json"), include_str!("../capabilities/voice-music.json"), include_str!("../capabilities/voice-home.json")) + "\n" + include_str!("../capabilities/voice-context.json") + "\n" + include_str!("../capabilities/voice-private-main.json");
         for command in [
             "open_voice_private",
             "get_backend_origin",
@@ -474,22 +530,40 @@ mod tests {
         }
     }
 
-    /// NV19-08: long-term context commands exist only for the packaged private window.
+    /// Windows deadlocks when a webview window is built inside a synchronous command
+    /// (2026-10-15: the private window stayed white and the app hung, AppHangB1).
     #[test]
-    fn voice_context_permissions_are_packaged_private_window_only() {
+    fn window_creating_commands_are_async() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("#[tauri::command]\nasync fn open_voice_private("), "open_voice_private must be async");
+        for (at, _) in source.match_indices("WebviewWindowBuilder::new(") {
+            let head = &source[..at];
+            let function = head.rfind("fn ").expect("builder outside a function");
+            assert!(head[..function].ends_with("async "), "window builder inside a non-async fn");
+        }
+    }
+
+    /// NV19-08 / n26：长期记忆命令给打包私密页与经授权的主窗口，其他来源一律拒绝。
+    #[test]
+    fn voice_context_permissions_are_packaged_private_and_trusted_main_only() {
         let private: serde_json::Value = serde_json::from_str(include_str!("../capabilities/voice-context.json")).unwrap();
         let general = include_str!("../capabilities/default.json");
         assert_eq!(private["windows"], serde_json::json!(["voice-private"]));
         assert!(private.get("remote").is_none() && private.get("webviews").is_none());
         assert_eq!(private["permissions"], serde_json::json!(["allow-voice-context-manage", "allow-voice-context-pick-folder"]));
         for permission in ["allow-voice-context-manage", "allow-voice-context-pick-folder"] {
-            assert!(!general.contains(permission), "{permission} must not reach the loopback main window");
+            assert!(!general.contains(permission), "{permission} 不进通配 / 远程 default capability");
+        }
+        let main_capability: serde_json::Value = serde_json::from_str(include_str!("../capabilities/voice-private-main.json")).unwrap();
+        assert_main_window_loopback_capability(&main_capability);
+        for permission in ["allow-voice-context-manage", "allow-voice-context-pick-folder"] {
+            assert!(main_capability["permissions"].as_array().unwrap().iter().any(|entry| entry == permission));
         }
         let source = include_str!("voice_context.rs");
         for command in ["pub async fn voice_context_manage", "pub async fn voice_context_pick_folder"] {
             let body = &source[source.find(command).unwrap()..];
             let body = &body[..body.find("\n}\n").unwrap()];
-            assert!(body.contains("require_voice_private_asset(&window)?"), "{command} must check the packaged private page");
+            assert!(body.contains("require_private_settings_window(&window)?"), "{command} must check the packaged private page or the trusted main window");
         }
     }
 
@@ -504,10 +578,11 @@ mod tests {
         }
     }
 
-    /// Main navigates to loopback HTTP; privileged commands must NEVER be
-    /// granted to it or to other remote windows.
+    /// 主窗口导航到回环 HTTP：通配 / 远程 default capability 不得含私密权限；私密能力只给
+    /// `voice-private` 窗口，主窗口就地展开所需命令单独写在 `voice-private-main.json` 并由
+    /// 命令内来源判定固定（n26，2026-10-18）。
     #[test]
-    fn voice_private_acl_does_not_expose_sensitive_data_to_loopback() {
+    fn voice_private_acl_keeps_wildcard_and_remote_capabilities_clean() {
         let default: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
         let memory: serde_json::Value =
@@ -524,6 +599,7 @@ mod tests {
                 "allow-voice-memory-save", "allow-voice-memory-clear",
                 "allow-voice-speaker-manage",
                 "allow-voice-firmware-status",
+                "allow-voice-firmware-import", "allow-voice-firmware-manage",
             ][..]),
             ("plugins", &plugins, &[
                 "allow-voice-plugins-status", "allow-voice-plugins-save",
@@ -541,12 +617,31 @@ mod tests {
                     "{permission} must not appear in wildcard/remote default ACL");
             }
         }
+        // 2026-10-18 用户决定（技术书 n26）：四项设置在主语音页就地展开，主窗口因此挂载这些卡片；
+        // 来源仍由命令内 require_private_settings_window 固定，固件命令不进主窗口。
         let main = include_str!("../../../../frontend/src/components/VoiceBuiltinCard.jsx");
         let private = include_str!("../../../../frontend/src/voicePrivate.jsx");
-        assert!(!main.contains("<VoicePluginsCard"));
-        assert!(!main.contains("<VoiceMemoryCard"));
-        assert!(private.contains("<VoicePluginsCard"));
-        assert!(private.contains("<VoiceMemoryCard"));
+        for card in ["<VoiceMemoryCard", "<VoicePluginsCard", "<VoiceSpeakerCard", "<VoiceHomeCard"] {
+            assert!(main.contains(card), "主语音页就地展开需要 {card}");
+            assert!(private.contains(card), "私密窗口保留 {card}");
+        }
+        let main_capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/voice-private-main.json")).unwrap();
+        assert_main_window_loopback_capability(&main_capability);
+        for permission in [
+            "allow-voice-firmware-status", "allow-voice-firmware-import", "allow-voice-firmware-manage",
+        ] {
+            assert!(
+                !main_capability["permissions"].as_array().unwrap().iter().any(|entry| entry == permission),
+                "{permission} 仍只在打包私密窗口"
+            );
+        }
+        let builtin = include_str!("voice_builtin.rs");
+        for command in ["pub async fn voice_firmware_status", "pub async fn voice_firmware_import", "pub async fn voice_firmware_manage"] {
+            let body = &builtin[builtin.find(command).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(body.contains("require_voice_private_asset(&window)?"), "{command} 仍只认打包私密页");
+        }
         assert!(include_str!("../../../../frontend/voice-private.html")
             .contains("src/voicePrivate.jsx"));
     }
@@ -627,7 +722,7 @@ mod tests {
                 "voice_builtin_start", "voice_builtin_stop", "voice_device_set_status", "voice_device_rename",
                 "voice_builtin_models_test", "voice_builtin_models_save", "voice_local_save",
                 "voice_local_model_download", "voice_local_model_cancel", "voice_local_model_delete",
-                "voice_agent_status", "voice_agent_save", "voice_music_pick_directory", "voice_music_status",
+                "voice_agent_status", "voice_agent_save", "voice_agent_stop", "voice_music_pick_directory", "voice_music_status",
                 "voice_music_save", "voice_vision_status", "voice_vision_save", "voice_vision_test",
             ][..]),
         ];

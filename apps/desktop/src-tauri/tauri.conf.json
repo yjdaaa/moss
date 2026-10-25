@@ -23,19 +23,30 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*"
+      "csp": "default-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*"
     }
   },
   "bundle": {
     "active": true,
     "icon": [
       "icons/icon.png",
+      "icons/icon.icns",
       "icons/icon.ico"
     ],
     "targets": [
-      "nsis"
+      "nsis",
+      "app",
+      "dmg",
+      "deb",
+      "appimage"
     ],
     "shortDescription": "MOSS 激光雕刻上位机",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": false,
+      "infoPlist": "Info.plist"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"

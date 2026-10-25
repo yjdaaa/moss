@@ -37,7 +37,7 @@
 | 项 | 代码事实 | 对安装包的影响 |
 | --- | --- | --- |
 | 打包开关 | `tauri.conf.json`：`bundle.active=false`，无 `windows.nsis` 配置；`identifier=com.moss.laser`，`productName=MOSS`，`version=0.1.0` | 需开启打包并补全安装器配置 |
-| 运行数据目录 | `laser-host` 调用 `RuntimeRoot::resolve(None, None)`，默认目录由 `RuntimeRoot::default_base()` 决定：`APPDATA` 非空时取 `%APPDATA%\moss`，否则取当前目录 `.runtime/`；`moss-host migrate` 不写 `--target` 时也用它 | **Windows 上实际写入 `%APPDATA%\moss`（漫游目录），不在程序目录旁**。旧文档“默认写入可执行文件同级 `.runtime/`”与代码不符，已在本次一并修正。对安装包是好事：安装到任何目录（包括 `C:\Program Files`）都不需要写权限，覆盖升级也不会碰到数据 |
+| 运行数据目录 | `laser-host` 调用 `RuntimeRoot::resolve(None, None)`，默认目录由 `RuntimeRoot::default_base()` 决定：Windows 为 `%APPDATA%\moss`，macOS 为 `~/Library/Application Support/moss`，Linux 为 `$XDG_DATA_HOME/moss` 或 `~/.local/share/moss`，均缺失时退回当前目录 `.runtime/`；`moss-host migrate` 不写 `--target` 时也用它 | **各桌面系统实际写入当前用户的应用数据目录，不在程序目录旁**。安装到 `C:\Program Files` 或 `/Applications/MOSS.app` 都不需要程序目录写权限，Finder 双击启动不会因只读 `/` 失败，覆盖升级也不会碰到用户数据 |
 | `.env` 读取 | `config::load_env_files`：先读进程环境变量，再读**启动时当前目录**（向上查找）的 `.env`，最后读**运行目录**的 `.env`（Windows 为 `%APPDATA%\moss\.env`）；先加载的优先，后者不覆盖前者 | 已修复（PKG-02）：快捷方式启动时当前目录不确定也不影响，运行目录里的 `.env` 一定能读到。`settings.json` 的 `web_port`、`mcp_endpoint` 照常可用 |
 | 实例锁 | 运行目录下 `moss.lock`（`fs4` 独占锁） | 安装器可据此判断是否有实例在运行 |
 | 语音中心外部目录 | 技术书 §9.4：`xiaozhi-server`、`mcp-endpoint-server` 源码目录由用户自备，路径存于 `settings.json` | **卸载不得删除**这些外部目录；只删除 MOSS 自己的程序文件和（用户同意时）运行数据 |
@@ -47,7 +47,7 @@
 
 | 项 | 状态 |
 | --- | --- |
-| PKG-01 打包配置 | 已写入 `apps/desktop/src-tauri/tauri.conf.json`：`bundle.active=true`、`targets=["nsis"]`、`installMode="both"`、简体中文 + 英文（不显示语言选择）、开始菜单文件夹 `MOSS`、`embedBootstrapper`、安装器图标与横幅 / 侧栏图、`installerHooks`。`publisher`、`copyright` 未填写（等用户提供真实信息，不预填） |
+| PKG-01 打包配置 | 已写入 `apps/desktop/src-tauri/tauri.conf.json`：`bundle.active=true`、`targets=["nsis", "app", "dmg", "deb", "appimage"]`（Tauri 按当前编译宿主自动筛选目标，Windows 仍只构建 `nsis`）、`icon` 含 `icon.png` / `icon.icns` / `icon.ico`、`macOS` 配置 `minimumSystemVersion="11.0"`、`signingIdentity="-"`（`hardenedRuntime=false`，确保 Tauri 二进制补丁后在 Apple Silicon 上完成内向外 ad-hoc 重签名；正式证书可通过 `APPLE_SIGNING_IDENTITY` 覆盖并开启 `hardenedRuntime=true`）与 `infoPlist="Info.plist"`（局域网 mDNS `_telnet._tcp` / `_http._tcp` 声明）；Windows NSIS 配 `installMode="both"`、简体中文 + 英文（不显示语言选择）、开始菜单文件夹 `MOSS`、`embedBootstrapper`、安装器图标与横幅 / 侧栏图、`installerHooks`。macOS 提供 `scripts/build-macos-installer.sh`，**默认**编译并内置 `moss-voice-local` sidecar、GPL 源码/许可证资源与 `release-manifest.json`（仅调试裸包时传 `--without-voice-sidecar`，待 Mac 实机验收）。`publisher`、`copyright` 未填写（等用户提供真实信息，不预填） |
 | PKG-02 安装版配置读取 | 已实施（见 §2 `.env` 行） |
 | PKG-03 安装/卸载钩子 | 已写 `apps/desktop/src-tauri/installer/hooks.nsh`：安装与卸载前用 `nsis_tauri_utils::FindProcess` 检测 `moss-desktop.exe`、`moss-host.exe` 与本地模型辅助程序 `moss-voice-local.exe`（2026-10-13 补），运行中只提示退出并取消。钩子位于 Tauri 模板 `CheckIfAppIsRunning` 之前，后者“询问后强行结束”的流程不会被触发。卸载时复用模板的“删除应用程序数据”复选框（`$DeleteAppDataCheckboxState`，默认不勾选），勾选且非更新模式时删除固定路径 `%APPDATA%\moss`（`APPDATA` 为空则跳过）。依据 Tauri `dev` 分支 `installer.nsi` / `utils.nsh` 核对；以用户本机 tauri-bundler 实际版本打包结果为准 |
 | PKG-04 安装器图片 | 已生成 `installer/header.bmp`（150×57）与 `installer/sidebar.bmp`（164×314），曜石配色 + MOSS 红眼 |
@@ -63,7 +63,7 @@
 | --- | --- |
 | helper EXE 收集 | `scripts/build-windows-installer.ps1` 已独立构建 Windows helper，复制为 `binaries/moss-voice-local-x86_64-pc-windows-msvc.exe`；overlay `tauri.voice-sidecar.conf.json` 已声明 externalBin。配置/脚本存在不证明成品含该文件 |
 | 常规与专用构建 | 常规 `cargo tauri build` 不自动构建/收集独立 GPL helper；带 helper NSIS 必须走专用脚本和 overlay。专用脚本已统一将 helper 输出写入根 `target/<triple>/release`，但原项目要求的 `target/release` 常规发布构建仍独立验收；专用 triple 产物与项目要求的 `target/release/moss-desktop.exe` 常规产物分别记录 |
-| 安装位置与启动 | 成品应将 `moss-voice-local.exe` 放在 `moss-desktop.exe` 同目录，宿主按 current_exe 父目录寻找并做 hello 协议校验；不回退任意 PATH 同名程序。当前协议 3，NV16 升级后按最终发布协议配套 |
+| 安装位置与启动 | 成品应将 `moss-voice-local.exe` 放在 `moss-desktop.exe` 同目录，宿主按 current_exe 父目录寻找并做 hello 协议校验；不回退任意 PATH 同名程序。`apps/moss-voice-local/build.rs`（以及独立后端 `apps/moss-host/build.rs`）在 Windows MSVC 下与 `moss-desktop.exe` 一致静态链接 `libvcruntime` / `libcmt`，干净 Windows 新机无需预装 Visual C++ 运行库即可启动；老版 Win10 缺 WebView2 时由 `tauri.conf.json` 的 `embedBootstrapper` 在安装期间自动联网下载补齐。当前协议 4 |
 | 源码与许可 | 脚本已暂存 helper 源码、path 依赖 `moss-voice-local-proto`、Cargo.lock、COPYING 和初版 THIRD_PARTY_NOTICES；overlay 已配置 `bundle.resources` 至 `licenses/voice-local/`。**上游 sherpa-onnx/espeak-ng 等静态依赖的完整分发所需对应源码/许可证和洁净机安装内资源验收尚待完成**，不能把初版 notices 当成合规证明 |
 | 成品验证 | 脚本新增发布清单生成，但本次构建进程状态丢失时清单尚未产出，不能把新 NSIS 文件出现视为构建通过；须复测同一构建的产物与源码/许可资源。后续补组件版本、协议、schema、大小/hash；解包检查 helper/资源并验证源码构建；经授权在干净系统完成新安装、升级、错误 helper、正常退出和卸载。缺这类证据仍为 partial/unverified |
 

@@ -307,8 +307,8 @@ impl Default for BuiltinPlugins {
     }
 }
 
-/// NV13: CLI task configuration only. The desktop cannot mark itself sandbox-verified.
-/// Paths/flags are inert until a separately authorized live sandbox negative test.
+/// NV13: 本机 Claude Code / Codex 的工作目录与可执行文件（2026-10-15 起用户开启后可用）。
+/// 每次运行都要桌面单独批准，且只在严格模式（`MOSS_FUSION_STRICT=1`）下运行。
 #[derive(Debug,Clone,Default,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(default)]
 pub struct BuiltinAgents {
@@ -325,6 +325,16 @@ pub struct BuiltinVision {
     pub enabled: bool,
     pub url: String,
     pub model: String,
+    /// 2026-10-16 用户要求：把照片交给“当前对话大模型”（多模态）看，而不是独立视觉模型。
+    /// 默认关闭；开启后 `url` / `model` 与 `voice.vision.main` 密钥都不再使用，
+    /// 改用 `builtin_models.llm` 的地址、模型名与 `voice.llm.main` 密钥。
+    #[serde(default)]
+    pub use_dialog_llm: bool,
+    /// 2026-10-16：把视觉请求的这张照片留进该设备的对话上下文（多模态用户消息），
+    /// 让后续追问可以直接引用。默认关闭；只在内存、随历史截断丢弃、不落盘。
+    /// 要求当前对话模型本身支持看图，否则每轮请求都会失败。
+    #[serde(default)]
+    pub keep_in_history: bool,
 }
 
 /// NV19: long-term context. Retrieval and extraction are separately opt-in and off for every
@@ -485,7 +495,7 @@ pub struct VoiceSettings {
     /// 内置语音服务的模型（不含密钥）
     #[serde(default, skip_serializing_if = "BuiltinModels::is_empty")]
     pub builtin_models: BuiltinModels,
-    /// NV13 stays disabled until an externally verified read-only CLI policy exists.
+    /// NV13 本机 Agent（默认关闭；开启与每次运行都要用户在电脑上确认）。
     #[serde(default)]
     pub builtin_agents:BuiltinAgents,
     /// NV15 inert Home Assistant settings, disabled until real authorization.

@@ -41,6 +41,11 @@ pub fn endpoint(base:&str)->Result<Url,VisionFailure>{
  let path=if path.ends_with("/chat/completions"){path.to_string()}else{format!("{path}/chat/completions")};
  url.set_path(&path);Ok(url)
 }
+/// 把图片字节编码成 OpenAI 兼容的 `data:` URL（多模态消息与视觉请求共用）。
+pub fn data_url(mime:&str,image:&[u8])->String{
+ format!("data:{mime};base64,{}",STANDARD.encode(image))
+}
+
 impl OpenAiVision {
  pub fn new(base:&str,model:&str,key:&str)->Result<Self,VisionFailure>{
   if model.trim().is_empty()||model.len()>200||key.trim().is_empty()||key.len()>8192 {return Err(VisionFailure::Configuration);}
@@ -49,7 +54,7 @@ impl OpenAiVision {
   Ok(Self {client,url:endpoint(base)?,model:model.into(),key:key.into()})
  }
  fn body(&self,question:&str,mime:&str,image:&[u8])->Value{
-  let data=format!("data:{mime};base64,{}",STANDARD.encode(image));
+ let data=data_url(mime,image);
   json!({"model":self.model,"stream":false,"messages":[{"role":"user","content":[
    {"type":"text","text":question},{"type":"image_url","image_url":{"url":data}}
   ]}],"max_tokens":512})

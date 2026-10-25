@@ -18,14 +18,17 @@ import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
 import { MaterialLabPage } from "./pages/MaterialLabPage.jsx";
 import { DrawPage } from "./pages/DrawPage.jsx";
+import { TwinPage } from "./pages/TwinPage.jsx";
 import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
 import { VoicePage } from "./pages/VoicePage.jsx";
 import { isVoiceCenterAvailable, voiceApi } from "./voiceApi.js";
+import { readHideTopPills, writeHideTopPills } from "./foldState.js";
 import "./styles.css";
 
 function pathToRoute(pathname, voiceEnabled) {
   if (pathname.startsWith("/material-lab")) return "/material-lab";
   if (pathname.startsWith("/draw")) return "/draw";
+  if (pathname.startsWith("/twin")) return "/twin";
   // 语音中心只在 MOSS 桌面端可用（技术书 §9.4.7）；其他环境回到工作台
   if (pathname.startsWith("/voice") && voiceEnabled) return "/voice";
   return "/";
@@ -45,6 +48,12 @@ function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
+  const [hideTopPills, setHideTopPills] = useState(() => readHideTopPills());
+  const handleHideTopPillsChange = useCallback((next) => {
+    const hidden = Boolean(next);
+    setHideTopPills(hidden);
+    writeHideTopPills(hidden);
+  }, []);
   // 退出时是否有 MOSS 启动的语音服务端在运行（决定关闭弹窗是否显示“同时停止语音服务端”）
   const [voiceServerOwned, setVoiceServerOwned] = useState(false);
   // 全局审批卡（技术书 §9.5.2）：只在桌面端（有桌面会话）显示
@@ -226,6 +235,7 @@ function App() {
           showApprovals={approvalsEnabled}
           approvalCount={approvalCount}
           onApprovalsClick={openApprovals}
+          hideStatusPills={hideTopPills}
         />
 
         <main className="main-content-viewport" key={currentPath}>
@@ -234,6 +244,13 @@ function App() {
           )}
           {currentPath === "/draw" && (
             <DrawPage onNavigate={navigateTo} />
+          )}
+          {currentPath === "/twin" && (
+            <TwinPage
+              onNavigate={navigateTo}
+              connectionStatus={connectionStatus}
+              setConnectionStatus={setConnectionStatus}
+            />
           )}
           {currentPath === "/voice" && voiceEnabled && (
             <VoiceErrorBoundary onBack={navigateTo}>
@@ -259,6 +276,8 @@ function App() {
       <SettingsModal
         visible={showSettingsModal}
         onClose={() => setShowSettingsModal(false)}
+        hideTopPills={hideTopPills}
+        onHideTopPillsChange={handleHideTopPillsChange}
         onOpenVoice={
           voiceEnabled
             ? () => {

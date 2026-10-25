@@ -1,6 +1,6 @@
 # 语音中心敏感 ACL 与本地安全窗口
 
-状态：2026-10-11，软件修复完成待本机安装版 GUI 验证。
+状态：2026-10-18，UI-4 入口收敛已实现；仍待本次安装版 WebView2 GUI 点击验收。
 
 本轮新增 `voice_speaker_manage`（声纹登记、元数据/取消/CAS删除）和 `voice_firmware_status`（只读下载记录），同样只授予 `voice-memory.json` 的 `voice-private` 固定打包窗口；两条命令都复核原始窗口URL，Android拒绝。普通回环页面不能读取姓名、向量或交付记录；声纹向量在所有返回值中均不序列化。固件传输和声纹识别均保持关闭。
 
@@ -19,7 +19,7 @@ MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 
 1. 保留主窗口原有 backend loopback navigation 与黑屏修复，不调整 server CORS 或给后端增加私密 REST API。
 2. 使用非敏感 `open_voice_private` 从主窗口打开新建 `voice-private` WebviewWindow，其实际来源必须是安装包中的 `WebviewUrl::App("voice-private.html")`。非 `main`、非当前后端同源或非打包主页面的调用均拒绝。再次点击复用已有安全窗口，不新建无限多窗口。
-3. `frontend/vite.config.mjs` 将 `index.html` 与 `voice-private.html` 同时作为独立入口，后者只渲染 VoicePluginsCard 与 VoiceMemoryCard 并以 `voice_builtin_status` 读取设备列表。默认主窗口不再挂载这两张会调用敏感命令的卡片，仅展示“打开本地安全设置窗口”按钮。
+3. 初始实现：`frontend/vite.config.mjs` 将 `index.html` 与 `voice-private.html` 同时作为独立入口，后者只渲染 VoicePluginsCard 与 VoiceMemoryCard 并以 `voice_builtin_status` 读取设备列表。默认主窗口不再挂载这两张会调用敏感命令的卡片，仅展示“打开本地安全设置窗口”按钮。
 4. `voice-plugins.json` 与 `voice-memory.json` 保留全部原有权限和“无 remote”限制，只把授权窗口标签从旧的 `main` 切换到唯一 `voice-private`。**敏感权限没有加入**包含 `windows:["*"]`、`remote.urls` 的 `default.json`；那里仅新增不返回数据的打开窗口命令。Tauri ACL 仍是第一层门禁。
 5. 六个敏感 Tauri 处理函数再验证 `WebviewWindow.label()=="voice-private"`，完整来源只能是 `tauri://localhost/voice-private.html` 或 `http(s)://tauri.localhost/voice-private.html`（无额外端口/查询参数/片段）；错误返回固定 `voice_acl_denied`，不读数据库。安全窗口同时阻断跳转到任意外部/loopback 页面，关闭安全窗口时真正销毁，不走主窗口的激光任务关闭拦截。
 6. 移动端不创建该窗口，敏感命令仍 `desktop_only`。只查询插件密钥是否已设置，绝不回显实际值；私人记忆只能在该本地可信窗口展示和编辑。没有对普通浏览器、局域网或小智设备开放访问。
@@ -42,13 +42,25 @@ MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 - `VoiceContextCard` 只挂在 `voicePrivate.jsx`，主窗口 `/voice` 页面不引用它，也不调用这两条命令（`voicePrivacyAcl.test.mjs` 与 `moss-desktop` 的 `voice_context_permissions_are_packaged_private_window_only` 检查）。主窗口的 `voice_save_settings` 不接受 `builtin_context`，不能打开检索 / 提取或更换当前项目（`moss-voice` center 测试）。
 - 仍需在安装版的真实 WebView2 中点击验收（HW-17）。
 
+### 2026-10-18 UI-4 入口收敛
+
+- 主窗口的“隐私与家居”是四项各自的下拉：点开哪一项，就在主页面原地展开对应设置（记忆 / 信息服务 / 声纹 / 家居，含“长期记忆、资料与恢复摘要”与“家居审批”两个次级折叠），未展开时不发任何私密命令。这是 n26（2026-10-18 用户决定）对 n25 的修订，见下节。
+- `open_voice_private` 与打包的 `voice-private.html` 仍然保留：只接受 `overview/memory/plugins/speaker/home/approvals/firmware` 固定目标，固件入口仍在“服务与设备”用它打开。
+
+### 2026-10-18 n26 主窗口就地展开（权限扩大，已获用户明确同意）
+
+- 新增 `capabilities/voice-private-main.json`：`windows:["main"]`、`remote.urls:["http://127.0.0.1:*"]`、无 `webviews`，权限仅为四项设置所需（`voice-memory-*`、`voice-speaker-manage`、`voice-plugins-*`、`voice-home-*`、`voice-context-*`）。原有 `voice-memory/plugins/home/context` 四个 capability 仍只授 `voice-private`，不放宽。
+- 原生侧新增 `require_private_settings_window`：接受打包私密页，或经 `window_is_trusted_main` 确认的 `main` 窗口（label 为 `main`、来源为本进程后端 `http://127.0.0.1:<port>`）。19 个命令改用它；`voice_firmware_status/import/manage` 继续只用 `require_voice_private_asset`，固件导入与推送只能从打包私密页发起。
+- 影响与边界：私人记忆、插件凭据、家居地址/令牌、长期记忆与资料索引从此可由主语音页读取与修改，主窗口页面本身的 XSS 风险因此也覆盖这些数据；这是用户知情后的选择。家居逐次桌面审批、声纹标定门槛、各项默认关闭的业务门禁不变。
+
 ## 验证
 
-- Rust `moss-desktop` ACL 检查：remote/wildcard/default 中没有敏感权限，专用 capability 限定 `voice-private` 且缺省不启用 remote；敏感函数额外校验页面来源，恶意主窗口、其他 HTTP、伪造端口、路径与 query/fragment 均拒绝。
-- 前端 `voicePrivacyAcl.test.mjs`：确认主窗口不加载敏感卡片、打包独立入口存在、所有六项 Tauri 命令都经过 Rust guard、原有 `window.navigate(parsed)` 仍保留。
+- Rust `moss-desktop` ACL 检查：通配/远程 `default.json` 中没有敏感权限；`voice-private` 专用 capability 缺省不启用 remote；n26 起另有一份 `main` 专用 capability（回环 remote），敏感函数再校验页面来源——打包私密页或本进程回环后端上的 `main` 窗口，其他 HTTP、伪造端口、路径与 query/fragment 均拒绝；固件三条命令仍只认打包私密页。
+- 前端 `voicePrivacyAcl.test.mjs`：确认四项设置卡已在主语音页就地挂载、`voice-private-main.json` 授权窗口为 `main` 且不含固件权限、私密 capability 未放宽、打包独立入口与 `window.navigate(parsed)` 仍保留。
 - Vite 输出真实 `dist/voice-private.html` 与带哈希的 JS，`dist/index.html` 仍存在；需通过 `npm run build` 复验。
-- 全量已验收：桌面 Rust 23/23、Rust workspace 630/630、前端 106/106（新增 3 项 ACL 回归）、FakeGrbl E2E 32/32；Windows release EXE / 普通 NSIS exit 0，Android aarch64 APK exit 0，APK 内原生 `.so` 与本轮编译库 SHA-256 一致。具体文件体积与 SHA-256 见 `CHANGELOG.md` 同日 ACL 修复条目；普通 NSIS 仍非 NV18 专用 sidecar 包。
-- **最后需要实际 Windows WebView2 GUI 点击验收**：打开当轮新 `target/release/moss-desktop.exe` → 语音中心 → 内置服务 → “打开本地安全设置窗口”，确认新窗口中的插件配置与私人记忆列表正常加载或正常为空且没有 `not allowed by ACL`；关闭新窗口，确认主窗口仍显示且没有黑屏。用户无需输入任何真实密钥、保存/清空记忆或连接设备。没有执行这次手动验收之前只标 `software tested / GUI unverified`。
+- 2026-10-11 原软件回执：桌面 Rust 23/23、Rust workspace 630/630、前端 106/106（新增 3 项 ACL 回归）、FakeGrbl E2E 32/32；Windows release EXE / 普通 NSIS exit 0，Android aarch64 APK exit 0，APK 内原生 `.so` 与本轮编译库 SHA-256 一致。具体文件体积与 SHA-256 见 `CHANGELOG.md` 同日 ACL 修复条目；普通 NSIS 仍非 NV18 专用 sidecar 包。
+- 2026-10-18 UI-4 的本次软件检查与 Windows/Android 交付构建见 [交付构建回执](../developer/build-receipts.md)；浏览器模拟和打包成功均不替代真实私密窗口点击。
+- **最后需要实际 Windows WebView2 GUI 点击验收**：打开当轮新 `target/release/moss-desktop.exe` → 语音中心 → “隐私与家居” → 依次打开四个入口（固件从“服务与设备”打开），确认新窗口中的插件配置与私人记忆列表正常加载或正常为空且没有 `not allowed by ACL`；关闭新窗口，确认主窗口仍显示且没有黑屏。用户无需输入任何真实密钥、保存/清空记忆或连接设备。没有执行这次手动验收之前只标 `software tested / GUI unverified`。
 
 关联：`apps/desktop/src-tauri/{build.rs,src/lib.rs,src/voice_builtin.rs,capabilities/{default,voice-memory,voice-plugins}.json}`，
 `frontend/{vite.config.mjs,voice-private.html,src/voicePrivate.jsx,src/voiceApi.js,src/components/VoiceBuiltinCard.jsx,tests/voicePrivacyAcl.test.mjs}`。

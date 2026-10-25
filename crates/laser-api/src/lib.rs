@@ -110,7 +110,7 @@ type SendLauncher<'a> = &'a dyn Fn(
 
 /// 前端页面路由：刷新这些地址时返回 index.html，由前端决定显示哪一页（语音中心只在桌面端显示）。
 fn is_spa_route(route: &str) -> bool {
-    matches!(route, "/draw" | "/material-lab" | "/voice") || route.starts_with("/draw/")
+    matches!(route, "/draw" | "/material-lab" | "/voice" | "/twin") || route.starts_with("/draw/")
 }
 
 /// SD 脱机：固件没有返回文件哈希时拒绝 `$SD/Run`（无法确认机器端文件就是确认过的刀路）。
@@ -3057,7 +3057,7 @@ fn generate_text_artifacts(
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(laser_core::font::find_system_font)
+        .or_else(|| laser_core::font::find_system_font_for_text(text))
         .ok_or("font_path 必须指向可读的 TTF/TTC 字体")?;
     let font_path = font_path_buf.to_str().ok_or("非法字体路径")?;
     let font_size = parse_float(object.get("font_size_mm"), "font_size_mm", 10.0)
@@ -6375,7 +6375,7 @@ mod tests {
         assert!(page.starts_with("HTTP/1.1 200 OK"));
         assert!(page.contains("<div id=\"root\"></div>"));
         assert!(page.contains("/assets/"));
-        for route in ["/draw", "/material-lab", "/voice"] {
+        for route in ["/draw", "/material-lab", "/voice", "/twin"] {
             // 在任一页面按 F5 刷新都应回到前端页面，而不是 404
             let index = service.handle_http(format!("GET {route} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
             assert!(String::from_utf8_lossy(&index).starts_with("HTTP/1.1 200 OK"), "{route}");

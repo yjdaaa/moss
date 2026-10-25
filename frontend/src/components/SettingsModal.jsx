@@ -7,9 +7,20 @@ import { FoldHeader } from "./FoldHeader.jsx";
 import { ExportSettingsSection } from "./ExportSettingsSection.jsx";
 import { PhoneLinkSection } from "./PhoneLinkSection.jsx";
 import { isRemoteMode } from "../authSession.js";
+import { readHideTopPills, writeHideTopPills } from "../foldState.js";
+import { trayActionCopy } from "../platform.js";
 
-export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
+export function SettingsModal({
+  visible,
+  onClose,
+  onOpenVoice = null,
+  hideTopPills: hideTopPillsProp,
+  onHideTopPillsChange = null,
+}) {
   const [closeAction, setCloseAction] = useState("ask");
+  const [hideTopPills, setHideTopPills] = useState(() =>
+    typeof hideTopPillsProp === "boolean" ? hideTopPillsProp : readHideTopPills()
+  );
   const [portInput, setPortInput] = useState("9666");
   const [systemInfo, setSystemInfo] = useState(null);
   const [saveStatus, setSaveStatus] = useState("");
@@ -31,6 +42,7 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
 
     const saved = localStorage.getItem("moss_close_action") || "ask";
     setCloseAction(saved);
+    setHideTopPills(typeof hideTopPillsProp === "boolean" ? hideTopPillsProp : readHideTopPills());
 
     // 查询系统实际运行端口与首选端口
     getJson("/api/system/info").then((res) => {
@@ -48,13 +60,22 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
         setJevMaskedKey(jev.masked_key || "");
       }
     });
-  }, [visible]);
+  }, [visible, hideTopPillsProp]);
 
   if (!visible) return null;
 
   const handleActionChange = (action) => {
     setCloseAction(action);
     localStorage.setItem("moss_close_action", action);
+  };
+
+  const handleHideTopPillsChange = (checked) => {
+    const next = Boolean(checked);
+    setHideTopPills(next);
+    writeHideTopPills(next);
+    if (onHideTopPillsChange) {
+      onHideTopPillsChange(next);
+    }
   };
 
   const handleSaveMcpEndpoint = async () => {
@@ -209,6 +230,23 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
         </div>
 
         <div className="mat-modal-body">
+          {/* 顶栏右上角状态显示 */}
+          <div className="ob-fold settings-box-3" id="settings-top-pills-section">
+            <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" defaultOpen={true} />
+            <div className="settings-box-4">
+              开启后隐藏页面右上角的「硬件」「小智」「审批」三个状态胶囊（未开启时保持原样显示；常驻「急停 0x18」按钮与新审批自动弹窗保持不变）：
+            </div>
+            <label className="settings-label">
+              <input
+                type="checkbox"
+                id="settings-hide-top-pills"
+                checked={hideTopPills}
+                onChange={(e) => handleHideTopPillsChange(e.target.checked)}
+              />
+              <span>隐藏右上角状态胶囊（硬件 / 小智 / 审批）</span>
+            </label>
+          </div>
+
           {/* 手机连接（电脑端：允许连接 / 配对码；手机端：连接电脑） */}
           <PhoneLinkSection />
 
@@ -465,10 +503,10 @@ export function SettingsModal({ visible, onClose, onOpenVoice = null }) {
                 />
                 <div>
                   <div className="settings-box-9">
-                    最小化到系统托盘
+                    {trayActionCopy().title}
                   </div>
                   <div className="settings-box-10">
-                    直接隐藏窗口到右下角托盘区，后台作业不中断，可在托盘右键退出
+                    {trayActionCopy().settingsDetail}
                   </div>
                 </div>
               </label>

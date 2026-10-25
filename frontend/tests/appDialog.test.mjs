@@ -7,6 +7,7 @@ import {
   resetDialogs,
   resolveDialog,
   showAlert,
+  showChoice,
   showConfirm,
   subscribe,
 } from "../src/appDialog.js";
@@ -88,4 +89,26 @@ test("显式 title 优先于消息中的【】标题；未知 tone 回退 info",
   resolveDialog(current.id, true);
   await p;
   unsubscribe();
+});
+
+// 2026-10-15：桌面端 Tauri 的 window.confirm 是返回 Promise 的异步函数，直接当布尔值会永远“确认”。
+test("原生降级会等待异步 confirm，并在出错时按取消处理", async () => {
+  const saved = globalThis.window;
+  try {
+    for (const [confirm, expectConfirm, expectChoice] of [
+      [async () => false, false, "cancel"],
+      [async () => true, true, "confirm"],
+      [() => false, false, "cancel"],
+      [async () => { throw new Error("not allowed"); }, false, "dismiss"],
+      [undefined, false, "dismiss"],
+    ]) {
+      globalThis.window = { confirm, alert: async () => {} };
+      assert.equal(await showConfirm("删除？"), expectConfirm);
+      assert.equal(await showChoice("怎么办？"), expectChoice);
+    }
+    globalThis.window = { alert: async () => { throw new Error("blocked"); } };
+    await showAlert("提示");
+  } finally {
+    globalThis.window = saved;
+  }
 });

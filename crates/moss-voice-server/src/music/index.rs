@@ -454,6 +454,21 @@ mod tests {
         ] {
             assert!(sensitive_catalog_root(Path::new(root)), "accepted {root}");
         }
+        for unix_like in [
+            "/System/Library/Sounds",
+            "/Library/Audio",
+            "/Applications/Music.app",
+            "/Users",
+            "/Users/someone",
+            "/Users/someone/Library",
+            "/Users/someone/Library/Application Support",
+            "/Volumes",
+            "/Volumes/ExternalSSD",
+        ] {
+            assert!(sensitive_catalog_root(Path::new(unix_like)), "accepted {unix_like}");
+        }
+        assert!(!sensitive_catalog_root(Path::new("/Users/someone/Music")));
+        assert!(!sensitive_catalog_root(Path::new("/Volumes/ExternalSSD/Music")));
         let temp = tempfile::tempdir().unwrap();
         assert!(!sensitive_catalog_root(temp.path()));
     }

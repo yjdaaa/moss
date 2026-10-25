@@ -38,7 +38,7 @@ try {
     voice_mcp_status: { servers: [], connections: [], audit: [], revision: "mock", max_servers: 8 },
     voice_home_status: { revision: 1, settings: { enabled: false, entities: [], base_url: "" } },
     voice_music_status: { settings: { enabled: false, directory: "" }, track_count: 0 },
-    voice_agent_status: { enabled: false, sandbox_verified: false, runs: [], settings: {} },
+    voice_agent_status: { configured: false, strict_mode: true, providers: [], runs: [], settings: {} },
     voice_vision_status: { enabled: false, settings: {} },
     voice_plugins_status: { settings: { news_sources: [], rag_dataset_ids: [] }, keys: {} },
     voice_memory_list: [],

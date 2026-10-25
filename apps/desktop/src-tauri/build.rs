@@ -27,6 +27,8 @@ fn main() {
         "voice_server_log",
         "voice_models_test",
         "voice_models_save",
+        "voice_detect_python",
+        "voice_strict_set",
         // 内置语音服务（内置语音技术书 NV1）
         "voice_builtin_status",
         "voice_builtin_start",
@@ -50,6 +52,7 @@ fn main() {
         "voice_home_discover",
         "voice_agent_status",
         "voice_agent_save",
+        "voice_agent_stop",
         "voice_vision_status",
         "voice_vision_save",
         "voice_vision_test",
@@ -65,6 +68,8 @@ fn main() {
         "voice_context_pick_folder",
         "voice_speaker_manage",
         "voice_firmware_status",
+        "voice_firmware_import",
+        "voice_firmware_manage",
         // 内置语音服务的模型配置（NV5）
         "voice_builtin_models_test",
         "voice_builtin_models_save",

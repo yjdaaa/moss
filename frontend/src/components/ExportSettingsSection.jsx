@@ -58,7 +58,7 @@ function ExportSettingsPanel() {
         <span className="mono">{view?.effective_dir || "读取中…"}</span>
         {view && !view.available && (
           <span className="ob-export-warn">
-            <AlertTriangle size={13} aria-hidden="true" /> 目录当前不可用（可能已拔出或无写入权限），导出时会请你重新选择
+            <AlertTriangle size={13} aria-hidden="true" /> 目录当前不可用（可能已换电脑、已拔出或无写入权限），导出时会请你重新选择
           </span>
         )}
       </div>
@@ -69,7 +69,7 @@ function ExportSettingsPanel() {
         <button type="button" className="btn btn-ghost" disabled={busy || !view?.dir} onClick={() => run("reset_export_dir")}>
           <RotateCcw size={14} /> 恢复默认
         </button>
-        <button type="button" className="btn btn-ghost" disabled={busy || !view} onClick={openFolder}>
+        <button type="button" className="btn btn-ghost" disabled={busy || !view || !view.available} onClick={openFolder}>
           <FolderOpen size={14} /> 打开文件夹
         </button>
       </div>

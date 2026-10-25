@@ -39,6 +39,8 @@
 - 环境变量集中在 `laser_runtime::LaserSettings` 与 `laser_tools::resolve_connection_spec` 读取。
 - 数据库迁移加在 `RuntimeDb::migrate`，事务内执行、可重跑，使用实际下一可用版本号。
 - 新增 Tauri 命令：在 `apps/desktop/src-tauri/build.rs` 的 `AppManifest::commands` 登记，并加入对应 capability（主窗口 `default.json`，私有窗口 `voice-*.json`）；私有命令同步 `frontend/tests/voicePrivacyAcl.test.mjs`。漏登记会在运行时被 ACL 拒绝，曾导致启动失败和黑屏。
+- 会创建窗口的 Tauri 命令必须写成 `async fn`：Windows 上在同步命令里建窗口会让主线程死锁（新窗口白屏、程序无响应），`moss-desktop` 的 `window_creating_commands_are_async` 会检查。
+- 前端确认一律 `await showConfirm(...)`（`appDialog.js`），不要直接用 `window.confirm` / `window.alert`：桌面端 Tauri 对话框插件把它们换成了返回 Promise 的异步函数，直接当布尔值会在用户回答前就判成“确认”。新页面入口要挂 `<AppDialogHost />`。
 - PowerShell 脚本保持纯 ASCII：Windows PowerShell 5.1 按系统代码页读取无 BOM 文件，中文会导致解析失败。
 - 平台差异显式分支，不支持时返回明确原因。
 - 工具名、HTTP 路由、错误码、响应字段和用户可见文案都是契约：改动前更新 [Web API 契约](api-contracts.md) 与测试断言。

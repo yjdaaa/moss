@@ -229,13 +229,21 @@ pub async fn pick_export_dir(
     app: tauri::AppHandle,
     state: tauri::State<'_, ExportState>,
 ) -> Result<Option<ExportSettingsView>, String> {
-    pick_export_dir_impl(&app, &state)
+    let settings_file = state.settings_file.clone();
+    tauri::async_runtime::spawn_blocking(move || pick_export_dir_impl(&app, settings_file.as_deref()))
+        .await
+        .map_err(|_| "打开导出目录选择框失败".to_owned())?
 }
 
 #[cfg(desktop)]
-fn pick_export_dir_impl(app: &tauri::AppHandle, state: &ExportState) -> Result<Option<ExportSettingsView>, String> {
+fn pick_export_dir_impl(
+    app: &tauri::AppHandle,
+    settings_path: Option<&Path>,
+) -> Result<Option<ExportSettingsView>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let file = settings_file(state)?.to_path_buf();
+    let file = settings_path
+        .ok_or_else(|| "运行目录不可用，无法保存导出设置".to_owned())?
+        .to_path_buf();
     let current = read_export_settings(&file);
     let mut builder = app.dialog().file().set_title("选择导出文件夹");
     if let Some(dir) = current.dir.as_deref().filter(|d| Path::new(d).is_dir()) {
@@ -257,7 +265,10 @@ fn pick_export_dir_impl(app: &tauri::AppHandle, state: &ExportState) -> Result<O
 }
 
 #[cfg(not(desktop))]
-fn pick_export_dir_impl(_app: &tauri::AppHandle, _state: &ExportState) -> Result<Option<ExportSettingsView>, String> {
+fn pick_export_dir_impl(
+    _app: &tauri::AppHandle,
+    _settings_path: Option<&Path>,
+) -> Result<Option<ExportSettingsView>, String> {
     Err("当前平台暂不支持选择导出目录".into())
 }
 
@@ -377,7 +388,14 @@ pub async fn save_export_file(
     })?;
 
     if settings.ask_each_time && !fallback {
-        return save_via_dialog(&app, &dir, &name, &bytes);
+        let app_for_dialog = app.clone();
+        let dir_for_dialog = dir.clone();
+        let name_for_dialog = name.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            save_via_dialog(&app_for_dialog, &dir_for_dialog, &name_for_dialog, &bytes)
+        })
+        .await
+        .map_err(|_| "打开保存位置选择框失败".to_owned())?;
     }
 
     let target = write_new_export(&dir, &name, &bytes)?;

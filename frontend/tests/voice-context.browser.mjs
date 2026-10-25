@@ -37,6 +37,14 @@ try {
   });
   await page.addInitScript(() => {
     window.__calls = [];
+    // Like the desktop app: Tauri's dialog plugin makes window.confirm async (returns a Promise).
+    window.__confirms = [];
+    window.__confirmAnswer = true;
+    window.confirm = async (message) => {
+      window.__confirms.push(String(message));
+      await new Promise((r) => setTimeout(r, 50));
+      return window.__confirmAnswer;
+    };
     const device = "aa:bb:cc:dd:ee:ff";
     const state = { retrieval: false, extraction: false, project: null, rows: [], runs: [{ id: "run-1", started_at: 1790000000, finished_at: 1790000001, reverted_at: null, added: 1, skipped: [{ op: "update", reason: "op_not_allowed" }] }], roots: [], resume: null, seq: 0 };
     const status = () => ({ retrieval: state.retrieval, extraction: state.extraction, project: state.project, devices: [{ id: device, name: "工作台小智", model: "MOSS-550W", firmware: "1.2.0" }], scopes: [{ kind: "device", id: device, total: state.rows.length, active: state.rows.length, candidates: 0, chars: 0 }], legacy_summaries: [device] });
@@ -103,9 +111,10 @@ try {
   // Both switches start off; extraction asks first and sends the consent flag.
   assert.equal(await page.locator("#context-retrieval").isChecked(), false);
   assert.equal(await page.locator("#context-extraction").isChecked(), false);
-  await page.locator("#context-extraction").check();
+  await page.locator("#context-extraction").click();
   await status("已开启");
-  assert.ok(dialogs.some((d) => d.includes("会发给你在内置服务里配置的大模型")));
+  const confirms = () => page.evaluate(() => window.__confirms);
+  assert.ok((await confirms()).some((d) => d.includes("会发给你在内置服务里配置的大模型")));
   assert.equal((await last("set_options")).confirmed, true);
 
   // Memories: create, reject machine data, confirm, search, delete.
@@ -129,11 +138,18 @@ try {
   assert.ok((await page.locator(".voice-context-row").innerText()).includes("预计时长"), "查找结果不会被随后的刷新覆盖");
   await page.getByRole("button", { name: "深度检索" }).click();
   await page.getByRole("alert").filter({ hasText: "需要先配置" }).waitFor();
-  assert.ok(dialogs.some((d) => d.includes("不发送记忆内容")));
+  assert.ok((await confirms()).some((d) => d.includes("不发送记忆内容")));
   await page.getByRole("button", { name: "导入旧摘要为候选" }).click();
   await status("从旧摘要导入 1 条候选（跳过：含敏感内容或机器指令）");
   await page.getByRole("button", { name: "整批撤销" }).click();
   await status("已撤销 1 条");
+  // Answering "cancel" to an async confirm must stop the action.
+  await page.evaluate(() => { window.__confirmAnswer = false; });
+  const before = (await calls()).filter((c) => c.action === "delete").length;
+  await page.locator(".voice-context-row").first().getByRole("button", { name: "删除" }).click();
+  await page.waitForTimeout(300);
+  assert.equal((await calls()).filter((c) => c.action === "delete").length, before, "点了取消就不能删除");
+  await page.evaluate(() => { window.__confirmAnswer = true; });
   await page.locator(".voice-context-row").first().getByRole("button", { name: "删除" }).click();
   await status("已删除");
 
@@ -142,6 +158,12 @@ try {
   await page.getByLabel("项目名称").fill("椴木杯垫");
   await page.getByRole("button", { name: "设为当前项目" }).click();
   await page.locator("#context-project").filter({ hasText: "椴木杯垫" }).waitFor();
+  // A project scope only takes tasks: the add button must still work there.
+  await page.getByLabel("记忆范围").selectOption({ label: "项目：椴木杯垫" });
+  await page.getByLabel("新记忆内容").fill("周五交付样品");
+  await page.getByRole("button", { name: "保存新记忆" }).click();
+  await status("已新增");
+  assert.equal((await last("create")).category, "task_context");
   await page.getByRole("button", { name: "添加资料文件夹…" }).click();
   await status("已建立索引：2 个目录、3 个文件");
   assert.ok((await page.locator("#context-knowledge").innerText()).includes("说明书"));

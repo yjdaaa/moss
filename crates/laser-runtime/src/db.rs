@@ -102,7 +102,7 @@ impl ApprovalRow {
 /// v10：NV19 结构化长期记忆 `context_memories` 与提取变更清单 `context_extraction_runs`。
 /// v11：NV19-04 记忆正文的 FTS5 trigram 全文索引 `context_memories_fts`（触发器同步）。
 /// v12：NV19-05 分层知识库：资料根目录、目录 L0/L1 摘要与文件指纹，目录摘要 FTS5 索引。
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,6 +126,8 @@ pub struct VoiceSpeakerTemplate {pub id:String,pub revision:i64,pub embedding:Ve
 pub struct VoiceFirmwareDeliveryRecord {
     pub delivery_id:String,pub device_id:String,pub artifact_sha256:String,
     pub download_status:String,pub device_report_status:String,pub revision:i64,pub updated_at:f64,
+    /// 推送的固件版本与推送到期时间（schema 13；旧记录为空串 / 0）
+    pub firmware_version:String,pub expires_at:f64,
 }
 
 /// 内置语音服务登记的小智设备（内置语音技术书 §6：新设备首次连接需在桌面端允许）。
@@ -626,6 +628,35 @@ impl RuntimeDb {
                  INSERT INTO schema_version(version,applied_at) VALUES(12,unixepoch());"
             )?;
         }
+        if current.unwrap_or(0) < 13 {
+            // NV17 固件 OTA（2026-10-15）：导入的固件与逐台推送。令牌只用于这一次推送的下载地址。
+            // 加列前先查表结构，重跑迁移（失败回滚后重试）时不会重复加列。
+            let existing = {
+                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('voice_firmware_delivery')")?;
+                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                names
+            };
+            for (column, definition) in [
+                ("firmware_version", "TEXT NOT NULL DEFAULT ''"),
+                ("token", "TEXT"),
+                ("expires_at", "REAL NOT NULL DEFAULT 0"),
+            ] {
+                if !existing.iter().any(|name| name == column) {
+                    tx.execute_batch(&format!("ALTER TABLE voice_firmware_delivery ADD COLUMN {column} {definition};"))?;
+                }
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS voice_firmware_artifacts(
+                   sha256 TEXT PRIMARY KEY NOT NULL CHECK(length(sha256)=64),
+                   version TEXT NOT NULL CHECK(length(version) BETWEEN 1 AND 32),
+                   project TEXT NOT NULL DEFAULT '' CHECK(length(project) <= 32),
+                   size INTEGER NOT NULL CHECK(size > 0),
+                   created_at REAL NOT NULL
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS voice_firmware_token ON voice_firmware_delivery(token) WHERE token IS NOT NULL;
+                 INSERT INTO schema_version(version,applied_at) VALUES(13,unixepoch());"
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -650,8 +681,8 @@ impl RuntimeDb {
 
     /// Private desktop diagnostic only. A finished download is never a flash claim.
     pub fn list_firmware_deliveries(&self)->Result<Vec<VoiceFirmwareDeliveryRecord>,SchemaError>{
-        let mut statement=self.connection.prepare("SELECT delivery_id,device_id,artifact_sha256,download_status,device_report_status,revision,updated_at FROM voice_firmware_delivery ORDER BY updated_at DESC,delivery_id LIMIT 200")?;
-        let rows=statement.query_map([],|r|Ok(VoiceFirmwareDeliveryRecord{delivery_id:r.get(0)?,device_id:r.get(1)?,artifact_sha256:r.get(2)?,download_status:r.get(3)?,device_report_status:r.get(4)?,revision:r.get(5)?,updated_at:r.get(6)?}))?;
+        let mut statement=self.connection.prepare("SELECT delivery_id,device_id,artifact_sha256,download_status,device_report_status,revision,updated_at,firmware_version,expires_at FROM voice_firmware_delivery ORDER BY updated_at DESC,delivery_id LIMIT 200")?;
+        let rows=statement.query_map([],|r|Ok(VoiceFirmwareDeliveryRecord{delivery_id:r.get(0)?,device_id:r.get(1)?,artifact_sha256:r.get(2)?,download_status:r.get(3)?,device_report_status:r.get(4)?,revision:r.get(5)?,updated_at:r.get(6)?,firmware_version:r.get(7)?,expires_at:r.get(8)?}))?;
         rows.collect::<Result<Vec<_>,_>>().map_err(Into::into)
     }
 

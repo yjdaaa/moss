@@ -21,6 +21,7 @@ fn nv16_enrollment_is_atomic_bounded_private_and_deleted_with_memory(){
     assert!(db.list_voice_speakers().unwrap().is_empty());
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn home_token_is_private_versioned_and_revocation_invalidates_approvals() {
     let db=RuntimeDb::open_memory().unwrap();
@@ -28,7 +29,10 @@ fn home_token_is_private_versioned_and_revocation_invalidates_approvals() {
     assert_eq!(db.update_home_token_if_revision(0,Some("synthetic_long_lived_test_token_without_whitespace"),1.).unwrap(),Some(1));
     assert_eq!(db.home_token_status().unwrap(),(true,1));
     let stored=db.get_secret("voice.homeassistant.token").unwrap().unwrap();
+    #[cfg(windows)]
     assert!(stored.starts_with("dpapi-user-v1:"));
+    #[cfg(target_os = "macos")]
+    assert!(stored.starts_with("keychain-user-v1:"));
     assert!(!stored.contains("synthetic_long_lived"));
     assert_eq!(db.home_token_for_connection().unwrap().as_deref(),Some("synthetic_long_lived_test_token_without_whitespace"));
     assert_eq!(db.update_home_token_if_revision(0,None,2.).unwrap(),None);
@@ -48,6 +52,7 @@ fn home_token_is_private_versioned_and_revocation_invalidates_approvals() {
     assert_eq!(db.home_token_status().unwrap(),(true,3));
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn nv15_legacy_plaintext_migration_is_atomic_and_one_time() {
     let db=RuntimeDb::open_memory().unwrap();
@@ -61,6 +66,7 @@ fn nv15_legacy_plaintext_migration_is_atomic_and_one_time() {
     assert_eq!(db.home_token_status().unwrap(),(true,1));
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn nv15_backup_does_not_persist_plaintext_and_two_connections_cannot_reuse_old_revision(){
     let dir=tempfile::tempdir().unwrap();
@@ -88,6 +94,7 @@ fn nv15_backup_does_not_persist_plaintext_and_two_connections_cannot_reuse_old_r
 }
 
 
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn nv15_token_rotation_revoke_wipes_all_voice_grants_and_approval_pending() {
     let db = RuntimeDb::open_memory().unwrap();
@@ -120,6 +127,7 @@ fn nv15_token_rotation_revoke_wipes_all_voice_grants_and_approval_pending() {
     assert_eq!(db.home_token_status().unwrap(),(false,4));
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn nv15_concurrent_token_cas_has_only_one_winner_across_connections() {
     use std::{sync::{Arc,Barrier},thread};
@@ -182,8 +190,12 @@ fn nv15_foreign_dpapi_blob_recovery_requires_revision_and_never_decrypts_old_sec
         "SELECT status FROM approvals WHERE approval_id='foreign-approval'",[],|r|r.get(0)
     ).unwrap();
     assert_eq!(state,"expired");
+    #[cfg(any(windows, target_os = "macos"))]
     assert_eq!(primary.update_home_token_if_revision(7,
         Some("synthetic_old_token_must_not_revive_this_approval"),4.).unwrap(),None);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    assert!(primary.update_home_token_if_revision(7,
+        Some("synthetic_old_token_must_not_revive_this_approval"),4.).is_err());
     assert_eq!(primary.home_token_status().unwrap(),(false,8));
 }
 

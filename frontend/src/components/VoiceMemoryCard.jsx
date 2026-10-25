@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
+import { showConfirm } from "../appDialog.js";
+
+const ask = (message) => showConfirm(message, { title: "请确认", tone: "warning", danger: true });
 
 export default function VoiceMemoryCard({ status }) {
   const [enabled, setEnabled] = useState(false);
@@ -34,8 +37,8 @@ export default function VoiceMemoryCard({ status }) {
   const devices = status?.devices || [];
   return (
     <section className="voice-card" aria-label="设备记忆">
-      <h3>设备记忆</h3>
-      <p>默认关闭。开启后会将筛选后的对话文字交给当前配置的大模型生成摘要；如果使用云模型，对话内容会发往对应服务商。只为已允许设备保存文字摘要，不保存录音。摘要绝不授予设备操作权限。</p>
+      <h3>对话记忆</h3>
+      <p>默认关闭。开启后会用对话文字生成本机摘要；使用云模型时，筛选后的文字会发送给服务商。不保存录音，记忆不能授权设备动作。</p>
       <label>
         <input type="checkbox" checked={enabled} disabled={busy} onChange={(e) => {
           const next = e.target.checked;
@@ -48,7 +51,9 @@ export default function VoiceMemoryCard({ status }) {
       </label>
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
-      <button type="button" disabled={busy} onClick={() => act(async () => {})}>刷新记忆</button>
+      <details className="voice-private-more">
+        <summary>查看或编辑已保存的设备摘要</summary>
+        <button type="button" disabled={busy} onClick={() => act(async () => {})}>刷新记忆</button>
       {devices.filter((d) => d.status === "allowed").map((device) => {
         const record = items.find((m) => m.device_id === device.device_id);
         return <div key={device.device_id} className="voice-form-group">
@@ -60,12 +65,13 @@ export default function VoiceMemoryCard({ status }) {
           <button type="button" disabled={busy} onClick={() => act(async () => {
             await voiceApi.memorySave(device.device_id, record?.revision ?? 0, drafts[device.device_id] || "");
           })}>保存</button>
-          <button type="button" disabled={busy} onClick={() => {
-            if (!window.confirm("确定要清空此设备的长期记忆？")) return;
+          <button type="button" disabled={busy} onClick={async () => {
+            if (!(await ask("确定要清空此设备的长期记忆？"))) return;
             act(async () => { await voiceApi.memoryClear(device.device_id, record?.revision ?? 0); });
           }}>清空</button>
         </div>;
       })}
+      </details>
     </section>
   );
 }

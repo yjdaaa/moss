@@ -552,7 +552,33 @@ fn open_with_system(target: &str) -> Result<(), String> {
 }
 
 fn resolve_app_alias(argument: &str) -> String {
+    resolve_app_alias_for(std::env::consts::OS, argument)
+}
+
+fn resolve_app_alias_for(os: &str, argument: &str) -> String {
     let normalized = argument.replace(' ', "").to_lowercase();
+    if os == "macos" {
+        return match normalized.as_str() {
+            "terminal" | "终端" => "/System/Applications/Utilities/Terminal.app",
+            "微信" | "wechat" => "/Applications/WeChat.app",
+            "企业微信" => "/Applications/企业微信.app",
+            "浏览器" | "safari" => "/Applications/Safari.app",
+            "chrome" => "/Applications/Google Chrome.app",
+            "edge" => "/Applications/Microsoft Edge.app",
+            "vscode" => "/Applications/Visual Studio Code.app",
+            _ => argument,
+        }
+        .to_owned();
+    }
+    if os != "windows" {
+        return match normalized.as_str() {
+            "terminal" | "终端" => "x-terminal-emulator",
+            "浏览器" | "chrome" => "google-chrome",
+            "vscode" => "code",
+            _ => argument,
+        }
+        .to_owned();
+    }
     match normalized.as_str() {
         "terminal" | "cmd" | "终端" => "cmd.exe",
         "powershell" => "powershell.exe",
@@ -582,6 +608,8 @@ pub fn execute_open_app(args: &OpenAppArgs) -> ToolCallResult {
         Some(payload) => {
             let status = if cfg!(target_os = "windows") {
                 std::process::Command::new("cmd").args(["/C", "start", "", &target, payload]).status()
+            } else if cfg!(target_os = "macos") {
+                std::process::Command::new("open").args(["-a", &target, payload]).status()
             } else {
                 std::process::Command::new(&target).arg(payload).status()
             };
@@ -611,6 +639,21 @@ const SHORTCUT_ACTIONS: [(&str, &str); 6] = [
     ("音乐音量减", "^ {DOWN}"),
 ];
 
+fn macos_shortcut_script(action: &str) -> Option<&'static str> {
+    match action {
+        "播放音乐" | "暂停音乐" => Some(r#"tell application "Music" to playpause"#),
+        "切换下一首" => Some(r#"tell application "Music" to next track"#),
+        "切换上一首" => Some(r#"tell application "Music" to previous track"#),
+        "音乐音量加" => Some(
+            "set v to output volume of (get volume settings)\nif v > 90 then\nset volume output volume 100\nelse\nset volume output volume (v + 10)\nend if",
+        ),
+        "音乐音量减" => Some(
+            "set v to output volume of (get volume settings)\nif v < 10 then\nset volume output volume 0\nelse\nset volume output volume (v - 10)\nend if",
+        ),
+        _ => None,
+    }
+}
+
 pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
     let action = args.action.trim();
     if action.is_empty() {
@@ -620,15 +663,25 @@ pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
         let supported = SHORTCUT_ACTIONS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ");
         return ToolCallResult::err(format!("不支持的快捷键操作: {action}，支持的操作: {supported}"));
     };
-    if !cfg!(target_os = "windows") {
-        return ToolCallResult::err("快捷键执行当前仅支持 Windows（PowerShell SendKeys）");
+    if cfg!(target_os = "windows") {
+        let script = format!("(New-Object -COM WScript.Shell).SendKeys(\"{keys}\")");
+        return match std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).status() {
+            Ok(status) if status.success() => ToolCallResult::ok(format!("快捷键动作已执行: {action}")),
+            Ok(status) => ToolCallResult::err(format!("快捷键 {action} 执行失败，退出码 {}", status.code().unwrap_or(-1))),
+            Err(error) => ToolCallResult::err(format!("快捷键 {action} 启动 PowerShell 失败: {error}")),
+        };
     }
-    let script = format!("(New-Object -COM WScript.Shell).SendKeys(\"{keys}\")");
-    match std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).status() {
-        Ok(status) if status.success() => ToolCallResult::ok(format!("快捷键动作已执行: {action}")),
-        Ok(status) => ToolCallResult::err(format!("快捷键 {action} 执行失败，退出码 {}", status.code().unwrap_or(-1))),
-        Err(error) => ToolCallResult::err(format!("快捷键 {action} 启动 PowerShell 失败: {error}")),
+    if cfg!(target_os = "macos") {
+        let Some(script) = macos_shortcut_script(action) else {
+            return ToolCallResult::err(format!("不支持的快捷键操作: {action}"));
+        };
+        return match std::process::Command::new("osascript").args(["-e", script]).status() {
+            Ok(status) if status.success() => ToolCallResult::ok(format!("快捷键动作已执行: {action}")),
+            Ok(status) => ToolCallResult::err(format!("快捷键 {action} 执行失败，退出码 {}", status.code().unwrap_or(-1))),
+            Err(error) => ToolCallResult::err(format!("快捷键 {action} 启动 osascript 失败: {error}")),
+        };
     }
+    ToolCallResult::err("快捷键执行当前仅支持 Windows 与 macOS")
 }
 
 // ---------------------------------------------------------------------------
@@ -649,7 +702,7 @@ pub fn execute_generate_text_image(args: &GenerateTextImageArgs) -> ToolCallResu
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(laser_core::font::find_system_font);
+        .or_else(|| laser_core::font::find_system_font_for_text(text));
     let font_data = match font_path.as_ref() {
         Some(path) => match std::fs::read(path) {
             Ok(data) => data,
@@ -948,6 +1001,13 @@ mod tests {
 
         let unsupported = execute_shortcut_key(&ShortcutKeyExecutionArgs { action: "打开灯".into() });
         assert!(!unsupported.success);
+
+        assert_eq!(resolve_app_alias_for("macos", "微信"), "/Applications/WeChat.app");
+        assert_eq!(resolve_app_alias_for("macos", "终端"), "/System/Applications/Utilities/Terminal.app");
+        assert_eq!(resolve_app_alias_for("windows", "终端"), "cmd.exe");
+        for (name, _) in SHORTCUT_ACTIONS {
+            assert!(macos_shortcut_script(name).is_some(), "missing macOS script for {name}");
+        }
     }
 
     #[test]

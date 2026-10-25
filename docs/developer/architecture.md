@@ -104,7 +104,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 
 ## 6. 存储与运行目录
 
-- 运行目录由 `RuntimeRoot::resolve` 决定：显式参数 → 可执行文件同级 `.runtime/` → `%APPDATA%\moss` → 当前目录 `.runtime/`。宿主与桌面端都传 `(None, None)`，因此 Windows 上实际使用 `%APPDATA%\moss`（无 `APPDATA` 时退回当前目录 `.runtime/`）；程序目录只放程序文件，安装与卸载规则见 [安装包与卸载规范](packaging-install.md)。目录内有 `uploads/`、`previews/`、`generated_assets/`、`moss.sqlite`、`settings.json`、`moss.lock`（`fs4` 独占锁，第二个实例初始化失败）。
+- 运行目录由 `RuntimeRoot::resolve` 决定：显式参数 → 可执行文件同级 `.runtime/` → 系统用户数据目录（Windows `%APPDATA%\moss`、macOS `~/Library/Application Support/moss`、Linux `$XDG_DATA_HOME/moss` 或 `~/.local/share/moss`）→ 当前目录 `.runtime/`。宿主与桌面端都传 `(None, None)`，因此各桌面平台均写入当前用户数据目录；程序目录只放程序文件，安装与卸载规则见 [安装包与卸载规范](packaging-install.md)。目录内有 `uploads/`、`previews/`、`generated_assets/`、`moss.sqlite`、`settings.json`、`moss.lock`（`fs4` 独占锁，第二个实例初始化失败）。
 - SQLite 打开时启用 WAL、5 秒 `busy_timeout`、`synchronous=NORMAL`，并执行 schema 迁移（当前版本 6，`laser_runtime::SCHEMA_VERSION`）。启动时 `recover_after_restart` 把残留的 `running/pending/queued` job 与 `sending/processing` 的 workflow、标定矩阵标为 `failed`（列与记录正文同时更新）；随后审批服务处理遗留审批（§4a）。
 - `RuntimeStore` 只有 `get` / `put` / `set_status` / `list_recent` 四个方法，作用于 `Workflow`、`TextTask`、`Job`、`Calibration` 四种记录；材料库通过 `RuntimeDb::import_material_json` / `export_material_library` 读写。运行时实际写入的记录类型是 workflow 与 calibration；`approvals` 与 `audit_log` 由审批服务写入；`jobs`、`auth_pairings`、`ai_state`、`gui_calibration` 表已建但当前没有运行时写入方，`uploads` 与 `jobs` 只由迁移器写入。表结构见 [数据库结构](db-schema.md)。
 - 材料库：`LASER_MATERIAL_PARAMS_FILE` 未设置时使用 `builtin_material_library`，保存操作写入 SQLite；设置后另写该 JSON 文件并生成 `.bak` 备份。

@@ -5,6 +5,7 @@ import { getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { clearAuthToken, isRemoteMode, remoteOriginLabel } from "../authSession.js";
 import { clearRemoteOrigin, isAndroidDevice, normalizeRemoteOrigin, probeRemoteOrigin, saveRemoteOrigin } from "../remoteHost.js";
+import { phoneLinkHostCopy } from "../platform.js";
 
 const foldStyle = { marginBottom: "20px", paddingBottom: "18px", borderBottom: "1px solid var(--line)" };
 const hintStyle = { fontSize: "12px", color: "var(--ink-dim)", marginBottom: "10px", lineHeight: 1.5 };
@@ -48,7 +49,7 @@ function ComputerHostPanel() {
       await load();
       await showAlert(
         enabled
-          ? "已保存。请完全退出并重新打开 MOSS 后生效；首次启动时 Windows 防火墙若弹窗，请勾选“专用网络”并允许。"
+          ? phoneLinkHostCopy().enableAlert
           : "已保存。重新打开 MOSS 后，手机将无法再连接这台电脑。",
         { title: "需要重启 MOSS", tone: "info" },
       );
@@ -100,7 +101,7 @@ function ComputerHostPanel() {
           <div className="phone-link-box-2">
             手机 App 中填写的电脑地址：{" "}
             <span className="mono phone-link-text">{address || `本机 IP:${info.port}`}</span>
-            {!address && <span className="phone-link-text-2">（未检测到局域网地址，请在 Windows 网络设置中查看本机 IPv4）</span>}
+            {!address && <span className="phone-link-text-2">{phoneLinkHostCopy().missingIpHint}</span>}
           </div>
           <div className="phone-link-row">
             <button type="button" className="btn btn-hud-primary phone-link-btn" disabled={busy} onClick={() => void generateCode()}>

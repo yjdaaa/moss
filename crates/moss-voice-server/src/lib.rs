@@ -22,7 +22,7 @@ mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
 pub mod conversation;
 pub mod fast;
 pub mod vision;
-mod firmware; // NV17 inert local fixture; production OTA unchanged
+pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
 mod speaker; // NV16 synthetic-only policy, default disabled
 pub mod speaker_enrollment;
 pub mod person_context;
@@ -124,6 +124,8 @@ pub struct ServerConfig {
     pub vision: Option<Arc<dyn vision::VisionFactory>>,
     /// NV10: optional opt-in memory service.
     pub memory: Option<Arc<memory::MemoryService>>,
+    /// NV17：固件推送记录与文件；None 时 OTA 不下发固件、下载地址一律 404。
+    pub firmware: Option<Arc<dyn firmware::FirmwareHost>>,
     /// 自动拾音模式下的语音活动检测参数
     pub vad: VadConfig,
     /// NV8b：仅 realtime 模式检测插话，须先在设备启用回声消除。
@@ -153,6 +155,7 @@ impl Default for ServerConfig {
             music: None,
             vision: None,
             memory: None,
+            firmware: None,
             vad: VadConfig::default(),
             barge_in: false,
             barge_in_ms: 400,
@@ -181,6 +184,8 @@ pub(crate) struct Shared {
     pub config: ServerConfig,
     pub http_port: u16,
     pub vision_quotas: Arc<vision::VisionQuotas>,
+    /// 2026-10-16：待接进对话上下文的照片（只在用户打开对应开关时写入）。
+    pub vision_photos: Arc<vision::VisionPhotos>,
     pub ws_port: u16,
     pub registry: Arc<dyn DeviceRegistry>,
     pub signer: TokenSigner,
@@ -242,6 +247,7 @@ impl VoiceServer {
             ws_port,
             http_port,
             vision_quotas:Arc::new(vision::VisionQuotas::default()),
+            vision_photos:Arc::new(vision::VisionPhotos::default()),
             registry,
             signer: TokenSigner::new(secret),
             state: state::LiveState::default(),
@@ -249,7 +255,7 @@ impl VoiceServer {
         });
         shared.state.event(format!("内置语音服务已启动：设备连接端口 {ws_port}，OTA 端口 {http_port}"));
         let ws_app = session::router(shared.clone());
-        let http_app = ota::router(shared.clone()).merge(vision::router(shared.clone()));
+        let http_app = ota::router(shared.clone()).merge(vision::router(shared.clone())).merge(firmware::router(shared.clone()));
         let mut stop_ws = shutdown_tx.subscribe();
         let mut stop_http = shutdown_tx.subscribe();
         // 不用 block_on：调用方可能处在另一个 tokio 运行时的阻塞线程里（Tauri 命令），嵌套 block_on 会 panic

@@ -2,8 +2,10 @@
 //!
 //! This is NOT an OS read/network sandbox: Job Objects constrain process trees
 //! and kill on handle close; they do not protect unrelated files or credentials.
-//! The production AgentCoordinator is still wired to DisabledRunner and the
-//! independent Codex restricted-read sandbox test failed on this Windows host.
+//! Since 2026-10-15 the production AgentCoordinator runs CLI plans through this
+//! harness (JobRunner in voice_agent.rs). The CLI's own sandbox on Windows still
+//! cannot restrict reads outside the workspace; that residual risk is declared
+//! in engine.rs.
 #![allow(dead_code)]
 
 #[cfg(test)]
@@ -40,8 +42,8 @@ use windows_sys::Win32::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
             DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
             InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-            UpdateProcThreadAttribute, WaitForSingleObject,
+            PROCESS_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE, OpenProcess, ResumeThread,
+            STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
         },
     },
 };
@@ -169,6 +171,27 @@ impl Job {
     }
 }
 
+/// Kill-on-close Job 守卫：把一个已经启动的探测进程（`--version` / `--help`）约束进 Job。
+/// 守卫 drop 时关闭 Job 句柄，任何幸存的探测进程树一起结束，不残留孤儿进程。
+/// 绑定失败（例如进程已属于别的 Job）时返回 None，探测仍照常运行，只是不受 Job 约束。
+pub(super) struct ConfineGuard(Option<Job>);
+pub(super) fn confine_running_process(pid: u32) -> ConfineGuard {
+    ConfineGuard(try_confine_running_process(pid))
+}
+fn try_confine_running_process(pid: u32) -> Option<Job> {
+    // SAFETY: PROCESS_SET_QUOTA|PROCESS_TERMINATE 仅用于 Job 绑定与兜底终止；
+    // 句柄不可继承，由 Handle 包装器唯一持有并在 drop 时关闭一次。
+    let process =
+        Handle::from_raw(unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) })
+            .ok()?;
+    let job = Job::new().ok()?;
+    // SAFETY: process 与 job 句柄均被独占持有且在调用期间有效；绑定对子进程原子生效。
+    if unsafe { AssignProcessToJobObject(job.0.0, process.0) } == 0 {
+        return None;
+    }
+    Some(job)
+}
+
 fn size_of_val<T>(value: &T) -> usize {
     std::mem::size_of_val(value)
 }
@@ -242,7 +265,7 @@ fn make_command_line(program: &Path, args: &[String]) -> Result<Vec<u16>, Proces
     }
     Ok(wide(OsStr::new(&line)))
 }
-fn environment_block(env: &BTreeMap<String, String>) -> Result<Vec<u16>, ProcessFailure> {
+pub(crate) fn environment_block(env: &BTreeMap<String, String>) -> Result<Vec<u16>, ProcessFailure> {
     let mut sorted = env.iter().collect::<Vec<_>>();
     sorted.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
     let mut output = Vec::new();
@@ -250,26 +273,19 @@ fn environment_block(env: &BTreeMap<String, String>) -> Result<Vec<u16>, Process
     for (key, value) in sorted {
         // Fail closed: a future caller must never pass inherited MOSS device,
         // MCP, session, provider or cloud-account credentials via environment.
-        // Only environment needed to launch Windows/CLI and the authorized
-        // login-home reference are allowed. The last two keys exist only in
-        // the compiled unit-test fixture, never in a release binary.
-        let allowed = [
-            "SystemRoot",
-            "WINDIR",
-            "PATH",
-            "TEMP",
-            "TMP",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "CODEX_HOME",
-        ];
+        // The allowed set is shared with the plan builder (voice_agent::CLI_ENV_KEYS)
+        // so the two lists cannot drift. CODEX_HOME stays allowed as the authorized
+        // login-home reference (the plan never sets it), and the fixture keys exist
+        // only in the compiled unit-test binary, never in a release one.
+        let allowed = super::CLI_ENV_KEYS;
+        let login_home = ["CODEX_HOME"];
         #[cfg(test)]
         let fixture = ["NV13_PROCESS_FIXTURE", "NV13_FIXTURE_MARKER"];
         #[cfg(not(test))]
         let fixture: [&str; 0] = [];
         if !allowed
             .iter()
+            .chain(login_home.iter())
             .chain(fixture.iter())
             .any(|item| item.eq_ignore_ascii_case(key))
             || key.is_empty()
@@ -436,7 +452,7 @@ fn drain(mut input: File, collector: Arc<Mutex<Output>>) -> io::Result<()> {
 
 /// Suspended launch -> atomically inherited pipe-handle list -> Job assignment
 /// -> resumed main thread. No child instruction runs before the Job is active.
-/// Used ONLY by tests until independent read/network sandbox safety is proven.
+/// Used by the production JobRunner (voice_agent.rs) and by tests.
 pub(super) fn run_fixture_process(
     executable: &Path,
     args: &[String],

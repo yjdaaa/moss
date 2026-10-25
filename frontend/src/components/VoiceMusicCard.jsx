@@ -3,12 +3,14 @@ import { FolderOpen } from "lucide-react";
 import { voiceApi } from "../voiceApi.js";
 import { formDirty, savedNoteText } from "../voiceState.js";
 import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
+import { musicDirPlaceholder } from "../platform.js";
 
 const EMPTY = { enabled: false, directory: "" };
 
 export default function VoiceMusicCard() {
   const [saved, setSaved] = useState(EMPTY);
   const [config, setConfig] = useState(EMPTY);
+  const [warning, setWarning] = useState("");
   const [picking, setPicking] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -24,6 +26,7 @@ export default function VoiceMusicCard() {
       const next = { ...EMPTY, ...(state.settings || {}) };
       setSaved(next);
       setConfig(next);
+      setWarning(typeof state?.warning === "string" ? state.warning : "");
       setLoaded(true);
     }).catch((e) => { if (alive) setLoadError(e?.message || "本地音乐状态读取失败"); });
     return () => { alive = false; };
@@ -53,6 +56,7 @@ export default function VoiceMusicCard() {
       const next = { ...EMPTY, ...(response.settings || {}) };
       setSaved(next);
       setConfig(next);
+      setWarning(typeof response?.warning === "string" ? response.warning : "");
       const effect = config.enabled
         ? `索引 ${response.track_count || 0} 首 · ${response.restarted ? "内置服务已重启" : "启动内置服务后生效"}`
         : `音乐已关闭${response.restarted ? " · 内置服务已重启" : ""}`;
@@ -64,11 +68,18 @@ export default function VoiceMusicCard() {
     }
   };
 
-  const summary = loadError ? "读取失败" : !loaded ? "读取中…" : saved.enabled ? `已开启 · ${saved.directory}` : "未开启";
+  const summary = loadError
+    ? "读取失败"
+    : !loaded
+      ? "读取中…"
+      : saved.enabled
+        ? (warning ? "目录不可用" : `已开启 · ${saved.directory}`)
+        : "未开启";
   return (
-    <VoiceGroup id="music" title="本地音乐" label="本地音乐" summary={summary} tone={saved.enabled ? "ok" : undefined} dirty={dirty}>
+    <VoiceGroup id="music" title="本地音乐" label="本地音乐" summary={summary} tone={saved.enabled && !warning ? "ok" : undefined} dirty={dirty}>
       <p className="voice-muted">默认关闭。只扫描你指定的本机目录，歌曲不上传给模型。歌名重复时先询问，不随机猜。</p>
       {loadError && <div className="voice-hint voice-hint--bad" role="alert">{loadError}</div>}
+      {warning && <div className="voice-hint voice-hint--warn" role="status">{warning}</div>}
       <div className="voice-form-grid">
         <label className="voice-check voice-wide">
           <input type="checkbox" checked={!!config.enabled} disabled={!loaded || busy} onChange={(event) => change("enabled", event.target.checked)} id="voice-music-enabled" />
@@ -77,7 +88,7 @@ export default function VoiceMusicCard() {
         <label className="voice-wide">
           <span>音乐目录（本机文件夹的完整路径，保存时才验证并建立索引）</span>
           <span className="voice-inline">
-            <input className="text-input mono" value={config.directory} disabled={!loaded || busy} placeholder="例如 D:\Music" autoComplete="off" onChange={(event) => change("directory", event.target.value)} id="voice-music-dir" />
+            <input className="text-input mono" value={config.directory} disabled={!loaded || busy} placeholder={musicDirPlaceholder()} autoComplete="off" onChange={(event) => change("directory", event.target.value)} id="voice-music-dir" />
             <button type="button" className="btn btn-ghost" disabled={!loaded || busy} onClick={pick}>
               <FolderOpen size={13} /> 选择…
             </button>
