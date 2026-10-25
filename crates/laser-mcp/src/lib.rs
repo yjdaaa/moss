@@ -935,6 +935,10 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// `global_mcp_telemetry().endpoints` 是进程级全局列表，其中 `register_endpoints`
+    /// 会替换整张列表；涉及端点列表读写的测试串行执行，避免并行测试互相清空计数。
+    static ENDPOINT_TELEMETRY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn safe_tools_list_hides_developer_command() {
         let value = tools_list_json(false);
@@ -1238,6 +1242,7 @@ mod tests {
     /// 本地 WebSocket 服务端：接收 initialize / tools/call，校验桥接真实往返，然后关闭。
     #[test]
     fn bridge_round_trips_json_rpc_over_loopback_websocket() {
+        let _telemetry_lock = ENDPOINT_TELEMETRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1354,6 +1359,7 @@ mod tests {
     /// 断线原因记入该接入点的状态。
     #[test]
     fn bridge_sends_heartbeats_and_reconnects_when_the_endpoint_goes_silent() {
+        let _telemetry_lock = ENDPOINT_TELEMETRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1402,6 +1408,7 @@ mod tests {
     /// 连接失败的原因记入接入点状态，且不含 token。
     #[test]
     fn connection_failures_are_recorded_without_the_token() {
+        let _telemetry_lock = ENDPOINT_TELEMETRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::net::TcpListener;
         // 先占用再释放一个端口，得到一个大概率没人监听的地址
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();

@@ -114,6 +114,8 @@ if [[ "$TRIPLE" == "universal-apple-darwin" ]]; then
   for sub_triple in aarch64-apple-darwin x86_64-apple-darwin; do
     cargo build --release --manifest-path "$HELPER_ROOT/Cargo.toml" --target "$sub_triple" --target-dir "$TARGET_DIR"
     test -s "$TARGET_DIR/$sub_triple/release/moss-voice-local"
+    copy_new "$TARGET_DIR/$sub_triple/release/moss-voice-local" "$(dirname "$BIN")/moss-voice-local-$sub_triple"
+    chmod 755 "$(dirname "$BIN")/moss-voice-local-$sub_triple"
   done
   lipo -create -output "$BIN" \
     "$TARGET_DIR/aarch64-apple-darwin/release/moss-voice-local" \

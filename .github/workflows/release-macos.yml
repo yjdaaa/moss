@@ -1,0 +1,78 @@
+name: Build macOS Release DMG
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '可选：把构建出的 macOS DMG 自动上传到指定 Release 标签（如 v0.1.0）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  macos-dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tauri-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+      - name: Build Universal macOS .app & .dmg (with moss-voice-local sidecar)
+        env:
+          MOSS_MACOS_TARGET: universal-apple-darwin
+          CI: 'true'
+        run: |
+          bash scripts/build-macos-installer.sh --with-voice-sidecar
+          VERSION="$(python3 -c 'import json; print(json.load(open("apps/desktop/src-tauri/tauri.conf.json"))["version"])')"
+          DMG_SRC="$(ls -t target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n 1)"
+          OUT_DMG="target/MOSS_${VERSION}_macos_universal.dmg"
+          cp "$DMG_SRC" "$OUT_DMG"
+          SHA="$(shasum -a 256 "$OUT_DMG" | awk '{print $1}')"
+          BYTES="$(stat -f%z "$OUT_DMG")"
+          echo "DMG_PATH=$OUT_DMG" >> "$GITHUB_ENV"
+          echo "DMG_SHA256=$SHA" >> "$GITHUB_ENV"
+          echo "DMG_BYTES=$BYTES" >> "$GITHUB_ENV"
+          echo "Built $OUT_DMG ($BYTES bytes, sha256=$SHA)"
+      - name: Upload macOS DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-macos-universal-dmg
+          path: ${{ env.DMG_PATH }}
+      - name: Attach macOS DMG to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [[ -z "$TAG" && "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ -z "$TAG" ]]; then
+            echo "未指定 release_tag 且非标签触发，仅保留 Actions 构建产物。"
+            exit 0
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${DMG_PATH}#macOS 通用版安装包 (Apple Silicon + Intel，含离线语音)" --clobber
+            echo "Uploaded $DMG_PATH to Release $TAG (sha256=$DMG_SHA256, bytes=$DMG_BYTES)"
+          else
+            echo "Release $TAG 尚不存在，跳过附加。"
+          fi

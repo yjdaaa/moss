@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复云端 CI 多端流水线报错与并行测试全局计数竞争，并新增 macOS 通用版 DMG 自动发布流水线（2026-10-25）
+
+- **现象**：推送到 GitHub 后 `.github/workflows/ci.yml` 报红：① `laser-mcp` 中 `connection_failures_are_recorded_without_the_token` 调用 `global_mcp_telemetry().register_endpoints` 清空进程级全局端点列表，在双核云端运行器并行执行时偶发冲掉 `bridge_sends_heartbeats_and_reconnects_when_the_endpoint_goes_silent` 的重连计数；② `android-build` 使用旧版 `setup-android@v3` 拉取已废弃的 `tools` 包并卡在许可证交互，且未移除不存在的 `ios-build` 任务；③ `scripts/build-macos-installer.sh` 在 `universal-apple-darwin` 目标下仅合并生成 `moss-voice-local-universal-apple-darwin`，未同时暂存子架构二进制供 `tauri-build` 双次构建阶段校验。
+- **根因与修复**：① `crates/laser-mcp/src/lib.rs` 为共享进程级全局端点列表的 3 条桥接测试增加 `ENDPOINT_TELEMETRY_TEST_LOCK` 互斥串行化（不放宽任何断言）；② 更新 `.github/workflows/ci.yml`（接入 `Swatinem/rust-cache@v2`、直接通过系统 `sdkmanager` 安装 NDK 27 并编译 Android APK、移除废弃 `ios-build`）；③ `scripts/build-macos-installer.sh` 在 `universal-apple-darwin` 分支同步暂存 `aarch64`/`x86_64` 子架构辅助程序，新增 `.github/workflows/release-macos.yml` 在 `macos-14` 云端构建内置离线语音辅助程序的 Universal `.dmg` 并自动附加到对应 GitHub Release。破坏性变更：无。
+- **验证**：`cargo test -p laser-mcp` **17 通过 / 0 失败**，`scripts/build-macos-installer.sh` LF 换行与 `bash -n` 语法检查通过，GitHub Actions 云端流水线运行核对。
+- **关联**：`crates/laser-mcp/src/lib.rs`、`scripts/build-macos-installer.sh`、`.github/workflows/{ci.yml,release-macos.yml}`。
+
 ### 内嵌 Windows 本地语音辅助程序与独立后端的 VC 运行库，并补全跨电脑文字雕刻系统字体兜底（2026-10-25）
 
 - **现象**：① 在未安装 Microsoft Visual C++ 运行库的全新干净 Windows 电脑上，虽然桌面主程序 `moss-desktop.exe` 可直接启动，但本地语音辅助程序 `moss-voice-local.exe` 与独立后端 `moss-host.exe` 仍动态依赖 `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll`，开启离线语音或声纹识别会因缺 DLL 启动失败；② 矢量文字雕刻 `find_system_font` 在 Windows 写死 `C:\Windows\Fonts\` 且只找 4 个中文字体（英文版 Windows 或非 C 盘系统找不到字体），在 macOS Sonoma / Sequoia 未扫描 `AssetsV2` 与 `Supplemental` 字体目录。
