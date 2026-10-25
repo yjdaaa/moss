@@ -145,11 +145,15 @@ for file in COPYING README.md THIRD_PARTY_NOTICES.md; do
 done
 if [[ -f "$HELPER_ROOT/native-source-evidence.json" ]]; then
   copy_new "$HELPER_ROOT/native-source-evidence.json" "$RESOURCE/native-source-evidence.json"
-  cp -R "$HELPER_ROOT/native-license-evidence" "$RESOURCE/native-license-evidence"
+  if [[ -d "$HELPER_ROOT/native-license-evidence" ]]; then
+    cp -R "$HELPER_ROOT/native-license-evidence" "$RESOURCE/native-license-evidence"
+  fi
 fi
 if [[ -f "$HELPER_ROOT/rust-source-evidence.json" ]]; then
   copy_new "$HELPER_ROOT/rust-source-evidence.json" "$RESOURCE/rust-source-evidence.json"
-  cp -R "$HELPER_ROOT/rust-license-evidence" "$RESOURCE/rust-license-evidence"
+  if [[ -d "$HELPER_ROOT/rust-license-evidence" ]]; then
+    cp -R "$HELPER_ROOT/rust-license-evidence" "$RESOURCE/rust-license-evidence"
+  fi
 fi
 
 python3 - "$OVERLAY" "$BIN_REL" "$REL_RESOURCE" "${APPLE_SIGNING_IDENTITY:-}" <<'PY'

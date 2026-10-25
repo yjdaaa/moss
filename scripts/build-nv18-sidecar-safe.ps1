@@ -55,11 +55,15 @@ foreach($file in @('COPYING','README.md','THIRD_PARTY_NOTICES.md')){
 }
 if(Test-Path -LiteralPath (Join-Path $helperRoot 'native-source-evidence.json')){
   Copy-New (Join-Path $helperRoot 'native-source-evidence.json') (Join-Path $resource 'native-source-evidence.json')
-  Copy-Item -LiteralPath (Join-Path $helperRoot 'native-license-evidence') -Destination (Join-Path $resource 'native-license-evidence') -Recurse -ErrorAction Stop
+  if(Test-Path -LiteralPath (Join-Path $helperRoot 'native-license-evidence') -PathType Container){
+    Copy-Item -LiteralPath (Join-Path $helperRoot 'native-license-evidence') -Destination (Join-Path $resource 'native-license-evidence') -Recurse -ErrorAction Stop
+  }
 }
 if(Test-Path -LiteralPath (Join-Path $helperRoot 'rust-source-evidence.json')){
   Copy-New (Join-Path $helperRoot 'rust-source-evidence.json') (Join-Path $resource 'rust-source-evidence.json')
-  Copy-Item -LiteralPath (Join-Path $helperRoot 'rust-license-evidence') -Destination (Join-Path $resource 'rust-license-evidence') -Recurse -ErrorAction Stop
+  if(Test-Path -LiteralPath (Join-Path $helperRoot 'rust-license-evidence') -PathType Container){
+    Copy-Item -LiteralPath (Join-Path $helperRoot 'rust-license-evidence') -Destination (Join-Path $resource 'rust-license-evidence') -Recurse -ErrorAction Stop
+  }
 }
 $configuration=@{bundle=@{externalBin=@($binRel);resources=@{"$relResource/"='licenses/voice-local/'}}}
 $configuration|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $overlay -Encoding utf8
