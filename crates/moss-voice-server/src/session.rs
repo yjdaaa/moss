@@ -301,6 +301,20 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     } else {
         None
     };
+    let mut requests = session.as_ref().map(|s| {
+        let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        if let Ok(mut map) = shared.device_requests.lock() {
+            map.insert(
+                device_id.clone(),
+                crate::DeviceRequestHandle {
+                    session_id: session_id.clone(),
+                    supports_mcp: s.device_mcp.is_some(),
+                    sender: requests_tx,
+                },
+            );
+        }
+        requests_rx
+    });
     let hello = ServerMessage::Hello {
         version,
         transport: "websocket".into(),
@@ -308,6 +322,13 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         audio_params: AudioParams::opus(shared.config.downlink_sample_rate, FRAME_MS as u32),
     };
     if !send_json(&mut socket, &hello).await {
+        if let Ok(mut map) = shared.device_requests.lock()
+            && map
+                .get(&device_id)
+                .is_some_and(|handle| handle.session_id == session_id)
+        {
+            map.remove(&device_id);
+        }
         shared.state.close(&session_id);
         shared
             .registry
@@ -346,18 +367,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         return;
     };
     let permission = lease.as_ref().unwrap().allowed.clone();
-    // 2026-11-02：桌面端「刷新信息 / 重启设备」的请求通道；断开时仅在仍归属本 session_id 时移除，防重连竞态误删新会话。
-    let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
-    if let Ok(mut map) = shared.device_requests.lock() {
-        map.insert(
-            device_id.clone(),
-            crate::DeviceRequestHandle {
-                session_id: session_id.clone(),
-                supports_mcp: session.device_mcp.is_some(),
-                sender: requests_tx,
-            },
-        );
-    }
+    let mut requests_rx = requests.take().expect("requests channel initialized with session");
     let reason = tokio::select! {
         biased;
         _ = async {

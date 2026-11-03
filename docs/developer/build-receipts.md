@@ -2,6 +2,22 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+
+## GitHub 仓库 `v0.2.0` 交付安装包构建（Windows 完整离线语音版 / 常规版 / Android 签名版，2026-11-03）
+
+基于 `main` 分支（含内置语音 Jev 云端与本地 `laya_multilingual` 智能信息筛选与续听防抢话、全息语音孪生舱与全局机械眼声波联动、全局激光任务进度浮层、加工完成主动语音播报、小智设备信息与设备端 AEC 模式诊断、声纹按人记忆与 NV19 长期结构化记忆及视觉照片留存打通、低延迟 TTS 预取与本地 TTS 自动降级兜底）完成全量测试后，将版本号升级至 `0.2.0`，依次完成带 `moss-voice-local` sidecar 的 Windows 专用 NSIS 构建、常规轻量 Windows NSIS 构建与 Android `aarch64` 签名 APK（`versionCode=2000`）构建，并经用户授权发布至 `yjdaaa/moss` 的 `v0.2.0` Release（macOS 通用版 DMG 由 GitHub Actions `release-macos.yml` 自动构建附加）。
+
+| 本次产物（0.2.0） | UTC时间（2026-11-03） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| 专用 `target/x86_64-pc-windows-msvc/release/moss-voice-local.exe` | 13:52:10 | 20,866,048 | `8d65898ec19e7b79d859ee8d91c706a2435b06a08699f79b340c6e270f0242b4` |
+| 专用 `target/x86_64-pc-windows-msvc/release/moss-desktop.exe` | 14:11:53 | 62,629,376 | `53735b942573a044693ffbde0c7a0aa35781d10fd0768d96fea452a6149b212a` |
+| 专用带离线语音 `target/x86_64-pc-windows-msvc/release/bundle/nsis/MOSS_0.2.0_x64-setup.exe` | 14:11:53 | 735,483,996 | `865ad8cfe22854dbfc6eeb931a4277d5f7e403dc0d382de1a34ea4edf839ceea` |
+| 常规 `target/release/moss-desktop.exe` | 14:18:55 | 62,638,080 | `b308b668bbe6a48a4e8c23988a77c08f8f8efa185b9de0b20c38c465330e2a46` |
+| 常规 `target/release/bundle/nsis/MOSS_0.2.0_x64-setup.exe` | 14:18:55 | 19,649,185 | `aec61ab51f0e5495e8ee93b3c09f160150681c9c2542dcc0866fff196816b403` |
+| Android `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 14:28:59 | 54,131,046 | `9112395f9542efa2a9fb5a70495f1ee550304f98f1e1ece6aac83080069a1fd9` |
+| Android `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 14:28:59 | 54,131,046 | `9112395f9548efa2a9fb5a70495f1ee550304f98f1e1ece6aac83080069a1fd9` |
+
+**未验证**：当前构建宿主为 Windows，macOS `.app`/`.dmg` 由云端 macOS Runner 构建；全新干净 Windows 虚拟机安装/卸载、Android 手机实机覆盖安装与连接真实激光雕刻硬件未在本轮执行；专用包仅供用户私有仓库内部使用（上游静态依赖许可证公开分发审计仍受 §2c 约束）。
 ## GitHub 私有仓库 `v0.1.0` 交付安装包构建（Windows 完整离线语音版 / 常规版 / Android 签名版，2026-10-25）
 
 基于 `main` 分支（含 macOS 跨平台运行与打包脚本、Unix 本机 Agent 进程组与 CLI 自动读取、换设备迁移路径降级兜底、Windows 静态内嵌 VC++ 运行库、跨电脑系统字体按字形选字及中英文双语 README）完成全量测试后，重新执行前端生产构建、带 `moss-voice-local` sidecar 的 Windows 专用 NSIS 构建、常规 Windows NSIS 构建与 Android `aarch64` 签名 APK 构建，并经用户授权上传至私有仓库 `yjdaaa/moss` 的 `v0.1.0` Release。

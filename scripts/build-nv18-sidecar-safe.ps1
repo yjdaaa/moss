@@ -95,7 +95,7 @@ $hashLines=@(Get-ChildItem -LiteralPath $src -Recurse -File | Sort-Object FullNa
   $rel+'='+((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())
 })
 $joined=[string]::Join([char]10,$hashLines)
-$sourceHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($joined))).ToLowerInvariant()
+$sha256Engine=[System.Security.Cryptography.SHA256]::Create(); try { $sourceHash=[BitConverter]::ToString($sha256Engine.ComputeHash([Text.Encoding]::UTF8.GetBytes($joined))).Replace('-','').ToLowerInvariant() } finally { $sha256Engine.Dispose() }
 $release=@{
  product_version=(Get-Content -LiteralPath (Join-Path $desktop 'tauri.conf.json') -Raw|ConvertFrom-Json).version
  helper_protocol=[int]$proto.Groups[1].Value

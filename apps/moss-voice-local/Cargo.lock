@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-local"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "moss-voice-local-proto",
  "sha2",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "moss-voice-local-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

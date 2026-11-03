@@ -1,6 +1,6 @@
 [package]
 name = "moss-voice-local-proto"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "MOSS 与本地模型辅助程序 moss-voice-local 之间的帧协议（内置语音技术书 §11.2，NV6）：长度前缀的 JSON 头 + 二进制音频。纯数据，无进程与线程代码。MOSS 本体（MIT）与辅助程序（GPL-3.0）共用。"
 license = "MIT"

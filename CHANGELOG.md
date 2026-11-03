@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+
+## [0.2.0] - 2026-11-03
+
+### 修复内置语音设备请求句柄注册晚于 `hello` 握手的时序竞态并发布 `v0.2.0`（2026-11-03）
+
+- **现象**：云端 Windows CI 慢速环境下，设备刚收到 WebSocket `hello` 回包后宿主立即发起 `VoiceServer::device_request` 时，服务端尚未完成 `shared.device_requests` 登记，偶发返回“当前不在线”（`device_request_preserves_reconnected_session_rejects_non_mcp_and_works_in_echo_mode`）。
+- **根因与修复**：`crates/moss-voice-server/src/session.rs` 将 `shared.device_requests` 的登记提前到 `send_json(&mut socket, &hello)` 之前（若 `hello` 发送失败则与会话状态一并按 `session_id` 清理），保证客户端收到 `hello` 时请求通道严格已就绪；同步将全仓工作区、`moss-voice-local`、Tauri 桌面/Android 与前端版本号升级至 `0.2.0`，并修复 `scripts/build-nv18-sidecar-safe.ps1` 在 Windows PowerShell 5.1 下的 `SHA256` 哈希计算兼容。破坏性变更：无。
+- **验证**：`device_request_preserves_reconnected_session_rejects_non_mcp_and_works_in_echo_mode` 连续 10 轮通过；完成 `0.2.0` Windows 完整离线语音版 NSIS、Windows 轻量版 NSIS 与 Android `aarch64` 签名版 APK 构建。**未验证**：干净新机安装覆盖与连接物理激光雕刻设备未在本轮执行。
+- **关联**：`crates/moss-voice-server/src/session.rs`、`scripts/build-nv18-sidecar-safe.ps1`、`apps/desktop/src-tauri/tauri.conf.json`。
 ### 完成全仓代码审查缺陷与关联同类问题闭环修复（2026-11-03）
 
 - **现象**：全仓审查与增量复审定位到多处跨模块边界问题：① 本地 `laya_multilingual` 在 `torch.cuda.is_available()` 为真前硬编码 `cuda:0`（无独显或 CPU 版 PyTorch 直接启动失败）、仅开启加工反馈时未随应用自启、停止/退出及探测解锁窗口存在残留或晚启动竞态，且表单省略 `model`、录入备用密钥或删除权重后关闭开关会误覆写本地路由或报 `412` 卡死；② 桌面端 `VoiceToolHost` 装饰器栈漏转发 `recent_workflows()`，导致启用家居/音乐/Agent/长期记忆任一层后加工完成语音播报静默失效；③ Jev 多步工具调用消息挤占 `build_recent_turns` 历史且流式预热未拼入按人/挂起视觉照片导致缓存失配，Cline 网关兼容头在探测、正式对话与看图间不一致，Home Assistant 备份 HTTP 探测允许重定向泄漏凭据，`mask_secret` 按字节切片遇非 ASCII 崩溃，前端任务栏与全局事件监听存在卸载泄漏，开发脚本端口复用校验在非 Windows 分支恒放行。
