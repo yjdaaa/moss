@@ -137,8 +137,9 @@ mod imp {
     use moss_voice_providers::openai::{OpenAiAsr, OpenAiLlm, OpenAiTts};
     use moss_voice_providers::{Asr, StreamingAsr, Tts};
     use moss_voice_server::{
-        Conversation, ConversationSettings, DeviceRegistry, DeviceStatus, DeviceVisit, HostTools, LocalVadFactory, ServerConfig,
-        ServerMode, ToolContext, ToolHost, ToolHostResult, VadFactory, VoiceServer,
+        Conversation, ConversationSettings, DeviceRegistry, DeviceStatus, DeviceVisit, HostTools,
+        JevFilterOptions, LocalVadFactory, OpenRouterDecisionClient, ServerConfig, ServerMode,
+        ToolContext, ToolHost, ToolHostResult, VadFactory, VoiceJevFilter, VoiceServer,
     };
     use serde_json::Value;
     use tauri::Manager;
@@ -177,6 +178,36 @@ mod imp {
         Err(error)
     }
 
+    /// 在已持有 `RuntimeDb` 锁的同一临界区内读取当前配置与凭据：
+    /// 优先返回独立 `jev_api_key`；未设时仅当**同一代次配置**的大模型为 OpenAI 兼容且严格指向
+    /// `https://openrouter.ai:443` 时才允许回退读取 `llm` 密钥，杜绝跨配置代次把其他服务商密钥发往 OpenRouter。
+    pub(super) fn resolve_openrouter_jev_secret_locked(
+        db: &laser_runtime::db::RuntimeDb,
+        settings_file: &std::path::Path,
+    ) -> Result<(Option<String>, bool), CenterError> {
+        if let Some(own) = db
+            .get_secret("jev_api_key")
+            .map_err(|e| internal(format!("{e:?}")))?
+            .filter(|v| !v.trim().is_empty())
+        {
+            return Ok((Some(own), true));
+        }
+        let settings = moss_voice::settings::load(settings_file);
+        let openrouter_llm = settings
+            .builtin_models
+            .llm
+            .as_ref()
+            .is_some_and(|p| p.kind == ProviderKind::Openai && moss_voice::models::is_openrouter_https_url(&p.url));
+        if openrouter_llm {
+            let peer = db
+                .get_secret(builtin_secret_name(Section::Llm))
+                .map_err(|e| internal(format!("{e:?}")))?
+                .filter(|v| !v.trim().is_empty());
+            return Ok((peer, false));
+        }
+        Ok((None, false))
+    }
+
     #[cfg(test)]
     mod commit_tests {
         use super::{CenterError, commit_secrets_then_settings};
@@ -211,6 +242,67 @@ mod imp {
             .unwrap();
             assert!(saved);
             assert_eq!(db.get_secret("voice.vision.main").unwrap().as_deref(), Some("key"));
+        }
+
+        #[test]
+        fn switching_llm_away_from_openrouter_never_exposes_new_provider_key_to_jev_reader() {
+            use super::{builtin_secret_name, resolve_openrouter_jev_secret_locked};
+            use moss_voice::models::{ProviderKind, Section};
+            use moss_voice::settings::{BuiltinProvider, VoiceSettings};
+            use std::sync::{Arc, Mutex};
+
+            let dir = tempfile::tempdir().unwrap();
+            let settings_file = dir.path().join("settings.json");
+            let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+
+            let mut initial = VoiceSettings::default();
+            initial.builtin_models.llm = Some(BuiltinProvider {
+                kind: ProviderKind::Openai,
+                url: "https://openrouter.ai/api/v1".into(),
+                model: "openai/gpt-4o-mini".into(),
+                voice: String::new(),
+                speed: 1.0,
+            });
+            {
+                let guard = db.lock().unwrap();
+                commit_secrets_then_settings(
+                    &guard,
+                    &[(builtin_secret_name(Section::Llm).to_owned(), Some("sk-or-v1-initial".into()))],
+                    || moss_voice::settings::save(&settings_file, &initial).map_err(|m| CenterError::new("err", 500, m)),
+                )
+                .unwrap();
+            }
+
+            // 模拟运行中语音服务持有的动态 SecretReader（不缓存旧布尔值）
+            let reader_db = db.clone();
+            let reader_file = settings_file.clone();
+            let reader = move || {
+                let guard = reader_db.lock().ok()?;
+                resolve_openrouter_jev_secret_locked(&guard, &reader_file)
+                    .ok()
+                    .and_then(|(secret, _)| secret)
+            };
+            assert_eq!(reader().as_deref(), Some("sk-or-v1-initial"));
+
+            // 用户将大模型切到其他服务商并换上新密钥：旧服务尚未停机期间调用 reader 也绝不读出新服务商密钥
+            let mut switched = initial.clone();
+            switched.builtin_models.llm = Some(BuiltinProvider {
+                kind: ProviderKind::Openai,
+                url: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-chat".into(),
+                voice: String::new(),
+                speed: 1.0,
+            });
+            {
+                let guard = db.lock().unwrap();
+                commit_secrets_then_settings(
+                    &guard,
+                    &[(builtin_secret_name(Section::Llm).to_owned(), Some("sk-deepseek-private".into()))],
+                    || moss_voice::settings::save(&settings_file, &switched).map_err(|m| CenterError::new("err", 500, m)),
+                )
+                .unwrap();
+            }
+            assert_eq!(reader(), None, "切换非 OpenRouter 大模型后绝不能把新服务商密钥暴露给 Jev");
         }
     }
 
@@ -261,6 +353,42 @@ mod imp {
             setting.enabled = false;
             let openai = provider(ProviderKind::Openai);
             assert!(vision_credentials(&setting, Some(&openai), Some("k"), Some("k")).is_none(), "总开关关着就不提供");
+        }
+    }
+
+    #[cfg(test)]
+    mod local_fallback_tests {
+        use super::ordered_local_tts_candidates;
+        use std::path::PathBuf;
+
+        #[test]
+        fn user_selected_fallback_model_is_prioritized_then_other_installed_models_follow() {
+            let both_installed = |id: &str| match id {
+                "kokoro" | "matcha_zh_en" => Some(PathBuf::from(format!("/models/{id}"))),
+                _ => None,
+            };
+            let matcha_first = ordered_local_tts_candidates("matcha_zh_en", 0, both_installed);
+            assert_eq!(
+                matcha_first.iter().map(|c| c.id).collect::<Vec<_>>(),
+                vec!["matcha_zh_en", "kokoro"],
+                "用户指定 Matcha 兜底时应先试 Matcha，若失败再顺延 Kokoro"
+            );
+
+            let kokoro_first = ordered_local_tts_candidates("kokoro", 50, both_installed);
+            assert_eq!(
+                kokoro_first.iter().map(|c| c.id).collect::<Vec<_>>(),
+                vec!["kokoro", "matcha_zh_en"],
+                "用户指定 Kokoro 兜底时应先试 Kokoro，若失败再顺延 Matcha"
+            );
+
+            let only_kokoro = ordered_local_tts_candidates("matcha_zh_en", 0, |id| {
+                (id == "kokoro").then(|| PathBuf::from("/models/kokoro"))
+            });
+            assert_eq!(
+                only_kokoro.iter().map(|c| c.id).collect::<Vec<_>>(),
+                vec!["kokoro"],
+                "用户所选未安装时自动顺延本机已安装的另一个模型"
+            );
         }
     }
 
@@ -652,6 +780,17 @@ mod imp {
         fn sessions_changed(&self, count: usize) {
             laser_host::set_voice_device_sessions(Some(u32::try_from(count).unwrap_or(u32::MAX)));
         }
+
+        fn pulse_changed(&self, phase: Option<&str>, level: u8) {
+            laser_host::set_voice_pulse(phase, level);
+        }
+        /// 2026-11-02：设备快照（开机 OTA 上报 / hello / 实时状态）只存原始 JSON，
+        /// 固件字段变化时不改表结构。
+        fn device_snapshot(&self, device: &str, kind: &str, json: &str) {
+            if let Ok(db) = self.db.lock() {
+                let _ = db.voice_device_snapshot(device, kind, json, now());
+            }
+        }
     }
 
     /// 对话中调用 MOSS 工具（NV4）：身份 `CallerContext::Voice`；运动与出光跟随严格模式开关，桌面控制类工具始终拒绝。
@@ -678,6 +817,36 @@ mod imp {
             };
             ToolHostResult { success: result.success, result: result.result, detail: result.detail }
         }
+
+        /// 加工结束播报的只读轮询：走不计入调用统计的进程内只读通道。
+        fn recent_workflows(&self, device_id: &str, session_id: &str) -> Option<Value> {
+            laser_host::voice_recent_workflows(&self.host.api_service, device_id, session_id)
+        }
+    }
+
+    struct LocalLayaRunner {
+        child: Option<std::process::Child>,
+        generation: u64,
+    }
+
+    impl LocalLayaRunner {
+        fn stop(&mut self) {
+            self.generation = self.generation.wrapping_add(1);
+            self.kill_reaped();
+        }
+
+        fn kill_reaped(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    impl Drop for LocalLayaRunner {
+        fn drop(&mut self) {
+            self.stop();
+        }
     }
 
     pub struct BuiltinVoice {
@@ -695,10 +864,12 @@ mod imp {
         music_warning: Mutex<Option<String>>,
         /// 声纹模型或辅助程序未就绪时的降级提示（保持个人上下文隔离，不回退共享设备记忆）
         speaker_warning: Mutex<Option<String>>,
-        /// 本地模型下载与安装（运行目录 `models/`）
+        /// 本地模型下载与安装（运行目录 `models/`，Laya 可挂载到 `E:\moss-laya\models`）
         models: ModelManager,
         /// 运行中的本地模型辅助程序（随内置服务启停）
         helper: Mutex<Option<LocalHelper>>,
+        /// 运行中的本地 Laya `/v1/systemone` 决策服务（随本地 Jev 开关启停）
+        laya: Mutex<LocalLayaRunner>,
         /// NV19 长期记忆、资料与恢复摘要；检索与提取默认关闭
         context: Arc<crate::voice_context::host::ContextHost>,
     }
@@ -710,12 +881,253 @@ mod imp {
         /// 选用流式识别模型时：边说边识别（整段识别 `asr` 作为它失败时的退路）
         streaming_asr: Option<Arc<dyn StreamingAsr>>,
         tts: Option<LocalTts>,
+        /// 主用云端 TTS 时，若本机已安装本地合成模型（Kokoro / Matcha），挂作失败时的按需自动降级兜底。
+        fallback_tts: Option<Arc<dyn Tts>>,
         vad: Option<Arc<dyn VadFactory>>,
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct LocalFallbackCandidate {
+        id: &'static str,
+        dir: std::path::PathBuf,
+        engine: TtsEngine,
+        preferred_speaker: i32,
+        default_speaker: i32,
+    }
+
+    /// 按「用户指定模型优先 → 其余已安装本地 TTS 模型顺延」顺序生成候选列表。
+    fn ordered_local_tts_candidates(
+        preferred_id: &str,
+        preferred_speaker: i32,
+        mut path_if_installed: impl FnMut(&str) -> Option<std::path::PathBuf>,
+    ) -> Vec<LocalFallbackCandidate> {
+        let mut candidates = Vec::new();
+        let to_candidate = |spec: &'static moss_voice::local_models::ModelSpec, dir: std::path::PathBuf| {
+            let engine = if spec.engine == Engine::Matcha {
+                TtsEngine::Matcha
+            } else {
+                TtsEngine::Kokoro
+            };
+            let default_speaker = spec.voices.map(|v| v.default).unwrap_or(0);
+            LocalFallbackCandidate {
+                id: spec.id,
+                dir,
+                engine,
+                preferred_speaker,
+                default_speaker,
+            }
+        };
+        if let Some(spec) = moss_voice::local_models::spec_of(preferred_id, ModelKind::Tts) {
+            if let Some(dir) = path_if_installed(spec.id) {
+                candidates.push(to_candidate(spec, dir));
+            }
+        }
+        for spec in moss_voice::local_models::CATALOG
+            .iter()
+            .filter(|spec| spec.kind == ModelKind::Tts)
+        {
+            if candidates.iter().any(|c| c.id == spec.id) {
+                continue;
+            }
+            if let Some(dir) = path_if_installed(spec.id) {
+                candidates.push(to_candidate(spec, dir));
+            }
+        }
+        candidates
+    }
+
+    /// 云端 TTS 失败且当句尚未产出音频时，按需加载本机已安装的本地 TTS（优先用户选定模型，坏了自动顺延本机其他已安装模型）。
+    struct LazyLocalFallbackTts {
+        exe: std::path::PathBuf,
+        candidates: Vec<LocalFallbackCandidate>,
+        speed: f32,
+        shared_helper: Option<LocalHelper>,
+        loaded: Arc<Mutex<Option<(usize, LocalTts)>>>,
+    }
+
+    impl LazyLocalFallbackTts {
+        async fn get_or_init_from(
+            &self,
+            start_index: usize,
+        ) -> Result<(usize, LocalTts), moss_voice_providers::ProviderError> {
+            if start_index >= self.candidates.len() {
+                return Err(moss_voice_providers::ProviderError::new(
+                    "没有可用的本地降级语音合成模型",
+                ));
+            }
+            if let Ok(guard) = self.loaded.lock() {
+                if let Some((idx, existing)) = guard.as_ref() {
+                    if *idx >= start_index && existing.helper.is_alive() {
+                        return Ok((
+                            *idx,
+                            LocalTts {
+                                helper: existing.helper.clone(),
+                                speaker: existing.speaker,
+                                speed: existing.speed,
+                            },
+                        ));
+                    }
+                }
+            }
+            let exe = self.exe.clone();
+            let candidates = self.candidates.clone();
+            let speed = self.speed.clamp(0.5, 2.0);
+            let shared_helper = self.shared_helper.clone();
+            let loaded_slot = self.loaded.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let mut guard = loaded_slot
+                    .lock()
+                    .map_err(|_| moss_voice_providers::ProviderError::new("本地降级合成锁失败"))?;
+                if let Some((idx, existing)) = guard.as_ref() {
+                    if *idx >= start_index && existing.helper.is_alive() {
+                        return Ok((
+                            *idx,
+                            LocalTts {
+                                helper: existing.helper.clone(),
+                                speaker: existing.speaker,
+                                speed: existing.speed,
+                            },
+                        ));
+                    }
+                }
+                let reuse_helper = guard
+                    .as_ref()
+                    .and_then(|(_, existing)| existing.helper.is_alive().then(|| existing.helper.clone()))
+                    .or_else(|| shared_helper.filter(|h| h.is_alive()));
+                let helper = match reuse_helper {
+                    Some(h) => h,
+                    None => LocalHelper::spawn(&exe)?,
+                };
+                let mut last_err = moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
+                for (idx, cand) in candidates.iter().enumerate().skip(start_index) {
+                    match helper.load_tts(&cand.dir, cand.engine) {
+                        Ok(info) => {
+                            let speaker = if info.speakers > 1 {
+                                if cand.preferred_speaker >= 0
+                                    && (cand.preferred_speaker as u32) < info.speakers
+                                {
+                                    cand.preferred_speaker
+                                } else {
+                                    cand.default_speaker.clamp(0, (info.speakers as i32) - 1)
+                                }
+                            } else {
+                                0
+                            };
+                            let tts = LocalTts {
+                                helper: helper.clone(),
+                                speaker,
+                                speed,
+                            };
+                            *guard = Some((
+                                idx,
+                                LocalTts {
+                                    helper,
+                                    speaker,
+                                    speed,
+                                },
+                            ));
+                            return Ok((idx, tts));
+                        }
+                        Err(err) => {
+                            last_err = err;
+                        }
+                    }
+                }
+                Err(last_err)
+            })
+            .await
+            .map_err(|_| moss_voice_providers::ProviderError::new("本地降级合成线程异常退出"))?
+        }
+
+        fn invalidate_index(&self, failed_idx: usize) {
+            if let Ok(mut guard) = self.loaded.lock() {
+                if guard.as_ref().is_some_and(|(idx, _)| *idx == failed_idx) {
+                    *guard = None;
+                }
+            }
+        }
+    }
+
+    impl Tts for LazyLocalFallbackTts {
+        fn synthesize<'a>(
+            &'a self,
+            text: &'a str,
+        ) -> moss_voice_providers::BoxFuture<'a, Result<moss_voice_providers::Pcm, moss_voice_providers::ProviderError>> {
+            Box::pin(async move {
+                let mut start_idx = 0;
+                let mut last_err = moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
+                while start_idx < self.candidates.len() {
+                    let (idx, tts) = self.get_or_init_from(start_idx).await?;
+                    match tts.synthesize(text).await {
+                        Ok(pcm) => return Ok(pcm),
+                        Err(err) => {
+                            self.invalidate_index(idx);
+                            last_err = err;
+                            start_idx = idx + 1;
+                        }
+                    }
+                }
+                Err(last_err)
+            })
+        }
+
+        fn synthesize_stream<'a>(
+            &'a self,
+            text: &'a str,
+            chunks: tokio::sync::mpsc::UnboundedSender<moss_voice_providers::Pcm>,
+        ) -> moss_voice_providers::BoxFuture<'a, Result<(), moss_voice_providers::ProviderError>> {
+            Box::pin(async move {
+                let mut start_idx = 0;
+                let mut last_err = moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
+                while start_idx < self.candidates.len() {
+                    let (idx, tts) = self.get_or_init_from(start_idx).await?;
+                    let (stage_tx, mut stage_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let res = tts.synthesize_stream(text, stage_tx).await;
+                    let mut emitted = false;
+                    while let Ok(pcm) = stage_rx.try_recv() {
+                        emitted = true;
+                        let _ = chunks.send(pcm);
+                    }
+                    match res {
+                        Ok(()) => return Ok(()),
+                        Err(err) if !emitted && idx + 1 < self.candidates.len() => {
+                            self.invalidate_index(idx);
+                            last_err = err;
+                            start_idx = idx + 1;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                Err(last_err)
+            })
+        }
+    }
     /// 辅助程序与 MOSS 放在同一目录。
     fn helper_path() -> Option<std::path::PathBuf> {
         std::env::current_exe().ok()?.parent().map(|dir| dir.join(HELPER_FILE))
+    }
+
+    /// 若 MOSS 运行在用户自定义安装目录（非 Cargo `target/` 构建目录且当前用户可写），返回该安装目录。
+    fn writable_install_dir() -> Option<std::path::PathBuf> {
+        if cfg!(test) {
+            return None;
+        }
+        let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        let norm = exe_dir.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+        if norm.ends_with("\\target\\release")
+            || norm.ends_with("\\target\\debug")
+            || norm.contains("\\target\\x86_64-")
+        {
+            return None;
+        }
+        let models_dir = exe_dir.join("models");
+        let probe = models_dir.join(".moss-write-probe");
+        if std::fs::create_dir_all(&models_dir).is_ok() && std::fs::write(&probe, b"ok").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            return Some(exe_dir);
+        }
+        None
     }
 
     fn start_error(message: impl Into<String>) -> CenterError {
@@ -733,7 +1145,29 @@ mod imp {
             ) {
                 eprintln!("[moss-desktop] AgentRun 只读工具不可用：{error}");
             }
-            let models = ModelManager::new(host.runtime_root.path.join("models"));
+            let default_models_dir = writable_install_dir()
+                .map(|dir| dir.join("models"))
+                .unwrap_or_else(|| host.runtime_root.path.join("models"));
+            let mut models = ModelManager::new(default_models_dir.clone());
+            if !cfg!(test) && !default_models_dir.join("laya_multilingual").is_dir() && writable_install_dir().is_none() {
+                if let Some(env_root) = std::env::var_os("MOSS_LAYA_ROOT").map(std::path::PathBuf::from) {
+                    let e_models = env_root.join("models");
+                    if std::fs::create_dir_all(&e_models).is_ok() {
+                        models = models.with_root_override("laya_multilingual", e_models);
+                    }
+                } else {
+                    #[cfg(windows)]
+                    {
+                        let e_laya_root = std::path::PathBuf::from(r"E:\moss-laya");
+                        if e_laya_root.is_dir() || std::path::Path::new(r"E:\").is_dir() {
+                            let e_models = e_laya_root.join("models");
+                            if std::fs::create_dir_all(&e_models).is_ok() {
+                                models = models.with_root_override("laya_multilingual", e_models);
+                            }
+                        }
+                    }
+                }
+            }
             let memory = MemoryService::new(Arc::new(DbMemoryStore { db: host.db.clone() }));
             let enabled = moss_voice::settings::load(&host.runtime_root.path.join("settings.json")).builtin_memory_enabled;
             let _ = memory.configure(enabled, || Ok(()));
@@ -745,7 +1179,27 @@ mod imp {
             let personal=PersonContext::new(identity.clone(),Arc::new(DbPersonStore{db:host.db.clone()}));
             if let Ok(mut slot)=speaker_backend.personal.lock(){*slot=Some(Arc::downgrade(&personal));}
             if let Ok(db)=host.db.lock(){if db.recover_firmware_downloads(now()).is_err(){eprintln!("[moss-desktop] 固件下载记录恢复失败，固件传输仍禁用");}}
-            let context = crate::voice_context::host::ContextHost::new(host.db.clone(), setting_path.clone());
+            let identity_for_context = identity.clone();
+            let db_for_context = host.db.clone();
+            let calibrated_speakers: crate::voice_context::host::CalibratedSpeakersFn = Arc::new(move || {
+                if identity_for_context.valid_calibration().is_none() {
+                    return Vec::new();
+                }
+                db_for_context
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.list_voice_speakers().ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| r.model_id == SPEAKER_MODEL && r.dimension == 192 && r.revision > 0)
+                    .map(|r| (r.id, r.name, r.revision))
+                    .collect()
+            });
+            let context = crate::voice_context::host::ContextHost::with_speakers(
+                host.db.clone(),
+                setting_path.clone(),
+                calibrated_speakers,
+            );
             Arc::new(BuiltinVoice {
                 host,
                 memory,
@@ -760,22 +1214,32 @@ mod imp {
                 speaker_warning: Mutex::new(None),
                 models,
                 helper: Mutex::new(None),
+                laya: Mutex::new(LocalLayaRunner { child: None, generation: 0 }),
                 context,
             })
         }))
     }
 
-    /// 语音链路为“内置服务”时，在后台启动内置语音服务；失败原因显示在内置服务卡片上。
+    /// 语音链路为“内置服务”时，在后台启动内置语音服务；若启用了本地 Laya 加工反馈，即使当前非内置语音模式也在后台拉起本地 Laya。
     pub fn autostart(state: &BuiltinState) {
         let Some(builtin) = state.0.clone() else { return };
-        if builtin.settings().mode != VoiceMode::Builtin {
+        let start_voice = builtin.settings().mode == VoiceMode::Builtin;
+        let start_feedback_laya = builtin.should_run_local_laya_for_feedback();
+        if !start_voice && !start_feedback_laya {
             return;
         }
         let _ = std::thread::Builder::new().name("voice-builtin-autostart".into()).spawn(move || {
-            if let Err(error) = builtin.start() {
-                eprintln!("[moss-desktop] 内置语音服务自动启动失败：{}", error.message);
-                if let Ok(mut last) = builtin.last_error.lock() {
-                    *last = Some(error.message);
+            if start_feedback_laya {
+                if let Err(err) = builtin.ensure_laya_running(false) {
+                    eprintln!("[moss-desktop] 本地 Laya 决策服务自动启动失败：{err}");
+                }
+            }
+            if start_voice {
+                if let Err(error) = builtin.start() {
+                    eprintln!("[moss-desktop] 内置语音服务自动启动失败：{}", error.message);
+                    if let Ok(mut last) = builtin.last_error.lock() {
+                        *last = Some(error.message);
+                    }
                 }
             }
         });
@@ -826,6 +1290,33 @@ mod imp {
                 .unwrap_or_else(|| Value::Array(Vec::new()))
         }
 
+        /// 查找本机已安装的本地 TTS 模型作为主用云端 TTS 失败时的自动降级兜底（优先使用用户选中的 `tts_model`，坏了自动顺延其他已安装模型）。
+        fn local_fallback_tts(
+            &self,
+            local: &BuiltinLocal,
+            shared_helper: Option<LocalHelper>,
+        ) -> Option<Arc<dyn Tts>> {
+            if local.tts {
+                return None;
+            }
+            let exe = helper_path().filter(|path| path.is_file())?;
+            let candidates = ordered_local_tts_candidates(
+                &local.tts_model,
+                local.tts_speaker,
+                |id| self.models.path_if_installed(id),
+            );
+            if candidates.is_empty() {
+                return None;
+            }
+            Some(Arc::new(LazyLocalFallbackTts {
+                exe,
+                candidates,
+                speed: local.tts_speed,
+                shared_helper,
+                loaded: Arc::new(Mutex::new(None)),
+            }))
+        }
+
         /// 按开关启动辅助程序并加载选用且已安装的本地模型。没有打开任何本地开关（或模型未安装）时不启动辅助程序。
         fn local_parts(&self, local: &BuiltinLocal) -> Result<(LocalParts, Option<LocalHelper>), CenterError> {
             let pick = |kind| {
@@ -833,7 +1324,13 @@ mod imp {
             };
             let (vad, asr, tts) = (pick(ModelKind::Vad), pick(ModelKind::Asr), pick(ModelKind::Tts));
             if vad.is_none() && asr.is_none() && tts.is_none() {
-                return Ok((LocalParts::default(), None));
+                return Ok((
+                    LocalParts {
+                        fallback_tts: self.local_fallback_tts(local, None),
+                        ..LocalParts::default()
+                    },
+                    None,
+                ));
             }
             let exe = helper_path().ok_or_else(|| start_error("无法确定 MOSS 程序所在目录"))?;
             let helper = LocalHelper::spawn(&exe).map_err(|error| start_error(error.0))?;
@@ -869,6 +1366,8 @@ mod imp {
                     0
                 };
                 parts.tts = Some(LocalTts { helper: helper.clone(), speaker, speed: local.tts_speed });
+            } else {
+                parts.fallback_tts = self.local_fallback_tts(local, Some(helper.clone()));
             }
             Ok((parts, Some(helper)))
         }
@@ -911,9 +1410,28 @@ mod imp {
                 }
                 (None, None) => return Ok(None),
             };
-            let labels = vec![format!("LLM:{}", llm.model),
+            let jev_options = JevFilterOptions {
+                enabled: experience.jev_filter_enabled,
+                unfinished_hold: experience.jev_unfinished_hold,
+                fast_route: experience.read_only_shortcuts && experience.jev_fast_route,
+                tool_prune: experience.jev_tool_prune,
+                memory_filter: experience.jev_memory_filter,
+            };
+            let jev_model = moss_voice::settings::validate_jev_model(&experience.jev_model)
+                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+            let is_local_laya = moss_voice::settings::is_local_laya_model(&jev_model);
+            let local_laya_installed = self.models.path_if_installed("laya_multilingual").is_some();
+            let jev_ready = if is_local_laya {
+                local_laya_installed
+            } else {
+                self.jev_effective_secret()?.is_some()
+            };
+            let mut labels = vec![format!("LLM:{}", llm.model),
                 format!("ASR:{}", if experience.asr { experience.asr_model.as_str() } else { models.asr.as_ref().map(|v| v.model.as_str()).unwrap_or("unknown") }),
                 format!("TTS:{}", if experience.tts { experience.tts_model.as_str() } else { models.tts.as_ref().map(|v| v.model.as_str()).unwrap_or("unknown") })];
+            if jev_options.active() && jev_ready {
+                labels.push(format!("Jev:{jev_model}"));
+            }
             let llm = OpenAiLlm::new(&llm.url, &key(Section::Llm)?, &llm.model).map_err(invalid)?;
             let original: Arc<dyn ToolExecutor> = Arc::new(HostTools::new(Arc::new(DesktopToolHost { host: self.host.clone() })));
             let plugin_host = Arc::new(DesktopInfoHost { host: self.host.clone() });
@@ -922,7 +1440,32 @@ mod imp {
             let tools: Arc<dyn ToolExecutor> = Arc::new(HomeTools {
                 original:combined, home:Arc::new(DesktopHomeHost{host:self.host.clone(),control:self.home_control.clone()})
             });
-            let mut conversation = Conversation::new(asr, Arc::new(llm), tts, tools, ConversationSettings { read_only_shortcuts: experience.read_only_shortcuts, model_labels: labels, ..Default::default() }).with_memory(self.memory.clone()).with_speaker_enrollment(self.speaker.clone());
+            let mut conversation = Conversation::new(asr, Arc::new(llm), tts, tools, ConversationSettings { read_only_shortcuts: experience.read_only_shortcuts, announce_job_done: experience.job_done_announce, model_labels: labels, ..Default::default() }).with_memory(self.memory.clone()).with_speaker_enrollment(self.speaker.clone());
+            if let Some(fallback_tts) = local.fallback_tts.take() {
+                conversation = conversation.with_fallback_tts(fallback_tts);
+            }
+            if jev_options.active() {
+                let client = if is_local_laya {
+                    let reader: moss_voice_server::jev::SecretReader =
+                        Arc::new(|| Some("moss-local-laya".to_owned()));
+                    Arc::new(OpenRouterDecisionClient::with_endpoint(
+                        moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL,
+                        reader,
+                        "multilingual",
+                    ))
+                } else {
+                    let db = self.host.db.clone();
+                    let settings_file = self.settings_file();
+                    let reader = Arc::new(move || {
+                        let guard = db.lock().ok()?;
+                        resolve_openrouter_jev_secret_locked(&guard, &settings_file)
+                            .ok()
+                            .and_then(|(secret, _)| secret)
+                    });
+                    Arc::new(OpenRouterDecisionClient::with_model(reader, jev_model))
+                };
+                conversation = conversation.with_jev_filter(Arc::new(VoiceJevFilter::new(client, jev_options)));
+            }
             // NV19: both hooks stay inert until the user switches them on in the private window.
             let (retrieval, extraction) = self.context.hooks();
             conversation = conversation.with_context_retrieval(retrieval).with_context_extraction(extraction);
@@ -949,10 +1492,24 @@ mod imp {
         }
 
         pub fn status(&self) -> Value {
-            let settings = self.settings();
             let guard = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let view = guard.as_ref().map(VoiceServer::status);
             drop(guard);
+            let db = self.host.db.lock().ok();
+            let settings = self.settings();
+            let jev_feedback_enabled = moss_voice::settings::jev_feedback_enabled(&self.settings_file());
+            let key_set = |name: &str| {
+                db.as_ref().and_then(|db| db.get_secret(name).ok().flatten()).is_some_and(|value| !value.is_empty())
+            };
+            let jev_key_configured = key_set("jev_api_key");
+            let openrouter_llm_key_set = settings
+                .builtin_models
+                .llm
+                .as_ref()
+                .is_some_and(|p| p.kind == ProviderKind::Openai && moss_voice::models::is_openrouter_https_url(&p.url))
+                && key_set(builtin_secret_name(Section::Llm));
+            let models = builtin::status_view(&settings.builtin_models, key_set);
+            drop(db);
             let (ws_port, http_port) = view
                 .as_ref()
                 .map(|view| (view.ws_port, view.http_port))
@@ -962,12 +1519,8 @@ mod imp {
                 Some(view) => serde_json::to_value(view.mode).unwrap_or_default(),
                 None => Value::String(if settings.builtin_chat_ready(self.models.root()) { "chat" } else { "echo" }.into()),
             };
-            let db = self.host.db.lock().ok();
-            let key_set = |name: &str| {
-                db.as_ref().and_then(|db| db.get_secret(name).ok().flatten()).is_some_and(|value| !value.is_empty())
-            };
-            let models = builtin::status_view(&settings.builtin_models, key_set);
-            drop(db);
+            let local_laya_installed = self.models.path_if_installed("laya_multilingual").is_some();
+            let is_local_laya = moss_voice::settings::is_local_laya_model(&settings.builtin_local.jev_model);
             serde_json::json!({
                 "running": view.is_some(),
                 "mode": mode,
@@ -976,10 +1529,25 @@ mod imp {
                 "http_port": http_port,
                 "ota_url": local_ip().map(|ip| format!("http://{ip}:{http_port}/xiaozhi/ota/")),
                 "models": models,
+                "jev": {
+                    "endpoint": if is_local_laya {
+                        moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL
+                    } else {
+                        moss_voice::models::DEFAULT_JEV_DECISIONS_URL
+                    },
+                    "model": settings.builtin_local.jev_model,
+                    "key_set": jev_key_configured,
+                    "openrouter_llm_key_set": openrouter_llm_key_set,
+                    "local_installed": local_laya_installed,
+                    "voice_enabled": settings.builtin_local.jev_filter_enabled,
+                    "feedback_enabled": jev_feedback_enabled,
+                },
                 "last_error": self.last_error.lock().ok().and_then(|last| last.clone()),
                 "local": {
                     "settings": settings.builtin_local,
+                    "jev_key_configured": jev_key_configured || openrouter_llm_key_set || (is_local_laya && local_laya_installed),
                     "default_mirror": local_models::DEFAULT_BASE,
+                    "models_dir": self.models.root_for("laya_multilingual").to_string_lossy(),
                     "helper_found": helper_path().is_some_and(|path| path.is_file()),
                     "helper_running": self.helper.lock().ok().and_then(|helper| helper.as_ref().map(LocalHelper::is_alive)).unwrap_or(false),
                     "models": self.models.status(),
@@ -1030,6 +1598,7 @@ mod imp {
                     let registry = Arc::new(DbRegistry { db: self.host.db.clone(), host: self.host.clone() });
                     let server = VoiceServer::start(config, registry)
                         .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
+                    server.prewarm_speech_cache();
                     *guard = Some(server);
                     if let Ok(mut slot) = self.helper.lock() {
                         *slot = helper;
@@ -1039,9 +1608,15 @@ mod imp {
                     }
                     // 顶栏：服务已运行、还没有设备连接
                     laser_host::set_voice_device_sessions(Some(0));
+                    laser_host::set_voice_pulse(None, 0);
                     if let Ok(mut last) = self.last_error.lock() {
                         *last = None;
                     }
+                }
+            }
+            if self.should_run_local_laya() {
+                if let Err(err) = self.ensure_laya_running(false) {
+                    eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
                 }
             }
             Ok(self.status())
@@ -1057,10 +1632,14 @@ mod imp {
             if let Some(server) = server {
                 server.stop();
                 laser_host::set_voice_device_sessions(None);
+                laser_host::set_voice_pulse(None, 0);
             }
             // 结束辅助程序（最后一个句柄丢弃时结束进程）
             if let Ok(mut helper) = self.helper.lock() {
                 *helper = None;
+            }
+            if !self.should_run_local_laya_for_feedback() {
+                self.stop_laya();
             }
             self.status()
         }
@@ -1077,63 +1656,111 @@ mod imp {
         /// 保存本地模型开关、音色、语速与镜像；运行中则重启服务以生效。
         pub fn local_save(&self, patch: &Value) -> Result<Value, CenterError> {
             let invalid = |message: &str| CenterError::new("voice_settings_invalid", 400, message);
-            let mut settings = self.settings();
-            let local = &mut settings.builtin_local;
-            for (key, slot) in [("asr", &mut local.asr), ("tts", &mut local.tts), ("vad", &mut local.vad), ("read_only_shortcuts", &mut local.read_only_shortcuts), ("asr_beam_search", &mut local.asr_beam_search), ("barge_in", &mut local.barge_in)] {
-                if let Some(value) = patch.get(key) {
-                    *slot = value.as_bool().ok_or_else(|| invalid("开关取值不正确"))?;
+            let touched_jev = patch.get("jev_model").is_some()
+                || patch.get("jev_filter_enabled").is_some()
+                || patch.get("jev_feedback_enabled").is_some();
+            let (is_local_laya, laya_needed) = {
+                let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                let mut settings = self.settings();
+                let local = &mut settings.builtin_local;
+                for (key, slot) in [("asr", &mut local.asr), ("tts", &mut local.tts), ("vad", &mut local.vad), ("read_only_shortcuts", &mut local.read_only_shortcuts), ("asr_beam_search", &mut local.asr_beam_search), ("barge_in", &mut local.barge_in), ("job_done_announce", &mut local.job_done_announce), ("jev_filter_enabled", &mut local.jev_filter_enabled), ("jev_unfinished_hold", &mut local.jev_unfinished_hold), ("jev_fast_route", &mut local.jev_fast_route), ("jev_tool_prune", &mut local.jev_tool_prune), ("jev_memory_filter", &mut local.jev_memory_filter)] {
+                    if let Some(value) = patch.get(key) {
+                        *slot = value.as_bool().ok_or_else(|| invalid("开关取值不正确"))?;
+                    }
                 }
-            }
-            if let Some(value) = patch.get("barge_in_ms") {
-                let ms = value.as_u64().ok_or_else(|| invalid("插话时长须为 300 ~ 600 毫秒的整数"))?;
-                local.barge_in_ms = moss_voice::settings::validate_barge_in_ms(ms).map_err(|message| invalid(&message))?;
-            }
-            if let Some(value) = patch.get("custom_hotwords") {
-                let words: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| invalid("热词须为文字数组"))?;
-                local.custom_hotwords = moss_voice::settings::normalize_hotwords(&words).map_err(|message| invalid(&message))?;
-            }
-            for (key, kind, slot) in [
-                ("vad_model", ModelKind::Vad, &mut local.vad_model),
-                ("asr_model", ModelKind::Asr, &mut local.asr_model),
-                ("tts_model", ModelKind::Tts, &mut local.tts_model),
-            ] {
-                if let Some(value) = patch.get(key) {
-                    let id = value.as_str().filter(|id| local_models::spec_of(id, kind).is_some());
-                    *slot = id.ok_or_else(|| invalid("选择的本地模型不存在"))?.to_owned();
+                if let Some(value) = patch.get("jev_model") {
+                    let raw = value.as_str().ok_or_else(|| invalid("Jev 模型名称须为字符串"))?;
+                    local.jev_model = moss_voice::settings::validate_jev_model(raw).map_err(|message| invalid(&message))?;
                 }
-            }
-            if let Some(value) = patch.get("tts_speaker") {
-                local.tts_speaker =
-                    value.as_i64().filter(|value| (0..=999).contains(value)).ok_or_else(|| invalid("音色编号须在 0 ~ 999 之间"))? as i32;
-            }
-            if let Some(value) = patch.get("tts_speed") {
-                let speed = value.as_f64().filter(|value| (0.5..=2.0).contains(value)).ok_or_else(|| invalid("本地合成语速须在 0.5 ~ 2.0 之间"))?;
-                local.tts_speed = speed as f32;
-            }
-            if let Some(value) = patch.get("mirror") {
-                let mirror = value.as_str().map(str::trim).unwrap_or_default();
-                local.mirror = if mirror.is_empty() {
-                    None
-                } else if (mirror.starts_with("https://") || mirror.starts_with("http://")) && !mirror.contains(char::is_whitespace) {
-                    Some(mirror.trim_end_matches('/').to_owned())
-                } else {
-                    return Err(invalid("下载地址必须以 http:// 或 https:// 开头"));
+                let jev_feedback_patch = match patch.get("jev_feedback_enabled") {
+                    Some(v) => Some(v.as_bool().ok_or_else(|| invalid("Jev 加工反馈开关取值不正确"))?),
+                    None => None,
                 };
+                if let Some(value) = patch.get("barge_in_ms") {
+                    let ms = value.as_u64().ok_or_else(|| invalid("插话时长须为 300 ~ 600 毫秒的整数"))?;
+                    local.barge_in_ms = moss_voice::settings::validate_barge_in_ms(ms).map_err(|message| invalid(&message))?;
+                }
+                if let Some(value) = patch.get("custom_hotwords") {
+                    let words: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| invalid("热词须为文字数组"))?;
+                    local.custom_hotwords = moss_voice::settings::normalize_hotwords(&words).map_err(|message| invalid(&message))?;
+                }
+                for (key, kind, slot) in [
+                    ("vad_model", ModelKind::Vad, &mut local.vad_model),
+                    ("asr_model", ModelKind::Asr, &mut local.asr_model),
+                    ("tts_model", ModelKind::Tts, &mut local.tts_model),
+                ] {
+                    if let Some(value) = patch.get(key) {
+                        let id = value.as_str().filter(|id| local_models::spec_of(id, kind).is_some());
+                        *slot = id.ok_or_else(|| invalid("选择的本地模型不存在"))?.to_owned();
+                    }
+                }
+                if let Some(value) = patch.get("tts_speaker") {
+                    local.tts_speaker =
+                        value.as_i64().filter(|value| (0..=999).contains(value)).ok_or_else(|| invalid("音色编号须在 0 ~ 999 之间"))? as i32;
+                }
+                if let Some(value) = patch.get("tts_speed") {
+                    let speed = value.as_f64().filter(|value| (0.5..=2.0).contains(value)).ok_or_else(|| invalid("本地合成语速须在 0.5 ~ 2.0 之间"))?;
+                    local.tts_speed = speed as f32;
+                }
+                if let Some(value) = patch.get("mirror") {
+                    let mirror = value.as_str().map(str::trim).unwrap_or_default();
+                    local.mirror = if mirror.is_empty() {
+                        None
+                    } else if (mirror.starts_with("https://") || mirror.starts_with("http://")) && !mirror.contains(char::is_whitespace) {
+                        Some(mirror.trim_end_matches('/').to_owned())
+                    } else {
+                        return Err(invalid("下载地址必须以 http:// 或 https:// 开头"));
+                    };
+                }
+                moss_voice::settings::save_with_jev_feedback(&self.settings_file(), &settings, jev_feedback_patch)
+                    .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
+                let is_local_laya = moss_voice::settings::is_local_laya_model(&settings.builtin_local.jev_model);
+                let jev_feedback_on = moss_voice::settings::jev_feedback_enabled(&self.settings_file());
+                (is_local_laya, settings.builtin_local.jev_filter_enabled || jev_feedback_on)
+            };
+            if is_local_laya && laya_needed {
+                if touched_jev {
+                    self.ensure_laya_running(false)
+                        .map_err(|msg| CenterError::new("laya_env_missing", 412, msg))?;
+                } else if let Err(err) = self.ensure_laya_running(false) {
+                    eprintln!("[moss-desktop] 本地 Laya 决策服务未就绪（不影响其余本地设置保存）：{err}");
+                }
+            } else if !is_local_laya || !laya_needed {
+                self.stop_laya();
             }
-            moss_voice::settings::save(&self.settings_file(), &settings)
-                .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
             let restarted = self.restart_if_running()?;
             let mut status = self.status();
             status["restarted"] = Value::Bool(restarted);
             Ok(status)
         }
 
-        pub fn model_download(&self, id: &str) -> Result<Value, CenterError> {
+        pub fn model_download(&self, raw_id: &str) -> Result<Value, CenterError> {
+            let (id, force) = match raw_id.strip_suffix(":force") {
+                Some(base) => (base, true),
+                None => (raw_id, false),
+            };
+            let mut checked_env = None;
+            if id == "laya_multilingual" {
+                let env_info = Self::detect_laya_env();
+                let ready = env_info.get("ready").and_then(Value::as_bool) == Some(true);
+                if !ready && !force {
+                    let summary = env_info
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or("未检测到本地 Laya 运行环境");
+                    return Err(CenterError::new("laya_env_missing", 412, summary));
+                }
+                checked_env = Some(env_info);
+            }
             let mirror = self.settings().builtin_local.mirror;
             self.models
                 .download(id, mirror.as_deref().unwrap_or(local_models::DEFAULT_BASE))
                 .map_err(|message| CenterError::new("local_model_download_failed", 409, message))?;
-            Ok(self.status())
+            let mut status = self.status();
+            if let Some(env_info) = checked_env {
+                status["local"]["laya_env"] = env_info;
+            }
+            Ok(status)
         }
 
         pub fn model_cancel(&self, id: &str) -> Value {
@@ -1145,7 +1772,10 @@ mod imp {
             if id=="campplus_sv_zh_cn_16k_common" && self.speaker_backend.helper.lock().map(|h|h.is_some()).unwrap_or(true) {
                 return Err(CenterError::new("local_model_in_use",409,"声纹模型已加载，请先停止内置服务"));
             }
-            if self.running() && self.helper.lock().map(|helper| helper.is_some()).unwrap_or(false) {
+            if id == "laya_multilingual" {
+                self.stop_laya();
+            }
+            if id != "laya_multilingual" && self.running() && self.helper.lock().map(|helper| helper.is_some()).unwrap_or(false) {
                 return Err(CenterError::new("local_model_in_use", 409, "内置服务正在使用本地模型，请先停止内置服务再删除"));
             }
             self.models.delete(id).map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
@@ -1157,8 +1787,40 @@ mod imp {
         }
 
         /// 测试一个分区的连接：密钥留空时用已保存的密钥。结果不含密钥。
+        /// 读取当前分区密钥；若当前分区尚未保存密钥且填写的地址与另一个已保存 OpenAI 兼容分区同源（基础 `/models` 地址一致），自动沿用同源分区的本机密钥。
+        fn secret_or_same_origin(&self, section: Section, input: &SectionInput) -> Result<Option<String>, CenterError> {
+            if let Some(own) = self.secret(section)?.filter(|value| !value.is_empty()) {
+                return Ok(Some(own));
+            }
+            if input.kind != ProviderKind::Openai {
+                return Ok(None);
+            }
+            if section != Section::Llm && moss_voice::models::chat_only_gateway_name(&input.url).is_some() {
+                return Ok(None);
+            }
+            let target_list_url = moss_voice::models::models_list_url(&input.url);
+            if target_list_url.is_empty() {
+                return Ok(None);
+            }
+            let settings = self.settings();
+            for other in Section::ALL {
+                if other == section {
+                    continue;
+                }
+                let Some(provider) = settings.builtin_models.get(other) else { continue };
+                if provider.kind == ProviderKind::Openai
+                    && moss_voice::models::models_list_url(&provider.url) == target_list_url
+                    && let Some(peer_key) = self.secret(other)?.filter(|value| !value.is_empty())
+                {
+                    return Ok(Some(peer_key));
+                }
+            }
+            Ok(None)
+        }
+
+        /// 测试一个分区的连接：密钥留空时用已保存的密钥（或同基础地址分区的已存密钥）。结果不含密钥。
         pub fn models_test(&self, section: Section, input: &SectionInput) -> Result<Value, CenterError> {
-            let stored = self.secret(section)?;
+            let stored = self.secret_or_same_origin(section, input)?;
             let resolved = builtin::resolve_for_test(section, input, stored)
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
             let result = match resolved.kind {
@@ -1168,28 +1830,42 @@ mod imp {
             serde_json::to_value(result).map_err(|error| internal(error.to_string()))
         }
 
+        /// 读取一个分区服务商支持的全部模型列表：密钥留空时用已保存的密钥（或同基础地址分区的已存密钥）。结果不含密钥。
+        pub fn models_list(&self, section: Section, input: &SectionInput) -> Result<Value, CenterError> {
+            let stored = self.secret_or_same_origin(section, input)?;
+            let resolved = builtin::resolve_for_list(section, input, stored)
+                .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
+            let result = moss_voice::models::list_models(&resolved);
+            serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+        }
+
         /// 保存模型设置（地址等写 settings.json，密钥写 app_secrets）；运行中则重启服务以生效。
         pub fn models_save(&self, input: &ModelsInput, clear: &[Section]) -> Result<Value, CenterError> {
-            let mut settings = self.settings();
+            let settings = self.settings();
             let plan = builtin::plan_save(&settings.builtin_models, input, clear)
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
-            let changes: Vec<(String, Option<String>)> = plan
-                .keys
-                .iter()
-                .filter_map(|(section, change)| {
-                    let name = builtin_secret_name(*section).to_owned();
-                    match change {
-                        KeyChange::Keep => None,
-                        KeyChange::Set(value) => Some((name, Some(value.clone()))),
-                        KeyChange::Clear => Some((name, None)),
+            let mut changes: Vec<(String, Option<String>)> = Vec::new();
+            for (section, change) in &plan.keys {
+                let name = builtin_secret_name(*section).to_owned();
+                match change {
+                    KeyChange::Keep => {
+                        if let Some(raw_input) = input.section(*section)
+                            && self.secret(*section)?.filter(|v| !v.is_empty()).is_none()
+                            && let Some(peer_key) = self.secret_or_same_origin(*section, raw_input)?
+                        {
+                            changes.push((name, Some(peer_key)));
+                        }
                     }
-                })
-                .collect();
-            settings.builtin_models = plan.models;
+                    KeyChange::Set(value) => changes.push((name, Some(value.clone()))),
+                    KeyChange::Clear => changes.push((name, None)),
+                }
+            }
             {
                 let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                let mut latest = self.settings();
+                latest.builtin_models = plan.models;
                 commit_secrets_then_settings(&db, &changes, || {
-                    moss_voice::settings::save(&self.settings_file(), &settings)
+                    moss_voice::settings::save(&self.settings_file(), &latest)
                         .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
                 })?;
             }
@@ -1201,6 +1877,580 @@ mod imp {
             let mut status = self.status();
             status["restarted"] = Value::Bool(restarted);
             Ok(status)
+        }
+
+        /// 读取 Jev 可用密钥：优先本机 `jev_api_key`，未设时若大模型指向 `openrouter.ai` 则沿用大模型密钥。
+        fn jev_effective_secret(&self) -> Result<Option<String>, CenterError> {
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+            resolve_openrouter_jev_secret_locked(&db, &self.settings_file()).map(|(secret, _)| secret)
+        }
+
+        fn stop_laya(&self) {
+            if let Ok(mut runner) = self.laya.lock() {
+                runner.stop();
+            }
+        }
+
+        fn is_local_laya_configured_and_installed(&self, settings: &moss_voice::VoiceSettings) -> bool {
+            let jev_model = moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
+                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+            moss_voice::settings::is_local_laya_model(&jev_model)
+                && self.models.path_if_installed("laya_multilingual").is_some()
+        }
+
+        fn should_run_local_laya_for_feedback(&self) -> bool {
+            let settings = self.settings();
+            self.is_local_laya_configured_and_installed(&settings)
+                && moss_voice::settings::jev_feedback_enabled(&self.settings_file())
+        }
+
+        fn should_run_local_laya(&self) -> bool {
+            let settings = self.settings();
+            self.is_local_laya_configured_and_installed(&settings)
+                && (settings.builtin_local.jev_filter_enabled
+                    || moss_voice::settings::jev_feedback_enabled(&self.settings_file()))
+        }
+
+        fn select_laya_device(cuda_available: bool, env_override: Option<&str>) -> String {
+            if let Some(raw) = env_override.map(str::trim).filter(|v| !v.is_empty()) {
+                return raw.to_owned();
+            }
+            if cuda_available {
+                "cuda:0".to_owned()
+            } else {
+                "cpu".to_owned()
+            }
+        }
+
+        fn probe_laya_cuda_available(py: &std::path::Path, cuda_lib_present: bool) -> bool {
+            if !cuda_lib_present || !py.is_file() {
+                return false;
+            }
+            let mut cmd = std::process::Command::new(py);
+            cmd.args([
+                "-c",
+                "import sys, torch; sys.stdout.write('1' if torch.cuda.is_available() else '0')",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let Ok(mut child) = cmd.spawn() else {
+                return false;
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if !status.success() {
+                            return false;
+                        }
+                        let mut out = String::new();
+                        if let Some(mut stdout) = child.stdout.take() {
+                            use std::io::Read;
+                            let _ = stdout.read_to_string(&mut out);
+                        }
+                        return out.trim() == "1";
+                    }
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return false;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(40));
+                    }
+                    Err(_) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return false;
+                    }
+                }
+            }
+        }
+
+        fn laya_venv_python(root: &std::path::Path) -> std::path::PathBuf {
+            #[cfg(windows)]
+            {
+                root.join(".venv").join("Scripts").join("python.exe")
+            }
+            #[cfg(not(windows))]
+            {
+                let py = root.join(".venv").join("bin").join("python");
+                if py.is_file() {
+                    py
+                } else {
+                    let py3 = root.join(".venv").join("bin").join("python3");
+                    if py3.is_file() { py3 } else { py }
+                }
+            }
+        }
+
+        fn resolve_laya_python() -> (std::path::PathBuf, std::path::PathBuf) {
+            let install_dir = writable_install_dir();
+            let env_py = std::env::var_os("MOSS_LAYA_PYTHON").map(std::path::PathBuf::from);
+            let laya_root = std::env::var_os("MOSS_LAYA_ROOT")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    install_dir.as_ref().and_then(|dir| {
+                        [dir.join("laya"), dir.join("moss-laya")]
+                            .into_iter()
+                            .find(|cand| Self::laya_venv_python(cand).is_file())
+                    })
+                })
+                .or_else(|| {
+                    env_py
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .and_then(|bin| bin.parent())
+                        .and_then(|venv| venv.parent().map(std::path::Path::to_path_buf))
+                })
+                .unwrap_or_else(|| {
+                    #[cfg(windows)]
+                    {
+                        install_dir
+                            .map(|dir| dir.join("laya"))
+                            .filter(|_| !std::path::Path::new(r"E:\moss-laya\.venv\Scripts\python.exe").is_file())
+                            .unwrap_or_else(|| std::path::PathBuf::from(r"E:\moss-laya"))
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        install_dir
+                            .map(|dir| dir.join("laya"))
+                            .unwrap_or_else(|| std::env::temp_dir().join("moss-laya"))
+                    }
+                });
+            let py = env_py.unwrap_or_else(|| Self::laya_venv_python(&laya_root));
+            (laya_root, py)
+        }
+
+        fn detect_laya_env() -> Value {
+            let skip_cuda_probe = std::env::var("MOSS_LAYA_DEVICE")
+                .ok()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
+            Self::detect_laya_env_with_probe(!skip_cuda_probe)
+        }
+
+        fn detect_laya_env_with_probe(probe_cuda: bool) -> Value {
+            let (laya_root, py) = Self::resolve_laya_python();
+            let python_found = py.is_file();
+            let site_packages = py
+                .parent()
+                .and_then(|s| s.parent())
+                .and_then(|venv| {
+                    let win_sp = venv.join("Lib").join("site-packages");
+                    if win_sp.is_dir() {
+                        return Some(win_sp);
+                    }
+                    let lib_dir = venv.join("lib");
+                    std::fs::read_dir(&lib_dir).ok()?.flatten().find_map(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        name.starts_with("python")
+                            .then(|| entry.path().join("site-packages"))
+                            .filter(|p| p.is_dir())
+                    })
+                });
+            let laya_serve_found = site_packages.as_ref().is_some_and(|sp| {
+                sp.join("laya").join("serve.py").is_file() && sp.join("uvicorn").is_dir()
+            });
+            let cuda_lib_found = site_packages.as_ref().is_some_and(|sp| {
+                let torch_lib = sp.join("torch").join("lib");
+                torch_lib.join("torch_cuda.dll").is_file()
+                    || torch_lib.join("libtorch_cuda.so").is_file()
+            });
+            let ready = python_found && laya_serve_found;
+            let cuda_found = ready && probe_cuda && Self::probe_laya_cuda_available(&py, cuda_lib_found);
+            let summary = if ready && cuda_found {
+                format!(
+                    "运行环境检测通过（Python 3.11 + laya[serve] + CUDA 显卡加速已就绪：{}），可直接下载并启用。",
+                    laya_root.display()
+                )
+            } else if ready {
+                format!(
+                    "运行环境检测通过（Python + laya[serve] CPU 模式已就绪：{}），可直接下载并启用。",
+                    laya_root.display()
+                )
+            } else if !python_found {
+                format!(
+                    "未检测到本地 Laya Python 运行环境（预期位置：{}）。需准备 Python 3.10+ 虚拟环境并执行 pip install \"laya[serve]\"；当前可先下载模型权重，但需环境就绪后才能启动推理。",
+                    py.display()
+                )
+            } else {
+                format!(
+                    "已找到 Python（{}），但缺少 laya[serve] 依赖包（请执行 pip install \"laya[serve]\"）；当前可先下载模型权重，补齐依赖后即可启用。",
+                    py.display()
+                )
+            };
+            serde_json::json!({
+                "ready": ready,
+                "python_found": python_found,
+                "laya_serve_found": laya_serve_found,
+                "cuda_found": cuda_found,
+                "python_path": py.to_string_lossy(),
+                "summary": summary,
+            })
+        }
+
+        fn ensure_laya_running(&self, wait_ready: bool) -> Result<(), String> {
+            let Some(model_dir) = self.models.path_if_installed("laya_multilingual") else {
+                return Err("本地 Laya 决策模型尚未下载：请先在下方“本地模型（断网可用）”点击下载".into());
+            };
+            if cfg!(test) {
+                return Ok(());
+            }
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18090));
+            if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(120)).is_ok() {
+                return Ok(());
+            }
+            let (already_alive, start_generation) = {
+                let mut runner = self.laya.lock().map_err(|_| "本地 Laya 进程锁失败".to_owned())?;
+                let alive = runner
+                    .child
+                    .as_mut()
+                    .is_some_and(|c| matches!(c.try_wait(), Ok(None)));
+                if !alive {
+                    runner.kill_reaped();
+                }
+                (alive, runner.generation)
+            };
+            if !already_alive {
+                let (laya_root, py) = Self::resolve_laya_python();
+                let env_device = std::env::var("MOSS_LAYA_DEVICE").ok();
+                let has_override = env_device.as_deref().is_some_and(|v| !v.trim().is_empty());
+                let env_info = Self::detect_laya_env_with_probe(!has_override);
+                if env_info.get("ready").and_then(Value::as_bool) != Some(true) {
+                    return Err(
+                        env_info
+                            .get("summary")
+                            .and_then(Value::as_str)
+                            .unwrap_or("未找到本地 Laya 运行环境")
+                            .to_owned(),
+                    );
+                }
+                let cuda_available = env_info.get("cuda_found").and_then(Value::as_bool) == Some(true);
+                let laya_device = Self::select_laya_device(cuda_available, env_device.as_deref());
+                let tmp_dir = laya_root.join("tmp");
+                let _ = std::fs::create_dir_all(&tmp_dir);
+                let extra_models = serde_json::json!({
+                    "multilingual": model_dir.to_string_lossy().replace('\\', "/")
+                })
+                .to_string();
+                let mut runner = self.laya.lock().map_err(|_| "本地 Laya 进程锁失败".to_owned())?;
+                if runner.generation != start_generation {
+                    return Err("本地 Laya 启动已取消（开关已关闭或服务已停止）".into());
+                }
+                let alive_now = runner
+                    .child
+                    .as_mut()
+                    .is_some_and(|c| matches!(c.try_wait(), Ok(None)));
+                if !alive_now
+                    && std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(120)).is_err()
+                {
+                    let mut cmd = std::process::Command::new(&py);
+                    cmd.args(["-m", "laya.serve"])
+                        .env("USE_TF", "0")
+                        .env("HF_HUB_OFFLINE", "1")
+                        .env("TMP", &tmp_dir)
+                        .env("TEMP", &tmp_dir)
+                        .env("LAYA_HOST", "127.0.0.1")
+                        .env("LAYA_PORT", "18090")
+                        .env("LAYA_DEVICE", &laya_device)
+                        .env("LAYA_PRELOAD", "1")
+                        .env("LAYA_MODELS", "multilingual")
+                        .env("LAYA_DEFAULT_MODEL", "multilingual")
+                        .env("LAYA_MAX_LOADED", "1")
+                        .env("LAYA_IDLE_UNLOAD_SECONDS", "0")
+                        .env("LAYA_MAX_TOKEN_BUDGET", "4096")
+                        .env("LAYA_EXTRA_MODELS", extra_models)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                        cmd.creation_flags(CREATE_NO_WINDOW);
+                    }
+                    let child = cmd
+                        .spawn()
+                        .map_err(|e| format!("启动本地 Laya 服务失败：{e}"))?;
+                    runner.child = Some(child);
+                }
+            }
+            if wait_ready {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(28);
+                while std::time::Instant::now() < deadline {
+                    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+                return Err("本地 Laya 决策服务启动超时（正在加载模型，请稍后再试）".into());
+            }
+            Ok(())
+        }
+
+        pub fn jev_test(&self, input: &Value) -> Result<Value, CenterError> {
+            let current_model = self.settings().builtin_local.jev_model;
+            let model = input
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .unwrap_or(current_model.as_str());
+            let model = moss_voice::settings::validate_jev_model(model)
+                .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
+            if moss_voice::settings::is_local_laya_model(&model) {
+                self.ensure_laya_running(true)
+                    .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
+                return Ok(moss_voice::models::test_jev_decisions(
+                    moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL,
+                    "moss-local-laya",
+                    &model,
+                ));
+            }
+            let typed_key = input
+                .get("api_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            let api_key = if !typed_key.is_empty() {
+                typed_key.to_owned()
+            } else {
+                self.jev_effective_secret()?
+                    .ok_or_else(|| CenterError::new("model_input_invalid", 400, "请填写 OpenRouter API Key"))?
+            };
+            Ok(moss_voice::models::test_jev_decisions(
+                moss_voice::models::DEFAULT_JEV_DECISIONS_URL,
+                &api_key,
+                &model,
+            ))
+        }
+
+        pub fn jev_models_list(&self, input: &Value) -> Result<Value, CenterError> {
+            let typed_key = input
+                .get("api_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned);
+            let effective = match typed_key {
+                Some(k) => Some(k),
+                None => self.jev_effective_secret()?,
+            };
+            Ok(moss_voice::models::list_jev_models(
+                moss_voice::models::DEFAULT_OPENROUTER_MODELS_URL,
+                effective.as_deref(),
+            ))
+        }
+
+        /// 组合保存 `models_save` + `jev_save` 前预校验 Jev 输入，防止普通模型落盘后因 Jev 参数格式错误造成半提交。
+        pub fn precheck_jev_save_input(
+            &self,
+            input: Option<&Value>,
+            clear: bool,
+            pending_models: &ModelsInput,
+            clearing_sections: &[Section],
+        ) -> Result<(), CenterError> {
+            if clear {
+                return Ok(());
+            }
+            let invalid = |msg: &str| CenterError::new("model_input_invalid", 400, msg);
+            let obj = input
+                .and_then(Value::as_object)
+                .ok_or_else(|| invalid("Jev 配置格式不正确"))?;
+            let current_settings = self.settings();
+            let model_raw = obj
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .unwrap_or(current_settings.builtin_local.jev_model.as_str());
+            let model = moss_voice::settings::validate_jev_model(model_raw)
+                .map_err(|msg| invalid(&msg))?;
+            let next_voice = match obj.get("voice_enabled") {
+                Some(v) => v.as_bool().ok_or_else(|| invalid("语音筛选开关取值不正确"))?,
+                None => current_settings.builtin_local.jev_filter_enabled,
+            };
+            let effective_feedback = match obj.get("feedback_enabled") {
+                Some(v) => v.as_bool().ok_or_else(|| invalid("加工反馈开关取值不正确"))?,
+                None => moss_voice::settings::jev_feedback_enabled(&self.settings_file()),
+            };
+            if moss_voice::settings::is_local_laya_model(&model) {
+                if (next_voice || effective_feedback)
+                    && self.models.path_if_installed("laya_multilingual").is_none()
+                {
+                    return Err(invalid("本地 Laya 决策模型尚未下载：请先在下方“本地模型（断网可用）”点击下载"));
+                }
+                return Ok(());
+            }
+            let typed_key = obj
+                .get("api_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if !typed_key.is_empty() {
+                return Ok(());
+            }
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+            if db
+                .get_secret("jev_api_key")
+                .map_err(|e| internal(format!("{e:?}")))?
+                .is_some_and(|v| !v.trim().is_empty())
+            {
+                return Ok(());
+            }
+            let plan = builtin::plan_save(&current_settings.builtin_models, pending_models, clearing_sections)
+                .map_err(|message| invalid(&message))?;
+            let next_openrouter_llm = plan
+                .models
+                .llm
+                .as_ref()
+                .is_some_and(|p| p.kind == ProviderKind::Openai && moss_voice::models::is_openrouter_https_url(&p.url));
+            let llm_has_key = plan
+                .keys
+                .iter()
+                .find(|(sec, _)| *sec == Section::Llm)
+                .map(|(_, ch)| match ch {
+                    KeyChange::Set(v) => !v.trim().is_empty(),
+                    KeyChange::Clear => false,
+                    KeyChange::Keep => db
+                        .get_secret(builtin_secret_name(Section::Llm))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|v| !v.trim().is_empty()),
+                })
+                .unwrap_or(false);
+            if next_openrouter_llm && llm_has_key {
+                Ok(())
+            } else {
+                Err(invalid("请填写 OpenRouter API Key"))
+            }
+        }
+
+        pub fn jev_save(&self, input: Option<&Value>, clear: bool) -> Result<Value, CenterError> {
+            let invalid = |msg: &str| CenterError::new("model_input_invalid", 400, msg);
+            enum LayaAction {
+                Start,
+                Stop,
+            }
+            let laya_action = {
+                let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                let mut settings = self.settings();
+                let mut changes: Vec<(String, Option<String>)> = Vec::new();
+                let feedback_patch: Option<bool>;
+                let action: LayaAction;
+                if clear {
+                    changes.push(("jev_api_key".into(), None));
+                    settings.builtin_local.jev_filter_enabled = false;
+                    settings.builtin_local.jev_model = moss_voice::settings::default_jev_model();
+                    feedback_patch = Some(false);
+                    action = LayaAction::Stop;
+                } else {
+                    let obj = input
+                        .and_then(Value::as_object)
+                        .ok_or_else(|| invalid("Jev 配置格式不正确"))?;
+                    let model_raw = obj
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or(settings.builtin_local.jev_model.as_str())
+                        .to_owned();
+                    let model = moss_voice::settings::validate_jev_model(&model_raw)
+                        .map_err(|msg| invalid(&msg))?;
+                    let is_local = moss_voice::settings::is_local_laya_model(&model);
+                    let typed_key = obj
+                        .get("api_key")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    let next_voice = match obj.get("voice_enabled") {
+                        Some(v) => v.as_bool().ok_or_else(|| invalid("语音筛选开关取值不正确"))?,
+                        None => settings.builtin_local.jev_filter_enabled,
+                    };
+                    feedback_patch = match obj.get("feedback_enabled") {
+                        Some(v) => Some(v.as_bool().ok_or_else(|| invalid("加工反馈开关取值不正确"))?),
+                        None => None,
+                    };
+                    let effective_feedback = feedback_patch
+                        .unwrap_or_else(|| moss_voice::settings::jev_feedback_enabled(&self.settings_file()));
+                    if is_local {
+                        if (next_voice || effective_feedback)
+                            && self.models.path_if_installed("laya_multilingual").is_none()
+                        {
+                            return Err(invalid("本地 Laya 决策模型尚未下载：请先在下方“本地模型（断网可用）”点击下载"));
+                        }
+                        if !typed_key.is_empty() {
+                            changes.push(("jev_api_key".into(), Some(typed_key.to_owned())));
+                        }
+                    } else if !typed_key.is_empty() {
+                        changes.push(("jev_api_key".into(), Some(typed_key.to_owned())));
+                    } else {
+                        let (existing, has_own) =
+                            resolve_openrouter_jev_secret_locked(&db, &self.settings_file())?;
+                        let Some(resolved_key) = existing else {
+                            return Err(invalid("请填写 OpenRouter API Key"));
+                        };
+                        if !has_own {
+                            changes.push(("jev_api_key".into(), Some(resolved_key)));
+                        }
+                    }
+                    settings.builtin_local.jev_model = model;
+                    settings.builtin_local.jev_filter_enabled = next_voice;
+                    action = if is_local && (settings.builtin_local.jev_filter_enabled || effective_feedback) {
+                        LayaAction::Start
+                    } else {
+                        LayaAction::Stop
+                    };
+                }
+                commit_secrets_then_settings(&db, &changes, || {
+                    moss_voice::settings::save_with_jev_feedback(&self.settings_file(), &settings, feedback_patch)
+                        .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
+                })?;
+                action
+            };
+            match laya_action {
+                LayaAction::Start => {
+                    if let Err(err) = self.ensure_laya_running(false) {
+                        eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
+                    }
+                }
+                LayaAction::Stop => self.stop_laya(),
+            }
+            let restarted = self.restart_if_running()?;
+            let mut status = self.status();
+            status["restarted"] = Value::Bool(restarted);
+            Ok(status)
+        }
+        /// 2026-11-02：桌面端直接向一台已连接设备发请求（`refresh_info` / `reboot`），不经过模型。
+        pub fn device_request(&self, device_id: &str, request: &str) -> Result<Value, CenterError> {
+            let label = request.trim();
+            let request = match label {
+                "refresh_info" => moss_voice_server::DeviceRequest::RefreshInfo,
+                "reboot" => moss_voice_server::DeviceRequest::Reboot,
+                _ => {
+                    return Err(CenterError::new(
+                        "voice_device_invalid",
+                        400,
+                        "设备请求只能是 refresh_info 或 reboot",
+                    ));
+                }
+            };
+            let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+            let server = server.as_ref().ok_or_else(|| {
+                CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+            })?;
+            server
+                .device_request(device_id, request)
+                .map_err(|error| CenterError::new("voice_device_offline", 409, error))?;
+            Ok(serde_json::json!({ "requested": label }))
         }
 
         pub fn set_device_status(&self, device_id: &str, status: &str) -> Result<Value, CenterError> {
@@ -2004,6 +3254,7 @@ mod imp {
                     *self.identity.calibration.lock().map_err(|_|internal("标定状态锁失败"))?=Some(calibration);
                     self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.clear();
                     self.personal.directory_changed();
+                    self.context.speakers_invalidated();
                     if self.settings().builtin_person_memory_enabled{self.restart_if_running()?;}
                 },
                 "reset_calibration"=>{
@@ -2012,6 +3263,7 @@ mod imp {
                     *self.identity.calibration.lock().map_err(|_|internal("标定状态锁失败"))?=None;
                     self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.clear();
                     self.personal.directory_changed();
+                    self.context.speakers_invalidated();
                     if self.settings().builtin_person_memory_enabled{self.restart_if_running()?;}
                 },
                 "delete"=>{
@@ -2021,6 +3273,7 @@ mod imp {
                     if !self.personal.person_deleted(id,||self.host.db.lock().map_err(|_|"数据库锁失败".to_owned())?.delete_voice_speaker_if_revision(id,revision).map_err(db_error)).map_err(internal)? {
                         return Err(CenterError::new("speaker_conflict",409,"声纹记录已变化，请刷新"));
                     }
+                    self.context.person_changed(id);
                     if let Ok(mut tests)=self.speaker_backend.tests.lock(){tests.remove(id);}
                 },
                 "save_memory"=>{
@@ -2038,6 +3291,7 @@ mod imp {
                     }
                     if enabled{self.prepare_speaker_helper()?;}
                     self.personal.directory_changed();
+                    self.context.speakers_invalidated();
                     let mut settings=self.settings();settings.builtin_person_memory_enabled=enabled;
                     moss_voice::settings::save(&self.settings_file(),&settings).map_err(internal)?;
                     self.restart_if_running()?;
@@ -2279,30 +3533,258 @@ mod imp {
             assert!(builtin.music_status()["warning"].is_null());
             assert!(builtin.speaker_manage(&serde_json::json!({"action": "status"})).unwrap()["warning"].is_null());
         }
+
+        #[test]
+        fn models_list_uses_stored_section_secret_without_echoing_it() {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = br#"{"object":"list","data":[{"id":"FunAudioLLM/SenseVoiceSmall"},{"id":"Qwen/Qwen2.5-7B-Instruct"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(body);
+                let _ = tx.send(head);
+            });
+
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            host.db.lock().unwrap().set_secret("voice.asr.main", "sk-stored-asr-secret", 1.0).unwrap();
+            let builtin = init(Some(host)).0.unwrap();
+
+            let input = SectionInput {
+                url: format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+                ..Default::default()
+            };
+            let out = builtin.models_list(Section::Asr, &input).unwrap();
+            assert_eq!(out["ok"], true);
+            assert_eq!(out["models"], serde_json::json!(["FunAudioLLM/SenseVoiceSmall", "Qwen/Qwen2.5-7B-Instruct"]));
+            assert!(!out.to_string().contains("sk-stored-asr-secret"));
+            let head = rx.recv().unwrap();
+            assert!(head.starts_with("GET /v1/models "), "{head}");
+            assert!(head.to_ascii_lowercase().contains("authorization: bearer sk-stored-asr-secret"), "{head}");
+
+            // 同基础地址跨分区复用已保存密钥（例如 TTS 填同一个基础地址且留空密钥时，自动沿用 ASR 已保存的本机密钥）
+            let mut settings = builtin.settings();
+            settings.builtin_models.asr = Some(moss_voice::settings::BuiltinProvider {
+                kind: ProviderKind::Openai,
+                url: format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+                model: "FunAudioLLM/SenseVoiceSmall".into(),
+                voice: String::new(),
+                speed: 1.0,
+            });
+            moss_voice::settings::save(&builtin.settings_file(), &settings).unwrap();
+            let tts_input = SectionInput {
+                url: format!("http://127.0.0.1:{port}/v1"),
+                ..Default::default()
+            };
+            assert_eq!(
+                builtin.secret_or_same_origin(Section::Tts, &tts_input).unwrap().as_deref(),
+                Some("sk-stored-asr-secret")
+            );
+        }
+
+        #[test]
+        fn jev_save_shares_system_secret_switches_model_and_clears_cleanly() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let builtin = init(Some(host.clone())).0.unwrap();
+
+            // 初始未配置
+            let initial = builtin.status();
+            assert_eq!(initial["jev"]["key_set"], false);
+            assert_eq!(initial["jev"]["model"], "typesafe/jev-1.14");
+
+            // 保存 Jev 配置：写入与系统设置共用的 app_secrets["jev_api_key"] 与顶层 jev_enabled，且返回状态不回显密钥
+            let saved = builtin
+                .jev_save(
+                    Some(&serde_json::json!({
+                        "api_key": "sk-or-shared-jev-secret",
+                        "model": "typesafe/jev-1.13",
+                        "voice_enabled": true,
+                        "feedback_enabled": true,
+                    })),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(saved["jev"]["key_set"], true);
+            assert_eq!(saved["jev"]["model"], "typesafe/jev-1.13");
+            assert_eq!(saved["jev"]["voice_enabled"], true);
+            assert_eq!(saved["jev"]["feedback_enabled"], true);
+            assert!(!saved.to_string().contains("sk-or-shared-jev-secret"));
+            assert_eq!(
+                host.db.lock().unwrap().get_secret("jev_api_key").unwrap().as_deref(),
+                Some("sk-or-shared-jev-secret")
+            );
+            assert!(moss_voice::settings::jev_feedback_enabled(&builtin.settings_file()));
+
+            // 顶部第 5 栏下拉框通过 local_save 切换模型版本与开关
+            let switched = builtin
+                .local_save(&serde_json::json!({
+                    "jev_filter_enabled": true,
+                    "jev_model": "typesafe/jev-1.14",
+                }))
+                .unwrap();
+            assert_eq!(switched["jev"]["model"], "typesafe/jev-1.14");
+            assert!(builtin.local_save(&serde_json::json!({"jev_model": "gpt-4o"})).is_err());
+
+            // 删除此项：清理 jev_api_key，并重置语音筛选与加工反馈开关
+            let cleared = builtin.jev_save(None, true).unwrap();
+            assert_eq!(cleared["jev"]["key_set"], false);
+            assert_eq!(cleared["jev"]["voice_enabled"], false);
+            assert_eq!(cleared["jev"]["feedback_enabled"], false);
+            assert_eq!(host.db.lock().unwrap().get_secret("jev_api_key").unwrap(), None);
+        }
+
+        #[test]
+        fn local_laya_device_selection_lifecycle_and_jev_save_preserve_local_routing() {
+            assert_eq!(BuiltinVoice::select_laya_device(true, None), "cuda:0");
+            assert_eq!(BuiltinVoice::select_laya_device(false, None), "cpu");
+            assert_eq!(BuiltinVoice::select_laya_device(false, Some(" cuda:1 ")), "cuda:1");
+            assert_eq!(BuiltinVoice::select_laya_device(true, Some("   ")), "cuda:0");
+            assert!(!BuiltinVoice::probe_laya_cuda_available(std::path::Path::new("nonexistent-python"), true));
+            assert!(!BuiltinVoice::probe_laya_cuda_available(std::path::Path::new("nonexistent-python"), false));
+
+            let temp = tempfile::tempdir().unwrap();
+            let laya_spec = local_models::spec("laya_multilingual").unwrap();
+            let laya_dir = temp.path().join("models").join("laya_multilingual");
+            for (rel, len) in std::iter::once((laya_spec.path, laya_spec.size))
+                .chain(laya_spec.extras.iter().map(|e| (e.path, e.size)))
+            {
+                let p = laya_dir.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::File::create(&p).unwrap().set_len(len).unwrap();
+            }
+
+            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let mut voice_settings = moss_voice::VoiceSettings::default();
+            voice_settings.mode = VoiceMode::Official;
+            voice_settings.builtin_local.jev_model = "laya_multilingual".into();
+            voice_settings.builtin_local.jev_filter_enabled = true;
+            moss_voice::settings::save_with_jev_feedback(
+                &temp.path().join("settings.json"),
+                &voice_settings,
+                Some(false),
+            )
+            .unwrap();
+
+            let builtin = init(Some(host.clone())).0.unwrap();
+            assert!(builtin.should_run_local_laya());
+            assert!(!builtin.should_run_local_laya_for_feedback());
+
+            // 省略 model 且无 OpenRouter API Key：保留 laya_multilingual，并允许单独开启加工反馈、关闭语音筛选
+            builtin
+                .precheck_jev_save_input(
+                    Some(&serde_json::json!({
+                        "voice_enabled": false,
+                        "feedback_enabled": true,
+                    })),
+                    false,
+                    &ModelsInput::default(),
+                    &[],
+                )
+                .unwrap();
+
+            let saved_feedback_only = builtin
+                .jev_save(
+                    Some(&serde_json::json!({
+                        "voice_enabled": false,
+                        "feedback_enabled": true,
+                    })),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(saved_feedback_only["jev"]["model"], "laya_multilingual");
+            assert_eq!(saved_feedback_only["jev"]["voice_enabled"], false);
+            assert_eq!(saved_feedback_only["jev"]["feedback_enabled"], true);
+            assert!(
+                builtin.should_run_local_laya_for_feedback(),
+                "仅开启加工反馈且非内置语音模式时，应用启动也应拉起本地 Laya 服务"
+            );
+
+            // 录入备用 OpenRouter 密钥但不传/不改本地模型：写入密钥且不覆盖本地路由
+            let saved_backup_key = builtin
+                .jev_save(
+                    Some(&serde_json::json!({
+                        "api_key": "sk-or-backup-only",
+                        "model": "",
+                    })),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(saved_backup_key["jev"]["model"], "laya_multilingual");
+            assert_eq!(saved_backup_key["jev"]["feedback_enabled"], true);
+            assert_eq!(
+                host.db.lock().unwrap().get_secret("jev_api_key").unwrap().as_deref(),
+                Some("sk-or-backup-only")
+            );
+
+            // 删除本地 Laya 权重后：修改无关的本地语速不因 Laya 缺失报 412，且关闭全部开关可正常保存并递增停止代次
+            let gen_before = builtin.laya.lock().unwrap().generation;
+            builtin.model_delete("laya_multilingual").unwrap();
+            let saved_speed = builtin
+                .local_save(&serde_json::json!({ "tts_speed": 1.25 }))
+                .unwrap();
+            assert_eq!(saved_speed["local"]["settings"]["tts_speed"], 1.25);
+
+            builtin
+                .precheck_jev_save_input(
+                    Some(&serde_json::json!({
+                        "voice_enabled": false,
+                        "feedback_enabled": false,
+                    })),
+                    false,
+                    &ModelsInput::default(),
+                    &[],
+                )
+                .unwrap();
+            let turned_off = builtin
+                .jev_save(
+                    Some(&serde_json::json!({
+                        "voice_enabled": false,
+                        "feedback_enabled": false,
+                    })),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(turned_off["jev"]["voice_enabled"], false);
+            assert_eq!(turned_off["jev"]["feedback_enabled"], false);
+            assert!(builtin.laya.lock().unwrap().generation > gen_before);
+        }
     }
 
     /// 测试豆包识别或合成（NV7）：识别送 1 秒低音量正弦音，合成一句短话。结果与错误都不含密钥。
     fn test_doubao(resolved: &moss_voice::models::ResolvedSection) -> moss_voice::TestResult {
         let started = std::time::Instant::now();
-        let outcome = tauri::async_runtime::block_on(async {
+        let outcome: Result<(String, Option<String>), moss_voice_providers::ProviderError> = tauri::async_runtime::block_on(async {
             match resolved.section {
                 Section::Asr => {
                     let asr = DoubaoAsr::new(&resolved.url, &resolved.api_key, &resolved.model)?;
                     let tone: Vec<i16> =
-                        (0..16_000).map(|index| ((index as f64 / 16_000.0 * 440.0 * std::f64::consts::TAU).sin() * 1200.0) as i16).collect();
-                    asr.transcribe(&tone, 16_000).await.map(|_| "连接成功，识别接口已返回结果（流式）".to_owned())
+                        (0..3_200).map(|index| ((index as f64 / 16_000.0 * 440.0 * std::f64::consts::TAU).sin() * 1200.0) as i16).collect();
+                    asr.transcribe(&tone, 16_000).await.map(|_| ("连接成功，识别接口已返回结果（流式）".to_owned(), None))
                 }
                 _ => {
                     let tts = DoubaoTts::new(&resolved.url, &resolved.api_key, &resolved.model, &resolved.voice, resolved.speed as f32)?;
-                    let pcm = tts.synthesize("你好，我是 MOSS。").await?;
+                    let pcm = tts.synthesize("你好。").await?;
                     let seconds = pcm.samples.len() as f64 / pcm.sample_rate as f64;
-                    Ok(format!("连接成功，合成了 {seconds:.1} 秒音频（流式）"))
+                    let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
+                    let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
+                    Ok((format!("连接成功，合成了 {seconds:.1} 秒音频（流式）"), Some(data_url)))
                 }
             }
         });
-        let (ok, detail) = match outcome {
-            Ok(detail) => (true, detail),
-            Err(error) => (false, error.0),
+        let (ok, detail, audio_data_url) = match outcome {
+            Ok((detail, audio_data_url)) => (true, detail, audio_data_url),
+            Err(error) => (false, error.0, None),
         };
         moss_voice::TestResult {
             section: resolved.section,
@@ -2311,6 +3793,7 @@ mod imp {
             http_status: None,
             final_url: resolved.url.clone(),
             detail,
+            audio_data_url,
         }
     }
 
@@ -2340,10 +3823,11 @@ mod imp {
             .collect()
     }
 
-    /// MOSS 退出时停止内置语音服务（在急停之后调用）。
+    /// MOSS 退出时停止内置语音服务及本地 Laya 子进程（在急停之后调用）。
     pub fn shutdown(app: &tauri::AppHandle) {
         if let Ok(builtin) = builtin(app) {
             builtin.stop();
+            builtin.stop_laya();
         }
     }
 }
@@ -2395,6 +3879,22 @@ pub async fn voice_device_set_status(app: tauri::AppHandle, window: tauri::Webvi
 }
 
 #[tauri::command]
+pub async fn voice_device_request(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    device_id: String,
+    request: String,
+) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
+    #[cfg(desktop)]
+    let result = imp::run(app, move |builtin| builtin.device_request(&device_id, &request)).await;
+    #[cfg(mobile)]
+    let result = desktop_only((app, window, device_id, request));
+    result
+}
+
+#[tauri::command]
 pub async fn voice_device_rename(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, name: String) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
@@ -2412,10 +3912,34 @@ pub async fn voice_builtin_models_test(app: tauri::AppHandle, window: tauri::Web
     require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| {
+        if section.trim() == "jev" {
+            return builtin.jev_test(&input);
+        }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
         let input: moss_voice::SectionInput = serde_json::from_value(input)
             .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确"))?;
         builtin.models_test(section, &input)
+    })
+    .await;
+    #[cfg(mobile)]
+    let result = desktop_only((app, window, section, input));
+    result
+}
+
+/// 读取内置服务一个模型分区（`llm` / `asr` / `tts` / `jev`）支持的模型列表；密钥留空时用已保存的密钥。
+#[tauri::command]
+pub async fn voice_builtin_models_list(app: tauri::AppHandle, window: tauri::WebviewWindow, section: String, input: Value) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
+    #[cfg(desktop)]
+    let result = imp::run(app, move |builtin| {
+        if section.trim() == "jev" {
+            return builtin.jev_models_list(&input);
+        }
+        let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
+        let input: moss_voice::SectionInput = serde_json::from_value(input)
+            .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确"))?;
+        builtin.models_list(section, &input)
     })
     .await;
     #[cfg(mobile)]
@@ -2430,10 +3954,31 @@ pub async fn voice_builtin_models_save(app: tauri::AppHandle, window: tauri::Web
     require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |builtin| {
-        let input: moss_voice::ModelsInput = serde_json::from_value(input)
+        let clear_list = clear.unwrap_or_default();
+        let clear_jev = clear_list.iter().any(|s| s.trim() == "jev");
+        let jev_input = input.get("jev");
+        if clear_jev && clear_list.len() == 1 && input.as_object().is_none_or(|o| o.is_empty()) {
+            return builtin.jev_save(None, true);
+        }
+        if !clear_jev && clear_list.is_empty() && jev_input.is_some() && input.as_object().is_some_and(|o| o.len() == 1) {
+            return builtin.jev_save(jev_input, false);
+        }
+        let non_jev_clear: Vec<String> = clear_list.into_iter().filter(|s| s.trim() != "jev").collect();
+        let mut non_jev_input = input.clone();
+        if let Some(obj) = non_jev_input.as_object_mut() {
+            obj.remove("jev");
+        }
+        let parsed_input: moss_voice::ModelsInput = serde_json::from_value(non_jev_input)
             .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确"))?;
-        let clear = imp::parse_sections(&clear.unwrap_or_default())?;
-        builtin.models_save(&input, &clear)
+        let parsed_clear = imp::parse_sections(&non_jev_clear)?;
+        if clear_jev || jev_input.is_some() {
+            builtin.precheck_jev_save_input(jev_input, clear_jev, &parsed_input, &parsed_clear)?;
+        }
+        let mut res = builtin.models_save(&parsed_input, &parsed_clear)?;
+        if clear_jev || jev_input.is_some() {
+            res = builtin.jev_save(jev_input, clear_jev)?;
+        }
+        Ok(res)
     })
     .await;
     #[cfg(mobile)]
@@ -2873,7 +4418,7 @@ pub async fn voice_memory_clear(app: tauri::AppHandle, window: tauri::WebviewWin
 
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 42] = [
+pub const COMMANDS: [&str; 44] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -2910,7 +4455,9 @@ pub const COMMANDS: [&str; 42] = [
     "voice_builtin_stop",
     "voice_device_set_status",
     "voice_device_rename",
+    "voice_device_request",
     "voice_builtin_models_test",
+    "voice_builtin_models_list",
     "voice_builtin_models_save",
     "voice_local_save",
     "voice_local_model_download",

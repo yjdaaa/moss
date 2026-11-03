@@ -35,6 +35,7 @@ fn main() {
         "voice_builtin_stop",
         "voice_device_set_status",
         "voice_device_rename",
+        "voice_device_request",
         "voice_music_pick_directory",
         "voice_music_status",
         "voice_music_save",
@@ -72,6 +73,7 @@ fn main() {
         "voice_firmware_manage",
         // 内置语音服务的模型配置（NV5）
         "voice_builtin_models_test",
+        "voice_builtin_models_list",
         "voice_builtin_models_save",
         // 内置语音服务的本地模型（NV6）
         "voice_local_save",

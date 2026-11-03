@@ -42,10 +42,10 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 | 时机 | 必须执行 |
 | --- | --- |
-| 每次代码改动 | 受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build` |
+| 每次代码改动（修复或新增功能） | 受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build`；**验证通过后必须执行 `powershell -File scripts/quick-update-desktop.ps1`（改 `apps/moss-voice-local` 加 `-WithVoiceHelper`，改 `moss-host` 加 `-WithHost`），把最新正式版 `moss-desktop.exe` 编译并原地同步到本机正式程序**（2026-11-01 用户决定；跳过 NSIS 重压包，MOSS 运行时不强杀，自动将旧文件改名挪开并写入新版，用户关掉重开即生效） |
 | 改 HTTP 行为、前端或发送链路 | `cd frontend; npm run test:e2e`（需先构建 `moss-host`，使用回环 GRBL 模拟器） |
-| 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`；根工作区测试不覆盖它 |
-| 阶段收尾、交付 | 以上全部，加三端 release 构建（见下） |
+| 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`，并在快更时加 `-WithVoiceHelper`；根工作区测试不覆盖它 |
+| 阶段收尾、交付 | 以上全部，加三端完整 release 安装包构建（见下） |
 
 三端 release 构建：
 
@@ -53,7 +53,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 - Windows：`cd apps/desktop/src-tauri; cargo tauri build`，产物 `target/release/moss-desktop.exe` 与 `target/release/bundle/nsis/MOSS_<版本>_x64-setup.exe`
 - Android：`cd apps/desktop/src-tauri; cargo tauri android build --target aarch64 --apk`，产物在 `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/`
 
-`--debug` 构建只用于临时调试，不算验证证据。带语音 helper 的专用安装包流程见
+`--debug` 构建只用于临时调试（桌面热重载 `scripts/dev-desktop.ps1`），不算验证证据。日常本机快速同步正式版主程序用 `scripts/quick-update-desktop.ps1`（`cargo tauri build --no-bundle`，跳过 NSIS 压包；阶段收尾仍须跑完整三端构建），细则与带语音 helper 的专用安装包流程见
 [`packaging-install.md`](docs/developer/packaging-install.md)。
 
 ## 结果状态
@@ -79,7 +79,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 ## 完成标准
 
-- 代码修复或功能变更：CHANGELOG 已更新、对应验证已通过、文档已同步，才能报告完成；阶段收尾还要求三端 release 构建成功。
+- 代码修复或功能变更：CHANGELOG 已更新、对应验证已通过、**正式版桌面主程序已通过 `scripts/quick-update-desktop.ps1` 同步到最新代码**、文档已同步，才能报告完成；阶段收尾还要求三端 release 构建成功。
 - 报告实际运行的检查、跳过项及原因、未验证风险。
 
 ## 构建缓存清理

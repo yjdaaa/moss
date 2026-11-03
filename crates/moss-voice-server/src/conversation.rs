@@ -20,7 +20,7 @@ use std::time::Duration;
 use moss_voice_providers::text::{Segmenter, emotion_of};
 use moss_voice_providers::{
     Asr, AsrStream, BoxFuture, ChatMessage, Llm, Pcm, StreamingAsr, ToolCall, ToolSpec, Tts,
-    truncate_history,
+    compact_stale_tool_results, truncate_history,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -91,6 +91,14 @@ pub trait ToolExecutor: Send + Sync {
             }
         })
     }
+    /// 只读读取最近的加工任务（加工结束播报轮询用）。
+    /// 默认不支持：宿主没有提供“不计入工具调用统计”的只读通道时，不做任何轮询。
+    fn recent_workflows<'a>(
+        &'a self,
+        _context: &'a ToolContext,
+    ) -> BoxFuture<'a, Option<Value>> {
+        Box::pin(async { None })
+    }
 }
 
 /// 不提供任何工具（NV3 默认）。
@@ -111,6 +119,74 @@ impl ToolExecutor for NoTools {
     }
 }
 
+/// 语音急停快通道成功后的固定反馈话术
+pub const STOP_OK_SPEECH: &str = "已发送停止请求，请确认设备状态。";
+/// 语音急停快通道失败后的固定反馈话术
+pub const STOP_ERR_SPEECH: &str = "停止请求发送失败，请使用设备急停按钮并检查连接。";
+/// 慢速外部信息查询工具（天气/新闻/联网搜索/RAGFlow 知识库）触发时的过渡垫音
+pub const SLOW_QUERY_FILLER: &str = "稍等，正在查询。";
+/// 慢速 AI 生图/刀路预览生成工具触发时的过渡垫音（仅预览生成，不涉及硬件动作）
+pub const SLOW_GENERATE_FILLER: &str = "稍等，正在生成预览。";
+
+fn arg_flag_true(arguments: &Value, key: &str) -> bool {
+    match arguments.get(key) {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(text)) => text.trim().eq_ignore_ascii_case("true") || text.trim() == "1",
+        Some(Value::Number(num)) => num.as_i64() == Some(1),
+        _ => false,
+    }
+}
+
+fn is_slow_query_call(call: &ToolCall) -> bool {
+    matches!(
+        call.function.name.as_str(),
+        "web_search" | "search_rag" | "get_weather" | "get_news"
+    )
+}
+
+fn is_slow_generate_preview_call(call: &ToolCall) -> bool {
+    let name = call.function.name.as_str();
+    match name {
+        "generate_text_image_tool" => true,
+        "ai_laser_gcode_tool"
+        | "generate_text_image_gcode_tool"
+        | "generate_text_laser_task_tool" => {
+            let parsed: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+            !(arg_flag_true(&parsed, "confirmed") && arg_flag_true(&parsed, "send_after_generate"))
+        }
+        "regenerate_text_laser_task_tool" => {
+            let parsed: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+            !parsed
+                .get("feedback_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// 判定本轮工具调用是否需要先行播放缓存过渡垫音：
+/// - 仅当整批调用全部属于慢速查询或慢速预览生成时才返回垫音；
+/// - 一旦包含任何控制、R3 审批、音乐或本地毫秒级快工具，一律返回 `None`。
+pub fn slow_tool_filler(calls: &[ToolCall]) -> Option<&'static str> {
+    if calls.is_empty() {
+        return None;
+    }
+    let mut has_generate = false;
+    for call in calls {
+        if is_slow_generate_preview_call(call) {
+            has_generate = true;
+        } else if !is_slow_query_call(call) {
+            return None;
+        }
+    }
+    if has_generate {
+        Some(SLOW_GENERATE_FILLER)
+    } else {
+        Some(SLOW_QUERY_FILLER)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConversationSettings {
     pub system_prompt: String,
@@ -127,6 +203,8 @@ pub struct ConversationSettings {
     pub max_tool_rounds: usize,
     pub tool_timeout: Duration,
     pub read_only_shortcuts: bool,
+    /// 加工结束后在空闲且设备在线时主动播报（2026-11-02 用户决定，语音中心可关）
+    pub announce_job_done: bool,
     /// 只存提供方/模型名称，禁止地址与密钥。
     pub model_labels: Vec<String>,
 }
@@ -146,6 +224,7 @@ impl Default for ConversationSettings {
             max_tool_rounds: 5,
             tool_timeout: Duration::from_secs(30),
             read_only_shortcuts: true,
+            announce_job_done: true,
             model_labels: Vec::new(),
         }
     }
@@ -158,6 +237,8 @@ pub struct Conversation {
     pub streaming_asr: Option<Arc<dyn StreamingAsr>>,
     pub llm: Arc<dyn Llm>,
     pub tts: Arc<dyn Tts>,
+    /// 主云端 TTS 失败且未产出本句音频时的本地降级 TTS（如本机已安装的 Kokoro / Matcha）。
+    pub fallback_tts: Option<Arc<dyn Tts>>,
     pub tools: Arc<dyn ToolExecutor>,
     pub settings: ConversationSettings,
     pub memory: Option<Arc<crate::memory::MemoryService>>,
@@ -167,6 +248,8 @@ pub struct Conversation {
     pub context_retrieval: Option<crate::context::retrieve::ContextRetrieval>,
     /// NV19-03 会话结束后的候选提取；宿主不接入时为空
     pub context_extraction: Option<crate::context::extract::ContextExtraction>,
+    /// 可选 Jev 信息筛选与快答分流器；默认未挂载，开启后不携带任何动作授权。
+    pub jev_filter: Option<Arc<crate::jev::VoiceJevFilter>>,
     /// 固定话术（唤醒回应、再见）的合成结果缓存
     cache: Mutex<Vec<(String, Pcm)>>,
 }
@@ -192,6 +275,7 @@ impl Conversation {
             streaming_asr: None,
             llm,
             tts,
+            fallback_tts: None,
             tools,
             settings,
             memory: None,
@@ -199,6 +283,7 @@ impl Conversation {
             personal_context:None,
             context_retrieval: None,
             context_extraction: None,
+            jev_filter: None,
             cache: Mutex::new(Vec::new()),
         }
     }
@@ -222,6 +307,10 @@ impl Conversation {
         self.context_extraction = Some(extraction);
         self
     }
+    pub fn with_jev_filter(mut self, filter: Arc<crate::jev::VoiceJevFilter>) -> Self {
+        self.jev_filter = Some(filter);
+        self
+    }
 
     /// 启用流式识别（NV7）。
     pub fn with_streaming_asr(mut self, streaming_asr: Arc<dyn StreamingAsr>) -> Self {
@@ -229,6 +318,11 @@ impl Conversation {
         self
     }
 
+    /// 配置主 TTS 失败时的本地降级 TTS（当句尚未产出音频即报错时自动降级，避免整轮静音）。
+    pub fn with_fallback_tts(mut self, fallback_tts: Arc<dyn Tts>) -> Self {
+        self.fallback_tts = Some(fallback_tts);
+        self
+    }
     fn is_exit(&self, text: &str) -> bool {
         let normalized: String = text.chars().filter(|c| c.is_alphanumeric()).collect();
         !normalized.is_empty()
@@ -246,16 +340,93 @@ impl Conversation {
         {
             return Ok(pcm.clone());
         }
-        let pcm = self
-            .tts
-            .synthesize(text)
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut pcm = match self.tts.synthesize(text).await {
+            Ok(pcm) => pcm,
+            Err(primary_err) => {
+                if let Some(fallback) = &self.fallback_tts {
+                    fallback
+                        .synthesize(text)
+                        .await
+                        .map_err(|_| primary_err.to_string())?
+                } else {
+                    return Err(primary_err.to_string());
+                }
+            }
+        };
+        crate::audio::trim_trailing_silence_i16(
+            &mut pcm.samples,
+            pcm.sample_rate,
+            crate::audio::TRAILING_SILENCE_KEEP_MS,
+            crate::audio::TRAILING_SILENCE_TRIGGER_MS,
+        );
+        crate::audio::fade_head_i16(&mut pcm.samples, pcm.sample_rate, crate::audio::BOUNDARY_FADE_MS);
+        crate::audio::fade_tail_i16(&mut pcm.samples, pcm.sample_rate, crate::audio::BOUNDARY_FADE_MS);
         if let Ok(mut cache) = self.cache.lock() {
             cache.push((text.to_owned(), pcm.clone()));
         }
         Ok(pcm)
     }
+    /// 返回需要预合成缓存的高频固定话术清单（去重、过滤空白）。
+    pub fn fixed_phrases(&self) -> Vec<String> {
+        let mut phrases = Vec::with_capacity(9);
+        let mut push_unique = |text: &str| {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() && !phrases.iter().any(|existing| existing == trimmed) {
+                phrases.push(trimmed.to_owned());
+            }
+        };
+        if let Some(wake) = self.settings.wake_reply.as_deref() {
+            push_unique(wake);
+        }
+        push_unique(&self.settings.goodbye);
+        push_unique(&self.settings.error_reply);
+        push_unique(STOP_OK_SPEECH);
+        push_unique(STOP_ERR_SPEECH);
+        push_unique(crate::tools::APPROVAL_SPEECH);
+        push_unique(crate::tools::SUBMITTED_APPROVAL_SPEECH);
+        push_unique(SLOW_QUERY_FILLER);
+        push_unique(SLOW_GENERATE_FILLER);
+        phrases
+    }
+
+    /// 提前合成高频固定话术与慢工具过渡垫音并写入内存缓存，返回成功缓存的条数。
+    /// 单条合成失败不会中断其余条目，后续实际触发时仍会按需重试合成。
+    pub async fn prewarm_cache(&self) -> usize {
+        let mut warmed = 0;
+        for phrase in self.fixed_phrases() {
+            if self.cached_speech(&phrase).await.is_ok() {
+                warmed += 1;
+            }
+        }
+        warmed
+    }
+}
+
+/// 任务取消守卫：对话被打断丢弃时，自动 abort 后台正在预合成的 TTS 任务。
+struct AbortOnDrop<T>(Option<tokio::task::JoinHandle<T>>);
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self(Some(handle))
+    }
+    async fn join(&mut self) -> Option<Result<T, tokio::task::JoinError>> {
+        Some(self.0.take()?.await)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// 一句已启动后台 TTS 合成的待播句子（用于二级流水线预取，消除句间 TTS 启动间隙）。
+struct PreparedSentence {
+    text: String,
+    chunks_rx: tokio::sync::mpsc::UnboundedReceiver<Pcm>,
+    handle: AbortOnDrop<Result<(), moss_voice_providers::ProviderError>>,
 }
 
 /// 设备自带 MCP 工具的一次调用：由对话任务发给会话，会话经 WebSocket 转给设备并把结果文字送回。
@@ -467,7 +638,20 @@ impl Turn {
             .map(|items| items.iter().filter(|v| v["status"] == "sending").collect())
             .unwrap_or_default();
         if active.is_empty() {
-            return "没有找到正在发送的加工任务，无法确定当前加工进度或材料。".into();
+            // 没有在途任务：不再一律回“没有找到”。材料只在加工中有意义，
+            // 进度与剩余时间改为按最近一条记录回答终态（2026-11-02 用户要求）。
+            if intent == ReadIntent::Material {
+                return "没有找到正在发送的加工任务，无法确定当前加工进度或材料。".into();
+            }
+            let latest = recent["workflows"].as_array().and_then(|items| {
+                items
+                    .iter()
+                    .max_by_key(|record| record["updated_at"].as_u64().unwrap_or(0))
+            });
+            return match latest {
+                Some(record) => terminal_reply(record),
+                None => "还没有任何加工任务记录。".into(),
+            };
         }
         if active.len() != 1 {
             return "找到多个正在发送的任务，无法确定你询问的是哪个，请说明任务。".into();
@@ -552,9 +736,9 @@ impl Turn {
                 )
                 .await;
             if result.success {
-                "已发送停止请求，请确认设备状态。".into()
+                STOP_OK_SPEECH.into()
             } else {
-                "停止请求发送失败，请使用设备急停按钮并检查连接。".into()
+                STOP_ERR_SPEECH.into()
             }
         } else {
             self.read_reply(read.unwrap()).await
@@ -609,19 +793,117 @@ impl Turn {
 
     /// 合成并送出一句话：第一段音频带文字（会话据此发 `sentence_start`），之后的分段直接追加。
     /// 返回是否送出过音频（中途失败时已送出的部分照常播放）。
-    async fn speak(&self, text: String) -> bool {
-        self.timing("first_synthesis_start");
-        let (chunks_tx, mut chunks_rx) = unbounded_channel::<Pcm>();
-        let tts = self.conversation.tts.clone();
+    fn start_sentence_tts_with(
+        &self,
+        tts: Arc<dyn Tts>,
+        text: String,
+        record_timing: bool,
+    ) -> PreparedSentence {
+        if record_timing {
+            self.timing("first_synthesis_start");
+        }
+        let (chunks_tx, chunks_rx) = unbounded_channel::<Pcm>();
         let input = text.clone();
-        let synthesis = async move { tts.synthesize_stream(&input, chunks_tx).await };
-        let forwarding = async {
-            let mut text = Some(text);
-            while let Some(pcm) = chunks_rx.recv().await {
-                if pcm.samples.is_empty() {
+        let handle = tokio::spawn(async move { tts.synthesize_stream(&input, chunks_tx).await });
+        PreparedSentence {
+            text,
+            chunks_rx,
+            handle: AbortOnDrop::new(handle),
+        }
+    }
+
+    fn start_sentence_tts(&self, text: String) -> PreparedSentence {
+        self.start_sentence_tts_with(self.conversation.tts.clone(), text, true)
+    }
+
+    /// 消费一句已启动的 TTS 音频流（首尾 12ms 线性淡入淡出 + 句尾冗余静音裁剪）；
+    /// 若传入 `sentence_rx` 与 `lookahead`，则在等待当前句音频块的同时后台并发启动下一句 TTS 预取。
+    async fn drain_prepared_sentence(
+        &self,
+        mut current: PreparedSentence,
+        mut sentence_rx: Option<&mut tokio::sync::mpsc::Receiver<String>>,
+        mut lookahead: Option<&mut Option<PreparedSentence>>,
+        sentence_rx_closed: &mut bool,
+        allow_fallback: bool,
+    ) -> bool {
+        let mut pending_text = Some(current.text);
+        let mut held_tail: Vec<i16> = Vec::new();
+        let mut sample_rate: u32 = 0;
+
+        loop {
+            let can_prefetch = sentence_rx.is_some()
+                && lookahead.as_ref().is_some_and(|slot| slot.is_none())
+                && !*sentence_rx_closed;
+            let maybe_pcm = if can_prefetch {
+                let rx = sentence_rx.as_deref_mut().unwrap();
+                tokio::select! {
+                    biased;
+                    pcm = current.chunks_rx.recv() => pcm,
+                    next = rx.recv() => {
+                        match next {
+                            Some(next_sentence) => {
+                                if let Some(slot) = lookahead.as_deref_mut() {
+                                    *slot = Some(self.start_sentence_tts(next_sentence));
+                                }
+                            }
+                            None => {
+                                *sentence_rx_closed = true;
+                            }
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                current.chunks_rx.recv().await
+            };
+
+            let Some(mut pcm) = maybe_pcm else {
+                break;
+            };
+            if pcm.samples.is_empty() {
+                continue;
+            }
+            sample_rate = pcm.sample_rate;
+            crate::audio::trim_trailing_silence_i16(
+                &mut pcm.samples,
+                sample_rate,
+                crate::audio::TRAILING_SILENCE_KEEP_MS,
+                crate::audio::TRAILING_SILENCE_TRIGGER_MS,
+            );
+            if pcm.samples.is_empty() {
+                continue;
+            }
+            if pending_text.is_some() && held_tail.is_empty() {
+                crate::audio::fade_head_i16(&mut pcm.samples, sample_rate, crate::audio::BOUNDARY_FADE_MS);
+            }
+            let hold_samples = ((u64::from(sample_rate) * u64::from(crate::audio::BOUNDARY_FADE_MS)) / 1000) as usize;
+            if hold_samples > 1 {
+                let mut combined = if held_tail.is_empty() {
+                    pcm.samples
+                } else {
+                    let mut buf = std::mem::take(&mut held_tail);
+                    buf.extend_from_slice(&pcm.samples);
+                    buf
+                };
+                if combined.len() <= hold_samples {
+                    held_tail = combined;
                     continue;
                 }
-                match text.take() {
+                let split_at = combined.len() - hold_samples;
+                held_tail = combined.split_off(split_at);
+                let emit_pcm = Pcm {
+                    samples: combined,
+                    sample_rate,
+                };
+                match pending_text.take() {
+                    Some(text) => {
+                        self.timing("first_synthesis_ready");
+                        self.send(TurnEvent::Speech { text, pcm: emit_pcm });
+                    }
+                    None => self.send(TurnEvent::SpeechMore(emit_pcm)),
+                }
+            } else {
+                match pending_text.take() {
                     Some(text) => {
                         self.timing("first_synthesis_ready");
                         self.send(TurnEvent::Speech { text, pcm });
@@ -629,13 +911,55 @@ impl Turn {
                     None => self.send(TurnEvent::SpeechMore(pcm)),
                 }
             }
-            text.is_none()
-        };
-        let (result, spoke) = tokio::join!(synthesis, forwarding);
-        if let Err(error) = result {
+        }
+
+        if !held_tail.is_empty() && sample_rate > 0 {
+            if pending_text.is_some() {
+                crate::audio::fade_head_i16(&mut held_tail, sample_rate, crate::audio::BOUNDARY_FADE_MS);
+            }
+            crate::audio::fade_tail_i16(&mut held_tail, sample_rate, crate::audio::BOUNDARY_FADE_MS);
+            let tail_pcm = Pcm {
+                samples: held_tail,
+                sample_rate,
+            };
+            match pending_text.take() {
+                Some(text) => {
+                    self.timing("first_synthesis_ready");
+                    self.send(TurnEvent::Speech { text, pcm: tail_pcm });
+                }
+                None => self.send(TurnEvent::SpeechMore(tail_pcm)),
+            }
+        }
+
+        if let Some(Ok(Err(error))) = current.handle.join().await {
+            if allow_fallback
+                && let Some(fallback) = self.conversation.fallback_tts.clone()
+                && let Some(retry_text) = pending_text.take()
+            {
+                self.send(TurnEvent::Failed(format!(
+                    "主语音合成失败（{error}），本句已自动降级为本地语音合成"
+                )));
+                let fb_prepared = self.start_sentence_tts_with(fallback, retry_text, false);
+                let mut fb_closed = true;
+                return Box::pin(self.drain_prepared_sentence(
+                    fb_prepared,
+                    None,
+                    None,
+                    &mut fb_closed,
+                    false,
+                ))
+                .await;
+            }
             self.send(TurnEvent::Failed(error.to_string()));
         }
-        spoke
+        pending_text.is_none()
+    }
+
+    async fn speak(&self, text: String) -> bool {
+        let prepared = self.start_sentence_tts(text);
+        let mut closed = true;
+        self.drain_prepared_sentence(prepared, None, None, &mut closed, true)
+            .await
     }
 
     /// 识别用户的话：有流式识别时取它的结果，失败则用整段音频再识别一次。
@@ -675,23 +999,62 @@ impl Turn {
                 .map_err(|error| error.to_string())
         };
         let speaking = async {
-            let mut segmenter = Segmenter::new();
-            let mut spoke = false;
-            while let Some(delta) = delta_rx.recv().await {
-                self.timing("first_llm_delta");
-                if !*emotion_sent && let Some(emotion) = emotion_of(&delta) {
-                    *emotion_sent = true;
-                    self.send(TurnEvent::Emotion(emotion));
+            let (sentence_tx, mut sentence_rx) = tokio::sync::mpsc::channel::<String>(4);
+            let feeder = async {
+                let sentence_tx = sentence_tx;
+                let mut segmenter = Segmenter::new();
+                while let Some(delta) = delta_rx.recv().await {
+                    self.timing("first_llm_delta");
+                    if !*emotion_sent && let Some(emotion) = emotion_of(&delta) {
+                        *emotion_sent = true;
+                        self.send(TurnEvent::Emotion(emotion));
+                    }
+                    for sentence in segmenter.push(&delta, Instant::now().into_std()) {
+                        self.timing("first_sentence");
+                        if sentence_tx.send(sentence).await.is_err() {
+                            return;
+                        }
+                    }
                 }
-                for sentence in segmenter.push(&delta, Instant::now().into_std()) {
+                if let Some(rest) = segmenter.finish() {
                     self.timing("first_sentence");
-                    spoke |= self.speak(sentence).await;
+                    let _ = sentence_tx.send(rest).await;
                 }
-            }
-            if let Some(rest) = segmenter.finish() {
-                self.timing("first_sentence");
-                spoke |= self.speak(rest).await;
-            }
+            };
+            let tts_consumer = async {
+                let mut spoke = false;
+                let mut lookahead: Option<PreparedSentence> = None;
+                let mut rx_closed = false;
+                loop {
+                    let next_prepared = if let Some(prefetched) = lookahead.take() {
+                        Some(prefetched)
+                    } else if rx_closed {
+                        None
+                    } else {
+                        match sentence_rx.recv().await {
+                            Some(sentence) => Some(self.start_sentence_tts(sentence)),
+                            None => {
+                                rx_closed = true;
+                                None
+                            }
+                        }
+                    };
+                    let Some(current) = next_prepared else {
+                        break;
+                    };
+                    spoke |= self
+                        .drain_prepared_sentence(
+                            current,
+                            Some(&mut sentence_rx),
+                            Some(&mut lookahead),
+                            &mut rx_closed,
+                            true,
+                        )
+                        .await;
+                }
+                spoke
+            };
+            let (_, spoke) = tokio::join!(feeder, tts_consumer);
             spoke
         };
         tokio::join!(generation, speaking)
@@ -780,7 +1143,7 @@ impl Turn {
             }
         };
         self.timing("final_asr");
-        if !moss_voice_providers::text::speakable(&text) {
+        if !moss_voice_providers::text::speakable(&text) || crate::fast::is_noise_filler(&text) {
             self.send(TurnEvent::Ignored);
             return;
         }
@@ -800,11 +1163,15 @@ impl Turn {
         // Stop and exit shortcuts above never wait for speaker work. Unknown
         // identity has no personal history or fallback device summary.
         let scope=match identity {Some(task)=>task.finish().await,None=>None};
-        let history=if let Some(personal)=&self.conversation.personal_context {
-            if !personal.permitted(&self.context,scope.as_ref()){return;}
+        let (history, personal_turn_prefix) = if let Some(personal) = &self.conversation.personal_context {
+            if !personal.permitted(&self.context, scope.as_ref()) {
+                return;
+            }
             self.send(TurnEvent::PersonResolved(scope.clone()));
-            personal.history(&self.context,scope.as_ref())
-        }else{history};
+            (personal.history(&self.context, scope.as_ref()), history)
+        } else {
+            (history, Vec::new())
+        };
         let mut tools = self.conversation.tools.tools();
         if let Some(device) = &self.device {
             // Reserved play_music is always owned by the trusted desktop index,
@@ -819,27 +1186,100 @@ impl Turn {
         }
         let mut messages = Vec::with_capacity(history.len() + 4);
         messages.push(ChatMessage::system(settings.system_prompt.clone()));
-        if let Some(personal)=&self.conversation.personal_context {
-            if let Some(context)=personal.prompt_for(&self.context,scope.as_ref()).await {messages.push(ChatMessage::system(context));}
-        }else if let Some(memory) = &self.conversation.memory {
-            if let Some(context) = memory.prompt_for(&self.context.device_id).await {
+
+        let active_jev = self
+            .conversation
+            .jev_filter
+            .as_ref()
+            .filter(|f| f.options().active());
+
+        if let Some(jev) = active_jev {
+            // 先取本地 SQLite 粗召回候选（~2ms，受 FAST_TIMEOUT 约束），使同一次 Jev 扇出顺手完成记忆撞词过滤；
+            // 同时与个人/设备摘要读取并发执行，不产生额外串行等待。
+            let retrieved = match &self.conversation.context_retrieval {
+                Some(retrieval) => match retrieval.access.access(&self.context, scope.as_ref()) {
+                    Some((access, device)) => {
+                        retrieval.retriever.retrieve_candidates(access, &text, device).await
+                    }
+                    None => None,
+                },
+                None => None,
+            };
+            let mem_texts = retrieved
+                .as_ref()
+                .map(|r| r.candidate_texts())
+                .unwrap_or_default();
+            let summary_fut = async {
+                if let Some(personal) = &self.conversation.personal_context {
+                    personal.prompt_for(&self.context, scope.as_ref()).await
+                } else if let Some(memory) = &self.conversation.memory {
+                    memory.prompt_for(&self.context.device_id).await
+                } else {
+                    None
+                }
+            };
+            let jev_fut = jev.evaluate_turn(&text, &history, &tools, &mem_texts);
+            let (summary_block, decision) = tokio::join!(summary_fut, jev_fut);
+            if decision.applied {
+                self.timing("jev_filter");
+            }
+            if settings.read_only_shortcuts
+                && let Some(intent) = decision.fast_read
+            {
+                self.timing("fast_route");
+                let reply = self.read_reply(intent).await;
+                if !self.speak(reply.clone()).await {
+                    self.send(TurnEvent::TextReply(reply.clone()));
+                }
+                let mut done_msgs = personal_turn_prefix;
+                done_msgs.push(ChatMessage::user(text));
+                done_msgs.push(ChatMessage::assistant(reply));
+                self.send(TurnEvent::Done {
+                    messages: done_msgs,
+                    close: false,
+                });
+                return;
+            }
+            tools = decision.filter_tools(&tools, &text, &history);
+            if let Some(context) = summary_block {
                 messages.push(ChatMessage::system(context));
             }
-        }
-        // NV19-04: bounded, labelled read-only data; skipped for small talk; never blocks
-        // beyond its own short timeout and adds nothing on any failure.
-        if let Some(retrieval) = &self.conversation.context_retrieval {
-            if let Some((access, device)) = retrieval.access.access(&self.context, scope.as_ref()) {
-                if let Some(context) = retrieval.retriever.prompt_for(access, &text, device).await {
+            if let Some(candidates) = retrieved
+                && let Some(context) = candidates.render(decision.keep_memories.as_deref())
+            {
+                messages.push(ChatMessage::system(context));
+            }
+        } else {
+            if let Some(personal) = &self.conversation.personal_context {
+                if let Some(context) = personal.prompt_for(&self.context, scope.as_ref()).await {
+                    messages.push(ChatMessage::system(context));
+                }
+            } else if let Some(memory) = &self.conversation.memory {
+                if let Some(context) = memory.prompt_for(&self.context.device_id).await {
                     messages.push(ChatMessage::system(context));
                 }
             }
+            // NV19-04: bounded, labelled read-only data; skipped for small talk; never blocks
+            // beyond its own short timeout and adds nothing on any failure.
+            if let Some(retrieval) = &self.conversation.context_retrieval {
+                if let Some((access, device)) =
+                    retrieval.access.access(&self.context, scope.as_ref())
+                {
+                    if let Some(context) =
+                        retrieval.retriever.prompt_for(access, &text, device).await
+                    {
+                        messages.push(ChatMessage::system(context));
+                    }
+                }
+            }
         }
-        messages.extend(history);
+        messages.extend(compact_stale_tool_results(&history, 2));
         let first_new = messages.len();
+        messages.extend(personal_turn_prefix);
         messages.push(ChatMessage::user(text));
         let mut emotion_sent = false;
         let mut spoke_any = false;
+        let mut filler_spoken = false;
         let mut rounds = 0;
         loop {
             if self.conversation.personal_context.as_ref().is_some_and(|personal|!personal.permitted(&self.context,scope.as_ref())) {
@@ -898,7 +1338,21 @@ impl Turn {
             }
             let mut direct = Vec::new();
             let mut music = None;
-            for (call, outcome) in self.run_tools(&reply.tool_calls).await {
+            let tool_outcomes = if !spoke_any
+                && !filler_spoken
+                && rounds == 1
+                && let Some(filler) = slow_tool_filler(&reply.tool_calls)
+            {
+                filler_spoken = true;
+                let (_, outcomes) = tokio::join!(
+                    self.speak_fixed(filler),
+                    self.run_tools(&reply.tool_calls),
+                );
+                outcomes
+            } else {
+                self.run_tools(&reply.tool_calls).await
+            };
+            for (call, outcome) in tool_outcomes {
                 let content = match outcome {
                     ToolOutcome::Reply(content) => content,
                     ToolOutcome::Speak(content) => {
@@ -925,7 +1379,7 @@ impl Turn {
             if !direct.is_empty() {
                 let spoken = direct.join("。");
                 for sentence in direct {
-                    self.speak(sentence).await;
+                    self.speak_fixed(&sentence).await;
                 }
                 messages.push(ChatMessage::assistant(spoken));
                 break;
@@ -935,6 +1389,34 @@ impl Turn {
             messages: messages.split_off(first_new),
             close: false,
         });
+    }
+}
+
+/// 没有在途任务时，用最近一条记录回答“上一个任务怎么样了”。
+/// 只说记录里已有的行数，不编造物理加工进度或剩余时间。
+fn terminal_reply(record: &Value) -> String {
+    let send = &record["send_result"];
+    let sent = send["lines_sent"].as_u64();
+    let total = send["total_lines"].as_u64();
+    match record["status"].as_str().unwrap_or("") {
+        "completed" => match total {
+            Some(total) if total > 0 => format!("上一个任务已经完成，共 {total} 行。"),
+            _ => "上一个任务已经完成。".into(),
+        },
+        "cancelled" => match sent {
+            Some(sent) if sent > 0 => format!("上一个任务已经取消，停在第 {sent} 行。"),
+            _ => "上一个任务已经取消。".into(),
+        },
+        "failed" => match sent {
+            Some(sent) if sent > 0 => {
+                format!("上一个任务失败了，停在第 {sent} 行，请检查设备。")
+            }
+            _ => "上一个任务失败了，请检查设备。".into(),
+        },
+        "preview_ready" | "preview" | "planned" | "confirmed" => {
+            "现在没有正在加工的任务，最近一条任务还没开始发送。".into()
+        }
+        _ => "现在没有正在加工的任务。".into(),
     }
 }
 

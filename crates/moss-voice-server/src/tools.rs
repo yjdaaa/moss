@@ -20,6 +20,8 @@ const MAX_RESULT_CHARS: usize = 1500;
 
 /// R3 生成审批后朗读的话（后端未给出 speech 时使用）
 pub const APPROVAL_SPEECH: &str = "已发到电脑，请在电脑上的 MOSS 里确认后开始。";
+/// 后端 R3 审批默认返回的固定朗读话术
+pub const SUBMITTED_APPROVAL_SPEECH: &str = "已提交，请在电脑上的 MOSS 里确认后开始。";
 
 /// 一次工具调用的结果（与 MCP 工具结果相同的三个字段）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,11 @@ pub trait ToolHost: Send + Sync {
     /// MCP `tools/list` 格式：`{"tools":[{"name","description","inputSchema"}]}`
     fn list(&self) -> Value;
     fn call(&self, context: &ToolContext, name: &str, arguments: &Value) -> ToolHostResult;
+    /// 只读读取最近的加工任务（加工结束播报轮询）。默认不支持，返回 `None` 即不轮询。
+    /// 这条通道**不走工具分发**，因此不计入工具调用统计，也不对模型暴露。
+    fn recent_workflows(&self, _device_id: &str, _session_id: &str) -> Option<Value> {
+        None
+    }
 }
 
 /// 把宿主的工具交给对话。工具清单每轮重新读取：用户在语音中心关闭或打开工具（NV8）后，下一轮对话即生效。
@@ -103,6 +110,17 @@ impl ToolExecutor for HostTools {
             let name = name.to_owned();
             tokio::task::spawn_blocking(move || host.call(&context, &name, &arguments)).await
                 .unwrap_or_else(|_| ToolHostResult { success: false, result: "工具执行失败".into(), detail: None })
+        })
+    }
+    fn recent_workflows<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
+        Box::pin(async move {
+            let host = self.host.clone();
+            let device = context.device_id.clone();
+            let session = context.session_id.clone();
+            tokio::task::spawn_blocking(move || host.recent_workflows(&device, &session))
+                .await
+                .ok()
+                .flatten()
         })
     }
     fn tools(&self) -> Vec<ToolSpec> {

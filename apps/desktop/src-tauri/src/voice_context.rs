@@ -41,11 +41,17 @@ pub(crate) mod host {
         format!("数据库操作失败：{error:?}")
     }
 
-    /// What the host vouches for right now: allowed devices (by grant generation) and the
-    /// current project (by switch generation). No person scope until calibration exists.
+    /// Calibrated speaker directory query `(id, name, revision)`; returns empty when
+    /// speaker calibration is absent or stale.
+    pub(crate) type CalibratedSpeakersFn =
+        Arc<dyn Fn() -> Vec<(String, String, i64)> + Send + Sync>;
+
+    /// What the host vouches for right now: allowed devices (by grant generation),
+    /// calibrated speakers (by speaker revision), and the current project (by switch generation).
     struct Trust {
         db: Arc<Mutex<RuntimeDb>>,
         settings_file: PathBuf,
+        speakers: CalibratedSpeakersFn,
     }
 
     impl Trust {
@@ -67,9 +73,32 @@ pub(crate) mod host {
                     let context = self.context();
                     !context.project_id.is_empty() && context.project_id == key.id() && context.project_generation == scope.generation()
                 }
-                // Production speaker calibration is absent; workspaces are not offered yet.
-                ScopeKind::Person | ScopeKind::Workspace => false,
+                ScopeKind::Person => self
+                    .person_scope(key.id())
+                    .is_some_and(|live| live.generation() == scope.generation()),
+                ScopeKind::Workspace => false,
             }
+        }
+
+        fn person_scope(&self, person_id: &str) -> Option<TrustedScope> {
+            let (_, _, revision) = (self.speakers)()
+                .into_iter()
+                .find(|(id, _, rev)| id == person_id && *rev > 0)?;
+            let candidate = PersonScope::candidate(person_id, revision, 1)?;
+            TrustedScope::calibrated_person(&candidate).ok()
+        }
+
+        fn voice_person(&self, person: Option<&PersonScope>) -> Option<TrustedScope> {
+            if !moss_voice::settings::load(&self.settings_file).builtin_person_memory_enabled {
+                return None;
+            }
+            let scope = person?;
+            let matched = (self.speakers)()
+                .into_iter()
+                .any(|(id, _, rev)| id == scope.id() && rev == scope.revision());
+            matched
+                .then(|| TrustedScope::calibrated_person(scope).ok())
+                .flatten()
         }
 
         fn project(&self) -> Option<TrustedScope> {
@@ -88,10 +117,15 @@ pub(crate) mod host {
             Applicability::new(&row.model, Some(&row.firmware_version)).ok()
         }
 
-        /// Private window: every allowed device plus the current project.
+        /// Private window: every allowed device, calibrated speakers, plus the current project.
         fn owner(&self) -> AccessContext {
             let ids: Vec<String> = self.db.lock().ok().and_then(|db| db.voice_devices().ok()).unwrap_or_default().into_iter().filter(|d| d.is_allowed()).map(|d| d.device_id).collect();
             let mut scopes: Vec<TrustedScope> = ids.iter().filter_map(|id| self.device(id)).collect();
+            scopes.extend(
+                (self.speakers)()
+                    .into_iter()
+                    .filter_map(|(id, _, _)| self.person_scope(&id)),
+            );
             scopes.extend(self.project());
             AccessContext::desktop_private(scopes)
         }
@@ -331,9 +365,9 @@ pub(crate) mod host {
     struct VoiceAccess(Arc<Trust>);
 
     impl ContextAccessProvider for VoiceAccess {
-        fn access(&self, context: &ToolContext, _person: Option<&PersonScope>) -> Option<(AccessContext, Option<Applicability>)> {
+        fn access(&self, context: &ToolContext, person: Option<&PersonScope>) -> Option<(AccessContext, Option<Applicability>)> {
             let device = self.0.device(&context.device_id)?;
-            let access = AccessContext::voice(device, None, self.0.project()).ok()?;
+            let access = AccessContext::voice(device, self.0.voice_person(person), self.0.project()).ok()?;
             Some((access, self.0.applicability(&context.device_id)))
         }
     }
@@ -433,8 +467,17 @@ pub(crate) mod host {
     }
 
     impl ContextHost {
+        #[cfg(test)]
         pub(crate) fn new(db: Arc<Mutex<RuntimeDb>>, settings_file: PathBuf) -> Arc<Self> {
-            let trust = Arc::new(Trust { db, settings_file });
+            Self::with_speakers(db, settings_file, Arc::new(Vec::new))
+        }
+
+        pub(crate) fn with_speakers(
+            db: Arc<Mutex<RuntimeDb>>,
+            settings_file: PathBuf,
+            speakers: CalibratedSpeakersFn,
+        ) -> Arc<Self> {
+            let trust = Arc::new(Trust { db, settings_file, speakers });
             let store = Arc::new(DbContextStore(trust.clone()));
             let service = ContextService::new(store.clone());
             let knowledge = KnowledgeService::new(Arc::new(DbKnowledgeStore(trust.clone())));
@@ -457,6 +500,30 @@ pub(crate) mod host {
         pub(crate) fn device_changed(&self, device_id: &str) {
             if let Ok(key) = ScopeKey::new(ScopeKind::Device, device_id) {
                 let _ = self.extractor.scope_changed(&key, || Ok::<_, ()>(()));
+            }
+        }
+
+        /// Speaker deleted or re-enrolled: in-flight extraction for that person is discarded.
+        pub(crate) fn person_changed(&self, person_id: &str) {
+            if let Ok(key) = ScopeKey::new(ScopeKind::Person, person_id) {
+                let _ = self.extractor.scope_changed(&key, || Ok::<_, ()>(()));
+            }
+        }
+
+        /// Calibration reset or personal mode toggled: invalidate in-flight extractions for all speakers.
+        pub(crate) fn speakers_invalidated(&self) {
+            let ids: Vec<String> = self
+                .trust
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.list_voice_speakers().ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            for id in ids {
+                self.person_changed(&id);
             }
         }
 
@@ -721,10 +788,15 @@ pub(crate) mod host {
                 let db = self.trust.db.lock().map_err(|_| fail("context_store_failed", 500, "数据库锁失败"))?;
                 devices.iter().filter(|d| d.is_allowed()).filter(|d| db.voice_memory(&d.device_id).ok().flatten().is_some_and(|m| !m.summary.trim().is_empty())).map(|d| d.device_id.clone()).collect()
             };
+            let persons: Vec<Value> = (self.trust.speakers)()
+                .into_iter()
+                .map(|(id, name, revision)| json!({"id": id, "name": name, "revision": revision}))
+                .collect();
             Ok(json!({
                 "retrieval": context.retrieval, "extraction": context.extraction,
                 "project": (!context.project_id.is_empty()).then(|| json!({"id": context.project_id, "name": context.project_name})),
                 "devices": devices.iter().filter(|d| d.is_allowed()).map(|d| json!({"id": d.device_id, "name": d.name, "model": d.model, "firmware": d.firmware_version})).collect::<Vec<_>>(),
+                "persons": persons,
                 "scopes": scopes, "legacy_summaries": legacy,
             }))
         }

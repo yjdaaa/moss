@@ -21,6 +21,7 @@ import VoiceVisionCard from "../components/VoiceVisionCard.jsx";
 import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
 import { VoiceEndpointsCard } from "../components/VoiceEndpointsCard.jsx";
 import { SaveBar, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel } from "../components/VoiceLayout.jsx";
+import { MossVoiceTwin } from "../components/MossVoiceTwin.jsx";
 import {
   SECTIONS,
   SETTINGS_GROUPS,
@@ -358,7 +359,7 @@ function ExternalModelGroup({ section, status, fullModule, busy, setBusy, refres
   );
 }
 
-export function VoicePage() {
+export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
@@ -542,7 +543,7 @@ export function VoicePage() {
   const builtinStatus = builtin.status && !builtin.status.error ? builtin.status : null;
   const builtinSessions = Array.isArray(builtinStatus?.sessions) ? builtinStatus.sessions.length : 0;
   const unsaved = dirtyTabs(dirty);
-
+  const pendingApprovals = approvalCount || approvals.filter((item) => item?.status === "pending").length;
   const serviceView = {
     builtin: builtinStatus?.running ? { text: "内置服务运行中", tone: "ok" } : { text: "内置服务未运行", tone: "off" },
     self_hosted: { text: `服务端${server.text}`, tone: server.tone },
@@ -661,6 +662,14 @@ export function VoicePage() {
               严格模式{status.strict?.enabled ? "已开启" : "未开启"} · 点此切换
             </button>
           </div>
+          <MossVoiceTwin
+            mode={mode}
+            status={status}
+            builtinStatus={builtinStatus}
+            mcpStatus={mcpStatus}
+            logLines={logLines}
+            approvalCount={pendingApprovals}
+          />
           {(device.hint || (mode === "official" && !status.strict?.enabled)) && (
             <div className={`voice-hint voice-hint--${mode === "official" && !status.strict?.enabled ? "warn" : device.tone}`} id="voice-ota-hint">
               {[
@@ -775,7 +784,7 @@ export function VoicePage() {
 
           <VoiceTabPanel tab="devices" active={activeTab === "devices"}>
             <div className="voice-stack" id="voice-devices-panel">
-              <VoiceEndpointsCard overview={status.mcp} busy={busy} run={run} />
+              <VoiceEndpointsCard mode={mode} overview={status.mcp} busy={busy} run={run} />
             </div>
           </VoiceTabPanel>
 
@@ -795,7 +804,7 @@ export function VoicePage() {
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="privacy" active={activeTab === "privacy"}>
-            <PrivateSettingsEntry status={builtinStatus} />
+            {mode === "builtin" && <PrivateSettingsEntry status={builtinStatus} />}
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="records" active={activeTab === "records"}>

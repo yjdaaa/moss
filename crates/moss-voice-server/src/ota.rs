@@ -83,6 +83,11 @@ async fn ota_post(
             return (StatusCode::INTERNAL_SERVER_ERROR, "设备登记失败").into_response();
         }
     };
+    // 2026-11-02：把这次上报的完整 JSON 存成设备快照（固件版本、芯片、flash/psram、MAC、
+    // 分区表等）。只在设备已登记后写入；字段随固件版本变化时不改表结构。
+    shared
+        .registry
+        .device_snapshot(&info.device_id, crate::SNAPSHOT_INFO, &body);
     let host = header("host")
         .as_deref()
         .and_then(host_without_port)

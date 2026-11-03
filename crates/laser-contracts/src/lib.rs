@@ -126,20 +126,56 @@ pub fn global_mcp_telemetry() -> &'static McpTelemetry {
 /// `/api/system/info` 读取。负数表示未知（未配置健康检查地址、查询失败或官方链路）。
 pub struct VoiceTelemetry {
     device_sessions: std::sync::atomic::AtomicI64,
+    /// 高 8 位存储 `phase_code`（0=None, 1=idle, 2=listening, 3=thinking, 4=speaking），低 8 位存储 `level`（0..=100），
+    /// 单次原子读写保证 `phase` 与 `level` 永远来自同一快照，消除跨原子变量读取撕裂。
+    pulse_packed: std::sync::atomic::AtomicU16,
 }
 
 impl VoiceTelemetry {
     const fn new() -> Self {
-        Self { device_sessions: std::sync::atomic::AtomicI64::new(-1) }
+        Self {
+            device_sessions: std::sync::atomic::AtomicI64::new(-1),
+            pulse_packed: std::sync::atomic::AtomicU16::new(0),
+        }
     }
 
     pub fn set_device_sessions(&self, sessions: Option<u32>) {
         let value = sessions.map(i64::from).unwrap_or(-1);
         self.device_sessions.store(value, std::sync::atomic::Ordering::SeqCst);
+        if sessions.unwrap_or(0) == 0 {
+            self.set_pulse(None, 0);
+        }
     }
 
     pub fn device_sessions(&self) -> Option<u32> {
         u32::try_from(self.device_sessions.load(std::sync::atomic::Ordering::SeqCst)).ok()
+    }
+
+    pub fn set_pulse(&self, phase: Option<&str>, level: u8) {
+        let code: u8 = match phase {
+            Some("speaking") => 4,
+            Some("thinking") => 3,
+            Some("listening") => 2,
+            Some("idle") => 1,
+            _ => 0,
+        };
+        let clamped: u8 = if matches!(code, 2 | 4) { level.min(100) } else { 0 };
+        let packed = (u16::from(code) << 8) | u16::from(clamped);
+        self.pulse_packed.store(packed, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn pulse(&self) -> (Option<&'static str>, u8) {
+        let packed = self.pulse_packed.load(std::sync::atomic::Ordering::SeqCst);
+        let code = (packed >> 8) as u8;
+        let level = (packed & 0xFF) as u8;
+        let phase = match code {
+            4 => Some("speaking"),
+            3 => Some("thinking"),
+            2 => Some("listening"),
+            1 => Some("idle"),
+            _ => None,
+        };
+        (phase, level)
     }
 }
 

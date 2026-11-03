@@ -43,6 +43,7 @@ pub struct PlaybackPump {
     started: bool,
     finished: bool,
     stats: PumpStats,
+    last_level: u8,
 }
 
 impl PlaybackPump {
@@ -57,6 +58,7 @@ impl PlaybackPump {
             started: false,
             finished: false,
             stats: PumpStats::default(),
+            last_level: 0,
         }
     }
 
@@ -69,6 +71,7 @@ impl PlaybackPump {
         self.started = false;
         self.finished = false;
         self.stats = PumpStats::default();
+        self.last_level = 0;
     }
 
     pub fn push(&mut self, pcm: &[i16]) {
@@ -98,6 +101,12 @@ impl PlaybackPump {
         self.started = false;
         self.finished = true;
         self.encoder.reset();
+        self.last_level = 0;
+    }
+
+    /// 最近一次送出的 60 ms 音频帧归一化音量（0..=100）；静音或结束时为 0。
+    pub fn last_level(&self) -> u8 {
+        self.last_level
     }
 
     pub fn stats(&self) -> PumpStats {
@@ -113,6 +122,7 @@ impl PlaybackPump {
         let frame = self.encoder.frame();
         if !self.started {
             if self.pending.is_empty() && self.finished {
+                self.last_level = 0;
                 return Ok(PumpTick::Done);
             }
             if self.pending.len() < self.start_samples.max(frame) && !self.finished {
@@ -132,13 +142,16 @@ impl PlaybackPump {
             }
             self.consumed = end;
             self.stats.frames += 1;
+            self.last_level = super::pcm_rms_level(&block);
             return self.encoder.encode(&block).map(|data| PumpTick::Frame { data, marks });
         }
         if self.finished {
+            self.last_level = 0;
             return Ok(PumpTick::Done);
         }
         // 播放中供不上：补一帧静音保持设备连续播放（不足一帧的尾巴留到下一拍凑满）
         self.stats.underruns += 1;
+        self.last_level = 0;
         self.encoder.encode(&[]).map(|data| PumpTick::Frame { data, marks: Vec::new() })
     }
 }

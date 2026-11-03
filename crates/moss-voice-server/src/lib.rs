@@ -20,7 +20,9 @@ pub mod audio;
 mod barge;
 mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
 pub mod conversation;
+pub mod jobs; // 加工结束主动播报（2026-11-02 用户决定）
 pub mod fast;
+pub mod jev;
 pub mod vision;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
 mod speaker; // NV16 synthetic-only policy, default disabled
@@ -45,6 +47,7 @@ use serde::Serialize;
 
 pub use audio::{LocalVadFactory, VadConfig, VadFactory};
 pub use conversation::{Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome};
+pub use jev::{DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter};
 pub use tools::{HostTools, ToolHost, ToolHostResult};
 pub use state::{ServerEvent, SessionView, TurnTiming, ToolTiming};
 
@@ -83,6 +86,12 @@ pub trait DeviceRegistry: Send + Sync {
     fn close_session(&self, session: &str);
     /// 已连接（通过授权）的设备会话数变化（NV5：桌面端据此更新顶栏的设备状态）。
     fn sessions_changed(&self, _count: usize) {}
+    /// 汇总在线会话的主状态（`idle`/`listening`/`thinking`/`speaking`，无会话时 `None`）与归一化音量（0..=100）。
+    fn pulse_changed(&self, _phase: Option<&str>, _level: u8) {}
+
+    /// 记录设备快照（开机 OTA 上报 / hello 握手 / 实时状态），`kind` 取 [`SNAPSHOT_INFO`] 等。
+    /// 默认忽略：不关心设备信息的宿主不必实现。
+    fn device_snapshot(&self, _device: &str, _kind: &str, _json: &str) {}
 }
 
 /// A live permission that cannot become valid again after revoke, disconnect or shutdown.
@@ -142,6 +151,8 @@ pub struct ServerConfig {
     pub idle_timeout: Duration,
     /// 下发给设备的帧协议版本（OTA 响应 `websocket.version`）
     pub protocol_version: u32,
+    /// 加工结束播报的轮询间隔；默认 5 秒，测试用小值加速。
+    pub job_poll_interval: Duration,
 }
 
 impl Default for ServerConfig {
@@ -164,6 +175,7 @@ impl Default for ServerConfig {
             playback_start_ms: 600,
             idle_timeout: Duration::from_secs(120),
             protocol_version: 1,
+            job_poll_interval: jobs::DEFAULT_POLL_INTERVAL,
         }
     }
 }
@@ -180,6 +192,28 @@ pub struct ServerStatusView {
     pub timings: Vec<TurnTiming>,
 }
 
+/// 设备快照种类（与 `laser_runtime::VOICE_SNAPSHOT_*` 是同一组字符串）。
+pub const SNAPSHOT_INFO: &str = "info";
+pub const SNAPSHOT_HELLO: &str = "hello";
+pub const SNAPSHOT_STATUS: &str = "status";
+/// 设备实际使用的拾音模式（`auto` / `manual` / `realtime`）。
+pub const SNAPSHOT_LISTEN: &str = "listen";
+
+/// 桌面端可以对一台已连接设备发起的即时请求（2026-11-02：设备信息刷新与重启）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceRequest {
+    /// 取设备自带 MCP 的 `self.get_device_status`，结果写成设备快照
+    RefreshInfo,
+    /// 取 `self.reboot`：设备重启后会重新请求 OTA，固件版本随之刷新
+    Reboot,
+}
+
+pub(crate) struct DeviceRequestHandle {
+    pub session_id: String,
+    pub supports_mcp: bool,
+    pub sender: tokio::sync::mpsc::UnboundedSender<DeviceRequest>,
+}
+
 pub(crate) struct Shared {
     pub config: ServerConfig,
     pub http_port: u16,
@@ -191,6 +225,12 @@ pub(crate) struct Shared {
     pub signer: TokenSigner,
     pub state: state::LiveState,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
+    /// 同一条加工任务只让一个在线会话播报结束。
+    pub job_announcements: jobs::AnnounceLog,
+    /// 桌面端 → 已连接设备的即时请求：按设备 MAC 绑定当前活跃会话（带 session_id 与 MCP 能力标志）
+    pub device_requests: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, DeviceRequestHandle>>,
+    >,
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -252,6 +292,8 @@ impl VoiceServer {
             signer: TokenSigner::new(secret),
             state: state::LiveState::default(),
             shutdown: shutdown_rx,
+            job_announcements: jobs::AnnounceLog::default(),
+            device_requests: Default::default(),
         });
         shared.state.event(format!("内置语音服务已启动：设备连接端口 {ws_port}，OTA 端口 {http_port}"));
         let ws_app = session::router(shared.clone());
@@ -306,6 +348,53 @@ impl VoiceServer {
             events: self.shared.state.events(),
             timings: self.shared.state.timings(),
         }
+    }
+
+    /// 向一台已连接的设备发起即时请求（刷新设备信息 / 重启设备）。
+    ///
+    /// 设备不在线、未声明设备端 MCP 或会话刚断开时同步返回错误；请求入队后异步发往设备，
+    /// `self.get_device_status` 的结果经 [`DeviceRegistry::device_snapshot`] 写回。
+    pub fn device_request(&self, device_id: &str, request: DeviceRequest) -> Result<(), String> {
+        if self.runtime.is_none() {
+            return Err("内置语音服务未运行".into());
+        }
+        let sender = {
+            let map = self
+                .shared
+                .device_requests
+                .lock()
+                .map_err(|_| "设备会话表锁失败".to_owned())?;
+            let Some(handle) = map.get(device_id) else {
+                return Err(format!("设备 {device_id} 当前不在线"));
+            };
+            if !handle.supports_mcp {
+                return Err(format!("设备 {device_id} 未启用设备端 MCP，无法执行该操作"));
+            }
+            handle.sender.clone()
+        };
+        if sender.send(request).is_err() {
+            let message = format!("设备 {device_id} 的会话刚刚结束，请求未送达");
+            self.shared.state.event(message.clone());
+            return Err(message);
+        }
+        Ok(())
+    }
+
+    /// 后台异步预热高频固定话术与慢工具过渡垫音缓存（不阻塞启动，服务关闭时自动中止）。
+    pub fn prewarm_speech_cache(&self) {
+        let (Some(runtime), Some(conversation)) = (
+            self.runtime.as_ref(),
+            self.shared.config.conversation.clone(),
+        ) else {
+            return;
+        };
+        let mut stop = self.shutdown.subscribe();
+        runtime.spawn(async move {
+            tokio::select! {
+                _ = conversation.prewarm_cache() => {}
+                _ = stop.wait_for(|stopped| *stopped) => {}
+            }
+        });
     }
 
     /// 通知所有会话结束并关闭运行时（最多等 2 秒）。

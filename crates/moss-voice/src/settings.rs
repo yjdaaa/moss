@@ -136,6 +136,38 @@ pub fn validate_barge_in_ms(ms: u64) -> Result<u32, String> {
     else { Err("插话时长须为 300 ~ 600 毫秒的整数".into()) }
 }
 
+pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-1.14";
+pub const LOCAL_LAYA_JEV_MODEL: &str = "laya_multilingual";
+
+pub fn default_jev_model() -> String {
+    DEFAULT_JEV_MODEL.to_owned()
+}
+
+pub fn is_local_laya_model(raw: &str) -> bool {
+    matches!(
+        raw.trim(),
+        "laya_multilingual" | "convaiinnovations/laya-multilingual" | "local/laya-multilingual"
+    )
+}
+
+/// 校验 Jev 决策模型名：允许 OpenRouter Decisions 的 `typesafe/jev-*` 系列或本地 `laya_multilingual`。
+pub fn validate_jev_model(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if is_local_laya_model(trimmed) {
+        return Ok(LOCAL_LAYA_JEV_MODEL.to_owned());
+    }
+    let Some(suffix) = trimmed.strip_prefix("typesafe/jev-") else {
+        return Err("Jev 模型须以 typesafe/jev- 开头或选用本地 laya_multilingual（如 typesafe/jev-1.14 或 typesafe/jev-1.13）".into());
+    };
+    if suffix.is_empty()
+        || trimmed.len() > 64
+        || suffix.contains("..")
+        || !suffix.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err("Jev 模型名称格式不正确（如 typesafe/jev-1.14、typesafe/jev-1.13 或本地 laya_multilingual）".into());
+    }
+    Ok(trimmed.to_owned())
+}
 pub fn normalize_hotwords(words: &[String]) -> Result<Vec<String>, String> {
     if words.len() > 64 { return Err("自定义热词最多 64 条".into()); }
     let mut normalized = Vec::new();
@@ -179,6 +211,26 @@ pub struct BuiltinLocal {
     pub asr_beam_search: bool,
     #[serde(default)]
     pub custom_hotwords: Vec<String>,
+    /// 加工结束后在设备在线且空闲时主动播报（2026-11-02 用户决定；默认开）
+    #[serde(default = "default_on")]
+    pub job_done_announce: bool,
+    /// 内置语音 Jev 信息筛选与提速总开关（默认关闭；开启后识别文本发往 OpenRouter Decisions 接口）
+    #[serde(default)]
+    pub jev_filter_enabled: bool,
+    /// 选用的 OpenRouter Jev 决策模型（默认 `typesafe/jev-1.14`，可切换 `typesafe/jev-1.13` 等）
+    #[serde(default = "default_jev_model")]
+    pub jev_model: String,
+    #[serde(default = "default_on")]
+    pub jev_unfinished_hold: bool,
+    /// 开关 B：口语只读状态快答分流（默认开，随总开关生效）
+    #[serde(default = "default_on")]
+    pub jev_fast_route: bool,
+    /// 开关 C：工具组按需剪枝（默认开，随总开关生效）
+    #[serde(default = "default_on")]
+    pub jev_tool_prune: bool,
+    /// 开关 D：长期记忆检索候选撞词过滤（默认开，随总开关生效）
+    #[serde(default = "default_on")]
+    pub jev_memory_filter: bool,
     /// 语音识别用本地模型（代替云端识别）
     #[serde(default)]
     pub asr: bool,
@@ -213,6 +265,13 @@ impl Default for BuiltinLocal {
             read_only_shortcuts: true,
             asr_beam_search: true,
             custom_hotwords: Vec::new(),
+            job_done_announce: true,
+            jev_filter_enabled: false,
+            jev_model: default_jev_model(),
+            jev_unfinished_hold: true,
+            jev_fast_route: true,
+            jev_tool_prune: true,
+            jev_memory_filter: true,
             asr: false,
             tts: false,
             vad: false,
@@ -241,6 +300,7 @@ impl BuiltinLocal {
             ModelKind::Vad => (self.vad, &self.vad_model),
             ModelKind::Asr => (self.asr, &self.asr_model),
             ModelKind::Tts => (self.tts, &self.tts_model),
+            ModelKind::Jev => (self.jev_filter_enabled && is_local_laya_model(&self.jev_model), &self.jev_model),
             ModelKind::Speaker => return None,
         };
         enabled.then(|| crate::local_models::spec_of(id, kind)).flatten()
@@ -612,6 +672,22 @@ pub fn save(settings_file: &Path, voice: &VoiceSettings) -> Result<(), String> {
     save_all(settings_file, voice, None, None, None)
 }
 
+/// 读取顶层 `jev_enabled`（系统设置与加工反馈共用的 Jev 开关）。
+pub fn jev_feedback_enabled(settings_file: &Path) -> bool {
+    read_root(settings_file)
+        .get("jev_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// 一次原子写入 `voice` 与可选的顶层 `jev_enabled`（与系统设置的加工反馈开关保持同步）。
+pub fn save_with_jev_feedback(
+    settings_file: &Path,
+    voice: &VoiceSettings,
+    jev_feedback: Option<bool>,
+) -> Result<(), String> {
+    save_all_inner(settings_file, voice, None, None, None, jev_feedback)
+}
 /// 当前顶层 `mcp_endpoint`（MOSS 小智桥使用的地址）。
 pub fn mcp_endpoint(settings_file: &Path) -> Option<String> {
     read_root(settings_file)
@@ -653,6 +729,17 @@ pub fn save_all(
     extra_endpoints: Option<&[String]>,
     disabled_tools: Option<&[String]>,
 ) -> Result<(), String> {
+    save_all_inner(settings_file, voice, endpoint, extra_endpoints, disabled_tools, None)
+}
+
+fn save_all_inner(
+    settings_file: &Path,
+    voice: &VoiceSettings,
+    endpoint: Option<Option<&str>>,
+    extra_endpoints: Option<&[String]>,
+    disabled_tools: Option<&[String]>,
+    jev_feedback: Option<bool>,
+) -> Result<(), String> {
     let _guard = SETTINGS_WRITE.lock().map_err(|_| "设置锁不可用")?;
     let mut root = read_root(settings_file);
     let external = root.get("voice").and_then(|v| v.get("mcp_servers")).cloned();
@@ -691,6 +778,9 @@ pub fn save_all(
             }
             None => {}
         }
+    }
+    if let Some(enabled) = jev_feedback {
+        root.insert("jev_enabled".into(), serde_json::Value::Bool(enabled));
     }
     write_root(settings_file, &root)
 }
@@ -1244,6 +1334,26 @@ mod tests {
         let enabled = BuiltinLocal { barge_in: true, barge_in_ms: 600, ..Default::default() };
         let value = serde_json::to_string(&enabled).unwrap();
         assert_eq!(serde_json::from_str::<BuiltinLocal>(&value).unwrap(), enabled);
+    }
+
+    #[test]
+    fn jev_voice_filter_defaults_disabled_and_round_trips_subswitches() {
+        let old: BuiltinLocal = serde_json::from_str("{}").unwrap();
+        assert!(!old.jev_filter_enabled);
+        assert_eq!(old.jev_model, DEFAULT_JEV_MODEL);
+        assert!(old.jev_unfinished_hold && old.jev_fast_route && old.jev_tool_prune && old.jev_memory_filter);
+        assert_eq!(validate_jev_model(" typesafe/jev-1.13 ").unwrap(), "typesafe/jev-1.13");
+        assert!(validate_jev_model("openai/gpt-4o").is_err());
+        assert!(validate_jev_model("typesafe/jev-../x").is_err());
+        let custom = BuiltinLocal {
+            jev_filter_enabled: true,
+            jev_model: "typesafe/jev-1.13".into(),
+            jev_tool_prune: true,
+            jev_memory_filter: false,
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&custom).unwrap();
+        assert_eq!(serde_json::from_str::<BuiltinLocal>(&text).unwrap(), custom);
     }
 
     #[test]

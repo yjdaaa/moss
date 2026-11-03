@@ -20,6 +20,9 @@ use sha2::{Digest, Sha256};
 
 /// sherpa-onnx 官方发布地址（可在语音中心换成镜像；校验值不变）
 pub const DEFAULT_BASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download";
+/// Laya 多语言决策模型官方发布地址與国内镜像回退地址（SHA-256 校验值恒定不变）
+pub const DEFAULT_LAYA_BASE: &str = "https://huggingface.co/convaiinnovations/laya-multilingual/resolve/main";
+pub const DEFAULT_LAYA_MIRROR_BASE: &str = "https://hf-mirror.com/convaiinnovations/laya-multilingual/resolve/main";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archive {
@@ -27,19 +30,22 @@ pub enum Archive {
     File,
     /// tar.bz2，解出顶层目录 `models/<dir>`
     TarBz2 { dir: &'static str },
+    /// 多文件模型目录，逐个文件校验 SHA-256 后组装为 `models/<dir>`
+    Directory { dir: &'static str, base_url: &'static str },
 }
 
-/// 模型类别：判停、识别、合成各选一个。
+/// 模型类别：判停、识别、合成、Jev 决策各选一个。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelKind {
     Vad,
     Asr,
     Tts,
+    Jev,
     Speaker,
 }
 
-/// 辅助程序加载模型的方式（与 `moss-voice-local-proto` 的引擎一一对应）。
+/// 辅助程序加载模型的方式（与 `moss-voice-local-proto` 的引擎及本地 Laya 决策服务对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Engine {
@@ -51,6 +57,7 @@ pub enum Engine {
     StreamingTransducer,
     Kokoro,
     Matcha,
+    Laya,
     CampPlus,
 }
 
@@ -102,10 +109,46 @@ impl ModelSpec {
 }
 
 const KOKORO_FILES: [&str; 6] = ["voices.bin", "tokens.txt", "lexicon-zh.txt", "lexicon-us-en.txt", "espeak-ng-data", "dict"];
+const LAYA_MULTILINGUAL_FILES: [&str; 6] = [
+    "model.safetensors",
+    "config.json",
+    "rl_agent_config.json",
+    "encoder/config.json",
+    "tokenizer/tokenizer_config.json",
+    "tokenizer/tokenizer.json",
+];
 
-/// 内置清单。SHA-256 取自 GitHub 发布页对各资产给出的摘要（2026-10-07 / 10-08 核对，并与实际下载的文件逐一核对一致）。
+const LAYA_MULTILINGUAL_EXTRAS: [ExtraFile; 5] = [
+    ExtraFile {
+        path: "config.json",
+        sha256: "7add7c041b53f7091e65908553af79ab3f077946e5f2312d510ae13b17c7c134",
+        size: 160,
+    },
+    ExtraFile {
+        path: "rl_agent_config.json",
+        sha256: "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6",
+        size: 472,
+    },
+    ExtraFile {
+        path: "encoder/config.json",
+        sha256: "83f6916d13ef0f556ac461f28308dc2bffa7ebeadee8ec9e2db5812020ea5bb4",
+        size: 1_938,
+    },
+    ExtraFile {
+        path: "tokenizer/tokenizer_config.json",
+        sha256: "424b69444bf7b5809dc2cd2e36d0bd71b8055124dd24274d6db3c655d38205e7",
+        size: 502,
+    },
+    ExtraFile {
+        path: "tokenizer/tokenizer.json",
+        sha256: "609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f",
+        size: 34_363_188,
+    },
+];
+
+/// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 9] = [
+pub const CATALOG: [ModelSpec; 10] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker, engine: Engine::CampPlus,
@@ -232,6 +275,23 @@ pub const CATALOG: [ModelSpec; 9] = [
         }],
         voices: None,
     },
+    ModelSpec {
+        id: "laya_multilingual",
+        kind: ModelKind::Jev,
+        engine: Engine::Laya,
+        label: "Laya 多语言决策（322M，中英 100+ 语言）",
+        note: "Apache-2.0；非自回归 System 1 决策模型，单次前向推理约 35–48ms（RTX 4060），兼容 /v1/systemone，无需 OpenRouter 密钥。",
+        path: "model.safetensors",
+        sha256: "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+        size: 643_835_514,
+        archive: Archive::Directory {
+            dir: "laya_multilingual",
+            base_url: DEFAULT_LAYA_BASE,
+        },
+        required: &LAYA_MULTILINGUAL_FILES,
+        extras: &LAYA_MULTILINGUAL_EXTRAS,
+        voices: None,
+    },
 ];
 
 pub fn spec(id: &str) -> Option<&'static ModelSpec> {
@@ -255,7 +315,7 @@ fn file_name(spec: &ModelSpec) -> &'static str {
 pub fn install_path(root: &Path, spec: &ModelSpec) -> PathBuf {
     match spec.archive {
         Archive::File => root.join(file_name(spec)),
-        Archive::TarBz2 { dir } => root.join(dir),
+        Archive::TarBz2 { dir } | Archive::Directory { dir, .. } => root.join(dir),
     }
 }
 
@@ -265,6 +325,14 @@ pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
     match spec.archive {
         Archive::File => path.metadata().map(|meta| meta.is_file() && meta.len() == spec.size).unwrap_or(false),
         Archive::TarBz2 { .. } => path.is_dir() && spec.required.iter().all(|item| path.join(item).exists()),
+        Archive::Directory { .. } => {
+            path.is_dir()
+                && path.join(spec.path).metadata().map(|m| m.is_file() && m.len() == spec.size).unwrap_or(false)
+                && spec.extras.iter().all(|extra| {
+                    path.join(extra.path).metadata().map(|m| m.is_file() && m.len() == extra.size).unwrap_or(false)
+                })
+                && spec.required.iter().all(|item| path.join(item).exists())
+        }
     }
 }
 
@@ -305,6 +373,7 @@ struct Task {
 
 pub struct ModelManager {
     root: PathBuf,
+    overrides: HashMap<&'static str, PathBuf>,
     tasks: Arc<Mutex<HashMap<&'static str, Task>>>,
     generation: std::sync::atomic::AtomicU64,
 }
@@ -312,33 +381,52 @@ pub struct ModelManager {
 impl ModelManager {
     /// `root` 为运行目录下的 `models/`。
     pub fn new(root: PathBuf) -> Self {
-        Self { root, tasks: Arc::default(), generation: std::sync::atomic::AtomicU64::new(1) }
+        Self {
+            root,
+            overrides: HashMap::new(),
+            tasks: Arc::default(),
+            generation: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// 为指定模型 id 覆盖存放父目录（例如将 `laya_multilingual` 放在 `E:\moss-laya\models`）。
+    pub fn with_root_override(mut self, id: &'static str, custom_root: PathBuf) -> Self {
+        self.overrides.insert(id, custom_root);
+        self
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    pub fn root_for(&self, id: &str) -> &Path {
+        self.overrides.get(id).map(PathBuf::as_path).unwrap_or(&self.root)
+    }
+
     pub fn path_if_installed(&self, id: &str) -> Option<PathBuf> {
         let spec = spec(id)?;
-        installed(&self.root, spec).then(|| install_path(&self.root, spec))
+        let root = self.root_for(id);
+        installed(root, spec).then(|| install_path(root, spec))
     }
 
     pub fn status(&self) -> Vec<ModelStatus> {
         let tasks = self.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         CATALOG
             .iter()
-            .map(|spec| ModelStatus {
-                id: spec.id,
-                kind: spec.kind,
-                engine: spec.engine,
-                label: spec.label,
-                note: spec.note,
-                size: spec.download_size(),
-                streaming: spec.engine == Engine::StreamingTransducer,
-                voices: spec.voices,
-                installed: installed(&self.root, spec),
-                progress: tasks.get(spec.id).map(|task| task.progress.clone()),
+            .map(|spec| {
+                let root = self.root_for(spec.id);
+                ModelStatus {
+                    id: spec.id,
+                    kind: spec.kind,
+                    engine: spec.engine,
+                    label: spec.label,
+                    note: spec.note,
+                    size: spec.download_size(),
+                    streaming: spec.engine == Engine::StreamingTransducer,
+                    voices: spec.voices,
+                    installed: installed(root, spec),
+                    progress: tasks.get(spec.id).map(|task| task.progress.clone()),
+                }
             })
             .collect()
     }
@@ -355,10 +443,13 @@ impl ModelManager {
 
     /// 与 [`download`](Self::download) 相同，但使用给定的清单项（测试用）。
     pub fn download_spec(&self, spec: ModelSpec, base: &str) -> Result<(), String> {
-        let base = base.trim().trim_end_matches('/');
-        if !(base.starts_with("https://") || base.starts_with("http://")) || base.contains(char::is_whitespace) {
+        let trimmed_base = base.trim().trim_end_matches('/');
+        if !(trimmed_base.starts_with("https://") || trimmed_base.starts_with("http://"))
+            || trimmed_base.contains(char::is_whitespace)
+        {
             return Err("下载地址必须以 http:// 或 https:// 开头".into());
         }
+        let candidate_bases = resolve_download_bases(&spec, trimmed_base);
         let cancel = Arc::new(AtomicBool::new(false));
         let generation = self.generation.fetch_add(1, Ordering::SeqCst);
         {
@@ -375,9 +466,8 @@ impl ModelManager {
                 },
             );
         }
-        let root = self.root.clone();
+        let root = self.root_for(spec.id).to_path_buf();
         let tasks = self.tasks.clone();
-        let base = base.to_owned();
         std::thread::Builder::new()
             .name(format!("model-download-{}", spec.id))
             .spawn(move || {
@@ -390,7 +480,7 @@ impl ModelManager {
                         task.progress = progress;
                     }
                 };
-                let result = run_download(&root, &spec, &base, &cancel, &report);
+                let result = run_download(&root, &spec, &candidate_bases, &cancel, &report);
                 if let Ok(mut tasks) = tasks.lock()
                     && let Some(task) = tasks.get(spec.id)
                     && task.generation == generation
@@ -430,10 +520,10 @@ impl ModelManager {
         if let Ok(mut tasks) = self.tasks.lock() {
             tasks.remove(spec.id);
         }
-        let path = install_path(&self.root, spec);
+        let path = install_path(self.root_for(spec.id), spec);
         let removed = match spec.archive {
             Archive::File => fs::remove_file(&path),
-            Archive::TarBz2 { .. } => fs::remove_dir_all(&path),
+            Archive::TarBz2 { .. } | Archive::Directory { .. } => fs::remove_dir_all(&path),
         };
         match removed {
             Ok(()) => Ok(()),
@@ -454,19 +544,73 @@ struct Item {
     size: u64,
 }
 
-fn run_download(root: &Path, spec: &ModelSpec, base: &str, cancel: &AtomicBool, report: &dyn Fn(Progress)) -> Result<(), String> {
+/// 为给定模型解析下载候选地址列表（主地址 + 镜像兜底）。
+/// `Archive::Directory`（如 HuggingFace 上的 `laya_multilingual`）不与 sherpa-onnx GitHub Release 混用路径。
+fn resolve_download_bases(spec: &ModelSpec, trimmed_base: &str) -> Vec<String> {
+    match spec.archive {
+        Archive::Directory { base_url, .. } => {
+            if trimmed_base == DEFAULT_BASE {
+                vec![base_url.to_owned(), DEFAULT_LAYA_MIRROR_BASE.to_owned()]
+            } else if trimmed_base.contains("k2-fsa/sherpa-onnx") {
+                // 用户填写的是 sherpa-onnx GitHub 发布镜像：目录模型优先走 HF 国内镜像，再兜底官方 HF
+                vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), base_url.to_owned()]
+            } else if let Some(suffix) = base_url.strip_prefix("https://huggingface.co")
+                && !trimmed_base.contains("/resolve/")
+                && (trimmed_base.contains("hf-mirror") || trimmed_base.contains("huggingface"))
+            {
+                let rewritten = format!("{trimmed_base}{suffix}");
+                if rewritten == base_url {
+                    vec![rewritten, DEFAULT_LAYA_MIRROR_BASE.to_owned()]
+                } else {
+                    vec![rewritten, base_url.to_owned()]
+                }
+            } else if trimmed_base == DEFAULT_LAYA_BASE {
+                vec![DEFAULT_LAYA_BASE.to_owned(), DEFAULT_LAYA_MIRROR_BASE.to_owned()]
+            } else if trimmed_base == DEFAULT_LAYA_MIRROR_BASE {
+                vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), DEFAULT_LAYA_BASE.to_owned()]
+            } else {
+                vec![trimmed_base.to_owned()]
+            }
+        }
+        _ => vec![trimmed_base.to_owned()],
+    }
+}
+
+fn run_download(root: &Path, spec: &ModelSpec, bases: &[String], cancel: &AtomicBool, report: &dyn Fn(Progress)) -> Result<(), String> {
     let staging = root.join(".download");
     fs::create_dir_all(&staging).map_err(|error| format!("创建下载目录失败：{error}"))?;
     let items: Vec<Item> = std::iter::once(Item { path: spec.path, sha256: spec.sha256, size: spec.size })
         .chain(spec.extras.iter().map(|extra| Item { path: extra.path, sha256: extra.sha256, size: extra.size }))
         .collect();
-    let parts: Vec<PathBuf> = items.iter().map(|item| staging.join(format!("{}.part", base_name(item.path)))).collect();
+    let parts: Vec<PathBuf> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| staging.join(format!("{}-{idx}-{}.part", spec.id, base_name(item.path))))
+        .collect();
     let total = spec.download_size();
     let result = (|| {
         let mut offset = 0;
         for (item, part) in items.iter().zip(&parts) {
             let progress = |done: u64| report(Progress::Downloading { done: offset + done, total });
-            fetch(item, &format!("{base}/{}", item.path), part, cancel, &progress)?;
+            let mut last_err = None;
+            for (idx, base) in bases.iter().enumerate() {
+                if idx > 0 && cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let url = format!("{base}/{}", item.path);
+                match fetch(item, &url, part, cancel, &progress) {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(err) => {
+                        last_err = Some(err);
+                    }
+                }
+            }
+            if let Some(err) = last_err {
+                return Err(err);
+            }
             offset += item.size;
         }
         report(Progress::Verifying);
@@ -581,6 +725,36 @@ fn install(root: &Path, spec: &ModelSpec, part: &Path, extras: &[PathBuf], cance
                 }
                 if let Some(missing) = spec.required.iter().find(|item| !unpacked.join(item).exists()) {
                     return Err(format!("压缩包缺少 {missing}"));
+                }
+                let _ = fs::remove_dir_all(&target);
+                fs::rename(&unpacked, &target).map_err(|error| format!("安装失败：{error}"))
+            })();
+            let _ = fs::remove_dir_all(&extract);
+            result
+        }
+        Archive::Directory { dir, .. } => {
+            let extract = root.join(format!(".extract-{}", spec.id));
+            let _ = fs::remove_dir_all(&extract);
+            fs::create_dir_all(&extract).map_err(|error| format!("创建安装目录失败：{error}"))?;
+            let result = (|| {
+                let unpacked = extract.join(dir);
+                let all_files = std::iter::once((spec.path, part)).chain(spec.extras.iter().map(|e| e.path).zip(extras.iter().map(PathBuf::as_path)));
+                for (rel_path, src_part) in all_files {
+                    if cancel.load(Ordering::SeqCst) {
+                        return Err("已取消".to_owned());
+                    }
+                    let rel = Path::new(rel_path);
+                    if !safe_relative(rel) {
+                        return Err(format!("模型包含不安全的路径：{}", rel.display()));
+                    }
+                    let dest = unpacked.join(rel);
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent).map_err(|error| format!("安装失败：{error}"))?;
+                    }
+                    fs::rename(src_part, &dest).map_err(|error| format!("安装失败：{error}"))?;
+                }
+                if let Some(missing) = spec.required.iter().find(|item| !unpacked.join(item).exists()) {
+                    return Err(format!("模型目录缺少 {missing}"));
                 }
                 let _ = fs::remove_dir_all(&target);
                 fs::rename(&unpacked, &target).map_err(|error| format!("安装失败：{error}"))
@@ -782,9 +956,13 @@ mod tests {
         for spec in CATALOG {
             assert!(spec.size > 0 && !spec.note.is_empty(), "{}", spec.id);
             // 附加文件只用于压缩包模型，且安装检查包含它
+            // 附加文件只用于压缩包或多文件目录模型，且安装检查包含它
             for extra in spec.extras {
-                assert!(matches!(spec.archive, Archive::TarBz2 { .. }), "{}", spec.id);
-                assert!(spec.required.contains(&base_name(extra.path)), "{}", spec.id);
+                match spec.archive {
+                    Archive::TarBz2 { .. } => assert!(spec.required.contains(&base_name(extra.path)), "{}", spec.id),
+                    Archive::Directory { .. } => assert!(spec.required.contains(&extra.path), "{}", spec.id),
+                    Archive::File => panic!("unexpected extra file for {}", spec.id),
+                }
             }
             // 多音色只用于合成模型，默认音色在范围内
             if let Some(voices) = spec.voices {
@@ -795,6 +973,7 @@ mod tests {
                 Engine::SileroVad | Engine::TenVad => ModelKind::Vad,
                 Engine::SenseVoice | Engine::StreamingTransducer => ModelKind::Asr,
                 Engine::Kokoro | Engine::Matcha => ModelKind::Tts,
+                Engine::Laya => ModelKind::Jev,
                 Engine::CampPlus => ModelKind::Speaker,
             };
             assert_eq!(spec.kind, kind, "{} 的引擎与类别一致", spec.id);
@@ -837,5 +1016,29 @@ mod tests {
         assert!(!safe_relative(Path::new("a/../../b")));
         assert!(!safe_relative(Path::new("/etc/passwd")));
         assert!(!safe_relative(Path::new("")));
+    }
+
+    #[test]
+    fn directory_model_ignores_sherpa_github_mirror_and_supports_hf_mirrors() {
+        let laya = super::spec("laya_multilingual").unwrap();
+        assert_eq!(
+            resolve_download_bases(laya, DEFAULT_BASE),
+            vec![DEFAULT_LAYA_BASE.to_owned(), DEFAULT_LAYA_MIRROR_BASE.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(
+                laya,
+                "https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download"
+            ),
+            vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), DEFAULT_LAYA_BASE.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(laya, "https://hf-mirror.com"),
+            vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), DEFAULT_LAYA_BASE.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(laya, "http://127.0.0.1:19999/laya"),
+            vec!["http://127.0.0.1:19999/laya".to_owned()]
+        );
     }
 }

@@ -21,6 +21,16 @@ if /I "%~1"=="-Desktop" (
     shift
     goto parse_args
 )
+if /I "%~1"=="-Dev" (
+    set "MOSS_START_MODE=dev"
+    shift
+    goto parse_args
+)
+if /I "%~1"=="-Update" (
+    set "MOSS_START_MODE=update"
+    shift
+    goto parse_args
+)
 if /I "%~1"=="-Server" (
     set "MOSS_START_MODE=server"
     shift
@@ -81,6 +91,16 @@ if (-not $DesktopExe -and -not $HostExe) {
     $HostExe = Find-Exe "moss-host"
 }
 
+if ($env:MOSS_START_MODE -eq "dev") {
+    & (Join-Path $Root "scripts\dev-desktop.ps1")
+    exit $LASTEXITCODE
+}
+
+if ($env:MOSS_START_MODE -eq "update") {
+    & (Join-Path $Root "scripts\quick-update-desktop.ps1") -Launch
+    exit $LASTEXITCODE
+}
+
 if ($env:MOSS_START_MODE -eq "server") {
     if (-not $HostExe) {
         Write-Host "[错误] 找不到 moss-host.exe，请先运行 cargo build --release -p moss-host" -ForegroundColor Red
@@ -101,6 +121,52 @@ if ($env:MOSS_START_MODE -eq "server") {
     Run-HostAndOpenBrowser
 } else {
     if ($DesktopExe) {
+        $ProtoFile = Join-Path $Root "crates\moss-voice-local-proto\src\lib.rs"
+        if (Test-Path -LiteralPath $ProtoFile -PathType Leaf) {
+            $ProtoRaw = Get-Content -LiteralPath $ProtoFile -Raw
+            if ($ProtoRaw -match 'pub\s+const\s+PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;') {
+                $ExpectedProto = [int]$Matches[1]
+                $TargetHelper = Join-Path (Split-Path -Parent $DesktopExe) "moss-voice-local.exe"
+                function Get-HelperProto([string]$PathToCheck) {
+                    if (-not (Test-Path -LiteralPath $PathToCheck -PathType Leaf)) { return -1 }
+                    try {
+                        $VerText = (& $PathToCheck --version 2>&1) -join ' '
+                        if ($LASTEXITCODE -eq 0 -and $VerText -match '\(protocol\s+(\d+)\b') { return [int]$Matches[1] }
+                    } catch {}
+                    return -1
+                }
+                if ((Get-HelperProto $TargetHelper) -ne $ExpectedProto) {
+                    $HelperCandidates = @(
+                        (Join-Path $Root "target\x86_64-pc-windows-msvc\release\moss-voice-local.exe"),
+                        (Join-Path $Root "apps\desktop\src-tauri\binaries\moss-voice-local-x86_64-pc-windows-msvc.exe"),
+                        (Join-Path $Root "target\release\moss-voice-local.exe")
+                    )
+                    $MatchedHelper = $null
+                    foreach ($Cand in $HelperCandidates) {
+                        if ((Get-HelperProto $Cand) -eq $ExpectedProto) { $MatchedHelper = $Cand; break }
+                    }
+                    if ($null -eq $MatchedHelper) {
+                        Write-Host "[信息] 本地语音辅助程序版本滞后或缺失，正在编译协议 $ExpectedProto 版本..." -ForegroundColor Yellow
+                        cargo build --release --manifest-path (Join-Path $Root "apps\moss-voice-local\Cargo.toml") --target x86_64-pc-windows-msvc --target-dir (Join-Path $Root "target")
+                        $BuiltHelper = Join-Path $Root "target\x86_64-pc-windows-msvc\release\moss-voice-local.exe"
+                        if ((Get-HelperProto $BuiltHelper) -eq $ExpectedProto) { $MatchedHelper = $BuiltHelper }
+                    }
+                    if ($null -ne $MatchedHelper -and $MatchedHelper -ine $TargetHelper) {
+                        if (Test-Path -LiteralPath $TargetHelper -PathType Leaf) {
+                            try {
+                                $LockStream = [System.IO.File]::Open($TargetHelper, 'Open', 'ReadWrite', 'None')
+                                $LockStream.Close()
+                            } catch {
+                                $Stamp = (Get-Date).ToString('yyyyMMddHHmmss')
+                                Move-Item -LiteralPath $TargetHelper -Destination (Join-Path (Split-Path -Parent $TargetHelper) "moss-voice-local.old-$Stamp.exe") -Force
+                            }
+                        }
+                        Copy-Item -LiteralPath $MatchedHelper -Destination $TargetHelper -Force
+                        Write-Host "[同步] 已更新同目录 moss-voice-local.exe (协议 $ExpectedProto)" -ForegroundColor Green
+                    }
+                }
+            }
+        }
         Write-Host "[启动] 正在启动 MOSS 原生桌面创作系统..." -ForegroundColor Green
         & $DesktopExe
     } elseif ($HostExe) {

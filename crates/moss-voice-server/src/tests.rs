@@ -564,3 +564,50 @@ fn firmware_offer_is_sent_only_to_allowed_device_and_download_uses_token() {
     let bad = reqwest::blocking::get(format!("http://127.0.0.1:{}/xiaozhi/firmware/..%2Fsecret", server.http_port())).unwrap();
     assert_eq!(bad.status().as_u16(), 404);
 }
+
+#[test]
+fn device_request_preserves_reconnected_session_rejects_non_mcp_and_works_in_echo_mode() {
+    let (server, registry) = start();
+
+    // 1. 设备未声明 MCP 时，device_request 同步报错，绝不返回假成功
+    let mut no_mcp = allowed_device_with(&server, &registry, 1, false);
+    let err = server.device_request(DEVICE, crate::DeviceRequest::RefreshInfo).unwrap_err();
+    assert!(err.contains("未启用设备端 MCP"), "{err}");
+    let _ = no_mcp.close(None);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !server.status().sessions.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // 2. 同一设备重叠重连：旧连接断开时绝不抹掉新连接的请求句柄；回声模式也支持按需握手刷新状态
+    let mut old_dev = allowed_device_with(&server, &registry, 1, true);
+    let mut new_dev = allowed_device_with(&server, &registry, 1, true);
+    let _ = old_dev.close(None);
+    while server.status().sessions.len() > 1 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    server.device_request(DEVICE, crate::DeviceRequest::RefreshInfo).unwrap();
+    // 连续第 2 次请求在设备回复 initialize 前到达：仍须进入延迟队列，不得抢跑发 tools/call 或重复发 initialize
+    server.device_request(DEVICE, crate::DeviceRequest::RefreshInfo).unwrap();
+    let init = read_json(&mut new_dev);
+    assert_eq!(init["type"], "mcp");
+    assert_eq!(init["payload"]["method"], "initialize");
+    let init_id = init["payload"]["id"].clone();
+    std::thread::sleep(Duration::from_millis(50));
+    send_json(
+        &mut new_dev,
+        &serde_json::json!({
+            "type": "mcp",
+            "payload": {"jsonrpc": "2.0", "id": init_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {}}}
+        })
+        .to_string(),
+    );
+    let initialized = read_json(&mut new_dev);
+    assert_eq!(initialized["payload"]["method"], "notifications/initialized");
+    let call_1 = read_json(&mut new_dev);
+    assert_eq!(call_1["payload"]["method"], "tools/call");
+    assert_eq!(call_1["payload"]["params"]["name"], "self.get_device_status");
+    let call_2 = read_json(&mut new_dev);
+    assert_eq!(call_2["payload"]["method"], "tools/call");
+    assert_eq!(call_2["payload"]["params"]["name"], "self.get_device_status");
+}

@@ -2160,7 +2160,16 @@ impl ApiService {
                 targets.insert(id.clone(), serde_json::json!({"job_id": id, "target": job.target, "state": "unknown"}));
             }
             for (id, job) in running.iter() {
-                targets.insert(id.clone(), serde_json::json!({"job_id": id, "target": job.target, "state": "running"}));
+                // 进度浮层（2026-11-02）：顶栏急停只用 job_id / state，这里额外带上只读进度字段
+                // （workflow_id、phase、lines_sent、total_lines、elapsed_ms、mode），供全局浮层显示；
+                // 只读查询，不改变门禁、不触发任何设备写入。
+                let mut live = job.live_send_result();
+                if let Some(map) = live.as_object_mut() {
+                    map.insert("job_id".into(), serde_json::json!(id));
+                    map.insert("workflow_id".into(), serde_json::json!(job.workflow_id));
+                    map.insert("state".into(), serde_json::json!("running"));
+                }
+                targets.insert(id.clone(), live);
             }
             return http_json(200, success(serde_json::json!({"jobs": targets.into_values().collect::<Vec<_>>() })));
         }
@@ -5208,15 +5217,26 @@ fn voice_status_json(runtime_path: Option<&std::path::Path>) -> serde_json::Valu
         Some("builtin") => "builtin",
         _ => "official",
     };
+    let telemetry = laser_contracts::global_voice_telemetry();
     let sessions = if mode != "official" {
-        laser_contracts::global_voice_telemetry()
+        telemetry
             .device_sessions()
             .map(serde_json::Value::from)
             .unwrap_or(serde_json::Value::Null)
     } else {
         serde_json::Value::Null
     };
-    serde_json::json!({"mode": mode, "device_sessions": sessions})
+    let (phase, level) = if mode == "builtin" {
+        telemetry.pulse()
+    } else {
+        (None, 0)
+    };
+    serde_json::json!({
+        "mode": mode,
+        "device_sessions": sessions,
+        "phase": phase,
+        "level": level,
+    })
 }
 
 fn read_runtime_settings(runtime_path: Option<&std::path::Path>) -> serde_json::Map<String, serde_json::Value> {
@@ -5248,16 +5268,13 @@ fn update_runtime_settings(
 
 fn mask_secret(value: &str) -> String {
     let value = value.trim();
-    if value.len() <= 8 {
+    let char_count = value.chars().count();
+    if char_count <= 8 {
         return "••••••••".to_owned();
     }
-    let prefix_len = value.len().min(5);
-    let suffix_len = value.len().min(4);
-    format!(
-        "{}••••••••{}",
-        &value[..prefix_len],
-        &value[value.len() - suffix_len..]
-    )
+    let prefix: String = value.chars().take(5).collect();
+    let suffix: String = value.chars().skip(char_count - 4).collect();
+    format!("{prefix}••••••••{suffix}")
 }
 
 /// `/api/system/info` 的 `mcp` 段：只反映真实配置与真实遥测（技术书 §9.5.3，验收 A-72）。
@@ -5622,6 +5639,8 @@ mod tests {
     fn jev_key_is_masked_without_leaking_the_middle() {
         assert_eq!(mask_secret("sk-1234567890"), "sk-12••••••••7890");
         assert_eq!(mask_secret("short"), "••••••••");
+        assert_eq!(mask_secret("测试密钥一二三四五六七八九"), "测试密钥一••••••••六七八九");
+        assert_eq!(mask_secret("中文短密钥"), "••••••••");
     }
 
     #[test]
@@ -7203,11 +7222,13 @@ mod tests {
         // 内置链路（NV5）：会话数来自内置语音服务
         std::fs::write(temp.path().join("settings.json"), br#"{"voice":{"mode":"builtin"}}"#).unwrap();
         laser_contracts::global_voice_telemetry().set_device_sessions(Some(2));
+        laser_contracts::global_voice_telemetry().set_pulse(Some("speaking"), 76);
         let builtin = parse_json_response(&service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"));
         laser_contracts::global_voice_telemetry().set_device_sessions(None);
         assert_eq!(builtin["result"]["voice"]["mode"], "builtin");
         assert_eq!(builtin["result"]["voice"]["device_sessions"], 2);
-        std::fs::write(temp.path().join("settings.json"), br#"{"voice":{"mode":"self_hosted"}}"#).unwrap();
+        assert_eq!(builtin["result"]["voice"]["phase"], "speaking");
+        assert_eq!(builtin["result"]["voice"]["level"], 76);
         // 未知（未配置健康检查或查询失败）时为 null，不猜
         let value = parse_json_response(&service.handle_http(
             b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -7975,6 +7996,28 @@ Content-Length: 30
     }
 
     #[test]
+    fn stop_targets_exposes_read_only_progress_for_the_global_panel() {
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_transport_factory(std::sync::Arc::new(|_| panic!("只读查询不得打开设备连接")));
+        let device = laser_device::FakeGrbl::new(Vec::<String>::new());
+        let progress = std::sync::Arc::new(laser_device::JobProgress::default());
+        progress.total_lines.store(100, std::sync::atomic::Ordering::Relaxed);
+        progress.lines_sent.store(37, std::sync::atomic::Ordering::Relaxed);
+        service.active_jobs.lock().unwrap().insert("job-9".into(), std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-9".into(), mode: "network", target: "127.0.0.1:2301".into(),
+            cancel: Default::default(), progress: progress.clone(),
+            transport: std::sync::Arc::new(device.clone()), started_at: std::time::Instant::now(),
+        }));
+        let res = service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let text = String::from_utf8_lossy(&res);
+        assert!(text.contains("\"workflow_id\":\"wf-9\""), "浮层需要 workflow_id 才能取消或续雕: {text}");
+        assert!(text.contains("\"lines_sent\":37") && text.contains("\"total_lines\":100"), "浮层需要真实进度: {text}");
+        assert!(text.contains("\"phase\":\"streaming\"") && text.contains("\"state\":\"running\""), "{text}");
+        assert!(text.contains("\"elapsed_ms\"") && text.contains("\"mode\":\"network\""), "{text}");
+        assert!(device.realtime().is_empty(), "只读查询不得写实时通道");
+    }
+
+    #[test]
     fn safe_action_route_overrides_running_job_without_reopening_transport() {
         let fake = laser_device::FakeGrbl::new(vec!["ok".into()]);
         let fake_clone = fake.clone();
@@ -8038,6 +8081,56 @@ Content-Length: 30
         assert_eq!(stop_res["success"], true);
         assert!(cancel.is_cancelled());
         assert!(fake.realtime().contains(&0x18));
+    }
+
+    /// 加工中查询状态：走原作业通道写实时状态字节，并直接回报已下发行数（2026-11-02 补测）。
+    #[test]
+    fn status_during_active_job_reports_progress_without_ending_the_job() {
+        use std::sync::atomic::Ordering;
+        let fake = laser_device::FakeGrbl::new(vec!["ok".into()]);
+        let fake_clone = fake.clone();
+        let service = ApiService::new(
+            laser_runtime::LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 8766,
+                material_params_file: None,
+            },
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake_clone.clone()))));
+        let progress = std::sync::Arc::new(laser_device::JobProgress::default());
+        progress.total_lines.store(342, Ordering::Relaxed);
+        progress.lines_sent.store(120, Ordering::Relaxed);
+        let job = std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-status".into(),
+            started_at: std::time::Instant::now(),
+            target: "127.0.0.1:8080".into(),
+            mode: "network",
+            cancel: laser_device::CancellationToken::default(),
+            progress: progress.clone(),
+            transport: std::sync::Arc::new(fake.clone()),
+        });
+        service
+            .active_jobs
+            .lock()
+            .unwrap()
+            .insert("wf-status".into(), job);
+
+        let res = post_json(&service, "/api/safe-action", &serde_json::json!({"action": "status"}));
+        assert_eq!(res["success"], true, "{res}");
+        let text = res["result"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("设备正在加工中") && text.contains("120/342"),
+            "加工中状态必须回报真实行数: {text}"
+        );
+        assert_eq!(res["detail"], "active_job_streaming");
+        assert!(
+            fake.realtime().contains(&0x3F),
+            "加工中的状态查询必须经原作业通道写实时状态字节"
+        );
+        assert_eq!(service.active_job_count(), 1, "查询状态不能移除在途作业");
     }
 
     #[test]

@@ -74,6 +74,15 @@ pub fn resolve_for_test(section: Section, input: &SectionInput, stored: Option<S
     Ok(resolved)
 }
 
+/// 读取模型列表用的分区参数：输入的密钥留空时用已保存的密钥（`stored`），不要求先填模型名与音色。
+pub fn resolve_for_list(section: Section, input: &SectionInput, stored: Option<String>) -> Result<models::ResolvedListRequest, String> {
+    let mut resolved = models::resolve_list_request(section, input)?;
+    if resolved.api_key.is_empty() {
+        resolved.api_key = stored.unwrap_or_default();
+    }
+    Ok(resolved)
+}
+
 /// 页面显示用（不含密钥）：每个分区的地址、模型、音色、语速与密钥是否已设置。
 pub fn status_view(models: &BuiltinModels, key_set: impl Fn(&str) -> bool) -> Value {
     let mut view = serde_json::Map::new();
@@ -162,6 +171,8 @@ mod tests {
         let typed = resolve_for_test(Section::Llm, &input("https://llm.test/v1", "sk-typed", "m"), Some("sk-stored".into())).unwrap();
         assert_eq!(typed.api_key, "sk-typed");
         assert!(resolve_for_test(Section::Asr, &input("", "", ""), None).is_err());
+        let list_req = resolve_for_list(Section::Tts, &input("https://tts.test/v1/audio/speech", "", ""), Some("sk-stored-tts".into())).unwrap();
+        assert_eq!((list_req.url.as_str(), list_req.api_key.as_str()), ("https://tts.test/v1/models", "sk-stored-tts"));
 
         let models = BuiltinModels {
             llm: Some(BuiltinProvider {

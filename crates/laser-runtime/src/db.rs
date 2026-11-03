@@ -102,7 +102,9 @@ impl ApprovalRow {
 /// v10：NV19 结构化长期记忆 `context_memories` 与提取变更清单 `context_extraction_runs`。
 /// v11：NV19-04 记忆正文的 FTS5 trigram 全文索引 `context_memories_fts`（触发器同步）。
 /// v12：NV19-05 分层知识库：资料根目录、目录 L0/L1 摘要与文件指纹，目录摘要 FTS5 索引。
-pub const SCHEMA_VERSION: i64 = 13;
+/// v14：小智设备信息快照（`voice_devices` 的 info/hello/status 原始 JSON 与时间）。
+/// v15：设备实际使用的拾音模式（`voice_devices.listen_json` / `listen_at`）。
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,6 +148,18 @@ pub struct VoiceDeviceRecord {
     pub first_seen: f64,
     pub last_seen: f64,
     pub decided_at: Option<f64>,
+    /// 设备快照（schema 14）：开机 OTA 上报的原始 JSON（固件版本、芯片、flash/psram、MAC 等）
+    pub info_json: Option<String>,
+    pub info_at: Option<f64>,
+    /// 连接握手 `hello` 的快照（协议版本、传输方式、音频参数、`features.aec`）
+    pub hello_json: Option<String>,
+    pub hello_at: Option<f64>,
+    /// 最近一次 `self.get_device_status` 的返回（音量、屏幕、电池、网络）
+    pub status_json: Option<String>,
+    pub status_at: Option<f64>,
+    /// 最近一次实际拾音模式（schema 15）：`{"mode":"realtime"}`；固件在设备端 AEC 开启时才选 realtime
+    pub listen_json: Option<String>,
+    pub listen_at: Option<f64>,
 }
 
 impl VoiceDeviceRecord {
@@ -158,8 +172,19 @@ pub const VOICE_DEVICE_PENDING: &str = "pending";
 pub const VOICE_DEVICE_ALLOWED: &str = "allowed";
 pub const VOICE_DEVICE_REVOKED: &str = "revoked";
 
+/// 设备快照种类（schema 14）：`info` 开机 OTA 上报、`hello` 连接握手、`status` 实时状态查询。
+pub const VOICE_SNAPSHOT_INFO: &str = "info";
+pub const VOICE_SNAPSHOT_HELLO: &str = "hello";
+pub const VOICE_SNAPSHOT_STATUS: &str = "status";
+
+/// 快照 JSON 上限：开机上报含分区表，8 KB 足够；更长的内容不写库（避免把设备上报当存储用）。
+/// 设备实际使用的拾音模式（`auto` / `manual` / `realtime`）：判断设备端 AEC 是否开启的行为证据。
+pub const VOICE_SNAPSHOT_LISTEN: &str = "listen";
+
+const VOICE_SNAPSHOT_MAX_BYTES: usize = 8 * 1024;
+
 const VOICE_DEVICE_COLUMNS: &str =
-    "device_id, client_id, status, name, model, firmware_version, last_ip, first_seen, last_seen, decided_at";
+    "device_id, client_id, status, name, model, firmware_version, last_ip, first_seen, last_seen, decided_at, info_json, info_at, hello_json, hello_at, status_json, status_at, listen_json, listen_at";
 
 fn voice_device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceDeviceRecord> {
     Ok(VoiceDeviceRecord {
@@ -173,6 +198,14 @@ fn voice_device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceDevic
         first_seen: row.get(7)?,
         last_seen: row.get(8)?,
         decided_at: row.get(9)?,
+        info_json: row.get(10)?,
+        info_at: row.get(11)?,
+        hello_json: row.get(12)?,
+        hello_at: row.get(13)?,
+        status_json: row.get(14)?,
+        status_at: row.get(15)?,
+        listen_json: row.get(16)?,
+        listen_at: row.get(17)?,
     })
 }
 
@@ -657,6 +690,43 @@ impl RuntimeDb {
                  INSERT INTO schema_version(version,applied_at) VALUES(13,unixepoch());"
             )?;
         }
+        if current.unwrap_or(0) < 14 {
+            // 2026-11-02：小智设备信息快照（开机 OTA 上报 / 连接 hello / 实时状态查询），
+            // 只存原始 JSON，字段随固件版本变化时不改表结构。加列前先查表结构，重跑迁移不会重复加列。
+            let existing = {
+                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
+                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                names
+            };
+            for (column, definition) in [
+                ("info_json", "TEXT"),
+                ("info_at", "REAL"),
+                ("hello_json", "TEXT"),
+                ("hello_at", "REAL"),
+                ("status_json", "TEXT"),
+                ("status_at", "REAL"),
+            ] {
+                if !existing.iter().any(|name| name == column) {
+                    tx.execute_batch(&format!("ALTER TABLE voice_devices ADD COLUMN {column} {definition};"))?;
+                }
+            }
+            tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(14,unixepoch());")?;
+        }
+        if current.unwrap_or(0) < 15 {
+            // 2026-11-02：设备实际使用的拾音模式（auto / manual / realtime）。它是判断设备端 AEC
+            // 是否开启的唯一行为证据——固件只在 AEC 开启时才选 realtime。加列前先查表结构。
+            let existing = {
+                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
+                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                names
+            };
+            for (column, definition) in [("listen_json", "TEXT"), ("listen_at", "REAL")] {
+                if !existing.iter().any(|name| name == column) {
+                    tx.execute_batch(&format!("ALTER TABLE voice_devices ADD COLUMN {column} {definition};"))?;
+                }
+            }
+            tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(15,unixepoch());")?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1106,6 +1176,31 @@ impl RuntimeDb {
         )?;
         tx.commit()?;
         Ok(record)
+    }
+
+    /// 记录设备快照（schema 14）。未知种类或超长 JSON 返回 `false`，不写库也不报错。
+    pub fn voice_device_snapshot(
+        &self,
+        device_id: &str,
+        kind: &str,
+        json: &str,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
+        let (column, at) = match kind {
+            VOICE_SNAPSHOT_INFO => ("info_json", "info_at"),
+            VOICE_SNAPSHOT_HELLO => ("hello_json", "hello_at"),
+            VOICE_SNAPSHOT_STATUS => ("status_json", "status_at"),
+            VOICE_SNAPSHOT_LISTEN => ("listen_json", "listen_at"),
+            _ => return Ok(false),
+        };
+        if json.is_empty() || json.len() > VOICE_SNAPSHOT_MAX_BYTES {
+            return Ok(false);
+        }
+        let changed = self.connection.execute(
+            &format!("UPDATE voice_devices SET {column}=?2, {at}=?3 WHERE device_id=?1"),
+            params![device_id, json, now],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn voice_device(&self, device_id: &str) -> Result<Option<VoiceDeviceRecord>, SchemaError> {

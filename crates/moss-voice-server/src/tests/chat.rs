@@ -160,6 +160,83 @@ async fn fixed_routes_skip_llm_keep_full_progress_and_report_failure() {
     }
 }
 
+/// 任务结束后问“当前进度”必须回答终态，不能再说“没有找到正在发送的加工任务”（2026-11-02）。
+#[tokio::test]
+async fn progress_shortcut_reports_terminal_state_after_job_ends() {
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+    struct EndedTools {
+        status: &'static str,
+        sent: u64,
+        total: u64,
+    }
+    impl ToolExecutor for EndedTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![]
+        }
+        fn call<'a>(&'a self, _: &'a ToolContext, _: &'a str, _: &'a str) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async { panic!("固定路由必须使用完整结果") })
+        }
+        fn call_raw<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, crate::ToolHostResult> {
+            Box::pin(async move {
+                let body = serde_json::json!({"workflows":[{
+                    "workflow_id":"wf-done",
+                    "status": self.status,
+                    "updated_at": 10,
+                    "send_result": {"lines_sent": self.sent, "total_lines": self.total}
+                }]});
+                crate::ToolHostResult {
+                    success: true,
+                    result: "已列出最近的激光 workflow".into(),
+                    detail: Some(serde_json::json!({"success":true,"result":body}).to_string()),
+                }
+            })
+        }
+    }
+    for (status, sent, total, expect) in [
+        ("completed", 342u64, 342u64, "上一个任务已经完成，共 342 行"),
+        ("cancelled", 120, 342, "上一个任务已经取消，停在第 120 行"),
+        ("failed", 88, 342, "上一个任务失败了"),
+        ("preview_ready", 0, 0, "最近一条任务还没开始发送"),
+    ] {
+        let tools = Arc::new(EndedTools { status, sent, total });
+        let llm = Arc::new(FakeLlm::default());
+        let asr = Arc::new(FakeAsr {
+            replies: Mutex::new(VecDeque::from([Ok("当前进度".into())])),
+            ..Default::default()
+        });
+        let conversation = Arc::new(Conversation::new(
+            asr,
+            llm.clone(),
+            Arc::new(FakeTts::default()),
+            tools,
+            ConversationSettings::default(),
+        ));
+        let context = ToolContext { device_id: "d".into(), session_id: "s".into() };
+        let (handle, mut events) = spawn_turn(
+            conversation,
+            context,
+            TurnInput::Utterance { pcm: vec![0; 960], sample_rate: UP, stream: None },
+            vec![],
+            None,
+        );
+        let mut reply = String::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                TurnEvent::Speech { text, .. } | TurnEvent::TextReply(text) => reply = text,
+                _ => {}
+            }
+        }
+        handle.await.unwrap();
+        assert!(reply.contains(expect), "{status}: {reply}");
+        assert!(llm.seen.lock().unwrap().is_empty(), "{status} 不该绕道大模型");
+    }
+}
+
 struct InterimStopAsr {
     final_text: &'static str,
     sent: Arc<std::sync::atomic::AtomicBool>,
@@ -975,4 +1052,1307 @@ async fn nv19_context_retrieval_hook_injects_memory_only_for_questions() {
         assert_eq!(injected, expect_memory, "{text}");
     }
     assert_eq!(retriever.searches(), 1, "只有真正的问题会查库");
+}
+
+/// 加工结束播报（2026-11-02 用户决定）：设备在线且空闲时，把刚结束的任务念出来，不经过大模型。
+#[test]
+fn finished_job_is_announced_to_an_idle_online_device() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    /// 只读最近任务：第一拍“发送中”，之后“已完成”，制造真实的转变。
+    struct JobTools {
+        polls: AtomicUsize,
+    }
+    impl ToolExecutor for JobTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![]
+        }
+        fn call<'a>(&'a self, _: &'a ToolContext, _: &'a str, _: &'a str) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async { panic!("播报只走只读通道") })
+        }
+        fn recent_workflows<'a>(
+            &'a self,
+            _: &'a ToolContext,
+        ) -> BoxFuture<'a, Option<Value>> {
+            Box::pin(async move {
+                let first = self.polls.fetch_add(1, Ordering::SeqCst) == 0;
+                Some(serde_json::json!({"workflows":[{
+                    "workflow_id":"wf-announce",
+                    "status": if first { "sending" } else { "completed" },
+                    "send_result":{"lines_sent":342,"total_lines":342}
+                }]}))
+            })
+        }
+    }
+
+    let tts = Arc::new(FakeTts::default());
+    let conversation = Arc::new(Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        tts.clone(),
+        Arc::new(JobTools { polls: AtomicUsize::new(0) }),
+        ConversationSettings::default(),
+    ));
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(conversation),
+            job_poll_interval: Duration::from_millis(30),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    // 全程不发语音、不发文字：设备在线且空闲就够了
+    let (texts, frames, _) = collect_playback(&mut device, 1);
+    assert_eq!(texts[0]["type"], "tts");
+    assert_eq!(texts[0]["state"], "start");
+    assert!(!frames.is_empty(), "播报必须有音频");
+    assert!(!texts.iter().any(|value| value["type"] == "stt"), "播报不是识别结果");
+    let said = tts.said.lock().unwrap().clone();
+    assert!(said.iter().any(|text| text.contains("雕刻任务已完成")), "{said:?}");
+    assert!(
+        server.status().events.iter().any(|event| event.text.contains("播报结果")),
+        "事件里要有播报记录"
+    );
+}
+
+#[tokio::test]
+async fn jev_filter_routes_colloquial_status_without_llm_and_prunes_unrelated_tools_for_chat() {
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+    use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+
+    struct ScriptedJev(Mutex<VecDeque<Result<Value, DecisionError>>>);
+    impl DecisionClient for ScriptedJev {
+        fn decide<'a>(
+            &'a self,
+            _payload: &'a Value,
+            _timeout: Duration,
+        ) -> BoxFuture<'a, Result<Value, DecisionError>> {
+            let next = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Err(DecisionError::Failed));
+            Box::pin(async move { next })
+        }
+    }
+
+    struct MultiDomainTools {
+        inner: FastTools,
+    }
+    impl ToolExecutor for MultiDomainTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            ["laser_workflow_tool", "get_weather", "hass_set_state", "play_music"]
+                .into_iter()
+                .map(|name| ToolSpec {
+                    name: name.into(),
+                    description: name.into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                })
+                .collect()
+        }
+        fn call<'a>(&'a self, c: &'a ToolContext, n: &'a str, a: &'a str) -> BoxFuture<'a, ToolOutcome> {
+            self.inner.call(c, n, a)
+        }
+        fn call_raw<'a>(&'a self, c: &'a ToolContext, n: &'a str, a: &'a str) -> BoxFuture<'a, crate::ToolHostResult> {
+            self.inner.call_raw(c, n, a)
+        }
+    }
+
+    let jev_client = Arc::new(ScriptedJev(Mutex::new(VecDeque::from([
+        // 第 1 轮：花式口语问进度 -> Jev quick_read 命中 progress，直接走本地快通道跳过大模型
+        Ok(serde_json::json!({
+            "answers": {
+                "quick_read": {
+                    "type": "choice",
+                    "choice": "progress",
+                    "confidence": 0.93,
+                    "probabilities": {"progress": 0.94, "none": 0.06}
+                },
+                "tool_laser_query": {"type": "noul", "noul": 0.90},
+                "tool_laser_generate": {"type": "noul", "noul": 0.02},
+                "tool_laser_control": {"type": "noul", "noul": 0.02},
+                "tool_info_plugin": {"type": "noul", "noul": 0.01},
+                "tool_home_agent": {"type": "noul", "noul": 0.01},
+                "tool_music_device": {"type": "noul", "noul": 0.01}
+            }
+        })),
+        // 第 2 轮：纯闲聊 -> Jev 将全部工具组剪为 0 个工具发给大模型
+        Ok(serde_json::json!({
+            "answers": {
+                "quick_read": {
+                    "type": "choice",
+                    "choice": "none",
+                    "confidence": 0.96,
+                    "probabilities": {"none": 0.97, "status": 0.03}
+                },
+                "tool_laser_query": {"type": "noul", "noul": 0.02},
+                "tool_laser_generate": {"type": "noul", "noul": 0.01},
+                "tool_laser_control": {"type": "noul", "noul": 0.01},
+                "tool_info_plugin": {"type": "noul", "noul": 0.03},
+                "tool_home_agent": {"type": "noul", "noul": 0.01},
+                "tool_music_device": {"type": "noul", "noul": 0.01}
+            }
+        })),
+    ]))));
+    let filter = Arc::new(VoiceJevFilter::new(
+        jev_client,
+        JevFilterOptions {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+    let llm = Arc::new(FakeLlm::default());
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("师傅那块木板现在干到几成啦".into()),
+            Ok("给我讲个冷笑话乐呵一下".into()),
+        ])),
+        ..Default::default()
+    });
+    let tools = Arc::new(MultiDomainTools {
+        inner: FastTools::default(),
+    });
+    let conversation = Arc::new(
+        Conversation::new(
+            asr,
+            llm.clone(),
+            Arc::new(FakeTts::default()),
+            tools,
+            ConversationSettings::default(),
+        )
+        .with_jev_filter(filter),
+    );
+    let ctx = ToolContext {
+        device_id: "d-jev".into(),
+        session_id: "s-jev".into(),
+    };
+
+    // 第 1 轮断言：走 fast_route，LLM 调用次数为 0，播报真实 40% 进度
+    let (h1, mut rx1) = spawn_turn(
+        conversation.clone(),
+        ctx.clone(),
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut reply1 = String::new();
+    let mut stages1 = Vec::new();
+    while let Some(ev) = rx1.recv().await {
+        match ev {
+            TurnEvent::Speech { text, .. } | TurnEvent::TextReply(text) => reply1 = text,
+            TurnEvent::Timing { stage, .. } => stages1.push(stage),
+            _ => {}
+        }
+    }
+    h1.await.unwrap();
+    assert!(reply1.contains("百分之40"), "{reply1}");
+    assert!(llm.seen.lock().unwrap().is_empty(), "口语快答不应调用主大模型");
+    assert!(stages1.contains(&"jev_filter") && stages1.contains(&"fast_route"));
+
+    // 第 2 轮断言：走主大模型，但 4 个无关工具已被裁剪为 0 个
+    let (h2, mut rx2) = spawn_turn(
+        conversation,
+        ctx,
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    while rx2.recv().await.is_some() {}
+    h2.await.unwrap();
+    let seen = llm.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, 0, "闲聊轮次应挂载 0 个工具给主大模型");
+}
+
+#[test]
+fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_early() {
+    use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+
+    struct TwoPartStreamingAsr;
+    impl StreamingAsr for TwoPartStreamingAsr {
+        fn start(&self) -> AsrStream {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
+            let handle = tokio::spawn(async move {
+                let mut total_samples = 0usize;
+                while let Some(chunk) = rx.recv().await {
+                    total_samples += chunk.len();
+                    // 前半段（~300ms = 4800 采样点）只说了半截，续说后超过 7000 点变成完整句
+                    if total_samples < 7000 {
+                        interim_tx.send_replace("把激光功率调到".into());
+                    } else {
+                        interim_tx.send_replace("把激光功率调到四百".into());
+                    }
+                }
+                let final_text = if total_samples >= 7000 {
+                    "把激光功率调到四百"
+                } else {
+                    "把激光功率调到"
+                };
+                let _ = done_tx.send(Ok(final_text.into()));
+            });
+            AsrStream::new(tx, done_rx, handle).with_interim(interim_rx)
+        }
+    }
+
+    struct UnfinishedJev;
+    impl DecisionClient for UnfinishedJev {
+        fn decide<'a>(
+            &'a self,
+            payload: &'a Value,
+            _timeout: Duration,
+        ) -> BoxFuture<'a, Result<Value, DecisionError>> {
+            let utterance = payload["state"]["utterance"].as_str().unwrap_or("").to_owned();
+            Box::pin(async move {
+                let unfinished = if utterance == "把激光功率调到" { 0.92 } else { 0.05 };
+                Ok(serde_json::json!({
+                    "answers": {
+                        "unfinished": {"type": "noul", "noul": unfinished},
+                        "quick_read": {
+                            "type": "choice",
+                            "choice": "none",
+                            "confidence": 0.95,
+                            "probabilities": {"none": 0.96, "status": 0.04}
+                        }
+                    }
+                }))
+            })
+        }
+    }
+
+    let llm = Arc::new(FakeLlm::default());
+    let tts = Arc::new(FakeTts::default());
+    let filter = Arc::new(VoiceJevFilter::new(
+        Arc::new(UnfinishedJev),
+        JevFilterOptions {
+            enabled: true,
+            tool_prune: false,
+            memory_filter: false,
+            ..Default::default()
+        },
+    ));
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm.clone(),
+        tts,
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    )
+    .with_streaming_asr(Arc::new(TwoPartStreamingAsr))
+    .with_jev_filter(filter);
+
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(&mut device, r#"{"type":"listen","state":"start","mode":"auto"}"#);
+
+    // 第 1 段：说 300ms（半截话“把激光功率调到”）+ 停顿 260ms 触发首次 VAD SpeechEnd
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
+    std::thread::sleep(Duration::from_millis(40));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    std::thread::sleep(Duration::from_millis(60));
+
+    // 第 2 段：在 1.2s 宽限窗内继续说 300ms（“四百”）+ 停顿 260ms 结束整句
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+
+    let (texts, _, _) = collect_playback(&mut device, 1);
+    let stt = texts
+        .iter()
+        .find(|m| m["type"] == "stt")
+        .and_then(|m| m["text"].as_str())
+        .unwrap_or("");
+    assert_eq!(stt, "把激光功率调到四百", "半截话不应提前抢话截断: {texts:?}");
+    assert_eq!(
+        llm.seen.lock().unwrap().len(),
+        1,
+        "整句只应调用一次大模型，而不是被切成两轮"
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("尚未说完")),
+        "应记录延长拾音事件"
+    );
+}
+
+#[test]
+fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuation_without_storm() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::audio::{EnergyVad, Vad, VadConfig, VadFactory};
+    use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+
+    struct WorkerEnergyVadFactory;
+    impl VadFactory for WorkerEnergyVadFactory {
+        fn create(&self, sample_rate: u32, config: &VadConfig) -> Option<Box<dyn Vad>> {
+            Some(Box::new(EnergyVad::new(sample_rate, config.clone())))
+        }
+    }
+
+    struct RapidInterimStreamingAsr;
+    impl StreamingAsr for RapidInterimStreamingAsr {
+        fn start(&self) -> AsrStream {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
+            let handle = tokio::spawn(async move {
+                let mut total_samples = 0usize;
+                let mut burst_sent = false;
+                while let Some(chunk) = rx.recv().await {
+                    total_samples += chunk.len();
+                    if total_samples < 7000 {
+                        if !burst_sent {
+                            burst_sent = true;
+                            // 模拟流式识别高频连续跳字，验证 120ms 防抖取消不会引发请求风暴或耗尽信号量
+                            for part in ["把", "把激", "把激光", "把激光功", "把激光功率", "把激光功率调", "把激光功率调到"] {
+                                interim_tx.send_replace(part.into());
+                                tokio::time::sleep(Duration::from_millis(8)).await;
+                            }
+                        } else {
+                            interim_tx.send_replace("把激光功率调到".into());
+                        }
+                    } else {
+                        interim_tx.send_replace("把激光功率调到四百".into());
+                    }
+                }
+                let final_text = if total_samples >= 7000 {
+                    "把激光功率调到四百"
+                } else {
+                    "把激光功率调到"
+                };
+                let _ = done_tx.send(Ok(final_text.into()));
+            });
+            AsrStream::new(tx, done_rx, handle).with_interim(interim_rx)
+        }
+    }
+
+    struct CountingUnfinishedJev(AtomicUsize);
+    impl DecisionClient for CountingUnfinishedJev {
+        fn decide<'a>(
+            &'a self,
+            payload: &'a Value,
+            _timeout: Duration,
+        ) -> BoxFuture<'a, Result<Value, DecisionError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let utterance = payload["state"]["utterance"].as_str().unwrap_or("").to_owned();
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(35)).await;
+                let unfinished = if utterance == "把激光功率调到" { 0.92 } else { 0.05 };
+                Ok(serde_json::json!({
+                    "answers": {
+                        "unfinished": {"type": "noul", "noul": unfinished},
+                        "quick_read": {
+                            "type": "choice",
+                            "choice": "none",
+                            "confidence": 0.95,
+                            "probabilities": {"none": 0.96, "status": 0.04}
+                        }
+                    }
+                }))
+            })
+        }
+    }
+
+    let llm = Arc::new(FakeLlm::default());
+    let jev_client = Arc::new(CountingUnfinishedJev(AtomicUsize::new(0)));
+    let filter = Arc::new(VoiceJevFilter::new(
+        jev_client.clone(),
+        JevFilterOptions {
+            enabled: true,
+            tool_prune: false,
+            memory_filter: false,
+            ..Default::default()
+        },
+    ));
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    )
+    .with_streaming_asr(Arc::new(RapidInterimStreamingAsr))
+    .with_jev_filter(filter);
+
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            vad_factory: Some(Arc::new(WorkerEnergyVadFactory)),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(&mut device, r#"{"type":"listen","state":"start","mode":"auto"}"#);
+
+    // 第 1 段语音 + 260ms 停顿，紧接着不等 35ms Jev 返回就送入第 2 段开头，验证 VadWorker 在途帧绝不被清空
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
+    std::thread::sleep(Duration::from_millis(80));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    std::thread::sleep(Duration::from_millis(10));
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+
+    let (texts, _, _) = collect_playback(&mut device, 1);
+    let stt = texts
+        .iter()
+        .find(|m| m["type"] == "stt")
+        .and_then(|m| m["text"].as_str())
+        .unwrap_or("");
+    assert_eq!(stt, "把激光功率调到四百", "VadWorker 队列中的续说帧不应丢失: {texts:?}");
+    assert_eq!(llm.seen.lock().unwrap().len(), 1);
+    let total_jev_calls = jev_client.0.load(Ordering::SeqCst);
+    assert!(
+        total_jev_calls <= 3,
+        "7 次快速跳字不应引发请求风暴，实际请求数={total_jev_calls}"
+    );
+}
+
+#[test]
+fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_cancel_utterance() {
+    use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+
+    struct PartialAsr;
+    impl StreamingAsr for PartialAsr {
+        fn start(&self) -> AsrStream {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
+            let handle = tokio::spawn(async move {
+                while rx.recv().await.is_some() {
+                    interim_tx.send_replace("把激光功率调到".into());
+                }
+                let _ = done_tx.send(Ok("把激光功率调到".into()));
+            });
+            AsrStream::new(tx, done_rx, handle).with_interim(interim_rx)
+        }
+    }
+
+    struct SlowHoldJev;
+    impl DecisionClient for SlowHoldJev {
+        fn decide<'a>(
+            &'a self,
+            _payload: &'a Value,
+            _timeout: Duration,
+        ) -> BoxFuture<'a, Result<Value, DecisionError>> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(280)).await;
+                Ok(serde_json::json!({
+                    "answers": {
+                        "unfinished": {"type": "noul", "noul": 0.95}
+                    }
+                }))
+            })
+        }
+    }
+
+    let llm = Arc::new(FakeLlm::default());
+    let filter = Arc::new(VoiceJevFilter::new(
+        Arc::new(SlowHoldJev),
+        JevFilterOptions {
+            enabled: true,
+            fast_route: false,
+            tool_prune: false,
+            memory_filter: false,
+            ..Default::default()
+        },
+    ));
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    )
+    .with_streaming_asr(Arc::new(PartialAsr))
+    .with_jev_filter(filter);
+
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(&mut device, r#"{"type":"listen","state":"start","mode":"auto"}"#);
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
+    std::thread::sleep(Duration::from_millis(30));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+
+    // Jev 280ms 续听检查仍在途：此时发 ping 必须零阻塞立即收到 pong（远早于 280ms）
+    let ping_at = Instant::now();
+    send_json(&mut device, r#"{"type":"ping"}"#);
+    loop {
+        let msg = read_json(&mut device);
+        if msg["type"] == "pong" {
+            break;
+        }
+    }
+    assert!(
+        ping_at.elapsed() < Duration::from_millis(180),
+        "在途 Jev 续听检查不得阻塞会话消息循环: {:?}",
+        ping_at.elapsed()
+    );
+
+    // 在途或挂起期间发 abort：必须立即取消挂起录音，宽限窗过后也绝不把半截话送进大模型
+    send_json(&mut device, r#"{"type":"abort","reason":"user_cancel"}"#);
+    std::thread::sleep(Duration::from_millis(1450));
+    assert!(
+        llm.seen.lock().unwrap().is_empty(),
+        "Abort 后挂起的半截话绝不能在宽限窗到期后发给大模型"
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("拾音已取消")),
+        "应记录拾音取消事件"
+    );
+}
+
+#[test]
+fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_and_defer_notice() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::audio::{EnergyVad, Vad, VadConfig, VadEvent, VadFactory};
+    use crate::jev::{DecisionClient, DecisionError, JevFilterOptions, VoiceJevFilter};
+
+    struct DelayedContinuationVad {
+        inner: EnergyVad,
+        slow_mode: bool,
+    }
+    impl Vad for DelayedContinuationVad {
+        fn accept(&mut self, pcm: &[i16]) -> Vec<VadEvent> {
+            if self.slow_mode {
+                std::thread::sleep(Duration::from_millis(12));
+            }
+            let events = self.inner.accept(pcm);
+            if events.iter().any(|e| matches!(e, VadEvent::SpeechEnd)) {
+                self.slow_mode = true;
+            }
+            events
+        }
+        fn reset(&mut self) {
+            self.slow_mode = false;
+            self.inner.reset();
+        }
+        fn in_speech(&self) -> bool {
+            self.inner.in_speech()
+        }
+    }
+
+    struct SlowContinuationVadFactory;
+    impl VadFactory for SlowContinuationVadFactory {
+        fn create(&self, sample_rate: u32, config: &VadConfig) -> Option<Box<dyn Vad>> {
+            Some(Box::new(DelayedContinuationVad {
+                inner: EnergyVad::new(sample_rate, config.clone()),
+                slow_mode: false,
+            }))
+        }
+    }
+
+    struct TwoPartStreamingAsr;
+    impl StreamingAsr for TwoPartStreamingAsr {
+        fn start(&self) -> AsrStream {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
+            let handle = tokio::spawn(async move {
+                let mut total_samples = 0usize;
+                while let Some(chunk) = rx.recv().await {
+                    total_samples += chunk.len();
+                    if total_samples < 7000 {
+                        interim_tx.send_replace("把激光功率调到".into());
+                    } else {
+                        interim_tx.send_replace("把激光功率调到四百".into());
+                    }
+                }
+                let text = if total_samples >= 7000 {
+                    "把激光功率调到四百"
+                } else {
+                    "把激光功率调到"
+                };
+                let _ = done_tx.send(Ok(text.into()));
+            });
+            AsrStream::new(tx, done_rx, handle).with_interim(interim_rx)
+        }
+    }
+
+    // 快速返回 held=false（35ms），早于慢速 VadWorker 处理完已入队的第 2 段语音开头
+    struct FastNegativeJev;
+    impl DecisionClient for FastNegativeJev {
+        fn decide<'a>(
+            &'a self,
+            _payload: &'a Value,
+            _timeout: Duration,
+        ) -> BoxFuture<'a, Result<Value, DecisionError>> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(35)).await;
+                Ok(serde_json::json!({
+                    "answers": {
+                        "unfinished": {"type": "noul", "noul": 0.05}
+                    }
+                }))
+            })
+        }
+    }
+
+    struct SwitchableJobTools {
+        completed: Arc<AtomicBool>,
+    }
+    impl ToolExecutor for SwitchableJobTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![]
+        }
+        fn call<'a>(&'a self, _: &'a ToolContext, _: &'a str, _: &'a str) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async { panic!("播报只走只读通道") })
+        }
+        fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
+            let done = self.completed.load(Ordering::SeqCst);
+            Box::pin(async move {
+                Some(serde_json::json!({"workflows":[{
+                    "workflow_id": "wf-during-hold",
+                    "status": if done { "completed" } else { "sending" },
+                    "send_result": {"lines_sent": 342, "total_lines": 342}
+                }]}))
+            })
+        }
+    }
+
+    let completed = Arc::new(AtomicBool::new(false));
+    let llm = Arc::new(FakeLlm::default());
+    let tts = Arc::new(FakeTts::default());
+    let filter = Arc::new(VoiceJevFilter::new(
+        Arc::new(FastNegativeJev),
+        JevFilterOptions {
+            enabled: true,
+            fast_route: false,
+            tool_prune: false,
+            memory_filter: false,
+            ..Default::default()
+        },
+    ));
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm.clone(),
+        tts.clone(),
+        Arc::new(SwitchableJobTools {
+            completed: completed.clone(),
+        }),
+        ConversationSettings::default(),
+    )
+    .with_streaming_asr(Arc::new(TwoPartStreamingAsr))
+    .with_jev_filter(filter);
+
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            vad_factory: Some(Arc::new(SlowContinuationVadFactory)),
+            job_poll_interval: Duration::from_millis(25),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    // 先让空闲轮询记录一次 sending 基线
+    std::thread::sleep(Duration::from_millis(45));
+    send_json(&mut device, r#"{"type":"listen","state":"start","mode":"auto"}"#);
+    // 录音与续听挂起期间任务变为 completed，不得抢占覆盖正在拾音/挂起的半句话
+    completed.store(true, Ordering::SeqCst);
+
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
+    std::thread::sleep(Duration::from_millis(50));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    std::thread::sleep(Duration::from_millis(10));
+    // 第 2 段音频在 Jev 35ms 返回 false 之前已经送入慢速 VadWorker（每帧 12ms，尚未吐出 SpeechStart）
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+
+    // 第 1 次播报必须是完整拼接后的用户回答（不能被 worker.reset 截断，也不能被任务播报抢断）
+    let (turn_texts, _, _) = collect_playback(&mut device, 1);
+    let stt = turn_texts
+        .iter()
+        .find(|m| m["type"] == "stt")
+        .and_then(|m| m["text"].as_str())
+        .unwrap_or("");
+    assert_eq!(
+        stt,
+        "把激光功率调到四百",
+        "慢速 VAD 已入队的续说帧在快速否定判定返回时不得丢失: {turn_texts:?}"
+    );
+    assert_eq!(llm.seen.lock().unwrap().len(), 1);
+
+    // 用户本轮安全结束后回到 Idle，延后的加工完成通知随后正常播报且不丢失
+    let (notice_texts, notice_frames, _) = collect_playback(&mut device, 1);
+    assert!(!notice_frames.is_empty(), "延后的任务完成通知必须正常播报: {notice_texts:?}");
+    let said = tts.said.lock().unwrap().clone();
+    assert!(
+        said.iter().any(|t| t.contains("雕刻任务已完成")),
+        "应在用户对话结束后补播加工完成结果: {said:?}"
+    );
+}
+
+#[test]
+fn second_sentence_tts_prefetches_concurrently_while_first_sentence_is_streaming() {
+    struct OverlapTts {
+        events: Mutex<Vec<String>>,
+    }
+    impl Tts for OverlapTts {
+        fn synthesize<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Pcm, ProviderError>> {
+            Box::pin(async move {
+                Ok(Pcm {
+                    samples: tone(16_000, 300.0, 200, 6000.0),
+                    sample_rate: 16_000,
+                })
+            })
+        }
+        fn synthesize_stream<'a>(
+            &'a self,
+            text: &'a str,
+            chunks: tokio::sync::mpsc::UnboundedSender<Pcm>,
+        ) -> BoxFuture<'a, Result<(), ProviderError>> {
+            Box::pin(async move {
+                self.events.lock().unwrap().push(format!("start:{text}"));
+                let _ = chunks.send(Pcm {
+                    samples: tone(16_000, 300.0, 120, 6000.0),
+                    sample_rate: 16_000,
+                });
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                let mut second_chunk = tone(16_000, 300.0, 120, 6000.0);
+                // 附带 250ms 句尾静音，验证自动裁剪不会破坏播放
+                second_chunk.extend(silence(16_000, 250));
+                let _ = chunks.send(Pcm {
+                    samples: second_chunk,
+                    sample_rate: 16_000,
+                });
+                self.events.lock().unwrap().push(format!("end:{text}"));
+                Ok(())
+            })
+        }
+    }
+
+    let tts = Arc::new(OverlapTts {
+        events: Mutex::new(Vec::new()),
+    });
+    let llm = Arc::new(FakeLlm {
+        // 包含 1 字碎句 "嗯。"，应自动与第三段合并为 "嗯。设备状态一切正常。"
+        rounds: Mutex::new(VecDeque::from([say(&[
+            "好的，",
+            "嗯。",
+            "设备状态一切正常。",
+        ])])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("检查状态".to_owned())])),
+        heard: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        tts.clone(),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            playback_start_ms: 120,
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 600);
+    let items = collect_items(&mut device);
+    assert_eq!(
+        texts(&items),
+        vec![
+            "听:检查状态",
+            "tts:start",
+            "句:好的，",
+            "句:嗯。设备状态一切正常。",
+            "tts:stop",
+        ]
+    );
+    let log = tts.events.lock().unwrap().clone();
+    let start_second = log
+        .iter()
+        .position(|e| e == "start:嗯。设备状态一切正常。")
+        .expect("第二句应启动 TTS");
+    let end_first = log
+        .iter()
+        .position(|e| e == "end:好的，")
+        .expect("第一句应完成 TTS");
+    assert!(
+        start_second < end_first,
+        "第二句 TTS 必须在第一句流式合成结束前已并发预启动，实际顺序: {log:?}"
+    );
+}
+
+#[tokio::test]
+async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
+    use crate::conversation::{
+        SLOW_GENERATE_FILLER, SLOW_QUERY_FILLER, STOP_ERR_SPEECH, STOP_OK_SPEECH, TurnEvent,
+        TurnInput, slow_tool_filler, spawn_turn,
+    };
+    let mk_call = |name: &str, args: &str| ToolCall::new(format!("call-{name}"), name, args);
+
+    // 1. 慢速外部查询工具触发查询过渡垫音
+    for name in ["web_search", "search_rag", "get_weather", "get_news"] {
+        assert_eq!(
+            slow_tool_filler(&[mk_call(name, "{}")]),
+            Some(SLOW_QUERY_FILLER),
+            "{name} should trigger query filler"
+        );
+    }
+
+    // 2. 慢速 AI 生图/刀路预览生成（非 R3 发送审批）触发生成预览垫音
+    for name in [
+        "generate_text_image_tool",
+        "ai_laser_gcode_tool",
+        "generate_text_image_gcode_tool",
+        "generate_text_laser_task_tool",
+        "regenerate_text_laser_task_tool",
+    ] {
+        assert_eq!(
+            slow_tool_filler(&[mk_call(name, r#"{"prompt":"小猫"}"#)]),
+            Some(SLOW_GENERATE_FILLER),
+            "{name} preview should trigger generate filler"
+        );
+    }
+
+    // 3. 安全边界：一旦携带 R3 动作参数或属于控制/审批/本地毫秒级快工具，绝不播垫音
+    assert_eq!(
+        slow_tool_filler(&[mk_call(
+            "ai_laser_gcode_tool",
+            r#"{"confirmed":true,"send_after_generate":true}"#
+        )]),
+        None
+    );
+    assert_eq!(
+        slow_tool_filler(&[mk_call(
+            "regenerate_text_laser_task_tool",
+            r#"{"feedback_id":"fb-1"}"#
+        )]),
+        None
+    );
+    for forbidden in [
+        "laser_workflow_tool",
+        "laser_safe_action_tool",
+        "run_calibration_grid_tool",
+        "start_tuned_job_tool",
+        "check_laser_connection_tool",
+        "material_params_tool",
+        "get_lunar",
+        "hass_set_state",
+        "agent_codex",
+        "agent_claude_code",
+        "play_music",
+        "ext__search",
+        "device__set_volume",
+    ] {
+        assert_eq!(
+            slow_tool_filler(&[mk_call(forbidden, "{}")]),
+            None,
+            "{forbidden} must never trigger slow tool filler"
+        );
+    }
+    // 混合慢查询与控制工具时也绝不触发垫音
+    assert_eq!(
+        slow_tool_filler(&[
+            mk_call("get_weather", "{}"),
+            mk_call("laser_workflow_tool", "{}")
+        ]),
+        None
+    );
+
+    // 4. 验证 prewarm_cache 提前合成后，唤醒、慢查询垫音、R3 审批播报全部直接命中内存缓存
+    struct SlowAndApprovalTools;
+    impl ToolExecutor for SlowAndApprovalTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![
+                ToolSpec {
+                    name: "web_search".into(),
+                    description: "联网搜索".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                ToolSpec {
+                    name: "laser_workflow_tool".into(),
+                    description: "激光流程".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ]
+        }
+        fn call<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            name: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async move {
+                match name {
+                    "web_search" => ToolOutcome::Reply("今日晴，25度".into()),
+                    "laser_workflow_tool" => {
+                        ToolOutcome::Speak(crate::tools::APPROVAL_SPEECH.into())
+                    }
+                    _ => ToolOutcome::Reply("ok".into()),
+                }
+            })
+        }
+    }
+
+    let tts = Arc::new(FakeTts::default());
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            // 第 1 轮对话：模型不先说话，直接调慢工具 web_search -> 应自动播预缓存的 SLOW_QUERY_FILLER
+            call("web_search"),
+            say(&["今天天气晴朗，25度。"]),
+            // 第 2 轮对话：模型调 R3 审批工具 -> 直接播预缓存的 APPROVAL_SPEECH，不走模型二轮
+            call("laser_workflow_tool"),
+            // 第 3 轮对话：模型在调慢工具的同时自己先流式说了一句过渡话 -> 绝不叠播系统垫音
+            Round::Reply {
+                deltas: vec!["好的，我帮您查一下。"],
+                calls: vec![ToolCall::new("call-web_search-2", "web_search", "{}")],
+                delay_ms: 0,
+            },
+            say(&["查到了，明天也是晴天。"]),
+        ])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("帮我搜一下今天天气".into()),
+            Ok("确认开始雕刻".into()),
+            Ok("明天呢".into()),
+        ])),
+        ..Default::default()
+    });
+    let conversation = Arc::new(Conversation::new(
+        asr,
+        llm.clone(),
+        tts.clone(),
+        Arc::new(SlowAndApprovalTools),
+        ConversationSettings::default(),
+    ));
+
+    let phrases = conversation.fixed_phrases();
+    assert!(phrases.contains(&"我在".to_owned()));
+    assert!(phrases.contains(&STOP_OK_SPEECH.to_owned()));
+    assert!(phrases.contains(&STOP_ERR_SPEECH.to_owned()));
+    assert!(phrases.contains(&crate::tools::APPROVAL_SPEECH.to_owned()));
+    assert!(phrases.contains(&SLOW_QUERY_FILLER.to_owned()));
+    assert!(phrases.contains(&SLOW_GENERATE_FILLER.to_owned()));
+
+    let warmed = conversation.prewarm_cache().await;
+    // FakeTts 对含“失败”字样的 STOP_ERR_SPEECH 模拟合成报错，验证单条失败不阻断其余 8 条预热
+    assert_eq!(warmed, phrases.len() - 1);
+    let count_after_prewarm = tts.said.lock().unwrap().len();
+    assert_eq!(count_after_prewarm, phrases.len());
+
+    let ctx = ToolContext {
+        device_id: "d-cache".into(),
+        session_id: "s-cache".into(),
+    };
+
+    // 触发慢查询：应先收到缓存垫音 "稍等，正在查询。"，再收到模型最终回答；且垫音不写入历史且不重调 TTS
+    let (h1, mut rx1) = spawn_turn(
+        conversation.clone(),
+        ctx.clone(),
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut spoken1 = Vec::new();
+    let mut history1 = Vec::new();
+    while let Some(ev) = rx1.recv().await {
+        match ev {
+            TurnEvent::Speech { text, .. } => spoken1.push(text),
+            TurnEvent::Done { messages, .. } => history1 = messages,
+            _ => {}
+        }
+    }
+    h1.await.unwrap();
+    assert_eq!(
+        spoken1,
+        vec![
+            SLOW_QUERY_FILLER.to_owned(),
+            "今天天气晴朗，".to_owned(),
+            "25度。".to_owned()
+        ]
+    );
+    assert!(
+        !history1
+            .iter()
+            .any(|m| m.content.as_deref() == Some(SLOW_QUERY_FILLER)),
+        "过渡垫音不得写入对话历史"
+    );
+    // TTS 只多合成了模型最终回答切出的 2 句，垫音直接命中预热缓存
+    assert_eq!(tts.said.lock().unwrap().len(), count_after_prewarm + 2);
+
+    // 触发 R3 审批工具：不播慢工具垫音，且 APPROVAL_SPEECH 直接命中预热缓存（TTS 调用次数不变）
+    let (h2, mut rx2) = spawn_turn(
+        conversation.clone(),
+        ctx.clone(),
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut spoken2 = Vec::new();
+    while let Some(ev) = rx2.recv().await {
+        if let TurnEvent::Speech { text, .. } = ev {
+            spoken2.push(text);
+        }
+    }
+    h2.await.unwrap();
+    assert_eq!(spoken2, vec![crate::tools::APPROVAL_SPEECH.to_owned()]);
+    assert_eq!(
+        tts.said.lock().unwrap().len(),
+        count_after_prewarm + 2,
+        "R3 审批固定话术应直接命中预热缓存，不再调用底层 TTS"
+    );
+
+    // 第 3 轮：模型在返回慢工具时已经自己说了话（spoke_any == true），不得再叠播 SLOW_QUERY_FILLER
+    let (h3, mut rx3) = spawn_turn(
+        conversation.clone(),
+        ctx,
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut spoken3 = Vec::new();
+    while let Some(ev) = rx3.recv().await {
+        if let TurnEvent::Speech { text, .. } = ev {
+            spoken3.push(text);
+        }
+    }
+    h3.await.unwrap();
+    assert_eq!(
+        spoken3,
+        vec![
+            "好的，".to_owned(),
+            "我帮您查一下。".to_owned(),
+            "查到了，".to_owned(),
+            "明天也是晴天。".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn primary_tts_failure_automatically_falls_back_to_local_tts_without_dropping_sentence() {
+    // FakeTts 在句子含“失败”时返回 Err("语音合成返回 HTTP 500")；
+    // 挂载 fallback_tts 后，含“失败”的句子自动由本地降级 TTS 合成出音频并正常播报，不会退化为纯文本静音。
+    struct LocalFallbackFakeTts {
+        fallback_said: Mutex<Vec<String>>,
+    }
+    impl Tts for LocalFallbackFakeTts {
+        fn synthesize<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Pcm, ProviderError>> {
+            Box::pin(async move {
+                self.fallback_said.lock().unwrap().push(text.to_owned());
+                Ok(Pcm {
+                    samples: tone(24_000, 300.0, 240, 6000.0),
+                    sample_rate: 24_000,
+                })
+            })
+        }
+    }
+
+    let primary_tts = Arc::new(FakeTts::default());
+    let fallback_tts = Arc::new(LocalFallbackFakeTts {
+        fallback_said: Mutex::new(Vec::new()),
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&[
+            "云端本句合成失败，",
+            "第二句恢复正常。",
+        ])])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("测试降级".to_owned())])),
+        heard: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        primary_tts.clone(),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    )
+    .with_fallback_tts(fallback_tts.clone());
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            playback_start_ms: 120,
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 600);
+    let items = collect_items(&mut device);
+    assert_eq!(
+        texts(&items),
+        vec![
+            "听:测试降级",
+            "tts:start",
+            "句:云端本句合成失败，",
+            "句:第二句恢复正常。",
+            "tts:stop",
+        ]
+    );
+    assert_eq!(
+        *fallback_tts.fallback_said.lock().unwrap(),
+        vec!["云端本句合成失败，"],
+        "只有主 TTS 失败的那一句走本地降级 TTS，恢复正常的后续句子继续走主 TTS"
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("本句已自动降级为本地语音合成")),
+        "事件记录应明确提示发生了本地 TTS 自动降级"
+    );
+}
+
+#[test]
+#[ignore]
+fn real_local_kokoro_fallback_when_primary_cloud_tts_fails() {
+    use moss_voice_providers::local::{LocalHelper, LocalTts, TtsEngine};
+    let exe = std::env::var("MOSS_VOICE_LOCAL_EXE").expect("MOSS_VOICE_LOCAL_EXE");
+    let models = std::path::PathBuf::from(std::env::var("MOSS_LOCAL_MODELS").expect("MOSS_LOCAL_MODELS"));
+    let helper = LocalHelper::spawn(std::path::Path::new(&exe)).unwrap();
+    helper
+        .load_tts(&models.join("kokoro-multi-lang-v1_0"), TtsEngine::Kokoro)
+        .unwrap();
+    let local_fallback = Arc::new(LocalTts {
+        helper,
+        speaker: 50,
+        speed: 1.0,
+    });
+
+    // 主 TTS 始终失败（文本含“失败”）
+    let primary_tts = Arc::new(FakeTts::default());
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["云端合成失败，已切换本地播报。"])])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("测试真实本地兜底".to_owned())])),
+        heard: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        primary_tts,
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    )
+    .with_fallback_tts(local_fallback);
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    device
+        .get_mut()
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    speak_manual(&mut device, 1, 600);
+    let items = collect_items(&mut device);
+    let frame_count = items.iter().filter(|item| matches!(item, Item::Frame)).count();
+    assert_eq!(
+        texts(&items),
+        vec![
+            "听:测试真实本地兜底",
+            "tts:start",
+            "句:云端合成失败，",
+            "句:已切换本地播报。",
+            "tts:stop",
+        ]
+    );
+    assert!(frame_count >= 15, "真实 Kokoro 本地降级必须产出有效 Opus 音频帧，实际帧数={frame_count}");
 }

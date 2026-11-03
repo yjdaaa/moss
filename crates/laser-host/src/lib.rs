@@ -303,6 +303,29 @@ pub fn voice_tool_call(
     result
 }
 
+/// 加工结束播报用的只读轮询：直接读进程内后端 `/api/workflow {action:"recent"}`。
+/// **不经过工具分发**，因此不计入工具调用统计、也不会给模型多出一个工具；
+/// 设备授权失效、用户在语音中心关闭了这个工具、或后端出错时返回 `None`（调用方保持静默）。
+pub fn voice_recent_workflows(
+    api: &Arc<ApiService>,
+    device_id: &str,
+    session_id: &str,
+) -> Option<serde_json::Value> {
+    if !api.voice_session_allowed(device_id, session_id) || api.tool_disabled("laser_workflow_tool") {
+        return None;
+    }
+    let caller = laser_contracts::CallerContext::Voice {
+        device_id: device_id.into(),
+        session_id: session_id.into(),
+    };
+    let body = serde_json::json!({"action": "recent"});
+    let (status, response) = in_process_request(api, "POST", "/api/workflow", &body, caller).ok()?;
+    if status >= 400 {
+        return None;
+    }
+    response.get("result").cloned()
+}
+
 pub struct HostApplication {
     pub settings: LaserSettings,
     pub runtime_root: RuntimeRoot,
@@ -380,6 +403,10 @@ pub fn set_voice_device_sessions(sessions: Option<u32>) {
     laser_contracts::global_voice_telemetry().set_device_sessions(sessions);
 }
 
+/// 内置语音服务写入的实时会话主状态（`idle`/`listening`/`thinking`/`speaking`）与归一化音量（0..=100）。
+pub fn set_voice_pulse(phase: Option<&str>, level: u8) {
+    laser_contracts::global_voice_telemetry().set_pulse(phase, level);
+}
 /// 运行目录 `settings.json` 中语音链路是否为自建模式（自建模式必须开启严格模式，技术书 §9.4.2）。
 pub fn voice_mode_is_self_hosted(runtime_dir: &std::path::Path) -> bool {
     std::fs::read(runtime_dir.join("settings.json"))
@@ -736,6 +763,38 @@ mod tests {
         assert_eq!(entry.target, "s-stop");
         assert_eq!(entry.result, laser_contracts::AuditResult::Failed);
         assert!(!serde_json::to_string(entry).unwrap().contains("127.0.0.1"));
+    }
+
+    /// 加工结束播报的轮询通道：只读、不走工具分发（因此不涨调用统计），
+    /// 授权失效或用户在语音中心关了 `laser_workflow_tool` 时静默返回 `None`。
+    #[test]
+    fn voice_recent_workflows_is_read_only_and_never_counts_as_a_tool_call() {
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let service = Arc::new(plain_service().with_runtime_db(db.clone()));
+        allow_test_voice(&service, &db, "watch-device", "watch-session");
+        let stat = || {
+            laser_mcp::global_mcp_telemetry()
+                .snapshot()
+                .tool_stats
+                .get("laser_workflow_tool")
+                .map(|stat| stat.calls)
+                .unwrap_or(0)
+        };
+        let before = stat();
+        let body = voice_recent_workflows(&service, "watch-device", "watch-session")
+            .expect("授权有效的语音会话必须能读到最近任务");
+        assert!(body.get("workflows").is_some(), "{body}");
+        assert_eq!(stat(), before, "自动轮询不能计入工具调用统计");
+
+        assert!(
+            voice_recent_workflows(&service, "watch-device", "other-session").is_none(),
+            "未授权的会话必须静默"
+        );
+        service.set_disabled_tools(vec!["laser_workflow_tool".into()]);
+        assert!(
+            voice_recent_workflows(&service, "watch-device", "watch-session").is_none(),
+            "用户关掉这个工具后不再轮询"
+        );
     }
 
     fn allow_test_voice(service: &ApiService, db: &Arc<Mutex<RuntimeDb>>, device: &str, session: &str) {

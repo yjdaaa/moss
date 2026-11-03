@@ -73,6 +73,8 @@ import {
   identityView,
   toolSwitchPayload,
   toolStatText,
+  TOOL_EDIT_PROMPTS,
+  toolEditPrompt,
   extraEndpointError,
   SETTINGS_GROUPS,
   LOCAL_MODEL_KEYS,
@@ -87,6 +89,8 @@ import {
   savedNoteText,
   dirtyTabs,
   builtinModelSummary,
+  builtinJevForm,
+  builtinJevSavePayload,
   externalModelSummary,
 } from "../src/voiceState.js";
 
@@ -249,7 +253,8 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   const form = localSettingsForm({ asr: true, tts_speaker: 3, tts_speed: 1.2 });
   assert.deepEqual(form, {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
-    read_only_shortcuts: true, asr_beam_search: true, custom_hotwords: "",
+    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: "",
+    jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: "400",
     tts_speaker: "3", tts_speed: "1.2", mirror: "",
   });
@@ -259,7 +264,8 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.match(localSettingsError({ ...form, mirror: "ftp://x" }), /http/);
   assert.deepEqual(localSettingsPayload({ ...form, mirror: " https://m.test/x " }), {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
-    read_only_shortcuts: true, asr_beam_search: true, custom_hotwords: [],
+    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: [],
+    jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: 400,
     tts_speaker: 3, tts_speed: 1.2, mirror: "https://m.test/x",
   });
@@ -278,6 +284,19 @@ test("自然插话默认关闭，时长限定为 300 到 600 毫秒的整数", (
   for (const value of ["", "299", "601", "400.5", "NaN", "Infinity"]) {
     assert.match(localSettingsError({ ...form, barge_in_ms: value }), /插话时长/);
   }
+});
+
+test("Jev 语音筛选默认关闭，四个子开关独立往返且耗时阶段可导出", () => {
+  const form = localSettingsForm();
+  assert.equal(form.jev_filter_enabled, false);
+  assert.equal(form.jev_unfinished_hold, true);
+  assert.equal(form.jev_fast_route, true);
+  assert.equal(form.jev_tool_prune, true);
+  assert.equal(form.jev_memory_filter, true);
+  const payload = localSettingsPayload({ ...form, jev_filter_enabled: true, jev_memory_filter: false });
+  assert.equal(payload.jev_filter_enabled, true);
+  assert.equal(payload.jev_tool_prune, true);
+  assert.equal(payload.jev_memory_filter, false);
 });
 
 test("本地模型可选：分组、改选合成模型换默认音色、按模型检查音色范围", () => {
@@ -522,4 +541,547 @@ test("Agent 卡：严格模式未开时提示；CLI 不可用时给原因；运�
   assert.equal(ready.runs[0].statusText, "已停止");
   assert.equal(ready.runs[0].detail, "已手动停止");
   assert.equal(ready.runs[1].stoppable, true);
+});
+
+test("内置云端模型：全量模型列表地址推导、自动拉取条件与下拉多词查询过滤", async () => {
+  const {
+    DOUBAO_MODEL_OPTIONS,
+    canAutoFetchModels,
+    filterModelOptions,
+    modelsListError,
+    modelsListKey,
+    modelsListUrl,
+  } = await import("../src/voiceState.js");
+  assert.equal(modelsListUrl(" https://api.example.test/v1/ "), "https://api.example.test/v1/models");
+  assert.equal(modelsListUrl("https://api.example.test/v1/chat/completions"), "https://api.example.test/v1/models");
+  assert.equal(modelsListUrl("https://api.example.test/v1/audio/transcriptions/"), "https://api.example.test/v1/models");
+  assert.equal(modelsListUrl("https://api.example.test/v1/audio/speech"), "https://api.example.test/v1/models");
+  assert.equal(modelsListUrl("https://api.example.test/v1/models"), "https://api.example.test/v1/models");
+
+  assert.equal(modelsListError({ url: "" }), "请先填写地址");
+  assert.equal(modelsListError({ url: "wss://x" }), "地址必须以 http:// 或 https:// 开头");
+  assert.equal(modelsListError({ kind: "doubao", url: "" }), "");
+
+  assert.equal(canAutoFetchModels({ url: "https://api.example.test/v1", api_key: "" }, { key_set: false }), false, "公有云未填密钥时不自动盲发");
+  assert.equal(canAutoFetchModels({ url: "https://api.example.test/v1", api_key: "sk-x" }, { key_set: false }), true);
+  assert.equal(canAutoFetchModels({ url: "https://api.example.test/v1", api_key: "" }, { key_set: true }), true, "本机已存密钥可直接自动拉取");
+  assert.equal(canAutoFetchModels({ url: "http://127.0.0.1:11434/v1", api_key: "" }, { key_set: false }), true, "本机回环服务免密钥可自动拉取");
+  assert.equal(canAutoFetchModels({ kind: "doubao", url: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async", api_key: "k" }, {}), false);
+  assert.notEqual(
+    modelsListKey({ url: "https://a.example.test/v1", api_key: "k1" }, {}),
+    modelsListKey({ url: "https://a.example.test/v1", api_key: "k2" }, {}),
+  );
+
+  const remote = [
+    "cline-pass/deepseek-v4.1-flash",
+    "Qwen/Qwen2.5-7B-Instruct",
+    "FunAudioLLM/SenseVoiceSmall",
+    "MOSS/CosyVoice2-0.5B",
+    "Qwen/Qwen2.5-Omni-7B",
+    "Qwen/Qwen2-Audio-7B-Instruct",
+    "BAAI/bge-m3",
+  ];
+  const all = filterModelOptions(remote, "Qwen/Qwen2.5-7B-Instruct", false);
+  assert.equal(all.length, 7, "未开启分区过滤时返回全部模型");
+  assert.equal(all[0].hint, "ClinePass 订阅");
+  assert.equal(all[0].displayHint, "ClinePass 订阅 · 大模型");
+  assert.equal(all[2].displayHint, "语音识别");
+  assert.equal(all[3].displayHint, "语音合成");
+  assert.equal(all[4].displayHint, "大模型 · 语音识别 · 语音合成", "Omni 全能模型标注三项用途");
+  assert.equal(all[5].displayHint, "大模型 · 语音识别", "Audio-Instruct 标注两项用途");
+
+  // 按分区自动筛选：多能力模型同时出现在它支持的多个分区里，向量模型不污染任何分区
+  assert.deepEqual(
+    filterModelOptions(remote, "", false, { section: "llm", onlyMatched: true }).map((item) => item.id),
+    ["cline-pass/deepseek-v4.1-flash", "Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen2.5-Omni-7B", "Qwen/Qwen2-Audio-7B-Instruct"],
+  );
+  assert.deepEqual(
+    filterModelOptions(remote, "", false, { section: "asr", onlyMatched: true }).map((item) => item.id),
+    ["FunAudioLLM/SenseVoiceSmall", "Qwen/Qwen2.5-Omni-7B", "Qwen/Qwen2-Audio-7B-Instruct"],
+  );
+  assert.deepEqual(
+    filterModelOptions(remote, "", false, { section: "tts", onlyMatched: true }).map((item) => item.id),
+    ["MOSS/CosyVoice2-0.5B", "Qwen/Qwen2.5-Omni-7B"],
+  );
+  assert.deepEqual(
+    filterModelOptions(remote, "订阅 flash", true).map((item) => item.id),
+    ["cline-pass/deepseek-v4.1-flash"],
+  );
+  assert.deepEqual(
+    filterModelOptions(remote, "sense small", true).map((item) => item.id),
+    ["FunAudioLLM/SenseVoiceSmall"],
+  );
+  assert.ok(DOUBAO_MODEL_OPTIONS.asr.length >= 2 && DOUBAO_MODEL_OPTIONS.tts.length >= 2);
+});
+
+test("内置模型自由混搭视图与一键切换云端/本地载荷（云端配置保留备用）", async () => {
+  const { builtinSectionSourceView, builtinSourceSwitchPayload } = await import("../src/voiceState.js");
+  const status = {
+    models: {
+      llm: { configured: true, url: "https://llm.test/v1", model: "qwen-max", key_set: true },
+      asr: { configured: true, url: "https://asr.test/v1/audio/transcriptions", model: "FunAudioLLM/SenseVoiceSmall", key_set: true },
+      tts: { configured: true, url: "https://tts.test/v1/audio/speech", model: "MOSS/TTS-1", voice: "alloy", speed: 1, key_set: true },
+    },
+    local: {
+      settings: { asr: false, tts: false, vad: false, asr_model: "sense_voice", tts_model: "kokoro", tts_speaker: 50, tts_speed: 1 },
+      models: [
+        { id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true },
+        { id: "ten_vad", kind: "vad", label: "TEN-VAD", installed: false },
+        { id: "sense_voice", kind: "asr", label: "SenseVoice 2024", installed: false },
+        { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: false, voices: { default: 50, max: 53 } },
+        { id: "kokoro_v11", kind: "tts", label: "Kokoro v1.1", installed: true, voices: { default: 3, max: 102 } },
+      ],
+    },
+  };
+  // 默认三项均走云端、判停走内置能量判停；tts 虽然当前选中的 kokoro 未安装，但同类别 kokoro_v11 已安装
+  assert.equal(builtinSectionSourceView("llm", status).activeText, "云端（qwen-max）");
+  assert.equal(builtinSectionSourceView("asr", status).activeText, "云端（FunAudioLLM/SenseVoiceSmall）");
+  const vadEnergyView = builtinSectionSourceView("vad", status);
+  assert.equal(vadEnergyView.source, "energy");
+  assert.equal(vadEnergyView.selectValue, "energy");
+  assert.equal(vadEnergyView.activeText, "内置能量判停（免下载）");
+  assert.deepEqual(
+    vadEnergyView.options.map((opt) => [opt.value, opt.label, opt.installed]),
+    [
+      ["energy", "内置能量判停（免下载）", true],
+      ["local:silero_vad", "本地 · Silero VAD", true],
+      ["local:ten_vad", "本地 · TEN-VAD（未下载）", false],
+    ],
+  );
+  const toLocalVad = builtinSourceSwitchPayload(status, "vad", "local:silero_vad");
+  assert.equal(toLocalVad.vad, true);
+  assert.equal(toLocalVad.vad_model, "silero_vad");
+  const backToEnergyVad = builtinSourceSwitchPayload({ ...status, local: { ...status.local, settings: toLocalVad } }, "vad", "energy");
+  assert.equal(backToEnergyVad.vad, false);
+  assert.equal(builtinSectionSourceView("llm", status).activeText, "云端（qwen-max）");
+  assert.equal(builtinSectionSourceView("asr", status).activeText, "云端（FunAudioLLM/SenseVoiceSmall）");
+  const ttsCloudView = builtinSectionSourceView("tts", status);
+  assert.equal(ttsCloudView.source, "cloud");
+  assert.equal(ttsCloudView.selectValue, "cloud");
+  assert.equal(ttsCloudView.installedLocalModel?.id, "kokoro_v11");
+  assert.deepEqual(
+    ttsCloudView.options.map((opt) => [opt.value, opt.label, opt.installed]),
+    [
+      ["cloud", "云端（MOSS/TTS-1）", true],
+      ["local:kokoro", "本地 · Kokoro v1.0（未下载）", false],
+      ["local:kokoro_v11", "本地 · Kokoro v1.1", true],
+    ],
+  );
+
+  // 从顶部下拉框直接选择 local:kokoro_v11：自动改选 kokoro_v11 与默认音色 3，且不动识别开关
+  const toLocalTts = builtinSourceSwitchPayload(status, "tts", "local:kokoro_v11");
+  assert.equal(toLocalTts.tts, true);
+  assert.equal(toLocalTts.asr, false);
+  assert.equal(toLocalTts.tts_model, "kokoro_v11");
+  assert.equal(toLocalTts.tts_speaker, 3);
+
+  // 切换后：语音识别走云端、语音合成走本地、大模型走云端，且云端 TTS 配置仍保留在 status.models.tts
+  const mixedStatus = {
+    ...status,
+    local: { ...status.local, settings: toLocalTts },
+  };
+  const ttsLocalView = builtinSectionSourceView("tts", mixedStatus);
+  assert.equal(ttsLocalView.source, "local");
+  assert.equal(ttsLocalView.selectValue, "local:kokoro_v11");
+  assert.equal(ttsLocalView.localReady, true);
+  assert.equal(ttsLocalView.cloudConfigured, true);
+  assert.equal(ttsLocalView.activeText, "本地（Kokoro v1.1）");
+
+  // 从顶部下拉框选回 cloud
+  const backToCloud = builtinSourceSwitchPayload(mixedStatus, "tts", "cloud");
+  assert.equal(backToCloud.tts, false);
+  assert.equal(backToCloud.tts_model, "kokoro_v11");
+
+  // 按真实语音执行链路排序：拾音判停(vad) -> 语音识别(asr) -> Jev 前置粗筛(jev) -> 大模型(llm) -> 语音合成(tts)
+  const { MIX_SECTIONS, builtinJevSummary, jevModelError } = await import("../src/voiceState.js");
+  assert.deepEqual(MIX_SECTIONS.map((s) => s.key), ["vad", "asr", "jev", "llm", "tts"]);
+  const jevUnconfigured = builtinSectionSourceView("jev", status);
+  assert.equal(jevUnconfigured.selectValue, "off");
+  assert.equal(jevUnconfigured.options[1].installed, false);
+  assert.match(jevUnconfigured.options[1].label, /需配密钥/);
+  const readyJevStatus = {
+    ...status,
+    jev: { key_set: true, model: "typesafe/jev-1.14", voice_enabled: false, feedback_enabled: true },
+    local: { ...status.local, jev_key_configured: true },
+  };
+  assert.equal(builtinJevSummary(readyJevStatus), "加工反馈开（固定 1.13） · 语音待用 typesafe/jev-1.14");
+  const switchTo113 = builtinSourceSwitchPayload(readyJevStatus, "jev", "jev:typesafe/jev-1.13");
+  assert.equal(switchTo113.jev_filter_enabled, true);
+  assert.equal(switchTo113.jev_model, "typesafe/jev-1.13");
+  const switchOff = builtinSourceSwitchPayload({ ...readyJevStatus, local: { ...readyJevStatus.local, settings: switchTo113 } }, "jev", "off");
+  assert.equal(switchOff.jev_filter_enabled, false);
+  assert.equal(switchOff.jev_model, "typesafe/jev-1.13", "关闭 Jev 筛选时保留已选模型版本作备用");
+  assert.equal(jevModelError("typesafe/jev-1.14"), "");
+  assert.match(jevModelError("laya_multilingual"), /typesafe\/jev-/);
+  assert.match(jevModelError("gpt-4o"), /typesafe\/jev-/);
+  const switchToLocalLaya = builtinSourceSwitchPayload(readyJevStatus, "jev", "local:laya_multilingual");
+  assert.equal(switchToLocalLaya.jev_filter_enabled, true);
+  assert.equal(switchToLocalLaya.jev_model, "laya_multilingual");
+  const localLayaReadyStatus = {
+    ...status,
+    jev: { key_set: false, local_installed: true, model: "laya_multilingual", voice_enabled: true, feedback_enabled: false },
+    local: {
+      ...status.local,
+      jev_key_configured: true,
+      settings: { ...status.local.settings, jev_filter_enabled: true, jev_model: "laya_multilingual" },
+    },
+  };
+  assert.equal(builtinJevSummary(localLayaReadyStatus), "使用本地模型");
+  assert.equal(builtinSectionSourceView("jev", localLayaReadyStatus).selectValue, "local:laya_multilingual");
+});
+test("同源服务商地址/密钥复用、服务端 model_sections 融合与 TTS 常用音色预设", async () => {
+  const {
+    applyDefaultTtsVoice,
+    canAutoFetchModels,
+    chatOnlyGatewayName,
+    filterModelOptions,
+    finalUrl,
+    findPeerCloudSource,
+    sectionInputError,
+    ttsVoiceOptionsFor,
+  } = await import("../src/voiceState.js");
+  const status = {
+    models: {
+      llm: { configured: true, url: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-7B-Instruct", key_set: true },
+    },
+  };
+  // 未填地址时可一键复用大模型地址与密钥；填入同一基础地址后识别为同源并可免重填密钥自动拉取
+  const emptyPeer = findPeerCloudSource("asr", status, "");
+  assert.equal(emptyPeer.reusable?.baseUrl, "https://api.siliconflow.cn/v1");
+  assert.equal(emptyPeer.reusable?.keySet, true);
+  assert.equal(emptyPeer.sameOrigin, null);
+
+  const samePeer = findPeerCloudSource("asr", status, "https://api.siliconflow.cn/v1/audio/transcriptions");
+  assert.equal(samePeer.sameOrigin?.section, "llm");
+  assert.equal(
+    canAutoFetchModels({ url: "https://api.siliconflow.cn/v1", api_key: "" }, { key_set: false }, status, "asr"),
+    true,
+    "同源地址直接复用已配置分区的密钥自动拉取模型列表",
+  );
+  // Cline / OpenRouter / DeepSeek 等仅对话网关：不对语音识别/合成暴露“一键复用”，手动填入时报错且不拼凑 /audio/transcriptions
+  const clineStatus = {
+    models: {
+      llm: { configured: true, url: "https://api.cline.bot/api/v1", model: "cline-pass/deepseek-v4.1-flash", key_set: true },
+    },
+  };
+  assert.equal(chatOnlyGatewayName("https://api.cline.bot/api/v1"), "Cline (api.cline.bot)");
+  assert.equal(findPeerCloudSource("asr", clineStatus, "").reusable, null, "Cline 仅支持大模型，不在 ASR 提供复用按钮");
+  assert.equal(findPeerCloudSource("tts", clineStatus, "").reusable, null, "Cline 仅支持大模型，不在 TTS 提供复用按钮");
+  assert.equal(finalUrl("asr", "https://api.cline.bot/api/v1", "openai"), "", "仅对话网关在 ASR 不拼凑虚假 /audio/transcriptions");
+  assert.match(
+    sectionInputError("asr", { url: "https://api.cline.bot/api/v1", api_key: "", model: "whisper-1" }),
+    /仅提供大模型对话接口/,
+  );
+  // 当服务商返回的全部是纯文本大模型时，ASR/TTS 的 onlyMatched 筛选返回空数组，绝不把纯文本大模型静默冒充语音模型列出
+  assert.deepEqual(
+    filterModelOptions(["cline-pass/deepseek-v4.1-flash", "Qwen/Qwen2.5-7B-Instruct"], "", false, {
+      section: "asr",
+      onlyMatched: true,
+    }),
+    [],
+  );
+  // 服务端返回原生 model_sections 时，即使模型名字不带 tts/asr 也能零误差筛出
+  const customModels = ["vendor/custom-voice-v1", "vendor/custom-embed-v1"];
+  const modelSections = {
+    "vendor/custom-voice-v1": ["tts"],
+    "vendor/custom-embed-v1": [],
+  };
+  assert.deepEqual(
+    filterModelOptions(customModels, "", false, { section: "tts", onlyMatched: true, modelSections }).map((m) => m.id),
+    ["vendor/custom-voice-v1"],
+  );
+
+  // TTS 常用音色预设与选模型自动填默认音色（CosyVoice 动态带模型名前缀）
+  const cosyForm = applyDefaultTtsVoice({ url: "https://api.siliconflow.cn/v1", model: "", voice: "", speed: "1" }, "FunAudioLLM/CosyVoice2-0.5B");
+  assert.equal(cosyForm.voice, "FunAudioLLM/CosyVoice2-0.5B:anna");
+  assert.ok(ttsVoiceOptionsFor(cosyForm).some((opt) => opt.id === "FunAudioLLM/CosyVoice2-0.5B:alex"));
+  const switchedCosy = applyDefaultTtsVoice(cosyForm, "FunAudioLLM/CosyVoice-300M");
+  assert.equal(switchedCosy.voice, "FunAudioLLM/CosyVoice-300M:anna", "切换 CosyVoice 模型时同步更新音色前缀");
+  const openaiForm = applyDefaultTtsVoice(switchedCosy, "tts-1");
+  assert.equal(openaiForm.voice, "alloy", "切回 OpenAI 合成模型时换成 alloy 默认音色");
+});
+
+test("内置工具增删提示词：给出真实改代码路径、Jev 粗筛归组并与第三方 MCP 区分（2026-11-02）", () => {
+  const add = toolEditPrompt("add");
+  assert.match(add, /crates\/laser-tools\/src\/lib\.rs/, "新增模板指向工具登记处");
+  assert.match(add, /tests\/golden\/mcp_tools\.json/, "新增模板指向编译期嵌入的黄金工具清单");
+  assert.match(add, /tools_list_with/);
+  assert.match(add, /dispatch_tool_call_with/);
+  assert.match(add, /tool_risk/, "新增模板要求登记风险分级");
+  assert.match(add, /groups_of_builtin_tool/, "新增模板要求归入既有 6 个 Jev 粗筛组而非逐工具平铺 noul");
+  assert.match(add, /审批与严格模式门禁/, "新增工具不得放宽门禁");
+  const remove = toolEditPrompt("remove");
+  assert.match(remove, /取消勾选/, "先说明只关开关就能让模型看不到");
+  assert.match(remove, /groups_of_builtin_tool/, "删除模板要求清理 Jev 静态归组残留");
+  assert.match(remove, /laser_safe_action_tool/, "急停工具不可删除");
+  assert.match(remove, /validate_disabled_tools/);
+  assert.equal(toolEditPrompt("unknown"), "", "未知类型返回空字符串");
+  assert.deepEqual(Object.keys(TOOL_EDIT_PROMPTS).sort(), ["add", "remove"]);
+  for (const value of Object.values(TOOL_EDIT_PROMPTS)) {
+    assert.ok(value.title && value.text.length > 200, `${value.title} 有标题与可复制的正文`);
+  }
+});
+
+test("schema 14 设备信息快照：缺字段显示破折号，AEC 只认设备上报", async () => {
+  const { builtinDeviceInfoView } = await import("../src/voiceState.js");
+  const value = (view, label) => view.rows.find(([name]) => name === label)[1];
+
+  const empty = builtinDeviceInfoView({});
+  assert.equal(empty.hasInfo, false);
+  assert.equal(value(empty, "固件版本"), "—");
+  assert.equal(value(empty, "服务端 AEC 声明"), "未上报", "没有 hello 就不猜");
+
+  const device = {
+    firmware_version: "2.4.0",
+    info_json: JSON.stringify({
+      language: "zh-CN",
+      flash_size: 16 * 1024 * 1024,
+      psram_size: 8 * 1024 * 1024,
+      chip_model_name: "esp32s3",
+      mac_address: "aa:bb:cc:dd:ee:ff",
+      uuid: "uuid-1",
+      application: { name: "xiaozhi", version: "2.5.0", idf_version: "v6.1.0", compile_time: "Nov  1 2026" },
+    }),
+    hello_json: JSON.stringify({
+      protocol_version: 1,
+      transport: "websocket",
+      aec: true,
+      mcp: true,
+      audio: { format: "opus", sample_rate: 24000, channels: 1, frame_duration: 60 },
+    }),
+    info_at: 12,
+  };
+  const view = builtinDeviceInfoView(device);
+  assert.equal(value(view, "固件版本"), "2.5.0", "以上报的 application.version 为准");
+  assert.equal(value(view, "服务端 AEC 声明"), "已声明");
+  assert.equal(value(view, "Flash / PSRAM"), "16 MB / 8 MB");
+  assert.equal(value(view, "上行音频"), "24000 Hz · opus · 60 ms");
+  assert.equal(value(view, "MAC"), "aa:bb:cc:dd:ee:ff");
+  assert.equal(view.updatedAt, 12);
+
+  const off = builtinDeviceInfoView({ hello_json: JSON.stringify({ aec: false }) });
+  assert.equal(value(off, "服务端 AEC 声明"), "未声明", "只有设备明确上报 false 才显示未声明");
+  assert.equal(value(off, "固件版本"), "—", "没有版本就不猜");
+  // 真实固件是设备端 AEC（CONFIG_USE_DEVICE_AEC），hello 里根本没有 aec 字段
+  const none = builtinDeviceInfoView({ hello_json: JSON.stringify({ mcp: true }) });
+  assert.equal(
+    value(none, "服务端 AEC 声明"),
+    "未上报",
+    "设备没上报就不能显示成未声明，更不能当成设备端 AEC 已开启",
+  );
+  assert.equal(value(none, "设备端回声消除").includes("不推断"), true);
+  // 实际拾音模式：判断设备端 AEC 的行为证据，只显示设备真的用过的模式
+  const mode = (json) => value(builtinDeviceInfoView({ listen_json: JSON.stringify(json) }), "实际拾音模式");
+  assert.equal(builtinDeviceInfoView({}).rows.find(([l]) => l === "实际拾音模式")[1], "未上报");
+  assert.match(mode({ mode: "realtime" }), /设备端 AEC 开启/);
+  assert.match(mode({ mode: "auto" }), /关闭或未启用/);
+  assert.match(mode({ mode: "manual" }), /无法判断/);
+  assert.equal(mode({ mode: "unknown-mode" }), "未上报", "不认识的模式不猜");
+  assert.equal(builtinDeviceInfoView({ listen_json: "{oops" }).rows.length > 0, true);
+  assert.equal(value(off, "固件版本"), "—", "没有版本就不猜");
+  assert.equal(builtinDeviceInfoView({ info_json: "{oops" }).hasInfo, false, "坏 JSON 不抛异常");
+});
+
+test("顶部切换 Jev 开关后编辑并保存语音体验，不会把未手改的 Jev 开关覆盖回旧值", async () => {
+  const {
+    EXPERIENCE_KEYS,
+    builtinJevForm,
+    builtinSourceSwitchPatch,
+    localGroupPatch,
+    localSettingsForm,
+    syncJevDraft,
+    syncLocalDraft,
+  } = await import("../src/voiceState.js");
+  const initialBaseline = localSettingsForm({ jev_filter_enabled: false, barge_in_ms: 400 });
+  // 顶部切换仅生成最小增量补丁，不携带无关字段
+  assert.deepEqual(
+    builtinSourceSwitchPatch({ local: { settings: initialBaseline } }, "jev", "jev:typesafe/jev-1.14"),
+    { jev_filter_enabled: true, jev_model: "typesafe/jev-1.14" },
+  );
+  assert.deepEqual(
+    builtinSourceSwitchPatch({ local: { settings: initialBaseline } }, "jev", "off"),
+    { jev_filter_enabled: false },
+  );
+
+  // 用户尚未编辑体验卡片，通过顶部第 5 栏下拉框将 jev_filter_enabled 开启为 true
+  const nextBaseline = localSettingsForm({ jev_filter_enabled: true, barge_in_ms: 400 });
+  const syncedDraft = syncLocalDraft(initialBaseline, nextBaseline, initialBaseline, EXPERIENCE_KEYS);
+  assert.equal(syncedDraft.jev_filter_enabled, true, "未手动编辑过的字段应跟随新 baseline 更新");
+
+  // 随后用户仅修改插话时长并保存“语音体验”
+  const editedDraft = { ...syncedDraft, barge_in_ms: "500" };
+  const patch = localGroupPatch(nextBaseline, editedDraft, EXPERIENCE_KEYS);
+  assert.deepEqual(patch, { barge_in_ms: 500 }, "局部保存只提交实际改动字段，绝不回写旧 jev_filter_enabled=false");
+
+  // 反向场景：即使草稿里原本已手改了插话时长，外部关闭 Jev 后保存体验仍保持 Jev 关闭
+  const preEdited = { ...nextBaseline, barge_in_ms: "520" };
+  const closedBaseline = localSettingsForm({ jev_filter_enabled: false, barge_in_ms: 400 });
+  const syncedAfterClose = syncLocalDraft(nextBaseline, closedBaseline, preEdited, EXPERIENCE_KEYS);
+  assert.equal(syncedAfterClose.jev_filter_enabled, false, "外部关闭 Jev 必须同步到草稿，防止重新打开外传");
+  assert.equal(syncedAfterClose.barge_in_ms, "520", "用户已手改的插话时长继续保留");
+  assert.deepEqual(localGroupPatch(closedBaseline, syncedAfterClose, EXPERIENCE_KEYS), { barge_in_ms: 520 });
+
+  // Jev 卡片在用户手填备用密钥或勾选反馈开关未保存时，顶部切换语音开关不会冲掉未保存草稿
+  const jevPrev = builtinJevForm({ jev: { model: "typesafe/jev-1.14", voice_enabled: false, feedback_enabled: false } });
+  const jevEdited = { ...jevPrev, api_key: "sk-or-draft", feedback_enabled: true };
+  const jevNext = builtinJevForm({ jev: { model: "typesafe/jev-1.13", voice_enabled: true, feedback_enabled: false } });
+  assert.deepEqual(syncJevDraft(jevPrev, jevNext, jevEdited), {
+    api_key: "sk-or-draft",
+    model: "typesafe/jev-1.13",
+    voice_enabled: true,
+    feedback_enabled: true,
+  });
+});
+
+test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪造音频振幅或泄漏密钥", async () => {
+  const { buildTwinWaveBars, globalEyeSensorView, mossEyeTwinView } = await import("../src/voiceState.js");
+
+  // 1. 内置服务链路：随真实 60ms 音频振幅驱动声波，记录识别字数、已播句数与工具名
+  const builtinIdle = mossEyeTwinView({
+    mode: "builtin",
+    builtinStatus: { running: false, sessions: [], events: [] },
+  });
+  assert.equal(builtinIdle.visualState, "offline");
+  assert.equal(builtinIdle.sourceBadge, "REALTIME AUDIO TWIN");
+  assert.equal(builtinIdle.level, 0);
+  assert.equal(builtinIdle.bars.length, 12);
+
+  const builtinSpeaking = mossEyeTwinView({
+    mode: "builtin",
+    builtinStatus: {
+      running: true,
+      mode: "chat",
+      sessions: [
+        { session_id: "s1", state: "idle", level: 0 },
+        {
+          session_id: "s2",
+          state: "speaking",
+          level: 78,
+          utterance_chars: 12,
+          spoken_sentences: 3,
+          active_tool: "laser_workflow_tool",
+          emotion: "happy",
+        },
+      ],
+      events: [{ at: 1, text: "首句延迟：420 ms（说完到首句音频就绪）" }],
+    },
+  });
+  assert.equal(builtinSpeaking.visualState, "speaking");
+  assert.equal(builtinSpeaking.level, 78);
+  assert.equal(builtinSpeaking.activePolling, true);
+  assert.ok(builtinSpeaking.bars[5] > builtinSpeaking.bars[0], "中央声波柱按对称权重高于边缘");
+  assert.deepEqual(builtinSpeaking.bars, buildTwinWaveBars("speaking", 78));
+  assert.equal(builtinSpeaking.metrics.find((m) => m.label === "实时振幅").value, "78%");
+  assert.equal(builtinSpeaking.metrics.find((m) => m.label === "本轮识别").value, "12 字");
+  assert.equal(builtinSpeaking.metrics.find((m) => m.label === "播报/路由").value, "已播 3 句");
+
+  // 2. 自建服务链路：进程日志自动脱敏，无音频流时 level 恒为 0，工具调用触发 pulse
+  const selfHosted = mossEyeTwinView({
+    mode: "self_hosted",
+    status: {
+      server: { state: "running", pid: 4242 },
+      bridge: { connected: true },
+      endpoint: { health: { robot_connections: 2 } },
+    },
+    mcpStatus: { connected: true, last_request: "tools/call: material_params_tool" },
+    logLines: ["[info] connected api_key=sk-secret-value-123"],
+  });
+  assert.equal(selfHosted.visualState, "pulse");
+  assert.equal(selfHosted.sourceBadge, "LOCAL SERVER BRIDGE");
+  assert.equal(selfHosted.level, 0, "自建链路不伪造音频振幅");
+  assert.equal(selfHosted.subline.includes("sk-secret-value-123"), false, "进程日志必须脱敏");
+  assert.match(selfHosted.headline, /material_params_tool/);
+
+  // 3. 官方云端链路：同步云端 MCP 握手、消息帧数、最近工具调用与审批警戒
+  const official = mossEyeTwinView({
+    mode: "official",
+    status: { mcp_endpoint: "wss://api.example.test/mcp/?token=***", bridge: { connected: true } },
+    mcpStatus: {
+      configured: true,
+      connected: true,
+      messages_count: 19,
+      last_request: "tools/call: get_status_tool",
+      last_request_time: "14:20:08",
+      tools_count: 19,
+    },
+  });
+  assert.equal(official.visualState, "pulse");
+  assert.equal(official.sourceBadge, "CLOUD MCP TELEMETRY");
+  assert.equal(official.level, 0);
+  assert.equal(official.metrics.find((m) => m.label === "指令帧数").value, "19 帧");
+
+  // 4. 全局左侧栏机械眼（globalEyeSensorView）：跨页面跟随 /api/system/info 与待审批数
+  assert.equal(
+    globalEyeSensorView({ voiceStatus: { mode: "builtin", phase: "listening", level: 64, device_sessions: 1 } }).visualState,
+    "listening",
+  );
+  assert.equal(
+    globalEyeSensorView({ voiceStatus: { mode: "builtin", phase: "speaking", level: 85, device_sessions: 1 }, approvalCount: 2 }).visualState,
+    "alert",
+    "待审批告警优先提示",
+  );
+
+  // 5. 异常数值（Infinity / NaN / 负数）与急停事件短语脱敏边界
+  const edgeBuiltin = mossEyeTwinView({
+    mode: "builtin",
+    approvalCount: Infinity,
+    builtinStatus: {
+      running: true,
+      sessions: [{ session_id: "s1", state: "listening", level: NaN, utterance_chars: -5, spoken_sentences: Infinity }],
+      events: [{ at: 2, text: "流式中间结果整句命中急停词（马上停下）：立即请求急停" }],
+    },
+  });
+  assert.equal(edgeBuiltin.approvalAlert, false, "Infinity 不得当作有效审批数");
+  assert.equal(edgeBuiltin.level, 0);
+  assert.equal(edgeBuiltin.subline.includes("马上停下"), false, "急停事件括号内口语文本不回显到全息舱");
+  assert.equal(edgeBuiltin.metrics.find((m) => m.label === "本轮识别").value, "—");
+});
+
+test("本地 Laya 激活时保存 Jev 卡片开关或备用密钥，不会把本地路由覆写成云端模型", () => {
+  const localStatus = {
+    jev: {
+      model: "laya_multilingual",
+      key_set: true,
+      local_installed: true,
+      voice_enabled: true,
+      feedback_enabled: false,
+    },
+    local: {
+      settings: { jev_model: "laya_multilingual", jev_filter_enabled: true },
+      models: [{ id: "laya_multilingual", kind: "jev", installed: true }],
+    },
+  };
+  const baseline = builtinJevForm(localStatus);
+  assert.equal(baseline.model, "typesafe/jev-1.14", "表单云端输入框显示默认备用模型");
+
+  // 仅打开加工反馈开关或录入备用 OpenRouter 密钥：保持 laya_multilingual
+  const toggledFeedback = builtinJevSavePayload(localStatus, { ...baseline, feedback_enabled: true }, baseline);
+  assert.equal(toggledFeedback.model, "laya_multilingual");
+  assert.equal(toggledFeedback.feedback_enabled, true);
+
+  const backupKey = builtinJevSavePayload(localStatus, { ...baseline, api_key: "sk-or-v1-backup" }, baseline);
+  assert.equal(backupKey.model, "laya_multilingual");
+  assert.equal(backupKey.api_key, "sk-or-v1-backup");
+
+  // 用户在表单中显式改选了其他云端模型：按用户所选模型提交
+  const switchedCloud = builtinJevSavePayload(localStatus, { ...baseline, model: "typesafe/jev-1.13" }, baseline);
+  assert.equal(switchedCloud.model, "typesafe/jev-1.13");
+
+  // 若本地 Laya 权重已被删除但路由仍设为 laya_multilingual（且本机存有旧备用云密钥），仅改开关仍保持 laya_multilingual 而不静默切回云端外发
+  const uninstalledStatus = {
+    ...localStatus,
+    jev: { ...localStatus.jev, local_installed: false },
+    local: { ...localStatus.local, models: [{ id: "laya_multilingual", kind: "jev", installed: false }] },
+  };
+  const stillLocal = builtinJevSavePayload(uninstalledStatus, { ...baseline, feedback_enabled: true }, baseline);
+  assert.equal(stillLocal.model, "laya_multilingual");
+
+  // 若本地权重已卸载且用户显式手填了新的云端 API Key，则按表单所选云端模型提交，避免被已删除的本地模型卡死
+  const switchDeletedToCloud = builtinJevSavePayload(
+    uninstalledStatus,
+    { ...baseline, api_key: "sk-or-v1-new-cloud" },
+    baseline,
+  );
+  assert.equal(switchDeletedToCloud.model, "typesafe/jev-1.14");
+  assert.equal(switchDeletedToCloud.api_key, "sk-or-v1-new-cloud");
 });

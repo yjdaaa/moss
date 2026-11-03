@@ -36,7 +36,7 @@ try {
     settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000, builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
     builtin: {
       running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003, ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
-      models: {}, local: { settings: {}, models: [], helper_found: true }, sessions: [], events: [], timings: [], devices: [],
+      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }], helper_found: true }, sessions: [], events: [], timings: [], devices: [],
     },
     agent: {
       settings: { enabled: false, workspace: "", codex_executable: "", claude_executable: "" },
@@ -69,6 +69,7 @@ try {
     voice_vision_status: () => ({ settings: { enabled: false, url: "", model: "" }, key_configured: false }),
     voice_agent_status: () => ({ configured: state.agent.settings.enabled, strict_mode: state.agent.strict_mode, providers: state.agent.providers, runs: structuredClone(state.agent.runs), settings: structuredClone(state.agent.settings) }),
     open_voice_private: () => null,
+    get_export_settings: () => ({ dir: "", effective_dir: "C:\\moss\\exports", available: true, ask_each_time: false }),
     voice_agent_save: ({ input }) => {
       state.agent.settings = structuredClone(input);
       state.agent.providers = input.codex_executable
@@ -109,13 +110,51 @@ try {
       state.server = { state: "stopped", owned: false };
       return voiceStatus();
     },
-    voice_builtin_models_test: () => ({ ok: true, elapsed_ms: 320, detail: "合成测试响应" }),
-    voice_builtin_models_save: ({ input }) => {
-      for (const [section, value] of Object.entries(input)) state.builtin.models[section] = { configured: true, url: value.url, model: value.model, key_set: true };
+    voice_builtin_models_test: ({ section }) => ({
+      ok: true,
+      elapsed_ms: 180,
+      detail: "合成测试响应",
+      ...(section === "tts" ? { audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" } : {}),
+    }),
+    voice_builtin_models_list: () => ({
+      ok: true,
+      elapsed_ms: 85,
+      models: ["Qwen/Qwen2.5-7B-Instruct", "FunAudioLLM/SenseVoiceSmall", "MOSS/TTS-1"],
+      detail: "已读取 3 个模型",
+    }),
+    voice_builtin_models_save: ({ input, clear }) => {
+      if (Array.isArray(clear) && clear.includes("jev")) {
+        state.builtin.jev = { ...state.builtin.jev, key_set: false, voice_enabled: false, feedback_enabled: false, model: "typesafe/jev-1.14" };
+        state.builtin.local.jev_key_configured = false;
+        state.builtin.local.settings.jev_filter_enabled = false;
+      }
+      for (const [section, value] of Object.entries(input || {})) {
+        if (section === "jev") {
+          state.builtin.jev = {
+            endpoint: "https://openrouter.ai/api/alpha/decisions",
+            model: value.model,
+            key_set: true,
+            openrouter_llm_key_set: false,
+            voice_enabled: Boolean(value.voice_enabled),
+            feedback_enabled: Boolean(value.feedback_enabled),
+          };
+          state.builtin.local.jev_key_configured = true;
+          state.builtin.local.settings.jev_model = value.model;
+          state.builtin.local.settings.jev_filter_enabled = Boolean(value.voice_enabled);
+        } else {
+          state.builtin.models[section] = { configured: true, url: value.url, model: value.model, key_set: true };
+        }
+      }
       return { ...structuredClone(state.builtin), restarted: false };
     },
     voice_local_save: ({ settings }) => {
-      state.builtin.local.settings = structuredClone(settings);
+      state.builtin.local.settings = { ...state.builtin.local.settings, ...structuredClone(settings) };
+      if (state.builtin.jev) {
+        if (Object.prototype.hasOwnProperty.call(settings, "jev_filter_enabled")) {
+          state.builtin.jev.voice_enabled = Boolean(settings.jev_filter_enabled);
+        }
+        if (settings.jev_model) state.builtin.jev.model = settings.jev_model;
+      }
       return { ...structuredClone(state.builtin), restarted: false };
     },
   };
@@ -155,15 +194,38 @@ try {
 
   await page.goto(new URL("voice", local).href, { waitUntil: "domcontentloaded" });
   await page.locator("#voice-mode-card").waitFor();
-  assert.equal(await page.getByRole("tab").count(), 5, "官方链路没有“模型”标签");
+  assert.equal(await page.getByRole("tab").count(), 4, "官方链路没有“模型”和“隐私与家居”标签");
   assert.equal(await page.getByRole("tab", { name: /^模型/ }).count(), 0, "官方链路的模型在小智控制台配置");
-
+  assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "非内置链路不显示隐私与家居标签");
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "official", "全息孪生舱默认跟随官方链路");
+  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /CLOUD MCP TELEMETRY/);
   // 1. 服务：官方链路只显示接入点与地址；其他链路的面板不渲染（不是折叠）
   await tab("服务").click();
   assert.ok(await page.locator("#voice-endpoint-card").isVisible(), "官方链路显示接入点");
   assert.equal(await page.locator("#voice-builtin-card").count(), 0, "官方链路不渲染内置服务面板");
   assert.equal(await page.locator("#voice-server-card").count(), 0, "官方链路不渲染自建服务端面板");
   await shot("voice-official");
+  await tab("设备").click();
+  assert.ok(await page.locator("#voice-group-endpoints").isVisible(), "官方链路渲染接入点状态");
+  assert.ok(await page.locator("#voice-group-tools").isVisible(), "官方链路渲染工具开关与调用统计");
+
+  // 1b. 内置工具与第三方 MCP 是两类东西：内置工具只能开关，增删用可复制的 AI 提示词模板（2026-11-02）
+  await openGroup("tools");
+  assert.equal(await page.locator("#voice-tool-prompt-copy-add").count(), 1);
+  assert.equal(await page.locator("#voice-tool-prompt-copy-remove").count(), 1);
+  await page.locator("#voice-tool-prompts > summary").click();
+  assert.match(await page.locator("#voice-tool-prompt-add pre").textContent(), /crates\/laser-tools\/src\/lib\.rs/, "新增模板给出真实改代码路径");
+  assert.match(await page.locator("#voice-tool-prompt-remove pre").textContent(), /laser_safe_action_tool/, "删除模板保护急停工具");
+  await page.locator("#voice-tool-prompt-copy-add").click();
+  await page.waitForFunction(() => {
+    const box = document.querySelector("#voice-group-tools");
+    return Boolean(box && (/已复制/.test(box.textContent) || /剪贴板/.test(box.textContent)));
+  }, null, { timeout: 5_000 });
+  await tab("扩展").click();
+  assert.match(await page.locator("#voice-group-mcp > .voice-group-h").innerText(), /第三方 MCP 工具/, "外部工具仍叫第三方 MCP 工具，和内置工具区分开");
+  await openGroup("mcp");
+  assert.ok(await page.locator("#voice-mcp-card").getByText(/MOSS 内置工具/).isVisible(), "MCP 卡说明与内置工具的区别");
+  await tab("设备").click();
 
   // 2. 连接：只保存官方接入点这一组；未保存标记在切换标签后仍在，填写不丢
   await tab("服务").click();
@@ -190,6 +252,9 @@ try {
   await confirmDialog("确认切换");
   await page.locator("#voice-mode-self_hosted[aria-checked=true]").waitFor();
   assert.equal(last("voice_set_mode").args.mode, "self_hosted");
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "self_hosted", "切换自建链路后孪生舱同步为 LOCAL SERVER BRIDGE");
+  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /LOCAL SERVER BRIDGE/);
+  assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "自建链路同样不显示隐私与家居标签");
   await tab("服务").click();
   assert.ok(await page.locator("#voice-server-card").isVisible(), "自建链路显示服务端");
   await page.locator("#voice-server-start").click();
@@ -212,6 +277,8 @@ try {
   await page.locator("#voice-mode-builtin[aria-checked=true]").waitFor();
   assert.equal(last("voice_server_stop") !== undefined, true);
   assert.equal(state.server.state, "stopped");
+  assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "builtin", "切换内置链路后孪生舱同步为 REALTIME AUDIO TWIN");
+  assert.match(await page.locator("#voice-moss-twin-source").innerText(), /REALTIME AUDIO TWIN/);
 
   // 5. 内置大模型：先测试、后保存，只提交这一项
   await tab("模型").click();
@@ -228,6 +295,64 @@ try {
   assert.deepEqual(Object.keys(last("voice_builtin_models_save").args.input), ["llm"]);
   assert.equal(await page.locator("#voice-builtin-model-key-llm").inputValue(), "", "保存后清空密钥");
 
+  // 5b. 内置语音识别：一键复用大模型地址与密钥，自动读取并筛选出可用于语音识别的模型
+  await openGroup("builtin-model-asr");
+  await page.locator("#voice-builtin-reuse-peer-asr").click();
+  assert.equal(await page.locator("#voice-builtin-model-url-asr").inputValue(), "https://llm.example.test/v1", "一键填入大模型基础地址");
+  await page.locator("#voice-builtin-model-options-asr").getByRole("option").first().waitFor();
+  assert.equal(await page.locator("#voice-builtin-model-options-asr").getByRole("option").count(), 1, "展开时自动筛选出可用于语音识别的 1 个模型");
+  await page.locator("#voice-builtin-model-scope-toggle-asr").click();
+  assert.equal(await page.locator("#voice-builtin-model-options-asr").getByRole("option").count(), 3, "点显示全部可查看服务商返回的全部 3 个模型");
+  await page.locator("#voice-builtin-model-name-asr").fill("sense");
+  assert.equal(await page.locator("#voice-builtin-model-options-asr").getByRole("option").count(), 1, "输入关键词实时筛出目标语音识别模型");
+  await page.locator("#voice-builtin-model-options-asr").getByRole("option", { name: /SenseVoiceSmall/ }).click();
+  assert.equal(await page.locator("#voice-builtin-model-name-asr").inputValue(), "FunAudioLLM/SenseVoiceSmall");
+  // 5b-2. 内置语音合成：一键复用地址、点选模型自动填入默认音色、测试通过后显示“试听语音”按钮
+  await openGroup("builtin-model-tts");
+  await page.locator("#voice-builtin-reuse-peer-tts").click();
+  await page.locator("#voice-builtin-model-options-tts").getByRole("option", { name: /MOSS\/TTS-1/ }).click();
+  assert.equal(await page.locator("#voice-builtin-model-voice-tts").inputValue(), "alloy", "选定合成模型后自动填入默认音色");
+  await page.locator("#voice-builtin-model-test-tts").click();
+  await page.locator("#voice-builtin-model-play-tts").waitFor();
+  // 5c. 顶部四栏自由混搭下拉框（大模型 + 语音识别 + 语音合成 + 拾音判停）：直接在顶部下拉框选本地合成与本地判停，下方卡片仅用于配置模型或下载
+  await page.locator("#voice-builtin-mix-select-tts").selectOption("local:kokoro");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为本地语音合成" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.tts, true, "语音合成切换为本地模型");
+  assert.equal(last("voice_local_save").args.settings.tts_model, "kokoro");
+  assert.equal("asr" in last("voice_local_save").args.settings, false, "单分区切换补丁不跨区携带语音识别开关");
+  assert.equal(Boolean(state.builtin.local.settings.asr), false, "语音识别保持云端不变");
+  await page.locator("#voice-builtin-mix-select-vad").selectOption("local:silero_vad");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为本地拾音判停（Silero VAD）" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.vad, true, "拾音判停切换为本地 Silero VAD");
+  assert.equal(last("voice_local_save").args.settings.vad_model, "silero_vad");
+  await page.locator("#voice-builtin-mix-select-vad").selectOption("energy");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为内置能量判停" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.vad, false, "可随时切回内置能量判停");
+  await page.locator("#voice-builtin-mix-select-tts").selectOption("cloud");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为云端语音合成" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.tts, false, "可随时在顶部下拉框切回云端语音合成");
+  // 5d. 顶部五栏按真实语音执行链路排序（拾音判停 -> 语音识别 -> Jev 前置粗筛 -> 大模型 -> 语音合成），且右上角偏好设置不再重复渲染 Jev
+  const mixOrder = await page.locator("#voice-builtin-mix-bar .voice-mix-field").evaluateAll((els) => els.map((el) => el.id));
+  assert.deepEqual(mixOrder, ["voice-builtin-mix-vad", "voice-builtin-mix-asr", "voice-builtin-mix-jev", "voice-builtin-mix-llm", "voice-builtin-mix-tts"]);
+  await page.getByTitle("系统偏好设置").click();
+  await page.locator(".settings-modal").waitFor();
+  assert.equal(await page.locator("#settings-jev").count(), 0, "桌面端右上角系统设置已移除重复的 Jev 配置，仅保留语音中心唯一入口");
+  await page.locator(".settings-modal .mat-modal-close").click();
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("jev:typesafe/jev-1.14");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "尚未配置 OpenRouter API Key" }).waitFor();
+  await page.locator("#voice-builtin-apikey-jev").fill("sk-or-test-jev");
+  await page.locator("#voice-builtin-jev-feedback-enabled").check();
+  await page.locator("#voice-builtin-model-test-jev").click();
+  await page.locator("#voice-builtin-model-result-jev").filter({ hasText: "测试通过" }).waitFor();
+  await page.locator("#voice-builtin-model-save-jev").click();
+  await page.locator("#voice-group-builtin-model-jev [role=status]").filter({ hasText: "已保存Jev 决策模型" }).waitFor();
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("jev:typesafe/jev-1.13");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为 Jev 决策（typesafe/jev-1.13）" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.jev_filter_enabled, true);
+  assert.equal(last("voice_local_save").args.settings.jev_model, "typesafe/jev-1.13");
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("off");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "已关闭 Jev 语音筛选" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.jev_filter_enabled, false);
   // 6. 本地模型与语音体验分开保存：保存体验时不带上本地模型未保存的改动
   await openGroup("local-models");
   await openGroup("experience");
@@ -237,8 +362,16 @@ try {
   await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存语音体验设置" }).waitFor();
   const localPayload = last("voice_local_save").args.settings;
   assert.equal(localPayload.barge_in, true);
-  assert.equal(localPayload.tts_speed, 1, "本地模型的未保存改动没有被一起提交");
+  assert.equal("tts_speed" in localPayload, false, "局部补丁不携带本地模型分组字段");
+  assert.equal(state.builtin.local.settings.tts_speed ?? 1, 1, "本地模型的未保存改动没有被一起提交");
   assert.ok(await page.locator("#voice-group-local-models .voice-dirty").isVisible(), "本地模型仍显示未保存");
+  // 6b. 顶部切换开启 Jev 后再修改并保存语音体验其他字段，绝不把 Jev 开关覆盖回旧值 false
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("jev:typesafe/jev-1.14");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为 Jev 决策（typesafe/jev-1.14）" }).waitFor();
+  await page.locator("#voice-barge-in-ms").fill("460");
+  await page.locator("#voice-experience-save").click();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存语音体验设置" }).waitFor();
+  assert.equal(state.builtin.local.settings.jev_filter_enabled, true, "保存语音体验插话时长后 Jev 仍保持开启");
   await page.locator("#voice-group-experience").scrollIntoViewIfNeeded();
   await shot("voice-builtin");
 
@@ -307,6 +440,8 @@ try {
   // 9. 窄屏无横向滚动
   await page.setViewportSize({ width: 820, height: 1000 });
   await tab("设备").click();
+  assert.equal(await page.locator("#voice-group-endpoints").count(), 0, "内置链路不渲染接入点状态");
+  assert.ok(await page.locator("#voice-group-tools").isVisible(), "内置链路只保留工具开关与调用统计");
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   assert.ok(overflow <= 1, `窄屏横向溢出 ${overflow}px`);
   await shot("voice-narrow");

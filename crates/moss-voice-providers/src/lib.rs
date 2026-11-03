@@ -24,7 +24,10 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-pub use history::{ChatMessage, FunctionCall, Role, ToolCall, ToolSpec, truncate_history};
+pub use history::{
+    ChatMessage, FunctionCall, Role, ToolCall, ToolSpec, compact_stale_tool_results,
+    truncate_history,
+};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -97,6 +100,14 @@ impl AsrStream {
             }
         }
         std::future::pending().await
+    }
+
+    /// 同步读取当前已到达的最新中间文字（消除 SpeechEnd 与 watch 通知的调度竞态）。
+    pub fn latest_interim(&self) -> Option<String> {
+        self.interim
+            .as_ref()
+            .map(|rx| rx.borrow().clone())
+            .filter(|s| !s.is_empty())
     }
 
     /// 送入一段 16 kHz 音频（不阻塞；连接失败后送入的音频被丢弃，错误在 [`Self::finish`] 返回）。

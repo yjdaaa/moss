@@ -18,8 +18,33 @@ pub struct ShutdownState {
 
 struct BackendOrigin(Result<String, String>);
 
+#[cfg(desktop)]
+struct DevUiOrigin(Option<String>);
+
 fn loopback_origin(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
+}
+
+/// 开发热重载前端地址白名单：只允许本机 `127.0.0.1` 上的固定 Vite 端口（`5177` / `5173`）。
+#[cfg(desktop)]
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub(crate) fn parse_dev_ui_origin(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim().trim_end_matches('/');
+    matches!(trimmed, "http://127.0.0.1:5177" | "http://127.0.0.1:5173")
+        .then(|| trimmed.to_owned())
+}
+
+/// 读取开发热重载前端来源：release 构建恒为 `None`，环境变量在正式版中完全失效。
+#[cfg(desktop)]
+fn resolve_dev_ui_origin() -> Option<String> {
+    #[cfg(debug_assertions)]
+    {
+        parse_dev_ui_origin(std::env::var("MOSS_DEV_UI_ORIGIN").ok().as_deref())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
 }
 
 #[tauri::command]
@@ -41,6 +66,26 @@ pub(crate) fn is_trusted_main(label: &str, url: &tauri::Url, expected: &str) -> 
         && url.origin().ascii_serialization() == expected
 }
 
+/// 叠加 debug 开发热重载来源的主窗口校验：正式构建只认 `expected`（本进程后端地址）。
+#[cfg(desktop)]
+pub(crate) fn is_trusted_main_with_dev(
+    label: &str,
+    url: &tauri::Url,
+    expected: &str,
+    dev_ui_origin: Option<&str>,
+) -> bool {
+    if is_trusted_main(label, url, expected) {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    if let Some(dev_origin) = parse_dev_ui_origin(dev_ui_origin) {
+        return is_trusted_main(label, url, &dev_origin);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = dev_ui_origin;
+    false
+}
+
 /// 按 [`is_trusted_main`] 校验调用窗口；后端未启动时一律拒绝。
 #[cfg(desktop)]
 pub(crate) fn window_is_trusted_main(window: &tauri::WebviewWindow) -> bool {
@@ -51,7 +96,13 @@ pub(crate) fn window_is_trusted_main(window: &tauri::WebviewWindow) -> bool {
     else {
         return false;
     };
-    window.url().is_ok_and(|url| is_trusted_main(window.label(), &url, &expected))
+    let dev_ui_origin = window
+        .app_handle()
+        .try_state::<DevUiOrigin>()
+        .and_then(|state| state.0.clone());
+    window.url().is_ok_and(|url| {
+        is_trusted_main_with_dev(window.label(), &url, &expected, dev_ui_origin.as_deref())
+    })
 }
 
 /// 桌面会话值（技术书 §5.3）：每次启动随机生成，只交给本窗口的页面并保存在其内存中，
@@ -149,9 +200,7 @@ async fn open_voice_private(
             _ => return Err("未知的语音隐私设置类别".into()),
         };
         let current = window.url().map_err(|_| "无法校验当前窗口来源")?;
-        let backend = app.state::<BackendOrigin>();
-        let on_expected_backend = backend.0.as_ref().ok()
-            .is_some_and(|origin| current.origin().ascii_serialization() == *origin);
+        let on_expected_backend = window_is_trusted_main(&window);
         let on_packaged_main = (
             matches!(current.scheme(), "http" | "https")
                 && current.host_str() == Some("tauri.localhost")
@@ -326,7 +375,9 @@ pub fn run() {
             voice_builtin::voice_builtin_stop,
             voice_builtin::voice_device_set_status,
             voice_builtin::voice_device_rename,
+            voice_builtin::voice_device_request,
             voice_builtin::voice_builtin_models_test,
+            voice_builtin::voice_builtin_models_list,
             voice_builtin::voice_builtin_models_save,
             voice_builtin::voice_local_save,
             voice_builtin::voice_local_model_download,
@@ -339,8 +390,12 @@ pub fn run() {
         ]);
 
     #[cfg(desktop)]
+    let dev_ui_origin = resolve_dev_ui_origin();
+
+    #[cfg(desktop)]
     let builder = builder
         .manage(BackendOrigin(backend_origin.clone()))
+        .manage(DevUiOrigin(dev_ui_origin.clone()))
         .manage(export_state)
         .manage(DesktopSession(desktop_session))
         .manage(voice_state)
@@ -383,10 +438,11 @@ pub fn run() {
             // 获取默认窗口图标
             let icon = app.default_window_icon().cloned().expect("缺少默认窗口图标");
 
-            // 同源窗口导航: 直接打开本地同源服务，彻底消除 CORS 跨域问题
+            // 同源窗口导航: 默认打开本地同源后端服务；debug 热重载模式下可打开白名单回环 Vite 页面
             if let Ok(origin) = &backend_origin {
+                let target_origin = dev_ui_origin.as_deref().unwrap_or(origin.as_str());
                 if let Some(window) = app.get_webview_window("main") {
-                    if let Ok(parsed) = format!("{origin}/").parse() {
+                    if let Ok(parsed) = format!("{target_origin}/").parse() {
                         let _ = window.navigate(parsed);
                     }
                 }
@@ -720,7 +776,8 @@ mod tests {
             ][..]),
             (include_str!("voice_builtin.rs"), &[
                 "voice_builtin_start", "voice_builtin_stop", "voice_device_set_status", "voice_device_rename",
-                "voice_builtin_models_test", "voice_builtin_models_save", "voice_local_save",
+                "voice_device_request",
+                "voice_builtin_models_test", "voice_builtin_models_list", "voice_builtin_models_save", "voice_local_save",
                 "voice_local_model_download", "voice_local_model_cancel", "voice_local_model_delete",
                 "voice_agent_status", "voice_agent_save", "voice_agent_stop", "voice_music_pick_directory", "voice_music_status",
                 "voice_music_save", "voice_vision_status", "voice_vision_save", "voice_vision_test",
@@ -756,6 +813,60 @@ mod tests {
         ] {
             assert!(!super::is_trusted_main(label, &url.parse().unwrap(), expected), "{label} {url}");
         }
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn dev_ui_origin_accepts_only_loopback_vite_ports_and_is_scoped_to_main() {
+        assert_eq!(
+            super::parse_dev_ui_origin(Some("http://127.0.0.1:5177/")),
+            Some("http://127.0.0.1:5177".to_owned())
+        );
+        assert_eq!(
+            super::parse_dev_ui_origin(Some(" http://127.0.0.1:5173 ")),
+            Some("http://127.0.0.1:5173".to_owned())
+        );
+        for rejected in [
+            None,
+            Some(""),
+            Some("http://localhost:5177"),
+            Some("http://127.0.0.1:5178"),
+            Some("http://127.0.0.1:8080"),
+            Some("https://127.0.0.1:5177"),
+            Some("http://evil.example:5177"),
+        ] {
+            assert_eq!(super::parse_dev_ui_origin(rejected), None, "{rejected:?}");
+        }
+
+        let expected = "http://127.0.0.1:19666";
+        let vite_url: tauri::Url = "http://127.0.0.1:5177/voice".parse().unwrap();
+        assert!(!super::is_trusted_main_with_dev("main", &vite_url, expected, None));
+        assert!(!super::is_trusted_main_with_dev(
+            "voice-private",
+            &vite_url,
+            expected,
+            Some("http://127.0.0.1:5177"),
+        ));
+        assert!(!super::is_trusted_main_with_dev(
+            "main",
+            &"http://127.0.0.1:8080/voice".parse().unwrap(),
+            expected,
+            Some("http://127.0.0.1:8080"),
+        ));
+        #[cfg(debug_assertions)]
+        assert!(super::is_trusted_main_with_dev(
+            "main",
+            &vite_url,
+            expected,
+            Some("http://127.0.0.1:5177"),
+        ));
+        #[cfg(not(debug_assertions))]
+        assert!(!super::is_trusted_main_with_dev(
+            "main",
+            &vite_url,
+            expected,
+            Some("http://127.0.0.1:5177"),
+        ));
     }
 
     #[test]

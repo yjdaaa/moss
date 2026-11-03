@@ -43,11 +43,20 @@ pub fn tts_full_url(input: &str) -> String {
 }
 
 fn client() -> Result<reqwest::Client, ProviderError> {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| ProviderError::new("无法创建网络客户端"))
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .tcp_nodelay(true)
+                .pool_max_idle_per_host(8)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|_| "无法创建网络客户端".to_owned())
+        })
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(ProviderError::new)
 }
 
 /// 不使用 reqwest 的原始描述（它会带上完整地址）。
@@ -68,7 +77,9 @@ fn error_hint(bytes: &[u8]) -> String {
         .and_then(|value| {
             value
                 .pointer("/error/message")
+                .or_else(|| value.pointer("/data/error/message"))
                 .or_else(|| value.get("message"))
+                .or_else(|| value.pointer("/data/message"))
                 .or_else(|| value.get("error"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
@@ -97,6 +108,7 @@ async fn check_status(label: &str, response: reqwest::Response) -> Result<reqwes
     let body = read_body(label, response, MAX_ERROR_BYTES).await.unwrap_or_default();
     let reason = match status.as_u16() {
         401 | 403 => "，密钥无效或没有权限",
+        402 => "，账户余额不足",
         404 => "，地址或模型名不对",
         429 => "，请求太频繁或额度不足",
         300..=399 => "，服务要求跳转（MOSS 不跟随重定向，请填写最终地址）",
@@ -107,6 +119,32 @@ async fn check_status(label: &str, response: reqwest::Response) -> Result<reqwes
 
 fn with_auth(builder: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
     if api_key.is_empty() { builder } else { builder.bearer_auth(api_key) }
+}
+
+fn is_cline_api_url(url: &str) -> bool {
+    reqwest::Url::parse(url.trim())
+        .ok()
+        .and_then(|parsed| {
+            parsed.host_str().map(|host| {
+                let lower = host.to_ascii_lowercase();
+                lower == "cline.bot" || lower.ends_with(".cline.bot")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn with_llm_compat(builder: reqwest::RequestBuilder, url: &str, api_key: &str) -> reqwest::RequestBuilder {
+    let builder = with_auth(builder, api_key);
+    if is_cline_api_url(url) {
+        builder
+            .header("X-Response-Format", "openai")
+            .header("HTTP-Referer", "https://cline.bot")
+            .header("X-Title", "Cline")
+            .header("X-IS-MULTIROOT", "false")
+            .header("X-CLIENT-TYPE", "cline-desktop")
+    } else {
+        builder
+    }
 }
 
 // ---------------------------------------------------------------- 识别
@@ -296,12 +334,17 @@ pub struct StreamAccumulator {
 impl StreamAccumulator {
     /// 处理一个数据块，返回其中的文字增量。
     pub fn apply(&mut self, chunk: &Value) -> Result<Option<String>, ProviderError> {
-        if let Some(error) = chunk.get("error") {
+        let payload = if chunk.get("choices").is_some() || chunk.get("error").is_some() {
+            chunk
+        } else {
+            chunk.get("data").unwrap_or(chunk)
+        };
+        if let Some(error) = payload.get("error") {
             let message = error.get("message").and_then(Value::as_str).unwrap_or("未知错误");
             let short: String = message.chars().take(120).collect();
             return Err(ProviderError::new(format!("大模型返回错误：{short}")));
         }
-        let Some(choice) = chunk.get("choices").and_then(|choices| choices.get(0)) else { return Ok(None) };
+        let Some(choice) = payload.get("choices").and_then(|choices| choices.get(0)) else { return Ok(None) };
         // 流式为 delta；不支持流式的服务返回完整 message
         let delta = choice.get("delta").or_else(|| choice.get("message"));
         let Some(delta) = delta else { return Ok(None) };
@@ -384,8 +427,9 @@ impl OpenAiLlm {
     ) -> Result<LlmReply, ProviderError> {
         const LABEL: &str = "大模型";
         let deadline = Instant::now() + LLM_TOTAL_TIMEOUT;
-        let request = self.client.post(format!("{}/chat/completions", self.base_url)).json(&self.request_body(messages, tools));
-        let send = with_auth(request, &self.api_key).send();
+        let endpoint = format!("{}/chat/completions", self.base_url);
+        let request = self.client.post(&endpoint).json(&self.request_body(messages, tools));
+        let send = with_llm_compat(request, &endpoint, &self.api_key).send();
         let response = tokio::time::timeout(LLM_IDLE_TIMEOUT, send)
             .await
             .map_err(|_| ProviderError::new("大模型请求超时（30 秒无响应）"))?

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-device-request"
+description = "Enables the voice_device_request command without any pre-configured scope."
+commands.allow = ["voice_device_request"]
+
+[[permission]]
+identifier = "deny-voice-device-request"
+description = "Denies the voice_device_request command without any pre-configured scope."
+commands.deny = ["voice_device_request"]

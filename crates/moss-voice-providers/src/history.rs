@@ -156,6 +156,54 @@ pub fn truncate_history(history: &mut Vec<ChatMessage>, budget: usize) {
     }
 }
 
+/// 折叠早于最近 `keep_recent_user_turns` 轮用户发言之前的冗长工具详情，保留对话原文与配对 ID。
+/// 0ms 本地执行，避免多轮查状态/搜网页后大段过期 JSON 拖慢后续轮次首字延迟。
+pub fn compact_stale_tool_results(
+    history: &[ChatMessage],
+    keep_recent_user_turns: usize,
+) -> Vec<ChatMessage> {
+    let user_positions: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, msg)| (msg.role == Role::User).then_some(idx))
+        .collect();
+    let cutoff = if keep_recent_user_turns == 0 {
+        history.len()
+    } else if user_positions.len() > keep_recent_user_turns {
+        user_positions[user_positions.len() - keep_recent_user_turns]
+    } else {
+        0
+    };
+    history
+        .iter()
+        .enumerate()
+        .map(|(idx, msg)| {
+            if idx >= cutoff || msg.role != Role::Tool {
+                return msg.clone();
+            }
+            let Some(content) = msg.content.as_deref() else {
+                return msg.clone();
+            };
+            if content.chars().count() <= 200 {
+                return msg.clone();
+            }
+            let compacted = if let Ok(mut value) = serde_json::from_str::<Value>(content)
+                && let Some(obj) = value.as_object_mut()
+                && obj.remove("detail").is_some()
+            {
+                value.to_string()
+            } else {
+                let mut head: String = content.chars().take(160).collect();
+                head.push_str("…（旧轮次详情已折叠）");
+                head
+            };
+            let mut next = msg.clone();
+            next.content = Some(compacted);
+            next
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +278,37 @@ mod tests {
         let mut history = vec![photo, ChatMessage::assistant("这是刚才那张照片")];
         truncate_history(&mut history, 1);
         assert_eq!(history.len(), 2, "最后一轮总是保留");
+    }
+
+    #[test]
+    fn compacts_only_stale_tool_details_without_breaking_pairs_or_user_text() {
+        let big_json = serde_json::json!({
+            "success": true,
+            "result": "查询成功",
+            "detail": "详".repeat(800),
+        })
+        .to_string();
+        let mut history = Vec::new();
+        for idx in 0..3 {
+            history.push(ChatMessage::user(format!("第{idx}句用户原话")));
+            history.push(ChatMessage::assistant_tools(
+                None,
+                vec![ToolCall::new(format!("call-{idx}"), "laser_workflow_tool", "{}")],
+            ));
+            history.push(ChatMessage::tool(format!("call-{idx}"), big_json.clone()));
+            history.push(ChatMessage::assistant(format!("第{idx}句助手回答")));
+        }
+        let compacted = compact_stale_tool_results(&history, 2);
+        assert_eq!(compacted.len(), history.len());
+        // 第 0 轮早于最近 2 轮：detail 被剥掉，但 call_id 与 result 摘要完整保留
+        let old_tool: Value = serde_json::from_str(compacted[2].content.as_deref().unwrap()).unwrap();
+        assert_eq!(old_tool["result"], "查询成功");
+        assert!(old_tool.get("detail").is_none());
+        assert_eq!(compacted[2].tool_call_id.as_deref(), Some("call-0"));
+        // 最近 2 轮（idx 1、2）完整保留 detail，所有用户/助手原文不变
+        let recent_tool: Value = serde_json::from_str(compacted[6].content.as_deref().unwrap()).unwrap();
+        assert!(recent_tool["detail"].as_str().unwrap().chars().count() == 800);
+        assert_eq!(compacted[0].content.as_deref(), Some("第0句用户原话"));
+        assert_eq!(compacted[3].content.as_deref(), Some("第0句助手回答"));
     }
 }

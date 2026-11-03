@@ -27,7 +27,7 @@ pub mod supervisor;
 
 pub use center::{CenterError, HostHooks, MAX_EXTRA_ENDPOINTS, VoiceCenter};
 pub use logfile::RotatingLog;
-pub use models::{ModelsInput, ProviderKind, Section, SectionInput, TestResult};
+pub use models::{ModelsInput, ModelsListResult, ProviderKind, Section, SectionInput, TestResult};
 pub use redact::redact_line;
 pub use settings::{VoiceMode, VoiceSettings};
 pub use supervisor::{ServerSpec, ServerState, ServerStatus, Supervisor, VoiceError};

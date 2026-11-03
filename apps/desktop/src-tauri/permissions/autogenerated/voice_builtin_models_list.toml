@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-builtin-models-list"
+description = "Enables the voice_builtin_models_list command without any pre-configured scope."
+commands.allow = ["voice_builtin_models_list"]
+
+[[permission]]
+identifier = "deny-voice-builtin-models-list"
+description = "Denies the voice_builtin_models_list command without any pre-configured scope."
+commands.deny = ["voice_builtin_models_list"]

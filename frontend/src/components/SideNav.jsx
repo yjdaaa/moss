@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Cpu, Layers, PenTool, Settings, KeyRound, ShieldCheck, AudioLines, Box } from "lucide-react";
 import { readAuthToken } from "../api/client.js";
-
+import { globalEyeSensorView } from "../voiceState.js";
 // 左侧竖向导航（技术书 §9.5.5 B）。窄屏（≤900px）由 CSS 折叠为顶部横排。
 // 语音中心为第四个标签，只在 MOSS 桌面端显示（技术书 §9.4.7 / §9.5.1，A-69）。
 export const NAV_ITEMS = [
@@ -17,9 +17,19 @@ export function visibleNavItems(showVoice) {
   return NAV_ITEMS.filter((item) => !item.desktopOnly || showVoice);
 }
 
-export function SideNav({ currentPath, onNavigate, onAuthClick, onSettingsClick, showVoice = false }) {
+export function SideNav({
+  currentPath,
+  onNavigate,
+  onAuthClick,
+  onSettingsClick,
+  showVoice = false,
+  mcpStatus = null,
+  voiceStatus = null,
+  approvalCount = 0,
+}) {
   const [hasToken, setHasToken] = useState(Boolean(readAuthToken()));
-
+  const eye = globalEyeSensorView({ mcpStatus, voiceStatus, approvalCount });
+  const eyeLevelRatio = Math.max(0, Math.min(1, (Number(eye.level) || 0) / 100));
   useEffect(() => {
     const handleAuthChange = () => setHasToken(Boolean(readAuthToken()));
     window.addEventListener("laser-auth-required", handleAuthChange);
@@ -32,9 +42,14 @@ export function SideNav({ currentPath, onNavigate, onAuthClick, onSettingsClick,
         type="button"
         className="ob-logo"
         onClick={() => onNavigate("/")}
-        title="返回雕刻工作台（关闭程序请使用窗口右上角 ×）"
+        title={`返回雕刻工作台 · ${eye.label}（关闭程序请使用窗口右上角 ×）`}
       >
-        <span className="ob-eye moss-eye-sensor" aria-hidden="true" />
+        <span
+          className={`ob-eye moss-eye-sensor moss-eye--${eye.visualState}`}
+          data-eye-state={eye.visualState}
+          style={{ "--moss-eye-level": eyeLevelRatio.toFixed(2) }}
+          aria-hidden="true"
+        />
         <span className="ob-logo-text">
           <b>MOSS</b>
           <small>LASER FORGE</small>

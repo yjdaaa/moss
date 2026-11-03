@@ -148,9 +148,11 @@
 
 说明：Tauri 卸载器自带的“删除应用数据”选项针对的是以 `identifier`（`com.moss.laser`）命名的目录，**覆盖不到 MOSS 实际使用的 `%APPDATA%\moss`**，因此数据删除必须在 `installer/hooks.nsh` 的卸载钩子中显式实现（实施时以实际 Tauri 版本的卸载器行为为准再核对一次）。
 
-### 3.6 升级
+### 3.6 升级与本机快速同步
 
 - 新版本安装包直接覆盖安装：沿用上次的安装范围与目录，只替换程序文件，`%APPDATA%\moss` 不动。
+- **日常每次代码改动后的正式版快速同步（`scripts/quick-update-desktop.ps1` / `scripts\start.bat -Update`，2026-11-01 用户决定）**：每次修复问题或新增功能通过测试后，默认执行 `powershell -File scripts/quick-update-desktop.ps1`（内部跑 `cargo tauri build --no-bundle`，未装 `cargo-tauri` 时回退 `npm run build` + `cargo build --release -p moss-desktop --features tauri/custom-protocol`），直接产出最新正式版 `target/release/moss-desktop.exe`（已内嵌最新 `frontend/dist` 与 `voice-private.html`），跳过 NSIS 压包与许可证暂存，并自动核对 `crates/moss-voice-local-proto/src/lib.rs` 的 `PROTOCOL_VERSION`，将协议匹配的 `moss-voice-local.exe` 同步到 `target/release/`（以及已存在的 `target/debug/`；本机尚无匹配协议产物时自动重编 `apps/moss-voice-local`）。若检测到本机已有安装目录（注册表或 `%LOCALAPPDATA%\MOSS` / `%ProgramFiles%\MOSS`，也可传 `-InstallDir <path>`），自动原地覆盖 `moss-desktop.exe`（若安装目录已含 `moss-voice-local.exe` 或传了 `-WithVoiceHelper` 也一并同步）并核对 SHA-256；若目标程序正在运行则绝不强杀（严守 I-7），自动将运行中的旧文件同目录改名为 `*.old-<时间戳>.exe` 挪开并写入新版（下次运行时自动清理已释放的旧文件），用户关掉重开即生效。涉及离线语音辅助程序内部实现（协议号未变）或独立宿主改动时追加 `-WithVoiceHelper`、`-WithHost`。阶段收尾与对外交付仍须按 §0 执行完整安装包构建。
+- **桌面热重载开发窗口（`scripts/dev-desktop.ps1` / `scripts\start.bat -Dev`）**：自动确保 `target/debug/moss-voice-local.exe` 与当前 `PROTOCOL_VERSION` 对齐（`start.bat` 直接启动桌面版前同样核对同目录辅助程序协议号），拉起回环 Vite（`127.0.0.1:5177`）与 debug 版 `moss-desktop` 实时预览前端与语音中心，仅供开发调试，不替代正式版验证。
 - 数据库 schema 由程序启动时自动迁移（`RuntimeDb` 只执行 `current < N` 的步骤）；降级到旧版本时旧程序也能打开新库（见技术书 §9.3）。
 - 自动更新（Tauri updater 插件）不在首版范围，后续单独评估；需要签名密钥与更新服务器。
 

@@ -96,6 +96,12 @@ impl ToolExecutor for MusicTools {
             }
         })
     }
+    fn recent_workflows<'a>(
+        &'a self,
+        context: &'a ToolContext,
+    ) -> BoxFuture<'a, Option<Value>> {
+        self.underlying.recent_workflows(context)
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -140,5 +146,98 @@ mod tests {
             ));
         }
         assert!(!rt.block_on(tools.call_raw(&ctx, PLAY, "{}")).success);
+    }
+
+    #[test]
+    fn desktop_wrapper_stack_forwards_recent_workflows_for_job_done_announcement() {
+        use crate::home_tools::{HomeAvailability, HomeHost, HomeTools};
+        use crate::plugins::runtime::{CombinedTools, InfoTools, PluginHost};
+        use std::sync::Mutex;
+
+        struct LeafTools(Mutex<Value>);
+        impl ToolExecutor for LeafTools {
+            fn tools(&self) -> Vec<ToolSpec> {
+                Vec::new()
+            }
+            fn call<'a>(
+                &'a self,
+                _: &'a ToolContext,
+                _: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, ToolOutcome> {
+                Box::pin(async { ToolOutcome::Reply("{}".into()) })
+            }
+            fn recent_workflows<'a>(
+                &'a self,
+                _: &'a ToolContext,
+            ) -> BoxFuture<'a, Option<Value>> {
+                let snapshot = self.0.lock().unwrap().clone();
+                Box::pin(async move { Some(snapshot) })
+            }
+        }
+        struct InertPlugins;
+        impl PluginHost for InertPlugins {
+            fn config(&self) -> Value {
+                json!({})
+            }
+            fn secret(&self, _: &str) -> Option<String> {
+                None
+            }
+            fn permitted(&self, _: &ToolContext) -> bool {
+                false
+            }
+        }
+        struct InertHome;
+        impl HomeHost for InertHome {
+            fn availability(&self) -> HomeAvailability {
+                HomeAvailability {
+                    read: false,
+                    control: false,
+                }
+            }
+            fn permitted(&self, _: &ToolContext) -> bool {
+                false
+            }
+            fn invoke(&self, _: &ToolContext, _: &str, _: &Value) -> Value {
+                json!({})
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("夜雨.wav"), b"fake").unwrap();
+        let leaf = Arc::new(LeafTools(Mutex::new(json!({
+            "workflows": [{"workflow_id": "wf-wrap-1", "status": "sending", "send_result": {"lines_sent": 10, "total_lines": 50}}]
+        }))));
+        let combined: Arc<dyn ToolExecutor> = Arc::new(CombinedTools {
+            original: leaf.clone(),
+            info: Arc::new(InfoTools::new(Arc::new(InertPlugins)).unwrap()),
+        });
+        let home: Arc<dyn ToolExecutor> = Arc::new(HomeTools {
+            original: combined,
+            home: Arc::new(InertHome),
+        });
+        let full_stack: Arc<dyn ToolExecutor> = Arc::new(MusicTools::new(
+            home,
+            Arc::new(MusicIndex::scan(temp.path()).unwrap()),
+        ));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = ToolContext {
+            device_id: "dev-1".into(),
+            session_id: "sess-1".into(),
+        };
+        let mut poller = crate::jobs::JobWatcher::new();
+        assert!(rt.block_on(poller.poll(full_stack.as_ref(), &ctx)).is_empty(), "首次轮询建立基线");
+
+        *leaf.0.lock().unwrap() = json!({
+            "workflows": [{"workflow_id": "wf-wrap-1", "status": "completed", "send_result": {"lines_sent": 50, "total_lines": 50}}]
+        });
+        let ended = rt.block_on(poller.poll(full_stack.as_ref(), &ctx));
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].workflow_id, "wf-wrap-1");
+        assert!(ended[0].speech().contains("50"));
     }
 }

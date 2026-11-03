@@ -105,6 +105,20 @@ impl VisionPhotos {
     pub fn take(&self,device:&str)->Option<Photo>{
         self.0.lock().ok()?.remove(device)
     }
+
+    /// 预览待接进下一轮上下文的照片文本摘要（不消费照片、不克隆大图字节），供 Jev 预热对齐正式轮历史。
+    pub fn peek_message(&self, device: &str) -> Option<moss_voice_providers::ChatMessage> {
+        let photos = self.0.lock().ok()?;
+        let photo = photos.get(device)?;
+        Some(
+            Photo {
+                question: photo.question.clone(),
+                text: photo.text.clone(),
+                data_url: String::new(),
+            }
+            .into_message(),
+        )
+    }
 }
 
 #[derive(Clone)]

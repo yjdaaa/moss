@@ -3,7 +3,7 @@
 //! cannot submit without the durable HomeControl approval coordinator.
 #![allow(dead_code)]
 use super::approved::HomeControlTransport;
-use reqwest::{StatusCode, Url, blocking::Client, header, redirect::Policy};
+use reqwest::{StatusCode, Url, blocking::Client, header};
 use std::{io::Read, time::Duration};
 
 const MAX_REPLY: usize = 8 * 1024;
@@ -39,7 +39,7 @@ impl HttpsHomeTransport {
         let client = moss_voice::home_readonly::pinned_client(&url).map_err(|_| ())?;
         #[cfg(test)]
         let client = Client::builder()
-            .https_only(true).no_proxy().redirect(Policy::none())
+            .https_only(true).no_proxy().redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(7))
             .build().map_err(|_| ())?;

@@ -32,7 +32,7 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 13（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at` | 
+| version | INTEGER PK | 当前 15（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13） | 
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
@@ -286,6 +286,10 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | model / firmware_version | TEXT | OTA 上报的型号（`board.type`）与固件版本；空值不覆盖已有记录 |
 | last_ip | TEXT | 最近来访的局域网地址（只在本机显示） |
 | first_seen / last_seen / decided_at | REAL | Unix 秒；`decided_at` 为最近一次允许或撤销的时间，可空 |
+| info_json / info_at | TEXT / REAL | v14。开机 OTA 上报的原始 JSON（固件版本、芯片、flash/psram、MAC 等，单次 ≤ 8 KB）及记录时间，可空 |
+| hello_json / hello_at | TEXT / REAL | v14。WebSocket 连接握手 `hello` 快照（协议版本、传输方式、音频参数、`features.aec`）及记录时间，可空 |
+| status_json / status_at | TEXT / REAL | v14。设备自带 MCP `self.get_device_status` 最近一次返回（音量、屏幕、电池、网络）及记录时间，可空 |
+| listen_json / listen_at | TEXT / REAL | v15。最近一次实际拾音模式快照（如 `{"mode":"auto\|manual\|realtime"}`）及记录时间，可空 |
 
 ### 3.14 `voice_memory`（schema v7，NV10-1）
 

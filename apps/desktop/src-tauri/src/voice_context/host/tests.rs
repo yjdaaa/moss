@@ -180,3 +180,62 @@ fn nv19_deep_search_needs_a_configured_model() {
     let f = fixture();
     assert_eq!(call(&f, json!({"action": "deep_search", "query": "边缘发黑"})).unwrap_err().code, "context_llm_missing");
 }
+
+#[test]
+fn nv19_calibrated_speakers_connect_to_voice_access_and_private_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.json");
+    let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+    {
+        let db = db.lock().unwrap();
+        db.voice_device_seen(DEVICE, "client-1", "MOSS-550W", "1.2.0", "192.0.2.10", 1.0).unwrap();
+        db.set_voice_device_status(DEVICE, laser_runtime::VOICE_DEVICE_ALLOWED, 2.0).unwrap();
+    }
+
+    // 1. 未标定时：即使传入 PersonScope，VoiceAccess 也不放行个人范围
+    let active = Arc::new(Mutex::new(Vec::<(String, String, i64)>::new()));
+    let active_reader = active.clone();
+    let host = ContextHost::with_speakers(
+        db.clone(),
+        settings.clone(),
+        Arc::new(move || active_reader.lock().unwrap().clone()),
+    );
+    let alice = PersonScope::candidate("spk_alice", 2, 1).unwrap();
+    let ctx = ToolContext { device_id: DEVICE.into(), session_id: "s-1".into() };
+    let (uncalibrated, _) = VoiceAccess(host.trust.clone()).access(&ctx, Some(&alice)).unwrap();
+    assert!(uncalibrated.scope_of(ScopeKind::Person).is_none(), "未完成标定时不得开放按人范围");
+
+    // 2. 完成标定并开启 builtin_person_memory_enabled 后：语音回合与私有管理窗口均打通 Person 范围
+    *active.lock().unwrap() = vec![("spk_alice".into(), "Alice".into(), 2)];
+    let mut voice_settings = moss_voice::settings::load(&settings);
+    voice_settings.builtin_person_memory_enabled = true;
+    moss_voice::settings::save(&settings, &voice_settings).unwrap();
+
+    let (calibrated, _) = VoiceAccess(host.trust.clone()).access(&ctx, Some(&alice)).unwrap();
+    assert_eq!(
+        calibrated.scope_of(ScopeKind::Person).unwrap().key().id(),
+        "spk_alice"
+    );
+
+    let status = host.manage(&json!({"action": "status"}), || None).unwrap();
+    assert_eq!(status["persons"][0]["id"], "spk_alice");
+
+    let person_scope = json!({"kind": "person", "id": "spk_alice"});
+    let created = host
+        .manage(
+            &json!({"action": "create", "scope": person_scope, "category": "preference", "content": "单位默认用毫米", "confirmed": true}),
+            || None,
+        )
+        .unwrap();
+    assert_eq!(created["scope"]["kind"], "person");
+
+    // 3. 删除声纹或标定失效后：Person 范围立即失效，不可再越权读取
+    active.lock().unwrap().clear();
+    host.person_changed("spk_alice");
+    assert_eq!(
+        host.manage(&json!({"action": "list", "scope": person_scope}), || None)
+            .unwrap_err()
+            .code,
+        "context_access_denied"
+    );
+}

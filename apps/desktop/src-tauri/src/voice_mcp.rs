@@ -29,7 +29,7 @@ pub fn shutdown(app: &tauri::AppHandle) {
         }
     }
 }
-#[cfg(desktop)]
+#[cfg(all(test, desktop))]
 use crate::is_trusted_main as trusted_window;
 fn error(message: impl Into<String>) -> Value {
     json!({"code":"voice_mcp_error","message":message.into()})
@@ -40,15 +40,17 @@ where
     F: FnOnce(&laser_host::external_mcp::ExternalMcp) -> Result<Value, String> + Send + 'static,
 {
     let app = window.app_handle();
-    let expected = app
+    if !app
         .try_state::<crate::BackendOrigin>()
-        .and_then(|s| s.0.as_ref().ok().cloned())
-        .ok_or_else(|| error("桌面后端不可用"))?;
-    let url = window.url().map_err(|_| error("无法核实窗口来源"))?;
+        .is_some_and(|s| s.0.is_ok())
+    {
+        return Err(error("桌面后端不可用"));
+    }
+    let _ = window.url().map_err(|_| error("无法核实窗口来源"))?;
     let has_session = app
         .try_state::<crate::DesktopSession>()
         .is_some_and(|s| s.0.is_some());
-    if !has_session || !trusted_window(window.label(), &url, &expected) {
+    if !has_session || !crate::window_is_trusted_main(&window) {
         return Err(error("只能在 MOSS 主窗口管理第三方 MCP"));
     }
     let external = app

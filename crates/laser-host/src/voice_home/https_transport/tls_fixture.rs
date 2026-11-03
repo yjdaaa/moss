@@ -1,6 +1,7 @@
 //! NV15 fake TLS Home Assistant: actual HTTPS bytes, no external devices.
 //! This fixture is TEST-ONLY and never sends anything to a real HA instance.
 use super::*;
+use reqwest::redirect::Policy;
 use rustls::{
     ServerConfig, ServerConnection, StreamOwned,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},

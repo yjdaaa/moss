@@ -29,8 +29,96 @@ export const DOUBAO_DEFAULTS = {
   tts: { url: "wss://openspeech.bytedance.com/api/v3/tts/bidirection", model: "seed-tts-2.0" },
 };
 
+/** 豆包流式无在线模型列表接口，内置常用资源 ID 供下拉选取（仍可手动填写其他控制台资源 ID）。 */
+export const DOUBAO_MODEL_OPTIONS = {
+  asr: [
+    { id: "volc.bigasr.sauc.duration", hint: "流式识别 1.0 · 小时版（默认）" },
+    { id: "volc.bigasr.sauc.concurrent", hint: "流式识别 1.0 · 并发版" },
+    { id: "volc.seedasr.sauc.duration", hint: "流式识别 2.0 · 小时版" },
+    { id: "volc.seedasr.sauc.concurrent", hint: "流式识别 2.0 · 并发版" },
+  ],
+  tts: [
+    { id: "seed-tts-2.0", hint: "语音合成 2.0（默认）" },
+    { id: "seed-tts-1.0", hint: "语音合成 1.0" },
+    { id: "volc.service_type.10029", hint: "大模型语音合成 · 并发版" },
+  ],
+};
+
 export function isDoubao(form) {
   return form?.kind === "doubao";
+}
+
+const OPENAI_VOICE_PRESETS = [
+  { id: "alloy", hint: "Alloy · 中性均衡（默认）" },
+  { id: "nova", hint: "Nova · 活力女声" },
+  { id: "shimmer", hint: "Shimmer · 温柔女声" },
+  { id: "echo", hint: "Echo · 温暖男声" },
+  { id: "onyx", hint: "Onyx · 浑厚男声" },
+  { id: "fable", hint: "Fable · 叙事音色" },
+  { id: "coral", hint: "Coral · 自然女声" },
+  { id: "sage", hint: "Sage · 知性音色" },
+];
+
+const COSYVOICE_SPEAKERS = [
+  { suffix: "anna", hint: "Anna · 沉稳女声（默认）" },
+  { suffix: "alex", hint: "Alex · 沉稳男声" },
+  { suffix: "bella", hint: "Bella · 活力女声" },
+  { suffix: "benjamin", hint: "Benjamin · 低沉男声" },
+  { suffix: "charles", hint: "Charles · 磁性男声" },
+  { suffix: "claire", hint: "Claire · 温柔女声" },
+  { suffix: "david", hint: "David · 欢快男声" },
+  { suffix: "diana", hint: "Diana · 欢快女声" },
+];
+
+const DOUBAO_V2_VOICE_PRESETS = [
+  { id: "zh_female_vv_uranus_bigtts", hint: "Vivi 2.0 · 中文女声（默认）" },
+  { id: "zh_female_xiaohe_uranus_bigtts", hint: "小荷 2.0 · 自然女声" },
+  { id: "zh_male_m191_uranus_bigtts", hint: "云舟 2.0 · 沉稳男声" },
+  { id: "zh_male_taocheng_uranus_bigtts", hint: "小天 2.0 · 阳光男声" },
+];
+
+const DOUBAO_V1_VOICE_PRESETS = [
+  { id: "zh_female_cancan_mars_bigtts", hint: "灿灿 · 甜美女声（默认）" },
+  { id: "zh_female_shuangkuaisisi_moon_bigtts", hint: "爽快思思 · 中文女声" },
+  { id: "zh_male_wennuanahu_moon_bigtts", hint: "温暖阿虎 · 中文男声" },
+  { id: "zh_female_wanwanxiaohe_moon_bigtts", hint: "湾湾小何 · 温柔女声" },
+];
+
+/** 根据当前语音合成表单（接口类型 + 模型名）返回推荐音色列表，仍支持手动填写任意音色。 */
+export function ttsVoiceOptionsFor(form) {
+  const model = String(form?.model || "").trim();
+  if (isDoubao(form)) {
+    const isV1 = model === "seed-tts-1.0" || model === "volc.service_type.10029";
+    return isV1 ? DOUBAO_V1_VOICE_PRESETS : DOUBAO_V2_VOICE_PRESETS;
+  }
+  if (/cosyvoice|moss-ttsd/i.test(model)) {
+    return COSYVOICE_SPEAKERS.map((item) => ({
+      id: `${model}:${item.suffix}`,
+      hint: item.hint,
+    }));
+  }
+  return OPENAI_VOICE_PRESETS;
+}
+
+/** 选定合成模型或切换接口类型时，若音色为空或仍是旧模型的 `<oldModel>:<speaker>` 前缀，自动填入新模型默认音色。 */
+export function applyDefaultTtsVoice(form, nextModel = form?.model) {
+  const next = { ...form, model: nextModel };
+  const options = ttsVoiceOptionsFor(next);
+  const defaultVoice = options[0]?.id || "";
+  const currentVoice = String(next.voice || "").trim();
+  if (!currentVoice) {
+    next.voice = defaultVoice;
+    return next;
+  }
+  if (!isDoubao(next) && currentVoice.includes(":")) {
+    const suffix = currentVoice.slice(currentVoice.lastIndexOf(":") + 1);
+    if (/cosyvoice|moss-ttsd/i.test(String(nextModel || ""))) {
+      next.voice = `${String(nextModel).trim()}:${suffix || "anna"}`;
+    } else {
+      next.voice = defaultVoice;
+    }
+  }
+  return next;
 }
 
 /** 切换接口类型：切到豆包时填入默认地址与资源 ID；切回 OpenAI 兼容时清掉豆包地址。密钥、音色保留。 */
@@ -48,14 +136,213 @@ export function switchKind(section, form, kind) {
   return next;
 }
 
-/** 与桌面端一致的最终地址规则：大模型写基础地址，语音识别 / 合成写完整接口地址；豆包留空用默认地址。 */
+/**
+ * 识别仅提供大模型对话接口、不提供 OpenAI `/audio/transcriptions` 与 `/audio/speech` 语音端点的网关
+ * （对齐 `yetone/magpie` `internal/provider/presets.go` 的 Chat-only 服务商与 Coding/Token Plan 专属端点）。
+ */
+export function chatOnlyGatewayName(url) {
+  const raw = String(url || "").trim();
+  if (!raw || !/^https?:\/\//i.test(raw)) return "";
+  try {
+    const parsed = new URL(raw);
+    const host = (parsed.hostname || "").toLowerCase();
+    const path = (parsed.pathname || "").toLowerCase();
+    if (host === "cline.bot" || host.endsWith(".cline.bot")) return "Cline (api.cline.bot)";
+    if (host === "openrouter.ai" || host.endsWith(".openrouter.ai")) return "OpenRouter";
+    if (host === "api.deepseek.com" || host.endsWith(".deepseek.com")) return "DeepSeek 官方 API";
+    if (host === "api.anthropic.com" || host.endsWith(".anthropic.com")) return "Anthropic";
+    if (host === "opencode.ai" || host.endsWith(".opencode.ai")) return "OpenCode Zen/Go";
+    if (host === "api.kilo.ai" || host.endsWith(".kilo.ai")) return "Kilo Gateway";
+    if (host === "api.moonshot.cn" || host === "api.moonshot.ai" || host === "api.kimi.com" || host === "api.kimi.ai") {
+      return "Kimi / Moonshot";
+    }
+    if (host.startsWith("token-plan") || path.includes("/api/coding") || path.includes("/tokenplan/") || path.includes("/step_plan/")) {
+      return "该 Coding / Token Plan 专属端点";
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+export function chatOnlyAudioGatewayError(section, url) {
+  if (!section || section === "llm") return "";
+  const gateway = chatOnlyGatewayName(url);
+  if (!gateway) return "";
+  const label = SECTION_USAGE_LABEL[section] || section;
+  const endpoint = section === "asr" ? "/audio/transcriptions" : "/audio/speech";
+  return `${gateway} 仅提供大模型对话接口，不支持${label}（无 ${endpoint} 端点）；请在顶部下拉框切换为「本地${label}」，或填写支持语音的服务商（如硅基流动 SiliconFlow、OpenAI、豆包流式）`;
+}
+
+/** 与桌面端一致的最终地址规则：大模型写基础地址，语音识别 / 合成写完整接口地址；豆包留空用默认地址；仅对话网关在语音分区不拼凑虚假音频路径。 */
 export function finalUrl(section, url, kind) {
   if (kind === "doubao") return trimEndSlash(url) || DOUBAO_DEFAULTS[section]?.url || "";
   const base = trimEndSlash(url);
   if (!base) return "";
   if (section === "llm") return base.replace(/\/chat\/completions$/, "").replace(/\/+$/, "");
+  if (chatOnlyGatewayName(base)) return "";
   const suffix = section === "asr" ? "/audio/transcriptions" : "/audio/speech";
   return base.endsWith(suffix) ? base : `${base}${suffix}`;
+}
+
+/** 从任意分区地址还原基础服务地址（去掉 `/chat/completions`、`/audio/transcriptions`、`/audio/speech`、`/models`）。 */
+export function baseServiceUrl(url) {
+  const trimmed = trimEndSlash(url);
+  if (!trimmed) return "";
+  return ["/chat/completions", "/audio/transcriptions", "/audio/speech", "/models"].reduce(
+    (current, suffix) => (current.endsWith(suffix) ? trimEndSlash(current.slice(0, -suffix.length)) : current),
+    trimmed,
+  );
+}
+
+/** 与桌面端 `models_list_url` 一致：从任意分区填写的地址推导 `/models` 列表查询地址。 */
+export function modelsListUrl(url) {
+  const base = baseServiceUrl(url);
+  return base ? `${base}/models` : "";
+}
+
+/**
+ * 查找其他分区已保存的 OpenAI 兼容服务商信息：
+ * - `sameOrigin`: 当前填写的 `formUrl` 与另一个已保存密钥的分区同源（基础 `/models` 地址一致），密钥留空可直接复用；
+ * - `reusable`: 当前分区可一键填入的已配置服务商地址与本机密钥来源（优先大模型 `llm`；仅支持大模型的网关不会提供给语音识别/合成）。
+ */
+export function findPeerCloudSource(section, status, formUrl = "") {
+  const models = status?.models || {};
+  const currentListUrl = modelsListUrl(formUrl);
+  let sameOrigin = null;
+  let reusable = null;
+  for (const item of SECTIONS) {
+    if (item.key === section) continue;
+    const peer = models[item.key];
+    if (!peer?.configured || peer.kind === "doubao") continue;
+    if (section !== "llm" && chatOnlyGatewayName(peer.url)) continue;
+    const peerBase = baseServiceUrl(peer.url);
+    const peerListUrl = modelsListUrl(peer.url);
+    if (!peerBase || !peerListUrl) continue;
+    const info = {
+      section: item.key,
+      label: item.label,
+      baseUrl: peerBase,
+      keySet: Boolean(peer.key_set),
+    };
+    if (currentListUrl && peerListUrl === currentListUrl && peer.key_set && !sameOrigin) {
+      sameOrigin = info;
+    }
+    if (!reusable && (!currentListUrl || peerListUrl !== currentListUrl)) {
+      reusable = info;
+    }
+  }
+  return { sameOrigin, reusable };
+}
+
+/** 读取模型列表前的地址检查（不要求提前填写模型名与音色）。 */
+export function modelsListError(form, section = "") {
+  if (isDoubao(form)) return "";
+  const url = String(form?.url || "").trim();
+  if (!url) return "请先填写地址";
+  if (!/^https?:\/\//i.test(url)) return "地址必须以 http:// 或 https:// 开头";
+  if (/[<>\s]/.test(url)) return "地址包含空白或占位符";
+  const gatewayErr = chatOnlyAudioGatewayError(section, url);
+  if (gatewayErr) return gatewayErr;
+  return "";
+}
+
+/** 是否满足自动读取模型列表的条件：OpenAI 兼容、地址有效，且已有密钥（含同源已存密钥或本机回环服务）。 */
+export function canAutoFetchModels(form, entry, status = null, section = "") {
+  if (isDoubao(form) || modelsListError(form, section)) return false;
+  if (String(form?.api_key || "").trim() || entry?.key_set) return true;
+  if (status && section && findPeerCloudSource(section, status, form?.url).sameOrigin) return true;
+  return /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/|$)/i.test(String(form?.url || "").trim());
+}
+/** 当前表单对应的模型列表缓存键（地址或密钥变动后重新读取）。 */
+export function modelsListKey(form, entry, peerKeySet = false) {
+  if (isDoubao(form)) return `doubao:${trimEndSlash(form?.url)}`;
+  return JSON.stringify([modelsListUrl(form?.url), String(form?.api_key || "").trim(), Boolean(entry?.key_set || peerKeySet)]);
+}
+const SECTION_USAGE_LABEL = { llm: "大模型", asr: "语音识别", tts: "语音合成" };
+const OMNI_ALL_RE = /(?:qwen[\d.]*-omni|gpt-4o(?:-[a-z0-9]+)*-(?:audio|realtime)|gemini-[\d.]+-[a-z0-9-]*live|glm-4-voice|step-1o|minimax-omni)/i;
+const OMNI_LLM_ASR_RE = /(?:qwen2?-audio|ultravox|voxtral|salmonn|kimi-audio)/i;
+const ASR_MODEL_RE =
+  /(?:whisper|sensevoice|sense-voice|paraformer|funasr|teleasr|telespeech|fireredasr|zipformer|transcribe|speech-to-text|audio-to-text|canary-|dolphin-asr|wenet|conformer|(?:^|[\/_-])(?:x-asr|asr|stt)(?:$|[\/_-]|\d)|volc\.(?:bigasr|seedasr))/i;
+const TTS_MODEL_RE =
+  /(?:cosyvoice|fish-speech|fishaudio|indextts|index-tts|kokoro|matcha|f5-tts|spark-tts|chattts|melotts|vits|text-to-speech|text2speech|audio-speech|voice-clone|bark|seed-tts|volc\.service_type|(?:^|[\/_-])tts(?:$|[\/_-]|\d)|(?:^|[\/_-])speech-(?:01|02|hd|turbo))/i;
+const NON_CHAT_VOICE_RE =
+  /(?:embed|bge-(?:large|base|small|m3|reranker)|rerank|bce-reranker|moderation|dall-e|flux[.\-_\/]|stable-diffusion|sdxl|kolors|wanx|wan2\.\d|cogview|cogvideo|seedream|imagen|hidream|sora|kling|vidu|hunyuanvideo|ltx-video|mochi-1)/i;
+
+/**
+ * 识别模型 ID 可用于哪些分区（`["llm" | "asr" | "tts"]`）：
+ * - 全能/多模态语音模型（如 `Qwen2.5-Omni`、`gpt-4o-audio`、`Qwen2-Audio`）会同时返回 2 个或 3 个分区，在各对应分区均会显示；
+ * - 向量、重排、生图、生视频等模型返回 `[]`，不混入默认推荐。
+ */
+export function classifyModelSections(modelId) {
+  const id = String(modelId || "").trim();
+  if (!id || NON_CHAT_VOICE_RE.test(id)) return [];
+  if (OMNI_ALL_RE.test(id)) return ["llm", "asr", "tts"];
+  if (OMNI_LLM_ASR_RE.test(id)) return ["llm", "asr"];
+  if (/step-audio/i.test(id) && !/step-audio-(?:tts|asr)/i.test(id)) return ["asr", "tts"];
+  const isAsr = ASR_MODEL_RE.test(id);
+  const isTts = !/sensevoice|sense-voice/i.test(id) && TTS_MODEL_RE.test(id);
+  if (isAsr || isTts) {
+    const out = [];
+    if (/(?:chat|instruct)/i.test(id)) out.push("llm");
+    if (isAsr) out.push("asr");
+    if (isTts) out.push("tts");
+    return out;
+  }
+  return ["llm"];
+}
+
+export function modelUsageLabel(sections) {
+  const list = Array.isArray(sections) ? sections.filter((s) => SECTION_USAGE_LABEL[s]) : [];
+  if (list.length === 0) return "其他用途";
+  return list.map((s) => SECTION_USAGE_LABEL[s]).join(" · ");
+}
+
+/** 下拉模型列表过滤：支持按当前分区用途（`section` + `onlyMatched`）自动筛选，并支持多词子串查询。 */
+/** 下拉模型列表过滤：融合服务端 `modelSections` 元数据与模型名规则，支持按分区用途（`section` + `onlyMatched`）自动筛选及多词查询。 */
+export function filterModelOptions(options, query, filtering = false, { section = "", onlyMatched = false, modelSections = null } = {}) {
+  const normalized = (Array.isArray(options) ? options : [])
+    .map((item) => {
+      if (typeof item === "string") {
+        const id = item.trim();
+        const byName = classifyModelSections(id);
+        const byMeta = modelSections && Array.isArray(modelSections[id]) ? modelSections[id] : null;
+        const sections =
+          byMeta !== null
+            ? byMeta.length === 0
+              ? []
+              : [...new Set([...byMeta, ...byName.filter((s) => s !== "llm")])]
+            : byName;
+        const usageHint = modelUsageLabel(sections);
+        const hint = id.startsWith("cline-pass/")
+          ? "ClinePass 订阅"
+          : id.startsWith("cline-free/") || id === "stealth/space-bunny-alpha"
+            ? "Cline 免费"
+            : "";
+        const displayHint = [hint, usageHint].filter(Boolean).join(" · ");
+        return { id, hint, sections, usageHint, displayHint };
+      }
+      const id = String(item?.id || "").trim();
+      const hint = String(item?.hint || "").trim();
+      const sections = Array.isArray(item?.sections) ? item.sections : section ? [section] : classifyModelSections(id);
+      const usageHint = item?.usageHint || modelUsageLabel(sections);
+      const displayHint = hint || usageHint;
+      return { id, hint, sections, usageHint, displayHint };
+    })
+    .filter((item) => item.id);
+  const matched =
+    onlyMatched && section
+      ? normalized.filter((item) => item.sections.includes(section))
+      : normalized;
+  const anyClassified = normalized.some((item) => item.sections.length > 0);
+  const pool = onlyMatched && section && anyClassified ? matched : normalized;
+  if (!filtering) return pool;
+  const tokens = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return pool;
+  return pool.filter((item) => {
+    const haystack = `${item.id} ${item.hint} ${item.usageHint}`.toLowerCase();
+    return tokens.every((token) => haystack.includes(token));
+  });
 }
 
 export function emptyForm(section) {
@@ -112,6 +399,8 @@ export function sectionInputError(section, form) {
   if (!payload.url) return "请填写地址";
   if (!/^https?:\/\//i.test(payload.url)) return "地址必须以 http:// 或 https:// 开头";
   if (/[<>\s]/.test(payload.url)) return "地址包含空白或占位符";
+  const gatewayErr = chatOnlyAudioGatewayError(section, payload.url);
+  if (gatewayErr) return gatewayErr;
   if (!payload.model) return "请填写模型名";
   if (section === "tts") {
     if (!payload.voice) return "请填写音色";
@@ -256,6 +545,66 @@ const DEVICE_STATUS = {
   revoked: { text: "已撤销", tone: "off" },
 };
 
+/**
+ * 设备信息快照（schema 14）：把设备开机上报（info）、连接握手（hello）、实时状态（status）
+ * 三段原始 JSON 摊成可显示的行。字段随固件版本变化，缺什么就显示「—」，不猜。
+ */
+export function builtinDeviceInfoView(device) {
+  const parse = (text) => {
+    if (!text) return null;
+    try {
+      const value = JSON.parse(text);
+      return value && typeof value === "object" ? value : null;
+    } catch {
+      return null;
+    }
+  };
+  const text = (value) => (value === undefined || value === null || value === "" ? "—" : String(value));
+  const size = (bytes) => {
+    const number = Number(bytes);
+    if (!Number.isFinite(number) || number <= 0) return "—";
+    return number >= 1024 * 1024 ? `${Math.round(number / 1024 / 1024)} MB` : `${Math.round(number / 1024)} KB`;
+  };
+  const info = parse(device?.info_json);
+  const hello = parse(device?.hello_json);
+  const status = parse(device?.status_json);
+  const app = info?.application || {};
+  const audio = hello?.audio;
+  const rows = [
+    ["固件版本", text(app.version || device?.firmware_version)],
+    ["应用名", text(app.name)],
+    ["芯片", text(info?.chip_model_name)],
+    ["Flash / PSRAM", `${size(info?.flash_size)} / ${size(info?.psram_size)}`],
+    ["服务端 AEC 声明", typeof hello?.aec === "boolean" ? (hello.aec ? "已声明" : "未声明") : "未上报"],
+    ["设备端回声消除", "固件不上报，看实际拾音模式（realtime 即已开启），本面板不推断"],
+    [
+      "实际拾音模式",
+      (() => {
+        const mode = parse(device?.listen_json)?.mode;
+        if (mode === "realtime") return "realtime（固件选了实时对话，说明设备端 AEC 开启）";
+        if (mode === "auto") return "auto（设备端 AEC 关闭或未启用）";
+        if (mode === "manual") return "manual（手动说话，无法判断 AEC）";
+        return "未上报";
+      })(),
+    ],
+    ["帧协议", hello ? `v${text(hello.protocol_version)} · ${text(hello.transport)}` : "—"],
+    ["上行音频", audio ? `${text(audio.sample_rate)} Hz · ${text(audio.format)} · ${text(audio.frame_duration)} ms` : "—"],
+    ["设备自带 MCP", hello ? (hello.mcp ? "支持" : "不支持") : "—"],
+    ["界面语言", text(info?.language)],
+    ["IDF 版本", text(app.idf_version)],
+    ["编译时间", text(app.compile_time)],
+    ["MAC", text(info?.mac_address)],
+    ["UUID", text(info?.uuid)],
+  ];
+  return {
+    rows,
+    hasInfo: Boolean(info),
+    hasHello: Boolean(hello),
+    hasStatus: Boolean(status),
+    status: status || null,
+    updatedAt: Number(device?.info_at) || 0,
+  };
+}
 /** 内置语音服务的设备状态与可用操作（内置语音技术书 §6：新设备首次连接需在电脑上允许）。 */
 export function builtinDeviceView(device) {
   const status = device?.status || "pending";
@@ -314,9 +663,11 @@ export function builtinModelForm(section, entry) {
   return form;
 }
 
-/** 密钥输入框的占位文字：已保存时说明留空即沿用，绝不显示密钥本身。 */
-export function builtinKeyPlaceholder(entry) {
-  return entry?.key_set ? "已设置（留空则沿用已保存的密钥）" : "未设置（本地模型服务可以不填）";
+/** 密钥输入框的占位文字：已保存或同源已存时说明留空即沿用，绝不显示密钥本身。 */
+export function builtinKeyPlaceholder(entry, sameOriginPeer = null) {
+  if (entry?.key_set) return "已设置（留空则沿用已保存的密钥）";
+  if (sameOriginPeer?.keySet) return `留空将自动复用“${sameOriginPeer.label}”已保存的密钥`;
+  return "未设置（本地模型服务可以不填）";
 }
 
 /** 字节数显示为 MB（保留 1 位小数，小于 1 MB 显示 KB）。 */
@@ -343,11 +694,11 @@ export function localModelView(model) {
   return { text: "未下载", tone: "off", percent: null, canDownload: true, canCancel: false, canDelete: false };
 }
 
-/** 本地模型的三个类别：开关文字与默认模型（与后端 `BuiltinLocal` 的默认值一致）。 */
+/** 本地模型的三个类别与默认模型（开关与选用统一由顶部四栏下拉框控制）。 */
 export const LOCAL_KINDS = [
-  { kind: "vad", title: "判停", toggle: "自动拾音判停用本地模型（否则用能量判停）", fallback: "silero_vad" },
-  { kind: "asr", title: "语音识别", toggle: "语音识别用本地模型（代替云端识别）", fallback: "sense_voice" },
-  { kind: "tts", title: "语音合成", toggle: "语音合成用本地模型（代替云端合成）", fallback: "kokoro" },
+  { kind: "vad", title: "拾音判停", fallback: "silero_vad" },
+  { kind: "asr", title: "语音识别", fallback: "sense_voice" },
+  { kind: "tts", title: "语音合成", fallback: "kokoro" },
 ];
 
 /** 按类别分组的本地模型（保持后端清单顺序）。 */
@@ -365,6 +716,13 @@ export function localSettingsForm(settings) {
     barge_in_ms: String(value.barge_in_ms ?? 400),
     read_only_shortcuts: value.read_only_shortcuts !== false,
     asr_beam_search: value.asr_beam_search !== false,
+    job_done_announce: value.job_done_announce !== false,
+    jev_filter_enabled: Boolean(value.jev_filter_enabled),
+    jev_model: value.jev_model || "typesafe/jev-1.14",
+    jev_unfinished_hold: value.jev_unfinished_hold !== false,
+    jev_fast_route: value.jev_fast_route !== false,
+    jev_tool_prune: value.jev_tool_prune !== false,
+    jev_memory_filter: value.jev_memory_filter !== false,
     custom_hotwords: (Array.isArray(value.custom_hotwords) ? value.custom_hotwords : []).join("\n"),
     tts: Boolean(value.tts),
     vad: Boolean(value.vad),
@@ -389,6 +747,16 @@ export function selectLocalModel(form, models, kind, id) {
 export function selectedVoices(form, models) {
   const model = (Array.isArray(models) ? models : []).find((item) => item.id === form.tts_model);
   return model?.voices || null;
+}
+
+/** 云端 TTS 启用时（`!form.tts`），返回当前作为云端异常优先兜底的已安装本地 TTS 模型；未安装任何本地 TTS 或已启用本地主 TTS 时返回 `null`。 */
+export function resolveFallbackTtsModel(form, models = []) {
+  if (!form || Boolean(form.tts)) return null;
+  const ttsModels = (Array.isArray(models) ? models : []).filter(
+    (item) => (!item.kind || item.kind === "tts") && item.installed
+  );
+  if (ttsModels.length === 0) return null;
+  return ttsModels.find((item) => item.id === form.tts_model) || ttsModels[0] || null;
 }
 
 /** 前端先做的检查，按保存分组拆开；返回错误文字或空串。语音体验分组（插话、热词）： */
@@ -429,6 +797,13 @@ export function localSettingsPayload(form) {
     barge_in_ms: Number(form.barge_in_ms ?? 400),
     read_only_shortcuts: form.read_only_shortcuts !== false,
     asr_beam_search: form.asr_beam_search !== false,
+    job_done_announce: form.job_done_announce !== false,
+    jev_filter_enabled: Boolean(form.jev_filter_enabled),
+    jev_model: String(form.jev_model || "typesafe/jev-1.14").trim() || "typesafe/jev-1.14",
+    jev_unfinished_hold: form.jev_unfinished_hold !== false,
+    jev_fast_route: form.jev_fast_route !== false,
+    jev_tool_prune: form.jev_tool_prune !== false,
+    jev_memory_filter: form.jev_memory_filter !== false,
     custom_hotwords: [...new Set(String(form.custom_hotwords || "").split(/\r?\n/).map((word) => word.trim()).filter(Boolean))],
     tts: Boolean(form.tts),
     vad: Boolean(form.vad),
@@ -444,7 +819,7 @@ export function localSettingsPayload(form) {
 export const VOICE_TIMING_STAGES = {
   barge_in: "自然插话确认",
   recording_start: "开始拾音", vad_start: "VAD 确认开始", vad_end: "VAD 判停", utterance_end: "说完 / 松开",
-  interim_stop: "中间结果命中停止", final_asr: "最终识别", fast_route: "快捷路由",
+  interim_stop: "中间结果命中停止", final_asr: "最终识别", jev_filter: "Jev 筛选分流", fast_route: "快捷路由",
   first_llm_delta: "模型首字", first_sentence: "第一句切出", first_synthesis_start: "首次合成开始",
   first_synthesis_ready: "首段音频就绪", first_audio_frame: "首帧发给设备", turn_end: "本轮结束",
 };
@@ -524,6 +899,57 @@ export function toolStatText(tool) {
   return parts.join(" · ");
 }
 
+/**
+ * 内置工具（编译在 MOSS 里的原生工具）不能在界面上增删，只能开关；
+ * 这两段是交给 AI 编码助手的施工说明，用户复制后粘给 AI 由它改代码（2026-11-02 用户决定）。
+ * 增删第三方外部工具走「扩展 → 第三方 MCP 工具」，与这里无关。
+ */
+export const TOOL_EDIT_PROMPTS = {
+  add: {
+    title: "让 AI 新增一个内置工具",
+    text: [
+      "请在 MOSS 仓库里新增一个内置工具：<工具名>，用途是 <一句话说明它做什么>。",
+      "",
+      "按下面顺序改，只动相关文件，不要顺手重构：",
+      "1. 登记：crates/laser-tools/src/lib.rs 的 PRIORITY_TOOLS / SECONDARY_TOOLS 名单里加入新工具名（snake_case、以 _tool 结尾，不含双下划线 __，与现有工具一致）；ToolCatalog 会自动把它收进名单。",
+      "2. 声明：tests/golden/mcp_tools.json（被 crates/laser-mcp/src/lib.rs 的 tools_list_json / tools_list_with 编译期加载）增加它的 name、description 与 inputSchema（JSON Schema，必填项与取值范围写清楚）。",
+      "3. 分发与分级：crates/laser-mcp/src/lib.rs 的 dispatch_tool_call_with 增加同名 match 分支（非法参数返回结构化错误，不 panic），并在 crates/laser-contracts/src/risk.rs 的 tool_risk 显式标定 R0–R4 风险等级。",
+      "4. 实现：复用现有的连接解析 resolve_connection_spec、发送门禁 authorize_send 与错误处理，不新增抽象层。",
+      "5. 门禁：涉及运动、出光、发送 G-code、急停、删除、OTA、密钥的动作必须走现有审批与严格模式门禁，不得放宽；只读工具不得有副作用；急停类工具必须 can_disable=false。",
+      "6. Jev 粗筛归组：在 crates/moss-voice-server/src/jev.rs 的 groups_of_builtin_tool 将新工具归入现有 6 个粗粒度 ToolGroup（LaserQuery / LaserGenerate / LaserControl / InfoPlugin / HomeAndAgent / MusicAndDevice，跨类激光工具可挂多组）；严禁为单个新工具平铺独立的 noul 问题。",
+      "7. 测试：在 crates/laser-mcp、crates/laser-tools 与 crates/moss-voice-server 增加单元测试（参数校验、关闭后不可见、Jev 归组、失败路径），硬件与网络副作用一律用 mock 或 FakeGrbl。",
+      "8. 记录：同步 docs/developer/api-contracts.md 与对应技术书，在 CHANGELOG.md 的 [Unreleased] 加一条；跑 cargo test --workspace。",
+      "",
+      "完成后回报：新工具名、用途、风险等级与所属粗筛组、是否需要审批、改了哪些文件、跑了哪些测试及结果。",
+    ].join("\n"),
+  },
+  remove: {
+    title: "让 AI 删除或下线一个内置工具",
+    text: [
+      "请把 MOSS 内置工具里的 <工具名> 下线或删除。",
+      "",
+      "先判断用哪种做法：",
+      "1. 只是不想让模型用到它：不用改代码。在「设备与工具 → MOSS 内置工具」里取消勾选即可，关闭的工具不会出现在任何接入点与内置语音的工具列表中。",
+      "2. 要彻底删掉代码：按下面顺序执行。",
+      "",
+      "彻底删除的顺序：",
+      "1. 从 crates/laser-tools/src/lib.rs 的 PRIORITY_TOOLS / SECONDARY_TOOLS 名单移除。",
+      "2. 从 tests/golden/mcp_tools.json、crates/laser-mcp/src/lib.rs（tools_list_with / dispatch_tool_call_with）及 crates/laser-contracts/src/risk.rs（tool_risk）移除对应 schema、分发与分级分支。",
+      "3. 删除该工具的实现、只属于它的测试，并从 crates/moss-voice-server/src/jev.rs 的 groups_of_builtin_tool 清理该工具名（Jev 按当轮启用工具动态提问，删空某组也无需改 ToolGroup 枚举）。",
+      "4. 在 crates/、frontend/、docs/、scripts/ 全局搜索残留引用并逐条清理，把清单告诉我。",
+      "",
+      "不要动：laser_safe_action_tool（急停与停机）、严格模式、审批与 ACL 门禁；crates/laser-host/src/lib.rs 的 validate_disabled_tools 中不可关闭的约束必须保留。",
+      "",
+      "完成后：跑 cargo test --workspace 与前端 npm test，同步 docs/developer/api-contracts.md 与 CHANGELOG.md，并回报实际做法、删除清单、残留引用检查结果与测试结果。",
+    ].join("\n"),
+  },
+};
+
+/** 取指定模板的纯文本；类型未知时返回空字符串。 */
+export function toolEditPrompt(kind) {
+  return TOOL_EDIT_PROMPTS[kind]?.text || "";
+}
+
 /** 新增附加接入点前的校验；通过时返回空字符串。 */
 export function extraEndpointError(url, endpoints = [], max = 4) {
   const value = String(url || "").trim();
@@ -547,11 +973,16 @@ export const VOICE_TABS = [
 ];
 
 /**
- * 当前链路要显示的标签（2026-10-18 用户决定）：官方链路的模型在小智控制台配置，
- * 语音中心不显示“模型”标签；其余链路保留全部标签。当前链路用不到的卡片不渲染。
+ * 当前链路要显示的标签（2026-10-18 / 2026-11-02 用户决定）：
+ * - 官方链路的模型在小智控制台配置，不显示“模型”标签；
+ * - “隐私与家居”四项（对话记忆、信息服务、声纹、家居）均挂在 MOSS 内置语音会话上，只在 `builtin` 链路显示。
  */
 export function voiceTabsFor(mode) {
-  return mode === "official" ? VOICE_TABS.filter((item) => item.key !== "models") : VOICE_TABS;
+  return VOICE_TABS.filter((item) => {
+    if (item.key === "models" && mode === "official") return false;
+    if (item.key === "privacy" && mode !== "builtin") return false;
+    return true;
+  });
 }
 
 export const VOICE_MODE_LABEL = { official: "官方小智", self_hosted: "自建服务端", builtin: "MOSS 内置服务" };
@@ -620,13 +1051,41 @@ export function settingsGroupPayload(group, form) {
 
 /** 本地模型设置拆成两组分别保存：模型选择与语音体验。 */
 export const LOCAL_MODEL_KEYS = ["vad", "vad_model", "asr", "asr_model", "tts", "tts_model", "tts_speaker", "tts_speed", "mirror"];
-export const EXPERIENCE_KEYS = ["read_only_shortcuts", "asr_beam_search", "barge_in", "barge_in_ms", "custom_hotwords"];
+export const EXPERIENCE_KEYS = ["read_only_shortcuts", "asr_beam_search", "job_done_announce", "jev_filter_enabled", "jev_unfinished_hold", "jev_fast_route", "jev_tool_prune", "jev_memory_filter", "barge_in", "barge_in_ms", "custom_hotwords"];
 
 /** 只取草稿中本组字段，其余用已保存的值，避免保存一组时顺带提交另一组未保存的改动。 */
 export function mergeGroup(baseline, draft, keys) {
   const next = { ...baseline };
   for (const key of keys) next[key] = draft[key];
   return next;
+}
+
+/**
+ * 外部渠道（如顶部 5 栏下拉框或 Jev 模型卡片）保存后刷新 baseline 时：
+ * 仅保留用户在当前分组草稿中相对上一次 baseline 真实手动改动过的字段，其余未改动字段自动跟随新 baseline。
+ */
+export function syncLocalDraft(prevBaseline, nextBaseline, currentDraft, keys) {
+  const prev = prevBaseline || nextBaseline;
+  const next = { ...nextBaseline };
+  for (const key of keys) {
+    if (currentDraft && currentDraft[key] !== prev[key]) {
+      next[key] = currentDraft[key];
+    }
+  }
+  return next;
+}
+
+/** 仅提取本分组相对当前已保存 baseline 真正改动的键值作为局部保存载荷，防止跨组旧草稿覆盖外部刚切换的开关。 */
+export function localGroupPatch(baseline, draft, keys) {
+  const basePayload = localSettingsPayload(baseline);
+  const mergedPayload = localSettingsPayload(mergeGroup(baseline, draft, keys));
+  const patch = {};
+  for (const key of keys) {
+    if (JSON.stringify(mergedPayload[key]) !== JSON.stringify(basePayload[key])) {
+      patch[key] = mergedPayload[key];
+    }
+  }
+  return Object.keys(patch).length > 0 ? patch : Object.fromEntries(keys.map((k) => [k, mergedPayload[k]]));
 }
 
 function clock(at) {
@@ -649,6 +1108,355 @@ export function builtinModelSummary(section, entry, localOn = false) {
   if (!entry?.configured) return "未配置";
   const kind = entry.kind === "doubao" ? "豆包流式" : "";
   return ["已配置", kind, entry.model].filter(Boolean).join(" · ");
+}
+export const DEFAULT_JEV_MODEL = "typesafe/jev-1.14";
+export const LOCAL_LAYA_JEV_MODEL = "laya_multilingual";
+export const DEFAULT_JEV_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
+export const JEV_PRESET_MODELS = [
+  { id: "typesafe/jev-1.14", hint: "推荐 · 语音筛选与决策" },
+  { id: "typesafe/jev-1.13", hint: "经典版 · 加工反馈" },
+];
+
+export function isLocalLayaJevModel(rawModel) {
+  const model = String(rawModel || "").trim();
+  return (
+    model === "laya_multilingual" ||
+    model === "convaiinnovations/laya-multilingual" ||
+    model === "local/laya-multilingual"
+  );
+}
+
+export function jevModelError(rawModel) {
+  const model = String(rawModel || "").trim();
+  if (!model) return "请选择或填写 Jev 模型名称（如 typesafe/jev-1.14）";
+  if (model.length > 64 || model.includes("..") || !/^typesafe\/jev-[A-Za-z0-9._-]+$/.test(model)) {
+    return "Jev 模型须以 typesafe/jev- 开头（如 typesafe/jev-1.14 或 typesafe/jev-1.13）";
+  }
+  return "";
+}
+
+export function builtinJevForm(status) {
+  const jev = status?.jev || {};
+  const local = status?.local?.settings || {};
+  const rawModel = jev.model || local.jev_model || DEFAULT_JEV_MODEL;
+  const cloudModel = isLocalLayaJevModel(rawModel) ? DEFAULT_JEV_MODEL : rawModel;
+  return {
+    api_key: "",
+    model: cloudModel,
+    voice_enabled: Boolean(jev.voice_enabled ?? local.jev_filter_enabled),
+    feedback_enabled: Boolean(jev.feedback_enabled),
+  };
+}
+
+/** 同步 Jev 模型卡片草稿：仅保留用户未保存的输入（如手填 api_key 或未保存的开关改动），其余跟随新 baseline。 */
+export function syncJevDraft(prevBaseline, nextBaseline, currentForm) {
+  const prev = prevBaseline || nextBaseline;
+  if (!currentForm) return { ...nextBaseline };
+  return {
+    api_key: currentForm.api_key || "",
+    model: currentForm.model !== prev.model ? currentForm.model : nextBaseline.model,
+    voice_enabled:
+      currentForm.voice_enabled !== prev.voice_enabled ? currentForm.voice_enabled : nextBaseline.voice_enabled,
+    feedback_enabled:
+      currentForm.feedback_enabled !== prev.feedback_enabled
+        ? currentForm.feedback_enabled
+        : nextBaseline.feedback_enabled,
+  };
+}
+
+export function builtinJevKeyPlaceholder(status) {
+  if (status?.jev?.key_set) return "已设置（留空则沿用已保存的密钥）";
+  if (status?.jev?.openrouter_llm_key_set) return "留空将自动复用“大模型”已保存的 OpenRouter 密钥";
+  return "未设置（请输入 OpenRouter API Key）";
+}
+
+export function builtinJevSummary(status) {
+  const rawModel = status?.jev?.model || status?.local?.settings?.jev_model || DEFAULT_JEV_MODEL;
+  const isLocal = isLocalLayaJevModel(rawModel);
+  const voiceOn = Boolean(status?.jev?.voice_enabled ?? status?.local?.settings?.jev_filter_enabled);
+  const feedbackOn = Boolean(status?.jev?.feedback_enabled);
+  const cloudKeyReady = Boolean(
+    status?.jev?.key_set || status?.jev?.openrouter_llm_key_set || (!isLocal && status?.local?.jev_key_configured)
+  );
+  if (voiceOn && isLocal) {
+    return cloudKeyReady ? "使用本地模型（云端设置作备用）" : "使用本地模型";
+  }
+  if (!voiceOn && feedbackOn && isLocal) {
+    return cloudKeyReady ? "加工反馈开（本地模型） · 云端设置作备用" : "加工反馈开（本地模型）";
+  }
+  if (!cloudKeyReady) return "未配置";
+  const model = isLocal ? DEFAULT_JEV_MODEL : rawModel;
+  const scopes = [
+    voiceOn ? "语音筛选开" : "",
+    feedbackOn ? "加工反馈开（固定 1.13）" : "",
+  ].filter(Boolean);
+  if (!voiceOn && feedbackOn) {
+    return `加工反馈开（固定 1.13） · 语音待用 ${model}`;
+  }
+  return scopes.length ? `${scopes.join(" + ")} · ${model}` : `已配密钥（未启用） · ${model}`;
+}
+
+export function jevFingerprint(form) {
+  return JSON.stringify([String(form?.api_key || "").trim(), String(form?.model || "").trim()]);
+}
+
+/**
+ * 构造 Jev 决策卡片的保存载荷：
+ * 当当前实际路由为本地 Laya（`laya_multilingual`）且用户未主动修改云端模型名时，
+ * 保留 `laya_multilingual`（只更新开关或备用 OpenRouter 密钥），绝不把本地离线路由悄悄覆写成云端模型；
+ * 若本地权重已卸载且用户显式手填了云端 API Key，则按表单云端模型提交。
+ */
+export function builtinJevSavePayload(status, form, baseline) {
+  const rawModel = status?.local?.settings?.jev_model || status?.jev?.model || DEFAULT_JEV_MODEL;
+  const isCurrentLocal = isLocalLayaJevModel(rawModel);
+  const localInstalled = Boolean(
+    status?.jev?.local_installed ||
+      (Array.isArray(status?.local?.models) &&
+        status.local.models.some((m) => m && m.id === LOCAL_LAYA_JEV_MODEL && m.installed))
+  );
+  const typedKey = String(form?.api_key || "").trim();
+  const typedModel = String(form?.model || DEFAULT_JEV_MODEL).trim();
+  const baseModel = String(baseline?.model || DEFAULT_JEV_MODEL).trim();
+  const modelChanged = typedModel !== baseModel;
+  const switchUninstalledLocalToCloud = isCurrentLocal && !localInstalled && Boolean(typedKey);
+  const preserveLocal = isCurrentLocal && !modelChanged && !switchUninstalledLocalToCloud;
+  return {
+    api_key: String(form?.api_key || ""),
+    model: preserveLocal ? LOCAL_LAYA_JEV_MODEL : typedModel,
+    voice_enabled: Boolean(form?.voice_enabled),
+    feedback_enabled: Boolean(form?.feedback_enabled),
+  };
+}
+
+/**
+ * 顶部自由混搭栏按真实语音处理链路排序（从收音到播报）：
+ * 拾音判停 (vad) → 语音识别 (asr) → Jev 前置粗筛 (jev，识别后·进大模型前) → 大模型 (llm) → 语音合成 (tts)
+ */
+export const MIX_SECTIONS = [
+  { key: "vad", label: "1. 拾音判停", hint: "检测说话开始与结束（本地模型可抗风扇/机器噪音）" },
+  { key: "asr", label: "2. 语音识别", hint: "将语音转为文字（可混搭云端或本地模型）" },
+  { key: "jev", label: "3. Jev 前置粗筛", hint: "识别后·大模型前：半截话续听、快答分流、工具与记忆粗筛" },
+  { key: "llm", label: "4. 大模型", hint: "接收粗筛后的上下文与工具，生成对话回复与调用" },
+  { key: "tts", label: "5. 语音合成", hint: "将回复合成为语音播报（可混搭云端或本地模型）" },
+];
+
+/**
+ * 内置服务单项（llm / asr / tts / vad / jev）的顶部下拉切换视图：
+ * - `asr` / `tts` 可在“云端模型”与“本地模型”之间独立切换；
+ * - `vad` 可在“内置能量判停（免下载）”与“本地判停模型（Silero VAD / TEN-VAD）”之间独立切换；
+ * - `jev` 可在“关闭（仅本地规则）”、“开启 · typesafe/jev-1.14 / 1.13”与“本地 · Laya 多语言决策”之间直接切换；
+ * - 切换时已保存的密钥与备用配置原样保留。
+ */
+export function builtinSectionSourceView(section, status) {
+  if (section === "jev") {
+    const jevOn = Boolean(status?.local?.settings?.jev_filter_enabled ?? status?.jev?.voice_enabled);
+    const rawJevModel = status?.local?.settings?.jev_model || status?.jev?.model || DEFAULT_JEV_MODEL;
+    const isCurrentLocal = isLocalLayaJevModel(rawJevModel);
+    const cloudModel = isCurrentLocal ? DEFAULT_JEV_MODEL : rawJevModel;
+    const allLocal = Array.isArray(status?.local?.models) ? status.local.models : [];
+    const localLayaItem = allLocal.find((m) => m && m.id === LOCAL_LAYA_JEV_MODEL) || null;
+    const localInstalled = Boolean(status?.jev?.local_installed || localLayaItem?.installed);
+    const cloudKeyReady = Boolean(
+      status?.jev?.key_set ||
+        status?.jev?.openrouter_llm_key_set ||
+        (!isCurrentLocal && status?.local?.jev_key_configured)
+    );
+    const currentReady = isCurrentLocal ? localInstalled : cloudKeyReady;
+    const presets = JEV_PRESET_MODELS.some((item) => item.id === cloudModel)
+      ? JEV_PRESET_MODELS
+      : [{ id: cloudModel, hint: "当前选用" }, ...JEV_PRESET_MODELS];
+    const options = [
+      { value: "off", label: "关闭（仅本地 0ms 规则）", installed: true },
+      ...presets.map((item) => ({
+        value: `jev:${item.id}`,
+        id: item.id,
+        modelLabel: item.id,
+        isLocal: false,
+        installed: cloudKeyReady,
+        label: `开启 · ${item.id}${item.id === DEFAULT_JEV_MODEL ? "（推荐）" : ""}${cloudKeyReady ? "" : "（需配密钥）"}`,
+      })),
+      {
+        value: `local:${LOCAL_LAYA_JEV_MODEL}`,
+        id: LOCAL_LAYA_JEV_MODEL,
+        modelLabel: localLayaItem?.label || "Laya 多语言决策（322M）",
+        isLocal: true,
+        installed: localInstalled,
+        label: `本地 · ${localLayaItem?.label || "Laya 多语言决策（322M，中英 100+ 语言）"}${localInstalled ? "" : "（未下载）"}`,
+      },
+    ];
+    return {
+      section: "jev",
+      canUseLocal: true,
+      source: jevOn ? (isCurrentLocal ? "local" : "jev") : "off",
+      localOn: Boolean(jevOn && isCurrentLocal),
+      localReady: currentReady,
+      cloudConfigured: cloudKeyReady,
+      cloudModel,
+      activeText: jevOn
+        ? isCurrentLocal
+          ? localInstalled
+            ? `本地（${localLayaItem?.label || "Laya 多语言决策"}）`
+            : "本地（Laya 多语言决策 · 未下载）"
+          : currentReady
+            ? `开启（${cloudModel}）`
+            : `开启（${cloudModel} · 未配密钥）`
+        : "关闭（仅本地 0ms 规则）",
+      selectValue: jevOn ? (isCurrentLocal ? `local:${LOCAL_LAYA_JEV_MODEL}` : `jev:${cloudModel}`) : "off",
+      options,
+      installedLocalModel: localInstalled ? localLayaItem : null,
+      selectedLocalModel: isCurrentLocal ? localLayaItem : null,
+    };
+  }
+  const isVad = section === "vad";
+  const entry = !isVad ? status?.models?.[section] : null;
+  const cloudConfigured = Boolean(entry?.configured);
+  const cloudModel = entry?.model || "";
+  const defaultValue = isVad ? "energy" : "cloud";
+  const defaultOptionLabel = isVad
+    ? "内置能量判停（免下载）"
+    : cloudConfigured
+      ? `云端（${entry?.kind === "doubao" ? `豆包 · ${cloudModel}` : cloudModel}）`
+      : "云端（未配置）";
+  if (section === "llm") {
+    return {
+      section,
+      canUseLocal: false,
+      source: "cloud",
+      localOn: false,
+      localReady: false,
+      cloudConfigured,
+      cloudModel,
+      activeText: cloudConfigured ? `云端（${cloudModel}）` : "未配置",
+      selectValue: "cloud",
+      options: [{ value: "cloud", label: defaultOptionLabel, installed: true }],
+      installedLocalModel: null,
+      selectedLocalModel: null,
+    };
+  }
+  const localSettings = localSettingsForm(status?.local?.settings);
+  const localOn = Boolean(status?.local?.settings?.[section]);
+  const allLocal = Array.isArray(status?.local?.models) ? status.local.models : [];
+  const kindModels = allLocal.filter((item) => item && item.kind === section);
+  const selectedId = localSettings[`${section}_model`];
+  const selectedLocalModel = kindModels.find((item) => item.id === selectedId) || kindModels[0] || null;
+  const installedLocalModel =
+    selectedLocalModel && selectedLocalModel.installed
+      ? selectedLocalModel
+      : kindModels.find((item) => item.installed) || null;
+  const localReady = Boolean(localOn && selectedLocalModel?.installed);
+  const source = localOn ? "local" : defaultValue;
+  const activeText = localOn
+    ? selectedLocalModel?.installed
+      ? `本地（${selectedLocalModel.label}）`
+      : `本地（${selectedLocalModel?.label || "未下载"} · 未安装）`
+    : defaultOptionLabel;
+  const localOptions =
+    kindModels.length > 0
+      ? kindModels.map((item) => ({
+          value: `local:${item.id}`,
+          id: item.id,
+          modelLabel: item.label,
+          installed: Boolean(item.installed),
+          label: `本地 · ${item.label}${item.installed ? "" : "（未下载）"}`,
+        }))
+      : [
+          {
+            value: "local",
+            id: selectedId,
+            modelLabel: "本地模型",
+            installed: false,
+            label: "本地模型（未下载）",
+          },
+        ];
+  const selectValue = localOn
+    ? selectedLocalModel
+      ? `local:${selectedLocalModel.id}`
+      : "local"
+    : defaultValue;
+  return {
+    section,
+    canUseLocal: true,
+    source,
+    localOn,
+    localReady,
+    cloudConfigured,
+    cloudModel,
+    activeText,
+    selectValue,
+    options: [{ value: defaultValue, label: defaultOptionLabel, installed: true }, ...localOptions],
+    installedLocalModel,
+    selectedLocalModel,
+  };
+}
+
+/**
+ * 生成将某个分区（asr / tts / vad / jev）在顶部下拉框切换后的 localSave 载荷。
+ */
+export function builtinSourceSwitchPayload(status, section, targetSource) {
+  if (section === "jev") {
+    let form = localSettingsForm(status?.local?.settings);
+    const target = String(targetSource || "");
+    if (target === "off") {
+      form = { ...form, jev_filter_enabled: false };
+    } else if (target.startsWith("local:") || target === `jev:${LOCAL_LAYA_JEV_MODEL}`) {
+      form = { ...form, jev_filter_enabled: true, jev_model: LOCAL_LAYA_JEV_MODEL };
+    } else if (target.startsWith("jev:")) {
+      const modelId = target.slice("jev:".length).trim() || DEFAULT_JEV_MODEL;
+      if (jevModelError(modelId)) return null;
+      form = { ...form, jev_filter_enabled: true, jev_model: modelId };
+    } else {
+      return null;
+    }
+    return localSettingsPayload(form);
+  }
+  if (section !== "asr" && section !== "tts" && section !== "vad") return null;
+  const allLocal = Array.isArray(status?.local?.models) ? status.local.models : [];
+  let form = localSettingsForm(status?.local?.settings);
+  const target = String(targetSource || "");
+  if (target.startsWith("local:")) {
+    const modelId = target.slice("local:").length ? target.slice("local:".length).trim() : "";
+    if (modelId) {
+      form = selectLocalModel(form, allLocal, section, modelId);
+    }
+    form = { ...form, [section]: true };
+  } else if (target === "local") {
+    const view = builtinSectionSourceView(section, status);
+    if (view.installedLocalModel && view.installedLocalModel.id !== form[`${section}_model`]) {
+      form = selectLocalModel(form, allLocal, section, view.installedLocalModel.id);
+    }
+    form = { ...form, [section]: true };
+  } else {
+    form = { ...form, [section]: false };
+  }
+  return localSettingsPayload(form);
+}
+
+/**
+ * 生成顶部混搭栏单分区切换的最小增量补丁（仅提交本次切换涉及的字段，避免覆盖其他分组在途或刚保存的改动）。
+ */
+export function builtinSourceSwitchPatch(status, section, targetSource) {
+  if (section === "jev") {
+    const target = String(targetSource || "");
+    if (target === "off") {
+      return { jev_filter_enabled: false };
+    }
+    if (target.startsWith("local:") || target === `jev:${LOCAL_LAYA_JEV_MODEL}`) {
+      return { jev_filter_enabled: true, jev_model: LOCAL_LAYA_JEV_MODEL };
+    }
+    if (target.startsWith("jev:")) {
+      const modelId = target.slice("jev:".length).trim() || DEFAULT_JEV_MODEL;
+      if (jevModelError(modelId)) return null;
+      return { jev_filter_enabled: true, jev_model: modelId };
+    }
+    return null;
+  }
+  const full = builtinSourceSwitchPayload(status, section, targetSource);
+  if (!full) return null;
+  const keys =
+    section === "tts"
+      ? ["tts", "tts_model", "tts_speaker"]
+      : [section, `${section}_model`];
+  return Object.fromEntries(keys.map((key) => [key, full[key]]));
 }
 
 /** 外部服务端模型分组折叠时的一行摘要（MOSS 不读回服务端配置，只能显示最近一次测试）。 */
@@ -739,4 +1547,368 @@ export function agentView(info) {
     detail: run.output ? String(run.output) : agentErrorText(run.error_code) || "无结果",
   }));
   return { summary, providers, runs, strictMissing: Boolean(info?.configured) && !info?.strict_mode };
+}
+
+// ---------- MOSS 全息机械眼与三链路语音孪生（2026-11-03） ----------
+
+const SYMMETRIC_WAVE_WEIGHTS = [0.34, 0.50, 0.68, 0.84, 0.94, 1.0, 1.0, 0.94, 0.84, 0.68, 0.50, 0.34];
+const THINKING_SCAN_BARS = [22, 34, 48, 62, 48, 34, 34, 48, 62, 48, 34, 22];
+const PULSE_EVENT_BARS = [18, 30, 52, 74, 88, 64, 64, 88, 74, 52, 30, 18];
+const ALERT_BARS = [42, 68, 42, 78, 42, 86, 86, 42, 78, 42, 68, 42];
+const IDLE_BARS = [10, 12, 14, 16, 18, 20, 20, 18, 16, 14, 12, 10];
+const OFFLINE_BARS = [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6];
+
+function finiteNonNegativeInt(value, fallback = null) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+    return fallback;
+  }
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) {
+    return fallback;
+  }
+  return Math.trunc(num);
+}
+
+function sanitizeTwinLine(raw, maxLen = 140) {
+  if (!raw) return "";
+  const masked = maskLogLine(String(raw))
+    .replace(/流式中间结果整句命中急停词（[^）]*）/g, "流式中间结果整句命中急停词")
+    .replace(/开始播放本地歌曲：.+/g, "开始播放本地歌曲")
+    .trim();
+  return masked.length > maxLen ? `${masked.slice(0, maxLen)}…` : masked;
+}
+
+function sanitizeIdentifier(raw, maxLen = 48) {
+  const clean = maskLogLine(String(raw || ""))
+    .replace(/[\r\n\t]+/g, " ")
+    .trim();
+  return clean.length > maxLen ? `${clean.slice(0, maxLen)}…` : clean;
+}
+
+/**
+ * 生成 12 柱对称声波/指令脉冲高度（0..100，确定性纯函数，绝不生成随机假音频分贝）。
+ * - `builtin` 的 `listening` / `speaking` 按真实 60ms PCM RMS 音量 `level` 缩放；
+ * - `thinking` / `pulse` / `alert` / `idle` / `offline` 使用固定的状态几何图案。
+ */
+export function buildTwinWaveBars(visualState, level = 0) {
+  const rawLevel = finiteNonNegativeInt(level, 0);
+  const clamped = Math.max(0, Math.min(100, rawLevel));
+  if ((visualState === "listening" || visualState === "speaking") && clamped > 0) {
+    return SYMMETRIC_WAVE_WEIGHTS.map((weight) => Math.max(12, Math.min(100, Math.round(10 + clamped * 0.9 * weight))));
+  }
+  if (visualState === "listening" || visualState === "speaking") {
+    return [14, 18, 22, 26, 30, 34, 34, 30, 26, 22, 18, 14];
+  }
+  if (visualState === "thinking") return [...THINKING_SCAN_BARS];
+  if (visualState === "pulse") return [...PULSE_EVENT_BARS];
+  if (visualState === "alert") return [...ALERT_BARS];
+  if (visualState === "idle") return [...IDLE_BARS];
+  return [...OFFLINE_BARS];
+}
+
+function sessionPriority(state) {
+  if (state === "speaking") return 4;
+  if (state === "thinking") return 3;
+  if (state === "listening") return 2;
+  if (state === "idle") return 1;
+  return 0;
+}
+
+function pickPrimarySession(sessions) {
+  if (!Array.isArray(sessions) || sessions.length === 0) return null;
+  return [...sessions].sort((a, b) => {
+    const diff = sessionPriority(b?.state) - sessionPriority(a?.state);
+    if (diff !== 0) return diff;
+    return (finiteNonNegativeInt(b?.level, 0)) - (finiteNonNegativeInt(a?.level, 0));
+  })[0];
+}
+
+/**
+ * 语音中心顶部「MOSS 全息语音孪生舱」三链路自适应视图（确定性纯函数）。
+ * - `builtin`：同步 60ms 真实 PCM 振幅 `level`、会话阶段、识别字数、已播句数与工具调用；
+ * - `self_hosted`：同步自建 `xiaozhi-server` 进程状态、健康检查会话数、脱敏日志与 MCP 工具脉冲；
+ * - `official`：同步官方云端 MCP 握手状态、累计 JSON-RPC 消息帧数与远端工具调用脉冲。
+ */
+export function mossEyeTwinView({
+  mode = "official",
+  status = null,
+  builtinStatus = null,
+  mcpStatus = null,
+  logLines = [],
+  approvalCount = 0,
+} = {}) {
+  const normalizedMode = mode === "builtin" || mode === "self_hosted" || mode === "official" ? mode : "official";
+  const approvals = finiteNonNegativeInt(approvalCount, 0);
+  const approvalAlert = approvals > 0;
+
+  if (normalizedMode === "builtin") {
+    const running = Boolean(builtinStatus?.running);
+    const sessions = Array.isArray(builtinStatus?.sessions) ? builtinStatus.sessions : [];
+    const events = Array.isArray(builtinStatus?.events) ? builtinStatus.events : [];
+    const primary = pickPrimarySession(sessions);
+    const rawState = primary?.state || "idle";
+    const activeAudio = running && sessions.length > 0 && (rawState === "listening" || rawState === "speaking");
+    const level = activeAudio ? Math.max(0, Math.min(100, finiteNonNegativeInt(primary?.level, 0))) : 0;
+    const activeTool = sanitizeIdentifier(primary?.active_tool, 48);
+    const emotion = sanitizeIdentifier(primary?.emotion, 24);
+    const utteranceChars = finiteNonNegativeInt(primary?.utterance_chars, 0);
+    const spokenSentences = finiteNonNegativeInt(primary?.spoken_sentences, 0);
+
+    let visualState = "offline";
+    if (running) {
+      if (rawState === "speaking") visualState = "speaking";
+      else if (rawState === "thinking") visualState = "thinking";
+      else if (rawState === "listening") visualState = "listening";
+      else if (approvalAlert) visualState = "alert";
+      else visualState = "idle";
+    } else if (approvalAlert) {
+      visualState = "alert";
+    }
+
+    let headline = "内置语音未启动 · 光学镜头待命";
+    if (running) {
+      if (sessions.length === 0) {
+        headline = "内置服务运行中 · 等待小智设备接入";
+      } else if (rawState === "speaking") {
+        headline = "MOSS 正在播报 · 60ms 帧同步输出";
+      } else if (rawState === "thinking") {
+        headline = activeTool ? `正在执行工具 · ${activeTool}` : "神经网络推理中 · Jev / LLM 路由";
+      } else if (rawState === "listening") {
+        headline = level > 0 ? "正在拾音倾听 · 实时声波锁定" : "拾音通道开启 · 等待语音输入";
+      } else if (approvalAlert) {
+        headline = `等待桌面安全审批 (${approvals} 项)`;
+      } else {
+        headline = `小智设备在线 (${sessions.length} 台) · 随时唤醒`;
+      }
+    }
+
+    const latestEvent = sanitizeTwinLine(events[0]?.text);
+    const subline = latestEvent
+      || (running
+        ? `工作模式：${builtinStatus?.mode === "chat" ? "AI 对话模式" : "回声测试模式"}`
+        : "启动内置语音服务后，此处实时镜像小智设备的拾音振幅、思考路由与播报节奏");
+
+    const progressValue = spokenSentences > 0
+      ? `已播 ${spokenSentences} 句`
+      : activeTool
+        ? activeTool
+        : emotion
+          ? `情绪 ${emotion}`
+          : running
+            ? "待命"
+            : "未运行";
+
+    return {
+      mode: "builtin",
+      visualState,
+      sourceBadge: "REALTIME AUDIO TWIN",
+      sourceLabel: "内置服务 · 60ms 实时音频孪生",
+      level,
+      approvalAlert,
+      approvalCount: approvals,
+      activePolling: running && sessions.some((s) => s?.state === "listening" || s?.state === "thinking" || s?.state === "speaking"),
+      headline,
+      subline,
+      bars: buildTwinWaveBars(visualState, level),
+      metrics: [
+        { label: "在线会话", value: `${sessions.length} 台` },
+        { label: "实时振幅", value: activeAudio ? `${level}%` : "0% (静音)" },
+        { label: "本轮识别", value: utteranceChars > 0 ? `${utteranceChars} 字` : "—" },
+        { label: "播报/路由", value: progressValue },
+      ],
+    };
+  }
+
+  if (normalizedMode === "self_hosted") {
+    const serverState = status?.server?.state || "stopped";
+    const serverRunning = serverState === "running";
+    const serverExited = serverState === "exited";
+    const bridgeConnected = Boolean(status?.bridge?.connected ?? mcpStatus?.connected);
+    const healthSessions = finiteNonNegativeInt(status?.endpoint?.health?.robot_connections, null);
+    const mcpTools = Array.isArray(status?.mcp?.tools) ? status.mcp.tools : [];
+    const latestCalledTool = [...mcpTools].filter((t) => finiteNonNegativeInt(t?.calls, 0) > 0).sort((a, b) => (Number(b?.last_at) || 0) - (Number(a?.last_at) || 0))[0];
+    const rawLastRequest = String(mcpStatus?.last_request || (latestCalledTool ? `tools/call: ${latestCalledTool.name}` : "")).trim();
+    const lastRequest = sanitizeTwinLine(rawLastRequest, 72);
+    const sanitizedLines = (Array.isArray(logLines) ? logLines : [])
+      .map((line) => sanitizeTwinLine(line))
+      .filter(Boolean);
+    const lastLog = sanitizedLines.length > 0 ? sanitizedLines[sanitizedLines.length - 1] : "";
+    const hasToolCall = lastRequest.startsWith("tools/call:");
+    const toolName = hasToolCall ? sanitizeIdentifier(lastRequest.slice("tools/call:".length), 48) : "";
+
+    let visualState = "offline";
+    if (approvalAlert) {
+      visualState = "alert";
+    } else if (serverRunning || bridgeConnected) {
+      visualState = hasToolCall ? "pulse" : "idle";
+    }
+
+    let headline = "自建服务端未运行 · 桥接休眠";
+    if (approvalAlert) {
+      headline = `自建链路发起受控操作 · ${approvals} 项待桌面批准`;
+    } else if (serverExited) {
+      headline = `自建服务端意外退出 (退出码 ${status?.server?.exit_code ?? "未知"})`;
+    } else if (hasToolCall && (serverRunning || bridgeConnected)) {
+      headline = `正在响应自建服务指令 · ${toolName}`;
+    } else if (serverRunning && healthSessions !== null && healthSessions > 0) {
+      headline = `自建服务运行中 · ${healthSessions} 台小智会话在线`;
+    } else if (serverRunning) {
+      headline = "自建服务运行中 · 监听进程日志与 MCP 信号";
+    } else if (bridgeConnected) {
+      headline = "自建 MCP 桥已连接 · 等待服务端会话";
+    }
+
+    const recentMcpEvent = Array.isArray(mcpStatus?.recent_events) && mcpStatus.recent_events[0]
+      ? sanitizeTwinLine(mcpStatus.recent_events[0])
+      : "";
+    const subline = lastLog
+      ? `最新日志：${lastLog}`
+      : recentMcpEvent || "音频流由外部 xiaozhi-server 处理；此处同步进程脱敏日志与 MCP 工具脉冲（不伪造音频分贝）";
+
+    const pid = finiteNonNegativeInt(status?.server?.pid, null);
+    return {
+      mode: "self_hosted",
+      visualState,
+      sourceBadge: "LOCAL SERVER BRIDGE",
+      sourceLabel: "自建服务 · 进程日志与 MCP 桥接",
+      level: 0,
+      approvalAlert,
+      approvalCount: approvals,
+      activePolling: false,
+      headline,
+      subline,
+      bars: buildTwinWaveBars(visualState, 0),
+      metrics: [
+        {
+          label: "服务端进程",
+          value: serverRunning ? (pid !== null ? `运行中 (PID ${pid})` : "运行中") : serverExited ? "异常退出" : "未运行",
+        },
+        { label: "MCP 桥接", value: bridgeConnected ? "已连接" : "未连接" },
+        { label: "设备会话", value: healthSessions !== null ? `${healthSessions} 台` : "未配置健康检查" },
+        { label: "最近指令", value: lastRequest || "尚无工具调用" },
+      ],
+    };
+  }
+
+  // official 官方链路
+  const configured = Boolean(status?.mcp_endpoint || mcpStatus?.configured);
+  const bridgeConnected = Boolean(status?.bridge?.connected ?? mcpStatus?.connected);
+  const mcpTools = Array.isArray(status?.mcp?.tools) ? status.mcp.tools : [];
+  const latestCalledTool = [...mcpTools].filter((t) => finiteNonNegativeInt(t?.calls, 0) > 0).sort((a, b) => (Number(b?.last_at) || 0) - (Number(a?.last_at) || 0))[0];
+  const messagesCount = finiteNonNegativeInt(mcpStatus?.messages_count, 0);
+  const rawLastRequest = String(mcpStatus?.last_request || (latestCalledTool ? `tools/call: ${latestCalledTool.name}` : "")).trim();
+  const lastRequest = sanitizeTwinLine(rawLastRequest, 72);
+  const lastRequestTime = sanitizeIdentifier(mcpStatus?.last_request_time, 16);
+  const hasToolCall = lastRequest.startsWith("tools/call:");
+  const toolName = hasToolCall ? sanitizeIdentifier(lastRequest.slice("tools/call:".length), 48) : "";
+  const recentEvent = Array.isArray(mcpStatus?.recent_events) && mcpStatus.recent_events[0]
+    ? sanitizeTwinLine(mcpStatus.recent_events[0])
+    : "";
+  const rawToolsCount = finiteNonNegativeInt(mcpStatus?.tools_count, null);
+  const enabledToolsCount = rawToolsCount !== null
+    ? rawToolsCount
+    : mcpTools.length > 0
+      ? mcpTools.filter((t) => t?.enabled !== false).length
+      : null;
+
+  let visualState = "offline";
+  if (approvalAlert) {
+    visualState = "alert";
+  } else if (configured && bridgeConnected) {
+    visualState = hasToolCall ? "pulse" : "idle";
+  }
+
+  let headline = "官方 MCP 接入点未配置";
+  if (approvalAlert) {
+    headline = `云端发起受控操作 · ${approvals} 项待桌面批准`;
+  } else if (!configured) {
+    headline = "官方 MCP 接入点未配置 · 请在下方填写";
+  } else if (!bridgeConnected) {
+    headline = "官方 MCP 桥未连接 · 正在等待握手";
+  } else if (hasToolCall) {
+    headline = `收到云端小智指令 · ${toolName}`;
+  } else {
+    headline = "云端 MCP 神经桥在线 · 实时监听工具指令";
+  }
+
+  const subline = recentEvent
+    || "语音闲聊在官方云端处理；当小智查询机床状态或发起雕刻时，此处同步触发指令脉冲";
+
+  return {
+    mode: "official",
+    visualState,
+    sourceBadge: "CLOUD MCP TELEMETRY",
+    sourceLabel: "官方链路 · 云端 MCP 指令遥测",
+    level: 0,
+    approvalAlert,
+    approvalCount: approvals,
+    activePolling: false,
+    headline,
+    subline,
+    bars: buildTwinWaveBars(visualState, 0),
+    metrics: [
+      { label: "云端网关", value: bridgeConnected ? "已握手在线" : configured ? "连接中断" : "未配置" },
+      { label: "指令帧数", value: `${messagesCount} 帧` },
+      { label: "最近指令", value: lastRequest ? `${lastRequest}${lastRequestTime ? ` (${lastRequestTime})` : ""}` : "暂无调用" },
+      { label: "可用工具", value: enabledToolsCount !== null ? `${enabledToolsCount} 项` : "—" },
+    ],
+  };
+}
+
+/**
+ * 左侧全局导航栏（SideNav）左上角 MOSS 机械眼的轻量实时状态推导。
+ * 任意页面都可根据 `/api/system/info` 的 `mcp` / `voice` 与待审批数实时反馈。
+ */
+export function globalEyeSensorView({ mcpStatus = null, voiceStatus = null, approvalCount = 0 } = {}) {
+  const approvals = finiteNonNegativeInt(approvalCount, 0);
+  if (approvals > 0) {
+    return {
+      visualState: "alert",
+      level: 0,
+      label: `MOSS 警戒：${approvals} 个请求等待批准`,
+    };
+  }
+  const mode = voiceStatus?.mode || "official";
+  if (mode === "builtin") {
+    const phase = voiceStatus?.phase || null;
+    const level = Math.max(0, Math.min(100, finiteNonNegativeInt(voiceStatus?.level, 0)));
+    const sessions = finiteNonNegativeInt(voiceStatus?.device_sessions, null);
+    if (phase === "speaking") {
+      return { visualState: "speaking", level, label: `MOSS 正在播报（振幅 ${level}%）` };
+    }
+    if (phase === "thinking") {
+      return { visualState: "thinking", level: 0, label: "MOSS 正在思考 / 调用工具" };
+    }
+    if (phase === "listening") {
+      return { visualState: "listening", level, label: `MOSS 正在倾听（振幅 ${level}%）` };
+    }
+    if (sessions !== null && sessions > 0) {
+      return { visualState: "idle", level: 0, label: `MOSS 内置语音在线（${sessions} 台设备）` };
+    }
+    if (sessions === 0) {
+      return { visualState: "idle", level: 0, label: "MOSS 内置语音运行中（等待设备连接）" };
+    }
+    return { visualState: "offline", level: 0, label: "MOSS 内置语音未启动" };
+  }
+  const connected = Boolean(mcpStatus?.connected);
+  if (!connected) {
+    return {
+      visualState: "offline",
+      level: 0,
+      label: mode === "self_hosted" ? "自建 MCP 桥未连接" : "小智 MCP 桥未连接",
+    };
+  }
+  const lastReq = sanitizeTwinLine(mcpStatus?.last_request, 72);
+  if (lastReq.startsWith("tools/call:")) {
+    return {
+      visualState: "pulse",
+      level: 0,
+      label: `小智最近调用：${sanitizeIdentifier(lastReq.slice("tools/call:".length), 48)}`,
+    };
+  }
+  return {
+    visualState: "idle",
+    level: 0,
+    label: mode === "self_hosted" ? "自建 MCP 桥已连接" : "官方小智 MCP 桥已连接",
+  };
 }

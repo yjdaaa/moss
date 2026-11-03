@@ -42,8 +42,13 @@ if (Get-Command cargo-sweep.exe -CommandType Application -ErrorAction SilentlyCo
     }
 }
 
-# 1. Incremental caches and temporary check dirs
-Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 2 -Filter incremental | ForEach-Object { Remove-Cache $_.FullName }
+# 1. Incremental caches (>3 days old) and temporary check dirs
+$cutoff = (Get-Date).AddDays(-3)
+Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 2 -Filter incremental | ForEach-Object {
+    Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cutoff } |
+        ForEach-Object { Remove-Cache $_.FullName }
+}
 Get-ChildItem -LiteralPath $target -Directory | Where-Object { $_.Name -eq 'tmp' -or $_.Name -like 'codex-*' } |
     ForEach-Object { Remove-Cache $_.FullName }
 
@@ -83,7 +88,11 @@ Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 2 -Filter deps | F
     Get-ChildItem -LiteralPath $_.FullName -File |
         Where-Object { $_.Name -match $artifact -and $names.Contains($Matches[2]) } |
         Group-Object { $null = $_.Name -match $artifact; '{0}|{1}|{2}' -f $Matches[1], $Matches[2], $Matches[4] } |
-        ForEach-Object { $_.Group | Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 | ForEach-Object { Remove-Cache $_.FullName } }
+        ForEach-Object {
+            $_.Group | Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 |
+                Where-Object { $_.LastWriteTime -lt $cutoff } |
+                ForEach-Object { Remove-Cache $_.FullName }
+        }
 }
 
 Write-Host ('Freed (or would free with -WhatIf): {0:N2} GB' -f ($script:freed / 1GB))

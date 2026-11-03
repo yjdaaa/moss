@@ -140,6 +140,9 @@ impl ToolExecutor for HomeTools {
             }else {ToolOutcome::Reply(reply.to_string())}
         })
     }
+    fn recent_workflows<'a>(&'a self,ctx:&'a ToolContext)->BoxFuture<'a,Option<Value>>{
+        self.original.recent_workflows(ctx)
+    }
 }
 
 #[cfg(test)]

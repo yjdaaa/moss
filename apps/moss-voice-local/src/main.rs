@@ -56,9 +56,43 @@ fn to_i16(samples: &[f32]) -> Vec<i16> {
     samples.iter().map(|&sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16).collect()
 }
 
+/// Windows 上 `std::fs::canonicalize` 会返回 `\\?\C:\...` 或 `\\?\UNC\...` 逐字路径前缀。
+/// `sherpa-onnx` C++ 层（如 Kokoro / Matcha 拼接 `espeak-ng-data/phontab`、`dict/hmm_model.utf8`）在内部硬编码正斜杠 `/`；
+/// 一旦带 `\\?\` 前缀，Windows 内核不再把 `/` 归一化为 `\`，导致文件打开失败。交给 C++ 配置前剥离常规盘符与 UNC 逐字前缀。
+fn strip_windows_verbatim_prefix(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        if !rest.is_empty() && !rest.contains('/') {
+            return format!(r"\\{rest}");
+        }
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+            && !rest.contains('/')
+        {
+            return rest.to_owned();
+        }
+    }
+    raw.to_owned()
+}
+
+fn native_path_string(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        strip_windows_verbatim_prefix(&raw)
+    }
+    #[cfg(not(windows))]
+    {
+        raw.into_owned()
+    }
+}
+
 fn require(path: &Path) -> Result<String, String> {
     if path.exists() {
-        Ok(path.to_string_lossy().into_owned())
+        Ok(native_path_string(path))
     } else {
         Err(format!("模型文件不存在：{}", path.display()))
     }
@@ -70,7 +104,7 @@ fn first_of(dir: &Path, names: &[&str]) -> Result<String, String> {
         .iter()
         .map(|name| dir.join(name))
         .find(|path| path.exists())
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| native_path_string(&path))
         .ok_or_else(|| format!("模型文件不存在：{}", dir.join(names[0]).display()))
 }
 
@@ -80,7 +114,7 @@ fn rule_fsts(dir: &Path) -> Option<String> {
         .iter()
         .map(|name| dir.join(name))
         .filter(|path| path.is_file())
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| native_path_string(&path))
         .collect();
     (!found.is_empty()).then(|| found.join(","))
 }
@@ -141,12 +175,14 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
     for (id, op, payload) in jobs {
         match op {
             Op::LoadVad { model, params, engine } => {
-                let candidate = vad_config(engine, &model, &params);
                 // 试建一个检测器确认模型可用
-                match require(Path::new(&model)).and_then(|_| {
-                    VoiceActivityDetector::create(&candidate, 30.0).map(|_| ()).ok_or_else(|| "判停模型加载失败".to_owned())
+                match require(Path::new(&model)).and_then(|clean_model| {
+                    let candidate = vad_config(engine, &clean_model, &params);
+                    VoiceActivityDetector::create(&candidate, 30.0)
+                        .map(|_| candidate)
+                        .ok_or_else(|| "判停模型加载失败".to_owned())
                 }) {
-                    Ok(()) => {
+                    Ok(candidate) => {
                         config = Some(candidate);
                         streams.clear();
                         loaded.vad.store(true, Ordering::SeqCst);
@@ -360,7 +396,7 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
                 lexicon: Some(require(&dir.join("lexicon.txt"))?),
                 tokens: Some(require(&dir.join("tokens.txt"))?),
                 data_dir: Some(require(&dir.join("espeak-ng-data"))?),
-                dict_dir: dir.join("dict").is_dir().then(|| dir.join("dict").to_string_lossy().into_owned()),
+                dict_dir: dir.join("dict").is_dir().then(|| native_path_string(&dir.join("dict"))),
                 ..Default::default()
             },
             num_threads: 2,
@@ -511,7 +547,7 @@ fn speaker_worker(jobs:Receiver<Job>,out:Out){
                             return Err("声纹模型加载前发生变更".into());
                         }
                     }
-                    let config=SpeakerEmbeddingExtractorConfig{model:Some(path.to_string_lossy().into_owned()),num_threads:1,debug:false,provider:Some("cpu".into())};
+                    let config=SpeakerEmbeddingExtractorConfig{model:Some(native_path_string(&path)),num_threads:1,debug:false,provider:Some("cpu".into())};
                     let created=SpeakerEmbeddingExtractor::create(&config).ok_or("声纹模型加载失败")?;
                     if created.dim()!=SPEAKER_DIMENSION as i32{return Err("声纹模型输出维度不匹配".into());}
                     Ok((created,file,directory_guards))
@@ -591,5 +627,69 @@ fn main() {
         if target.send((id, op, payload)).is_err() {
             error(&out, id, "工作线程已退出");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_windows_verbatim_prefix_handles_drive_unc_and_plain_paths() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\Users\demo\AppData\Roaming\moss\models\kokoro-multi-lang-v1_0\espeak-ng-data"),
+            r"C:\Users\demo\AppData\Roaming\moss\models\kokoro-multi-lang-v1_0\espeak-ng-data"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\moss\models"),
+            r"\\server\share\moss\models"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"C:\Users\demo\models"),
+            r"C:\Users\demo\models"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix("/Users/demo/Library/Application Support/moss/models"),
+            "/Users/demo/Library/Application Support/moss/models"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tts_config_strips_verbatim_prefix_from_canonicalized_model_dirs() {
+        let unique = format!(
+            "moss-voice-local-path-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let temp = std::env::temp_dir().join(unique);
+        let kokoro_dir = temp.join("kokoro");
+        std::fs::create_dir_all(kokoro_dir.join("espeak-ng-data")).unwrap();
+        std::fs::create_dir_all(kokoro_dir.join("dict")).unwrap();
+        for file in ["model.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt", "phone-zh.fst"] {
+            std::fs::write(kokoro_dir.join(file), b"stub").unwrap();
+        }
+        let canonical = std::fs::canonicalize(&kokoro_dir).unwrap();
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+
+        let cfg = tts_config(&canonical, TtsEngine::Kokoro).unwrap();
+        let kokoro = &cfg.model.kokoro;
+        for field in [
+            kokoro.model.as_deref(),
+            kokoro.voices.as_deref(),
+            kokoro.tokens.as_deref(),
+            kokoro.data_dir.as_deref(),
+            kokoro.dict_dir.as_deref(),
+            kokoro.lexicon.as_deref(),
+            cfg.rule_fsts.as_deref(),
+        ] {
+            let value = field.expect("populated kokoro path");
+            assert!(!value.contains(r"\\?\"), "unexpected verbatim prefix in {value}");
+        }
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

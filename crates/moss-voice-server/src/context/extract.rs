@@ -123,6 +123,10 @@ impl ContextExtractor {
             return None;
         }
         let device_key = access.scope_of(ScopeKind::Device)?.key().clone();
+        let flight_key = match access.scope_of(ScopeKind::Person) {
+            Some(person) => format!("{}#person:{}", device_key.id(), person.key().id()),
+            None => device_key.id().to_owned(),
+        };
         let dialog = bounded_dialog(history);
         if dialog.is_empty() || !history.iter().any(|m| m.role == Role::User) {
             return None;
@@ -130,10 +134,10 @@ impl ContextExtractor {
         let pending = self.pending.clone().try_acquire_owned().ok()?;
         let snapshot = {
             let mut gate = self.gate.lock().ok()?;
-            if !gate.enabled || gate.in_flight.contains(device_key.id()) {
+            if !gate.enabled || gate.in_flight.contains(&flight_key) {
                 return None;
             }
-            gate.in_flight.insert(device_key.id().to_owned());
+            gate.in_flight.insert(flight_key.clone());
             let epochs: Vec<(ScopeKey, u64)> = access.scopes().iter().map(|s| (s.key().clone(), *gate.epochs.get(s.key()).unwrap_or(&0))).collect();
             (gate.generation, epochs)
         };
@@ -147,7 +151,7 @@ impl ContextExtractor {
                     }
                 }
             }
-            let _finish = Finish(this.clone(), device_key.id().to_owned());
+            let _finish = Finish(this.clone(), flight_key);
             let _pending = pending;
             let Ok(_worker) = this.workers.clone().acquire_owned().await else { return };
             let (sender, _receiver) = mpsc::unbounded_channel();
@@ -242,7 +246,18 @@ pub struct ContextExtraction {
 impl ContextExtraction {
     /// Called after a normal disconnect with the committed history; never blocks.
     pub fn session_closed(&self, context: &crate::conversation::ToolContext, history: &[ChatMessage], llm: Arc<dyn Llm>) -> bool {
-        match self.access.access(context, None) {
+        self.session_closed_for_person(context, None, history, llm)
+    }
+
+    /// Called after a normal disconnect with a calibrated speaker's isolated history.
+    pub fn session_closed_for_person(
+        &self,
+        context: &crate::conversation::ToolContext,
+        person: Option<&crate::person_context::PersonScope>,
+        history: &[ChatMessage],
+        llm: Arc<dyn Llm>,
+    ) -> bool {
+        match self.access.access(context, person) {
             Some((access, device)) => self.extractor.queue(access, device, history, llm),
             None => false,
         }

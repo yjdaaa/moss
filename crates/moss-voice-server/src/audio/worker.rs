@@ -19,6 +19,7 @@ impl Drop for WorkerSlot {
 }
 struct Work {
     epoch: u64,
+    seq: u64,
     samples: Vec<i16>,
     prime: bool,
     at: Instant,
@@ -29,11 +30,14 @@ pub(crate) struct VadFrame {
     pub notice: Option<String>,
     pub prime: bool,
     epoch: u64,
+    seq: u64,
 }
 pub(crate) struct VadWorker {
     input: SyncSender<Work>,
     output: tokio::sync::mpsc::Receiver<VadFrame>,
     epoch: Arc<AtomicU64>,
+    next_seq: u64,
+    completed_seq: u64,
     waiting: VecDeque<Instant>,
     max_samples: usize,
 }
@@ -83,6 +87,7 @@ impl VadWorker {
                             notice,
                             prime: work.prime,
                             epoch: work.epoch,
+                            seq: work.seq,
                         })
                         .is_err()
                     {
@@ -95,12 +100,15 @@ impl VadWorker {
             input,
             output,
             epoch,
+            next_seq: 0,
+            completed_seq: 0,
             waiting: VecDeque::new(),
             max_samples: rate as usize * 2,
         })
     }
     pub fn reset(&mut self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.completed_seq = self.next_seq;
         self.waiting.clear();
         while self.output.try_recv().is_ok() {}
     }
@@ -109,19 +117,29 @@ impl VadWorker {
             return Err("语音处理积压，已停止本轮识别，请重新连接；紧急情况请使用实体急停".into());
         }
         let at = Instant::now();
+        let seq = self.next_seq.wrapping_add(1);
         self.input
             .try_send(Work {
                 epoch: self.epoch.load(Ordering::Acquire),
+                seq,
                 samples,
                 prime,
                 at,
             })
             .map_err(|_| "语音处理队列不可用")?;
+        self.next_seq = seq;
         self.waiting.push_back(at);
         Ok(())
     }
     pub fn pending(&self) -> bool {
         !self.waiting.is_empty()
+    }
+    /// 若当前存在已入队但尚未由会话循环消费的帧，返回当前最后入队序号作为排空屏障。
+    pub fn pending_target(&self) -> Option<u64> {
+        (self.completed_seq < self.next_seq).then_some(self.next_seq)
+    }
+    pub fn completed_seq(&self) -> u64 {
+        self.completed_seq
     }
     pub async fn next(&mut self) -> Result<VadFrame, String> {
         let Some(first) = self.waiting.front().copied() else {
@@ -137,6 +155,7 @@ impl VadWorker {
                 continue;
             }
             self.waiting.pop_front();
+            self.completed_seq = frame.seq;
             return Ok(frame);
         }
     }

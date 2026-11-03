@@ -159,6 +159,27 @@ async fn llm_accepts_non_streaming_json_and_omits_empty_tools() {
     assert!(!request.head.to_ascii_lowercase().contains("authorization"), "没有密钥时不发 Authorization");
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert!(body.get("tools").is_none() && body.get("tool_choice").is_none());
+
+    // 兼容 Cline 等网关在非流式下返回的 `{ success: true, data: { choices: [...] } }` 包裹结构
+    let wrapped = json!({
+        "success": true,
+        "data": {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "套壳回答",
+                    "tool_calls": [{"id": "c9", "type": "function", "function": {"name": "get_time", "arguments": "{}"}}]
+                }
+            }]
+        }
+    })
+    .to_string();
+    let (url, _) = serve_once(vec![response("200 OK", "application/json", wrapped.as_bytes())]).await;
+    let llm = OpenAiLlm::new(&format!("{url}/api/v1"), KEY, "cline-pass/deepseek-v4.1-flash").unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let reply = llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap();
+    assert_eq!(reply.text, "套壳回答");
+    assert_eq!(reply.tool_calls, vec![ToolCall::new("c9", "get_time", "{}")]);
 }
 
 #[tokio::test]

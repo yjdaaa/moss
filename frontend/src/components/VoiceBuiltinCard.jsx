@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, Trash2, Download, Lock, ChevronDown, Copy } from "lucide-react";
+import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, Trash2, Download, Lock, ChevronDown, Copy, RefreshCw, Volume2 } from "lucide-react";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
@@ -10,29 +10,57 @@ import VoiceHomeCard from "./VoiceHomeCard.jsx";
 import VoiceHomeApprovalCard from "./VoiceHomeApprovalCard.jsx";
 import VoiceContextCard from "./VoiceContextCard.jsx";
 import {
+  DEFAULT_JEV_DECISIONS_URL,
+  DEFAULT_JEV_MODEL,
+  DOUBAO_MODEL_OPTIONS,
   EXPERIENCE_KEYS,
+  JEV_PRESET_MODELS,
   LOCAL_MODEL_KEYS,
+  MIX_SECTIONS,
   SECTIONS,
   VOICE_POLL_MS,
   allowDeviceConfirmText,
+  applyDefaultTtsVoice,
+  builtinDeviceInfoView,
   builtinDeviceView,
+  builtinJevForm,
+  builtinJevKeyPlaceholder,
+  builtinJevSavePayload,
+  builtinJevSummary,
   builtinKeyPlaceholder,
   builtinModeView,
   builtinModelForm,
   builtinModelSummary,
+  builtinSectionSourceView,
+  builtinSourceSwitchPatch,
+  builtinSourceSwitchPayload,
+  canAutoFetchModels,
   canSaveSection,
+  chatOnlyAudioGatewayError,
+  chatOnlyGatewayName,
   experienceSettingsError,
+  filterModelOptions,
   finalUrl,
+  findPeerCloudSource,
   formDirty,
   formatBytes,
+  isLocalLayaJevModel,
   isSectionBlank,
+  jevFingerprint,
+  jevModelError,
   localModelGroups,
   localModelSettingsError,
   localModelView,
+  localGroupPatch,
   localSettingsForm,
   localSettingsPayload,
   mergeGroup,
+  syncJevDraft,
+  syncLocalDraft,
+  modelsListError,
+  modelsListKey,
   savedNoteText,
+  resolveFallbackTtsModel,
   selectLocalModel,
   selectedVoices,
   isDoubao,
@@ -40,6 +68,7 @@ import {
   sectionInputError,
   sectionPayload,
   switchKind,
+  ttsVoiceOptionsFor,
   voiceErrorText,
   VOICE_TIMING_STAGES,
   voiceTimingReport,
@@ -63,30 +92,50 @@ function restartEffect(next) {
 
 /** 内置服务状态：每 4 秒刷新；`busy` 在本服务的各部分之间共享，避免并发操作。 */
 export function useBuiltinStatus() {
-  const [status, setStatus] = useState(null);
+  const [status, rawSetStatus] = useState(null);
   const [busy, setBusy] = useState("");
   const mounted = useRef(true);
+  const versionRef = useRef(0);
+
+  const setStatus = useCallback((next) => {
+    versionRef.current += 1;
+    rawSetStatus(next);
+  }, []);
 
   const refresh = useCallback(async () => {
+    const ver = versionRef.current;
     try {
       const next = await voiceApi.builtinStatus();
-      if (mounted.current) setStatus(next);
+      if (mounted.current && versionRef.current === ver) {
+        rawSetStatus(next);
+      }
     } catch (error) {
       // 读过一次后保留上次状态，只标出刷新失败；不卸载各分组，避免丢失未保存的填写
-      if (mounted.current) setStatus((prev) => (prev && !prev.error ? { ...prev, poll_error: voiceErrorText(error) } : { error: voiceErrorText(error) }));
+      if (mounted.current && versionRef.current === ver) {
+        rawSetStatus((prev) => (prev && !prev.error ? { ...prev, poll_error: voiceErrorText(error) } : { error: voiceErrorText(error) }));
+      }
     }
   }, []);
+
+  const activeTurn = Boolean(
+    status?.running
+    && Array.isArray(status?.sessions)
+    && status.sessions.some((item) => item?.state === "listening" || item?.state === "thinking" || item?.state === "speaking"),
+  );
 
   useEffect(() => {
     mounted.current = true;
     refresh();
-    const timer = setInterval(refresh, VOICE_POLL_MS);
     return () => {
       mounted.current = false;
-      clearInterval(timer);
     };
   }, [refresh]);
 
+  useEffect(() => {
+    const intervalMs = activeTurn ? 280 : VOICE_POLL_MS;
+    const timer = setInterval(refresh, intervalMs);
+    return () => clearInterval(timer);
+  }, [activeTurn, refresh]);
   const act = useCallback(async (label, action) => {
     setBusy(label);
     try {
@@ -99,7 +148,7 @@ export function useBuiltinStatus() {
     } finally {
       if (mounted.current) setBusy("");
     }
-  }, []);
+  }, [setStatus]);
 
   return { status, setStatus, busy, setBusy, act };
 }
@@ -108,6 +157,8 @@ export function useBuiltinStatus() {
 export function BuiltinServicePanel({ builtin }) {
   const { status, busy, act } = builtin;
   const [editing, setEditing] = useState({ id: "", name: "" });
+  const [expanded, setExpanded] = useState("");
+  const [asking, setAsking] = useState("");
   if (!status) return <p className="voice-muted">正在读取内置服务状态…</p>;
   if (status.error) return <div className="voice-hint voice-hint--bad">{status.error}</div>;
 
@@ -128,6 +179,35 @@ export function BuiltinServicePanel({ builtin }) {
     const { id, name } = editing;
     setEditing({ id: "", name: "" });
     await act("修改名称", () => voiceApi.deviceRename(id, name));
+  };
+  /** 2026-11-02：设备信息面板的「刷新信息」——让设备回一次 `self.get_device_status`。 */
+  const refreshDeviceInfo = async (device) => {
+    setAsking(device.device_id);
+    try {
+      await voiceApi.deviceRequest(device.device_id, "refresh_info");
+      await showAlert("已请求设备上报信息，回包后这里的内容会更新（一般 1~2 秒）。", { title: "已发送", tone: "success" });
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: "刷新信息失败", tone: "error" });
+    } finally {
+      setAsking("");
+    }
+  };
+  /** 会打断当前对话，所以单独确认；重启后设备重新走 OTA，固件版本随之刷新。 */
+  const rebootDevice = async (device) => {
+    const view = builtinDeviceView(device);
+    if (!(await showConfirm(
+      `重启设备“${view.title}”？正在进行的对话会中断，屏幕会黑一下；重启后它会重新上报固件版本。`,
+      { title: "重启设备？", tone: "warning", danger: true, confirmText: "重启" },
+    ))) return;
+    setAsking(device.device_id);
+    try {
+      await voiceApi.deviceRequest(device.device_id, "reboot");
+      await showAlert("已发送重启指令，设备会在几秒后重新连接。", { title: "已发送", tone: "success" });
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: "重启设备失败", tone: "error" });
+    } finally {
+      setAsking("");
+    }
   };
 
   const copyOta = async () => {
@@ -205,8 +285,10 @@ export function BuiltinServicePanel({ builtin }) {
               devices.map((device) => {
                 const view = builtinDeviceView(device);
                 const online = sessions.some((session) => session.device_id === device.device_id);
+                const details = builtinDeviceInfoView(device);
                 return (
-                  <tr key={device.device_id}>
+                  <React.Fragment key={device.device_id}>
+                  <tr>
                     <td>
                       {editing.id === device.device_id ? (
                         <span className="voice-actions">
@@ -249,9 +331,58 @@ export function BuiltinServicePanel({ builtin }) {
                         <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => setEditing({ id: device.device_id, name: device.name || "" })} title="修改名称">
                           <Pencil size={13} />
                         </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          disabled={Boolean(busy)}
+                          onClick={() => setExpanded(expanded === device.device_id ? "" : device.device_id)}
+                          title="设备信息"
+                        >
+                          {expanded === device.device_id ? "收起" : "信息"}
+                        </button>
                       </span>
                     </td>
                   </tr>
+                  {expanded === device.device_id && (
+                    <tr>
+                      <td colSpan={5}>
+                        <p className="voice-muted">
+                          设备信息：版本与芯片来自设备开机上报，协议与音频参数来自连接握手；「刷新信息」只更新实时状态。回声消除不在本面板断言——固件只在启用服务端 AEC 时才上报 `aec` 字段，设备端 AEC 不上报。
+                        </p>
+                        <table className="voice-table">
+                          <tbody>
+                            {details.rows.map(([label, value]) => (
+                              <tr key={label}>
+                                <th scope="row">{label}</th>
+                                <td className="mono">{value}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <span className="voice-actions">
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            disabled={Boolean(asking) || !online}
+                            onClick={() => refreshDeviceInfo(device)}
+                            title="让设备重新上报实时状态（音量、屏幕、电池、网络）"
+                          >
+                            刷新信息
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            disabled={Boolean(asking) || !online}
+                            onClick={() => rebootDevice(device)}
+                            title="重启设备，让它重新上报固件版本"
+                          >
+                            重启设备
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 );
               })
             )}
@@ -262,73 +393,343 @@ export function BuiltinServicePanel({ builtin }) {
   );
 }
 
-/** 内置服务的一项云端模型（大模型 / 语音识别 / 语音合成）：先测试、后保存；密钥只提交、不回显。 */
+/** 已读取的服务商模型列表内存缓存（切换标签页或同服务商跨分区时直接复用，点“刷新列表”时强制重读）。 */
+const REMOTE_MODELS_CACHE = new Map();
+
+function remoteCacheKey(section, form, entry, peerKeySet = false) {
+  const baseKey = modelsListKey(form, entry, peerKeySet);
+  if (isDoubao(form)) return baseKey;
+  const hasKey = Boolean(String(form?.api_key || "").trim() || entry?.key_set || peerKeySet);
+  const isClineLlm = section === "llm" && chatOnlyGatewayName(form?.url) === "Cline (api.cline.bot)";
+  return hasKey && !isClineLlm ? `shared:${baseKey}` : `${section}:${baseKey}`;
+}
+
+/** 内置服务的一项云端模型（大模型 / 语音识别 / 语音合成）：支持拉取全量模型下拉筛选或手填；先测试、后保存；密钥只提交、不回显。 */
 function BuiltinModelGroup({ section, builtin }) {
-  const { status, setStatus, busy, setBusy } = builtin;
+  const { status, setStatus, busy } = builtin;
   const current = SECTIONS.find((item) => item.key === section);
   const entry = status.models?.[section];
   const baseline = builtinModelForm(section, entry);
   const [form, setForm] = useState(baseline);
   const [test, setTest] = useState(null);
   const [result, setResult] = useState(null);
+  const [localBusy, setLocalBusy] = useState("");
+  const [remoteModels, setRemoteModels] = useState({ key: "", items: [], modelSections: null, detail: "", ok: null, loading: false });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
+  const [playingAudio, setPlayingAudio] = useState(false);
+  const [filtering, setFiltering] = useState(false);
+  const [showAllModels, setShowAllModels] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const comboRef = useRef(null);
+  const voiceComboRef = useRef(null);
+  const audioRef = useRef(null);
+  const fetchSeq = useRef(0);
   const dirty = formDirty(baseline, form);
   const saveEnabled = canSaveSection(section, form, test);
   const doubao = isDoubao(form);
-  const localOn = section !== "llm" && Boolean(status.local?.settings?.[section]);
+  const sourceView = builtinSectionSourceView(section, status);
+  const localOn = sourceView.localOn;
+  const sectionBusy = Boolean(busy || localBusy);
   const n = (suffix) => `voice-builtin-${suffix}-${section}`;
+  const peerCloud = findPeerCloudSource(section, status, form.url);
+  const peerKeySet = Boolean(peerCloud.sameOrigin?.keySet);
+  const currentListKey = modelsListKey(form, entry, peerKeySet);
+  const currentCacheKey = remoteCacheKey(section, form, entry, peerKeySet);
+  const cachedModels = !doubao ? REMOTE_MODELS_CACHE.get(currentCacheKey) : null;
+  const rawOptions = doubao
+    ? DOUBAO_MODEL_OPTIONS[section] || []
+    : remoteModels.key === currentListKey && remoteModels.ok !== null
+      ? remoteModels.items
+      : cachedModels
+        ? cachedModels.items
+        : [];
+  const modelSections = !doubao
+    ? remoteModels.key === currentListKey && remoteModels.ok !== null
+      ? remoteModels.modelSections
+      : cachedModels?.modelSections || null
+    : null;
+  const allOptions = filterModelOptions(rawOptions, "", false, { section, modelSections });
+  const matchedOptions = allOptions.filter((item) => item.sections?.includes(section));
+  const anyClassified = allOptions.some((item) => item.sections?.length > 0);
+  const onlyMatched = !doubao && !showAllModels && anyClassified;
+  const scopedOptions = onlyMatched ? matchedOptions : allOptions;
+  const filteredOptions = filterModelOptions(rawOptions, form.model, filtering, { section, onlyMatched, modelSections });
+  const voiceOptions = section === "tts" ? ttsVoiceOptionsFor(form) : [];
+  const gatewayAudioErr = !doubao ? chatOnlyAudioGatewayError(section, form.url) : "";
+
+  useEffect(() => {
+    if (!menuOpen && !voiceMenuOpen) return undefined;
+    const handleOutsideClick = (event) => {
+      if (comboRef.current && !comboRef.current.contains(event.target)) {
+        setMenuOpen(false);
+        setFiltering(false);
+      }
+      if (voiceComboRef.current && !voiceComboRef.current.contains(event.target)) {
+        setVoiceMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [menuOpen, voiceMenuOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
 
   const update = (key, value) => {
     setForm((all) => ({ ...all, [key]: value }));
     setResult(null);
   };
 
+  const stopAudioPreview = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    setPlayingAudio(false);
+  };
+
+  const toggleAudioPreview = async () => {
+    if (!test?.audio_data_url) return;
+    if (playingAudio && audioRef.current) {
+      stopAudioPreview();
+      return;
+    }
+    stopAudioPreview();
+    try {
+      const audio = new Audio(test.audio_data_url);
+      audioRef.current = audio;
+      setPlayingAudio(true);
+      audio.onended = () => setPlayingAudio(false);
+      audio.onerror = () => setPlayingAudio(false);
+      await audio.play();
+    } catch {
+      setPlayingAudio(false);
+    }
+  };
+
+  const fetchModels = async ({ auto = false, nextForm = form } = {}) => {
+    if (isDoubao(nextForm)) return;
+    const err = modelsListError(nextForm, section);
+    if (err) {
+      if (!auto) setRemoteModels({ key: "", items: [], modelSections: null, detail: err, ok: false, loading: false });
+      return;
+    }
+    const nextPeer = findPeerCloudSource(section, status, nextForm.url);
+    const nextPeerKeySet = Boolean(nextPeer.sameOrigin?.keySet);
+    const reqKey = modelsListKey(nextForm, entry, nextPeerKeySet);
+    const cacheKey = remoteCacheKey(section, nextForm, entry, nextPeerKeySet);
+    if (auto) {
+      if (!canAutoFetchModels(nextForm, entry, status, section)) return;
+      if (remoteModels.loading && remoteModels.key === reqKey) return;
+      if (remoteModels.key === reqKey && remoteModels.ok !== null) return;
+      const hit = REMOTE_MODELS_CACHE.get(cacheKey);
+      if (hit) {
+        setRemoteModels({
+          key: reqKey,
+          items: hit.items,
+          modelSections: hit.modelSections || null,
+          detail: hit.detail,
+          ok: true,
+          loading: false,
+        });
+        return;
+      }
+    }
+    const seq = ++fetchSeq.current;
+    setRemoteModels((prev) => ({
+      key: reqKey,
+      items: prev.key === reqKey ? prev.items : [],
+      modelSections: prev.key === reqKey ? prev.modelSections : null,
+      detail: "",
+      ok: prev.key === reqKey ? prev.ok : null,
+      loading: true,
+    }));
+    try {
+      const outcome = await voiceApi.builtinModelsList(section, sectionPayload(section, nextForm));
+      if (fetchSeq.current !== seq) return;
+      const items = Array.isArray(outcome?.models) ? outcome.models : [];
+      const metaSections = outcome?.model_sections && typeof outcome.model_sections === "object" ? outcome.model_sections : null;
+      const detail = outcome?.detail || (outcome?.ok ? `已读取 ${items.length} 个模型` : "读取模型列表失败");
+      const ok = Boolean(outcome?.ok);
+      if (ok && items.length > 0) {
+        REMOTE_MODELS_CACHE.set(cacheKey, { items, modelSections: metaSections, detail });
+      }
+      setRemoteModels({
+        key: reqKey,
+        items,
+        modelSections: metaSections,
+        detail,
+        ok,
+        loading: false,
+      });
+    } catch (error) {
+      if (fetchSeq.current !== seq) return;
+      setRemoteModels({
+        key: reqKey,
+        items: [],
+        modelSections: null,
+        detail: voiceErrorText(error),
+        ok: false,
+        loading: false,
+      });
+    }
+  };
+
+  const reusePeerSource = (event) => {
+    event?.stopPropagation?.();
+    if (!peerCloud.reusable) return;
+    const nextForm = { ...form, url: peerCloud.reusable.baseUrl };
+    setForm(nextForm);
+    setResult(null);
+    setMenuOpen(true);
+    setFiltering(false);
+    fetchModels({ auto: true, nextForm });
+  };
+
+  const pickModel = (modelId) => {
+    if (section === "tts") {
+      setForm((all) => applyDefaultTtsVoice(all, modelId));
+      setResult(null);
+    } else {
+      update("model", modelId);
+    }
+    setMenuOpen(false);
+    setFiltering(false);
+    setActiveIndex(-1);
+  };
+
+  const handleModelFocus = () => {
+    setFiltering(false);
+    setActiveIndex(-1);
+    if (doubao || allOptions.length > 0 || canAutoFetchModels(form, entry, status, section)) {
+      setMenuOpen(true);
+      fetchModels({ auto: true });
+    }
+  };
+
+  const handleModelChange = (event) => {
+    const value = event.target.value;
+    update("model", value);
+    setFiltering(true);
+    setActiveIndex(-1);
+    if (allOptions.length > 0) setMenuOpen(true);
+  };
+
+  const handleModelKeyDown = (event) => {
+    if (event.key === "Escape" && menuOpen) {
+      event.preventDefault();
+      setMenuOpen(false);
+      setFiltering(false);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      if (!menuOpen) {
+        setMenuOpen(true);
+        setFiltering(false);
+        fetchModels({ auto: true });
+        return;
+      }
+      if (filteredOptions.length > 0) {
+        event.preventDefault();
+        setActiveIndex((idx) => (idx + 1) % filteredOptions.length);
+      }
+      return;
+    }
+    if (event.key === "ArrowUp" && menuOpen && filteredOptions.length > 0) {
+      event.preventDefault();
+      setActiveIndex((idx) => (idx <= 0 ? filteredOptions.length - 1 : idx - 1));
+      return;
+    }
+    if (event.key === "Enter" && menuOpen && activeIndex >= 0 && filteredOptions[activeIndex]) {
+      event.preventDefault();
+      pickModel(filteredOptions[activeIndex].id);
+    }
+  };
+
+  const toggleMenu = () => {
+    const nextOpen = !menuOpen;
+    setMenuOpen(nextOpen);
+    setFiltering(false);
+    setActiveIndex(-1);
+    if (nextOpen) fetchModels({ auto: true });
+  };
+
+
   const runTest = async () => {
+    setMenuOpen(false);
+    setVoiceMenuOpen(false);
+    stopAudioPreview();
     const inputError = sectionInputError(section, form);
     if (inputError) {
       setTest({ ok: false, detail: inputError, fingerprint: "" });
       return;
     }
     const fingerprint = sectionFingerprint(section, form);
-    setBusy(`builtin-test-${section}`);
+    setLocalBusy(`builtin-test-${section}`);
     try {
       const outcome = await voiceApi.builtinModelsTest(section, sectionPayload(section, form));
       setTest({ ...outcome, fingerprint });
     } catch (error) {
       setTest({ ok: false, detail: voiceErrorText(error), fingerprint: "" });
     } finally {
-      setBusy("");
+      setLocalBusy("");
     }
   };
 
   const save = async () => {
-    setBusy(`builtin-save-${section}`);
+    setMenuOpen(false);
+    setVoiceMenuOpen(false);
+    stopAudioPreview();
+    setLocalBusy(`builtin-save-${section}`);
     try {
       const next = await voiceApi.builtinModelsSave({ [section]: sectionPayload(section, form) });
+      const nextEntry = next.models?.[section];
+      const nextForm = builtinModelForm(section, nextEntry);
       setStatus(next);
-      setForm(builtinModelForm(section, next.models?.[section]));
+      setForm(nextForm);
+      const nextPeer = findPeerCloudSource(section, next, nextForm.url);
+      const nextListKey = modelsListKey(nextForm, nextEntry, Boolean(nextPeer.sameOrigin?.keySet));
+      const nextCacheKey = remoteCacheKey(section, nextForm, nextEntry, Boolean(nextPeer.sameOrigin?.keySet));
+      setRemoteModels((prev) => {
+        if (prev.items.length > 0) {
+          REMOTE_MODELS_CACHE.set(nextCacheKey, { items: prev.items, modelSections: prev.modelSections || null, detail: prev.detail });
+          return { ...prev, key: nextListKey };
+        }
+        return prev;
+      });
       setTest(null);
       setResult({ ok: true, text: savedNoteText(`${current.label}设置`, `密钥存本机、不显示 · ${restartEffect(next)}`) });
     } catch (error) {
       setResult({ ok: false, text: `保存失败：${voiceErrorText(error)}` });
     } finally {
-      setBusy("");
+      setLocalBusy("");
     }
   };
 
   const clear = async () => {
     const message = `删除内置服务的“${current.label}”设置与已保存的密钥？删除后内置服务回到回声测试模式。`;
     if (!(await showConfirm(message, { title: "删除设置？", tone: "warning", danger: true, confirmText: "删除" }))) return;
-    setBusy(`builtin-clear-${section}`);
+    setMenuOpen(false);
+    setLocalBusy(`builtin-clear-${section}`);
     try {
       const next = await voiceApi.builtinModelsSave({}, [section]);
+      REMOTE_MODELS_CACHE.delete(currentCacheKey);
       setStatus(next);
       setForm(builtinModelForm(section, next.models?.[section]));
+      setRemoteModels({ key: "", items: [], detail: "", ok: null, loading: false });
       setTest(null);
       setResult({ ok: true, text: `已删除${current.label}设置与密钥 · ${restartEffect(next)}` });
     } catch (error) {
       setResult({ ok: false, text: `删除失败：${voiceErrorText(error)}` });
     } finally {
-      setBusy("");
+      setLocalBusy("");
     }
   };
 
@@ -337,38 +738,263 @@ function BuiltinModelGroup({ section, builtin }) {
       id={`builtin-model-${section}`}
       title={current.label}
       summary={builtinModelSummary(section, entry, localOn)}
-      tone={entry?.configured ? "ok" : undefined}
+      tone={localOn ? (sourceView.localReady ? "ok" : "warn") : entry?.configured ? "ok" : undefined}
       dirty={dirty}
     >
-      {localOn && <p className="voice-muted">已打开本地{current.label}：以本地模型为准，这里的云端设置作为备用。</p>}
+      {localOn ? (
+        <p className="voice-muted">
+          当前已在上方下拉框选用本地{current.label}（{sourceView.selectedLocalModel?.label || "本地模型"}）；这里的云端配置与密钥作为备用保留，随时可在上方下拉切回。
+        </p>
+      ) : section === "llm" ? (
+        <p className="voice-muted">支持云端大模型 API，也支持本机大模型服务（如 Ollama 填 http://127.0.0.1:11434/v1，密钥留空）。</p>
+      ) : null}
       <div className="voice-form-grid">
         {section !== "llm" && (
           <label className="voice-wide">
             <span>接口类型</span>
-            <select className="text-input" value={doubao ? "doubao" : "openai"} onChange={(e) => { setForm((all) => switchKind(section, all, e.target.value)); setResult(null); }} id={n("model-kind")}>
+            <select
+              className="text-input"
+              value={doubao ? "doubao" : "openai"}
+              onChange={(e) => {
+                setForm((all) => {
+                  const switched = switchKind(section, all, e.target.value);
+                  return section === "tts" ? applyDefaultTtsVoice(switched, switched.model) : switched;
+                });
+                setMenuOpen(false);
+                setVoiceMenuOpen(false);
+                setFiltering(false);
+                setResult(null);
+              }}
+              id={n("model-kind")}
+            >
               <option value="openai">OpenAI 兼容（整段{section === "asr" ? "识别" : "合成"}）</option>
               <option value="doubao">豆包流式（{section === "asr" ? "边说边识别" : "边合成边播放"}，首句更快）</option>
             </select>
           </label>
         )}
-        <label className="voice-wide">
-          <span>地址（{doubao ? "豆包 WebSocket 地址，一般不用改" : current.hint}）</span>
-          <input className="text-input mono" value={form.url} onChange={(e) => update("url", e.target.value)} spellCheck="false" autoComplete="off" id={n("model-url")} />
-        </label>
+        <div className="voice-field voice-wide">
+          <div className="voice-field-head">
+            <label htmlFor={n("model-url")}>地址（{doubao ? "豆包 WebSocket 地址，一般不用改" : current.hint}）</label>
+            {!doubao && peerCloud.reusable && (
+              <button
+                type="button"
+                className="voice-link-btn"
+                disabled={sectionBusy}
+                onClick={reusePeerSource}
+                id={n("reuse-peer")}
+              >
+                复用{peerCloud.reusable.label}地址{peerCloud.reusable.keySet ? "与密钥" : ""}
+              </button>
+            )}
+          </div>
+          <input
+            className="text-input mono"
+            value={form.url}
+            onChange={(e) => update("url", e.target.value)}
+            onBlur={() => fetchModels({ auto: true })}
+            spellCheck="false"
+            autoComplete="off"
+            id={n("model-url")}
+          />
+        </div>
         <label>
           <span>{doubao ? "API Key" : "密钥"}</span>
-          <input className="text-input" type="password" value={form.api_key} placeholder={doubao && !entry?.key_set ? "控制台 API Key；旧版控制台填“APP ID:Access Token”" : builtinKeyPlaceholder(entry)} onChange={(e) => update("api_key", e.target.value)} autoComplete="new-password" spellCheck="false" id={n("model-key")} />
+          <input
+            className="text-input"
+            type="password"
+            value={form.api_key}
+            placeholder={doubao && !entry?.key_set ? "控制台 API Key；旧版控制台填“APP ID:Access Token”" : builtinKeyPlaceholder(entry, peerCloud.sameOrigin)}
+            onChange={(e) => update("api_key", e.target.value)}
+            onBlur={() => fetchModels({ auto: true })}
+            autoComplete="new-password"
+            spellCheck="false"
+            id={n("model-key")}
+          />
         </label>
-        <label>
-          <span>{doubao ? "资源 ID（留空用默认）" : "模型"}</span>
-          <input className="text-input mono" value={form.model} onChange={(e) => update("model", e.target.value)} spellCheck="false" id={n("model-name")} />
-        </label>
+        <div className="voice-field" ref={comboRef}>
+          <div className="voice-field-head">
+            <label htmlFor={n("model-name")}>{doubao ? "资源 ID（留空用默认）" : "模型"}</label>
+            {!doubao && (
+              <button
+                type="button"
+                className="voice-link-btn"
+                disabled={remoteModels.loading || sectionBusy}
+                onClick={() => {
+                  setMenuOpen(true);
+                  setFiltering(false);
+                  fetchModels({ auto: false });
+                }}
+                id={n("model-fetch")}
+              >
+                <RefreshCw size={11} className={remoteModels.loading ? "voice-spin" : ""} />
+                {remoteModels.loading
+                  ? "读取中…"
+                  : allOptions.length > 0
+                    ? `刷新列表（${onlyMatched && matchedOptions.length < allOptions.length ? `${matchedOptions.length}/${allOptions.length}` : allOptions.length}）`
+                    : "读取模型"}
+              </button>
+            )}
+          </div>
+          <div className="voice-combo-wrap">
+            <input
+              className="text-input mono voice-combo-input"
+              value={form.model}
+              placeholder={
+                doubao
+                  ? "下拉选择或手动填写资源 ID"
+                  : allOptions.length > 0
+                    ? onlyMatched && matchedOptions.length < allOptions.length
+                      ? `已筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个），点击选择或输入查询`
+                      : `已读 ${allOptions.length} 个，输入关键词查询或下拉选择`
+                    : "输入关键词筛选，或填好地址密钥读取"
+              }
+              onFocus={handleModelFocus}
+              onChange={handleModelChange}
+              onKeyDown={handleModelKeyDown}
+              spellCheck="false"
+              autoComplete="off"
+              id={n("model-name")}
+            />
+            <button
+              type="button"
+              className="voice-combo-toggle"
+              aria-label={doubao ? "展开常用资源 ID" : "展开模型列表"}
+              aria-expanded={menuOpen}
+              onClick={toggleMenu}
+              id={n("model-toggle")}
+            >
+              <ChevronDown size={14} />
+            </button>
+          </div>
+          {menuOpen && (
+            <div className="voice-combo-menu" role="listbox" aria-label={`${current.label}可选模型`} id={n("model-options")}>
+              <div className="voice-combo-meta">
+                {remoteModels.loading ? (
+                  <span>正在读取服务商支持的全部模型…</span>
+                ) : !doubao && remoteModels.ok === false && remoteModels.detail ? (
+                  <span className="voice-combo-err">{remoteModels.detail}（仍可直接手动输入模型名）</span>
+                ) : allOptions.length > 0 ? (
+                  <>
+                    <span>
+                      {doubao
+                        ? `常用资源 ID（${allOptions.length} 个）`
+                        : matchedOptions.length === 0
+                          ? onlyMatched
+                            ? `该服务商返回的 ${allOptions.length} 个模型均为大模型，无${current.label}模型`
+                            : `未发现专用${current.label}模型，已显示全部 ${allOptions.length} 个`
+                          : matchedOptions.length < allOptions.length
+                            ? onlyMatched
+                              ? `已自动筛出 ${matchedOptions.length} 个${current.label}模型（共 ${allOptions.length} 个）`
+                              : `全部 ${allOptions.length} 个模型（含 ${matchedOptions.length} 个${current.label}模型）`
+                            : `共 ${allOptions.length} 个${current.label}模型`}
+                      {filtering && filteredOptions.length !== scopedOptions.length ? ` · 筛出 ${filteredOptions.length} 个` : matchedOptions.length > 0 || !onlyMatched ? " · 输入关键词可查询" : ""}
+                    </span>
+                    <span className="voice-actions">
+                      {!doubao && matchedOptions.length < allOptions.length && (
+                        <button
+                          type="button"
+                          className="voice-link-btn"
+                          onClick={() => setShowAllModels((prev) => !prev)}
+                          id={n("model-scope-toggle")}
+                        >
+                          {showAllModels ? `只看${current.label}（${matchedOptions.length}）` : `显示全部（${allOptions.length}）`}
+                        </button>
+                      )}
+                      {filtering && filteredOptions.length !== scopedOptions.length && (
+                        <button type="button" className="voice-link-btn" onClick={() => setFiltering(false)}>
+                          清除筛选
+                        </button>
+                      )}
+                    </span>
+                  </>
+                ) : !doubao && remoteModels.ok === true ? (
+                  <span>{remoteModels.detail || "未返回可选模型，请直接手动输入"}</span>
+                ) : (
+                  <span>先填好上方地址与密钥，点“读取模型”即可拉取全部模型</span>
+                )}
+              </div>
+              {filteredOptions.length > 0 ? (
+                <div className="voice-combo-list">
+                  {filteredOptions.map((option, idx) => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={option.id === form.model}
+                      key={option.id}
+                      className={`voice-combo-option mono${option.id === form.model ? " is-selected" : ""}${idx === activeIndex ? " is-active" : ""}`}
+                      onClick={() => pickModel(option.id)}
+                    >
+                      <span className="voice-combo-id">{option.id}</span>
+                      {(option.displayHint || option.hint) && <span className="voice-combo-hint">{option.displayHint || option.hint}</span>}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                allOptions.length > 0 && !remoteModels.loading && (
+                  <div className="voice-combo-empty">
+                    {onlyMatched && matchedOptions.length === 0
+                      ? `该服务商没有${current.label}模型，建议在上方顶部下拉框切换为「本地${current.label}」，或点右上角“显示全部”手动选择`
+                      : `没有包含“${form.model}”的模型，可直接使用当前手动输入的名称`}
+                  </div>
+                )
+              )}
+            </div>
+          )}
+        </div>
         {section === "tts" && (
           <>
-            <label>
-              <span>{doubao ? "音色 ID（见豆包控制台）" : "音色"}</span>
-              <input className="text-input" value={form.voice} onChange={(e) => update("voice", e.target.value)} spellCheck="false" id={n("model-voice")} />
-            </label>
+            <div className="voice-field" ref={voiceComboRef}>
+              <div className="voice-field-head">
+                <label htmlFor={n("model-voice")}>{doubao ? "音色 ID（可下拉选常用或手填）" : "音色（可下拉选常用或手填）"}</label>
+              </div>
+              <div className="voice-combo-wrap">
+                <input
+                  className="text-input mono voice-combo-input"
+                  value={form.voice}
+                  placeholder={voiceOptions[0] ? `如 ${voiceOptions[0].id}` : "填写或下拉选择音色"}
+                  onFocus={() => setVoiceMenuOpen(true)}
+                  onChange={(e) => update("voice", e.target.value)}
+                  spellCheck="false"
+                  autoComplete="off"
+                  id={n("model-voice")}
+                />
+                <button
+                  type="button"
+                  className="voice-combo-toggle"
+                  aria-label="展开常用音色列表"
+                  aria-expanded={voiceMenuOpen}
+                  onClick={() => setVoiceMenuOpen((prev) => !prev)}
+                  id={n("voice-toggle")}
+                >
+                  <ChevronDown size={14} />
+                </button>
+              </div>
+              {voiceMenuOpen && voiceOptions.length > 0 && (
+                <div className="voice-combo-menu" role="listbox" aria-label="语音合成常用音色" id={n("voice-options")}>
+                  <div className="voice-combo-meta">
+                    <span>推荐常用音色（共 {voiceOptions.length} 个，也可直接手动输入）</span>
+                  </div>
+                  <div className="voice-combo-list">
+                    {voiceOptions.map((opt) => (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={opt.id === form.voice}
+                        key={opt.id}
+                        className={`voice-combo-option mono${opt.id === form.voice ? " is-selected" : ""}`}
+                        onClick={() => {
+                          update("voice", opt.id);
+                          setVoiceMenuOpen(false);
+                        }}
+                      >
+                        <span className="voice-combo-id">{opt.id}</span>
+                        {opt.hint && <span className="voice-combo-hint">{opt.hint}</span>}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             <label>
               <span>{doubao ? "语速（0.5 ~ 2.0）" : "语速（0.25 ~ 4.0）"}</span>
               <input className="text-input" inputMode="decimal" value={form.speed} onChange={(e) => update("speed", e.target.value)} />
@@ -376,12 +1002,34 @@ function BuiltinModelGroup({ section, builtin }) {
           </>
         )}
       </div>
-      <div className="voice-final mono">保存的地址：{finalUrl(section, form.url, form.kind) || "—"}</div>
+      <div className="voice-final mono">
+        {entry?.configured && !dirty ? "已保存接口地址：" : "将请求的接口地址："}
+        {gatewayAudioErr ? `—（当前服务商不支持${current.label}接口）` : finalUrl(section, form.url, form.kind) || "—"}
+      </div>
+      {gatewayAudioErr && (
+        <div className="voice-hint voice-hint--bad" id={n("gateway-audio-error")}>
+          {gatewayAudioErr}
+        </div>
+      )}
       {test ? (
         <div className={`voice-hint voice-hint--${test.ok ? "ok" : "bad"}`} id={n("model-result")}>
-          {test.ok ? "测试通过" : "测试未通过"}
-          {typeof test.elapsed_ms === "number" ? ` · ${(test.elapsed_ms / 1000).toFixed(1)} s` : ""} · {test.detail}
-          {test.ok && test.fingerprint !== sectionFingerprint(section, form) && "（测试后内容已修改，请重新测试）"}
+          <span>
+            {test.ok ? "测试通过" : "测试未通过"}
+            {typeof test.elapsed_ms === "number" ? ` · ${(test.elapsed_ms / 1000).toFixed(1)} s` : ""} · {test.detail}
+            {test.ok && test.fingerprint !== sectionFingerprint(section, form) && "（测试后内容已修改，请重新测试）"}
+          </span>
+          {section === "tts" && test.ok && test.audio_data_url && (
+            <button
+              type="button"
+              className="btn btn-ghost voice-inline-btn"
+              onClick={toggleAudioPreview}
+              id={n("model-play")}
+              style={{ marginLeft: "10px" }}
+            >
+              {playingAudio ? <Square size={12} /> : <Volume2 size={13} />}
+              {playingAudio ? "停止试听" : "试听语音"}
+            </button>
+          )}
         </div>
       ) : (
         <p className="voice-muted">先测试连接，通过后才能保存。密钥留空时测试用已保存的密钥。</p>
@@ -390,18 +1038,18 @@ function BuiltinModelGroup({ section, builtin }) {
         id={n("model-save")}
         target={`${current.label}设置`}
         dirty={dirty}
-        busy={Boolean(busy)}
-        saving={busy === `builtin-save-${section}`}
+        busy={sectionBusy}
+        saving={localBusy === `builtin-save-${section}`}
         blocked={saveEnabled ? "" : "先测试连接，通过后才能保存"}
         result={result}
         onSave={save}
         extra={
           <>
-            <button type="button" className="btn btn-ghost" onClick={runTest} disabled={Boolean(busy) || isSectionBlank(form)} id={n("model-test")}>
-              <FlaskConical size={13} /> {busy === `builtin-test-${section}` ? "测试中…" : "测试连接"}
+            <button type="button" className="btn btn-ghost" onClick={runTest} disabled={sectionBusy || isSectionBlank(form)} id={n("model-test")}>
+              <FlaskConical size={13} /> {localBusy === `builtin-test-${section}` ? "测试中…" : "测试连接"}
             </button>
             {entry?.configured && (
-              <button type="button" className="btn btn-ghost" onClick={clear} disabled={Boolean(busy)} id={n("model-clear")}>
+              <button type="button" className="btn btn-ghost" onClick={clear} disabled={sectionBusy} id={n("model-clear")}>
                 <Trash2 size={13} /> 删除此项
               </button>
             )}
@@ -412,10 +1060,476 @@ function BuiltinModelGroup({ section, builtin }) {
   );
 }
 
-/** 内置服务的三项云端模型，各自一个分组、各自保存。 */
+/** OpenRouter · Jev 决策模型配置卡片（与右上角系统设置共享本机 jev_api_key 与加工反馈开关）。 */
+function BuiltinJevGroup({ builtin }) {
+  const { status, setStatus, busy } = builtin;
+  const baseline = builtinJevForm(status);
+  const baselineSig = JSON.stringify(baseline);
+  const [form, setForm] = useState(baseline);
+  const prevBaselineRef = useRef(baseline);
+  const opSeqRef = useRef(0);
+  const [test, setTest] = useState(null);
+  const [result, setResult] = useState(null);
+  const [localBusy, setLocalBusy] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [remoteModels, setRemoteModels] = useState({ loading: false, ok: false, models: [], detail: "" });
+  const comboRef = useRef(null);
+
+  useEffect(() => {
+    const prev = prevBaselineRef.current;
+    setForm((current) => syncJevDraft(prev, baseline, current));
+    if (prev.model !== baseline.model) {
+      setTest(null);
+    }
+    prevBaselineRef.current = baseline;
+  }, [baselineSig]);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onPointerDown = (event) => {
+      if (comboRef.current && !comboRef.current.contains(event.target)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [menuOpen]);
+
+  const sourceView = builtinSectionSourceView("jev", status);
+  const localOn = sourceView.localOn;
+  const rawJevModel = status?.local?.settings?.jev_model || status?.jev?.model || DEFAULT_JEV_MODEL;
+  const isCurrentLocal = isLocalLayaJevModel(rawJevModel);
+  const localInstalled = Boolean(
+    status?.jev?.local_installed ||
+      (Array.isArray(status?.local?.models) && status.local.models.some((m) => m && m.id === "laya_multilingual" && m.installed)),
+  );
+  const keyReady = Boolean(
+    status?.jev?.key_set || status?.jev?.openrouter_llm_key_set || (!isCurrentLocal && status?.local?.jev_key_configured)
+  );
+  const typedKey = String(form.api_key || "").trim();
+  const modelChanged = String(form.model || "").trim() !== baseline.model;
+  const keyOrModelChanged = Boolean(typedKey) || modelChanged;
+  const dirty = keyOrModelChanged || form.voice_enabled !== baseline.voice_enabled || form.feedback_enabled !== baseline.feedback_enabled;
+  const disablingBothSwitches = !form.voice_enabled && !form.feedback_enabled;
+  const preserveLocalWithoutCloudKey =
+    isCurrentLocal && !modelChanged && !typedKey && (localInstalled || disablingBothSwitches);
+  const cloudInputErr = jevModelError(form.model) || (!keyReady && !typedKey ? "请填写 OpenRouter API Key" : "");
+  const inputErr = preserveLocalWithoutCloudKey ? "" : cloudInputErr;
+  const currentFp = jevFingerprint(form);
+  const needsTest = preserveLocalWithoutCloudKey ? false : (!keyReady || keyOrModelChanged);
+  const saveEnabled = !inputErr && (!needsTest || Boolean(test?.ok && test.fingerprint === currentFp));
+  const sectionBusy = Boolean(busy || localBusy);
+  const mergedOptions = (() => {
+    const map = new Map();
+    for (const item of JEV_PRESET_MODELS) map.set(item.id, item);
+    for (const id of remoteModels.models) {
+      if (!map.has(id)) map.set(id, { id, hint: "OpenRouter 在线模型" });
+    }
+    return [...map.values()];
+  })();
+
+  const update = (key, value) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+    setResult(null);
+  };
+
+  const fetchModels = async () => {
+    setRemoteModels((prev) => ({ ...prev, loading: true }));
+    try {
+      const outcome = await voiceApi.builtinModelsList("jev", { api_key: form.api_key });
+      setRemoteModels({
+        loading: false,
+        ok: Boolean(outcome.ok),
+        models: Array.isArray(outcome.models) ? outcome.models : [],
+        detail: outcome.detail || "",
+      });
+      setMenuOpen(true);
+    } catch (error) {
+      setRemoteModels({ loading: false, ok: false, models: [], detail: voiceErrorText(error) });
+      setMenuOpen(true);
+    }
+  };
+
+  const runTest = async () => {
+    const err = cloudInputErr;
+    if (err) {
+      setTest({ ok: false, detail: err, fingerprint: "" });
+      return;
+    }
+    const seq = ++opSeqRef.current;
+    setLocalBusy("builtin-test-jev");
+    setResult(null);
+    const fp = jevFingerprint(form);
+    try {
+      const outcome = await voiceApi.builtinModelsTest("jev", { api_key: form.api_key, model: form.model });
+      if (opSeqRef.current === seq) {
+        setTest({ ...outcome, fingerprint: outcome.ok ? fp : "" });
+      }
+    } catch (error) {
+      if (opSeqRef.current === seq) {
+        setTest({ ok: false, detail: voiceErrorText(error), fingerprint: "" });
+      }
+    } finally {
+      if (opSeqRef.current === seq) {
+        setLocalBusy("");
+      }
+    }
+  };
+
+  const save = async () => {
+    if (!saveEnabled) return;
+    const seq = ++opSeqRef.current;
+    setLocalBusy("builtin-save-jev");
+    setResult(null);
+    try {
+      const next = await voiceApi.builtinModelsSave({
+        jev: builtinJevSavePayload(status, form, baseline),
+      });
+      const nextBaseline = builtinJevForm(next);
+      prevBaselineRef.current = nextBaseline;
+      setStatus(next);
+      setForm(nextBaseline);
+      setTest(null);
+      setResult({ ok: true, text: savedNoteText("Jev 决策模型", restartEffect(next)) });
+    } catch (error) {
+      setResult({ ok: false, text: `保存失败：${voiceErrorText(error)}` });
+    } finally {
+      if (opSeqRef.current === seq) {
+        setLocalBusy("");
+      }
+    }
+  };
+
+  const clear = async () => {
+    const ok = await showConfirm("将删除本机保存的 Jev OpenRouter API Key，并同时关闭语音 Jev 筛选与加工反馈判断。", {
+      title: "删除 Jev 密钥与配置",
+      danger: true,
+      confirmText: "删除",
+    });
+    if (!ok) return;
+    const seq = ++opSeqRef.current;
+    setLocalBusy("builtin-clear-jev");
+    setResult(null);
+    try {
+      const next = await voiceApi.builtinModelsSave({}, ["jev"]);
+      const nextBaseline = builtinJevForm(next);
+      prevBaselineRef.current = nextBaseline;
+      setStatus(next);
+      setForm(nextBaseline);
+      setTest(null);
+      setResult({ ok: true, text: `已删除 Jev 密钥与配置 · ${restartEffect(next)}` });
+    } catch (error) {
+      setResult({ ok: false, text: `删除失败：${voiceErrorText(error)}` });
+    } finally {
+      if (opSeqRef.current === seq) {
+        setLocalBusy("");
+      }
+    }
+  };
+
+  return (
+    <VoiceGroup id="builtin-model-jev" title="OpenRouter · Jev 前置粗筛模型（共享反馈密钥）" summary={builtinJevSummary(status)} dirty={dirty} tab="models">
+      {localOn && (
+        <p className="voice-muted">
+          当前已在上方下拉框选用本地 Jev 决策（{sourceView.selectedLocalModel?.label || "Laya 多语言决策"}）；这里的 OpenRouter 云端配置与密钥作为备用保留，随时可在上方下拉切回。
+        </p>
+      )}
+      <p className="voice-muted">
+        在语音链路中位于「语音识别」之后、「大模型」之前：模型下拉选择作用于内置语音前置粗筛（半截话续听防抢话、口语快答分流、6 大工具组/外部 MCP 粗筛与记忆精筛）；OpenRouter 密钥同时可供雕刻加工反馈共用（加工反馈接口按契约固定使用 typesafe/jev-1.13），绝不授权任何设备动作。
+      </p>
+      <div className="voice-form-grid">
+        <div className="voice-field">
+          <div className="voice-field-head">
+            <label htmlFor="voice-builtin-apikey-jev">OpenRouter API Key（不回显；留空则沿用已保存）</label>
+          </div>
+          <input
+            className="text-input mono"
+            type="password"
+            autoComplete="off"
+            value={form.api_key}
+            placeholder={builtinJevKeyPlaceholder(status)}
+            onChange={(e) => update("api_key", e.target.value)}
+            id="voice-builtin-apikey-jev"
+          />
+        </div>
+        <div className="voice-field" ref={comboRef}>
+          <div className="voice-field-head">
+            <label htmlFor="voice-builtin-model-jev">Jev 模型名称</label>
+            <button
+              type="button"
+              className="voice-link-btn"
+              onClick={fetchModels}
+              disabled={sectionBusy || remoteModels.loading}
+              id="voice-builtin-fetch-models-jev"
+            >
+              <RefreshCw size={11} className={remoteModels.loading ? "voice-spin" : ""} />
+              {remoteModels.loading ? "读取中…" : "读取模型"}
+            </button>
+          </div>
+          <div className="voice-combo-wrap">
+            <input
+              className="text-input mono voice-combo-input"
+              value={form.model}
+              placeholder="如 typesafe/jev-1.14"
+              onChange={(e) => update("model", e.target.value)}
+              onFocus={() => setMenuOpen(true)}
+              id="voice-builtin-model-jev"
+            />
+            <button
+              type="button"
+              className="voice-combo-toggle"
+              aria-label="展开可选 Jev 模型列表"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((open) => !open)}
+              id="voice-builtin-toggle-jev"
+            >
+              <ChevronDown size={14} />
+            </button>
+            {menuOpen && (
+              <div className="voice-combo-menu" role="listbox" aria-label="Jev 决策可选模型" id="voice-builtin-model-options-jev">
+                <div className="voice-combo-meta">
+                  <span>{remoteModels.detail || `可选 Jev 模型（共 ${mergedOptions.length} 个，也可手填新版本）`}</span>
+                </div>
+                <div className="voice-combo-list">
+                  {mergedOptions.map((opt) => (
+                    <div
+                      key={opt.id}
+                      role="option"
+                      aria-selected={opt.id === form.model}
+                      className={`voice-combo-option mono${opt.id === form.model ? " is-selected" : ""}`}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        update("model", opt.id);
+                        setMenuOpen(false);
+                      }}
+                    >
+                      <span className="voice-combo-id">{opt.id}</span>
+                      {opt.hint && <span className="voice-combo-hint">{opt.hint}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        <label className="voice-check voice-wide">
+          <input
+            type="checkbox"
+            checked={form.voice_enabled}
+            onChange={(e) => update("voice_enabled", e.target.checked)}
+            id="voice-builtin-jev-voice-enabled"
+          />
+          <span>启用内置语音 Jev 智能筛选与提速（也可在上方顶部下拉框直接一键切换；细项开关见“服务 → 语音体验”）</span>
+        </label>
+        <label className="voice-check voice-wide">
+          <input
+            type="checkbox"
+            checked={form.feedback_enabled}
+            onChange={(e) => update("feedback_enabled", e.target.checked)}
+            id="voice-builtin-jev-feedback-enabled"
+          />
+          <span>同时启用雕刻任务加工反馈判断（共用此 OpenRouter 密钥，按契约使用 typesafe/jev-1.13 判断“太焦、太浅、切不透”等调参建议）</span>
+        </label>
+      </div>
+      <div className="voice-final mono">最终请求地址：{DEFAULT_JEV_DECISIONS_URL}</div>
+      {inputErr && dirty && <div className="voice-hint voice-hint--bad">{inputErr}</div>}
+      {test ? (
+        <div className={`voice-hint voice-hint--${test.ok ? "ok" : "bad"}`} id="voice-builtin-model-result-jev">
+          <span>
+            {test.ok ? "测试通过" : "测试未通过"}
+            {typeof test.elapsed_ms === "number" ? ` · ${(test.elapsed_ms / 1000).toFixed(1)} s` : ""} · {test.detail}
+            {test.ok && test.fingerprint !== currentFp && "（测试后密钥或模型已修改，请重新测试）"}
+          </span>
+        </div>
+      ) : (
+        <p className="voice-muted">
+          {needsTest ? "首次配置或修改密钥/模型后请先测试连接，通过后才能保存。" : "本机已配置密钥；只改勾选开关可直接保存，也可随时测试连接。"}
+        </p>
+      )}
+      <SaveBar
+        id="voice-builtin-model-save-jev"
+        target="Jev 决策模型设置"
+        dirty={dirty}
+        busy={sectionBusy}
+        saving={localBusy === "builtin-save-jev"}
+        blocked={saveEnabled ? "" : inputErr || "先测试连接，通过后才能保存"}
+        result={result}
+        onSave={save}
+        extra={
+          <>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={runTest}
+              disabled={sectionBusy || Boolean(inputErr)}
+              id="voice-builtin-model-test-jev"
+            >
+              <FlaskConical size={13} /> {localBusy === "builtin-test-jev" ? "测试中…" : "测试连接"}
+            </button>
+            {Boolean(status?.jev?.key_set) && (
+              <button type="button" className="btn btn-ghost" onClick={clear} disabled={sectionBusy} id="voice-builtin-model-clear-jev">
+                <Trash2 size={13} /> 删除此项
+              </button>
+            )}
+          </>
+        }
+      />
+    </VoiceGroup>
+  );
+}
+
+/** 内置服务顶部五栏自由搭配下拉选择栏 + 下方云端模型与 Jev 配置卡片。 */
 export function BuiltinModelGroups({ builtin }) {
-  if (!builtin.status || builtin.status.error) return <p className="voice-muted">{builtin.status?.error || "正在读取内置服务状态…"}</p>;
-  return SECTIONS.map((item) => <BuiltinModelGroup key={item.key} section={item.key} builtin={builtin} />);
+  const { status, setStatus, busy } = builtin;
+  const [mixBusy, setMixBusy] = useState("");
+  const [mixNote, setMixNote] = useState(null);
+  if (!status || status.error) return <p className="voice-muted">{status?.error || "正在读取内置服务状态…"}</p>;
+  const views = MIX_SECTIONS.map((item) => ({ ...item, view: builtinSectionSourceView(item.key, status) }));
+  const focusConfigGroup = (groupId, scrollTargetId) => {
+    const header = document.querySelector(`#voice-group-${groupId} > .voice-group-h`);
+    if (header && header.getAttribute("aria-expanded") !== "true") {
+      header.click();
+    }
+    const target = document.getElementById(scrollTargetId || `voice-group-${groupId}`);
+    if (target && typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  };
+
+  const handleSelectSource = async (section, label, nextValue) => {
+    if (section === "llm") {
+      focusConfigGroup("builtin-model-llm", "voice-group-builtin-model-llm");
+      return;
+    }
+    const currentView = builtinSectionSourceView(section, status);
+    const pickedOption = currentView.options.find((opt) => opt.value === nextValue);
+    if (section === "jev") {
+      if (nextValue !== "off" && pickedOption && !pickedOption.installed) {
+        if (pickedOption.isLocal) {
+          focusConfigGroup("local-models", "voice-local-group-jev");
+          setMixNote({
+            ok: false,
+            text: "本地 Laya 决策模型尚未下载：已为你展开下方“本地模型（断网可用）”，点击“下载”时将自动检测运行环境并开始下载。",
+          });
+        } else {
+          focusConfigGroup("builtin-model-jev", "voice-group-builtin-model-jev");
+          setMixNote({
+            ok: false,
+            text: "尚未配置 OpenRouter API Key：已为你展开下方“OpenRouter · Jev 前置粗筛与反馈模型”，填入密钥测试并保存后即可在此直接下拉切换。",
+          });
+        }
+        return;
+      }
+      const payload = builtinSourceSwitchPatch(status, "jev", nextValue);
+      if (!payload) return;
+      setMixBusy("jev");
+      builtin.setBusy("mix-switch-jev");
+      setMixNote(null);
+      try {
+        const next = await voiceApi.localSave(payload);
+        setStatus(next);
+        setMixNote({
+          ok: true,
+          text:
+            nextValue === "off"
+              ? `已关闭 Jev 语音筛选（密钥与模型配置已保留） · ${restartEffect(next)}`
+              : isLocalLayaJevModel(payload.jev_model)
+                ? `已切换为本地 Laya 多语言决策（${payload.jev_model} · RTX 加速免密钥） · ${restartEffect(next)}`
+                : `已切换为 Jev 决策（${payload.jev_model}） · ${restartEffect(next)}`,
+        });
+      } catch (error) {
+        setMixNote({ ok: false, text: `切换失败：${voiceErrorText(error)}` });
+      } finally {
+        setMixBusy("");
+        builtin.setBusy("");
+      }
+      return;
+    }
+    const isDefault = nextValue === "cloud" || nextValue === "energy";
+    const cleanLabel = label.replace(/^\d+\.\s*/, "");
+    if (!isDefault && pickedOption && !pickedOption.installed) {
+      focusConfigGroup("local-models", `voice-local-group-${section}`);
+      setMixNote({
+        ok: false,
+        text: `本地${cleanLabel}模型“${pickedOption.modelLabel || pickedOption.label}”尚未下载：已为你展开下方“本地模型（断网可用）”，点“下载”完成后即可在此下拉选用。`,
+      });
+      return;
+    }
+    const payload = builtinSourceSwitchPatch(status, section, nextValue);
+    if (!payload) return;
+    setMixBusy(section);
+    builtin.setBusy(`mix-switch-${section}`);
+    setMixNote(null);
+    try {
+      const next = await voiceApi.localSave(payload);
+      setStatus(next);
+      const nextView = builtinSectionSourceView(section, next);
+      setMixNote({
+        ok: true,
+        text: isDefault
+          ? section === "vad"
+            ? `已切换为内置能量判停 · ${restartEffect(next)}`
+            : `已切换为云端${cleanLabel} · ${restartEffect(next)}`
+          : `已切换为本地${cleanLabel}（${nextView.selectedLocalModel?.label || "本地模型"}）${section === "vad" ? "" : "，云端配置与密钥已保留"} · ${restartEffect(next)}`,
+      });
+    } catch (error) {
+      setMixNote({ ok: false, text: `切换失败：${voiceErrorText(error)}` });
+    } finally {
+      setMixBusy("");
+      builtin.setBusy("");
+    }
+  };
+
+  return (
+    <>
+      <div className="voice-mix-bar" id="voice-builtin-mix-bar">
+        <div className="voice-mix-grid">
+          {views.map(({ key, label, hint, view }) => (
+            <label className="voice-mix-field" key={key} id={`voice-builtin-mix-${key}`} title={hint || ""}>
+              <span className="voice-mix-field-head">
+                <b>{label}</b>
+                {(key === "llm" || key === "jev") && (
+                  <button
+                    type="button"
+                    className="voice-link-btn"
+                    onClick={() => focusConfigGroup(`builtin-model-${key}`, `voice-group-builtin-model-${key}`)}
+                  >
+                    去配置
+                  </button>
+                )}
+              </span>
+              <select
+                className="text-input"
+                value={view.selectValue}
+                disabled={Boolean(busy || mixBusy)}
+                onChange={(e) => handleSelectSource(key, label, e.target.value)}
+                id={`voice-builtin-mix-select-${key}`}
+                aria-label={`${label}当前使用模型`}
+              >
+                {view.options.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+        {mixNote && (
+          <div className={`voice-hint voice-hint--${mixNote.ok ? "ok" : "warn"}`} role="status" id="voice-builtin-mix-status">
+            {mixNote.text}
+          </div>
+        )}
+        <span className="voice-muted">
+          按真实语音链路从左到右排列：拾音判停 → 语音识别 → Jev 前置粗筛（识别后·进大模型前） → 大模型 → 语音合成；直接下拉选完立即生效，下方卡片用于配置对应项密钥、模型版本与下载本地模型。
+        </span>
+      </div>
+      <BuiltinModelGroup section="asr" builtin={builtin} />
+      <BuiltinJevGroup builtin={builtin} />
+      <BuiltinModelGroup section="llm" builtin={builtin} />
+      <BuiltinModelGroup section="tts" builtin={builtin} />
+    </>
+  );
 }
 
 /**
@@ -426,8 +1540,15 @@ function useLocalGroup(builtin, keys, validate) {
   const local = builtin.status?.local || {};
   const models = Array.isArray(local.models) ? local.models : [];
   const baseline = localSettingsForm(local.settings);
+  const baselineSig = JSON.stringify(baseline);
   const [draft, setDraft] = useState(baseline);
+  const prevBaselineRef = useRef(baseline);
   const [result, setResult] = useState(null);
+  useEffect(() => {
+    const prev = prevBaselineRef.current;
+    setDraft((current) => syncLocalDraft(prev, baseline, current, keys));
+    prevBaselineRef.current = baseline;
+  }, [baselineSig]);
   const merged = mergeGroup(baseline, draft, keys);
   const dirty = formDirty(baseline, draft, keys);
   const error = validate(merged, models);
@@ -438,9 +1559,11 @@ function useLocalGroup(builtin, keys, validate) {
   const save = async (target) => {
     builtin.setBusy(`local-save-${target}`);
     try {
-      const next = await voiceApi.localSave(localSettingsPayload(merged));
+      const next = await voiceApi.localSave(localGroupPatch(baseline, draft, keys));
+      const nextForm = localSettingsForm(next.local?.settings);
+      prevBaselineRef.current = nextForm;
       builtin.setStatus(next);
-      setDraft(localSettingsForm(next.local?.settings));
+      setDraft(nextForm);
       setResult({ ok: true, text: savedNoteText(target, restartEffect(next)) });
     } catch (e) {
       setResult({ ok: false, text: `保存失败：${voiceErrorText(e)}` });
@@ -454,20 +1577,32 @@ function useLocalGroup(builtin, keys, validate) {
 /** 本地模型（NV6）：判停、识别、合成各有几个可选模型，每类选一个、可分别下载。 */
 export function LocalModelsGroup({ builtin }) {
   const { busy, act } = builtin;
+  const [layaEnvHint, setLayaEnvHint] = useState(null);
   const group = useLocalGroup(builtin, LOCAL_MODEL_KEYS, localModelSettingsError);
-  const { local, models, baseline, draft: form, update, dirty, error, result } = group;
+  const { local, models, baseline, draft: form, setDraft, update, dirty, error, result, setResult } = group;
   const groups = localModelGroups(models);
   const voices = selectedVoices(form, models);
-  const pick = (kind, id) => {
-    group.setDraft((current) => selectLocalModel(current, models, kind, id));
-    group.setResult(null);
-  };
-  // 折叠摘要只反映已保存的设置
+  const fallbackTtsModel = resolveFallbackTtsModel(form, models);
   const on = groups.filter((item) => baseline[item.kind]).map((item) => item.title);
-
   const remove = async (model) => {
     if (!(await showConfirm(`删除本地模型“${model.label}”？需要时可以重新下载。`, { title: "删除模型？", tone: "warning", danger: true, confirmText: "删除" }))) return;
     await act("删除模型", () => voiceApi.localDelete(model.id));
+  };
+  const pickFallbackTts = async (model) => {
+    const nextDraft = selectLocalModel(form, models, "tts", model.id);
+    setDraft(nextDraft);
+    builtin.setBusy("local-save-云端兜底合成模型");
+    try {
+      const next = await voiceApi.localSave(localGroupPatch(baseline, nextDraft, LOCAL_MODEL_KEYS));
+      const nextForm = localSettingsForm(next.local?.settings);
+      builtin.setStatus(next);
+      setDraft(nextForm);
+      setResult({ ok: true, text: `已将“${model.label}”设为云端 TTS 异常时的优先兜底模型 · ${restartEffect(next)}` });
+    } catch (e) {
+      setResult({ ok: false, text: `设置兜底模型失败：${voiceErrorText(e)}` });
+    } finally {
+      builtin.setBusy("");
+    }
   };
 
   return (
@@ -476,24 +1611,33 @@ export function LocalModelsGroup({ builtin }) {
         {!local.helper_found && (
           <div className="voice-hint voice-hint--warn">没有找到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录）。可以先下载模型，但打开本地开关后内置服务将无法启动。</div>
         )}
-        <p className="voice-muted">每类可下载多个模型，只用选中的那个。下载、删除立即执行；开关、选用和音色要点下方保存。</p>
+        <p className="voice-muted">
+          在这里下载或管理断网可用的本地模型包（随 MOSS 自定义安装目录存放{local.models_dir ? `：${local.models_dir}` : ""}），以及调整本地合成音色与语速；当前启用哪个模型请直接在上方顶部下拉框切换。
+        </p>
         {groups.map((item) => {
           const selectedId = form[`${item.kind}_model`];
+          const activeOn = Boolean(form[item.kind]);
           const selected = item.models.find((model) => model.id === selectedId);
           return (
             <div className="voice-local-group" key={item.kind} id={`voice-local-group-${item.kind}`}>
-              <label className="voice-check">
-                <input type="checkbox" checked={form[item.kind]} onChange={(e) => update(item.kind, e.target.checked)} id={`voice-local-${item.kind}`} />
-                <span>
-                  {item.toggle}
-                  {form[item.kind] && selected && !selected.installed && <span className="voice-bad">（选用的模型未下载，开关暂不生效）</span>}
+              <div className="voice-field-head">
+                <b>{item.title}模型包</b>
+                <span className="voice-muted">
+                  {activeOn
+                    ? selected?.installed
+                      ? `当前在顶部已选用：${selected.label}`
+                      : `顶部已选 ${selected?.label || "本地模型"}（未下载，暂不生效）`
+                    : item.kind === "vad"
+                      ? "当前在顶部使用：内置能量判停"
+                      : item.kind === "tts" && fallbackTtsModel
+                        ? `当前在顶部使用：云端模型（云端异常优先兜底：${fallbackTtsModel.label}）`
+                        : "当前在顶部使用：云端模型"}
                 </span>
-              </label>
+              </div>
               <div className="ob-tbl voice-tbl">
                 <table>
                   <thead>
                     <tr>
-                      <th className="voice-pick">选用</th>
                       <th>{item.title}模型</th>
                       <th>大小</th>
                       <th>状态</th>
@@ -503,17 +1647,18 @@ export function LocalModelsGroup({ builtin }) {
                   <tbody>
                     {item.models.map((model) => {
                       const view = localModelView(model);
-                      const chosen = model.id === selectedId;
+                      const chosen = activeOn && model.id === selectedId;
+                      const isFallback = item.kind === "tts" && !activeOn && fallbackTtsModel?.id === model.id;
+                      const canSetFallback = item.kind === "tts" && !activeOn && Boolean(model.installed) && fallbackTtsModel?.id !== model.id;
                       return (
                         <tr key={model.id} className={chosen ? "on" : ""}>
-                          <td className="voice-pick">
-                            <input type="radio" name={`voice-local-${item.kind}-model`} checked={chosen} onChange={() => pick(item.kind, model.id)} id={`voice-local-pick-${model.id}`} aria-label={`选用 ${model.label}`} />
-                          </td>
                           <td className="voice-model-cell">
-                            <label htmlFor={`voice-local-pick-${model.id}`} className="voice-model-name">
+                            <div className="voice-model-name">
                               <b>{model.label}</b>
+                              {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
+                              {isFallback && <span className="ob-pill ob-pill--info voice-tag">当前兜底</span>}
                               {model.streaming && <span className="ob-pill ob-pill--info voice-tag">边说边识别</span>}
-                            </label>
+                            </div>
                             <div className="ob-sub">{model.note}</div>
                           </td>
                           <td className="mono voice-size">{formatBytes(model.size)}</td>
@@ -528,6 +1673,17 @@ export function LocalModelsGroup({ builtin }) {
                           </td>
                           <td>
                             <span className="voice-actions">
+                              {canSetFallback && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={Boolean(busy)}
+                                  onClick={() => pickFallbackTts(model)}
+                                  id={`voice-local-fallback-${model.id}`}
+                                >
+                                  设为云端兜底
+                                </button>
+                              )}
                               {view.canDownload && (
                                 <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => act("下载模型", () => voiceApi.localDownload(model.id))} id={`voice-local-download-${model.id}`}>
                                   <Download size={13} /> 下载
@@ -554,6 +1710,130 @@ export function LocalModelsGroup({ builtin }) {
             </div>
           );
         })}
+        {models.filter((model) => model.kind === "jev").length > 0 && (
+          <div className="voice-local-group" id="voice-local-group-jev">
+            <div className="voice-field-head">
+              <b>Jev 前置粗筛模型包（本地 System 1 决策）</b>
+              <span className="voice-muted">
+                {form.jev_filter_enabled && isLocalLayaJevModel(form.jev_model)
+                  ? "当前在顶部已选用：本地 Laya 多语言决策"
+                  : form.jev_filter_enabled
+                    ? `当前在顶部使用：云端 Jev（${form.jev_model}）`
+                    : "当前在顶部未启用（可在顶部第 3 栏下拉直接切换为本地 Laya）"}
+              </span>
+            </div>
+            {layaEnvHint && (
+              <div
+                className={`voice-hint ${layaEnvHint.ready ? "voice-hint--ok" : "voice-hint--warn"}`}
+                id="voice-local-laya-env-hint"
+              >
+                {layaEnvHint.ready ? `✓ ${layaEnvHint.summary}` : `⚠ ${layaEnvHint.summary}`}
+              </div>
+            )}
+            <div className="ob-tbl voice-tbl">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Jev 决策模型</th>
+                    <th>大小</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {models
+                    .filter((model) => model.kind === "jev")
+                    .map((model) => {
+                      const view = localModelView(model);
+                      const chosen = Boolean(form.jev_filter_enabled && isLocalLayaJevModel(form.jev_model) && model.id === "laya_multilingual");
+                      const handleDownloadLaya = async () => {
+                        builtin.setBusy("下载模型");
+                        try {
+                          const next = await voiceApi.localDownload(model.id);
+                          if (next) builtin.setStatus(next);
+                          if (next?.local?.laya_env) {
+                            setLayaEnvHint(next.local.laya_env);
+                          }
+                        } catch (err) {
+                          if (err?.code === "laya_env_missing") {
+                            builtin.setBusy("");
+                            setLayaEnvHint({ ready: false, summary: err.message });
+                            const go = await showConfirm(
+                              `${err.message}\n\n是否仍要先仅下载模型权重文件？`,
+                              {
+                                title: "未检测到本地 Laya 运行环境",
+                                tone: "warning",
+                                confirmText: "仍然下载",
+                                cancelText: "取消",
+                              }
+                            );
+                            if (!go) return;
+                            await act("下载模型", () => voiceApi.localDownload(`${model.id}:force`));
+                            return;
+                          }
+                          await showAlert(voiceErrorText(err), { title: "下载模型失败", tone: "error" });
+                        } finally {
+                          builtin.setBusy("");
+                        }
+                      };
+                      return (
+                        <tr key={model.id} className={chosen ? "on" : ""}>
+                          <td className="voice-model-cell">
+                            <div className="voice-model-name">
+                              <b>{model.label}</b>
+                              {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
+                              <span className="ob-pill ob-pill--info voice-tag">免密钥 · 随安装目录存储</span>
+                            </div>
+                            <div className="ob-sub">{model.note}</div>
+                          </td>
+                          <td className="mono voice-size">{formatBytes(model.size)}</td>
+                          <td className="voice-status">
+                            <span className={`ob-pill ${TONE_CLASS[view.tone]}`}>{view.text}</span>
+                            {view.detail && <div className="ob-sub voice-bad">{view.detail}</div>}
+                            {view.percent !== null && (
+                              <div className="voice-progress" aria-hidden="true">
+                                <span style={{ width: `${view.percent}%` }} />
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            <span className="voice-actions">
+                              {view.canDownload && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={Boolean(busy)}
+                                  onClick={handleDownloadLaya}
+                                  id={`voice-local-download-${model.id}`}
+                                >
+                                  <Download size={13} /> 下载
+                                </button>
+                              )}
+                              {view.canCancel && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={Boolean(busy)}
+                                  onClick={() => act("取消下载", () => voiceApi.localCancel(model.id))}
+                                >
+                                  <X size={13} /> 取消
+                                </button>
+                              )}
+                              {view.canDelete && (
+                                <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => remove(model)}>
+                                  <Trash2 size={13} /> 删除
+                                </button>
+                              )}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
         {models.filter((model) => model.kind === "speaker").map((model) => {
           const view = localModelView(model);
           return (
@@ -604,7 +1884,18 @@ export function ExperienceGroup({ builtin }) {
   const group = useLocalGroup(builtin, EXPERIENCE_KEYS, experienceSettingsError);
   const { baseline, draft: form, update, dirty, error, result } = group;
   const busy = builtin.busy;
-  const summary = [baseline.read_only_shortcuts ? "快捷查询开" : "快捷查询关", baseline.barge_in ? "插话开" : "插话关", `${String(baseline.custom_hotwords || "").split(/\r?\n/).filter((w) => w.trim()).length} 个自定义热词`].join(" · ");
+  const selectedJevModel = form.jev_model || baseline.jev_model || DEFAULT_JEV_MODEL;
+  const isLocalJev = isLocalLayaJevModel(selectedJevModel);
+  const localLayaInstalled = Boolean(
+    builtin.status?.jev?.local_installed ||
+      (Array.isArray(builtin.status?.local?.models) &&
+        builtin.status.local.models.find((m) => m && m.id === "laya_multilingual")?.installed)
+  );
+  const jevKeyConfigured = isLocalJev
+    ? localLayaInstalled
+    : Boolean(builtin.status?.jev?.key_set || builtin.status?.jev?.openrouter_llm_key_set || builtin.status?.local?.jev_key_configured);
+  const jevActive = Boolean(baseline.jev_filter_enabled && (baseline.jev_unfinished_hold || (baseline.read_only_shortcuts && baseline.jev_fast_route) || baseline.jev_tool_prune || baseline.jev_memory_filter));
+  const summary = [baseline.read_only_shortcuts ? "快捷查询开" : "快捷查询关", jevActive ? "Jev 筛选开" : "Jev 筛选关", baseline.barge_in ? "插话开" : "插话关", baseline.job_done_announce ? "结束播报开" : "结束播报关", `${String(baseline.custom_hotwords || "").split(/\r?\n/).filter((w) => w.trim()).length} 个自定义热词`].join(" · ");
   return (
     <VoiceGroup id="experience" title="语音体验" summary={summary} dirty={dirty}>
       <p className="voice-muted">停止词整句命中时立即请求急停，不能关闭；设备是否停下仍需确认。</p>
@@ -614,9 +1905,50 @@ export function ExperienceGroup({ builtin }) {
           <span>快捷查询状态、连接、进度、剩余时间与材料（不经大模型，默认开）</span>
         </label>
         <label className="voice-check voice-wide">
+          <input type="checkbox" checked={form.job_done_announce} onChange={(e) => update("job_done_announce", e.target.checked)} id="voice-job-announce" />
+          <span title="只在设备在线且当前不在说话时播报；播报中被打断按插话机制处理。">
+            加工结束后主动播报结果（默认开；设备在线且空闲时才播）
+          </span>
+        </label>
+        <label className="voice-check voice-wide">
           <input type="checkbox" checked={form.asr_beam_search} onChange={(e) => update("asr_beam_search", e.target.checked)} id="voice-asr-beam" />
           <span>X-ASR 热词识别（默认开；识别较慢时可关闭）</span>
         </label>
+        <label className="voice-check voice-wide">
+          <input type="checkbox" checked={form.jev_filter_enabled} onChange={(e) => update("jev_filter_enabled", e.target.checked)} id="voice-jev-filter-enabled" />
+          <span title={`使用 ${isLocalJev ? "本地 Laya (laya_multilingual)" : `OpenRouter Decisions（${selectedJevModel}）`} 在单次请求中并发执行断句、快答分流与上下文/工具剪枝；只做信息筛选，绝不授权任何机器动作。`}>
+            Jev 智能信息筛选与提速（默认关；{isLocalJev ? `当前选用本地 ${selectedJevModel}` : `当前选用 ${selectedJevModel}`}，只做信息筛选不授权动作）
+          </span>
+        </label>
+        {form.jev_filter_enabled && (
+          <div className="voice-wide voice-stack" id="voice-jev-suboptions">
+            <div className={`voice-hint ${jevKeyConfigured ? "" : "voice-hint--bad"}`}>
+              {isLocalJev
+                ? jevKeyConfigured
+                  ? "已就绪本地 Laya 多语言决策模型（免云端密钥，识别文字不出本机）；超时或异常时自动无感回退常规链路。"
+                  : "本地 Laya 决策模型尚未下载：请前往“本地模型（断网可用）”下载 laya_multilingual，未就绪时自动回退常规对话链路。"
+                : jevKeyConfigured
+                  ? `已就绪 OpenRouter API Key（当前语音粗筛模型 ${selectedJevModel}）；单次请求并发筛选，超时或限流时自动无感回退常规链路。`
+                  : `尚未配置 OpenRouter API Key：请前往“模型与服务 → OpenRouter · Jev 前置粗筛模型”保存密钥；未配置时自动回退常规对话链路。`}
+            </div>
+            <label className="voice-check voice-wide">
+              <input type="checkbox" checked={form.jev_unfinished_hold} onChange={(e) => update("jev_unfinished_hold", e.target.checked)} id="voice-jev-unfinished" />
+              <span>半截话防抢话续听与流式预热（停顿想词时单次延后最多 1.2 秒，并提前缓存本句路由）</span>
+            </label>
+            <label className="voice-check voice-wide">
+              <input type="checkbox" checked={form.read_only_shortcuts && form.jev_fast_route} disabled={!form.read_only_shortcuts} onChange={(e) => update("jev_fast_route", e.target.checked)} id="voice-jev-fast-route" />
+              <span>口语状态快答分流（口语询问状态、连接、进度、剩余时间与材料时跳过大模型直答{form.read_only_shortcuts ? "" : "；需先开启上方快捷查询"}）</span>
+            </label>
+            <label className="voice-check voice-wide">
+              <input type="checkbox" checked={form.jev_tool_prune} onChange={(e) => update("jev_tool_prune", e.target.checked)} id="voice-jev-tool-prune" />
+              <span title="内置与扩展工具收拢为 6 个粗筛开关（支持增删工具自动适配），第三方外部 MCP 工具较多时自动按服务分组粗筛，避免逐个工具平铺累积误报；state 单条不超过 600 字符、只带最近 2 轮极简上下文。">6 大工具组按需剪枝（日常闲聊 0 工具进主模型，业务指令仅挂载相关工具组以缩短首字延迟）</span>
+            </label>
+            <label className="voice-check voice-wide">
+              <input type="checkbox" checked={form.jev_memory_filter} onChange={(e) => update("jev_memory_filter", e.target.checked)} id="voice-jev-memory-filter" />
+              <span>长期记忆相关性精筛（顺手剔除字面撞词但语义无关的候选记忆）</span>
+            </label>
+          </div>
+        )}
         <label className="voice-check voice-wide">
           <input type="checkbox" checked={form.barge_in} onChange={(e) => update("barge_in", e.target.checked)} id="voice-barge-in" />
           <span title="须先在设备固件开启设备端回声消除并使用 realtime 模式；未消除的回声可能误打断。MOSS 不修改固件。">

@@ -14,6 +14,7 @@ import { showAlert, showConfirm } from "./appDialog.js";
 import { getJson, postJson } from "./api/client.js";
 import { backendStartupErrorText, hasDesktopSession, initializeBackendOrigin, isRemoteMode, refreshDesktopSession } from "./authSession.js";
 import { ApprovalCenter } from "./components/ApprovalCenter.jsx";
+import { JobProgressDock } from "./components/JobProgressDock.jsx";
 import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
 import { MaterialLabPage } from "./pages/MaterialLabPage.jsx";
@@ -135,9 +136,12 @@ function App() {
     const handlePopState = () => {
       setCurrentPath(pathToRoute(window.location.pathname, voiceEnabled));
     };
+    const handleAuthRequired = () => {
+      setShowAuthModal(true);
+    };
 
     window.addEventListener("popstate", handlePopState);
-    window.addEventListener("laser-auth-required", () => setShowAuthModal(true));
+    window.addEventListener("laser-auth-required", handleAuthRequired);
     window.addEventListener("moss:close-requested", triggerCloseHandling);
 
     let unlistenTauri = null;
@@ -154,7 +158,7 @@ function App() {
 
     return () => {
       window.removeEventListener("popstate", handlePopState);
-      window.removeEventListener("laser-auth-required", () => setShowAuthModal(true));
+      window.removeEventListener("laser-auth-required", handleAuthRequired);
       window.removeEventListener("moss:close-requested", triggerCloseHandling);
       if (unlistenTauri) unlistenTauri();
     };
@@ -223,6 +227,9 @@ function App() {
         onAuthClick={() => setShowAuthModal(true)}
         onSettingsClick={() => setShowSettingsModal(true)}
         showVoice={voiceEnabled}
+        mcpStatus={mcpStatus}
+        voiceStatus={voiceStatus}
+        approvalCount={approvalCount}
       />
       <div className="ob-main">
         <Navbar
@@ -254,7 +261,7 @@ function App() {
           )}
           {currentPath === "/voice" && voiceEnabled && (
             <VoiceErrorBoundary onBack={navigateTo}>
-              <VoicePage />
+              <VoicePage mcpStatus={mcpStatus} approvalCount={approvalCount} />
             </VoiceErrorBoundary>
           )}
           {currentPath === "/" && (
@@ -300,6 +307,8 @@ function App() {
         onOpenChange={setApprovalOpen}
         onPendingCountChange={setApprovalCount}
       />
+
+      <JobProgressDock />
 
       <AppDialogHost />
     </div>

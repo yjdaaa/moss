@@ -53,14 +53,16 @@ export function SettingsModal({
       }
     });
 
-    getJson("/api/jev/status").then((res) => {
-      if (res.ok && res.data?.success) {
-        const jev = res.data.result || {};
-        setJevEnabled(Boolean(jev.enabled));
-        setJevMaskedKey(jev.masked_key || "");
-      }
-    });
-  }, [visible, hideTopPillsProp]);
+    if (!onOpenVoice) {
+      getJson("/api/jev/status").then((res) => {
+        if (res.ok && res.data?.success) {
+          const jev = res.data.result || {};
+          setJevEnabled(Boolean(jev.enabled));
+          setJevMaskedKey(jev.masked_key || "");
+        }
+      });
+    }
+  }, [visible, hideTopPillsProp, onOpenVoice]);
 
   if (!visible) return null;
 
@@ -366,7 +368,9 @@ export function SettingsModal({
             </div>
           )}
 
-          {/* Jev 判断服务设置 */}
+          {/* Jev 判断服务：桌面端已统一收归「语音中心 → 模型」管理，右上角偏好设置不再重复展示；
+              仅在无语音中心的独立 moss-host 网页环境保留兼容配置 */}
+          {!onOpenVoice && (
           <div className="ob-fold settings-box-3">
             <FoldHeader variant="section" id="settings-jev" icon={Link2} title="OpenRouter · Jev 判断服务" defaultOpen={false} />
             <div className="settings-box-4">
@@ -436,7 +440,7 @@ export function SettingsModal({
               {jevSaveStatus && <span className="settings-text">{jevSaveStatus}</span>}
             </div>
           </div>
-
+          )}
           </>)}
 
           {/* 导出目录（仅桌面版） */}

@@ -530,10 +530,14 @@ impl PersonContext {
         }
         self.store.update(scope, revision, text)
     }
-    pub fn session_closed(self: &Arc<Self>, context: &ToolContext, llm: Arc<dyn Llm>) {
+    pub fn session_closed(
+        self: &Arc<Self>,
+        context: &ToolContext,
+        llm: Arc<dyn Llm>,
+    ) -> Vec<(PersonScope, Vec<ChatMessage>)> {
         let histories = {
             let Ok(mut state) = self.state.lock() else {
-                return;
+                return Vec::new();
             };
             let keys = state
                 .histories
@@ -545,9 +549,10 @@ impl PersonContext {
                 .filter_map(|key| state.histories.remove(&key).map(|history| (key.2, history)))
                 .collect::<Vec<_>>()
         };
-        for (scope, history) in histories {
-            self.queue_summary(context, &scope, &history, llm.clone());
+        for (scope, history) in &histories {
+            self.queue_summary(context, scope, history, llm.clone());
         }
+        histories
     }
     fn queue_summary(
         self: &Arc<Self>,

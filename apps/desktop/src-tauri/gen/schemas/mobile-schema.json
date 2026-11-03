@@ -267,6 +267,12 @@
           "markdownDescription": "Enables the voice_agent_stop command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_builtin_models_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-builtin-models-list",
+          "markdownDescription": "Enables the voice_builtin_models_list command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voice_builtin_models_save command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-builtin-models-save",
@@ -697,6 +703,12 @@
           "type": "string",
           "const": "deny-voice-agent-stop",
           "markdownDescription": "Denies the voice_agent_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_builtin_models_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-builtin-models-list",
+          "markdownDescription": "Denies the voice_builtin_models_list command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_builtin_models_save command without any pre-configured scope.",

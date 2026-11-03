@@ -291,3 +291,39 @@ fn nv16_nv17_sqlite_migration_and_failclosed_restart() {
     let remaining: i64=db.connection.query_row("SELECT count(*) FROM voice_person_memory",[],|r|r.get(0)).unwrap();
     assert_eq!(remaining,0);
 }
+
+#[test]
+fn device_snapshot_keeps_raw_json_and_rejects_unknown_or_oversized(){
+    let db=RuntimeDb::open_memory().unwrap();
+    assert_eq!(SCHEMA_VERSION,15);
+    db.voice_device_seen("dev","client","lichuang-dev","2.5.0","192.168.1.9",1.).unwrap();
+    assert!(db.voice_device_snapshot("dev","info",r#"{"application":{"version":"2.5.0"}}"#,2.).unwrap());
+    assert!(db.voice_device_snapshot("dev","hello",r#"{"aec":true}"#,3.).unwrap());
+    assert!(db.voice_device_snapshot("dev","status",r#"{"volume":50}"#,4.).unwrap());
+    let row=db.voice_device("dev").unwrap().unwrap();
+    assert_eq!(row.info_json.as_deref(),Some(r#"{"application":{"version":"2.5.0"}}"#));
+    assert_eq!(row.hello_json.as_deref(),Some(r#"{"aec":true}"#));
+    assert_eq!(row.status_json.as_deref(),Some(r#"{"volume":50}"#));
+    assert_eq!((row.info_at,row.hello_at,row.status_at),(Some(2.),Some(3.),Some(4.)));
+    // 未知种类、超长内容与未登记设备都不写库，也不影响已有快照
+    assert!(!db.voice_device_snapshot("dev","name","x",5.).unwrap());
+    let long=format!(r#"{{"a":"{}"}}"#,"x".repeat(9000));
+    assert!(!db.voice_device_snapshot("dev","info",&long,6.).unwrap());
+    assert!(!db.voice_device_snapshot("missing","info","{}",7.).unwrap());
+    assert_eq!(db.voice_device("dev").unwrap().unwrap().info_at,Some(2.));
+}
+
+#[test]
+fn listen_mode_snapshot_is_the_device_aec_evidence(){
+    let db=RuntimeDb::open_memory().unwrap();
+    assert_eq!(SCHEMA_VERSION,15);
+    db.voice_device_seen("dev","client","lichuang-dev","2.5.0","1.2.3.4",1.).unwrap();
+    assert!(db.voice_device_snapshot("dev","listen",r#"{"mode":"realtime"}"#,2.).unwrap());
+    let row=db.voice_device("dev").unwrap().unwrap();
+    assert_eq!(row.listen_json.as_deref(),Some(r#"{"mode":"realtime"}"#));
+    assert_eq!(row.listen_at,Some(2.));
+    // 只保留最近一次：设备双击关掉 AEC 后退回 auto 会覆盖
+    assert!(db.voice_device_snapshot("dev","listen",r#"{"mode":"auto"}"#,3.).unwrap());
+    assert_eq!(db.voice_device("dev").unwrap().unwrap().listen_json.as_deref(),Some(r#"{"mode":"auto"}"#));
+    assert_eq!(db.voice_device("dev").unwrap().unwrap().listen_at,Some(3.));
+}

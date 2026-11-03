@@ -118,7 +118,7 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> bool {
 }
 
 /// 等设备 hello，返回其声明的协议版本、上行音频参数与是否支持设备 MCP。
-async fn wait_hello(socket: &mut WebSocket) -> Option<(u32, AudioParams, bool)> {
+async fn wait_hello(socket: &mut WebSocket) -> Option<(u32, AudioParams, bool, bool)> {
     let deadline = Instant::now() + HELLO_TIMEOUT;
     loop {
         let message = tokio::time::timeout_at(deadline, socket.recv())
@@ -134,7 +134,7 @@ async fn wait_hello(socket: &mut WebSocket) -> Option<(u32, AudioParams, bool)> 
                     ..
                 }) = ClientMessage::parse(text.as_str())
                 {
-                    return Some((version, audio_params, features.mcp));
+                    return Some((version, audio_params, features.mcp, features.aec));
                 }
             }
             Message::Close(_) => return None,
@@ -182,7 +182,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                     .verify(token, &client_id, &device_id, unix_now())
             })
             .unwrap_or(false);
-    let Some((hello_version, uplink, device_mcp)) = wait_hello(&mut socket).await else {
+    let Some((hello_version, uplink, device_mcp, device_aec)) = wait_hello(&mut socket).await else {
         shared
             .state
             .event(format!("设备 {device_id} 未在 10 秒内发送 hello，已断开"));
@@ -193,6 +193,24 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     } else {
         identity.protocol_version.unwrap_or(1)
     };
+
+    // 2026-11-02：连接握手快照（协议版本、音频参数、是否带 MCP、设备端 AEC）。
+    // 桌面端「设备信息」用它显示 AEC 是否真的开启，而不是按板型推断。
+    let hello_snapshot = json!({
+        "protocol_version": version,
+        "transport": "websocket",
+        "audio": {
+            "format": uplink.format,
+            "sample_rate": uplink.sample_rate,
+            "channels": uplink.channels,
+            "frame_duration": uplink.frame_duration,
+        },
+        "mcp": device_mcp,
+        "aec": device_aec,
+    });
+    shared
+        .registry
+        .device_snapshot(&device_id, crate::SNAPSHOT_HELLO, &hello_snapshot.to_string());
     let session_id = random_id();
     let lease = if token_ok {
         let (registry, d, c, s) = (
@@ -235,16 +253,18 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             lease.as_ref().unwrap().allowed.clone(),
         ) {
             Ok(mut session) => {
-                if device_mcp && session.conversation.is_some() {
+                if device_mcp {
                     session.device_mcp = Some(DeviceMcp::new());
-                    session.vision_host = identity.host.clone();
-                    session.vision_token = identity.authorization.clone().map(|value| {
-                        value
-                            .trim()
-                            .strip_prefix("Bearer ")
-                            .unwrap_or(value.trim())
-                            .to_owned()
-                    });
+                    if session.conversation.is_some() {
+                        session.vision_host = identity.host.clone();
+                        session.vision_token = identity.authorization.clone().map(|value| {
+                            value
+                                .trim()
+                                .strip_prefix("Bearer ")
+                                .unwrap_or(value.trim())
+                                .to_owned()
+                        });
+                    }
                 }
                 shared.state.open(SessionView {
                     session_id: session_id.clone(),
@@ -253,10 +273,17 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                     protocol_version: version,
                     connected_at: unix_now(),
                     state: "idle".into(),
+                    level: 0,
+                    emotion: String::new(),
+                    active_tool: None,
+                    utterance_chars: 0,
+                    spoken_sentences: 0,
                 });
                 shared
                     .registry
                     .sessions_changed(shared.state.sessions().len());
+                let (phase, level) = shared.state.aggregate_pulse();
+                shared.registry.pulse_changed(phase.as_deref(), level);
                 shared.state.event(format!(
                     "设备 {device_id} 已连接（帧协议 v{version}，上行 {uplink_rate} Hz，下行 {} Hz）",
                     shared.config.downlink_sample_rate
@@ -285,6 +312,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         shared
             .registry
             .sessions_changed(shared.state.sessions().len());
+        let (phase, level) = shared.state.aggregate_pulse();
+        shared.registry.pulse_changed(phase.as_deref(), level);
         return;
     }
     let Some(session) = session.as_mut() else {
@@ -317,6 +346,18 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         return;
     };
     let permission = lease.as_ref().unwrap().allowed.clone();
+    // 2026-11-02：桌面端「刷新信息 / 重启设备」的请求通道；断开时仅在仍归属本 session_id 时移除，防重连竞态误删新会话。
+    let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+    if let Ok(mut map) = shared.device_requests.lock() {
+        map.insert(
+            device_id.clone(),
+            crate::DeviceRequestHandle {
+                session_id: session_id.clone(),
+                supports_mcp: session.device_mcp.is_some(),
+                sender: requests_tx,
+            },
+        );
+    }
     let reason = tokio::select! {
         biased;
         _ = async {
@@ -324,21 +365,44 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         } => "设备授权已撤销".to_owned(),
-        reason = session.run(&mut socket) => reason,
+        reason = session.run(&mut socket, &mut requests_rx) => reason,
     };
     // NV10: background summary uses only committed, bounded history and never delays disconnect.
     if permission.load(std::sync::atomic::Ordering::Acquire) {
         if let Some(conversation) = &session.conversation {
-            if let Some(personal)=&conversation.personal_context {
-                personal.session_closed(&ToolContext{device_id:device_id.clone(),session_id:session_id.clone()},conversation.llm.clone());
-            }else if let Some(memory) = &conversation.memory {
-                memory.queue_summary(&device_id, &session.history, conversation.llm.clone());
-            }
-            // NV19-03: independent of the NV10 summary; off unless the user enabled it.
-            if let Some(extraction) = &conversation.context_extraction {
-                extraction.session_closed(&ToolContext{device_id:device_id.clone(),session_id:session_id.clone()}, &session.history, conversation.llm.clone());
+            let end_ctx = ToolContext {
+                device_id: device_id.clone(),
+                session_id: session_id.clone(),
+            };
+            if let Some(personal) = &conversation.personal_context {
+                let person_histories = personal.session_closed(&end_ctx, conversation.llm.clone());
+                if let Some(extraction) = &conversation.context_extraction {
+                    for (scope, person_history) in &person_histories {
+                        extraction.session_closed_for_person(
+                            &end_ctx,
+                            Some(scope),
+                            person_history,
+                            conversation.llm.clone(),
+                        );
+                    }
+                }
+            } else {
+                if let Some(memory) = &conversation.memory {
+                    memory.queue_summary(&device_id, &session.history, conversation.llm.clone());
+                }
+                // NV19-03: independent of the NV10 summary; off unless the user enabled it.
+                if let Some(extraction) = &conversation.context_extraction {
+                    extraction.session_closed(&end_ctx, &session.history, conversation.llm.clone());
+                }
             }
         }
+    }
+    if let Ok(mut map) = shared.device_requests.lock()
+        && map
+            .get(&device_id)
+            .is_some_and(|handle| handle.session_id == session_id)
+    {
+        map.remove(&device_id);
     }
     session.finish_timing("disconnected");
     session.turn = None;
@@ -348,6 +412,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     shared
         .registry
         .sessions_changed(shared.state.sessions().len());
+    let (phase, level) = shared.state.aggregate_pulse();
+    shared.registry.pulse_changed(phase.as_deref(), level);
     shared
         .state
         .event(format!("设备 {device_id} 已断开：{reason}"));
@@ -374,6 +440,35 @@ struct Listening {
     preroll: VecDeque<i16>,
     /// 进行中的流式识别（NV7）与上行 → 16 kHz 的重采样（上行已是 16 kHz 时为空）
     stream: Option<(AsrStream, Option<Resampler>)>,
+    /// 最新流式中间识别文字（用于半截话防抢话判定与路由预热）
+    last_interim: String,
+    /// 防抖中的流式预热任务（新 interim 到达或离开拾音时立即中止旧任务）
+    prewarm_task: Option<tokio::task::JoinHandle<()>>,
+    /// 每轮拾音最多允许一次半截话续听延长，防止背景人声无限挂起
+    hold_used: bool,
+    /// 半截话续听宽限窗截止时刻（自首次静音判停时刻起算 1.2 秒）
+    hold_deadline: Option<Instant>,
+    /// 续听否定或到期时，等待此前已入队 VAD 帧排空的目标序号屏障
+    finalize_after_vad_seq: Option<u64>,
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        if let Some(task) = self.prewarm_task.take() {
+            task.abort();
+        }
+    }
+}
+
+struct PendingHoldCheck {
+    paused_at: Instant,
+    task: tokio::task::JoinHandle<bool>,
+}
+
+impl Drop for PendingHoldCheck {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Listening {
@@ -389,6 +484,10 @@ impl Listening {
 
 /// 流式识别要求的上行采样率。
 const STREAM_ASR_RATE: u32 = 16_000;
+/// 半截话未说完时的单次最长续听宽限窗（1.2 秒硬上限）。
+const UNFINISHED_HOLD_WINDOW: Duration = Duration::from_millis(1200);
+/// 流式中间结果停顿防抖预热阈值：连续流利说话时 0 请求，停顿满 120ms 才预热 1 次。
+const INTERIM_PREWARM_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// 一段话结束的原因。
 #[derive(Clone, Copy)]
@@ -415,7 +514,10 @@ enum TurnKind {
     /// 唤醒回应
     Greeting,
     /// 空闲断开前的再见
+    /// 空闲断开前的再见
     Goodbye,
+    /// 加工结束播报：固定话术，不经过大模型，可被插话打断
+    Notice,
 }
 
 /// 正在进行的一轮对话。丢弃时中止对话任务（打断、断开连接）。
@@ -428,6 +530,8 @@ struct ActiveTurn {
     started: Instant,
     handle: tokio::task::JoinHandle<()>,
     events: UnboundedReceiver<TurnEvent>,
+    /// 声纹按人记忆开启时，本轮携带的视觉照片上下文（打断时随已识别说话人写入其个人历史）
+    pending_photo: Option<ChatMessage>,
     /// 识别出的用户原话（打断时记入历史）
     user: Option<String>,
     /// 已向设备发出 sentence_start 的句子（不是仅合成或排队的句子）。
@@ -456,7 +560,10 @@ struct DeviceMcp {
     tools: Vec<Value>,
     /// 已请求的 tools/list 页数
     pages: usize,
+    init_sent: bool,
+    initialized: bool,
     ready: bool,
+    deferred_requests: Vec<crate::DeviceRequest>,
     calls_tx: UnboundedSender<DeviceCall>,
     calls_rx: UnboundedReceiver<DeviceCall>,
 }
@@ -465,6 +572,10 @@ enum McpPending {
     Initialize,
     ToolsList,
     Call(oneshot::Sender<String>),
+    /// 桌面端请求 `self.get_device_status`：结果不交给模型，直接写成设备快照
+    Snapshot(&'static str),
+    /// 桌面端请求 `self.reboot`：设备不回响应
+    Reboot,
 }
 
 /// 设备工具清单最多取多少页（防止设备返回循环的游标）
@@ -480,7 +591,10 @@ impl DeviceMcp {
             pending: HashMap::new(),
             tools: Vec::new(),
             pages: 0,
+            init_sent: false,
+            initialized: false,
             ready: false,
+            deferred_requests: Vec::new(),
             calls_tx,
             calls_rx,
         }
@@ -550,6 +664,19 @@ async fn next_listening_interim(phase: &mut Phase) -> String {
     }
 }
 
+/// 等待非阻塞的半截话续听判定结果（不阻塞 socket/VAD/打断事件轮询）。
+async fn next_listening_hold_check(slot: &mut Option<PendingHoldCheck>) -> (Instant, bool) {
+    match slot.as_mut() {
+        Some(pending) => {
+            let at = pending.paused_at;
+            let held = (&mut pending.task).await.unwrap_or(false);
+            *slot = None;
+            (at, held)
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// 等对话任务发来的下一个设备工具调用；没有设备 MCP 时永远等待（用于 `select!`）。
 async fn next_device_call(device: &mut Option<DeviceMcp>) -> Option<DeviceCall> {
     match device {
@@ -585,6 +712,7 @@ struct Session<'a> {
     pump: PlaybackPump,
     decode_errors: u64,
     phase: Phase,
+    hold_check: Option<PendingHoldCheck>,
     /// 最近一次文本消息或说话的时间（自动模式下设备持续上传静音，静音帧不算活动）
     last_activity: Instant,
     /// 最近一次 `listen start` 是否为手动模式
@@ -600,6 +728,9 @@ struct Session<'a> {
     vision_host: Option<String>,
     vision_token: Option<String>,
     device_mcp: Option<DeviceMcp>,
+    /// 加工结束播报：只读观察最近任务，发现“发送中 → 终态”时在空闲时播报一次。
+    jobs: crate::jobs::JobWatcher,
+    next_job_poll: Instant,
 }
 
 impl<'a> Session<'a> {
@@ -663,6 +794,7 @@ impl<'a> Session<'a> {
             ),
             decode_errors: 0,
             phase: Phase::Idle,
+            hold_check: None,
             last_activity: Instant::now(),
             listen_manual: false,
             listen_realtime: false,
@@ -682,13 +814,25 @@ impl<'a> Session<'a> {
             vision_host: None,
             vision_token: None,
             device_mcp: None,
+            jobs: crate::jobs::JobWatcher::new(),
+            next_job_poll: Instant::now() + shared.config.job_poll_interval,
         })
+    }
+
+    fn sync_pulse(&self) {
+        let (phase, level) = self.shared.state.aggregate_pulse();
+        self.shared.registry.pulse_changed(phase.as_deref(), level);
     }
 
     fn set_state(&self, state: &str) {
         self.shared.state.set_state(self.session_id, state);
+        self.sync_pulse();
     }
 
+    fn set_level(&self, level: u8) {
+        self.shared.state.set_level(self.session_id, level);
+        self.sync_pulse();
+    }
     fn event(&self, text: String) {
         self.shared.state.event(text);
     }
@@ -742,6 +886,7 @@ impl<'a> Session<'a> {
             worker.reset();
         }
         self.pending_listen_stop = false;
+        self.hold_check = None;
         self.listen_manual = manual;
         // 手动模式按住即说：马上建立识别连接；自动模式等 VAD 确认开始说话（避免为环境声建连接）
         let stream = if manual { self.open_stream() } else { None };
@@ -751,6 +896,11 @@ impl<'a> Session<'a> {
             utterance: Vec::new(),
             preroll: VecDeque::new(),
             stream,
+            last_interim: String::new(),
+            prewarm_task: None,
+            hold_used: false,
+            hold_deadline: None,
+            finalize_after_vad_seq: None,
         });
         self.set_state("listening");
     }
@@ -794,15 +944,31 @@ impl<'a> Session<'a> {
                     }
                     VadEvent::SpeechEnd => {
                         ended = true;
-                        self.recording_marks
-                            .entry("vad_end".into())
-                            .or_insert(self.recording_started.elapsed().as_millis() as u64);
+                        self.recording_marks.insert(
+                            "vad_end".into(),
+                            self.recording_started.elapsed().as_millis() as u64,
+                        );
                     }
                 }
             }
             if listening.speaking && !was_speaking {
-                listening.utterance = listening.preroll.drain(..).collect();
-                began = true;
+                if self.hold_check.take().is_some()
+                    || listening.hold_deadline.is_some()
+                    || listening.finalize_after_vad_seq.is_some()
+                {
+                    listening.hold_used = true;
+                }
+                listening.hold_deadline = None;
+                listening.finalize_after_vad_seq = None;
+                if listening.utterance.is_empty() {
+                    listening.utterance = listening.preroll.drain(..).collect();
+                    began = true;
+                } else {
+                    // 半截话续听后再次开口：将中间短暂过渡音频无缝拼入同一段 utterance 与流式识别
+                    let bridge: Vec<i16> = listening.preroll.drain(..).collect();
+                    listening.feed(&bridge);
+                    listening.utterance.extend_from_slice(&bridge);
+                }
             }
             if listening.speaking {
                 listening.utterance.extend_from_slice(pcm);
@@ -828,7 +994,7 @@ impl<'a> Session<'a> {
         let Phase::Listening(listening) = &mut self.phase else {
             return None;
         };
-        if ended {
+        if ended && self.hold_check.is_none() {
             return Some((
                 std::mem::take(&mut listening.utterance),
                 UtteranceEnd::Silence,
@@ -843,26 +1009,219 @@ impl<'a> Session<'a> {
         None
     }
 
-    /// NV8a-1：完整中间识别已是停止词时立刻发起一次急停轮次；普通前缀不触发。
+    /// NV8a-1：完整中间识别已是停止词时立刻发起一次急停轮次；
+    /// 普通句子若开启了 Jev 筛选，则按 120ms 防抖在后台预热未说完/路由/工具缓存（连续跳字不风暴）。
     fn on_interim(&mut self, interim: String) {
-        if !crate::fast::is_stop(&interim) || self.conversation.is_none() {
+        let Some(conversation) = self.conversation.clone() else {
             return;
-        }
+        };
         if !matches!(self.phase, Phase::Listening(_)) {
             return;
         }
-        self.pending_listen_stop = false;
-        if let Some(worker) = self.vad_worker.as_mut() {
-            worker.reset();
+        if crate::fast::is_stop(&interim) {
+            self.pending_listen_stop = false;
+            self.hold_check = None;
+            if let Some(worker) = self.vad_worker.as_mut() {
+                worker.reset();
+            }
+            // 替换 Listening 会丢弃旧 ASR 接收器与预热任务；本次语音只开始一个 FastStop 轮次，
+            // 后续最终结果和设备 listen stop 不会再次触发。
+            self.phase = Phase::Idle;
+            self.event(format!(
+                "流式中间结果整句命中急停词（{}）：立即请求急停",
+                crate::fast::normalized(&interim)
+            ));
+            self.start_turn(TurnInput::FastStop { text: interim }, TurnKind::Answer);
+            return;
         }
-        // 替换 Listening 会丢弃旧 ASR 接收器；本次语音只开始一个 FastStop 轮次，
-        // 后续最终结果和设备 listen stop 不会再次触发。
-        self.phase = Phase::Idle;
-        self.event(format!(
-            "流式中间结果整句命中急停词（{}）：立即请求急停",
-            crate::fast::normalized(&interim)
-        ));
-        self.start_turn(TurnInput::FastStop { text: interim }, TurnKind::Answer);
+        let device_specs: Vec<_> = self
+            .device_mcp
+            .as_ref()
+            .and_then(DeviceMcp::tool_set)
+            .map(|device| {
+                device
+                    .specs()
+                    .iter()
+                    .filter(|spec| spec.name != "play_music")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Phase::Listening(listening) = &mut self.phase else {
+            return;
+        };
+        if listening.last_interim == interim {
+            return;
+        }
+        listening.last_interim = interim.clone();
+        if let Some(prev) = listening.prewarm_task.take() {
+            prev.abort();
+        }
+        if let Some(jev) = conversation
+            .jev_filter
+            .clone()
+            .filter(|f| f.options().enabled && f.options().unfinished_hold)
+            && crate::fast::normalized(&interim).chars().count() >= 2
+        {
+            let history = Self::jev_prewarm_history(
+                &self.shared.vision_photos,
+                &self.device_id,
+                &self.history,
+                &conversation,
+            );
+            listening.prewarm_task = Some(tokio::spawn(async move {
+                tokio::time::sleep(INTERIM_PREWARM_DEBOUNCE).await;
+                let mut tools = conversation.tools.tools();
+                tools.extend(device_specs);
+                let _ = jev.should_hold_unfinished(&interim, &history, &tools).await;
+            }));
+        }
+    }
+
+    fn jev_prewarm_history(
+        vision_photos: &crate::vision::VisionPhotos,
+        device_id: &str,
+        base_history: &[ChatMessage],
+        conversation: &Conversation,
+    ) -> Vec<ChatMessage> {
+        if conversation.personal_context.is_some() {
+            vision_photos
+                .peek_message(device_id)
+                .into_iter()
+                .collect()
+        } else {
+            let mut history = base_history.to_vec();
+            if let Some(photo_msg) = vision_photos.peek_message(device_id) {
+                history.push(photo_msg);
+            }
+            history
+        }
+    }
+
+    /// VAD 静音判停时：若开启了 Jev 未说完防抢话，启动非阻塞判定任务挂在 `Session::hold_check` 上，
+    /// 会话循环继续实时响应 `Abort`、`ListenStop`、`Ping`、停止词与提前续说音频。
+    async fn finish_or_hold_utterance(
+        &mut self,
+        socket: &mut WebSocket,
+        pcm: Vec<i16>,
+        end: UtteranceEnd,
+    ) -> Result<(), String> {
+        if matches!(end, UtteranceEnd::Silence)
+            && !self.pending_listen_stop
+            && self.hold_check.is_none()
+            && let Some(conversation) = self.conversation.clone()
+            && let Some(jev) = conversation
+                .jev_filter
+                .clone()
+                .filter(|f| f.options().enabled && f.options().unfinished_hold)
+        {
+            let mut tools = conversation.tools.tools();
+            if let Some(device) = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set) {
+                tools.extend(
+                    device
+                        .specs()
+                        .iter()
+                        .filter(|spec| spec.name != "play_music")
+                        .cloned(),
+                );
+            }
+            if let Phase::Listening(listening) = &mut self.phase
+                && !listening.manual
+                && !listening.hold_used
+            {
+                if let Some(task) = listening.prewarm_task.take()
+                    && !task.is_finished()
+                {
+                    task.abort();
+                }
+                let latest = listening
+                    .stream
+                    .as_ref()
+                    .and_then(|(s, _)| s.latest_interim())
+                    .unwrap_or_else(|| listening.last_interim.clone());
+                listening.last_interim = latest.clone();
+                if !latest.is_empty() {
+                    let paused_at = Instant::now();
+                    let history = Self::jev_prewarm_history(
+                        &self.shared.vision_photos,
+                        &self.device_id,
+                        &self.history,
+                        &conversation,
+                    );
+                    // 暂存前半句录音、保持 Phase::Listening 不中断，交由 select! 异步接收结果
+                    listening.utterance = pcm;
+                    listening.speaking = false;
+                    self.hold_check = Some(PendingHoldCheck {
+                        paused_at,
+                        task: tokio::spawn(async move {
+                            tokio::task::yield_now().await;
+                            jev.should_hold_unfinished(&latest, &history, &tools).await
+                        }),
+                    });
+                    self.set_level(0);
+                    return Ok(());
+                }
+            }
+        }
+        self.finish_utterance(socket, pcm, end).await
+    }
+
+    async fn on_hold_check_done(
+        &mut self,
+        socket: &mut WebSocket,
+        paused_at: Instant,
+        held: bool,
+    ) -> Result<(), String> {
+        if self.pending_listen_stop {
+            return self.finish_listen_stop(socket).await;
+        }
+        let deadline = paused_at + UNFINISHED_HOLD_WINDOW;
+        if held
+            && Instant::now() < deadline
+            && let Phase::Listening(listening) = &mut self.phase
+        {
+            listening.hold_used = true;
+            listening.hold_deadline = Some(deadline);
+            listening.finalize_after_vad_seq = None;
+            self.set_level(0);
+            self.event("检测到语句尚未说完，延长拾音等待续说".into());
+            return Ok(());
+        }
+        self.finalize_held_utterance(socket).await
+    }
+
+    async fn on_hold_expired(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+        let active = matches!(&self.phase, Phase::Listening(l) if l.hold_deadline.is_some());
+        if !active {
+            return Ok(());
+        }
+        self.finalize_held_utterance(socket).await
+    }
+
+    /// 结束挂起中的半句录音：若此刻 `VadWorker` 仍有已接收但尚未消费的在途帧，
+    /// 先记录帧序号屏障，待这些在途帧经 `hear` 确认无续说后再提交，防止 `worker.reset()` 丢弃已入队续说语音。
+    async fn finalize_held_utterance(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+        if !self.listen_manual
+            && let Some(target) = self
+                .vad_worker
+                .as_ref()
+                .and_then(crate::audio::worker::VadWorker::pending_target)
+            && let Phase::Listening(listening) = &mut self.phase
+        {
+            listening.hold_deadline = None;
+            listening.finalize_after_vad_seq = Some(target);
+            return Ok(());
+        }
+        let pcm = match &mut self.phase {
+            Phase::Listening(listening) => {
+                listening.hold_deadline = None;
+                listening.finalize_after_vad_seq = None;
+                std::mem::take(&mut listening.utterance)
+            }
+            _ => return Ok(()),
+        };
+        self.finish_utterance(socket, pcm, UtteranceEnd::Silence)
+            .await
     }
 
     /// 一段话结束：记录并交给应答。
@@ -873,11 +1232,12 @@ impl<'a> Session<'a> {
         end: UtteranceEnd,
     ) -> Result<(), String> {
         self.pending_listen_stop = false;
+        self.hold_check = None;
         if let Some(worker) = self.vad_worker.as_mut() {
             worker.reset();
         }
         let stream = match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Listening(listening) => listening.stream.map(|(stream, _)| stream),
+            Phase::Listening(mut listening) => listening.stream.take().map(|(stream, _)| stream),
             _ => None,
         };
         self.set_state("idle");
@@ -943,21 +1303,31 @@ impl<'a> Session<'a> {
         };
         // 2026-10-16：视觉卡片打开“把照片留在对话上下文里”时，把这一张作为多模态用户消息
         // 接进历史；只在会话内存里，随历史截断丢弃，不落盘。
-        if kind == TurnKind::Answer {
-            if let Some(photo) = self.shared.vision_photos.take(&self.device_id) {
-                self.history.push(photo.into_message());
-                append_history(&mut self.history, Vec::new(), conversation.settings.history_budget);
-            }
-        }
+        let mut pending_photo = None;
         let history = if kind == TurnKind::Answer {
-            self.history.clone()
+            if conversation.personal_context.is_some() {
+                if let Some(photo) = self.shared.vision_photos.take(&self.device_id) {
+                    let msg = photo.into_message();
+                    pending_photo = Some(msg.clone());
+                    vec![msg]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                if let Some(photo) = self.shared.vision_photos.take(&self.device_id) {
+                    self.history.push(photo.into_message());
+                    append_history(&mut self.history, Vec::new(), conversation.settings.history_budget);
+                }
+                self.history.clone()
+            }
         } else {
             Vec::new()
         };
         let device = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set);
         let (handle, events) = spawn_turn(conversation, context, input, history, device);
         self.turn = Some(ActiveTurn {
-            person_scope:None,
+            person_scope: None,
+            pending_photo,
             timing,
             recording_offset,
             kind,
@@ -1095,6 +1465,7 @@ impl<'a> Session<'a> {
                 }
             }
             TurnEvent::ToolTiming { name, ms } => {
+                self.shared.state.set_active_tool(self.session_id, Some(name.clone()));
                 if let Some(turn) = self.turn.as_mut()
                     && let Some(timing) = turn.timing.as_mut()
                     && timing.tools.len() < 50
@@ -1111,7 +1482,12 @@ impl<'a> Session<'a> {
                 self.tts(socket, TtsState::Stop, None).await?;
             }
             TurnEvent::Heard(text) => {
-                self.event(format!("识别完成：{} 字", text.chars().count()));
+                let chars = text.chars().count();
+                self.shared.state.set_utterance_chars(
+                    self.session_id,
+                    u32::try_from(chars).unwrap_or(u32::MAX),
+                );
+                self.event(format!("识别完成：{chars} 字"));
                 if let Some(turn) = self.turn.as_mut() {
                     turn.user = Some(text.clone());
                 }
@@ -1140,6 +1516,7 @@ impl<'a> Session<'a> {
                 }
             }
             TurnEvent::Emotion(emotion) => {
+                self.shared.state.set_emotion(self.session_id, emotion);
                 let message = ServerMessage::Llm {
                     session_id: self.session_id.into(),
                     text: emotion.into(),
@@ -1266,12 +1643,16 @@ impl<'a> Session<'a> {
                 music.cancel(&mut self.pump);
             }
         }
-        if let Some(turn) = self.turn.take()
+        if let Some(mut turn) = self.turn.take()
             && turn.kind == TurnKind::Answer
             && let Some(user) = turn.user.clone()
             && let Some(conversation) = &self.conversation
         {
-            let mut messages = vec![ChatMessage::user(user)];
+            let mut messages = Vec::with_capacity(3);
+            if let Some(photo) = turn.pending_photo.take() {
+                messages.push(photo);
+            }
+            messages.push(ChatMessage::user(user));
             if !turn.spoken.is_empty() {
                 messages.push(ChatMessage::assistant(turn.spoken.join("")));
             }
@@ -1315,11 +1696,13 @@ impl<'a> Session<'a> {
                     for text in marks {
                         self.tts(socket, TtsState::SentenceStart, Some(text.clone()))
                             .await?;
+                        self.shared.state.inc_spoken_sentences(self.session_id);
                         if let Some(turn) = self.turn.as_mut() {
                             turn.spoken.push(text);
                         }
                     }
                     self.send_frame(socket, &data).await?;
+                    self.set_level(self.pump.last_level());
                     if self.playback_started.is_none() {
                         self.playback_started = Some(Instant::now());
                         self.barge.reset();
@@ -1394,7 +1777,7 @@ impl<'a> Session<'a> {
             && (self
                 .turn
                 .as_ref()
-                .is_some_and(|turn| turn.kind == TurnKind::Answer && !turn.close)
+                .is_some_and(|turn| matches!(turn.kind, TurnKind::Answer | TurnKind::Notice) && !turn.close)
                 || self.music.as_ref().is_some_and(|music| music.active()));
         if !listening && !may_interrupt {
             return Ok(());
@@ -1438,12 +1821,14 @@ impl<'a> Session<'a> {
                 let _ = self.vad.accept(&head);
             }
             let stream = self.open_stream();
+            let head_level = crate::audio::pcm_rms_level(&head);
             if let Phase::Listening(recording) = &mut self.phase {
                 recording.speaking = true;
                 recording.stream = stream;
                 recording.feed(&head);
                 recording.utterance = head;
             }
+            self.set_level(head_level);
             self.last_activity = Instant::now();
             self.event(format!(
                 "自然插话：连续语音至少 {} ms，距开播 {}，保留开头 {head_ms} ms",
@@ -1454,6 +1839,7 @@ impl<'a> Session<'a> {
             ));
             return Ok(());
         }
+        self.set_level(crate::audio::pcm_rms_level(&pcm));
         if !self.listen_manual
             && let Some(worker) = self.vad_worker.as_mut()
         {
@@ -1461,7 +1847,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         match self.hear(&pcm, None) {
-            Some((utterance, end)) => self.finish_utterance(socket, utterance, end).await,
+            Some((utterance, end)) => self.finish_or_hold_utterance(socket, utterance, end).await,
             None => Ok(()),
         }
     }
@@ -1477,7 +1863,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         if let Phase::Listening(listening) = &mut self.phase {
-            let utterance = if listening.manual || listening.speaking {
+            let utterance = if listening.manual || listening.speaking || !listening.utterance.is_empty() {
                 std::mem::take(&mut listening.utterance)
             } else {
                 Vec::new()
@@ -1497,11 +1883,33 @@ impl<'a> Session<'a> {
         if !frame.prime && matches!(self.phase, Phase::Listening(_)) && !self.listen_manual {
             if let Some((pcm, end)) = self.hear(&frame.samples, Some((frame.events, frame.notice)))
             {
-                self.finish_utterance(socket, pcm, end).await?;
+                self.finish_or_hold_utterance(socket, pcm, end).await?;
             }
         }
         if self.pending_listen_stop {
             self.finish_listen_stop(socket).await?;
+            return Ok(());
+        }
+        let reached_barrier = self
+            .vad_worker
+            .as_ref()
+            .zip(match &self.phase {
+                Phase::Listening(listening) => listening.finalize_after_vad_seq,
+                _ => None,
+            })
+            .is_some_and(|(worker, target)| worker.completed_seq() >= target);
+        if reached_barrier {
+            let pcm = match &mut self.phase {
+                Phase::Listening(listening) if !listening.speaking => {
+                    listening.finalize_after_vad_seq = None;
+                    std::mem::take(&mut listening.utterance)
+                }
+                _ => Vec::new(),
+            };
+            if !pcm.is_empty() {
+                self.finish_utterance(socket, pcm, UtteranceEnd::Silence)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -1518,11 +1926,22 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// 会话开始时向声明了 MCP 的设备发 `initialize`。
+    /// 对话模式会话开始时向声明了 MCP 的设备发 `initialize`（回声模式按需在首次桌面端请求时握手）。
     async fn start_device_mcp(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+        if self.conversation.is_none() {
+            return Ok(());
+        }
+        self.send_mcp_initialize(socket).await
+    }
+
+    async fn send_mcp_initialize(&mut self, socket: &mut WebSocket) -> Result<(), String> {
         let Some(device) = self.device_mcp.as_mut() else {
             return Ok(());
         };
+        if device.init_sent {
+            return Ok(());
+        }
+        device.init_sent = true;
         // Only an already-authorized session gets a currently configured vision capability.
         // Host comes from the validated websocket Host header; port is the ACTUAL bound HTTP port.
         let capability = match (
@@ -1564,13 +1983,24 @@ impl<'a> Session<'a> {
         }
         match device.pending.remove(&id) {
             Some(McpPending::Initialize) => {
-                let list = device.request("tools/list", json!({}), McpPending::ToolsList);
+                device.initialized = true;
+                let deferred = std::mem::take(&mut device.deferred_requests);
+                let list = self
+                    .conversation
+                    .is_some()
+                    .then(|| device.request("tools/list", json!({}), McpPending::ToolsList));
                 self.send_mcp(
                     socket,
                     json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
                 )
                 .await?;
-                self.send_mcp(socket, list).await
+                if let Some(list) = list {
+                    self.send_mcp(socket, list).await?;
+                }
+                for req in deferred {
+                    self.dispatch_device_request(socket, req).await?;
+                }
+                Ok(())
             }
             Some(McpPending::ToolsList) => {
                 if let Some(tools) = payload.pointer("/result/tools").and_then(Value::as_array) {
@@ -1601,11 +2031,82 @@ impl<'a> Session<'a> {
                 let _ = reply.send(device_result_text(&payload));
                 Ok(())
             }
+            Some(McpPending::Snapshot(kind)) => {
+                let text = device_result_text(&payload);
+                self.shared.registry.device_snapshot(&self.device_id, kind, &text);
+                Ok(())
+            }
+            // 重启不会回响应：设备随后断开，等它重新连接上报新的 OTA
+            Some(McpPending::Reboot) => Ok(()),
             None => Ok(()),
         }
     }
 
     /// 把对话任务的设备工具调用转发给设备。
+    /// 桌面端请求（2026-11-02）：刷新设备信息 / 重启设备。设备自带 MCP 未就绪时只记事件。
+    /// 2026-11-02：记录设备实际使用的拾音模式（每次开始拾音写一次，条数有界）。
+    /// 这是判断设备端 AEC 是否开启的行为证据：固件的 `GetDefaultListeningMode()` 在 AEC
+    /// 开启时返回 `realtime`、关闭时返回 `auto`，所以 `mode` 比固件自称可靠。
+    /// 只记录、不做任何门禁。
+    fn record_listen_mode(&mut self, manual: bool, realtime: bool) {
+        let mode = if realtime {
+            "realtime"
+        } else if manual {
+            "manual"
+        } else {
+            "auto"
+        };
+        let snapshot = json!({ "mode": mode }).to_string();
+        self.shared
+            .registry
+            .device_snapshot(&self.device_id, crate::SNAPSHOT_LISTEN, &snapshot);
+    }
+
+    async fn on_device_request(
+        &mut self,
+        socket: &mut WebSocket,
+        request: crate::DeviceRequest,
+    ) -> Result<(), String> {
+        let should_send_init = match self.device_mcp.as_mut() {
+            Some(device) if !device.initialized => {
+                if device.deferred_requests.len() < 16 {
+                    device.deferred_requests.push(request);
+                }
+                !device.init_sent
+            }
+            Some(_) => {
+                return self.dispatch_device_request(socket, request).await;
+            }
+            None => {
+                self.event("设备没有提供自带 MCP，桌面端请求已忽略".into());
+                return Ok(());
+            }
+        };
+        if should_send_init {
+            return self.send_mcp_initialize(socket).await;
+        }
+        Ok(())
+    }
+
+    async fn dispatch_device_request(
+        &mut self,
+        socket: &mut WebSocket,
+        request: crate::DeviceRequest,
+    ) -> Result<(), String> {
+        let (tool, pending) = match request {
+            crate::DeviceRequest::RefreshInfo => {
+                ("self.get_device_status", McpPending::Snapshot(crate::SNAPSHOT_STATUS))
+            }
+            crate::DeviceRequest::Reboot => ("self.reboot", McpPending::Reboot),
+        };
+        let Some(device) = self.device_mcp.as_mut() else {
+            return Ok(());
+        };
+        let payload = device.request("tools/call", json!({ "name": tool, "arguments": {} }), pending);
+        self.event(format!("桌面端请求：{tool}"));
+        self.send_mcp(socket, payload).await
+    }
+
     async fn forward_device_call(
         &mut self,
         socket: &mut WebSocket,
@@ -1636,6 +2137,7 @@ impl<'a> Session<'a> {
             }) => {
                 let manual = mode.as_deref() == Some("manual");
                 let realtime = mode.as_deref() == Some("realtime");
+                self.record_listen_mode(manual, realtime);
                 if realtime
                     && self.listen_realtime
                     && self.barge_resumed
@@ -1687,9 +2189,18 @@ impl<'a> Session<'a> {
                 }
             }
             Ok(ClientMessage::Abort { reason }) => {
+                let reason = reason.unwrap_or_else(|| "设备打断".into());
                 if self.busy() {
-                    let reason = reason.unwrap_or_else(|| "设备打断".into());
                     self.interrupt(socket, &reason).await?;
+                } else if matches!(self.phase, Phase::Listening(_)) {
+                    self.pending_listen_stop = false;
+                    self.hold_check = None;
+                    if let Some(worker) = self.vad_worker.as_mut() {
+                        worker.reset();
+                    }
+                    self.phase = Phase::Idle;
+                    self.set_state("idle");
+                    self.event(format!("拾音已取消（{reason}）"));
                 }
             }
             Ok(ClientMessage::Ping) => {
@@ -1723,10 +2234,72 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// 正在拾音或存在尚未提交的半句录音/续听判定时，延后加工完成播报，待本轮对话安全结束后再播。
+    fn listening_occupied(&self) -> bool {
+        if self.hold_check.is_some() || self.pending_listen_stop {
+            return true;
+        }
+        match &self.phase {
+            Phase::Listening(listening) => {
+                listening.manual
+                    || !self.listen_realtime
+                    || listening.speaking
+                    || !listening.utterance.is_empty()
+                    || listening.hold_deadline.is_some()
+                    || listening.finalize_after_vad_seq.is_some()
+                    || self
+                        .vad_worker
+                        .as_ref()
+                        .is_some_and(crate::audio::worker::VadWorker::pending)
+            }
+            _ => false,
+        }
+    }
+
+    /// 加工结束播报：设备在线且空闲时读一次最近任务，发现刚结束的就播一次（2026-11-02 用户决定）。
+    /// 正在说话、拾音挂起或思考时整体跳过，不抢话；播报走固定话术轮次，因此和普通回答一样能被插话打断。
+    /// 只读 `laser_workflow_tool(action=recent)`，不碰设备、不发起任何动作。
+    async fn poll_jobs(&mut self) -> Result<(), String> {
+        self.next_job_poll = Instant::now() + self.shared.config.job_poll_interval;
+        if self.busy()
+            || self.listening_occupied()
+            || !self.permission.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        let Some(conversation) = self.conversation.clone() else {
+            return Ok(());
+        };
+        if !conversation.settings.announce_job_done {
+            return Ok(());
+        }
+        let context = ToolContext {
+            device_id: self.device_id.to_owned(),
+            session_id: self.session_id.to_owned(),
+        };
+        for job in self.jobs.poll(conversation.tools.as_ref(), &context).await {
+            if !self.shared.job_announcements.claim(&job.workflow_id) {
+                continue;
+            }
+            self.event("加工任务已结束，播报结果".into());
+            self.start_turn(
+                TurnInput::Say { text: job.speech(), close: false },
+                TurnKind::Notice,
+            );
+            return Ok(());
+        }
+        Ok(())
+    }
+
     /// 会话循环；返回断开原因。
-    async fn run(&mut self, socket: &mut WebSocket) -> String {
+    async fn run(
+        &mut self,
+        socket: &mut WebSocket,
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<crate::DeviceRequest>,
+    ) -> String {
         let mut shutdown = self.shared.shutdown.clone();
         let idle_timeout = self.shared.config.idle_timeout;
+        let mut requests_closed = false;
         if let Err(reason) = self.start_device_mcp(socket).await {
             return reason;
         }
@@ -1740,6 +2313,12 @@ impl<'a> Session<'a> {
                 Phase::Thinking => Instant::now() + Duration::from_secs(3600),
                 _ => self.last_activity + idle_timeout,
             };
+            let hold_deadline = match &self.phase {
+                Phase::Listening(listening) => listening.hold_deadline,
+                _ => None,
+            };
+            // 加工结束播报用固定节拍（不随消息重置），否则 realtime 一直上传音频时永远轮不到
+            let job_deadline = self.next_job_poll;
             // 按顺序检查（biased）：对话任务的事件先于它发出的设备工具调用处理，设备看到的顺序与任务一致
             // （先 stt 再 tools/call）；设备消息先于播放定时器，打断不被积压的播放拍延迟。
             let result = tokio::select! {
@@ -1760,7 +2339,27 @@ impl<'a> Session<'a> {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(_)) => return "连接出错".into(),
                 },
+                (paused_at, held) = next_listening_hold_check(&mut self.hold_check) => self.on_hold_check_done(socket, paused_at, held).await,
                 call = next_device_call(&mut self.device_mcp) => self.forward_device_call(socket, call).await,
+                request = async {
+                    if requests_closed {
+                        std::future::pending().await
+                    } else {
+                        requests.recv().await
+                    }
+                } => match request {
+                    Some(request) => self.on_device_request(socket, request).await,
+                    None => {
+                        requests_closed = true;
+                        Ok(())
+                    }
+                },
+                _ = async {
+                    match hold_deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.on_hold_expired(socket).await,
                 _ = tokio::time::sleep_until(deadline) => {
                     match self.phase {
                         Phase::Speaking { .. } => self.tick(socket).await,
@@ -1768,6 +2367,7 @@ impl<'a> Session<'a> {
                         _ => self.on_idle(),
                     }
                 }
+                _ = tokio::time::sleep_until(job_deadline) => self.poll_jobs().await,
             };
             if let Err(reason) = result {
                 return reason;

@@ -63,7 +63,19 @@ impl OpenAiVision {
 impl VisionProvider for OpenAiVision {
  fn explain<'a>(&'a self,question:&'a str,mime:&'a str,image:&'a [u8])->BoxFuture<'a,Result<String,VisionFailure>> {
   Box::pin(async move {
-   let response=self.client.post(self.url.clone()).bearer_auth(&self.key)
+   let mut request=self.client.post(self.url.clone()).bearer_auth(&self.key);
+   if self.url.host_str().is_some_and(|h| {
+    let lower = h.to_ascii_lowercase();
+    lower == "cline.bot" || lower.ends_with(".cline.bot")
+   }) {
+    request=request
+     .header("X-Response-Format","openai")
+     .header("HTTP-Referer","https://cline.bot")
+     .header("X-Title","Cline")
+     .header("X-IS-MULTIROOT","false")
+     .header("X-CLIENT-TYPE","cline-desktop");
+   }
+   let response=request
     .json(&self.body(question,mime,image)).send().await.map_err(|e|if e.is_timeout(){VisionFailure::Timeout}else{VisionFailure::Upstream})?;
    if response.status().as_u16()==401||response.status().as_u16()==403 {return Err(VisionFailure::Auth);}
    if !response.status().is_success(){return Err(VisionFailure::Upstream);}
@@ -75,7 +87,9 @@ impl VisionProvider for OpenAiVision {
     bytes.extend_from_slice(&chunk);
    }
    let value:Value=serde_json::from_slice(&bytes).map_err(|_|VisionFailure::Malformed)?;
-   let answer=value.pointer("/choices/0/message/content").and_then(Value::as_str).ok_or(VisionFailure::Malformed)?;
+   let answer=value.pointer("/choices/0/message/content")
+    .or_else(||value.pointer("/data/choices/0/message/content"))
+    .and_then(Value::as_str).ok_or(VisionFailure::Malformed)?;
    if answer.trim().is_empty(){return Err(VisionFailure::Malformed);}
    Ok(answer.chars().take(MAX_RESULT_CHARS).collect())
   })
@@ -126,6 +140,10 @@ impl VisionProvider for OpenAiVision {
         assert_eq!(request["messages"][0]["content"][0]["text"],"这是什么");
         assert_eq!(request["messages"][0]["content"][1]["image_url"]["url"],"data:image/png;base64,cG5n");
         assert!(request.get("tools").is_none());
+
+        let (url,_)=fake_server("200 OK",r#"{"success":true,"data":{"choices":[{"message":{"content":"套壳图片描述"}}]}}"#).await;
+        let client=OpenAiVision::new(&url,"cline-pass/qwen3.8-max","test-secret").unwrap();
+        assert_eq!(client.explain("这是什么","image/png",b"png").await.unwrap(),"套壳图片描述");
     }
 
     #[tokio::test]

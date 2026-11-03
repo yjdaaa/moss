@@ -234,6 +234,9 @@ impl ToolExecutor for CombinedTools {
     fn call<'a>(&'a self,ctx:&'a ToolContext,name:&'a str,arguments:&'a str)->BoxFuture<'a,ToolOutcome>{
         if InfoTools::is_info(name){self.info.call(ctx,name,arguments)} else {self.original.call(ctx,name,arguments)}
     }
+    fn recent_workflows<'a>(&'a self,ctx:&'a ToolContext)->BoxFuture<'a,Option<Value>>{
+        self.original.recent_workflows(ctx)
+    }
 }
 
 #[cfg(test)]

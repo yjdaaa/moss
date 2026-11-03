@@ -81,17 +81,42 @@ pub fn speakable(text: &str) -> bool {
     text.chars().any(char::is_alphanumeric)
 }
 
-/// 流式切句器。
-#[derive(Default)]
+/// 统计可读字符数（字母、数字或汉字，不含标点与空白），用于碎句防抖合并（TTS Coalesce）。
+pub fn speakable_char_count(text: &str) -> usize {
+    text.chars().filter(|c| c.is_alphanumeric()).count()
+}
+
+/// 流式切句器（含极短碎句合并 TTS Coalesce）。
 pub struct Segmenter {
     buffer: String,
     sent_any: bool,
     since: Option<Instant>,
+    min_first_chars: usize,
+    min_next_chars: usize,
+}
+
+impl Default for Segmenter {
+    fn default() -> Self {
+        Self {
+            buffer: String::new(),
+            sent_any: false,
+            since: None,
+            min_first_chars: 1,
+            min_next_chars: 2,
+        }
+    }
 }
 
 impl Segmenter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 自定义首句与后续句子的最小可读字符合并阈值（不足阈值时暂存与后句合并，流结束 `finish` 时兜底冲刷）。
+    pub fn with_min_chars(mut self, first_min: usize, next_min: usize) -> Self {
+        self.min_first_chars = first_min.max(1);
+        self.min_next_chars = next_min.max(1);
+        self
     }
 
     /// 送入一段增量，返回可以送合成的句子（已清洗）。
@@ -136,16 +161,25 @@ impl Segmenter {
         while let Some((at, c)) = chars.next() {
             let end = at + c.len_utf8();
             let boundary = if self.sent_any { is_end(c) } else { is_pause(c) };
+            let min_chars = if self.sent_any { self.min_next_chars } else { self.min_first_chars };
             if boundary {
-                // 有内容才切（避免开头的孤立标点单独成句）
-                if speakable(&self.buffer[..end]) || c == '\n' {
+                // 有足够可读内容才切（避免开头的孤立标点或句中 1 字碎句单独发起一次 TTS 请求；换行符保持分行）
+                let count = speakable_char_count(&self.buffer[..end]);
+                if count >= min_chars || (c == '\n' && count >= 1) || (c == '\n' && !self.buffer[..at].trim().is_empty()) {
+                    return Some(end);
+                }
+                if count == 0 && c == '\n' {
                     return Some(end);
                 }
                 continue;
             }
             if c == '.' {
                 match chars.peek() {
-                    Some((_, next)) if next.is_whitespace() => return Some(end),
+                    Some((_, next)) if next.is_whitespace() => {
+                        if speakable_char_count(&self.buffer[..end]) >= min_chars {
+                            return Some(end);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -224,5 +258,25 @@ mod tests {
     fn punctuation_only_pieces_are_dropped() {
         assert_eq!(run(&["，。", "你好。", "……"]), vec!["你好。"], "开头的孤立标点被去掉");
         assert!(run(&["😊"]).is_empty());
+    }
+
+    #[test]
+    fn short_mid_stream_fragments_coalesce_with_following_clause() {
+        // 首句“好的，”立即切出保证首字延迟；后续仅有 1 个可读字的碎句（“嗯。”、“对！”）自动与下一句合并，避免浪费一次 TTS 往返
+        let out = run(&["好的，", "嗯。", "激光机目前处于空闲状态。", "对！", "随时可以开始。"]);
+        assert_eq!(
+            out,
+            vec!["好的，", "嗯。激光机目前处于空闲状态。", "对！随时可以开始。"]
+        );
+
+        // 自定义合并阈值（如首句至少 4 字、后续至少 6 字）：不足阈值的碎句自动合并，流结束兜底冲刷
+        let mut custom = Segmenter::new().with_min_chars(4, 6);
+        let now = Instant::now();
+        assert!(custom.push("好，", now).is_empty(), "不足 4 字暂存不切");
+        assert_eq!(custom.push("马上为您查询，", now), vec!["好，马上为您查询，"]);
+        assert!(custom.push("正常。", now).is_empty(), "后续不足 6 字暂存");
+        assert_eq!(custom.push("可以开始雕刻。", now), vec!["正常。可以开始雕刻。"]);
+        assert_eq!(custom.push("尾句", now), Vec::<String>::new());
+        assert_eq!(custom.finish().as_deref(), Some("尾句"));
     }
 }
