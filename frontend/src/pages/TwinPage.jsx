@@ -294,6 +294,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     }));
     if (wf.send_result) {
       setJobSendResult(wf.send_result);
+      if (wf.send_result.last_status_report) {
+        const parsed = parseGrblStatusReport(wf.send_result.last_status_report);
+        if (parsed.online) {
+          setTelemetry(parsed);
+          setLastTelemetryAt(new Date().toLocaleTimeString());
+        }
+      }
     }
     const gcodeFile = wf.artifacts?.gcode_file || wf.gcode_file;
     if (!gcodeFile) return;
@@ -388,7 +395,9 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
   // 当处于“加工下发同步”模式且有选定 workflow 时，轮询 /api/workflow status
   useEffect(() => {
-    if (driveMode !== "job" || !selectedWorkflowId) return undefined;
+    if ((driveMode !== "job" && !(driveMode === "telemetry" && isJobRunning)) || !selectedWorkflowId) {
+      return undefined;
+    }
     let cancelled = false;
     let timer = null;
 
@@ -403,6 +412,13 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
           setJobStatus(wf.status || "preview_ready");
           if (wf.send_result) {
             setJobSendResult(wf.send_result);
+            if (wf.send_result.last_status_report) {
+              const parsed = parseGrblStatusReport(wf.send_result.last_status_report);
+              if (parsed.online) {
+                setTelemetry(parsed);
+                setLastTelemetryAt(new Date().toLocaleTimeString());
+              }
+            }
           }
           if (TERMINAL_STATUSES.has(wf.status) && !wf.send_result?.running) {
             return;
@@ -421,7 +437,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [driveMode, selectedWorkflowId]);
+  }, [driveMode, isJobRunning, selectedWorkflowId]);
 
   // 同步机台物理行程与外设能力 (/api/connection/check)
   const handleSyncMachineCapabilities = async () => {

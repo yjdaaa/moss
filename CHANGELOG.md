@@ -3,6 +3,16 @@
 代码修复与功能变更记录，格式参考 Keep a Changelog；条目要求见 [`AGENTS.md`](AGENTS.md)“变更记录”。
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-11-05
+
+### 打通流式发送期间 FluidNC `$RI` 实时坐标报文到 3D 数字孪生，并合并收敛语音中心「记录与诊断」面板（2026-11-04）
+
+- **现象**：① `JobWorker` 在流式发送 G-code 期间已向 FluidNC 开启 `$RI=200` 自动状态上报并接收 `<Run|MPos:...|FS:...>`，但 `JobProgress` 仅向外同步了已发送行数 `lines_sent`，导致加工进行中串口被发送线程独占时，前端 3D 数字孪生舱无法直接从任务进度中获取固件实时回传的 `MPos/WPos` 物理坐标报文；② 语音中心「记录与诊断」标签下将内置语音的「实时对话排障镜」「最近对话耗时」「内置服务事件」拆成了 3 个独立折叠框，平时无对话或未开启排障时并排出现多个空框，显得零散冗余。
+- **根因与修复**：① 在 `crates/laser-device/src/lib.rs` 为 `JobProgress` 新增 `last_status_report` 与 `record_status_report` / `status_report`，并在 `DeviceConnection::classify_line` 及 `wait_until_sd_completed` 中自动将收到的 `<...>` 状态报告原文写入绑定的 `JobProgress`；在 `crates/laser-api/src/lib.rs` 的 `ActiveJob::live_send_result` 与任务终态 `send_result` 中附带 `last_status_report`；在 `frontend/src/twinState.js`（`resolveTwinHeadPose`）与 `frontend/src/pages/TwinPage.jsx` 中自动解析 `send_result.last_status_report` 刷新遥测面板并在 `job` 运行态融合刀路进度与固件实时 `MPos/WPos` 坐标驱动 3D 激光头；② 在 `frontend/src/pages/VoicePage.jsx` 与 `frontend/src/components/VoiceBuiltinCard.jsx`（`LiveDebugTraces`）中将「实时对话排障镜」「最近对话耗时」「内置服务事件」三合一为单个「对话诊断与服务日志（仅内存）」折叠组，按需展示真实耗时表与服务事件流，消除多余空框。默认值与硬件/隐私安全门禁不变，破坏性变更：无。
+- **验证**：`cargo test --workspace` 全工作区测试通过（含 `auto_report_is_enabled_only_for_fluidnc_and_its_ack_is_consumed_before_gcode` 实时状态记录断言）；前端 `npm test` **171 通过 / 0 失败**、`npm run build` 成功；`node tests/voice-center.browser.mjs` **PASS**；回环 FakeGrbl `npm run test:e2e` **32/32 通过**；执行 `scripts/quick-update-desktop.ps1 -WithHost` 与 `cargo sweep --time 3` 同步正式版 `moss-desktop.exe`、`moss-host.exe` 并清理缓存。**未验证**：物理 FluidNC 控制器真机流式雕刻待现场验收。
+- **关联**：`crates/laser-device/src/lib.rs`、`crates/laser-api/src/lib.rs`、`frontend/src/{twinState.js,pages/TwinPage.jsx,pages/VoicePage.jsx,components/VoiceBuiltinCard.jsx}`、`frontend/tests/twinState.test.mjs`、`docs/developer/frontend-behavior.md`。
+
 ### 新增三张零 Flash 小智动态场景卡、双卡片画风不断连热切换与「护目镜小机器人」GIF 橱窗（2026-11-04）
 
 - **现象**：立创·实战派 ESP32-S3（`320×240` IPS ST7789 彩屏，`78/xiaozhi-esp32` 官方固件）在严格模式等待电脑点击批准、激光任务完工/急停收尾及播放本地音乐期间仍缺少直观的屏幕视觉反馈；同时官方固件的 `self.assets.set_download_url` 会整块擦写设备 `assets` Flash 分区（内含出厂 `srmodels.bin` 唤醒词模型，直接下发自定义资源包会导致唤醒词失效），需要在**完全不碰设备 Flash 分区、不改固件**的前提下同时支持硬核工业风与可爱像素风，并在上位机界面提供动态护目镜小机器人 GIF 预览。

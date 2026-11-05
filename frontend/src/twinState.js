@@ -890,6 +890,24 @@ export function resolveTwinHeadPose({
   }
 
   if (driveMode === "job") {
+    if (jobRunning && telemetry?.online && (telemetry.wpos || telemetry.mpos)) {
+      const pos = telemetry.wpos || telemetry.mpos;
+      const spindle = telemetry.fs?.spindlePower ?? base.power ?? 0;
+      const feed = telemetry.fs?.feedRate || base.feedRate || 0;
+      const isRunningState = telemetry.baseState === "Run";
+      return {
+        ...base,
+        x: pos.x,
+        y: pos.y,
+        z: pos.z ?? base.z ?? 0,
+        laserOn: Boolean((isRunningState && spindle > 0) || base.laserOn),
+        power: spindle,
+        powerRatio: clamp(spindle / DEFAULT_POWER_SCALE, 0, 1),
+        feedRate: feed,
+        sourceLabel: "JobWorker 实时下发 + 固件坐标 ($RI)",
+        isLiveHardware: true,
+      };
+    }
     return {
       ...base,
       laserOn: Boolean(jobRunning && base.laserOn),

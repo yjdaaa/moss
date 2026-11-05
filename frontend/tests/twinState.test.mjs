@@ -208,6 +208,22 @@ test("resolveMachineWorkspace 与 resolveTwinHeadPose 正确处理翼宿 V1.0 �
   assert.equal(fromTel.y, 6);
   assert.equal(fromTel.laserOn, false);
   assert.equal(fromTel.isLiveHardware, true);
+
+  // job 运行态且收到 FluidNC $RI 自动上报的实时状态时，融合刀路进度与固件真实坐标
+  const runTelemetry = parseGrblStatusReport("<Run|MPos:18.500,26.250,0.000|FS:1200,800>");
+  const jobPose = { x: 10, y: 20, z: 0, laserOn: true, power: 600, powerRatio: 0.6, feedRate: 1000, completedSegmentCount: 3 };
+  const fromJobLive = resolveTwinHeadPose({
+    driveMode: "job",
+    jobPose,
+    telemetry: runTelemetry,
+    jobRunning: true,
+  });
+  assert.equal(fromJobLive.x, 18.5);
+  assert.equal(fromJobLive.y, 26.25);
+  assert.equal(fromJobLive.power, 800);
+  assert.equal(fromJobLive.feedRate, 1200);
+  assert.equal(fromJobLive.completedSegmentCount, 3);
+  assert.equal(fromJobLive.isLiveHardware, true);
 });
 
 test("数字孪生：实机行程上限支持 200/300/400mm 至 2000mm，默认值保持 100×100×20mm", () => {

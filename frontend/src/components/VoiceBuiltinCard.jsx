@@ -2374,10 +2374,27 @@ export function LiveDebugTraces({ builtin }) {
   const status = builtin?.status;
   const enabled = Boolean(status?.debug_enabled);
   const traces = Array.isArray(status?.debug_traces) ? status.debug_traces : [];
+  const timingItems = voiceTimingReport(status?.timings);
+  const events = Array.isArray(status?.events) ? status.events.slice(0, 20) : [];
   const [selectedWord, setSelectedWord] = useState("");
   const [rightWord, setRightWord] = useState("");
   const [feedback, setFeedback] = useState("");
   const [saving, setSaving] = useState(false);
+
+  const copyTimings = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(timingItems, null, 2));
+      await showAlert("耗时数据已复制", { title: "已复制", tone: "success" });
+    } catch {
+      await showAlert("无法访问剪贴板，请检查浏览器权限", { title: "复制失败", tone: "error" });
+    }
+  };
+
+  const summaryParts = [
+    enabled ? `排障已开 (${traces.length} 轮)` : "排障默认关",
+    timingItems.length ? `耗时 ${timingItems.length} 轮` : "",
+    events.length ? `事件 ${events.length} 条` : "",
+  ].filter(Boolean);
 
   const toggleDebug = async (checked) => {
     setSaving(true);
@@ -2465,8 +2482,8 @@ export function LiveDebugTraces({ builtin }) {
   return (
     <VoiceGroup
       id="live-debug-traces"
-      title="实时对话排障镜（仅内存）"
-      summary={enabled ? `已开启 · ${traces.length} 轮` : "默认关闭（不留存文字）"}
+      title="对话诊断与服务日志（仅内存）"
+      summary={summaryParts.join(" · ")}
     >
       <div className="voice-stack" id="voice-live-debug">
         <div className="voice-actions">
@@ -2489,6 +2506,16 @@ export function LiveDebugTraces({ builtin }) {
               id="voice-debug-trace-clear"
             >
               清空调试记录
+            </button>
+          )}
+          {timingItems.length > 0 && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={copyTimings}
+              id="voice-timings-copy"
+            >
+              复制耗时数据（{timingItems.length} 轮）
             </button>
           )}
         </div>
@@ -2584,6 +2611,50 @@ export function LiveDebugTraces({ builtin }) {
               </div>
             );
           })
+        )}
+        {timingItems.length > 0 && (
+          <div id="voice-turn-timings" className="voice-stack">
+            <span className="voice-muted">最近对话各阶段耗时（最近 {timingItems.length} 轮，从本轮开始拾音算起）：</span>
+            {timingItems.map((item, index) => (
+              <details key={index} open={index === 0}>
+                <summary>
+                  第 {item.turn} 轮 · {item.outcome === "done" ? "结束" : item.outcome === "interrupted" ? "被打断" : "未完成"} · {item.models.join(" / ")}
+                </summary>
+                <div className="voice-table-wrap">
+                  <table className="voice-table">
+                    <thead>
+                      <tr>
+                        <th>阶段</th>
+                        <th>毫秒</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(item.stages).map(([stage, ms]) => (
+                        <tr key={stage}>
+                          <td>{VOICE_TIMING_STAGES[stage]}</td>
+                          <td>{ms}</td>
+                        </tr>
+                      ))}
+                      {item.tools.map((tool, i) => (
+                        <tr key={`tool-${i}`}>
+                          <td>工具 {tool.name}</td>
+                          <td>{tool.ms}（调用耗时）</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            ))}
+          </div>
+        )}
+        {events.length > 0 && (
+          <div className="voice-stack">
+            <span className="voice-muted">最近服务事件（{events.length} 条）：</span>
+            <pre className="voice-log mono" id="voice-builtin-events">
+              {events.map((event) => `${formatTime(event.at)}  ${event.text}`).join("\n")}
+            </pre>
+          </div>
         )}
       </div>
     </VoiceGroup>

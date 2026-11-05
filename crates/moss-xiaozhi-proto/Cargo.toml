@@ -1,6 +1,6 @@
 [package]
 name = "moss-xiaozhi-proto"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "小智设备协议（内置语音服务 NV1）：消息类型、二进制音频帧 v1/v2/v3、设备 token、OTA 请求与响应。纯数据与纯函数，不含网络与异步代码。"
 license = "MIT"

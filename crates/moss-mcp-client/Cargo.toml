@@ -1,6 +1,6 @@
 [package]
 name = "moss-mcp-client"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 description = "NV9 third-party MCP client foundation; explicit configuration and fail-closed authorization. Not yet wired into the desktop voice center."

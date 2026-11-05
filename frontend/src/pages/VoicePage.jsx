@@ -5,7 +5,6 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
 import { voiceApi } from "../voiceApi.js";
 import {
-  BuiltinEvents,
   BuiltinModelGroups,
   BuiltinServicePanel,
   ExperienceGroup,
@@ -13,7 +12,6 @@ import {
   LocalModelsGroup,
   PrivateSettingsEntry,
   PrivateFirmwareEntry,
-  TurnTimings,
   useBuiltinStatus,
 } from "../components/VoiceBuiltinCard.jsx";
 import VoiceMusicCard from "../components/VoiceMusicCard.jsx";
@@ -864,8 +862,6 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                   ),
                 },
                 { key: "debug-traces", modes: ["builtin"], node: <LiveDebugTraces builtin={builtin} /> },
-                { key: "timings", modes: ["builtin"], node: <TurnTimings timings={builtinStatus?.timings} /> },
-                { key: "events", modes: ["builtin"], node: <BuiltinEvents status={builtinStatus} /> },
                 {
                   key: "log",
                   modes: ["self_hosted"],

@@ -3,6 +3,23 @@
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
 
+## GitHub 仓库 `v0.3.0` 交付安装包构建（Windows 完整离线语音版 / 常规版 / macOS 通用版 / Android 签名版，2026-11-05）
+
+基于 `main` 分支（含立创·实战派 ESP32-S3 `320×240` 1:1 零缩放预览与确认窗续期、实时加工进度副屏 HUD、零 Flash 三张服务端动态场景卡［待电脑审批警戒卡 / 5 秒完工庆祝与急停徽章卡 / 本地音乐律动卡］、硬核太空舱与可爱像素小机器人双画风不断连热切换、5 姿态护目镜小机器人 GIF89a 橱窗、独立「本地知识库」与单开关无感记忆流、锁死安全底座的助手风格预设与 0ms 同音纠偏、左上角全局 MOSS 光学机械眼升级、手机持久配对与固定配对码哈希存储、流式发送 FluidNC `$RI` 实时坐标直通 3D 数字孪生）完成全量测试后，将版本号升级至 `0.3.0`，依次完成带 `moss-voice-local` sidecar 的 Windows 专用 NSIS 构建、常规轻量 Windows NSIS 构建与 Android `aarch64` 签名 APK（`versionCode=3000`）构建，并经用户授权发布至 `yjdaaa/moss` 的 `v0.3.0` Release（macOS 通用版 DMG 由 GitHub Actions `release-macos.yml` 自动构建附加）。
+
+| 本次产物（0.3.0） | UTC时间（2026-11-05） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| 专用 `target/x86_64-pc-windows-msvc/release/moss-voice-local.exe` | 05:07:45 | 20,866,048 | `0a6123aa7114d5e3550418fa45a72b0ad5f30e6b7268333370e1f2695a31d8d7` |
+| 专用 `target/x86_64-pc-windows-msvc/release/moss-desktop.exe` | 06:04:05 | 65,454,592 | `5cec442661ce5a54d40b66f8b42a818ec7a2f7024761789c7a8feb1021413768` |
+| 专用带离线语音 `target/x86_64-pc-windows-msvc/release/bundle/nsis/MOSS_0.3.0_x64-setup.exe` | 06:04:05 | 736,039,327 | `ec0fcdfe4814ba3902c7a4fb62c680f1eafd6b0a316d0904baeadbb498d4bfff` |
+| 常规 `target/release/moss-desktop.exe` | 06:07:03 | 65,462,784 | `eacefb9083ebf7a76468c1204753b654351b542a35e2cfabca178a603b56610d` |
+| 常规 `target/release/bundle/nsis/MOSS_0.3.0_x64-setup.exe` | 06:07:03 | 20,193,483 | `9dd1ef94ec9bae106342e7259de109f0fa16215a089ee7a3218bce0c265bb5e7` |
+| Android `target/aarch64-linux-android/release/libmoss_desktop_lib.so` | 06:08:59 | 48,800,360 | `446751ceaba2eee78a0c1be5a70f09c8b81922b2b4c1d993d42eb23b94774c98` |
+| Android `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 06:09:23 | 54,521,502 | `fb4a7ecd2f266d7cdfdecbe472f12990f09c56965bcaba7f34df81eb4a1a298e` |
+
+**未验证**：当前构建宿主为 Windows，macOS `.app`/`.dmg` 由云端 macOS Runner 构建并自动附加到 `v0.3.0` Release；全新干净 Windows 虚拟机安装/卸载、Android 手机实机覆盖安装与连接真实激光雕刻硬件未在本轮执行；专用包仅供用户仓库内部使用（上游静态依赖许可证公开分发审计仍受 §2c 约束）。
+
+
 ## GitHub 仓库 `v0.2.0` 交付安装包构建（Windows 完整离线语音版 / 常规版 / macOS 通用版 / Android 签名版，2026-11-03）
 
 基于 `main` 分支（含内置语音 Jev 云端与本地 `laya_multilingual` 智能信息筛选与续听防抢话、全息语音孪生舱与全局机械眼声波联动、全局激光任务进度浮层、加工完成主动语音播报、小智设备信息与设备端 AEC 模式诊断、声纹按人记忆与 NV19 长期结构化记忆及视觉照片留存打通、低延迟 TTS 预取与本地 TTS 自动降级兜底）完成全量测试后，将版本号升级至 `0.2.0`，依次完成带 `moss-voice-local` sidecar 的 Windows 专用 NSIS 构建、常规轻量 Windows NSIS 构建与 Android `aarch64` 签名 APK（`versionCode=2000`）构建，并经用户授权发布至 `yjdaaa/moss` 的 `v0.2.0` Release（macOS 通用版 DMG 由 GitHub Actions `release-macos.yml` 自动构建附加）。

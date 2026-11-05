@@ -87,7 +87,7 @@ pub struct ActiveJob {
 impl ActiveJob {
     pub fn live_send_result(&self) -> serde_json::Value {
         use std::sync::atomic::Ordering;
-        serde_json::json!({
+        let mut val = serde_json::json!({
             "success": true,
             "running": true,
             "phase": if self.progress.awaiting_completion.load(Ordering::Acquire) { "awaiting_completion" } else { "streaming" },
@@ -96,7 +96,11 @@ impl ActiveJob {
             "lines_sent": self.progress.lines_sent.load(Ordering::Relaxed),
             "total_lines": self.progress.total_lines.load(Ordering::Relaxed),
             "elapsed_ms": self.started_at.elapsed().as_millis() as u64,
-        })
+        });
+        if let (Some(raw), Some(map)) = (self.progress.status_report(), val.as_object_mut()) {
+            map.insert("last_status_report".into(), serde_json::json!(raw));
+        }
+        val
     }
 }
 
@@ -1764,6 +1768,7 @@ impl ApiService {
                     }
                 };
                 let sent = progress.lines_sent.load(Ordering::Relaxed);
+                let last_status_report = progress.status_report();
                 let elapsed_ms = job.started_at.elapsed().as_millis() as u64;
                 let target = target_for_thread;
                 let cancelled_result = || {
@@ -1786,7 +1791,7 @@ impl ApiService {
                         }
                     })
                 };
-                let (status, send_result) = match outcome {
+                let (status, mut send_result) = match outcome {
                     Ok(_) if cancel.is_cancelled() => ("cancelled", cancelled_result()),
                     Ok(_) => (
                         "completed",
@@ -1805,6 +1810,9 @@ impl ApiService {
                         )
                     }
                 };
+                if let (Some(raw), Some(map)) = (last_status_report, send_result.as_object_mut()) {
+                    map.insert("last_status_report".into(), serde_json::json!(raw));
+                }
                 if let Some(hook) = on_terminal {
                     hook(status, &send_result);
                 }
@@ -4955,6 +4963,28 @@ fn signal_job_cancel(
     signalled
 }
 
+/// 只读探测是否仍有活动发送或启动预约；锁中毒时按“活动”处理，绝不因探测失败拦下取消。
+fn job_is_active(jobs: &ActiveJobs, reservations: &LaunchReservations, workflow_id: &str) -> bool {
+    let in_jobs = jobs.lock().map(|guard| guard.contains_key(workflow_id)).unwrap_or(true);
+    let reserved = reservations
+        .lock()
+        .map(|state| state.active.contains_key(workflow_id))
+        .unwrap_or(true);
+    in_jobs || reserved
+}
+
+/// 已全量完成且无活动发送的任务不可再取消：`completed` 是设备逐行确认后的历史记录，
+/// 改写成 `cancelled` 会抹掉事实，此时取消也不会向设备发出任何字节。
+fn cancel_completed_rejected() -> Vec<u8> {
+    http_json(
+        400,
+        failure(
+            "该任务已全量发送完成，取消不会再向设备发出任何指令；如设备仍在运动，请使用急停",
+            Some(serde_json::json!({"error_code": "workflow_completed"})),
+        ),
+    )
+}
+
 fn handle_workflow_store_request(
     store: &dyn laser_runtime::RuntimeStore,
     route: &str,
@@ -5094,6 +5124,21 @@ fn handle_workflow_store_request(
             let Some(workflow_id) = requested_id else {
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
+            if !job_is_active(jobs, reservations, &workflow_id) {
+                let stored = [laser_runtime::RecordKind::Workflow, laser_runtime::RecordKind::Calibration]
+                    .into_iter()
+                    .find_map(|kind| store.get(kind, &workflow_id).ok().flatten());
+                let completed = stored.is_some_and(|stored| {
+                    stored
+                        .status
+                        .as_deref()
+                        .or_else(|| stored.payload.get("status").and_then(|v| v.as_str()))
+                        == Some("completed")
+                });
+                if completed {
+                    return cancel_completed_rejected();
+                }
+            }
             let now = unix_seconds() as f64;
             let store_outcome = store.set_status(
                 laser_runtime::RecordKind::Workflow,
@@ -5525,6 +5570,18 @@ fn handle_workflow_request(
             let Some(workflow_id) = requested_id else {
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
+            if !job_is_active(jobs, reservations, &workflow_id) {
+                let status_of = |map: &std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>| {
+                    map.lock().ok().and_then(|records| {
+                        records
+                            .get(&workflow_id)
+                            .map(|record| record.get("status").and_then(|v| v.as_str()) == Some("completed"))
+                    })
+                };
+                if status_of(workflows).or_else(|| status_of(calibrations)) == Some(true) {
+                    return cancel_completed_rejected();
+                }
+            }
             let now = unix_seconds();
             let mut updated_record = None;
             {

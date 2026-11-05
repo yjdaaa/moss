@@ -901,6 +901,8 @@ pub struct DeviceConnection<T: DeviceTransport> {
     /// 最近一条固件附带的人类可读说明（`[MSG:INFO: ALARM: ...]` / `[MSG:ERR: ...]`），
     /// 用于给随后的 `ALARM:N` / `error:N` 补充原因。
     last_explanation: Option<String>,
+    /// 流式发送或脱机监控期间绑定的实时进度槽位：收到 `<...>` 状态报告时自动同步最新坐标报文。
+    progress_sink: Option<Arc<JobProgress>>,
 }
 
 impl<T: DeviceTransport> DeviceConnection<T> {
@@ -915,6 +917,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             auto_report_ms: 0,
             sd_job_active: false,
             last_explanation: None,
+            progress_sink: None,
         }
     }
 
@@ -1179,6 +1182,9 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         }
         if let Some(report) = parse_status_report(line) {
             self.sd_job_active = report.has_sd_job();
+            if let Some(prog) = &self.progress_sink {
+                prog.record_status_report(&report.raw);
+            }
             return Ok(Some(report));
         }
         Ok(None)
@@ -1403,6 +1409,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         Err(e) => break Err(e),
                     };
                     if let Some(prog) = progress {
+                        prog.record_status_report(&report.raw);
                         let total = prog.total_lines.load(Ordering::Relaxed);
                         match &report.sd {
                             Some(SdProgress::Running { percent, .. }) => {
@@ -1611,6 +1618,31 @@ pub struct JobProgress {
     pub total_lines: AtomicUsize,
     pub updated_at_millis: AtomicU64,
     pub awaiting_completion: AtomicBool,
+    pub last_status_report: std::sync::Mutex<Option<String>>,
+}
+
+impl JobProgress {
+    pub fn record_status_report(&self, raw: &str) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.last_status_report.lock() {
+            *guard = Some(trimmed.to_string());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.updated_at_millis.store(now, Ordering::Relaxed);
+    }
+
+    pub fn status_report(&self) -> Option<String> {
+        self.last_status_report
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
 }
 
 /// 根据目标功率标尺对 G-code 行中的 S 参数进行动态等比缩放。
@@ -1659,19 +1691,15 @@ pub struct JobWorker<T: DeviceTransport> {
 
 impl<T: DeviceTransport> JobWorker<T> {
     pub fn new(device: DeviceConnection<T>, cancel: CancellationToken) -> Self {
-        Self {
-            device,
-            cancel,
-            progress: Arc::new(JobProgress::default()),
-            scale_factor: 1.0,
-        }
+        Self::with_progress(device, cancel, Arc::new(JobProgress::default()))
     }
 
     pub fn with_progress(
-        device: DeviceConnection<T>,
+        mut device: DeviceConnection<T>,
         cancel: CancellationToken,
         progress: Arc<JobProgress>,
     ) -> Self {
+        device.progress_sink = Some(progress.clone());
         Self {
             device,
             cancel,
@@ -2963,6 +2991,7 @@ control:
         let mut worker = JobWorker::new(device, CancellationToken::default());
         assert_eq!(worker.send_lines(["M5".into()]).unwrap(), 1);
         assert_eq!(worker.progress.lines_sent.load(Ordering::Relaxed), 1);
+        assert_eq!(worker.progress.status_report().as_deref(), Some("<Idle>"));
         assert_eq!(fake.lines(), ["$$", "$RI=200", "M5", "G4 P0", "$RI=0"]);
 
         // 固件不认识 $RI（error:3）：静默关闭，不影响后续
