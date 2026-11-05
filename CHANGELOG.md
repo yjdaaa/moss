@@ -11,7 +11,7 @@
 - **现象**：GitHub Actions 构建 Android APK 时因 `gen/android/build.gradle.kts` 在 `buildscript {}` 块前声明顶层变量触发 Kotlin DSL 语法错误失败，且 `buildSrc/build.gradle.kts` 在海外 CI 仍优先请求阿里云镜像。
 - **根因与修复**：Gradle Kotlin DSL 要求 `buildscript {}` 之前不得出现任何普通语句。移除 `build.gradle.kts` 顶层变量改为在 `repositories` 块内直接判读 `CI` / `GITHUB_ACTIONS` 环境变量，并同步修复 `buildSrc/build.gradle.kts`。无运行期行为变更，不是破坏性变更。
 - **验证**：由 GitHub Actions `ci.yml` 与 `release.yml` 的 `android-apk` 任务实跑验证。
-- **关联**：`apps/desktop/src-tauri/gen/android/build.gradle.kts`、`apps/desktop/src-tauri/gen/android/buildSrc/build.gradle.kts`。
+- **关联**：`apps/desktop/src-tauri/gen/android/build.gradle.kts`、`apps/desktop/src-tauri/gen/android/buildSrc/build.gradle.kts`、`.github/workflows/release.yml`。
 
 ### 顶栏与页面急停全链路补发 0x18，移除工作台未使用的发送覆盖层（2026-11-05）
 

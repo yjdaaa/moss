@@ -149,9 +149,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            apps/moss-voice-local -> target
+          prefix-key: v1-main-ws
 
       - uses: taiki-e/install-action@v2
         with:
@@ -163,6 +161,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          cargo clean --manifest-path apps/moss-voice-local/Cargo.toml --target-dir target 2>$null
           New-Item -ItemType Directory -Path target/release-assets -Force | Out-Null
           $srcZip = (Resolve-Path target/release-assets).Path + "\moss-voice-local-${env:VERSION}-gpl-source.zip"
           powershell -File scripts/build-nv18-sidecar-safe.ps1 `
@@ -204,9 +203,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            apps/moss-voice-local -> target
+          prefix-key: v1-main-ws
 
       - uses: taiki-e/install-action@v2
         with:
@@ -220,6 +217,7 @@ jobs:
           MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           CI: 'true'
         run: |
+          cargo clean --manifest-path apps/moss-voice-local/Cargo.toml --target-dir target || true
           bash scripts/build-macos-installer.sh --with-voice-sidecar
           mkdir -p target/release-assets
           DMG_SRC="$(ls -t target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n 1)"
