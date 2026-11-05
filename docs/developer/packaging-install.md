@@ -166,6 +166,22 @@
 - 正式分发需签名的 release APK（当前产物 `app-universal-release-unsigned.apk` 未签名）。
 - 运行目录应确认落在应用私有目录（见 §2 最后一行），实施时实机核对。
 
+### 3.9 macOS 本机打包、安装与清理（2026-11-05）
+
+**为什么会看到两个 MOSS**：`scripts/build-macos-installer.sh` 先生成 `target/<triple>/release/bundle/macos/MOSS.app`，再用它做成 `bundle/dmg/MOSS_<版本>_<arch>.dmg`。Spotlight 与启动台会收录磁盘上任何位置的 `.app`，所以装到 `/Applications` 后会同时看到“已安装的 MOSS”和“构建目录里的 MOSS”两个图标，两者是同一份程序，只有 `/Applications/MOSS.app` 才是安装件。打开测试一律用 `/Applications` 里的那个；构建目录里的 `.app` 只是做 DMG 的中间产物，每次构建都会重新生成。
+
+**本机构建（与云端 Mac 版内容一致）**：
+
+1. `native-license-evidence/`、`rust-license-evidence/` 未纳入 git，云端没有这两个目录；本机若存在，脚本会把约 760 MB 证据打进包里。构建前临时移出 `apps/moss-voice-local/`，构建后移回。
+2. 设 `CI=true` 运行脚本：跳过 `bundle_dmg.sh` 用 AppleScript 让 Finder 排版窗口的步骤（未授予终端“控制 Finder”自动化权限时会报 `AppleEvent 已超时 (-1712)` 而失败）。
+3. 需要与发布同号时用 `MOSS_VERSION_OVERRIDE=<X.Y.Z>` 注入版本（只改包与 `current_moss_version`，不改仓库文件；`moss-voice-local` 仍显示自身 crate 版本）；要支持 Intel 用 `MOSS_MACOS_TARGET=universal-apple-darwin`。
+
+示例：`CI=true MOSS_VERSION_OVERRIDE=0.3.2 bash scripts/build-macos-installer.sh`
+
+**安装**：挂载 DMG，把 `MOSS.app` 拖到“应用程序”（命令行：`hdiutil attach -nobrowse -readonly <dmg>` → `ditto /Volumes/MOSS/MOSS.app /Applications/MOSS.app` → `hdiutil detach /Volumes/MOSS`）。本机构建的包没有隔离属性，可直接打开；从网上下载到其他 Mac 的包是 ad-hoc 签名、未公证，首次需右键“打开”。运行数据在 `~/Library/Application Support/moss`，卸载或覆盖安装 `.app` 都不会动它。
+
+**清理（只保留最新）**：安装完成后可删除 `target/<triple>/release/bundle/macos/MOSS.app`（消除重复图标），以及 DMG 失败残留的 `bundle/macos/rw.*.dmg`。脚本每次构建都会新建唯一的暂存目录且从不删除（防止覆盖），会在 `target/nv18-<id>/`、`apps/desktop/src-tauri/binaries/nv18-<id>/`、`apps/desktop/src-tauri/bundle-resources/nv18-<id>/` 三处累积；构建结束后只需保留最新一组（其中 `release-manifest.json` 是该次构建的清单），旧的可直接删除，三处都已被 `.gitignore` 忽略。
+
 ## 4. 与其他功能的关系
 
 - **语音中心**（技术书 §9.4）：安装包只含 MOSS 本体，不捆绑 Python 运行环境与 `xiaozhi-server`；语音中心的“服务端目录”仍由用户在向导中指定。卸载时不触碰这些目录，但若 MOSS 启动过服务端子进程，卸载前的“请先退出 MOSS”会连带按 §9.4.3 规则停止它们。
