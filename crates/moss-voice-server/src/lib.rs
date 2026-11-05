@@ -52,6 +52,7 @@ pub use audio::{LocalVadFactory, VadConfig, VadFactory};
 pub use conversation::{Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome};
 pub use jev::{DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter};
 pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
+pub use preview_push::{StyleSceneGifCatalog, cached_style_scene_gifs};
 pub use tools::{HostTools, ToolHost, ToolHostResult};
 pub use ota::{MDNS_HOST_LABEL, is_virtual_or_tunnel_ipv4, lan_ipv4_addrs, local_ip as primary_lan_ip};
 pub use state::{DebugToolTrace, ServerEvent, SessionView, ToolTiming, TurnDebugTrace, TurnTiming};
@@ -465,20 +466,25 @@ impl VoiceServer {
         self.shared.card_style()
     }
 
-    /// 将指定姿态的「小 MOSS · 护目镜小机器人」展示卡投送到在线小智屏幕上试看。
-    pub fn push_goggle_bot_pose(
+    /// 将指定场景展示卡（按当前或指定画风：`MossHud` 太空舱 / `GoggleBot` 小机器人）投送到在线小智屏幕上试看。
+    pub fn push_scene_card(
         &self,
         pose: BotPose,
+        style_override: Option<ScreenCardStyle>,
         target_device: Option<&str>,
     ) -> Result<usize, String> {
         if self.runtime.is_none() {
             return Err("内置语音服务未运行".into());
         }
-        let summary = format!("小MOSS护目镜机器人 · {}", pose.label_zh());
+        let active_style = style_override.unwrap_or_else(|| self.shared.card_style());
+        let summary = match active_style {
+            ScreenCardStyle::MossHud => format!("MOSS太空舱 · {}", pose.moss_hud_label_zh()),
+            ScreenCardStyle::GoggleBot => format!("小MOSS护目镜机器人 · {}", pose.label_zh()),
+        };
         let stage_for_device = |device_id: &str| -> Result<String, String> {
             let screen_size = self.shared.state.session_screen_size(device_id);
             let (cw, ch) = preview_push::optimal_canvas_for_screen(screen_size);
-            let png = preview_push::make_goggle_bot_showcase_png(pose, 0, cw, ch)?;
+            let png = preview_push::make_scene_showcase_png(pose, active_style, 1, cw, ch)?;
             self.shared.preview_store.stage_prebuilt_png(png)
         };
         if let Some(device_id) = target_device {
@@ -513,6 +519,15 @@ impl VoiceServer {
             }
         }
         Ok(pushed)
+    }
+
+    /// 兼容固定按 `GoggleBot` 画风投送小机器人姿态卡。
+    pub fn push_goggle_bot_pose(
+        &self,
+        pose: BotPose,
+        target_device: Option<&str>,
+    ) -> Result<usize, String> {
+        self.push_scene_card(pose, Some(ScreenCardStyle::GoggleBot), target_device)
     }
     /// 将预览图与文字摘要自适应推送给指定设备或全部在线设备（彩屏按设备屏幕尺寸生成 1:1 点对点 PNG，单色 OLED 发文字卡）。
     pub fn push_preview_adaptive(

@@ -3,12 +3,12 @@
 代码修复与功能变更记录，格式参考 Keep a Changelog；条目要求见 [`AGENTS.md`](AGENTS.md)“变更记录”。
 
 ## [Unreleased]
-### 修复语音中心「护目镜小机器人 GIF」橱窗将后端数组按对象下标读取导致显示占位文字的问题（2026-11-05）
+### 升级语音中心小智彩屏预览台为「硬核太空舱 ↔ 可爱像素小机器人」双套 160×120 动态 GIF 0ms 瞬切与推屏联动（2026-11-05）
 
-- **现象**：桌面端「语音中心 → 服务」的「小智彩屏动态卡片 & 护目镜小机器人 GIF」面板中，5 个小机器人方框仅显示灰色占位文字 `GIF`，未渲染出循环像素动图。
-- **根因与修复**：后端 `moss_voice_server::cached_goggle_bot_gifs()` 返回数组结构 `[{ id, label, data_url }]`，而前端 `VoiceBuiltinCard.jsx` 直接执行 `botGifs[pose.id]` 导致取值为 `undefined`；现改为在 `VoiceBuiltinCard.jsx` 自动将数组 `[{ id, data_url }]` 归一映射为按 `id` 索引的字典（兼容旧键值结构），并将 `voice-center.browser.mjs` 的测试桩对齐为真实数组结构。默认值与安全门禁不变，破坏性变更：无。
-- **验证**：`node tests/voice-center.browser.mjs` **PASS**；执行 `scripts/quick-update-desktop.ps1` 重新编译同步本机 `target/release/moss-desktop.exe`。**未验证**：立创·实战派真机一键推屏实拍待现场核验。
-- **关联**：`frontend/src/components/VoiceBuiltinCard.jsx`、`frontend/tests/voice-center.browser.mjs`。
+- **现象**：语音中心「服务」标签下的卡片画风切换开关此前仅改变了按钮高亮状态，下方 5 个预览窗未随「硬核太空舱」与「可爱像素小机器人」切换画面，且早期数组读取与一键推屏固定走小机器人画风。
+- **根因与修复**：① 在 `crates/moss-voice-server/src/preview_push.rs` 新增 `make_scene_showcase_png`、`encode_scene_showcase_gif` 与进程级缓存 `cached_style_scene_gifs`，为 `moss_hud`（红眼扫描刀路预览、62%→71% 太空舱雕刻表盘、脉冲审批门禁、旋转黑胶唱盘、翠绿完工徽章）与 `goggle_bot`（额头护目镜眨眼预览、防激光护目镜火花雕刻、举牌催审批、戴耳机律动、竖拇指欢呼）分别生成全套 `160×120`（4:3 真机比例）4 帧循环 `GIF89a` 动图；② `VoiceServer::push_scene_card` 与 `voice_builtin.rs` 的 `push_bot_pose` 支持按当前选中画风投送对应场景卡；③ 前端 `VoiceBuiltinCard.jsx`、`voiceState.js`、`styles.css` 支持点击画风按钮 0ms 瞬时切换全套 5 屏 `4:3` 动态 GIF、场景标题描述与卡片光效主题，并在已向在线彩屏小智投送过试看卡时自动同步切换小智真机屏幕画面。默认值与安全门禁不变，破坏性变更：无。
+- **验证**：`cargo test -p moss-voice-server -p moss-desktop --lib` **305 通过 / 0 失败**；前端 `npm test` 通过、`node tests/voice-center.browser.mjs` **PASS**；执行 `scripts/quick-update-desktop.ps1` 编译同步本机正式版 `moss-desktop.exe`。**未验证**：立创·实战派真机双画风实时切换实拍待现场验收。
+- **关联**：`crates/moss-voice-server/src/{goggle_bot.rs,preview_push.rs,lib.rs}`、`apps/desktop/src-tauri/src/voice_builtin.rs`、`frontend/src/{voiceState.js,styles.css,components/VoiceBuiltinCard.jsx}`、`frontend/tests/voice-center.browser.mjs`。
 
 ### 内置语音服务支持 `moss.local` 跨 Wi-Fi 固定 OTA 地址广播并过滤代理/虚拟机网卡（2026-11-05）
 

@@ -85,6 +85,17 @@ impl BotPose {
             Self::HaltedShield => "急停护盾",
         }
     }
+
+    pub fn moss_hud_label_zh(self) -> &'static str {
+        match self {
+            Self::IdleBlink => "1:1 刀路预览与红眼待机",
+            Self::GogglesEngrave => "太空舱实时雕刻仪表盘",
+            Self::ApprovalWave => "太空舱待电脑审批门禁",
+            Self::MusicGroove => "太空舱黑胶像素唱机",
+            Self::CelebrateDone => "太空舱 5 秒完工徽章",
+            Self::HaltedShield => "太空舱安全急停徽章",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -382,7 +393,7 @@ pub fn encode_goggle_bot_gif(pose: BotPose) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     for chunk in bytes.chunks(3) {

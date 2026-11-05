@@ -9,18 +9,20 @@
 //!    3×3 形态学加粗与发光描边，叠加曜石黑底板、MOSS 四角瞄准框与底部 5×7 像素标尺（尺寸/功率/速度）。
 //! 3. 加工发送期间可生成超轻量（约 2~5 KB）的 MOSS 太空舱实时进度 HUD PNG，携带精确 `Content-Length`。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use image::codecs::gif::{GifEncoder, Repeat};
 use image::imageops::FilterType;
-use image::{ImageFormat, ImageReader, Limits, Rgb, RgbImage};
-use crate::goggle_bot::{BotPose, ScreenCardStyle, draw_cute_frame, draw_goggle_bot, encode_goggle_bot_gif};
+use image::{Delay, Frame, ImageFormat, ImageReader, Limits, Rgb, RgbImage, Rgba, RgbaImage};
+use serde::Serialize;
+use crate::goggle_bot::{BotPose, ScreenCardStyle, base64_encode, draw_cute_frame, draw_goggle_bot, encode_goggle_bot_gif};
 use crate::{Shared, unix_now};
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_THUMBNAIL_PNG_BYTES: usize = 128 * 1024;
@@ -662,6 +664,16 @@ pub fn make_terminal_badge_png(
     canvas_w: u32,
     canvas_h: u32,
 ) -> Result<Vec<u8>, String> {
+    make_terminal_badge_png_frame(spec, style, 1, canvas_w, canvas_h)
+}
+
+pub fn make_terminal_badge_png_frame(
+    spec: &TerminalBadgeSpec,
+    style: ScreenCardStyle,
+    frame: u8,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Result<Vec<u8>, String> {
     let cw = canvas_w.clamp(96, 240);
     let ch = canvas_h.clamp(80, 240);
     let emerald = Rgb([52, 245, 168]);
@@ -681,7 +693,7 @@ pub fn make_terminal_badge_png(
         } else {
             BotPose::HaltedShield
         };
-        draw_goggle_bot(&mut canvas, 6, (ch as i32 - 56) / 2, 2, pose, 1);
+        draw_goggle_bot(&mut canvas, 6, (ch as i32 - 56) / 2, 2, pose, frame);
         let rx = 64i32;
         if spec.completed {
             draw_text_5x7(&mut canvas, rx, 16, 1, "GREAT JOB!", Rgb([255, 214, 84]));
@@ -707,7 +719,18 @@ pub fn make_terminal_badge_png(
     let mut canvas = RgbImage::from_pixel(cw, ch, bg);
     let accent = if spec.completed { emerald } else { crimson };
     draw_moss_frame(&mut canvas, accent);
-    draw_moss_optical_eye(&mut canvas, 28, ch as i32 / 2, 17, accent, accent);
+    let eye_core = if frame % 2 == 0 {
+        accent
+    } else if spec.completed {
+        Rgb([142, 255, 214])
+    } else {
+        Rgb([255, 146, 98])
+    };
+    draw_moss_optical_eye(&mut canvas, 28, ch as i32 / 2, 17, eye_core, accent);
+    let pulse_x = 54 + ((frame as i32 % 4) * 20);
+    for dx in 0..10 {
+        put_px(&mut canvas, pulse_x + dx, 88, accent);
+    }
     let rx = 54i32;
     if spec.completed {
         draw_text_5x7(&mut canvas, rx, 16, 1, "MOSS LASER", Rgb([172, 226, 206]));
@@ -839,6 +862,209 @@ pub fn make_goggle_bot_showcase_png(
         png = encode_png_checked(&canvas)?;
     }
     Ok(png)
+}
+
+/// 按指定画风（`MossHud` 硬核太空舱 / `GoggleBot` 可爱像素小机器人）生成任意场景的 1:1 卡片 PNG。
+pub fn make_scene_showcase_png(
+    pose: BotPose,
+    style: ScreenCardStyle,
+    frame: u8,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Result<Vec<u8>, String> {
+    let cw = canvas_w.clamp(96, 240);
+    let ch = canvas_h.clamp(80, 240);
+    match pose {
+        BotPose::IdleBlink => {
+            let cyan = Rgb([0, 224, 255]);
+            let mint = Rgb([72, 250, 210]);
+            if style == ScreenCardStyle::GoggleBot {
+                let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([12, 16, 26]));
+                draw_cute_frame(&mut canvas, mint, Rgb([255, 126, 108]));
+                draw_goggle_bot(&mut canvas, 6, (ch as i32 - 62) / 2, 2, BotPose::IdleBlink, frame);
+                let bx0 = 64i32;
+                let by0 = 12i32;
+                let bw = (cw as i32 - bx0 - 8).max(48);
+                let bh = (ch as i32 - 32).max(44);
+                for x in bx0..(bx0 + bw) {
+                    put_px(&mut canvas, x, by0, Rgb([38, 56, 82]));
+                    put_px(&mut canvas, x, by0 + bh, Rgb([38, 56, 82]));
+                }
+                for y in by0..(by0 + bh + 1) {
+                    put_px(&mut canvas, bx0, y, Rgb([38, 56, 82]));
+                    put_px(&mut canvas, bx0 + bw, y, Rgb([38, 56, 82]));
+                }
+                draw_text_5x7(&mut canvas, bx0 + 8, by0 + 10, 2, "MOSS", mint);
+                let sweep_x = bx0 + 8 + ((frame as i32 % 4) * ((bw - 18).max(12) / 3));
+                for dy in -2i32..=2 {
+                    put_px(&mut canvas, sweep_x, by0 + 32 + dy, Rgb([255, 206, 82]));
+                }
+                for x in (bx0 + 6)..(bx0 + bw - 6) {
+                    put_px(&mut canvas, x, by0 + 32, cyan);
+                }
+                draw_text_5x7(&mut canvas, bx0 + 6, by0 + bh - 12, 1, "PREVIEW 1:1", Rgb([188, 208, 232]));
+                draw_text_5x7(&mut canvas, 10, ch as i32 - 12, 1, "40X30MM S600 F1200", cyan);
+                encode_png_checked(&canvas)
+            } else {
+                let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([9, 12, 18]));
+                draw_moss_frame(&mut canvas, Rgb([255, 68, 56]));
+                let core_c = if frame % 2 == 0 {
+                    Rgb([255, 58, 48])
+                } else {
+                    Rgb([255, 118, 96])
+                };
+                draw_moss_optical_eye(&mut canvas, 28, ch as i32 / 2 - 4, 17, core_c, Rgb([255, 78, 66]));
+                let bx0 = 54i32;
+                let by0 = 12i32;
+                let bw = (cw as i32 - bx0 - 8).max(52);
+                let bh = (ch as i32 - 32).max(44);
+                for x in bx0..(bx0 + bw) {
+                    put_px(&mut canvas, x, by0, Rgb([34, 48, 72]));
+                    put_px(&mut canvas, x, by0 + bh, Rgb([34, 48, 72]));
+                }
+                for y in by0..(by0 + bh + 1) {
+                    put_px(&mut canvas, bx0, y, Rgb([34, 48, 72]));
+                    put_px(&mut canvas, bx0 + bw, y, Rgb([34, 48, 72]));
+                }
+                draw_text_5x7(&mut canvas, bx0 + 6, by0 + 6, 1, "MOSS PATH", Rgb([168, 186, 212]));
+                draw_text_5x7(&mut canvas, bx0 + 10, by0 + 20, 2, "MOSS", cyan);
+                let scan_x = bx0 + 8 + ((frame as i32 % 4) * ((bw - 18).max(12) / 3));
+                for y in (by0 + 18)..(by0 + 38) {
+                    put_px(&mut canvas, scan_x, y, Rgb([255, 72, 62]));
+                }
+                for x in (bx0 + 6)..(bx0 + bw - 6) {
+                    put_px(&mut canvas, x, by0 + 42, Rgb([52, 245, 168]));
+                }
+                draw_text_5x7(&mut canvas, 10, ch as i32 - 12, 1, "40X30MM S600 F1200", cyan);
+                encode_png_checked(&canvas)
+            }
+        }
+        BotPose::GogglesEngrave => {
+            let pct = 62 + (frame % 4) * 3;
+            let sent = 620 + (frame as u64 % 4) * 30;
+            let eta = 16u64.saturating_sub(frame as u64 % 4);
+            make_job_hud_png_for_style(
+                &JobHudSpec {
+                    percent: pct,
+                    lines_sent: sent,
+                    total_lines: 1000,
+                    eta_seconds: Some(eta),
+                    power: Some(600),
+                    feed_rate: Some(1200),
+                },
+                style,
+                frame,
+                cw,
+                ch,
+            )
+        }
+        BotPose::ApprovalWave => {
+            let rem = 118u64.saturating_sub((frame as u64 % 4) * 6);
+            make_approval_card_png(
+                &ApprovalCardSpec {
+                    kind_ascii: "LASER SEND".into(),
+                    remaining_secs: rem,
+                    total_secs: 180,
+                },
+                style,
+                frame,
+                cw,
+                ch,
+            )
+        }
+        BotPose::MusicGroove => make_music_card_png(
+            &MusicCardSpec {
+                title_ascii: "MOSS GROOVE".into(),
+            },
+            style,
+            frame,
+            cw,
+            ch,
+        ),
+        BotPose::CelebrateDone => make_terminal_badge_png_frame(
+            &TerminalBadgeSpec {
+                completed: true,
+                lines: 1000,
+            },
+            style,
+            frame,
+            cw,
+            ch,
+        ),
+        BotPose::HaltedShield => make_terminal_badge_png_frame(
+            &TerminalBadgeSpec {
+                completed: false,
+                lines: 420,
+            },
+            style,
+            frame,
+            cw,
+            ch,
+        ),
+    }
+}
+
+/// 编码单张 `160×120` 场景卡的 4 帧循环 GIF89a 动图。
+pub fn encode_scene_showcase_gif(pose: BotPose, style: ScreenCardStyle) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(8192);
+    {
+        let mut encoder = GifEncoder::new_with_speed(&mut out, 10);
+        encoder
+            .set_repeat(Repeat::Infinite)
+            .map_err(|e| format!("设置场景 GIF 循环失败：{e}"))?;
+        for f in 0..4u8 {
+            let png = make_scene_showcase_png(pose, style, f, DEFAULT_CANVAS_W, DEFAULT_CANVAS_H)?;
+            let decoded = image::load_from_memory(&png)
+                .map_err(|e| format!("解码场景帧失败：{e}"))?
+                .to_rgba8();
+            let (w, h) = decoded.dimensions();
+            let mut rgba = RgbaImage::new(w, h);
+            for (x, y, p) in decoded.enumerate_pixels() {
+                rgba.put_pixel(x, y, Rgba([p[0], p[1], p[2], 255]));
+            }
+            let frame = Frame::from_parts(rgba, 0, 0, Delay::from_numer_denom_ms(280, 1));
+            encoder
+                .encode_frame(frame)
+                .map_err(|e| format!("编码场景 GIF 帧失败：{e}"))?;
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StyleSceneGifCatalog {
+    pub moss_hud: BTreeMap<&'static str, String>,
+    pub goggle_bot: BTreeMap<&'static str, String>,
+}
+
+/// 进程级缓存「硬核太空舱」与「可爱像素小机器人」两套完整的 160×120 5 场景动态 GIF89a。
+pub fn cached_style_scene_gifs() -> &'static StyleSceneGifCatalog {
+    static CACHE: OnceLock<StyleSceneGifCatalog> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let poses = [
+            BotPose::IdleBlink,
+            BotPose::GogglesEngrave,
+            BotPose::ApprovalWave,
+            BotPose::MusicGroove,
+            BotPose::CelebrateDone,
+        ];
+        let build_map = |style: ScreenCardStyle| -> BTreeMap<&'static str, String> {
+            let mut map = BTreeMap::new();
+            for pose in poses {
+                if let Ok(gif) = encode_scene_showcase_gif(pose, style) {
+                    map.insert(
+                        pose.slug(),
+                        format!("data:image/gif;base64,{}", base64_encode(&gif)),
+                    );
+                }
+            }
+            map
+        };
+        StyleSceneGifCatalog {
+            moss_hud: build_map(ScreenCardStyle::MossHud),
+            goggle_bot: build_map(ScreenCardStyle::GoggleBot),
+        }
+    })
 }
 
 impl PreviewStore {
@@ -1094,6 +1320,15 @@ mod tests {
             .unwrap();
             let music_img = image::load_from_memory(&music).unwrap();
             assert_eq!((music_img.width(), music_img.height()), (160, 120));
+        }
+
+        let catalog = cached_style_scene_gifs();
+        for key in ["idle", "engrave", "approval", "music", "celebrate"] {
+            let m_url = catalog.moss_hud.get(key).expect("moss_hud gif exists");
+            let b_url = catalog.goggle_bot.get(key).expect("goggle_bot gif exists");
+            assert!(m_url.starts_with("data:image/gif;base64,R0lGODlh"));
+            assert!(b_url.starts_with("data:image/gif;base64,R0lGODlh"));
+            assert_ne!(m_url, b_url, "两套画风的 {key} 动图画面必须不同");
         }
     }
 }

@@ -166,6 +166,8 @@ export function BuiltinServicePanel({ builtin }) {
   const [controlDrafts, setControlDrafts] = useState({});
   const [controlNotice, setControlNotice] = useState({});
   const [botNotice, setBotNotice] = useState("");
+  const [optimisticStyle, setOptimisticStyle] = useState("");
+  const [lastPushedPose, setLastPushedPose] = useState("");
   if (!status) return <p className="voice-muted">正在读取内置服务状态…</p>;
   if (status.error) return <div className="voice-hint voice-hint--bad">{status.error}</div>;
 
@@ -173,10 +175,17 @@ export function BuiltinServicePanel({ builtin }) {
   const devices = Array.isArray(status.devices) ? status.devices : [];
   const sessions = Array.isArray(status.sessions) ? status.sessions : [];
   const modeView = builtinModeView(status);
-  const currentCardStyle = status.local?.settings?.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud";
-  const botGifs = Array.isArray(status.goggle_bot_gifs)
+  const savedCardStyle = status.local?.settings?.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud";
+  const currentCardStyle = optimisticStyle || savedCardStyle;
+  const legacyBotGifs = Array.isArray(status.goggle_bot_gifs)
     ? Object.fromEntries(status.goggle_bot_gifs.filter((item) => item?.id && item?.data_url).map((item) => [item.id, item.data_url]))
     : (status.goggle_bot_gifs && typeof status.goggle_bot_gifs === "object" ? status.goggle_bot_gifs : {});
+  const styleGifCatalog = status.screen_style_gifs && typeof status.screen_style_gifs === "object"
+    ? status.screen_style_gifs
+    : {};
+  const activeSceneGifs = currentCardStyle === "goggle_bot"
+    ? { ...legacyBotGifs, ...(styleGifCatalog.goggle_bot || {}) }
+    : (styleGifCatalog.moss_hud || {});
   const onlineColorDevice = devices.find((d) => {
     if (d.status !== "allowed") return false;
     const sess = sessions.find((s) => s.device_id === d.device_id);
@@ -185,23 +194,44 @@ export function BuiltinServicePanel({ builtin }) {
 
   const switchCardStyle = async (nextStyle) => {
     if (nextStyle === currentCardStyle) return;
+    setOptimisticStyle(nextStyle);
     setBotNotice("");
     const opt = SCREEN_CARD_STYLE_OPTIONS.find((item) => item.id === nextStyle);
     const updated = await act("切换卡片画风", () => voiceApi.localSave({ screen_card_style: nextStyle }));
     if (updated) {
-      setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风（在线小智无需重连立即生效）`);
+      setOptimisticStyle("");
+      if (onlineColorDevice && lastPushedPose) {
+        try {
+          await voiceApi.deviceRequest(onlineColorDevice.device_id, "push_bot_pose", {
+            pose: lastPushedPose,
+            style: nextStyle,
+          });
+          setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风，并同步刷新在线小智屏幕预览`);
+          return;
+        } catch {
+          // 若设备刚好断开，不影响画风保存提示
+        }
+      }
+      setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风（下方 5 屏预览已实时切换，在线小智不断连立即生效）`);
+    } else {
+      setOptimisticStyle("");
     }
   };
 
   const pushBotPose = async (pose) => {
     if (!onlineColorDevice) return;
+    const sceneTitle = currentCardStyle === "goggle_bot" ? (pose.botLabel || pose.label) : (pose.mossLabel || pose.label);
     setAsking(onlineColorDevice.device_id);
     setBotNotice("");
     try {
-      await voiceApi.deviceRequest(onlineColorDevice.device_id, "push_bot_pose", { pose: pose.id });
-      setBotNotice(`已将「小 MOSS · ${pose.label}」投送到 ${builtinDeviceView(onlineColorDevice).title}`);
+      await voiceApi.deviceRequest(onlineColorDevice.device_id, "push_bot_pose", {
+        pose: pose.id,
+        style: currentCardStyle,
+      });
+      setLastPushedPose(pose.id);
+      setBotNotice(`已将「${sceneTitle}」1:1 投送到 ${builtinDeviceView(onlineColorDevice).title}`);
     } catch (error) {
-      await showAlert(voiceErrorText(error), { title: "投送小机器人预览失败", tone: "error" });
+      await showAlert(voiceErrorText(error), { title: "投送屏幕预览失败", tone: "error" });
     } finally {
       setAsking("");
     }
@@ -646,14 +676,21 @@ export function BuiltinServicePanel({ builtin }) {
         </table>
       </div>
 
-      <div className="voice-bot-showcase" id="voice-goggle-bot-card">
+      <div
+        className={`voice-bot-showcase ${currentCardStyle === "goggle_bot" ? "voice-bot-showcase--bot" : "voice-bot-showcase--moss"}`}
+        id="voice-goggle-bot-card"
+        data-card-style={currentCardStyle}
+      >
         <div className="voice-bot-showcase-head">
           <span className="voice-actions">
-            <b>小智彩屏动态卡片 & 护目镜小机器人 GIF</b>
-            <span className="ob-pill ob-pill--ok voice-tag">零 Flash 风险 · 纯内存渲染</span>
+            <b>小智 320×240 彩屏动态副屏 · 双画风实时预览台</b>
+            <span className={`ob-pill ${currentCardStyle === "goggle_bot" ? "ob-pill--ok" : "ob-pill--info"} voice-tag`}>
+              {currentCardStyle === "goggle_bot" ? "当前：可爱像素小机器人" : "当前：硬核太空舱 HUD"}
+            </span>
+            <span className="ob-pill ob-pill--off voice-tag">零 Flash 风险 · 纯内存渲染</span>
           </span>
           <div className="voice-bot-style-switch" role="group" aria-label="小智彩屏卡片画风">
-            <span className="voice-muted">卡片画风：</span>
+            <span className="voice-muted">点击切换画风：</span>
             {SCREEN_CARD_STYLE_OPTIONS.map((opt) => {
               const active = currentCardStyle === opt.id;
               return (
@@ -676,29 +713,36 @@ export function BuiltinServicePanel({ builtin }) {
           <span className="ob-pill ob-pill--info voice-tag">① 待电脑审批警戒卡（含倒计时条）</span>
           <span className="ob-pill ob-pill--info voice-tag">② 完工庆祝 / 急停断点 5 秒徽章卡（固件自动淡出）</span>
           <span className="ob-pill ob-pill--info voice-tag">③ 本地音乐像素唱机 / 听歌小机器人卡</span>
-          <span className="ob-pill ob-pill--off voice-tag">1:1 激光刀路预览 + 实时加工进度 HUD 同步切换画风</span>
+          <span className="ob-pill ob-pill--off voice-tag">1:1 激光刀路预览 + 实时加工进度 HUD 全部同步切换画风</span>
         </div>
         <div className="voice-bot-gif-grid" id="voice-goggle-bot-gallery">
           {GOGGLE_BOT_POSES.map((pose) => {
-            const gifSrc = botGifs[pose.id];
+            const gifSrc = activeSceneGifs[pose.id] || legacyBotGifs[pose.id];
+            const sceneTitle = currentCardStyle === "goggle_bot" ? (pose.botLabel || pose.label) : (pose.mossLabel || pose.label);
+            const sceneDesc = currentCardStyle === "goggle_bot" ? (pose.botDesc || pose.desc) : (pose.mossDesc || pose.desc);
             return (
               <div className="voice-bot-gif-tile" key={pose.id} data-pose={pose.id}>
                 <div className="voice-bot-gif-frame">
                   {gifSrc ? (
-                    <img src={gifSrc} alt={`小 MOSS 护目镜小机器人：${pose.label}`} className="voice-bot-gif-img" />
+                    <img
+                      key={`${currentCardStyle}-${pose.id}`}
+                      src={gifSrc}
+                      alt={`${sceneTitle}`}
+                      className="voice-bot-gif-img"
+                    />
                   ) : (
-                    <span className="voice-muted mono">GIF</span>
+                    <span className="voice-muted mono">160×120</span>
                   )}
                 </div>
-                <div className="voice-bot-gif-title">{pose.label}</div>
-                <div className="voice-bot-gif-desc">{pose.desc}</div>
+                <div className="voice-bot-gif-title">{sceneTitle}</div>
+                <div className="voice-bot-gif-desc">{sceneDesc}</div>
                 <button
                   type="button"
                   className="btn btn-ghost"
                   disabled={Boolean(asking) || Boolean(busy) || !onlineColorDevice}
                   title={
                     onlineColorDevice
-                      ? `将「${pose.label}」1:1 投送到在线彩屏小智试看`
+                      ? `将当前「${sceneTitle}」1:1 投送到在线彩屏小智试看`
                       : "连接并允许彩屏小智（如立创·实战派 320×240）后可一键推屏试看"
                   }
                   id={`voice-push-bot-${pose.id}`}

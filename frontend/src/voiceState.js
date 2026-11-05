@@ -627,11 +627,51 @@ export const SCREEN_CARD_STYLE_OPTIONS = [
 ];
 
 export const GOGGLE_BOT_POSES = [
-  { id: "idle", label: "待机眨眼", desc: "护目镜架额头，灵动眨眼" },
-  { id: "engrave", label: "戴护目镜雕刻", desc: "拉下琥珀防激光镜与火花" },
-  { id: "approval", label: "待电脑审批", desc: "举牌挥手提醒电脑点批准" },
-  { id: "music", label: "听歌摇摆", desc: "戴青色耳机随本地音乐律动" },
-  { id: "celebrate", label: "完工欢呼", desc: "5 秒庆祝徽章自动淡出" },
+  {
+    id: "idle",
+    label: "待机眨眼",
+    desc: "护目镜架额头，灵动眨眼",
+    mossLabel: "1:1 刀路预览 · 太空舱",
+    mossDesc: "MOSS 红眼扫描 + 发光刀路标尺",
+    botLabel: "1:1 刀路预览 · 小机器人",
+    botDesc: "护目镜架额头眨眼 + 发光刀路",
+  },
+  {
+    id: "engrave",
+    label: "戴护目镜雕刻",
+    desc: "拉下琥珀防激光镜与火花",
+    mossLabel: "太空舱雕刻表盘",
+    mossDesc: "大号百分比 + 16 段进度与剩余时间",
+    botLabel: "戴护目镜雕刻",
+    botDesc: "拉下琥珀防激光镜伴随火花闪烁",
+  },
+  {
+    id: "approval",
+    label: "待电脑审批",
+    desc: "举牌挥手提醒电脑点批准",
+    mossLabel: "太空舱审批警戒门禁",
+    mossDesc: "红琥珀脉冲机械眼 + 批准倒计时条",
+    botLabel: "待电脑审批提醒",
+    botDesc: "小机器人举牌挥手催电脑点批准",
+  },
+  {
+    id: "music",
+    label: "听歌摇摆",
+    desc: "戴青色耳机随本地音乐律动",
+    mossLabel: "太空舱黑胶像素唱机",
+    mossDesc: "旋转黑胶唱盘 + 8 柱频谱跳动",
+    botLabel: "听歌摇摆",
+    botDesc: "戴青色耳机跟拍 + 音符频谱律动",
+  },
+  {
+    id: "celebrate",
+    label: "完工欢呼",
+    desc: "5 秒庆祝徽章自动淡出",
+    mossLabel: "太空舱 5 秒完工徽章",
+    mossDesc: "翠绿完成徽章，5 秒后自动淡出",
+    botLabel: "完工欢呼徽章",
+    botDesc: "竖大拇指星光闪烁，5 秒自动淡出",
+  },
 ];
 
 export const BUILTIN_ASR_CORRECTION_PREVIEW =

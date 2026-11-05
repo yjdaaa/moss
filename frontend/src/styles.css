@@ -5145,7 +5145,7 @@ input:not([type]):focus {
   color: var(--ob-accent-2);
 }
 
-/* n53：小智彩屏零 Flash 动态卡片画风切换与护目镜小机器人 GIF 橱窗 */
+/* n53：小智 320×240 彩屏零 Flash 动态卡片双画风切换与 160×120 4:3 真机比例预览台 */
 .voice-bot-showcase {
   margin-top: 14px;
   padding: 14px 16px;
@@ -5155,6 +5155,15 @@ input:not([type]):focus {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  transition: border-color 0.22s ease, background 0.22s ease;
+}
+.voice-bot-showcase--moss {
+  border-color: rgba(255, 77, 109, 0.34);
+  background: linear-gradient(180deg, rgba(255, 68, 56, 0.06) 0%, rgba(9, 13, 22, 0.42) 100%);
+}
+.voice-bot-showcase--bot {
+  border-color: rgba(72, 250, 210, 0.36);
+  background: linear-gradient(180deg, rgba(72, 250, 210, 0.06) 0%, rgba(18, 16, 32, 0.42) 100%);
 }
 .voice-bot-showcase-head {
   display: flex;
@@ -5170,8 +5179,8 @@ input:not([type]):focus {
   gap: 6px;
 }
 .voice-bot-style-switch .btn.is-active {
-  border-color: rgba(139, 123, 255, 0.78);
-  background: rgba(139, 123, 255, 0.2);
+  border-color: rgba(139, 123, 255, 0.85);
+  background: rgba(139, 123, 255, 0.22);
   color: var(--ob-ink);
   font-weight: 600;
 }
@@ -5182,7 +5191,7 @@ input:not([type]):focus {
 }
 .voice-bot-gif-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(144px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
   gap: 10px;
   margin-top: 2px;
 }
@@ -5190,7 +5199,7 @@ input:not([type]):focus {
   padding: 10px;
   border: 1px solid var(--ob-line);
   border-radius: 10px;
-  background: rgba(7, 10, 18, 0.62);
+  background: rgba(7, 10, 18, 0.68);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -5202,19 +5211,26 @@ input:not([type]):focus {
   border-color: rgba(139, 123, 255, 0.52);
 }
 .voice-bot-gif-frame {
-  width: 84px;
-  height: 84px;
-  border-radius: 10px;
+  width: 148px;
+  height: 112px;
+  border-radius: 8px;
   background: #070a12;
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55);
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
 }
+.voice-bot-showcase--moss .voice-bot-gif-frame {
+  border-color: rgba(255, 77, 109, 0.28);
+}
+.voice-bot-showcase--bot .voice-bot-gif-frame {
+  border-color: rgba(72, 250, 210, 0.32);
+}
 .voice-bot-gif-img {
-  width: 78px;
-  height: 78px;
+  width: 144px;
+  height: 108px;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   display: block;

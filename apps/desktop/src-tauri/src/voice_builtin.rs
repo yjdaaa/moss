@@ -1948,6 +1948,7 @@ mod imp {
                 "debug_traces": view.as_ref().map(|v| serde_json::to_value(&v.debug_traces).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
                 "device_prefs": settings.builtin_device_prefs,
                 "goggle_bot_gifs": moss_voice_server::cached_goggle_bot_gifs(),
+                "screen_style_gifs": moss_voice_server::cached_style_scene_gifs(),
                 "memory_enabled": self.memory.enabled(),
                 "devices": self.devices(),
             })
@@ -3076,14 +3077,23 @@ mod imp {
                     .unwrap_or("idle");
                 let pose = moss_voice_server::BotPose::from_slug(raw_pose)
                     .ok_or_else(|| invalid("小机器人动作只能是 idle、engrave、approval、music、celebrate 或 halted"))?;
+                let style_override = value
+                    .and_then(|v| v.get("style"))
+                    .and_then(Value::as_str)
+                    .map(moss_voice_server::ScreenCardStyle::from_setting);
                 let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
                 let server = server.as_ref().ok_or_else(|| {
                     CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
                 })?;
+                let effective_style = style_override.unwrap_or_else(|| server.screen_card_style());
                 server
-                    .push_goggle_bot_pose(pose, Some(device_id))
+                    .push_scene_card(pose, Some(effective_style), Some(device_id))
                     .map_err(|error| CenterError::new("voice_device_offline", 409, error))?;
-                return Ok(serde_json::json!({ "requested": label, "pose": pose.slug() }));
+                return Ok(serde_json::json!({
+                    "requested": label,
+                    "pose": pose.slug(),
+                    "style": effective_style.as_str(),
+                }));
             }
             let parsed = match label {
                 "refresh_info" => moss_voice_server::DeviceRequest::RefreshInfo,

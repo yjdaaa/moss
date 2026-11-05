@@ -40,7 +40,11 @@ try {
       debug_enabled: false,
       debug_traces: [],
       device_prefs: {},
-      goggle_bot_gifs: ["idle", "engrave", "approval", "music", "celebrate"].map((id) => ({ id, label: id, data_url: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" })),
+      goggle_bot_gifs: ["idle", "engrave", "approval", "music", "celebrate"].map((id) => ({ id, label: id, data_url: `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-bot` })),
+      screen_style_gifs: {
+        moss_hud: Object.fromEntries(["idle", "engrave", "approval", "music", "celebrate"].map((id) => [id, `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-moss`])),
+        goggle_bot: Object.fromEntries(["idle", "engrave", "approval", "music", "celebrate"].map((id) => [id, `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-bot`])),
+      },
       sessions: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", ip: "192.0.2.55", protocol_version: 1, connected_at: 1_790_000_000, state: "idle", level: 0, screen_monochrome: false, screen_width: 320, screen_height: 240, device_tools: ["self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness", "self.screen.set_theme", "self.screen.preview_image", "self.set_press_to_talk"] }],
       events: [], timings: [],
       devices: [{ device_id: "aa:bb:cc:11:22:33", name: "立创实战派小智", model: "lichuang-dev", firmware_version: "2.2.0", status: "allowed", last_seen: 1_790_000_000, status_json: JSON.stringify({ audio_speaker: { volume: 65 }, screen: { brightness: 80, theme: "dark" } }) }],
@@ -557,13 +561,20 @@ try {
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_preview" });
   const botCard = page.locator("#voice-goggle-bot-card");
   await botCard.waitFor();
-  assert.equal(await botCard.locator(".voice-bot-gif-img").count(), 5, "护目镜小机器人展示 5 组 GIF 姿态");
+  assert.equal(await botCard.locator(".voice-bot-gif-img").count(), 5, "展示 5 组 160×120 动态场景屏");
+  await botCard.getByText("太空舱雕刻表盘").waitFor();
+  assert.match(await botCard.locator('[data-pose="engrave"] .voice-bot-gif-img').getAttribute("src"), /#engrave-moss$/);
   await page.locator("#voice-card-style-goggle_bot").click();
+  await botCard.getByText("戴护目镜雕刻").waitFor();
+  assert.match(await botCard.locator('[data-pose="engrave"] .voice-bot-gif-img').getAttribute("src"), /#engrave-bot$/);
   await page.locator("#voice-bot-showcase-notice").getByText(/可爱像素小机器人/).waitFor();
   assert.deepEqual(last("voice_local_save").args, { settings: { screen_card_style: "goggle_bot" } });
   await page.locator("#voice-push-bot-engrave").click();
   await page.locator("#voice-bot-showcase-notice").getByText(/戴护目镜雕刻/).waitFor();
-  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave" } });
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave", style: "goggle_bot" } });
+  await page.locator("#voice-card-style-moss_hud").click();
+  await botCard.getByText("太空舱雕刻表盘").waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave", style: "moss_hud" } });
   // 9. 窄屏无横向滚动
   await page.setViewportSize({ width: 820, height: 1000 });
   await tab("设备").click();
