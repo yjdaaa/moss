@@ -1,8 +1,6 @@
-val isCiBuild = System.getenv("CI") == "true" || System.getenv("GITHUB_ACTIONS") == "true"
-
 buildscript {
     repositories {
-        if (!isCiBuild) {
+        if (System.getenv("CI") != "true" && System.getenv("GITHUB_ACTIONS") != "true") {
             maven("https://maven.aliyun.com/repository/google")
             maven("https://maven.aliyun.com/repository/public")
         }
@@ -17,7 +15,7 @@ buildscript {
 
 allprojects {
     repositories {
-        if (!isCiBuild) {
+        if (System.getenv("CI") != "true" && System.getenv("GITHUB_ACTIONS") != "true") {
             maven("https://maven.aliyun.com/repository/google")
             maven("https://maven.aliyun.com/repository/public")
         }
@@ -29,4 +27,3 @@ allprojects {
 tasks.register("clean").configure {
     delete("build")
 }
-

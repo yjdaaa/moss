@@ -6,6 +6,13 @@
 
 ## [0.3.2] - 2026-11-05
 
+### 修复 Android Gradle 脚本顶层语法顺序并同步跳过 buildSrc 阿里云镜像（2026-11-05）
+
+- **现象**：GitHub Actions 构建 Android APK 时因 `gen/android/build.gradle.kts` 在 `buildscript {}` 块前声明顶层变量触发 Kotlin DSL 语法错误失败，且 `buildSrc/build.gradle.kts` 在海外 CI 仍优先请求阿里云镜像。
+- **根因与修复**：Gradle Kotlin DSL 要求 `buildscript {}` 之前不得出现任何普通语句。移除 `build.gradle.kts` 顶层变量改为在 `repositories` 块内直接判读 `CI` / `GITHUB_ACTIONS` 环境变量，并同步修复 `buildSrc/build.gradle.kts`。无运行期行为变更，不是破坏性变更。
+- **验证**：由 GitHub Actions `ci.yml` 与 `release.yml` 的 `android-apk` 任务实跑验证。
+- **关联**：`apps/desktop/src-tauri/gen/android/build.gradle.kts`、`apps/desktop/src-tauri/gen/android/buildSrc/build.gradle.kts`。
+
 ### 顶栏与页面急停全链路补发 0x18，移除工作台未使用的发送覆盖层（2026-11-05）
 
 - **现象**：① 画板页此前把顶栏急停接到 `workflow cancel`，任务全量发送完后按急停不向设备写任何字节；② 若后端残留一条“待确认停止”（`unknown`）的旧任务记录，按顶栏急停会只发给旧记录对应的目标而不发给当前页面的设备；③ 工作台 `HomePage.jsx` 挂载了从未设为显示的 `SendOverlay` 死代码。
