@@ -54,6 +54,65 @@ export function approvedInPrivateWindow(kind) {
   return kind === "home_control";
 }
 
+export function approvalTagText(kind) {
+  if (kind === "external_tool") return "第三方工具 · 本次批准";
+  if (kind === "agent_run") return "本机 Agent · 本次批准";
+  if (approvedInPrivateWindow(kind)) return "家居控制 · 私密窗口批准";
+  return "R3 · 运动与出光";
+}
+
+export function agentApprovalPreview(agent) {
+  if (!agent || typeof agent !== "object") return null;
+  const rawProvider = String(agent.provider || "").trim();
+  const providerLabel = rawProvider === "codex"
+    ? "Codex (codex)"
+    : rawProvider === "claude_code"
+      ? "Claude Code (claude_code)"
+      : rawProvider || "未知 CLI";
+  const workspaceLabel = String(agent.workspace_label || agent.workspace_name || "").trim() || "未指定工作区";
+  const task = String(agent.task || "").trim() || "—";
+  return {
+    provider: rawProvider,
+    providerLabel,
+    workspaceLabel,
+    task,
+    warning: "该任务可修改上述工作目录中的文件，并可能消耗对应 CLI 账号的模型额度。不确定时请选择拒绝。",
+  };
+}
+
+export async function rejectApprovalRequest(approval, { cancelHomeApproval, postReject }) {
+  if (approval?.kind === "home_control" && typeof cancelHomeApproval === "function") {
+    try {
+      const result = await cancelHomeApproval({
+        approval_id: approval.approval_id,
+        digest: approval.digest,
+        confirmed: true,
+      });
+      if (result && result.status && !["rejected", "expired"].includes(result.status)) {
+        return { ok: false, code: null, fallback: "家居审批撤销状态未确认" };
+      }
+      return { ok: true };
+    } catch (error) {
+      if (error?.code !== "voice_desktop_only") {
+        return {
+          ok: false,
+          code: error?.code || null,
+          fallback: error?.message || "撤销家居审批失败",
+        };
+      }
+    }
+  }
+  const res = await postReject(`/v1/approvals/${encodeURIComponent(approval.approval_id)}/reject`, {});
+  if (!(res?.ok && res?.data?.success)) {
+    return {
+      ok: false,
+      code: res?.data?.detail?.error_code || null,
+      fallback: typeof res?.data?.result === "string" ? res.data.result : "",
+    };
+  }
+  return { ok: true };
+}
+
 export const SOURCE_LABEL = {
   mcp_bridge: "小智语音（MCP 接入点）",
   lan: "局域网配对设备",

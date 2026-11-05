@@ -107,7 +107,7 @@ export default function VoicePluginsCard() {
           <option value="weather">天气</option>
           <option value="news">新闻</option>
           <option value="search">联网搜索</option>
-          <option value="rag">知识库</option>
+          <option value="rag">外部 RAGFlow 知识库（远程服务）</option>
         </select>
       </label>
       {selectedService === "lunar" && <div className="voice-private-service">
@@ -152,8 +152,9 @@ export default function VoicePluginsCard() {
         </>}
       </div>}
       {selectedService === "rag" && <div className="voice-private-service">
-        {toggle("rag_enabled", "启用知识库检索")}
-        {field("rag_host", "RAGFlow 地址", "https://rag.example.com")}
+        <p className="voice-muted">连接外部部署的 RAGFlow 知识库服务器（需填写远程地址与密钥）。若只需读取本机电脑文件夹，请前往「扩展 → 本地知识库」。</p>
+        {toggle("rag_enabled", "启用外部 RAGFlow 知识库检索")}
+        {field("rag_host", "RAGFlow 服务地址", "https://rag.example.com")}
         <label className="voice-form-group">数据集白名单，每行一个 Dataset ID
           <textarea rows={3} disabled={saving} value={datasets} onChange={(e) => setDatasets(e.target.value)} />
         </label>

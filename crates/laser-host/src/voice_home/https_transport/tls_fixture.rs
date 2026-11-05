@@ -175,6 +175,24 @@ fn nv15_synthetic_tls_service_post_exactly_once_and_targeted_state_get() {
     let record = String::from_utf8(fake.finish()).unwrap();
     assert!(record.starts_with("GET /api/states/light.desk HTTP/1.1"));
     assert!(!record.contains("attributes"));
+
+    let mut fake = fake_ha_https(
+        "ha.example.test",
+        "200 OK",
+        "application/json",
+        br#"{"entity_id":"climate.room","state":"heat","attributes":{"temperature":23.5,"token":"redacted"}}"#
+            .to_vec(),
+        Duration::ZERO,
+        None,
+    );
+    let (state, attrs) = fake
+        .transport
+        .read_target_snapshot("climate.room", Duration::from_millis(900))
+        .unwrap();
+    assert_eq!(state, "heat");
+    assert_eq!(attrs["temperature"], 23.5);
+    assert!(attrs.get("token").is_none());
+    fake.finish();
 }
 
 #[test]

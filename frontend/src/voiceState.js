@@ -605,6 +605,172 @@ export function builtinDeviceInfoView(device) {
     updatedAt: Number(device?.info_at) || 0,
   };
 }
+export const PERSONA_STYLE_OPTIONS = [
+  { id: "workshop", label: "简明工坊助手（默认）", hint: "干练直接，专注激光雕刻指令与状态反馈" },
+  { id: "moss_station", label: "MOSS 领航空间站（冷峻克制腔调）", hint: "《流浪地球》量子计算中枢语气：冷静理性、不寒暄卖萌，严格基于真实状态汇报" },
+  { id: "beginner_guide", label: "新手引导模式（耐心讲解工艺）", hint: "针对耗材、对焦、排风与走边框多给一句大白话提醒" },
+];
+
+export const SCREEN_CARD_STYLE_OPTIONS = [
+  {
+    id: "moss_hud",
+    label: "硬核太空舱（MOSS HUD）",
+    shortLabel: "硬核太空舱",
+    hint: "直角战术瞄准刻度、深空暗底与领航空间站仪表盘",
+  },
+  {
+    id: "goggle_bot",
+    label: "可爱像素小机器人（Goggle Bot）",
+    shortLabel: "可爱像素小机器人",
+    hint: "圆角星光边框、小 MOSS 护目镜像素小机器人陪同雕刻/审批/听歌/庆祝",
+  },
+];
+
+export const GOGGLE_BOT_POSES = [
+  { id: "idle", label: "待机眨眼", desc: "护目镜架额头，灵动眨眼" },
+  { id: "engrave", label: "戴护目镜雕刻", desc: "拉下琥珀防激光镜与火花" },
+  { id: "approval", label: "待电脑审批", desc: "举牌挥手提醒电脑点批准" },
+  { id: "music", label: "听歌摇摆", desc: "戴青色耳机随本地音乐律动" },
+  { id: "celebrate", label: "完工欢呼", desc: "5 秒庆祝徽章自动淡出" },
+];
+
+export const BUILTIN_ASR_CORRECTION_PREVIEW =
+  "段木/端木→椴木 · 亚克立→亚克力 · 一宿→翼宿 · 牛皮指→牛皮纸 · 胶合版→胶合板 · 走边筐→走边框";
+
+const PROTECTED_STOP_WORDS = new Set([
+  "停", "急停", "停止", "立刻停", "马上停", "快停", "取消", "停止加工", "暂停",
+  "退出", "再见", "拜拜", "退下", "关闭对话", "确认", "开始",
+]);
+
+function containsDangerousGcodeOrGrblJs(text) {
+  const upper = String(text || "").toUpperCase();
+  for (const token of upper.split(/[^A-Z0-9$=]+/)) {
+    if (!token) continue;
+    if (["G0", "G00", "G1", "G01", "M3", "M03", "M4", "M04", "M5", "M05"].includes(token)) return true;
+    if (/^\$\d+=/.test(token)) return true;
+  }
+  return false;
+}
+
+export function parseAsrCorrectionLine(rawLine) {
+  const line = String(rawLine || "");
+  if (/[\x00-\x1f\x7f]/.test(line)) return { error: "同音纠错规则不能包含控制字符" };
+  const trimmed = line.trim();
+  if (!trimmed) return { empty: true };
+  const match = trimmed.match(/^(.*?)(?:=|->|→|＝)(.*)$/);
+  if (!match) return { error: "每条同音纠错请按“错词=正词”填写（如 段木=椴木）" };
+  const wrong = match[1].trim();
+  const right = match[2].trim();
+  if (!wrong || !right) return { error: "同音纠错的错词与正词都不能为空" };
+  if (wrong === right) return { error: "同音纠错的错词与正词不能相同" };
+  if (wrong.includes("=") || right.includes("=")) return { error: "单条同音纠错只能包含一个“=”分隔符" };
+  if ([...wrong].length > 24 || [...right].length > 24) return { error: "同音纠错单侧最多 24 个字符" };
+  if (PROTECTED_STOP_WORDS.has(wrong.toLowerCase()) || PROTECTED_STOP_WORDS.has(wrong)) {
+    return { error: `安全保护词“${wrong}”不允许被同音纠错改写` };
+  }
+  if (containsDangerousGcodeOrGrblJs(right)) {
+    return { error: "同音纠错目标词不能包含 G-code 或控制器 $n= 指令" };
+  }
+  return { wrong, right, formatted: `${wrong}=${right}` };
+}
+
+/** 计算单台小智设备的在线快捷控制能力与当前显示值（结合实时快照、会话工具列表与本机记忆偏好）。 */
+export function builtinDeviceControlsView(device, session, devicePrefs = {}) {
+  let statusObj = null;
+  try {
+    statusObj = device?.status_json ? JSON.parse(device.status_json) : null;
+  } catch {
+    statusObj = null;
+  }
+  let helloObj = null;
+  try {
+    helloObj = device?.hello_json ? JSON.parse(device.hello_json) : null;
+  } catch {
+    helloObj = null;
+  }
+  let listenObj = null;
+  let parsedListen = null;
+  try {
+    parsedListen = device?.listen_json ? JSON.parse(device.listen_json) : null;
+  } catch {
+    parsedListen = null;
+  }
+  void listenObj;
+  const pref = (devicePrefs && device?.device_id && devicePrefs[device.device_id]) || {};
+  const tools = Array.isArray(session?.device_tools) ? session.device_tools : [];
+  const hasToolList = tools.length > 0;
+  const mcpSupported = Boolean(session) && (hasToolList || helloObj?.mcp !== false);
+  const canVolume = hasToolList
+    ? tools.includes("self.audio_speaker.set_volume")
+    : Boolean(mcpSupported);
+  const canBrightness = hasToolList
+    ? tools.includes("self.screen.set_brightness") || tools.includes("self.disp.setbacklight")
+    : Boolean(statusObj?.screen && statusObj.screen.brightness !== undefined);
+  const canTheme = hasToolList
+    ? tools.includes("self.screen.set_theme")
+    : Boolean(statusObj?.screen && statusObj.screen.theme);
+  const canPressToTalk = hasToolList
+    ? tools.includes("self.set_press_to_talk")
+    : false;
+  const screenMonochrome =
+    session?.screen_monochrome === true
+      ? true
+      : session?.screen_monochrome === false
+        ? false
+        : null;
+  const screenWidth = Number(session?.screen_width);
+  const screenHeight = Number(session?.screen_height);
+  const screenResolution =
+    Number.isFinite(screenWidth) && screenWidth > 0 && Number.isFinite(screenHeight) && screenHeight > 0
+      ? `${Math.round(screenWidth)}×${Math.round(screenHeight)}`
+      : null;
+  const canPreviewImage = hasToolList
+    ? tools.includes("self.screen.preview_image") && screenMonochrome !== true
+    : false;
+  const clampPct = (val, fallback) => {
+    const num = Number(val);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.max(0, Math.min(100, Math.round(num)));
+  };
+  const liveVol = statusObj?.audio_speaker?.volume;
+  const liveBri = statusObj?.screen?.brightness;
+  const liveTheme = statusObj?.screen?.theme;
+  const volume = liveVol !== undefined ? clampPct(liveVol, 60) : clampPct(pref.volume, 60);
+  const brightness = liveBri !== undefined ? clampPct(liveBri, 80) : clampPct(pref.brightness, 80);
+  const theme = liveTheme === "light" || liveTheme === "dark"
+    ? liveTheme
+    : pref.theme === "light" || pref.theme === "dark"
+      ? pref.theme
+      : "dark";
+  const talkMode =
+    pref.talk_mode === "press_to_talk" || pref.talk_mode === "click_to_talk"
+      ? pref.talk_mode
+      : parsedListen?.mode === "manual"
+        ? "press_to_talk"
+        : "click_to_talk";
+
+  return {
+    online: Boolean(session),
+    mcpSupported,
+    canVolume,
+    canBrightness,
+    canTheme,
+    canPressToTalk,
+    canPreviewImage,
+    screenMonochrome,
+    screenResolution,
+    volume,
+    brightness,
+    theme,
+    talkMode,
+    savedPref: {
+      volume: pref.volume ?? null,
+      brightness: pref.brightness ?? null,
+      theme: pref.theme || "",
+      talk_mode: pref.talk_mode || "",
+    },
+  };
+}
 /** 内置语音服务的设备状态与可用操作（内置语音技术书 §6：新设备首次连接需在电脑上允许）。 */
 export function builtinDeviceView(device) {
   const status = device?.status || "pending";
@@ -724,6 +890,12 @@ export function localSettingsForm(settings) {
     jev_tool_prune: value.jev_tool_prune !== false,
     jev_memory_filter: value.jev_memory_filter !== false,
     custom_hotwords: (Array.isArray(value.custom_hotwords) ? value.custom_hotwords : []).join("\n"),
+    asr_homophone_fix: value.asr_homophone_fix !== false,
+    custom_asr_corrections: (Array.isArray(value.custom_asr_corrections) ? value.custom_asr_corrections : []).join("\n"),
+    persona_style: value.persona_style || "workshop",
+    persona_prompt: value.persona_prompt || "",
+    screen_preview_sync: value.screen_preview_sync !== false,
+    screen_card_style: value.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud",
     tts: Boolean(value.tts),
     vad: Boolean(value.vad),
     vad_model: value.vad_model || "silero_vad",
@@ -769,6 +941,24 @@ export function experienceSettingsError(form) {
   if (effective.length > 64) return "自定义热词最多 64 条";
   if (effective.some((word) => [...word].length > 32)) return "每条热词最多 32 个字符";
   if (new TextEncoder().encode(effective.join("")).length > 4096) return "热词总长度超过 4096 字节";
+  const style = String(form.persona_style || "workshop").trim();
+  if (!["workshop", "moss_station", "beginner_guide"].includes(style)) return "请选择有效的助手风格";
+  const cardStyle = String(form.screen_card_style || "moss_hud").trim();
+  if (!["moss_hud", "goggle_bot"].includes(cardStyle)) return "请选择有效的屏幕卡片画风";
+  const prompt = String(form.persona_prompt || "").replace(/\r\n?/g, "\n");
+  if (/[\x00-\x09\x0b-\x1f\x7f]/.test(prompt)) return "补充说明不能包含控制字符";
+  if ([...prompt.trim()].length > 300) return "补充说明最多 300 个字符";
+  if (containsDangerousGcodeOrGrblJs(prompt)) return "补充说明不能包含 G-code 或控制器 $n= 指令";
+  const corrLines = String(form.custom_asr_corrections || "").split(/\r?\n/);
+  const seenWrong = new Map();
+  for (const line of corrLines) {
+    const parsed = parseAsrCorrectionLine(line);
+    if (parsed.empty) continue;
+    if (parsed.error) return parsed.error;
+    seenWrong.set(parsed.wrong, parsed.formatted);
+  }
+  if (seenWrong.size > 64) return "自定义同音纠错最多 64 条";
+  if (new TextEncoder().encode([...seenWrong.values()].join("")).length > 4096) return "同音纠错总长度超过 4096 字节";
   return "";
 }
 
@@ -805,6 +995,19 @@ export function localSettingsPayload(form) {
     jev_tool_prune: form.jev_tool_prune !== false,
     jev_memory_filter: form.jev_memory_filter !== false,
     custom_hotwords: [...new Set(String(form.custom_hotwords || "").split(/\r?\n/).map((word) => word.trim()).filter(Boolean))],
+    asr_homophone_fix: form.asr_homophone_fix !== false,
+    custom_asr_corrections: (() => {
+      const map = new Map();
+      for (const line of String(form.custom_asr_corrections || "").split(/\r?\n/)) {
+        const parsed = parseAsrCorrectionLine(line);
+        if (!parsed.empty && !parsed.error) map.set(parsed.wrong, parsed.formatted);
+      }
+      return [...map.values()];
+    })(),
+    persona_style: String(form.persona_style || "workshop").trim() || "workshop",
+    persona_prompt: String(form.persona_prompt || "").replace(/\r\n?/g, "\n").trim(),
+    screen_preview_sync: form.screen_preview_sync !== false,
+    screen_card_style: form.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud",
     tts: Boolean(form.tts),
     vad: Boolean(form.vad),
     vad_model: form.vad_model,
@@ -1051,7 +1254,25 @@ export function settingsGroupPayload(group, form) {
 
 /** 本地模型设置拆成两组分别保存：模型选择与语音体验。 */
 export const LOCAL_MODEL_KEYS = ["vad", "vad_model", "asr", "asr_model", "tts", "tts_model", "tts_speaker", "tts_speed", "mirror"];
-export const EXPERIENCE_KEYS = ["read_only_shortcuts", "asr_beam_search", "job_done_announce", "jev_filter_enabled", "jev_unfinished_hold", "jev_fast_route", "jev_tool_prune", "jev_memory_filter", "barge_in", "barge_in_ms", "custom_hotwords"];
+export const EXPERIENCE_KEYS = [
+  "read_only_shortcuts",
+  "asr_beam_search",
+  "job_done_announce",
+  "screen_preview_sync",
+  "screen_card_style",
+  "persona_style",
+  "persona_prompt",
+  "asr_homophone_fix",
+  "custom_asr_corrections",
+  "jev_filter_enabled",
+  "jev_unfinished_hold",
+  "jev_fast_route",
+  "jev_tool_prune",
+  "jev_memory_filter",
+  "barge_in",
+  "barge_in_ms",
+  "custom_hotwords",
+];
 
 /** 只取草稿中本组字段，其余用已保存的值，避免保存一组时顺带提交另一组未保存的改动。 */
 export function mergeGroup(baseline, draft, keys) {
@@ -1585,6 +1806,64 @@ function sanitizeIdentifier(raw, maxLen = 48) {
   return clean.length > maxLen ? `${clean.slice(0, maxLen)}…` : clean;
 }
 
+const MOSS_EYE_PALETTES = {
+  offline: {
+    coreStops: ["#e2e8f0", "#94a3b8", "#475569", "#1e293b", "#090d16"],
+    glowStops: ["rgba(148, 163, 184, 0.14)", "rgba(71, 85, 105, 0.06)", "rgba(15, 23, 42, 0)"],
+    accent: "#64748b",
+    tempo: "dormant",
+  },
+  idle: {
+    coreStops: ["#ffffff", "#ffc2cd", "#ff3b5c", "#990a1e", "#1e0005"],
+    glowStops: ["rgba(255, 59, 92, 0.36)", "rgba(56, 189, 248, 0.16)", "rgba(255, 59, 92, 0)"],
+    accent: "#ff3b5c",
+    tempo: "cruise",
+  },
+  listening: {
+    coreStops: ["#ffffff", "#bae6fd", "#38bdf8", "#0369a1", "#081426"],
+    glowStops: ["rgba(56, 189, 248, 0.52)", "rgba(255, 59, 92, 0.24)", "rgba(56, 189, 248, 0)"],
+    accent: "#38bdf8",
+    tempo: "acoustic",
+  },
+  thinking: {
+    coreStops: ["#ffffff", "#e9d5ff", "#a855f7", "#581c87", "#160526"],
+    glowStops: ["rgba(168, 85, 247, 0.50)", "rgba(56, 189, 248, 0.24)", "rgba(168, 85, 247, 0)"],
+    accent: "#a855f7",
+    tempo: "neural",
+  },
+  pulse: {
+    coreStops: ["#ffffff", "#ddd6fe", "#8b5cf6", "#4c1d95", "#130726"],
+    glowStops: ["rgba(139, 92, 246, 0.52)", "rgba(255, 59, 92, 0.26)", "rgba(139, 92, 246, 0)"],
+    accent: "#a78bfa",
+    tempo: "neural",
+  },
+  speaking: {
+    coreStops: ["#ffffff", "#ffe4e8", "#ff2a52", "#b80828", "#240007"],
+    glowStops: ["rgba(255, 59, 92, 0.56)", "rgba(251, 113, 133, 0.28)", "rgba(255, 59, 92, 0)"],
+    accent: "#ff3b5c",
+    tempo: "stream",
+  },
+  alert: {
+    coreStops: ["#ffffff", "#fef08a", "#f59e0b", "#dc2626", "#290602"],
+    glowStops: ["rgba(245, 158, 11, 0.58)", "rgba(239, 68, 68, 0.30)", "rgba(245, 158, 11, 0)"],
+    accent: "#f59e0b",
+    tempo: "alert",
+  },
+  engraving: {
+    coreStops: ["#ffffff", "#a7f3d0", "#10b981", "#047857", "#031c14"],
+    glowStops: ["rgba(16, 185, 129, 0.54)", "rgba(56, 189, 248, 0.28)", "rgba(16, 185, 129, 0)"],
+    accent: "#10b981",
+    tempo: "laser",
+  },
+};
+
+/**
+ * 根据机械眼视觉状态返回核心球体渐变色与动态节奏配置（确定性纯函数）。
+ */
+export function mossEyeCorePalette(visualState = "idle") {
+  return MOSS_EYE_PALETTES[visualState] || MOSS_EYE_PALETTES.idle;
+}
+
 /**
  * 生成 12 柱对称声波/指令脉冲高度（0..100，确定性纯函数，绝不生成随机假音频分贝）。
  * - `builtin` 的 `listening` / `speaking` 按真实 60ms PCM RMS 音量 `level` 缩放；
@@ -1856,59 +2135,198 @@ export function mossEyeTwinView({
 }
 
 /**
- * 左侧全局导航栏（SideNav）左上角 MOSS 机械眼的轻量实时状态推导。
- * 任意页面都可根据 `/api/system/info` 的 `mcp` / `voice` 与待审批数实时反馈。
+ * 左侧全局导航栏（SideNav）左上角 MOSS 光学机械眼的「硬件 + 加工 + 语音 + 审批」多维实时状态推导。
+ * - 外环（`hardwareState`）：反映激光硬件握手连接与 G-code 加工任务（`engraving` / `online` / `fault` / `unprobed`）；
+ * - 内核（`visualState`）：反映安全警戒、实时语音拾音/思考/播报、MCP 工具脉冲与激光雕刻聚焦。
  */
-export function globalEyeSensorView({ mcpStatus = null, voiceStatus = null, approvalCount = 0 } = {}) {
+export function globalEyeSensorView({
+  mcpStatus = null,
+  voiceStatus = null,
+  approvalCount = 0,
+  connectionStatus = null,
+  activeJobs = [],
+} = {}) {
   const approvals = finiteNonNegativeInt(approvalCount, 0);
+  const jobs = Array.isArray(activeJobs) ? activeJobs.filter(Boolean) : [];
+  const hasUncertainJob = jobs.some((job) => Boolean(job?.unknown || job?.state === "unknown"));
+  const activeJobCount = jobs.length;
+  const primaryJob = jobs[0] || null;
+  const rawJobPercent = finiteNonNegativeInt(primaryJob?.percent, null);
+  const jobProgress = rawJobPercent !== null ? Math.max(0, Math.min(100, rawJobPercent)) : null;
+
+  let hardwareState = "unprobed";
+  let hwLabel = "";
+  if (hasUncertainJob) {
+    hardwareState = "fault";
+    hwLabel = "激光任务连接状态未知（请现场确认）";
+  } else if (activeJobCount > 0) {
+    hardwareState = "engraving";
+    hwLabel = jobProgress !== null ? `激光加工中 ${jobProgress}%` : `激光加工进行中（${activeJobCount} 项）`;
+  } else if (connectionStatus?.connected) {
+    hardwareState = "online";
+    hwLabel = "硬件握手已通";
+  } else if (connectionStatus?.checkedAt) {
+    hardwareState = "fault";
+    hwLabel = "硬件未连接";
+  }
+
+  const withHwSuffix = (baseLabel) => (hwLabel ? `${baseLabel} · ${hwLabel}` : baseLabel);
+  const engravingBadge = jobProgress !== null ? `正在发送 ${jobProgress}%` : "正在发送加工";
+
   if (approvals > 0) {
     return {
       visualState: "alert",
+      hardwareState,
+      jobProgress,
       level: 0,
-      label: `MOSS 警戒：${approvals} 个请求等待批准`,
+      shortBadge: `待批准 (${approvals})`,
+      label: withHwSuffix(`MOSS 警戒：${approvals} 个请求等待批准`),
     };
   }
+  if (hasUncertainJob) {
+    return {
+      visualState: "alert",
+      hardwareState,
+      jobProgress,
+      level: 0,
+      shortBadge: "加工连接异常",
+      label: "MOSS 警戒：激光任务连接异常，请在机器旁确认停稳",
+    };
+  }
+
   const mode = voiceStatus?.mode || "official";
   if (mode === "builtin") {
     const phase = voiceStatus?.phase || null;
     const level = Math.max(0, Math.min(100, finiteNonNegativeInt(voiceStatus?.level, 0)));
     const sessions = finiteNonNegativeInt(voiceStatus?.device_sessions, null);
     if (phase === "speaking") {
-      return { visualState: "speaking", level, label: `MOSS 正在播报（振幅 ${level}%）` };
+      return {
+        visualState: "speaking",
+        hardwareState,
+        jobProgress,
+        level,
+        shortBadge: activeJobCount > 0 ? `播报中 · ${engravingBadge}` : `正在播报 ${level}%`,
+        label: withHwSuffix(`MOSS 正在播报（振幅 ${level}%）`),
+      };
     }
     if (phase === "thinking") {
-      return { visualState: "thinking", level: 0, label: "MOSS 正在思考 / 调用工具" };
+      return {
+        visualState: "thinking",
+        hardwareState,
+        jobProgress,
+        level: 0,
+        shortBadge: activeJobCount > 0 ? `思考中 · ${engravingBadge}` : "AI 思考路由",
+        label: withHwSuffix("MOSS 正在思考 / 调用工具"),
+      };
     }
     if (phase === "listening") {
-      return { visualState: "listening", level, label: `MOSS 正在倾听（振幅 ${level}%）` };
+      return {
+        visualState: "listening",
+        hardwareState,
+        jobProgress,
+        level,
+        shortBadge: activeJobCount > 0 ? `拾音中 · ${engravingBadge}` : `正在拾音 ${level}%`,
+        label: withHwSuffix(`MOSS 正在倾听（振幅 ${level}%）`),
+      };
+    }
+    if (activeJobCount > 0) {
+      return {
+        visualState: "engraving",
+        hardwareState,
+        jobProgress,
+        level: jobProgress !== null ? Math.max(25, jobProgress) : 60,
+        shortBadge: engravingBadge,
+        label: `${hwLabel}${sessions !== null && sessions > 0 ? ` · 内置语音在线（${sessions} 台）` : ""}`,
+      };
     }
     if (sessions !== null && sessions > 0) {
-      return { visualState: "idle", level: 0, label: `MOSS 内置语音在线（${sessions} 台设备）` };
+      return {
+        visualState: "idle",
+        hardwareState,
+        jobProgress,
+        level: 0,
+        shortBadge: hardwareState === "online" ? "硬件·语音已连" : `语音已连 (${sessions}台)`,
+        label: withHwSuffix(`MOSS 内置语音在线（${sessions} 台设备）`),
+      };
     }
     if (sessions === 0) {
-      return { visualState: "idle", level: 0, label: "MOSS 内置语音运行中（等待设备连接）" };
+      return {
+        visualState: "idle",
+        hardwareState,
+        jobProgress,
+        level: 0,
+        shortBadge: hardwareState === "online" ? "硬件已连·待唤醒" : "语音就绪·待设备",
+        label: withHwSuffix("MOSS 内置语音运行中（等待设备连接）"),
+      };
     }
-    return { visualState: "offline", level: 0, label: "MOSS 内置语音未启动" };
-  }
-  const connected = Boolean(mcpStatus?.connected);
-  if (!connected) {
+    if (hardwareState === "online") {
+      return {
+        visualState: "idle",
+        hardwareState,
+        jobProgress,
+        level: 0,
+        shortBadge: "硬件已连接",
+        label: "激光硬件已就绪 · 内置语音未启动",
+      };
+    }
     return {
       visualState: "offline",
+      hardwareState,
+      jobProgress,
       level: 0,
-      label: mode === "self_hosted" ? "自建 MCP 桥未连接" : "小智 MCP 桥未连接",
+      shortBadge: hardwareState === "fault" ? "硬件未连接" : "未连接 · 待机",
+      label: withHwSuffix("MOSS 内置语音未启动"),
     };
   }
+
+  const connected = Boolean(mcpStatus?.connected);
   const lastReq = sanitizeTwinLine(mcpStatus?.last_request, 72);
-  if (lastReq.startsWith("tools/call:")) {
+  if (connected && lastReq.startsWith("tools/call:")) {
     return {
       visualState: "pulse",
+      hardwareState,
+      jobProgress,
       level: 0,
-      label: `小智最近调用：${sanitizeIdentifier(lastReq.slice("tools/call:".length), 48)}`,
+      shortBadge: activeJobCount > 0 ? `指令脉冲 · ${engravingBadge}` : "指令脉冲执行",
+      label: withHwSuffix(`小智最近调用：${sanitizeIdentifier(lastReq.slice("tools/call:".length), 48)}`),
+    };
+  }
+  if (activeJobCount > 0) {
+    return {
+      visualState: "engraving",
+      hardwareState,
+      jobProgress,
+      level: jobProgress !== null ? Math.max(25, jobProgress) : 60,
+      shortBadge: engravingBadge,
+      label: `${hwLabel} · ${connected ? "小智 MCP 已连接" : "小智 MCP 未连接"}`,
+    };
+  }
+  if (!connected) {
+    if (hardwareState === "online") {
+      return {
+        visualState: "idle",
+        hardwareState,
+        jobProgress,
+        level: 0,
+        shortBadge: "硬件已连接",
+        label: `激光硬件已就绪 · ${mode === "self_hosted" ? "自建 MCP 桥未连接" : "小智 MCP 桥未连接"}`,
+      };
+    }
+    return {
+      visualState: "offline",
+      hardwareState,
+      jobProgress,
+      level: 0,
+      shortBadge: hardwareState === "fault" ? "硬件未连接" : "未连接 · 待机",
+      label: withHwSuffix(mode === "self_hosted" ? "自建 MCP 桥未连接" : "小智 MCP 桥未连接"),
     };
   }
   return {
     visualState: "idle",
+    hardwareState,
+    jobProgress,
     level: 0,
-    label: mode === "self_hosted" ? "自建 MCP 桥已连接" : "官方小智 MCP 桥已连接",
+    shortBadge: hardwareState === "online" ? "硬件·小智已连" : "小智已连接",
+    label: withHwSuffix(mode === "self_hosted" ? "自建 MCP 桥已连接" : "官方小智 MCP 桥已连接"),
   };
 }

@@ -42,6 +42,7 @@ try {
     voice_vision_status: { enabled: false, settings: {} },
     voice_plugins_status: { settings: { news_sources: [], rag_dataset_ids: [] }, keys: {} },
     voice_memory_list: [],
+    voice_context_manage: { roots: [], rows: [], retrieval: false, extraction: false, devices: [] },
   };
   const scenarios = [
     {name: "open-from-sidebar", navigateFromHome: true, overrides: {}},

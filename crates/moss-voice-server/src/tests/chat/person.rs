@@ -190,7 +190,7 @@ fn personal_context_bridges_vision_photos_per_speaker_and_runs_nv19_extraction_o
             let dev = TrustedScope::device_grant(&context.device_id, 1).ok()?;
             let p = person.and_then(|s| TrustedScope::calibrated_person(s).ok());
             Some((
-                AccessContext::voice(dev, p, None).ok()?,
+                AccessContext::voice(dev, p, None).ok()?.with_personal_mode(true),
                 Applicability::new("MOSS-550W", Some("1.2.0")).ok(),
             ))
         }
@@ -315,4 +315,138 @@ fn personal_context_bridges_vision_photos_per_speaker_and_runs_nv19_extraction_o
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+fn short_and_overlong_utterances_fail_closed_without_leaking_or_wiping_verified_speaker_history() {
+    // 第 1 轮（a，2.1s）与第 3 轮（陌生人 None，2.1s）及第 5 轮（a，2.1s）进入声纹提取器；
+    // 第 2 轮（1s < 2s）与第 4 轮（10.5s > 10s）均未经过本轮声纹核验，严禁读取或污染说话人 a 的私密历史与摘要；
+    // 第 5 轮说话人 a 重新说满 >=2s 完成验声后，PersonContext 中保留的第 1 轮历史与摘要仍完整恢复。
+    let resolver = Resolver::new(&[Some("a"), None, Some("a")]);
+    let personal = PersonContext::new(resolver.clone(), Store::seeded());
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            say(&["请问厚度是多少？"]),
+            say(&["当前未识别说话人身份，请补充完整需求。"]),
+            say(&["我不清楚之前的对话。"]),
+            say(&["超长语句未识别身份。"]),
+            say(&["好的，按五毫米继续刚才的椴木板任务。"]),
+        ])),
+        repeat: None,
+        seen: Mutex::default(),
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("帮我切割一块椴木板".into()),
+            Ok("刚才说的厚度是多少".into()),
+            Ok("继续刚才的任务".into()),
+            Ok("这是一段超过十秒的陌生人长句测试".into()),
+            Ok("厚度按五毫米来".into()),
+        ])),
+        heard: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    )
+    .with_personal_context(personal);
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    // 第 1 轮：Alice 说满 >=2s（2100ms），声纹识别为 a
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+    // 第 2 轮：未达验声下限的 1s 短问句（<2s），不验证身份，绝不能泄露说话人 a 的历史或摘要
+    speak_manual(&mut device, 1, 1000);
+    let _ = collect_items(&mut device);
+    // 第 3 轮：陌生人说满 >=2s（2100ms），声纹识别返回 None，绝不能看到说话人 a 的历史或摘要
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+    // 第 4 轮：陌生人说超过 10s 的超长句（10500ms > 10s），按 Denied 拒绝，绝不能继承说话人 a
+    speak_manual(&mut device, 1, 10500);
+    let _ = collect_items(&mut device);
+    // 第 5 轮：Alice 再次说满 >=2s（2100ms）通过验声，第 1 轮持久个人历史与摘要完好无损且不含中间未知轮次
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 3, "<2s 与 >10s 语句不应调用声纹提取器");
+    let seen = llm.seen.lock().unwrap();
+    assert_eq!(seen.len(), 5);
+    let flatten = |idx: usize| -> String {
+        seen[idx]
+            .0
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for unverified_turn in [1, 2, 3] {
+        let prompt = flatten(unverified_turn);
+        assert!(
+            !prompt.contains("甲喜欢茶")
+                && !prompt.contains("帮我切割一块椴木板")
+                && !prompt.contains("请问厚度是多少"),
+            "第 {} 轮未验声说话人严禁看到说话人 a 的任何个人历史或摘要，实际：\n{prompt}",
+            unverified_turn + 1
+        );
+    }
+    let alice_resumed = flatten(4);
+    assert!(
+        alice_resumed.contains("甲喜欢茶")
+            && alice_resumed.contains("帮我切割一块椴木板")
+            && alice_resumed.contains("请问厚度是多少")
+            && !alice_resumed.contains("刚才说的厚度是多少")
+            && !alice_resumed.contains("超过十秒的陌生人"),
+        "第 5 轮说话人 a 重新验声后应完整恢复本人历史且未混入未知轮次，实际：\n{alice_resumed}"
+    );
+}
+#[tokio::test]
+async fn speech_cache_deduplicates_and_caps_at_thirty_two_entries_preserving_fixed_phrases() {
+    let tts = Arc::new(FakeTts::default());
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        tts.clone(),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    );
+    let fixed: Vec<String> = conversation
+        .fixed_phrases()
+        .into_iter()
+        .filter(|p| !p.contains("失败"))
+        .collect();
+    assert!(!fixed.is_empty() && fixed.len() < 32);
+    assert_eq!(conversation.prewarm_cache().await, fixed.len());
+    let calls_after_prewarm = tts.said.lock().unwrap().len();
+
+    // 重复合成同一句动态话术只调用一次底层 TTS，且超过 32 条后淘汰最早的动态条目并保留固定话术
+    for i in 0..40 {
+        let phrase = format!("动态播报第{i}条");
+        conversation.prewarm_or_speak_for_test(&phrase).await;
+        conversation.prewarm_or_speak_for_test(&phrase).await;
+    }
+    assert_eq!(tts.said.lock().unwrap().len(), calls_after_prewarm + 40);
+    assert_eq!(conversation.speech_cache_len_for_test(), 32);
+
+    // 预合成成功的固定话术仍在缓存中（不会再次触发底层 TTS）
+    let before_fixed_check = tts.said.lock().unwrap().len();
+    for phrase in &fixed {
+        conversation.prewarm_or_speak_for_test(phrase).await;
+    }
+    assert_eq!(tts.said.lock().unwrap().len(), before_fixed_check);
 }

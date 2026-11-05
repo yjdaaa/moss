@@ -257,10 +257,43 @@ mod imp {
         }
         let mut text = lines.join("\n");
         text.push('\n');
-        let temp = path.with_file_name(".env.tmp");
+        let temp = path.with_file_name(format!(".env.tmp-{}", std::process::id()));
         std::fs::write(&temp, text)?;
-        std::fs::rename(&temp, path)?;
+        if let Err(err) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(err);
+        }
         Ok(path.to_path_buf())
+    }
+
+    /// 若启动工作目录或其祖先目录中的首个 `.env` 已显式定义该开关（`dotenvy` 启动时会读取），
+    /// 同步更新对应行，避免下次启动被旧工作目录 `.env` 反向覆盖；不存在或未定义时不改动。
+    pub fn sync_existing_startup_env_flag(
+        start_dir: &std::path::Path,
+        runtime_env: &std::path::Path,
+        key: &str,
+        value: &str,
+    ) {
+        let prefix = format!("{key}=");
+        let runtime_canon = std::fs::canonicalize(runtime_env).ok();
+        for ancestor in start_dir.ancestors() {
+            let candidate = ancestor.join(".env");
+            if !candidate.is_file() {
+                continue;
+            }
+            let same = runtime_canon
+                .as_ref()
+                .zip(std::fs::canonicalize(&candidate).ok())
+                .is_some_and(|(a, b)| a == &b)
+                || candidate == runtime_env;
+            if !same
+                && let Ok(existing) = std::fs::read_to_string(&candidate)
+                && existing.lines().any(|line| line.trim_start().starts_with(&prefix))
+            {
+                let _ = write_env_flag(&candidate, key, value);
+            }
+            break;
+        }
     }
 
     fn center(app: &tauri::AppHandle) -> Result<Arc<VoiceCenter>, Value> {
@@ -488,18 +521,31 @@ pub async fn voice_strict_set(
         if !enabled && locked {
             return Err(error_value("strict_mode_locked", "自建链路必须开启严格模式，不能在语音中心关闭"));
         }
+        let flag = if enabled { "true" } else { "false" };
         let env_file = host.runtime_root.path.join(".env");
-        imp::write_env_flag(&env_file, "MOSS_FUSION_STRICT", if enabled { "true" } else { "false" })
+        imp::write_env_flag(&env_file, "MOSS_FUSION_STRICT", flag)
             .map_err(|error| error_value("strict_write_failed", &format!("写入 .env 失败：{error}")))?;
+        if let Ok(cwd) = std::env::current_dir() {
+            imp::sync_existing_startup_env_flag(&cwd, &env_file, "MOSS_FUSION_STRICT", flag);
+        }
         host.set_strict_from_env(enabled);
         host.api_service.set_strict_mode(enabled);
+        let (stopped_cleanly, expected_bridges, spawned_bridges) = host.restart_mcp_bridge_checked();
+        let bridge_ok = stopped_cleanly && spawned_bridges == expected_bridges;
         let active = host.api_service.strict_mode();
-        return Ok(serde_json::json!({
+        let mut payload = serde_json::json!({
             "enabled": enabled,
-            "applied": active == enabled,
-            "needs_restart": active != enabled,
+            "applied": active == enabled && bridge_ok,
+            "needs_restart": active != enabled || !bridge_ok,
+            "bridge_restarted": bridge_ok,
             "env_file": env_file.display().to_string(),
-        }));
+        });
+        if !bridge_ok {
+            payload["bridge_error"] = serde_json::Value::String(
+                "小智 MCP 桥未能立即完成重连，建议重启 MOSS 确保工具列表与严格模式完全同步".into(),
+            );
+        }
+        return Ok(payload);
     }
     #[cfg(mobile)]
     {
@@ -556,6 +602,31 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("MOSS_GATEWAY_ENABLED=false"), "缺失的键要追加");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_existing_startup_env_updates_only_when_key_already_present() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("sub").join("nested");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let runtime_env = root.path().join("runtime").join(".env");
+        std::fs::create_dir_all(runtime_env.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_env, "MOSS_FUSION_STRICT=false\n").unwrap();
+
+        let startup_env = root.path().join(".env");
+        std::fs::write(&startup_env, "MOSS_PORT=8080\n").unwrap();
+        super::imp::sync_existing_startup_env_flag(&cwd, &runtime_env, "MOSS_FUSION_STRICT", "false");
+        assert_eq!(
+            std::fs::read_to_string(&startup_env).unwrap(),
+            "MOSS_PORT=8080\n",
+            "未定义 MOSS_FUSION_STRICT 的工作目录 .env 不应被追加"
+        );
+
+        std::fs::write(&startup_env, "MOSS_PORT=8080\nMOSS_FUSION_STRICT=true\n").unwrap();
+        super::imp::sync_existing_startup_env_flag(&cwd, &runtime_env, "MOSS_FUSION_STRICT", "false");
+        let updated = std::fs::read_to_string(&startup_env).unwrap();
+        assert!(updated.contains("MOSS_FUSION_STRICT=false"));
+        assert!(updated.contains("MOSS_PORT=8080"));
     }
 
     #[test]

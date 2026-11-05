@@ -22,7 +22,27 @@ use laser_runtime::{LaserSettings, RuntimeDb, RuntimeRoot};
 /// 附加接入点数量上限（语音中心据此限制输入，NV8）。
 pub use laser_mcp::MAX_EXTRA_ENDPOINTS;
 
-pub type RawAbortCallback = Box<dyn Fn() -> Result<(), String> + Send + Sync + 'static>;
+pub type RawAbortCallback = Arc<dyn Fn() -> Result<(), String> + Send + Sync + 'static>;
+
+std::thread_local! {
+    static IN_RAW_ABORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct RawAbortReentrancyGuard;
+impl Drop for RawAbortReentrancyGuard {
+    fn drop(&mut self) {
+        IN_RAW_ABORT.with(|flag| flag.set(false));
+    }
+}
+
+fn enter_raw_abort() -> Option<RawAbortReentrancyGuard> {
+    let already = IN_RAW_ABORT.with(|flag| flag.replace(true));
+    if already {
+        None
+    } else {
+        Some(RawAbortReentrancyGuard)
+    }
+}
 
 #[derive(Default)]
 pub struct ShutdownCoordinator {
@@ -40,12 +60,18 @@ impl ShutdownCoordinator {
     where
         F: Fn() -> Result<(), String> + Send + Sync + 'static,
     {
-        let mut handles = self.raw_handles.lock().unwrap();
-        handles.push(Box::new(handle));
+        let mut handles = self
+            .raw_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        handles.push(Arc::new(handle));
     }
 
     pub fn register_db(&self, db: Arc<Mutex<RuntimeDb>>) {
-        let mut target = self.db.lock().unwrap();
+        let mut target = self
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *target = Some(db);
     }
 
@@ -53,8 +79,48 @@ impl ShutdownCoordinator {
         self.requested.load(Ordering::SeqCst)
     }
 
+    fn snapshot_raw_handles(&self) -> Vec<RawAbortCallback> {
+        self.raw_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn invoke_handles(handles: &[RawAbortCallback]) {
+        for handle in handles {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (handle)()));
+        }
+    }
+
+    /// Panic Hook 专用紧急停机：先克隆并释放 `raw_handles` 锁，再遍历裸句柄刷出 `0x18`，
+    /// 且**不置位** `self.requested`，既杜绝持锁回调 panic 重入自锁，又保证后续正常退出仍有效。
+    pub fn trigger_panic_abort(&self) {
+        let Some(_guard) = enter_raw_abort() else {
+            return;
+        };
+        let handles = self.snapshot_raw_handles();
+        Self::invoke_handles(&handles);
+    }
+
+    /// 非阻塞停机：先 `try_lock` 快照句柄并立即释放锁，再在锁外刷出 `0x18`，不阻塞等待 SQLite 锁。
+    pub fn trigger_shutdown_from_signal(&self) -> bool {
+        if self.requested.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let Some(_guard) = enter_raw_abort() else {
+            return true;
+        };
+        let handles = match self.raw_handles.try_lock() {
+            Ok(guard) => guard.clone(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
+            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+        };
+        Self::invoke_handles(&handles);
+        true
+    }
+
     /// 核心退出激光安全兜底（规格 §16 & §22）:
-    /// 1. 触发后第一步脱离 Tokio 运行时，向每个打开连接通过同步裸句柄直接写出 0x18；
+    /// 1. 触发后第一步快照并释放 `raw_handles` 锁，向每个打开连接通过同步裸句柄写出 0x18；
     /// 2. 进行中任务标为 failed，注明 "host 退出中断"；
     /// 3. 幂等性保证：仅首个请求执行，后续调用直接返回 false。
     pub fn trigger_shutdown(&self) -> bool {
@@ -64,11 +130,10 @@ impl ShutdownCoordinator {
 
         let start = Instant::now();
 
-        // 步骤 1: 遍历所有活动设备连接，同步裸写 0x18
-        if let Ok(handles) = self.raw_handles.lock() {
-            for handle in handles.iter() {
-                let _ = handle();
-            }
+        // 步骤 1: 快照后释放注册表锁，在锁外执行 0x18 回调（即使回调触发全局 panic hook 也不自锁）
+        if let Some(_guard) = enter_raw_abort() {
+            let handles = self.snapshot_raw_handles();
+            Self::invoke_handles(&handles);
         }
 
         // 步骤 2: 任务安全清零落库
@@ -87,12 +152,17 @@ impl ShutdownCoordinator {
                          WHERE status IN ('sending', 'processing')",
                         [],
                     );
+                    let _ = db.connection.execute(
+                        "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
+                         payload=json_set(payload,'$.detail','host 退出中断，任务安全终止')
+                         WHERE status IN ('sending', 'processing')",
+                        [],
+                    );
                 }
             }
         }
 
         let elapsed = start.elapsed();
-        // 确保在 2s 超时约束内完成
         if elapsed > Duration::from_secs(2) {
             eprintln!("警告: 退出激光安全停机超时 (耗时 {:?})", elapsed);
         }
@@ -102,68 +172,145 @@ impl ShutdownCoordinator {
 }
 
 static GLOBAL_COORDINATOR: OnceLock<ShutdownCoordinator> = OnceLock::new();
+static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
+static CTRL_HANDLER_INSTALLED: OnceLock<()> = OnceLock::new();
 
 pub fn global_shutdown_coordinator() -> &'static ShutdownCoordinator {
     GLOBAL_COORDINATOR.get_or_init(ShutdownCoordinator::new)
 }
 
-/// 路径 5 兜底: 注册异常 Panic Hook，在崩溃第一现场通过裸句柄同步刷出 0x18
+/// 路径 5 兜底: 注册异常 Panic Hook（幂等单次安装），在崩溃第一现场通过裸句柄同步刷出 0x18，
+/// 且不置位 `requested`，避免被捕获的后台任务 panic 让后续真正的退出停机失效。
 pub fn install_panic_hook() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // 第一时间脱离调度写入 0x18
-        global_shutdown_coordinator().trigger_shutdown();
-        default_hook(info);
-    }));
+    PANIC_HOOK_INSTALLED.get_or_init(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // 第一时间脱离调度写入 0x18
+            global_shutdown_coordinator().trigger_panic_abort();
+            default_hook(info);
+        }));
+    });
 }
 
 /// 路径 4 兜底: 注册 Windows 控制台关闭事件 (SetConsoleCtrlHandler)
 #[cfg(windows)]
 pub fn install_console_ctrl_handler() {
-    unsafe extern "system" fn console_handler(_ctrl_type: u32) -> i32 {
-        global_shutdown_coordinator().trigger_shutdown();
-        0 // 传递给后续处理或允许正常终止
-    }
+    CTRL_HANDLER_INSTALLED.get_or_init(|| {
+        unsafe extern "system" fn console_handler(_ctrl_type: u32) -> i32 {
+            global_shutdown_coordinator().trigger_shutdown();
+            0 // 传递给后续处理或允许正常终止
+        }
 
-    unsafe extern "system" {
-        fn SetConsoleCtrlHandler(
-            handler: Option<unsafe extern "system" fn(ctrl_type: u32) -> i32>,
-            add: i32,
-        ) -> i32;
-    }
+        unsafe extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(ctrl_type: u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
 
-    unsafe {
-        SetConsoleCtrlHandler(Some(console_handler), 1);
-    }
+        unsafe {
+            SetConsoleCtrlHandler(Some(console_handler), 1);
+        }
+    });
 }
 
 /// 路径 3 兜底: Unix 平台 SIGHUP / SIGINT / SIGTERM 触发退出激光安全停机（规格 §16）
 #[cfg(not(windows))]
 pub fn install_console_ctrl_handler() {
-    unsafe extern "C" {
-        fn signal(signum: i32, handler: usize) -> usize;
-        fn raise(signum: i32) -> i32;
-    }
-    const SIGHUP: i32 = 1;
-    const SIGINT: i32 = 2;
-    const SIGTERM: i32 = 15;
-    const SIG_DFL: usize = 0;
+    CTRL_HANDLER_INSTALLED.get_or_init(|| {
+        use std::sync::atomic::AtomicI32;
+        static SIGNAL_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 
-    unsafe extern "C" fn signal_handler(signum: i32) {
-        // 与 Windows 控制台回调一致：先经协调器同步裸写 0x18 并清零任务，
-        // 再恢复默认处置并重新抛出信号，保留常规的信号退出码。
-        global_shutdown_coordinator().trigger_shutdown();
+        unsafe extern "C" {
+            fn pipe(fds: *mut i32) -> i32;
+            fn close(fd: i32) -> i32;
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+            fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+            fn signal(signum: i32, handler: usize) -> usize;
+            fn raise(signum: i32) -> i32;
+        }
+        const SIGHUP: i32 = 1;
+        const SIGINT: i32 = 2;
+        const SIGTERM: i32 = 15;
+        const SIG_DFL: usize = 0;
+        const F_GETFL: i32 = 3;
+        const F_SETFL: i32 = 4;
+        const F_SETFD: i32 = 2;
+        const FD_CLOEXEC: i32 = 1;
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        const O_NONBLOCK: i32 = 0x0004;
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        const O_NONBLOCK: i32 = 0x0800;
+
+        // 信号处理器内仅调用异步信号安全的 write() 写入 1 字节信号编号，
+        // 由预先启动的普通后台线程完成完整停机（刷出 0x18 + 落库 + 重新传递信号）。
+        unsafe extern "C" fn signal_handler(signum: i32) {
+            let fd = SIGNAL_PIPE_WR.load(Ordering::Relaxed);
+            if fd >= 0 {
+                let byte = signum as u8;
+                unsafe {
+                    let _ = write(fd, &byte as *const u8, 1);
+                }
+            }
+        }
+
+        let mut fds = [-1i32; 2];
+        if unsafe { pipe(fds.as_mut_ptr()) } != 0 {
+            return;
+        }
+        let (rd, wr) = (fds[0], fds[1]);
+        let nonblock_ok = unsafe {
+            let _ = fcntl(rd, F_SETFD, FD_CLOEXEC);
+            let _ = fcntl(wr, F_SETFD, FD_CLOEXEC);
+            let flags = fcntl(wr, F_GETFL);
+            flags >= 0 && fcntl(wr, F_SETFL, flags | O_NONBLOCK) == 0
+        };
+        if !nonblock_ok {
+            unsafe {
+                let _ = close(rd);
+                let _ = close(wr);
+            }
+            return;
+        }
+        SIGNAL_PIPE_WR.store(wr, Ordering::Release);
+        let spawned = std::thread::Builder::new()
+            .name("moss-unix-signal-shutdown".into())
+            .spawn(move || {
+                let mut byte = 0u8;
+                loop {
+                    let n = unsafe { read(rd, &mut byte as *mut u8, 1) };
+                    if n == 1 {
+                        let signum = i32::from(byte);
+                        global_shutdown_coordinator().trigger_shutdown();
+                        unsafe {
+                            signal(signum, SIG_DFL);
+                            raise(signum);
+                        }
+                        break;
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                unsafe {
+                    let _ = close(rd);
+                }
+            });
+        if spawned.is_err() {
+            SIGNAL_PIPE_WR.store(-1, Ordering::Release);
+            unsafe {
+                let _ = close(rd);
+                let _ = close(wr);
+            }
+            return;
+        }
         unsafe {
-            signal(signum, SIG_DFL);
-            raise(signum);
+            for signum in [SIGHUP, SIGINT, SIGTERM] {
+                signal(signum, signal_handler as unsafe extern "C" fn(i32) as usize);
+            }
         }
-    }
-
-    unsafe {
-        for signum in [SIGHUP, SIGINT, SIGTERM] {
-            signal(signum, signal_handler as unsafe extern "C" fn(i32) as usize);
-        }
-    }
+    });
 }
 
 /// 进程内后端：MCP 工具调用直接走 ApiService 的 HTTP 处理器（回环语义，免认证），
@@ -314,16 +461,58 @@ pub fn voice_recent_workflows(
     if !api.voice_session_allowed(device_id, session_id) || api.tool_disabled("laser_workflow_tool") {
         return None;
     }
-    let caller = laser_contracts::CallerContext::Voice {
+    let make_caller = || laser_contracts::CallerContext::Voice {
         device_id: device_id.into(),
         session_id: session_id.into(),
     };
     let body = serde_json::json!({"action": "recent"});
-    let (status, response) = in_process_request(api, "POST", "/api/workflow", &body, caller).ok()?;
+    let (status, response) = in_process_request(api, "POST", "/api/workflow", &body, make_caller()).ok()?;
     if status >= 400 {
         return None;
     }
-    response.get("result").cloned()
+    let mut result = response.get("result").cloned()?;
+    let has_sending = result["workflows"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|w| w["status"].as_str() == Some("sending")));
+    if has_sending
+        && let Ok((200, targets_res)) = in_process_request(
+            api,
+            "GET",
+            "/api/jobs/stop-targets",
+            &serde_json::Value::Null,
+            make_caller(),
+        )
+        && let Some(jobs) = targets_res["result"]["jobs"].as_array()
+        && let Some(items) = result["workflows"].as_array_mut()
+    {
+        for item in items.iter_mut() {
+            if item["status"].as_str() != Some("sending") {
+                continue;
+            }
+            let Some(wf_id) = item["workflow_id"].as_str().filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if let Some(live) = jobs.iter().find(|j| {
+                j["workflow_id"].as_str() == Some(wf_id) && j["state"].as_str() == Some("running")
+            }) && let Some(obj) = item.as_object_mut()
+            {
+                obj.insert(
+                    "live_progress".into(),
+                    serde_json::json!({
+                        "lines_sent": live["lines_sent"].as_u64().unwrap_or(0),
+                        "total_lines": live["total_lines"].as_u64().unwrap_or(0),
+                        "elapsed_ms": live["elapsed_ms"].as_u64().unwrap_or(0),
+                    }),
+                );
+            }
+        }
+    }
+    if let Some(pending) = api.pending_approval_display_summary()
+        && let Some(root) = result.as_object_mut()
+    {
+        root.insert("pending_approval".into(), pending);
+    }
+    Some(result)
 }
 
 pub struct HostApplication {
@@ -548,7 +737,7 @@ impl HostApplication {
                     runtime_root.generated_assets.clone(),
                 ])
                 .with_runtime_db(db_arc.clone())
-                .with_auth(Arc::new(laser_api::AuthManager::new()))
+                .with_auth(Arc::new(laser_api::AuthManager::with_runtime_path(runtime_root.path.clone())))
                 .with_allowed_origins(allowed_origins)
                 .with_strict_mode(strict_mode),
         );
@@ -600,6 +789,20 @@ impl HostApplication {
             eprintln!("提示：旧的小智桥 5 秒内未退出，将在其下次检查时停止");
         }
         self.spawn_mcp_bridge() > 0
+    }
+
+    /// 重启小智 MCP 桥并返回 `(旧桥已在时限内退出, 应启动的活跃接入点数, 实际成功启动的桥线程数)`。
+    pub fn restart_mcp_bridge_checked(&self) -> (bool, usize, usize) {
+        let stopped_cleanly = self.stop_mcp_bridge(Duration::from_secs(5));
+        if !stopped_cleanly {
+            eprintln!("提示：旧的小智桥 5 秒内未退出，将在其下次检查时停止");
+        }
+        let expected = configured_mcp_endpoints(&self.runtime_root.path)
+            .into_iter()
+            .filter(|(_, _, active)| *active)
+            .count();
+        let spawned = self.spawn_mcp_bridge();
+        (stopped_cleanly, expected, spawned)
     }
 
     /// 小智 MCP 桥接：把各接入点（wss://）上的 JSON-RPC 工具调用转发到进程内 ApiService，每个接入点一条线程。
@@ -966,5 +1169,131 @@ mod tests {
         assert!(coordinator.trigger_shutdown());
         assert!(coordinator.is_shutdown_requested());
         assert!(!coordinator.trigger_shutdown());
+    }
+
+    #[test]
+    fn panic_abort_sends_0x18_without_disarming_subsequent_shutdown_and_cleans_calibrations() {
+        use laser_device::{DeviceTransport, FakeGrbl};
+
+        let fake = FakeGrbl::new(["$32=1".to_string()]);
+        let abort_handle = fake.raw_abort_handle().expect("raw handle must exist");
+
+        let coordinator = ShutdownCoordinator::new();
+        coordinator.register_raw_abort(abort_handle);
+
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        {
+            let guard = db.lock().unwrap();
+            guard
+                .connection
+                .execute(
+                    "INSERT INTO jobs(job_id, status, created_at, payload) VALUES
+                     ('job_1', 'running', unixepoch(), '{}')",
+                    [],
+                )
+                .unwrap();
+            guard
+                .connection
+                .execute(
+                    "INSERT INTO workflows(workflow_id, status, created_at, updated_at, payload) VALUES
+                     ('wf_1', 'sending', unixepoch(), unixepoch(), '{}')",
+                    [],
+                )
+                .unwrap();
+            guard
+                .connection
+                .execute(
+                    "INSERT INTO calibrations(calibration_id, status, created_at, updated_at, payload) VALUES
+                     ('cal_1', 'processing', unixepoch(), unixepoch(), '{}')",
+                    [],
+                )
+                .unwrap();
+        }
+        coordinator.register_db(db.clone());
+
+        // Simulate a caught background worker panic: must send 0x18 immediately without flipping `requested`
+        coordinator.trigger_panic_abort();
+        assert_eq!(fake.realtime(), vec![0x18]);
+        assert!(
+            !coordinator.is_shutdown_requested(),
+            "caught panic must not permanently disarm future real shutdown"
+        );
+
+        // Subsequent real shutdown still runs, sends 0x18 again, and fails jobs/workflows/calibrations
+        assert!(coordinator.trigger_shutdown());
+        assert!(coordinator.is_shutdown_requested());
+        assert_eq!(fake.realtime(), vec![0x18, 0x18]);
+        assert!(!coordinator.trigger_shutdown());
+
+        let guard = db.lock().unwrap();
+        for (table, pk_col, id, path) in [
+            ("jobs", "job_id", "job_1", "$.result.detail"),
+            ("workflows", "workflow_id", "wf_1", "$.detail"),
+            ("calibrations", "calibration_id", "cal_1", "$.detail"),
+        ] {
+            let (status, detail): (String, String) = guard
+                .connection
+                .query_row(
+                    &format!(
+                        "SELECT status, json_extract(payload, '{path}') FROM {table} WHERE {pk_col}=?1"
+                    ),
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "failed", "{table} must be marked failed on shutdown");
+            assert_eq!(detail, "host 退出中断，任务安全终止");
+        }
+    }
+
+    #[test]
+    fn signal_shutdown_is_non_blocking_when_db_lock_is_already_held() {
+        use laser_device::{DeviceTransport, FakeGrbl};
+
+        let fake = FakeGrbl::new(["$32=1".to_string()]);
+        let abort_handle = fake.raw_abort_handle().expect("raw handle must exist");
+
+        let coordinator = ShutdownCoordinator::new();
+        coordinator.register_raw_abort(abort_handle);
+
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        coordinator.register_db(db.clone());
+
+        // Simulate an async signal arriving while the interrupted thread already holds `db` lock
+        let _held_db_guard = db.lock().unwrap();
+        assert!(coordinator.trigger_shutdown_from_signal());
+        assert!(coordinator.is_shutdown_requested());
+        assert_eq!(fake.realtime(), vec![0x18]);
+        assert!(!coordinator.trigger_shutdown_from_signal());
+    }
+
+    #[test]
+    fn panicking_raw_abort_callback_never_self_deadlocks_and_runs_remaining_handles() {
+        use laser_device::{DeviceTransport, FakeGrbl};
+
+        let fake = FakeGrbl::new(["$32=1".to_string()]);
+        let abort_handle = fake.raw_abort_handle().expect("raw handle must exist");
+
+        let coordinator = Arc::new(ShutdownCoordinator::new());
+        let coord_in_panic = coordinator.clone();
+        // 模拟安装了全局 panic hook：回调自身发生 panic 时在栈展开前重入 trigger_panic_abort()
+        coordinator.register_raw_abort(move || {
+            coord_in_panic.trigger_panic_abort();
+            panic!("simulated raw abort panic");
+        });
+        coordinator.register_raw_abort(abort_handle);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let coord_runner = coordinator.clone();
+        std::thread::spawn(move || {
+            let ok = coord_runner.trigger_shutdown();
+            let _ = tx.send(ok);
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("trigger_shutdown must not self-deadlock on raw_handles mutex"),
+            true
+        );
+        assert_eq!(fake.realtime(), vec![0x18]);
     }
 }

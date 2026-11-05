@@ -13,9 +13,8 @@ use std::time::Duration;
 use crate::conversation::{ToolContext, ToolExecutor};
 
 
-/// 默认轮询间隔（`ServerConfig::job_poll_interval` 的默认值）。
-pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-
+/// 默认轮询间隔（4 秒：严格小于官方固件 `PREVIEW_IMAGE_DURATION_MS = 5000`，确保加工副屏 HUD 常驻不断帧）。
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(4);
 /// 最多记住多少条任务状态；超过就整表重来（重新记基线，绝不会因此多播一次）。
 const MAX_TRACKED: usize = 32;
 /// 一个刚刚结束的加工任务。
@@ -47,8 +46,173 @@ impl FinishedJob {
         }
     }
 }
+/// 当前正在发送中的实时加工进度快照（用于驱动小智彩屏太空舱副屏 HUD / OLED 进度卡）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveJobProgress {
+    pub workflow_id: String,
+    pub percent: u8,
+    pub lines_sent: u64,
+    pub total_lines: u64,
+    pub power: Option<i64>,
+    pub feed_rate: Option<i64>,
+    pub eta_seconds: Option<u64>,
+}
 
-/// 每个会话一份：记住上一次看到的任务状态，用来发现“发送中 → 终态”的转变。
+impl ActiveJobProgress {
+    pub fn to_hud_spec(&self) -> crate::preview_push::JobHudSpec {
+        crate::preview_push::JobHudSpec {
+            percent: self.percent,
+            lines_sent: self.lines_sent,
+            total_lines: self.total_lines,
+            power: self.power,
+            feed_rate: self.feed_rate,
+            eta_seconds: self.eta_seconds,
+        }
+    }
+
+    pub fn subtitle(&self) -> String {
+        let mut parts = vec![format!("{}%", self.percent)];
+        if self.total_lines > 0 {
+            parts.push(format!("{}/{}行", self.lines_sent, self.total_lines));
+        }
+        if let Some(eta) = self.eta_seconds {
+            if eta >= 60 {
+                parts.push(format!("剩余{}分{}秒", eta / 60, eta % 60));
+            } else {
+                parts.push(format!("剩余{eta}秒"));
+            }
+        }
+        let mut pf = Vec::new();
+        if let Some(p) = self.power {
+            pf.push(format!("S{p}"));
+        }
+        if let Some(f) = self.feed_rate {
+            pf.push(format!("F{f}"));
+        }
+        if !pf.is_empty() {
+            parts.push(pf.join(" "));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// 当前待用户在电脑桌面确认的只读审批提示（无敏字段，供小智屏幕显示「待电脑审批警戒卡」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApprovalNotice {
+    pub kind_ascii: String,
+    pub summary: String,
+    pub remaining_secs: u64,
+    pub total_secs: u64,
+}
+
+impl PendingApprovalNotice {
+    pub fn to_card_spec(&self) -> crate::preview_push::ApprovalCardSpec {
+        crate::preview_push::ApprovalCardSpec {
+            kind_ascii: self.kind_ascii.clone(),
+            remaining_secs: self.remaining_secs,
+            total_secs: self.total_secs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PollFullSnapshot {
+    pub active_job: Option<ActiveJobProgress>,
+    pub pending_approval: Option<PendingApprovalNotice>,
+    pub finished: Vec<FinishedJob>,
+}
+
+fn extract_pending_approval(body: &serde_json::Value) -> Option<PendingApprovalNotice> {
+    let p = body.get("pending_approval")?.as_object()?;
+    let rem = p.get("remaining_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    if rem == 0 {
+        return None;
+    }
+    let total = p.get("total_secs").and_then(|v| v.as_u64()).unwrap_or(120).max(rem);
+    let kind_raw = p.get("kind").and_then(|v| v.as_str()).unwrap_or("laser");
+    let kind_ascii = match kind_raw {
+        "home_control" => "HOME CONTROL",
+        "agent_run" => "LOCAL AGENT",
+        "external_tool" => "MCP TOOL",
+        "calibration" => "CALIBRATION",
+        _ => "LASER ACTION",
+    }
+    .to_owned();
+    let summary = p
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(|s| s.replace(['\r', '\n'], " ").trim().chars().take(72).collect::<String>())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "请在电脑 MOSS 点击批准后开始".to_owned());
+    Some(PendingApprovalNotice {
+        kind_ascii,
+        summary,
+        remaining_secs: rem,
+        total_secs: total,
+    })
+}
+
+fn extract_active_progress(item: &serde_json::Value, wf_id: &str) -> ActiveJobProgress {
+    let live = &item["live_progress"];
+    let send = &item["send_result"];
+    let estimate = item
+        .get("estimate")
+        .or_else(|| item.pointer("/artifacts/estimate"))
+        .unwrap_or(item);
+    let snap = item.get("confirmation_snapshot").unwrap_or(item);
+    let input = item.get("input").unwrap_or(item);
+
+    let lines_sent = live["lines_sent"]
+        .as_u64()
+        .or_else(|| send["lines_sent"].as_u64())
+        .unwrap_or(0);
+    let total_lines = live["total_lines"]
+        .as_u64()
+        .or_else(|| send["total_lines"].as_u64())
+        .or_else(|| estimate["line_count"].as_u64())
+        .unwrap_or(0);
+    let percent = if total_lines > 0 {
+        ((lines_sent.saturating_mul(100)) / total_lines).min(100) as u8
+    } else {
+        0
+    };
+    let elapsed_ms = live["elapsed_ms"].as_u64().unwrap_or(0);
+    let eta_seconds = if elapsed_ms >= 500 && lines_sent > 0 && total_lines > lines_sent {
+        let rem_lines = total_lines - lines_sent;
+        let rem_ms = rem_lines.saturating_mul(elapsed_ms) / lines_sent;
+        Some((rem_ms / 1000).max(1))
+    } else if total_lines > lines_sent
+        && let Some(est) = estimate["estimated_seconds"]
+            .as_f64()
+            .or_else(|| item["estimated_seconds"].as_f64())
+            .filter(|v| v.is_finite() && *v >= 1.0)
+    {
+        let ratio = (total_lines - lines_sent) as f64 / total_lines as f64;
+        Some(((est * ratio).round() as u64).max(1))
+    } else {
+        None
+    };
+    let power = snap["power"]
+        .as_i64()
+        .or_else(|| input["power"].as_i64())
+        .or_else(|| item["power"].as_i64());
+    let feed_rate = snap["feed_rate"]
+        .as_i64()
+        .or_else(|| input["feed_rate"].as_i64())
+        .or_else(|| item["feed_rate"].as_i64());
+
+    ActiveJobProgress {
+        workflow_id: wf_id.to_owned(),
+        percent,
+        lines_sent,
+        total_lines,
+        power,
+        feed_rate,
+        eta_seconds,
+    }
+}
+
+/// 每个会话一份：记住上一次看到的任务状态，用来发现“发送中 → 终态”的转变，并提取当前正在发送的实时进度。
 #[derive(Default)]
 pub struct JobWatcher {
     seen: HashMap<String, String>,
@@ -60,26 +224,35 @@ impl JobWatcher {
         Self::default()
     }
 
-    /// 读一次最近的任务，返回这一拍刚结束的任务（第一次调用只记基线，返回空）。
-    /// 宿主没有提供只读通道、或后端出错时静默返回空，不把错误念给用户。
-    pub async fn poll(
+    /// 只读查询最近任务与待电脑审批状态：返回完整快照。
+    pub async fn poll_full(
         &mut self,
         tools: &dyn ToolExecutor,
         context: &ToolContext,
-    ) -> Vec<FinishedJob> {
+    ) -> PollFullSnapshot {
         let Some(body) = tools.recent_workflows(context).await else {
-            return Vec::new();
+            return PollFullSnapshot::default();
         };
+        let pending_approval = extract_pending_approval(&body);
         let Some(items) = body["workflows"].as_array() else {
-            return Vec::new();
+            return PollFullSnapshot {
+                active_job: None,
+                pending_approval,
+                finished: Vec::new(),
+            };
         };
+        let mut active: Option<ActiveJobProgress> = None;
         let mut finished = Vec::new();
         for item in items {
             let Some(id) = item["workflow_id"].as_str().filter(|id| !id.is_empty()) else {
                 continue;
             };
             let status = item["status"].as_str().unwrap_or("");
-            let was_sending = self.baseline && self.seen.get(id).is_some_and(|old| old == "sending");
+            if status == "sending" && active.is_none() {
+                active = Some(extract_active_progress(item, id));
+            }
+            let was_sending =
+                self.baseline && self.seen.get(id).is_some_and(|old| old == "sending");
             if was_sending && status != "sending" {
                 let send = &item["send_result"];
                 finished.push(FinishedJob {
@@ -93,16 +266,43 @@ impl JobWatcher {
         }
         if !self.baseline {
             self.baseline = true;
-            return Vec::new();
+            return PollFullSnapshot {
+                active_job: active,
+                pending_approval,
+                finished: Vec::new(),
+            };
         }
         if self.seen.len() > MAX_TRACKED {
             self.seen.clear();
             self.baseline = false;
         }
-        finished
+        PollFullSnapshot {
+            active_job: active,
+            pending_approval,
+            finished,
+        }
+    }
+
+    /// 只读查询最近任务：返回 `(当前活跃发送中进度, 本拍刚结束的任务列表)`。
+    pub async fn poll_snapshot(
+        &mut self,
+        tools: &dyn ToolExecutor,
+        context: &ToolContext,
+    ) -> (Option<ActiveJobProgress>, Vec<FinishedJob>) {
+        let snap = self.poll_full(tools, context).await;
+        (snap.active_job, snap.finished)
+    }
+
+    /// 读一次最近的任务，返回这一拍刚结束的任务（第一次调用只记基线，返回空）。
+    /// 宿主没有提供只读通道、或后端出错时静默返回空，不把错误念给用户。
+    pub async fn poll(
+        &mut self,
+        tools: &dyn ToolExecutor,
+        context: &ToolContext,
+    ) -> Vec<FinishedJob> {
+        self.poll_full(tools, context).await.finished
     }
 }
-
 /// 同一条任务只让一个在线会话播报：多台设备同时在线时不至于一起说话。
 #[derive(Default)]
 pub struct AnnounceLog {
@@ -259,5 +459,27 @@ mod tests {
         assert!(log.claim("wf-1"));
         assert!(!log.claim("wf-1"), "同一个任务不能两台设备各播一次");
         assert!(log.claim("wf-2"));
+    }
+
+    #[tokio::test]
+    async fn active_sending_job_extracts_live_progress_eta_and_laser_params() {
+        let host = FakeHost::new(json!([{
+            "workflow_id": "wf-live",
+            "status": "sending",
+            "confirmation_snapshot": { "power": 600, "feed_rate": 1200 },
+            "live_progress": { "lines_sent": 250, "total_lines": 1000, "elapsed_ms": 10_000 }
+        }]));
+        let mut watcher = JobWatcher::new();
+        let (active, finished) = watcher.poll_snapshot(&host, &context()).await;
+        assert!(finished.is_empty(), "首拍只记基线，不误报终态");
+        let active = active.expect("sending 状态应立即提取实时进度");
+        assert_eq!(active.workflow_id, "wf-live");
+        assert_eq!(active.percent, 25);
+        assert_eq!(active.lines_sent, 250);
+        assert_eq!(active.total_lines, 1000);
+        assert_eq!(active.power, Some(600));
+        assert_eq!(active.feed_rate, Some(1200));
+        assert_eq!(active.eta_seconds, Some(30));
+        assert!(active.subtitle().contains("25%") && active.subtitle().contains("S600 F1200"));
     }
 }

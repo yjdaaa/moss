@@ -46,6 +46,7 @@ function App() {
   });
   const [mcpStatus, setMcpStatus] = useState(null);
   const [voiceStatus, setVoiceStatus] = useState(null);
+  const [activeJobs, setActiveJobs] = useState([]);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
@@ -164,23 +165,43 @@ function App() {
     };
   }, [triggerCloseHandling, voiceEnabled]);
 
-  // 定期同步小智 MCP 真实运行状态
+  // 定期同步小智 MCP 与语音遥测状态（活跃拾音/思考/播报时自适应加密至 240ms，跨页面实时驱动左上角 MOSS 机械眼）
+  const activeVoicePhase = voiceStatus?.phase === "listening" || voiceStatus?.phase === "thinking" || voiceStatus?.phase === "speaking";
+  const autoUpdateCheckedRef = useRef(false);
   useEffect(() => {
     let cancelled = false;
     async function syncMcp() {
       const res = await getJson("/api/system/info");
       if (!cancelled && res.ok && res.data?.success && res.data?.result?.mcp) {
-        setMcpStatus(res.data.result.mcp);
-        setVoiceStatus(res.data.result.voice ?? null);
+        const result = res.data.result;
+        setMcpStatus(result.mcp);
+        setVoiceStatus(result.voice ?? null);
+        if (!autoUpdateCheckedRef.current) {
+          autoUpdateCheckedRef.current = true;
+          if (result.auto_check_update && !isRemoteMode()) {
+            postJson("/api/system/check-update", {
+              include_prerelease: Boolean(result.check_prerelease),
+            }).then((up) => {
+              if (!cancelled && up.ok && up.data?.success && up.data?.result?.has_update) {
+                const rep = up.data.result;
+                void showAlert(
+                  `检测到 MOSS 新版本 v${rep.latest_version}（当前 v${rep.current_version}）。可在「偏好设置 → 软件更新」中查看更新说明与下载地址。`,
+                  { title: "发现新版本", tone: "info" },
+                );
+              }
+            }).catch(() => {});
+          }
+        }
       }
     }
     syncMcp();
-    const timer = setInterval(syncMcp, 4000);
+    const intervalMs = activeVoicePhase ? 240 : 3000;
+    const timer = setInterval(syncMcp, intervalMs);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [activeVoicePhase]);
 
   useEffect(() => installCardSpotlight(), []);
 
@@ -230,6 +251,8 @@ function App() {
         mcpStatus={mcpStatus}
         voiceStatus={voiceStatus}
         approvalCount={approvalCount}
+        connectionStatus={connectionStatus}
+        activeJobs={activeJobs}
       />
       <div className="ob-main">
         <Navbar
@@ -308,7 +331,7 @@ function App() {
         onPendingCountChange={setApprovalCount}
       />
 
-      <JobProgressDock />
+      <JobProgressDock onJobsChange={setActiveJobs} />
 
       <AppDialogHost />
     </div>

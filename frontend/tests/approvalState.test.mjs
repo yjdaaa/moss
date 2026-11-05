@@ -105,3 +105,59 @@ test("Agent 审批卡用任务确认文案，不用加工现场确认文案（20
   assert.match(approvalErrorText("agent_strict_mode_required", "后端原话"), /严格模式/);
   assert.equal(approvalErrorText("something_new", "后端原话"), "后端原话");
 });
+
+test("Agent 审批徽标与任务预览字段及家居审批拒绝优先撤销协调器挂起态", async () => {
+  const { approvalTagText, agentApprovalPreview, rejectApprovalRequest } = await import("../src/approvalState.js");
+  assert.equal(approvalTagText("agent_run"), "本机 Agent · 本次批准");
+  assert.equal(approvalTagText("external_tool"), "第三方工具 · 本次批准");
+  assert.equal(approvalTagText("home_control"), "家居控制 · 私密窗口批准");
+  assert.equal(approvalTagText("workflow_confirm_send"), "R3 · 运动与出光");
+
+  const preview = agentApprovalPreview({
+    provider: "codex",
+    workspace_label: "demo-project",
+    task: "修复 README 拼写错误",
+  });
+  assert.match(preview.providerLabel, /codex/);
+  assert.equal(preview.workspaceLabel, "demo-project");
+  assert.equal(preview.task, "修复 README 拼写错误");
+  assert.match(preview.warning, /修改/);
+  assert.match(preview.warning, /额度/);
+
+  const cancelledCalls = [];
+  let postCalled = false;
+  const homeOutcome = await rejectApprovalRequest(
+    { approval_id: "apr-home-1", kind: "home_control", digest: "deadbeef" },
+    {
+      cancelHomeApproval: async (input) => {
+        cancelledCalls.push(input);
+        return { status: "rejected" };
+      },
+      postReject: async () => {
+        postCalled = true;
+        return { ok: true, data: { success: true } };
+      },
+    },
+  );
+  assert.equal(homeOutcome.ok, true);
+  assert.equal(postCalled, false, "桌面端 Tauri 可用时直接走 homeApprovalCancel 立即作废内存挂起与 send_fence");
+  assert.deepEqual(cancelledCalls, [{ approval_id: "apr-home-1", digest: "deadbeef", confirmed: true }]);
+
+  let fallbackUrl = "";
+  const fallbackOutcome = await rejectApprovalRequest(
+    { approval_id: "apr-home-2", kind: "home_control", digest: "beadfeed" },
+    {
+      cancelHomeApproval: async () => {
+        const err = new Error("语音中心仅在 MOSS 桌面端可用");
+        err.code = "voice_desktop_only";
+        throw err;
+      },
+      postReject: async (url) => {
+        fallbackUrl = url;
+        return { ok: true, data: { success: true } };
+      },
+    },
+  );
+  assert.equal(fallbackOutcome.ok, true);
+  assert.equal(fallbackUrl, "/v1/approvals/apr-home-2/reject");
+});

@@ -836,7 +836,7 @@ impl ApprovalService {
             _=>ApprovalPhase::Failed,
         };
         let outcome=ApprovalOutcome{
-            success,message:if success{"Agent 只读任务执行完成".into()}else{"Agent 只读任务未成功完成".into()},
+            success,message:if success{"Agent 任务执行完成".into()}else{"Agent 任务未成功完成".into()},
             job_id:Some(run.id.clone()),error_code:error_code.map(str::to_owned),
             phase:Some(phase),
         };
@@ -1472,7 +1472,7 @@ pub(crate) fn approval_view(record: &ApprovalRecord) -> Value {
                     "task":request.get("task").and_then(Value::as_str).unwrap_or(""),
                     "workspace_label":folder,
                     "version":request.get("version").and_then(Value::as_str).unwrap_or(""),
-                    "permission":"read_only_plan",
+                    "permission":"workspace_write",
                     "uses_installed_cli_account":true,
                     "may_incur_cost":true,
                 }));
@@ -1538,6 +1538,22 @@ impl crate::ApiService {
         } else {
             Err(desktop_session_invalid())
         }
+    }
+
+    /// 仅供内置语音副屏展示的只读待电脑审批无敏摘要（不含 approval_id、digest、路径或凭据）。
+    pub fn pending_approval_display_summary(&self) -> Option<serde_json::Value> {
+        let service = self.approval_service().ok()?;
+        let now = service.now();
+        let records = service.list(Some(ApprovalStatus::Pending), 5).ok()?;
+        let rec = records.into_iter().find(|r| !r.is_expired_at(now))?;
+        let rem = (rec.expires_at - now).ceil().max(1.0) as u64;
+        let total = (rec.expires_at - rec.created_at).round().clamp(30.0, 600.0) as u64;
+        Some(serde_json::json!({
+            "kind": rec.kind.as_str(),
+            "summary": rec.summary,
+            "remaining_secs": rem,
+            "total_secs": total,
+        }))
     }
 
     /// `/v1/approvals`（列表）、`/v1/approvals/{id}/approve`、`/v1/approvals/{id}/reject`，仅桌面会话。
@@ -1959,7 +1975,9 @@ mod tests {
         assert_eq!(started.outcome.unwrap().phase,Some(ApprovalPhase::Running));
         assert_eq!(fixture.service.consume_agent_run(&created.approval_id,&created.digest,&base,&permit).unwrap_err(),ApprovalError::Consumed);
         assert_eq!(fixture.db.lock().unwrap().agent_runs(50).unwrap().len(),1);
-        assert!(fixture.service.finish_agent_run("run-nv13","completed","只读测试完成",false,None).unwrap());
+        assert_eq!(approval_view(&created)["agent"]["permission"], "workspace_write");
+        assert!(fixture.service.finish_agent_run("run-nv13","completed","任务完成",false,None).unwrap());
+        assert_eq!(fixture.service.get(&created.approval_id).unwrap().outcome.unwrap().message, "Agent 任务执行完成");
         assert_eq!(fixture.db.lock().unwrap().find_agent_run("run-nv13").unwrap().unwrap().status,"completed");
         assert!(fixture.service.finish_agent_run("run-nv13","completed","retry",false,None).is_err());
 

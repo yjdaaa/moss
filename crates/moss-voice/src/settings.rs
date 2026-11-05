@@ -10,8 +10,6 @@ pub use home_transfer::{export_home_template, parse_home_template};
 
 use std::path::{Path, PathBuf};
 
-static SETTINGS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 use serde::{Deserialize, Serialize};
 
 use crate::models::{ProviderKind, Section};
@@ -194,6 +192,213 @@ pub fn effective_hotwords(custom: &[String], materials: &[String]) -> Vec<String
     words
 }
 
+pub const DEFAULT_PERSONA_STYLE: &str = "workshop";
+
+pub fn default_persona_style() -> String {
+    DEFAULT_PERSONA_STYLE.to_owned()
+}
+
+pub fn validate_persona_style(raw: &str) -> Result<String, String> {
+    match raw.trim() {
+        "" | "workshop" => Ok("workshop".into()),
+        "moss_station" => Ok("moss_station".into()),
+        "beginner_guide" => Ok("beginner_guide".into()),
+        _ => Err("助手风格只能是 workshop、moss_station 或 beginner_guide".into()),
+    }
+}
+
+pub const DEFAULT_SCREEN_CARD_STYLE: &str = "moss_hud";
+
+pub fn default_screen_card_style() -> String {
+    DEFAULT_SCREEN_CARD_STYLE.to_owned()
+}
+
+pub fn validate_screen_card_style(raw: &str) -> Result<String, String> {
+    match raw.trim() {
+        "" | "moss_hud" => Ok("moss_hud".into()),
+        "goggle_bot" => Ok("goggle_bot".into()),
+        _ => Err("屏幕卡片画风只能是 moss_hud 或 goggle_bot".into()),
+    }
+}
+fn contains_dangerous_gcode_or_grbl(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    for token in upper.split(|c: char| !c.is_ascii_alphanumeric() && c != '$' && c != '=') {
+        if matches!(token, "G0" | "G00" | "G1" | "G01" | "M3" | "M03" | "M4" | "M04" | "M5" | "M05") {
+            return true;
+        }
+        if let Some(rest) = token.strip_prefix('$')
+            && let Some((digits, _)) = rest.split_once('=')
+            && !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 校验用户补充的工坊背景提示（不能覆盖安全铁律，禁含控制字符与 G-code/GRBL 指令）。
+pub fn normalize_persona_prompt(raw: &str) -> Result<String, String> {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.chars().any(|c| c.is_control() && c != '\n') {
+        return Err("补充说明不能包含控制字符".into());
+    }
+    let trimmed = normalized.trim();
+    if trimmed.chars().count() > 300 {
+        return Err("补充说明最多 300 个字符".into());
+    }
+    if contains_dangerous_gcode_or_grbl(trimmed) {
+        return Err("补充说明不能包含 G-code 或控制器 $n= 指令".into());
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// 激光行业与本机设备高频 ASR 同音错词内置预设（0ms 本地替换，云端/本地识别均生效）。
+pub const BUILTIN_ASR_CORRECTIONS: &[(&str, &str)] = &[
+    ("段木", "椴木"),
+    ("端木", "椴木"),
+    ("断木", "椴木"),
+    ("缎木", "椴木"),
+    ("亚克立", "亚克力"),
+    ("雅克力", "亚克力"),
+    ("压克力", "亚克力"),
+    ("一宿", "翼宿"),
+    ("亦宿", "翼宿"),
+    ("义宿", "翼宿"),
+    ("异宿", "翼宿"),
+    ("牛皮指", "牛皮纸"),
+    ("胶合版", "胶合板"),
+    ("走边筐", "走边框"),
+];
+
+const PROTECTED_STOP_WORDS: &[&str] = &[
+    "停", "急停", "停止", "立刻停", "马上停", "快停", "取消", "停止加工", "暂停",
+    "退出", "再见", "拜拜", "退下", "关闭对话", "确认", "开始",
+];
+
+fn parse_correction_pair(raw: &str) -> Result<Option<(String, String)>, String> {
+    if raw.chars().any(char::is_control) {
+        return Err("同音纠错规则不能包含控制字符".into());
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let split = trimmed
+        .split_once('=')
+        .or_else(|| trimmed.split_once("->"))
+        .or_else(|| trimmed.split_once('→'))
+        .or_else(|| trimmed.split_once('＝'));
+    let Some((wrong_raw, right_raw)) = split else {
+        return Err("每条同音纠错请按“错词=正词”填写（如 段木=椴木）".into());
+    };
+    let wrong = wrong_raw.trim();
+    let right = right_raw.trim();
+    if wrong.is_empty() || right.is_empty() {
+        return Err("同音纠错的错词与正词都不能为空".into());
+    }
+    if wrong == right {
+        return Err("同音纠错的错词与正词不能相同".into());
+    }
+    if wrong.contains('=') || right.contains('=') {
+        return Err("单条同音纠错只能包含一个“=”分隔符".into());
+    }
+    if wrong.chars().count() > 24 || right.chars().count() > 24 {
+        return Err("同音纠错单侧最多 24 个字符".into());
+    }
+    if PROTECTED_STOP_WORDS
+        .iter()
+        .any(|protected| wrong.eq_ignore_ascii_case(protected))
+    {
+        return Err(format!("安全保护词“{wrong}”不允许被同音纠错改写"));
+    }
+    if contains_dangerous_gcode_or_grbl(right) {
+        return Err("同音纠错目标词不能包含 G-code 或控制器 $n= 指令".into());
+    }
+    Ok(Some((wrong.to_owned(), right.to_owned())))
+}
+
+pub fn normalize_asr_corrections(entries: &[String]) -> Result<Vec<String>, String> {
+    if entries.len() > 64 {
+        return Err("自定义同音纠错最多 64 条".into());
+    }
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for entry in entries {
+        let Some((wrong, right)) = parse_correction_pair(entry)? else {
+            continue;
+        };
+        if let Some(existing) = pairs.iter_mut().find(|(w, _)| w == &wrong) {
+            existing.1 = right;
+        } else {
+            pairs.push((wrong, right));
+        }
+    }
+    let formatted: Vec<String> = pairs.into_iter().map(|(w, r)| format!("{w}={r}")).collect();
+    if formatted.iter().map(String::len).sum::<usize>() > 4096 {
+        return Err("同音纠错总长度超过 4096 字节".into());
+    }
+    Ok(formatted)
+}
+
+/// 合并自定义纠错与内置激光行业同音词（自定义优先覆盖同错词），按错词字数降序排列避免短词截断长词。
+pub fn effective_asr_corrections(include_builtin: bool, custom: &[String]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for item in custom {
+        if let Ok(Some((w, r))) = parse_correction_pair(item)
+            && !pairs.iter().any(|(ew, _)| ew == &w)
+        {
+            pairs.push((w, r));
+        }
+    }
+    if include_builtin {
+        for &(w, r) in BUILTIN_ASR_CORRECTIONS {
+            if !pairs.iter().any(|(ew, _)| ew == w) {
+                pairs.push((w.to_owned(), r.to_owned()));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.0.chars().count().cmp(&a.0.chars().count()));
+    pairs
+}
+
+/// 单台小智设备的硬件偏好记忆（用于弥补固件音量/亮度设 0 重启回退为 10 等断电复位行为）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceHardwarePrefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk_mode: Option<String>,
+}
+
+impl DeviceHardwarePrefs {
+    pub fn is_empty(&self) -> bool {
+        self.volume.is_none()
+            && self.brightness.is_none()
+            && self.theme.is_none()
+            && self.talk_mode.is_none()
+    }
+}
+
+pub fn validate_device_theme(raw: &str) -> Result<String, String> {
+    match raw.trim() {
+        "light" => Ok("light".into()),
+        "dark" => Ok("dark".into()),
+        _ => Err("屏幕主题只能是 light 或 dark".into()),
+    }
+}
+
+pub fn validate_talk_mode(raw: &str) -> Result<String, String> {
+    match raw.trim() {
+        "click_to_talk" => Ok("click_to_talk".into()),
+        "press_to_talk" => Ok("press_to_talk".into()),
+        _ => Err("按键对话模式只能是 click_to_talk 或 press_to_talk".into()),
+    }
+}
+
 /// 内置语音服务的本地模型开关与选用的模型（NV6；可选模型见技术书 §13.7）。
 /// 模型文件在运行目录 `models/`，由辅助程序 `moss-voice-local` 运行。
 /// 旧设置没有 `*_model` 字段，按 NV6 的默认模型（Silero、SenseVoice 2024、Kokoro v1.0）读取，行为不变。
@@ -211,7 +416,24 @@ pub struct BuiltinLocal {
     pub asr_beam_search: bool,
     #[serde(default)]
     pub custom_hotwords: Vec<String>,
-    /// 加工结束后在设备在线且空闲时主动播报（2026-11-02 用户决定；默认开）
+    /// 激光行业同音错词 0ms 自动纠偏（默认开）
+    #[serde(default = "default_on")]
+    pub asr_homophone_fix: bool,
+    /// 用户自定义同音纠错规则（形如 `错词=正词`）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_asr_corrections: Vec<String>,
+    /// 助手语气风格预设（`workshop` / `moss_station` / `beginner_guide`；底层安全铁律不可覆盖）
+    #[serde(default = "default_persona_style")]
+    pub persona_style: String,
+    /// 用户补充的工坊背景说明（最多 300 字）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub persona_prompt: String,
+    /// 生成激光雕刻预览及加工发送期间自动将画面同步到在线小智彩屏（默认开）
+    #[serde(default = "default_on")]
+    pub screen_preview_sync: bool,
+    /// 小智彩屏卡片视觉画风（`"moss_hud"` 硬核太空舱 / `"goggle_bot"` 可爱护目镜小机器人；默认 `"moss_hud"`）
+    #[serde(default = "default_screen_card_style")]
+    pub screen_card_style: String,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,
     /// 内置语音 Jev 信息筛选与提速总开关（默认关闭；开启后识别文本发往 OpenRouter Decisions 接口）
@@ -265,6 +487,12 @@ impl Default for BuiltinLocal {
             read_only_shortcuts: true,
             asr_beam_search: true,
             custom_hotwords: Vec::new(),
+            asr_homophone_fix: true,
+            custom_asr_corrections: Vec::new(),
+            persona_style: default_persona_style(),
+            persona_prompt: String::new(),
+            screen_preview_sync: true,
+            screen_card_style: default_screen_card_style(),
             job_done_announce: true,
             jev_filter_enabled: false,
             jev_model: default_jev_model(),
@@ -582,6 +810,9 @@ pub struct VoiceSettings {
     /// 内置语音服务的本地模型开关（NV6）
     #[serde(default, skip_serializing_if = "BuiltinLocal::is_default")]
     pub builtin_local: BuiltinLocal,
+    /// 每台小智设备的音量/亮度/屏幕主题偏好（重连时自动同步恢复）
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub builtin_device_prefs: std::collections::BTreeMap<String, DeviceHardwarePrefs>,
 }
 
 impl Default for VoiceSettings {
@@ -608,6 +839,7 @@ impl Default for VoiceSettings {
             builtin_person_memory_enabled:false,
             builtin_context: BuiltinContext::default(),
             builtin_local: BuiltinLocal::default(),
+            builtin_device_prefs: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -648,14 +880,68 @@ fn read_root(settings_file: &Path) -> serde_json::Map<String, serde_json::Value>
         .unwrap_or_default()
 }
 
+fn read_root_checked(settings_file: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    match std::fs::read(settings_file) {
+        Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(serde_json::Map::new()),
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .ok_or_else(|| "settings.json 格式损坏，拒绝覆盖".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::Map::new()),
+        Err(error) => Err(format!("无法读取设置文件: {error}")),
+    }
+}
+
 fn write_root(settings_file: &Path, root: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
     if let Some(parent) = settings_file.parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("创建运行目录失败: {error}"))?;
     }
     let text = serde_json::to_string_pretty(root).map_err(|error| error.to_string())?;
-    let temp = settings_file.with_extension("json.tmp");
+    let temp = settings_file.with_extension(format!("json.tmp-{}", std::process::id()));
     std::fs::write(&temp, text).map_err(|error| format!("写入设置失败: {error}"))?;
-    std::fs::rename(&temp, settings_file).map_err(|error| format!("保存设置失败: {error}"))
+    std::fs::rename(&temp, settings_file).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        format!("保存设置失败: {error}")
+    })
+}
+
+/// 在全局 `SETTINGS_WRITE` 锁保护下更新 `settings.json` 顶层键值；非空损坏文件拒绝覆盖。
+pub fn update_root(
+    settings_file: &Path,
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<(), String> {
+    laser_contracts::with_settings_file_lock(|| {
+        let mut root = read_root_checked(settings_file)?;
+        mutate(&mut root);
+        write_root(settings_file, &root)
+    })
+}
+
+/// 在全局 `SETTINGS_WRITE` 锁保护下执行 `load -> mutate -> save`，避免并发子分区写入互相覆盖。
+pub fn update_voice<R>(
+    settings_file: &Path,
+    mutate: impl FnOnce(&mut VoiceSettings) -> Result<R, String>,
+) -> Result<R, String> {
+    update_voice_with_jev_feedback(settings_file, |voice| mutate(voice).map(|out| (out, None)))
+}
+
+/// 在全局 `SETTINGS_WRITE` 锁保护下原子更新 `voice` 子分区与可选顶层 `jev_enabled`。
+pub fn update_voice_with_jev_feedback<R>(
+    settings_file: &Path,
+    mutate: impl FnOnce(&mut VoiceSettings) -> Result<(R, Option<bool>), String>,
+) -> Result<R, String> {
+    laser_contracts::with_settings_file_lock(|| {
+        let mut root = read_root_checked(settings_file)?;
+        let mut voice = root
+            .get("voice")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        let (out, jev_feedback) = mutate(&mut voice)?;
+        apply_voice_to_root(&mut root, &voice, None, None, None, jev_feedback)?;
+        write_root(settings_file, &root)?;
+        Ok(out)
+    })
 }
 
 /// 读取语音设置；文件缺失、损坏或旧版本没有 `voice` 时返回默认值。
@@ -732,31 +1018,37 @@ pub fn save_all(
     save_all_inner(settings_file, voice, endpoint, extra_endpoints, disabled_tools, None)
 }
 
-fn save_all_inner(
-    settings_file: &Path,
+fn apply_voice_to_root(
+    root: &mut serde_json::Map<String, serde_json::Value>,
     voice: &VoiceSettings,
     endpoint: Option<Option<&str>>,
     extra_endpoints: Option<&[String]>,
     disabled_tools: Option<&[String]>,
     jev_feedback: Option<bool>,
 ) -> Result<(), String> {
-    let _guard = SETTINGS_WRITE.lock().map_err(|_| "设置锁不可用")?;
-    let mut root = read_root(settings_file);
     let external = root.get("voice").and_then(|v| v.get("mcp_servers")).cloned();
     let home = root.get("voice").and_then(|v| v.get("builtin_home")).cloned();
     let home_revision = root.get("voice").and_then(|v| v.get("builtin_home_revision")).cloned();
     let mut updated = serde_json::to_value(voice).map_err(|error| error.to_string())?;
     // Generic saves must not overwrite independently maintained MCP or Home
     // settings; in particular, a stale voice form cannot undo home revocation.
-    if let Some(external) = external { updated["mcp_servers"] = external; }
-    else if let Some(object) = updated.as_object_mut() { object.remove("mcp_servers"); }
+    if let Some(external) = external {
+        updated["mcp_servers"] = external;
+    } else if let Some(object) = updated.as_object_mut() {
+        object.remove("mcp_servers");
+    }
     // Only the version-checked home writer may introduce or modify HA settings.
     // A generic settings save must never enable HA on a fresh installation.
-    updated["builtin_home"] = home.unwrap_or_else(|| serde_json::json!({
-        "enabled":false,"base_url":"","entities":[]
-    }));
-    if let Some(home_revision) = home_revision { updated["builtin_home_revision"] = home_revision; }
-    else if let Some(object) = updated.as_object_mut() { object.remove("builtin_home_revision"); }
+    updated["builtin_home"] = home.unwrap_or_else(|| {
+        serde_json::json!({
+            "enabled":false,"base_url":"","entities":[]
+        })
+    });
+    if let Some(home_revision) = home_revision {
+        updated["builtin_home_revision"] = home_revision;
+    } else if let Some(object) = updated.as_object_mut() {
+        object.remove("builtin_home_revision");
+    }
     root.insert("voice".into(), updated);
     if let Some(endpoint) = endpoint {
         match endpoint.map(str::trim).filter(|value| !value.is_empty()) {
@@ -782,7 +1074,22 @@ fn save_all_inner(
     if let Some(enabled) = jev_feedback {
         root.insert("jev_enabled".into(), serde_json::Value::Bool(enabled));
     }
-    write_root(settings_file, &root)
+    Ok(())
+}
+
+fn save_all_inner(
+    settings_file: &Path,
+    voice: &VoiceSettings,
+    endpoint: Option<Option<&str>>,
+    extra_endpoints: Option<&[String]>,
+    disabled_tools: Option<&[String]>,
+    jev_feedback: Option<bool>,
+) -> Result<(), String> {
+    laser_contracts::with_settings_file_lock(|| {
+        let mut root = read_root_checked(settings_file)?;
+        apply_voice_to_root(&mut root, voice, endpoint, extra_endpoints, disabled_tools, jev_feedback)?;
+        write_root(settings_file, &root)
+    })
 }
 
 /// Strict MCP read: a damaged settings file must not silently become an empty server list.
@@ -853,26 +1160,32 @@ pub fn save_home_offline(
     expected_revision: u64,
 ) -> Result<u64, HomeOfflineError> {
     next.validate_offline().map_err(HomeOfflineError::Invalid)?;
-    let _guard = SETTINGS_WRITE.lock()
-        .map_err(|_| HomeOfflineError::Storage("设置锁不可用".into()))?;
-    let mut root = strict_root(file).map_err(HomeOfflineError::Storage)?;
-    let (current, revision) = home_snapshot(&root)?;
-    if revision != expected_revision {
-        return Err(HomeOfflineError::Conflict);
-    }
-    if &current == next {
-        return Ok(revision);
-    }
-    let updated_revision = revision.checked_add(1)
-        .filter(|v| *v <= HOME_REVISION_MAX)
-        .ok_or(HomeOfflineError::Invalid("Home Assistant 配置版本已达上限"))?;
-    let voice = root.entry("voice").or_insert_with(|| serde_json::json!({}));
-    let voice = voice.as_object_mut().ok_or(HomeOfflineError::Invalid("语音配置格式无效"))?;
-    voice.insert("builtin_home".into(), serde_json::to_value(next)
-        .map_err(|_| HomeOfflineError::Invalid("Home Assistant 配置序列化失败"))?);
-    voice.insert("builtin_home_revision".into(), serde_json::json!(updated_revision));
-    write_root(file, &root).map_err(HomeOfflineError::Storage)?;
-    Ok(updated_revision)
+    laser_contracts::with_settings_file_lock(|| {
+        let mut root = strict_root(file).map_err(HomeOfflineError::Storage)?;
+        let (current, revision) = home_snapshot(&root)?;
+        if revision != expected_revision {
+            return Err(HomeOfflineError::Conflict);
+        }
+        if &current == next {
+            return Ok(revision);
+        }
+        let updated_revision = revision
+            .checked_add(1)
+            .filter(|v| *v <= HOME_REVISION_MAX)
+            .ok_or(HomeOfflineError::Invalid("Home Assistant 配置版本已达上限"))?;
+        let voice = root.entry("voice").or_insert_with(|| serde_json::json!({}));
+        let voice = voice
+            .as_object_mut()
+            .ok_or(HomeOfflineError::Invalid("语音配置格式无效"))?;
+        voice.insert(
+            "builtin_home".into(),
+            serde_json::to_value(next)
+                .map_err(|_| HomeOfflineError::Invalid("Home Assistant 配置序列化失败"))?,
+        );
+        voice.insert("builtin_home_revision".into(), serde_json::json!(updated_revision));
+        write_root(file, &root).map_err(HomeOfflineError::Storage)?;
+        Ok(updated_revision)
+    })
 }
 
 
@@ -934,11 +1247,19 @@ pub fn validate_home_portable(data: &[u8])
 /// Dedicated desktop write; preserves all other voice and root settings.
 pub fn save_mcp_servers(file: &Path, servers: &[moss_mcp_client::ServerConfig]) -> Result<(), String> {
     moss_mcp_client::validate_servers(servers).map_err(|error| error.to_string())?;
-    let _guard = SETTINGS_WRITE.lock().map_err(|_| "设置锁不可用")?;
-    let mut root = strict_root(file)?;
-    let voice = root.entry("voice").or_insert_with(|| serde_json::json!({})).as_object_mut().ok_or("语音设置格式不正确")?;
-    voice.insert("mcp_servers".into(), serde_json::to_value(servers).map_err(|_| "第三方 MCP 配置格式不正确")?);
-    write_root(file,&root)
+    laser_contracts::with_settings_file_lock(|| {
+        let mut root = strict_root(file)?;
+        let voice = root
+            .entry("voice")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("语音设置格式不正确")?;
+        voice.insert(
+            "mcp_servers".into(),
+            serde_json::to_value(servers).map_err(|_| "第三方 MCP 配置格式不正确")?,
+        );
+        write_root(file, &root)
+    })
 }
 
 #[cfg(test)]
@@ -1292,6 +1613,7 @@ mod tests {
             builtin_person_memory_enabled:false,
             builtin_context: BuiltinContext::default(),
             builtin_local: BuiltinLocal { asr: true, mirror: Some("https://mirror.test/x".into()), ..BuiltinLocal::default() },
+            builtin_device_prefs: std::collections::BTreeMap::new(),
         };
         save(&file, &voice).unwrap();
         assert_eq!(load(&file), voice);
@@ -1411,5 +1733,149 @@ mod tests {
         assert!(!voice.builtin_section_ready(Section::Tts, &models));
         voice.builtin_models.tts = Some(cloud("https://tts.test/v1/audio/speech"));
         assert!(voice.builtin_chat_ready(&models), "合成走云端");
+    }
+
+    #[test]
+    fn update_voice_and_update_root_serialize_concurrent_subsection_writes_and_reject_corrupt_json() {
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, br#"{"web_port": 9666}"#).unwrap();
+
+        let barrier = Arc::new(Barrier::new(5));
+        let mut handles = Vec::new();
+
+        {
+            let file = file.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..20 {
+                    update_voice(&file, |v| {
+                        v.builtin_context.project_id = format!("p-{i}");
+                        v.builtin_context.project_generation = v.builtin_context.project_generation.wrapping_add(1);
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            }));
+        }
+        {
+            let file = file.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..20 {
+                    update_voice(&file, |v| {
+                        v.builtin_agents.workspace = format!("work-{i}");
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            }));
+        }
+        {
+            let file = file.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..20 {
+                    update_voice(&file, |v| {
+                        v.builtin_music.directory = format!("music-{i}");
+                        v.builtin_person_memory_enabled = true;
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            }));
+        }
+        {
+            let file = file.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..20 {
+                    update_root(&file, |root| {
+                        root.insert("export".into(), serde_json::json!({"dir": format!("exp-{i}"), "ask_each_time": true}));
+                    })
+                    .unwrap();
+                }
+            }));
+        }
+
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let final_voice = load(&file);
+        assert_eq!(final_voice.builtin_context.project_generation, 20);
+        assert_eq!(final_voice.builtin_context.project_id, "p-19");
+        assert_eq!(final_voice.builtin_agents.workspace, "work-19");
+        assert_eq!(final_voice.builtin_music.directory, "music-19");
+        assert!(final_voice.builtin_person_memory_enabled);
+        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(raw["web_port"], 9666);
+        assert_eq!(raw["export"]["dir"], "exp-19");
+
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, b"{broken-json").unwrap();
+        assert_eq!(
+            update_root(&corrupt, |r| {
+                r.insert("x".into(), serde_json::json!(1));
+            })
+            .unwrap_err(),
+            "settings.json 格式损坏，拒绝覆盖"
+        );
+        assert_eq!(
+            update_voice(&corrupt, |v| {
+                v.builtin_memory_enabled = true;
+                Ok(())
+            })
+            .unwrap_err(),
+            "settings.json 格式损坏，拒绝覆盖"
+        );
+        assert_eq!(
+            save(&corrupt, &VoiceSettings::default()).unwrap_err(),
+            "settings.json 格式损坏，拒绝覆盖"
+        );
+        assert_eq!(std::fs::read(&corrupt).unwrap(), b"{broken-json");
+    }
+
+    #[test]
+    fn persona_and_asr_correction_rules_enforce_safety_bounds() {
+        assert_eq!(validate_persona_style("moss_station").unwrap(), "moss_station");
+        assert_eq!(validate_persona_style("").unwrap(), "workshop");
+        assert!(validate_persona_style("hacker").is_err());
+
+        assert_eq!(normalize_persona_prompt("  我有一台 5W 蓝光翼宿机  ").unwrap(), "我有一台 5W 蓝光翼宿机");
+        assert!(normalize_persona_prompt("直接发 G1 X10 Y10").is_err());
+        assert!(normalize_persona_prompt("修改 $32=0").is_err());
+
+        let rules = normalize_asr_corrections(&[
+            " 段木 = 椴木 ".into(),
+            "一宿->翼宿".into(),
+            "段木=东北椴木".into(),
+        ])
+        .unwrap();
+        assert_eq!(rules, vec!["段木=东北椴木", "一宿=翼宿"]);
+        assert!(normalize_asr_corrections(&["急停=继续".into()]).is_err());
+        assert!(normalize_asr_corrections(&["停=好".into()]).is_err());
+        assert!(normalize_asr_corrections(&["测试=G0 X10".into()]).is_err());
+
+        let merged = effective_asr_corrections(true, &rules);
+        assert_eq!(merged.iter().find(|(w, _)| w == "段木").unwrap().1, "东北椴木");
+        assert!(merged.iter().any(|(w, r)| w == "亚克立" && r == "亚克力"));
+
+        assert_eq!(validate_talk_mode("press_to_talk").unwrap(), "press_to_talk");
+        assert_eq!(validate_talk_mode("click_to_talk").unwrap(), "click_to_talk");
+        assert!(validate_talk_mode("hold").is_err());
+        let mut prefs = DeviceHardwarePrefs::default();
+        assert!(prefs.is_empty());
+        prefs.talk_mode = Some("press_to_talk".into());
+        assert!(!prefs.is_empty());
+        assert_eq!(validate_screen_card_style("").unwrap(), "moss_hud");
+        assert_eq!(validate_screen_card_style("goggle_bot").unwrap(), "goggle_bot");
+        assert!(validate_screen_card_style("neon").is_err());
     }
 }

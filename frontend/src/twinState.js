@@ -904,3 +904,77 @@ export function resolveTwinHeadPose({
     isLiveHardware: false,
   };
 }
+
+export const MAX_XY_TRAVEL_MM = 2000;
+export const MAX_Z_TRAVEL_MM = 500;
+
+export function normalizeWorkspaceLimits(patch = {}, base = null) {
+  const fallback = base || {
+    x_travel_mm: YISU_V1_PROFILE.xTravelMm,
+    y_travel_mm: YISU_V1_PROFILE.yTravelMm,
+    z_travel_mm: YISU_V1_PROFILE.zTravelMm,
+    from_hardware: false,
+  };
+  return {
+    ...fallback,
+    ...patch,
+    x_travel_mm: clamp(
+      Number(patch?.x_travel_mm ?? fallback.x_travel_mm) || YISU_V1_PROFILE.xTravelMm,
+      20,
+      MAX_XY_TRAVEL_MM,
+    ),
+    y_travel_mm: clamp(
+      Number(patch?.y_travel_mm ?? fallback.y_travel_mm) || YISU_V1_PROFILE.yTravelMm,
+      20,
+      MAX_XY_TRAVEL_MM,
+    ),
+    z_travel_mm: clamp(
+      Number(patch?.z_travel_mm ?? fallback.z_travel_mm) || YISU_V1_PROFILE.zTravelMm,
+      5,
+      MAX_Z_TRAVEL_MM,
+    ),
+  };
+}
+
+export function buildTwinConnectionPayload({
+  mode = "network",
+  port = "",
+  baudrate = 115200,
+  networkHost = "",
+  telnetPort = 23,
+} = {}) {
+  if (mode === "serial") {
+    return {
+      connection_mode: "serial",
+      port,
+      baudrate: Number(baudrate) || 115200,
+    };
+  }
+  const parsedTelnetPort = Number(telnetPort) || 23;
+  return {
+    connection_mode: "network",
+    network_host: networkHost,
+    host: networkHost,
+    network_telnet_port: parsedTelnetPort,
+    telnet_port: parsedTelnetPort,
+  };
+}
+
+export function buildTwinEmergencyStopPayload({
+  isJobRunning,
+  selectedWorkflowId,
+  connectionPayload,
+} = {}) {
+  if (isJobRunning && selectedWorkflowId) {
+    return {
+      action: "emergency_stop",
+      confirmed: true,
+      job_id: selectedWorkflowId,
+    };
+  }
+  return {
+    ...(connectionPayload || {}),
+    action: "emergency_stop",
+    confirmed: true,
+  };
+}

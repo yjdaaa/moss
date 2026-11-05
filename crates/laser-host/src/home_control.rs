@@ -142,7 +142,11 @@ impl HomeControlCoordinator {
         let fingerprint=Self::fingerprint(&profile);
         let service=ApprovalService::new(host.db.clone());
         let mut pending=self.pending.lock().map_err(|_|"home_unavailable")?;
-        pending.retain(|id,item|item.permit.load(Ordering::Acquire) && item.active.load(Ordering::Acquire) && service.get(id).is_ok_and(|r|r.status==ApprovalStatus::Pending && r.expires_at>now()));
+        pending.retain(|id,item|{
+            let keep=item.permit.load(Ordering::Acquire) && item.active.load(Ordering::Acquire) && service.get(id).is_ok_and(|r|r.status==ApprovalStatus::Pending && r.expires_at>now());
+            if !keep {item.active.store(false,Ordering::Release);}
+            keep
+        });
         if pending.len()>=64{return Err("home_capacity");}
         let facts=json!({"path":plan.service_path,"body":plan.body,"policy":plan.policy_revision,"credential":plan.credential_revision}).as_object().expect("object").clone();
         let record=service.create(NewApproval{owner:Some(session.into()),voice_permit:Some(permit.clone()),kind:ApprovalKind::HomeControl,target_record:plan.entity_id.clone(),source:ApprovalSource::Voice,session_id:Some(device.into()),request_id:None,summary:format!("家居动作 {} → {}，每次需电脑确认",plan.service_path,plan.entity_id),facts:facts.clone(),connection:ApprovalConnection::Home{fingerprint:fingerprint.clone()},request:facts,client:format!("voice:{device}"),removed_fields:vec![]}).map_err(|_|"home_approval_failed")?;
@@ -150,20 +154,43 @@ impl HomeControlCoordinator {
         Ok(json!({"approval_required":true,"approval_id":record.approval_id,"status":"pending"}))
     }
     pub fn can_approve(&self,id:&str)->bool{
-        let Ok(profile)=self.profile() else{return false;};
-        let Ok(pending)=self.pending.lock() else{return false;};
-        let Some(item)=pending.get(id) else{return false;};
         let Some(host)=self.host.upgrade() else{return false;};
-        item.permit.load(Ordering::Acquire) && item.active.load(Ordering::Acquire) && item.fingerprint==Self::fingerprint(&profile)
+        let record_pending=ApprovalService::new(host.db.clone())
+            .get(id)
+            .is_ok_and(|r|r.status==ApprovalStatus::Pending && r.expires_at>now());
+        if !record_pending {
+            let _=self.invalidate_request(id);
+            return false;
+        }
+        let Ok(profile)=self.profile() else{return false;};
+        let item={
+            let Ok(mut pending)=self.pending.lock() else{return false;};
+            let Some(item)=pending.get(id).cloned() else{return false;};
+            if !item.permit.load(Ordering::Acquire) || !item.active.load(Ordering::Acquire) {
+                if let Some(removed)=pending.remove(id){removed.active.store(false,Ordering::Release);}
+                return false;
+            }
+            item
+        };
+        item.fingerprint==Self::fingerprint(&profile)
             && host.api_service.voice_session_allowed(&item.device,&item.session)
-            && ApprovalService::new(host.db.clone()).get(id).is_ok_and(|r|r.status==ApprovalStatus::Pending && r.expires_at>now())
     }
     pub fn approve(&self,id:&str,digest:&str,confirmed:bool)->Result<Value,&'static str>{
         if !confirmed{return Err("home_confirmation_required");}
         let host=self.host.upgrade().ok_or("home_disabled")?;
+        let service=ApprovalService::new(host.db.clone());
+        if !service.get(id).is_ok_and(|r|r.status==ApprovalStatus::Pending && r.expires_at>now()) {
+            self.invalidate_request(id)?;
+            let _=self.profile()?;
+            return Err("home_approval_unavailable");
+        }
         let item=self.pending.lock().map_err(|_|"home_unavailable")?.get(id).cloned().ok_or("home_approval_unavailable")?;
         let profile=self.profile()?;
-        if Self::fingerprint(&profile)!=item.fingerprint || !item.permit.load(Ordering::Acquire) || !item.active.load(Ordering::Acquire)
+        if !item.permit.load(Ordering::Acquire) || !item.active.load(Ordering::Acquire) {
+            self.invalidate_request(id)?;
+            return Err("home_conflict");
+        }
+        if Self::fingerprint(&profile)!=item.fingerprint
             || !host.api_service.voice_session_allowed(&item.device,&item.session){return Err("home_conflict");}
         let (catalog,token)=self.sync(&profile)?;
         catalog.revalidate_plan(&item.plan,&item.permit).map_err(|_|"home_conflict")?;
@@ -183,12 +210,17 @@ impl HomeControlCoordinator {
                 self.network.submit_once(path,body)
             }
             fn read_target_state(&mut self,entity:&str,budget:std::time::Duration)->Result<String,()>{if !(self.valid)(){return Err(());}let result=self.network.read_target_state(entity,budget);if !(self.valid)(){return Err(());}result}
+            fn read_target_snapshot(&mut self,entity:&str,budget:std::time::Duration)->Result<(String,Value),()>{if !(self.valid)(){return Err(());}let result=self.network.read_target_snapshot(entity,budget);if !(self.valid)(){return Err(());}result}
         }
-        let service=ApprovalService::new(host.db.clone());
         if !valid(){return Err("home_conflict");}
         let facts=json!({"path":item.plan.service_path,"body":item.plan.body,"policy":item.plan.policy_revision,"credential":item.plan.credential_revision}).as_object().expect("object").clone();
         let current=laser_api::approval::approval_digest(ApprovalKind::HomeControl,&item.plan.entity_id,&facts,&ApprovalConnection::Home{fingerprint:item.fingerprint.clone()});
-        service.approve(id,digest,&current).map_err(|_|"home_approval_failed")?;
+        if service.approve(id,digest,&current).is_err() {
+            if !service.get(id).is_ok_and(|r|r.status==ApprovalStatus::Pending && r.expires_at>now()) {
+                let _=self.invalidate_request(id);
+            }
+            return Err("home_approval_failed");
+        }
         let result=dispatch_approved(&service,id,&item.device,&item.fingerprint,&catalog,&item.plan,&item.active,&mut Guarded{network:network.as_mut(),valid,send_fence:&self.send_fence});
         self.pending.lock().map_err(|_|"home_unavailable")?.remove(id);
         result.map_err(|_|"home_approval_failed")?;
@@ -410,5 +442,159 @@ mod tests {
         assert_eq!(record.outcome.unwrap().phase,Some(laser_contracts::ApprovalPhase::Unknown));
         assert!(f.coordinator.approve(&id,&digest,true).is_err());assert_eq!(f.calls.lock().unwrap().sends,1);
     }
-}
+    #[test]
+    fn external_rejection_drops_stale_pending_in_can_approve_and_approve() {
+        // Case 1: rejected via ApprovalService (/v1/approvals/{id}/reject) then checked via can_approve
+        let f = integrated(false);
+        let (id, digest) = request(&f);
+        assert!(f.coordinator.pending.lock().unwrap().contains_key(&id));
+        ApprovalService::new(f.host.db.clone())
+            .reject(&id, Some("user rejected"))
+            .unwrap();
+        assert!(!f.coordinator.can_approve(&id));
+        assert!(!f.coordinator.pending.lock().unwrap().contains_key(&id));
+        assert_eq!(f.calls.lock().unwrap().sends, 0);
 
+        // Case 2: rejected via ApprovalService (/v1/approvals/{id}/reject) then approve called directly
+        let f = integrated(false);
+        let (id, digest_two) = request(&f);
+        let _ = digest;
+        assert!(f.coordinator.pending.lock().unwrap().contains_key(&id));
+        ApprovalService::new(f.host.db.clone())
+            .reject(&id, Some("user rejected"))
+            .unwrap();
+        assert!(f.coordinator.approve(&id, &digest_two, true).is_err());
+        assert!(!f.coordinator.pending.lock().unwrap().contains_key(&id));
+        assert_eq!(f.calls.lock().unwrap().sends, 0);
+    }
+
+    #[test]
+    fn integrated_set_temperature_confirms_via_guarded_snapshot_on_second_poll() {
+        use moss_voice::settings::{BuiltinHomeEntity, HomeApprovalPreference};
+
+        struct ClimateFake {
+            calls: Arc<Mutex<Calls>>,
+        }
+        impl HomeControlTransport for ClimateFake {
+            fn submit_once(&mut self, path: &str, body: &Value) -> Result<(), ()> {
+                assert_eq!(path, "/api/services/climate/set_temperature");
+                assert_eq!(
+                    body,
+                    &json!({"entity_id": "climate.room", "temperature": 24.0})
+                );
+                self.calls.lock().unwrap().sends += 1;
+                Ok(())
+            }
+            fn read_target_state(&mut self, _: &str, _: std::time::Duration) -> Result<String, ()> {
+                unreachable!("SetTemperature must observe via read_target_snapshot")
+            }
+            fn read_target_snapshot(
+                &mut self,
+                id: &str,
+                budget: std::time::Duration,
+            ) -> Result<(String, Value), ()> {
+                assert_eq!(id, "climate.room");
+                assert!(!budget.is_zero());
+                let mut guard = self.calls.lock().unwrap();
+                guard.reads += 1;
+                if guard.reads == 1 {
+                    Ok(("heat".into(), json!({"temperature": 20.0})))
+                } else {
+                    Ok(("heat".into(), json!({"temperature": 24.0})))
+                }
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let host = Arc::new(HostApplication::init_with_runtime_dir(Some(root.path())).unwrap());
+        let config = BuiltinHomeAssistant {
+            enabled: false,
+            base_url: "https://ha.example.test/".into(),
+            entities: vec![BuiltinHomeEntity {
+                entity_id: "climate.room".into(),
+                alias: "空调".into(),
+                enabled: true,
+                policy: HomeApprovalPreference::Ask,
+                media: vec![],
+            }],
+        };
+        let policy = moss_voice::settings::save_home_offline(
+            &host.runtime_root.path.join("settings.json"),
+            &config,
+            0,
+        )
+        .unwrap();
+        let credential = {
+            let db = host.db.lock().unwrap();
+            db.voice_device_seen("synthetic-device", "synthetic-client", "", "", "", now())
+                .unwrap();
+            let revision = db
+                .update_home_token_if_revision(
+                    0,
+                    Some("synthetic-home-token-not-real-credentials"),
+                    now(),
+                )
+                .unwrap()
+                .unwrap();
+            db.set_secret(
+                GRANT,
+                &format!("{policy}:{revision}:{}", "b".repeat(64)),
+                now(),
+            )
+            .unwrap();
+            revision
+        };
+        host.api_service
+            .set_voice_device_status(
+                "synthetic-device",
+                laser_runtime::VOICE_DEVICE_ALLOWED,
+                now(),
+            )
+            .unwrap();
+        host.api_service
+            .register_voice_session("synthetic-device", "synthetic-client", "synthetic-session")
+            .unwrap();
+        let discovery = home_readonly::Discovery {
+            policy_revision: policy,
+            credential_revision: credential,
+            entities: vec![home_readonly::DiscoveredEntity {
+                entity_id: "climate.room".into(),
+                state: "heat".into(),
+                last_updated: "synthetic-now".into(),
+                attributes: json!({"min_temp": 17.0, "max_temp": 28.0, "temperature": 20.0}),
+                actions_available: vec!["set_temperature".into()],
+            }],
+        };
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let coordinator = Arc::new(HomeControlCoordinator {
+            host: Arc::downgrade(&host),
+            pending: Mutex::new(HashMap::new()),
+            send_fence: Mutex::new(()),
+            test_fixture: Some(TestFixture {
+                discovery,
+                transport: Mutex::new(Some(Box::new(ClimateFake {
+                    calls: calls.clone(),
+                }))),
+            }),
+        });
+        let reply = coordinator
+            .prepare(
+                "synthetic-device",
+                "synthetic-session",
+                "hass_set_state",
+                &json!({"entity": "空调", "action": "set_temperature", "temperature": 24.0}),
+            )
+            .unwrap();
+        let id = reply["approval_id"].as_str().unwrap().to_owned();
+        let digest = ApprovalService::new(host.db.clone())
+            .get(&id)
+            .unwrap()
+            .digest;
+        let outcome = coordinator.approve(&id, &digest, true).unwrap();
+        assert_eq!(outcome["status"], "executed");
+        assert_eq!(outcome["outcome"]["success"], true);
+        assert_eq!(outcome["outcome"]["phase"], "completed");
+        let c = calls.lock().unwrap();
+        assert_eq!((c.sends, c.reads), (1, 2));
+    }
+}

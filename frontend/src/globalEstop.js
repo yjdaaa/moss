@@ -9,8 +9,27 @@ export async function stopKnownJob(getTargets, sendStop) {
     return { kind: "lookup_failed" };
   }
   if (jobs.length === 0) return { kind: "none" };
-  if (jobs.length > 1) return { kind: "ambiguous", jobs };
-  const job = jobs[0];
+  let job = jobs[0];
+  if (jobs.length > 1) {
+    const running = jobs.filter((item) => item && item.state === "running");
+    const othersAllUnknown = jobs.every(
+      (item) => item && (item.state === "running" || item.state === "unknown"),
+    );
+    const primaryTarget =
+      running.length === 1 && typeof running[0]?.target === "string"
+        ? running[0].target.trim()
+        : "";
+    const sameSingleTarget =
+      primaryTarget !== "" &&
+      jobs.every(
+        (item) => typeof item?.target === "string" && item.target.trim() === primaryTarget,
+      );
+    if (running.length === 1 && othersAllUnknown && sameSingleTarget) {
+      job = running[0];
+    } else {
+      return { kind: "ambiguous", jobs };
+    }
+  }
   if (typeof job.job_id !== "string" || !job.job_id.trim()) {
     return { kind: "lookup_failed" };
   }

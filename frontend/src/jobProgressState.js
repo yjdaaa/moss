@@ -70,6 +70,7 @@ export function jobView(job) {
     mode: job?.mode === "serial" ? "串口" : job?.mode === "network" ? "网络" : "",
     canCancel: Boolean(workflowId) && job?.state !== "unknown",
     canEstop: Boolean(jobId),
+    canAcknowledgeStop: Boolean(jobId) && job?.state === "unknown",
     // 「取消」只在知道 workflow_id 且非未知态时可用；未知态保留软急停重试入口，但须在机器旁确认。
     cancelHint: !workflowId
       ? "这条任务缺少 workflow_id，无法温和取消，只能用急停"
@@ -104,6 +105,11 @@ export function cancelPayload(view) {
 /** 急停：走既有 `/api/safe-action` 的实时 0x18 通道，必须显式 confirmed。 */
 export function estopPayload(view) {
   return { action: "emergency_stop", confirmed: true, job_id: view?.jobId || "" };
+}
+
+/** 未知态人工现场核对停稳后移除卡片：走 `/api/jobs/acknowledge-stop`，必须显式 confirmed。 */
+export function acknowledgeStopPayload(view) {
+  return { job_id: view?.jobId || "", confirmed: true };
 }
 
 /** 从 workflow 状态载荷里找 G-code 下载地址；找不到返回空字符串（界面隐藏按钮）。 */

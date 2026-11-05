@@ -32,7 +32,7 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 15（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13） | 
+| version | INTEGER PK | 当前 16（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13）；v16 为 `context_knowledge_roots` 增加按目录独立启停列 `enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))`（§3.17，n50） |
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
@@ -343,17 +343,17 @@ v11（NV19-04）：外部内容 FTS5 虚表 `context_memories_fts(content)`，`t
 
 `context_extraction_runs` 保存每次候选提取的变更清单及 `reverted_at`（NV19-03）。提取只能新增候选，所以 `adds_json` 只有 `{id,revision}`，`skipped_json` 只有 `{op,reason}`，`updates_json` / `deletes_json` 恒为 `[]`，清单不含记忆正文；四列都必须是不超过 16 KiB 的 JSON 数组。接口：`insert_context_extraction_run`（不能直接写入已撤销）、`context_extraction_run`、`list_context_extraction_runs`（按范围，新的在前）、`mark_context_extraction_reverted`（只能成功一次）。
 
-### 3.17 `context_knowledge_*`（schema v12，NV19-05）
+### 3.17 `context_knowledge_*`（schema v12 / v16，NV19-05 / n50）
 
 用户明确选择的资料目录。只存目录级摘要与文件指纹，原文（L2）不入库。
 
 | 表 | 列 | 说明 |
 |---|---|---|
-| `context_knowledge_roots` | id、scope_kind（project / workspace）、scope_id、label（目录名，≤128）、root_path（规范化本机路径，≤1024，不进提示词）、revision（≥1）、created_at、indexed_at | 同一范围同一路径唯一 |
+| `context_knowledge_roots` | id、scope_kind（project / workspace）、scope_id（独立本地知识库固定为 `local-kb`）、label（目录名，≤128）、root_path（规范化本机路径，≤1024，不进提示词）、enabled（0/1，默认 1）、revision（≥1）、created_at、indexed_at | 同一范围同一路径唯一 |
 | `context_knowledge_dirs` | id、root_id、rel_dir（`/` 分隔，根目录为空串）、l0（1～256 字）、l1（1～4000 字）、file_count（≥1） | `(root_id, rel_dir)` 唯一；FTS5 外部内容表 `context_knowledge_fts(l0, l1)`，trigram，三个触发器同步 |
 | `context_knowledge_files` | id、root_id、dir_id、rel_path、sha256（64）、size（>0）、mtime | `(root_id, rel_path)` 唯一；索引 `(dir_id)` |
 
-`RuntimeDb`（`knowledge_store.rs`）：`insert_knowledge_root`（revision 1、未建索引）、`knowledge_root(s)`、`replace_knowledge_index`（单事务：revision 相符才整体替换目录与文件并 revision+1，文件必须属于本次的目录，任何约束失败整体回滚）、`delete_knowledge_root_if_revision`（单事务删除三张表的行；数据库未开外键，不依赖级联）、`knowledge_dirs`、`knowledge_files`、`search_knowledge_dirs`（本范围内 L0 / L1 命中三字片段（FTS5）或短词（LIKE，`!` 转义）的目录，去重合并）。
+`RuntimeDb`（`knowledge_store.rs`）：`insert_knowledge_root`（revision 1、enabled 1、未建索引）、`knowledge_root(s)`、`all_knowledge_roots`、`set_knowledge_root_enabled`、`replace_knowledge_index`（单事务：revision 相符才整体替换目录与文件并 revision+1，文件必须属于本次的目录，任何约束失败整体回滚）、`delete_knowledge_root_if_revision`（单事务删除三张表的行；数据库未开外键，不依赖级联）、`knowledge_dirs`、`knowledge_files`、`search_knowledge_dirs`（仅在 `r.enabled = 1` 的本范围根目录内，匹配 L0 / L1 命中三字片段（FTS5）或短词（LIKE，`!` 转义）的目录，去重合并）。
 
 ### 3.18 `voice_firmware_artifacts` 与固件推送列（schema v13，NV17）
 

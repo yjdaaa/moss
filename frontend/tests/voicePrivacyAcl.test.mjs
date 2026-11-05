@@ -134,8 +134,9 @@ test("NV19 long-term context UI and commands live only in the packaged private w
   assert.equal(Object.hasOwn(context, "remote"), false);
   assert.equal(Object.hasOwn(context, "webviews"), false);
   for (const permission of context.permissions) assert.equal(fallback.permissions.includes(permission), false, permission);
-  assert.match(frontend("src/voicePrivate.jsx"), /<VoiceContextCard\b/);
-  assert.match(frontend("src/components/VoiceBuiltinCard.jsx"), /VoiceContextCard/, "主语音页就地展开长期记忆");
+  assert.match(frontend("src/voicePrivate.jsx"), /<VoiceMemoryCard\b/);
+  assert.match(frontend("src/components/VoiceMemoryCard.jsx"), /<VoiceContextCard\b/, "记忆面板收口为单一无感记忆卡");
+  assert.match(frontend("src/components/VoiceBuiltinCard.jsx"), /<VoiceMemoryCard\b/, "主语音页就地展开合一记忆卡");
   assert.doesNotMatch(frontend("src/pages/VoicePage.jsx"), /VoiceContextCard|contextManage|contextPickFolder/, "长期记忆不挂到整页顶层");
   const native = desktop("src/voice_context.rs");
   for (const command of ["voice_context_manage", "voice_context_pick_folder"]) {

@@ -11,6 +11,7 @@
 | GET | `/api/health` | 存活检查 | §2 |
 | GET | `/api/system/info` | 端口、MCP 桥状态与遥测；非回环也公开 | §2 |
 | GET | `/api/jobs/stop-targets` | 顶栏急停与激光任务进度浮层的后端原始任务目标：`result.jobs` 数组。除 `job_id`、`target`、`state` (`running` / `unknown`) 外，2026-11-02 起运行中的作业还带只读进度字段 `workflow_id`、`phase` (`streaming` / `awaiting_completion`)、`lines_sent`、`total_lines`、`elapsed_ms`、`mode`（取自 `ActiveJob::live_send_result`）。**纯只读**：不开设备连接、不写实时通道；状态未知不代表已停机，多个目标不得随机选择 | §2 |
+| POST | `/api/jobs/acknowledge-stop` | 交互端操作者现场核实机器已停稳后清除指定非空 `job_id` 且 `confirmed:true` 的 `uncertain_jobs` 待确认停止记录（拒绝语音/MCP 桥/审批重放调用方，不支持无编号全量清空，不影响运行中的 `active_jobs`） | §2 |
 | GET | `/api/ui/runtime-config` | 连接默认值与上传后缀 | §2 |
 | GET | `/api/ui/serial-ports` | 系统串口列表 | §2 |
 | POST | `/api/ui/discover-controllers` | mDNS 发现 FluidNC（2026-10-13 起由 GET 改为 POST） | §2 |
@@ -410,7 +411,7 @@ GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflo
 
 Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `typesafe/jev-1.13`，固定 `POST https://openrouter.ai/api/alpha/decisions`，Bearer 认证；请求含 `model`、`state`、`questions.feedback_type.{type:"choice",instructions,criteria}`，响应读取 `answers.feedback_type.{type,choice,confidence}`。不使用 Chat Completions 或 TypeSafe 直连接口，不跟随重定向，超时 5 秒，响应上限 64 KiB。协议依据 OpenRouter 官方 `openapi.json`（2026-09-22 核对）。
 
-`GET /api/jev/status` 返回 `enabled`、固定 `endpoint`、`model`、`provider`、`configured` 和 `masked_key`，不返回完整 Key。`POST /api/jev/reveal` 沿用现有鉴权规则，返回完整 Key；无 Key 为 404。`POST /api/jev/test` 使用已保存的 OpenRouter Key 测试 Decisions 契约，不连接设备。旧 TypeSafe Key 不能用于 OpenRouter，升级后需在设置中替换为 OpenRouter Key。
+`GET /api/jev/status` 返回 `enabled`、固定 `endpoint`、`model`、`provider`、`configured` 和 `masked_key`，不返回完整 Key。`POST /api/jev/reveal` 返回完整 Key（无 Key 为 404；桌面会话启用时要求 `X-Moss-Desktop-Session`，非桌面回环进程与局域网均拒绝）。`POST /api/jev/test` 使用已保存的 OpenRouter Key 测试 Decisions 契约，不连接设备。旧 TypeSafe Key 不能用于 OpenRouter，升级后需在设置中替换为 OpenRouter Key。`POST /api/feedback` 支持读取 `voice.builtin_local.jev_model`（含本地 Laya 或指定 OpenRouter 模型），并在未单独保存 `jev_api_key` 且内置语音大模型配置为 `https://openrouter.ai` 时安全复用 `voice.llm.main` 密钥。
 
 `POST /api/feedback`（兼容别名 `/api/jev/feedback`）接收 `{workflow_id|task_id, feedback_text}`。必须关联已有 workflow，反馈长度为 1..2000 字符。原参数读取 `artifacts.actual_params`；无此快照的旧任务或上传 G-code 必须显式提供 `laser_max_power`、`feed_rate`、`passes`、`power_scale`，只提供建议，不能自动采用。参数须为有限数字：`0<power<=power_scale`、标尺 1..100000、速度 100..6000 mm/min、次数为 1..5 整数。新生成预览使用 1000 标尺，反馈参数中的功率、速度须为整数；超限或缺失返回 400，显式参数与实际快照冲突返回 409，不猜默认参数。
 
@@ -424,7 +425,7 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 
 ### 3.15 `/api/settings`
 
-`{web_port, mcp_endpoint, jev_enabled, jev_api_key, jev_delete_api_key, lan_access}`。先校验全部字段，再一次写入 `settings.json`（临时文件 + 改名，保留其他键）；没有运行目录或写入失败返回 500 `settings_write_failed`，不再显示“已保存”（2026-10-14）。`mcp_endpoint` 保留以兼容旧前端、独立 `moss-host` 与手机端；桌面端页面改在语音中心修改（技术书 §9.5.1），由语音中心直接写 `settings.json` 并立即重连。普通 Jev 配置写入运行目录 `settings.json`；Key 仍以原有方式存储于 SQLite `app_secrets`，本次不改变存储安全方案。旧 `jev_endpoint` 字段仅接受空值或固定 OpenRouter Decisions 地址，其他地址返回 400；已保存的旧地址不参与请求路由。`jev_delete_api_key:true` 删除已保存的 Key。
+`{web_port, mcp_endpoint, jev_enabled, jev_api_key, jev_delete_api_key, lan_access}`。桌面会话启用时要求 `X-Moss-Desktop-Session`（独立 `moss-host` 维持回环可写，局域网始终 403 `lan_read_only`）。先校验全部字段，再加锁原子读-改-写 `settings.json`（独立临时文件 + 改名，保留其他键，坏 JSON 拒绝覆盖）；没有运行目录或写入失败返回 500 `settings_write_failed`，不再显示“已保存”（2026-10-14）。`mcp_endpoint` 保留以兼容旧前端、独立 `moss-host` 与手机端；桌面端页面改在语音中心修改（技术书 §9.5.1），由语音中心直接写 `settings.json` 并立即重连。普通 Jev 配置写入运行目录 `settings.json`；Key 仍以原有方式存储于 SQLite `app_secrets`，本次不改变存储安全方案。旧 `jev_endpoint` 字段仅接受空值或固定 OpenRouter Decisions 地址，其他地址返回 400；已保存的旧地址不参与请求路由。`jev_delete_api_key:true` 删除已保存的 Key。
 
 ## 4. 需要在实现时保持的怪异行为
 

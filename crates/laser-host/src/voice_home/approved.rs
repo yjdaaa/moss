@@ -23,6 +23,62 @@ pub(crate) trait HomeControlTransport {
     /// An observation must honor the remaining deadline; blocking network
     /// reads must never overrun the caller's total observation budget.
     fn read_target_state(&mut self, entity_id: &str, budget: Duration) -> Result<String, ()>;
+    fn read_target_snapshot(
+        &mut self,
+        entity_id: &str,
+        budget: Duration,
+    ) -> Result<(String, serde_json::Value), ()> {
+        self.read_target_state(entity_id, budget)
+            .map(|state| (state, serde_json::Value::Null))
+    }
+}
+
+enum ExpectedObservation {
+    State(&'static str),
+    Temperature(f64),
+    PlayingMedia(Option<String>),
+}
+
+impl ExpectedObservation {
+    fn matches(&self, state: &str, attributes: &serde_json::Value) -> bool {
+        match self {
+            Self::State(expected) => state == *expected,
+            Self::Temperature(target) => {
+                state != "unavailable"
+                    && state != "unknown"
+                    && attributes
+                        .get("temperature")
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|actual| actual.is_finite() && (actual - *target).abs() <= 0.05)
+            }
+            Self::PlayingMedia(expected_id) => {
+                state == "playing"
+                    && expected_id.as_deref().is_some_and(|expected| {
+                        attributes
+                            .get("media_content_id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|actual| actual == expected)
+                    })
+            }
+        }
+    }
+}
+
+fn wait_before_retry(deadline: Instant, permit: &AtomicBool) -> bool {
+    let pause_until = (Instant::now() + Duration::from_millis(150)).min(deadline);
+    while Instant::now() < pause_until {
+        if !permit.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return false;
+        }
+        let step = pause_until
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(25));
+        if step.is_zero() {
+            break;
+        }
+        std::thread::sleep(step);
+    }
+    permit.load(Ordering::Acquire) && Instant::now() < deadline
 }
 
 /// The approval is consumed and audited *before* the one possible request.
@@ -97,22 +153,33 @@ pub(crate) fn dispatch_approved(
         HomeDispatchResult::ResultUnknown
     } else {
         let expected = match plan.action {
-            HomeAction::TurnOn => "on",
-            HomeAction::TurnOff => "off",
-            HomeAction::Lock => "locked",
-            HomeAction::Unlock => "unlocked",
-            HomeAction::ArmHome => "armed_home",
-            HomeAction::ArmAway => "armed_away",
-            HomeAction::Disarm => "disarmed",
-            HomeAction::OpenCover => "open",
-            HomeAction::CloseCover => "closed",
-            HomeAction::StopCover => "stopped",
-            HomeAction::SetTemperature | HomeAction::PlayMedia => "",
+            HomeAction::TurnOn => Some(ExpectedObservation::State("on")),
+            HomeAction::TurnOff => Some(ExpectedObservation::State("off")),
+            HomeAction::Lock => Some(ExpectedObservation::State("locked")),
+            HomeAction::Unlock => Some(ExpectedObservation::State("unlocked")),
+            HomeAction::ArmHome => Some(ExpectedObservation::State("armed_home")),
+            HomeAction::ArmAway => Some(ExpectedObservation::State("armed_away")),
+            HomeAction::Disarm => Some(ExpectedObservation::State("disarmed")),
+            HomeAction::OpenCover => Some(ExpectedObservation::State("open")),
+            HomeAction::CloseCover => Some(ExpectedObservation::State("closed")),
+            HomeAction::StopCover => Some(ExpectedObservation::State("stopped")),
+            HomeAction::PlayMedia => Some(ExpectedObservation::PlayingMedia(
+                plan.body
+                    .get("media_content_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            )),
+            HomeAction::SetTemperature => plan
+                .body
+                .get("temperature")
+                .and_then(serde_json::Value::as_f64)
+                .filter(|t| t.is_finite())
+                .map(ExpectedObservation::Temperature),
         };
         let mut result = HomeDispatchResult::AcceptedUnconfirmed;
         let deadline = Instant::now() + Duration::from_secs(3);
-        if !expected.is_empty() {
-            for _ in 0..3 {
+        if let Some(expected) = expected {
+            for attempt in 0..3 {
                 if Instant::now() >= deadline || !permit.load(Ordering::Acquire) {
                     result = HomeDispatchResult::ResultUnknown;
                     break;
@@ -123,7 +190,7 @@ pub(crate) fn dispatch_approved(
                     result = HomeDispatchResult::ResultUnknown;
                     break;
                 }
-                let observed = transport.read_target_state(&plan.entity_id, budget);
+                let observed = transport.read_target_snapshot(&plan.entity_id, budget);
                 // Revocation can happen while HTTPS observation is pending.
                 // An old read success must not turn revoked work into Completed.
                 if !permit.load(Ordering::Acquire) || Instant::now() >= deadline {
@@ -131,11 +198,16 @@ pub(crate) fn dispatch_approved(
                     break;
                 }
                 match observed {
-                    Ok(state) if state == expected => {
+                    Ok((state, attributes)) if expected.matches(&state, &attributes) => {
                         result = HomeDispatchResult::Confirmed;
                         break;
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        if attempt < 2 && !wait_before_retry(deadline, permit) {
+                            result = HomeDispatchResult::ResultUnknown;
+                            break;
+                        }
+                    }
                     Err(_) => {
                         result = HomeDispatchResult::ResultUnknown;
                         break;
@@ -565,5 +637,253 @@ mod tests {
             ApprovalError::Consumed
         );
         assert_eq!(fake.sends, 1);
+    }
+
+    struct PollSequenceTransport {
+        expected_path: &'static str,
+        expected_entity: &'static str,
+        replies: Vec<(String, Value)>,
+        sends: usize,
+        reads: usize,
+    }
+    impl HomeControlTransport for PollSequenceTransport {
+        fn submit_once(&mut self, path: &str, body: &Value) -> Result<(), ()> {
+            assert_eq!(path, self.expected_path);
+            assert_eq!(body["entity_id"], self.expected_entity);
+            self.sends += 1;
+            Ok(())
+        }
+        fn read_target_state(&mut self, entity_id: &str, budget: Duration) -> Result<String, ()> {
+            self.read_target_snapshot(entity_id, budget).map(|(s, _)| s)
+        }
+        fn read_target_snapshot(
+            &mut self,
+            entity_id: &str,
+            budget: Duration,
+        ) -> Result<(String, Value), ()> {
+            assert_eq!(entity_id, self.expected_entity);
+            assert!(!budget.is_zero() && budget <= Duration::from_millis(900));
+            let idx = self.reads.min(self.replies.len().saturating_sub(1));
+            self.reads += 1;
+            Ok(self.replies[idx].clone())
+        }
+    }
+
+    fn custom_plan_fixture(
+        states_json: &[u8],
+        services_json: &[u8],
+        allowlist: Vec<AllowedEntity>,
+        target: &str,
+        action: HomeAction,
+        params: Value,
+    ) -> (
+        ApprovalService,
+        HomeCatalog,
+        HomeControlPlan,
+        String,
+        String,
+        Arc<AtomicBool>,
+    ) {
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        {
+            let lock = db.lock().unwrap();
+            lock.voice_device_seen("nv15-device", "nv15-client", "", "", "", 1.)
+                .unwrap();
+            lock.set_voice_device_status("nv15-device", VOICE_DEVICE_ALLOWED, 2.)
+                .unwrap();
+        }
+        let service = ApprovalService::new(db).with_clock(Arc::new(|| 10.));
+        let catalog =
+            HomeCatalog::from_snapshots(states_json, services_json, allowlist, 4, 5).unwrap();
+        let permit = Arc::new(AtomicBool::new(true));
+        let plan = catalog.plan(target, action, &params, &permit).unwrap();
+        let facts: Map<String, Value> =
+            json!({"path":plan.service_path,"body":plan.body,"policy":4,"credential":5})
+                .as_object()
+                .unwrap()
+                .clone();
+        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&facts).unwrap()));
+        let created = service
+            .create(NewApproval {
+                owner: Some("trusted-device".into()),
+                voice_permit: Some(permit.clone()),
+                kind: ApprovalKind::HomeControl,
+                target_record: plan.entity_id.clone(),
+                source: ApprovalSource::Voice,
+                session_id: Some("nv15-device".into()),
+                request_id: None,
+                summary: "合成家居审批".into(),
+                facts: facts.clone(),
+                connection: ApprovalConnection::Home {
+                    fingerprint: fingerprint.clone(),
+                },
+                request: facts,
+                client: "voice:nv15-device".into(),
+                removed_fields: vec![],
+            })
+            .unwrap();
+        let digest = created.digest;
+        service
+            .approve(&created.approval_id, &digest, &digest)
+            .unwrap();
+        (
+            service,
+            catalog,
+            plan,
+            fingerprint,
+            created.approval_id,
+            permit,
+        )
+    }
+
+    #[test]
+    fn set_temperature_and_play_media_confirm_on_second_poll_with_backoff() {
+        use super::super::AllowedMedia;
+
+        // 1. SetTemperature confirms on poll #2 when attributes["temperature"] matches within 0.05
+        let (service, catalog, plan, fp, id, permit) = custom_plan_fixture(
+            br#"[{"entity_id":"climate.room","state":"heat","last_updated":"now","attributes":{"min_temp":17.0,"max_temp":28.0,"temperature":20.0}}]"#,
+            br#"[{"domain":"climate","services":{"set_temperature":{}}}]"#,
+            vec![AllowedEntity {
+                entity_id: "climate.room".into(),
+                alias: "空调".into(),
+                enabled: true,
+                policy: HomePolicy::Ask,
+                media: vec![],
+            }],
+            "空调",
+            HomeAction::SetTemperature,
+            json!({"temperature": 23.5}),
+        );
+        let mut climate_transport = PollSequenceTransport {
+            expected_path: "/api/services/climate/set_temperature",
+            expected_entity: "climate.room",
+            replies: vec![
+                ("heat".into(), json!({"temperature": 20.0})),
+                ("heat".into(), json!({"temperature": 23.53})),
+            ],
+            sends: 0,
+            reads: 0,
+        };
+        let started = Instant::now();
+        let res = dispatch_approved(
+            &service,
+            &id,
+            "nv15-device",
+            &fp,
+            &catalog,
+            &plan,
+            &permit,
+            &mut climate_transport,
+        )
+        .unwrap();
+        assert_eq!(res, HomeDispatchResult::Confirmed);
+        assert_eq!((climate_transport.sends, climate_transport.reads), (1, 2));
+        assert!(
+            started.elapsed() >= Duration::from_millis(120),
+            "poll #1 未命中后应退避等待再执行 poll #2"
+        );
+        let saved = service.get(&id).unwrap();
+        assert_eq!(saved.status, ApprovalStatus::Executed);
+        let outcome = saved.outcome.unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.phase, Some(ApprovalPhase::Completed));
+        assert!(outcome.error_code.is_none());
+
+        // 2. PlayMedia confirms ONLY when state == "playing" AND media_content_id matches approved media
+        let (service, catalog, plan, fp, id, permit) = custom_plan_fixture(
+            br#"[{"entity_id":"media_player.room","state":"idle","last_updated":"now","attributes":{}}]"#,
+            br#"[{"domain":"media_player","services":{"play_media":{}}}]"#,
+            vec![AllowedEntity {
+                entity_id: "media_player.room".into(),
+                alias: "音箱".into(),
+                enabled: true,
+                policy: HomePolicy::Ask,
+                media: vec![AllowedMedia {
+                    id: "library_demo_song".into(),
+                    media_type: "music".into(),
+                }],
+            }],
+            "音箱",
+            HomeAction::PlayMedia,
+            json!({"library_id": "library_demo_song"}),
+        );
+        let mut media_transport = PollSequenceTransport {
+            expected_path: "/api/services/media_player/play_media",
+            expected_entity: "media_player.room",
+            replies: vec![
+                ("buffering".into(), json!({"media_content_id": "library_demo_song"})),
+                ("playing".into(), json!({"media_content_id": "library_demo_song"})),
+            ],
+            sends: 0,
+            reads: 0,
+        };
+        let res = dispatch_approved(
+            &service,
+            &id,
+            "nv15-device",
+            &fp,
+            &catalog,
+            &plan,
+            &permit,
+            &mut media_transport,
+        )
+        .unwrap();
+        assert_eq!(res, HomeDispatchResult::Confirmed);
+        assert_eq!((media_transport.sends, media_transport.reads), (1, 2));
+        let saved = service.get(&id).unwrap();
+        assert_eq!(saved.status, ApprovalStatus::Executed);
+        let outcome = saved.outcome.unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.phase, Some(ApprovalPhase::Completed));
+        assert!(outcome.error_code.is_none());
+
+        // 2b. PlayMedia stays AcceptedUnconfirmed if speaker is playing a different track or omits media_content_id
+        let (service2, catalog2, plan2, fp2, id2, permit2) = custom_plan_fixture(
+            br#"[{"entity_id":"media_player.room","state":"playing","last_updated":"now","attributes":{"media_content_id":"other_song"}}]"#,
+            br#"[{"domain":"media_player","services":{"play_media":{}}}]"#,
+            vec![AllowedEntity {
+                entity_id: "media_player.room".into(),
+                alias: "音箱".into(),
+                enabled: true,
+                policy: HomePolicy::Ask,
+                media: vec![AllowedMedia {
+                    id: "library_demo_song".into(),
+                    media_type: "music".into(),
+                }],
+            }],
+            "音箱",
+            HomeAction::PlayMedia,
+            json!({"library_id": "library_demo_song"}),
+        );
+        let mut wrong_media_transport = PollSequenceTransport {
+            expected_path: "/api/services/media_player/play_media",
+            expected_entity: "media_player.room",
+            replies: vec![
+                ("playing".into(), json!({"media_content_id": "other_song"})),
+                ("playing".into(), Value::Null),
+                ("playing".into(), json!({"media_content_id": "other_song"})),
+            ],
+            sends: 0,
+            reads: 0,
+        };
+        let unconfirmed = dispatch_approved(
+            &service2,
+            &id2,
+            "nv15-device",
+            &fp2,
+            &catalog2,
+            &plan2,
+            &permit2,
+            &mut wrong_media_transport,
+        )
+        .unwrap();
+        assert_eq!(unconfirmed, HomeDispatchResult::AcceptedUnconfirmed);
+        // 3. Temperature matcher rejects unavailable/unknown states and out-of-tolerance values
+        let matcher = ExpectedObservation::Temperature(23.5);
+        assert!(matcher.matches("heat", &json!({"temperature": 23.54})));
+        assert!(!matcher.matches("unavailable", &json!({"temperature": 23.5})));
+        assert!(!matcher.matches("unknown", &json!({"temperature": 23.5})));
+        assert!(!matcher.matches("heat", &json!({"temperature": 23.6})));
     }
 }

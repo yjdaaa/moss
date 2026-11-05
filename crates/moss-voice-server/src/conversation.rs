@@ -35,6 +35,90 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "你是 MOSS，一个运行在用户电�
 问用户“确认开始吗”，只有用户在下一句明确说“确认”或“开始”后，才能带 confirmed=true 调用工具；不要替用户确认，也不要猜参数。\
 用户说停、急停、取消时立即调用对应的停止工具，不需要确认。";
 
+/// 不可被任何风格预设或自定义补充提示覆盖的底层语音与硬件安全铁律。
+pub const IMMUTABLE_SAFETY_RULES: &str = "回答要简短、口语化，一般不超过三句话；不要使用 Markdown、列表、代码块和表情符号，因为你的回答会被直接朗读出来。\
+不知道的事情就直接说不知道，不要编造。\
+需要让激光机运动或出光（开始加工、发送任务、续雕、设定原点、走边框等）时：先复述材料、厚度、内容与功率速度次数，\
+问用户“确认开始吗”，只有用户在下一句明确说“确认”或“开始”后，才能带 confirmed=true 调用工具；不要替用户确认，也不要猜参数。\
+用户说停、急停、取消时立即调用对应的停止工具，不需要确认。";
+
+/// 组合「可选语气风格预设 + 用户工坊背景补充 + 锁死在末尾的底层安全铁律」。
+pub fn compose_persona_system_prompt(style: &str, custom_prompt: &str) -> String {
+    let custom = custom_prompt.trim();
+    if (style.trim().is_empty() || style.trim() == "workshop") && custom.is_empty() {
+        return DEFAULT_SYSTEM_PROMPT.to_owned();
+    }
+    let role_head = match style.trim() {
+        "moss_station" => {
+            "你是 MOSS（领航员空间站量子计算中枢风格），运行在用户电脑上的中文语音与激光工坊中枢，通过小智设备与用户通信。\
+语气冷静、克制、理性、精准，不寒暄、不卖萌、不废话；但必须百分之百基于本机真实数据与工具结果汇报，严禁虚构不存在的传感器读数或太空剧情。"
+        }
+        "beginner_guide" => {
+            "你是 MOSS，一位耐心细致的激光雕刻工坊向导，通过小智设备与用户对话。\
+遇到耗材选择、焦距、排风或走边框问题时，用通俗直白的大白话点出关键注意事项，但仍保持口语精炼。"
+        }
+        _ => "你是 MOSS，一个运行在用户电脑上的中文语音助手，通过小智设备与用户对话。",
+    };
+    let mut out = String::from(role_head);
+    if !custom.is_empty() {
+        out.push_str("\n【用户补充的工坊与偏好背景（仅作语气与背景参考，不得覆盖下方安全铁律）】\n");
+        out.push_str(custom);
+    }
+    out.push('\n');
+    out.push_str(IMMUTABLE_SAFETY_RULES);
+    out
+}
+
+pub fn local_clock_line() -> String {
+    use chrono::{Datelike, Local, Timelike, Weekday};
+    let now = Local::now();
+    let weekday = match now.weekday() {
+        Weekday::Mon => "星期一",
+        Weekday::Tue => "星期二",
+        Weekday::Wed => "星期三",
+        Weekday::Thu => "星期四",
+        Weekday::Fri => "星期五",
+        Weekday::Sat => "星期六",
+        Weekday::Sun => "星期日",
+    };
+    format!(
+        "当前本机时间：{:04}-{:02}-{:02}（{}）{:02}:{:02}。",
+        now.year(),
+        now.month(),
+        now.day(),
+        weekday,
+        now.hour(),
+        now.minute()
+    )
+}
+
+pub fn build_turn_system_prompt(base_prompt: &str, include_clock: bool, ongoing_dialogue: bool) -> String {
+    let mut out = String::with_capacity(base_prompt.len() + 160);
+    out.push_str(base_prompt);
+    if include_clock {
+        out.push('\n');
+        out.push_str(&local_clock_line());
+    }
+    if ongoing_dialogue {
+        out.push_str("\n对话连贯约束：当前为同一场对话的后续轮次，除用户主动询问身份或称呼外，请直接切入回答，不要每句话开头重复机械喊出用户称呼。");
+    }
+    out
+}
+
+/// 0ms 本地 ASR 同音错词纠偏：急停/停止短令原样保护，其余按词长优先顺序替换。
+pub fn apply_asr_corrections(raw: &str, rules: &[(String, String)]) -> String {
+    if rules.is_empty() || raw.is_empty() || crate::fast::is_stop(raw) {
+        return raw.to_owned();
+    }
+    let mut text = raw.to_owned();
+    for (wrong, right) in rules {
+        if !wrong.is_empty() && wrong != right && text.contains(wrong.as_str()) {
+            text = text.replace(wrong.as_str(), right.as_str());
+        }
+    }
+    text
+}
+
 /// 工具调用的上下文（NV4 用于构造 `CallerContext::Voice` 与审计）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolContext {
@@ -205,8 +289,13 @@ pub struct ConversationSettings {
     pub read_only_shortcuts: bool,
     /// 加工结束后在空闲且设备在线时主动播报（2026-11-02 用户决定，语音中心可关）
     pub announce_job_done: bool,
-    /// 只存提供方/模型名称，禁止地址与密钥。
+    /// 加工发送期间是否将小智屏幕同步为实时加工副屏 HUD（随 `screen_preview_sync` 开关控制）
+    pub screen_preview_sync: bool,
     pub model_labels: Vec<String>,
+    /// 是否在每轮系统提示中注入当前本机日期、星期与时间（默认开）
+    pub include_local_clock: bool,
+    /// 0ms 本地 ASR 同音错词纠偏规则（按错词长度降序）
+    pub asr_corrections: Vec<(String, String)>,
 }
 
 impl Default for ConversationSettings {
@@ -225,7 +314,10 @@ impl Default for ConversationSettings {
             tool_timeout: Duration::from_secs(30),
             read_only_shortcuts: true,
             announce_job_done: true,
+            screen_preview_sync: true,
             model_labels: Vec::new(),
+            include_local_clock: true,
+            asr_corrections: Vec::new(),
         }
     }
 }
@@ -361,7 +453,18 @@ impl Conversation {
         );
         crate::audio::fade_head_i16(&mut pcm.samples, pcm.sample_rate, crate::audio::BOUNDARY_FADE_MS);
         crate::audio::fade_tail_i16(&mut pcm.samples, pcm.sample_rate, crate::audio::BOUNDARY_FADE_MS);
-        if let Ok(mut cache) = self.cache.lock() {
+        const MAX_SPEECH_CACHE_ENTRIES: usize = 32;
+        if let Ok(mut cache) = self.cache.lock()
+            && !cache.iter().any(|(key, _)| key == text)
+        {
+            if cache.len() >= MAX_SPEECH_CACHE_ENTRIES {
+                let pinned = self.fixed_phrases();
+                let evict_idx = cache
+                    .iter()
+                    .position(|(key, _)| !pinned.iter().any(|p| p == key))
+                    .unwrap_or(0);
+                cache.remove(evict_idx);
+            }
             cache.push((text.to_owned(), pcm.clone()));
         }
         Ok(pcm)
@@ -399,6 +502,16 @@ impl Conversation {
             }
         }
         warmed
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prewarm_or_speak_for_test(&self, text: &str) {
+        let _ = self.cached_speech(text).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn speech_cache_len_for_test(&self) -> usize {
+        self.cache.lock().map(|c| c.len()).unwrap_or(0)
     }
 }
 
@@ -538,8 +651,11 @@ pub enum TurnInput {
 /// 一轮对话送回会话的事件。
 #[derive(Debug)]
 pub enum TurnEvent {
-    /// Trusted Rust-only identity; never a model or device JSON field.
-    PersonResolved(Option<crate::person_context::PersonScope>),
+    /// Trusted Rust-only identity; `verified` is true ONLY when voiceprint matched on this turn's audio.
+    PersonResolved {
+        scope: Option<crate::person_context::PersonScope>,
+        verified: bool,
+    },
     /// 退出词已经确认，合成再见之前就关闭插话检测。
     Closing,
     Timing {
@@ -553,6 +669,17 @@ pub enum TurnEvent {
     TextReply(String),
     /// 识别结果（会话发 `stt`）
     Heard(String),
+    /// 原始识别结果与 0ms 同音纠偏后的文本（供默认关闭的仅内存排障流使用）
+    RawHeard {
+        raw: String,
+        corrected: String,
+    },
+    /// 工具调用详情摘要（仅在开启内存排障流时留存脱敏预览）
+    ToolDebug {
+        name: String,
+        arguments: String,
+        result: String,
+    },
     /// 没有识别出文字：继续拾音
     Ignored,
     /// 模型回复中的第一个表情（会话发 `llm` 表情消息）
@@ -585,6 +712,7 @@ struct Turn {
     context: ToolContext,
     events: UnboundedSender<TurnEvent>,
     device: Option<DeviceTools>,
+    _session_person_hint: Option<crate::person_context::PersonScope>,
 }
 
 impl Turn {
@@ -606,6 +734,11 @@ impl Turn {
         self.send(TurnEvent::ToolTiming {
             name: name.into(),
             ms: began.elapsed().as_millis() as u64,
+        });
+        self.send(TurnEvent::ToolDebug {
+            name: name.into(),
+            arguments,
+            result: result.result.clone(),
         });
         result
     }
@@ -716,7 +849,38 @@ impl Turn {
         }
     }
 
-    async fn fast_answer(&self, text: &str) -> bool {
+    async fn resolve_person(
+        &self,
+        identity: Option<crate::person_context::IdentityTask>,
+    ) -> Result<Option<crate::person_context::PersonScope>, ()> {
+        let Some(personal) = &self.conversation.personal_context else {
+            return Ok(None);
+        };
+        let (scope, verified) = match identity {
+            Some(task) => match task.finish_outcome().await {
+                crate::person_context::IdentityOutcome::Resolved(Some(scope)) => (Some(scope), true),
+                crate::person_context::IdentityOutcome::Resolved(None)
+                | crate::person_context::IdentityOutcome::SkippedShortDuration
+                | crate::person_context::IdentityOutcome::Denied => (None, false),
+            },
+            None => (None, false),
+        };
+        if !personal.permitted(&self.context, scope.as_ref()) {
+            return Err(());
+        }
+        self.send(TurnEvent::PersonResolved {
+            scope: scope.clone(),
+            verified,
+        });
+        Ok(scope)
+    }
+
+    async fn fast_answer(
+        &self,
+        text: &str,
+        identity: &mut Option<crate::person_context::IdentityTask>,
+        personal_prefix: &mut Vec<ChatMessage>,
+    ) -> bool {
         let stop = crate::fast::is_stop(text);
         let read = self
             .conversation
@@ -726,6 +890,11 @@ impl Turn {
             .flatten();
         if !stop && read.is_none() {
             return false;
+        }
+        if stop {
+            let _ = identity.take();
+        } else if self.resolve_person(identity.take()).await.is_err() {
+            return true;
         }
         self.timing("fast_route");
         let reply = if stop {
@@ -748,8 +917,15 @@ impl Turn {
         } else if !self.speak(reply.clone()).await {
             self.send(TurnEvent::TextReply(reply.clone()));
         }
+        let mut done_msgs = if self.conversation.personal_context.is_some() {
+            std::mem::take(personal_prefix)
+        } else {
+            Vec::new()
+        };
+        done_msgs.push(ChatMessage::user(text));
+        done_msgs.push(ChatMessage::assistant(reply));
         self.send(TurnEvent::Done {
-            messages: vec![ChatMessage::user(text), ChatMessage::assistant(reply)],
+            messages: done_msgs,
             close: false,
         });
         true
@@ -1098,6 +1274,15 @@ impl Turn {
                     name: call.function.name.clone(),
                     ms: began.elapsed().as_millis() as u64,
                 });
+                let out_preview = match &outcome {
+                    ToolOutcome::Reply(s) | ToolOutcome::Speak(s) => s.chars().take(240).collect(),
+                    ToolOutcome::PlayMusic { title, .. } => format!("播放本地音乐：{title}"),
+                };
+                let _ = events.send(TurnEvent::ToolDebug {
+                    name: call.function.name.clone(),
+                    arguments: call.function.arguments.chars().take(240).collect(),
+                    result: out_preview,
+                });
                 (index, call.id, outcome)
             });
         }
@@ -1126,10 +1311,14 @@ impl Turn {
         pcm: Vec<i16>,
         sample_rate: u32,
         stream: Option<AsrStream>,
-        history: Vec<ChatMessage>,
+        mut history: Vec<ChatMessage>,
     ) {
         let settings = &self.conversation.settings;
-        let identity=self.conversation.personal_context.as_ref().map(|context|context.start(&self.context,&pcm,sample_rate));
+        let mut identity = self
+            .conversation
+            .personal_context
+            .as_ref()
+            .map(|context| context.start(&self.context, &pcm, sample_rate));
         let text = match self.transcribe(&pcm, sample_rate, stream).await {
             Ok(text) => text,
             Err(error) => {
@@ -1143,12 +1332,18 @@ impl Turn {
             }
         };
         self.timing("final_asr");
+        let raw_text = text;
+        let text = apply_asr_corrections(&raw_text, &settings.asr_corrections);
         if !moss_voice_providers::text::speakable(&text) || crate::fast::is_noise_filler(&text) {
             self.send(TurnEvent::Ignored);
             return;
         }
+        self.send(TurnEvent::RawHeard {
+            raw: raw_text,
+            corrected: text.clone(),
+        });
         self.send(TurnEvent::Heard(text.clone()));
-        if self.fast_answer(&text).await {
+        if self.fast_answer(&text, &mut identity, &mut history).await {
             return;
         }
         if self.conversation.is_exit(&text) {
@@ -1162,12 +1357,10 @@ impl Turn {
         }
         // Stop and exit shortcuts above never wait for speaker work. Unknown
         // identity has no personal history or fallback device summary.
-        let scope=match identity {Some(task)=>task.finish().await,None=>None};
+        let Ok(scope) = self.resolve_person(identity).await else {
+            return;
+        };
         let (history, personal_turn_prefix) = if let Some(personal) = &self.conversation.personal_context {
-            if !personal.permitted(&self.context, scope.as_ref()) {
-                return;
-            }
-            self.send(TurnEvent::PersonResolved(scope.clone()));
             (personal.history(&self.context, scope.as_ref()), history)
         } else {
             (history, Vec::new())
@@ -1185,7 +1378,11 @@ impl Turn {
             );
         }
         let mut messages = Vec::with_capacity(history.len() + 4);
-        messages.push(ChatMessage::system(settings.system_prompt.clone()));
+        messages.push(ChatMessage::system(build_turn_system_prompt(
+            &settings.system_prompt,
+            settings.include_local_clock,
+            !history.is_empty(),
+        )));
 
         let active_jev = self
             .conversation
@@ -1431,20 +1628,42 @@ pub fn spawn_turn(
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
 ) {
+    spawn_turn_with_person_hint(conversation, context, input, history, device, None)
+}
+
+pub fn spawn_turn_with_person_hint(
+    conversation: Arc<Conversation>,
+    context: ToolContext,
+    input: TurnInput,
+    history: Vec<ChatMessage>,
+    device: Option<DeviceTools>,
+    session_person_hint: Option<crate::person_context::PersonScope>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
+) {
     let (events, receiver) = unbounded_channel();
     let turn = Turn {
         conversation,
         context,
         events,
         device,
+        _session_person_hint: session_person_hint,
         started: Instant::now(),
         measured: Mutex::default(),
     };
     let handle = tokio::spawn(async move {
         match input {
             TurnInput::FastStop { text } => {
-                turn.send(TurnEvent::Heard(text.clone()));
-                turn.fast_answer(&text).await;
+                let mut no_identity = None;
+                let mut no_prefix = Vec::new();
+                let corrected = apply_asr_corrections(&text, &turn.conversation.settings.asr_corrections);
+                turn.send(TurnEvent::RawHeard {
+                    raw: text,
+                    corrected: corrected.clone(),
+                });
+                turn.send(TurnEvent::Heard(corrected.clone()));
+                turn.fast_answer(&corrected, &mut no_identity, &mut no_prefix).await;
             }
             TurnInput::Utterance {
                 pcm,

@@ -2361,3 +2361,702 @@ fn real_local_kokoro_fallback_when_primary_cloud_tts_fails() {
     );
     assert!(frame_count >= 15, "真实 Kokoro 本地降级必须产出有效 Opus 音频帧，实际帧数={frame_count}");
 }
+
+#[test]
+fn user_only_device_tools_are_hidden_from_llm_but_usable_by_host_and_preview_push() {
+    use image::{ImageFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["收到。"])])),
+        repeat: None,
+        seen: Mutex::default(),
+    };
+    let (server, registry, fakes) = start_chat(llm, &["随便聊聊"], Duration::from_secs(120));
+    let mut device = allowed_device_with(&server, &registry, 1, true);
+
+    let initialize = read_mcp(&mut device);
+    reply_mcp(
+        &mut device,
+        &initialize["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(read_mcp(&mut device)["method"], "notifications/initialized");
+    let list_req = read_mcp(&mut device);
+    assert_eq!(list_req["method"], "tools/list");
+    assert_eq!(list_req["params"]["withUserTools"], true, "握手必须请求发现上位机专属工具");
+    reply_mcp(
+        &mut device,
+        &list_req["id"],
+        serde_json::json!({
+            "tools": [
+                {"name": "self.get_device_status", "description": "状态", "inputSchema": {"type": "object", "properties": {}}},
+                {"name": "self.audio_speaker.set_volume", "description": "音量", "inputSchema": {"type": "object", "properties": {"volume": {"type": "integer"}}}},
+                {"name": "self.screen.preview_image", "description": "屏幕预览", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}},
+                {"name": "self.reboot", "description": "重启", "inputSchema": {"type": "object", "properties": {}}},
+                {"name": "self.upgrade_firmware", "description": "升级", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}}
+            ]
+        }),
+    );
+
+    // 1. 对话中大模型只能看到非 user_only 工具（MOSS 1 个 + 设备模型可见工具 2 个 = 3 个）
+    speak_manual(&mut device, 1, 600);
+    let _ = collect_items(&mut device);
+    {
+        let seen = fakes.llm.seen.lock().unwrap();
+        assert_eq!(seen[0].1, 3, "user_only 工具严禁暴露给大模型");
+    }
+    let session_tools = &server.status().sessions[0].device_tools;
+    assert!(session_tools.iter().any(|t| t == "self.screen.preview_image"));
+
+    // 2. 上位机调节音量（含静音 0%）下发 set_volume 并自动跟进刷新状态
+    let dev_id = server.status().sessions[0].device_id.clone();
+    server
+        .device_request(&dev_id, crate::DeviceRequest::SetVolume(0))
+        .unwrap();
+    let vol_call = read_mcp(&mut device);
+    assert_eq!(vol_call["params"]["name"], "self.audio_speaker.set_volume");
+    assert_eq!(vol_call["params"]["arguments"]["volume"], 0);
+    let status_call = read_mcp(&mut device);
+    assert_eq!(status_call["params"]["name"], "self.get_device_status");
+    reply_mcp(&mut device, &vol_call["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+    reply_mcp(&mut device, &status_call["id"], serde_json::json!({"audio_speaker": {"volume": 0}}));
+
+    // 3. 推送激光雕刻预览图：生成紧凑 PNG、带 Content-Length 响应头供固件拉取，并下发 self.screen.preview_image
+    let mut img = RgbaImage::new(320, 320);
+    for p in img.pixels_mut() {
+        *p = Rgba([0, 220, 140, 255]);
+    }
+    let mut png_bytes = Vec::new();
+    img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .unwrap();
+    let pushed = server.push_preview_png(&png_bytes, None).unwrap();
+    assert_eq!(pushed, 1);
+    let preview_call = read_mcp(&mut device);
+    assert_eq!(preview_call["params"]["name"], "self.screen.preview_image");
+    let url = preview_call["params"]["arguments"]["url"].as_str().unwrap();
+    let resp = reqwest::blocking::get(url).unwrap();
+    assert_eq!(resp.status(), 200);
+    let content_len: usize = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body = resp.bytes().unwrap();
+    assert_eq!(content_len, body.len(), "固件 GetBodyLength 依赖精确 Content-Length");
+    assert!(&body[..8] == b"\x89PNG\r\n\x1a\n");
+}
+
+#[test]
+fn persona_style_clock_anti_parrot_asr_corrections_and_debug_traces_work_end_to_end() {
+    use crate::conversation::{IMMUTABLE_SAFETY_RULES, compose_persona_system_prompt};
+
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("帮我切 3 毫米段木".into()),
+            Ok("再看一下一宿状态".into()),
+        ])),
+        heard: Mutex::default(),
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["已按椴木准备。"]), say(&["翼宿正常。"])])),
+        repeat: None,
+        seen: Mutex::default(),
+    });
+    let tts = Arc::new(FakeTts::default());
+    let prompt = compose_persona_system_prompt("moss_station", "工坊常用 5W 蓝光模组");
+    assert!(prompt.contains("领航员空间站"));
+    assert!(prompt.contains("工坊常用 5W 蓝光模组"));
+    assert!(prompt.ends_with(IMMUTABLE_SAFETY_RULES), "底层安全铁律必须锁死在系统提示末尾");
+
+    let conversation = Conversation::new(
+        asr,
+        llm.clone(),
+        tts,
+        Arc::new(FakeTools::default()),
+        ConversationSettings {
+            system_prompt: prompt,
+            include_local_clock: true,
+            asr_corrections: vec![("段木".into(), "椴木".into()), ("一宿".into(), "翼宿".into())],
+            read_only_shortcuts: false,
+            ..ConversationSettings::default()
+        },
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    assert!(!server.status().debug_enabled);
+    server.set_debug_enabled(true);
+
+    let mut device = chat_device(&server, &registry, 1);
+    // 第 1 轮：同音纠偏生效、系统提示含本机时间、首轮不加“后续轮次禁重复称呼”
+    speak_manual(&mut device, 1, 600);
+    let first_items = collect_items(&mut device);
+    assert!(texts(&first_items).contains(&"听:帮我切 3 毫米椴木".to_owned()));
+
+    // 第 2 轮：自动附带同一会话防复读机称呼约束
+    speak_manual(&mut device, 1, 600);
+    let second_items = collect_items(&mut device);
+    assert!(texts(&second_items).contains(&"听:再看一下翼宿状态".to_owned()));
+
+    let seen = llm.seen.lock().unwrap();
+    let sys1 = seen[0].0[0].content.as_deref().unwrap();
+    let sys2 = seen[1].0[0].content.as_deref().unwrap();
+    assert!(sys1.contains("当前本机时间：") && !sys1.contains("对话连贯约束："));
+    assert!(sys2.contains("当前本机时间：") && sys2.contains("对话连贯约束："));
+    assert_eq!(seen[0].0.last().unwrap().content.as_deref(), Some("帮我切 3 毫米椴木"));
+    assert_eq!(seen[1].0.last().unwrap().content.as_deref(), Some("再看一下翼宿状态"));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while server.status().debug_traces.len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let traces = server.status().debug_traces;
+    assert_eq!(traces.len(), 2);
+    assert_eq!(traces[1].raw_asr, "帮我切 3 毫米段木");
+    assert_eq!(traces[1].corrected_asr, "帮我切 3 毫米椴木");
+    assert_eq!(traces[0].raw_asr, "再看一下一宿状态");
+    assert_eq!(traces[0].corrected_asr, "再看一下翼宿状态");
+
+    server.set_debug_enabled(false);
+    assert!(server.status().debug_traces.is_empty());
+}
+
+#[test]
+fn monochrome_oled_official_firmware_auto_detects_screen_info_and_pushes_text_preview_card() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["预览已准备好，确认开始吗？"])])),
+        repeat: None,
+        seen: Mutex::default(),
+    };
+    let (server, registry, _fakes) = start_chat(llm, &["刻一个福字"], Duration::from_secs(120));
+    let mut oled = allowed_device_with(&server, &registry, 1, true);
+
+    let init = read_mcp(&mut oled);
+    reply_mcp(
+        &mut oled,
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(read_mcp(&mut oled)["method"], "notifications/initialized");
+    let list_req = read_mcp(&mut oled);
+    assert_eq!(list_req["params"]["withUserTools"], true);
+    // 模拟 ESP32-S3 单色 128x64 OLED 官方固件：同时注册了 screen.get_info 与空实现的 screen.preview_image
+    reply_mcp(
+        &mut oled,
+        &list_req["id"],
+        serde_json::json!({
+            "tools": [
+                {"name": "self.screen.get_info", "description": "屏幕信息", "inputSchema": {"type": "object", "properties": {}}},
+                {"name": "self.screen.preview_image", "description": "图片预览", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}}
+            ]
+        }),
+    );
+
+    // MOSS 自动发送 self.screen.get_info 探测屏幕是否为单色 OLED
+    let info_req = read_mcp(&mut oled);
+    assert_eq!(info_req["params"]["name"], "self.screen.get_info");
+    reply_mcp(
+        &mut oled,
+        &info_req["id"],
+        serde_json::json!({
+            "content": [{"type": "text", "text": "{\"width\":128,\"height\":64,\"monochrome\":true}"}],
+            "isError": false
+        }),
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while server.status().sessions[0].screen_monochrome != Some(true)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(server.status().sessions[0].screen_monochrome, Some(true));
+
+    // 1. 空闲态推送预览：识别为单色 OLED 后不发无效 PNG，自动改为向 OLED 下发 Alert 滚动文字预览卡
+    let summary = "3mm椴木雕刻 ·「福」· 40×40mm · S600 F1200 ×1遍";
+    let pushed = server.push_preview_adaptive(None, summary, None).unwrap();
+    assert_eq!(pushed, 1);
+    let alert = read_json(&mut oled);
+    assert_eq!(alert["type"], "alert");
+    assert_eq!(alert["status"], "雕刻预览");
+    assert_eq!(alert["message"], summary);
+
+    // 2. 对话轮次中生成预览：暂存 OLED 文字卡，等本轮语音 tts:stop 播完后无声刷到 OLED 字幕槽供用户核对
+    speak_manual(&mut oled, 1, 600);
+    assert_eq!(read_json(&mut oled)["text"], "刻一个福字");
+    server
+        .push_preview_adaptive(None, "3mm椴木雕刻 ·「福」· S600 F1200", None)
+        .unwrap();
+    let _ = collect_items(&mut oled);
+    let post_tts_card = read_json(&mut oled);
+    assert_eq!(post_tts_card["type"], "stt");
+    assert_eq!(
+        post_tts_card["text"],
+        "[预览] 3mm椴木雕刻 ·「福」· S600 F1200"
+    );
+}
+
+#[test]
+fn lichuang_szpi_320x240_pushes_1to1_preview_holds_until_speech_streams_live_hud_and_switches_talk_mode() {
+    use image::{ImageFormat, Rgba, RgbaImage};
+    use moss_voice_providers::BoxFuture;
+    use std::io::Cursor;
+
+    struct LiveJobTools {
+        workflows: Arc<Mutex<Value>>,
+    }
+    impl ToolExecutor for LiveJobTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        fn call<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async { panic!("实时副屏与播报只走只读通道") })
+        }
+        fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
+            let wf = self.workflows.lock().unwrap().clone();
+            Box::pin(async move { Some(serde_json::json!({ "workflows": wf })) })
+        }
+    }
+
+    let workflows = Arc::new(Mutex::new(serde_json::json!([])));
+    let tts = Arc::new(FakeTts::default());
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        tts.clone(),
+        Arc::new(LiveJobTools {
+            workflows: workflows.clone(),
+        }),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            job_poll_interval: Duration::from_millis(60),
+            preview_hold_interval: Duration::from_millis(70),
+            preview_hold_duration: Duration::from_millis(600),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    let mut szpi = allowed_device_with(&server, &registry, 1, true);
+    let init = read_mcp(&mut szpi);
+    reply_mcp(
+        &mut szpi,
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(read_mcp(&mut szpi)["method"], "notifications/initialized");
+    let list_req = read_mcp(&mut szpi);
+    reply_mcp(
+        &mut szpi,
+        &list_req["id"],
+        serde_json::json!({
+            "tools": [
+                {"name": "self.screen.get_info", "description": "屏幕信息", "inputSchema": {"type": "object", "properties": {}}},
+                {"name": "self.screen.preview_image", "description": "图片预览", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}},
+                {"name": "self.set_press_to_talk", "description": "长按说话切换", "inputSchema": {"type": "object", "properties": {"mode": {"type": "string"}}}},
+                {"name": "self.get_device_status", "description": "设备状态", "inputSchema": {"type": "object", "properties": {}}}
+            ]
+        }),
+    );
+
+    let info_req = read_mcp(&mut szpi);
+    assert_eq!(info_req["params"]["name"], "self.screen.get_info");
+    reply_mcp(
+        &mut szpi,
+        &info_req["id"],
+        serde_json::json!({
+            "content": [{"type": "text", "text": "{\"width\":320,\"height\":240,\"monochrome\":false}"}],
+            "isError": false
+        }),
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while server.status().sessions[0].screen_width != Some(320)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let sess = &server.status().sessions[0];
+    assert_eq!((sess.screen_width, sess.screen_height, sess.screen_monochrome), (Some(320), Some(240), Some(false)));
+
+    // 优化 4：一键切换排风抗噪「长按说话」模式
+    server
+        .device_request(
+            DEVICE,
+            crate::DeviceRequest::SetTalkMode("press_to_talk".into()),
+        )
+        .unwrap();
+    let ptt_call = read_mcp(&mut szpi);
+    assert_eq!(ptt_call["params"]["name"], "self.set_press_to_talk");
+    assert_eq!(ptt_call["params"]["arguments"]["mode"], "press_to_talk");
+    let status_call = read_mcp(&mut szpi);
+    assert_eq!(status_call["params"]["name"], "self.get_device_status");
+    reply_mcp(&mut szpi, &ptt_call["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+    reply_mcp(&mut szpi, &status_call["id"], serde_json::json!({"audio_speaker": {"volume": 60}}));
+
+    // 优化 1 & 2：推送白底 1px 极细刀路原图 → 自动输出精确 160×120 PNG + 底部中文参数栏 + 无声续期保持
+    let mut fine = RgbaImage::from_pixel(400, 300, Rgba([255, 255, 255, 255]));
+    for x in 30..370 {
+        fine.put_pixel(x, 150, Rgba([0, 0, 0, 255]));
+    }
+    let mut raw_png = Vec::new();
+    fine.write_to(&mut Cursor::new(&mut raw_png), ImageFormat::Png)
+        .unwrap();
+    let summary = "3mm椴木雕刻 ·「MOSS」· 40×30mm · S600 F1200";
+    let pushed = server
+        .push_preview_adaptive_with_ruler(Some(&raw_png), summary, Some("40X30MM S600 F1200"), None)
+        .unwrap();
+    assert_eq!(pushed, 1);
+
+    let preview_mcp = read_mcp(&mut szpi);
+    assert_eq!(preview_mcp["params"]["name"], "self.screen.preview_image");
+    let preview_url = preview_mcp["params"]["arguments"]["url"].as_str().unwrap().to_owned();
+    let png_resp = reqwest::blocking::get(&preview_url).unwrap().bytes().unwrap();
+    let decoded_preview = image::load_from_memory(&png_resp).unwrap();
+    assert_eq!(
+        (decoded_preview.width(), decoded_preview.height()),
+        (160, 120),
+        "立创·实战派 320×240 必须输出精确 160×120 1:1 点对点 PNG"
+    );
+    reply_mcp(&mut szpi, &preview_mcp["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+
+    // 图文同屏：底部状态栏同时收到中文参数摘要
+    let subtitle_msg = read_json(&mut szpi);
+    assert_eq!(subtitle_msg["type"], "stt");
+    assert_eq!(subtitle_msg["text"], format!("[预览] {summary}"));
+
+    // 确认窗口内自动无声续期（克服官方固件 5000ms 自动隐藏预览图计时器）
+    let hold_refresh = read_mcp(&mut szpi);
+    assert_eq!(hold_refresh["params"]["name"], "self.screen.preview_image");
+    assert_eq!(hold_refresh["params"]["arguments"]["url"], preview_url);
+    reply_mcp(&mut szpi, &hold_refresh["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+
+    // 用户按下按键开口或打断时，确认续期立即停止
+    send_json(&mut szpi, r#"{"type":"listen","state":"start","mode":"manual"}"#);
+    send_json(&mut szpi, r#"{"type":"abort","reason":"user_button"}"#);
+
+    // 优化 3：进入激光加工 sending 阶段 → 屏幕自动变身 MOSS 太空舱实时进度副屏 HUD，完成后语音播报
+    *workflows.lock().unwrap() = serde_json::json!([{
+        "workflow_id": "wf-szpi-hud",
+        "status": "sending",
+        "confirmation_snapshot": { "power": 600, "feed_rate": 1200 },
+        "live_progress": { "lines_sent": 680, "total_lines": 1000, "elapsed_ms": 17_000 }
+    }]);
+    let hud_mcp = read_mcp(&mut szpi);
+    assert_eq!(hud_mcp["params"]["name"], "self.screen.preview_image");
+    let hud_url = hud_mcp["params"]["arguments"]["url"].as_str().unwrap().to_owned();
+    assert_ne!(hud_url, preview_url, "实时加工副屏 HUD 应生成独立的进度图像令牌");
+    let hud_bytes = reqwest::blocking::get(&hud_url).unwrap().bytes().unwrap();
+    assert!(hud_bytes.len() < 16 * 1024);
+    let hud_img = image::load_from_memory(&hud_bytes).unwrap();
+    assert_eq!((hud_img.width(), hud_img.height()), (160, 120));
+    reply_mcp(&mut szpi, &hud_mcp["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+
+    *workflows.lock().unwrap() = serde_json::json!([{
+        "workflow_id": "wf-szpi-hud",
+        "status": "completed",
+        "send_result": { "lines_sent": 1000, "total_lines": 1000 }
+    }]);
+    let (_, frames, _) = collect_playback(&mut szpi, 1);
+    assert!(!frames.is_empty());
+    assert!(
+        tts.said
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("雕刻任务已完成，共 1000 行"))
+    );
+}
+
+#[test]
+fn zero_flash_cards_approval_alert_terminal_badge_music_deck_style_switch_and_goggle_bot_gif_work() {
+    use crate::music::{MusicIndex, MusicTools};
+    use moss_voice_providers::BoxFuture;
+    use std::io::Write;
+
+    struct SceneTools {
+        payload: Arc<Mutex<Value>>,
+    }
+    impl ToolExecutor for SceneTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        fn call<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async { ToolOutcome::Reply("{}".into()) })
+        }
+        fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
+            let snap = self.payload.lock().unwrap().clone();
+            Box::pin(async move { Some(snap) })
+        }
+    }
+
+    let music_dir = tempfile::tempdir().unwrap();
+    {
+        let rate = 24_000u32;
+        let frames = rate; // 1s WAV
+        let mut f = std::fs::File::create(music_dir.path().join("MOSS_GROOVE.wav")).unwrap();
+        let mut header = Vec::new();
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&rate.to_le_bytes());
+        header.extend_from_slice(&(rate * 2).to_le_bytes());
+        header.extend_from_slice(&2u16.to_le_bytes());
+        header.extend_from_slice(&16u16.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&(frames * 2).to_le_bytes());
+        f.write_all(&header).unwrap();
+        for _ in 0..frames {
+            f.write_all(&2200i16.to_le_bytes()).unwrap();
+        }
+    }
+    let music_index = Arc::new(MusicIndex::scan(music_dir.path()).unwrap());
+    let payload = Arc::new(Mutex::new(serde_json::json!({ "workflows": [] })));
+    let tools = Arc::new(MusicTools::new(
+        Arc::new(SceneTools {
+            payload: payload.clone(),
+        }),
+        music_index.clone(),
+    ));
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([Round::Reply {
+            deltas: vec![],
+            calls: vec![ToolCall::new(
+                "music-card-1",
+                "play_music",
+                r#"{"query":"MOSS_GROOVE"}"#,
+            )],
+            delay_ms: 0,
+        }])),
+        ..Default::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("放首音乐".to_owned())])),
+        ..Default::default()
+    });
+    let tts = Arc::new(FakeTts::default());
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        tts.clone(),
+        tools,
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            music: Some(music_index),
+            playback_start_ms: 80,
+            job_poll_interval: Duration::from_millis(60),
+            preview_hold_interval: Duration::from_millis(80),
+            preview_hold_duration: Duration::from_millis(600),
+            screen_card_style: crate::ScreenCardStyle::MossHud,
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    // 0. 服务端 GIF89a 端点验证（护目镜小机器人 4 帧循环动图，零 Flash 分区占用）
+    let gif_url = format!(
+        "http://127.0.0.1:{}/mcp/preview/goggle-bot/engrave.gif",
+        server.http_port()
+    );
+    let gif_resp = reqwest::blocking::get(&gif_url).unwrap();
+    assert_eq!(gif_resp.status().as_u16(), 200);
+    assert_eq!(
+        gif_resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("image/gif")
+    );
+    let gif_bytes = gif_resp.bytes().unwrap();
+    assert!(gif_bytes.starts_with(b"GIF89a"));
+
+    // 立创·实战派 320×240 彩屏接入
+    let mut szpi = allowed_device_with(&server, &registry, 1, true);
+    let init = read_mcp(&mut szpi);
+    reply_mcp(
+        &mut szpi,
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(read_mcp(&mut szpi)["method"], "notifications/initialized");
+    let list_req = read_mcp(&mut szpi);
+    reply_mcp(
+        &mut szpi,
+        &list_req["id"],
+        serde_json::json!({
+            "tools": [
+                {"name": "self.screen.get_info", "description": "屏幕信息", "inputSchema": {"type": "object", "properties": {}}},
+                {"name": "self.screen.preview_image", "description": "图片预览", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}}
+            ]
+        }),
+    );
+    let info_req = read_mcp(&mut szpi);
+    reply_mcp(
+        &mut szpi,
+        &info_req["id"],
+        serde_json::json!({
+            "content": [{"type": "text", "text": "{\"width\":320,\"height\":240,\"monochrome\":false}"}],
+            "isError": false
+        }),
+    );
+    let wait_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while server.status().sessions[0].screen_width != Some(320)
+        && std::time::Instant::now() < wait_deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // 1. 热切换为「可爱像素小机器人」画风（不断开当前小智会话）
+    assert_eq!(server.screen_card_style(), crate::ScreenCardStyle::MossHud);
+    server.set_screen_card_style(crate::ScreenCardStyle::GoggleBot);
+    assert_eq!(server.screen_card_style(), crate::ScreenCardStyle::GoggleBot);
+    assert_eq!(server.status().sessions.len(), 1);
+
+    // 2. 场景卡 ①：严格模式待电脑审批警戒卡（含倒计时条，不泄露审批 ID 或摘要哈希）
+    *payload.lock().unwrap() = serde_json::json!({
+        "workflows": [],
+        "pending_approval": {
+            "kind": "workflow_send",
+            "summary": "激光任务开始发送（3mm椴木）",
+            "remaining_secs": 110,
+            "total_secs": 180
+        }
+    });
+    let approval_mcp = read_mcp(&mut szpi);
+    assert_eq!(approval_mcp["params"]["name"], "self.screen.preview_image");
+    let approval_url = approval_mcp["params"]["arguments"]["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let approval_png = reqwest::blocking::get(&approval_url).unwrap().bytes().unwrap();
+    let approval_img = image::load_from_memory(&approval_png).unwrap();
+    assert_eq!((approval_img.width(), approval_img.height()), (160, 120));
+    reply_mcp(&mut szpi, &approval_mcp["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+    let approval_stt = read_json(&mut szpi);
+    assert_eq!(approval_stt["type"], "stt");
+    assert_eq!(
+        approval_stt["text"],
+        "[待电脑批准] 激光任务开始发送（3mm椴木）"
+    );
+
+    // 3. 场景卡 ②：加工从 sending 进入 completed → 推送 5 秒完工庆祝徽章卡 + 播报结果
+    *payload.lock().unwrap() = serde_json::json!({
+        "workflows": [{
+            "workflow_id": "wf-celebrate-1",
+            "status": "sending",
+            "confirmation_snapshot": { "power": 550, "feed_rate": 1000 },
+            "live_progress": { "lines_sent": 500, "total_lines": 1000, "elapsed_ms": 10_000 }
+        }]
+    });
+    let sending_mcp = read_mcp(&mut szpi);
+    assert_eq!(sending_mcp["params"]["name"], "self.screen.preview_image");
+    reply_mcp(&mut szpi, &sending_mcp["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+
+    *payload.lock().unwrap() = serde_json::json!({
+        "workflows": [{
+            "workflow_id": "wf-celebrate-1",
+            "status": "completed",
+            "send_result": { "lines_sent": 1000, "total_lines": 1000 }
+        }]
+    });
+    let badge_mcp = read_mcp(&mut szpi);
+    assert_eq!(badge_mcp["params"]["name"], "self.screen.preview_image");
+    let badge_url = badge_mcp["params"]["arguments"]["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let badge_png = reqwest::blocking::get(&badge_url).unwrap().bytes().unwrap();
+    let badge_img = image::load_from_memory(&badge_png).unwrap();
+    assert_eq!((badge_img.width(), badge_img.height()), (160, 120));
+    reply_mcp(&mut szpi, &badge_mcp["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+    let (_, notice_frames, _) = collect_playback(&mut szpi, 1);
+    assert!(!notice_frames.is_empty());
+
+    // 4. 场景卡 ③：播放本地音乐 → 自动推送小机器人耳机听歌/像素唱机卡
+    speak_manual(&mut szpi, 1, 260);
+    let mut saw_music_card = false;
+    loop {
+        match szpi.read().unwrap() {
+            tungstenite::Message::Text(raw) => {
+                let v: Value = serde_json::from_str(&raw).unwrap();
+                if v["type"] == "mcp"
+                    && v["payload"]["params"]["name"] == "self.screen.preview_image"
+                {
+                    let url = v["payload"]["params"]["arguments"]["url"]
+                        .as_str()
+                        .unwrap();
+                    let png = reqwest::blocking::get(url).unwrap().bytes().unwrap();
+                    let img = image::load_from_memory(&png).unwrap();
+                    assert_eq!((img.width(), img.height()), (160, 120));
+                    saw_music_card = true;
+                    reply_mcp(&mut szpi, &v["payload"]["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+                } else if v["type"] == "tts" && v["state"] == "stop" {
+                    break;
+                }
+            }
+            tungstenite::Message::Binary(_) => {}
+            other => panic!("unexpected ws message: {other:?}"),
+        }
+    }
+    assert!(saw_music_card, "本地音乐播放期间应向 320×240 彩屏推送听歌卡片");
+
+    // 5. 桌面语音中心一键推屏小机器人姿态预览
+    let pushed = server
+        .push_goggle_bot_pose(crate::BotPose::GogglesEngrave, Some(DEVICE))
+        .unwrap();
+    assert_eq!(pushed, 1);
+    let pose_mcp = read_mcp(&mut szpi);
+    assert_eq!(pose_mcp["params"]["name"], "self.screen.preview_image");
+    let pose_url = pose_mcp["params"]["arguments"]["url"].as_str().unwrap();
+    let pose_png = reqwest::blocking::get(pose_url).unwrap().bytes().unwrap();
+    let pose_img = image::load_from_memory(&pose_png).unwrap();
+    assert_eq!((pose_img.width(), pose_img.height()), (160, 120));
+    reply_mcp(&mut szpi, &pose_mcp["id"], serde_json::json!({"content": [{"type": "text", "text": "true"}]}));
+    let pose_stt = read_json(&mut szpi);
+    assert_eq!(pose_stt["text"], "[预览] 小MOSS护目镜机器人 · 戴护目镜雕刻");
+}

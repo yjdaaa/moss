@@ -9,6 +9,7 @@ import {
   BuiltinModelGroups,
   BuiltinServicePanel,
   ExperienceGroup,
+  LiveDebugTraces,
   LocalModelsGroup,
   PrivateSettingsEntry,
   PrivateFirmwareEntry,
@@ -18,6 +19,7 @@ import {
 import VoiceMusicCard from "../components/VoiceMusicCard.jsx";
 import VoiceAgentCard from "../components/VoiceAgentCard.jsx";
 import VoiceVisionCard from "../components/VoiceVisionCard.jsx";
+import VoiceKnowledgeCard from "../components/VoiceKnowledgeCard.jsx";
 import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
 import { VoiceEndpointsCard } from "../components/VoiceEndpointsCard.jsx";
 import { SaveBar, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel } from "../components/VoiceLayout.jsx";
@@ -795,9 +797,15 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                   <h3 className="voice-section-h">内置服务能力（只在“MOSS 内置服务”链路生效）</h3>
                   <VoiceMusicCard />
                   <VoiceVisionCard />
+                  <VoiceKnowledgeCard />
                 </>
               )}
-              <h3 className="voice-section-h">第三方工具（与链路无关）</h3>
+              <h3 className="voice-section-h">第三方扩展与本机代理（内置服务链路调用）</h3>
+              {mode !== "builtin" && (
+                <div className="voice-hint voice-hint--warn">
+                  {`当前为“${VOICE_MODE_LABEL[mode]}”链路：第三方 MCP 工具与本机 Agent 仅在“MOSS 内置服务”链路下对语音开放；此处可预先配置，切换至内置服务后生效。`}
+                </div>
+              )}
               <VoiceMcpCard defaultOpen={false} />
               <VoiceAgentCard />
             </div>
@@ -855,6 +863,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                     </VoiceGroup>
                   ),
                 },
+                { key: "debug-traces", modes: ["builtin"], node: <LiveDebugTraces builtin={builtin} /> },
                 { key: "timings", modes: ["builtin"], node: <TurnTimings timings={builtinStatus?.timings} /> },
                 { key: "events", modes: ["builtin"], node: <BuiltinEvents status={builtinStatus} /> },
                 {

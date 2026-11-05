@@ -25,6 +25,9 @@ pub mod fast;
 pub mod jev;
 pub mod vision;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
+pub mod goggle_bot;
+pub mod preview_push;
+#[cfg(test)]
 mod speaker; // NV16 synthetic-only policy, default disabled
 pub mod speaker_enrollment;
 pub mod person_context;
@@ -48,9 +51,9 @@ use serde::Serialize;
 pub use audio::{LocalVadFactory, VadConfig, VadFactory};
 pub use conversation::{Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome};
 pub use jev::{DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter};
+pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
 pub use tools::{HostTools, ToolHost, ToolHostResult};
-pub use state::{ServerEvent, SessionView, TurnTiming, ToolTiming};
-
+pub use state::{DebugToolTrace, ServerEvent, SessionView, ToolTiming, TurnDebugTrace, TurnTiming};
 /// 设备登记状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +71,14 @@ pub struct DeviceVisit {
     pub model: String,
     pub firmware_version: String,
     pub ip: String,
+}
+/// 上位机为单台设备记忆的硬件偏好（断电重连握手后按设备已声明能力静默回放）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HardwarePrefs {
+    pub volume: Option<u8>,
+    pub brightness: Option<u8>,
+    pub theme: Option<String>,
+    pub talk_mode: Option<String>,
 }
 
 /// 宿主提供的设备登记与密钥。实现须线程安全；调用很快（本地数据库），在运行时线程中直接调用。
@@ -92,8 +103,12 @@ pub trait DeviceRegistry: Send + Sync {
     /// 记录设备快照（开机 OTA 上报 / hello 握手 / 实时状态），`kind` 取 [`SNAPSHOT_INFO`] 等。
     /// 默认忽略：不关心设备信息的宿主不必实现。
     fn device_snapshot(&self, _device: &str, _kind: &str, _json: &str) {}
-}
 
+    /// 读取用户在上位机为该设备记忆的硬件偏好；无设置时返回 `None`，连接握手不额外发指令。
+    fn device_hardware_prefs(&self, _device: &str) -> Option<HardwarePrefs> {
+        None
+    }
+}
 /// A live permission that cannot become valid again after revoke, disconnect or shutdown.
 pub(crate) struct SessionLease {
     pub allowed: Arc<std::sync::atomic::AtomicBool>,
@@ -151,8 +166,14 @@ pub struct ServerConfig {
     pub idle_timeout: Duration,
     /// 下发给设备的帧协议版本（OTA 响应 `websocket.version`）
     pub protocol_version: u32,
-    /// 加工结束播报的轮询间隔；默认 5 秒，测试用小值加速。
+    /// 加工结束播报与实时副屏 HUD 的轮询间隔；默认 4 秒，测试用小值加速。
     pub job_poll_interval: Duration,
+    /// 彩屏雕刻预览确认窗口内的无声续期节拍（克服官方固件 5 秒自动隐藏预览计时器，默认 4 秒）。
+    pub preview_hold_interval: Duration,
+    /// 彩屏雕刻预览确认窗口的最长保留时长（默认 24 秒；用户开口/确认/打断立即终止）。
+    pub preview_hold_duration: Duration,
+    /// 小智彩屏卡片视觉画风（`MossHud` 硬核太空舱 / `GoggleBot` 可爱护目镜小机器人）。
+    pub screen_card_style: ScreenCardStyle,
 }
 
 impl Default for ServerConfig {
@@ -176,6 +197,9 @@ impl Default for ServerConfig {
             idle_timeout: Duration::from_secs(120),
             protocol_version: 1,
             job_poll_interval: jobs::DEFAULT_POLL_INTERVAL,
+            preview_hold_interval: Duration::from_secs(4),
+            preview_hold_duration: Duration::from_secs(24),
+            screen_card_style: ScreenCardStyle::MossHud,
         }
     }
 }
@@ -190,6 +214,10 @@ pub struct ServerStatusView {
     pub sessions: Vec<SessionView>,
     pub events: Vec<ServerEvent>,
     pub timings: Vec<TurnTiming>,
+    #[serde(default)]
+    pub debug_enabled: bool,
+    #[serde(default)]
+    pub debug_traces: Vec<TurnDebugTrace>,
 }
 
 /// 设备快照种类（与 `laser_runtime::VOICE_SNAPSHOT_*` 是同一组字符串）。
@@ -200,12 +228,26 @@ pub const SNAPSHOT_STATUS: &str = "status";
 pub const SNAPSHOT_LISTEN: &str = "listen";
 
 /// 桌面端可以对一台已连接设备发起的即时请求（2026-11-02：设备信息刷新与重启）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceRequest {
     /// 取设备自带 MCP 的 `self.get_device_status`，结果写成设备快照
     RefreshInfo,
     /// 取 `self.reboot`：设备重启后会重新请求 OTA，固件版本随之刷新
     Reboot,
+    /// 设置设备扬声器音量 `0..=100` 并随后刷新状态快照
+    SetVolume(u8),
+    /// 设置设备屏幕亮度 `0..=100` 并随后刷新状态快照
+    SetBrightness(u8),
+    /// 设置设备屏幕主题 `"light"` / `"dark"` 并随后刷新状态快照
+    SetTheme(String),
+    /// 切换设备按键对话模式（`self.set_press_to_talk`：`"click_to_talk"` / `"press_to_talk"`）
+    SetTalkMode(String),
+    /// 自适应推送雕刻预览：彩屏（支持 `self.screen.preview_image` 且非单色 OLED）推送 1:1 PNG 缩略图与参数底栏；
+    /// 普通单色 OLED 或无图片预览能力的官方固件自动推送屏幕文字预览卡。
+    PreviewScreen {
+        token: Option<String>,
+        summary: String,
+    },
 }
 
 pub(crate) struct DeviceRequestHandle {
@@ -220,9 +262,11 @@ pub(crate) struct Shared {
     pub vision_quotas: Arc<vision::VisionQuotas>,
     /// 2026-10-16：待接进对话上下文的照片（只在用户打开对应开关时写入）。
     pub vision_photos: Arc<vision::VisionPhotos>,
+    pub preview_store: Arc<preview_push::PreviewStore>,
+    pub screen_card_style: std::sync::Mutex<ScreenCardStyle>,
     pub ws_port: u16,
-    pub registry: Arc<dyn DeviceRegistry>,
     pub signer: TokenSigner,
+    pub registry: Arc<dyn DeviceRegistry>,
     pub state: state::LiveState,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
     /// 同一条加工任务只让一个在线会话播报结束。
@@ -233,10 +277,18 @@ pub(crate) struct Shared {
     >,
 }
 
+impl Shared {
+    pub(crate) fn card_style(&self) -> ScreenCardStyle {
+        self.screen_card_style
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(ScreenCardStyle::MossHud)
+    }
+}
+
 pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
-
 /// 运行中的内置语音服务。丢弃或调用 [`stop`](Self::stop) 时关闭。
 pub struct VoiceServer {
     runtime: Option<tokio::runtime::Runtime>,
@@ -288,8 +340,10 @@ impl VoiceServer {
             http_port,
             vision_quotas:Arc::new(vision::VisionQuotas::default()),
             vision_photos:Arc::new(vision::VisionPhotos::default()),
-            registry,
+            preview_store: Arc::new(preview_push::PreviewStore::default()),
+            screen_card_style: std::sync::Mutex::new(config.screen_card_style),
             signer: TokenSigner::new(secret),
+            registry,
             state: state::LiveState::default(),
             shutdown: shutdown_rx,
             job_announcements: jobs::AnnounceLog::default(),
@@ -297,7 +351,10 @@ impl VoiceServer {
         });
         shared.state.event(format!("内置语音服务已启动：设备连接端口 {ws_port}，OTA 端口 {http_port}"));
         let ws_app = session::router(shared.clone());
-        let http_app = ota::router(shared.clone()).merge(vision::router(shared.clone())).merge(firmware::router(shared.clone()));
+        let http_app = ota::router(shared.clone())
+            .merge(vision::router(shared.clone()))
+            .merge(firmware::router(shared.clone()))
+            .merge(preview_push::router(shared.clone()));
         let mut stop_ws = shutdown_tx.subscribe();
         let mut stop_http = shutdown_tx.subscribe();
         // 不用 block_on：调用方可能处在另一个 tokio 运行时的阻塞线程里（Tauri 命令），嵌套 block_on 会 panic
@@ -347,6 +404,8 @@ impl VoiceServer {
             sessions: self.shared.state.sessions(),
             events: self.shared.state.events(),
             timings: self.shared.state.timings(),
+            debug_enabled: self.shared.state.debug_enabled(),
+            debug_traces: self.shared.state.debug_traces(),
         }
     }
 
@@ -367,7 +426,7 @@ impl VoiceServer {
             let Some(handle) = map.get(device_id) else {
                 return Err(format!("设备 {device_id} 当前不在线"));
             };
-            if !handle.supports_mcp {
+            if !handle.supports_mcp && !matches!(request, DeviceRequest::PreviewScreen { .. }) {
                 return Err(format!("设备 {device_id} 未启用设备端 MCP，无法执行该操作"));
             }
             handle.sender.clone()
@@ -378,6 +437,169 @@ impl VoiceServer {
             return Err(message);
         }
         Ok(())
+    }
+
+    /// 动态开关仅内存对话排障流（无需重启服务；关闭时立即清空内存缓冲）。
+    pub fn set_debug_enabled(&self, enabled: bool) {
+        self.shared.state.set_debug_enabled(enabled);
+    }
+    pub fn clear_debug_traces(&self) {
+        self.shared.state.clear_debug_traces();
+    }
+
+    /// 热切换小智彩屏卡片画风（无需重启 WebSocket 服务，在线设备不断连立即生效）。
+    pub fn set_screen_card_style(&self, style: ScreenCardStyle) {
+        if let Ok(mut guard) = self.shared.screen_card_style.lock() {
+            *guard = style;
+        }
+    }
+
+    pub fn screen_card_style(&self) -> ScreenCardStyle {
+        self.shared.card_style()
+    }
+
+    /// 将指定姿态的「小 MOSS · 护目镜小机器人」展示卡投送到在线小智屏幕上试看。
+    pub fn push_goggle_bot_pose(
+        &self,
+        pose: BotPose,
+        target_device: Option<&str>,
+    ) -> Result<usize, String> {
+        if self.runtime.is_none() {
+            return Err("内置语音服务未运行".into());
+        }
+        let summary = format!("小MOSS护目镜机器人 · {}", pose.label_zh());
+        let stage_for_device = |device_id: &str| -> Result<String, String> {
+            let screen_size = self.shared.state.session_screen_size(device_id);
+            let (cw, ch) = preview_push::optimal_canvas_for_screen(screen_size);
+            let png = preview_push::make_goggle_bot_showcase_png(pose, 0, cw, ch)?;
+            self.shared.preview_store.stage_prebuilt_png(png)
+        };
+        if let Some(device_id) = target_device {
+            let token = Some(stage_for_device(device_id)?);
+            self.device_request(
+                device_id,
+                DeviceRequest::PreviewScreen { token, summary },
+            )?;
+            return Ok(1);
+        }
+        let online_devices: Vec<String> = self
+            .shared
+            .state
+            .sessions()
+            .into_iter()
+            .map(|s| s.device_id)
+            .collect();
+        let mut pushed = 0usize;
+        for device_id in online_devices {
+            let token = Some(stage_for_device(&device_id)?);
+            if self
+                .device_request(
+                    &device_id,
+                    DeviceRequest::PreviewScreen {
+                        token,
+                        summary: summary.clone(),
+                    },
+                )
+                .is_ok()
+            {
+                pushed += 1;
+            }
+        }
+        Ok(pushed)
+    }
+    /// 将预览图与文字摘要自适应推送给指定设备或全部在线设备（彩屏按设备屏幕尺寸生成 1:1 点对点 PNG，单色 OLED 发文字卡）。
+    pub fn push_preview_adaptive(
+        &self,
+        source_bytes: Option<&[u8]>,
+        summary: &str,
+        target_device: Option<&str>,
+    ) -> Result<usize, String> {
+        self.push_preview_adaptive_with_ruler(source_bytes, summary, None, target_device)
+    }
+
+    /// 带底部 5×7 ASCII 尺寸/功率标尺的自适应预览推送入口。
+    pub fn push_preview_adaptive_with_ruler(
+        &self,
+        source_bytes: Option<&[u8]>,
+        summary: &str,
+        ruler_ascii: Option<&str>,
+        target_device: Option<&str>,
+    ) -> Result<usize, String> {
+        if self.runtime.is_none() {
+            return Err("内置语音服务未运行".into());
+        }
+        let clean_summary: String = summary
+            .replace(['\r', '\n'], " ")
+            .trim()
+            .chars()
+            .take(96)
+            .collect();
+        let mut staged_by_canvas: std::collections::HashMap<(u32, u32), String> =
+            std::collections::HashMap::new();
+        let mut stage_for_device = |device_id: &str| -> Result<Option<String>, String> {
+            let Some(bytes) = source_bytes.filter(|b| !b.is_empty()) else {
+                return Ok(None);
+            };
+            let screen_size = self.shared.state.session_screen_size(device_id);
+            let (cw, ch) = preview_push::optimal_canvas_for_screen(screen_size);
+            if let Some(tok) = staged_by_canvas.get(&(cw, ch)) {
+                return Ok(Some(tok.clone()));
+            }
+            let tok = self.shared.preview_store.stage_thumbnail_for_style(
+                bytes,
+                cw,
+                ch,
+                ruler_ascii,
+                self.shared.card_style(),
+            )?;
+            staged_by_canvas.insert((cw, ch), tok.clone());
+            Ok(Some(tok))
+        };
+
+        if let Some(device_id) = target_device {
+            let token = stage_for_device(device_id)?;
+            self.device_request(
+                device_id,
+                DeviceRequest::PreviewScreen {
+                    token,
+                    summary: clean_summary,
+                },
+            )?;
+            return Ok(1);
+        }
+        let online_devices: Vec<String> = self
+            .shared
+            .state
+            .sessions()
+            .into_iter()
+            .map(|s| s.device_id)
+            .collect();
+        let mut pushed = 0usize;
+        for device_id in online_devices {
+            let token = stage_for_device(&device_id)?;
+            if self
+                .device_request(
+                    &device_id,
+                    DeviceRequest::PreviewScreen {
+                        token,
+                        summary: clean_summary.clone(),
+                    },
+                )
+                .is_ok()
+            {
+                pushed += 1;
+            }
+        }
+        Ok(pushed)
+    }
+
+    /// 兼容只传 PNG 字节的预览推送入口（不额外改写底部参数字幕）。
+    pub fn push_preview_png(
+        &self,
+        source_bytes: &[u8],
+        target_device: Option<&str>,
+    ) -> Result<usize, String> {
+        self.push_preview_adaptive_with_ruler(Some(source_bytes), "", None, target_device)
     }
 
     /// 后台异步预热高频固定话术与慢工具过渡垫音缓存（不阻塞启动，服务关闭时自动中止）。

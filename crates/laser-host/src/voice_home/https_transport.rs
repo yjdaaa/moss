@@ -155,6 +155,14 @@ impl HomeControlTransport for HttpsHomeTransport {
         Ok(())
     }
     fn read_target_state(&mut self, entity: &str, budget: Duration) -> Result<String, ()> {
+        self.read_target_snapshot(entity, budget)
+            .map(|(state, _)| state)
+    }
+    fn read_target_snapshot(
+        &mut self,
+        entity: &str,
+        budget: Duration,
+    ) -> Result<(String, serde_json::Value), ()> {
         if budget.is_zero() || budget > Duration::from_millis(900) {
             return Err(());
         }
@@ -180,7 +188,12 @@ impl HomeControlTransport for HttpsHomeTransport {
         if state.len() > 128 || state.chars().any(char::is_control) {
             return Err(());
         }
-        Ok(state.to_owned())
+        let attributes = match json.get("attributes") {
+            Some(serde_json::Value::Object(map)) => super::public_attributes(map),
+            None | Some(serde_json::Value::Null) => serde_json::Value::Null,
+            Some(_) => return Err(()),
+        };
+        Ok((state.to_owned(), attributes))
     }
 }
 #[cfg(test)]

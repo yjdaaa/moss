@@ -27,6 +27,8 @@ function ComputerHostPanel() {
   const [info, setInfo] = useState(null);
   const [busy, setBusy] = useState(false);
   const [code, setCode] = useState(null);
+  const [staticPinInput, setStaticPinInput] = useState("");
+  const [pinStatus, setPinStatus] = useState("");
 
   const load = async () => {
     const res = await getJson("/api/system/lan-info");
@@ -75,6 +77,71 @@ function ComputerHostPanel() {
     }
   };
 
+  const saveStaticPin = async () => {
+    const trimmed = staticPinInput.trim();
+    if (!/^\d{6}$/.test(trimmed)) {
+      await showAlert("请输入 6 位纯数字作为固定配对码（例如 888888）", { title: "格式无效", tone: "warning" });
+      return;
+    }
+    setBusy(true);
+    setPinStatus("");
+    try {
+      const res = await postJson("/api/settings", { lan_static_pin: trimmed });
+      if (!(res.ok && res.data?.success)) {
+        throw new Error(res.data?.result || `HTTP ${res.status}`);
+      }
+      setStaticPinInput("");
+      await load();
+      setPinStatus("✓ 固定配对码已保存（长期有效）");
+      setTimeout(() => setPinStatus(""), 4500);
+    } catch (error) {
+      await showAlert(String(error?.message ?? error), { title: "保存固定配对码失败", tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearStaticPin = async () => {
+    setBusy(true);
+    setPinStatus("");
+    try {
+      const res = await postJson("/api/settings", { lan_static_pin: "" });
+      if (!(res.ok && res.data?.success)) {
+        throw new Error(res.data?.result || `HTTP ${res.status}`);
+      }
+      await load();
+      setPinStatus("已清除固定配对码");
+      setTimeout(() => setPinStatus(""), 4000);
+    } catch (error) {
+      await showAlert(String(error?.message ?? error), { title: "清除失败", tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokePairedDevices = async () => {
+    if (!(await showConfirm("撤销后，之前已配对的手机/局域网设备需要重新输入配对码才能连接。确定撤销吗？", {
+      title: "撤销已配对设备",
+      tone: "warning",
+      danger: true,
+      confirmText: "全部撤销",
+    }))) return;
+    setBusy(true);
+    try {
+      const res = await postJson("/api/settings", { lan_revoke_paired: true });
+      if (!(res.ok && res.data?.success)) {
+        throw new Error(res.data?.result || `HTTP ${res.status}`);
+      }
+      await load();
+      setPinStatus("已撤销所有已配对设备");
+      setTimeout(() => setPinStatus(""), 4000);
+    } catch (error) {
+      await showAlert(String(error?.message ?? error), { title: "撤销失败", tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const address = info.addresses?.[0] ? `${info.addresses[0]}:${info.port}` : null;
 
   return (
@@ -82,7 +149,7 @@ function ComputerHostPanel() {
       <FoldHeader variant="section" id="settings-phone-link" icon={Smartphone} title="手机连接" defaultOpen={false} />
       <div style={hintStyle}>
         开启后，同一 WiFi 下的手机 App 可以连接这台电脑，用电脑的数据操作雕刻机（连接、预览、发送、急停）。
-        手机上材料、校准参数和系统设置只读，只能在电脑上修改。
+        配对成功后会自动长久记住（MOSS 软件重启或电脑重启后均无需重新配对）。
       </div>
       <label className="phone-link-label">
         <input
@@ -103,20 +170,76 @@ function ComputerHostPanel() {
             <span className="mono phone-link-text">{address || `本机 IP:${info.port}`}</span>
             {!address && <span className="phone-link-text-2">{phoneLinkHostCopy().missingIpHint}</span>}
           </div>
-          <div className="phone-link-row">
-            <button type="button" className="btn btn-hud-primary phone-link-btn" disabled={busy} onClick={() => void generateCode()}>
+
+          <div className="phone-link-box-2" style={{ marginTop: "10px" }}>
+            <div style={{ fontSize: "12px", fontWeight: 600, marginBottom: "6px" }}>
+              自定义固定配对码（6 位数字，长久有效，免去每次手动生成）：
+              {info.static_pin_set && (
+                <span style={{ color: "var(--green)", marginLeft: "6px" }}>● 已设置生效</span>
+              )}
+            </div>
+            <div className="phone-link-row" style={{ flexWrap: "wrap", gap: "8px" }}>
+              <input
+                type="password"
+                inputMode="numeric"
+                maxLength={6}
+                value={staticPinInput}
+                onChange={(e) => setStaticPinInput(e.target.value.replace(/\D/g, ""))}
+                className="text-input phone-link-field"
+                style={{ maxWidth: "210px" }}
+                placeholder={info.static_pin_set ? "输入新 6 位数字可修改" : "例如 888888"}
+                autoComplete="new-password"
+                id="settings-lan-static-pin"
+              />
+              <button
+                type="button"
+                className="btn btn-hud-primary phone-link-btn"
+                disabled={busy || staticPinInput.length !== 6}
+                onClick={() => void saveStaticPin()}
+                id="settings-lan-static-pin-save"
+              >
+                <span>保存固定码</span>
+              </button>
+              {info.static_pin_set && (
+                <button
+                  type="button"
+                  className="btn btn-ghost phone-link-btn"
+                  disabled={busy}
+                  onClick={() => void clearStaticPin()}
+                  id="settings-lan-static-pin-clear"
+                >
+                  <span>清除固定码</span>
+                </button>
+              )}
+              {pinStatus && <span className="settings-text">{pinStatus}</span>}
+            </div>
+          </div>
+
+          <div className="phone-link-row" style={{ marginTop: "10px", flexWrap: "wrap", gap: "8px" }}>
+            <button type="button" className="btn btn-ghost phone-link-btn" disabled={busy} onClick={() => void generateCode()}>
               <KeyRound size={13} />
-              <span>生成配对码</span>
+              <span>生成临时配对码 (5分钟)</span>
             </button>
             {code && (
               <span className="mono phone-link-text-3">
                 {code.value}
               </span>
             )}
+            {Number(info.paired_devices_count) > 0 && (
+              <button
+                type="button"
+                className="btn btn-ghost phone-link-btn"
+                disabled={busy}
+                onClick={() => void revokePairedDevices()}
+                title="清除所有已记住的手机连接授权"
+              >
+                <span>撤销已配对设备 ({info.paired_devices_count}台)</span>
+              </button>
+            )}
           </div>
           {code && (
             <div className="phone-link-box-3">
-              5 分钟内在手机上输入；电脑重启后手机需要重新配对。
+              5 分钟内在手机上输入；配对成功后将长久保持连接（MOSS 重启或电脑重启后无需重新配对）。
             </div>
           )}
         </>

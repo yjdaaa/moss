@@ -448,3 +448,48 @@ impl CloneLike for Vec<CalibrationSample> {
         self.iter().map(|s| CalibrationSample { speaker_id: s.speaker_id.clone(), embedding: s.embedding.clone() }).collect()
     }
 }
+
+#[tokio::test]
+async fn short_vs_overlong_duration_split_and_timeout_aborts_worker_immediately() {
+    let resolver = Arc::new(Resolver {
+        delay: Duration::from_secs(10),
+        allowed: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+        replies: Mutex::new(std::collections::VecDeque::from([Some("a".into())])),
+    });
+    let service = PersonContext::new(resolver.clone(), Store::seeded());
+    let ctx = context();
+
+    // <2s 返回 SkippedShortDuration；>10s 必须返回 Denied（绝不继承上一轮身份）
+    assert_eq!(
+        service
+            .start(&ctx, &vec![200; 16000], 16000)
+            .finish_outcome()
+            .await,
+        IdentityOutcome::SkippedShortDuration
+    );
+    assert_eq!(
+        service
+            .start(&ctx, &vec![200; 16000 * 11], 16000)
+            .finish_outcome()
+            .await,
+        IdentityOutcome::Denied
+    );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+
+    // finish_outcome 超时（1.5s < 10s）后 Drop 必须立即 abort 后台任务并释放并发槽位
+    let outcome = service
+        .start(&ctx, &vec![200; 32000], 16000)
+        .finish_outcome()
+        .await;
+    assert_eq!(outcome, IdentityOutcome::Resolved(None));
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while service.identify_workers.available_permits() < 2
+            || service.state.lock().unwrap().identifying.contains(&ctx.device_id)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timeout in finish_outcome must abort spawned task and release permits promptly");
+}

@@ -22,7 +22,7 @@ pub trait AgentRunner:Send+Sync{
 pub type CapabilityProbe=Arc<dyn Fn(Provider,&Path)->Option<CapabilitySnapshot>+Send+Sync>;
 /// 自动扫描本机已安装的 CLI 可执行文件（不启动子进程）。
 pub type CliDetector=Arc<dyn Fn(Provider)->Option<PathBuf>+Send+Sync>;
-type CachedSnapshot=(Option<std::time::SystemTime>,u64,CapabilitySnapshot);
+type CachedSnapshot=(Option<std::time::SystemTime>,u64,std::time::Instant,Option<CapabilitySnapshot>);
 
 pub struct AgentCoordinator {
     api:Weak<ApiService>,
@@ -56,13 +56,27 @@ impl AgentCoordinator {
     fn snapshot(&self,kind:Provider,exe:&Path)->Result<CapabilitySnapshot,AgentError>{
        let meta=std::fs::metadata(exe).map_err(|_|AgentError::CapabilityMissing)?;
        let key=(meta.modified().ok(),meta.len());
-       let mut cache=self.snapshots.lock().map_err(|_|AgentError::CapabilityMissing)?;
-       if let Some((modified,len,snapshot))=cache.get(exe) {
-           if (*modified,*len)==key {return Ok(snapshot.clone());}
+       {
+           let cache=self.snapshots.lock().map_err(|_|AgentError::CapabilityMissing)?;
+           if let Some((modified,len,cached_at,snapshot))=cache.get(exe) {
+               if (*modified,*len)==key {
+                   if let Some(snap)=snapshot {
+                       return Ok(snap.clone());
+                   }
+                   if cached_at.elapsed()<std::time::Duration::from_secs(5) {
+                       return Err(AgentError::CapabilityMissing);
+                   }
+               }
+           }
        }
-       let snapshot=(self.probe)(kind,exe).ok_or(AgentError::CapabilityMissing)?;
-       cache.insert(exe.to_path_buf(),(key.0,key.1,snapshot.clone()));
-       Ok(snapshot)
+       let probed=(self.probe)(kind,exe);
+       if let Ok(after)=std::fs::metadata(exe)
+           && (after.modified().ok(),after.len())==key
+           && let Ok(mut cache)=self.snapshots.lock()
+       {
+           cache.insert(exe.to_path_buf(),(key.0,key.1,std::time::Instant::now(),probed.clone()));
+       }
+       probed.ok_or(AgentError::CapabilityMissing)
     }
     fn prepare(&self,kind:Provider,task:&str)->Result<AgentPlan,AgentError>{
        let config=self.configuration();
@@ -536,5 +550,113 @@ mod tests{
         }
         assert_eq!(fake.calls.load(AtomicOrdering::SeqCst),1);
     }
-}
+    #[test]
+    fn snapshot_drops_lock_during_probe_caches_none_and_invalidates_on_binary_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
+        let approvals = Arc::new(ApprovalService::new(db.clone()));
+        let api = Arc::new(
+            ApiService::new(
+                laser_runtime::LaserSettings {
+                    default_connection_mode: "network".into(),
+                    engraving_mode: "raster".into(),
+                    web_host: "127.0.0.1".into(),
+                    web_port: 9666,
+                    material_params_file: None,
+                },
+                builtin_material_library(),
+            )
+            .with_runtime_db(db.clone())
+            .with_approval_service(approvals)
+            .with_strict_mode(true),
+        );
+        let workdir = dir.path().join("agent-workspace");
+        std::fs::create_dir(&workdir).unwrap();
+        let binary = dir.path().join(Provider::Codex.expected_binary());
+        std::fs::write(&binary, b"broken-v1").unwrap();
+        let mut settings = moss_voice::settings::VoiceSettings::default();
+        settings.builtin_agents = moss_voice::settings::BuiltinAgents {
+            enabled: true,
+            workspace: workdir.to_string_lossy().into_owned(),
+            codex_executable: binary.to_string_lossy().into_owned(),
+            claude_executable: String::new(),
+        };
+        let path = dir.path().join("settings.json");
+        moss_voice::settings::save(&path, &settings).unwrap();
 
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let allow_success = Arc::new(AtomicBool::new(false));
+        let weak_holder: Arc<Mutex<Option<Weak<AgentCoordinator>>>> = Arc::new(Mutex::new(None));
+        let calls_ref = probe_calls.clone();
+        let allow_ref = allow_success.clone();
+        let weak_ref = weak_holder.clone();
+        let codex_help = "--ask-for-approval --sandbox --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --cd --json --color";
+        let probe: CapabilityProbe = Arc::new(move |_, _| {
+            calls_ref.fetch_add(1, AtomicOrdering::SeqCst);
+            if let Some(coord) = weak_ref.lock().unwrap().as_ref().and_then(Weak::upgrade) {
+                assert!(
+                    coord.snapshots.try_lock().is_ok(),
+                    "snapshots lock must NOT be held while probe subprocesses run"
+                );
+            }
+            if allow_ref.load(AtomicOrdering::Acquire) {
+                Some(CapabilitySnapshot {
+                    version: "codex-cli 0.159.0".into(),
+                    help: codex_help.into(),
+                })
+            } else {
+                None
+            }
+        });
+        let detector: CliDetector = Arc::new(|_| None);
+        let runner: Arc<dyn AgentRunner> = Arc::new(FakeRunner {
+            calls: AtomicUsize::new(0),
+        });
+        let manager = Arc::new_cyclic(|me| AgentCoordinator {
+            api: Arc::downgrade(&api),
+            db: db.clone(),
+            settings_file: path,
+            sensitive: vec![],
+            probe,
+            detector,
+            snapshots: Mutex::new(HashMap::new()),
+            runner,
+            running: Mutex::new(HashMap::new()),
+            me: me.clone(),
+        });
+        *weak_holder.lock().unwrap() = Some(Arc::downgrade(&manager));
+        api.set_agent_runs(manager.clone()).unwrap();
+
+        // Unchanged broken CLI: multiple status() and tools() calls invoke probe only once
+        let s1 = manager.status();
+        let s2 = manager.status();
+        let _ = manager.tools();
+        assert_eq!(probe_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(s1["providers"][0]["ready"], false);
+        assert_eq!(
+            s2["providers"][0]["error_code"],
+            "agent_capability_missing"
+        );
+
+        // Upgrade CLI (file length changes): cache invalidates and re-probes once
+        allow_success.store(true, AtomicOrdering::Release);
+        std::fs::write(&binary, b"working-upgraded-cli-binary-v2").unwrap();
+        let s3 = manager.status();
+        let s4 = manager.status();
+        assert_eq!(probe_calls.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(s3["providers"][0]["ready"], true);
+        assert_eq!(s4["providers"][0]["version"], "codex-cli 0.159.0");
+
+        // Touch mtime without changing file length: cache invalidates and re-probes once
+        let old_mtime = std::fs::metadata(&binary).unwrap().modified().unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&binary)
+            .unwrap()
+            .set_modified(old_mtime + std::time::Duration::from_secs(60))
+            .unwrap();
+        let _ = manager.status();
+        let _ = manager.status();
+        assert_eq!(probe_calls.load(AtomicOrdering::SeqCst), 3);
+    }
+}

@@ -16,6 +16,7 @@ pub struct KnowledgeRootRow {
     pub revision: i64,
     pub created_at: f64,
     pub indexed_at: Option<f64>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -39,7 +40,7 @@ pub struct KnowledgeFileRow {
     pub mtime: f64,
 }
 
-const ROOT_COLUMNS: &str = "id,scope_kind,scope_id,label,root_path,revision,created_at,indexed_at";
+const ROOT_COLUMNS: &str = "id,scope_kind,scope_id,label,root_path,revision,created_at,indexed_at,enabled";
 const DIR_COLUMNS: &str = "d.id,d.root_id,d.rel_dir,d.l0,d.l1,d.file_count";
 const MAX_LIST: usize = 200;
 
@@ -53,6 +54,7 @@ fn root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeRootRow> 
         revision: row.get(5)?,
         created_at: row.get(6)?,
         indexed_at: row.get(7)?,
+        enabled: row.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -71,8 +73,8 @@ impl RuntimeDb {
             return Err(invalid("资料目录无效"));
         }
         self.connection.execute(
-            &format!("INSERT INTO context_knowledge_roots({ROOT_COLUMNS}) VALUES(?1,?2,?3,?4,?5,1,?6,NULL)"),
-            params![row.id, row.scope_kind, row.scope_id, row.label, row.root_path, row.created_at],
+            &format!("INSERT INTO context_knowledge_roots({ROOT_COLUMNS}) VALUES(?1,?2,?3,?4,?5,1,?6,NULL,?7)"),
+            params![row.id, row.scope_kind, row.scope_id, row.label, row.root_path, row.created_at, i64::from(row.enabled)],
         )?;
         Ok(())
     }
@@ -90,6 +92,22 @@ impl RuntimeDb {
         ))?;
         let rows = statement.query_map(params![scope_kind, scope_id], root_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn all_knowledge_roots(&self) -> Result<Vec<KnowledgeRootRow>, SchemaError> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {ROOT_COLUMNS} FROM context_knowledge_roots ORDER BY created_at,id LIMIT {MAX_LIST}"
+        ))?;
+        let rows = statement.query_map([], root_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn set_knowledge_root_enabled(&self, id: &str, expected_revision: i64, enabled: bool) -> Result<bool, SchemaError> {
+        let updated = self.connection.execute(
+            "UPDATE context_knowledge_roots SET enabled=?3, revision=revision+1 WHERE id=?1 AND revision=?2",
+            params![id, expected_revision, i64::from(enabled)],
+        )?;
+        Ok(updated == 1)
     }
 
     /// Replace the whole index of one root atomically, only if the root is still at
@@ -164,7 +182,7 @@ impl RuntimeDb {
             let mut statement = self.connection.prepare(&format!(
                 "SELECT {DIR_COLUMNS} FROM context_knowledge_fts f JOIN context_knowledge_dirs d ON d.rowid=f.rowid
                  JOIN context_knowledge_roots r ON r.id=d.root_id
-                 WHERE context_knowledge_fts MATCH ?3 AND r.scope_kind=?1 AND r.scope_id=?2 ORDER BY bm25(context_knowledge_fts) LIMIT ?4"
+                 WHERE context_knowledge_fts MATCH ?3 AND r.scope_kind=?1 AND r.scope_id=?2 AND r.enabled=1 ORDER BY bm25(context_knowledge_fts) LIMIT ?4"
             ))?;
             for row in statement.query_map(params![scope_kind, scope_id, query, limit], dir_from_row)? {
                 found.push(row?);
@@ -176,7 +194,7 @@ impl RuntimeDb {
             let any = (0..patterns.len()).map(|i| format!("(d.l0 LIKE ?{0} ESCAPE '!' OR d.l1 LIKE ?{0} ESCAPE '!')", i + 4)).collect::<Vec<_>>().join(" OR ");
             let mut statement = self.connection.prepare(&format!(
                 "SELECT {DIR_COLUMNS} FROM context_knowledge_dirs d JOIN context_knowledge_roots r ON r.id=d.root_id
-                 WHERE ({any}) AND r.scope_kind=?1 AND r.scope_id=?2 ORDER BY d.rel_dir LIMIT ?3"
+                 WHERE ({any}) AND r.scope_kind=?1 AND r.scope_id=?2 AND r.enabled=1 ORDER BY d.rel_dir LIMIT ?3"
             ))?;
             let mut values: Vec<&dyn rusqlite::ToSql> = vec![&scope_kind, &scope_id, &limit];
             values.extend(patterns.iter().map(|p| p as &dyn rusqlite::ToSql));

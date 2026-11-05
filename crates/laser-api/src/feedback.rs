@@ -238,6 +238,57 @@ fn recommendation(class: &str, params: Params) -> Value {
     .json()
 }
 
+fn is_openrouter_https_url(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some(after_scheme) = trimmed
+        .get(..8)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("https://"))
+        .and_then(|_| trimmed.get(8..))
+    else {
+        return false;
+    };
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return false;
+    }
+    let (host, port_ok) = match authority.split_once(':') {
+        None => (authority, true),
+        Some((h, "443")) => (h, true),
+        Some(_) => ("", false),
+    };
+    port_ok && host.eq_ignore_ascii_case("openrouter.ai")
+}
+
+fn can_reuse_openrouter_llm_key(settings: &Map<String, Value>) -> bool {
+    let Some(llm) = settings
+        .get("voice")
+        .and_then(|v| v.pointer("/builtin_models/llm"))
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    let kind_ok = match llm.get("kind") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            trimmed.is_empty() || trimmed.eq_ignore_ascii_case("openai")
+        }
+        _ => false,
+    };
+    if !kind_ok {
+        return false;
+    }
+    llm.get("url")
+        .and_then(Value::as_str)
+        .is_some_and(is_openrouter_https_url)
+}
+
 impl ApiService {
     fn feedback_workflow(&self, id: &str) -> Result<Value, String> {
         if let Some(store) = &self.store {
@@ -370,12 +421,25 @@ impl ApiService {
                 .get("jev_enabled")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let key = match &self.runtime_db {
-                Some(db) => db
-                    .lock()
-                    .map_err(|_| (500, "数据库锁失败".into()))?
-                    .get_secret(JEV_API_KEY_SECRET)
-                    .map_err(|_| (500, "密钥读取失败".into()))?,
+            let allow_llm_fallback = can_reuse_openrouter_llm_key(&settings);
+            let effective_key = match &self.runtime_db {
+                Some(db) => {
+                    let guard = db.lock().map_err(|_| (500, "数据库锁失败".into()))?;
+                    let primary = guard
+                        .get_secret(JEV_API_KEY_SECRET)
+                        .map_err(|_| (500, "密钥读取失败".into()))?
+                        .map(|k| k.trim().to_owned())
+                        .filter(|k| !k.is_empty());
+                    match primary {
+                        Some(k) => Some(k),
+                        None if allow_llm_fallback => guard
+                            .get_secret("voice.llm.main")
+                            .map_err(|_| (500, "密钥读取失败".into()))?
+                            .map(|k| k.trim().to_owned())
+                            .filter(|k| !k.is_empty()),
+                        None => None,
+                    }
+                }
                 None => None,
             };
             let mut state = json!({"feedback_text": text, "original_params": params.json()});
@@ -388,16 +452,18 @@ impl ApiService {
                     state[key] = value.clone();
                 }
             }
-            let local_laya = settings
+            let jev_model = settings
                 .get("voice")
                 .and_then(|v| v.pointer("/builtin_local/jev_model"))
                 .and_then(Value::as_str)
-                .is_some_and(|m| {
-                    matches!(
-                        m.trim(),
-                        "laya_multilingual" | "convaiinnovations/laya-multilingual" | "local/laya-multilingual"
-                    )
-                });
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let local_laya = jev_model.is_some_and(|m| {
+                matches!(
+                    m,
+                    "laya_multilingual" | "convaiinnovations/laya-multilingual" | "local/laya-multilingual"
+                )
+            });
             let decision = if enabled {
                 if local_laya {
                     call_jev_with_model(
@@ -407,8 +473,9 @@ impl ApiService {
                         &state,
                     )
                 } else {
-                    match key.filter(|k| !k.trim().is_empty()) {
-                        Some(key) => call_jev(DEFAULT_JEV_ENDPOINT, &key, &state),
+                    let model_to_use = jev_model.unwrap_or(JEV_MODEL);
+                    match effective_key.as_deref() {
+                        Some(key) => call_jev_with_model(DEFAULT_JEV_ENDPOINT, key, model_to_use, &state),
                         None => Err("未配置 OpenRouter API Key".into()),
                     }
                 }
@@ -477,8 +544,9 @@ impl ApiService {
         input.remove("workflow_id");
         input.remove("_artifacts");
         input.insert("feedback_params".into(), params.json());
+        let effective_library = self.effective_material_library()?;
         let artifacts = match workflow["source_type"].as_str() {
-            Some("text") => generate_text_artifacts(&input, self.generated_root.as_deref())?,
+            Some("text") => generate_text_artifacts(&input, self.generated_root.as_deref(), &effective_library)?,
             Some("draw" | "image") => {
                 let file = workflow["artifacts"]["image_file"]
                     .as_str()
@@ -498,7 +566,7 @@ impl ApiService {
                         input.insert(key.into(), workflow["artifacts"][key].clone());
                     }
                 }
-                generate_draw_artifacts(&input, Some(root))?
+                generate_draw_artifacts(&input, Some(root), &effective_library)?
             }
             _ => return Err("已有 G-code 不能自动改写，请重新生成素材任务".into()),
         };
@@ -944,5 +1012,64 @@ mod tests {
             assert_eq!(regenerated["source_type"], workflow["source_type"]);
             assert_ne!(regenerated["artifacts"]["gcode_file"], workflow["artifacts"]["gcode_file"]);
         }
+    }
+
+    #[test]
+    fn openrouter_llm_key_reuse_checks_exact_https_host_and_openai_kind() {
+        for valid in [
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/chat/completions",
+            "https://OPENROUTER.AI:443/api/v1",
+            "https://openrouter.ai",
+        ] {
+            assert!(is_openrouter_https_url(valid), "{valid}");
+        }
+        for invalid in [
+            "http://openrouter.ai/api/v1",
+            "https://user@openrouter.ai/api/v1",
+            "https://openrouter.ai@evil.example/api/v1",
+            "https://openrouter.ai.evil.example/api/v1",
+            "https://sub.openrouter.ai/api/v1",
+            "https://openrouter.ai:8443/api/v1",
+            "https://api.openai.com/v1",
+            "",
+        ] {
+            assert!(!is_openrouter_https_url(invalid), "{invalid}");
+        }
+
+        let ok_default_kind = json!({"voice": {"builtin_models": {"llm": {"url": "https://openrouter.ai/api/v1"}}}});
+        assert!(can_reuse_openrouter_llm_key(ok_default_kind.as_object().unwrap()));
+        let ok_openai_kind = json!({"voice": {"builtin_models": {"llm": {"kind": "openai", "url": "https://openrouter.ai/api/v1"}}}});
+        assert!(can_reuse_openrouter_llm_key(ok_openai_kind.as_object().unwrap()));
+        let bad_kind = json!({"voice": {"builtin_models": {"llm": {"kind": "anthropic", "url": "https://openrouter.ai/api/v1"}}}});
+        assert!(!can_reuse_openrouter_llm_key(bad_kind.as_object().unwrap()));
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("settings.json"),
+            json!({
+                "jev_enabled": false,
+                "voice": {
+                    "builtin_local": {"jev_model": "typesafe/jev-custom"},
+                    "builtin_models": {"llm": {"kind": "openai", "url": "https://openrouter.ai/api/v1"}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let svc = service(temp.path(), true);
+        svc.runtime_db
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_secret("voice.llm.main", "sk-or-test-fallback", 1.0)
+            .unwrap();
+        let (status, preview) = post(&svc, "/api/draw/preview", draw_input());
+        assert_eq!(status, 200);
+        let wf_id = preview["result"]["workflow_id"].as_str().unwrap();
+        let (status, fb) = post(&svc, "/api/jev/feedback", json!({"workflow_id": wf_id, "feedback_text": "太焦了"}));
+        assert_eq!(status, 200);
+        assert_eq!(fb["result"]["feedback_type"], "too_dark");
     }
 }

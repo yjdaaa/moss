@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Settings, X, ShieldAlert, Monitor, Network, Link2, CheckCircle2, AlertCircle, Eye, EyeOff, Trash2 } from "lucide-react";
+import { Settings, X, ShieldAlert, Monitor, Network, Link2, CheckCircle2, AlertCircle, Eye, EyeOff, Trash2, RefreshCw } from "lucide-react";
 import { getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 
@@ -36,6 +36,11 @@ export function SettingsModal({
   const [savingJev, setSavingJev] = useState(false);
   const [testingJev, setTestingJev] = useState(false);
   const [jevSaveStatus, setJevSaveStatus] = useState("");
+  const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
+  const [checkPrerelease, setCheckPrerelease] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateReport, setUpdateReport] = useState(null);
+  const [updateError, setUpdateError] = useState("");
 
   useEffect(() => {
     if (!visible) return;
@@ -44,15 +49,16 @@ export function SettingsModal({
     setCloseAction(saved);
     setHideTopPills(typeof hideTopPillsProp === "boolean" ? hideTopPillsProp : readHideTopPills());
 
-    // 查询系统实际运行端口与首选端口
+    // 查询系统实际运行端口、首选端口与更新设置
     getJson("/api/system/info").then((res) => {
       if (res.ok && res.data?.success) {
         const info = res.data.result || {};
         setSystemInfo(info);
         setPortInput(String(info.preferred_port || 9666));
+        setAutoCheckUpdate(Boolean(info.auto_check_update));
+        setCheckPrerelease(Boolean(info.check_prerelease));
       }
     });
-
     if (!onOpenVoice) {
       getJson("/api/jev/status").then((res) => {
         if (res.ok && res.data?.success) {
@@ -77,6 +83,42 @@ export function SettingsModal({
     writeHideTopPills(next);
     if (onHideTopPillsChange) {
       onHideTopPillsChange(next);
+    }
+  };
+
+  const handleToggleUpdatePref = async (key, checked) => {
+    const next = Boolean(checked);
+    if (key === "auto_check_update") setAutoCheckUpdate(next);
+    if (key === "check_prerelease") setCheckPrerelease(next);
+    try {
+      const res = await postJson("/api/settings", { [key]: next });
+      if (!(res.ok && res.data?.success)) {
+        if (key === "auto_check_update") setAutoCheckUpdate(!next);
+        if (key === "check_prerelease") setCheckPrerelease(!next);
+        await showAlert(res.data?.result || "保存失败", { title: "更新设置保存失败", tone: "error" });
+      }
+    } catch (e) {
+      if (key === "auto_check_update") setAutoCheckUpdate(!next);
+      if (key === "check_prerelease") setCheckPrerelease(!next);
+      await showAlert(`保存网络异常: ${e.message}`, { title: "更新设置保存失败", tone: "error" });
+    }
+  };
+
+  const handleCheckUpdateNow = async () => {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    setUpdateError("");
+    try {
+      const res = await postJson("/api/system/check-update", { include_prerelease: checkPrerelease });
+      if (res.ok && res.data?.success && res.data?.result) {
+        setUpdateReport(res.data.result);
+      } else {
+        setUpdateError(res.data?.result || "检查更新失败，请稍后重试");
+      }
+    } catch (e) {
+      setUpdateError(`检查更新网络异常: ${e.message}`);
+    } finally {
+      setCheckingUpdate(false);
     }
   };
 
@@ -312,24 +354,9 @@ export function SettingsModal({
             )}
           </div>
 
-          {/* 小智 MCP 桥接设置：桌面端统一在语音中心修改（技术书 §9.5.1，A-77）；
-              独立 moss-host、手机等没有语音中心的环境仍在此填写（/api/settings 保持兼容） */}
-          {onOpenVoice ? (
-            <div className="ob-fold settings-box-3" id="settings-mcp-moved">
-              <FoldHeader variant="section" id="settings-mcp" icon={Link2} title="小智 MCP 网关端点" defaultOpen={false} />
-              <div className="settings-row-2">
-                <span>小智连接在语音中心设置（官方 / 自建链路、接入点地址、服务端与模型）。</span>
-                <button type="button" className="btn btn-hud-primary settings-btn" onClick={onOpenVoice} id="settings-open-voice">
-                  前往语音中心
-                </button>
-              </div>
-              {systemInfo?.mcp && (
-                <div className="settings-box-5">
-                  当前状态：{systemInfo.mcp.configured ? (systemInfo.mcp.connected ? "已连接" : "已配置，未连接") : "未配置"}
-                </div>
-              )}
-            </div>
-          ) : (
+          {/* 小智 MCP 桥接设置：桌面端已统一收归「语音中心」管理，偏好设置中不再重复展示；
+              仅在无语音中心的独立 moss-host 等环境保留兼容配置 */}
+          {!onOpenVoice && (
             <div className="ob-fold settings-box-3">
               <FoldHeader variant="section" id="settings-mcp" icon={Link2} title="小智 MCP 网关端点" defaultOpen={false} />
               <div className="settings-box-4">
@@ -445,6 +472,90 @@ export function SettingsModal({
 
           {/* 导出目录（仅桌面版） */}
           <ExportSettingsSection />
+
+          {/* 软件更新（Magpie 风格：当前版本 + 启动时自动检查更新 + 包含预览版 + 立即检查更新） */}
+          {!isRemoteMode() && (
+            <div className="ob-fold settings-box-3" id="settings-update-section">
+              <FoldHeader variant="section" id="settings-update" icon={RefreshCw} title="软件更新" defaultOpen={false} />
+              <div className="settings-box-4">
+                当前版本：<strong className="mono">MOSS v{systemInfo?.version || "0.2.0"}</strong>
+              </div>
+              <label className="settings-label">
+                <input
+                  type="checkbox"
+                  id="settings-auto-check-update"
+                  checked={autoCheckUpdate}
+                  onChange={(e) => void handleToggleUpdatePref("auto_check_update", e.target.checked)}
+                />
+                <span>启动时自动检查更新</span>
+              </label>
+              <label className="settings-label" style={{ marginTop: "6px" }}>
+                <input
+                  type="checkbox"
+                  id="settings-check-prerelease"
+                  checked={checkPrerelease}
+                  onChange={(e) => void handleToggleUpdatePref("check_prerelease", e.target.checked)}
+                />
+                <span>检查更新时包含预览版 (Pre-release)</span>
+              </label>
+              <div className="settings-row" style={{ marginTop: "10px", flexWrap: "wrap", gap: "10px" }}>
+                <button
+                  type="button"
+                  className="btn btn-hud-primary settings-btn"
+                  onClick={() => void handleCheckUpdateNow()}
+                  disabled={checkingUpdate}
+                  id="settings-check-update-btn"
+                >
+                  <RefreshCw size={13} />
+                  <span>{checkingUpdate ? "正在检查更新…" : "立即检查更新"}</span>
+                </button>
+                {updateReport && !updateError && (
+                  <span
+                    className="settings-text"
+                    style={{ color: updateReport.has_update ? "var(--gold)" : "var(--green)" }}
+                  >
+                    {updateReport.has_update
+                      ? `发现新版本 v${updateReport.latest_version}${updateReport.prerelease ? " (预览版)" : ""}`
+                      : `✓ 已是最新版本 (v${updateReport.current_version || systemInfo?.version || "0.2.0"})`}
+                  </span>
+                )}
+                {updateError && (
+                  <span className="settings-text" style={{ color: "var(--danger)" }}>
+                    {updateError}
+                  </span>
+                )}
+              </div>
+              {updateReport?.has_update && (
+                <div
+                  style={{
+                    marginTop: "10px",
+                    padding: "8px 10px",
+                    borderRadius: "6px",
+                    background: "rgba(251, 191, 36, 0.08)",
+                    border: "1px solid rgba(251, 191, 36, 0.35)",
+                    fontSize: "12px",
+                  }}
+                >
+                  <div>
+                    最新版本：<strong className="mono">v{updateReport.latest_version}</strong>
+                    {updateReport.published_at ? ` · 发布于 ${updateReport.published_at.slice(0, 10)}` : ""}
+                  </div>
+                  {updateReport.notes && (
+                    <div style={{ marginTop: "4px", color: "var(--ink-dim)", whiteSpace: "pre-wrap" }}>
+                      {updateReport.notes}
+                    </div>
+                  )}
+                  {updateReport.release_url && (
+                    <div style={{ marginTop: "6px" }}>
+                      <a href={updateReport.release_url} target="_blank" rel="noreferrer">
+                        前往 GitHub Releases 下载更新 →
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 桌面客户端关闭行为 */}
           <div className="ob-fold settings-spacer">

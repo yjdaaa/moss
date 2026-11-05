@@ -266,7 +266,7 @@ mod knowledge {
     use laser_runtime::{KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
 
     fn root(id: &str, scope: &str, path: &str) -> KnowledgeRootRow {
-        KnowledgeRootRow { id: id.into(), scope_kind: "project".into(), scope_id: scope.into(), label: "说明书".into(), root_path: path.into(), revision: 1, created_at: 1.0, indexed_at: None }
+        KnowledgeRootRow { id: id.into(), scope_kind: "project".into(), scope_id: scope.into(), label: "说明书".into(), root_path: path.into(), revision: 1, created_at: 1.0, indexed_at: None, enabled: true }
     }
     fn dir(id: &str, root: &str, rel: &str, l0: &str) -> KnowledgeDirRow {
         KnowledgeDirRow { id: id.into(), root_id: root.into(), rel_dir: rel.into(), l0: l0.into(), l1: format!("{l0}。详细概览"), file_count: 1 }
@@ -299,16 +299,20 @@ mod knowledge {
         assert_eq!(hit(&["皮带张"], &[]), vec!["d2"], "只查本范围");
         assert_eq!(hit(&["详细概"], &[]).len(), 2, "L1 也参与检索");
         assert_eq!(hit(&[], &["镜片"]), vec!["d1"]);
+        assert!(db.set_knowledge_root_enabled("r1", 2, false).unwrap());
+        assert!(hit(&["皮带张"], &[]).is_empty(), "关闭的知识库不参与检索");
+        assert!(db.set_knowledge_root_enabled("r1", 3, true).unwrap());
+        assert_eq!(hit(&["皮带张"], &[]), vec!["d2"], "重新开启后恢复检索");
         assert!(db.search_knowledge_dirs("project", "p1", &strings(&["皮带"]), &[], 10).is_err());
 
         // Reindex after a file was removed: its directory summary disappears from search.
-        assert!(db.replace_knowledge_index("r1", 2, &dirs[..1], &files[..1], 4.0).unwrap());
+        assert!(db.replace_knowledge_index("r1", 4, &dirs[..1], &files[..1], 4.0).unwrap());
         assert!(hit(&["皮带张"], &[]).is_empty(), "删除的文件不再命中");
         assert_eq!(db.knowledge_files("d2").unwrap().len(), 0);
-        assert!(db.replace_knowledge_index("r1", 3, &dirs[..1], &[file("fx", "r1", "missing", "x.md")], 5.0).is_err(), "文件必须属于本次的目录");
+        assert!(db.replace_knowledge_index("r1", 5, &dirs[..1], &[file("fx", "r1", "missing", "x.md")], 5.0).is_err(), "文件必须属于本次的目录");
 
         assert!(!db.delete_knowledge_root_if_revision("r1", 1).unwrap());
-        assert!(db.delete_knowledge_root_if_revision("r1", 3).unwrap());
+        assert!(db.delete_knowledge_root_if_revision("r1", 5).unwrap());
         assert!(hit(&["对焦步"], &[]).is_empty() && db.knowledge_dirs("r1").unwrap().is_empty() && db.knowledge_files("d1").unwrap().is_empty());
         let indexed: i64 = db.connection.query_row("SELECT COUNT(*) FROM context_knowledge_fts WHERE context_knowledge_fts MATCH '\"对焦步\"'", [], |r| r.get(0)).unwrap();
         assert_eq!(indexed, 0, "全文索引一并清掉");

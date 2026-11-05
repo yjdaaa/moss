@@ -41,10 +41,27 @@ pub fn recommend_with_scale(
     engraving_mode: Option<&str>,
     power_scale: f64,
 ) -> Option<Recommendation> {
+    recommend_in_library(
+        &builtin_material_library(),
+        material,
+        thickness_mm,
+        laser_mode,
+        engraving_mode,
+        power_scale,
+    )
+}
+
+pub fn recommend_in_library(
+    library: &laser_contracts::MaterialLibrary,
+    material: &str,
+    thickness_mm: f64,
+    laser_mode: &str,
+    engraving_mode: Option<&str>,
+    power_scale: f64,
+) -> Option<Recommendation> {
     if !thickness_mm.is_finite() || thickness_mm <= 0.0 {
         return None;
     }
-    let library = builtin_material_library();
     let (name, entry) = library.materials.iter().find(|(name, entry)| {
         name.eq_ignore_ascii_case(material)
             || entry
@@ -263,5 +280,36 @@ mod tests {
                 .unwrap()
                 .ends_with("M5\nM2\n")
         );
+    }
+
+    #[test]
+    fn recommends_custom_materials_from_supplied_library() {
+        let mut lib = builtin_material_library();
+        let mut entry = laser_contracts::MaterialEntry::default();
+        entry.aliases.push("custom-bamboo".into());
+        let mut th = laser_contracts::ThicknessEntry::default();
+        th.cut = Some(ParamCell {
+            laser_min_power: 0,
+            laser_max_power: 750,
+            feed_rate: 320,
+            travel_rate: 3000,
+            threshold: -1,
+            passes: 2,
+            pixel_size_mm: 0.1,
+            power_scale: Some(1000),
+            source: None,
+            notes: None,
+            updated_at: None,
+            extra: Default::default(),
+        });
+        entry.thicknesses.insert("5".into(), th);
+        lib.materials.insert("特制楠竹".into(), entry);
+
+        let res = recommend_in_library(&lib, "custom-bamboo", 5.0, "cut", None, 255.0).unwrap();
+        assert_eq!(res.material, "特制楠竹");
+        assert_eq!(res.laser_mode, "cut");
+        assert_eq!(res.params.feed_rate, 320);
+        assert_eq!(res.params.passes, 2);
+        assert!(res.params.laser_max_power < 255);
     }
 }

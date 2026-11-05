@@ -3,6 +3,67 @@ import { Layers, Trash2, X } from "lucide-react";
 import { postJson } from "../api/client.js";
 import { showConfirm } from "../appDialog.js";
 
+export function parseThicknessList(str) {
+  return String(str || "")
+    .split(/[,，\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+export function buildMaterialSavePayload({
+  material,
+  thickList,
+  power,
+  speed,
+  laserMode = "engrave",
+  engravingMode = "raster",
+}) {
+  const normalizedLaserMode = laserMode === "cut" || engravingMode === "cut" ? "cut" : "engrave";
+  const normalizedEngravingMode = engravingMode === "outline" ? "outline" : "raster";
+  const laserMaxPower = Math.round((Number(power) / 100) * 1000);
+  const feedRate = Math.round(Number(speed) * 60);
+  const cell = {
+    laser_min_power: 0,
+    laser_max_power: laserMaxPower,
+    feed_rate: feedRate,
+    travel_rate: 3000,
+    threshold: -1,
+    passes: 1,
+    pixel_size_mm: 0.1,
+  };
+  const thicknesses = {};
+  for (const th of thickList) {
+    thicknesses[String(th)] =
+      normalizedLaserMode === "cut"
+        ? { cut: { ...cell } }
+        : { engrave: { [normalizedEngravingMode]: { ...cell } } };
+  }
+  return {
+    action: "save",
+    material,
+    thicknesses,
+    power_percent: Number(power),
+    speed_mms: Number(speed),
+    laser_mode: normalizedLaserMode,
+    engraving_mode: normalizedLaserMode === "cut" ? "" : normalizedEngravingMode,
+    // 兼容单厚度字段
+    thickness_mm: thickList[0],
+    laser_max_power: laserMaxPower,
+    feed_rate: feedRate,
+  };
+}
+
+export function buildMaterialDeletePayload(material) {
+  return {
+    action: "delete",
+    material,
+    thickness_mm: 0,
+    confirmed: true,
+  };
+}
+
 export function MaterialModal({ visible, initialData, onClose, onSaved, onDeleted }) {
   if (!visible) return null;
 
@@ -33,15 +94,6 @@ export function MaterialModal({ visible, initialData, onClose, onSaved, onDelete
     setBusy(false);
   }, [initialData, visible]);
 
-  const parseThicknessList = (str) => {
-    return str
-      .split(/[,，\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map(Number)
-      .filter((n) => Number.isFinite(n) && n > 0);
-  };
-
   const handleSave = async () => {
     const trimmedName = name.trim();
     if (!trimmedName) {
@@ -58,17 +110,14 @@ export function MaterialModal({ visible, initialData, onClose, onSaved, onDelete
     setError("");
 
     // D9: 原子批量保存所有厚度，单次提交
-    const payload = {
-      action: "save",
+    const payload = buildMaterialSavePayload({
       material: trimmedName,
-      thicknesses: thickList,
-      power_percent: Number(power),
-      speed_mms: Number(speed),
-      // 兼容单厚度字段
-      thickness_mm: thickList[0],
-      laser_max_power: Math.round((Number(power) / 100) * 1000),
-      feed_rate: Math.round(Number(speed) * 60),
-    };
+      thickList,
+      power,
+      speed,
+      laserMode: initialData?.laser_mode,
+      engravingMode: initialData?.engraving_mode,
+    });
 
     try {
       const res = await postJson("/api/material-lab/manage", payload);
@@ -102,13 +151,7 @@ export function MaterialModal({ visible, initialData, onClose, onSaved, onDelete
     setBusy(true);
     setError("");
 
-    const thickList = parseThicknessList(thicknessStr);
-    const payload = {
-      action: "delete",
-      material: trimmedName,
-      thickness_mm: thickList[0] || 0,
-      confirmed: true,
-    };
+    const payload = buildMaterialDeletePayload(trimmedName);
 
     try {
       const res = await postJson("/api/material-lab/manage", payload);

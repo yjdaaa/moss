@@ -15,8 +15,10 @@ mod windows_process;
 #[cfg(unix)]
 mod unix_process;
 // Offline fake-upstream HTTP request policy. Not a production model proxy.
+#[cfg(test)]
 mod model_proxy;
 // Digest-pinned, synthetic-only Docker invocation plan; not production runner.
+#[cfg(test)]
 mod docker_plan;
 mod engine;
 pub use engine::{AgentCoordinator,CapabilitySnapshot,AgentRunner};

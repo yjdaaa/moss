@@ -39,7 +39,7 @@ use crate::audio::{
 };
 use crate::conversation::{
     Conversation, DeviceCall, DeviceTools, ToolContext, TurnEvent, TurnInput, append_history,
-    spawn_turn,
+    spawn_turn_with_person_hint,
 };
 use crate::music::playback::{MusicController, MusicProgress};
 use crate::state::SessionView;
@@ -278,6 +278,10 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                     active_tool: None,
                     utterance_chars: 0,
                     spoken_sentences: 0,
+                    device_tools: Vec::new(),
+                    screen_monochrome: None,
+                    screen_width: None,
+                    screen_height: None,
                 });
                 shared
                     .registry
@@ -415,6 +419,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         map.remove(&device_id);
     }
     session.finish_timing("disconnected");
+    session.last_verified_person = None;
     session.turn = None;
     session.pump.clear();
     drop(lease);
@@ -531,8 +536,18 @@ enum TurnKind {
 }
 
 /// 正在进行的一轮对话。丢弃时中止对话任务（打断、断开连接）。
+struct VerifiedPersonHint {
+    scope: crate::person_context::PersonScope,
+    verified_at: Instant,
+    consecutive_short: u8,
+}
+
+const SHORT_UTTERANCE_CONTINUITY_WINDOW: Duration = Duration::from_secs(30);
+const MAX_CONSECUTIVE_SHORT_UTTERANCES: u8 = 2;
+
 struct ActiveTurn {
-    person_scope:Option<crate::person_context::PersonScope>,
+    person_scope: Option<crate::person_context::PersonScope>,
+    person_verified: bool,
     timing: Option<crate::TurnTiming>,
     recording_offset: u64,
     kind: TurnKind,
@@ -546,6 +561,10 @@ struct ActiveTurn {
     user: Option<String>,
     /// 已向设备发出 sentence_start 的句子（不是仅合成或排队的句子）。
     spoken: Vec<String>,
+    debug_raw_asr: Option<String>,
+    debug_corrected_asr: Option<String>,
+    debug_tools: Vec<crate::DebugToolTrace>,
+    debug_text_reply: Vec<String>,
     /// 生成完成不等于播放完成；正常播完后才提交完整历史。
     pending_messages: Vec<ChatMessage>,
     /// 当前句子的重采样器（流式合成的后续分段沿用，保证分段之间连续）
@@ -573,6 +592,8 @@ struct DeviceMcp {
     init_sent: bool,
     initialized: bool,
     ready: bool,
+    screen_monochrome: Option<bool>,
+    screen_size: Option<(u32, u32)>,
     deferred_requests: Vec<crate::DeviceRequest>,
     calls_tx: UnboundedSender<DeviceCall>,
     calls_rx: UnboundedReceiver<DeviceCall>,
@@ -586,12 +607,31 @@ enum McpPending {
     Snapshot(&'static str),
     /// 桌面端请求 `self.reboot`：设备不回响应
     Reboot,
+    /// 上位机调参/预览推送：回包只检查是否报错记事件，不覆盖设备状态快照
+    Quiet(&'static str),
+    /// 连接握手后查询 `self.screen.get_info` 以识别单色 OLED (`monochrome: true`) vs 彩屏 LCD
+    ScreenInfo,
 }
 
 /// 设备工具清单最多取多少页（防止设备返回循环的游标）
 const MAX_TOOL_PAGES: usize = 20;
 /// 交给模型的设备工具结果最长字符数
 const MAX_DEVICE_RESULT_CHARS: usize = 1500;
+
+fn is_user_only_device_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "self.reboot"
+            | "self.upgrade_firmware"
+            | "self.get_system_info"
+            | "self.screen.get_info"
+            | "self.screen.snapshot"
+            | "self.screen.preview_image"
+            | "self.assets.set_download_url"
+            | "self.system.reconfigure_wifi"
+            | "self.disp.network"
+    )
+}
 
 impl DeviceMcp {
     fn new() -> Self {
@@ -604,6 +644,8 @@ impl DeviceMcp {
             init_sent: false,
             initialized: false,
             ready: false,
+            screen_monochrome: None,
+            screen_size: None,
             deferred_requests: Vec::new(),
             calls_tx,
             calls_rx,
@@ -620,9 +662,42 @@ impl DeviceMcp {
         json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
     }
 
+    fn model_tools(&self) -> Vec<Value> {
+        self.tools
+            .iter()
+            .filter(|item| {
+                item.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !is_user_only_device_tool(name))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn all_tool_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for item in &self.tools {
+            if let Some(name) = item.get("name").and_then(Value::as_str)
+                && !names.iter().any(|n| n == name)
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names
+    }
+
+    fn has_tool(&self, name: &str) -> bool {
+        self.tools
+            .iter()
+            .any(|item| item.get("name").and_then(Value::as_str) == Some(name))
+    }
+
     fn tool_set(&self) -> Option<DeviceTools> {
-        (self.ready && !self.tools.is_empty())
-            .then(|| DeviceTools::new(&self.tools, self.calls_tx.clone()))
+        if !self.ready {
+            return None;
+        }
+        let visible = self.model_tools();
+        (!visible.is_empty()).then(|| DeviceTools::new(&visible, self.calls_tx.clone()))
     }
 }
 
@@ -702,6 +777,17 @@ async fn next_turn_event(turn: &mut Option<ActiveTurn>) -> Option<TurnEvent> {
         _ => std::future::pending().await,
     }
 }
+struct PreviewHold {
+    url: String,
+    until: Instant,
+    next_refresh: Instant,
+}
+
+struct MusicHud {
+    title_ascii: String,
+    frame: u8,
+    next_refresh: Instant,
+}
 
 struct Session<'a> {
     permission: Arc<std::sync::atomic::AtomicBool>,
@@ -735,9 +821,24 @@ struct Session<'a> {
     conversation: Option<Arc<Conversation>>,
     history: Vec<ChatMessage>,
     turn: Option<ActiveTurn>,
+    last_verified_person: Option<VerifiedPersonHint>,
     vision_host: Option<String>,
     vision_token: Option<String>,
     device_mcp: Option<DeviceMcp>,
+    /// 对话播报期间暂存的雕刻预览底部摘要（播完 `tts:stop` 后无声刷到 `bottom_bar_` 供用户核对）
+    pending_oled_preview: Option<String>,
+    /// 彩屏预览确认窗口内的 4 秒无声续期句柄（克服官方固件 5 秒自动隐藏预览计时器；用户开口即停）
+    preview_hold: Option<PreviewHold>,
+    /// 当前加工发送期间最近一次刷新的实时副屏 HUD 任务与百分比
+    last_hud_workflow: Option<(String, u8)>,
+    /// 副屏动态帧序号（用于驱动护目镜小机器人火花、光学红核与黑胶旋转）
+    hud_frame: u8,
+    /// 最近一次已在屏幕上提示过的待电脑审批摘要（避免重复刷底栏字幕）
+    last_approval_summary: Option<String>,
+    /// 完工庆祝 / 急停断点 5 秒徽章卡的单次重绘地址（不设续期，交由官方固件 5 秒自动淡出）
+    one_shot_badge_url: Option<String>,
+    /// 本地音乐播放期间的黑胶/听歌小机器人动态卡状态
+    music_hud: Option<MusicHud>,
     /// 加工结束播报：只读观察最近任务，发现“发送中 → 终态”时在空闲时播报一次。
     jobs: crate::jobs::JobWatcher,
     next_job_poll: Instant,
@@ -754,7 +855,32 @@ impl<'a> Session<'a> {
                     .saturating_add(turn.started.elapsed().as_millis() as u64),
             );
             timing.outcome = outcome.into();
+            let turn_no = timing.turn;
             self.shared.state.finish_timing(timing);
+            if turn.kind == TurnKind::Answer
+                && self.shared.state.debug_enabled()
+                && let Some(raw_asr) = turn.debug_raw_asr.take()
+            {
+                let corrected_asr = turn
+                    .debug_corrected_asr
+                    .take()
+                    .unwrap_or_else(|| raw_asr.clone());
+                let reply = if !turn.spoken.is_empty() {
+                    turn.spoken.join("")
+                } else {
+                    turn.debug_text_reply.join("")
+                };
+                self.shared.state.finish_debug_trace(crate::TurnDebugTrace {
+                    session_id: self.session_id.into(),
+                    turn: turn_no,
+                    at: crate::unix_now(),
+                    raw_asr,
+                    corrected_asr,
+                    tools: std::mem::take(&mut turn.debug_tools),
+                    reply,
+                    outcome: outcome.into(),
+                });
+            }
         }
     }
     fn new(
@@ -821,9 +947,17 @@ impl<'a> Session<'a> {
             },
             history: Vec::new(),
             turn: None,
+            last_verified_person: None,
             vision_host: None,
             vision_token: None,
             device_mcp: None,
+            pending_oled_preview: None,
+            preview_hold: None,
+            last_hud_workflow: None,
+            hud_frame: 0,
+            last_approval_summary: None,
+            one_shot_badge_url: None,
+            music_hud: None,
             jobs: crate::jobs::JobWatcher::new(),
             next_job_poll: Instant::now() + shared.config.job_poll_interval,
         })
@@ -993,6 +1127,7 @@ impl<'a> Session<'a> {
             }
         }
         if began {
+            self.preview_hold = None;
             // VAD 刚确认开始说话：建立流式识别，先补送保留的开头与这一帧
             let stream = self.open_stream();
             if let Phase::Listening(listening) = &mut self.phase {
@@ -1075,7 +1210,7 @@ impl<'a> Session<'a> {
         {
             let history = Self::jev_prewarm_history(
                 &self.shared.vision_photos,
-                &self.device_id,
+                self.device_id,
                 &self.history,
                 &conversation,
             );
@@ -1094,18 +1229,15 @@ impl<'a> Session<'a> {
         base_history: &[ChatMessage],
         conversation: &Conversation,
     ) -> Vec<ChatMessage> {
+        // 声纹个人模式下本轮说话人尚未在拾音阶段完成验声，严禁把上一位说话人的私密历史送往预热端点。
         if conversation.personal_context.is_some() {
-            vision_photos
-                .peek_message(device_id)
-                .into_iter()
-                .collect()
-        } else {
-            let mut history = base_history.to_vec();
-            if let Some(photo_msg) = vision_photos.peek_message(device_id) {
-                history.push(photo_msg);
-            }
-            history
+            return Vec::new();
         }
+        let mut history = base_history.to_vec();
+        if let Some(photo_msg) = vision_photos.peek_message(device_id) {
+            history.push(photo_msg);
+        }
+        history
     }
 
     /// VAD 静音判停时：若开启了 Jev 未说完防抢话，启动非阻塞判定任务挂在 `Session::hold_check` 上，
@@ -1154,7 +1286,7 @@ impl<'a> Session<'a> {
                     let paused_at = Instant::now();
                     let history = Self::jev_prewarm_history(
                         &self.shared.vision_photos,
-                        &self.device_id,
+                        self.device_id,
                         &self.history,
                         &conversation,
                     );
@@ -1279,6 +1411,12 @@ impl<'a> Session<'a> {
         let Some(conversation) = self.conversation.clone() else {
             return;
         };
+        if matches!(kind, TurnKind::Answer | TurnKind::Goodbye) {
+            self.preview_hold = None;
+            self.pending_oled_preview = None;
+            self.one_shot_badge_url = None;
+            self.music_hud = None;
+        }
         self.barge.reset();
         self.playback_started = None;
         self.barge_resumed = false;
@@ -1333,10 +1471,37 @@ impl<'a> Session<'a> {
         } else {
             Vec::new()
         };
+        let person_hint = if kind == TurnKind::Answer {
+            if let Some(personal) = &conversation.personal_context {
+                let valid = self.last_verified_person.as_ref().is_some_and(|hint| {
+                    hint.verified_at.elapsed() <= SHORT_UTTERANCE_CONTINUITY_WINDOW
+                        && hint.consecutive_short < MAX_CONSECUTIVE_SHORT_UTTERANCES
+                        && personal.permitted(&context, Some(&hint.scope))
+                });
+                if !valid {
+                    self.last_verified_person = None;
+                }
+            } else {
+                self.last_verified_person = None;
+            }
+            self.last_verified_person
+                .as_ref()
+                .map(|hint| hint.scope.clone())
+        } else {
+            None
+        };
         let device = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set);
-        let (handle, events) = spawn_turn(conversation, context, input, history, device);
+        let (handle, events) = spawn_turn_with_person_hint(
+            conversation,
+            context,
+            input,
+            history,
+            device,
+            person_hint,
+        );
         self.turn = Some(ActiveTurn {
             person_scope: None,
+            person_verified: false,
             pending_photo,
             timing,
             recording_offset,
@@ -1346,6 +1511,10 @@ impl<'a> Session<'a> {
             events,
             user: None,
             spoken: Vec::new(),
+            debug_raw_asr: None,
+            debug_corrected_asr: None,
+            debug_tools: Vec::new(),
+            debug_text_reply: Vec::new(),
             pending_messages: Vec::new(),
             resampler: None,
             audio_started: false,
@@ -1441,6 +1610,64 @@ impl<'a> Session<'a> {
         self.event(format!("开始播放本地歌曲：{title}"));
         self.playback_started = None;
         self.barge.reset();
+        self.preview_hold = None;
+        let want_hud = self
+            .conversation
+            .as_ref()
+            .is_none_or(|c| c.settings.screen_preview_sync);
+        let can_color_music = want_hud
+            && self.device_mcp.as_ref().is_some_and(|d| {
+                d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
+            });
+        if can_color_music {
+            let ascii_raw: String = title
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-')
+                .take(14)
+                .collect::<String>()
+                .trim()
+                .to_ascii_uppercase();
+            let title_ascii = if ascii_raw.is_empty() {
+                "LOCAL TRACK".to_owned()
+            } else {
+                ascii_raw
+            };
+            let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
+            let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
+            if let Ok(png) = crate::preview_push::make_music_card_png(
+                &crate::preview_push::MusicCardSpec {
+                    title_ascii: title_ascii.clone(),
+                },
+                self.shared.card_style(),
+                0,
+                cw,
+                ch,
+            ) && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
+            {
+                let host = self.preview_http_host();
+                let url = format!("http://{host}:{}/mcp/preview/{tok}.png", self.shared.http_port);
+                self.music_hud = Some(MusicHud {
+                    title_ascii,
+                    frame: 1,
+                    next_refresh: Instant::now() + self.shared.config.preview_hold_interval,
+                });
+                self.send_quiet_device_call(
+                    socket,
+                    "self.screen.preview_image",
+                    json!({ "url": url }),
+                )
+                .await?;
+                let short_title: String = title.chars().take(48).collect();
+                let _ = send_json(
+                    socket,
+                    &ServerMessage::Stt {
+                        session_id: self.session_id.into(),
+                        text: format!("[音乐] {short_title}"),
+                    },
+                )
+                .await;
+            }
+        }
         Ok(())
     }
 
@@ -1457,7 +1684,33 @@ impl<'a> Session<'a> {
             messages: Vec::new(),
             close: false,
         }) {
-            TurnEvent::PersonResolved(scope)=>{if let Some(turn)=self.turn.as_mut(){turn.person_scope=scope;}},
+            TurnEvent::PersonResolved { scope, verified } => {
+                match (&scope, verified) {
+                    (Some(resolved), true) => {
+                        self.last_verified_person = Some(VerifiedPersonHint {
+                            scope: resolved.clone(),
+                            verified_at: Instant::now(),
+                            consecutive_short: 0,
+                        });
+                    }
+                    (Some(inherited), false) => {
+                        if let Some(prev) = self.last_verified_person.as_mut()
+                            && prev.scope == *inherited
+                        {
+                            prev.consecutive_short = prev.consecutive_short.saturating_add(1);
+                        } else {
+                            self.last_verified_person = None;
+                        }
+                    }
+                    (None, _) => {
+                        self.last_verified_person = None;
+                    }
+                }
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.person_scope = scope;
+                    turn.person_verified = verified;
+                }
+            }
             TurnEvent::Closing => {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.close = true;
@@ -1484,8 +1737,33 @@ impl<'a> Session<'a> {
                     timing.tools.push(crate::ToolTiming { name, ms });
                 }
             }
+            TurnEvent::RawHeard { raw, corrected } => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.debug_raw_asr = Some(raw);
+                    turn.debug_corrected_asr = Some(corrected);
+                }
+            }
+            TurnEvent::ToolDebug {
+                name,
+                arguments,
+                result,
+            } => {
+                if self.shared.state.debug_enabled()
+                    && let Some(turn) = self.turn.as_mut()
+                    && turn.debug_tools.len() < 8
+                {
+                    turn.debug_tools.push(crate::DebugToolTrace {
+                        name,
+                        arguments,
+                        result,
+                    });
+                }
+            }
             TurnEvent::TextReply(text) => {
                 // 合成不可用仍给设备文字，不用静音音频冒充已播报。
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.debug_text_reply.push(text.clone());
+                }
                 self.tts(socket, TtsState::Start, None).await?;
                 self.tts(socket, TtsState::SentenceStart, Some(text))
                     .await?;
@@ -1534,6 +1812,19 @@ impl<'a> Session<'a> {
                 };
                 if !send_json(socket, &message).await {
                     return Err("发送失败".into());
+                }
+                let restore_url = self
+                    .preview_hold
+                    .as_ref()
+                    .map(|h| h.url.clone())
+                    .or_else(|| self.one_shot_badge_url.take());
+                if let Some(url) = restore_url {
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.screen.preview_image",
+                        json!({ "url": url }),
+                    )
+                    .await?;
                 }
             }
             TurnEvent::PlayMusic { track_id, title } => {
@@ -1613,10 +1904,28 @@ impl<'a> Session<'a> {
         if turn.kind == TurnKind::Answer
             && let Some(conversation) = &self.conversation
         {
-            let messages=std::mem::take(&mut turn.pending_messages);
-            if let Some(personal)=&conversation.personal_context {
-                personal.commit(&ToolContext{device_id:self.device_id.into(),session_id:self.session_id.into()},turn.person_scope.as_ref(),messages,conversation.settings.history_budget);
-            }else{append_history(&mut self.history,messages,conversation.settings.history_budget);}
+            let messages = std::mem::take(&mut turn.pending_messages);
+            let turn_ctx = ToolContext {
+                device_id: self.device_id.into(),
+                session_id: self.session_id.into(),
+            };
+            if let Some(personal) = &conversation.personal_context {
+                let commit_scope = turn.person_scope.as_ref().filter(|_| turn.person_verified);
+                if let (Some(extraction), Some(verified_person)) = (&conversation.context_extraction, commit_scope) {
+                    extraction.turn_completed(&turn_ctx, Some(verified_person), &messages, conversation.llm.clone());
+                }
+                personal.commit(
+                    &turn_ctx,
+                    commit_scope,
+                    messages,
+                    conversation.settings.history_budget,
+                );
+            } else {
+                if let Some(extraction) = &conversation.context_extraction {
+                    extraction.turn_completed(&turn_ctx, None, &messages, conversation.llm.clone());
+                }
+                append_history(&mut self.history, messages, conversation.settings.history_budget);
+            }
         }
         self.phase = Phase::Idle;
         self.set_state("idle");
@@ -1648,6 +1957,28 @@ impl<'a> Session<'a> {
     /// 打断：中止对话任务、丢弃未播音频；已识别的原话与已播的句子记入历史。
     async fn interrupt(&mut self, socket: &mut WebSocket, reason: &str) -> Result<(), String> {
         self.finish_timing("interrupted");
+        self.preview_hold = None;
+        self.pending_oled_preview = None;
+        self.one_shot_badge_url = None;
+        self.music_hud = None;
+        if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+        } else if let Some(personal) = self
+            .conversation
+            .as_ref()
+            .and_then(|c| c.personal_context.as_ref())
+        {
+            let ctx = ToolContext {
+                device_id: self.device_id.to_owned(),
+                session_id: self.session_id.to_owned(),
+            };
+            if self
+                .last_verified_person
+                .as_ref()
+                .is_some_and(|hint| !personal.permitted(&ctx, Some(&hint.scope)))
+            {
+                self.last_verified_person = None;
+            }
+        }
         if let Some(music) = self.music.as_mut() {
             if music.active() {
                 music.cancel(&mut self.pump);
@@ -1666,9 +1997,20 @@ impl<'a> Session<'a> {
             if !turn.spoken.is_empty() {
                 messages.push(ChatMessage::assistant(turn.spoken.join("")));
             }
-            if let Some(personal)=&conversation.personal_context {
-                personal.commit(&ToolContext{device_id:self.device_id.into(),session_id:self.session_id.into()},turn.person_scope.as_ref(),messages,conversation.settings.history_budget);
-            }else{append_history(&mut self.history,messages,conversation.settings.history_budget);}
+            if let Some(personal) = &conversation.personal_context {
+                let commit_scope = turn.person_scope.as_ref().filter(|_| turn.person_verified);
+                personal.commit(
+                    &ToolContext {
+                        device_id: self.device_id.into(),
+                        session_id: self.session_id.into(),
+                    },
+                    commit_scope,
+                    messages,
+                    conversation.settings.history_budget,
+                );
+            } else {
+                append_history(&mut self.history, messages, conversation.settings.history_budget);
+            }
         }
         match self.phase {
             Phase::Speaking { .. } => self.stop_speaking(socket, Some(reason)).await,
@@ -1698,6 +2040,7 @@ impl<'a> Session<'a> {
                     // Check permission immediately before every outgoing frame,
                     // including any initial prebuffer burst.
                     if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+                        self.last_verified_person = None;
                         if let Some(music) = self.music.as_mut() {
                             music.cancel(&mut self.pump);
                         }
@@ -1736,8 +2079,11 @@ impl<'a> Session<'a> {
                 }
                 PumpTick::Waiting => break,
                 PumpTick::Done => {
-                    if was_music && let Some(music) = self.music.as_mut() {
-                        music.finish_after_pump_done();
+                    if was_music {
+                        self.music_hud = None;
+                        if let Some(music) = self.music.as_mut() {
+                            music.finish_after_pump_done();
+                        }
                     }
                     self.stop_speaking(socket, None).await?;
                     return if was_music {
@@ -1765,6 +2111,8 @@ impl<'a> Session<'a> {
     ) -> Result<(), String> {
         let stats = self.pump.stats();
         if let Some(reason) = interrupted {
+            self.pending_oled_preview = None;
+            self.preview_hold = None;
             self.pump.clear();
             self.event(format!("播放被打断（{reason}）：已播 {} 帧", stats.frames));
         } else {
@@ -1776,7 +2124,32 @@ impl<'a> Session<'a> {
         self.phase = Phase::Idle;
         self.set_state("idle");
         self.last_activity = Instant::now();
-        self.tts(socket, TtsState::Stop, None).await
+        self.tts(socket, TtsState::Stop, None).await?;
+        if interrupted.is_none() {
+            if let Some(hold_url) = self.preview_hold.as_mut().map(|hold| {
+                let now = Instant::now();
+                hold.until = now + self.shared.config.preview_hold_duration;
+                hold.next_refresh = now + self.shared.config.preview_hold_interval;
+                hold.url.clone()
+            }) {
+                self.send_quiet_device_call(
+                    socket,
+                    "self.screen.preview_image",
+                    json!({ "url": hold_url }),
+                )
+                .await?;
+            }
+            if let Some(card) = self.pending_oled_preview.take() {
+                let msg = ServerMessage::Stt {
+                    session_id: self.session_id.into(),
+                    text: format!("[预览] {card}"),
+                };
+                if !send_json(socket, &msg).await {
+                    return Err("发送失败".into());
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn on_binary(&mut self, socket: &mut WebSocket, data: &[u8]) -> Result<(), String> {
@@ -1998,7 +2371,7 @@ impl<'a> Session<'a> {
                 let list = self
                     .conversation
                     .is_some()
-                    .then(|| device.request("tools/list", json!({}), McpPending::ToolsList));
+                    .then(|| device.request("tools/list", json!({"withUserTools": true}), McpPending::ToolsList));
                 self.send_mcp(
                     socket,
                     json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
@@ -2024,15 +2397,93 @@ impl<'a> Session<'a> {
                     Some(cursor) if device.pages < MAX_TOOL_PAGES => {
                         let next = device.request(
                             "tools/list",
-                            json!({"cursor": cursor}),
+                            json!({"cursor": cursor, "withUserTools": true}),
                             McpPending::ToolsList,
                         );
                         self.send_mcp(socket, next).await
                     }
                     _ => {
                         device.ready = true;
-                        let count = device.tools.len();
+                        let all_names = device.all_tool_names();
+                        let count = device.model_tools().len();
+                        self.shared.state.set_device_tools(self.session_id, all_names);
                         self.event(format!("设备提供 {count} 个自带工具"));
+                        if self
+                            .device_mcp
+                            .as_ref()
+                            .is_some_and(|d| d.has_tool("self.screen.get_info"))
+                        {
+                            if let Some(dev) = self.device_mcp.as_mut() {
+                                let req = dev.request(
+                                    "tools/call",
+                                    json!({ "name": "self.screen.get_info", "arguments": {} }),
+                                    McpPending::ScreenInfo,
+                                );
+                                self.send_mcp(socket, req).await?;
+                            }
+                        }
+                        if let Some(prefs) =
+                            self.shared.registry.device_hardware_prefs(&self.device_id)
+                        {
+                            let mut replayed = false;
+                            if let Some(v) = prefs.volume
+                                && self.device_mcp.as_ref().is_some_and(|d| d.has_tool("self.audio_speaker.set_volume"))
+                            {
+                                self.send_quiet_device_call(
+                                    socket,
+                                    "self.audio_speaker.set_volume",
+                                    json!({"volume": v.min(100)}),
+                                )
+                                .await?;
+                                replayed = true;
+                            }
+                            if let Some(b) = prefs.brightness {
+                                if self.device_mcp.as_ref().is_some_and(|d| d.has_tool("self.screen.set_brightness")) {
+                                    self.send_quiet_device_call(
+                                        socket,
+                                        "self.screen.set_brightness",
+                                        json!({"brightness": b.min(100)}),
+                                    )
+                                    .await?;
+                                    replayed = true;
+                                } else if self.device_mcp.as_ref().is_some_and(|d| d.has_tool("self.disp.setbacklight")) {
+                                    let level = ((b.min(100) as u16) * 255) / 100;
+                                    self.send_quiet_device_call(
+                                        socket,
+                                        "self.disp.setbacklight",
+                                        json!({"level": level}),
+                                    )
+                                    .await?;
+                                    replayed = true;
+                                }
+                            }
+                            if let Some(th) = prefs.theme
+                                && self.device_mcp.as_ref().is_some_and(|d| d.has_tool("self.screen.set_theme"))
+                            {
+                                self.send_quiet_device_call(
+                                    socket,
+                                    "self.screen.set_theme",
+                                    json!({"theme": th}),
+                                )
+                                .await?;
+                                replayed = true;
+                            }
+                            if let Some(mode) = prefs.talk_mode
+                                && self.device_mcp.as_ref().is_some_and(|d| d.has_tool("self.set_press_to_talk"))
+                            {
+                                self.send_quiet_device_call(
+                                    socket,
+                                    "self.set_press_to_talk",
+                                    json!({"mode": mode}),
+                                )
+                                .await?;
+                                replayed = true;
+                            }
+                            if replayed {
+                                self.dispatch_device_request(socket, crate::DeviceRequest::RefreshInfo)
+                                    .await?;
+                            }
+                        }
                         Ok(())
                     }
                 }
@@ -2048,6 +2499,46 @@ impl<'a> Session<'a> {
             }
             // 重启不会回响应：设备随后断开，等它重新连接上报新的 OTA
             Some(McpPending::Reboot) => Ok(()),
+            Some(McpPending::Quiet(tool)) => {
+                if payload.get("error").is_some()
+                    || payload
+                        .pointer("/result/isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                {
+                    let msg = device_result_text(&payload);
+                    self.event(format!("桌面端请求 {tool} 未成功：{msg}"));
+                }
+                Ok(())
+            }
+            Some(McpPending::ScreenInfo) => {
+                let text = device_result_text(&payload);
+                if let Ok(info) = serde_json::from_str::<Value>(&text) {
+                    let mono = info.get("monochrome").and_then(Value::as_bool);
+                    let width = info
+                        .get("width")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .filter(|v| (64..=1024).contains(v));
+                    let height = info
+                        .get("height")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .filter(|v| (32..=1024).contains(v));
+                    if let Some(dev) = self.device_mcp.as_mut() {
+                        if mono.is_some() {
+                            dev.screen_monochrome = mono;
+                        }
+                        if let (Some(w), Some(h)) = (width, height) {
+                            dev.screen_size = Some((w, h));
+                        }
+                    }
+                    self.shared
+                        .state
+                        .set_screen_info(self.session_id, mono, width, height);
+                }
+                Ok(())
+            }
             None => Ok(()),
         }
     }
@@ -2077,6 +2568,9 @@ impl<'a> Session<'a> {
         socket: &mut WebSocket,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
+        if matches!(request, crate::DeviceRequest::PreviewScreen { .. }) && self.device_mcp.is_none() {
+            return self.dispatch_device_request(socket, request).await;
+        }
         let should_send_init = match self.device_mcp.as_mut() {
             Some(device) if !device.initialized => {
                 if device.deferred_requests.len() < 16 {
@@ -2098,23 +2592,223 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    async fn send_quiet_device_call(
+        &mut self,
+        socket: &mut WebSocket,
+        tool: &'static str,
+        arguments: Value,
+    ) -> Result<(), String> {
+        let Some(device) = self.device_mcp.as_mut() else {
+            return Ok(());
+        };
+        let payload = device.request(
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments }),
+            McpPending::Quiet(tool),
+        );
+        self.send_mcp(socket, payload).await
+    }
+
     async fn dispatch_device_request(
         &mut self,
         socket: &mut WebSocket,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
-        let (tool, pending) = match request {
+        match request {
             crate::DeviceRequest::RefreshInfo => {
-                ("self.get_device_status", McpPending::Snapshot(crate::SNAPSHOT_STATUS))
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                let payload = device.request(
+                    "tools/call",
+                    json!({ "name": "self.get_device_status", "arguments": {} }),
+                    McpPending::Snapshot(crate::SNAPSHOT_STATUS),
+                );
+                self.event("桌面端请求：self.get_device_status".into());
+                self.send_mcp(socket, payload).await
             }
-            crate::DeviceRequest::Reboot => ("self.reboot", McpPending::Reboot),
-        };
-        let Some(device) = self.device_mcp.as_mut() else {
-            return Ok(());
-        };
-        let payload = device.request("tools/call", json!({ "name": tool, "arguments": {} }), pending);
-        self.event(format!("桌面端请求：{tool}"));
-        self.send_mcp(socket, payload).await
+            crate::DeviceRequest::Reboot => {
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                let payload = device.request(
+                    "tools/call",
+                    json!({ "name": "self.reboot", "arguments": {} }),
+                    McpPending::Reboot,
+                );
+                self.event("桌面端请求：self.reboot".into());
+                self.send_mcp(socket, payload).await
+            }
+            crate::DeviceRequest::SetVolume(volume) => {
+                let v = volume.min(100);
+                self.event(format!("桌面端调节设备音量：{v}%"));
+                self.send_quiet_device_call(
+                    socket,
+                    "self.audio_speaker.set_volume",
+                    json!({ "volume": v }),
+                )
+                .await?;
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                let refresh = device.request(
+                    "tools/call",
+                    json!({ "name": "self.get_device_status", "arguments": {} }),
+                    McpPending::Snapshot(crate::SNAPSHOT_STATUS),
+                );
+                self.send_mcp(socket, refresh).await
+            }
+            crate::DeviceRequest::SetBrightness(brightness) => {
+                let b = brightness.min(100);
+                self.event(format!("桌面端调节屏幕亮度：{b}%"));
+                let use_amoled = self
+                    .device_mcp
+                    .as_ref()
+                    .is_some_and(|d| !d.has_tool("self.screen.set_brightness") && d.has_tool("self.disp.setbacklight"));
+                if use_amoled {
+                    let level = ((b as u16) * 255) / 100;
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.disp.setbacklight",
+                        json!({ "level": level }),
+                    )
+                    .await?;
+                } else {
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.screen.set_brightness",
+                        json!({ "brightness": b }),
+                    )
+                    .await?;
+                }
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                let refresh = device.request(
+                    "tools/call",
+                    json!({ "name": "self.get_device_status", "arguments": {} }),
+                    McpPending::Snapshot(crate::SNAPSHOT_STATUS),
+                );
+                self.send_mcp(socket, refresh).await
+            }
+            crate::DeviceRequest::SetTheme(theme) => {
+                self.event(format!("桌面端切换屏幕主题：{theme}"));
+                self.send_quiet_device_call(
+                    socket,
+                    "self.screen.set_theme",
+                    json!({ "theme": theme }),
+                )
+                .await?;
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                let refresh = device.request(
+                    "tools/call",
+                    json!({ "name": "self.get_device_status", "arguments": {} }),
+                    McpPending::Snapshot(crate::SNAPSHOT_STATUS),
+                );
+                self.send_mcp(socket, refresh).await
+            }
+            crate::DeviceRequest::SetTalkMode(mode) => {
+                self.event(format!("桌面端切换按键对话模式：{mode}"));
+                self.send_quiet_device_call(
+                    socket,
+                    "self.set_press_to_talk",
+                    json!({ "mode": mode }),
+                )
+                .await?;
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                if device.has_tool("self.get_device_status") {
+                    let refresh = device.request(
+                        "tools/call",
+                        json!({ "name": "self.get_device_status", "arguments": {} }),
+                        McpPending::Snapshot(crate::SNAPSHOT_STATUS),
+                    );
+                    self.send_mcp(socket, refresh).await?;
+                }
+                Ok(())
+            }
+            crate::DeviceRequest::PreviewScreen { token, summary } => {
+                let clean_card: String = summary
+                    .replace(['\r', '\n'], " ")
+                    .trim()
+                    .chars()
+                    .take(96)
+                    .collect();
+                let can_color_image = token.is_some()
+                    && self.device_mcp.as_ref().is_some_and(|d| {
+                        d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
+                    });
+                if let (true, Some(tok)) = (can_color_image, token) {
+                    let host = self.preview_http_host();
+                    let url = format!("http://{host}:{}/mcp/preview/{tok}.png", self.shared.http_port);
+                    let now = Instant::now();
+                    self.preview_hold = Some(PreviewHold {
+                        url: url.clone(),
+                        until: now + self.shared.config.preview_hold_duration,
+                        next_refresh: now + self.shared.config.preview_hold_interval,
+                    });
+                    self.event("向小智彩屏推送激光预览缩略图".into());
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.screen.preview_image",
+                        json!({ "url": url }),
+                    )
+                    .await?;
+                    if !clean_card.is_empty() {
+                        if self.busy() {
+                            self.pending_oled_preview = Some(clean_card);
+                        } else {
+                            let msg = ServerMessage::Stt {
+                                session_id: self.session_id.into(),
+                                text: format!("[预览] {clean_card}"),
+                            };
+                            if !send_json(socket, &msg).await {
+                                return Err("发送失败".into());
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                self.preview_hold = None;
+                // 普通单色 OLED（`monochrome: true`）或未启用彩屏图片工具的官方固件：自动降级为滚动文字预览卡
+                let card = if clean_card.is_empty() {
+                    "激光雕刻预览已就绪".to_owned()
+                } else {
+                    clean_card
+                };
+                if self.busy() {
+                    self.pending_oled_preview = Some(card);
+                    self.event("已暂存小智 OLED 雕刻预览文字卡（本轮语音播完后自动上屏）".into());
+                    Ok(())
+                } else if matches!(self.phase, Phase::Listening(_)) {
+                    self.event("向小智 OLED 屏幕静默刷新雕刻预览参数字幕".into());
+                    let msg = ServerMessage::Stt {
+                        session_id: self.session_id.into(),
+                        text: format!("[预览] {card}"),
+                    };
+                    if send_json(socket, &msg).await {
+                        Ok(())
+                    } else {
+                        Err("发送失败".into())
+                    }
+                } else {
+                    self.event("向小智 OLED 屏幕推送雕刻预览文字卡".into());
+                    let alert = ServerMessage::Alert {
+                        status: "雕刻预览".into(),
+                        message: card,
+                        emotion: "cool".into(),
+                    };
+                    if send_json(socket, &alert).await {
+                        Ok(())
+                    } else {
+                        Err("发送失败".into())
+                    }
+                }
+            }
+        }
     }
 
     async fn forward_device_call(
@@ -2123,6 +2817,7 @@ impl<'a> Session<'a> {
         call: Option<DeviceCall>,
     ) -> Result<(), String> {
         if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+            self.last_verified_person = None;
             return Err("设备授权已撤销".into());
         }
         let (Some(call), Some(device)) = (call, self.device_mcp.as_mut()) else {
@@ -2147,6 +2842,9 @@ impl<'a> Session<'a> {
             }) => {
                 let manual = mode.as_deref() == Some("manual");
                 let realtime = mode.as_deref() == Some("realtime");
+                if manual {
+                    self.preview_hold = None;
+                }
                 self.record_listen_mode(manual, realtime);
                 if realtime
                     && self.listen_realtime
@@ -2200,6 +2898,10 @@ impl<'a> Session<'a> {
             }
             Ok(ClientMessage::Abort { reason }) => {
                 let reason = reason.unwrap_or_else(|| "设备打断".into());
+                self.preview_hold = None;
+                self.pending_oled_preview = None;
+                self.one_shot_badge_url = None;
+                self.music_hud = None;
                 if self.busy() {
                     self.interrupt(socket, &reason).await?;
                 } else if matches!(self.phase, Phase::Listening(_)) {
@@ -2265,39 +2967,308 @@ impl<'a> Session<'a> {
             _ => false,
         }
     }
+    fn preview_http_host(&self) -> String {
+        self.vision_host
+            .clone()
+            .or_else(|| crate::ota::local_ip().map(|ip| ip.to_string()))
+            .unwrap_or_else(|| "127.0.0.1".into())
+    }
 
-    /// 加工结束播报：设备在线且空闲时读一次最近任务，发现刚结束的就播一次（2026-11-02 用户决定）。
-    /// 正在说话、拾音挂起或思考时整体跳过，不抢话；播报走固定话术轮次，因此和普通回答一样能被插话打断。
-    /// 只读 `laser_workflow_tool(action=recent)`，不碰设备、不发起任何动作。
-    async fn poll_jobs(&mut self) -> Result<(), String> {
-        self.next_job_poll = Instant::now() + self.shared.config.job_poll_interval;
-        if self.busy()
-            || self.listening_occupied()
-            || !self.permission.load(std::sync::atomic::Ordering::Acquire)
+    fn actively_speaking_user(&self) -> bool {
+        if self.hold_check.is_some() || self.pending_listen_stop {
+            return true;
+        }
+        match &self.phase {
+            Phase::Listening(listening) => {
+                listening.manual
+                    || listening.speaking
+                    || !listening.utterance.is_empty()
+                    || listening.hold_deadline.is_some()
+                    || listening.finalize_after_vad_seq.is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// 彩屏预览确认窗口内的 4 秒无声续期：重置官方固件 5000ms `preview_timer_`，用户一旦开口或到期立即停止。
+    async fn on_preview_hold_tick(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+        let now = Instant::now();
+        let speaking = self.actively_speaking_user();
+        let Some(hold) = self.preview_hold.as_mut() else {
+            return Ok(());
+        };
+        if now >= hold.until || speaking {
+            self.preview_hold = None;
+            return Ok(());
+        }
+        let url = hold.url.clone();
+        hold.next_refresh = now + self.shared.config.preview_hold_interval;
+        if !self.busy() {
+            self.send_quiet_device_call(
+                socket,
+                "self.screen.preview_image",
+                json!({ "url": url }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// 本地音乐播放期间每 4 秒刷新一次黑胶旋转 / 护目镜小机器人听歌摇摆帧；停播自动停止。
+    async fn on_music_hud_tick(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+        let music_active = self.music.as_ref().is_some_and(|m| m.active());
+        let can_color = self.device_mcp.as_ref().is_some_and(|d| {
+            d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
+        });
+        if !music_active || !can_color {
+            self.music_hud = None;
+            return Ok(());
+        }
+        let Some((title_ascii, frame)) = self.music_hud.as_mut().map(|hud| {
+            let current = hud.frame;
+            hud.frame = hud.frame.wrapping_add(1);
+            hud.next_refresh = Instant::now() + self.shared.config.preview_hold_interval;
+            (hud.title_ascii.clone(), current)
+        }) else {
+            return Ok(());
+        };
+        let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
+        let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
+        if let Ok(png) = crate::preview_push::make_music_card_png(
+            &crate::preview_push::MusicCardSpec { title_ascii },
+            self.shared.card_style(),
+            frame,
+            cw,
+            ch,
+        ) && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
         {
+            let host = self.preview_http_host();
+            let url = format!("http://{host}:{}/mcp/preview/{tok}.png", self.shared.http_port);
+            self.send_quiet_device_call(
+                socket,
+                "self.screen.preview_image",
+                json!({ "url": url }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn stage_terminal_badge_url(&self, job: &crate::jobs::FinishedJob) -> Option<String> {
+        let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
+        let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
+        let completed = job.status == "completed";
+        let lines = if completed {
+            job.total_lines
+        } else {
+            job.lines_sent
+        };
+        let png = crate::preview_push::make_terminal_badge_png(
+            &crate::preview_push::TerminalBadgeSpec { completed, lines },
+            self.shared.card_style(),
+            cw,
+            ch,
+        )
+        .ok()?;
+        let tok = self.shared.preview_store.stage_prebuilt_png(png).ok()?;
+        let host = self.preview_http_host();
+        Some(format!(
+            "http://{host}:{}/mcp/preview/{tok}.png",
+            self.shared.http_port
+        ))
+    }
+
+    /// 加工结束播报、终态 5 秒徽章卡、实时加工副屏 HUD 与待电脑审批警戒卡（全流程零 Flash 擦写）：
+    /// - 只读 `laser_workflow_tool(action=recent)`（进程内合并 `stop-targets` 与无敏待审批状态）；
+    /// - 任务从 `sending` 进入终态时：彩屏弹出 5 秒完工庆祝/急停断点徽章卡（自动淡出）并语音播报；
+    /// - 任务处于 `sending` 时：彩屏刷新双画风实时进度副屏 HUD；
+    /// - 严格模式有待电脑批准请求时：彩屏刷新待电脑审批警戒卡（含倒计时条）。
+    async fn poll_jobs(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+        self.next_job_poll = Instant::now() + self.shared.config.job_poll_interval;
+        if self.busy() || !self.permission.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(());
         }
         let Some(conversation) = self.conversation.clone() else {
             return Ok(());
         };
-        if !conversation.settings.announce_job_done {
+        let want_announce = conversation.settings.announce_job_done;
+        let want_hud = conversation.settings.screen_preview_sync;
+        if !want_announce && !want_hud {
+            return Ok(());
+        }
+        // 若用户正在说话或处于非实时拾音占线态，延后轮询以免丢失终态边沿或干扰拾音
+        if self.listening_occupied() {
             return Ok(());
         }
         let context = ToolContext {
             device_id: self.device_id.to_owned(),
             session_id: self.session_id.to_owned(),
         };
-        for job in self.jobs.poll(conversation.tools.as_ref(), &context).await {
-            if !self.shared.job_announcements.claim(&job.workflow_id) {
-                continue;
+        let snap = self
+            .jobs
+            .poll_full(conversation.tools.as_ref(), &context)
+            .await;
+        let can_color_hud = self.device_mcp.as_ref().is_some_and(|d| {
+            d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
+        });
+        let is_mono_oled = self
+            .device_mcp
+            .as_ref()
+            .is_some_and(|d| d.screen_monochrome == Some(true));
+
+        if !snap.finished.is_empty() {
+            for job in snap.finished {
+                if want_announce {
+                    if !self.shared.job_announcements.claim(&job.workflow_id) {
+                        continue;
+                    }
+                    self.preview_hold = None;
+                    self.last_hud_workflow = None;
+                    self.last_approval_summary = None;
+                    if want_hud && can_color_hud
+                        && let Some(badge_url) = self.stage_terminal_badge_url(&job)
+                    {
+                        self.one_shot_badge_url = Some(badge_url.clone());
+                        self.send_quiet_device_call(
+                            socket,
+                            "self.screen.preview_image",
+                            json!({ "url": badge_url }),
+                        )
+                        .await?;
+                    }
+                    self.event("加工任务已结束，播报结果".into());
+                    self.start_turn(
+                        TurnInput::Say { text: job.speech(), close: false },
+                        TurnKind::Notice,
+                    );
+                    return Ok(());
+                } else if want_hud && can_color_hud {
+                    self.preview_hold = None;
+                    self.last_hud_workflow = None;
+                    if let Some(badge_url) = self.stage_terminal_badge_url(&job) {
+                        self.send_quiet_device_call(
+                            socket,
+                            "self.screen.preview_image",
+                            json!({ "url": badge_url }),
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
             }
-            self.event("加工任务已结束，播报结果".into());
-            self.start_turn(
-                TurnInput::Say { text: job.speech(), close: false },
-                TurnKind::Notice,
-            );
+        }
+
+        if let Some(progress) = snap.active_job.filter(|_| want_hud) {
+            self.preview_hold = None;
+            self.last_approval_summary = None;
+            let frame = self.hud_frame;
+            self.hud_frame = self.hud_frame.wrapping_add(1);
+            if can_color_hud {
+                let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
+                let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
+                if let Ok(png) = crate::preview_push::make_job_hud_png_for_style(
+                    &progress.to_hud_spec(),
+                    self.shared.card_style(),
+                    frame,
+                    cw,
+                    ch,
+                ) && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
+                {
+                    let host = self.preview_http_host();
+                    let url = format!("http://{host}:{}/mcp/preview/{tok}.png", self.shared.http_port);
+                    let first_for_job = self
+                        .last_hud_workflow
+                        .as_ref()
+                        .is_none_or(|(id, _)| id != &progress.workflow_id);
+                    self.last_hud_workflow = Some((progress.workflow_id.clone(), progress.percent));
+                    self.last_activity = Instant::now();
+                    if first_for_job {
+                        self.event("向小智彩屏开启实时激光加工进度副屏 HUD".into());
+                    }
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.screen.preview_image",
+                        json!({ "url": url }),
+                    )
+                    .await?;
+                }
+            } else if is_mono_oled {
+                let should_refresh = match &self.last_hud_workflow {
+                    Some((id, prev_pct)) if id == &progress.workflow_id => {
+                        progress.percent.abs_diff(*prev_pct) >= 10
+                    }
+                    _ => true,
+                };
+                if should_refresh {
+                    self.last_hud_workflow = Some((progress.workflow_id.clone(), progress.percent));
+                    self.last_activity = Instant::now();
+                    let alert = ServerMessage::Alert {
+                        status: "加工中".into(),
+                        message: progress.subtitle(),
+                        emotion: "cool".into(),
+                    };
+                    let _ = send_json(socket, &alert).await;
+                }
+            }
             return Ok(());
         }
+        self.last_hud_workflow = None;
+
+        if let Some(pending) = snap.pending_approval.filter(|_| want_hud) {
+            self.preview_hold = None;
+            let frame = self.hud_frame;
+            self.hud_frame = self.hud_frame.wrapping_add(1);
+            let first_for_approval =
+                self.last_approval_summary.as_deref() != Some(pending.summary.as_str());
+            if can_color_hud {
+                let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
+                let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
+                if let Ok(png) = crate::preview_push::make_approval_card_png(
+                    &pending.to_card_spec(),
+                    self.shared.card_style(),
+                    frame,
+                    cw,
+                    ch,
+                ) && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
+                {
+                    let host = self.preview_http_host();
+                    let url = format!("http://{host}:{}/mcp/preview/{tok}.png", self.shared.http_port);
+                    self.last_activity = Instant::now();
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.screen.preview_image",
+                        json!({ "url": url }),
+                    )
+                    .await?;
+                    if first_for_approval {
+                        self.last_approval_summary = Some(pending.summary.clone());
+                        self.event("向小智彩屏推送待电脑审批警戒卡".into());
+                        let _ = send_json(
+                            socket,
+                            &ServerMessage::Stt {
+                                session_id: self.session_id.into(),
+                                text: format!("[待电脑批准] {}", pending.summary),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            } else if is_mono_oled && first_for_approval {
+                self.last_approval_summary = Some(pending.summary.clone());
+                self.last_activity = Instant::now();
+                let _ = send_json(
+                    socket,
+                    &ServerMessage::Alert {
+                        status: "待电脑批准".into(),
+                        message: pending.summary,
+                        emotion: "thinking".into(),
+                    },
+                )
+                .await;
+            }
+            return Ok(());
+        }
+        self.last_approval_summary = None;
         Ok(())
     }
 
@@ -2327,7 +3298,9 @@ impl<'a> Session<'a> {
                 Phase::Listening(listening) => listening.hold_deadline,
                 _ => None,
             };
-            // 加工结束播报用固定节拍（不随消息重置），否则 realtime 一直上传音频时永远轮不到
+            let preview_hold_deadline = self.preview_hold.as_ref().map(|h| h.next_refresh);
+            let music_hud_deadline = self.music_hud.as_ref().map(|m| m.next_refresh);
+            // 加工结束播报与副屏 HUD 用固定节拍（不随消息重置），否则 realtime 一直上传音频时永远轮不到
             let job_deadline = self.next_job_poll;
             // 按顺序检查（biased）：对话任务的事件先于它发出的设备工具调用处理，设备看到的顺序与任务一致
             // （先 stt 再 tools/call）；设备消息先于播放定时器，打断不被积压的播放拍延迟。
@@ -2370,6 +3343,18 @@ impl<'a> Session<'a> {
                         None => std::future::pending().await,
                     }
                 } => self.on_hold_expired(socket).await,
+                _ = async {
+                    match preview_hold_deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.on_preview_hold_tick(socket).await,
+                _ = async {
+                    match music_hud_deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.on_music_hud_tick(socket).await,
                 _ = tokio::time::sleep_until(deadline) => {
                     match self.phase {
                         Phase::Speaking { .. } => self.tick(socket).await,
@@ -2377,7 +3362,7 @@ impl<'a> Session<'a> {
                         _ => self.on_idle(),
                     }
                 }
-                _ = tokio::time::sleep_until(job_deadline) => self.poll_jobs().await,
+                _ = tokio::time::sleep_until(job_deadline) => self.poll_jobs(socket).await,
             };
             if let Err(reason) = result {
                 return reason;

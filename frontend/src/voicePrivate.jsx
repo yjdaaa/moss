@@ -6,7 +6,6 @@ import VoiceHomeCard from "./components/VoiceHomeCard.jsx";
 import VoiceHomeApprovalCard from "./components/VoiceHomeApprovalCard.jsx";
 import VoiceSpeakerCard from "./components/VoiceSpeakerCard.jsx";
 import VoiceFirmwareCard from "./components/VoiceFirmwareCard.jsx";
-import VoiceContextCard from "./components/VoiceContextCard.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
 import { voiceApi } from "./voiceApi.js";
 import "./styles.css";
@@ -26,7 +25,6 @@ export function VoicePrivatePage() {
   const [error, setError] = useState("");
   const [section, setSection] = useState(() => initialPrivateSection() === "overview" ? null : initialPrivateSection());
   const [visited, setVisited] = useState(() => new Set(initialPrivateSection() && initialPrivateSection() !== "overview" ? [initialPrivateSection()] : []));
-  const [longMemoryOpened, setLongMemoryOpened] = useState(false);
   const select = (next) => {
     setSection(next);
     if (next) setVisited((old) => new Set([...old, next]));
@@ -79,10 +77,6 @@ export function VoicePrivatePage() {
       {error && <p role="alert">{error}</p>}
       {visited.has("memory") && <div className="voice-private-panel" hidden={section !== "memory"}>
         <VoiceMemoryCard status={status} />
-        <details className="voice-private-more" onToggle={(event) => { if (event.currentTarget.open) setLongMemoryOpened(true); }}>
-          <summary>长期记忆、资料与恢复摘要</summary>
-          {longMemoryOpened && <VoiceContextCard />}
-        </details>
       </div>}
       {visited.has("plugins") && <div className="voice-private-panel" hidden={section !== "plugins"}><VoicePluginsCard /></div>}
       {visited.has("speaker") && <div className="voice-private-panel" hidden={section !== "speaker"}><VoiceSpeakerCard /></div>}

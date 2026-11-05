@@ -67,7 +67,7 @@ export function AuthModal({ visible, onClose, onAuthenticated }) {
 
         <div className="mat-modal-body">
           <p className="auth-note">
-            手机或局域网设备访问电脑 MOSS 时需要配对：在电脑 MOSS 的“偏好设置 → 手机连接”中点“生成配对码”，把 6 位数字输入下面（5 分钟内有效）。电脑重启后需重新配对。
+            手机或局域网设备首次访问电脑 MOSS 时需要配对：输入电脑“偏好设置 → 手机连接”中设置的 6 位固定配对码（或生成的临时配对码）。配对成功后将长久保持连接，软件或电脑重启后无需重配。
           </p>
 
           <div className="mat-field">

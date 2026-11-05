@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   JOB_LINGER_MS,
   JOB_POLL_MS,
+  acknowledgeStopPayload,
   cancelPayload,
   dockPillText,
   estopPayload,
@@ -59,6 +60,7 @@ test("激光任务浮层：视图只暴露可执行的动作，缺 workflow_id �
   assert.equal(view.target, "127.0.0.1:2301");
   assert.equal(view.canCancel, true);
   assert.equal(view.canEstop, true);
+  assert.equal(view.canAcknowledgeStop, false);
   assert.equal(view.cancelHint, "");
 
   const unknown = jobView({ job_id: "job-1", state: "unknown", target: "127.0.0.1:2301" });
@@ -66,15 +68,19 @@ test("激光任务浮层：视图只暴露可执行的动作，缺 workflow_id �
   assert.equal(unknown.percentText, "进度未知");
   assert.equal(unknown.canCancel, false, "未知态不给温和取消");
   assert.equal(unknown.canEstop, true, "未知态仍保留 0x18 急停重试入口，与后端 stop-targets 契约一致");
+  assert.equal(unknown.canAcknowledgeStop, true, "未知态提供现场确认停稳后的清除入口");
+  assert.deepEqual(acknowledgeStopPayload(unknown), { job_id: "job-1", confirmed: true });
   assert.match(unknown.cancelHint, /workflow_id/);
 
   const unknownWithWf = jobView({ job_id: "job-2", workflow_id: "wf-2", state: "unknown", target: "COM3" });
   assert.equal(unknownWithWf.canCancel, false, "未知态带 workflow_id 也不允许温和取消");
   assert.equal(unknownWithWf.canEstop, true, "未知态有 job_id 即可尝试急停");
+  assert.equal(unknownWithWf.canAcknowledgeStop, true);
   assert.match(unknownWithWf.cancelHint, /连接状态未知/);
 
   const missingJobId = jobView({ workflow_id: "wf-only", state: "running" });
   assert.equal(missingJobId.canEstop, false, "没有 job_id 时不能发软件急停");
+  assert.equal(missingJobId.canAcknowledgeStop, false);
 });
 
 test("激光任务浮层：载荷与 G-code 地址复用既有接口，不新造通道", () => {

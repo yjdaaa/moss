@@ -596,20 +596,39 @@ test("[BTN-40] 材料实验室: 「新建材料」与「删除材料」全生命
   assert.equal(saveRes.status, 200, "新建材料必须成功");
   assert.equal(saveRes.data?.success, true);
 
-  // 2. 验证新材料已入库并生效
+  // 2. 验证新材料两个厚度（2mm 与 4mm）均已入库并参与实时推荐
   const bootRes = await apiGet("/v1/material-lab/bootstrap");
   assert.equal(bootRes.status, 200);
   const mats = bootRes.data?.result?.materials?.materials || {};
   assert.ok(mats["E2E测试碳纤维"], "材料库必须包含新建材料");
+  assert.ok(mats["E2E测试碳纤维"].thicknesses?.["2"], "2mm 规格必须入库");
+  assert.ok(mats["E2E测试碳纤维"].thicknesses?.["4"], "4mm 规格必须入库");
+  const recRes = await apiGet(
+    `/api/ui/material-recommendation?material=${encodeURIComponent("E2E测试碳纤维")}&thickness_mm=4&laser_mode=engrave&engraving_mode=raster`
+  );
+  assert.equal(recRes.status, 200, "新建材料必须可通过推荐接口实时命中");
+  assert.equal(recRes.data?.result?.laser_max_power, 750);
 
-  // 3. 删除临时材料
-  const delRes = await apiPost("/api/material-lab/manage", {
+  // 3. 先按单厚度删除 2mm（4mm 保留），再按整材料删除（thickness_mm: 0，与 MaterialModal 一致）
+  const delSingle = await apiPost("/api/material-lab/manage", {
     action: "delete",
     material: "E2E测试碳纤维",
     thickness_mm: 2,
     confirmed: true,
   });
-  assert.equal(delRes.status, 200, "删除材料必须成功");
+  assert.equal(delSingle.status, 200, "删除单厚度必须成功");
+  const bootMid = await apiGet("/v1/material-lab/bootstrap");
+  const matsMid = bootMid.data?.result?.materials?.materials || {};
+  assert.equal(matsMid["E2E测试碳纤维"]?.thicknesses?.["2"], undefined, "2mm 应已移除");
+  assert.ok(matsMid["E2E测试碳纤维"]?.thicknesses?.["4"], "4mm 应保留");
+
+  const delRes = await apiPost("/api/material-lab/manage", {
+    action: "delete",
+    material: "E2E测试碳纤维",
+    thickness_mm: 0,
+    confirmed: true,
+  });
+  assert.equal(delRes.status, 200, "删除整材料必须成功");
   assert.equal(delRes.data?.success, true);
 
   // 4. 再次验证已被移除

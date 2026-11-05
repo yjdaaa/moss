@@ -210,6 +210,7 @@ pub enum Channel {
 pub struct AccessContext {
     channel: Channel,
     scopes: Vec<TrustedScope>,
+    personal_mode: bool,
 }
 
 impl AccessContext {
@@ -225,14 +226,35 @@ impl AccessContext {
         let mut scopes = vec![device];
         scopes.extend(person);
         scopes.extend(selection);
-        Ok(Self { channel: Channel::Voice, scopes })
+        Ok(Self { channel: Channel::Voice, scopes, personal_mode: false })
     }
 
     /// Private window: the scopes the host enumerated for the owner of this machine.
     pub fn desktop_private(scopes: Vec<TrustedScope>) -> Self {
-        Self { channel: Channel::DesktopPrivate, scopes }
+        Self { channel: Channel::DesktopPrivate, scopes, personal_mode: false }
     }
 
+    /// NV14 personal mode: isolate `Category::Preference` strictly to `ScopeKind::Person` on the
+    /// voice channel so unknown or other speakers never fall back to shared device preferences.
+    pub fn with_personal_mode(mut self, personal_mode: bool) -> Self {
+        self.personal_mode = personal_mode && self.channel == Channel::Voice;
+        self
+    }
+    /// Attach an independent workspace scope (e.g. `local-kb`) alongside any active project.
+    pub fn with_workspace(mut self, workspace: TrustedScope) -> Result<Self, ContextError> {
+        if workspace.origin != ScopeOrigin::DesktopSelection || workspace.key.kind != ScopeKind::Workspace {
+            return Err(ContextError::ScopeInvalid);
+        }
+        if !self.scopes.iter().any(|s| s.key == workspace.key) {
+            self.scopes.push(workspace);
+        }
+        Ok(self)
+    }
+
+
+    pub fn personal_mode(&self) -> bool {
+        self.personal_mode
+    }
     pub fn channel(&self) -> Channel {
         self.channel
     }
@@ -496,6 +518,9 @@ impl MemoryDraft {
         if !access.can_write(&self.scope, self.source.kind()) {
             return Err(ContextError::AccessDenied);
         }
+        if access.personal_mode() && self.scope.kind() == ScopeKind::Device && self.category == Category::Preference {
+            return Err(ContextError::AccessDenied);
+        }
         if !self.source.kind().allowed_categories().contains(&self.category) {
             return Err(ContextError::SourceNotAllowed);
         }
@@ -599,6 +624,9 @@ impl ContextMemory {
 
     /// Visible to this request at all (candidates included, labelled as such by the caller).
     pub fn readable(&self, access: &AccessContext, now: f64) -> bool {
+        if access.personal_mode() && self.scope.kind() == ScopeKind::Device && self.category == Category::Preference {
+            return false;
+        }
         access.can_read(&self.scope) && matches!(self.state(now), RecordState::Active(_))
     }
 

@@ -32,6 +32,19 @@ impl KnowledgeStore for FakeKnowledge {
     fn roots(&self, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, String> {
         Ok(self.roots.lock().unwrap().values().filter(|r| &r.scope == scope).cloned().collect())
     }
+    fn all_roots(&self) -> Result<Vec<KnowledgeRoot>, String> {
+        Ok(self.roots.lock().unwrap().values().cloned().collect())
+    }
+    fn set_root_enabled(&self, id: &str, expected: i64, enabled: bool) -> Result<bool, String> {
+        let mut roots = self.roots.lock().unwrap();
+        let Some(root) = roots.get_mut(id) else { return Ok(false) };
+        if root.revision != expected {
+            return Ok(false);
+        }
+        root.enabled = enabled;
+        root.revision += 1;
+        Ok(true)
+    }
     fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String> {
         let mut roots = self.roots.lock().unwrap();
         let Some(root) = roots.get_mut(root_id) else { return Ok(false) };
@@ -66,7 +79,7 @@ impl KnowledgeStore for FakeKnowledge {
             .lock()
             .unwrap()
             .iter()
-            .filter(|d| roots.get(&d.root_id).is_some_and(|r| &r.scope == scope))
+            .filter(|d| roots.get(&d.root_id).is_some_and(|r| &r.scope == scope && r.enabled))
             .filter(|d| query.terms.iter().chain(&query.shorts).any(|t| d.l0.contains(t.as_str()) || d.l1.contains(t.as_str())))
             .take(limit)
             .cloned()

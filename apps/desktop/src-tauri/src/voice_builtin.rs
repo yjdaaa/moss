@@ -735,6 +735,7 @@ mod imp {
     struct DbRegistry {
         db: Arc<Mutex<laser_runtime::RuntimeDb>>,
         host: Arc<laser_host::HostApplication>,
+        settings_file: std::path::PathBuf,
     }
 
     impl DeviceRegistry for DbRegistry {
@@ -791,13 +792,271 @@ mod imp {
                 let _ = db.voice_device_snapshot(device, kind, json, now());
             }
         }
+
+        fn device_hardware_prefs(
+            &self,
+            device: &str,
+        ) -> Option<moss_voice_server::HardwarePrefs> {
+            let mut prefs = moss_voice::settings::load(&self.settings_file).builtin_device_prefs;
+            let entry = prefs.remove(device)?;
+            (!entry.is_empty()).then_some(moss_voice_server::HardwarePrefs {
+                volume: entry.volume,
+                brightness: entry.brightness,
+                theme: entry.theme,
+                talk_mode: entry.talk_mode,
+            })
+        }
     }
 
     /// 对话中调用 MOSS 工具（NV4）：身份 `CallerContext::Voice`；运动与出光跟随严格模式开关，桌面控制类工具始终拒绝。
-    struct DesktopToolHost {
-        host: Arc<laser_host::HostApplication>,
+    fn preview_candidate_from_json(val: &Value) -> Option<&str> {
+        [
+            val.pointer("/workflow/artifacts/path_preview_file"),
+            val.pointer("/workflow/artifacts/preview_file"),
+            val.pointer("/workflow/artifacts/image_file"),
+            val.pointer("/artifacts/path_preview_file"),
+            val.pointer("/artifacts/preview_file"),
+            val.pointer("/artifacts/image_file"),
+            val.get("path_preview_file"),
+            val.get("preview_file"),
+            val.get("image_file"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|s| !s.is_empty())
     }
 
+    fn format_workflow_oled_summary(val: &Value) -> Option<String> {
+        let wf = val.get("workflow").unwrap_or(val);
+        if !wf.is_object() {
+            return None;
+        }
+        let input = wf.get("input").unwrap_or(wf);
+        let snap = wf.get("confirmation_snapshot").unwrap_or(wf);
+        let artifacts = wf.get("artifacts").unwrap_or(wf);
+        let estimate = wf.get("estimate").or_else(|| artifacts.get("estimate")).unwrap_or(wf);
+
+        let mut parts: Vec<String> = Vec::new();
+        let mat = input
+            .get("material")
+            .or_else(|| wf.get("material"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let thick = input
+            .get("thickness_mm")
+            .or_else(|| wf.get("thickness_mm"))
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v > 0.0);
+        let mode_label = match input
+            .get("laser_mode")
+            .or_else(|| wf.get("laser_mode"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+        {
+            "cut" => "切割",
+            "engrave" => "雕刻",
+            _ => "",
+        };
+        match (thick, mat) {
+            (Some(t), Some(m)) => {
+                let t_str = if (t.fract()).abs() < 1e-3 {
+                    format!("{}mm", t.round() as i64)
+                } else {
+                    format!("{t:.1}mm")
+                };
+                parts.push(format!("{t_str}{m}{mode_label}"));
+            }
+            (None, Some(m)) => parts.push(format!("{m}{mode_label}")),
+            (Some(t), None) if !mode_label.is_empty() => parts.push(format!("{t:.1}mm{mode_label}")),
+            _ if !mode_label.is_empty() => parts.push(mode_label.to_owned()),
+            _ => {}
+        }
+
+        if let Some(txt) = input
+            .get("text")
+            .or_else(|| wf.get("text"))
+            .and_then(Value::as_str)
+            .map(|s| s.replace(['\r', '\n'], " ").trim().to_owned())
+            .filter(|s| !s.is_empty())
+        {
+            let short: String = txt.chars().take(10).collect();
+            let ell = if txt.chars().count() > 10 { "…" } else { "" };
+            parts.push(format!("「{short}{ell}」"));
+        }
+
+        let w_mm = estimate
+            .get("width_mm")
+            .or_else(|| artifacts.get("width_mm"))
+            .or_else(|| input.get("width_mm"))
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v > 0.0);
+        let h_mm = estimate
+            .get("height_mm")
+            .or_else(|| artifacts.get("height_mm"))
+            .or_else(|| input.get("height_mm"))
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v > 0.0);
+        if let (Some(w), Some(h)) = (w_mm, h_mm) {
+            parts.push(format!("{}×{}mm", w.round() as i64, h.round() as i64));
+        }
+
+        let power = snap
+            .get("power")
+            .or_else(|| input.get("power"))
+            .and_then(Value::as_i64);
+        let feed = snap
+            .get("feed_rate")
+            .or_else(|| input.get("feed_rate"))
+            .and_then(Value::as_i64);
+        let passes = snap
+            .get("passes")
+            .or_else(|| input.get("passes"))
+            .and_then(Value::as_i64);
+        let mut p_tokens = Vec::new();
+        if let Some(p) = power {
+            p_tokens.push(format!("S{p}"));
+        }
+        if let Some(f) = feed {
+            p_tokens.push(format!("F{f}"));
+        }
+        if let Some(ps) = passes {
+            p_tokens.push(format!("×{ps}遍"));
+        }
+        if !p_tokens.is_empty() {
+            parts.push(p_tokens.join(" "));
+        }
+
+        if let Some(secs) = estimate
+            .get("estimated_seconds")
+            .or_else(|| wf.get("estimated_seconds"))
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v >= 1.0)
+        {
+            let total = secs.round() as u64;
+            if total >= 60 {
+                parts.push(format!("约{}分{}秒", total / 60, total % 60));
+            } else {
+                parts.push(format!("约{total}秒"));
+            }
+        }
+
+        if parts.is_empty() {
+            wf.get("workflow_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|id| format!("预览就绪 · {id}"))
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
+    /// 提取用于彩屏 PNG 底部 5×7 像素字模的精简 ASCII 标尺（如 `40X30MM S600 F1200`）。
+    fn format_workflow_ruler_ascii(val: &Value) -> Option<String> {
+        let wf = val.get("workflow").unwrap_or(val);
+        if !wf.is_object() {
+            return None;
+        }
+        let input = wf.get("input").unwrap_or(wf);
+        let snap = wf.get("confirmation_snapshot").unwrap_or(wf);
+        let artifacts = wf.get("artifacts").unwrap_or(wf);
+        let estimate = wf
+            .get("estimate")
+            .or_else(|| artifacts.get("estimate"))
+            .unwrap_or(wf);
+        let mut tokens: Vec<String> = Vec::new();
+        let w_mm = estimate
+            .get("width_mm")
+            .or_else(|| artifacts.get("width_mm"))
+            .or_else(|| input.get("width_mm"))
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v > 0.0);
+        let h_mm = estimate
+            .get("height_mm")
+            .or_else(|| artifacts.get("height_mm"))
+            .or_else(|| input.get("height_mm"))
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v > 0.0);
+        if let (Some(w), Some(h)) = (w_mm, h_mm) {
+            tokens.push(format!("{}X{}MM", w.round() as i64, h.round() as i64));
+        }
+        if let Some(p) = snap
+            .get("power")
+            .or_else(|| input.get("power"))
+            .and_then(Value::as_i64)
+        {
+            tokens.push(format!("S{p}"));
+        }
+        if let Some(f) = snap
+            .get("feed_rate")
+            .or_else(|| input.get("feed_rate"))
+            .and_then(Value::as_i64)
+        {
+            tokens.push(format!("F{f}"));
+        }
+        if let Some(ps) = snap
+            .get("passes")
+            .or_else(|| input.get("passes"))
+            .and_then(Value::as_i64)
+            .filter(|v| *v > 1)
+        {
+            tokens.push(format!("P{ps}"));
+        }
+        (!tokens.is_empty()).then(|| tokens.join(" "))
+    }
+
+    fn extract_preview_bundle_for_host(
+        host: &laser_host::HostApplication,
+        tool_detail: Option<&str>,
+    ) -> Result<(Option<Vec<u8>>, String, Option<String>), String> {
+        use laser_runtime::RuntimeStore;
+        let roots = host.api_service.preview_roots();
+        let try_read = |rel_or_abs: &str| -> Option<Vec<u8>> {
+            let resolved =
+                laser_api::resolve_preview_file(std::path::Path::new(rel_or_abs), roots).ok()?;
+            std::fs::read(resolved).ok().filter(|b| !b.is_empty())
+        };
+        if let Some(detail) = tool_detail
+            && let Ok(parsed) = serde_json::from_str::<Value>(detail)
+        {
+            let bytes = preview_candidate_from_json(&parsed).and_then(try_read);
+            let summary = format_workflow_oled_summary(&parsed);
+            let ruler = format_workflow_ruler_ascii(&parsed);
+            if bytes.is_some() || summary.is_some() {
+                return Ok((
+                    bytes,
+                    summary.unwrap_or_else(|| "激光雕刻预览已就绪".into()),
+                    ruler,
+                ));
+            }
+        }
+        let recent = host
+            .db
+            .list_recent(laser_runtime::RecordKind::Workflow, 10)
+            .map_err(|_| "查询最近加工预览失败".to_owned())?;
+        for record in recent {
+            let bytes = preview_candidate_from_json(&record.payload).and_then(try_read);
+            let summary = format_workflow_oled_summary(&record.payload);
+            let ruler = format_workflow_ruler_ascii(&record.payload);
+            if bytes.is_some() || summary.is_some() {
+                return Ok((
+                    bytes,
+                    summary.unwrap_or_else(|| "激光雕刻预览已就绪".into()),
+                    ruler,
+                ));
+            }
+        }
+        Err("当前还没有可推送的激光加工预览（请先在工作台、画板或语音生成一次预览）".into())
+    }
+    /// 对话中调用 MOSS 工具（NV4）：身份 `CallerContext::Voice`；运动与出光跟随严格模式开关，桌面控制类工具始终拒绝。
+    struct DesktopToolHost {
+        host: Arc<laser_host::HostApplication>,
+        settings_file: std::path::PathBuf,
+        server: std::sync::Weak<Mutex<Option<VoiceServer>>>,
+    }
     impl ToolHost for DesktopToolHost {
         fn list(&self) -> Value {
             let mut base=laser_host::voice_tools_list(&self.host.api_service);
@@ -815,6 +1074,31 @@ mod imp {
             } else {
                 laser_host::voice_tool_call(&self.host.api_service, &context.device_id, &context.session_id, name, arguments)
             };
+            if result.success
+                && matches!(
+                    name,
+                    "generate_text_laser_task_tool"
+                        | "ai_laser_gcode_tool"
+                        | "generate_text_image_gcode_tool"
+                        | "regenerate_text_laser_task_tool"
+                        | "generate_text_image_tool"
+                )
+                && moss_voice::settings::load(&self.settings_file)
+                    .builtin_local
+                    .screen_preview_sync
+                && let Ok((bytes, summary, ruler)) =
+                    extract_preview_bundle_for_host(&self.host, result.detail.as_deref())
+                && let Some(server_arc) = self.server.upgrade()
+                && let Ok(guard) = server_arc.lock()
+                && let Some(server) = guard.as_ref()
+            {
+                let _ = server.push_preview_adaptive_with_ruler(
+                    bytes.as_deref(),
+                    &summary,
+                    ruler.as_deref(),
+                    None,
+                );
+            }
             ToolHostResult { success: result.success, result: result.result, detail: result.detail }
         }
 
@@ -824,8 +1108,61 @@ mod imp {
         }
     }
 
+    fn probe_laya_http(addr: std::net::SocketAddr, connect_timeout: std::time::Duration) -> bool {
+        use std::io::{Read, Write};
+        let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, connect_timeout) else {
+            return false;
+        };
+        let io_timeout = Some(std::time::Duration::from_millis(300));
+        let _ = stream.set_write_timeout(io_timeout);
+        let _ = stream.set_read_timeout(io_timeout);
+        if stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:18090\r\nConnection: close\r\n\r\n")
+            .is_err()
+        {
+            return false;
+        }
+        let mut buf = [0u8; 1024];
+        let mut read_total = 0;
+        while read_total < buf.len() {
+            match stream.read(&mut buf[read_total..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => read_total += n,
+            }
+        }
+        let raw = &buf[..read_total];
+        let Some(sep) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&raw[..sep]);
+        let Some(status_line) = head.lines().next() else {
+            return false;
+        };
+        let is_200 = status_line == "HTTP/1.1 200"
+            || status_line.starts_with("HTTP/1.1 200 ")
+            || status_line == "HTTP/1.0 200"
+            || status_line.starts_with("HTTP/1.0 200 ");
+        if !is_200 {
+            return false;
+        }
+        let body = String::from_utf8_lossy(&raw[sep + 4..]);
+        let trimmed = body.trim();
+        if trimmed.eq_ignore_ascii_case("ok") {
+            return true;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            return false;
+        };
+        json.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+            || json
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "ok" | "healthy" | "ready"))
+    }
+
     struct LocalLayaRunner {
         child: Option<std::process::Child>,
+        job: Option<moss_voice::supervisor::JobHandle>,
         generation: u64,
     }
 
@@ -836,7 +1173,23 @@ mod imp {
         }
 
         fn kill_reaped(&mut self) {
+            let job = self.job.take();
             if let Some(mut child) = self.child.take() {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    let pid = child.id();
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .creation_flags(0x0800_0000)
+                        .status();
+                }
+                if let Some(job) = job.as_ref() {
+                    job.terminate();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
             }
@@ -851,7 +1204,11 @@ mod imp {
 
     pub struct BuiltinVoice {
         host: Arc<laser_host::HostApplication>,
-        server: Mutex<Option<VoiceServer>>,
+        /// 串行化启停与重启编排，避免加载本地模型/扫描音乐时长时间阻塞 `self.server` 状态轮询。
+        lifecycle: Mutex<()>,
+        server: Arc<Mutex<Option<VoiceServer>>>,
+        /// 仅内存、重启即清的实时对话调试流总开关（默认 false，不落盘）
+        debug_trace_enabled: std::sync::atomic::AtomicBool,
         memory: Arc<MemoryService>,
         speaker:Arc<moss_voice_server::speaker_enrollment::SpeakerEnrollment>,
         speaker_backend:Arc<DesktopSpeakerBackend>,
@@ -1208,13 +1565,15 @@ mod imp {
                 personal,
                 identity,
                 home_control,
-                server: Mutex::new(None),
+                lifecycle: Mutex::new(()),
+                server: Arc::new(Mutex::new(None)),
+                debug_trace_enabled: std::sync::atomic::AtomicBool::new(false),
                 last_error: Mutex::new(None),
                 music_warning: Mutex::new(None),
                 speaker_warning: Mutex::new(None),
                 models,
                 helper: Mutex::new(None),
-                laya: Mutex::new(LocalLayaRunner { child: None, generation: 0 }),
+                laya: Mutex::new(LocalLayaRunner { child: None, job: None, generation: 0 }),
                 context,
             })
         }))
@@ -1433,14 +1792,43 @@ mod imp {
                 labels.push(format!("Jev:{jev_model}"));
             }
             let llm = OpenAiLlm::new(&llm.url, &key(Section::Llm)?, &llm.model).map_err(invalid)?;
-            let original: Arc<dyn ToolExecutor> = Arc::new(HostTools::new(Arc::new(DesktopToolHost { host: self.host.clone() })));
+
+            let original: Arc<dyn ToolExecutor> = Arc::new(HostTools::new(Arc::new(DesktopToolHost {
+                host: self.host.clone(),
+                settings_file: self.settings_file(),
+                server: Arc::downgrade(&self.server),
+            })));
             let plugin_host = Arc::new(DesktopInfoHost { host: self.host.clone() });
             let info = InfoTools::new(plugin_host).map_err(|_| internal("信息插件 HTTP 客户端初始化失败"))?;
             let combined: Arc<dyn ToolExecutor> = Arc::new(CombinedTools { original, info: Arc::new(info) });
             let tools: Arc<dyn ToolExecutor> = Arc::new(HomeTools {
                 original:combined, home:Arc::new(DesktopHomeHost{host:self.host.clone(),control:self.home_control.clone()})
             });
-            let mut conversation = Conversation::new(asr, Arc::new(llm), tts, tools, ConversationSettings { read_only_shortcuts: experience.read_only_shortcuts, announce_job_done: experience.job_done_announce, model_labels: labels, ..Default::default() }).with_memory(self.memory.clone()).with_speaker_enrollment(self.speaker.clone());
+            let system_prompt = moss_voice_server::conversation::compose_persona_system_prompt(
+                &experience.persona_style,
+                &experience.persona_prompt,
+            );
+            let asr_corrections = moss_voice::settings::effective_asr_corrections(
+                experience.asr_homophone_fix,
+                &experience.custom_asr_corrections,
+            );
+            let mut conversation = Conversation::new(
+                asr,
+                Arc::new(llm),
+                tts,
+                tools,
+                ConversationSettings {
+                    system_prompt,
+                    asr_corrections,
+                    read_only_shortcuts: experience.read_only_shortcuts,
+                    announce_job_done: experience.job_done_announce,
+                    screen_preview_sync: experience.screen_preview_sync,
+                    model_labels: labels,
+                    ..Default::default()
+                },
+            )
+            .with_memory(self.memory.clone())
+            .with_speaker_enrollment(self.speaker.clone());
             if let Some(fallback_tts) = local.fallback_tts.take() {
                 conversation = conversation.with_fallback_tts(fallback_tts);
             }
@@ -1559,59 +1947,71 @@ mod imp {
                 "sessions": view.as_ref().map(|view| serde_json::to_value(&view.sessions).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
                 "events": view.as_ref().map(|view| serde_json::to_value(&view.events).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
                 "timings": view.as_ref().map(|view| serde_json::to_value(&view.timings).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
+                "debug_enabled": view.as_ref().map(|v| v.debug_enabled).unwrap_or_else(|| self.debug_trace_enabled.load(std::sync::atomic::Ordering::Acquire)),
+                "debug_traces": view.as_ref().map(|v| serde_json::to_value(&v.debug_traces).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
+                "device_prefs": settings.builtin_device_prefs,
+                "goggle_bot_gifs": moss_voice_server::cached_goggle_bot_gifs(),
                 "memory_enabled": self.memory.enabled(),
                 "devices": self.devices(),
             })
         }
 
-        pub fn start(&self) -> Result<Value, CenterError> {
-            {
-                let mut guard = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                if guard.is_none() {
-                    let settings = self.settings();
-                    let (mut local, helper) = self.local_parts(&settings.builtin_local)?;
-                    let mut conversation = self.conversation(&settings.builtin_models, &mut local, &settings.builtin_local)?;
-                    // No music scanning while disabled or chat unavailable;换机或拔盘目录不可用时跳过音乐索引，不阻断内置语音主服务启动。
-                    let (music, next_music_warning) = scan_music_for_start(&settings.builtin_music, conversation.is_some());
-                    if let (Some(index), Some((chat, _))) = (&music, conversation.as_mut()) {
-                        chat.tools = Arc::new(moss_voice_server::music::MusicTools::new(chat.tools.clone(), index.clone()));
-                    }
-                    let defaults = ServerConfig::default();
-                    let playback_start_ms = match &conversation {
-                        Some((_, true)) => STREAMING_PLAYBACK_START_MS,
-                        _ => defaults.playback_start_ms,
-                    };
-                    let config = ServerConfig {
-                        ws_port: settings.builtin_ws_port,
-                        http_port: settings.builtin_http_port,
-                        mode: if conversation.is_some() { ServerMode::Chat } else { ServerMode::Echo },
-                        conversation: conversation.map(|(conversation, _)| Arc::new(conversation)),
-                        music,
-                        vision: Some(Arc::new(DesktopVisionFactory { host: self.host.clone() })),
-                        firmware: Some(Arc::new(DesktopFirmwareHost { db: self.host.db.clone(), dir: self.firmware_dir() })),
-                        vad_factory: local.vad.take(),
-                        barge_in: settings.builtin_local.barge_in,
-                        barge_in_ms: settings.builtin_local.barge_in_ms,
-                        playback_start_ms,
-                        ..defaults
-                    };
-                    let registry = Arc::new(DbRegistry { db: self.host.db.clone(), host: self.host.clone() });
-                    let server = VoiceServer::start(config, registry)
-                        .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
-                    server.prewarm_speech_cache();
+        fn start_locked(&self) -> Result<(), CenterError> {
+            if !self.running() {
+                let settings = self.settings();
+                let (mut local, helper) = self.local_parts(&settings.builtin_local)?;
+                let mut conversation = self.conversation(&settings.builtin_models, &mut local, &settings.builtin_local)?;
+                // No music scanning while disabled or chat unavailable;换机或拔盘目录不可用时跳过音乐索引，不阻断内置语音主服务启动。
+                let (music, next_music_warning) = scan_music_for_start(&settings.builtin_music, conversation.is_some());
+                if let (Some(index), Some((chat, _))) = (&music, conversation.as_mut()) {
+                    chat.tools = Arc::new(moss_voice_server::music::MusicTools::new(chat.tools.clone(), index.clone()));
+                }
+                let defaults = ServerConfig::default();
+                let playback_start_ms = match &conversation {
+                    Some((_, true)) => STREAMING_PLAYBACK_START_MS,
+                    _ => defaults.playback_start_ms,
+                };
+                let config = ServerConfig {
+                    ws_port: settings.builtin_ws_port,
+                    http_port: settings.builtin_http_port,
+                    mode: if conversation.is_some() { ServerMode::Chat } else { ServerMode::Echo },
+                    conversation: conversation.map(|(conversation, _)| Arc::new(conversation)),
+                    music,
+                    vision: Some(Arc::new(DesktopVisionFactory { host: self.host.clone() })),
+                    firmware: Some(Arc::new(DesktopFirmwareHost { db: self.host.db.clone(), dir: self.firmware_dir() })),
+                    vad_factory: local.vad.take(),
+                    barge_in: settings.builtin_local.barge_in,
+                    barge_in_ms: settings.builtin_local.barge_in_ms,
+                    playback_start_ms,
+                    screen_card_style: moss_voice_server::ScreenCardStyle::from_setting(
+                        &settings.builtin_local.screen_card_style,
+                    ),
+                    ..defaults
+                };
+                let registry = Arc::new(DbRegistry {
+                    db: self.host.db.clone(),
+                    host: self.host.clone(),
+                    settings_file: self.settings_file(),
+                });
+                let server = VoiceServer::start(config, registry)
+                    .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
+                server.set_debug_enabled(self.debug_trace_enabled.load(std::sync::atomic::Ordering::Acquire));
+                server.prewarm_speech_cache();
+                {
+                    let mut guard = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     *guard = Some(server);
-                    if let Ok(mut slot) = self.helper.lock() {
-                        *slot = helper;
-                    }
-                    if let Ok(mut slot) = self.music_warning.lock() {
-                        *slot = next_music_warning;
-                    }
-                    // 顶栏：服务已运行、还没有设备连接
-                    laser_host::set_voice_device_sessions(Some(0));
-                    laser_host::set_voice_pulse(None, 0);
-                    if let Ok(mut last) = self.last_error.lock() {
-                        *last = None;
-                    }
+                }
+                if let Ok(mut slot) = self.helper.lock() {
+                    *slot = helper;
+                }
+                if let Ok(mut slot) = self.music_warning.lock() {
+                    *slot = next_music_warning;
+                }
+                // 顶栏：服务已运行、还没有设备连接
+                laser_host::set_voice_device_sessions(Some(0));
+                laser_host::set_voice_pulse(None, 0);
+                if let Ok(mut last) = self.last_error.lock() {
+                    *last = None;
                 }
             }
             if self.should_run_local_laya() {
@@ -1619,15 +2019,21 @@ mod imp {
                     eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
                 }
             }
-            Ok(self.status())
+            Ok(())
         }
 
-        pub fn stop(&self) -> Value {
+        fn stop_locked(&self) {
             self.personal.directory_changed();
-            let _=self.speaker.cancel();
-            if let Ok(mut helper)=self.speaker_backend.helper.lock(){*helper=None;}
-            if let Ok(mut slot)=self.music_warning.lock(){*slot=None;}
-            if let Ok(mut slot)=self.speaker_warning.lock(){*slot=None;}
+            let _ = self.speaker.cancel();
+            if let Ok(mut helper) = self.speaker_backend.helper.lock() {
+                *helper = None;
+            }
+            if let Ok(mut slot) = self.music_warning.lock() {
+                *slot = None;
+            }
+            if let Ok(mut slot) = self.speaker_warning.lock() {
+                *slot = None;
+            }
             let server = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
             if let Some(server) = server {
                 server.stop();
@@ -1641,82 +2047,272 @@ mod imp {
             if !self.should_run_local_laya_for_feedback() {
                 self.stop_laya();
             }
+        }
+
+        pub fn start(&self) -> Result<Value, CenterError> {
+            {
+                let _lifecycle = self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.start_locked()?;
+            }
+            Ok(self.status())
+        }
+
+        pub fn stop(&self) -> Value {
+            {
+                let _lifecycle = self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.stop_locked();
+            }
             self.status()
         }
 
         fn restart_if_running(&self) -> Result<bool, CenterError> {
+            let _lifecycle = self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if !self.running() {
                 return Ok(false);
             }
-            self.stop();
-            self.start()?;
+            self.stop_locked();
+            self.start_locked()?;
             Ok(true)
         }
 
         /// 保存本地模型开关、音色、语速与镜像；运行中则重启服务以生效。
         pub fn local_save(&self, patch: &Value) -> Result<Value, CenterError> {
             let invalid = |message: &str| CenterError::new("voice_settings_invalid", 400, message);
+            let debug_enable_patch = match patch.get("debug_trace_enabled") {
+                Some(v) => Some(v.as_bool().ok_or_else(|| invalid("调试开关取值不正确"))?),
+                None => None,
+            };
+            let clear_debug_patch = match patch.get("clear_debug_traces") {
+                Some(v) => Some(v.as_bool().ok_or_else(|| invalid("清空调试记录取值不正确"))?),
+                None => None,
+            };
+            if debug_enable_patch.is_some() || clear_debug_patch.is_some() {
+                if let Some(enabled) = debug_enable_patch {
+                    self.debug_trace_enabled
+                        .store(enabled, std::sync::atomic::Ordering::Release);
+                }
+                if let Ok(guard) = self.server.lock()
+                    && let Some(server) = guard.as_ref()
+                {
+                    if let Some(enabled) = debug_enable_patch {
+                        server.set_debug_enabled(enabled);
+                    }
+                    if clear_debug_patch == Some(true) {
+                        server.clear_debug_traces();
+                    }
+                }
+                let only_debug = patch.as_object().is_some_and(|obj| {
+                    obj.keys()
+                        .all(|k| k == "debug_trace_enabled" || k == "clear_debug_traces")
+                });
+                if only_debug {
+                    let mut status = self.status();
+                    status["restarted"] = Value::Bool(false);
+                    return Ok(status);
+                }
+            }
             let touched_jev = patch.get("jev_model").is_some()
                 || patch.get("jev_filter_enabled").is_some()
                 || patch.get("jev_feedback_enabled").is_some();
-            let (is_local_laya, laya_needed) = {
-                let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-                let mut settings = self.settings();
-                let local = &mut settings.builtin_local;
-                for (key, slot) in [("asr", &mut local.asr), ("tts", &mut local.tts), ("vad", &mut local.vad), ("read_only_shortcuts", &mut local.read_only_shortcuts), ("asr_beam_search", &mut local.asr_beam_search), ("barge_in", &mut local.barge_in), ("job_done_announce", &mut local.job_done_announce), ("jev_filter_enabled", &mut local.jev_filter_enabled), ("jev_unfinished_hold", &mut local.jev_unfinished_hold), ("jev_fast_route", &mut local.jev_fast_route), ("jev_tool_prune", &mut local.jev_tool_prune), ("jev_memory_filter", &mut local.jev_memory_filter)] {
-                    if let Some(value) = patch.get(key) {
-                        *slot = value.as_bool().ok_or_else(|| invalid("开关取值不正确"))?;
-                    }
+            let mut bool_patches: Vec<(&'static str, bool)> = Vec::new();
+            for key in [
+                "asr",
+                "tts",
+                "vad",
+                "read_only_shortcuts",
+                "asr_beam_search",
+                "barge_in",
+                "job_done_announce",
+                "jev_filter_enabled",
+                "jev_unfinished_hold",
+                "jev_fast_route",
+                "jev_tool_prune",
+                "jev_memory_filter",
+                "asr_homophone_fix",
+                "screen_preview_sync",
+            ] {
+                if let Some(value) = patch.get(key) {
+                    bool_patches.push((key, value.as_bool().ok_or_else(|| invalid("开关取值不正确"))?));
                 }
-                if let Some(value) = patch.get("jev_model") {
+            }
+            let jev_model_patch = match patch.get("jev_model") {
+                Some(value) => {
                     let raw = value.as_str().ok_or_else(|| invalid("Jev 模型名称须为字符串"))?;
-                    local.jev_model = moss_voice::settings::validate_jev_model(raw).map_err(|message| invalid(&message))?;
+                    Some(moss_voice::settings::validate_jev_model(raw).map_err(|message| invalid(&message))?)
                 }
-                let jev_feedback_patch = match patch.get("jev_feedback_enabled") {
-                    Some(v) => Some(v.as_bool().ok_or_else(|| invalid("Jev 加工反馈开关取值不正确"))?),
-                    None => None,
-                };
-                if let Some(value) = patch.get("barge_in_ms") {
+                None => None,
+            };
+            let jev_feedback_patch = match patch.get("jev_feedback_enabled") {
+                Some(v) => Some(v.as_bool().ok_or_else(|| invalid("Jev 加工反馈开关取值不正确"))?),
+                None => None,
+            };
+            let barge_in_ms_patch = match patch.get("barge_in_ms") {
+                Some(value) => {
                     let ms = value.as_u64().ok_or_else(|| invalid("插话时长须为 300 ~ 600 毫秒的整数"))?;
-                    local.barge_in_ms = moss_voice::settings::validate_barge_in_ms(ms).map_err(|message| invalid(&message))?;
+                    Some(moss_voice::settings::validate_barge_in_ms(ms).map_err(|message| invalid(&message))?)
                 }
-                if let Some(value) = patch.get("custom_hotwords") {
+                None => None,
+            };
+            let custom_hotwords_patch = match patch.get("custom_hotwords") {
+                Some(value) => {
                     let words: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| invalid("热词须为文字数组"))?;
-                    local.custom_hotwords = moss_voice::settings::normalize_hotwords(&words).map_err(|message| invalid(&message))?;
+                    Some(moss_voice::settings::normalize_hotwords(&words).map_err(|message| invalid(&message))?)
                 }
-                for (key, kind, slot) in [
-                    ("vad_model", ModelKind::Vad, &mut local.vad_model),
-                    ("asr_model", ModelKind::Asr, &mut local.asr_model),
-                    ("tts_model", ModelKind::Tts, &mut local.tts_model),
-                ] {
-                    if let Some(value) = patch.get(key) {
-                        let id = value.as_str().filter(|id| local_models::spec_of(id, kind).is_some());
-                        *slot = id.ok_or_else(|| invalid("选择的本地模型不存在"))?.to_owned();
-                    }
+                None => None,
+            };
+            let custom_corrections_patch = match patch.get("custom_asr_corrections") {
+                Some(value) => {
+                    let entries: Vec<String> = serde_json::from_value(value.clone())
+                        .map_err(|_| invalid("同音纠错规则须为文字数组"))?;
+                    Some(
+                        moss_voice::settings::normalize_asr_corrections(&entries)
+                            .map_err(|message| invalid(&message))?,
+                    )
                 }
-                if let Some(value) = patch.get("tts_speaker") {
-                    local.tts_speaker =
-                        value.as_i64().filter(|value| (0..=999).contains(value)).ok_or_else(|| invalid("音色编号须在 0 ~ 999 之间"))? as i32;
+                None => None,
+            };
+            let persona_style_patch = match patch.get("persona_style") {
+                Some(value) => {
+                    let raw = value.as_str().ok_or_else(|| invalid("助手风格须为字符串"))?;
+                    Some(
+                        moss_voice::settings::validate_persona_style(raw)
+                            .map_err(|message| invalid(&message))?,
+                    )
                 }
-                if let Some(value) = patch.get("tts_speed") {
-                    let speed = value.as_f64().filter(|value| (0.5..=2.0).contains(value)).ok_or_else(|| invalid("本地合成语速须在 0.5 ~ 2.0 之间"))?;
-                    local.tts_speed = speed as f32;
+                None => None,
+            };
+            let persona_prompt_patch = match patch.get("persona_prompt") {
+                Some(value) => {
+                    let raw = value.as_str().ok_or_else(|| invalid("补充说明须为字符串"))?;
+                    Some(
+                        moss_voice::settings::normalize_persona_prompt(raw)
+                            .map_err(|message| invalid(&message))?,
+                    )
                 }
-                if let Some(value) = patch.get("mirror") {
+                None => None,
+            };
+            let screen_card_style_patch = match patch.get("screen_card_style") {
+                Some(value) => {
+                    let raw = value.as_str().ok_or_else(|| invalid("屏幕卡片画风须为字符串"))?;
+                    Some(
+                        moss_voice::settings::validate_screen_card_style(raw)
+                            .map_err(|message| invalid(&message))?,
+                    )
+                }
+                None => None,
+            };
+            let mut model_patches = Vec::new();
+            for (key, kind) in [
+                ("vad_model", ModelKind::Vad),
+                ("asr_model", ModelKind::Asr),
+                ("tts_model", ModelKind::Tts),
+            ] {
+                if let Some(value) = patch.get(key) {
+                    let id = value.as_str().filter(|id| local_models::spec_of(id, kind).is_some());
+                    model_patches.push((key, id.ok_or_else(|| invalid("选择的本地模型不存在"))?.to_owned()));
+                }
+            }
+            let tts_speaker_patch = match patch.get("tts_speaker") {
+                Some(value) => Some(
+                    value
+                        .as_i64()
+                        .filter(|value| (0..=999).contains(value))
+                        .ok_or_else(|| invalid("音色编号须在 0 ~ 999 之间"))? as i32,
+                ),
+                None => None,
+            };
+            let tts_speed_patch = match patch.get("tts_speed") {
+                Some(value) => Some(
+                    value
+                        .as_f64()
+                        .filter(|value| (0.5..=2.0).contains(value))
+                        .ok_or_else(|| invalid("本地合成语速须在 0.5 ~ 2.0 之间"))? as f32,
+                ),
+                None => None,
+            };
+            let mirror_patch: Option<Option<String>> = match patch.get("mirror") {
+                Some(value) => {
                     let mirror = value.as_str().map(str::trim).unwrap_or_default();
-                    local.mirror = if mirror.is_empty() {
-                        None
+                    if mirror.is_empty() {
+                        Some(None)
                     } else if (mirror.starts_with("https://") || mirror.starts_with("http://")) && !mirror.contains(char::is_whitespace) {
-                        Some(mirror.trim_end_matches('/').to_owned())
+                        Some(Some(mirror.trim_end_matches('/').to_owned()))
                     } else {
                         return Err(invalid("下载地址必须以 http:// 或 https:// 开头"));
-                    };
+                    }
                 }
-                moss_voice::settings::save_with_jev_feedback(&self.settings_file(), &settings, jev_feedback_patch)
-                    .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
-                let is_local_laya = moss_voice::settings::is_local_laya_model(&settings.builtin_local.jev_model);
+                None => None,
+            };
+            let (is_local_laya, laya_needed) = {
+                let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                let (is_local_laya, filter_on) = moss_voice::settings::update_voice_with_jev_feedback(
+                    &self.settings_file(),
+                    |settings| {
+                        let local = &mut settings.builtin_local;
+                        for (key, val) in &bool_patches {
+                            match *key {
+                                "asr" => local.asr = *val,
+                                "tts" => local.tts = *val,
+                                "vad" => local.vad = *val,
+                                "read_only_shortcuts" => local.read_only_shortcuts = *val,
+                                "asr_beam_search" => local.asr_beam_search = *val,
+                                "barge_in" => local.barge_in = *val,
+                                "job_done_announce" => local.job_done_announce = *val,
+                                "jev_filter_enabled" => local.jev_filter_enabled = *val,
+                                "jev_unfinished_hold" => local.jev_unfinished_hold = *val,
+                                "jev_fast_route" => local.jev_fast_route = *val,
+                                "jev_tool_prune" => local.jev_tool_prune = *val,
+                                "jev_memory_filter" => local.jev_memory_filter = *val,
+                                "asr_homophone_fix" => local.asr_homophone_fix = *val,
+                                "screen_preview_sync" => local.screen_preview_sync = *val,
+                                _ => {}
+                            }
+                        }
+                        if let Some(model) = &jev_model_patch {
+                            local.jev_model = model.clone();
+                        }
+                        if let Some(ms) = barge_in_ms_patch {
+                            local.barge_in_ms = ms;
+                        }
+                        if let Some(words) = &custom_hotwords_patch {
+                            local.custom_hotwords = words.clone();
+                        }
+                        if let Some(rules) = &custom_corrections_patch {
+                            local.custom_asr_corrections = rules.clone();
+                        }
+                        if let Some(style) = &persona_style_patch {
+                            local.persona_style = style.clone();
+                        }
+                        if let Some(prompt) = &persona_prompt_patch {
+                            local.persona_prompt = prompt.clone();
+                        }
+                        if let Some(card_style) = &screen_card_style_patch {
+                            local.screen_card_style = card_style.clone();
+                        }
+                        for (key, id) in &model_patches {
+                            match *key {
+                                "vad_model" => local.vad_model = id.clone(),
+                                "asr_model" => local.asr_model = id.clone(),
+                                "tts_model" => local.tts_model = id.clone(),
+                                _ => {}
+                            }
+                        }
+                        if let Some(speaker) = tts_speaker_patch {
+                            local.tts_speaker = speaker;
+                        }
+                        if let Some(speed) = tts_speed_patch {
+                            local.tts_speed = speed;
+                        }
+                        if let Some(mirror) = &mirror_patch {
+                            local.mirror = mirror.clone();
+                        }
+                        let is_local = moss_voice::settings::is_local_laya_model(&local.jev_model);
+                        Ok(((is_local, local.jev_filter_enabled), jev_feedback_patch))
+                    },
+                )
+                .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
                 let jev_feedback_on = moss_voice::settings::jev_feedback_enabled(&self.settings_file());
-                (is_local_laya, settings.builtin_local.jev_filter_enabled || jev_feedback_on)
+                (is_local_laya, filter_on || jev_feedback_on)
             };
             if is_local_laya && laya_needed {
                 if touched_jev {
@@ -1728,7 +2324,26 @@ mod imp {
             } else if !is_local_laya || !laya_needed {
                 self.stop_laya();
             }
-            let restarted = self.restart_if_running()?;
+            if let Some(card_style) = &screen_card_style_patch
+                && let Ok(guard) = self.server.lock()
+                && let Some(server) = guard.as_ref()
+            {
+                server.set_screen_card_style(moss_voice_server::ScreenCardStyle::from_setting(card_style));
+            }
+            let hot_only = patch.as_object().is_some_and(|obj| {
+                !obj.is_empty()
+                    && obj.keys().all(|k| {
+                        matches!(
+                            k.as_str(),
+                            "screen_card_style" | "debug_trace_enabled" | "clear_debug_traces"
+                        )
+                    })
+            });
+            let restarted = if hot_only {
+                false
+            } else {
+                self.restart_if_running()?
+            };
             let mut status = self.status();
             status["restarted"] = Value::Bool(restarted);
             Ok(status)
@@ -1862,18 +2477,16 @@ mod imp {
             }
             {
                 let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-                let mut latest = self.settings();
-                latest.builtin_models = plan.models;
+                let next_models = plan.models;
                 commit_secrets_then_settings(&db, &changes, || {
-                    moss_voice::settings::save(&self.settings_file(), &latest)
-                        .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
+                    moss_voice::settings::update_voice(&self.settings_file(), |latest| {
+                        latest.builtin_models = next_models.clone();
+                        Ok(())
+                    })
+                    .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
                 })?;
             }
-            let restarted = self.running();
-            if restarted {
-                self.stop();
-                self.start()?;
-            }
+            let restarted = self.restart_if_running()?;
             let mut status = self.status();
             status["restarted"] = Value::Bool(restarted);
             Ok(status)
@@ -2105,7 +2718,7 @@ mod imp {
                 return Ok(());
             }
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18090));
-            if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(120)).is_ok() {
+            if probe_laya_http(addr, std::time::Duration::from_millis(120)) {
                 return Ok(());
             }
             let (already_alive, start_generation) = {
@@ -2149,9 +2762,7 @@ mod imp {
                     .child
                     .as_mut()
                     .is_some_and(|c| matches!(c.try_wait(), Ok(None)));
-                if !alive_now
-                    && std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(120)).is_err()
-                {
+                if !alive_now && !probe_laya_http(addr, std::time::Duration::from_millis(120)) {
                     let mut cmd = std::process::Command::new(&py);
                     cmd.args(["-m", "laya.serve"])
                         .env("USE_TF", "0")
@@ -2180,13 +2791,14 @@ mod imp {
                     let child = cmd
                         .spawn()
                         .map_err(|e| format!("启动本地 Laya 服务失败：{e}"))?;
+                    runner.job = moss_voice::supervisor::JobHandle::for_child(&child);
                     runner.child = Some(child);
                 }
             }
             if wait_ready {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(28);
                 while std::time::Instant::now() < deadline {
-                    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)).is_ok() {
+                    if probe_laya_http(addr, std::time::Duration::from_millis(200)) {
                         return Ok(());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -2342,14 +2954,16 @@ mod imp {
             }
             let laya_action = {
                 let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-                let mut settings = self.settings();
+                let snapshot = self.settings();
                 let mut changes: Vec<(String, Option<String>)> = Vec::new();
+                let next_model: String;
+                let next_voice: bool;
                 let feedback_patch: Option<bool>;
                 let action: LayaAction;
                 if clear {
                     changes.push(("jev_api_key".into(), None));
-                    settings.builtin_local.jev_filter_enabled = false;
-                    settings.builtin_local.jev_model = moss_voice::settings::default_jev_model();
+                    next_voice = false;
+                    next_model = moss_voice::settings::default_jev_model();
                     feedback_patch = Some(false);
                     action = LayaAction::Stop;
                 } else {
@@ -2361,7 +2975,7 @@ mod imp {
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|m| !m.is_empty())
-                        .unwrap_or(settings.builtin_local.jev_model.as_str())
+                        .unwrap_or(snapshot.builtin_local.jev_model.as_str())
                         .to_owned();
                     let model = moss_voice::settings::validate_jev_model(&model_raw)
                         .map_err(|msg| invalid(&msg))?;
@@ -2371,9 +2985,9 @@ mod imp {
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .unwrap_or("");
-                    let next_voice = match obj.get("voice_enabled") {
+                    next_voice = match obj.get("voice_enabled") {
                         Some(v) => v.as_bool().ok_or_else(|| invalid("语音筛选开关取值不正确"))?,
-                        None => settings.builtin_local.jev_filter_enabled,
+                        None => snapshot.builtin_local.jev_filter_enabled,
                     };
                     feedback_patch = match obj.get("feedback_enabled") {
                         Some(v) => Some(v.as_bool().ok_or_else(|| invalid("加工反馈开关取值不正确"))?),
@@ -2402,17 +3016,20 @@ mod imp {
                             changes.push(("jev_api_key".into(), Some(resolved_key)));
                         }
                     }
-                    settings.builtin_local.jev_model = model;
-                    settings.builtin_local.jev_filter_enabled = next_voice;
-                    action = if is_local && (settings.builtin_local.jev_filter_enabled || effective_feedback) {
+                    next_model = model;
+                    action = if is_local && (next_voice || effective_feedback) {
                         LayaAction::Start
                     } else {
                         LayaAction::Stop
                     };
                 }
                 commit_secrets_then_settings(&db, &changes, || {
-                    moss_voice::settings::save_with_jev_feedback(&self.settings_file(), &settings, feedback_patch)
-                        .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
+                    moss_voice::settings::update_voice_with_jev_feedback(&self.settings_file(), |settings| {
+                        settings.builtin_local.jev_model = next_model.clone();
+                        settings.builtin_local.jev_filter_enabled = next_voice;
+                        Ok(((), feedback_patch))
+                    })
+                    .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
                 })?;
                 action
             };
@@ -2430,16 +3047,119 @@ mod imp {
             Ok(status)
         }
         /// 2026-11-02：桌面端直接向一台已连接设备发请求（`refresh_info` / `reboot`），不经过模型。
-        pub fn device_request(&self, device_id: &str, request: &str) -> Result<Value, CenterError> {
+        pub fn device_request(
+            &self,
+            device_id: &str,
+            request: &str,
+            value: Option<&Value>,
+        ) -> Result<Value, CenterError> {
             let label = request.trim();
-            let request = match label {
+            let invalid = |msg: &str| CenterError::new("voice_device_invalid", 400, msg);
+            if label == "push_preview" {
+                let (bytes, summary, ruler) = extract_preview_bundle_for_host(&self.host, None)
+                    .map_err(|msg| CenterError::new("voice_preview_missing", 404, msg))?;
+                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = server.as_ref().ok_or_else(|| {
+                    CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                })?;
+                server
+                    .push_preview_adaptive_with_ruler(
+                        bytes.as_deref(),
+                        &summary,
+                        ruler.as_deref(),
+                        Some(device_id),
+                    )
+                    .map_err(|error| CenterError::new("voice_device_offline", 409, error))?;
+                return Ok(serde_json::json!({ "requested": label, "summary": summary }));
+            }
+            if label == "push_bot_pose" {
+                let raw_pose = value
+                    .and_then(|v| v.get("pose").or(Some(v)))
+                    .and_then(Value::as_str)
+                    .unwrap_or("idle");
+                let pose = moss_voice_server::BotPose::from_slug(raw_pose)
+                    .ok_or_else(|| invalid("小机器人动作只能是 idle、engrave、approval、music、celebrate 或 halted"))?;
+                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = server.as_ref().ok_or_else(|| {
+                    CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                })?;
+                server
+                    .push_goggle_bot_pose(pose, Some(device_id))
+                    .map_err(|error| CenterError::new("voice_device_offline", 409, error))?;
+                return Ok(serde_json::json!({ "requested": label, "pose": pose.slug() }));
+            }
+            let parsed = match label {
                 "refresh_info" => moss_voice_server::DeviceRequest::RefreshInfo,
                 "reboot" => moss_voice_server::DeviceRequest::Reboot,
+                "set_volume" => {
+                    let vol = value
+                        .and_then(|v| v.get("volume").or(Some(v)))
+                        .and_then(Value::as_u64)
+                        .filter(|v| *v <= 100)
+                        .ok_or_else(|| invalid("音量须为 0 ~ 100 的整数"))? as u8;
+                    moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                        s.builtin_device_prefs
+                            .entry(device_id.to_owned())
+                            .or_default()
+                            .volume = Some(vol);
+                        Ok(())
+                    })
+                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+                    moss_voice_server::DeviceRequest::SetVolume(vol)
+                }
+                "set_brightness" => {
+                    let bri = value
+                        .and_then(|v| v.get("brightness").or(Some(v)))
+                        .and_then(Value::as_u64)
+                        .filter(|v| *v <= 100)
+                        .ok_or_else(|| invalid("屏幕亮度须为 0 ~ 100 的整数"))? as u8;
+                    moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                        s.builtin_device_prefs
+                            .entry(device_id.to_owned())
+                            .or_default()
+                            .brightness = Some(bri);
+                        Ok(())
+                    })
+                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+                    moss_voice_server::DeviceRequest::SetBrightness(bri)
+                }
+                "set_theme" => {
+                    let raw_theme = value
+                        .and_then(|v| v.get("theme").or(Some(v)))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| invalid("屏幕主题须为 light 或 dark"))?;
+                    let theme = moss_voice::settings::validate_device_theme(raw_theme)
+                        .map_err(|msg| invalid(&msg))?;
+                    moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                        s.builtin_device_prefs
+                            .entry(device_id.to_owned())
+                            .or_default()
+                            .theme = Some(theme.clone());
+                        Ok(())
+                    })
+                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+                    moss_voice_server::DeviceRequest::SetTheme(theme)
+                }
+                "set_talk_mode" => {
+                    let raw_mode = value
+                        .and_then(|v| v.get("mode").or(Some(v)))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| invalid("按键模式须为 click_to_talk 或 press_to_talk"))?;
+                    let mode = moss_voice::settings::validate_talk_mode(raw_mode)
+                        .map_err(|msg| invalid(&msg))?;
+                    moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                        s.builtin_device_prefs
+                            .entry(device_id.to_owned())
+                            .or_default()
+                            .talk_mode = Some(mode.clone());
+                        Ok(())
+                    })
+                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+                    moss_voice_server::DeviceRequest::SetTalkMode(mode)
+                }
                 _ => {
-                    return Err(CenterError::new(
-                        "voice_device_invalid",
-                        400,
-                        "设备请求只能是 refresh_info 或 reboot",
+                    return Err(invalid(
+                        "设备请求只能是 refresh_info、reboot、set_volume、set_brightness、set_theme、set_talk_mode、push_preview 或 push_bot_pose",
                     ));
                 }
             };
@@ -2448,7 +3168,7 @@ mod imp {
                 CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
             })?;
             server
-                .device_request(device_id, request)
+                .device_request(device_id, parsed)
                 .map_err(|error| CenterError::new("voice_device_offline", 409, error))?;
             Ok(serde_json::json!({ "requested": label }))
         }
@@ -2469,7 +3189,31 @@ mod imp {
 
         /// NV19 private-window management (`voice_context_manage`).
         pub fn context_manage(&self, input: &Value) -> Result<Value, CenterError> {
-            self.context.manage(input, || self.chat_llm())
+            let out = self.context.manage(input, || self.chat_llm())?;
+            if input.get("action").and_then(Value::as_str) == Some("set_options")
+                && input.get("sync_legacy_memory").and_then(Value::as_bool) == Some(true)
+                && let Some(enabled) = out.get("retrieval").and_then(Value::as_bool)
+            {
+                let _ = self.memory_enable(enabled);
+                if !enabled
+                    && let Ok(db) = self.host.db.lock()
+                    && let Ok(devices) = db.voice_devices()
+                {
+                    for d in devices.into_iter().filter(|d| d.is_allowed()) {
+                        let _ = self.memory.device_changed(&d.device_id, || Ok::<_, String>(()));
+                    }
+                }
+            }
+            if input.get("action").and_then(Value::as_str) == Some("clear_all")
+                && let Ok(list) = self.memory.list()
+            {
+                for item in list {
+                    if !item.summary.is_empty() {
+                        let _ = self.memory.edit(&item.device_id, item.revision, "");
+                    }
+                }
+            }
+            Ok(out)
         }
 
         pub fn context_add_folder(&self, path: &std::path::Path) -> Result<Value, CenterError> {
@@ -2505,12 +3249,23 @@ mod imp {
             let invalid=|message:&str|CenterError::new("agent_config_invalid",400,message);
             let raw:BuiltinAgents=serde_json::from_value(input.clone())
                 .map_err(|_|invalid("Agent 配置格式无效"))?;
-            let mut settings=self.settings();
-            let sensitive=[self.host.runtime_root.path.clone()];
-            let config=normalize_agent_save(raw,&settings.builtin_agents,&sensitive,detect_cli)?;
-            settings.builtin_agents=config;
-            moss_voice::settings::save(&self.settings_file(),&settings)
-                .map_err(|_|CenterError::new("agent_save_failed",500,"Agent 配置保存失败"))?;
+            let sensitive = [self.host.runtime_root.path.clone()];
+            let mut validation_err: Option<CenterError> = None;
+            moss_voice::settings::update_voice(&self.settings_file(), |settings| {
+                match normalize_agent_save(raw, &settings.builtin_agents, &sensitive, detect_cli) {
+                    Ok(config) => {
+                        settings.builtin_agents = config;
+                        Ok(())
+                    }
+                    Err(err) => {
+                        validation_err = Some(err);
+                        Err(String::new())
+                    }
+                }
+            })
+            .map_err(|_| {
+                validation_err.unwrap_or_else(|| CenterError::new("agent_save_failed", 500, "Agent 配置保存失败"))
+            })?;
             Ok(self.agent_status())
         }
 
@@ -2549,15 +3304,15 @@ mod imp {
                     std::path::Path::new(&config.directory)
                 ).map_err(|_|invalid("音乐目录无法读取、路径不安全或超过索引限制"))?.len()
             } else {0};
-            let mut settings=self.settings();
-            settings.builtin_music=config;
-            moss_voice::settings::save(&self.settings_file(),&settings)
-                .map_err(|_|CenterError::new("music_save_failed",500,"音乐配置写入失败"))?;
+            moss_voice::settings::update_voice(&self.settings_file(), |settings| {
+                settings.builtin_music = config;
+                Ok(())
+            })
+            .map_err(|_| CenterError::new("music_save_failed", 500, "音乐配置写入失败"))?;
             if let Ok(mut slot) = self.music_warning.lock() {
                 *slot = None;
             }
-            let restarted=self.running();
-            if restarted { self.stop(); self.start()?; }
+            let restarted = self.restart_if_running()?;
             let mut result=self.music_status();
             result["restarted"]=Value::Bool(restarted);
             result["track_count"]=serde_json::json!(track_count);
@@ -2964,11 +3719,12 @@ mod imp {
             let has_key=match &new_key{None=>existing,Some(Some(_))=>true,Some(None)=>false};
             if next.enabled&&!next.use_dialog_llm&&!has_key{return Err(invalid("启用视觉前必须保存对应模型密钥"));}
             let changes:Vec<(String,Option<String>)>=new_key.into_iter().map(|key|("voice.vision.main".to_owned(),key)).collect();
-            let mut settings=self.settings();
-            settings.builtin_vision=next;
-            commit_secrets_then_settings(&db,&changes,||{
-                moss_voice::settings::save(&self.settings_file(),&settings)
-                    .map_err(|_|CenterError::new("vision_save_failed",500,"视觉配置保存失败"))
+            commit_secrets_then_settings(&db, &changes, || {
+                moss_voice::settings::update_voice(&self.settings_file(), |settings| {
+                    settings.builtin_vision = next.clone();
+                    Ok(())
+                })
+                .map_err(|_| CenterError::new("vision_save_failed", 500, "视觉配置保存失败"))
             })?;
             drop(db);
             Ok(self.vision_status())
@@ -3097,11 +3853,12 @@ mod imp {
             }
 
             // 持锁到提交完成：校验时看到的密钥状态不会被并发保存改掉
-            let mut settings=self.settings();
-            settings.builtin_plugins=config;
-            commit_secrets_then_settings(&db,&operations,||{
-                moss_voice::settings::save(&self.settings_file(),&settings)
-                    .map_err(|_|CenterError::new("plugin_settings_failed",500,"插件配置保存失败"))
+            commit_secrets_then_settings(&db, &operations, || {
+                moss_voice::settings::update_voice(&self.settings_file(), |settings| {
+                    settings.builtin_plugins = config.clone();
+                    Ok(())
+                })
+                .map_err(|_| CenterError::new("plugin_settings_failed", 500, "插件配置保存失败"))
             })?;
             drop(db);
             Ok(self.plugins_status())
@@ -3115,11 +3872,14 @@ mod imp {
             serde_json::to_value(updated.ok_or_else(|| CenterError::new("memory_conflict", 409, "记忆已更新，请刷新后重试"))?).map_err(|_| internal("保存结果序列化失败"))
         }
         pub fn memory_enable(&self, enabled: bool) -> Result<Value, CenterError> {
-            self.memory.configure(enabled, || {
-                let mut settings = self.settings();
-                settings.builtin_memory_enabled = enabled;
-                moss_voice::settings::save(&self.settings_file(), &settings)
-            }).map_err(|e| CenterError::new("memory_settings_failed", 500, e))?;
+            self.memory
+                .configure(enabled, || {
+                    moss_voice::settings::update_voice(&self.settings_file(), |settings| {
+                        settings.builtin_memory_enabled = enabled;
+                        Ok(())
+                    })
+                })
+                .map_err(|e| CenterError::new("memory_settings_failed", 500, e))?;
             Ok(serde_json::json!({"enabled": enabled}))
         }
 
@@ -3292,8 +4052,11 @@ mod imp {
                     if enabled{self.prepare_speaker_helper()?;}
                     self.personal.directory_changed();
                     self.context.speakers_invalidated();
-                    let mut settings=self.settings();settings.builtin_person_memory_enabled=enabled;
-                    moss_voice::settings::save(&self.settings_file(),&settings).map_err(internal)?;
+                    moss_voice::settings::update_voice(&self.settings_file(), |settings| {
+                        settings.builtin_person_memory_enabled = enabled;
+                        Ok(())
+                    })
+                    .map_err(internal)?;
                     self.restart_if_running()?;
                 },_=>{}
             }
@@ -3759,6 +4522,53 @@ mod imp {
             assert_eq!(turned_off["jev"]["feedback_enabled"], false);
             assert!(builtin.laya.lock().unwrap().generation > gen_before);
         }
+
+        #[test]
+        fn probe_laya_http_rejects_non_http_tcp_listener_and_accepts_http() {
+            use std::io::{Read, Write};
+            let non_http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let non_http_addr = non_http.local_addr().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = non_http.accept() {
+                    let mut buf = [0u8; 128];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(b"NOT_HTTP_BANNER\r\n");
+                }
+            });
+            assert!(!probe_laya_http(non_http_addr, std::time::Duration::from_millis(200)));
+
+            for bad_http in [
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found".as_slice(),
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\n\r\nerror".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\n<html></html>".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{\"status\":\"error\"}".as_slice(),
+            ] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
+                let reply = bad_http.to_vec();
+                std::thread::spawn(move || {
+                    if let Ok((mut stream, _)) = listener.accept() {
+                        let mut buf = [0u8; 256];
+                        let _ = stream.read(&mut buf);
+                        let _ = stream.write_all(&reply);
+                    }
+                });
+                assert!(!probe_laya_http(addr, std::time::Duration::from_millis(200)));
+            }
+
+            let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let http_addr = http.local_addr().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = http.accept() {
+                    let mut buf = [0u8; 256];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}",
+                    );
+                }
+            });
+            assert!(probe_laya_http(http_addr, std::time::Duration::from_millis(200)));
+        }
     }
 
     /// 测试豆包识别或合成（NV7）：识别送 1 秒低音量正弦音，合成一句短话。结果与错误都不含密钥。
@@ -3884,13 +4694,17 @@ pub async fn voice_device_request(
     window: tauri::WebviewWindow,
     device_id: String,
     request: String,
+    value: Option<Value>,
 ) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result = imp::run(app, move |builtin| builtin.device_request(&device_id, &request)).await;
+    let result = imp::run(app, move |builtin| {
+        builtin.device_request(&device_id, &request, value.as_ref())
+    })
+    .await;
     #[cfg(mobile)]
-    let result = desktop_only((app, window, device_id, request));
+    let result = desktop_only((app, window, device_id, request, value));
     result
 }
 

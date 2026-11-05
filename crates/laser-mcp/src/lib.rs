@@ -235,9 +235,16 @@ pub fn tools_list_with(developer_mode: bool, backend: Option<&dyn HostBackend>) 
 }
 
 /// 用户关闭的工具（NV8）：不执行、不触达后端。停止类工具不受开关影响。
-fn disabled_gate(name: &str, backend: Option<&dyn HostBackend>) -> Option<laser_contracts::ToolCallResult> {
+fn disabled_gate(
+    name: &str,
+    arguments: &serde_json::Value,
+    backend: Option<&dyn HostBackend>,
+) -> Option<laser_contracts::ToolCallResult> {
     let backend = backend?;
-    if !tool_can_be_disabled(name) || !backend.tool_disabled(name) {
+    if !tool_can_be_disabled(name)
+        || laser_contracts::tool_risk(name, arguments) == Some(laser_contracts::RiskLevel::R2)
+        || !backend.tool_disabled(name)
+    {
         return None;
     }
     Some(laser_contracts::ToolCallResult::with_detail(
@@ -323,7 +330,7 @@ pub fn dispatch_tool_call_with(
     backend: Option<&dyn HostBackend>,
 ) -> laser_contracts::ToolCallResult {
     use laser_contracts::ToolCallOutcome;
-    let gate = disabled_gate(name, backend).or_else(|| strict_bridge_gate(name, arguments, backend));
+    let gate = disabled_gate(name, arguments, backend).or_else(|| strict_bridge_gate(name, arguments, backend));
     let (result, outcome) = match gate {
         Some(denied) => (denied, ToolCallOutcome::Denied),
         None => {
@@ -361,10 +368,69 @@ fn dispatch_allowed(
                 laser_tools::execute_laser_safe_action(&args)
             }
         }
-        "recommend_laser_params_tool" => match serde_json::from_value(arguments.clone()) {
-            Ok(args) => laser_tools::execute_recommend_laser_params(&args),
-            Err(e) => ToolCallResult::err(format!("参数校验失败: {e}")),
-        },
+        "recommend_laser_params_tool" => {
+            let args = match serde_json::from_value(arguments.clone()) {
+                Ok(args) => args,
+                Err(e) => return ToolCallResult::err(format!("参数校验失败: {e}")),
+            };
+            let Some(backend) = backend else {
+                return laser_tools::execute_recommend_laser_params(&args);
+            };
+            let material = arg_str(arguments, "material").unwrap_or("");
+            let thickness = arguments
+                .get("thickness_mm")
+                .and_then(|v| {
+                    v.as_f64()
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+                })
+                .unwrap_or(0.0);
+            if material.is_empty() || !thickness.is_finite() || thickness <= 0.0 {
+                return laser_tools::execute_recommend_laser_params(&args);
+            }
+            let laser_mode = arg_str(arguments, "laser_mode").unwrap_or("engrave");
+            let mut route = format!(
+                "/api/ui/material-recommendation?material={}&thickness_mm={thickness}&laser_mode={}",
+                percent_encode(material),
+                percent_encode(laser_mode),
+            );
+            if let Some(engraving) = arg_str(arguments, "engraving_mode") {
+                route.push_str(&format!("&engraving_mode={}", percent_encode(engraving)));
+            } else if !laser_mode.eq_ignore_ascii_case("cut") {
+                route.push_str("&engraving_mode=raster");
+            }
+            if let Some(power_scale) = arguments
+                .get("power_scale")
+                .and_then(|v| {
+                    v.as_f64()
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+                })
+                .filter(|v| v.is_finite() && *v > 0.0)
+            {
+                route.push_str(&format!("&power_scale={power_scale}"));
+            }
+            match backend.request("GET", &route, &serde_json::Value::Null) {
+                Ok((status, body)) => {
+                    let ok = body.get("success").and_then(|v| v.as_bool()).unwrap_or(status < 400);
+                    if ok {
+                        let res = &body["result"];
+                        let mat = res.get("material").and_then(|v| v.as_str()).unwrap_or(material);
+                        let matched = res.get("matched_thickness_mm").and_then(|v| v.as_f64()).unwrap_or(thickness);
+                        let mode = res.get("laser_mode").and_then(|v| v.as_str()).unwrap_or(laser_mode);
+                        let power = res.get("laser_max_power").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let feed = res.get("feed_rate").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let passes = res.get("passes").and_then(|v| v.as_i64()).unwrap_or(1);
+                        let summary = format!(
+                            "推荐参数：{mat} {matched}mm ({mode}) -> 最大功率 S{power}，速度 F{feed} mm/min，次数 {passes}"
+                        );
+                        let detail = serde_json::to_string_pretty(&body).unwrap_or_default();
+                        ToolCallResult::with_detail(true, summary, detail)
+                    } else {
+                        backend_result(name, Ok((status, body)))
+                    }
+                }
+                Err(error) => backend_result(name, Err(error)),
+            }
+        }
         "command_execution_tool" => match serde_json::from_value(arguments.clone()) {
             Ok(args) => laser_tools::execute_command(&args, developer_mode),
             Err(e) => ToolCallResult::err(format!("参数校验失败: {e}")),
@@ -394,12 +460,12 @@ fn dispatch_allowed(
             let action = arg_str(arguments, "action").unwrap_or("status");
             let workflow_id = arg_str(arguments, "workflow_id");
             let confirmed = arg_bool(arguments, "confirmed");
-            if action == "confirm_send" {
+            if matches!(action, "confirm_send" | "send" | "resume") {
                 if !confirmed {
                     return ToolCallResult::err("发送动作未确认 (confirmed=false)");
                 }
                 if workflow_id.is_none() {
-                    return ToolCallResult::err("confirm_send 缺少 workflow_id");
+                    return ToolCallResult::err(format!("{action} 缺少 workflow_id"));
                 }
             }
             let Some(backend) = backend else {
@@ -412,7 +478,11 @@ fn dispatch_allowed(
             } else {
                 "/api/workflow"
             };
-            let body = if action == "confirm_send" { with_connection_fields(arguments, body) } else { body };
+            let body = if matches!(action, "confirm_send" | "send" | "resume") {
+                with_connection_fields(arguments, body)
+            } else {
+                body
+            };
             backend_result(name, backend.request("POST", route, &serde_json::Value::Object(body)))
         }
         "run_calibration_grid_tool" => {
@@ -454,17 +524,29 @@ fn dispatch_allowed(
                     }
                     let laser_mode = arg_str(arguments, "laser_mode").unwrap_or("engrave");
                     let engraving = arg_str(arguments, "engraving_mode").unwrap_or("raster");
-                    let route = format!(
-                        "/api/ui/material-recommendation?material={}&thickness_mm={thickness}&laser_mode={laser_mode}&engraving_mode={engraving}",
-                        percent_encode(material)
+                    let mut route = format!(
+                        "/api/ui/material-recommendation?material={}&thickness_mm={thickness}&laser_mode={}&engraving_mode={}",
+                        percent_encode(material),
+                        percent_encode(laser_mode),
+                        percent_encode(engraving),
                     );
+                    if let Some(power_scale) = arguments
+                        .get("power_scale")
+                        .and_then(|v| {
+                            v.as_f64()
+                                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+                        })
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                    {
+                        route.push_str(&format!("&power_scale={power_scale}"));
+                    }
                     backend_result(name, backend.request("GET", &route, &serde_json::Value::Null))
                 }
                 "save" | "delete" | "import" | "export" => {
                     let mut body = arguments.as_object().cloned().unwrap_or_default();
                     body.insert("action".into(), serde_json::Value::String(action.clone()));
-                    if action == "delete" {
-                        body.insert("confirmed".into(), serde_json::Value::Bool(true));
+                    if arguments.get("confirmed").is_some() {
+                        body.insert("confirmed".into(), serde_json::Value::Bool(arg_bool(arguments, "confirmed")));
                     }
                     for (from, to) in [("aliases_json", "aliases"), ("params_json", "library_json")] {
                         if let Some(raw) = arg_str(arguments, from) {
@@ -1463,5 +1545,113 @@ mod tests {
         for endpoint in ["wss://api.example.test/mcp/?token=plain-token", "wss://api.example.test/mcp/", "wss://x/?token=a.%%%.c"] {
             assert!(endpoint_identity(endpoint).is_none(), "{endpoint}");
         }
+    }
+
+    #[test]
+    fn disabled_gate_never_blocks_r2_workflow_cancel() {
+        let backend = SwitchBackend {
+            inner: FakeBackend::new(vec![(
+                200,
+                serde_json::json!({"success": true, "result": {"workflow_id": "wf-9", "status": "cancelled"}}),
+            )]),
+            disabled: vec!["laser_workflow_tool"],
+        };
+        // 非停止类调用被关闭开关拦截
+        let blocked = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "status", "workflow_id": "wf-9"}),
+            false,
+            Some(&backend),
+        );
+        assert!(!blocked.success);
+        assert!(blocked.detail.as_deref().unwrap_or("").contains("tool_disabled"));
+        assert!(backend.inner.calls().is_empty());
+
+        // R2 取消动作即使 laser_workflow_tool 被关闭也照常放行
+        let cancel = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "cancel", "workflow_id": "wf-9"}),
+            false,
+            Some(&backend),
+        );
+        assert!(cancel.success, "{cancel:?}");
+        let calls = backend.inner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "/api/workflow");
+        assert_eq!(calls[0].2["action"], "cancel");
+    }
+
+    #[test]
+    fn recommend_forwards_to_backend_and_resume_delete_enforce_confirmed() {
+        let backend = FakeBackend::new(vec![
+            (
+                200,
+                serde_json::json!({
+                    "success": true,
+                    "result": {
+                        "material": "特制亚克力",
+                        "thickness_mm": 4.0,
+                        "matched_thickness_mm": 4.0,
+                        "laser_mode": "cut",
+                        "laser_max_power": 230,
+                        "feed_rate": 240,
+                        "passes": 2
+                    }
+                }),
+            ),
+            (
+                200,
+                serde_json::json!({"success": true, "result": {"workflow_id": "wf-2", "status": "sending"}}),
+            ),
+            (
+                400,
+                serde_json::json!({"success": false, "result": "删除当前参数需要 confirmed=true"}),
+            ),
+        ]);
+        let rec = dispatch_tool_call_with(
+            "recommend_laser_params_tool",
+            &serde_json::json!({
+                "material": "特制亚克力",
+                "thickness_mm": 4.0,
+                "laser_mode": "cut",
+                "power_scale": 255.0
+            }),
+            false,
+            Some(&backend),
+        );
+        assert!(rec.success, "{rec:?}");
+        assert!(rec.result.contains("推荐参数") && rec.result.contains("特制亚克力"), "{rec:?}");
+
+        // 未确认 resume 被拦截，不触达后端
+        let unconfirmed_resume = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "resume", "workflow_id": "wf-2"}),
+            false,
+            Some(&backend),
+        );
+        assert!(!unconfirmed_resume.success);
+        assert_eq!(backend.calls().len(), 1);
+
+        // 确认后的 resume 携带连接参数转发
+        let ok_resume = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "resume", "workflow_id": "wf-2", "confirmed": true, "host": "10.0.0.8"}),
+            false,
+            Some(&backend),
+        );
+        assert!(ok_resume.success, "{ok_resume:?}");
+
+        // delete 未传 confirmed 时不得自动注入 confirmed=true
+        let _ = dispatch_tool_call_with(
+            "material_params_tool",
+            &serde_json::json!({"action": "delete", "material": "特制亚克力"}),
+            false,
+            Some(&backend),
+        );
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].1.contains("power_scale=255"));
+        assert_eq!(calls[1].2["network_host"], "10.0.0.8");
+        assert!(calls[2].2.get("confirmed").is_none());
     }
 }

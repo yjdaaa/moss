@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { CATEGORY_SCOPES, NEEDS_DEVICE, experienceDevices, linesToList, listToLines, rowBadge, scopeLabel, scopeOptions, skipReasonText } from "../src/voiceContextState.js";
 
 test("NV19 每类记忆的范围与 Rust 契约一致", () => {
+  assert.deepEqual(CATEGORY_SCOPES.preference, ["device", "person"]);
   assert.deepEqual(CATEGORY_SCOPES.task_context, ["project"]);
   assert.deepEqual(CATEGORY_SCOPES.troubleshooting_experience, ["device"]);
   assert.ok(NEEDS_DEVICE.has("device_fact") && !NEEDS_DEVICE.has("preference"));
@@ -17,11 +18,12 @@ test("NV19 状态胶囊：作废、过期优先于确认", () => {
 });
 
 test("NV19 范围、设备与表单转换", () => {
-  const status = { devices: [{ id: "aa", name: "客厅小智", model: "M", firmware: "1" }, { id: "bb", name: "", model: "", firmware: "" }], project: { id: "p-1", name: "杯垫" } };
-  assert.deepEqual(scopeOptions(status), [{ kind: "device", id: "aa" }, { kind: "device", id: "bb" }, { kind: "project", id: "p-1" }]);
+  const status = { devices: [{ id: "aa", name: "客厅小智", model: "M", firmware: "1" }, { id: "bb", name: "", model: "", firmware: "" }], persons: [{ id: "sp-1", name: "小明" }], project: { id: "p-1", name: "杯垫" } };
+  assert.deepEqual(scopeOptions(status), [{ kind: "device", id: "aa" }, { kind: "device", id: "bb" }, { kind: "person", id: "sp-1" }, { kind: "project", id: "p-1" }]);
   assert.deepEqual(scopeOptions({ devices: [] }), []);
   assert.equal(scopeLabel({ kind: "device", id: "aa" }, status), "设备：客厅小智");
   assert.equal(scopeLabel({ kind: "device", id: "bb" }, status), "设备：bb");
+  assert.equal(scopeLabel({ kind: "person", id: "sp-1" }, status), "个人：小明");
   assert.equal(scopeLabel({ kind: "project", id: "p-1" }, status), "项目：杯垫");
   assert.deepEqual(experienceDevices(status).map((d) => d.id), ["aa"]);
   assert.deepEqual(linesToList(" a \r\n\n b\n"), ["a", "b"]);

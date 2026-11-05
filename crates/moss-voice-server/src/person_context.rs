@@ -255,25 +255,61 @@ pub struct PersonContext {
     workers: Arc<tokio::sync::Semaphore>,
     identify_workers: Arc<tokio::sync::Semaphore>,
 }
+enum IdentityState {
+    Denied,
+    SkippedShortDuration,
+    Attempted(tokio::task::JoinHandle<Option<PersonScope>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityOutcome {
+    Denied,
+    SkippedShortDuration,
+    Resolved(Option<PersonScope>),
+}
+
 pub struct IdentityTask {
-    task: Option<tokio::task::JoinHandle<Option<PersonScope>>>,
+    state: IdentityState,
     started: tokio::time::Instant,
 }
 impl Drop for IdentityTask {
     fn drop(&mut self) {
-        if let Some(task) = &self.task {
+        if let IdentityState::Attempted(task) = &self.state {
             task.abort();
         }
     }
 }
 impl IdentityTask {
-    pub async fn finish(mut self) -> Option<PersonScope> {
-        let task = self.task.as_mut()?;
-        tokio::time::timeout_at(self.started + Duration::from_millis(1500), task)
-            .await
-            .ok()?
-            .ok()
-            .flatten()
+    pub fn is_skipped_short_duration(&self) -> bool {
+        matches!(self.state, IdentityState::SkippedShortDuration)
+    }
+
+    pub async fn finish_outcome(mut self) -> IdentityOutcome {
+        match &mut self.state {
+            IdentityState::Denied => IdentityOutcome::Denied,
+            IdentityState::SkippedShortDuration => IdentityOutcome::SkippedShortDuration,
+            IdentityState::Attempted(task) => {
+                match tokio::time::timeout_at(self.started + Duration::from_millis(1500), task)
+                    .await
+                {
+                    Ok(joined) => {
+                        self.state = IdentityState::Denied;
+                        IdentityOutcome::Resolved(joined.ok().flatten())
+                    }
+                    Err(_) => {
+                        // 超时时保留 IdentityState::Attempted，由 Drop 立即调用 task.abort() 释放并发槽位
+                        IdentityOutcome::Resolved(None)
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn finish(self) -> Option<PersonScope> {
+        match self.finish_outcome().await {
+            IdentityOutcome::Resolved(scope) => scope,
+            IdentityOutcome::Denied | IdentityOutcome::SkippedShortDuration => None,
+        }
     }
 }
 impl PersonContext {
@@ -317,38 +353,46 @@ impl PersonContext {
     /// No queue for recognition, no await on the recording/stop path.
     pub fn start(self: &Arc<Self>, context: &ToolContext, pcm: &[i16], rate: u32) -> IdentityTask {
         let started = tokio::time::Instant::now();
-        if !self.resolver.permitted(context)
-            || ![16000, 24000, 48000].contains(&rate)
-            || pcm.len() < (rate as usize) * 2
-            || pcm.len() > (rate as usize) * 10
-        {
+        if !self.resolver.permitted(context) || ![16000, 24000, 48000].contains(&rate) {
             return IdentityTask {
-                task: None,
+                state: IdentityState::Denied,
+                started,
+            };
+        }
+        if pcm.len() > (rate as usize) * 10 {
+            return IdentityTask {
+                state: IdentityState::Denied,
+                started,
+            };
+        }
+        if pcm.len() < (rate as usize) * 2 {
+            return IdentityTask {
+                state: IdentityState::SkippedShortDuration,
                 started,
             };
         }
         let Ok(worker) = self.identify_workers.clone().try_acquire_owned() else {
             return IdentityTask {
-                task: None,
+                state: IdentityState::Denied,
                 started,
             };
         };
         let (generation, epoch, grant) = {
             let Ok(mut state) = self.state.lock() else {
                 return IdentityTask {
-                    task: None,
+                    state: IdentityState::Denied,
                     started,
                 };
             };
             let Some(grant) = self.resolver.device_generation(&context.device_id) else {
                 return IdentityTask {
-                    task: None,
+                    state: IdentityState::Denied,
                     started,
                 };
             };
             if !state.identifying.insert(context.device_id.clone()) {
                 return IdentityTask {
-                    task: None,
+                    state: IdentityState::Denied,
                     started,
                 };
             }
@@ -399,7 +443,7 @@ impl PersonContext {
             this.permitted(&context, Some(&scope)).then_some(scope)
         });
         IdentityTask {
-            task: Some(task),
+            state: IdentityState::Attempted(task),
             started,
         }
     }

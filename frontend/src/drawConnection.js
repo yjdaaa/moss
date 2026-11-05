@@ -46,3 +46,12 @@ export function drawTargetLabel(form) {
 export function drawTargetMissingText(form) {
   return isSerial(form) ? "请先选择串口" : "请先填写设备 host/IP";
 }
+
+/** 走边框响应（按 client.js `{ status, ok, data }` 契约）转界面状态文案。 */
+export function formatFramingStatus(res, width, height, framingLight) {
+  if (res?.ok && res?.data?.success) {
+    return `走边框完成 (${width.toFixed(1)} x ${height.toFixed(1)} mm${framingLight ? "，弱光" : "，未出光"})`;
+  }
+  const errMsg = typeof res?.data?.result === "string" && res.data.result ? res.data.result : "未知错误";
+  return `走边框未完成：${errMsg}`;
+}

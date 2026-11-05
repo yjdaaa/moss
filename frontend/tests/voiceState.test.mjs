@@ -41,6 +41,8 @@ import {
   approvalHistoryStatus,
   canSaveSection,
   deviceView,
+  builtinDeviceControlsView,
+  parseAsrCorrectionLine,
   emptyForm,
   finalUrl,
   isSectionBlank,
@@ -254,6 +256,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.deepEqual(form, {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: "",
+    asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_prompt: "", screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: "400",
     tts_speaker: "3", tts_speed: "1.2", mirror: "",
@@ -265,6 +268,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.deepEqual(localSettingsPayload({ ...form, mirror: " https://m.test/x " }), {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: [],
+    asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_prompt: "", screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: 400,
     tts_speaker: 3, tts_speed: 1.2, mirror: "https://m.test/x",
@@ -934,7 +938,7 @@ test("顶部切换 Jev 开关后编辑并保存语音体验，不会把未手改
 });
 
 test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪造音频振幅或泄漏密钥", async () => {
-  const { buildTwinWaveBars, globalEyeSensorView, mossEyeTwinView } = await import("../src/voiceState.js");
+  const { buildTwinWaveBars, globalEyeSensorView, mossEyeCorePalette, mossEyeTwinView } = await import("../src/voiceState.js");
 
   // 1. 内置服务链路：随真实 60ms 音频振幅驱动声波，记录识别字数、已播句数与工具名
   const builtinIdle = mossEyeTwinView({
@@ -1010,7 +1014,7 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
   assert.equal(official.level, 0);
   assert.equal(official.metrics.find((m) => m.label === "指令帧数").value, "19 帧");
 
-  // 4. 全局左侧栏机械眼（globalEyeSensorView）：跨页面跟随 /api/system/info 与待审批数
+  // 4. 全局左侧栏机械眼（globalEyeSensorView）：跨页面跟随语音、MCP、待审批数、激光硬件握手与雕刻加工任务
   assert.equal(
     globalEyeSensorView({ voiceStatus: { mode: "builtin", phase: "listening", level: 64, device_sessions: 1 } }).visualState,
     "listening",
@@ -1020,6 +1024,49 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
     "alert",
     "待审批告警优先提示",
   );
+  const hwOnlineEye = globalEyeSensorView({
+    voiceStatus: { mode: "official" },
+    mcpStatus: { connected: false },
+    connectionStatus: { connected: true, checkedAt: 1700000000000 },
+  });
+  assert.equal(hwOnlineEye.hardwareState, "online", "硬件握手通过后外环点亮 online");
+  assert.equal(hwOnlineEye.visualState, "idle", "即使语音未连接，硬件就绪时也不显示死寂 offline");
+  assert.equal(hwOnlineEye.shortBadge, "硬件已连接");
+  assert.match(hwOnlineEye.label, /激光硬件已就绪/);
+
+  const offlineEye = globalEyeSensorView({
+    voiceStatus: { mode: "official" },
+    mcpStatus: { connected: false },
+  });
+  assert.equal(offlineEye.visualState, "offline");
+  assert.equal(offlineEye.shortBadge, "未连接 · 待机");
+
+  const engravingEye = globalEyeSensorView({
+    voiceStatus: { mode: "builtin", device_sessions: 1 },
+    connectionStatus: { connected: true, checkedAt: 1700000000000 },
+    activeJobs: [{ jobId: "job-1", percent: 62, unknown: false }],
+  });
+  assert.equal(engravingEye.visualState, "engraving", "激光雕刻进行中切换为 engraving 激光态");
+  assert.equal(engravingEye.hardwareState, "engraving");
+  assert.equal(engravingEye.jobProgress, 62);
+  assert.equal(engravingEye.shortBadge, "正在发送 62%");
+  assert.match(engravingEye.label, /激光加工中 62%/);
+
+  const engravingWhileSpeaking = globalEyeSensorView({
+    voiceStatus: { mode: "builtin", phase: "speaking", level: 74, device_sessions: 1 },
+    activeJobs: [{ jobId: "job-1", percent: 45, unknown: false }],
+  });
+  assert.equal(engravingWhileSpeaking.visualState, "speaking", "边雕刻边说话时内核跟随语音播报振幅");
+  assert.equal(engravingWhileSpeaking.hardwareState, "engraving", "边雕刻边说话时外环同步保持激光加工高速旋转");
+  assert.equal(engravingWhileSpeaking.shortBadge, "播报中 · 正在发送 45%");
+
+  const uncertainJobEye = globalEyeSensorView({
+    voiceStatus: { mode: "official" },
+    activeJobs: [{ jobId: "job-2", unknown: true }],
+  });
+  assert.equal(uncertainJobEye.visualState, "alert", "连接异常的未知状态加工任务触发 alert 警戒");
+  assert.equal(uncertainJobEye.hardwareState, "fault");
+  assert.equal(uncertainJobEye.shortBadge, "加工连接异常");
 
   // 5. 异常数值（Infinity / NaN / 负数）与急停事件短语脱敏边界
   const edgeBuiltin = mossEyeTwinView({
@@ -1035,6 +1082,17 @@ test("MOSS 全息语音孪生与全局机械眼：三链路自适应且绝不伪
   assert.equal(edgeBuiltin.level, 0);
   assert.equal(edgeBuiltin.subline.includes("马上停下"), false, "急停事件括号内口语文本不回显到全息舱");
   assert.equal(edgeBuiltin.metrics.find((m) => m.label === "本轮识别").value, "—");
+
+  // 6. 多态球核色盘与节奏映射（mossEyeCorePalette）：各状态核心渐变与未知状态回退
+  assert.equal(mossEyeCorePalette("listening").tempo, "acoustic");
+  assert.equal(mossEyeCorePalette("listening").accent, "#38bdf8");
+  assert.equal(mossEyeCorePalette("thinking").tempo, "neural");
+  assert.equal(mossEyeCorePalette("alert").tempo, "alert");
+  assert.equal(mossEyeCorePalette("offline").tempo, "dormant");
+  assert.equal(mossEyeCorePalette("unknown_state").tempo, "cruise");
+  assert.equal(mossEyeCorePalette("speaking").coreStops.length, 5);
+  assert.equal(mossEyeCorePalette("engraving").tempo, "laser");
+  assert.equal(mossEyeCorePalette("engraving").accent, "#10b981");
 });
 
 test("本地 Laya 激活时保存 Jev 卡片开关或备用密钥，不会把本地路由覆写成云端模型", () => {
@@ -1084,4 +1142,66 @@ test("本地 Laya 激活时保存 Jev 卡片开关或备用密钥，不会把本
   );
   assert.equal(switchDeletedToCloud.model, "typesafe/jev-1.14");
   assert.equal(switchDeletedToCloud.api_key, "sk-or-v1-new-cloud");
+});
+
+test("n51：助手风格安全校验、同音错词规则与小智硬件在线快捷控制视图", () => {
+  const base = localSettingsForm();
+  assert.equal(base.persona_style, "workshop");
+  assert.equal(base.asr_homophone_fix, true);
+  assert.equal(base.screen_preview_sync, true);
+  assert.equal(base.screen_card_style, "moss_hud");
+
+  const station = {
+    ...base,
+    persona_style: "moss_station",
+    persona_prompt: "  翼宿 5W 激光工坊  ",
+    custom_asr_corrections: " 段木 = 椴木 \n一宿->翼宿\n段木=东北椴木",
+  };
+  assert.equal(localSettingsError(station), "");
+  const payload = localSettingsPayload(station);
+  assert.equal(payload.persona_style, "moss_station");
+  assert.equal(payload.persona_prompt, "翼宿 5W 激光工坊");
+  assert.deepEqual(payload.custom_asr_corrections, ["段木=东北椴木", "一宿=翼宿"]);
+  assert.equal(localSettingsPayload({ ...station, screen_card_style: "goggle_bot" }).screen_card_style, "goggle_bot");
+  assert.match(localSettingsError({ ...base, screen_card_style: "invalid_style" }), /画风/);
+
+  assert.match(localSettingsError({ ...base, persona_prompt: "执行 G1 X20 Y20" }), /G-code/);
+  assert.match(localSettingsError({ ...base, custom_asr_corrections: "急停=继续" }), /安全保护词/);
+  assert.match(localSettingsError({ ...base, custom_asr_corrections: "测试=G0 X10" }), /G-code|控制器/);
+  assert.equal(parseAsrCorrectionLine("亚克立→亚克力").formatted, "亚克立=亚克力");
+
+  const ctrl = builtinDeviceControlsView(
+    {
+      device_id: "aa:bb:cc",
+      status: "allowed",
+      status_json: JSON.stringify({ audio_speaker: { volume: 0 }, screen: { brightness: 45, theme: "dark" } }),
+      listen_json: JSON.stringify({ mode: "manual" }),
+    },
+    {
+      session_id: "s1",
+      device_id: "aa:bb:cc",
+      screen_monochrome: false,
+      screen_width: 320,
+      screen_height: 240,
+      device_tools: [
+        "self.audio_speaker.set_volume",
+        "self.screen.set_brightness",
+        "self.screen.set_theme",
+        "self.screen.preview_image",
+        "self.set_press_to_talk",
+      ],
+    },
+    { "aa:bb:cc": { volume: 0, brightness: 45, theme: "dark" } }
+  );
+  assert.equal(ctrl.online, true);
+  assert.equal(ctrl.canVolume, true);
+  assert.equal(ctrl.canBrightness, true);
+  assert.equal(ctrl.canTheme, true);
+  assert.equal(ctrl.canPressToTalk, true);
+  assert.equal(ctrl.canPreviewImage, true);
+  assert.equal(ctrl.screenResolution, "320×240");
+  assert.equal(ctrl.talkMode, "press_to_talk");
+  assert.equal(ctrl.volume, 0);
+  assert.equal(ctrl.brightness, 45);
+  assert.equal(ctrl.theme, "dark");
 });

@@ -23,6 +23,9 @@ impl FakeLlm {
     fn gated(text: &str, gate: Arc<Notify>) -> Arc<Self> {
         Arc::new(Self { text: text.into(), tool_call: false, gate: Some(gate), seen: Mutex::new(Vec::new()) })
     }
+    fn calls(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
 }
 
 impl Llm for FakeLlm {
@@ -249,6 +252,32 @@ async fn nv19_calibrated_speaker_preferences_go_to_the_person_scope() {
     assert_eq!((added[0].scope.kind(), added[0].scope.id()), (ScopeKind::Person, "alice"));
 }
 
+#[tokio::test]
+async fn nv19_personal_mode_unknown_speaker_never_falls_back_preference_to_device_scope() {
+    let (store, _, extractor) = setup();
+    let access = AccessContext::voice(device(), None, None).unwrap().with_personal_mode(true);
+    extractor
+        .spawn(
+            access,
+            machine(),
+            &history(),
+            FakeLlm::new(
+                r#"{"operations":[
+                    {"op":"add","category":"preference","content":"回答先说预计时长"},
+                    {"op":"add","category":"troubleshooting_experience","content":"边缘发黑时降低功率后改善"}
+                ]}"#,
+            ),
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    let added = rows(&store);
+    assert_eq!(added.len(), 1, "未知说话人在个人模式下提取不得把偏好写入设备范围");
+    assert_eq!(added[0].category, Category::TroubleshootingExperience);
+    let runs = store.list_runs(&ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(), 10).unwrap();
+    assert!(runs[0].skipped.iter().any(|s| s.reason == "no_person_scope"));
+}
+
 #[test]
 fn nv19_operation_parser_limits_count_and_sanitizes_op_names() {
     let many = format!("{{\"operations\":[{}]}}", vec![r#"{"op":"add","category":"preference","content":"a"}"#; 10].join(","));
@@ -290,4 +319,89 @@ async fn nv19_session_close_hook_uses_host_access_and_respects_the_switch() {
     }
     assert_eq!(store.runs.lock().unwrap().len(), 1);
     assert!(rows(&store).iter().all(|r| r.scope.id() == "dev-a"));
+}
+
+#[tokio::test]
+async fn nv19_realtime_rule_captures_habits_supersedes_corrections_and_blocks_unsafe_text() {
+    // Reject unsafe, stop, or recall-question utterances at 0ms.
+    for rejected in [
+        "你好",
+        "急停",
+        "记住 G1 X10 Y10 S1000",
+        "记住 $30=1000",
+        "记住我的密钥 sk-abcdef123456",
+        "记住 https://example.com/secret",
+        "记住这条审批记录已批准",
+        "你还记得我常切什么材料吗？",
+        "我的偏好是什么？",
+    ] {
+        assert_eq!(decide_realtime_preference(rejected), None, "必须拒绝: {rejected}");
+    }
+
+    let (store, service, extractor) = setup();
+    extractor.configure(true, || Ok(())).unwrap();
+    let access = AccessContext::voice(TrustedScope::device_grant("dev-a", 1).unwrap(), None, None).unwrap();
+    let llm = FakeLlm::new(r#"{"operations":[]}"#);
+
+    // Turn 1: explicit "记住…" strips prefix and writes immediately without LLM.
+    extractor.record_turn(access.clone(), machine(), "记住，我常切 3mm 椴木板", "好的，我记下了。", llm.clone());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while rows(&store).is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let active: Vec<_> = service
+        .list(&access, &ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(), now())
+        .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].content, "我常切 3mm 椴木板");
+    assert_eq!(llm.calls(), 0, "单轮实时规则捕获不调用大模型");
+
+    // Turn 2: correction "不是 3mm 是 5mm" supersedes the old 3mm entry.
+    extractor.record_turn(access.clone(), machine(), "我常切的不是 3mm，是 5mm 椴木板", "已更新为 5mm。", llm.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    let active_after = service
+        .list(&access, &ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(), now())
+        .unwrap();
+    assert_eq!(active_after.len(), 1, "纠错应覆盖旧偏好而不是堆积冲突项");
+    assert!(active_after[0].content.contains("5mm"));
+
+    // Turn 3 & 4: style slot update ("回答尽量简短" -> "以后回答详细一点") replaces previous style slot.
+    extractor.record_turn(access.clone(), machine(), "以后回答尽量简短", "明白。", llm.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    extractor.record_turn(access.clone(), machine(), "以后回答详细一点", "好的。", llm.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    let final_rows = service
+        .list(&access, &ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(), now())
+        .unwrap();
+    let contents: Vec<_> = final_rows.iter().map(|r| r.content.as_str()).collect();
+    assert!(contents.iter().any(|c| c.contains("详细")));
+    assert!(!contents.iter().any(|c| c.contains("简短")), "同槽位说话风格更新自动替换旧项");
+}
+
+#[tokio::test]
+async fn nv19_rolling_eight_turn_window_compacts_mid_session_without_waiting_for_disconnect() {
+    let (store, _, extractor) = setup();
+    extractor.configure(true, || Ok(())).unwrap();
+    let access = AccessContext::voice(TrustedScope::device_grant("dev-a", 1).unwrap(), None, None).unwrap();
+    let llm = FakeLlm::new(r#"{"operations":[{"op":"add","category":"preference","content":"加工前习惯先检查排烟风扇"}]}"#);
+
+    for idx in 0..ROLLING_TURN_WINDOW {
+        extractor.record_turn(
+            access.clone(),
+            machine(),
+            &format!("第 {idx} 轮讨论排烟风扇风量调节"),
+            "风扇正常运转。",
+            llm.clone(),
+        );
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while rows(&store).is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(llm.calls(), 1, "满 8 轮在会话中自动触发一次后台浓缩");
+    assert!(rows(&store).iter().any(|r| r.content == "加工前习惯先检查排烟风扇"));
+
+    // Immediate disconnect with 0 new turns since the 8-turn compaction must NOT call LLM again.
+    assert!(!extractor.flush_session(access, machine(), &history(), llm.clone()));
+    assert_eq!(llm.calls(), 1);
 }

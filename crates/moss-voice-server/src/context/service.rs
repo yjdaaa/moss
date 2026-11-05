@@ -4,7 +4,7 @@
 //! private-window only; the voice channel may only create extraction candidates and read.
 use super::{
     check_content, transition, AccessContext, Applicability, Category, Channel, ContextError, ContextMemory, Evidence, MemoryDraft,
-    RecordState, ScopeKey, ScopeKind, Source, SourceKind, TrustedScope, Verification, MAX_CONTENT_CHARS,
+    ScopeKey, ScopeKind, Source, SourceKind, TrustedScope, Verification, MAX_CONTENT_CHARS,
 };
 use super::retrieve::SearchQuery;
 use sha2::{Digest, Sha256};
@@ -245,7 +245,7 @@ impl ContextService {
         Ok(rows
             .into_iter()
             .filter(|row| &row.scope == scope && row.deleted_at.is_none())
-            .filter(|row| access.channel() == Channel::DesktopPrivate || matches!(row.state(now), RecordState::Active(_)))
+            .filter(|row| access.channel() == Channel::DesktopPrivate || row.readable(access, now))
             .collect())
     }
 
@@ -280,6 +280,43 @@ impl ContextService {
         let _gate = self.lock()?;
         self.managed(access, id, expected_revision)?;
         if Self::store(self.store.delete(id, expected_revision, now))? { Ok(()) } else { Err(ServiceError::Conflict) }
+    }
+
+    /// Voice-channel conflict/correction superseding: soft-delete an older `Preference` record
+    /// in the same verified scope when the user states an updated or corrected habit.
+    pub(crate) fn supersede_voice_preference(&self, access: &AccessContext, id: &str, expected_revision: i64, now: f64) -> Result<bool, ServiceError> {
+        if access.channel() != Channel::Voice {
+            return Err(ContextError::AccessDenied.into());
+        }
+        let _gate = self.lock()?;
+        let Some(record) = Self::store(self.store.get(id))? else { return Ok(false) };
+        if record.deleted_at.is_some() || record.category != Category::Preference {
+            return Ok(false);
+        }
+        self.verified(access, &record.scope)?;
+        if record.revision != expected_revision {
+            return Ok(false);
+        }
+        Self::store(self.store.delete(id, expected_revision, now))
+    }
+
+    /// Up to 2 active speaking-style / address preferences in the caller's active preference scope.
+    pub fn style_preferences(&self, access: &AccessContext, now: f64) -> Vec<ContextMemory> {
+        let target = if access.personal_mode() {
+            access.scope_of(ScopeKind::Person)
+        } else {
+            access.scope_of(ScopeKind::Person).or_else(|| access.scope_of(ScopeKind::Device))
+        };
+        let Some(scope) = target else { return Vec::new() };
+        let Ok(mut rows) = self.list(access, scope.key(), now) else { return Vec::new() };
+        rows.retain(|r| r.category == Category::Preference && r.readable(access, now) && super::retrieve::is_global_style_preference(&r.content));
+        rows.sort_by(|a, b| {
+            (b.verification == Verification::Confirmed)
+                .cmp(&(a.verification == Verification::Confirmed))
+                .then_with(|| b.updated_at.total_cmp(&a.updated_at))
+        });
+        rows.truncate(2);
+        rows
     }
 
     pub fn clear(&self, access: &AccessContext, scope: &ScopeKey, now: f64) -> Result<usize, ServiceError> {

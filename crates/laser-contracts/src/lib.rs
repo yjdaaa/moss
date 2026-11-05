@@ -19,6 +19,16 @@ pub use approval::{
 pub const MATERIAL_LIBRARY_VERSION: u32 = 1;
 pub const DEFAULT_POWER_SCALE: u32 = 1000;
 
+/// 进程内共享的 `settings.json` 读-改-写互斥锁（`laser-api` 与 `moss-voice` 共用），
+/// 避免 `/api/settings` 与语音中心并发保存时互相覆盖对方刚写入的字段。
+pub fn with_settings_file_lock<R>(f: impl FnOnce() -> R) -> R {
+    static SETTINGS_FILE_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = SETTINGS_FILE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
+}
+
 /// 调用方上下文（技术书 §6.4）：由 HTTP 入口或进程内调用方**构造**，绝不从请求体读取。
 /// P1-00 只做传递，不参与任何判定；严格模式（P1-04）将据此决定 R3 动作是否放行。
 #[derive(Debug, Clone, PartialEq, Eq)]

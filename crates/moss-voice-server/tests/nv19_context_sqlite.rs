@@ -391,6 +391,7 @@ mod knowledge_sqlite {
             root_path: PathBuf::from(row.root_path),
             revision: row.revision,
             indexed_at: row.indexed_at,
+            enabled: row.enabled,
         })
     }
     fn dir_from(d: KnowledgeDirRow) -> KnowledgeDir {
@@ -411,6 +412,7 @@ mod knowledge_sqlite {
                 revision: 1,
                 created_at: now,
                 indexed_at: None,
+                enabled: root.enabled,
             };
             self.0.lock().unwrap().insert_knowledge_root(&row).map_err(err)
         }
@@ -419,6 +421,12 @@ mod knowledge_sqlite {
         }
         fn roots(&self, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, String> {
             self.0.lock().unwrap().knowledge_roots(scope.kind().as_str(), scope.id()).map_err(err)?.into_iter().map(root_from).collect()
+        }
+        fn all_roots(&self) -> Result<Vec<KnowledgeRoot>, String> {
+            self.0.lock().unwrap().all_knowledge_roots().map_err(err)?.into_iter().map(root_from).collect()
+        }
+        fn set_root_enabled(&self, id: &str, expected: i64, enabled: bool) -> Result<bool, String> {
+            self.0.lock().unwrap().set_knowledge_root_enabled(id, expected, enabled).map_err(err)
         }
         fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String> {
             let dirs: Vec<_> = dirs.iter().map(|d| KnowledgeDirRow { id: d.id.clone(), root_id: d.root_id.clone(), rel_dir: d.rel_dir.clone(), l0: d.l0.clone(), l1: d.l1.clone(), file_count: d.file_count }).collect();

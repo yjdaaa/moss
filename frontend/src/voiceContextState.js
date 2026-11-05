@@ -13,7 +13,7 @@ export const CATEGORY_LABEL = {
 
 /** 每类记忆能放的范围（与 moss-voice-server::context 一致）。 */
 export const CATEGORY_SCOPES = {
-  preference: ["device"],
+  preference: ["device", "person"],
   device_fact: ["device"],
   technical_note: ["project"],
   task_context: ["project"],
@@ -77,14 +77,19 @@ export function rowBadge(row) {
 export function scopeLabel(scope, status) {
   if (!scope) return "";
   if (scope.kind === "project") return `项目：${status?.project?.name || scope.id}`;
+  if (scope.kind === "person") {
+    const person = (status?.persons || []).find((p) => p.id === scope.id);
+    return `个人：${person?.name || scope.id}`;
+  }
   const device = (status?.devices || []).find((d) => d.id === scope.id);
   return `设备：${device?.name || scope.id}`;
 }
 
-/** 状态里列出的全部可选范围（已允许的设备 + 当前项目）。 */
+/** 状态里列出的全部可选范围（已允许的设备 + 已标定说话人 + 当前项目）。 */
 export function scopeOptions(status) {
   const devices = (status?.devices || []).map((d) => ({ kind: "device", id: d.id }));
-  return status?.project ? [...devices, { kind: "project", id: status.project.id }] : devices;
+  const persons = (status?.persons || []).map((p) => ({ kind: "person", id: p.id }));
+  return status?.project ? [...devices, ...persons, { kind: "project", id: status.project.id }] : [...devices, ...persons];
 }
 
 /** 能记录故障经验的设备：机型和固件都已登记。 */

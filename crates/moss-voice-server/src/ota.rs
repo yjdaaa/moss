@@ -28,7 +28,7 @@ async fn ota_get() -> &'static str {
 }
 
 /// 本机用于对外通信的地址（不发送任何数据，只用于选路）。
-fn local_ip() -> Option<IpAddr> {
+pub(crate) fn local_ip() -> Option<IpAddr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:80").ok()?;
     socket.local_addr().ok().map(|addr| addr.ip()).filter(|ip| !ip.is_unspecified())

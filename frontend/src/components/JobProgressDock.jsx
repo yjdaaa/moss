@@ -6,6 +6,7 @@ import { exportFile, savedMessage } from "../saveFile.js";
 import {
   JOB_LINGER_MS,
   JOB_POLL_MS,
+  acknowledgeStopPayload,
   cancelPayload,
   dockPillText,
   estopPayload,
@@ -46,7 +47,7 @@ function writeMinimized(value) {
   }
 }
 
-export function JobProgressDock() {
+export function JobProgressDock({ onJobsChange = null } = {}) {
   const [views, setViews] = useState([]);
   const [error, setError] = useState("");
   const [minimized, setMinimized] = useState(readMinimized);
@@ -92,6 +93,12 @@ export function JobProgressDock() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof onJobsChange === "function") {
+      onJobsChange(views);
+    }
+  }, [views, onJobsChange]);
+
   const toggleMinimized = useCallback(() => {
     setMinimized((value) => {
       writeMinimized(!value);
@@ -132,6 +139,20 @@ export function JobProgressDock() {
     setBusy(false);
     // 请求成功只证明实时指令已写出，不证明物理停机
     setNote(res?.ok && res?.data?.success ? "已发出急停指令，请到设备旁确认已停" : `急停失败：${res?.data?.result || "请用实体急停"}`);
+  }, []);
+
+  const acknowledgeStop = useCallback(async (view) => {
+    if (!view.jobId) return;
+    setBusy(true);
+    setNote("");
+    const res = await postJson("/api/jobs/acknowledge-stop", acknowledgeStopPayload(view));
+    setBusy(false);
+    if (res?.ok && res?.data?.success) {
+      setViews((prev) => prev.filter((item) => item.jobId !== view.jobId));
+      setNote("已确认设备停稳并移除未知状态卡片");
+    } else {
+      setNote(`确认失败：${res?.data?.result || "请重试"}`);
+    }
   }, []);
 
   const download = useCallback(async (view) => {
@@ -234,6 +255,17 @@ export function JobProgressDock() {
             <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => cancel(view)} id={`job-progress-cancel-${index}`}>
               <Square size={13} /> 取消（记断点）
             </button>
+            {(view.canAcknowledgeStop ?? (view.unknown && Boolean(view.jobId))) && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                onClick={() => acknowledgeStop(view)}
+                id={`job-progress-ack-${index}`}
+              >
+                已确认停稳
+              </button>
+            )}
             <button type="button" className="btn btn-danger" disabled={busy} onClick={() => estop(view)} id={`job-progress-estop-${index}`}>
               <OctagonX size={13} /> 急停
             </button>

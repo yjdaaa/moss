@@ -32,6 +32,11 @@ const TOP_DIRECTORIES: usize = 2;
 const L2_FILES_PER_DIRECTORY: usize = 5;
 const EXCERPT_CHARS: usize = 400;
 pub const KNOWLEDGE_BUDGET_CHARS: usize = 900;
+pub const INDEPENDENT_KB_SCOPE_ID: &str = "local-kb";
+
+pub fn independent_kb_scope() -> ScopeKey {
+    ScopeKey::new(ScopeKind::Workspace, INDEPENDENT_KB_SCOPE_ID).expect("static workspace scope")
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum KnowledgeError {
@@ -88,6 +93,7 @@ pub struct KnowledgeRoot {
     pub root_path: PathBuf,
     pub revision: i64,
     pub indexed_at: Option<f64>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +133,8 @@ pub trait KnowledgeStore: Send + Sync {
     fn insert_root(&self, root: &KnowledgeRoot, now: f64) -> Result<(), String>;
     fn root(&self, id: &str) -> Result<Option<KnowledgeRoot>, String>;
     fn roots(&self, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, String>;
+    fn all_roots(&self) -> Result<Vec<KnowledgeRoot>, String>;
+    fn set_root_enabled(&self, id: &str, expected_revision: i64, enabled: bool) -> Result<bool, String>;
     /// `false`: the root is no longer at `expected_revision`; nothing written.
     fn replace(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String>;
     fn delete_root(&self, id: &str, expected_revision: i64) -> Result<bool, String>;
@@ -455,7 +463,7 @@ impl KnowledgeService {
         let canonical = valid_local_root(path)?;
         canonical.to_str().ok_or(KnowledgeError::InvalidRoot)?;
         let label = clip(canonical.file_name().and_then(|n| n.to_str()).ok_or(KnowledgeError::InvalidRoot)?, 128);
-        let root = KnowledgeRoot { id: random_id()?, scope: scope.clone(), label, root_path: canonical, revision: 1, indexed_at: None };
+        let root = KnowledgeRoot { id: random_id()?, scope: scope.clone(), label, root_path: canonical, revision: 1, indexed_at: None, enabled: true };
         Self::store(self.store.insert_root(&root, now))?;
         let report = self.reindex(access, &root.id, now)?;
         let root = Self::store(self.store.root(&root.id))?.ok_or(KnowledgeError::NotFound)?;
@@ -504,6 +512,35 @@ impl KnowledgeService {
         Self::store(self.store.roots(scope))
     }
 
+    pub fn all_roots(&self, access: &AccessContext) -> Result<Vec<KnowledgeRoot>, KnowledgeError> {
+        if access.channel() != Channel::DesktopPrivate {
+            return Err(ContextError::AccessDenied.into());
+        }
+        let roots = Self::store(self.store.all_roots())?;
+        Ok(roots.into_iter().filter(|r| self.verified(access, &r.scope).is_ok()).collect())
+    }
+
+    pub fn set_enabled(&self, access: &AccessContext, root_id: &str, expected_revision: i64, enabled: bool) -> Result<KnowledgeRoot, KnowledgeError> {
+        let root = Self::store(self.store.root(root_id))?.ok_or(KnowledgeError::NotFound)?;
+        self.private(access, &root.scope)?;
+        if !Self::store(self.store.set_root_enabled(root_id, expected_revision, enabled))? {
+            return Err(KnowledgeError::Conflict);
+        }
+        Self::store(self.store.root(root_id))?.ok_or(KnowledgeError::NotFound)
+    }
+
+    pub fn has_enabled_roots(&self, access: &AccessContext) -> bool {
+        access
+            .scopes()
+            .iter()
+            .filter(|s| matches!(s.key().kind(), ScopeKind::Project | ScopeKind::Workspace))
+            .any(|s| {
+                let key = s.key();
+                self.verified(access, key).is_ok()
+                    && self.store.roots(key).ok().is_some_and(|roots| roots.iter().any(|r| r.enabled))
+            })
+    }
+
     /// Forget a root: summaries and fingerprints go; files on disk are never touched.
     pub fn remove_root(&self, access: &AccessContext, root_id: &str, expected_revision: i64) -> Result<(), KnowledgeError> {
         let root = Self::store(self.store.root(root_id))?.ok_or(KnowledgeError::NotFound)?;
@@ -521,7 +558,7 @@ impl KnowledgeService {
             self.verified(access, &key)?;
             let roots = Self::store(self.store.roots(&key))?;
             for dir in Self::store(self.store.search_dirs(&key, query, 20))? {
-                let Some(root) = roots.iter().find(|r| r.id == dir.root_id && r.scope == key) else { continue };
+                let Some(root) = roots.iter().find(|r| r.id == dir.root_id && r.scope == key && r.enabled) else { continue };
                 let points = score(&dir.l0, query).map(|p| p * 2).unwrap_or(0) + score(&dir.l1, query).unwrap_or(0);
                 if points > 0 && !ranked.iter().any(|(seen, _, _)| seen.id == dir.id) {
                     ranked.push((dir, root.clone(), points));

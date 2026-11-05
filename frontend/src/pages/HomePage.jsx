@@ -38,6 +38,14 @@ import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { defaultSerialPortHint } from "../platform.js";
 
+export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
+  if (!imageFile) return "";
+  if (remote) {
+    return await fetchBlobUrl(imageFile);
+  }
+  return resolveUrl(`/preview?path=${encodeURIComponent(imageFile)}`);
+}
+
 export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) {
   // Connection state
   const [connectionMode, setConnectionMode] = useState(
@@ -89,6 +97,33 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
   const [dimensions, setDimensions] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  const mountedRef = useRef(true);
+  const previewBlobUrlRef = useRef("");
+  const applyPreviewUrl = (nextUrl) => {
+    const prev = previewBlobUrlRef.current;
+    if (prev && prev !== nextUrl && prev.startsWith("blob:")) {
+      URL.revokeObjectURL(prev);
+    }
+    if (!mountedRef.current) {
+      if (nextUrl && nextUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(nextUrl);
+      }
+      previewBlobUrlRef.current = "";
+      return;
+    }
+    previewBlobUrlRef.current = nextUrl && nextUrl.startsWith("blob:") ? nextUrl : "";
+    setPreviewUrl(nextUrl || "");
+  };
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (previewBlobUrlRef.current && previewBlobUrlRef.current.startsWith("blob:")) {
+        URL.revokeObjectURL(previewBlobUrlRef.current);
+        previewBlobUrlRef.current = "";
+      }
+    };
+  }, []);
   // Overlay & Modals
   const [showSendOverlay, setShowSendOverlay] = useState(false);
   const [overlayStatus, setOverlayStatus] = useState("pending");
@@ -346,6 +381,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           material: selectedMaterial,
           thickness_mm: Number(selectedThickness),
           font_size_mm: Number(fontSizeMm),
+          laser_mode: engravingMode === "cut" ? "cut" : "engrave",
           engraving_mode: engravingMode,
         });
       } else if (activeTool === "image") {
@@ -360,6 +396,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           thickness_mm: Number(selectedThickness),
           source_type: "image",
           image_file: uploadedFilePath,
+          laser_mode: engravingMode === "cut" ? "cut" : "engrave",
+          engraving_mode: engravingMode,
         });
       } else if (activeTool === "gcode") {
         if (!uploadedFilePath) {
@@ -388,10 +426,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         const artifacts = wf.artifacts || {};
 
         if (artifacts.image_file) {
-          const directUrl = resolveApiUrl(`/preview?path=${encodeURIComponent(artifacts.image_file)}`);
-          const blobUrl = await fetchPreviewBlobUrl(artifacts.image_file);
-          // 连接电脑时图片需要带配对 token，<img> 直链拿不到，只能用经鉴权取回的 blob
-          setPreviewUrl(isRemoteMode() ? blobUrl : (directUrl || blobUrl));
+          // 连接电脑时图片需要带配对 token，<img> 直链拿不到，才经鉴权取回 blob；本机/桌面直接用直链，避免泄漏 blob
+          const nextUrl = await loadWorkbenchPreviewUrl(artifacts.image_file, {
+            remote: isRemoteMode(),
+            fetchBlobUrl: fetchPreviewBlobUrl,
+            resolveUrl: resolveApiUrl,
+          });
+          applyPreviewUrl(nextUrl);
         }
         if (artifacts.gcode_file) {
           try {
@@ -876,11 +917,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
               <div className="tool-body wb-spacer">
                 <div className="wb-spacer-2">
                   <label className="wb-label-2">
-                    导入现有 G-code / NC 刀路文件 (.gcode / .nc / .txt)
+                    导入现有 G-code / NC 刀路文件 (.gcode / .nc)
                   </label>
                   <input
                     type="file"
-                    accept=".gcode,.nc,.txt"
+                    accept=".gcode,.nc"
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
                       if (!file) return;
@@ -960,6 +1001,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       thicknesses: availableThicknesses,
                       power_percent: powerPercent,
                       speed_mms: speedMms,
+                      laser_mode: engravingMode === "cut" ? "cut" : "engrave",
+                      engraving_mode: engravingMode,
                     });
                     setShowMaterialModal(true);
                   }}
@@ -1218,7 +1261,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 setShowSendOverlay(false);
                 setSendProgress(null);
                 const artifacts = workflow.artifacts || {};
-                setPreviewUrl(await fetchPreviewBlobUrl(artifacts.image_file));
+                applyPreviewUrl(
+                  await loadWorkbenchPreviewUrl(artifacts.image_file, {
+                    remote: isRemoteMode(),
+                    fetchBlobUrl: fetchPreviewBlobUrl,
+                    resolveUrl: resolveApiUrl,
+                  }),
+                );
                 setGcodeText("");
                 if (artifacts.gcode_file) {
                   try {

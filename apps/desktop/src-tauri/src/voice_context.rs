@@ -21,7 +21,9 @@ pub(crate) mod host {
     use moss_voice_providers::Llm;
     use moss_voice_server::context::experience::{format_experience, Experience};
     use moss_voice_server::context::extract::{ContextExtraction, ContextExtractor};
-    use moss_voice_server::context::knowledge::{KnowledgeDir, KnowledgeError, KnowledgeFile, KnowledgeRoot, KnowledgeService, KnowledgeStore};
+    use moss_voice_server::context::knowledge::{
+        independent_kb_scope, KnowledgeDir, KnowledgeError, KnowledgeFile, KnowledgeRoot, KnowledgeService, KnowledgeStore, INDEPENDENT_KB_SCOPE_ID,
+    };
     use moss_voice_server::context::resume::{format_resume, RefKind, RefState, Reference, ResumeFacts, ResumeNote};
     use moss_voice_server::context::retrieve::{fast_query, ContextAccessProvider, ContextRetrieval, ContextRetriever, SearchQuery};
     use moss_voice_server::context::service::{ContextService, ContextStore, ExtractionRun, MemoryPatch, ServiceError};
@@ -76,7 +78,7 @@ pub(crate) mod host {
                 ScopeKind::Person => self
                     .person_scope(key.id())
                     .is_some_and(|live| live.generation() == scope.generation()),
-                ScopeKind::Workspace => false,
+                ScopeKind::Workspace => key.id() == INDEPENDENT_KB_SCOPE_ID && scope.generation() == 1,
             }
         }
 
@@ -106,6 +108,10 @@ pub(crate) mod host {
             (!context.project_id.is_empty()).then(|| TrustedScope::desktop_selection(ScopeKind::Project, &context.project_id, context.project_generation).ok()).flatten()
         }
 
+        fn workspace_kb(&self) -> Option<TrustedScope> {
+            TrustedScope::desktop_selection(ScopeKind::Workspace, INDEPENDENT_KB_SCOPE_ID, 1).ok()
+        }
+
         fn device(&self, device_id: &str) -> Option<TrustedScope> {
             TrustedScope::device_grant(device_id, self.device_generation(device_id)?).ok()
         }
@@ -127,6 +133,7 @@ pub(crate) mod host {
                     .filter_map(|(id, _, _)| self.person_scope(&id)),
             );
             scopes.extend(self.project());
+            scopes.extend(self.workspace_kb());
             AccessContext::desktop_private(scopes)
         }
     }
@@ -267,6 +274,7 @@ pub(crate) mod host {
             root_path: PathBuf::from(row.root_path),
             revision: row.revision,
             indexed_at: row.indexed_at,
+            enabled: row.enabled,
         })
     }
 
@@ -284,6 +292,7 @@ pub(crate) mod host {
                 revision: 1,
                 created_at: now,
                 indexed_at: None,
+                enabled: root.enabled,
             };
             self.0.db.lock().map_err(err)?.insert_knowledge_root(&row).map_err(err)
         }
@@ -292,6 +301,12 @@ pub(crate) mod host {
         }
         fn roots(&self, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, String> {
             self.0.db.lock().map_err(err)?.knowledge_roots(scope.kind().as_str(), scope.id()).map_err(err)?.into_iter().map(root_from).collect()
+        }
+        fn all_roots(&self) -> Result<Vec<KnowledgeRoot>, String> {
+            self.0.db.lock().map_err(err)?.all_knowledge_roots().map_err(err)?.into_iter().map(root_from).collect()
+        }
+        fn set_root_enabled(&self, id: &str, expected: i64, enabled: bool) -> Result<bool, String> {
+            self.0.db.lock().map_err(err)?.set_knowledge_root_enabled(id, expected, enabled).map_err(err)
         }
         fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String> {
             let dirs: Vec<_> = dirs.iter().map(|d| KnowledgeDirRow { id: d.id.clone(), root_id: d.root_id.clone(), rel_dir: d.rel_dir.clone(), l0: d.l0.clone(), l1: d.l1.clone(), file_count: d.file_count }).collect();
@@ -367,7 +382,13 @@ pub(crate) mod host {
     impl ContextAccessProvider for VoiceAccess {
         fn access(&self, context: &ToolContext, person: Option<&PersonScope>) -> Option<(AccessContext, Option<Applicability>)> {
             let device = self.0.device(&context.device_id)?;
-            let access = AccessContext::voice(device, self.0.voice_person(person), self.0.project()).ok()?;
+            let personal_mode = moss_voice::settings::load(&self.0.settings_file).builtin_person_memory_enabled;
+            let mut access = AccessContext::voice(device, self.0.voice_person(person), self.0.project())
+                .ok()?
+                .with_personal_mode(personal_mode);
+            if let Some(kb) = self.0.workspace_kb() {
+                access = access.with_workspace(kb).ok()?;
+            }
             Some((access, self.0.applicability(&context.device_id)))
         }
     }
@@ -529,10 +550,11 @@ pub(crate) mod host {
 
         fn save_context(&self, change: impl FnOnce(&mut BuiltinContext)) -> Result<BuiltinContext, CenterError> {
             let _guard = self.settings_lock.lock().map_err(|_| fail("context_settings_failed", 500, "设置锁不可用"))?;
-            let mut settings = moss_voice::settings::load(&self.trust.settings_file);
-            change(&mut settings.builtin_context);
-            moss_voice::settings::save(&self.trust.settings_file, &settings).map_err(|e| fail("context_settings_failed", 500, &e))?;
-            Ok(settings.builtin_context)
+            moss_voice::settings::update_voice(&self.trust.settings_file, |settings| {
+                change(&mut settings.builtin_context);
+                Ok(settings.builtin_context.clone())
+            })
+            .map_err(|e| fail("context_settings_failed", 500, &e))
         }
 
         fn project_key(&self) -> Result<ScopeKey, CenterError> {
@@ -540,9 +562,13 @@ pub(crate) mod host {
         }
 
         pub(crate) fn add_folder(&self, path: &std::path::Path) -> Result<Value, CenterError> {
-            let scope = self.project_key()?;
+            let scope = independent_kb_scope();
             let (root, report) = self.knowledge.add_root(&self.trust.owner(), &scope, path, now()).map_err(knowledge_error)?;
-            Ok(json!({"id": root.id, "label": root.label, "directories": report.directories, "files": report.files, "skipped": report.skipped}))
+            Ok(json!({
+                "id": root.id, "label": root.label, "enabled": root.enabled,
+                "revision": root.revision, "indexed_at": root.indexed_at,
+                "directories": report.directories, "files": report.files, "skipped": report.skipped
+            }))
         }
 
         pub(crate) fn manage(&self, input: &Value, llm: impl FnOnce() -> Option<Arc<dyn Llm>>) -> Result<Value, CenterError> {
@@ -569,6 +595,9 @@ pub(crate) mod host {
                         })
                         .map_err(|e| fail("context_settings_failed", 500, &e))?;
                     self.retriever.set_enabled(retrieval);
+                    if extraction {
+                        self.auto_import_legacy_summaries(&owner, at);
+                    }
                     let saved = saved.ok_or_else(|| fail("context_settings_failed", 500, "设置未保存"))?;
                     Ok(json!({"retrieval": saved.retrieval, "extraction": saved.extraction}))
                 }
@@ -598,6 +627,105 @@ pub(crate) mod host {
                     };
                     let rows: Vec<Value> = rows.iter().filter(|r| category.is_none_or(|c| r.category == c)).map(|r| row_json(r, at)).collect();
                     Ok(json!({"rows": rows}))
+                }
+                "list_all" => {
+                    let query = input.get("query").and_then(Value::as_str).map(str::trim).filter(|q| !q.is_empty());
+                    let parsed_query = query.and_then(fast_query);
+                    if query.is_some() && parsed_query.is_none() {
+                        return Ok(json!({"rows": []}));
+                    }
+                    let devices_meta: Vec<(String, String)> = self
+                        .trust
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|db| db.voice_devices().ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|d| d.is_allowed())
+                        .map(|d| (d.device_id.clone(), if d.name.trim().is_empty() { d.device_id } else { d.name }))
+                        .collect();
+                    let speakers_meta = (self.trust.speakers)();
+                    let project_name = self.trust.context().project_name;
+                    let mut collected: Vec<ContextMemory> = Vec::new();
+                    for trusted in owner.scopes() {
+                        let key = trusted.key();
+                        if key.kind() == ScopeKind::Workspace {
+                            continue;
+                        }
+                        let found = match &parsed_query {
+                            Some(q) => {
+                                let scoped = AccessContext::desktop_private(vec![trusted.clone()]);
+                                self.service.search(&scoped, q, None, at).map(|hits| hits.into_iter().map(|(r, _)| r).collect()).unwrap_or_default()
+                            }
+                            None => self.service.list(&owner, key, at).unwrap_or_default(),
+                        };
+                        for row in found {
+                            if matches!(row.state(at), RecordState::Active(_)) && !collected.iter().any(|seen| seen.id == row.id) {
+                                collected.push(row);
+                            }
+                        }
+                    }
+                    collected.sort_by(|a, b| b.updated_at.total_cmp(&a.updated_at));
+                    let rows: Vec<Value> = collected
+                        .iter()
+                        .map(|r| {
+                            let mut v = row_json(r, at);
+                            let label = match r.scope.kind() {
+                                ScopeKind::Person => speakers_meta.iter().find(|(id, _, _)| id == r.scope.id()).map(|(_, name, _)| name.clone()).unwrap_or_else(|| r.scope.id().to_owned()),
+                                ScopeKind::Device => devices_meta.iter().find(|(id, _)| id == r.scope.id()).map(|(_, name)| name.clone()).unwrap_or_else(|| r.scope.id().to_owned()),
+                                ScopeKind::Project => if project_name.is_empty() { r.scope.id().to_owned() } else { project_name.clone() },
+                                ScopeKind::Workspace => "通用".into(),
+                            };
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert("scope_label".into(), Value::String(label));
+                            }
+                            v
+                        })
+                        .collect();
+                    Ok(json!({"rows": rows}))
+                }
+                "quick_create" => {
+                    let content = text(input, "content")?.trim().to_owned();
+                    let personal_on = moss_voice::settings::load(&self.trust.settings_file).builtin_person_memory_enabled;
+                    let target = if input.get("scope").is_some() {
+                        scope_of(input)?
+                    } else if personal_on
+                        && let Some(person) = owner.scopes().iter().find(|s| s.key().kind() == ScopeKind::Person)
+                    {
+                        person.key().clone()
+                    } else if let Some(dev) = owner.scopes().iter().find(|s| s.key().kind() == ScopeKind::Device) {
+                        dev.key().clone()
+                    } else {
+                        return Err(fail("context_no_device", 409, "请先在“服务”标签允许一台小智设备接入后再添加记忆"));
+                    };
+                    let draft = MemoryDraft {
+                        scope: target,
+                        category: Category::Preference,
+                        content,
+                        verification: Verification::Confirmed,
+                        source: Source::new(SourceKind::UserEdit, None).map_err(|e| fail(e.code(), 400, context_message(e)))?,
+                        applicability: None,
+                        expires_at: None,
+                    };
+                    let row = self.service.create(&owner, draft, at).map_err(service_error)?;
+                    Ok(row_json(&row, at))
+                }
+                "clear_all" => {
+                    if input.get("confirmed").and_then(Value::as_bool) != Some(true) {
+                        return Err(fail("context_confirm_required", 400, "清空前需要确认"));
+                    }
+                    let mut cleared = 0usize;
+                    for trusted in owner.scopes() {
+                        let key = trusted.key().clone();
+                        if key.kind() == ScopeKind::Workspace {
+                            continue;
+                        }
+                        if let Ok(n) = self.extractor.scope_changed(&key, || self.service.clear(&owner, &key, at)) {
+                            cleared += n;
+                        }
+                    }
+                    Ok(json!({"cleared": cleared}))
                 }
                 "deep_search" => {
                     let question = text(input, "query")?;
@@ -687,14 +815,24 @@ pub(crate) mod host {
                     Ok(json!({"removed": report.removed, "kept": report.kept}))
                 }
                 "knowledge_list" => {
-                    let Ok(scope) = self.project_key() else { return Ok(json!({"roots": []})) };
-                    let roots = self.knowledge.roots(&owner, &scope).map_err(knowledge_error)?;
+                    let roots = self.knowledge.all_roots(&owner).map_err(knowledge_error)?;
                     let db = self.trust.db.lock().map_err(|_| fail("context_store_failed", 500, "数据库锁失败"))?;
                     Ok(json!({"roots": roots.iter().map(|r| {
                         let dirs = db.knowledge_dirs(&r.id).unwrap_or_default();
-                        json!({"id": r.id, "label": r.label, "revision": r.revision, "indexed_at": r.indexed_at,
+                        json!({"id": r.id, "label": r.label, "enabled": r.enabled, "revision": r.revision, "indexed_at": r.indexed_at,
                                "directories": dirs.len(), "files": dirs.iter().map(|d| d.file_count).sum::<i64>()})
                     }).collect::<Vec<_>>()}))
+                }
+                "knowledge_toggle" => {
+                    let enabled = input.get("enabled").and_then(Value::as_bool).ok_or_else(bad_input)?;
+                    let root = self.knowledge.set_enabled(&owner, text(input, "id")?, int(input, "revision")?, enabled).map_err(knowledge_error)?;
+                    let db = self.trust.db.lock().map_err(|_| fail("context_store_failed", 500, "数据库锁失败"))?;
+                    let dirs = db.knowledge_dirs(&root.id).unwrap_or_default();
+                    Ok(json!({
+                        "id": root.id, "label": root.label, "enabled": root.enabled, "revision": root.revision,
+                        "indexed_at": root.indexed_at, "directories": dirs.len(),
+                        "files": dirs.iter().map(|d| d.file_count).sum::<i64>()
+                    }))
                 }
                 "knowledge_reindex" => {
                     let report = self.knowledge.reindex(&owner, text(input, "id")?, at).map_err(knowledge_error)?;
@@ -774,7 +912,7 @@ pub(crate) mod host {
             let context = self.trust.context();
             let devices = self.trust.db.lock().map_err(|_| fail("context_store_failed", 500, "数据库锁失败"))?.voice_devices().unwrap_or_default();
             let mut scopes = Vec::new();
-            for scope in owner.scopes() {
+            for scope in owner.scopes().iter().filter(|s| s.key().kind() != ScopeKind::Workspace) {
                 let rows = self.service.list(owner, scope.key(), at).unwrap_or_default();
                 let live: Vec<_> = rows.iter().filter(|r| matches!(r.state(at), RecordState::Active(_))).collect();
                 let chars: usize = rows.iter().map(|r| r.content.chars().count()).sum();
@@ -799,6 +937,24 @@ pub(crate) mod host {
                 "persons": persons,
                 "scopes": scopes, "legacy_summaries": legacy,
             }))
+        }
+
+        fn auto_import_legacy_summaries(&self, owner: &AccessContext, at: f64) {
+            let legacy_rows: Vec<(String, String, i64)> = {
+                let Ok(db) = self.trust.db.lock() else { return };
+                let devices = db.voice_devices().unwrap_or_default();
+                devices
+                    .into_iter()
+                    .filter(|d| d.is_allowed())
+                    .filter_map(|d| {
+                        let m = db.voice_memory(&d.device_id).ok().flatten()?;
+                        (!m.summary.trim().is_empty()).then_some((d.device_id, m.summary, m.revision))
+                    })
+                    .collect()
+            };
+            for (device_id, summary, revision) in legacy_rows {
+                let _ = self.service.import_legacy(owner, &device_id, &summary, revision, at);
+            }
         }
     }
 

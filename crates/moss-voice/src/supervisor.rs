@@ -235,6 +235,8 @@ mod job {
     }
 }
 
+pub use job::JobHandle;
+
 struct Running {
     child: Child,
     pid: u32,

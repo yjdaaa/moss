@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Square } from "lucide-react";
 import { voiceApi } from "../voiceApi.js";
 import { agentErrorText, agentView, formDirty, savedNoteText } from "../voiceState.js";
@@ -11,6 +11,20 @@ import { agentPlatformCopy } from "../platform.js";
 // 每次运行都要在电脑上批准一次；只在严格模式开启时运行（Agent 即使调用本机 MOSS 接口也动不了激光机）。
 const EMPTY = { enabled: false, workspace: "", codex_executable: "", claude_executable: "" };
 
+export function shouldSyncAgentFormOnPoll({
+  pollEpoch = 0,
+  currentEpoch = 0,
+  loaded,
+  saving,
+  saved,
+  config,
+}) {
+  if (pollEpoch < currentEpoch) return false;
+  if (!loaded) return true;
+  if (saving) return false;
+  return !formDirty(saved, config);
+}
+
 export default function VoiceAgentCard() {
   const [saved, setSaved] = useState(EMPTY);
   const [config, setConfig] = useState(EMPTY);
@@ -20,27 +34,73 @@ export default function VoiceAgentCard() {
   const [stopping, setStopping] = useState("");
   const [loadError, setLoadError] = useState("");
   const [result, setResult] = useState(null);
+  const epochRef = useRef(0);
+  const loadedRef = useRef(false);
+  const savingRef = useRef(false);
+  const savedRef = useRef(EMPTY);
+  const configRef = useRef(EMPTY);
+  loadedRef.current = loaded;
+  savingRef.current = saving;
+  savedRef.current = saved;
+  configRef.current = config;
+
   const busy = saving || Boolean(stopping);
   const dirty = loaded && formDirty(saved, config);
 
   const apply = (data) => {
+    epochRef.current += 1;
     const next = { ...EMPTY, ...((data || {}).settings || {}) };
+    savedRef.current = next;
+    configRef.current = next;
+    loadedRef.current = true;
     setSaved(next);
     setConfig(next);
     setInfo(data || {});
     setLoaded(true);
   };
+  const applyPoll = (data, pollEpoch = epochRef.current) => {
+    if (pollEpoch < epochRef.current) return;
+    const next = { ...EMPTY, ...((data || {}).settings || {}) };
+    setInfo(data || {});
+    if (
+      shouldSyncAgentFormOnPoll({
+        pollEpoch,
+        currentEpoch: epochRef.current,
+        loaded: loadedRef.current,
+        saving: savingRef.current,
+        saved: savedRef.current,
+        config: configRef.current,
+      })
+    ) {
+      savedRef.current = next;
+      configRef.current = next;
+      loadedRef.current = true;
+      setSaved(next);
+      setConfig(next);
+      setLoaded(true);
+    }
+  };
   useEffect(() => {
     let active = true;
+    const pollEpoch = epochRef.current;
     voiceApi.agentStatus()
-      .then((data) => { if (active) apply(data); })
-      .catch((e) => { if (active) setLoadError(e.message || "读取 Agent 配置失败"); });
+      .then((data) => { if (active) applyPoll(data, pollEpoch); })
+      .catch((e) => { if (active && pollEpoch === epochRef.current) setLoadError(e.message || "读取 Agent 配置失败"); });
     return () => { active = false; };
   }, []);
 
   const refresh = async () => {
-    try { apply(await voiceApi.agentStatus()); setLoadError(""); }
-    catch (e) { setLoadError(e.message || "读取 Agent 配置失败"); }
+    const pollEpoch = epochRef.current;
+    try {
+      const data = await voiceApi.agentStatus();
+      if (pollEpoch < epochRef.current) return;
+      applyPoll(data, pollEpoch);
+      setLoadError("");
+    } catch (e) {
+      if (pollEpoch === epochRef.current) {
+        setLoadError(e.message || "读取 Agent 配置失败");
+      }
+    }
   };
   // 小智可能随时发起任务：每 5 秒刷新一次状态（运行中的任务结束时会显示为已完成 / 已停止）。
   useEffect(() => {
@@ -48,11 +108,18 @@ export default function VoiceAgentCard() {
     return () => clearInterval(timer);
   }, []);
   const change = (name, value) => {
-    setConfig((current) => ({ ...current, [name]: value }));
+    epochRef.current += 1;
+    setConfig((current) => {
+      const next = { ...current, [name]: value };
+      configRef.current = next;
+      return next;
+    });
     setResult(null);
   };
 
   const save = async () => {
+    epochRef.current += 1;
+    savingRef.current = true;
     setSaving(true);
     try {
       const response = await voiceApi.agentSave({ ...config });
@@ -64,6 +131,7 @@ export default function VoiceAgentCard() {
     } catch (e) {
       setResult({ ok: false, text: `保存失败：${e.message || "保存 Agent 配置失败"}` });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -73,11 +141,12 @@ export default function VoiceAgentCard() {
       title: "停止 Agent 任务", tone: "warning", danger: true, confirmText: "停止任务",
     });
     if (!ok) return;
+    epochRef.current += 1;
     setStopping(run.id);
     setResult(null);
     try {
       const response = await voiceApi.agentStop(run.id);
-      apply(response);
+      applyPoll(response, epochRef.current);
       setResult(response && response.stopped === false
         ? { ok: false, text: "这条任务已经结束了，没有可停止的进程" }
         : { ok: true, text: "已请求停止；任务状态会更新为“已停止”" });

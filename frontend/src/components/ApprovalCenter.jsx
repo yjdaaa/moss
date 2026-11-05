@@ -7,7 +7,9 @@ import { onEmergencyStop } from "../estopBus.js";
 import { extractWorkflowInfo, normalizeWorkflowStatus, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import {
   APPROVAL_POLL_MS,
+  agentApprovalPreview,
   approvalCheckText,
+  approvalTagText,
   approvedInPrivateWindow,
   approvalErrorText,
   canApprove,
@@ -15,6 +17,7 @@ import {
   kindLabel,
   newPendingIds,
   orderPending,
+  rejectApprovalRequest,
   secondsLeft,
   shortDigest,
   sourceLabel,
@@ -169,12 +172,13 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
     if (!shown || busy) return;
     const approval = shown;
     setBusy(true);
-    const res = await postJson(`/v1/approvals/${encodeURIComponent(approval.approval_id)}/reject`, {});
+    const outcome = await rejectApprovalRequest(approval, {
+      cancelHomeApproval: voiceApi.homeApprovalCancel,
+      postReject: postJson,
+    });
     setBusy(false);
-    if (!(res.ok && res.data?.success)) {
-      const code = res.data?.detail?.error_code || null;
-      const fallback = typeof res.data?.result === "string" ? res.data.result : "";
-      setFailure({ code, text: approvalErrorText(code, fallback, approval.kind) });
+    if (!outcome.ok) {
+      setFailure({ code: outcome.code, text: approvalErrorText(outcome.code, outcome.fallback, approval.kind) });
       return;
     }
     removeShown(approval.approval_id);
@@ -262,7 +266,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                 <ShieldAlert size={18} aria-hidden="true" />
                 <span>{SOURCE_SHORT[shown.source] || "远程"}请求{kindLabel(shown.kind)}</span>
               </h3>
-              <span className="approval-tag">{shown.kind === "external_tool" ? "第三方工具 · 本次批准" : privateOnly ? "家居控制 · 私密窗口批准" : "R3 · 运动与出光"}</span>
+              <span className="approval-tag">{approvalTagText(shown.kind)}</span>
             </div>
             <div className="mat-modal-body">
               {pending.length > 1 && (
@@ -307,6 +311,16 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                 </dl>
               </div>
               {shown.kind === "external_tool" && <div className="voice-hint"><b>参数预览（敏感字段已隐藏，长内容可能截断）</b><pre className="approval-center-code">{JSON.stringify(shown.external?.arguments ?? {}, null, 2)}</pre><span>这是第三方操作，不代表 MOSS 验证过该服务的安全性。不确定时请选择拒绝。</span></div>}
+              {shown.kind === "agent_run" && shown.agent && (() => {
+                const agentPreview = agentApprovalPreview(shown.agent);
+                return agentPreview ? (
+                  <div className="voice-hint" id="approval-agent-preview">
+                    <b>{`Agent 任务预览 · ${agentPreview.providerLabel} · 工作目录：${agentPreview.workspaceLabel}`}</b>
+                    <pre className="approval-center-code">{agentPreview.task}</pre>
+                    <span>{agentPreview.warning}</span>
+                  </div>
+                ) : null;
+              })()}
               <p className="approval-summary">{shown.summary}</p>
               {!failure && (
                 <div className="approval-timer" aria-live="polite">

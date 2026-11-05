@@ -36,12 +36,21 @@ try {
     settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000, builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
     builtin: {
       running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003, ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
-      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }], helper_found: true }, sessions: [], events: [], timings: [], devices: [],
+      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }], helper_found: true },
+      debug_enabled: false,
+      debug_traces: [],
+      device_prefs: {},
+      goggle_bot_gifs: Object.fromEntries(["idle", "engrave", "approval", "music", "celebrate"].map((k) => [k, "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"])),
+      sessions: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", ip: "192.0.2.55", protocol_version: 1, connected_at: 1_790_000_000, state: "idle", level: 0, screen_monochrome: false, screen_width: 320, screen_height: 240, device_tools: ["self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness", "self.screen.set_theme", "self.screen.preview_image", "self.set_press_to_talk"] }],
+      events: [], timings: [],
+      devices: [{ device_id: "aa:bb:cc:11:22:33", name: "立创实战派小智", model: "lichuang-dev", firmware_version: "2.2.0", status: "allowed", last_seen: 1_790_000_000, status_json: JSON.stringify({ audio_speaker: { volume: 65 }, screen: { brightness: 80, theme: "dark" } }) }],
     },
     agent: {
       settings: { enabled: false, workspace: "", codex_executable: "", claude_executable: "" },
       strict_mode: false, providers: [], runs: [],
     },
+    kbRoots: [],
+    memoryState: { enabled: false, rows: [] },
   };
   const voiceStatus = (extra = {}) => ({
     mode: state.mode, settings: structuredClone(state.settings), server: structuredClone(state.server),
@@ -59,6 +68,32 @@ try {
     voice_builtin_status: () => structuredClone(state.builtin),
     voice_mcp_status: () => ({ servers: [], connections: [], audit: [], revision: "r1", max_servers: 8 }),
     voice_memory_list: () => [],
+    voice_context_pick_folder: () => {
+      const added = { id: "kr-1", label: "椴木工艺笔记", enabled: true, revision: 1, indexed_at: 1_790_000_000, directories: 1, files: 3 };
+      state.kbRoots = [added];
+      return added;
+    },
+    voice_context_manage: ({ input }) => {
+      switch (input?.action) {
+        case "knowledge_list": return { roots: structuredClone(state.kbRoots) };
+        case "knowledge_toggle": {
+          const r = state.kbRoots.find((x) => x.id === input.id);
+          if (r) { r.enabled = Boolean(input.enabled); r.revision += 1; }
+          return structuredClone(r || {});
+        }
+        case "knowledge_reindex": return { directories: 1, files: 3, skipped: {} };
+        case "knowledge_remove": state.kbRoots = state.kbRoots.filter((x) => x.id !== input.id); return { removed: true };
+        case "status": return { retrieval: state.memoryState.enabled, extraction: state.memoryState.enabled, project: null, devices: [{ id: "dev-1", name: "测试小智", model: "MOSS", firmware: "1.0" }], persons: [], scopes: [], legacy_summaries: [] };
+        case "list_all": return { rows: structuredClone(state.memoryState.rows) };
+        case "set_options": state.memoryState.enabled = Boolean(input.retrieval); return { retrieval: state.memoryState.enabled, extraction: state.memoryState.enabled };
+        case "quick_create": {
+          const row = { id: "ctx-1", scope: { kind: "device", id: "dev-1" }, scope_label: "测试小智", category: "preference", content: input.content, verification: "confirmed", source_kind: "user_edit", revision: 1, updated_at: 1_790_000_000, state: "active" };
+          state.memoryState.rows.unshift(row);
+          return row;
+        }
+        default: return {};
+      }
+    },
     voice_detect_python: () => ({ candidates: ["C:\\Python312\\python.exe"], suggested: "C:\\Python312\\python.exe" }),
     voice_strict_set: ({ enabled }) => ({ enabled, applied: true, needs_restart: false, env_file: "C:\\moss\\.env" }),
     voice_music_status: () => ({
@@ -155,7 +190,36 @@ try {
         }
         if (settings.jev_model) state.builtin.jev.model = settings.jev_model;
       }
+      if (Object.prototype.hasOwnProperty.call(settings, "debug_trace_enabled")) {
+        state.builtin.debug_enabled = Boolean(settings.debug_trace_enabled);
+        if (state.builtin.debug_enabled) {
+          state.builtin.debug_traces = [
+            {
+              session_id: "s-dev1",
+              turn: 1,
+              at: 1_790_000_100,
+              raw_asr: "帮我切段木书签",
+              corrected_asr: "帮我切椴木书签",
+              tools: [{ name: "generate_text_laser_task_tool", arguments: "{\"material\":\"椴木\"}", result: "预览已生成" }],
+              reply: "已准备 3 毫米椴木预览，确认开始吗？",
+              outcome: "done",
+            },
+          ];
+        } else {
+          state.builtin.debug_traces = [];
+        }
+      }
+      if (settings.clear_debug_traces) state.builtin.debug_traces = [];
       return { ...structuredClone(state.builtin), restarted: false };
+    },
+    voice_device_request: ({ deviceId, request, value }) => {
+      if (request === "set_volume" && value && typeof value.volume === "number") {
+        state.builtin.device_prefs[deviceId] = { ...(state.builtin.device_prefs[deviceId] || {}), volume: value.volume };
+      }
+      if (request === "set_talk_mode" && value && typeof value.mode === "string") {
+        state.builtin.device_prefs[deviceId] = { ...(state.builtin.device_prefs[deviceId] || {}), talk_mode: value.mode };
+      }
+      return { requested: request };
     },
   };
   await page.exposeFunction("__fakeInvoke", async (command, args = {}) => {
@@ -372,6 +436,15 @@ try {
   await page.locator("#voice-experience-save").click();
   await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存语音体验设置" }).waitFor();
   assert.equal(state.builtin.local.settings.jev_filter_enabled, true, "保存语音体验插话时长后 Jev 仍保持开启");
+  // 6c. n51：切换《流浪地球》MOSS 领航空间站风格 + 工坊补充说明 + 自定义同音纠偏
+  await page.locator("#voice-persona-style").selectOption("moss_station");
+  await page.locator("#voice-persona-prompt").fill("工坊主力机为翼宿 5W 蓝光机");
+  await page.locator("#voice-asr-corrections").fill("红松木=樟子松");
+  await page.locator("#voice-experience-save").click();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存语音体验设置" }).waitFor();
+  assert.equal(state.builtin.local.settings.persona_style, "moss_station");
+  assert.equal(state.builtin.local.settings.persona_prompt, "工坊主力机为翼宿 5W 蓝光机");
+  assert.deepEqual(state.builtin.local.settings.custom_asr_corrections, ["红松木=樟子松"]);
   await page.locator("#voice-group-experience").scrollIntoViewIfNeeded();
   await shot("voice-builtin");
 
@@ -412,6 +485,15 @@ try {
   await openGroup("music");
   assert.ok(await page.locator("#voice-group-music").getByText("本次启动已跳过本地音乐").isVisible(), "换机音乐目录缺失时展示降级提示");
 
+  // 7b. 扩展 -> 独立本地知识库：免填项目名直接添加资料目录，勾选/取消勾选立即切换挂载状态（n50）
+  await openGroup("knowledge");
+  await page.locator("#voice-knowledge-add").click();
+  await page.locator("#voice-group-knowledge").getByText("椴木工艺笔记", { exact: true }).waitFor();
+  assert.match(await page.locator("#voice-group-knowledge .voice-group-summary").innerText(), /已启用 1 \/ 1 个/, "挂载知识库后摘要显示已启用数量");
+  await page.getByLabel("对话时启用 椴木工艺笔记").uncheck();
+  assert.match(await page.locator("#voice-group-knowledge .voice-group-summary").innerText(), /未启用/, "取消勾选后摘要更新为未启用");
+  await page.getByLabel("对话时启用 椴木工艺笔记").check();
+  assert.match(await page.locator("#voice-group-knowledge .voice-group-summary").innerText(), /已启用 1 \/ 1 个/, "重新勾选即挂载");
   // 8. 隐私与家居：四项各自下拉，点开哪一项就在主页面就地展开对应设置（n26，2026-10-18）。
   await tab("隐私与家居").click();
   for (const key of ["memory", "plugins", "speaker", "home"]) {
@@ -419,6 +501,15 @@ try {
     assert.equal(await item.count(), 1, `${key} 是一项下拉`);
     assert.equal(await item.evaluate((el) => el.open), false, `${key} 默认收起`);
   }
+  const alignEdges = await page.evaluate(() => {
+    const twin = document.querySelector("#voice-moss-twin").getBoundingClientRect();
+    const firstTab = document.querySelector("#voice-page-tab-service").getBoundingClientRect();
+    const memoryBox = document.querySelector("#voice-private-memory-item").getBoundingClientRect();
+    return { twinLeft: Math.round(twin.left), twinRight: Math.round(twin.right), tabLeft: Math.round(firstTab.left), memLeft: Math.round(memoryBox.left), memRight: Math.round(memoryBox.right) };
+  });
+  assert.equal(alignEdges.tabLeft, alignEdges.twinLeft, "语音标签栏左边缘与上方孪生卡片严格对齐");
+  assert.equal(alignEdges.memLeft, alignEdges.twinLeft, "隐私与家居折叠项左边缘与上方卡片严格对齐");
+  assert.equal(alignEdges.memRight, alignEdges.twinRight, "隐私与家居折叠项右边缘与上方卡片严格对齐");
   assert.equal(await page.locator(".voice-private-item-body .voice-card").count(), 0, "未展开时不挂载设置卡");
   assert.equal(await page.locator("#voice-private-settings-open").isVisible(), false, "固件入口不在隐私与家居");
   if (process.env.VOICE_QA_DIR) await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-privacy-tab.png") });
@@ -426,8 +517,8 @@ try {
   await memoryItem.locator("> summary").click();
   assert.equal(await memoryItem.evaluate((el) => el.open), true, "点标题展开记忆设置");
   await memoryItem.getByRole("heading", { name: "对话记忆" }).waitFor();
-  assert.ok(last("voice_memory_list"), "主窗口就地读出设备记忆");
-  assert.equal(await page.locator("#voice-private-memory-advanced").evaluate((el) => el.open), false, "长期记忆默认收起");
+  assert.equal(await memoryItem.locator("#context-memory-switch").isChecked(), false, "合一记忆总开关默认关闭");
+  assert.equal(await memoryItem.locator("#voice-private-memory-advanced").count(), 0, "不再嵌套第二层长期记忆折叠框");
   if (process.env.VOICE_QA_DIR) await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-privacy-tab-open.png") });
   await memoryItem.locator("> summary").click();
   assert.equal(await memoryItem.evaluate((el) => el.open), false, "再点收起");
@@ -436,7 +527,43 @@ try {
   await openGroup("device-maintenance");
   await page.locator("#voice-private-settings-open").click();
   assert.deepEqual(last("open_voice_private").args, { section: "firmware" }, "设备维护入口打开私密固件任务");
+  // 8b. n51：记录与诊断 -> 仅内存实时对话排障镜（默认关闭，开启后展示原话与 0ms 纠偏并可一键追加纠偏规则）
+  await openGroup("live-debug-traces");
+  assert.equal(await page.locator("#voice-debug-trace-switch").isChecked(), false, "实时对话调试默认关闭");
+  await page.locator("#voice-debug-trace-switch").check();
+  await page.locator("#voice-live-debug").getByText("帮我切椴木书签").waitFor();
+  await page.locator("#voice-live-debug").getByRole("button", { name: "纠偏此句" }).click();
+  await page.locator("#voice-debug-right-word").fill("帮我切东北椴木书签");
+  await page.locator("#voice-debug-add-correction").click();
+  await page.locator("#voice-live-debug").getByText(/已添加同音纠偏/).waitFor();
+  assert.ok(state.builtin.local.settings.custom_asr_corrections.includes("帮我切段木书签=帮我切东北椴木书签"));
+  await page.locator("#voice-debug-trace-switch").uncheck();
+  assert.equal(state.builtin.debug_traces.length, 0, "关闭开关立即清空内存排障记录");
 
+  // 8c. n51 + n52：服务 -> 在线小智硬件快捷控制（320×240 彩屏识别、一键静音记忆 0%、投送雕刻预览、一键切换长按说话抗噪模式）
+  await tab("服务").click();
+  await page.locator("#voice-builtin-card").getByRole("button", { name: "信息" }).click();
+  const ctrlBox = page.locator("#voice-device-controls-aa\\:bb\\:cc\\:11\\:22\\:33");
+  await ctrlBox.waitFor();
+  await ctrlBox.getByText("320×240 彩屏").waitFor();
+  await ctrlBox.getByRole("button", { name: "静音" }).click();
+  await ctrlBox.getByText(/已静音/).waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 0 } });
+  await ctrlBox.getByRole("button", { name: "长按说话（抗噪）" }).click();
+  await ctrlBox.getByText(/长按说话（抗噪）/).first().waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_talk_mode", value: { mode: "press_to_talk" } });
+  await ctrlBox.getByRole("button", { name: /投送.*预览/ }).click();
+  await ctrlBox.getByText(/已将.*预览.*推送到小智/).waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_preview" });
+  const botCard = page.locator("#voice-goggle-bot-card");
+  await botCard.waitFor();
+  assert.equal(await botCard.locator(".voice-bot-gif-img").count(), 5, "护目镜小机器人展示 5 组 GIF 姿态");
+  await page.locator("#voice-card-style-goggle_bot").click();
+  await page.locator("#voice-bot-showcase-notice").getByText(/可爱像素小机器人/).waitFor();
+  assert.deepEqual(last("voice_local_save").args, { settings: { screen_card_style: "goggle_bot" } });
+  await page.locator("#voice-push-bot-engrave").click();
+  await page.locator("#voice-bot-showcase-notice").getByText(/戴护目镜雕刻/).waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave" } });
   // 9. 窄屏无横向滚动
   await page.setViewportSize({ width: 820, height: 1000 });
   await tab("设备").click();

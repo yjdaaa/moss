@@ -34,6 +34,11 @@ import {
   resolveMachineWorkspace,
   resolveTwinHeadPose,
   YISU_V1_PROFILE,
+  MAX_XY_TRAVEL_MM,
+  MAX_Z_TRAVEL_MM,
+  normalizeWorkspaceLimits,
+  buildTwinConnectionPayload,
+  buildTwinEmergencyStopPayload,
 } from "../twinState.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { showAlert } from "../appDialog.js";
@@ -77,11 +82,11 @@ function loadSavedWorkspaceLimits() {
       const x = Number(parsed?.x_travel_mm);
       const y = Number(parsed?.y_travel_mm);
       const z = Number(parsed?.z_travel_mm);
-      if (x >= 20 && x <= 100 && y >= 20 && y <= 100) {
+      if (x >= 20 && x <= MAX_XY_TRAVEL_MM && y >= 20 && y <= MAX_XY_TRAVEL_MM) {
         return {
           x_travel_mm: x,
           y_travel_mm: y,
-          z_travel_mm: z > 0 ? z : YISU_V1_PROFILE.zTravelMm,
+          z_travel_mm: z >= 5 && z <= MAX_Z_TRAVEL_MM ? z : YISU_V1_PROFILE.zTravelMm,
           from_hardware: Boolean(parsed?.from_hardware),
         };
       }
@@ -186,13 +191,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
   const updateWorkspaceLimits = useCallback((patch) => {
     setMachineLimits((prev) => {
       const base = prev || loadSavedWorkspaceLimits();
-      const next = {
-        ...base,
-        ...patch,
-        x_travel_mm: Math.min(100, Math.max(20, Number(patch?.x_travel_mm ?? base.x_travel_mm) || 100)),
-        y_travel_mm: Math.min(100, Math.max(20, Number(patch?.y_travel_mm ?? base.y_travel_mm) || 100)),
-        z_travel_mm: Math.min(50, Math.max(5, Number(patch?.z_travel_mm ?? base.z_travel_mm) || 20)),
-      };
+      const next = normalizeWorkspaceLimits(patch, base);
       try {
         localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(next));
       } catch (_e) {
@@ -213,15 +212,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     const baudrate = Number(localStorage.getItem("laser-forge-baud") || 115200);
     const networkHost = localStorage.getItem("laser-forge-host") || "";
     const telnetPort = Number(localStorage.getItem("laser-forge-telnet-port") || 23);
-    return {
-      connection_mode: mode,
-      port,
-      baudrate,
-      network_host: networkHost,
-       host: networkHost,
-      network_telnet_port: telnetPort,
-      telnet_port: telnetPort,
-    };
+    return buildTwinConnectionPayload({ mode, port, baudrate, networkHost, telnetPort });
   }, []);
 
   // 解析三维刀路
@@ -601,12 +592,11 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
   // 页面内急停按钮：请求 0x18 软件复位
   const handleTwinEmergencyStop = async () => {
-    const payload = {
-      ...getConnectionPayload(),
-      action: "emergency_stop",
-      confirmed: true,
-      ...(selectedWorkflowId ? { job_id: selectedWorkflowId } : {}),
-    };
+    const payload = buildTwinEmergencyStopPayload({
+      isJobRunning,
+      selectedWorkflowId,
+      connectionPayload: getConnectionPayload(),
+    });
     const res = await postJson("/api/safe-action", payload);
     const sent = res.ok && res.data?.success;
     const msg = sent
@@ -1467,14 +1457,14 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 </button>
               </div>
 
-              {/* 雕刻机可调范围微调 (20 ~ 100 mm) */}
+              {/* 雕刻机可调范围微调 (20 ~ 2000 mm) */}
               <div className="twin-metrics-grid">
                 <label className="twin-metric-box">
-                  <span>X 轴可调行程 (≤100mm)</span>
+                  <span>X 轴可调行程 (≤2000mm)</span>
                   <input
                     type="number"
                     min={20}
-                    max={100}
+                    max={MAX_XY_TRAVEL_MM}
                     step={1}
                     value={workspace.xTravelMm}
                     onChange={(e) => updateWorkspaceLimits({ x_travel_mm: e.target.value, from_hardware: false })}
@@ -1483,11 +1473,11 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
                   />
                 </label>
                 <label className="twin-metric-box">
-                  <span>Y 轴可调行程 (≤100mm)</span>
+                  <span>Y 轴可调行程 (≤2000mm)</span>
                   <input
                     type="number"
                     min={20}
-                    max={100}
+                    max={MAX_XY_TRAVEL_MM}
                     step={1}
                     value={workspace.yTravelMm}
                     onChange={(e) => updateWorkspaceLimits({ y_travel_mm: e.target.value, from_hardware: false })}

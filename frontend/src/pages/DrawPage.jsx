@@ -47,8 +47,8 @@ import {
   requiresMovedMaterialAcknowledgement,
   setMovedMaterialAcknowledged,
 } from "../repeatSendGuard.js";
-import { fetchWithDesktopSession, isRemoteMode, resolveApiUrl } from "../authSession.js";
-import { fetchPreviewBlobUrl } from "../api/client.js";
+import { isRemoteMode, resolveApiUrl } from "../authSession.js";
+import { apiFetch, fetchPreviewBlobUrl, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
@@ -62,6 +62,7 @@ import {
   drawTargetLabel,
   drawTargetMissingText,
   drawTargetReady,
+  formatFramingStatus,
   isSerial,
   normalizeDrawMode,
 } from "../drawConnection.js";
@@ -81,7 +82,6 @@ const CONFIG_KEYS = [
 ];
 const EXCALIDRAW_LANG_CODE = "zh-CN";
 const MATERIAL_CHANNEL_NAME = "laser-material-library-v1";
-const apiFetch = (...args) => fetchWithDesktopSession(fetch, ...args);
 
 const DEFAULT_FORM = {
   material: localStorage.getItem("laserLab.material") || "椴木",
@@ -402,17 +402,20 @@ export function DrawPage({ onNavigate }) {
         const simplifyRaw = String(form.vector_simplify_factor ?? "").trim();
         payload.vector_simplify_factor = simplifyRaw === "" ? 3 : Number(simplifyRaw);
       }
-      const data = await postJson("/api/draw/preview", payload);
+      const res = await postJson("/api/draw/preview", payload);
+      const data = res.data || { success: false, result: `HTTP ${res.status}` };
       setResult(data);
-      const nextWorkflowId = data?.result?.workflow_id || data?.result?.workflow?.workflow_id || "";
+      const nextWorkflowId = res.ok && data.success
+        ? data?.result?.workflow_id || data?.result?.workflow?.workflow_id || ""
+        : "";
       setWorkflowId(nextWorkflowId);
       setConfirmOpen(false);
-      if (data.success) {
+      if (res.ok && data.success) {
         const fingerprint = data?.result?.draw_lab?.content_fingerprint || "";
         setRepeatSend((current) => applyPreviewFingerprintSuccess(current, fingerprint));
         setStatus(data.result?.speech || "预览已生成");
       } else {
-        setStatus(data.result || "预览失败");
+        setStatus((typeof data.result === "string" && data.result) || "预览失败");
       }
     } catch (error) {
       setStatus(`失败：${error.message || error}`);
@@ -454,7 +457,7 @@ export function DrawPage({ onNavigate }) {
     setBusy(true);
     setStatus(offlineSd ? "提交脱机离线加工..." : "提交确认发送...");
     try {
-      const data = await postJson("/api/workflow", {
+      const res = await postJson("/api/workflow", {
         action: "confirm_send",
         workflow_id: workflowId,
         confirmed: true,
@@ -463,10 +466,17 @@ export function DrawPage({ onNavigate }) {
         run_in_background: true,
         wait_for_response: true,
       });
+      const data = res.data || { success: false, result: `HTTP ${res.status}` };
       setResult(data);
       setConfirmOpen(false);
-      setRepeatSend((current) => applyConfirmSendResponse(current, data, window.localStorage));
-      setStatus(data.success ? data.result?.speech || (offlineSd ? "已启动 SD 脱机加工" : "已交给发送门禁处理") : data.result || "发送被拒绝");
+      setRepeatSend((current) =>
+        applyConfirmSendResponse(current, res.ok ? data : { ...data, success: false }, window.localStorage),
+      );
+      setStatus(
+        res.ok && data.success
+          ? data.result?.speech || (offlineSd ? "已启动 SD 脱机加工" : "已交给发送门禁处理")
+          : (typeof data.result === "string" && data.result) || "发送被拒绝",
+      );
     } catch (error) {
       setStatus(`请求失败：${error.message || error}`);
     } finally {
@@ -494,11 +504,7 @@ export function DrawPage({ onNavigate }) {
         feed_rate: 2000,
         power: framingLight ? 1 : 0,
       });
-      if (res.data?.success) {
-        setStatus(`走边框完成 (${width.toFixed(1)} x ${height.toFixed(1)} mm${framingLight ? "，弱光" : "，未出光"})`);
-      } else {
-        setStatus(`走边框未完成：${res.data?.result || "未知错误"}`);
-      }
+      setStatus(formatFramingStatus(res, width, height, framingLight));
     } catch (e) {
       setStatus(`走边框请求失败：${e.message || e}`);
     } finally {
@@ -515,14 +521,19 @@ export function DrawPage({ onNavigate }) {
     setConnectionBusy(true);
     setStatus("测试设备连接...");
     try {
-      const data = await postJson("/api/connection/check", {
+      const res = await postJson("/api/connection/check", {
         ...drawConnectionPayload(form),
         network_transport: "telnet",
         network_timeout: 3,
         include_detail: false,
       });
+      const data = res.data || { success: false, result: `HTTP ${res.status}` };
       setConnectionResult(data);
-      setStatus(data.success ? data.result?.summary || "连接检查完成" : data.result || "连接检查失败");
+      setStatus(
+        res.ok && data.success
+          ? data.result?.summary || "连接检查完成"
+          : (typeof data.result === "string" && data.result) || "连接检查失败",
+      );
     } catch (error) {
       const message = error.message || String(error);
       setConnectionResult({ success: false, result: message });
@@ -563,9 +574,14 @@ export function DrawPage({ onNavigate }) {
     setBusy(true);
     setStatus(action === "status" ? "查询状态..." : "提交取消...");
     try {
-      const data = await postJson("/api/workflow", { action, workflow_id: workflowId });
+      const res = await postJson("/api/workflow", { action, workflow_id: workflowId });
+      const data = res.data || { success: false, result: `HTTP ${res.status}` };
       setResult(data);
-      setStatus(data.success ? data.result?.speech || "已更新" : data.result || "操作失败");
+      setStatus(
+        res.ok && data.success
+          ? data.result?.speech || "已更新"
+          : (typeof data.result === "string" && data.result) || "操作失败",
+      );
     } catch (error) {
       setStatus(`请求失败：${error.message || error}`);
     } finally {
@@ -1159,22 +1175,6 @@ function blobToDataUrl(blob) {
     reader.onerror = () => reject(reader.error || new Error("读取 PNG 失败"));
     reader.readAsDataURL(blob);
   });
-}
-
-async function postJson(url, payload) {
-  const response = await apiFetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json().catch(() => ({
-    success: false,
-    result: `HTTP ${response.status} 响应解析失败，后端可能正在启动或通信中断`,
-  }));
-  if (!response.ok) {
-    throw new Error(data.result || `HTTP ${response.status}`);
-  }
-  return data;
 }
 
 /** 从 `/preview?path=...` 下载地址取出文件名；取不到时用默认名 */

@@ -9,6 +9,9 @@ import {
   resolveMachineWorkspace,
   resolveTwinHeadPose,
   YISU_V1_PROFILE,
+  normalizeWorkspaceLimits,
+  buildTwinConnectionPayload,
+  buildTwinEmergencyStopPayload,
 } from "../src/twinState.js";
 
 test("parseGcodeWords 忽略注释与系统指令并提取模态参数", () => {
@@ -205,4 +208,80 @@ test("resolveMachineWorkspace 与 resolveTwinHeadPose 正确处理翼宿 V1.0 �
   assert.equal(fromTel.y, 6);
   assert.equal(fromTel.laserOn, false);
   assert.equal(fromTel.isLiveHardware, true);
+});
+
+test("数字孪生：实机行程上限支持 200/300/400mm 至 2000mm，默认值保持 100×100×20mm", () => {
+  const defaults = normalizeWorkspaceLimits({});
+  assert.equal(defaults.x_travel_mm, 100);
+  assert.equal(defaults.y_travel_mm, 100);
+  assert.equal(defaults.z_travel_mm, 20);
+
+  const grbl400 = normalizeWorkspaceLimits({ x_travel_mm: 400, y_travel_mm: 300, z_travel_mm: 80, from_hardware: true });
+  assert.equal(grbl400.x_travel_mm, 400);
+  assert.equal(grbl400.y_travel_mm, 300);
+  assert.equal(grbl400.z_travel_mm, 80);
+  assert.equal(grbl400.from_hardware, true);
+
+  const upperClamped = normalizeWorkspaceLimits({ x_travel_mm: 5000, y_travel_mm: 3000, z_travel_mm: 999 });
+  assert.equal(upperClamped.x_travel_mm, 2000);
+  assert.equal(upperClamped.y_travel_mm, 2000);
+  assert.equal(upperClamped.z_travel_mm, 500);
+});
+
+test("数字孪生：连接参数按模式隔离，页面内急停在非运行态不误带已完成 workflow job_id", () => {
+  const serialConn = buildTwinConnectionPayload({
+    mode: "serial",
+    port: "COM5",
+    baudrate: 115200,
+    networkHost: "192.168.1.50",
+    telnetPort: 23,
+  });
+  assert.deepEqual(serialConn, {
+    connection_mode: "serial",
+    port: "COM5",
+    baudrate: 115200,
+  });
+  assert.equal("host" in serialConn, false);
+  assert.equal("network_host" in serialConn, false);
+
+  const netConn = buildTwinConnectionPayload({
+    mode: "network",
+    port: "COM5",
+    baudrate: 115200,
+    networkHost: "192.168.1.50",
+    telnetPort: 2323,
+  });
+  assert.deepEqual(netConn, {
+    connection_mode: "network",
+    network_host: "192.168.1.50",
+    host: "192.168.1.50",
+    network_telnet_port: 2323,
+    telnet_port: 2323,
+  });
+  assert.equal("port" in netConn, false);
+
+  // 运行中任务：只带 job_id，不混入冲突连接字段
+  assert.deepEqual(
+    buildTwinEmergencyStopPayload({
+      isJobRunning: true,
+      selectedWorkflowId: "wf-live-1",
+      connectionPayload: netConn,
+    }),
+    { action: "emergency_stop", confirmed: true, job_id: "wf-live-1" },
+  );
+
+  // 已完成或仅预览任务 (!isJobRunning)：绝不带旧 job_id，直接走当前控制器连接急停
+  const directStop = buildTwinEmergencyStopPayload({
+    isJobRunning: false,
+    selectedWorkflowId: "wf-completed-old",
+    connectionPayload: serialConn,
+  });
+  assert.equal("job_id" in directStop, false);
+  assert.deepEqual(directStop, {
+    connection_mode: "serial",
+    port: "COM5",
+    baudrate: 115200,
+    action: "emergency_stop",
+    confirmed: true,
+  });
 });

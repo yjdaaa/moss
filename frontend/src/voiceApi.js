@@ -89,8 +89,9 @@ export const voiceApi = {
   builtinStop: () => invokeVoice("voice_builtin_stop"),
   deviceSetStatus: (deviceId, status) => invokeVoice("voice_device_set_status", { deviceId, status }),
   deviceRename: (deviceId, name) => invokeVoice("voice_device_rename", { deviceId, name }),
-  /** 2026-11-02：直接向一台在线设备发请求（`refresh_info` 取实时状态 / `reboot` 重启并刷新版本）。 */
-  deviceRequest: (deviceId, request) => invokeVoice("voice_device_request", { deviceId, request }),
+  /** 直接向一台在线设备发即时请求（`refresh_info` / `reboot` / `set_volume` / `set_brightness` / `set_theme` / `push_preview`）。 */
+  deviceRequest: (deviceId, request, value = undefined) =>
+    invokeVoice("voice_device_request", value === undefined ? { deviceId, request } : { deviceId, request, value }),
   // 内置语音服务的模型配置（NV5）：密钥留空表示沿用已保存的密钥；clear 中的分区删除设置与密钥
   builtinModelsTest: (section, input) => invokeVoice("voice_builtin_models_test", { section, input }),
   builtinModelsList: (section, input) => invokeVoice("voice_builtin_models_list", { section, input }),

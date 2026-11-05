@@ -104,7 +104,7 @@ impl ApprovalRow {
 /// v12：NV19-05 分层知识库：资料根目录、目录 L0/L1 摘要与文件指纹，目录摘要 FTS5 索引。
 /// v14：小智设备信息快照（`voice_devices` 的 info/hello/status 原始 JSON 与时间）。
 /// v15：设备实际使用的拾音模式（`voice_devices.listen_json` / `listen_at`）。
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -726,6 +726,21 @@ impl RuntimeDb {
                 }
             }
             tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(15,unixepoch());")?;
+        }
+        if current.unwrap_or(0) < 16 {
+            // 2026-11-04（技术书 n50）：本地知识库独立化，支持按每个资料目录单独勾选启用/停用。
+            // 加列前先查表结构，重跑迁移不会重复加列。
+            let existing = {
+                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('context_knowledge_roots')")?;
+                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                names
+            };
+            if !existing.iter().any(|name| name == "enabled") {
+                tx.execute_batch(
+                    "ALTER TABLE context_knowledge_roots ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1));",
+                )?;
+            }
+            tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(16,unixepoch());")?;
         }
         tx.commit()?;
         Ok(())
@@ -1586,11 +1601,29 @@ impl RuntimeDb {
         Ok(serde_json::to_value(self.export_material_library()?)?)
     }
 
+    pub fn replace_material_json(
+        &self,
+        value: &Value,
+        now: f64,
+    ) -> Result<MaterialImportCounts, SchemaError> {
+        self.import_material_json_inner(value, MaterialConflictPolicy::Overwrite, now, true)
+    }
+
     pub fn import_material_json(
         &self,
         value: &Value,
         policy: MaterialConflictPolicy,
         now: f64,
+    ) -> Result<MaterialImportCounts, SchemaError> {
+        self.import_material_json_inner(value, policy, now, false)
+    }
+
+    fn import_material_json_inner(
+        &self,
+        value: &Value,
+        policy: MaterialConflictPolicy,
+        now: f64,
+        clear_existing: bool,
     ) -> Result<MaterialImportCounts, SchemaError> {
         let mut counts = MaterialImportCounts::default();
         let Some(materials) = value.get("materials").and_then(Value::as_object) else {
@@ -1598,6 +1631,11 @@ impl RuntimeDb {
         };
 
         let tx = self.connection.unchecked_transaction()?;
+        if clear_existing {
+            tx.execute_batch(
+                "DELETE FROM material_params; DELETE FROM material_aliases; DELETE FROM materials;",
+            )?;
+        }
         for (name, mat_val) in materials {
             tx.execute(
                 "INSERT OR IGNORE INTO materials(name, created_at, updated_at) VALUES(?1, ?2, ?2)",

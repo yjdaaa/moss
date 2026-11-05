@@ -98,27 +98,41 @@ pub(crate) fn read_export_settings(settings_file: &Path) -> ExportSettings {
 
 /// 写回 `export` 设置：保留文件中其他键，先写临时文件再重命名，避免写出半截文件。
 pub(crate) fn write_export_settings(settings_file: &Path, settings: &ExportSettings) -> Result<(), String> {
-    let mut root = std::fs::read(settings_file)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
-    let mut export = serde_json::Map::new();
-    if let Some(dir) = &settings.dir {
-        export.insert("dir".into(), serde_json::Value::String(dir.clone()));
+    let apply = |root: &mut serde_json::Map<String, serde_json::Value>| {
+        let mut export = serde_json::Map::new();
+        if let Some(dir) = &settings.dir {
+            export.insert("dir".into(), serde_json::Value::String(dir.clone()));
+        }
+        export.insert("ask_each_time".into(), serde_json::Value::Bool(settings.ask_each_time));
+        root.insert("export".into(), serde_json::Value::Object(export));
+    };
+    #[cfg(desktop)]
+    {
+        moss_voice::settings::update_root(settings_file, apply)
     }
-    export.insert("ask_each_time".into(), serde_json::Value::Bool(settings.ask_each_time));
-    root["export"] = serde_json::Value::Object(export);
-    let data = serde_json::to_vec_pretty(&root).map_err(|e| format!("序列化设置失败: {e}"))?;
-    if let Some(parent) = settings_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建设置目录失败: {e}"))?;
+    #[cfg(not(desktop))]
+    {
+        let mut root = match std::fs::read(settings_file) {
+            Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => serde_json::Map::new(),
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .ok_or_else(|| "settings.json 格式损坏，拒绝覆盖".to_owned())?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            Err(e) => return Err(format!("读取设置失败: {e}")),
+        };
+        apply(&mut root);
+        let data = serde_json::to_vec_pretty(&root).map_err(|e| format!("序列化设置失败: {e}"))?;
+        if let Some(parent) = settings_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建设置目录失败: {e}"))?;
+        }
+        let tmp = settings_file.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, data).map_err(|e| format!("写入设置失败: {e}"))?;
+        std::fs::rename(&tmp, settings_file).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("保存设置失败: {e}")
+        })
     }
-    let tmp = settings_file.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, data).map_err(|e| format!("写入设置失败: {e}"))?;
-    std::fs::rename(&tmp, settings_file).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("保存设置失败: {e}")
-    })
 }
 
 /// 导出目录校验：绝对路径、目录存在、可写（创建并删除一个探测文件）。
@@ -491,9 +505,12 @@ mod tests {
         let file = dir.join("settings.json");
         std::fs::write(&file, b"{not json").unwrap();
         assert_eq!(read_export_settings(&file), ExportSettings::default());
-        // 损坏的文件被安全覆盖为合法 JSON
-        write_export_settings(&file, &ExportSettings { dir: None, ask_each_time: true }).unwrap();
-        assert!(read_export_settings(&file).ask_each_time);
+        // 非空损坏文件拒绝覆盖，防止抹掉其他模块配置；空文件或缺失文件可正常写入
+        assert!(write_export_settings(&file, &ExportSettings { dir: None, ask_each_time: true }).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"{not json");
+        let fresh = dir.join("fresh.json");
+        write_export_settings(&fresh, &ExportSettings { dir: None, ask_each_time: true }).unwrap();
+        assert!(read_export_settings(&fresh).ask_each_time);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

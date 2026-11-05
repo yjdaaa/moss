@@ -5,6 +5,7 @@ edition = "2024"
 description = "语音中心（技术书 §9.4，P4）：自建 xiaozhi-server 的设置、进程管理、日志与模型配置。仅桌面端使用，不进入 laser-api / moss-host / Android。"
 
 [dependencies]
+laser-contracts = { path = "../laser-contracts" }
 moss-mcp-client = { path = "../moss-mcp-client" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
