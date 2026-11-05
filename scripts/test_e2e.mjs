@@ -10,8 +10,9 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
-const RELEASE_EXE = path.join(ROOT_DIR, "target", "release", "moss-host.exe");
-const DEBUG_EXE = path.join(ROOT_DIR, "target", "debug", "moss-host.exe");
+const HOST_BIN = process.platform === "win32" ? "moss-host.exe" : "moss-host";
+const RELEASE_EXE = path.join(ROOT_DIR, "target", "release", HOST_BIN);
+const DEBUG_EXE = path.join(ROOT_DIR, "target", "debug", HOST_BIN);
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "moss-e2e-"));
 const cleanupTestDir = () => fs.rmSync(TEST_DIR, { recursive: true, force: true });
 

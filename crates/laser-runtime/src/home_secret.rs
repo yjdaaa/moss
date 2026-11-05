@@ -225,6 +225,8 @@ pub(crate) fn open(ciphertext: &str) -> Result<String, HomeSecretError> {
 
 #[cfg(target_os = "macos")]
 mod macos_keychain {
+    // 测试构建改用进程内主密钥后，钥匙串读写函数只在正式构建里使用
+    #![cfg_attr(any(test, feature = "test-memory-secret-store"), allow(dead_code))]
     use super::envelope::{self, MASTER_KEY_LEN, NONCE_LEN};
     use super::{HomeSecretError, KEYCHAIN_PREFIX};
     use std::ffi::c_void;
@@ -377,7 +379,32 @@ mod macos_keychain {
         Ok(Some(key))
     }
 
+    /// 正式构建：主密钥存放在当前用户登录钥匙串（device-only）。
+    #[cfg(not(any(test, feature = "test-memory-secret-store")))]
     fn load_or_create_master_key(create_if_missing: bool) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
+        load_or_create_keychain_master_key(create_if_missing)
+    }
+
+    /// 测试构建：主密钥只存在于本进程内存，绝不读写用户真实登录钥匙串。
+    /// 否则测试会把生产同名条目写进钥匙串，且每次重新编译的测试二进制都会触发授权弹窗导致 `cargo test` 卡死。
+    /// 仅通过 dev-dependency 的 `test-memory-secret-store` feature 或本 crate 单元测试启用，正式打包不含 dev-dependency。
+    #[cfg(any(test, feature = "test-memory-secret-store"))]
+    fn load_or_create_master_key(create_if_missing: bool) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
+        static TEST_MASTER_KEY: std::sync::Mutex<Option<[u8; MASTER_KEY_LEN]>> = std::sync::Mutex::new(None);
+        let mut slot = TEST_MASTER_KEY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = *slot {
+            return Ok(existing);
+        }
+        if !create_if_missing {
+            return Err(HomeSecretError::CryptoFailure);
+        }
+        let mut generated = [0u8; MASTER_KEY_LEN];
+        sec_random(&mut generated)?;
+        *slot = Some(generated);
+        Ok(generated)
+    }
+
+    fn load_or_create_keychain_master_key(create_if_missing: bool) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
         if let Some(existing) = query_master_key()? {
             return Ok(existing);
         }

@@ -60,5 +60,6 @@
 - [ ] 改动符合目录职责，没有跨层直连设备或数据库。
 - [ ] 工具增删已同步 `ToolCatalog`、分发分支、`tool_risk`、`mcp_tools.json` 与 `jev.rs` 粗筛归组（不按单工具平铺 `noul`）。
 - [ ] 外部效果使用 mock / `FakeGrbl`，未连接真实设备。
+- [ ] 测试不读写系统凭据库：会经过 `laser-runtime` 家居令牌封存的 crate，须在 `[dev-dependencies]` 里给 `laser-runtime` 开 `test-memory-secret-store`（macOS 上改用进程内主密钥，不碰登录钥匙串；该 feature 不得出现在正式依赖中，2026-11-05）。
 - [ ] 未提交 `.env`、运行目录、构建产物或个人配置。
 - [ ] 已按 `AGENTS.md` 运行验证，跳过项写明原因；CHANGELOG 与相关 `docs/` 已更新。

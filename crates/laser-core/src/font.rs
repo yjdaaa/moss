@@ -620,14 +620,21 @@ mod tests {
             None,
             Some(std::ffi::OsStr::new(r"D:\Users\demo\AppData\Local")),
         );
+        // 期望路径按宿主分隔符拼接：Windows 上与 `D:\Windows\Fonts\simhei.ttf` 等字面量完全一致，
+        // macOS / Linux 上 `join` 使用 `/`，避免测试因宿主平台而误报。
+        let custom_fonts = Path::new(r"D:\Windows").join("Fonts");
+        let user_fonts = Path::new(r"D:\Users\demo\AppData\Local")
+            .join("Microsoft")
+            .join("Windows")
+            .join("Fonts");
+        assert_eq!(win_candidates.first(), Some(&custom_fonts.join("simhei.ttf")));
+        assert!(win_candidates.iter().any(|p| p == &custom_fonts.join("arial.ttf")));
+        assert!(win_candidates.iter().any(|p| p == &user_fonts.join("msyh.ttc")));
+        #[cfg(windows)]
         assert_eq!(
             win_candidates.first().and_then(|p| p.to_str()),
             Some(r"D:\Windows\Fonts\simhei.ttf")
         );
-        assert!(win_candidates.iter().any(|p| p == Path::new(r"D:\Windows\Fonts\arial.ttf")));
-        assert!(win_candidates.iter().any(|p| {
-            p == Path::new(r"D:\Users\demo\AppData\Local\Microsoft\Windows\Fonts\msyh.ttc")
-        }));
 
         let mut stamp = [0u8; 8];
         getrandom::fill(&mut stamp).unwrap();

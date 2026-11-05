@@ -14,3 +14,11 @@ sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 tempfile = "3"
+
+[features]
+# 仅供测试：macOS 上用进程内主密钥代替登录钥匙串，避免测试读写用户真实钥匙串并卡在授权弹窗。
+# 只允许出现在 dev-dependencies 中；正式构建不得启用。
+test-memory-secret-store = []
+
+[dev-dependencies]
+laser-runtime = { path = ".", features = ["test-memory-secret-store"] }

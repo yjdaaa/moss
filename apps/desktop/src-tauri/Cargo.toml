@@ -35,5 +35,7 @@ getrandom = "0.3"
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
+# 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
+laser-runtime = { path = "../../../crates/laser-runtime", features = ["test-memory-secret-store"] }
 # NV19-08 host tests use temporary settings files and folders only.
 tempfile = "3"

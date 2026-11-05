@@ -32,6 +32,8 @@ windows-sys = { version = "0.59", features = [
 libc = "0.2"
 
 [dev-dependencies]
+# 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
+laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3"

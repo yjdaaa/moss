@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### macOS 上 `cargo test` 不再读写登录钥匙串，修复三处平台相关测试（2026-11-05）
+
+- **现象**：在 macOS 上跑 `cargo test --workspace` 时，`laser-host` 的 `home_control` 测试与 `laser-runtime` 家居令牌测试把生产同名主密钥 `com.moss.laser.homeassistant.master-v1` 写进用户真实登录钥匙串；每次重新编译的测试二进制都触发授权弹窗，测试进程卡死（实测 30 分钟以上）。另外字体候选测试写死了 Windows 反斜杠路径，`plugins::http` 的模拟服务器在客户端按设计拒收超大响应时因 ECONNRESET 而 panic，两者在 macOS 上必定失败。
+- **根因与修复**：`laser-runtime` 新增仅供测试的 feature `test-memory-secret-store`（本 crate 单元测试与 `laser-runtime` 自身、`laser-host`、`moss-desktop` 的 dev-dependency 启用），macOS 上改用进程内随机主密钥，信封格式与 `keychain-user-v1:` 前缀不变；正式依赖树不含该 feature（已用 `cargo tree -e normal,build` 核对）。字体测试按宿主分隔符拼接期望路径（Windows 上与原字面量一致）；模拟服务器忽略客户端提前断开造成的写入错误，断言不变。Windows DPAPI 路径与正式版行为不变，不是破坏性变更。
+- **验证**：macOS 上 `laser-runtime`、`laser-host`（含 `home_control`）、`moss-desktop` 测试跑完不再卡住，跑完后钥匙串中不出现该条目；`plugins::http` 连续 3 次通过；`laser-core` 字体测试通过。未在 Windows 上重跑。
+- **关联**：`crates/laser-runtime/{Cargo.toml,src/home_secret.rs}`、`crates/laser-host/Cargo.toml`、`apps/desktop/src-tauri/Cargo.toml`、`crates/laser-core/src/font.rs`、`crates/moss-voice-server/src/plugins/http.rs`、`docs/developer/standards.md`。
+
 ### SD 脱机按设备标尺换算功率、确认发送拒绝客户端断点行号、任务浮层急停不再被 busy 锁住（2026-11-05）
 
 - **现象**：① 设备 `$30=255` 时，SD 脱机上传的是未换算的 1000 标尺原文件，S≥255 处被固件钳位成满功率出光；流式发送的 S 值换算也漏掉 `G1X10S500` 紧凑写法（含剥离括号注释后拼出的写法）。② `confirm_send` / `send` 采用请求体自带的 `start_from_line`，会先发 `$X` 解除 Alarm 再跳过开头 G21/G90/M5 设置行，绕过 `resume` 的续雕校验。③ 激光任务浮层的急停按钮与取消共用 `disabled={busy}`，取消请求挂起时急停无法点击。

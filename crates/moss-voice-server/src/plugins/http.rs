@@ -183,7 +183,9 @@ mod tests {
             let mut incoming=[0u8;1024];
             let _=stream.read(&mut incoming);
             let response=format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",body.len());
-            stream.write_all(response.as_bytes()).unwrap();
+            // 客户端按 Content-Length 超限拒收时会立即断开；macOS 的 socket 缓冲较小，
+            // 剩余写入会收到 ECONNRESET。客户端提前断开正是被测行为，模拟服务器不得因此 panic。
+            let _ = stream.write_all(response.as_bytes());
         });
         let target=format!("http://127.0.0.1:{port}/");
         let response=client().unwrap().get(target).send().unwrap();
