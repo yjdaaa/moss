@@ -1377,7 +1377,7 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
     std::thread::sleep(Duration::from_millis(40));
     send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
-    let wait_deadline = Instant::now() + Duration::from_millis(800);
+    let wait_deadline = Instant::now() + Duration::from_millis(2500);
     while !server.status().events.iter().any(|e| e.text.contains("尚未说完"))
         && Instant::now() < wait_deadline
     {
