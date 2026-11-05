@@ -8,6 +8,13 @@ use std::net::TcpListener;
 const JEV_API_KEY_SECRET: &str = "jev_api_key";
 const DEFAULT_JEV_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
 const JEV_MODEL: &str = "typesafe/jev-1.13";
+
+fn current_moss_version() -> &'static str {
+    match option_env!("MOSS_RELEASE_VERSION") {
+        Some(ver) if !ver.is_empty() => ver,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
+}
 pub mod approval;
 pub mod agent_runs;
 pub mod external_tools;
@@ -2999,7 +3006,7 @@ impl ApiService {
                 .or_else(|| saved_map.get("check_prerelease").and_then(|v| v.as_bool()))
                 .unwrap_or(false);
             return match check_github_release_update(
-                env!("CARGO_PKG_VERSION"),
+                current_moss_version(),
                 include_prerelease,
                 DEFAULT_GITHUB_RELEASES_API,
             ) {
@@ -3103,7 +3110,7 @@ impl ApiService {
             return http_json(
                 200,
                 success(serde_json::json!({
-                    "version": env!("CARGO_PKG_VERSION"),
+                    "version": current_moss_version(),
                     "auto_check_update": auto_check_update,
                     "check_prerelease": check_prerelease,
                     "actual_port": actual,

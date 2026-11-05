@@ -158,6 +158,9 @@ if [[ -f "$HELPER_ROOT/rust-source-evidence.json" ]]; then
   fi
 fi
 
+if [[ "${MOSS_VERSION_OVERRIDE:-}" != "" ]]; then
+  export MOSS_RELEASE_VERSION="$MOSS_VERSION_OVERRIDE"
+fi
 python3 - "$OVERLAY" "$BIN_REL" "$REL_RESOURCE" "${APPLE_SIGNING_IDENTITY:-}" "${MOSS_VERSION_OVERRIDE:-}" <<'PY'
 import json, sys
 

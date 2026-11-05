@@ -3,6 +3,16 @@
 代码修复与功能变更记录，格式参考 Keep a Changelog；条目要求见 [`AGENTS.md`](AGENTS.md)“变更记录”。
 
 ## [Unreleased]
+
+## [0.3.1] - 2026-11-05
+
+### 新增类 Magpie 云端四端并行全自动 Release 流水线、便携单文件版与离线语音安装包瘦身（2026-11-05）
+
+- **现象**：原先发布多端安装包需在本机串行执行前端编译、Windows 完整版、Windows 轻量版与 Android APK，且 Windows 离线语音版将 759.5 MB 原生静态库证据目录直接打入 NSIS 安装包导致体积膨胀至约 702 MB；同时通过标签覆盖版本号发布时，`laser-api` 内置版本查询与「检查更新」仍读取静态 `Cargo.toml` 版本。
+- **根因与修复**：① 新增 `.github/workflows/release.yml` 与纯 ASCII 一键打标脚本 `scripts/release-tag.ps1`，推送 `v*` 标签后由 GitHub Actions 云端先构建一次 `frontend/dist`，再并行构建 Windows 轻量版 + 免安装便携单文件版（`MOSS_<ver>_windows_x64_portable.exe`）、Windows 离线语音版 + 独立 `moss-voice-local-<ver>-gpl-source.zip`、macOS 通用版 DMG 与 Android 签名 APK，自动计算 `SHA256SUMS.txt` 并发布 GitHub Release；② 为 `scripts/build-nv18-sidecar-safe.ps1` 增加 `-SkipFrontendBuild`、`-IncludeFullNativeEvidence`、`-VersionOverride` 与 `-EmitGplSourceZip`，默认分离大型原生静态库归档使离线语音安装包从约 702 MB 瘦身至约 35 MB；③ 在 `crates/laser-api/src/lib.rs` 新增 `current_moss_version()` 支持 `MOSS_RELEASE_VERSION` 编译期注入，使标签发版产物内显示的当前版本与「检查更新」比对版本始终与 Release 标签严格一致。默认值与安全门禁不变，破坏性变更：无。
+- **验证**：`node tests/devQuickUpdate.test.mjs` **5/5 通过**；`cargo test -p laser-api --lib version_comparison` 通过；执行 `scripts/quick-update-desktop.ps1` 编译同步本机正式版 `moss-desktop.exe`。
+- **关联**：`.github/workflows/{release.yml,release-macos.yml}`、`scripts/{release-tag.ps1,build-nv18-sidecar-safe.ps1,build-macos-installer.sh}`、`crates/laser-api/src/lib.rs`、`frontend/tests/devQuickUpdate.test.mjs`、`docs/developer/packaging-install.md`。
+
 ### 升级语音中心小智彩屏预览台为「硬核太空舱 ↔ 可爱像素小机器人」双套 160×120 动态 GIF 0ms 瞬切与推屏联动（2026-11-05）
 
 - **现象**：语音中心「服务」标签下的卡片画风切换开关此前仅改变了按钮高亮状态，下方 5 个预览窗未随「硬核太空舱」与「可爱像素小机器人」切换画面，且早期数组读取与一键推屏固定走小机器人画风。

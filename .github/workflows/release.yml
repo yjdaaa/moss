@@ -98,6 +98,7 @@ jobs:
         shell: pwsh
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           $overlay = Join-Path $env:RUNNER_TEMP "tauri-lite-overlay.json"
           @{
@@ -160,6 +161,7 @@ jobs:
         shell: pwsh
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           New-Item -ItemType Directory -Path target/release-assets -Force | Out-Null
           $srcZip = (Resolve-Path target/release-assets).Path + "\moss-voice-local-${env:VERSION}-gpl-source.zip"
@@ -215,6 +217,7 @@ jobs:
           MOSS_MACOS_TARGET: universal-apple-darwin
           MOSS_SKIP_FRONTEND_BUILD: '1'
           MOSS_VERSION_OVERRIDE: ${{ needs.prepare.outputs.version }}
+          MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           CI: 'true'
         run: |
           bash scripts/build-macos-installer.sh --with-voice-sidecar
@@ -299,6 +302,7 @@ jobs:
       - name: Build Android arm64 Release APK
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           GRADLE_OPTS: '-Dorg.gradle.daemon=false'
         run: |
           OVERLAY="$RUNNER_TEMP/tauri-android-overlay.json"

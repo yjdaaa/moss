@@ -83,6 +83,7 @@ $configuration=@{
 }
 if($VersionOverride -ne ''){
   $configuration['version']=$VersionOverride
+  $env:MOSS_RELEASE_VERSION=$VersionOverride
 }
 $configuration|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $overlay -Encoding utf8
 

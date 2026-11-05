@@ -84,5 +84,6 @@ test("Magpie-style cloud parallel release workflow and slimmed sidecar script st
     assert.ok(releaseYml.includes(job), `release.yml must include parallel job ${job}`);
   }
   assert.match(releaseYml, /-Dorg\.gradle\.daemon=false/);
+  assert.match(releaseYml, /MOSS_RELEASE_VERSION:/);
   assert.match(releaseYml, /MOSS_\$\{VERSION\}_windows_x64_portable\.exe/);
 });
