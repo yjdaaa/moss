@@ -1648,14 +1648,20 @@ impl JobProgress {
 /// 根据目标功率标尺对 G-code 行中的 S 参数进行动态等比缩放。
 /// 例如当设备标尺为 255（标准 1000）时，scale_factor = 255.0 / 1000.0 = 0.255。
 /// "M4 S1000" -> "M4 S255", "G1 X10 Y10 S500" -> "G1 X10 Y10 S128"。
+/// 紧凑写法 "G1X10S500" 同样识别（S 紧跟在上一个字的数值之后）；`$` 开头的系统指令原样保留。
 pub fn rescale_gcode_line_s(line: &str, scale_factor: f64) -> String {
-    if (scale_factor - 1.0).abs() < 1e-6 || scale_factor <= 0.0 {
+    if (scale_factor - 1.0).abs() < 1e-6 || scale_factor <= 0.0 || line.trim_start().starts_with('$') {
         return line.to_string();
     }
     let mut result = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
-        if (c == 'S' || c == 's') && (result.is_empty() || result.ends_with(' ') || result.ends_with('\t')) {
+        // S 是 G-code 字地址：位于行首、空白之后或上一个字的数值之后（紧凑写法）
+        let at_word_start = result
+            .chars()
+            .next_back()
+            .is_none_or(|prev| prev.is_whitespace() || prev.is_ascii_digit() || prev == '.');
+        if (c == 'S' || c == 's') && at_word_start {
             let mut num_str = String::new();
             while let Some(&nc) = chars.peek() {
                 if nc.is_ascii_digit() || nc == '.' {
@@ -2621,6 +2627,17 @@ mod tests {
         assert_eq!(rescale_gcode_line_s("G1 X10 Y20 S500 F3000", factor), "G1 X10 Y20 S128 F3000");
         assert_eq!(rescale_gcode_line_s("M5 S0", factor), "M5 S0");
         assert_eq!(rescale_gcode_line_s("M4 S1000", 1.0), "M4 S1000");
+    }
+
+    #[test]
+    fn rescale_gcode_line_s_handles_compact_words_and_keeps_system_commands() {
+        let factor = 255.0 / 1000.0;
+        // 紧凑写法（含剥离括号注释后拼接出的 "X10S500"）同样必须换算，否则按原值满功率出光
+        assert_eq!(rescale_gcode_line_s("G1X10S500", factor), "G1X10S128");
+        assert_eq!(rescale_gcode_line_s("M4S1000", factor), "M4S255");
+        assert_eq!(rescale_gcode_line_s("G1 X10.5S1000F600", factor), "G1 X10.5S255F600");
+        // `$` 系统指令（如 $SD/Run=）不是 G-code 字，不得改写
+        assert_eq!(rescale_gcode_line_s("$SD/Run=/sd/S500.gcode", factor), "$SD/Run=/sd/S500.gcode");
     }
 
     #[test]

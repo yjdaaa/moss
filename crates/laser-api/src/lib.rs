@@ -302,6 +302,27 @@ fn reserve_workflow_launch(
     })
 }
 
+/// SD 脱机上传内容与对应 SHA-256。标尺为 1000（`scale_factor == 1`）时原样上传已门禁校验的文件字节；
+/// 否则上传与流式发送完全相同的已校验并按设备 `$30` 换算 S 值后的行，避免固件按原值钳位成满功率。
+fn sd_offline_upload_payload(
+    original_bytes: Vec<u8>,
+    original_sha: &str,
+    prepared_lines: &[String],
+    scale_factor: f64,
+) -> (Vec<u8>, String) {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 || (scale_factor - 1.0).abs() < 1e-6 {
+        return (original_bytes, original_sha.to_owned());
+    }
+    let mut text = String::new();
+    for line in prepared_lines {
+        text.push_str(&laser_device::rescale_gcode_line_s(line, scale_factor));
+        text.push('\n');
+    }
+    use sha2::Digest;
+    let sha = hex::encode(sha2::Sha256::digest(text.as_bytes()));
+    (text.into_bytes(), sha)
+}
+
 fn target_open_mutex(locks: &TargetOpenLocks, target: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     let mut map = locks
         .lock()
@@ -1622,6 +1643,9 @@ impl ApiService {
         if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
             return Err((403, failure("预检期间设备授权已撤销，未开始加工", Some(serde_json::json!({"error_code":"voice_session_revoked"})))));
         }
+        // SD 脱机文件与流式发送使用同一功率标尺：设备 $30 不是 1000 时，上传按标尺换算后的已校验行，
+        // 并以实际上传字节的 SHA-256 做固件侧哈希门禁（原文件 SHA 已在上面与确认快照比对）。
+        let (sd_upload_bytes, sd_upload_sha) = sd_offline_upload_payload(gcode_bytes, &expected_sha, &lines, scale_factor);
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
         progress.total_lines.store(lines.len(), Ordering::Relaxed);
         progress.lines_sent.store(start_from_line, Ordering::Relaxed);
@@ -1704,7 +1728,7 @@ impl ApiService {
                     // 2. HTTP POST /upload 上传文件内容到机床 SD 卡
                     // 3. 发送 $File/ShowHash 校验硬件计算的 SHA-256 物理一致性；固件不返回哈希（未启用 HashFS）时拒绝启动（2026-10-14 用户决定）
                     // 4. 发送 $SD/Run 并进入 wait_until_sd_completed 监控
-                    let short_sha = if expected_sha.len() >= 8 { &expected_sha[..8] } else { &expected_sha };
+                    let short_sha = if sd_upload_sha.len() >= 8 { &sd_upload_sha[..8] } else { &sd_upload_sha };
                     let safe_wf_id = wf_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_");
                     let remote_filename = format!("moss_{safe_wf_id}_{short_sha}.gcode");
                     let remote_path = format!("/sd/{remote_filename}");
@@ -1728,7 +1752,7 @@ impl ApiService {
                                 host,
                                 http_port,
                                 &remote_filename,
-                                &gcode_bytes,
+                                &sd_upload_bytes,
                                 std::time::Duration::from_secs(15),
                             )
                         }
@@ -1739,7 +1763,7 @@ impl ApiService {
                     let verified = match upload_res {
                         Err(e) => Err(format!("上传脱机文件失败: {e}")),
                         Ok(()) => device
-                            .verify_sd_file_hash(&remote_path, &expected_sha, std::time::Duration::from_secs(10))
+                            .verify_sd_file_hash(&remote_path, &sd_upload_sha, std::time::Duration::from_secs(10))
                             .map_err(|e| format!("脱机文件硬件安全门禁校验失败: {e}")),
                     };
                     match verified {
@@ -4992,6 +5016,20 @@ fn cancel_completed_rejected() -> Vec<u8> {
     )
 }
 
+/// 断点行号只能由 `resume` 从服务端记录的 `lines_sent` 写入；`confirm_send` / `send` 若接受客户端
+/// 自带的 `start_from_line`，会绕过续雕校验并在跳过开头 G21/G90/M5 设置行前先发 `$X` 解锁。
+fn reject_client_resume_line(object: &serde_json::Map<String, serde_json::Value>) -> Option<Vec<u8>> {
+    object.contains_key("start_from_line").then(|| {
+        http_json(
+            400,
+            failure(
+                "确认发送不接受 start_from_line；断点续雕请使用 action=resume",
+                Some(serde_json::json!({"error_code": "resume_line_not_allowed"})),
+            ),
+        )
+    })
+}
+
 fn handle_workflow_store_request(
     store: &dyn laser_runtime::RuntimeStore,
     route: &str,
@@ -5319,6 +5357,9 @@ fn handle_workflow_store_request(
             let Some(workflow_id) = requested_id else {
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
+            if let Some(rejected) = reject_client_resume_line(object) {
+                return rejected;
+            }
             let confirmed = object.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false);
             if !confirmed {
                 return http_json(400, failure("请确认发送安全选项 (confirmed=true)", None));
@@ -5628,6 +5669,9 @@ fn handle_workflow_request(
             let Some(workflow_id) = requested_id else {
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
+            if let Some(rejected) = reject_client_resume_line(object) {
+                return rejected;
+            }
             let confirmed = object.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false);
             if !confirmed {
                 return http_json(400, failure("请确认发送安全选项 (confirmed=true)", None));
@@ -7925,6 +7969,53 @@ mod tests {
         let lines = written.lock().unwrap().clone();
         assert!(lines.iter().any(|line| line.starts_with("$File/ShowHash=")), "{lines:?}");
         assert!(!lines.iter().any(|line| line.starts_with("$SD/Run")), "没有固件哈希不能启动 SD 作业: {lines:?}");
+    }
+
+    /// SD 脱机必须和流式发送使用同一功率标尺：设备 `$30=255` 时上传换算后的行，并用上传字节的 SHA 做固件哈希门禁。
+    #[test]
+    fn sd_offline_upload_payload_rescales_power_to_device_scale() {
+        let original = b"M4 S1000\nG1X10S500 F600\nM5\n".to_vec();
+        let original_sha = hex::encode(Sha256::digest(&original));
+        let lines: Vec<String> = ["M4 S1000", "G1X10S500 F600", "M5"].map(str::to_owned).to_vec();
+
+        let (same, same_sha) = sd_offline_upload_payload(original.clone(), &original_sha, &lines, 1.0);
+        assert_eq!(same, original, "标尺 1000 时原样上传已门禁校验的文件");
+        assert_eq!(same_sha, original_sha);
+
+        let (scaled, scaled_sha) = sd_offline_upload_payload(original.clone(), &original_sha, &lines, 255.0 / 1000.0);
+        assert_eq!(String::from_utf8(scaled.clone()).unwrap(), "M4 S255\nG1X10S128 F600\nM5\n");
+        assert_eq!(scaled_sha, hex::encode(Sha256::digest(&scaled)), "固件哈希门禁必须比对实际上传的字节");
+        assert_ne!(scaled_sha, original_sha);
+    }
+
+    /// `confirm_send` / `send` 不得采用客户端自带的 `start_from_line`（只允许 `resume` 从服务端记录写入），
+    /// 否则会先发 `$X` 解锁再跳过开头 G21/G90/M5 设置行。
+    #[test]
+    fn confirm_send_rejects_client_supplied_start_from_line_for_store_and_memory_backends() {
+        for use_store in [true, false] {
+            for action in ["confirm_send", "send"] {
+                let temp = tempfile::tempdir().unwrap();
+                let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+                    .with_generated_root(temp.path().to_path_buf())
+                    .with_transport_factory(recording_transport_factory(200_000, written.clone()));
+                if use_store {
+                    service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                }
+                let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
+                    "text": "SKIP", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+                }));
+                let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
+                let send = post_json(&service, "/api/workflow", &serde_json::json!({
+                    "action": action, "workflow_id": workflow_id, "confirmed": true, "start_from_line": 5,
+                    "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
+                }));
+                assert_eq!(send["success"], false, "use_store={use_store} action={action}: {send}");
+                assert_eq!(send["detail"]["error_code"], "resume_line_not_allowed", "{send}");
+                assert_eq!(service.active_job_count(), 0);
+                assert!(written.lock().unwrap().is_empty(), "被拒绝的发送不得打开设备或写任何行");
+            }
+        }
     }
 
     #[test]

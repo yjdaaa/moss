@@ -58,6 +58,10 @@ try {
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { jobs: state.jobs } }) });
       }
       if (target.pathname === "/api/workflow" && body.action === "cancel") {
+        if (state.hangCancel) {
+          // 模拟取消请求挂起（后端卡住 / 网络无响应）：直到测试显式放行才返回
+          await new Promise((resolve) => { state.releaseCancel = resolve; });
+        }
         state.jobs = [];
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { workflow_id: body.workflow_id, status: "cancelled" } }) });
       }
@@ -134,6 +138,22 @@ try {
   await confirmDialog("急停");
   const unknownEstop = posts.find((item) => item.path === "/api/safe-action" && item.body.job_id === "job-unknown");
   assert.deepEqual(unknownEstop.body, { action: "emergency_stop", confirmed: true, job_id: "job-unknown" }, "未知态仍可发 0x18 急停");
+
+  // 7. 取消请求挂起期间急停必须仍可点击并立即发出 0x18，不能被 busy 锁住
+  state.jobs = [{ job_id: "job-hang", workflow_id: "wf-hang", state: "running", phase: "streaming", mode: "network", target: "127.0.0.1:2301", lines_sent: 10, total_lines: 100, elapsed_ms: 5_000 }];
+  state.hangCancel = true;
+  await page.locator("#job-progress-percent-0").filter({ hasText: "10%" }).waitFor({ timeout: 10_000 });
+  await page.locator("#job-progress-cancel-0").click();
+  await confirmDialog("取消加工");
+  await page.waitForFunction(() => document.querySelector("#job-progress-cancel-0")?.disabled === true);
+  assert.equal(await page.locator("#job-progress-estop-0").isDisabled(), false, "取消挂起时急停按钮必须保持可用");
+  await page.locator("#job-progress-estop-0").click();
+  await confirmDialog("急停");
+  await page.locator("#job-progress-note").filter({ hasText: "已发出急停指令" }).waitFor();
+  const hangEstop = posts.find((item) => item.path === "/api/safe-action" && item.body.job_id === "job-hang");
+  assert.deepEqual(hangEstop.body, { action: "emergency_stop", confirmed: true, job_id: "job-hang" }, "取消挂起时急停照常发出");
+  state.hangCancel = false;
+  state.releaseCancel?.();
 
   assert.deepEqual(errors, [], "页面运行期无异常");
   console.log(`JOB_DOCK_BROWSER_TEST=PASS posts=${posts.length}`);

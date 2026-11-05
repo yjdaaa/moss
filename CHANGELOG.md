@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### SD 脱机按设备标尺换算功率、确认发送拒绝客户端断点行号、任务浮层急停不再被 busy 锁住（2026-11-05）
+
+- **现象**：① 设备 `$30=255` 时，SD 脱机上传的是未换算的 1000 标尺原文件，S≥255 处被固件钳位成满功率出光；流式发送的 S 值换算也漏掉 `G1X10S500` 紧凑写法（含剥离括号注释后拼出的写法）。② `confirm_send` / `send` 采用请求体自带的 `start_from_line`，会先发 `$X` 解除 Alarm 再跳过开头 G21/G90/M5 设置行，绕过 `resume` 的续雕校验。③ 激光任务浮层的急停按钮与取消共用 `disabled={busy}`，取消请求挂起时急停无法点击。
+- **根因与修复**：① `laser-api` 新增 `sd_offline_upload_payload`：标尺为 1000 时原样上传；否则上传与流式发送相同的已校验并换算后的行，`$File/ShowHash` 比对实际上传字节的 SHA-256（原文件 SHA 仍先与确认快照比对）；`laser_device::rescale_gcode_line_s` 识别紧凑写法并保留 `$` 系统指令。② 新增 `reject_client_resume_line`，两个工作流后端的 `confirm_send` / `send` 遇到 `start_from_line` 返回 400 `resume_line_not_allowed`。③ `JobProgressDock.jsx` 的急停（含胶囊）不再读写 `busy`。契约变更：`confirm_send` 带 `start_from_line` 由放行改为 400（前端与 E2E 未使用该字段）；安全门禁只收紧，不是破坏性变更。
+- **验证**：新增 `sd_offline_upload_payload_rescales_power_to_device_scale`、`confirm_send_rejects_client_supplied_start_from_line_for_store_and_memory_backends`、`rescale_gcode_line_s_handles_compact_words_and_keeps_system_commands`；`tests/job-dock.browser.mjs` 新增“取消挂起时急停仍可用”场景（已确认旧组件会失败）；前端 `npm test` 179/179、`npm run build` 通过。本次在 macOS 上验证，未执行 Windows `quick-update-desktop.ps1`；未在真实设备上验证。
+- **关联**：`crates/laser-api/src/lib.rs`（`sd_offline_upload_payload`、`reject_client_resume_line`、`launch_send_job_unchecked`）、`crates/laser-device/src/lib.rs`（`rescale_gcode_line_s`）、`frontend/src/components/JobProgressDock.jsx`、`frontend/tests/job-dock.browser.mjs`、`docs/developer/{api-contracts,architecture,frontend-behavior}.md`、`docs/laser/grbl-esp32-network-commands.md`。
+
 ## [0.3.2] - 2026-11-05
 
 ### 修复 Android Gradle 脚本顶层语法顺序并同步跳过 buildSrc 阿里云镜像（2026-11-05）

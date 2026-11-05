@@ -133,10 +133,9 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
       { title: "急停？", danger: true, confirmText: "急停" },
     );
     if (!ok) return;
-    setBusy(true);
+    // 急停不进入 busy：取消 / 确认停稳等请求挂起时也必须能立即再发 0x18
     setNote("");
     const res = await postJson("/api/safe-action", estopPayload(view));
-    setBusy(false);
     // 请求成功只证明实时指令已写出，不证明物理停机
     setNote(res?.ok && res?.data?.success ? "已发出急停指令，请到设备旁确认已停" : `急停失败：${res?.data?.result || "请用实体急停"}`);
   }, []);
@@ -203,7 +202,6 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
           <button
             type="button"
             className="job-dock-pill-estop"
-            disabled={busy}
             onClick={() => estop(single)}
             id="job-progress-pill-estop"
             title="急停（0x18 实时软复位）"
@@ -266,7 +264,7 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
                 已确认停稳
               </button>
             )}
-            <button type="button" className="btn btn-danger" disabled={busy} onClick={() => estop(view)} id={`job-progress-estop-${index}`}>
+            <button type="button" className="btn btn-danger" onClick={() => estop(view)} id={`job-progress-estop-${index}`}>
               <OctagonX size={13} /> 急停
             </button>
           </div>
