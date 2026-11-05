@@ -42,3 +42,41 @@ export async function stopKnownJob(getTargets, sendStop) {
     message: typeof response?.data?.result === "string" ? response.data.result : "",
   };
 }
+
+/**
+ * 页面表单 → `/api/safe-action` 的显式设备目标；目标没填时返回 null（绝不猜设备）。
+ * 表单字段与发送请求一致：`connection_mode`、`port`、`baudrate`、`network_host`、`network_telnet_port`。
+ */
+export function estopTargetArgs(form) {
+  if (!form) return null;
+  if (form.connection_mode === "serial") {
+    const port = String(form.port || "").trim();
+    return port ? { connection_mode: "serial", port, baudrate: Number(form.baudrate) || 115200 } : null;
+  }
+  const host = String(form.network_host || "").trim();
+  return host ? { connection_mode: "network", host, telnet_port: Number(form.network_telnet_port) || 23 } : null;
+}
+
+/**
+ * 页面急停（2026-11-05）：先按任务编号走原设备通道；后端已找不到该任务时（刚全量发送完，
+ * GRBL 缓冲区仍可能在执行；或任务从未登记），改按本页设备目标新开连接写 0x18。
+ * 绝不退化为 workflow cancel——无活动任务时 cancel 不向设备写任何字节。
+ */
+export async function stopPageTarget(sendStop, { jobId, target } = {}) {
+  const attempts = [];
+  if (typeof jobId === "string" && jobId.trim()) {
+    attempts.push({ action: "emergency_stop", confirmed: true, job_id: jobId.trim() });
+  }
+  if (target) attempts.push({ action: "emergency_stop", confirmed: true, ...target });
+  if (attempts.length === 0) return { kind: "no_target" };
+  const messages = [];
+  for (const body of attempts) {
+    const response = await sendStop("/api/safe-action", body);
+    const message = typeof response?.data?.result === "string" ? response.data.result : "";
+    if (response?.ok && response?.data?.success) {
+      return { kind: "sent", via: body.job_id ? "job" : "target", message };
+    }
+    if (message) messages.push(message);
+  }
+  return { kind: "failed", message: messages.join("；") };
+}

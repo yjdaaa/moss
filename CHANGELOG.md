@@ -4,7 +4,21 @@
 
 ## [Unreleased]
 
+### 画板急停不再退化为取消，任务结束后急停仍能写出 0x18（2026-11-05）
+
+- **现象**：画板页把顶栏急停接到 `workflow cancel`，任务全量发送完后按急停不向设备写任何字节，还吞掉了“请使用实体急停”的提示；而 GRBL 回 ok 只代表指令进了缓冲区，机器可能仍在运动。工作台在任务结束后按急停也只报失败。
+- **根因与修复**：新增 `globalEstop.js` 的 `stopPageTarget` 与 `estopTargetArgs`：页面急停先按任务编号走原设备通道，后端找不到任务时按本页已填的设备目标新开连接写 0x18，两者都没有时不发送并如实提示。画板与工作台改用它。行为变更：这两页只要填了设备目标，即使没有工作流，顶栏急停也会向该设备写 0x18（控制器进入 Alarm，需解锁）。后端契约与安全门禁不变，不是破坏性变更。
+- **验证**：`tests/globalEstop.test.mjs` 新增 5 项；E2E 重组为 API 32 项 + 真实浏览器界面 3 项（UI-01 任务浮层取消、UI-02 任务结束后顶栏急停、UI-03 画板无任务急停），`npm run test:e2e` 35/35，设备侧断言看模拟器实际收到的字节。测试文件改名 `api.test.mjs`、调度脚本改名 `scripts/test_e2e.mjs`，`playwright` 加入前端 devDependencies。未在真实设备上验证。
+- **关联**：`frontend/src/globalEstop.js`、`frontend/src/pages/{DrawPage,HomePage}.jsx`、`frontend/tests/e2e/{api.test,workbench.ui.test,recordingGrbl}.mjs`、`scripts/test_e2e.mjs`、`docs/developer/frontend-behavior.md`、`AGENTS.md`。
+
 ## [0.3.1] - 2026-11-05
+
+### 已全量完成的任务拒绝取消，不再被改写为 cancelled（2026-11-05）
+
+- **现象**：`/api/workflow {action:"cancel"}` 不看当前状态，直接把记录写成 `cancelled`。已 `completed` 的任务（含标定矩阵）被取消后会抹掉"设备已逐行确认"的事实，而此时并没有向设备发出任何字节。E2E 的 BTN-10、BTN-31 还把这一行为当作预期写进了断言；BTN-41 因此即使任务在取消前已经跑完也会通过（假阳性）。
+- **根因与修复**：`laser-api` 的两个工作流处理函数（存储版与内存版）在取消前新增只读判断 `job_is_active`：有活动发送或启动预约时一律放行（锁异常也按活动处理，绝不拦下取消）；没有活动发送且记录已 `completed` 时返回 400 `workflow_completed`，保留原记录，并提示"如设备仍在运动请使用急停"。契约变更：已完成任务的 cancel 由 200 改为 400；其他状态与发送中的取消路径不变，安全门禁不放宽，不是破坏性变更。
+- **验证**：新增 `cancel_mid_send_is_still_accepted_for_store_and_memory_backends`（发送中途取消在两种后端都放行，且停在中途）；`run_confirm_send_gate_scenario` 改为断言已完成任务拒绝取消且 `lines_sent` 保持不变。E2E 方面：BTN-10、BTN-31 改为反向断言；BTN-41 改用自带的记录型 GRBL 模拟器（每行 ok 延迟 3ms），断言停在中途、`!`→`?`→`0x18` 的顺序以及软复位后不再下发刀路行。`npm run test:e2e` 32/32、前端 `npm test` 172/172。未在真实设备上验证。
+- **关联**：`crates/laser-api/src/lib.rs`（`job_is_active`、`cancel_completed_rejected`、`handle_workflow_store_request`、`handle_workflow_request`）、`frontend/tests/e2e/api.test.mjs`（当时名为 `buttons.test.mjs`）、`docs/developer/api-contracts.md`。
 
 ### 新增类 Magpie 云端四端并行全自动 Release 流水线、便携单文件版与离线语音安装包瘦身（2026-11-05）
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stopKnownJob } from "../src/globalEstop.js";
+import { estopTargetArgs, stopKnownJob, stopPageTarget } from "../src/globalEstop.js";
 
 test("顶栏独立于页面，使用后端唯一任务的原 job_id 发实时急停", async () => {
   const calls = [];
@@ -105,4 +105,54 @@ test("同一物理目标上新运行任务与旧未知记录并存时急停该�
     },
   );
   assert.equal(twoUnknown.kind, "ambiguous");
+});
+
+test("页面急停：任务仍在登记时只走原任务通道", async () => {
+  const calls = [];
+  const result = await stopPageTarget(
+    async (path, data) => { calls.push({ path, data }); return { ok: true, data: { success: true, result: "已发送" } }; },
+    { jobId: "wf-1", target: { connection_mode: "network", host: "127.0.0.1", telnet_port: 23 } },
+  );
+  assert.equal(result.kind, "sent");
+  assert.equal(result.via, "job");
+  assert.deepEqual(calls, [{ path: "/api/safe-action", data: { action: "emergency_stop", confirmed: true, job_id: "wf-1" } }]);
+});
+
+test("页面急停：任务已发送完（后端找不到任务）时仍按设备目标写 0x18，绝不改走 cancel", async () => {
+  const calls = [];
+  const result = await stopPageTarget(
+    async (path, data) => {
+      calls.push({ path, data });
+      return data.job_id
+        ? { ok: true, data: { success: false, result: "找不到此任务的设备连接" } }
+        : { ok: true, data: { success: true, result: "急停 0x18 已发送到 127.0.0.1:23" } };
+    },
+    { jobId: "wf-done", target: estopTargetArgs({ connection_mode: "network", network_host: " 127.0.0.1 ", network_telnet_port: "23" }) },
+  );
+  assert.equal(result.kind, "sent");
+  assert.equal(result.via, "target");
+  assert.ok(calls.every((call) => call.path === "/api/safe-action"), "急停只能走 safe-action");
+  assert.deepEqual(calls[1].data, { action: "emergency_stop", confirmed: true, connection_mode: "network", host: "127.0.0.1", telnet_port: 23 });
+});
+
+test("页面急停：没有任务也没有设备目标时不发送、如实返回", async () => {
+  let called = false;
+  const result = await stopPageTarget(async () => { called = true; }, { jobId: "", target: estopTargetArgs({ connection_mode: "network", network_host: "" }) });
+  assert.equal(result.kind, "no_target");
+  assert.equal(called, false);
+});
+
+test("页面急停：两条通道都失败时报告失败并带回后端原因", async () => {
+  const result = await stopPageTarget(
+    async (_, data) => ({ ok: false, data: { success: false, result: data.job_id ? "任务不存在" : "连接被拒绝" } }),
+    { jobId: "wf-x", target: estopTargetArgs({ connection_mode: "serial", port: "COM9", baudrate: "115200" }) },
+  );
+  assert.equal(result.kind, "failed");
+  assert.match(result.message, /任务不存在.*连接被拒绝/);
+});
+
+test("急停目标：串口模式未选串口时为 null，网口默认 23", () => {
+  assert.equal(estopTargetArgs({ connection_mode: "serial", port: " " }), null);
+  assert.deepEqual(estopTargetArgs({ connection_mode: "serial", port: "COM3", baudrate: "" }), { connection_mode: "serial", port: "COM3", baudrate: 115200 });
+  assert.deepEqual(estopTargetArgs({ connection_mode: "network", network_host: "h", network_telnet_port: "" }), { connection_mode: "network", host: "h", telnet_port: 23 });
 });

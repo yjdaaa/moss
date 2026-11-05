@@ -335,7 +335,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | `recent` | 最近记录列表 | |
 | `confirm_send` / `send` | 必须 `confirmed=true`；门禁顺序：记录存在 → 状态可发送（`sending/completed/failed/cancelled` 拒绝，`workflow_not_sendable`）→ 快照存在（`confirmation_snapshot_missing`）→ 物理文件 SHA-256 重算一致（`send_gate_rejected`）→ 设备连接、握手、`$CD`、预检、行校验（§1 增补）→ 同设备无在途作业（409 `device_busy`）。通过后后台逐行发送，响应 `status=sending` 与 `send_result`。可带 `offline_sd=true`（或 `send_mode=sd_offline`）走 SD 脱机模式（仅网口；固件不返回文件哈希时不执行 `$SD/Run`，任务记为 failed，2026-10-14） | 400 / 404 / 409 |
 | `resume` | 从 `start_from_line` 断点续传；同样要求 `confirmed=true`、快照与 SHA 一致，且记录未全量完成（`workflow_completed` / `workflow_not_resumable`） | 400 / 404 |
-| `cancel` | 置取消并走取消序列；不承诺物理停机 | 400 / 404 |
+| `cancel` | 置取消并走取消序列；不承诺物理停机。有活动发送或启动预约时一律放行；无活动发送且记录（含标定矩阵）已 `completed` 时拒绝 400 `workflow_completed`，保留 completed 与逐行确认记录，提示如设备仍在运动请走急停（2026-11-05） | 400 / 404 |
 
 严格模式（`MOSS_FUSION_STRICT=true`，§5 桌面会话）下，`confirm_send` / `send` / `resume` 在上述门禁之后、连接设备之前追加授权检查：桌面会话照常执行；小智桥接 / 局域网 / 网关返回 202 `result.status="approval_required"`，记录状态不变；本机回环无会话返回 403 `strict_mode_blocked`。标定矩阵发送（§3.8）与文字任务发送（§3.5）相同。
 

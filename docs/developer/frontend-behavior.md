@@ -75,6 +75,7 @@
 - 关闭窗口退出、托盘/菜单栏“退出程序”与 macOS `Cmd+Q`（`RunEvent::Exit`）走同一安全收尾：先急停，再停止（或放开）语音服务端、内置语音服务与第三方 MCP 子进程，最后退出（2026-10-14 起托盘退出不再漏掉后两项）。
 - 画板设备卡（2026-10-14）：连接方式可选网络（Telnet）或串口（`/api/ui/serial-ports` 刷新、可选波特率），发送、走边框、测试连接都用所选方式（`drawConnection.js`）；串口时确认框不显示 SD 脱机选项。宽 / 高留空表示按导出尺寸，填写后后端按填的尺寸出成品；生成策略只有光栅与轮廓（轮廓沿深色图形描边）。“走边框”默认不出光，勾选“走边框时弱光指示”才传 `power:1`；走边框期间顶栏急停能找到并停止它。
 - 顶栏“硬件”胶囊显示最近一次握手探测的结果（`state/hardwareStatus.js`：未探测 / 握手通过 / 未连接），提示里写探测时间，不冒充实时在线；探测在雕刻工作台进行。偏好设置「顶栏右上角状态显示」提供「隐藏右上角状态胶囊（硬件 / 小智 / 审批）」开关（`foldState.js` 的 `readHideTopPills` / `writeHideTopPills`，键 `moss_hide_top_pills`，默认关闭即保持原样显示；开启后隐藏顶栏 `#nav-hardware-status`、`#nav-mcp-status`、`#nav-approvals` 三个胶囊，常驻 `#nav-estop` 急停按钮与 `ApprovalCenter` 新审批自动弹窗保持不变）。控制台“AI 工具路由”卡中的发送门禁、急停方式、核心调度工具标“固定规则 / 固定”，是设计说明，不是检测结果。
+- 急停入口一律走 `/api/safe-action {action:"emergency_stop"}` 实时 0x18，不得改走 workflow `cancel`（2026-11-05）：顶栏先按 `/api/jobs/stop-targets` 停后端登记的任务（`globalEstop.js::stopKnownJob`）；没有登记任务时交给当前页面，工作台与画板用 `stopPageTarget` 先按任务编号停，后端找不到该任务（如刚全量发送完、GRBL 仍在执行缓冲）时改按本页已填的设备目标（`estopTargetArgs`）新开连接写 0x18；两者都没有时不发送并提示使用实体急停。审批卡与任务浮层按任务编号急停，数字孪生页无运行任务时按页面连接目标急停。
 - 视觉基线：`tests/visual-baseline/` 保存三个页面桌面与移动视口截图，用于人工核对布局，不做像素比对。
 
 ## 7. 偏好设置“导出”分区与导出流程（技术书 §9.7）

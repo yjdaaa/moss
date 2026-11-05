@@ -53,6 +53,7 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { onEmergencyStop } from "../estopBus.js";
+import { estopTargetArgs, stopPageTarget } from "../globalEstop.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
@@ -556,9 +557,19 @@ export function DrawPage({ onNavigate }) {
     }
   }
 
-  // 顶栏常驻急停：有当前工作流时执行与本页“取消”按钮相同的 workflow cancel
+  // 顶栏常驻急停（2026-11-05）：只走 `/api/safe-action` 实时 0x18，绝不退化为 workflow cancel。
+  // 顶栏已先停后端登记的任务；轮到本页说明任务已不在登记表（如刚全量发送完、GRBL 仍在执行缓冲），
+  // 此时按任务编号失败后改用本页设备目标新开连接写 0x18。
+  async function handleEStop() {
+    const outcome = await stopPageTarget(postJson, { jobId: workflowId, target: estopTargetArgs(form) });
+    const message = outcome.kind === "sent"
+      ? `${outcome.message || "急停 0x18 已发送"}。软件急停不代表物理停机，请到设备旁确认；必要时按实体急停。`
+      : `${outcome.message || "急停发送失败"}。请立即使用实体急停，并检查设备连接。`;
+    setStatus(message);
+    void showAlert(message, { title: outcome.kind === "sent" ? "已发送急停" : "急停未确认", tone: outcome.kind === "sent" ? "warning" : "error" });
+  }
   const estopRef = useRef(null);
-  estopRef.current = workflowId ? () => workflowAction("cancel") : null;
+  estopRef.current = workflowId || estopTargetArgs(form) ? handleEStop : null;
   useEffect(
     () =>
       onEmergencyStop(() => {

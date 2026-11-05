@@ -33,6 +33,7 @@ import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize
 import { showAlert, showConfirm } from "../appDialog.js";
 import { canResumeJob, formatResumeActionLabel } from "../estopResumeState.js";
 import { onEmergencyStop } from "../estopBus.js";
+import { estopTargetArgs, stopPageTarget } from "../globalEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
@@ -615,21 +616,28 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     setPollIntervalId(() => stop);
   };
 
+  const estopTarget = () => estopTargetArgs({
+    connection_mode: connectionMode,
+    port: serialPort,
+    baudrate,
+    network_host: networkHost,
+    network_telnet_port: telnetPort,
+  });
+  // 急停（2026-11-05）：先按任务编号走原设备通道；任务已不在后端登记表（刚全量发送完等）时
+  // 改按本页设备目标新开连接写 0x18，不再只提示失败。
   const handleEStop = async () => {
-    const id = currentWorkflow?.workflow_id;
-    if (!id) return;
-    const res = await postJson("/api/safe-action", { action:"emergency_stop", confirmed:true, job_id:id });
-    const sent = res.ok && res.data?.success;
+    const outcome = await stopPageTarget(postJson, { jobId: currentWorkflow?.workflow_id, target: estopTarget() });
+    const sent = outcome.kind === "sent";
     const message = sent
-      ? "停止请求已发送，但尚未确认设备已停止。请到设备旁确认，软件复位不能代替实体急停。"
-      : `${res.data?.result || "停止请求发送失败"}。请立即使用实体急停。`;
+      ? `${outcome.message || "急停 0x18 已发送"}。停止请求已发送，但尚未确认设备已停止。请到设备旁确认，软件复位不能代替实体急停。`
+      : `${outcome.message || "停止请求发送失败"}。请立即使用实体急停。`;
     setPollSafetyNotice(message);
     addLog("ESTOP", message, sent ? "warn" : "error");
     showAlert(message, { title:sent ? "停止请求已发送" : "停止未确认", tone:sent ? "warning" : "error" });
   };
-  // 顶栏常驻急停：有当前工作流时执行与监视舱急停按钮完全相同的 handleEStop
+  // 顶栏常驻急停：有当前工作流或已填设备目标时执行与监视舱急停按钮完全相同的 handleEStop
   const estopRef = useRef(null);
-  estopRef.current = currentWorkflow?.workflow_id ? handleEStop : null;
+  estopRef.current = currentWorkflow?.workflow_id || estopTarget() ? handleEStop : null;
   useEffect(
     () =>
       onEmergencyStop(() => {
