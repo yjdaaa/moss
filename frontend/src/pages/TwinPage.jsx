@@ -21,7 +21,7 @@ import {
   ChevronUp,
   ChevronDown,
 } from "lucide-react";
-import { apiFetch, getJson, postJson } from "../api/client.js";
+import { fetchPreviewText, getJson, postJson } from "../api/client.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { readFoldOpen, writeFoldOpen } from "../foldState.js";
 import { TwinStage3D } from "../components/TwinStage3D.jsx";
@@ -38,12 +38,11 @@ import {
   MAX_Z_TRAVEL_MM,
   normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
-  buildTwinEmergencyStopPayload,
+  twinEstopContext,
 } from "../twinState.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { showAlert } from "../appDialog.js";
-import { onEmergencyStop } from "../estopBus.js";
-import { isJobCoveringPageTarget } from "../globalEstop.js";
+import { usePageEmergencyStop } from "../usePageEstop.js";
 
 // 面向大鱼 DIY 翼宿 V1.0 (100×100mm 行程) 的内置演示刀路（60×60mm 标准铭牌 + 内框几何，起点对齐 (0,0)）
 const DEMO_GCODE = [
@@ -208,12 +207,20 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
   const [lastTelemetryAt, setLastTelemetryAt] = useState(null);
 
   // 读取工作台保存的连接参数
+  // 存储被禁用时读取会抛错；急停路径也会调用这里，必须退回空目标而不是中断（2026-11-05）
   const getConnectionPayload = useCallback(() => {
-    const mode = localStorage.getItem("laser-forge-conn-mode") || "network";
-    const port = localStorage.getItem("laser-forge-serial-port") || "";
-    const baudrate = Number(localStorage.getItem("laser-forge-baud") || 115200);
-    const networkHost = localStorage.getItem("laser-forge-host") || "";
-    const telnetPort = Number(localStorage.getItem("laser-forge-telnet-port") || 23);
+    const read = (key) => {
+      try {
+        return globalThis.localStorage?.getItem(key) || "";
+      } catch (_error) {
+        return "";
+      }
+    };
+    const mode = read("laser-forge-conn-mode") || "network";
+    const port = read("laser-forge-serial-port");
+    const baudrate = Number(read("laser-forge-baud") || 115200);
+    const networkHost = read("laser-forge-host");
+    const telnetPort = Number(read("laser-forge-telnet-port") || 23);
     return buildTwinConnectionPayload({ mode, port, baudrate, networkHost, telnetPort });
   }, []);
 
@@ -284,9 +291,12 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     return "";
   }, [toolpath, workspace]);
 
-  // 加载指定 workflow 的 G-code 刀路文件
+  // 加载指定 workflow 的 G-code 刀路文件。请求序号守卫（2026-11-05）：快速切换任务时，
+  // 旧任务较慢返回的刀路不得覆盖新选中的任务。
+  const workflowLoadSeqRef = useRef(0);
   const loadWorkflowToolpath = useCallback(async (wf) => {
     if (!wf) return;
+    const seq = ++workflowLoadSeqRef.current;
     setActiveWorkflow(wf);
     setSelectedWorkflowId(wf.workflow_id || "");
     setJobStatus(wf.status || "preview_ready");
@@ -305,26 +315,27 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
       }
     }
     const gcodeFile = wf.artifacts?.gcode_file || wf.gcode_file;
-    if (!gcodeFile) return;
+    if (!gcodeFile) {
+      setLoadingWorkflow(false);
+      return;
+    }
 
     setLoadingWorkflow(true);
     try {
-      const res = await apiFetch(`/preview?path=${encodeURIComponent(gcodeFile)}`);
-      if (res.ok) {
-        const text = await res.text();
-        if (text && text.trim().length > 0) {
-          setGcodeText(text);
-          const mat = wf.artifacts?.material || wf.material || "未知材质";
-          const thick = wf.artifacts?.thickness_mm || wf.thickness_mm || "";
-          setGcodeSourceLabel(`任务 ${wf.workflow_id} · ${mat} ${thick ? `${thick}mm` : ""}`);
-          setSimProgress(0);
-          setSimPlaying(true);
-        }
+      const res = await fetchPreviewText(gcodeFile);
+      if (seq !== workflowLoadSeqRef.current) return;
+      const text = res.ok ? res.text : "";
+      if (text && text.trim().length > 0) {
+        setGcodeText(text);
+        const mat = wf.artifacts?.material || wf.material || "未知材质";
+        const thick = wf.artifacts?.thickness_mm || wf.thickness_mm || "";
+        setGcodeSourceLabel(`任务 ${wf.workflow_id} · ${mat} ${thick ? `${thick}mm` : ""}`);
+        setSimProgress(0);
+        setSimPlaying(true);
       }
-    } catch (_err) {
-      // 保留当前刀路
+      // 读取失败时保留当前刀路
     } finally {
-      setLoadingWorkflow(false);
+      if (seq === workflowLoadSeqRef.current) setLoadingWorkflow(false);
     }
   }, []);
 
@@ -532,6 +543,9 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     reader.onload = () => {
       const content = String(reader.result || "");
       if (content.trim()) {
+        // 作废仍在途的任务刀路请求，避免其晚到后覆盖本地文件
+        workflowLoadSeqRef.current += 1;
+        setLoadingWorkflow(false);
         setActiveWorkflow(null);
         setSelectedWorkflowId("");
         setGcodeText(content);
@@ -608,40 +622,26 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     [workspace, toolpath.bounds, updateMaterialConfig],
   );
 
-  // 页面内急停按钮：请求 0x18 软件复位
-  const handleTwinEmergencyStop = async () => {
-    const payload = buildTwinEmergencyStopPayload({
+  // 页面内急停按钮与顶栏急停（2026-11-05）：与工作台 / 画板共用 `usePageEmergencyStop` 两段式机制——
+  // 运行中先按任务编号走原设备通道，失败或超时再按页面连接目标写 0x18；无运行任务时直接按连接目标急停。
+  const handleTwinEmergencyStop = usePageEmergencyStop(
+    () => twinEstopContext({
       isJobRunning,
       selectedWorkflowId,
       connectionPayload: getConnectionPayload(),
-    });
-    const res = await postJson("/api/safe-action", payload);
-    const sent = res.ok && res.data?.success;
-    const msg = sent
-      ? "0x18 软件复位已发送。请立即在现场核对机器物理状态，软件急停不能替代实体急停按钮。"
-      : `${res.data?.result || "急停请求发送失败"}。请立即按下机器上的实体急停开关！`;
-    await showAlert(msg, {
-      title: sent ? "已发送 0x18 急停" : "急停未确认",
-      tone: sent ? "warning" : "error",
-    });
-  };
-  const twinEstopRef = useRef(null);
-  twinEstopRef.current = (detail) => {
-    const target = getConnectionPayload();
-    const hasTarget =
-      target.connection_mode === "serial" ? Boolean(target.port) : Boolean(target.host);
-    const jobId = isJobRunning ? selectedWorkflowId : "";
-    if (!jobId && !hasTarget) return false;
-    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target: hasTarget ? target : null })) {
-      return false;
-    }
-    void handleTwinEmergencyStop();
-    return true;
-  };
-  useEffect(
-    () =>
-      onEmergencyStop((detail) => (twinEstopRef.current ? twinEstopRef.current(detail) : false)),
-    [],
+    }),
+    async (outcome) => {
+      const sent = outcome.kind === "sent";
+      const msg = sent
+        ? `${outcome.message || "0x18 软件复位已发送"}。请立即在现场核对机器物理状态，软件急停不能替代实体急停按钮。`
+        : outcome.kind === "no_target"
+          ? "没有运行中的任务，也没有填写设备连接目标，未发送急停。请立即按下机器上的实体急停开关！"
+          : `${outcome.message || "急停请求发送失败"}。请立即按下机器上的实体急停开关！`;
+      await showAlert(msg, {
+        title: sent ? "已发送 0x18 急停" : "急停未确认",
+        tone: sent ? "warning" : "error",
+      });
+    },
   );
 
   // 单步前/后移动一行（按真实累计时间比例定位）

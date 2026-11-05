@@ -417,6 +417,33 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// 每个姿势一格的 GIF 原始字节缓存槽（编码结果确定，失败也只试一次）。
+fn goggle_bot_gif_slot(pose: BotPose) -> &'static OnceLock<Option<Vec<u8>>> {
+    static SLOTS: [OnceLock<Option<Vec<u8>>>; 6] = [const { OnceLock::new() }; 6];
+    let index = match pose {
+        BotPose::IdleBlink => 0,
+        BotPose::GogglesEngrave => 1,
+        BotPose::ApprovalWave => 2,
+        BotPose::MusicGroove => 3,
+        BotPose::CelebrateDone => 4,
+        BotPose::HaltedShield => 5,
+    };
+    &SLOTS[index]
+}
+
+/// 进程级缓存的单个姿势 GIF 原始字节（2026-11-05：HTTP 路由与展台共用，每个姿势只编码一次）。
+/// 首次调用会同步编码 4 帧 GIF，异步上下文里应放到 `spawn_blocking`，或先用 [`goggle_bot_gif_if_encoded`]。
+pub fn cached_goggle_bot_gif(pose: BotPose) -> Option<&'static [u8]> {
+    goggle_bot_gif_slot(pose)
+        .get_or_init(|| encode_goggle_bot_gif(pose).ok())
+        .as_deref()
+}
+
+/// 已编码过时直接取缓存（不阻塞）；尚未编码返回 `None`。
+pub(crate) fn goggle_bot_gif_if_encoded(pose: BotPose) -> Option<Option<&'static [u8]>> {
+    goggle_bot_gif_slot(pose).get().map(Option::as_deref)
+}
+
 /// 进程级缓存全套 5 个「小 MOSS · 护目镜小机器人」动态 GIF（供语音中心实时展台直接渲染）。
 pub fn cached_goggle_bot_gifs() -> &'static [GoggleBotGifItem] {
     static CACHE: OnceLock<Vec<GoggleBotGifItem>> = OnceLock::new();
@@ -430,11 +457,11 @@ pub fn cached_goggle_bot_gifs() -> &'static [GoggleBotGifItem] {
         ]
         .into_iter()
         .filter_map(|pose| {
-            let gif = encode_goggle_bot_gif(pose).ok()?;
+            let gif = cached_goggle_bot_gif(pose)?;
             Some(GoggleBotGifItem {
                 id: pose.slug(),
                 label: pose.label_zh(),
-                data_url: format!("data:image/gif;base64,{}", base64_encode(&gif)),
+                data_url: format!("data:image/gif;base64,{}", base64_encode(gif)),
             })
         })
         .collect()

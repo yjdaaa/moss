@@ -198,6 +198,8 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 
 执行顺序：Host 校验 → 来源校验 → §5 鉴权 → 路由。
 
+**并发连接名额与回环预留（2026-11-05）**：真实 TCP 入口同时最多 64 条连接。鉴权要等读完请求才能做，所以名额在接入时按对端地址分配：非回环连接最多占 56 条，最后 8 条只留给回环连接（桌面界面、Tauri 内嵌页走 127.0.0.1）。局域网慢连接或未鉴权连接占满后，本机界面的 `/api/safe-action` 急停等请求仍能接入；名额不足时直接回 503 `{"success":false,"result":"并发连接过多，请稍后重试"}`，不读请求、不进路由。实现：`try_admit_http_connection`（`MAX_CONCURRENT_HTTP`、`LOOPBACK_RESERVED_HTTP`）。
+
 ## 2. GET 路由
 
 | 路径 | 参数 | 成功 `result` | 失败 |
@@ -333,7 +335,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | `preview` / `plan` / `create` | `source_type=text` 时等价于 §3.4；`source_type=image` 需要 `image_file`（已上传文件名，位于预览白名单目录）、`material`、`thickness_mm`（默认 3.0）；`source_type=gcode` 需要 `gcode_file`。生成产物、创建记录并冻结快照 | 400 `未指定图片素材路径` / `找不到指定的素材图片文件` / `未指定 G-code 刀路路径` / `找不到指定的 G-code 刀路文件` / `图片尺寸为 0` |
 | `status` | 返回记录并叠加内存中的实时 `send_result`（`running, total_lines, lines_sent, target, phase, error`） | 400 `workflow_id 不能为空`；404 `未找到 workflow` |
 | `recent` | 最近记录列表 | |
-| `confirm_send` / `send` | 必须 `confirmed=true`；不接受请求自带的 `start_from_line`（400 `resume_line_not_allowed`，断点行号只由 `resume` 按服务端记录的 `lines_sent` 写入，2026-11-05）；门禁顺序：记录存在 → 状态可发送（`sending/completed/failed/cancelled` 拒绝，`workflow_not_sendable`）→ 快照存在（`confirmation_snapshot_missing`）→ 物理文件 SHA-256 重算一致（`send_gate_rejected`）→ 设备连接、握手、`$CD`、预检、行校验（§1 增补）→ 同设备无在途作业（409 `device_busy`）。通过后后台逐行发送，响应 `status=sending` 与 `send_result`。可带 `offline_sd=true`（或 `send_mode=sd_offline`）走 SD 脱机模式（仅网口；固件不返回文件哈希时不执行 `$SD/Run`，任务记为 failed，2026-10-14） | 400 / 404 / 409 |
+| `confirm_send` / `send` | 必须 `confirmed=true`；不接受请求自带的 `start_from_line`（400 `resume_line_not_allowed`，断点行号只由 `resume` 按服务端记录的 `lines_sent` 写入，2026-11-05）；门禁顺序：记录存在 → 状态可发送（`sending/completed/failed/cancelled` 拒绝，`workflow_not_sendable`）→ 快照存在（`confirmation_snapshot_missing`）→ 物理文件 SHA-256 重算一致（`send_gate_rejected`）→ 设备连接、握手、`$CD`、预检、行校验（§1 增补）→ 同设备无在途作业（409 `device_busy`）。通过后后台逐行发送，响应 `status=sending` 与 `send_result`。可带 `offline_sd=true`（或 `send_mode=sd_offline`）走 SD 脱机模式（仅网口；固件不返回文件哈希时不执行 `$SD/Run`，任务记为 failed，2026-10-14）；SD 脱机上传端口取 `network_http_port`，其次 `http_port`，都缺省时为 80，给出的值必须是 1..=65535 的整数，否则在连接设备前返回 400 `sd_http_port_invalid`，不截断、不回落到 80（2026-11-05） | 400 / 404 / 409 |
 | `resume` | 从 `start_from_line` 断点续传；同样要求 `confirmed=true`、快照与 SHA 一致，且记录未全量完成（`workflow_completed` / `workflow_not_resumable`） | 400 / 404 |
 | `cancel` | 置取消并走取消序列；不承诺物理停机。有活动发送或启动预约时一律放行；无活动发送且记录（含标定矩阵）已 `completed` 时拒绝 400 `workflow_completed`，保留 completed 与逐行确认记录，提示如设备仍在运动请走急停（2026-11-05） | 400 / 404 |
 
@@ -399,13 +401,15 @@ GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflo
 
 ### 3.12 `/api/device/framing`
 
-真实驱动机器沿外接矩形走边框，用于校对材料摆放位置。字段：`min_x`、`min_y`（默认 0）、`max_x`、`max_y`（默认 100）、`feed_rate`（默认 2000）、`power`（默认 **0，不出光**；画板勾选“弱光指示”时传 1，2026-10-14 起）与 §1.5 连接字段。流程与完整发送一致（2026-10-14 起）：生成 framing G-code → 同设备在途作业 409 `device_busy` → 打开传输 → 握手 → `$CD` → Idle 预检（失败 400 `device_preflight_failed`）→ 登记为活动作业 `framing-…`（`/api/jobs/stop-targets` 可见，顶栏急停、`/api/safe-action` 带 `job_id` 可停）→ `JobWorker::send_lines`。成功 `result`：`{message:"走边框完成", job_id, laser_on, bounds}`；失败 400（生成、连接、握手、预检、行校验），500 `framing_failed`（执行失败，已补发 0x18），409 `framing_cancelled`（被急停或取消）；后两种保留为“待确认停止”目标。不经 workflow 快照，也不需要 `confirmed`，改动时按发送链路对待。严格模式下按 R3 处理（授权规则同 §3.6）。
+真实驱动机器沿外接矩形走边框，用于校对材料摆放位置。字段：`min_x`、`min_y`（默认 0）、`max_x`、`max_y`（默认 100）、`feed_rate`（默认 2000）、`power`（默认 **0，不出光**；画板勾选“弱光指示”时传 1，2026-10-14 起）与 §1.5 连接字段。`power` 必须是 0..=1000 的 JSON 整数（G-code S 标尺，下发时按设备 `$30` 换算），`feed_rate` 必须是 1..=20000 的 JSON 整数（mm/min）；超出 `i32`、越界、小数或字符串一律在审批与连接设备之前返回 400 `framing_params_invalid`，不再截断回绕（此前 `4294968096` 会变成 S800），严格模式审批摘要与实际下发因此是同一个已校验的值（2026-11-05）。流程与完整发送一致（2026-10-14 起）：生成 framing G-code → 同设备在途作业 409 `device_busy` → 打开传输 → 握手 → `$CD` → Idle 预检（失败 400 `device_preflight_failed`）→ 登记为活动作业 `framing-…`（`/api/jobs/stop-targets` 可见，顶栏急停、`/api/safe-action` 带 `job_id` 可停）→ `JobWorker::send_lines`。成功 `result`：`{message:"走边框完成", job_id, laser_on, bounds}`；失败 400（生成、连接、握手、预检、行校验），500 `framing_failed`（执行失败，已补发 0x18），409 `framing_cancelled`（被急停或取消）；后两种保留为“待确认停止”目标。不经 workflow 快照，也不需要 `confirmed`，改动时按发送链路对待。严格模式下按 R3 处理（授权规则同 §3.6）。
 
 ### 3.13 `/api/safe-action`
 
 请求体为 `laser_contracts::LaserSafeActionArgs`：`action` 必填，可选 `confirmed`、`dry_run`、`x`、`y`、`feed_rate`、`power` 与连接字段。动作集合见 [开发者安全入口](safety.md) §2；`status` 与进给/功率倍率不需确认，其余需 `confirmed=true`。成功 200，失败 400，响应体 `{success, result, detail}`。MCP `laser_safe_action_tool` 在有宿主时转发到本路由。严格模式下，除 `status`、`emergency_stop`、`soft_reset`、`laser_off`、倍率复位与降低外的动作按 R3 处理（授权规则同 §3.6，判定函数 `laser_contracts::safe_action_requires_approval`）。
 
 2026-10-10：HTTP 停止/查询请求可另带 `job_id`，仅限 `emergency_stop`、`soft_reset`、`status`，按登记任务使用其连接；编号未知或与显式目标不一致时失败，不改用其他设备。无编号时优先匹配显式连接目标；多个活动任务且无目标时拒绝随意选择。无活动任务且无编号时仍可通过明确的连接配置发送停止，不能依赖任务列表存在。`dry_run=true` 不写入活动任务的实时字节。成功只证明请求发送，不保证设备物理停止。
+
+2026-11-05：`action` 先去首尾空白再转小写后匹配（与 `laser_tools::execute_laser_safe_action_with_gate`、`safe_action_requires_approval` 一致），包括 `job_id` 允许的动作检查；`Emergency_Stop`、`EMERGENCY_STOP` 在作业运行中同样走原任务通道写出实时 0x18。
 
 ### 3.14 `/api/jev/status`、`/api/jev/reveal`、`/api/jev/test`、`/api/jev/feedback`
 

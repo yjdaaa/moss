@@ -451,6 +451,42 @@ pub fn write_raster(
     Ok(lines.join("\n") + "\n")
 }
 
+/// 把像素坐标系中的线段裁剪到 `[min, max]` 矩形内（Liang–Barsky），返回可见部分的参数区间 `(t0, t1)`；
+/// 完全不可见时返回 `None`。预览只栅格化可见部分，单段工作量因此以画布对角线为上限，
+/// 不会因 `X1e12` 这类超大坐标把步数推到 `u32::MAX` 而卡死（2026-11-05 修订）。
+fn clip_segment(p0: (f64, f64), p1: (f64, f64), min: (f64, f64), max: (f64, f64)) -> Option<(f64, f64)> {
+    let dx = p1.0 - p0.0;
+    let dy = p1.1 - p0.1;
+    let mut t0 = 0.0_f64;
+    let mut t1 = 1.0_f64;
+    for (p, q) in [
+        (-dx, p0.0 - min.0),
+        (dx, max.0 - p0.0),
+        (-dy, p0.1 - min.1),
+        (dy, max.1 - p0.1),
+    ] {
+        if !p.is_finite() || !q.is_finite() {
+            return None;
+        }
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            t0 = t0.max(r);
+        } else {
+            t1 = t1.min(r);
+        }
+        if t0 > t1 {
+            return None;
+        }
+    }
+    Some((t0, t1))
+}
+
 pub fn preview_outline(
     paths: &Paths,
     width: u32,
@@ -489,12 +525,24 @@ pub fn preview_outline(
             if !x0.is_finite() || !y0.is_finite() || !x1.is_finite() || !y1.is_finite() {
                 return Err("path contains non-finite coordinates");
             }
-            let mut steps = ((x1 - x0).hypot(y1 - y0) * sx.max(sy)).ceil() as u32;
-            steps = steps.max(1);
+            let (px0, py0) = (x0 * sx, y0 * sy);
+            let (px1, py1) = (x1 * sx, y1 * sy);
+            let Some((t0, t1)) = clip_segment(
+                (px0, py0),
+                (px1, py1),
+                (0.0, 0.0),
+                (f64::from(width), f64::from(height)),
+            ) else {
+                continue;
+            };
+            let (cx0, cy0) = (px0 + (px1 - px0) * t0, py0 + (py1 - py0) * t0);
+            let (cx1, cy1) = (px0 + (px1 - px0) * t1, py0 + (py1 - py0) * t1);
+            // 可见部分长度不超过画布对角线：每步不超过 1 像素，步数有界
+            let steps = ((cx1 - cx0).hypot(cy1 - cy0).ceil() as u32).max(1);
             for step in 0..=steps {
                 let t = f64::from(step) / f64::from(steps);
-                let px = (x0 + (x1 - x0) * t) * sx;
-                let py = (y0 + (y1 - y0) * t) * sy;
+                let px = cx0 + (cx1 - cx0) * t;
+                let py = cy0 + (cy1 - cy0) * t;
                 if px >= 0.0 && py >= 0.0 && px < f64::from(width) && py < f64::from(height) {
                     image.put_pixel(px as u32, py as u32, image::Luma([0]));
                 }
@@ -598,14 +646,25 @@ pub fn preview_outline_rgba_with_options(
             let px1 = x1 * scale + offset_x;
             let py1 = y1 * scale + offset_y;
 
-            let dist_px = (px1 - px0).hypot(py1 - py0);
+            // 自动缩放通常已把轨迹装进画布；仍按画布（含 2px 光晕）裁剪，保证单段步数有界
+            let Some((t0, t1)) = clip_segment(
+                (px0, py0),
+                (px1, py1),
+                (-3.0, -3.0),
+                (f64::from(width) + 3.0, f64::from(height) + 3.0),
+            ) else {
+                continue;
+            };
+            let (sx0, sy0) = (px0 + (px1 - px0) * t0, py0 + (py1 - py0) * t0);
+            let (sx1, sy1) = (px0 + (px1 - px0) * t1, py0 + (py1 - py0) * t1);
+            let dist_px = (sx1 - sx0).hypot(sy1 - sy0);
             let steps = (dist_px * 2.0).ceil() as u32;
             let steps = steps.max(1);
 
             for step in 0..=steps {
                 let t = f64::from(step) / f64::from(steps);
-                let cx = (px0 + (px1 - px0) * t).round() as i32;
-                let cy = (py0 + (py1 - py0) * t).round() as i32;
+                let cx = (sx0 + (sx1 - sx0) * t).round() as i32;
+                let cy = (sy0 + (sy1 - sy0) * t).round() as i32;
 
                 // 绘制高对比度多层激光等离子发光线条 (3px 线宽 + 高光白芯)
                 for dy in -2..=2 {
@@ -1022,6 +1081,28 @@ mod tests {
         assert!(output.contains("G1 X0.000 Y20.000 S120\n"));
         let preview = preview_outline(&paths, 100, 100, 20.0, 20.0).unwrap();
         assert!(preview.pixels().any(|pixel| pixel.0[0] == 0));
+    }
+
+    #[test]
+    fn preview_with_huge_coordinates_finishes_quickly_and_stays_bounded() {
+        // X1e12 让旧实现的单段步数饱和到 u32::MAX（约 43 亿次循环），预览接口会被拖死
+        let moves = parse_moves("G0 X0 Y2\nG1 X1e12 Y2 S500\nG1 X1e12 Y-1e12\n");
+        let path: Vec<_> = moves.iter().map(|m| (m.x.unwrap_or(0.0), m.y.unwrap_or(0.0))).collect();
+        assert_eq!(path[1], (1e12, 2.0));
+        let paths = vec![path];
+        let started = std::time::Instant::now();
+        let gray = preview_outline(&paths, 101, 101, 10.0, 10.0).unwrap();
+        // 可见部分仍按原位置绘制：y=2mm 那条线穿过整幅画布
+        assert_eq!(gray.get_pixel(50, 20).0[0], 0);
+        assert_eq!(gray.get_pixel(100, 20).0[0], 0);
+        assert_eq!(gray.get_pixel(50, 80).0[0], 255);
+        let rgba = preview_outline_rgba_with_options(&paths, 800, 600, 10.0, 10.0, false).unwrap();
+        assert_eq!(rgba.dimensions(), (800, 600));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "预览耗时 {:?}", started.elapsed());
+        // 完全落在画布外的超大线段直接跳过
+        let outside = vec![vec![(-1e15, -1e15), (-1e12, -2e12)]];
+        let blank = preview_outline(&outside, 50, 50, 10.0, 10.0).unwrap();
+        assert!(blank.pixels().all(|p| p.0[0] == 255));
     }
 
     #[test]

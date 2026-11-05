@@ -38,7 +38,7 @@
 ## 3. 发送进度与轮询
 
 - 确认发送前先调用 `/api/connection/check`，再调用 `/api/workflow` 的 `confirm_send` 并携带 `confirmed:true`、`workflow_id` 与连接参数；客户端不提交快照 SHA，由服务端重算。
-- 进度通过轮询 `/api/workflow {action:"status"}` 获得，显示 `send_result.lines_sent / total_lines`、`target` 与 `phase`；可信终态才停止轮询。审批、工作台与标定轮询同时最多一个请求，每次 5 秒超时，结束后间隔 1 秒再查；取消后迟到结果不写入新任务。失败保留最后状态与进度，显示“状态未知、机器可能仍在运行”，继续重试，不伪造 failed。
+- 进度通过轮询 `/api/workflow {action:"status"}` 获得，显示 `send_result.lines_sent / total_lines`、`target` 与 `phase`；可信终态才停止轮询。2026-11-05：工作台生成预览后读取 G-code 走 `api/client.js::fetchPreviewText`，非 2xx 时报错“刀路读取失败”而不把错误页当 G-code；日志里的物理 SHA-256 只显示后端返回的真实值，拿不到时写“摘要不可用”，不再伪造摘要或声称门禁已通过（发送时后端仍按物理文件重算）。顶栏状态（240 ms / 3 s）与内置语音状态（对话中 140 ms）轮询经 `pollGuard.js::createPollRunner` 保证同时最多一个请求、切换间隔或卸载后丢弃旧响应。审批、工作台与标定轮询同时最多一个请求，每次 5 秒超时，结束后间隔 1 秒再查；取消后迟到结果不写入新任务。失败保留最后状态与进度，显示“状态未知、机器可能仍在运行”，继续重试，不伪造 failed。
 - 主页支持 `action:"resume"` 从指定行续传（HomePage 内存态路径）。
 
 ## 4. 画板重复发送防呆
@@ -55,11 +55,11 @@
 | --- | --- | --- |
 | `laser-forge-conn-mode`、`laser-forge-serial-port`、`laser-forge-baud`、`laser-forge-host`、`laser-forge-telnet-port` | 主页 | 连接方式与参数 |
 | `laser-forge-mat`、`laser-forge-thick`、`laser-forge-text`、`laser-forge-font-size` | 主页 | 文字任务表单 |
-| `laserLab.material`、`laserLab.thickness_mm`、`laserLab.width_mm`、`laserLab.height_mm`、`laserLab.mode`、`laserLab.connection_mode`、`laserLab.network_host`、`laserLab.network_telnet_port`、`laserLab.port`、`laserLab.baudrate`、`laserLab.vector_simplify_factor` | 画板 | 画板表单（`mode` 旧值 `auto` 读入时按 `raster`） |
+| `laserLab.material`、`laserLab.thickness_mm`、`laserLab.width_mm`、`laserLab.height_mm`、`laserLab.mode`、`laserLab.connection_mode`、`laserLab.network_host`、`laserLab.network_telnet_port`、`laserLab.port`、`laserLab.baudrate`、`laserLab.vector_simplify_factor` | 画板 | 画板表单（`mode` 旧值 `auto` 读入时按 `raster`；`drawConnection.js::readDrawDefaultForm` 读取，存储被禁用时逐项用默认值，保存失败只提示“不会被记住”，2026-11-05） |
 | `laserLab.authToken` | 全局 | 局域网配对 token |
 | `laserLab.repeatSend.v1.lastAcceptedFingerprint` | 画板 | 重复发送防呆 |
 | `moss_draw_layout_v1` | 画板 | 创作画板四张卡片（`board` / `draw-material` / `draw-device` / `draw-send`）自由画布位置、宽高与锁定状态 |
-| `moss_close_action` | 全局 | 桌面端关闭行为（`ask` / `tray` / `exit`） |
+| `moss_close_action` | 全局 | 桌面端关闭行为（`ask` / `tray` / `exit`；存储不可用时按 `ask`，2026-11-05） |
 | `moss_hide_top_pills` | 全局 | 顶栏右上角状态胶囊（硬件 / 小智 / 审批）是否隐藏（`1` 隐藏，`0` 或未设置时默认显示） |
 | `moss_yisu_workspace_limits_v1`、`moss_yisu_material_config_v1`、`moss_yisu_hud_collapsed_v1` | 数字孪生 | 翼宿 V1.0 有效工作区范围、材料外框/材料内文字位置配置与 3D 视口浮层收起状态 |
 
@@ -73,9 +73,11 @@
 - Excalidraw 主题变量覆盖 `--color-primary`（`styles.css`），语言 `zh-CN`。
 - 桌面端关闭窗口时先弹出"最小化到托盘 / 退出"选择（macOS 显示“隐藏到菜单栏图标”并支持点 Dock 重开窗口；平台自适应文案统一在 `src/platform.js`，单元测试 `tests/platform.test.mjs`，还覆盖手动串口提示、手机连接防火墙提示、音乐目录与 Agent 路径占位及非 Windows 系统的 Agent 沙箱不可用提示）；选择可被记住到 `moss_close_action`。非 Tauri 环境下"退出"只关闭页面并显示会话终止提示。
 - 关闭窗口退出、托盘/菜单栏“退出程序”与 macOS `Cmd+Q`（`RunEvent::Exit`）走同一安全收尾：先急停，再停止（或放开）语音服务端、内置语音服务与第三方 MCP 子进程，最后退出（2026-10-14 起托盘退出不再漏掉后两项）。
-- 画板设备卡（2026-10-14）：连接方式可选网络（Telnet）或串口（`/api/ui/serial-ports` 刷新、可选波特率），发送、走边框、测试连接都用所选方式（`drawConnection.js`）；串口时确认框不显示 SD 脱机选项。宽 / 高留空表示按导出尺寸，填写后后端按填的尺寸出成品；生成策略只有光栅与轮廓（轮廓沿深色图形描边）。“走边框”默认不出光，勾选“走边框时弱光指示”才传 `power:1`；走边框期间顶栏急停能找到并停止它。
+- 画板设备卡（2026-10-14）：连接方式可选网络（Telnet）或串口（`/api/ui/serial-ports` 刷新、可选波特率），发送、走边框、测试连接都用所选方式（`drawConnection.js`）；串口时确认框不显示 SD 脱机选项。宽 / 高留空表示按导出尺寸，填写后后端按填的尺寸出成品；生成策略只有光栅与轮廓（轮廓沿深色图形描边）。“走边框”默认不出光，勾选“走边框时弱光指示”才传 `power:1`；走边框期间顶栏急停能找到并停止它。2026-11-05 用户决定：走边框会实际移动机器，点击后先弹 `showConfirm` 确认框（`drawConnection.js::framingConfirmText`：写明设备目标、边框尺寸、机器会移动；勾选弱光时标题为“确认走边框（弱光出光）”并说明会以 S1 低功率出光、需佩戴护目镜），取消则不发任何请求。急停路径不增加任何确认。
 - 顶栏“硬件”胶囊显示最近一次握手探测的结果（`state/hardwareStatus.js`：未探测 / 握手通过 / 未连接），提示里写探测时间，不冒充实时在线；探测在雕刻工作台进行。偏好设置「顶栏右上角状态显示」提供「隐藏右上角状态胶囊（硬件 / 小智 / 审批）」开关（`foldState.js` 的 `readHideTopPills` / `writeHideTopPills`，键 `moss_hide_top_pills`，默认关闭即保持原样显示；开启后隐藏顶栏 `#nav-hardware-status`、`#nav-mcp-status`、`#nav-approvals` 三个胶囊，常驻 `#nav-estop` 急停按钮与 `ApprovalCenter` 新审批自动弹窗保持不变）。控制台“AI 工具路由”卡中的发送门禁、急停方式、核心调度工具标“固定规则 / 固定”，是设计说明，不是检测结果。
-- 急停入口一律走 `/api/safe-action {action:"emergency_stop"}` 实时 0x18，不得改走 workflow `cancel`（2026-11-05）：顶栏先按 `/api/jobs/stop-targets` 停后端登记的任务（`globalEstop.js::stopKnownJob`）；没有登记任务时交给当前页面，工作台与画板用 `stopPageTarget` 先按任务编号停，后端找不到该任务（如刚全量发送完、GRBL 仍在执行缓冲）时改按本页已填的设备目标（`estopTargetArgs`）新开连接写 0x18；两者都没有时不发送并提示使用实体急停。审批卡与任务浮层按任务编号急停，数字孪生页无运行任务时按页面连接目标急停。
+- 急停入口一律走 `/api/safe-action {action:"emergency_stop"}` 实时 0x18，不得改走 workflow `cancel`（2026-11-05）：顶栏先按 `/api/jobs/stop-targets` 停后端登记的任务（`globalEstop.js::stopKnownJob`）；没有登记任务时交给当前页面，工作台、画板与数字孪生页共用 `usePageEstop.js::usePageEmergencyStop`（内部为 `globalEstop.js` 的 `createPageEstopResponder` + `stopPageTarget`）：先按任务编号停，后端找不到该任务（如刚全量发送完、GRBL 仍在执行缓冲）或请求超时时改按本页已填的设备目标（`estopTargetArgs`）新开连接写 0x18；两者都没有时不发送并提示使用实体急停。审批卡与任务浮层按任务编号急停。
+- 急停时限与并行（2026-11-05）：`api/client.js` 的 `getJson` / `postJson` 新增可选 `{ timeoutMs }`（AbortController，可与调用方 `signal` 合并；不传时行为不变），超时返回 `{ ok:false, timedOut:true }` 并说明“后端是否已处理未知”。急停路径查询 `/api/jobs/stop-targets` 限时 1.5 秒（`ESTOP_LOOKUP_TIMEOUT_MS`），写 0x18 限时 4 秒（`ESTOP_SEND_TIMEOUT_MS`）。顶栏急停（`triggerTopbarEmergencyStop`）在后端任务通道 0.8 秒（`ESTOP_PAGE_DEADLINE_MS`）内没有结果时立即通知当前页面按本页目标补发，不再排在挂起的查询之后，之后的结果不再重复通知页面；多任务无法确定（`ambiguous`）时顶栏仍不猜设备、不发送，但会通知当前页面按本页已知目标补发，并提示还有其他任务需各自急停。提示框打开期间再次按顶栏急停可立即重发。
+- 数字孪生页急停（2026-11-05）：运行中先按任务编号、失败再按页面连接目标写 0x18（`twinState.js::twinEstopContext`）；无运行任务时绝不带旧任务编号；未填连接目标时如实提示未发送。读取工作台连接参数时存储被禁用也不会中断急停。
 - 视觉基线：`tests/visual-baseline/` 保存三个页面桌面与移动视口截图，用于人工核对布局，不做像素比对。
 
 ## 7. 偏好设置“导出”分区与导出流程（技术书 §9.7）
@@ -133,3 +135,4 @@
   2. `加工下发同步 (job)`：轮询 `/api/workflow {action:"status"}`，按 `send_result.lines_sent` 实时定位已加工轨迹（`resolvePoseAtLine`），并自动消费流式发送/脱机监控期间固件 `$RI=200` 或 `?` 回传的 `send_result.last_status_report` 实时 `<Run|MPos|WPos|FS>` 报文，融合驱动 3D 激光头物理坐标、功率与遥测面板。
   3. `实机遥测映射 (telemetry)`：空闲或点动时通过 `/api/safe-action {action:"status"}` 只读采样控制器 `<State|MPos|WPos|Bf|FS|Pn|Ov|SD>` 报文（`parseGrblStatusReport`），任务运行期间同步复用 `send_result.last_status_report`（免抢占独占串口），展示机械/工作坐标、规划器与串口缓冲余量、限位/门开/急停引脚状态；支持手动调节工作区范围或通过 `/api/connection/check` 同步实机 `$CD` / GRBL 物理行程并自动做刀路越界预警。
 - **安全边界**：离线推演与本地 G-code 导入不触碰硬件；遥测采样仅发送只读 `status`（`?`）与 `connection/check`，不触发运动或出光；页面常驻 `0x18` 急停按钮。
+- 2026-11-05：切换最近任务时刀路请求带序号守卫，旧任务较慢返回的 G-code 不覆盖新选中的任务或本地导入的文件；3D 视口重建前用 `threeDispose.js::clearAndDispose` 递归释放几何体 / 材质 / 贴图，卸载时释放整个场景并 `renderer.forceContextLoss()`；拖动板材起点 / 雕刻位置滑块只平移板材、原点坐标轴与零点环，不再重建整台机台（浏览器测试 `tests/twin-estop.browser.mjs`）。

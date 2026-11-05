@@ -162,7 +162,12 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         firmware_version: String::new(),
         ip: identity.ip.clone(),
     };
-    let status = match shared.registry.seen(&visit) {
+    // 登记走本地 SQLite（同步锁）：和 open_session 一样放到阻塞线程，不占 tokio 工作线程
+    let registry = shared.registry.clone();
+    let seen = tokio::task::spawn_blocking(move || registry.seen(&visit))
+        .await
+        .unwrap_or_else(|error| Err(format!("登记任务失败：{error}")));
+    let status = match seen {
         Ok(status) => status,
         Err(error) => {
             shared
@@ -196,6 +201,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
 
     // 2026-11-02：连接握手快照（协议版本、音频参数、是否带 MCP、设备端 AEC）。
     // 桌面端「设备信息」用它显示 AEC 是否真的开启，而不是按板型推断。
+    // 2026-11-05：只有 token 校验通过且 open_session 按当前授权（已允许 + Client-Id 一致）登记成功后才写入，
+    // 冒用已允许设备 Device-Id 的未认证连接不能改写设备信息。
     let hello_snapshot = json!({
         "protocol_version": version,
         "transport": "websocket",
@@ -208,9 +215,6 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         "mcp": device_mcp,
         "aec": device_aec,
     });
-    shared
-        .registry
-        .device_snapshot(&device_id, crate::SNAPSHOT_HELLO, &hello_snapshot.to_string());
     let session_id = random_id();
     let lease = if token_ok {
         let (registry, d, c, s) = (
@@ -219,7 +223,13 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             client_id.clone(),
             session_id.clone(),
         );
-        match tokio::task::spawn_blocking(move || registry.open_session(&d, &c, &s)).await {
+        let snapshot = hello_snapshot.to_string();
+        let opened = tokio::task::spawn_blocking(move || {
+            let allowed = registry.open_session(&d, &c, &s)?;
+            registry.device_snapshot(&d, crate::SNAPSHOT_HELLO, &snapshot);
+            Ok::<_, String>(allowed)
+        });
+        match opened.await {
             Ok(Ok(allowed)) => Some(crate::SessionLease {
                 allowed,
                 registry: shared.registry.clone(),
@@ -585,7 +595,9 @@ impl Drop for ActiveTurn {
 /// 设备自带 MCP（内置语音技术书 §5.3，NV4）：握手、分页取工具清单、转发工具调用。
 struct DeviceMcp {
     next_id: u64,
-    pending: HashMap<u64, McpPending>,
+    /// 等设备回包的请求（发出时刻、种类）。2026-11-05：有界并按 [`MCP_PENDING_TTL`] 过期，
+    /// 不回包的请求不再一直留到会话结束。
+    pending: HashMap<u64, (Instant, McpPending)>,
     tools: Vec<Value>,
     /// 已请求的 tools/list 页数
     pages: usize,
@@ -605,8 +617,6 @@ enum McpPending {
     Call(oneshot::Sender<String>),
     /// 桌面端请求 `self.get_device_status`：结果不交给模型，直接写成设备快照
     Snapshot(&'static str),
-    /// 桌面端请求 `self.reboot`：设备不回响应
-    Reboot,
     /// 上位机调参/预览推送：回包只检查是否报错记事件，不覆盖设备状态快照
     Quiet(&'static str),
     /// 连接握手后查询 `self.screen.get_info` 以识别单色 OLED (`monochrome: true`) vs 彩屏 LCD
@@ -615,6 +625,10 @@ enum McpPending {
 
 /// 设备工具清单最多取多少页（防止设备返回循环的游标）
 const MAX_TOOL_PAGES: usize = 20;
+/// 等设备 MCP 回包的最长时间：超时的请求从 `pending` 移除；工具调用的等待方随之收到“设备没有返回结果”。
+const MCP_PENDING_TTL: Duration = Duration::from_secs(60);
+/// 同时等回包的设备 MCP 请求上限；超出时丢弃最早的一条。
+const MAX_MCP_PENDING: usize = 64;
 /// 交给模型的设备工具结果最长字符数
 const MAX_DEVICE_RESULT_CHARS: usize = 1500;
 
@@ -653,13 +667,38 @@ impl DeviceMcp {
     }
 
     fn request(&mut self, method: &str, params: Value, pending: McpPending) -> Value {
+        self.request_at(method, params, pending, Instant::now())
+    }
+
+    fn request_at(&mut self, method: &str, params: Value, pending: McpPending, now: Instant) -> Value {
         if matches!(pending, McpPending::ToolsList) {
             self.pages += 1;
         }
+        self.prune_pending(now);
+        while self.pending.len() >= MAX_MCP_PENDING {
+            // id 单调递增：最小的就是最早发出的
+            let Some(oldest) = self.pending.keys().min().copied() else { break };
+            self.pending.remove(&oldest);
+        }
         let id = self.next_id;
         self.next_id += 1;
-        self.pending.insert(id, pending);
+        self.pending.insert(id, (now, pending));
         json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    }
+
+    /// 设备按设计不回包的请求（如 `self.reboot`，设备随即重启断开）：分配 id 但不登记等待。
+    fn request_untracked(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    }
+
+    /// 移除超过 [`MCP_PENDING_TTL`] 仍未回包的请求，以及等待方已放弃（对话任务结束）的工具调用。
+    fn prune_pending(&mut self, now: Instant) {
+        self.pending.retain(|_, (at, pending)| {
+            now.saturating_duration_since(*at) < MCP_PENDING_TTL
+                && !matches!(pending, McpPending::Call(reply) if reply.is_closed())
+        });
     }
 
     fn model_tools(&self) -> Vec<Value> {
@@ -2364,7 +2403,7 @@ impl<'a> Session<'a> {
         if payload.get("method").is_some() {
             return Ok(());
         }
-        match device.pending.remove(&id) {
+        match device.pending.remove(&id).map(|(_, pending)| pending) {
             Some(McpPending::Initialize) => {
                 device.initialized = true;
                 let deferred = std::mem::take(&mut device.deferred_requests);
@@ -2497,8 +2536,6 @@ impl<'a> Session<'a> {
                 self.shared.registry.device_snapshot(&self.device_id, kind, &text);
                 Ok(())
             }
-            // 重启不会回响应：设备随后断开，等它重新连接上报新的 OTA
-            Some(McpPending::Reboot) => Ok(()),
             Some(McpPending::Quiet(tool)) => {
                 if payload.get("error").is_some()
                     || payload
@@ -2631,10 +2668,10 @@ impl<'a> Session<'a> {
                 let Some(device) = self.device_mcp.as_mut() else {
                     return Ok(());
                 };
-                let payload = device.request(
+                // 重启不会回响应：设备随后断开，等它重新连接上报新的 OTA；不登记等待，免得留在 pending
+                let payload = device.request_untracked(
                     "tools/call",
                     json!({ "name": "self.reboot", "arguments": {} }),
-                    McpPending::Reboot,
                 );
                 self.event("桌面端请求：self.reboot".into());
                 self.send_mcp(socket, payload).await
@@ -3288,6 +3325,9 @@ impl<'a> Session<'a> {
             if *shutdown.borrow() {
                 return "内置语音服务已停止".into();
             }
+            if let Some(device) = self.device_mcp.as_mut() {
+                device.prune_pending(Instant::now());
+            }
             let deadline = match &self.phase {
                 Phase::Speaking { next, .. } => *next,
                 // 对话任务有自己的超时（识别 / 合成 30 秒，大模型 120 秒），等待期间不算空闲
@@ -3368,5 +3408,47 @@ impl<'a> Session<'a> {
                 return reason;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod device_mcp_pending_tests {
+    use super::*;
+
+    fn id(payload: &Value) -> u64 {
+        payload["id"].as_u64().unwrap()
+    }
+
+    /// 2026-11-05：重启不登记等待；超时、等待方已放弃的请求被移除；同时等待的请求有上限。
+    #[test]
+    fn pending_requests_are_bounded_and_expire() {
+        let mut device = DeviceMcp::new();
+        let start = Instant::now();
+
+        let reboot = device.request_untracked("tools/call", json!({"name": "self.reboot"}));
+        assert!(!device.pending.contains_key(&id(&reboot)), "设备不回包的重启不应留在 pending");
+
+        let quiet = device.request_at("tools/call", json!({}), McpPending::Quiet("self.audio_speaker.set_volume"), start);
+        let (reply, waiting) = oneshot::channel();
+        let call = device.request_at("tools/call", json!({}), McpPending::Call(reply), start);
+        let (dropped_reply, dropped) = oneshot::channel();
+        let abandoned = device.request_at("tools/call", json!({}), McpPending::Call(dropped_reply), start);
+        drop(dropped);
+        device.prune_pending(start + Duration::from_secs(1));
+        assert!(device.pending.contains_key(&id(&quiet)));
+        assert!(device.pending.contains_key(&id(&call)));
+        assert!(!device.pending.contains_key(&id(&abandoned)), "对话任务已放弃的调用不再等待");
+
+        device.prune_pending(start + MCP_PENDING_TTL);
+        assert!(device.pending.is_empty(), "超时未回包的请求被移除");
+        assert!(waiting.blocking_recv().is_err(), "超时的工具调用等待方立即得到“设备没有返回结果”");
+
+        let mut first = None;
+        for _ in 0..MAX_MCP_PENDING + 10 {
+            let payload = device.request_at("tools/call", json!({}), McpPending::Quiet("q"), start);
+            first.get_or_insert(id(&payload));
+        }
+        assert_eq!(device.pending.len(), MAX_MCP_PENDING);
+        assert!(!device.pending.contains_key(&first.unwrap()), "超出上限时丢弃最早的请求");
     }
 }

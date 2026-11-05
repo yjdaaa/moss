@@ -55,3 +55,51 @@ export function formatFramingStatus(res, width, height, framingLight) {
   const errMsg = typeof res?.data?.result === "string" && res.data.result ? res.data.result : "未知错误";
   return `走边框未完成：${errMsg}`;
 }
+
+/**
+ * 画板表单默认值（2026-11-05）：从 `laserLab.*` 读上次保存的配置；存储被禁用或读取抛错时
+ * 逐项退回内置默认值，页面照常加载。
+ */
+export function readDrawDefaultForm(storage = safeBrowserStorage()) {
+  const read = (key) => {
+    try {
+      return storage?.getItem?.(`laserLab.${key}`) ?? null;
+    } catch (_error) {
+      return null;
+    }
+  };
+  return {
+    material: read("material") || "椴木",
+    thickness_mm: read("thickness_mm") || "3",
+    width_mm: read("width_mm") || "",
+    height_mm: read("height_mm") || "",
+    mode: normalizeDrawMode(read("mode")),
+    connection_mode: read("connection_mode") === "serial" ? "serial" : "network",
+    network_host: read("network_host") || "",
+    network_telnet_port: read("network_telnet_port") || "23",
+    port: read("port") || "",
+    baudrate: read("baudrate") || "115200",
+    vector_simplify_factor: read("vector_simplify_factor") || "3",
+    output_format: "gcode",
+  };
+}
+
+/** 取浏览器 localStorage；访问本身抛错（存储被禁用、沙箱）时返回 null。 */
+export function safeBrowserStorage() {
+  try {
+    return globalThis.localStorage || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * 走边框确认文案（2026-11-05 用户决定：走边框会移动机器，必须先确认；勾选弱光时说明会低功率出光）。
+ */
+export function framingConfirmText(form, width, height, framingLight) {
+  const size = `${Number(width).toFixed(1)} × ${Number(height).toFixed(1)} mm`;
+  const light = framingLight
+    ? "已勾选“弱光指示”：走边框期间激光会以 S1（约 0.1%）低功率出光，请佩戴护目镜、确认材料与周围无易燃物。"
+    : "激光保持关闭，只移动激光头。";
+  return `将连接 ${drawTargetLabel(form)}，机器会实际移动，激光头沿 ${size} 的边框走一圈。${light}\n请确认行程内无遮挡、手已离开机台；随时可按顶栏急停。`;
+}

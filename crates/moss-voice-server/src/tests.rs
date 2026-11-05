@@ -23,6 +23,11 @@ const CLIENT: &str = "uuid-device-1";
 struct FakeRegistry {
     devices: Mutex<HashMap<String, (String, DeviceStatus)>>,
     leases: Mutex<HashMap<String, (String, Arc<std::sync::atomic::AtomicBool>)>>,
+    /// 写入过的设备快照（设备、种类、JSON）
+    snapshots: Mutex<Vec<(String, String, String)>>,
+    /// 按真实数据库语义登记：同 Device-Id、不同 Client-Id 的来访不改绑定，返回已绑定记录的状态
+    /// （`laser_runtime::RuntimeDb::voice_device_seen`）。
+    keep_binding: std::sync::atomic::AtomicBool,
 }
 
 impl FakeRegistry {
@@ -40,6 +45,10 @@ impl FakeRegistry {
     fn status(&self, device_id: &str) -> Option<DeviceStatus> {
         self.devices.lock().unwrap().get(device_id).map(|entry| entry.1)
     }
+
+    fn snapshots(&self, kind: &str) -> Vec<String> {
+        self.snapshots.lock().unwrap().iter().filter(|(_, k, _)| k == kind).map(|(_, _, json)| json.clone()).collect()
+    }
 }
 
 impl DeviceRegistry for FakeRegistry {
@@ -48,6 +57,9 @@ impl DeviceRegistry for FakeRegistry {
         let entry = devices
             .entry(visit.device_id.clone())
             .or_insert_with(|| (visit.client_id.clone(), DeviceStatus::Pending));
+        if entry.0 != visit.client_id && self.keep_binding.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(entry.1);
+        }
         if entry.0 != visit.client_id && entry.1 == DeviceStatus::Allowed {
             entry.1 = DeviceStatus::Pending;
         }
@@ -70,6 +82,10 @@ impl DeviceRegistry for FakeRegistry {
 
     fn token_secret(&self) -> Result<Vec<u8>, String> {
         Ok(SECRET.to_vec())
+    }
+
+    fn device_snapshot(&self, device: &str, kind: &str, json: &str) {
+        self.snapshots.lock().unwrap().push((device.into(), kind.into(), json.into()));
     }
 }
 
@@ -347,6 +363,63 @@ fn unauthorized_devices_get_alert_then_disconnect() {
         Message::Text(text) => assert!(text.as_str().contains("Device-Id")),
         other => panic!("{other:?}"),
     }
+}
+
+/// 2026-11-05：未认证的 hello（缺 token、token 错、未允许）不写握手快照；认证通过后才写。
+#[test]
+fn unauthenticated_hello_does_not_write_device_snapshot() {
+    let (server, registry) = start();
+    // 待允许设备（首次来访即登记）
+    let mut device = connect(&server, &device_headers(None, 1));
+    hello(&mut device, 1);
+    assert_eq!(read_json(&mut device)["type"], "alert");
+    expect_closed(&mut device);
+    // 冒用已允许设备的 Device-Id，但拿不出有效 token
+    registry.set(DEVICE, DeviceStatus::Allowed);
+    for token in [None, Some("bogus.1")] {
+        let mut device = connect(&server, &device_headers(token, 1));
+        hello(&mut device, 1);
+        assert_eq!(read_json(&mut device)["type"], "alert");
+        expect_closed(&mut device);
+    }
+    assert!(registry.snapshots(SNAPSHOT_HELLO).is_empty(), "未认证连接不能改写设备信息");
+
+    // 认证通过的连接照常写入
+    let _device = allowed_device_with(&server, &registry, 1, false);
+    let hello = registry.snapshots(SNAPSHOT_HELLO);
+    assert_eq!(hello.len(), 1);
+    let hello: Value = serde_json::from_str(&hello[0]).unwrap();
+    assert_eq!(hello["protocol_version"], 1);
+    assert_eq!(hello["mcp"], false);
+}
+
+/// 2026-11-05：OTA 不带 token；同 Device-Id、不同 Client-Id 的来访（真实数据库仍返回已允许）
+/// 不写设备上报快照，Client-Id 一致的已允许设备才写。
+#[test]
+fn ota_from_spoofed_client_does_not_write_device_snapshot() {
+    let (server, registry) = start();
+    registry.keep_binding.store(true, std::sync::atomic::Ordering::Release);
+    // 待允许设备的上报不写
+    ota(&server, Some(DEVICE));
+    assert!(registry.snapshots(SNAPSHOT_INFO).is_empty());
+    registry.set(DEVICE, DeviceStatus::Allowed);
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{}/xiaozhi/ota/", server.http_port()))
+        .header("Device-Id", DEVICE)
+        .header("Client-Id", "uuid-spoofer")
+        .header("Content-Type", "application/json")
+        .body(r#"{"application":{"version":"6.6.6"},"board":{"type":"spoofed"}}"#)
+        .send()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(registry.status(DEVICE), Some(DeviceStatus::Allowed), "绑定未被替换");
+    assert!(registry.snapshots(SNAPSHOT_INFO).is_empty(), "冒用 Device-Id 的上报不能改写设备信息");
+
+    ota(&server, Some(DEVICE));
+    let info = registry.snapshots(SNAPSHOT_INFO);
+    assert_eq!(info.len(), 1);
+    assert!(info[0].contains("1.9.2") && !info[0].contains("6.6.6"));
 }
 
 fn allowed_device(server: &VoiceServer, registry: &FakeRegistry, version: u32) -> Device {

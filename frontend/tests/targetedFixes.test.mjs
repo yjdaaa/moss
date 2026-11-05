@@ -194,3 +194,29 @@ test("VoiceAgentCard 5 秒轮询保脏、VoicePage 链路提示、HomePage 预�
     await server.close();
   }
 });
+
+test("工作台预览：不伪造 SHA-256、不跳过 HTTP 状态检查，统一走 fetchPreviewText", () => {
+  const home = readFileSync(path.join(srcRoot, "pages/HomePage.jsx"), "utf8");
+  assert.doesNotMatch(home, /d8f2b1a9/, "不得用假摘要兜底");
+  assert.doesNotMatch(home, /preview\?path=\$\{encodeURIComponent\(artifacts\.gcode_file\)\}/, "G-code 预览统一走 fetchPreviewText");
+  assert.match(home, /fetchPreviewText\(artifacts\.gcode_file\)/);
+  assert.match(home, /摘要不可用/);
+  const twin = readFileSync(path.join(srcRoot, "pages/TwinPage.jsx"), "utf8");
+  assert.match(twin, /fetchPreviewText\(gcodeFile\)/);
+  assert.match(twin, /seq !== workflowLoadSeqRef\.current/, "旧任务刀路响应不得覆盖新选中的任务");
+});
+
+test("三个页面共用 usePageEmergencyStop 两段式急停；走边框先确认，急停路径不加确认", () => {
+  for (const file of ["pages/HomePage.jsx", "pages/DrawPage.jsx", "pages/TwinPage.jsx"]) {
+    const source = readFileSync(path.join(srcRoot, file), "utf8");
+    assert.match(source, /usePageEmergencyStop\(/, `${file} 必须复用共享页面急停`);
+    assert.doesNotMatch(source, /onEmergencyStop\(/, `${file} 不得自行再注册一份急停监听`);
+  }
+  const hook = readFileSync(path.join(srcRoot, "usePageEstop.js"), "utf8");
+  assert.doesNotMatch(hook, /showConfirm/, "急停路径不得增加确认框");
+  const draw = readFileSync(path.join(srcRoot, "pages/DrawPage.jsx"), "utf8");
+  const framing = draw.slice(draw.indexOf("async function runFraming()"), draw.indexOf("async function testConnection()"));
+  assert.ok(framing.indexOf("showConfirm(") > 0 && framing.indexOf("showConfirm(") < framing.indexOf('postJson("/api/device/framing"'), "走边框必须先确认再下发");
+  assert.match(framing, /if \(!confirmed\)/);
+  assert.doesNotMatch(draw, /^const DEFAULT_FORM = \{[\s\S]*?localStorage\.getItem/m, "模块顶层不得直接读 localStorage");
+});

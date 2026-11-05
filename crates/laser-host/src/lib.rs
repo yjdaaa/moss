@@ -225,8 +225,8 @@ pub fn install_console_ctrl_handler() {
             fn pipe(fds: *mut i32) -> i32;
             fn close(fd: i32) -> i32;
             fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-            fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+            fn read(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
+            fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
             fn signal(signum: i32, handler: usize) -> usize;
             fn raise(signum: i32) -> i32;
         }
@@ -250,7 +250,7 @@ pub fn install_console_ctrl_handler() {
             if fd >= 0 {
                 let byte = signum as u8;
                 unsafe {
-                    let _ = write(fd, &byte as *const u8, 1);
+                    let _ = write(fd, (&byte as *const u8).cast(), 1);
                 }
             }
         }
@@ -279,7 +279,7 @@ pub fn install_console_ctrl_handler() {
             .spawn(move || {
                 let mut byte = 0u8;
                 loop {
-                    let n = unsafe { read(rd, &mut byte as *mut u8, 1) };
+                    let n = unsafe { read(rd, (&mut byte as *mut u8).cast(), 1) };
                     if n == 1 {
                         let signum = i32::from(byte);
                         global_shutdown_coordinator().trigger_shutdown();

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -120,13 +120,76 @@ pub trait DeviceTransport: Send + Sync {
     fn raw_abort_handle(&self) -> Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>> {
         None
     }
+    /// 传输层建议的字符计数窗口上限（字节）。默认取经典 GRBL 1.1 串口可用的 127 字节；
+    /// 实际窗口还要经 [`DeviceConnection::effective_rx_window`] 按设备身份与 `Bf:` 观测收紧。
     fn default_rx_buffer_size(&self) -> usize {
-        255
+        GRBL_CLASSIC_RX_WINDOW
+    }
+}
+
+/// 经典 GRBL 1.1 串口 RX 环形缓冲 `RX_BUFFER_SIZE = 128`，环形结构实际只能存 127 字节；
+/// 未确认设备容量前，字符计数窗口不得超过它（2026-11-05 修订）。
+pub const GRBL_CLASSIC_RX_WINDOW: usize = 127;
+/// 已通过 `$CD` 确认是 FluidNC、但尚未观测到空闲 `Bf:` 时的网络初始窗口：FluidNC `Channel` 通用 256 字节。
+pub const FLUIDNC_CHANNEL_RX_WINDOW: usize = 256;
+/// 字符计数窗口硬上限（字节），即使设备报告更大的空闲缓冲也不超过它。
+pub const MAX_RX_WINDOW: usize = 1024;
+/// 半行续接缓冲上限：设备持续输出不带换行的数据时丢弃，避免无界增长。
+const MAX_PARTIAL_LINE_BYTES: usize = 64 * 1024;
+
+/// 跨读超时保留半行的行读取器（2026-11-05 修订）。
+///
+/// `BufRead::read_line` 在读超时返回错误时，已从内部缓冲取出的字节只留在调用方传入的缓冲里；
+/// 若每次调用都新建局部 `String`，Wi-Fi 抖动把一条 `ok` 拆成 `o` + 超时 + `k\n` 时前半截就丢了，
+/// 流控的未确认计数永远对不上。这里把半行保存在读取器内，下次调用继续拼接。
+pub struct LineReader<R> {
+    inner: BufReader<R>,
+    partial: Vec<u8>,
+}
+
+impl<R: Read> LineReader<R> {
+    pub fn new(inner: R) -> Self {
+        Self { inner: BufReader::new(inner), partial: Vec::new() }
+    }
+
+    /// `Ok(Some(line))`：完整一行（只去行尾 CR/LF，保留行首缩进）；`Ok(None)`：EOF；
+    /// `Err`：读超时等错误，已读到的半行保留到下次调用。
+    pub fn read_line(&mut self) -> Result<Option<String>, String> {
+        loop {
+            match self.inner.read_until(b'\n', &mut self.partial) {
+                Ok(0) => {
+                    if self.partial.is_empty() {
+                        return Ok(None);
+                    }
+                    // EOF 前最后一段没有换行：作为最后一行交出，下次调用再报 EOF
+                    return Ok(Some(Self::take_line(&mut self.partial)));
+                }
+                Ok(_) if self.partial.last() == Some(&b'\n') => {
+                    return Ok(Some(Self::take_line(&mut self.partial)));
+                }
+                // 未遇到换行就返回说明已到 EOF，下一轮读到 0 字节时交出
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    if self.partial.len() > MAX_PARTIAL_LINE_BYTES {
+                        self.partial.clear();
+                        return Err(format!("设备输出超过 {MAX_PARTIAL_LINE_BYTES} 字节仍无换行，已丢弃: {e}"));
+                    }
+                    return Err(e.to_string());
+                }
+            }
+        }
+    }
+
+    fn take_line(partial: &mut Vec<u8>) -> String {
+        let bytes = std::mem::take(partial);
+        // 只去行尾 CR/LF：$CD 返回的 YAML 依赖行首缩进表达层级，不能 trim 行首
+        String::from_utf8_lossy(&bytes).trim_end_matches(['\r', '\n']).to_string()
     }
 }
 
 pub struct TcpGrbl {
-    reader: Mutex<BufReader<TcpStream>>,
+    reader: Mutex<LineReader<TcpStream>>,
     writer: Mutex<TcpStream>,
     realtime_writer: Mutex<TcpStream>,
     raw_abort_stream: Option<Arc<TcpStream>>,
@@ -147,7 +210,7 @@ impl TcpGrbl {
         let realtime = stream.try_clone().map_err(|e| e.to_string())?;
         let raw_abort = stream.try_clone().ok().map(Arc::new);
         Ok(Self {
-            reader: Mutex::new(BufReader::new(reader)),
+            reader: Mutex::new(LineReader::new(reader)),
             writer: Mutex::new(stream),
             realtime_writer: Mutex::new(realtime),
             raw_abort_stream: raw_abort,
@@ -188,18 +251,10 @@ impl DeviceTransport for TcpGrbl {
     }
 
     fn read_line(&self) -> Result<Option<String>, String> {
-        let mut line = String::new();
-        let count = self
-            .reader
+        self.reader
             .lock()
             .map_err(|_| "TCP reader lock poisoned".to_string())?
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        if count == 0 {
-            return Ok(None);
-        }
-        // 只去行尾 CR/LF：$CD 返回的 YAML 依赖行首缩进表达层级，不能 trim 行首
-        Ok(Some(line.trim_end_matches(['\r', '\n']).to_string()))
+            .read_line()
     }
 
     fn raw_abort_handle(&self) -> Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>> {
@@ -211,7 +266,7 @@ impl DeviceTransport for TcpGrbl {
     }
 
     fn default_rx_buffer_size(&self) -> usize {
-        1024
+        MAX_RX_WINDOW
     }
 }
 
@@ -256,7 +311,7 @@ impl DeviceTransport for Arc<dyn DeviceTransport> {
 /// 串口 GRBL 传输：与 `TcpGrbl` 对等，顺序 G-code 写入与实时单字节写入使用独立的串口句柄克隆，
 /// 保证背压时 `!` / `0x18` 不会被顺序写锁排挤。
 pub struct SerialGrbl {
-    reader: Mutex<BufReader<Box<dyn serialport::SerialPort>>>,
+    reader: Mutex<LineReader<Box<dyn serialport::SerialPort>>>,
     writer: Mutex<Box<dyn serialport::SerialPort>>,
     realtime_writer: Mutex<Box<dyn serialport::SerialPort>>,
     raw_abort_port: Option<Arc<Mutex<Box<dyn serialport::SerialPort>>>>,
@@ -278,7 +333,7 @@ impl SerialGrbl {
         std::thread::sleep(Duration::from_millis(150));
         let _ = port.clear(serialport::ClearBuffer::Input);
         Ok(Self {
-            reader: Mutex::new(BufReader::new(reader)),
+            reader: Mutex::new(LineReader::new(reader)),
             writer: Mutex::new(port),
             realtime_writer: Mutex::new(realtime),
             raw_abort_port: raw_abort,
@@ -312,18 +367,10 @@ impl DeviceTransport for SerialGrbl {
     }
 
     fn read_line(&self) -> Result<Option<String>, String> {
-        let mut line = String::new();
-        let count = self
-            .reader
+        self.reader
             .lock()
             .map_err(|_| "串口 reader lock poisoned".to_string())?
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        if count == 0 {
-            return Ok(None);
-        }
-        // 只去行尾 CR/LF：$CD 返回的 YAML 依赖行首缩进表达层级，不能 trim 行首
-        Ok(Some(line.trim_end_matches(['\r', '\n']).to_string()))
+            .read_line()
     }
 
     fn raw_abort_handle(&self) -> Option<Box<dyn Fn() -> Result<(), String> + Send + Sync>> {
@@ -338,7 +385,7 @@ impl DeviceTransport for SerialGrbl {
     }
 
     fn default_rx_buffer_size(&self) -> usize {
-        255
+        GRBL_CLASSIC_RX_WINDOW
     }
 }
 
@@ -768,7 +815,7 @@ pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
             };
             let mut summary = format!("{label} 握手成功 ({target})，固件 $32=1 激光模式就绪");
             if device.reports_buffer_state() == Some(false) {
-                summary.push_str("；$10 未开启缓冲汇报（建议设 $10=3），发送窗口已限制为 256 字节");
+                summary.push_str("；$10 未开启缓冲汇报（建议设 $10=3），发送窗口保持保守值（串口 127 字节，网络 FluidNC 不超过 256 字节）");
             }
             if let Some(f) = &features {
                 if f.has_after_unlock_macro || f.has_after_homing_macro {
@@ -884,6 +931,43 @@ impl DeviceTransport for FakeGrbl {
     }
 }
 
+/// `$RI` 设置的常规应答等待时间。
+const AUTO_REPORT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+/// `$RI` 应答超时后补发 `G4 P0` 同步时，收齐两个终止应答的额外时限。
+const AUTO_REPORT_RESYNC_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 字符计数流控窗口（2026-11-05 修订）。
+///
+/// `Bf:` 第二个数是**此刻剩余**的 RX 字节，不是总容量；任何时刻剩余值都不超过容量，
+/// 所以观测到的最大剩余值是容量的安全下界，在顺序信道没有未确认字节时观测到的值就等于容量。
+/// - `idle_confirmed`：窗口 = 最大剩余 − 1（经典 GRBL 空闲报 128、实际可存 127），可低于初始猜测；
+/// - 只有发送中的观测：窗口 = max(初始猜测, 最大剩余 − 1)，只升不降；
+/// - 始终不超过 `cap`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RxWindow {
+    guess: usize,
+    max_free_seen: Option<usize>,
+    idle_confirmed: bool,
+    cap: usize,
+}
+
+impl RxWindow {
+    fn observe(&mut self, free: usize, idle: bool) {
+        self.max_free_seen = Some(self.max_free_seen.map_or(free, |seen| seen.max(free)));
+        self.idle_confirmed |= idle;
+    }
+
+    fn size(&self) -> usize {
+        let observed = self.max_free_seen.map(|free| free.saturating_sub(1));
+        let size = match observed {
+            Some(observed) if self.idle_confirmed => observed,
+            Some(observed) => self.guess.max(observed),
+            None => self.guess,
+        };
+        size.min(self.cap)
+    }
+}
+
 pub struct DeviceConnection<T: DeviceTransport> {
     pub transport: T,
     pub state: DeviceState,
@@ -903,6 +987,9 @@ pub struct DeviceConnection<T: DeviceTransport> {
     last_explanation: Option<String>,
     /// 流式发送或脱机监控期间绑定的实时进度槽位：收到 `<...>` 状态报告时自动同步最新坐标报文。
     progress_sink: Option<Arc<JobProgress>>,
+    /// 顺序信道没有未确认字节时 `Bf:` 报告的最大剩余 RX 字节，即设备 RX 缓冲的真实容量；
+    /// `None` 表示尚未观测到。由预检 `?` 与完成等待阶段记录，字符计数窗口据此确定。
+    pub rx_capacity_observed: Option<usize>,
 }
 
 impl<T: DeviceTransport> DeviceConnection<T> {
@@ -918,6 +1005,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             sd_job_active: false,
             last_explanation: None,
             progress_sink: None,
+            rx_capacity_observed: None,
         }
     }
 
@@ -947,13 +1035,36 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         self.report_status_mask.map(|mask| mask & 0b10 != 0)
     }
 
-    /// 字符计数流控的安全初始窗口：固件不报 `Bf:` 时退回 FluidNC `Channel` 通用 256 字节
-    /// （UART / WebSocket 通道的真实上限），只有能看到 `Bf:` 时才允许传输层建议的更大窗口。
+    /// 字符计数流控的当前窗口（字节，2026-11-05 修订）。
+    ///
+    /// - 已在顺序信道空闲时观测到 `Bf:`：窗口 = 观测到的最大剩余字节 − 1（经典 GRBL 空闲报 128、
+    ///   环形缓冲只能存 127），不再叠加任何高于设备报告值的下限；
+    /// - 尚未观测：经 `$CD` 确认是 FluidNC 时取 `min(传输层建议, 256)`，否则一律 `min(传输层建议, 127)`；
+    /// - 固件不报 `Bf:`（`$10` 缺 bit1）时上限 256，其余情况硬上限 [`MAX_RX_WINDOW`]。
     pub fn effective_rx_window(&self, transport_default: usize) -> usize {
-        match self.reports_buffer_state() {
-            Some(true) => transport_default,
-            Some(false) => transport_default.min(256),
-            None => transport_default,
+        self.rx_window(self.rx_window_guess(transport_default)).size()
+    }
+
+    /// 未观测到设备容量时的保守初始窗口。
+    fn rx_window_guess(&self, transport_default: usize) -> usize {
+        let limit = if self.features.is_some() { FLUIDNC_CHANNEL_RX_WINDOW } else { GRBL_CLASSIC_RX_WINDOW };
+        transport_default.min(limit)
+    }
+
+    fn rx_window(&self, guess: usize) -> RxWindow {
+        let cap = if self.reports_buffer_state() == Some(false) { FLUIDNC_CHANNEL_RX_WINDOW } else { MAX_RX_WINDOW };
+        RxWindow {
+            guess: guess.min(cap),
+            max_free_seen: self.rx_capacity_observed,
+            idle_confirmed: self.rx_capacity_observed.is_some(),
+            cap,
+        }
+    }
+
+    /// 顺序信道无未确认字节时收到的 `Bf:` 剩余值即 RX 缓冲容量，取历史最大值。
+    fn record_idle_rx_free(&mut self, report: &StatusReport) {
+        if let Some(free) = report.rx_buffer_free {
+            self.rx_capacity_observed = Some(self.rx_capacity_observed.map_or(free, |seen| seen.max(free)));
         }
     }
 
@@ -967,6 +1078,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         self.state = DeviceState::Disconnected;
         self.max_spindle_speed = None;
         self.report_status_mask = None;
+        self.rx_capacity_observed = None;
         self.transport.write_line("$$")?;
         let start = Instant::now();
         let mut laser_mode = None;
@@ -1043,28 +1155,60 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// 开启 FluidNC 本通道自动状态上报（`$RI=<ms>`，最小 50ms）。仅在已确认是 FluidNC
     /// （`features` 已加载）时发送；旧 GRBL 会返回 `error:3`，此时静默关闭该功能。
     /// 必须在流式发送开始前调用并消费掉它的 `ok`，避免 ack 计数错位。
+    ///
+    /// 2026-11-05 修订：`$RI` 的应答在 2 秒内未到时不再直接放行（迟到的 `ok` 会被当成首行 G-code 的 ack），
+    /// 而是补发 `G4 P0`（不运动、不出光）同步，按顺序应答规则在限定时间内收齐 `$RI` 与 `G4 P0`
+    /// 两个终止应答后才放行；收不齐则置 `Lost` 并返回错误，调用方不得开始流式发送。
     pub fn enable_auto_report(&mut self, interval_ms: u32) -> Result<bool, String> {
         if self.features.is_none() {
             return Ok(false);
         }
         let interval_ms = interval_ms.max(50);
         self.transport.write_line(&format!("$RI={interval_ms}"))?;
+        let mut acks = Vec::new();
+        self.collect_terminal_acks(&mut acks, 1, AUTO_REPORT_ACK_TIMEOUT)?;
+        if acks.is_empty() {
+            self.transport.write_line("G4 P0")?;
+            self.collect_terminal_acks(&mut acks, 2, AUTO_REPORT_RESYNC_TIMEOUT)?;
+            if acks.len() < 2 {
+                // 无法判断收到的应答属于哪条命令：保守地认为自动上报可能已开启，交给调用方 `$RI=0` 收尾
+                self.auto_report_ms = interval_ms;
+                self.state = DeviceState::Lost;
+                return Err(format!(
+                    "$RI 自动上报设置在 {}ms 内未确认，G4 P0 同步也未在 {}ms 内收齐应答，ack 计数无法对齐；未开始发送任何 G-code",
+                    AUTO_REPORT_ACK_TIMEOUT.as_millis(),
+                    AUTO_REPORT_RESYNC_TIMEOUT.as_millis()
+                ));
+            }
+        }
+        let enabled = acks[0].is_ok();
+        self.auto_report_ms = if enabled { interval_ms } else { 0 };
+        if let Some(Err(line)) = acks.get(1) {
+            return Err(format!("同步指令 G4 P0 被固件拒绝（{line}），未开始发送任何 G-code"));
+        }
+        Ok(enabled)
+    }
+
+    /// 读取顺序信道的终止应答（`ok` → `Ok(())`，`error:N` → `Err`）直到凑满 `want` 个或超时。
+    /// 状态报告与说明行照常分类；复位横幅 / ALARM / 断开直接返回错误。
+    fn collect_terminal_acks(
+        &mut self,
+        acks: &mut Vec<Result<(), String>>,
+        want: usize,
+        timeout: Duration,
+    ) -> Result<(), String> {
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(2) {
+        while acks.len() < want && start.elapsed() < timeout {
             match self.transport.read_line() {
                 Ok(Some(line)) => {
                     self.last_response_at = Instant::now();
                     if line.eq_ignore_ascii_case("ok") {
-                        self.auto_report_ms = interval_ms;
-                        return Ok(true);
-                    }
-                    if line.starts_with("error:") {
-                        self.auto_report_ms = 0;
-                        return Ok(false);
-                    }
-                    if line.starts_with("ALARM:") {
-                        self.state = DeviceState::Alarm;
-                        return Err(self.explain(&line));
+                        acks.push(Ok(()));
+                    } else if line.to_ascii_lowercase().starts_with("error:") {
+                        let message = self.explain(&line);
+                        acks.push(Err(message));
+                    } else {
+                        self.classify_line(&line, "设置自动上报")?;
                     }
                 }
                 Ok(None) => {
@@ -1074,7 +1218,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                 Err(_) => continue,
             }
         }
-        Ok(false)
+        Ok(())
     }
 
     /// 关闭自动上报（`$RI=0`）。尽力而为：任务结束或断开前调用，不关心结果。
@@ -1102,22 +1246,6 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         } else {
             default
         }
-    }
-
-    /// Existing generated jobs and material tables use the 1000 S-value scale.
-    /// Do not silently rescale a previously confirmed file or rewrite firmware settings.
-    pub fn verify_job_ready(&mut self, timeout: Duration) -> Result<(), String> {
-        self.verify_job_ready_with_scale(timeout, 1000.0)
-    }
-
-    pub fn verify_job_ready_with_scale(&mut self, timeout: Duration, expected_scale: f64) -> Result<(), String> {
-        if self.max_spindle_speed != Some(expected_scale) {
-            return Err(format!(
-                "功率标尺不匹配：当前任务要求 $30={expected_scale}，设备报告 {:?}；请核对 FluidNC Laser speed_map，未发送加工指令",
-                self.max_spindle_speed
-            ));
-        }
-        self.require_idle(timeout, None)
     }
 
     /// 自适应功率标尺检查：只要设备 $30 是合法有限正数即通过，并返回设备实际标尺（如 255.0、1000.0 等）。
@@ -1205,6 +1333,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         Some(report) => report,
                         None => continue,
                     };
+                    // 预检前所有顺序命令都已确认，此刻的 Bf: 剩余值就是 RX 缓冲容量
+                    self.record_idle_rx_free(&report);
                     let blocking = report.blocking_pins();
                     if !blocking.is_empty() {
                         self.state = DeviceState::Alarm;
@@ -1280,6 +1410,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         Some(report) => report,
                         None => continue,
                     };
+                    // 完成等待阶段同步指令已确认，顺序信道无未确认字节
+                    self.record_idle_rx_free(&report);
                     match report.activity {
                         MachineActivity::Idle if !report.has_sd_job() => {
                             self.state = DeviceState::Ready;
@@ -1590,14 +1722,6 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             }
         })
     }
-
-    pub fn check_heartbeat(&mut self) -> Result<(), String> {
-        if self.last_response_at.elapsed() > Duration::from_millis(500) {
-            self.state = DeviceState::Lost;
-            return Err("控制器连续 500ms 无响应，已判定失联，急停无法送达".into());
-        }
-        self.transport.write_realtime(RealtimeCommand::StatusQuery)
-    }
 }
 
 #[derive(Clone, Default)]
@@ -1721,26 +1845,31 @@ impl<T: DeviceTransport> JobWorker<T> {
         self
     }
 
-    /// GRBL / FluidNC 初始串口 RX 缓冲区大小（字节），网络模式为 1024，串口为 255，后续根据 |Bf: 自适应
-    pub const DEFAULT_RX_BUFFER_SIZE: usize = 255;
-
-    /// 发送 G-code 行序列。采用 GRBL/FluidNC 动态字符计数流控（Character-Counting Streaming Flow Control）：
-    /// 初始配额按传输层通道类型（网络 1024 字节，串口 255 字节）下发，并在收到状态报告 |Bf: 时自适应扩容；
-    /// 收到 ACK 时释放对应行字符配额并推进进度，彻底消除对讲机单步往返延迟导致的运动卡顿。
+    /// 发送 G-code 行序列。采用 GRBL/FluidNC 字符计数流控（Character-Counting Streaming Flow Control）：
+    /// 未确认字节总数不超过窗口；窗口规则见 [`DeviceConnection::effective_rx_window`]（2026-11-05 修订：
+    /// 未知设备从 127 字节起步，只按 `Bf:` 观测到的容量调整，不再套用 255 字节下限）。
+    /// 收到 ACK 时释放对应行字符配额并推进进度。
     pub fn send_lines(&mut self, lines: impl IntoIterator<Item = String>) -> Result<usize, String> {
         let transport_default = self.device.transport.default_rx_buffer_size();
-        let initial_buf = self.device.effective_rx_window(transport_default);
-        self.stream_lines_with_buffer_size(lines, initial_buf)
+        let guess = self.device.rx_window_guess(transport_default);
+        self.stream_lines_with_buffer_size(lines, guess)
     }
 
+    /// `rx_buffer_size` 是尚未观测到设备容量时的初始窗口；一旦在空闲时观测到 `Bf:`，以设备报告为准。
     pub fn stream_lines_with_buffer_size(
         &mut self,
         lines: impl IntoIterator<Item = String>,
         rx_buffer_size: usize,
     ) -> Result<usize, String> {
         // FluidNC 可主动周期上报状态（$RI），替代 500ms 心跳轮询；旧 GRBL 返回 error:3 时自动关闭。
-        // 必须在首行 G-code 之前完成并消费掉它的 ok，否则会与行 ack 计数错位。
-        let auto_report = self.device.enable_auto_report(200)?;
+        // 必须在首行 G-code 之前完成并消费掉它的 ok，否则会与行 ack 计数错位；无法确认时直接报错不发送。
+        let auto_report = match self.device.enable_auto_report(200) {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                self.device.disable_auto_report();
+                return Err(e);
+            }
+        };
         let result = self.stream_lines_inner(lines, rx_buffer_size);
         if auto_report {
             self.device.disable_auto_report();
@@ -1756,9 +1885,7 @@ impl<T: DeviceTransport> JobWorker<T> {
         let mut lines_iter = lines.into_iter().peekable();
         let mut in_flight: VecDeque<usize> = VecDeque::new();
         let mut chars_in_buffer: usize = 0;
-        // 固件不报 Bf: 时窗口不能超过 FluidNC Channel 通用上限 256
-        let window_cap = if self.device.reports_buffer_state() == Some(false) { 256 } else { 1024 };
-        let mut current_rx_buffer_size = rx_buffer_size.min(window_cap);
+        let mut window = self.device.rx_window(rx_buffer_size);
         let mut acked_count: usize = 0;
         let mut heartbeat_sent = false;
 
@@ -1778,7 +1905,7 @@ impl<T: DeviceTransport> JobWorker<T> {
                 };
                 let line_len = line.len() + 1; // +1 表示尾随换行符 '\n'
                 // 如果单行就超过 current_rx_buffer_size，在缓冲区完全排空时单独发送该行
-                if chars_in_buffer + line_len <= current_rx_buffer_size || (chars_in_buffer == 0 && in_flight.is_empty()) {
+                if chars_in_buffer + line_len <= window.size() || (chars_in_buffer == 0 && in_flight.is_empty()) {
                     let _ = lines_iter.next();
                     if let Err(e) = self.device.send_line(&line) {
                         if self.cancel.is_cancelled() {
@@ -1827,9 +1954,13 @@ impl<T: DeviceTransport> JobWorker<T> {
                     let report = self.device.classify_line(&response, "流式发送")?;
                     heartbeat_sent = false;
                     if let Some(report) = report {
-                        // 按 |Bf:blocks,rx_bytes 动态自适应调整缓冲区容量（限制在 255~window_cap 字节）
-                        if let Some(reported_rx) = report.rx_buffer_free {
-                            current_rx_buffer_size = reported_rx.clamp(255, window_cap);
+                        // |Bf:blocks,rx_free 是此刻剩余字节：只用来估计容量（见 RxWindow），绝不当作窗口下限
+                        if let Some(free) = report.rx_buffer_free {
+                            let idle = in_flight.is_empty();
+                            window.observe(free, idle);
+                            if idle {
+                                self.device.record_idle_rx_free(&report);
+                            }
                         }
                         let blocking = report.blocking_pins();
                         if !blocking.is_empty() {
@@ -2118,25 +2249,6 @@ pub fn upload_gcode_to_fluidnc_sd(
         Ok(())
     } else {
         Err(format!("FluidNC HTTP 上传失败，响应: {status_line}"))
-    }
-}
-
-// Optional Hardware / Protocol Capability Stubs (spec §4.7)
-pub mod optional_capabilities {
-    pub fn onvif_soap_ptz() -> Result<(), &'static str> {
-        Err("能力不可用: ONVIF 依赖未配置")
-    }
-
-    pub fn rtsp_stream() -> Result<(), &'static str> {
-        Err("能力不可用: RTSP/ffmpeg 未安装")
-    }
-
-    pub fn home_assistant_service() -> Result<(), &'static str> {
-        Err("能力不可用: Home Assistant 未接入")
-    }
-
-    pub fn win_gui_automation() -> Result<(), &'static str> {
-        Err("能力不可用: GUI 自动化仅本地开发支持")
     }
 }
 
@@ -2451,14 +2563,6 @@ mod tests {
     }
 
     #[test]
-    fn optional_capabilities_return_unavailable() {
-        assert!(optional_capabilities::onvif_soap_ptz().is_err());
-        assert!(optional_capabilities::rtsp_stream().is_err());
-        assert!(optional_capabilities::home_assistant_service().is_err());
-        assert!(optional_capabilities::win_gui_automation().is_err());
-    }
-
-    #[test]
     fn handshake_consumes_terminal_ack_and_all_settings() {
         let fake = FakeGrbl::new(["$32=1", "$30=1000", "$130=100", "ok", "error:2"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake);
@@ -2477,12 +2581,15 @@ mod tests {
     }
 
     #[test]
-    fn preflight_requires_matching_power_scale_and_idle() {
-        for max in ["255", "0", "NaN", "inf", "1001"] {
-            let fake = FakeGrbl::new([format!("$30={max}"), "$32=1".into(), "ok".into()]);
+    fn preflight_requires_valid_power_scale_and_idle() {
+        // 缺少 $30 或非有限正数：拒绝且不发任何指令（包括 ? 预检）
+        for max in [None, Some("0"), Some("NaN"), Some("inf"), Some("-5")] {
+            let mut responses: Vec<String> = max.map(|m| format!("$30={m}")).into_iter().collect();
+            responses.extend(["$32=1".to_string(), "ok".to_string()]);
+            let fake = FakeGrbl::new(responses);
             let mut device = DeviceConnection::new(fake.clone());
             device.handshake().unwrap();
-            assert!(device.verify_job_ready(Duration::from_secs(1)).unwrap_err().contains("功率标尺"));
+            assert!(device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap_err().contains("$30"), "{max:?}");
             assert_eq!(fake.lines(), ["$$"]);
             assert!(fake.realtime().is_empty());
         }
@@ -2490,13 +2597,13 @@ mod tests {
             let fake = FakeGrbl::new(["$30=1000", "$32=1", "ok", state].map(str::to_owned));
             let mut device = DeviceConnection::new(fake.clone());
             device.handshake().unwrap();
-            assert!(device.verify_job_ready(Duration::from_secs(1)).is_err(), "{state}");
+            assert!(device.verify_job_ready_adaptive(Duration::from_secs(1)).is_err(), "{state}");
             assert_eq!(fake.lines(), ["$$"]);
         }
         let fake = FakeGrbl::new(["$30=1000", "$32=1", "ok", "<Idle|MPos:0,0,0>"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake);
         device.handshake().unwrap();
-        device.verify_job_ready(Duration::from_secs(1)).unwrap();
+        assert_eq!(device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap(), 1000.0);
     }
 
     #[test]
@@ -2927,17 +3034,29 @@ control:
 
     #[test]
     fn rx_window_is_capped_at_256_when_firmware_does_not_report_buffer() {
+        // 未确认设备身份：无论传输层建议多大，初始窗口都不超过经典 GRBL 的 127 字节
         let fake = FakeGrbl::new(["$10=1", "$32=1", "ok"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake);
         device.handshake().unwrap();
         assert_eq!(device.reports_buffer_state(), Some(false));
+        assert_eq!(device.effective_rx_window(1024), GRBL_CLASSIC_RX_WINDOW);
+        assert_eq!(device.effective_rx_window(255), GRBL_CLASSIC_RX_WINDOW);
+        // 已确认 FluidNC 但不报 Bf:：网络窗口 256，串口仍是 127
+        device.features = Some(MachineFeatures::default());
         assert_eq!(device.effective_rx_window(1024), 256);
+        assert_eq!(device.effective_rx_window(GRBL_CLASSIC_RX_WINDOW), GRBL_CLASSIC_RX_WINDOW);
 
-        let fake = FakeGrbl::new(["$10=3", "$32=1", "ok"].map(str::to_owned));
+        // 报 Bf: 但尚未观测：仍按保守初始值；预检 ? 观测到空闲 Bf:15,1200 后放大到硬上限 1024
+        let fake = FakeGrbl::new(["$10=3", "$30=1000", "$32=1", "ok", "<Idle|MPos:0,0,0|Bf:15,1200>"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake);
         device.handshake().unwrap();
         assert_eq!(device.reports_buffer_state(), Some(true));
-        assert_eq!(device.effective_rx_window(1024), 1024);
+        assert_eq!(device.effective_rx_window(1024), GRBL_CLASSIC_RX_WINDOW);
+        device.features = Some(MachineFeatures::default());
+        assert_eq!(device.effective_rx_window(1024), 256);
+        device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap();
+        assert_eq!(device.rx_capacity_observed, Some(1200));
+        assert_eq!(device.effective_rx_window(1024), MAX_RX_WINDOW);
 
         // $10=1 时即使 Bf: 报告 1200，窗口也不得扩到 256 以上；3 行仍应正常完成
         let responses = ["$10=1", "$32=1", "ok", "<Run|Bf:15,1200>", "ok", "ok", "ok", "ok", "<Idle>"].map(str::to_owned);
@@ -3027,5 +3146,282 @@ control:
         let mut device = DeviceConnection::new(fake);
         let zeros = "0".repeat(64);
         assert_eq!(device.verify_sd_file_hash("/sd/x.nc", &zeros, Duration::from_secs(1)).unwrap(), false);
+    }
+
+    // ---- 2026-11-05：读超时半行续接 ----
+
+    /// 按脚本逐段吐出字节或 IO 错误，脚本耗尽后 EOF。
+    struct ScriptedReader(VecDeque<Result<&'static [u8], std::io::ErrorKind>>);
+    impl Read for ScriptedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(Err(kind)) => Err(std::io::Error::new(kind, "scripted timeout")),
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_reader_keeps_partial_line_across_read_timeout() {
+        use std::io::ErrorKind::{TimedOut, WouldBlock};
+        let script = [Ok(&b"o"[..]), Err(TimedOut), Ok(&b"k\r\n<Idle|Bf:15,"[..]), Err(WouldBlock), Ok(&b"128>\n  indented: 1\ntail"[..])];
+        let mut reader = LineReader::new(ScriptedReader(script.into_iter().collect()));
+        assert!(reader.read_line().is_err(), "第一次读到半行后超时应报错");
+        assert_eq!(reader.read_line().unwrap().as_deref(), Some("ok"));
+        assert!(reader.read_line().is_err());
+        assert_eq!(reader.read_line().unwrap().as_deref(), Some("<Idle|Bf:15,128>"));
+        assert_eq!(reader.read_line().unwrap().as_deref(), Some("  indented: 1"));
+        // EOF 前无换行的尾巴作为最后一行交出，随后报 EOF
+        assert_eq!(reader.read_line().unwrap().as_deref(), Some("tail"));
+        assert_eq!(reader.read_line().unwrap(), None);
+    }
+
+    #[test]
+    fn tcp_read_line_completes_ok_split_by_read_timeout() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.write_all(b"o").unwrap();
+            socket.flush().unwrap();
+            // 间隔超过 500ms 读超时，模拟 Wi-Fi 抖动把 ok 拆成两段
+            std::thread::sleep(Duration::from_millis(800));
+            socket.write_all(b"k\r\n").unwrap();
+            socket.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let grbl = TcpGrbl::connect(&address.to_string()).unwrap();
+        assert!(grbl.read_line().is_err(), "半行之后的读超时应报错而不是交出半行");
+        let mut completed = None;
+        for _ in 0..4 {
+            match grbl.read_line() {
+                Ok(line) => {
+                    completed = line;
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        assert_eq!(completed.as_deref(), Some("ok"));
+        server.join().unwrap();
+    }
+
+    // ---- 2026-11-05：字符计数窗口不得超过设备 RX 容量 ----
+
+    #[derive(Default)]
+    struct SimRxState {
+        pending: VecDeque<usize>,
+        written: Vec<String>,
+        /// 每次写入后设备 RX 缓冲中的字节数
+        occupancy: Vec<usize>,
+        overflow: bool,
+        status_requested: bool,
+        reads: usize,
+    }
+
+    /// RX 缓冲模拟器：最坏情况下设备在回 ok 前不取走任何字节，未确认字节全部占着 RX 缓冲；
+    /// 超过 `usable` 即记为溢出（真实串口会丢字节、破坏 G-code）。每读一次处理一行回 `ok`，
+    /// 每 `report_every` 次读插入一条 `Bf:` 报告（模拟 `$RI` 自动上报），收到 `?` 时回当前状态。
+    struct SimRx {
+        usable: usize,
+        idle_reported_free: usize,
+        transport_default: usize,
+        report_every: usize,
+        state: Mutex<SimRxState>,
+    }
+
+    impl SimRx {
+        fn new(usable: usize, idle_reported_free: usize, transport_default: usize, report_every: usize) -> Arc<Self> {
+            Arc::new(Self { usable, idle_reported_free, transport_default, report_every, state: Mutex::default() })
+        }
+        fn peak(&self) -> usize {
+            self.state.lock().unwrap().occupancy.iter().copied().max().unwrap_or(0)
+        }
+        fn peak_after_writes(&self, skip: usize) -> usize {
+            self.state.lock().unwrap().occupancy.iter().skip(skip).copied().max().unwrap_or(0)
+        }
+    }
+
+    impl DeviceTransport for Arc<SimRx> {
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            let mut st = self.state.lock().unwrap();
+            st.pending.push_back(line.len() + 1);
+            st.written.push(line.to_string());
+            let used: usize = st.pending.iter().sum();
+            st.occupancy.push(used);
+            if used > self.usable {
+                st.overflow = true;
+            }
+            Ok(())
+        }
+        fn write_realtime(&self, command: RealtimeCommand) -> Result<(), String> {
+            if command == RealtimeCommand::StatusQuery {
+                self.state.lock().unwrap().status_requested = true;
+            }
+            Ok(())
+        }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            let mut st = self.state.lock().unwrap();
+            st.reads += 1;
+            let periodic = !st.pending.is_empty() && st.reads.is_multiple_of(self.report_every);
+            if st.status_requested || periodic {
+                st.status_requested = false;
+                let used: usize = st.pending.iter().sum();
+                let free = self.idle_reported_free.saturating_sub(used);
+                let state = if st.pending.is_empty() { "Idle" } else { "Run" };
+                return Ok(Some(format!("<{state}|MPos:0.000,0.000,0.000|Bf:15,{free}>")));
+            }
+            if st.pending.pop_front().is_some() {
+                return Ok(Some("ok".into()));
+            }
+            drop(st);
+            std::thread::sleep(Duration::from_millis(2));
+            Err("timed out".into())
+        }
+        fn default_rx_buffer_size(&self) -> usize {
+            self.transport_default
+        }
+    }
+
+    fn sim_device(sim: &Arc<SimRx>, fluidnc: bool) -> DeviceConnection<Arc<SimRx>> {
+        let mut device = DeviceConnection::new(sim.clone());
+        device.state = DeviceState::Ready;
+        device.report_status_mask = Some(3);
+        device.max_spindle_speed = Some(1000.0);
+        if fluidnc {
+            device.features = Some(MachineFeatures::default());
+        }
+        device
+    }
+
+    fn sim_lines(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("G1 X{:.3} Y{:.3} S500", i as f64 * 0.1, i as f64 * 0.2)).collect()
+    }
+
+    #[test]
+    fn rx_window_never_exceeds_classic_grbl_rx_buffer() {
+        // 经典 GRBL 1.1：128 字节环形缓冲只能存 127；空闲时 Bf 报 128（部分变体报 127）。
+        // 传输层建议 255（旧串口默认值）也不能被采信。
+        for idle_free in [127usize, 128] {
+            for preflight in [false, true] {
+                let sim = SimRx::new(GRBL_CLASSIC_RX_WINDOW, idle_free, 255, 3);
+                let mut device = sim_device(&sim, false);
+                if preflight {
+                    device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap();
+                    assert_eq!(device.rx_capacity_observed, Some(idle_free));
+                    assert!(device.effective_rx_window(255) <= GRBL_CLASSIC_RX_WINDOW);
+                }
+                let mut worker = JobWorker::new(device, CancellationToken::default());
+                assert_eq!(worker.send_lines(sim_lines(200)).unwrap(), 200, "Bf:15,{idle_free} preflight={preflight}");
+                let peak = sim.peak();
+                assert!(!sim.state.lock().unwrap().overflow, "RX 溢出：峰值 {peak} 字节 (Bf:15,{idle_free}, preflight={preflight})");
+                assert!(peak <= GRBL_CLASSIC_RX_WINDOW && peak < idle_free, "峰值 {peak} 超过设备容量 {idle_free}");
+                // 窗口仍被有效利用，不是退化成逐行往返
+                assert!(peak >= 100, "峰值 {peak} 过低");
+                assert_eq!(sim.state.lock().unwrap().written.len(), 201); // 200 行 + G4 P0
+            }
+        }
+    }
+
+    #[test]
+    fn fluidnc_large_reported_rx_capacity_is_used_and_not_shrunk_by_mid_stream_free() {
+        // FluidNC Telnet 空闲报 Bf:15,1200：窗口应放大到 1024 上限，且发送中 Bf 剩余值变小不能把窗口压回 255。
+        for preflight in [true, false] {
+            let sim = SimRx::new(1200, 1200, MAX_RX_WINDOW, 4);
+            let mut device = sim_device(&sim, true);
+            if preflight {
+                device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap();
+                assert_eq!(device.effective_rx_window(MAX_RX_WINDOW), MAX_RX_WINDOW);
+            } else {
+                assert_eq!(device.effective_rx_window(MAX_RX_WINDOW), FLUIDNC_CHANNEL_RX_WINDOW);
+            }
+            let mut worker = JobWorker::new(device, CancellationToken::default());
+            assert_eq!(worker.send_lines(sim_lines(400)).unwrap(), 400);
+            assert!(!sim.state.lock().unwrap().overflow);
+            assert!(sim.peak() <= MAX_RX_WINDOW, "峰值 {} 超过窗口上限", sim.peak());
+            // 后半程（已收到多次发送中 Bf 报告之后）仍保持大窗口
+            let late_peak = sim.peak_after_writes(200);
+            assert!(late_peak > 900, "后半程峰值 {late_peak}，大容量未被利用 (preflight={preflight})");
+            let written = sim.state.lock().unwrap().written.clone();
+            assert_eq!(written.first().map(String::as_str), Some("$RI=200"));
+            assert_eq!(written.last().map(String::as_str), Some("$RI=0"));
+        }
+    }
+
+    // ---- 2026-11-05：$RI 迟到的 ok 不得被当成 G-code 行的 ack ----
+
+    /// 响应队列中的 `"\u{0}wait:<ms>"` 标记模拟线路沉默；队列耗尽后持续读超时而不是 EOF。
+    struct SlowLink {
+        fake: FakeGrbl,
+        gate: Mutex<Option<Instant>>,
+    }
+    impl DeviceTransport for SlowLink {
+        fn write_line(&self, line: &str) -> Result<(), String> { self.fake.write_line(line) }
+        fn write_realtime(&self, c: RealtimeCommand) -> Result<(), String> { self.fake.write_realtime(c) }
+        fn read_line(&self) -> Result<Option<String>, String> {
+            let mut queue = self.fake.responses.lock().unwrap();
+            match queue.front().cloned() {
+                Some(front) if front.starts_with("\u{0}wait:") => {
+                    let ms: u64 = front["\u{0}wait:".len()..].parse().unwrap();
+                    let mut gate = self.gate.lock().unwrap();
+                    let until = *gate.get_or_insert_with(|| Instant::now() + Duration::from_millis(ms));
+                    if Instant::now() >= until {
+                        queue.pop_front();
+                        *gate = None;
+                    }
+                }
+                Some(_) => return Ok(queue.pop_front()),
+                None => {}
+            }
+            drop(queue);
+            std::thread::sleep(Duration::from_millis(20));
+            Err("timed out".into())
+        }
+    }
+
+    fn slow_fluidnc(responses: &[&str]) -> (FakeGrbl, DeviceConnection<SlowLink>) {
+        let fake = FakeGrbl::new(responses.iter().map(|s| s.to_string()));
+        let mut device = DeviceConnection::new(SlowLink { fake: fake.clone(), gate: Mutex::new(None) });
+        device.handshake().unwrap();
+        device.features = Some(MachineFeatures::default());
+        (fake, device)
+    }
+
+    #[test]
+    fn late_auto_report_ack_is_resynchronised_before_streaming() {
+        let (fake, device) = slow_fluidnc(&[
+            "$32=1", "ok",       // 握手
+            "\u{0}wait:2300",    // $RI 应答迟到，超过 2s 常规等待
+            "ok",                // $RI 的 ok（迟到）
+            "ok",                // 同步 G4 P0 的 ok
+            "ok",                // M5
+            "ok",                // 完成栅栏 G4 P0
+            "<Idle>",
+            "ok",                // $RI=0
+        ]);
+        let mut worker = JobWorker::new(device, CancellationToken::default());
+        assert_eq!(worker.send_lines(["M5".into()]).unwrap(), 1);
+        assert_eq!(worker.progress.lines_sent.load(Ordering::Relaxed), 1);
+        // 迟到的 ok 被同步消费掉，M5 只在同步之后发出，完成后关闭自动上报
+        assert_eq!(fake.lines(), ["$$", "$RI=200", "G4 P0", "M5", "G4 P0", "$RI=0"]);
+    }
+
+    #[test]
+    fn unconfirmed_auto_report_ack_aborts_before_streaming() {
+        // 超时后只收到一个 ok：无法判断它属于 $RI 还是 G4 P0，必须拒绝开始发送
+        let (fake, device) = slow_fluidnc(&["$32=1", "ok", "\u{0}wait:2300", "ok"]);
+        let mut worker = JobWorker::new(device, CancellationToken::default());
+        let err = worker.send_lines(["M5".into()]).unwrap_err();
+        assert!(err.contains("未开始发送"), "{err}");
+        assert_eq!(worker.device.state(), DeviceState::Lost);
+        assert_eq!(worker.progress.lines_sent.load(Ordering::Relaxed), 0);
+        let lines = fake.lines();
+        assert!(!lines.iter().any(|l| l == "M5"), "{lines:?}");
+        assert_eq!(lines, ["$$", "$RI=200", "G4 P0", "$RI=0"]);
     }
 }

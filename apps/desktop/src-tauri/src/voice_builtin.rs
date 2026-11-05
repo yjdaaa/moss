@@ -80,6 +80,18 @@ fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
     }))
 }
 
+/// 读取内置语音状态的窗口：经 [`crate::window_is_trusted_main`] 确认的主窗口，或打包私密页。
+/// 判定与 [`require_private_settings_window`] 相同，只换成“查看状态”的提示。
+#[cfg(desktop)]
+fn require_status_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
+    require_private_settings_window(window).map_err(|_| {
+        serde_json::json!({
+            "code": "voice_acl_denied",
+            "message": "内置语音状态只能在 MOSS 主窗口或本机安全设置窗口查看"
+        })
+    })
+}
+
 #[cfg(all(test, desktop))]
 #[test]
 fn sensitive_voice_commands_require_packaged_private_window_origin() {
@@ -4652,12 +4664,17 @@ mod imp {
 #[cfg(desktop)]
 pub use imp::{BuiltinVoice, autostart, init, shutdown};
 
+/// 内置语音状态含设备 IP、会话事件，调试开启时还有原始识别文字与工具参数。
+/// 2026-11-05：只给前端实际调用它的两个窗口——主窗口语音页（`VoiceBuiltinCard`）与打包私密页
+/// （`voicePrivate.jsx` 轮询运行状态），其他窗口即使拿到 `default` capability（`windows:["*"]`）也读不到。
 #[tauri::command]
-pub async fn voice_builtin_status(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_builtin_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_status_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |builtin| Ok(builtin.status())).await;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 

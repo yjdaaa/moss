@@ -2914,6 +2914,13 @@ fn zero_flash_cards_approval_alert_terminal_badge_music_deck_style_switch_and_go
     );
     let gif_bytes = gif_resp.bytes().unwrap();
     assert!(gif_bytes.starts_with(b"GIF89a"));
+    // 2026-11-05：路由改取进程级缓存后响应字节不变
+    assert_eq!(
+        gif_bytes.as_ref(),
+        crate::goggle_bot::encode_goggle_bot_gif(crate::goggle_bot::BotPose::GogglesEngrave)
+            .unwrap()
+            .as_slice()
+    );
 
     // 立创·实战派 320×240 彩屏接入
     let mut szpi = allowed_device_with(&server, &registry, 1, true);

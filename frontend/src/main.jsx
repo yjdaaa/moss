@@ -3,7 +3,8 @@ import { createRoot } from "react-dom/client";
 import { Navbar } from "./components/Navbar.jsx";
 import { SideNav } from "./components/SideNav.jsx";
 import { requestEmergencyStop } from "./estopBus.js";
-import { triggerTopbarEmergencyStop } from "./globalEstop.js";
+import { ESTOP_LOOKUP_TIMEOUT_MS, ESTOP_SEND_TIMEOUT_MS, triggerTopbarEmergencyStop } from "./globalEstop.js";
+import { createPollRunner } from "./pollGuard.js";
 import { installCardSpotlight } from "./spotlight.js";
 import { AuthModal } from "./components/AuthModal.jsx";
 import { CloseConfirmModal } from "./components/CloseConfirmModal.jsx";
@@ -102,7 +103,12 @@ function App() {
   }, []);
 
   const triggerCloseHandling = useCallback(async () => {
-    const pref = localStorage.getItem("moss_close_action") || "ask";
+    let pref = "ask";
+    try {
+      pref = globalThis.localStorage?.getItem("moss_close_action") || "ask";
+    } catch (_error) {
+      // 存储被禁用时按“每次询问”处理
+    }
     let owned = false;
     if (voiceEnabled) {
       try {
@@ -125,7 +131,11 @@ function App() {
 
   const handleCloseConfirm = useCallback(async (action, remember, stopServer = true) => {
     if (remember) {
-      localStorage.setItem("moss_close_action", action);
+      try {
+        globalThis.localStorage?.setItem("moss_close_action", action);
+      } catch (_error) {
+        // 存储被禁用：本次照常执行，只是不记住选择
+      }
     }
     const succeeded = await executeDesktopAction(action, { stopServer });
     if (succeeded) {
@@ -168,11 +178,12 @@ function App() {
   // 定期同步小智 MCP 与语音遥测状态（活跃拾音/思考/播报时自适应加密至 240ms，跨页面实时驱动左上角 MOSS 机械眼）
   const activeVoicePhase = voiceStatus?.phase === "listening" || voiceStatus?.phase === "thinking" || voiceStatus?.phase === "speaking";
   const autoUpdateCheckedRef = useRef(false);
+  // 2026-11-05：上一次请求未返回时跳过本节拍（240ms 高频时不叠加请求），切换间隔或卸载后丢弃旧响应
   useEffect(() => {
     let cancelled = false;
-    async function syncMcp() {
+    const syncMcp = createPollRunner(async (isCurrent) => {
       const res = await getJson("/api/system/info");
-      if (!cancelled && res.ok && res.data?.success && res.data?.result?.mcp) {
+      if (!cancelled && isCurrent() && res.ok && res.data?.success && res.data?.result?.mcp) {
         const result = res.data.result;
         setMcpStatus(result.mcp);
         setVoiceStatus(result.voice ?? null);
@@ -193,12 +204,13 @@ function App() {
           }
         }
       }
-    }
-    syncMcp();
+    });
+    void syncMcp();
     const intervalMs = activeVoicePhase ? 240 : 3000;
-    const timer = setInterval(syncMcp, intervalMs);
+    const timer = setInterval(() => void syncMcp(), intervalMs);
     return () => {
       cancelled = true;
+      syncMcp.invalidate();
       clearInterval(timer);
     };
   }, [activeVoicePhase]);
@@ -206,34 +218,47 @@ function App() {
   useEffect(() => installCardSpotlight(), []);
 
   // 顶栏急停先读后端全局任务（含执行结果未知的作业），跨页面也可停止原目标；
-  // 若后端僅有 unknown 待确认旧记录、停止失败或停的是其他设备，同时向当前页面的设备发送 0x18。
+  // 若后端仅有 unknown 待确认旧记录、停止失败、多任务无法确定或停的是其他设备，同时向当前页面的设备发送 0x18。
+  // 2026-11-05：查询与写出都带短时限；后端任务通道 800ms 内没有结果就先让页面按本页目标补发，不再无限等待。
   const estopBusy = useRef(false);
   const handleGlobalEmergencyStop = useCallback(async () => {
     if (estopBusy.current) return;
     estopBusy.current = true;
+    let outcome;
     try {
-      const outcome = await triggerTopbarEmergencyStop(getJson, postJson, (opts) =>
-        requestEmergencyStop(opts),
+      outcome = await triggerTopbarEmergencyStop(
+        (path) => getJson(path, { timeoutMs: ESTOP_LOOKUP_TIMEOUT_MS }),
+        (path, body) => postJson(path, body, { timeoutMs: ESTOP_SEND_TIMEOUT_MS }),
+        (opts) => requestEmergencyStop(opts),
       );
-      if (outcome.pageHandled) {
-        return;
-      }
-      if (outcome.kind === "sent") {
-        await showAlert(`${outcome.message || "急停 0x18 已写出"}。停止尚未确认，请现场检查机床状态；必要时按实体急停。`, { title: "已发送急停", tone: "warning" });
-      } else if (outcome.kind === "failed") {
-        await showAlert(`${outcome.message || "急停发送失败"}。请立即使用实体急停，并检查设备连接。`, { title: "急停未确认", tone: "error" });
-      } else if (outcome.kind === "ambiguous") {
-        await showAlert(`检测到 ${outcome.jobs.length} 个可能仍在运行的任务。无法安全地猜测要停止哪台设备，请在对应任务中按急停；紧急情况使用实体急停。`, { title: "多个停止目标", tone: "warning" });
-      } else {
-        await showAlert(
-          outcome.kind === "lookup_failed"
-            ? "无法查询后端当前任务，不能确认软件急停能否发送。请立即使用实体急停。"
-            : "没有找到正在下发的任务。如设备仍在运动或出光，请立即使用实体急停。",
-          { title: "停止状态未知", tone: "warning" },
-        );
-      }
     } finally {
+      // 请求结束即释放，提示框打开期间再次按急停也能立即重发
       estopBusy.current = false;
+    }
+    if (outcome.kind === "ambiguous") {
+      // 本页即便已按自己的设备目标补发，其他任务仍未停止，必须提示
+      await showAlert(
+        outcome.pageHandled
+          ? `已由当前页面按本页设备目标补发急停 0x18（结果见页面提示）；另检测到 ${outcome.jobs.length} 个可能仍在运行的任务，无法安全地猜测其设备，请在对应任务中按急停；紧急情况使用实体急停。`
+          : `检测到 ${outcome.jobs.length} 个可能仍在运行的任务。无法安全地猜测要停止哪台设备，请在对应任务中按急停；紧急情况使用实体急停。`,
+        { title: "多个停止目标", tone: "warning" },
+      );
+      return;
+    }
+    if (outcome.pageHandled) {
+      return;
+    }
+    if (outcome.kind === "sent") {
+      await showAlert(`${outcome.message || "急停 0x18 已写出"}。停止尚未确认，请现场检查机床状态；必要时按实体急停。`, { title: "已发送急停", tone: "warning" });
+    } else if (outcome.kind === "failed") {
+      await showAlert(`${outcome.message || "急停发送失败"}。请立即使用实体急停，并检查设备连接。`, { title: "急停未确认", tone: "error" });
+    } else {
+      await showAlert(
+        outcome.kind === "lookup_failed"
+          ? "无法查询后端当前任务，不能确认软件急停能否发送。请立即使用实体急停。"
+          : "没有找到正在下发的任务。如设备仍在运动或出光，请立即使用实体急停。",
+        { title: "停止状态未知", tone: "warning" },
+      );
     }
   }, []);
 

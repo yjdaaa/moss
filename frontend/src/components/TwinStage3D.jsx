@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
+import { clearAndDispose, disposeObjectResources } from "../threeDispose.js";
 import * as THREE from "three";
 import { Eye, Compass, RotateCcw, Crosshair, Focus, Sun, Box, ChevronUp, ChevronDown } from "lucide-react";
 
@@ -49,6 +50,17 @@ function addMeshWithEdges(group, geometry, material, edgeColor = 0x94a3b8, edgeO
   mesh.add(edges);
   group.add(mesh);
   return mesh;
+}
+
+/**
+ * 只依赖板材起点 / 雕刻起点的对象（板材、原点坐标轴、零点环）按位置摆放，
+ * 改偏置时不重建整台机台（2026-11-05，避免拖动滑块时每次重建上百个网格）。
+ */
+function placeOffsetObjects(ctx, { offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick }) {
+  if (!ctx) return;
+  ctx.slabMesh?.position.set(offsetX + matWidth / 2, matThick / 2, -(offsetY + matHeight / 2));
+  ctx.originMarker?.position.set(toolpathOffsetX, 0, -toolpathOffsetY);
+  if (ctx.homeRing) ctx.homeRing.visible = toolpathOffsetX > 0.01 || toolpathOffsetY > 0.01;
 }
 
 /**
@@ -403,7 +415,11 @@ export function TwinStage3D({
       if (sceneRef.current?.animId) {
         cancelAnimationFrame(sceneRef.current.animId);
       }
+      // 卸载时释放全部几何体 / 材质并主动丢弃 WebGL 上下文，避免反复进出页面耗尽上下文与显存
+      disposeObjectResources(scene);
       renderer.dispose();
+      renderer.forceContextLoss?.();
+      renderer.domElement?.remove?.();
       sceneRef.current = null;
     };
   }, []);
@@ -438,10 +454,17 @@ export function TwinStage3D({
     if (!ctx) return;
     const { frameGroup, enclosureGroup, workpieceGroup, cursorGroup, gantryGroup, headGroup } = ctx;
 
-    frameGroup.clear();
-    enclosureGroup.clear();
-    workpieceGroup.clear();
-    cursorGroup.clear();
+    // 重建前先释放旧网格的 GPU 资源（group.clear() 本身不释放显存）
+    clearAndDispose(frameGroup);
+    clearAndDispose(enclosureGroup);
+    clearAndDispose(workpieceGroup);
+    clearAndDispose(cursorGroup);
+    clearAndDispose(headGroup);
+    clearAndDispose(gantryGroup);
+    gantryGroup.add(headGroup);
+    ctx.slabMesh = null;
+    ctx.originMarker = null;
+    ctx.homeRing = null;
 
     const cx = xMax / 2;
     const cz = -yMax / 2;
@@ -606,14 +629,14 @@ export function TwinStage3D({
     );
 
     // 3. 机器零点 (0,0) 基准环与跟随雕刻起点 (toolpathOffsetX, toolpathOffsetY) 移动的醒目坐标轴
-    if (toolpathOffsetX > 0.01 || toolpathOffsetY > 0.01) {
-      const homeRing = new THREE.Mesh(
-        new THREE.RingGeometry(1.2, 2.4, 24).rotateX(-Math.PI / 2),
-        new THREE.MeshBasicMaterial({ color: 0x64748b, side: THREE.DoubleSide }),
-      );
-      homeRing.position.set(0, 0.25, 0);
-      frameGroup.add(homeRing);
-    }
+    // 零点环只在雕刻起点偏离 (0,0) 时显示；显隐由 placeOffsetObjects 控制，改偏置不重建
+    const homeRing = new THREE.Mesh(
+      new THREE.RingGeometry(1.2, 2.4, 24).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0x64748b, side: THREE.DoubleSide }),
+    );
+    homeRing.position.set(0, 0.25, 0);
+    frameGroup.add(homeRing);
+    ctx.homeRing = homeRing;
 
     const originSurfaceY = matThick + 0.22;
     const axisLen = Math.min(22, Math.max(10, Math.min(matWidth, matHeight) * 0.35));
@@ -621,9 +644,9 @@ export function TwinStage3D({
     axisGeo.setAttribute(
       "position",
       new THREE.Float32BufferAttribute([
-        toolpathOffsetX, originSurfaceY, -toolpathOffsetY, toolpathOffsetX + axisLen, originSurfaceY, -toolpathOffsetY,
-        toolpathOffsetX, originSurfaceY, -toolpathOffsetY, toolpathOffsetX, originSurfaceY, -(toolpathOffsetY + axisLen),
-        toolpathOffsetX, originSurfaceY, -toolpathOffsetY, toolpathOffsetX, originSurfaceY + 14, -toolpathOffsetY,
+        0, originSurfaceY, 0, axisLen, originSurfaceY, 0,
+        0, originSurfaceY, 0, 0, originSurfaceY, -axisLen,
+        0, originSurfaceY, 0, 0, originSurfaceY + 14, 0,
       ], 3),
     );
     axisGeo.setAttribute(
@@ -634,14 +657,18 @@ export function TwinStage3D({
         0.35, 0.78, 1.0, 0.35, 0.78, 1.0,
       ], 3),
     );
-    workpieceGroup.add(new THREE.LineSegments(axisGeo, new THREE.LineBasicMaterial({ vertexColors: true })));
+    // 坐标轴与原点环建在局部原点，整组随雕刻起点 (toolpathOffsetX, toolpathOffsetY) 平移
+    const originMarker = new THREE.Group();
+    originMarker.add(new THREE.LineSegments(axisGeo, new THREE.LineBasicMaterial({ vertexColors: true })));
 
     const originRing = new THREE.Mesh(
       new THREE.RingGeometry(1.6, 3.4, 28).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ color: 0x34d399, side: THREE.DoubleSide }),
     );
-    originRing.position.set(toolpathOffsetX, originSurfaceY + 0.03, -toolpathOffsetY);
-    workpieceGroup.add(originRing);
+    originRing.position.set(0, originSurfaceY + 0.03, 0);
+    originMarker.add(originRing);
+    workpieceGroup.add(originMarker);
+    ctx.originMarker = originMarker;
     // =========================================================================
     // 4. Y 轴线性导轨与双 42 步进电机传动总成 (BOM: 2×140mm MGN9H + 2×42步进 + Ø8×186mm联动轴)
     // =========================================================================
@@ -882,7 +909,7 @@ export function TwinStage3D({
       opacity: 0.92,
     });
     const slabMesh = addMeshWithEdges(workpieceGroup, slabGeo, slabMat, 0xfbbf24, 0.78);
-    slabMesh.position.set(offsetX + matWidth / 2, matThick / 2, -(offsetY + matHeight / 2));
+    ctx.slabMesh = slabMesh;
     // 7. X/Y 动态十字准星投影线（贴在板材上表面，实时标示激光头 X/Y 坐标位置）
     const cursorSurfaceY = matThick + 0.18;
     const xLineGeo = new THREE.BufferGeometry().setFromPoints([
@@ -908,10 +935,6 @@ export function TwinStage3D({
     // =========================================================================
     // 8. X 轴龙门架总成 (XY转接块.STEP + 联动支架.STEP + 140mm MGN9H 导轨)
     // =========================================================================
-    gantryGroup.clear();
-    headGroup.clear();
-    gantryGroup.add(headGroup);
-
     const gantryBaseY = 26; // Y 轴 MGN9H 滑块顶面高度
     const xRailSpan = yRailOffsetX * 2;
     const xRailLen = Math.max(140, xMax + 40);
@@ -1196,13 +1219,20 @@ export function TwinStage3D({
 
     ctx.headLedMat = ledMat;
     ctx.nozzleTipY = headMountY - 30;
-  }, [xMax, yMax, zMax, matWidth, matHeight, matThick, matName, offsetX, offsetY, toolpathOffsetX, toolpathOffsetY]);
+    placeOffsetObjects(ctx, { offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick });
+    // 偏置不在依赖里：只改板材 / 雕刻起点时由下一个 effect 平移对象，不重建机台
+  }, [xMax, yMax, zMax, matWidth, matHeight, matThick, matName]);
+
+  // 板材起点与雕刻起点变化：只平移相关对象（2026-11-05）
+  useEffect(() => {
+    placeOffsetObjects(sceneRef.current, { offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick });
+  }, [offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick]);
   // 构建三维刀路轨迹几何体（高对比度：亮青蓝待加工、炽金红已加工、带方向箭头的 G0 空移、动态彗星尾迹）
   useEffect(() => {
     const ctx = sceneRef.current;
     if (!ctx) return;
     const { toolpathGroup } = ctx;
-    toolpathGroup.clear();
+    clearAndDispose(toolpathGroup);
     ctx.doneCutLine = null;
     ctx.todoCutLine = null;
     ctx.rapidLine = null;

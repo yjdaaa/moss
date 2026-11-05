@@ -96,7 +96,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 5. `load_features`：发送 `$CD` 读取 FluidNC YAML（行程、`speed_map`、宏、急停/故障/门引脚、`planner_blocks`），旧 GRBL 返回 `error:3` 时静默跳过。
 6. `verify_job_ready_adaptive`：`$30` 必须为有限正数；发送 `?` 要求 Idle，拒绝 Run/Jog/Home/Hold/Door/Sleep/Check/Alarm、SD 运行标记以及 `Pn:` 含 `E`/`F`/`D`；失败返回 `device_preflight_failed`。换算系数为 `$30 / 1000`。
 7. 设备预检后重新读取物理文件并与确认快照 SHA-256 比对；不一致返回 `send_gate_rejected`，不发送加工行。`prepare_gcode_lines` 只处理这份已验证的内存内容：剥离 `;` 与 `( )` 注释、丢弃空行，单行超过 254 字节或含非 ASCII 即拒绝整个文件（`gcode_line_invalid`），空文件拒绝（`gcode_empty`）。SHA 门禁校验的仍是原文件。
-8. `JobWorker` 逐行流式发送：字符计数流控，网络初始窗口 1024 字节、串口 255 字节，收到 `|Bf:` 后按固件报告自适应；S 值按第 6 步系数在线换算；`lines_sent` 只统计原文件行。
+8. `JobWorker` 逐行流式发送：字符计数流控（2026-11-05 起）：`$CD` 确认为 FluidNC 的网络连接起步 256 字节，串口与未知设备按经典 GRBL 起步 127 字节；无未确认命令时观测到的 `|Bf:` 剩余值即真实容量，窗口取观测最大值 − 1（上限 1024），发送中的 `Bf:` 只会抬高、不压低，绝不套高于设备报告值的下限；`$RI` 自动上报设置超时会补发 `G4 P0` 对齐应答，对不齐则不发任何刀路行；S 值按第 6 步系数在线换算；`lines_sent` 只统计原文件行。
 9. 全部 ACK 后发送 `G4 P0` 同步规划器，再查询 Idle，通过才写 `completed`；中间状态为 `awaiting_completion`。
 10. SD 脱机模式（`offline_sd=true` 或 `send_mode=sd_offline`）：已验证的内存文件经 FluidNC HTTP `/upload` 写入 SD 卡，用 `$File/ShowHash` 比对固件哈希，再 `$SD/Run`；设备 `$30` 不是 1000 时，上传内容与流式发送相同（已校验行按标尺换算 S 值），固件哈希比对实际上传字节的 SHA-256，原文件 SHA 仍先与确认快照比对（2026-11-05 起），进度来自状态报告的 `SD:` 字段；固件未启用 HashFS、拿不到文件哈希时拒绝 `$SD/Run`（2026-10-14 起）。
 

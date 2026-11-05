@@ -22,7 +22,7 @@ use image::codecs::gif::{GifEncoder, Repeat};
 use image::imageops::FilterType;
 use image::{Delay, Frame, ImageFormat, ImageReader, Limits, Rgb, RgbImage, Rgba, RgbaImage};
 use serde::Serialize;
-use crate::goggle_bot::{BotPose, ScreenCardStyle, base64_encode, draw_cute_frame, draw_goggle_bot, encode_goggle_bot_gif};
+use crate::goggle_bot::{BotPose, ScreenCardStyle, base64_encode, draw_cute_frame, draw_goggle_bot};
 use crate::{Shared, unix_now};
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_THUMBNAIL_PNG_BYTES: usize = 128 * 1024;
@@ -1158,12 +1158,21 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .with_state(shared)
 }
 
+/// 免鉴权的局域网路由：2026-11-05 起取进程级缓存（每个姿势只编码一次），首次编码放到阻塞线程，
+/// 反复请求不再在 tokio 工作线程上逐次重编码 GIF。
 async fn serve_goggle_bot_gif(Path(file): Path<String>) -> Response {
     let slug = file.strip_suffix(".gif").unwrap_or(&file);
     let Some(pose) = BotPose::from_slug(slug) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Ok(bytes) = encode_goggle_bot_gif(pose) else {
+    let cached = match crate::goggle_bot::goggle_bot_gif_if_encoded(pose) {
+        Some(cached) => cached,
+        None => tokio::task::spawn_blocking(move || crate::goggle_bot::cached_goggle_bot_gif(pose))
+            .await
+            .ok()
+            .flatten(),
+    };
+    let Some(bytes) = cached else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let len = bytes.len().to_string();
@@ -1256,6 +1265,19 @@ mod tests {
         assert!(store.get_at(&format!("{:032x}", 14u128), 500).is_none());
     }
 
+    /// 2026-11-05：免鉴权 GIF 路由取进程级缓存，字节与现场编码完全一致，同一姿势只编码一次。
+    #[test]
+    fn goggle_bot_gif_route_cache_is_encoded_once_with_identical_bytes() {
+        for slug in ["idle", "engrave", "approval", "music", "celebrate", "halted"] {
+            let pose = BotPose::from_slug(slug).unwrap();
+            let first = crate::goggle_bot::cached_goggle_bot_gif(pose).unwrap();
+            let again = crate::goggle_bot::cached_goggle_bot_gif(pose).unwrap();
+            assert!(std::ptr::eq(first, again), "{slug} 不应重复编码");
+            assert_eq!(crate::goggle_bot::goggle_bot_gif_if_encoded(pose), Some(Some(first)));
+            assert_eq!(first, crate::goggle_bot::encode_goggle_bot_gif(pose).unwrap().as_slice(), "{slug}");
+        }
+    }
+
     #[test]
     fn goggle_bot_gifs_and_all_three_zero_flash_cards_render_cleanly_in_both_styles() {
         let gifs = crate::goggle_bot::cached_goggle_bot_gifs();
@@ -1263,7 +1285,7 @@ mod tests {
         for item in gifs {
             assert!(item.data_url.starts_with("data:image/gif;base64,R0lGODlh"), "{}", item.id);
         }
-        let raw_gif = encode_goggle_bot_gif(BotPose::GogglesEngrave).unwrap();
+        let raw_gif = crate::goggle_bot::encode_goggle_bot_gif(BotPose::GogglesEngrave).unwrap();
         assert_eq!(&raw_gif[..6], b"GIF89a");
 
         for style in [ScreenCardStyle::MossHud, ScreenCardStyle::GoggleBot] {

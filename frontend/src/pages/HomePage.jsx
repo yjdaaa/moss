@@ -23,7 +23,7 @@ import {
   Square,
   Box,
 } from "lucide-react";
-import { apiFetch, getJson, postJson, fetchPreviewBlobUrl, resolveApiUrl } from "../api/client.js";
+import { getJson, postJson, fetchPreviewBlobUrl, fetchPreviewText, resolveApiUrl } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
@@ -31,8 +31,8 @@ import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { canResumeJob, formatResumeActionLabel } from "../estopResumeState.js";
-import { onEmergencyStop } from "../estopBus.js";
-import { estopTargetArgs, isJobCoveringPageTarget, stopPageTarget } from "../globalEstop.js";
+import { estopTargetArgs } from "../globalEstop.js";
+import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
@@ -434,18 +434,28 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           applyPreviewUrl(nextUrl);
         }
         if (artifacts.gcode_file) {
-          try {
-            apiFetch(`/preview?path=${encodeURIComponent(artifacts.gcode_file)}`)
-              .then((r) => r.text())
-              .then((t) => {
-                setGcodeText(t);
-                const lineCount = t.split("\n").filter((l) => l.trim().length > 0).length;
-                const sha = wf.confirmation_snapshot?.gcode_sha256 || artifacts.gcode_sha256 || "d8f2b1a9";
-                addLog("PREVIEW", `刀路解算完成: ${lineCount.toLocaleString()} 行 G-code, 物理 SHA-256: ${sha.slice(0, 8)}... 已就绪`, "ok");
-                addLog("HOST", `任务 [${info.jobId || wf.workflow_id}] 门禁校验通过，可点击【启动 JobWorker 逐行下发】`, "info");
-              })
-              .catch(() => {});
-          } catch (_e) {}
+          // 2026-11-05：先核对 HTTP 状态，错误页不得当 G-code 显示；SHA-256 只用后端给出的真实值，
+          // 拿不到时如实说明不可用，绝不伪造摘要或声称门禁已通过（发送时后端仍按物理文件重算）。
+          void fetchPreviewText(artifacts.gcode_file).then((preview) => {
+            if (!mountedRef.current) return;
+            if (!preview.ok) {
+              setGcodeText("");
+              addLog("PREVIEW", `加工预览已生成，但 G-code 刀路读取失败：${preview.error}。请重新生成预览后再发送。`, "error");
+              showAlert(`${preview.error}。工作流 ${info.jobId || wf.workflow_id} 的刀路文件无法读取，请重新生成预览。`, { title: "刀路读取失败", tone: "error" });
+              return;
+            }
+            const t = preview.text;
+            setGcodeText(t);
+            const lineCount = t.split("\n").filter((l) => l.trim().length > 0).length;
+            const sha = wf.confirmation_snapshot?.gcode_sha256 || artifacts.gcode_sha256 || "";
+            if (sha) {
+              addLog("PREVIEW", `刀路解算完成: ${lineCount.toLocaleString()} 行 G-code, 物理 SHA-256: ${String(sha).slice(0, 8)}... 已就绪`, "ok");
+              addLog("HOST", `任务 [${info.jobId || wf.workflow_id}] 预览已就绪，发送时后端将重新校验物理文件 SHA-256；可点击【启动 JobWorker 逐行下发】`, "info");
+            } else {
+              addLog("PREVIEW", `刀路解算完成: ${lineCount.toLocaleString()} 行 G-code；后端未返回物理 SHA-256，摘要不可用`, "warn");
+              addLog("HOST", `任务 [${info.jobId || wf.workflow_id}] 未确认刀路门禁，发送时由后端重新计算物理文件 SHA-256 校验`, "warn");
+            }
+          });
         } else {
           addLog("PREVIEW", `加工预览已生成，工作流就绪: ${info.jobId || wf.workflow_id}`, "ok");
         }
@@ -621,33 +631,20 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     network_host: networkHost,
     network_telnet_port: telnetPort,
   });
-  // 急停（2026-11-05）：先按任务编号走原设备通道；任务已不在后端登记表（刚全量发送完等）时
-  // 改按本页设备目标新开连接写 0x18，不再只提示失败。
-  const handleEStop = async () => {
-    const outcome = await stopPageTarget(postJson, { jobId: currentWorkflow?.workflow_id, target: estopTarget() });
-    const sent = outcome.kind === "sent";
-    const message = sent
-      ? `${outcome.message || "急停 0x18 已发送"}。停止请求已发送，但尚未确认设备已停止。请到设备旁确认，软件复位不能代替实体急停。`
-      : `${outcome.message || "停止请求发送失败"}。请立即使用实体急停。`;
-    setPollSafetyNotice(message);
-    addLog("ESTOP", message, sent ? "warn" : "error");
-    showAlert(message, { title:sent ? "停止请求已发送" : "停止未确认", tone:sent ? "warning" : "error" });
-  };
-  // 顶栏常驻急停：若后端未停掉本页正在运行的同一设备任务（如后端仅停了 unknown 旧记录或其他设备），
-  // 则同时向本页当前设备目标发送 0x18。
-  const estopRef = useRef(null);
-  estopRef.current = (detail) => {
-    const jobId = currentWorkflow?.workflow_id;
-    const target = estopTarget();
-    if (!jobId && !target) return false;
-    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target })) return false;
-    void handleEStop();
-    return true;
-  };
-  useEffect(
-    () =>
-      onEmergencyStop((detail) => (estopRef.current ? estopRef.current(detail) : false)),
-    [],
+  // 急停（2026-11-05）：先按任务编号走原设备通道；任务已不在后端登记表（刚全量发送完等）或通道挂起时
+  // 改按本页设备目标新开连接写 0x18，不再只提示失败。顶栏常驻急停若未停掉本页同一 running 设备任务
+  // （如后端仅停了 unknown 旧记录或其他设备），同样由 `usePageEmergencyStop` 向本页设备目标补发。
+  const handleEStop = usePageEmergencyStop(
+    () => ({ jobId: currentWorkflow?.workflow_id, target: estopTarget() }),
+    (outcome) => {
+      const sent = outcome.kind === "sent";
+      const message = sent
+        ? `${outcome.message || "急停 0x18 已发送"}。停止请求已发送，但尚未确认设备已停止。请到设备旁确认，软件复位不能代替实体急停。`
+        : `${outcome.message || "停止请求发送失败"}。请立即使用实体急停。`;
+      setPollSafetyNotice(message);
+      addLog("ESTOP", message, sent ? "warn" : "error");
+      showAlert(message, { title:sent ? "停止请求已发送" : "停止未确认", tone:sent ? "warning" : "error" });
+    },
   );
 
   // Cancel Job
@@ -1279,12 +1276,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 );
                 setGcodeText("");
                 if (artifacts.gcode_file) {
-                  try {
-                    const response = await apiFetch(`/preview?path=${encodeURIComponent(artifacts.gcode_file)}`);
-                    if (!response.ok) throw new Error("资源读取失败");
-                    setGcodeText(await response.text());
-                  } catch (_error) {
-                    addLog("PREVIEW", "调参预览已生成，但刀路资源加载失败，请重新打开任务", "error");
+                  const preview = await fetchPreviewText(artifacts.gcode_file);
+                  if (preview.ok) {
+                    setGcodeText(preview.text);
+                  } else {
+                    addLog("PREVIEW", `调参预览已生成，但刀路资源加载失败（${preview.error}），请重新打开任务`, "error");
                   }
                 }
                 if (artifacts.actual_params) {

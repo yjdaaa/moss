@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, Trash2, Download, Lock, ChevronDown, Copy, RefreshCw, Volume2 } from "lucide-react";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
+import { createPollRunner } from "../pollGuard.js";
 import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
 import VoiceMemoryCard from "./VoiceMemoryCard.jsx";
 import VoicePluginsCard from "./VoicePluginsCard.jsx";
@@ -106,20 +107,24 @@ export function useBuiltinStatus() {
     rawSetStatus(next);
   }, []);
 
-  const refresh = useCallback(async () => {
-    const ver = versionRef.current;
-    try {
-      const next = await voiceApi.builtinStatus();
-      if (mounted.current && versionRef.current === ver) {
-        rawSetStatus(next);
+  // 2026-11-05：对话进行中按 140ms 轮询；上一次请求未返回时跳过本节拍，卸载后与动作改写状态后丢弃旧响应
+  const pollRef = useRef(null);
+  if (!pollRef.current) {
+    pollRef.current = createPollRunner(async (isCurrent) => {
+      const ver = versionRef.current;
+      const fresh = () => mounted.current && isCurrent() && versionRef.current === ver;
+      try {
+        const next = await voiceApi.builtinStatus();
+        if (fresh()) rawSetStatus(next);
+      } catch (error) {
+        // 读过一次后保留上次状态，只标出刷新失败；不卸载各分组，避免丢失未保存的填写
+        if (fresh()) {
+          rawSetStatus((prev) => (prev && !prev.error ? { ...prev, poll_error: voiceErrorText(error) } : { error: voiceErrorText(error) }));
+        }
       }
-    } catch (error) {
-      // 读过一次后保留上次状态，只标出刷新失败；不卸载各分组，避免丢失未保存的填写
-      if (mounted.current && versionRef.current === ver) {
-        rawSetStatus((prev) => (prev && !prev.error ? { ...prev, poll_error: voiceErrorText(error) } : { error: voiceErrorText(error) }));
-      }
-    }
-  }, []);
+    });
+  }
+  const refresh = useCallback(() => pollRef.current(), []);
 
   const activeTurn = Boolean(
     status?.running
@@ -129,15 +134,16 @@ export function useBuiltinStatus() {
 
   useEffect(() => {
     mounted.current = true;
-    refresh();
+    void refresh();
     return () => {
       mounted.current = false;
+      pollRef.current?.invalidate();
     };
   }, [refresh]);
 
   useEffect(() => {
     const intervalMs = activeTurn ? 140 : VOICE_POLL_MS;
-    const timer = setInterval(refresh, intervalMs);
+    const timer = setInterval(() => void refresh(), intervalMs);
     return () => clearInterval(timer);
   }, [activeTurn, refresh]);
   const act = useCallback(async (label, action) => {

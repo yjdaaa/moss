@@ -1,3 +1,4 @@
+import { estopTargetArgs } from "./globalEstop.js";
 // 数字孪生核心纯逻辑：
 // 1. G-code 刀路解析（模态跟踪 G0/G1/G90/G91/M3/M4/M5/F/S、三维线段、包络、行号索引与连续进度插值）
 // 2. GRBL / FluidNC <State|MPos|WPos|Bf|FS|Pn|Ov|SD> 实时遥测报文解析
@@ -978,21 +979,16 @@ export function buildTwinConnectionPayload({
   };
 }
 
-export function buildTwinEmergencyStopPayload({
+/**
+ * 数字孪生页急停目标（2026-11-05）：与工作台 / 画板共用 `stopPageTarget` 两段式机制——
+ * 任务运行中先按任务编号走原设备通道，失败（后端已找不到任务或通道挂起超时）再按页面连接目标写 0x18；
+ * 无运行任务时绝不带旧任务编号，直接按页面连接目标急停。目标未填写时为 null（绝不猜设备）。
+ */
+export function twinEstopContext({
   isJobRunning,
   selectedWorkflowId,
   connectionPayload,
 } = {}) {
-  if (isJobRunning && selectedWorkflowId) {
-    return {
-      action: "emergency_stop",
-      confirmed: true,
-      job_id: selectedWorkflowId,
-    };
-  }
-  return {
-    ...(connectionPayload || {}),
-    action: "emergency_stop",
-    confirmed: true,
-  };
+  const jobId = isJobRunning && typeof selectedWorkflowId === "string" ? selectedWorkflowId.trim() : "";
+  return { jobId, target: estopTargetArgs(connectionPayload) };
 }

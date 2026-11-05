@@ -793,6 +793,15 @@ mod tests {
                 assert!(guard < body.find("imp::run").or(body.find("spawn_blocking")).unwrap(), "{command} 须先校验来源");
             }
         }
+        // 2026-11-05：状态读取含设备 IP 与调试原文，只给主窗口与打包私密页（两处前端调用方）
+        let builtin = include_str!("voice_builtin.rs");
+        let start = builtin.find("pub async fn voice_builtin_status(").expect("voice_builtin_status");
+        let body = &builtin[start..start + builtin[start..].find("\n}\n").expect("voice_builtin_status")];
+        let guard = body.find("require_status_window(&window)?;").expect("voice_builtin_status 未校验窗口来源");
+        assert!(guard < body.find("imp::run").unwrap(), "voice_builtin_status 须先校验来源");
+        let helper = builtin.find("fn require_status_window(").expect("require_status_window");
+        let helper = &builtin[helper..helper + builtin[helper..].find("\n}\n").expect("require_status_window")];
+        assert!(helper.contains("require_private_settings_window(window)"));
         let session = include_str!("lib.rs");
         let start = session.find("fn get_desktop_session(").unwrap();
         assert!(session[start..start + 800].contains("window_is_trusted_main(&window)"));

@@ -52,8 +52,8 @@ import { apiFetch, fetchPreviewBlobUrl, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
-import { onEmergencyStop } from "../estopBus.js";
-import { estopTargetArgs, isJobCoveringPageTarget, stopPageTarget } from "../globalEstop.js";
+import { estopTargetArgs } from "../globalEstop.js";
+import { usePageEmergencyStop } from "../usePageEstop.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
@@ -64,8 +64,10 @@ import {
   drawTargetMissingText,
   drawTargetReady,
   formatFramingStatus,
+  framingConfirmText,
   isSerial,
-  normalizeDrawMode,
+  readDrawDefaultForm,
+  safeBrowserStorage,
 } from "../drawConnection.js";
 
 const CONFIG_KEYS = [
@@ -84,20 +86,8 @@ const CONFIG_KEYS = [
 const EXCALIDRAW_LANG_CODE = "zh-CN";
 const MATERIAL_CHANNEL_NAME = "laser-material-library-v1";
 
-const DEFAULT_FORM = {
-  material: localStorage.getItem("laserLab.material") || "椴木",
-  thickness_mm: localStorage.getItem("laserLab.thickness_mm") || "3",
-  width_mm: localStorage.getItem("laserLab.width_mm") || "",
-  height_mm: localStorage.getItem("laserLab.height_mm") || "",
-  mode: normalizeDrawMode(localStorage.getItem("laserLab.mode")),
-  connection_mode: localStorage.getItem("laserLab.connection_mode") === "serial" ? "serial" : "network",
-  network_host: localStorage.getItem("laserLab.network_host") || "",
-  network_telnet_port: localStorage.getItem("laserLab.network_telnet_port") || "23",
-  port: localStorage.getItem("laserLab.port") || "",
-  baudrate: localStorage.getItem("laserLab.baudrate") || "115200",
-  vector_simplify_factor: localStorage.getItem("laserLab.vector_simplify_factor") || "3",
-  output_format: "gcode",
-};
+// 存储被禁用时逐项退回默认值，不能让模块顶层读取抛错导致整个应用打不开（2026-11-05）
+const DEFAULT_FORM = readDrawDefaultForm();
 
 export function DrawPage({ onNavigate }) {
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
@@ -114,7 +104,7 @@ export function DrawPage({ onNavigate }) {
   const [materialMode, setMaterialMode] = useState("custom");
   const [materialSelectValue, setMaterialSelectValue] = useState(CUSTOM_OPTION_VALUE);
   const [materialRefreshBusy, setMaterialRefreshBusy] = useState(false);
-  const [repeatSend, setRepeatSend] = useState(() => createRepeatSendState(window.localStorage));
+  const [repeatSend, setRepeatSend] = useState(() => createRepeatSendState(safeBrowserStorage()));
   const [serialPorts, setSerialPorts] = useState([]);
   const [framingLight, setFramingLight] = useState(false);
   const materialLibraryRef = useRef(materialLibrary);
@@ -307,15 +297,17 @@ export function DrawPage({ onNavigate }) {
   }
 
   function saveConfiguration() {
-    CONFIG_KEYS.forEach((key) => {
-      const value = form[key];
-      if (typeof value === "boolean") {
-        localStorage.setItem(`laserLab.${key}`, value ? "true" : "false");
-      } else {
-        localStorage.setItem(`laserLab.${key}`, value ?? "");
-      }
-    });
-    setStatus("配置已保存");
+    try {
+      const storage = safeBrowserStorage();
+      if (!storage) throw new Error("浏览器存储不可用");
+      CONFIG_KEYS.forEach((key) => {
+        const value = form[key];
+        storage.setItem(`laserLab.${key}`, typeof value === "boolean" ? (value ? "true" : "false") : (value ?? ""));
+      });
+      setStatus("配置已保存");
+    } catch (error) {
+      setStatus(`配置保存失败：${error?.message || error}（本次设置仍可使用，但不会被记住）`);
+    }
   }
 
   async function exportScene({ forLaser = false } = {}) {
@@ -471,7 +463,7 @@ export function DrawPage({ onNavigate }) {
       setResult(data);
       setConfirmOpen(false);
       setRepeatSend((current) =>
-        applyConfirmSendResponse(current, res.ok ? data : { ...data, success: false }, window.localStorage),
+        applyConfirmSendResponse(current, res.ok ? data : { ...data, success: false }, safeBrowserStorage()),
       );
       setStatus(
         res.ok && data.success
@@ -486,14 +478,28 @@ export function DrawPage({ onNavigate }) {
   }
 
   async function runFraming() {
+    if (busy) return;
     if (!hostReady) {
       setStatus(drawTargetMissingText(form));
       return;
     }
     const width = jobSummary?.actual_width_mm || 100;
     const height = jobSummary?.actual_height_mm || 100;
+    // 走边框会实际移动机器（勾选弱光时还会低功率出光），单击不得直接执行（2026-11-05 用户决定）
+    const lightOn = framingLight;
+    const confirmed = await showConfirm(framingConfirmText(form, width, height, lightOn), {
+      title: lightOn ? "确认走边框（弱光出光）" : "确认走边框（机器将移动）",
+      tone: "warning",
+      danger: lightOn,
+      confirmText: lightOn ? "移动并弱光走边框" : "开始走边框",
+      cancelText: "取消",
+    });
+    if (!confirmed) {
+      setStatus("已取消走边框，机器未移动");
+      return;
+    }
     setBusy(true);
-    setStatus(framingLight ? "正在走边框（弱光指示）…顶栏急停可随时停止" : "正在走边框（激光关闭，只移动激光头）…顶栏急停可随时停止");
+    setStatus(lightOn ? "正在走边框（弱光指示）…顶栏急停可随时停止" : "正在走边框（激光关闭，只移动激光头）…顶栏急停可随时停止");
     try {
       // 默认不出光；勾选“弱光指示”才以 S1 出极弱的光（2026-10-14）
       const res = await postJson("/api/device/framing", {
@@ -503,9 +509,9 @@ export function DrawPage({ onNavigate }) {
         max_x: width,
         max_y: height,
         feed_rate: 2000,
-        power: framingLight ? 1 : 0,
+        power: lightOn ? 1 : 0,
       });
-      setStatus(formatFramingStatus(res, width, height, framingLight));
+      setStatus(formatFramingStatus(res, width, height, lightOn));
     } catch (e) {
       setStatus(`走边框请求失败：${e.message || e}`);
     } finally {
@@ -558,29 +564,17 @@ export function DrawPage({ onNavigate }) {
   }
 
   // 顶栏常驻急停（2026-11-05）：只走 `/api/safe-action` 实时 0x18，绝不退化为 workflow cancel。
-  // 顶栏已先停后端登记的任务；轮到本页说明任务已不在登记表（如刚全量发送完、GRBL 仍在执行缓冲），
-  // 此时按任务编号失败后改用本页设备目标新开连接写 0x18。
-  async function handleEStop() {
-    const outcome = await stopPageTarget(postJson, { jobId: workflowId, target: estopTargetArgs(form) });
-    const message = outcome.kind === "sent"
-      ? `${outcome.message || "急停 0x18 已发送"}。软件急停不代表物理停机，请到设备旁确认；必要时按实体急停。`
-      : `${outcome.message || "急停发送失败"}。请立即使用实体急停，并检查设备连接。`;
-    setStatus(message);
-    void showAlert(message, { title: outcome.kind === "sent" ? "已发送急停" : "急停未确认", tone: outcome.kind === "sent" ? "warning" : "error" });
-  }
-  const estopRef = useRef(null);
-  estopRef.current = (detail) => {
-    const jobId = workflowId;
-    const target = estopTargetArgs(form);
-    if (!jobId && !target) return false;
-    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target })) return false;
-    void handleEStop();
-    return true;
-  };
-  useEffect(
-    () =>
-      onEmergencyStop((detail) => (estopRef.current ? estopRef.current(detail) : false)),
-    [],
+  // 顶栏已先停后端登记的任务；轮到本页说明任务已不在登记表（如刚全量发送完、GRBL 仍在执行缓冲）
+  // 或任务通道挂起，此时按任务编号失败后改用本页设备目标新开连接写 0x18（`usePageEmergencyStop`）。
+  usePageEmergencyStop(
+    () => ({ jobId: workflowId, target: estopTargetArgs(form) }),
+    (outcome) => {
+      const message = outcome.kind === "sent"
+        ? `${outcome.message || "急停 0x18 已发送"}。软件急停不代表物理停机，请到设备旁确认；必要时按实体急停。`
+        : `${outcome.message || "急停发送失败"}。请立即使用实体急停，并检查设备连接。`;
+      setStatus(message);
+      void showAlert(message, { title: outcome.kind === "sent" ? "已发送急停" : "急停未确认", tone: outcome.kind === "sent" ? "warning" : "error" });
+    },
   );
 
   async function workflowAction(action) {

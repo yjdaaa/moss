@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  createPageEstopResponder,
   estopTargetArgs,
   isJobCoveringPageTarget,
   isSameEstopTarget,
@@ -236,4 +237,116 @@ test("顶栏急停：后端已停掉当前页面同一 running 设备时不重�
     ),
     false,
   );
+});
+
+test("顶栏急停：任务查询挂起时到时限即让页面按本页目标补发 0x18，不无限等待", async () => {
+  const calls = [];
+  const pageTarget = estopTargetArgs({ connection_mode: "network", network_host: "127.0.0.1", network_telnet_port: "2302" });
+  let releaseLookup;
+  const hungLookup = new Promise((resolve) => { releaseLookup = resolve; });
+  let notifiedWith = "never";
+  const pending = triggerTopbarEmergencyStop(
+    () => hungLookup,
+    async (path, data) => { calls.push({ path, data }); return { ok: true, data: { success: true } }; },
+    ({ stoppedJob }) => {
+      notifiedWith = stoppedJob;
+      void stopPageTarget(async (path, data) => {
+        calls.push({ path, data });
+        return { ok: true, data: { success: true, result: "页面设备已急停" } };
+      }, { jobId: "", target: pageTarget });
+      return true;
+    },
+    { pageDeadlineMs: 20 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(notifiedWith, null, "查询仍挂起时必须已通知页面（不带 stoppedJob）");
+  assert.deepEqual(calls, [
+    { path: "/api/safe-action", data: { action: "emergency_stop", confirmed: true, connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 } },
+  ]);
+  // 查询最终以超时失败返回：结果如实报告，页面不会被第二次通知
+  releaseLookup({ ok: false, status: 0, timedOut: true, data: { success: false, result: "请求超时" } });
+  const outcome = await pending;
+  assert.equal(outcome.kind, "lookup_failed");
+  assert.equal(outcome.pageHandled, true);
+  assert.equal(outcome.pageNotifiedEarly, true);
+  assert.equal(calls.length, 1);
+});
+
+test("顶栏急停：按任务写 0x18 挂起时同样到时限通知页面；后续结果不重复通知", async () => {
+  let notifications = 0;
+  let releaseStop;
+  const pending = triggerTopbarEmergencyStop(
+    async () => ({ ok: true, data: { success: true, result: { jobs: [{ job_id: "wf-1", target: "127.0.0.1:23", state: "running" }] } } }),
+    () => new Promise((resolve) => { releaseStop = resolve; }),
+    () => { notifications += 1; return true; },
+    { pageDeadlineMs: 20 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(notifications, 1);
+  releaseStop({ ok: true, data: { success: true, result: "0x18 已写出" } });
+  const outcome = await pending;
+  assert.equal(outcome.kind, "sent");
+  assert.equal(notifications, 1, "已提前通知过页面，不得再通知第二次");
+});
+
+test("顶栏急停：多任务无法确定（ambiguous）时不猜设备，但仍通知当前页面按本页目标补发", async () => {
+  let backendStopCalled = false;
+  const pageCalls = [];
+  const outcome = await triggerTopbarEmergencyStop(
+    async () => ({ ok: true, data: { success: true, result: { jobs: [
+      { job_id: "a", target: "192.168.1.9:23", state: "running" },
+      { job_id: "b", target: "COM3@115200", state: "running" },
+    ] } } }),
+    async () => { backendStopCalled = true; return { ok: true, data: { success: true } }; },
+    ({ stoppedJob }) => { pageCalls.push(stoppedJob); return true; },
+  );
+  assert.equal(outcome.kind, "ambiguous");
+  assert.equal(backendStopCalled, false, "多任务时顶栏绝不随机挑选任务");
+  assert.deepEqual(pageCalls, [null]);
+  assert.equal(outcome.pageHandled, true);
+});
+
+test("顶栏急停：后端任务正常返回时不提前通知页面，保持先任务后页面的顺序", async () => {
+  const order = [];
+  const outcome = await triggerTopbarEmergencyStop(
+    async () => ({ ok: true, data: { success: true, result: { jobs: [] } } }),
+    async () => ({ ok: true, data: { success: true } }),
+    ({ stoppedJob }) => { order.push(["page", stoppedJob]); return false; },
+    { pageDeadlineMs: 1000 },
+  );
+  assert.equal(outcome.kind, "none");
+  assert.equal(outcome.pageNotifiedEarly, false);
+  assert.deepEqual(order, [["page", null]]);
+});
+
+test("页面急停响应：无目标不处理；顶栏已停掉覆盖本页的 running 任务不重复；否则异步执行并返回 true", async () => {
+  const runs = [];
+  const target = estopTargetArgs({ connection_mode: "network", network_host: "127.0.0.1", network_telnet_port: "23" });
+  const none = createPageEstopResponder(() => ({ jobId: " ", target: null }), (ctx) => runs.push(ctx));
+  assert.equal(none({ stoppedJob: null }), false);
+
+  const responder = createPageEstopResponder(() => ({ jobId: " wf-1 ", target }), (ctx) => runs.push(ctx));
+  assert.equal(responder({ stoppedJob: { job_id: "wf-1", target: "x", state: "running" } }), false);
+  assert.equal(responder({ stoppedJob: { job_id: "other", target: "127.0.0.1:23", state: "running" } }), false);
+  assert.equal(runs.length, 0);
+  // unknown 旧记录不算覆盖
+  assert.equal(responder({ stoppedJob: { job_id: "wf-1", target: "127.0.0.1:23", state: "unknown" } }), true);
+  assert.equal(responder({ stoppedJob: null }), true);
+  assert.deepEqual(runs, [{ jobId: "wf-1", target }, { jobId: "wf-1", target }]);
+});
+
+test("页面急停：任务通道请求超时后仍按设备目标补发", async () => {
+  const calls = [];
+  const result = await stopPageTarget(
+    async (path, data) => {
+      calls.push(data);
+      return data.job_id
+        ? { ok: false, status: 0, timedOut: true, data: { success: false, result: "请求超时（4000 ms 未响应）" } }
+        : { ok: true, data: { success: true, result: "急停 0x18 已发送" } };
+    },
+    { jobId: "wf-hung", target: estopTargetArgs({ connection_mode: "serial", port: "COM4", baudrate: "115200" }) },
+  );
+  assert.equal(result.kind, "sent");
+  assert.equal(result.via, "target");
+  assert.equal(calls.length, 2);
 });

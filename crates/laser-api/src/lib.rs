@@ -944,7 +944,9 @@ impl ApiService {
         if !self.voice_caller_allowed(_ctx) {
             return laser_contracts::ToolCallResult::with_detail(false, "语音设备授权已失效，请重新连接", "voice_session_revoked");
         }
-        let action = args.action.trim();
+        // 与 laser-tools 一致：动作名大小写不敏感，避免 "Emergency_Stop" 落空而不发 0x18（2026-11-05）。
+        let action_owned = args.action.trim().to_ascii_lowercase();
+        let action = action_owned.as_str();
         if job_id.is_some() && !matches!(action, "emergency_stop" | "soft_reset" | "status") {
             return laser_contracts::ToolCallResult::err("job_id 只用于查询或停止任务，不能改变其他动作的目标");
         }
@@ -1184,8 +1186,10 @@ impl ApiService {
         let min_y = object.get("min_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let max_x = object.get("max_x").and_then(|v| v.as_f64()).unwrap_or(100.0);
         let max_y = object.get("max_y").and_then(|v| v.as_f64()).unwrap_or(100.0);
-        let feed_rate = object.get("feed_rate").and_then(|v| v.as_i64()).unwrap_or(2000) as i32;
-        let power = object.get("power").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let (feed_rate, power) = match framing_feed_and_power(object) {
+            Ok(values) => values,
+            Err(error) => return framing_params_invalid(error),
+        };
 
         let framing_gcode = match laser_core::gcode::generate_framing_gcode(min_x, min_y, max_x, max_y, feed_rate, power) {
             Ok(g) => g,
@@ -1529,6 +1533,19 @@ impl ApiService {
         })?;
         let mode = spec.mode();
         let target = spec.describe();
+        let is_offline_sd = object
+            .get("offline_sd")
+            .and_then(|v| v.as_bool())
+            .or_else(|| object.get("send_mode").and_then(|v| v.as_str()).map(|s| s == "sd_offline"))
+            .unwrap_or(false);
+        // 网络脱机上传端口在打开设备前校验：不截断（65616 不能变成 80），无效直接 400（2026-11-05）。
+        let sd_http_port = if is_offline_sd && mode == "network" {
+            sd_offline_http_port(object).map_err(|error| {
+                (400, failure(error, Some(serde_json::json!({"error_code": "sd_http_port_invalid"}))))
+            })?
+        } else {
+            80
+        };
         let (cancel, _owned_reservation) = {
             let jobs = self
                 .active_jobs
@@ -1612,12 +1629,6 @@ impl ApiService {
             ));
         }
         let expected_sha = actual_sha;
-
-        let is_offline_sd = object
-            .get("offline_sd")
-            .and_then(|v| v.as_bool())
-            .or_else(|| object.get("send_mode").and_then(|v| v.as_str()).map(|s| s == "sd_offline"))
-            .unwrap_or(false);
 
         let start_from_line = object
             .get("start_from_line")
@@ -1734,11 +1745,7 @@ impl ApiService {
                     let remote_path = format!("/sd/{remote_filename}");
 
                     let upload_res = if mode == "network" {
-                        let http_port = obj_clone
-                            .get("network_http_port")
-                            .or_else(|| obj_clone.get("http_port"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(80) as u16;
+                        let http_port = sd_http_port;
                         let host = obj_clone
                             .get("network_host")
                             .or_else(|| obj_clone.get("host"))
@@ -2545,7 +2552,12 @@ impl ApiService {
                 .map(|records| records.into_iter().map(|r| r.payload).collect::<Vec<_>>())
                 .unwrap_or_default()
         } else {
-            self.workflows.lock().unwrap().values().cloned().collect()
+            self.workflows
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .values()
+                .cloned()
+                .collect()
         };
         let effective_library = self.effective_material_library().ok()?;
         for wf in workflows {
@@ -2621,7 +2633,6 @@ impl ApiService {
     }
 
     pub fn serve(listener: TcpListener, service: std::sync::Arc<Self>) -> std::io::Result<()> {
-        const MAX_CONCURRENT_HTTP: usize = 64;
         struct ConnPermit(std::sync::Arc<std::sync::atomic::AtomicUsize>);
         impl Drop for ConnPermit {
             fn drop(&mut self) {
@@ -2635,14 +2646,11 @@ impl ApiService {
                 Err(_) => continue,
             };
             let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
-            if active_conns
-                .fetch_update(
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                    |n| (n < MAX_CONCURRENT_HTTP).then_some(n + 1),
-                )
-                .is_err()
-            {
+            // 认证要等读完请求才能做，因此在接入时就按来源分配名额：回环（桌面界面 / Tauri 内嵌页）
+            // 始终保有预留名额，局域网慢连接占满也不会让本机急停拿到 503（2026-11-05）。
+            let Ok(peer) = stream.peer_addr() else { continue; };
+            let loopback = peer.ip().is_loopback();
+            if !try_admit_http_connection(&active_conns, loopback) {
                 let busy = http_json(503, failure("并发连接过多，请稍后重试", None));
                 let _ = stream.write_all(&busy);
                 let _ = stream.flush();
@@ -2654,9 +2662,7 @@ impl ApiService {
                 .name("moss-http".into())
                 .spawn(move || {
                     let _permit = permit;
-                    let Ok(peer) = stream.peer_addr() else { return; };
                     let source = peer.ip().to_string();
-                    let loopback = peer.ip().is_loopback();
                     if let Ok(request) = read_http_request(&mut stream) {
                         if !request.is_empty() {
                             let response = missing_host_rejection(&request, loopback)
@@ -2669,6 +2675,44 @@ impl ApiService {
         }
         Ok(())
     }
+}
+
+/// SD 脱机上传使用的 FluidNC HTTP 端口：`network_http_port`，其次 `http_port`，都缺省时为 80。
+/// 给出的值必须是 1..=65535 的整数，否则拒绝（不截断、不回落到 80）。
+fn sd_offline_http_port(object: &serde_json::Map<String, serde_json::Value>) -> Result<u16, String> {
+    let Some((key, value)) = ["network_http_port", "http_port"]
+        .into_iter()
+        .find_map(|key| object.get(key).filter(|value| !value.is_null()).map(|value| (key, value)))
+    else {
+        return Ok(80);
+    };
+    value
+        .as_u64()
+        .and_then(|raw| u16::try_from(raw).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| format!("脱机上传端口 {key} 无效：{value}，必须是 1..=65535 的整数，未连接设备"))
+}
+
+/// HTTP 并发连接总上限。
+const MAX_CONCURRENT_HTTP: usize = 64;
+/// 只留给回环来源的名额：非回环连接最多占 `MAX_CONCURRENT_HTTP - LOOPBACK_RESERVED_HTTP` 个。
+const LOOPBACK_RESERVED_HTTP: usize = 8;
+
+/// 接入一条 HTTP 连接并占用名额；名额不足返回 `false`（调用方回 503）。
+/// 非回环来源只能用到 `MAX - RESERVED`，回环来源可用满 `MAX`，保证本机界面的急停等请求总有余量。
+fn try_admit_http_connection(active: &std::sync::atomic::AtomicUsize, loopback: bool) -> bool {
+    let limit = if loopback {
+        MAX_CONCURRENT_HTTP
+    } else {
+        MAX_CONCURRENT_HTTP - LOOPBACK_RESERVED_HTTP
+    };
+    active
+        .fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |n| (n < limit).then_some(n + 1),
+        )
+        .is_ok()
 }
 
 /// 真实 TCP 入口上的回环请求必须带 `Host`：否则 `is_allowed_loopback_host` 的防 DNS 重绑定检查无从执行。
@@ -3688,6 +3732,10 @@ impl ApiService {
                 Err(error) => return http_json(400, failure(error, None)),
             };
             strip_identity_fields(&mut object);
+            // 先校验整数参数，审批摘要与实际下发使用同一份已校验的值（2026-11-05）。
+            if let Err(error) = framing_feed_and_power(&object) {
+                return framing_params_invalid(error);
+            }
             // 严格模式检查点（技术书 §6.2）：走边框真实驱动机器
             let framing_facts = approval::framing_digest_facts(&object);
             let framing_summary = framing_approval_summary(&framing_facts);
@@ -3807,7 +3855,9 @@ impl ApiService {
                     return http_json(500, failure("画板预览保存失败", None));
                 }
             } else {
-                let mut map = self.workflows.lock().unwrap();
+                let Ok(mut map) = self.workflows.lock() else {
+                    return http_json(500, failure("画板预览保存失败", None));
+                };
                 map.insert(workflow_id.clone(), record.clone());
             }
             return http_json(200, success(record));
@@ -6712,6 +6762,38 @@ fn safe_action_approval_summary(action: &str, facts: &serde_json::Map<String, se
     }
 }
 
+/// 走边框进给上限（mm/min）。只挡明显错误的数值；实际速度仍受固件 `$110/$111` 限制。
+const FRAMING_MAX_FEED_RATE: i32 = 20_000;
+
+/// 读取走边框的 `feed_rate`（缺省 2000）与 `power`（缺省 0，不出光）。
+/// 必须是 JSON 整数且可无损转为 `i32`；`power` 在 G-code S 标尺 0..=1000（下发时再按设备 `$30` 换算），
+/// `feed_rate` 在 1..=20000。不截断、不回绕，越界一律拒绝（2026-11-05）。
+fn framing_feed_and_power(object: &serde_json::Map<String, serde_json::Value>) -> Result<(i32, i32), String> {
+    fn read_int(object: &serde_json::Map<String, serde_json::Value>, key: &str, default: i32, min: i32, max: i32) -> Result<i32, String> {
+        let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
+            return Ok(default);
+        };
+        let parsed = value
+            .as_i64()
+            .and_then(|raw| i32::try_from(raw).ok())
+            .filter(|parsed| (min..=max).contains(parsed));
+        parsed.ok_or_else(|| format!("{key} 必须是 {min}..={max} 的整数，收到 {value}"))
+    }
+    let feed_rate = read_int(object, "feed_rate", 2000, 1, FRAMING_MAX_FEED_RATE)?;
+    let power = read_int(object, "power", 0, 0, laser_core::safety::MAX_POWER)?;
+    Ok((feed_rate, power))
+}
+
+fn framing_params_invalid(error: String) -> Vec<u8> {
+    http_json(
+        400,
+        failure(
+            format!("走边框参数无效：{error}"),
+            Some(serde_json::json!({"error_code": "framing_params_invalid"})),
+        ),
+    )
+}
+
 fn framing_approval_summary(facts: &serde_json::Map<String, serde_json::Value>) -> String {
     let value = |key: &str, default: &str| facts.get(key).map(|v| v.to_string()).unwrap_or_else(|| default.to_owned());
     format!(
@@ -7796,7 +7878,8 @@ mod tests {
         let start = std::time::Instant::now();
         loop {
             let value = parse_json_response(&service.handle_http(status_request.as_bytes()));
-            if value["result"]["status"] == wanted || start.elapsed() > std::time::Duration::from_secs(5) {
+            // 成功即返回；20 秒上限只为全工作区并行测试负载下不误报（2026-11-05）。
+            if value["result"]["status"] == wanted || start.elapsed() > std::time::Duration::from_secs(20) {
                 return value;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -7969,6 +8052,67 @@ mod tests {
         let lines = written.lock().unwrap().clone();
         assert!(lines.iter().any(|line| line.starts_with("$File/ShowHash=")), "{lines:?}");
         assert!(!lines.iter().any(|line| line.starts_with("$SD/Run")), "没有固件哈希不能启动 SD 作业: {lines:?}");
+    }
+
+    /// SD 脱机上传端口不能截断：65616 曾被 `as u16` 变成 80 并上传到错误端口；
+    /// 无效端口必须在连接设备前 400 拒绝（2026-11-05）。
+    #[test]
+    fn sd_offline_rejects_out_of_range_http_port_before_opening_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_generated_root(temp.path().to_path_buf())
+            .with_transport_factory(recording_transport_factory(200_000, written.clone()));
+        let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
+            "text": "SD", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+        }));
+        let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
+        for (key, port) in [
+            ("network_http_port", serde_json::json!(65_616)),
+            ("network_http_port", serde_json::json!(0)),
+            ("http_port", serde_json::json!(-1)),
+            ("network_http_port", serde_json::json!("8080")),
+        ] {
+            let mut body = serde_json::json!({
+                "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+                "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
+                "offline_sd": true
+            });
+            body[key] = port.clone();
+            let send = post_json(&service, "/api/workflow", &body);
+            assert_eq!(send["success"], false, "{key}={port}: {send}");
+            assert_eq!(send["detail"]["error_code"], "sd_http_port_invalid", "{key}={port}: {send}");
+            assert!(written.lock().unwrap().is_empty(), "端口无效时不能连接设备: {key}={port}");
+            assert_eq!(service.active_job_count(), 0);
+        }
+        let mut object = serde_json::Map::new();
+        assert_eq!(sd_offline_http_port(&object), Ok(80));
+        object.insert("http_port".into(), serde_json::json!(8080));
+        assert_eq!(sd_offline_http_port(&object), Ok(8080));
+        object.insert("network_http_port".into(), serde_json::json!(65_535));
+        assert_eq!(sd_offline_http_port(&object), Ok(65_535));
+    }
+
+    /// 非回环来源最多占 `MAX - RESERVED` 个连接名额，回环可用满全部：局域网慢连接占满时本机急停仍能接入（2026-11-05）。
+    #[test]
+    fn http_admission_reserves_slots_for_loopback() {
+        let active = std::sync::atomic::AtomicUsize::new(0);
+        let remote_limit = MAX_CONCURRENT_HTTP - LOOPBACK_RESERVED_HTTP;
+        for _ in 0..remote_limit {
+            assert!(try_admit_http_connection(&active, false));
+        }
+        assert!(!try_admit_http_connection(&active, false), "非回环不能占用回环预留名额");
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), remote_limit);
+        for _ in 0..LOOPBACK_RESERVED_HTTP {
+            assert!(try_admit_http_connection(&active, true), "回环必须还能接入");
+        }
+        assert!(!try_admit_http_connection(&active, true), "总上限仍然生效");
+        assert!(!try_admit_http_connection(&active, false));
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), MAX_CONCURRENT_HTTP);
+        // 释放一个名额后，非回环在总数仍高于其上限时依旧被拒，回环可以补上
+        active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(!try_admit_http_connection(&active, false));
+        assert!(try_admit_http_connection(&active, true));
     }
 
     /// SD 脱机必须和流式发送使用同一功率标尺：设备 `$30=255` 时上传换算后的行，并用上传字节的 SHA 做固件哈希门禁。
@@ -10987,6 +11131,132 @@ Content-Length: 30
         let refused = framing(&alarm, Some(1));
         assert_eq!(refused["detail"]["error_code"], "device_preflight_failed", "{refused}");
         assert!(motion(&alarm_written.lock().unwrap()).is_empty(), "预检失败不能运动: {:?}", alarm_written.lock().unwrap());
+    }
+
+    /// 走边框的 `power` / `feed_rate` 必须是范围内整数：溢出不能回绕（4294968096 曾变成 S800），
+    /// 越界与非整数在打开设备前 400 拒绝；合法值原样写进 G-code（2026-11-05）。
+    #[test]
+    fn framing_rejects_overflowing_or_out_of_range_power_and_feed() {
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_transport_factory(status_transport_factory("Idle", written.clone()));
+        let framing = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "max_x": 20, "max_y": 10});
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            post_json(&service, "/api/device/framing", &body)
+        };
+        let rejected = [
+            serde_json::json!({"power": 4_294_968_096_u64}),
+            serde_json::json!({"power": 1001}),
+            serde_json::json!({"power": -1}),
+            serde_json::json!({"power": 12.5}),
+            serde_json::json!({"power": "800"}),
+            serde_json::json!({"feed_rate": 4_294_969_296_u64}),
+            serde_json::json!({"feed_rate": 0}),
+            serde_json::json!({"feed_rate": 20_001}),
+        ];
+        for extra in rejected {
+            let result = framing(extra.clone());
+            assert_eq!(result["success"], false, "{extra}: {result}");
+            assert_eq!(result["detail"]["error_code"], "framing_params_invalid", "{extra}: {result}");
+            assert!(written.lock().unwrap().is_empty(), "参数无效时不能连接或写设备: {extra}");
+        }
+
+        let accepted = framing(serde_json::json!({"power": 1000, "feed_rate": 2500}));
+        assert_eq!(accepted["success"], true, "{accepted}");
+        let lines = written.lock().unwrap().clone();
+        assert!(lines.iter().any(|line| line == "M4 S1000"), "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("G1 X20") && line.ends_with("F2500")), "{lines:?}");
+    }
+
+    /// 动作名大小写不敏感（与 laser-tools 一致）：运行中的作业收到 `Emergency_Stop` / `EMERGENCY_STOP`
+    /// 必须走原任务通道写出实时 0x18，不能落空或另开新连接（2026-11-05）。
+    #[test]
+    fn mixed_case_emergency_stop_during_running_job_writes_realtime_estop() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct GatedRecordingGrbl {
+            responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+            realtime: std::sync::Arc<std::sync::Mutex<Vec<laser_device::RealtimeCommand>>>,
+            gate: std::sync::Arc<AtomicBool>,
+        }
+        impl laser_device::DeviceTransport for GatedRecordingGrbl {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                if line.starts_with('$') {
+                    let mut responses = self.responses.lock().unwrap();
+                    if line == "$$" {
+                        responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
+                    } else {
+                        responses.push_back("ok".into());
+                    }
+                    return Ok(());
+                }
+                while !self.gate.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err("测试结束：模拟连接断开".into())
+            }
+            fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+                if command == laser_device::RealtimeCommand::StatusQuery {
+                    self.responses.lock().unwrap().push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                } else {
+                    self.realtime.lock().unwrap().push(command);
+                }
+                Ok(())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                Ok(self.responses.lock().unwrap().pop_front())
+            }
+        }
+        let gate = std::sync::Arc::new(AtomicBool::new(false));
+        let realtime = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let opens = std::sync::Arc::new(AtomicUsize::new(0));
+        let factory: TransportFactory = {
+            let (gate, realtime, opens) = (gate.clone(), realtime.clone(), opens.clone());
+            std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
+                opens.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(GatedRecordingGrbl { responses: Default::default(), realtime: realtime.clone(), gate: gate.clone() }) as Box<dyn laser_device::DeviceTransport>)
+            })
+        };
+        let service = std::sync::Arc::new(
+            ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library()).with_transport_factory(factory),
+        );
+        let runner = {
+            let service = service.clone();
+            std::thread::spawn(move || post_json(&service, "/api/device/framing", &serde_json::json!({
+                "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+            })))
+        };
+        let targets_request = b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let start = std::time::Instant::now();
+        let job_id = loop {
+            let targets = parse_json_response(&service.handle_http(targets_request));
+            if let Some(id) = targets["result"]["jobs"][0]["job_id"].as_str() {
+                break id.to_owned();
+            }
+            if runner.is_finished() || start.elapsed() > std::time::Duration::from_secs(10) {
+                gate.store(true, Ordering::SeqCst);
+                panic!("走边框没有登记为活动作业: {}", runner.join().unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+        let stop = post_json(&service, "/api/safe-action", &serde_json::json!({"action": "Emergency_Stop", "confirmed": true}));
+        assert_eq!(stop["success"], true, "{stop}");
+        assert!(stop["result"].as_str().unwrap_or("").contains("原设备通道"), "{stop}");
+        assert_eq!(*realtime.lock().unwrap(), vec![laser_device::RealtimeCommand::EmergencyStop]);
+        assert_eq!(opens.load(Ordering::SeqCst), 1, "急停必须复用运行中任务的通道，不能另开连接");
+
+        let by_id = post_json(&service, "/api/safe-action", &serde_json::json!({"action": " EMERGENCY_STOP ", "confirmed": true, "job_id": job_id}));
+        assert_eq!(by_id["success"], true, "{by_id}");
+        assert_eq!(realtime.lock().unwrap().len(), 2, "按任务编号的大写急停也要写出 0x18");
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+        gate.store(true, Ordering::SeqCst);
+        let result = runner.join().unwrap();
+        assert_eq!(result["detail"]["error_code"], "framing_cancelled", "{result}");
     }
 
     /// 走边框运行中登记为活动作业：顶栏急停能找到并停止它，结束后保留为“待确认停止”（2026-10-14）。

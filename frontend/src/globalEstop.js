@@ -1,4 +1,13 @@
 /**
+ * 急停请求时限（2026-11-05）：查询登记任务只读内存，给短时限；写 0x18 可能要新开串口/网口连接，
+ * 时限稍长。超时只代表前端不再等，绝不当作“已停机”。
+ */
+export const ESTOP_LOOKUP_TIMEOUT_MS = 1500;
+export const ESTOP_SEND_TIMEOUT_MS = 4000;
+/** 顶栏急停最多等后端任务通道这么久，超时就让当前页面立刻按本页目标补发 0x18 */
+export const ESTOP_PAGE_DEADLINE_MS = 800;
+
+/**
  * 顶栏急停：直接查询后端持有的原设备任务通道，不依赖当前 React 页面。
  * 多任务时不擅自选择设备；请求成功只证明实时指令已写出，不证明物理停机。
  */
@@ -115,18 +124,60 @@ export function isJobCoveringPageTarget(stoppedJob, { jobId, target } = {}) {
 }
 
 /**
- * 顶栏全局急停编排：先停后端登记的任务；当后端无任务、失败、仅停了 `unknown` 旧记录
- * 或停的是其他设备时，同时触发当前页面向本页设备目标补发 0x18。
+ * 页面急停响应（2026-11-05，工作台 / 画板 / 数字孪生共用）：返回顶栏急停事件的处理函数。
+ * `getContext()` 返回 `{ jobId, target }`；两者都没有时不处理（交还顶栏提示）；顶栏已停掉
+ * 覆盖本页的 running 任务时不重复发送；否则异步执行 `run(context)` 并返回 true。
  */
-export async function triggerTopbarEmergencyStop(getTargets, sendStop, notifyPage) {
-  const outcome = await stopKnownJob(getTargets, sendStop);
-  let pageHandled = false;
-  if (typeof notifyPage === "function" && outcome.kind !== "ambiguous") {
-    pageHandled = Boolean(
-      notifyPage({
-        stoppedJob: outcome.kind === "sent" ? outcome.job : null,
-      }),
-    );
-  }
-  return { ...outcome, pageHandled };
+export function createPageEstopResponder(getContext, run) {
+  return (detail) => {
+    const context = (typeof getContext === "function" ? getContext() : null) || {};
+    const jobId = typeof context.jobId === "string" ? context.jobId.trim() : "";
+    const target = context.target || null;
+    if (!jobId && !target) return false;
+    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target })) return false;
+    void run({ jobId, target });
+    return true;
+  };
 }
+
+const DEADLINE = Symbol("estop-page-deadline");
+
+/**
+ * 顶栏全局急停编排：先停后端登记的任务；当后端无任务、失败、多任务无法确定（ambiguous）、
+ * 仅停了 `unknown` 旧记录或停的是其他设备时，同时触发当前页面向本页设备目标补发 0x18。
+ *
+ * 2026-11-05：页面补发不再无限排在任务查询之后——后端任务通道在 `pageDeadlineMs` 内没有结果
+ * （查询或写出挂起）就立刻通知页面（不带 stoppedJob），页面按本页目标补发；后续结果不再重复通知。
+ * 0x18 重复写到同一台设备无害，漏发才危险。
+ */
+export async function triggerTopbarEmergencyStop(getTargets, sendStop, notifyPage, options = {}) {
+  const pageDeadlineMs = Number(options.pageDeadlineMs ?? ESTOP_PAGE_DEADLINE_MS);
+  const setTimer = options.setTimer || setTimeout;
+  const clearTimer = options.clearTimer || clearTimeout;
+  let notified = false;
+  let pageHandled = false;
+  let pageNotifiedEarly = false;
+  const notify = (stoppedJob) => {
+    if (notified || typeof notifyPage !== "function") return;
+    notified = true;
+    pageHandled = Boolean(notifyPage({ stoppedJob }));
+  };
+
+  const known = Promise.resolve()
+    .then(() => stopKnownJob(getTargets, sendStop))
+    .catch((error) => ({ kind: "lookup_failed", message: error instanceof Error ? error.message : String(error) }));
+  let timer = null;
+  const deadline = new Promise((resolve) => {
+    timer = setTimer(() => resolve(DEADLINE), pageDeadlineMs > 0 ? pageDeadlineMs : 0);
+  });
+  const first = await Promise.race([known, deadline]);
+  clearTimer(timer);
+  if (first === DEADLINE) {
+    pageNotifiedEarly = true;
+    notify(null);
+  }
+  const outcome = await known;
+  notify(outcome.kind === "sent" ? outcome.job : null);
+  return { ...outcome, pageHandled, pageNotifiedEarly };
+}
+

@@ -11,8 +11,9 @@ import {
   YISU_V1_PROFILE,
   normalizeWorkspaceLimits,
   buildTwinConnectionPayload,
-  buildTwinEmergencyStopPayload,
+  twinEstopContext,
 } from "../src/twinState.js";
+import { stopPageTarget } from "../src/globalEstop.js";
 
 test("parseGcodeWords 忽略注释与系统指令并提取模态参数", () => {
   assert.deepEqual(parseGcodeWords("; header comment"), []);
@@ -276,28 +277,51 @@ test("数字孪生：连接参数按模式隔离，页面内急停在非运行�
   });
   assert.equal("port" in netConn, false);
 
-  // 运行中任务：只带 job_id，不混入冲突连接字段
+  // 运行中任务：先按 job_id，页面连接目标作为第二段兜底（与工作台 / 画板同一机制）
   assert.deepEqual(
-    buildTwinEmergencyStopPayload({
+    twinEstopContext({
       isJobRunning: true,
-      selectedWorkflowId: "wf-live-1",
+      selectedWorkflowId: " wf-live-1 ",
       connectionPayload: netConn,
     }),
-    { action: "emergency_stop", confirmed: true, job_id: "wf-live-1" },
+    { jobId: "wf-live-1", target: { connection_mode: "network", host: "192.168.1.50", telnet_port: 2323 } },
   );
 
   // 已完成或仅预览任务 (!isJobRunning)：绝不带旧 job_id，直接走当前控制器连接急停
-  const directStop = buildTwinEmergencyStopPayload({
+  const directStop = twinEstopContext({
     isJobRunning: false,
     selectedWorkflowId: "wf-completed-old",
     connectionPayload: serialConn,
   });
-  assert.equal("job_id" in directStop, false);
   assert.deepEqual(directStop, {
-    connection_mode: "serial",
-    port: "COM5",
-    baudrate: 115200,
-    action: "emergency_stop",
-    confirmed: true,
+    jobId: "",
+    target: { connection_mode: "serial", port: "COM5", baudrate: 115200 },
   });
+
+  // 未填写连接目标时目标为 null，绝不猜设备
+  assert.deepEqual(
+    twinEstopContext({ isJobRunning: false, selectedWorkflowId: "", connectionPayload: buildTwinConnectionPayload({ mode: "network", networkHost: "" }) }),
+    { jobId: "", target: null },
+  );
+});
+
+test("数字孪生急停：任务通道失败时按页面连接目标补发 0x18，只走 safe-action", async () => {
+  const calls = [];
+  const context = twinEstopContext({
+    isJobRunning: true,
+    selectedWorkflowId: "wf-live-2",
+    connectionPayload: buildTwinConnectionPayload({ mode: "network", networkHost: "127.0.0.1", telnetPort: 2302 }),
+  });
+  const outcome = await stopPageTarget(async (path, body) => {
+    calls.push({ path, body });
+    return body.job_id
+      ? { ok: false, status: 0, timedOut: true, data: { success: false, result: "请求超时" } }
+      : { ok: true, data: { success: true, result: "急停 0x18 已发送到 127.0.0.1:2302" } };
+  }, context);
+  assert.equal(outcome.kind, "sent");
+  assert.equal(outcome.via, "target");
+  assert.deepEqual(calls, [
+    { path: "/api/safe-action", body: { action: "emergency_stop", confirmed: true, job_id: "wf-live-2" } },
+    { path: "/api/safe-action", body: { action: "emergency_stop", confirmed: true, connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 } },
+  ]);
 });

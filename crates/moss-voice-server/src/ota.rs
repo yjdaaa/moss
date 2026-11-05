@@ -216,18 +216,32 @@ async fn ota_post(
         firmware_version: info.version.clone(),
         ip: peer.ip().to_string(),
     };
-    let status = match shared.registry.seen(&visit) {
-        Ok(status) => status,
+    // 登记、授权核对与快照都走本地 SQLite（同步锁）：放到阻塞线程，不占 tokio 工作线程。
+    let registry = shared.registry.clone();
+    let (device_id, client_id, report) = (info.device_id.clone(), info.client_id.clone(), body);
+    let registered = tokio::task::spawn_blocking(move || {
+        let status = registry.seen(&visit)?;
+        // 2026-11-02：把这次上报的完整 JSON 存成设备快照（固件版本、芯片、flash/psram、MAC、
+        // 分区表等）；字段随固件版本变化时不改表结构。
+        // 2026-11-05：OTA 请求不带 token，`seen` 对“同 Device-Id、不同 Client-Id”的来访仍返回已绑定记录的状态，
+        // 所以只在设备已允许且 Client-Id 与绑定记录一致（`authorize_http`，纯读）时才写快照，
+        // 冒用 Device-Id 的局域网主机不能改写桌面端「设备信息」。
+        let bound = status == DeviceStatus::Allowed
+            && registry.authorize_http(&device_id, &client_id).ok().flatten().is_some();
+        if bound {
+            registry.device_snapshot(&device_id, crate::SNAPSHOT_INFO, &report);
+        }
+        Ok::<_, String>((status, bound))
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("登记任务失败：{error}")));
+    let (status, bound) = match registered {
+        Ok(registered) => registered,
         Err(error) => {
             shared.state.event(format!("OTA 登记设备失败：{error}"));
             return (StatusCode::INTERNAL_SERVER_ERROR, "设备登记失败").into_response();
         }
     };
-    // 2026-11-02：把这次上报的完整 JSON 存成设备快照（固件版本、芯片、flash/psram、MAC、
-    // 分区表等）。只在设备已登记后写入；字段随固件版本变化时不改表结构。
-    shared
-        .registry
-        .device_snapshot(&info.device_id, crate::SNAPSHOT_INFO, &body);
     let raw_host = header("host").as_deref().and_then(host_without_port);
     let host = match raw_host.as_deref() {
         Some(h) if h.eq_ignore_ascii_case("localhost") || h == "0.0.0.0" => local_ip_for_peer(peer.ip())
@@ -252,8 +266,9 @@ async fn ota_post(
     } else {
         String::new()
     };
-    // NV17：只对已允许的设备核对上报版本、下发用户确认过的推送
-    let firmware = match (&shared.config.firmware, status == DeviceStatus::Allowed) {
+    // NV17：只对已允许的设备核对上报版本、下发用户确认过的推送。
+    // 2026-11-05：同快照，要求 Client-Id 与绑定记录一致，冒用者上报的版本不会把推送记为已升级。
+    let firmware = match (&shared.config.firmware, bound) {
         (Some(host), true) => {
             let host = host.clone();
             let (device, version) = (info.device_id.clone(), info.version.clone());
