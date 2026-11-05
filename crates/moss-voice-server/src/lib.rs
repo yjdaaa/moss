@@ -53,6 +53,7 @@ pub use conversation::{Conversation, ConversationSettings, NoTools, ToolContext,
 pub use jev::{DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter};
 pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
 pub use tools::{HostTools, ToolHost, ToolHostResult};
+pub use ota::{MDNS_HOST_LABEL, is_virtual_or_tunnel_ipv4, lan_ipv4_addrs, local_ip as primary_lan_ip};
 pub use state::{DebugToolTrace, ServerEvent, SessionView, ToolTiming, TurnDebugTrace, TurnTiming};
 /// 设备登记状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -296,6 +297,7 @@ pub struct VoiceServer {
     shared: Arc<Shared>,
     ws_port: u16,
     http_port: u16,
+    mdns: Option<mdns_sd::ServiceDaemon>,
 }
 
 fn bind(ip: IpAddr, port: u16, label: &str) -> Result<std::net::TcpListener, String> {
@@ -384,7 +386,12 @@ impl VoiceServer {
                 Err(error) => events.state.event(format!("OTA 端口启动失败：{error}")),
             }
         });
-        Ok(Self { runtime: Some(runtime), shutdown: shutdown_tx, shared, ws_port, http_port })
+        let mdns = if config.bind.is_unspecified() {
+            ota::start_mdns_responder(http_port, ws_port)
+        } else {
+            None
+        };
+        Ok(Self { runtime: Some(runtime), shutdown: shutdown_tx, shared, ws_port, http_port, mdns })
     }
 
     pub fn ws_port(&self) -> u16 {
@@ -625,6 +632,9 @@ impl VoiceServer {
     }
 
     fn shutdown_now(&mut self) {
+        if let Some(daemon) = self.mdns.take() {
+            let _ = daemon.shutdown();
+        }
         let _ = self.shutdown.send(true);
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(Duration::from_secs(2));

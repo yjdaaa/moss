@@ -4,9 +4,8 @@
 //! 连接后会收到“请在电脑上允许”的提示。WebSocket 地址的主机名取自设备请求 OTA 时用的地址
 //! （`Host` 请求头），保证设备能用同一个地址连回来。
 
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
-
 use axum::Router;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -26,14 +25,155 @@ pub fn router(shared: Arc<Shared>) -> Router {
 async fn ota_get() -> &'static str {
     "MOSS 内置语音服务：OTA 接口运行中"
 }
+/// 固定 mDNS 局域网主机名：小智设备填入 `http://moss.local:8003/xiaozhi/ota/` 后，换 Wi-Fi 无需重改地址。
+pub const MDNS_HOST_LABEL: &str = "moss.local";
 
-/// 本机用于对外通信的地址（不发送任何数据，只用于选路）。
-pub(crate) fn local_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:80").ok()?;
-    socket.local_addr().ok().map(|addr| addr.ip()).filter(|ip| !ip.is_unspecified())
+/// 判断 IPv4 地址或对应网卡是否属于代理 TUN、VPN 隧道或虚拟机桥接网卡。
+pub fn is_virtual_or_tunnel_ipv4(if_name: &str, ip: Ipv4Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_broadcast() {
+        return true;
+    }
+    let octets = ip.octets();
+    // 198.18.0.0/15：Clash / Mihomo / Sing-box 等代理软件 TUN 虚拟网卡地址段
+    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+        return true;
+    }
+    // 100.64.0.0/10：Tailscale / ZeroTier 等 CGNAT 异地组网虚拟地址段
+    if octets[0] == 100 && (octets[1] & 0xc0) == 64 {
+        return true;
+    }
+    let lower = if_name.to_ascii_lowercase();
+    const VIRTUAL_KEYWORDS: [&str; 18] = [
+        "vmware",
+        "vmnet",
+        "vbox",
+        "virtual",
+        "vethernet",
+        "wsl",
+        "hyper-v",
+        "docker",
+        "tailscale",
+        "zerotier",
+        "clash",
+        "mihomo",
+        "sing-box",
+        "wintun",
+        "wireguard",
+        "loopback",
+        "npcap",
+        "utun",
+    ];
+    if VIRTUAL_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
+        return true;
+    }
+    false
 }
 
+fn interface_priority(if_name: &str, ip: Ipv4Addr) -> (u8, u8, u8) {
+    let lower = if_name.to_ascii_lowercase();
+    let name_rank = if lower.contains("wlan")
+        || lower.contains("wi-fi")
+        || lower.contains("wifi")
+        || lower == "en0"
+    {
+        0
+    } else if lower.contains("eth") || lower.contains("以太网") || lower.starts_with("en") {
+        1
+    } else {
+        2
+    };
+    let octets = ip.octets();
+    // Windows 移动热点固定为 192.168.137.1，属于真实可用热点网关；其余 .1 结尾多为未命名的本地虚拟网桥
+    let is_windows_hotspot = octets == [192, 168, 137, 1];
+    let host_rank = if octets[3] != 1 || is_windows_hotspot { 0 } else { 1 };
+    let private_rank = if ip.is_private() { 0 } else { 1 };
+    (name_rank, host_rank, private_rank)
+}
+
+/// 枚举本机所有真实局域网 IPv4 地址（已排除 Clash TUN、Tailscale、VMware 等虚拟网卡，按 Wi-Fi/有线优先级排序）。
+pub fn lan_ipv4_addrs() -> Vec<Ipv4Addr> {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<(String, Ipv4Addr)> = interfaces
+        .into_iter()
+        .filter(|iface| !iface.is_loopback())
+        .filter_map(|iface| match iface.ip() {
+            IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4(&iface.name, v4) => Some((iface.name, v4)),
+            _ => None,
+        })
+        .collect();
+    candidates.sort_by_key(|(name, ip)| (interface_priority(name, *ip), ip.octets()));
+    let mut result = Vec::with_capacity(candidates.len());
+    for (_, ip) in candidates {
+        if !result.contains(&ip) {
+            result.push(ip);
+        }
+    }
+    result
+}
+
+/// 本机用于局域网通信的首选地址（只用于选路，不发送任何数据；自动跳过 198.18.0.1 等虚拟网卡）。
+pub fn local_ip() -> Option<IpAddr> {
+    if let Some(ip) = lan_ipv4_addrs().into_iter().next() {
+        return Some(IpAddr::V4(ip));
+    }
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:80").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4("", v4) => Some(IpAddr::V4(v4)),
+        _ => None,
+    }
+}
+
+/// 针对来访设备 `peer` 选择与其同网段的本机真实网卡地址。
+pub fn local_ip_for_peer(peer: IpAddr) -> Option<IpAddr> {
+    if !peer.is_loopback() && !peer.is_unspecified() {
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(SocketAddr::new(peer, 80)).is_ok() {
+                if let Ok(local) = socket.local_addr() {
+                    match local.ip() {
+                        IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4("", v4) => {
+                            return Some(IpAddr::V4(v4));
+                        }
+                        IpAddr::V6(v6) if !v6.is_loopback() && !v6.is_unspecified() => {
+                            return Some(IpAddr::V6(v6));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    local_ip()
+}
+
+/// 在局域网物理网卡上启动 `moss.local.` mDNS 广播，使小智固定填写 `http://moss.local:8003/xiaozhi/ota/` 即可跨 Wi-Fi 自动解析。
+pub(crate) fn start_mdns_responder(http_port: u16, ws_port: u16) -> Option<mdns_sd::ServiceDaemon> {
+    let ips = lan_ipv4_addrs();
+    if ips.is_empty() {
+        return None;
+    }
+    let daemon = mdns_sd::ServiceDaemon::new().ok()?;
+    let _ = daemon.disable_interface(mdns_sd::IfKind::All);
+    for ip in &ips {
+        let _ = daemon.enable_interface(IpAddr::V4(*ip));
+    }
+    let ip_addrs: Vec<IpAddr> = ips.iter().copied().map(IpAddr::V4).collect();
+    let host_fqdn = format!("{MDNS_HOST_LABEL}.");
+    if let Ok(http_info) = mdns_sd::ServiceInfo::new(
+        "_http._tcp.local.",
+        "moss-xiaozhi-ota",
+        &host_fqdn,
+        &ip_addrs[..],
+        http_port,
+        None,
+    ) {
+        let _ = daemon.register(http_info);
+    }
+    let _ = ws_port;
+    Some(daemon)
+}
 /// 从 `Host` 请求头取主机名（去掉端口，保留 IPv6 方括号）。
 pub(crate) fn host_without_port(host: &str) -> Option<String> {
     let host = host.trim();
@@ -88,12 +228,25 @@ async fn ota_post(
     shared
         .registry
         .device_snapshot(&info.device_id, crate::SNAPSHOT_INFO, &body);
-    let host = header("host")
-        .as_deref()
-        .and_then(host_without_port)
-        .filter(|host| host != "localhost" && host != "0.0.0.0")
-        .or_else(|| local_ip().map(|ip| ip.to_string()))
-        .unwrap_or_else(|| "127.0.0.1".into());
+    let raw_host = header("host").as_deref().and_then(host_without_port);
+    let host = match raw_host.as_deref() {
+        Some(h) if h.eq_ignore_ascii_case("localhost") || h == "0.0.0.0" => local_ip_for_peer(peer.ip())
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "127.0.0.1".into()),
+        Some(h) if h.to_ascii_lowercase().ends_with(".local") => {
+            if !peer.ip().is_loopback() {
+                local_ip_for_peer(peer.ip())
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| h.to_owned())
+            } else {
+                h.to_owned()
+            }
+        }
+        Some(h) => h.to_owned(),
+        None => local_ip_for_peer(peer.ip())
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "127.0.0.1".into()),
+    };
     let token = if status == DeviceStatus::Allowed {
         shared.signer.issue(&info.client_id, &info.device_id, unix_now())
     } else {
@@ -145,14 +298,30 @@ async fn ota_post(
 
 #[cfg(test)]
 mod tests {
-    use super::host_without_port;
+    use std::net::Ipv4Addr;
+    use super::{host_without_port, is_virtual_or_tunnel_ipv4};
 
     #[test]
     fn host_header_parsing() {
         assert_eq!(host_without_port("192.168.1.5:8003").as_deref(), Some("192.168.1.5"));
+        assert_eq!(host_without_port("moss.local:8003").as_deref(), Some("moss.local"));
         assert_eq!(host_without_port("moss-pc").as_deref(), Some("moss-pc"));
         assert_eq!(host_without_port("[fe80::1]:8003").as_deref(), Some("[fe80::1]"));
         assert_eq!(host_without_port(""), None);
         assert_eq!(host_without_port("evil/host:80"), None);
+    }
+
+    #[test]
+    fn virtual_and_tunnel_interfaces_are_filtered_out() {
+        // Clash / Sing-box TUN 虚拟网卡 (198.18.0.0/15) 必须被过滤
+        assert!(is_virtual_or_tunnel_ipv4("Meta", Ipv4Addr::new(198, 18, 0, 1)));
+        assert!(is_virtual_or_tunnel_ipv4("utun3", Ipv4Addr::new(198, 19, 1, 1)));
+        // Tailscale CGNAT (100.64.0.0/10) 必须被过滤
+        assert!(is_virtual_or_tunnel_ipv4("Tailscale", Ipv4Addr::new(100, 101, 50, 60)));
+        // VMware 虚拟网卡必须被过滤
+        assert!(is_virtual_or_tunnel_ipv4("VMware Network Adapter VMnet8", Ipv4Addr::new(192, 168, 51, 1)));
+        // 真实 WLAN 局域网地址保留
+        assert!(!is_virtual_or_tunnel_ipv4("WLAN", Ipv4Addr::new(10, 12, 19, 12)));
+        assert!(!is_virtual_or_tunnel_ipv4("Wi-Fi", Ipv4Addr::new(192, 168, 1, 105)));
     }
 }

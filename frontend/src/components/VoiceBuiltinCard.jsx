@@ -260,11 +260,11 @@ export function BuiltinServicePanel({ builtin }) {
     }
   };
 
-  const copyOta = async () => {
-    if (!status.ota_url) return;
+  const copyOta = async (url = status.ota_url, label = "设备 OTA 地址") => {
+    if (!url) return;
     try {
-      await navigator.clipboard.writeText(status.ota_url);
-      await showAlert("设备 OTA 地址已复制，粘贴到设备配网页面即可", { title: "已复制", tone: "success" });
+      await navigator.clipboard.writeText(url);
+      await showAlert(`${label}已复制，粘贴到设备配网页面即可`, { title: "已复制", tone: "success" });
     } catch {
       await showAlert("无法访问剪贴板，请手动选中地址复制", { title: "复制失败", tone: "error" });
     }
@@ -303,15 +303,24 @@ export function BuiltinServicePanel({ builtin }) {
       )}
       <div className="voice-kv">
         <span className="voice-inline">
-          设备 OTA 地址：<b className="mono voice-break" id="voice-builtin-ota">{status.ota_url || "未能获取本机局域网地址"}</b>
+          设备 OTA 地址（固定不变）：<b className="mono voice-break" id="voice-builtin-ota">{status.ota_url || "未能获取本机局域网地址"}</b>
           {status.ota_url && (
-            <button type="button" className="btn btn-ghost voice-inline-btn" onClick={copyOta} id="voice-builtin-ota-copy" title="复制设备 OTA 地址">
+            <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_url, "设备 OTA 地址")} id="voice-builtin-ota-copy" title="复制设备 OTA 地址">
               <Copy size={13} /> 复制
             </button>
           )}
+          {status.ota_ip_url && status.ota_ip_url !== status.ota_url && (
+            <>
+              <span className="voice-muted">· 当前 Wi-Fi IP：</span>
+              <span className="mono voice-break" id="voice-builtin-ota-ip">{status.ota_ip_url}</span>
+              <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_ip_url, "当前 Wi-Fi OTA 地址")} id="voice-builtin-ota-ip-copy" title="复制当前 Wi-Fi IP 地址">
+                <Copy size={13} /> 复制 IP
+              </button>
+            </>
+          )}
         </span>
         <span className="voice-muted">
-          在设备配网页面填入这个地址并重启设备，再在下面的列表中点“允许”。端口 {status.ws_port} / {status.http_port}，在“连接”标签修改。
+          在设备配网页面填入上方 <code>moss.local</code> 地址后，换 Wi-Fi 无需重改；若公共网络屏蔽局域网广播，可改用右侧当前 Wi-Fi IP 地址。端口 {status.ws_port} / {status.http_port}，在“服务”标签下方修改。
         </span>
       </div>
 

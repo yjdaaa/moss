@@ -123,7 +123,6 @@ fn desktop_only<T>(_: T) -> CmdResult {
 
 #[cfg(desktop)]
 mod imp {
-    use std::net::UdpSocket;
     use std::sync::{Arc, Mutex};
 
     use moss_voice::builtin::{self, KeyChange};
@@ -1604,12 +1603,9 @@ mod imp {
         });
     }
 
-    /// 本机局域网地址（只用于选路，不发送数据），用于告诉用户设备 OTA 要填的地址。
+    /// 本机真实局域网地址（跳过 Clash TUN 198.18.0.0/15、Tailscale 与 VMware 等虚拟网卡）。
     fn local_ip() -> Option<String> {
-        let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-        socket.connect("192.0.2.1:80").ok()?;
-        let ip = socket.local_addr().ok()?.ip();
-        (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
+        moss_voice_server::primary_lan_ip().map(|ip| ip.to_string())
     }
 
     impl BuiltinVoice {
@@ -1915,7 +1911,8 @@ mod imp {
                 "link_mode": settings.mode.as_str(),
                 "ws_port": ws_port,
                 "http_port": http_port,
-                "ota_url": local_ip().map(|ip| format!("http://{ip}:{http_port}/xiaozhi/ota/")),
+                "ota_url": format!("http://{}:{http_port}/xiaozhi/ota/", moss_voice_server::MDNS_HOST_LABEL),
+                "ota_ip_url": local_ip().map(|ip| format!("http://{ip}:{http_port}/xiaozhi/ota/")),
                 "models": models,
                 "jev": {
                     "endpoint": if is_local_laya {

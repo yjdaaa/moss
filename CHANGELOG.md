@@ -3,6 +3,12 @@
 代码修复与功能变更记录，格式参考 Keep a Changelog；条目要求见 [`AGENTS.md`](AGENTS.md)“变更记录”。
 
 ## [Unreleased]
+### 内置语音服务支持 `moss.local` 跨 Wi-Fi 固定 OTA 地址广播并过滤代理/虚拟机网卡（2026-11-05）
+
+- **现象**：电脑开启 Clash / Sing-box TUN 模式（`198.18.0.0/15`）、Tailscale（`100.64.0.0/10`）或安装 VMware 虚拟网卡时，`UdpSocket::connect("192.0.2.1:80")` 选路会命中 TUN 虚拟网卡，导致语音中心「设备 OTA 地址」显示为局域网设备无法访问的 `http://198.18.0.1:8003/xiaozhi/ota/`；且更换不同 Wi-Fi 网络时本机 IP 变化需反复修改小智配网中的 OTA 地址。
+- **根因与修复**：① 在 `crates/moss-voice-server/src/ota.rs` 新增 `is_virtual_or_tunnel_ipv4`、`lan_ipv4_addrs` 与 `local_ip_for_peer`，精确排除 `198.18.0.0/15`（TUN）、`100.64.0.0/10`（CGNAT）及 VMware/VirtualBox/WSL/Docker 等虚拟网卡，优先选取物理 `WLAN`/`Wi-Fi`/有线网卡地址（同步加固 `crates/laser-api/src/lib.rs::primary_lan_ipv4`）；② `VoiceServer::start`（监听 `0.0.0.0`）时在物理局域网网卡上自动启动 `mdns-sd` 广播 `moss.local.`，并在 `ota_post` 收到 `.local` 请求时按来访设备 `peer.ip()` 自动下发同网段真实 IP 的 WebSocket 与固件地址；③ `apps/desktop/src-tauri/src/voice_builtin.rs` 与 `frontend/src/components/VoiceBuiltinCard.jsx` 将默认 `ota_url` 固定为跨 Wi-Fi 不变的 `http://moss.local:8003/xiaozhi/ota/`，同时并列提供 `ota_ip_url`（当前真实 Wi-Fi IP 地址）及一键复制。默认值与安全门禁不变，破坏性变更：无。
+- **验证**：`cargo test -p moss-voice-server -p moss-desktop -p laser-api` 全部通过（含新增 `virtual_and_tunnel_interfaces_are_filtered_out` 单元测试）；前端 `npm test` **171 通过 / 0 失败**、`npm run build` 成功；`node tests/voice-center.browser.mjs` **PASS**；执行 `scripts/quick-update-desktop.ps1 -WithHost` 与 `cargo sweep --time 3` 同步正式版 `moss-desktop.exe`、`moss-host.exe`。**未验证**：小智真机跨路由器 Wi-Fi 切换待现场实测。
+- **关联**：`crates/moss-voice-server/{Cargo.toml,src/{lib.rs,ota.rs}}`、`crates/laser-api/src/lib.rs`、`apps/desktop/src-tauri/src/voice_builtin.rs`、`frontend/src/components/VoiceBuiltinCard.jsx`。
 
 ## [0.3.0] - 2026-11-05
 

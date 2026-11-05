@@ -6556,12 +6556,28 @@ pub fn is_reference_data_write(method: &str, route: &str, body: &[u8]) -> bool {
 /// 本机用于局域网通信的 IPv4 地址：对外“连接”一个 UDP 套接字（不发送任何数据包）后读本地地址。
 /// 没有网络或只有回环时返回空。
 fn primary_lan_ipv4() -> Option<std::net::Ipv4Addr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
-        _ => None,
+    let is_usable_lan_v4 = |ip: std::net::Ipv4Addr| -> bool {
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_broadcast() {
+            return false;
+        }
+        let o = ip.octets();
+        // 排除 198.18.0.0/15 (Clash/Sing-box TUN) 与 100.64.0.0/10 (Tailscale CGNAT)
+        !(o[0] == 198 && (o[1] == 18 || o[1] == 19)) && !(o[0] == 100 && (o[1] & 0xc0) == 64)
+    };
+    for probe in ["192.0.2.1:9", "10.255.255.254:9", "192.168.1.1:9", "172.16.0.1:9"] {
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(probe).is_ok() {
+                if let Ok(addr) = socket.local_addr() {
+                    if let std::net::IpAddr::V4(ip) = addr.ip() {
+                        if is_usable_lan_v4(ip) {
+                            return Some(ip);
+                        }
+                    }
+                }
+            }
+        }
     }
+    None
 }
 
 /// 构造调用方上下文：进程内调用方显式给出的优先；否则回环 → `Loopback`，局域网配对 → `Lan`。
@@ -7806,10 +7822,13 @@ mod tests {
             cancel_body.len(),
             cancel_body
         );
-        assert_eq!(
-            parse_json_response(&service.handle_http(cancel_request.as_bytes()))["result"]["status"],
-            "cancelled"
-        );
+        // 5. 已完成任务不得被取消改写为 cancelled：拒绝并保留 completed 与逐行确认记录
+        let cancel_text = String::from_utf8_lossy(&service.handle_http(cancel_request.as_bytes())).into_owned();
+        assert!(cancel_text.starts_with("HTTP/1.1 400"), "{cancel_text}");
+        assert!(cancel_text.contains("workflow_completed"), "{cancel_text}");
+        let after = wait_for_status(service, &workflow_id, "completed");
+        assert_eq!(after["result"]["status"], "completed", "{after}");
+        assert_eq!(after["result"]["send_result"]["lines_sent"].as_u64(), Some(sent), "{after}");
         let after_cancel = String::from_utf8_lossy(&service.handle_http(send_request.as_bytes())).into_owned();
         assert!(after_cancel.contains("workflow_not_sendable"), "{after_cancel}");
     }
@@ -7825,6 +7844,40 @@ mod tests {
                 service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
             }
             run_confirm_send_gate_scenario(&service, temp.path());
+        }
+    }
+
+    /// 已完成任务拒绝取消的门禁不得挡住发送中的取消：设备停止回 ok 时取消必须放行并停在中途。
+    #[test]
+    fn cancel_mid_send_is_still_accepted_for_store_and_memory_backends() {
+        for use_store in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+                .with_generated_root(temp.path().to_path_buf())
+                .with_transport_factory(fake_transport_factory(5));
+            if use_store {
+                service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+            }
+            let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
+                "text": "MOSS-CANCEL", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 20
+            }));
+            let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
+            let send = post_json(&service, "/api/workflow", &serde_json::json!({
+                "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+                "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
+            }));
+            assert_eq!(send["success"], true, "{send}");
+            assert_eq!(service.active_job_count(), 1, "设备只回 5 个 ok，任务必须仍在发送中");
+
+            let cancel = post_json(&service, "/api/workflow", &serde_json::json!({"action": "cancel", "workflow_id": workflow_id}));
+            assert_eq!(cancel["success"], true, "use_store={use_store}: {cancel}");
+            assert_eq!(cancel["result"]["status"], "cancelled", "{cancel}");
+
+            let finished = wait_for_status(&service, &workflow_id, "cancelled");
+            assert_eq!(finished["result"]["status"], "cancelled", "{finished}");
+            let sent = finished["result"]["send_result"]["lines_sent"].as_u64().unwrap_or(0);
+            let total = finished["result"]["send_result"]["total_lines"].as_u64().unwrap_or(0);
+            assert!(sent < total, "取消必须发生在发送中途: {sent}/{total}");
         }
     }
 
