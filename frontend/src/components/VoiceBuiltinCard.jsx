@@ -174,7 +174,9 @@ export function BuiltinServicePanel({ builtin }) {
   const sessions = Array.isArray(status.sessions) ? status.sessions : [];
   const modeView = builtinModeView(status);
   const currentCardStyle = status.local?.settings?.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud";
-  const botGifs = status.goggle_bot_gifs && typeof status.goggle_bot_gifs === "object" ? status.goggle_bot_gifs : {};
+  const botGifs = Array.isArray(status.goggle_bot_gifs)
+    ? Object.fromEntries(status.goggle_bot_gifs.filter((item) => item?.id && item?.data_url).map((item) => [item.id, item.data_url]))
+    : (status.goggle_bot_gifs && typeof status.goggle_bot_gifs === "object" ? status.goggle_bot_gifs : {});
   const onlineColorDevice = devices.find((d) => {
     if (d.status !== "allowed") return false;
     const sess = sessions.find((s) => s.device_id === d.device_id);

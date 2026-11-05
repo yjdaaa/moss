@@ -3,6 +3,13 @@
 代码修复与功能变更记录，格式参考 Keep a Changelog；条目要求见 [`AGENTS.md`](AGENTS.md)“变更记录”。
 
 ## [Unreleased]
+### 修复语音中心「护目镜小机器人 GIF」橱窗将后端数组按对象下标读取导致显示占位文字的问题（2026-11-05）
+
+- **现象**：桌面端「语音中心 → 服务」的「小智彩屏动态卡片 & 护目镜小机器人 GIF」面板中，5 个小机器人方框仅显示灰色占位文字 `GIF`，未渲染出循环像素动图。
+- **根因与修复**：后端 `moss_voice_server::cached_goggle_bot_gifs()` 返回数组结构 `[{ id, label, data_url }]`，而前端 `VoiceBuiltinCard.jsx` 直接执行 `botGifs[pose.id]` 导致取值为 `undefined`；现改为在 `VoiceBuiltinCard.jsx` 自动将数组 `[{ id, data_url }]` 归一映射为按 `id` 索引的字典（兼容旧键值结构），并将 `voice-center.browser.mjs` 的测试桩对齐为真实数组结构。默认值与安全门禁不变，破坏性变更：无。
+- **验证**：`node tests/voice-center.browser.mjs` **PASS**；执行 `scripts/quick-update-desktop.ps1` 重新编译同步本机 `target/release/moss-desktop.exe`。**未验证**：立创·实战派真机一键推屏实拍待现场核验。
+- **关联**：`frontend/src/components/VoiceBuiltinCard.jsx`、`frontend/tests/voice-center.browser.mjs`。
+
 ### 内置语音服务支持 `moss.local` 跨 Wi-Fi 固定 OTA 地址广播并过滤代理/虚拟机网卡（2026-11-05）
 
 - **现象**：电脑开启 Clash / Sing-box TUN 模式（`198.18.0.0/15`）、Tailscale（`100.64.0.0/10`）或安装 VMware 虚拟网卡时，`UdpSocket::connect("192.0.2.1:80")` 选路会命中 TUN 虚拟网卡，导致语音中心「设备 OTA 地址」显示为局域网设备无法访问的 `http://198.18.0.1:8003/xiaozhi/ota/`；且更换不同 Wi-Fi 网络时本机 IP 变化需反复修改小智配网中的 OTA 地址。

@@ -40,7 +40,7 @@ try {
       debug_enabled: false,
       debug_traces: [],
       device_prefs: {},
-      goggle_bot_gifs: Object.fromEntries(["idle", "engrave", "approval", "music", "celebrate"].map((k) => [k, "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"])),
+      goggle_bot_gifs: ["idle", "engrave", "approval", "music", "celebrate"].map((id) => ({ id, label: id, data_url: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" })),
       sessions: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", ip: "192.0.2.55", protocol_version: 1, connected_at: 1_790_000_000, state: "idle", level: 0, screen_monochrome: false, screen_width: 320, screen_height: 240, device_tools: ["self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness", "self.screen.set_theme", "self.screen.preview_image", "self.set_press_to_talk"] }],
       events: [], timings: [],
       devices: [{ device_id: "aa:bb:cc:11:22:33", name: "立创实战派小智", model: "lichuang-dev", firmware_version: "2.2.0", status: "allowed", last_seen: 1_790_000_000, status_json: JSON.stringify({ audio_speaker: { volume: 65 }, screen: { brightness: 80, theme: "dark" } }) }],
