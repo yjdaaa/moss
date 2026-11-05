@@ -53,7 +53,7 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { onEmergencyStop } from "../estopBus.js";
-import { estopTargetArgs, stopPageTarget } from "../globalEstop.js";
+import { estopTargetArgs, isJobCoveringPageTarget, stopPageTarget } from "../globalEstop.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
@@ -569,14 +569,17 @@ export function DrawPage({ onNavigate }) {
     void showAlert(message, { title: outcome.kind === "sent" ? "已发送急停" : "急停未确认", tone: outcome.kind === "sent" ? "warning" : "error" });
   }
   const estopRef = useRef(null);
-  estopRef.current = workflowId || estopTargetArgs(form) ? handleEStop : null;
+  estopRef.current = (detail) => {
+    const jobId = workflowId;
+    const target = estopTargetArgs(form);
+    if (!jobId && !target) return false;
+    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target })) return false;
+    void handleEStop();
+    return true;
+  };
   useEffect(
     () =>
-      onEmergencyStop(() => {
-        if (!estopRef.current) return false;
-        void estopRef.current();
-        return true;
-      }),
+      onEmergencyStop((detail) => (estopRef.current ? estopRef.current(detail) : false)),
     [],
   );
 

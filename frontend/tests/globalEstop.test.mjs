@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { estopTargetArgs, stopKnownJob, stopPageTarget } from "../src/globalEstop.js";
+import {
+  estopTargetArgs,
+  isJobCoveringPageTarget,
+  isSameEstopTarget,
+  stopKnownJob,
+  stopPageTarget,
+  triggerTopbarEmergencyStop,
+} from "../src/globalEstop.js";
 
 test("顶栏独立于页面，使用后端唯一任务的原 job_id 发实时急停", async () => {
   const calls = [];
@@ -155,4 +162,78 @@ test("急停目标：串口模式未选串口时为 null，网口默认 23", () 
   assert.equal(estopTargetArgs({ connection_mode: "serial", port: " " }), null);
   assert.deepEqual(estopTargetArgs({ connection_mode: "serial", port: "COM3", baudrate: "" }), { connection_mode: "serial", port: "COM3", baudrate: 115200 });
   assert.deepEqual(estopTargetArgs({ connection_mode: "network", network_host: "h", network_telnet_port: "" }), { connection_mode: "network", host: "h", telnet_port: 23 });
+});
+
+test("顶栏急停：后端残留 unknown 旧记录且返回成功时，仍同时向当前页面的设备发送 0x18", async () => {
+  const calls = [];
+  const pageTarget = estopTargetArgs({
+    connection_mode: "network",
+    network_host: "127.0.0.1",
+    network_telnet_port: "2302",
+  });
+  const outcome = await triggerTopbarEmergencyStop(
+    async () => ({
+      ok: true,
+      data: {
+        success: true,
+        result: {
+          jobs: [{ job_id: "stale-old-job", target: "127.0.0.1:2301", state: "unknown" }],
+        },
+      },
+    }),
+    async (path, data) => {
+      calls.push({ path, data });
+      return { ok: true, data: { success: true, result: "0x18 已写出" } };
+    },
+    ({ stoppedJob }) => {
+      if (isJobCoveringPageTarget(stoppedJob, { jobId: "", target: pageTarget })) {
+        return false;
+      }
+      void stopPageTarget(
+        async (path, data) => {
+          calls.push({ path, data });
+          return { ok: true, data: { success: true, result: "页面设备已急停" } };
+        },
+        { jobId: "", target: pageTarget },
+      );
+      return true;
+    },
+  );
+  assert.equal(outcome.kind, "sent");
+  assert.equal(outcome.pageHandled, true);
+  assert.deepEqual(calls, [
+    { path: "/api/safe-action", data: { action: "emergency_stop", confirmed: true, job_id: "stale-old-job" } },
+    {
+      path: "/api/safe-action",
+      data: { action: "emergency_stop", confirmed: true, connection_mode: "network", host: "127.0.0.1", telnet_port: 2302 },
+    },
+  ]);
+});
+
+test("顶栏急停：后端已停掉当前页面同一 running 设备时不重复发第二次，不同设备时双发", () => {
+  const netTarget = estopTargetArgs({
+    connection_mode: "network",
+    network_host: "127.0.0.1",
+    network_telnet_port: "23",
+  });
+  assert.equal(isSameEstopTarget(netTarget, "127.0.0.1:23"), true);
+  assert.equal(isSameEstopTarget(netTarget, "tcp://127.0.0.1:23"), true);
+  assert.equal(isSameEstopTarget(netTarget, "127.0.0.1:2301"), false);
+
+  // running 且同目标 → 已覆盖
+  assert.equal(
+    isJobCoveringPageTarget(
+      { job_id: "wf-1", target: "127.0.0.1:23", state: "running" },
+      { jobId: "", target: netTarget },
+    ),
+    true,
+  );
+  // unknown 状态哪怕同端口也不视为已覆盖（旧模拟实例可能已关，需对当前页面连接补发）
+  assert.equal(
+    isJobCoveringPageTarget(
+      { job_id: "wf-old", target: "127.0.0.1:23", state: "unknown" },
+      { jobId: "wf-old", target: netTarget },
+    ),
+    false,
+  );
 });

@@ -42,12 +42,21 @@ if (Get-Command cargo-sweep.exe -CommandType Application -ErrorAction SilentlyCo
     }
 }
 
-# 1. Incremental caches (>3 days old) and temporary check dirs
+# 1. Incremental caches: remove >3 days old, and keep only the newest session dir per crate prefix
 $cutoff = (Get-Date).AddDays(-3)
-Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 2 -Filter incremental | ForEach-Object {
-    Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -lt $cutoff } |
-        ForEach-Object { Remove-Cache $_.FullName }
+Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 3 -Filter incremental | ForEach-Object {
+    $incDirs = @(Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue)
+    $incDirs | Where-Object { $_.LastWriteTime -lt $cutoff } | ForEach-Object { Remove-Cache $_.FullName }
+    $incDirs = @(Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue)
+    $incDirs | Group-Object { if ($_.Name -match '^(.+)-[0-9a-z]+$') { $Matches[1] } else { $_.Name } } | ForEach-Object {
+        $_.Group | Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 | ForEach-Object { Remove-Cache $_.FullName }
+        $newest = $_.Group | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newest -and (Test-Path -LiteralPath $newest.FullName)) {
+            Get-ChildItem -LiteralPath $newest.FullName -Directory -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 |
+                ForEach-Object { Remove-Cache $_.FullName }
+        }
+    }
 }
 Get-ChildItem -LiteralPath $target -Directory | Where-Object { $_.Name -eq 'tmp' -or $_.Name -like 'codex-*' } |
     ForEach-Object { Remove-Cache $_.FullName }
@@ -62,35 +71,55 @@ $android = Join-Path $repo 'apps/desktop/src-tauri/gen/android/app/build'
 Remove-Cache (Join-Path $android 'intermediates')
 Get-ChildItem -Path (Join-Path $android 'outputs/apk/*/debug') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Remove-Cache $_.FullName }
 
-# 4. NV18 staging copies: keep the newest (originals live in apps/moss-voice-local)
+# 4. NV18 staging copies & temporary license staging (originals live in apps/moss-voice-local)
 foreach ($staging in 'apps/desktop/src-tauri/bundle-resources', 'apps/desktop/src-tauri/binaries') {
     Get-ChildItem -Path (Join-Path $repo $staging) -Directory -Filter 'nv18-*' -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 | ForEach-Object { Remove-Cache $_.FullName }
+        ForEach-Object { Remove-Cache $_.FullName }
+}
+Get-ChildItem -LiteralPath $target -Directory -Filter 'nv18-*' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 | ForEach-Object { Remove-Cache $_.FullName }
+Get-ChildItem -Path (Join-Path $target '*/release/licenses') -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Cache $_.FullName }
+Get-ChildItem -Path (Join-Path $target 'release/*.old-*.exe') -File -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Cache $_.FullName }
+foreach ($nsisDir in @(Join-Path $target 'release/bundle/nsis'), (Join-Path $target 'x86_64-pc-windows-msvc/release/bundle/nsis')) {
+    if (Test-Path -LiteralPath $nsisDir) {
+        Get-ChildItem -LiteralPath $nsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 |
+            ForEach-Object { Remove-Cache $_.FullName }
+    }
 }
 
-# 5. Stale hashed artifacts of this repo's crates in deps/
-$names = New-Object System.Collections.Generic.HashSet[string]
+# 5. Stale hashed artifacts of this repo's crates in deps/ (newest kept per kind)
+$crateNames = New-Object System.Collections.Generic.HashSet[string]
+$testNames = New-Object System.Collections.Generic.HashSet[string]
 $manifests = @(Get-ChildItem -Path (Join-Path $repo 'crates/*/Cargo.toml')) +
     @(Get-ChildItem -Path (Join-Path $repo 'apps/*/Cargo.toml')) +
     @(Get-Item -LiteralPath (Join-Path $repo 'apps/desktop/src-tauri/Cargo.toml'))
 foreach ($m in $manifests) {
     foreach ($match in [regex]::Matches((Get-Content -LiteralPath $m.FullName -Raw), '(?m)^name\s*=\s*"([^"]+)"')) {
-        [void]$names.Add($match.Groups[1].Value.Replace('-', '_'))
+        $crateName = $match.Groups[1].Value.Replace('-', '_')
+        [void]$crateNames.Add($crateName)
+        [void]$crateNames.Add("${crateName}_lib")
     }
     $tests = Join-Path $m.DirectoryName 'tests'
     if (Test-Path -LiteralPath $tests) {
-        Get-ChildItem -LiteralPath $tests -Filter *.rs -File | ForEach-Object { [void]$names.Add($_.BaseName) }
+        Get-ChildItem -LiteralPath $tests -Filter *.rs -File | ForEach-Object { [void]$testNames.Add($_.BaseName.Replace('-', '_')) }
     }
 }
 
 $artifact = '^(lib)?(.+)-([0-9a-f]{16})(\..+)?$'
-Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 2 -Filter deps | ForEach-Object {
+Get-ChildItem -LiteralPath $target -Directory -Recurse -Depth 3 -Filter deps | ForEach-Object {
     Get-ChildItem -LiteralPath $_.FullName -File |
-        Where-Object { $_.Name -match $artifact -and $names.Contains($Matches[2]) } |
+        Where-Object {
+            $_.Name -match $artifact -and (
+                $crateNames.Contains($Matches[2]) -or
+                ([string]::IsNullOrEmpty($Matches[1]) -and $testNames.Contains($Matches[2]) -and $Matches[4] -in @('.exe', '.pdb', '.d'))
+            )
+        } |
         Group-Object { $null = $_.Name -match $artifact; '{0}|{1}|{2}' -f $Matches[1], $Matches[2], $Matches[4] } |
         ForEach-Object {
             $_.Group | Sort-Object LastWriteTime -Descending | Select-Object -Skip 1 |
-                Where-Object { $_.LastWriteTime -lt $cutoff } |
                 ForEach-Object { Remove-Cache $_.FullName }
         }
 }

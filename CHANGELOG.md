@@ -4,12 +4,12 @@
 
 ## [Unreleased]
 
-### 画板急停不再退化为取消，任务结束后急停仍能写出 0x18（2026-11-05）
+### 顶栏与页面急停全链路补发 0x18，移除工作台未使用的发送覆盖层（2026-11-05）
 
-- **现象**：画板页把顶栏急停接到 `workflow cancel`，任务全量发送完后按急停不向设备写任何字节，还吞掉了“请使用实体急停”的提示；而 GRBL 回 ok 只代表指令进了缓冲区，机器可能仍在运动。工作台在任务结束后按急停也只报失败。
-- **根因与修复**：新增 `globalEstop.js` 的 `stopPageTarget` 与 `estopTargetArgs`：页面急停先按任务编号走原设备通道，后端找不到任务时按本页已填的设备目标新开连接写 0x18，两者都没有时不发送并如实提示。画板与工作台改用它。行为变更：这两页只要填了设备目标，即使没有工作流，顶栏急停也会向该设备写 0x18（控制器进入 Alarm，需解锁）。后端契约与安全门禁不变，不是破坏性变更。
-- **验证**：`tests/globalEstop.test.mjs` 新增 5 项；E2E 重组为 API 32 项 + 真实浏览器界面 3 项（UI-01 任务浮层取消、UI-02 任务结束后顶栏急停、UI-03 画板无任务急停），`npm run test:e2e` 35/35，设备侧断言看模拟器实际收到的字节。测试文件改名 `api.test.mjs`、调度脚本改名 `scripts/test_e2e.mjs`，`playwright` 加入前端 devDependencies。未在真实设备上验证。
-- **关联**：`frontend/src/globalEstop.js`、`frontend/src/pages/{DrawPage,HomePage}.jsx`、`frontend/tests/e2e/{api.test,workbench.ui.test,recordingGrbl}.mjs`、`scripts/test_e2e.mjs`、`docs/developer/frontend-behavior.md`、`AGENTS.md`。
+- **现象**：① 画板页此前把顶栏急停接到 `workflow cancel`，任务全量发送完后按急停不向设备写任何字节；② 若后端残留一条“待确认停止”（`unknown`）的旧任务记录，按顶栏急停会只发给旧记录对应的目标而不发给当前页面的设备；③ 工作台 `HomePage.jsx` 挂载了从未设为显示的 `SendOverlay` 死代码。
+- **根因与修复**：① 新增 `globalEstop.js` 的 `stopPageTarget`、`estopTargetArgs`、`isJobCoveringPageTarget` 与 `triggerTopbarEmergencyStop`，并将 `estopBus.js` 扩展支持传递 `stoppedJob` 上下文：顶栏急停先停后端登记的任务，若后端无任务、失败、仅停了 `unknown` 待确认旧记录或停的是其他设备，同时触发当前页面（工作台、画板、数字孪生）向本页已填的设备目标补发 `0x18`；② 移除 `HomePage.jsx` 中未使用的 `SendOverlay` 状态与 JSX（保留 `ApprovalCenter.jsx` 中的使用）。后端契约与安全门禁不变，不是破坏性变更。
+- **验证**：`tests/globalEstop.test.mjs` 新增 7 项（共 12 项通过）；前端 `npm test` 172/172 通过；E2E 重组为 API 32 项 + 真实浏览器界面 3 项（UI-01 任务浮层取消、UI-02 任务结束后顶栏急停、UI-03 画板无任务急停），`npm run test:e2e` 35/35 通过；执行 `scripts/quick-update-desktop.ps1 -WithHost` 编译同步本机正式版。未在真实设备上验证。
+- **关联**：`frontend/src/{globalEstop,estopBus,main}.js(x)`、`frontend/src/pages/{DrawPage,HomePage,TwinPage}.jsx`、`frontend/tests/globalEstop.test.mjs`、`frontend/tests/e2e/{api.test,workbench.ui.test,recordingGrbl}.mjs`、`scripts/test_e2e.mjs`。
 
 ## [0.3.1] - 2026-11-05
 

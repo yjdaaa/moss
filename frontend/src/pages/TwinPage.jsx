@@ -42,6 +42,8 @@ import {
 } from "../twinState.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import { showAlert } from "../appDialog.js";
+import { onEmergencyStop } from "../estopBus.js";
+import { isJobCoveringPageTarget } from "../globalEstop.js";
 
 // 面向大鱼 DIY 翼宿 V1.0 (100×100mm 行程) 的内置演示刀路（60×60mm 标准铭牌 + 内框几何，起点对齐 (0,0)）
 const DEMO_GCODE = [
@@ -623,6 +625,24 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
       tone: sent ? "warning" : "error",
     });
   };
+  const twinEstopRef = useRef(null);
+  twinEstopRef.current = (detail) => {
+    const target = getConnectionPayload();
+    const hasTarget =
+      target.connection_mode === "serial" ? Boolean(target.port) : Boolean(target.host);
+    const jobId = isJobRunning ? selectedWorkflowId : "";
+    if (!jobId && !hasTarget) return false;
+    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target: hasTarget ? target : null })) {
+      return false;
+    }
+    void handleTwinEmergencyStop();
+    return true;
+  };
+  useEffect(
+    () =>
+      onEmergencyStop((detail) => (twinEstopRef.current ? twinEstopRef.current(detail) : false)),
+    [],
+  );
 
   // 单步前/后移动一行（按真实累计时间比例定位）
   const stepByLine = (delta) => {

@@ -8,8 +8,15 @@
  */
 export const ESTOP_EVENT = "moss:estop-request";
 
-export function requestEmergencyStop(target = globalThis.window) {
-  const detail = { handled: false };
+export function requestEmergencyStop(targetOrOptions = globalThis.window, maybeOptions = {}) {
+  const isEventTarget =
+    targetOrOptions && typeof targetOrOptions.dispatchEvent === "function";
+  const target = isEventTarget ? targetOrOptions : globalThis.window;
+  const options = isEventTarget ? maybeOptions : targetOrOptions || {};
+  const detail = {
+    handled: false,
+    stoppedJob: options?.stoppedJob || null,
+  };
   if (target?.dispatchEvent) {
     target.dispatchEvent(new CustomEvent(ESTOP_EVENT, { detail }));
   }
@@ -20,7 +27,7 @@ export function onEmergencyStop(handler, target = globalThis.window) {
   if (!target?.addEventListener) return () => {};
   const listener = (event) => {
     if (event.detail?.handled) return;
-    if (handler() === true) event.detail.handled = true;
+    if (handler(event.detail) === true) event.detail.handled = true;
   };
   target.addEventListener(ESTOP_EVENT, listener);
   return () => target.removeEventListener(ESTOP_EVENT, listener);

@@ -80,3 +80,53 @@ export async function stopPageTarget(sendStop, { jobId, target } = {}) {
   }
   return { kind: "failed", message: messages.join("；") };
 }
+
+/**
+ * 判断页面显式设备目标是否与后端任务记录的 target 描述指向同一设备。
+ */
+export function isSameEstopTarget(target, jobTarget) {
+  if (!target || typeof jobTarget !== "string" || !jobTarget.trim()) return false;
+  const normalized = jobTarget.trim().toLowerCase();
+  if (target.connection_mode === "serial") {
+    const port = String(target.port || "").trim().toLowerCase();
+    const baud = Number(target.baudrate) || 115200;
+    if (!port) return false;
+    return normalized === port || normalized.includes(`${port}@${baud}`) || normalized.endsWith(`/${port}`);
+  }
+  if (target.connection_mode === "network") {
+    const host = String(target.host || "").trim().toLowerCase();
+    const port = Number(target.telnet_port) || 23;
+    if (!host) return false;
+    return normalized === `${host}:${port}` || normalized.endsWith(`://${host}:${port}`);
+  }
+  return false;
+}
+
+/**
+ * 判断后端刚刚通过 stopKnownJob 停掉的任务是否已经覆盖当前页面的设备目标。
+ * 注意：若后端记录处于 `unknown`（待确认停止的旧记录，对应连接或模拟设备可能已关闭），
+ * 绝不视为已覆盖当前页面设备，必须继续向当前页面的设备目标发送一次 0x18。
+ */
+export function isJobCoveringPageTarget(stoppedJob, { jobId, target } = {}) {
+  if (!stoppedJob || stoppedJob.state !== "running") return false;
+  const trimmedJobId = typeof jobId === "string" ? jobId.trim() : "";
+  if (trimmedJobId && stoppedJob.job_id === trimmedJobId) return true;
+  return isSameEstopTarget(target, stoppedJob.target);
+}
+
+/**
+ * 顶栏全局急停编排：先停后端登记的任务；当后端无任务、失败、仅停了 `unknown` 旧记录
+ * 或停的是其他设备时，同时触发当前页面向本页设备目标补发 0x18。
+ */
+export async function triggerTopbarEmergencyStop(getTargets, sendStop, notifyPage) {
+  const outcome = await stopKnownJob(getTargets, sendStop);
+  let pageHandled = false;
+  if (typeof notifyPage === "function" && outcome.kind !== "ambiguous") {
+    pageHandled = Boolean(
+      notifyPage({
+        stoppedJob: outcome.kind === "sent" ? outcome.job : null,
+      }),
+    );
+  }
+  return { ...outcome, pageHandled };
+}

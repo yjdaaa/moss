@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Navbar } from "./components/Navbar.jsx";
 import { SideNav } from "./components/SideNav.jsx";
 import { requestEmergencyStop } from "./estopBus.js";
-import { stopKnownJob } from "./globalEstop.js";
+import { triggerTopbarEmergencyStop } from "./globalEstop.js";
 import { installCardSpotlight } from "./spotlight.js";
 import { AuthModal } from "./components/AuthModal.jsx";
 import { CloseConfirmModal } from "./components/CloseConfirmModal.jsx";
@@ -205,21 +205,26 @@ function App() {
 
   useEffect(() => installCardSpotlight(), []);
 
-  // 顶栏急停先读后端全局任务（含执行结果未知的作业），跨页面也可停止原目标。
-  // 状态查询失败才尝试旧的页面处理器；软件 0x18 不等于物理停机。
+  // 顶栏急停先读后端全局任务（含执行结果未知的作业），跨页面也可停止原目标；
+  // 若后端僅有 unknown 待确认旧记录、停止失败或停的是其他设备，同时向当前页面的设备发送 0x18。
   const estopBusy = useRef(false);
   const handleGlobalEmergencyStop = useCallback(async () => {
     if (estopBusy.current) return;
     estopBusy.current = true;
     try {
-      const outcome = await stopKnownJob(getJson, postJson);
+      const outcome = await triggerTopbarEmergencyStop(getJson, postJson, (opts) =>
+        requestEmergencyStop(opts),
+      );
+      if (outcome.pageHandled) {
+        return;
+      }
       if (outcome.kind === "sent") {
         await showAlert(`${outcome.message || "急停 0x18 已写出"}。停止尚未确认，请现场检查机床状态；必要时按实体急停。`, { title: "已发送急停", tone: "warning" });
       } else if (outcome.kind === "failed") {
         await showAlert(`${outcome.message || "急停发送失败"}。请立即使用实体急停，并检查设备连接。`, { title: "急停未确认", tone: "error" });
       } else if (outcome.kind === "ambiguous") {
         await showAlert(`检测到 ${outcome.jobs.length} 个可能仍在运行的任务。无法安全地猜测要停止哪台设备，请在对应任务中按急停；紧急情况使用实体急停。`, { title: "多个停止目标", tone: "warning" });
-      } else if (!requestEmergencyStop()) {
+      } else {
         await showAlert(
           outcome.kind === "lookup_failed"
             ? "无法查询后端当前任务，不能确认软件急停能否发送。请立即使用实体急停。"

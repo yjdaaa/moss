@@ -25,7 +25,6 @@ import {
 } from "lucide-react";
 import { apiFetch, getJson, postJson, fetchPreviewBlobUrl, resolveApiUrl } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
-import { SendOverlay } from "../components/SendOverlay.jsx";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
@@ -33,7 +32,7 @@ import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize
 import { showAlert, showConfirm } from "../appDialog.js";
 import { canResumeJob, formatResumeActionLabel } from "../estopResumeState.js";
 import { onEmergencyStop } from "../estopBus.js";
-import { estopTargetArgs, stopPageTarget } from "../globalEstop.js";
+import { estopTargetArgs, isJobCoveringPageTarget, stopPageTarget } from "../globalEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
@@ -126,7 +125,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     };
   }, []);
   // Overlay & Modals
-  const [showSendOverlay, setShowSendOverlay] = useState(false);
   const [overlayStatus, setOverlayStatus] = useState("pending");
   const [sendProgress, setSendProgress] = useState(null);
   const [pollIntervalId, setPollIntervalId] = useState(null);
@@ -635,16 +633,20 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     addLog("ESTOP", message, sent ? "warn" : "error");
     showAlert(message, { title:sent ? "停止请求已发送" : "停止未确认", tone:sent ? "warning" : "error" });
   };
-  // 顶栏常驻急停：有当前工作流或已填设备目标时执行与监视舱急停按钮完全相同的 handleEStop
+  // 顶栏常驻急停：若后端未停掉本页正在运行的同一设备任务（如后端仅停了 unknown 旧记录或其他设备），
+  // 则同时向本页当前设备目标发送 0x18。
   const estopRef = useRef(null);
-  estopRef.current = currentWorkflow?.workflow_id || estopTarget() ? handleEStop : null;
+  estopRef.current = (detail) => {
+    const jobId = currentWorkflow?.workflow_id;
+    const target = estopTarget();
+    if (!jobId && !target) return false;
+    if (isJobCoveringPageTarget(detail?.stoppedJob, { jobId, target })) return false;
+    void handleEStop();
+    return true;
+  };
   useEffect(
     () =>
-      onEmergencyStop(() => {
-        if (!estopRef.current) return false;
-        void estopRef.current();
-        return true;
-      }),
+      onEmergencyStop((detail) => (estopRef.current ? estopRef.current(detail) : false)),
     [],
   );
 
@@ -1266,7 +1268,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 setPollIntervalId(null);
                 setCurrentWorkflow(workflow);
                 setOverlayStatus("pending");
-                setShowSendOverlay(false);
                 setSendProgress(null);
                 const artifacts = workflow.artifacts || {};
                 applyPreviewUrl(
@@ -1312,23 +1313,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
       />
 
       {pollSafetyNotice && <p role="alert" className="send-desc">{pollSafetyNotice}</p>}
-      {/* Send Overlay */}
-      <SendOverlay
-        visible={showSendOverlay}
-        status={overlayStatus}
-        progress={sendProgress}
-        onCancel={handleCancel}
-        onEmergencyStop={currentWorkflow?.workflow_id ? handleEStop : null}
-        keepEmergencyStop={Boolean(currentWorkflow?.workflow_id)}
-        safetyNotice={pollSafetyNotice}
-        onClose={() => {
-          setShowSendOverlay(false);
-          if (pollIntervalId) {
-            pollIntervalId();
-            setPollIntervalId(null);
-          }
-        }}
-      />
 
       {/* Material Modal */}
       <MaterialModal
