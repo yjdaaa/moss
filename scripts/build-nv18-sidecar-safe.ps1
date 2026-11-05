@@ -1,5 +1,11 @@
 # NV18 Windows voice-sidecar build with unique, non-destructive staging.
 # No installation, hardware access, real model inference, or source-tree deletion.
+param(
+  [switch]$SkipFrontendBuild,
+  [switch]$IncludeFullNativeEvidence,
+  [string]$VersionOverride = '',
+  [string]$EmitGplSourceZip = ''
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if(-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){throw 'Windows host required'}
@@ -55,21 +61,35 @@ foreach($file in @('COPYING','README.md','THIRD_PARTY_NOTICES.md')){
 }
 if(Test-Path -LiteralPath (Join-Path $helperRoot 'native-source-evidence.json')){
   Copy-New (Join-Path $helperRoot 'native-source-evidence.json') (Join-Path $resource 'native-source-evidence.json')
-  if(Test-Path -LiteralPath (Join-Path $helperRoot 'native-license-evidence') -PathType Container){
+  if($IncludeFullNativeEvidence -and (Test-Path -LiteralPath (Join-Path $helperRoot 'native-license-evidence') -PathType Container)){
     Copy-Item -LiteralPath (Join-Path $helperRoot 'native-license-evidence') -Destination (Join-Path $resource 'native-license-evidence') -Recurse -ErrorAction Stop
   }
 }
 if(Test-Path -LiteralPath (Join-Path $helperRoot 'rust-source-evidence.json')){
   Copy-New (Join-Path $helperRoot 'rust-source-evidence.json') (Join-Path $resource 'rust-source-evidence.json')
-  if(Test-Path -LiteralPath (Join-Path $helperRoot 'rust-license-evidence') -PathType Container){
+  if($IncludeFullNativeEvidence -and (Test-Path -LiteralPath (Join-Path $helperRoot 'rust-license-evidence') -PathType Container)){
     Copy-Item -LiteralPath (Join-Path $helperRoot 'rust-license-evidence') -Destination (Join-Path $resource 'rust-license-evidence') -Recurse -ErrorAction Stop
   }
 }
-$configuration=@{bundle=@{externalBin=@($binRel);resources=@{"$relResource/"='licenses/voice-local/'}}}
+if($EmitGplSourceZip -ne ''){
+  New-Item -ItemType Directory -Path (Split-Path -Parent $EmitGplSourceZip) -Force | Out-Null
+  if(Test-Path -LiteralPath $EmitGplSourceZip){Remove-Item -LiteralPath $EmitGplSourceZip -Force}
+  Compress-Archive -Path (Join-Path $resource '*') -DestinationPath $EmitGplSourceZip -Force
+  Write-Output ('NV18_GPL_SOURCE_ZIP='+$EmitGplSourceZip)
+}
+$configuration=@{
+  build=@{beforeBuildCommand=''}
+  bundle=@{externalBin=@($binRel);resources=@{"$relResource/"='licenses/voice-local/'}}
+}
+if($VersionOverride -ne ''){
+  $configuration['version']=$VersionOverride
+}
 $configuration|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $overlay -Encoding utf8
 
-Push-Location (Join-Path $repo 'frontend')
-try{& npm run build;if($LASTEXITCODE -ne 0){throw 'Frontend release build failed'}}finally{Pop-Location}
+if(-not $SkipFrontendBuild){
+  Push-Location (Join-Path $repo 'frontend')
+  try{& npm run build;if($LASTEXITCODE -ne 0){throw 'Frontend release build failed'}}finally{Pop-Location}
+}
 $started=(Get-Date).ToUniversalTime()
 Push-Location $desktop
 try{& cargo tauri build --target $triple --config $overlay;if($LASTEXITCODE -ne 0){throw 'Sidecar NSIS build failed'}}finally{Pop-Location}
@@ -97,7 +117,7 @@ $hashLines=@(Get-ChildItem -LiteralPath $src -Recurse -File | Sort-Object FullNa
 $joined=[string]::Join([char]10,$hashLines)
 $sha256Engine=[System.Security.Cryptography.SHA256]::Create(); try { $sourceHash=[BitConverter]::ToString($sha256Engine.ComputeHash([Text.Encoding]::UTF8.GetBytes($joined))).Replace('-','').ToLowerInvariant() } finally { $sha256Engine.Dispose() }
 $release=@{
- product_version=(Get-Content -LiteralPath (Join-Path $desktop 'tauri.conf.json') -Raw|ConvertFrom-Json).version
+ product_version=if($VersionOverride -ne ''){$VersionOverride}else{(Get-Content -LiteralPath (Join-Path $desktop 'tauri.conf.json') -Raw|ConvertFrom-Json).version}
  helper_protocol=[int]$proto.Groups[1].Value
  db_schema=[int]$schema.Groups[1].Value
  source_tree_sha256=$sourceHash

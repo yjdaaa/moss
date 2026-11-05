@@ -63,3 +63,26 @@ test("MOSS_DEV_UI_ORIGIN is restricted to debug builds and loopback Vite ports o
   assert.match(libRs, /"http:\/\/127\.0\.0\.1:5177"\s*\|\s*"http:\/\/127\.0\.0\.1:5173"/);
   assert.match(libRs, /is_trusted_main_with_dev/);
 });
+
+test("Magpie-style cloud parallel release workflow and slimmed sidecar script stay pure ASCII and deduplicate builds", () => {
+  for (const script of ["scripts/release-tag.ps1", "scripts/build-nv18-sidecar-safe.ps1"]) {
+    const bytes = readRepo(script);
+    const badIndex = bytes.findIndex((byte) => byte > 0x7f);
+    assert.equal(badIndex, -1, `${script} contains non-ASCII byte at offset ${badIndex}`);
+  }
+
+  const sidecar = readRepoText("scripts/build-nv18-sidecar-safe.ps1");
+  assert.match(sidecar, /\[switch\]\$SkipFrontendBuild/);
+  assert.match(sidecar, /\[switch\]\$IncludeFullNativeEvidence/);
+  assert.match(sidecar, /\[string\]\$VersionOverride/);
+  assert.match(sidecar, /\[string\]\$EmitGplSourceZip/);
+  assert.match(sidecar, /beforeBuildCommand\s*=\s*''/);
+
+  const releaseYml = readRepoText(".github/workflows/release.yml");
+  assert.match(releaseYml, /name:\s*release-frontend-dist/);
+  for (const job of ["windows-lite:", "windows-offline-voice:", "macos-universal:", "android-apk:", "publish:"]) {
+    assert.ok(releaseYml.includes(job), `release.yml must include parallel job ${job}`);
+  }
+  assert.match(releaseYml, /-Dorg\.gradle\.daemon=false/);
+  assert.match(releaseYml, /MOSS_\$\{VERSION\}_windows_x64_portable\.exe/);
+});

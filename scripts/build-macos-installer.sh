@@ -77,13 +77,15 @@ copy_new() {
   cp "$from" "$to"
 }
 
-pushd "$REPO/frontend" >/dev/null
-npm run build
-popd >/dev/null
+if [[ "${MOSS_SKIP_FRONTEND_BUILD:-0}" != "1" ]]; then
+  pushd "$REPO/frontend" >/dev/null
+  npm run build
+  popd >/dev/null
+fi
 
 if [[ "$WITH_SIDECAR" -eq 0 ]]; then
   pushd "$DESKTOP" >/dev/null
-  cargo tauri build --target "$TRIPLE"
+  cargo tauri build --target "$TRIPLE" --config '{"build":{"beforeBuildCommand":""}}'
   popd >/dev/null
   APP_BUNDLE="$TARGET_DIR/$TRIPLE/release/bundle/macos/MOSS.app"
   codesign --verify --deep --strict "$APP_BUNDLE"
@@ -156,10 +158,10 @@ if [[ -f "$HELPER_ROOT/rust-source-evidence.json" ]]; then
   fi
 fi
 
-python3 - "$OVERLAY" "$BIN_REL" "$REL_RESOURCE" "${APPLE_SIGNING_IDENTITY:-}" <<'PY'
+python3 - "$OVERLAY" "$BIN_REL" "$REL_RESOURCE" "${APPLE_SIGNING_IDENTITY:-}" "${MOSS_VERSION_OVERRIDE:-}" <<'PY'
 import json, sys
 
-overlay_path, bin_rel, rel_resource, signing_id = sys.argv[1:5]
+overlay_path, bin_rel, rel_resource, signing_id, version_override = sys.argv[1:6]
 bundle = {
     "externalBin": [bin_rel],
     "resources": {f"{rel_resource}/": "licenses/voice-local/"},
@@ -169,8 +171,14 @@ if signing_id:
         "signingIdentity": signing_id,
         "hardenedRuntime": True,
     }
+payload = {
+    "build": {"beforeBuildCommand": ""},
+    "bundle": bundle,
+}
+if version_override:
+    payload["version"] = version_override
 with open(overlay_path, "w", encoding="utf-8") as fp:
-    json.dump({"bundle": bundle}, fp, indent=2, ensure_ascii=False)
+    json.dump(payload, fp, indent=2, ensure_ascii=False)
 PY
 
 STAMP_FILE="$RUN_DIR/.build-started"

@@ -1,0 +1,411 @@
+name: MOSS Parallel Release
+
+# Magpie-style zero-local-wait release pipeline:
+# Push any `v*` tag (e.g. via `powershell -File scripts/release-tag.ps1`) ->
+# Frontend builds ONCE -> Windows Lite / Windows Offline-Voice / macOS Universal / Android arm64
+# compile in PARALLEL on cloud runners -> assets + SHA256SUMS publish to GitHub Releases automatically.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建发布的已有 Git 标签（如 v0.3.1）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: 1. Prepare Version & Frontend Dist
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Resolve tag and semantic version
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -n "$INPUT_TAG" ]]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semantic version derived from tag '$TAG': '$VERSION'" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag=$TAG version=$VERSION"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend once
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Upload shared frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-frontend-dist
+          path: frontend/dist
+          retention-days: 3
+
+  windows-lite:
+    name: 2a. Windows Lite & Portable (x64)
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download shared frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: release-frontend-dist
+          path: frontend/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Build Windows Lite NSIS & Portable EXE
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $overlay = Join-Path $env:RUNNER_TEMP "tauri-lite-overlay.json"
+          @{
+            version = $env:VERSION
+            build   = @{ beforeBuildCommand = "" }
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $overlay -Encoding utf8
+
+          Push-Location apps/desktop/src-tauri
+          try {
+            cargo tauri build --bundles nsis --config $overlay
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+
+          New-Item -ItemType Directory -Path target/release-assets -Force | Out-Null
+          $nsis = Get-ChildItem -LiteralPath target/release/bundle/nsis -Filter "*.exe" -File |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if (-not $nsis) { throw "Missing Windows Lite NSIS installer" }
+
+          Copy-Item -LiteralPath $nsis.FullName -Destination "target/release-assets/MOSS_${env:VERSION}_x64-lite-setup.exe" -Force
+          Copy-Item -LiteralPath "target/release/moss-desktop.exe" -Destination "target/release-assets/MOSS_${env:VERSION}_windows_x64_portable.exe" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-windows-lite
+          path: target/release-assets/*
+          retention-days: 3
+
+  windows-offline-voice:
+    name: 2b. Windows Offline Voice Bundle (x64)
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download shared frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: release-frontend-dist
+          path: frontend/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/moss-voice-local -> target
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Build slimmed Windows Offline-Voice NSIS + GPL source zip
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Path target/release-assets -Force | Out-Null
+          $srcZip = (Resolve-Path target/release-assets).Path + "\moss-voice-local-${env:VERSION}-gpl-source.zip"
+          powershell -File scripts/build-nv18-sidecar-safe.ps1 `
+            -SkipFrontendBuild `
+            -VersionOverride $env:VERSION `
+            -EmitGplSourceZip $srcZip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $nsis = Get-ChildItem -LiteralPath target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter "*.exe" -File |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if (-not $nsis) { throw "Missing Windows Offline-Voice NSIS installer" }
+
+          Copy-Item -LiteralPath $nsis.FullName -Destination "target/release-assets/MOSS_${env:VERSION}_x64-offline-voice-setup.exe" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-windows-offline-voice
+          path: target/release-assets/*
+          retention-days: 3
+
+  macos-universal:
+    name: 2c. macOS Universal DMG (Apple Silicon + Intel)
+    needs: prepare
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download shared frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: release-frontend-dist
+          path: frontend/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/moss-voice-local -> target
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Build Universal macOS .app & .dmg
+        env:
+          MOSS_MACOS_TARGET: universal-apple-darwin
+          MOSS_SKIP_FRONTEND_BUILD: '1'
+          MOSS_VERSION_OVERRIDE: ${{ needs.prepare.outputs.version }}
+          CI: 'true'
+        run: |
+          bash scripts/build-macos-installer.sh --with-voice-sidecar
+          mkdir -p target/release-assets
+          DMG_SRC="$(ls -t target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n 1)"
+          cp "$DMG_SRC" "target/release-assets/MOSS_${MOSS_VERSION_OVERRIDE}_macos_universal.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-macos-universal
+          path: target/release-assets/*
+          retention-days: 3
+
+  android-apk:
+    name: 2d. Android Signed APK (arm64)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download shared frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: release-frontend-dist
+          path: frontend/dist
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'microsoft'
+          java-version: '17'
+
+      - name: Setup Android SDK & NDK
+        run: |
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMGR" --licenses > /dev/null || true
+          "$SDKMGR" --install "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Configure Android release signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ANDROID_DIR="apps/desktop/src-tauri/gen/android"
+          KS_FILE="$RUNNER_TEMP/moss-release.jks"
+          if [[ -n "$KEYSTORE_B64" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            echo "$KEYSTORE_B64" | base64 --decode > "$KS_FILE"
+            ALIAS_USE="$KEY_ALIAS"
+            PASS_USE="$KEY_PASSWORD"
+            echo "Using repository secret Android keystore."
+          else
+            ALIAS_USE="moss"
+            PASS_USE="$(openssl rand -hex 16)"
+            keytool -genkeypair -v \
+              -keystore "$KS_FILE" \
+              -storetype PKCS12 \
+              -alias "$ALIAS_USE" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS_USE" -keypass "$PASS_USE" \
+              -dname "CN=MOSS, OU=LaserForge, O=MOSS, L=CN, ST=CN, C=CN"
+            echo "::notice::ANDROID_KEYSTORE_BASE64 not configured; signed APK with ephemeral PKCS12 key so Android installs cleanly."
+          fi
+          cat > "$ANDROID_DIR/keystore.properties" <<EOF
+          storeFile=$KS_FILE
+          keyAlias=$ALIAS_USE
+          password=$PASS_USE
+          EOF
+
+      - name: Build Android arm64 Release APK
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GRADLE_OPTS: '-Dorg.gradle.daemon=false'
+        run: |
+          OVERLAY="$RUNNER_TEMP/tauri-android-overlay.json"
+          python3 - "$OVERLAY" "$VERSION" <<'PY'
+          import json, sys
+          path, ver = sys.argv[1:3]
+          parts = [int(x) for x in ver.split("-")[0].split(".")[:3]]
+          while len(parts) < 3:
+              parts.append(0)
+          version_code = max(1, parts[0] * 1000000 + parts[1] * 1000 + parts[2])
+          with open(path, "w", encoding="utf-8") as fp:
+              json.dump({
+                  "version": ver,
+                  "build": {"beforeBuildCommand": ""},
+                  "bundle": {"android": {"versionCode": version_code}},
+              }, fp)
+          PY
+
+          pushd apps/desktop/src-tauri >/dev/null
+          cargo tauri android build --target aarch64 --apk --ci --config "$OVERLAY"
+          popd >/dev/null
+
+          mkdir -p target/release-assets
+          APK_SRC="apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk"
+          test -s "$APK_SRC"
+          cp "$APK_SRC" "target/release-assets/MOSS_${VERSION}_android_aarch64.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-android-apk
+          path: target/release-assets/*
+          retention-days: 3
+
+  publish:
+    name: 3. Publish GitHub Release
+    needs:
+      - prepare
+      - windows-lite
+      - windows-offline-voice
+      - macos-universal
+      - android-apk
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Download all platform release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: asset-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS & release notes
+        run: |
+          cd dist
+          sha256sum * | tee SHA256SUMS.txt
+          cd ..
+
+          python3 - "$VERSION" "$TAG" > release-notes.md <<'PY'
+          import pathlib, re, subprocess, sys
+
+          ver, tag = sys.argv[1:3]
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = re.compile(rf"^## \[{re.escape(ver)}\][^\n]*\n(.*?)(?=^## \[|\Z)", re.M | re.S)
+          m = pattern.search(changelog)
+          body = m.group(1).strip() if m else ""
+          if not body:
+              prev = subprocess.run(
+                  ["git", "describe", "--tags", "--abbrev=0", f"{tag}^"],
+                  capture_output=True, text=True
+              )
+              rev_range = f"{prev.stdout.strip()}..{tag}" if prev.returncode == 0 and prev.stdout.strip() else tag
+              commits = subprocess.run(
+                  ["git", "log", "--pretty=format:- %s (%h)", rev_range],
+                  capture_output=True, text=True
+              ).stdout.strip()
+              body = commits or f"- 发布 MOSS {tag}"
+
+          sums = pathlib.Path("dist/SHA256SUMS.txt").read_text(encoding="utf-8").strip()
+          print(f"## MOSS {tag}\n\n{body}\n\n### SHA-256 校验和\n\n```text\n{sums}\n```")
+          PY
+
+      - name: Create or update GitHub Release
+        run: |
+          ASSETS=(
+            "dist/MOSS_${VERSION}_x64-offline-voice-setup.exe#Windows 完整版安装包（含离线语音辅助程序）"
+            "dist/MOSS_${VERSION}_x64-lite-setup.exe#Windows 轻量版安装包"
+            "dist/MOSS_${VERSION}_windows_x64_portable.exe#Windows 单文件免安装便携版 (x64)"
+            "dist/MOSS_${VERSION}_macos_universal.dmg#macOS 通用版安装包 (Apple Silicon + Intel，含离线语音)"
+            "dist/MOSS_${VERSION}_android_aarch64.apk#Android 手机端安装包 (arm64)"
+            "dist/moss-voice-local-${VERSION}-gpl-source.zip#离线语音辅助程序对应源码与许可清单 (GPLv3)"
+            "dist/SHA256SUMS.txt#SHA-256 校验清单"
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --verify-tag \
+              --title "MOSS $TAG" \
+              --notes-file release-notes.md \
+              --latest
+          fi

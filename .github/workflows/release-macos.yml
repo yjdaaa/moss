@@ -1,9 +1,8 @@
 name: Build macOS Release DMG
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # 全平台标签自动发布已统一由 .github/workflows/release.yml 并行接管；
+  # 本工作流保留为单独重打/补挂某一个历史标签 macOS 通用版 DMG 的手动入口。
   workflow_dispatch:
     inputs:
       release_tag:

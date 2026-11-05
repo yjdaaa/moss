@@ -196,3 +196,16 @@
 4. 交付构建命令改为 `cargo tauri build`（产物增加 `target/release/bundle/nsis/MOSS_<版本>_x64-setup.exe`）；`AGENTS.md` 中 `target/release/moss-desktop.exe` 的检查保留，另增安装包检查。
 5. 签名流程与证书管理（正式版）。
 6. 同步文档：本文、[快速开始](../user/quick-start.md)（新增“安装与卸载”章节）、根目录 README 的安装说明、[架构总览](architecture.md) §6。
+
+## 7. 类 Magpie 云端全自动四端并行发版工作流（2026-11-05）
+
+对齐 `yetone/magpie` 的高频零阻塞发布架构，日常迭代与正式发版彻底解耦：
+
+1. **本地 1 秒打标签脱手（`scripts/release-tag.ps1`）**：
+   - 在工作区干净时运行 `powershell -File scripts/release-tag.ps1`（自动将最新 `vX.Y.Z` 补丁号 `+1`，也可显式传 `-Version 0.4.0` 或 `-DryRun` 预览），仅耗时约 1 秒即完成分支与标签推送，无需在本机排队串行编译、无需改 18 个 `Cargo.toml` 版本号使全量缓存失效。
+2. **云端单次前端构建 + 四台机器并行编译（`.github/workflows/release.yml`）**：
+   - `prepare` 仅执行 **1 次** `npm ci && npm run build` 产出共享 `release-frontend-dist`，并从 Git 标签提取语义化版本号注入各端 Tauri overlay（避免重复执行 4 次 4007 模块 Vite 构建）；
+   - `windows-lite`（NSIS 轻量包 + `MOSS_<版本>_windows_x64_portable.exe` 免安装单文件便携版）、`windows-offline-voice`（带 `moss-voice-local.exe` 的瘦身离线语音安装包 + 独立 `moss-voice-local-<版本>-gpl-source.zip`）、`macos-universal`（Apple Silicon + Intel 通用版 `.dmg`）与 `android-apk`（`-Dorg.gradle.daemon=false --ci` 签名 `arm64` APK）在云端 **同时并行构建**；
+   - `publish` 汇总全部产物，自动生成 `SHA256SUMS.txt` 与中文变更说明并发布至 GitHub Releases。
+3. **安装包瘦身（`scripts/build-nv18-sidecar-safe.ps1`）**：
+   - 默认将 `moss-voice-local` 与 `moss-voice-local-proto` 完整源码、许可证及上游哈希清单随包打包，并通过 `-EmitGplSourceZip` 导出独立源码压缩包，不再每次将 759 MB 的上游静态库原始归档重复压入 NSIS `.exe`（安装包体积由 ~702 MB 降至 ~35 MB；如需生成包含全量原始归档的内部审计包可显式传 `-IncludeFullNativeEvidence`）。
