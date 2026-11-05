@@ -152,6 +152,7 @@
 
 - 新版本安装包直接覆盖安装：沿用上次的安装范围与目录，只替换程序文件，`%APPDATA%\moss` 不动。
 - **日常每次代码改动后的正式版快速同步（`scripts/quick-update-desktop.ps1` / `scripts\start.bat -Update`，2026-11-01 用户决定）**：每次修复问题或新增功能通过测试后，默认执行 `powershell -File scripts/quick-update-desktop.ps1`（内部跑 `cargo tauri build --no-bundle`，未装 `cargo-tauri` 时回退 `npm run build` + `cargo build --release -p moss-desktop --features tauri/custom-protocol`），直接产出最新正式版 `target/release/moss-desktop.exe`（已内嵌最新 `frontend/dist` 与 `voice-private.html`），跳过 NSIS 压包与许可证暂存，并自动核对 `crates/moss-voice-local-proto/src/lib.rs` 的 `PROTOCOL_VERSION`，将协议匹配的 `moss-voice-local.exe` 同步到 `target/release/`（以及已存在的 `target/debug/`；本机尚无匹配协议产物时自动重编 `apps/moss-voice-local`）。若检测到本机已有安装目录（注册表或 `%LOCALAPPDATA%\MOSS` / `%ProgramFiles%\MOSS`，也可传 `-InstallDir <path>`），自动原地覆盖 `moss-desktop.exe`（若安装目录已含 `moss-voice-local.exe` 或传了 `-WithVoiceHelper` 也一并同步）并核对 SHA-256；若目标程序正在运行则绝不强杀（严守 I-7），自动将运行中的旧文件同目录改名为 `*.old-<时间戳>.exe` 挪开并写入新版（下次运行时自动清理已释放的旧文件），用户关掉重开即生效。涉及离线语音辅助程序内部实现（协议号未变）或独立宿主改动时追加 `-WithVoiceHelper`、`-WithHost`。阶段收尾与对外交付仍须按 §0 执行完整安装包构建。
+- **macOS 本机快速同步（`scripts/quick-update-desktop.sh`，2026-11-05）**：与 Windows 脚本同参数语义（`--build-only` / `--install-dir <MOSS.app>` / `--with-voice-helper` / `--with-host` / `--launch` / `--skip-cache-sweep`，另有 `--dry-run` 与 `--version`）。跑 `cargo tauri build --no-bundle` 后原地替换 `/Applications/MOSS.app`（或 `~/Applications`）里的 `Contents/MacOS/moss-desktop`，语音辅助程序协议号不符或带 `--with-voice-helper` 时一并重编并替换 `moss-voice-local`。替换方式是先在同目录写临时文件并 ad-hoc 签名、再原子 `mv` 覆盖：运行中的 MOSS 继续使用旧文件，**从不结束进程**，退出重开即生效；有替换时重新签名整个 `.app` 并 `codesign --verify --deep --strict`。默认把已安装包的 `CFBundleShortVersionString` 注入 `MOSS_RELEASE_VERSION`，补丁后显示与“检查更新”版本不变。运行检测只比对进程可执行路径（`ps -o comm`），`--launch` 在 MOSS 已运行时拒绝。只换程序文件，图标、`Info.plist`、许可证资源等需重新完整打包（§3.9）才更新。首次仍需从 DMG 安装一次。
 - **桌面热重载开发窗口（`scripts/dev-desktop.ps1` / `scripts\start.bat -Dev`）**：自动确保 `target/debug/moss-voice-local.exe` 与当前 `PROTOCOL_VERSION` 对齐（`start.bat` 直接启动桌面版前同样核对同目录辅助程序协议号），拉起回环 Vite（`127.0.0.1:5177`）与 debug 版 `moss-desktop` 实时预览前端与语音中心，仅供开发调试，不替代正式版验证。
 - 数据库 schema 由程序启动时自动迁移（`RuntimeDb` 只执行 `current < N` 的步骤）；降级到旧版本时旧程序也能打开新库（见技术书 §9.3）。
 - 自动更新（Tauri updater 插件）不在首版范围，后续单独评估；需要签名密钥与更新服务器。
@@ -177,6 +178,8 @@
 3. 需要与发布同号时用 `MOSS_VERSION_OVERRIDE=<X.Y.Z>` 注入版本（只改包与 `current_moss_version`，不改仓库文件；`moss-voice-local` 仍显示自身 crate 版本）；要支持 Intel 用 `MOSS_MACOS_TARGET=universal-apple-darwin`。
 
 示例：`CI=true MOSS_VERSION_OVERRIDE=0.3.2 bash scripts/build-macos-installer.sh`
+
+**日常改代码后不必重新打包**：首次从 DMG 安装后，用 `bash scripts/quick-update-desktop.sh` 原地打补丁（见 §3.6），约 1 分钟；只有改了图标、`Info.plist`、打包资源或要分发安装包时才重跑本节的完整构建。
 
 **安装**：挂载 DMG，把 `MOSS.app` 拖到“应用程序”（命令行：`hdiutil attach -nobrowse -readonly <dmg>` → `ditto /Volumes/MOSS/MOSS.app /Applications/MOSS.app` → `hdiutil detach /Volumes/MOSS`）。本机构建的包没有隔离属性，可直接打开；从网上下载到其他 Mac 的包是 ad-hoc 签名、未公证，首次需右键“打开”。运行数据在 `~/Library/Application Support/moss`，卸载或覆盖安装 `.app` 都不会动它。
 

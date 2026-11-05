@@ -45,6 +45,27 @@ test("quick-update, dev-desktop, and start.bat verify PROTOCOL_VERSION and sync 
   assert.match(startBat, /moss-voice-local\.exe/);
 });
 
+test("macOS quick-update-desktop.sh stays ASCII, patches MOSS.app atomically, re-signs, and never kills MOSS", () => {
+  const bytes = readRepo("scripts/quick-update-desktop.sh");
+  const badIndex = bytes.findIndex((byte) => byte > 0x7f);
+  assert.equal(badIndex, -1, `quick-update-desktop.sh contains non-ASCII byte at offset ${badIndex}`);
+
+  const quick = readRepoText("scripts/quick-update-desktop.sh");
+  assert.match(quick, /--no-bundle/);
+  assert.match(quick, /PROTOCOL_VERSION/);
+  assert.match(quick, /binary_protocol/);
+  // Atomic replace: write next to the target, sign, then rename over it (running MOSS keeps the old inode)
+  assert.match(quick, /\.new-\$\$/);
+  assert.match(quick, /mv -f "\$tmp" "\$dst"/);
+  assert.match(quick, /codesign --verify --deep --strict/);
+  assert.match(quick, /MOSS_RELEASE_VERSION/);
+  // Running detection must match the executable path (ps comm), not argv, and must not use grep -q under pipefail
+  assert.match(quick, /ps -axo comm=/);
+  assert.doesNotMatch(quick, /moss_running\(\)[^\n]*grep -q/);
+  assert.doesNotMatch(quick, /\b(pkill|killall)\b/, "must never force-kill running MOSS or voice helper");
+  assert.doesNotMatch(quick, /\bkill\s+-?\d*\s*\$/, "must never force-kill running MOSS or voice helper");
+});
+
 test("Vite dev server pins 127.0.0.1:5177 with React Fast Refresh while keeping packaged voice-private entry", () => {
   const viteConfig = readRepoText("frontend/vite.config.mjs");
   assert.match(viteConfig, /@vitejs\/plugin-react/);

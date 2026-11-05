@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新增 macOS 本机快速同步脚本，改代码后原地给已安装的 MOSS.app 打补丁（2026-11-05）
+
+- **现象**：Windows 上用 `quick-update-desktop.ps1` 原地替换已安装的 `moss-desktop.exe`，macOS 上没有对应工具，每次改动都要重跑约 5 分钟的完整 `.app`/`.dmg` 打包。
+- **根因与修复**：新增 `scripts/quick-update-desktop.sh`，参数语义与 Windows 版一致：`cargo tauri build --no-bundle` 后把新程序写到 `MOSS.app/Contents/MacOS` 同目录临时文件、ad-hoc 签名、原子 `mv` 覆盖，运行中的 MOSS 不被打断也从不结束进程（I-7）；有替换时重新签名整个 bundle 并严格校验；语音辅助程序按 `PROTOCOL_VERSION` 复用或重编；默认沿用已安装包的版本号注入 `MOSS_RELEASE_VERSION`。运行检测只比对可执行路径，且避开 `pipefail` 下 `grep -q` 引发的 SIGPIPE 误判。只影响开发工具，应用功能、默认值与安全门禁不变，不是破坏性变更。
+- **验证**：对 `/Applications/MOSS.app` 实测：未运行时补丁约 42 秒完成且签名校验通过；MOSS 运行中以不同版本补丁两次，原进程始终存活、提示退出重开，`--launch` 在运行中拒绝（退出码 1），最终程序为 0.3.2；`frontend/tests/devQuickUpdate.test.mjs` 新增 1 项（6/6 通过）。未在 Intel Mac 上验证。
+- **关联**：`scripts/quick-update-desktop.sh`、`frontend/tests/devQuickUpdate.test.mjs`、`AGENTS.md`、`docs/developer/packaging-install.md`。
+
 ### 急停链路加固、GRBL 流控按真实缓冲容量、语音设备快照须认证、前端去除伪造 SHA 与资源泄漏（2026-11-05）
 
 - **现象**：① `Emergency_Stop` 等大小写不同的动作名在任务运行中发不出 0x18；顶栏急停串行且请求无超时，任务查询挂起时页面的 0x18 永远发不出，多任务时也不通知页面；数字孪生页急停失败后不按本页目标补发；局域网慢连接占满 64 个 HTTP 名额时本机急停得到 503。② 流控窗口下限写死 255 字节（经典 GRBL 只有 128 字节），读超时丢弃半行导致 `ok` 丢失，`$RI` 超时后迟到的 `ok` 被当成首行 G-code 的应答。③ 走边框功率无上限且 `as i32` 截断（审批卡显示原值），SD `http_port` 截断（65616→80）。④ 局域网主机冒用设备 ID 即可在认证前改写“设备信息”快照与 OTA 固件版本；`voice_builtin_status` 任意窗口可调；未鉴权 GIF 路由每次请求同步重编码；设备 MCP 待回包表不清理；异步里直接跑同步 SQLite。⑤ 工作台取不到哈希时用 `d8f2b1a9` 冒充 SHA-256 并显示“门禁通过”，预览 404 正文被当成 G-code；three.js 不释放显存；切换任务与轮询存在旧响应覆盖新状态；`localStorage` 被禁用时应用加载失败；走边框一点即动。
