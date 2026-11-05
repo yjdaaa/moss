@@ -106,7 +106,7 @@ async function waitForServer(url, timeoutMs = 15000) {
 
 async function main() {
   console.log("===============================================================");
-  console.log(" MOSS App 按钮与全功能端到端 (E2E) 自动化测试调度器");
+  console.log(" MOSS 端到端 (E2E) 测试调度器：API 链路 + 工作台界面");
   console.log("===============================================================\n");
 
   const exePath = fs.existsSync(RELEASE_EXE) ? RELEASE_EXE : DEBUG_EXE;
@@ -203,7 +203,7 @@ async function main() {
 
   const testProc = spawn(
     process.execPath,
-    ["--test", "frontend/tests/e2e/buttons.test.mjs"],
+    ["--test", "--test-concurrency=1", "frontend/tests/e2e/api.test.mjs", "frontend/tests/e2e/workbench.ui.test.mjs"],
     {
       cwd: ROOT_DIR,
       env: testEnv,

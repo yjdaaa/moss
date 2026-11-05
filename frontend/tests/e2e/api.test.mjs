@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { startRecordingGrbl } from "./recordingGrbl.mjs";
 
 if (!process.env.TEST_API_BASE || !process.env.TEST_GRBL_PORT) {
   throw new Error("E2E 必须由隔离调度器注入 TEST_API_BASE 和 TEST_GRBL_PORT");
@@ -233,23 +234,23 @@ test("[BTN-09] 雕刻工作台: 「安全确认 · 立即发送」按钮触发�
   assert.equal(repeat.data?.error_code || repeat.data?.detail?.error_code || repeat.data?.result?.error_code, "workflow_not_sendable");
 });
 
-test("[BTN-10] 雕刻工作台: 「取消加工」按钮下发 cancel 变更工作流为 cancelled 终态", async () => {
-  assert.ok(generatedTextWorkflow?.workflow_id, "依赖文字工作流");
+test("[BTN-10] 雕刻工作台: 已全量完成的任务「取消加工」必须拒绝，保留 completed 记录", async () => {
+  assert.ok(generatedTextWorkflow?.workflow_id, "依赖 BTN-09 已完成的文字工作流");
   const res = await apiPost("/api/workflow", {
     action: "cancel",
     workflow_id: generatedTextWorkflow.workflow_id,
   });
-  assert.equal(res.status, 200);
-  assert.equal(res.data?.success, true, "取消请求必须成功处理");
+  assert.equal(res.status, 400, `已完成任务不得被改写为 cancelled: ${JSON.stringify(res.data)}`);
+  assert.equal(res.data?.error_code || res.data?.detail?.error_code || res.data?.result?.error_code, "workflow_completed");
 
-  // 再次查询状态验证已终止
   const checkRes = await apiPost("/api/workflow", {
     action: "status",
     workflow_id: generatedTextWorkflow.workflow_id,
   });
   assert.equal(checkRes.status, 200);
-  const finalStatus = checkRes.data?.result?.status;
-  assert.equal(finalStatus, "cancelled", "被取消的任务状态必须为 cancelled");
+  assert.equal(checkRes.data?.result?.status, "completed", "拒绝取消后状态必须保持 completed");
+  const sr = checkRes.data?.result?.send_result;
+  assert.equal(sr?.lines_sent, sr?.total_lines, "逐行确认记录不得被抹掉");
 });
 
 // -----------------------------------------------------------------------------
@@ -550,14 +551,36 @@ test("[BTN-30] 创意画板: 「状态」按钮查询工作流执行进度", asy
   assert.equal(res.data?.success, true);
 });
 
-test("[BTN-31] 创意画板: 「取消」按钮安全终止工作流", async () => {
-  assert.ok(drawWorkflowId, "依赖工作流 ID");
-  const res = await apiPost("/api/workflow", {
-    action: "cancel",
-    workflow_id: drawWorkflowId,
+test("[BTN-31] 创意画板: 「取消」按钮终止未发送工作流，已完成工作流拒绝取消", async () => {
+  assert.ok(drawWorkflowId, "依赖 BTN-29 已完成的画板工作流");
+  // 反向：已全量完成的画板任务不得被改写为 cancelled
+  const done = await apiPost("/api/workflow", { action: "cancel", workflow_id: drawWorkflowId });
+  assert.equal(done.status, 400, JSON.stringify(done.data));
+  assert.equal(done.data?.error_code || done.data?.detail?.error_code || done.data?.result?.error_code, "workflow_completed");
+
+  // 正向：新生成、尚未发送的画板预览可取消，取消后拒绝下发
+  const preview = await apiPost("/api/draw/preview", {
+    image_data_url: DUMMY_PNG_BASE64,
+    material: "椴木",
+    thickness_mm: 3,
+    mode: "raster",
+    output_format: "gcode",
+    network_host: "127.0.0.1",
+    network_telnet_port: 23,
+    scene_json: { type: "excalidraw", version: 2 },
   });
-  assert.equal(res.status, 200);
+  assert.equal(preview.status, 200, JSON.stringify(preview.data));
+  const freshId = preview.data?.result?.workflow_id || preview.data?.result?.workflow?.workflow_id;
+  assert.ok(freshId && freshId !== drawWorkflowId, "必须生成新的画板工作流");
+  const res = await apiPost("/api/workflow", { action: "cancel", workflow_id: freshId });
+  assert.equal(res.status, 200, JSON.stringify(res.data));
   assert.equal(res.data?.success, true);
+  assert.equal(res.data?.result?.status, "cancelled");
+  const send = await apiPost("/api/workflow", {
+    action: "confirm_send", workflow_id: freshId, confirmed: true,
+    connection_mode: "network", network_host: GRBL_HOST, network_telnet_port: GRBL_PORT,
+  });
+  assert.equal(send.status, 400, "已取消的画板任务必须拒绝下发");
 });
 
 test("[BTN-38] 创意画板: 「下载 G-code」链接返回真实物理刀路与 Content-Disposition", async () => {
@@ -638,40 +661,54 @@ test("[BTN-40] 材料实验室: 「新建材料」与「删除材料」全生命
 });
 
 test("[BTN-41] 雕刻工作台: 发送中点击「取消任务」真实触发 ! → ? → 0x18 安全停机并置 cancelled", async () => {
-  // 生成一条足够长的文字刀路，确保取消发生在下发过程中
-  const gen = await apiPost("/api/text-task/generate", {
-    text: "MOSS-CANCEL-MOSS-CANCEL",
-    material: "椴木",
-    thickness_mm: 3,
-    font_size_mm: 30,
-    engraving_mode: "raster",
-  });
-  assert.equal(gen.status, 200);
-  const wfId = gen.data?.result?.workflow_id;
-  assert.ok(wfId);
-  const send = await apiPost("/api/workflow", {
-    action: "confirm_send",
-    workflow_id: wfId,
-    confirmed: true,
-    connection_mode: "network",
-    network_host: GRBL_HOST,
-    network_telnet_port: GRBL_PORT,
-  });
-  assert.equal(send.status, 200, JSON.stringify(send.data));
-  const total = send.data?.result?.send_result?.total_lines || 0;
-  assert.ok(total > 50, `刀路需足够长以便取消发生在发送中: ${total}`);
+  const rec = await startRecordingGrbl({ ackDelayMs: 3 });
+  try {
+    const gen = await apiPost("/api/text-task/generate", {
+      text: "MOSS-CANCEL-MOSS-CANCEL",
+      material: "椴木",
+      thickness_mm: 3,
+      font_size_mm: 30,
+      engraving_mode: "raster",
+    });
+    assert.equal(gen.status, 200);
+    const wfId = gen.data?.result?.workflow_id;
+    assert.ok(wfId);
+    const target = {
+      action: "confirm_send", workflow_id: wfId, confirmed: true,
+      connection_mode: "network", network_host: GRBL_HOST, network_telnet_port: rec.port,
+    };
+    const send = await apiPost("/api/workflow", target);
+    assert.equal(send.status, 200, JSON.stringify(send.data));
+    const total = send.data?.result?.send_result?.total_lines || 0;
+    assert.ok(total > 50, `刀路需足够长以便取消发生在发送中: ${total}`);
 
-  const cancel = await apiPost("/api/workflow", { action: "cancel", workflow_id: wfId });
-  assert.equal(cancel.status, 200);
-  assert.equal(cancel.data?.result?.status, "cancelled");
+    // 等设备确实收到部分刀路后再取消，证明取消发生在发送中途
+    const started = Date.now();
+    while (!rec.events.includes("line") && Date.now() - started < 5000) await new Promise((r) => setTimeout(r, 10));
+    const cancel = await apiPost("/api/workflow", { action: "cancel", workflow_id: wfId });
+    assert.equal(cancel.status, 200, JSON.stringify(cancel.data));
+    assert.equal(cancel.data?.result?.status, "cancelled");
 
-  const final = await pollWorkflowUntil(wfId, ["cancelled", "completed", "failed"]);
-  assert.equal(final.data?.result?.status, "cancelled", JSON.stringify(final.data?.result));
-  const again = await apiPost("/api/workflow", {
-    action: "confirm_send", workflow_id: wfId, confirmed: true,
-    connection_mode: "network", network_host: GRBL_HOST, network_telnet_port: GRBL_PORT,
-  });
-  assert.equal(again.status, 400, "取消/完成后的任务必须拒绝重复下发");
+    const final = await pollWorkflowUntil(wfId, ["cancelled", "completed", "failed"], 8000,
+      (record) => record.send_result?.can_resume !== undefined);
+    assert.equal(final.data?.result?.status, "cancelled", JSON.stringify(final.data?.result));
+    const sr = final.data?.result?.send_result || {};
+    assert.ok(sr.lines_sent > 0 && sr.lines_sent < total, `取消必须停在发送中途: ${sr.lines_sent}/${total}`);
+
+    // 本连接上的真实字节顺序：! 之后有 ? 状态查询，再之后 0x18 软复位，且复位后不再下发任何刀路行
+    const hold = rec.events.indexOf("!");
+    assert.ok(hold >= 0, `必须收到 ! 进给保持: ${rec.events.slice(-20).join(" ")}`);
+    const query = rec.events.indexOf("?", hold);
+    assert.ok(query > hold, "! 之后必须轮询 ? 确认保持状态");
+    const reset = rec.events.indexOf("0x18", query);
+    assert.ok(reset > query, "确认保持后必须发送 0x18 软复位");
+    assert.equal(rec.events.indexOf("line", reset), -1, "0x18 软复位后不得再下发刀路行");
+
+    const again = await apiPost("/api/workflow", target);
+    assert.equal(again.status, 400, "取消/完成后的任务必须拒绝重复下发");
+  } finally {
+    rec.close();
+  }
 });
 
 test("[BTN-42] 雕刻工作台: 急停停机后记录断点，通过 /api/workflow (action: resume) 成功续雕剩余代码至终态", async () => {
