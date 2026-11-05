@@ -3,6 +3,22 @@
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
 
+## GitHub 仓库 `v0.3.1` 云端四端并行交付安装包构建（Windows 离线语音瘦身版 / 轻量版 / 单文件便携版 / macOS 通用版 / Android 签名版，2026-11-05）
+
+通过 `scripts/release-tag.ps1 -Version 0.3.1` 一键推送 `v0.3.1` 标签，触发 `.github/workflows/release.yml`（Run `41994099595`）在 GitHub Actions 云端执行 1 次前端生产编译 + 四端并行构建（注入 `MOSS_RELEASE_VERSION=0.3.1`），分离大型原生静态库归档使带离线语音辅助程序的 Windows 完整版安装包从 `701.9 MB` 瘦身至 `24.72 MB`，并自动计算 `SHA256SUMS.txt` 发布至公开仓库 `yjdaaa/moss` 的 `v0.3.1` Latest Release（含双画风 `160×120` 动态场景 GIF 瞬切与推屏联动、`moss.local` 跨 Wi-Fi 固定 OTA 地址广播及虚拟网卡过滤）。
+
+| 本次产物（0.3.1，GitHub Actions Run `41994099595`） | UTC时间（2026-11-05） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| Windows 完整版（含离线语音）`MOSS_0.3.1_x64-offline-voice-setup.exe` | 08:59:19 | 25,923,235 | `c53dd77e6439393d57a6cce073c4c35b2bf794ac224c1244944c496b1011ce5c` |
+| Windows 轻量版 `MOSS_0.3.1_x64-lite-setup.exe` | 08:59:19 | 20,309,175 | `c5fcb825b85ffa4bd5b0727baf23447e712f9ae3a128caa1fbf87df78a7b8f11` |
+| Windows 单文件免安装便携版 `MOSS_0.3.1_windows_x64_portable.exe` | 08:59:19 | 65,723,904 | `112247e0d1a9483ca72c17ff599bd8ce82754c892d4c58ec0e70e2b90d781893` |
+| macOS 通用版（Apple Silicon + Intel，含离线语音）`MOSS_0.3.1_macos_universal.dmg` | 08:59:19 | 74,765,042 | `2274e24265391ec4423a58295da9d5839eb77babf15f68f2540913e3b83c05f4` |
+| Android 签名版 `MOSS_0.3.1_android_aarch64.apk` | 08:59:19 | 54,872,058 | `f1cebfeba5bf66fed2d7fe27b7bd7452102d30719af59b6b935d2d1f0fbab25b` |
+| 离线语音辅助程序源码与许可清单 `moss-voice-local-0.3.1-gpl-source.zip` | 08:59:19 | 120,871 | `21fc4fb2a966c9954ed741443b68f9d1e862524175ef59030dd337ac36d9d1a0` |
+| 本机快更正式版 `target/release/moss-desktop.exe` | 08:22:50 | 65,589,760 | `04092828365ac1d0ed915e97f65e36cbe15b7d44b4fc002730c5a6cff47e0a9e` |
+
+**未验证**：全新干净 Windows / macOS 机器首次安装、Android 手机实机覆盖安装与立创·实战派 ESP32-S3 及物理激光雕刻机现场联动待实机核验。
+
 ## GitHub 仓库 `v0.3.0` 交付安装包构建（Windows 完整离线语音版 / 常规版 / macOS 通用版 / Android 签名版，2026-11-05）
 
 基于 `main` 分支（含立创·实战派 ESP32-S3 `320×240` 1:1 零缩放预览与确认窗续期、实时加工进度副屏 HUD、零 Flash 三张服务端动态场景卡［待电脑审批警戒卡 / 5 秒完工庆祝与急停徽章卡 / 本地音乐律动卡］、硬核太空舱与可爱像素小机器人双画风不断连热切换、5 姿态护目镜小机器人 GIF89a 橱窗、独立「本地知识库」与单开关无感记忆流、锁死安全底座的助手风格预设与 0ms 同音纠偏、左上角全局 MOSS 光学机械眼升级、手机持久配对与固定配对码哈希存储、流式发送 FluidNC `$RI` 实时坐标直通 3D 数字孪生）完成全量测试后，将版本号升级至 `0.3.0`，依次完成带 `moss-voice-local` sidecar 的 Windows 专用 NSIS 构建、常规轻量 Windows NSIS 构建与 Android `aarch64` 签名 APK（`versionCode=3000`）构建，并经用户授权发布至 `yjdaaa/moss` 的 `v0.3.0` Release（macOS 通用版 DMG 由 GitHub Actions `release-macos.yml` 自动构建附加）。
