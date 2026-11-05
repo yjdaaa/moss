@@ -2,6 +2,18 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## macOS 本机 Apple Silicon 安装包构建（含离线语音辅助程序，2026-11-05）
+
+首次在 macOS 开发机（Apple Silicon，macOS 27.0）上用 `scripts/build-macos-installer.sh`（默认内置 `moss-voice-local` sidecar）构建，基于提交 `793d902`（干净工作树，前端同步重新构建）。为与云端 Mac 版内容一致：构建期间临时移开未纳入 git 的 `native-license-evidence/`、`rust-license-evidence/`（云端没有这两个目录），并设 `CI=true` 跳过 Finder AppleScript 窗口排版（未授予自动化权限时 `bundle_dmg.sh` 会因 AppleEvent 超时失败）。版本号取仓库 `0.3.0`（未注入 `MOSS_RELEASE_VERSION`）；ad-hoc 签名、未公证。
+
+| 本次产物（0.3.0，`aarch64-apple-darwin`） | UTC时间（2026-11-05） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| macOS Apple Silicon 版（含离线语音）`MOSS_0.3.0_aarch64.dmg` | 15:32:06 | 36,489,010 | `cb00ecd86844b09fe7af5ed657528a5fcee93931669941c31d874615da689014` |
+
+核对：`codesign --verify --deep --strict` 通过；`.app` 内含 `moss-desktop`（arm64）与 `moss-voice-local 0.3.0 (protocol 4, GPL-3.0-or-later)`；`LSMinimumSystemVersion=11.0`；`spctl` 按预期拒绝（ad-hoc 未公证，与云端 Mac 版相同）。构建前同一代码 `cargo test --workspace` 934 通过 / 0 失败、前端 198/198、E2E 35/35。
+
+**未验证**：未在本机或其他 Mac 上安装运行；未连接激光雕刻机与小智设备；不含 Intel（x86_64），需要时用 `MOSS_MACOS_TARGET=universal-apple-darwin` 构建通用版。
+
 
 ## GitHub 仓库 `v0.3.1` 云端四端并行交付安装包构建（Windows 离线语音瘦身版 / 轻量版 / 单文件便携版 / macOS 通用版 / Android 签名版，2026-11-05）
 
