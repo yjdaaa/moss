@@ -86,4 +86,8 @@ test("Magpie-style cloud parallel release workflow and slimmed sidecar script st
   assert.match(releaseYml, /-Dorg\.gradle\.daemon=false/);
   assert.match(releaseYml, /MOSS_RELEASE_VERSION:/);
   assert.match(releaseYml, /MOSS_\$\{VERSION\}_windows_x64_portable\.exe/);
+
+  const androidGradle = readRepoText("apps/desktop/src-tauri/gen/android/build.gradle.kts");
+  assert.match(androidGradle, /GITHUB_ACTIONS/);
+  assert.match(androidGradle, /if\s*\(!isCiBuild\)/);
 });
