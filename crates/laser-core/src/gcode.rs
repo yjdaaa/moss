@@ -769,6 +769,137 @@ pub fn parse_moves(text: &str) -> Vec<Move> {
     out
 }
 
+/// 刀路实际走到的范围（mm，相对任务开始时激光头所在位置；起点本身计入）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionExtents {
+    pub min_x: f64,
+    pub max_x: f64,
+    pub min_y: f64,
+    pub max_y: f64,
+}
+
+impl MotionExtents {
+    pub fn width(&self) -> f64 {
+        self.max_x - self.min_x
+    }
+
+    pub fn height(&self) -> f64 {
+        self.max_y - self.min_y
+    }
+
+    fn include(&mut self, x: f64, y: f64) {
+        self.min_x = self.min_x.min(x);
+        self.max_x = self.max_x.max(x);
+        self.min_y = self.min_y.min(y);
+        self.max_y = self.max_y.max(y);
+    }
+}
+
+/// 计算激光头在整份 G-code 中走过的 X/Y 范围，用于发送前与机器行程比对（2026-11-06）。
+/// - 跟踪 G90/G91、G20/G21；`G92` 只改坐标原点不移动（生成的任务以 `G92 X0 Y0` 把当前位置设为原点）；
+/// - 快速移动也计入（激光头同样会走到）；G2/G3 圆弧计入经过的最左 / 右 / 上 / 下点，`R` 写法按以弦中点为心、
+///   半径 |R| 的圆保守计入；
+/// - `G53` / `G28` / `G30` 等以机床坐标或回参考点移动的行无法从文件本身得知终点，返回 `Err` 让调用方拒绝。
+///
+/// 没有任何 X/Y 移动时返回 `Ok(None)`。
+pub fn motion_extents(text: &str) -> Result<Option<MotionExtents>, String> {
+    let (mut px, mut py) = (0.0_f64, 0.0_f64); // 物理位置（相对开始点）
+    let (mut ox, mut oy) = (0.0_f64, 0.0_f64); // 工件坐标原点相对开始点的偏移
+    let mut absolute = true;
+    let mut unit = 1.0;
+    let mut motion = 0;
+    let mut extents = MotionExtents { min_x: 0.0, max_x: 0.0, min_y: 0.0, max_y: 0.0 };
+    let mut moved = false;
+    for (index, line) in text.lines().enumerate() {
+        let ws = words(line);
+        if ws.is_empty() {
+            continue;
+        }
+        let g_codes: Vec<f64> = ws.iter().filter(|(l, _)| *l == 'G').map(|(_, v)| *v).collect();
+        let has = |code: f64| g_codes.iter().any(|v| (v - code).abs() < 1e-9);
+        let word = |letter: char| ws.iter().rev().find(|(l, _)| *l == letter).map(|(_, v)| *v);
+        if has(20.0) {
+            unit = 25.4;
+        }
+        if has(21.0) {
+            unit = 1.0;
+        }
+        if has(90.0) {
+            absolute = true;
+        }
+        if has(91.0) {
+            absolute = false;
+        }
+        let (x, y) = (word('X'), word('Y'));
+        if has(92.0) {
+            // G92 Xa：当前位置在新坐标系里记为 a
+            if let Some(v) = x {
+                ox = px - v * unit;
+            }
+            if let Some(v) = y {
+                oy = py - v * unit;
+            }
+            if x.is_none() && y.is_none() {
+                ox = px;
+                oy = py;
+            }
+            continue;
+        }
+        if [53.0, 28.0, 30.0, 10.0].iter().any(|code| has(*code)) && (x.is_some() || y.is_some() || has(28.0) || has(30.0)) {
+            return Err(format!("第 {} 行使用机床坐标、回参考点或改坐标系指令（{}），无法从文件计算加工范围", index + 1, line.trim()));
+        }
+        for code in &g_codes {
+            if [0.0, 1.0, 2.0, 3.0].iter().any(|m| (code - m).abs() < 1e-9) {
+                motion = *code as i32;
+            }
+        }
+        if x.is_none() && y.is_none() {
+            continue;
+        }
+        let (sx, sy) = (px, py);
+        let target = |current: f64, origin: f64, value: Option<f64>| match value {
+            None => current,
+            Some(v) if absolute => origin + v * unit,
+            Some(v) => current + v * unit,
+        };
+        let (tx, ty) = (target(px, ox, x), target(py, oy, y));
+        if !(tx.is_finite() && ty.is_finite()) {
+            return Err(format!("第 {} 行坐标不是有限数", index + 1));
+        }
+        moved = true;
+        extents.include(tx, ty);
+        if motion == 2 || motion == 3 {
+            if let Some(r) = word('R') {
+                let (cx, cy, radius) = ((sx + tx) / 2.0, (sy + ty) / 2.0, r.abs() * unit);
+                extents.include(cx - radius, cy - radius);
+                extents.include(cx + radius, cy + radius);
+            } else {
+                let (cx, cy) = (sx + word('I').unwrap_or(0.0) * unit, sy + word('J').unwrap_or(0.0) * unit);
+                let radius = (sx - cx).hypot(sy - cy);
+                let start = (sy - cy).atan2(sx - cx);
+                let end = (ty - cy).atan2(tx - cx);
+                let full = (sx - tx).abs() < 1e-9 && (sy - ty).abs() < 1e-9;
+                let tau = std::f64::consts::TAU;
+                // 逆时针（G3）从 start 扫到 end；顺时针（G2）反向
+                let (from, sweep) = if motion == 3 {
+                    (start, if full { tau } else { (end - start).rem_euclid(tau) })
+                } else {
+                    (end, if full { tau } else { (start - end).rem_euclid(tau) })
+                };
+                for quadrant in 0..4 {
+                    let angle = f64::from(quadrant) * std::f64::consts::FRAC_PI_2;
+                    if (angle - from).rem_euclid(tau) <= sweep + 1e-12 {
+                        extents.include(cx + radius * angle.cos(), cy + radius * angle.sin());
+                    }
+                }
+            }
+        }
+        px = tx;
+        py = ty;
+    }
+    Ok(moved.then_some(extents))
+}
+
 pub fn write_move(m: &Move) -> String {
     let mut line = if m.rapid { "G0" } else { "G1" }.to_owned();
     if let Some(x) = m.x {
@@ -991,6 +1122,40 @@ pub fn rescale_gcode_power(text: &str, from_scale: f64, to_scale: f64) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motion_extents_follow_modes_offsets_units_and_arcs() {
+        // 生成任务的典型开头：G92 把当前位置设为原点，再走 0..80 × 0..20
+        let job = "G21\nG90\nG92 X0 Y0 Z0\nM4 S0\nG0 X0 Y0\nG1 X80 Y0 S420\nG1 X80 Y20\nG0 X0 Y0\nM5";
+        let e = motion_extents(job).unwrap().unwrap();
+        assert_eq!((e.width(), e.height()), (80.0, 20.0));
+        // 相对坐标与英寸
+        let e = motion_extents("G91\nG1 X10 Y5\nG1 X10 Y5").unwrap().unwrap();
+        assert_eq!((e.max_x, e.max_y), (20.0, 10.0));
+        let e = motion_extents("G20\nG90\nG1 X2 Y1").unwrap().unwrap();
+        assert!((e.max_x - 50.8).abs() < 1e-9 && (e.max_y - 25.4).abs() < 1e-9);
+        // 中途 G92 改原点：之后的 X0 实际在开始点右侧 30 mm
+        let e = motion_extents("G90\nG0 X30\nG92 X0\nG1 X100").unwrap().unwrap();
+        assert_eq!(e.max_x, 130.0);
+        // 负方向同样计入
+        let e = motion_extents("G90\nG1 X-15 Y-5\nG1 X10 Y10").unwrap().unwrap();
+        assert_eq!((e.width(), e.height()), (25.0, 15.0));
+        // 逆时针半圆从 (10,0) 绕 (0,0) 到 (-10,0)，经过最高点 (0,10)
+        let e = motion_extents("G90\nG0 X10 Y0\nG3 X-10 Y0 I-10 J0").unwrap().unwrap();
+        assert!((e.max_y - 10.0).abs() < 1e-9 && e.min_y.abs() < 1e-9);
+        // 顺时针同一半圆经过最低点 (0,-10)
+        let e = motion_extents("G90\nG0 X10 Y0\nG2 X-10 Y0 I-10 J0").unwrap().unwrap();
+        assert!((e.min_y + 10.0).abs() < 1e-9 && e.max_y.abs() < 1e-9);
+        // 整圆
+        let e = motion_extents("G90\nG0 X10 Y0\nG2 X10 Y0 I-10 J0").unwrap().unwrap();
+        assert!((e.width() - 20.0).abs() < 1e-9 && (e.height() - 20.0).abs() < 1e-9);
+        // 模态 G1 下只写坐标的行也算移动；注释里的坐标不算
+        let e = motion_extents("G1 X5\nX40 ; X999\n(Y999) Y7").unwrap().unwrap();
+        assert_eq!((e.max_x, e.max_y), (40.0, 7.0));
+        assert_eq!(motion_extents("G21\nM5\n").unwrap(), None);
+        assert!(motion_extents("G53 G0 X0 Y0").is_err());
+        assert!(motion_extents("G28").is_err());
+    }
     #[test]
     fn modal_parser_and_estimator_cover_compact_words_arcs_and_pauses() {
         let text = "G21 G90 G94 M4 S100 F600\nG0X0Y0\nG1X10Y0\nG2 X0 Y10 I-5 J5 G4 P2\nM5";

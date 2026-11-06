@@ -27,6 +27,7 @@ pub mod vision;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
 pub mod goggle_bot;
 pub mod preview_push;
+pub mod wake_assets; // n61 设备唤醒词资源包：私密窗口逐台确认推送（2026-11-06）
 #[cfg(test)]
 mod speaker; // NV16 synthetic-only policy, default disabled
 pub mod speaker_enrollment;
@@ -251,6 +252,9 @@ pub enum DeviceRequest {
         token: Option<String>,
         summary: String,
     },
+    /// n61：让设备下载已暂存的唤醒词资源包（`self.assets.set_download_url` 后 `self.reboot`）。
+    /// 只由私密窗口逐台确认后发起；设备固件没有该工具时不发送。
+    InstallAssets { token: String },
 }
 
 pub(crate) struct DeviceRequestHandle {
@@ -266,6 +270,8 @@ pub(crate) struct Shared {
     /// 2026-10-16：待接进对话上下文的照片（只在用户打开对应开关时写入）。
     pub vision_photos: Arc<vision::VisionPhotos>,
     pub preview_store: Arc<preview_push::PreviewStore>,
+    /// n61：待设备下载的唤醒词资源包（只在内存里，30 分钟过期）
+    pub assets_store: wake_assets::AssetsStore,
     pub screen_card_style: std::sync::Mutex<ScreenCardStyle>,
     pub ws_port: u16,
     pub signer: TokenSigner,
@@ -345,6 +351,7 @@ impl VoiceServer {
             vision_quotas:Arc::new(vision::VisionQuotas::default()),
             vision_photos:Arc::new(vision::VisionPhotos::default()),
             preview_store: Arc::new(preview_push::PreviewStore::default()),
+            assets_store: wake_assets::AssetsStore::default(),
             screen_card_style: std::sync::Mutex::new(config.screen_card_style),
             signer: TokenSigner::new(secret),
             registry,
@@ -358,6 +365,7 @@ impl VoiceServer {
         let http_app = ota::router(shared.clone())
             .merge(vision::router(shared.clone()))
             .merge(firmware::router(shared.clone()))
+            .merge(wake_assets::router(shared.clone()))
             .merge(preview_push::router(shared.clone()));
         let mut stop_ws = shutdown_tx.subscribe();
         let mut stop_http = shutdown_tx.subscribe();
@@ -446,6 +454,24 @@ impl VoiceServer {
             return Err(message);
         }
         Ok(())
+    }
+
+    /// n61：暂存唤醒词资源包并让这台在线设备去下载（设备随后重启、自己写入资源分区）。
+    ///
+    /// 只在设备当前会话上报了 user-only 工具 `self.assets.set_download_url` 时发送；
+    /// 调用方（私密窗口）负责逐台明确确认。
+    pub fn install_wake_assets(&self, device_id: &str, package: Vec<u8>) -> Result<(), String> {
+        let supported = self
+            .shared
+            .state
+            .sessions()
+            .iter()
+            .any(|s| s.device_id == device_id && s.device_tools.iter().any(|t| t == "self.assets.set_download_url"));
+        if !supported {
+            return Err(format!("设备 {device_id} 不在线，或固件不支持网络更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"));
+        }
+        let token = self.shared.assets_store.stage(device_id, package)?;
+        self.device_request(device_id, DeviceRequest::InstallAssets { token })
     }
 
     /// 动态开关仅内存对话排障流（无需重启服务；关闭时立即清空内存缓冲）。

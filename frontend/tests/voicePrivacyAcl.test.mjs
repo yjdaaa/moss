@@ -30,12 +30,14 @@ test("n26：私密窗口能力保持最小影子集，主窗口就地展开的�
   assert.deepEqual(mainCapability.windows, ["main"]);
   assert.deepEqual(mainCapability.remote?.urls, ["http://127.0.0.1:*"]);
   assert.equal(Object.hasOwn(mainCapability, "webviews"), false);
+  // 固件与 n61 设备唤醒词都会写设备闪存，只给打包私密窗口
+  const flashWriting = (permission) => permission.startsWith("allow-voice-firmware") || permission.startsWith("allow-voice-wakeword");
   for (const permission of [...memory.permissions, ...plugins.permissions]) {
-    if (!permission.startsWith("allow-voice-firmware")) {
+    if (!flashWriting(permission)) {
       assert.ok(mainCapability.permissions.includes(permission), permission);
     }
   }
-  assert.equal(mainCapability.permissions.some((permission) => permission.startsWith("allow-voice-firmware")), false, "固件仍需打包私密窗口");
+  assert.equal(mainCapability.permissions.some(flashWriting), false, "固件与唤醒词仍需打包私密窗口");
   for (const value of [memory, plugins]) {
     assert.equal(Object.hasOwn(value, "remote"), false);
     assert.equal(Object.hasOwn(value, "webviews"), false);
@@ -168,6 +170,31 @@ test("NV17 firmware import, push and cancel stay private-window-only with native
   assert.match(importBody, /add_filter\("固件",&\["bin"\]\)/);
   const manageBody = native.match(/pub async fn voice_firmware_manage\b[\s\S]*?(?=\n}\n)/)[0];
   assert.doesNotMatch(manageBody, /std::fs::remove_file|std::fs::write/, "写入与删除只由内部按 SHA-256 处理");
+});
+
+test("n61 wake word status, base import and push stay private-window-only with native file picking", () => {
+  const memory = JSON.parse(desktop("capabilities/voice-memory.json"));
+  const fallback = JSON.parse(desktop("capabilities/default.json"));
+  const main = JSON.parse(desktop("capabilities/voice-private-main.json"));
+  const native = desktop("src/voice_builtin.rs");
+  for (const command of ["voice_wakeword_status", "voice_wakeword_import_base", "voice_wakeword_manage"]) {
+    const permission = `allow-${command.replaceAll("_", "-")}`;
+    assert.ok(memory.permissions.includes(permission), command);
+    assert.equal(fallback.permissions.includes(permission), false, command);
+    assert.equal(main.permissions.includes(permission), false, command);
+    assert.match(desktop("build.rs"), new RegExp(`"${command}"`));
+    const body = native.match(new RegExp(`pub async fn ${command}\\b[\\s\\S]*?(?=\\n}\\n)`));
+    assert.ok(body, command);
+    assert.match(body[0], /require_voice_private_asset\(&window\)\?/);
+  }
+  const importBody = native.match(/pub async fn voice_wakeword_import_base\b[\s\S]*?(?=\n}\n)/)[0];
+  assert.match(importBody, /blocking_pick_file\(\)/, "资源包只能由本机文件框选择");
+  assert.match(frontend("src/voicePrivate.jsx"), /<VoiceWakeWordCard\b/);
+  assert.doesNotMatch(frontend("src/pages/VoicePage.jsx"), /VoiceWakeWordCard/);
+  assert.doesNotMatch(frontend("src/components/VoiceBuiltinCard.jsx"), /VoiceWakeWordCard|wakewordManage/, "主窗口只放入口，不能直接推送");
+  const card = frontend("src/components/VoiceWakeWordCard.jsx");
+  assert.match(card, /showConfirm\(/, "推送前逐台确认");
+  assert.match(card, /confirmed: true/);
 });
 
 test("NV13 agent stop is main-window-only and saving keeps the enable switch", () => {

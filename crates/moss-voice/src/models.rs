@@ -1159,7 +1159,7 @@ pub fn test_jev_decisions(endpoint: &str, api_key: &str, model: &str) -> serde_j
         Ok(m) => m,
         Err(err) => return finish(false, None, err),
     };
-    let is_local = crate::settings::is_local_laya_model(&model);
+    let is_local = crate::settings::is_local_jev_model(&model);
     if !is_local && api_key.is_empty() {
         return finish(false, None, "请先填写 OpenRouter API Key".into());
     }
@@ -1167,7 +1167,11 @@ pub fn test_jev_decisions(endpoint: &str, api_key: &str, model: &str) -> serde_j
         Ok(c) => c,
         Err(detail) => return finish(false, None, detail),
     };
-    let wire_model = if is_local { "multilingual" } else { model.as_str() };
+    let wire_model = if is_local {
+        crate::settings::local_jev_upstream_model_name(&model)
+    } else {
+        model.as_str()
+    };
     let payload = serde_json::json!({
         "model": wire_model,
         "state": { "utterance": "检查激光雕刻机连接状态" },

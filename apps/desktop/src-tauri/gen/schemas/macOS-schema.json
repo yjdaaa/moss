@@ -621,6 +621,24 @@
           "markdownDescription": "Enables the voice_vision_test command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_wakeword_import_base command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-wakeword-import-base",
+          "markdownDescription": "Enables the voice_wakeword_import_base command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_wakeword_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-wakeword-manage",
+          "markdownDescription": "Enables the voice_wakeword_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_wakeword_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-wakeword-status",
+          "markdownDescription": "Enables the voice_wakeword_status command without any pre-configured scope."
+        },
+        {
           "description": "Denies the exit_application command without any pre-configured scope.",
           "type": "string",
           "const": "deny-exit-application",
@@ -1063,6 +1081,24 @@
           "type": "string",
           "const": "deny-voice-vision-test",
           "markdownDescription": "Denies the voice_vision_test command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_wakeword_import_base command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-wakeword-import-base",
+          "markdownDescription": "Denies the voice_wakeword_import_base command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_wakeword_manage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-wakeword-manage",
+          "markdownDescription": "Denies the voice_wakeword_manage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_wakeword_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-wakeword-status",
+          "markdownDescription": "Denies the voice_wakeword_status command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

@@ -4814,3 +4814,12 @@ input:not([type]):focus {
   .voice-bot-showcase-mascot { animation: none; }
   .voice-bot-gif-tile, .voice-bot-gif-tile:hover, .voice-bot-push:hover:not(:disabled) { transform: none; transition: none; }
 }
+
+/* 开刻前激光头对准位置提示（2026-11-06：文字默认对准木牌中心） */
+.wb-origin-note {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fbbf24;
+}
+.ai-preview-origin b { color: #fbbf24; }

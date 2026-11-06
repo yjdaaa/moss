@@ -2889,7 +2889,9 @@ dependencies = [
 name = "moss-voice"
 version = "0.3.0"
 dependencies = [
+ "base64 0.22.1",
  "bzip2",
+ "flate2",
  "laser-contracts",
  "moss-mcp-client",
  "reqwest",

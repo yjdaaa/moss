@@ -36,7 +36,7 @@ try {
     settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000, builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
     builtin: {
       running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003, ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
-      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }], helper_found: true },
+      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }], helper_found: true },
       debug_enabled: false,
       debug_traces: [],
       device_prefs: {},
@@ -418,6 +418,20 @@ try {
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为 Jev 决策（typesafe/jev-1.13）" }).waitFor();
   assert.equal(last("voice_local_save").args.settings.jev_filter_enabled, true);
   assert.equal(last("voice_local_save").args.settings.jev_model, "typesafe/jev-1.13");
+  // 5d-2. 本地 OneJev 1.6 (0.8B / 4B / 9B) 与 Laya 自由混搭：未下载项引导到下载区，已安装项可在顶部下拉或行内一键选用并展示硬件加速提示
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("local:onejev_1_6_9b");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "尚未下载" }).waitFor();
+  assert.match(await page.locator("#voice-local-onejev-env-hint").innerText(), /Apple Metal GPU 加速/);
+  await page.locator("#voice-local-use-onejev_1_6_0_8b").click();
+  await page.locator("#voice-group-local-models [role=status]").filter({ hasText: "OneJev 1.6 0.8B" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.jev_model, "onejev_1_6_0_8b");
+  assert.equal(await page.locator("#voice-builtin-mix-select-jev").inputValue(), "local:onejev_1_6_0_8b");
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("local:onejev_1_6_4b");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "OneJev 1.6 4B" }).filter({ hasText: "Apple Metal GPU 加速" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.jev_model, "onejev_1_6_4b");
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("local:laya_multilingual");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "Laya 决策模型" }).filter({ hasText: "Apple Metal MPS" }).waitFor();
+  assert.equal(last("voice_local_save").args.settings.jev_model, "laya_multilingual");
   await page.locator("#voice-builtin-mix-select-jev").selectOption("off");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "已关闭 Jev 语音筛选" }).waitFor();
   assert.equal(last("voice_local_save").args.settings.jev_filter_enabled, false);

@@ -83,6 +83,31 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                     {"required":["task_id","feedback_id","confirmed"],"properties":{"confirmed":{"const":true},"feedback_id":{"minLength":1}}}
                 ]);
             }
+            "generate_text_laser_task_tool" | "generate_text_image_gcode_tool" | "ai_laser_gcode_tool" | "laser_workflow_tool" => {
+                // 2026-11-06 文字刻法、排版与起点（用户决定：默认描边、激光头对准木牌中心）
+                let props = &mut tool["inputSchema"]["properties"];
+                props["text_fill"] = serde_json::json!({
+                    "type": "string", "enum": ["outline", "fill", "hatch"], "default": "outline",
+                    "description": "文字刻法：outline 只描轮廓（默认）；fill 扫描填满（小字、中文更清楚）；hatch 平行线填满并描边（大字更快）"
+                });
+                props["text_align"] = serde_json::json!({
+                    "type": "string", "enum": ["left", "center", "right"], "default": "center",
+                    "description": "多行文字（用换行分行）的对齐方式"
+                });
+                props["origin"] = serde_json::json!({
+                    "type": "string", "enum": ["center", "lower_left"], "default": "center",
+                    "description": "开刻前激光头对准的位置：center 木牌（图案）中心（默认），lower_left 木牌左下角"
+                });
+                props["width_mm"] = serde_json::json!({
+                    "type": "number", "description": "文字任务：木牌宽度 mm；不给字号时自动取能放下的最大字号并居中"
+                });
+                props["height_mm"] = serde_json::json!({
+                    "type": "number", "description": "文字任务：木牌高度 mm（可与 width_mm 一起或单独给）"
+                });
+                props["safe_margin_mm"] = serde_json::json!({
+                    "type": "number", "default": 2, "description": "文字放进木牌时四周留边 mm"
+                });
+            }
             _ => {}
         }
     }
@@ -152,6 +177,22 @@ fn backend_result(tool: &str, response: Result<(u16, serde_json::Value), String>
             let detail = serde_json::to_string_pretty(&body).unwrap_or_default();
             laser_contracts::ToolCallResult::with_detail(success, summary, detail)
         }
+    }
+}
+
+/// AI 生成预览后给模型的固定说明（2026-11-06 统一 AI 预览流程）：预览会弹到 MOSS 桌面，
+/// 必须等用户在预览窗点“同意开刻”或（未开严格模式时）口头明确确认，才能 confirm_send。
+pub const DESKTOP_PREVIEW_HINT: &str = "预览已弹到 MOSS 电脑屏幕上。请把尺寸、材料和预计时间告诉用户，让用户在预览窗核对后点「同意开刻」；未开启严格模式时，用户也可以口头明确说确认，你再调用 laser_workflow_tool(action=confirm_send, confirmed=true)。用户确认前不要发送。";
+
+fn with_desktop_preview_hint(result: laser_contracts::ToolCallResult, wanted_send: bool) -> laser_contracts::ToolCallResult {
+    if !result.success {
+        return result;
+    }
+    let note = if wanted_send { "（本次没有直接开始加工：AI 生成的任务必须先在电脑上预览）" } else { "" };
+    laser_contracts::ToolCallResult {
+        success: true,
+        result: format!("{}。{DESKTOP_PREVIEW_HINT}{note}", result.result.trim_end_matches('。')),
+        detail: result.detail,
     }
 }
 
@@ -483,7 +524,12 @@ fn dispatch_allowed(
             } else {
                 body
             };
-            backend_result(name, backend.request("POST", route, &serde_json::Value::Object(body)))
+            let result = backend_result(name, backend.request("POST", route, &serde_json::Value::Object(body)));
+            if matches!(action, "preview" | "plan" | "create") {
+                with_desktop_preview_hint(result, false)
+            } else {
+                result
+            }
         }
         "run_calibration_grid_tool" => {
             let calibration_id = arg_str(arguments, "calibration_id");
@@ -571,21 +617,10 @@ fn dispatch_allowed(
                 body.entry("font_size_mm").or_insert(serde_json::json!((size / 32.0).clamp(3.0, 80.0)));
             }
             let generated = backend.request("POST", "/api/text-task/generate", &serde_json::Value::Object(body));
-            let confirmed = arg_bool(arguments, "confirmed") && arg_bool(arguments, "send_after_generate");
-            match generated {
-                Ok((status, response)) if status < 400 && confirmed => {
-                    let Some(workflow_id) = response.pointer("/result/workflow_id").and_then(|v| v.as_str()) else {
-                        return backend_result(name, Ok((status, response)));
-                    };
-                    let mut send = serde_json::Map::new();
-                    send.insert("action".into(), serde_json::Value::String("confirm_send".into()));
-                    send.insert("workflow_id".into(), serde_json::Value::String(workflow_id.into()));
-                    send.insert("confirmed".into(), serde_json::Value::Bool(true));
-                    let send = with_connection_fields(arguments, send);
-                    backend_result(name, backend.request("POST", "/api/workflow", &serde_json::Value::Object(send)))
-                }
-                other => backend_result(name, other),
-            }
+            // 2026-11-06 用户决定：AI 生成的任务必须先在电脑上弹出预览，生成后不再顺带发送；
+            // `send_after_generate` 只保留在工具参数里兼容旧调用，生成结果会说明需要用户确认后再 confirm_send。
+            let wanted_send = arg_bool(arguments, "confirmed") && arg_bool(arguments, "send_after_generate");
+            with_desktop_preview_hint(backend_result(name, generated), wanted_send)
         }
         "start_tuned_job_tool" => {
             let Some(workflow_id) = arg_str(arguments, "task_id").or_else(|| arg_str(arguments, "workflow_id")) else {
@@ -1653,5 +1688,33 @@ mod tests {
         assert!(calls[0].1.contains("power_scale=255"));
         assert_eq!(calls[1].2["network_host"], "10.0.0.8");
         assert!(calls[2].2.get("confirmed").is_none());
+    }
+
+    /// 2026-11-06：AI 生成文字任务后只停在预览，`confirmed + send_after_generate` 不再顺带发送，
+    /// 结果提示模型等用户在电脑预览窗确认。
+    #[test]
+    fn ai_generation_stops_at_the_desktop_preview_even_when_asked_to_send() {
+        let ok = (200, serde_json::json!({"success": true, "result": {"workflow_id": "wf-ai", "status": "preview_ready"}}));
+        let backend = FakeBackend::new(vec![ok.clone(), ok.clone(), ok.clone(), ok]);
+        for name in ["ai_laser_gcode_tool", "generate_text_laser_task_tool", "generate_text_image_gcode_tool"] {
+            let result = dispatch_tool_call_with(
+                name,
+                &serde_json::json!({"text": "生日快乐", "material": "椴木", "thickness_mm": 3, "confirmed": true, "send_after_generate": true, "host": "10.0.0.8"}),
+                false,
+                Some(&backend),
+            );
+            assert!(result.success, "{result:?}");
+            assert!(result.result.contains("同意开刻") && result.result.contains("没有直接开始加工"), "{}", result.result);
+        }
+        let preview = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "preview", "text": "MOSS", "material": "椴木", "thickness_mm": 3}),
+            false,
+            Some(&backend),
+        );
+        assert!(preview.result.contains("同意开刻"), "{}", preview.result);
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 4);
+        assert!(calls.iter().all(|call| call.1 == "/api/text-task/generate"), "{calls:?}");
     }
 }

@@ -21,6 +21,7 @@ pub mod home_backup_audit;
 pub mod local_models;
 pub mod logfile;
 pub mod models;
+pub mod onejev;
 pub mod redact;
 pub mod settings;
 pub mod supervisor;

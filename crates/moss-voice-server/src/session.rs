@@ -2678,6 +2678,22 @@ impl<'a> Session<'a> {
                 self.event("桌面端请求：self.reboot".into());
                 self.send_mcp(socket, payload).await
             }
+            crate::DeviceRequest::InstallAssets { token } => {
+                if !self.device_mcp.as_ref().is_some_and(|d| d.has_tool("self.assets.set_download_url")) {
+                    self.event("设备固件不支持网络更新资源包（没有 self.assets.set_download_url），唤醒词未推送".into());
+                    return Ok(());
+                }
+                let host = self.preview_http_host();
+                let url = format!("http://{host}:{}/xiaozhi/assets/{token}.bin", self.shared.http_port);
+                self.event("桌面端推送唤醒词资源包：设备将重启并自行下载写入".into());
+                // 固件把两次调用按顺序排进主循环：先记下下载地址，再在 1 秒后重启。
+                self.send_quiet_device_call(socket, "self.assets.set_download_url", json!({ "url": url })).await?;
+                let Some(device) = self.device_mcp.as_mut() else {
+                    return Ok(());
+                };
+                let payload = device.request_untracked("tools/call", json!({ "name": "self.reboot", "arguments": {} }));
+                self.send_mcp(socket, payload).await
+            }
             crate::DeviceRequest::SetVolume(volume) => {
                 let v = volume.min(100);
                 self.event(format!("桌面端调节设备音量：{v}%"));

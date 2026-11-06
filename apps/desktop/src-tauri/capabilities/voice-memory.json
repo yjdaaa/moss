@@ -13,6 +13,9 @@
     "allow-voice-speaker-manage",
     "allow-voice-firmware-status",
     "allow-voice-firmware-import",
-    "allow-voice-firmware-manage"
+    "allow-voice-firmware-manage",
+    "allow-voice-wakeword-status",
+    "allow-voice-wakeword-import-base",
+    "allow-voice-wakeword-manage"
   ]
 }

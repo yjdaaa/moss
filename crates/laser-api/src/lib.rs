@@ -1195,6 +1195,13 @@ impl ApiService {
             Ok(g) => g,
             Err(e) => return http_json(400, failure(format!("生成走边框 G-code 失败: {e}"), None)),
         };
+        // relative_to_head（2026-11-06，AI 预览窗“先走边框”）：以激光头当前位置为 (0,0)，范围取预览返回的
+        // frame_mm（可为负），与即将开刻的任务同一参照；生成器结尾的 G0 X0 Y0 即回到起点
+        let framing_gcode = if object.get("relative_to_head").and_then(|v| v.as_bool()) == Some(true) {
+            format!("G21\nG92 X0 Y0 Z0\n{framing_gcode}")
+        } else {
+            framing_gcode
+        };
         let lines: Vec<String> = match laser_device::prepare_gcode_lines(&framing_gcode) {
             Ok(p) => p.lines,
             Err(e) => return http_json(400, failure(format!("走边框 G-code 校验失败: {e}"), None)),
@@ -1241,6 +1248,9 @@ impl ApiService {
             Ok(scale) => scale,
             Err(e) => return http_json(400, failure(format!("走边框前检查未通过 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_preflight_failed"})))),
         };
+        if let Err(error) = check_job_fits_machine(&framing_gcode, &device.travel_limits) {
+            return http_json(400, failure(format!("{error}（{target}）"), Some(serde_json::json!({"error_code": "job_exceeds_travel"}))));
+        }
         if permit.as_ref().is_some_and(|p| !p.load(Ordering::Acquire)) {
             return http_json(403, failure("预检期间设备授权已撤销，未开始走边框", Some(serde_json::json!({"error_code":"voice_session_revoked"}))));
         }
@@ -1629,6 +1639,9 @@ impl ApiService {
             ));
         }
         let expected_sha = actual_sha;
+        if let Err(error) = check_job_fits_machine(&text, &device.travel_limits) {
+            return Err((400, failure(format!("{error}（{target}）"), Some(serde_json::json!({"error_code": "job_exceeds_travel"})))));
+        }
 
         let start_from_line = object
             .get("start_from_line")
@@ -3236,7 +3249,7 @@ impl ApiService {
         if (method == "POST" && matches!(route, "/api/feedback" | "/api/jev/feedback" | "/api/feedback/accept"))
             || (method == "GET" && route == "/api/feedback/history")
         {
-            return self.handle_feedback_route(route, path, &body[..content_length]);
+            return self.handle_feedback_route(route, path, &body[..content_length], ctx.label());
         }
         if method == "POST" && route == "/api/jev/reveal" {
             if self.desktop_session.get().is_some()
@@ -3580,6 +3593,15 @@ impl ApiService {
             };
             let mut object = object;
             strip_identity_fields(&mut object);
+            // 新预览记下发起方（服务端按调用身份填写，客户端自带的值一律丢弃）；
+            // 桌面端据此把 AI（语音 / 小智 / 网关）生成的任务弹出预览窗（2026-11-06）
+            object.remove("_origin");
+            let creates_preview = route == "/api/text-task/generate"
+                || (route == "/api/workflow"
+                    && matches!(object.get("action").and_then(|v| v.as_str()), Some("preview" | "plan" | "create")));
+            if creates_preview {
+                object.insert("_origin".into(), serde_json::Value::String(ctx.label().to_owned()));
+            }
             if route == "/api/text-task/generate" {
                 let effective_library = match self.effective_material_library() {
                     Ok(lib) => lib,
@@ -4210,10 +4232,15 @@ fn generate_text_artifacts(
         .filter(|s| !s.is_empty());
     let is_cut = raw_engraving_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"))
         || raw_laser_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"));
+    // 文字刻法（2026-11-06）：默认只描轮廓（用户决定）；fill 扫描填充用材料库 raster 参数，
+    // outline / hatch 是矢量走线，用 outline 参数（此前一律取 engraving_mode，即工作台默认的 raster）
+    let text_fill = laser_core::engine::TextFill::parse(object.get("text_fill").and_then(|v| v.as_str()))?;
     let (rec_laser_mode, rec_engraving_mode) = if is_cut {
         ("cut", None)
+    } else if text_fill == laser_core::engine::TextFill::Fill {
+        ("engrave", Some("raster"))
     } else {
-        ("engrave", raw_engraving_mode)
+        ("engrave", Some("outline"))
     };
     let recommendation = laser_core::material::recommend_in_library(
         library,
@@ -4226,6 +4253,32 @@ fn generate_text_artifacts(
     .ok_or("读取材料推荐失败")?;
 
     let params = feedback::generation_params(object, recommendation.params.laser_max_power as f64, recommendation.params.feed_rate as f64)?;
+    // 排版与起点（2026-11-06）：width_mm / height_mm 为木牌尺寸；没指定字号时自动取能放下的最大字号；
+    // 默认激光头对准木牌（图案）中心（用户决定）
+    let optional_number = |keys: &[&str]| -> Result<Option<f64>, String> {
+        for key in keys {
+            match object.get(*key) {
+                None | Some(serde_json::Value::Null) => continue,
+                Some(serde_json::Value::String(text)) if text.trim().is_empty() => continue,
+                Some(value) => {
+                    return value
+                        .as_f64()
+                        .or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+                        .filter(|v| v.is_finite())
+                        .map(Some)
+                        .ok_or_else(|| format!("{key} 必须是数字"));
+                }
+            }
+        }
+        Ok(None)
+    };
+    let explicit_font_size = optional_number(&["font_size_mm"])?.is_some();
+    let pixel_size = optional_number(&["pixel_size_mm"])?
+        .unwrap_or(if recommendation.params.pixel_size_mm.is_finite() && recommendation.params.pixel_size_mm > 0.0 {
+            recommendation.params.pixel_size_mm
+        } else {
+            0.1
+        });
     let spec = laser_core::TextTaskSpec {
         text,
         font_path,
@@ -4235,8 +4288,30 @@ fn generate_text_artifacts(
         feed_rate: params.feed as i32,
         preview_width_px: 800,
         preview_height_px: 600,
+        fill: text_fill,
+        alignment: laser_core::engine::parse_alignment(object.get("text_align").and_then(|v| v.as_str()))?,
+        origin: laser_core::engine::TextOrigin::parse(object.get("origin").and_then(|v| v.as_str()))?,
+        board_width_mm: optional_number(&["board_width_mm", "width_mm"])?,
+        board_height_mm: optional_number(&["board_height_mm", "height_mm"])?,
+        margin_mm: optional_number(&["margin_mm", "safe_margin_mm"])?.unwrap_or(TEXT_BOARD_MARGIN_MM),
+        auto_size: !explicit_font_size,
+        pixel_size_mm: pixel_size,
+        overscan_mm: IMAGE_OVERSCAN_MM,
     };
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
+    // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）
+    let area = |key: &str| parse_float(object.get(key), key, MACHINE_WORK_AREA_MM).ok().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(MACHINE_WORK_AREA_MM);
+    let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
+    if let Ok(Some(extents)) = laser_core::gcode::motion_extents(&artifacts.gcode) {
+        if extents.width() > area_w + 0.01 || extents.height() > area_h + 0.01 {
+            return Err(format!(
+                "文字成品约 {:.1} × {:.1} mm，超出机器幅面 {area_w:.0} × {area_h:.0} mm，请减小字号（当前 {:.1} mm）或减少字数",
+                extents.width(),
+                extents.height(),
+                artifacts.font_size_mm
+            ));
+        }
+    }
     let gcode = feedback::repeat_generated(&artifacts.gcode, params.passes);
     let estimate = laser_core::gcode::estimate_time(&gcode, 3000.0);
 
@@ -4267,6 +4342,23 @@ fn generate_text_artifacts(
         "thickness_mm": thickness,
         "width_mm": artifacts.width_mm,
         "height_mm": artifacts.height_mm,
+        "font_size_mm": artifacts.font_size_mm,
+        "text_fill": artifacts.fill.as_str(),
+        "origin": artifacts.origin.as_str(),
+        "origin_note": match (artifacts.origin, spec.board_width_mm.is_some() || spec.board_height_mm.is_some()) {
+            (laser_core::engine::TextOrigin::Center, true) => "开刻前把激光头移到木牌中心",
+            (laser_core::engine::TextOrigin::Center, false) => "开刻前把激光头移到要刻的位置中心",
+            (laser_core::engine::TextOrigin::LowerLeft, true) => "开刻前把激光头移到木牌左下角",
+            (laser_core::engine::TextOrigin::LowerLeft, false) => "开刻前把激光头移到文字左下角",
+        },
+        "board_width_mm": spec.board_width_mm,
+        "board_height_mm": spec.board_height_mm,
+        "frame_mm": {
+            "min_x": artifacts.frame.min_x,
+            "max_x": artifacts.frame.max_x,
+            "min_y": artifacts.frame.min_y,
+            "max_y": artifacts.frame.max_y
+        },
         "glyphs": artifacts.glyphs,
         "path_optimization": artifacts.path_optimization,
         "time_estimate": {
@@ -4362,12 +4454,18 @@ fn generate_draw_artifacts(
     let power = params.power as i32;
     let feed_rate = params.feed as i32;
 
-    // 成品尺寸：填了宽 / 高按填的尺寸（锁定比例，取能放进去的最大尺寸）；都没填按导出图 0.1 mm/像素
-    let (width_mm, height_mm) = draw_target_size_mm(
+    // 成品尺寸：填了宽 / 高按填的尺寸（锁定比例，取能放进去的最大尺寸）；都没填按导出图 0.1 mm/像素。
+    // 2026-11-06 起按机器幅面（默认 100 mm，请求可传 work_area_*）而不是 400 mm 画布限制；光栅模式宽度另留两侧过扫描
+    let area = |key: &str| parse_float(object.get(key), key, MACHINE_WORK_AREA_MM).ok().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(MACHINE_WORK_AREA_MM);
+    let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
+    let usable_w = if mode == "outline" { area_w } else { area_w - 2.0 * IMAGE_OVERSCAN_MM };
+    let (width_mm, height_mm, draw_auto_fitted) = draw_target_size_mm(
         img_w,
         img_h,
         optional_positive_mm(object.get("width_mm"), "width_mm")?,
         optional_positive_mm(object.get("height_mm"), "height_mm")?,
+        (usable_w, area_h),
+        (area_w, area_h),
     )?;
     let path_preview_name = format!("{id}.path.png");
     let gcode_str = if mode == "outline" {
@@ -4384,8 +4482,8 @@ fn generate_draw_artifacts(
             width_mm: Some(width_mm),
             height_mm: Some(height_mm),
             lock_aspect_ratio: true,
-            work_area_width_mm: DRAW_WORK_AREA_MM,
-            work_area_height_mm: DRAW_WORK_AREA_MM,
+            work_area_width_mm: area_w,
+            work_area_height_mm: area_h,
             simplify_factor,
         })
         .map_err(|e| e.to_string())?;
@@ -4450,9 +4548,9 @@ fn generate_draw_artifacts(
             raster_h as usize,
             &laser_core::gcode::RasterWriterOptions {
                 pixel_size_mm: DRAW_PIXEL_MM,
-                overscan_mm: 1.0,
-                work_area_width_mm: DRAW_WORK_AREA_MM,
-                work_area_height_mm: DRAW_WORK_AREA_MM,
+                overscan_mm: IMAGE_OVERSCAN_MM,
+                work_area_width_mm: area_w,
+                work_area_height_mm: area_h,
                 power,
                 feed_rate,
                 laser_mode: "M4",
@@ -4487,6 +4585,12 @@ fn generate_draw_artifacts(
     res_map.insert("thickness_mm".into(), serde_json::json!(thickness));
     res_map.insert("width_mm".into(), serde_json::json!(width_mm));
     res_map.insert("height_mm".into(), serde_json::json!(height_mm));
+    res_map.insert("auto_fitted".into(), serde_json::json!(draw_auto_fitted));
+    if draw_auto_fitted {
+        res_map.insert("fit_note".into(), serde_json::json!(format!(
+            "画板按 0.1 mm/像素会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm"
+        )));
+    }
     res_map.insert("mode".into(), serde_json::Value::String(mode.to_string()));
     res_map.insert("time_estimate".into(), serde_json::json!({
         "estimated_seconds": estimate.estimated_seconds,
@@ -4501,7 +4605,40 @@ fn generate_draw_artifacts(
 
 /// 画板光栅每像素对应的物理尺寸与工作区上限（见 safety.md §4）。
 const DRAW_PIXEL_MM: f64 = 0.1;
-const DRAW_WORK_AREA_MM: f64 = 400.0;
+/// 图片任务默认机器幅面（翼宿 V1.0，`docs/laser/hardware-bom.md`）；请求可用 `work_area_width_mm` /
+/// `work_area_height_mm` 传入连接检查读到的实际行程。发送前另按固件行程复核。
+const MACHINE_WORK_AREA_MM: f64 = 100.0;
+/// 图片横向扫描每侧过扫描（mm），尺寸换算会为它留出余量
+const IMAGE_OVERSCAN_MM: f64 = 1.0;
+/// 文字放进木牌时四周默认留边（mm）
+const TEXT_BOARD_MARGIN_MM: f64 = 2.0;
+
+/// 发送前按固件报告的机器行程复核任务范围（2026-11-06）。
+/// 任务以开始时激光头所在位置为原点（生成的 G-code 以 `G92 X0 Y0` 开头），因此只比较刀路走过的
+/// 宽、高是否超过 X/Y 行程——超过时无论从哪里开始都会撞到行程尽头，直接拒绝、不连接后续发送。
+/// 固件没报告行程（`$130/$131` 与 `$CD` 都没有）或文件含机床坐标 / 回参考点移动、无法从文件得知
+/// 范围时跳过本项，交给固件软限位。
+fn check_job_fits_machine(gcode: &str, limits: &laser_device::MachineLimits) -> Result<(), String> {
+    if limits.x_travel_mm.is_none() && limits.y_travel_mm.is_none() {
+        return Ok(());
+    }
+    let Ok(Some(extents)) = laser_core::gcode::motion_extents(gcode) else {
+        return Ok(());
+    };
+    const TOLERANCE_MM: f64 = 0.01;
+    let over = |size: f64, travel: Option<f64>| travel.is_some_and(|t| size > t + TOLERANCE_MM);
+    if over(extents.width(), limits.x_travel_mm) || over(extents.height(), limits.y_travel_mm) {
+        let fmt = |travel: Option<f64>| travel.map_or("未知".to_owned(), |t| format!("{t:.0}"));
+        return Err(format!(
+            "任务范围 {:.1} × {:.1} mm 超出机器行程 {} × {} mm，已拒绝发送；请缩小尺寸后重新生成预览",
+            extents.width(),
+            extents.height(),
+            fmt(limits.x_travel_mm),
+            fmt(limits.y_travel_mm),
+        ));
+    }
+    Ok(())
+}
 
 /// 可选的正数尺寸：缺省、null、空串或 0 表示“自动”。
 fn optional_positive_mm(value: Option<&serde_json::Value>, field: &str) -> Result<Option<f64>, String> {
@@ -4518,9 +4655,19 @@ fn optional_positive_mm(value: Option<&serde_json::Value>, field: &str) -> Resul
 }
 
 /// 画板成品尺寸（毫米）：宽高都填时锁定比例放进该框内；只填一边按比例算另一边；
-/// 都没填按导出图每像素 0.1 mm。超出工作区直接拒绝，不悄悄缩小。
-fn draw_target_size_mm(img_w: u32, img_h: u32, width: Option<f64>, height: Option<f64>) -> Result<(f64, f64), String> {
+/// 都没填按导出图每像素 0.1 mm，超出可用范围时等比缩小并返回 `true`；填写的尺寸超出直接拒绝，不悄悄缩小。
+/// `usable` 为实际可放图案的范围（光栅模式宽度已扣除两侧过扫描），`machine` 为机器幅面（只用于提示）。
+fn draw_target_size_mm(
+    img_w: u32,
+    img_h: u32,
+    width: Option<f64>,
+    height: Option<f64>,
+    usable: (f64, f64),
+    machine: (f64, f64),
+) -> Result<(f64, f64, bool), String> {
     let (w, h) = (f64::from(img_w), f64::from(img_h));
+    let (usable_w, usable_h) = usable;
+    let mut auto_fitted = false;
     let (target_w, target_h) = match (width, height) {
         (Some(tw), Some(th)) => {
             let scale = (tw / w).min(th / h);
@@ -4528,17 +4675,27 @@ fn draw_target_size_mm(img_w: u32, img_h: u32, width: Option<f64>, height: Optio
         }
         (Some(tw), None) => (tw, tw * h / w),
         (None, Some(th)) => (th * w / h, th),
-        (None, None) => (w * DRAW_PIXEL_MM, h * DRAW_PIXEL_MM),
+        (None, None) => {
+            let (nw, nh) = (w * DRAW_PIXEL_MM, h * DRAW_PIXEL_MM);
+            if nw > usable_w + 1e-9 || nh > usable_h + 1e-9 {
+                auto_fitted = true;
+                let scale = (usable_w / nw).min(usable_h / nh);
+                (nw * scale, nh * scale)
+            } else {
+                (nw, nh)
+            }
+        }
     };
-    if target_w > DRAW_WORK_AREA_MM + 1e-9 || target_h > DRAW_WORK_AREA_MM + 1e-9 {
+    if target_w > usable_w + 1e-9 || target_h > usable_h + 1e-9 {
         return Err(format!(
-            "成品尺寸 {target_w:.1} × {target_h:.1} mm 超出工作区 {DRAW_WORK_AREA_MM:.0} × {DRAW_WORK_AREA_MM:.0} mm，请减小宽或高"
+            "成品尺寸 {target_w:.1} × {target_h:.1} mm 超出工作区（机器幅面 {:.0} × {:.0} mm，可放图案最大 {usable_w:.1} × {usable_h:.1} mm），请减小宽或高",
+            machine.0, machine.1
         ));
     }
     if target_w < DRAW_PIXEL_MM || target_h < DRAW_PIXEL_MM {
         return Err("成品尺寸太小，宽和高都至少 0.1 mm".into());
     }
-    Ok((target_w, target_h))
+    Ok((target_w, target_h, auto_fitted))
 }
 
 fn generate_image_or_gcode_artifacts(
@@ -4596,12 +4753,10 @@ fn generate_image_or_gcode_artifacts(
         hasher.update(&image_bytes);
         let _fingerprint = hex::encode(hasher.finalize());
 
-        let luma_img = image::load_from_memory(&image_bytes)
-            .map_err(|e| format!("解析图片格式失败: {e}"))?
-            .to_luma8();
-        let img_w = luma_img.width();
-        let img_h = luma_img.height();
-        if img_w == 0 || img_h == 0 {
+        let decoded = image::load_from_memory(&image_bytes).map_err(|e| format!("解析图片格式失败: {e}"))?;
+        // 透明背景按白色（不出光）处理，避免透明 PNG 整片出光
+        let luma_img = laser_core::image_job::flatten_on_white(&decoded);
+        if luma_img.width() == 0 || luma_img.height() == 0 {
             return Err("图片尺寸为 0".into());
         }
 
@@ -4628,30 +4783,57 @@ fn generate_image_or_gcode_artifacts(
         );
         let power = recommendation.as_ref().map(|r| r.params.laser_max_power).unwrap_or(400);
         let feed_rate = recommendation.as_ref().map(|r| r.params.feed_rate).unwrap_or(1500);
+        let material_pixel = recommendation
+            .as_ref()
+            .map(|r| r.params.pixel_size_mm)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.1);
         let params = feedback::generation_params(object, power as f64, feed_rate as f64)?;
         let power = params.power as i32;
         let feed_rate = params.feed as i32;
 
-        let mut bitmap = Vec::with_capacity(img_h as usize);
-        for y in 0..img_h {
-            let mut row = Vec::with_capacity(img_w as usize);
-            for x in 0..img_w {
-                row.push(if luma_img.get_pixel(x, y).0[0] < 128 { 0 } else { 255 });
+        // 成品尺寸、机器幅面、材料像素间距与灰度处理（laser_core::image_job）
+        let optional_number = |key: &str| -> Result<Option<f64>, String> {
+            match object.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
+                Some(value) => value
+                    .as_f64()
+                    .or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+                    .filter(|v| v.is_finite())
+                    .map(Some)
+                    .ok_or_else(|| format!("{key} 必须是数字")),
             }
-            bitmap.push(row);
-        }
+        };
+        let threshold = match optional_number("threshold")? {
+            None => None,
+            Some(v) if (0.0..=255.0).contains(&v) => Some(v.round() as u8),
+            Some(_) => return Err("threshold 必须在 0 ~ 255 之间".into()),
+        };
+        let raster_options = laser_core::image_job::ImageRasterOptions {
+            pixel_size_mm: optional_number("pixel_size_mm")?.unwrap_or(material_pixel),
+            width_mm: optional_number("width_mm")?,
+            height_mm: optional_number("height_mm")?,
+            work_area_width_mm: optional_number("work_area_width_mm")?.unwrap_or(MACHINE_WORK_AREA_MM),
+            work_area_height_mm: optional_number("work_area_height_mm")?.unwrap_or(MACHINE_WORK_AREA_MM),
+            scan_overscan_mm: IMAGE_OVERSCAN_MM,
+            mode: laser_core::image_job::ToneMode::parse(object.get("image_mode").and_then(|v| v.as_str()))?,
+            threshold,
+        };
+        let prepared = laser_core::image_job::prepare_raster(&luma_img, &raster_options)?;
+        let (img_w, img_h) = (prepared.grid_width, prepared.grid_height);
 
-        let plan = laser_core::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
+        let plan = laser_core::raster::raster_plan_with_direction(&prepared.bitmap, "horizontal", "scanline")
             .map_err(|e| e.to_string())?;
         let gcode_str = laser_core::gcode::write_raster(
             &plan,
             img_w as usize,
             img_h as usize,
             &laser_core::gcode::RasterWriterOptions {
-                pixel_size_mm: 0.1,
-                overscan_mm: 1.0,
-                work_area_width_mm: 400.0,
-                work_area_height_mm: 400.0,
+                pixel_size_mm: raster_options.pixel_size_mm,
+                overscan_mm: IMAGE_OVERSCAN_MM,
+                work_area_width_mm: raster_options.work_area_width_mm,
+                work_area_height_mm: raster_options.work_area_height_mm,
                 power,
                 feed_rate,
                 laser_mode: "M4",
@@ -4667,12 +4849,15 @@ fn generate_image_or_gcode_artifacts(
         let gcode_path = root.join(format!("{id}.gcode"));
         std::fs::write(&gcode_path, gcode_str.as_bytes()).map_err(|e| e.to_string())?;
 
+        // 预览图就是实际要雕刻的黑白网格（黑 = 出光），而不是原图；原图（透明已按白色合成）另存一份，
+        // 供“采用反馈建议重新生成”从原图重新处理，避免对已抖动的图再抖动一次
         let preview_path = root.join(format!("{id}.png"));
-        luma_img.save(&preview_path).map_err(|e| e.to_string())?;
+        prepared.preview().save(&preview_path).map_err(|e| e.to_string())?;
+        let source_name = format!("{id}-source.png");
+        luma_img.save(root.join(&source_name)).map_err(|e| e.to_string())?;
 
         let estimate = laser_core::gcode::estimate_time(&gcode_str, 3000.0);
-        let width_mm = img_w as f64 * 0.1;
-        let height_mm = img_h as f64 * 0.1;
+        let (width_mm, height_mm) = (prepared.width_mm, prepared.height_mm);
 
         let img_name = format!("{id}.png");
         let gcode_name = format!("{id}.gcode");
@@ -4687,6 +4872,25 @@ fn generate_image_or_gcode_artifacts(
         res.insert("thickness_mm".into(), serde_json::json!(thickness));
         res.insert("width_mm".into(), serde_json::json!(width_mm));
         res.insert("height_mm".into(), serde_json::json!(height_mm));
+        res.insert("source_image_file".into(), serde_json::Value::String(source_name));
+        res.insert("pixel_size_mm".into(), serde_json::json!(raster_options.pixel_size_mm));
+        res.insert("image_mode".into(), serde_json::json!(prepared.mode.as_str()));
+        if let Some(value) = prepared.threshold {
+            res.insert("threshold".into(), serde_json::json!(value));
+        }
+        res.insert("auto_fitted".into(), serde_json::json!(prepared.auto_fitted));
+        // 图片任务以开始时激光头位置为图片左下角（栅格写出器右移一个过扫描距离），走边框按激光头实际经过的范围
+        res.insert("origin".into(), serde_json::json!("lower_left"));
+        res.insert("origin_note".into(), serde_json::json!("开刻前把激光头移到图片左下角"));
+        res.insert("frame_mm".into(), serde_json::json!({
+            "min_x": 0.0, "max_x": width_mm + 2.0 * IMAGE_OVERSCAN_MM, "min_y": 0.0, "max_y": height_mm
+        }));
+        if prepared.auto_fitted {
+            res.insert("fit_note".into(), serde_json::json!(format!(
+                "原图按 {:.2} mm/像素会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm",
+                raster_options.pixel_size_mm
+            )));
+        }
         res.insert("time_estimate".into(), serde_json::json!({
             "estimated_seconds": estimate.estimated_seconds,
             "estimated_minutes": estimate.estimated_minutes,
@@ -5130,6 +5334,7 @@ fn handle_workflow_store_request(
                 .unwrap_or_else(|| serde_json::json!({}));
             let mut input = object.clone();
             input.remove("_artifacts");
+            let origin = input.remove("_origin").unwrap_or(serde_json::Value::Null);
             if let Err(error) =
                 validate_material_safety_in_payload(&serde_json::Value::Object(input.clone()))
             {
@@ -5166,6 +5371,7 @@ fn handle_workflow_store_request(
                 "input": input,
                 "artifacts": artifacts,
                 "confirmation_snapshot": confirmation_snapshot,
+                "origin": origin,
                 "next_actions": ["status", "cancel", "confirm_send"],
                 "created_at": unix_seconds(),
                 "updated_at": unix_seconds()
@@ -5584,6 +5790,7 @@ fn handle_workflow_request(
                 .unwrap_or_else(|| serde_json::json!({}));
             let mut input = object.clone();
             input.remove("_artifacts");
+            let origin = input.remove("_origin").unwrap_or(serde_json::Value::Null);
             if let Err(error) =
                 validate_material_safety_in_payload(&serde_json::Value::Object(input.clone()))
             {
@@ -5620,6 +5827,7 @@ fn handle_workflow_request(
                 "input": input,
                 "artifacts": artifacts,
                 "confirmation_snapshot": confirmation_snapshot,
+                "origin": origin,
                 "next_actions": ["status", "cancel", "confirm_send"],
                 "created_at": unix_seconds(),
                 "updated_at": unix_seconds()
@@ -7647,6 +7855,16 @@ mod tests {
         max
     }
 
+    #[test]
+    fn draw_natural_size_is_fitted_into_the_machine_and_explicit_size_is_not() {
+        // 1500 × 100 像素按 0.1 mm 是 150 × 10 mm，可放范围 98 × 100 → 等比缩到 98 × 6.53
+        let (w, h, fitted) = draw_target_size_mm(1500, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
+        assert!(fitted && (w - 98.0).abs() < 1e-9 && (h - 98.0 / 15.0).abs() < 1e-9, "{w} {h}");
+        let (w, _, fitted) = draw_target_size_mm(200, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
+        assert!(!fitted && (w - 20.0).abs() < 1e-9);
+        assert!(draw_target_size_mm(200, 100, Some(99.0), None, (98.0, 100.0), (100.0, 100.0)).is_err());
+    }
+
     /// 画板按填写的宽 / 高出成品（锁定比例）；不填按 0.1 mm/像素；超出工作区拒绝；轮廓模式真的描边（2026-10-14）。
     #[test]
     fn draw_preview_honors_target_size_and_outline_mode() {
@@ -7679,9 +7897,14 @@ mod tests {
         assert_eq!(boxed["result"]["artifacts"]["width_mm"], 30.0, "锁定比例放进框内: {boxed}");
         assert_eq!(boxed["result"]["artifacts"]["height_mm"], 15.0);
 
-        let too_big = preview(serde_json::json!({"width_mm": 500}));
+        // 2026-11-06 起按机器幅面（默认 100 mm，光栅宽度另留两侧 1 mm 过扫描）而不是 400 mm 画布
+        let too_big = preview(serde_json::json!({"width_mm": 120}));
         assert_eq!(too_big["success"], false);
         assert!(too_big.to_string().contains("超出工作区"), "{too_big}");
+        assert!(too_big.to_string().contains("100 × 100"), "{too_big}");
+        assert_eq!(preview(serde_json::json!({"width_mm": 99}))["success"], false, "光栅宽度须留出过扫描");
+        assert_eq!(preview(serde_json::json!({"width_mm": 99, "mode": "outline"}))["success"], true, "轮廓模式无过扫描");
+        assert_eq!(natural["result"]["artifacts"]["auto_fitted"], false);
 
         let outline = preview(serde_json::json!({"mode": "outline", "width_mm": 40}));
         assert_eq!(outline["success"], true, "{outline}");
@@ -7753,14 +7976,21 @@ mod tests {
     }
 
     fn fake_transport_factory(ok_lines: usize) -> TransportFactory {
+        fake_transport_factory_with_settings(ok_lines, &[])
+    }
+
+    /// 同 `fake_transport_factory`，`$$` 额外回报 `extra_settings`（如 `$130=100`）。
+    fn fake_transport_factory_with_settings(ok_lines: usize, extra_settings: &[&str]) -> TransportFactory {
         struct ResponsiveGrbl {
             responses: std::sync::Mutex<std::collections::VecDeque<String>>,
             remaining: std::sync::atomic::AtomicUsize,
+            extra_settings: Vec<String>,
         }
         impl laser_device::DeviceTransport for ResponsiveGrbl {
             fn write_line(&self, line: &str) -> Result<(), String> {
                 let mut responses = self.responses.lock().unwrap();
                 if line == "$$" {
+                    responses.extend(self.extra_settings.iter().cloned());
                     responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
                 } else if line == "$CD" || line.starts_with("$RI=") {
                     // 模拟 FluidNC：配置读取与自动上报设置都只回 ok，不占用 G-code 行的 ack 配额
@@ -7780,12 +8010,87 @@ mod tests {
                 Ok(self.responses.lock().unwrap().pop_front())
             }
         }
+        let extra: Vec<String> = extra_settings.iter().map(|line| (*line).to_owned()).collect();
         std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
             Ok(Box::new(ResponsiveGrbl {
                 responses: Default::default(),
                 remaining: std::sync::atomic::AtomicUsize::new(ok_lines),
+                extra_settings: extra.clone(),
             }) as Box<dyn laser_device::DeviceTransport>)
         })
+    }
+
+    #[test]
+    fn job_travel_check_compares_extents_with_firmware_travel() {
+        let limits = laser_device::MachineLimits { x_travel_mm: Some(100.0), y_travel_mm: Some(100.0), z_travel_mm: None };
+        assert!(check_job_fits_machine("G92 X0 Y0\nG1 X100 Y60 S300", &limits).is_ok());
+        let err = check_job_fits_machine("G92 X0 Y0\nG1 X200 Y60 S300", &limits).unwrap_err();
+        assert!(err.contains("200.0 × 60.0") && err.contains("100 × 100"), "{err}");
+        // 固件没报告行程、或文件无法计算范围时交给固件软限位
+        assert!(check_job_fits_machine("G1 X500", &laser_device::MachineLimits::default()).is_ok());
+        assert!(check_job_fits_machine("G28\nG1 X500", &limits).is_ok());
+        // 只知道 X 行程时仍检查 X
+        let x_only = laser_device::MachineLimits { x_travel_mm: Some(50.0), ..Default::default() };
+        assert!(check_job_fits_machine("G1 X60 Y500", &x_only).is_err());
+    }
+
+    /// 2026-11-06 严重缺陷修复：大图不再按 0.1 mm/像素生成超出幅面的任务；
+    /// 显式超大尺寸拒绝；超出固件行程的 G-code 在发送前被拒、不写入任何 G-code 行。
+    #[test]
+    fn oversized_image_is_fitted_and_oversized_gcode_is_refused_before_sending() {
+        let temp = tempfile::tempdir().unwrap();
+        let gen_dir = temp.path().join("generated");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        // 2000 × 500 像素的渐变照片：按 0.1 mm/像素是 200 × 50 mm
+        let photo = image::GrayImage::from_fn(2000, 500, |x, _| image::Luma([(x * 255 / 1999) as u8]));
+        photo.save(gen_dir.join("wide.png")).unwrap();
+        std::fs::write(gen_dir.join("wide.gcode"), "G21\nG90\nG92 X0 Y0\nM4 S0\nG1 X150 Y10 F1000 S200\nM5\n").unwrap();
+        let settings = laser_runtime::LaserSettings {
+            default_connection_mode: "network".into(),
+            engraving_mode: "raster".into(),
+            web_host: "127.0.0.1".into(),
+            web_port: 8766,
+            material_params_file: None,
+        };
+        let service = ApiService::new(settings, laser_contracts::builtin_material_library())
+            .with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()))
+            .with_generated_root(gen_dir.clone())
+            .with_preview_roots(vec![gen_dir.clone()])
+            .with_transport_factory(fake_transport_factory_with_settings(10_000, &["$130=100.000", "$131=100.000"]));
+
+        let fitted = post_json(&service, "/api/workflow", &serde_json::json!({
+            "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3
+        }));
+        assert_eq!(fitted["success"], true, "{fitted}");
+        let artifacts = &fitted["result"]["artifacts"];
+        assert_eq!(artifacts["auto_fitted"], true);
+        // 100 mm 幅面减两侧各 1 mm 过扫描 → 98 × 24.5 mm
+        assert_eq!(artifacts["width_mm"].as_f64().unwrap(), 98.0);
+        assert_eq!(artifacts["height_mm"].as_f64().unwrap(), 24.5);
+        assert_eq!(artifacts["image_mode"], "dither");
+        let gcode = std::fs::read_to_string(gen_dir.join(artifacts["gcode_file"].as_str().unwrap())).unwrap();
+        let extents = laser_core::gcode::motion_extents(&gcode).unwrap().unwrap();
+        assert!(extents.width() <= 100.0 + 1e-6, "生成的刀路必须在幅面内：{}", extents.width());
+
+        let sized = post_json(&service, "/api/workflow", &serde_json::json!({
+            "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3, "width_mm": 40
+        }));
+        assert_eq!(sized["result"]["artifacts"]["width_mm"].as_f64().unwrap().round(), 40.0, "{sized}");
+        let refused = post_json(&service, "/api/workflow", &serde_json::json!({
+            "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3, "width_mm": 150
+        }));
+        assert_eq!(refused["success"], false, "{refused}");
+
+        let preview = post_json(&service, "/api/workflow", &serde_json::json!({
+            "action": "preview", "source_type": "gcode", "gcode_file": "wide.gcode", "material": "椴木", "thickness_mm": 3
+        }));
+        assert_eq!(preview["success"], true, "{preview}");
+        let send = post_json(&service, "/api/workflow", &serde_json::json!({
+            "action": "confirm_send", "workflow_id": preview["result"]["workflow_id"], "confirmed": true,
+            "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23
+        }));
+        assert_eq!(send["success"], false, "{send}");
+        assert_eq!(send["detail"]["error_code"], "job_exceeds_travel", "{send}");
     }
 
     fn recording_transport_factory(
@@ -7993,8 +8298,9 @@ mod tests {
                 service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
             }
             let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-                "text": "MOSS-CANCEL", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 20
+                "text": "MOSS-CANCEL", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 8
             }));
+            assert_eq!(preview["success"], true, "文字须在 100 mm 幅面内：{preview}");
             let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
             let send = post_json(&service, "/api/workflow", &serde_json::json!({
                 "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
@@ -8717,6 +9023,69 @@ mod tests {
             parsed["result"]["materials"]["materials"]["椴木测试板"]["thicknesses"]["3.0"]["cut"]
                 .is_object()
         );
+    }
+
+    #[test]
+    fn text_larger_than_the_machine_is_refused_at_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ApiService::new(
+            laser_runtime::LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 8766,
+                material_params_file: None,
+            },
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf());
+        let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
+        let small = post_json(&service, "/api/text-task/generate", &serde_json::json!({
+            "text": "AB", "font_path": font, "font_size_mm": 10, "material": "椴木", "thickness_mm": 3
+        }));
+        assert_eq!(small["success"], true, "{small}");
+        let huge = post_json(&service, "/api/text-task/generate", &serde_json::json!({
+            "text": "ABABABAB", "font_path": font, "font_size_mm": 40, "material": "椴木", "thickness_mm": 3
+        }));
+        assert_eq!(huge["success"], false, "{huge}");
+        assert!(huge["result"].as_str().unwrap_or_default().contains("超出机器幅面"), "{huge}");
+    }
+
+    /// 2026-11-06：文字默认描边、激光头对准中心；给木牌尺寸自动适配字号；填充用材料库 raster 参数。
+    #[test]
+    fn text_board_fill_and_origin_options_reach_the_engine() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+            .with_generated_root(temp.path().to_path_buf());
+        let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
+        let base = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({"text": "ABAB", "font_path": font, "material": "椴木", "thickness_mm": 3});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            post_json(&service, "/api/text-task/generate", &body)
+        };
+        let default = base(serde_json::json!({}));
+        let artifacts = &default["result"]["artifacts"];
+        assert_eq!(artifacts["text_fill"], "outline", "{default}");
+        assert_eq!(artifacts["origin"], "center");
+        assert_eq!(artifacts["origin_note"], "开刻前把激光头移到要刻的位置中心");
+        let frame = &artifacts["frame_mm"];
+        assert!((frame["min_x"].as_f64().unwrap() + frame["max_x"].as_f64().unwrap()).abs() < 1e-6);
+
+        let board = base(serde_json::json!({"width_mm": 80, "height_mm": 30, "text_fill": "fill"}));
+        let artifacts = &board["result"]["artifacts"];
+        assert_eq!(artifacts["text_fill"], "fill", "{board}");
+        assert!(artifacts["width_mm"].as_f64().unwrap() <= 76.0 + 1e-6);
+        assert!(artifacts["font_size_mm"].as_f64().unwrap() > 10.0, "未指定字号时应自动放大到木牌");
+        assert_eq!(artifacts["origin_note"], "开刻前把激光头移到木牌中心");
+        assert_eq!(artifacts["actual_params"]["laser_max_power"].as_f64(), Some(420.0));
+
+        let fixed = base(serde_json::json!({"width_mm": 30, "font_size_mm": 20}));
+        assert_eq!(fixed["success"], false, "{fixed}");
+        assert!(fixed["result"].as_str().unwrap().contains("放不进"), "{fixed}");
+        let bad = base(serde_json::json!({"text_fill": "solid"}));
+        assert_eq!(bad["success"], false, "{bad}");
+        let corner = base(serde_json::json!({"origin": "lower_left"}));
+        assert_eq!(corner["result"]["artifacts"]["frame_mm"]["min_x"].as_f64().unwrap(), 0.0, "{corner}");
     }
 
     #[test]
@@ -10330,6 +10699,44 @@ Content-Length: 30
         preview["result"]["workflow_id"].as_str().unwrap().to_owned()
     }
 
+    /// 2026-11-06 统一 AI 预览：新预览记下发起方，客户端伪造的 `_origin` 被丢弃，
+    /// 原始入参里不残留该字段；图片任务另存原图供反馈重生成。
+    #[test]
+    fn previews_record_their_origin_and_ignore_client_supplied_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let gen_dir = temp.path().join("generated");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        image::GrayImage::from_fn(40, 20, |x, _| image::Luma([if x < 20 { 0 } else { 255 }])).save(gen_dir.join("logo.png")).unwrap();
+        for use_store in [true, false] {
+            let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
+                .with_generated_root(gen_dir.clone())
+                .with_preview_roots(vec![gen_dir.clone()]);
+            if use_store {
+                service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+            }
+            let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
+            let (_, ai) = post_with_ctx(&service, "/api/text-task/generate", &serde_json::json!({
+                "text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3, "_origin": "desktop"
+            }), laser_contracts::CallerContext::McpBridge);
+            assert_eq!(ai["result"]["origin"], "mcp_bridge", "{ai}");
+            assert!(ai["result"]["input"].get("_origin").is_none(), "{ai}");
+            let (_, voice) = post_with_ctx(&service, "/api/workflow", &serde_json::json!({
+                "action": "preview", "source_type": "image", "image_file": "logo.png", "material": "椴木", "thickness_mm": 3
+            }), laser_contracts::CallerContext::Gateway { session_id: "g".into() });
+            assert_eq!(voice["result"]["origin"], "gateway", "{voice}");
+            let source = voice["result"]["artifacts"]["source_image_file"].as_str().unwrap();
+            assert!(gen_dir.join(source).exists());
+            let (_, desk) = post_with_ctx(&service, "/api/text-task/generate", &serde_json::json!({
+                "text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3, "_origin": "voice"
+            }), laser_contracts::CallerContext::Desktop);
+            assert_eq!(desk["result"]["origin"], "desktop", "{desk}");
+            // 其他动作不改写已有记录的来源
+            let id = ai["result"]["workflow_id"].as_str().unwrap();
+            let status = post_json(&service, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": id, "_origin": "desktop"}));
+            assert_eq!(status["result"]["origin"], "mcp_bridge", "{status}");
+        }
+    }
+
     fn post_with_ctx(
         service: &ApiService,
         route: &str,
@@ -11119,6 +11526,20 @@ Content-Length: 30
         assert!(!lines.iter().any(|line| line.starts_with("M4")), "默认不能出光: {lines:?}");
         assert!(lines.iter().any(|line| line.starts_with("G1 X20")), "{lines:?}");
         assert_eq!(service.active_job_count(), 0, "完成后不再占用设备");
+
+        // 以激光头当前位置为原点（AI 预览窗“先走边框”）：先 G92 置零，范围可为负，最后回到起点
+        written.lock().unwrap().clear();
+        let relative = post_json(&service, "/api/device/framing", &serde_json::json!({
+            "connection_mode": "network", "network_host": "127.0.0.1", "relative_to_head": true,
+            "min_x": -15, "max_x": 15, "min_y": -5, "max_y": 5
+        }));
+        assert_eq!(relative["success"], true, "{relative}");
+        let lines = written.lock().unwrap().clone();
+        let g92 = lines.iter().position(|line| line.starts_with("G92 X0 Y0")).expect("必须先把当前位置设为原点");
+        let first_move = lines.iter().position(|line| line.starts_with("G0") || line.starts_with("G1")).unwrap();
+        assert!(g92 < first_move, "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("G0 X-15.000 Y-5.000")), "{lines:?}");
+        assert!(lines.iter().filter(|line| line.starts_with("G0") || line.starts_with("G1")).last().unwrap().starts_with("G0 X0 Y0"), "{lines:?}");
 
         written.lock().unwrap().clear();
         let weak = framing(&service, Some(1));

@@ -990,6 +990,9 @@ pub struct DeviceConnection<T: DeviceTransport> {
     /// 顺序信道没有未确认字节时 `Bf:` 报告的最大剩余 RX 字节，即设备 RX 缓冲的真实容量；
     /// `None` 表示尚未观测到。由预检 `?` 与完成等待阶段记录，字符计数窗口据此确定。
     pub rx_capacity_observed: Option<usize>,
+    /// 机器 X/Y 行程：握手 `$$` 的 `$130/$131`，FluidNC `$CD` 的 `max_travel_mm` 优先。
+    /// 发送前用来复核任务范围（2026-11-06）；都没有时为空，调用方跳过该项检查。
+    pub travel_limits: MachineLimits,
 }
 
 impl<T: DeviceTransport> DeviceConnection<T> {
@@ -1006,6 +1009,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             last_explanation: None,
             progress_sink: None,
             rx_capacity_observed: None,
+            travel_limits: MachineLimits::default(),
         }
     }
 
@@ -1079,6 +1083,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         self.max_spindle_speed = None;
         self.report_status_mask = None;
         self.rx_capacity_observed = None;
+        self.travel_limits = MachineLimits::default();
         self.transport.write_line("$$")?;
         let start = Instant::now();
         let mut laser_mode = None;
@@ -1137,6 +1142,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             return Err("固件设置响应不完整（缺少终止 ok），拒绝发送".into());
         }
         self.state = DeviceState::Ready;
+        self.travel_limits = parse_grbl_settings_limits(&settings);
         Ok(settings)
     }
 
@@ -1144,7 +1150,10 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// 保持 `None` 且不报错；返回是否读到了配置。
     pub fn load_features(&mut self, timeout: Duration) -> bool {
         match self.fetch_fluidnc_config(timeout) {
-            Ok((_, features)) => {
+            Ok((limits, features)) => {
+                if limits.x_travel_mm.is_some() || limits.y_travel_mm.is_some() {
+                    self.travel_limits = limits;
+                }
                 self.features = Some(features);
                 true
             }

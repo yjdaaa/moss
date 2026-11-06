@@ -41,6 +41,10 @@ export const voiceApi = {
   firmwareStatus: () => invokeVoice("voice_firmware_status"),
   firmwareImport: () => invokeVoice("voice_firmware_import"),
   firmwareManage: (input) => invokeVoice("voice_firmware_manage", { input }),
+  // n61 设备唤醒词（仅打包私密窗口）
+  wakewordStatus: () => invokeVoice("voice_wakeword_status"),
+  wakewordImportBase: () => invokeVoice("voice_wakeword_import_base"),
+  wakewordManage: (input) => invokeVoice("voice_wakeword_manage", { input }),
   mcpStatus: () => invokeVoice("voice_mcp_status"),
   mcpSave: (input) => invokeVoice("voice_mcp_save", { input }),
   mcpDelete: (name, revision, confirmed) => invokeVoice("voice_mcp_delete", { name, revision, confirmed }),

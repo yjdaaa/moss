@@ -664,10 +664,10 @@ test("[BTN-41] 雕刻工作台: 发送中点击「取消任务」真实触发 ! 
   const rec = await startRecordingGrbl({ ackDelayMs: 3 });
   try {
     const gen = await apiPost("/api/text-task/generate", {
-      text: "MOSS-CANCEL-MOSS-CANCEL",
+      text: "MOSS-CANCEL", // 约 80 mm 宽，须在 100 mm 幅面内
       material: "椴木",
       thickness_mm: 3,
-      font_size_mm: 30,
+      font_size_mm: 11,
       engraving_mode: "raster",
     });
     assert.equal(gen.status, 200);
@@ -714,10 +714,10 @@ test("[BTN-41] 雕刻工作台: 发送中点击「取消任务」真实触发 ! 
 test("[BTN-42] 雕刻工作台: 急停停机后记录断点，通过 /api/workflow (action: resume) 成功续雕剩余代码至终态", async () => {
   // 1. 生成一段长任务刀路
   const gen = await apiPost("/api/text-task/generate", {
-    text: "MOSS-RESUME-E2E-TEST",
+    text: "MOSS-RESUME", // 约 80 mm 宽，须在 100 mm 幅面内
     material: "椴木",
     thickness_mm: 3,
-    font_size_mm: 20,
+    font_size_mm: 11,
     engraving_mode: "raster",
   });
   assert.equal(gen.status, 200);

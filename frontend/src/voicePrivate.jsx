@@ -6,6 +6,7 @@ import VoiceHomeCard from "./components/VoiceHomeCard.jsx";
 import VoiceHomeApprovalCard from "./components/VoiceHomeApprovalCard.jsx";
 import VoiceSpeakerCard from "./components/VoiceSpeakerCard.jsx";
 import VoiceFirmwareCard from "./components/VoiceFirmwareCard.jsx";
+import VoiceWakeWordCard from "./components/VoiceWakeWordCard.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
 import { voiceApi } from "./voiceApi.js";
 import "./styles.css";
@@ -71,7 +72,7 @@ export function VoicePrivatePage() {
               </button>
             ))}
           </div>
-          <button type="button" className="btn btn-ghost voice-private-secondary" onClick={() => select("firmware")}>设备维护：固件升级…</button>
+          <button type="button" className="btn btn-ghost voice-private-secondary" onClick={() => select("firmware")}>设备维护：唤醒词与固件升级…</button>
         </>
       )}
       {error && <p role="alert">{error}</p>}
@@ -85,7 +86,7 @@ export function VoicePrivatePage() {
         <button type="button" className="btn btn-ghost" onClick={() => select("approvals")}>查看家居审批</button>
       </div>}
       {visited.has("approvals") && <div className="voice-private-panel" hidden={section !== "approvals"}><VoiceHomeApprovalCard /></div>}
-      {visited.has("firmware") && <div className="voice-private-panel" hidden={section !== "firmware"}><VoiceFirmwareCard /></div>}
+      {visited.has("firmware") && <div className="voice-private-panel" hidden={section !== "firmware"}><VoiceWakeWordCard /><VoiceFirmwareCard /></div>}
       <AppDialogHost />
     </main>
   );

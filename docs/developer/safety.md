@@ -37,7 +37,7 @@
 5. 有界握手（3 秒）：发 `$$` 并消费到终止 `ok`，要求 `$32=1`，读取 `$30`、`$10`；失败 `device_not_ready`。握手无响应时提示可能正在跑 SD 脱机作业。
 6. `$CD` 读取 FluidNC 配置；旧 GRBL 静默跳过。
 7. 自适应预检：`$30` 必须为有限正数，非 1000 时按 `$30/1000` 在发送流水线中换算 S 值，原文件与 SHA 门禁不变；不写 `$30` / `$32`。发 `?` 要求 Idle，拒绝 Run/Jog/Home/Hold/Door/Sleep/Check/Alarm、SD 运行标记及 `Pn:` 含 `E`/`F`/`D`；失败 `device_preflight_failed`。
-8. 设备预检后再读取物理 G-code，与确认快照的 SHA-256 重新比对；不一致返回 `send_gate_rejected`，不写入加工行。之后的流式发送和 SD 上传只使用这份已比对的内存内容。行校验剥注释、丢空行；超过 254 字节或含非 ASCII 拒绝整个文件（`gcode_line_invalid`）；空文件拒绝（`gcode_empty`）。
+8. 设备预检后再读取物理 G-code，与确认快照的 SHA-256 重新比对；不一致返回 `send_gate_rejected`，不写入加工行。**任务范围复核**（2026-11-06）：按这份内容计算激光头走过的 X/Y 范围（`laser_core::gcode::motion_extents`，跟踪 G90/G91、G20/G21、`G92` 改原点与 G2/G3 圆弧，快速移动也计入），宽或高超过握手 `$130/$131` 或 `$CD` `max_travel_mm` 报告的行程时返回 400 `job_exceeds_travel`，不写入加工行；固件未报告行程或文件含 `G53` / `G28` / `G30` / `G10` 等无法从文件得知终点的指令时跳过本项、交给固件软限位。任务以开始时激光头位置为原点，因此只比较宽高、不判断起点位置。`/api/device/framing` 同样复核。之后的流式发送和 SD 上传只使用这份已比对的内存内容。行校验剥注释、丢空行；超过 254 字节或含非 ASCII 拒绝整个文件（`gcode_line_invalid`）；空文件拒绝（`gcode_empty`）。
 9. 流式发送后保持作业占用，`G4 P0` 同步 ACK 与后续 Idle 都通过才标记 `completed`。断线、复位横幅（`Grbl `、`[MSG:INFO: Restarting]`、`[VER:`）、报警或无法确认状态都是"执行结果未知"，不自动重发。
 10. `cancel` 只停止后续发送并走取消序列；`0x18` 走实时通道，不排队；写入成功不证明物理停机。`0x18` 不替代硬件急停。
 
@@ -57,9 +57,9 @@
 改相关代码时先核对这些现状，不要按文档或提示词想当然：
 
 - `laser-api` 的文字、图片、G-code workflow 预览，以及 workflow / 标定矩阵发送和断点恢复，都会调用 `laser_core::safety::evaluate_material`。PVC 与明确危险材料直接返回 `material_safety_blocked`；仅写“塑料”等成分不明描述时要求澄清。小智提示词仍负责对话层确认与实物复核，后端也会独立拒绝，不依赖提示词是否遵守。
-- 后端生成画板光栅时的工作区上限为 400×400 mm，不是翼宿的 100×100；行程限制以握手读到的 `machine_limits` 透传给前端约束画板。
+- 画板、图片与文字预览都按机器幅面（默认 100 × 100 mm，请求可覆盖）限制尺寸（2026-11-06 起画板不再使用 400 mm 画布）；发送前另按固件报告的行程复核刀路范围（`job_exceeds_travel`）。生成的文字任务默认以激光头所在位置为木牌（图案）中心（`G92 X<半宽> Y<半高>`），图片任务以激光头位置为图片左下角。
 - 经审批执行的发送在开始前把审批结果记为“发送中”（`phase=running`），发送线程结束时写回完成 / 失败 / 取消；进程在发送中崩溃后，启动恢复把这类审批记为失败、`error_code=result_unknown`，workflow 同时被记为 failed，任何一方都不会自动重发（A-33）。
-- 内置语音（NV4）以 `CallerContext::Voice` 调用工具。运动与出光（R3）**跟随 `MOSS_FUSION_STRICT`**（2026-10-07 用户决定）：开启时只生成审批（来源 `voice`），关闭时与官方接入点相同，模型带 `confirmed=true` 即执行——此时唯一的确认是系统提示要求模型先复述参数、等用户口头确认，没有桌面批准。R4 与未分级工具（命令执行、打开应用、快捷键、打开网站）**不论开关都拒绝**（`HostBackend::always_deny_r4`），返回 `tool_not_allowed` 并记审计 `voice:<设备>`；工具清单与严格模式下的接入点相同（`laser_host::voice_tools_list`）。停止类动作照常立即执行。
+- 内置语音（NV4）以 `CallerContext::Voice` 调用工具。运动与出光（R3）**跟随 `MOSS_FUSION_STRICT`**（2026-10-07 用户决定）：开启时只生成审批（来源 `voice`），关闭时与官方接入点相同，模型带 `confirmed=true` 即执行——此时唯一的确认是系统提示要求模型先复述参数、等用户口头确认，没有桌面批准。2026-11-06 起（技术书 r18）AI（语音、小智接入点、网关）生成的每个预览都会在桌面弹出预览窗（`AiPreviewCenter`），用户可在窗内勾选现场确认后“同意开刻”或取消；严格模式开启时只能在界面同意，关闭时口头确认后 AI 仍可 `confirm_send`。文字生成工具的 `confirmed + send_after_generate` 不再顺带发送，只生成预览。R4 与未分级工具（命令执行、打开应用、快捷键、打开网站）**不论开关都拒绝**（`HostBackend::always_deny_r4`），返回 `tool_not_allowed` 并记审计 `voice:<设备>`；工具清单与严格模式下的接入点相同（`laser_host::voice_tools_list`）。停止类动作照常立即执行。
 - 工具开关（NV8，`mcp_disabled_tools`）只能减少可用工具：关闭的工具在接入点与内置语音的清单和调用两处都拒绝（`tool_disabled`，不触达后端）。`laser_safe_action_tool`（停止、急停）列在 `ALWAYS_ENABLED_TOOLS`，后端与语音中心都不允许关闭；新增停止类工具时须同时加入该列表。
 - 小智接入点的工具分级在 `laser_contracts::tool_risk`（R0 只读、R1 生成、R2 降低风险、R3 运动或出光、R4 永不开放）。严格模式下接入点对 R4 与未分级工具返回 `tool_not_allowed`，R3 交给执行层生成审批；新增 MCP 工具时必须同时补分级，否则 `laser-mcp` 测试失败。
 - 严格模式下桌面端通过 `get_desktop_session` 携带 `X-Moss-Desktop-Session` 放行；不带桌面会话头的普通本机回环请求返回 403 `strict_mode_blocked`。

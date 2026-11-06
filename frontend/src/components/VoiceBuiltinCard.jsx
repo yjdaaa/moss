@@ -46,13 +46,17 @@ import {
   canSaveSection,
   chatOnlyAudioGatewayError,
   chatOnlyGatewayName,
+  canonicalLocalJevModel,
   experienceSettingsError,
   filterModelOptions,
   finalUrl,
   findPeerCloudSource,
   formDirty,
   formatBytes,
+  isLocalJevModel,
   isLocalLayaJevModel,
+  isLocalOneJevModel,
+  isSpecificLocalJevInstalled,
   isSectionBlank,
   jevFingerprint,
   jevModelError,
@@ -1495,11 +1499,9 @@ function BuiltinJevGroup({ builtin }) {
   const sourceView = builtinSectionSourceView("jev", status);
   const localOn = sourceView.localOn;
   const rawJevModel = status?.local?.settings?.jev_model || status?.jev?.model || DEFAULT_JEV_MODEL;
-  const isCurrentLocal = isLocalLayaJevModel(rawJevModel);
-  const localInstalled = Boolean(
-    status?.jev?.local_installed ||
-      (Array.isArray(status?.local?.models) && status.local.models.some((m) => m && m.id === "laya_multilingual" && m.installed)),
-  );
+  const activeLocalId = canonicalLocalJevModel(rawJevModel);
+  const isCurrentLocal = Boolean(activeLocalId);
+  const localInstalled = activeLocalId ? isSpecificLocalJevInstalled(status, activeLocalId) : false;
   const keyReady = Boolean(
     status?.jev?.key_set || status?.jev?.openrouter_llm_key_set || (!isCurrentLocal && status?.local?.jev_key_configured)
   );
@@ -1628,7 +1630,7 @@ function BuiltinJevGroup({ builtin }) {
     <VoiceGroup id="builtin-model-jev" title="OpenRouter · Jev 前置粗筛模型（共享反馈密钥）" summary={builtinJevSummary(status)} dirty={dirty} tab="models">
       {localOn && (
         <p className="voice-muted">
-          当前已在上方下拉框选用本地 Jev 决策（{sourceView.selectedLocalModel?.label || "Laya 多语言决策"}）；这里的 OpenRouter 云端配置与密钥作为备用保留，随时可在上方下拉切回。
+          当前已在上方下拉框选用本地 Jev 决策（{sourceView.selectedLocalModel?.label || activeLocalId}）；这里的 OpenRouter 云端配置与密钥作为备用保留，随时可在上方下拉切回。
         </p>
       )}
       <p className="voice-muted">
@@ -1806,7 +1808,7 @@ export function BuiltinModelGroups({ builtin }) {
           focusConfigGroup("local-models", "voice-local-group-jev");
           setMixNote({
             ok: false,
-            text: "本地 Laya 决策模型尚未下载：已为你展开下方“本地模型（断网可用）”，点击“下载”时将自动检测运行环境并开始下载。",
+            text: `本地决策模型“${pickedOption.modelLabel || pickedOption.id}”尚未下载：已为你展开下方“本地模型（断网可用）”，点击“下载”完成后即可在此直接下拉切换。`,
           });
         } else {
           focusConfigGroup("builtin-model-jev", "voice-group-builtin-model-jev");
@@ -1825,13 +1827,20 @@ export function BuiltinModelGroups({ builtin }) {
       try {
         const next = await voiceApi.localSave(payload);
         setStatus(next);
+        const accelLabel = isLocalOneJevModel(payload.jev_model)
+          ? next?.local?.onejev_env?.accelerator_label || "本机硬件加速"
+          : next?.local?.laya_env?.accelerator === "mps"
+            ? "Apple Metal MPS"
+            : next?.local?.laya_env?.cuda_found
+              ? "CUDA 显卡加速"
+              : "本机离线推理";
         setMixNote({
           ok: true,
           text:
             nextValue === "off"
               ? `已关闭 Jev 语音筛选（密钥与模型配置已保留） · ${restartEffect(next)}`
-              : isLocalLayaJevModel(payload.jev_model)
-                ? `已切换为本地 Laya 多语言决策（${payload.jev_model} · RTX 加速免密钥） · ${restartEffect(next)}`
+              : isLocalJevModel(payload.jev_model)
+                ? `已切换为本地决策（${pickedOption?.modelLabel || payload.jev_model} · ${accelLabel} · 免密钥） · ${restartEffect(next)}`
                 : `已切换为 Jev 决策（${payload.jev_model}） · ${restartEffect(next)}`,
         });
       } catch (error) {
@@ -2115,15 +2124,20 @@ export function LocalModelsGroup({ builtin }) {
         {models.filter((model) => model.kind === "jev").length > 0 && (
           <div className="voice-local-group" id="voice-local-group-jev">
             <div className="voice-field-head">
-              <b>Jev 前置粗筛模型包（本地 System 1 决策）</b>
+              <b>Jev 前置粗筛模型包（本地 System 1 决策：OneJev 1.6 / Laya）</b>
               <span className="voice-muted">
-                {form.jev_filter_enabled && isLocalLayaJevModel(form.jev_model)
-                  ? "当前在顶部已选用：本地 Laya 多语言决策"
+                {form.jev_filter_enabled && isLocalJevModel(form.jev_model)
+                  ? `当前在顶部已选用：${models.find((m) => m.id === canonicalLocalJevModel(form.jev_model))?.label || form.jev_model}`
                   : form.jev_filter_enabled
                     ? `当前在顶部使用：云端 Jev（${form.jev_model}）`
-                    : "当前在顶部未启用（可在顶部第 3 栏下拉直接切换为本地 Laya）"}
+                    : "当前在顶部未启用（可在顶部第 3 栏下拉或下方已下载行直接点“选用”）"}
               </span>
             </div>
+            {local.onejev_env?.summary && (
+              <div className="voice-hint" id="voice-local-onejev-env-hint">
+                OneJev 1.6 本机硬件加速：{local.onejev_env.summary}
+              </div>
+            )}
             {layaEnvHint && (
               <div
                 className={`voice-hint ${layaEnvHint.ready ? "voice-hint--ok" : "voice-hint--warn"}`}
@@ -2147,8 +2161,31 @@ export function LocalModelsGroup({ builtin }) {
                     .filter((model) => model.kind === "jev")
                     .map((model) => {
                       const view = localModelView(model);
-                      const chosen = Boolean(form.jev_filter_enabled && isLocalLayaJevModel(form.jev_model) && model.id === "laya_multilingual");
-                      const handleDownloadLaya = async () => {
+                      const chosen = Boolean(
+                        form.jev_filter_enabled && canonicalLocalJevModel(form.jev_model) === model.id,
+                      );
+                      const isOneJevRow = model.id !== "laya_multilingual";
+                      const handleUseLocalJev = async () => {
+                        builtin.setBusy(`local-use-${model.id}`);
+                        try {
+                          const next = await voiceApi.localSave({
+                            jev_filter_enabled: true,
+                            jev_model: model.id,
+                          });
+                          const nextForm = localSettingsForm(next.local?.settings);
+                          builtin.setStatus(next);
+                          setDraft(nextForm);
+                          setResult({
+                            ok: true,
+                            text: `已选用本地决策模型“${model.label}” · ${restartEffect(next)}`,
+                          });
+                        } catch (err) {
+                          setResult({ ok: false, text: `选用失败：${voiceErrorText(err)}` });
+                        } finally {
+                          builtin.setBusy("");
+                        }
+                      };
+                      const handleDownloadJev = async () => {
                         builtin.setBusy("下载模型");
                         try {
                           const next = await voiceApi.localDownload(model.id);
@@ -2184,7 +2221,11 @@ export function LocalModelsGroup({ builtin }) {
                             <div className="voice-model-name">
                               <b>{model.label}</b>
                               {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
-                              <span className="ob-pill ob-pill--info voice-tag">免密钥 · 随安装目录存储</span>
+                              <span className="ob-pill ob-pill--info voice-tag">
+                                {isOneJevRow
+                                  ? `免密钥 · 免 Python · ${local.onejev_env?.accelerator_label || "GPU/CPU 自动加速"}`
+                                  : `免密钥 · Python laya[serve]${local.laya_env?.accelerator === "mps" ? " · Apple Metal MPS" : local.laya_env?.cuda_found ? " · CUDA 显卡加速" : ""}`}
+                              </span>
                             </div>
                             <div className="ob-sub">{model.note}</div>
                           </td>
@@ -2200,12 +2241,23 @@ export function LocalModelsGroup({ builtin }) {
                           </td>
                           <td>
                             <span className="voice-actions">
+                              {Boolean(model.installed) && !chosen && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={Boolean(busy)}
+                                  onClick={handleUseLocalJev}
+                                  id={`voice-local-use-${model.id}`}
+                                >
+                                  选用
+                                </button>
+                              )}
                               {view.canDownload && (
                                 <button
                                   type="button"
                                   className="btn btn-ghost"
                                   disabled={Boolean(busy)}
-                                  onClick={handleDownloadLaya}
+                                  onClick={handleDownloadJev}
                                   id={`voice-local-download-${model.id}`}
                                 >
                                   <Download size={13} /> 下载
@@ -2344,14 +2396,13 @@ export function ExperienceGroup({ builtin }) {
   const { baseline, draft: form, update, dirty, error, result } = group;
   const busy = builtin.busy;
   const selectedJevModel = form.jev_model || baseline.jev_model || DEFAULT_JEV_MODEL;
-  const isLocalJev = isLocalLayaJevModel(selectedJevModel);
-  const localLayaInstalled = Boolean(
-    builtin.status?.jev?.local_installed ||
-      (Array.isArray(builtin.status?.local?.models) &&
-        builtin.status.local.models.find((m) => m && m.id === "laya_multilingual")?.installed)
-  );
+  const activeLocalJevId = canonicalLocalJevModel(selectedJevModel);
+  const isLocalJev = Boolean(activeLocalJevId);
+  const localJevInstalled = activeLocalJevId
+    ? isSpecificLocalJevInstalled(builtin.status, activeLocalJevId)
+    : false;
   const jevKeyConfigured = isLocalJev
-    ? localLayaInstalled
+    ? localJevInstalled
     : Boolean(builtin.status?.jev?.key_set || builtin.status?.jev?.openrouter_llm_key_set || builtin.status?.local?.jev_key_configured);
   const jevActive = Boolean(baseline.jev_filter_enabled && (baseline.jev_unfinished_hold || (baseline.read_only_shortcuts && baseline.jev_fast_route) || baseline.jev_tool_prune || baseline.jev_memory_filter));
   const styleLabel = personaOptions(baseline.custom_personas).find((opt) => opt.id === (baseline.persona_style || "workshop"))?.label?.replace(/（.*）$/, "") || "简明工坊助手";
@@ -2455,8 +2506,8 @@ export function ExperienceGroup({ builtin }) {
         </label>
         <label className="voice-check voice-wide">
           <input type="checkbox" checked={form.jev_filter_enabled} onChange={(e) => update("jev_filter_enabled", e.target.checked)} id="voice-jev-filter-enabled" />
-          <span title={`使用 ${isLocalJev ? "本地 Laya (laya_multilingual)" : `OpenRouter Decisions（${selectedJevModel}）`} 在单次请求中并发执行断句、快答分流与上下文/工具剪枝；只做信息筛选，绝不授权任何机器动作。`}>
-            Jev 智能信息筛选与提速（默认关；{isLocalJev ? `当前选用本地 ${selectedJevModel}` : `当前选用 ${selectedJevModel}`}，只做信息筛选不授权动作）
+          <span title={`使用 ${isLocalJev ? `本地决策模型 (${activeLocalJevId})` : `OpenRouter Decisions（${selectedJevModel}）`} 在单次请求中并发执行断句、快答分流与上下文/工具剪枝；只做信息筛选，绝不授权任何机器动作。`}>
+            Jev 智能信息筛选与提速（默认关；{isLocalJev ? `当前选用本地 ${activeLocalJevId}` : `当前选用 ${selectedJevModel}`}，只做信息筛选不授权动作）
           </span>
         </label>
         {form.jev_filter_enabled && (
@@ -2464,8 +2515,8 @@ export function ExperienceGroup({ builtin }) {
             <div className={`voice-hint ${jevKeyConfigured ? "" : "voice-hint--bad"}`}>
               {isLocalJev
                 ? jevKeyConfigured
-                  ? "已就绪本地 Laya 多语言决策模型（免云端密钥，识别文字不出本机）；超时或异常时自动无感回退常规链路。"
-                  : "本地 Laya 决策模型尚未下载：请前往“本地模型（断网可用）”下载 laya_multilingual，未就绪时自动回退常规对话链路。"
+                  ? `已就绪本地决策模型（${activeLocalJevId} · 免云端密钥，识别文字不出本机）；超时或异常时自动无感回退常规链路。`
+                  : `本地决策模型（${activeLocalJevId}）尚未下载：请前往“本地模型（断网可用）”下载，未就绪时自动回退常规对话链路。`
                 : jevKeyConfigured
                   ? `已就绪 OpenRouter API Key（当前语音粗筛模型 ${selectedJevModel}）；单次请求并发筛选，超时或限流时自动无感回退常规链路。`
                   : `尚未配置 OpenRouter API Key：请前往“模型与服务 → OpenRouter · Jev 前置粗筛模型”保存密钥；未配置时自动回退常规对话链路。`}
@@ -2947,9 +2998,9 @@ export function PrivateSettingsEntry({ status }) {
 export function PrivateFirmwareEntry() {
   return (
     <div className="voice-private-maintenance">
-      <span>固件升级仅在本机逐台操作。</span>
+      <span>设备唤醒词与固件升级仅在本机逐台操作。</span>
       <button type="button" className="btn btn-ghost" id="voice-private-settings-open"
-        onClick={() => openPrivateTask("firmware")}>管理固件…</button>
+        onClick={() => openPrivateTask("firmware")}>唤醒词与固件…</button>
     </div>
   );
 }

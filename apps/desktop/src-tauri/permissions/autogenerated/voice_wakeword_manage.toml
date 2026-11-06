@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-wakeword-manage"
+description = "Enables the voice_wakeword_manage command without any pre-configured scope."
+commands.allow = ["voice_wakeword_manage"]
+
+[[permission]]
+identifier = "deny-voice-wakeword-manage"
+description = "Denies the voice_wakeword_manage command without any pre-configured scope."
+commands.deny = ["voice_wakeword_manage"]

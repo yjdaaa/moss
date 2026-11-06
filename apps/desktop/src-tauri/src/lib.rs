@@ -14,6 +14,7 @@ mod voice_mcp;
 #[derive(Clone, Default)]
 pub struct ShutdownState {
     pub requested: Arc<AtomicBool>,
+    pub services_stopped: Arc<AtomicBool>,
 }
 
 struct BackendOrigin(Result<String, String>);
@@ -154,11 +155,14 @@ async fn exit_application(app: tauri::AppHandle, stop_server: Option<bool>) -> R
     Ok(())
 }
 
-/// 退出的唯一收尾顺序：先急停，再停止（或放开）语音服务端、内置语音服务与第三方 MCP 子进程，最后退出。
-/// 关闭窗口退出与托盘退出都走这里（2026-10-14 前托盘在没有自有服务端时直接退出，漏了后两项）。
-fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
+/// 幂等停止桌面端托管子进程与内置语音服务（`shutdown_and_exit` 与 macOS `Cmd+Q` / Dock `RunEvent::Exit` 共用，仅执行一次）。
+fn shutdown_desktop_services(handle: &tauri::AppHandle, stop_server: bool) {
     use tauri::Manager;
-    handle.state::<ShutdownState>().request();
+    let state = handle.state::<ShutdownState>();
+    state.request();
+    if state.services_stopped.swap(true, Ordering::SeqCst) {
+        return;
+    }
     #[cfg(desktop)]
     {
         voice::shutdown(handle, stop_server);
@@ -167,6 +171,12 @@ fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
     }
     #[cfg(mobile)]
     let _ = stop_server;
+}
+
+/// 退出的唯一收尾顺序：先急停，再停止（或放开）语音服务端、内置语音服务与第三方 MCP 子进程，最后退出。
+/// 关闭窗口退出与托盘退出都走这里（2026-10-14 前托盘在没有自有服务端时直接退出，漏了后两项）。
+fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
+    shutdown_desktop_services(handle, stop_server);
     handle.exit(0);
 }
 
@@ -354,6 +364,9 @@ pub fn run() {
             voice_builtin::voice_firmware_status,
             voice_builtin::voice_firmware_import,
             voice_builtin::voice_firmware_manage,
+            voice_builtin::voice_wakeword_status,
+            voice_builtin::voice_wakeword_import_base,
+            voice_builtin::voice_wakeword_manage,
             voice_builtin::voice_home_discover,
             voice_builtin::voice_agent_status,
             voice_builtin::voice_agent_save,
@@ -540,10 +553,9 @@ pub fn run() {
                     let _ = window.set_focus();
                 }
             }
-            // 应用级退出（含 macOS Cmd+Q / Dock 退出）：幂等触发急停 0x18 与任务状态收尾
+            // 应用级退出（含 macOS Cmd+Q / Dock 退出）：幂等触发急停 0x18 并清理语音/本地推理子进程
             tauri::RunEvent::Exit => {
-                use tauri::Manager;
-                app_handle.state::<ShutdownState>().request();
+                shutdown_desktop_services(app_handle, true);
             }
             _ => {
                 let _ = app_handle;
@@ -656,6 +668,7 @@ mod tests {
                 "allow-voice-speaker-manage",
                 "allow-voice-firmware-status",
                 "allow-voice-firmware-import", "allow-voice-firmware-manage",
+                "allow-voice-wakeword-status", "allow-voice-wakeword-import-base", "allow-voice-wakeword-manage",
             ][..]),
             ("plugins", &plugins, &[
                 "allow-voice-plugins-status", "allow-voice-plugins-save",
@@ -686,6 +699,7 @@ mod tests {
         assert_main_window_loopback_capability(&main_capability);
         for permission in [
             "allow-voice-firmware-status", "allow-voice-firmware-import", "allow-voice-firmware-manage",
+            "allow-voice-wakeword-status", "allow-voice-wakeword-import-base", "allow-voice-wakeword-manage",
         ] {
             assert!(
                 !main_capability["permissions"].as_array().unwrap().iter().any(|entry| entry == permission),
@@ -693,7 +707,10 @@ mod tests {
             );
         }
         let builtin = include_str!("voice_builtin.rs");
-        for command in ["pub async fn voice_firmware_status", "pub async fn voice_firmware_import", "pub async fn voice_firmware_manage"] {
+        for command in [
+            "pub async fn voice_firmware_status", "pub async fn voice_firmware_import", "pub async fn voice_firmware_manage",
+            "pub async fn voice_wakeword_status", "pub async fn voice_wakeword_import_base", "pub async fn voice_wakeword_manage",
+        ] {
             let body = &builtin[builtin.find(command).unwrap()..];
             let body = &body[..body.find("\n}\n").unwrap()];
             assert!(body.contains("require_voice_private_asset(&window)?"), "{command} 仍只认打包私密页");

@@ -6,3 +6,4 @@
 *.icns binary
 *.bmp binary
 *.woff2 binary
+crates/moss-voice-server/assets/esp-sr/** binary

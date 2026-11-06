@@ -155,8 +155,9 @@ pub(super) fn call_jev_with_model(
     model: &str,
     state: &Value,
 ) -> Result<Value, String> {
+    let timeout_secs = if endpoint.starts_with("http://127.0.0.1:") { 12 } else { 5 };
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "无法创建网络客户端")?;
@@ -179,6 +180,36 @@ pub(super) fn call_jev_with_model(
     }
     let value = serde_json::from_slice(&bytes).map_err(|_| "OpenRouter 返回无效 JSON")?;
     parse_answer(&value)
+}
+
+fn local_jev_upstream_model(raw: &str) -> Option<&'static str> {
+    let m = raw.trim();
+    if m.eq_ignore_ascii_case("laya_multilingual")
+        || m.eq_ignore_ascii_case("laya/multilingual")
+        || m.eq_ignore_ascii_case("convaiinnovations/laya-multilingual")
+        || m.eq_ignore_ascii_case("local/laya-multilingual")
+    {
+        return Some("multilingual");
+    }
+    if m.eq_ignore_ascii_case("onejev_1_6_0_8b")
+        || m.eq_ignore_ascii_case("OmniJev/OneJev1.6-0.8B")
+        || m.eq_ignore_ascii_case("onejev1.6-0.8b")
+        || m.eq_ignore_ascii_case("onejev-1.6-0.8b")
+        || m.eq_ignore_ascii_case("local/onejev-1.6-0.8b")
+        || m.eq_ignore_ascii_case("onejev_1_6_4b")
+        || m.eq_ignore_ascii_case("OmniJev/OneJev1.6-4B")
+        || m.eq_ignore_ascii_case("onejev1.6-4b")
+        || m.eq_ignore_ascii_case("onejev-1.6-4b")
+        || m.eq_ignore_ascii_case("local/onejev-1.6-4b")
+        || m.eq_ignore_ascii_case("onejev_1_6_9b")
+        || m.eq_ignore_ascii_case("OmniJev/OneJev1.6-9B")
+        || m.eq_ignore_ascii_case("onejev1.6-9b")
+        || m.eq_ignore_ascii_case("onejev-1.6-9b")
+        || m.eq_ignore_ascii_case("local/onejev-1.6-9b")
+    {
+        return Some("jev-latest");
+    }
+    None
 }
 
 fn local_class(text: &str) -> &'static str {
@@ -332,7 +363,7 @@ impl ApiService {
         Ok(())
     }
 
-    pub(super) fn handle_feedback_route(&self, route: &str, path: &str, body: &[u8]) -> Vec<u8> {
+    pub(super) fn handle_feedback_route(&self, route: &str, path: &str, body: &[u8], origin: &str) -> Vec<u8> {
         let result = (|| -> Result<Value, (u16, String)> {
             let object = if route == "/api/feedback/history" {
                 let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
@@ -389,7 +420,7 @@ impl ApiService {
                     return Err((409, "任务状态已变化，请重新读取任务".into()));
                 }
                 return self
-                    .accept_feedback(id, &fresh, &object)
+                    .accept_feedback(id, &fresh, &object, origin)
                     .map_err(|e| (400, e));
             }
             let text = object
@@ -458,18 +489,13 @@ impl ApiService {
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            let local_laya = jev_model.is_some_and(|m| {
-                matches!(
-                    m,
-                    "laya_multilingual" | "convaiinnovations/laya-multilingual" | "local/laya-multilingual"
-                )
-            });
+            let local_upstream = jev_model.and_then(local_jev_upstream_model);
             let decision = if enabled {
-                if local_laya {
+                if let Some(upstream_model) = local_upstream {
                     call_jev_with_model(
                         "http://127.0.0.1:18090/v1/systemone",
                         "moss-local-laya",
-                        "multilingual",
+                        upstream_model,
                         &state,
                     )
                 } else {
@@ -520,6 +546,7 @@ impl ApiService {
         id: &str,
         workflow: &Value,
         object: &Map<String, Value>,
+        origin: &str,
     ) -> Result<Value, String> {
         if object.get("confirmed").and_then(Value::as_bool) != Some(true) {
             return Err("采用建议并生成新预览需要 confirmed=true".into());
@@ -548,8 +575,10 @@ impl ApiService {
         let artifacts = match workflow["source_type"].as_str() {
             Some("text") => generate_text_artifacts(&input, self.generated_root.as_deref(), &effective_library)?,
             Some("draw" | "image") => {
-                let file = workflow["artifacts"]["image_file"]
+                // 图片任务的预览是抖动后的黑白网格，优先用另存的原图重新处理
+                let file = workflow["artifacts"]["source_image_file"]
                     .as_str()
+                    .or_else(|| workflow["artifacts"]["image_file"].as_str())
                     .ok_or("任务素材缺失")?;
                 let root = self.generated_root.as_ref().ok_or("生成目录未配置")?;
                 let file = resolve_preview_file(std::path::Path::new(file), &[root.clone()])?;
@@ -587,7 +616,7 @@ impl ApiService {
             "confirmation_snapshot": {"gcode_file": name, "gcode_sha256": hash,
                 "material": artifacts.get("material"), "thickness_mm": artifacts.get("thickness_mm"),
                 "params": params.json()},
-            "regenerated_from": id, "feedback_id": feedback_id,
+            "regenerated_from": id, "feedback_id": feedback_id, "origin": origin,
             "next_actions": ["status", "cancel", "confirm_send"],
             "created_at": unix_seconds(), "updated_at": unix_seconds()
         });
@@ -1071,5 +1100,10 @@ mod tests {
         let (status, fb) = post(&svc, "/api/jev/feedback", json!({"workflow_id": wf_id, "feedback_text": "太焦了"}));
         assert_eq!(status, 200);
         assert_eq!(fb["result"]["feedback_type"], "too_dark");
+        assert_eq!(local_jev_upstream_model("laya_multilingual"), Some("multilingual"));
+        assert_eq!(local_jev_upstream_model("onejev_1_6_0_8b"), Some("jev-latest"));
+        assert_eq!(local_jev_upstream_model("OmniJev/OneJev1.6-4B"), Some("jev-latest"));
+        assert_eq!(local_jev_upstream_model("onejev1.6-9b"), Some("jev-latest"));
+        assert_eq!(local_jev_upstream_model("typesafe/jev-1.14"), None);
     }
 }

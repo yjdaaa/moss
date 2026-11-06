@@ -406,7 +406,9 @@ export function DrawPage({ onNavigate }) {
       if (res.ok && data.success) {
         const fingerprint = data?.result?.draw_lab?.content_fingerprint || "";
         setRepeatSend((current) => applyPreviewFingerprintSuccess(current, fingerprint));
-        setStatus(data.result?.speech || "预览已生成");
+        // 未填尺寸且超出机器幅面时后端会等比缩小，并说明缩到多大（2026-11-06）
+        const fitNote = data.result?.artifacts?.fit_note;
+        setStatus([data.result?.speech || "预览已生成", fitNote].filter(Boolean).join("；"));
       } else {
         setStatus((typeof data.result === "string" && data.result) || "预览失败");
       }

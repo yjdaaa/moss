@@ -1164,10 +1164,13 @@ mod imp {
         }
     }
 
-    fn probe_laya_http(addr: std::net::SocketAddr, connect_timeout: std::time::Duration) -> bool {
+    fn probe_local_jev_health_model(
+        addr: std::net::SocketAddr,
+        connect_timeout: std::time::Duration,
+    ) -> Option<String> {
         use std::io::{Read, Write};
         let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, connect_timeout) else {
-            return false;
+            return None;
         };
         let io_timeout = Some(std::time::Duration::from_millis(300));
         let _ = stream.set_write_timeout(io_timeout);
@@ -1176,7 +1179,7 @@ mod imp {
             .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:18090\r\nConnection: close\r\n\r\n")
             .is_err()
         {
-            return false;
+            return None;
         }
         let mut buf = [0u8; 1024];
         let mut read_total = 0;
@@ -1188,47 +1191,112 @@ mod imp {
         }
         let raw = &buf[..read_total];
         let Some(sep) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
-            return false;
+            return None;
         };
         let head = String::from_utf8_lossy(&raw[..sep]);
         let Some(status_line) = head.lines().next() else {
-            return false;
+            return None;
         };
         let is_200 = status_line == "HTTP/1.1 200"
             || status_line.starts_with("HTTP/1.1 200 ")
             || status_line == "HTTP/1.0 200"
             || status_line.starts_with("HTTP/1.0 200 ");
         if !is_200 {
-            return false;
+            return None;
         }
         let body = String::from_utf8_lossy(&raw[sep + 4..]);
         let trimmed = body.trim();
         if trimmed.eq_ignore_ascii_case("ok") {
-            return true;
+            return Some(moss_voice::settings::LOCAL_LAYA_JEV_MODEL.to_owned());
         }
         let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            return false;
+            return None;
         };
-        json.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+        let healthy = json.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
             || json
                 .get("status")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "ok" | "healthy" | "ready"))
+                .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "ok" | "healthy" | "ready"));
+        if !healthy {
+            return None;
+        }
+        let is_onejev_like = json.get("engine").and_then(serde_json::Value::as_str) == Some("onejev")
+            || json.get("fork_mode").is_some()
+            || json.get("prompt_version").is_some();
+        if let Some(raw_model) = json
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(canonical) = moss_voice::settings::canonical_local_jev_model(raw_model) {
+                return Some(canonical.to_owned());
+            }
+            if is_onejev_like {
+                return Some(format!("external_onejev:{raw_model}"));
+            }
+        }
+        if is_onejev_like {
+            return Some("external_onejev".to_owned());
+        }
+        Some(moss_voice::settings::LOCAL_LAYA_JEV_MODEL.to_owned())
     }
 
     struct LocalLayaRunner {
+        active_model: Option<String>,
+        starting_model: Option<String>,
+        starting_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        cancelling_model: Option<String>,
         child: Option<std::process::Child>,
         job: Option<moss_voice::supervisor::JobHandle>,
+        onejev: Option<moss_voice::onejev::OneJevGateway>,
         generation: u64,
     }
 
     impl LocalLayaRunner {
+        fn is_alive_for(&mut self, canonical_model: &str) -> bool {
+            if self.active_model.as_deref() != Some(canonical_model) {
+                return false;
+            }
+            if canonical_model == moss_voice::settings::LOCAL_LAYA_JEV_MODEL {
+                self.child
+                    .as_mut()
+                    .is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+            } else {
+                self.onejev
+                    .as_ref()
+                    .is_some_and(moss_voice::onejev::OneJevGateway::is_alive)
+            }
+        }
+
+        fn is_starting_for(&self, canonical_model: &str) -> bool {
+            self.starting_model.as_deref() == Some(canonical_model)
+                && self
+                    .starting_cancel
+                    .as_ref()
+                    .is_some_and(|c| !c.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn cancel_in_flight(&mut self) {
+            if let Some(model) = self.starting_model.take() {
+                self.cancelling_model = Some(model);
+            }
+            if let Some(cancel) = self.starting_cancel.take() {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
         fn stop(&mut self) {
             self.generation = self.generation.wrapping_add(1);
+            self.cancel_in_flight();
             self.kill_reaped();
         }
 
         fn kill_reaped(&mut self) {
+            self.active_model = None;
+            if let Some(mut gw) = self.onejev.take() {
+                gw.stop();
+            }
             let job = self.job.take();
             if let Some(mut child) = self.child.take() {
                 #[cfg(windows)]
@@ -1277,12 +1345,14 @@ mod imp {
         music_warning: Mutex<Option<String>>,
         /// 声纹模型或辅助程序未就绪时的降级提示（保持个人上下文隔离，不回退共享设备记忆）
         speaker_warning: Mutex<Option<String>>,
-        /// 本地模型下载与安装（运行目录 `models/`，Laya 可挂载到 `E:\moss-laya\models`）
+        /// 本地模型下载与安装（默认运行目录 `models/`，可通过 `MOSS_LAYA_ROOT` 指定外置 `<path>/models`）
         models: ModelManager,
         /// 运行中的本地模型辅助程序（随内置服务启停）
         helper: Mutex<Option<LocalHelper>>,
-        /// 运行中的本地 Laya `/v1/systemone` 决策服务（随本地 Jev 开关启停）
-        laya: Mutex<LocalLayaRunner>,
+        /// 串行化本地 Jev 决策服务（OneJev / Laya）启动与模型切换，不阻塞 `stop_laya`
+        jev_start_lock: Arc<Mutex<()>>,
+        /// 运行中的本地 Jev `/v1/systemone` 决策服务（OneJev `llama-server` 网关或 Laya 子进程，随本地 Jev 开关启停）
+        laya: Arc<Mutex<LocalLayaRunner>>,
         /// NV19 长期记忆、资料与恢复摘要；检索与提取默认关闭
         context: Arc<crate::voice_context::host::ContextHost>,
         /// n59 当前说话角色（全部设备共用；语音与界面切换都即时生效，不重启服务）
@@ -1523,7 +1593,7 @@ mod imp {
         std::env::current_exe().ok()?.parent().map(|dir| dir.join(HELPER_FILE))
     }
 
-    /// 若 MOSS 运行在用户自定义安装目录（非 Cargo `target/` 构建目录且当前用户可写），返回该安装目录。
+    /// 若 MOSS 运行在用户自定义独立目录（排除 Cargo `target/` 与 macOS `.app` 签名包目录且当前用户可写），返回该安装目录。
     fn writable_install_dir() -> Option<std::path::PathBuf> {
         if cfg!(test) {
             return None;
@@ -1532,7 +1602,8 @@ mod imp {
         let norm = exe_dir.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
         if norm.ends_with("\\target\\release")
             || norm.ends_with("\\target\\debug")
-            || norm.contains("\\target\\x86_64-")
+            || norm.contains("\\target\\")
+            || norm.contains(".app\\contents\\macos")
         {
             return None;
         }
@@ -1564,21 +1635,16 @@ mod imp {
                 .map(|dir| dir.join("models"))
                 .unwrap_or_else(|| host.runtime_root.path.join("models"));
             let mut models = ModelManager::new(default_models_dir.clone());
-            if !cfg!(test) && !default_models_dir.join("laya_multilingual").is_dir() && writable_install_dir().is_none() {
-                if let Some(env_root) = std::env::var_os("MOSS_LAYA_ROOT").map(std::path::PathBuf::from) {
-                    let e_models = env_root.join("models");
-                    if std::fs::create_dir_all(&e_models).is_ok() {
-                        models = models.with_root_override("laya_multilingual", e_models);
-                    }
-                } else {
-                    #[cfg(windows)]
-                    {
-                        let e_laya_root = std::path::PathBuf::from(r"E:\moss-laya");
-                        if e_laya_root.is_dir() || std::path::Path::new(r"E:\").is_dir() {
-                            let e_models = e_laya_root.join("models");
-                            if std::fs::create_dir_all(&e_models).is_ok() {
-                                models = models.with_root_override("laya_multilingual", e_models);
-                            }
+            if !cfg!(test)
+                && writable_install_dir().is_none()
+                && let Some(env_root) =
+                    std::env::var_os("MOSS_LAYA_ROOT").map(std::path::PathBuf::from)
+            {
+                let e_models = env_root.join("models");
+                if std::fs::create_dir_all(&e_models).is_ok() {
+                    for id in moss_voice::settings::LOCAL_JEV_MODEL_IDS {
+                        if !default_models_dir.join(id).is_dir() {
+                            models = models.with_root_override(id, e_models.clone());
                         }
                     }
                 }
@@ -1635,7 +1701,17 @@ mod imp {
                 speaker_warning: Mutex::new(None),
                 models,
                 helper: Mutex::new(None),
-                laya: Mutex::new(LocalLayaRunner { child: None, job: None, generation: 0 }),
+                jev_start_lock: Arc::new(Mutex::new(())),
+                laya: Arc::new(Mutex::new(LocalLayaRunner {
+                    active_model: None,
+                    starting_model: None,
+                    starting_cancel: None,
+                    cancelling_model: None,
+                    child: None,
+                    job: None,
+                    onejev: None,
+                    generation: 0,
+                })),
                 context,
                 persona,
             })
@@ -1838,12 +1914,10 @@ mod imp {
             };
             let jev_model = moss_voice::settings::validate_jev_model(&experience.jev_model)
                 .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
-            let is_local_laya = moss_voice::settings::is_local_laya_model(&jev_model);
-            let local_laya_installed = self.models.path_if_installed("laya_multilingual").is_some();
-            let jev_ready = if is_local_laya {
-                local_laya_installed
-            } else {
-                self.jev_effective_secret()?.is_some()
+            let local_jev_id = moss_voice::settings::canonical_local_jev_model(&jev_model);
+            let jev_ready = match local_jev_id {
+                Some(id) => self.models.path_if_installed(id).is_some(),
+                None => self.jev_effective_secret()?.is_some(),
             };
             let mut labels = vec![format!("LLM:{}", llm.model),
                 format!("ASR:{}", if experience.asr { experience.asr_model.as_str() } else { models.asr.as_ref().map(|v| v.model.as_str()).unwrap_or("unknown") }),
@@ -1893,14 +1967,36 @@ mod imp {
                 conversation = conversation.with_fallback_tts(fallback_tts);
             }
             if jev_options.active() {
-                let client = if is_local_laya {
+                let filter = if let Some(local_id) = local_jev_id {
                     let reader: moss_voice_server::jev::SecretReader =
-                        Arc::new(|| Some("moss-local-laya".to_owned()));
-                    Arc::new(OpenRouterDecisionClient::with_endpoint(
+                        Arc::new(|| Some("moss-local-jev".to_owned()));
+                    let upstream_model = moss_voice::settings::local_jev_upstream_model_name(local_id);
+                    let client = Arc::new(OpenRouterDecisionClient::with_endpoint(
                         moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL,
                         reader,
-                        "multilingual",
-                    ))
+                        upstream_model,
+                    ));
+                    match local_id {
+                        moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL => {
+                            VoiceJevFilter::new(client, jev_options).with_timeouts(
+                                std::time::Duration::from_millis(1500),
+                                std::time::Duration::from_millis(600),
+                            )
+                        }
+                        moss_voice::settings::LOCAL_ONEJEV_4B_MODEL => {
+                            VoiceJevFilter::new(client, jev_options).with_timeouts(
+                                std::time::Duration::from_millis(2500),
+                                std::time::Duration::from_millis(900),
+                            )
+                        }
+                        moss_voice::settings::LOCAL_ONEJEV_9B_MODEL => {
+                            VoiceJevFilter::new(client, jev_options).with_timeouts(
+                                std::time::Duration::from_millis(3500),
+                                std::time::Duration::from_millis(1200),
+                            )
+                        }
+                        _ => VoiceJevFilter::new(client, jev_options),
+                    }
                 } else {
                     let db = self.host.db.clone();
                     let settings_file = self.settings_file();
@@ -1910,9 +2006,10 @@ mod imp {
                             .ok()
                             .and_then(|(secret, _)| secret)
                     });
-                    Arc::new(OpenRouterDecisionClient::with_model(reader, jev_model))
+                    let client = Arc::new(OpenRouterDecisionClient::with_model(reader, jev_model));
+                    VoiceJevFilter::new(client, jev_options)
                 };
-                conversation = conversation.with_jev_filter(Arc::new(VoiceJevFilter::new(client, jev_options)));
+                conversation = conversation.with_jev_filter(Arc::new(filter));
             }
             // NV19: both hooks stay inert until the user switches them on in the private window.
             let (retrieval, extraction) = self.context.hooks();
@@ -1967,8 +2064,25 @@ mod imp {
                 Some(view) => serde_json::to_value(view.mode).unwrap_or_default(),
                 None => Value::String(if settings.builtin_chat_ready(self.models.root()) { "chat" } else { "echo" }.into()),
             };
-            let local_laya_installed = self.models.path_if_installed("laya_multilingual").is_some();
-            let is_local_laya = moss_voice::settings::is_local_laya_model(&settings.builtin_local.jev_model);
+            let active_local_jev_id =
+                moss_voice::settings::canonical_local_jev_model(&settings.builtin_local.jev_model);
+            let any_local_jev_installed = moss_voice::settings::LOCAL_JEV_MODEL_IDS
+                .iter()
+                .any(|id| self.models.path_if_installed(id).is_some());
+            let active_local_jev_installed = active_local_jev_id
+                .is_some_and(|id| self.models.path_if_installed(id).is_some());
+            let local_jev_installed = if active_local_jev_id.is_some() {
+                active_local_jev_installed
+            } else {
+                any_local_jev_installed
+            };
+            let is_local_jev = active_local_jev_id.is_some();
+            let models_dir_ref = active_local_jev_id.unwrap_or("laya_multilingual");
+            let onejev_env = moss_voice::onejev::detect_onejev_env(
+                self.models.root_for(moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL),
+                false,
+            );
+            let laya_env = Self::detect_laya_env_with_probe(false);
             serde_json::json!({
                 "running": view.is_some(),
                 "mode": mode,
@@ -1979,7 +2093,7 @@ mod imp {
                 "ota_ip_url": local_ip().map(|ip| format!("http://{ip}:{http_port}/xiaozhi/ota/")),
                 "models": models,
                 "jev": {
-                    "endpoint": if is_local_laya {
+                    "endpoint": if is_local_jev {
                         moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL
                     } else {
                         moss_voice::models::DEFAULT_JEV_DECISIONS_URL
@@ -1987,16 +2101,18 @@ mod imp {
                     "model": settings.builtin_local.jev_model,
                     "key_set": jev_key_configured,
                     "openrouter_llm_key_set": openrouter_llm_key_set,
-                    "local_installed": local_laya_installed,
+                    "local_installed": local_jev_installed,
                     "voice_enabled": settings.builtin_local.jev_filter_enabled,
                     "feedback_enabled": jev_feedback_enabled,
                 },
                 "last_error": self.last_error.lock().ok().and_then(|last| last.clone()),
                 "local": {
                     "settings": settings.builtin_local,
-                    "jev_key_configured": jev_key_configured || openrouter_llm_key_set || (is_local_laya && local_laya_installed),
+                    "jev_key_configured": jev_key_configured || openrouter_llm_key_set || active_local_jev_installed,
                     "default_mirror": local_models::DEFAULT_BASE,
-                    "models_dir": self.models.root_for("laya_multilingual").to_string_lossy(),
+                    "models_dir": self.models.root_for(models_dir_ref).to_string_lossy(),
+                    "onejev_env": onejev_env,
+                    "laya_env": laya_env,
                     "helper_found": helper_path().is_some_and(|path| path.is_file()),
                     "helper_running": self.helper.lock().ok().and_then(|helper| helper.as_ref().map(LocalHelper::is_alive)).unwrap_or(false),
                     "models": self.models.status(),
@@ -2085,6 +2201,10 @@ mod imp {
         }
 
         fn stop_locked(&self) {
+            self.stop_locked_inner(false);
+        }
+
+        fn stop_locked_inner(&self, keep_local_jev: bool) {
             self.personal.directory_changed();
             let _ = self.speaker.cancel();
             if let Ok(mut helper) = self.speaker_backend.helper.lock() {
@@ -2106,7 +2226,7 @@ mod imp {
             if let Ok(mut helper) = self.helper.lock() {
                 *helper = None;
             }
-            if !self.should_run_local_laya_for_feedback() {
+            if !keep_local_jev && !self.should_run_local_laya_for_feedback() {
                 self.stop_laya();
             }
         }
@@ -2132,8 +2252,14 @@ mod imp {
             if !self.running() {
                 return Ok(false);
             }
-            self.stop_locked();
-            self.start_locked()?;
+            let keep_local_jev = self.should_run_local_laya();
+            self.stop_locked_inner(keep_local_jev);
+            if let Err(err) = self.start_locked() {
+                if !self.should_run_local_laya_for_feedback() {
+                    self.stop_laya();
+                }
+                return Err(err);
+            }
             Ok(true)
         }
 
@@ -2390,7 +2516,7 @@ mod imp {
                         if let Some(mirror) = &mirror_patch {
                             local.mirror = mirror.clone();
                         }
-                        let is_local = moss_voice::settings::is_local_laya_model(&local.jev_model);
+                        let is_local = moss_voice::settings::is_local_jev_model(&local.jev_model);
                         Ok(((is_local, local.jev_filter_enabled), jev_feedback_patch))
                     },
                 );
@@ -2398,17 +2524,17 @@ mod imp {
                     // A rejected or failed save must leave the running role equal to the file.
                     self.persona.configure(persona_config(&self.settings().builtin_local));
                 }
-                let (is_local_laya, filter_on) =
+                let (is_local_jev, filter_on) =
                     saved.map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
                 let jev_feedback_on = moss_voice::settings::jev_feedback_enabled(&self.settings_file());
-                (is_local_laya, filter_on || jev_feedback_on)
+                (is_local_jev, filter_on || jev_feedback_on)
             };
             if is_local_laya && laya_needed {
                 if touched_jev {
                     self.ensure_laya_running(false)
                         .map_err(|msg| CenterError::new("laya_env_missing", 412, msg))?;
                 } else if let Err(err) = self.ensure_laya_running(false) {
-                    eprintln!("[moss-desktop] 本地 Laya 决策服务未就绪（不影响其余本地设置保存）：{err}");
+                    eprintln!("[moss-desktop] 本地 Jev 决策服务未就绪（不影响其余本地设置保存）：{err}");
                 }
             } else if !is_local_laya || !laya_needed {
                 self.stop_laya();
@@ -2481,10 +2607,29 @@ mod imp {
             if id=="campplus_sv_zh_cn_16k_common" && self.speaker_backend.helper.lock().map(|h|h.is_some()).unwrap_or(true) {
                 return Err(CenterError::new("local_model_in_use",409,"声纹模型已加载，请先停止内置服务"));
             }
-            if id == "laya_multilingual" {
-                self.stop_laya();
-            }
-            if id != "laya_multilingual" && self.running() && self.helper.lock().map(|helper| helper.is_some()).unwrap_or(false) {
+            if moss_voice::settings::is_local_jev_model(id) {
+                let configured_id = moss_voice::settings::canonical_local_jev_model(
+                    &self.settings().builtin_local.jev_model,
+                );
+                let (stop_runner, wait_cancelling) = match self.laya.lock() {
+                    Ok(r) => (
+                        configured_id == Some(id)
+                            || r.active_model.as_deref() == Some(id)
+                            || r.starting_model.as_deref() == Some(id),
+                        r.cancelling_model.as_deref() == Some(id),
+                    ),
+                    Err(_) => (true, false),
+                };
+                if stop_runner {
+                    self.stop_laya_and_wait();
+                } else if wait_cancelling
+                    && let Ok(_guard) = self.jev_start_lock.lock()
+                    && let Ok(mut r) = self.laya.lock()
+                    && r.cancelling_model.as_deref() == Some(id)
+                {
+                    r.cancelling_model = None;
+                }
+            } else if self.running() && self.helper.lock().map(|helper| helper.is_some()).unwrap_or(false) {
                 return Err(CenterError::new("local_model_in_use", 409, "内置服务正在使用本地模型，请先停止内置服务再删除"));
             }
             self.models.delete(id).map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
@@ -2598,11 +2743,21 @@ mod imp {
             }
         }
 
+        fn stop_laya_and_wait(&self) {
+            self.stop_laya();
+            if let Ok(_guard) = self.jev_start_lock.lock() {
+                self.stop_laya();
+                if let Ok(mut r) = self.laya.lock() {
+                    r.cancelling_model = None;
+                }
+            }
+        }
+
         fn is_local_laya_configured_and_installed(&self, settings: &moss_voice::VoiceSettings) -> bool {
             let jev_model = moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
                 .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
-            moss_voice::settings::is_local_laya_model(&jev_model)
-                && self.models.path_if_installed("laya_multilingual").is_some()
+            moss_voice::settings::canonical_local_jev_model(&jev_model)
+                .is_some_and(|id| self.models.path_if_installed(id).is_some())
         }
 
         fn should_run_local_laya_for_feedback(&self) -> bool {
@@ -2618,29 +2773,32 @@ mod imp {
                     || moss_voice::settings::jev_feedback_enabled(&self.settings_file()))
         }
 
-        fn select_laya_device(cuda_available: bool, env_override: Option<&str>) -> String {
+        fn select_laya_device(
+            cuda_available: bool,
+            mps_available: bool,
+            env_override: Option<&str>,
+        ) -> String {
             if let Some(raw) = env_override.map(str::trim).filter(|v| !v.is_empty()) {
                 return raw.to_owned();
             }
             if cuda_available {
                 "cuda:0".to_owned()
+            } else if mps_available {
+                "mps".to_owned()
             } else {
                 "cpu".to_owned()
             }
         }
 
-        fn probe_laya_cuda_available(py: &std::path::Path, cuda_lib_present: bool) -> bool {
-            if !cuda_lib_present || !py.is_file() {
+        fn probe_python_flag(py: &std::path::Path, snippet: &str) -> bool {
+            if !py.is_file() {
                 return false;
             }
             let mut cmd = std::process::Command::new(py);
-            cmd.args([
-                "-c",
-                "import sys, torch; sys.stdout.write('1' if torch.cuda.is_available() else '0')",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            cmd.args(["-c", snippet])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -2681,6 +2839,26 @@ mod imp {
             }
         }
 
+        fn probe_laya_cuda_available(py: &std::path::Path, cuda_lib_present: bool) -> bool {
+            if !cuda_lib_present {
+                return false;
+            }
+            Self::probe_python_flag(
+                py,
+                "import sys, torch; sys.stdout.write('1' if torch.cuda.is_available() else '0')",
+            )
+        }
+
+        fn probe_laya_mps_available(py: &std::path::Path, is_apple_silicon: bool) -> bool {
+            if !is_apple_silicon {
+                return false;
+            }
+            Self::probe_python_flag(
+                py,
+                "import sys, torch; b = getattr(torch.backends, 'mps', None); sys.stdout.write('1' if b is not None and b.is_available() else '0')",
+            )
+        }
+
         fn laya_venv_python(root: &std::path::Path) -> std::path::PathBuf {
             #[cfg(windows)]
             {
@@ -2718,33 +2896,57 @@ mod imp {
                         .and_then(|venv| venv.parent().map(std::path::Path::to_path_buf))
                 })
                 .unwrap_or_else(|| {
-                    #[cfg(windows)]
-                    {
-                        install_dir
-                            .map(|dir| dir.join("laya"))
-                            .filter(|_| !std::path::Path::new(r"E:\moss-laya\.venv\Scripts\python.exe").is_file())
-                            .unwrap_or_else(|| std::path::PathBuf::from(r"E:\moss-laya"))
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        install_dir
-                            .map(|dir| dir.join("laya"))
-                            .unwrap_or_else(|| std::env::temp_dir().join("moss-laya"))
+                    if let Some(dir) = install_dir {
+                        dir.join("laya")
+                    } else {
+                        let home = std::env::var_os("HOME")
+                            .or_else(|| std::env::var_os("USERPROFILE"))
+                            .map(std::path::PathBuf::from)
+                            .filter(|p| p.is_absolute());
+                        let local_appdata = std::env::var_os("LOCALAPPDATA")
+                            .map(std::path::PathBuf::from)
+                            .filter(|p| p.is_absolute());
+                        let mut cands = Vec::new();
+                        if let Some(h) = &home {
+                            cands.push(h.join("moss-laya"));
+                            cands.push(h.join(".moss").join("laya"));
+                        }
+                        if let Some(appdata) = &local_appdata {
+                            cands.push(appdata.join("moss").join("laya"));
+                        }
+                        cands
+                            .iter()
+                            .find(|cand| Self::laya_venv_python(cand).is_file())
+                            .cloned()
+                            .or_else(|| home.map(|h| h.join("moss-laya")))
+                            .or_else(|| local_appdata.map(|a| a.join("moss").join("laya")))
+                            .unwrap_or_default()
                     }
                 });
-            let py = env_py.unwrap_or_else(|| Self::laya_venv_python(&laya_root));
+            let py = env_py.unwrap_or_else(|| {
+                if laya_root.as_os_str().is_empty() {
+                    std::path::PathBuf::new()
+                } else {
+                    Self::laya_venv_python(&laya_root)
+                }
+            });
             (laya_root, py)
         }
 
         fn detect_laya_env() -> Value {
-            let skip_cuda_probe = std::env::var("MOSS_LAYA_DEVICE")
+            let skip_accel_probe = std::env::var("MOSS_LAYA_DEVICE")
+                .or_else(|_| std::env::var("MOSS_JEV_DEVICE"))
                 .ok()
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
-            Self::detect_laya_env_with_probe(!skip_cuda_probe)
+            Self::detect_laya_env_with_probe(!skip_accel_probe)
         }
 
-        fn detect_laya_env_with_probe(probe_cuda: bool) -> Value {
-            let (laya_root, py) = Self::resolve_laya_python();
+        fn detect_laya_env_with_probe(probe_accel: bool) -> Value {
+            let (_laya_root, py) = Self::resolve_laya_python();
+            let force_cpu = std::env::var("MOSS_LAYA_DEVICE")
+                .or_else(|_| std::env::var("MOSS_JEV_DEVICE"))
+                .ok()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
             let python_found = py.is_file();
             let site_packages = py
                 .parent()
@@ -2766,138 +2968,360 @@ mod imp {
             let laya_serve_found = site_packages.as_ref().is_some_and(|sp| {
                 sp.join("laya").join("serve.py").is_file() && sp.join("uvicorn").is_dir()
             });
+            let torch_found = site_packages
+                .as_ref()
+                .is_some_and(|sp| sp.join("torch").is_dir());
             let cuda_lib_found = site_packages.as_ref().is_some_and(|sp| {
                 let torch_lib = sp.join("torch").join("lib");
                 torch_lib.join("torch_cuda.dll").is_file()
                     || torch_lib.join("libtorch_cuda.so").is_file()
             });
             let ready = python_found && laya_serve_found;
-            let cuda_found = ready && probe_cuda && Self::probe_laya_cuda_available(&py, cuda_lib_found);
-            let summary = if ready && cuda_found {
-                format!(
-                    "运行环境检测通过（Python 3.11 + laya[serve] + CUDA 显卡加速已就绪：{}），可直接下载并启用。",
-                    laya_root.display()
-                )
-            } else if ready {
-                format!(
-                    "运行环境检测通过（Python + laya[serve] CPU 模式已就绪：{}），可直接下载并启用。",
-                    laya_root.display()
-                )
-            } else if !python_found {
-                format!(
-                    "未检测到本地 Laya Python 运行环境（预期位置：{}）。需准备 Python 3.10+ 虚拟环境并执行 pip install \"laya[serve]\"；当前可先下载模型权重，但需环境就绪后才能启动推理。",
-                    py.display()
-                )
+            let is_apple_silicon = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+            let cuda_found = if !ready || force_cpu {
+                false
+            } else if probe_accel {
+                Self::probe_laya_cuda_available(&py, cuda_lib_found)
             } else {
-                format!(
-                    "已找到 Python（{}），但缺少 laya[serve] 依赖包（请执行 pip install \"laya[serve]\"）；当前可先下载模型权重，补齐依赖后即可启用。",
-                    py.display()
-                )
+                cuda_lib_found
+            };
+            let mps_found = if !ready || force_cpu || cuda_found {
+                false
+            } else if probe_accel {
+                Self::probe_laya_mps_available(&py, is_apple_silicon && torch_found)
+            } else {
+                is_apple_silicon && torch_found
+            };
+            let accelerator = if cuda_found {
+                "cuda"
+            } else if mps_found {
+                "mps"
+            } else {
+                "cpu"
+            };
+            let summary = if ready && cuda_found {
+                "运行环境检测通过（Python + laya[serve] + NVIDIA CUDA 显卡加速已就绪），可直接下载并启用。".to_owned()
+            } else if ready && mps_found {
+                "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。".to_owned()
+            } else if ready {
+                "运行环境检测通过（Python + laya[serve] CPU 模式已就绪），可直接下载并启用。".to_owned()
+            } else if !python_found {
+                "未检测到本地 Laya Python 运行环境（可通过 MOSS_LAYA_ROOT 或用户目录 moss-laya/.venv 准备 Python 3.10+ 并执行 pip install \"laya[serve]\"；当前也可直接选用上方免 Python 的 OneJev 1.6 GGUF 模型）。".to_owned()
+            } else {
+                "已找到 Python 虚拟环境，但缺少 laya[serve] 依赖包（请执行 pip install \"laya[serve]\"）；当前可先下载模型权重，补齐依赖后即可启用。".to_owned()
             };
             serde_json::json!({
                 "ready": ready,
                 "python_found": python_found,
                 "laya_serve_found": laya_serve_found,
                 "cuda_found": cuda_found,
-                "python_path": py.to_string_lossy(),
+                "mps_found": mps_found,
+                "accelerator": accelerator,
                 "summary": summary,
             })
         }
 
+        fn local_jev_missing_message(canonical_id: &str) -> String {
+            let label = local_models::spec(canonical_id)
+                .map(|s| s.label)
+                .unwrap_or(canonical_id);
+            format!("本地决策模型“{label}”（{canonical_id}）尚未下载：请先在下方“本地模型（断网可用）”点击下载")
+        }
+
         fn ensure_laya_running(&self, wait_ready: bool) -> Result<(), String> {
-            let Some(model_dir) = self.models.path_if_installed("laya_multilingual") else {
-                return Err("本地 Laya 决策模型尚未下载：请先在下方“本地模型（断网可用）”点击下载".into());
+            let settings = self.settings();
+            let validated = moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
+                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+            let Some(canonical_id) = moss_voice::settings::canonical_local_jev_model(&validated) else {
+                return Ok(());
+            };
+            self.ensure_local_jev_running_for(canonical_id, wait_ready)
+        }
+
+        fn ensure_local_jev_running_for(&self, canonical_id: &str, wait_ready: bool) -> Result<(), String> {
+            let Some(model_dir) = self.models.path_if_installed(canonical_id) else {
+                return Err(Self::local_jev_missing_message(canonical_id));
             };
             if cfg!(test) {
                 return Ok(());
             }
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18090));
-            if probe_laya_http(addr, std::time::Duration::from_millis(120)) {
-                return Ok(());
+            {
+                let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                if !wait_ready
+                    && (runner.is_alive_for(canonical_id) || runner.is_starting_for(canonical_id))
+                {
+                    return Ok(());
+                }
+                if runner
+                    .starting_model
+                    .as_deref()
+                    .is_some_and(|m| m != canonical_id)
+                {
+                    runner.cancel_in_flight();
+                }
             }
+            let start_guard = self
+                .jev_start_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18090));
             let (already_alive, start_generation) = {
-                let mut runner = self.laya.lock().map_err(|_| "本地 Laya 进程锁失败".to_owned())?;
-                let alive = runner
-                    .child
-                    .as_mut()
-                    .is_some_and(|c| matches!(c.try_wait(), Ok(None)));
+                let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                let alive = runner.is_alive_for(canonical_id);
                 if !alive {
+                    runner.cancel_in_flight();
                     runner.kill_reaped();
                 }
                 (alive, runner.generation)
             };
-            if !already_alive {
-                let (laya_root, py) = Self::resolve_laya_python();
-                let env_device = std::env::var("MOSS_LAYA_DEVICE").ok();
-                let has_override = env_device.as_deref().is_some_and(|v| !v.trim().is_empty());
-                let env_info = Self::detect_laya_env_with_probe(!has_override);
-                if env_info.get("ready").and_then(Value::as_bool) != Some(true) {
-                    return Err(
-                        env_info
-                            .get("summary")
-                            .and_then(Value::as_str)
-                            .unwrap_or("未找到本地 Laya 运行环境")
-                            .to_owned(),
-                    );
+
+            if let Some(serving_model) =
+                probe_local_jev_health_model(addr, std::time::Duration::from_millis(120))
+            {
+                if serving_model == canonical_id {
+                    return Ok(());
                 }
-                let cuda_available = env_info.get("cuda_found").and_then(Value::as_bool) == Some(true);
-                let laya_device = Self::select_laya_device(cuda_available, env_device.as_deref());
-                let tmp_dir = laya_root.join("tmp");
-                let _ = std::fs::create_dir_all(&tmp_dir);
-                let extra_models = serde_json::json!({
-                    "multilingual": model_dir.to_string_lossy().replace('\\', "/")
-                })
-                .to_string();
-                let mut runner = self.laya.lock().map_err(|_| "本地 Laya 进程锁失败".to_owned())?;
-                if runner.generation != start_generation {
-                    return Err("本地 Laya 启动已取消（开关已关闭或服务已停止）".into());
-                }
-                let alive_now = runner
-                    .child
-                    .as_mut()
-                    .is_some_and(|c| matches!(c.try_wait(), Ok(None)));
-                if !alive_now && !probe_laya_http(addr, std::time::Duration::from_millis(120)) {
-                    let mut cmd = std::process::Command::new(&py);
-                    cmd.args(["-m", "laya.serve"])
-                        .env("USE_TF", "0")
-                        .env("HF_HUB_OFFLINE", "1")
-                        .env("TMP", &tmp_dir)
-                        .env("TEMP", &tmp_dir)
-                        .env("LAYA_HOST", "127.0.0.1")
-                        .env("LAYA_PORT", "18090")
-                        .env("LAYA_DEVICE", &laya_device)
-                        .env("LAYA_PRELOAD", "1")
-                        .env("LAYA_MODELS", "multilingual")
-                        .env("LAYA_DEFAULT_MODEL", "multilingual")
-                        .env("LAYA_MAX_LOADED", "1")
-                        .env("LAYA_IDLE_UNLOAD_SECONDS", "0")
-                        .env("LAYA_MAX_TOKEN_BUDGET", "4096")
-                        .env("LAYA_EXTRA_MODELS", extra_models)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null());
-                    #[cfg(windows)]
+                let release_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(1500);
+                let mut freed = false;
+                while std::time::Instant::now() < release_deadline {
+                    if probe_local_jev_health_model(addr, std::time::Duration::from_millis(100))
+                        .is_none()
                     {
-                        use std::os::windows::process::CommandExt;
-                        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                        cmd.creation_flags(CREATE_NO_WINDOW);
+                        freed = true;
+                        break;
                     }
-                    let child = cmd
-                        .spawn()
-                        .map_err(|e| format!("启动本地 Laya 服务失败：{e}"))?;
-                    runner.job = moss_voice::supervisor::JobHandle::for_child(&child);
-                    runner.child = Some(child);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                if !freed {
+                    return Err(format!(
+                        "本地端口 127.0.0.1:18090 已被外部 {serving_model} 服务占用，无法切换到 {canonical_id}；请先关闭外部 18090 进程"
+                    ));
                 }
             }
-            if wait_ready {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(28);
-                while std::time::Instant::now() < deadline {
-                    if probe_laya_http(addr, std::time::Duration::from_millis(200)) {
-                        return Ok(());
+
+            if canonical_id == moss_voice::settings::LOCAL_LAYA_JEV_MODEL {
+                if !already_alive {
+                    let (laya_root, py) = Self::resolve_laya_python();
+                    let env_device = std::env::var("MOSS_LAYA_DEVICE")
+                        .or_else(|_| std::env::var("MOSS_JEV_DEVICE"))
+                        .ok();
+                    let has_override = env_device.as_deref().is_some_and(|v| !v.trim().is_empty());
+                    let env_info = Self::detect_laya_env_with_probe(!has_override);
+                    if env_info.get("ready").and_then(Value::as_bool) != Some(true) {
+                        return Err(
+                            env_info
+                                .get("summary")
+                                .and_then(Value::as_str)
+                                .unwrap_or("未找到本地 Laya 运行环境")
+                                .to_owned(),
+                        );
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let cuda_available =
+                        env_info.get("cuda_found").and_then(Value::as_bool) == Some(true);
+                    let mps_available =
+                        env_info.get("mps_found").and_then(Value::as_bool) == Some(true);
+                    let laya_device = Self::select_laya_device(
+                        cuda_available,
+                        mps_available,
+                        env_device.as_deref(),
+                    );
+                    let tmp_dir = laya_root.join("tmp");
+                    let _ = std::fs::create_dir_all(&tmp_dir);
+                    let extra_models = serde_json::json!({
+                        "multilingual": model_dir.to_string_lossy().replace('\\', "/")
+                    })
+                    .to_string();
+                    let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                    if runner.generation != start_generation {
+                        return Err("本地 Laya 启动已取消（开关已关闭或服务已停止）".into());
+                    }
+                    if !runner.is_alive_for(canonical_id)
+                        && probe_local_jev_health_model(addr, std::time::Duration::from_millis(120))
+                            .as_deref()
+                            != Some(canonical_id)
+                    {
+                        let mut cmd = std::process::Command::new(&py);
+                        cmd.args(["-m", "laya.serve"])
+                            .env("USE_TF", "0")
+                            .env("HF_HUB_OFFLINE", "1")
+                            .env("TMP", &tmp_dir)
+                            .env("TEMP", &tmp_dir)
+                            .env("LAYA_HOST", "127.0.0.1")
+                            .env("LAYA_PORT", "18090")
+                            .env("LAYA_DEVICE", &laya_device)
+                            .env("LAYA_PRELOAD", "1")
+                            .env("LAYA_MODELS", "multilingual")
+                            .env("LAYA_DEFAULT_MODEL", "multilingual")
+                            .env("LAYA_MAX_LOADED", "1")
+                            .env("LAYA_IDLE_UNLOAD_SECONDS", "0")
+                            .env("LAYA_MAX_TOKEN_BUDGET", "4096")
+                            .env("LAYA_EXTRA_MODELS", extra_models)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                            cmd.creation_flags(CREATE_NO_WINDOW);
+                        }
+                        let child = cmd
+                            .spawn()
+                            .map_err(|e| format!("启动本地 Laya 服务失败：{e}"))?;
+                        runner.job = moss_voice::supervisor::JobHandle::for_child(&child);
+                        runner.child = Some(child);
+                        runner.active_model = Some(canonical_id.to_owned());
+                    }
                 }
-                return Err("本地 Laya 决策服务启动超时（正在加载模型，请稍后再试）".into());
+                if wait_ready {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(28);
+                    while std::time::Instant::now() < deadline {
+                        if self
+                            .laya
+                            .lock()
+                            .map(|r| r.generation != start_generation)
+                            .unwrap_or(false)
+                        {
+                            return Err("本地 Laya 启动已取消（开关已关闭或服务已停止）".into());
+                        }
+                        if probe_local_jev_health_model(addr, std::time::Duration::from_millis(200))
+                            .as_deref()
+                            == Some(canonical_id)
+                        {
+                            return Ok(());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                    return Err("本地 Laya 决策服务启动超时（正在加载模型，请稍后再试）".into());
+                }
+                return Ok(());
+            }
+
+            let models_root = self.models.root_for(canonical_id).to_path_buf();
+            if moss_voice::onejev::resolve_llama_server(&models_root).is_none()
+                && !moss_voice::onejev::has_platform_runtime_asset()
+            {
+                return Err(
+                    "当前系统架构暂无内置预编译包，请安装 llama.cpp 并设置 MOSS_LLAMA_SERVER 指向 llama-server。".into(),
+                );
+            }
+
+            if !already_alive {
+                let mirror_hint = self.settings().builtin_local.mirror;
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                {
+                    let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                    if runner.generation != start_generation {
+                        return Err("本地 OneJev 启动已取消（开关已关闭或服务已停止）".into());
+                    }
+                    runner.starting_model = Some(canonical_id.to_owned());
+                    runner.starting_cancel = Some(cancel.clone());
+                }
+
+                if !wait_ready {
+                    let start_lock = self.jev_start_lock.clone();
+                    let laya_slot = self.laya.clone();
+                    let id_owned = canonical_id.to_owned();
+                    drop(start_guard);
+                    let _ = std::thread::Builder::new()
+                        .name(format!("onejev-start-{canonical_id}"))
+                        .spawn(move || {
+                            let _bg_guard = start_lock
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                                if let Ok(mut r) = laya_slot.lock() {
+                                    if r.generation == start_generation {
+                                        r.starting_model = None;
+                                        r.starting_cancel = None;
+                                    }
+                                    if r.cancelling_model.as_deref() == Some(id_owned.as_str()) {
+                                        r.cancelling_model = None;
+                                    }
+                                }
+                                return;
+                            }
+                            match moss_voice::onejev::OneJevGateway::start_with_cancel(
+                                &id_owned,
+                                &model_dir,
+                                &models_root,
+                                addr,
+                                mirror_hint.as_deref(),
+                                &cancel,
+                            ) {
+                                Ok(mut gw) => {
+                                    if let Ok(mut r) = laya_slot.lock() {
+                                        if r.cancelling_model.as_deref() == Some(id_owned.as_str())
+                                        {
+                                            r.cancelling_model = None;
+                                        }
+                                        if r.generation != start_generation
+                                            || cancel.load(std::sync::atomic::Ordering::SeqCst)
+                                        {
+                                            gw.stop();
+                                        } else {
+                                            r.starting_model = None;
+                                            r.starting_cancel = None;
+                                            r.onejev = Some(gw);
+                                            r.active_model = Some(id_owned);
+                                        }
+                                    } else {
+                                        gw.stop();
+                                    }
+                                }
+                                Err(err) => {
+                                    if let Ok(mut r) = laya_slot.lock() {
+                                        if r.generation == start_generation {
+                                            r.starting_model = None;
+                                            r.starting_cancel = None;
+                                        }
+                                        if r.cancelling_model.as_deref() == Some(id_owned.as_str())
+                                        {
+                                            r.cancelling_model = None;
+                                        }
+                                    }
+                                    if !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                                        eprintln!("[moss-desktop] 本地 OneJev ({id_owned}) 后台启动失败：{err}");
+                                    }
+                                }
+                            }
+                        });
+                    return Ok(());
+                }
+
+                let start_res = moss_voice::onejev::OneJevGateway::start_with_cancel(
+                    canonical_id,
+                    &model_dir,
+                    &models_root,
+                    addr,
+                    mirror_hint.as_deref(),
+                    &cancel,
+                );
+                let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                if runner.generation == start_generation {
+                    runner.starting_model = None;
+                    runner.starting_cancel = None;
+                }
+                if runner.cancelling_model.as_deref() == Some(canonical_id) {
+                    runner.cancelling_model = None;
+                }
+                let mut gateway = start_res?;
+                if runner.generation != start_generation
+                    || cancel.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    gateway.stop();
+                    return Err("本地 OneJev 启动已取消（开关已关闭或服务已停止）".into());
+                }
+                runner.onejev = Some(gateway);
+                runner.active_model = Some(canonical_id.to_owned());
+            }
+            if wait_ready
+                && probe_local_jev_health_model(addr, std::time::Duration::from_millis(300))
+                    .as_deref()
+                    != Some(canonical_id)
+            {
+                return Err("本地 OneJev 网关未就绪".into());
             }
             Ok(())
         }
@@ -2912,13 +3336,13 @@ mod imp {
                 .unwrap_or(current_model.as_str());
             let model = moss_voice::settings::validate_jev_model(model)
                 .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
-            if moss_voice::settings::is_local_laya_model(&model) {
-                self.ensure_laya_running(true)
+            if let Some(local_id) = moss_voice::settings::canonical_local_jev_model(&model) {
+                self.ensure_local_jev_running_for(local_id, true)
                     .map_err(|msg| CenterError::new("model_input_invalid", 400, msg))?;
                 return Ok(moss_voice::models::test_jev_decisions(
                     moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL,
-                    "moss-local-laya",
-                    &model,
+                    "moss-local-jev",
+                    local_id,
                 ));
             }
             let typed_key = input
@@ -2988,11 +3412,11 @@ mod imp {
                 Some(v) => v.as_bool().ok_or_else(|| invalid("加工反馈开关取值不正确"))?,
                 None => moss_voice::settings::jev_feedback_enabled(&self.settings_file()),
             };
-            if moss_voice::settings::is_local_laya_model(&model) {
+            if let Some(local_id) = moss_voice::settings::canonical_local_jev_model(&model) {
                 if (next_voice || effective_feedback)
-                    && self.models.path_if_installed("laya_multilingual").is_none()
+                    && self.models.path_if_installed(local_id).is_none()
                 {
-                    return Err(invalid("本地 Laya 决策模型尚未下载：请先在下方“本地模型（断网可用）”点击下载"));
+                    return Err(invalid(&Self::local_jev_missing_message(local_id)));
                 }
                 return Ok(());
             }
@@ -3073,7 +3497,7 @@ mod imp {
                         .to_owned();
                     let model = moss_voice::settings::validate_jev_model(&model_raw)
                         .map_err(|msg| invalid(&msg))?;
-                    let is_local = moss_voice::settings::is_local_laya_model(&model);
+                    let local_id = moss_voice::settings::canonical_local_jev_model(&model);
                     let typed_key = obj
                         .get("api_key")
                         .and_then(Value::as_str)
@@ -3089,11 +3513,11 @@ mod imp {
                     };
                     let effective_feedback = feedback_patch
                         .unwrap_or_else(|| moss_voice::settings::jev_feedback_enabled(&self.settings_file()));
-                    if is_local {
+                    if let Some(lid) = local_id {
                         if (next_voice || effective_feedback)
-                            && self.models.path_if_installed("laya_multilingual").is_none()
+                            && self.models.path_if_installed(lid).is_none()
                         {
-                            return Err(invalid("本地 Laya 决策模型尚未下载：请先在下方“本地模型（断网可用）”点击下载"));
+                            return Err(invalid(&Self::local_jev_missing_message(lid)));
                         }
                         if !typed_key.is_empty() {
                             changes.push(("jev_api_key".into(), Some(typed_key.to_owned())));
@@ -3111,7 +3535,7 @@ mod imp {
                         }
                     }
                     next_model = model;
-                    action = if is_local && (next_voice || effective_feedback) {
+                    action = if local_id.is_some() && (next_voice || effective_feedback) {
                         LayaAction::Start
                     } else {
                         LayaAction::Stop
@@ -3130,7 +3554,7 @@ mod imp {
             match laya_action {
                 LayaAction::Start => {
                     if let Err(err) = self.ensure_laya_running(false) {
-                        eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
+                        eprintln!("[moss-desktop] 本地 Jev 决策服务启动失败：{err}");
                     }
                 }
                 LayaAction::Stop => self.stop_laya(),
@@ -4064,6 +4488,105 @@ mod imp {
             self.firmware_status()
         }
 
+        fn wakeword_dir(&self) -> std::path::PathBuf {
+            self.host.runtime_root.path.join("wakeword")
+        }
+
+        /// n61：当前保存的自定义唤醒词；没保存过或文件损坏时用“你好 MOSS”。
+        fn wakeword_word(&self) -> moss_voice_server::wake_assets::WakeWord {
+            use moss_voice_server::wake_assets::{DEFAULT_THRESHOLD, WakeWord};
+            std::fs::read(self.wakeword_dir().join("settings.json")).ok()
+                .and_then(|raw|serde_json::from_slice::<Value>(&raw).ok())
+                .and_then(|v|WakeWord::new(v["text"].as_str()?,v["command"].as_str()?,v["threshold"].as_f64()?).ok())
+                .unwrap_or_else(||WakeWord::new("你好 MOSS","ni hao mo si",DEFAULT_THRESHOLD).expect("default wake word is valid"))
+        }
+
+        fn wakeword_base(&self) -> Option<Vec<u8>> {
+            std::fs::read(self.wakeword_dir().join("base-assets.bin")).ok()
+        }
+
+        fn wakeword_write(&self, name: &str, bytes: &[u8]) -> Result<(), CenterError> {
+            let dir=self.wakeword_dir();
+            std::fs::create_dir_all(&dir).map_err(|e|internal(format!("创建唤醒词目录失败：{e}")))?;
+            let temp=dir.join(format!(".{name}.part"));
+            std::fs::write(&temp,bytes).and_then(|()|std::fs::rename(&temp,dir.join(name)))
+                .map_err(|e|{let _=std::fs::remove_file(&temp);internal(format!("保存失败：{e}"))})
+        }
+
+        /// n61 设备唤醒词：当前设置、基础资源包摘要、在线且已允许的设备及其固件是否支持网络更新资源包。
+        pub fn wakeword_status(&self)->Result<Value,CenterError>{
+            let word=self.wakeword_word();
+            let base=self.wakeword_base().and_then(|b|moss_voice_server::wake_assets::describe_base(&b).ok());
+            let allowed:std::collections::HashMap<String,String>=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?
+                .voice_devices().map_err(|_|internal("读取设备失败"))?.into_iter().filter(|d|d.is_allowed()).map(|d|(d.device_id,d.name)).collect();
+            let sessions=self.server.lock().map_err(|_|internal("语音服务锁失败"))?.as_ref().map(|s|s.status().sessions).unwrap_or_default();
+            let mut seen=std::collections::BTreeSet::new();
+            let devices=sessions.iter().filter(|r|allowed.contains_key(&r.device_id) && seen.insert(r.device_id.clone())).map(|r|serde_json::json!({
+                "device_id":r.device_id,"name":allowed.get(&r.device_id),
+                "supported":r.device_tools.iter().any(|t|t=="self.assets.set_download_url"),
+            })).collect::<Vec<_>>();
+            Ok(serde_json::json!({
+                "word":{"text":word.text,"command":word.command,"threshold":word.threshold},
+                "base":base,"devices":devices,
+                "running":self.server.lock().map_err(|_|internal("语音服务锁失败"))?.is_some(),
+            }))
+        }
+
+        /// 导入基础资源包（官方网页生成器导出的 assets.bin）：推送时保留它的字体、表情和背景，只换唤醒词。
+        pub fn wakeword_import_base(&self,path:&std::path::Path)->Result<Value,CenterError>{
+            use moss_voice_server::wake_assets::{ASSETS_MAX_BYTES,describe_base};
+            let invalid=|message:&str|CenterError::new("wakeword_invalid",400,message);
+            let meta=std::fs::metadata(path).map_err(|_|invalid("无法读取所选文件"))?;
+            if !meta.is_file() || meta.len() as usize>ASSETS_MAX_BYTES {return Err(invalid("请选择 8 MB 以内的资源包（assets.bin）"));}
+            let bytes=std::fs::read(path).map_err(|_|invalid("无法读取所选文件"))?;
+            let summary=describe_base(&bytes).map_err(|e|invalid(&e))?;
+            self.wakeword_write("base-assets.bin",&bytes)?;
+            Ok(summary)
+        }
+
+        /// 保存唤醒词 / 移除基础资源包 / 逐台确认推送（自定义唤醒词或恢复“你好小智”）。
+        pub fn wakeword_manage(&self,input:&Value)->Result<Value,CenterError>{
+            use moss_voice_server::wake_assets::{WakeTarget,WakeWord,build_package};
+            let invalid=||CenterError::new("wakeword_invalid",400,"唤醒词操作格式无效");
+            let object=input.as_object().ok_or_else(invalid)?;
+            let action=input["action"].as_str().ok_or_else(invalid)?;
+            let allowed:&[&str]=match action {"save"=>&["action","text","command","threshold"],"clear_base"=>&["action","confirmed"],"push"=>&["action","device_id","target","confirmed"],_=>return Err(invalid())};
+            if object.len()!=allowed.len() || object.keys().any(|k|!allowed.contains(&k.as_str())){return Err(invalid());}
+            match action {
+                "save"=>{
+                    let word=WakeWord::new(input["text"].as_str().ok_or_else(invalid)?,input["command"].as_str().ok_or_else(invalid)?,input["threshold"].as_f64().ok_or_else(invalid)?)
+                        .map_err(|e|CenterError::new("wakeword_invalid",400,e))?;
+                    let raw=serde_json::to_vec(&serde_json::json!({"text":word.text,"command":word.command,"threshold":word.threshold})).map_err(|_|internal("保存唤醒词失败"))?;
+                    self.wakeword_write("settings.json",&raw)?;
+                },
+                "clear_base"=>{
+                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
+                    match std::fs::remove_file(self.wakeword_dir().join("base-assets.bin")) {
+                        Ok(())=>{},
+                        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
+                        Err(e)=>return Err(internal(format!("移除基础资源包失败：{e}"))),
+                    }
+                },
+                "push"=>{
+                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
+                    let device_id=input["device_id"].as_str().ok_or_else(invalid)?;
+                    let target=match input["target"].as_str() {Some("custom")=>WakeTarget::Custom(self.wakeword_word()),Some("default")=>WakeTarget::Default,_=>return Err(invalid())};
+                    let device_ok=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.voice_device(device_id).map_err(|_|internal("读取设备失败"))?.is_some_and(|d|d.is_allowed());
+                    if !device_ok {return Err(CenterError::new("wakeword_device_invalid",409,"只能推送给已允许的设备"));}
+                    let package=build_package(self.wakeword_base().as_deref(),&target).map_err(|e|CenterError::new("wakeword_invalid",400,e))?;
+                    let size=package.len();
+                    let server=self.server.lock().map_err(|_|internal("语音服务锁失败"))?;
+                    let server=server.as_ref().ok_or_else(||CenterError::new("voice_builtin_stopped",409,"内置语音服务未运行"))?;
+                    server.install_wake_assets(device_id,package).map_err(|e|CenterError::new("wakeword_device_unsupported",409,e))?;
+                    let mut status=self.wakeword_status()?;
+                    status["pushed"]=serde_json::json!({"device_id":device_id,"size":size,"target":input["target"]});
+                    return Ok(status);
+                },
+                _=>{}
+            }
+            self.wakeword_status()
+        }
+
         pub fn speaker_manage(&self,input:&Value)->Result<Value,CenterError>{
             let invalid=||CenterError::new("speaker_invalid",400,"声纹操作格式无效");
             let object=input.as_object().ok_or_else(invalid)?;
@@ -4511,6 +5034,48 @@ mod imp {
         }
 
         #[test]
+        fn n61_wake_word_settings_base_package_and_push_guards() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let builtin = init(Some(host)).0.unwrap();
+            let status = builtin.wakeword_status().unwrap();
+            assert_eq!(status["word"]["text"], "你好 MOSS", "default suggestion is MOSS");
+            assert_eq!(status["word"]["command"], "ni hao mo si");
+            assert!(status["base"].is_null() && status["devices"].as_array().unwrap().is_empty());
+
+            let saved = builtin.wakeword_manage(&serde_json::json!({"action": "save", "text": " MOSS MOSS ", "command": "Mo Si  mo si", "threshold": 0.3})).unwrap();
+            assert_eq!(saved["word"], serde_json::json!({"text": "MOSS MOSS", "command": "mo si mo si", "threshold": 0.3}));
+            for bad in [
+                serde_json::json!({"action": "save", "text": "MOSS", "command": "moss", "threshold": 0.2}),
+                serde_json::json!({"action": "save", "text": "", "command": "mo si", "threshold": 0.2}),
+                serde_json::json!({"action": "save", "text": "MOSS", "command": "mo si", "threshold": 2.0}),
+                serde_json::json!({"action": "save", "text": "MOSS", "command": "mo si", "threshold": 0.2, "extra": 1}),
+                serde_json::json!({"action": "push", "device_id": "dev", "target": "custom"}),
+                serde_json::json!({"action": "push", "device_id": "dev", "target": "custom", "confirmed": false}),
+                serde_json::json!({"action": "clear_base", "confirmed": false}),
+                serde_json::json!({"action": "flash"}),
+            ] {
+                assert!(builtin.wakeword_manage(&bad).is_err(), "{bad}");
+            }
+            assert_eq!(builtin.wakeword_status().unwrap()["word"]["command"], "mo si mo si", "rejected saves change nothing");
+            let push = builtin.wakeword_manage(&serde_json::json!({"action": "push", "device_id": "never-allowed", "target": "custom", "confirmed": true}));
+            assert_eq!(push.unwrap_err().code, "wakeword_device_invalid", "only allowed devices");
+
+            let base_path = temp.path().join("picked-assets.bin");
+            let base = moss_voice_server::wake_assets::pack_assets(&[moss_voice_server::wake_assets::AssetEntry {
+                name: "index.json".into(), data: br#"{"version":1,"text_font":"f.bin"}"#.to_vec(), width: 0, height: 0,
+            }, moss_voice_server::wake_assets::AssetEntry { name: "f.bin".into(), data: vec![1; 10], width: 0, height: 0 }]).unwrap();
+            std::fs::write(&base_path, &base).unwrap();
+            assert_eq!(builtin.wakeword_import_base(&base_path).unwrap()["text_font"], "f.bin");
+            assert_eq!(builtin.wakeword_status().unwrap()["base"]["files"], 2);
+            std::fs::write(&base_path, b"not a package").unwrap();
+            assert!(builtin.wakeword_import_base(&base_path).is_err());
+            assert_eq!(builtin.wakeword_status().unwrap()["base"]["files"], 2, "a bad import keeps the old base");
+            builtin.wakeword_manage(&serde_json::json!({"action": "clear_base", "confirmed": true})).unwrap();
+            assert!(builtin.wakeword_status().unwrap()["base"].is_null());
+        }
+
+        #[test]
         fn n59_role_settings_apply_without_restart_and_spoken_switch_is_saved() {
             let server_ids: Vec<&str> = moss_voice_server::persona::BUILTINS.iter().map(|b| b.id).collect();
             assert_eq!(server_ids, moss_voice::settings::BUILTIN_PERSONA_IDS, "settings and server role lists must match");
@@ -4578,23 +5143,32 @@ mod imp {
 
         #[test]
         fn local_laya_device_selection_lifecycle_and_jev_save_preserve_local_routing() {
-            assert_eq!(BuiltinVoice::select_laya_device(true, None), "cuda:0");
-            assert_eq!(BuiltinVoice::select_laya_device(false, None), "cpu");
-            assert_eq!(BuiltinVoice::select_laya_device(false, Some(" cuda:1 ")), "cuda:1");
-            assert_eq!(BuiltinVoice::select_laya_device(true, Some("   ")), "cuda:0");
+            assert_eq!(BuiltinVoice::select_laya_device(true, false, None), "cuda:0");
+            assert_eq!(BuiltinVoice::select_laya_device(true, true, None), "cuda:0");
+            assert_eq!(BuiltinVoice::select_laya_device(false, true, None), "mps");
+            assert_eq!(BuiltinVoice::select_laya_device(false, false, None), "cpu");
+            assert_eq!(BuiltinVoice::select_laya_device(false, true, Some(" cuda:1 ")), "cuda:1");
+            assert_eq!(BuiltinVoice::select_laya_device(true, false, Some("   ")), "cuda:0");
             assert!(!BuiltinVoice::probe_laya_cuda_available(std::path::Path::new("nonexistent-python"), true));
             assert!(!BuiltinVoice::probe_laya_cuda_available(std::path::Path::new("nonexistent-python"), false));
+            assert!(!BuiltinVoice::probe_laya_mps_available(std::path::Path::new("nonexistent-python"), true));
+            assert!(!BuiltinVoice::probe_laya_mps_available(std::path::Path::new("nonexistent-python"), false));
 
             let temp = tempfile::tempdir().unwrap();
-            let laya_spec = local_models::spec("laya_multilingual").unwrap();
-            let laya_dir = temp.path().join("models").join("laya_multilingual");
-            for (rel, len) in std::iter::once((laya_spec.path, laya_spec.size))
-                .chain(laya_spec.extras.iter().map(|e| (e.path, e.size)))
-            {
-                let p = laya_dir.join(rel);
-                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-                std::fs::File::create(&p).unwrap().set_len(len).unwrap();
-            }
+            let fake_install = |model_id: &str| {
+                let spec = local_models::spec(model_id).unwrap();
+                let dir = temp.path().join("models").join(model_id);
+                for (rel, len) in std::iter::once((spec.path, spec.size))
+                    .chain(spec.extras.iter().map(|e| (e.path, e.size)))
+                {
+                    let p = dir.join(rel);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::File::create(&p).unwrap().set_len(len).unwrap();
+                }
+            };
+            fake_install("laya_multilingual");
+            fake_install("onejev_1_6_0_8b");
+            fake_install("onejev_1_6_4b");
 
             let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
             let mut voice_settings = moss_voice::VoiceSettings::default();
@@ -4611,6 +5185,47 @@ mod imp {
             let builtin = init(Some(host.clone())).0.unwrap();
             assert!(builtin.should_run_local_laya());
             assert!(!builtin.should_run_local_laya_for_feedback());
+            assert!(builtin.status()["local"]["onejev_env"]["accelerator"].is_string());
+            assert!(builtin.status()["local"]["onejev_env"]["accelerator_label"].is_string());
+            assert!(builtin.status()["local"]["laya_env"]["accelerator"].is_string());
+
+            // 可在本地 OneJev 0.8B / 4B / 9B 与 Laya 之间自由切换（未安装的 9B 在启用时会给出明确下载提示）
+            assert!(
+                builtin
+                    .precheck_jev_save_input(
+                        Some(&serde_json::json!({
+                            "model": "onejev_1_6_9b",
+                            "voice_enabled": true,
+                        })),
+                        false,
+                        &ModelsInput::default(),
+                        &[],
+                    )
+                    .is_err(),
+                "未下载的 OneJev 9B 不允许直接作为启用态保存"
+            );
+            let switched_onejev = builtin
+                .local_save(&serde_json::json!({
+                    "jev_filter_enabled": true,
+                    "jev_model": "onejev_1_6_4b",
+                }))
+                .unwrap();
+            assert_eq!(switched_onejev["jev"]["model"], "onejev_1_6_4b");
+            assert_eq!(
+                switched_onejev["jev"]["endpoint"],
+                moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL
+            );
+            assert_eq!(switched_onejev["jev"]["local_installed"], true);
+            assert_eq!(switched_onejev["local"]["jev_key_configured"], true);
+            assert!(builtin.should_run_local_laya());
+
+            // 切回 laya_multilingual 继续验证免密钥与备用密钥共存
+            builtin
+                .local_save(&serde_json::json!({
+                    "jev_filter_enabled": true,
+                    "jev_model": "laya_multilingual",
+                }))
+                .unwrap();
 
             // 省略 model 且无 OpenRouter API Key：保留 laya_multilingual，并允许单独开启加工反馈、关闭语音筛选
             builtin
@@ -4639,7 +5254,7 @@ mod imp {
             assert_eq!(saved_feedback_only["jev"]["feedback_enabled"], true);
             assert!(
                 builtin.should_run_local_laya_for_feedback(),
-                "仅开启加工反馈且非内置语音模式时，应用启动也应拉起本地 Laya 服务"
+                "仅开启加工反馈且非内置语音模式时，应用启动也应拉起本地 Jev 服务"
             );
 
             // 录入备用 OpenRouter 密钥但不传/不改本地模型：写入密钥且不覆盖本地路由
@@ -4659,9 +5274,139 @@ mod imp {
                 Some("sk-or-backup-only")
             );
 
-            // 删除本地 Laya 权重后：修改无关的本地语速不因 Laya 缺失报 412，且关闭全部开关可正常保存并递增停止代次
+            // 删除未激活的 onejev_1_6_0_8b 不递增当前运行代次；切换到 onejev_1_6_4b 后删除闲置 laya_multilingual 也不误停当前网关
             let gen_before = builtin.laya.lock().unwrap().generation;
+            builtin.model_delete("onejev_1_6_0_8b").unwrap();
+            assert_eq!(builtin.laya.lock().unwrap().generation, gen_before);
+            builtin
+                .local_save(&serde_json::json!({
+                    "jev_filter_enabled": true,
+                    "jev_model": "onejev_1_6_4b",
+                }))
+                .unwrap();
+            let gen_on_onejev = builtin.laya.lock().unwrap().generation;
             builtin.model_delete("laya_multilingual").unwrap();
+            assert_eq!(
+                builtin.laya.lock().unwrap().generation,
+                gen_on_onejev,
+                "运行 onejev_1_6_4b 时删除闲置 laya_multilingual 不得误停当前 Jev 进程"
+            );
+            // 当反馈关闭、仅语音筛选开启时：原地重启（keep_local_jev=true）不打断在途预热，完整停止（false）才回收
+            builtin
+                .jev_save(
+                    Some(&serde_json::json!({
+                        "voice_enabled": true,
+                        "feedback_enabled": false,
+                        "model": "onejev_1_6_4b",
+                    })),
+                    false,
+                )
+                .unwrap();
+            let in_flight_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut runner = builtin.laya.lock().unwrap();
+                runner.starting_model = Some("onejev_1_6_4b".to_owned());
+                runner.starting_cancel = Some(in_flight_cancel.clone());
+            }
+            let gen_keep = builtin.laya.lock().unwrap().generation;
+            builtin.stop_locked_inner(true);
+            assert!(!in_flight_cancel.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(builtin.laya.lock().unwrap().generation, gen_keep);
+            builtin.stop_locked_inner(false);
+            assert!(in_flight_cancel.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(builtin.laya.lock().unwrap().generation > gen_keep);
+
+            // 删除正在后台加载权重的模型时：必须先置位取消并等待 jev_start_lock 释放，才允许删除磁盘目录
+            let bg_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let bg_cleaned_before_delete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut runner = builtin.laya.lock().unwrap();
+                runner.starting_model = Some("onejev_1_6_4b".to_owned());
+                runner.starting_cancel = Some(bg_cancel.clone());
+            }
+            let start_lock_clone = builtin.jev_start_lock.clone();
+            let model_dir_check = builtin.models.path_if_installed("onejev_1_6_4b").unwrap();
+            let cancel_for_bg = bg_cancel.clone();
+            let cleaned_flag = bg_cleaned_before_delete.clone();
+            let lock_acquired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let lock_acquired_bg = lock_acquired.clone();
+            let bg_worker = std::thread::spawn(move || {
+                let _g = start_lock_clone.lock().unwrap();
+                lock_acquired_bg.store(true, std::sync::atomic::Ordering::SeqCst);
+                while !cancel_for_bg.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                // 在释放 jev_start_lock 前，模型权重目录必须尚未被删除（Windows 下否则触发共享冲突）
+                if model_dir_check.exists() {
+                    cleaned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            while !lock_acquired.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let gen_before_del = builtin.laya.lock().unwrap().generation;
+            builtin.model_delete("onejev_1_6_4b").unwrap();
+            bg_worker.join().unwrap();
+            assert!(bg_cleaned_before_delete.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(builtin.laya.lock().unwrap().generation > gen_before_del);
+            assert!(builtin.models.path_if_installed("onejev_1_6_4b").is_none());
+
+            // 先切回 off 触发非阻塞取消（starting_model -> cancelling_model），紧接着删 onejev_1_6_9b 也必须等 jev_start_lock 释放
+            fake_install("onejev_1_6_9b");
+            let cancel_9b = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut runner = builtin.laya.lock().unwrap();
+                runner.starting_model = Some("onejev_1_6_9b".to_owned());
+                runner.starting_cancel = Some(cancel_9b.clone());
+            }
+            let lock_9b = builtin.jev_start_lock.clone();
+            let dir_9b_check = builtin.models.path_if_installed("onejev_1_6_9b").unwrap();
+            let survived_until_unlock = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let survived_bg = survived_until_unlock.clone();
+            let locked_9b = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let locked_9b_bg = locked_9b.clone();
+            let cancel_9b_bg = cancel_9b.clone();
+            let worker_9b = std::thread::spawn(move || {
+                let _g = lock_9b.lock().unwrap();
+                locked_9b_bg.store(true, std::sync::atomic::Ordering::SeqCst);
+                while !cancel_9b_bg.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                if dir_9b_check.exists() {
+                    survived_bg.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            while !locked_9b.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            builtin
+                .local_save(&serde_json::json!({
+                    "jev_filter_enabled": false,
+                    "jev_model": "typesafe/jev-latest",
+                }))
+                .unwrap();
+            assert_eq!(
+                builtin.laya.lock().unwrap().cancelling_model.as_deref(),
+                Some("onejev_1_6_9b")
+            );
+            builtin.model_delete("onejev_1_6_9b").unwrap();
+            worker_9b.join().unwrap();
+            assert!(survived_until_unlock.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(builtin.laya.lock().unwrap().cancelling_model.is_none());
+            assert!(builtin.models.path_if_installed("onejev_1_6_9b").is_none());
+
+            if std::env::var_os("MOSS_LAYA_ROOT").is_none()
+                && std::env::var_os("MOSS_LAYA_PYTHON").is_none()
+            {
+                let (laya_root, laya_py) = BuiltinVoice::resolve_laya_python();
+                let tmp = std::env::temp_dir();
+                assert!(
+                    !laya_root.starts_with(&tmp) && !laya_py.starts_with(&tmp),
+                    "resolve_laya_python must never probe world-writable temp_dir"
+                );
+            }
             let saved_speed = builtin
                 .local_save(&serde_json::json!({ "tts_speed": 1.25 }))
                 .unwrap();
@@ -4704,7 +5449,7 @@ mod imp {
                     let _ = stream.write_all(b"NOT_HTTP_BANNER\r\n");
                 }
             });
-            assert!(!probe_laya_http(non_http_addr, std::time::Duration::from_millis(200)));
+            assert!(probe_local_jev_health_model(non_http_addr, std::time::Duration::from_millis(200)).is_none());
 
             for bad_http in [
                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found".as_slice(),
@@ -4722,7 +5467,7 @@ mod imp {
                         let _ = stream.write_all(&reply);
                     }
                 });
-                assert!(!probe_laya_http(addr, std::time::Duration::from_millis(200)));
+                assert!(probe_local_jev_health_model(addr, std::time::Duration::from_millis(200)).is_none());
             }
 
             let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4736,7 +5481,55 @@ mod imp {
                     );
                 }
             });
-            assert!(probe_laya_http(http_addr, std::time::Duration::from_millis(200)));
+            assert_eq!(
+                probe_local_jev_health_model(http_addr, std::time::Duration::from_millis(200)).as_deref(),
+                Some("laya_multilingual")
+            );
+
+            let onejev_http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let onejev_addr = onejev_http.local_addr().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = onejev_http.accept() {
+                    let mut buf = [0u8; 256];
+                    let _ = stream.read(&mut buf);
+                    let body = serde_json::to_vec(&moss_voice::onejev::health_payload(
+                        "onejev_1_6_4b",
+                        "Apple Metal GPU",
+                    ))
+                    .unwrap();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+            });
+            assert_eq!(
+                probe_local_jev_health_model(onejev_addr, std::time::Duration::from_millis(200)).as_deref(),
+                Some("onejev_1_6_4b")
+            );
+
+            // 外部上游 qev / OneJev 服务（不含 engine 字段，但含 fork_mode 与自定义 model）不得被误判为 laya_multilingual
+            let ext_http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let ext_addr = ext_http.local_addr().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = ext_http.accept() {
+                    let mut buf = [0u8; 256];
+                    let _ = stream.read(&mut buf);
+                    let body = br#"{"status":"ok","fork_mode":"llama.cpp","model":"custom-qev"}"#;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(body);
+                }
+            });
+            assert_eq!(
+                probe_local_jev_health_model(ext_addr, std::time::Duration::from_millis(200)).as_deref(),
+                Some("external_onejev:custom-qev")
+            );
         }
     }
 
@@ -4802,11 +5595,12 @@ mod imp {
             .collect()
     }
 
-    /// MOSS 退出时停止内置语音服务及本地 Laya 子进程（在急停之后调用）。
+    /// MOSS 退出时停止内置语音服务及本地 Jev（OneJev / Laya）子进程（在急停之后调用）。
     pub fn shutdown(app: &tauri::AppHandle) {
         if let Ok(builtin) = builtin(app) {
             builtin.stop();
-            builtin.stop_laya();
+            // 等待已被 starting_cancel 中断的后台启动线程完成子进程回收，杜绝退出时残留孤儿 llama-server
+            builtin.stop_laya_and_wait();
         }
     }
 }
@@ -5293,6 +6087,48 @@ pub async fn voice_firmware_manage(app:tauri::AppHandle,window:tauri::WebviewWin
     require_voice_private_asset(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.firmware_manage(&input)).await;
+    #[cfg(mobile)]
+    let result=desktop_only((app,input));
+    result
+}
+/// n61 设备唤醒词（只认打包私密页，与固件推送同级）。
+#[tauri::command]
+pub async fn voice_wakeword_status(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+    #[cfg(desktop)]
+    require_voice_private_asset(&window)?;
+    #[cfg(desktop)]
+    let result=imp::run(app,|voice|voice.wakeword_status()).await;
+    #[cfg(mobile)]
+    let result=desktop_only(app);
+    result
+}
+/// 弹出文件选择框导入基础资源包；路径和内容都不来自网页。
+#[tauri::command]
+pub async fn voice_wakeword_import_base(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+    #[cfg(desktop)]
+    require_voice_private_asset(&window)?;
+    #[cfg(desktop)]
+    let result={
+        let picker=app.clone();
+        let picked=tauri::async_runtime::spawn_blocking(move||{
+            use tauri_plugin_dialog::DialogExt;
+            picker.dialog().file().set_title("选择小智资源包（assets.bin）").add_filter("资源包",&["bin"]).blocking_pick_file().and_then(|p|p.into_path().ok())
+        }).await.map_err(|_|serde_json::json!({"code":"wakeword_invalid","message":"选择资源包失败"}))?;
+        match picked {
+            None=>Ok(Value::Null),
+            Some(path)=>imp::run(app,move|voice|voice.wakeword_import_base(&path)).await,
+        }
+    };
+    #[cfg(mobile)]
+    let result=desktop_only(app);
+    result
+}
+#[tauri::command]
+pub async fn voice_wakeword_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+    #[cfg(desktop)]
+    require_voice_private_asset(&window)?;
+    #[cfg(desktop)]
+    let result=imp::run(app,move|voice|voice.wakeword_manage(&input)).await;
     #[cfg(mobile)]
     let result=desktop_only((app,input));
     result

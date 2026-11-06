@@ -45,7 +45,7 @@ MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 ### 2026-10-18 UI-4 入口收敛
 
 - 主窗口的“隐私与家居”是四项各自的下拉：点开哪一项，就在主页面原地展开对应设置（记忆 / 信息服务 / 声纹 / 家居，含“长期记忆、资料与恢复摘要”与“家居审批”两个次级折叠），未展开时不发任何私密命令。这是 n26（2026-10-18 用户决定）对 n25 的修订，见下节。
-- `open_voice_private` 与打包的 `voice-private.html` 仍然保留：只接受 `overview/memory/plugins/speaker/home/approvals/firmware` 固定目标，固件入口仍在“服务与设备”用它打开。
+- `open_voice_private` 与打包的 `voice-private.html` 仍然保留：只接受 `overview/memory/plugins/speaker/home/approvals/firmware` 固定目标，固件入口仍在“服务与设备”用它打开。n61（2026-11-06）的 `voice_wakeword_status / voice_wakeword_import_base / voice_wakeword_manage` 与固件命令同级：只授予 `voice-memory.json`、命令内复核 `require_voice_private_asset`，主窗口能力文件不含它们。
 
 ### 2026-10-18 n26 主窗口就地展开（权限扩大，已获用户明确同意）
 

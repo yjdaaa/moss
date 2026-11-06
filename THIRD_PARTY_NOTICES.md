@@ -13,7 +13,11 @@ Geist 与 Geist Mono 来自官方 [vercel/geist-font](https://github.com/vercel/
 ## 本地模型辅助程序与模型文件（NV6）
 
 - **辅助程序 `moss-voice-local`**（`apps/moss-voice-local/`）以 **GPL-3.0-or-later** 单独发布，全文见 `apps/moss-voice-local/COPYING`。原因：它静态链接的 sherpa-onnx（Apache-2.0）预编译库包含 espeak-ng（GPL-3.0）。MOSS 本体（MIT）不链接它，只经标准输入输出通信；分发安装包时须一并提供该目录源码与 `COPYING`（技术书 §11.2，V5）。
-- **模型文件不随 MOSS 分发**：由用户在语音中心按需从 sherpa-onnx 官方发布地址（或用户填写的镜像）下载，各自适用其上游许可：Silero VAD（MIT）、TEN-VAD（Apache-2.0 附加条款：不得以与 Agora 竞争的方式部署，详见 TEN-framework/ten-vad 的 LICENSE）、SenseVoice（模型目录内 `LICENSE`）、X-ASR 流式识别（Apache-2.0，Gilgamesh-J/X-ASR）、Kokoro v1.0 / v1.1（Apache-2.0，模型目录内 `LICENSE`）、Matcha 中英（Apache-2.0，ModelScope dengcunqin/matcha_tts_zh_en_20251010）及其声码器 `vocos-16khz-univ.onnx`（sherpa-onnx `vocoder-models` 发布）。下载后校验 SHA-256（取自 GitHub 发布页的资产摘要）。
+- **模型文件不随 MOSS 分发**：由用户在语音中心按需从官方发布地址（或用户填写的镜像）下载，各自适用其上游许可：Silero VAD（MIT）、TEN-VAD（Apache-2.0 附加条款：不得以与 Agora 竞争的方式部署，详见 TEN-framework/ten-vad 的 LICENSE）、SenseVoice（模型目录内 `LICENSE`）、X-ASR 流式识别（Apache-2.0，Gilgamesh-J/X-ASR）、Kokoro v1.0 / v1.1（Apache-2.0，模型目录内 `LICENSE`）、Matcha 中英（Apache-2.0，ModelScope dengcunqin/matcha_tts_zh_en_20251010）及其声码器 `vocos-16khz-univ.onnx`（sherpa-onnx `vocoder-models` 发布）、Laya 多语种决策（Apache-2.0，ConvAIInnovations/laya-multilingual）、OneJev 1.6 0.8B / 4B / 9B GGUF（Apache-2.0，OmniJev/OneJev1.6-*-GGUF）。OneJev 按需下载的推理程序 `llama-server` 来自官方 [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) `b12167` 预编译包（MIT License，解压含上游 `LICENSE`），MOSS 只经本机回环 HTTP 调用、不链接。所有文件下载后均校验 SHA-256。
+
+## 设备唤醒词模型文件（n61）
+
+`crates/moss-voice-server/assets/esp-sr/` 下的 MultiNet6 中文模型 `mn6_cn`、`fst` 命令词表与 WakeNet9 `wn9_nihaoxiaozhi_tts` 原样取自乐鑫 [ESP-SR](https://github.com/espressif/esp-sr)（经 [78/xiaozhi-assets-generator](https://github.com/78/xiaozhi-assets-generator) 提交 `55517b40d724014faff00f941ca700cbf9d14b51` 转载，MIT，Copyright (c) 2025 Shenzhen Xinzhi Future Technology Co., Ltd.）。ESP-SR 使用 ESPRESSIF MIT License（仅限在乐鑫芯片产品上使用），全文见同目录 `LICENSE`。MOSS 只把它们打进下发给 ESP32 小智设备的资源包，桌面端不运行这些模型。资源包格式参照 xiaozhi-assets-generator 的 `SpiffsGenerator` / `WakenetModelPacker` 用 Rust 重写。
 
 ## 借用或参考的项目
 
@@ -23,6 +27,7 @@ Geist 与 Geist Mono 来自官方 [vercel/geist-font](https://github.com/vercel/
 | xiaozhi-esp32-server | <https://github.com/xinnan-tech/xiaozhi-esp32-server> | `7a260ee` | MIT，Copyright (c) 2025 xinnan-tech | 设备鉴权与 OTA 语义、VAD 参数、对话与工具调度、设备 MCP、插件、记忆、视觉、固件下发规则（按行为用 Rust 重写） |
 | xiaozhi-client | <https://github.com/shenjingnan/xiaozhi-client> | `fe3c382` | MIT，Copyright (c) 2025 shenjingnan | 多接入点、工具命名与开关、第三方 MCP 聚合、心跳与重连（按思路用 Rust 重写） |
 | univoice（Rust 版，`main-rs` 分支） | <https://github.com/shenjingnan/univoice> | `021113f` | MIT，Copyright (c) 2026 shenjingnan | 豆包流式识别与双向流式合成的二进制帧协议，已移植到 `crates/moss-voice-providers/src/doubao/{sauc.rs,bidirection.rs}`（NV7；按 crates.io 0.1.6 源码移植，与该提交对应） |
+| OneJev | <https://github.com/OmniJev/OneJev> | `main`（1.6） | Apache-2.0，OmniJev | `qev-labels-v2` / `onejev-slot-v2` 结构化提示词格式与单 token 对数概率读出规则，已在 `crates/moss-voice/src/onejev.rs` 按协议用 Rust 重写 |
 
 ## 许可文本
 

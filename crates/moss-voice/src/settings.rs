@@ -136,33 +136,96 @@ pub fn validate_barge_in_ms(ms: u64) -> Result<u32, String> {
 
 pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-1.14";
 pub const LOCAL_LAYA_JEV_MODEL: &str = "laya_multilingual";
+pub const LOCAL_ONEJEV_0_8B_MODEL: &str = "onejev_1_6_0_8b";
+pub const LOCAL_ONEJEV_4B_MODEL: &str = "onejev_1_6_4b";
+pub const LOCAL_ONEJEV_9B_MODEL: &str = "onejev_1_6_9b";
+pub const LOCAL_JEV_MODEL_IDS: [&str; 4] = [
+    LOCAL_ONEJEV_0_8B_MODEL,
+    LOCAL_ONEJEV_4B_MODEL,
+    LOCAL_ONEJEV_9B_MODEL,
+    LOCAL_LAYA_JEV_MODEL,
+];
 
 pub fn default_jev_model() -> String {
     DEFAULT_JEV_MODEL.to_owned()
 }
 
+/// 将用户填写或旧配置中的本地 Jev 模型别名归一为内置模型 id；云端或未知模型返回 `None`。
+pub fn canonical_local_jev_model(raw: &str) -> Option<&'static str> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("laya_multilingual")
+        || trimmed.eq_ignore_ascii_case("laya/multilingual")
+        || trimmed.eq_ignore_ascii_case("convaiinnovations/laya-multilingual")
+        || trimmed.eq_ignore_ascii_case("local/laya-multilingual")
+    {
+        return Some(LOCAL_LAYA_JEV_MODEL);
+    }
+    if trimmed.eq_ignore_ascii_case("onejev_1_6_0_8b")
+        || trimmed.eq_ignore_ascii_case("OmniJev/OneJev1.6-0.8B")
+        || trimmed.eq_ignore_ascii_case("onejev1.6-0.8b")
+        || trimmed.eq_ignore_ascii_case("onejev-1.6-0.8b")
+        || trimmed.eq_ignore_ascii_case("local/onejev-1.6-0.8b")
+    {
+        return Some(LOCAL_ONEJEV_0_8B_MODEL);
+    }
+    if trimmed.eq_ignore_ascii_case("onejev_1_6_4b")
+        || trimmed.eq_ignore_ascii_case("OmniJev/OneJev1.6-4B")
+        || trimmed.eq_ignore_ascii_case("onejev1.6-4b")
+        || trimmed.eq_ignore_ascii_case("onejev-1.6-4b")
+        || trimmed.eq_ignore_ascii_case("local/onejev-1.6-4b")
+    {
+        return Some(LOCAL_ONEJEV_4B_MODEL);
+    }
+    if trimmed.eq_ignore_ascii_case("onejev_1_6_9b")
+        || trimmed.eq_ignore_ascii_case("OmniJev/OneJev1.6-9B")
+        || trimmed.eq_ignore_ascii_case("onejev1.6-9b")
+        || trimmed.eq_ignore_ascii_case("onejev-1.6-9b")
+        || trimmed.eq_ignore_ascii_case("local/onejev-1.6-9b")
+    {
+        return Some(LOCAL_ONEJEV_9B_MODEL);
+    }
+    None
+}
+
 pub fn is_local_laya_model(raw: &str) -> bool {
+    canonical_local_jev_model(raw) == Some(LOCAL_LAYA_JEV_MODEL)
+}
+
+pub fn is_local_onejev_model(raw: &str) -> bool {
     matches!(
-        raw.trim(),
-        "laya_multilingual" | "convaiinnovations/laya-multilingual" | "local/laya-multilingual"
+        canonical_local_jev_model(raw),
+        Some(LOCAL_ONEJEV_0_8B_MODEL | LOCAL_ONEJEV_4B_MODEL | LOCAL_ONEJEV_9B_MODEL)
     )
 }
 
-/// 校验 Jev 决策模型名：允许 OpenRouter Decisions 的 `typesafe/jev-*` 系列或本地 `laya_multilingual`。
+pub fn is_local_jev_model(raw: &str) -> bool {
+    canonical_local_jev_model(raw).is_some()
+}
+
+/// 发往本地 `127.0.0.1:18090/v1/systemone` 的上游模型字段名：Laya 需 `"multilingual"`，OneJev 兼容别名 `"jev-latest"`。
+pub fn local_jev_upstream_model_name(raw: &str) -> &'static str {
+    if is_local_laya_model(raw) {
+        "multilingual"
+    } else {
+        "jev-latest"
+    }
+}
+
+/// 校验 Jev 决策模型名：允许 OpenRouter Decisions 的 `typesafe/jev-*` 系列，或本地 `OneJev 1.6 (0.8B/4B/9B)` 与 `laya_multilingual`。
 pub fn validate_jev_model(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
-    if is_local_laya_model(trimmed) {
-        return Ok(LOCAL_LAYA_JEV_MODEL.to_owned());
+    if let Some(canonical) = canonical_local_jev_model(trimmed) {
+        return Ok(canonical.to_owned());
     }
     let Some(suffix) = trimmed.strip_prefix("typesafe/jev-") else {
-        return Err("Jev 模型须以 typesafe/jev- 开头或选用本地 laya_multilingual（如 typesafe/jev-1.14 或 typesafe/jev-1.13）".into());
+        return Err("Jev 模型须以 typesafe/jev- 开头，或选用本地 OneJev 1.6（0.8B/4B/9B）/ laya_multilingual".into());
     };
     if suffix.is_empty()
         || trimmed.len() > 64
         || suffix.contains("..")
         || !suffix.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
-        return Err("Jev 模型名称格式不正确（如 typesafe/jev-1.14、typesafe/jev-1.13 或本地 laya_multilingual）".into());
+        return Err("Jev 模型名称格式不正确（如 typesafe/jev-1.14、onejev_1_6_0_8b 或 laya_multilingual）".into());
     }
     Ok(trimmed.to_owned())
 }
@@ -622,10 +685,13 @@ impl BuiltinLocal {
     /// 某类别打开了本地开关时选用的模型（开关关闭或模型 id 无效时为空）。
     pub fn selected(&self, kind: ModelKind) -> Option<&'static ModelSpec> {
         let (enabled, id) = match kind {
-            ModelKind::Vad => (self.vad, &self.vad_model),
-            ModelKind::Asr => (self.asr, &self.asr_model),
-            ModelKind::Tts => (self.tts, &self.tts_model),
-            ModelKind::Jev => (self.jev_filter_enabled && is_local_laya_model(&self.jev_model), &self.jev_model),
+            ModelKind::Vad => (self.vad, self.vad_model.as_str()),
+            ModelKind::Asr => (self.asr, self.asr_model.as_str()),
+            ModelKind::Tts => (self.tts, self.tts_model.as_str()),
+            ModelKind::Jev => {
+                let canonical = canonical_local_jev_model(&self.jev_model);
+                (self.jev_filter_enabled && canonical.is_some(), canonical.unwrap_or(self.jev_model.as_str()))
+            }
             ModelKind::Speaker => return None,
         };
         enabled.then(|| crate::local_models::spec_of(id, kind)).flatten()
@@ -1762,6 +1828,12 @@ mod tests {
         assert_eq!(old.jev_model, DEFAULT_JEV_MODEL);
         assert!(old.jev_unfinished_hold && old.jev_fast_route && old.jev_tool_prune && old.jev_memory_filter);
         assert_eq!(validate_jev_model(" typesafe/jev-1.13 ").unwrap(), "typesafe/jev-1.13");
+        assert_eq!(validate_jev_model("laya_multilingual").unwrap(), LOCAL_LAYA_JEV_MODEL);
+        assert_eq!(validate_jev_model("OmniJev/OneJev1.6-0.8B").unwrap(), LOCAL_ONEJEV_0_8B_MODEL);
+        assert_eq!(validate_jev_model("onejev_1_6_4b").unwrap(), LOCAL_ONEJEV_4B_MODEL);
+        assert_eq!(validate_jev_model("onejev1.6-9b").unwrap(), LOCAL_ONEJEV_9B_MODEL);
+        assert_eq!(local_jev_upstream_model_name(LOCAL_LAYA_JEV_MODEL), "multilingual");
+        assert_eq!(local_jev_upstream_model_name(LOCAL_ONEJEV_0_8B_MODEL), "jev-latest");
         assert!(validate_jev_model("openai/gpt-4o").is_err());
         assert!(validate_jev_model("typesafe/jev-../x").is_err());
         let custom = BuiltinLocal {

@@ -2555,6 +2555,52 @@ fn user_only_device_tools_are_hidden_from_llm_but_usable_by_host_and_preview_pus
 }
 
 #[test]
+fn n61_wake_word_package_is_pushed_by_url_then_reboot_and_served_once_staged() {
+    let llm = FakeLlm { rounds: Mutex::new(VecDeque::from([say(&["收到。"])])), repeat: None, seen: Mutex::default() };
+    let (server, registry, fakes) = start_chat(llm, &["随便聊聊"], Duration::from_secs(120));
+    let mut device = allowed_device_with(&server, &registry, 1, true);
+    let initialize = read_mcp(&mut device);
+    reply_mcp(&mut device, &initialize["id"], serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}));
+    assert_eq!(read_mcp(&mut device)["method"], "notifications/initialized");
+    let list_req = read_mcp(&mut device);
+    reply_mcp(
+        &mut device,
+        &list_req["id"],
+        serde_json::json!({"tools": [
+            {"name": "self.get_device_status", "description": "状态", "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "self.reboot", "description": "重启", "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "self.assets.set_download_url", "description": "资源", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}}
+        ]}),
+    );
+    speak_manual(&mut device, 1, 600);
+    let _ = collect_items(&mut device);
+    assert_eq!(fakes.llm.seen.lock().unwrap()[0].1, 2, "资源包工具是 user-only，模型看不到也调不了");
+
+    let dev_id = server.status().sessions[0].device_id.clone();
+    assert!(server.install_wake_assets("someone-else", vec![1]).is_err(), "不在线的设备不推送");
+    let package = crate::wake_assets::build_package(
+        None,
+        &crate::wake_assets::WakeTarget::Custom(crate::wake_assets::WakeWord::new("你好 MOSS", "ni hao mo si", 0.2).unwrap()),
+    )
+    .unwrap();
+    server.install_wake_assets(&dev_id, package.clone()).unwrap();
+    let set_url = read_mcp(&mut device);
+    assert_eq!(set_url["params"]["name"], "self.assets.set_download_url");
+    let url = set_url["params"]["arguments"]["url"].as_str().unwrap().to_owned();
+    assert!(url.starts_with("http://") && url.contains("/xiaozhi/assets/") && url.ends_with(".bin"));
+    let reboot = read_mcp(&mut device);
+    assert_eq!(reboot["params"]["name"], "self.reboot", "先记下载地址，再重启让设备自己下载");
+
+    let resp = reqwest::blocking::get(&url).unwrap();
+    assert_eq!(resp.status(), 200);
+    let content_len: usize = resp.headers().get(reqwest::header::CONTENT_LENGTH).unwrap().to_str().unwrap().parse().unwrap();
+    let body = resp.bytes().unwrap();
+    assert_eq!((content_len, body.as_ref()), (package.len(), package.as_slice()), "固件按 Content-Length 判断分区放不放得下");
+    let wrong = url.replace("/xiaozhi/assets/", "/xiaozhi/assets/0").replacen(".bin", "", 1);
+    assert_eq!(reqwest::blocking::get(&wrong).unwrap().status(), 404);
+}
+
+#[test]
 fn persona_style_clock_anti_parrot_asr_corrections_and_debug_traces_work_end_to_end() {
     use crate::conversation::{IMMUTABLE_SAFETY_RULES, compose_persona_system_prompt};
 

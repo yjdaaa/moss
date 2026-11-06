@@ -15,6 +15,7 @@ import { showAlert, showConfirm } from "./appDialog.js";
 import { getJson, postJson } from "./api/client.js";
 import { backendStartupErrorText, hasDesktopSession, initializeBackendOrigin, isRemoteMode, refreshDesktopSession } from "./authSession.js";
 import { ApprovalCenter } from "./components/ApprovalCenter.jsx";
+import { AiPreviewCenter } from "./components/AiPreviewCenter.jsx";
 import { JobProgressDock } from "./components/JobProgressDock.jsx";
 import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
@@ -360,6 +361,8 @@ function App() {
         onOpenChange={setApprovalOpen}
         onPendingCountChange={setApprovalCount}
       />
+
+      <AiPreviewCenter />
 
       <JobProgressDock onJobsChange={setActiveJobs} />
 

@@ -559,6 +559,8 @@ struct RuntimeGuard {
 pub struct VoiceJevFilter {
     client: Arc<dyn DecisionClient>,
     options: JevFilterOptions,
+    turn_timeout: Duration,
+    hold_timeout: Duration,
     turn_in_flight: Semaphore,
     prewarm_in_flight: Semaphore,
     guard: Mutex<RuntimeGuard>,
@@ -568,6 +570,8 @@ impl std::fmt::Debug for VoiceJevFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VoiceJevFilter")
             .field("options", &self.options)
+            .field("turn_timeout", &self.turn_timeout)
+            .field("hold_timeout", &self.hold_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -577,6 +581,8 @@ impl VoiceJevFilter {
         Self {
             client,
             options,
+            turn_timeout: TURN_TIMEOUT,
+            hold_timeout: HOLD_TIMEOUT,
             turn_in_flight: Semaphore::new(MAX_IN_FLIGHT),
             prewarm_in_flight: Semaphore::new(MAX_PREWARM_IN_FLIGHT),
             guard: Mutex::new(RuntimeGuard {
@@ -585,6 +591,12 @@ impl VoiceJevFilter {
                 cache: VecDeque::with_capacity(CACHE_CAPACITY),
             }),
         }
+    }
+
+    pub fn with_timeouts(mut self, turn_timeout: Duration, hold_timeout: Duration) -> Self {
+        self.turn_timeout = turn_timeout;
+        self.hold_timeout = hold_timeout;
+        self
     }
 
     pub fn options(&self) -> JevFilterOptions {
@@ -680,7 +692,7 @@ impl VoiceJevFilter {
         }
         // 抢跑时顺便把快答路由和工具筛选一起带上并写入 60s 缓存；若最终识别文本一致，正轮直接 0ms 命中缓存
         let decision = self
-            .evaluate_internal(interim_text, history, tools, &[], true, HOLD_TIMEOUT)
+            .evaluate_internal(interim_text, history, tools, &[], true, self.hold_timeout)
             .await;
         decision.applied && decision.unfinished
     }
@@ -703,7 +715,7 @@ impl VoiceJevFilter {
         {
             return JevTurnDecision::passthrough();
         }
-        self.evaluate_internal(text, history, tools, memory_candidates, false, TURN_TIMEOUT)
+        self.evaluate_internal(text, history, tools, memory_candidates, false, self.turn_timeout)
             .await
     }
 

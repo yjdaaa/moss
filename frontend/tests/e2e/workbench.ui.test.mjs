@@ -90,7 +90,7 @@ test("[UI-01] 工作台: 生成 → 发送 → 发送中在任务浮层点「取
   const rec = await startRecordingGrbl({ ackDelayMs: 100 });
   const { context, page, diagnose } = await openWorkbench(rec.port);
   try {
-    await generateAndSend(page, { text: "MOSS-UI-CANCEL-E2E", fontSizeMm: 30 });
+    await generateAndSend(page, { text: "MOSS-UI-E2E", fontSizeMm: 11 }); // 约 80 mm 宽，须在 100 mm 幅面内
     await waitFor(() => rec.events.includes("line"), "设备必须先收到刀路行，取消才算发生在发送中");
 
     await page.locator("#job-progress-cancel-0").click({ timeout: STEP_TIMEOUT_MS });

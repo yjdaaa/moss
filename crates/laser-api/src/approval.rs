@@ -1503,7 +1503,8 @@ pub(crate) fn safe_action_digest_facts(object: &Map<String, Value>) -> Map<Strin
 /// 走边框的摘要要素（路由创建审批与批准时重算共用）。
 pub(crate) fn framing_digest_facts(object: &Map<String, Value>) -> Map<String, Value> {
     let mut facts = Map::new();
-    for key in ["min_x", "min_y", "max_x", "max_y", "feed_rate", "power"] {
+    // relative_to_head（2026-11-06）改变走边框的参照点，必须进入摘要；未带该字段的请求摘要不变
+    for key in ["min_x", "min_y", "max_x", "max_y", "feed_rate", "power", "relative_to_head"] {
         if let Some(value) = object.get(key).filter(|value| !value.is_null()) {
             facts.insert(key.into(), value.clone());
         }

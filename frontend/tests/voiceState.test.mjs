@@ -1148,6 +1148,117 @@ test("本地 Laya 激活时保存 Jev 卡片开关或备用密钥，不会把本
   assert.equal(switchDeletedToCloud.api_key, "sk-or-v1-new-cloud");
 });
 
+test("OneJev 1.6 (0.8B / 4B / 9B) 与 Laya 本地决策模型共存：规范化、按模型独立检查安装态、顶部下拉与备用密钥互不覆盖", async () => {
+  const {
+    builtinJevForm,
+    builtinJevSavePayload,
+    builtinJevSummary,
+    builtinSectionSourceView,
+    builtinSourceSwitchPatch,
+    builtinSourceSwitchPayload,
+    canonicalLocalJevModel,
+    isLocalJevModel,
+    isLocalLayaJevModel,
+    isLocalOneJevModel,
+    isSpecificLocalJevInstalled,
+  } = await import("../src/voiceState.js");
+
+  assert.equal(canonicalLocalJevModel("onejev_1_6_0_8b"), "onejev_1_6_0_8b");
+  assert.equal(canonicalLocalJevModel("OmniJev/OneJev1.6-0.8B"), "onejev_1_6_0_8b");
+  assert.equal(canonicalLocalJevModel("onejev-1.6-4b"), "onejev_1_6_4b");
+  assert.equal(canonicalLocalJevModel("OmniJev/OneJev1.6-9B"), "onejev_1_6_9b");
+  assert.equal(canonicalLocalJevModel("laya/multilingual"), "laya_multilingual");
+  assert.equal(canonicalLocalJevModel("typesafe/jev-1.14"), "");
+
+  for (const id of ["onejev_1_6_0_8b", "onejev_1_6_4b", "onejev_1_6_9b"]) {
+    assert.equal(isLocalOneJevModel(id), true, id);
+    assert.equal(isLocalLayaJevModel(id), false, id);
+    assert.equal(isLocalJevModel(id), true, id);
+  }
+  assert.equal(isLocalOneJevModel("laya_multilingual"), false);
+  assert.equal(isLocalLayaJevModel("laya_multilingual"), true);
+  assert.equal(isLocalJevModel("laya_multilingual"), true);
+
+  const catalogModels = [
+    { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", installed: true },
+    { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", installed: true },
+    { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", installed: false },
+    { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", installed: true },
+  ];
+  const baseStatus = {
+    jev: {
+      model: "onejev_1_6_4b",
+      key_set: true,
+      local_installed: true,
+      voice_enabled: true,
+      feedback_enabled: false,
+    },
+    local: {
+      jev_key_configured: true,
+      settings: { jev_filter_enabled: true, jev_model: "onejev_1_6_4b" },
+      models: catalogModels,
+    },
+  };
+
+  assert.equal(isSpecificLocalJevInstalled(baseStatus, "onejev_1_6_0_8b"), true);
+  assert.equal(isSpecificLocalJevInstalled(baseStatus, "onejev_1_6_4b"), true);
+  assert.equal(isSpecificLocalJevInstalled(baseStatus, "onejev_1_6_9b"), false, "未下载的 9B 不因其他本地 Jev 已装而误判");
+  assert.equal(isSpecificLocalJevInstalled(baseStatus, "laya_multilingual"), true);
+
+  const view4b = builtinSectionSourceView("jev", baseStatus);
+  assert.equal(view4b.source, "local");
+  assert.equal(view4b.localOn, true);
+  assert.equal(view4b.localReady, true);
+  assert.equal(view4b.selectValue, "local:onejev_1_6_4b");
+  assert.equal(view4b.activeText, "本地（OneJev 1.6 4B（均衡主力））");
+  assert.deepEqual(
+    view4b.options.filter((opt) => opt.isLocal).map((opt) => [opt.value, opt.installed]),
+    [
+      ["local:onejev_1_6_0_8b", true],
+      ["local:onejev_1_6_4b", true],
+      ["local:onejev_1_6_9b", false],
+      ["local:laya_multilingual", true],
+    ],
+  );
+  assert.equal(builtinJevSummary(baseStatus), "使用本地模型（云端设置作备用）");
+
+  // 顶部下拉在 OneJev 0.8B / 4B / 9B 与 Laya 之间自由切换
+  for (const id of ["onejev_1_6_0_8b", "onejev_1_6_4b", "onejev_1_6_9b", "laya_multilingual"]) {
+    assert.deepEqual(builtinSourceSwitchPatch(baseStatus, "jev", `local:${id}`), {
+      jev_filter_enabled: true,
+      jev_model: id,
+    });
+    const full = builtinSourceSwitchPayload(baseStatus, "jev", `local:${id}`);
+    assert.equal(full.jev_filter_enabled, true);
+    assert.equal(full.jev_model, id);
+  }
+
+  // OneJev 4B 激活时在云端 Jev 卡片打开加工反馈或保存备用密钥，保持 onejev_1_6_4b 不被覆写为云端模型
+  const baseline = builtinJevForm(baseStatus);
+  assert.equal(baseline.model, "typesafe/jev-1.14");
+  const savedFeedback = builtinJevSavePayload(baseStatus, { ...baseline, feedback_enabled: true }, baseline);
+  assert.equal(savedFeedback.model, "onejev_1_6_4b");
+  assert.equal(savedFeedback.feedback_enabled, true);
+  const savedBackupKey = builtinJevSavePayload(baseStatus, { ...baseline, api_key: "sk-or-v1-backup" }, baseline);
+  assert.equal(savedBackupKey.model, "onejev_1_6_4b");
+
+  // 若当前路由选在未下载的 9B（哪怕 Laya 已装），localReady 为 false；此时手填云端密钥可顺利切回云端
+  const uninstalled9bStatus = {
+    ...baseStatus,
+    jev: { ...baseStatus.jev, model: "onejev_1_6_9b", local_installed: false },
+    local: { ...baseStatus.local, settings: { jev_filter_enabled: true, jev_model: "onejev_1_6_9b" } },
+  };
+  const view9b = builtinSectionSourceView("jev", uninstalled9bStatus);
+  assert.equal(view9b.localReady, false);
+  assert.match(view9b.activeText, /未下载/);
+  const switchedFromUninstalled9b = builtinJevSavePayload(
+    uninstalled9bStatus,
+    { ...baseline, api_key: "sk-or-v1-cloud" },
+    baseline,
+  );
+  assert.equal(switchedFromUninstalled9b.model, "typesafe/jev-1.14");
+});
+
 test("n59：内置 MOSS 角色、自建角色的校验与保存载荷", () => {
   const base = localSettingsForm();
   const ids = personaOptions(base.custom_personas).map((opt) => opt.id);
@@ -1245,4 +1356,15 @@ test("n51：助手风格安全校验、同音错词规则与小智硬件在线�
   assert.equal(ctrl.volume, 0);
   assert.equal(ctrl.brightness, 45);
   assert.equal(ctrl.theme, "dark");
+});
+
+test("n61 wake word drafts are checked before saving", async () => {
+  const { WAKE_WORD_PRESETS, wakeWordDraftError } = await import("../src/voiceState.js");
+  assert.equal(WAKE_WORD_PRESETS[0].command, "ni hao mo si");
+  for (const preset of WAKE_WORD_PRESETS) assert.equal(wakeWordDraftError({ ...preset, threshold: 0.2 }), "");
+  assert.match(wakeWordDraftError({ text: "", command: "mo si", threshold: 0.2 }), /填写/);
+  assert.match(wakeWordDraftError({ text: "字".repeat(17), command: "mo si", threshold: 0.2 }), /16/);
+  assert.match(wakeWordDraftError({ text: "MOSS", command: "moss", threshold: 0.2 }), /2～6/);
+  assert.match(wakeWordDraftError({ text: "MOSS", command: "mó sī", threshold: 0.2 }), /声调/);
+  assert.match(wakeWordDraftError({ text: "MOSS", command: "mo si", threshold: 1 }), /阈值/);
 });

@@ -1458,19 +1458,86 @@ export function builtinModelSummary(section, entry, localOn = false) {
 }
 export const DEFAULT_JEV_MODEL = "typesafe/jev-1.14";
 export const LOCAL_LAYA_JEV_MODEL = "laya_multilingual";
+export const LOCAL_ONEJEV_0_8B_MODEL = "onejev_1_6_0_8b";
+export const LOCAL_ONEJEV_4B_MODEL = "onejev_1_6_4b";
+export const LOCAL_ONEJEV_9B_MODEL = "onejev_1_6_9b";
+export const LOCAL_JEV_FALLBACK_MODELS = [
+  { id: LOCAL_ONEJEV_0_8B_MODEL, label: "OneJev 1.6（0.8B 极速图文，Q8_0）" },
+  { id: LOCAL_ONEJEV_4B_MODEL, label: "OneJev 1.6（4B 均衡图文，Q4_K_M）" },
+  { id: LOCAL_ONEJEV_9B_MODEL, label: "OneJev 1.6（9B 旗舰图文，Q4_K_M）" },
+  { id: LOCAL_LAYA_JEV_MODEL, label: "Laya 多语言决策（322M，中英 100+ 语言）" },
+];
 export const DEFAULT_JEV_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
 export const JEV_PRESET_MODELS = [
   { id: "typesafe/jev-1.14", hint: "推荐 · 语音筛选与决策" },
   { id: "typesafe/jev-1.13", hint: "经典版 · 加工反馈" },
 ];
 
-export function isLocalLayaJevModel(rawModel) {
+export function canonicalLocalJevModel(rawModel) {
   const model = String(rawModel || "").trim();
-  return (
-    model === "laya_multilingual" ||
-    model === "convaiinnovations/laya-multilingual" ||
-    model === "local/laya-multilingual"
-  );
+  if (!model) return "";
+  const lower = model.toLowerCase();
+  if (
+    lower === "laya_multilingual" ||
+    lower === "laya/multilingual" ||
+    lower === "convaiinnovations/laya-multilingual" ||
+    lower === "local/laya-multilingual"
+  ) {
+    return LOCAL_LAYA_JEV_MODEL;
+  }
+  if (
+    lower === "onejev_1_6_0_8b" ||
+    lower === "omnijev/onejev1.6-0.8b" ||
+    lower === "onejev1.6-0.8b" ||
+    lower === "onejev-1.6-0.8b" ||
+    lower === "local/onejev-1.6-0.8b"
+  ) {
+    return LOCAL_ONEJEV_0_8B_MODEL;
+  }
+  if (
+    lower === "onejev_1_6_4b" ||
+    lower === "omnijev/onejev1.6-4b" ||
+    lower === "onejev1.6-4b" ||
+    lower === "onejev-1.6-4b" ||
+    lower === "local/onejev-1.6-4b"
+  ) {
+    return LOCAL_ONEJEV_4B_MODEL;
+  }
+  if (
+    lower === "onejev_1_6_9b" ||
+    lower === "omnijev/onejev1.6-9b" ||
+    lower === "onejev1.6-9b" ||
+    lower === "onejev-1.6-9b" ||
+    lower === "local/onejev-1.6-9b"
+  ) {
+    return LOCAL_ONEJEV_9B_MODEL;
+  }
+  return "";
+}
+
+export function isLocalLayaJevModel(rawModel) {
+  return canonicalLocalJevModel(rawModel) === LOCAL_LAYA_JEV_MODEL;
+}
+
+export function isLocalOneJevModel(rawModel) {
+  const id = canonicalLocalJevModel(rawModel);
+  return Boolean(id && id !== LOCAL_LAYA_JEV_MODEL);
+}
+
+export function isLocalJevModel(rawModel) {
+  return Boolean(canonicalLocalJevModel(rawModel));
+}
+
+export function isSpecificLocalJevInstalled(status, canonicalId) {
+  if (!canonicalId) return false;
+  const allLocal = Array.isArray(status?.local?.models) ? status.local.models : [];
+  const item = allLocal.find((m) => m && m.id === canonicalId);
+  if (item) return Boolean(item.installed);
+  const rawActive = status?.local?.settings?.jev_model || status?.jev?.model || "";
+  if (canonicalLocalJevModel(rawActive) === canonicalId) {
+    return Boolean(status?.jev?.local_installed);
+  }
+  return false;
 }
 
 export function jevModelError(rawModel) {
@@ -1486,7 +1553,7 @@ export function builtinJevForm(status) {
   const jev = status?.jev || {};
   const local = status?.local?.settings || {};
   const rawModel = jev.model || local.jev_model || DEFAULT_JEV_MODEL;
-  const cloudModel = isLocalLayaJevModel(rawModel) ? DEFAULT_JEV_MODEL : rawModel;
+  const cloudModel = isLocalJevModel(rawModel) ? DEFAULT_JEV_MODEL : rawModel;
   return {
     api_key: "",
     model: cloudModel,
@@ -1519,7 +1586,7 @@ export function builtinJevKeyPlaceholder(status) {
 
 export function builtinJevSummary(status) {
   const rawModel = status?.jev?.model || status?.local?.settings?.jev_model || DEFAULT_JEV_MODEL;
-  const isLocal = isLocalLayaJevModel(rawModel);
+  const isLocal = isLocalJevModel(rawModel);
   const voiceOn = Boolean(status?.jev?.voice_enabled ?? status?.local?.settings?.jev_filter_enabled);
   const feedbackOn = Boolean(status?.jev?.feedback_enabled);
   const cloudKeyReady = Boolean(
@@ -1549,18 +1616,15 @@ export function jevFingerprint(form) {
 
 /**
  * 构造 Jev 决策卡片的保存载荷：
- * 当当前实际路由为本地 Laya（`laya_multilingual`）且用户未主动修改云端模型名时，
- * 保留 `laya_multilingual`（只更新开关或备用 OpenRouter 密钥），绝不把本地离线路由悄悄覆写成云端模型；
+ * 当当前实际路由为本地 Jev（`OneJev 1.6` 或 `Laya`）且用户未主动修改云端模型名时，
+ * 保留当前本地模型 ID（只更新开关或备用 OpenRouter 密钥），绝不把本地离线路由悄悄覆写成云端模型；
  * 若本地权重已卸载且用户显式手填了云端 API Key，则按表单云端模型提交。
  */
 export function builtinJevSavePayload(status, form, baseline) {
   const rawModel = status?.local?.settings?.jev_model || status?.jev?.model || DEFAULT_JEV_MODEL;
-  const isCurrentLocal = isLocalLayaJevModel(rawModel);
-  const localInstalled = Boolean(
-    status?.jev?.local_installed ||
-      (Array.isArray(status?.local?.models) &&
-        status.local.models.some((m) => m && m.id === LOCAL_LAYA_JEV_MODEL && m.installed))
-  );
+  const activeLocalId = canonicalLocalJevModel(rawModel);
+  const isCurrentLocal = Boolean(activeLocalId);
+  const localInstalled = activeLocalId ? isSpecificLocalJevInstalled(status, activeLocalId) : false;
   const typedKey = String(form?.api_key || "").trim();
   const typedModel = String(form?.model || DEFAULT_JEV_MODEL).trim();
   const baseModel = String(baseline?.model || DEFAULT_JEV_MODEL).trim();
@@ -1569,7 +1633,7 @@ export function builtinJevSavePayload(status, form, baseline) {
   const preserveLocal = isCurrentLocal && !modelChanged && !switchUninstalledLocalToCloud;
   return {
     api_key: String(form?.api_key || ""),
-    model: preserveLocal ? LOCAL_LAYA_JEV_MODEL : typedModel,
+    model: preserveLocal ? activeLocalId : typedModel,
     voice_enabled: Boolean(form?.voice_enabled),
     feedback_enabled: Boolean(form?.feedback_enabled),
   };
@@ -1591,24 +1655,56 @@ export const MIX_SECTIONS = [
  * 内置服务单项（llm / asr / tts / vad / jev）的顶部下拉切换视图：
  * - `asr` / `tts` 可在“云端模型”与“本地模型”之间独立切换；
  * - `vad` 可在“内置能量判停（免下载）”与“本地判停模型（Silero VAD / TEN-VAD）”之间独立切换；
- * - `jev` 可在“关闭（仅本地规则）”、“开启 · typesafe/jev-1.14 / 1.13”与“本地 · Laya 多语言决策”之间直接切换；
+ * - `jev` 可在“关闭（仅本地规则）”、“开启 · typesafe/jev-1.14 / 1.13”与“本地 · OneJev 1.6 (0.8B/4B/9B) / Laya”之间直接切换；
  * - 切换时已保存的密钥与备用配置原样保留。
  */
 export function builtinSectionSourceView(section, status) {
   if (section === "jev") {
     const jevOn = Boolean(status?.local?.settings?.jev_filter_enabled ?? status?.jev?.voice_enabled);
     const rawJevModel = status?.local?.settings?.jev_model || status?.jev?.model || DEFAULT_JEV_MODEL;
-    const isCurrentLocal = isLocalLayaJevModel(rawJevModel);
+    const activeLocalId = canonicalLocalJevModel(rawJevModel);
+    const isCurrentLocal = Boolean(activeLocalId);
     const cloudModel = isCurrentLocal ? DEFAULT_JEV_MODEL : rawJevModel;
     const allLocal = Array.isArray(status?.local?.models) ? status.local.models : [];
-    const localLayaItem = allLocal.find((m) => m && m.id === LOCAL_LAYA_JEV_MODEL) || null;
-    const localInstalled = Boolean(status?.jev?.local_installed || localLayaItem?.installed);
+    const catalogJevItems = allLocal.filter((m) => m && m.kind === "jev");
+    const localSpecs = catalogJevItems.length > 0 ? catalogJevItems : LOCAL_JEV_FALLBACK_MODELS;
+    const localOptions = localSpecs.map((item) => {
+      const installed = catalogJevItems.length > 0 ? Boolean(item.installed) : isSpecificLocalJevInstalled(status, item.id);
+      return {
+        value: `local:${item.id}`,
+        id: item.id,
+        modelLabel: item.label,
+        isLocal: true,
+        installed,
+        label: `本地 · ${item.label}${installed ? "" : "（未下载）"}`,
+      };
+    });
+    const selectedLocalOption = isCurrentLocal
+      ? localOptions.find((item) => item.id === activeLocalId) || null
+      : null;
+    const selectedLocalModel = isCurrentLocal
+      ? catalogJevItems.find((item) => item.id === activeLocalId) ||
+        (selectedLocalOption
+          ? { id: selectedLocalOption.id, label: selectedLocalOption.modelLabel, installed: selectedLocalOption.installed }
+          : null)
+      : null;
+    const installedLocalModel =
+      (selectedLocalModel && selectedLocalModel.installed ? selectedLocalModel : null) ||
+      catalogJevItems.find((item) => item.installed) ||
+      (localOptions.find((item) => item.installed)
+        ? {
+            id: localOptions.find((item) => item.installed).id,
+            label: localOptions.find((item) => item.installed).modelLabel,
+            installed: true,
+          }
+        : null);
+    const activeLocalInstalled = Boolean(selectedLocalOption?.installed);
     const cloudKeyReady = Boolean(
       status?.jev?.key_set ||
         status?.jev?.openrouter_llm_key_set ||
         (!isCurrentLocal && status?.local?.jev_key_configured)
     );
-    const currentReady = isCurrentLocal ? localInstalled : cloudKeyReady;
+    const currentReady = isCurrentLocal ? activeLocalInstalled : cloudKeyReady;
     const presets = JEV_PRESET_MODELS.some((item) => item.id === cloudModel)
       ? JEV_PRESET_MODELS
       : [{ id: cloudModel, hint: "当前选用" }, ...JEV_PRESET_MODELS];
@@ -1622,15 +1718,9 @@ export function builtinSectionSourceView(section, status) {
         installed: cloudKeyReady,
         label: `开启 · ${item.id}${item.id === DEFAULT_JEV_MODEL ? "（推荐）" : ""}${cloudKeyReady ? "" : "（需配密钥）"}`,
       })),
-      {
-        value: `local:${LOCAL_LAYA_JEV_MODEL}`,
-        id: LOCAL_LAYA_JEV_MODEL,
-        modelLabel: localLayaItem?.label || "Laya 多语言决策（322M）",
-        isLocal: true,
-        installed: localInstalled,
-        label: `本地 · ${localLayaItem?.label || "Laya 多语言决策（322M，中英 100+ 语言）"}${localInstalled ? "" : "（未下载）"}`,
-      },
+      ...localOptions,
     ];
+    const activeLocalLabel = selectedLocalModel?.label || activeLocalId || "本地决策模型";
     return {
       section: "jev",
       canUseLocal: true,
@@ -1641,17 +1731,17 @@ export function builtinSectionSourceView(section, status) {
       cloudModel,
       activeText: jevOn
         ? isCurrentLocal
-          ? localInstalled
-            ? `本地（${localLayaItem?.label || "Laya 多语言决策"}）`
-            : "本地（Laya 多语言决策 · 未下载）"
+          ? activeLocalInstalled
+            ? `本地（${activeLocalLabel}）`
+            : `本地（${activeLocalLabel} · 未下载）`
           : currentReady
             ? `开启（${cloudModel}）`
             : `开启（${cloudModel} · 未配密钥）`
         : "关闭（仅本地 0ms 规则）",
-      selectValue: jevOn ? (isCurrentLocal ? `local:${LOCAL_LAYA_JEV_MODEL}` : `jev:${cloudModel}`) : "off",
+      selectValue: jevOn ? (isCurrentLocal ? `local:${activeLocalId}` : `jev:${cloudModel}`) : "off",
       options,
-      installedLocalModel: localInstalled ? localLayaItem : null,
-      selectedLocalModel: isCurrentLocal ? localLayaItem : null,
+      installedLocalModel,
+      selectedLocalModel,
     };
   }
   const isVad = section === "vad";
@@ -1745,12 +1835,19 @@ export function builtinSourceSwitchPayload(status, section, targetSource) {
     const target = String(targetSource || "");
     if (target === "off") {
       form = { ...form, jev_filter_enabled: false };
-    } else if (target.startsWith("local:") || target === `jev:${LOCAL_LAYA_JEV_MODEL}`) {
-      form = { ...form, jev_filter_enabled: true, jev_model: LOCAL_LAYA_JEV_MODEL };
+    } else if (target.startsWith("local:")) {
+      const localId = canonicalLocalJevModel(target.slice("local:".length));
+      if (!localId) return null;
+      form = { ...form, jev_filter_enabled: true, jev_model: localId };
     } else if (target.startsWith("jev:")) {
-      const modelId = target.slice("jev:".length).trim() || DEFAULT_JEV_MODEL;
-      if (jevModelError(modelId)) return null;
-      form = { ...form, jev_filter_enabled: true, jev_model: modelId };
+      const rawId = target.slice("jev:".length).trim() || DEFAULT_JEV_MODEL;
+      const maybeLocal = canonicalLocalJevModel(rawId);
+      if (maybeLocal) {
+        form = { ...form, jev_filter_enabled: true, jev_model: maybeLocal };
+      } else {
+        if (jevModelError(rawId)) return null;
+        form = { ...form, jev_filter_enabled: true, jev_model: rawId };
+      }
     } else {
       return null;
     }
@@ -1787,13 +1884,19 @@ export function builtinSourceSwitchPatch(status, section, targetSource) {
     if (target === "off") {
       return { jev_filter_enabled: false };
     }
-    if (target.startsWith("local:") || target === `jev:${LOCAL_LAYA_JEV_MODEL}`) {
-      return { jev_filter_enabled: true, jev_model: LOCAL_LAYA_JEV_MODEL };
+    if (target.startsWith("local:")) {
+      const localId = canonicalLocalJevModel(target.slice("local:".length));
+      if (!localId) return null;
+      return { jev_filter_enabled: true, jev_model: localId };
     }
     if (target.startsWith("jev:")) {
-      const modelId = target.slice("jev:".length).trim() || DEFAULT_JEV_MODEL;
-      if (jevModelError(modelId)) return null;
-      return { jev_filter_enabled: true, jev_model: modelId };
+      const rawId = target.slice("jev:".length).trim() || DEFAULT_JEV_MODEL;
+      const maybeLocal = canonicalLocalJevModel(rawId);
+      if (maybeLocal) {
+        return { jev_filter_enabled: true, jev_model: maybeLocal };
+      }
+      if (jevModelError(rawId)) return null;
+      return { jev_filter_enabled: true, jev_model: rawId };
     }
     return null;
   }
@@ -2455,4 +2558,25 @@ export function globalEyeSensorView({
     shortBadge: hardwareState === "online" ? "硬件·小智已连" : "小智已连接",
     label: withHwSuffix(mode === "self_hosted" ? "自建 MCP 桥已连接" : "官方小智 MCP 桥已连接"),
   };
+}
+
+// n61 设备唤醒词（2026-11-06）：预设与前端校验；拼音音节是否被模型认识由后端按模型词表最终核对。
+export const WAKE_WORD_PRESETS = [
+  { text: "你好 MOSS", command: "ni hao mo si" },
+  { text: "MOSS MOSS", command: "mo si mo si" },
+  { text: "嘿 MOSS", command: "hei mo si" },
+];
+
+export function wakeWordDraftError(draft) {
+  const text = String(draft?.text ?? "").trim();
+  if (!text) return "请填写唤醒词";
+  if ([...text].length > 16) return "唤醒词最多 16 个字";
+  if (/\p{Cc}/u.test(text)) return "唤醒词里不能有控制字符";
+  const syllables = String(draft?.command ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (syllables.length < 2 || syllables.length > 6) return "拼音需要 2～6 个音节，用空格隔开，例如 ni hao mo si";
+  const bad = syllables.find((s) => !/^[a-z]+$/.test(s));
+  if (bad) return `“${bad}”不是拼音音节（只写字母、不带声调）`;
+  const threshold = Number(draft?.threshold);
+  if (!Number.isFinite(threshold) || threshold < 0.05 || threshold > 0.95) return "灵敏度阈值须在 0.05～0.95 之间";
+  return "";
 }

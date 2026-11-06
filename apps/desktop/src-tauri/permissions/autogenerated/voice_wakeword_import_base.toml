@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-wakeword-import-base"
+description = "Enables the voice_wakeword_import_base command without any pre-configured scope."
+commands.allow = ["voice_wakeword_import_base"]
+
+[[permission]]
+identifier = "deny-voice-wakeword-import-base"
+description = "Denies the voice_wakeword_import_base command without any pre-configured scope."
+commands.deny = ["voice_wakeword_import_base"]

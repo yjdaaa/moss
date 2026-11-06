@@ -23,6 +23,10 @@ pub const DEFAULT_BASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/d
 /// Laya 多语言决策模型官方发布地址與国内镜像回退地址（SHA-256 校验值恒定不变）
 pub const DEFAULT_LAYA_BASE: &str = "https://huggingface.co/convaiinnovations/laya-multilingual/resolve/main";
 pub const DEFAULT_LAYA_MIRROR_BASE: &str = "https://hf-mirror.com/convaiinnovations/laya-multilingual/resolve/main";
+/// OneJev 1.6 多模态决策模型 GGUF 官方发布地址（SHA-256 校验值恒定不变，支持 hf-mirror 自动回退）
+pub const DEFAULT_ONEJEV_0_8B_BASE: &str = "https://huggingface.co/mradermacher/OneJev1.6-0.8B-GGUF/resolve/main";
+pub const DEFAULT_ONEJEV_4B_BASE: &str = "https://huggingface.co/mradermacher/OneJev1.6-4B-GGUF/resolve/main";
+pub const DEFAULT_ONEJEV_9B_BASE: &str = "https://huggingface.co/mradermacher/OneJev1.6-9B-GGUF/resolve/main";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archive {
@@ -58,6 +62,7 @@ pub enum Engine {
     Kokoro,
     Matcha,
     Laya,
+    OneJev,
     CampPlus,
 }
 
@@ -146,9 +151,39 @@ const LAYA_MULTILINGUAL_EXTRAS: [ExtraFile; 5] = [
     },
 ];
 
+const ONEJEV_0_8B_FILES: [&str; 2] = [
+    "OneJev1.6-0.8B.Q8_0.gguf",
+    "OneJev1.6-0.8B.mmproj-Q8_0.gguf",
+];
+const ONEJEV_0_8B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
+    path: "OneJev1.6-0.8B.mmproj-Q8_0.gguf",
+    sha256: "231e2ba51cd7f4c8092009428e249fd5cb2c2562a4c306cadba682f354fffdf4",
+    size: 115_923_712,
+}];
+
+const ONEJEV_4B_FILES: [&str; 2] = [
+    "OneJev1.6-4B.Q4_K_M.gguf",
+    "OneJev1.6-4B.mmproj-Q8_0.gguf",
+];
+const ONEJEV_4B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
+    path: "OneJev1.6-4B.mmproj-Q8_0.gguf",
+    sha256: "bb24088d1d1a051677a16811facb39a6cfd1f3fbb0e6139695fc5ab2f48dbe77",
+    size: 366_894_656,
+}];
+
+const ONEJEV_9B_FILES: [&str; 2] = [
+    "OneJev1.6-9B.Q4_K_M.gguf",
+    "OneJev1.6-9B.mmproj-Q8_0.gguf",
+];
+const ONEJEV_9B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
+    path: "OneJev1.6-9B.mmproj-Q8_0.gguf",
+    sha256: "40d295bdd324b1a1c8b716c6b4e6a88152db13338bba4097cac60ea536ed6cbd",
+    size: 624_229_728,
+}];
+
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 10] = [
+pub const CATALOG: [ModelSpec; 13] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker, engine: Engine::CampPlus,
@@ -276,11 +311,62 @@ pub const CATALOG: [ModelSpec; 10] = [
         voices: None,
     },
     ModelSpec {
+        id: "onejev_1_6_0_8b",
+        kind: ModelKind::Jev,
+        engine: Engine::OneJev,
+        label: "OneJev 1.6 · 0.8B 多模态极速决策（推荐）",
+        note: "Apache-2.0；<2.5B 判别榜第一（Q8_0+视觉投影）。Mac 走 Apple Metal、Win 走 Vulkan/CUDA 硬件加速，免装 Python，稳压 360ms 实时语音红线且支持看图质检。",
+        path: "OneJev1.6-0.8B.Q8_0.gguf",
+        sha256: "1225c4f8d907636c2d4725ae5ca33a2ba32a64e84efc6a09052839790970b3ae",
+        size: 811_844_096,
+        archive: Archive::Directory {
+            dir: "onejev_1_6_0_8b",
+            base_url: DEFAULT_ONEJEV_0_8B_BASE,
+        },
+        required: &ONEJEV_0_8B_FILES,
+        extras: &ONEJEV_0_8B_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
+        id: "onejev_1_6_4b",
+        kind: ModelKind::Jev,
+        engine: Engine::OneJev,
+        label: "OneJev 1.6 · 4B 多模态均衡决策",
+        note: "Apache-2.0；3B–6B 判别榜第一（Q4_K_M+视觉投影）。适合 8GB+ 独显（Win）或 16GB+ 统一内存（Mac Metal）的高精度加工反馈与复杂语义分诊。",
+        path: "OneJev1.6-4B.Q4_K_M.gguf",
+        sha256: "8a12b976e7d2ea60fb603720ce07e2ef5e85b9b8a2a5519cb0bf2cc72aacac8d",
+        size: 2_708_805_024,
+        archive: Archive::Directory {
+            dir: "onejev_1_6_4b",
+            base_url: DEFAULT_ONEJEV_4B_BASE,
+        },
+        required: &ONEJEV_4B_FILES,
+        extras: &ONEJEV_4B_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
+        id: "onejev_1_6_9b",
+        kind: ModelKind::Jev,
+        engine: Engine::OneJev,
+        label: "OneJev 1.6 · 9B 多模态旗舰决策",
+        note: "Apache-2.0；6B–12B 判别榜第一（Q4_K_M+视觉投影）。适合高配显卡或大内存 Mac 的离线看图质检与加工调参；实时语音若超 750ms 会自动无感回退主模型。",
+        path: "OneJev1.6-9B.Q4_K_M.gguf",
+        sha256: "2b3b2007465427fafb5060f0d5172d9c37c2349021f22532ae741fd823f0d738",
+        size: 5_629_109_696,
+        archive: Archive::Directory {
+            dir: "onejev_1_6_9b",
+            base_url: DEFAULT_ONEJEV_9B_BASE,
+        },
+        required: &ONEJEV_9B_FILES,
+        extras: &ONEJEV_9B_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
         id: "laya_multilingual",
         kind: ModelKind::Jev,
         engine: Engine::Laya,
         label: "Laya 多语言决策（322M，中英 100+ 语言）",
-        note: "Apache-2.0；非自回归 System 1 决策模型，单次前向推理约 35–48ms（RTX 4060），兼容 /v1/systemone，无需 OpenRouter 密钥。",
+        note: "Apache-2.0；纯文本非自回归 System 1 决策模型，需外部 Python laya[serve] 环境（Win 走 CUDA、Mac 走 Apple MPS），兼容 /v1/systemone。",
         path: "model.safetensors",
         sha256: "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
         size: 643_835_514,
@@ -389,7 +475,7 @@ impl ModelManager {
         }
     }
 
-    /// 为指定模型 id 覆盖存放父目录（例如将 `laya_multilingual` 放在 `E:\moss-laya\models`）。
+    /// 为指定模型 id 覆盖存放父目录（例如通过 `MOSS_LAYA_ROOT` 指向 `<path>/models`）。
     pub fn with_root_override(mut self, id: &'static str, custom_root: PathBuf) -> Self {
         self.overrides.insert(id, custom_root);
         self
@@ -544,36 +630,48 @@ struct Item {
     size: u64,
 }
 
+fn hf_mirror_for(base_url: &str) -> String {
+    match base_url.strip_prefix("https://huggingface.co") {
+        Some(suffix) => format!("https://hf-mirror.com{suffix}"),
+        None => DEFAULT_LAYA_MIRROR_BASE.to_owned(),
+    }
+}
+
 /// 为给定模型解析下载候选地址列表（主地址 + 镜像兜底）。
-/// `Archive::Directory`（如 HuggingFace 上的 `laya_multilingual`）不与 sherpa-onnx GitHub Release 混用路径。
+/// `Archive::Directory`（如 HuggingFace 上的 `OneJev` / `laya_multilingual`）不与 sherpa-onnx GitHub Release 混用路径。
 fn resolve_download_bases(spec: &ModelSpec, trimmed_base: &str) -> Vec<String> {
     match spec.archive {
         Archive::Directory { base_url, .. } => {
+            let mirror_url = hf_mirror_for(base_url);
             if trimmed_base == DEFAULT_BASE {
-                vec![base_url.to_owned(), DEFAULT_LAYA_MIRROR_BASE.to_owned()]
+                vec![base_url.to_owned(), mirror_url]
             } else if trimmed_base.contains("k2-fsa/sherpa-onnx") {
-                // 用户填写的是 sherpa-onnx GitHub 发布镜像：目录模型优先走 HF 国内镜像，再兜底官方 HF
-                vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), base_url.to_owned()]
+                // 用户填写的是 sherpa-onnx GitHub 发布镜像：目录模型优先走对应仓库的 HF 国内镜像，再兜底官方 HF
+                vec![mirror_url, base_url.to_owned()]
             } else if let Some(suffix) = base_url.strip_prefix("https://huggingface.co")
                 && !trimmed_base.contains("/resolve/")
                 && (trimmed_base.contains("hf-mirror") || trimmed_base.contains("huggingface"))
             {
                 let rewritten = format!("{trimmed_base}{suffix}");
                 if rewritten == base_url {
-                    vec![rewritten, DEFAULT_LAYA_MIRROR_BASE.to_owned()]
+                    vec![rewritten, mirror_url]
                 } else {
                     vec![rewritten, base_url.to_owned()]
                 }
-            } else if trimmed_base == DEFAULT_LAYA_BASE {
-                vec![DEFAULT_LAYA_BASE.to_owned(), DEFAULT_LAYA_MIRROR_BASE.to_owned()]
-            } else if trimmed_base == DEFAULT_LAYA_MIRROR_BASE {
-                vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), DEFAULT_LAYA_BASE.to_owned()]
+            } else if trimmed_base == base_url {
+                vec![base_url.to_owned(), mirror_url]
+            } else if trimmed_base == mirror_url {
+                vec![mirror_url, base_url.to_owned()]
             } else {
                 vec![trimmed_base.to_owned()]
             }
         }
         _ => vec![trimmed_base.to_owned()],
     }
+}
+
+fn is_loopback_test_base(base: &str) -> bool {
+    base.starts_with("http://127.0.0.1") || base.starts_with("http://localhost") || base.starts_with("http://[::1]")
 }
 
 fn run_download(root: &Path, spec: &ModelSpec, bases: &[String], cancel: &AtomicBool, report: &dyn Fn(Progress)) -> Result<(), String> {
@@ -589,6 +687,9 @@ fn run_download(root: &Path, spec: &ModelSpec, bases: &[String], cancel: &Atomic
         .collect();
     let total = spec.download_size();
     let result = (|| {
+        if spec.engine == Engine::OneJev && !bases.iter().any(|b| is_loopback_test_base(b)) {
+            crate::onejev::ensure_llama_runtime(root, bases.first().map(String::as_str), cancel)?;
+        }
         let mut offset = 0;
         for (item, part) in items.iter().zip(&parts) {
             let progress = |done: u64| report(Progress::Downloading { done: offset + done, total });
@@ -623,7 +724,14 @@ fn run_download(root: &Path, spec: &ModelSpec, bases: &[String], cancel: &Atomic
     result
 }
 
-fn fetch(item: &Item, url: &str, part: &Path, cancel: &AtomicBool, progress: &dyn Fn(u64)) -> Result<(), String> {
+pub(crate) fn fetch_verified_file(
+    url: &str,
+    expected_sha256: &str,
+    expected_size: u64,
+    part: &Path,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(u64),
+) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(None::<Duration>)
@@ -657,30 +765,34 @@ fn fetch(item: &Item, url: &str, part: &Path, cancel: &AtomicBool, progress: &dy
             break;
         }
         done += read as u64;
-        if done > item.size {
+        if done > expected_size {
             return Err("下载的文件比预期大，已停止".into());
         }
         hasher.update(&buffer[..read]);
         file.write_all(&buffer[..read]).map_err(|error| format!("写入失败（磁盘空间不足？）：{error}"))?;
-        if done - last_report >= 1024 * 1024 || done == item.size {
+        if done - last_report >= 1024 * 1024 || done == expected_size {
             last_report = done;
             progress(done);
         }
     }
     file.flush().map_err(|error| format!("写入失败：{error}"))?;
     drop(file);
-    if done != item.size {
-        return Err(format!("下载不完整（{done} / {} 字节），请重试", item.size));
+    if done != expected_size {
+        return Err(format!("下载不完整（{done} / {expected_size} 字节），请重试"));
     }
     let digest = hex(&hasher.finalize());
-    if digest != item.sha256 {
+    if digest != expected_sha256 {
         return Err("SHA-256 校验不一致，文件已删除（可能被篡改或下载出错）".into());
     }
     Ok(())
 }
 
+fn fetch(item: &Item, url: &str, part: &Path, cancel: &AtomicBool, progress: &dyn Fn(u64)) -> Result<(), String> {
+    fetch_verified_file(url, item.sha256, item.size, part, cancel, progress)
+}
+
 /// 压缩包内的路径是否安全（相对路径、无 `..`）。
-fn safe_relative(path: &Path) -> bool {
+pub(crate) fn safe_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
@@ -973,7 +1085,7 @@ mod tests {
                 Engine::SileroVad | Engine::TenVad => ModelKind::Vad,
                 Engine::SenseVoice | Engine::StreamingTransducer => ModelKind::Asr,
                 Engine::Kokoro | Engine::Matcha => ModelKind::Tts,
-                Engine::Laya => ModelKind::Jev,
+                Engine::Laya | Engine::OneJev => ModelKind::Jev,
                 Engine::CampPlus => ModelKind::Speaker,
             };
             assert_eq!(spec.kind, kind, "{} 的引擎与类别一致", spec.id);
@@ -1039,6 +1151,17 @@ mod tests {
         assert_eq!(
             resolve_download_bases(laya, "http://127.0.0.1:19999/laya"),
             vec!["http://127.0.0.1:19999/laya".to_owned()]
+        );
+
+        let onejev = super::spec("onejev_1_6_0_8b").unwrap();
+        let expected_mirror = "https://hf-mirror.com/mradermacher/OneJev1.6-0.8B-GGUF/resolve/main";
+        assert_eq!(
+            resolve_download_bases(onejev, DEFAULT_BASE),
+            vec![DEFAULT_ONEJEV_0_8B_BASE.to_owned(), expected_mirror.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(onejev, "https://hf-mirror.com"),
+            vec![expected_mirror.to_owned(), DEFAULT_ONEJEV_0_8B_BASE.to_owned()]
         );
     }
 }

@@ -463,7 +463,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           setTimeEstimate(artifacts.time_estimate);
         }
         if (artifacts.width_mm && artifacts.height_mm) {
-          setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm });
+          // 2026-11-06：文字默认以激光头对准中心为起点、图片以左下角为起点，开刻前提示放哪
+          setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" });
+          if (artifacts.origin_note) addLog("HOST", artifacts.origin_note, "warn");
         }
       } else {
         addLog("PREVIEW", res.data?.result || "预览生成失败", "error");
@@ -1143,6 +1145,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 <div className="wb-box-13">
                   {dimensions ? `${dimensions.width.toFixed(1)} × ${dimensions.height.toFixed(1)} mm` : "—"}
                 </div>
+                {dimensions?.originNote && (
+                  <div className="wb-origin-note" id="wb-origin-note">{dimensions.originNote}</div>
+                )}
               </div>
 
               <div
@@ -1288,7 +1293,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                   setSpeedMms(artifacts.actual_params.feed_rate / 60);
                 }
                 setTimeEstimate(artifacts.time_estimate || null);
-                setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm });
+                setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" });
                 addLog("PREVIEW", `调参预览已生成：${workflow.workflow_id}，尚未发送`, "ok");
               }} />
         </WbCard>

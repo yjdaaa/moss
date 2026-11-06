@@ -107,6 +107,16 @@ schema v8 的 voice_agent_runs 最近 50 条记录包含 run id、approval id、
 - `voice_firmware_status()`：返回 `enabled`、`artifacts`（已导入固件：sha256/version/project/size/created_at）、`devices`（已允许设备的型号与当前版本）、`records`（推送记录：delivery_id、device_id、firmware_version、download_status、device_report_status、expires_at、revision）与 `now`、`offer_hours`。
 - `voice_firmware_import()`：弹本机文件框（只筛 `.bin`，不接受前端给的路径），校验 ESP32 应用镜像头与数字版本（≤16 MB），按 SHA-256 存到运行目录 `firmware/<sha256>.bin` 并登记；文件完全重复时只登记不重写。取消选择返回 `null`，校验失败返回 `firmware_invalid`。
 - `voice_firmware_manage({input})`：只接受三种 action，字段集合必须完全匹配，否则 `firmware_invalid`。`offer{device_id,sha256,confirmed:true}` 要求设备已允许、固件已导入、版本比设备当前版本新，否则分别返回 `firmware_device_invalid` / `firmware_missing` / `firmware_not_newer`；成功时生成一次性令牌，有效期 24 小时。`cancel{delivery_id}` 未开始下载的直接删除，已开始下载的保留记录并让令牌失效；已完成或已取消返回 `firmware_conflict`。`delete{sha256,confirmed:true}` 在还有有效推送时返回 `firmware_in_use`，否则删除记录与文件，返回最新的 status。
+### n61 设备唤醒词（内置语音 HTTP 路由 + 私密窗口 Tauri 命令）
+
+`GET /xiaozhi/assets/{token}.bin`：令牌 32 位十六进制、对应内存里一份未过期（30 分钟）的暂存资源包，否则 404；成功返回 `application/octet-stream` 且带精确 `Content-Length`（固件据此判断分区放不放得下）。资源包由桌面经 `VoiceServer::install_wake_assets(device_id, bytes)` 暂存，同时向该设备发 `self.assets.set_download_url{url}` 与 `self.reboot`；设备当前会话未上报该 user-only 工具时直接报错、不发送。
+
+桌面 Tauri 命令与 NV17 一样只在 `voice-private` 打包窗口可用（capability `voice-memory.json`，处理函数复核 `require_voice_private_asset`），Android 返回仅桌面：
+
+- `voice_wakeword_status()` → `{word:{text,command,threshold}, base:{files,size,chip_model,text_font,emoji_count,wake_word}|null, devices:[{device_id,name,supported}], running}`；`devices` 只含在线且已允许的设备，`supported` 表示固件上报了 `self.assets.set_download_url`。
+- `voice_wakeword_import_base()`：弹本机文件框（只筛 `.bin`），校验资源包格式、校验和与 `index.json`（≤8 MB），存为运行目录 `wakeword/base-assets.bin`；取消返回 `null`，失败 `wakeword_invalid` 且保留旧文件。
+- `voice_wakeword_manage({input})`：字段集合必须完全匹配。`save{text,command,threshold}`（显示文字 1～16 字、拼音 2～6 个 `mn6_cn` 词表音节、阈值 0.05～0.95）；`clear_base{confirmed:true}`；`push{device_id,target:"custom"|"default",confirmed:true}` 要求设备已允许（`wakeword_device_invalid`）、服务运行中（`voice_builtin_stopped`）、设备在线且支持（`wakeword_device_unsupported`），返回状态加 `pushed{device_id,size,target}`。
+
 ### NV14 本地音乐（桌面 Tauri 命令，非公共 HTTP）
 
 `voice.builtin_music` 为默认关闭的配置 `{enabled:false,directory:""}`；现有用户升级后不会自动扫描任何目录。所有命令仅由桌面主窗口的 `capabilities/voice-music.json` 授权（remote 回环，命令内固定本进程后端地址）；普通远程 Web 和 Android 没有真实实现。
@@ -271,7 +281,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | material | string | 是 | |
 | thickness_mm | float | 是 | >0 |
 | mode | string | 否 | `raster`（默认，按 0.1 mm 点距逐行扫描）或 `outline`（沿深色区域描边，`trace_grayscale` + 路径优化 + `write_outline`）；其他值按 `raster` |
-| width_mm、height_mm | 可选正数 | 否 | 成品尺寸（2026-10-14 起生效，此前被忽略）：都填时锁定比例放进该框；只填一边按比例算另一边；缺省、空串、null 或 0 按导出图每像素 0.1 mm。超出 400×400 mm 工作区返回 400，不悄悄缩小 |
+| width_mm、height_mm | 可选正数 | 否 | 成品尺寸（2026-10-14 起生效，此前被忽略）：都填时锁定比例放进该框；只填一边按比例算另一边；缺省、空串、null 或 0 按导出图每像素 0.1 mm。2026-11-06 起按机器幅面（默认 100 × 100 mm，可用 `work_area_width_mm` / `work_area_height_mm` 覆盖；光栅模式宽度另留两侧各 1 mm 过扫描）而不是 400 mm 画布：填写的尺寸超出返回 400；没填且按 0.1 mm/像素超出时等比缩小并返回 `auto_fitted=true` 与 `fit_note` |
 | vector_simplify_factor | 可选数字 | 否 | 仅 `outline`：0.25 ~ 8，默认 3 |
 | 连接字段 | 见 §1.5 | 否 | 只记录，不连接设备 |
 
@@ -301,14 +311,21 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 |---|---|---|---|
 | text、material | string | 是 | `text 不能为空` |
 | thickness_mm | float | 是 | >0，否则 400 `thickness_mm 必须是大于 0 的数字` |
-| engraving_mode | string | 否 | `raster`；`outline` 走字体矢量轮廓 |
-| font_size_mm | float | 否 | 10.0 |
+| engraving_mode | string | 否 | 只用于判断是否切割（`cut`）；不再决定文字刻法（此前写 `raster` 也只描轮廓） |
+| text_fill | string | 否 | `outline`（默认，2026-11-06 用户决定）只描字的轮廓，取材料库 outline 参数；`fill` 把字形按 `pixel_size_mm` 转黑白位图逐行扫描填满，取 raster 参数；`hatch` 矢量平行线填满并描边，取 outline 参数。填充按非零环绕规则，字内孔不填 |
+| text_align | string | 否 | `center`（默认）/ `left` / `right`；文字里的换行即分行 |
+| origin | string | 否 | `center`（默认，用户决定）开刻前激光头对准木牌（图案）中心；`lower_left` 对准木牌左下角（无木牌为文字左下角）。只改开头 `G92` 声明的激光头位置，结束时关光回到起点 |
+| width_mm / height_mm（别名 board_width_mm / board_height_mm） | float | 否 | 木牌尺寸，可只给一边；没给 `font_size_mm` 时自动取能放下的最大字号并居中，给了字号但放不下 400 `…放不进 … 的木牌` |
+| safe_margin_mm（别名 margin_mm） | float | 否 | 2；放进木牌时四周留边 |
+| pixel_size_mm | float | 否 | 材料库对应参数（0.05～1）；`fill` 的扫描行距与 `hatch` 的排线间距 |
+| font_size_mm | float | 否 | 10.0；给了木牌尺寸且没填时自动适配 |
 | letter_spacing_mm | float | 否 | 0.5 |
 | font_path | string | 否 | 缺省使用内置字体 |
+| work_area_width_mm / work_area_height_mm | float | 否 | 100（翼宿 V1.0 幅面）；成品超出时 400 `文字成品约 W × H mm，超出机器幅面…`（2026-11-06） |
 | 连接字段 | 见 §1.5 | 否 | 只记录 |
 
 后端用材料库推荐参数生成 G-code 与预览 PNG（运行目录 `generated_assets/`），创建 `source_type="text"` 的 workflow 并冻结快照。
-成功 `result` 含 `workflow_id`、`status=preview_ready`、`gcode_file`、`gcode_sha256`、`image_file`、`font_path`、`material`、`thickness_mm`、`width_mm`、`height_mm`、`glyphs`、`path_optimization`、`time_estimate:{estimated_seconds, estimated_minutes, laser_seconds, non_laser_seconds}` 与 §1.4 的 `web`。
+成功 `result` 含 `workflow_id`、`status=preview_ready`、`gcode_file`、`gcode_sha256`、`image_file`、`font_path`、`material`、`thickness_mm`、`width_mm`、`height_mm`（笔画实际范围）、`font_size_mm`（实际字号）、`text_fill`、`origin`、`origin_note`（开刻前激光头放哪）、`board_width_mm`、`board_height_mm`、`frame_mm:{min_x,max_x,min_y,max_y}`（笔画相对激光头起点的范围，供走边框）、`glyphs`、`path_optimization`、`time_estimate:{estimated_seconds, estimated_minutes, laser_seconds, non_laser_seconds}` 与 §1.4 的 `web`。
 材料安全门：后端调用 `laser_core::safety::evaluate_material`；PVC、聚氯乙烯及明确危险材料返回 400 `material_safety_blocked`，仅写“塑料”等成分不明描述时同样返回 400 并要求澄清。MCP 工具 `generate_text_laser_task_tool` / `generate_text_image_gcode_tool` / `ai_laser_gcode_tool` 与 `laser_workflow_tool preview`（带 `text`）都转发到本路由；工具的 `font_size` 按 `32px≈1mm` 折算为 `font_size_mm` 并限制在 3～80。
 
 ### 3.5 `/api/text-task/send`
@@ -332,7 +349,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 
 | action | 说明 | 失败 |
 |---|---|---|
-| `preview` / `plan` / `create` | `source_type=text` 时等价于 §3.4；`source_type=image` 需要 `image_file`（已上传文件名，位于预览白名单目录）、`material`、`thickness_mm`（默认 3.0）；`source_type=gcode` 需要 `gcode_file`。生成产物、创建记录并冻结快照 | 400 `未指定图片素材路径` / `找不到指定的素材图片文件` / `未指定 G-code 刀路路径` / `找不到指定的 G-code 刀路文件` / `图片尺寸为 0` |
+| `preview` / `plan` / `create` | 新记录含 `origin`（2026-11-06：发起方 `CallerContext::label`——`desktop` / `voice` / `mcp_bridge` / `gateway` / `lan` / `loopback` 等，服务端填写，请求自带的 `_origin` 被丢弃；采用反馈建议生成的新预览同样记录）。`source_type=text` 时等价于 §3.4；`source_type=image` 需要 `image_file`（已上传文件名，位于预览白名单目录）、`material`、`thickness_mm`（默认 3.0），可选（2026-11-06）`width_mm` / `height_mm`（成品尺寸，只给一边按原图比例，两边都给按比例放进该框）、`pixel_size_mm`（默认取材料库 raster 参数，0.05～1）、`image_mode`（`auto` 默认：中间灰度占比 >20% 按 Floyd–Steinberg 抖动，否则 Otsu 阈值；`dither` / `threshold`）、`threshold`（0～255，仅阈值模式）、`work_area_width_mm` / `work_area_height_mm`（默认 100）。透明像素按白色不出光；都没给尺寸时按像素间距换算原图，超出幅面（宽度另留两侧各 1 mm 过扫描）自动等比缩小并返回 `auto_fitted=true` 与 `fit_note`，显式尺寸超出直接 400。产物另含 `pixel_size_mm`、`image_mode`、`threshold`、`auto_fitted`，预览图为实际雕刻的黑白网格；`source_type=gcode` 需要 `gcode_file`。生成产物、创建记录并冻结快照 | 400 `未指定图片素材路径` / `找不到指定的素材图片文件` / `未指定 G-code 刀路路径` / `找不到指定的 G-code 刀路文件` / `图片尺寸为 0` / `成品尺寸 … 超出机器幅面` / `image_mode 只能是 …` |
 | `status` | 返回记录并叠加内存中的实时 `send_result`（`running, total_lines, lines_sent, target, phase, error`） | 400 `workflow_id 不能为空`；404 `未找到 workflow` |
 | `recent` | 最近记录列表 | |
 | `confirm_send` / `send` | 必须 `confirmed=true`；不接受请求自带的 `start_from_line`（400 `resume_line_not_allowed`，断点行号只由 `resume` 按服务端记录的 `lines_sent` 写入，2026-11-05）；门禁顺序：记录存在 → 状态可发送（`sending/completed/failed/cancelled` 拒绝，`workflow_not_sendable`）→ 快照存在（`confirmation_snapshot_missing`）→ 物理文件 SHA-256 重算一致（`send_gate_rejected`）→ 设备连接、握手、`$CD`、预检、行校验（§1 增补）→ 同设备无在途作业（409 `device_busy`）。通过后后台逐行发送，响应 `status=sending` 与 `send_result`。可带 `offline_sd=true`（或 `send_mode=sd_offline`）走 SD 脱机模式（仅网口；固件不返回文件哈希时不执行 `$SD/Run`，任务记为 failed，2026-10-14）；SD 脱机上传端口取 `network_http_port`，其次 `http_port`，都缺省时为 80，给出的值必须是 1..=65535 的整数，否则在连接设备前返回 400 `sd_http_port_invalid`，不截断、不回落到 80（2026-11-05） | 400 / 404 / 409 |
@@ -401,7 +418,7 @@ GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflo
 
 ### 3.12 `/api/device/framing`
 
-真实驱动机器沿外接矩形走边框，用于校对材料摆放位置。字段：`min_x`、`min_y`（默认 0）、`max_x`、`max_y`（默认 100）、`feed_rate`（默认 2000）、`power`（默认 **0，不出光**；画板勾选“弱光指示”时传 1，2026-10-14 起）与 §1.5 连接字段。`power` 必须是 0..=1000 的 JSON 整数（G-code S 标尺，下发时按设备 `$30` 换算），`feed_rate` 必须是 1..=20000 的 JSON 整数（mm/min）；超出 `i32`、越界、小数或字符串一律在审批与连接设备之前返回 400 `framing_params_invalid`，不再截断回绕（此前 `4294968096` 会变成 S800），严格模式审批摘要与实际下发因此是同一个已校验的值（2026-11-05）。流程与完整发送一致（2026-10-14 起）：生成 framing G-code → 同设备在途作业 409 `device_busy` → 打开传输 → 握手 → `$CD` → Idle 预检（失败 400 `device_preflight_failed`）→ 登记为活动作业 `framing-…`（`/api/jobs/stop-targets` 可见，顶栏急停、`/api/safe-action` 带 `job_id` 可停）→ `JobWorker::send_lines`。成功 `result`：`{message:"走边框完成", job_id, laser_on, bounds}`；失败 400（生成、连接、握手、预检、行校验），500 `framing_failed`（执行失败，已补发 0x18），409 `framing_cancelled`（被急停或取消）；后两种保留为“待确认停止”目标。不经 workflow 快照，也不需要 `confirmed`，改动时按发送链路对待。严格模式下按 R3 处理（授权规则同 §3.6）。
+真实驱动机器沿外接矩形走边框，用于校对材料摆放位置。可选 `relative_to_head: true`（2026-11-06，AI 预览窗“先走边框”）：先 `G92 X0 Y0` 把激光头当前位置设为原点，`min_*` / `max_*` 可为负（取预览返回的 `frame_mm`），结尾回到起点；该字段进入严格模式审批摘要。字段：`min_x`、`min_y`（默认 0）、`max_x`、`max_y`（默认 100）、`feed_rate`（默认 2000）、`power`（默认 **0，不出光**；画板勾选“弱光指示”时传 1，2026-10-14 起）与 §1.5 连接字段。`power` 必须是 0..=1000 的 JSON 整数（G-code S 标尺，下发时按设备 `$30` 换算），`feed_rate` 必须是 1..=20000 的 JSON 整数（mm/min）；超出 `i32`、越界、小数或字符串一律在审批与连接设备之前返回 400 `framing_params_invalid`，不再截断回绕（此前 `4294968096` 会变成 S800），严格模式审批摘要与实际下发因此是同一个已校验的值（2026-11-05）。流程与完整发送一致（2026-10-14 起）：生成 framing G-code → 同设备在途作业 409 `device_busy` → 打开传输 → 握手 → `$CD` → Idle 预检（失败 400 `device_preflight_failed`）→ 登记为活动作业 `framing-…`（`/api/jobs/stop-targets` 可见，顶栏急停、`/api/safe-action` 带 `job_id` 可停）→ `JobWorker::send_lines`。成功 `result`：`{message:"走边框完成", job_id, laser_on, bounds}`；失败 400（生成、连接、握手、预检、行校验），500 `framing_failed`（执行失败，已补发 0x18），409 `framing_cancelled`（被急停或取消）；后两种保留为“待确认停止”目标。不经 workflow 快照，也不需要 `confirmed`，改动时按发送链路对待。严格模式下按 R3 处理（授权规则同 §3.6）。
 
 ### 3.13 `/api/safe-action`
 

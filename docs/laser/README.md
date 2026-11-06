@@ -21,7 +21,7 @@
 | `start_tuned_job_tool` | 对已有 `workflow_id` 执行 `confirm_send`；未确认或 `dry_run=true` 时只返回状态 | 需 `confirmed=true` |
 | `material_params_tool` / `recommend_laser_params_tool` | 材料库 `list` / `get` / `recommend` / `save` / `delete` / `import` / `export`；参数推荐 | 否 |
 | `generate_text_image_tool` | 生成白底黑字文字图片 | 否 |
-| `generate_text_laser_task_tool` / `generate_text_image_gcode_tool` / `ai_laser_gcode_tool` | 三者同一分支，只接受 `text` 素材，转发 `/api/text-task/generate`；`confirmed=true` 且 `send_after_generate=true` 时继续 `confirm_send` | 默认不发送 |
+| `generate_text_laser_task_tool` / `generate_text_image_gcode_tool` / `ai_laser_gcode_tool` | 三者同一分支，只接受 `text` 素材，转发 `/api/text-task/generate`；可传 `text_fill`（`outline` 默认 / `fill` / `hatch`）、`text_align`、`origin`（`center` 默认）与木牌尺寸 `width_mm` / `height_mm`（不给字号时自动适配）；2026-11-06 起 `send_after_generate` 不再顺带发送，预览弹到桌面，提示模型等用户在预览窗“同意开刻”或（未开严格模式时）口头确认后再 `confirm_send` | 否 |
 | `refine_laser_params_from_feedback_tool` / `regenerate_text_laser_task_tool` | 按"太焦/太浅/切不透/毛边/断线"有界调参；用原任务输入重新生成 | 否 |
 | `laser_grbl_tool` / `laser_network_grbl_tool` | 只保留 `status` / `check` / `probe` 与 `cancel`；`send_file`、`send_command` 直接拒绝并引导走 workflow 或安全动作 | 否 |
 
