@@ -2,6 +2,37 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 仓库 `v0.3.5` 与 `v0.3.4` 云端四端并行交付安装包构建（2026-11-06）
+
+用户 2026-11-06 决定“全部帮我打包版本就用0.3.4”：按 `scripts/release-tag.ps1` 的步骤（本机无 PowerShell，手工执行同样的干净树检查、推分支、`git tag -a vX -m "MOSS vX"`、推标签）推送 `v0.3.4`（提交 `f6adb8c`），触发 `.github/workflows/release.yml` Run `42176162789`，全部 6 个作业成功并发布 [Release v0.3.4](https://github.com/yjdaaa/moss/releases/tag/v0.3.4)。之后 codex 对说话角色（c3bd009）独立验收发现并发与校验问题，修复提交 `0de7c56`；用户同日选择“推送修复，再发 v0.3.5”，已发布的 0.3.4 不改动，推送 `v0.3.5`（提交 `0de7c56`）触发 Run `42179010884`，全部成功并发布 [Release v0.3.5](https://github.com/yjdaaa/moss/releases/tag/v0.3.5)。**推荐使用 0.3.5**。
+
+**0.3.5（Run `42179010884`，提交 `0de7c56`）**
+
+| 产物 | UTC时间（2026-11-06） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.5_x64-offline-voice-setup.exe` | 07:35:00 | 25,997,241 | `1eaea015d4364a52d3c1646be8efa9ae279dd45303dc9560c457f0b5a140f59d` |
+| `MOSS_0.3.5_x64-lite-setup.exe` | 07:35:00 | 20,390,610 | `6a674bfcd9031a8eac108eba4725bb637e41afff2e37eab185dd39d28db18eba` |
+| `MOSS_0.3.5_windows_x64_portable.exe` | 07:35:01 | 66,047,488 | `da62bcb2012681c2c5df340b508bebb6fdf20bb1df40ba296a7a3d90425b0689` |
+| `MOSS_0.3.5_macos_universal.dmg` | 07:35:02 | 74,466,964 | `b3aba5d3503e44e775887a3aed0e0892c83fc304e0455f44670d5371d252e398` |
+| `MOSS_0.3.5_android_aarch64.apk` | 07:35:01 | 54,889,866 | `3b8f0de25607cdf2cc7e7bc2e6f35a374a67d81f09513aa632ef3b2aa5990d00` |
+| `moss-voice-local-0.3.5-gpl-source.zip` | 07:35:01 | 120,874 | `17705aaa351dbfee256d4e9ad6e9d121df9b73245d50fecac91e96fe51f06502` |
+
+**0.3.4（Run `42176162789`，提交 `f6adb8c`；含 codex 验收发现的问题，见 CHANGELOG）**
+
+| 产物 | UTC时间（2026-11-06） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.4_x64-offline-voice-setup.exe` | 07:11:02 | 25,994,664 | `c80dc8a50601bede1148c3a53d9ecfac2d505133069831e172f77499c2e08e51` |
+| `MOSS_0.3.4_x64-lite-setup.exe` | 07:11:04 | 20,377,117 | `cf5c5808f086c04350400de2467dc53b7afc15d0b22ade96b209b0862268b53f` |
+| `MOSS_0.3.4_windows_x64_portable.exe` | 07:11:04 | 66,038,272 | `f2f9ce6d54510b98527c6157ad381f370185400538997c3a965eee0cbf92e3d6` |
+| `MOSS_0.3.4_macos_universal.dmg` | 07:11:05 | 74,464,536 | `ad2c7ee329e437807596c42c477a7e9dae4462d4e28d793a581668a63757686d` |
+| `MOSS_0.3.4_android_aarch64.apk` | 07:11:03 | 54,889,754 | `957146dbd364d58ac8a3448269095d5616af2e1cd6bc51a389e54428f40332fb` |
+| `moss-voice-local-0.3.4-gpl-source.zip` | 07:11:02 | 120,874 | `1101f300d482046645bdfedb44f51c41ddcac51ed6d1e5ba79aa5eebd26e8f05` |
+
+核对：SHA-256 取自 GitHub Release 资产的 `digest` 字段，未下载到本机重新计算；两次构建前同一代码分别通过 `cargo test --workspace`（954 / 955 通过，9 忽略）、前端 `npm test` 200、`npm run build`、`voice-center.browser.mjs`，0.3.4 另跑 `npm run test:e2e` 35/35。
+
+**未验证**：未下载安装任何一个安装包；未连接激光雕刻机与小智设备；真实大模型按角色说话与语音切换未验证；macOS 包 ad-hoc 签名、未公证。
+
+
 ## macOS 本机 Apple Silicon `0.3.4` 安装包构建（含离线语音辅助程序，2026-11-06）
 
 在 macOS 开发机（Apple Silicon，macOS 27.0）上用 `scripts/build-macos-installer.sh`（默认内置 `moss-voice-local` sidecar）构建，基于提交 `5f4806f`（干净工作树，含 n57 NV19 记忆 / 资料修订、n58 像素点阵导航眼、n59 说话角色；前端同步重新构建）。沿用 0.3.2 的做法：构建期间临时移开未纳入 git 的 `apps/moss-voice-local/native-license-evidence/`、`rust-license-evidence/`（云端没有这两个目录；未移开时第一次构建把约 762 MB 的证据材料打进了 `Resources/licenses`，DMG 达 742.87 MiB，该产物已被本次覆盖、不作交付），构建后原样放回；设 `CI=true` 跳过 Finder AppleScript 窗口排版。版本号经 `MOSS_VERSION_OVERRIDE=0.3.4` 注入（按 2026-11-05 用户决定的同一规则：`v0.3.3` 已在 `b1accf1` 发布，包内含之后的改动，不与已发布版本同号；仓库文件未改，`moss-voice-local` 仍显示其自身 crate 版本 0.3.0）；ad-hoc 签名、未公证。
