@@ -50,6 +50,22 @@ impl ContextStore for FakeStore {
         row.updated_at = now;
         Ok(Some(row.clone()))
     }
+    fn reinforce(&self, id: &str, now: f64, extend_to: Option<f64>) -> Result<bool, String> {
+        let mut rows = self.rows.lock().unwrap();
+        let Some(row) = rows.get_mut(id) else { return Ok(false) };
+        if row.deleted_at.is_some() || row.verification == Verification::Invalidated {
+            return Ok(false);
+        }
+        row.seen_count += 1;
+        row.last_seen_at = Some(now);
+        let extracted = row.source.kind() == super::SourceKind::ConversationExtraction && row.verification == Verification::Candidate;
+        if let (true, Some(to), Some(at)) = (extracted, extend_to, row.expires_at) {
+            if at < to {
+                row.expires_at = Some(to);
+            }
+        }
+        Ok(true)
+    }
     fn delete(&self, id: &str, expected: i64, now: f64) -> Result<bool, String> {
         let mut rows = self.rows.lock().unwrap();
         let Some(row) = rows.get_mut(id) else { return Ok(false) };

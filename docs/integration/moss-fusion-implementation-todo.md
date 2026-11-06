@@ -515,6 +515,7 @@
   - [x] **NV19-06 设备故障经验**（2026-10-14：`moss-voice-server/src/context/experience.rs`，不改表结构；私有窗口表单随 NV19-08；验证见 §9）：存设备/固件条件、故障现象、排查与验证证据。验收：同类召回、错机型/过期版本不套用，经验不能授权控制硬件。
   - [x] **NV19-07 跨会话项目只读恢复**（2026-10-14：`moss-voice-server/src/context/resume.rs`；代码仓库状态无法在运行时核实，输出一律提示重新核对；桌面接线随 NV19-08；验证见 §9）：摘要固定为决策、待办、证据、未验证项四节；重新核实代码和实际任务。验收：撤销/结果未知不重放，NV13 生产 Runner 仍禁用。
   - [x] **NV19-08 私有 UI 与全端回归**（2026-10-15：桌面接线 `apps/desktop/src-tauri/src/voice_context.rs`、私有卡片 `VoiceContextCard.jsx`、独立 capability `voice-context.json`；Rust 全量、前端、浏览器测试、E2E 与 Windows / Android release 构建均通过，见[构建回执](../developer/build-receipts.md)；GUI 实测见 HW-17）：分类、查找、来源、确认、编辑/清空、备份、存储/模型开销提示；新功能默认关闭。验收：主窗口 ACL、隔离/迁移/质量/性能及 Rust/前端/E2E/Windows/Android 正式回归；真人/实机另留 FINAL。
+  - [x] **NV19 修订 n56 / n57**（2026-11-06，软件完成；真实模型、资料目录与 GUI 验收并入 HW-17）：知识库大目录召回、记忆与资料分别限时、提取去重；schema v17 记忆取代链（用户确认后作废旧条）、复现计数与任务上下文时间衰减、三槽位常驻画像、NV19 开启时 NV10 设备摘要不再注入 / 生成、资料段落级无正文索引（已登记目录需重建一次）。`cargo test --workspace` 947 通过 / 9 忽略；Windows 快更与三端 release 未在本轮执行。
   - **不预先排期的可选增强**：OpenViking 独立 HTTP 服务（需 Python 3.10+/uv，Windows 走 Docker，需 embedding 与视觉语言模型；打进安装包即触发 AGPLv3 分发义务）、向量搜索及 Skills 智能发现；先比较成本/性能/许可证并另获安装部署许可。
 
 **语音体验 · 可选项**（2026-10-08 列入，**尚未决定是否实施**，不排期；设计方向见内置语音技术书 §8.2，用户决定后再细化并排期）

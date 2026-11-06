@@ -1054,6 +1054,63 @@ async fn nv19_context_retrieval_hook_injects_memory_only_for_questions() {
     assert_eq!(retriever.searches(), 1, "只有真正的问题会查库");
 }
 
+/// n57: once structured retrieval is on, the old NV10 per-device summary is not injected.
+#[tokio::test]
+async fn nv19_retrieval_on_replaces_the_nv10_device_summary() {
+    use crate::context::fake_store::FakeStore;
+    use crate::context::retrieve::{ContextAccessProvider, ContextRetrieval, ContextRetriever};
+    use crate::context::service::ContextService;
+    use crate::context::{AccessContext, Applicability, TrustedScope};
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+    use crate::memory::{MemoryRecord, MemoryService, VoiceMemoryStore};
+    use crate::person_context::PersonScope;
+
+    struct Summary;
+    impl VoiceMemoryStore for Summary {
+        fn allowed(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn load(&self, id: &str) -> Result<Option<MemoryRecord>, String> {
+            Ok(Some(MemoryRecord { device_id: id.into(), summary: "旧设备摘要：喜欢绿茶".into(), revision: 0, updated_at: 0.0 }))
+        }
+        fn ensure(&self, id: &str) -> Result<MemoryRecord, String> {
+            Ok(self.load(id)?.unwrap())
+        }
+        fn update(&self, _: &str, _: i64, _: &str) -> Result<Option<MemoryRecord>, String> {
+            Ok(None)
+        }
+        fn list(&self) -> Result<Vec<MemoryRecord>, String> {
+            Ok(vec![])
+        }
+    }
+    struct Access;
+    impl ContextAccessProvider for Access {
+        fn access(&self, context: &ToolContext, _person: Option<&PersonScope>) -> Option<(AccessContext, Option<Applicability>)> {
+            Some((AccessContext::voice(TrustedScope::device_grant(&context.device_id, 1).ok()?, None, None).ok()?, None))
+        }
+    }
+    let memory = MemoryService::new(Arc::new(Summary));
+    memory.configure(true, || Ok(())).unwrap();
+    let retriever = ContextRetriever::new(ContextService::new(Arc::new(FakeStore::default())));
+    for (retrieval_on, expect_summary) in [(false, true), (true, false)] {
+        retriever.set_enabled(retrieval_on);
+        let llm = Arc::new(FakeLlm::default());
+        let asr = Arc::new(FakeAsr { replies: Mutex::new(VecDeque::from([Ok("我喜欢喝什么茶".into())])), ..Default::default() });
+        let conversation = Conversation::new(asr, llm.clone(), Arc::new(FakeTts::default()), Arc::new(FastTools::default()), ConversationSettings::default())
+            .with_memory(memory.clone())
+            .with_context_retrieval(ContextRetrieval { retriever: retriever.clone(), access: Arc::new(Access) });
+        let context = ToolContext { device_id: "fake-device".into(), session_id: "fake-session".into() };
+        let (handle, mut events) = spawn_turn(Arc::new(conversation), context, TurnInput::Utterance { pcm: vec![0; 960], sample_rate: UP, stream: None }, vec![], None);
+        while let Some(event) = events.recv().await {
+            let _: TurnEvent = event;
+        }
+        handle.await.unwrap();
+        let seen = llm.seen.lock().unwrap();
+        let injected = seen.iter().flat_map(|(messages, _)| messages.iter()).any(|m| m.content.as_deref().is_some_and(|c| c.contains("旧设备摘要")));
+        assert_eq!(injected, expect_summary, "检索开关 {retrieval_on}");
+    }
+}
+
 /// 加工结束播报（2026-11-02 用户决定）：设备在线且空闲时，把刚结束的任务念出来，不经过大模型。
 #[test]
 fn finished_job_is_announced_to_an_idle_online_device() {

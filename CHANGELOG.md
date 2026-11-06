@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### NV19 记忆新旧冲突、重复提及、任务过时与资料段落检索（schema v17）（2026-11-06）
+
+- **现象**：用户改了习惯（如从常切椴木改成亚克力）时，除称呼 / 风格 / 常用材料三个口头规则槽位外，新旧两条记忆同时注入、互相矛盾；同一事实反复提到既不加权，未确认候选 90 天后照样消失；几个月前的项目待办与新的同等排序；记忆检索打开后 NV10 设备摘要仍每轮注入并在会话结束整份重写，与结构化记忆重复；资料检索以目录为单位，文件中后部的段落既不在目录摘要里也读不到。
+- **根因与修复**：schema v17 为 `context_memories` 增加 `supersedes` / `seen_count` / `last_seen_at`，新增 `context_knowledge_chunks` 与无正文 FTS5 `context_knowledge_chunks_fts`（`content=''`、`contentless_delete=1`、`detail=column`、trigram），迁移可重跑。提取提示词新增 `replaces`，`ContextService::create_superseding` 只在旧记录有效、同范围同类、本次可读时保留链接，`set_verification` 确认新记录时作废旧记录；语音检索与常驻画像隐藏被仍有效记录替代的旧记录。重复提及走新的 `ContextStore::reinforce`（不改正文、状态、revision，不写清单）。`retrieve::rank` 按得分 × 任务上下文 14 天半衰（保底 0.3）× 复现加成（封顶 +50%）排序。`style_preferences` 改为三槽位每槽一条、最多 3 条。语音检索开启时不注入、提取开启时不生成 NV10 设备摘要。知识库重建时按 `passages`（带标题路径）写段落索引，检索先查段落、只读命中文件并核对 SHA-256 后按段序号取摘录，无段落命中时退回原方式。默认开关、界面与 NV16 按人摘要不变；关闭 NV19 时 NV10 行为不变；已登记的资料目录需重建一次索引；数据库升到 v17 后旧版程序无法打开（与以往 schema 升级相同），不是接口层面的破坏性变更。
+- **验证**：新增 `laser-runtime` `nv19_v17_passage_index_holds_no_text_and_follows_reindex_and_delete`、`nv19_v17_supersedes_and_reinforcement`；`moss-voice-server` `nv19_replacement_links_old_record_and_confirming_it_retires_the_old_one`、`nv19_facts_proposed_again_are_counted_and_keep_candidates_alive`、`nv19_task_context_decays_but_preferences_and_repeated_facts_do_not_lose_rank`、`nv19_live_replacement_hides_the_old_record_from_voice_search_and_profile`、`nv19_passages_carry_their_heading_path_and_skip_code`、`nv19_passage_index_finds_text_deep_inside_large_directories`、`nv19_retrieval_on_replaces_the_nv10_device_summary`，真实 SQLite `nv19_passage_index_over_sqlite_finds_deep_text_without_storing_it`。`cargo test --workspace` 947 通过 / 9 忽略。会话结束时跳过 NV10 摘要生成没有单独测试；真实模型能否正确标出 `replaces`、真实资料目录与 Android 上的索引耗时未验证；在 macOS 上执行，未跑 Windows `quick-update-desktop.ps1`。
+- **关联**：`crates/laser-runtime/src/db.rs`（v17）、`context_store.rs`（`reinforce_context_memory`）、`knowledge_store.rs`（`replace_knowledge_index_with_chunks`、`search_knowledge_chunks`）；`crates/moss-voice-server/src/context.rs`（`ContextMemory`）、`context/service.rs`（`create_superseding`、`reinforce`、`superseded_ids`、`style_preferences`、`set_verification`）、`context/extract.rs`（`Known`、`Proposal`、`Parsed`）、`context/retrieve.rs`（`rank`）、`context/knowledge.rs`（`passages`、`KnowledgeChunk`、`search`）、`conversation.rs`、`session.rs`；`apps/desktop/src-tauri/src/voice_context.rs`；`docs/developer/db-schema.md`、`moss-native-voice-spec.md` n57、`moss-native-voice-implementation.md` i14。
+
+### NV19 知识库大目录后面的文件查不到、资料检索超时连带丢记忆、提取重复堆积候选（2026-11-06）
+
+- **现象**：资料目录文件较多时，L1 写满 4000 字即截断，约第 10 个以后的文件进不了索引；读原文时每个目录只读按路径排序的前 5 个文件，第 6 个以后的文件即使完全命中也摘录不到。语音检索里记忆与资料共用一个 300 ms 任务，资料读盘慢导致超时时，已查到的记忆也一起丢失。后台提取看不到已有记忆、只做完全相同文本去重，“喜欢绿茶”“喜欢喝绿茶”这类近似候选反复堆积。
+- **根因与修复**：`summarize` 改为按文件数平分 L1，每个文件至少保留文件名与开头；`KnowledgeService::search` 每目录仍最多读 5 个文件，但按文件名与该文件 L1 概览得分先读。`ContextRetriever::retrieve_candidates` 把记忆与资料拆成两个并发阻塞任务，各自 300 ms 超时。`ContextExtractor` 提取前列出本次语音请求本就可读、与对话有字面重合的有效记录（≤10 条、每条 ≤120 字，沿用检索的范围、个人模式与机型 / 固件规则），用短编号作为数据交给模型，提示词新增可选 `same_as`；宿主只在编号有效且类别一致时跳过（新原因码 `duplicate_existing`），宿主侧去重与实时规则改为忽略标点、空格和大小写。提取提示词有变化，模型仍只能新增候选、不能改删；不改默认值、数据库结构、界面与跨端行为，不是破坏性变更。
+- **验证**：新增 `nv19_large_directories_keep_late_files_searchable_and_excerptable`、`nv19_extraction_sees_relevant_known_records_and_drops_duplicates`、`nv19_extraction_input_without_known_records_is_unchanged`，`nv19_voice_retrieval_combines_memory_and_knowledge_and_survives_either_failing` 补充资料慢 700 ms 时记忆仍返回的断言；两项知识库用例在改动前代码上失败、改动后通过。`moss-voice-server` nv19 61 项、`cargo test --workspace` 937 通过 / 9 忽略。在 macOS 上执行，未跑 Windows `quick-update-desktop.ps1`；真实模型提取质量、真实资料目录与 Android 读盘耗时未验证。
+- **关联**：`crates/moss-voice-server/src/context/knowledge.rs`（`summarize`、`l1_entry`、`KnowledgeService::search`）、`context/retrieve.rs`（`retrieve_candidates`、`significant`）、`context/extract.rs`（`PROMPT`、`parse_operations`、`extraction_input`、`known_for`、`same_text`）、`docs/integration/moss-native-voice-spec.md` n56、`moss-native-voice-implementation.md` i13。
+
 ## [0.3.3] - 2026-11-05
 
 ### 升级云端发版流水线 macOS Runner 为 `macos-latest`（2026-11-06）

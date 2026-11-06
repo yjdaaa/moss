@@ -98,6 +98,9 @@ pub trait ContextStore: Send + Sync {
     /// `None`: revision conflict, or the row was deleted/invalidated meanwhile.
     fn update(&self, id: &str, expected_revision: i64, patch: &MemoryPatch, now: f64) -> Result<Option<ContextMemory>, String>;
     fn delete(&self, id: &str, expected_revision: i64, now: f64) -> Result<bool, String>;
+    /// The same fact was proposed again: count it and push out an extracted candidate's expiry
+    /// to `extend_to` (never earlier). Content, verification and revision stay unchanged.
+    fn reinforce(&self, id: &str, now: f64, extend_to: Option<f64>) -> Result<bool, String>;
     fn clear(&self, scope: &ScopeKey, now: f64) -> Result<usize, String>;
     fn insert_run(&self, run: &ExtractionRun) -> Result<(), String>;
     fn get_run(&self, id: &str) -> Result<Option<ExtractionRun>, String>;
@@ -152,6 +155,9 @@ pub struct ContextService {
     /// checks protect against everything else.
     gate: Mutex<()>,
 }
+
+/// Always-on profile lines per voice turn (see `style_preferences`).
+pub const PROFILE_LIMIT: usize = 3;
 
 fn new_id() -> Result<String, ServiceError> {
     let mut bytes = [0u8; 16];
@@ -217,9 +223,22 @@ impl ContextService {
     }
 
     pub fn create(&self, access: &AccessContext, draft: MemoryDraft, now: f64) -> Result<ContextMemory, ServiceError> {
+        self.create_superseding(access, draft, None, now)
+    }
+
+    /// Create a record that replaces `supersedes` once confirmed. The link is kept only when the
+    /// older record is live, readable by this request and in the same scope and category;
+    /// otherwise the record is created without it (the link is a hint, never an authority).
+    fn create_superseding(&self, access: &AccessContext, draft: MemoryDraft, supersedes: Option<&str>, now: f64) -> Result<ContextMemory, ServiceError> {
         draft.validate(access, now)?;
         let _gate = self.lock()?;
         self.verified(access, &draft.scope)?;
+        let supersedes = match supersedes {
+            Some(id) => Self::store(self.store.get(id))?
+                .filter(|old| old.scope == draft.scope && old.category == draft.category && old.readable(access, now))
+                .map(|old| old.id),
+            None => None,
+        };
         let memory = ContextMemory {
             id: new_id()?,
             scope: draft.scope,
@@ -233,8 +252,40 @@ impl ContextService {
             updated_at: now,
             expires_at: draft.expires_at,
             deleted_at: None,
+            supersedes,
+            seen_count: 1,
+            last_seen_at: None,
         };
         Self::store(self.store.insert(&memory))
+    }
+
+    /// Voice: an extraction proposed a fact that is already stored. Counts it and keeps an
+    /// unreviewed extracted candidate from expiring; never confirms or edits anything.
+    pub(crate) fn reinforce(&self, access: &AccessContext, id: &str, now: f64) -> Result<bool, ServiceError> {
+        if access.channel() != Channel::Voice {
+            return Err(ContextError::AccessDenied.into());
+        }
+        let _gate = self.lock()?;
+        let Some(record) = Self::store(self.store.get(id))? else { return Ok(false) };
+        if !record.readable(access, now) {
+            return Ok(false);
+        }
+        self.verified(access, &record.scope)?;
+        Self::store(self.store.reinforce(id, now, Some(now + super::extract::CANDIDATE_TTL_SECONDS)))
+    }
+
+    /// Ids replaced by a live record that this request can read (hidden from voice retrieval
+    /// until the user decides). Uses every scope the request holds.
+    pub(crate) fn superseded_ids(&self, access: &AccessContext, now: f64) -> std::collections::HashSet<String> {
+        let mut ids = std::collections::HashSet::new();
+        for scope in access.scopes() {
+            for row in self.list(access, scope.key(), now).unwrap_or_default() {
+                if let Some(old) = row.supersedes.as_ref().filter(|_| row.readable(access, now)) {
+                    ids.insert(old.clone());
+                }
+            }
+        }
+        ids
     }
 
     /// Voice sees only active records; the private window also sees expired and invalidated
@@ -272,8 +323,20 @@ impl ContextService {
         let _gate = self.lock()?;
         let record = self.managed(access, id, expected_revision)?;
         transition(record.verification, to, evidence)?;
+        let supersedes = record.supersedes.clone();
+        let (scope, category) = (record.scope.clone(), record.category);
         let patch = MemoryPatch { content: record.content, verification: to, applicability: record.applicability, expires_at: record.expires_at };
-        Self::store(self.store.update(id, expected_revision, &patch, now))?.ok_or(ServiceError::Conflict)
+        let updated = Self::store(self.store.update(id, expected_revision, &patch, now))?.ok_or(ServiceError::Conflict)?;
+        // Confirming a correction retires the record it replaces (same scope and category only).
+        if to == Verification::Confirmed {
+            if let Some(old) = supersedes.and_then(|old| Self::store(self.store.get(&old)).ok().flatten()) {
+                if old.scope == scope && old.category == category && old.deleted_at.is_none() && old.verification != Verification::Invalidated && self.verified(access, &old.scope).is_ok() {
+                    let retire = MemoryPatch { content: old.content.clone(), verification: Verification::Invalidated, applicability: old.applicability.clone(), expires_at: old.expires_at };
+                    let _ = Self::store(self.store.update(&old.id, old.revision, &retire, now))?;
+                }
+            }
+        }
+        Ok(updated)
     }
 
     pub fn delete(&self, access: &AccessContext, id: &str, expected_revision: i64, now: f64) -> Result<(), ServiceError> {
@@ -300,7 +363,10 @@ impl ContextService {
         Self::store(self.store.delete(id, expected_revision, now))
     }
 
-    /// Up to 2 active speaking-style / address preferences in the caller's active preference scope.
+    /// Always-on profile: active preferences in the caller's preference scope that fill a known
+    /// slot (address, reply style, usual material) or state a general speaking style. One per
+    /// slot, confirmed before candidate, newest first; records replaced by a live correction
+    /// are skipped. At most `PROFILE_LIMIT`.
     pub fn style_preferences(&self, access: &AccessContext, now: f64) -> Vec<ContextMemory> {
         let target = if access.personal_mode() {
             access.scope_of(ScopeKind::Person)
@@ -309,13 +375,21 @@ impl ContextService {
         };
         let Some(scope) = target else { return Vec::new() };
         let Ok(mut rows) = self.list(access, scope.key(), now) else { return Vec::new() };
-        rows.retain(|r| r.category == Category::Preference && r.readable(access, now) && super::retrieve::is_global_style_preference(&r.content));
+        let superseded = self.superseded_ids(access, now);
+        rows.retain(|r| {
+            r.category == Category::Preference
+                && r.readable(access, now)
+                && !superseded.contains(&r.id)
+                && (super::extract::classify_preference_slot(&r.content).is_some() || super::retrieve::is_global_style_preference(&r.content))
+        });
         rows.sort_by(|a, b| {
             (b.verification == Verification::Confirmed)
                 .cmp(&(a.verification == Verification::Confirmed))
                 .then_with(|| b.updated_at.total_cmp(&a.updated_at))
         });
-        rows.truncate(2);
+        let mut slots = std::collections::HashSet::new();
+        rows.retain(|r| super::extract::classify_preference_slot(&r.content).is_none_or(|slot| slots.insert(slot)));
+        rows.truncate(PROFILE_LIMIT);
         rows
     }
 
@@ -380,6 +454,9 @@ impl ContextService {
                         updated_at: now,
                         expires_at: None,
                         deleted_at: None,
+                        supersedes: None,
+                        seen_count: 1,
+                        last_seen_at: None,
                     };
                     report.created.push(Self::store(self.store.insert(&memory))?);
                 }
@@ -431,14 +508,15 @@ impl ContextService {
 
     /// Commit one extraction run from the voice channel: every candidate goes through
     /// `create` (contracts + host scope check); the manifest is written last.
-    pub(crate) fn commit_extraction(&self, access: &AccessContext, run: &mut ExtractionRun, drafts: Vec<MemoryDraft>, now: f64) -> Result<(), ServiceError> {
+    /// Each draft may name an older record it replaces (see `create_superseding`).
+    pub(crate) fn commit_extraction(&self, access: &AccessContext, run: &mut ExtractionRun, drafts: Vec<(MemoryDraft, Option<String>)>, now: f64) -> Result<(), ServiceError> {
         let mut stopped = None;
-        for draft in drafts {
+        for (draft, supersedes) in drafts {
             if stopped.is_some() {
                 run.skipped.push(RunSkip { op: "add".into(), reason: "run_stopped".into() });
                 continue;
             }
-            match self.create(access, draft, now) {
+            match self.create_superseding(access, draft, supersedes.as_deref(), now) {
                 Ok(row) => run.adds.push(RunAdd { id: row.id, revision: row.revision }),
                 Err(ServiceError::Invalid(error)) => run.skipped.push(RunSkip { op: "add".into(), reason: error.code().into() }),
                 // Scope went stale or the store failed mid-run: stop adding, but still write
@@ -476,6 +554,9 @@ impl ContextService {
                         "created_at": row.created_at,
                         "updated_at": row.updated_at,
                         "expires_at": row.expires_at,
+                        "supersedes": row.supersedes,
+                        "seen_count": row.seen_count,
+                        "last_seen_at": row.last_seen_at,
                     })
                 })
                 .collect(),

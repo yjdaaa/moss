@@ -34,6 +34,9 @@ fn decode(row: ContextMemoryRow) -> Result<ContextMemory, String> {
         updated_at: row.updated_at,
         expires_at: row.expires_at,
         deleted_at: row.deleted_at,
+        supersedes: row.supersedes.as_deref(),
+        seen_count: row.seen_count,
+        last_seen_at: row.last_seen_at,
     })
     .map_err(|e| e.code().to_owned())
 }
@@ -63,6 +66,9 @@ impl ContextStore for DbStore {
             updated_at: m.updated_at,
             expires_at: m.expires_at,
             deleted_at: m.deleted_at,
+            supersedes: m.supersedes.clone(),
+            seen_count: 1,
+            last_seen_at: None,
         };
         decode(self.db.lock().unwrap().insert_context_memory(&row).map_err(err)?)
     }
@@ -84,6 +90,9 @@ impl ContextStore for DbStore {
             expires_at: patch.expires_at,
         };
         self.db.lock().unwrap().update_context_memory_if_revision(id, expected, &row, now).map_err(err)?.map(decode).transpose()
+    }
+    fn reinforce(&self, id: &str, now: f64, extend_to: Option<f64>) -> Result<bool, String> {
+        self.db.lock().unwrap().reinforce_context_memory(id, now, extend_to).map_err(err)
     }
     fn delete(&self, id: &str, expected: i64, now: f64) -> Result<bool, String> {
         self.db.lock().unwrap().delete_context_memory_if_revision(id, expected, now).map_err(err)
@@ -376,8 +385,8 @@ mod knowledge_sqlite {
     //! NV19-05 reference `KnowledgeStore` over schema v12, driven through `KnowledgeService`
     //! with a temporary folder.
     use super::*;
-    use laser_runtime::{KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
-    use moss_voice_server::context::knowledge::{format_knowledge, KnowledgeDir, KnowledgeError, KnowledgeFile, KnowledgeRoot, KnowledgeService, KnowledgeStore};
+    use laser_runtime::{KnowledgeChunkRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
+    use moss_voice_server::context::knowledge::{format_knowledge, KnowledgeChunk, KnowledgeChunkHit, KnowledgeDir, KnowledgeError, KnowledgeFile, KnowledgeRoot, KnowledgeService, KnowledgeStore};
     use moss_voice_server::context::retrieve::fast_query;
     use std::path::PathBuf;
 
@@ -428,16 +437,20 @@ mod knowledge_sqlite {
         fn set_root_enabled(&self, id: &str, expected: i64, enabled: bool) -> Result<bool, String> {
             self.0.lock().unwrap().set_knowledge_root_enabled(id, expected, enabled).map_err(err)
         }
-        fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String> {
+        fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], chunks: &[KnowledgeChunk], now: f64) -> Result<bool, String> {
             let dirs: Vec<_> = dirs.iter().map(|d| KnowledgeDirRow { id: d.id.clone(), root_id: d.root_id.clone(), rel_dir: d.rel_dir.clone(), l0: d.l0.clone(), l1: d.l1.clone(), file_count: d.file_count }).collect();
             let files: Vec<_> = files
                 .iter()
                 .map(|f| KnowledgeFileRow { id: f.id.clone(), root_id: f.root_id.clone(), dir_id: f.dir_id.clone(), rel_path: f.rel_path.clone(), sha256: f.sha256.clone(), size: f.size, mtime: f.mtime })
                 .collect();
-            self.0.lock().unwrap().replace_knowledge_index(root_id, expected, &dirs, &files, now).map_err(err)
+            let chunks: Vec<_> = chunks.iter().map(|c| KnowledgeChunkRow { file_id: c.file_id.clone(), ord: c.ord, text: c.text.clone() }).collect();
+            self.0.lock().unwrap().replace_knowledge_index_with_chunks(root_id, expected, &dirs, &files, &chunks, now).map_err(err)
         }
         fn delete_root(&self, id: &str, expected: i64) -> Result<bool, String> {
             self.0.lock().unwrap().delete_knowledge_root_if_revision(id, expected).map_err(err)
+        }
+        fn search_chunks(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeChunkHit>, String> {
+            Ok(self.0.lock().unwrap().search_knowledge_chunks(scope.kind().as_str(), scope.id(), &query.terms, limit).map_err(err)?.into_iter().map(|h| KnowledgeChunkHit { dir: dir_from(h.dir), file_id: h.file_id, ord: h.ord }).collect())
         }
         fn search_dirs(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeDir>, String> {
             Ok(self.0.lock().unwrap().search_knowledge_dirs(scope.kind().as_str(), scope.id(), &query.terms, &query.shorts, limit).map_err(err)?.into_iter().map(dir_from).collect())
@@ -489,6 +502,24 @@ mod knowledge_sqlite {
         service.remove_root(&owner, &root.id, current.revision).unwrap();
         assert!(service.search(&owner, &fast_query("怎么降低激光头").unwrap()).unwrap().is_empty());
         assert!(service.roots(&owner, &project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn nv19_passage_index_over_sqlite_finds_deep_text_without_storing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let filler = (0..15).map(|n| format!("第{n}段：椴木雕刻常规参数说明，按材料厚度与图案密度选择合适的速度和功率。")).collect::<Vec<_>>().join("\n\n");
+        std::fs::write(temp.path().join("手册.md"), format!("# 设备维护\n\n{filler}\n\n## 气泵\n\n空气辅助气泵噪音大时检查进气滤网是否堵塞。\n")).unwrap();
+        let db = Arc::new(DbKnowledge(Mutex::new(RuntimeDb::open_memory().unwrap())));
+        let service = KnowledgeService::new(db.clone());
+        let project = ScopeKey::new(ScopeKind::Project, "p1").unwrap();
+        let owner = AccessContext::desktop_private(vec![TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap()]);
+        let (_, report) = service.add_root(&owner, &project, temp.path(), NOW).unwrap();
+        assert_eq!(report.chunks, 16);
+        let hits = service.search(&owner, &fast_query("气泵噪音大怎么办").unwrap()).unwrap();
+        let (_, excerpt) = hits[0].excerpt.clone().unwrap();
+        assert!(excerpt.starts_with("设备维护 / 气泵：") && excerpt.contains("进气滤网"), "{excerpt}");
+        let stored: i64 = db.0.lock().unwrap().connection.query_row("SELECT COUNT(*) FROM context_knowledge_dirs WHERE l1 LIKE '%进气滤网%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(stored, 0, "这句只在段落索引里，数据库里读不到原文");
     }
 }
 

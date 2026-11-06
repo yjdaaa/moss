@@ -20,6 +20,9 @@ fn row(id: &str, scope_kind: &str, scope_id: &str) -> ContextMemoryRow {
         updated_at: 10.0,
         expires_at: None,
         deleted_at: None,
+        supersedes: None,
+        seen_count: 1,
+        last_seen_at: None,
     }
 }
 
@@ -263,7 +266,7 @@ fn nv19_fts_index_follows_inserts_edits_deletes_and_filters_state() {
 
 mod knowledge {
     use laser_runtime::db::RuntimeDb;
-    use laser_runtime::{KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
+    use laser_runtime::{KnowledgeChunkRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
 
     fn root(id: &str, scope: &str, path: &str) -> KnowledgeRootRow {
         KnowledgeRootRow { id: id.into(), scope_kind: "project".into(), scope_id: scope.into(), label: "说明书".into(), root_path: path.into(), revision: 1, created_at: 1.0, indexed_at: None, enabled: true }
@@ -331,4 +334,73 @@ mod knowledge {
         ok.l1 = "字".repeat(4000);
         assert!(db.replace_knowledge_index("r1", 1, &[ok], &[], 2.0).unwrap());
     }
+
+    fn chunk(file_id: &str, ord: i64, text: &str) -> KnowledgeChunkRow {
+        KnowledgeChunkRow { file_id: file_id.into(), ord, text: text.into() }
+    }
+
+    #[test]
+    fn nv19_v17_passage_index_holds_no_text_and_follows_reindex_and_delete() {
+        let db = RuntimeDb::open_memory().unwrap();
+        db.insert_knowledge_root(&root("r1", "p1", "D:/docs")).unwrap();
+        db.insert_knowledge_root(&root("r2", "p2", "D:/other")).unwrap();
+        let dirs = vec![dir("d1", "r1", "", "说明书目录"), dir("d2", "r1", "维护", "维护目录")];
+        let files = vec![file("f1", "r1", "d1", "对焦.md"), file("f2", "r1", "d2", "维护/气泵.md")];
+        let chunks = vec![chunk("f1", 0, "激光对焦：降低激光头直到接触"), chunk("f2", 0, "气泵：噪音大时检查进气滤网"), chunk("f2", 1, "气泵：每月清洁一次")];
+        assert!(db.replace_knowledge_index_with_chunks("r1", 1, &dirs, &files, &chunks, 2.0).unwrap());
+        db.replace_knowledge_index_with_chunks("r2", 1, &[dir("d9", "r2", "", "别的项目")], &[file("f9", "r2", "d9", "a.md")], &[chunk("f9", 0, "气泵：另一个项目的滤网")], 2.0).unwrap();
+        assert!(db.replace_knowledge_index_with_chunks("r1", 2, &dirs, &files, &[chunk("missing", 0, "x")], 3.0).is_err(), "段落必须属于本次的文件");
+
+        let hits = db.search_knowledge_chunks("project", "p1", &strings(&["进气滤", "气滤网"]), 10).unwrap();
+        assert_eq!(hits.len(), 1, "只查本范围");
+        assert_eq!((hits[0].dir.id.as_str(), hits[0].file_id.as_str(), hits[0].ord), ("d2", "f2", 0));
+        assert!(db.search_knowledge_chunks("project", "p1", &strings(&["滤网"]), 10).is_err(), "两字词不走段落索引");
+
+        // Contentless: the passage text cannot be read back from the database.
+        let text: Option<String> = db.connection.query_row("SELECT text FROM context_knowledge_chunks_fts LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert!(text.is_none(), "无正文索引读不回原文");
+        let columns: Vec<String> = {
+            let mut statement = db.connection.prepare("SELECT name FROM pragma_table_info('context_knowledge_chunks')").unwrap();
+            statement.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert!(!columns.iter().any(|c| c == "text"), "段落表不存正文列");
+
+        assert!(db.set_knowledge_root_enabled("r1", 2, false).unwrap());
+        assert!(db.search_knowledge_chunks("project", "p1", &strings(&["进气滤"]), 10).unwrap().is_empty(), "停用的目录不参与");
+        assert!(db.set_knowledge_root_enabled("r1", 3, true).unwrap());
+        assert!(db.replace_knowledge_index("r1", 4, &dirs, &files, 4.0).unwrap(), "不带段落的重建清空本目录的段落索引");
+        assert!(db.search_knowledge_chunks("project", "p1", &strings(&["进气滤"]), 10).unwrap().is_empty());
+        assert!(db.replace_knowledge_index_with_chunks("r1", 5, &dirs, &files, &chunks, 5.0).unwrap());
+        assert!(db.delete_knowledge_root_if_revision("r1", 6).unwrap());
+        let left: i64 = db.connection.query_row("SELECT COUNT(*) FROM context_knowledge_chunks WHERE root_id='r1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+        let indexed: i64 = db.connection.query_row("SELECT COUNT(*) FROM context_knowledge_chunks_fts WHERE context_knowledge_chunks_fts MATCH '\"进气滤\" OR \"另一个\"'", [], |r| r.get(0)).unwrap();
+        assert_eq!(indexed, 1, "删除目录后只剩另一项目的段落");
+    }
+}
+
+#[test]
+fn nv19_v17_supersedes_and_reinforcement() {
+    let db = RuntimeDb::open_memory().unwrap();
+    db.insert_context_memory(&row("old", "device", "dev-a")).unwrap();
+    let mut new = row("new", "device", "dev-a");
+    new.source_kind = "conversation_extraction".into();
+    new.source_ref = Some("extract:run-1".into());
+    new.supersedes = Some("old".into());
+    new.expires_at = Some(100.0);
+    let inserted = db.insert_context_memory(&new).unwrap();
+    assert_eq!((inserted.supersedes.as_deref(), inserted.seen_count, inserted.last_seen_at), (Some("old"), 1, None));
+    let mut counted = row("x", "device", "dev-a");
+    counted.seen_count = 2;
+    assert!(db.insert_context_memory(&counted).is_err(), "新记录只能从 1 次开始");
+
+    assert!(db.reinforce_context_memory("new", 50.0, Some(500.0)).unwrap());
+    let after = db.context_memory("new").unwrap().unwrap();
+    assert_eq!((after.seen_count, after.last_seen_at, after.expires_at, after.revision), (2, Some(50.0), Some(500.0), 1), "候选延期，版本不变");
+    assert!(db.reinforce_context_memory("old", 60.0, Some(500.0)).unwrap());
+    assert_eq!(db.context_memory("old").unwrap().unwrap().expires_at, None, "用户填写的记录不加到期时间");
+    assert!(db.reinforce_context_memory("new", 70.0, Some(80.0)).unwrap());
+    assert_eq!(db.context_memory("new").unwrap().unwrap().expires_at, Some(500.0), "不会把到期时间提前");
+    assert!(db.delete_context_memory_if_revision("new", 1, 90.0).unwrap());
+    assert!(!db.reinforce_context_memory("new", 95.0, None).unwrap(), "删除后不再计数");
 }

@@ -1384,6 +1384,13 @@ impl Turn {
             !history.is_empty(),
         )));
 
+        // n57: once structured memory retrieval is on, the old NV10 per-device summary (imported
+        // as candidates when the switch was turned on) is no longer injected next to it.
+        let nv10_summary = !self
+            .conversation
+            .context_retrieval
+            .as_ref()
+            .is_some_and(|retrieval| retrieval.retriever.enabled());
         let active_jev = self
             .conversation
             .jev_filter
@@ -1409,7 +1416,7 @@ impl Turn {
             let summary_fut = async {
                 if let Some(personal) = &self.conversation.personal_context {
                     personal.prompt_for(&self.context, scope.as_ref()).await
-                } else if let Some(memory) = &self.conversation.memory {
+                } else if let Some(memory) = self.conversation.memory.as_ref().filter(|_| nv10_summary) {
                     memory.prompt_for(&self.context.device_id).await
                 } else {
                     None
@@ -1451,7 +1458,7 @@ impl Turn {
                 if let Some(context) = personal.prompt_for(&self.context, scope.as_ref()).await {
                     messages.push(ChatMessage::system(context));
                 }
-            } else if let Some(memory) = &self.conversation.memory {
+            } else if let Some(memory) = self.conversation.memory.as_ref().filter(|_| nv10_summary) {
                 if let Some(context) = memory.prompt_for(&self.context.device_id).await {
                     messages.push(ChatMessage::system(context));
                 }

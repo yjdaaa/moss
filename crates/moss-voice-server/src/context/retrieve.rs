@@ -45,7 +45,7 @@ pub fn should_retrieve(text: &str) -> bool {
     !CHIT_CHAT.contains(&normalized.as_str())
 }
 
-fn significant(text: &str) -> Vec<char> {
+pub(crate) fn significant(text: &str) -> Vec<char> {
     text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
@@ -127,11 +127,16 @@ impl ContextService {
     /// firmware does not match the current device are dropped, not shown with a warning.
     pub fn search(&self, access: &AccessContext, query: &SearchQuery, device: Option<&Applicability>, now: f64) -> Result<Vec<(ContextMemory, usize)>, ServiceError> {
         let mut hits: Vec<(ContextMemory, usize)> = Vec::new();
+        let mut superseded = None;
         for scope in access.scopes() {
             let key = scope.key().clone();
             self.verify_for_search(access, &key)?;
             for row in self.search_store(&key, query, now)? {
                 if !row.readable(access, now) || hits.iter().any(|(seen, _)| seen.id == row.id) {
+                    continue;
+                }
+                // A live record that replaces this one wins until the user decides.
+                if superseded.get_or_insert_with(|| self.superseded_ids(access, now)).contains(&row.id) {
                     continue;
                 }
                 if row.category.needs_applicability() {
@@ -146,12 +151,31 @@ impl ContextService {
             }
         }
         hits.sort_by(|(a, sa), (b, sb)| {
-            sb.cmp(sa)
+            rank(b, *sb, now)
+                .total_cmp(&rank(a, *sa, now))
                 .then_with(|| (b.verification == Verification::Confirmed).cmp(&(a.verification == Verification::Confirmed)))
                 .then_with(|| b.updated_at.total_cmp(&a.updated_at))
         });
         Ok(hits)
     }
+}
+
+/// Half-life for task context (project decisions and to-dos go stale); other categories
+/// (preferences, hardware-bound experience) do not decay.
+pub(crate) const TASK_HALF_LIFE_DAYS: f64 = 14.0;
+
+/// Ranking weight: lexical points × time decay (task context only, floor 0.3 so an old but
+/// exact match still shows) × a small bonus for facts proposed again (capped at +50%).
+pub(crate) fn rank(row: &ContextMemory, points: usize, now: f64) -> f64 {
+    let decay = if row.category == Category::TaskContext {
+        let seen = row.last_seen_at.unwrap_or(row.updated_at).max(row.updated_at);
+        let days = ((now - seen) / 86_400.0).max(0.0);
+        0.3 + 0.7 * 0.5f64.powf(days / TASK_HALF_LIFE_DAYS)
+    } else {
+        1.0
+    };
+    let repeated = 1.0 + 0.1 * (row.seen_count.saturating_sub(1).min(5) as f64);
+    points as f64 * decay * repeated
 }
 
 /// Labelled, bounded, read-only block for the system prompt; `None` when nothing fits.
@@ -278,37 +302,50 @@ impl ContextRetriever {
             return None;
         }
         let query = fast_query(text)?;
-        let service = self.service.clone();
-        let this = self.clone();
+        let at = now();
         // Memory and knowledge are independent: enabled knowledge folders work even when
-        // personal memory is off, and a failure in one never hides the other.
-        let task = tokio::task::spawn_blocking(move || {
-            let kb_on = knowledge.as_ref().is_some_and(|k| k.has_enabled_roots(&access));
-            if !mem_on && !kb_on {
-                return None;
-            }
-            this.searches.fetch_add(1, Ordering::SeqCst);
-            let at = now();
-            let (always_preferences, memory_hits) = if mem_on {
-                let style = service.style_preferences(&access, at);
-                let hits = service
-                    .search(&access, &query, device.as_ref(), at)
-                    .unwrap_or_default();
+        // personal memory is off, and a failure *or timeout* in one never hides the other —
+        // each runs on its own blocking task under its own `FAST_TIMEOUT`, concurrently.
+        let memory = mem_on.then(|| {
+            let (this, access, query) = (self.clone(), access.clone(), query.clone());
+            tokio::task::spawn_blocking(move || {
+                this.searches.fetch_add(1, Ordering::SeqCst);
+                let style = this.service.style_preferences(&access, at);
+                let hits = this.service.search(&access, &query, device.as_ref(), at).unwrap_or_default();
                 (style, hits)
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            let documents_block = kb_on
-                .then(|| knowledge.and_then(|k| k.search(&access, &query).ok()))
-                .flatten()
-                .and_then(|hits| super::knowledge::format_knowledge(&hits));
-            (!always_preferences.is_empty() || !memory_hits.is_empty() || documents_block.is_some()).then_some(RetrievedCandidates {
-                always_preferences,
-                memory_hits,
-                documents_block,
             })
         });
-        tokio::time::timeout(FAST_TIMEOUT, task).await.ok()?.ok()?
+        let documents = knowledge.map(|knowledge| {
+            let this = self.clone();
+            tokio::task::spawn_blocking(move || {
+                if !knowledge.has_enabled_roots(&access) {
+                    return None;
+                }
+                if !mem_on {
+                    this.searches.fetch_add(1, Ordering::SeqCst);
+                }
+                knowledge.search(&access, &query).ok().and_then(|hits| super::knowledge::format_knowledge(&hits))
+            })
+        });
+        let memory = async move {
+            match memory {
+                Some(task) => tokio::time::timeout(FAST_TIMEOUT, task).await.ok().and_then(Result::ok),
+                None => None,
+            }
+        };
+        let documents = async move {
+            match documents {
+                Some(task) => tokio::time::timeout(FAST_TIMEOUT, task).await.ok().and_then(Result::ok).flatten(),
+                None => None,
+            }
+        };
+        let (memory, documents_block) = tokio::join!(memory, documents);
+        let (always_preferences, memory_hits) = memory.unwrap_or_default();
+        (!always_preferences.is_empty() || !memory_hits.is_empty() || documents_block.is_some()).then_some(RetrievedCandidates {
+            always_preferences,
+            memory_hits,
+            documents_block,
+        })
     }
 
     /// Fast mode for one voice turn: no model call, bounded by `FAST_TIMEOUT`.
@@ -352,7 +389,7 @@ impl ContextRetriever {
                     }
                 }
             }
-            scored.sort_by(|(a, sa), (b, sb)| sb.cmp(sa).then_with(|| b.updated_at.total_cmp(&a.updated_at)));
+            scored.sort_by(|(a, sa), (b, sb)| rank(b, *sb, at).total_cmp(&rank(a, *sa, at)).then_with(|| b.updated_at.total_cmp(&a.updated_at)));
             Ok(scored.into_iter().map(|(row, _)| row).take(20).collect())
         })
         .await

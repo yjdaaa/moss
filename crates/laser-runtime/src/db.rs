@@ -104,7 +104,10 @@ impl ApprovalRow {
 /// v12：NV19-05 分层知识库：资料根目录、目录 L0/L1 摘要与文件指纹，目录摘要 FTS5 索引。
 /// v14：小智设备信息快照（`voice_devices` 的 info/hello/status 原始 JSON 与时间）。
 /// v15：设备实际使用的拾音模式（`voice_devices.listen_json` / `listen_at`）。
-pub const SCHEMA_VERSION: i64 = 16;
+/// v16：资料目录单独启用 / 停用（`context_knowledge_roots.enabled`）。
+/// v17：NV19 记忆取代链与复现计数（`context_memories.supersedes/seen_count/last_seen_at`），
+/// 资料段落级索引（`context_knowledge_chunks` + 无正文 FTS5 `context_knowledge_chunks_fts`）。
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -741,6 +744,40 @@ impl RuntimeDb {
                 )?;
             }
             tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(16,unixepoch());")?;
+        }
+        if current.unwrap_or(0) < 17 {
+            // 2026-11-06（技术书 n57）：记忆新增“取代哪条旧记录”与被再次提到的次数；资料新增段落级
+            // 索引。段落 FTS5 为无正文（content=''）表，只存三字片段的倒排索引（detail=column，
+            // 不存位置），原文仍只在磁盘上，检索命中后按指纹核对再读。加列前先查表结构，可重跑。
+            let existing = {
+                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('context_memories')")?;
+                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                names
+            };
+            for (column, definition) in [
+                ("supersedes", "TEXT CHECK(supersedes IS NULL OR length(supersedes) BETWEEN 1 AND 64)"),
+                ("seen_count", "INTEGER NOT NULL DEFAULT 1 CHECK(seen_count >= 1)"),
+                ("last_seen_at", "REAL"),
+            ] {
+                if !existing.iter().any(|name| name == column) {
+                    tx.execute_batch(&format!("ALTER TABLE context_memories ADD COLUMN {column} {definition};"))?;
+                }
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS context_knowledge_chunks(
+                   id INTEGER PRIMARY KEY,
+                   root_id TEXT NOT NULL,
+                   dir_id TEXT NOT NULL,
+                   file_id TEXT NOT NULL,
+                   ord INTEGER NOT NULL CHECK(ord >= 0),
+                   UNIQUE(file_id, ord)
+                 );
+                 CREATE INDEX IF NOT EXISTS context_knowledge_chunks_root ON context_knowledge_chunks(root_id);
+                 CREATE VIRTUAL TABLE IF NOT EXISTS context_knowledge_chunks_fts USING fts5(
+                   text, content='', contentless_delete=1, detail=column, tokenize='trigram'
+                 );
+                 INSERT INTO schema_version(version,applied_at) VALUES(17,unixepoch());"
+            )?;
         }
         tx.commit()?;
         Ok(())

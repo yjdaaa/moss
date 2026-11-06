@@ -563,6 +563,12 @@ pub struct ContextMemory {
     pub updated_at: f64,
     pub expires_at: Option<f64>,
     pub deleted_at: Option<f64>,
+    /// Older record (same scope and category) this one replaces; invalidated when this one is
+    /// confirmed, and hidden from voice retrieval while this one is live.
+    pub supersedes: Option<String>,
+    /// How often the same fact was proposed again (1 = once). Ranking hint only, never evidence.
+    pub seen_count: i64,
+    pub last_seen_at: Option<f64>,
 }
 
 /// A row as stored (column strings), for the host's store adapter.
@@ -583,6 +589,9 @@ pub struct StoredMemory<'a> {
     pub updated_at: f64,
     pub expires_at: Option<f64>,
     pub deleted_at: Option<f64>,
+    pub supersedes: Option<&'a str>,
+    pub seen_count: i64,
+    pub last_seen_at: Option<f64>,
 }
 
 impl ContextMemory {
@@ -607,6 +616,9 @@ impl ContextMemory {
             updated_at: row.updated_at,
             expires_at: row.expires_at,
             deleted_at: row.deleted_at,
+            supersedes: row.supersedes.map(Into::into),
+            seen_count: row.seen_count.max(1),
+            last_seen_at: row.last_seen_at,
         })
     }
 

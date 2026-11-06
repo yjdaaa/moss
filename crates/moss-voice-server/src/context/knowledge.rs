@@ -32,6 +32,13 @@ const TOP_DIRECTORIES: usize = 2;
 const L2_FILES_PER_DIRECTORY: usize = 5;
 const EXCERPT_CHARS: usize = 400;
 pub const KNOWLEDGE_BUDGET_CHARS: usize = 900;
+/// Passage index (v17): at most this many passages per root; the rest is reported as skipped.
+const MAX_CHUNKS: usize = 50_000;
+/// Passage hits fetched per scope, and passages read from disk per directory.
+const CHUNK_HITS: usize = 30;
+const CHUNK_READS_PER_DIRECTORY: usize = 3;
+/// A heading path in front of a passage is clipped to this many characters.
+const HEADING_CHARS: usize = 60;
 pub const INDEPENDENT_KB_SCOPE_ID: &str = "local-kb";
 
 pub fn independent_kb_scope() -> ScopeKey {
@@ -118,11 +125,30 @@ pub struct KnowledgeFile {
     pub mtime: f64,
 }
 
+/// One passage to index (v17). `text` feeds only the contentless FTS5 index; it is never stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeChunk {
+    pub file_id: String,
+    /// Position in `passages(file text)`; re-derived from disk after the fingerprint check.
+    pub ord: i64,
+    pub text: String,
+}
+
+/// A passage that matched: its directory row and which passage of which file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeChunkHit {
+    pub dir: KnowledgeDir,
+    pub file_id: String,
+    pub ord: i64,
+}
+
 /// What a rebuild found; file text is not kept.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IndexReport {
     pub directories: usize,
     pub files: usize,
+    /// Passages put into the v17 passage index.
+    pub chunks: usize,
     /// Reason → count (`unsupported_type`, `too_large`, `not_utf8`, `sensitive_name`, `link_or_reparse`, `empty`).
     pub skipped: BTreeMap<&'static str, usize>,
 }
@@ -136,9 +162,12 @@ pub trait KnowledgeStore: Send + Sync {
     fn all_roots(&self) -> Result<Vec<KnowledgeRoot>, String>;
     fn set_root_enabled(&self, id: &str, expected_revision: i64, enabled: bool) -> Result<bool, String>;
     /// `false`: the root is no longer at `expected_revision`; nothing written.
-    fn replace(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String>;
+    fn replace(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], chunks: &[KnowledgeChunk], now: f64) -> Result<bool, String>;
     fn delete_root(&self, id: &str, expected_revision: i64) -> Result<bool, String>;
     fn search_dirs(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeDir>, String>;
+    /// v17: passages of enabled roots in one scope matching any three-character term of
+    /// `query.terms`, best first. Two-character terms are not indexed at passage level.
+    fn search_chunks(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeChunkHit>, String>;
     fn files(&self, dir_id: &str) -> Result<Vec<KnowledgeFile>, String>;
 }
 
@@ -326,6 +355,64 @@ pub(crate) fn paragraphs(text: &str) -> Vec<String> {
     out
 }
 
+/// Heading-aware passages for the v17 index: Markdown headings (`#`…`######`) are not passages
+/// themselves but prefix the passages under them as `标题 / 小标题：正文`; code blocks are
+/// skipped. Same paragraph rules and filters as `paragraphs`. Deterministic, so a passage can
+/// be found again by its position after the file's fingerprint is re-checked.
+pub(crate) fn passages(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut headings: Vec<(usize, String)> = Vec::new();
+    let mut current = String::new();
+    let mut in_code = false;
+    let flush = |current: &mut String, headings: &[(usize, String)], out: &mut Vec<String>| {
+        let body = clip(current.trim(), PARAGRAPH_CHARS);
+        current.clear();
+        if body.is_empty() {
+            return;
+        }
+        let path = clip(&headings.iter().map(|(_, h)| h.as_str()).collect::<Vec<_>>().join(" / "), HEADING_CHARS);
+        let passage = if path.is_empty() { body } else { format!("{path}：{body}") };
+        if check_content(&passage).is_ok() {
+            out.push(passage);
+        }
+    };
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            flush(&mut current, &headings, &mut out);
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let level = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&level) {
+            let title = trimmed[level..].trim();
+            if !title.is_empty() {
+                flush(&mut current, &headings, &mut out);
+                headings.retain(|(l, _)| *l < level);
+                headings.push((level, clip(title, 40)));
+                continue;
+            }
+        }
+        let line = trimmed.trim_start_matches(['>', '-', '*', '|']).trim();
+        if line.is_empty() {
+            flush(&mut current, &headings, &mut out);
+            continue;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(line);
+        if current.chars().count() >= PARAGRAPH_CHARS {
+            flush(&mut current, &headings, &mut out);
+        }
+    }
+    flush(&mut current, &headings, &mut out);
+    out
+}
+
 fn file_name(rel_path: &str) -> &str {
     rel_path.rsplit('/').next().unwrap_or(rel_path)
 }
@@ -336,11 +423,16 @@ fn summarize(label: &str, rel_dir: &str, files: &[ScannedFile]) -> (String, Stri
     let names: Vec<&str> = files.iter().map(|f| file_name(&f.rel_path)).collect();
     let mut leads = Vec::new();
     let mut l1 = String::new();
+    // Every file gets an equal share of L1, so files late in a large directory stay searchable
+    // and can be ranked for an L2 excerpt; small directories keep the full overview length.
+    let share = L1_CHARS / files.len().max(1);
     for (file, name) in files.iter().zip(&names) {
         let parts = paragraphs(&file.text);
         if let Some(first) = parts.first() {
             leads.push(clip(first, 40));
         }
+        let header = format!("【{name}】");
+        let room = share.saturating_sub(header.chars().count() + 1).min(FILE_OVERVIEW_CHARS);
         let mut body = String::new();
         for part in &parts {
             if body.chars().count() + part.chars().count() > FILE_OVERVIEW_CHARS {
@@ -351,7 +443,12 @@ fn summarize(label: &str, rel_dir: &str, files: &[ScannedFile]) -> (String, Stri
             }
             body.push_str(part);
         }
-        let entry = format!("【{name}】{}\n", if body.is_empty() { "（没有可显示的内容）" } else { &body });
+        let body = match (body.is_empty(), room) {
+            (_, room) if room < 8 => String::new(),
+            (true, _) => "（没有可显示的内容）".to_owned(),
+            (false, room) => clip(&body, room),
+        };
+        let entry = format!("{header}{body}\n");
         if l1.chars().count() + entry.chars().count() > L1_CHARS {
             break;
         }
@@ -360,6 +457,12 @@ fn summarize(label: &str, rel_dir: &str, files: &[ScannedFile]) -> (String, Stri
     let l0 = clip(&format!("{place}：{} 个文件（{}）。{}", files.len(), names.join("、"), leads.join("；")), L0_CHARS);
     let l1 = if l1.trim().is_empty() { clip(&format!("{place}：{}", names.join("、")), L1_CHARS) } else { clip(l1.trim_end(), L1_CHARS) };
     (l0, l1)
+}
+
+/// The `【name】overview` line of one file inside a directory's L1 (empty when cut off).
+fn l1_entry<'a>(l1: &'a str, name: &str) -> &'a str {
+    let header = format!("【{name}】");
+    l1.lines().find(|line| line.starts_with(&header)).unwrap_or("")
 }
 
 // ---------- reading L2 on demand ----------
@@ -486,13 +589,22 @@ impl KnowledgeService {
         let found = scan(&root_path, &mut report)?;
         let mut dirs = Vec::new();
         let mut files = Vec::new();
+        let mut chunks = Vec::new();
         for (rel_dir, list) in &found {
             let dir_id = short_id("kd", &[&root.id, rel_dir]);
             let (l0, l1) = summarize(&root.label, rel_dir, list);
             dirs.push(KnowledgeDir { id: dir_id.clone(), root_id: root.id.clone(), rel_dir: rel_dir.clone(), l0, l1, file_count: list.len() as i64 });
             for file in list {
+                let file_id = short_id("kf", &[&root.id, &file.rel_path]);
+                for (ord, text) in passages(&file.text).into_iter().enumerate() {
+                    if chunks.len() >= MAX_CHUNKS {
+                        *report.skipped.entry("chunk_limit").or_default() += 1;
+                        break;
+                    }
+                    chunks.push(KnowledgeChunk { file_id: file_id.clone(), ord: ord as i64, text });
+                }
                 files.push(KnowledgeFile {
-                    id: short_id("kf", &[&root.id, &file.rel_path]),
+                    id: file_id,
                     root_id: root.id.clone(),
                     dir_id: dir_id.clone(),
                     rel_path: file.rel_path.clone(),
@@ -504,7 +616,8 @@ impl KnowledgeService {
         }
         report.directories = dirs.len();
         report.files = files.len();
-        if Self::store(self.store.replace(&root.id, root.revision, &dirs, &files, now))? { Ok(report) } else { Err(KnowledgeError::Conflict) }
+        report.chunks = chunks.len();
+        if Self::store(self.store.replace(&root.id, root.revision, &dirs, &files, &chunks, now))? { Ok(report) } else { Err(KnowledgeError::Conflict) }
     }
 
     pub fn roots(&self, access: &AccessContext, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, KnowledgeError> {
@@ -552,40 +665,119 @@ impl KnowledgeService {
     /// private window): L0/L1 match and rank directories, then only the top directories read
     /// L2 for an excerpt. Any stale scope fails the whole search.
     pub fn search(&self, access: &AccessContext, query: &SearchQuery) -> Result<Vec<KnowledgeHit>, KnowledgeError> {
-        let mut ranked: Vec<(KnowledgeDir, KnowledgeRoot, usize)> = Vec::new();
+        // (directory, root, points, passage hits in index order)
+        let mut ranked: Vec<(KnowledgeDir, KnowledgeRoot, usize, Vec<KnowledgeChunkHit>)> = Vec::new();
         for scope in access.scopes().iter().filter(|s| matches!(s.key().kind(), ScopeKind::Project | ScopeKind::Workspace)) {
             let key = scope.key().clone();
             self.verified(access, &key)?;
             let roots = Self::store(self.store.roots(&key))?;
+            let root_of = |dir: &KnowledgeDir| roots.iter().find(|r| r.id == dir.root_id && r.scope == key && r.enabled).cloned();
+            // v17 passage index: each hit adds weight to its directory (earlier hits more).
+            if !query.terms.is_empty() {
+                for (index, hit) in Self::store(self.store.search_chunks(&key, query, CHUNK_HITS))?.into_iter().enumerate() {
+                    let bonus = 3 + (CHUNK_HITS - index.min(CHUNK_HITS)) / 10;
+                    match ranked.iter_mut().find(|(dir, ..)| dir.id == hit.dir.id) {
+                        Some((_, _, points, chunks)) => {
+                            *points += bonus;
+                            chunks.push(hit);
+                        }
+                        None => {
+                            let Some(root) = root_of(&hit.dir) else { continue };
+                            ranked.push((hit.dir.clone(), root, bonus, vec![hit]));
+                        }
+                    }
+                }
+            }
             for dir in Self::store(self.store.search_dirs(&key, query, 20))? {
-                let Some(root) = roots.iter().find(|r| r.id == dir.root_id && r.scope == key && r.enabled) else { continue };
                 let points = score(&dir.l0, query).map(|p| p * 2).unwrap_or(0) + score(&dir.l1, query).unwrap_or(0);
-                if points > 0 && !ranked.iter().any(|(seen, _, _)| seen.id == dir.id) {
-                    ranked.push((dir, root.clone(), points));
+                if points == 0 {
+                    continue;
+                }
+                match ranked.iter_mut().find(|(seen, ..)| seen.id == dir.id) {
+                    Some((_, _, total, _)) => *total += points,
+                    None => {
+                        let Some(root) = root_of(&dir) else { continue };
+                        ranked.push((dir, root, points, Vec::new()));
+                    }
                 }
             }
         }
         ranked.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.rel_dir.cmp(&b.0.rel_dir)));
         let mut hits = Vec::new();
-        for (dir, root, points) in ranked.into_iter().take(TOP_DIRECTORIES) {
-            let mut stale = false;
-            let mut best: Option<(usize, String, String)> = None;
-            for file in Self::store(self.store.files(&dir.id))?.iter().take(L2_FILES_PER_DIRECTORY) {
-                let Some(text) = read_l2(&root, file) else {
-                    stale = true;
-                    continue;
-                };
-                for paragraph in paragraphs(&text) {
-                    if let Some(p) = score(&paragraph, query) {
-                        if best.as_ref().is_none_or(|(b, _, _)| p > *b) {
-                            best = Some((p, file.rel_path.clone(), clip(&paragraph, EXCERPT_CHARS)));
-                        }
-                    }
-                }
+        for (dir, root, points, chunks) in ranked.into_iter().take(TOP_DIRECTORIES) {
+            let files = Self::store(self.store.files(&dir.id))?;
+            let (mut best, mut stale) = Self::excerpt_from_passages(&root, &files, &chunks, query);
+            if best.is_none() {
+                let (fallback, fallback_stale) = Self::excerpt_from_files(&root, &dir, &files, query);
+                best = fallback;
+                stale |= fallback_stale;
             }
             hits.push(KnowledgeHit { label: root.label, rel_dir: dir.rel_dir, l0: dir.l0, excerpt: best.map(|(_, path, text)| (path, text)), stale, score: points });
         }
         Ok(hits)
+    }
+
+    /// Read only the files of the best passage hits (fingerprint re-checked) and take the
+    /// passage at the indexed position. A changed file or missing position marks it stale.
+    fn excerpt_from_passages(root: &KnowledgeRoot, files: &[KnowledgeFile], chunks: &[KnowledgeChunkHit], query: &SearchQuery) -> (Option<(usize, String, String)>, bool) {
+        let mut best: Option<(usize, String, String)> = None;
+        let mut stale = false;
+        let mut read: Vec<(&str, Option<Vec<String>>)> = Vec::new();
+        for hit in chunks {
+            let Some(file) = files.iter().find(|f| f.id == hit.file_id) else {
+                stale = true;
+                continue;
+            };
+            if !read.iter().any(|(id, _)| *id == file.id) {
+                if read.len() >= CHUNK_READS_PER_DIRECTORY {
+                    continue;
+                }
+                read.push((file.id.as_str(), read_l2(root, file).map(|text| passages(&text))));
+            }
+            let Some((_, Some(list))) = read.iter().find(|(id, _)| *id == file.id) else {
+                stale = true;
+                continue;
+            };
+            let Some(passage) = usize::try_from(hit.ord).ok().and_then(|ord| list.get(ord)) else {
+                stale = true;
+                continue;
+            };
+            if let Some(points) = score(passage, query) {
+                if best.as_ref().is_none_or(|(b, _, _)| points > *b) {
+                    best = Some((points, file.rel_path.clone(), clip(passage, EXCERPT_CHARS)));
+                }
+            }
+        }
+        (best, stale)
+    }
+
+    /// No usable passage hit (old index, two-character query): read the files whose name or
+    /// L1 overview matches first (ties keep path order) and take the best paragraph.
+    fn excerpt_from_files(root: &KnowledgeRoot, dir: &KnowledgeDir, files: &[KnowledgeFile], query: &SearchQuery) -> (Option<(usize, String, String)>, bool) {
+        let mut best: Option<(usize, String, String)> = None;
+        let mut stale = false;
+        let mut candidates: Vec<(usize, &KnowledgeFile)> = files
+            .iter()
+            .map(|file| {
+                let name = file_name(&file.rel_path);
+                (score(&format!("{name} {}", l1_entry(&dir.l1, name)), query).unwrap_or(0), file)
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, file) in candidates.into_iter().take(L2_FILES_PER_DIRECTORY) {
+            let Some(text) = read_l2(root, file) else {
+                stale = true;
+                continue;
+            };
+            for paragraph in paragraphs(&text) {
+                if let Some(p) = score(&paragraph, query) {
+                    if best.as_ref().is_none_or(|(b, _, _)| p > *b) {
+                        best = Some((p, file.rel_path.clone(), clip(&paragraph, EXCERPT_CHARS)));
+                    }
+                }
+            }
+        }
+        (best, stale)
     }
 }
 

@@ -281,16 +281,16 @@ async fn nv19_personal_mode_unknown_speaker_never_falls_back_preference_to_devic
 #[test]
 fn nv19_operation_parser_limits_count_and_sanitizes_op_names() {
     let many = format!("{{\"operations\":[{}]}}", vec![r#"{"op":"add","category":"preference","content":"a"}"#; 10].join(","));
-    let (adds, skipped) = parse_operations(&many).unwrap();
+    let Parsed { adds, skipped, .. } = parse_operations(&many, &[]).unwrap();
     assert_eq!(adds.len(), MAX_OPERATIONS);
     assert_eq!(skipped.iter().filter(|s| s.reason == "too_many_operations").count(), 2);
-    assert_eq!(parse_operations("{\"ops\":[]}").unwrap_err(), "invalid_output");
-    assert_eq!(parse_operations(r#"{"operations":[{"op":"add","category":"preference"}]}"#).unwrap().1[0].reason, "content_missing");
+    assert_eq!(parse_operations("{\"ops\":[]}", &[]).unwrap_err(), "invalid_output");
+    assert_eq!(parse_operations(r#"{"operations":[{"op":"add","category":"preference"}]}"#, &[]).unwrap().skipped[0].reason, "content_missing");
     assert_eq!(skip("rm -rf /", "x").op, "unknown");
-    let ops = parse_operations(r#"{"operations":[{"op":"delete","id":"ctx-2"},{"op":"Drop Table"},{"op":"invalidate","id":"ctx-3"}]}"#).unwrap().1;
+    let ops = parse_operations(r#"{"operations":[{"op":"delete","id":"ctx-2"},{"op":"Drop Table"},{"op":"invalidate","id":"ctx-3"}]}"#, &[]).unwrap().skipped;
     let reasons: Vec<_> = ops.iter().map(|s| (s.op.as_str(), s.reason.as_str())).collect();
     assert_eq!(reasons, vec![("delete", "op_not_allowed"), ("unknown", "op_not_allowed"), ("invalidate", "op_not_allowed")], "模型不能修改或删除记忆");
-    assert_eq!(parse_operations("{\"operations\":[]}").unwrap().0.len(), 0);
+    assert_eq!(parse_operations("{\"operations\":[]}", &[]).unwrap().adds.len(), 0);
 }
 
 #[tokio::test]
@@ -404,4 +404,109 @@ async fn nv19_rolling_eight_turn_window_compacts_mid_session_without_waiting_for
     // Immediate disconnect with 0 new turns since the 8-turn compaction must NOT call LLM again.
     assert!(!extractor.flush_session(access, machine(), &history(), llm.clone()));
     assert_eq!(llm.calls(), 1);
+}
+
+#[tokio::test]
+async fn nv19_extraction_sees_relevant_known_records_and_drops_duplicates() {
+    let (store, service, extractor) = setup();
+    let draft = |scope: TrustedScope, category: Category, content: &str, applicability: Option<Applicability>| MemoryDraft {
+        scope: scope.key().clone(),
+        category,
+        content: content.into(),
+        verification: Verification::Confirmed,
+        source: Source::new(SourceKind::UserEdit, None).unwrap(),
+        applicability,
+        expires_at: None,
+    };
+    service.create(&owner(), draft(device(), Category::Preference, "回答先说预计时长。", None), 1.0).unwrap();
+    service.create(&owner(), draft(device(), Category::Preference, "喜欢周末加工竹片", None), 1.0).unwrap();
+    let other_model = Applicability::new("OTHER-10W", Some("0.9")).ok();
+    service.create(&owner(), draft(device(), Category::TroubleshootingExperience, "边缘发黑时先清洁镜片", other_model), 1.0).unwrap();
+
+    let llm = FakeLlm::new(r#"{"operations":[
+ {"op":"add","category":"preference","content":"回答要先说预计时长","same_as":0},
+ {"op":"add","category":"preference","content":"回答先说预计时长！"},
+ {"op":"add","category":"task_context","content":"本周先完成椴木样品","same_as":0},
+ {"op":"add","category":"preference","content":"加工完提醒清理镜片","same_as":99}
+]}"#);
+    let dialog = [ChatMessage::user("以后回答先说预计时长"), ChatMessage::assistant("好的"), ChatMessage::user("边缘发黑怎么办")];
+    extractor.spawn(voice(true), machine(), &dialog, llm.clone()).unwrap().await.unwrap();
+
+    let input = llm.seen.lock().unwrap().join("\n");
+    assert!(input.contains("已有记忆") && input.contains("0. 回答先说预计时长。"), "相关的已有记忆按编号给模型");
+    assert!(!input.contains("1. "), "只给一条相关记录：{input}");
+    assert!(!input.contains("周末加工竹片"), "与本次对话无关的记忆不发给模型");
+    assert!(!input.contains("先清洁镜片"), "其他机型的故障经验不发给模型");
+
+    let added: Vec<String> = rows(&store).into_iter().filter(|r| r.source.kind() == SourceKind::ConversationExtraction).map(|r| r.content).collect();
+    assert_eq!(added.len(), 2, "实际新增：{added:?}");
+    assert!(added.contains(&"本周先完成椴木样品".to_owned()), "same_as 指向不同类别时忽略，照常新增");
+    assert!(added.contains(&"加工完提醒清理镜片".to_owned()), "same_as 越界时忽略，照常新增");
+    let runs = store.list_runs(&ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(), 10).unwrap();
+    let reasons: Vec<&str> = runs[0].skipped.iter().map(|s| s.reason.as_str()).collect();
+    assert_eq!(reasons, vec!["duplicate_existing", "duplicate"], "模型标记的重复与只差标点的重复都跳过");
+}
+
+#[test]
+fn nv19_extraction_input_without_known_records_is_unchanged() {
+    assert_eq!(extraction_input(&[], "用户：你好"), "本次对话（数据）：\n用户：你好");
+    assert!(same_text("回答先说 预计时长。", "回答先说预计时长!"));
+    assert!(!same_text("喜欢绿茶", "喜欢喝绿茶"));
+}
+
+#[tokio::test]
+async fn nv19_replacement_links_old_record_and_confirming_it_retires_the_old_one() {
+    let (store, service, extractor) = setup();
+    let old = service
+        .create(&owner(), MemoryDraft {
+            scope: device().key().clone(),
+            category: Category::Preference,
+            content: "我常切椴木板".into(),
+            verification: Verification::Confirmed,
+            source: Source::new(SourceKind::UserEdit, None).unwrap(),
+            applicability: None,
+            expires_at: None,
+        }, 1.0)
+        .unwrap();
+    let llm = FakeLlm::new(r#"{"operations":[
+ {"op":"add","category":"preference","content":"现在常切亚克力，不再切椴木板","replaces":0},
+ {"op":"add","category":"task_context","content":"椴木板样品本周停做","replaces":0}
+]}"#);
+    let dialog = [ChatMessage::user("我常切椴木板，但是现在改成亚克力了"), ChatMessage::assistant("好的")];
+    extractor.spawn(voice(true), machine(), &dialog, llm).unwrap().await.unwrap();
+
+    let rows = rows(&store);
+    let newer = rows.iter().find(|r| r.content.starts_with("现在常切亚克力")).unwrap();
+    assert_eq!(newer.supersedes.as_deref(), Some(old.id.as_str()), "替代关系指向同类旧记录");
+    assert_eq!(newer.verification, Verification::Candidate);
+    let task = rows.iter().find(|r| r.category == Category::TaskContext).unwrap();
+    assert_eq!(task.supersedes, None, "不同类别的替代编号被忽略");
+    assert_eq!(store.get(&old.id).unwrap().unwrap().verification, Verification::Confirmed, "只是候选时不动旧记录");
+
+    service.set_verification(&owner(), &newer.id, newer.revision, Verification::Confirmed, Some(&Evidence::UserConfirmed), 2.0).unwrap();
+    assert_eq!(store.get(&old.id).unwrap().unwrap().verification, Verification::Invalidated, "用户确认新记录后旧记录作废");
+}
+
+#[tokio::test]
+async fn nv19_facts_proposed_again_are_counted_and_keep_candidates_alive() {
+    let (store, _service, extractor) = setup();
+    let first = FakeLlm::new(r#"{"operations":[{"op":"add","category":"preference","content":"回答先说预计时长"}]}"#);
+    let dialog = [ChatMessage::user("以后回答先说预计时长"), ChatMessage::assistant("好的")];
+    extractor.spawn(voice(true), machine(), &dialog, first).unwrap().await.unwrap();
+    let created = rows(&store).into_iter().next().unwrap();
+    assert_eq!(created.seen_count, 1);
+
+    // Make the candidate older so the extension is observable.
+    store.rows.lock().unwrap().get_mut(&created.id).unwrap().expires_at = Some(created.created_at + 10.0);
+    let again = FakeLlm::new(r#"{"operations":[{"op":"add","category":"preference","content":"回答要先说预计时长","same_as":0}]}"#);
+    extractor.spawn(voice(true), machine(), &dialog, again).unwrap().await.unwrap();
+    let after = store.get(&created.id).unwrap().unwrap();
+    assert_eq!(after.seen_count, 2, "模型标为同一条时计数");
+    assert!(after.expires_at.unwrap() > created.created_at + CANDIDATE_TTL_SECONDS - 60.0, "未确认候选的到期时间顺延");
+    assert_eq!((after.revision, after.verification, after.content.as_str()), (created.revision, Verification::Candidate, "回答先说预计时长"), "不改内容、状态和版本");
+
+    let punctuation = FakeLlm::new(r#"{"operations":[{"op":"add","category":"preference","content":"回答先说预计时长！"}]}"#);
+    extractor.spawn(voice(true), machine(), &dialog, punctuation).unwrap().await.unwrap();
+    assert_eq!(store.get(&created.id).unwrap().unwrap().seen_count, 3, "只差标点的重复也计数");
+    assert_eq!(rows(&store).len(), 1);
 }

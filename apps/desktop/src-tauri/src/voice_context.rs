@@ -15,14 +15,14 @@ pub(crate) mod host {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-    use laser_runtime::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow, RuntimeDb};
+    use laser_runtime::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow, KnowledgeChunkRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow, RuntimeDb};
     use moss_voice::settings::BuiltinContext;
     use moss_voice::CenterError;
     use moss_voice_providers::Llm;
     use moss_voice_server::context::experience::{format_experience, Experience};
     use moss_voice_server::context::extract::{ContextExtraction, ContextExtractor};
     use moss_voice_server::context::knowledge::{
-        independent_kb_scope, KnowledgeDir, KnowledgeError, KnowledgeFile, KnowledgeRoot, KnowledgeService, KnowledgeStore, INDEPENDENT_KB_SCOPE_ID,
+        independent_kb_scope, KnowledgeChunk, KnowledgeChunkHit, KnowledgeDir, KnowledgeError, KnowledgeFile, KnowledgeRoot, KnowledgeService, KnowledgeStore, INDEPENDENT_KB_SCOPE_ID,
     };
     use moss_voice_server::context::resume::{format_resume, RefKind, RefState, Reference, ResumeFacts, ResumeNote};
     use moss_voice_server::context::retrieve::{fast_query, ContextAccessProvider, ContextRetrieval, ContextRetriever, SearchQuery};
@@ -159,6 +159,9 @@ pub(crate) mod host {
             updated_at: row.updated_at,
             expires_at: row.expires_at,
             deleted_at: row.deleted_at,
+            supersedes: row.supersedes.as_deref(),
+            seen_count: row.seen_count,
+            last_seen_at: row.last_seen_at,
         })
         .map_err(|e| e.code().to_owned())
     }
@@ -195,6 +198,9 @@ pub(crate) mod host {
                 updated_at: m.updated_at,
                 expires_at: m.expires_at,
                 deleted_at: m.deleted_at,
+                supersedes: m.supersedes.clone(),
+                seen_count: 1,
+                last_seen_at: None,
             };
             decode(self.db()?.insert_context_memory(&row).map_err(err)?)
         }
@@ -219,6 +225,9 @@ pub(crate) mod host {
         }
         fn delete(&self, id: &str, expected: i64, now: f64) -> Result<bool, String> {
             self.db()?.delete_context_memory_if_revision(id, expected, now).map_err(err)
+        }
+        fn reinforce(&self, id: &str, now: f64, extend_to: Option<f64>) -> Result<bool, String> {
+            self.db()?.reinforce_context_memory(id, now, extend_to).map_err(err)
         }
         fn clear(&self, scope: &ScopeKey, now: f64) -> Result<usize, String> {
             self.db()?.clear_context_scope(scope.kind().as_str(), scope.id(), now).map_err(err)
@@ -308,16 +317,33 @@ pub(crate) mod host {
         fn set_root_enabled(&self, id: &str, expected: i64, enabled: bool) -> Result<bool, String> {
             self.0.db.lock().map_err(err)?.set_knowledge_root_enabled(id, expected, enabled).map_err(err)
         }
-        fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String> {
+        fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], chunks: &[KnowledgeChunk], now: f64) -> Result<bool, String> {
             let dirs: Vec<_> = dirs.iter().map(|d| KnowledgeDirRow { id: d.id.clone(), root_id: d.root_id.clone(), rel_dir: d.rel_dir.clone(), l0: d.l0.clone(), l1: d.l1.clone(), file_count: d.file_count }).collect();
             let files: Vec<_> = files
                 .iter()
                 .map(|f| KnowledgeFileRow { id: f.id.clone(), root_id: f.root_id.clone(), dir_id: f.dir_id.clone(), rel_path: f.rel_path.clone(), sha256: f.sha256.clone(), size: f.size, mtime: f.mtime })
                 .collect();
-            self.0.db.lock().map_err(err)?.replace_knowledge_index(root_id, expected, &dirs, &files, now).map_err(err)
+            let chunks: Vec<_> = chunks.iter().map(|c| KnowledgeChunkRow { file_id: c.file_id.clone(), ord: c.ord, text: c.text.clone() }).collect();
+            self.0.db.lock().map_err(err)?.replace_knowledge_index_with_chunks(root_id, expected, &dirs, &files, &chunks, now).map_err(err)
         }
         fn delete_root(&self, id: &str, expected: i64) -> Result<bool, String> {
             self.0.db.lock().map_err(err)?.delete_knowledge_root_if_revision(id, expected).map_err(err)
+        }
+        fn search_chunks(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeChunkHit>, String> {
+            Ok(self
+                .0
+                .db
+                .lock()
+                .map_err(err)?
+                .search_knowledge_chunks(scope.kind().as_str(), scope.id(), &query.terms, limit)
+                .map_err(err)?
+                .into_iter()
+                .map(|h| KnowledgeChunkHit {
+                    dir: KnowledgeDir { id: h.dir.id, root_id: h.dir.root_id, rel_dir: h.dir.rel_dir, l0: h.dir.l0, l1: h.dir.l1, file_count: h.dir.file_count },
+                    file_id: h.file_id,
+                    ord: h.ord,
+                })
+                .collect())
         }
         fn search_dirs(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeDir>, String> {
             Ok(self
@@ -567,7 +593,7 @@ pub(crate) mod host {
             Ok(json!({
                 "id": root.id, "label": root.label, "enabled": root.enabled,
                 "revision": root.revision, "indexed_at": root.indexed_at,
-                "directories": report.directories, "files": report.files, "skipped": report.skipped
+                "directories": report.directories, "files": report.files, "chunks": report.chunks, "skipped": report.skipped
             }))
         }
 
@@ -836,7 +862,7 @@ pub(crate) mod host {
                 }
                 "knowledge_reindex" => {
                     let report = self.knowledge.reindex(&owner, text(input, "id")?, at).map_err(knowledge_error)?;
-                    Ok(json!({"directories": report.directories, "files": report.files, "skipped": report.skipped}))
+                    Ok(json!({"directories": report.directories, "files": report.files, "chunks": report.chunks, "skipped": report.skipped}))
                 }
                 "knowledge_remove" => {
                     self.knowledge.remove_root(&owner, text(input, "id")?, int(input, "revision")?).map_err(knowledge_error)?;

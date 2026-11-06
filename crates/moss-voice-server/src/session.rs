@@ -411,7 +411,9 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                     }
                 }
             } else {
-                if let Some(memory) = &conversation.memory {
+                // n57: structured extraction replaces the NV10 whole-summary rewrite once it is on.
+                let extracting = conversation.context_extraction.as_ref().is_some_and(|e| e.extractor.enabled());
+                if let Some(memory) = conversation.memory.as_ref().filter(|_| !extracting) {
                     memory.queue_summary(&device_id, &session.history, conversation.llm.clone());
                 }
                 // NV19-03: independent of the NV10 summary; off unless the user enabled it.

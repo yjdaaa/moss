@@ -3,7 +3,7 @@
 use super::*;
 use crate::context::retrieve::fast_query;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -12,6 +12,10 @@ pub(crate) struct FakeKnowledge {
     dirs: Mutex<Vec<KnowledgeDir>>,
     files: Mutex<Vec<KnowledgeFile>>,
     pub(crate) stale: AtomicBool,
+    /// Simulated slow disk/database for the directory search, in milliseconds.
+    pub(crate) delay_ms: AtomicU64,
+    /// (root id, passage) — the fake keeps the text to emulate matching; SQLite does not.
+    chunks: Mutex<Vec<(String, KnowledgeChunk)>>,
 }
 
 impl KnowledgeStore for FakeKnowledge {
@@ -45,7 +49,7 @@ impl KnowledgeStore for FakeKnowledge {
         root.revision += 1;
         Ok(true)
     }
-    fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], now: f64) -> Result<bool, String> {
+    fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], chunks: &[KnowledgeChunk], now: f64) -> Result<bool, String> {
         let mut roots = self.roots.lock().unwrap();
         let Some(root) = roots.get_mut(root_id) else { return Ok(false) };
         if root.revision != expected {
@@ -60,6 +64,9 @@ impl KnowledgeStore for FakeKnowledge {
         let mut all_files = self.files.lock().unwrap();
         all_files.retain(|f| f.root_id != root_id);
         all_files.extend(files.iter().cloned());
+        let mut all_chunks = self.chunks.lock().unwrap();
+        all_chunks.retain(|(root, _)| root != root_id);
+        all_chunks.extend(chunks.iter().map(|c| (root_id.to_owned(), c.clone())));
         Ok(true)
     }
     fn delete_root(&self, id: &str, expected: i64) -> Result<bool, String> {
@@ -70,9 +77,11 @@ impl KnowledgeStore for FakeKnowledge {
         roots.remove(id);
         self.dirs.lock().unwrap().retain(|d| d.root_id != id);
         self.files.lock().unwrap().retain(|f| f.root_id != id);
+        self.chunks.lock().unwrap().retain(|(root, _)| root != id);
         Ok(true)
     }
     fn search_dirs(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeDir>, String> {
+        std::thread::sleep(std::time::Duration::from_millis(self.delay_ms.load(Ordering::SeqCst)));
         let roots = self.roots.lock().unwrap();
         Ok(self
             .dirs
@@ -83,6 +92,26 @@ impl KnowledgeStore for FakeKnowledge {
             .filter(|d| query.terms.iter().chain(&query.shorts).any(|t| d.l0.contains(t.as_str()) || d.l1.contains(t.as_str())))
             .take(limit)
             .cloned()
+            .collect())
+    }
+    fn search_chunks(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeChunkHit>, String> {
+        std::thread::sleep(std::time::Duration::from_millis(self.delay_ms.load(Ordering::SeqCst)));
+        let roots = self.roots.lock().unwrap();
+        let files = self.files.lock().unwrap();
+        let dirs = self.dirs.lock().unwrap();
+        Ok(self
+            .chunks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(root, _)| roots.get(root).is_some_and(|r| &r.scope == scope && r.enabled))
+            .filter(|(_, c)| query.terms.iter().any(|t| c.text.contains(t.as_str())))
+            .filter_map(|(_, c)| {
+                let file = files.iter().find(|f| f.id == c.file_id)?;
+                let dir = dirs.iter().find(|d| d.id == file.dir_id)?;
+                Some(KnowledgeChunkHit { dir: dir.clone(), file_id: c.file_id.clone(), ord: c.ord })
+            })
+            .take(limit)
             .collect())
     }
     fn files(&self, dir_id: &str) -> Result<Vec<KnowledgeFile>, String> {
@@ -224,7 +253,7 @@ fn nv19_changed_removed_and_forgotten_files_follow_the_disk() {
     assert!(service.search(&owner(), &query).unwrap().is_empty());
 
     // A rebuild based on an old revision loses.
-    assert_eq!(store.replace(&root.id, 1, &[], &[], NOW).unwrap(), false);
+    assert_eq!(store.replace(&root.id, 1, &[], &[], &[], NOW).unwrap(), false);
     let current = store.root(&root.id).unwrap().unwrap();
     assert_eq!(service.remove_root(&owner(), &root.id, current.revision - 1).unwrap_err(), KnowledgeError::Conflict);
     service.remove_root(&owner(), &root.id, current.revision).unwrap();
@@ -323,4 +352,69 @@ async fn nv19_voice_retrieval_combines_memory_and_knowledge_and_survives_either_
     knowledge_store.stale.store(true, Ordering::SeqCst);
     let memory_only = retriever.prompt_for(voice(), "线条断续怎么办", None).await.unwrap();
     assert!(memory_only.contains("长期记忆检索结果") && !memory_only.contains("资料检索结果"), "资料库失效不影响记忆");
+
+    // A slow knowledge search times out on its own; memory found in time is still injected.
+    knowledge_store.stale.store(false, Ordering::SeqCst);
+    knowledge_store.delay_ms.store(700, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let slow = retriever.prompt_for(voice(), "线条断续怎么办", None).await.unwrap();
+    assert!(slow.contains("长期记忆检索结果") && !slow.contains("资料检索结果"), "资料检索超时不连带丢掉记忆");
+    assert!(started.elapsed() < std::time::Duration::from_millis(650), "仍受 300 ms 上限约束");
+}
+
+#[test]
+fn nv19_large_directories_keep_late_files_searchable_and_excerptable() {
+    let temp = tempfile::tempdir().unwrap();
+    for i in 0..15 {
+        let lead = if i == 14 { "空气辅助气泵噪音大时检查进气滤网是否堵塞。".to_owned() } else { "椴木雕刻参数说明。".repeat(40) };
+        write(temp.path(), &format!("说明{i:02}.md"), format!("{lead}\n\n{}\n", "通用操作提示。".repeat(40)).as_bytes());
+    }
+    let (store, service) = setup();
+    service.add_root(&owner(), &project(), temp.path(), NOW).unwrap();
+    let dir = store.dirs.lock().unwrap()[0].clone();
+    assert!(dir.l1.chars().count() <= L1_CHARS);
+    assert!(dir.l1.contains("【说明14.md】空气辅助气泵"), "目录里第 15 个文件也进入 L1");
+
+    let hits = service.search(&owner(), &fast_query("气泵噪音大怎么办").unwrap()).unwrap();
+    let (path, excerpt) = hits[0].excerpt.clone().expect("第 6 个以后的文件也能摘录原文");
+    assert_eq!(path, "说明14.md");
+    assert!(excerpt.contains("进气滤网"));
+}
+
+#[test]
+fn nv19_passages_carry_their_heading_path_and_skip_code() {
+    let text = "# 维护手册\n\n## 气泵\n\n噪音大时检查进气滤网。\n\n```\nG1 X10 Y10 S1000\n```\n\n### 滤网\n每月清洁一次。\n\n## 皮带\n线条断续时拧紧。\n";
+    assert_eq!(passages(text), vec!["维护手册 / 气泵：噪音大时检查进气滤网。", "维护手册 / 气泵 / 滤网：每月清洁一次。", "维护手册 / 皮带：线条断续时拧紧。"]);
+    assert_eq!(passages("没有标题的一段。\n\n我的密码是 hunter2\n"), vec!["没有标题的一段。"], "敏感段落照样丢弃");
+}
+
+#[test]
+fn nv19_passage_index_finds_text_deep_inside_large_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let filler = |i: usize| (0..12).map(|n| format!("第{i}号文件的第{n}段：椴木雕刻常规参数说明。")).collect::<Vec<_>>().join("\n\n");
+    for i in 0..30 {
+        let body = if i == 20 { format!("# 设备维护\n\n{}\n\n## 气泵\n\n空气辅助气泵噪音大时检查进气滤网是否堵塞。\n", filler(i)) } else { filler(i) };
+        write(temp.path(), &format!("手册{i:02}.md"), body.as_bytes());
+    }
+    let (store, service) = setup();
+    let (root, report) = service.add_root(&owner(), &project(), temp.path(), NOW).unwrap();
+    assert!(report.chunks >= 30 * 12, "每个文件的每段都进入段落索引：{}", report.chunks);
+    let dir = store.dirs.lock().unwrap()[0].clone();
+    assert!(!dir.l1.contains("进气滤网"), "这句话不在目录摘要里，只能靠段落索引找到");
+
+    let hits = service.search(&owner(), &fast_query("气泵噪音大怎么办").unwrap()).unwrap();
+    let (path, excerpt) = hits[0].excerpt.clone().expect("段落命中直接摘录");
+    assert_eq!(path, "手册20.md");
+    assert!(excerpt.starts_with("设备维护 / 气泵：") && excerpt.contains("进气滤网"), "摘录带标题路径：{excerpt}");
+    assert!(!hits[0].stale);
+
+    // The file changed after indexing: the passage is not read and the hit says so.
+    write(temp.path(), "手册20.md", "改过的内容，气泵噪音大时请联系售后。".as_bytes());
+    let changed = service.search(&owner(), &fast_query("气泵噪音大怎么办").unwrap()).unwrap();
+    assert!(changed[0].stale, "文件变化后标为需要重建索引");
+    assert!(changed[0].excerpt.as_ref().is_none_or(|(_, text)| !text.contains("进气滤网")), "不读变化后的旧位置");
+
+    service.reindex(&owner(), &root.id, NOW + 1.0).unwrap();
+    let rebuilt = service.search(&owner(), &fast_query("气泵噪音大怎么办").unwrap()).unwrap();
+    assert!(rebuilt[0].excerpt.as_ref().is_some_and(|(_, text)| text.contains("联系售后")) && !rebuilt[0].stale);
 }

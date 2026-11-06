@@ -23,6 +23,11 @@ pub struct ContextMemoryRow {
     pub updated_at: f64,
     pub expires_at: Option<f64>,
     pub deleted_at: Option<f64>,
+    /// v17: id of the older record (same scope and category) this one replaces once confirmed.
+    pub supersedes: Option<String>,
+    /// v17: how often the same fact was proposed again; new rows always start at 1.
+    pub seen_count: i64,
+    pub last_seen_at: Option<f64>,
 }
 
 /// User-editable fields. Scope, category and source never change after creation.
@@ -35,7 +40,7 @@ pub struct ContextMemoryPatch {
     pub expires_at: Option<f64>,
 }
 
-const COLUMNS: &str = "id,scope_kind,scope_id,category,content,verification,source_kind,source_ref,device_model,firmware,revision,created_at,updated_at,expires_at,deleted_at";
+const COLUMNS: &str = "id,scope_kind,scope_id,category,content,verification,source_kind,source_ref,device_model,firmware,revision,created_at,updated_at,expires_at,deleted_at,supersedes,seen_count,last_seen_at";
 const MAX_LIST: usize = 500;
 
 fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextMemoryRow> {
@@ -55,6 +60,9 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextMemoryRow> {
         updated_at: row.get(12)?,
         expires_at: row.get(13)?,
         deleted_at: row.get(14)?,
+        supersedes: row.get(15)?,
+        seen_count: row.get(16)?,
+        last_seen_at: row.get(17)?,
     })
 }
 
@@ -63,16 +71,17 @@ fn invalid(message: &str) -> SchemaError {
 }
 
 impl RuntimeDb {
-    /// New rows always start at revision 1 and are never born deleted.
+    /// New rows always start at revision 1, seen once, and are never born deleted.
     pub fn insert_context_memory(&self, row: &ContextMemoryRow) -> Result<ContextMemoryRow, SchemaError> {
-        if row.revision != 1 || row.deleted_at.is_some() || !row.created_at.is_finite() || row.updated_at != row.created_at || row.expires_at.is_some_and(|at| !at.is_finite()) {
+        if row.revision != 1 || row.seen_count != 1 || row.last_seen_at.is_some() || row.deleted_at.is_some() || !row.created_at.is_finite() || row.updated_at != row.created_at || row.expires_at.is_some_and(|at| !at.is_finite()) {
             return Err(invalid("记忆条目无效"));
         }
         self.connection.execute(
-            &format!("INSERT INTO context_memories({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?11,?12,NULL)"),
+            &format!("INSERT INTO context_memories({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?11,?12,NULL,?13,1,NULL)"),
             params![
                 row.id, row.scope_kind, row.scope_id, row.category, row.content, row.verification,
-                row.source_kind, row.source_ref, row.device_model, row.firmware, row.created_at, row.expires_at
+                row.source_kind, row.source_ref, row.device_model, row.firmware, row.created_at, row.expires_at,
+                row.supersedes
             ],
         )?;
         self.context_memory(&row.id)?.ok_or_else(|| invalid("记忆条目写入失败"))
@@ -131,6 +140,22 @@ impl RuntimeDb {
             "UPDATE context_memories SET content='',device_model=NULL,firmware=NULL,expires_at=NULL,revision=revision+1,updated_at=?3,deleted_at=?3
              WHERE id=?1 AND revision=?2 AND deleted_at IS NULL",
             params![id, expected_revision, now],
+        )? == 1)
+    }
+
+    /// v17: the same fact was proposed again. Counts it and, for an unreviewed extracted
+    /// candidate whose expiry is earlier than `extend_to`, pushes the expiry out. Content,
+    /// verification and revision are untouched, so user edits and run reverts keep working.
+    pub fn reinforce_context_memory(&self, id: &str, now: f64, extend_to: Option<f64>) -> Result<bool, SchemaError> {
+        if !now.is_finite() || extend_to.is_some_and(|at| !at.is_finite()) {
+            return Err(invalid("时间无效"));
+        }
+        Ok(self.connection.execute(
+            "UPDATE context_memories SET seen_count=seen_count+1, last_seen_at=?2,
+               expires_at=CASE WHEN ?3 IS NOT NULL AND verification='candidate' AND source_kind='conversation_extraction'
+                                AND expires_at IS NOT NULL AND expires_at<?3 THEN ?3 ELSE expires_at END
+             WHERE id=?1 AND deleted_at IS NULL AND verification<>'invalidated'",
+            params![id, now, extend_to],
         )? == 1)
     }
 

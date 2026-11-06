@@ -1,6 +1,7 @@
 //! NV19-04 retrieval rules over the in-memory store. Synthetic memories only.
 use super::*;
 use crate::context::fake_store::FakeStore;
+use crate::context::service::ContextStore;
 use crate::context::{MemoryDraft, ScopeKey, ScopeKind, Source, TrustedScope};
 use moss_voice_providers::{BoxFuture, LlmReply, ProviderError, ToolSpec};
 use std::sync::Mutex;
@@ -170,4 +171,63 @@ async fn nv19_deep_search_plans_keywords_and_falls_back_without_a_model() {
     let fallback = retriever.deep_search(owner(), "边缘发黑", failing, Some(machine("1.2.0"))).await.unwrap();
     assert_eq!(fallback.len(), 1, "模型失败时退回快速查询");
     assert_eq!(retriever.deep_search(voice("dev-a"), "边缘发黑", planner, None).await.unwrap_err(), ServiceError::Invalid(crate::context::ContextError::AccessDenied));
+}
+
+#[test]
+fn nv19_task_context_decays_but_preferences_and_repeated_facts_do_not_lose_rank() {
+    let base = |category: Category, updated_at: f64, seen_count: i64| ContextMemory {
+        id: "m".into(),
+        scope: ScopeKey::new(ScopeKind::Project, "p1").unwrap(),
+        category,
+        content: "x".into(),
+        verification: Verification::Candidate,
+        source: Source::new(SourceKind::UserEdit, None).unwrap(),
+        applicability: None,
+        revision: 1,
+        created_at: updated_at,
+        updated_at,
+        expires_at: None,
+        deleted_at: None,
+        supersedes: None,
+        seen_count,
+        last_seen_at: None,
+    };
+    let day = 86_400.0;
+    let fresh = rank(&base(Category::TaskContext, NOW, 1), 10, NOW);
+    let two_weeks = rank(&base(Category::TaskContext, NOW - 14.0 * day, 1), 10, NOW);
+    let ancient = rank(&base(Category::TaskContext, NOW - 3650.0 * day, 1), 10, NOW);
+    assert!((fresh - 10.0).abs() < 1e-9 && (two_weeks - 6.5).abs() < 1e-9, "14 天半衰：0.3 + 0.7 × 0.5");
+    assert!((ancient - 3.0).abs() < 1e-6, "很久以前的精确命中仍保底 30%");
+    assert_eq!(rank(&base(Category::Preference, NOW - 3650.0 * day, 1), 10, NOW), 10.0, "偏好不衰减");
+    assert_eq!(rank(&base(Category::Preference, NOW, 3), 10, NOW), 12.0, "被再次提到两次加 20%");
+    assert_eq!(rank(&base(Category::Preference, NOW, 100), 10, NOW), 15.0, "复现加成封顶 50%");
+    let mut touched = base(Category::TaskContext, NOW - 14.0 * day, 2);
+    touched.last_seen_at = Some(NOW);
+    assert!((rank(&touched, 10, NOW) - 11.0).abs() < 1e-9, "最近又被提到的任务按最近一次计算");
+}
+
+#[test]
+fn nv19_live_replacement_hides_the_old_record_from_voice_search_and_profile() {
+    let store = Arc::new(FakeStore::default());
+    let service = ContextService::new(store.clone());
+    let old = add(&service, (ScopeKind::Device, "dev-a"), Category::Preference, "以后叫我王工", Verification::Confirmed, None);
+    add(&service, (ScopeKind::Device, "dev-a"), Category::Preference, "回答尽量简短", Verification::Confirmed, None);
+    add(&service, (ScopeKind::Device, "dev-a"), Category::Preference, "我常切椴木板", Verification::Confirmed, None);
+    add(&service, (ScopeKind::Device, "dev-a"), Category::Preference, "我常用三毫米椴木", Verification::Candidate, None);
+    let profile = service.style_preferences(&voice("dev-a"), NOW);
+    assert_eq!(profile.len(), 3, "每个槽位一条，最多 3 条");
+    assert!(profile.iter().any(|r| r.content == "我常切椴木板") && !profile.iter().any(|r| r.content == "我常用三毫米椴木"), "同槽位已确认的优先");
+
+    // A correction that replaces the old address, still only a candidate.
+    let mut newer = store.rows.lock().unwrap().get(&old.id).cloned().unwrap();
+    newer.id = "ctx-new".into();
+    newer.content = "以后叫我王老师".into();
+    newer.verification = Verification::Candidate;
+    newer.supersedes = Some(old.id.clone());
+    store.insert(&newer).unwrap();
+    let profile = service.style_preferences(&voice("dev-a"), NOW);
+    assert!(profile.iter().any(|r| r.content == "以后叫我王老师") && !profile.iter().any(|r| r.content == "以后叫我王工"), "被替代的旧称呼不再常驻");
+    let hits = service.search(&voice("dev-a"), &fast_query("叫我王").unwrap(), None, NOW).unwrap();
+    assert!(hits.iter().all(|(r, _)| r.id != old.id), "检索也隐藏被替代的旧记录");
+    assert_eq!(service.list(&owner(), &ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(), NOW).unwrap().len(), 5, "私有窗口仍能看到两条，等用户决定");
 }

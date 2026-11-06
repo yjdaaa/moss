@@ -47,6 +47,9 @@ fn record(scope: ScopeKey, category: Category, verification: Verification) -> Co
         updated_at: NOW - 10.0,
         expires_at: None,
         deleted_at: None,
+        supersedes: None,
+        seen_count: 1,
+        last_seen_at: None,
     }
 }
 

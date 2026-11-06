@@ -40,6 +40,23 @@ pub struct KnowledgeFileRow {
     pub mtime: f64,
 }
 
+/// v17 passage to index. `text` goes only into the contentless FTS5 table (trigram index,
+/// no positions); it is never stored as a column and cannot be selected back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeChunkRow {
+    pub file_id: String,
+    pub ord: i64,
+    pub text: String,
+}
+
+/// v17 passage hit: the directory row it belongs to, plus which passage of which file.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeChunkHitRow {
+    pub dir: KnowledgeDirRow,
+    pub file_id: String,
+    pub ord: i64,
+}
+
 const ROOT_COLUMNS: &str = "id,scope_kind,scope_id,label,root_path,revision,created_at,indexed_at,enabled";
 const DIR_COLUMNS: &str = "d.id,d.root_id,d.rel_dir,d.l0,d.l1,d.file_count";
 const MAX_LIST: usize = 200;
@@ -114,8 +131,17 @@ impl RuntimeDb {
     /// `expected_revision`. Removed or renamed files disappear with their old summaries.
     /// `false` means a conflict (another reindex or a deletion won); nothing is written.
     pub fn replace_knowledge_index(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDirRow], files: &[KnowledgeFileRow], now: f64) -> Result<bool, SchemaError> {
+        self.replace_knowledge_index_with_chunks(root_id, expected_revision, dirs, files, &[], now)
+    }
+
+    /// Same as `replace_knowledge_index`, also replacing the root's passage index (v17).
+    pub fn replace_knowledge_index_with_chunks(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDirRow], files: &[KnowledgeFileRow], chunks: &[KnowledgeChunkRow], now: f64) -> Result<bool, SchemaError> {
         if !now.is_finite() || dirs.iter().any(|d| d.root_id != root_id) || files.iter().any(|f| f.root_id != root_id || !dirs.iter().any(|d| d.id == f.dir_id)) {
             return Err(invalid("资料索引无效"));
+        }
+        let dir_of: std::collections::HashMap<&str, &str> = files.iter().map(|f| (f.id.as_str(), f.dir_id.as_str())).collect();
+        if chunks.iter().any(|c| c.ord < 0 || c.text.trim().is_empty() || !dir_of.contains_key(c.file_id.as_str())) {
+            return Err(invalid("资料段落无效"));
         }
         let tx = self.connection.unchecked_transaction()?;
         let bumped = tx.execute(
@@ -125,6 +151,7 @@ impl RuntimeDb {
         if bumped != 1 {
             return Ok(false);
         }
+        delete_chunks(&tx, root_id)?;
         tx.execute("DELETE FROM context_knowledge_files WHERE root_id=?1", [root_id])?;
         tx.execute("DELETE FROM context_knowledge_dirs WHERE root_id=?1", [root_id])?;
         for dir in dirs {
@@ -139,6 +166,13 @@ impl RuntimeDb {
                 params![file.id, file.root_id, file.dir_id, file.rel_path, file.sha256, file.size, file.mtime],
             )?;
         }
+        for chunk in chunks {
+            tx.execute(
+                "INSERT INTO context_knowledge_chunks(root_id,dir_id,file_id,ord) VALUES(?1,?2,?3,?4)",
+                params![root_id, dir_of[chunk.file_id.as_str()], chunk.file_id, chunk.ord],
+            )?;
+            tx.execute("INSERT INTO context_knowledge_chunks_fts(rowid,text) VALUES(last_insert_rowid(),?1)", [&chunk.text])?;
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -149,6 +183,7 @@ impl RuntimeDb {
         if tx.execute("DELETE FROM context_knowledge_roots WHERE id=?1 AND revision=?2", params![id, expected_revision])? != 1 {
             return Ok(false);
         }
+        delete_chunks(&tx, id)?;
         tx.execute("DELETE FROM context_knowledge_files WHERE root_id=?1", [id])?;
         tx.execute("DELETE FROM context_knowledge_dirs WHERE root_id=?1", [id])?;
         tx.commit()?;
@@ -206,5 +241,35 @@ impl RuntimeDb {
             }
         }
         Ok(found)
+    }
+}
+
+/// Passage index entries of one root, FTS rows first (contentless_delete allows plain DELETE).
+fn delete_chunks(tx: &rusqlite::Transaction<'_>, root_id: &str) -> Result<(), SchemaError> {
+    tx.execute("DELETE FROM context_knowledge_chunks_fts WHERE rowid IN (SELECT id FROM context_knowledge_chunks WHERE root_id=?1)", [root_id])?;
+    tx.execute("DELETE FROM context_knowledge_chunks WHERE root_id=?1", [root_id])?;
+    Ok(())
+}
+
+impl RuntimeDb {
+    /// v17: passages of enabled roots in one scope matching any three-character term
+    /// (phrase-quoted, OR-ed), best bm25 first. Only ids come back — never document text.
+    pub fn search_knowledge_chunks(&self, scope_kind: &str, scope_id: &str, terms: &[String], limit: usize) -> Result<Vec<KnowledgeChunkHitRow>, SchemaError> {
+        if terms.is_empty() || terms.len() > 64 || terms.iter().any(|t| t.chars().count() < 3 || t.chars().count() > 64) {
+            return Err(invalid("检索词无效"));
+        }
+        let query = terms.iter().map(|t| format!("\"{}\"", t.replace('"', "\"\""))).collect::<Vec<_>>().join(" OR ");
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {DIR_COLUMNS}, c.file_id, c.ord FROM context_knowledge_chunks_fts f
+             JOIN context_knowledge_chunks c ON c.id=f.rowid
+             JOIN context_knowledge_dirs d ON d.id=c.dir_id
+             JOIN context_knowledge_roots r ON r.id=c.root_id
+             WHERE context_knowledge_chunks_fts MATCH ?3 AND r.scope_kind=?1 AND r.scope_id=?2 AND r.enabled=1
+             ORDER BY bm25(context_knowledge_chunks_fts) LIMIT ?4"
+        ))?;
+        let rows = statement.query_map(params![scope_kind, scope_id, query, limit.min(MAX_LIST) as i64], |row| {
+            Ok(KnowledgeChunkHitRow { dir: dir_from_row(row)?, file_id: row.get(6)?, ord: row.get(7)? })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

@@ -12,7 +12,7 @@ pub mod store;
 pub use agent_store::AgentRunRecord;
 pub use firmware_store::{FirmwareArtifactRow, FirmwareOfferRow};
 pub use context_store::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow};
-pub use knowledge_store::{KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
+pub use knowledge_store::{KnowledgeChunkHitRow, KnowledgeChunkRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
 pub use config::LaserSettings;
 pub use db::{
     MaterialConflictPolicy, RuntimeDb, SCHEMA_VERSION, SchemaError, VOICE_DEVICE_ALLOWED, VOICE_DEVICE_PENDING,
