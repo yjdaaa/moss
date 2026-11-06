@@ -11,6 +11,13 @@
 - **验证**：新增 `moss-voice` `n59_custom_personas_are_bounded_and_can_be_selected`；`moss-voice-server` `n59_default_prompt_is_unchanged_and_every_role_keeps_the_safety_rules_last`、`n59_spoken_role_names_resolve_to_one_role_or_ask_back`、`n59_switch_saves_first_and_a_failed_save_keeps_the_old_role`、`n59_persona_tool_switches_lists_and_never_lets_others_impersonate_it`、`n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety_rules`；`moss-desktop` `n59_role_settings_apply_without_restart_and_spoken_switch_is_saved`；前端 `n59：内置 MOSS 角色、自建角色的校验与保存载荷` 与 `voice-center.browser.mjs` 自建角色步骤。`cargo test --workspace` 954 通过 / 9 忽略，`npm test` 200 通过，`npm run build` 通过。真实模型能否按角色说话、能否正确调用切换工具未验证；在 macOS 上执行，未跑 Windows `quick-update-desktop.ps1`。
 - **关联**：`crates/moss-voice-server/src/persona.rs`（`BUILTINS`、`PersonaConfig`、`PersonaSwitch`、`PersonaTools`）、`conversation.rs`（`compose_persona_system_prompt`、`with_persona`）、`jev.rs`；`crates/moss-voice/src/settings.rs`（`CustomPersona`、`BUILTIN_PERSONA_IDS`、`validate_active_persona`、`normalize_custom_personas`）；`apps/desktop/src-tauri/src/voice_builtin.rs`（`DesktopPersonaStore`、`local_save`）；`frontend/src/voiceState.js`、`components/VoiceBuiltinCard.jsx`（`CustomPersonaEditor`）；`docs/integration/moss-native-voice-spec.md` n59、`docs/user/quick-start.md`。
 
+### 导航眼与语音孪生舱改为像素点阵徽标，各状态用不同小图标区分（2026-11-06）
+
+- **现象**：上一版动漫眼用户觉得“怪怪的”，且待命、聆听、播报等状态主要靠颜色和小特效区分，在 40px 导航眼上看不出当前状态。
+- **根因与修复**：用户从两轮 HTML 候选中选定“像素点阵”，`MossEye` 改为外圈 + 7×7 LED 点阵逐帧小图标：待命笑脸眨眼、聆听麦克风、思考 / 指令脉冲转圈、播报声波柱、雕刻激光十字、警戒闪烁“!”；离线“闭眼睡觉 + z”不变。逐帧用 CSS `step-end` 关键帧加负延迟实现，`prefers-reduced-motion` 下只保留第一帧。配色、光晕振幅、导航眼硬件外圈、组件接口与两处尺寸不变，只改前端呈现，不是破坏性变更。
+- **验证**：`npm test` 199 项、`npm run build` 通过；`voice-center`、`twin-estop`、`workbench-layout`、`voice-private-navigation`、`job-dock`、`voice-context`、`voiceMcp` 浏览器用例通过；`npm run test:e2e` 通过；用真实组件截图核对 8 个状态的大小两种尺寸。在 macOS 上执行，未跑 Windows `quick-update-desktop.ps1`。
+- **关联**：`frontend/src/components/MossEye.jsx`（`PIXEL_ANIMS`）、`frontend/src/styles.css`（`moss-eye-px*`、`moss-eye-pf2/3/6/8`）、`docs/integration/moss-native-voice-spec.md` n58。
+
 ### NV19 记忆新旧冲突、重复提及、任务过时与资料段落检索（schema v17）（2026-11-06）
 
 - **现象**：用户改了习惯（如从常切椴木改成亚克力）时，除称呼 / 风格 / 常用材料三个口头规则槽位外，新旧两条记忆同时注入、互相矛盾；同一事实反复提到既不加权，未确认候选 90 天后照样消失；几个月前的项目待办与新的同等排序；记忆检索打开后 NV10 设备摘要仍每轮注入并在会话结束整份重写，与结构化记忆重复；资料检索以目录为单位，文件中后部的段落既不在目录摘要里也读不到。

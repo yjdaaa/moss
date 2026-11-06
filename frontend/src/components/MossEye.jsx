@@ -1,26 +1,87 @@
 import React, { useId } from "react";
 import { mossEyeCorePalette } from "../voiceState.js";
 
-/** 四角星星（漫画“闪光”符号），以 (0,0) 为中心、半径 6。 */
-const STAR = "M0 -6 Q0.9 -0.9 6 0 Q0.9 0.9 0 6 Q-0.9 0.9 -6 0 Q-0.9 -0.9 0 -6Z";
+/** 7×7 点阵几何（viewBox 0..100）：点距 7.5、首点 27.5，四角距圆心约 31.8，落在外圈 r38 以内。 */
+const GRID = 7;
+const PITCH = 7.5;
+const ORIGIN = 27.5;
+const DOT_R = 2.9;
+
+/** "#" 为亮点，按行以空白分隔，返回 [行, 列] 列表。 */
+function bitmap(rows) {
+  return rows
+    .trim()
+    .split(/\s+/)
+    .flatMap((row, r) => [...row].map((ch, c) => (ch === "#" ? [r, c] : null)).filter(Boolean));
+}
+
+const SMILE = bitmap(".......  .#...#.  .#...#.  .......  #.....#  .#####.  .......");
+const SMILE_BLINK = bitmap(".......  .......  ##...##  .......  #.....#  .#####.  .......");
+/** 思考转圈：外环 8 个点顺时针轮流点亮，前一个点留半亮拖尾。 */
+const SPINNER_RING = [[0, 3], [1, 5], [3, 6], [5, 5], [6, 3], [5, 1], [3, 0], [1, 1]];
+/** 播报声波柱：7 列对称高度，按帧切换。 */
+const EQ_FRAMES = [
+  [1, 3, 5, 7, 5, 3, 1],
+  [3, 5, 7, 5, 3, 5, 3],
+  [1, 5, 3, 7, 3, 5, 1],
+].map((heights) => heights.flatMap((h, c) => [...Array(GRID)].map((_, r) => (Math.abs(r - 3) <= (h - 1) / 2 ? [r, c] : null)).filter(Boolean)));
+const spinner = {
+  seconds: 1.2,
+  base: [...SPINNER_RING, [3, 3]],
+  frames: SPINNER_RING.map((cell, k) => ({ on: [cell], tail: [SPINNER_RING[(k + SPINNER_RING.length - 1) % SPINNER_RING.length]] })),
+};
 
 /**
- * MOSS 机械眼（2026-11-06 用户要求“可爱风一点”，左上角导航眼与语音中心孪生舱眼统一为同一组件）。
- * - 同一套形状、配色（`mossEyeCorePalette`）与动画节奏，按 `size` 决定细节多少：
- *   `sm`（导航 40px）不画眼睛两侧的声波弧；`lg`（孪生舱）多一圈星点轨道。
- * - 造型沿用用户认可的“闭眼睡觉”画法（同日反馈：写实眼球“恐怖”、豆豆眼“不像眼睛”）：
- *   睁眼 = 与睡觉弧线同粗同色的上眼睑线 + 两根小睫毛 + 上暗下亮的大虹膜 + 两点大高光，眨眼时整只眼压成一条线；
- *   每个状态配一个漫画符号特效，与睡觉的“z”同一语言：待命闪星、拾音/播报两侧声波、思考冒泡、雕刻火花、警戒“!”。
+ * 每个状态一段会动的点阵小图标（逐帧切换，帧数对应 styles.css 中的 moss-eye-pf2/3/6/8）。
+ * 区分状态靠图形本身，不只靠颜色（2026-11-06 用户反馈旧版“状态之间看不出区别”）。
+ */
+const PIXEL_ANIMS = {
+  idle: { seconds: 3.6, frames: [SMILE, SMILE, SMILE, SMILE, SMILE, SMILE_BLINK].map((on) => ({ on })) },
+  listening: {
+    seconds: 0.8,
+    frames: [
+      bitmap("..###..  ..###..  #.###.#  #.###.#  .#...#.  ..###..  ...#..."),
+      bitmap("..###..  ..###..  ..###..  ..###..  .#...#.  ..###..  ...#..."),
+    ].map((on) => ({ on })),
+  },
+  thinking: spinner,
+  pulse: spinner,
+  speaking: { seconds: 0.54, frames: EQ_FRAMES.map((on) => ({ on })) },
+  engraving: {
+    seconds: 0.6,
+    frames: [
+      bitmap("...#...  ...#...  .......  ##.#.##  .......  ...#...  ...#..."),
+      bitmap("#..#..#  ...#...  .......  ##.#.##  .......  ...#...  #..#..#"),
+    ].map((on) => ({ on })),
+  },
+  alert: {
+    seconds: 0.7,
+    frames: [bitmap("...#...  ...#...  ...#...  ...#...  ...#...  .......  ...#..."), []].map((on) => ({ on })),
+  },
+};
+
+const ALL_CELLS = [...Array(GRID * GRID)].map((_, i) => [Math.floor(i / GRID), i % GRID]);
+
+function Dot({ cell, className }) {
+  const [r, c] = cell;
+  return <circle className={className} cx={ORIGIN + c * PITCH} cy={ORIGIN + r * PITCH} r={DOT_R} />;
+}
+
+/**
+ * MOSS 状态徽标（左上角导航眼与语音中心孪生舱共用）。
+ * - 2026-11-06 用户在候选页中选定“像素点阵”方案：外圈 + 7×7 LED 点阵，与小智实机屏幕同一味道；
+ *   待命笑脸眨眼、聆听麦克风、思考转圈、播报声波柱、雕刻激光十字、警戒闪烁“!”；离线沿用用户认可的“闭眼睡觉 + z”。
+ * - 配色沿用 `mossEyeCorePalette`；`size` 只决定 class（`sm` 导航 40px / `lg` 孪生舱）。
  * - `hardware` 只在导航眼上传入：unprobed / online / engraving / fault 用外圈颜色表示激光机状态。
- * - 视线跟随读取祖先元素上的 CSS 变量 `--eye-gaze-x` / `--eye-gaze-y`（-1..1），本组件不监听指针。
+ * - 亮点层读取祖先元素上的 `--eye-gaze-x` / `--eye-gaze-y`（-1..1）轻微偏向指针，本组件不监听指针。
  */
 export function MossEye({ state = "idle", level = 0, hardware = "", size = "sm", className = "" }) {
   const palette = mossEyeCorePalette(state);
   const ratio = Math.max(0, Math.min(1, (Number(level) || 0) / 100));
-  const uid = useId().replace(/:/g, "");
-  const irisId = `${uid}-moss-eye-iris`;
-  const glowId = `${uid}-moss-eye-glow`;
-  const lidClipId = `${uid}-moss-eye-lid`;
+  const glowId = `${useId().replace(/:/g, "")}-moss-eye-glow`;
+  const offline = state === "offline";
+  const anim = PIXEL_ANIMS[state] || PIXEL_ANIMS.idle;
+  const frameCount = anim.frames.length;
   const classes = [
     "moss-eye",
     `moss-eye--${size}`,
@@ -37,74 +98,51 @@ export function MossEye({ state = "idle", level = 0, hardware = "", size = "sm",
       style={{ "--eye-level": ratio.toFixed(2), "--eye-accent": palette.accent }}
     >
       <defs>
-        <linearGradient id={irisId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={palette.coreStops[4]} />
-          <stop offset="42%" stopColor={palette.coreStops[3]} />
-          <stop offset="82%" stopColor={palette.coreStops[2]} />
-          <stop offset="100%" stopColor={palette.coreStops[1]} />
-        </linearGradient>
         <radialGradient id={glowId} cx="50%" cy="50%" r="50%">
           <stop offset="0%" stopColor={palette.glowStops[0]} />
           <stop offset="66%" stopColor={palette.glowStops[1]} />
           <stop offset="100%" stopColor={palette.glowStops[2]} />
         </radialGradient>
-        {/* 虹膜只露出上眼睑线以下的部分 */}
-        <clipPath id={lidClipId}>
-          <path d="M18 47 Q50 25 82 47 L82 92 L18 92 Z" />
-        </clipPath>
       </defs>
       <circle className="moss-eye-halo" cx="50" cy="50" r="49" fill={`url(#${glowId})`} />
       {hardware && <circle className="moss-eye-hw" cx="50" cy="50" r="46" fill="none" strokeWidth="5" />}
-      {size === "lg" && (
-        <circle className="moss-eye-orbit" cx="50" cy="50" r="46" fill="none" strokeWidth="3.2" strokeLinecap="round" strokeDasharray="0.1 8.6" />
-      )}
       <circle className="moss-eye-socket" cx="50" cy="50" r="38" strokeWidth="4" />
 
-      <g className="moss-eye-ball">
-        <g clipPath={`url(#${lidClipId})`}>
-          <g className="moss-eye-look">
-            <g className="moss-eye-shape">
-              <ellipse className="moss-eye-iris" cx="50" cy="55" rx="15.5" ry="18" fill={`url(#${irisId})`} />
-              <ellipse className="moss-eye-glint" cx="44.5" cy="51" rx="5" ry="6" />
-              <circle className="moss-eye-glint-sub" cx="56.5" cy="64" r="2.6" />
-              <circle className="moss-eye-glint-sub" cx="56.5" cy="51.5" r="1.6" />
-            </g>
+      {offline ? (
+        <g className="moss-eye-sleep">
+          <path d="M33 50 Q50 64 67 50" fill="none" strokeWidth="5" strokeLinecap="round" />
+          <text x="66" y="34" className="moss-eye-z">z</text>
+        </g>
+      ) : (
+        <g className="moss-eye-px">
+          {ALL_CELLS.map((cell) => (
+            <Dot key={`off-${cell[0]}-${cell[1]}`} cell={cell} className="moss-eye-px-off" />
+          ))}
+          <g className="moss-eye-px-lit">
+            {(anim.base || []).map((cell) => (
+              <Dot key={`base-${cell[0]}-${cell[1]}`} cell={cell} className="moss-eye-px-base" />
+            ))}
+            {anim.frames.map((frame, k) => (
+              <g
+                key={`frame-${k}`}
+                className={`moss-eye-px-frame moss-eye-pf--${frameCount}`}
+                style={{
+                  "--px-t": `${anim.seconds}s`,
+                  // 负延迟让第 k 帧恰好在第 k 段显示，且首次渲染就处于动画中（避免全部帧叠在一起）。
+                  "--px-d": `${((k * anim.seconds) / frameCount - anim.seconds).toFixed(3)}s`,
+                }}
+              >
+                {frame.on.map((cell) => (
+                  <Dot key={`on-${cell[0]}-${cell[1]}`} cell={cell} className="moss-eye-px-on" />
+                ))}
+                {(frame.tail || []).map((cell) => (
+                  <Dot key={`tail-${cell[0]}-${cell[1]}`} cell={cell} className="moss-eye-px-tail" />
+                ))}
+              </g>
+            ))}
           </g>
         </g>
-        <path className="moss-eye-lid" d="M31 47 Q50 30 69 47" fill="none" strokeWidth="5" strokeLinecap="round" />
-        <path className="moss-eye-lash" d="M33.5 43.5 L27.5 38.5 M66.5 43.5 L72.5 38.5" fill="none" strokeWidth="4" strokeLinecap="round" />
-      </g>
-
-      <g className="moss-eye-sleep">
-        <path d="M33 50 Q50 64 67 50" fill="none" strokeWidth="5" strokeLinecap="round" />
-        <text x="66" y="34" className="moss-eye-z">z</text>
-      </g>
-
-      {/* 漫画符号特效：按状态由 CSS 显隐，均为装饰（aria-hidden 已在根节点）。 */}
-      <g className="moss-eye-fx moss-eye-fx--sparkle">
-        <path d={STAR} transform="translate(85 15) scale(1.15)" />
-        <path d={STAR} transform="translate(14 84) scale(0.8)" />
-        <path d={STAR} transform="translate(90 74) scale(0.6)" />
-      </g>
-      <g className="moss-eye-fx moss-eye-fx--waves" fill="none" strokeWidth="4" strokeLinecap="round">
-        <path className="moss-eye-wave-1" d="M7 39 Q0 50 7 61" />
-        <path className="moss-eye-wave-2" d="M-3 32 Q-13 50 -3 68" />
-        <path className="moss-eye-wave-1" d="M93 39 Q100 50 93 61" />
-        <path className="moss-eye-wave-2" d="M103 32 Q113 50 103 68" />
-      </g>
-      <g className="moss-eye-fx moss-eye-fx--think">
-        <circle className="moss-eye-bubble-1" cx="76" cy="17" r="3" />
-        <circle className="moss-eye-bubble-2" cx="85" cy="9" r="4.2" />
-        <circle className="moss-eye-bubble-3" cx="96" cy="0" r="5.6" />
-      </g>
-      <g className="moss-eye-fx moss-eye-fx--sparks">
-        <path d={STAR} transform="translate(86 80) scale(0.9)" />
-        <path d={STAR} transform="translate(75 92) scale(0.6)" />
-        <path d={STAR} transform="translate(95 64) scale(0.55)" />
-      </g>
-      <g className="moss-eye-fx moss-eye-fx--alert">
-        <text x="83" y="25" className="moss-eye-bang">!</text>
-      </g>
+      )}
     </svg>
   );
 }
