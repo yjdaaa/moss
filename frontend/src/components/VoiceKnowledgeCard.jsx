@@ -58,6 +58,8 @@ export default function VoiceKnowledgeCard() {
   const toggleRoot = async (root, enabled) => {
     setBusyId(root.id);
     setResult(null);
+    // 先就地切换勾选，避免受控复选框在后端返回前弹回原状态；失败时下方 catch 会重新读取真实状态。
+    setRoots((current) => current.map((item) => (item.id === root.id ? { ...item, enabled } : item)));
     try {
       const updated = await voiceApi.contextManage({
         action: "knowledge_toggle",

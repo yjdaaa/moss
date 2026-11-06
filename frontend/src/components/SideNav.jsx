@@ -1,7 +1,8 @@
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Cpu, Layers, PenTool, Settings, KeyRound, ShieldCheck, AudioLines, Box } from "lucide-react";
 import { readAuthToken } from "../api/client.js";
-import { globalEyeSensorView, mossEyeCorePalette } from "../voiceState.js";
+import { globalEyeSensorView } from "../voiceState.js";
+import { MossEye } from "./MossEye.jsx";
 // 左侧竖向导航（技术书 §9.5.5 B）。窄屏（≤900px）由 CSS 折叠为顶部横排。
 // 语音中心为第四个标签，只在 MOSS 桌面端显示（技术书 §9.4.7 / §9.5.1，A-69）。
 export const NAV_ITEMS = [
@@ -37,11 +38,6 @@ export function SideNav({
     connectionStatus,
     activeJobs,
   });
-  const palette = mossEyeCorePalette(eye.visualState);
-  const eyeLevelRatio = Math.max(0, Math.min(1, (Number(eye.level) || 0) / 100));
-  const uid = useId().replace(/:/g, "");
-  const coreGradId = `${uid}-nav-eye-core`;
-  const glowGradId = `${uid}-nav-eye-glow`;
   const eyeRef = useRef(null);
 
   useEffect(() => {
@@ -90,109 +86,12 @@ export function SideNav({
       >
         <span
           ref={eyeRef}
-          className={`ob-eye moss-eye-sensor moss-eye--${eye.visualState} moss-eye-hw--${eye.hardwareState}`}
+          className="ob-eye moss-eye-sensor"
           data-eye-state={eye.visualState}
           data-hardware-state={eye.hardwareState}
-          style={{
-            "--moss-eye-level": eyeLevelRatio.toFixed(2),
-            "--moss-eye-accent": palette.accent,
-          }}
           aria-hidden="true"
         >
-          <svg className="ob-eye-svg" viewBox="0 0 40 40">
-            <defs>
-              <radialGradient id={coreGradId} cx="36%" cy="32%" r="68%">
-                <stop offset="0%" stopColor={palette.coreStops[0]} />
-                <stop offset="16%" stopColor={palette.coreStops[1]} />
-                <stop offset="45%" stopColor={palette.coreStops[2]} />
-                <stop offset="78%" stopColor={palette.coreStops[3]} />
-                <stop offset="100%" stopColor={palette.coreStops[4]} />
-              </radialGradient>
-              <radialGradient id={glowGradId} cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stopColor={palette.glowStops[0]} />
-                <stop offset="68%" stopColor={palette.glowStops[1]} />
-                <stop offset="100%" stopColor={palette.glowStops[2]} />
-              </radialGradient>
-            </defs>
-
-            {/* 外层激光硬件状态环（随硬件握手/雕刻出光变色与旋转） */}
-            <circle
-              className="ob-eye-ring-hw"
-              cx="20"
-              cy="20"
-              r="18.2"
-              fill="none"
-              strokeWidth="1.2"
-              strokeDasharray="3.2 2.8"
-            />
-            {/* 四向激光准星刻度 */}
-            <path
-              className="ob-eye-crosshair"
-              d="M20 0.8 V3.6 M20 36.4 V39.2 M0.8 20 H3.6 M36.4 20 H39.2"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-            />
-            {/* 双层交替扩散脉冲波纹环 */}
-            <circle
-              className="ob-eye-ring-sonar"
-              cx="20"
-              cy="20"
-              r="10.5"
-              fill="none"
-              strokeWidth="1.35"
-            />
-            <circle
-              className="ob-eye-ring-sonar ob-eye-ring-sonar--delay"
-              cx="20"
-              cy="20"
-              r="10.5"
-              fill="none"
-              strokeWidth="1.2"
-            />
-            <circle
-              className="ob-eye-ring-scan"
-              cx="20"
-              cy="20"
-              r="14.6"
-              fill={`url(#${glowGradId})`}
-              strokeWidth="1.35"
-              strokeDasharray="11 6 4 6"
-            />
-            {/* 机械光圈内环 */}
-            <circle
-              className="ob-eye-ring-iris"
-              cx="20"
-              cy="20"
-              r="10.8"
-              fill="none"
-              strokeWidth="1"
-              strokeDasharray="5 3.5"
-            />
-            {/* 球体核心与顶部弧形反光 */}
-            <g className="ob-eye-core-group">
-              <circle
-                className="ob-eye-core"
-                cx="20"
-                cy="20"
-                r="7.4"
-                fill={`url(#${coreGradId})`}
-              />
-              <path
-                className="ob-eye-spec-arc"
-                d="M 14.8 16.2 A 6 6 0 0 1 25.2 16.2"
-                fill="none"
-                stroke="rgba(255,255,255,0.42)"
-                strokeWidth="0.95"
-                strokeLinecap="round"
-              />
-            </g>
-            {/* 独立瞳孔与双点高光（随全局光标视差移动） */}
-            <g className="ob-eye-pupil-group">
-              <circle className="ob-eye-pupil" cx="20" cy="20" r="2.5" />
-              <circle className="ob-eye-glint" cx="17.5" cy="17.3" r="1.2" />
-              <circle className="ob-eye-glint-sub" cx="22.1" cy="22.2" r="0.6" />
-            </g>
-          </svg>
+          <MossEye state={eye.visualState} level={eye.level} hardware={eye.hardwareState} size="sm" className="ob-eye-svg" />
         </span>
         <span className="ob-logo-text">
           <b>MOSS</b>

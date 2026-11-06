@@ -1701,14 +1701,10 @@ input[type="radio"] {
   cursor: pointer;
 }
 .ob-eye.moss-eye-sensor {
-  width: 42px;
-  height: 42px;
   flex: none;
   border: 0;
   display: inline-grid;
   place-items: center;
-  background: radial-gradient(circle at 50% 50%, rgba(255, 59, 92, 0.22), rgba(10, 10, 14, 0.94) 74%);
-  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.14), 0 0 22px rgba(255, 59, 92, 0.55);
 }
 .ob-logo-text {
   display: flex;
@@ -4086,362 +4082,180 @@ input:not([type]):focus {
 /* ============================================================
    MOSS 全息语音孪生舱与全局机械眼多态联动（2026-11-03）
    ============================================================ */
+/* 统一机械眼 MossEye（2026-11-06 用户要求“可爱风一点”）：导航眼（sm）与孪生舱眼（lg）同一组件、同一套状态动画。
+   造型沿用用户认可的“闭眼睡觉”画法：睁眼 = 同粗同色的上眼睑线 + 小睫毛 + 上暗下亮大虹膜 + 大高光；
+   每个状态配一个漫画符号特效（待命闪星、拾音/播报声波、思考冒泡、雕刻火花、警戒“!”、睡觉“z”）。
+   导航眼外圈颜色表示激光机硬件状态。 */
 .ob-eye.moss-eye-sensor {
   position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
   animation: none;
-  transition: transform 0.16s ease, box-shadow 0.22s ease, filter 0.22s ease, background 0.25s ease;
+  transition: transform 0.25s var(--ob-ease);
 }
+.ob-logo:hover .ob-eye.moss-eye-sensor { transform: scale(1.08) rotate(-6deg); }
 .ob-eye-svg {
-  width: 42px;
-  height: 42px;
-  overflow: visible;
+  width: 40px;
+  height: 40px;
   display: block;
 }
+.moss-eye { overflow: visible; }
+.moss-eye-halo {
+  transform-origin: 50px 50px;
+  opacity: calc(0.45 + var(--eye-level, 0) * 0.55);
+  transform: scale(calc(0.92 + var(--eye-level, 0) * 0.12));
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.moss-eye-hw {
+  stroke: transparent;
+  transform-origin: 50px 50px;
+  transition: stroke 0.3s ease;
+}
+.moss-eye-hw--online .moss-eye-hw { stroke: #34d399; }
+.moss-eye-hw--engraving .moss-eye-hw { stroke: #34d399; stroke-dasharray: 14 8; animation: moss-eye-spin 1.6s linear infinite; }
+.moss-eye-hw--fault .moss-eye-hw { stroke: #fbbf24; stroke-dasharray: 6 6; }
+.moss-eye-orbit {
+  stroke: var(--eye-accent);
+  opacity: 0.55;
+  transform-origin: 50px 50px;
+  animation: moss-eye-spin 24s linear infinite;
+}
+.moss-eye-socket {
+  fill: #121218;
+  stroke: var(--eye-accent);
+  transition: stroke 0.3s ease;
+}
+/* 眼睛本体：眨眼时整只眼（眼睑 + 虹膜）压成一条线 */
+.moss-eye-ball {
+  transform-origin: 50px 52px;
+  transition: opacity 0.25s ease;
+  animation: moss-eye-blink 5.2s ease-in-out infinite;
+}
+.moss-eye-lid,
+.moss-eye-lash { stroke: #eef2f7; }
+.moss-eye-look {
+  transform: translate(calc(var(--eye-gaze-x, 0) * 5px), calc(var(--eye-gaze-y, 0) * 3px));
+  transition: transform 0.25s var(--ob-ease);
+}
+.moss-eye-shape {
+  transform-origin: 50px 55px;
+  transform: scale(calc(1 + var(--eye-level, 0) * 0.08));
+  transition: transform 0.3s var(--ob-ease);
+}
+.moss-eye-glint { fill: #fff; }
+.moss-eye-glint-sub { fill: rgba(255, 255, 255, 0.85); }
+.moss-eye-sleep { opacity: 0; transition: opacity 0.25s ease; }
+.moss-eye-sleep path { stroke: #cbd5e1; }
+.moss-eye-z { font: 700 18px var(--ob-font); fill: #cbd5e1; }
 
-/* 1. 外层激光硬件状态环（unprobed / online / engraving / fault） */
-.ob-eye-ring-hw {
-  stroke: rgba(255, 255, 255, 0.26);
-  transform-origin: 20px 20px;
-  animation: mossTwinOrbitReverse 16s linear infinite;
-  transition: stroke 0.25s ease, stroke-width 0.2s ease;
+/* 漫画符号特效：默认隐藏，按状态出现（星星用 opacity 闪烁，不改 transform 以免覆盖 SVG 定位） */
+.moss-eye-fx { opacity: 0; transition: opacity 0.3s ease; }
+.moss-eye-fx--sparkle path,
+.moss-eye-fx--sparks path { fill: color-mix(in srgb, var(--eye-accent) 40%, #fff); }
+.moss-eye-fx--sparks path { fill: #fde68a; }
+.moss-eye-fx--waves path { stroke: var(--eye-accent); }
+.moss-eye-fx--think circle { fill: color-mix(in srgb, var(--eye-accent) 35%, #fff); }
+.moss-eye-bang {
+  font: 900 30px var(--ob-font);
+  fill: var(--eye-accent);
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
 }
-.ob-eye-crosshair {
-  stroke: rgba(255, 92, 119, 0.65);
-  transition: stroke 0.25s ease;
-}
-/* 未连接且未探测时：外环完全静止，一眼区分“未连接”与“已连接” */
-.ob-eye.moss-eye--offline.moss-eye-hw--unprobed .ob-eye-ring-hw {
-  stroke: rgba(148, 163, 184, 0.25);
-  animation: none;
-}
-.ob-eye.moss-eye--offline.moss-eye-hw--unprobed .ob-eye-crosshair {
-  stroke: rgba(148, 163, 184, 0.32);
-}
-/* 硬件握手已连接：醒目翡翠绿外圈 */
-.ob-eye.moss-eye-hw--online .ob-eye-ring-hw {
-  stroke: #10b981;
-  stroke-width: 1.5;
-  animation: mossTwinOrbitReverse 7s linear infinite;
-}
-.ob-eye.moss-eye-hw--online .ob-eye-crosshair {
-  stroke: #34d399;
-}
-/* 正在发送加工 G-code：外环高频激光绿飞旋 */
-.ob-eye.moss-eye-hw--engraving .ob-eye-ring-hw {
-  stroke: #34d399;
-  stroke-width: 1.85;
-  animation: mossTwinOrbit 1.15s linear infinite;
-}
-.ob-eye.moss-eye-hw--engraving .ob-eye-crosshair {
-  stroke: #6ee7b7;
-}
-/* 硬件探测失败/异常：琥珀黄警示外圈 */
-.ob-eye.moss-eye-hw--fault .ob-eye-ring-hw {
-  stroke: #f59e0b;
-  stroke-width: 1.45;
-  animation: none;
-}
-.ob-eye.moss-eye-hw--fault .ob-eye-crosshair {
-  stroke: #fbbf24;
-}
+.moss-eye--sm .moss-eye-fx--waves { display: none; } /* 导航 40px 旁边就是文字，声波弧会溢出压字 */
 
-/* 2. 双层交替扩散声呐/激光脉冲波纹环 */
-.ob-eye-ring-sonar {
-  stroke: var(--moss-eye-accent, #ff3b5c);
-  transform-origin: 20px 20px;
-  opacity: 0;
-  animation: obEyeSonarRipple 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
-}
-.ob-eye-ring-sonar--delay {
-  animation-delay: -1.2s;
-}
-/* 未连接时完全关闭波纹，保持安静待机 */
-.ob-eye.moss-eye--offline .ob-eye-ring-sonar {
-  animation: none;
-  opacity: 0;
-}
-.ob-eye.moss-eye--listening .ob-eye-ring-sonar,
-.ob-eye.moss-eye--speaking .ob-eye-ring-sonar {
-  animation-duration: 1.15s;
-}
-.ob-eye.moss-eye--listening .ob-eye-ring-sonar--delay,
-.ob-eye.moss-eye--speaking .ob-eye-ring-sonar--delay {
-  animation-delay: -0.57s;
-}
-.ob-eye.moss-eye--thinking .ob-eye-ring-sonar,
-.ob-eye.moss-eye--pulse .ob-eye-ring-sonar,
-.ob-eye.moss-eye--engraving .ob-eye-ring-sonar {
-  animation-duration: 1.05s;
-}
-.ob-eye.moss-eye--thinking .ob-eye-ring-sonar--delay,
-.ob-eye.moss-eye--pulse .ob-eye-ring-sonar--delay,
-.ob-eye.moss-eye--engraving .ob-eye-ring-sonar--delay {
-  animation-delay: -0.52s;
-}
-.ob-eye.moss-eye--alert .ob-eye-ring-sonar {
-  animation-duration: 0.8s;
-}
-.ob-eye.moss-eye--alert .ob-eye-ring-sonar--delay {
-  animation-delay: -0.4s;
-}
+/* 状态：睡着（未连接）/ 待命 / 拾音 / 思考 / 播报 / 雕刻 / 警戒 */
+.moss-eye--offline .moss-eye-ball { opacity: 0; animation: none; }
+.moss-eye--offline .moss-eye-sleep { opacity: 1; }
+.moss-eye--offline .moss-eye-z { animation: moss-eye-snooze 2.8s ease-in-out infinite; }
+.moss-eye--offline .moss-eye-halo { opacity: 0.25; }
 
-/* 3. 中层语音/神经扫描环与内光圈 */
-.ob-eye-ring-scan {
-  stroke: rgba(255, 77, 109, 0.88);
-  transform-origin: 20px 20px;
-  animation: mossTwinOrbit 4.8s linear infinite;
-  transition: stroke 0.25s ease;
-}
-.ob-eye.moss-eye--listening .ob-eye-ring-scan {
-  stroke: #38bdf8;
-  stroke-width: 1.65;
-  animation-duration: 1.5s;
-}
-.ob-eye.moss-eye--thinking .ob-eye-ring-scan,
-.ob-eye.moss-eye--pulse .ob-eye-ring-scan {
-  stroke: #c084fc;
-  stroke-width: 1.65;
-  animation-duration: 1.1s;
-}
-.ob-eye.moss-eye--speaking .ob-eye-ring-scan {
-  stroke: #ff2a52;
-  stroke-width: 1.7;
-  animation-duration: 1.3s;
-}
-.ob-eye.moss-eye--engraving .ob-eye-ring-scan {
-  stroke: #10b981;
-  stroke-width: 1.75;
-  animation-duration: 1.05s;
-}
-.ob-eye.moss-eye--alert .ob-eye-ring-scan {
-  stroke: #fbbf24;
-  stroke-width: 1.75;
-  animation-duration: 0.85s;
-}
-/* 未连接时：扫描环与光圈完全静止 */
-.ob-eye.moss-eye--offline .ob-eye-ring-scan {
-  stroke: rgba(148, 163, 184, 0.28);
-  animation: none;
-}
+.moss-eye--idle .moss-eye-halo { animation: moss-eye-breathe 3.2s ease-in-out infinite; }
+.moss-eye--idle .moss-eye-fx--sparkle { opacity: 1; }
+.moss-eye--idle .moss-eye-fx--sparkle path { animation: moss-eye-twinkle 2.4s ease-in-out infinite; }
+.moss-eye--idle .moss-eye-fx--sparkle path:nth-child(2) { animation-delay: 0.8s; }
+.moss-eye--idle .moss-eye-fx--sparkle path:nth-child(3) { animation-delay: 1.6s; }
 
-.ob-eye-ring-iris {
-  stroke: rgba(255, 255, 255, 0.42);
-  transform-origin: 20px 20px;
-  animation: mossTwinOrbitReverse 6.5s linear infinite;
-}
-.ob-eye.moss-eye--listening .ob-eye-ring-iris,
-.ob-eye.moss-eye--speaking .ob-eye-ring-iris,
-.ob-eye.moss-eye--thinking .ob-eye-ring-iris,
-.ob-eye.moss-eye--pulse .ob-eye-ring-iris,
-.ob-eye.moss-eye--engraving .ob-eye-ring-iris {
-  animation-duration: 1.6s;
-  stroke: rgba(255, 255, 255, 0.68);
-}
-.ob-eye.moss-eye--offline .ob-eye-ring-iris {
-  animation: none;
-  stroke: rgba(148, 163, 184, 0.22);
-}
+.moss-eye--listening .moss-eye-halo { animation: moss-eye-breathe 1.4s ease-in-out infinite; }
+.moss-eye--listening .moss-eye-shape { transform: scale(1.08); }
+.moss-eye--listening .moss-eye-fx--waves,
+.moss-eye--speaking .moss-eye-fx--waves { opacity: 1; }
+.moss-eye-fx--waves .moss-eye-wave-1 { animation: moss-eye-wave 1.2s ease-out infinite; }
+.moss-eye-fx--waves .moss-eye-wave-2 { animation: moss-eye-wave 1.2s ease-out 0.3s infinite; }
+.moss-eye--speaking .moss-eye-fx--waves path { animation-duration: 0.7s; }
+.moss-eye--speaking .moss-eye-shape { animation: moss-eye-bounce 0.42s ease-in-out infinite alternate; }
 
-/* 4. 球核与瞳孔全局光标视差跟随 + 强对比度状态脉动 */
-.ob-eye-core-group {
-  transform: translate(
-    calc(var(--eye-gaze-x, 0) * 1.4px),
-    calc(var(--eye-gaze-y, 0) * 1.2px)
-  );
-  transition: transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ob-eye-pupil-group {
-  transform: translate(
-    calc(var(--eye-gaze-x, 0) * 2.6px),
-    calc(var(--eye-gaze-y, 0) * 2.2px)
-  );
-  transition: transform 0.11s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ob-eye-core {
-  transform-origin: 20px 20px;
-  transform: scale(calc(1 + var(--moss-eye-level, 0) * 0.32));
-  filter: drop-shadow(0 0 7px var(--moss-eye-accent, #ff3b5c));
-  animation: obEyeCoreConnectedBreath 2.1s ease-in-out infinite;
-  transition: transform 0.1s ease, filter 0.22s ease;
-}
-.ob-eye.moss-eye--listening .ob-eye-core,
-.ob-eye.moss-eye--speaking .ob-eye-core {
-  animation: obEyeCoreVoicePulse 0.7s ease-in-out infinite;
-}
-.ob-eye.moss-eye--thinking .ob-eye-core,
-.ob-eye.moss-eye--pulse .ob-eye-core {
-  animation: mossTwinCoreNeural 0.9s ease-in-out infinite;
-}
-.ob-eye.moss-eye--engraving .ob-eye-core {
-  animation: obEyeCoreLaserPulse 0.75s ease-in-out infinite;
-}
-.ob-eye.moss-eye--alert .ob-eye-core {
-  animation: mossTwinCoreAlert 0.55s ease-in-out infinite;
-}
-/* 未连接时：暗灰低亮静止态 */
-.ob-eye.moss-eye--offline .ob-eye-core {
-  animation: none;
-  filter: none;
-  opacity: 0.62;
-}
-.ob-eye-pupil {
-  fill: rgba(255, 245, 247, 0.98);
-  transform-origin: 20px 20px;
-  transform: scale(calc(0.95 + var(--moss-eye-level, 0) * 0.45));
-  animation: mossTwinPupilFocus 2.6s ease-in-out infinite;
-}
-.ob-eye.moss-eye--offline .ob-eye-pupil {
-  animation: none;
-  fill: rgba(203, 213, 225, 0.65);
-  transform: scale(0.75);
-}
-.ob-eye.moss-eye--thinking .ob-eye-pupil,
-.ob-eye.moss-eye--pulse .ob-eye-pupil,
-.ob-eye.moss-eye--engraving .ob-eye-pupil {
-  animation: obEyePupilScan 1.1s ease-in-out infinite;
-}
-.ob-eye-glint {
-  fill: rgba(255, 255, 255, 0.95);
-}
-.ob-eye-glint-sub {
-  fill: rgba(255, 255, 255, 0.62);
-}
+.moss-eye--thinking .moss-eye-ball,
+.moss-eye--pulse .moss-eye-ball { animation: none; }
+.moss-eye--thinking .moss-eye-look,
+.moss-eye--pulse .moss-eye-look { animation: moss-eye-ponder 2.4s ease-in-out infinite; }
+.moss-eye--thinking .moss-eye-fx--think,
+.moss-eye--pulse .moss-eye-fx--think { opacity: 1; }
+.moss-eye-fx--think circle { animation: moss-eye-bubble 1.8s ease-in-out infinite; }
+.moss-eye-fx--think .moss-eye-bubble-2 { animation-delay: 0.25s; }
+.moss-eye-fx--think .moss-eye-bubble-3 { animation-delay: 0.5s; }
 
-/* 5. 容器外围强对比度光晕（未连接冷灰无光 vs 已连接亮光 vs 发送/语音强脉冲） */
-.ob-eye.moss-eye-sensor.moss-eye--offline {
-  opacity: 0.72;
-  background: radial-gradient(circle at 50% 50%, rgba(71, 85, 105, 0.16), rgba(9, 11, 16, 0.95) 75%);
-  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.18);
-}
-.ob-eye.moss-eye-sensor.moss-eye--idle {
-  animation: obEyeIdleHalo 2.4s ease-in-out infinite;
-}
-.ob-eye.moss-eye-sensor.moss-eye-hw--online {
-  background: radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.24), rgba(10, 14, 14, 0.94) 74%);
-  box-shadow:
-    0 0 0 2px rgba(16, 185, 129, 0.55),
-    0 0 20px rgba(16, 185, 129, 0.55),
-    0 0 28px rgba(255, 59, 92, 0.35);
-}
-.ob-eye.moss-eye-sensor.moss-eye--listening {
-  background: radial-gradient(circle at 50% 50%, rgba(56, 189, 248, 0.34), rgba(8, 18, 30, 0.95) 75%);
-  transform: scale(calc(1.06 + var(--moss-eye-level, 0) * 0.22));
-  box-shadow:
-    0 0 0 2.5px rgba(56, 189, 248, 0.75),
-    0 0 26px rgba(56, 189, 248, 0.9),
-    0 0 42px rgba(56, 189, 248, 0.45);
-}
-.ob-eye.moss-eye-sensor.moss-eye--thinking,
-.ob-eye.moss-eye-sensor.moss-eye--pulse {
-  background: radial-gradient(circle at 50% 50%, rgba(168, 85, 247, 0.34), rgba(16, 8, 28, 0.95) 75%);
-  animation: mossEyeScanPulse 0.95s ease-in-out infinite;
-  box-shadow:
-    0 0 0 2.5px rgba(192, 132, 252, 0.75),
-    0 0 28px rgba(168, 85, 247, 0.92);
-}
-.ob-eye.moss-eye-sensor.moss-eye--speaking {
-  background: radial-gradient(circle at 50% 50%, rgba(255, 42, 82, 0.38), rgba(24, 6, 12, 0.95) 75%);
-  transform: scale(calc(1.08 + var(--moss-eye-level, 0) * 0.24));
-  box-shadow:
-    0 0 0 3px rgba(255, 59, 92, 0.8),
-    0 0 calc(24px + var(--moss-eye-level, 0) * 22px) rgba(255, 42, 82, 1);
-}
-.ob-eye.moss-eye-sensor.moss-eye--engraving,
-.ob-eye.moss-eye-sensor.moss-eye-hw--engraving {
-  background: radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.38), rgba(4, 22, 16, 0.95) 75%);
-  animation: obEyeLaserHalo 0.85s ease-in-out infinite;
-  box-shadow:
-    0 0 0 2.5px #10b981,
-    0 0 28px rgba(16, 185, 129, 0.95),
-    0 0 44px rgba(52, 211, 153, 0.55);
-}
-.ob-eye.moss-eye-sensor.moss-eye--alert {
-  background: radial-gradient(circle at 50% 50%, rgba(245, 158, 11, 0.38), rgba(28, 10, 6, 0.95) 75%);
-  animation: mossEyeAlertFlash 0.6s ease-in-out infinite;
-}
+.moss-eye--engraving .moss-eye-orbit { animation-duration: 6s; }
+.moss-eye--engraving .moss-eye-fx--sparks { opacity: 1; }
+.moss-eye--engraving .moss-eye-fx--sparks path { animation: moss-eye-twinkle 0.8s ease-in-out infinite; }
+.moss-eye--engraving .moss-eye-fx--sparks path:nth-child(2) { animation-delay: 0.27s; }
+.moss-eye--engraving .moss-eye-fx--sparks path:nth-child(3) { animation-delay: 0.53s; }
 
-@keyframes obEyeIdleHalo {
-  0%, 100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
-}
+.moss-eye--alert .moss-eye-ball { animation: moss-eye-wobble 0.5s ease-in-out infinite; }
+.moss-eye--alert .moss-eye-shape { transform: scale(1.1); }
+.moss-eye--alert .moss-eye-fx--alert { opacity: 1; }
+.moss-eye--alert .moss-eye-bang { animation: moss-eye-bang 0.9s ease-in-out infinite; }
 
-@keyframes obEyeLaserHalo {
-  0%, 100% {
-    transform: scale(1);
-    box-shadow: 0 0 0 2px #10b981, 0 0 20px rgba(16, 185, 129, 0.75);
-  }
-  50% {
-    transform: scale(1.12);
-    box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.85), 0 0 36px rgba(16, 185, 129, 1);
-  }
+@keyframes moss-eye-spin { to { transform: rotate(360deg); } }
+@keyframes moss-eye-blink {
+  0%, 90%, 100% { transform: scaleY(1); }
+  93% { transform: scaleY(0.08); }
+  96% { transform: scaleY(1); }
 }
-
-@keyframes obEyeCoreConnectedBreath {
-  0%, 100% {
-    transform: scale(0.95);
-  }
-  50% {
-    transform: scale(1.14);
-  }
+@keyframes moss-eye-breathe {
+  0%, 100% { opacity: 0.42; transform: scale(0.92); }
+  50% { opacity: 0.9; transform: scale(1); }
 }
-
-@keyframes obEyeCoreVoicePulse {
-  0%, 100% {
-    transform: scale(calc(0.98 + var(--moss-eye-level, 0) * 0.28));
-  }
-  50% {
-    transform: scale(calc(1.16 + var(--moss-eye-level, 0) * 0.34));
-  }
+@keyframes moss-eye-ponder {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(4px, -4px); }
+  50% { transform: translate(0, -6px); }
+  75% { transform: translate(-4px, -4px); }
 }
-
-@keyframes obEyeCoreLaserPulse {
-  0%, 100% {
-    transform: scale(0.96);
-  }
-  50% {
-    transform: scale(1.22);
-  }
+@keyframes moss-eye-bounce {
+  from { transform: scale(1, calc(0.94 + var(--eye-level, 0) * 0.03)); }
+  to { transform: scale(calc(1.02 + var(--eye-level, 0) * 0.05), calc(1.02 + var(--eye-level, 0) * 0.12)); }
 }
-
-@keyframes obEyeSonarRipple {
-  0% {
-    transform: scale(0.58);
-    opacity: 0.92;
-  }
-  75% {
-    opacity: 0.32;
-  }
-  100% {
-    transform: scale(1.85);
-    opacity: 0;
-  }
+@keyframes moss-eye-wobble {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-7deg); }
+  75% { transform: rotate(7deg); }
 }
-
-@keyframes obEyePupilScan {
-  0%, 100% {
-    transform: translate(0, 0) scale(0.92);
-  }
-  25% {
-    transform: translate(-1.3px, -0.7px) scale(1.22);
-  }
-  75% {
-    transform: translate(1.3px, 0.7px) scale(1.1);
-  }
+@keyframes moss-eye-snooze {
+  0% { opacity: 0; transform: translate(0, 4px); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: translate(7px, -9px); }
 }
-
-@keyframes mossEyeAlertFlash {
-  0%, 100% {
-    transform: scale(1);
-    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.4), 0 0 18px rgba(255, 59, 92, 0.8);
-  }
-  50% {
-    transform: scale(1.15);
-    box-shadow: 0 0 0 5px rgba(245, 158, 11, 0.85), 0 0 36px rgba(255, 59, 92, 1);
-  }
+@keyframes moss-eye-twinkle {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 1; }
+}
+@keyframes moss-eye-wave {
+  0% { opacity: 0; }
+  30% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes moss-eye-bubble {
+  0%, 10% { opacity: 0; }
+  35%, 75% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes moss-eye-bang {
+  0%, 60%, 100% { transform: scale(1) rotate(0deg); }
+  20% { transform: scale(1.25) rotate(-8deg); }
+  40% { transform: scale(1) rotate(6deg); }
 }
 
 .moss-twin {
@@ -4492,319 +4306,26 @@ input:not([type]):focus {
   gap: 8px;
 }
 .moss-twin-lens-wrap {
-  width: 88px;
-  height: 88px;
+  width: 112px;
+  height: 112px;
   display: grid;
   place-items: center;
   cursor: pointer;
   user-select: none;
+  transition: transform 0.25s var(--ob-ease);
 }
+.moss-twin-lens-wrap:hover { transform: scale(1.04) rotate(-3deg); }
 .moss-twin-svg {
-  width: 88px;
-  height: 88px;
-  overflow: visible;
+  width: 112px;
+  height: 112px;
 }
-.moss-twin-ring-outer {
-  stroke: rgba(255, 255, 255, 0.24);
-  transform-origin: 60px 60px;
-  animation: mossTwinOrbitReverse 38s linear infinite;
-}
-.moss-twin-crosshair {
-  stroke: rgba(255, 92, 119, 0.48);
-  transition: stroke 0.25s ease;
-}
-.moss-twin--listening .moss-twin-crosshair {
-  stroke: rgba(56, 189, 248, 0.58);
-}
-.moss-twin--thinking .moss-twin-crosshair,
-.moss-twin--pulse .moss-twin-crosshair {
-  stroke: rgba(167, 139, 250, 0.62);
-}
-.moss-twin--alert .moss-twin-crosshair {
-  stroke: rgba(245, 158, 11, 0.72);
-}
-
-/* 扩散声呐脉冲波纹环 */
-.moss-twin-ring-sonar {
-  stroke: var(--moss-accent, #ff3b5c);
-  transform-origin: 60px 60px;
-  opacity: 0;
-  animation: mossTwinSonarRipple 2.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
-}
-.moss-twin-ring-sonar--delay {
-  animation-delay: -1.4s;
-}
-.moss-twin--offline .moss-twin-ring-sonar {
-  animation: none;
-  opacity: 0;
-}
-.moss-twin--listening .moss-twin-ring-sonar {
-  animation-duration: 1.4s;
-}
-.moss-twin--listening .moss-twin-ring-sonar--delay {
-  animation-delay: -0.7s;
-}
-.moss-twin--speaking .moss-twin-ring-sonar {
-  animation-duration: 1.2s;
-}
-.moss-twin--speaking .moss-twin-ring-sonar--delay {
-  animation-delay: -0.6s;
-}
-.moss-twin--thinking .moss-twin-ring-sonar,
-.moss-twin--pulse .moss-twin-ring-sonar {
-  animation-duration: 1.3s;
-}
-.moss-twin--thinking .moss-twin-ring-sonar--delay,
-.moss-twin--pulse .moss-twin-ring-sonar--delay {
-  animation-delay: -0.65s;
-}
-.moss-twin--alert .moss-twin-ring-sonar {
-  animation-duration: 0.9s;
-}
-.moss-twin--alert .moss-twin-ring-sonar--delay {
-  animation-delay: -0.45s;
-}
-
-.moss-twin-ring-scan {
-  stroke: rgba(255, 77, 109, 0.72);
-  transform-origin: 60px 60px;
-  animation: mossTwinOrbit 6.5s linear infinite;
-  transition: stroke 0.25s ease;
-}
-.moss-twin--thinking .moss-twin-ring-scan,
-.moss-twin--pulse .moss-twin-ring-scan {
-  stroke: #c084fc;
-  animation-duration: 1.6s;
-}
-.moss-twin--listening .moss-twin-ring-scan {
-  stroke: #38bdf8;
-  animation-duration: 2.2s;
-}
-.moss-twin--speaking .moss-twin-ring-scan {
-  stroke: #ff2a52;
-  animation-duration: 1.8s;
-}
-.moss-twin--alert .moss-twin-ring-scan {
-  stroke: #fbbf24;
-  animation-duration: 1.1s;
-}
-.moss-twin--offline .moss-twin-ring-scan {
-  stroke: rgba(148, 163, 184, 0.24);
-  animation: none;
-}
-
-.moss-twin-ring-acoustic {
-  stroke: rgba(255, 59, 92, 0.38);
-  transform-origin: 60px 60px;
-  transform: scale(calc(0.92 + var(--moss-twin-level, 0) * 0.30));
-  animation: mossTwinAcousticBreath 3.2s ease-in-out infinite;
-  transition: transform 0.14s ease, stroke 0.25s ease;
-}
-.moss-twin--listening .moss-twin-ring-acoustic {
-  stroke: rgba(56, 189, 248, 0.78);
-}
-.moss-twin--thinking .moss-twin-ring-acoustic,
-.moss-twin--pulse .moss-twin-ring-acoustic {
-  stroke: rgba(167, 139, 250, 0.72);
-  animation-duration: 1.8s;
-}
-.moss-twin--alert .moss-twin-ring-acoustic {
-  stroke: rgba(245, 158, 11, 0.82);
-  animation-duration: 1.1s;
-}
-.moss-twin--offline .moss-twin-ring-acoustic {
-  stroke: rgba(255, 255, 255, 0.12);
-  animation-duration: 5.4s;
-}
-
-.moss-twin-ring-iris {
-  transform-origin: 60px 60px;
-  animation: mossTwinOrbitReverse 11s linear infinite;
-}
-.moss-twin--thinking .moss-twin-ring-iris,
-.moss-twin--pulse .moss-twin-ring-iris {
-  animation-duration: 3.4s;
-}
-.moss-twin--listening .moss-twin-ring-iris,
-.moss-twin--speaking .moss-twin-ring-iris {
-  animation-duration: 5.2s;
-}
-.moss-twin--offline .moss-twin-ring-iris {
-  animation-duration: 32s;
-  opacity: 0.48;
-}
-
-/* 球核与瞳孔视差容器 */
-.moss-twin-core-group {
-  transform: translate(
-    calc(var(--moss-gaze-x, 0) * 2.2px),
-    calc(var(--moss-gaze-y, 0) * 1.8px)
-  );
-  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.moss-twin-pupil-group {
-  transform: translate(
-    calc(var(--moss-gaze-x, 0) * 4.2px),
-    calc(var(--moss-gaze-y, 0) * 3.4px)
-  );
-  transition: transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.moss-twin-core {
-  transform-origin: 60px 60px;
-  transform: scale(calc(1 + var(--moss-twin-level, 0) * 0.24));
-  filter: drop-shadow(0 0 11px var(--moss-accent, rgba(255, 59, 92, 0.8)));
-  animation: mossTwinCoreBreathe 3.2s ease-in-out infinite;
-  transition: transform 0.12s ease, filter 0.25s ease, opacity 0.25s ease;
-}
-.moss-twin--listening .moss-twin-core,
-.moss-twin--speaking .moss-twin-core {
-  animation: none;
-  filter: drop-shadow(0 0 calc(12px + var(--moss-twin-level, 0) * 12px) var(--moss-accent, #ff3b5c));
-}
-.moss-twin--thinking .moss-twin-core,
-.moss-twin--pulse .moss-twin-core {
-  animation: mossTwinCoreNeural 1.5s ease-in-out infinite;
-}
-.moss-twin--alert .moss-twin-core {
-  animation: mossTwinCoreAlert 0.85s ease-in-out infinite;
-}
-.moss-twin--offline .moss-twin-core {
-  opacity: 0.68;
-  animation: mossTwinCoreDormant 5.2s ease-in-out infinite;
-}
-
-.moss-twin-spec-arc {
-  transform-origin: 60px 60px;
-  pointer-events: none;
-}
-
-.moss-twin-pupil {
-  fill: rgba(255, 245, 247, 0.96);
-  transform-origin: 60px 60px;
-  transform: scale(calc(0.92 + var(--moss-twin-level, 0) * 0.38));
-  animation: mossTwinPupilFocus 4.2s ease-in-out infinite;
-  transition: transform 0.12s ease;
-}
-.moss-twin--listening .moss-twin-pupil,
-.moss-twin--speaking .moss-twin-pupil {
-  animation: none;
-}
-.moss-twin--thinking .moss-twin-pupil,
-.moss-twin--pulse .moss-twin-pupil {
-  animation: mossTwinPupilScan 1.8s ease-in-out infinite;
-}
-.moss-twin-glint {
-  fill: rgba(255, 255, 255, 0.9);
-}
-.moss-twin-glint-sub {
-  fill: rgba(255, 255, 255, 0.55);
-}
-
-/* 点击镜头自检对焦脉冲 */
-.moss-twin--focus-pulse .moss-twin-svg {
-  animation: mossTwinFocusSnap 0.52s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-@keyframes mossTwinFocusSnap {
+/* 戳一下：果冻回弹 */
+.moss-twin--focus-pulse .moss-twin-svg { animation: mossTwinBoop 0.5s var(--ob-ease); }
+@keyframes mossTwinBoop {
   0% { transform: scale(1); }
-  35% { transform: scale(0.88) rotate(-8deg); filter: brightness(1.35); }
-  70% { transform: scale(1.08) rotate(4deg); filter: brightness(1.2); }
-  100% { transform: scale(1) rotate(0deg); }
-}
-
-@keyframes mossTwinSonarRipple {
-  0% {
-    transform: scale(0.62);
-    opacity: 0.68;
-  }
-  80% {
-    opacity: 0.12;
-  }
-  100% {
-    transform: scale(1.68);
-    opacity: 0;
-  }
-}
-
-@keyframes mossTwinAcousticBreath {
-  0%, 100% {
-    opacity: 0.78;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-@keyframes mossTwinCoreBreathe {
-  0%, 100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.09);
-  }
-}
-
-@keyframes mossTwinCoreDormant {
-  0%, 100% {
-    transform: scale(0.95);
-    opacity: 0.54;
-  }
-  50% {
-    transform: scale(1.03);
-    opacity: 0.78;
-  }
-}
-
-@keyframes mossTwinCoreNeural {
-  0%, 100% {
-    transform: scale(0.98);
-  }
-  50% {
-    transform: scale(1.15);
-  }
-}
-
-@keyframes mossTwinCoreAlert {
-  0%, 100% {
-    transform: scale(0.98);
-  }
-  50% {
-    transform: scale(1.18);
-  }
-}
-
-@keyframes mossTwinPupilFocus {
-  0%, 100% {
-    transform: scale(0.92);
-  }
-  45% {
-    transform: scale(1.08);
-  }
-  75% {
-    transform: scale(0.86);
-  }
-}
-
-@keyframes mossTwinPupilScan {
-  0%, 100% {
-    transform: translate(0, 0) scale(0.92);
-  }
-  25% {
-    transform: translate(-1.6px, -0.8px) scale(1.14);
-  }
-  75% {
-    transform: translate(1.6px, 0.8px) scale(1.06);
-  }
-}
-
-@keyframes mossTwinOrbit {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-@keyframes mossTwinOrbitReverse {
-  from { transform: rotate(360deg); }
-  to { transform: rotate(0deg); }
+  35% { transform: scale(0.86, 1.1); }
+  70% { transform: scale(1.08, 0.94); }
+  100% { transform: scale(1); }
 }
 
 .moss-twin-wave {
@@ -5026,25 +4547,14 @@ input:not([type]):focus {
 
 @media (prefers-reduced-motion: reduce) {
   .moss-twin *,
-  .moss-twin-ring-outer,
-  .moss-twin-ring-sonar,
-  .moss-twin-ring-scan,
-  .moss-twin-ring-iris,
-  .moss-twin-bar,
-  .ob-eye.moss-eye-sensor,
-  .ob-eye.moss-eye-sensor * {
+  .moss-eye,
+  .moss-eye *,
+  .ob-eye.moss-eye-sensor {
     animation: none !important;
     transition: none !important;
   }
-  .moss-twin-ring-acoustic,
-  .moss-twin-core-group,
-  .moss-twin-pupil-group,
-  .moss-twin-core,
-  .moss-twin-pupil,
-  .ob-eye-core-group,
-  .ob-eye-pupil-group,
-  .ob-eye-core,
-  .ob-eye-pupil,
+  .moss-eye-look,
+  .moss-twin-lens-wrap,
   .ob-eye.moss-eye-sensor {
     transform: none !important;
   }
@@ -5145,103 +4655,247 @@ input:not([type]):focus {
   color: var(--ob-accent-2);
 }
 
-/* n53：小智 320×240 彩屏零 Flash 动态卡片双画风切换与 160×120 4:3 真机比例预览台 */
+/* n53：小智 320×240 彩屏动态卡片双画风预览台。2026-11-06 用户要求“可爱风一点”：
+   圆润面板 + 糖果色描边 + 小屏幕外壳；同日用户决定 5 屏固定排成一行，预览随宽度等比缩小，
+   不必与实机尺寸一致（实机仍按 320×240 显示）。 */
 .voice-bot-showcase {
+  --bot-tint: #ff7a90;
+  --bot-tint-2: #ffb4a2;
+  --bot-tint-bg: rgba(255, 122, 144, 0.1);
   margin-top: 14px;
-  padding: 14px 16px;
-  border: 1px solid var(--ob-line);
-  border-radius: 10px;
-  background: linear-gradient(180deg, rgba(139, 123, 255, 0.05) 0%, rgba(15, 23, 42, 0.28) 100%);
+  padding: 16px 18px 14px;
+  border: 1.5px solid color-mix(in srgb, var(--bot-tint) 34%, transparent);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--bot-tint) 14%, transparent) 0, transparent 42%),
+    radial-gradient(circle at 92% 100%, color-mix(in srgb, var(--bot-tint-2) 10%, transparent) 0, transparent 46%),
+    rgba(14, 14, 20, 0.62);
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  transition: border-color 0.22s ease, background 0.22s ease;
-}
-.voice-bot-showcase--moss {
-  border-color: rgba(255, 77, 109, 0.34);
-  background: linear-gradient(180deg, rgba(255, 68, 56, 0.06) 0%, rgba(9, 13, 22, 0.42) 100%);
+  gap: 12px;
+  transition: border-color 0.3s ease, background 0.3s ease;
 }
 .voice-bot-showcase--bot {
-  border-color: rgba(72, 250, 210, 0.36);
-  background: linear-gradient(180deg, rgba(72, 250, 210, 0.06) 0%, rgba(18, 16, 32, 0.42) 100%);
+  --bot-tint: #5eead4;
+  --bot-tint-2: #f9a8d4;
+  --bot-tint-bg: rgba(94, 234, 212, 0.1);
 }
 .voice-bot-showcase-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: 10px 14px;
+}
+.voice-bot-showcase-title {
+  display: inline-flex;
+  align-items: center;
   gap: 10px;
+  min-width: 0;
+}
+.voice-bot-showcase-title b {
+  display: block;
+  font-size: 14.5px;
+  color: var(--ob-ink);
+}
+.voice-bot-showcase-title small {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--ob-ink-3);
+}
+.voice-bot-showcase-mascot {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  color: #18181b;
+  background: linear-gradient(135deg, var(--bot-tint) 0%, var(--bot-tint-2) 100%);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--bot-tint) 32%, transparent);
+  animation: voice-bot-bob 3.2s ease-in-out infinite;
+}
+@keyframes voice-bot-bob {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-2px) rotate(-4deg); }
 }
 .voice-bot-style-switch {
   display: inline-flex;
   flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid var(--ob-line);
+}
+.voice-bot-style-opt {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ob-ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.22s var(--ob-ease), color 0.22s ease, box-shadow 0.22s ease;
 }
-.voice-bot-style-switch .btn.is-active {
-  border-color: rgba(139, 123, 255, 0.85);
-  background: rgba(139, 123, 255, 0.22);
+.voice-bot-style-opt:hover:not(:disabled):not(.is-active) {
   color: var(--ob-ink);
+  background: rgba(255, 255, 255, 0.06);
+}
+.voice-bot-style-opt.is-active {
+  color: #18181b;
   font-weight: 600;
+  background: linear-gradient(135deg, var(--bot-tint) 0%, var(--bot-tint-2) 100%);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--bot-tint) 36%, transparent);
 }
-.voice-bot-scene-tags {
+.voice-bot-style-opt:disabled { cursor: progress; opacity: 0.7; }
+.voice-bot-style-opt:focus-visible { outline: 2px solid var(--bot-tint); outline-offset: 2px; }
+.voice-bot-offline-tip {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  background: var(--bot-tint-bg);
+  color: var(--ob-ink-2);
+  font-size: 12px;
 }
+.voice-bot-offline-tip svg { flex: none; color: var(--bot-tint); }
 .voice-bot-gif-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
-  gap: 10px;
-  margin-top: 2px;
+  grid-template-columns: repeat(5, minmax(112px, 1fr));
+  gap: 12px;
+  overflow-x: auto; /* 只在极窄窗口（每屏 <112px）时横向滚动，平时始终一行 */
+  padding: 4px 0 6px; /* 悬停上浮与阴影不被滚动容器裁掉 */
 }
 .voice-bot-gif-tile {
-  padding: 10px;
+  container: bot-tile / inline-size;
+  min-width: 0;
+  padding: 10px 10px 12px;
   border: 1px solid var(--ob-line);
-  border-radius: 10px;
-  background: rgba(7, 10, 18, 0.68);
+  border-radius: 18px;
+  background: rgba(9, 9, 13, 0.7);
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 6px;
-  transition: border-color 0.18s ease, transform 0.18s ease;
+  gap: 4px;
+  transition: border-color 0.2s ease, transform 0.25s var(--ob-ease), box-shadow 0.25s ease;
 }
 .voice-bot-gif-tile:hover {
-  border-color: rgba(139, 123, 255, 0.52);
+  border-color: color-mix(in srgb, var(--bot-tint) 55%, transparent);
+  transform: translateY(-3px);
+  box-shadow: 0 10px 22px -12px color-mix(in srgb, var(--bot-tint) 60%, transparent);
 }
+.voice-bot-gif-tile.is-pushed {
+  border-color: color-mix(in srgb, var(--bot-tint) 70%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bot-tint) 16%, transparent);
+}
+/* 小屏幕外壳：圆角机身 + 糖果色边框，屏幕本身 160×120 原图 1:1。 */
 .voice-bot-gif-frame {
-  width: 148px;
-  height: 112px;
-  border-radius: 8px;
-  background: #070a12;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55);
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 178px;
+  aspect-ratio: 178 / 138;
+  padding: 7px;
+  margin-bottom: 6px;
+  border-radius: 16px;
+  background:
+    linear-gradient(#0a0a0f, #0a0a0f) padding-box,
+    linear-gradient(135deg, var(--bot-tint) 0%, var(--bot-tint-2) 100%) border-box;
+  border: 2px solid transparent;
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
-}
-.voice-bot-showcase--moss .voice-bot-gif-frame {
-  border-color: rgba(255, 77, 109, 0.28);
-}
-.voice-bot-showcase--bot .voice-bot-gif-frame {
-  border-color: rgba(72, 250, 210, 0.32);
 }
 .voice-bot-gif-img {
-  width: 144px;
-  height: 108px;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  border-radius: 6px;
   display: block;
 }
+/* 卡片够宽、能按 1:1 原图显示时用最近邻保持像素锐利；缩小时用平滑缩放，避免丢行导致像素字断笔。 */
+@container bot-tile (min-width: 178px) {
+  .voice-bot-gif-img { image-rendering: pixelated; }
+}
+.voice-bot-gif-badge {
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  transform: translateX(-50%);
+  padding: 1px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #18181b;
+  background: linear-gradient(135deg, var(--bot-tint) 0%, var(--bot-tint-2) 100%);
+}
+.voice-bot-push {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 2px solid #0a0a0f;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #18181b;
+  background: linear-gradient(135deg, var(--bot-tint) 0%, var(--bot-tint-2) 100%);
+  cursor: pointer;
+  transition: transform 0.2s var(--ob-ease), filter 0.2s ease;
+}
+.voice-bot-push:hover:not(:disabled) { transform: scale(1.12) rotate(-12deg); filter: brightness(1.08); }
+.voice-bot-push:disabled { cursor: progress; filter: grayscale(0.6) brightness(0.7); }
+.voice-bot-push:focus-visible { outline: 2px solid var(--ob-ink); outline-offset: 2px; }
 .voice-bot-gif-title {
+  max-width: 100%;
+  line-height: 1.35;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--ob-ink);
 }
 .voice-bot-gif-desc {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11.5px;
-  line-height: 1.35;
-  color: var(--ob-muted);
+  color: var(--ob-ink-3);
+}
+.voice-bot-showcase-more {
+  font-size: 12px;
+  color: var(--ob-ink-3);
+}
+.voice-bot-showcase-more summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--ob-ink-2);
+}
+.voice-bot-showcase-more summary:hover { color: var(--bot-tint); }
+.voice-bot-showcase-more ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+#voice-bot-showcase-notice {
+  align-self: center;
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: var(--bot-tint-bg);
+  color: var(--ob-ink);
+  font-size: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-bot-showcase-mascot { animation: none; }
+  .voice-bot-gif-tile, .voice-bot-gif-tile:hover, .voice-bot-push:hover:not(:disabled) { transform: none; transition: none; }
 }

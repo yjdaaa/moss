@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, Trash2, Download, Lock, ChevronDown, Copy, RefreshCw, Volume2 } from "lucide-react";
+import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, Trash2, Download, Lock, ChevronDown, Copy, RefreshCw, Volume2, Bot, Satellite, Send, Sparkles } from "lucide-react";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { createPollRunner } from "../pollGuard.js";
@@ -218,7 +218,7 @@ export function BuiltinServicePanel({ builtin }) {
           // 若设备刚好断开，不影响画风保存提示
         }
       }
-      setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风（下方 5 屏预览已实时切换，在线小智不断连立即生效）`);
+      setBotNotice(`已换成「${opt?.shortLabel || nextStyle}」画风，在线小智不用重连，马上生效`);
     } else {
       setOptimisticStyle("");
     }
@@ -688,46 +688,53 @@ export function BuiltinServicePanel({ builtin }) {
         data-card-style={currentCardStyle}
       >
         <div className="voice-bot-showcase-head">
-          <span className="voice-actions">
-            <b>小智 320×240 彩屏动态副屏 · 双画风实时预览台</b>
-            <span className={`ob-pill ${currentCardStyle === "goggle_bot" ? "ob-pill--ok" : "ob-pill--info"} voice-tag`}>
-              {currentCardStyle === "goggle_bot" ? "当前：可爱像素小机器人" : "当前：硬核太空舱 HUD"}
+          <div className="voice-bot-showcase-title">
+            <span className="voice-bot-showcase-mascot" aria-hidden="true">
+              {currentCardStyle === "goggle_bot" ? <Bot size={18} /> : <Satellite size={18} />}
             </span>
-            <span className="ob-pill ob-pill--off voice-tag">零 Flash 风险 · 纯内存渲染</span>
-          </span>
-          <div className="voice-bot-style-switch" role="group" aria-label="小智彩屏卡片画风">
-            <span className="voice-muted">点击切换画风：</span>
+            <span>
+              <b>小智副屏预览</b>
+              <small>5 个动态场景 · 这里按比例缩小预览，小智实机仍按 320×240 全屏显示</small>
+            </span>
+          </div>
+          <div className="voice-bot-style-switch" role="radiogroup" aria-label="小智彩屏卡片画风">
             {SCREEN_CARD_STYLE_OPTIONS.map((opt) => {
               const active = currentCardStyle === opt.id;
+              const Icon = opt.id === "goggle_bot" ? Bot : Satellite;
               return (
                 <button
                   key={opt.id}
                   type="button"
-                  className={`btn btn-ghost${active ? " is-active" : ""}`}
+                  role="radio"
+                  aria-checked={active}
+                  className={`voice-bot-style-opt${active ? " is-active" : ""}`}
                   disabled={Boolean(busy)}
                   title={opt.hint}
                   id={`voice-card-style-${opt.id}`}
                   onClick={() => switchCardStyle(opt.id)}
                 >
+                  <Icon size={14} aria-hidden="true" />
                   {opt.shortLabel}
                 </button>
               );
             })}
           </div>
         </div>
-        <div className="voice-bot-scene-tags">
-          <span className="ob-pill ob-pill--info voice-tag">① 待电脑审批警戒卡（含倒计时条）</span>
-          <span className="ob-pill ob-pill--info voice-tag">② 完工庆祝 / 急停断点 5 秒徽章卡（固件自动淡出）</span>
-          <span className="ob-pill ob-pill--info voice-tag">③ 本地音乐像素唱机 / 听歌小机器人卡</span>
-          <span className="ob-pill ob-pill--off voice-tag">1:1 激光刀路预览 + 实时加工进度 HUD 全部同步切换画风</span>
-        </div>
+        {!onlineColorDevice && (
+          <div className="voice-bot-offline-tip" id="voice-bot-offline-tip">
+            <Sparkles size={13} aria-hidden="true" />
+            连上并允许一台彩屏小智（如立创·实战派 320×240）后，点画面右上角的小飞机就能推过去试看
+          </div>
+        )}
         <div className="voice-bot-gif-grid" id="voice-goggle-bot-gallery">
           {GOGGLE_BOT_POSES.map((pose) => {
             const gifSrc = activeSceneGifs[pose.id] || legacyBotGifs[pose.id];
             const sceneTitle = currentCardStyle === "goggle_bot" ? (pose.botLabel || pose.label) : (pose.mossLabel || pose.label);
             const sceneDesc = currentCardStyle === "goggle_bot" ? (pose.botDesc || pose.desc) : (pose.mossDesc || pose.desc);
+            // 只标记本页刚推送过的那一屏：固件会按工作状态自动换卡，这里不冒充“设备当前画面”。
+            const pushed = Boolean(onlineColorDevice) && lastPushedPose === pose.id;
             return (
-              <div className="voice-bot-gif-tile" key={pose.id} data-pose={pose.id}>
+              <div className={`voice-bot-gif-tile${pushed ? " is-pushed" : ""}`} key={pose.id} data-pose={pose.id}>
                 <div className="voice-bot-gif-frame">
                   {gifSrc ? (
                     <img
@@ -735,31 +742,43 @@ export function BuiltinServicePanel({ builtin }) {
                       src={gifSrc}
                       alt={`${sceneTitle}`}
                       className="voice-bot-gif-img"
+                      width={160}
+                      height={120}
                     />
                   ) : (
                     <span className="voice-muted mono">160×120</span>
                   )}
+                  {pushed && <span className="voice-bot-gif-badge">刚推到小智</span>}
+                  {onlineColorDevice && (
+                    <button
+                      type="button"
+                      className="voice-bot-push"
+                      disabled={Boolean(asking) || Boolean(busy)}
+                      title={`把「${sceneTitle}」推到 ${builtinDeviceView(onlineColorDevice).title} 的屏幕上试看`}
+                      aria-label={`把${sceneTitle}推到小智屏`}
+                      id={`voice-push-bot-${pose.id}`}
+                      onClick={() => pushBotPose(pose)}
+                    >
+                      <Send size={13} aria-hidden="true" />
+                    </button>
+                  )}
                 </div>
                 <div className="voice-bot-gif-title">{sceneTitle}</div>
-                <div className="voice-bot-gif-desc">{sceneDesc}</div>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={Boolean(asking) || Boolean(busy) || !onlineColorDevice}
-                  title={
-                    onlineColorDevice
-                      ? `将当前「${sceneTitle}」1:1 投送到在线彩屏小智试看`
-                      : "连接并允许彩屏小智（如立创·实战派 320×240）后可一键推屏试看"
-                  }
-                  id={`voice-push-bot-${pose.id}`}
-                  onClick={() => pushBotPose(pose)}
-                >
-                  推到小智屏
-                </button>
+                <div className="voice-bot-gif-desc" title={sceneDesc}>{sceneDesc}</div>
               </div>
             );
           })}
         </div>
+        <details className="voice-bot-showcase-more">
+          <summary>这些画面什么时候出现？</summary>
+          <ul>
+            <li>等电脑点批准时：警戒卡，底部带倒计时条</li>
+            <li>雕完或急停时：5 秒庆祝 / 断点徽章，固件自动淡出</li>
+            <li>放本地音乐时：像素唱机 / 戴耳机的小机器人</li>
+            <li>激光刀路预览和加工进度屏也会跟着换画风</li>
+            <li>全部在内存里画，不写小智的 Flash</li>
+          </ul>
+        </details>
         {botNotice && <div className="voice-ok" id="voice-bot-showcase-notice">{botNotice}</div>}
       </div>
     </div>
@@ -842,8 +861,9 @@ function BuiltinModelGroup({ section, builtin }) {
         setVoiceMenuOpen(false);
       }
     };
-    document.addEventListener("mousedown", handleOutsideClick);
-    return () => document.removeEventListener("mousedown", handleOutsideClick);
+    // 用 click 而不是 mousedown 关闭：下拉列表占文档流，按下时收起会让下方按钮上移、松开落空导致点击丢失。
+    document.addEventListener("click", handleOutsideClick);
+    return () => document.removeEventListener("click", handleOutsideClick);
   }, [menuOpen, voiceMenuOpen]);
 
   useEffect(() => {
@@ -1464,8 +1484,9 @@ function BuiltinJevGroup({ builtin }) {
         setMenuOpen(false);
       }
     };
-    document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
+    // 同上：click 时再收起，避免下方按钮在按下与松开之间移位而丢失点击。
+    document.addEventListener("click", onPointerDown);
+    return () => document.removeEventListener("click", onPointerDown);
   }, [menuOpen]);
 
   const sourceView = builtinSectionSourceView("jev", status);
@@ -2433,7 +2454,9 @@ export function ExperienceGroup({ builtin }) {
 /** 默认关闭、仅存本机内存（关闭或重启即清）的实时对话识别与工具调用排障面板，支持划词一键加入纠错或热词。 */
 export function LiveDebugTraces({ builtin }) {
   const status = builtin?.status;
-  const enabled = Boolean(status?.debug_enabled);
+  // 保存期间先显示目标状态，避免受控复选框在后端返回前弹回；保存结束（成功或失败）后回到后端真实值。
+  const [pendingEnabled, setPendingEnabled] = useState(null);
+  const enabled = pendingEnabled ?? Boolean(status?.debug_enabled);
   const traces = Array.isArray(status?.debug_traces) ? status.debug_traces : [];
   const timingItems = voiceTimingReport(status?.timings);
   const events = Array.isArray(status?.events) ? status.events.slice(0, 20) : [];
@@ -2459,6 +2482,7 @@ export function LiveDebugTraces({ builtin }) {
 
   const toggleDebug = async (checked) => {
     setSaving(true);
+    setPendingEnabled(checked);
     setFeedback("");
     try {
       const next = await voiceApi.localSave({ debug_trace_enabled: checked });
@@ -2470,6 +2494,7 @@ export function LiveDebugTraces({ builtin }) {
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "切换调试流失败", tone: "error" });
     } finally {
+      setPendingEnabled(null);
       setSaving(false);
     }
   };

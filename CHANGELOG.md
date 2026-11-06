@@ -18,6 +18,13 @@
 - **验证**：新增 `nv19_large_directories_keep_late_files_searchable_and_excerptable`、`nv19_extraction_sees_relevant_known_records_and_drops_duplicates`、`nv19_extraction_input_without_known_records_is_unchanged`，`nv19_voice_retrieval_combines_memory_and_knowledge_and_survives_either_failing` 补充资料慢 700 ms 时记忆仍返回的断言；两项知识库用例在改动前代码上失败、改动后通过。`moss-voice-server` nv19 61 项、`cargo test --workspace` 937 通过 / 9 忽略。在 macOS 上执行，未跑 Windows `quick-update-desktop.ps1`；真实模型提取质量、真实资料目录与 Android 读盘耗时未验证。
 - **关联**：`crates/moss-voice-server/src/context/knowledge.rs`（`summarize`、`l1_entry`、`KnowledgeService::search`）、`context/retrieve.rs`（`retrieve_candidates`、`significant`）、`context/extract.rs`（`PROMPT`、`parse_operations`、`extraction_input`、`known_for`、`same_text`）、`docs/integration/moss-native-voice-spec.md` n56、`moss-native-voice-implementation.md` i13。
 
+### 语音中心小智副屏预览台与机械眼改为可爱风，并修复下拉框与开关丢点击（2026-11-06）
+
+- **现象**：副屏预览台把 160×120 像素图缩成 144×108，像素字发糊；当前画风难以分辨，说明标签和 5 个重复按钮占满版面，窄屏出现孤立的最后一张。左上角导航眼在 42px 内塞了 13 层元素，未连接时是一团暗灰，像失效图标；它和孪生舱眼是两套各写一遍的 SVG。另外，模型名下拉列表展开时点“测试连接”会丢失这次点击，知识库启用勾选和实时排障开关点下后会先弹回原状态，等后端返回才变。
+- **根因与修复**：新增 `MossEye` 统一组件，导航眼与孪生舱眼共用形状、配色与状态动画；睁眼由写实眼球加黑瞳孔（用户反馈“有点恐怖”）改为沿用闭眼睡觉画法的动漫眼（上眼睑线 + 小睫毛 + 上暗下亮大虹膜 + 大高光），每个状态配一个漫画符号特效（待命闪星、拾音/播报声波、思考泡泡、雕刻火花、警戒“!”、睡觉“z”），定时眨眼、播报随真实振幅弹跳；导航小眼不画两侧声波以免压字，孪生舱眼由 88px 放大到 112px，删除两套旧 SVG 的约 600 行样式。预览台改为分段画风切换、5 屏固定一行并随宽度等比缩小（最大 1:1 原图，实机仍按 320×240 显示）、小屏外壳、角标推送按钮（仅有在线彩屏小智时出现）、折叠说明与“刚推到小智”标记。下拉列表占文档流，在 `mousedown` 时收起会让下方按钮上移，松开时落空；两处组合框改为在 `click` 时收起。知识库勾选与排障开关在保存期间先显示目标状态，失败时回到后端真实值。不改后端、协议、默认值或推屏请求内容，跨端（Windows/macOS/Android 网页视图）一致，不是破坏性变更。
+- **验证**：`npm test` 199/199，`npm run build` 通过；`voice-center.browser.mjs` 通过（含预览台切换画风、推屏请求与 8c 断言，修复前在本机卡在下拉框与两处开关）；`voice-context`、`voiceMcp`、`job-dock`、`twin-estop`、`voice-private-navigation`、`workbench-layout` 浏览器测试通过；`voice-plugins`、`voice-speaker` 写死了 Windows Chrome 路径，在 macOS 上改用 Playwright 自带 Chromium 的临时副本运行后通过；`npm run test:e2e` 35/35。`feedback.browser.mjs` 在改动前后都失败（找不到“加工效果反馈”输入框），与本次无关，未处理。未在真机小智屏上验证。
+- **关联**：`frontend/src/components/MossEye.jsx`、`SideNav.jsx`、`MossVoiceTwin.jsx`、`VoiceBuiltinCard.jsx`（`BuiltinServicePanel` 预览台、模型组合框、`LiveDebugTraces`）、`VoiceKnowledgeCard.jsx`（`toggleRoot`）、`frontend/src/styles.css`、`docs/integration/moss-native-voice-spec.md` n55。
+
 ## [0.3.3] - 2026-11-05
 
 ### 升级云端发版流水线 macOS Runner 为 `macos-latest`（2026-11-06）
