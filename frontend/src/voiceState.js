@@ -609,7 +609,7 @@ export function builtinDeviceInfoView(device) {
 export const PERSONA_STYLE_OPTIONS = [
   { id: "workshop", label: "简明工坊助手（默认）", hint: "干练直接，专注激光雕刻指令与状态反馈" },
   { id: "beginner_guide", label: "新手引导模式（耐心讲解工艺）", hint: "针对耗材、对焦、排风与走边框多给一句大白话提醒" },
-  { id: "moss_station", label: "MOSS 领航空间站（冷峻克制腔调）", hint: "《流浪地球》量子计算中枢语气：冷静理性、不寒暄卖萌，严格基于真实状态汇报" },
+  { id: "moss_station", label: "MOSS 领航空间站（电影原版腔调）", hint: "像《流浪地球》的 MOSS：平稳无起伏、先报结论，用“提示：”“警告：”开头；只有真实数据才说“经计算”，否则说“数据不足，无法计算”" },
   { id: "moss_briefing", label: "MOSS 任务简报（先报结论）", hint: "像指挥中心简报：收到、结论、一两项关键数据，句子极短" },
   { id: "moss_risk", label: "MOSS 风险评估（附把握高低）", hint: "建议时说明把握较大 / 一般 / 不大和最主要的风险，没把握先试边角料" },
   { id: "moss_deadpan", label: "MOSS 冷面幽默（偶尔冷笑话）", hint: "正事说完偶尔一句冷幽默；出光、急停、故障时不开玩笑" },

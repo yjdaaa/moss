@@ -34,6 +34,8 @@ fn n59_spoken_role_names_resolve_to_one_role_or_ask_back() {
     let cfg = config("workshop", vec![custom("custom_a1", "老王师傅", "话少"), custom("custom_a2", "老李师傅", "话多")]);
     let id = |q: &str| cfg.find(q).map(|(id, _)| id);
     assert_eq!(id("MOSS").unwrap(), "moss_station", "bare MOSS is the original station role");
+    assert_eq!(id("流浪地球里的 MOSS").unwrap(), "moss_station", "n60 movie MOSS");
+    assert_eq!(id("换成电影版").unwrap(), "moss_station");
     assert_eq!(id("moss 任务简报").unwrap(), "moss_briefing");
     assert_eq!(id("换成守夜模式").unwrap(), "moss_night");
     assert_eq!(id("冷笑话风格").unwrap(), "moss_deadpan");
@@ -169,4 +171,13 @@ async fn n59_persona_tool_switches_lists_and_never_lets_others_impersonate_it() 
         other => panic!("unknown role is handed back with the list: {other:?}"),
     }
     assert!(persona.system_prompt().contains("任务简报风格"), "failed switch keeps the role");
+}
+
+#[test]
+fn n60_station_role_speaks_like_the_film_but_never_invents_numbers() {
+    let prompt = config("moss_station", vec![]).system_prompt();
+    for rule in ["550W 量子计算机", "语调平稳", "“提示：”", "“警告：”", "“经计算”", "“数据不足，无法计算”", "严禁编造概率", "不复述电影台词"] {
+        assert!(prompt.contains(rule), "missing: {rule}");
+    }
+    assert!(prompt.ends_with(IMMUTABLE_SAFETY_RULES), "safety rules stay last");
 }
