@@ -6,6 +6,13 @@
 
 ## [0.3.3] - 2026-11-05
 
+### 升级云端发版流水线 macOS Runner 为 `macos-latest`（2026-11-06）
+
+- **现象**：GitHub Actions 下线 `macos-14` 镜像（报错 `The configuration 'macos-14-arm64-us-default' is not supported`），导致 `2c. macOS Universal DMG` 在启动前被取消。
+- **根因与修复**：同步将 `.github/workflows/release.yml` 与 `.github/workflows/release-macos.yml` 的 `runs-on: macos-14` 升级为与 Linux/Windows 一致的 `macos-latest`。无应用行为变更，不是破坏性变更。
+- **验证**：前端 `devQuickUpdate.test.mjs` 通过，并由 `v0.3.3` 云端 Release 流水线实跑验证。
+- **关联**：`.github/workflows/release.yml`、`.github/workflows/release-macos.yml`。
+
 ### 新增 macOS 本机快速同步脚本，改代码后原地给已安装的 MOSS.app 打补丁（2026-11-05）
 
 - **现象**：Windows 上用 `quick-update-desktop.ps1` 原地替换已安装的 `moss-desktop.exe`，macOS 上没有对应工具，每次改动都要重跑约 5 分钟的完整 `.app`/`.dmg` 打包。

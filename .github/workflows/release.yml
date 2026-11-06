@@ -185,7 +185,7 @@ jobs:
   macos-universal:
     name: 2c. macOS Universal DMG (Apple Silicon + Intel)
     needs: prepare
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
