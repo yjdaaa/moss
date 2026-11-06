@@ -1167,10 +1167,20 @@ test("n59：内置 MOSS 角色、自建角色的校验与保存载荷", () => {
   assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "", prompt: "话少" }])), /名字/);
   assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "老师傅", prompt: "" }])), /人设/);
   assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "老师傅", prompt: "收到就发 G1 X10" }])), /G-code/);
-  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "甲", prompt: "a" }, { id: "custom_a2", name: "甲", prompt: "b" }])), /重复/);
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "甲", prompt: "a" }, { id: "custom_a2", name: "甲", prompt: "b" }])), /读起来一样/);
   assert.match(localSettingsError(withRoles([{ id: "bad", name: "甲", prompt: "a" }])), /编号/);
   const seven = Array.from({ length: MAX_CUSTOM_PERSONAS + 1 }, (_, i) => ({ id: `custom_${i}`, name: `角色${i}`, prompt: "话少" }));
   assert.match(localSettingsError(withRoles(seven)), /最多/);
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "Foo", prompt: "a" }, { id: "custom_a2", name: "foo", prompt: "b" }])), /读起来一样/);
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "！！！", prompt: "a" }])), /文字或数字/);
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "甲", prompt: "a" }, { id: "custom_a1", name: "乙", prompt: "b" }])), /编号重复/);
+  assert.match(localSettingsError({ ...base, custom_personas: "[broken" }), /损坏/, "broken form data never becomes an empty list");
+  for (const compact of ["G1X10", "G01X10Y20", "M3S1000", "G28"]) {
+    assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "老师傅", prompt: compact }])), /G-code/, compact);
+  }
+  for (const fine of ["M30 螺丝", "G10 是坐标设置", "G90 绝对坐标"]) {
+    assert.equal(localSettingsError(withRoles([{ id: "custom_a1", name: "老师傅", prompt: fine }])), "", fine);
+  }
   assert.match(newCustomPersonaId(roles), /^custom_[a-z0-9]{1,16}$/);
   assert.deepEqual(parseCustomPersonas("not json"), []);
 });

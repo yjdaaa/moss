@@ -544,15 +544,33 @@ mod imp {
         }
     }
 
-    /// 语音切换角色时写入设置（只改 `persona_style`，不重启服务）。
+    /// 语音切换角色时写入设置（只改 `persona_style`，不重启服务）。核对与更新运行中的角色都在设置写入锁内，
+    /// 与界面保存（`local_save`）排成同一顺序。
     struct DesktopPersonaStore { settings_file: std::path::PathBuf }
     impl PersonaStore for DesktopPersonaStore {
-        fn save_active(&self, id: &str) -> Result<(), String> {
-            moss_voice::settings::update_voice(&self.settings_file, |settings| {
+        fn save_active(&self, id: &str, apply: &mut dyn FnMut(PersonaConfig)) -> Result<(), String> {
+            let mut touched = false;
+            let result = moss_voice::settings::update_voice(&self.settings_file, |settings| {
                 let local = &mut settings.builtin_local;
-                local.persona_style = moss_voice::settings::validate_active_persona(id, &local.custom_personas)?;
-                Ok(())
-            })
+                touched = true;
+                match moss_voice::settings::validate_active_persona(id, &local.custom_personas) {
+                    Ok(active) => {
+                        local.persona_style = active;
+                        apply(persona_config(local));
+                        Ok(())
+                    }
+                    Err(message) => {
+                        // The role is gone from the file (e.g. just deleted); re-sync the running role to it.
+                        apply(persona_config(local));
+                        Err(message)
+                    }
+                }
+            });
+            if result.is_err() && touched {
+                // The file write failed after the running role changed; follow the file again.
+                apply(persona_config(&moss_voice::settings::load(&self.settings_file).builtin_local));
+            }
+            result
         }
     }
 
@@ -2290,9 +2308,11 @@ mod imp {
                 }
                 None => None,
             };
+            let persona_touched =
+                persona_style_patch.is_some() || custom_personas_patch.is_some() || persona_prompt_patch.is_some();
             let (is_local_laya, laya_needed) = {
                 let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-                let (is_local_laya, filter_on) = moss_voice::settings::update_voice_with_jev_feedback(
+                let saved = moss_voice::settings::update_voice_with_jev_feedback(
                     &self.settings_file(),
                     |settings| {
                         let local = &mut settings.builtin_local;
@@ -2348,6 +2368,11 @@ mod imp {
                         if let Some(card_style) = &screen_card_style_patch {
                             local.screen_card_style = card_style.clone();
                         }
+                        if persona_touched {
+                            // n59: update the running role inside the settings lock, in the same order as
+                            // spoken switches (DesktopPersonaStore), so the two never disagree.
+                            self.persona.configure(persona_config(local));
+                        }
                         for (key, id) in &model_patches {
                             match *key {
                                 "vad_model" => local.vad_model = id.clone(),
@@ -2368,8 +2393,13 @@ mod imp {
                         let is_local = moss_voice::settings::is_local_laya_model(&local.jev_model);
                         Ok(((is_local, local.jev_filter_enabled), jev_feedback_patch))
                     },
-                )
-                .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
+                );
+                if saved.is_err() && persona_touched {
+                    // A rejected or failed save must leave the running role equal to the file.
+                    self.persona.configure(persona_config(&self.settings().builtin_local));
+                }
+                let (is_local_laya, filter_on) =
+                    saved.map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
                 let jev_feedback_on = moss_voice::settings::jev_feedback_enabled(&self.settings_file());
                 (is_local_laya, filter_on || jev_feedback_on)
             };
@@ -2388,10 +2418,6 @@ mod imp {
                 && let Some(server) = guard.as_ref()
             {
                 server.set_screen_card_style(moss_voice_server::ScreenCardStyle::from_setting(card_style));
-            }
-            if persona_style_patch.is_some() || custom_personas_patch.is_some() || persona_prompt_patch.is_some() {
-                // n59: the running conversation reads the role prompt each turn, so no restart is needed.
-                self.persona.configure(persona_config(&self.settings().builtin_local));
             }
             let hot_only = patch.as_object().is_some_and(|obj| {
                 !obj.is_empty()
@@ -4519,6 +4545,35 @@ mod imp {
             let removed = builtin.local_save(&serde_json::json!({"custom_personas": []})).unwrap();
             assert_eq!(removed["local"]["settings"]["persona_style"], "workshop");
             assert_eq!(builtin.persona.system_prompt(), moss_voice_server::conversation::DEFAULT_SYSTEM_PROMPT);
+
+            // A spoken switch to a role the UI just deleted on disk fails instead of claiming success.
+            builtin
+                .local_save(&serde_json::json!({"custom_personas": [{"id": "custom_b1", "name": "守门员", "prompt": "话少"}]}))
+                .unwrap();
+            moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
+                s.builtin_local.custom_personas.clear();
+                Ok(())
+            })
+            .unwrap();
+            assert!(builtin.persona.switch("守门员").is_err());
+            assert_eq!(builtin.persona.config(), persona_config(&builtin.settings().builtin_local));
+
+            // UI saves and spoken switches racing each other leave the running role equal to the file.
+            std::thread::scope(|scope| {
+                let ui = &builtin;
+                scope.spawn(move || {
+                    for (i, style) in ["moss_station", "moss_risk", "beginner_guide"].iter().cycle().take(15).enumerate() {
+                        ui.local_save(&serde_json::json!({"persona_style": style, "persona_prompt": format!("背景{i}")})).unwrap();
+                    }
+                });
+                let voice = &builtin;
+                scope.spawn(move || {
+                    for name in ["守夜", "任务简报", "冷面幽默"].iter().cycle().take(15) {
+                        voice.persona.switch(name).unwrap();
+                    }
+                });
+            });
+            assert_eq!(builtin.persona.config(), persona_config(&builtin.settings().builtin_local));
         }
 
         #[test]

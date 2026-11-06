@@ -168,11 +168,13 @@ impl PersonaConfig {
         if let [one] = exact.as_slice() {
             return Ok((one.0.clone(), one.1.clone()));
         }
-        // An exact hit shared by a custom role and a built-in one prefers the user's own role.
+        // An exact hit shared by one custom role and built-in ones prefers the user's own role;
+        // two custom roles that read the same ("Foo" / "foo") are asked back.
         if exact.len() > 1 {
-            return match exact.iter().find(|(id, _, _)| id.starts_with("custom_")) {
-                Some(custom) => Ok((custom.0.clone(), custom.1.clone())),
-                None => Err(FindError::Ambiguous(exact.iter().map(|c| c.1.clone()).collect())),
+            let customs: Vec<_> = exact.iter().filter(|(id, _, _)| id.starts_with("custom_")).collect();
+            return match customs.as_slice() {
+                [one] => Ok((one.0.clone(), one.1.clone())),
+                _ => Err(FindError::Ambiguous(exact.iter().map(|c| c.1.clone()).collect())),
             };
         }
         let partial: Vec<_> = candidates
@@ -226,7 +228,10 @@ fn normalize(raw: &str) -> String {
 
 /// 宿主保存当前角色（写设置文件，不重启语音服务）。
 pub trait PersonaStore: Send + Sync {
-    fn save_active(&self, id: &str) -> Result<(), String>;
+    /// 在设置写入锁内以设置文件为准核对并改为 `id`，并在仍持锁时用写入后的完整角色设置调用 `apply`；
+    /// 界面保存也在同一把锁里更新运行中的角色，因此运行中的角色与文件按同一顺序变化，不会对不上。
+    /// 文件里已没有这个角色（例如界面刚删掉）时返回错误，不调用 `apply`。
+    fn save_active(&self, id: &str, apply: &mut dyn FnMut(PersonaConfig)) -> Result<(), String>;
 }
 
 /// 运行中的当前角色。宿主创建一份，同时交给对话（读提示词）与 [`PersonaTools`]（切换）。
@@ -257,21 +262,31 @@ impl PersonaSwitch {
         self.state.lock().map(|s| s.0.clone()).unwrap_or_default()
     }
 
-    /// 语音切换：先保存，保存成功才换。返回新角色名。
+    /// 语音切换：先保存，保存成功才换（换成的是设置文件里的那份角色设置）。返回新角色名。
     pub fn switch(&self, query: &str) -> Result<String, SwitchError> {
-        let config = self.config();
-        let (id, name) = config.find(query).map_err(SwitchError::Find)?;
-        if let Some(store) = &self.store {
-            store.save_active(&id).map_err(SwitchError::Save)?;
+        let (id, _) = self.config().find(query).map_err(SwitchError::Find)?;
+        let applied = match &self.store {
+            Some(store) => {
+                let mut applied = None;
+                store
+                    .save_active(&id, &mut |config| {
+                        self.configure(config.clone());
+                        applied = Some(config);
+                    })
+                    .map_err(SwitchError::Save)?;
+                applied.ok_or_else(|| SwitchError::Save("设置没有写入".into()))?
+            }
+            None => {
+                let mut next = self.config();
+                next.active = id.clone();
+                self.configure(next.clone());
+                next
+            }
+        };
+        match applied.active_role() {
+            (active, name) if active == id => Ok(name),
+            _ => Err(SwitchError::Save("所选说话角色不存在".into())),
         }
-        if let Ok(mut state) = self.state.lock() {
-            // A UI save may have landed in between; only the active role changes.
-            let mut next = state.0.clone();
-            next.active = id;
-            let prompt = next.system_prompt();
-            *state = (next, prompt);
-        }
-        Ok(name)
     }
 }
 

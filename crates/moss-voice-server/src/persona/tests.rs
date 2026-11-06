@@ -29,6 +29,8 @@ fn n59_default_prompt_is_unchanged_and_every_role_keeps_the_safety_rules_last() 
 
 #[test]
 fn n59_spoken_role_names_resolve_to_one_role_or_ask_back() {
+    let twins = config("workshop", vec![custom("custom_a1", "Foo", "话少"), custom("custom_a2", "foo", "话多")]);
+    assert!(matches!(twins.find("foo"), Err(FindError::Ambiguous(_))), "custom roles that read the same are asked back");
     let cfg = config("workshop", vec![custom("custom_a1", "老王师傅", "话少"), custom("custom_a2", "老李师傅", "话多")]);
     let id = |q: &str| cfg.find(q).map(|(id, _)| id);
     assert_eq!(id("MOSS").unwrap(), "moss_station", "bare MOSS is the original station role");
@@ -56,13 +58,46 @@ struct Store {
 }
 
 impl PersonaStore for Store {
-    fn save_active(&self, id: &str) -> Result<(), String> {
+    fn save_active(&self, id: &str, apply: &mut dyn FnMut(PersonaConfig)) -> Result<(), String> {
         if self.fail.load(Ordering::SeqCst) {
             return Err("disk full".into());
         }
         self.saved.lock().unwrap().push(id.into());
+        apply(PersonaConfig { active: id.into(), ..PersonaConfig::default() });
         Ok(())
     }
+}
+
+/// Stands in for a settings file the UI has changed behind the running role.
+struct FileStore {
+    file: Mutex<PersonaConfig>,
+}
+
+impl PersonaStore for FileStore {
+    fn save_active(&self, id: &str, apply: &mut dyn FnMut(PersonaConfig)) -> Result<(), String> {
+        let mut file = self.file.lock().unwrap();
+        if file.roles().iter().all(|(role, _)| role != id) {
+            return Err("所选说话角色不存在".into());
+        }
+        file.active = id.into();
+        apply(file.clone());
+        Ok(())
+    }
+}
+
+#[test]
+fn n59_spoken_switch_follows_the_settings_file_not_a_stale_running_copy() {
+    let running = config("workshop", vec![custom("custom_a1", "老师傅", "话少")]);
+    // The UI already deleted the custom role and changed the background on disk.
+    let store = Arc::new(FileStore { file: Mutex::new(PersonaConfig { active: "workshop".into(), background: "新背景".into(), custom: vec![] }) });
+    let switch = PersonaSwitch::new(running, Some(store.clone()));
+    assert!(matches!(switch.switch("老师傅"), Err(SwitchError::Save(_))), "a role deleted on disk is not reported as switched");
+    assert!(!switch.system_prompt().contains("老师傅"));
+
+    assert_eq!(switch.switch("守夜").unwrap(), "MOSS 守夜");
+    let config = switch.config();
+    assert_eq!(config, store.file.lock().unwrap().clone(), "running role equals the file after a spoken switch");
+    assert_eq!(config.background, "新背景");
 }
 
 #[test]

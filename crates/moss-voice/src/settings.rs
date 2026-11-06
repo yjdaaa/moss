@@ -245,6 +245,10 @@ fn valid_custom_persona_id(id: &str) -> bool {
     })
 }
 
+fn persona_name_key(name: &str) -> String {
+    name.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
 /// 校验并规整自建角色列表：名字不重复、不和内置角色重名，人设沿用补充说明的安全检查。
 pub fn normalize_custom_personas(raw: &[CustomPersona]) -> Result<Vec<CustomPersona>, String> {
     if raw.len() > MAX_CUSTOM_PERSONAS {
@@ -266,6 +270,11 @@ pub fn normalize_custom_personas(raw: &[CustomPersona]) -> Result<Vec<CustomPers
         if name.chars().any(char::is_control) || contains_dangerous_gcode_or_grbl(name) {
             return Err("角色名不能包含控制字符或 G-code".into());
         }
+        // Voice switching matches names on letters and digits only, ignoring case.
+        let key = persona_name_key(name);
+        if key.is_empty() {
+            return Err("角色名需要包含文字或数字".into());
+        }
         let prompt = normalize_persona_prompt(&role.prompt).map_err(|e| e.replace("补充说明", "角色人设"))?;
         if prompt.is_empty() {
             return Err(format!("角色“{name}”需要写人设"));
@@ -273,8 +282,8 @@ pub fn normalize_custom_personas(raw: &[CustomPersona]) -> Result<Vec<CustomPers
         if out.iter().any(|r| r.id == id) {
             return Err("自建角色编号重复".into());
         }
-        if out.iter().any(|r| r.name == name) {
-            return Err(format!("角色名“{name}”重复"));
+        if out.iter().any(|r| persona_name_key(&r.name) == key) {
+            return Err(format!("角色名“{name}”和已有角色读起来一样"));
         }
         out.push(CustomPersona { id: id.to_owned(), name: name.to_owned(), prompt });
     }
@@ -294,10 +303,20 @@ pub fn validate_screen_card_style(raw: &str) -> Result<String, String> {
         _ => Err("屏幕卡片画风只能是 moss_hud 或 goggle_bot".into()),
     }
 }
+/// 运动 / 出光 G-code：整词（`G1`）或紧跟参数字母的紧凑写法（`G1X10`、`M3S1000`）都算。
+const MOTION_GCODES: &[&str] = &[
+    "G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03", "G28", "M3", "M03", "M4", "M04", "M5", "M05",
+];
+
 fn contains_dangerous_gcode_or_grbl(text: &str) -> bool {
     let upper = text.to_ascii_uppercase();
     for token in upper.split(|c: char| !c.is_ascii_alphanumeric() && c != '$' && c != '=') {
-        if matches!(token, "G0" | "G00" | "G1" | "G01" | "M3" | "M03" | "M4" | "M04" | "M5" | "M05") {
+        let motion = MOTION_GCODES.iter().any(|code| {
+            token
+                .strip_prefix(code)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_alphabetic()))
+        });
+        if motion {
             return true;
         }
         if let Some(rest) = token.strip_prefix('$')
@@ -1938,6 +1957,16 @@ mod tests {
         assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", &"长".repeat(301))]).is_err());
         assert!(normalize_custom_personas(&[role("custom_a1", "甲", "话少"), role("custom_a1", "乙", "话少")]).is_err());
         assert!(normalize_custom_personas(&[role("custom_a1", "甲", "话少"), role("custom_a2", "甲", "话少")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "Foo", "话少"), role("custom_a2", "foo", "话少")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "老-王", "话少"), role("custom_a2", "老王", "话少")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "！！！", "话少")]).is_err(), "names need letters or digits");
+        for compact in ["G1X10", "G01X10Y20", "M3S1000", "g0 x5", "G28"] {
+            assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", compact)]).is_err(), "{compact}");
+        }
+        // Ordinary text that only looks similar is still allowed.
+        for fine in ["M30 螺丝", "G10 是坐标设置", "用 M2 螺丝固定", "G90 绝对坐标"] {
+            assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", fine)]).is_ok(), "{fine}");
+        }
         let seven: Vec<_> = (0..7).map(|i| role(&format!("custom_{i}"), &format!("角色{i}"), "话少")).collect();
         assert!(normalize_custom_personas(&seven).is_err());
 

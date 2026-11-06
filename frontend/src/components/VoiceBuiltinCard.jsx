@@ -2282,7 +2282,7 @@ export function LocalModelsGroup({ builtin }) {
 }
 
 /** n59 自建角色：名字 + 人设，最多 6 个；表单里存 JSON 文字。 */
-function CustomPersonaEditor({ value, onChange }) {
+function CustomPersonaEditor({ value, onChange, onRemove }) {
   const roles = parseCustomPersonas(value);
   const commit = (next) => onChange(JSON.stringify(next));
   const edit = (index, key, text) => commit(roles.map((role, i) => (i === index ? { ...role, [key]: text } : role)));
@@ -2311,7 +2311,14 @@ function CustomPersonaEditor({ value, onChange }) {
             onChange={(e) => edit(index, "prompt", e.target.value)}
             aria-label={`自建角色 ${index + 1} 人设`}
           />
-          <button type="button" className="btn btn-ghost" onClick={() => commit(roles.filter((_, i) => i !== index))}>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              commit(roles.filter((_, i) => i !== index));
+              onRemove?.(role.id);
+            }}
+          >
             删除
           </button>
         </div>
@@ -2377,7 +2384,14 @@ export function ExperienceGroup({ builtin }) {
             ))}
           </select>
         </label>
-        <CustomPersonaEditor value={form.custom_personas} onChange={(next) => update("custom_personas", next)} />
+        <CustomPersonaEditor
+          value={form.custom_personas}
+          onChange={(next) => update("custom_personas", next)}
+          onRemove={(id) => {
+            // Deleting the selected role falls back to the default one, as the backend does.
+            if ((form.persona_style || "workshop") === id) update("persona_style", "workshop");
+          }}
+        />
         <label className="voice-wide">
           <span>工坊补充背景说明（可选，最多 300 字；如常用机型、排风习惯或偏好的说明方式）</span>
           <input

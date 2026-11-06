@@ -460,6 +460,14 @@ try {
   assert.deepEqual(Object.keys(rolePatch).sort(), ["custom_personas", "persona_style"], "只提交角色字段");
   assert.equal(rolePatch.custom_personas[0].name, "老师傅");
   assert.equal(rolePatch.persona_style, rolePatch.custom_personas[0].id);
+  // 6e. 删除正在使用的自建角色：选中项回到默认角色，可以直接保存
+  await page.locator("#voice-custom-personas").getByRole("button", { name: "删除" }).click();
+  assert.equal(await page.locator("#voice-persona-style").inputValue(), "workshop");
+  await page.locator("#voice-experience-save").click();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已立即生效" }).waitFor();
+  const deletePatch = last("voice_local_save").args.settings;
+  assert.deepEqual(deletePatch.custom_personas, []);
+  assert.equal(deletePatch.persona_style, "workshop");
   await page.locator("#voice-group-experience").scrollIntoViewIfNeeded();
   await shot("voice-builtin");
 

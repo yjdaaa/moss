@@ -647,18 +647,35 @@ export function newCustomPersonaId(existing = []) {
   }
 }
 
+/** 语音按名字切换时只看文字和数字、不分大小写（与后端 `persona_name_key` 一致）。 */
+function personaNameKey(name) {
+  return String(name || "").replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
+}
+
 function customPersonasError(raw) {
+  if (typeof raw === "string") {
+    try {
+      if (!Array.isArray(JSON.parse(raw || "[]"))) return "自建角色数据损坏，请刷新页面";
+    } catch {
+      return "自建角色数据损坏，请刷新页面";
+    }
+  }
   const roles = parseCustomPersonas(raw);
   if (roles.length > MAX_CUSTOM_PERSONAS) return `自建角色最多 ${MAX_CUSTOM_PERSONAS} 个`;
   const names = new Set();
+  const ids = new Set();
   for (const role of roles) {
     if (!/^custom_[a-z0-9]{1,16}$/.test(role.id)) return "自建角色编号无效，请删除后重新新增";
+    if (ids.has(role.id)) return "自建角色编号重复，请删除后重新新增";
+    ids.add(role.id);
     const name = role.name.trim();
     if (!name) return "自建角色需要名字";
     if ([...name].length > 12) return "角色名最多 12 个字";
     if (/[\x00-\x1f\x7f]/.test(name) || containsDangerousGcodeOrGrblJs(name)) return "角色名不能包含控制字符或 G-code";
-    if (names.has(name)) return `角色名“${name}”重复`;
-    names.add(name);
+    const key = personaNameKey(name);
+    if (!key) return "角色名需要包含文字或数字";
+    if (names.has(key)) return `角色名“${name}”和已有角色读起来一样`;
+    names.add(key);
     const prompt = role.prompt.replace(/\r\n?/g, "\n").trim();
     if (!prompt) return `角色“${name}”需要写人设`;
     if (/[\x00-\x09\x0b-\x1f\x7f]/.test(prompt)) return "角色人设不能包含控制字符";
@@ -739,11 +756,14 @@ const PROTECTED_STOP_WORDS = new Set([
   "退出", "再见", "拜拜", "退下", "关闭对话", "确认", "开始",
 ]);
 
+const MOTION_GCODES = ["G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03", "G28", "M3", "M03", "M4", "M04", "M5", "M05"];
+
 function containsDangerousGcodeOrGrblJs(text) {
   const upper = String(text || "").toUpperCase();
   for (const token of upper.split(/[^A-Z0-9$=]+/)) {
     if (!token) continue;
-    if (["G0", "G00", "G1", "G01", "M3", "M03", "M4", "M04", "M5", "M05"].includes(token)) return true;
+    // Whole word (G1) or compact form followed by a parameter letter (G1X10, M3S1000); mirrors the backend list.
+    if (MOTION_GCODES.some((code) => token.startsWith(code) && /^(?:$|[A-Z])/.test(token.slice(code.length)))) return true;
     if (/^\$\d+=/.test(token)) return true;
   }
   return false;

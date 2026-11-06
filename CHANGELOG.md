@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 修复说话角色在界面保存与语音切换同时发生时运行中的角色和设置文件不一致等 codex 验收问题（2026-11-06）
+
+- **现象**：codex 独立验收 c3bd009 发现：语音切换写完设置后、更新运行中的角色前若穿插界面保存，或两次语音切换交错，文件与运行中的角色会不一致；语音切换到刚被界面删掉的自建角色仍报“已切换”；界面删除正在使用的自建角色后报“请选择有效的说话角色”无法保存；`Foo` / `foo`、`老-王` / `老王` 这类读起来一样的名字能同时保存，语音只会选第一个；只有标点的名字能保存但无法语音切换；紧凑写法 `G1X10`、`M3S1000` 绕过 G-code 检查；前端把损坏的角色数据当空列表、不拒绝重复编号。
+- **根因与修复**：`PersonaStore::save_active` 改为在设置写入锁内以文件为准核对角色并调用 `apply` 更新运行中的角色，`local_save` 也在同一把锁内 `configure`，写入失败或被拒时按文件重新同步；切换结果以写入后的角色为准。`find` 遇到多个读起来一样的自建角色时反问。`normalize_custom_personas` 与前端按“文字和数字、不分大小写”判重并要求至少含一个文字或数字；G-code 检查（补充背景、同音纠错、角色共用）补上紧凑写法与 `G2`/`G3`/`G28`；前端删除当前角色时选中项回到默认，拒绝损坏数据与重复编号。不改默认值与接口；G-code 检查比以前严格，`G90`/`G91` 仍放行。
+- **验证**：新增 `n59_spoken_switch_follows_the_settings_file_not_a_stale_running_copy`，扩充 `n59_custom_personas_are_bounded_and_can_be_selected`、`n59_spoken_role_names_resolve_to_one_role_or_ask_back`、`n59_role_settings_apply_without_restart_and_spoken_switch_is_saved`（界面保存与语音切换各 15 次并发后文件与运行中的角色一致，连跑 5 次稳定）、前端 n59 用例与 `voice-center.browser.mjs` 删除当前角色步骤。`cargo test --workspace` 955 通过 / 9 忽略，`npm test` 200、`npm run build`、浏览器用例通过；codex 的前端验收用例 6 项中 4 项通过，余下 2 项为预期差异（`G90`/`G91` 放行；删除当前角色由界面改选中项而非放宽校验）。最终请求里时间行仍在安全铁律之后（n51 既有设计，未改）；真实模型未验证。
+- **关联**：`crates/moss-voice-server/src/persona.rs`（`PersonaStore`、`PersonaSwitch::switch`、`find`）、`crates/moss-voice/src/settings.rs`（`MOTION_GCODES`、`persona_name_key`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`DesktopPersonaStore`、`local_save`）、`frontend/src/voiceState.js`、`components/VoiceBuiltinCard.jsx`；`moss-native-voice-spec.md` n59。
+
 ### 助手风格扩展为说话角色：新增 4 个 MOSS 风格、可自建角色、可对小智说“换成 XX”即时切换（2026-11-06）
 
 - **现象**：只有 3 个固定助手风格，不能自己定义角色；换风格要进设置，保存后还会重启内置语音服务、断开正在进行的对话。
