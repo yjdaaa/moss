@@ -109,6 +109,9 @@ test("Magpie-style cloud parallel release workflow and slimmed sidecar script st
   assert.match(releaseYml, /MOSS_\$\{VERSION\}_windows_x64_portable\.exe/);
 
   const androidGradle = readRepoText("apps/desktop/src-tauri/gen/android/build.gradle.kts");
-  assert.match(androidGradle, /GITHUB_ACTIONS/);
-  assert.match(androidGradle, /if\s*\(!isCiBuild\)/);
+  assert.match(androidGradle, /^\s*buildscript\s*\{/, "buildscript {} must appear first in Gradle Kotlin DSL");
+  assert.match(androidGradle, /System\.getenv\("CI"\)\s*!=\s*"true"\s*&&\s*System\.getenv\("GITHUB_ACTIONS"\)\s*!=\s*"true"/);
+
+  const buildSrcGradle = readRepoText("apps/desktop/src-tauri/gen/android/buildSrc/build.gradle.kts");
+  assert.match(buildSrcGradle, /System\.getenv\("CI"\)\s*!=\s*"true"\s*&&\s*System\.getenv\("GITHUB_ACTIONS"\)\s*!=\s*"true"/);
 });

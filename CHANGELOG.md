@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-05
+
 ### 新增 macOS 本机快速同步脚本，改代码后原地给已安装的 MOSS.app 打补丁（2026-11-05）
 
 - **现象**：Windows 上用 `quick-update-desktop.ps1` 原地替换已安装的 `moss-desktop.exe`，macOS 上没有对应工具，每次改动都要重跑约 5 分钟的完整 `.app`/`.dmg` 打包。
