@@ -2,6 +2,24 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 仓库 `v0.3.7` 云端四端并行交付安装包构建（2026-11-06）
+
+用户 2026-11-06 决定“直接把所有修改都 git 然后推送到远端上，并 release 发布新版本”：将本地 Jev 三档 `OneJev 1.6`（`0.8B` / `4B` / `9B`）与 `Laya` 跨平台硬件加速、小智自定义唤醒词、AI 雕刻预览确认弹窗、图片灰度抖动与固件行程门禁合入提交 `0d3144b`，按 `scripts/release-tag.ps1` 步骤推送 `main` 与带附注标签 `v0.3.7`，触发 `.github/workflows/release.yml` Run `42252269752`（同提交主分支 CI Run `42252263422` 同步全绿），全部 6 个作业成功并发布 [Release v0.3.7](https://github.com/yjdaaa/moss/releases/tag/v0.3.7)。
+
+| 产物 | UTC时间（2026-11-06） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.7_x64-offline-voice-setup.exe` | 16:54:32 | 29,396,928 | `11b7d64033ae61931390dd97603ee1402b1b61c9269efe85c4c0d800e2852bf7` |
+| `MOSS_0.3.7_x64-lite-setup.exe` | 16:54:32 | 23,763,256 | `08a68d2baf43e319688555d630bdce40752ba5c900d197f9e020e5bb45586caf` |
+| `MOSS_0.3.7_windows_x64_portable.exe` | 16:54:34 | 71,000,064 | `a373c2fd3128da271d6c748ef7cfeaccbfd28f81f698cf2e818caece4ac73ca4` |
+| `MOSS_0.3.7_macos_universal.dmg` | 16:54:34 | 81,571,009 | `df594db25b1905002897592c75ac3ce11dd3277ffb1cbedee88904f415952969` |
+| `MOSS_0.3.7_android_aarch64.apk` | 16:54:34 | 55,063,858 | `2958c4b46602c24b6127339fc011b47fa59ef53788da0b3950936759b9c3b00f` |
+| `moss-voice-local-0.3.7-gpl-source.zip` | 16:54:33 | 120,875 | `a9b10426db75fc3a871a2251546240ac8132dee861fcd27e85524a33931cc533` |
+| `SHA256SUMS.txt` | 16:54:33 | 601 | `7421db501203b5ab2005d78109bdfa2cc43ee48d68f75298ae1332b4836a02a4` |
+
+核对：SHA-256、字节与 UTC 时间取自 GitHub Release API 资产 `digest` / `size` / `updated_at` 并与发布的 `SHA256SUMS.txt` 逐项一致，未将各端大体积安装包重新下载到本机复算；构建前同一代码在 macOS 通过 `cargo test --workspace`（992 通过，9 忽略）、`cargo check --target x86_64-apple-darwin -p moss-desktop`、前端 `npm test`（210 通过）、`npm run build`、`voice-center.browser.mjs`、`npm run test:e2e`（35/35），并已用 `quick-update-desktop.sh --with-host` 同步本机 MOSS。
+
+**未验证**：未下载安装任何一个云端安装包；未连接真实激光雕刻机与小智硬件设备；未从 HuggingFace 下载完整 `OneJev 1.6` GGUF 权重跑实机推理，未在 Windows 实机测试 Vulkan / CUDA 推理分支；macOS 包 ad-hoc 签名、未公证。
+
 ## GitHub 仓库 `v0.3.6` 云端四端并行交付安装包构建（2026-11-06）
 
 用户 2026-11-06 选择“推送并发 0.3.6”：电影版 MOSS 说话角色（提交 `90e0caf`）按 `scripts/release-tag.ps1` 的步骤手工推送分支与标签 `v0.3.6`，触发 `.github/workflows/release.yml` Run `42221885011`，结论成功并发布 [Release v0.3.6](https://github.com/yjdaaa/moss/releases/tag/v0.3.6)。
