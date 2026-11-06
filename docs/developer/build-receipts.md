@@ -2,6 +2,23 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 仓库 `v0.3.6` 云端四端并行交付安装包构建（2026-11-06）
+
+用户 2026-11-06 选择“推送并发 0.3.6”：电影版 MOSS 说话角色（提交 `90e0caf`）按 `scripts/release-tag.ps1` 的步骤手工推送分支与标签 `v0.3.6`，触发 `.github/workflows/release.yml` Run `42221885011`，结论成功并发布 [Release v0.3.6](https://github.com/yjdaaa/moss/releases/tag/v0.3.6)。
+
+| 产物 | UTC时间（2026-11-06） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.6_x64-offline-voice-setup.exe` | 13:29:04 | 25,997,981 | `d5f7cce732250d04bad2f4743d82c23c555676be0e2c5dbe39ab8a38c7191b65` |
+| `MOSS_0.3.6_x64-lite-setup.exe` | 13:29:04 | 20,390,992 | `b278e4dec044d572aef7bd39be5a9c6f2746542e681bcd15949f20e4bc6e0a5b` |
+| `MOSS_0.3.6_windows_x64_portable.exe` | 13:29:06 | 66,051,584 | `29a8658322887e0dcb4f333ab2436c4ad22272376ae33fd09da8b45023ecb278` |
+| `MOSS_0.3.6_macos_universal.dmg` | 13:29:06 | 74,467,598 | `0fd6d81ad1c87563b49910ab535dbc4a6b2b58c8e0c43c3222800a6f7d7e9003` |
+| `MOSS_0.3.6_android_aarch64.apk` | 13:29:05 | 54,889,866 | `b3398593e88530406eaa3db50695f166c75b2f087bed3a163123ae804786ad14` |
+| `moss-voice-local-0.3.6-gpl-source.zip` | 13:29:05 | 120,874 | `b970514c9554f640caca162771a2e02066ab5fa8a24351d88f1c3179310fbbc1` |
+
+核对：SHA-256 取自 GitHub Release 页面资产摘要，字节与时间取自下载地址响应头，未下载到本机重新计算；构建前同一代码通过 `cargo test --workspace`（956 通过，9 忽略）、前端 `npm test` 200、`npm run build`，并已用 `quick-update-desktop.sh` 同步本机 MOSS。
+
+**未验证**：未下载安装任何一个安装包；未连接激光雕刻机与小智设备；真实大模型是否按电影版 MOSS 腔调说话未验证；macOS 包 ad-hoc 签名、未公证。
+
 ## GitHub 仓库 `v0.3.5` 与 `v0.3.4` 云端四端并行交付安装包构建（2026-11-06）
 
 用户 2026-11-06 决定“全部帮我打包版本就用0.3.4”：按 `scripts/release-tag.ps1` 的步骤（本机无 PowerShell，手工执行同样的干净树检查、推分支、`git tag -a vX -m "MOSS vX"`、推标签）推送 `v0.3.4`（提交 `f6adb8c`），触发 `.github/workflows/release.yml` Run `42176162789`，全部 6 个作业成功并发布 [Release v0.3.4](https://github.com/yjdaaa/moss/releases/tag/v0.3.4)。之后 codex 对说话角色（c3bd009）独立验收发现并发与校验问题，修复提交 `0de7c56`；用户同日选择“推送修复，再发 v0.3.5”，已发布的 0.3.4 不改动，推送 `v0.3.5`（提交 `0de7c56`）触发 Run `42179010884`，全部成功并发布 [Release v0.3.5](https://github.com/yjdaaa/moss/releases/tag/v0.3.5)。**推荐使用 0.3.5**。
