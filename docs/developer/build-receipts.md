@@ -2,6 +2,20 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## macOS 本机 Apple Silicon `0.3.4` 安装包构建（含离线语音辅助程序，2026-11-06）
+
+在 macOS 开发机（Apple Silicon，macOS 27.0）上用 `scripts/build-macos-installer.sh`（默认内置 `moss-voice-local` sidecar）构建，基于提交 `5f4806f`（干净工作树，含 n57 NV19 记忆 / 资料修订、n58 像素点阵导航眼、n59 说话角色；前端同步重新构建）。沿用 0.3.2 的做法：构建期间临时移开未纳入 git 的 `apps/moss-voice-local/native-license-evidence/`、`rust-license-evidence/`（云端没有这两个目录；未移开时第一次构建把约 762 MB 的证据材料打进了 `Resources/licenses`，DMG 达 742.87 MiB，该产物已被本次覆盖、不作交付），构建后原样放回；设 `CI=true` 跳过 Finder AppleScript 窗口排版。版本号经 `MOSS_VERSION_OVERRIDE=0.3.4` 注入（按 2026-11-05 用户决定的同一规则：`v0.3.3` 已在 `b1accf1` 发布，包内含之后的改动，不与已发布版本同号；仓库文件未改，`moss-voice-local` 仍显示其自身 crate 版本 0.3.0）；ad-hoc 签名、未公证。
+
+| 本次产物（0.3.4，`aarch64-apple-darwin`） | UTC时间（2026-11-06） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| macOS Apple Silicon 版（含离线语音）`MOSS_0.3.4_aarch64.dmg` | 06:32:02 | 36,575,116 | `4cfdf85b890c46be7277b2a20ab4191c980292c60876e3a49aa90eabc38d7de7` |
+
+核对：`Info.plist` `CFBundleShortVersionString=0.3.4`，主程序内嵌版本 `0.3.4`；`codesign --verify --deep --strict` 通过；`.app`（95.05 MiB）内含 `moss-desktop`（arm64，含 `voice_persona_tool`）与 `moss-voice-local 0.3.0 (protocol 4, GPL-3.0-or-later)`；`LSMinimumSystemVersion=11.0`；`spctl` 按预期拒绝（ad-hoc 未公证）。构建前同一代码 `cargo test --workspace` 954 通过 / 0 失败 / 9 忽略、前端 `npm test` 200/200、`npm run build` 通过、`voice-center.browser.mjs` 通过、`npm run test:e2e` 35/35。
+
+云端 CI：推送 `5f4806f` 触发 `.github/workflows/ci.yml`（Run `42174657909`）全部通过：前端 `npm test` + `npm run build`；Windows（`windows-latest`）`cargo test --workspace` 并 `cargo build --release -p moss-desktop -p moss-host`；Android `cargo tauri android build --debug --target aarch64 --apk`。CI 产物是 Actions 内部工件（Windows release 可执行文件与 Android debug APK），不是交付安装包，未下载核对 hash。
+
+**未验证**：未在本机或其他 Mac 上安装运行 DMG（本机正式程序另由快更同步）；未连接激光雕刻机与小智设备；不含 Intel（x86_64）；本次没有推 `v*` 标签，未触发 `release.yml` 四端发布，GitHub Releases 无新版本，Windows NSIS 安装包与 Android 签名包未构建。
+
 ## macOS 本机 Apple Silicon `0.3.2` 安装包构建（含离线语音辅助程序，2026-11-05）
 
 首次在 macOS 开发机（Apple Silicon，macOS 27.0）上用 `scripts/build-macos-installer.sh`（默认内置 `moss-voice-local` sidecar）构建，基于提交 `793d902`（干净工作树，前端同步重新构建）。为与云端 Mac 版内容一致：构建期间临时移开未纳入 git 的 `native-license-evidence/`、`rust-license-evidence/`（云端没有这两个目录），并设 `CI=true` 跳过 Finder AppleScript 窗口排版（未授予自动化权限时 `bundle_dmg.sh` 会因 AppleEvent 超时失败）。版本号经 `MOSS_VERSION_OVERRIDE=0.3.2` 注入为 `0.3.2`（用户 2026-11-05 决定：包内含 0.3.1 发布后的修复，不与官方 0.3.1 同号；仓库文件未改，`moss-voice-local` 仍显示其自身 crate 版本 0.3.0，与云端构建一致）；ad-hoc 签名、未公证。
