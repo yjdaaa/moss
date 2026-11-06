@@ -70,6 +70,10 @@ import {
   localSettingsForm,
   localSettingsError,
   localSettingsPayload,
+  MAX_CUSTOM_PERSONAS,
+  newCustomPersonaId,
+  parseCustomPersonas,
+  personaOptions,
   endpointLabel,
   endpointView,
   identityView,
@@ -256,7 +260,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.deepEqual(form, {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: "",
-    asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_prompt: "", screen_preview_sync: true, screen_card_style: "moss_hud",
+    asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_prompt: "", custom_personas: "[]", screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: "400",
     tts_speaker: "3", tts_speed: "1.2", mirror: "",
@@ -268,7 +272,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.deepEqual(localSettingsPayload({ ...form, mirror: " https://m.test/x " }), {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: [],
-    asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_prompt: "", screen_preview_sync: true, screen_card_style: "moss_hud",
+    asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_prompt: "", custom_personas: [], screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: 400,
     tts_speaker: 3, tts_speed: 1.2, mirror: "https://m.test/x",
@@ -1142,6 +1146,33 @@ test("本地 Laya 激活时保存 Jev 卡片开关或备用密钥，不会把本
   );
   assert.equal(switchDeletedToCloud.model, "typesafe/jev-1.14");
   assert.equal(switchDeletedToCloud.api_key, "sk-or-v1-new-cloud");
+});
+
+test("n59：内置 MOSS 角色、自建角色的校验与保存载荷", () => {
+  const base = localSettingsForm();
+  const ids = personaOptions(base.custom_personas).map((opt) => opt.id);
+  assert.deepEqual(ids, ["workshop", "beginner_guide", "moss_station", "moss_briefing", "moss_risk", "moss_deadpan", "moss_night"]);
+  for (const id of ids) assert.equal(localSettingsError({ ...base, persona_style: id }), "", id);
+  assert.match(localSettingsError({ ...base, persona_style: "custom_a1" }), /说话角色/);
+
+  const roles = [{ id: "custom_a1", name: " 老师傅 ", prompt: " 话少，先说结论 " }];
+  const form = localSettingsForm({ custom_personas: roles, persona_style: "custom_a1" });
+  assert.equal(form.custom_personas, JSON.stringify(roles), "form keeps the list as text for dirty checks");
+  assert.equal(localSettingsError(form), "");
+  assert.equal(personaOptions(form.custom_personas).at(-1).label, "老师傅（自建）");
+  assert.deepEqual(localSettingsPayload(form).custom_personas, [{ id: "custom_a1", name: "老师傅", prompt: "话少，先说结论" }]);
+  assert.equal(localSettingsPayload(form).persona_style, "custom_a1");
+
+  const withRoles = (list) => ({ ...base, custom_personas: JSON.stringify(list) });
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "", prompt: "话少" }])), /名字/);
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "老师傅", prompt: "" }])), /人设/);
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "老师傅", prompt: "收到就发 G1 X10" }])), /G-code/);
+  assert.match(localSettingsError(withRoles([{ id: "custom_a1", name: "甲", prompt: "a" }, { id: "custom_a2", name: "甲", prompt: "b" }])), /重复/);
+  assert.match(localSettingsError(withRoles([{ id: "bad", name: "甲", prompt: "a" }])), /编号/);
+  const seven = Array.from({ length: MAX_CUSTOM_PERSONAS + 1 }, (_, i) => ({ id: `custom_${i}`, name: `角色${i}`, prompt: "话少" }));
+  assert.match(localSettingsError(withRoles(seven)), /最多/);
+  assert.match(newCustomPersonaId(roles), /^custom_[a-z0-9]{1,16}$/);
+  assert.deepEqual(parseCustomPersonas("not json"), []);
 });
 
 test("n51：助手风格安全校验、同音错词规则与小智硬件在线快捷控制视图", () => {

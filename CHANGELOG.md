@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 助手风格扩展为说话角色：新增 4 个 MOSS 风格、可自建角色、可对小智说“换成 XX”即时切换（2026-11-06）
+
+- **现象**：只有 3 个固定助手风格，不能自己定义角色；换风格要进设置，保存后还会重启内置语音服务、断开正在进行的对话。
+- **根因与修复**：新增 `moss_voice_server::persona`：内置角色表（原 3 个加 `moss_briefing` / `moss_risk` / `moss_deadpan` / `moss_night`）、自建角色、`PersonaSwitch`（当前角色与提示词）和挂在全部工具外层的 `voice_persona_tool`（list / switch；先写设置成功才切换，切换话术直接朗读，下一轮生效）。`Conversation::with_persona` 每轮读取当前角色提示词，安全铁律仍锁在末尾。设置新增 `builtin_local.custom_personas`（最多 6 个，名字 ≤12 字、人设 1～300 字，沿用 G-code / `$n=` 拦截），`persona_style` 可指向自建角色，删除当前自建角色时回默认；界面只改角色相关字段时热更新、不重启服务。默认角色与默认提示词不变；角色不改工具权限、不绑定音色；全部设备共用一个角色；新增的模型工具 `voice_persona_tool` 只改语气设置。
+- **验证**：新增 `moss-voice` `n59_custom_personas_are_bounded_and_can_be_selected`；`moss-voice-server` `n59_default_prompt_is_unchanged_and_every_role_keeps_the_safety_rules_last`、`n59_spoken_role_names_resolve_to_one_role_or_ask_back`、`n59_switch_saves_first_and_a_failed_save_keeps_the_old_role`、`n59_persona_tool_switches_lists_and_never_lets_others_impersonate_it`、`n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety_rules`；`moss-desktop` `n59_role_settings_apply_without_restart_and_spoken_switch_is_saved`；前端 `n59：内置 MOSS 角色、自建角色的校验与保存载荷` 与 `voice-center.browser.mjs` 自建角色步骤。`cargo test --workspace` 954 通过 / 9 忽略，`npm test` 200 通过，`npm run build` 通过。真实模型能否按角色说话、能否正确调用切换工具未验证；在 macOS 上执行，未跑 Windows `quick-update-desktop.ps1`。
+- **关联**：`crates/moss-voice-server/src/persona.rs`（`BUILTINS`、`PersonaConfig`、`PersonaSwitch`、`PersonaTools`）、`conversation.rs`（`compose_persona_system_prompt`、`with_persona`）、`jev.rs`；`crates/moss-voice/src/settings.rs`（`CustomPersona`、`BUILTIN_PERSONA_IDS`、`validate_active_persona`、`normalize_custom_personas`）；`apps/desktop/src-tauri/src/voice_builtin.rs`（`DesktopPersonaStore`、`local_save`）；`frontend/src/voiceState.js`、`components/VoiceBuiltinCard.jsx`（`CustomPersonaEditor`）；`docs/integration/moss-native-voice-spec.md` n59、`docs/user/quick-start.md`。
+
 ### NV19 记忆新旧冲突、重复提及、任务过时与资料段落检索（schema v17）（2026-11-06）
 
 - **现象**：用户改了习惯（如从常切椴木改成亚克力）时，除称呼 / 风格 / 常用材料三个口头规则槽位外，新旧两条记忆同时注入、互相矛盾；同一事实反复提到既不加权，未确认候选 90 天后照样消失；几个月前的项目待办与新的同等排序；记忆检索打开后 NV10 设备摘要仍每轮注入并在会话结束整份重写，与结构化记忆重复；资料检索以目录为单位，文件中后部的段落既不在目录摘要里也读不到。

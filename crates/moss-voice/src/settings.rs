@@ -198,13 +198,87 @@ pub fn default_persona_style() -> String {
     DEFAULT_PERSONA_STYLE.to_owned()
 }
 
+/// 内置说话角色编号（n59；名称与提示词在 `moss_voice_server::persona::BUILTINS`，两边由桌面端测试核对一致）。
+pub const BUILTIN_PERSONA_IDS: &[&str] = &[
+    "workshop",
+    "beginner_guide",
+    "moss_station",
+    "moss_briefing",
+    "moss_risk",
+    "moss_deadpan",
+    "moss_night",
+];
+/// 用户自建角色最多条数、角色名与人设的字数上限。
+pub const MAX_CUSTOM_PERSONAS: usize = 6;
+pub const MAX_PERSONA_NAME_CHARS: usize = 12;
+pub const MAX_PERSONA_PROMPT_CHARS: usize = 300;
+
+/// 用户自建的说话角色：只决定名字、语气与说话方式，不改变工具权限，也不覆盖安全铁律（n59）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomPersona {
+    /// `custom_` 加 1～16 位小写字母或数字，前端生成，改名不变
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+}
+
+/// 只接受内置角色编号（空串按默认处理）。
 pub fn validate_persona_style(raw: &str) -> Result<String, String> {
-    match raw.trim() {
-        "" | "workshop" => Ok("workshop".into()),
-        "moss_station" => Ok("moss_station".into()),
-        "beginner_guide" => Ok("beginner_guide".into()),
-        _ => Err("助手风格只能是 workshop、moss_station 或 beginner_guide".into()),
+    validate_active_persona(raw, &[])
+}
+
+/// 当前角色：内置编号，或本次自建角色列表里已有的编号。
+pub fn validate_active_persona(raw: &str, custom: &[CustomPersona]) -> Result<String, String> {
+    let id = raw.trim();
+    if id.is_empty() {
+        return Ok(DEFAULT_PERSONA_STYLE.into());
     }
+    if BUILTIN_PERSONA_IDS.contains(&id) || custom.iter().any(|role| role.id == id) {
+        return Ok(id.to_owned());
+    }
+    Err("所选说话角色不存在".into())
+}
+
+fn valid_custom_persona_id(id: &str) -> bool {
+    id.strip_prefix("custom_").is_some_and(|rest| {
+        (1..=16).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    })
+}
+
+/// 校验并规整自建角色列表：名字不重复、不和内置角色重名，人设沿用补充说明的安全检查。
+pub fn normalize_custom_personas(raw: &[CustomPersona]) -> Result<Vec<CustomPersona>, String> {
+    if raw.len() > MAX_CUSTOM_PERSONAS {
+        return Err(format!("自建角色最多 {MAX_CUSTOM_PERSONAS} 个"));
+    }
+    let mut out: Vec<CustomPersona> = Vec::with_capacity(raw.len());
+    for role in raw {
+        let id = role.id.trim();
+        if !valid_custom_persona_id(id) {
+            return Err("自建角色编号无效".into());
+        }
+        let name = role.name.trim();
+        if name.is_empty() {
+            return Err("自建角色需要名字".into());
+        }
+        if name.chars().count() > MAX_PERSONA_NAME_CHARS {
+            return Err(format!("角色名最多 {MAX_PERSONA_NAME_CHARS} 个字"));
+        }
+        if name.chars().any(char::is_control) || contains_dangerous_gcode_or_grbl(name) {
+            return Err("角色名不能包含控制字符或 G-code".into());
+        }
+        let prompt = normalize_persona_prompt(&role.prompt).map_err(|e| e.replace("补充说明", "角色人设"))?;
+        if prompt.is_empty() {
+            return Err(format!("角色“{name}”需要写人设"));
+        }
+        if out.iter().any(|r| r.id == id) {
+            return Err("自建角色编号重复".into());
+        }
+        if out.iter().any(|r| r.name == name) {
+            return Err(format!("角色名“{name}”重复"));
+        }
+        out.push(CustomPersona { id: id.to_owned(), name: name.to_owned(), prompt });
+    }
+    Ok(out)
 }
 
 pub const DEFAULT_SCREEN_CARD_STYLE: &str = "moss_hud";
@@ -422,12 +496,15 @@ pub struct BuiltinLocal {
     /// 用户自定义同音纠错规则（形如 `错词=正词`）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_asr_corrections: Vec<String>,
-    /// 助手语气风格预设（`workshop` / `moss_station` / `beginner_guide`；底层安全铁律不可覆盖）
+    /// 当前说话角色：内置编号（见 `BUILTIN_PERSONA_IDS`）或自建角色编号；底层安全铁律不可覆盖
     #[serde(default = "default_persona_style")]
     pub persona_style: String,
-    /// 用户补充的工坊背景说明（最多 300 字）
+    /// 用户补充的工坊背景说明（最多 300 字；所有角色共用）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub persona_prompt: String,
+    /// 用户自建的说话角色（n59，最多 6 个）；`persona_style` 可指向其中一个
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_personas: Vec<CustomPersona>,
     /// 生成激光雕刻预览及加工发送期间自动将画面同步到在线小智彩屏（默认开）
     #[serde(default = "default_on")]
     pub screen_preview_sync: bool,
@@ -491,6 +568,7 @@ impl Default for BuiltinLocal {
             custom_asr_corrections: Vec::new(),
             persona_style: default_persona_style(),
             persona_prompt: String::new(),
+            custom_personas: Vec::new(),
             screen_preview_sync: true,
             screen_card_style: default_screen_card_style(),
             job_done_announce: true,
@@ -1843,10 +1921,39 @@ mod tests {
     }
 
     #[test]
+    fn n59_custom_personas_are_bounded_and_can_be_selected() {
+        let role = |id: &str, name: &str, prompt: &str| CustomPersona { id: id.into(), name: name.into(), prompt: prompt.into() };
+        let roles = normalize_custom_personas(&[role("custom_a1", " 老师傅 ", "  话少，先说结论  ")]).unwrap();
+        assert_eq!(roles, vec![role("custom_a1", "老师傅", "话少，先说结论")]);
+        assert_eq!(validate_active_persona("custom_a1", &roles).unwrap(), "custom_a1");
+        assert!(validate_active_persona("custom_b2", &roles).is_err());
+
+        assert!(normalize_custom_personas(&[role("a1", "老师傅", "话少")]).is_err(), "id needs custom_ prefix");
+        assert!(normalize_custom_personas(&[role("custom_A1", "老师傅", "话少")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "", "话少")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "名字超过十二个字的一个角色名称", "话少")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", "")]).is_err(), "empty persona is rejected");
+        assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", "收到就发 G1 X10")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", "改 $32=0")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", &"长".repeat(301))]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "甲", "话少"), role("custom_a1", "乙", "话少")]).is_err());
+        assert!(normalize_custom_personas(&[role("custom_a1", "甲", "话少"), role("custom_a2", "甲", "话少")]).is_err());
+        let seven: Vec<_> = (0..7).map(|i| role(&format!("custom_{i}"), &format!("角色{i}"), "话少")).collect();
+        assert!(normalize_custom_personas(&seven).is_err());
+
+        // Old settings files without the new field still load with no custom roles.
+        let old: BuiltinLocal = serde_json::from_value(serde_json::json!({"persona_style": "moss_station"})).unwrap();
+        assert!(old.custom_personas.is_empty());
+        assert_eq!(old.persona_style, "moss_station");
+    }
+
+    #[test]
     fn persona_and_asr_correction_rules_enforce_safety_bounds() {
         assert_eq!(validate_persona_style("moss_station").unwrap(), "moss_station");
         assert_eq!(validate_persona_style("").unwrap(), "workshop");
         assert!(validate_persona_style("hacker").is_err());
+        assert_eq!(validate_persona_style("moss_briefing").unwrap(), "moss_briefing");
+        assert!(validate_persona_style("custom_a1").is_err());
 
         assert_eq!(normalize_persona_prompt("  我有一台 5W 蓝光翼宿机  ").unwrap(), "我有一台 5W 蓝光翼宿机");
         assert!(normalize_persona_prompt("直接发 G1 X10 Y10").is_err());

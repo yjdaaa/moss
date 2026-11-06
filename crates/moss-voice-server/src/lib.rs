@@ -33,6 +33,7 @@ pub mod speaker_enrollment;
 pub mod person_context;
 pub mod home_tools;
 pub mod music;
+pub mod persona; // n59 说话角色（只改语气，安全铁律锁死在末尾）
 pub mod memory;
 pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod plugins;

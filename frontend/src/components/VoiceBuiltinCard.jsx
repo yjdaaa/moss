@@ -22,7 +22,10 @@ import {
   allowDeviceConfirmText,
   applyDefaultTtsVoice,
   BUILTIN_ASR_CORRECTION_PREVIEW,
-  PERSONA_STYLE_OPTIONS,
+  MAX_CUSTOM_PERSONAS,
+  newCustomPersonaId,
+  parseCustomPersonas,
+  personaOptions,
   GOGGLE_BOT_POSES,
   SCREEN_CARD_STYLE_OPTIONS,
   builtinDeviceControlsView,
@@ -1930,6 +1933,9 @@ export function BuiltinModelGroups({ builtin }) {
  * 本地模型与语音体验共用同一份已保存设置，各自只提交自己的字段，也只检查自己的字段：
  * 另一组已保存的值即使不合前端规则，也不挡本组保存（由后端最终校验）。
  */
+/** 后端热更新、不重启内置服务的字段（与 `local_save` 的 hot_only 一致）。 */
+const HOT_LOCAL_KEYS = ["screen_card_style", "persona_style", "persona_prompt", "custom_personas"];
+
 function useLocalGroup(builtin, keys, validate) {
   const local = builtin.status?.local || {};
   const models = Array.isArray(local.models) ? local.models : [];
@@ -1953,12 +1959,14 @@ function useLocalGroup(builtin, keys, validate) {
   const save = async (target) => {
     builtin.setBusy(`local-save-${target}`);
     try {
-      const next = await voiceApi.localSave(localGroupPatch(baseline, draft, keys));
+      const patch = localGroupPatch(baseline, draft, keys);
+      const next = await voiceApi.localSave(patch);
       const nextForm = localSettingsForm(next.local?.settings);
       prevBaselineRef.current = nextForm;
       builtin.setStatus(next);
       setDraft(nextForm);
-      setResult({ ok: true, text: savedNoteText(target, restartEffect(next)) });
+      const hotOnly = Object.keys(patch).every((key) => HOT_LOCAL_KEYS.includes(key));
+      setResult({ ok: true, text: savedNoteText(target, hotOnly ? "已立即生效，无需重启" : restartEffect(next)) });
     } catch (e) {
       setResult({ ok: false, text: `保存失败：${voiceErrorText(e)}` });
     } finally {
@@ -2273,6 +2281,56 @@ export function LocalModelsGroup({ builtin }) {
   );
 }
 
+/** n59 自建角色：名字 + 人设，最多 6 个；表单里存 JSON 文字。 */
+function CustomPersonaEditor({ value, onChange }) {
+  const roles = parseCustomPersonas(value);
+  const commit = (next) => onChange(JSON.stringify(next));
+  const edit = (index, key, text) => commit(roles.map((role, i) => (i === index ? { ...role, [key]: text } : role)));
+  return (
+    <div className="voice-wide voice-persona-editor" id="voice-custom-personas" style={{ display: "grid", gap: 8 }}>
+      <span>自建角色（可选，最多 {MAX_CUSTOM_PERSONAS} 个；名字最多 12 字，人设最多 300 字，写性格、说话方式和口头禅；不能写 G-code）</span>
+      {roles.map((role, index) => (
+        <div className="voice-persona-row" key={role.id} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start" }}>
+          <input
+            className="text-input"
+            type="text"
+            maxLength={12}
+            placeholder="角色名，如：老师傅"
+            style={{ flex: "0 1 10em", minWidth: "7em" }}
+            value={role.name}
+            onChange={(e) => edit(index, "name", e.target.value)}
+            aria-label={`自建角色 ${index + 1} 名字`}
+          />
+          <textarea
+            className="text-input"
+            rows={2}
+            maxLength={300}
+            placeholder="例如：说话像干了二十年的老师傅，话少，先说结论，偶尔提醒一句安全。"
+            style={{ flex: "1 1 14em", minWidth: 0 }}
+            value={role.prompt}
+            onChange={(e) => edit(index, "prompt", e.target.value)}
+            aria-label={`自建角色 ${index + 1} 人设`}
+          />
+          <button type="button" className="btn btn-ghost" onClick={() => commit(roles.filter((_, i) => i !== index))}>
+            删除
+          </button>
+        </div>
+      ))}
+      {roles.length < MAX_CUSTOM_PERSONAS && (
+        <button
+          type="button"
+          className="btn btn-ghost"
+          id="voice-custom-persona-add"
+          style={{ justifySelf: "start" }}
+          onClick={() => commit([...roles, { id: newCustomPersonaId(roles), name: "", prompt: "" }])}
+        >
+          新增角色
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** 语音体验：快捷查询、热词、自然插话。 */
 export function ExperienceGroup({ builtin }) {
   const group = useLocalGroup(builtin, EXPERIENCE_KEYS, experienceSettingsError);
@@ -2289,7 +2347,7 @@ export function ExperienceGroup({ builtin }) {
     ? localLayaInstalled
     : Boolean(builtin.status?.jev?.key_set || builtin.status?.jev?.openrouter_llm_key_set || builtin.status?.local?.jev_key_configured);
   const jevActive = Boolean(baseline.jev_filter_enabled && (baseline.jev_unfinished_hold || (baseline.read_only_shortcuts && baseline.jev_fast_route) || baseline.jev_tool_prune || baseline.jev_memory_filter));
-  const styleLabel = PERSONA_STYLE_OPTIONS.find((opt) => opt.id === (baseline.persona_style || "workshop"))?.label?.replace(/（.*）$/, "") || "简明工坊助手";
+  const styleLabel = personaOptions(baseline.custom_personas).find((opt) => opt.id === (baseline.persona_style || "workshop"))?.label?.replace(/（.*）$/, "") || "简明工坊助手";
   const corrCount = String(baseline.custom_asr_corrections || "").split(/\r?\n/).filter((w) => w.trim()).length;
   const summary = [
     styleLabel,
@@ -2305,20 +2363,21 @@ export function ExperienceGroup({ builtin }) {
       <p className="voice-muted">停止词整句命中时立即请求急停，不能关闭；设备是否停下仍需确认。</p>
       <div className="voice-form-grid">
         <label className="voice-wide">
-          <span>助手语气风格（底层动机器复述确认与急停铁律始终锁定不可覆盖；每轮自动注入本机日期星期时间，并抑制同一会话重复机械喊称呼）</span>
+          <span>说话角色（只改语气和说话方式；声音在语音合成里换；也可以对小智说“换成 MOSS 守夜”。动机器前复述确认与急停铁律对所有角色锁定不可覆盖）</span>
           <select
             className="select-input"
             value={form.persona_style || "workshop"}
             onChange={(e) => update("persona_style", e.target.value)}
             id="voice-persona-style"
           >
-            {PERSONA_STYLE_OPTIONS.map((opt) => (
+            {personaOptions(form.custom_personas).map((opt) => (
               <option key={opt.id} value={opt.id}>
-                {opt.label} — {opt.hint}
+                {opt.label}{opt.hint ? ` — ${opt.hint}` : ""}
               </option>
             ))}
           </select>
         </label>
+        <CustomPersonaEditor value={form.custom_personas} onChange={(next) => update("custom_personas", next)} />
         <label className="voice-wide">
           <span>工坊补充背景说明（可选，最多 300 字；如常用机型、排风习惯或偏好的说明方式）</span>
           <input

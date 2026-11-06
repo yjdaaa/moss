@@ -449,6 +449,17 @@ try {
   assert.equal(state.builtin.local.settings.persona_style, "moss_station");
   assert.equal(state.builtin.local.settings.persona_prompt, "工坊主力机为翼宿 5W 蓝光机");
   assert.deepEqual(state.builtin.local.settings.custom_asr_corrections, ["红松木=樟子松"]);
+  // 6d. n59：新增自建角色并选中，保存后立即生效、不重启
+  await page.locator("#voice-custom-persona-add").click();
+  await page.getByLabel("自建角色 1 名字").fill("老师傅");
+  await page.getByLabel("自建角色 1 人设").fill("话少，先说结论");
+  await page.locator("#voice-persona-style").selectOption({ label: "老师傅（自建） — 话少，先说结论" });
+  await page.locator("#voice-experience-save").click();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已立即生效" }).waitFor();
+  const rolePatch = last("voice_local_save").args.settings;
+  assert.deepEqual(Object.keys(rolePatch).sort(), ["custom_personas", "persona_style"], "只提交角色字段");
+  assert.equal(rolePatch.custom_personas[0].name, "老师傅");
+  assert.equal(rolePatch.persona_style, rolePatch.custom_personas[0].id);
   await page.locator("#voice-group-experience").scrollIntoViewIfNeeded();
   await shot("voice-builtin");
 

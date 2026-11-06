@@ -529,6 +529,33 @@ mod imp {
     use moss_voice_server::ToolExecutor;
     use moss_voice_server::home_tools::{HomeAvailability, HomeHost, HomeTools};
 
+    use moss_voice_server::persona::{CustomRole, PersonaConfig, PersonaStore, PersonaSwitch, PersonaTools};
+
+    /// n59 当前说话角色的组成：内置 / 自建角色、共用的工坊补充背景。
+    fn persona_config(local: &BuiltinLocal) -> PersonaConfig {
+        PersonaConfig {
+            active: local.persona_style.clone(),
+            background: local.persona_prompt.clone(),
+            custom: local
+                .custom_personas
+                .iter()
+                .map(|c| CustomRole { id: c.id.clone(), name: c.name.clone(), prompt: c.prompt.clone() })
+                .collect(),
+        }
+    }
+
+    /// 语音切换角色时写入设置（只改 `persona_style`，不重启服务）。
+    struct DesktopPersonaStore { settings_file: std::path::PathBuf }
+    impl PersonaStore for DesktopPersonaStore {
+        fn save_active(&self, id: &str) -> Result<(), String> {
+            moss_voice::settings::update_voice(&self.settings_file, |settings| {
+                let local = &mut settings.builtin_local;
+                local.persona_style = moss_voice::settings::validate_active_persona(id, &local.custom_personas)?;
+                Ok(())
+            })
+        }
+    }
+
     struct DesktopInfoHost { host: Arc<laser_host::HostApplication> }
     impl PluginHost for DesktopInfoHost {
         fn config(&self) -> Value {
@@ -1240,6 +1267,8 @@ mod imp {
         laya: Mutex<LocalLayaRunner>,
         /// NV19 长期记忆、资料与恢复摘要；检索与提取默认关闭
         context: Arc<crate::voice_context::host::ContextHost>,
+        /// n59 当前说话角色（全部设备共用；语音与界面切换都即时生效，不重启服务）
+        persona: Arc<PersonaSwitch>,
     }
 
     /// 本次启动用到的本地模型。
@@ -1568,6 +1597,10 @@ mod imp {
                 setting_path.clone(),
                 calibrated_speakers,
             );
+            let persona = Arc::new(PersonaSwitch::new(
+                persona_config(&moss_voice::settings::load(&setting_path).builtin_local),
+                Some(Arc::new(DesktopPersonaStore { settings_file: setting_path.clone() })),
+            ));
             Arc::new(BuiltinVoice {
                 host,
                 memory,
@@ -1586,6 +1619,7 @@ mod imp {
                 helper: Mutex::new(None),
                 laya: Mutex::new(LocalLayaRunner { child: None, job: None, generation: 0 }),
                 context,
+                persona,
             })
         }))
     }
@@ -1812,10 +1846,9 @@ mod imp {
             let tools: Arc<dyn ToolExecutor> = Arc::new(HomeTools {
                 original:combined, home:Arc::new(DesktopHomeHost{host:self.host.clone(),control:self.home_control.clone()})
             });
-            let system_prompt = moss_voice_server::conversation::compose_persona_system_prompt(
-                &experience.persona_style,
-                &experience.persona_prompt,
-            );
+            self.persona.configure(persona_config(experience));
+            let tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools { original: tools, persona: self.persona.clone() });
+            let system_prompt = self.persona.system_prompt();
             let asr_corrections = moss_voice::settings::effective_asr_corrections(
                 experience.asr_homophone_fix,
                 &experience.custom_asr_corrections,
@@ -1836,7 +1869,8 @@ mod imp {
                 },
             )
             .with_memory(self.memory.clone())
-            .with_speaker_enrollment(self.speaker.clone());
+            .with_speaker_enrollment(self.speaker.clone())
+            .with_persona(self.persona.clone());
             if let Some(fallback_tts) = local.fallback_tts.take() {
                 conversation = conversation.with_fallback_tts(fallback_tts);
             }
@@ -2181,14 +2215,17 @@ mod imp {
                 }
                 None => None,
             };
-            let persona_style_patch = match patch.get("persona_style") {
+            let custom_personas_patch = match patch.get("custom_personas") {
                 Some(value) => {
-                    let raw = value.as_str().ok_or_else(|| invalid("助手风格须为字符串"))?;
-                    Some(
-                        moss_voice::settings::validate_persona_style(raw)
-                            .map_err(|message| invalid(&message))?,
-                    )
+                    let roles: Vec<moss_voice::settings::CustomPersona> = serde_json::from_value(value.clone())
+                        .map_err(|_| invalid("自建角色格式无效"))?;
+                    Some(moss_voice::settings::normalize_custom_personas(&roles).map_err(|message| invalid(&message))?)
                 }
+                None => None,
+            };
+            // The active role is checked against the custom list inside the settings lock below.
+            let persona_style_patch = match patch.get("persona_style") {
+                Some(value) => Some(value.as_str().ok_or_else(|| invalid("说话角色须为字符串"))?.trim().to_owned()),
                 None => None,
             };
             let persona_prompt_patch = match patch.get("persona_prompt") {
@@ -2290,8 +2327,20 @@ mod imp {
                         if let Some(rules) = &custom_corrections_patch {
                             local.custom_asr_corrections = rules.clone();
                         }
-                        if let Some(style) = &persona_style_patch {
-                            local.persona_style = style.clone();
+                        if let Some(roles) = &custom_personas_patch {
+                            local.custom_personas = roles.clone();
+                        }
+                        match &persona_style_patch {
+                            Some(style) => {
+                                local.persona_style =
+                                    moss_voice::settings::validate_active_persona(style, &local.custom_personas)?;
+                            }
+                            // Deleting the active custom role falls back to the default role.
+                            None => {
+                                if moss_voice::settings::validate_active_persona(&local.persona_style, &local.custom_personas).is_err() {
+                                    local.persona_style = moss_voice::settings::DEFAULT_PERSONA_STYLE.into();
+                                }
+                            }
                         }
                         if let Some(prompt) = &persona_prompt_patch {
                             local.persona_prompt = prompt.clone();
@@ -2340,12 +2389,21 @@ mod imp {
             {
                 server.set_screen_card_style(moss_voice_server::ScreenCardStyle::from_setting(card_style));
             }
+            if persona_style_patch.is_some() || custom_personas_patch.is_some() || persona_prompt_patch.is_some() {
+                // n59: the running conversation reads the role prompt each turn, so no restart is needed.
+                self.persona.configure(persona_config(&self.settings().builtin_local));
+            }
             let hot_only = patch.as_object().is_some_and(|obj| {
                 !obj.is_empty()
                     && obj.keys().all(|k| {
                         matches!(
                             k.as_str(),
-                            "screen_card_style" | "debug_trace_enabled" | "clear_debug_traces"
+                            "screen_card_style"
+                                | "debug_trace_enabled"
+                                | "clear_debug_traces"
+                                | "persona_style"
+                                | "persona_prompt"
+                                | "custom_personas"
                         )
                     })
             });
@@ -4424,6 +4482,43 @@ mod imp {
             assert_eq!(cleared["jev"]["voice_enabled"], false);
             assert_eq!(cleared["jev"]["feedback_enabled"], false);
             assert_eq!(host.db.lock().unwrap().get_secret("jev_api_key").unwrap(), None);
+        }
+
+        #[test]
+        fn n59_role_settings_apply_without_restart_and_spoken_switch_is_saved() {
+            let server_ids: Vec<&str> = moss_voice_server::persona::BUILTINS.iter().map(|b| b.id).collect();
+            assert_eq!(server_ids, moss_voice::settings::BUILTIN_PERSONA_IDS, "settings and server role lists must match");
+
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let builtin = init(Some(host)).0.unwrap();
+            assert_eq!(builtin.persona.system_prompt(), moss_voice_server::conversation::DEFAULT_SYSTEM_PROMPT);
+
+            let saved = builtin
+                .local_save(&serde_json::json!({
+                    "custom_personas": [{"id": "custom_a1", "name": " 老师傅 ", "prompt": "话少，先说结论"}],
+                    "persona_style": "custom_a1",
+                }))
+                .unwrap();
+            assert_eq!(saved["local"]["settings"]["persona_style"], "custom_a1");
+            assert_eq!(saved["local"]["settings"]["custom_personas"][0]["name"], "老师傅");
+            assert!(builtin.persona.system_prompt().contains("当前说话角色：老师傅"), "UI save applies to the running role at once");
+
+            assert!(builtin.local_save(&serde_json::json!({"persona_style": "custom_zz"})).is_err());
+            assert!(builtin
+                .local_save(&serde_json::json!({"custom_personas": [{"id": "custom_a1", "name": "老师傅", "prompt": "直接发 G1 X10"}]}))
+                .is_err());
+            assert_eq!(builtin.settings().builtin_local.persona_style, "custom_a1", "rejected saves change nothing");
+
+            // Spoken switch goes through the same settings file.
+            assert_eq!(builtin.persona.switch("任务简报").unwrap(), "MOSS 任务简报");
+            assert_eq!(builtin.settings().builtin_local.persona_style, "moss_briefing");
+
+            // Deleting the active custom role falls back to the default role.
+            builtin.local_save(&serde_json::json!({"persona_style": "custom_a1"})).unwrap();
+            let removed = builtin.local_save(&serde_json::json!({"custom_personas": []})).unwrap();
+            assert_eq!(removed["local"]["settings"]["persona_style"], "workshop");
+            assert_eq!(builtin.persona.system_prompt(), moss_voice_server::conversation::DEFAULT_SYSTEM_PROMPT);
         }
 
         #[test]

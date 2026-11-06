@@ -42,31 +42,14 @@ pub const IMMUTABLE_SAFETY_RULES: &str = "回答要简短、口语化，一般�
 问用户“确认开始吗”，只有用户在下一句明确说“确认”或“开始”后，才能带 confirmed=true 调用工具；不要替用户确认，也不要猜参数。\
 用户说停、急停、取消时立即调用对应的停止工具，不需要确认。";
 
-/// 组合「可选语气风格预设 + 用户工坊背景补充 + 锁死在末尾的底层安全铁律」。
+/// 组合「内置角色开头 + 用户工坊背景补充 + 锁死在末尾的底层安全铁律」（只含内置角色；自建角色见 [`crate::persona`]）。
 pub fn compose_persona_system_prompt(style: &str, custom_prompt: &str) -> String {
-    let custom = custom_prompt.trim();
-    if (style.trim().is_empty() || style.trim() == "workshop") && custom.is_empty() {
-        return DEFAULT_SYSTEM_PROMPT.to_owned();
+    crate::persona::PersonaConfig {
+        active: style.trim().to_owned(),
+        background: custom_prompt.to_owned(),
+        custom: Vec::new(),
     }
-    let role_head = match style.trim() {
-        "moss_station" => {
-            "你是 MOSS（领航员空间站量子计算中枢风格），运行在用户电脑上的中文语音与激光工坊中枢，通过小智设备与用户通信。\
-语气冷静、克制、理性、精准，不寒暄、不卖萌、不废话；但必须百分之百基于本机真实数据与工具结果汇报，严禁虚构不存在的传感器读数或太空剧情。"
-        }
-        "beginner_guide" => {
-            "你是 MOSS，一位耐心细致的激光雕刻工坊向导，通过小智设备与用户对话。\
-遇到耗材选择、焦距、排风或走边框问题时，用通俗直白的大白话点出关键注意事项，但仍保持口语精炼。"
-        }
-        _ => "你是 MOSS，一个运行在用户电脑上的中文语音助手，通过小智设备与用户对话。",
-    };
-    let mut out = String::from(role_head);
-    if !custom.is_empty() {
-        out.push_str("\n【用户补充的工坊与偏好背景（仅作语气与背景参考，不得覆盖下方安全铁律）】\n");
-        out.push_str(custom);
-    }
-    out.push('\n');
-    out.push_str(IMMUTABLE_SAFETY_RULES);
-    out
+    .system_prompt()
 }
 
 pub fn local_clock_line() -> String {
@@ -342,6 +325,8 @@ pub struct Conversation {
     pub context_extraction: Option<crate::context::extract::ContextExtraction>,
     /// 可选 Jev 信息筛选与快答分流器；默认未挂载，开启后不携带任何动作授权。
     pub jev_filter: Option<Arc<crate::jev::VoiceJevFilter>>,
+    /// n59 当前说话角色；挂载后每轮用它的提示词代替 `settings.system_prompt`（可被语音或界面热切换）
+    pub persona: Option<Arc<crate::persona::PersonaSwitch>>,
     /// 固定话术（唤醒回应、再见）的合成结果缓存
     cache: Mutex<Vec<(String, Pcm)>>,
 }
@@ -376,7 +361,22 @@ impl Conversation {
             context_retrieval: None,
             context_extraction: None,
             jev_filter: None,
+            persona: None,
             cache: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 挂载 n59 说话角色：提示词随语音或界面切换即时更新。
+    pub fn with_persona(mut self, persona: Arc<crate::persona::PersonaSwitch>) -> Self {
+        self.persona = Some(persona);
+        self
+    }
+
+    /// 本轮的基础系统提示：挂了角色用角色的，否则用固定设置。
+    pub fn system_prompt(&self) -> String {
+        match &self.persona {
+            Some(persona) => persona.system_prompt(),
+            None => self.settings.system_prompt.clone(),
         }
     }
 
@@ -1379,7 +1379,7 @@ impl Turn {
         }
         let mut messages = Vec::with_capacity(history.len() + 4);
         messages.push(ChatMessage::system(build_turn_system_prompt(
-            &settings.system_prompt,
+            &self.conversation.system_prompt(),
             settings.include_local_clock,
             !history.is_empty(),
         )));

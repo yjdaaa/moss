@@ -429,6 +429,8 @@ pub fn groups_of_builtin_tool(spec: &ToolSpec) -> &'static [ToolGroup] {
         "hass_get_state" | "hass_set_state" | "hass_play_music" | "agent_codex"
         | "agent_claude_code" => &[ToolGroup::HomeAndAgent],
         "play_music" => &[ToolGroup::MusicAndDevice],
+        // n59 说话角色切换只改语气，不属于任何业务组，始终保留
+        crate::persona::PERSONA_TOOL => &[],
         other if other.starts_with("device__") => &[ToolGroup::MusicAndDevice],
         other if external_mcp_server(other).is_some() => &[],
         _ => infer_groups_from_spec(spec),

@@ -1111,6 +1111,53 @@ async fn nv19_retrieval_on_replaces_the_nv10_device_summary() {
     }
 }
 
+/// n59：对小智说“换成 XX”时模型调用 `voice_persona_tool`，切换话术直接朗读，下一轮起系统提示换成新角色，
+/// 安全铁律仍在末尾。
+#[tokio::test]
+async fn n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety_rules() {
+    use crate::conversation::{IMMUTABLE_SAFETY_RULES, TurnEvent, TurnInput, spawn_turn};
+    use crate::persona::{PERSONA_TOOL, PersonaConfig, PersonaSwitch, PersonaTools};
+
+    let persona = Arc::new(PersonaSwitch::new(PersonaConfig::default(), None));
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            Round::Reply {
+                deltas: Vec::new(),
+                calls: vec![ToolCall::new("call-persona", PERSONA_TOOL, r#"{"action":"switch","name":"守夜"}"#)],
+                delay_ms: 0,
+            },
+            say(&["收到。"]),
+        ])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr { replies: Mutex::new(VecDeque::from([Ok("换成守夜模式".into()), Ok("现在几点".into())])), ..Default::default() });
+    let tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools { original: Arc::new(FastTools::default()), persona: persona.clone() });
+    let conversation = Arc::new(
+        Conversation::new(asr, llm.clone(), Arc::new(FakeTts::default()), tools, ConversationSettings { read_only_shortcuts: false, ..ConversationSettings::default() })
+            .with_persona(persona.clone()),
+    );
+    let context = ToolContext { device_id: "fake-device".into(), session_id: "fake-session".into() };
+    let mut spoken = Vec::new();
+    for _ in 0..2 {
+        let (handle, mut events) = spawn_turn(conversation.clone(), context.clone(), TurnInput::Utterance { pcm: vec![0; 960], sample_rate: UP, stream: None }, vec![], None);
+        while let Some(event) = events.recv().await {
+            if let TurnEvent::Speech { text, .. } = event {
+                spoken.push(text);
+            }
+        }
+        handle.await.unwrap();
+    }
+    assert_eq!(spoken, vec!["好的，已切换为MOSS 守夜。".to_owned(), "收到。".to_owned()]);
+    let seen = llm.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "the switch reply is spoken without asking the model again");
+    let first = seen[0].0[0].content.clone().unwrap();
+    let second = seen[1].0[0].content.clone().unwrap();
+    assert!(!first.contains("守夜风格"));
+    assert!(second.contains("守夜风格"), "next turn uses the new role");
+    let base = second.split("\n当前本机时间").next().unwrap();
+    assert!(base.ends_with(IMMUTABLE_SAFETY_RULES), "safety rules stay last in the role prompt");
+}
+
 /// 加工结束播报（2026-11-02 用户决定）：设备在线且空闲时，把刚结束的任务念出来，不经过大模型。
 #[test]
 fn finished_job_is_announced_to_an_idle_online_device() {

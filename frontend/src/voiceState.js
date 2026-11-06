@@ -605,11 +605,68 @@ export function builtinDeviceInfoView(device) {
     updatedAt: Number(device?.info_at) || 0,
   };
 }
+/** 内置说话角色（n59；编号与后端 `BUILTIN_PERSONA_IDS` 一致）。角色只改语气，声音由语音合成设置决定。 */
 export const PERSONA_STYLE_OPTIONS = [
   { id: "workshop", label: "简明工坊助手（默认）", hint: "干练直接，专注激光雕刻指令与状态反馈" },
-  { id: "moss_station", label: "MOSS 领航空间站（冷峻克制腔调）", hint: "《流浪地球》量子计算中枢语气：冷静理性、不寒暄卖萌，严格基于真实状态汇报" },
   { id: "beginner_guide", label: "新手引导模式（耐心讲解工艺）", hint: "针对耗材、对焦、排风与走边框多给一句大白话提醒" },
+  { id: "moss_station", label: "MOSS 领航空间站（冷峻克制腔调）", hint: "《流浪地球》量子计算中枢语气：冷静理性、不寒暄卖萌，严格基于真实状态汇报" },
+  { id: "moss_briefing", label: "MOSS 任务简报（先报结论）", hint: "像指挥中心简报：收到、结论、一两项关键数据，句子极短" },
+  { id: "moss_risk", label: "MOSS 风险评估（附把握高低）", hint: "建议时说明把握较大 / 一般 / 不大和最主要的风险，没把握先试边角料" },
+  { id: "moss_deadpan", label: "MOSS 冷面幽默（偶尔冷笑话）", hint: "正事说完偶尔一句冷幽默；出光、急停、故障时不开玩笑" },
+  { id: "moss_night", label: "MOSS 守夜（深夜轻声）", hint: "语气轻、话更短，不主动扯新话题" },
 ];
+export const MAX_CUSTOM_PERSONAS = 6;
+
+/** 自建角色在表单里存为 JSON 文字（便于未保存改动比较），这里读回数组。 */
+export function parseCustomPersonas(raw) {
+  try {
+    const list = typeof raw === "string" ? JSON.parse(raw || "[]") : raw;
+    return (Array.isArray(list) ? list : []).map((role) => ({
+      id: String(role?.id || ""),
+      name: String(role?.name || ""),
+      prompt: String(role?.prompt || ""),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** 下拉框里的全部角色：内置在前，自建在后。 */
+export function personaOptions(customRaw) {
+  const custom = parseCustomPersonas(customRaw)
+    .filter((role) => role.id && role.name.trim())
+    .map((role) => ({ id: role.id, label: `${role.name.trim()}（自建）`, hint: role.prompt.trim().slice(0, 40) }));
+  return [...PERSONA_STYLE_OPTIONS, ...custom];
+}
+
+export function newCustomPersonaId(existing = []) {
+  const used = new Set(existing.map((role) => role.id));
+  for (let i = 1; ; i += 1) {
+    const id = `custom_${Date.now().toString(36).slice(-6)}${i}`;
+    if (!used.has(id)) return id;
+  }
+}
+
+function customPersonasError(raw) {
+  const roles = parseCustomPersonas(raw);
+  if (roles.length > MAX_CUSTOM_PERSONAS) return `自建角色最多 ${MAX_CUSTOM_PERSONAS} 个`;
+  const names = new Set();
+  for (const role of roles) {
+    if (!/^custom_[a-z0-9]{1,16}$/.test(role.id)) return "自建角色编号无效，请删除后重新新增";
+    const name = role.name.trim();
+    if (!name) return "自建角色需要名字";
+    if ([...name].length > 12) return "角色名最多 12 个字";
+    if (/[\x00-\x1f\x7f]/.test(name) || containsDangerousGcodeOrGrblJs(name)) return "角色名不能包含控制字符或 G-code";
+    if (names.has(name)) return `角色名“${name}”重复`;
+    names.add(name);
+    const prompt = role.prompt.replace(/\r\n?/g, "\n").trim();
+    if (!prompt) return `角色“${name}”需要写人设`;
+    if (/[\x00-\x09\x0b-\x1f\x7f]/.test(prompt)) return "角色人设不能包含控制字符";
+    if ([...prompt].length > 300) return "角色人设最多 300 个字符";
+    if (containsDangerousGcodeOrGrblJs(prompt)) return "角色人设不能包含 G-code 或控制器 $n= 指令";
+  }
+  return "";
+}
 
 export const SCREEN_CARD_STYLE_OPTIONS = [
   {
@@ -934,6 +991,7 @@ export function localSettingsForm(settings) {
     custom_asr_corrections: (Array.isArray(value.custom_asr_corrections) ? value.custom_asr_corrections : []).join("\n"),
     persona_style: value.persona_style || "workshop",
     persona_prompt: value.persona_prompt || "",
+    custom_personas: JSON.stringify(parseCustomPersonas(value.custom_personas)),
     screen_preview_sync: value.screen_preview_sync !== false,
     screen_card_style: value.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud",
     tts: Boolean(value.tts),
@@ -981,8 +1039,10 @@ export function experienceSettingsError(form) {
   if (effective.length > 64) return "自定义热词最多 64 条";
   if (effective.some((word) => [...word].length > 32)) return "每条热词最多 32 个字符";
   if (new TextEncoder().encode(effective.join("")).length > 4096) return "热词总长度超过 4096 字节";
+  const customError = customPersonasError(form.custom_personas);
+  if (customError) return customError;
   const style = String(form.persona_style || "workshop").trim();
-  if (!["workshop", "moss_station", "beginner_guide"].includes(style)) return "请选择有效的助手风格";
+  if (!personaOptions(form.custom_personas).some((opt) => opt.id === style)) return "请选择有效的说话角色";
   const cardStyle = String(form.screen_card_style || "moss_hud").trim();
   if (!["moss_hud", "goggle_bot"].includes(cardStyle)) return "请选择有效的屏幕卡片画风";
   const prompt = String(form.persona_prompt || "").replace(/\r\n?/g, "\n");
@@ -1046,6 +1106,11 @@ export function localSettingsPayload(form) {
     })(),
     persona_style: String(form.persona_style || "workshop").trim() || "workshop",
     persona_prompt: String(form.persona_prompt || "").replace(/\r\n?/g, "\n").trim(),
+    custom_personas: parseCustomPersonas(form.custom_personas).map((role) => ({
+      id: role.id,
+      name: role.name.trim(),
+      prompt: role.prompt.replace(/\r\n?/g, "\n").trim(),
+    })),
     screen_preview_sync: form.screen_preview_sync !== false,
     screen_card_style: form.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud",
     tts: Boolean(form.tts),
@@ -1302,6 +1367,7 @@ export const EXPERIENCE_KEYS = [
   "screen_card_style",
   "persona_style",
   "persona_prompt",
+  "custom_personas",
   "asr_homophone_fix",
   "custom_asr_corrections",
   "jev_filter_enabled",
