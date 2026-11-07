@@ -129,7 +129,7 @@ mod envelope {
 
         let mut mac_key = hmac_sha256(master, &[b"moss.ha.mac.v1", ENTROPY, nonce]);
         let len_le = (ciphertext.len() as u64).to_le_bytes();
-        let expected_tag = hmac_sha256(&mac_key, &[ENTROPY, nonce, &len_le, &ciphertext]);
+        let expected_tag = hmac_sha256(&mac_key, &[ENTROPY, nonce, &len_le, ciphertext]);
         for b in &mut mac_key {
             unsafe { std::ptr::write_volatile(b, 0) };
         }

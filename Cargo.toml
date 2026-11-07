@@ -19,6 +19,14 @@ members = [
     "crates/moss-xiaozhi-proto",
 ]
 
+# 2026-11-07 起 CI 以 `cargo clippy --workspace --all-targets -- -D warnings` 把关。
+# 下面几项是结构层面的提示（复杂类型、枚举体积），留给后续拆分大文件时处理，不在日常改动中阻塞；
+# 参数个数上限见根目录 clippy.toml。
+[workspace.lints.clippy]
+type_complexity = "allow"
+large_enum_variant = "allow"
+result_large_err = "allow"
+
 [profile.dev]
 debug = "line-tables-only"
 

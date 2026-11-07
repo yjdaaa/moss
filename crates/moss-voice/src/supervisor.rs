@@ -564,12 +564,12 @@ impl Supervisor {
     pub fn detach(&self) -> Option<u32> {
         let running = self.lock().running.take()?;
         let pid = running.pid;
-        if let Some(job) = running.job.as_ref() {
-            if !job.release_on_close() {
-                let _ = self
-                    .log
-                    .write_line("[MOSS] 无法解除 Job Object 关联，MOSS 退出时服务端仍会结束");
-            }
+        if let Some(job) = running.job.as_ref()
+            && !job.release_on_close()
+        {
+            let _ = self
+                .log
+                .write_line("[MOSS] 无法解除 Job Object 关联，MOSS 退出时服务端仍会结束");
         }
         let _ = self.log.write_line(&format!(
             "[MOSS] 退出 MOSS 时保留服务端运行（进程 {pid}），之后其输出不再写入本日志"

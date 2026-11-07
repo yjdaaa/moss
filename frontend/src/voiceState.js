@@ -263,11 +263,11 @@ const SECTION_USAGE_LABEL = { llm: "大模型", asr: "语音识别", tts: "语�
 const OMNI_ALL_RE = /(?:qwen[\d.]*-omni|gpt-4o(?:-[a-z0-9]+)*-(?:audio|realtime)|gemini-[\d.]+-[a-z0-9-]*live|glm-4-voice|step-1o|minimax-omni)/i;
 const OMNI_LLM_ASR_RE = /(?:qwen2?-audio|ultravox|voxtral|salmonn|kimi-audio)/i;
 const ASR_MODEL_RE =
-  /(?:whisper|sensevoice|sense-voice|paraformer|funasr|teleasr|telespeech|fireredasr|zipformer|transcribe|speech-to-text|audio-to-text|canary-|dolphin-asr|wenet|conformer|(?:^|[\/_-])(?:x-asr|asr|stt)(?:$|[\/_-]|\d)|volc\.(?:bigasr|seedasr))/i;
+  /(?:whisper|sensevoice|sense-voice|paraformer|funasr|teleasr|telespeech|fireredasr|zipformer|transcribe|speech-to-text|audio-to-text|canary-|dolphin-asr|wenet|conformer|(?:^|[/_-])(?:x-asr|asr|stt)(?:$|[/_-]|\d)|volc\.(?:bigasr|seedasr))/i;
 const TTS_MODEL_RE =
-  /(?:cosyvoice|fish-speech|fishaudio|indextts|index-tts|kokoro|matcha|f5-tts|spark-tts|chattts|melotts|vits|text-to-speech|text2speech|audio-speech|voice-clone|bark|seed-tts|volc\.service_type|(?:^|[\/_-])tts(?:$|[\/_-]|\d)|(?:^|[\/_-])speech-(?:01|02|hd|turbo))/i;
+  /(?:cosyvoice|fish-speech|fishaudio|indextts|index-tts|kokoro|matcha|f5-tts|spark-tts|chattts|melotts|vits|text-to-speech|text2speech|audio-speech|voice-clone|bark|seed-tts|volc\.service_type|(?:^|[/_-])tts(?:$|[/_-]|\d)|(?:^|[/_-])speech-(?:01|02|hd|turbo))/i;
 const NON_CHAT_VOICE_RE =
-  /(?:embed|bge-(?:large|base|small|m3|reranker)|rerank|bce-reranker|moderation|dall-e|flux[.\-_\/]|stable-diffusion|sdxl|kolors|wanx|wan2\.\d|cogview|cogvideo|seedream|imagen|hidream|sora|kling|vidu|hunyuanvideo|ltx-video|mochi-1)/i;
+  /(?:embed|bge-(?:large|base|small|m3|reranker)|rerank|bce-reranker|moderation|dall-e|flux[.\-_/]|stable-diffusion|sdxl|kolors|wanx|wan2\.\d|cogview|cogvideo|seedream|imagen|hidream|sora|kling|vidu|hunyuanvideo|ltx-video|mochi-1)/i;
 
 /**
  * 识别模型 ID 可用于哪些分区（`["llm" | "asr" | "tts"]`）：

@@ -477,25 +477,22 @@ impl ContextService {
         let updated = Self::store(self.store.update(id, expected_revision, &patch, now))?
             .ok_or(ServiceError::Conflict)?;
         // Confirming a correction retires the record it replaces (same scope and category only).
-        if to == Verification::Confirmed {
-            if let Some(old) =
+        if to == Verification::Confirmed
+            && let Some(old) =
                 supersedes.and_then(|old| Self::store(self.store.get(&old)).ok().flatten())
-            {
-                if old.scope == scope
-                    && old.category == category
-                    && old.deleted_at.is_none()
-                    && old.verification != Verification::Invalidated
-                    && self.verified(access, &old.scope).is_ok()
-                {
-                    let retire = MemoryPatch {
-                        content: old.content.clone(),
-                        verification: Verification::Invalidated,
-                        applicability: old.applicability.clone(),
-                        expires_at: old.expires_at,
-                    };
-                    let _ = Self::store(self.store.update(&old.id, old.revision, &retire, now))?;
-                }
-            }
+            && old.scope == scope
+            && old.category == category
+            && old.deleted_at.is_none()
+            && old.verification != Verification::Invalidated
+            && self.verified(access, &old.scope).is_ok()
+        {
+            let retire = MemoryPatch {
+                content: old.content.clone(),
+                verification: Verification::Invalidated,
+                applicability: old.applicability.clone(),
+                expires_at: old.expires_at,
+            };
+            let _ = Self::store(self.store.update(&old.id, old.revision, &retire, now))?;
         }
         Ok(updated)
     }

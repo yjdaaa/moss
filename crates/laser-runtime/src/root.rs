@@ -59,8 +59,10 @@ impl RuntimeRoot {
             fs::create_dir_all(path.join(child))?;
         }
         let lock_path = path.join("moss.lock");
+        // 锁文件只用来加排他锁，内容无意义，打开时不清空
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)?;

@@ -251,7 +251,7 @@ fn draw_text_5x7(img: &mut RgbImage, x0: i32, y0: i32, scale: i32, text: &str, c
                         for sx in 0..scale {
                             put_px(
                                 img,
-                                cx + (rx as i32) * scale + sx,
+                                cx + rx * scale + sx,
                                 y0 + (ry as i32) * scale + sy,
                                 color,
                             );
@@ -659,7 +659,7 @@ pub fn make_job_hud_png_for_style(
     draw_moss_frame(&mut canvas, Rgb([255, 68, 56]));
 
     // 顶部红色 MOSS 光学指示点 + 标题 "MOSS LASER"
-    let dot_c = if frame % 2 == 0 {
+    let dot_c = if frame.is_multiple_of(2) {
         Rgb([255, 59, 48])
     } else {
         Rgb([255, 126, 110])
@@ -786,7 +786,7 @@ pub fn make_approval_card_png(
 
     let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([16, 11, 16]));
     draw_moss_frame(&mut canvas, amber);
-    let core_c = if frame % 2 == 0 { red } else { amber };
+    let core_c = if frame.is_multiple_of(2) { red } else { amber };
     draw_moss_optical_eye(&mut canvas, 28, ch as i32 / 2 - 4, 17, core_c, amber);
     let rx = 54i32;
     draw_text_5x7(&mut canvas, rx, 12, 1, "MOSS GATE", amber);
@@ -884,7 +884,7 @@ pub fn make_terminal_badge_png_frame(
     let mut canvas = RgbImage::from_pixel(cw, ch, bg);
     let accent = if spec.completed { emerald } else { crimson };
     draw_moss_frame(&mut canvas, accent);
-    let eye_core = if frame % 2 == 0 {
+    let eye_core = if frame.is_multiple_of(2) {
         accent
     } else if spec.completed {
         Rgb([142, 255, 214])
@@ -993,7 +993,7 @@ pub fn make_music_card_png(
             } else if d2 <= 64 {
                 put_px(&mut canvas, vcx + dx, vcy + dy, Rgb([255, 68, 56]));
             } else if d2 <= 484 {
-                let groove = d2 >= 196 && d2 <= 225 || d2 >= 324 && d2 <= 360;
+                let groove = (196..=225).contains(&d2) || (324..=360).contains(&d2);
                 let spin_hi = match frame % 4 {
                     0 => dx > 0 && dy < 0,
                     1 => dx > 0 && dy > 0,
@@ -1133,7 +1133,7 @@ pub fn make_scene_showcase_png(
             } else {
                 let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([9, 12, 18]));
                 draw_moss_frame(&mut canvas, Rgb([255, 68, 56]));
-                let core_c = if frame % 2 == 0 {
+                let core_c = if frame.is_multiple_of(2) {
                     Rgb([255, 58, 48])
                 } else {
                     Rgb([255, 118, 96])

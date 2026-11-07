@@ -201,10 +201,11 @@ impl Segmenter {
             }
             if c == '.' {
                 match chars.peek() {
-                    Some((_, next)) if next.is_whitespace() => {
-                        if speakable_char_count(&self.buffer[..end]) >= min_chars {
-                            return Some(end);
-                        }
+                    Some((_, next))
+                        if next.is_whitespace()
+                            && speakable_char_count(&self.buffer[..end]) >= min_chars =>
+                    {
+                        return Some(end);
                     }
                     _ => {}
                 }

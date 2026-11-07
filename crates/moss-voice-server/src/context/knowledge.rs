@@ -993,10 +993,10 @@ impl KnowledgeService {
                 stale = true;
                 continue;
             };
-            if let Some(points) = score(passage, query) {
-                if best.as_ref().is_none_or(|(b, _, _)| points > *b) {
-                    best = Some((points, file.rel_path.clone(), clip(passage, EXCERPT_CHARS)));
-                }
+            if let Some(points) = score(passage, query)
+                && best.as_ref().is_none_or(|(b, _, _)| points > *b)
+            {
+                best = Some((points, file.rel_path.clone(), clip(passage, EXCERPT_CHARS)));
             }
         }
         (best, stale)
@@ -1022,17 +1022,17 @@ impl KnowledgeService {
                 )
             })
             .collect();
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
         for (_, file) in candidates.into_iter().take(L2_FILES_PER_DIRECTORY) {
             let Some(text) = read_l2(root, file) else {
                 stale = true;
                 continue;
             };
             for paragraph in paragraphs(&text) {
-                if let Some(p) = score(&paragraph, query) {
-                    if best.as_ref().is_none_or(|(b, _, _)| p > *b) {
-                        best = Some((p, file.rel_path.clone(), clip(&paragraph, EXCERPT_CHARS)));
-                    }
+                if let Some(p) = score(&paragraph, query)
+                    && best.as_ref().is_none_or(|(b, _, _)| p > *b)
+                {
+                    best = Some((p, file.rel_path.clone(), clip(&paragraph, EXCERPT_CHARS)));
                 }
             }
         }

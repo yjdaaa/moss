@@ -169,7 +169,11 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
 
     // 1. 头顶小天线 + MOSS 呼吸信号球
     fill_rect(img, 12, 2, 2, 3, s, bx, by, Rgb([120, 142, 174]));
-    let ant_color = if f % 2 == 0 { moss_red } else { moss_red_hi };
+    let ant_color = if f.is_multiple_of(2) {
+        moss_red
+    } else {
+        moss_red_hi
+    };
     fill_rect(img, 11, 0, 4, 2, s, bx, by, ant_color);
     dot(img, 12, 0, s, bx, by, Rgb([255, 240, 240]));
 
@@ -284,7 +288,7 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
             for step in 0..3 {
                 dot(img, 23 + step, 21 + step, s, bx, by, cyan_eye);
             }
-            if f % 2 == 0 {
+            if f.is_multiple_of(2) {
                 dot(img, 24, 20, s, bx, by, gold);
                 dot(img, 22, 23, s, bx, by, gold);
             } else {
@@ -295,7 +299,7 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
         BotPose::ApprovalWave => {
             fill_rect(img, 5, 20, 2, 3, s, bx, by, shell_hi);
             // 右手高举琥珀色小警示牌轻轻挥动
-            let wave_y = if f % 2 == 0 { 14 } else { 13 };
+            let wave_y = if f.is_multiple_of(2) { 14 } else { 13 };
             fill_rect(img, 19, wave_y + 3, 2, 3, s, bx, by, shell_hi);
             fill_rect(img, 20, wave_y - 2, 6, 5, s, bx, by, gold);
             fill_rect(img, 21, wave_y - 1, 4, 3, s, bx, by, Rgb([30, 22, 12]));
@@ -303,7 +307,7 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
             dot(img, 23, wave_y, s, bx, by, moss_red);
         }
         BotPose::MusicGroove => {
-            let arm_y = if f % 2 == 0 { 18 } else { 20 };
+            let arm_y = if f.is_multiple_of(2) { 18 } else { 20 };
             fill_rect(img, 5, arm_y, 2, 3, s, bx, by, shell_hi);
             fill_rect(img, 19, 38 - arm_y - 19, 2, 3, s, bx, by, shell_hi);
             // 飘动的像素八分音符
@@ -320,7 +324,7 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
             // 右手竖起大拇指 + 四周闪烁小星星
             fill_rect(img, 19, 17, 3, 3, s, bx, by, shell_hi);
             fill_rect(img, 20, 15, 2, 2, s, bx, by, gold);
-            let star_c = if f % 2 == 0 { gold } else { cyan_eye };
+            let star_c = if f.is_multiple_of(2) { gold } else { cyan_eye };
             dot(img, 2, 4, s, bx, by, star_c);
             dot(img, 1, 5, s, bx, by, star_c);
             dot(img, 3, 5, s, bx, by, star_c);
@@ -400,7 +404,7 @@ pub fn encode_goggle_bot_gif(pose: BotPose) -> Result<Vec<u8>, String> {
 
 pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };

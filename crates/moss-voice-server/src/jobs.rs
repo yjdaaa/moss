@@ -183,11 +183,10 @@ fn extract_active_progress(item: &serde_json::Value, wf_id: &str) -> ActiveJobPr
         .or_else(|| send["total_lines"].as_u64())
         .or_else(|| estimate["line_count"].as_u64())
         .unwrap_or(0);
-    let percent = if total_lines > 0 {
-        ((lines_sent.saturating_mul(100)) / total_lines).min(100) as u8
-    } else {
-        0
-    };
+    let percent = lines_sent
+        .saturating_mul(100)
+        .checked_div(total_lines)
+        .map_or(0, |percent| percent.min(100) as u8);
     let elapsed_ms = live["elapsed_ms"].as_u64().unwrap_or(0);
     let eta_seconds = if elapsed_ms >= 500 && lines_sent > 0 && total_lines > lines_sent {
         let rem_lines = total_lines - lines_sent;

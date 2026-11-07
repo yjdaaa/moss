@@ -6,22 +6,18 @@ import {
   SkipBack,
   SkipForward,
   Activity,
-  Cpu,
   Radio,
-  Layers,
-  Gauge,
   AlertTriangle,
   RefreshCw,
   Upload,
   CheckCircle2,
   ShieldAlert,
-  Sliders,
   Flame,
   ArrowUpRight,
   ChevronUp,
   ChevronDown,
 } from "lucide-react";
-import { fetchPreviewText, getJson, postJson } from "../api/client.js";
+import { fetchPreviewText, postJson } from "../api/client.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { readFoldOpen, writeFoldOpen } from "../foldState.js";
 import { TwinStage3D } from "../components/TwinStage3D.jsx";
@@ -168,7 +164,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
   // 控制器硬件行程与实时遥测状态（默认对齐大鱼 DIY 翼宿 V1.0 的 100×100mm 可调范围）
   const [machineLimits, setMachineLimits] = useState(() => loadSavedWorkspaceLimits());
-  const [machineFeatures, setMachineFeatures] = useState(null);
+  const [, setMachineFeatures] = useState(null);
 
   // 材料外框尺寸、台面摆放起点 (offsetX, offsetY) 与激光雕刻文字在材料内的位置 (textOffsetX, textOffsetY)
   const [materialConfig, setMaterialConfig] = useState(() => loadSavedMaterialConfig());

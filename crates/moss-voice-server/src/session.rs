@@ -1598,7 +1598,7 @@ impl<'a> Session<'a> {
         let mut pending_photo = None;
         let history = if kind == TurnKind::Answer {
             if conversation.personal_context.is_some() {
-                if let Some(photo) = self.shared.vision_photos.take(&self.device_id) {
+                if let Some(photo) = self.shared.vision_photos.take(self.device_id) {
                     let msg = photo.into_message();
                     pending_photo = Some(msg.clone());
                     vec![msg]
@@ -1606,7 +1606,7 @@ impl<'a> Session<'a> {
                     Vec::new()
                 }
             } else {
-                if let Some(photo) = self.shared.vision_photos.take(&self.device_id) {
+                if let Some(photo) = self.shared.vision_photos.take(self.device_id) {
                     self.history.push(photo.into_message());
                     append_history(
                         &mut self.history,
@@ -2155,10 +2155,10 @@ impl<'a> Session<'a> {
                 self.last_verified_person = None;
             }
         }
-        if let Some(music) = self.music.as_mut() {
-            if music.active() {
-                music.cancel(&mut self.pump);
-            }
+        if let Some(music) = self.music.as_mut()
+            && music.active()
+        {
+            music.cancel(&mut self.pump);
         }
         if let Some(mut turn) = self.turn.take()
             && turn.kind == TurnKind::Answer
@@ -2449,11 +2449,12 @@ impl<'a> Session<'a> {
         frame: Result<crate::audio::worker::VadFrame, String>,
     ) -> Result<(), String> {
         let frame = frame?;
-        if !frame.prime && matches!(self.phase, Phase::Listening(_)) && !self.listen_manual {
-            if let Some((pcm, end)) = self.hear(&frame.samples, Some((frame.events, frame.notice)))
-            {
-                self.finish_or_hold_utterance(socket, pcm, end).await?;
-            }
+        if !frame.prime
+            && matches!(self.phase, Phase::Listening(_))
+            && !self.listen_manual
+            && let Some((pcm, end)) = self.hear(&frame.samples, Some((frame.events, frame.notice)))
+        {
+            self.finish_or_hold_utterance(socket, pcm, end).await?;
         }
         if self.pending_listen_stop {
             self.finish_listen_stop(socket).await?;
@@ -2605,18 +2606,17 @@ impl<'a> Session<'a> {
                             .device_mcp
                             .as_ref()
                             .is_some_and(|d| d.has_tool("self.screen.get_info"))
+                            && let Some(dev) = self.device_mcp.as_mut()
                         {
-                            if let Some(dev) = self.device_mcp.as_mut() {
-                                let req = dev.request(
-                                    "tools/call",
-                                    json!({ "name": "self.screen.get_info", "arguments": {} }),
-                                    McpPending::ScreenInfo,
-                                );
-                                self.send_mcp(socket, req).await?;
-                            }
+                            let req = dev.request(
+                                "tools/call",
+                                json!({ "name": "self.screen.get_info", "arguments": {} }),
+                                McpPending::ScreenInfo,
+                            );
+                            self.send_mcp(socket, req).await?;
                         }
                         if let Some(prefs) =
-                            self.shared.registry.device_hardware_prefs(&self.device_id)
+                            self.shared.registry.device_hardware_prefs(self.device_id)
                         {
                             let mut replayed = false;
                             if let Some(v) = prefs.volume
@@ -2717,7 +2717,7 @@ impl<'a> Session<'a> {
                 let text = device_result_text(&payload);
                 self.shared
                     .registry
-                    .device_snapshot(&self.device_id, kind, &text);
+                    .device_snapshot(self.device_id, kind, &text);
                 Ok(())
             }
             Some(McpPending::Quiet(tool)) => {
@@ -2834,7 +2834,7 @@ impl<'a> Session<'a> {
         let snapshot = json!({ "mode": mode }).to_string();
         self.shared
             .registry
-            .device_snapshot(&self.device_id, crate::SNAPSHOT_LISTEN, &snapshot);
+            .device_snapshot(self.device_id, crate::SNAPSHOT_LISTEN, &snapshot);
     }
 
     async fn on_device_request(
@@ -3371,7 +3371,7 @@ impl<'a> Session<'a> {
                     "收到设备发来的一条看不懂的消息，已忽略",
                 )
                 .hint("通常是设备固件和 MOSS 版本不匹配；偶尔一次不影响使用，频繁出现请升级固件")
-                .detail(error.to_string()),
+                .detail(&error),
             ),
         }
         Ok(())

@@ -52,3 +52,6 @@ tauri = { version = "2", features = ["test"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 flate2 = "1"
 tar = "0.4"
+
+[lints]
+workspace = true

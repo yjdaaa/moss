@@ -633,7 +633,7 @@ pub async fn voice_strict_set(
                 "小智 MCP 桥未能立即完成重连，建议重启 MOSS 确保工具列表与严格模式完全同步".into(),
             );
         }
-        return Ok(payload);
+        Ok(payload)
     }
     #[cfg(mobile)]
     {

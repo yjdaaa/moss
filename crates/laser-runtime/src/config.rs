@@ -34,10 +34,8 @@ impl LaserSettings {
         let web_port = if let Ok(val) = env::var("LASER_WEB_PORT") {
             val.parse::<u16>()
                 .map_err(|_| "LASER_WEB_PORT must be a valid port".to_owned())?
-        } else if let Some(p) = port_from_file {
-            p
         } else {
-            9666
+            port_from_file.unwrap_or(9666)
         };
         let mode = env::var("LASER_DEFAULT_CONNECTION_MODE").unwrap_or_else(|_| "network".into());
         if !matches!(mode.as_str(), "network" | "serial") {

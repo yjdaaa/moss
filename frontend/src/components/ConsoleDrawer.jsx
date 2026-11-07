@@ -4,10 +4,7 @@ import {
   Radio,
   FileCode,
   Trash2,
-  CheckCircle2,
-  AlertCircle,
   Cpu,
-  ArrowRight,
   Wifi,
   WifiOff,
 } from "lucide-react";

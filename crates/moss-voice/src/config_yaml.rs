@@ -602,7 +602,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("data").join(".config.yaml");
         let llm = resolved(Section::Llm, "https://h/v1", "sk-fake-write", "m");
-        let outcome = write(&config, &edits_for(&[llm.clone()], None)).unwrap();
+        let outcome = write(&config, &edits_for(std::slice::from_ref(&llm), None)).unwrap();
         assert!(outcome.created);
         assert_eq!(outcome.backup, None);
         let first = std::fs::read_to_string(&config).unwrap();

@@ -891,7 +891,7 @@ mod imp {
                 return self
                     .control
                     .prepare(&context.device_id, &context.session_id, name, arguments)
-                    .unwrap_or_else(|code| deny(code));
+                    .unwrap_or_else(&deny);
             }
             let Some((config, policy, revision, _)) = self.current() else {
                 return deny("home_disabled");
@@ -1217,10 +1217,10 @@ mod imp {
 
         fn token_secret(&self) -> Result<Vec<u8>, String> {
             let db = self.db.lock().map_err(|_| "数据库锁失败".to_owned())?;
-            if let Some(secret) = db.get_secret(TOKEN_SECRET_NAME).map_err(db_error)? {
-                if secret.len() >= 32 {
-                    return Ok(secret.into_bytes());
-                }
+            if let Some(secret) = db.get_secret(TOKEN_SECRET_NAME).map_err(db_error)?
+                && secret.len() >= 32
+            {
+                return Ok(secret.into_bytes());
             }
             let mut bytes = [0u8; 32];
             getrandom::fill(&mut bytes).map_err(|error| format!("生成设备密钥失败：{error}"))?;
@@ -1607,13 +1607,9 @@ mod imp {
             }
         }
         let raw = &buf[..read_total];
-        let Some(sep) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
-            return None;
-        };
+        let sep = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
         let head = String::from_utf8_lossy(&raw[..sep]);
-        let Some(status_line) = head.lines().next() else {
-            return None;
-        };
+        let status_line = head.lines().next()?;
         let is_200 = status_line == "HTTP/1.1 200"
             || status_line.starts_with("HTTP/1.1 200 ")
             || status_line == "HTTP/1.0 200"
@@ -1836,10 +1832,10 @@ mod imp {
                 default_speaker,
             }
         };
-        if let Some(spec) = moss_voice::local_models::spec_of(preferred_id, ModelKind::Tts) {
-            if let Some(dir) = path_if_installed(spec.id) {
-                candidates.push(to_candidate(spec, dir));
-            }
+        if let Some(spec) = moss_voice::local_models::spec_of(preferred_id, ModelKind::Tts)
+            && let Some(dir) = path_if_installed(spec.id)
+        {
+            candidates.push(to_candidate(spec, dir));
         }
         for spec in moss_voice::local_models::CATALOG
             .iter()
@@ -1874,19 +1870,19 @@ mod imp {
                     "没有可用的本地降级语音合成模型",
                 ));
             }
-            if let Ok(guard) = self.loaded.lock() {
-                if let Some((idx, existing)) = guard.as_ref() {
-                    if *idx >= start_index && existing.helper.is_alive() {
-                        return Ok((
-                            *idx,
-                            LocalTts {
-                                helper: existing.helper.clone(),
-                                speaker: existing.speaker,
-                                speed: existing.speed,
-                            },
-                        ));
-                    }
-                }
+            if let Ok(guard) = self.loaded.lock()
+                && let Some((idx, existing)) = guard.as_ref()
+                && *idx >= start_index
+                && existing.helper.is_alive()
+            {
+                return Ok((
+                    *idx,
+                    LocalTts {
+                        helper: existing.helper.clone(),
+                        speaker: existing.speaker,
+                        speed: existing.speed,
+                    },
+                ));
             }
             let exe = self.exe.clone();
             let candidates = self.candidates.clone();
@@ -1898,17 +1894,18 @@ mod imp {
                 let mut guard = loaded_slot
                     .lock()
                     .map_err(|_| moss_voice_providers::ProviderError::new("本地降级合成锁失败"))?;
-                if let Some((idx, existing)) = guard.as_ref() {
-                    if *idx >= start_index && existing.helper.is_alive() {
-                        return Ok((
-                            *idx,
-                            LocalTts {
-                                helper: existing.helper.clone(),
-                                speaker: existing.speaker,
-                                speed: existing.speed,
-                            },
-                        ));
-                    }
+                if let Some((idx, existing)) = guard.as_ref()
+                    && *idx >= start_index
+                    && existing.helper.is_alive()
+                {
+                    return Ok((
+                        *idx,
+                        LocalTts {
+                            helper: existing.helper.clone(),
+                            speaker: existing.speaker,
+                            speed: existing.speed,
+                        },
+                    ));
                 }
                 let reuse_helper = guard
                     .as_ref()
@@ -1963,10 +1960,10 @@ mod imp {
         }
 
         fn invalidate_index(&self, failed_idx: usize) {
-            if let Ok(mut guard) = self.loaded.lock() {
-                if guard.as_ref().is_some_and(|(idx, _)| *idx == failed_idx) {
-                    *guard = None;
-                }
+            if let Ok(mut guard) = self.loaded.lock()
+                && guard.as_ref().is_some_and(|(idx, _)| *idx == failed_idx)
+            {
+                *guard = None;
             }
         }
     }
@@ -2377,21 +2374,17 @@ mod imp {
         let _ = std::thread::Builder::new()
             .name("voice-builtin-autostart".into())
             .spawn(move || {
-                if start_feedback_laya {
-                    if let Err(err) = builtin.ensure_laya_running(false) {
-                        eprintln!("[moss-desktop] 本地 Laya 决策服务自动启动失败：{err}");
-                        builtin.diagnostics.push(local_jev_failure(
-                            "MOSS 启动时自动拉起本地 Jev 决策服务失败",
-                            &err,
-                        ));
-                    }
+                if start_feedback_laya && let Err(err) = builtin.ensure_laya_running(false) {
+                    eprintln!("[moss-desktop] 本地 Laya 决策服务自动启动失败：{err}");
+                    builtin.diagnostics.push(local_jev_failure(
+                        "MOSS 启动时自动拉起本地 Jev 决策服务失败",
+                        &err,
+                    ));
                 }
-                if start_voice {
-                    if let Err(error) = builtin.start() {
-                        eprintln!("[moss-desktop] 内置语音服务自动启动失败：{}", error.message);
-                        if let Ok(mut last) = builtin.last_error.lock() {
-                            *last = Some(error.message);
-                        }
+                if start_voice && let Err(error) = builtin.start() {
+                    eprintln!("[moss-desktop] 内置语音服务自动启动失败：{}", error.message);
+                    if let Ok(mut last) = builtin.last_error.lock() {
+                        *last = Some(error.message);
                     }
                 }
             });
@@ -3144,14 +3137,14 @@ mod imp {
                     *last = None;
                 }
             }
-            if self.should_run_local_laya() {
-                if let Err(err) = self.ensure_laya_running(false) {
-                    eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
-                    self.diagnostics.push(local_jev_failure(
-                        "开启内置语音时拉起本地 Jev 决策服务失败",
-                        &err,
-                    ));
-                }
+            if self.should_run_local_laya()
+                && let Err(err) = self.ensure_laya_running(false)
+            {
+                eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
+                self.diagnostics.push(local_jev_failure(
+                    "开启内置语音时拉起本地 Jev 决策服务失败",
+                    &err,
+                ));
             }
             Ok(())
         }
@@ -7335,9 +7328,11 @@ mod imp {
                 .unwrap();
             }
 
-            let mut voice_settings = moss_voice::VoiceSettings::default();
-            voice_settings.builtin_ws_port = ws_port;
-            voice_settings.builtin_http_port = http_port;
+            let mut voice_settings = moss_voice::VoiceSettings {
+                builtin_ws_port: ws_port,
+                builtin_http_port: http_port,
+                ..Default::default()
+            };
             voice_settings.builtin_models = BuiltinModels {
                 llm: Some(BuiltinProvider {
                     kind: ProviderKind::Openai,
@@ -7892,8 +7887,10 @@ mod imp {
             let host = Arc::new(
                 laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
             );
-            let mut voice_settings = moss_voice::VoiceSettings::default();
-            voice_settings.mode = VoiceMode::Official;
+            let mut voice_settings = moss_voice::VoiceSettings {
+                mode: VoiceMode::Official,
+                ..Default::default()
+            };
             voice_settings.builtin_local.jev_model = "laya_multilingual".into();
             voice_settings.builtin_local.jev_filter_enabled = true;
             moss_voice::settings::save_with_jev_feedback(

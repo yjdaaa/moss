@@ -47,6 +47,9 @@
 - 平台差异显式分支，不支持时返回明确原因。
 - 工具名、HTTP 路由、错误码、响应字段和用户可见文案都是契约：改动前更新 [Web API 契约](api-contracts.md) 与测试断言。
 - Web 服务默认只绑回环；非回环依赖配对鉴权。
+- 格式与静态检查（2026-11-07 用户同意加门禁）：Rust 用 `rustfmt` 默认规则（仓库不放 `rustfmt.toml`），提交前 `cargo fmt --all`；`cargo clippy --workspace --all-targets -- -D warnings` 必须零警告。只有复杂类型、枚举体积几项结构提示在根 `Cargo.toml` `[workspace.lints.clippy]` 放行，参数个数上限 10 写在 `clippy.toml`；新增 crate 要在自己的 `Cargo.toml` 写 `[lints] workspace = true`。确需例外时用带 `reason` 的 `#[expect(...)]`，不要整文件 `allow`。前端 `npm run lint`（`frontend/eslint.config.js`）零 error：Hooks 只能在组件顶层调用；需要“关闭即重置”的弹窗写成外层判断 `visible`、内层组件放 Hooks，不要在 Hooks 前 `return null`。`react-hooks/exhaustive-deps` 暂为 warning，逐步清理。
+- 纯格式化的大提交记入 `.git-blame-ignore-revs`，本机执行一次 `git config blame.ignoreRevsFile .git-blame-ignore-revs`。
+- 测试里按源码文本断言时，正则要容忍 rustfmt 可能加的空白（如 `,\s*`），不要依赖紧凑写法。
 
 ## 文档
 
@@ -62,4 +65,5 @@
 - [ ] 外部效果使用 mock / `FakeGrbl`，未连接真实设备。
 - [ ] 测试不读写系统凭据库：会经过 `laser-runtime` 家居令牌封存的 crate，须在 `[dev-dependencies]` 里给 `laser-runtime` 开 `test-memory-secret-store`（macOS 上改用进程内主密钥，不碰登录钥匙串；该 feature 不得出现在正式依赖中，2026-11-05）。
 - [ ] 未提交 `.env`、运行目录、构建产物或个人配置。
+- [ ] `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cd frontend; npm run lint` 通过。
 - [ ] 已按 `AGENTS.md` 运行验证，跳过项写明原因；CHANGELOG 与相关 `docs/` 已更新。

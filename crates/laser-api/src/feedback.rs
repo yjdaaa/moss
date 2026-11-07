@@ -617,7 +617,8 @@ impl ApiService {
                     .or_else(|| workflow["artifacts"]["image_file"].as_str())
                     .ok_or("任务素材缺失")?;
                 let root = self.generated_root.as_ref().ok_or("生成目录未配置")?;
-                let file = resolve_preview_file(std::path::Path::new(file), &[root.clone()])?;
+                let file =
+                    resolve_preview_file(std::path::Path::new(file), std::slice::from_ref(root))?;
                 let bytes = std::fs::read(file).map_err(|_| "任务素材读取失败")?;
                 input.insert(
                     "image_data_url".into(),

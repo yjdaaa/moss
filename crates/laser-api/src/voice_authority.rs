@@ -57,10 +57,10 @@ impl crate::ApiService {
     }
 
     pub fn unregister_voice_session(&self, session: &str) {
-        if let Ok(mut sessions) = self.voice_sessions.lock() {
-            if let Some(lease) = sessions.remove(session) {
-                lease.allowed.store(false, Ordering::Release);
-            }
+        if let Ok(mut sessions) = self.voice_sessions.lock()
+            && let Some(lease) = sessions.remove(session)
+        {
+            lease.allowed.store(false, Ordering::Release);
         }
     }
 

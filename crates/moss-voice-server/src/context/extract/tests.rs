@@ -511,7 +511,7 @@ async fn nv19_personal_mode_unknown_speaker_never_falls_back_preference_to_devic
 fn nv19_operation_parser_limits_count_and_sanitizes_op_names() {
     let many = format!(
         "{{\"operations\":[{}]}}",
-        vec![r#"{"op":"add","category":"preference","content":"a"}"#; 10].join(",")
+        [r#"{"op":"add","category":"preference","content":"a"}"#; 10].join(",")
     );
     let Parsed { adds, skipped, .. } = parse_operations(&many, &[]).unwrap();
     assert_eq!(adds.len(), MAX_OPERATIONS);

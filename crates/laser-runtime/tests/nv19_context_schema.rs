@@ -42,7 +42,7 @@ fn count(db: &RuntimeDb, sql: &str) -> i64 {
 
 #[test]
 fn nv19_v10_upgrades_v9_database_and_keeps_nv10_summaries() {
-    assert!(SCHEMA_VERSION >= 12, "NV19 表在 schema 10～12 引入");
+    const { assert!(SCHEMA_VERSION >= 12, "NV19 表在 schema 10～12 引入") };
     let db = RuntimeDb::open_memory().unwrap();
     db.connection
         .execute_batch("DROP TABLE context_knowledge_fts; DROP TABLE context_knowledge_roots; DROP TABLE context_knowledge_dirs; DROP TABLE context_knowledge_files; DROP TABLE context_memories_fts; DROP TABLE context_memories; DROP TABLE context_extraction_runs; DELETE FROM schema_version WHERE version>=10;")

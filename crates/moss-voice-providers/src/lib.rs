@@ -170,9 +170,9 @@ pub fn scrub_diagnostic_text(raw: &str) -> String {
             out.push(' ');
         }
         let lower = token.to_ascii_lowercase();
-        let masked = if previous_bearer && !token.is_empty() {
-            "[REDACTED]".to_owned()
-        } else if lower.starts_with("sk-")
+        // `Bearer` 后面紧跟的令牌，或本身看起来像密钥的片段，一律遮掉
+        let masked = if (previous_bearer && !token.is_empty())
+            || lower.starts_with("sk-")
             || lower.contains("token=")
             || lower.contains("api_key")
             || lower.contains("apikey")
@@ -323,10 +323,10 @@ impl AsrStream {
 
     /// 收音期间等待下一次中间结果；提供方没有此能力或已关闭时不忙轮询。
     pub async fn next_interim(&mut self) -> String {
-        if let Some(interim) = &mut self.interim {
-            if interim.changed().await.is_ok() {
-                return interim.borrow_and_update().clone();
-            }
+        if let Some(interim) = &mut self.interim
+            && interim.changed().await.is_ok()
+        {
+            return interim.borrow_and_update().clone();
         }
         std::future::pending().await
     }

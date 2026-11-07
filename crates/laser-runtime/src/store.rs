@@ -103,14 +103,13 @@ impl RuntimeStore for MemoryStore {
     fn put(&self, record: &StoredRecord) -> Result<(), SchemaError> {
         let mut records = self.records.lock().expect("memory store lock");
         let mut record = record.clone();
-        if record.kind == RecordKind::Workflow {
-            if let Some(history) = records
+        if record.kind == RecordKind::Workflow
+            && let Some(history) = records
                 .get(&(record.kind, record.id.clone()))
                 .and_then(|previous| previous.payload.get("feedback_history"))
                 .filter(|v| v.is_array())
-            {
-                record.payload["feedback_history"] = history.clone();
-            }
+        {
+            record.payload["feedback_history"] = history.clone();
         }
         records.insert((record.kind, record.id.clone()), record);
         Ok(())
@@ -383,10 +382,10 @@ fn merge_feedback(payload: &mut Value, feedback: &Value) {
 }
 
 pub fn coerce_numeric_to_f64(v: &mut Value) {
-    if let Value::String(s) = v {
-        if let Ok(num) = s.trim().parse::<f64>() {
-            *v = serde_json::json!(num);
-        }
+    if let Value::String(s) = v
+        && let Ok(num) = s.trim().parse::<f64>()
+    {
+        *v = serde_json::json!(num);
     }
 }
 
@@ -395,10 +394,10 @@ pub fn coerce_numeric_to_i64(v: &mut Value) {
         if let Ok(num) = s.trim().parse::<f64>() {
             *v = serde_json::json!(num.trunc() as i64);
         }
-    } else if let Value::Number(n) = v {
-        if let Some(f) = n.as_f64() {
-            *v = serde_json::json!(f.trunc() as i64);
-        }
+    } else if let Value::Number(n) = v
+        && let Some(f) = n.as_f64()
+    {
+        *v = serde_json::json!(f.trunc() as i64);
     }
 }
 
@@ -505,10 +504,9 @@ pub fn decode_text_task(payload: &Value) -> Result<TextTaskRecord, (bool, String
     if let Some(opts) = normalized
         .get_mut("generation_options")
         .and_then(Value::as_object_mut)
+        && let Some(tt) = opts.get_mut("trim_tolerance")
     {
-        if let Some(tt) = opts.get_mut("trim_tolerance") {
-            coerce_numeric_to_f64(tt);
-        }
+        coerce_numeric_to_f64(tt);
     }
     match serde_json::from_value::<TextTaskRecord>(normalized) {
         Ok(record) => Ok(record),
@@ -524,23 +522,21 @@ pub fn decode_calibration(payload: &Value) -> Result<CalibrationRecord, (bool, S
     if let Some(conn) = normalized
         .get_mut("connection")
         .and_then(Value::as_object_mut)
+        && let Some(timeout) = conn.get_mut("network_timeout")
     {
-        if let Some(timeout) = conn.get_mut("network_timeout") {
-            coerce_numeric_to_f64(timeout);
-        }
+        coerce_numeric_to_f64(timeout);
     }
     if let Some(cell) = normalized
         .get_mut("selected_cell")
         .and_then(Value::as_object_mut)
+        && let Some(cell_num) = cell.get_mut("cell_number")
     {
-        if let Some(cell_num) = cell.get_mut("cell_number") {
-            coerce_numeric_to_i64(cell_num);
-        }
+        coerce_numeric_to_i64(cell_num);
     }
-    if normalized.get("selected_cell_number").is_none() {
-        if let Some(cell_num) = normalized.pointer("/selected_cell/cell_number").cloned() {
-            normalized["selected_cell_number"] = cell_num;
-        }
+    if normalized.get("selected_cell_number").is_none()
+        && let Some(cell_num) = normalized.pointer("/selected_cell/cell_number").cloned()
+    {
+        normalized["selected_cell_number"] = cell_num;
     }
     match serde_json::from_value::<CalibrationRecord>(normalized) {
         Ok(record) => Ok(record),

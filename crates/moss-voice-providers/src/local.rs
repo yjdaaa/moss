@@ -60,10 +60,10 @@ impl Inner {
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
         }
-        if let Ok(mut child) = self.child.lock() {
-            if let Some(child) = child.as_mut() {
-                let _ = child.kill();
-            }
+        if let Ok(mut child) = self.child.lock()
+            && let Some(child) = child.as_mut()
+        {
+            let _ = child.kill();
         }
     }
 }

@@ -1601,19 +1601,18 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         let msg = self.explain(&line);
                         return Err(format!("固件计算文件哈希失败: {msg}"));
                     }
-                    if let Some(val_idx) = line.find("\"value\"") {
-                        if let Some(colon) = line[val_idx..].find(':') {
-                            let after = &line[val_idx + colon + 1..];
-                            let cleaned = after
-                                .trim_start_matches(|c: char| c.is_whitespace() || c == '"')
-                                .split(|c: char| c == '"' || c == ',' || c == '}')
-                                .next()
-                                .unwrap_or("")
-                                .trim();
-                            if cleaned.len() == 64 && cleaned.bytes().all(|b| b.is_ascii_hexdigit())
-                            {
-                                got_hash = Some(cleaned.to_ascii_lowercase());
-                            }
+                    if let Some(val_idx) = line.find("\"value\"")
+                        && let Some(colon) = line[val_idx..].find(':')
+                    {
+                        let after = &line[val_idx + colon + 1..];
+                        let cleaned = after
+                            .trim_start_matches(|c: char| c.is_whitespace() || c == '"')
+                            .split(['"', ',', '}'])
+                            .next()
+                            .unwrap_or("")
+                            .trim();
+                        if cleaned.len() == 64 && cleaned.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            got_hash = Some(cleaned.to_ascii_lowercase());
                         }
                     }
                 }
@@ -3593,11 +3592,10 @@ control:
         let fake = FakeGrbl::new(["ok".to_string()]);
         let mut device = DeviceConnection::new(fake);
         let zeros = "0".repeat(64);
-        assert_eq!(
-            device
+        assert!(
+            !device
                 .verify_sd_file_hash("/sd/x.nc", &zeros, Duration::from_secs(1))
-                .unwrap(),
-            false
+                .unwrap()
         );
     }
 

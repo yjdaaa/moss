@@ -137,29 +137,28 @@ impl ShutdownCoordinator {
         }
 
         // 步骤 2: 任务安全清零落库
-        if let Ok(db_guard) = self.db.lock() {
-            if let Some(db_arc) = db_guard.as_ref() {
-                if let Ok(db) = db_arc.lock() {
-                    let _ = db.connection.execute(
-                        "UPDATE jobs SET status='failed', finished_at=unixepoch(),
+        if let Ok(db_guard) = self.db.lock()
+            && let Some(db_arc) = db_guard.as_ref()
+            && let Ok(db) = db_arc.lock()
+        {
+            let _ = db.connection.execute(
+                "UPDATE jobs SET status='failed', finished_at=unixepoch(),
                          payload=json_set(payload,'$.result.detail','host 退出中断，任务安全终止')
                          WHERE status IN ('running', 'pending', 'queued')",
-                        [],
-                    );
-                    let _ = db.connection.execute(
-                        "UPDATE workflows SET status='failed', updated_at=unixepoch(),
+                [],
+            );
+            let _ = db.connection.execute(
+                "UPDATE workflows SET status='failed', updated_at=unixepoch(),
                          payload=json_set(payload,'$.detail','host 退出中断，任务安全终止')
                          WHERE status IN ('sending', 'processing')",
-                        [],
-                    );
-                    let _ = db.connection.execute(
-                        "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
+                [],
+            );
+            let _ = db.connection.execute(
+                "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
                          payload=json_set(payload,'$.detail','host 退出中断，任务安全终止')
                          WHERE status IN ('sending', 'processing')",
-                        [],
-                    );
-                }
-            }
+                [],
+            );
         }
 
         let elapsed = start.elapsed();
@@ -1584,10 +1583,9 @@ mod tests {
             let ok = coord_runner.trigger_shutdown();
             let _ = tx.send(ok);
         });
-        assert_eq!(
+        assert!(
             rx.recv_timeout(Duration::from_secs(2))
-                .expect("trigger_shutdown must not self-deadlock on raw_handles mutex"),
-            true
+                .expect("trigger_shutdown must not self-deadlock on raw_handles mutex")
         );
         assert_eq!(fake.realtime(), vec![0x18]);
     }

@@ -749,10 +749,10 @@ fn words(line: &str) -> Vec<(char, f64)> {
             {
                 i += 1;
             }
-            if i > start + 1 {
-                if let Ok(value) = line[start + 1..i].parse() {
-                    out.push((letter, value));
-                }
+            if i > start + 1
+                && let Ok(value) = line[start + 1..i].parse()
+            {
+                out.push((letter, value));
             }
         } else {
             i += 1;
@@ -1117,10 +1117,10 @@ pub fn detect_gcode_power_scale(text: &str) -> Option<f64> {
                 .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '.')
                 .collect();
-            if let Ok(val) = num_str.parse::<f64>() {
-                if val > 0.0 {
-                    return Some(val);
-                }
+            if let Ok(val) = num_str.parse::<f64>()
+                && val > 0.0
+            {
+                return Some(val);
             }
         }
     }

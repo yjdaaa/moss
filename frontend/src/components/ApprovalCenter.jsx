@@ -5,7 +5,7 @@ import { fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
 import { showAlert } from "../appDialog.js";
 import { onEmergencyStop } from "../estopBus.js";
-import { extractWorkflowInfo, normalizeWorkflowStatus, TERMINAL_STATUSES } from "../state/statusNormalize.js";
+import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import {
   APPROVAL_POLL_MS,
   agentApprovalPreview,

@@ -48,7 +48,7 @@ impl VadWorker {
         config: VadConfig,
     ) -> Result<Self, String> {
         WORKERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < 16).then_some(n + 1)
             })
             .map_err(|_| "本地语音工作线程已达上限")?;

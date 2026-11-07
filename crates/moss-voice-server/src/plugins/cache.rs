@@ -38,14 +38,13 @@ impl PluginCache {
         }
         let value = fetch()?;
         let mut entries = self.values.lock().map_err(|_| FetchError::Network)?;
-        if entries.len() >= MAX_ENTRIES {
-            if let Some(oldest) = entries
+        if entries.len() >= MAX_ENTRIES
+            && let Some(oldest) = entries
                 .iter()
                 .min_by_key(|(_, v)| v.0)
                 .map(|(key, _)| key.clone())
-            {
-                entries.remove(&oldest);
-            }
+        {
+            entries.remove(&oldest);
         }
         entries.insert(key.to_string(), (Instant::now(), value.clone()));
         Ok(value)
@@ -73,10 +72,10 @@ mod tests {
             n.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({"x":1}))
         };
-        cache.fetch("revision1", &load).unwrap();
-        cache.fetch("revision1", &load).unwrap();
+        cache.fetch("revision1", load).unwrap();
+        cache.fetch("revision1", load).unwrap();
         assert_eq!(n.load(Ordering::SeqCst), 1);
-        cache.fetch("revision2", &load).unwrap();
+        cache.fetch("revision2", load).unwrap();
         assert_eq!(n.load(Ordering::SeqCst), 2);
         assert!(
             cache

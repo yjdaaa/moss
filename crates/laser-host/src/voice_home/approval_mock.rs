@@ -114,10 +114,9 @@ impl MockHomeApprovals {
             pending.remove(&key);
             return Err(HomeDeny::Cancelled);
         }
-        let verdict = catalog.revalidate_plan(&entry.plan, &entry.permit);
-        if verdict.is_err() {
+        if let Err(error) = catalog.revalidate_plan(&entry.plan, &entry.permit) {
             pending.remove(&key);
-            return Err(verdict.unwrap_err());
+            return Err(error);
         }
         // Exactly one consumer can receive the inert plan. Actual control
         // is still blocked by execute_without_home_control_approval.

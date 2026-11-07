@@ -1,24 +1,17 @@
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import React, { useState, useEffect, useRef } from "react";
 import {
-  Layers,
   Search,
   Plus,
   Bookmark,
   Download,
   Upload,
   Save,
-  Trash2,
-  Copy,
   Grid,
   Send,
-  CheckCircle2,
-  AlertTriangle,
-  Info,
-  Clock,
   Settings2,
 } from "lucide-react";
-import { getJson, postJson, fetchPreviewBlobUrl } from "../api/client.js";
+import { getJson, postJson } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
 import { showAlert } from "../appDialog.js";
@@ -26,7 +19,7 @@ import { exportFile } from "../saveFile.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 
 export function MaterialLabPage({ onNavigate }) {
-  const [bootstrapData, setBootstrapData] = useState(null);
+  const [, setBootstrapData] = useState(null);
   const [materials, setMaterials] = useState({});
   const [sourcePath, setSourcePath] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -53,7 +46,7 @@ export function MaterialLabPage({ onNavigate }) {
   const [editorStatus, setEditorStatus] = useState("");
 
   // Calibration Matrix State
-  const [matrixLaserMode, setMatrixLaserMode] = useState("engrave");
+  const [matrixLaserMode] = useState("engrave");
   const [matrixRows, setMatrixRows] = useState(5);
   const [matrixCols, setMatrixCols] = useState(5);
   const [matrixPowerMin, setMatrixPowerMin] = useState(100);

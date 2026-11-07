@@ -419,10 +419,11 @@ impl AuthManager {
         let mut tokens = HashMap::new();
         if let Some(obj) = saved.get("lan_paired_tokens").and_then(|v| v.as_object()) {
             for (k, v) in obj.iter().take(64) {
-                if k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    if let Some(id) = v.as_str() {
-                        tokens.insert(k.to_ascii_lowercase(), id.to_owned());
-                    }
+                if k.len() == 64
+                    && k.bytes().all(|b| b.is_ascii_hexdigit())
+                    && let Some(id) = v.as_str()
+                {
+                    tokens.insert(k.to_ascii_lowercase(), id.to_owned());
                 }
             }
         }
@@ -569,10 +570,10 @@ impl AuthManager {
             let token = base64::engine::general_purpose::STANDARD.encode(bytes);
             let token_hash = hex::encode(Sha256::digest(bytes));
             let pairing_id = format!("pair-{}", &token_hash[..12]);
-            if state.tokens.len() >= 64 {
-                if let Some(first_key) = state.tokens.keys().next().cloned() {
-                    state.tokens.remove(&first_key);
-                }
+            if state.tokens.len() >= 64
+                && let Some(first_key) = state.tokens.keys().next().cloned()
+            {
+                state.tokens.remove(&first_key);
             }
             state.tokens.insert(token_hash, pairing_id.clone());
             (token, pairing_id, state.tokens.clone())
@@ -604,6 +605,12 @@ impl AuthManager {
             .get(&hash)
             .cloned()
             .ok_or(AuthError::Unauthorized)
+    }
+}
+
+impl Default for AuthManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -639,24 +646,23 @@ pub fn resolve_preview_file(
     // 1. 如果请求的是相对文件名或相对子路径，优先在允许的根目录列表中拼接查找
     for root in allowed_roots {
         let candidate = root.join(requested);
-        if let Ok(resolved) = std::fs::canonicalize(&candidate) {
-            if let Ok(canonical_root) = std::fs::canonicalize(root) {
-                if resolved.starts_with(canonical_root) {
-                    return Ok(resolved);
-                }
-            }
+        if let Ok(resolved) = std::fs::canonicalize(&candidate)
+            && let Ok(canonical_root) = std::fs::canonicalize(root)
+            && resolved.starts_with(canonical_root)
+        {
+            return Ok(resolved);
         }
     }
 
     // 2. 如果请求的是完整路径，校验是否位于任一允许的根目录内
-    if let Ok(resolved) = std::fs::canonicalize(requested) {
-        if allowed_roots.iter().any(|root| {
+    if let Ok(resolved) = std::fs::canonicalize(requested)
+        && allowed_roots.iter().any(|root| {
             std::fs::canonicalize(root)
                 .ok()
                 .is_some_and(|canonical_root| resolved.starts_with(canonical_root))
-        }) {
-            return Ok(resolved);
-        }
+        })
+    {
+        return Ok(resolved);
     }
 
     Err("文件不存在或不在允许的预览目录内".into())
@@ -676,22 +682,21 @@ fn resolve_gcode_file(
     }
     for root in allowed_roots {
         let candidate = root.join(requested);
-        if let Ok(resolved) = std::fs::canonicalize(&candidate) {
-            if let Ok(canonical_root) = std::fs::canonicalize(root) {
-                if resolved.starts_with(canonical_root) {
-                    return Ok(resolved);
-                }
-            }
+        if let Ok(resolved) = std::fs::canonicalize(&candidate)
+            && let Ok(canonical_root) = std::fs::canonicalize(root)
+            && resolved.starts_with(canonical_root)
+        {
+            return Ok(resolved);
         }
     }
-    if let Ok(resolved) = std::fs::canonicalize(requested) {
-        if allowed_roots.iter().any(|root| {
+    if let Ok(resolved) = std::fs::canonicalize(requested)
+        && allowed_roots.iter().any(|root| {
             std::fs::canonicalize(root)
                 .ok()
                 .is_some_and(|canonical_root| resolved.starts_with(canonical_root))
-        }) {
-            return Ok(resolved);
-        }
+        })
+    {
+        return Ok(resolved);
     }
     Err("G-code 刀路文件不存在或不在允许目录内".into())
 }
@@ -751,7 +756,7 @@ pub fn save_upload(
         .collect::<String>();
     let filename = format!(
         "{unix_seconds}_{}_{stem}{suffix}",
-        hex::encode(&digest)[..10].to_string()
+        &hex::encode(digest)[..10]
     );
     std::fs::create_dir_all(upload_root).map_err(|error| error.to_string())?;
     let destination = upload_root.join(&filename);
@@ -1362,19 +1367,19 @@ impl ApiService {
             }
         };
         let target = spec.describe();
-        if let Ok(jobs) = self.active_jobs.lock() {
-            if let Some(job) = jobs.values().find(|job| job.target == target) {
-                return http_json(
-                    409,
-                    failure(
-                        format!(
-                            "设备 {target} 正在执行 {}，请等待完成或先取消",
-                            job.workflow_id
-                        ),
-                        Some(serde_json::json!({"error_code": "device_busy"})),
+        if let Ok(jobs) = self.active_jobs.lock()
+            && let Some(job) = jobs.values().find(|job| job.target == target)
+        {
+            return http_json(
+                409,
+                failure(
+                    format!(
+                        "设备 {target} 正在执行 {}，请等待完成或先取消",
+                        job.workflow_id
                     ),
-                );
-            }
+                    Some(serde_json::json!({"error_code": "device_busy"})),
+                ),
+            );
         }
         let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
             let open_mutex = target_open_mutex(&self.target_open_locks, &target);
@@ -1786,16 +1791,15 @@ impl ApiService {
             .get("material")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
+            && let Err(error) = validate_material_safety(material)
         {
-            if let Err(error) = validate_material_safety(material) {
-                return Err((
-                    400,
-                    failure(
-                        error,
-                        Some(serde_json::json!({"error_code": "material_safety_blocked"})),
-                    ),
-                ));
-            }
+            return Err((
+                400,
+                failure(
+                    error,
+                    Some(serde_json::json!({"error_code": "material_safety_blocked"})),
+                ),
+            ));
         }
         use std::sync::atomic::Ordering;
         let spec = self.connection_spec_from_request(object).map_err(|e| {
@@ -3101,58 +3105,59 @@ impl ApiService {
                         .and_then(|a| a.get("thickness_mm"))
                         .and_then(serde_json::Value::as_f64)
                 });
-            if let (Some(mat), Some(thick)) = (material, thickness) {
-                if !mat.is_empty() && thick > 0.0 {
-                    let laser_mode = input
-                        .and_then(|i| i.get("laser_mode"))
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("engrave");
-                    let engraving_mode = input
-                        .and_then(|i| i.get("engraving_mode"))
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("raster");
-                    let rec = laser_core::material::recommend_in_library(
-                        &effective_library,
-                        mat,
-                        thick,
-                        laser_mode,
-                        if laser_mode.eq_ignore_ascii_case("cut") {
-                            None
-                        } else {
-                            Some(engraving_mode)
-                        },
-                        1000.0,
-                    );
-                    let params = if let Some(rec) = rec {
-                        serde_json::json!({
-                            "laser_min_power": rec.params.laser_min_power,
-                            "laser_max_power": rec.params.laser_max_power,
-                            "feed_rate": rec.params.feed_rate,
-                            "travel_rate": rec.params.travel_rate,
-                            "threshold": rec.params.threshold,
-                            "passes": rec.params.passes,
-                            "pixel_size_mm": rec.params.pixel_size_mm
-                        })
+            if let (Some(mat), Some(thick)) = (material, thickness)
+                && !mat.is_empty()
+                && thick > 0.0
+            {
+                let laser_mode = input
+                    .and_then(|i| i.get("laser_mode"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("engrave");
+                let engraving_mode = input
+                    .and_then(|i| i.get("engraving_mode"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("raster");
+                let rec = laser_core::material::recommend_in_library(
+                    &effective_library,
+                    mat,
+                    thick,
+                    laser_mode,
+                    if laser_mode.eq_ignore_ascii_case("cut") {
+                        None
                     } else {
-                        serde_json::json!({
-                            "laser_min_power": 0,
-                            "laser_max_power": 340,
-                            "feed_rate": 1600,
-                            "travel_rate": 3000,
-                            "threshold": -1,
-                            "passes": 1,
-                            "pixel_size_mm": 0.1
-                        })
-                    };
-                    return Some(serde_json::json!({
-                        "workflow_id": wf.get("workflow_id").and_then(serde_json::Value::as_str).unwrap_or(""),
-                        "material": mat,
-                        "thickness_mm": thick,
-                        "laser_mode": laser_mode,
-                        "engraving_mode": engraving_mode,
-                        "params": params
-                    }));
-                }
+                        Some(engraving_mode)
+                    },
+                    1000.0,
+                );
+                let params = if let Some(rec) = rec {
+                    serde_json::json!({
+                        "laser_min_power": rec.params.laser_min_power,
+                        "laser_max_power": rec.params.laser_max_power,
+                        "feed_rate": rec.params.feed_rate,
+                        "travel_rate": rec.params.travel_rate,
+                        "threshold": rec.params.threshold,
+                        "passes": rec.params.passes,
+                        "pixel_size_mm": rec.params.pixel_size_mm
+                    })
+                } else {
+                    serde_json::json!({
+                        "laser_min_power": 0,
+                        "laser_max_power": 340,
+                        "feed_rate": 1600,
+                        "travel_rate": 3000,
+                        "threshold": -1,
+                        "passes": 1,
+                        "pixel_size_mm": 0.1
+                    })
+                };
+                return Some(serde_json::json!({
+                    "workflow_id": wf.get("workflow_id").and_then(serde_json::Value::as_str).unwrap_or(""),
+                    "material": mat,
+                    "thickness_mm": thick,
+                    "laser_mode": laser_mode,
+                    "engraving_mode": engraving_mode,
+                    "params": params
+                }));
             }
         }
         None
@@ -3191,15 +3196,15 @@ impl ApiService {
                 .spawn(move || {
                     let _permit = permit;
                     let source = peer.ip().to_string();
-                    if let Ok(request) = read_http_request(&mut stream) {
-                        if !request.is_empty() {
-                            let response = missing_host_rejection(&request, loopback)
-                                .unwrap_or_else(|| {
-                                    service.handle_http_from(&request, loopback, &source, None)
-                                });
-                            let _ = stream.write_all(&response);
-                            let _ = stream.flush();
-                        }
+                    if let Ok(request) = read_http_request(&mut stream)
+                        && !request.is_empty()
+                    {
+                        let response =
+                            missing_host_rejection(&request, loopback).unwrap_or_else(|| {
+                                service.handle_http_from(&request, loopback, &source, None)
+                            });
+                        let _ = stream.write_all(&response);
+                        let _ = stream.flush();
                     }
                 });
         }
@@ -3246,7 +3251,7 @@ fn try_admit_http_connection(active: &std::sync::atomic::AtomicUsize, loopback: 
         MAX_CONCURRENT_HTTP - LOOPBACK_RESERVED_HTTP
     };
     active
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
             |n| (n < limit).then_some(n + 1),
@@ -3302,10 +3307,10 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
                 header_end = Some(pos + 4);
                 let head = String::from_utf8_lossy(&buffer[..pos]);
                 for line in head.lines() {
-                    if let Some((k, v)) = line.split_once(':') {
-                        if k.trim().eq_ignore_ascii_case("content-length") {
-                            content_length = v.trim().parse::<usize>().ok();
-                        }
+                    if let Some((k, v)) = line.split_once(':')
+                        && k.trim().eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = v.trim().parse::<usize>().ok();
                     }
                 }
             } else if buffer.len() > MAX_HEADER_SIZE {
@@ -3890,16 +3895,15 @@ impl ApiService {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
             };
-            if let Some(endpoint) = object.get("jev_endpoint") {
-                if !endpoint
+            if let Some(endpoint) = object.get("jev_endpoint")
+                && !endpoint
                     .as_str()
                     .is_some_and(|s| s.trim().is_empty() || s.trim() == DEFAULT_JEV_ENDPOINT)
-                {
-                    return http_json(
-                        400,
-                        failure("Jev 仅支持固定 OpenRouter Decisions 地址", None),
-                    );
-                }
+            {
+                return http_json(
+                    400,
+                    failure("Jev 仅支持固定 OpenRouter Decisions 地址", None),
+                );
             }
             if object.get("jev_enabled").is_some_and(|v| !v.is_boolean())
                 || object.get("jev_api_key").is_some_and(|v| !v.is_string())
@@ -3929,7 +3933,7 @@ impl ApiService {
             // 先校验全部字段，再一次写入 settings.json；写不进去就报错，不能显示“已保存”
             let mut file_changes: Vec<(&str, Option<serde_json::Value>)> = Vec::new();
             if let Some(port) = object.get("web_port").and_then(|v| v.as_u64()) {
-                if port < 1024 || port > 65535 {
+                if !(1024..=65535).contains(&port) {
                     return http_json(400, failure("端口号必须在 1024 ~ 65535 之间", None));
                 }
                 file_changes.push(("web_port", Some(serde_json::json!(port))));
@@ -4060,19 +4064,16 @@ impl ApiService {
                 .get("jev_delete_api_key")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false)
+                && let Some(db) = self.runtime_db.as_ref()
+                && let Err(error) = db
+                    .lock()
+                    .map_err(|_| "运行时数据库锁失败".to_owned())
+                    .and_then(|db| {
+                        db.delete_secret(JEV_API_KEY_SECRET)
+                            .map_err(|error| format!("{error:?}"))
+                    })
             {
-                if let Some(db) = self.runtime_db.as_ref() {
-                    if let Err(error) = db
-                        .lock()
-                        .map_err(|_| "运行时数据库锁失败".to_owned())
-                        .and_then(|db| {
-                            db.delete_secret(JEV_API_KEY_SECRET)
-                                .map_err(|error| format!("{error:?}"))
-                        })
-                    {
-                        return http_json(500, failure(error, None));
-                    }
-                }
+                return http_json(500, failure(error, None));
             }
             return http_json(
                 200,
@@ -4142,7 +4143,7 @@ impl ApiService {
         }
         if method == "GET" && route == "/preview" {
             let query = path.split_once('?').map(|(_, value)| value).unwrap_or("");
-            let requested = query_param(query, "path").map(|value| std::path::PathBuf::from(value));
+            let requested = query_param(query, "path").map(std::path::PathBuf::from);
             let Some(requested) = requested else {
                 return http_json(404, failure("缺少 path", None));
             };
@@ -4387,10 +4388,10 @@ impl ApiService {
                     Ok(authority) => authority,
                     Err((status, body)) => return http_json(status, body),
                 };
-                if let approval::R3Authority::Approval(record) = &authority {
-                    if let Some(connection) = record.connection.as_ref() {
-                        apply_connection_to_safe_action(&mut args, connection);
-                    }
+                if let approval::R3Authority::Approval(record) = &authority
+                    && let Some(connection) = record.connection.as_ref()
+                {
+                    apply_connection_to_safe_action(&mut args, connection);
                 }
             }
             let job_id = object.get("job_id").and_then(serde_json::Value::as_str);
@@ -5039,15 +5040,15 @@ fn generate_text_artifacts(
             .unwrap_or(MACHINE_WORK_AREA_MM)
     };
     let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
-    if let Ok(Some(extents)) = laser_core::gcode::motion_extents(&artifacts.gcode) {
-        if extents.width() > area_w + 0.01 || extents.height() > area_h + 0.01 {
-            return Err(format!(
-                "文字成品约 {:.1} × {:.1} mm，超出机器幅面 {area_w:.0} × {area_h:.0} mm，请减小字号（当前 {:.1} mm）或减少字数",
-                extents.width(),
-                extents.height(),
-                artifacts.font_size_mm
-            ));
-        }
+    if let Ok(Some(extents)) = laser_core::gcode::motion_extents(&artifacts.gcode)
+        && (extents.width() > area_w + 0.01 || extents.height() > area_h + 0.01)
+    {
+        return Err(format!(
+            "文字成品约 {:.1} × {:.1} mm，超出机器幅面 {area_w:.0} × {area_h:.0} mm，请减小字号（当前 {:.1} mm）或减少字数",
+            extents.width(),
+            extents.height(),
+            artifacts.font_size_mm
+        ));
     }
     let gcode = feedback::repeat_generated(&artifacts.gcode, params.passes);
     let estimate = laser_core::gcode::estimate_time(&gcode, 3000.0);
@@ -6083,30 +6084,28 @@ fn finalize_workflow_record(
         }
         return;
     }
-    if let Ok(mut records) = workflows.lock() {
-        if let Some(record) = records.get_mut(workflow_id) {
-            let already_cancelled =
-                record.get("status").and_then(|v| v.as_str()) == Some("cancelled");
-            let final_status = if already_cancelled && status == "completed" {
-                "cancelled"
-            } else {
-                status
-            };
-            record["status"] = serde_json::Value::String(final_status.into());
-            record["updated_at"] = serde_json::json!(now);
-            record["send_result"] = send_result;
-        }
+    if let Ok(mut records) = workflows.lock()
+        && let Some(record) = records.get_mut(workflow_id)
+    {
+        let already_cancelled = record.get("status").and_then(|v| v.as_str()) == Some("cancelled");
+        let final_status = if already_cancelled && status == "completed" {
+            "cancelled"
+        } else {
+            status
+        };
+        record["status"] = serde_json::Value::String(final_status.into());
+        record["updated_at"] = serde_json::json!(now);
+        record["send_result"] = send_result;
     }
 }
 
 fn overlay_live_progress(payload: &mut serde_json::Value, jobs: &ActiveJobs, workflow_id: &str) {
-    if let Ok(jobs) = jobs.lock() {
-        if let Some(job) = jobs.get(workflow_id) {
-            if let Some(map) = payload.as_object_mut() {
-                map.insert("send_result".into(), job.live_send_result());
-                map.insert("status".into(), serde_json::Value::String("sending".into()));
-            }
-        }
+    if let Ok(jobs) = jobs.lock()
+        && let Some(job) = jobs.get(workflow_id)
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert("send_result".into(), job.live_send_result());
+        map.insert("status".into(), serde_json::Value::String("sending".into()));
     }
 }
 
@@ -6310,17 +6309,17 @@ fn handle_workflow_store_request(
                         http_json(200, success(stored.payload))
                     }
                     Ok(None) => {
-                        if let Ok(guard) = jobs.lock() {
-                            if let Some(job) = guard.get(&workflow_id) {
-                                return http_json(
-                                    200,
-                                    success(serde_json::json!({
-                                        "workflow_id": workflow_id,
-                                        "status": "sending",
-                                        "send_result": job.live_send_result(),
-                                    })),
-                                );
-                            }
+                        if let Ok(guard) = jobs.lock()
+                            && let Some(job) = guard.get(&workflow_id)
+                        {
+                            return http_json(
+                                200,
+                                success(serde_json::json!({
+                                    "workflow_id": workflow_id,
+                                    "status": "sending",
+                                    "send_result": job.live_send_result(),
+                                })),
+                            );
                         }
                         http_json(404, failure("未找到 workflow", None))
                     }
@@ -6875,17 +6874,17 @@ fn handle_workflow_request(
                 overlay_live_progress(&mut payload, jobs, &workflow_id);
                 return http_json(200, success(payload));
             }
-            if let Ok(guard) = jobs.lock() {
-                if let Some(job) = guard.get(&workflow_id) {
-                    return http_json(
-                        200,
-                        success(serde_json::json!({
-                            "workflow_id": workflow_id,
-                            "status": "sending",
-                            "send_result": job.live_send_result(),
-                        })),
-                    );
-                }
+            if let Ok(guard) = jobs.lock()
+                && let Some(job) = guard.get(&workflow_id)
+            {
+                return http_json(
+                    200,
+                    success(serde_json::json!({
+                        "workflow_id": workflow_id,
+                        "status": "sending",
+                        "send_result": job.live_send_result(),
+                    })),
+                );
             }
             http_json(404, failure("未找到 workflow", None))
         }
@@ -7673,42 +7672,39 @@ fn handle_material_manage(
                         .collect()
                 };
             }
-            if let Some(thicknesses_val) = object.get("thicknesses").filter(|v| v.is_object()) {
-                if let Ok(parsed_thicknesses) = serde_json::from_value::<
+            if let Some(thicknesses_val) = object.get("thicknesses").filter(|v| v.is_object())
+                && let Ok(parsed_thicknesses) = serde_json::from_value::<
                     std::collections::BTreeMap<String, laser_contracts::ThicknessEntry>,
                 >(thicknesses_val.clone())
-                {
-                    for (k, v) in parsed_thicknesses {
-                        let target_thick = entry.thicknesses.entry(k).or_default();
-                        if let Some(cut) = v.cut {
-                            target_thick.cut = Some(cut);
+            {
+                for (k, v) in parsed_thicknesses {
+                    let target_thick = entry.thicknesses.entry(k).or_default();
+                    if let Some(cut) = v.cut {
+                        target_thick.cut = Some(cut);
+                    }
+                    if let Some(engrave) = v.engrave {
+                        let target_engrave =
+                            target_thick.engrave.get_or_insert_with(Default::default);
+                        if let Some(raster) = engrave.raster {
+                            target_engrave.raster = Some(raster);
                         }
-                        if let Some(engrave) = v.engrave {
-                            let target_engrave =
-                                target_thick.engrave.get_or_insert_with(Default::default);
-                            if let Some(raster) = engrave.raster {
-                                target_engrave.raster = Some(raster);
-                            }
-                            if let Some(outline) = engrave.outline {
-                                target_engrave.outline = Some(outline);
-                            }
+                        if let Some(outline) = engrave.outline {
+                            target_engrave.outline = Some(outline);
                         }
                     }
-                    return match persist_material_library(settings, db, &library, || {
-                        sync_library_to_db(db, &library)
-                    }) {
-                        Ok(_) => {
-                            http_json(200, success(serde_json::json!({ "materials": library })))
-                        }
-                        Err(error) => http_json(
-                            500,
-                            failure(
-                                "保存材料库失败",
-                                Some(serde_json::json!({ "error": error })),
-                            ),
-                        ),
-                    };
                 }
+                return match persist_material_library(settings, db, &library, || {
+                    sync_library_to_db(db, &library)
+                }) {
+                    Ok(_) => http_json(200, success(serde_json::json!({ "materials": library }))),
+                    Err(error) => http_json(
+                        500,
+                        failure(
+                            "保存材料库失败",
+                            Some(serde_json::json!({ "error": error })),
+                        ),
+                    ),
+                };
             }
             let array_thicknesses: Vec<f64> = object
                 .get("thicknesses")
@@ -7883,14 +7879,13 @@ pub fn is_allowed_origin(
     if extra.iter().any(|item| item == origin) {
         return true;
     }
-    if let Some(host) = host_header.map(str::trim).filter(|host| !host.is_empty()) {
-        if origin
+    if let Some(host) = host_header.map(str::trim).filter(|host| !host.is_empty())
+        && origin
             .strip_prefix("http://")
             .or_else(|| origin.strip_prefix("https://"))
             .is_some_and(|rest| rest == host)
-        {
-            return true;
-        }
+    {
+        return true;
     }
     false
 }
@@ -7943,10 +7938,10 @@ fn host_name_without_port(host: &str) -> Option<&str> {
     if name.is_empty() || name == "[]" {
         return None;
     }
-    if let Some(port) = port {
-        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
+    if let Some(port) = port
+        && (port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
     }
     Some(name)
 }
@@ -7995,16 +7990,13 @@ fn primary_lan_ipv4() -> Option<std::net::Ipv4Addr> {
         "192.168.1.1:9",
         "172.16.0.1:9",
     ] {
-        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-            if socket.connect(probe).is_ok() {
-                if let Ok(addr) = socket.local_addr() {
-                    if let std::net::IpAddr::V4(ip) = addr.ip() {
-                        if is_usable_lan_v4(ip) {
-                            return Some(ip);
-                        }
-                    }
-                }
-            }
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
+            && socket.connect(probe).is_ok()
+            && let Ok(addr) = socket.local_addr()
+            && let std::net::IpAddr::V4(ip) = addr.ip()
+            && is_usable_lan_v4(ip)
+        {
+            return Some(ip);
         }
     }
     None
@@ -8726,12 +8718,13 @@ fn percent_decode(value: &str) -> String {
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                output.push(byte);
-                index += 3;
-                continue;
-            }
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16)
+        {
+            output.push(byte);
+            index += 3;
+            continue;
         }
         output.push(if bytes[index] == b'+' {
             b' '
@@ -9471,9 +9464,10 @@ mod tests {
                 let mut responses = self.responses.lock().unwrap();
                 if line == "$$" {
                     responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
-                } else if line == "$CD" || line.starts_with("$RI=") || line == "$X" {
-                    responses.push_back("ok".into());
-                } else if line == "G4 P0"
+                } else if line == "$CD"
+                    || line.starts_with("$RI=")
+                    || line == "$X"
+                    || line == "G4 P0"
                     || self
                         .remaining
                         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
@@ -12139,10 +12133,11 @@ Content-Length: 30
     fn normalize_golden_numbers(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Number(number) => {
-                if let Some(float) = number.as_f64() {
-                    if float.is_finite() && float.fract() == 0.0 {
-                        *value = serde_json::json!(float as i64);
-                    }
+                if let Some(float) = number.as_f64()
+                    && float.is_finite()
+                    && float.fract() == 0.0
+                {
+                    *value = serde_json::json!(float as i64);
                 }
             }
             serde_json::Value::Object(object) => {
@@ -12243,15 +12238,15 @@ Content-Length: 30
             &std::fs::read(&golden_path).expect("golden response must exist"),
         )
         .expect("golden response must be valid JSON");
-        if let Some(materials) = expected.get_mut("materials") {
-            if materials.get("version").is_none() {
-                let legacy_materials = materials.take();
-                *materials = serde_json::json!({
-                    "version": 1,
-                    "materials": legacy_materials,
-                    "power_scale": 1000
-                });
-            }
+        if let Some(materials) = expected.get_mut("materials")
+            && materials.get("version").is_none()
+        {
+            let legacy_materials = materials.take();
+            *materials = serde_json::json!({
+                "version": 1,
+                "materials": legacy_materials,
+                "power_scale": 1000
+            });
         }
         let mut actual = serde_json::json!({
             "status": status,
@@ -14265,8 +14260,7 @@ Content-Length: 30
         assert!(
             lines
                 .iter()
-                .filter(|line| line.starts_with("G0") || line.starts_with("G1"))
-                .last()
+                .rfind(|line| line.starts_with("G0") || line.starts_with("G1"))
                 .unwrap()
                 .starts_with("G0 X0 Y0"),
             "{lines:?}"

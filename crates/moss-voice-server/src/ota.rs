@@ -132,21 +132,20 @@ pub fn local_ip() -> Option<IpAddr> {
 
 /// 针对来访设备 `peer` 选择与其同网段的本机真实网卡地址。
 pub fn local_ip_for_peer(peer: IpAddr) -> Option<IpAddr> {
-    if !peer.is_loopback() && !peer.is_unspecified() {
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-            if socket.connect(SocketAddr::new(peer, 80)).is_ok() {
-                if let Ok(local) = socket.local_addr() {
-                    match local.ip() {
-                        IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4("", v4) => {
-                            return Some(IpAddr::V4(v4));
-                        }
-                        IpAddr::V6(v6) if !v6.is_loopback() && !v6.is_unspecified() => {
-                            return Some(IpAddr::V6(v6));
-                        }
-                        _ => {}
-                    }
-                }
+    if !peer.is_loopback()
+        && !peer.is_unspecified()
+        && let Ok(socket) = UdpSocket::bind("0.0.0.0:0")
+        && socket.connect(SocketAddr::new(peer, 80)).is_ok()
+        && let Ok(local) = socket.local_addr()
+    {
+        match local.ip() {
+            IpAddr::V4(v4) if !is_virtual_or_tunnel_ipv4("", v4) => {
+                return Some(IpAddr::V4(v4));
             }
+            IpAddr::V6(v6) if !v6.is_loopback() && !v6.is_unspecified() => {
+                return Some(IpAddr::V6(v6));
+            }
+            _ => {}
         }
     }
     local_ip()

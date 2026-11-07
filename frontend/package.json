@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1 --port 5177",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 5178",
+    "lint": "eslint .",
     "test": "node --test tests/*.test.mjs",
     "test:e2e": "node ../scripts/test_e2e.mjs"
   },
@@ -18,7 +19,12 @@
     "three": "^0.186.1"
   },
   "devDependencies": {
+    "@eslint/js": "9.17.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "9.17.0",
+    "eslint-plugin-react": "7.37.2",
+    "eslint-plugin-react-hooks": "5.1.0",
+    "globals": "15.14.0",
     "playwright": "^1.62.1",
     "vite": "^6.0.7"
   }

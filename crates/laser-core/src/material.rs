@@ -287,21 +287,23 @@ mod tests {
         let mut lib = builtin_material_library();
         let mut entry = laser_contracts::MaterialEntry::default();
         entry.aliases.push("custom-bamboo".into());
-        let mut th = laser_contracts::ThicknessEntry::default();
-        th.cut = Some(ParamCell {
-            laser_min_power: 0,
-            laser_max_power: 750,
-            feed_rate: 320,
-            travel_rate: 3000,
-            threshold: -1,
-            passes: 2,
-            pixel_size_mm: 0.1,
-            power_scale: Some(1000),
-            source: None,
-            notes: None,
-            updated_at: None,
-            extra: Default::default(),
-        });
+        let th = laser_contracts::ThicknessEntry {
+            cut: Some(ParamCell {
+                laser_min_power: 0,
+                laser_max_power: 750,
+                feed_rate: 320,
+                travel_rate: 3000,
+                threshold: -1,
+                passes: 2,
+                pixel_size_mm: 0.1,
+                power_scale: Some(1000),
+                source: None,
+                notes: None,
+                updated_at: None,
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        };
         entry.thicknesses.insert("5".into(), th);
         lib.materials.insert("特制楠竹".into(), entry);
 

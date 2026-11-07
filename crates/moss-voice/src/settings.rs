@@ -592,7 +592,7 @@ pub fn effective_asr_corrections(
             }
         }
     }
-    pairs.sort_by(|a, b| b.0.chars().count().cmp(&a.0.chars().count()));
+    pairs.sort_by_key(|pair| std::cmp::Reverse(pair.0.chars().count()));
     pairs
 }
 
@@ -1740,7 +1740,8 @@ mod tests {
             }],
         };
         assert!(valid.validate_offline().is_ok());
-        for enabled in [true] {
+        {
+            let enabled = true;
             let next = BuiltinHomeAssistant {
                 enabled,
                 ..valid.clone()

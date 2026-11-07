@@ -63,8 +63,7 @@ fn client() -> Result<reqwest::Client, ProviderError> {
                 .build()
                 .map_err(|_| "无法创建网络客户端".to_owned())
         })
-        .as_ref()
-        .map(Clone::clone)
+        .clone()
         .map_err(ProviderError::new)
 }
 

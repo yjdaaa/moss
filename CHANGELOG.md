@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 代码格式与静态检查纳入 CI，修复两个弹窗违反 Hooks 规则（2026-11-07）
+
+- **现象**：150 个 Rust 文件与 rustfmt 不一致，`cargo clippy` 约 280 条警告，CI 只跑测试不查格式与静态检查，问题越积越多；前端没有任何静态检查。配对认证弹窗 `AuthModal` 与材料编辑弹窗 `MaterialModal` 在 `visible` 为假时先 `return null` 再调用 `useState` / `useEffect`，违反“Hooks 只能在顶层调用”，只是碰巧没有报错，开发构建会打印 Hooks 顺序变化的警告。
+- **根因与修复**：全仓按 rustfmt 默认规则格式化（单独提交，记入 `.git-blame-ignore-revs`）；`cargo clippy --fix` 加手工修正清零警告，期间把 `migration.rs` 里五处重复的路径改写合成一个闭包，`root.rs` 锁文件显式 `truncate(false)`，测试里跨 `await` 的锁改为作用域释放。根 `Cargo.toml` 新增 `[workspace.lints.clippy]`（只放行 `type_complexity`、`large_enum_variant`、`result_large_err` 三项结构提示）与 `clippy.toml`（参数上限 10），各 crate `[lints] workspace = true`。前端新增 ESLint 9（`eslint.config.js`、`npm run lint`），`rules-of-hooks` 为 error；两个弹窗改为外层判断 `visible`、内层组件放 Hooks，关闭即重置的行为不变；删除未使用的导入、`HomePage` 里无人调用的 `handleCancel` 等死代码。CI 前端作业加 `npm run lint`，新增 macOS `rust-lint` 作业跑 `cargo fmt --check` 与 `cargo clippy -D warnings`。没有改变默认值、契约与安全门禁；之后提交未格式化或有 clippy 警告的代码会让 CI 失败。
+- **验证**：`cargo clippy --workspace --all-targets -- -D warnings` 零警告，`apps/moss-voice-local` 同样零警告；`cargo test --workspace` 1023 通过 / 0 失败；前端 `npm run lint` 0 error（17 条 `exhaustive-deps` 警告待逐步清理），`npm test` 225 通过，`camera` / `voice-center` 浏览器用例通过。`voicePrivacyAcl.test.mjs` 按源码文本断言的正则放宽空白以适配格式化。Windows / Android 专属代码未在本机跑 clippy，CI 也暂不检查。
+- **关联**：`Cargo.toml`、`clippy.toml`、`.git-blame-ignore-revs`、`.github/workflows/ci.yml`；`crates/laser-runtime/src/{migration,root,config,db}.rs`；`frontend/eslint.config.js`、`frontend/src/components/{AuthModal,MaterialModal}.jsx`；`docs/developer/standards.md`、`AGENTS.md` 验证表。
+
 ## [0.3.10] - 2026-11-07
 
 ### 取消独立的语音隐私安全窗口，唤醒词与固件升级直接在语音中心操作（2026-11-07）

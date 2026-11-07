@@ -282,11 +282,12 @@ mod tests {
             panic!()
         };
         assert!(text.contains("不是合法的 JSON"));
-        let calls = host.calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].2, "aa:bb", "宿主收到设备身份");
+        {
+            let calls = host.calls.lock().unwrap();
+            assert_eq!(calls.len(), 3);
+            assert_eq!(calls[0].2, "aa:bb", "宿主收到设备身份");
+        }
         // 空参数按 {} 处理
-        drop(calls);
         tools.call(&context(), "laser_workflow_tool", "").await;
         assert_eq!(host.calls.lock().unwrap()[3].1, json!({}));
     }

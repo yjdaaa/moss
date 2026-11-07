@@ -87,10 +87,10 @@ impl ContextStore for FakeStore {
         row.last_seen_at = Some(now);
         let extracted = row.source.kind() == super::SourceKind::ConversationExtraction
             && row.verification == Verification::Candidate;
-        if let (true, Some(to), Some(at)) = (extracted, extend_to, row.expires_at) {
-            if at < to {
-                row.expires_at = Some(to);
-            }
+        if let (true, Some(to), Some(at)) = (extracted, extend_to, row.expires_at)
+            && at < to
+        {
+            row.expires_at = Some(to);
         }
         Ok(true)
     }

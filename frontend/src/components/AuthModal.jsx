@@ -1,11 +1,14 @@
 import React, { useState } from "react";
-import { KeyRound, X, Check } from "lucide-react";
+import { KeyRound, X } from "lucide-react";
 import { storeAuthToken, clearAuthToken, readAuthToken, isRemoteMode } from "../authSession.js";
 import { postJson } from "../api/client.js";
 
-export function AuthModal({ visible, onClose, onAuthenticated }) {
-  if (!visible) return null;
+// 关闭时整个对话框卸载，下次打开输入框与报错从空白开始；Hooks 放在内层组件，保证每次渲染调用顺序一致
+export function AuthModal({ visible, ...props }) {
+  return visible ? <AuthModalDialog {...props} /> : null;
+}
 
+function AuthModalDialog({ onClose, onAuthenticated }) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

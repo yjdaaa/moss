@@ -338,7 +338,7 @@ impl DiagnosticsLog {
             .chain(inner.problems.iter())
             .cloned()
             .collect();
-        all.sort_by(|a, b| b.seq.cmp(&a.seq));
+        all.sort_by_key(|entry| std::cmp::Reverse(entry.seq));
         all
     }
 
@@ -469,72 +469,72 @@ impl LiveState {
     }
 
     pub fn set_state(&self, session_id: &str, state: &str) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                view.state = state.to_owned();
-                if state == "idle" {
-                    view.level = 0;
-                    view.active_tool = None;
-                    view.emotion.clear();
-                } else if state == "thinking" {
-                    view.level = 0;
-                    view.active_tool = None;
-                    view.spoken_sentences = 0;
-                } else if state == "listening" {
-                    view.level = 0;
-                    view.emotion.clear();
-                    view.active_tool = None;
-                    view.spoken_sentences = 0;
-                }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.state = state.to_owned();
+            if state == "idle" {
+                view.level = 0;
+                view.active_tool = None;
+                view.emotion.clear();
+            } else if state == "thinking" {
+                view.level = 0;
+                view.active_tool = None;
+                view.spoken_sentences = 0;
+            } else if state == "listening" {
+                view.level = 0;
+                view.emotion.clear();
+                view.active_tool = None;
+                view.spoken_sentences = 0;
             }
         }
     }
 
     pub fn set_level(&self, session_id: &str, level: u8) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                view.level = level.min(100);
-            }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.level = level.min(100);
         }
     }
 
     pub fn set_emotion(&self, session_id: &str, emotion: &str) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                view.emotion = emotion.chars().take(32).collect();
-            }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.emotion = emotion.chars().take(32).collect();
         }
     }
 
     pub fn set_active_tool(&self, session_id: &str, tool: Option<String>) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                view.active_tool = tool.map(|name| name.chars().take(64).collect());
-            }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.active_tool = tool.map(|name| name.chars().take(64).collect());
         }
     }
 
     pub fn set_utterance_chars(&self, session_id: &str, chars: u32) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                view.utterance_chars = chars;
-            }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.utterance_chars = chars;
         }
     }
 
     pub fn inc_spoken_sentences(&self, session_id: &str) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                view.spoken_sentences = view.spoken_sentences.saturating_add(1);
-            }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.spoken_sentences = view.spoken_sentences.saturating_add(1);
         }
     }
 
     pub fn set_device_tools(&self, session_id: &str, tools: Vec<String>) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                view.device_tools = tools;
-            }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.device_tools = tools;
         }
     }
 
@@ -545,15 +545,15 @@ impl LiveState {
         width: Option<u32>,
         height: Option<u32>,
     ) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            if let Some(view) = sessions.get_mut(session_id) {
-                if monochrome.is_some() {
-                    view.screen_monochrome = monochrome;
-                }
-                if let (Some(w), Some(h)) = (width, height) {
-                    view.screen_width = Some(w);
-                    view.screen_height = Some(h);
-                }
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            if monochrome.is_some() {
+                view.screen_monochrome = monochrome;
+            }
+            if let (Some(w), Some(h)) = (width, height) {
+                view.screen_width = Some(w);
+                view.screen_height = Some(h);
             }
         }
     }

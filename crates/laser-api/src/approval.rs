@@ -466,20 +466,19 @@ impl ApprovalService {
         // Dedicated HA controls can only be created by a trusted voice caller
         // with an explicit live permit and a fingerprinted Home connection.
         // Never accept a model-selected arbitrary URL/command or public route.
-        if request.kind == ApprovalKind::HomeControl {
-            if request.source != ApprovalSource::Voice
+        if request.kind == ApprovalKind::HomeControl
+            && (request.source != ApprovalSource::Voice
                 || request.session_id.as_deref().is_none_or(str::is_empty)
                 || request.voice_permit.is_none()
                 || !valid_home_target(&request.target_record)
                 || request.summary.chars().count() > 200
                 || !matches!(&request.connection,
                     ApprovalConnection::Home { fingerprint }
-                    if valid_home_fingerprint(fingerprint))
-            {
-                return Err(ApprovalError::InvalidRequest(
-                    "HomeControl 必须经独立语音身份、设备授权与可信配置指纹创建".into(),
-                ));
-            }
+                    if valid_home_fingerprint(fingerprint)))
+        {
+            return Err(ApprovalError::InvalidRequest(
+                "HomeControl 必须经独立语音身份、设备授权与可信配置指纹创建".into(),
+            ));
         }
         let raw_id = request
             .request_id
@@ -529,20 +528,19 @@ impl ApprovalService {
                 return Err(ApprovalError::Expired);
             }
         }
-        if let Some(request_id) = request_id.as_deref() {
-            if let Some(existing) = db.find_approval_by_request(request.source, request_id)? {
-                if existing.digest != digest || existing.request.as_ref() != Some(&request.request)
-                {
-                    return Err(ApprovalError::RequestConflict);
-                }
-                if existing.is_expired_at(now) {
-                    self.expire_one(&db, &existing, now)?;
-                    return db
-                        .get_approval(&existing.approval_id)?
-                        .ok_or(ApprovalError::NotFound);
-                }
-                return Ok(existing);
+        if let Some(request_id) = request_id.as_deref()
+            && let Some(existing) = db.find_approval_by_request(request.source, request_id)?
+        {
+            if existing.digest != digest || existing.request.as_ref() != Some(&request.request) {
+                return Err(ApprovalError::RequestConflict);
             }
+            if existing.is_expired_at(now) {
+                self.expire_one(&db, &existing, now)?;
+                return db
+                    .get_approval(&existing.approval_id)?
+                    .ok_or(ApprovalError::NotFound);
+            }
+            return Ok(existing);
         }
         let record = ApprovalRecord {
             approval_id: new_approval_id()?,
@@ -1146,14 +1144,18 @@ impl ApprovalService {
             }
             // A fake "running"/"completed but failed" outcome must never
             // extend a one-shot HA approval's lifetime or mask uncertainty.
-            let terminal = match (outcome.success, outcome.phase) {
-                (true, Some(ApprovalPhase::Completed)) => true,
-                (
-                    false,
-                    Some(ApprovalPhase::Unknown | ApprovalPhase::Failed | ApprovalPhase::Cancelled),
-                ) => true,
-                _ => false,
-            };
+            let terminal = matches!(
+                (outcome.success, outcome.phase),
+                (true, Some(ApprovalPhase::Completed))
+                    | (
+                        false,
+                        Some(
+                            ApprovalPhase::Unknown
+                                | ApprovalPhase::Failed
+                                | ApprovalPhase::Cancelled
+                        ),
+                    )
+            );
             if !terminal {
                 return Err(ApprovalError::Mismatch);
             }
@@ -1321,7 +1323,7 @@ fn target_key(kind: ApprovalKind) -> &'static str {
 }
 
 /// 动作摘要：`SHA-256(canonical_json(payload))`（技术书 §5.4）。payload = 动作要素 + 类别 + 目标记录
-/// + `target{mode, host_fingerprint}`；`host_fingerprint` 是解析后连接描述的 SHA-256，摘要里不出现地址明文。
+/// 加 `target{mode, host_fingerprint}`；`host_fingerprint` 是解析后连接描述的 SHA-256，摘要里不出现地址明文。
 /// 保留键（kind、目标记录键、target）以服务端的值为准，`facts` 不能覆盖。
 pub fn approval_digest(
     kind: ApprovalKind,
@@ -1872,34 +1874,34 @@ pub(crate) fn approval_view(record: &ApprovalRecord) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     if let Some(map) = value.as_object_mut() {
         map.insert("target".into(), target_view(record.connection.as_ref()));
-        if record.kind == ApprovalKind::AgentRun {
-            if let Some(request) = &record.request {
-                let workspace = request
-                    .get("workspace")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let folder = std::path::Path::new(workspace)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("未提供");
-                map.insert(
-                    "agent".into(),
-                    serde_json::json!({
-                        "provider":request.get("provider").and_then(Value::as_str).unwrap_or(""),
-                        "task":request.get("task").and_then(Value::as_str).unwrap_or(""),
-                        "workspace_label":folder,
-                        "version":request.get("version").and_then(Value::as_str).unwrap_or(""),
-                        "permission":"workspace_write",
-                        "uses_installed_cli_account":true,
-                        "may_incur_cost":true,
-                    }),
-                );
-            }
+        if record.kind == ApprovalKind::AgentRun
+            && let Some(request) = &record.request
+        {
+            let workspace = request
+                .get("workspace")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let folder = std::path::Path::new(workspace)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("未提供");
+            map.insert(
+                "agent".into(),
+                serde_json::json!({
+                    "provider":request.get("provider").and_then(Value::as_str).unwrap_or(""),
+                    "task":request.get("task").and_then(Value::as_str).unwrap_or(""),
+                    "workspace_label":folder,
+                    "version":request.get("version").and_then(Value::as_str).unwrap_or(""),
+                    "permission":"workspace_write",
+                    "uses_installed_cli_account":true,
+                    "may_incur_cost":true,
+                }),
+            );
         }
-        if record.kind == ApprovalKind::ExternalTool {
-            if let Some(request) = &record.request {
-                map.insert("external".into(), serde_json::json!({"tool":record.target_record,"arguments":crate::external_tools::parameter_preview(request.get("arguments").unwrap_or(&Value::Null))}));
-            }
+        if record.kind == ApprovalKind::ExternalTool
+            && let Some(request) = &record.request
+        {
+            map.insert("external".into(), serde_json::json!({"tool":record.target_record,"arguments":crate::external_tools::parameter_preview(request.get("arguments").unwrap_or(&Value::Null))}));
         }
     }
     value

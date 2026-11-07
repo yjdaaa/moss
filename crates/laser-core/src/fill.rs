@@ -217,7 +217,8 @@ mod tests {
             (10.0, 0.0),
             (0.0, 0.0),
         ];
-        let result = apply_vector_fill(&[bow.clone()], 2.0, FillStrategy::Hatch).unwrap();
+        let result =
+            apply_vector_fill(std::slice::from_ref(&bow), 2.0, FillStrategy::Hatch).unwrap();
         assert_eq!(result.paths, vec![bow]);
         assert_eq!(result.fill_warnings.len(), 1);
     }

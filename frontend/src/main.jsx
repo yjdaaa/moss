@@ -169,7 +169,6 @@ function App() {
           unlistenTauri = unlisten;
         })
         .catch((error) => {
-          const detail = error instanceof Error ? error.message : String(error);
           console.error("注册桌面关闭事件失败", error);
         });
     }

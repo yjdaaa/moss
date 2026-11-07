@@ -89,7 +89,7 @@ test("n67：唤醒词卡挂在“唤醒词与音量”，固件卡挂在“设�
   const native = desktop("src/voice_builtin.rs");
   const firmwareImport = fnBody(native, "voice_firmware_import");
   assert.match(firmwareImport, /blocking_pick_file\(\)/, "固件文件只能由本机文件框选择");
-  assert.match(firmwareImport, /add_filter\("固件",&\["bin"\]\)/);
+  assert.match(firmwareImport, /add_filter\("固件",\s*&\["bin"\]\)/, "只接受 .bin 固件文件");
   assert.doesNotMatch(fnBody(native, "voice_firmware_manage"), /std::fs::remove_file|std::fs::write/, "写入与删除只由内部按 SHA-256 处理");
   assert.match(fnBody(native, "voice_wakeword_import_base"), /blocking_pick_file\(\)/, "资源包只能由本机文件框选择");
 });
@@ -125,8 +125,8 @@ test("NV13 agent stop is main-window-only and saving keeps the enable switch", (
   assert.match(frontend("src/voiceApi.js"), /agentStop: \(runId\) => invokeVoice\("voice_agent_stop", \{ runId \}\)/);
   const stop = fnBody(native, "voice_agent_stop");
   assert.match(stop, /require_main_window\(&window\)\?/);
-  const save = native.match(/pub fn agent_save\b[\s\S]*?(?=\n        \}\n)/)[0];
-  const normalize = native.match(/fn normalize_agent_save\b[\s\S]*?(?=\n    \}\n)/)[0];
+  const save = native.match(/pub fn agent_save\b[\s\S]*?(?=\n {8}\}\n)/)[0];
+  const normalize = native.match(/fn normalize_agent_save\b[\s\S]*?(?=\n {4}\}\n)/)[0];
   assert.doesNotMatch(save, /config\.enabled\s*=\s*false/, "不再把开关强制改回关闭");
   assert.doesNotMatch(normalize, /config\.enabled\s*=\s*false/, "不再把开关强制改回关闭");
   assert.match(save, /normalize_agent_save\(/);

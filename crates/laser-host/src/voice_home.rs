@@ -163,13 +163,12 @@ fn public_attributes(attributes: &serde_json::Map<String, Value>) -> Value {
                     safe.insert(key.clone(), value.clone());
                 }
             }
-            "unit_of_measurement" => {
+            "unit_of_measurement"
                 if value
                     .as_str()
-                    .is_some_and(|v| v.len() <= 12 && !v.chars().any(char::is_control))
-                {
-                    safe.insert(key.clone(), value.clone());
-                }
+                    .is_some_and(|v| v.len() <= 12 && !v.chars().any(char::is_control)) =>
+            {
+                safe.insert(key.clone(), value.clone());
             }
             _ => {}
         }
@@ -814,10 +813,7 @@ mod tests {
             Err(HomeDeny::InvalidSchema)
         ));
         assert!(
-            matches!(
-                HomeCatalog::from_snapshots(&sample_states(), b"[]", selected(), 7, 9),
-                Ok(_)
-            ),
+            HomeCatalog::from_snapshots(&sample_states(), b"[]", selected(), 7, 9).is_ok(),
             "missing service catalog allows read-only state but NEVER a control"
         );
         let no_services =

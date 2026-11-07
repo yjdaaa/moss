@@ -162,10 +162,10 @@ impl ExternalMcp {
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
         self.manager.shutdown();
-        if let Ok(mut runtime) = self.runtime.lock() {
-            if let Some(runtime) = runtime.take() {
-                runtime.shutdown_background();
-            }
+        if let Ok(mut runtime) = self.runtime.lock()
+            && let Some(runtime) = runtime.take()
+        {
+            runtime.shutdown_background();
         }
     }
     fn prepare(&self, name: &str, args: Value) -> Result<PreparedCall, ClientError> {
@@ -289,13 +289,13 @@ fn result_text(value: &Value) -> String {
         if text.chars().count() >= 1500 {
             break;
         }
-        if item["type"] == "text" {
-            if let Some(part) = item["text"].as_str().filter(|text| !text.is_empty()) {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.extend(part.chars().take(1500 - text.chars().count().min(1500)));
+        if item["type"] == "text"
+            && let Some(part) = item["text"].as_str().filter(|text| !text.is_empty())
+        {
+            if !text.is_empty() {
+                text.push('\n');
             }
+            text.extend(part.chars().take(1500 - text.chars().count().min(1500)));
         }
     }
     if text.is_empty() {

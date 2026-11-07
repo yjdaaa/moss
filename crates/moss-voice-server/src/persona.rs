@@ -196,7 +196,7 @@ impl PersonaConfig {
         );
         let exact: Vec<_> = candidates
             .iter()
-            .filter(|(_, _, keys)| keys.iter().any(|k| *k == wanted))
+            .filter(|(_, _, keys)| keys.contains(&wanted))
             .collect();
         if let [one] = exact.as_slice() {
             return Ok((one.0.clone(), one.1.clone()));

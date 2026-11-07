@@ -149,12 +149,12 @@ pub fn otsu_threshold(image: &GrayImage) -> u8 {
     let mut background_count = 0.0;
     let mut background_sum = 0.0;
     let mut best = (-1.0, 128_u8);
-    for threshold in 0..=255 {
-        background_count += histogram[threshold] as f64;
+    for (threshold, &bin) in histogram.iter().enumerate() {
+        background_count += bin as f64;
         if background_count == 0.0 || background_count == total {
             continue;
         }
-        background_sum += threshold as f64 * histogram[threshold] as f64;
+        background_sum += threshold as f64 * bin as f64;
         let foreground_count = total - background_count;
         let mean_background = background_sum / background_count;
         let mean_foreground = (total_sum - background_sum) / foreground_count;

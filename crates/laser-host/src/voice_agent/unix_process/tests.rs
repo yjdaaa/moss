@@ -84,6 +84,8 @@ fn fixture_worker() {
             }
         }
         "spawn" => {
+            // 故意不 wait：这个孙进程要在父进程退出后仍存活，验证进程组整体被结束。
+            #[expect(clippy::zombie_processes, reason = "孙进程由被测的进程组清理负责回收")]
             let child = Command::new(self_executable())
                 .args(command_args(
                     "voice_agent::unix_process::tests::fixture_grandchild",
@@ -213,11 +215,11 @@ fn cancellation_kills_descendant_not_just_parent() {
     let marker_worker = marker.clone();
     let signal = std::thread::spawn(move || {
         for _ in 0..220 {
-            if let Ok(pid) = std::fs::read_to_string(&marker_worker) {
-                if pid.trim().parse::<u32>().is_ok() {
-                    cancel_worker.store(true, Ordering::Release);
-                    return;
-                }
+            if let Ok(pid) = std::fs::read_to_string(&marker_worker)
+                && pid.trim().parse::<u32>().is_ok()
+            {
+                cancel_worker.store(true, Ordering::Release);
+                return;
             }
             std::thread::sleep(Duration::from_millis(30));
         }

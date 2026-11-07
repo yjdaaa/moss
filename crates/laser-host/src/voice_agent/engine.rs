@@ -96,14 +96,14 @@ impl AgentCoordinator {
                 .snapshots
                 .lock()
                 .map_err(|_| AgentError::CapabilityMissing)?;
-            if let Some((modified, len, cached_at, snapshot)) = cache.get(exe) {
-                if (*modified, *len) == key {
-                    if let Some(snap) = snapshot {
-                        return Ok(snap.clone());
-                    }
-                    if cached_at.elapsed() < std::time::Duration::from_secs(5) {
-                        return Err(AgentError::CapabilityMissing);
-                    }
+            if let Some((modified, len, cached_at, snapshot)) = cache.get(exe)
+                && (*modified, *len) == key
+            {
+                if let Some(snap) = snapshot {
+                    return Ok(snap.clone());
+                }
+                if cached_at.elapsed() < std::time::Duration::from_secs(5) {
+                    return Err(AgentError::CapabilityMissing);
                 }
             }
         }

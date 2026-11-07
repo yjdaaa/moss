@@ -1505,23 +1505,18 @@ impl Turn {
                     messages.push(ChatMessage::system(context));
                 }
             } else if let Some(memory) = self.conversation.memory.as_ref().filter(|_| nv10_summary)
+                && let Some(context) = memory.prompt_for(&self.context.device_id).await
             {
-                if let Some(context) = memory.prompt_for(&self.context.device_id).await {
-                    messages.push(ChatMessage::system(context));
-                }
+                messages.push(ChatMessage::system(context));
             }
             // NV19-04: bounded, labelled read-only data; skipped for small talk; never blocks
             // beyond its own short timeout and adds nothing on any failure.
-            if let Some(retrieval) = &self.conversation.context_retrieval {
-                if let Some((access, device)) =
+            if let Some(retrieval) = &self.conversation.context_retrieval
+                && let Some((access, device)) =
                     retrieval.access.access(&self.context, scope.as_ref())
-                {
-                    if let Some(context) =
-                        retrieval.retriever.prompt_for(access, &text, device).await
-                    {
-                        messages.push(ChatMessage::system(context));
-                    }
-                }
+                && let Some(context) = retrieval.retriever.prompt_for(access, &text, device).await
+            {
+                messages.push(ChatMessage::system(context));
             }
         }
         messages.extend(compact_stale_tool_results(&history, 2));

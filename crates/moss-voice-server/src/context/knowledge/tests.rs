@@ -410,10 +410,7 @@ fn nv19_changed_removed_and_forgotten_files_follow_the_disk() {
     assert!(service.search(&owner(), &query).unwrap().is_empty());
 
     // A rebuild based on an old revision loses.
-    assert_eq!(
-        store.replace(&root.id, 1, &[], &[], &[], NOW).unwrap(),
-        false
-    );
+    assert!(!store.replace(&root.id, 1, &[], &[], &[], NOW).unwrap());
     let current = store.root(&root.id).unwrap().unwrap();
     assert_eq!(
         service

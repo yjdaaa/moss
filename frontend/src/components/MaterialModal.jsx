@@ -64,9 +64,12 @@ export function buildMaterialDeletePayload(material) {
   };
 }
 
-export function MaterialModal({ visible, initialData, onClose, onSaved, onDeleted }) {
-  if (!visible) return null;
+// 关闭时整个对话框卸载，下次打开按 initialData 重新填表；Hooks 放在内层组件，保证每次渲染调用顺序一致
+export function MaterialModal({ visible, ...props }) {
+  return visible ? <MaterialModalDialog {...props} /> : null;
+}
 
+function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
   const isEditing = Boolean(initialData && initialData.name);
   const [name, setName] = useState("");
   const [thicknessStr, setThicknessStr] = useState("");
@@ -92,7 +95,7 @@ export function MaterialModal({ visible, initialData, onClose, onSaved, onDelete
     }
     setError("");
     setBusy(false);
-  }, [initialData, visible]);
+  }, [initialData]);
 
   const handleSave = async () => {
     const trimmedName = name.trim();

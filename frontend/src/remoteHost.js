@@ -26,7 +26,7 @@ export function normalizeRemoteOrigin(input) {
   if (!text) return null;
   if (/^https:\/\//i.test(text)) return null;
   text = text.replace(/^http:\/\//i, "").replace(/\/+$/, "");
-  if (!text || /[\/@?#\s]/.test(text)) return null;
+  if (!text || /[/@?#\s]/.test(text)) return null;
   let host = text;
   let port = DEFAULT_PORT;
   const match = text.match(/^(.+):(\d{1,5})$/);

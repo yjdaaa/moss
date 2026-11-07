@@ -22,6 +22,7 @@ jobs:
         run: |
           cd frontend
           npm ci
+          npm run lint
           npm test
           npm run build
       - name: Upload frontend assets
@@ -29,6 +30,29 @@ jobs:
         with:
           name: frontend-dist
           path: frontend/dist
+
+  # 1b. Rust 格式与静态检查（2026-11-07）：在 macOS 上跑，与本机验证平台一致；
+  #     Windows / Android 专属代码暂不在这里检查
+  rust-lint:
+    needs: frontend
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: |
+          cargo fmt --all -- --check
+          (cd apps/moss-voice-local && cargo fmt --all -- --check)
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   # 2. Rust Workspace 核心检查与 Windows 桌面构建
   windows-desktop:

@@ -51,23 +51,23 @@ pub(super) fn read_frame(stream: &mut TcpStream, alive: &AtomicBool) -> Result<V
                             std::str::from_utf8(&frame[..split]).map_err(|_| Deny::Malformed)?;
                         let mut content_length = None;
                         for line in text.split("\r\n").skip(1) {
-                            if let Some((name, value)) = line.split_once(':') {
-                                if name.eq_ignore_ascii_case("Content-Length") {
-                                    if content_length.is_some() {
-                                        return Err(Deny::Malformed);
-                                    }
-                                    let value = value.trim();
-                                    if value.is_empty()
-                                        || !value.bytes().all(|byte| byte.is_ascii_digit())
-                                    {
-                                        return Err(Deny::Malformed);
-                                    }
-                                    let count: usize = value.parse().map_err(|_| Deny::TooLarge)?;
-                                    if count > MAX_BODY_BYTES {
-                                        return Err(Deny::TooLarge);
-                                    }
-                                    content_length = Some(count);
+                            if let Some((name, value)) = line.split_once(':')
+                                && name.eq_ignore_ascii_case("Content-Length")
+                            {
+                                if content_length.is_some() {
+                                    return Err(Deny::Malformed);
                                 }
+                                let value = value.trim();
+                                if value.is_empty()
+                                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                                {
+                                    return Err(Deny::Malformed);
+                                }
+                                let count: usize = value.parse().map_err(|_| Deny::TooLarge)?;
+                                if count > MAX_BODY_BYTES {
+                                    return Err(Deny::TooLarge);
+                                }
+                                content_length = Some(count);
                             }
                         }
                         required = Some(

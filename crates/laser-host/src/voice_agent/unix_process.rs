@@ -59,7 +59,7 @@ pub(super) enum ProcessFailure {
 
 pub(super) fn validate_environment(env: &BTreeMap<String, String>) -> Result<(), ProcessFailure> {
     let mut sorted = env.iter().collect::<Vec<_>>();
-    sorted.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    sorted.sort_by_key(|a| a.0.to_ascii_lowercase());
     let mut previous = String::new();
     for (key, value) in sorted {
         let allowed = super::CLI_ENV_KEYS;

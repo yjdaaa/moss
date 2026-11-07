@@ -2,25 +2,15 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   Cpu,
   Flame,
-  Layers,
-  Play,
   RefreshCw,
-  RotateCcw,
-  Send,
   Sliders,
-  Terminal,
   Type,
-  UploadCloud,
   FileCode,
   Image as ImageIcon,
   PenTool,
-  CheckCircle2,
   AlertTriangle,
-  Info,
   Clock,
   Ruler,
-  Radio,
-  Square,
   Box,
 } from "lucide-react";
 import { getJson, postJson, fetchPreviewBlobUrl, fetchPreviewText, resolveApiUrl } from "../api/client.js";
@@ -75,7 +65,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
   const [fontSizeMm, setFontSizeMm] = useState(
     Number(localStorage.getItem("laser-forge-font-size") || 12)
   );
-  const [uploadedFile, setUploadedFile] = useState(null);
   const [uploadedFilePath, setUploadedFilePath] = useState("");
 
   // Material and Parameter state
@@ -648,38 +637,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
       showAlert(message, { title:sent ? "停止请求已发送" : "停止未确认", tone:sent ? "warning" : "error" });
     },
   );
-
-  // Cancel Job
-  const handleCancel = async () => {
-    if (!currentWorkflow?.workflow_id) return;
-    addLog("CANCEL", "正在请求终止工作流任务...", "warn");
-    try {
-      const res = await postJson("/api/workflow", {
-        action: "cancel",
-        workflow_id: currentWorkflow.workflow_id,
-      });
-      if (res.ok && res.data?.success) {
-        setPollSafetyNotice("停止请求已发送，但尚未确认设备已停止；急停按钮仍保留。");
-        startStatusPolling(currentWorkflow.workflow_id);
-        const sr = res.data.result?.send_result;
-        if (sr && typeof sr.lines_sent === "number") {
-          setSendProgress((prev) => ({
-            ...prev,
-            sent: sr.lines_sent,
-            total: sr.total_lines || prev?.total || 0,
-          }));
-          if (sr.lines_sent > 0 && sr.lines_sent < sr.total_lines) {
-            addLog("ESTOP", `取消请求已提交；记录进度 ${sr.lines_sent}/${sr.total_lines}，恢复前必须确认设备与材料状态`, "warn");
-          }
-        }
-        addLog("CANCEL", "已收到取消请求回复，正在查询最终状态；不代表物理停机", "ok");
-      } else {
-        addLog("CANCEL", res.data?.result || "请求取消失败", "error");
-      }
-    } catch (e) {
-      addLog("CANCEL", `取消网络异常: ${e.message}`, "error");
-    }
-  };
 
   return (
     <div className="home-page ob-page">

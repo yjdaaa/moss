@@ -38,3 +38,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 moss-voice-local-proto = { path = "../moss-voice-local-proto" }
 tempfile = "3"
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+
+[lints]
+workspace = true

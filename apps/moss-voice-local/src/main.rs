@@ -40,11 +40,11 @@ type Job = (u64, Op, Vec<u8>);
 const STREAM_TAIL_SECONDS: f32 = 1.0;
 
 fn send(out: &Out, id: u64, reply: Reply, payload: &[u8]) {
-    if let Ok(mut writer) = out.lock() {
-        if write_frame(&mut *writer, &Response { id, reply }, payload).is_err() {
-            // MOSS 已退出：结束进程
-            std::process::exit(0);
-        }
+    if let Ok(mut writer) = out.lock()
+        && write_frame(&mut *writer, &Response { id, reply }, payload).is_err()
+    {
+        // MOSS 已退出：结束进程
+        std::process::exit(0);
     }
 }
 
@@ -73,6 +73,7 @@ fn to_i16(samples: &[f32]) -> Vec<i16> {
 /// Windows 上 `std::fs::canonicalize` 会返回 `\\?\C:\...` 或 `\\?\UNC\...` 逐字路径前缀。
 /// `sherpa-onnx` C++ 层（如 Kokoro / Matcha 拼接 `espeak-ng-data/phontab`、`dict/hmm_model.utf8`）在内部硬编码正斜杠 `/`；
 /// 一旦带 `\\?\` 前缀，Windows 内核不再把 `/` 归一化为 `\`，导致文件打开失败。交给 C++ 配置前剥离常规盘符与 UNC 逐字前缀。
+#[cfg(any(windows, test))]
 fn strip_windows_verbatim_prefix(raw: &str) -> String {
     if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
         if !rest.is_empty() && !rest.contains('/') {
@@ -802,19 +803,15 @@ fn main() {
         .spawn(move || speaker_worker(speaker_jobs, speaker_out))
         .expect("创建声纹线程失败");
     let mut input = BufReader::new(io::stdin());
-    loop {
-        let (request, payload): (Request, Vec<u8>) = match read_frame(&mut input) {
-            Ok(Some(frame)) => frame,
-            // 标准输入关闭（MOSS 退出）或数据损坏：退出
-            Ok(None) | Err(_) => break,
-        };
+    // 标准输入关闭（MOSS 退出）或数据损坏：退出
+    while let Ok(Some((request, payload))) = read_frame::<_, Request>(&mut input) {
         let Request { id, op } = request;
         if matches!(&op, Op::LoadSpeaker { .. } | Op::SpeakerEmbed { .. }) {
-            if let Op::SpeakerEmbed { sample_rate, .. } = &op {
-                if !valid_speaker_pcm(*sample_rate, payload.len()) {
-                    error(&out, id, "声纹采样格式无效");
-                    continue;
-                }
+            if let Op::SpeakerEmbed { sample_rate, .. } = &op
+                && !valid_speaker_pcm(*sample_rate, payload.len())
+            {
+                error(&out, id, "声纹采样格式无效");
+                continue;
             }
             if speaker.try_send((id, op, payload)).is_err() {
                 error(&out, id, "声纹队列已满或退出");

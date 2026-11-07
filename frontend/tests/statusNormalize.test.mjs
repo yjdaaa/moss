@@ -4,7 +4,6 @@ import {
   normalizeWorkflowStatus,
   getSendOverlayStage,
   extractWorkflowInfo,
-  TERMINAL_STATUSES,
 } from "../src/state/statusNormalize.js";
 
 test("D10: normalizes queued to pending and canceled to cancelled", () => {

@@ -255,13 +255,13 @@ fn summarize_success(tool: &str, result: &serde_json::Value) -> String {
     if !status.is_empty() {
         parts.push(format!("status={status}"));
     }
-    if let Some(send) = result.get("send_result") {
-        if let (Some(sent), Some(total)) = (
+    if let Some(send) = result.get("send_result")
+        && let (Some(sent), Some(total)) = (
             send.get("lines_sent").and_then(|v| v.as_u64()),
             send.get("total_lines").and_then(|v| v.as_u64()),
-        ) {
-            parts.push(format!("已下发 {sent}/{total} 行"));
-        }
+        )
+    {
+        parts.push(format!("已下发 {sent}/{total} 行"));
     }
     if let Some(cells) = result.get("cell_count").and_then(|v| v.as_u64()) {
         parts.push(format!("{cells} 个标定单元格"));
@@ -362,6 +362,7 @@ fn disabled_gate(
 /// - R3：照常交给后端，由执行层（`require_r3_authority`）创建审批并返回 `approval_required`；
 ///   后端执行层没有检查点的 R3（采用反馈建议）在这里直接拒绝，提示到桌面端操作；
 /// - R0–R2：不变。
+///
 /// 严格模式关闭或没有后端时返回 `None`，行为与之前一致。
 fn strict_bridge_gate(
     name: &str,
@@ -728,10 +729,10 @@ fn dispatch_allowed(
                     }
                     for (from, to) in [("aliases_json", "aliases"), ("params_json", "library_json")]
                     {
-                        if let Some(raw) = arg_str(arguments, from) {
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-                                body.insert(to.into(), parsed);
-                            }
+                        if let Some(raw) = arg_str(arguments, from)
+                            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw)
+                        {
+                            body.insert(to.into(), parsed);
                         }
                     }
                     backend_result(

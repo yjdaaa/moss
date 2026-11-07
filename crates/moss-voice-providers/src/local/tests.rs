@@ -102,10 +102,10 @@ fn fake(
         let mut writer = server;
         while let Ok(Some((request, payload))) = read_frame::<_, Request>(&mut reader) {
             let id = request.id;
-            if let Some((reply, out)) = respond(request, payload) {
-                if write_frame(&mut writer, &Response { id, reply }, &out).is_err() {
-                    return;
-                }
+            if let Some((reply, out)) = respond(request, payload)
+                && write_frame(&mut writer, &Response { id, reply }, &out).is_err()
+            {
+                return;
             }
         }
     });

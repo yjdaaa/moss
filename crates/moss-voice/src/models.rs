@@ -1253,16 +1253,10 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
             if outs.contains("audio") {
                 push_unique_section(&mut sections, Section::Tts);
             }
+            // 纯文本对话模型，或输入输出都含音频的全能模型，都可以当对话大模型
             if ins.contains("text")
                 && outs.contains("text")
-                && !ins.contains("audio")
-                && !outs.contains("audio")
-            {
-                push_unique_section(&mut sections, Section::Llm);
-            } else if ins.contains("text")
-                && outs.contains("text")
-                && ins.contains("audio")
-                && outs.contains("audio")
+                && ins.contains("audio") == outs.contains("audio")
             {
                 push_unique_section(&mut sections, Section::Llm);
             }

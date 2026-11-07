@@ -8,7 +8,7 @@ pub fn py_round(value: f64, ndigits: i32) -> f64 {
     if ndigits < -308 {
         return 0.0_f64.copysign(value);
     }
-    if ndigits >= 0 && ndigits <= 308 && value.abs() < 0.5 * 10_f64.powi(-ndigits) {
+    if (0..=308).contains(&ndigits) && value.abs() < 0.5 * 10_f64.powi(-ndigits) {
         return 0.0_f64.copysign(value);
     }
     // Round the exact binary rational, not value * 10^n (which introduces a
@@ -85,14 +85,14 @@ pub fn format_float(value: f64) -> String {
         (digits, exp_val)
     };
 
-    let body = if exponent < -4 || exponent >= 16 {
+    let body = if !(-4..16).contains(&exponent) {
         let mantissa = if digits.len() == 1 {
             digits
         } else {
             format!("{}.{}", &digits[..1], &digits[1..])
         };
         format!("{mantissa}e{exponent:+03}")
-    } else if exponent + 1 <= 0 {
+    } else if exponent < 0 {
         let leading_zeros = -(exponent + 1) as usize;
         format!("0.{}{}", "0".repeat(leading_zeros), digits)
     } else if (exponent + 1) as usize >= digits.len() {

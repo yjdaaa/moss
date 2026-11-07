@@ -17,7 +17,7 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Mutex::new(
-            RuntimeDb::open(&dir.path().join("runtime.sqlite")).unwrap(),
+            RuntimeDb::open(dir.path().join("runtime.sqlite")).unwrap(),
         ));
         let clock = Arc::new(Mutex::new(now()));
         let read_clock = clock.clone();
@@ -243,7 +243,7 @@ fn nv9_default_ask_uses_persistent_desktop_approval_and_consumes_once() {
             .unwrap()
             .contains("hidden-example")
     );
-    let persisted = RuntimeDb::open(&f.dir.path().join("runtime.sqlite"))
+    let persisted = RuntimeDb::open(f.dir.path().join("runtime.sqlite"))
         .unwrap()
         .get_approval(&pending.approval_id)
         .unwrap()

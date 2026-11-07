@@ -71,10 +71,8 @@ fn public_ip_only(ip: IpAddr) -> bool {
     if a == 172 && (16..=31).contains(&b) {
         return false;
     }
-    if a == 192 {
-        if b == 0 || b == 168 || (b == 88 && c == 99) {
-            return false;
-        }
+    if a == 192 && (b == 0 || b == 168 || (b == 88 && c == 99)) {
+        return false;
     }
     if a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100)) {
         return false;

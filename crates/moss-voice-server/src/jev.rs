@@ -181,8 +181,7 @@ fn shared_http_client() -> Result<reqwest::Client, DecisionError> {
                 .build()
                 .map_err(|_| ())
         })
-        .as_ref()
-        .map(Clone::clone)
+        .clone()
         .map_err(|_| DecisionError::Failed)
 }
 
@@ -1037,16 +1036,16 @@ impl VoiceJevFilter {
 
         let keep_memories = if mem_count > 0 {
             let mut flags = Vec::with_capacity(memory_candidates.len());
-            for idx in 0..memory_candidates.len() {
+            for (idx, candidate) in memory_candidates.iter().enumerate() {
                 if idx < mem_count {
                     let candidate_truncated =
-                        memory_candidates[idx].chars().count() > MAX_MEMORY_CANDIDATE_CHARS;
+                        candidate.chars().count() > MAX_MEMORY_CANDIDATE_CHARS;
                     // 解析失败或候选超长被截断（尾部信息分类器未看见）时保守保留该条记忆
                     let keep = if candidate_truncated {
                         true
                     } else {
                         parse_noul(answers.get(&format!("mem_{idx}")))
-                            .map_or(true, |p| p >= MEMORY_KEEP_THRESHOLD)
+                            .is_none_or(|p| p >= MEMORY_KEEP_THRESHOLD)
                     };
                     flags.push(keep);
                 } else {
@@ -1489,7 +1488,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or_else(|| Err(DecisionError::Failed));
+                .unwrap_or(Err(DecisionError::Failed));
             Box::pin(async move { next })
         }
     }
@@ -1599,11 +1598,12 @@ mod tests {
         assert_eq!(pruned[0].name, "get_weather");
 
         // 校验单次请求结构：state 只包含一份 utterance，绝不重复
-        let payloads = fake.seen_payloads.lock().unwrap();
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0]["state"]["utterance"], "今天外面下不下雨");
-        assert!(payloads[0]["state"].get("turn").is_none());
-        drop(payloads);
+        {
+            let payloads = fake.seen_payloads.lock().unwrap();
+            assert_eq!(payloads.len(), 1);
+            assert_eq!(payloads[0]["state"]["utterance"], "今天外面下不下雨");
+            assert!(payloads[0]["state"].get("turn").is_none());
+        }
 
         // 第二次相同问句直接命中 60s LRU 缓存，不再发网络请求
         let d2 = filter

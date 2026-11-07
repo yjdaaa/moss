@@ -42,7 +42,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 | 时机 | 必须执行 |
 | --- | --- |
-| 每次代码改动（修复或新增功能） | 受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build`；**验证通过后必须执行 `powershell -File scripts/quick-update-desktop.ps1`（改 `apps/moss-voice-local` 加 `-WithVoiceHelper`，改 `moss-host` 加 `-WithHost`），把最新正式版 `moss-desktop.exe` 编译并原地同步到本机正式程序**（2026-11-01 用户决定；跳过 NSIS 重压包，MOSS 运行时不强杀，自动将旧文件改名挪开并写入新版，用户关掉重开即生效）；macOS 上执行 `bash scripts/quick-update-desktop.sh`（对应参数 `--with-voice-helper` / `--with-host`，原地替换 `/Applications/MOSS.app` 内的程序并重新 ad-hoc 签名，2026-11-05） |
+| 每次代码改动（修复或新增功能） | `cargo fmt --all`，`cargo clippy --workspace --all-targets -- -D warnings` 零警告，改前端加 `cd frontend; npm run lint` 零 error（CI 同样把关，2026-11-07）；受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build`；**验证通过后必须执行 `powershell -File scripts/quick-update-desktop.ps1`（改 `apps/moss-voice-local` 加 `-WithVoiceHelper`，改 `moss-host` 加 `-WithHost`），把最新正式版 `moss-desktop.exe` 编译并原地同步到本机正式程序**（2026-11-01 用户决定；跳过 NSIS 重压包，MOSS 运行时不强杀，自动将旧文件改名挪开并写入新版，用户关掉重开即生效）；macOS 上执行 `bash scripts/quick-update-desktop.sh`（对应参数 `--with-voice-helper` / `--with-host`，原地替换 `/Applications/MOSS.app` 内的程序并重新 ad-hoc 签名，2026-11-05） |
 | 改 HTTP 行为、前端或发送链路 | `cd frontend; npm run test:e2e`（API 链路 + 工作台界面，使用回环 GRBL 模拟器；`moss-host` 编译时内嵌 `frontend/dist`，须先 `npm run build` 再构建 release `moss-host`；界面用例需本机 Edge） |
 | 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`，并在快更时加 `-WithVoiceHelper`；根工作区测试不覆盖它 |
 | 阶段收尾、交付 | 以上全部，加三端完整 release 安装包构建（见下） |

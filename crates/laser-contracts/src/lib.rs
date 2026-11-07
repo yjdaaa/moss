@@ -324,14 +324,14 @@ impl McpTelemetry {
 
     /// 接入点 `id`（脱敏地址 `endpoint`）已连接；未登记过的编号自动登记。
     pub fn link_up(&self, id: &str, endpoint: &str) {
-        if let Ok(mut lock) = self.data.lock() {
-            if !lock.endpoints.iter().any(|link| link.id == id) {
-                lock.endpoints.push(EndpointLink {
-                    id: id.to_owned(),
-                    endpoint: endpoint.to_owned(),
-                    ..EndpointLink::default()
-                });
-            }
+        if let Ok(mut lock) = self.data.lock()
+            && !lock.endpoints.iter().any(|link| link.id == id)
+        {
+            lock.endpoints.push(EndpointLink {
+                id: id.to_owned(),
+                endpoint: endpoint.to_owned(),
+                ..EndpointLink::default()
+            });
         }
         self.update_link(id, |link| {
             link.endpoint = endpoint.to_owned();

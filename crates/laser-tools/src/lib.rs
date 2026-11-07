@@ -246,7 +246,7 @@ pub fn execute_check_laser_connection_with(
         Err(error) => ToolCallResult::with_detail(
             false,
             format!("{label}已连接但未就绪 ({target})"),
-            format!("{error}"),
+            error.to_string(),
         ),
     }
 }
@@ -945,12 +945,11 @@ pub fn execute_generate_text_image(args: &GenerateTextImageArgs) -> ToolCallResu
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("generated_images").join("text_image.png"));
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                return ToolCallResult::err(format!("创建输出目录失败: {error}"));
-            }
-        }
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return ToolCallResult::err(format!("创建输出目录失败: {error}"));
     }
     match image.save(&output) {
         Ok(()) => ToolCallResult::with_detail(

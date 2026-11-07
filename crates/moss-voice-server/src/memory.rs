@@ -180,7 +180,7 @@ impl MemoryService {
         let device = device_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let guard = service.gate.lock().ok()?;
-            if !guard.enabled || service.store.allowed(&device).ok()? != true {
+            if !guard.enabled || !service.store.allowed(&device).ok()? {
                 return None;
             }
             let record = service.store.ensure(&device).ok()?;

@@ -95,15 +95,15 @@ fn runs_horizontal(bitmap: &[Vec<u8>]) -> Vec<RasterSegment> {
             if value == 0 && start.is_none() {
                 start = Some(index);
             }
-            if value != 0 {
-                if let Some(begin) = start.take() {
-                    result.push(RasterSegment {
-                        axis: "horizontal",
-                        line,
-                        start: begin,
-                        end: index,
-                    });
-                }
+            if value != 0
+                && let Some(begin) = start.take()
+            {
+                result.push(RasterSegment {
+                    axis: "horizontal",
+                    line,
+                    start: begin,
+                    end: index,
+                });
             }
         }
     }
@@ -124,15 +124,15 @@ fn runs_vertical(bitmap: &[Vec<u8>]) -> Vec<RasterSegment> {
             if value == 0 && start.is_none() {
                 start = Some(index);
             }
-            if value != 0 {
-                if let Some(begin) = start.take() {
-                    result.push(RasterSegment {
-                        axis: "vertical",
-                        line,
-                        start: begin,
-                        end: index,
-                    });
-                }
+            if value != 0
+                && let Some(begin) = start.take()
+            {
+                result.push(RasterSegment {
+                    axis: "vertical",
+                    line,
+                    start: begin,
+                    end: index,
+                });
             }
         }
     }
@@ -213,12 +213,12 @@ pub fn otsu_threshold(input: &[Vec<u8>]) -> u8 {
     let mut weight_background = 0.0;
     let mut sum_background = 0.0;
     let mut best = (-1.0, 128_u8);
-    for threshold in 0..256 {
-        weight_background += histogram[threshold] as f64;
+    for (threshold, &bin) in histogram.iter().enumerate() {
+        weight_background += bin as f64;
         if weight_background == 0.0 || weight_background == total {
             continue;
         }
-        sum_background += threshold as f64 * histogram[threshold] as f64;
+        sum_background += threshold as f64 * bin as f64;
         let mean_background = sum_background / weight_background;
         let mean_foreground = (sum - sum_background) / (total - weight_background);
         let variance = weight_background

@@ -205,7 +205,7 @@ pub(crate) fn actual_handle_path(file: &std::fs::File) -> Result<PathBuf, FsErro
             return Err(FsError::UnsafePath);
         }
         let actual = PathBuf::from(OsStr::from_bytes(cstr.to_bytes()));
-        return actual.canonicalize().map_err(|_| FsError::UnsafePath);
+        actual.canonicalize().map_err(|_| FsError::UnsafePath)
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {

@@ -175,20 +175,18 @@ pub fn workspace(path: &Path, sensitive_roots: &[PathBuf]) -> Result<PathBuf, Ag
             return Err(AgentError::PathRejected);
         }
     }
-    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        if let Ok(home) = PathBuf::from(home).canonicalize() {
-            if canonical == home || home.starts_with(&canonical) {
-                return Err(AgentError::PathRejected);
-            }
-        }
+    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+        && let Ok(home) = PathBuf::from(home).canonicalize()
+        && (canonical == home || home.starts_with(&canonical))
+    {
+        return Err(AgentError::PathRejected);
     }
     for key in ["SystemRoot", "WINDIR"] {
-        if let Ok(value) = std::env::var(key) {
-            if let Ok(root) = PathBuf::from(value).canonicalize() {
-                if canonical.starts_with(&root) || root.starts_with(&canonical) {
-                    return Err(AgentError::PathRejected);
-                }
-            }
+        if let Ok(value) = std::env::var(key)
+            && let Ok(root) = PathBuf::from(value).canonicalize()
+            && (canonical.starts_with(&root) || root.starts_with(&canonical))
+        {
+            return Err(AgentError::PathRejected);
         }
     }
     let forbidden = [
@@ -239,13 +237,13 @@ pub fn workspace(path: &Path, sensitive_roots: &[PathBuf]) -> Result<PathBuf, Ag
 }
 
 fn is_script_file(path: &Path) -> bool {
-    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-        if matches!(
+    if let Some(ext) = path.extension().and_then(|s| s.to_str())
+        && matches!(
             ext.to_ascii_lowercase().as_str(),
             "cmd" | "bat" | "ps1" | "sh" | "bash" | "zsh" | "js" | "mjs" | "cjs" | "py" | "lnk"
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
     let Ok(mut file) = std::fs::File::open(path) else {
         return true;
@@ -363,15 +361,13 @@ fn resolve_unix_codex_wrapper(path: &Path) -> Option<PathBuf> {
         for candidate in
             codex_vendor_candidates_under(&nm, std::env::consts::OS, std::env::consts::ARCH)
         {
-            if let Ok(canonical) = candidate.canonicalize() {
-                if let Ok(meta) = std::fs::symlink_metadata(&canonical) {
-                    if meta.is_file()
-                        && !meta.file_type().is_symlink()
-                        && !is_script_file(&canonical)
-                    {
-                        return Some(canonical);
-                    }
-                }
+            if let Ok(canonical) = candidate.canonicalize()
+                && let Ok(meta) = std::fs::symlink_metadata(&canonical)
+                && meta.is_file()
+                && !meta.file_type().is_symlink()
+                && !is_script_file(&canonical)
+            {
+                return Some(canonical);
             }
         }
     }
@@ -398,10 +394,10 @@ pub fn executable(path: &Path, provider: Provider) -> Result<PathBuf, AgentError
     }
     #[cfg(unix)]
     {
-        if provider == Provider::Codex {
-            if let Some(resolved) = resolve_unix_codex_wrapper(path) {
-                return Ok(resolved);
-            }
+        if provider == Provider::Codex
+            && let Some(resolved) = resolve_unix_codex_wrapper(path)
+        {
+            return Ok(resolved);
         }
         let canonical = path.canonicalize().map_err(|_| AgentError::PathRejected)?;
         let meta = std::fs::symlink_metadata(&canonical).map_err(|_| AgentError::PathRejected)?;
@@ -546,22 +542,23 @@ pub(crate) fn detect_cli_candidates_in(
             }
         }
     }
-    if !is_windows && provider == Provider::ClaudeCode {
-        if let Some(home) = home {
-            let versions_dir = home
-                .join(".local")
-                .join("share")
-                .join("claude")
-                .join("versions");
-            if let Ok(entries) = std::fs::read_dir(&versions_dir) {
-                let mut files: Vec<PathBuf> = entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_file())
-                    .collect();
-                files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-                candidates.extend(files);
-            }
+    if !is_windows
+        && provider == Provider::ClaudeCode
+        && let Some(home) = home
+    {
+        let versions_dir = home
+            .join(".local")
+            .join("share")
+            .join("claude")
+            .join("versions");
+        if let Ok(entries) = std::fs::read_dir(&versions_dir) {
+            let mut files: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect();
+            files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            candidates.extend(files);
         }
     }
     candidates
@@ -637,10 +634,10 @@ pub(crate) fn resolve_with_detector(
     match executable(Path::new(trimmed), provider) {
         Ok(exe) => Ok((exe, CliSource::Configured)),
         Err(err) if is_missing_or_foreign_os_path(trimmed) => {
-            if let Some(found) = detector(provider) {
-                if let Ok(exe) = executable(&found, provider) {
-                    return Ok((exe, CliSource::AutoFallback));
-                }
+            if let Some(found) = detector(provider)
+                && let Ok(exe) = executable(&found, provider)
+            {
+                return Ok((exe, CliSource::AutoFallback));
             }
             Err(err)
         }
@@ -779,10 +776,11 @@ pub(crate) const CLI_ENV_KEYS: [&str; 18] = [
 fn minimal_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for key in CLI_ENV_KEYS {
-        if let Ok(value) = std::env::var(key) {
-            if !value.contains('\0') && value.len() <= 4096 {
-                env.insert(key.into(), value);
-            }
+        if let Ok(value) = std::env::var(key)
+            && !value.contains('\0')
+            && value.len() <= 4096
+        {
+            env.insert(key.into(), value);
         }
     }
     #[cfg(unix)]
@@ -804,12 +802,11 @@ fn minimal_env() -> BTreeMap<String, String> {
                 parts.push(extra);
             }
         }
-        if let Ok(joined) = std::env::join_paths(&parts) {
-            if let Some(s) = joined.to_str() {
-                if s.len() <= 4096 {
-                    env.insert("PATH".into(), s.to_owned());
-                }
-            }
+        if let Ok(joined) = std::env::join_paths(&parts)
+            && let Some(s) = joined.to_str()
+            && s.len() <= 4096
+        {
+            env.insert("PATH".into(), s.to_owned());
         }
     }
     env
@@ -902,7 +899,7 @@ pub fn final_answer(provider: Provider, raw: &str) -> String {
         Provider::ClaudeCode => lines
             .filter(|v| v["type"] == "result")
             .filter_map(|v| v["result"].as_str().map(str::to_owned))
-            .last(),
+            .next_back(),
         Provider::Codex => lines
             .filter_map(|v| {
                 if v["item"]["type"] == "agent_message" {
@@ -913,7 +910,7 @@ pub fn final_answer(provider: Provider, raw: &str) -> String {
                     None
                 }
             })
-            .last(),
+            .next_back(),
     };
     found
         .filter(|text| !text.trim().is_empty())
@@ -1115,9 +1112,9 @@ mod tests {
         std::fs::create_dir(&secret).unwrap();
         let cwd = root.path().join("agent-workspace");
         std::fs::create_dir(&cwd).unwrap();
-        assert!(workspace(&cwd, &[secret.clone()]).is_ok());
+        assert!(workspace(&cwd, std::slice::from_ref(&secret)).is_ok());
         assert_eq!(
-            workspace(&secret, &[secret.clone()]),
+            workspace(&secret, std::slice::from_ref(&secret)),
             Err(AgentError::PathRejected)
         );
         assert_eq!(
@@ -1256,7 +1253,7 @@ mod tests {
             None,
             None,
             None,
-            &[brew_bin.clone()],
+            std::slice::from_ref(&brew_bin),
         );
         assert!(mac_codex_list.contains(&mac_codex), "{mac_codex_list:?}");
         let mac_claude_list = detect_cli_candidates_in(

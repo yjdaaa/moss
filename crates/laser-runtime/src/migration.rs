@@ -229,11 +229,11 @@ pub fn run_migration(
             }
             _ => counts.added += 1,
         }
-        if !options.dry_run {
-            if let Some(db) = db.as_ref() {
-                let store = SqliteStore::new(db);
-                store.put(&changed)?;
-            }
+        if !options.dry_run
+            && let Some(db) = db.as_ref()
+        {
+            let store = SqliteStore::new(db);
+            store.put(&changed)?;
         }
     }
     let report_path = options.target_root.join(format!(
@@ -374,23 +374,22 @@ fn normalize_old_job(kind: RecordKind, payload: &mut Value) {
         return;
     }
     let status = payload.get("status").and_then(Value::as_str).unwrap_or("");
-    if matches!(status, "pending" | "running" | "queued")
+    if (matches!(status, "pending" | "running" | "queued")
         || payload
             .get("expected_gcode_sha256")
             .and_then(Value::as_str)
-            .is_none()
+            .is_none())
+        && let Some(object) = payload.as_object_mut()
     {
-        if let Some(object) = payload.as_object_mut() {
-            object.insert("status".into(), Value::String("failed".into()));
-            let result = object
-                .entry("result")
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(result) = result.as_object_mut() {
-                result.insert(
-                    "detail".into(),
-                    Value::String("旧系统未完成任务，迁移时安全终止".into()),
-                );
-            }
+        object.insert("status".into(), Value::String("failed".into()));
+        let result = object
+            .entry("result")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(result) = result.as_object_mut() {
+            result.insert(
+                "detail".into(),
+                Value::String("旧系统未完成任务，迁移时安全终止".into()),
+            );
         }
     }
 }
@@ -501,83 +500,51 @@ pub fn remap_record_paths(
         (rel_path, stale)
     };
 
+    // 字符串路径字段原地改写为 RuntimeRoot 相对路径；空串与非字符串保持原样
+    let mut remap = |val: &mut Value| {
+        if let Some(s) = val.as_str()
+            && !s.is_empty()
+        {
+            let (remapped, stale) = remap_field(s);
+            *val = Value::String(remapped);
+            is_stale |= stale;
+        }
+    };
     match kind {
         RecordKind::Workflow => {
             if let Some(artifacts) = payload.get_mut("artifacts").and_then(Value::as_object_mut) {
                 for key in ["gcode_file", "image_file", "preview_file", "task_file"] {
                     if let Some(val) = artifacts.get_mut(key) {
-                        if let Some(s) = val.as_str() {
-                            if !s.is_empty() {
-                                let (remapped, stale) = remap_field(s);
-                                *val = Value::String(remapped);
-                                if stale {
-                                    is_stale = true;
-                                }
-                            }
-                        }
+                        remap(val);
                     }
                 }
             }
         }
         RecordKind::TextTask => {
-            if let Some(task_dir) = payload.get_mut("task_dir") {
-                if let Some(s) = task_dir.as_str() {
-                    if !s.is_empty() {
-                        let (remapped, stale) = remap_field(s);
-                        *task_dir = Value::String(remapped);
-                        if stale {
-                            is_stale = true;
-                        }
-                    }
-                }
+            if let Some(val) = payload.get_mut("task_dir") {
+                remap(val);
             }
             if let Some(attempts) = payload.get_mut("attempts").and_then(Value::as_array_mut) {
-                for attempt in attempts {
-                    if let Some(att_obj) = attempt.as_object_mut() {
-                        for key in ["gcode_file", "image_file", "preview_file"] {
-                            if let Some(val) = att_obj.get_mut(key) {
-                                if let Some(s) = val.as_str() {
-                                    if !s.is_empty() {
-                                        let (remapped, stale) = remap_field(s);
-                                        *val = Value::String(remapped);
-                                        if stale {
-                                            is_stale = true;
-                                        }
-                                    }
-                                }
-                            }
+                for att_obj in attempts.iter_mut().filter_map(Value::as_object_mut) {
+                    for key in ["gcode_file", "image_file", "preview_file"] {
+                        if let Some(val) = att_obj.get_mut(key) {
+                            remap(val);
                         }
                     }
                 }
             }
         }
         RecordKind::Job => {
-            if let Some(prepared) = payload.get_mut("prepared").and_then(Value::as_object_mut) {
-                if let Some(val) = prepared.get_mut("gcode_file") {
-                    if let Some(s) = val.as_str() {
-                        if !s.is_empty() {
-                            let (remapped, stale) = remap_field(s);
-                            *val = Value::String(remapped);
-                            if stale {
-                                is_stale = true;
-                            }
-                        }
-                    }
-                }
+            if let Some(prepared) = payload.get_mut("prepared").and_then(Value::as_object_mut)
+                && let Some(val) = prepared.get_mut("gcode_file")
+            {
+                remap(val);
             }
         }
         RecordKind::Calibration => {
             for key in ["gcode_file", "preview_file"] {
                 if let Some(val) = payload.get_mut(key) {
-                    if let Some(s) = val.as_str() {
-                        if !s.is_empty() {
-                            let (remapped, stale) = remap_field(s);
-                            *val = Value::String(remapped);
-                            if stale {
-                                is_stale = true;
-                            }
-                        }
-                    }
+                    remap(val);
                 }
             }
         }

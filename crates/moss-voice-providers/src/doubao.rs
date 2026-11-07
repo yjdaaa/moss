@@ -692,7 +692,9 @@ fn pcm_samples(carry: &mut Option<u8>, bytes: &[u8]) -> Vec<i16> {
     if data.len() % 2 == 1 {
         *carry = data.pop();
     }
-    data.chunks_exact(2)
+    data.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
         .collect()
 }

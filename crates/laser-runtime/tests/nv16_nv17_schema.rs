@@ -552,7 +552,7 @@ fn nv16_nv17_sqlite_migration_and_failclosed_restart() {
 #[test]
 fn device_snapshot_keeps_raw_json_and_rejects_unknown_or_oversized() {
     let db = RuntimeDb::open_memory().unwrap();
-    assert!(SCHEMA_VERSION >= 15);
+    const { assert!(SCHEMA_VERSION >= 15) };
     db.voice_device_seen("dev", "client", "lichuang-dev", "2.5.0", "192.168.1.9", 1.)
         .unwrap();
     assert!(
@@ -592,7 +592,7 @@ fn device_snapshot_keeps_raw_json_and_rejects_unknown_or_oversized() {
 #[test]
 fn listen_mode_snapshot_is_the_device_aec_evidence() {
     let db = RuntimeDb::open_memory().unwrap();
-    assert!(SCHEMA_VERSION >= 15);
+    const { assert!(SCHEMA_VERSION >= 15) };
     db.voice_device_seen("dev", "client", "lichuang-dev", "2.5.0", "1.2.3.4", 1.)
         .unwrap();
     assert!(

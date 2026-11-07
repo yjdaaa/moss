@@ -137,7 +137,7 @@ fn hits(content: &str, query: &SearchQuery) -> (usize, usize) {
 /// Three-character hits weigh more than two-character ones.
 pub(crate) fn score(content: &str, query: &SearchQuery) -> Option<usize> {
     let (long, short) = hits(content, query);
-    (long >= 1 || short >= query.shorts.len().min(2).max(1)).then_some(long * 2 + short)
+    (long >= 1 || short >= query.shorts.len().clamp(1, 2)).then_some(long * 2 + short)
 }
 
 fn category_label(category: Category) -> &'static str {
@@ -524,28 +524,27 @@ impl ContextRetriever {
             planned.iter().filter_map(|k| fast_query(k)).collect()
         };
         let service = self.service.clone();
-        let merged =
-            tokio::task::spawn_blocking(move || -> Result<Vec<ContextMemory>, ServiceError> {
-                let at = now();
-                let mut scored: Vec<(ContextMemory, usize)> = Vec::new();
-                for query in &queries {
-                    for (row, points) in service.search(&access, query, device.as_ref(), at)? {
-                        match scored.iter_mut().find(|(seen, _)| seen.id == row.id) {
-                            Some((_, total)) => *total += points,
-                            None => scored.push((row, points)),
-                        }
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<ContextMemory>, ServiceError> {
+            let at = now();
+            let mut scored: Vec<(ContextMemory, usize)> = Vec::new();
+            for query in &queries {
+                for (row, points) in service.search(&access, query, device.as_ref(), at)? {
+                    match scored.iter_mut().find(|(seen, _)| seen.id == row.id) {
+                        Some((_, total)) => *total += points,
+                        None => scored.push((row, points)),
                     }
                 }
-                scored.sort_by(|(a, sa), (b, sb)| {
-                    rank(b, *sb, at)
-                        .total_cmp(&rank(a, *sa, at))
-                        .then_with(|| b.updated_at.total_cmp(&a.updated_at))
-                });
-                Ok(scored.into_iter().map(|(row, _)| row).take(20).collect())
-            })
-            .await
-            .map_err(|_| ServiceError::Store("检索任务失败".into()))?;
-        merged
+            }
+            scored.sort_by(|(a, sa), (b, sb)| {
+                rank(b, *sb, at)
+                    .total_cmp(&rank(a, *sa, at))
+                    .then_with(|| b.updated_at.total_cmp(&a.updated_at))
+            });
+            Ok(scored.into_iter().map(|(row, _)| row).take(20).collect())
+        })
+        .await
+        .map_err(|_| ServiceError::Store("检索任务失败".into()))?
     }
 }
 

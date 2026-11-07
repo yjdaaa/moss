@@ -23,10 +23,10 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> McpState {
 }
 #[cfg(desktop)]
 pub fn shutdown(app: &tauri::AppHandle) {
-    if let Some(state) = app.try_state::<McpState>() {
-        if let Ok(external) = &state.0 {
-            external.shutdown();
-        }
+    if let Some(state) = app.try_state::<McpState>()
+        && let Ok(external) = &state.0
+    {
+        external.shutdown();
     }
 }
 #[cfg(all(test, desktop))]

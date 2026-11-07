@@ -30,7 +30,9 @@ pub const SPEAKER_DIMENSION: u32 = 192;
 pub const SPEAKER_SAMPLE_RATE: u32 = 16_000;
 
 pub fn valid_speaker_pcm(sample_rate: u32, bytes: usize) -> bool {
-    sample_rate == SPEAKER_SAMPLE_RATE && bytes % 2 == 0 && (64_000..=320_000).contains(&bytes)
+    sample_rate == SPEAKER_SAMPLE_RATE
+        && bytes.is_multiple_of(2)
+        && (64_000..=320_000).contains(&bytes)
 }
 /// Embeddings are f32 little-endian, unlike PCM i16. Reject nonfinite/zero vectors.
 pub fn embedding_to_bytes(vector: &[f32]) -> io::Result<Vec<u8>> {
@@ -53,8 +55,10 @@ pub fn bytes_to_embedding(bytes: &[u8]) -> io::Result<Vec<f32>> {
         ));
     }
     let values = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().expect("four-byte chunk")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect::<Vec<_>>();
     embedding_to_bytes(&values)?;
     Ok(values)
@@ -389,8 +393,10 @@ pub fn pcm_to_bytes(samples: &[i16]) -> Vec<u8> {
 
 pub fn bytes_to_pcm(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect()
 }
 

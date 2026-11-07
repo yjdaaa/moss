@@ -80,11 +80,10 @@ fn nv19_everything_starts_off_and_extraction_needs_explicit_consent() {
     )
     .unwrap();
     assert!(f.host.retriever.enabled() && f.host.extractor.enabled());
-    assert_eq!(
+    assert!(
         moss_voice::settings::load(&f.settings)
             .builtin_context
-            .extraction,
-        true
+            .extraction
     );
     call(
         &f,

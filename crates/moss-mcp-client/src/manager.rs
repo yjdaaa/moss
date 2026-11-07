@@ -97,13 +97,13 @@ impl Manager {
 
     /// Pause immediately without losing this run's counters. Configuration save calls this before persistence.
     pub fn suspend(&self, name: &str) {
-        if let Ok(entries) = self.entries.lock() {
-            if let Some(entry) = entries.get(name) {
-                entry.active.store(false, Ordering::Release);
-                entry.stop.send_replace(true);
-                if let Ok(mut view) = entry.view.lock() {
-                    view.state = "disabled".into();
-                }
+        if let Ok(entries) = self.entries.lock()
+            && let Some(entry) = entries.get(name)
+        {
+            entry.active.store(false, Ordering::Release);
+            entry.stop.send_replace(true);
+            if let Ok(mut view) = entry.view.lock() {
+                view.state = "disabled".into();
             }
         }
     }

@@ -223,15 +223,15 @@ impl CameraPreviewStore {
             .lock()
             .map_err(|_| "摄像头预览状态锁失败".to_owned())?;
         inner.tickets.retain(|_, item| now <= item.expires_at);
-        if inner.tickets.len() >= MAX_CAMERA_DEVICES && !inner.tickets.contains_key(device) {
-            if let Some(oldest) = inner
+        if inner.tickets.len() >= MAX_CAMERA_DEVICES
+            && !inner.tickets.contains_key(device)
+            && let Some(oldest) = inner
                 .tickets
                 .iter()
                 .min_by_key(|(_, item)| item.expires_at)
                 .map(|(k, _)| k.clone())
-            {
-                inner.tickets.remove(&oldest);
-            }
+        {
+            inner.tickets.remove(&oldest);
         }
         inner.next_seq = inner.next_seq.saturating_add(1);
         let seq = inner.next_seq;
@@ -290,15 +290,15 @@ impl CameraPreviewStore {
         let Ok(mut inner) = self.0.lock() else {
             return None;
         };
-        if inner.frames.len() >= MAX_CAMERA_DEVICES && !inner.frames.contains_key(device) {
-            if let Some(oldest) = inner
+        if inner.frames.len() >= MAX_CAMERA_DEVICES
+            && !inner.frames.contains_key(device)
+            && let Some(oldest) = inner
                 .frames
                 .iter()
                 .min_by_key(|(_, item)| item.seq)
                 .map(|(k, _)| k.clone())
-            {
-                inner.frames.remove(&oldest);
-            }
+        {
+            inner.frames.remove(&oldest);
         }
         inner.next_seq = inner.next_seq.saturating_add(1);
         let seq = inner.next_seq;

@@ -42,7 +42,7 @@ impl InfoTools {
         NAMES.contains(&name)
     }
 
-    fn search_route<'a>(config: &'a Value) -> Option<(&'static str, &'a str)> {
+    fn search_route(config: &Value) -> Option<(&'static str, &str)> {
         match config["search_provider"].as_str().unwrap_or("tavily") {
             "tavily" => Some(("search", config["search_host"].as_str()?)),
             "metaso" => Some(("metaso", config["metaso_host"].as_str()?)),
@@ -481,7 +481,7 @@ mod tests {
                     .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                     .unwrap();
                 let mut incoming = [0; 4096];
-                stream.read(&mut incoming).unwrap();
+                let _ = stream.read(&mut incoming).unwrap(); // 假新闻源只需读走请求，不解析
                 if turn == 1 {
                     changed.permit.store(false, Ordering::Release);
                 }

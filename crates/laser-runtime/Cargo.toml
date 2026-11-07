@@ -22,3 +22,6 @@ test-memory-secret-store = []
 
 [dev-dependencies]
 laser-runtime = { path = ".", features = ["test-memory-secret-store"] }
+
+[lints]
+workspace = true

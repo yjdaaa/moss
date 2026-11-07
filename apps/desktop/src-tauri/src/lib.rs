@@ -400,11 +400,10 @@ pub fn run() {
             // 同源窗口导航: 默认打开本地同源后端服务；debug 热重载模式下可打开白名单回环 Vite 页面
             if let Ok(origin) = &backend_origin {
                 let target_origin = dev_ui_origin.as_deref().unwrap_or(origin.as_str());
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Ok(parsed) = format!("{target_origin}/").parse() {
+                if let Some(window) = app.get_webview_window("main")
+                    && let Ok(parsed) = format!("{target_origin}/").parse() {
                         let _ = window.navigate(parsed);
                     }
-                }
             }
 
             let _tray = TrayIconBuilder::with_id("moss-tray")
@@ -1014,7 +1013,7 @@ mod tests {
             desktop
                 .trim_end()
                 .split(';')
-                .last()
+                .next_back()
                 .unwrap()
                 .trim_start()
                 .starts_with("connect-src"),

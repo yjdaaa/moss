@@ -690,10 +690,10 @@ impl RuntimeDb {
             let existing = {
                 let mut statement =
                     tx.prepare("SELECT name FROM pragma_table_info('voice_firmware_delivery')")?;
-                let names = statement
+
+                statement
                     .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                names
+                    .collect::<Result<Vec<_>, _>>()?
             };
             for (column, definition) in [
                 ("firmware_version", "TEXT NOT NULL DEFAULT ''"),
@@ -724,10 +724,10 @@ impl RuntimeDb {
             let existing = {
                 let mut statement =
                     tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
-                let names = statement
+
+                statement
                     .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                names
+                    .collect::<Result<Vec<_>, _>>()?
             };
             for (column, definition) in [
                 ("info_json", "TEXT"),
@@ -753,10 +753,10 @@ impl RuntimeDb {
             let existing = {
                 let mut statement =
                     tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
-                let names = statement
+
+                statement
                     .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                names
+                    .collect::<Result<Vec<_>, _>>()?
             };
             for (column, definition) in [("listen_json", "TEXT"), ("listen_at", "REAL")] {
                 if !existing.iter().any(|name| name == column) {
@@ -775,10 +775,10 @@ impl RuntimeDb {
             let existing = {
                 let mut statement =
                     tx.prepare("SELECT name FROM pragma_table_info('context_knowledge_roots')")?;
-                let names = statement
+
+                statement
                     .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                names
+                    .collect::<Result<Vec<_>, _>>()?
             };
             if !existing.iter().any(|name| name == "enabled") {
                 tx.execute_batch(
@@ -796,10 +796,10 @@ impl RuntimeDb {
             let existing = {
                 let mut statement =
                     tx.prepare("SELECT name FROM pragma_table_info('context_memories')")?;
-                let names = statement
+
+                statement
                     .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                names
+                    .collect::<Result<Vec<_>, _>>()?
             };
             for (column, definition) in [
                 (
@@ -1021,8 +1021,10 @@ impl RuntimeDb {
                 return Err(SchemaError::InvalidRecord("声纹记录损坏".into()));
             }
             let embedding = bytes
-                .chunks_exact(4)
-                .map(|v| f32::from_le_bytes(v.try_into().expect("four bytes")))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| f32::from_le_bytes(*v))
                 .collect::<Vec<_>>();
             let norm = embedding.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
             if !norm.is_finite() || norm <= 1e-16 || embedding.iter().any(|v| !v.is_finite()) {
@@ -1603,15 +1605,14 @@ impl RuntimeDb {
         if expected_revision > 9_007_199_254_740_990 || !now.is_finite() || now < 0.0 {
             return Err(SchemaError::InvalidRecord("HA 令牌版本或时间无效".into()));
         }
-        if let Some(token) = replacement {
-            if token.len() < 20
+        if let Some(token) = replacement
+            && (token.len() < 20
                 || token.len() > 8192
                 || token
                     .bytes()
-                    .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-            {
-                return Err(SchemaError::InvalidRecord("HA 访问令牌格式无效".into()));
-            }
+                    .any(|b| b.is_ascii_whitespace() || b.is_ascii_control()))
+        {
+            return Err(SchemaError::InvalidRecord("HA 访问令牌格式无效".into()));
         }
         let sealed = replacement
             .map(|token| {

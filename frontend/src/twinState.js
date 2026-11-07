@@ -698,9 +698,6 @@ export function resolveMachineWorkspace(
     ? Number(toolpathBounds.heightMm)
     : Math.max(0, maxBoundY - Math.min(0, minBoundY));
 
-  const spanX = Math.max(gcodeWidth, maxBoundX - Math.min(0, minBoundX));
-  const spanY = Math.max(gcodeHeight, maxBoundY - Math.min(0, minBoundY));
-
   const rawAutoW = gcodeWidth > 0
     ? gcodeWidth
     : Number(workflowArtifacts?.width_mm) > 0

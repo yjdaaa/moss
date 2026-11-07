@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, Cpu, Flame, UploadCloud, X } from "lucide-react";
+import { Check, Cpu, Flame, UploadCloud } from "lucide-react";
 import { getSendOverlayStage } from "../state/statusNormalize.js";
 
 /**

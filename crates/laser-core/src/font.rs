@@ -345,10 +345,10 @@ impl OutlineBuilder for Builder {
         subdivide_cubic(p0, p1, p2, p3, self.tolerance, 0, &mut self.current);
     }
     fn close(&mut self) {
-        if let Some(first) = self.current.first().copied() {
-            if self.current.last().copied() != Some(first) {
-                self.current.push(first);
-            }
+        if let Some(first) = self.current.first().copied()
+            && self.current.last().copied() != Some(first)
+        {
+            self.current.push(first);
         }
     }
 }
@@ -398,9 +398,9 @@ pub fn layout_text_file(
     layout_text(&data, 0, text, height_mm, spacing_mm)
 }
 
-pub fn wrap_text_lines<'a>(
+pub fn wrap_text_lines(
     face: &Face<'_>,
-    text: &'a str,
+    text: &str,
     scale: f64,
     spacing_mm: f64,
     max_width_mm: Option<f64>,
@@ -412,31 +412,31 @@ pub fn wrap_text_lines<'a>(
             lines.push(String::new());
             continue;
         }
-        if let Some(max_w) = max_width_mm {
-            if max_w > 0.0 {
-                let mut current_line = String::new();
-                let mut current_w = 0.0;
-                for ch in trimmed.chars() {
-                    let adv = face
-                        .glyph_index(ch)
-                        .and_then(|g| face.glyph_hor_advance(g))
-                        .unwrap_or(0) as f64
-                        * scale
-                        + spacing_mm;
-                    if !current_line.is_empty() && current_w + adv > max_w {
-                        lines.push(current_line);
-                        current_line = ch.to_string();
-                        current_w = adv;
-                    } else {
-                        current_line.push(ch);
-                        current_w += adv;
-                    }
-                }
-                if !current_line.is_empty() {
+        if let Some(max_w) = max_width_mm
+            && max_w > 0.0
+        {
+            let mut current_line = String::new();
+            let mut current_w = 0.0;
+            for ch in trimmed.chars() {
+                let adv = face
+                    .glyph_index(ch)
+                    .and_then(|g| face.glyph_hor_advance(g))
+                    .unwrap_or(0) as f64
+                    * scale
+                    + spacing_mm;
+                if !current_line.is_empty() && current_w + adv > max_w {
                     lines.push(current_line);
+                    current_line = ch.to_string();
+                    current_w = adv;
+                } else {
+                    current_line.push(ch);
+                    current_w += adv;
                 }
-                continue;
             }
+            if !current_line.is_empty() {
+                lines.push(current_line);
+            }
+            continue;
         }
         lines.push(trimmed.to_string());
     }

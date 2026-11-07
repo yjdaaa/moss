@@ -487,7 +487,7 @@ fn remember(log: &mut VecDeque<String>, line: &str) {
 }
 
 fn find_python(host: &dyn SetupHost, cancel: &AtomicBool) -> Result<PythonFound, String> {
-    let probe = vec!["-c".to_owned(), PYTHON_PROBE.to_owned()];
+    let probe = ["-c".to_owned(), PYTHON_PROBE.to_owned()];
     let mut found: Vec<PythonFound> = Vec::new();
     for candidate in host.python_candidates() {
         if cancel.load(Ordering::SeqCst) {
