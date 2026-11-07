@@ -2,6 +2,26 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 仓库 `v0.3.11` 云端四端并行交付安装包构建（含应用内更新包，2026-11-07）
+
+用户 2026-11-07 决定“这个修改完后吧项目没有提交的全部git一下然后一起推送并release吧”：将 Windows 专属代码 clippy 清理（`3bceaa2`）与窄窗口两栏并排、创作画板设置移到画布下方、语音中心整理（n69）、撤回工作台与摄像头变长的改动及两栏模式恢复拖上下边框（`123e79b`）推送 `main`，手工执行与 `scripts/release-tag.ps1` 相同的干净树检查、`git tag -a v0.3.11 -m "MOSS v0.3.11"` 并推送标签，触发 `.github/workflows/release.yml` Run `42397900977`（同提交主分支 CI Run `42397893052` 同步全绿），全部 6 个作业成功（17:45:49–18:01:43 UTC）并发布 [Release v0.3.11](https://github.com/yjdaaa/moss/releases/tag/v0.3.11)。
+
+| 产物 | UTC时间（2026-11-07） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.11_x64-offline-voice-setup.exe` | 18:01:37 | 29,727,317 | `2398be74fc3570ea3854df4616171ec3fac37b5266dd19606c4ec34e7b578af8` |
+| `MOSS_0.3.11_x64-lite-setup.exe` | 18:01:37 | 24,112,758 | `e2d2907d4045cc03a439415bb64600e9f33aca4a0083dff52fb7e070f8180053` |
+| `MOSS_0.3.11_windows_x64_portable.exe` | 18:01:38 | 72,324,096 | `a31070c00f554eb345e1044a3d819e4bff37fe6d492f29f064fc202c330dceb6` |
+| `MOSS_0.3.11_macos_universal.dmg` | 18:01:39 | 82,606,114 | `3f3f396cdecc65c9375f4ba6f033aef3d55f1494ec7519e7e7d3ef05e34cb989` |
+| `MOSS_0.3.11_macos_universal.app.tar.gz` | 18:01:40 | 83,496,018 | `4f0090059f32d93224ed621169ca7206a254075c77c027c9c7fc889c4caefd90` |
+| `MOSS_0.3.11_android_aarch64.apk` | 18:01:38 | 55,450,630 | `f26ec9a448e22a93ffb5d67d29fe7c3189b395adff430ad44dc21cc86166bcfe` |
+| `latest.json` | 18:01:38 | 3,097 | `30097df26832084ff38b5cd7e2aa915916a27a0c93bfb2ede38b4e656c50ac5f` |
+| `moss-voice-local-0.3.11-gpl-source.zip` | 18:01:38 | 122,272 | `d6abce578d410b5315c48f2c370245eee2a4dacc140a21cacf4daf0e81142db9` |
+| `SHA256SUMS.txt` | 18:01:38 | 790 | `185d527ef68210c7733c33a8143eb8bb644a4564ff7ec863d04b3d1643221881` |
+
+核对：SHA-256、字节与 UTC 时间取自 GitHub Release API 资产 `digest` / `size` / `updated_at`，并与发布的 `SHA256SUMS.txt` 逐项一致（`SHA256SUMS.txt` 本身下载后复算一致），未将大体积安装包重新下载到本机复算；`latest.json` 版本为 `0.3.11`，含 `windows-x86_64-lite` / `windows-x86_64-offline-voice` / `darwin-aarch64` / `darwin-x86_64` / `android-aarch64` 五个平台；Release 说明取自 `CHANGELOG.md` 的 `[0.3.11]` 节。
+
+**未验证**：未下载安装任何一个云端安装包，未实测从 `0.3.10` 经应用内更新升到 `0.3.11`；未在 Windows（含高缩放窄窗口两栏）与 Android 实机上看新布局；未连接真实小智设备、摄像头与激光雕刻机，语音中心设备列表 / 唤醒词 / 音量只在模拟数据下测过；Windows 专属代码是否 clippy 零警告未在 Windows 上确认；macOS 包 ad-hoc 签名、未公证。
+
 ## GitHub 仓库 `v0.3.10` 云端四端并行交付安装包构建（含应用内更新包，2026-11-07）
 
 用户 2026-11-07 决定“你帮我提交git然后推送并release”：将数字孪生 3D 视口改版、摄像头页重新排版、取消独立语音隐私安全窗口（n67）与记录与诊断改造合入提交 `c400d15` 并推送 `main`，按 `scripts/release-tag.ps1` 步骤（本机无 PowerShell，手工执行同样的干净树检查、`git tag -a v0.3.10 -m "MOSS v0.3.10"`、推标签）推送带附注标签 `v0.3.10`，触发 `.github/workflows/release.yml` Run `42370393959`（同提交主分支 CI Run `42370386559` 同步全绿），全部 6 个作业成功（11:58:09–12:23:12 UTC）并发布 [Release v0.3.10](https://github.com/yjdaaa/moss/releases/tag/v0.3.10)。
