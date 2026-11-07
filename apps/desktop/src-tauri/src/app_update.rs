@@ -986,7 +986,13 @@ mod tests {
     fn updater_config_requires_signed_version() {
         let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let updater = &config["plugins"]["updater"];
-        assert_eq!(updater["pubkey"], "", "公钥只放 updater-pubkey.txt，配置里保持空串供插件反序列化");
+        // 2026-11-07：v0.3.8 发布时三个桌面安装包都因配置里公钥为空而签名失败（tauri-cli 用它核对签名私钥），
+        // 配置与 updater-pubkey.txt 必须是同一行公钥；换钥时两处一起改。
+        assert_eq!(
+            updater["pubkey"].as_str(),
+            embedded_pubkey().as_deref(),
+            "tauri.conf.json 的 plugins.updater.pubkey 必须与 updater-pubkey.txt 一致"
+        );
         assert_eq!(updater["requireSignedVersion"], true, "签名必须带版本，防止旧版冒充新版");
         assert_eq!(updater["windows"]["installMode"], "passive");
         assert!(

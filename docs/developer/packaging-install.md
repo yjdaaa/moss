@@ -161,7 +161,7 @@
   - macOS 用通用版 `MOSS.app.tar.gz` 原地替换 `.app`（`darwin-aarch64` / `darwin-x86_64` 两个键指向同一个包），安装后按完全退出的顺序收尾并重启。
   - Android 取 `android-aarch64`，下载上限 512 MiB，先把 APK 流式写入应用私有缓存目录 `cacheDir/updates/` 临时文件，在 Rust 侧完成带版本绑定的 minisign 签名校验后原子重命名为正式缓存文件，再经 JNI 调用 `ApkInstaller.installApk` 使用 `FileProvider` 拉起系统安装界面由用户确认覆盖升级（Android 8+ 首次未授权“安装未知应用”时自动打开本应用授权页，返回后再次点击直接复用已校验缓存包拉起安装器，无需重下）。
   - 设备正在下发、启动或停机待确认（`ApiService::device_work_in_progress`）时拒绝开始；下载完成、安装前再检查一次。命令 `app_update_status / app_update_install` 只认受信任主窗口（桌面回环后端来源或 Android 打包主窗口），updater 插件自带的前端命令不授权给任何页面。
-  - **签名密钥**：正式 minisign 公钥已写入 `apps/desktop/src-tauri/updater-pubkey.txt`；私钥与密码仅保存在维护者本机 `~/.tauri/moss-updater.{key,pass}` 并注入 GitHub 仓库密钥 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，绝不入库。丢失私钥后已安装的版本无法再应用内更新，只能手动安装一次带新公钥的版本。
+  - **签名密钥**：正式 minisign 公钥已写入 `apps/desktop/src-tauri/updater-pubkey.txt`，并且必须同时写进 `tauri.conf.json` 的 `plugins.updater.pubkey`（同一行；tauri-cli 打更新包时用它核对签名私钥，为空会让三个桌面安装包全部失败，`app_update` 单测强制两处一致，2026-11-07）；私钥与密码仅保存在维护者本机 `~/.tauri/moss-updater.{key,pass}` 并注入 GitHub 仓库密钥 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，绝不入库。丢失私钥后已安装的版本无法再应用内更新，只能手动安装一次带新公钥的版本。
   - 只有配置了上述仓库密钥的发版才生成更新包（`createUpdaterArtifacts` 只在流水线覆盖配置里开启，本机快更与普通构建不生成），见 §7。在此之前发布的旧版本尚未内置该公钥，需手动覆盖安装一次首个带公钥的版本后，后续版本即可在软件内直接更新。
 
 ### 3.7 签名

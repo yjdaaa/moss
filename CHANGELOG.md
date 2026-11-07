@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-11-07
+
+### 修复发布流水线签名更新包失败，v0.3.8 桌面安装包未能发布
+
+- **现象**：推送 `v0.3.8` 标签后，Windows 轻量版、Windows 离线语音版、macOS 三个桌面安装包在打包时全部失败，只有 Android 成功，GitHub Release 没有发布。
+- **根因与修复**：仓库已配置签名私钥，发布流水线因此会生成应用内更新包。tauri-cli 签名时读取 `tauri.conf.json` 的 `plugins.updater.pubkey` 来核对私钥，而这里留的是空串，签名报“failed to decode pubkey”。现在把 `updater-pubkey.txt` 里的同一行公钥也写进配置，`app_update::updater_config_requires_signed_version` 改为断言两处一致。应用运行时仍用同一把公钥校验更新包，行为不变。
+- **验证**：`cargo test -p moss-desktop --lib app_update` 9 项通过；本机用维护者私钥执行 `cargo tauri build --bundles app` 并开启更新包，生成 `MOSS.app.tar.gz` 与 `.sig`，没有“私钥与公钥不匹配”的警告；把公钥改回空串后能复现同样的报错。Windows 安装包与真实的应用内升级仍要等云端发布结果确认。
+- **关联**：`apps/desktop/src-tauri/tauri.conf.json`、`apps/desktop/src-tauri/src/app_update.rs`、`docs/developer/packaging-install.md` §3.6。
+
 ## [0.3.8] - 2026-11-07
 
 ### 本地 Jev 运行状态可见、作废请求不再排队推理，按硬件调整等待（2026-11-07）

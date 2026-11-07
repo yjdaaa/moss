@@ -21,6 +21,10 @@ pub const MAX_IMAGE_BYTES:usize=5*1024*1024;
 const MAX_BODY_BYTES:usize=MAX_IMAGE_BYTES+64*1024;
 const MAX_QUESTION_CHARS:usize=2000;
 const MODEL_TIMEOUT:Duration=Duration::from_secs(30);
+/// 桌面端「摄像头」页发起抓拍时写入 `question` 的内部前缀；命中有效一次性票据时不调用外部视觉模型。
+pub const CAMERA_PREVIEW_PREFIX:&str="__moss_camera_preview__:";
+const CAMERA_TICKET_TTL_SECS:u64=15;
+const MAX_CAMERA_DEVICES:usize=8;
 
 /// The host rechecks settings/credentials on every call; never holds a globally
 /// privileged vision model or shares its key with the text LLM.
@@ -121,6 +125,249 @@ impl VisionPhotos {
     }
 }
 
+/// 桌面端「摄像头」标签页的内存帧：每台设备只留最新一张、总台数与单张字节受限，
+/// 不落盘、不写 SQLite、不进事件日志；撤销设备或停止内置语音服务时立即销毁。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CameraFrame {
+    pub seq: u64,
+    pub captured_at: u64,
+    pub source: String,
+    pub question: String,
+    pub summary: String,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub size_bytes: usize,
+    pub data_url: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CameraFrameSnapshot {
+    pub unchanged: bool,
+    pub pending: bool,
+    pub last_error: Option<String>,
+    pub frame_seq: Option<u64>,
+    pub frame: Option<CameraFrame>,
+}
+
+pub struct CameraFrameInput {
+    pub source: &'static str,
+    pub question: String,
+    pub summary: String,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub size_bytes: usize,
+    pub data_url: String,
+}
+
+struct PendingCapture {
+    ticket: String,
+    expires_at: u64,
+}
+
+#[derive(Default)]
+struct CameraPreviewInner {
+    next_seq: u64,
+    frames: std::collections::HashMap<String, CameraFrame>,
+    tickets: std::collections::HashMap<String, PendingCapture>,
+    errors: std::collections::HashMap<String, String>,
+}
+
+#[derive(Default)]
+pub struct CameraPreviewStore(Mutex<CameraPreviewInner>);
+
+fn constant_time_ticket_eq(a: &str, b: &str) -> bool {
+    if a.len() != 32 || b.len() != 32 {
+        return false;
+    }
+    a.as_bytes()
+        .iter()
+        .zip(b.as_bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+impl CameraPreviewStore {
+    pub fn issue_ticket(&self, device: &str, now: u64) -> Result<(String, u64), String> {
+        let mut raw = [0u8; 16];
+        getrandom::fill(&mut raw).map_err(|_| "无法生成摄像头抓拍票据".to_owned())?;
+        let ticket: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let mut inner = self.0.lock().map_err(|_| "摄像头预览状态锁失败".to_owned())?;
+        inner.tickets.retain(|_, item| now <= item.expires_at);
+        if inner.tickets.len() >= MAX_CAMERA_DEVICES && !inner.tickets.contains_key(device) {
+            if let Some(oldest) = inner
+                .tickets
+                .iter()
+                .min_by_key(|(_, item)| item.expires_at)
+                .map(|(k, _)| k.clone())
+            {
+                inner.tickets.remove(&oldest);
+            }
+        }
+        inner.next_seq = inner.next_seq.saturating_add(1);
+        let seq = inner.next_seq;
+        inner.errors.remove(device);
+        inner.tickets.insert(
+            device.to_owned(),
+            PendingCapture {
+                ticket: ticket.clone(),
+                expires_at: now.saturating_add(CAMERA_TICKET_TTL_SECS),
+            },
+        );
+        Ok((ticket, seq))
+    }
+
+    pub fn has_active_ticket(&self, device: &str, now: u64) -> bool {
+        let Ok(inner) = self.0.lock() else {
+            return false;
+        };
+        inner
+            .tickets
+            .get(device)
+            .is_some_and(|item| now <= item.expires_at)
+    }
+
+    pub fn consume_ticket(&self, device: &str, candidate: &str, now: u64) -> bool {
+        let Ok(mut inner) = self.0.lock() else {
+            return false;
+        };
+        let Some(existing) = inner.tickets.get(device) else {
+            return false;
+        };
+        if now > existing.expires_at {
+            inner.tickets.remove(device);
+            return false;
+        }
+        if !constant_time_ticket_eq(&existing.ticket, candidate) {
+            return false;
+        }
+        inner.tickets.remove(device);
+        true
+    }
+
+    pub fn put_frame(&self, device: &str, input: CameraFrameInput, now: u64) -> Option<u64> {
+        if input.data_url.is_empty() || input.data_url.len() > MAX_PHOTO_DATA_URL {
+            return None;
+        }
+        let Ok(mut inner) = self.0.lock() else {
+            return None;
+        };
+        if inner.frames.len() >= MAX_CAMERA_DEVICES && !inner.frames.contains_key(device) {
+            if let Some(oldest) = inner
+                .frames
+                .iter()
+                .min_by_key(|(_, item)| item.seq)
+                .map(|(k, _)| k.clone())
+            {
+                inner.frames.remove(&oldest);
+            }
+        }
+        inner.next_seq = inner.next_seq.saturating_add(1);
+        let seq = inner.next_seq;
+        inner.errors.remove(device);
+        inner.frames.insert(
+            device.to_owned(),
+            CameraFrame {
+                seq,
+                captured_at: now,
+                source: input.source.to_owned(),
+                question: input.question,
+                summary: input.summary,
+                mime: input.mime,
+                width: input.width,
+                height: input.height,
+                size_bytes: input.size_bytes,
+                data_url: input.data_url,
+            },
+        );
+        Some(seq)
+    }
+
+    pub fn record_error(&self, device: &str, matching_ticket: Option<&str>, message: String) {
+        let Ok(mut inner) = self.0.lock() else {
+            return;
+        };
+        match matching_ticket {
+            Some(expected) => {
+                if inner
+                    .tickets
+                    .get(device)
+                    .is_some_and(|item| constant_time_ticket_eq(&item.ticket, expected))
+                {
+                    inner.tickets.remove(device);
+                }
+            }
+            None => {
+                inner.tickets.remove(device);
+            }
+        }
+        if inner.errors.len() >= MAX_CAMERA_DEVICES && !inner.errors.contains_key(device) {
+            inner.errors.clear();
+        }
+        let clean: String = message.chars().take(300).collect();
+        if !clean.trim().is_empty() {
+            inner.errors.insert(device.to_owned(), clean);
+        }
+    }
+
+    pub fn clear_device(&self, device: &str) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.frames.remove(device);
+            inner.tickets.remove(device);
+            inner.errors.remove(device);
+        }
+    }
+
+    pub fn snapshot(&self, device: &str, after_seq: Option<u64>, now: u64) -> CameraFrameSnapshot {
+        let Ok(mut inner) = self.0.lock() else {
+            return CameraFrameSnapshot {
+                unchanged: false,
+                pending: false,
+                last_error: None,
+                frame_seq: None,
+                frame: None,
+            };
+        };
+        if inner
+            .tickets
+            .get(device)
+            .is_some_and(|item| now > item.expires_at)
+        {
+            inner.tickets.remove(device);
+            inner.errors.insert(
+                device.to_owned(),
+                "等待设备回传画面超时，请确认摄像头排线正常且电脑防火墙未拦截语音服务端口".into(),
+            );
+        }
+        let pending = inner.tickets.contains_key(device);
+        let last_error = inner.errors.get(device).cloned();
+        match inner.frames.get(device) {
+            Some(frame) if after_seq == Some(frame.seq) => CameraFrameSnapshot {
+                unchanged: true,
+                pending,
+                last_error,
+                frame_seq: Some(frame.seq),
+                frame: None,
+            },
+            Some(frame) => CameraFrameSnapshot {
+                unchanged: false,
+                pending,
+                last_error,
+                frame_seq: Some(frame.seq),
+                frame: Some(frame.clone()),
+            },
+            None => CameraFrameSnapshot {
+                unchanged: false,
+                pending,
+                last_error,
+                frame_seq: None,
+                frame: None,
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HttpDevicePermit {
     pub device:String,
@@ -160,9 +407,10 @@ async fn http_guard(
         let header=|name:&str|request.headers().get(name).and_then(|v|v.to_str().ok()).unwrap_or("").trim().to_owned();
         (header("device-id"),header("client-id"),header("authorization"))
     };
+    let now=unix_now();
     if device.is_empty()||client.is_empty()||token.is_empty()
        ||device.len()>128||client.len()>128||token.len()>512
-       ||!shared.signer.verify(&token,&client,&device,unix_now()){
+       ||!shared.signer.verify(&token,&client,&device,now){
         return fail(StatusCode::UNAUTHORIZED,"vision_unauthorized");
     }
     let registry=shared.registry.clone();
@@ -170,11 +418,14 @@ async fn http_guard(
     let Ok(Ok(Some(generation)))=tokio::task::spawn_blocking(move||registry.authorize_http(&check_device,&check_client)).await else{
         return fail(StatusCode::FORBIDDEN,"vision_forbidden");
     };
+    let has_preview_ticket=shared.camera_preview.has_active_ticket(&device,now);
     let permit=HttpDevicePermit{device,client,generation,registry:shared.registry.clone()};
     // Settings/SQLite access belongs on a blocking worker, not an audio thread.
-    let factory=shared.config.vision.clone();
-    if !matches!(tokio::task::spawn_blocking(move||factory.is_some_and(|factory|factory.ready())).await,Ok(true)){
-        return fail(StatusCode::FORBIDDEN,"vision_disabled");
+    if !has_preview_ticket {
+        let factory=shared.config.vision.clone();
+        if !matches!(tokio::task::spawn_blocking(move||factory.is_some_and(|factory|factory.ready())).await,Ok(true)){
+            return fail(StatusCode::FORBIDDEN,"vision_disabled");
+        }
     }
     request.extensions_mut().insert(permit);
     let mut response=next.run(request).await;
@@ -190,7 +441,7 @@ pub(crate) fn router(shared:Arc<Shared>)->Router{
       .with_state(shared)
 }
 
-fn validate_image(bytes:&[u8],mime:&str)->Result<(),StatusCode>{
+fn validate_image(bytes:&[u8],mime:&str)->Result<(u32,u32),StatusCode>{
     if bytes.is_empty()||bytes.len()>MAX_IMAGE_BYTES{return Err(StatusCode::PAYLOAD_TOO_LARGE);}
     let expect=match mime{
         "image/png"=>ImageFormat::Png,
@@ -210,7 +461,7 @@ fn validate_image(bytes:&[u8],mime:&str)->Result<(),StatusCode>{
     limits.max_alloc=Some(96*1024*1024);
     image.limits(limits);
     image.decode().map_err(|_|StatusCode::UNPROCESSABLE_ENTITY)?;
-    Ok(())
+    Ok((w,h))
 }
 fn image_error(status:StatusCode)->Response{
     let code=match status{
@@ -296,12 +547,32 @@ async fn explain(
         let owned=bytes.clone();let mime=mime.clone();
         move||validate_image(&owned,&mime)
     }).await;
-    match validated {
-        Ok(Ok(()))=>{},
+    let (w,h)=match validated {
+        Ok(Ok(dim))=>dim,
         Ok(Err(status))=>return image_error(status),
         Err(_)=>return fail(StatusCode::UNPROCESSABLE_ENTITY,"vision_image_invalid"),
-    }
+    };
     if !permit.current().await{return fail(StatusCode::FORBIDDEN,"vision_revoked");}
+    if let Some(raw_ticket)=question.trim().strip_prefix(CAMERA_PREVIEW_PREFIX){
+        let now=unix_now();
+        if !shared.camera_preview.consume_ticket(&permit.device,raw_ticket.trim(),now){
+            return fail(StatusCode::FORBIDDEN,"vision_disabled");
+        }
+        let url=moss_voice_providers::vision::data_url(&mime,&bytes);
+        if shared.camera_preview.put_frame(&permit.device,CameraFrameInput{
+            source:"preview",
+            question:String::new(),
+            summary:String::new(),
+            mime,
+            width:w,
+            height:h,
+            size_bytes:bytes.len(),
+            data_url:url,
+        },now).is_none(){
+            return image_error(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        return response(StatusCode::OK,json!({"success":true,"text":"画面已同步到 MOSS 桌面端"}));
+    }
     let Some(factory)=shared.config.vision.clone() else{return fail(StatusCode::FORBIDDEN,"vision_disabled")};
     let factory_for_open=factory.clone();
     let Ok(Some(snapshot))=tokio::task::spawn_blocking(move||factory_for_open.open()).await else{
@@ -317,16 +588,28 @@ async fn explain(
     }
     match result{
         Ok(Ok(text)) if !text.trim().is_empty()=>{
+            let clean_text:String=text.chars().take(2000).collect();
+            let url=moss_voice_providers::vision::data_url(&mime,&bytes);
             if keep{
                 // 2026-10-16：只有用户明确打开“把照片留在对话上下文里”才交给会话；
                 // 只留内存、按设备只留最新一张，不落盘、不进日志与事件。
                 shared.vision_photos.put(&permit.device,Photo{
                     question:question.chars().take(200).collect(),
-                    text:text.chars().take(400).collect(),
-                    data_url:moss_voice_providers::vision::data_url(&mime,&bytes),
+                    text:clean_text.chars().take(400).collect(),
+                    data_url:url.clone(),
                 });
             }
-            response(StatusCode::OK,json!({"success":true,"text":text.chars().take(2000).collect::<String>()}))
+            shared.camera_preview.put_frame(&permit.device,CameraFrameInput{
+                source:"voice",
+                question:question.chars().take(200).collect(),
+                summary:clean_text.chars().take(600).collect(),
+                mime,
+                width:w,
+                height:h,
+                size_bytes:bytes.len(),
+                data_url:url,
+            },unix_now());
+            response(StatusCode::OK,json!({"success":true,"text":clean_text}))
         },
         Err(GuardedVisionError::Revoked)=>fail(StatusCode::FORBIDDEN,"vision_revoked"),
         Err(GuardedVisionError::Disabled)=>fail(StatusCode::FORBIDDEN,"vision_disabled"),
