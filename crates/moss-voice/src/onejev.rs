@@ -1446,6 +1446,7 @@ impl UpstreamClient {
         state: &Value,
         questions: &Map<String, Value>,
         media: Option<&Value>,
+        abandoned: &dyn Fn() -> bool,
     ) -> Result<(u16, Value), String> {
         let t0 = Instant::now();
         let images = match parse_inline_media(media, self.vision) {
@@ -1461,6 +1462,11 @@ impl UpstreamClient {
         }
 
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        // 2026-11-07：网关单槽串行推理。排队期间调用方已放弃（预热被新的中间结果取代、超时）的请求直接丢弃，
+        // 不再占用推理，避免正式轮次排在一串作废请求之后超时并触发熔断。
+        if abandoned() {
+            return Ok((CLIENT_GONE_STATUS, json!({ "detail": "client disconnected" })));
+        }
         let (prompts, prefix_prompt, total_tokens) = if images.is_empty() {
             let mut full_ids = Vec::with_capacity(branches.len());
             for br in &branches {
@@ -1516,6 +1522,9 @@ impl UpstreamClient {
             (prompt_vals, prefix_obj, branches.len() * 256)
         };
 
+        if abandoned() {
+            return Ok((CLIENT_GONE_STATUS, json!({ "detail": "client disconnected" })));
+        }
         let mut pin_slot: Option<i64> = None;
         if prompts.len() > 1 {
             let prefill = self.post_completion(&json!({
@@ -1671,6 +1680,104 @@ impl UpstreamClient {
     }
 }
 
+/// 本地 OneJev 在语音链路里的等待预算（2026-11-07 用户决定）。
+///
+/// - `hold_ms`：静音判停后“这句话是不是没说完”的判断最多等多久；为 `None` 时不做这项判断。
+///   必须短于会话续听窗口（1200ms），否则结果回来时窗口已过，只会白白多等。9B 来不及，固定关闭。
+/// - 没有显卡加速时 4B / 9B 基本赶不上语音节奏：不再加长等待（否则每句话都更慢），
+///   改为关闭“没说完”判断并在界面提示改用 0.8B。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalJevBudget {
+    pub turn_ms: u64,
+    pub hold_ms: Option<u64>,
+    pub notice: Option<&'static str>,
+}
+
+pub const NOTICE_9B_NO_HOLD: &str = "9B 推理较慢，来不及在续听窗口内判断“没说完”，已自动关闭这一项（其余筛选照常）";
+pub const NOTICE_SLOW_ON_CPU: &str = "当前没有显卡加速，4B / 9B 推理较慢，语音筛选经常来不及而被自动跳过；建议改用 0.8B";
+
+/// 按模型档位与是否有显卡加速给出等待预算；Laya 等非 OneJev 模型返回 `None`（沿用默认值）。
+pub fn local_jev_budget(model_id: &str, gpu: bool) -> Option<LocalJevBudget> {
+    let budget = match (model_id, gpu) {
+        ("onejev_1_6_0_8b", true) => LocalJevBudget { turn_ms: 1500, hold_ms: Some(600), notice: None },
+        ("onejev_1_6_0_8b", false) => LocalJevBudget { turn_ms: 2000, hold_ms: Some(800), notice: None },
+        ("onejev_1_6_4b", true) => LocalJevBudget { turn_ms: 2500, hold_ms: Some(800), notice: None },
+        ("onejev_1_6_4b", false) => LocalJevBudget { turn_ms: 2500, hold_ms: None, notice: Some(NOTICE_SLOW_ON_CPU) },
+        ("onejev_1_6_9b", true) => LocalJevBudget { turn_ms: 3500, hold_ms: None, notice: Some(NOTICE_9B_NO_HOLD) },
+        ("onejev_1_6_9b", false) => LocalJevBudget { turn_ms: 3500, hold_ms: None, notice: Some(NOTICE_SLOW_ON_CPU) },
+        _ => return None,
+    };
+    Some(budget)
+}
+
+/// 未启动推理进程前，按推理引擎文件与平台预估是否会走显卡加速（与 `detect_onejev_env` 同一口径）。
+pub fn expected_gpu(models_root: &Path) -> bool {
+    detect_onejev_env(models_root, false)
+        .get("accelerator")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "metal" | "cuda" | "vulkan"))
+}
+
+/// 从 `ps -axo pid=,ppid=,command=` 的输出里挑出 MOSS 自己拉起、父进程已不在（被 init/launchd 收养）
+/// 的 OneJev 推理进程：命令行同时含 `llama-server`、`OneJev1.6-` 权重名与 MOSS 的模型目录。
+fn orphan_llama_pids(ps_output: &str, model_roots: &[String]) -> Vec<u32> {
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, command) = rest.trim_start().split_once(char::is_whitespace)?;
+            let pid: u32 = pid.parse().ok()?;
+            let ppid: u32 = ppid.parse().ok()?;
+            let command = command.trim_start();
+            let ours = command.contains("llama-server")
+                && command.contains("OneJev1.6-")
+                && model_roots.iter().any(|root| !root.is_empty() && command.contains(root.as_str()));
+            (ppid == 1 && ours).then_some(pid)
+        })
+        .collect()
+}
+
+/// 清理上次 MOSS 崩溃或被强制结束后遗留的 OneJev 推理进程，返回结束的个数。
+/// Windows 由 Job Object 随 MOSS 一起结束，这里只处理 macOS / Linux；只认 MOSS 模型目录里的 OneJev 权重，
+/// 绝不碰用户自己运行的其他 `llama-server`。
+pub fn reap_orphaned_llama_servers(model_roots: &[PathBuf]) -> usize {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let Ok(out) = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,command="])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return 0;
+        };
+        let roots: Vec<String> = model_roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect();
+        let pids = orphan_llama_pids(&String::from_utf8_lossy(&out.stdout), &roots);
+        let mut killed = 0;
+        for pid in pids {
+            let ok = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if ok {
+                killed += 1;
+            }
+        }
+        killed
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = model_roots;
+        0
+    }
+}
+
 pub struct OneJevGateway {
     model_id: String,
     accelerator: DetectedAccelerator,
@@ -1679,6 +1786,70 @@ pub struct OneJevGateway {
     server_thread: Option<std::thread::JoinHandle<()>>,
     llama_child: Arc<Mutex<Option<Child>>>,
     _job: Option<JobHandle>,
+    log: LlamaLog,
+}
+
+/// `llama-server` 错误输出的最近几行（只在内存里，按行数与长度封顶），用于启动失败与意外退出时说明原因。
+#[derive(Clone, Default)]
+pub struct LlamaLog(Arc<Mutex<std::collections::VecDeque<String>>>);
+
+const LLAMA_LOG_LINES: usize = 40;
+const LLAMA_LOG_LINE_CHARS: usize = 240;
+
+impl LlamaLog {
+    fn push(&self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let Ok(mut lines) = self.0.lock() else { return };
+        if lines.len() >= LLAMA_LOG_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line.chars().take(LLAMA_LOG_LINE_CHARS).collect());
+    }
+
+    /// 持续读完子进程 stderr（读到 EOF 即子进程已退出），避免管道写满阻塞推理进程。
+    fn drain<R: Read + Send + 'static>(&self, pipe: R) {
+        let log = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("onejev-llama-log".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(pipe);
+                let mut buf = Vec::new();
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => log.push(&String::from_utf8_lossy(&buf)),
+                    }
+                }
+            });
+    }
+
+    /// 最近几行里最能说明问题的：优先带 error / failed 字样的行，否则取最后几行。
+    pub fn summary(&self, max_lines: usize) -> String {
+        let Ok(lines) = self.0.lock() else { return String::new() };
+        let lower_hit = |l: &String| {
+            let l = l.to_ascii_lowercase();
+            l.contains("error") || l.contains("failed") || l.contains("unable") || l.contains("out of memory")
+        };
+        let picked: Vec<&String> = {
+            let hits: Vec<&String> = lines.iter().filter(|l| lower_hit(l)).collect();
+            if hits.is_empty() { lines.iter().collect() } else { hits }
+        };
+        let start = picked.len().saturating_sub(max_lines);
+        picked[start..].iter().map(|l| l.as_str()).collect::<Vec<_>>().join(" | ")
+    }
+}
+
+fn with_log_hint(message: String, log: &LlamaLog) -> String {
+    let tail = log.summary(3);
+    if tail.is_empty() {
+        message
+    } else {
+        format!("{message}。推理进程输出：{tail}")
+    }
 }
 
 impl OneJevGateway {
@@ -1780,13 +1951,17 @@ impl OneJevGateway {
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         configure_no_window(&mut cmd);
 
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("启动 OneJev llama-server 失败：{e}"))?;
         let job = JobHandle::for_child(&child);
+        let log = LlamaLog::default();
+        if let Some(stderr) = child.stderr.take() {
+            log.drain(stderr);
+        }
 
         let upstream_addr = SocketAddr::from(([127, 0, 0, 1], llama_port));
         let load_timeout = if model_id == "onejev_1_6_9b" {
@@ -1805,10 +1980,15 @@ impl OneJevGateway {
                 return Err("本地 OneJev 启动已取消".into());
             }
             if let Ok(Some(status)) = child.try_wait() {
-                return Err(format!(
-                    "OneJev 底层推理进程提前退出（状态码 {:?}，加速模式 {}）",
-                    status.code(),
-                    accel.display_text()
+                // 给日志线程一点时间读完最后的错误输出
+                std::thread::sleep(Duration::from_millis(100));
+                return Err(with_log_hint(
+                    format!(
+                        "OneJev 底层推理进程提前退出（状态码 {:?}，加速模式 {}）",
+                        status.code(),
+                        accel.display_text()
+                    ),
+                    &log,
                 ));
             }
             if probe_http_health(upstream_addr, Duration::from_millis(150)) {
@@ -1820,7 +2000,10 @@ impl OneJevGateway {
         if !ready {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("OneJev 模型加载超时（首次加载权重到显存/统一内存较慢，请稍后重试）".into());
+            return Err(with_log_hint(
+                "OneJev 模型加载超时（首次加载权重到显存/统一内存较慢，请稍后重试）".into(),
+                &log,
+            ));
         }
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
@@ -1850,7 +2033,7 @@ impl OneJevGateway {
         let child_arc = Arc::new(Mutex::new(Some(child)));
         let stop_flag = Arc::new(AtomicBool::new(false));
 
-        let gateway = Self::spawn_with_upstream(
+        let mut gateway = Self::spawn_with_upstream(
             model_id.to_owned(),
             accel,
             listener,
@@ -1860,6 +2043,7 @@ impl OneJevGateway {
             job,
             stop_flag,
         )?;
+        gateway.log = log;
         Ok(gateway)
     }
 
@@ -1911,6 +2095,7 @@ impl OneJevGateway {
             server_thread: Some(handle),
             llama_child,
             _job: job,
+            log: LlamaLog::default(),
         })
     }
 
@@ -1924,6 +2109,11 @@ impl OneJevGateway {
 
     pub fn listen_addr(&self) -> SocketAddr {
         self.listen_addr
+    }
+
+    /// 推理进程最近的错误输出摘要（意外退出后用来说明原因；没有输出时为空）。
+    pub fn log_summary(&self) -> String {
+        self.log.summary(3)
     }
 
     pub fn is_alive(&self) -> bool {
@@ -2281,7 +2471,9 @@ fn handle_gateway_conn(
                 return;
             };
             let media = payload.get("media");
-            match upstream.evaluate(model_id, state, questions, media) {
+            let abandoned = || client_disconnected(&stream);
+            match upstream.evaluate(model_id, state, questions, media, &abandoned) {
+                Ok((CLIENT_GONE_STATUS, _)) => {}
                 Ok((status, resp_json)) => write_json_response(&mut stream, status, &resp_json),
                 Err(err) => write_json_response(&mut stream, 502, &json!({ "error": err, "detail": err })),
             }
@@ -2290,6 +2482,28 @@ fn handle_gateway_conn(
             write_json_response(&mut stream, 404, &json!({ "detail": "not found" }));
         }
     }
+}
+
+/// 内部状态码：调用方已断开，不写响应。
+const CLIENT_GONE_STATUS: u16 = 499;
+
+/// 请求已完整读完后，调用方若已关闭连接（放弃等待），套接字上会读到 EOF 或连接重置。
+/// 只做非阻塞 peek，不消费数据；无法判断时按“仍在等待”处理。
+fn client_disconnected(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 1];
+    let gone = match stream.peek(&mut buf) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(err) => !matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ),
+    };
+    let _ = stream.set_nonblocking(false);
+    gone
 }
 
 fn write_json_response(stream: &mut TcpStream, status: u16, body: &Value) {
@@ -2477,12 +2691,28 @@ mod tests {
         assert!(!tmp.path().join("escape.exe").exists());
     }
 
-    #[test]
-    fn gateway_round_trips_systemone_over_mock_llama_server() {
+    struct MockLlama {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        completions: Arc<AtomicUsize>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl MockLlama {
+        fn shutdown(self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            let _ = self.thread.join();
+        }
+    }
+
+    fn spawn_mock_llama() -> MockLlama {
         let mock_llama = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let mock_port = mock_llama.local_addr().unwrap().port();
         let stop_mock = Arc::new(AtomicBool::new(false));
         let stop_mock_t = stop_mock.clone();
+        let completions = Arc::new(AtomicUsize::new(0));
+        let completions_t = completions.clone();
 
         let mock_thread = std::thread::spawn(move || {
             while !stop_mock_t.load(Ordering::SeqCst) {
@@ -2529,6 +2759,7 @@ mod tests {
                     };
                     write_json_response(&mut s, 200, &json!({ "tokens": tokens }));
                 } else if path == "/completion" {
+                    completions_t.fetch_add(1, Ordering::SeqCst);
                     let v: Value = serde_json::from_slice(&body).unwrap();
                     let n_predict = v["n_predict"].as_i64().unwrap_or(1);
                     let prompts = v["prompt"].as_array().unwrap();
@@ -2556,10 +2787,13 @@ mod tests {
             }
         });
 
-        let upstream = Arc::new(UpstreamClient::connect(format!("http://127.0.0.1:{mock_port}")).unwrap());
+        MockLlama { port: mock_port, stop: stop_mock, completions, thread: mock_thread }
+    }
+
+    fn spawn_test_gateway(upstream: Arc<UpstreamClient>) -> (OneJevGateway, SocketAddr) {
         let gw_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let gw_addr = gw_listener.local_addr().unwrap();
-        let mut gw = OneJevGateway::spawn_with_upstream(
+        let gw = OneJevGateway::spawn_with_upstream(
             "onejev_1_6_0_8b".into(),
             DetectedAccelerator {
                 kind: AcceleratorKind::Metal,
@@ -2573,6 +2807,15 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
+        (gw, gw_addr)
+    }
+
+    #[test]
+    fn gateway_round_trips_systemone_over_mock_llama_server() {
+        let mock = spawn_mock_llama();
+        let mock_port = mock.port;
+        let upstream = Arc::new(UpstreamClient::connect(format!("http://127.0.0.1:{mock_port}")).unwrap());
+        let (mut gw, gw_addr) = spawn_test_gateway(upstream);
 
         let client = reqwest::blocking::Client::new();
         let health: Value = client
@@ -2644,9 +2887,106 @@ mod tests {
         assert_eq!(not_found.status().as_u16(), 404);
 
         gw.stop();
-        stop_mock.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect(("127.0.0.1", mock_port));
-        let _ = mock_thread.join();
+        mock.shutdown();
+    }
+
+    #[test]
+    fn gateway_drops_requests_abandoned_while_queued_behind_the_single_slot() {
+        let mock = spawn_mock_llama();
+        let upstream = Arc::new(UpstreamClient::connect(format!("http://127.0.0.1:{}", mock.port)).unwrap());
+        let (mut gw, gw_addr) = spawn_test_gateway(upstream.clone());
+        let body = serde_json::to_vec(&json!({
+            "model": "jev-latest",
+            "state": { "utterance": "帮我看下" },
+            "questions": { "unfinished": { "type": "noul", "instructions": "unfinished?" } }
+        }))
+        .unwrap();
+        let request = |close: bool| {
+            let mut stream = TcpStream::connect(gw_addr).unwrap();
+            let head = format!(
+                "POST /v1/systemone HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                gw_addr.port(),
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+            if close {
+                drop(stream);
+                None
+            } else {
+                Some(stream)
+            }
+        };
+
+        // 模拟推理正忙：占住单槽锁，期间到达的请求排队；调用方等不及先断开
+        let busy = upstream.lock.lock().unwrap();
+        request(true);
+        request(true);
+        std::thread::sleep(Duration::from_millis(300));
+        drop(busy);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(mock.completions.load(Ordering::SeqCst), 0, "已放弃的请求不应再推理");
+
+        // 仍在等待的请求照常推理并返回结果
+        let mut alive = request(false).unwrap();
+        let mut resp = String::new();
+        alive.read_to_string(&mut resp).unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp}");
+        assert!(resp.contains("\"unfinished\""), "got: {resp}");
+        assert_eq!(mock.completions.load(Ordering::SeqCst), 1);
+
+        gw.stop();
+        mock.shutdown();
+    }
+
+    #[test]
+    fn local_jev_budget_keeps_hold_inside_listen_window_and_flags_slow_cpu() {
+        for id in ["onejev_1_6_0_8b", "onejev_1_6_4b", "onejev_1_6_9b"] {
+            for gpu in [true, false] {
+                let budget = local_jev_budget(id, gpu).unwrap();
+                assert!(budget.hold_ms.is_none_or(|ms| ms <= 800), "{id} gpu={gpu}: {budget:?}");
+                assert!(budget.turn_ms >= 1500 && budget.turn_ms <= 3500, "{id} gpu={gpu}: {budget:?}");
+            }
+        }
+        assert_eq!(local_jev_budget("onejev_1_6_0_8b", true).unwrap().hold_ms, Some(600));
+        assert_eq!(local_jev_budget("onejev_1_6_9b", true).unwrap().hold_ms, None);
+        assert_eq!(local_jev_budget("onejev_1_6_9b", true).unwrap().notice, Some(NOTICE_9B_NO_HOLD));
+        assert_eq!(local_jev_budget("onejev_1_6_4b", false).unwrap().notice, Some(NOTICE_SLOW_ON_CPU));
+        assert_eq!(local_jev_budget("onejev_1_6_4b", false).unwrap().hold_ms, None);
+        assert!(local_jev_budget("onejev_1_6_0_8b", false).unwrap().notice.is_none());
+        assert!(local_jev_budget("laya_multilingual", true).is_none());
+    }
+
+    #[test]
+    fn orphan_reaper_only_matches_moss_onejev_processes_adopted_by_init() {
+        let roots = vec!["/Users/u/Library/Application Support/moss/models".to_owned()];
+        let ps = "\
+  101     1 /Users/u/Library/Application Support/moss/models/.runtime/llama-b12167/llama-server --host 127.0.0.1 --port 5000 -m /Users/u/Library/Application Support/moss/models/onejev_1_6_4b/OneJev1.6-4B.Q4_K_M.gguf
+  102   900 /Users/u/Library/Application Support/moss/models/.runtime/llama-b12167/llama-server -m /Users/u/Library/Application Support/moss/models/onejev_1_6_0_8b/OneJev1.6-0.8B.Q8_0.gguf
+  103     1 /opt/homebrew/bin/llama-server -m /Users/u/models/qwen.gguf
+  104     1 /opt/homebrew/bin/llama-server -m /Users/u/Library/Application Support/moss/models/other.gguf
+  105     1 /usr/bin/python3 -m laya.serve
+garbage line
+";
+        assert_eq!(orphan_llama_pids(ps, &roots), vec![101]);
+        assert!(orphan_llama_pids(ps, &[String::new()]).is_empty());
+    }
+
+    #[test]
+    fn llama_log_summary_prefers_error_lines_and_stays_bounded() {
+        let log = LlamaLog::default();
+        assert_eq!(log.summary(3), "");
+        for i in 0..100 {
+            log.push(&format!("info line {i}"));
+        }
+        assert_eq!(log.0.lock().unwrap().len(), LLAMA_LOG_LINES);
+        assert!(log.summary(2).ends_with("info line 99"));
+        log.push("llama_model_load: error loading model: failed to open file");
+        log.push(&"x".repeat(1000));
+        assert!(log.summary(3).contains("error loading model"));
+        assert!(log.0.lock().unwrap().back().unwrap().chars().count() <= LLAMA_LOG_LINE_CHARS);
+        assert!(with_log_hint("启动失败".into(), &log).contains("推理进程输出"));
+        assert_eq!(with_log_hint("启动失败".into(), &LlamaLog::default()), "启动失败");
     }
 
     #[test]

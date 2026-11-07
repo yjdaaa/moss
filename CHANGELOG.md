@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 本地 Jev 运行状态可见、作废请求不再排队推理，按硬件调整等待（2026-11-07）
+
+- **现象**：本地 OneJev 后台启动失败只打印到控制台，打包后的程序看不到，界面照样显示 Jev 已启用，实际每轮都被跳过。网关一次只算一个请求，说话时每段中间识别结果都会发一次预热请求，被新结果取代后网关仍照算，正式轮次排在后面容易超时并停用 Jev 30 秒。9B 的“没说完”判断等 1200ms，正好等于续听窗口，结果回来时窗口已过，只会让每句话多等。4B / 9B 没有显卡加速时几乎每轮都超时。用本机 Jev 分析加工反馈时，记录显示“OpenRouter Jev”。macOS 上 MOSS 崩溃后推理进程留在后台占内存。
+- **根因与修复**：`onejev::UpstreamClient::evaluate` 拿到推理锁后、提交推理前各检查一次调用方是否已断开，断开就丢弃（`client_disconnected`）；`llama-server` 错误输出改为在内存中保留最近 40 行（`LlamaLog`），启动失败、加载超时和意外退出时附在原因里。新增 `onejev::local_jev_budget` 按档位与是否有显卡定等待时间，9B 以及无显卡的 4B 关闭“没说完”判断；`VoiceJevFilter::with_timeouts` 把这项等待封顶为 `MAX_HOLD_TIMEOUT`（800ms），`session.rs` 编译期断言续听窗口比它至少长 300ms。桌面 `LocalLayaRunner.last_failure` 记录启动失败原因，`voice_builtin_status.local.jev_runtime` 返回状态、加速方式、原因与提示，语音中心显示 `#voice-local-jev-runtime`。加工反馈本机分类记 `source: "local_jev"`，错误提示按服务写“本机 Jev 服务”或 OpenRouter。macOS / Linux 桌面启动时调用 `onejev::reap_orphaned_llama_servers`，只结束 MOSS 模型目录里 OneJev 权重对应、已被系统收养的推理进程。**行为变更**：9B 与无显卡的 4B 不再做“没说完”判断；0.8B 无显卡时等待放宽到 2000/800ms；4B 显卡下“没说完”等待由 900ms 改为 800ms。按用户决定保留并照常加载 OneJev 图片理解模块 mmproj，供以后接摄像头。默认值、安全门禁与 `authorizes_actions: false` 不变，不是破坏性变更。
+- **验证**：新增 `moss-voice` `onejev` 4 项（排队期间已断开的请求不再推理、还在等的照常返回，且已确认去掉修复后该用例失败；等待预算不超过续听窗口；遗留进程只认 MOSS 的 OneJev；错误输出摘要有上限并优先取报错行），`moss-voice-server` `jev` 1 项（“没说完”等待封顶）；桌面 `local_laya_device_selection…` 补充运行状态 stopped / starting / failed、不串档位与提示；`laser-api` 反馈来源与服务名断言；前端 `voiceState.test.mjs` 1 项、新增 `feedbackView.test.mjs`，`voice-center.browser.mjs` 断言失败原因展示。未在真实 OneJev 模型、显卡或 CPU 环境上实测延迟；未在 macOS 上实测崩溃后的进程清理。
+- **关联**：`crates/moss-voice/src/onejev.rs`（`client_disconnected`、`LlamaLog`、`local_jev_budget`、`expected_gpu`、`reap_orphaned_llama_servers`）；`crates/moss-voice-server/src/{jev.rs,session.rs}`；`apps/desktop/src-tauri/src/voice_builtin.rs`（`local_jev_runtime_status`、`onejev_uses_gpu`、`ensure_laya_running`）；`crates/laser-api/src/feedback.rs`（`decision_source`、`is_local_jev_endpoint`）；`frontend/src/{voiceState.js,feedbackView.js,components/VoiceBuiltinCard.jsx,components/FeedbackPanel.jsx}`；`docs/integration/moss-native-voice-spec.md` n65、`docs/developer/api-contracts.md`。
+
 ### 本地模型可同时下载、删除不留残留，Laya 运行环境改为自动准备（2026-11-07）
 
 - **现象**：语音中心点下载后所有模型按钮会短暂变灰；OneJev 多档同时下载时，后点的排队等共用推理引擎，一直显示“下载中 0%”且取消不生效，第一档下载推理引擎时进度也不动。删除模型后，MOSS 自动下载的推理引擎 `<models>/.runtime/llama-*` 永远不删；下载中途强关或崩溃留下的半截文件（9B 可达数 GB）不清理；Windows 下文件被占用时会删掉一半。Laya 需要用户自己建 Python 虚拟环境并 `pip install "laya[serve]"`，不会自动装 CUDA 版 PyTorch。

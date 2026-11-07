@@ -121,22 +121,22 @@ fn request_payload_for(model: &str, state: &Value) -> Value {
 
 fn parse_answer(value: &Value) -> Result<Value, String> {
     if value.get("error").is_some() {
-        return Err("OpenRouter 返回错误".into());
+        return Err("Jev 返回错误".into());
     }
     let answer = &value["answers"]["feedback_type"];
     let choice = answer["choice"]
         .as_str()
         .filter(|c| CLASSES.contains(c))
-        .ok_or("OpenRouter 返回未知分类或缺少 choice")?;
+        .ok_or("Jev 返回未知分类或缺少 choice")?;
     let confidence = answer
         .get("x_jev_confidence")
         .or_else(|| answer.get("confidence"))
         .or_else(|| answer.get("answer_confidence"))
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite() && (0.0..=1.0).contains(n))
-        .ok_or("OpenRouter 返回无效 confidence")?;
+        .ok_or("Jev 返回无效 confidence")?;
     if answer["type"] != "choice" {
-        return Err("OpenRouter 返回类型不是 choice".into());
+        return Err("Jev 返回类型不是 choice".into());
     }
     Ok(json!({
         "feedback_type": if confidence >= MIN_CONFIDENCE { choice } else { "unknown" },
@@ -155,7 +155,9 @@ pub(super) fn call_jev_with_model(
     model: &str,
     state: &Value,
 ) -> Result<Value, String> {
-    let timeout_secs = if endpoint.starts_with("http://127.0.0.1:") { 12 } else { 5 };
+    let local = is_local_jev_endpoint(endpoint);
+    let service = if local { "本机 Jev 服务" } else { "OpenRouter" };
+    let timeout_secs = if local { 12 } else { 5 };
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
@@ -166,20 +168,30 @@ pub(super) fn call_jev_with_model(
         .bearer_auth(api_key)
         .json(&request_payload_for(model, state))
         .send()
-        .map_err(|_| "OpenRouter 超时或无法连接")?;
+        .map_err(|_| format!("{service} 超时或无法连接"))?;
     if !response.status().is_success() {
-        return Err(format!("OpenRouter HTTP {}", response.status().as_u16()));
+        return Err(format!("{service} HTTP {}", response.status().as_u16()));
     }
     let mut bytes = Vec::new();
     response
         .take(64 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "OpenRouter 响应读取失败")?;
+        .map_err(|_| format!("{service} 响应读取失败"))?;
     if bytes.len() > 64 * 1024 {
-        return Err("OpenRouter 响应过大".into());
+        return Err(format!("{service} 响应过大"));
     }
-    let value = serde_json::from_slice(&bytes).map_err(|_| "OpenRouter 返回无效 JSON")?;
+    let value = serde_json::from_slice(&bytes).map_err(|_| format!("{service} 返回无效 JSON"))?;
     parse_answer(&value)
+}
+
+/// 本机回环上的 Jev 决策服务（OneJev 网关或 Laya）；用于放宽超时与在提示里写对服务名。
+fn is_local_jev_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("http://127.0.0.1:")
+}
+
+/// 反馈记录的分类来源（2026-11-07）：本机 Jev 与 OpenRouter 分开记，界面不再把本机模型标成 OpenRouter。
+fn decision_source(used_local_jev: bool) -> &'static str {
+    if used_local_jev { "local_jev" } else { "openrouter" }
 }
 
 fn local_jev_upstream_model(raw: &str) -> Option<&'static str> {
@@ -505,11 +517,13 @@ impl ApiService {
                         None => Err("未配置 OpenRouter API Key".into()),
                     }
                 }
+            } else if local_upstream.is_some() {
+                Err("未启用本机 Jev 加工反馈".into())
             } else {
                 Err("未启用 OpenRouter Jev".into())
             };
             let (answer, source, fallback) = match decision {
-                Ok(value) => (value, "openrouter", Value::Null),
+                Ok(value) => (value, decision_source(local_upstream.is_some()), Value::Null),
                 Err(error) => (
                     json!({"feedback_type": local_class(text)}),
                     "local_rules",
@@ -1105,5 +1119,9 @@ mod tests {
         assert_eq!(local_jev_upstream_model("OmniJev/OneJev1.6-4B"), Some("jev-latest"));
         assert_eq!(local_jev_upstream_model("onejev1.6-9b"), Some("jev-latest"));
         assert_eq!(local_jev_upstream_model("typesafe/jev-1.14"), None);
+        assert_eq!(decision_source(true), "local_jev");
+        assert_eq!(decision_source(false), "openrouter");
+        assert!(is_local_jev_endpoint("http://127.0.0.1:18090/v1/systemone"));
+        assert!(!is_local_jev_endpoint(DEFAULT_JEV_ENDPOINT));
     }
 }

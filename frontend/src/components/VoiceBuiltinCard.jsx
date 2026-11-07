@@ -64,6 +64,7 @@ import {
   localModelSettingsError,
   localModelView,
   layaSetupView,
+  localJevRuntimeView,
   localModelDeleteText,
   localGroupPatch,
   localSettingsForm,
@@ -2022,6 +2023,7 @@ export function LocalModelsGroup({ builtin }) {
     await modelAct(model.id, "删除模型", () => voiceApi.localDelete(model.id));
   };
   const layaSetup = layaSetupView(local.laya_setup, local.laya_env);
+  const jevRuntime = localJevRuntimeView(local.jev_runtime);
   const layaSetupLocked = modelLocked("laya-setup");
   const pickFallbackTts = async (model) => {
     const nextDraft = selectLocalModel(form, models, "tts", model.id);
@@ -2160,6 +2162,12 @@ export function LocalModelsGroup({ builtin }) {
             {local.onejev_env?.summary && (
               <div className="voice-hint" id="voice-local-onejev-env-hint">
                 OneJev 1.6 本机硬件加速：{local.onejev_env.summary}
+              </div>
+            )}
+            {jevRuntime && (
+              <div className={`voice-hint ${LAYA_HINT_CLASS[jevRuntime.tone] || ""}`} id="voice-local-jev-runtime" role="status">
+                <div>{jevRuntime.text}</div>
+                {jevRuntime.detail && <div className="ob-sub">{jevRuntime.detail}</div>}
               </div>
             )}
             {layaSetup && (

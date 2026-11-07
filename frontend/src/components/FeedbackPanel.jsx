@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Check, MessageSquare, RefreshCw } from "lucide-react";
 import { getJson, postJson } from "../api/client.js";
 import { showConfirm } from "../appDialog.js";
+import { feedbackSourceLabel } from "../feedbackView.js";
 
 const labels = {
   too_dark: "过焦或过深", too_light: "过浅", not_cut_through: "未切透",
@@ -96,7 +97,7 @@ export function FeedbackPanel({ workflowId, origin = null, disabled = false, onA
       <div className="feedback-history">
         {[...history].reverse().concat(origin ? [origin] : []).map((entry) => (
           <details key={entry.feedback_id} open>
-            <summary>{labels[entry.feedback_type] || "未知"} · {entry.source === "openrouter" ? "OpenRouter Jev" : "本地规则"}</summary>
+            <summary>{labels[entry.feedback_type] || "未知"} · {feedbackSourceLabel(entry)}</summary>
             <p>{entry.feedback_text}</p>
             {entry.fallback_reason && <p className="feedback-muted">{entry.fallback_reason}</p>}
             <dl>

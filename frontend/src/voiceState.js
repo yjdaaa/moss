@@ -1019,6 +1019,28 @@ export function layaSetupView(setup, env) {
   return env?.accelerator === "cpu" && env?.managed ? { tone: "ok", text: env.summary, detail: "", canStart: true, canCancel: false, startLabel: retryLabel } : null;
 }
 
+// 2026-11-07：本地 Jev（OneJev / Laya）实际运行情况。后台启动失败、推理进程意外退出时说明原因，
+// 不再出现“看着开着、实际每轮都被跳过”；云端模型与未下载时不显示。
+export function localJevRuntimeView(runtime) {
+  if (!runtime || runtime.state === "cloud" || runtime.state === "not_installed") return null;
+  const accel = runtime.accelerator ? `（${runtime.accelerator}）` : "";
+  const notice = runtime.notice || "";
+  switch (runtime.state) {
+    case "ready":
+      return { tone: notice ? "warn" : "ok", text: `本地 Jev 已就绪${accel}`, detail: notice };
+    case "starting":
+      return { tone: "info", text: "本地 Jev 正在加载模型，加载完成前语音筛选会先跳过", detail: notice };
+    case "failed":
+      return { tone: "bad", text: `本地 Jev 启动失败：${runtime.error || "未知原因"}`, detail: notice };
+    case "stopped":
+      return { tone: "warn", text: "本地 Jev 未在运行：重新保存设置或重启语音服务即可拉起", detail: notice };
+    case "idle":
+      return notice ? { tone: "off", text: "本地 Jev 未启用（语音筛选与加工反馈都关闭时不占内存）", detail: notice } : null;
+    default:
+      return null;
+  }
+}
+
 const LOCAL_BUSY_STATES = new Set(["downloading", "preparing_runtime", "waiting_runtime", "verifying", "installing"]);
 
 /** 删除本地模型前的确认文字：说明会一并删除的附带文件（2026-11-07）。 */

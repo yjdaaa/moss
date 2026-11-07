@@ -1251,6 +1251,8 @@ mod imp {
         job: Option<moss_voice::supervisor::JobHandle>,
         onejev: Option<moss_voice::onejev::OneJevGateway>,
         generation: u64,
+        /// 最近一次启动失败（模型编号、原因），供状态接口说明；开始新的启动或启动成功时清除（2026-11-07）。
+        last_failure: Option<(String, String)>,
     }
 
     impl LocalLayaRunner {
@@ -1699,6 +1701,20 @@ mod imp {
             if cleaned > 0 {
                 eprintln!("[moss-desktop] 已清理 {cleaned} 个本地模型下载残留");
             }
+            // 2026-11-07：macOS / Linux 上 MOSS 崩溃或被强制结束后，OneJev 推理进程会被系统收养继续占着内存；
+            // 启动时只结束 MOSS 模型目录里 OneJev 权重对应、父进程已不在的那些（Windows 由 Job Object 自动处理）
+            if !cfg!(test) {
+                let mut roots: Vec<std::path::PathBuf> = moss_voice::settings::LOCAL_JEV_MODEL_IDS
+                    .iter()
+                    .map(|id| models.root_for(id).to_path_buf())
+                    .collect();
+                roots.sort();
+                roots.dedup();
+                let reaped = moss_voice::onejev::reap_orphaned_llama_servers(&roots);
+                if reaped > 0 {
+                    eprintln!("[moss-desktop] 已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程");
+                }
+            }
             let memory = MemoryService::new(Arc::new(DbMemoryStore { db: host.db.clone() }));
             let enabled = moss_voice::settings::load(&host.runtime_root.path.join("settings.json")).builtin_memory_enabled;
             let _ = memory.configure(enabled, || Ok(()));
@@ -1764,6 +1780,7 @@ mod imp {
                     job: None,
                     onejev: None,
                     generation: 0,
+                    last_failure: None,
                 })),
                 context,
                 persona,
@@ -1958,7 +1975,7 @@ mod imp {
                 }
                 (None, None) => return Ok(None),
             };
-            let jev_options = JevFilterOptions {
+            let mut jev_options = JevFilterOptions {
                 enabled: experience.jev_filter_enabled,
                 unfinished_hold: experience.jev_unfinished_hold,
                 fast_route: experience.read_only_shortcuts && experience.jev_fast_route,
@@ -1968,6 +1985,12 @@ mod imp {
             let jev_model = moss_voice::settings::validate_jev_model(&experience.jev_model)
                 .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
             let local_jev_id = moss_voice::settings::canonical_local_jev_model(&jev_model);
+            // 2026-11-07：本地 OneJev 按档位与是否有显卡加速决定等待预算；来不及时关闭“没说完”判断（界面另有说明）
+            let local_budget = local_jev_id
+                .and_then(|id| moss_voice::onejev::local_jev_budget(id, self.onejev_uses_gpu(id)));
+            if local_budget.is_some_and(|budget| budget.hold_ms.is_none()) {
+                jev_options.unfinished_hold = false;
+            }
             let jev_ready = match local_jev_id {
                 Some(id) => self.models.path_if_installed(id).is_some(),
                 None => self.jev_effective_secret()?.is_some(),
@@ -2029,26 +2052,12 @@ mod imp {
                         reader,
                         upstream_model,
                     ));
-                    match local_id {
-                        moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL => {
-                            VoiceJevFilter::new(client, jev_options).with_timeouts(
-                                std::time::Duration::from_millis(1500),
-                                std::time::Duration::from_millis(600),
-                            )
-                        }
-                        moss_voice::settings::LOCAL_ONEJEV_4B_MODEL => {
-                            VoiceJevFilter::new(client, jev_options).with_timeouts(
-                                std::time::Duration::from_millis(2500),
-                                std::time::Duration::from_millis(900),
-                            )
-                        }
-                        moss_voice::settings::LOCAL_ONEJEV_9B_MODEL => {
-                            VoiceJevFilter::new(client, jev_options).with_timeouts(
-                                std::time::Duration::from_millis(3500),
-                                std::time::Duration::from_millis(1200),
-                            )
-                        }
-                        _ => VoiceJevFilter::new(client, jev_options),
+                    match local_budget {
+                        Some(budget) => VoiceJevFilter::new(client, jev_options).with_timeouts(
+                            std::time::Duration::from_millis(budget.turn_ms),
+                            std::time::Duration::from_millis(budget.hold_ms.unwrap_or(0)),
+                        ),
+                        None => VoiceJevFilter::new(client, jev_options),
                     }
                 } else {
                     let db = self.host.db.clone();
@@ -2177,6 +2186,7 @@ mod imp {
                     "default_mirror": local_models::DEFAULT_BASE,
                     "models_dir": self.models.root_for(models_dir_ref).to_string_lossy(),
                     "onejev_env": onejev_env,
+                    "jev_runtime": self.local_jev_runtime_status(&settings, jev_feedback_enabled),
                     "laya_env": laya_env,
                     "laya_setup": self.laya_setup.status(),
                     "helper_found": helper_path().is_some_and(|path| path.is_file()),
@@ -3158,7 +3168,97 @@ mod imp {
             let Some(canonical_id) = moss_voice::settings::canonical_local_jev_model(&validated) else {
                 return Ok(());
             };
-            self.ensure_local_jev_running_for(canonical_id, wait_ready)
+            let result = self.ensure_local_jev_running_for(canonical_id, wait_ready);
+            // 启动失败的原因留给状态接口显示（打包后的程序看不到控制台输出）；主动取消不算失败
+            if let Err(err) = &result
+                && !err.contains("已取消")
+                && let Ok(mut runner) = self.laya.lock()
+            {
+                runner.last_failure = Some((canonical_id.to_owned(), err.clone()));
+            }
+            result
+        }
+
+        /// 本地 OneJev 是否走显卡加速：推理进程已在运行时以实际探测为准，否则按推理引擎文件预估。
+        fn onejev_uses_gpu(&self, canonical_id: &str) -> bool {
+            if let Ok(runner) = self.laya.lock()
+                && runner.active_model.as_deref() == Some(canonical_id)
+                && let Some(gw) = runner.onejev.as_ref()
+            {
+                return gw.accelerator().kind.uses_gpu();
+            }
+            moss_voice::onejev::expected_gpu(self.models.root_for(canonical_id))
+        }
+
+        /// 当前所选本地 Jev 的实际运行情况（2026-11-07）：未下载 / 未启用 / 加载中 / 已就绪 / 启动失败 / 已停止。
+        /// 后台启动失败或推理进程意外退出时带上原因，界面据此提示，不再“看着开着、实际每轮都跳过”。
+        fn local_jev_runtime_status(&self, settings: &moss_voice::VoiceSettings, feedback_enabled: bool) -> Value {
+            let validated = moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
+                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+            let Some(id) = moss_voice::settings::canonical_local_jev_model(&validated) else {
+                return serde_json::json!({ "state": "cloud" });
+            };
+            let is_onejev = moss_voice::settings::is_local_onejev_model(id);
+            let installed = self.models.path_if_installed(id).is_some();
+            let wanted = settings.builtin_local.jev_filter_enabled || feedback_enabled;
+            let (alive, starting, crashed, accelerator, crash_log, failure) = match self.laya.lock() {
+                Ok(mut runner) => {
+                    let alive = runner.is_alive_for(id);
+                    let starting = runner.is_starting_for(id);
+                    let crashed = !alive && runner.active_model.as_deref() == Some(id);
+                    let gw = runner.onejev.as_ref().filter(|_| runner.active_model.as_deref() == Some(id));
+                    let accelerator = gw.map(|gw| (gw.accelerator().display_text(), gw.accelerator().kind.uses_gpu()));
+                    let crash_log = gw.map(|gw| gw.log_summary()).unwrap_or_default();
+                    let failure = runner
+                        .last_failure
+                        .as_ref()
+                        .filter(|(model, _)| model == id)
+                        .map(|(_, message)| message.clone());
+                    (alive, starting, crashed, accelerator, crash_log, failure)
+                }
+                Err(_) => (false, false, false, None, String::new(), None),
+            };
+            // Laya 子进程起来后还要加载权重，能答 /health 才算就绪
+            let answering = alive
+                && (is_onejev
+                    || probe_local_jev_health_model(
+                        std::net::SocketAddr::from(([127, 0, 0, 1], 18090)),
+                        std::time::Duration::from_millis(120),
+                    )
+                    .as_deref()
+                        == Some(id));
+            let (state, error) = if !installed {
+                ("not_installed", None)
+            } else if answering {
+                ("ready", None)
+            } else if starting || alive {
+                ("starting", None)
+            } else if crashed {
+                let hint = if crash_log.is_empty() { String::new() } else { format!("（{crash_log}）") };
+                ("failed", Some(format!("本地推理进程已意外退出{hint}；关闭再打开 Jev 开关或重启语音服务即可重新拉起")))
+            } else if let Some(message) = failure {
+                ("failed", Some(message))
+            } else if !wanted {
+                ("idle", None)
+            } else {
+                ("stopped", None)
+            };
+            let notice = if is_onejev {
+                let gpu = accelerator
+                    .as_ref()
+                    .map(|(_, gpu)| *gpu)
+                    .unwrap_or_else(|| moss_voice::onejev::expected_gpu(self.models.root_for(id)));
+                moss_voice::onejev::local_jev_budget(id, gpu).and_then(|budget| budget.notice)
+            } else {
+                None
+            };
+            serde_json::json!({
+                "model": id,
+                "state": state,
+                "accelerator": accelerator.map(|(label, _)| label),
+                "error": error,
+                "notice": notice,
+            })
         }
 
         fn ensure_local_jev_running_for(&self, canonical_id: &str, wait_ready: bool) -> Result<(), String> {
@@ -3299,6 +3399,7 @@ mod imp {
                         runner.job = moss_voice::supervisor::JobHandle::for_child(&child);
                         runner.child = Some(child);
                         runner.active_model = Some(canonical_id.to_owned());
+                        runner.last_failure = None;
                     }
                 }
                 if wait_ready {
@@ -3344,6 +3445,7 @@ mod imp {
                     }
                     runner.starting_model = Some(canonical_id.to_owned());
                     runner.starting_cancel = Some(cancel.clone());
+                    runner.last_failure = None;
                 }
 
                 if !wait_ready {
@@ -3392,6 +3494,7 @@ mod imp {
                                             r.starting_cancel = None;
                                             r.onejev = Some(gw);
                                             r.active_model = Some(id_owned);
+                                            r.last_failure = None;
                                         }
                                     } else {
                                         gw.stop();
@@ -3410,6 +3513,11 @@ mod imp {
                                     }
                                     if !cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                         eprintln!("[moss-desktop] 本地 OneJev ({id_owned}) 后台启动失败：{err}");
+                                        if let Ok(mut r) = laya_slot.lock()
+                                            && r.generation == start_generation
+                                        {
+                                            r.last_failure = Some((id_owned.clone(), err));
+                                        }
                                     }
                                 }
                             }
@@ -3442,6 +3550,7 @@ mod imp {
                 }
                 runner.onejev = Some(gateway);
                 runner.active_model = Some(canonical_id.to_owned());
+                runner.last_failure = None;
             }
             if wait_ready
                 && probe_local_jev_health_model(addr, std::time::Duration::from_millis(300))
@@ -5345,6 +5454,35 @@ mod imp {
             assert_eq!(switched_onejev["jev"]["local_installed"], true);
             assert_eq!(switched_onejev["local"]["jev_key_configured"], true);
             assert!(builtin.should_run_local_laya());
+
+            // 本地 Jev 实际运行情况：已下载已启用但未拉起 → stopped；在途启动 → starting；
+            // 后台启动失败 → failed 并带原因；切到云端模型 → cloud（2026-11-07）
+            let runtime = |b: &BuiltinVoice| b.status()["local"]["jev_runtime"].clone();
+            assert_eq!(runtime(&builtin)["model"], "onejev_1_6_4b");
+            assert_eq!(runtime(&builtin)["state"], "stopped");
+            {
+                let mut runner = builtin.laya.lock().unwrap();
+                runner.starting_model = Some("onejev_1_6_4b".to_owned());
+                runner.starting_cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            }
+            assert_eq!(runtime(&builtin)["state"], "starting");
+            {
+                let mut runner = builtin.laya.lock().unwrap();
+                runner.starting_model = None;
+                runner.starting_cancel = None;
+                runner.last_failure = Some(("onejev_1_6_4b".to_owned(), "OneJev 模型加载超时".to_owned()));
+            }
+            assert_eq!(runtime(&builtin)["state"], "failed");
+            assert_eq!(runtime(&builtin)["error"], "OneJev 模型加载超时");
+            builtin.laya.lock().unwrap().last_failure =
+                Some(("onejev_1_6_0_8b".to_owned(), "别的档位的旧失败".to_owned()));
+            assert_eq!(runtime(&builtin)["state"], "stopped", "其他档位的失败不串到当前模型");
+            builtin.laya.lock().unwrap().last_failure = None;
+            let cpu_gpu = moss_voice::onejev::expected_gpu(builtin.models.root_for("onejev_1_6_4b"));
+            assert_eq!(
+                runtime(&builtin)["notice"].as_str(),
+                moss_voice::onejev::local_jev_budget("onejev_1_6_4b", cpu_gpu).unwrap().notice
+            );
 
             // 切回 laya_multilingual 继续验证免密钥与备用密钥共存
             builtin

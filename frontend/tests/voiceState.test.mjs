@@ -65,6 +65,7 @@ import {
   localModelGroups,
   localModelView,
   layaSetupView,
+  localJevRuntimeView,
   localModelDeleteText,
   selectLocalModel,
   selectedVoices,
@@ -1431,4 +1432,24 @@ test("唤醒词与音量：只列已允许设备，在线且支持音量工具�
   assert.equal(volumeLevelText(30), "较小");
   assert.equal(volumeLevelText(60), "适中");
   assert.equal(volumeLevelText(100), "较大");
+});
+
+test("本地 Jev 运行状态：失败带原因、加载中说明会跳过、9B / CPU 提示随状态带出", () => {
+  assert.equal(localJevRuntimeView(null), null);
+  assert.equal(localJevRuntimeView({ state: "cloud" }), null);
+  assert.equal(localJevRuntimeView({ state: "not_installed", model: "onejev_1_6_4b" }), null);
+  const ready = localJevRuntimeView({ state: "ready", accelerator: "Apple Metal GPU", notice: null });
+  assert.equal(ready.tone, "ok");
+  assert.match(ready.text, /已就绪（Apple Metal GPU）/);
+  const slow = localJevRuntimeView({ state: "ready", accelerator: "CPU", notice: "建议改用 0.8B" });
+  assert.equal(slow.tone, "warn");
+  assert.equal(slow.detail, "建议改用 0.8B");
+  assert.match(localJevRuntimeView({ state: "starting" }).text, /正在加载/);
+  const failed = localJevRuntimeView({ state: "failed", error: "OneJev 模型加载超时" });
+  assert.equal(failed.tone, "bad");
+  assert.match(failed.text, /启动失败：OneJev 模型加载超时/);
+  assert.match(localJevRuntimeView({ state: "failed" }).text, /未知原因/);
+  assert.match(localJevRuntimeView({ state: "stopped" }).text, /未在运行/);
+  assert.equal(localJevRuntimeView({ state: "idle" }), null);
+  assert.equal(localJevRuntimeView({ state: "idle", notice: "9B 已关闭没说完判断" }).tone, "off");
 });

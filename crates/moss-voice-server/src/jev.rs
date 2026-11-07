@@ -24,6 +24,9 @@ pub const DEFAULT_LOCAL_LAYA_ENDPOINT: &str = "http://127.0.0.1:18090/v1/systemo
 pub const DEFAULT_JEV_VOICE_MODEL: &str = "typesafe/jev-1.14";
 const TURN_TIMEOUT: Duration = Duration::from_millis(750);
 const HOLD_TIMEOUT: Duration = Duration::from_millis(360);
+/// “没说完”判断的等待上限：必须明显短于会话续听窗口（`session.rs` 的 `UNFINISHED_HOLD_WINDOW`），
+/// 否则结果回来时窗口已过，判对了也用不上，只是让每句话多等（2026-11-07）。
+pub const MAX_HOLD_TIMEOUT: Duration = Duration::from_millis(800);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const CACHE_CAPACITY: usize = 256;
@@ -595,7 +598,7 @@ impl VoiceJevFilter {
 
     pub fn with_timeouts(mut self, turn_timeout: Duration, hold_timeout: Duration) -> Self {
         self.turn_timeout = turn_timeout;
-        self.hold_timeout = hold_timeout;
+        self.hold_timeout = hold_timeout.min(MAX_HOLD_TIMEOUT);
         self
     }
 
@@ -1408,6 +1411,15 @@ mod tests {
             parameters: json!({"type": "object"}),
         })
         .collect()
+    }
+
+    #[test]
+    fn hold_timeout_is_capped_below_the_listen_window() {
+        let client = FakeDecisionClient::new([]);
+        let filter = VoiceJevFilter::new(client, JevFilterOptions::default())
+            .with_timeouts(Duration::from_millis(3500), Duration::from_millis(1200));
+        assert_eq!(filter.turn_timeout, Duration::from_millis(3500));
+        assert_eq!(filter.hold_timeout, MAX_HOLD_TIMEOUT);
     }
 
     #[test]

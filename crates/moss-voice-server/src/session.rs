@@ -513,6 +513,8 @@ impl Listening {
 const STREAM_ASR_RATE: u32 = 16_000;
 /// 半截话未说完时的单次最长续听宽限窗（1.2 秒硬上限）。
 const UNFINISHED_HOLD_WINDOW: Duration = Duration::from_millis(1200);
+// 判断结果至少要比续听窗口早 300ms 回来，续听才有意义（见 `jev::MAX_HOLD_TIMEOUT`）。
+const _: () = assert!(UNFINISHED_HOLD_WINDOW.as_millis() >= crate::jev::MAX_HOLD_TIMEOUT.as_millis() + 300);
 /// 流式中间结果停顿防抖预热阈值：连续流利说话时 0 请求，停顿满 120ms 才预热 1 次。
 const INTERIM_PREWARM_DEBOUNCE: Duration = Duration::from_millis(120);
 
