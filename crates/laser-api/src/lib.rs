@@ -5898,10 +5898,11 @@ fn enumerate_system_serial_ports() -> Vec<String> {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("COM") && trimmed.len() >= 4 {
-                if !ports.contains(&trimmed.to_string()) {
-                    ports.push(trimmed.to_string());
-                }
+            if trimmed.starts_with("COM")
+                && trimmed.len() >= 4
+                && !ports.iter().any(|port| port == trimmed)
+            {
+                ports.push(trimmed.to_string());
             }
         }
     }

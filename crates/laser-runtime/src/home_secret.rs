@@ -187,11 +187,11 @@ fn crypt(input: &[u8], decrypt: bool) -> Result<Vec<u8>, HomeSecretError> {
     if input.is_empty() || input.len() > 64 * 1024 {
         return Err(HomeSecretError::Invalid);
     }
-    let mut source = DataBlob {
+    let source = DataBlob {
         len: input.len() as u32,
         data: input.as_ptr().cast_mut(),
     };
-    let mut entropy = DataBlob {
+    let entropy = DataBlob {
         len: ENTROPY.len() as u32,
         data: ENTROPY.as_ptr().cast_mut(),
     };
@@ -204,9 +204,9 @@ fn crypt(input: &[u8], decrypt: bool) -> Result<Vec<u8>, HomeSecretError> {
     let success = unsafe {
         if decrypt {
             CryptUnprotectData(
-                &mut source,
+                &source,
                 ptr::null_mut(),
-                &mut entropy,
+                &entropy,
                 ptr::null(),
                 ptr::null(),
                 0x1, /* UI_FORBIDDEN */
@@ -214,9 +214,9 @@ fn crypt(input: &[u8], decrypt: bool) -> Result<Vec<u8>, HomeSecretError> {
             )
         } else {
             CryptProtectData(
-                &mut source,
+                &source,
                 ptr::null(),
-                &mut entropy,
+                &entropy,
                 ptr::null(),
                 ptr::null(),
                 0x1, /* UI_FORBIDDEN */

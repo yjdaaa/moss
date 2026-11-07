@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 清理 Windows 专属代码的 clippy 警告，避免 Windows 上改代码被零警告规则拦住（2026-11-07）
+
+- **现象**：CI 的 clippy 只在 macOS 上跑，Windows 专属代码一直没检查过；在 Windows 上按 AGENTS.md 跑 `cargo clippy --workspace --all-targets -- -D warnings` 会因这些警告失败（Windows 会话报告约 12 条）。
+- **根因与修复**：`home_secret.rs` `crypt` 给 DPAPI 的只读参数多传了 `&mut`，改为 `&`；`onejev.rs` 的 `safe_intra_dir_symlink_target` 只在 Unix 解压里用，加 `#[cfg(unix)]`；`orphan_llama_pids` 加 `#[cfg(any(target_os = "macos", target_os = "linux", test))]`（单元测试各平台都跑，不能只挂 `unix`）；`windows_process.rs` `environment_block` 改用 `sort_by_key`；`safe_fs.rs` `actual_handle_path` 的 Windows / Linux 分支去掉多余的 `return`；`laser-api` 串口枚举合并两层 `if`。只改写法，行为不变。
+- **验证**：macOS 上 `cargo fmt --all`、`cargo clippy --workspace --all-targets -- -D warnings` 零警告，`cargo test --workspace` 1023 通过 / 0 失败 / 10 忽略。在 macOS 上交叉跑 Windows 目标的 clippy 会卡在 `ring` / `aws-lc-sys` 需要 Windows C 头文件，未能执行；Windows 上是否零警告尚待在 Windows 机器上确认。
+- **关联**：`crates/laser-runtime/src/home_secret.rs`、`crates/moss-voice/src/onejev.rs`、`crates/laser-host/src/voice_agent/windows_process.rs`、`crates/moss-voice-server/src/safe_fs.rs`、`crates/laser-api/src/lib.rs`（`enumerate_system_serial_ports`）。
+
 ### 布局优化：工作台操作栏常驻底部，顶部与各页标题行收紧，语音中心标签吸顶（2026-11-07）
 
 - **现象**：1280×720 小窗口下，雕刻工作台的“计算加工轨迹 / 启动下发”在左栏最下面，要滚动才看得到；新版本横幅、布局提示行与按钮行在内容上方占约 200px；创作画板顶部两行按钮；数字孪生信号源切换卡占两行约 120px；加工监视舱“预估耗时”出现两次；“矢量文字”等选项被挤成两行；语音中心标签在页面五百多像素以下，长设置页的保存按钮在最底部；摄像头画面区大屏下方空一截。

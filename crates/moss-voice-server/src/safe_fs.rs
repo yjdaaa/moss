@@ -177,14 +177,14 @@ pub(crate) fn actual_handle_path(file: &std::fs::File) -> Result<PathBuf, FsErro
             return Err(FsError::UnsafePath);
         }
         let actual = PathBuf::from(OsString::from_wide(&chars[..length]));
-        return actual.canonicalize().map_err(|_| FsError::UnsafePath);
+        actual.canonicalize().map_err(|_| FsError::UnsafePath)
     }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
         let actual = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
             .map_err(|_| FsError::UnsafePath)?;
-        return actual.canonicalize().map_err(|_| FsError::UnsafePath);
+        actual.canonicalize().map_err(|_| FsError::UnsafePath)
     }
     #[cfg(target_os = "macos")]
     {

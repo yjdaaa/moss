@@ -724,6 +724,8 @@ pub fn ensure_llama_runtime(
     Ok(target_bin)
 }
 
+// 只有 Unix 解压会还原符号链接（见 extract_tar_gz），Windows 上不编译这个函数
+#[cfg(unix)]
 fn safe_intra_dir_symlink_target(target: &Path) -> bool {
     let mut comps = target.components();
     matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
@@ -1844,6 +1846,8 @@ pub fn expected_gpu(models_root: &Path) -> bool {
 
 /// 从 `ps -axo pid=,ppid=,command=` 的输出里挑出 MOSS 自己拉起、父进程已不在（被 init/launchd 收养）
 /// 的 OneJev 推理进程：命令行同时含 `llama-server`、`OneJev1.6-` 权重名与 MOSS 的模型目录。
+/// 只在 macOS / Linux 的清理里调用；单元测试在各平台都跑。
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn orphan_llama_pids(ps_output: &str, model_roots: &[String]) -> Vec<u32> {
     ps_output
         .lines()

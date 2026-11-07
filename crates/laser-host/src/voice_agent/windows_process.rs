@@ -269,7 +269,7 @@ pub(crate) fn environment_block(
     env: &BTreeMap<String, String>,
 ) -> Result<Vec<u16>, ProcessFailure> {
     let mut sorted = env.iter().collect::<Vec<_>>();
-    sorted.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    sorted.sort_by_key(|entry| entry.0.to_ascii_lowercase());
     let mut output = Vec::new();
     let mut previous = String::new();
     for (key, value) in sorted {
