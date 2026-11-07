@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useLayoutEffect, useRef } from "react";
 import { Zap, Radio, OctagonAlert, ShieldCheck } from "lucide-react";
 import { mcpPillState } from "../state/mcpStatus.js";
 import { hardwarePillView } from "../state/hardwareStatus.js";
@@ -32,20 +32,35 @@ export function Navbar({
   approvalCount = 0,
   onApprovalsClick,
   hideStatusPills = false,
+  updateNotice = null,
 }) {
   const page = PAGE_TITLES[currentPath] || PAGE_TITLES["/"];
   const mcpPill = mcpPillState(mcpStatus, voiceStatus);
   const pillClass =
     mcpPill.key === "connected" && mcpPill.link === "自建" ? "ob-pill--ok" : MCP_PILL_CLASS[mcpPill.key];
   const hardware = hardwarePillView(connectionStatus);
+  const headerRef = useRef(null);
+
+  // 顶栏实际高度写进 CSS 变量 --ob-top-h，页面里的吸顶元素（如语音中心标签栏）贴在它下面；顶栏换行时也跟着变
+  useLayoutEffect(() => {
+    const element = headerRef.current;
+    if (!element) return undefined;
+    const apply = () => document.documentElement.style.setProperty("--ob-top-h", `${element.offsetHeight}px`);
+    apply();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(apply);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   return (
-    <header className="ob-top">
+    <header className="ob-top" ref={headerRef}>
       <h1 className="ob-title">
         {page.title}
         <small>{page.sub}</small>
       </h1>
       <div className="ob-top-spacer" />
+      {updateNotice}
 
       {!hideStatusPills && (
         <>

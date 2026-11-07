@@ -45,6 +45,7 @@ export function WorkbenchCanvas({
   children,
   defaultLayout = DEFAULT_LAYOUT,
   storageKey = STORAGE_KEY,
+  toolbarStart = null,
 }) {
   const stored = useMemo(() => readLayout(globalThis.localStorage, storageKey), [storageKey]);
   const [layout, setLayout] = useState(() => (stored?.cards ? { ...defaultLayout, ...stored.cards } : defaultLayout));
@@ -325,9 +326,15 @@ export function WorkbenchCanvas({
 
   return (
     <WbContext.Provider value={context}>
+      {/* 布局工具与页面自己的操作合成一行（2026-11-07 布局优化），少占一整行高度 */}
       <div className="ob-canvas-tools">
+        {toolbarStart && <div className="ob-canvas-tools-start">{toolbarStart}</div>}
         <span className="ob-canvas-hint">
-          <LayoutGrid size={13} aria-hidden="true" /> 拖卡片顶部移动；拖四周或四角的边框改大小
+          {!locked && (
+            <>
+              <LayoutGrid size={13} aria-hidden="true" /> 拖标题移动 · 拖边框缩放
+            </>
+          )}
         </span>
         <button type="button" className="btn btn-ghost" onClick={toggleLock} id="wb-layout-lock"
           title={locked ? "解锁后可以拖动卡片" : "锁定后不会误拖"}>

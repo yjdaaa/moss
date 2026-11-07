@@ -36,6 +36,8 @@ export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl,
   return resolveUrl(`/preview?path=${encodeURIComponent(imageFile)}`);
 }
 
+const ENGRAVING_MODE_LABELS = { raster: "光栅填充", outline: "轮廓扫描", cut: "边缘切割" };
+
 export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) {
   // Connection state
   const [connectionMode, setConnectionMode] = useState(
@@ -760,19 +762,17 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 const Icon = t.icon;
                 const active = activeTool === t.id;
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={t.id}
                     onClick={() => setActiveTool(t.id)}
                     className={`hud-tool-card ${active ? "active" : ""}`}
+                    aria-pressed={active}
                   >
-                    <Icon size={18} className="tool-icon" style={{ color: active ? "var(--laser)" : "var(--ink-dim)" }} />
-                    <span style={{ fontSize: "12px", fontWeight: "700", color: active ? "var(--ink)" : "var(--ink-dim)" }}>
-                      {t.label}
-                    </span>
-                    <span style={{ fontSize: "9px", fontFamily: "var(--font-mono)", color: active ? "var(--laser)" : "var(--ink-faint)" }}>
-                      {t.sub}
-                    </span>
-                  </div>
+                    <Icon size={18} className="tool-icon" aria-hidden="true" />
+                    <span className="hud-tool-label">{t.label}</span>
+                    <span className="hud-tool-sub">{t.sub}</span>
+                  </button>
                 );
               })}
             </div>
@@ -1011,40 +1011,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
               </div>
             </div>
 
-            {/* Action Buttons: HUD Primary + HUD Fire Trigger */}
-            <div className="wb-grid-3">
-              <button
-                className="btn btn-hud-primary wb-btn-4"
-                onClick={handleGeneratePreview}
-                disabled={busy}
-              >
-                <Cpu size={16} />
-                <span>{busy ? "正在解算..." : currentWorkflow ? "重新生成轨迹" : "计算加工轨迹"}</span>
-              </button>
-
-              {(() => {
-                const canResume = canResumeJob(sendProgress, overlayStatus);
-                return (
-                  <button
-                    className={`btn ${currentWorkflow ? "btn-hud-fire" : "btn-ghost"}`}
-                    onClick={canResume ? handleResumeSend : handleConfirmSend}
-                    disabled={busy || !currentWorkflow || overlayStatus === "running"}
-                    style={{ padding: "12px", background: canResume ? "linear-gradient(135deg, #059669, #10b981)" : undefined }}
-                  >
-                    <Flame size={17} style={{ color: currentWorkflow ? "#04050a" : "inherit" }} />
-                    <span>
-                      {overlayStatus === "running"
-                        ? "JobWorker 正在下发中..."
-                        : canResume
-                        ? formatResumeActionLabel(sendProgress)
-                        : currentWorkflow
-                        ? "启动 JobWorker 逐行下发"
-                        : "待计算加工轨迹"}
-                    </span>
-                  </button>
-                );
-              })()}
-            </div>
         </WbCard>
 
         <WbCard id="monitor" className="hud-card ob-card ob-monitor" label="加工监视舱">
@@ -1090,38 +1056,15 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
               )}
             </div>
 
-            {/* Metrics cards (HUD Data Capsules) */}
-            <div className="wb-grid-5">
-              <div
-                className="wb-box-12"
-              >
-                <div className="wb-row-8">
-                  <Ruler size={13} className="wb-icon-3" />
-                  <span>几何轮廓包络</span>
-                </div>
-                <div className="wb-box-13">
-                  {dimensions ? `${dimensions.width.toFixed(1)} × ${dimensions.height.toFixed(1)} mm` : "—"}
-                </div>
-                {dimensions?.originNote && (
-                  <div className="wb-origin-note" id="wb-origin-note">{dimensions.originNote}</div>
-                )}
-              </div>
-
-              <div
-                className="wb-box-12"
-              >
-                <div className="wb-row-8">
-                  <Clock size={13} className="wb-icon-4" />
-                  <span>预估加工耗时</span>
-                </div>
-                <div className="wb-box-14">
-                  {timeEstimate ? `${timeEstimate.estimated_seconds}s (${timeEstimate.estimated_minutes} min)` : "—"}
-                </div>
-              </div>
-            </div>
             <div className="job-dispatch-card">
-              {/* 刀路摘要胶囊 */}
-              <div className="toolpath-capsule">
+              {/* 刀路摘要：尺寸、行数、耗时、物理文件指纹集中一行（2026-11-07 合并原先重复的两组统计） */}
+              <div className="toolpath-capsule" id="wb-toolpath-stats">
+                <div className="toolpath-item">
+                  <span className="toolpath-label"><Ruler size={11} aria-hidden="true" /> 轮廓尺寸</span>
+                  <span className="toolpath-value">
+                    {dimensions ? `${dimensions.width.toFixed(1)} × ${dimensions.height.toFixed(1)} mm` : "—"}
+                  </span>
+                </div>
                 <div className="toolpath-item">
                   <span className="toolpath-label">刀路总行数</span>
                   <span className="toolpath-value">
@@ -1135,6 +1078,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                   </span>
                 </div>
                 <div className="toolpath-item">
+                  <span className="toolpath-label"><Clock size={11} aria-hidden="true" /> 预估耗时</span>
+                  <span className="toolpath-value wb-text-5">
+                    {timeEstimate ? `${timeEstimate.estimated_seconds}s（${timeEstimate.estimated_minutes} 分钟）` : "—"}
+                  </span>
+                </div>
+                <div className="toolpath-item">
                   <span className="toolpath-label">物理 SHA-256</span>
                   <span className="toolpath-value wb-text-4">
                     {currentWorkflow?.confirmation_snapshot?.gcode_sha256
@@ -1144,13 +1093,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       : "待计算比对"}
                   </span>
                 </div>
-                <div className="toolpath-item">
-                  <span className="toolpath-label">预估耗时</span>
-                  <span className="toolpath-value wb-text-5">
-                    {timeEstimate ? `${timeEstimate.estimated_seconds}s` : "—"}
-                  </span>
-                </div>
               </div>
+              {dimensions?.originNote && (
+                <div className="wb-origin-note" id="wb-origin-note">{dimensions.originNote}</div>
+              )}
 
               <button
                 type="button"
@@ -1256,6 +1202,46 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         </WbCard>
 
       </WorkbenchCanvas>
+
+      {/* 底部操作栏（2026-11-07 用户决定“布局再优化”）：生成与下发按钮固定在窗口底部，
+          小窗口也不用滚到左栏最下面才找得到；卡片仍可自由拖动。 */}
+      <div className="wb-action-bar" id="wb-action-bar" role="toolbar" aria-label="生成与下发">
+        <div className="wb-action-buttons">
+          <button className="btn btn-hud-primary" onClick={handleGeneratePreview} disabled={busy}>
+            <Cpu size={16} aria-hidden="true" />
+            <span>{busy ? "正在解算..." : currentWorkflow ? "重新生成轨迹" : "计算加工轨迹"}</span>
+          </button>
+          {(() => {
+            const canResume = canResumeJob(sendProgress, overlayStatus);
+            return (
+              <button
+                className={`btn ${currentWorkflow ? "btn-hud-fire" : "btn-ghost"}${canResume ? " btn-resume" : ""}`}
+                onClick={canResume ? handleResumeSend : handleConfirmSend}
+                disabled={busy || !currentWorkflow || overlayStatus === "running"}
+              >
+                <Flame size={17} aria-hidden="true" />
+                <span>
+                  {overlayStatus === "running"
+                    ? "JobWorker 正在下发中..."
+                    : canResume
+                    ? formatResumeActionLabel(sendProgress)
+                    : currentWorkflow
+                    ? "启动 JobWorker 逐行下发"
+                    : "待计算加工轨迹"}
+                </span>
+              </button>
+            );
+          })()}
+        </div>
+        <div className="wb-action-summary" aria-live="polite">
+          <span>{selectedMaterial || "未选材料"} · {selectedThickness} mm · {ENGRAVING_MODE_LABELS[engravingMode] || engravingMode}</span>
+          <span className="wb-action-summary-meta">
+            {currentWorkflow
+              ? `${dimensions ? `${dimensions.width.toFixed(1)}×${dimensions.height.toFixed(1)} mm` : "轨迹已生成"}${timeEstimate ? ` · 预估 ${timeEstimate.estimated_seconds}s` : ""}`
+              : "尚未生成轨迹"}
+          </span>
+        </div>
+      </div>
       {/* 底部三标签遥测控制台抽屉 (ConsoleDrawer) */}
       <ConsoleDrawer
         logs={logs}

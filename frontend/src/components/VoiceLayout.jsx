@@ -73,7 +73,7 @@ export function SaveBar({ id, target, dirty, busy = false, saving = false, block
   const disabled = busy || saving || !dirty || Boolean(blocked);
   const reason = blocked || (!dirty ? "没有需要保存的修改" : "");
   return (
-    <div className="voice-savebar">
+    <div className="voice-savebar" data-dirty={dirty ? "true" : "false"}>
       <button type="button" className="btn btn-primary" onClick={onSave} disabled={disabled} id={id} title={reason || `保存${target}`}>
         <Save size={13} /> {saving ? "保存中…" : `保存${target}`}
       </button>

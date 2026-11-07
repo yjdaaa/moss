@@ -641,30 +641,35 @@ export function DrawPage({ onNavigate }) {
 
   return (
     <main className="app-shell ob-page ob-draw-page">
-      <section className="topbar ob-canvasbar">
-        <div>
-          <h1 className="draw-heading">Excalidraw 激光画板</h1>
-          <p className="draw-note">{status}</p>
-        </div>
-        <div className="topbar-actions">
-          <button type="button" className="ghost-button" onClick={() => onNavigate("/")}>
-            <Home size={16} className="draw-icon" />
-            工作台
-          </button>
-          <button type="button" className="ghost-button" onClick={downloadScene} disabled={busy || !excalidrawAPI}>
-            <FileJson size={16} className="draw-icon" />
-            场景
-          </button>
-          <button type="button" className="ghost-button" onClick={downloadPng} disabled={busy || !excalidrawAPI}>
-            <Download size={16} className="draw-icon" />
-            PNG
-          </button>
-        </div>
-      </section>
 
       {/* 左侧大画布，右侧三张卡：材料与尺寸、设备、预览与发送（技术书 §9.5.5 B；支持自由缩放/拖动/折叠） */}
       <section className="workspace ob-draw">
-        <WorkbenchCanvas defaultLayout={DRAW_DEFAULT_LAYOUT} storageKey={DRAW_STORAGE_KEY}>
+        <WorkbenchCanvas
+          defaultLayout={DRAW_DEFAULT_LAYOUT}
+          storageKey={DRAW_STORAGE_KEY}
+          toolbarStart={
+            <>
+              <div className="ob-canvasbar">
+                <h1 className="draw-heading">Excalidraw 激光画板</h1>
+                <p className="draw-note">{status}</p>
+              </div>
+              <div className="topbar-actions">
+                <button type="button" className="btn btn-ghost" onClick={() => onNavigate("/")}>
+                  <Home size={14} aria-hidden="true" />
+                  工作台
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={downloadScene} disabled={busy || !excalidrawAPI}>
+                  <FileJson size={14} aria-hidden="true" />
+                  场景
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={downloadPng} disabled={busy || !excalidrawAPI}>
+                  <Download size={14} aria-hidden="true" />
+                  PNG
+                </button>
+              </div>
+            </>
+          }
+        >
         <WbCard id="board" className="hud-card ob-card canvas-panel ob-board" label="画布">
           <FoldHeader id="draw-board" title="创作画布" k="CANVAS" />
           <div className="ob-board-stage" ref={boardStageRef}>

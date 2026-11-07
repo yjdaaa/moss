@@ -661,7 +661,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
   return (
     <div className="twin-page ob-page">
       {/* 顶部模式切换与状态横幅 */}
-      <div className="hud-card ob-card twin-header-bar">
+      <div className="twin-header-bar">
         <div className="twin-mode-tabs" role="tablist" aria-label="数字孪生信号源模式">
           <button
             type="button"
@@ -671,10 +671,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
             onClick={() => setDriveMode("sim")}
           >
             <Play size={14} />
-            <div>
-              <b>离线刀路推演</b>
-              <small>G-CODE SIMULATION</small>
-            </div>
+            <b title="G-CODE SIMULATION">离线刀路推演</b>
           </button>
 
           <button
@@ -688,10 +685,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
             }}
           >
             <Flame size={14} />
-            <div>
-              <b>加工下发同步</b>
-              <small>JOB STREAM SYNC</small>
-            </div>
+            <b title="JOB STREAM SYNC">加工下发同步</b>
           </button>
 
           <button
@@ -706,10 +700,7 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
             }}
           >
             <Activity size={14} />
-            <div>
-              <b>实机遥测映射</b>
-              <small>LIVE TELEMETRY</small>
-            </div>
+            <b title="LIVE TELEMETRY">实机遥测映射</b>
           </button>
         </div>
 

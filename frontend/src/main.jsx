@@ -298,39 +298,42 @@ function App() {
           approvalCount={approvalCount}
           onApprovalsClick={openApprovals}
           hideStatusPills={hideTopPills}
+          updateNotice={
+            startupUpdate?.has_update && !isRemoteMode() && dismissedUpdateVersion !== startupUpdate.latest_version ? (
+              // 新版本提示收进顶栏一个小胶囊（2026-11-07 布局优化），不再单独占一整行
+              <div className="app-update-banner" id="app-update-banner" role="status"
+                title={startupUpdate.current_version ? `当前 v${startupUpdate.current_version}` : undefined}>
+                <span className="app-update-banner-text">
+                  新版本 <strong className="mono">MOSS v{startupUpdate.latest_version}</strong>
+                  {startupUpdate.prerelease ? " · 预览版" : ""}
+                </span>
+                <button
+                  type="button"
+                  className="app-update-banner-btn"
+                  id="app-update-banner-open"
+                  onClick={() => {
+                    writeFoldOpen("settings-update", true);
+                    setFocusUpdateSection(true);
+                    setShowSettingsModal(true);
+                  }}
+                >
+                  {appUpdateAvailable() ? "立即更新" : "查看"}
+                </button>
+                <button
+                  type="button"
+                  className="app-update-banner-dismiss"
+                  id="app-update-banner-dismiss"
+                  aria-label="稍后提醒"
+                  title="稍后提醒"
+                  onClick={() => setDismissedUpdateVersion(startupUpdate.latest_version)}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null
+          }
         />
 
-        {startupUpdate?.has_update && !isRemoteMode() && dismissedUpdateVersion !== startupUpdate.latest_version && (
-          <div className="app-update-banner" id="app-update-banner" role="status">
-            <span className="app-update-banner-text">
-              发现新版本 <strong className="mono">MOSS v{startupUpdate.latest_version}</strong>
-              {startupUpdate.current_version ? `（当前 v${startupUpdate.current_version}）` : ""}
-              {startupUpdate.prerelease ? " · 预览版" : ""}
-            </span>
-            <div className="app-update-banner-actions">
-              <button
-                type="button"
-                className="btn btn-hud-primary app-update-banner-btn"
-                id="app-update-banner-open"
-                onClick={() => {
-                  writeFoldOpen("settings-update", true);
-                  setFocusUpdateSection(true);
-                  setShowSettingsModal(true);
-                }}
-              >
-                {appUpdateAvailable() ? "立即更新" : "查看更新"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost app-update-banner-btn"
-                id="app-update-banner-dismiss"
-                onClick={() => setDismissedUpdateVersion(startupUpdate.latest_version)}
-              >
-                稍后
-              </button>
-            </div>
-          </div>
-        )}
 
         <main className="main-content-viewport" key={currentPath}>
           {currentPath === "/material-lab" && (

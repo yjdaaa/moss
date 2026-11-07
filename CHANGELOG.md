@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 布局优化：工作台操作栏常驻底部，顶部与各页标题行收紧，语音中心标签吸顶（2026-11-07）
+
+- **现象**：1280×720 小窗口下，雕刻工作台的“计算加工轨迹 / 启动下发”在左栏最下面，要滚动才看得到；新版本横幅、布局提示行与按钮行在内容上方占约 200px；创作画板顶部两行按钮；数字孪生信号源切换卡占两行约 120px；加工监视舱“预估耗时”出现两次；“矢量文字”等选项被挤成两行；语音中心标签在页面五百多像素以下，长设置页的保存按钮在最底部；摄像头画面区大屏下方空一截。
+- **根因与修复**：工作台按钮移到画布下方吸附底部的 `#wb-action-bar`，监视舱统计合并为 `#wb-toolpath-stats`，选项改为 `<button aria-pressed>` 并用容器查询在窄卡片排成 2×2；新版本提示改为顶栏小胶囊（保留 `#app-update-banner` 等编号）；`WorkbenchCanvas` 新增 `toolbarStart`，画板标题与按钮并入工具条；数字孪生改为一条分段标签；`Navbar` 把顶栏高度写入 `--ob-top-h`，语音中心标签栏吸顶，`SaveBar` 有未保存修改时吸附底部；摄像头画面区按窗口高度撑满。默认排布、布局记忆键、急停与发送门禁不变，不是破坏性变更。
+- **验证**：前端 `npm run lint` 0 error、`npm test` 225 通过、`npm run build` 通过；浏览器用例 `workbench-layout`、`voice-center`、`camera`、`job-dock`、`twin-estop`、`ai-preview`、`app-update`、`voice-context`、`voiceMcp` 通过（`voice-plugins` / `voice-speaker` 写死了 Windows Chrome 路径，macOS 上改前改后都无法启动）；按 1440×900 与 1280×720 截图逐页核对。未在 Windows 与 Android 实机上看过新布局。
+- **关联**：`frontend/src/pages/{HomePage,DrawPage,TwinPage}.jsx`、`frontend/src/components/{WorkbenchCanvas,Navbar,VoiceLayout}.jsx`、`frontend/src/main.jsx`、`frontend/src/styles.css`；`docs/integration/moss-desktop-fusion-technical-spec.md` r22、`docs/developer/frontend-behavior.md`。
+
 ### 代码格式与静态检查纳入 CI，修复两个弹窗违反 Hooks 规则（2026-11-07）
 
 - **现象**：150 个 Rust 文件与 rustfmt 不一致，`cargo clippy` 约 280 条警告，CI 只跑测试不查格式与静态检查，问题越积越多；前端没有任何静态检查。配对认证弹窗 `AuthModal` 与材料编辑弹窗 `MaterialModal` 在 `visible` 为假时先 `return null` 再调用 `useState` / `useEffect`，违反“Hooks 只能在顶层调用”，只是碰巧没有报错，开发构建会打印 Hooks 顺序变化的警告。
