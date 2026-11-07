@@ -2,6 +2,26 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 仓库 `v0.3.10` 云端四端并行交付安装包构建（含应用内更新包，2026-11-07）
+
+用户 2026-11-07 决定“你帮我提交git然后推送并release”：将数字孪生 3D 视口改版、摄像头页重新排版、取消独立语音隐私安全窗口（n67）与记录与诊断改造合入提交 `c400d15` 并推送 `main`，按 `scripts/release-tag.ps1` 步骤（本机无 PowerShell，手工执行同样的干净树检查、`git tag -a v0.3.10 -m "MOSS v0.3.10"`、推标签）推送带附注标签 `v0.3.10`，触发 `.github/workflows/release.yml` Run `42370393959`（同提交主分支 CI Run `42370386559` 同步全绿），全部 6 个作业成功（11:58:09–12:23:12 UTC）并发布 [Release v0.3.10](https://github.com/yjdaaa/moss/releases/tag/v0.3.10)。
+
+| 产物 | UTC时间（2026-11-07） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.10_x64-offline-voice-setup.exe` | 12:23:04 | 29,721,302 | `2908ac9a94c53d205038466fe0a976b6af27c2df851dfa97aae43fcbc721879e` |
+| `MOSS_0.3.10_x64-lite-setup.exe` | 12:23:04 | 24,115,151 | `e869811243b419a0a0cf8ea7b82a8fda71af1521d94e1e430881c0948a25d8bb` |
+| `MOSS_0.3.10_windows_x64_portable.exe` | 12:23:06 | 72,326,656 | `44beac632c4ce881c5b06df8d7ae922960f807079365a2b9ab4e16781f96fd3a` |
+| `MOSS_0.3.10_macos_universal.dmg` | 12:23:06 | 82,610,485 | `206d2ebda933050ce3dcd10143104c74c3ded681331c79d88b9224df84673ad9` |
+| `MOSS_0.3.10_macos_universal.app.tar.gz` | 12:23:08 | 83,493,691 | `b08f38ef2f9fee43ff72af105f01c2c5bff20e391583cb501a8cdefc5c1c91ea` |
+| `MOSS_0.3.10_android_aarch64.apk` | 12:23:05 | 55,449,118 | `2124c3be94ffb4cfb9c365c5e48597315c3e3760ebfd813a8f8833e5543bedf5` |
+| `latest.json` | 12:23:06 | 3,097 | `2c7233c0d25587e0ada465f58448533bc687e4c52c3d20a25252fc92d65e1586` |
+| `moss-voice-local-0.3.10-gpl-source.zip` | 12:23:05 | 121,618 | `82c749aec69ae9eb614c4abaad89faf085c7a703b72f90cfb604cf6226bec5e0` |
+| `SHA256SUMS.txt` | 12:23:05 | 790 | `9712ce5be6e43217ba3b5021c76620a9d17f51f2488cb751ed2276754422fcc0` |
+
+核对：SHA-256、字节与 UTC 时间取自 GitHub Release API 资产 `digest` / `size` / `updated_at`，并与发布的 `SHA256SUMS.txt` 逐项一致，未将大体积安装包重新下载到本机复算；`latest.json` 版本为 `0.3.10`，含 `windows-x86_64-lite` / `windows-x86_64-offline-voice` / `darwin-aarch64` / `darwin-x86_64` / `android-aarch64` 五个平台。
+
+**未验证**：未下载安装任何一个云端安装包，未实测从旧版经应用内更新升到 `0.3.10`；未在真实 Windows WebView2 上点击验收取消安全窗口后的唤醒词 / 固件 / 家居审批入口；未连接真实小智设备、摄像头与激光雕刻机；诊断包的原生保存对话框未实际写文件；macOS 包 ad-hoc 签名、未公证。
+
 ## GitHub 仓库 `v0.3.9` 云端四端并行交付安装包构建（含应用内更新包，2026-11-07）
 
 用户 2026-11-07 决定“帮我吧项目所有没提交的都git一下然后推送到远端，并release一下”，并在 `v0.3.8` 桌面三端因配置公钥为空签名失败后选择“重打 v0.3.9”：将本地 Jev 运行状态可见（`81ee163`）、发布流水线公钥修复（`1919697`）与桌面摄像头标签页（`2a9e428`）一并推送 `main`，删除指向未完成提交的旧 `v0.3.9` 标签后在 `2a9e428` 重建带附注标签，触发 `.github/workflows/release.yml` Run `42364413826`（同提交主分支 CI Run `42364396731` 同步全绿），全部 6 个作业成功并发布 [Release v0.3.9](https://github.com/yjdaaa/moss/releases/tag/v0.3.9)。`v0.3.8` 标签保留但没有 Release。
