@@ -99,11 +99,17 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          # 应用内更新签名私钥（仓库密钥，未配置时不生成更新包，只发普通安装包）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $overlay = Join-Path $env:RUNNER_TEMP "tauri-lite-overlay.json"
+          $bundle = @{}
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) { $bundle.createUpdaterArtifacts = $true }
           @{
             version = $env:VERSION
             build   = @{ beforeBuildCommand = "" }
+            bundle  = $bundle
           } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $overlay -Encoding utf8
 
           Push-Location apps/desktop/src-tauri
@@ -120,6 +126,9 @@ jobs:
           if (-not $nsis) { throw "Missing Windows Lite NSIS installer" }
 
           Copy-Item -LiteralPath $nsis.FullName -Destination "target/release-assets/MOSS_${env:VERSION}_x64-lite-setup.exe" -Force
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            Copy-Item -LiteralPath "$($nsis.FullName).sig" -Destination "target/release-assets/MOSS_${env:VERSION}_x64-lite-setup.exe.sig" -Force
+          }
           Copy-Item -LiteralPath "target/release/moss-desktop.exe" -Destination "target/release-assets/MOSS_${env:VERSION}_windows_x64_portable.exe" -Force
 
       - uses: actions/upload-artifact@v4
@@ -160,6 +169,8 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cargo clean --manifest-path apps/moss-voice-local/Cargo.toml --target-dir target 2>$null
           New-Item -ItemType Directory -Path target/release-assets -Force | Out-Null
@@ -175,6 +186,9 @@ jobs:
           if (-not $nsis) { throw "Missing Windows Offline-Voice NSIS installer" }
 
           Copy-Item -LiteralPath $nsis.FullName -Destination "target/release-assets/MOSS_${env:VERSION}_x64-offline-voice-setup.exe" -Force
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            Copy-Item -LiteralPath "$($nsis.FullName).sig" -Destination "target/release-assets/MOSS_${env:VERSION}_x64-offline-voice-setup.exe.sig" -Force
+          }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -215,6 +229,8 @@ jobs:
           MOSS_SKIP_FRONTEND_BUILD: '1'
           MOSS_VERSION_OVERRIDE: ${{ needs.prepare.outputs.version }}
           MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CI: 'true'
         run: |
           cargo clean --manifest-path apps/moss-voice-local/Cargo.toml --target-dir target || true
@@ -222,6 +238,12 @@ jobs:
           mkdir -p target/release-assets
           DMG_SRC="$(ls -t target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n 1)"
           cp "$DMG_SRC" "target/release-assets/MOSS_${MOSS_VERSION_OVERRIDE}_macos_universal.dmg"
+          if [[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+            UPD_SRC="target/universal-apple-darwin/release/bundle/macos/MOSS.app.tar.gz"
+            test -s "$UPD_SRC" && test -s "$UPD_SRC.sig"
+            cp "$UPD_SRC" "target/release-assets/MOSS_${MOSS_VERSION_OVERRIDE}_macos_universal.app.tar.gz"
+            cp "$UPD_SRC.sig" "target/release-assets/MOSS_${MOSS_VERSION_OVERRIDE}_macos_universal.app.tar.gz.sig"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -278,10 +300,12 @@ jobs:
             echo "$KEYSTORE_B64" | base64 --decode > "$KS_FILE"
             ALIAS_USE="$KEY_ALIAS"
             PASS_USE="$KEY_PASSWORD"
+            echo "ANDROID_FIXED_SIGNING=true" >> "$GITHUB_ENV"
             echo "Using repository secret Android keystore."
           else
             ALIAS_USE="moss"
             PASS_USE="$(openssl rand -hex 16)"
+            echo "ANDROID_FIXED_SIGNING=false" >> "$GITHUB_ENV"
             keytool -genkeypair -v \
               -keystore "$KS_FILE" \
               -storetype PKCS12 \
@@ -301,6 +325,8 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           MOSS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           GRADLE_OPTS: '-Dorg.gradle.daemon=false'
         run: |
           OVERLAY="$RUNNER_TEMP/tauri-android-overlay.json"
@@ -327,6 +353,12 @@ jobs:
           APK_SRC="apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk"
           test -s "$APK_SRC"
           cp "$APK_SRC" "target/release-assets/MOSS_${VERSION}_android_aarch64.apk"
+          if [[ "${ANDROID_FIXED_SIGNING:-}" == "true" && -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            cargo tauri signer sign --app-version "$VERSION" "target/release-assets/MOSS_${VERSION}_android_aarch64.apk"
+            test -s "target/release-assets/MOSS_${VERSION}_android_aarch64.apk.sig"
+          elif [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "::notice::ANDROID_KEYSTORE_BASE64 未配置固定证书（临时证书 APK 无法覆盖安装旧版），跳过 Android 应用内更新签名"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -359,6 +391,46 @@ jobs:
           pattern: asset-*
           path: dist
           merge-multiple: true
+
+      - name: Generate in-app update manifest (latest.json)
+        run: |
+          # 应用内更新清单（2026-11-07）：桌面三份签名齐全时生成 latest.json；Android 固定证书签名就绪时一并写入。
+          python3 - "$VERSION" "$TAG" "$GITHUB_REPOSITORY" <<'PY'
+          import datetime, json, pathlib, sys
+
+          ver, tag, repo = sys.argv[1:4]
+          dist = pathlib.Path("dist")
+          base = f"https://github.com/{repo}/releases/download/{tag}/"
+          desktop_packages = {
+              "windows-x86_64-lite": f"MOSS_{ver}_x64-lite-setup.exe",
+              "windows-x86_64-offline-voice": f"MOSS_{ver}_x64-offline-voice-setup.exe",
+              "darwin-aarch64": f"MOSS_{ver}_macos_universal.app.tar.gz",
+              "darwin-x86_64": f"MOSS_{ver}_macos_universal.app.tar.gz",
+          }
+          android_apk = f"MOSS_{ver}_android_aarch64.apk"
+          missing = [name for name in sorted(set(desktop_packages.values())) if not (dist / f"{name}.sig").is_file()]
+          signatures = {path.name[:-4]: path.read_text(encoding="utf-8").strip() for path in dist.glob("*.sig")}
+          for sig in dist.glob("*.sig"):
+              sig.unlink()  # 签名写进清单，不单独上传，也不进 SHA256SUMS
+          if missing:
+              (dist / f"MOSS_{ver}_macos_universal.app.tar.gz").unlink(missing_ok=True)
+              print(f"::notice::未配置 TAURI_SIGNING_PRIVATE_KEY 或缺少桌面签名 {missing}，本次不发布应用内更新清单")
+              sys.exit(0)
+          platforms = {
+              key: {"url": base + name, "signature": signatures[name]}
+              for key, name in desktop_packages.items()
+          }
+          if android_apk in signatures:
+              platforms["android-aarch64"] = {"url": base + android_apk, "signature": signatures[android_apk]}
+          manifest = {
+              "version": ver,
+              "notes": f"MOSS {tag}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
+          }
+          (dist / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
 
       - name: Generate SHA256SUMS & release notes
         run: |
@@ -401,6 +473,12 @@ jobs:
             "dist/moss-voice-local-${VERSION}-gpl-source.zip#离线语音辅助程序对应源码与许可清单 (GPLv3)"
             "dist/SHA256SUMS.txt#SHA-256 校验清单"
           )
+          if [[ -f dist/latest.json ]]; then
+            ASSETS+=(
+              "dist/MOSS_${VERSION}_macos_universal.app.tar.gz#macOS 应用内更新包（由 MOSS 自动下载，无需手动安装）"
+              "dist/latest.json#应用内更新清单"
+            )
+          fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --clobber

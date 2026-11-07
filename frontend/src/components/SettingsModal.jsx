@@ -9,6 +9,7 @@ import { PhoneLinkSection } from "./PhoneLinkSection.jsx";
 import { isRemoteMode } from "../authSession.js";
 import { readHideTopPills, writeHideTopPills } from "../foldState.js";
 import { trayActionCopy } from "../platform.js";
+import { appUpdateActionLabel, appUpdateAvailable, appUpdateBusy, appUpdateInstall, appUpdateProgressView, appUpdateScopeProgress, appUpdateStatus } from "../appUpdate.js";
 
 export function SettingsModal({
   visible,
@@ -16,6 +17,9 @@ export function SettingsModal({
   onOpenVoice = null,
   hideTopPills: hideTopPillsProp,
   onHideTopPillsChange = null,
+  initialUpdateReport = null,
+  focusUpdateSection = false,
+  onUpdateReport = null,
 }) {
   const [closeAction, setCloseAction] = useState("ask");
   const [hideTopPills, setHideTopPills] = useState(() =>
@@ -36,11 +40,30 @@ export function SettingsModal({
   const [savingJev, setSavingJev] = useState(false);
   const [testingJev, setTestingJev] = useState(false);
   const [jevSaveStatus, setJevSaveStatus] = useState("");
-  const [autoCheckUpdate, setAutoCheckUpdate] = useState(false);
+  const [autoCheckUpdate, setAutoCheckUpdate] = useState(true);
   const [checkPrerelease, setCheckPrerelease] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [updateReport, setUpdateReport] = useState(null);
+  const [updateReport, setUpdateReport] = useState(() => initialUpdateReport);
   const [updateError, setUpdateError] = useState("");
+  // 应用内更新（2026-11-07）：supported/unsupported_reason/platform 来自客户端主窗口，progress 为下载安装进度
+  const [installInfo, setInstallInfo] = useState(null);
+  const [installProgress, setInstallProgress] = useState(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    if (
+      initialUpdateReport &&
+      (!updateReport ||
+        (initialUpdateReport.has_update && initialUpdateReport.latest_version !== updateReport.latest_version))
+    ) {
+      setUpdateReport(initialUpdateReport);
+    }
+    if (focusUpdateSection) {
+      requestAnimationFrame(() => {
+        document.getElementById("settings-update-section")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
+  }, [visible, initialUpdateReport, focusUpdateSection, updateReport]);
 
   useEffect(() => {
     if (!visible) return;
@@ -55,7 +78,7 @@ export function SettingsModal({
         const info = res.data.result || {};
         setSystemInfo(info);
         setPortInput(String(info.preferred_port || 9666));
-        setAutoCheckUpdate(Boolean(info.auto_check_update));
+        setAutoCheckUpdate(Boolean(info.auto_check_update ?? true));
         setCheckPrerelease(Boolean(info.check_prerelease));
       }
     });
@@ -70,7 +93,31 @@ export function SettingsModal({
     }
   }, [visible, hideTopPillsProp, onOpenVoice]);
 
+  useEffect(() => {
+    if (!updateReport?.has_update || !appUpdateAvailable()) return;
+    let alive = true;
+    appUpdateStatus()
+      .then((info) => {
+        if (alive) {
+          setInstallInfo(info);
+          setInstallProgress(appUpdateScopeProgress(info, updateReport.latest_version));
+        }
+      })
+      .catch((e) => { if (alive) setInstallInfo({ supported: false, unsupported_reason: e.message }); });
+    return () => { alive = false; };
+  }, [updateReport]);
+
+  useEffect(() => {
+    if (!appUpdateBusy(installProgress)) return;
+    const timer = setInterval(() => {
+      appUpdateStatus().then(setInstallProgress).catch(() => {});
+    }, 500);
+    return () => clearInterval(timer);
+  }, [installProgress?.phase]);
+
   if (!visible) return null;
+
+  const activeUpdateProgress = appUpdateScopeProgress(installProgress, updateReport?.latest_version);
 
   const handleActionChange = (action) => {
     setCloseAction(action);
@@ -104,6 +151,30 @@ export function SettingsModal({
     }
   };
 
+  const handleInstallUpdate = async () => {
+    if (!updateReport?.has_update || appUpdateBusy(activeUpdateProgress)) return;
+    const version = updateReport.latest_version;
+    const isAndroid = installInfo?.platform === "android";
+    if (!(isAndroid && activeUpdateProgress?.phase === "installer_launched")) {
+      const ok = await showConfirm(
+        isAndroid
+          ? `下载 MOSS v${version} 安装包并校验签名，完成后打开系统安装界面由您确认升级。\n\n设备正在加工或等待确认停机时不能更新。`
+          : `下载 MOSS v${version}，校验签名后安装并自动重启。\n\n` +
+            "重启前会像“完全退出”一样先停止激光任务通道和语音服务；设备正在加工或等待确认停机时不能更新。",
+        {
+          title: isAndroid ? "下载并安装更新？" : "下载并重启更新？",
+          confirmText: isAndroid ? "下载并安装" : "下载并更新",
+        },
+      );
+      if (!ok) return;
+    }
+    try {
+      setInstallProgress(await appUpdateInstall(`v${version}`));
+    } catch (e) {
+      setInstallProgress({ phase: "error", version, error: e.message });
+    }
+  };
+
   const handleCheckUpdateNow = async () => {
     if (checkingUpdate) return;
     setCheckingUpdate(true);
@@ -112,6 +183,7 @@ export function SettingsModal({
       const res = await postJson("/api/system/check-update", { include_prerelease: checkPrerelease });
       if (res.ok && res.data?.success && res.data?.result) {
         setUpdateReport(res.data.result);
+        onUpdateReport?.(res.data.result);
       } else {
         setUpdateError(res.data?.result || "检查更新失败，请稍后重试");
       }
@@ -545,10 +617,41 @@ export function SettingsModal({
                       {updateReport.notes}
                     </div>
                   )}
+                  {installInfo?.supported && (() => {
+                    const busy = appUpdateBusy(activeUpdateProgress);
+                    const view = appUpdateProgressView(activeUpdateProgress);
+                    return (
+                      <div className="app-update-install" id="settings-app-update">
+                        <button
+                          type="button"
+                          className="btn btn-hud-primary settings-btn"
+                          id="settings-install-update-btn"
+                          disabled={busy}
+                          onClick={() => void handleInstallUpdate()}
+                        >
+                          <RefreshCw size={13} className={busy ? "spin" : undefined} />
+                          <span>{appUpdateActionLabel(installInfo, activeUpdateProgress)}</span>
+                        </button>
+                        {view.text && (
+                          <div className="app-update-progress" role="status" data-phase={activeUpdateProgress?.phase}>
+                            {busy && (
+                              <div className="app-update-bar" data-indeterminate={view.percent === null ? "true" : "false"}>
+                                <span style={{ width: view.percent === null ? undefined : `${view.percent}%` }} />
+                              </div>
+                            )}
+                            <span>{view.text}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  {installInfo && !installInfo.supported && installInfo.unsupported_reason && (
+                    <div style={{ marginTop: "6px", color: "var(--ink-dim)" }}>{installInfo.unsupported_reason}</div>
+                  )}
                   {updateReport.release_url && (
                     <div style={{ marginTop: "6px" }}>
                       <a href={updateReport.release_url} target="_blank" rel="noreferrer">
-                        前往 GitHub Releases 下载更新 →
+                        {installInfo?.supported ? "查看更新说明 / 手动下载 →" : "前往 GitHub Releases 下载更新 →"}
                       </a>
                     </div>
                   )}

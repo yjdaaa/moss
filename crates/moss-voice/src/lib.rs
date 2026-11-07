@@ -18,6 +18,7 @@ pub mod config_yaml;
 pub mod health;
 pub mod home_readonly;
 pub mod home_backup_audit;
+pub mod laya_env;
 pub mod local_models;
 pub mod logfile;
 pub mod models;

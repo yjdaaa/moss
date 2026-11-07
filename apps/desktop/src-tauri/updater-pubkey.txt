@@ -1,0 +1,6 @@
+# MOSS 应用内更新签名公钥（2026-11-07）
+# 维护者在本机普通终端运行：cargo tauri signer generate -w ~/.tauri/moss-updater.key
+# 把生成的 ~/.tauri/moss-updater.key.pub 的内容（一行 base64）粘贴到本注释下方的空行；只放公钥，私钥只进 GitHub 仓库密钥。
+# 留空时应用内更新按钮不可用，界面引导到 GitHub Releases 手动下载。
+
+dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdCRUMxNTY1Q0IwOTU4NzYKUldSMldBbkxaUlhzZTRUM0NuK0pFTUwvT2RzYXd0OEhDY3g3NXRFREd6Ni9xNkI0UlI5eDBKamMK

@@ -162,13 +162,16 @@ if [[ "${MOSS_VERSION_OVERRIDE:-}" != "" ]]; then
   export MOSS_RELEASE_VERSION="$MOSS_VERSION_OVERRIDE"
 fi
 python3 - "$OVERLAY" "$BIN_REL" "$REL_RESOURCE" "${APPLE_SIGNING_IDENTITY:-}" "${MOSS_VERSION_OVERRIDE:-}" <<'PY'
-import json, sys
+import json, os, sys
 
 overlay_path, bin_rel, rel_resource, signing_id, version_override = sys.argv[1:6]
 bundle = {
     "externalBin": [bin_rel],
     "resources": {f"{rel_resource}/": "licenses/voice-local/"},
 }
+# 应用内更新（2026-11-07）：只有提供了签名私钥（发布流水线的仓库密钥）才生成 MOSS.app.tar.gz 与 .sig
+if os.environ.get("TAURI_SIGNING_PRIVATE_KEY"):
+    bundle["createUpdaterArtifacts"] = True
 if signing_id:
     bundle["macOS"] = {
         "signingIdentity": signing_id,

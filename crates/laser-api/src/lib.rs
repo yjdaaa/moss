@@ -882,6 +882,15 @@ impl ApiService {
         self.active_jobs.lock().map(|jobs| jobs.len()).unwrap_or(0)
     }
 
+    /// 是否有设备作业在进行：正在下发、正在启动或停机后待操作者确认的任务都算（锁中毒时按“忙”处理）。
+    /// 应用内更新（2026-11-07）据此拒绝在加工途中重启 MOSS。
+    pub fn device_work_in_progress(&self) -> bool {
+        let busy = |held: Option<bool>| held.unwrap_or(true);
+        busy(self.active_jobs.lock().ok().map(|jobs| !jobs.is_empty()))
+            || busy(self.uncertain_jobs.lock().ok().map(|jobs| !jobs.is_empty()))
+            || busy(self.launching_workflows.lock().ok().map(|state| !state.active.is_empty()))
+    }
+
     /// 退出/崩溃兜底：对所有活动作业置取消并直接写 0x18（实时信道 + 裸句柄双路）。
     pub fn abort_all_active_jobs(&self) -> Result<(), String> {
         let (jobs, uncertain) = {
@@ -3169,10 +3178,12 @@ impl ApiService {
                 .and_then(|p| p.as_u64())
                 .map(|p| p as u16);
             let preferred = preferred_from_file.unwrap_or(self.settings.web_port);
+            // 2026-11-07 用户决定：启动自动检查更新默认开启，其他用户安装后打开即自动检查并可在软件内更新；
+            // 用户在偏好设置中取消勾选后写入 settings.json 的 auto_check_update=false。
             let auto_check_update = saved_settings
                 .get("auto_check_update")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+                .unwrap_or(true);
             let check_prerelease = saved_settings
                 .get("check_prerelease")
                 .and_then(|v| v.as_bool())
@@ -7185,22 +7196,50 @@ fn mask_secret(value: &str) -> String {
 const DEFAULT_GITHUB_RELEASES_API: &str = "https://api.github.com/repos/yjdaaa/moss/releases";
 const DEFAULT_GITHUB_RELEASES_PAGE: &str = "https://github.com/yjdaaa/moss/releases";
 
-fn parse_semver_tuple(raw: &str) -> Option<(u64, u64, u64, bool)> {
+fn parse_semver_tuple(raw: &str) -> Option<(u64, u64, u64, String)> {
     let trimmed = raw.trim().trim_start_matches(['v', 'V']);
     if trimmed.is_empty() {
         return None;
     }
     let (core, suffix) = match trimmed.split_once('-') {
-        Some((c, s)) => (c, Some(s)),
-        None => (trimmed, None),
+        Some((c, s)) => (c, s.split('+').next().unwrap_or(s)),
+        None => (trimmed.split('+').next().unwrap_or(trimmed), ""),
     };
-    let core = core.split('+').next().unwrap_or(core);
     let mut parts = core.split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
     let patch = parts.next().unwrap_or("0").parse::<u64>().ok()?;
-    let is_prerelease = suffix.is_some_and(|s| !s.trim().is_empty());
-    Some((major, minor, patch, is_prerelease))
+    Some((major, minor, patch, suffix.trim().to_owned()))
+}
+
+fn cmp_prerelease(candidate: &str, current: &str) -> std::cmp::Ordering {
+    match (candidate.is_empty(), current.is_empty()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => {
+            let mut c_iter = candidate.split('.');
+            let mut cur_iter = current.split('.');
+            loop {
+                match (c_iter.next(), cur_iter.next()) {
+                    (None, None) => return std::cmp::Ordering::Equal,
+                    (Some(_), None) => return std::cmp::Ordering::Greater,
+                    (None, Some(_)) => return std::cmp::Ordering::Less,
+                    (Some(a), Some(b)) => {
+                        let ord = match (a.parse::<u64>(), b.parse::<u64>()) {
+                            (Ok(na), Ok(nb)) => na.cmp(&nb),
+                            (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                            (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                            (Err(_), Err(_)) => a.cmp(b),
+                        };
+                        if ord != std::cmp::Ordering::Equal {
+                            return ord;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 比较 `candidate` 是否比 `current` 更新。
@@ -7214,7 +7253,7 @@ pub fn is_newer_version(candidate: &str, current: &str) -> bool {
     match (c_maj, c_min, c_pat).cmp(&(cur_maj, cur_min, cur_pat)) {
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Equal => cur_pre && !c_pre,
+        std::cmp::Ordering::Equal => cmp_prerelease(&c_pre, &cur_pre).is_gt(),
     }
 }
 
@@ -8255,6 +8294,7 @@ mod tests {
         let total = finished["result"]["send_result"]["total_lines"].as_u64().unwrap_or(0);
         assert!(total > 0 && sent == total, "全部刀路行必须收到设备 ok: {sent}/{total}");
         assert_eq!(service.active_job_count(), 0, "作业完成后必须从注册表移除");
+        assert!(!service.device_work_in_progress(), "作业完成后应用内更新不再被加工任务挡住");
         let cancel_body = format!(r#"{{"action":"cancel","workflow_id":"{workflow_id}"}}"#);
         let cancel_request = format!(
             "POST /api/workflow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
@@ -8308,6 +8348,7 @@ mod tests {
             }));
             assert_eq!(send["success"], true, "{send}");
             assert_eq!(service.active_job_count(), 1, "设备只回 5 个 ok，任务必须仍在发送中");
+            assert!(service.device_work_in_progress(), "发送中必须拒绝应用内更新重启");
 
             let cancel = post_json(&service, "/api/workflow", &serde_json::json!({"action": "cancel", "workflow_id": workflow_id}));
             assert_eq!(cancel["success"], true, "use_store={use_store}: {cancel}");
@@ -9939,6 +9980,8 @@ Content-Length: 30
         assert!(!is_newer_version("0.2.0", "0.2.0"));
         assert!(!is_newer_version("0.1.9", "0.2.0"));
         assert!(is_newer_version("0.2.0", "0.2.0-beta.1"));
+        assert!(is_newer_version("0.2.0-beta.10", "0.2.0-beta.2"));
+        assert!(!is_newer_version("0.2.0-beta.1", "0.2.0"));
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -9960,6 +10003,47 @@ Content-Length: 30
         assert_eq!(report["has_update"], true);
         assert_eq!(report["latest_version"], "0.3.1");
         assert_eq!(report["current_version"], "0.2.0");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = ApiService::new(
+            laser_runtime::LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 9666,
+                material_params_file: None,
+            },
+            laser_contracts::builtin_material_library(),
+        )
+        .with_runtime_path(temp_dir.path().to_path_buf());
+        let info_default = service.handle_http_from(
+            b"GET /api/system/info HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            true,
+            "127.0.0.1",
+            None,
+        );
+        let default_json: serde_json::Value =
+            serde_json::from_slice(&info_default[info_default.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(default_json["result"]["auto_check_update"], true, "新安装默认开启启动自动检查更新");
+
+        let body = br#"{"auto_check_update":false}"#;
+        let save_req = format!(
+            "POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut raw_post = save_req.into_bytes();
+        raw_post.extend_from_slice(body);
+        let save_resp = service.handle_http_from(&raw_post, true, "127.0.0.1", None);
+        assert!(String::from_utf8_lossy(&save_resp).starts_with("HTTP/1.1 200"));
+        let info_after = service.handle_http_from(
+            b"GET /api/system/info HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            true,
+            "127.0.0.1",
+            None,
+        );
+        let after_json: serde_json::Value =
+            serde_json::from_slice(&info_after[info_after.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(after_json["result"]["auto_check_update"], false, "用户关闭后持久化生效");
     }
 
     #[test]

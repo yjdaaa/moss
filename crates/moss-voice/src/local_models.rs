@@ -426,6 +426,10 @@ pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Progress {
     Downloading { done: u64, total: u64 },
+    /// OneJev：正在下载三档共用的推理引擎 llama-server（2026-11-07）
+    PreparingRuntime { done: u64, total: u64 },
+    /// OneJev：另一档正在安装推理引擎，排队等待（可取消）
+    WaitingRuntime,
     Verifying,
     Installing,
     Failed { message: String },
@@ -462,6 +466,8 @@ pub struct ModelManager {
     overrides: HashMap<&'static str, PathBuf>,
     tasks: Arc<Mutex<HashMap<&'static str, Task>>>,
     generation: std::sync::atomic::AtomicU64,
+    /// 安装最后一步（改名就位）与删除互斥：删除先拿到锁则安装看到取消标志放弃，安装先完成则删除随后删掉（2026-11-07）
+    install_lock: Arc<Mutex<()>>,
 }
 
 impl ModelManager {
@@ -472,6 +478,7 @@ impl ModelManager {
             overrides: HashMap::new(),
             tasks: Arc::default(),
             generation: std::sync::atomic::AtomicU64::new(1),
+            install_lock: Arc::default(),
         }
     }
 
@@ -518,7 +525,64 @@ impl ModelManager {
     }
 
     fn busy(progress: &Progress) -> bool {
-        matches!(progress, Progress::Downloading { .. } | Progress::Verifying | Progress::Installing)
+        matches!(
+            progress,
+            Progress::Downloading { .. }
+                | Progress::PreparingRuntime { .. }
+                | Progress::WaitingRuntime
+                | Progress::Verifying
+                | Progress::Installing
+        )
+    }
+
+    /// 本进程管理的所有模型目录（默认目录 + 外置覆盖目录，去重）。
+    fn roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.root.clone()];
+        for root in self.overrides.values() {
+            if !roots.contains(root) {
+                roots.push(root.clone());
+            }
+        }
+        roots
+    }
+
+    /// 清理上次运行中途退出（强关、崩溃、断电）留下的半截文件：`.download/`、`.extract-*`、`.trash-*`。
+    /// 只在没有下载任务时执行（桌面启动时调用）；返回清掉的条目数（2026-11-07）。
+    pub fn clean_leftovers(&self) -> usize {
+        let idle = self
+            .tasks
+            .lock()
+            .map(|tasks| !tasks.values().any(|task| Self::busy(&task.progress)))
+            .unwrap_or(false);
+        if !idle {
+            return 0;
+        }
+        let mut removed = 0;
+        for root in self.roots() {
+            let Ok(entries) = fs::read_dir(&root) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !(name == ".download" || name.starts_with(".extract-") || name.starts_with(".trash-")) {
+                    continue;
+                }
+                let path = entry.path();
+                let is_real_dir = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir());
+                let result = if is_real_dir { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+                if result.is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+
+    /// 同一目录下是否还有已安装或正在下载的 OneJev（决定能否删掉共用的推理引擎）。
+    fn onejev_still_needed(&self, root: &Path) -> bool {
+        let tasks = self.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        CATALOG.iter().filter(|spec| spec.engine == Engine::OneJev && self.root_for(spec.id) == root).any(|spec| {
+            installed(root, spec) || tasks.get(spec.id).is_some_and(|task| Self::busy(&task.progress))
+        })
     }
 
     /// 开始下载（后台线程）。`base` 为发布地址或镜像。
@@ -554,6 +618,7 @@ impl ModelManager {
         }
         let root = self.root_for(spec.id).to_path_buf();
         let tasks = self.tasks.clone();
+        let install_lock = self.install_lock.clone();
         std::thread::Builder::new()
             .name(format!("model-download-{}", spec.id))
             .spawn(move || {
@@ -566,7 +631,7 @@ impl ModelManager {
                         task.progress = progress;
                     }
                 };
-                let result = run_download(&root, &spec, &candidate_bases, &cancel, &report);
+                let result = run_download(&root, &spec, &candidate_bases, generation, &cancel, &install_lock, &report);
                 if let Ok(mut tasks) = tasks.lock()
                     && let Some(task) = tasks.get(spec.id)
                     && task.generation == generation
@@ -600,23 +665,43 @@ impl ModelManager {
     }
 
     /// 删除已安装的模型（下载中时先取消）。
+    ///
+    /// 先把模型整体改名到 `.trash-*` 再删：文件被占用时改名失败、模型原样保留，不会留下删了一半的目录；
+    /// 改名后删不掉的残留在下次启动时由 [`clean_leftovers`](Self::clean_leftovers) 清掉。
+    /// 删掉同目录最后一档 OneJev 时，一并删除 MOSS 自动下载的推理引擎（2026-11-07）。
     pub fn delete(&self, id: &str) -> Result<(), String> {
         let spec = spec(id).ok_or_else(|| format!("未知模型：{id}"))?;
         self.cancel(id);
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.remove(spec.id);
+        let root = self.root_for(spec.id).to_path_buf();
+        {
+            let _guard = self.install_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Ok(mut tasks) = self.tasks.lock() {
+                tasks.remove(spec.id);
+            }
+            remove_installed(&root, spec)?;
         }
-        let path = install_path(self.root_for(spec.id), spec);
-        let removed = match spec.archive {
-            Archive::File => fs::remove_file(&path),
-            Archive::TarBz2 { .. } | Archive::Directory { .. } => fs::remove_dir_all(&path),
-        };
-        match removed {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("删除失败：{error}")),
+        if spec.engine == Engine::OneJev && !self.onejev_still_needed(&root) {
+            crate::onejev::remove_managed_runtime(&root)?;
         }
+        Ok(())
     }
+}
+
+/// 把已安装的模型改名到回收目录后删除；不存在时视为成功。
+fn remove_installed(root: &Path, spec: &ModelSpec) -> Result<(), String> {
+    let path = install_path(root, spec);
+    if fs::symlink_metadata(&path).is_err() {
+        return Ok(());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let trash = root.join(format!(".trash-{}-{stamp}", spec.id));
+    fs::rename(&path, &trash).map_err(|error| format!("删除失败（模型文件可能正被其他程序占用，关闭后重试）：{error}"))?;
+    let is_real_dir = fs::symlink_metadata(&trash).is_ok_and(|m| m.file_type().is_dir());
+    let _ = if is_real_dir { fs::remove_dir_all(&trash) } else { fs::remove_file(&trash) };
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -674,7 +759,15 @@ fn is_loopback_test_base(base: &str) -> bool {
     base.starts_with("http://127.0.0.1") || base.starts_with("http://localhost") || base.starts_with("http://[::1]")
 }
 
-fn run_download(root: &Path, spec: &ModelSpec, bases: &[String], cancel: &AtomicBool, report: &dyn Fn(Progress)) -> Result<(), String> {
+fn run_download(
+    root: &Path,
+    spec: &ModelSpec,
+    bases: &[String],
+    generation: u64,
+    cancel: &AtomicBool,
+    install_lock: &Mutex<()>,
+    report: &dyn Fn(Progress),
+) -> Result<(), String> {
     let staging = root.join(".download");
     fs::create_dir_all(&staging).map_err(|error| format!("创建下载目录失败：{error}"))?;
     let items: Vec<Item> = std::iter::once(Item { path: spec.path, sha256: spec.sha256, size: spec.size })
@@ -683,12 +776,17 @@ fn run_download(root: &Path, spec: &ModelSpec, bases: &[String], cancel: &Atomic
     let parts: Vec<PathBuf> = items
         .iter()
         .enumerate()
-        .map(|(idx, item)| staging.join(format!("{}-{idx}-{}.part", spec.id, base_name(item.path))))
+        // 文件名带任务号：取消后立刻重下时，旧线程收尾不会删掉新任务的临时文件
+        .map(|(idx, item)| staging.join(format!("{}-{generation}-{idx}-{}.part", spec.id, base_name(item.path))))
         .collect();
     let total = spec.download_size();
     let result = (|| {
         if spec.engine == Engine::OneJev && !bases.iter().any(|b| is_loopback_test_base(b)) {
-            crate::onejev::ensure_llama_runtime(root, bases.first().map(String::as_str), cancel)?;
+            crate::onejev::ensure_llama_runtime(root, bases.first().map(String::as_str), cancel, &|progress| match progress {
+                crate::onejev::RuntimeProgress::Waiting => report(Progress::WaitingRuntime),
+                crate::onejev::RuntimeProgress::Downloading { done, total } => report(Progress::PreparingRuntime { done, total }),
+            })?;
+            report(Progress::Downloading { done: 0, total });
         }
         let mut offset = 0;
         for (item, part) in items.iter().zip(&parts) {
@@ -716,12 +814,59 @@ fn run_download(root: &Path, spec: &ModelSpec, bases: &[String], cancel: &Atomic
         }
         report(Progress::Verifying);
         report(Progress::Installing);
-        install(root, spec, &parts[0], &parts[1..], cancel)
+        install(root, spec, &parts[0], &parts[1..], generation, cancel, install_lock)
     })();
     for part in &parts {
         let _ = fs::remove_file(part);
     }
     result
+}
+
+fn is_private_or_loopback_host(host: &str) -> bool {
+    let clean = host.trim_matches(['[', ']']);
+    if clean.eq_ignore_ascii_case("localhost") || clean.ends_with(".localhost") || clean.ends_with(".local") {
+        return true;
+    }
+    if let Ok(ip) = clean.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    false
+}
+
+fn safe_model_redirect_policy(initial_loopback: bool, initial_https: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("重定向次数过多");
+        }
+        let next = attempt.url();
+        if initial_https && next.scheme() != "https" {
+            return attempt.error("禁止从 HTTPS 降级重定向到非加密地址");
+        }
+        if !matches!(next.scheme(), "https" | "http") {
+            return attempt.error("不支持的重定向协议");
+        }
+        let Some(host) = next.host_str() else {
+            return attempt.error("重定向地址缺少主机名");
+        };
+        if !initial_loopback && is_private_or_loopback_host(host) {
+            return attempt.error("禁止重定向到本机或局域网地址");
+        }
+        attempt.follow()
+    })
 }
 
 pub(crate) fn fetch_verified_file(
@@ -732,11 +877,13 @@ pub(crate) fn fetch_verified_file(
     cancel: &AtomicBool,
     progress: &dyn Fn(u64),
 ) -> Result<(), String> {
+    let initial_loopback = is_loopback_test_base(url);
+    let initial_https = url.starts_with("https://");
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(None::<Duration>)
-        // GitHub 发布资产会跳转到存储地址；完整性由 SHA-256 保证
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // GitHub / HuggingFace 发布资产会跳转到 CDN 存储地址；禁止降级协议与内网 SSRF，完整性由 SHA-256 保证
+        .redirect(safe_model_redirect_policy(initial_loopback, initial_https))
         .build()
         .map_err(|_| "无法创建网络客户端".to_owned())?;
     let response = client.get(url).send().map_err(|error| {
@@ -796,15 +943,30 @@ pub(crate) fn safe_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
-fn install(root: &Path, spec: &ModelSpec, part: &Path, extras: &[PathBuf], cancel: &AtomicBool) -> Result<(), String> {
+/// 安装最后一步：持锁复核取消标志后把成品改名就位（与 [`ModelManager::delete`] 互斥）。
+fn place(install_lock: &Mutex<()>, cancel: &AtomicBool, from: &Path, target: &Path, is_dir: bool) -> Result<(), String> {
+    let _guard = install_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cancel.load(Ordering::SeqCst) {
+        return Err("已取消".to_owned());
+    }
+    let _ = if is_dir { fs::remove_dir_all(target) } else { fs::remove_file(target) };
+    fs::rename(from, target).map_err(|error| format!("安装失败：{error}"))
+}
+
+fn install(
+    root: &Path,
+    spec: &ModelSpec,
+    part: &Path,
+    extras: &[PathBuf],
+    generation: u64,
+    cancel: &AtomicBool,
+    install_lock: &Mutex<()>,
+) -> Result<(), String> {
     let target = install_path(root, spec);
     match spec.archive {
-        Archive::File => {
-            let _ = fs::remove_file(&target);
-            fs::rename(part, &target).map_err(|error| format!("安装失败：{error}"))
-        }
+        Archive::File => place(install_lock, cancel, part, &target, false),
         Archive::TarBz2 { dir } => {
-            let extract = root.join(format!(".extract-{}", spec.id));
+            let extract = root.join(format!(".extract-{}-{generation}", spec.id));
             let _ = fs::remove_dir_all(&extract);
             fs::create_dir_all(&extract).map_err(|error| format!("创建解压目录失败：{error}"))?;
             let result = (|| {
@@ -838,14 +1000,13 @@ fn install(root: &Path, spec: &ModelSpec, part: &Path, extras: &[PathBuf], cance
                 if let Some(missing) = spec.required.iter().find(|item| !unpacked.join(item).exists()) {
                     return Err(format!("压缩包缺少 {missing}"));
                 }
-                let _ = fs::remove_dir_all(&target);
-                fs::rename(&unpacked, &target).map_err(|error| format!("安装失败：{error}"))
+                place(install_lock, cancel, &unpacked, &target, true)
             })();
             let _ = fs::remove_dir_all(&extract);
             result
         }
         Archive::Directory { dir, .. } => {
-            let extract = root.join(format!(".extract-{}", spec.id));
+            let extract = root.join(format!(".extract-{}-{generation}", spec.id));
             let _ = fs::remove_dir_all(&extract);
             fs::create_dir_all(&extract).map_err(|error| format!("创建安装目录失败：{error}"))?;
             let result = (|| {
@@ -868,8 +1029,7 @@ fn install(root: &Path, spec: &ModelSpec, part: &Path, extras: &[PathBuf], cance
                 if let Some(missing) = spec.required.iter().find(|item| !unpacked.join(item).exists()) {
                     return Err(format!("模型目录缺少 {missing}"));
                 }
-                let _ = fs::remove_dir_all(&target);
-                fs::rename(&unpacked, &target).map_err(|error| format!("安装失败：{error}"))
+                place(install_lock, cancel, &unpacked, &target, true)
             })();
             let _ = fs::remove_dir_all(&extract);
             result
@@ -948,6 +1108,97 @@ mod tests {
         assert_eq!(fs::read(root.join("pkg/sub/x.txt")).unwrap(), b"x");
         assert!(!root.join(".extract-test").exists());
         assert!(fs::read_dir(root.join(".download")).unwrap().next().is_none(), "临时文件已清理");
+    }
+
+    /// 按清单造出“已安装”的模型（大文件用 set_len 生成稀疏文件，不真的写入数据）。
+    fn fake_install(root: &Path, spec: &ModelSpec) {
+        let path = install_path(root, spec);
+        let sized = |file: PathBuf, size: u64| {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::File::create(&file).unwrap().set_len(size).unwrap();
+        };
+        match spec.archive {
+            Archive::File => sized(path, spec.size),
+            _ => {
+                if matches!(spec.archive, Archive::Directory { .. }) {
+                    sized(path.join(spec.path), spec.size);
+                    for extra in spec.extras {
+                        sized(path.join(extra.path), extra.size);
+                    }
+                }
+                for item in spec.required {
+                    if !path.join(item).exists() {
+                        sized(path.join(item), 1);
+                    }
+                }
+            }
+        }
+        assert!(installed(root, spec), "{} 未造成已安装", spec.id);
+    }
+
+    /// 2026-11-07：中途退出留下的半截文件启动时清掉；删除先改名到回收目录再删，不留残留。
+    #[test]
+    fn leftovers_are_cleaned_and_delete_goes_through_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("models");
+        let laya_root = dir.path().join("external").join("models");
+        let manager = ModelManager::new(root.clone()).with_root_override("laya_multilingual", laya_root.clone());
+        let kokoro = spec("kokoro").unwrap();
+        fake_install(&root, kokoro);
+        fs::create_dir_all(root.join(".download")).unwrap();
+        fs::write(root.join(".download").join("onejev_1_6_9b-3-0-x.gguf.part"), b"half").unwrap();
+        fs::create_dir_all(root.join(".extract-kokoro-7").join("pkg")).unwrap();
+        fs::create_dir_all(root.join(".extract-llama-macos-arm64")).unwrap();
+        fs::create_dir_all(root.join(".trash-kokoro-1")).unwrap();
+        fs::create_dir_all(laya_root.join(".download")).unwrap();
+        assert_eq!(manager.clean_leftovers(), 5);
+        let left: Vec<_> = fs::read_dir(&root).unwrap().flatten().map(|entry| entry.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from(base_name_dir(kokoro))], "只剩已安装的模型");
+        assert!(!laya_root.join(".download").exists(), "外置目录也清理");
+
+        manager.delete("kokoro").unwrap();
+        assert!(!install_path(&root, kokoro).exists());
+        assert!(fs::read_dir(&root).unwrap().next().is_none(), "删除后不留 .trash 残留");
+        // 安装最后一步看到取消标志就放弃，不会在删除之后又装回去
+        let cancelled = AtomicBool::new(true);
+        let staged = dir.path().join("staged");
+        fs::create_dir_all(&staged).unwrap();
+        assert!(place(&Mutex::new(()), &cancelled, &staged, &install_path(&root, kokoro), true).is_err());
+        assert!(!install_path(&root, kokoro).exists());
+    }
+
+    fn base_name_dir(spec: &ModelSpec) -> &'static str {
+        match spec.archive {
+            Archive::TarBz2 { dir } | Archive::Directory { dir, .. } => dir,
+            Archive::File => base_name(spec.path),
+        }
+    }
+
+    /// 2026-11-07：删掉最后一档 OneJev 时一并删除 MOSS 下载的推理引擎；用户自己放的 llama/ 不动。
+    #[test]
+    fn deleting_the_last_onejev_removes_the_managed_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("models");
+        let manager = ModelManager::new(root.clone());
+        let small = spec("onejev_1_6_0_8b").unwrap();
+        let mid = spec("onejev_1_6_4b").unwrap();
+        fake_install(&root, small);
+        fake_install(&root, mid);
+        let managed = root.join(".runtime").join("llama-b12167").join("platform");
+        fs::create_dir_all(&managed).unwrap();
+        fs::write(managed.join("llama-server"), b"bin").unwrap();
+        fs::create_dir_all(root.join("llama")).unwrap();
+        fs::write(root.join("llama").join("llama-server"), b"user").unwrap();
+
+        manager.delete(mid.id).unwrap();
+        assert!(managed.join("llama-server").is_file(), "还有 0.8B 在用，推理引擎保留");
+        manager.delete(small.id).unwrap();
+        assert!(!root.join(".runtime").exists(), "最后一档删掉后推理引擎一起删");
+        assert!(root.join("llama").join("llama-server").is_file(), "用户自备的 llama/ 不动");
+        // 删除非 OneJev 模型不影响推理引擎
+        fs::create_dir_all(&managed).unwrap();
+        manager.delete("kokoro").unwrap();
+        assert!(managed.is_dir());
     }
 
     /// 按请求路径回应的本机 HTTP 服务（每个连接一个请求）。

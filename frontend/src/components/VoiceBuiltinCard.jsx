@@ -63,6 +63,8 @@ import {
   localModelGroups,
   localModelSettingsError,
   localModelView,
+  layaSetupView,
+  localModelDeleteText,
   localGroupPatch,
   localSettingsForm,
   localSettingsPayload,
@@ -91,6 +93,7 @@ import {
 // 语音中心页按标签分开摆放本文件导出的各部分（UI-3）：服务与设备、模型、记录与诊断。
 
 const TONE_CLASS = { ok: "ob-pill--ok", info: "ob-pill--info", warn: "ob-pill--warn", bad: "ob-pill--bad", off: "ob-pill--off" };
+const LAYA_HINT_CLASS = { ok: "voice-hint--ok", warn: "voice-hint--warn", bad: "voice-hint--bad" };
 
 function formatTime(seconds) {
   if (!seconds) return "—";
@@ -1987,8 +1990,27 @@ function useLocalGroup(builtin, keys, validate) {
 
 /** 本地模型（NV6）：判停、识别、合成各有几个可选模型，每类选一个、可分别下载。 */
 export function LocalModelsGroup({ builtin }) {
-  const { busy, act } = builtin;
-  const [layaEnvHint, setLayaEnvHint] = useState(null);
+  const { busy } = builtin;
+  // 2026-11-07：下载 / 取消 / 删除按模型各自加锁，点一个模型不再让其他模型的按钮变灰，可同时下载多个
+  const [pending, setPending] = useState({});
+  const modelLocked = (id) => Boolean(busy) || Boolean(pending[id]);
+  const modelAct = async (id, label, action) => {
+    setPending((prev) => ({ ...prev, [id]: label }));
+    try {
+      const next = await action();
+      if (next) builtin.setStatus(next);
+      return next;
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: `${label}失败`, tone: "error" });
+      return null;
+    } finally {
+      setPending((prev) => {
+        const rest = { ...prev };
+        delete rest[id];
+        return rest;
+      });
+    }
+  };
   const group = useLocalGroup(builtin, LOCAL_MODEL_KEYS, localModelSettingsError);
   const { local, models, baseline, draft: form, setDraft, update, dirty, error, result, setResult } = group;
   const groups = localModelGroups(models);
@@ -1996,9 +2018,11 @@ export function LocalModelsGroup({ builtin }) {
   const fallbackTtsModel = resolveFallbackTtsModel(form, models);
   const on = groups.filter((item) => baseline[item.kind]).map((item) => item.title);
   const remove = async (model) => {
-    if (!(await showConfirm(`删除本地模型“${model.label}”？需要时可以重新下载。`, { title: "删除模型？", tone: "warning", danger: true, confirmText: "删除" }))) return;
-    await act("删除模型", () => voiceApi.localDelete(model.id));
+    if (!(await showConfirm(localModelDeleteText(model, models, local), { title: "删除模型？", tone: "warning", danger: true, confirmText: "删除" }))) return;
+    await modelAct(model.id, "删除模型", () => voiceApi.localDelete(model.id));
   };
+  const layaSetup = layaSetupView(local.laya_setup, local.laya_env);
+  const layaSetupLocked = modelLocked("laya-setup");
   const pickFallbackTts = async (model) => {
     const nextDraft = selectLocalModel(form, models, "tts", model.id);
     setDraft(nextDraft);
@@ -2096,17 +2120,17 @@ export function LocalModelsGroup({ builtin }) {
                                 </button>
                               )}
                               {view.canDownload && (
-                                <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => act("下载模型", () => voiceApi.localDownload(model.id))} id={`voice-local-download-${model.id}`}>
+                                <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "下载模型", () => voiceApi.localDownload(model.id))} id={`voice-local-download-${model.id}`}>
                                   <Download size={13} /> 下载
                                 </button>
                               )}
                               {view.canCancel && (
-                                <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => act("取消下载", () => voiceApi.localCancel(model.id))}>
+                                <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "取消下载", () => voiceApi.localCancel(model.id))} id={`voice-local-cancel-${model.id}`}>
                                   <X size={13} /> 取消
                                 </button>
                               )}
                               {view.canDelete && (
-                                <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => remove(model)}>
+                                <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => remove(model)} id={`voice-local-delete-${model.id}`}>
                                   <Trash2 size={13} /> 删除
                                 </button>
                               )}
@@ -2138,12 +2162,36 @@ export function LocalModelsGroup({ builtin }) {
                 OneJev 1.6 本机硬件加速：{local.onejev_env.summary}
               </div>
             )}
-            {layaEnvHint && (
-              <div
-                className={`voice-hint ${layaEnvHint.ready ? "voice-hint--ok" : "voice-hint--warn"}`}
-                id="voice-local-laya-env-hint"
-              >
-                {layaEnvHint.ready ? `✓ ${layaEnvHint.summary}` : `⚠ ${layaEnvHint.summary}`}
+            {layaSetup && (
+              <div className={`voice-hint ${LAYA_HINT_CLASS[layaSetup.tone] || ""}`} id="voice-local-laya-setup">
+                <div>{layaSetup.text}</div>
+                {layaSetup.detail && <div className="ob-sub mono voice-laya-setup-detail">{layaSetup.detail}</div>}
+                {(layaSetup.canStart || layaSetup.canCancel) && (
+                  <span className="voice-actions">
+                    {layaSetup.canStart && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={layaSetupLocked}
+                        onClick={() => modelAct("laya-setup", "准备 Laya 运行环境", () => voiceApi.localLayaSetup("start"))}
+                        id="voice-local-laya-setup-start"
+                      >
+                        {layaSetup.startLabel}
+                      </button>
+                    )}
+                    {layaSetup.canCancel && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={layaSetupLocked}
+                        onClick={() => modelAct("laya-setup", "取消准备", () => voiceApi.localLayaSetup("cancel"))}
+                        id="voice-local-laya-setup-cancel"
+                      >
+                        <X size={13} /> 取消准备
+                      </button>
+                    )}
+                  </span>
+                )}
               </div>
             )}
             <div className="ob-tbl voice-tbl">
@@ -2186,33 +2234,38 @@ export function LocalModelsGroup({ builtin }) {
                         }
                       };
                       const handleDownloadJev = async () => {
-                        builtin.setBusy("下载模型");
+                        setPending((prev) => ({ ...prev, [model.id]: "下载模型" }));
                         try {
+                          // Laya：运行环境没准备好时后端会同时在后台自动准备（2026-11-07）
                           const next = await voiceApi.localDownload(model.id);
                           if (next) builtin.setStatus(next);
-                          if (next?.local?.laya_env) {
-                            setLayaEnvHint(next.local.laya_env);
-                          }
                         } catch (err) {
                           if (err?.code === "laya_env_missing") {
-                            builtin.setBusy("");
-                            setLayaEnvHint({ ready: false, summary: err.message });
+                            setPending((prev) => {
+                              const rest = { ...prev };
+                              delete rest[model.id];
+                              return rest;
+                            });
                             const go = await showConfirm(
-                              `${err.message}\n\n是否仍要先仅下载模型权重文件？`,
+                              `${err.message}\n\n是否仍要先只下载模型权重文件？装好 Python 后再点“准备运行环境”。`,
                               {
-                                title: "未检测到本地 Laya 运行环境",
+                                title: "无法自动准备 Laya 运行环境",
                                 tone: "warning",
                                 confirmText: "仍然下载",
                                 cancelText: "取消",
                               }
                             );
                             if (!go) return;
-                            await act("下载模型", () => voiceApi.localDownload(`${model.id}:force`));
+                            await modelAct(model.id, "下载模型", () => voiceApi.localDownload(`${model.id}:force`));
                             return;
                           }
                           await showAlert(voiceErrorText(err), { title: "下载模型失败", tone: "error" });
                         } finally {
-                          builtin.setBusy("");
+                          setPending((prev) => {
+                            const rest = { ...prev };
+                            delete rest[model.id];
+                            return rest;
+                          });
                         }
                       };
                       return (
@@ -2256,7 +2309,7 @@ export function LocalModelsGroup({ builtin }) {
                                 <button
                                   type="button"
                                   className="btn btn-ghost"
-                                  disabled={Boolean(busy)}
+                                  disabled={modelLocked(model.id)}
                                   onClick={handleDownloadJev}
                                   id={`voice-local-download-${model.id}`}
                                 >
@@ -2267,14 +2320,15 @@ export function LocalModelsGroup({ builtin }) {
                                 <button
                                   type="button"
                                   className="btn btn-ghost"
-                                  disabled={Boolean(busy)}
-                                  onClick={() => act("取消下载", () => voiceApi.localCancel(model.id))}
+                                  disabled={modelLocked(model.id)}
+                                  onClick={() => modelAct(model.id, "取消下载", () => voiceApi.localCancel(model.id))}
+                                  id={`voice-local-cancel-${model.id}`}
                                 >
                                   <X size={13} /> 取消
                                 </button>
                               )}
                               {view.canDelete && (
-                                <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => remove(model)}>
+                                <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => remove(model)} id={`voice-local-delete-${model.id}`}>
                                   <Trash2 size={13} /> 删除
                                 </button>
                               )}
@@ -2298,9 +2352,9 @@ export function LocalModelsGroup({ builtin }) {
                 {view.detail ? ` · ${view.detail}` : ""}
               </p>
               <span className="voice-actions">
-                {view.canDownload && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => act("下载声纹模型", () => voiceApi.localDownload(model.id))}>下载声纹模型</button>}
-                {view.canCancel && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => act("取消声纹下载", () => voiceApi.localCancel(model.id))}>取消下载</button>}
-                {view.canDelete && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => remove(model)}>删除模型</button>}
+                {view.canDownload && <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "下载声纹模型", () => voiceApi.localDownload(model.id))}>下载声纹模型</button>}
+                {view.canCancel && <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "取消声纹下载", () => voiceApi.localCancel(model.id))}>取消下载</button>}
+                {view.canDelete && <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => remove(model)}>删除模型</button>}
               </span>
             </div>
           );
@@ -2998,9 +3052,9 @@ export function PrivateSettingsEntry({ status }) {
 export function PrivateFirmwareEntry() {
   return (
     <div className="voice-private-maintenance">
-      <span>设备唤醒词与固件升级仅在本机逐台操作。</span>
+      <span>固件升级仅在本机安全窗口逐台操作；唤醒词在“唤醒词与音量”标签。</span>
       <button type="button" className="btn btn-ghost" id="voice-private-settings-open"
-        onClick={() => openPrivateTask("firmware")}>唤醒词与固件…</button>
+        onClick={() => openPrivateTask("firmware")}>固件升级…</button>
     </div>
   );
 }

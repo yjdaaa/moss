@@ -105,6 +105,8 @@ export const voiceApi = {
   localDownload: (id) => invokeVoice("voice_local_model_download", { id }),
   localCancel: (id) => invokeVoice("voice_local_model_cancel", { id }),
   localDelete: (id) => invokeVoice("voice_local_model_delete", { id }),
+  // 2026-11-07：自动准备 Laya 的 Python 运行环境（action: start / cancel），进度在 builtinStatus().local.laya_setup
+  localLayaSetup: (action) => invokeVoice("voice_local_laya_setup", { action }),
   // 自建服务端向导：自动探测本机 Python 3 解释器路径（只查文件，不执行程序）
   // 严格模式开关：写运行目录 .env；开启立即生效，关闭重启后生效
   strictSet: (enabled, confirmed) => invokeVoice("voice_strict_set", { enabled, confirmed }),

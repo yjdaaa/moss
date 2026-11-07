@@ -523,6 +523,13 @@ mod tests {
     use super::*;
 
     fn free_port() -> u16 {
+        static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(38_100);
+        for _ in 0..500 {
+            let candidate = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() && !port_in_use(candidate) {
+                return candidate;
+            }
+        }
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 

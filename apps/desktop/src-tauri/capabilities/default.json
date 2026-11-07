@@ -22,6 +22,8 @@
     "allow-reveal-exported-file",
     "allow-minimize-to-tray",
     "allow-exit-application",
+    "allow-app-update-status",
+    "allow-app-update-install",
     "allow-open-voice-private",
     "allow-voice-status",
     "allow-voice-save-settings",
@@ -47,6 +49,7 @@
     "allow-voice-local-save",
     "allow-voice-local-model-download",
     "allow-voice-local-model-cancel",
-    "allow-voice-local-model-delete"
+    "allow-voice-local-model-delete",
+    "allow-voice-local-laya-setup"
   ]
 }

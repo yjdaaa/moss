@@ -522,16 +522,78 @@ pub fn detect_onejev_env(models_root: &Path, probe_binary: bool) -> Value {
     })
 }
 
+/// 推理引擎准备进度（下载 OneJev 时显示在模型行里）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeProgress {
+    /// 另一个 OneJev 下载正在安装同一个推理引擎，排队等待
+    Waiting,
+    /// 正在下载推理引擎压缩包
+    Downloading { done: u64, total: u64 },
+}
+
+/// 等待推理引擎安装锁；等待期间可取消（2026-11-07：多档 OneJev 同时下载时后点的不再卡死在 0%）。
+fn lock_runtime_install(
+    cancel: &AtomicBool,
+    progress: &dyn Fn(RuntimeProgress),
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    let lock = RUNTIME_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+    let mut reported = false;
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err("已取消".into());
+                }
+                if !reported {
+                    progress(RuntimeProgress::Waiting);
+                    reported = true;
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+}
+
+/// 删除 MOSS 自动下载的推理引擎（`<models>/.runtime/llama-*`）；用户自己放的 `<models>/llama` 不动。
+/// 返回是否删掉了东西。最后一档 OneJev 删除时调用（2026-11-07）。
+pub fn remove_managed_runtime(models_root: &Path) -> Result<bool, String> {
+    let runtime = models_root.join(".runtime");
+    let Ok(entries) = fs::read_dir(&runtime) else {
+        return Ok(false);
+    };
+    let _guard = RUNTIME_INSTALL_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut removed = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("llama-")
+            || !entry.file_type().is_ok_and(|ft| ft.is_dir())
+        {
+            continue;
+        }
+        fs::remove_dir_all(entry.path())
+            .map_err(|error| format!("删除 OneJev 推理引擎失败（可能仍在运行）：{error}"))?;
+        removed = true;
+    }
+    // 目录空了才删
+    let _ = fs::remove_dir(&runtime);
+    Ok(removed)
+}
+
 pub fn ensure_llama_runtime(
     models_root: &Path,
     mirror_hint: Option<&str>,
     cancel: &AtomicBool,
+    progress: &dyn Fn(RuntimeProgress),
 ) -> Result<PathBuf, String> {
     if let Some(existing) = resolve_llama_server(models_root) {
         return Ok(existing);
     }
-    let lock = RUNTIME_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_runtime_install(cancel, progress)?;
     if let Some(existing) = resolve_llama_server(models_root) {
         return Ok(existing);
     }
@@ -561,7 +623,11 @@ pub fn ensure_llama_runtime(
             break;
         }
         let url = format!("{base}/{}", asset.file_name);
-        match fetch_verified_file(&url, asset.sha256, asset.size, &part, cancel, &|_| {}) {
+        let total = asset.size;
+        progress(RuntimeProgress::Downloading { done: 0, total });
+        match fetch_verified_file(&url, asset.sha256, asset.size, &part, cancel, &|done| {
+            progress(RuntimeProgress::Downloading { done, total })
+        }) {
             Ok(()) => {
                 last_err = None;
                 break;
@@ -1666,7 +1732,7 @@ impl OneJevGateway {
             );
         }
 
-        let llama_bin = ensure_llama_runtime(models_root, mirror_hint, cancel)?;
+        let llama_bin = ensure_llama_runtime(models_root, mirror_hint, cancel, &|_| {})?;
         if cancel.load(Ordering::SeqCst) {
             return Err("本地 OneJev 启动已取消".into());
         }
@@ -2368,6 +2434,31 @@ mod tests {
         buf.extend_from_slice(&cd_offset.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
         buf
+    }
+
+    /// 2026-11-07：多档 OneJev 同时下载时，后来的排队等推理引擎并报告“等待”，等待中可取消。
+    #[test]
+    fn runtime_install_wait_reports_waiting_and_is_cancellable() {
+        let held = RUNTIME_INSTALL_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let waiter = {
+            let cancel = cancel.clone();
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                lock_runtime_install(&cancel, &|progress| seen.lock().unwrap().push(progress)).map(drop)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "未报告等待");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(seen.lock().unwrap().as_slice(), &[RuntimeProgress::Waiting]);
+        cancel.store(true, Ordering::SeqCst);
+        assert_eq!(waiter.join().unwrap(), Err("已取消".to_owned()));
+        drop(held);
+        assert!(lock_runtime_install(&AtomicBool::new(false), &|_| {}).is_ok(), "释放后立即可拿到");
     }
 
     #[test]

@@ -25,7 +25,8 @@ import { TwinPage } from "./pages/TwinPage.jsx";
 import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
 import { VoicePage } from "./pages/VoicePage.jsx";
 import { isVoiceCenterAvailable, voiceApi } from "./voiceApi.js";
-import { readHideTopPills, writeHideTopPills } from "./foldState.js";
+import { readHideTopPills, writeFoldOpen, writeHideTopPills } from "./foldState.js";
+import { appUpdateAvailable } from "./appUpdate.js";
 import "./styles.css";
 
 function pathToRoute(pathname, voiceEnabled) {
@@ -52,6 +53,9 @@ function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
+  const [startupUpdate, setStartupUpdate] = useState(null);
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState("");
+  const [focusUpdateSection, setFocusUpdateSection] = useState(false);
   const [hideTopPills, setHideTopPills] = useState(() => readHideTopPills());
   const handleHideTopPillsChange = useCallback((next) => {
     const hidden = Boolean(next);
@@ -195,11 +199,7 @@ function App() {
               include_prerelease: Boolean(result.check_prerelease),
             }).then((up) => {
               if (!cancelled && up.ok && up.data?.success && up.data?.result?.has_update) {
-                const rep = up.data.result;
-                void showAlert(
-                  `检测到 MOSS 新版本 v${rep.latest_version}（当前 v${rep.current_version}）。可在「偏好设置 → 软件更新」中查看更新说明与下载地址。`,
-                  { title: "发现新版本", tone: "info" },
-                );
+                setStartupUpdate(up.data.result);
               }
             }).catch(() => {});
           }
@@ -299,6 +299,38 @@ function App() {
           hideStatusPills={hideTopPills}
         />
 
+        {startupUpdate?.has_update && !isRemoteMode() && dismissedUpdateVersion !== startupUpdate.latest_version && (
+          <div className="app-update-banner" id="app-update-banner" role="status">
+            <span className="app-update-banner-text">
+              发现新版本 <strong className="mono">MOSS v{startupUpdate.latest_version}</strong>
+              {startupUpdate.current_version ? `（当前 v${startupUpdate.current_version}）` : ""}
+              {startupUpdate.prerelease ? " · 预览版" : ""}
+            </span>
+            <div className="app-update-banner-actions">
+              <button
+                type="button"
+                className="btn btn-hud-primary app-update-banner-btn"
+                id="app-update-banner-open"
+                onClick={() => {
+                  writeFoldOpen("settings-update", true);
+                  setFocusUpdateSection(true);
+                  setShowSettingsModal(true);
+                }}
+              >
+                {appUpdateAvailable() ? "立即更新" : "查看更新"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost app-update-banner-btn"
+                id="app-update-banner-dismiss"
+                onClick={() => setDismissedUpdateVersion(startupUpdate.latest_version)}
+              >
+                稍后
+              </button>
+            </div>
+          </div>
+        )}
+
         <main className="main-content-viewport" key={currentPath}>
           {currentPath === "/material-lab" && (
             <MaterialLabPage onNavigate={navigateTo} />
@@ -336,9 +368,15 @@ function App() {
 
       <SettingsModal
         visible={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
+        onClose={() => {
+          setShowSettingsModal(false);
+          setFocusUpdateSection(false);
+        }}
         hideTopPills={hideTopPills}
         onHideTopPillsChange={handleHideTopPillsChange}
+        initialUpdateReport={startupUpdate}
+        focusUpdateSection={focusUpdateSection}
+        onUpdateReport={setStartupUpdate}
         onOpenVoice={
           voiceEnabled
             ? () => {

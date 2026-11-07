@@ -216,6 +216,22 @@ try {
       if (settings.clear_debug_traces) state.builtin.debug_traces = [];
       return { ...structuredClone(state.builtin), restarted: false };
     },
+    // 2026-11-07：下载请求故意慢一点，验证等待期间其他模型的按钮不被锁住
+    voice_local_model_download: async ({ id }) => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const model = state.builtin.local.models.find((item) => item.id === id.replace(/:force$/, ""));
+      if (model.id === "laya_multilingual") {
+        model.progress = { state: "downloading", done: 0, total: model.size };
+        state.builtin.local.laya_setup = { state: "running", stage: "安装 PyTorch（CUDA 12.4 · cu124，约 2.5 GB）", step: 4, steps: 6, detail: "Downloading torch-2.5.1+cu124", elapsed_secs: 65 };
+      } else {
+        model.progress = { state: "waiting_runtime" };
+      }
+      return structuredClone(state.builtin);
+    },
+    voice_local_laya_setup: ({ action }) => {
+      if (action === "cancel") state.builtin.local.laya_setup = { state: "cancelled" };
+      return structuredClone(state.builtin);
+    },
     voice_device_request: ({ deviceId, request, value }) => {
       if (request === "set_volume" && value && typeof value.volume === "number") {
         state.builtin.device_prefs[deviceId] = { ...(state.builtin.device_prefs[deviceId] || {}), volume: value.volume };
@@ -262,7 +278,11 @@ try {
 
   await page.goto(new URL("voice", local).href, { waitUntil: "domcontentloaded" });
   await page.locator("#voice-mode-card").waitFor();
-  assert.equal(await page.getByRole("tab").count(), 4, "官方链路没有“模型”和“隐私与家居”标签");
+  assert.equal(await page.getByRole("tab").count(), 5, "官方链路没有“模型”和“隐私与家居”标签（有“唤醒词与音量”）");
+  await tab("唤醒词与音量").click();
+  await page.locator("#voice-wake-volume-mode-hint").waitFor();
+  assert.equal(await page.locator("#voice-wake-volume-panel").count(), 0, "非内置链路只提示切换，不渲染音量与唤醒词入口");
+  await tab("服务").click();
   assert.equal(await page.getByRole("tab", { name: /^模型/ }).count(), 0, "官方链路的模型在小智控制台配置");
   assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "非内置链路不显示隐私与家居标签");
   assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "official", "全息孪生舱默认跟随官方链路");
@@ -435,6 +455,29 @@ try {
   await page.locator("#voice-builtin-mix-select-jev").selectOption("off");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "已关闭 Jev 语音筛选" }).waitFor();
   assert.equal(last("voice_local_save").args.settings.jev_filter_enabled, false);
+  // 5d-3. 2026-11-07：多个模型可同时下载（点一个不锁其他行）；OneJev 排队显示“等待推理引擎”；Laya 运行环境自动准备、可取消
+  const layaModel = state.builtin.local.models.find((item) => item.id === "laya_multilingual");
+  const savedLayaEnv = structuredClone(state.builtin.local.laya_env);
+  layaModel.installed = false;
+  state.builtin.local.laya_env = { ready: false, python_found: false, laya_serve_found: false, accelerator: "cpu", managed: false, summary: "尚未准备 Laya 运行环境：点“下载”或“准备运行环境”后自动创建虚拟环境" };
+  state.builtin.local.laya_setup = { state: "idle" };
+  await page.locator("#voice-local-download-onejev_1_6_9b").click();
+  assert.equal(await page.locator("#voice-local-download-onejev_1_6_9b").isDisabled(), true, "正在请求的模型按钮加锁");
+  assert.equal(await page.locator("#voice-local-delete-onejev_1_6_4b").isDisabled(), false, "其他模型不受影响");
+  await page.locator("#voice-local-group-jev").filter({ hasText: "等待推理引擎" }).waitFor();
+  await page.locator("#voice-local-laya-setup").filter({ hasText: "尚未准备 Laya 运行环境" }).waitFor();
+  await page.locator("#voice-local-download-laya_multilingual").click();
+  await page.locator("#voice-local-laya-setup").filter({ hasText: "第 4/6 步" }).filter({ hasText: "已用时 1:05" }).waitFor();
+  assert.match(await page.locator("#voice-local-laya-setup").innerText(), /Downloading torch/);
+  await page.locator("#voice-local-laya-setup-cancel").click();
+  await page.locator("#voice-local-laya-setup").filter({ hasText: "已取消准备" }).waitFor();
+  await page.locator("#voice-local-laya-setup-start").filter({ hasText: "准备运行环境" }).waitFor();
+  assert.equal(last("voice_local_laya_setup").args.action, "cancel");
+  layaModel.installed = true;
+  delete layaModel.progress;
+  delete state.builtin.local.models.find((item) => item.id === "onejev_1_6_9b").progress;
+  state.builtin.local.laya_env = savedLayaEnv;
+  state.builtin.local.laya_setup = { state: "idle" };
   // 6. 本地模型与语音体验分开保存：保存体验时不带上本地模型未保存的改动
   await openGroup("local-models");
   await openGroup("experience");
@@ -608,6 +651,22 @@ try {
   await page.locator("#voice-card-style-moss_hud").click();
   await botCard.getByText("太空舱雕刻表盘").waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave", style: "moss_hud" } });
+  // 8d. 2026-11-07：“唤醒词与音量”标签——音量松手即下发 set_volume，唤醒词只打开安全窗口的 wakeword 任务
+  await tab("唤醒词与音量").click();
+  const wakePanel = page.locator("#voice-wake-volume-panel");
+  await wakePanel.waitFor();
+  const volumeSlider = wakePanel.locator("#voice-volume-aa\\:bb\\:cc\\:11\\:22\\:33");
+  assert.equal(await volumeSlider.inputValue(), "65", "显示设备实时上报的音量");
+  await volumeSlider.focus();
+  await page.keyboard.press("ArrowRight");
+  await wakePanel.getByText("已设为 70%").waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 70 } });
+  await wakePanel.getByRole("button", { name: "静音 立创实战派小智" }).click();
+  await wakePanel.getByText("已静音").waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 0 } });
+  await page.locator("#voice-wakeword-open").click();
+  assert.deepEqual(last("open_voice_private").args, { section: "wakeword" }, "唤醒词入口打开安全窗口的 wakeword 任务");
+  await shot("voice-wake-volume");
   // 9. 窄屏无横向滚动
   await page.setViewportSize({ width: 820, height: 1000 });
   await tab("设备").click();

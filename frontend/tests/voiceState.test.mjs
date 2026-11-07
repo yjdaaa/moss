@@ -64,6 +64,8 @@ import {
   formatBytes,
   localModelGroups,
   localModelView,
+  layaSetupView,
+  localModelDeleteText,
   selectLocalModel,
   selectedVoices,
   voiceTimingReport,
@@ -241,6 +243,39 @@ test("NV5: 内置服务的模式、表单预填与密钥占位（不回显密钥
   assert.match(builtinKeyPlaceholder({ key_set: false }), /未设置/);
   assert.equal(modeConfirmText("builtin", ["a"]).title, "切换到 MOSS 内置服务？");
   assert.equal(deviceView("builtin", { state: "waiting" }).text, "见内置服务");
+});
+
+test("2026-11-07: OneJev 推理引擎准备进度、Laya 运行环境自动准备与删除提示", () => {
+  const preparing = localModelView({ installed: false, progress: { state: "preparing_runtime", done: 5, total: 20 } });
+  assert.deepEqual([preparing.text, preparing.percent, preparing.canCancel, preparing.canDelete], ["准备推理引擎 25%", 25, true, false]);
+  const waiting = localModelView({ installed: false, progress: { state: "waiting_runtime" } });
+  assert.deepEqual([waiting.text, waiting.canCancel, waiting.canDownload], ["等待推理引擎", true, false]);
+
+  const missing = layaSetupView({ state: "idle" }, { ready: false, summary: "尚未准备 Laya 运行环境" });
+  assert.deepEqual([missing.tone, missing.canStart, missing.startLabel], ["warn", true, "准备运行环境"]);
+  const running = layaSetupView({ state: "running", stage: "安装 PyTorch（CUDA 12.4）", step: 4, steps: 6, detail: "Downloading torch", elapsed_secs: 75 }, { ready: false });
+  assert.equal(running.text, "正在准备 Laya 运行环境：第 4/6 步 · 安装 PyTorch（CUDA 12.4）（已用时 1:15）");
+  assert.deepEqual([running.canCancel, running.canStart, running.detail], [true, false, "Downloading torch"]);
+  const failed = layaSetupView({ state: "failed", message: "未检测到可用的 Python", log: ["a", "b", "c", "d"] }, { ready: false });
+  assert.deepEqual([failed.tone, failed.canStart, failed.detail, failed.startLabel], ["bad", true, "b\nc\nd", "重试准备环境"]);
+  assert.equal(layaSetupView({ state: "done", summary: "已准备好" }, { ready: true, accelerator: "cuda" }).canStart, false);
+  assert.equal(layaSetupView({ state: "done", summary: "已准备好" }, { ready: true, accelerator: "cpu" }).startLabel, "重新准备环境");
+  assert.equal(layaSetupView({ state: "idle" }, { ready: true, accelerator: "mps", managed: true }), null);
+  assert.equal(layaSetupView({ state: "idle" }, { ready: true, accelerator: "cpu", managed: false }), null, "用户自建环境不提示重装");
+
+  const models = [
+    { id: "onejev_1_6_0_8b", kind: "jev", label: "0.8B", installed: true },
+    { id: "onejev_1_6_4b", kind: "jev", label: "4B", installed: false, progress: { state: "failed" } },
+    { id: "laya_multilingual", kind: "jev", label: "Laya", installed: true },
+  ];
+  assert.match(localModelDeleteText(models[0], models, {}), /最后一档 OneJev/);
+  assert.doesNotMatch(
+    localModelDeleteText(models[0], [...models, { id: "onejev_1_6_9b", kind: "jev", progress: { state: "waiting_runtime" } }], {}),
+    /最后一档/,
+  );
+  assert.match(localModelDeleteText(models[2], models, { laya_env: { managed: true } }), /Python 运行环境/);
+  assert.doesNotMatch(localModelDeleteText(models[2], models, { laya_env: { managed: false } }), /Python 运行环境/);
+  assert.equal(localModelDeleteText({ id: "kokoro", kind: "tts", label: "Kokoro" }, models, {}), "删除本地模型“Kokoro”？需要时可以重新下载。");
 });
 
 test("NV6: 本地模型状态、设置表单与校验", () => {
@@ -1367,4 +1402,33 @@ test("n61 wake word drafts are checked before saving", async () => {
   assert.match(wakeWordDraftError({ text: "MOSS", command: "moss", threshold: 0.2 }), /2～6/);
   assert.match(wakeWordDraftError({ text: "MOSS", command: "mó sī", threshold: 0.2 }), /声调/);
   assert.match(wakeWordDraftError({ text: "MOSS", command: "mo si", threshold: 1 }), /阈值/);
+});
+
+test("唤醒词与音量：只列已允许设备，在线且支持音量工具才可调，在线排前", async () => {
+  const { volumeDevicesView, volumeLevelText } = await import("../src/voiceState.js");
+  const status = {
+    devices: [
+      { device_id: "off", name: "客厅", status: "allowed" },
+      { device_id: "on", name: "书房", status: "allowed", status_json: JSON.stringify({ audio_speaker: { volume: 45 } }) },
+      { device_id: "old", name: "旧固件", status: "allowed" },
+      { device_id: "wait", name: "待审", status: "pending" },
+    ],
+    sessions: [
+      { device_id: "on", device_tools: ["self.audio_speaker.set_volume"] },
+      { device_id: "old", device_tools: ["self.get_device_status"] },
+    ],
+    device_prefs: { off: { volume: 0 } },
+  };
+  const rows = volumeDevicesView(status);
+  assert.deepEqual(rows.map((row) => row.device_id), ["on", "old", "off"], "待审设备不列出，在线排前");
+  assert.deepEqual(rows[0], { device_id: "on", name: "书房", online: true, adjustable: true, volume: 45, hint: "" });
+  assert.equal(rows[1].adjustable, false);
+  assert.match(rows[1].hint, /不支持/);
+  assert.equal(rows[2].volume, 0, "离线设备显示记忆的音量偏好");
+  assert.match(rows[2].hint, /离线/);
+  assert.deepEqual(volumeDevicesView(null), []);
+  assert.equal(volumeLevelText(0), "静音");
+  assert.equal(volumeLevelText(30), "较小");
+  assert.equal(volumeLevelText(60), "适中");
+  assert.equal(volumeLevelText(100), "较大");
 });

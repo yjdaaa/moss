@@ -16,6 +16,9 @@ fn main() {
         "reveal_exported_file",
         "minimize_to_tray",
         "exit_application",
+        // 应用内更新（2026-11-07）：命令内只认受信任主窗口
+        "app_update_status",
+        "app_update_install",
         // 语音中心（技术书 §9.4.6，仅桌面端可用；移动端命令直接返回错误）
         "voice_status",
         "voice_save_settings",
@@ -83,6 +86,7 @@ fn main() {
         "voice_local_model_download",
         "voice_local_model_cancel",
         "voice_local_model_delete",
+        "voice_local_laya_setup",
         "voice_mcp_status",
         "voice_mcp_save",
         "voice_mcp_delete",

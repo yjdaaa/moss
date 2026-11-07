@@ -967,6 +967,12 @@ export function localModelView(model) {
     const percent = progress.total > 0 ? Math.min(100, Math.floor((progress.done / progress.total) * 100)) : 0;
     return { text: `下载中 ${percent}%`, tone: "info", percent, canDownload: false, canCancel: true, canDelete: false };
   }
+  // 2026-11-07：OneJev 先准备三档共用的推理引擎；多档同时下载时后来的排队等待
+  if (progress?.state === "preparing_runtime") {
+    const percent = progress.total > 0 ? Math.min(100, Math.floor((progress.done / progress.total) * 100)) : 0;
+    return { text: `准备推理引擎 ${percent}%`, tone: "info", percent, canDownload: false, canCancel: true, canDelete: false };
+  }
+  if (progress?.state === "waiting_runtime") return { text: "等待推理引擎", tone: "info", percent: 0, canDownload: false, canCancel: true, canDelete: false };
   if (progress?.state === "verifying") return { text: "校验中", tone: "info", percent: 100, canDownload: false, canCancel: true, canDelete: false };
   if (progress?.state === "installing") return { text: "安装中", tone: "info", percent: 100, canDownload: false, canCancel: true, canDelete: false };
   if (model?.installed) return { text: "已安装", tone: "ok", percent: null, canDownload: false, canCancel: false, canDelete: true };
@@ -975,6 +981,59 @@ export function localModelView(model) {
   }
   if (progress?.state === "cancelled") return { text: "已取消", tone: "off", percent: null, canDownload: true, canCancel: false, canDelete: false };
   return { text: "未下载", tone: "off", percent: null, canDownload: true, canCancel: false, canDelete: false };
+}
+
+function formatElapsed(secs) {
+  const total = Math.max(0, Math.floor(Number(secs) || 0));
+  const m = Math.floor(total / 60);
+  const sec = String(total % 60).padStart(2, "0");
+  return `${m}:${sec}`;
+}
+
+/**
+ * Laya 运行环境自动准备的显示（2026-11-07）：`setup` 为 `local.laya_setup`，`env` 为 `local.laya_env`。
+ * 返回 null 表示无需显示；`canStart` 时显示“准备运行环境 / 重新准备环境”按钮。
+ */
+export function layaSetupView(setup, env) {
+  const state = setup?.state || "idle";
+  const ready = Boolean(env?.ready);
+  const retryLabel = ready ? "重新准备环境" : "准备运行环境";
+  if (state === "running") {
+    const step = setup.steps ? `第 ${setup.step || 0}/${setup.steps} 步 · ` : "";
+    return {
+      tone: "info",
+      text: `正在准备 Laya 运行环境：${step}${setup.stage || ""}（已用时 ${formatElapsed(setup.elapsed_secs)}）`,
+      detail: setup.detail || "",
+      canStart: false,
+      canCancel: true,
+      startLabel: retryLabel,
+    };
+  }
+  if (state === "failed") {
+    return { tone: "bad", text: `Laya 运行环境准备失败：${setup.message || "未知原因"}`, detail: (setup.log || []).slice(-3).join("\n"), canStart: true, canCancel: false, startLabel: "重试准备环境" };
+  }
+  if (state === "cancelled") return { tone: "off", text: "已取消准备 Laya 运行环境", detail: "", canStart: true, canCancel: false, startLabel: retryLabel };
+  if (state === "done") return { tone: "ok", text: setup.summary || "Laya 运行环境已准备好", detail: "", canStart: ready && env?.accelerator === "cpu", canCancel: false, startLabel: retryLabel };
+  if (!ready) return { tone: "warn", text: env?.summary || "尚未准备 Laya 运行环境", detail: "", canStart: true, canCancel: false, startLabel: retryLabel };
+  // 已就绪但只能用 CPU（如装好显卡驱动之前准备的）：允许重新准备以换成 CUDA
+  return env?.accelerator === "cpu" && env?.managed ? { tone: "ok", text: env.summary, detail: "", canStart: true, canCancel: false, startLabel: retryLabel } : null;
+}
+
+const LOCAL_BUSY_STATES = new Set(["downloading", "preparing_runtime", "waiting_runtime", "verifying", "installing"]);
+
+/** 删除本地模型前的确认文字：说明会一并删除的附带文件（2026-11-07）。 */
+export function localModelDeleteText(model, models, local) {
+  const label = model?.label || model?.id || "";
+  let extra = "";
+  if (model?.id === "laya_multilingual" && local?.laya_env?.managed) {
+    extra = "会同时删除 MOSS 自动创建的 Laya Python 运行环境（含 PyTorch，可能有几 GB），下次使用时重新准备。";
+  } else if (model?.kind === "jev" && model?.id !== "laya_multilingual") {
+    const otherOneJev = (Array.isArray(models) ? models : []).some(
+      (item) => item.kind === "jev" && item.id !== "laya_multilingual" && item.id !== model.id && (item.installed || LOCAL_BUSY_STATES.has(item.progress?.state)),
+    );
+    if (!otherOneJev) extra = "这是最后一档 OneJev，会同时删除 MOSS 下载的推理引擎 llama-server。";
+  }
+  return `删除本地模型“${label}”？${extra}需要时可以重新下载。`;
 }
 
 /** 本地模型的三个类别与默认模型（开关与选用统一由顶部四栏下拉框控制）。 */
@@ -1295,6 +1354,7 @@ export const VOICE_TABS = [
   { key: "service", label: "服务" },
   { key: "models", label: "模型" },
   { key: "devices", label: "设备与工具" },
+  { key: "wake", label: "唤醒词与音量" },
   { key: "features", label: "扩展" },
   { key: "privacy", label: "隐私与家居" },
   { key: "records", label: "记录与诊断" },
@@ -2579,4 +2639,37 @@ export function wakeWordDraftError(draft) {
   const threshold = Number(draft?.threshold);
   if (!Number.isFinite(threshold) || threshold < 0.05 || threshold > 0.95) return "灵敏度阈值须在 0.05～0.95 之间";
   return "";
+}
+
+/**
+ * “唤醒词与音量”标签（2026-11-07 用户决定：唤醒词单独放一处，并加 MOSS 说话音量调节）。
+ * MOSS 的声音从小智设备的扬声器播出，音量即设备扬声器音量；只列已允许的设备，在线且支持音量工具才可调。
+ */
+export function volumeDevicesView(status) {
+  const devices = Array.isArray(status?.devices) ? status.devices : [];
+  const sessions = Array.isArray(status?.sessions) ? status.sessions : [];
+  return devices
+    .filter((device) => device?.status === "allowed")
+    .map((device) => {
+      const session = sessions.find((item) => item.device_id === device.device_id) || null;
+      const controls = builtinDeviceControlsView(device, session, status?.device_prefs);
+      return {
+        device_id: device.device_id,
+        name: builtinDeviceView(device).title,
+        online: controls.online,
+        adjustable: controls.online && controls.canVolume,
+        volume: controls.volume,
+        hint: !controls.online ? "离线，上线后可调" : controls.canVolume ? "" : "固件不支持远程调音量",
+      };
+    })
+    .sort((a, b) => Number(b.online) - Number(a.online));
+}
+
+/** 音量档位文字：0 为静音。 */
+export function volumeLevelText(volume) {
+  const value = Math.max(0, Math.min(100, Math.round(Number(volume) || 0)));
+  if (value === 0) return "静音";
+  if (value <= 30) return "较小";
+  if (value <= 70) return "适中";
+  return "较大";
 }

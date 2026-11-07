@@ -16,6 +16,14 @@ tauri = { version = "2", features = [] }
 laser-host = { path = "../../../crates/laser-host" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
+minisign-verify = "0.3"
+reqwest = { version = "0.13", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -33,9 +41,14 @@ laser-runtime = { path = "../../../crates/laser-runtime" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 getrandom = "0.3"
 tokio = { version = "1", features = ["sync"] }
+tauri-plugin-updater = "2"
 
 [dev-dependencies]
 # 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
 laser-runtime = { path = "../../../crates/laser-runtime", features = ["test-memory-secret-store"] }
 # NV19-08 host tests use temporary settings files and folders only.
 tempfile = "3"
+tauri = { version = "2", features = ["test"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+flate2 = "1"
+tar = "0.4"

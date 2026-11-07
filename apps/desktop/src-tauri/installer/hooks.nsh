@@ -11,6 +11,21 @@
 !macro MOSS_ABORT_IF_RUNNING EXE_NAME
   nsis_tauri_utils::FindProcess "${EXE_NAME}"
   Pop $R0
+  ; 应用内更新（/UPDATE，2026-11-07）：MOSS 已按急停 → 停语音服务的顺序收尾后才启动安装器，
+  ; 进程可能还在退出途中；最多等 15 秒让它自己退出，仍在运行才按下方提示取消，绝不强杀。
+  ${If} $R0 = 0
+  ${AndIf} $UpdateMode = 1
+    StrCpy $R1 0
+    ${DoWhile} $R0 = 0
+      ${If} $R1 >= 30
+        ${ExitDo}
+      ${EndIf}
+      Sleep 500
+      IntOp $R1 $R1 + 1
+      nsis_tauri_utils::FindProcess "${EXE_NAME}"
+      Pop $R0
+    ${Loop}
+  ${EndIf}
   ${If} $R0 = 0
     IfSilent +2
     MessageBox MB_ICONEXCLAMATION|MB_OK "检测到 MOSS 正在运行（${EXE_NAME}）。$\r$\n$\r$\n为保证激光任务按安全顺序停止，安装程序不会强行结束它。$\r$\n请先在托盘图标上右键选择“退出程序”，然后重新运行本程序。"

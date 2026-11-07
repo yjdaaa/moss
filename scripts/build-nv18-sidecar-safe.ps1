@@ -81,6 +81,8 @@ $configuration=@{
   build=@{beforeBuildCommand=''}
   bundle=@{externalBin=@($binRel);resources=@{"$relResource/"='licenses/voice-local/'}}
 }
+# In-app updater (2026-11-07): emit installer .sig only when the release signing key secret is present
+if($env:TAURI_SIGNING_PRIVATE_KEY){$configuration['bundle']['createUpdaterArtifacts']=$true}
 if($VersionOverride -ne ''){
   $configuration['version']=$VersionOverride
   $env:MOSS_RELEASE_VERSION=$VersionOverride

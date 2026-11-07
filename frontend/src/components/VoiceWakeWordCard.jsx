@@ -66,68 +66,106 @@ export default function VoiceWakeWordCard() {
   };
   const devices = Array.isArray(data?.devices) ? data.devices : [];
   const base = data?.base;
+  const presetActive = (preset) => draft && draft.command.trim().toLowerCase().split(/\s+/).join(" ") === preset.command;
   return (
-    <section className="voice-card voice-speaker-card" id="voice-wakeword-card">
-      <h2>设备唤醒词</h2>
-      <p>唤醒词由小智设备自己识别。保存后选一台在线设备确认推送：设备会重启，开机后自己下载新的唤醒模型并写入闪存。要求 ESP32-S3 板子（如实战派）、16 MB 闪存、小智固件 2.0.2 以上。自定义唤醒词的准确度一般不如原装“你好小智”，误唤醒多就把灵敏度阈值调高一点；随时可以恢复“你好小智”。</p>
-      {error && <p role="alert">{error}</p>}
-      {message && <p role="status">{message}</p>}
+    <section className="voice-card wakeword-card" id="voice-wakeword-card">
+      <p className="wakeword-intro">
+        唤醒词由小智设备自己识别。先选好唤醒词并保存，再逐台推送：设备会重启，开机后自己下载新的唤醒模型写入闪存。随时可以恢复“你好小智”。
+      </p>
+      {error && <p className="wakeword-banner wakeword-banner--bad" role="alert">{error}</p>}
+      {message && <p className="wakeword-banner" role="status">{message}</p>}
 
-      <h3>唤醒词</h3>
-      <div role="group" aria-label="唤醒词预设">
-        {WAKE_WORD_PRESETS.map((preset) => (
-          <button key={preset.command} className="btn btn-ghost" type="button" disabled={busy || !draft}
-            onClick={() => setDraft((old) => ({ ...old, text: preset.text, command: preset.command }))}>{preset.text}</button>
-        ))}
-      </div>
-      {draft && (
-        <div style={{ display: "grid", gap: 8, maxWidth: 420 }}>
-          <label>显示文字（设备屏幕上显示）
-            <input className="text-input" id="voice-wakeword-text" maxLength={16} value={draft.text}
-              onChange={(event) => setDraft((old) => ({ ...old, text: event.target.value }))} />
-          </label>
-          <label>拼音（设备按这个发音识别，音节用空格隔开，不带声调）
-            <input className="text-input" id="voice-wakeword-command" value={draft.command} placeholder="ni hao mo si"
-              onChange={(event) => setDraft((old) => ({ ...old, command: event.target.value }))} />
-          </label>
-          <label>灵敏度阈值 {Number(draft.threshold).toFixed(2)}（越小越容易唤醒，也越容易误唤醒；默认 0.20）
-            <input type="range" id="voice-wakeword-threshold" min="0.05" max="0.95" step="0.01" value={draft.threshold}
-              onChange={(event) => setDraft((old) => ({ ...old, threshold: Number(event.target.value) }))} />
-          </label>
-          <p className="voice-muted">MOSS 按中文读作“莫斯”（mo si）。乐鑫建议唤醒词 3～6 个音节，“你好 MOSS”比单独“MOSS”更不容易误唤醒。</p>
-          {draftError && <p role="alert">{draftError}</p>}
+      <div className="wakeword-step">
+        <div className="wakeword-step-head">
+          <span className="wakeword-step-no" aria-hidden="true">1</span>
           <div>
-            <button className="btn" type="button" id="voice-wakeword-save" disabled={busy || !dirty || Boolean(draftError)} onClick={save}>保存唤醒词</button>
-            {dirty && <span className="voice-muted"> 有未保存的修改，保存后才能推送</span>}
+            <h3>选择唤醒词</h3>
+            <p>选一个预设，或自己填写显示文字和拼音。</p>
+          </div>
+          {saved && <span className="wakeword-current">已保存：<b>{saved.text}</b></span>}
+        </div>
+        <div className="wakeword-presets" role="group" aria-label="唤醒词预设">
+          {WAKE_WORD_PRESETS.map((preset) => (
+            <button key={preset.command} className="wakeword-preset" type="button" disabled={busy || !draft}
+              aria-pressed={presetActive(preset) ? "true" : "false"}
+              onClick={() => setDraft((old) => ({ ...old, text: preset.text, command: preset.command }))}>
+              <strong>{preset.text}</strong>
+              <small className="mono">{preset.command}</small>
+            </button>
+          ))}
+        </div>
+        {draft && (
+          <>
+            <div className="wakeword-fields">
+              <label className="wakeword-field">
+                <span>显示文字</span>
+                <input className="text-input" id="voice-wakeword-text" maxLength={16} value={draft.text}
+                  onChange={(event) => setDraft((old) => ({ ...old, text: event.target.value }))} />
+                <small>设备屏幕上显示的文字</small>
+              </label>
+              <label className="wakeword-field">
+                <span>拼音</span>
+                <input className="text-input mono" id="voice-wakeword-command" value={draft.command} placeholder="ni hao mo si"
+                  onChange={(event) => setDraft((old) => ({ ...old, command: event.target.value }))} />
+                <small>设备按这个发音识别；音节用空格隔开，不带声调</small>
+              </label>
+            </div>
+            <label className="wakeword-field wakeword-threshold">
+              <span>灵敏度阈值 <b className="mono">{Number(draft.threshold).toFixed(2)}</b></span>
+              <input type="range" id="voice-wakeword-threshold" min="0.05" max="0.95" step="0.01" value={draft.threshold}
+                onChange={(event) => setDraft((old) => ({ ...old, threshold: Number(event.target.value) }))} />
+              <span className="wakeword-threshold-ends" aria-hidden="true"><small>更容易唤醒</small><small>默认 0.20</small><small>更少误唤醒</small></span>
+            </label>
+            <p className="wakeword-tip">MOSS 按中文读作“莫斯”（mo si）。唤醒词 3～6 个音节最好，“你好 MOSS”比单独“MOSS”更不容易误唤醒；误唤醒多就把阈值调高一点。</p>
+            {draftError && <p className="wakeword-banner wakeword-banner--bad" role="alert">{draftError}</p>}
+            <div className="wakeword-actions">
+              <button className="btn btn-hud-primary" type="button" id="voice-wakeword-save" disabled={busy || !dirty || Boolean(draftError)} onClick={save}>保存唤醒词</button>
+              {dirty ? <span className="voice-muted">有未保存的修改，保存后才能推送</span> : saved && <span className="voice-muted">已保存，可以推送到设备</span>}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="wakeword-step">
+        <div className="wakeword-step-head">
+          <span className="wakeword-step-no" aria-hidden="true">2</span>
+          <div>
+            <h3>推送到设备（逐台确认）</h3>
+            <p>需要 ESP32-S3、16 MB 闪存、小智固件 2.0.2 以上；推送期间不要断电。</p>
           </div>
         </div>
-      )}
+        {!data?.running ? <p className="wakeword-empty">内置语音服务未运行。</p> : devices.length === 0 ? <p className="wakeword-empty">没有在线的已允许设备。</p> : (
+          <ul className="wakeword-devices" aria-label="可推送唤醒词的设备">
+            {devices.map((device) => (
+              <li key={device.device_id} className="wakeword-device">
+                <span className="wakeword-device-name">
+                  <strong>{device.name || device.device_id}</strong>
+                  <small>{device.supported ? "支持在线更新唤醒词" : "固件不支持在线更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"}</small>
+                </span>
+                {device.supported && (
+                  <span className="wakeword-device-actions">
+                    <button className="btn btn-hud-primary" type="button" disabled={busy || dirty || !saved} onClick={() => push(device, "custom")}>推送“{saved?.text}”</button>
+                    <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => push(device, "default")}>恢复“你好小智”</button>
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
-      <h3>基础资源包（可选）</h3>
-      {base ? (
-        <p>已导入：{base.files} 个文件，{(base.size / 1048576).toFixed(1)} MB{base.text_font ? ` · 字体 ${base.text_font}` : ""}{base.emoji_count ? ` · ${base.emoji_count} 个表情` : ""}{base.wake_word ? ` · 原唤醒词 ${base.wake_word}` : ""}。推送时保留这些，只换唤醒词。</p>
-      ) : (
-        <p>未导入。推送的资源包只含唤醒词，设备屏幕的字体和表情会回到固件自带的。想保留自定义字体、表情或背景，可以先用小智官方网页生成器（xiaozhi-assets-generator）导出一个 assets.bin 再导入。</p>
-      )}
-      <button className="btn btn-ghost" type="button" disabled={busy} onClick={importBase}>导入资源包…</button>
-      {base && <button className="btn btn-ghost" type="button" disabled={busy} onClick={clearBase}>移除</button>}
-
-      <h3>推送到设备（逐台确认）</h3>
-      {!data?.running ? <p>内置语音服务未运行。</p> : devices.length === 0 ? <p>没有在线的已允许设备。</p> : (
-        <ul aria-label="可推送唤醒词的设备">
-          {devices.map((device) => (
-            <li key={device.device_id}>
-              {device.name || device.device_id}
-              {device.supported ? (
-                <>
-                  <button className="btn btn-ghost" type="button" disabled={busy || dirty || !saved} onClick={() => push(device, "custom")}>推送“{saved?.text}”</button>
-                  <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => push(device, "default")}>恢复“你好小智”</button>
-                </>
-              ) : <span className="voice-muted"> · 固件不支持网络更新资源包（需要小智固件 2.0.2 以上、v2 分区表）</span>}
-            </li>
-          ))}
-        </ul>
-      )}
+      <details className="wakeword-advanced">
+        <summary>高级：基础资源包（可选）{base ? " · 已导入" : ""}</summary>
+        {base ? (
+          <p>已导入：{base.files} 个文件，{(base.size / 1048576).toFixed(1)} MB{base.text_font ? ` · 字体 ${base.text_font}` : ""}{base.emoji_count ? ` · ${base.emoji_count} 个表情` : ""}{base.wake_word ? ` · 原唤醒词 ${base.wake_word}` : ""}。推送时保留这些，只换唤醒词。</p>
+        ) : (
+          <p>未导入时，推送的资源包只含唤醒词，设备屏幕的字体和表情会回到固件自带的。想保留自定义字体、表情或背景，可以先用小智官方网页生成器（xiaozhi-assets-generator）导出 assets.bin 再导入。</p>
+        )}
+        <div className="wakeword-actions">
+          <button className="btn btn-ghost" type="button" disabled={busy} onClick={importBase}>导入资源包…</button>
+          {base && <button className="btn btn-ghost" type="button" disabled={busy} onClick={clearBase}>移除</button>}
+        </div>
+      </details>
     </section>
   );
 }

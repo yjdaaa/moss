@@ -52,13 +52,15 @@ export default function VoiceFirmwareCard() {
     await run(() => voiceApi.firmwareManage({ action: "delete", sha256: artifact.sha256, confirmed: true }), "已删除固件");
   };
   return (
-    <section className="voice-card voice-speaker-card" id="voice-firmware-card">
+    <section className="voice-card voice-speaker-card firmware-card" id="voice-firmware-card">
       <h2>固件升级（OTA）</h2>
       <p>导入自己编译的 ESP32 应用固件（编译输出里的应用 .bin，不是整片烧录包），选一台已允许的设备确认推送。设备下次开机检查更新时会自动下载并刷写；只有设备之后上报了新版本才算升级完成。一次只推一台，先确认没问题再推下一台。</p>
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
-      <button className="btn btn-ghost" type="button" disabled={busy} onClick={importFirmware}>导入固件…</button>
-      <button className="btn btn-ghost" type="button" disabled={busy} onClick={refresh}>刷新</button>
+      <div className="wakeword-actions">
+        <button className="btn btn-hud-primary" type="button" disabled={busy} onClick={importFirmware}>导入固件…</button>
+        <button className="btn btn-ghost" type="button" disabled={busy} onClick={refresh}>刷新</button>
+      </div>
 
       <h3>已导入的固件</h3>
       {artifacts.length === 0 ? <p>还没有导入固件。</p> : (

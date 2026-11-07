@@ -216,3 +216,33 @@ test("NV13 agent stop is main-window-only and saving keeps the enable switch", (
   assert.match(save, /normalize_agent_save\(/);
   assert.match(normalize, /if\s+!config\.enabled\s*\{[\s\S]*?if\s+config\.workspace\.trim\(\)\.is_empty\(\)/);
 });
+
+test("2026-11-07 唤醒词单独入口：主窗口只打开私密 wakeword 任务，音量走主窗口设备请求", () => {
+  assert.ok(desktop("src/lib.rs").includes('Some("wakeword") => "wakeword"'), "原生分区白名单含 wakeword");
+  const panel = frontend("src/components/VoiceWakeVolumePanel.jsx");
+  assert.match(panel, /openPrivateSettings\("wakeword"\)/);
+  assert.doesNotMatch(panel, /wakewordManage|wakewordStatus|VoiceWakeWordCard/, "主窗口不能读写唤醒词");
+  assert.match(panel, /deviceRequest\(row\.device_id, "set_volume"/);
+  const privatePage = frontend("src/voicePrivate.jsx");
+  assert.match(privatePage, /section !== "wakeword"\}><VoiceWakeWordCard \/>/);
+  assert.match(privatePage, /section !== "firmware"\}><VoiceFirmwareCard \/>/);
+});
+
+test("2026-11-07 应用内更新命令只认主窗口，更新插件的前端命令不授权给页面", () => {
+  const fallback = JSON.parse(desktop("capabilities/default.json"));
+  for (const command of ["app_update_status", "app_update_install"]) {
+    assert.match(desktop("build.rs"), new RegExp(`"${command}"`));
+    assert.ok(fallback.permissions.includes(`allow-${command.replaceAll("_", "-")}`), command);
+  }
+  const files = ["default", "voice-private-main", "voice-memory", "voice-plugins", "voice-home", "voice-agent", "voice-context", "voice-mcp", "voice-music", "voice-vision"];
+  for (const name of files) {
+    assert.doesNotMatch(desktop(`capabilities/${name}.json`), /updater:/, `${name} 不能授权 updater 插件命令`);
+  }
+  const native = desktop("src/app_update.rs");
+  for (const command of ["app_update_status", "app_update_install"]) {
+    const body = native.match(new RegExp(`pub async fn ${command}\\b[\\s\\S]*?require_main\\(&window\\)\\?`));
+    assert.ok(body, `${command} 先校验主窗口`);
+  }
+  assert.match(native, /device_work_in_progress\(\)/, "加工中拒绝更新");
+  assert.match(native, /on_before_exit\(move \|\| crate::shutdown_desktop_services/, "Windows 安装器结束进程前走急停收尾");
+});

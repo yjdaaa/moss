@@ -130,11 +130,22 @@ async function main() {
   const fakeGrbl = await startFakeGrblServer(grblPort);
   console.log(`[E2E] 回环 GRBL 模拟器已监听: 127.0.0.1:${grblPort}`);
 
-  // 2. 启动真实后端服务
+  // 2. 启动真实后端服务（跨平台隔离运行目录，并关闭启动时自动联网检查更新以保证离线纯净测试）
+  for (const rel of [
+    path.join("moss"),
+    path.join("Library", "Application Support", "moss"),
+    path.join(".local", "share", "moss"),
+  ]) {
+    const dir = path.join(TEST_DIR, rel);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ auto_check_update: false }), "utf8");
+  }
   console.log(`[E2E] 正在启动后端服务 (moss-host.exe serve)...`);
   const hostEnv = {
     ...process.env,
     APPDATA: TEST_DIR,
+    HOME: TEST_DIR,
+    XDG_DATA_HOME: path.join(TEST_DIR, ".local", "share"),
     MCP_ENDPOINT: "disabled-for-loopback-tests",
     LASER_WEB_HOST: "127.0.0.1",
     LASER_WEB_PORT: String(port),

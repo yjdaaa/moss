@@ -1347,6 +1347,11 @@ mod imp {
         speaker_warning: Mutex<Option<String>>,
         /// 本地模型下载与安装（默认运行目录 `models/`，可通过 `MOSS_LAYA_ROOT` 指定外置 `<path>/models`）
         models: ModelManager,
+        /// Laya 的 Python 运行环境自动准备（2026-11-07：点下载 Laya 时在软件目录创建虚拟环境并安装 laya[serve]）
+        laya_setup: moss_voice::laya_env::LayaSetup,
+        /// 测试用 Laya 根目录（测试中不碰真实用户目录下的虚拟环境）
+        #[cfg(test)]
+        laya_root_for_test: Mutex<Option<std::path::PathBuf>>,
         /// 运行中的本地模型辅助程序（随内置服务启停）
         helper: Mutex<Option<LocalHelper>>,
         /// 串行化本地 Jev 决策服务（OneJev / Laya）启动与模型切换，不阻塞 `stop_laya`
@@ -1649,6 +1654,11 @@ mod imp {
                     }
                 }
             }
+            // 2026-11-07：清掉上次中途退出（强关、崩溃、断电）留下的半截下载与解压目录
+            let cleaned = models.clean_leftovers();
+            if cleaned > 0 {
+                eprintln!("[moss-desktop] 已清理 {cleaned} 个本地模型下载残留");
+            }
             let memory = MemoryService::new(Arc::new(DbMemoryStore { db: host.db.clone() }));
             let enabled = moss_voice::settings::load(&host.runtime_root.path.join("settings.json")).builtin_memory_enabled;
             let _ = memory.configure(enabled, || Ok(()));
@@ -1700,6 +1710,9 @@ mod imp {
                 music_warning: Mutex::new(None),
                 speaker_warning: Mutex::new(None),
                 models,
+                laya_setup: moss_voice::laya_env::LayaSetup::new(Arc::new(moss_voice::laya_env::SystemHost)),
+                #[cfg(test)]
+                laya_root_for_test: Mutex::new(None),
                 helper: Mutex::new(None),
                 jev_start_lock: Arc::new(Mutex::new(())),
                 laya: Arc::new(Mutex::new(LocalLayaRunner {
@@ -2113,6 +2126,7 @@ mod imp {
                     "models_dir": self.models.root_for(models_dir_ref).to_string_lossy(),
                     "onejev_env": onejev_env,
                     "laya_env": laya_env,
+                    "laya_setup": self.laya_setup.status(),
                     "helper_found": helper_path().is_some_and(|path| path.is_file()),
                     "helper_running": self.helper.lock().ok().and_then(|helper| helper.as_ref().map(LocalHelper::is_alive)).unwrap_or(false),
                     "models": self.models.status(),
@@ -2579,11 +2593,9 @@ mod imp {
                 let env_info = Self::detect_laya_env();
                 let ready = env_info.get("ready").and_then(Value::as_bool) == Some(true);
                 if !ready && !force {
-                    let summary = env_info
-                        .get("summary")
-                        .and_then(Value::as_str)
-                        .unwrap_or("未检测到本地 Laya 运行环境");
-                    return Err(CenterError::new("laya_env_missing", 412, summary));
+                    // 2026-11-07：运行环境没准备好时，先确认本机有 Python，再在后台自动创建虚拟环境，与权重下载同时进行；
+                    // 没有 Python 时返回 412 说明原因（前端仍可选择只下载权重）
+                    self.start_laya_setup()?;
                 }
                 checked_env = Some(env_info);
             }
@@ -2633,6 +2645,61 @@ mod imp {
                 return Err(CenterError::new("local_model_in_use", 409, "内置服务正在使用本地模型，请先停止内置服务再删除"));
             }
             self.models.delete(id).map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
+            if id == moss_voice::settings::LOCAL_LAYA_JEV_MODEL {
+                // 2026-11-07：连同 MOSS 自动创建的 Python 虚拟环境一起删（用户自建、未带标记的环境不动）
+                self.laya_setup.cancel_and_wait();
+                if let Some(root) = self.laya_env_root() {
+                    moss_voice::laya_env::remove_managed_env(&root)
+                        .map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
+                }
+            }
+            Ok(self.status())
+        }
+
+        /// MOSS 可以自动管理的 Laya 根目录；用户用 `MOSS_LAYA_PYTHON` 指定了外部 Python 时返回 `None`。
+        fn laya_env_root(&self) -> Option<std::path::PathBuf> {
+            if std::env::var_os("MOSS_LAYA_PYTHON").is_some() {
+                return None;
+            }
+            #[cfg(test)]
+            {
+                self.laya_root_for_test.lock().ok().and_then(|root| root.clone())
+            }
+            #[cfg(not(test))]
+            {
+                Some(Self::resolve_laya_python().0).filter(|root| !root.as_os_str().is_empty())
+            }
+        }
+
+        /// 开始自动准备 Laya 运行环境；本机没有可用 Python 时返回 412 并说明原因。
+        fn start_laya_setup(&self) -> Result<(), CenterError> {
+            if self.laya_setup.running() {
+                return Ok(());
+            }
+            let root = self.laya_env_root().ok_or_else(|| {
+                CenterError::new(
+                    "laya_env_missing",
+                    412,
+                    "已通过 MOSS_LAYA_PYTHON 指定外部 Python，MOSS 不会改动该环境；请在其中自行执行 pip install \"laya[serve]\"",
+                )
+            })?;
+            self.laya_setup.find_python().map_err(|message| CenterError::new("laya_env_missing", 412, message))?;
+            let mirror = self.settings().builtin_local.mirror.unwrap_or_default().to_ascii_lowercase();
+            let prefer_mirror = ["mirror", "ghfast", "tuna", "aliyun", "ustc", "huaweicloud", "tencent"]
+                .iter()
+                .any(|hint| mirror.contains(hint));
+            self.laya_setup
+                .start(moss_voice::laya_env::SetupRequest { root, prefer_mirror })
+                .map_err(|message| CenterError::new("laya_setup_failed", 500, message))
+        }
+
+        /// `voice_local_laya_setup`：`start` 开始准备、`cancel` 取消。
+        pub fn laya_setup_action(&self, action: &str) -> Result<Value, CenterError> {
+            match action {
+                "start" => self.start_laya_setup()?,
+                "cancel" => self.laya_setup.cancel(),
+                _ => return Err(CenterError::new("voice_settings_invalid", 400, "action 只能是 start 或 cancel")),
+            }
             Ok(self.status())
         }
 
@@ -2977,6 +3044,9 @@ mod imp {
                     || torch_lib.join("libtorch_cuda.so").is_file()
             });
             let ready = python_found && laya_serve_found;
+            // 虚拟环境由 MOSS 自动创建（删除 Laya 时一并删除）
+            let venv_dir = py.parent().and_then(|bin| bin.parent()).map(std::path::Path::to_path_buf);
+            let managed = venv_dir.as_deref().is_some_and(moss_voice::laya_env::is_managed);
             let is_apple_silicon = cfg!(all(target_os = "macos", target_arch = "aarch64"));
             let cuda_found = if !ready || force_cpu {
                 false
@@ -3006,9 +3076,9 @@ mod imp {
             } else if ready {
                 "运行环境检测通过（Python + laya[serve] CPU 模式已就绪），可直接下载并启用。".to_owned()
             } else if !python_found {
-                "未检测到本地 Laya Python 运行环境（可通过 MOSS_LAYA_ROOT 或用户目录 moss-laya/.venv 准备 Python 3.10+ 并执行 pip install \"laya[serve]\"；当前也可直接选用上方免 Python 的 OneJev 1.6 GGUF 模型）。".to_owned()
+                "尚未准备 Laya 运行环境：点“下载”或“准备运行环境”后，MOSS 会用本机 Python 3.10+ 自动创建虚拟环境并安装 laya[serve]（有 NVIDIA 显卡时装 CUDA 版 PyTorch）；也可直接选用上方免 Python 的 OneJev 1.6。".to_owned()
             } else {
-                "已找到 Python 虚拟环境，但缺少 laya[serve] 依赖包（请执行 pip install \"laya[serve]\"）；当前可先下载模型权重，补齐依赖后即可启用。".to_owned()
+                "已找到 Python 虚拟环境，但缺少 laya[serve] 依赖包：点“准备运行环境”自动补齐。".to_owned()
             };
             serde_json::json!({
                 "ready": ready,
@@ -3017,6 +3087,8 @@ mod imp {
                 "cuda_found": cuda_found,
                 "mps_found": mps_found,
                 "accelerator": accelerator,
+                "managed": managed,
+                "venv_dir": venv_dir.map(|dir| dir.to_string_lossy().into_owned()),
                 "summary": summary,
             })
         }
@@ -3127,7 +3199,11 @@ mod imp {
                         env_device.as_deref(),
                     );
                     let tmp_dir = laya_root.join("tmp");
+                    let tmp_existed = tmp_dir.exists();
                     let _ = std::fs::create_dir_all(&tmp_dir);
+                    if !tmp_existed {
+                        let _ = std::fs::write(tmp_dir.join(moss_voice::laya_env::MANAGED_MARKER), b"");
+                    }
                     let extra_models = serde_json::json!({
                         "multilingual": model_dir.to_string_lossy().replace('\\', "/")
                     })
@@ -5285,7 +5361,15 @@ mod imp {
                 }))
                 .unwrap();
             let gen_on_onejev = builtin.laya.lock().unwrap().generation;
+            // 2026-11-07：删除 Laya 时连同 MOSS 创建（带标记）的虚拟环境与 tmp 一起删
+            let laya_root = temp.path().join("laya-env");
+            std::fs::create_dir_all(laya_root.join(".venv").join("bin")).unwrap();
+            std::fs::write(laya_root.join(".venv").join(moss_voice::laya_env::MANAGED_MARKER), b"").unwrap();
+            std::fs::create_dir_all(laya_root.join("tmp")).unwrap();
+            *builtin.laya_root_for_test.lock().unwrap() = Some(laya_root.clone());
+            assert_eq!(builtin.status()["local"]["laya_setup"]["state"], "idle");
             builtin.model_delete("laya_multilingual").unwrap();
+            assert!(!laya_root.exists(), "MOSS 创建的 Laya 虚拟环境随模型一起删除");
             assert_eq!(
                 builtin.laya.lock().unwrap().generation,
                 gen_on_onejev,
@@ -5598,6 +5682,7 @@ mod imp {
     /// MOSS 退出时停止内置语音服务及本地 Jev（OneJev / Laya）子进程（在急停之后调用）。
     pub fn shutdown(app: &tauri::AppHandle) {
         if let Ok(builtin) = builtin(app) {
+            builtin.laya_setup.cancel_and_wait();
             builtin.stop();
             // 等待已被 starting_cancel 中断的后台启动线程完成子进程回收，杜绝退出时残留孤儿 llama-server
             builtin.stop_laya_and_wait();
@@ -5811,6 +5896,18 @@ pub async fn voice_local_model_delete(app: tauri::AppHandle, window: tauri::Webv
     let result = imp::run(app, move |builtin| builtin.model_delete(&id)).await;
     #[cfg(mobile)]
     let result = desktop_only((app, window, id));
+    result
+}
+
+/// 自动准备 Laya 的 Python 运行环境（2026-11-07）：`action` 为 `start` / `cancel`。
+#[tauri::command]
+pub async fn voice_local_laya_setup(app: tauri::AppHandle, window: tauri::WebviewWindow, action: String) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
+    #[cfg(desktop)]
+    let result = imp::run(app, move |builtin| builtin.laya_setup_action(&action)).await;
+    #[cfg(mobile)]
+    let result = desktop_only((app, window, action));
     result
 }
 
@@ -6242,7 +6339,7 @@ pub async fn voice_memory_clear(app: tauri::AppHandle, window: tauri::WebviewWin
 
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 44] = [
+pub const COMMANDS: [&str; 45] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -6287,4 +6384,5 @@ pub const COMMANDS: [&str; 44] = [
     "voice_local_model_download",
     "voice_local_model_cancel",
     "voice_local_model_delete",
+    "voice_local_laya_setup",
 ];

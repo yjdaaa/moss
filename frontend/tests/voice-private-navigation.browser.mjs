@@ -32,7 +32,7 @@ try {
   });
   await page.goto(new URL("voice-private.html", server.resolvedUrls.local[0]).href);
   await page.getByRole("heading", { name: "隐私与家居" }).waitFor();
-  assert.equal(await page.locator(".voice-private-task").count(), 4);
+  assert.equal(await page.locator(".voice-private-task").count(), 6, "四项隐私任务 + 唤醒词、固件升级两项设备任务");
   assert.equal(await page.locator("input, textarea").count(), 0, "task overview has no form fields");
   if (process.env.VOICE_QA_DIR) await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-private-overview.png") });
   await page.getByRole("button", { name: /信息服务/ }).click();

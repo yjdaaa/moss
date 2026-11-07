@@ -20,6 +20,7 @@ import VoiceVisionCard from "../components/VoiceVisionCard.jsx";
 import VoiceKnowledgeCard from "../components/VoiceKnowledgeCard.jsx";
 import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
 import { VoiceEndpointsCard } from "../components/VoiceEndpointsCard.jsx";
+import VoiceWakeVolumePanel from "../components/VoiceWakeVolumePanel.jsx";
 import { SaveBar, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel } from "../components/VoiceLayout.jsx";
 import { MossVoiceTwin } from "../components/MossVoiceTwin.jsx";
 import {
@@ -786,6 +787,10 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
             <div className="voice-stack" id="voice-devices-panel">
               <VoiceEndpointsCard mode={mode} overview={status.mcp} busy={busy} run={run} />
             </div>
+          </VoiceTabPanel>
+
+          <VoiceTabPanel tab="wake" active={activeTab === "wake"}>
+            <VoiceWakeVolumePanel builtin={builtin} mode={mode} />
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="features" active={activeTab === "features"}>

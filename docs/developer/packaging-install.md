@@ -155,7 +155,14 @@
 - **macOS 本机快速同步（`scripts/quick-update-desktop.sh`，2026-11-05）**：与 Windows 脚本同参数语义（`--build-only` / `--install-dir <MOSS.app>` / `--with-voice-helper` / `--with-host` / `--launch` / `--skip-cache-sweep`，另有 `--dry-run` 与 `--version`）。跑 `cargo tauri build --no-bundle` 后原地替换 `/Applications/MOSS.app`（或 `~/Applications`）里的 `Contents/MacOS/moss-desktop`，语音辅助程序协议号不符或带 `--with-voice-helper` 时一并重编并替换 `moss-voice-local`。替换方式是先在同目录写临时文件并 ad-hoc 签名、再原子 `mv` 覆盖：运行中的 MOSS 继续使用旧文件，**从不结束进程**，退出重开即生效；有替换时重新签名整个 `.app` 并 `codesign --verify --deep --strict`。默认把已安装包的 `CFBundleShortVersionString` 注入 `MOSS_RELEASE_VERSION`，补丁后显示与“检查更新”版本不变。运行检测只比对进程可执行路径（`ps -o comm`），`--launch` 在 MOSS 已运行时拒绝。只换程序文件，图标、`Info.plist`、许可证资源等需重新完整打包（§3.9）才更新。首次仍需从 DMG 安装一次。
 - **桌面热重载开发窗口（`scripts/dev-desktop.ps1` / `scripts\start.bat -Dev`）**：自动确保 `target/debug/moss-voice-local.exe` 与当前 `PROTOCOL_VERSION` 对齐（`start.bat` 直接启动桌面版前同样核对同目录辅助程序协议号），拉起回环 Vite（`127.0.0.1:5177`）与 debug 版 `moss-desktop` 实时预览前端与语音中心，仅供开发调试，不替代正式版验证。
 - 数据库 schema 由程序启动时自动迁移（`RuntimeDb` 只执行 `current < N` 的步骤）；降级到旧版本时旧程序也能打开新库（见技术书 §9.3）。
-- 自动更新（Tauri updater 插件）不在首版范围，后续单独评估；需要签名密钥与更新服务器。
+- **应用内更新与默认启动自动检查（2026-11-07 用户决定）**：`settings.json` 未显式设置 `auto_check_update` 时默认开启启动自动检查，发现新版后在主界面顶部显示不打断操作的更新提示条，点“立即更新”直接打开“偏好设置 → 软件更新”并填入检查结果；桌面版（Windows 安装版、macOS）可点“下载并重启更新”，Android 版可点“下载并安装更新”。实现见 `apps/desktop/src-tauri/src/app_update.rs` 与 `gen/android/app/src/main/java/com/moss/laser/MainActivity.kt`（`ApkInstaller`）：
+  - 更新清单固定取 `https://github.com/yjdaaa/moss/releases/download/<标签>/latest.json`，标签只接受版本号字符；下载后用 `apps/desktop/src-tauri/updater-pubkey.txt` 里的公钥校验 minisign 签名，并强制核对签名 `trusted comment` 里记录的 `version:` 字段（`requireSignedVersion`，签名内版本必须与清单一致，防止旧版合法签名冒充新版）。
+  - Windows 按主程序目录判断安装形态：有 `uninstall.exe` 且有 `moss-voice-local.exe` 取 `windows-x86_64-offline-voice`，只有 `uninstall.exe` 取 `windows-x86_64-lite`；没有 `uninstall.exe` 的免安装便携版不支持应用内更新。安装器以 `/P /UPDATE` 被动模式运行、完成后自动重启 MOSS；插件结束进程前先调用 `shutdown_desktop_services`（急停 → 停语音服务，与“完全退出”同序）。`installer/hooks.nsh` 在 `/UPDATE` 模式下最多等 15 秒让旧进程自己退出，仍未退出才提示并取消，绝不强杀。
+  - macOS 用通用版 `MOSS.app.tar.gz` 原地替换 `.app`（`darwin-aarch64` / `darwin-x86_64` 两个键指向同一个包），安装后按完全退出的顺序收尾并重启。
+  - Android 取 `android-aarch64`，下载上限 512 MiB，先把 APK 流式写入应用私有缓存目录 `cacheDir/updates/` 临时文件，在 Rust 侧完成带版本绑定的 minisign 签名校验后原子重命名为正式缓存文件，再经 JNI 调用 `ApkInstaller.installApk` 使用 `FileProvider` 拉起系统安装界面由用户确认覆盖升级（Android 8+ 首次未授权“安装未知应用”时自动打开本应用授权页，返回后再次点击直接复用已校验缓存包拉起安装器，无需重下）。
+  - 设备正在下发、启动或停机待确认（`ApiService::device_work_in_progress`）时拒绝开始；下载完成、安装前再检查一次。命令 `app_update_status / app_update_install` 只认受信任主窗口（桌面回环后端来源或 Android 打包主窗口），updater 插件自带的前端命令不授权给任何页面。
+  - **签名密钥**：正式 minisign 公钥已写入 `apps/desktop/src-tauri/updater-pubkey.txt`；私钥与密码仅保存在维护者本机 `~/.tauri/moss-updater.{key,pass}` 并注入 GitHub 仓库密钥 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，绝不入库。丢失私钥后已安装的版本无法再应用内更新，只能手动安装一次带新公钥的版本。
+  - 只有配置了上述仓库密钥的发版才生成更新包（`createUpdaterArtifacts` 只在流水线覆盖配置里开启，本机快更与普通构建不生成），见 §7。在此之前发布的旧版本尚未内置该公钥，需手动覆盖安装一次首个带公钥的版本后，后续版本即可在软件内直接更新。
 
 ### 3.7 签名
 
@@ -163,9 +170,9 @@
 
 ### 3.8 Android
 
-- 保持 APK：用户从下载页获取后由系统安装，系统卸载即删除应用与其私有数据；Android 不提供自定义安装目录。
-- 正式分发需签名的 release APK（当前产物 `app-universal-release-unsigned.apk` 未签名）。
-- 运行目录应确认落在应用私有目录（见 §2 最后一行），实施时实机核对。
+- 保持 APK：首次从下载页获取安装，后续可在 App 内直接下载校验签名后的新版 APK 并拉起系统安装界面覆盖升级；系统卸载即删除应用与其私有数据；Android 不提供自定义安装目录。
+- 正式分发与覆盖升级必须使用同一固定签名证书（Android 系统要求覆盖安装的 APK 签名证书一致）：维护者本机保存 `~/.tauri/moss-android-release.jks`（及 `.pass`），仓库密钥配置 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`，本机调试通过已 gitignore 的 `gen/android/keystore.properties` 引用。此前由临时证书签名的旧版 APK 首次切换到固定正式证书时，需先卸载旧版再安装一次，之后所有新版均可原地保留数据覆盖升级。
+- 运行目录位于应用私有数据目录 `app_data_dir`，更新包暂存在 `app_cache_dir/updates/`。
 
 ### 3.9 macOS 本机打包、安装与清理（2026-11-05）
 
@@ -226,5 +233,6 @@
    - `prepare` 仅执行 **1 次** `npm ci && npm run build` 产出共享 `release-frontend-dist`，并从 Git 标签提取语义化版本号注入各端 Tauri overlay（避免重复执行 4 次 4007 模块 Vite 构建）；
    - `windows-lite`（NSIS 轻量包 + `MOSS_<版本>_windows_x64_portable.exe` 免安装单文件便携版）、`windows-offline-voice`（带 `moss-voice-local.exe` 的瘦身离线语音安装包 + 独立 `moss-voice-local-<版本>-gpl-source.zip`）、`macos-universal`（Apple Silicon + Intel 通用版 `.dmg`）与 `android-apk`（`-Dorg.gradle.daemon=false --ci` 签名 `arm64` APK）在云端 **同时并行构建**；
    - `publish` 汇总全部产物，自动生成 `SHA256SUMS.txt` 与中文变更说明并发布至 GitHub Releases。
+   - **应用内更新包（2026-11-07）**：配置了仓库密钥 `TAURI_SIGNING_PRIVATE_KEY`（及密码）时，两个 Windows 安装包、macOS `MOSS_<版本>_macos_universal.app.tar.gz` 与 Android `MOSS_<版本>_android_aarch64.apk` 均以 `--app-version` 生成带版本绑定的 `.sig`；`publish` 在桌面三份签名齐全时写出 `latest.json`（平台键 `windows-x86_64-lite` / `windows-x86_64-offline-voice` / `darwin-aarch64` / `darwin-x86_64`，Android 签名就绪时一并写入 `android-aarch64`）并随 `.app.tar.gz`、`.apk` 一起上传；签名只写进清单，不单独上传。缺桌面签名就跳过清单（流水线提示 notice），普通安装包照常发布。详见 §3.6、§3.8。
 3. **安装包瘦身（`scripts/build-nv18-sidecar-safe.ps1`）**：
    - 默认将 `moss-voice-local` 与 `moss-voice-local-proto` 完整源码、许可证及上游哈希清单随包打包，并通过 `-EmitGplSourceZip` 导出独立源码压缩包，不再每次将 759 MB 的上游静态库原始归档重复压入 NSIS `.exe`（安装包体积由 ~702 MB 降至 ~35 MB；如需生成包含全量原始归档的内部审计包可显式传 `-IncludeFullNativeEvidence`）。

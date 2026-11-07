@@ -5,6 +5,7 @@ use std::sync::{
 #[cfg(desktop)]
 use tauri::{Emitter, Manager};
 
+mod app_update;
 mod export;
 mod voice;
 mod voice_builtin;
@@ -207,6 +208,7 @@ async fn open_voice_private(
             Some("home") => "home",
             Some("approvals") => "approvals",
             Some("firmware") => "firmware",
+            Some("wakeword") => "wakeword",
             _ => return Err("未知的语音隐私设置类别".into()),
         };
         let current = window.url().map_err(|_| "无法校验当前窗口来源")?;
@@ -334,6 +336,8 @@ pub fn run() {
             export::reveal_exported_file,
             minimize_to_tray,
             exit_application,
+            app_update::app_update_status,
+            app_update::app_update_install,
             voice::voice_status,
             voice::voice_detect_python,
             voice::voice_strict_set,
@@ -395,6 +399,7 @@ pub fn run() {
             voice_builtin::voice_local_save,
             voice_builtin::voice_local_model_download,
             voice_builtin::voice_local_model_cancel,
+            voice_builtin::voice_local_laya_setup,
             voice_builtin::voice_local_model_delete,
             voice_mcp::voice_mcp_status,
             voice_mcp::voice_mcp_save,
@@ -413,7 +418,8 @@ pub fn run() {
         .manage(DesktopSession(desktop_session))
         .manage(voice_state)
         .manage(builtin_state)
-        .manage(mcp_state);
+        .manage(mcp_state)
+        .manage(app_update::init(_host_handle.clone(), None));
 
     #[cfg(mobile)]
     let builder = builder.setup(|app| {
@@ -426,9 +432,11 @@ pub fn run() {
                 export::ExportState { settings_file: None },
             ),
         };
+        let host = host.map(Arc::new);
+        app.manage(app_update::init(host.clone(), app.path().app_cache_dir().ok()));
         // 后端（数据库、数据目录锁、HTTP 服务）须与进程同寿命；移动端 run() 可能先于应用结束返回。
         if let Some(host) = host {
-            Box::leak(Box::new(host));
+            std::mem::forget(host);
         }
         app.manage(BackendOrigin(backend_origin));
         app.manage(export_state);
@@ -439,6 +447,8 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
+        // 应用内更新：插件的前端命令不授权给任何页面，只由 app_update 模块在 Rust 侧调用
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -588,6 +598,7 @@ mod tests {
             "exit_application",
         ]
         .into_iter()
+        .chain(crate::app_update::COMMANDS)
         .chain(crate::voice::COMMANDS)
         .chain(crate::voice_builtin::COMMANDS)
         .chain(crate::voice_context::COMMANDS)
@@ -795,7 +806,7 @@ mod tests {
                 "voice_builtin_start", "voice_builtin_stop", "voice_device_set_status", "voice_device_rename",
                 "voice_device_request",
                 "voice_builtin_models_test", "voice_builtin_models_list", "voice_builtin_models_save", "voice_local_save",
-                "voice_local_model_download", "voice_local_model_cancel", "voice_local_model_delete",
+                "voice_local_model_download", "voice_local_model_cancel", "voice_local_model_delete", "voice_local_laya_setup",
                 "voice_agent_status", "voice_agent_save", "voice_agent_stop", "voice_music_pick_directory", "voice_music_status",
                 "voice_music_save", "voice_vision_status", "voice_vision_save", "voice_vision_test",
             ][..]),
@@ -822,6 +833,20 @@ mod tests {
         let session = include_str!("lib.rs");
         let start = session.find("fn get_desktop_session(").unwrap();
         assert!(session[start..start + 800].contains("window_is_trusted_main(&window)"));
+        let updater = include_str!("app_update.rs");
+        for command in crate::app_update::COMMANDS {
+            let start = updater.find(&format!("pub async fn {command}(")).expect(command);
+            let body = &updater[start..start + updater[start..].find("\n}\n").expect(command)];
+            let open_brace = body.find("{\n").expect(command);
+            assert!(
+                body[open_brace..].trim_start_matches("{\n").trim_start().starts_with("require_main(&window)?;"),
+                "{command} 必须在函数首行固定主窗口来源"
+            );
+        }
+        let guard = updater.find("fn require_main(").expect("require_main");
+        let guard_body = &updater[guard..guard + updater[guard..].find("\n}\n").expect("require_main")];
+        assert!(guard_body.contains("crate::window_is_trusted_main(window)"));
+        assert!(guard_body.contains("is_trusted_mobile_main(window.label(), &url)"));
     }
 
     #[cfg(desktop)]
