@@ -10,6 +10,7 @@ const PAGE_TITLES = {
   "/draw": { title: "创作画板", sub: "CANVAS" },
   "/material-lab": { title: "材料实验室", sub: "MATERIAL LAB" },
   "/twin": { title: "数字孪生舱", sub: "DIGITAL TWIN 3D" },
+  "/camera": { title: "摄像头", sub: "CAMERA VIEW" },
   "/voice": { title: "语音中心", sub: "VOICE CENTER" },
 };
 

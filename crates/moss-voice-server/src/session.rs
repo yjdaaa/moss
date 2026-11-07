@@ -258,6 +258,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             &shared,
             &session_id,
             &device_id,
+            &client_id,
             version,
             uplink_rate,
             lease.as_ref().unwrap().allowed.clone(),
@@ -265,8 +266,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             Ok(mut session) => {
                 if device_mcp {
                     session.device_mcp = Some(DeviceMcp::new());
+                    session.vision_host = identity.host.clone();
                     if session.conversation.is_some() {
-                        session.vision_host = identity.host.clone();
                         session.vision_token = identity.authorization.clone().map(|value| {
                             value
                                 .trim()
@@ -422,13 +423,23 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                 }
             }
         }
+    } else {
+        shared.camera_preview.clear_device(&device_id);
+        let _ = shared.vision_photos.take(&device_id);
     }
+    let mut was_active_device_handle = false;
     if let Ok(mut map) = shared.device_requests.lock()
         && map
             .get(&device_id)
             .is_some_and(|handle| handle.session_id == session_id)
     {
         map.remove(&device_id);
+        was_active_device_handle = true;
+    }
+    if was_active_device_handle && permission.load(std::sync::atomic::Ordering::Acquire) {
+        shared
+            .camera_preview
+            .fail_if_pending(&device_id, "设备连接已断开，画面未回传".into());
     }
     session.finish_timing("disconnected");
     session.last_verified_person = None;
@@ -608,6 +619,8 @@ struct DeviceMcp {
     init_sent: bool,
     initialized: bool,
     ready: bool,
+    vision_url_sent: bool,
+    vision_token_issued_at: Option<Instant>,
     screen_monochrome: Option<bool>,
     screen_size: Option<(u32, u32)>,
     deferred_requests: Vec<crate::DeviceRequest>,
@@ -625,6 +638,8 @@ enum McpPending {
     Quiet(&'static str),
     /// 连接握手后查询 `self.screen.get_info` 以识别单色 OLED (`monochrome: true`) vs 彩屏 LCD
     ScreenInfo,
+    /// 桌面端「摄像头」标签页抓拍请求：检查设备侧拍照/上传是否报错并即时写入预览错误态
+    CameraCapture { ticket: String },
 }
 
 /// 设备工具清单最多取多少页（防止设备返回循环的游标）
@@ -662,6 +677,8 @@ impl DeviceMcp {
             init_sent: false,
             initialized: false,
             ready: false,
+            vision_url_sent: false,
+            vision_token_issued_at: None,
             screen_monochrome: None,
             screen_size: None,
             deferred_requests: Vec::new(),
@@ -840,6 +857,7 @@ struct Session<'a> {
     shared: &'a Shared,
     session_id: &'a str,
     device_id: &'a str,
+    client_id: &'a str,
     version: u32,
     timestamp: u32,
     uplink_rate: u32,
@@ -930,6 +948,7 @@ impl<'a> Session<'a> {
         shared: &'a Shared,
         session_id: &'a str,
         device_id: &'a str,
+        client_id: &'a str,
         version: u32,
         uplink_rate: u32,
         permission: Arc<std::sync::atomic::AtomicBool>,
@@ -943,6 +962,7 @@ impl<'a> Session<'a> {
             shared,
             session_id,
             device_id,
+            client_id,
             version,
             timestamp: 0,
             uplink_rate,
@@ -2379,6 +2399,8 @@ impl<'a> Session<'a> {
                 if self.permission.load(std::sync::atomic::Ordering::Acquire)
                     && factory.ready() =>
             {
+                device.vision_url_sent = true;
+                device.vision_token_issued_at = Some(Instant::now());
                 json!({"vision":{"url":format!("http://{host}:{}/mcp/vision/explain",self.shared.http_port),"token":token}})
             }
             _ => json!({}),
@@ -2527,6 +2549,14 @@ impl<'a> Session<'a> {
                                     .await?;
                             }
                         }
+                        let ready_deferred = self
+                            .device_mcp
+                            .as_mut()
+                            .map(|d| std::mem::take(&mut d.deferred_requests))
+                            .unwrap_or_default();
+                        for req in ready_deferred {
+                            self.dispatch_device_request(socket, req).await?;
+                        }
                         Ok(())
                     }
                 }
@@ -2580,6 +2610,46 @@ impl<'a> Session<'a> {
                 }
                 Ok(())
             }
+            Some(McpPending::CameraCapture { ticket }) => {
+                let is_rpc_error = payload.get("error").is_some();
+                let is_tool_error = payload
+                    .pointer("/result/isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let text = device_result_text(&payload);
+                let json_fail_message = if !is_rpc_error && !is_tool_error {
+                    serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .filter(|v| v.get("success").and_then(Value::as_bool) == Some(false))
+                        .map(|v| {
+                            v.get("message")
+                                .or_else(|| v.pointer("/error/message"))
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| text.clone())
+                        })
+                } else {
+                    None
+                };
+                if is_rpc_error || is_tool_error || json_fail_message.is_some() {
+                    let detail = json_fail_message.unwrap_or(text);
+                    let human = if detail.contains("Failed to connect to explain URL") {
+                        format!(
+                            "设备无法连接电脑视觉接口（{detail}），请检查电脑防火墙是否放行端口 {}",
+                            self.shared.http_port
+                        )
+                    } else if detail.contains("Failed to capture photo") {
+                        "设备摄像头抓拍失败（Failed to capture photo），请检查摄像头排线或供电".into()
+                    } else {
+                        detail
+                    };
+                    self.shared
+                        .camera_preview
+                        .record_error(self.device_id, Some(&ticket), human.clone());
+                    self.event(format!("摄像头抓拍未成功：{human}"));
+                }
+                Ok(())
+            }
             None => Ok(()),
         }
     }
@@ -2616,6 +2686,12 @@ impl<'a> Session<'a> {
             Some(device) if !device.initialized => {
                 if device.deferred_requests.len() < 16 {
                     device.deferred_requests.push(request);
+                } else if let crate::DeviceRequest::CapturePhoto { ticket } = request {
+                    self.shared.camera_preview.record_error(
+                        self.device_id,
+                        Some(&ticket),
+                        "设备待处理请求过多，请稍后再试".into(),
+                    );
                 }
                 !device.init_sent
             }
@@ -2623,6 +2699,13 @@ impl<'a> Session<'a> {
                 return self.dispatch_device_request(socket, request).await;
             }
             None => {
+                if let crate::DeviceRequest::CapturePhoto { ticket } = request {
+                    self.shared.camera_preview.record_error(
+                        self.device_id,
+                        Some(&ticket),
+                        "该设备未启用设备端 MCP，不支持摄像头抓拍".into(),
+                    );
+                }
                 self.event("设备没有提供自带 MCP，桌面端请求已忽略".into());
                 return Ok(());
             }
@@ -2695,6 +2778,115 @@ impl<'a> Session<'a> {
                 };
                 let payload = device.request_untracked("tools/call", json!({ "name": "self.reboot", "arguments": {} }));
                 self.send_mcp(socket, payload).await
+            }
+            crate::DeviceRequest::CapturePhoto { ticket } => {
+                if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+                    self.shared.camera_preview.clear_device(self.device_id);
+                    return Err("设备授权已撤销".into());
+                }
+                if self.conversation.is_some()
+                    && self.device_mcp.as_ref().is_some_and(|d| !d.ready)
+                {
+                    if let Some(dev) = self.device_mcp.as_mut() {
+                        if dev.deferred_requests.len() < 16 {
+                            dev.deferred_requests
+                                .push(crate::DeviceRequest::CapturePhoto { ticket });
+                        } else {
+                            self.shared.camera_preview.record_error(
+                                self.device_id,
+                                Some(&ticket),
+                                "设备工具清单同步繁忙，请稍后再试".into(),
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                if self
+                    .device_mcp
+                    .as_ref()
+                    .is_some_and(|d| d.ready && !d.has_tool("self.camera.take_photo"))
+                {
+                    self.shared.camera_preview.record_error(
+                        self.device_id,
+                        Some(&ticket),
+                        "该小智固件未上报摄像头工具（self.camera.take_photo）".into(),
+                    );
+                    return Ok(());
+                }
+                if self.client_id.trim().is_empty() {
+                    self.shared.camera_preview.record_error(
+                        self.device_id,
+                        Some(&ticket),
+                        "设备连接未携带 Client-Id，无法建立摄像头画面上传凭证".into(),
+                    );
+                    return Ok(());
+                }
+                self.last_activity = Instant::now();
+                let need_vision_init = self.device_mcp.as_ref().is_some_and(|d| {
+                    !d.vision_url_sent
+                        || d.vision_token_issued_at
+                            .is_none_or(|at| at.elapsed() > Duration::from_secs(3600))
+                });
+                if need_vision_init {
+                    let host = self.preview_http_host();
+                    let token = self.shared.signer.issue(
+                        self.client_id,
+                        self.device_id,
+                        crate::unix_now(),
+                    );
+                    let params = json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {
+                            "vision": {
+                                "url": format!("http://{host}:{}/mcp/vision/explain", self.shared.http_port),
+                                "token": token,
+                            }
+                        },
+                        "clientInfo": {"name": "MOSS", "version": env!("CARGO_PKG_VERSION")},
+                    });
+                    if let Some(dev) = self.device_mcp.as_mut() {
+                        let init_payload =
+                            dev.request("initialize", params, McpPending::Quiet("initialize_vision"));
+                        dev.vision_url_sent = true;
+                        dev.vision_token_issued_at = Some(Instant::now());
+                        if let Err(err) = self.send_mcp(socket, init_payload).await {
+                            self.shared.camera_preview.record_error(
+                                self.device_id,
+                                Some(&ticket),
+                                format!("发送摄像头能力握手失败：{err}"),
+                            );
+                            return Err(err);
+                        }
+                    }
+                }
+                let Some(device) = self.device_mcp.as_mut() else {
+                    self.shared.camera_preview.record_error(
+                        self.device_id,
+                        Some(&ticket),
+                        "该设备未启用设备端 MCP，不支持摄像头抓拍".into(),
+                    );
+                    return Ok(());
+                };
+                let question = format!("{}{ticket}", crate::vision::CAMERA_PREVIEW_PREFIX);
+                let payload = device.request(
+                    "tools/call",
+                    json!({
+                        "name": "self.camera.take_photo",
+                        "arguments": { "question": question },
+                    }),
+                    McpPending::CameraCapture {
+                        ticket: ticket.clone(),
+                    },
+                );
+                if let Err(err) = self.send_mcp(socket, payload).await {
+                    self.shared.camera_preview.record_error(
+                        self.device_id,
+                        Some(&ticket),
+                        format!("发送摄像头抓拍指令失败：{err}"),
+                    );
+                    return Err(err);
+                }
+                Ok(())
             }
             crate::DeviceRequest::SetVolume(volume) => {
                 let v = volume.min(100);

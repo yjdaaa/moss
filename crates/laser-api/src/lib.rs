@@ -341,9 +341,9 @@ type SendLauncher<'a> = &'a dyn Fn(
     &serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, (u16, serde_json::Value)>;
 
-/// 前端页面路由：刷新这些地址时返回 index.html，由前端决定显示哪一页（语音中心只在桌面端显示）。
+/// 前端页面路由：刷新这些地址时返回 index.html，由前端决定显示哪一页（摄像头与语音中心只在桌面端显示）。
 fn is_spa_route(route: &str) -> bool {
-    matches!(route, "/draw" | "/material-lab" | "/voice" | "/twin") || route.starts_with("/draw/")
+    matches!(route, "/draw" | "/material-lab" | "/voice" | "/camera" | "/twin") || route.starts_with("/draw/")
 }
 
 /// SD 脱机：固件没有返回文件哈希时拒绝 `$SD/Run`（无法确认机器端文件就是确认过的刀路）。
@@ -8720,7 +8720,7 @@ mod tests {
         assert!(page.starts_with("HTTP/1.1 200 OK"));
         assert!(page.contains("<div id=\"root\"></div>"));
         assert!(page.contains("/assets/"));
-        for route in ["/draw", "/material-lab", "/voice", "/twin"] {
+        for route in ["/draw", "/material-lab", "/voice", "/camera", "/twin"] {
             // 在任一页面按 F5 刷新都应回到前端页面，而不是 404
             let index = service.handle_http(format!("GET {route} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
             assert!(String::from_utf8_lossy(&index).starts_with("HTTP/1.1 200 OK"), "{route}");

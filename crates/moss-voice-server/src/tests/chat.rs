@@ -669,6 +669,138 @@ fn vision_capability_is_conditional_and_uses_bound_http_port(){
     assert!(init_off["params"]["capabilities"]["vision"].is_null());
 }
 
+/// 桌面端「摄像头」标签页抓拍：即使未配置视觉大模型，点击抓拍时也会按需补发 `capabilities.vision`，
+/// 固件经 `self.camera.take_photo` 上传 JPEG 后直接进入内存帧；设备拍照报错时立即写入错误态。
+#[test]
+fn desktop_camera_capture_works_without_vision_provider_and_surfaces_errors() {
+    let wait_until = |cond: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "等待条件超时");
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+    let (server, registry, _fakes) = start_chat_with(FakeLlm::default(), &[], Duration::from_secs(120), None);
+    let mut device = allowed_device_with(&server, &registry, 1, true);
+
+    let init = read_mcp(&mut device);
+    assert_eq!(init["method"], "initialize");
+    assert!(init["params"]["capabilities"]["vision"].is_null(), "未配置视觉模型时初始握手不下发 vision");
+    reply_mcp(
+        &mut device,
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(read_mcp(&mut device)["method"], "notifications/initialized");
+    let list = read_mcp(&mut device);
+    assert_eq!(list["method"], "tools/list");
+    reply_mcp(
+        &mut device,
+        &list["id"],
+        serde_json::json!({
+            "tools": [
+                {"name": "self.camera.take_photo", "description": "拍照", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}}}}
+            ]
+        }),
+    );
+    wait_until(&|| {
+        server
+            .status()
+            .sessions
+            .iter()
+            .any(|s| s.device_tools.iter().any(|t| t == "self.camera.take_photo"))
+    });
+
+    // 第一次抓拍：应先收到补发的 initialize(vision)，再收到 self.camera.take_photo
+    server.request_camera_capture(DEVICE).expect("在线摄像头设备应允许抓拍");
+    let vision_init = read_mcp(&mut device);
+    assert_eq!(vision_init["method"], "initialize");
+    let explain_url = vision_init["params"]["capabilities"]["vision"]["url"]
+        .as_str()
+        .expect("补发握手须带 vision.url")
+        .to_owned();
+    let explain_token = vision_init["params"]["capabilities"]["vision"]["token"]
+        .as_str()
+        .expect("补发握手须带 vision.token")
+        .to_owned();
+    reply_mcp(
+        &mut device,
+        &vision_init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {}}),
+    );
+
+    let take = read_mcp(&mut device);
+    assert_eq!(take["method"], "tools/call");
+    assert_eq!(take["params"]["name"], "self.camera.take_photo");
+    let question = take["params"]["arguments"]["question"].as_str().unwrap().to_owned();
+    assert!(question.starts_with(crate::vision::CAMERA_PREVIEW_PREFIX));
+
+    // 模拟固件 camera->Explain(question) 上传 JPEG
+    let mut jpg = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(16, 12)
+        .write_to(&mut jpg, image::ImageFormat::Jpeg)
+        .unwrap();
+    let jpg = jpg.into_inner();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!("--boundary\r\nContent-Disposition: form-data; name=\"question\"\r\n\r\n{question}\r\n").as_bytes(),
+    );
+    body.extend_from_slice(
+        b"--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n",
+    );
+    body.extend_from_slice(&jpg);
+    body.extend_from_slice(b"\r\n--boundary--\r\n");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let upload = client
+        .post(&explain_url)
+        .header("Device-Id", DEVICE)
+        .header("Client-Id", CLIENT)
+        .header("Authorization", format!("Bearer {explain_token}"))
+        .header("Content-Type", "multipart/form-data; boundary=boundary")
+        .body(body)
+        .send()
+        .unwrap();
+    assert_eq!(upload.status().as_u16(), 200);
+    let upload_text = upload.text().unwrap();
+    reply_mcp(
+        &mut device,
+        &take["id"],
+        serde_json::json!({"content": [{"type": "text", "text": upload_text}], "isError": false}),
+    );
+
+    let view = server.camera_frame_view(DEVICE, None);
+    assert_eq!(view["online"], true);
+    assert_eq!(view["has_camera_tool"], true);
+    assert_eq!(view["pending"], false);
+    assert_eq!(view["frame"]["source"], "preview");
+    assert_eq!(view["frame"]["width"], 16);
+    assert_eq!(view["frame"]["height"], 12);
+
+    // 第二次抓拍模拟传感器报错：不再重复补发 initialize，直接调用 take_photo 并写入中文报错提示
+    server.request_camera_capture(DEVICE).unwrap();
+    let take_fail = read_mcp(&mut device);
+    assert_eq!(take_fail["method"], "tools/call");
+    assert_eq!(take_fail["params"]["name"], "self.camera.take_photo");
+    reply_mcp(
+        &mut device,
+        &take_fail["id"],
+        serde_json::json!({"content": [{"type": "text", "text": "Failed to capture photo"}], "isError": true}),
+    );
+    wait_until(&|| server.camera_frame_view(DEVICE, None)["last_error"].is_string());
+    let err_view = server.camera_frame_view(DEVICE, None);
+    assert_eq!(err_view["pending"], false);
+    assert!(
+        err_view["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("摄像头抓拍失败")
+    );
+}
+
 /// NV4 设备自带 MCP：握手、分页取工具、模型以清理后的名字调用，设备收到原名，结果回填给模型。
 #[test]
 fn device_mcp_tools_are_listed_and_relayed() {

@@ -20,7 +20,7 @@
 | GET | `/api/material-lab/export` | 材料库导出 | §2 |
 | GET / POST | `/api/material-lab/recent` | 最近一条含完整参数的 workflow | §3.11 |
 | GET | `/preview` | 受控文件服务 | §2.1 |
-| GET | `/`、`/draw`、`/material-lab`、`/twin`、`/assets/*` | 嵌入的前端 | §2.2 |
+| GET | `/`、`/draw`、`/material-lab`、`/twin`、`/voice`、`/camera`、`/assets/*` | 嵌入的前端 | §2.2 |
 | POST | `/api/upload` | 上传图片或 G-code | §3.1 |
 | POST | `/api/draw/preview` | 画板预览 | §3.2 |
 | POST | `/api/connection/check` | 连接检查与设备能力 | §3.3 |
@@ -80,7 +80,7 @@ HTTP POST /mcp/vision/explain，Header 必须包含 Authorization: Bearer <设�
 
 成功：HTTP 200，JSON {success:true,text}。失败：{success:false,error:{code,message}}；401 无效 token，403 拒绝/已撤销/关闭，413 超大，415 格式不匹配，422 其他图片/请求错误，429 已满（Retry-After:1），502 上游异常，504 超时。所有响应 Cache-Control:no-store。视觉模型结果属于不可信资料，不赋予任何设备控制权限。
 
-桌面仅本地 main 窗口具有 voice_vision_status() / voice_vision_save({input:{settings:{enabled,url,model,use_dialog_llm,keep_in_history},key:{action:keep|set|clear,value?}}}) / voice_vision_test() 权限。`use_dialog_llm`（2026-10-16，默认 false）打开后改用当前对话大模型看图：凭据取 `builtin_models.llm` 的地址 / 模型名与 `voice.llm.main` 密钥，`url` / `model` 与 `voice.vision.main` 不再使用；保存时要求对话模型是 OpenAI 兼容且已存密钥，否则 `vision_invalid`。`keep_in_history`（2026-10-16，默认 false）打开后，视觉请求成功的那一张照片会暂存在服务端内存 `vision::VisionPhotos`（按设备只留最新一张、最多 8 台设备、单张 data URL ≤ 4 MiB），该设备下一轮语音开始时取走并作为一条多模态用户消息接进对话历史，用于后续追问；图片只在内存、不落盘、不进日志与事件，历史按长度预算截断（一张图按 1500 token 计）。要求当前对话模型支持看图，否则每轮请求会失败。状态返回 settings、key_configured、ready 与 `dialog_llm{configured,url,model}`，不返回任何原始密钥；保存默认不开启视觉。测试按钮只使用程序在内存生成的测试 PNG 向当前生效的模型发起请求（独立视觉模型或对话模型），可能产生费用，但不会使用摄像头。Android 命令仅返回不支持；真实固件、真实模型与实机延迟留 FINAL 验收。
+桌面仅本地 main 窗口具有 voice_vision_status() / voice_vision_save({input:{settings:{enabled,url,model,use_dialog_llm,keep_in_history},key:{action:keep|set|clear,value?}}}) / voice_vision_test() 权限。`use_dialog_llm`（2026-10-16，默认 false）打开后改用当前对话大模型看图：凭据取 `builtin_models.llm` 的地址 / 模型名与 `voice.llm.main` 密钥，`url` / `model` 与 `voice.vision.main` 不再使用；保存时要求对话模型是 OpenAI 兼容且已存密钥，否则 `vision_invalid`。`keep_in_history`（2026-10-16，默认 false）打开后，视觉请求成功的那一张照片会暂存在服务端内存 `vision::VisionPhotos`（按设备只留最新一张、最多 8 台设备、单张 data URL ≤ 4 MiB），该设备下一轮语音开始时取走并作为一条多模态用户消息接进对话历史，用于后续追问；图片只在内存、不落盘、不进日志与事件，历史按长度预算截断（一张图按 1500 token 计）。要求当前对话模型支持看图，否则每轮请求会失败。状态返回 settings、key_configured、ready 与 `dialog_llm{configured,url,model}`，不返回任何原始密钥；保存默认不开启视觉。测试按钮只使用程序在内存生成的测试 PNG 向当前生效的模型发起请求（独立视觉模型或对话模型），可能产生费用，但不会使用摄像头。此外（2026-11-07 左侧栏「摄像头」页），受信任主窗口 `voice_device_request` 支持 `capture_photo`（仅已允许设备；签发 15s 一次性 128 位随机票据并按需补发 `capabilities.vision` 后调用设备 `self.camera.take_photo`；命中票据的上传直接存入内存 `CameraPreviewStore` 并返回 `200 no-store`，不调外部视觉模型，伪造/重放/无票据仍 `403`）、`camera_frame({after_seq?})`（返回 `{running,online,session_state,has_camera_tool,unchanged,pending,last_error,error_seq,frame_seq,frame}`；命中 `after_seq` 时返回 `unchanged:true` 省略 `frame` 大图字节；非允许设备立即清帧并返回空态）与 `clear_camera_frame`（撤销设备或停服时同步清除）。Android 命令仅返回不支持；真实固件、真实模型与实机延迟留 FINAL 验收。
 
 ### NV13 Claude Code / Codex 专用 AgentRun（2026-10-15 起可开启）
 

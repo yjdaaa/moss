@@ -3800,6 +3800,15 @@ mod imp {
             status["restarted"] = Value::Bool(restarted);
             Ok(status)
         }
+        fn is_device_allowed(&self, device_id: &str) -> bool {
+            self.host
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.voice_devices().ok())
+                .is_some_and(|list| list.into_iter().any(|d| d.device_id == device_id && d.is_allowed()))
+        }
+
         /// 2026-11-02：桌面端直接向一台已连接设备发请求（`refresh_info` / `reboot`），不经过模型。
         pub fn device_request(
             &self,
@@ -3807,8 +3816,81 @@ mod imp {
             request: &str,
             value: Option<&Value>,
         ) -> Result<Value, CenterError> {
+            let device_id = device_id.trim();
             let label = request.trim();
             let invalid = |msg: &str| CenterError::new("voice_device_invalid", 400, msg);
+            if device_id.is_empty() || device_id.len() > 128 {
+                return Err(invalid("设备编号不能为空"));
+            }
+            if label == "capture_photo" {
+                if !self.is_device_allowed(device_id) {
+                    if let Ok(guard) = self.server.lock()
+                        && let Some(server) = guard.as_ref()
+                    {
+                        server.clear_camera_frame(device_id);
+                    }
+                    return Err(CenterError::new(
+                        "voice_device_forbidden",
+                        403,
+                        "该设备尚未在语音中心允许连接或已被撤销",
+                    ));
+                }
+                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = server.as_ref().ok_or_else(|| {
+                    CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                })?;
+                let ticket_seq = server
+                    .request_camera_capture(device_id)
+                    .map_err(|error| CenterError::new("voice_device_offline", 409, error))?;
+                return Ok(serde_json::json!({
+                    "requested": label,
+                    "ticket_seq": ticket_seq,
+                }));
+            }
+            if label == "camera_frame" {
+                let after_seq = value
+                    .and_then(|v| v.get("after_seq").or(Some(v)))
+                    .and_then(Value::as_u64);
+                let allowed = self.is_device_allowed(device_id);
+                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let Some(server) = server.as_ref() else {
+                    return Ok(serde_json::json!({
+                        "running": false,
+                        "online": false,
+                        "session_state": null,
+                        "has_camera_tool": null,
+                        "unchanged": false,
+                        "pending": false,
+                        "last_error": null,
+                        "error_seq": null,
+                        "frame_seq": null,
+                        "frame": null,
+                    }));
+                };
+                if !allowed {
+                    server.clear_camera_frame(device_id);
+                    return Ok(serde_json::json!({
+                        "running": true,
+                        "online": false,
+                        "session_state": null,
+                        "has_camera_tool": null,
+                        "unchanged": false,
+                        "pending": false,
+                        "last_error": null,
+                        "error_seq": null,
+                        "frame_seq": null,
+                        "frame": null,
+                    }));
+                }
+                return Ok(server.camera_frame_view(device_id, after_seq));
+            }
+            if label == "clear_camera_frame" {
+                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                if let Some(server) = server.as_ref() {
+                    server.clear_camera_frame(device_id);
+                }
+                return Ok(serde_json::json!({ "requested": label }));
+            }
             if label == "push_preview" {
                 let (bytes, summary, ruler) = extract_preview_bundle_for_host(&self.host, None)
                     .map_err(|msg| CenterError::new("voice_preview_missing", 404, msg))?;
@@ -3922,7 +4004,7 @@ mod imp {
                 }
                 _ => {
                     return Err(invalid(
-                        "设备请求只能是 refresh_info、reboot、set_volume、set_brightness、set_theme、set_talk_mode、push_preview 或 push_bot_pose",
+                        "设备请求只能是 refresh_info、reboot、set_volume、set_brightness、set_theme、set_talk_mode、push_preview、push_bot_pose、capture_photo、camera_frame 或 clear_camera_frame",
                     ));
                 }
             };
@@ -3937,6 +4019,10 @@ mod imp {
         }
 
         pub fn set_device_status(&self, device_id: &str, status: &str) -> Result<Value, CenterError> {
+            let device_id = device_id.trim();
+            if device_id.is_empty() || device_id.len() > 128 {
+                return Err(CenterError::new("voice_device_invalid", 400, "设备编号不能为空"));
+            }
             let status = match status.trim() {
                 "allowed" => laser_runtime::VOICE_DEVICE_ALLOWED,
                 "revoked" => laser_runtime::VOICE_DEVICE_REVOKED,
@@ -3944,6 +4030,12 @@ mod imp {
             };
             let found = self.personal.device_changed(device_id,||self.memory.device_changed(device_id, || self.host.api_service.set_voice_device_status(device_id, status, now()))).map_err(internal)?;
             self.context.device_changed(device_id);
+            if status != laser_runtime::VOICE_DEVICE_ALLOWED
+                && let Ok(guard) = self.server.lock()
+                && let Some(server) = guard.as_ref()
+            {
+                server.clear_camera_frame(device_id);
+            }
             if !found {
                 return Err(CenterError::new("voice_device_not_found", 404, "找不到该设备"));
             }

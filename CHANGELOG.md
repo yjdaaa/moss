@@ -6,6 +6,13 @@
 
 ## [0.3.9] - 2026-11-07
 
+### 桌面端左侧栏新增「摄像头」标签页，支持免模型密钥实时抓拍与查看小智设备画面（2026-11-07）
+
+- **现象**：带摄像头的小智设备（如立创实战派 ESP32-S3）在正常 Wi-Fi 模式下不提供内置网页预览服务，只能通过语音说“拍一下看看”交给云端视觉模型文字回答，桌面端没有直接查看摄像头画面的入口。
+- **根因与修复**：核对上游 `78/xiaozhi-esp32` 固件源码（`main/mcp_server.cc`、`esp32_camera.cc`），摄像头唯一对外接口为设备 MCP 工具 `self.camera.take_photo` 并向 `capabilities.vision.url` 上传 `multipart/form-data` JPEG。`moss_voice_server::vision` 新增仅驻留内存的 `CameraPreviewStore`（按设备只留最新一帧、上限 8 台、单帧 `data_url <= 4 MiB`、撤销设备或停服立即清空，绝不落盘或写日志）与 15 秒有效期、常量时间比对的一次性抓拍票据；`Session::dispatch_device_request` 新增 `DeviceRequest::CapturePhoto`，在未配置任何外部视觉模型时也能在用户点击抓拍时按需补发幂等 `initialize(capabilities.vision)` 并调用 `self.camera.take_photo`，上传命中有效票据时直接存入内存返回 `200 no-store`，不调外部视觉模型、零 Token 消耗（无票据或伪造/重放票据仍返回 `403 vision_disabled`）；用户语音说“拍一下看看”完成视觉问答时同步将画面、提问与回答镜像至内存预览。受信任主窗口 `voice_device_request` 扩展 `capture_photo` / `camera_frame`（支持 `after_seq` 零大图拷贝轮询）/ `clear_camera_frame`。前端左侧栏新增桌面专属「摄像头」标签（`/camera`，`CameraPage.jsx` + `cameraState.js`）：切换到该页绝不自动触发硬件拍照，提供「抓拍一张」、串行「自动刷新」（小智处于拾音/思考/播报时自动让路暂缓）、水平镜像 / 旋转 180° 视图矫正与一键清空画面。默认行为与安全门禁不变，不是破坏性变更。
+- **验证**：`moss-voice-server` 292 项通过（含新增 `camera_preview_ticket_works_without_vision_provider_and_is_single_use`、`voice_explain_also_updates_camera_preview_frame`、`desktop_camera_capture_works_without_vision_provider_and_surfaces_errors`）；前端新增 `cameraState.test.mjs` 与浏览器端到端 `camera.browser.mjs` 通过。未连接真实立创实战派 ESP32-S3 物理摄像头实测。
+- **关联**：`crates/moss-voice-server/src/{vision,session,lib}.rs`、`crates/moss-voice-server/src/tests/chat.rs`；`crates/laser-api/src/lib.rs`（`is_spa_route`）；`apps/desktop/src-tauri/src/voice_builtin.rs`（`device_request`、`set_device_status`）；`frontend/src/{cameraState.js,main.jsx,voiceApi.js,styles.css,components/Navbar.jsx,components/SideNav.jsx,pages/CameraPage.jsx}`、`frontend/tests/{cameraState.test.mjs,camera.browser.mjs}`；`docs/integration/moss-native-voice-spec.md` n66、`docs/developer/api-contracts.md`。
+
 ### 修复发布流水线签名更新包失败，v0.3.8 桌面安装包未能发布
 
 - **现象**：推送 `v0.3.8` 标签后，Windows 轻量版、Windows 离线语音版、macOS 三个桌面安装包在打包时全部失败，只有 Android 成功，GitHub Release 没有发布。

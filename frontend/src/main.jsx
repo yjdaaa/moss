@@ -24,6 +24,7 @@ import { DrawPage } from "./pages/DrawPage.jsx";
 import { TwinPage } from "./pages/TwinPage.jsx";
 import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
 import { VoicePage } from "./pages/VoicePage.jsx";
+import { CameraPage } from "./pages/CameraPage.jsx";
 import { isVoiceCenterAvailable, voiceApi } from "./voiceApi.js";
 import { readHideTopPills, writeFoldOpen, writeHideTopPills } from "./foldState.js";
 import { appUpdateAvailable } from "./appUpdate.js";
@@ -33,7 +34,8 @@ function pathToRoute(pathname, voiceEnabled) {
   if (pathname.startsWith("/material-lab")) return "/material-lab";
   if (pathname.startsWith("/draw")) return "/draw";
   if (pathname.startsWith("/twin")) return "/twin";
-  // 语音中心只在 MOSS 桌面端可用（技术书 §9.4.7）；其他环境回到工作台
+  // 摄像头与语音中心只在 MOSS 桌面端可用（技术书 §9.4.7）；其他环境回到工作台
+  if (pathname.startsWith("/camera") && voiceEnabled) return "/camera";
   if (pathname.startsWith("/voice") && voiceEnabled) return "/voice";
   return "/";
 }
@@ -344,6 +346,11 @@ function App() {
               connectionStatus={connectionStatus}
               setConnectionStatus={setConnectionStatus}
             />
+          )}
+          {currentPath === "/camera" && voiceEnabled && (
+            <VoiceErrorBoundary onBack={navigateTo}>
+              <CameraPage onNavigate={navigateTo} />
+            </VoiceErrorBoundary>
           )}
           {currentPath === "/voice" && voiceEnabled && (
             <VoiceErrorBoundary onBack={navigateTo}>

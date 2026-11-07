@@ -255,6 +255,8 @@ pub enum DeviceRequest {
     /// n61：让设备下载已暂存的唤醒词资源包（`self.assets.set_download_url` 后 `self.reboot`）。
     /// 只由私密窗口逐台确认后发起；设备固件没有该工具时不发送。
     InstallAssets { token: String },
+    /// 桌面端「摄像头」标签页主动抓拍一张画面（下发一次性票据，仅存内存，不调外部视觉模型）。
+    CapturePhoto { ticket: String },
 }
 
 pub(crate) struct DeviceRequestHandle {
@@ -269,6 +271,8 @@ pub(crate) struct Shared {
     pub vision_quotas: Arc<vision::VisionQuotas>,
     /// 2026-10-16：待接进对话上下文的照片（只在用户打开对应开关时写入）。
     pub vision_photos: Arc<vision::VisionPhotos>,
+    /// 2026-11-07：桌面端「摄像头」标签页的内存帧与一次性抓拍票据。
+    pub camera_preview: Arc<vision::CameraPreviewStore>,
     pub preview_store: Arc<preview_push::PreviewStore>,
     /// n61：待设备下载的唤醒词资源包（只在内存里，30 分钟过期）
     pub assets_store: wake_assets::AssetsStore,
@@ -350,6 +354,7 @@ impl VoiceServer {
             http_port,
             vision_quotas:Arc::new(vision::VisionQuotas::default()),
             vision_photos:Arc::new(vision::VisionPhotos::default()),
+            camera_preview: Arc::new(vision::CameraPreviewStore::default()),
             preview_store: Arc::new(preview_push::PreviewStore::default()),
             assets_store: wake_assets::AssetsStore::default(),
             screen_card_style: std::sync::Mutex::new(config.screen_card_style),
@@ -472,6 +477,75 @@ impl VoiceServer {
         }
         let token = self.shared.assets_store.stage(device_id, package)?;
         self.device_request(device_id, DeviceRequest::InstallAssets { token })
+    }
+
+    /// 桌面端「摄像头」标签页向指定在线设备发起一次抓拍：签发 15 秒一次性票据并触发 `self.camera.take_photo`。
+    pub fn request_camera_capture(&self, device_id: &str) -> Result<u64, String> {
+        if self.runtime.is_none() {
+            return Err("内置语音服务未运行".into());
+        }
+        if let Some(session) = self
+            .shared
+            .state
+            .sessions()
+            .into_iter()
+            .find(|s| s.device_id == device_id)
+            && !session.device_tools.is_empty()
+            && !session
+                .device_tools
+                .iter()
+                .any(|t| t == "self.camera.take_photo")
+        {
+            return Err("该小智设备固件未上报摄像头工具（self.camera.take_photo）".into());
+        }
+        let (ticket, seq) = self.shared.camera_preview.issue_ticket(device_id, unix_now())?;
+        if let Err(err) = self.device_request(
+            device_id,
+            DeviceRequest::CapturePhoto {
+                ticket: ticket.clone(),
+            },
+        ) {
+            self.shared.camera_preview.revoke_ticket(device_id, &ticket);
+            return Err(err);
+        }
+        Ok(seq)
+    }
+
+    /// 读取指定设备的最新摄像头内存帧与在线会话状态；`after_seq` 命中时只返回 `unchanged: true`，不重复拷贝图片字节。
+    pub fn camera_frame_view(&self, device_id: &str, after_seq: Option<u64>) -> serde_json::Value {
+        let session = self
+            .shared
+            .state
+            .sessions()
+            .into_iter()
+            .find(|s| s.device_id == device_id);
+        let online = session.is_some();
+        let session_state = session.as_ref().map(|s| s.state.clone());
+        let has_camera_tool = session.as_ref().and_then(|s| {
+            if s.device_tools.is_empty() {
+                None
+            } else {
+                Some(s.device_tools.iter().any(|t| t == "self.camera.take_photo"))
+            }
+        });
+        let snap = self.shared.camera_preview.snapshot(device_id, after_seq, unix_now());
+        serde_json::json!({
+            "running": self.runtime.is_some(),
+            "online": online,
+            "session_state": session_state,
+            "has_camera_tool": has_camera_tool,
+            "unchanged": snap.unchanged,
+            "pending": snap.pending,
+            "last_error": snap.last_error,
+            "error_seq": snap.error_seq,
+            "frame_seq": snap.frame_seq,
+            "frame": snap.frame,
+        })
+    }
+
+    /// 清除指定设备的摄像头内存帧、待处理票据与最近错误（撤销设备或手动清空时调用）。
+    pub fn clear_camera_frame(&self, device_id: &str) {
+        self.shared.camera_preview.clear_device(device_id);
     }
 
     /// 动态开关仅内存对话排障流（无需重启服务；关闭时立即清空内存缓冲）。
@@ -674,6 +748,7 @@ impl VoiceServer {
     }
 
     fn shutdown_now(&mut self) {
+        self.shared.camera_preview.clear_all();
         if let Some(daemon) = self.mdns.take() {
             let _ = daemon.shutdown();
         }
