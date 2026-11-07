@@ -469,22 +469,174 @@ export function deviceView(mode, device) {
   return { text: "未知", tone: "off", hint: `无法判断设备当前连接的服务端：${device?.reason || "未填写接入点健康检查地址"}。` };
 }
 
-const ERROR_TEXT = {
+/**
+ * 诊断分类 → 大白话（2026-11-07 技术书 n68；与 Rust `moss_voice_providers::DiagCategory` 一一对应）。
+ * `cause` 说是哪一类问题，`next` 是没有更具体建议时的通用下一步。
+ */
+export const VOICE_DIAG_CATEGORIES = {
+  general: { label: "一般", cause: "正常运行记录", next: "" },
+  network: { label: "网络", cause: "网络问题：电脑连不上对方服务器，或连接中途断了", next: "检查电脑网络、代理和地址是否填对，稍后再试" },
+  auth: { label: "密钥/权限", cause: "密钥或权限问题：密钥填错、过期，或没有开通这项服务", next: "到服务方控制台核对密钥和权限后重新填写" },
+  quota: { label: "额度", cause: "额度问题：余额不足、今天的额度用完或调用太频繁", next: "充值或等一会儿再试，也可以到控制台提高限额" },
+  config: { label: "配置", cause: "配置问题：地址、模型名或参数填得不对", next: "对照服务方文档检查设置" },
+  device: { label: "设备", cause: "小智设备问题：断线、握手失败或设备回复了错误", next: "检查设备供电和 Wi-Fi，必要时重启设备或升级固件" },
+  firmware: { label: "固件", cause: "固件或资源包问题：设备固件不支持，或推送令牌已失效", next: "确认固件版本，在对应页面重新推送" },
+  model: { label: "模型服务", cause: "模型服务问题：服务方出错或返回了异常内容，或本地模型程序出错", next: "稍后再试，或换一个模型服务" },
+  audio: { label: "声音", cause: "声音处理问题：音频解码、判停或播放出错", next: "换用标准小智固件或换一首歌再试" },
+  internal: { label: "MOSS 内部", cause: "MOSS 程序内部出错（数据库、线程等）", next: "重启 MOSS 再试；一直出现请导出诊断包反馈" },
+};
+
+/** 常见错误码 → 大白话（后端 `message` 不够直白时补上“是什么问题、怎么办”）。 */
+export const VOICE_ERROR_CODES = {
   voice_unavailable: "语音中心不可用：本机后端未启动。",
   voice_desktop_only: "语音中心仅在 MOSS 桌面端可用。",
   self_hosted_endpoint_missing: "还没有可用的自建接入点：在“服务 → 自建接入点”填好 ws:// 地址并保存。",
   server_not_owned: "正在运行的服务端不是 MOSS 启动的，请在启动它的地方关闭。",
   server_external: "服务端端口已被其他程序占用（外部运行的服务端），MOSS 不会再启动一个。",
   model_test_required: "请先用当前填写的内容测试连接并成功后再保存。",
+  voice_acl_denied: "这个操作只能在 MOSS 主窗口里做。",
+  voice_internal: "MOSS 内部出错了，重启 MOSS 再试；一直出现请导出诊断包反馈。",
+  builtin_start_failed: "内置语音服务没能启动。",
+  diagnostics_export_failed: "诊断包没有导出成功。",
 };
 
-/** 桌面端命令错误（`{code, message}`、Error 或字符串）转为界面文字。 */
+function compactJson(value) {
+  try {
+    const text = JSON.stringify(value);
+    if (!text || text === "{}") return "";
+    return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 桌面端命令错误（`{code, message, category?, hint?}`、Error 或字符串）转为界面文字。
+ * 先看错误码与分类给出大白话，再附上后端的具体原因与下一步；任何输入都不会输出 “[object Object]”。
+ */
 export function voiceErrorText(error) {
-  if (!error) return "操作失败";
+  if (error === null || error === undefined || error === "") return "操作失败（没有收到具体原因）";
   if (typeof error === "string") return error;
-  if (typeof error.message === "string" && error.message) return error.message;
-  if (error.code && ERROR_TEXT[error.code]) return ERROR_TEXT[error.code];
-  return String(error);
+  if (typeof error !== "object") return String(error);
+  const rawMessage = error.message;
+  const message = typeof rawMessage === "string"
+    ? rawMessage.trim()
+    : rawMessage && typeof rawMessage === "object"
+      ? voiceErrorText(rawMessage)
+      : "";
+  const code = typeof error.code === "string" ? error.code : "";
+  const known = code ? VOICE_ERROR_CODES[code] : "";
+  const category = typeof error.category === "string" ? VOICE_DIAG_CATEGORIES[error.category] : null;
+  const hint = typeof error.hint === "string" ? error.hint.trim() : "";
+  let text;
+  if (known) {
+    text = message && !known.includes(message) ? `${known}具体原因：${message}` : known;
+  } else if (message) {
+    text = message;
+  } else if (category && category.cause !== VOICE_DIAG_CATEGORIES.general.cause) {
+    text = category.cause;
+  } else if (code) {
+    text = `操作失败（错误码 ${code}）`;
+  } else {
+    const raw = compactJson(error);
+    text = raw ? `操作失败（原始信息：${raw}）` : "操作失败（没有收到具体原因）";
+  }
+  if (hint && !text.includes(hint)) text = `${text.replace(/[。.]$/, "")}。${hint}`;
+  return text;
+}
+
+/** 对话 / 排障轮次的结果（后端 `TurnTiming.outcome` / `TurnDebugTrace.outcome`）→ 中文。 */
+export const VOICE_OUTCOMES = {
+  running: { text: "进行中", tone: "info" },
+  done: { text: "完成", tone: "ok" },
+  interrupted: { text: "被打断", tone: "warn" },
+  ignored: { text: "没识别出文字，已忽略", tone: "off" },
+  music_started: { text: "转去播放音乐", tone: "info" },
+  disconnected: { text: "设备断开，本轮中止", tone: "bad" },
+  failed: { text: "失败", tone: "bad" },
+};
+
+export function voiceOutcomeLabel(outcome) {
+  const key = String(outcome || "");
+  return VOICE_OUTCOMES[key] || { text: key ? `未知结果（${key}）` : "未知结果", tone: "off" };
+}
+
+const EVENT_LEVELS = {
+  info: { text: "记录", tone: "off" },
+  warn: { text: "警告", tone: "warn" },
+  error: { text: "错误", tone: "bad" },
+};
+
+function pad(value, size = 2) {
+  return String(value).padStart(size, "0");
+}
+
+/** 事件时间：月-日 时:分:秒.毫秒（本机时区）；旧格式只有秒时不编造毫秒。 */
+export function formatEventTime(event) {
+  const ms = Number(event?.at_ms);
+  const seconds = Number(event?.at);
+  const hasMs = Number.isFinite(ms) && ms > 0;
+  if (!hasMs && !(Number.isFinite(seconds) && seconds > 0)) return "—";
+  const date = new Date(hasMs ? ms : seconds * 1000);
+  const base = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return hasMs ? `${base}.${pad(date.getMilliseconds(), 3)}` : base;
+}
+
+/** 一条服务事件的显示：级别、分类、时间、说明、下一步（事件自带优先，警告/错误缺省时用分类的通用建议）、技术细节。 */
+export function voiceEventView(event) {
+  const level = EVENT_LEVELS[event?.level] ? event.level : "info";
+  const category = VOICE_DIAG_CATEGORIES[event?.category] ? event.category : "general";
+  const meta = VOICE_DIAG_CATEGORIES[category];
+  const own = typeof event?.hint === "string" ? event.hint.trim() : "";
+  return {
+    key: event?.seq ?? `${event?.at_ms ?? event?.at}-${event?.text}`,
+    level,
+    levelText: EVENT_LEVELS[level].text,
+    tone: EVENT_LEVELS[level].tone,
+    category,
+    categoryLabel: meta.label,
+    cause: level === "info" ? "" : meta.cause,
+    time: formatEventTime(event),
+    text: String(event?.text ?? ""),
+    hint: own || (level === "info" ? "" : meta.next),
+    detail: typeof event?.detail === "string" ? event.detail : "",
+  };
+}
+
+/** “只看错误和警告”筛选；不改动原数组顺序（新的在前）。 */
+export function filterVoiceEvents(events, onlyProblems) {
+  const list = Array.isArray(events) ? events : [];
+  return onlyProblems ? list.filter((event) => event?.level === "warn" || event?.level === "error") : list;
+}
+
+/** 被覆盖记录的提示（计数为 0 时不提示）；绝不悄悄丢记录。 */
+export function voiceEventDropNotices(drops) {
+  const notices = [];
+  const info = Number(drops?.info) || 0;
+  const problems = Number(drops?.problems) || 0;
+  const timings = Number(drops?.timings) || 0;
+  if (problems) notices.push(`有 ${problems} 条较早的错误或警告已被覆盖（最多保留 ${drops?.max_problems ?? 200} 条）`);
+  if (info) notices.push(`有 ${info} 条较早的日常记录已被覆盖（最多保留 ${drops?.max_info ?? 300} 条）`);
+  if (timings) notices.push(`有 ${timings} 轮较早的耗时记录已被覆盖（最多保留 ${drops?.max_timings ?? 50} 轮）`);
+  return notices;
+}
+
+/** 审批列表标题：后端最多返回 `limit` 条，满额时说明更早的没显示，不把它当总数。 */
+export function approvalListSummary(count, limit, error) {
+  if (error) return "读取失败";
+  if (!count) return "暂无";
+  const max = Number(limit) || 0;
+  return max && count >= max ? `最近 ${count} 条（只显示最近 ${max} 条）` : `最近 ${count} 条`;
+}
+
+/** 审批失败 / 取消 / 摘要不一致时的原因（`outcome.message` 与错误码）；成功或尚无结果时为空。 */
+export function approvalOutcomeReason(record) {
+  const outcome = record?.outcome;
+  if (!outcome || outcome.success) return "";
+  const message = String(outcome.message || "").trim();
+  const code = String(outcome.error_code || "").trim();
+  if (message && code) return `${message}（错误码 ${code}）`;
+  return message || (code ? `错误码 ${code}` : "");
 }
 
 const APPROVAL_STATUS = {
@@ -1233,14 +1385,23 @@ export const VOICE_TIMING_STAGES = {
   first_synthesis_ready: "首段音频就绪", first_audio_frame: "首帧发给设备", turn_end: "本轮结束",
 };
 
-/** 复制只取诊断字段；不复制完整服务状态、对话或模型地址。 */
+/** 复制只取诊断字段；不复制完整服务状态、对话或模型地址。
+ * n68：带会话号、设备编号与结束时间；后端新增的阶段也照抄（名称为原始键），只要值是有限数字。 */
 export function voiceTimingReport(timings) {
-  return (Array.isArray(timings) ? timings : []).slice(0, 20).map((item) => ({
-    turn: item.turn, outcome: item.outcome,
-    models: (Array.isArray(item.models) ? item.models : []).map(String),
-    stages: Object.fromEntries(Object.keys(VOICE_TIMING_STAGES).filter((key) => Number.isFinite(item.stages?.[key])).map((key) => [key, item.stages[key]])),
-    tools: (Array.isArray(item.tools) ? item.tools : []).slice(0, 50).map(({ name, ms }) => ({ name, ms })),
-  }));
+  return (Array.isArray(timings) ? timings : []).slice(0, 50).map((item) => {
+    const stages = item?.stages && typeof item.stages === "object" ? item.stages : {};
+    const known = Object.keys(VOICE_TIMING_STAGES).filter((key) => Number.isFinite(stages[key]));
+    const extra = Object.keys(stages).filter((key) => !VOICE_TIMING_STAGES[key] && Number.isFinite(stages[key])).sort();
+    return {
+      session_id: String(item?.session_id ?? ""),
+      device_id: String(item?.device_id ?? ""),
+      at_ms: Number.isFinite(item?.at_ms) ? item.at_ms : null,
+      turn: item?.turn, outcome: item?.outcome,
+      models: (Array.isArray(item?.models) ? item.models : []).map(String),
+      stages: Object.fromEntries([...known, ...extra].map((key) => [key, stages[key]])),
+      tools: (Array.isArray(item?.tools) ? item.tools : []).slice(0, 50).map(({ name, ms }) => ({ name, ms })),
+    };
+  });
 }
 
 // ---------- NV8 接入点与工具 ----------

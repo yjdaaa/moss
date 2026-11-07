@@ -86,7 +86,7 @@ test("workflow details are read from the record without inventing values", () =>
   assert.equal(empty.duration, null);
 });
 
-test("家居控制只在私密窗口批准，全局审批卡只提醒并打开那里（2026-10-14）", async () => {
+test("家居控制要在语音中心家居审批里批准，全局审批卡只提醒并跳到那里（2026-10-14，n67 起不再开独立窗口）", async () => {
   const { approvedInPrivateWindow, kindLabel } = await import("../src/approvalState.js");
   assert.equal(approvedInPrivateWindow("home_control"), true);
   for (const kind of ["workflow_confirm_send", "calibration_send", "safe_action", "framing", "external_tool"]) {
@@ -110,7 +110,7 @@ test("Agent 审批徽标与任务预览字段及家居审批拒绝优先撤销�
   const { approvalTagText, agentApprovalPreview, rejectApprovalRequest } = await import("../src/approvalState.js");
   assert.equal(approvalTagText("agent_run"), "本机 Agent · 本次批准");
   assert.equal(approvalTagText("external_tool"), "第三方工具 · 本次批准");
-  assert.equal(approvalTagText("home_control"), "家居控制 · 私密窗口批准");
+  assert.equal(approvalTagText("home_control"), "家居控制 · 在家居审批里批准");
   assert.equal(approvalTagText("workflow_confirm_send"), "R3 · 运动与出光");
 
   const preview = agentApprovalPreview({

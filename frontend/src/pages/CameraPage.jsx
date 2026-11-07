@@ -356,61 +356,25 @@ export function CameraPage({ onNavigate }) {
       ? "该设备固件未上报摄像头工具（self.camera.take_photo）"
       : activeDevice?.disabledReason || "";
 
+  // 2026-11-07 布局改版：去掉与顶栏重复的大标题和使用说明；左侧设备卡，右侧画面卡；
+  // 抓拍 / 连续刷新放在画面上方工具条，镜像 / 旋转 / 清空收成图标按钮，画面信息叠在画面角上
   return (
     <div className="camera-page" id="camera-page">
-      <header className="camera-header ob-card">
-        <div className="camera-header-title">
-          <span className="camera-header-icon" aria-hidden="true">
-            <Camera size={20} />
-          </span>
-          <div>
-            <h1>小智摄像头</h1>
-            <p>
-              直接查看已连接小智设备的实时抓拍与语音拍照问答画面（仅存本机内存，不落盘、无需配置视觉模型密钥）
-            </p>
-          </div>
-        </div>
-        <div className="camera-header-badges">
-          <span
-            className={`ob-pill ${view.running ? TONE_CLASS.ok : TONE_CLASS.off}`}
-            id="camera-service-pill"
-          >
-            <Radio size={13} aria-hidden="true" />
-            <span>{view.running ? `内置语音运行中 · HTTP ${view.httpPort}` : "内置语音未启动"}</span>
-          </span>
-          {onNavigate && (
-            <button
-              type="button"
-              className="btn btn-ghost camera-jump-voice"
-              id="camera-open-voice-center"
-              onClick={() => onNavigate("/voice")}
-            >
-              <span>语音中心</span>
-              <ArrowUpRight size={14} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-      </header>
-
       {!view.running && builtinStatus && (
         <section className="camera-banner ob-card" role="status" id="camera-stopped-banner">
           <div className="camera-banner-text">
             <AlertTriangle size={16} aria-hidden="true" />
-            <span>
-              内置语音服务尚未运行。启动后，已配网允许的小智设备会自动连回本机并可随时抓拍画面。
-            </span>
+            <span>内置语音服务没有运行，小智设备连不上本机，所以看不到画面。</span>
           </div>
-          <div className="camera-banner-actions">
-            <button
-              type="button"
-              className="btn btn-hud-primary"
-              id="camera-start-builtin-btn"
-              disabled={startingServer}
-              onClick={handleStartBuiltin}
-            >
-              {startingServer ? "正在启动…" : "一键启动内置语音服务"}
-            </button>
-          </div>
+          <button
+            type="button"
+            className="btn btn-hud-primary"
+            id="camera-start-builtin-btn"
+            disabled={startingServer}
+            onClick={handleStartBuiltin}
+          >
+            {startingServer ? "正在启动…" : "启动内置语音服务"}
+          </button>
         </section>
       )}
 
@@ -418,16 +382,10 @@ export function CameraPage({ onNavigate }) {
         <section className="camera-banner camera-banner--info ob-card" role="status">
           <div className="camera-banner-text">
             <Sparkles size={16} aria-hidden="true" />
-            <span>
-              检测到 {view.pendingCount} 台待允许的新小智设备，请先前往「语音中心」点击允许后再查看摄像头。
-            </span>
+            <span>有 {view.pendingCount} 台新的小智设备在等你允许，允许后才能看它的摄像头。</span>
           </div>
           {onNavigate && (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => onNavigate("/voice")}
-            >
+            <button type="button" className="btn btn-ghost" onClick={() => onNavigate("/voice")}>
               去允许设备
             </button>
           )}
@@ -435,62 +393,76 @@ export function CameraPage({ onNavigate }) {
       )}
 
       <div className="camera-grid">
-        <aside className="camera-sidebar ob-card" aria-label="摄像头设备与控制">
-          <div className="camera-section">
-            <div className="camera-section-head">
-              <h2>选择设备</h2>
-              <span className="ob-pill ob-pill--off">{view.devices.length} 台已允许</span>
+        <aside className="camera-sidebar hud-card ob-card" aria-label="摄像头设备">
+          <div className="camera-section-head">
+            <h2>设备</h2>
+            <span className="ob-pill ob-pill--off">{view.devices.length} 台已允许</span>
+          </div>
+          {view.devices.length === 0 ? (
+            <div className="camera-empty-devices" id="camera-no-devices">
+              <p>还没有已允许的小智设备。</p>
+              <small>把小智固件的 OTA 地址指向本机语音中心后开机，再到「语音中心 → 服务与设备」点一次允许。</small>
             </div>
-            {view.devices.length === 0 ? (
-              <div className="camera-empty-devices" id="camera-no-devices">
-                <p>还没有已允许的小智设备。</p>
-                <small>
-                  将小智固件 OTA 地址指向本机语音中心后开机，在「语音中心 → 服务与设备」点一次允许即可出现。
-                </small>
-              </div>
-            ) : (
-              <div className="camera-device-list" role="listbox" aria-label="已允许的小智设备">
-                {view.devices.map((dev) => {
-                  const selected = dev.deviceId === selectedDeviceId;
-                  return (
-                    <button
-                      key={dev.deviceId}
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      className={`camera-device-item${selected ? " is-selected" : ""}`}
-                      onClick={() => setSelectedDeviceId(dev.deviceId)}
-                    >
-                      <div className="camera-device-row">
-                        <strong>{dev.title}</strong>
-                        <span
-                          className={`ob-pill ${
-                            dev.canCapture
-                              ? TONE_CLASS.ok
-                              : dev.online
-                                ? TONE_CLASS.warn
-                                : TONE_CLASS.off
-                          }`}
-                        >
-                          {dev.online ? dev.sessionStateLabel : "离线"}
-                        </span>
-                      </div>
-                      <div className="camera-device-meta">
-                        {dev.ip && <span>{dev.ip}</span>}
-                        {dev.model && <span>{dev.model}</span>}
-                        {dev.hasCameraTool === true && <span>支持拍照</span>}
-                        {dev.hasCameraTool === false && <span>无摄像头工具</span>}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+          ) : (
+            <div className="camera-device-list" role="listbox" aria-label="已允许的小智设备">
+              {view.devices.map((dev) => {
+                const selected = dev.deviceId === selectedDeviceId;
+                return (
+                  <button
+                    key={dev.deviceId}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={`camera-device-item${selected ? " is-selected" : ""}`}
+                    onClick={() => setSelectedDeviceId(dev.deviceId)}
+                  >
+                    <div className="camera-device-row">
+                      <strong>{dev.title}</strong>
+                      <span
+                        className={`ob-pill ${
+                          dev.canCapture ? TONE_CLASS.ok : dev.online ? TONE_CLASS.warn : TONE_CLASS.off
+                        }`}
+                      >
+                        {dev.online ? dev.sessionStateLabel : "离线"}
+                      </span>
+                    </div>
+                    <div className="camera-device-meta">
+                      {dev.ip && <span>{dev.ip}</span>}
+                      {dev.model && <span>{dev.model}</span>}
+                      {dev.hasCameraTool === true && <span>支持拍照</span>}
+                      {dev.hasCameraTool === false && <span>无摄像头工具</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="camera-service-row">
+            <span
+              className={`ob-pill ${view.running ? TONE_CLASS.ok : TONE_CLASS.off}`}
+              id="camera-service-pill"
+            >
+              <Radio size={12} aria-hidden="true" />
+              <span>{view.running ? `内置语音运行中 · 端口 ${view.httpPort}` : "内置语音未启动"}</span>
+            </span>
+            {onNavigate && (
+              <button
+                type="button"
+                className="btn btn-ghost camera-jump-voice"
+                id="camera-open-voice-center"
+                onClick={() => onNavigate("/voice")}
+              >
+                <span>语音中心</span>
+                <ArrowUpRight size={13} aria-hidden="true" />
+              </button>
             )}
           </div>
+        </aside>
 
-          <div className="camera-section">
-            <h2>画面控制</h2>
-            <div className="camera-controls-primary">
+        <section className="camera-stage hud-card ob-card" aria-label="摄像头画面">
+          <div className="camera-toolbar" role="toolbar" aria-label="画面控制">
+            <div className="camera-toolbar-main">
               <button
                 type="button"
                 className="btn btn-hud-primary camera-capture-btn"
@@ -500,17 +472,16 @@ export function CameraPage({ onNavigate }) {
               >
                 {isWaitingFrame ? (
                   <>
-                    <RefreshCw size={16} className="spin" aria-hidden="true" />
-                    <span>正在抓拍回传…</span>
+                    <RefreshCw size={15} className="spin" aria-hidden="true" />
+                    <span>正在回传…</span>
                   </>
                 ) : (
                   <>
-                    <Camera size={16} aria-hidden="true" />
-                    <span>抓拍一张</span>
+                    <Camera size={15} aria-hidden="true" />
+                    <span>抓拍</span>
                   </>
                 )}
               </button>
-
               <button
                 type="button"
                 className={`btn ${autoRefresh ? "btn-hud-primary" : "btn-ghost"} camera-auto-btn`}
@@ -518,94 +489,59 @@ export function CameraPage({ onNavigate }) {
                 aria-pressed={autoRefresh}
                 disabled={!effectiveCanCapture && !autoRefresh}
                 onClick={handleToggleAuto}
+                title="每约 1.6 秒抓拍一张；你和小智说话时会自动暂停"
               >
-                {autoRefresh ? <Pause size={15} aria-hidden="true" /> : <Play size={15} aria-hidden="true" />}
-                <span>{autoRefresh ? "停止自动刷新" : "自动刷新（约 1.6 秒/帧）"}</span>
+                {autoRefresh ? <Pause size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+                <span>{autoRefresh ? "停止连续刷新" : "连续刷新"}</span>
               </button>
             </div>
-
-            {disabledHint && (
-              <p className="camera-hint camera-hint--warn" id="camera-disabled-reason">
-                {disabledHint}
-              </p>
-            )}
-            {autoRefresh && autoGate.pausedReason && (
-              <p className="camera-hint camera-hint--info" id="camera-auto-paused-reason">
-                {autoGate.pausedReason}
-              </p>
-            )}
-
-            <div className="camera-view-tools">
+            <div className="camera-toolbar-tools">
               <button
                 type="button"
-                className={`btn btn-ghost camera-tool-btn${viewPrefs.mirror ? " is-on" : ""}`}
+                className={`camera-icon-btn${viewPrefs.mirror ? " is-on" : ""}`}
                 id="camera-mirror-btn"
                 aria-pressed={viewPrefs.mirror}
+                aria-label="水平镜像"
+                title="水平镜像"
                 onClick={() => updateViewPref("mirror")}
               >
-                <FlipHorizontal2 size={14} aria-hidden="true" />
-                <span>水平镜像</span>
+                <FlipHorizontal2 size={15} aria-hidden="true" />
               </button>
               <button
                 type="button"
-                className={`btn btn-ghost camera-tool-btn${viewPrefs.flip180 ? " is-on" : ""}`}
+                className={`camera-icon-btn${viewPrefs.flip180 ? " is-on" : ""}`}
                 id="camera-flip-btn"
                 aria-pressed={viewPrefs.flip180}
+                aria-label="旋转 180°"
+                title="旋转 180°（摄像头倒装时用）"
                 onClick={() => updateViewPref("flip180")}
               >
-                <RotateCw size={14} aria-hidden="true" />
-                <span>旋转 180°</span>
+                <RotateCw size={15} aria-hidden="true" />
               </button>
               <button
                 type="button"
-                className="btn btn-ghost camera-tool-btn"
+                className="camera-icon-btn"
                 id="camera-clear-btn"
+                aria-label="清空画面"
+                title="清空画面"
                 disabled={!frame && !displayError}
                 onClick={handleClearFrame}
               >
-                <Trash2 size={14} aria-hidden="true" />
-                <span>清空画面</span>
+                <Trash2 size={15} aria-hidden="true" />
               </button>
             </div>
           </div>
 
-          <div className="camera-section camera-tips">
-            <h2>使用说明</h2>
-            <ul>
-              <li>点击「抓拍一张」只在局域网内回传 JPEG 画面，不消耗任何大模型额度。</li>
-              <li>对小智说「拍一下看看这是什么」时，照片与识别回答也会同步显示在这里。</li>
-              <li>你跟小智说话或小智播报期间，自动刷新会自动让路，保证语音不卡顿。</li>
-            </ul>
-          </div>
-        </aside>
-
-        <section className="camera-stage ob-card" aria-label="摄像头画面预览">
-          <div className="camera-stage-bar">
-            <div className="camera-stage-meta">
-              <span className={`ob-pill ${TONE_CLASS[sourceBadge.tone] || TONE_CLASS.off}`} id="camera-source-pill">
-                {sourceBadge.label}
-              </span>
-              {frame && (
-                <>
-                  <span className="camera-meta-chip" id="camera-resolution">
-                    {frame.width} × {frame.height}
-                  </span>
-                  <span className="camera-meta-chip">
-                    {formatBytes(frame.size_bytes || 0)}
-                  </span>
-                  <span className="camera-meta-chip">
-                    抓拍于 {formatCaptureTime(frame.captured_at)}
-                  </span>
-                </>
-              )}
-            </div>
-            {autoRefresh && (
-              <span className="ob-pill ob-pill--ok" id="camera-live-pill">
-                自动刷新中
-              </span>
-            )}
-          </div>
-
+          {disabledHint && (
+            <p className="camera-hint camera-hint--warn" id="camera-disabled-reason">
+              {disabledHint}
+            </p>
+          )}
+          {autoRefresh && autoGate.pausedReason && (
+            <p className="camera-hint camera-hint--info" id="camera-auto-paused-reason">
+              {autoGate.pausedReason}
+            </p>
+          )}
           {displayError && (
             <div className="camera-error" role="alert" id="camera-error-box">
               <AlertTriangle size={15} aria-hidden="true" />
@@ -624,19 +560,38 @@ export function CameraPage({ onNavigate }) {
               />
             ) : (
               <div className="camera-placeholder" id="camera-placeholder">
-                <Camera size={40} aria-hidden="true" />
+                <Camera size={36} aria-hidden="true" />
                 <strong>
                   {isWaitingFrame
-                    ? "正在等待小智设备拍照并回传画面…"
+                    ? "正在等小智拍照并传回画面…"
                     : effectiveCanCapture
-                      ? "点击左侧「抓拍一张」查看当前摄像头画面"
+                      ? "点上方「抓拍」看当前画面"
                       : "暂无摄像头画面"}
                 </strong>
                 <span>
                   {effectiveCanCapture
-                    ? "为保护隐私，切换标签页不会自动开启摄像头；需要时点一下即可抓拍。"
-                    : disabledHint || "请先连接带摄像头的小智设备（如立创实战派 ESP32-S3）"}
+                    ? "画面只在局域网内传回本机，不用模型额度；进入本页不会自动开摄像头。对小智说「拍一下看看」时，照片和回答也会显示在这里。"
+                    : disabledHint || "请先连接带摄像头的小智设备（如立创实战派 ESP32-S3）。"}
                 </span>
+              </div>
+            )}
+            <div className="camera-overlay camera-overlay--top">
+              <span className={`ob-pill ${TONE_CLASS[sourceBadge.tone] || TONE_CLASS.off}`} id="camera-source-pill">
+                {sourceBadge.label}
+              </span>
+              {autoRefresh && (
+                <span className="ob-pill ob-pill--ok" id="camera-live-pill">
+                  连续刷新中
+                </span>
+              )}
+            </div>
+            {frame && (
+              <div className="camera-overlay camera-overlay--bottom">
+                <span className="camera-meta-chip" id="camera-resolution">
+                  {frame.width} × {frame.height}
+                </span>
+                <span className="camera-meta-chip">{formatBytes(frame.size_bytes || 0)}</span>
+                <span className="camera-meta-chip">抓拍于 {formatCaptureTime(frame.captured_at)}</span>
               </div>
             )}
           </div>

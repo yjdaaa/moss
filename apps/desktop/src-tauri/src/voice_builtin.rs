@@ -17,54 +17,19 @@ use serde_json::Value;
 
 type CmdResult = Result<Value, Value>;
 
-/// Defense in depth beyond Tauri ACL: private commands require the unique
-/// packaged voice-private webview and its original local asset URL.
-#[cfg(desktop)]
-pub(crate) fn is_voice_private_asset(
-    label: &str, scheme: &str, host: Option<&str>, port: Option<u16>,
-    path: &str, query: Option<&str>, fragment: Option<&str>,
-) -> bool {
-    label == "voice-private"
-        && port.is_none() && query.is_none() && fragment.is_none()
-        && path == "/voice-private.html"
-        && ((matches!(scheme, "http" | "https") && host == Some("tauri.localhost"))
-            || (scheme == "tauri" && host == Some("localhost")))
-}
-
-#[cfg(desktop)]
-pub(crate) fn require_voice_private_asset(window: &tauri::WebviewWindow) -> Result<(), Value> {
-    let fail = || serde_json::json!({
-        "code": "voice_acl_denied",
-        "message": "私人记忆和插件配置只能在 MOSS 本地安全设置窗口访问"
-    });
-    let url = window.url().map_err(|_| fail())?;
-    if !is_voice_private_asset(
-        window.label(), url.scheme(), url.host_str(), url.port(),
-        url.path(), url.query(), url.fragment(),
-    ) {
-        return Err(fail());
-    }
-    Ok(())
-}
-
-/// 敏感语音设置窗口：打包的私密页，或经 [`crate::window_is_trusted_main`] 确认的 MOSS 主窗口。
+/// 敏感语音设置窗口：只接受经 [`crate::window_is_trusted_main`] 确认的 MOSS 主窗口。
 ///
-/// 2026-10-18 用户决定（技术书 n26）：记忆、信息服务、声纹、家居四项在主语音页就地展开，
-/// 主窗口因此获得这些设置命令；固件导入与推送不在此列，仍只认 [`require_voice_private_asset`]。
+/// 2026-10-18 用户决定（技术书 n26）：记忆、信息服务、声纹、家居四项在主语音页就地展开；
+/// 2026-11-07 用户决定（n67）：取消独立的本机安全设置窗口，唤醒词与固件升级也放进语音中心，
+/// 推送前逐台确认不变。Tauri ACL（`voice-private-main.json`）是第一层，这里固定来源为本进程后端。
 #[cfg(desktop)]
 pub(crate) fn require_private_settings_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
-    let packaged_private = window.url().is_ok_and(|url| {
-        is_voice_private_asset(
-            window.label(), url.scheme(), url.host_str(), url.port(),
-            url.path(), url.query(), url.fragment(),
-        )
-    });
-    if packaged_private || crate::window_is_trusted_main(window) {
+    if crate::window_is_trusted_main(window) {
         return Ok(());
     }
     Err(serde_json::json!({
         "code": "voice_acl_denied",
-        "message": "私人记忆、信息服务、声纹与家居设置只能在 MOSS 主窗口或本机安全设置窗口修改"
+        "message": "这项语音设置只能在 MOSS 主窗口里修改"
     }))
 }
 
@@ -80,41 +45,16 @@ fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
     }))
 }
 
-/// 读取内置语音状态的窗口：经 [`crate::window_is_trusted_main`] 确认的主窗口，或打包私密页。
+/// 读取内置语音状态的窗口：经 [`crate::window_is_trusted_main`] 确认的主窗口。
 /// 判定与 [`require_private_settings_window`] 相同，只换成“查看状态”的提示。
 #[cfg(desktop)]
 fn require_status_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
     require_private_settings_window(window).map_err(|_| {
         serde_json::json!({
             "code": "voice_acl_denied",
-            "message": "内置语音状态只能在 MOSS 主窗口或本机安全设置窗口查看"
+            "message": "内置语音状态只能在 MOSS 主窗口查看"
         })
     })
-}
-
-#[cfg(all(test, desktop))]
-#[test]
-fn sensitive_voice_commands_require_packaged_private_window_origin() {
-    let allowed = |label, scheme, host, port, path, query, fragment| {
-        is_voice_private_asset(label, scheme, host, port, path, query, fragment)
-    };
-    assert!(allowed("voice-private", "http", Some("tauri.localhost"), None,
-        "/voice-private.html", None, None));
-    assert!(allowed("voice-private", "tauri", Some("localhost"), None,
-        "/voice-private.html", None, None));
-    for (label, scheme, host, port, path, query, fragment) in [
-        ("main", "http", Some("tauri.localhost"), None, "/voice-private.html", None, None),
-        ("main", "http", Some("127.0.0.1"), Some(9666), "/voice-private.html", None, None),
-        ("voice-private", "http", Some("127.0.0.1"), Some(9666), "/voice-private.html", None, None),
-        ("voice-private", "https", Some("example.com"), None, "/voice-private.html", None, None),
-        ("voice-private", "http", Some("tauri.localhost"), Some(8080), "/voice-private.html", None, None),
-        ("voice-private", "http", Some("tauri.localhost"), None, "/index.html", None, None),
-        ("voice-private", "http", Some("tauri.localhost"), None, "/voice-private.html", Some("x=1"), None),
-        ("voice-private", "http", Some("tauri.localhost"), None, "/voice-private.html", None, Some("leak")),
-    ] {
-        assert!(!allowed(label, scheme, host, port, path, query, fragment),
-            "unexpectedly allowed: {label}/{scheme}/{host:?}/{path}");
-    }
 }
 
 /// NV19-08: entry points for `voice_context.rs` commands (the backend type stays private).
@@ -148,7 +88,7 @@ mod imp {
     use moss_voice_providers::openai::{OpenAiAsr, OpenAiLlm, OpenAiTts};
     use moss_voice_providers::{Asr, StreamingAsr, Tts};
     use moss_voice_server::{
-        Conversation, ConversationSettings, DeviceRegistry, DeviceStatus, DeviceVisit, HostTools,
+        Conversation, ConversationSettings, DeviceRegistry, DeviceStatus, DeviceVisit, DiagCategory, EventRecord, HostTools,
         JevFilterOptions, LocalVadFactory, OpenRouterDecisionClient, ServerConfig, ServerMode,
         ToolContext, ToolHost, ToolHostResult, VadFactory, VoiceJevFilter, VoiceServer,
     };
@@ -165,8 +105,18 @@ mod imp {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
     }
 
+    /// 字符串版本（设备登记、记忆等内部接口用）：大白话在前，脱敏后的原始错误在括号里。
     fn db_error(error: impl std::fmt::Debug) -> String {
-        format!("数据库操作失败：{error:?}")
+        format!(
+            "MOSS 本机设置数据库读写失败（原始信息：{}）",
+            moss_voice_providers::scrub_diagnostic_text(&format!("{error:?}"))
+        )
+    }
+
+    /// 本机数据库失败：界面只说大白话，原始错误（Debug 文本，已脱敏）放进 `detail`（2026-11-07 n68）。
+    fn db_failure(error: impl std::fmt::Debug) -> CenterError {
+        internal("MOSS 本机设置数据库读写失败，请重启 MOSS 再试；一直失败请导出诊断包反馈")
+            .with_detail(moss_voice_providers::scrub_diagnostic_text(&format!("{error:?}")))
     }
 
     fn internal(message: impl Into<String>) -> CenterError {
@@ -181,10 +131,12 @@ mod imp {
         changes: &[(String, Option<String>)],
         save_settings: impl FnOnce() -> Result<(), CenterError>,
     ) -> Result<(), CenterError> {
-        let previous = db.apply_secret_changes(changes, now()).map_err(|error| internal(db_error(error)))?;
+        let previous = db.apply_secret_changes(changes, now()).map_err(db_failure)?;
         let Err(error) = save_settings() else { return Ok(()) };
         if let Err(restore) = db.restore_secrets(&previous, now()) {
-            return Err(internal(format!("{}；密钥还原也失败，请重新保存：{}", error.message, db_error(restore))));
+            return Err(internal(format!("{}；密钥还原也失败，请重新保存", error.message)).with_detail(
+                moss_voice_providers::scrub_diagnostic_text(&format!("{restore:?}")),
+            ));
         }
         Err(error)
     }
@@ -198,7 +150,7 @@ mod imp {
     ) -> Result<(Option<String>, bool), CenterError> {
         if let Some(own) = db
             .get_secret("jev_api_key")
-            .map_err(|e| internal(format!("{e:?}")))?
+            .map_err(db_failure)?
             .filter(|v| !v.trim().is_empty())
         {
             return Ok((Some(own), true));
@@ -212,7 +164,7 @@ mod imp {
         if openrouter_llm {
             let peer = db
                 .get_secret(builtin_secret_name(Section::Llm))
-                .map_err(|e| internal(format!("{e:?}")))?
+                .map_err(db_failure)?
                 .filter(|v| !v.trim().is_empty());
             return Ok((peer, false));
         }
@@ -1343,6 +1295,9 @@ mod imp {
         home_control:Arc<laser_host::home_control::HomeControlCoordinator>,
         /// 最近一次自动启动失败的原因（语音链路为内置服务时随 MOSS 启动）
         last_error: Mutex<Option<String>>,
+        /// 诊断记录本（2026-11-07 n68）：服务事件、对话耗时与桌面端后台失败（本地模型、Laya、固件记录等），
+        /// 传给每次启动的语音服务，停止、重启、崩溃重启都不清空；导出诊断包时整份写出。
+        diagnostics: Arc<moss_voice_server::DiagnosticsLog>,
         /// 本地音乐目录换机或拔盘不可用时的降级提示（不阻断内置语音主服务启动）
         music_warning: Mutex<Option<String>>,
         /// 声纹模型或辅助程序未就绪时的降级提示（保持个人上下文隔离，不回退共享设备记忆）
@@ -1672,11 +1627,17 @@ mod imp {
 
     pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
         BuiltinState(host.map(|host| {
+            let diagnostics = moss_voice_server::DiagnosticsLog::new();
             let setting_path=host.runtime_root.path.join("settings.json");
             if let Err(error)=laser_host::voice_agent::AgentCoordinator::attach(
                 &host.api_service,host.db.clone(),setting_path.clone(),vec![host.runtime_root.path.clone()]
             ) {
                 eprintln!("[moss-desktop] AgentRun 只读工具不可用：{error}");
+                diagnostics.push(
+                    EventRecord::warn(DiagCategory::Internal, "本机 Agent 的只读工具没能挂上，语音里暂时用不了 Agent 查询")
+                        .hint("重启 MOSS 再试；不用 Agent 功能可以忽略")
+                        .detail(&error),
+                );
             }
             let default_models_dir = writable_install_dir()
                 .map(|dir| dir.join("models"))
@@ -1700,6 +1661,10 @@ mod imp {
             let cleaned = models.clean_leftovers();
             if cleaned > 0 {
                 eprintln!("[moss-desktop] 已清理 {cleaned} 个本地模型下载残留");
+                diagnostics.push(EventRecord::info(
+                    DiagCategory::Model,
+                    format!("已清理 {cleaned} 个本地模型下载残留（上次下载中途退出留下的半截文件）"),
+                ));
             }
             // 2026-11-07：macOS / Linux 上 MOSS 崩溃或被强制结束后，OneJev 推理进程会被系统收养继续占着内存；
             // 启动时只结束 MOSS 模型目录里 OneJev 权重对应、父进程已不在的那些（Windows 由 Job Object 自动处理）
@@ -1713,6 +1678,13 @@ mod imp {
                 let reaped = moss_voice::onejev::reap_orphaned_llama_servers(&roots);
                 if reaped > 0 {
                     eprintln!("[moss-desktop] 已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程");
+                    diagnostics.push(
+                        EventRecord::warn(
+                            DiagCategory::Model,
+                            format!("已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程"),
+                        )
+                        .hint("说明 MOSS 上次没有正常退出（崩溃、强制结束或断电）；偶尔一次不用处理"),
+                    );
                 }
             }
             let memory = MemoryService::new(Arc::new(DbMemoryStore { db: host.db.clone() }));
@@ -1725,7 +1697,16 @@ mod imp {
             let identity=Arc::new(DesktopIdentity{host:Arc::downgrade(&host),backend:speaker_backend.clone(),calibration:Mutex::new(saved_calibration),workers:Arc::new(tokio::sync::Semaphore::new(2))});
             let personal=PersonContext::new(identity.clone(),Arc::new(DbPersonStore{db:host.db.clone()}));
             if let Ok(mut slot)=speaker_backend.personal.lock(){*slot=Some(Arc::downgrade(&personal));}
-            if let Ok(db)=host.db.lock(){if db.recover_firmware_downloads(now()).is_err(){eprintln!("[moss-desktop] 固件下载记录恢复失败，固件传输仍禁用");}}
+            if let Ok(db)=host.db.lock()
+                && let Err(error)=db.recover_firmware_downloads(now())
+            {
+                eprintln!("[moss-desktop] 固件下载记录恢复失败，固件传输仍禁用");
+                diagnostics.push(
+                    EventRecord::error(DiagCategory::Firmware, "固件下载记录恢复失败，这次运行不能给设备推送固件")
+                        .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
+                        .detail(format!("{error:?}")),
+                );
+            }
             let identity_for_context = identity.clone();
             let db_for_context = host.db.clone();
             let calibrated_speakers: crate::voice_context::host::CalibratedSpeakersFn = Arc::new(move || {
@@ -1763,6 +1744,7 @@ mod imp {
                 server: Arc::new(Mutex::new(None)),
                 debug_trace_enabled: std::sync::atomic::AtomicBool::new(false),
                 last_error: Mutex::new(None),
+                diagnostics,
                 music_warning: Mutex::new(None),
                 speaker_warning: Mutex::new(None),
                 models,
@@ -1788,6 +1770,58 @@ mod imp {
         }))
     }
 
+    /// 诊断包里的审批记录条数（与 `/v1/approvals` 列表上限一致）。
+    pub(super) const APPROVALS_IN_BUNDLE: usize = 50;
+    /// 诊断包自带的“包含 / 不包含”说明，拿到文件的人不用翻文档也知道里面有什么。
+    pub(super) const BUNDLE_INCLUDED: &[&str] = &[
+        "MOSS 版本、操作系统与 CPU 架构",
+        "语音链路、服务是否运行、端口",
+        "云端模型的服务类型、地址（去掉账号密码与查询参数，IP 换成 <ip>）、模型名、音色，以及是否填过密钥（只有是/否）",
+        "本地模型安装与运行状态、Jev 决策服务状态",
+        "全部保留的服务事件（日常记录最多 300 条、错误与警告最多 200 条）及被覆盖条数",
+        "最近 50 轮对话各阶段耗时（含会话号与设备编号）",
+        "排障开关打开时最近 10 轮的识别原话、工具参数与回复（关闭时为空）",
+        "在线会话与已登记设备（设备编号、名称、型号、固件版本、授权状态；IP 换成 <ip>）",
+        "最近 50 条审批记录及执行结果说明与错误码",
+        "最近一次启动失败原因与当前降级提示",
+    ];
+    pub(super) const BUNDLE_EXCLUDED: &[&str] = &[
+        "任何密钥、令牌、密码（只记录是否填过）",
+        "录音和合成音频",
+        "排障开关关闭时的对话文字",
+        "对话记忆、长期记忆、资料库内容与声纹",
+        "家居地址与令牌、固件文件",
+        "设备上报的原始状态快照（可能含 Wi-Fi 名称等）",
+    ];
+
+    /// 诊断包整体脱敏：每个字符串先过 `moss_voice::redact::redact_line`（`api_key: …`、`Authorization: …` 一类），
+    /// 再过 [`moss_voice_providers::scrub_diagnostic_text`]（疑似密钥、带凭据或查询参数的地址、IPv4 地址）。
+    pub(super) fn scrub_bundle(value: &mut Value) {
+        match value {
+            Value::String(text) => {
+                *text = moss_voice_providers::scrub_diagnostic_text(&moss_voice::redact::redact_line(text));
+            }
+            Value::Array(items) => items.iter_mut().for_each(scrub_bundle),
+            Value::Object(map) => map.values_mut().for_each(scrub_bundle),
+            _ => {}
+        }
+    }
+
+    /// 本地 Jev（OneJev / Laya）启动失败 → 诊断事件。
+    fn local_jev_failure(what: &str, err: &str) -> EventRecord {
+        EventRecord::warn(DiagCategory::Model, what)
+            .hint("Jev 只做信息筛选，失败时语音照常可用；到“服务 → 本地模型”检查模型是否下载完整、运行环境是否就绪")
+            .detail(err)
+    }
+
+    /// 内置语音服务启动失败 → 诊断事件（端口占用归网络类，其余按配置类）。
+    fn start_failure_event(what: &str, error: &CenterError) -> EventRecord {
+        let category = if error.message.contains("端口") { DiagCategory::Network } else { DiagCategory::Config };
+        EventRecord::error(category, format!("{what}：{}", error.message))
+            .hint("按提示改好后，在“服务”标签点“启动”重试")
+            .detail(format!("错误码 {}", error.code))
+    }
+
     /// 语音链路为“内置服务”时，在后台启动内置语音服务；若启用了本地 Laya 加工反馈，即使当前非内置语音模式也在后台拉起本地 Laya。
     pub fn autostart(state: &BuiltinState) {
         let Some(builtin) = state.0.clone() else { return };
@@ -1800,6 +1834,7 @@ mod imp {
             if start_feedback_laya {
                 if let Err(err) = builtin.ensure_laya_running(false) {
                     eprintln!("[moss-desktop] 本地 Laya 决策服务自动启动失败：{err}");
+                    builtin.diagnostics.push(local_jev_failure("MOSS 启动时自动拉起本地 Jev 决策服务失败", &err));
                 }
             }
             if start_voice {
@@ -1842,7 +1877,7 @@ mod imp {
 
         fn secret(&self, section: Section) -> Result<Option<String>, CenterError> {
             let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-            db.get_secret(builtin_secret_name(section)).map_err(|error| internal(db_error(error)))
+            db.get_secret(builtin_secret_name(section)).map_err(db_failure)
         }
 
         fn devices(&self) -> Value {
@@ -1898,20 +1933,20 @@ mod imp {
                 ));
             }
             let exe = helper_path().ok_or_else(|| start_error("无法确定 MOSS 程序所在目录"))?;
-            let helper = LocalHelper::spawn(&exe).map_err(|error| start_error(error.0))?;
+            let helper = LocalHelper::spawn(&exe).map_err(|error| start_error(error.to_string()))?;
             let mut parts = LocalParts::default();
             if let Some((spec, model)) = vad {
                 let engine = if spec.engine == Engine::TenVad { VadEngine::Ten } else { VadEngine::Silero };
                 helper
                     .load_vad(&model, VadParams::for_engine(engine), engine)
-                    .map_err(|error| start_error(format!("本地判停（{}）：{}", spec.label, error.0)))?;
+                    .map_err(|error| start_error(format!("本地判停（{}）：{}", spec.label, error)))?;
                 parts.vad = Some(Arc::new(LocalVadFactory { helper: helper.clone() }));
             }
             if let Some((spec, dir)) = asr {
                 let engine =
                     if spec.engine == Engine::StreamingTransducer { AsrEngine::StreamingTransducer } else { AsrEngine::SenseVoice };
                 helper.load_asr_with_options(&dir, engine, moss_voice_providers::local::AsrDecodeOptions { beam_search: local.asr_beam_search, hotwords: self.hotwords(local) })
-                    .map_err(|error| start_error(format!("本地识别（{}）：{}", spec.label, error.0)))?;
+                    .map_err(|error| start_error(format!("本地识别（{}）：{}", spec.label, error)))?;
                 parts.asr = Some(LocalAsr { helper: helper.clone() });
                 if engine.streaming() {
                     parts.streaming_asr = Some(Arc::new(LocalStreamingAsr { helper: helper.clone() }));
@@ -1920,7 +1955,7 @@ mod imp {
             if let Some((spec, dir)) = tts {
                 let engine = if spec.engine == Engine::Matcha { TtsEngine::Matcha } else { TtsEngine::Kokoro };
                 let info =
-                    helper.load_tts(&dir, engine).map_err(|error| start_error(format!("本地合成（{}）：{}", spec.label, error.0)))?;
+                    helper.load_tts(&dir, engine).map_err(|error| start_error(format!("本地合成（{}）：{}", spec.label, error)))?;
                 // 单音色模型忽略音色编号
                 let speaker = if info.speakers > 1 {
                     if local.tts_speaker < 0 || local.tts_speaker as u32 >= info.speakers {
@@ -1947,7 +1982,7 @@ mod imp {
         ) -> Result<Option<(Conversation, bool)>, CenterError> {
             let Some(llm) = &models.llm else { return Ok(None) };
             let key = |section| self.secret(section).map(Option::unwrap_or_default);
-            let invalid = |error: moss_voice_providers::ProviderError| CenterError::new("builtin_models_invalid", 400, error.0);
+            let invalid = |error: moss_voice_providers::ProviderError| CenterError::new("builtin_models_invalid", 400, error.to_string());
             let hotwords = self.hotwords(experience);
             let mut streaming_asr: Option<Arc<dyn StreamingAsr>> = None;
             let asr: Arc<dyn Asr> = match (local.asr.take(), &models.asr) {
@@ -2085,6 +2120,10 @@ mod imp {
                     Err(error) => {
                         let warning = format!("声纹按人记忆暂未生效（{}）：当前按未知身份处理、不会回退共享设备记忆，请下载声纹模型后重启内置服务", error.message);
                         eprintln!("[moss-desktop] {warning}");
+                        self.diagnostics.push(
+                            EventRecord::warn(DiagCategory::Model, warning.clone())
+                                .hint("到“隐私与家居 → 声纹”下载声纹模型，再重启内置服务"),
+                        );
                         if let Ok(mut slot) = self.speaker_warning.lock() { *slot = Some(warning); }
                     }
                 }
@@ -2198,8 +2237,11 @@ mod imp {
                     },
                 },
                 "sessions": view.as_ref().map(|view| serde_json::to_value(&view.sessions).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
-                "events": view.as_ref().map(|view| serde_json::to_value(&view.events).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
-                "timings": view.as_ref().map(|view| serde_json::to_value(&view.timings).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
+                // n68：事件与耗时来自桌面端持有的诊断记录本，服务停止后仍可查看
+                "events": self.diagnostics.events(),
+                "events_dropped": self.diagnostics.drops(),
+                "timings": self.diagnostics.timings(),
+                "warnings": self.warnings(),
                 "debug_enabled": view.as_ref().map(|v| v.debug_enabled).unwrap_or_else(|| self.debug_trace_enabled.load(std::sync::atomic::Ordering::Acquire)),
                 "debug_traces": view.as_ref().map(|v| serde_json::to_value(&v.debug_traces).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
                 "device_prefs": settings.builtin_device_prefs,
@@ -2210,7 +2252,103 @@ mod imp {
             })
         }
 
+        /// 启动（或重启）失败都写进诊断记录，界面上的报错弹窗关掉后仍能查到原因。
+        /// 当前生效的降级提示（本地音乐目录不可用、声纹按人记忆未生效）。
+        fn warnings(&self) -> Vec<String> {
+            [&self.music_warning, &self.speaker_warning]
+                .into_iter()
+                .filter_map(|slot| slot.lock().ok().and_then(|warning| warning.clone()))
+                .collect()
+        }
+
+        /// 诊断包（2026-11-07 n68，`docs/developer/api-contracts.md`“诊断包”一节）：版本、系统、链路、模型名、
+        /// 全部保留的事件与覆盖计数、耗时、开启时的排障记录、最近 50 条审批及其结果、最近错误与降级提示、
+        /// 本地模型状态。不含密钥、令牌、音频、对话记忆与资料内容；所有文字统一经 [`scrub_bundle`] 脱敏。
+        pub fn diagnostics_bundle(&self) -> Value {
+            let status = self.status();
+            let settings = self.settings();
+            let (approvals, approvals_error) = match laser_api::approval::ApprovalService::new(self.host.db.clone())
+                .list(None, APPROVALS_IN_BUNDLE)
+            {
+                Ok(rows) => (serde_json::to_value(rows).unwrap_or_default(), Value::Null),
+                Err(error) => (Value::Array(Vec::new()), Value::String(format!("审批记录读取失败：{error:?}"))),
+            };
+            let devices: Vec<Value> = status["devices"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| {
+                            serde_json::json!({
+                                "device_id": row["device_id"],
+                                "name": row["name"],
+                                "model": row["model"],
+                                "firmware_version": row["firmware_version"],
+                                "status": row["status"],
+                                "last_seen": row["last_seen"],
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut bundle = serde_json::json!({
+                "format": "moss-voice-diagnostics",
+                "format_version": 1,
+                "generated_at_ms": (now() * 1000.0) as u64,
+                "app": {
+                    "name": "MOSS",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                },
+                "link_mode": status["link_mode"],
+                "running": status["running"],
+                "mode": status["mode"],
+                "ports": { "ws": status["ws_port"], "http": status["http_port"] },
+                "models": status["models"],
+                "jev": status["jev"],
+                "local": {
+                    "ready": status["local"]["ready"],
+                    "helper_found": status["local"]["helper_found"],
+                    "helper_running": status["local"]["helper_running"],
+                    "models": status["local"]["models"],
+                    "jev_runtime": status["local"]["jev_runtime"],
+                    "onejev_env": status["local"]["onejev_env"],
+                    "laya_env": status["local"]["laya_env"],
+                    "laya_setup": status["local"]["laya_setup"],
+                    "asr_model": settings.builtin_local.asr_model,
+                    "tts_model": settings.builtin_local.tts_model,
+                    "vad_model": settings.builtin_local.vad_model,
+                },
+                "last_error": status["last_error"],
+                "warnings": status["warnings"],
+                "events": status["events"],
+                "events_dropped": status["events_dropped"],
+                "timings": status["timings"],
+                "debug_enabled": status["debug_enabled"],
+                "debug_traces": status["debug_traces"],
+                "sessions": status["sessions"],
+                "devices": devices,
+                "approvals": {
+                    "limit": APPROVALS_IN_BUNDLE,
+                    "items": approvals,
+                    "error": approvals_error,
+                },
+                "included": BUNDLE_INCLUDED,
+                "excluded": BUNDLE_EXCLUDED,
+            });
+            scrub_bundle(&mut bundle);
+            bundle
+        }
+
         fn start_locked(&self) -> Result<(), CenterError> {
+            let result = self.start_locked_inner();
+            if let Err(error) = &result {
+                self.diagnostics.push(start_failure_event("内置语音服务启动失败", error));
+            }
+            result
+        }
+
+        fn start_locked_inner(&self) -> Result<(), CenterError> {
             if !self.running() {
                 let settings = self.settings();
                 let (mut local, helper) = self.local_parts(&settings.builtin_local)?;
@@ -2240,6 +2378,7 @@ mod imp {
                     screen_card_style: moss_voice_server::ScreenCardStyle::from_setting(
                         &settings.builtin_local.screen_card_style,
                     ),
+                    diagnostics: self.diagnostics.clone(),
                     ..defaults
                 };
                 let registry = Arc::new(DbRegistry {
@@ -2258,6 +2397,12 @@ mod imp {
                 if let Ok(mut slot) = self.helper.lock() {
                     *slot = helper;
                 }
+                if let Some(warning) = &next_music_warning {
+                    self.diagnostics.push(
+                        EventRecord::warn(DiagCategory::Config, warning.clone())
+                            .hint("在“能力 → 本地音乐”里重新选择音乐文件夹"),
+                    );
+                }
                 if let Ok(mut slot) = self.music_warning.lock() {
                     *slot = next_music_warning;
                 }
@@ -2271,6 +2416,7 @@ mod imp {
             if self.should_run_local_laya() {
                 if let Err(err) = self.ensure_laya_running(false) {
                     eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
+                    self.diagnostics.push(local_jev_failure("开启内置语音时拉起本地 Jev 决策服务失败", &err));
                 }
             }
             Ok(())
@@ -2611,6 +2757,7 @@ mod imp {
                         .map_err(|msg| CenterError::new("laya_env_missing", 412, msg))?;
                 } else if let Err(err) = self.ensure_laya_running(false) {
                     eprintln!("[moss-desktop] 本地 Jev 决策服务未就绪（不影响其余本地设置保存）：{err}");
+                    self.diagnostics.push(local_jev_failure("保存本地设置后，本地 Jev 决策服务没有就绪（其余设置已保存）", &err));
                 }
             } else if !is_local_laya || !laya_needed {
                 self.stop_laya();
@@ -3451,6 +3598,7 @@ mod imp {
                 if !wait_ready {
                     let start_lock = self.jev_start_lock.clone();
                     let laya_slot = self.laya.clone();
+                    let diagnostics = self.diagnostics.clone();
                     let id_owned = canonical_id.to_owned();
                     drop(start_guard);
                     let _ = std::thread::Builder::new()
@@ -3513,6 +3661,7 @@ mod imp {
                                     }
                                     if !cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                         eprintln!("[moss-desktop] 本地 OneJev ({id_owned}) 后台启动失败：{err}");
+                                        diagnostics.push(local_jev_failure(&format!("本地 OneJev（{id_owned}）后台启动失败"), &err));
                                         if let Ok(mut r) = laya_slot.lock()
                                             && r.generation == start_generation
                                         {
@@ -3667,7 +3816,7 @@ mod imp {
             let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
             if db
                 .get_secret("jev_api_key")
-                .map_err(|e| internal(format!("{e:?}")))?
+                .map_err(db_failure)?
                 .is_some_and(|v| !v.trim().is_empty())
             {
                 return Ok(());
@@ -3791,6 +3940,7 @@ mod imp {
                 LayaAction::Start => {
                     if let Err(err) = self.ensure_laya_running(false) {
                         eprintln!("[moss-desktop] 本地 Jev 决策服务启动失败：{err}");
+                        self.diagnostics.push(local_jev_failure("切换 Jev 设置后本地 Jev 决策服务启动失败", &err));
                     }
                 }
                 LayaAction::Stop => self.stop_laya(),
@@ -4560,7 +4710,7 @@ mod imp {
             }
             let action=input["key"]["action"].as_str().unwrap_or("keep");
             let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-            let existing=db.get_secret("voice.vision.main").map_err(|e|internal(db_error(e)))?.is_some_and(|s|!s.is_empty());
+            let existing=db.get_secret("voice.vision.main").map_err(db_failure)?.is_some_and(|s|!s.is_empty());
             let new_key=match action{
                 "keep"=>None,
                 "set"=>{
@@ -4688,7 +4838,7 @@ mod imp {
             ] {
                 let name=format!("voice.plugin.{kind}");
                 let command=keys[kind]["action"].as_str().unwrap_or("keep");
-                let existing=db.get_secret(&name).map_err(|e|internal(db_error(e)))?.is_some_and(|k|!k.is_empty());
+                let existing=db.get_secret(&name).map_err(db_failure)?.is_some_and(|k|!k.is_empty());
                 let available=match command {
                     "keep" => existing,
                     "set" => {
@@ -5032,7 +5182,7 @@ mod imp {
 
         pub fn rename_device(&self, device_id: &str, name: &str) -> Result<Value, CenterError> {
             let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-            let found = db.rename_voice_device(device_id, name).map_err(|error| internal(db_error(error)))?;
+            let found = db.rename_voice_device(device_id, name).map_err(db_failure)?;
             drop(db);
             if !found {
                 return Err(CenterError::new("voice_device_not_found", 404, "找不到该设备"));
@@ -5246,9 +5396,62 @@ mod imp {
             let speaker_view = builtin.speaker_manage(&serde_json::json!({"action": "status"})).unwrap();
             assert!(speaker_view["warning"].as_str().unwrap_or_default().contains("声纹按人记忆暂未生效"), "{speaker_view}");
 
+            // n68：降级提示出现在状态里，也写进诊断记录（警告级别、带分类与下一步）
+            let warnings = status["warnings"].as_array().unwrap();
+            assert_eq!(warnings.len(), 2, "{status}");
+            let events = builtin.status()["events"].as_array().unwrap().clone();
+            let music_event = events.iter().find(|e| e["text"].as_str().unwrap().contains("本地音乐目录当前不可用")).expect("音乐降级写进记录");
+            assert_eq!(music_event["level"], "warn");
+            assert_eq!(music_event["category"], "config");
+            assert!(music_event["hint"].is_string());
+            assert!(events.iter().any(|e| e["level"] == "warn" && e["text"].as_str().unwrap().contains("声纹按人记忆暂未生效")));
+            assert!(events.iter().any(|e| e["text"].as_str().unwrap().starts_with("内置语音服务已启动")));
+
             builtin.stop();
             assert!(builtin.music_status()["warning"].is_null());
             assert!(builtin.speaker_manage(&serde_json::json!({"action": "status"})).unwrap()["warning"].is_null());
+            let after_stop = builtin.status();
+            assert_eq!(after_stop["running"], false);
+            assert!(after_stop["warnings"].as_array().unwrap().is_empty());
+            assert_eq!(after_stop["events"].as_array().unwrap().len(), events.len(), "停止服务不清空诊断记录");
+
+            // 诊断包：整份记录 + 不含任何密钥
+            let bundle = builtin.diagnostics_bundle();
+            assert_eq!(bundle["format"], "moss-voice-diagnostics");
+            assert_eq!(bundle["app"]["version"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(bundle["events"].as_array().unwrap().len(), events.len());
+            assert_eq!(bundle["events_dropped"]["info"], 0);
+            assert_eq!(bundle["approvals"]["limit"], APPROVALS_IN_BUNDLE);
+            assert!(bundle["approvals"]["items"].is_array() && bundle["approvals"]["error"].is_null());
+            assert_eq!(bundle["models"]["llm"]["model"], "gpt-test");
+            assert_eq!(bundle["models"]["llm"]["key_set"], true);
+            let text = bundle.to_string();
+            for secret in ["sk-test-llm", "sk-test-asr", "sk-test-tts"] {
+                assert!(!text.contains(secret), "诊断包泄露了 {secret}");
+            }
+            assert!(bundle["excluded"].as_array().unwrap().iter().any(|e| e.as_str().unwrap().contains("密钥")));
+        }
+
+        /// n68：诊断包脱敏覆盖每一个字符串字段（键值写法的密钥、Bearer、带凭据地址、设备 IP）。
+        #[test]
+        fn diagnostics_bundle_scrub_masks_every_string() {
+            let mut bundle = serde_json::json!({
+                "events": [{"text": "OTA 请求被拒绝（192.168.31.20）", "detail": "api_key: sk-abc123 Authorization: Bearer tok.en"}],
+                "models": {"llm": {"url": "https://user:pw@llm.example.test/v1?key=zzz", "model": "gpt-test"}},
+                "sessions": [{"ip": "10.1.2.3", "device_id": "aa:bb:cc:11:22:33"}],
+                "nested": [["token=abcd"]],
+                "number": 42,
+            });
+            scrub_bundle(&mut bundle);
+            let text = bundle.to_string();
+            for leak in ["192.168.31.20", "sk-abc123", "tok.en", "user:pw", "zzz", "10.1.2.3", "abcd"] {
+                assert!(!text.contains(leak), "{leak} 未脱敏：{text}");
+            }
+            assert_eq!(bundle["models"]["llm"]["url"], "https://[REDACTED]@llm.example.test/v1?[REDACTED]");
+            assert_eq!(bundle["models"]["llm"]["model"], "gpt-test");
+            assert_eq!(bundle["sessions"][0]["ip"], "<ip>");
+            assert_eq!(bundle["sessions"][0]["device_id"], "aa:bb:cc:11:22:33", "设备编号保留用于排障");
+            assert_eq!(bundle["number"], 42);
         }
 
         #[test]
@@ -5936,7 +6139,7 @@ mod imp {
         });
         let (ok, detail, audio_data_url) = match outcome {
             Ok((detail, audio_data_url)) => (true, detail, audio_data_url),
-            Err(error) => (false, error.0, None),
+            Err(error) => (false, error.to_string(), None),
         };
         moss_voice::TestResult {
             section: resolved.section,
@@ -6020,6 +6223,58 @@ pub async fn voice_builtin_stop(app: tauri::AppHandle, window: tauri::WebviewWin
     require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |builtin| Ok(builtin.stop())).await;
+    #[cfg(mobile)]
+    let result = desktop_only((app, window));
+    result
+}
+
+/// 导出诊断包（2026-11-07 技术书 n68）：后端生成并脱敏 JSON，弹出系统“另存为”对话框写入用户选的位置；
+/// 路径与内容都不来自网页。与状态读取同权限：只给经 `require_status_window` 确认的 MOSS 主窗口。
+/// 用户取消时返回 `{saved: false}`；成功返回文件名（不回传完整路径）、字节数与事件条数。
+#[tauri::command]
+pub async fn voice_diagnostics_export(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_status_window(&window)?;
+    #[cfg(desktop)]
+    let result = {
+        let bundle = imp::run(app.clone(), |builtin| Ok(builtin.diagnostics_bundle())).await?;
+        let events = bundle["events"].as_array().map(Vec::len).unwrap_or(0);
+        let text = serde_json::to_string_pretty(&bundle).map_err(|_| {
+            serde_json::json!({"code": "diagnostics_export_failed", "message": "诊断包生成失败（内容无法转成 JSON）"})
+        })?;
+        let default_name = format!("moss-voice-diagnostics-{}.json", bundle["generated_at_ms"].as_u64().unwrap_or(0) / 1000);
+        let picker = app.clone();
+        let name = default_name.clone();
+        let picked = tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_dialog::DialogExt;
+            picker
+                .dialog()
+                .file()
+                .set_title("保存语音诊断包")
+                .set_file_name(&name)
+                .add_filter("JSON", &["json"])
+                .blocking_save_file()
+                .and_then(|path| path.into_path().ok())
+        })
+        .await
+        .map_err(|_| serde_json::json!({"code": "diagnostics_export_failed", "message": "打开保存对话框失败"}))?;
+        match picked {
+            None => Ok(serde_json::json!({"saved": false})),
+            Some(path) => match std::fs::write(&path, text.as_bytes()) {
+                Ok(()) => Ok(serde_json::json!({
+                    "saved": true,
+                    "file_name": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(default_name),
+                    "bytes": text.len(),
+                    "events": events,
+                })),
+                Err(error) => Err(serde_json::json!({
+                    "code": "diagnostics_export_failed",
+                    "message": "诊断包没能写入所选位置：可能没有写入权限或磁盘已满，换个文件夹再试",
+                    "detail": error.kind().to_string(),
+                })),
+            },
+        }
+    };
     #[cfg(mobile)]
     let result = desktop_only((app, window));
     result
@@ -6446,7 +6701,7 @@ pub async fn voice_speaker_manage(app:tauri::AppHandle,window:tauri::WebviewWind
 #[tauri::command]
 pub async fn voice_firmware_status(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|voice.firmware_status()).await;
     #[cfg(mobile)]
@@ -6457,7 +6712,7 @@ pub async fn voice_firmware_status(app:tauri::AppHandle,window:tauri::WebviewWin
 #[tauri::command]
 pub async fn voice_firmware_import(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result={
         let picker=app.clone();
@@ -6477,18 +6732,18 @@ pub async fn voice_firmware_import(app:tauri::AppHandle,window:tauri::WebviewWin
 #[tauri::command]
 pub async fn voice_firmware_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.firmware_manage(&input)).await;
     #[cfg(mobile)]
     let result=desktop_only((app,input));
     result
 }
-/// n61 设备唤醒词（只认打包私密页，与固件推送同级）。
+/// n61 设备唤醒词（n67 起与固件一样在主窗口语音中心操作，来源固定为本进程后端上的主窗口）。
 #[tauri::command]
 pub async fn voice_wakeword_status(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,|voice|voice.wakeword_status()).await;
     #[cfg(mobile)]
@@ -6499,7 +6754,7 @@ pub async fn voice_wakeword_status(app:tauri::AppHandle,window:tauri::WebviewWin
 #[tauri::command]
 pub async fn voice_wakeword_import_base(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result={
         let picker=app.clone();
@@ -6519,7 +6774,7 @@ pub async fn voice_wakeword_import_base(app:tauri::AppHandle,window:tauri::Webvi
 #[tauri::command]
 pub async fn voice_wakeword_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
     #[cfg(desktop)]
-    require_voice_private_asset(&window)?;
+    require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result=imp::run(app,move|voice|voice.wakeword_manage(&input)).await;
     #[cfg(mobile)]
@@ -6635,7 +6890,7 @@ pub async fn voice_memory_clear(app: tauri::AppHandle, window: tauri::WebviewWin
 
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 45] = [
+pub const COMMANDS: [&str; 46] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -6670,6 +6925,7 @@ pub const COMMANDS: [&str; 45] = [
     "voice_builtin_status",
     "voice_builtin_start",
     "voice_builtin_stop",
+    "voice_diagnostics_export",
     "voice_device_set_status",
     "voice_device_rename",
     "voice_device_request",

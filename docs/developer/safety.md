@@ -6,7 +6,7 @@
 
 - MCP 工具由 `laser_tools::ToolCatalog` 登记、`laser_mcp::dispatch_tool_call_with` 分发；小智连接由 `laser_host::HostApplication::spawn_mcp_bridge` 在 `MCP_ENDPOINT` 有效时启动。桌面端与 `moss-host serve` 走同一条路径。
 - 目录共 20 个工具。`command_execution_tool` 只在 `MOSS_ENABLE_DEVELOPER_COMMANDS=true` 时进入列表并允许执行；`/v1/capabilities` 的 `command_execution` 字段反映该开关。
-- 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制默认关闭，由用户在私密窗口同意后开启、每个动作逐次桌面批准，见 §4.17。
+- 激光工具目录里没有摄像头、Home Assistant、LaserGRBL GUI 自动化工具，提示词不得把它们写成激光工具。内置语音另有视觉（NV12）和 Home Assistant（NV15）工具；HA 控制默认关闭，由用户在语音中心“隐私与家居”同意后开启、每个动作逐次桌面批准，见 §4.17。
 - `laser_grbl_tool` / `laser_network_grbl_tool` 只保留 `status` / `check` / `probe` 与 `cancel`；`send_file` 与 `send_command` 一律拒绝并引导走 workflow 或 `laser_safe_action_tool`。
 - `ai_laser_gcode_tool`、`generate_text_image_gcode_tool`、`generate_text_laser_task_tool` 只接受 `text` 素材，都转发到 `/api/text-task/generate`；图片素材只能从网页或桌面端上传后走 workflow。
 - 设备传输只有串口与 Telnet。没有 HTTP `/command`、`[ESP800]` 或 WebSocket 设备通道。
@@ -97,7 +97,7 @@
 
 ### 4.13 语音中心插件/私人记忆的 Tauri ACL 本地页面隔离（2026-10-11，2026-10-18 n26 更新）
 
-桌面主窗口继续导航到本机 `http://127.0.0.1:<端口>/`，该页面对 Tauri 来说属于 remote origin。n26（2026-10-18 用户决定）起，插件密钥状态与私人记忆可在主语音页就地展开：授权写在独立的 `capabilities/voice-private-main.json`（`windows:["main"]` + `remote:["http://127.0.0.1:*"]`），命令开头用 `require_private_settings_window` 校验「打包私密页 URL」或「经 `window_is_trusted_main` 确认的主窗口精确来源」，其他 host、端口、路径、query 一律拒绝。`voice-private` 窗口仍只加载安装包资源 `voice-private.html`，其四个 capability 不放宽也不配 `remote`。**固件导入与推送 `voice_firmware_{status,import,manage}` 仍只认 `voice-private` 打包页**。不得把这些权限加入 default `windows:["*"]`，也不得转交普通浏览器或小智设备。代价已知并接受：主窗口页面的漏洞同样能读到上面这些数据。详见 [`docs/integration/voice-private-acl.md`](../integration/voice-private-acl.md) 的 n26 节。安装后真实 Windows WebView2 的授权链仍需实际页面验证。
+桌面主窗口继续导航到本机 `http://127.0.0.1:<端口>/`，该页面对 Tauri 来说属于 remote origin。n26（2026-10-18 用户决定）起，插件密钥状态与私人记忆可在主语音页就地展开：授权写在独立的 `capabilities/voice-private-main.json`（`windows:["main"]` + `remote:["http://127.0.0.1:*"]`），命令开头用 `require_private_settings_window` 校验「经 `window_is_trusted_main` 确认的主窗口精确来源」，其他窗口标签、host、端口、路径一律拒绝。n67（2026-11-07 用户决定）取消了独立的 `voice-private` 打包窗口：固件 `voice_firmware_{status,import,manage}` 与唤醒词 `voice_wakeword_{status,import_base,manage}` 也并入 `voice-private-main.json`，在语音中心操作；导入仍只由原生文件框选择，推送仍逐台确认。不得把这些权限加入 default `windows:["*"]`，也不得转交普通浏览器或小智设备。代价已知并接受：主窗口页面的漏洞同样能读到上面这些数据，也能发起固件 / 唤醒词推送请求（推送前的逐台确认框仍需用户点击）。详见 [`docs/integration/voice-private-acl.md`](../integration/voice-private-acl.md) 的 n26 节。安装后真实 Windows WebView2 的授权链仍需实际页面验证。
 
 ### 4.16 主窗口特权命令固定到本进程后端地址（2026-10-13）
 
@@ -105,7 +105,7 @@
 
 ### 4.17 家居控制与声纹识别改为用户开启（2026-10-14 用户决定）
 
-- **家居控制（NV15）**：`HttpsHomeTransport::submit_once` 在生产中按 §4.10～4.15 门禁真实发送。开启条件全部由用户在私密窗口完成：HTTPS 地址、令牌、勾选白名单实体、明确同意语音控制（GRANT 绑定当前白名单与凭据版本，改任一项即失效）。语音只能生成审批；每个动作都要在私密窗口“家居控制审批”里批准，全局审批卡只提醒并打开私密窗口（主窗口的通用批准接口按设计拒绝 HomeControl）。至多一次 POST，结果未知不重发，批准前重新读取并核对状态与白名单。未用真实 Home Assistant 验收，界面提示先用无害设备试用。
+- **家居控制（NV15）**：`HttpsHomeTransport::submit_once` 在生产中按 §4.10～4.15 门禁真实发送。开启条件全部由用户在语音中心“隐私与家居 → 家居”完成：HTTPS 地址、令牌、勾选白名单实体、明确同意语音控制（GRANT 绑定当前白名单与凭据版本，改任一项即失效）。语音只能生成审批；每个动作都要在“隐私与家居 → 家居 → 家居审批”里核对后批准，全局审批卡只提醒并跳到那里（通用审批接口按设计拒绝 HomeControl，只能走 `voice_home_approval_approve`）。至多一次 POST，结果未知不重发，批准前重新读取并核对状态与白名单。未用真实 Home Assistant 验收，界面提示先用无害设备试用。
 - **声纹识别（NV16）**：用户登记至少两人后，每人另录三段测试音，`person_context::calibrate` 以“认成别人”的最高分加 0.05 为阈值（下限 0.5、上限 0.95），自检要求测试集内零误认、本人认对不少于三分之二；结果存于 `app_secrets`（`voice.speaker.calibration`），只对标定时的登记名单（编号与版本）有效，名单变化即失效。未标定时返回 `Unknown`，`may_authorize_action` 恒 `false`。只拿已登记的人互比，测不到陌生人；这是候选身份提示，**永远不能授权加工、家居或任何设备动作**，按人记忆仍需另行明确开启。
 
 ### 4.18 本机 Agent 与固件 OTA 改为用户开启（2026-10-15 用户决定；2026-10-25 开通 macOS/Unix 并支持自动读取 CLI）

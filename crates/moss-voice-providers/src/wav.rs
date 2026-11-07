@@ -133,10 +133,10 @@ mod tests {
 
     #[test]
     fn rejects_non_wav() {
-        assert!(decode_wav(b"ID3\x04mp3data....").unwrap_err().0.contains("不是 WAV"));
+        assert!(decode_wav(b"ID3\x04mp3data....").unwrap_err().to_string().contains("不是 WAV"));
         assert!(decode_wav(b"").is_err());
         let mut eight_bit = encode_wav(&[0; 4], 8000);
         eight_bit[34] = 8;
-        assert!(decode_wav(&eight_bit).unwrap_err().0.contains("不支持"));
+        assert!(decode_wav(&eight_bit).unwrap_err().to_string().contains("不支持"));
     }
 }

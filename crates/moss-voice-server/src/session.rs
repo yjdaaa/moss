@@ -42,7 +42,7 @@ use crate::conversation::{
     spawn_turn_with_person_hint,
 };
 use crate::music::playback::{MusicController, MusicProgress};
-use crate::state::SessionView;
+use crate::state::{DiagCategory, EventLevel, EventRecord, SessionView};
 use crate::{DeviceStatus, DeviceVisit, ServerMode, Shared, unix_now};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -147,7 +147,10 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     let Some(device_id) = identity.device_id.clone() else {
         shared
             .state
-            .event(format!("拒绝连接（{}）：缺少 Device-Id", identity.ip));
+            .event(
+                EventRecord::warn(DiagCategory::Device, format!("拒绝连接（{}）：设备没有带设备编号（Device-Id）", identity.ip))
+                    .hint("这台设备的固件没按小智协议上报设备编号：换用标准小智固件，或检查自编固件的连接请求头"),
+            );
         let _ = socket
             .send(Message::Text("缺少 Device-Id，无法识别设备".into()))
             .await;
@@ -172,7 +175,11 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         Err(error) => {
             shared
                 .state
-                .event(format!("登记设备 {device_id} 失败：{error}"));
+                .event(
+                    EventRecord::error(DiagCategory::Internal, format!("登记设备 {device_id} 失败：本机设备记录读写出错"))
+                        .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
+                        .detail(&error),
+                );
             let _ = socket.send(Message::Close(None)).await;
             return;
         }
@@ -190,7 +197,10 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     let Some((hello_version, uplink, device_mcp, device_aec)) = wait_hello(&mut socket).await else {
         shared
             .state
-            .event(format!("设备 {device_id} 未在 10 秒内发送 hello，已断开"));
+            .event(
+                EventRecord::warn(DiagCategory::Device, format!("设备 {device_id} 连上后 10 秒内没有完成握手（hello），已断开"))
+                    .hint("多半是设备网络太差或固件版本太旧：靠近路由器、重启设备，或升级小智固件"),
+            );
         return;
     };
     let version = if matches!(hello_version, 1..=3) {
@@ -248,10 +258,13 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         let uplink_rate = if uplink.format == "opus" && supported_rate(uplink.sample_rate) {
             uplink.sample_rate
         } else {
-            shared.state.event(format!(
-                "设备 {device_id} 声明的上行音频为 {} {} Hz，不支持，按 Opus 16000 Hz 处理",
-                uplink.format, uplink.sample_rate
-            ));
+            shared.state.event(EventRecord::warn(
+                DiagCategory::Audio,
+                format!(
+                    "设备 {device_id} 声明的上行音频为 {} {} Hz，不支持，按 Opus 16000 Hz 处理",
+                    uplink.format, uplink.sample_rate
+                ),
+            ).hint("如果听不清或识别全错，换用标准小智固件"));
             16_000
         };
         match Session::new(
@@ -308,7 +321,11 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             Err(error) => {
                 shared
                     .state
-                    .event(format!("设备 {device_id} 的音频初始化失败：{error}"));
+                    .event(
+                        EventRecord::error(DiagCategory::Audio, format!("设备 {device_id} 的音频初始化失败，已断开"))
+                            .hint("设备声明的音频格式 MOSS 处理不了：换用标准小智固件后重试")
+                            .detail(&error),
+                    );
                 let _ = socket.send(Message::Close(None)).await;
                 return;
             }
@@ -370,7 +387,12 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                 "已允许但 token 缺失或无效（允许后尚未重启设备？），已提示重启",
             ),
         };
-        shared.state.event(format!("设备 {device_id}：{log}"));
+        let record = if status == DeviceStatus::Pending {
+            EventRecord::info(DiagCategory::Device, format!("设备 {device_id}：{log}")).hint(message)
+        } else {
+            EventRecord::warn(DiagCategory::Device, format!("设备 {device_id}：{log}")).hint(message)
+        };
+        shared.state.event(record);
         let alert = ServerMessage::Alert {
             status: status_text.into(),
             message: message.into(),
@@ -452,10 +474,27 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         .sessions_changed(shared.state.sessions().len());
     let (phase, level) = shared.state.aggregate_pulse();
     shared.registry.pulse_changed(phase.as_deref(), level);
-    shared
-        .state
-        .event(format!("设备 {device_id} 已断开：{reason}"));
+    shared.state.event(disconnect_event(&device_id, &reason));
     let _ = socket.send(Message::Close(None)).await;
+}
+
+/// 断开原因 → 大白话事件：正常结束记为日常记录，异常断线记为警告并说明最可能的原因。
+fn disconnect_event(device_id: &str, reason: &str) -> EventRecord {
+    let text = format!("设备 {device_id} 已断开：{reason}");
+    let likely = "最可能是 Wi-Fi 掉线、设备重启或断电";
+    match reason {
+        "连接出错" => EventRecord::warn(DiagCategory::Device, format!("设备 {device_id} 已断开：连接突然中断（{likely}）"))
+            .hint("检查设备供电和 Wi-Fi 信号；设备会自动重连，频繁出现就把设备挪近路由器")
+            .detail(reason),
+        "发送失败" => EventRecord::warn(DiagCategory::Device, format!("设备 {device_id} 已断开：向设备发数据失败，连接已经断了（{likely}）"))
+            .hint("检查设备供电和 Wi-Fi 信号；设备会自动重连，频繁出现就把设备挪近路由器")
+            .detail(reason),
+        "设备授权已撤销" => EventRecord::warn(DiagCategory::Device, text).hint("在设备列表里重新允许这台设备后，重启设备"),
+        _ if reason.contains("失败") || reason.contains("出错") => {
+            EventRecord::warn(DiagCategory::Device, text)
+        }
+        _ => EventRecord::info(DiagCategory::Device, text),
+    }
 }
 
 enum Phase {
@@ -916,6 +955,7 @@ impl<'a> Session<'a> {
                     .saturating_add(turn.started.elapsed().as_millis() as u64),
             );
             timing.outcome = outcome.into();
+            timing.at_ms = crate::unix_now_ms();
             let turn_no = timing.turn;
             self.shared.state.finish_timing(timing);
             if turn.kind == TurnKind::Answer
@@ -940,6 +980,8 @@ impl<'a> Session<'a> {
                     tools: std::mem::take(&mut turn.debug_tools),
                     reply,
                     outcome: outcome.into(),
+                    truncated: false,
+                    tools_dropped: 0,
                 });
             }
         }
@@ -1040,8 +1082,8 @@ impl<'a> Session<'a> {
         self.shared.state.set_level(self.session_id, level);
         self.sync_pulse();
     }
-    fn event(&self, text: String) {
-        self.shared.state.event(text);
+    fn event(&self, record: impl Into<EventRecord>) {
+        self.shared.state.event(record);
     }
 
     async fn tts(
@@ -1139,7 +1181,10 @@ impl<'a> Session<'a> {
                 }
             };
             if let Some(notice) = notice {
-                self.shared.state.event(notice);
+                self.shared.state.event(
+                    EventRecord::warn(DiagCategory::Audio, notice)
+                        .hint("本地判停模型出了问题，这次连接先用音量判断你是否说完；重启内置服务会重新尝试本地模型"),
+                );
             }
             for event in events {
                 match event {
@@ -1389,7 +1434,7 @@ impl<'a> Session<'a> {
             listening.hold_deadline = Some(deadline);
             listening.finalize_after_vad_seq = None;
             self.set_level(0);
-            self.event("检测到语句尚未说完，延长拾音等待续说".into());
+            self.event("检测到语句尚未说完，延长拾音等待续说");
             return Ok(());
         }
         self.finalize_held_utterance(socket).await
@@ -1499,6 +1544,8 @@ impl<'a> Session<'a> {
             stages.insert(end.into(), recording_offset);
             Some(crate::TurnTiming {
                 session_id: self.session_id.into(),
+                device_id: self.device_id.into(),
+                at_ms: 0,
                 turn: self.turn_number,
                 models: conversation.settings.model_labels.clone(),
                 stages,
@@ -1634,11 +1681,11 @@ impl<'a> Session<'a> {
         if !self.permission.load(std::sync::atomic::Ordering::Acquire)
             || self.shared.config.downlink_sample_rate != 24_000
         {
-            self.event("音乐请求被拒绝：设备权限或播放采样率不符合要求".into());
+            self.event(EventRecord::warn(DiagCategory::Audio, "音乐请求被拒绝：设备权限或播放采样率不符合要求"));
             return Ok(());
         }
         let Some(index) = self.shared.config.music.clone() else {
-            self.event("音乐功能未启用".into());
+            self.event(EventRecord::warn(DiagCategory::Config, "音乐功能未启用").hint("在“能力”标签里打开本地音乐并选好音乐文件夹"));
             return Ok(());
         };
         // No pathname or file descriptor is supplied by the model.
@@ -1646,7 +1693,10 @@ impl<'a> Session<'a> {
         let (file, extension) = match opened {
             Ok(Ok(track)) => track,
             _ => {
-                self.event("所选歌曲不存在、已变化或不允许读取".into());
+                self.event(
+                    EventRecord::warn(DiagCategory::Audio, "所选歌曲不存在、已变化或不允许读取")
+                        .hint("音乐文件可能被移动或删除了：在“能力”标签重新选择音乐文件夹"),
+                );
                 return Ok(());
             }
         };
@@ -1660,7 +1710,7 @@ impl<'a> Session<'a> {
             return Ok(());
         };
         if music.start(file, &extension, &mut self.pump).is_err() {
-            self.event("本地音乐解码任务未能启动".into());
+            self.event(EventRecord::error(DiagCategory::Audio, "本地音乐解码任务未能启动"));
             return Ok(());
         }
         self.tts(socket, TtsState::Start, None).await?;
@@ -1857,7 +1907,7 @@ impl<'a> Session<'a> {
             TurnEvent::Ignored => {
                 self.finish_timing("ignored");
                 self.turn = None;
-                self.event("没有识别出文字，继续拾音".into());
+                self.event("没有识别出文字，继续拾音");
                 if self.listen_manual {
                     self.phase = Phase::Idle;
                     self.set_state("idle");
@@ -1934,7 +1984,8 @@ impl<'a> Session<'a> {
                 let samples = resampler.process(&pcm.samples);
                 self.pump.push(&samples);
             }
-            TurnEvent::Failed(error) => self.event(format!("对话出错：{error}")),
+            TurnEvent::Failed(error) => self.event(EventRecord::from_provider(EventLevel::Error, "对话出错：", &error)),
+            TurnEvent::Warning(error) => self.event(EventRecord::from_provider(EventLevel::Warn, "", &error)),
             TurnEvent::Done { messages, close } => {
                 if self.music.as_ref().is_some_and(|music| music.active()) {
                     self.finish_timing("music_started");
@@ -2092,8 +2143,12 @@ impl<'a> Session<'a> {
         let was_music = self.music.as_ref().is_some_and(|music| music.active());
         if was_music && let Some(music) = self.music.as_mut() {
             match music.refill(&mut self.pump) {
-                MusicProgress::Failed(_) => self.event("音乐解码或缓冲失败，已终止播放".into()),
-                MusicProgress::Cancelled => self.event("设备权限撤销，音乐已停止".into()),
+                MusicProgress::Failed(reason) => self.event(
+                    EventRecord::error(DiagCategory::Audio, "音乐解码或缓冲失败，已终止播放")
+                        .hint("这首歌的文件可能损坏或格式不支持：换一首试试")
+                        .detail(format!("{reason:?}")),
+                ),
+                MusicProgress::Cancelled => self.event(EventRecord::warn(DiagCategory::Device, "设备权限撤销，音乐已停止")),
                 _ => {}
             }
         }
@@ -2578,7 +2633,11 @@ impl<'a> Session<'a> {
                         .unwrap_or(false)
                 {
                     let msg = device_result_text(&payload);
-                    self.event(format!("桌面端请求 {tool} 未成功：{msg}"));
+                    self.event(
+                        EventRecord::warn(DiagCategory::Device, format!("桌面端请求 {tool} 未成功：设备回复了错误"))
+                            .hint("设备固件可能不支持这个操作，或设备正忙：稍后再试，必要时升级固件")
+                            .detail(&msg),
+                    );
                 }
                 Ok(())
             }
@@ -2646,7 +2705,7 @@ impl<'a> Session<'a> {
                     self.shared
                         .camera_preview
                         .record_error(self.device_id, Some(&ticket), human.clone());
-                    self.event(format!("摄像头抓拍未成功：{human}"));
+                    self.event(EventRecord::warn(DiagCategory::Device, format!("摄像头抓拍未成功：{human}")));
                 }
                 Ok(())
             }
@@ -2706,7 +2765,10 @@ impl<'a> Session<'a> {
                         "该设备未启用设备端 MCP，不支持摄像头抓拍".into(),
                     );
                 }
-                self.event("设备没有提供自带 MCP，桌面端请求已忽略".into());
+                self.event(
+                    EventRecord::warn(DiagCategory::Device, "设备没有提供自带 MCP，桌面端请求已忽略")
+                        .hint("这台设备的固件不支持从电脑控制：升级到支持设备端 MCP 的小智固件"),
+                );
                 return Ok(());
             }
         };
@@ -2748,7 +2810,7 @@ impl<'a> Session<'a> {
                     json!({ "name": "self.get_device_status", "arguments": {} }),
                     McpPending::Snapshot(crate::SNAPSHOT_STATUS),
                 );
-                self.event("桌面端请求：self.get_device_status".into());
+                self.event("桌面端请求：self.get_device_status");
                 self.send_mcp(socket, payload).await
             }
             crate::DeviceRequest::Reboot => {
@@ -2760,17 +2822,20 @@ impl<'a> Session<'a> {
                     "tools/call",
                     json!({ "name": "self.reboot", "arguments": {} }),
                 );
-                self.event("桌面端请求：self.reboot".into());
+                self.event("桌面端请求：self.reboot");
                 self.send_mcp(socket, payload).await
             }
             crate::DeviceRequest::InstallAssets { token } => {
                 if !self.device_mcp.as_ref().is_some_and(|d| d.has_tool("self.assets.set_download_url")) {
-                    self.event("设备固件不支持网络更新资源包（没有 self.assets.set_download_url），唤醒词未推送".into());
+                    self.event(
+                        EventRecord::warn(DiagCategory::Firmware, "设备固件不支持网络更新资源包（没有 self.assets.set_download_url），唤醒词未推送")
+                            .hint("需要小智固件 2.0.2 以上、v2 分区表"),
+                    );
                     return Ok(());
                 }
                 let host = self.preview_http_host();
                 let url = format!("http://{host}:{}/xiaozhi/assets/{token}.bin", self.shared.http_port);
-                self.event("桌面端推送唤醒词资源包：设备将重启并自行下载写入".into());
+                self.event("桌面端推送唤醒词资源包：设备将重启并自行下载写入");
                 // 固件把两次调用按顺序排进主循环：先记下下载地址，再在 1 秒后重启。
                 self.send_quiet_device_call(socket, "self.assets.set_download_url", json!({ "url": url })).await?;
                 let Some(device) = self.device_mcp.as_mut() else {
@@ -2999,7 +3064,7 @@ impl<'a> Session<'a> {
                         until: now + self.shared.config.preview_hold_duration,
                         next_refresh: now + self.shared.config.preview_hold_interval,
                     });
-                    self.event("向小智彩屏推送激光预览缩略图".into());
+                    self.event("向小智彩屏推送激光预览缩略图");
                     self.send_quiet_device_call(
                         socket,
                         "self.screen.preview_image",
@@ -3030,10 +3095,10 @@ impl<'a> Session<'a> {
                 };
                 if self.busy() {
                     self.pending_oled_preview = Some(card);
-                    self.event("已暂存小智 OLED 雕刻预览文字卡（本轮语音播完后自动上屏）".into());
+                    self.event("已暂存小智 OLED 雕刻预览文字卡（本轮语音播完后自动上屏）");
                     Ok(())
                 } else if matches!(self.phase, Phase::Listening(_)) {
-                    self.event("向小智 OLED 屏幕静默刷新雕刻预览参数字幕".into());
+                    self.event("向小智 OLED 屏幕静默刷新雕刻预览参数字幕");
                     let msg = ServerMessage::Stt {
                         session_id: self.session_id.into(),
                         text: format!("[预览] {card}"),
@@ -3044,7 +3109,7 @@ impl<'a> Session<'a> {
                         Err("发送失败".into())
                     }
                 } else {
-                    self.event("向小智 OLED 屏幕推送雕刻预览文字卡".into());
+                    self.event("向小智 OLED 屏幕推送雕刻预览文字卡");
                     let alert = ServerMessage::Alert {
                         status: "雕刻预览".into(),
                         message: card,
@@ -3172,7 +3237,11 @@ impl<'a> Session<'a> {
             Ok(ClientMessage::Goodbye) => return Err("设备结束会话".into()),
             Ok(ClientMessage::Mcp { payload }) => self.on_device_mcp(socket, payload).await?,
             Ok(_) => {}
-            Err(error) => self.event(format!("忽略无法解析的消息：{error}")),
+            Err(error) => self.event(
+                EventRecord::warn(DiagCategory::Device, "收到设备发来的一条看不懂的消息，已忽略")
+                    .hint("通常是设备固件和 MOSS 版本不匹配；偶尔一次不影响使用，频繁出现请升级固件")
+                    .detail(error.to_string()),
+            ),
         }
         Ok(())
     }
@@ -3385,7 +3454,7 @@ impl<'a> Session<'a> {
                         )
                         .await?;
                     }
-                    self.event("加工任务已结束，播报结果".into());
+                    self.event("加工任务已结束，播报结果");
                     self.start_turn(
                         TurnInput::Say { text: job.speech(), close: false },
                         TurnKind::Notice,
@@ -3432,7 +3501,7 @@ impl<'a> Session<'a> {
                     self.last_hud_workflow = Some((progress.workflow_id.clone(), progress.percent));
                     self.last_activity = Instant::now();
                     if first_for_job {
-                        self.event("向小智彩屏开启实时激光加工进度副屏 HUD".into());
+                        self.event("向小智彩屏开启实时激光加工进度副屏 HUD");
                     }
                     self.send_quiet_device_call(
                         socket,
@@ -3491,7 +3560,7 @@ impl<'a> Session<'a> {
                     .await?;
                     if first_for_approval {
                         self.last_approval_summary = Some(pending.summary.clone());
-                        self.event("向小智彩屏推送待电脑审批警戒卡".into());
+                        self.event("向小智彩屏推送待电脑审批警戒卡");
                         let _ = send_json(
                             socket,
                             &ServerMessage::Stt {

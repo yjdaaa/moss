@@ -217,7 +217,7 @@ export function ConsoleDrawer({
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">协议版本</span>
-                  <span className="mcp-val mono">{mcpStatus?.protocol_version || "JSON-RPC 2.0 · MCP 2024-11-05"}</span>
+                  <span className="mcp-val mono">{mcpStatus?.protocol_version ? `MCP ${mcpStatus.protocol_version}` : "未知（尚未握手）"}</span>
                 </div>
                 <div className="mcp-row">
                   <span className="mcp-label">连接状态</span>

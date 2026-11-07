@@ -7388,7 +7388,8 @@ fn mcp_status_json(
         "last_request_time": telemetry.last_request_time,
         "messages_count": telemetry.messages_count,
         "tools_count": tools_count,
-        "protocol_version": "2024-11-05",
+        // 最近一次握手实际应答的版本；未握手为空，界面显示“未知”（n68：不再写死）
+        "protocol_version": telemetry.protocol_version,
         "recent_events": telemetry.recent_events,
         // 各接入点的连接状态（NV8 多接入点；地址已脱敏）
         "endpoints": telemetry.endpoints.iter().map(|link| serde_json::json!({
@@ -9523,6 +9524,7 @@ mod tests {
         assert_eq!(status["messages_count"], 0);
         assert_eq!(status["recent_events"], serde_json::json!([]));
         assert_eq!(status["tools_count"], 19);
+        assert_eq!(status["protocol_version"], "", "未握手时不写死协议版本");
         assert!(!status.to_string().contains("xz-mcp-broker"));
         assert!(!status.to_string().contains("16:00:02"));
 
@@ -9541,6 +9543,7 @@ mod tests {
             last_request_time: "10:00:00".into(),
             messages_count: 4,
             recent_events: vec!["10:00:00 [RECV] initialize (client: client-a v1.2)".into()],
+            protocol_version: "2024-11-05".into(),
             endpoints: vec![laser_contracts::EndpointLink {
                 id: "primary".into(),
                 endpoint: "wss://example.test/mcp/".into(),
@@ -9553,6 +9556,7 @@ mod tests {
         let status = mcp_status_json(Some("wss://example.test/mcp/"), &live, 19);
         assert_eq!(status["connected"], true);
         assert_eq!(status["client_info"], "client-a v1.2");
+        assert_eq!(status["protocol_version"], "2024-11-05", "握手后显示实际应答的版本");
         assert_eq!(status["messages_count"], 4);
         assert_eq!(status["recent_events"].as_array().unwrap().len(), 1);
         // NV8：各接入点的状态
@@ -11278,6 +11282,7 @@ Content-Length: 30
         let (status, response) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=pending", None, Some(&session));
         assert_eq!(status, 200, "{response}");
         assert_eq!(response["result"]["approvals"].as_array().unwrap().len(), 0);
+        assert_eq!(response["result"]["limit"], 50, "列表上限随结果返回，界面不把它当总数");
         assert_eq!(response["result"]["ttl_seconds"], 120);
         let (status, response) = desktop_request(
             &fixture.service, "POST", "/v1/approvals/apr_missing/approve", Some(&serde_json::json!({"digest": "x"})), Some(&session),

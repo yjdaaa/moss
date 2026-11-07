@@ -49,7 +49,7 @@ export const KIND_LABEL = {
   agent_run: "运行本机 Agent（Claude Code / Codex）",
 };
 
-/** 家居控制只能在私密设置窗口批准（主窗口的批准接口按设计拒绝），全局审批卡只负责提醒并打开那里。 */
+/** 家居控制要在语音中心“家居审批”里核对参数后批准（n67 起不再有独立安全窗口），全局审批卡只负责提醒并跳到那里。 */
 export function approvedInPrivateWindow(kind) {
   return kind === "home_control";
 }
@@ -57,7 +57,7 @@ export function approvedInPrivateWindow(kind) {
 export function approvalTagText(kind) {
   if (kind === "external_tool") return "第三方工具 · 本次批准";
   if (kind === "agent_run") return "本机 Agent · 本次批准";
-  if (approvedInPrivateWindow(kind)) return "家居控制 · 私密窗口批准";
+  if (approvedInPrivateWindow(kind)) return "家居控制 · 在家居审批里批准";
   return "R3 · 运动与出光";
 }
 

@@ -509,7 +509,9 @@ fn model_errors_and_failed_sentences_are_handled() {
     speak_manual(&mut device, 1, 600);
     let reply = ConversationSettings::default().error_reply;
     assert_eq!(texts(&collect_items(&mut device)), vec!["听:你好".to_owned(), "tts:start".into(), format!("句:{reply}"), "tts:stop".into()]);
-    assert!(server.status().events.iter().any(|event| event.text.contains("对话出错：大模型返回 HTTP 401")));
+    assert!(server.status().events.iter().any(|event| event.text.contains("对话出错：大模型返回 HTTP 401")
+        && event.level == crate::EventLevel::Error
+        && event.category == crate::DiagCategory::Model), "对话失败记为错误级别并带分类");
     // 合成失败的句子跳过，其余照常
     speak_manual(&mut device, 1, 600);
     assert_eq!(texts(&collect_items(&mut device)), vec!["听:再试一次", "tts:start", "句:第一句。", "句:第三句。", "tts:stop"]);
@@ -1002,7 +1004,8 @@ fn failed_streaming_recognition_falls_back_to_whole_utterance() {
     speak_manual(&mut device, 1, 600);
     assert_eq!(texts(&collect_items(&mut device)), vec!["听:整段识别", "tts:start", "句:好的。", "tts:stop"]);
     assert_eq!(asr.heard.lock().unwrap().len(), 1);
-    assert!(server.status().events.iter().any(|event| event.text.contains("流式识别失败，改用整段识别：豆包识别连接被拒绝")));
+    assert!(server.status().events.iter().any(|event| event.text.contains("流式识别失败，改用整段识别：豆包识别连接被拒绝")
+        && event.level == crate::EventLevel::Warn), "已自动补救的失败记为警告：{:?}", server.status().events);
 }
 
 /// NV7：流式合成的第一段一到就开始播放（不等整句合成完），句子文字只发一次，分段之间连续不补静音。

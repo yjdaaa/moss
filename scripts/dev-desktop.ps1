@@ -13,7 +13,6 @@ Set-StrictMode -Version Latest
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $frontendDir = Join-Path $repo 'frontend'
 $distIndex = Join-Path $frontendDir 'dist/index.html'
-$distPrivate = Join-Path $frontendDir 'dist/voice-private.html'
 $protoSource = Join-Path $repo 'crates/moss-voice-local-proto/src/lib.rs'
 $helperManifest = Join-Path $repo 'apps/moss-voice-local/Cargo.toml'
 $triple = 'x86_64-pc-windows-msvc'
@@ -210,7 +209,7 @@ function Test-VerifiedMossViteOrigin([string]$origin, [int]$port, [string]$expec
     return (Test-MossViteProcess $port $expectedFrontendDir) -and (Test-MossViteHttp $origin)
 }
 
-$needDist = $RebuildDist -or (-not (Test-Path -LiteralPath $distIndex -PathType Leaf)) -or (-not (Test-Path -LiteralPath $distPrivate -PathType Leaf))
+$needDist = $RebuildDist -or (-not (Test-Path -LiteralPath $distIndex -PathType Leaf))
 
 $tauriConfPath = Join-Path $repo 'apps/desktop/src-tauri/tauri.conf.json'
 $tauriConfObj = Get-Content -LiteralPath $tauriConfPath -Raw | ConvertFrom-Json
@@ -257,7 +256,7 @@ $effectiveVersion = Resolve-EffectiveMossVersion $confVersion
 if ($DryRun) {
     Write-Host "[DryRun] Repo: $repo"
     Write-Host "[DryRun] Effective version: $effectiveVersion"
-    Write-Host "[DryRun] Need initial frontend/dist build (for packaged voice-private.html): $needDist"
+    Write-Host "[DryRun] Need initial frontend/dist build (for packaged index.html): $needDist"
     Write-Host "[DryRun] Dev UI origin: $devOrigin"
     Write-Host "[DryRun] Command: MOSS_DEV_UI_ORIGIN=$devOrigin MOSS_RELEASE_VERSION=$effectiveVersion cargo run -p moss-desktop"
     exit 0
@@ -276,7 +275,7 @@ try {
     }
 
     if ($needDist) {
-        Write-Host '[MOSS Dev] Building frontend/dist once so packaged voice-private.html is present...' -ForegroundColor Cyan
+        Write-Host '[MOSS Dev] Building frontend/dist once so packaged index.html is present...' -ForegroundColor Cyan
         Push-Location $frontendDir
         try {
             & $npmCmd run build

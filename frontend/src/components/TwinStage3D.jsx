@@ -1,15 +1,196 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { clearAndDispose, disposeObjectResources } from "../threeDispose.js";
 import * as THREE from "three";
-import { Eye, Compass, RotateCcw, Crosshair, Focus, Sun, Box, ChevronUp, ChevronDown } from "lucide-react";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { Route, RotateCcw, Crosshair, Sun, Box, EyeOff, Eye } from "lucide-react";
 
+// 视角预设（2026-11-07 视口改版）：默认“整机”斜 45° 看全机；切换时相机平滑过渡
 const CAMERA_PRESETS = {
-  fit: { label: "聚焦刀路", theta: -Math.PI * 0.18, phi: Math.PI * 0.28, distScale: 1.75 },
-  iso: { label: "整机 3D", theta: -Math.PI * 0.22, phi: Math.PI * 0.31, distScale: 2.35 },
-  top: { label: "俯视 XY", theta: 0, phi: 0.015, distScale: 1.55 },
-  front: { label: "前视 XZ", theta: 0, phi: Math.PI * 0.43, distScale: 1.9 },
-  side: { label: "侧视 YZ", theta: -Math.PI * 0.48, phi: Math.PI * 0.38, distScale: 1.95 },
+  iso: { label: "整机", title: "整机 3D 视角", theta: -Math.PI * 0.2, phi: Math.PI * 0.32, distScale: 3.5 },
+  fit: { label: "刀路", title: "聚焦刀路与板材", theta: Math.PI * 0.12, phi: Math.PI * 0.2, distScale: 2.3 },
+  top: { label: "俯视", title: "俯视 XY", theta: 0, phi: 0.015, distScale: 2.7 },
+  front: { label: "前视", title: "前视 XZ", theta: 0, phi: Math.PI * 0.44, distScale: 2.6 },
+  side: { label: "侧视", title: "侧视 YZ", theta: -Math.PI * 0.5, phi: Math.PI * 0.4, distScale: 2.6 },
 };
+const DEFAULT_PRESET = "iso";
+
+/** 圆角盒体：打印件、电机与板材统一用小圆角，靠光照表现体积，避免“线框积木”观感。 */
+function rbox(w, h, d, r = 1.2) {
+  const radius = Math.max(0.01, Math.min(r, Math.min(w, h, d) * 0.45));
+  return new RoundedBoxGeometry(w, h, d, 3, radius);
+}
+
+/** 材料烧灼颜色：木材 / 皮革 / 纸为深褐碳化，亚克力为雾白，金属为浅灰白。 */
+function burnStyleFor(name = "") {
+  const s = String(name);
+  if (s.includes("亚克力") || s.toLowerCase().includes("acrylic")) return { rgb: "236, 240, 255", base: 0.35, gain: 0.45 };
+  if (s.includes("金属") || s.includes("钢") || s.includes("铝")) return { rgb: "226, 232, 240", base: 0.4, gain: 0.5 };
+  return { rgb: "46, 24, 10", base: 0.5, gain: 0.45 };
+}
+
+/** 生成板材表面底纹：木材画年轮纹理，其他材料为均匀底色加轻微噪点。 */
+function paintMaterialBase(g2d, width, height, name, colorHex) {
+  const base = new THREE.Color(colorHex);
+  g2d.fillStyle = `#${base.getHexString()}`;
+  g2d.fillRect(0, 0, width, height);
+  const s = String(name);
+  const isWood = !(s.includes("亚克力") || s.toLowerCase().includes("acrylic") || s.includes("金属") || s.includes("钢") || s.includes("铝"));
+  // 固定种子的伪随机，保证同一块板每次重建纹理一致
+  let seed = 7;
+  const rand = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  if (isWood) {
+    const lines = Math.max(24, Math.round(height / 6));
+    for (let i = 0; i < lines; i++) {
+      const y0 = (i / lines) * height + rand() * 4;
+      const amp = 1.5 + rand() * 4;
+      const freq = 0.004 + rand() * 0.01;
+      const phase = rand() * Math.PI * 2;
+      const dark = rand() < 0.5;
+      g2d.strokeStyle = dark ? `rgba(80, 45, 18, ${0.08 + rand() * 0.12})` : `rgba(255, 228, 190, ${0.05 + rand() * 0.08})`;
+      g2d.lineWidth = 0.8 + rand() * 2.2;
+      g2d.beginPath();
+      for (let x = 0; x <= width; x += 8) {
+        const y = y0 + Math.sin(x * freq + phase) * amp;
+        if (x === 0) g2d.moveTo(x, y);
+        else g2d.lineTo(x, y);
+      }
+      g2d.stroke();
+    }
+  }
+  for (let i = 0; i < (width * height) / 90; i++) {
+    g2d.fillStyle = rand() < 0.5 ? "rgba(0,0,0,0.05)" : "rgba(255,255,255,0.04)";
+    g2d.fillRect(rand() * width, rand() * height, 1.5, 1.5);
+  }
+}
+
+// 刀路 / 俯视视角下龙门与激光头半透明（2026-11-07 用户决定），透过它们看到落点与烧灼痕迹
+const GHOST_PRESETS = new Set(["fit", "top"]);
+const GHOST_FADE = 0.86;
+
+/** level 0 = 实体，1 = 半透明；透明开关变化时才重新编译材质。 */
+function applyGhost(ctx, level) {
+  if (!ctx?.ghostMats) return;
+  const ghosted = level > 0.001;
+  for (const entry of ctx.ghostMats) {
+    const { mat } = entry;
+    const transparent = entry.transparent || ghosted;
+    if (mat.transparent !== transparent) {
+      mat.transparent = transparent;
+      mat.needsUpdate = true;
+    }
+    mat.opacity = entry.opacity * (1 - GHOST_FADE * level);
+    mat.depthWrite = ghosted ? false : entry.depthWrite;
+  }
+  // 半透明时不再往板面投阴影
+  for (const entry of ctx.ghostMeshes || []) {
+    entry.mesh.castShadow = entry.castShadow && !ghosted;
+  }
+}
+
+function applyCoverVisibility(ctx, visible) {
+  ctx?.enclosureGroup?.children.forEach((child) => {
+    if (child.userData?.cover) child.visible = Boolean(visible);
+  });
+}
+
+function burnStroke(burn, powerRatio) {
+  const p = Math.min(1, Math.max(0, Number(powerRatio) || 0.7));
+  const alpha = Math.round((burn.style.base + burn.style.gain * p) * 20) / 20;
+  return `rgba(${burn.style.rgb}, ${alpha})`;
+}
+
+/**
+ * 把已完成的出光段增量画到板面画布上（2026-11-07）。
+ * 只画新增部分；进度倒退、换刀路或改偏置时先铺回底纹再从头画。当前段只画到激光头所在位置。
+ */
+function updateBurnSurface(burn, { segs, completed, activeFraction, key, mapX, mapY }) {
+  const g = burn?.g2d;
+  if (!g) return;
+  const rewind =
+    completed < burn.drawnSeg ||
+    (completed === burn.drawnSeg && burn.partial && activeFraction < burn.partialFrac - 1e-6);
+  let dirty = false;
+  if (burn.key !== key || rewind) {
+    g.globalCompositeOperation = "source-over";
+    g.drawImage(burn.base, 0, 0);
+    burn.key = key;
+    burn.drawnSeg = 0;
+    burn.partial = null;
+    burn.partialFrac = 0;
+    dirty = true;
+  }
+  g.lineJoin = "round";
+  g.lineWidth = Math.max(2, 0.5 * burn.pxPerMm);
+  const target = Math.min(completed, segs.length);
+  if (target > burn.drawnSeg) {
+    g.lineCap = "round";
+    let style = "";
+    let open = false;
+    for (let i = burn.drawnSeg; i < target; i++) {
+      const s = segs[i];
+      if (!s.laserOn) continue;
+      const st = burnStroke(burn, s.powerRatio);
+      if (st !== style) {
+        if (open) g.stroke();
+        g.strokeStyle = st;
+        g.beginPath();
+        style = st;
+        open = true;
+      }
+      const start = i === burn.drawnSeg && burn.partial ? burn.partial : s.from;
+      g.moveTo(mapX(start.x), mapY(start.y));
+      g.lineTo(mapX(s.to.x), mapY(s.to.y));
+    }
+    if (open) g.stroke();
+    burn.drawnSeg = target;
+    burn.partial = null;
+    burn.partialFrac = 0;
+    dirty = true;
+  }
+  const active = segs[burn.drawnSeg];
+  if (active?.laserOn && activeFraction > 0 && activeFraction > burn.partialFrac) {
+    const cur = {
+      x: active.from.x + (active.to.x - active.from.x) * activeFraction,
+      y: active.from.y + (active.to.y - active.from.y) * activeFraction,
+    };
+    const start = burn.partial || active.from;
+    // 同一段分多次画时用平头端点，避免接缝处叠色出现深点
+    g.lineCap = burn.partial ? "butt" : "round";
+    g.strokeStyle = burnStroke(burn, active.powerRatio);
+    g.beginPath();
+    g.moveTo(mapX(start.x), mapY(start.y));
+    g.lineTo(mapX(cur.x), mapY(cur.y));
+    g.stroke();
+    burn.partial = cur;
+    burn.partialFrac = activeFraction;
+    dirty = true;
+  }
+  if (dirty) burn.texture.needsUpdate = true;
+}
+
+/** 径向渐变光斑贴图（激光落点辉光）。 */
+function makeGlowTexture() {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const g2d = canvas.getContext("2d");
+  if (!g2d) return null;
+  const grad = g2d.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.18, "rgba(214,204,255,0.85)");
+  grad.addColorStop(0.45, "rgba(124,92,255,0.32)");
+  grad.addColorStop(1, "rgba(124,92,255,0)");
+  g2d.fillStyle = grad;
+  g2d.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 function donePowerToRgb(powerRatio) {
   const t = Math.min(1, Math.max(0, Number(powerRatio) || 0));
@@ -39,12 +220,17 @@ function materialColorHex(name = "") {
 
 function addMeshWithEdges(group, geometry, material, edgeColor = 0x94a3b8, edgeOpacity = 0.55) {
   const mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = !material.transparent;
+  mesh.receiveShadow = true;
+  // 实体件只留极淡的棱线，靠光照与阴影表现体积；透明亚克力保留彩色轮廓便于辨认
+  const solid = !material.transparent;
   const edges = new THREE.LineSegments(
-    new THREE.EdgesGeometry(geometry),
+    new THREE.EdgesGeometry(geometry, 35),
     new THREE.LineBasicMaterial({
-      color: edgeColor,
-      transparent: edgeOpacity < 1,
-      opacity: edgeOpacity,
+      color: solid ? 0xffffff : edgeColor,
+      transparent: true,
+      opacity: solid ? Math.min(0.12, edgeOpacity * 0.16) : edgeOpacity * 0.6,
+      depthWrite: false,
     }),
   );
   mesh.add(edges);
@@ -86,9 +272,9 @@ export function TwinStage3D({
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const [webglError, setWebglError] = useState("");
-  const [activePreset, setActivePreset] = useState("fit");
+  const [activePreset, setActivePreset] = useState(DEFAULT_PRESET);
   const [brightMode, setBrightMode] = useState(true);
-  const [showEnclosure, setShowEnclosure] = useState(true);
+  const [showEnclosure, setShowEnclosure] = useState(false);
   const [hudCollapsed, setHudCollapsed] = useState(() => {
     try {
       const saved = window.localStorage.getItem("moss_yisu_hud_collapsed_v1");
@@ -207,10 +393,12 @@ export function TwinStage3D({
   }, [toolpath, matWidth, matHeight, xMax, yMax, offsetX, offsetY]);
   // 相机轨道参数 ref
   const orbitRef = useRef({
-    theta: CAMERA_PRESETS.fit.theta,
-    phi: CAMERA_PRESETS.fit.phi,
-    distance: 175,
-    target: new THREE.Vector3(50, 4, -50),
+    theta: CAMERA_PRESETS[DEFAULT_PRESET].theta,
+    phi: CAMERA_PRESETS[DEFAULT_PRESET].phi,
+    distance: 340,
+    target: new THREE.Vector3(50, 28, -50),
+    // 视角切换的目标；动画循环每帧向目标插值，拖拽时清空
+    goal: null,
     dragging: false,
     panMode: false,
     lastX: 0,
@@ -235,23 +423,36 @@ export function TwinStage3D({
     camera.lookAt(orb.target);
   }, []);
 
-  const selectPreset = useCallback((presetKey) => {
-    const preset = CAMERA_PRESETS[presetKey] || CAMERA_PRESETS.fit;
-    setActivePreset(presetKey);
-    if (presetKey === "fit") {
+  const selectPreset = useCallback((presetKey, { instant = false } = {}) => {
+    const key = CAMERA_PRESETS[presetKey] ? presetKey : DEFAULT_PRESET;
+    const preset = CAMERA_PRESETS[key];
+    setActivePreset(key);
+    let distance;
+    let target;
+    if (key === "fit") {
       const { cx, cy, span } = getFocusBox();
-      orbitRef.current.theta = preset.theta;
-      orbitRef.current.phi = preset.phi;
-      orbitRef.current.distance = Math.max(85, span * preset.distScale);
-      orbitRef.current.target.set(cx, matThick + 4, -cy);
+      distance = Math.max(110, span * preset.distScale);
+      target = new THREE.Vector3(cx, matThick + 4, -cy);
     } else {
       const span = Math.max(xMax, yMax, 110);
-      orbitRef.current.theta = preset.theta;
-      orbitRef.current.phi = preset.phi;
-      orbitRef.current.distance = span * preset.distScale;
-      orbitRef.current.target.set(xMax * 0.5, 18, -yMax * 0.5);
+      distance = span * preset.distScale;
+      target = new THREE.Vector3(xMax * 0.5, key === "top" ? 0 : 28, -yMax * 0.5);
     }
-    applyCameraOrbit();
+    const orb = orbitRef.current;
+    // 最短路径转到目标方位角，避免绕远圈
+    let theta = preset.theta;
+    while (theta - orb.theta > Math.PI) theta -= Math.PI * 2;
+    while (theta - orb.theta < -Math.PI) theta += Math.PI * 2;
+    if (instant || !sceneRef.current) {
+      orb.goal = null;
+      orb.theta = theta;
+      orb.phi = preset.phi;
+      orb.distance = distance;
+      orb.target.copy(target);
+      applyCameraOrbit();
+      return;
+    }
+    orb.goal = { theta, phi: preset.phi, distance, target };
   }, [xMax, yMax, matThick, getFocusBox, applyCameraOrbit]);
 
   // 初始化 Three.js 场景与渲染循环
@@ -263,7 +464,7 @@ export function TwinStage3D({
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: true,
-        alpha: false,
+        alpha: true,
         powerPreference: "high-performance",
       });
     } catch (err) {
@@ -275,7 +476,12 @@ export function TwinStage3D({
     const height = Math.max(200, container.clientHeight || 420);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height, false);
-    renderer.setClearColor(0x131826, 1);
+    // 透明清屏，背景交给 CSS 的影棚渐变；ACES 色调映射 + 软阴影
+    renderer.setClearColor(0x000000, 0);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     container.innerHTML = "";
     container.appendChild(renderer.domElement);
@@ -284,18 +490,68 @@ export function TwinStage3D({
     const initialFov = height < 520 ? Math.min(62, 38 * Math.pow(520 / height, 0.55)) : 38;
     const camera = new THREE.PerspectiveCamera(initialFov, width / height, 1, 5000);
 
-    // 充足立体照明：天地半球光 + 主平行光 + 冷色补光，清晰展现 PETG 打印件棱线与 MGN9H 金属导轨质感
-    const hemiLight = new THREE.HemisphereLight(0xf8fafc, 0x475569, 1.6);
+    // 室内反射环境：让导轨、光轴、电机端盖等金属件有真实高光
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environment = envTexture;
+    scene.environmentIntensity = 0.55;
+
+    // 三点布光：半球环境光 + 投影主光 + 背后冷色轮廓光
+    const hemiLight = new THREE.HemisphereLight(0xe8eefc, 0x1a1f2b, 0.75);
     hemiLight.position.set(0, 400, 0);
     scene.add(hemiLight);
 
-    const mainDirLight = new THREE.DirectionalLight(0xffffff, 1.4);
-    mainDirLight.position.set(220, 420, 260);
-    scene.add(mainDirLight);
+    const keyLight = new THREE.DirectionalLight(0xfff4e6, 2.2);
+    keyLight.position.set(170, 320, 200);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(2048, 2048);
+    keyLight.shadow.camera.left = -190;
+    keyLight.shadow.camera.right = 190;
+    keyLight.shadow.camera.top = 190;
+    keyLight.shadow.camera.bottom = -190;
+    keyLight.shadow.camera.near = 40;
+    keyLight.shadow.camera.far = 900;
+    keyLight.shadow.bias = -0.0004;
+    keyLight.shadow.normalBias = 0.6;
+    keyLight.shadow.radius = 4;
+    scene.add(keyLight);
+    scene.add(keyLight.target);
 
-    const fillDirLight = new THREE.DirectionalLight(0x93c5fd, 0.95);
-    fillDirLight.position.set(-220, 280, -240);
-    scene.add(fillDirLight);
+    const rimLight = new THREE.DirectionalLight(0x9db4ff, 1.1);
+    rimLight.position.set(-200, 200, -260);
+    scene.add(rimLight);
+
+    // 承托地面：只接收阴影的透明平面 + 柔和的圆形影棚地台
+    const floorGroup = new THREE.Group();
+    const shadowFloor = new THREE.Mesh(
+      new THREE.PlaneGeometry(1400, 1400).rotateX(-Math.PI / 2),
+      new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.38 }),
+    );
+    shadowFloor.receiveShadow = true;
+    floorGroup.add(shadowFloor);
+    const floorDiscCanvas = document.createElement("canvas");
+    floorDiscCanvas.width = 256;
+    floorDiscCanvas.height = 256;
+    const discCtx = floorDiscCanvas.getContext("2d");
+    if (discCtx) {
+      const grad = discCtx.createRadialGradient(128, 128, 0, 128, 128, 128);
+      grad.addColorStop(0, "rgba(148,163,200,0.16)");
+      grad.addColorStop(0.6, "rgba(120,130,170,0.07)");
+      grad.addColorStop(1, "rgba(120,130,170,0)");
+      discCtx.fillStyle = grad;
+      discCtx.fillRect(0, 0, 256, 256);
+    }
+    const floorDiscTex = new THREE.CanvasTexture(floorDiscCanvas);
+    floorDiscTex.colorSpace = THREE.SRGBColorSpace;
+    const floorDisc = new THREE.Mesh(
+      new THREE.PlaneGeometry(620, 620).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ map: floorDiscTex, transparent: true, depthWrite: false }),
+    );
+    floorDisc.position.y = 0.05;
+    floorDisc.renderOrder = -1;
+    floorGroup.add(floorDisc);
+    floorGroup.position.y = -6.1;
+    scene.add(floorGroup);
 
     // 场景分组
     const frameGroup = new THREE.Group();
@@ -314,48 +570,70 @@ export function TwinStage3D({
     scene.add(cursorGroup);
     scene.add(gantryGroup);
 
-    // 激光束与焦点光斑对象（M5 时为绿色定位导引细光束，M3 出光时为高亮蓝紫/洋红高能激光束）
-    const beamCoreGeo = new THREE.CylinderGeometry(0.5, 0.18, 1, 16);
+    // 激光束与落点：出光时为细亮的 450nm 蓝紫光束 + 加色辉光；不出光时只在板面留一个小定位环
+    const beamCoreGeo = new THREE.CylinderGeometry(0.16, 0.08, 1, 12);
     const beamCoreMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
+      color: 0xe4dcff,
       transparent: true,
-      opacity: 0.96,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
     });
     const beamCoreMesh = new THREE.Mesh(beamCoreGeo, beamCoreMat);
 
-    const beamHaloGeo = new THREE.CylinderGeometry(1.85, 0.95, 1, 16);
+    const beamHaloGeo = new THREE.CylinderGeometry(0.75, 0.32, 1, 16, 1, true);
     const beamHaloMat = new THREE.MeshBasicMaterial({
-      color: 0x3b82f6,
+      color: 0x7c5cff,
       transparent: true,
-      opacity: 0.45,
+      opacity: 0.35,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
     });
     const beamHaloMesh = new THREE.Mesh(beamHaloGeo, beamHaloMat);
 
-    // 焦点靶环
-    const spotRingGeo = new THREE.RingGeometry(0.9, 3.2, 28);
+    // 不出光时的定位环
+    const spotRingGeo = new THREE.RingGeometry(1.6, 2.2, 40);
     spotRingGeo.rotateX(-Math.PI / 2);
     const spotRingMat = new THREE.MeshBasicMaterial({
-      color: 0x34d399,
+      color: 0x7dd3fc,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.95,
+      opacity: 0.85,
+      depthWrite: false,
     });
     const spotRingMesh = new THREE.Mesh(spotRingGeo, spotRingMat);
 
-    const spotCenterGeo = new THREE.CircleGeometry(0.75, 20);
+    const spotCenterGeo = new THREE.CircleGeometry(0.45, 20);
     spotCenterGeo.rotateX(-Math.PI / 2);
     const spotCenterMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       side: THREE.DoubleSide,
+      transparent: true,
+      depthWrite: false,
     });
     const spotCenterMesh = new THREE.Mesh(spotCenterGeo, spotCenterMat);
 
-    const spotPointLight = new THREE.PointLight(0x38bdf8, 0, 95);
+    // 出光落点辉光（始终朝向相机的加色贴图）
+    const glowTexture = makeGlowTexture();
+    const spotGlow = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: glowTexture,
+        color: 0xffffff,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    spotGlow.visible = false;
+
+    const spotPointLight = new THREE.PointLight(0x8b7bff, 0, 70, 1.6);
 
     scene.add(beamCoreMesh);
     scene.add(beamHaloMesh);
     scene.add(spotRingMesh);
     scene.add(spotCenterMesh);
+    scene.add(spotGlow);
     scene.add(spotPointLight);
 
     sceneRef.current = {
@@ -363,6 +641,8 @@ export function TwinStage3D({
       scene,
       camera,
       hemiLight,
+      keyLight,
+      rimLight,
       frameGroup,
       enclosureGroup,
       workpieceGroup,
@@ -374,7 +654,15 @@ export function TwinStage3D({
       beamHaloMesh,
       spotRingMesh,
       spotCenterMesh,
+      spotGlow,
       spotPointLight,
+      laserOn: false,
+      powerRatio: 0,
+      burn: null,
+      cutVertexPrefix: null,
+      ghostMats: null,
+      ghostLevel: 0,
+      ghostTarget: 0,
       doneCutLine: null,
       todoCutLine: null,
       rapidLine: null,
@@ -393,8 +681,42 @@ export function TwinStage3D({
       if (!ctx) return;
       ctx.animId = requestAnimationFrame(animate);
       pulsePhase += 0.12;
-      const s = 1 + Math.sin(pulsePhase) * 0.2;
-      ctx.spotRingMesh.scale.set(s, 1, s);
+      // 视角切换平滑过渡
+      const orb = orbitRef.current;
+      if (orb.goal && !orb.dragging) {
+        const k = 0.14;
+        orb.theta += (orb.goal.theta - orb.theta) * k;
+        orb.phi += (orb.goal.phi - orb.phi) * k;
+        orb.distance += (orb.goal.distance - orb.distance) * k;
+        orb.target.lerp(orb.goal.target, k);
+        if (
+          Math.abs(orb.goal.theta - orb.theta) < 1e-3 &&
+          Math.abs(orb.goal.phi - orb.phi) < 1e-3 &&
+          Math.abs(orb.goal.distance - orb.distance) < 0.05 &&
+          orb.target.distanceTo(orb.goal.target) < 0.05
+        ) {
+          orb.theta = orb.goal.theta;
+          orb.phi = orb.goal.phi;
+          orb.distance = orb.goal.distance;
+          orb.target.copy(orb.goal.target);
+          orb.goal = null;
+        }
+        applyCameraOrbit();
+      }
+      if (ctx.laserOn) {
+        // 出光时落点辉光轻微闪烁
+        const flicker = 1 + Math.sin(pulsePhase * 2.7) * 0.08 + Math.sin(pulsePhase * 6.1) * 0.05;
+        const size = (5 + ctx.powerRatio * 6) * flicker;
+        ctx.spotGlow.scale.set(size, size, 1);
+      } else {
+        const s = 1 + Math.sin(pulsePhase * 0.6) * 0.12;
+        ctx.spotRingMesh.scale.set(s, 1, s);
+      }
+      if (ctx.ghostMats && ctx.ghostLevel !== ctx.ghostTarget) {
+        ctx.ghostLevel += (ctx.ghostTarget - ctx.ghostLevel) * 0.15;
+        if (Math.abs(ctx.ghostTarget - ctx.ghostLevel) < 0.01) ctx.ghostLevel = ctx.ghostTarget;
+        applyGhost(ctx, ctx.ghostLevel);
+      }
       if (ctx.fanHubMesh) {
         ctx.fanHubMesh.rotation.z += 0.18;
       }
@@ -417,6 +739,8 @@ export function TwinStage3D({
       }
       // 卸载时释放全部几何体 / 材质并主动丢弃 WebGL 上下文，避免反复进出页面耗尽上下文与显存
       disposeObjectResources(scene);
+      envTexture.dispose();
+      pmrem.dispose();
       renderer.dispose();
       renderer.forceContextLoss?.();
       renderer.domElement?.remove?.();
@@ -428,22 +752,36 @@ export function TwinStage3D({
   useEffect(() => {
     const ctx = sceneRef.current;
     if (!ctx) return;
-    ctx.renderer.setClearColor(brightMode ? 0x161d2f : 0x0b0e17, 1);
-    if (ctx.hemiLight) {
-      ctx.hemiLight.intensity = brightMode ? 1.65 : 1.15;
-    }
+    // 背景渐变由 CSS 类切换；这里只调灯光与曝光
+    ctx.hemiLight.intensity = brightMode ? 0.75 : 0.4;
+    ctx.keyLight.intensity = brightMode ? 2.2 : 1.5;
+    ctx.rimLight.intensity = brightMode ? 1.1 : 1.4;
+    ctx.scene.environmentIntensity = brightMode ? 0.55 : 0.3;
+    ctx.renderer.toneMappingExposure = brightMode ? 1.05 : 0.85;
   }, [brightMode]);
 
-  // 切换翼宿 V1.0 外壳与半透亚克力护罩显隐
+  // 切换半透亚克力护罩（顶盖、前遮光板、上侧框、铰链与卡扣）显隐；背板、风扇、主板盖等实体件始终显示。
+  // 默认隐藏护罩（2026-11-07）：橙色亚克力会把整台机器染成褐色并挡住板面
+  const ghostTargetRef = useRef(GHOST_PRESETS.has(activePreset) ? 1 : 0);
   useEffect(() => {
-    const ctx = sceneRef.current;
-    if (!ctx?.enclosureGroup) return;
-    ctx.enclosureGroup.visible = Boolean(showEnclosure);
+    ghostTargetRef.current = GHOST_PRESETS.has(activePreset) ? 1 : 0;
+    if (sceneRef.current) sceneRef.current.ghostTarget = ghostTargetRef.current;
+  }, [activePreset]);
+
+  const showEnclosureRef = useRef(showEnclosure);
+  useEffect(() => {
+    showEnclosureRef.current = showEnclosure;
+    applyCoverVisibility(sceneRef.current, showEnclosure);
   }, [showEnclosure]);
 
   // 当切换/上传新刀路时，若处于 fit 视角则自动对焦到刀路区域（调整材料坐标时保持机台视角稳定，直观看到材料与激光头在台面上移动）
+  const cameraPlacedRef = useRef(false);
   useEffect(() => {
-    if (activePreset === "fit") {
+    if (!cameraPlacedRef.current) {
+      // 首次挂载直接摆到默认视角，不做过渡
+      cameraPlacedRef.current = Boolean(sceneRef.current);
+      selectPreset(activePreset, { instant: true });
+    } else if (activePreset === "fit") {
       selectPreset("fit");
     }
   }, [toolpath]);
@@ -479,63 +817,70 @@ export function TwinStage3D({
     const yRailOffsetX = Math.max(66, xMax / 2 + 16); // 左右 Y 轴 MGN9H 导轨距中心距离
 
     // 材质库：还原 PETG 打印件、MGN9H 银白钢轨、MGN9H 滑块、42 步进电机、5W 蓝光激光器、半透橙红亚克力
+    // 2026-11-07 视口改版：石墨灰打印件 + 银色钢件 + 黑色阳极氧化激光头，只在旋钮、线夹上点缀 MOSS 紫
     const petgDarkMat = new THREE.MeshStandardMaterial({
-      color: 0x263147,
-      roughness: 0.55,
-      metalness: 0.15,
+      color: 0x2a2f38,
+      roughness: 0.7,
+      metalness: 0.0,
     });
     const petgAccentMat = new THREE.MeshStandardMaterial({
-      color: 0x334155,
-      roughness: 0.48,
-      metalness: 0.18,
+      color: 0x353b46,
+      roughness: 0.66,
+      metalness: 0.0,
     });
     const petgPrintMat = new THREE.MeshStandardMaterial({
-      color: 0x3b4d6b,
-      roughness: 0.42,
-      metalness: 0.15,
+      color: 0x41495a,
+      roughness: 0.6,
+      metalness: 0.0,
+    });
+    const accentMat = new THREE.MeshStandardMaterial({
+      color: 0x8b7bff,
+      roughness: 0.45,
+      metalness: 0.1,
     });
     const cuttingPadMat = new THREE.MeshStandardMaterial({
-      color: 0x1a2234,
-      roughness: 0.72,
-      metalness: 0.25,
+      color: 0x1c2028,
+      roughness: 0.55,
+      metalness: 0.6,
     });
     const mgnRailMat = new THREE.MeshStandardMaterial({
-      color: 0xcbd5e1,
-      roughness: 0.25,
-      metalness: 0.78,
+      color: 0xdfe4ec,
+      roughness: 0.24,
+      metalness: 0.92,
     });
     const mgnBlockMat = new THREE.MeshStandardMaterial({
-      color: 0x10b981,
-      roughness: 0.35,
-      metalness: 0.45,
+      color: 0xb4bcc8,
+      roughness: 0.32,
+      metalness: 0.88,
     });
     const motorBodyMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
-      roughness: 0.5,
+      color: 0x16191f,
+      roughness: 0.48,
       metalness: 0.35,
     });
     const motorCapMat = new THREE.MeshStandardMaterial({
-      color: 0x94a3b8,
-      roughness: 0.3,
-      metalness: 0.68,
+      color: 0xb6bec9,
+      roughness: 0.28,
+      metalness: 0.9,
     });
     const beltMat = new THREE.MeshStandardMaterial({
-      color: 0x0f172a,
-      roughness: 0.85,
-      metalness: 0.08,
+      color: 0x0d0f13,
+      roughness: 0.9,
+      metalness: 0.0,
     });
     const brassMat = new THREE.MeshStandardMaterial({
-      color: 0xf59e0b,
-      roughness: 0.28,
-      metalness: 0.75,
+      color: 0xd9a441,
+      roughness: 0.3,
+      metalness: 0.95,
     });
     const acrylicOrangeMat = new THREE.MeshStandardMaterial({
-      color: 0xea580c,
-      roughness: 0.15,
-      metalness: 0.05,
+      color: 0xff6a1a,
+      roughness: 0.08,
+      metalness: 0.0,
       transparent: true,
-      opacity: 0.15,
+      opacity: 0.13,
       depthWrite: false,
+      side: THREE.DoubleSide,
     });
 
     // =========================================================================
@@ -548,7 +893,7 @@ export function TwinStage3D({
     // 底板四周框架（还原 底板.STEP 中央镂空嵌装切割垫板结构）
     const baseLeft = addMeshWithEdges(
       frameGroup,
-      new THREE.BoxGeometry(sideSkirtW, baseFrameThickness, chassisD),
+      rbox(sideSkirtW, baseFrameThickness, chassisD),
       petgDarkMat,
       0x475569,
       0.55,
@@ -557,7 +902,7 @@ export function TwinStage3D({
 
     const baseRight = addMeshWithEdges(
       frameGroup,
-      new THREE.BoxGeometry(sideSkirtW, baseFrameThickness, chassisD),
+      rbox(sideSkirtW, baseFrameThickness, chassisD),
       petgDarkMat,
       0x475569,
       0.55,
@@ -566,7 +911,7 @@ export function TwinStage3D({
 
     const baseFront = addMeshWithEdges(
       frameGroup,
-      new THREE.BoxGeometry(cuttingMatW, baseFrameThickness, frontBackSkirtD),
+      rbox(cuttingMatW, baseFrameThickness, frontBackSkirtD),
       petgDarkMat,
       0x475569,
       0.55,
@@ -575,7 +920,7 @@ export function TwinStage3D({
 
     const baseBack = addMeshWithEdges(
       frameGroup,
-      new THREE.BoxGeometry(cuttingMatW, baseFrameThickness, frontBackSkirtD),
+      rbox(cuttingMatW, baseFrameThickness, frontBackSkirtD),
       petgDarkMat,
       0x475569,
       0.55,
@@ -585,7 +930,7 @@ export function TwinStage3D({
     // 切割垫板.STEP (121.9 × 4.5 × 121.9 mm)：位于工作区正中央
     const padMesh = addMeshWithEdges(
       frameGroup,
-      new THREE.BoxGeometry(cuttingMatW, 4.5, cuttingMatD),
+      rbox(cuttingMatW, 4.5, cuttingMatD),
       cuttingPadMat,
       0x64748b,
       0.7,
@@ -595,8 +940,8 @@ export function TwinStage3D({
     // 切割垫板条形防反光排烟格栅槽 (还原 切割垫板.STEP 表面平行凹槽)
     for (let sx = -cuttingMatW / 2 + 8; sx <= cuttingMatW / 2 - 8; sx += 10) {
       const slat = new THREE.Mesh(
-        new THREE.BoxGeometry(2.2, 0.3, cuttingMatD - 14),
-        new THREE.MeshBasicMaterial({ color: 0x0f172a }),
+        rbox(2.2, 0.3, cuttingMatD - 14),
+        new THREE.MeshStandardMaterial({ color: 0x0b0d11, roughness: 0.9, metalness: 0.2 }),
       );
       slat.position.set(cx + sx, 0.01, cz);
       frameGroup.add(slat);
@@ -608,13 +953,13 @@ export function TwinStage3D({
     const step = 10;
     for (let gx = 0; gx <= xMax; gx += step) {
       const isMajor = gx % 50 === 0 || gx === xMax;
-      const c = isMajor ? [0.38, 0.68, 0.98] : [0.24, 0.33, 0.48];
+      const c = isMajor ? [0.42, 0.47, 0.58] : [0.2, 0.23, 0.29];
       gridPos.push(gx, 0.1, 0, gx, 0.1, -yMax);
       gridColors.push(...c, ...c);
     }
     for (let gy = 0; gy <= yMax; gy += step) {
       const isMajor = gy % 50 === 0 || gy === yMax;
-      const c = isMajor ? [0.38, 0.68, 0.98] : [0.24, 0.33, 0.48];
+      const c = isMajor ? [0.42, 0.47, 0.58] : [0.2, 0.23, 0.29];
       gridPos.push(0, 0.1, -gy, xMax, 0.1, -gy);
       gridColors.push(...c, ...c);
     }
@@ -624,7 +969,21 @@ export function TwinStage3D({
     frameGroup.add(
       new THREE.LineSegments(
         gridGeo,
-        new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.92 }),
+        new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false }),
+      ),
+    );
+    // 有效工作区边界：MOSS 紫细框，一眼看出能刻到哪里
+    const workAreaGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0.14, 0),
+      new THREE.Vector3(xMax, 0.14, 0),
+      new THREE.Vector3(xMax, 0.14, -yMax),
+      new THREE.Vector3(0, 0.14, -yMax),
+      new THREE.Vector3(0, 0.14, 0),
+    ]);
+    frameGroup.add(
+      new THREE.Line(
+        workAreaGeo,
+        new THREE.LineBasicMaterial({ color: 0x8b7bff, transparent: true, opacity: 0.75, depthWrite: false }),
       ),
     );
 
@@ -662,8 +1021,8 @@ export function TwinStage3D({
     originMarker.add(new THREE.LineSegments(axisGeo, new THREE.LineBasicMaterial({ vertexColors: true })));
 
     const originRing = new THREE.Mesh(
-      new THREE.RingGeometry(1.6, 3.4, 28).rotateX(-Math.PI / 2),
-      new THREE.MeshBasicMaterial({ color: 0x34d399, side: THREE.DoubleSide }),
+      new THREE.RingGeometry(0.9, 1.5, 28).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xe2e8f0, side: THREE.DoubleSide, transparent: true, opacity: 0.85 }),
     );
     originRing.position.set(0, originSurfaceY + 0.03, 0);
     originMarker.add(originRing);
@@ -678,7 +1037,7 @@ export function TwinStage3D({
       // PETG 侧向导轨承托台
       const railBed = addMeshWithEdges(
         frameGroup,
-        new THREE.BoxGeometry(16, 18, railLen + 36),
+        rbox(16, 18, railLen + 36),
         petgAccentMat,
         0x64748b,
         0.55,
@@ -688,7 +1047,7 @@ export function TwinStage3D({
       // 140mm MGN9H 线性导轨 (宽 9mm × 高 6.5mm × 长 140mm)
       const yRail = addMeshWithEdges(
         frameGroup,
-        new THREE.BoxGeometry(9, 6.5, railLen),
+        rbox(9, 6.5, railLen),
         mgnRailMat,
         0x475569,
         0.8,
@@ -697,7 +1056,7 @@ export function TwinStage3D({
 
       // Y 轴 GT2 6mm 同步带
       const yBelt = new THREE.Mesh(
-        new THREE.BoxGeometry(2.2, 6, railLen + 24),
+        rbox(2.2, 6, railLen + 24),
         beltMat,
       );
       yBelt.position.set(rx - side * 6.5, 25, cz - 4);
@@ -706,7 +1065,7 @@ export function TwinStage3D({
       // 前置 惰轮调节块_Y左/Y右.STEP + 手拧螺帽.STEP (PETG 打印件)
       const tensionBlock = addMeshWithEdges(
         frameGroup,
-        new THREE.BoxGeometry(15, 16, 22),
+        rbox(15, 16, 22),
         petgPrintMat,
         0x38bdf8,
         0.7,
@@ -717,7 +1076,7 @@ export function TwinStage3D({
       const thumbNut = addMeshWithEdges(
         frameGroup,
         new THREE.CylinderGeometry(7.5, 7.5, 8, 12).rotateX(Math.PI / 2),
-        new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.35, metalness: 0.2 }),
+        accentMat,
         0xe0f2fe,
         0.85,
       );
@@ -729,7 +1088,7 @@ export function TwinStage3D({
 
       const motorMount = addMeshWithEdges(
         frameGroup,
-        new THREE.BoxGeometry(32, 32, 8),
+        rbox(32, 32, 8),
         petgPrintMat,
         0x64748b,
         0.65,
@@ -738,7 +1097,7 @@ export function TwinStage3D({
 
       const motorBody = addMeshWithEdges(
         frameGroup,
-        new THREE.BoxGeometry(42, 40, 42),
+        rbox(42, 40, 42),
         motorBodyMat,
         0x64748b,
         0.7,
@@ -747,7 +1106,7 @@ export function TwinStage3D({
 
       const motorTopCap = addMeshWithEdges(
         frameGroup,
-        new THREE.BoxGeometry(42.4, 7, 42.4),
+        rbox(42.4, 7, 42.4),
         motorCapMat,
         0x94a3b8,
         0.6,
@@ -782,7 +1141,7 @@ export function TwinStage3D({
     const backWallZ = cz - chassisD / 2 + 3;
     const backPlate = addMeshWithEdges(
       enclosureGroup,
-      new THREE.BoxGeometry(chassisW, 62, 6),
+      rbox(chassisW, 62, 6),
       petgDarkMat,
       0x475569,
       0.6,
@@ -794,7 +1153,7 @@ export function TwinStage3D({
     fanGroup.position.set(cx + 42, 30, backWallZ - 17);
     addMeshWithEdges(
       fanGroup,
-      new THREE.BoxGeometry(40, 40, 28),
+      rbox(40, 40, 28),
       motorBodyMat,
       0x64748b,
       0.75,
@@ -807,7 +1166,7 @@ export function TwinStage3D({
     const fanHub = addMeshWithEdges(
       fanGroup,
       new THREE.CylinderGeometry(8, 8, 30, 16).rotateX(Math.PI / 2),
-      new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.3 }),
+      new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.5 }),
       0xbae6fd,
       0.8,
     );
@@ -817,7 +1176,7 @@ export function TwinStage3D({
     // 主板盖.STEP (G3 主板防护盒，带六边形散热格栅视觉，72 × 54 × 18 mm)
     const boardCover = addMeshWithEdges(
       enclosureGroup,
-      new THREE.BoxGeometry(72, 54, 18),
+      rbox(72, 54, 18),
       petgPrintMat,
       0x38bdf8,
       0.65,
@@ -838,7 +1197,7 @@ export function TwinStage3D({
       // 下沿实心裙边
       const lowerSide = addMeshWithEdges(
         enclosureGroup,
-        new THREE.BoxGeometry(8, 24, chassisD),
+        rbox(8, 24, chassisD),
         petgDarkMat,
         0x475569,
         0.65,
@@ -848,68 +1207,110 @@ export function TwinStage3D({
       // 上沿側框立柱与顶梁 (还原 侧框_左/右.STEP 视窗框造型)
       const upperSide = addMeshWithEdges(
         enclosureGroup,
-        new THREE.BoxGeometry(6, chassisH - 24, chassisD),
+        rbox(6, chassisH - 24, chassisD),
         sideWallMat,
         0x64748b,
         0.45,
       );
       upperSide.position.set(sx, 24 + (chassisH - 24) / 2, cz);
+      upperSide.userData.cover = true;
     });
 
     // 顶盖框架.STEP + 顶部观察板_厚度3mm.DXF (186.8 × 213 × 3 mm 半透橙红防激光亚克力)
     const topAcrylic = addMeshWithEdges(
       enclosureGroup,
-      new THREE.BoxGeometry(186.8, 3, 213),
+      rbox(186.8, 3, 213),
       acrylicOrangeMat,
       0xf97316,
       0.55,
     );
     topAcrylic.position.set(cx, chassisH - 1.5, cz);
+    topAcrylic.userData.cover = true;
 
     // 前遮光板_厚度3mm.DXF (158 × 107 × 3 mm 半透橙红防激光亚克力)
     const frontAcrylic = addMeshWithEdges(
       enclosureGroup,
-      new THREE.BoxGeometry(158, 86, 3),
+      rbox(158, 86, 3),
       acrylicOrangeMat,
       0xf97316,
       0.5,
     );
     frontAcrylic.position.set(cx, 20 + 43, cz + chassisD / 2 - 2);
+    frontAcrylic.userData.cover = true;
 
     // 后部左右阻尼铰链 (BOM: 小号阻尼合页 1.5kgf.cm 左/右) 与前部 顶板固定器.STEP
     [-68, 68].forEach((hx) => {
       const hinge = addMeshWithEdges(
         enclosureGroup,
-        new THREE.BoxGeometry(14, 10, 12),
+        rbox(14, 10, 12),
         petgPrintMat,
         0x94a3b8,
         0.7,
       );
       hinge.position.set(cx + hx, chassisH - 2, backWallZ + 4);
+      hinge.userData.cover = true;
 
       const frontClip = addMeshWithEdges(
         enclosureGroup,
-        new THREE.BoxGeometry(28, 6, 10),
+        rbox(28, 6, 10),
         petgPrintMat,
         0x94a3b8,
         0.65,
       );
       frontClip.position.set(cx + hx, chassisH - 1, cz + chassisD / 2 - 4);
+      frontClip.userData.cover = true;
     });
 
     // =========================================================================
     // 6. 加工板材 (Workpiece Slab) —— 按用户设置的尺寸 (matWidth × matHeight) 与起点坐标 (offsetX, offsetY) 摆放
     // =========================================================================
-    const slabGeo = new THREE.BoxGeometry(matWidth, matThick, matHeight);
+    const slabGeo = rbox(matWidth, matThick, matHeight, 0.3);
+    const slabColor = new THREE.Color(materialColorHex(matName)).multiplyScalar(0.82);
     const slabMat = new THREE.MeshStandardMaterial({
-      color: materialColorHex(matName),
-      roughness: 0.65,
-      metalness: 0.05,
-      transparent: true,
-      opacity: 0.92,
+      color: slabColor,
+      roughness: 0.78,
+      metalness: 0.02,
     });
     const slabMesh = addMeshWithEdges(workpieceGroup, slabGeo, slabMat, 0xfbbf24, 0.78);
     ctx.slabMesh = slabMesh;
+
+    // 板材上表面：材料底纹 + 逐段累积的烧灼痕迹（画在同一张画布上，雕刻时能看到逐渐刻出来的样子）
+    const pxPerMm = Math.max(4, Math.min(12, 1536 / Math.max(matWidth, matHeight)));
+    const burnCanvas = document.createElement("canvas");
+    burnCanvas.width = Math.max(16, Math.round(matWidth * pxPerMm));
+    burnCanvas.height = Math.max(16, Math.round(matHeight * pxPerMm));
+    const burnCtx = burnCanvas.getContext("2d");
+    const baseCanvas = document.createElement("canvas");
+    baseCanvas.width = burnCanvas.width;
+    baseCanvas.height = burnCanvas.height;
+    const baseCtx = baseCanvas.getContext("2d");
+    if (burnCtx && baseCtx) {
+      paintMaterialBase(baseCtx, baseCanvas.width, baseCanvas.height, matName, materialColorHex(matName));
+      burnCtx.drawImage(baseCanvas, 0, 0);
+      const burnTexture = new THREE.CanvasTexture(burnCanvas);
+      burnTexture.colorSpace = THREE.SRGBColorSpace;
+      burnTexture.anisotropy = Math.min(8, ctx.renderer.capabilities.getMaxAnisotropy?.() || 1);
+      const surface = new THREE.Mesh(
+        new THREE.PlaneGeometry(matWidth, matHeight).rotateX(-Math.PI / 2),
+        new THREE.MeshStandardMaterial({ map: burnTexture, roughness: 0.82, metalness: 0.0 }),
+      );
+      surface.position.y = matThick / 2 + 0.02;
+      surface.receiveShadow = true;
+      slabMesh.add(surface);
+      ctx.burn = {
+        canvas: burnCanvas,
+        g2d: burnCtx,
+        base: baseCanvas,
+        texture: burnTexture,
+        pxPerMm,
+        style: burnStyleFor(matName),
+        key: "",
+        drawnSeg: 0,
+        partial: null,
+      };
+    } else {
+      ctx.burn = null;
+    }
     // 7. X/Y 动态十字准星投影线（贴在板材上表面，实时标示激光头 X/Y 坐标位置）
     const cursorSurfaceY = matThick + 0.18;
     const xLineGeo = new THREE.BufferGeometry().setFromPoints([
@@ -921,9 +1322,10 @@ export function TwinStage3D({
       new THREE.Vector3(0, cursorSurfaceY, -yMax),
     ]);
     const cursorMat = new THREE.LineBasicMaterial({
-      color: 0x34d399,
+      color: 0x7dd3fc,
       transparent: true,
-      opacity: 0.6,
+      opacity: 0.32,
+      depthWrite: false,
     });
     const cursorXLine = new THREE.Line(xLineGeo, cursorMat);
     const cursorYLine = new THREE.Line(yLineGeo, cursorMat);
@@ -946,7 +1348,7 @@ export function TwinStage3D({
       // Y 轴 MGN9H 滑块 (28.9 × 8 × 20 mm)
       const yCarriageBlock = addMeshWithEdges(
         gantryGroup,
-        new THREE.BoxGeometry(20, 7, 29),
+        rbox(20, 7, 29),
         mgnBlockMat,
         0x6ee7b7,
         0.85,
@@ -956,7 +1358,7 @@ export function TwinStage3D({
       // XY转接块.STEP (PETG 打印件，36 × 15.2 × 21 mm，带阶梯与斜角)
       const xyAdapter = addMeshWithEdges(
         gantryGroup,
-        new THREE.BoxGeometry(22, 15.2, 35),
+        rbox(22, 15.2, 35),
         petgPrintMat,
         0x38bdf8,
         0.8,
@@ -979,7 +1381,7 @@ export function TwinStage3D({
     // 联动支架.STEP 主横梁 (PETG 打印件，连接左右 XY 转接块，承载 X 轴 140mm MGN9H 导轨)
     const linkBracket = addMeshWithEdges(
       gantryGroup,
-      new THREE.BoxGeometry(xRailSpan - 8, 14, 15),
+      rbox(xRailSpan - 8, 14, 15),
       petgPrintMat,
       0x38bdf8,
       0.75,
@@ -989,7 +1391,7 @@ export function TwinStage3D({
     // X 轴 140mm MGN9H 线性导轨 (安装在联动支架正面，宽 140mm × 高 9mm × 厚 6.5mm)
     const xMgnRail = addMeshWithEdges(
       gantryGroup,
-      new THREE.BoxGeometry(xRailLen, 9, 6.5),
+      rbox(xRailLen, 9, 6.5),
       mgnRailMat,
       0x475569,
       0.85,
@@ -998,7 +1400,7 @@ export function TwinStage3D({
 
     // X 轴横向 GT2 6mm 同步带
     const xBelt = new THREE.Mesh(
-      new THREE.BoxGeometry(xRailLen, 6, 1.8),
+      rbox(xRailLen, 6, 1.8),
       beltMat,
     );
     xBelt.position.set(cx, gantryBaseY + 19.5, 4);
@@ -1013,7 +1415,7 @@ export function TwinStage3D({
     // (a) X 轴 MGN9H 线性滑块 (28.9 × 20 × 8 mm)
     const xCarriageBlock = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(28.9, 20, 8),
+      rbox(28.9, 20, 8),
       mgnBlockMat,
       0x6ee7b7,
       0.9,
@@ -1023,7 +1425,7 @@ export function TwinStage3D({
     // (b) X轴连接件.STEP + 同步带卡齿_固定/可调.STEP (PETG 打印件，抱合滑块并咬合后方同步带)
     const xConnector = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(33, 24, 12),
+      rbox(33, 24, 12),
       petgPrintMat,
       0x60a5fa,
       0.85,
@@ -1033,7 +1435,7 @@ export function TwinStage3D({
     // 同步带卡齿块 (顶部后伸卡入 GT2 皮带)
     const beltClamp = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(22, 9, 14),
+      rbox(22, 9, 14),
       petgAccentMat,
       0x38bdf8,
       0.8,
@@ -1043,7 +1445,7 @@ export function TwinStage3D({
     // (c) 激光头转接板_5W.STEP (PETG 打印件：35.6 × 38 × 6 mm 背板 + 左右竖向调焦滑槽耳 + 抱箍侧翼)
     const adapterPlate = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(35.6, 38, 5.5),
+      rbox(35.6, 38, 5.5),
       petgPrintMat,
       0x38bdf8,
       0.92,
@@ -1054,7 +1456,7 @@ export function TwinStage3D({
     [-13.5, 13.5].forEach((sx) => {
       // 竖向调焦滑槽深色凹槽
       const slotGroove = new THREE.Mesh(
-        new THREE.BoxGeometry(3.4, 24, 1.2),
+        rbox(3.4, 24, 1.2),
         new THREE.MeshBasicMaterial({ color: 0x0f172a }),
       );
       slotGroove.position.set(sx, headMountY + 1, 24.6);
@@ -1073,7 +1475,7 @@ export function TwinStage3D({
       // 转接板前伸抱夹侧翼 (夹持 5W 激光器两侧)
       const sideClampEar = addMeshWithEdges(
         headGroup,
-        new THREE.BoxGeometry(3.5, 28, 18),
+        rbox(3.5, 28, 18),
         petgPrintMat,
         0x38bdf8,
         0.85,
@@ -1084,7 +1486,7 @@ export function TwinStage3D({
     // (d) 线束固定器.STEP + 线束固定压块.STEP (位于转接板右上方，夹持激光头 24V/TTL 线束)
     const wireHolder = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(11, 16, 10),
+      rbox(11, 16, 10),
       petgPrintMat,
       0x38bdf8,
       0.85,
@@ -1093,8 +1495,8 @@ export function TwinStage3D({
 
     const wireClamp = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(13, 5, 11),
-      new THREE.MeshStandardMaterial({ color: 0x0ea5e9, roughness: 0.35 }),
+      rbox(13, 5, 11),
+      accentMat,
       0xbae6fd,
       0.9,
     );
@@ -1130,37 +1532,32 @@ export function TwinStage3D({
       }
     });
 
-    // 5W 激光器阳极氧化铝合金主体 (30 × 40 × 30 mm，略带科技半透以便任何角度都不彻底死挡视线)
+    // 5W 激光器黑色阳极氧化铝主体 (30 × 40 × 30 mm)：方芯 + 水平叠片散热鳍片
     const laserHeatsinkMat = new THREE.MeshStandardMaterial({
-      color: 0x1d4ed8,
-      metalness: 0.45,
-      roughness: 0.28,
-      transparent: true,
-      opacity: 0.86,
+      color: 0x1a1d23,
+      metalness: 0.65,
+      roughness: 0.36,
     });
     const laserBody = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(29.5, 38, 29.5),
+      rbox(22, 38, 22, 1.5),
       laserHeatsinkMat,
       0x60a5fa,
       0.95,
     );
     laserBody.position.set(0, headMountY + 1, laserCenterZ);
 
-    // 5W 激光器正面与侧面竖向 CNC 散热鳍片槽 (还原真实 5W 激光模块外观)
-    [-10, -5, 0, 5, 10].forEach((fx) => {
-      const fin = new THREE.Mesh(
-        new THREE.BoxGeometry(1.4, 34, 31),
-        new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.5, roughness: 0.4 }),
-      );
-      fin.position.set(fx, headMountY + 1, laserCenterZ);
+    const finMat = new THREE.MeshStandardMaterial({ color: 0x23272f, metalness: 0.7, roughness: 0.32 });
+    for (let fy = -16; fy <= 16; fy += 3.2) {
+      const fin = new THREE.Mesh(rbox(29.5, 1.3, 29.5, 0.5), finMat);
+      fin.position.set(0, headMountY + 1 + fy, laserCenterZ);
       headGroup.add(fin);
-    });
+    }
 
     // 激光器顶部 3010 轴流冷却风扇 + 24V/TTL 3P 白色接线端子座
     const topFanCap = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(30, 8, 30),
+      rbox(30, 8, 30),
       motorBodyMat,
       0x94a3b8,
       0.85,
@@ -1169,7 +1566,7 @@ export function TwinStage3D({
 
     const xhConnector = addMeshWithEdges(
       headGroup,
-      new THREE.BoxGeometry(10, 5, 7),
+      rbox(10, 5, 7),
       new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.3 }),
       0x94a3b8,
       0.8,
@@ -1178,7 +1575,7 @@ export function TwinStage3D({
 
     // 顶部运行状态 LED 指示灯
     const ledMat = new THREE.MeshBasicMaterial({ color: 0x34d399 });
-    const headLed = new THREE.Mesh(new THREE.SphereGeometry(2.4, 14, 14), ledMat);
+    const headLed = new THREE.Mesh(new THREE.SphereGeometry(1.3, 14, 14), ledMat);
     headLed.position.set(-7, headMountY + 29.5, laserCenterZ + 6);
     headGroup.add(headLed);
 
@@ -1219,6 +1616,46 @@ export function TwinStage3D({
 
     ctx.headLedMat = ledMat;
     ctx.nozzleTipY = headMountY - 30;
+
+    // 实体件投射与接收阴影（透明亚克力、发光件不投影）
+    [frameGroup, enclosureGroup, workpieceGroup, gantryGroup].forEach((group) => {
+      group.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const transparent = Boolean(obj.material?.transparent) || obj.material?.isMeshBasicMaterial;
+        obj.castShadow = !transparent;
+        obj.receiveShadow = !obj.material?.isMeshBasicMaterial;
+      });
+    });
+    applyCoverVisibility(ctx, showEnclosureRef.current);
+
+    // 龙门与激光头改用独立材质副本（原材质与机架共用），以便单独调透明度。
+    // 副本在本帧首次渲染前替换，原材质尚未上传 GPU，无需释放。
+    const ghostClones = new Map();
+    const ghostMats = [];
+    const ghostMeshes = [];
+    gantryGroup.traverse((obj) => {
+      if (!obj.material || Array.isArray(obj.material)) return;
+      if (obj.isMesh) ghostMeshes.push({ mesh: obj, castShadow: obj.castShadow });
+      let clone = ghostClones.get(obj.material);
+      if (!clone) {
+        clone = obj.material.clone();
+        ghostClones.set(obj.material, clone);
+        ghostMats.push({ mat: clone, opacity: clone.opacity, transparent: clone.transparent, depthWrite: clone.depthWrite });
+      }
+      obj.material = clone;
+    });
+    ctx.headLedMat = ghostClones.get(ledMat) || ledMat;
+    ctx.ghostMats = ghostMats;
+    ctx.ghostMeshes = ghostMeshes;
+    ctx.ghostTarget = ghostTargetRef.current;
+    ctx.ghostLevel = ctx.ghostTarget;
+    applyGhost(ctx, ctx.ghostLevel);
+
+    // 主光与阴影相机对准机台中心
+    ctx.keyLight.target.position.set(cx, 0, cz);
+    ctx.keyLight.position.set(cx + 170, 320, cz + 200);
+    ctx.rimLight.position.set(cx - 200, 200, cz - 260);
+
     placeOffsetObjects(ctx, { offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick });
     // 偏置不在依赖里：只改板材 / 雕刻起点时由下一个 effect 平移对象，不重建机台
   }, [xMax, yMax, zMax, matWidth, matHeight, matThick, matName]);
@@ -1227,7 +1664,8 @@ export function TwinStage3D({
   useEffect(() => {
     placeOffsetObjects(sceneRef.current, { offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick });
   }, [offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, matWidth, matHeight, matThick]);
-  // 构建三维刀路轨迹几何体（高对比度：亮青蓝待加工、炽金红已加工、带方向箭头的 G0 空移、动态彗星尾迹）
+  // 构建三维刀路轨迹（2026-11-07 视口改版）：待雕刻为半透青色细线，已雕刻由板面烧灼痕迹表现
+  // （无烧灼画布时回退为按功率着色的线），G0 空移为紫色虚线 + 方向箭头，当前位置带一段亮色尾迹
   useEffect(() => {
     const ctx = sceneRef.current;
     if (!ctx) return;
@@ -1238,6 +1676,8 @@ export function TwinStage3D({
     ctx.rapidLine = null;
     ctx.arrowLine = null;
     ctx.cometLine = null;
+    ctx.cutVertexPrefix = null;
+    ctx.toolpathVersion = (ctx.toolpathVersion || 0) + 1;
 
     const segments = toolpath?.segments || [];
     if (segments.length === 0) return;
@@ -1245,7 +1685,7 @@ export function TwinStage3D({
     const surfaceY = matThick + 0.45;
     const rapidY = matThick + 2.0;
 
-    // 雕刻文字/刀路在材料上表面的包络边界框（直观展示文字在材料内部的位置范围）
+    // 刀路包络虚线框（直观展示雕刻内容在材料上的范围）
     const b = toolpath?.bounds;
     if (b && (b.widthMm > 0.5 || b.heightMm > 0.5)) {
       const by = matThick + 0.2;
@@ -1261,30 +1701,35 @@ export function TwinStage3D({
       ]);
       const boxLine = new THREE.LineSegments(
         boxGeo,
-        new THREE.LineBasicMaterial({
-          color: 0x34d399,
+        new THREE.LineDashedMaterial({
+          color: 0xffffff,
           transparent: true,
-          opacity: 0.48,
+          opacity: 0.32,
+          dashSize: 1.6,
+          gapSize: 1.2,
+          depthWrite: false,
         }),
       );
+      boxLine.computeLineDistances();
       toolpathGroup.add(boxLine);
     }
 
     const cutPositions = [];
     const doneColors = [];
-    const todoColors = [];
     const rapidPositions = [];
     const arrowPositions = [];
+    // 已雕刻顶点数前缀和：更新进度时 O(1) 得到 drawRange，大文件不再每帧遍历全部线段
+    const prefix = new Int32Array(segments.length + 1);
 
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
+      prefix[i + 1] = prefix[i] + (seg.laserOn ? 2 : 0);
       if (seg.laserOn) {
         const y0 = surfaceY + (seg.from.z || 0);
         const y1 = surfaceY + (seg.to.z || 0);
         cutPositions.push(seg.from.x, y0, -seg.from.y, seg.to.x, y1, -seg.to.y);
         const rgb = donePowerToRgb(seg.powerRatio || 0.7);
         doneColors.push(...rgb, ...rgb);
-        todoColors.push(0.22, 0.74, 0.97, 0.22, 0.74, 0.97);
       } else {
         const y0 = rapidY + (seg.from.z || 0);
         const y1 = rapidY + (seg.to.z || 0);
@@ -1309,17 +1754,18 @@ export function TwinStage3D({
         }
       }
     }
+    ctx.cutVertexPrefix = prefix;
 
     if (cutPositions.length > 0) {
       const todoGeo = new THREE.BufferGeometry();
       todoGeo.setAttribute("position", new THREE.Float32BufferAttribute(cutPositions, 3));
-      todoGeo.setAttribute("color", new THREE.Float32BufferAttribute(todoColors, 3));
       const todoLine = new THREE.LineSegments(
         todoGeo,
         new THREE.LineBasicMaterial({
-          vertexColors: true,
+          color: 0x67e8f9,
           transparent: true,
-          opacity: 0.82,
+          opacity: 0.55,
+          depthWrite: false,
         }),
       );
       todoLine.position.y = -0.04;
@@ -1334,6 +1780,8 @@ export function TwinStage3D({
         new THREE.LineBasicMaterial({ vertexColors: true }),
       );
       doneLine.position.y = 0.08;
+      doneLine.visible = !ctx.burn;
+      doneGeo.setDrawRange(0, 0);
       toolpathGroup.add(doneLine);
       ctx.doneCutLine = doneLine;
     }
@@ -1343,12 +1791,16 @@ export function TwinStage3D({
       rapidGeo.setAttribute("position", new THREE.Float32BufferAttribute(rapidPositions, 3));
       const rapidLine = new THREE.LineSegments(
         rapidGeo,
-        new THREE.LineBasicMaterial({
+        new THREE.LineDashedMaterial({
           color: 0xa78bfa,
           transparent: true,
           opacity: 0.55,
+          dashSize: 1.8,
+          gapSize: 1.4,
+          depthWrite: false,
         }),
       );
+      rapidLine.computeLineDistances();
       rapidLine.visible = showRapid;
       toolpathGroup.add(rapidLine);
       ctx.rapidLine = rapidLine;
@@ -1360,9 +1812,10 @@ export function TwinStage3D({
       const arrowLine = new THREE.LineSegments(
         arrowGeo,
         new THREE.LineBasicMaterial({
-          color: 0xfbbf24,
+          color: 0xc4b5fd,
           transparent: true,
-          opacity: 0.85,
+          opacity: 0.7,
+          depthWrite: false,
         }),
       );
       arrowLine.visible = showRapid;
@@ -1375,7 +1828,13 @@ export function TwinStage3D({
     cometGeo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(cometMaxSegments * 6), 3));
     const cometLine = new THREE.LineSegments(
       cometGeo,
-      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 }),
+      new THREE.LineBasicMaterial({
+        color: 0xe4dcff,
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
     );
     cometLine.position.y = 0.25;
     toolpathGroup.add(cometLine);
@@ -1389,7 +1848,7 @@ export function TwinStage3D({
     if (ctx?.arrowLine) ctx.arrowLine.visible = Boolean(showRapid);
   }, [showRapid]);
 
-  // 实时更新龙门架、翼宿 5W 激光头打印件总成位置、刀路偏置、激光束、十字游标、彗星尾迹与已完成刀路
+  // 实时更新龙门架、激光头位置、刀路偏置、激光束与落点、十字游标、尾迹与板面烧灼痕迹
   useEffect(() => {
     const ctx = sceneRef.current;
     if (!ctx) return;
@@ -1402,6 +1861,8 @@ export function TwinStage3D({
     const py = clampCoord(localY + toolpathOffsetY, -10, yMax + 10);
     const laserOn = Boolean(pose?.laserOn);
     const powerRatio = Math.min(1, Math.max(0, Number(pose?.powerRatio) || 0));
+    ctx.laserOn = laserOn;
+    ctx.powerRatio = powerRatio;
 
     // 3D 刀路轨迹组与雕刻合成起点 (toolpathOffsetX, toolpathOffsetY) 及材料宽高比例同步，始终在材料内部
     if (ctx.toolpathGroup) {
@@ -1413,91 +1874,105 @@ export function TwinStage3D({
     ctx.gantryGroup.position.set(0, 0, -py);
     ctx.headGroup.position.set(px, pz, 0);
 
-    // 更新台面 X/Y 十字准星游标线位置
+    // 台面 X/Y 十字游标线
     if (ctx.cursorXLine && ctx.cursorYLine) {
       ctx.cursorXLine.position.z = -py;
       ctx.cursorYLine.position.x = px;
-      ctx.cursorXLine.material.color.setHex(laserOn ? 0xf43f5e : 0x34d399);
+      ctx.cursorXLine.material.color.setHex(laserOn ? 0xa78bfa : 0x7dd3fc);
+      ctx.cursorXLine.material.opacity = laserOn ? 0.5 : 0.32;
     }
     if (ctx.headLedMat) {
-      ctx.headLedMat.color.setHex(laserOn ? 0xff3b5c : 0x34d399);
+      ctx.headLedMat.color.setHex(laserOn ? 0xa78bfa : 0x34d399);
     }
 
-    // 激光束与焦点靶环
+    // 激光束（喷嘴到板面）与落点
     const surfaceY = matThick + 0.45;
     const tipY = (ctx.nozzleTipY || 12) + pz;
     const beamLen = Math.max(1.5, tipY - surfaceY);
     const midY = surfaceY + beamLen / 2;
 
-    ctx.beamCoreMesh.visible = true;
-    ctx.beamHaloMesh.visible = true;
-    ctx.spotRingMesh.visible = true;
-    ctx.spotCenterMesh.visible = true;
+    ctx.beamCoreMesh.visible = laserOn;
+    ctx.beamHaloMesh.visible = laserOn;
+    ctx.spotGlow.visible = laserOn;
+    ctx.spotRingMesh.visible = !laserOn;
+    ctx.spotCenterMesh.visible = !laserOn;
 
     ctx.spotRingMesh.position.set(px, surfaceY + 0.15, -py);
     ctx.spotCenterMesh.position.set(px, surfaceY + 0.18, -py);
 
     if (laserOn) {
-      // 24V 5W 450nm 蓝紫高能半导体激光束
-      const beamScale = 0.75 + powerRatio * 0.85;
-      ctx.beamCoreMesh.material.color.setHex(0xffffff);
+      // 24V 5W 450nm 蓝紫激光：功率越高光束越粗越亮
+      const beamScale = 0.8 + powerRatio * 0.9;
       ctx.beamCoreMesh.position.set(px, midY, -py);
       ctx.beamCoreMesh.scale.set(beamScale, beamLen, beamScale);
-
-      ctx.beamHaloMesh.material.color.setHex(0x3b82f6);
-      ctx.beamHaloMesh.material.opacity = 0.42 + powerRatio * 0.4;
+      ctx.beamHaloMesh.material.opacity = 0.22 + powerRatio * 0.3;
       ctx.beamHaloMesh.position.set(px, midY, -py);
-      ctx.beamHaloMesh.scale.set(beamScale * 1.55, beamLen, beamScale * 1.55);
-
-      ctx.spotRingMesh.material.color.setHex(0xfbbf24);
-      ctx.spotPointLight.color.setHex(0x60a5fa);
-      ctx.spotPointLight.position.set(px, surfaceY + 8, -py);
-      ctx.spotPointLight.intensity = 1.8 + powerRatio * 2.4;
+      ctx.beamHaloMesh.scale.set(beamScale, beamLen, beamScale);
+      ctx.spotGlow.position.set(px, surfaceY + 0.6, -py);
+      ctx.spotPointLight.position.set(px, surfaceY + 6, -py);
+      ctx.spotPointLight.intensity = 20 + powerRatio * 40;
     } else {
-      // M5 安全定位导引光束
-      ctx.beamCoreMesh.material.color.setHex(0x34d399);
-      ctx.beamCoreMesh.position.set(px, midY, -py);
-      ctx.beamCoreMesh.scale.set(0.32, beamLen, 0.32);
-
-      ctx.beamHaloMesh.material.color.setHex(0x10b981);
-      ctx.beamHaloMesh.material.opacity = 0.18;
-      ctx.beamHaloMesh.position.set(px, midY, -py);
-      ctx.beamHaloMesh.scale.set(0.65, beamLen, 0.65);
-
-      ctx.spotRingMesh.material.color.setHex(0x34d399);
-      ctx.spotPointLight.intensity = 0.45;
+      ctx.spotPointLight.intensity = 0;
     }
 
-    // 更新已完成雕刻段 drawRange 与动态彗星尾迹
+    // 已雕刻进度：烧灼画布 + （回退时）已完成线段 drawRange + 尾迹
     if (toolpath?.segments) {
       const segs = toolpath.segments;
-      const completedIdx = pose?.completedSegmentCount ?? 0;
+      const completedIdx = Math.min(segs.length, pose?.completedSegmentCount ?? 0);
       const activeLimit = Math.min(segs.length, completedIdx + (pose?.activeSegmentFraction > 0 ? 1 : 0));
 
       if (ctx.doneCutLine) {
-        let cutVerticesDone = 0;
-        for (let i = 0; i < activeLimit; i++) {
-          if (segs[i].laserOn) cutVerticesDone += 2;
+        const prefix = ctx.cutVertexPrefix;
+        ctx.doneCutLine.geometry.setDrawRange(0, prefix ? prefix[activeLimit] : 0);
+        if (ctx.todoCutLine && prefix) {
+          // 待雕刻线只画尚未完成的部分，不盖住已烧灼的痕迹
+          const doneVerts = prefix[completedIdx];
+          ctx.todoCutLine.geometry.setDrawRange(doneVerts, prefix[segs.length] - doneVerts);
         }
-        ctx.doneCutLine.geometry.setDrawRange(0, cutVerticesDone);
+        ctx.doneCutLine.visible = !ctx.burn;
+      }
+
+      if (ctx.burn) {
+        const burn = ctx.burn;
+        const relX = toolpathOffsetX - offsetX;
+        const relY = toolpathOffsetY - offsetY;
+        const key = `${ctx.toolpathVersion || 0}|${relX}|${relY}|${toolpathScaleX}|${toolpathScaleY}`;
+        updateBurnSurface(burn, {
+          segs,
+          completed: completedIdx,
+          activeFraction: Number(pose?.activeSegmentFraction) || 0,
+          key,
+          mapX: (x) => (relX + x * toolpathScaleX) * burn.pxPerMm,
+          mapY: (y) => burn.canvas.height - (relY + y * toolpathScaleY) * burn.pxPerMm,
+        });
       }
 
       if (ctx.cometLine) {
+        // 尾迹只取激光头身后约 12mm 的出光路径（按长度截取，长线段不会整段发白）
         const posAttr = ctx.cometLine.geometry.getAttribute("position");
         const arr = posAttr.array;
-        const tailCount = 24;
-        const startIdx = Math.max(0, activeLimit - tailCount);
+        let remain = laserOn ? 12 : 0;
         let ptr = 0;
-        for (let i = startIdx; i < activeLimit && ptr + 5 < arr.length; i++) {
+        let headPt = { x: Number(pose?.x) || 0, y: Number(pose?.y) || 0 };
+        for (let i = activeLimit - 1; i >= 0 && remain > 0 && ptr + 5 < arr.length; i--) {
           const s = segs[i];
-          const y0 = surfaceY + (s.from.z || 0) + 0.2;
-          const y1 = surfaceY + (s.to.z || 0) + 0.2;
-          arr[ptr++] = s.from.x;
-          arr[ptr++] = y0;
-          arr[ptr++] = -s.from.y;
-          arr[ptr++] = i === activeLimit - 1 ? (Number(pose?.x) || 0) : s.to.x;
-          arr[ptr++] = y1;
-          arr[ptr++] = i === activeLimit - 1 ? -(Number(pose?.y) || 0) : -s.to.y;
+          if (!s.laserOn) break;
+          const end = i === activeLimit - 1 ? headPt : s.to;
+          const dx = end.x - s.from.x;
+          const dy = end.y - s.from.y;
+          const len = Math.hypot(dx, dy);
+          if (len < 1e-6) continue;
+          const k = Math.min(1, remain / len);
+          const start = { x: end.x - dx * k, y: end.y - dy * k };
+          const yy = surfaceY + (s.to.z || 0) + 0.2;
+          arr[ptr++] = start.x;
+          arr[ptr++] = yy;
+          arr[ptr++] = -start.y;
+          arr[ptr++] = end.x;
+          arr[ptr++] = yy;
+          arr[ptr++] = -end.y;
+          remain -= len * k;
+          headPt = s.from;
         }
         posAttr.needsUpdate = true;
         ctx.cometLine.geometry.setDrawRange(0, ptr / 3);
@@ -1505,6 +1980,7 @@ export function TwinStage3D({
     }
 
     if (followHead) {
+      orbitRef.current.goal = null;
       orbitRef.current.target.set(px, surfaceY, -py);
       applyCameraOrbit();
     }
@@ -1555,122 +2031,135 @@ export function TwinStage3D({
       className={`twin-stage-wrap ${brightMode ? "twin-stage-wrap--bright" : ""} ${resizingStage ? "is-resizing" : ""}`}
       style={{ height: `${stageHeight}px` }}
     >
-      {/* 视口顶部可收起 HUD 覆盖层：实时坐标、功率、速度与视角切换 */}
+      {/* 视口浮层（2026-11-07 改版）：左上读数卡、右侧竖排视角栏、底部图例与规格；可整体收起 */}
       <div className={`twin-hud-top ${hudCollapsed ? "is-collapsed" : ""}`}>
         {hudCollapsed ? (
-          <div className="twin-coord-cluster">
-            <button
-              type="button"
-              className="btn btn-ghost twin-hud-collapse-btn is-collapsed"
-              onClick={toggleHudCollapsed}
-              title="展开 3D 视口坐标、激光状态与视角控制浮层"
-            >
-              <ChevronDown size={13} />
-              <span>展开浮层</span>
-              <span
-                className={`twin-laser-dot ${pose?.laserOn ? "is-firing" : ""}`}
-                style={{ color: pose?.laserOn ? "#a78bfa" : "#34d399" }}
-              />
-            </button>
-          </div>
+          <button
+            type="button"
+            className="twin-hud-collapse-btn is-collapsed"
+            onClick={toggleHudCollapsed}
+            title="展开浮层：显示坐标、激光状态与视角控制"
+            aria-label="展开浮层"
+          >
+            <Eye size={13} />
+            <span>展开浮层</span>
+            <span className={`twin-laser-dot ${pose?.laserOn ? "is-firing" : ""}`} />
+          </button>
         ) : (
-          <>
-            <div className="twin-coord-cluster">
-              <button
-                type="button"
-                className="btn btn-ghost twin-hud-collapse-btn"
-                onClick={toggleHudCollapsed}
-                title="收起视口上的所有文字与按钮浮层，不遮挡 3D 工作台"
-              >
-                <ChevronUp size={13} />
-                <span>收起浮层</span>
-              </button>
-              <div className="twin-coord-chip">
+          <div className="twin-readout" aria-label="激光头实时坐标">
+            <div className={`twin-laser-badge ${pose?.laserOn ? "is-firing" : ""}`}>
+              <span className="twin-laser-dot" />
+              <span>{pose?.laserOn ? `出光 S${Math.round(pose?.power || 0)}` : "未出光 M5"}</span>
+            </div>
+            <div className="twin-readout-coords">
+              <span className="twin-coord-chip">
                 <span className="twin-coord-axis">X</span>
                 <b>{((pose?.x ?? 0) * toolpathScaleX + toolpathOffsetX).toFixed(2)}</b>
-                <small>mm</small>
-              </div>
-              <div className="twin-coord-chip">
+              </span>
+              <span className="twin-coord-chip">
                 <span className="twin-coord-axis">Y</span>
                 <b>{((pose?.y ?? 0) * toolpathScaleY + toolpathOffsetY).toFixed(2)}</b>
-                <small>mm</small>
-              </div>
-              <div className="twin-coord-chip">
+              </span>
+              <span className="twin-coord-chip">
                 <span className="twin-coord-axis">Z</span>
                 <b>{(pose?.z ?? 0).toFixed(2)}</b>
-                <small>mm</small>
-              </div>
-              <div className={`twin-laser-badge ${pose?.laserOn ? "is-firing" : ""}`}>
-                <span className="twin-laser-dot" />
-                <span>{pose?.laserOn ? `5W LASER ON · S${Math.round(pose?.power || 0)}` : "LASER SAFE (M5)"}</span>
-              </div>
-              <div className="twin-feed-chip">
-                <span>
-                  F {Math.round(pose?.feedRate || 0)} mm/min · 板材 ({offsetX}, {offsetY}) · 材料内 (+{textOffsetX}, +{textOffsetY})
-                </span>
-              </div>
+              </span>
+              <span className="twin-coord-chip twin-feed-chip">
+                <span className="twin-coord-axis">F</span>
+                <b>{Math.round(pose?.feedRate || 0)}</b>
+                <small>mm/min</small>
+              </span>
             </div>
-
-            <div className="twin-camera-bar" role="toolbar" aria-label="三维视角控制">
-              {Object.entries(CAMERA_PRESETS).map(([key, item]) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={`btn btn-ghost twin-cam-btn ${activePreset === key ? "active" : ""}`}
-                  onClick={() => selectPreset(key)}
-                >
-                  {key === "fit" ? <Focus size={12} /> : <Compass size={12} />}
-                  <span>{item.label}</span>
-                </button>
-              ))}
-              <button
-                type="button"
-                className={`btn btn-ghost twin-cam-btn ${showEnclosure ? "active" : ""}`}
-                onClick={() => setShowEnclosure((v) => !v)}
-                title="显示/隐藏翼宿 V1.0 半透防激光亚克力护罩、侧框与后置 4028 风扇外罩"
-              >
-                <Box size={12} />
-                <span>亚克力护罩</span>
-              </button>
-              <button
-                type="button"
-                className={`btn btn-ghost twin-cam-btn ${followHead ? "active" : ""}`}
-                onClick={onToggleFollow}
-                title="视角自动锁定并跟随 5W 激光头打印件总成移动"
-              >
-                <Crosshair size={12} />
-                <span>跟随刀头</span>
-              </button>
-              <button
-                type="button"
-                className={`btn btn-ghost twin-cam-btn ${showRapid ? "active" : ""}`}
-                onClick={onToggleRapid}
-                title="显示/隐藏 G0 空移轨迹与方向箭头"
-              >
-                <Eye size={12} />
-                <span>G0 空移</span>
-              </button>
-              <button
-                type="button"
-                className={`btn btn-ghost twin-cam-btn ${brightMode ? "active" : ""}`}
-                onClick={() => setBrightMode((v) => !v)}
-                title="切换高对比度工程亮色照明 / 暗色背景"
-              >
-                <Sun size={12} />
-                <span>提亮</span>
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost twin-cam-btn"
-                onClick={() => selectPreset("fit")}
-                title="重置并聚焦到刀路区域"
-              >
-                <RotateCcw size={12} />
-              </button>
-            </div>
-          </>
+          </div>
         )}
       </div>
+
+      {!hudCollapsed && (
+        <div className="twin-view-rail" role="toolbar" aria-label="三维视角控制">
+          <div className="twin-view-group">
+            {Object.entries(CAMERA_PRESETS).map(([key, item]) => (
+              <button
+                key={key}
+                type="button"
+                className={`twin-rail-btn ${activePreset === key ? "active" : ""}`}
+                onClick={() => selectPreset(key)}
+                title={item.title}
+                aria-pressed={activePreset === key}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="twin-view-group">
+            <button
+              type="button"
+              className={`twin-rail-btn twin-rail-icon ${showEnclosure ? "active" : ""}`}
+              onClick={() => setShowEnclosure((v) => !v)}
+              title="显示/隐藏亚克力护罩、侧框与后置风扇"
+              aria-label="亚克力护罩"
+              aria-pressed={showEnclosure}
+            >
+              <Box size={14} />
+              <span>护罩</span>
+            </button>
+            <button
+              type="button"
+              className={`twin-rail-btn twin-rail-icon ${followHead ? "active" : ""}`}
+              onClick={onToggleFollow}
+              title="视角跟随激光头移动"
+              aria-label="跟随刀头"
+              aria-pressed={followHead}
+            >
+              <Crosshair size={14} />
+              <span>跟随</span>
+            </button>
+            <button
+              type="button"
+              className={`twin-rail-btn twin-rail-icon ${showRapid ? "active" : ""}`}
+              onClick={onToggleRapid}
+              title="显示/隐藏 G0 空移轨迹与方向箭头"
+              aria-label="G0 空移"
+              aria-pressed={showRapid}
+            >
+              <Route size={14} />
+              <span>空移</span>
+            </button>
+            <button
+              type="button"
+              className={`twin-rail-btn twin-rail-icon ${brightMode ? "active" : ""}`}
+              onClick={() => setBrightMode((v) => !v)}
+              title="切换明亮影棚光 / 暗场光"
+              aria-label="提亮"
+              aria-pressed={brightMode}
+            >
+              <Sun size={14} />
+              <span>提亮</span>
+            </button>
+          </div>
+          <div className="twin-view-group">
+            <button
+              type="button"
+              className="twin-rail-btn twin-rail-icon"
+              onClick={() => selectPreset(DEFAULT_PRESET)}
+              title="复位到整机视角"
+              aria-label="复位视角"
+            >
+              <RotateCcw size={14} />
+              <span>复位</span>
+            </button>
+            <button
+              type="button"
+              className="twin-rail-btn twin-rail-icon"
+              onClick={toggleHudCollapsed}
+              title="收起浮层：隐藏视口上的文字与按钮，不遮挡 3D 工作台"
+              aria-label="收起浮层"
+            >
+              <EyeOff size={14} />
+              <span>收起</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Three.js WebGL 渲染画布（若环境无 WebGL 则展示 2.5D 工程矢量降级画布） */}
       {webglError ? (
@@ -1727,35 +2216,33 @@ export function TwinStage3D({
         />
       )}
 
-      {/* 视口左下角图例与翼宿 V1.0 真实机台规格脚标（收起浮层时一并隐藏，避免遮挡工作台） */}
+      {/* 底部图例与机台规格（收起浮层时一并隐藏） */}
       {!hudCollapsed && (
         <div className="twin-hud-bottom">
           <div className="twin-legend">
             <span className="twin-legend-item">
-              <i className="twin-swatch twin-swatch--cut" />
-              已加工刀路 (金红)
+              <i className="twin-swatch twin-swatch--todo" />
+              待雕刻
             </span>
             <span className="twin-legend-item">
-              <i className="twin-swatch twin-swatch--todo" />
-              待加工刀路 (亮青)
+              <i className="twin-swatch twin-swatch--cut" />
+              已雕刻
             </span>
             <span className="twin-legend-item">
               <i className="twin-swatch twin-swatch--rapid" />
-              G0 空移与走向箭头
+              空移
             </span>
             <span className="twin-legend-item">
-              <i className="twin-swatch twin-swatch--origin" />
-              5W 激光落点与十字游标
+              <i className="twin-swatch twin-swatch--area" />
+              工作区
             </span>
           </div>
           <div className="twin-workspace-tag">
-            <span>翼宿 V1.0 工作区 {xMax}×{yMax} mm</span>
-            <span>·</span>
+            <span>翼宿 V1.0 · {xMax}×{yMax} mm</span>
             <span>
-              板材 {matName} ({matWidth}×{matHeight}×{matThick} mm · 台面 X{offsetX} Y{offsetY} · 材料内位置 +{textOffsetX}, +{textOffsetY} mm)
+              {matName} {matWidth}×{matHeight}×{matThick} mm
             </span>
-            <span>·</span>
-            <span>左键旋转 / 右键平移 / 滚轮缩放</span>
+            <span className="twin-workspace-hint">左键旋转 · 右键平移 · 滚轮缩放</span>
           </div>
         </div>
       )}

@@ -59,19 +59,74 @@ fn client() -> Result<reqwest::Client, ProviderError> {
         .map_err(ProviderError::new)
 }
 
-/// 不使用 reqwest 的原始描述（它会带上完整地址）。
+/// 不使用 reqwest 的原始描述（它会带上完整地址）；只取底层原因链（DNS / 拒绝连接 / 证书……）判断具体原因，
+/// 原因链脱敏后放进 `detail`。
 fn describe_send_error(label: &str, error: &reqwest::Error) -> ProviderError {
-    ProviderError::new(if error.is_timeout() {
-        format!("{label}请求超时")
-    } else if error.is_connect() {
-        format!("{label}无法连接到该地址")
-    } else {
-        format!("{label}请求失败（网络或 TLS 错误）")
-    })
+    let mut chain = Vec::new();
+    let mut source = std::error::Error::source(error);
+    while let Some(inner) = source {
+        chain.push(inner.to_string());
+        source = inner.source();
+    }
+    classify_transport_error(label, error.is_timeout(), error.is_connect(), &chain.join(": "))
 }
 
-/// 从错误响应里取一段可读说明（只取 `error.message` 一类字段并截断；不回显整个响应）。
-fn error_hint(bytes: &[u8]) -> String {
+/// 按底层原因区分网络错误（纯函数，测试用假输入覆盖）。每种原因各自一句大白话和下一步。
+pub(crate) fn classify_transport_error(label: &str, timeout: bool, connect: bool, chain: &str) -> ProviderError {
+    use crate::DiagCategory::Network;
+    let lower = chain.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    let error = if timeout {
+        ProviderError::with_category(Network, format!("{label}请求超时：对方服务器太久没有回应"))
+            .hint("检查电脑网络是否通畅；服务方繁忙时稍后再试，一直超时就换一个更近或更稳定的服务地址")
+    } else if has(&["dns", "failed to lookup", "nodename nor servname", "name or service not known", "no such host", "name resolution"]) {
+        ProviderError::with_category(Network, format!("{label}找不到服务器：域名解析失败"))
+            .hint("检查地址里的域名有没有拼错，电脑能不能正常上网；用了代理或公司网络时确认它没有拦截这个域名")
+    } else if has(&["certificate", "tls", "ssl", "handshake"]) {
+        ProviderError::with_category(Network, format!("{label}安全连接失败：TLS 握手或证书校验没通过"))
+            .hint("确认地址是 https:// 且证书有效；电脑时间不对、代理软件替换了证书时也会这样")
+    } else if has(&["refused"]) {
+        ProviderError::with_category(Network, format!("{label}无法连接：对方拒绝了连接（服务没开或端口填错）"))
+            .hint("确认服务已经启动、地址和端口填对；本机服务（如 127.0.0.1）要先在电脑上运行起来")
+    } else if has(&["unreachable", "no route"]) {
+        ProviderError::with_category(Network, format!("{label}无法连接：网络不通，到不了这个地址"))
+            .hint("检查电脑是否联网、Wi-Fi 或网线是否正常；内网地址要和电脑在同一个网络里")
+    } else if connect {
+        ProviderError::with_category(Network, format!("{label}无法连接到该地址"))
+            .hint("检查地址、端口和电脑网络；具体原因见技术细节")
+    } else if has(&["reset", "broken pipe", "closed", "eof", "incomplete"]) {
+        ProviderError::with_category(Network, format!("{label}连接中途断开：数据还没收完对方就断了"))
+            .hint("多半是网络不稳或服务方主动断开；稍后再试，一直这样就换个网络或服务地址")
+    } else {
+        ProviderError::with_category(Network, format!("{label}请求失败：网络传输出错"))
+            .hint("检查电脑网络后再试；具体原因见技术细节")
+    };
+    error.detail(chain)
+}
+
+/// HTTP 错误状态 → 分类与大白话（纯函数）。`upstream` 是服务方原话（已截断、不含地址），放进技术细节。
+pub(crate) fn classify_http_status(label: &str, status: u16, upstream: Option<String>) -> ProviderError {
+    use crate::DiagCategory::{Auth, Config, Model, Quota};
+    let (category, reason, hint) = match status {
+        401 => (Auth, "，密钥无效或没有权限", "密钥填错、过期或被停用了：到服务方控制台复制新密钥重新填写"),
+        403 => (Auth, "，密钥无效或没有权限", "这个密钥没有调用该模型的权限，或账号被限制：到服务方控制台检查权限"),
+        402 => (Quota, "，账户余额不足", "到服务方控制台充值或换一个有余额的账号"),
+        429 => (Quota, "，请求太频繁或额度不足", "调用太快或今天的额度用完了：等一会儿再试，或到控制台提高限额"),
+        404 => (Config, "，地址或模型名不对", "检查服务地址和模型名称是否和服务方文档一致"),
+        400 | 422 => (Config, "，请求参数不被接受", "通常是模型名、音色或参数不被这个服务支持：对照服务方文档检查设置"),
+        300..=399 => (Config, "，服务要求跳转（MOSS 不跟随重定向，请填写最终地址）", "把地址换成跳转后的最终地址"),
+        500..=599 => (Model, "，服务方服务器出错", "这是服务方那边的问题，不是你的设置：稍后再试或换一个模型服务"),
+        _ => (Model, "", "具体原因见技术细节"),
+    };
+    let error = ProviderError::with_category(category, format!("{label}返回 HTTP {status}{reason}")).hint(hint);
+    match upstream {
+        Some(text) => error.detail(format!("服务方原话：{text}")),
+        None => error,
+    }
+}
+
+/// 从错误响应里取服务方原话（只取 `error.message` 一类字段并截断；不回显整个响应，含地址或疑似密钥时不保留）。
+fn error_upstream(bytes: &[u8]) -> Option<String> {
     let text = serde_json::from_slice::<Value>(bytes)
         .ok()
         .and_then(|value| {
@@ -85,8 +140,7 @@ fn error_hint(bytes: &[u8]) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_default();
-    // 防止服务端把密钥或地址回显在错误信息里
-    crate::safe_hint(&text)
+    crate::upstream_text(&text)
 }
 
 async fn read_body(label: &str, mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ProviderError> {
@@ -106,15 +160,7 @@ async fn check_status(label: &str, response: reqwest::Response) -> Result<reqwes
         return Ok(response);
     }
     let body = read_body(label, response, MAX_ERROR_BYTES).await.unwrap_or_default();
-    let reason = match status.as_u16() {
-        401 | 403 => "，密钥无效或没有权限",
-        402 => "，账户余额不足",
-        404 => "，地址或模型名不对",
-        429 => "，请求太频繁或额度不足",
-        300..=399 => "，服务要求跳转（MOSS 不跟随重定向，请填写最终地址）",
-        _ => "",
-    };
-    Err(ProviderError::new(format!("{label}返回 HTTP {}{reason}{}", status.as_u16(), error_hint(&body))))
+    Err(classify_http_status(label, status.as_u16(), error_upstream(&body)))
 }
 
 fn with_auth(builder: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {

@@ -1,13 +1,14 @@
 import React, { useState } from "react";
-import { Volume2, VolumeX, Mic, ChevronRight, Lock } from "lucide-react";
+import { Volume2, VolumeX, Mic } from "lucide-react";
 import { showAlert } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { volumeDevicesView, volumeLevelText, voiceErrorText } from "../voiceState.js";
+import VoiceWakeWordCard from "./VoiceWakeWordCard.jsx";
 
 // 2026-11-07 用户决定：唤醒词从“设备维护”里单独拿出来，与 MOSS 说话音量放在同一个标签。
-// 音量走主窗口已有的设备即时请求（set_volume，重连自动保持）；唤醒词会重启设备并写闪存，
-// 仍只在打包私密窗口里修改，这里只放入口。
-export default function VoiceWakeVolumePanel({ builtin, mode }) {
+// 音量走主窗口已有的设备即时请求（set_volume，重连自动保持）。n67（同日）取消独立安全窗口，
+// 唤醒词卡直接挂在这里；推送会重启设备并写闪存，每台推送前仍逐台确认。
+export default function VoiceWakeVolumePanel({ builtin, mode, active = true }) {
   if (mode !== "builtin") {
     return (
       <div className="voice-hint" id="voice-wake-volume-mode-hint">
@@ -18,7 +19,7 @@ export default function VoiceWakeVolumePanel({ builtin, mode }) {
   return (
     <div className="wake-volume" id="voice-wake-volume-panel">
       <VolumeCard status={builtin?.status} />
-      <WakeWordEntry />
+      <WakeWordSection active={active} />
     </div>
   );
 }
@@ -116,30 +117,18 @@ function VolumeCard({ status }) {
   );
 }
 
-function WakeWordEntry() {
-  const open = async () => {
-    try {
-      await voiceApi.openPrivateSettings("wakeword");
-    } catch (error) {
-      await showAlert(voiceErrorText(error), { title: "无法打开唤醒词设置", tone: "error" });
-    }
-  };
+function WakeWordSection({ active }) {
   return (
-    <section className="wake-volume-card" aria-labelledby="voice-wakeword-entry-title">
+    <section className="wake-volume-card wake-volume-card--wide" aria-labelledby="voice-wakeword-title">
       <header className="wake-volume-card-head">
         <span className="wake-volume-icon" aria-hidden="true"><Mic size={18} /></span>
         <div>
-          <h3 id="voice-wakeword-entry-title">唤醒词</h3>
-          <p>默认“你好小智”，可以改成“你好 MOSS”等。唤醒词由设备自己识别，改好后推送给设备，设备会重启并写入新的唤醒模型。</p>
+          <h3 id="voice-wakeword-title">唤醒词</h3>
+          <p>默认“你好小智”，可以改成“你好 MOSS”等。唤醒词由设备自己识别；推送后设备会重启并写入新的唤醒模型，每台推送前都会请你确认。</p>
         </div>
       </header>
-      <button type="button" className="wake-volume-entry" id="voice-wakeword-open" onClick={() => void open()}>
-        <span>
-          <strong>修改唤醒词</strong>
-          <small><Lock size={12} aria-hidden="true" /> 会写入设备闪存，在本机安全窗口里逐台确认</small>
-        </span>
-        <ChevronRight size={18} aria-hidden="true" />
-      </button>
+      {/* 只在本标签打开时挂载，避免后台每 5 秒查询唤醒词状态 */}
+      {active && <VoiceWakeWordCard />}
     </section>
   );
 }

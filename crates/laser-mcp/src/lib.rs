@@ -724,6 +724,7 @@ pub fn handle_json_rpc_with(
             let client_name = message.pointer("/params/clientInfo/name").and_then(|v| v.as_str()).unwrap_or("");
             let client_ver = message.pointer("/params/clientInfo/version").and_then(|v| v.as_str()).unwrap_or("");
             global_mcp_telemetry().record_client_info(client_name, client_ver);
+            global_mcp_telemetry().record_protocol_version(PROTOCOL_VERSION);
             let shown = match (client_name.is_empty(), client_ver.is_empty()) {
                 (true, _) => "未上报".to_owned(),
                 (false, true) => client_name.to_owned(),
@@ -1233,6 +1234,7 @@ mod tests {
         let init = handle_json_rpc(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}), false).unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], SERVER_NAME);
         assert_eq!(init["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(global_mcp_telemetry().snapshot().protocol_version, PROTOCOL_VERSION, "遥测记录实际应答的协议版本");
         let list = handle_json_rpc(&serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), false).unwrap();
         assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 19);
         assert!(handle_json_rpc(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}), false).is_none());

@@ -88,16 +88,16 @@ test("macOS quick-update-desktop.sh stays ASCII, patches MOSS.app atomically, re
   assert.doesNotMatch(quick, /\bkill\s+-?\d*\s*\$/, "must never force-kill running MOSS or voice helper");
 });
 
-test("Vite dev server pins 127.0.0.1:5177 with React Fast Refresh while keeping packaged voice-private entry", () => {
+test("Vite dev server pins 127.0.0.1:5177 with React Fast Refresh; voice-private entry removed (n67)", () => {
   const viteConfig = readRepoText("frontend/vite.config.mjs");
   assert.match(viteConfig, /@vitejs\/plugin-react/);
   assert.match(viteConfig, /host:\s*"127\.0\.0\.1"/);
   assert.match(viteConfig, /port:\s*5177/);
   assert.match(viteConfig, /strictPort:\s*true/);
-  assert.match(viteConfig, /voice-private\.html/);
+  assert.doesNotMatch(viteConfig, /voice-private\.html/, "独立安全窗口已取消（2026-11-07 n67）");
 
   const tauriConf = JSON.parse(readRepoText("apps/desktop/src-tauri/tauri.conf.json"));
-  assert.equal(Object.hasOwn(tauriConf.build ?? {}, "devUrl"), false, "voice-private must stay on packaged tauri.localhost");
+  assert.equal(Object.hasOwn(tauriConf.build ?? {}, "devUrl"), false, "packaged boot page stays on tauri.localhost; dev UI goes through MOSS_DEV_UI_ORIGIN");
 });
 
 test("MOSS_DEV_UI_ORIGIN is restricted to debug builds and loopback Vite ports only", () => {

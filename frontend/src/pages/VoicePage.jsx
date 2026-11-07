@@ -5,16 +5,17 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
 import { voiceApi } from "../voiceApi.js";
 import {
+  BuiltinEvents,
   BuiltinModelGroups,
   BuiltinServicePanel,
   ExperienceGroup,
   LiveDebugTraces,
   LocalModelsGroup,
   PrivateSettingsEntry,
-  PrivateFirmwareEntry,
   useBuiltinStatus,
 } from "../components/VoiceBuiltinCard.jsx";
 import VoiceMusicCard from "../components/VoiceMusicCard.jsx";
+import VoiceFirmwareCard from "../components/VoiceFirmwareCard.jsx";
 import VoiceAgentCard from "../components/VoiceAgentCard.jsx";
 import VoiceVisionCard from "../components/VoiceVisionCard.jsx";
 import VoiceKnowledgeCard from "../components/VoiceKnowledgeCard.jsx";
@@ -22,6 +23,7 @@ import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
 import { VoiceEndpointsCard } from "../components/VoiceEndpointsCard.jsx";
 import VoiceWakeVolumePanel from "../components/VoiceWakeVolumePanel.jsx";
 import { SaveBar, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel } from "../components/VoiceLayout.jsx";
+import { HOME_APPROVALS, VOICE_FOCUS_EVENT, peekVoiceFocus } from "../voiceFocus.js";
 import { MossVoiceTwin } from "../components/MossVoiceTwin.jsx";
 import {
   SECTIONS,
@@ -31,6 +33,8 @@ import {
   VOICE_TABS,
   voiceTabsFor,
   approvalHistoryStatus,
+  approvalListSummary,
+  approvalOutcomeReason,
   canSaveSection,
   deviceView,
   dirtyTabs,
@@ -366,10 +370,20 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
   const [busy, setBusy] = useState("");
   const [form, setForm] = useState(null);
   const [baseline, setBaseline] = useState(null);
-  const [tab, setTab] = useState(readTab);
+  const [tab, setTab] = useState(() => (peekVoiceFocus() === HOME_APPROVALS ? "privacy" : readTab()));
+  // 全局审批卡“去家居审批”：切到“隐私与家居”标签（展开家居审批由 PrivateSettingsEntry 处理）
+  useEffect(() => {
+    const onFocus = (event) => {
+      if (event.detail === HOME_APPROVALS) setTab("privacy");
+    };
+    window.addEventListener(VOICE_FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(VOICE_FOCUS_EVENT, onFocus);
+  }, []);
   const [dirty, setDirty] = useState({});
   const [logLines, setLogLines] = useState([]);
   const [approvals, setApprovals] = useState([]);
+  // n68：列表上限与读取失败原因（失败时保留上次列表并明确提示，不悄悄显示旧数据）
+  const [approvalsMeta, setApprovalsMeta] = useState({ limit: 0, error: "" });
   const mounted = useRef(true);
   const builtin = useBuiltinStatus();
 
@@ -434,9 +448,28 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
   };
 
   const refreshApprovals = useCallback(async () => {
-    const res = await getJson("/v1/approvals?status=all");
-    if (mounted.current && res.ok && res.data?.success) {
+    let res;
+    try {
+      res = await getJson("/v1/approvals?status=all");
+    } catch (error) {
+      if (mounted.current) setApprovalsMeta((meta) => ({ ...meta, error: voiceErrorText(error) }));
+      return;
+    }
+    if (!mounted.current) return;
+    if (res?.ok && res.data?.success) {
       setApprovals(Array.isArray(res.data.result?.approvals) ? res.data.result.approvals : []);
+      setApprovalsMeta({ limit: Number(res.data.result?.limit) || 0, error: "" });
+    } else {
+      const result = res?.data?.result;
+      const code = res?.data?.detail?.error_code;
+      const reason = typeof result === "string" && result
+        ? result
+        : code
+          ? `错误码 ${code}`
+          : res?.status
+            ? `后端返回 HTTP ${res.status}`
+            : "没有收到具体原因";
+      setApprovalsMeta((meta) => ({ ...meta, error: reason }));
     }
   }, []);
 
@@ -786,11 +819,15 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
           <VoiceTabPanel tab="devices" active={activeTab === "devices"}>
             <div className="voice-stack" id="voice-devices-panel">
               <VoiceEndpointsCard mode={mode} overview={status.mcp} busy={busy} run={run} />
+              {/* n67（2026-11-07）：独立安全窗口取消，固件升级直接在这里；每台推送前仍逐台确认 */}
+              <VoiceGroup id="device-firmware" title="固件升级" summary="导入自己编译的固件，逐台确认推送" lazy>
+                <VoiceFirmwareCard />
+              </VoiceGroup>
             </div>
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="wake" active={activeTab === "wake"}>
-            <VoiceWakeVolumePanel builtin={builtin} mode={mode} />
+            <VoiceWakeVolumePanel builtin={builtin} mode={mode} active={activeTab === "wake"} />
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="features" active={activeTab === "features"}>
@@ -827,7 +864,12 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                   key: "approvals",
                   modes: ["official", "self_hosted", "builtin"],
                   node: (
-                    <VoiceGroup id="approvals" title="审批记录" summary={approvals.length ? `${approvals.length} 条` : "暂无"} defaultOpen>
+                    <VoiceGroup id="approvals" title="审批记录" summary={approvalListSummary(approvals.length, approvalsMeta.limit, approvalsMeta.error)} defaultOpen>
+                      {approvalsMeta.error && (
+                        <div className="voice-hint voice-hint--bad" id="voice-approvals-error">
+                          审批记录读取失败：{approvalsMeta.error}{approvals.length ? "（下面是上次读到的记录）" : ""}
+                        </div>
+                      )}
                       <div className="ob-tbl voice-tbl" id="voice-approvals-card">
                         <table>
                           <thead>
@@ -846,6 +888,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                             ) : (
                               approvals.map((record) => {
                                 const view = approvalHistoryStatus(record);
+                                const reason = approvalOutcomeReason(record);
                                 return (
                                   <tr key={record.approval_id}>
                                     <td className="mono">{formatTime(record.created_at)}</td>
@@ -855,6 +898,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                                     <td>{sourceLabel(record.source, record.session_id)}</td>
                                     <td>
                                       <Pill tone={view.tone}>{view.text}</Pill>
+                                      {reason && <div className="voice-muted voice-approval-reason">原因：{reason}</div>}
                                     </td>
                                   </tr>
                                 );
@@ -866,6 +910,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                     </VoiceGroup>
                   ),
                 },
+                { key: "builtin-events", modes: ["builtin"], node: <BuiltinEvents builtin={builtin} /> },
                 { key: "debug-traces", modes: ["builtin"], node: <LiveDebugTraces builtin={builtin} /> },
                 {
                   key: "log",
@@ -881,15 +926,6 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                       <pre className="voice-log mono" id="voice-log">
                         {logLines.length ? logLines.map(maskLogLine).join("\n") : "暂无日志"}
                       </pre>
-                    </VoiceGroup>
-                  ),
-                },
-                {
-                  key: "maintenance",
-                  modes: ["official", "self_hosted", "builtin"],
-                  node: (
-                    <VoiceGroup id="device-maintenance" title="设备维护（固件升级）" summary="只在本机安全窗口逐台操作">
-                      <PrivateFirmwareEntry />
                     </VoiceGroup>
                   ),
                 },

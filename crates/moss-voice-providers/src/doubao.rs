@@ -84,15 +84,15 @@ impl DoubaoConfig {
         let url = url.trim();
         let url = if url.is_empty() { default_url } else { url };
         if !(url.starts_with("wss://") || url.starts_with("ws://")) {
-            return Err(ProviderError::new("豆包地址必须以 wss:// 开头"));
+            return Err(ProviderError::with_category(crate::DiagCategory::Config, "豆包地址必须以 wss:// 开头"));
         }
         let api_key = api_key.trim();
         if api_key.is_empty() {
-            return Err(ProviderError::new("豆包需要填写密钥（API Key）"));
+            return Err(ProviderError::with_category(crate::DiagCategory::Auth, "豆包需要填写密钥（API Key）"));
         }
         let resource_id = resource_id.trim();
         if resource_id.is_empty() {
-            return Err(ProviderError::new("豆包需要填写资源 ID"));
+            return Err(ProviderError::with_category(crate::DiagCategory::Config, "豆包需要填写资源 ID"));
         }
         Ok(Self { url: url.to_owned(), api_key: api_key.to_owned(), resource_id: resource_id.to_owned() })
     }
@@ -132,37 +132,63 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>, ProviderError> {
                 .map(|builder| Arc::new(builder.with_root_certificates(roots).with_no_client_auth()))
         })
         .clone()
-        .ok_or_else(|| ProviderError::new("TLS 初始化失败"))
+        .ok_or_else(|| ProviderError::with_category(crate::DiagCategory::Internal, "TLS 初始化失败"))
 }
 
-/// 不使用 tungstenite 的原始描述（可能带上地址）。
+/// 不使用 tungstenite 的原始描述（可能带上地址）；底层原因脱敏后放进技术细节。
 fn describe_connect_error(label: &str, error: tungstenite::Error) -> ProviderError {
-    ProviderError::new(match error {
+    use crate::DiagCategory::{Auth, Config, Network, Quota};
+    match error {
         tungstenite::Error::Http(response) => {
             let status = response.status().as_u16();
-            let hint = response.body().as_deref().map(|body| safe_hint(&String::from_utf8_lossy(body))).unwrap_or_default();
-            let reason = match status {
-                401 | 403 => "，密钥或资源 ID 不对，或没有开通该服务",
-                404 => "，地址不对",
-                429 => "，请求太频繁或额度不足",
-                _ => "",
+            let upstream = response.body().as_deref().and_then(|body| crate::upstream_text(&String::from_utf8_lossy(body)));
+            let (category, reason, hint) = match status {
+                401 | 403 => (Auth, "，密钥或资源 ID 不对，或没有开通该服务", "到火山引擎控制台核对 API Key 与资源 ID，并确认已开通这项语音服务"),
+                404 => (Config, "，地址不对", "把地址恢复成默认值，或对照火山引擎文档填写"),
+                429 => (Quota, "，请求太频繁或额度不足", "等一会儿再试，或到控制台查看并发与额度"),
+                500..=599 => (crate::DiagCategory::Model, "，服务方服务器出错", "这是服务方那边的问题：稍后再试"),
+                _ => (Network, "", "具体原因见技术细节"),
             };
-            format!("{label}连接被拒绝（HTTP {status}{reason}）{hint}")
+            let error = ProviderError::with_category(category, format!("{label}连接被拒绝（HTTP {status}{reason}）")).hint(hint);
+            match upstream {
+                Some(text) => error.detail(format!("服务方原话：{text}")),
+                None => error,
+            }
         }
-        tungstenite::Error::Io(_) => format!("{label}无法连接到该地址"),
-        tungstenite::Error::Tls(_) => format!("{label}TLS 握手失败"),
-        tungstenite::Error::Url(_) => format!("{label}地址无效"),
-        _ => format!("{label}连接失败（网络或协议错误）"),
-    })
+        tungstenite::Error::Io(io) => {
+            crate::openai::classify_transport_error(label, io.kind() == std::io::ErrorKind::TimedOut, true, &io.to_string())
+        }
+        tungstenite::Error::Tls(tls) => ProviderError::with_category(Network, format!("{label}安全连接失败：TLS 握手或证书校验没通过"))
+            .hint("确认电脑时间正确；代理软件替换了证书时也会这样")
+            .detail(tls.to_string()),
+        tungstenite::Error::Url(_) => ProviderError::with_category(Config, format!("{label}地址无效"))
+            .hint("地址应以 wss:// 开头，可以清空恢复默认地址"),
+        other => ProviderError::with_category(Network, format!("{label}连接失败（网络或协议错误）"))
+            .hint("检查电脑网络后再试；具体原因见技术细节")
+            .detail(other.to_string()),
+    }
+}
+
+/// 连接已建立后中途断开（发送或接收失败）。
+fn network_drop(label: &str, error: &tungstenite::Error) -> ProviderError {
+    ProviderError::with_category(crate::DiagCategory::Network, format!("{label}连接中断：数据传到一半网络断了"))
+        .hint("多半是网络不稳；稍后再试，一直这样就换个网络")
+        .detail(error.to_string())
+}
+
+/// 服务方主动关闭了连接（没给出原因）。
+fn server_closed(label: &str) -> ProviderError {
+    ProviderError::new(format!("{label}连接被服务端关闭"))
+        .hint("服务方提前结束了这次请求：检查资源 ID、音色是否已开通，或稍后再试")
 }
 
 async fn connect(config: &DoubaoConfig, label: &str) -> Result<Ws, ProviderError> {
     let mut request =
-        config.url.as_str().into_client_request().map_err(|_| ProviderError::new(format!("{label}地址无效")))?;
+        config.url.as_str().into_client_request().map_err(|_| ProviderError::with_category(crate::DiagCategory::Config, format!("{label}地址无效")))?;
     let headers = request.headers_mut();
     for (name, value) in auth_headers(&config.api_key, &config.resource_id).into_iter().chain([("X-Api-Connect-Id", uuid())]) {
         let value = HeaderValue::from_str(&value)
-            .map_err(|_| ProviderError::new(format!("{label}密钥或资源 ID 含有不能放进请求头的字符")))?;
+            .map_err(|_| ProviderError::with_category(crate::DiagCategory::Config, format!("{label}密钥或资源 ID 含有不能放进请求头的字符")))?;
         headers.insert(name, value);
     }
     let connector = if config.url.starts_with("wss://") { Some(Connector::Rustls(tls_config()?)) } else { None };
@@ -173,7 +199,8 @@ async fn connect(config: &DoubaoConfig, label: &str) -> Result<Ws, ProviderError
     match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
         Ok(Ok((ws, _))) => Ok(ws),
         Ok(Err(error)) => Err(describe_connect_error(label, error)),
-        Err(_) => Err(ProviderError::new(format!("{label}连接超时"))),
+        Err(_) => Err(ProviderError::with_category(crate::DiagCategory::Network, format!("{label}连接超时：10 秒内没连上服务器"))
+            .hint("检查电脑网络；服务方繁忙时稍后再试")),
     }
 }
 
@@ -217,7 +244,7 @@ async fn send_binary<S>(write: &mut S, bytes: Vec<u8>, label: &str) -> Result<()
 where
     S: futures_util::Sink<WsMessage, Error = tungstenite::Error> + Unpin,
 {
-    write.send(WsMessage::Binary(bytes.into())).await.map_err(|_| ProviderError::new(format!("{label}连接中断")))
+    write.send(WsMessage::Binary(bytes.into())).await.map_err(|error| network_drop(label, &error))
 }
 
 /// 一段识别的完整过程：连接、发参数帧、边收音频边发包，音频通道关闭（说完）后发最后一包并等最终结果。
@@ -257,9 +284,9 @@ async fn recognize(config: Arc<DoubaoConfig>, mut audio: UnboundedReceiver<Vec<i
             message = read.next() => {
                 let data = match message {
                     Some(Ok(WsMessage::Binary(data))) => data,
-                    Some(Ok(WsMessage::Close(_))) | None => return Err(ProviderError::new(format!("{LABEL}连接被服务端关闭"))),
+                    Some(Ok(WsMessage::Close(_))) | None => return Err(server_closed(LABEL)),
                     Some(Ok(_)) => continue,
-                    Some(Err(_)) => return Err(ProviderError::new(format!("{LABEL}连接中断"))),
+                    Some(Err(error)) => return Err(network_drop(LABEL, &error)),
                 };
                 let response = sauc::parse_response(&data)?;
                 if response.code != 0 {
@@ -352,7 +379,7 @@ impl DoubaoTts {
     pub fn new(url: &str, api_key: &str, resource_id: &str, speaker: &str, speed: f32) -> Result<Self, ProviderError> {
         let speaker = speaker.trim();
         if speaker.is_empty() {
-            return Err(ProviderError::new("豆包合成需要填写音色"));
+            return Err(ProviderError::with_category(crate::DiagCategory::Config, "豆包合成需要填写音色"));
         }
         Ok(Self {
             config: DoubaoConfig::new(url, api_key, resource_id, DEFAULT_TTS_URL)?,
@@ -386,7 +413,7 @@ impl DoubaoTts {
         let mut ws = connect(&self.config, "豆包合成").await?;
         ws.send(WsMessage::Binary(bidirection::marshal(&Message::start_connection()).into()))
             .await
-            .map_err(|_| ProviderError::new("豆包合成连接中断"))?;
+            .map_err(|error| network_drop("豆包合成", &error))?;
         loop {
             let message = next_message(&mut ws).await?;
             match (message.msg_type, message.event) {
@@ -501,7 +528,7 @@ fn service_error(message: &Message) -> ProviderError {
 async fn send_message(ws: &mut Ws, message: &Message) -> Result<(), ProviderError> {
     ws.send(WsMessage::Binary(bidirection::marshal(message).into()))
         .await
-        .map_err(|_| ProviderError::new("豆包合成连接中断"))
+        .map_err(|error| network_drop("豆包合成", &error))
 }
 
 async fn next_message(ws: &mut Ws) -> Result<Message, ProviderError> {
@@ -511,9 +538,9 @@ async fn next_message(ws: &mut Ws) -> Result<Message, ProviderError> {
             .map_err(|_| ProviderError::new("豆包合成等待超时"))?;
         match message {
             Some(Ok(WsMessage::Binary(data))) => return bidirection::unmarshal(&data),
-            Some(Ok(WsMessage::Close(_))) | None => return Err(ProviderError::new("豆包合成连接被服务端关闭")),
+            Some(Ok(WsMessage::Close(_))) | None => return Err(server_closed("豆包合成")),
             Some(Ok(_)) => {}
-            Some(Err(_)) => return Err(ProviderError::new("豆包合成连接中断")),
+            Some(Err(error)) => return Err(network_drop("豆包合成", &error)),
         }
     }
 }

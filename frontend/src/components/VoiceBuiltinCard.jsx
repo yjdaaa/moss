@@ -9,6 +9,7 @@ import VoicePluginsCard from "./VoicePluginsCard.jsx";
 import VoiceSpeakerCard from "./VoiceSpeakerCard.jsx";
 import VoiceHomeCard from "./VoiceHomeCard.jsx";
 import VoiceHomeApprovalCard from "./VoiceHomeApprovalCard.jsx";
+import { HOME_APPROVALS, VOICE_FOCUS_EVENT, clearVoiceFocus, peekVoiceFocus } from "../voiceFocus.js";
 import {
   DEFAULT_JEV_DECISIONS_URL,
   DEFAULT_JEV_MODEL,
@@ -30,6 +31,10 @@ import {
   SCREEN_CARD_STYLE_OPTIONS,
   builtinDeviceControlsView,
   builtinDeviceInfoView,
+  filterVoiceEvents,
+  voiceEventDropNotices,
+  voiceEventView,
+  voiceOutcomeLabel,
   builtinDeviceView,
   builtinJevForm,
   builtinJevKeyPlaceholder,
@@ -2559,7 +2564,7 @@ export function ExperienceGroup({ builtin }) {
             id="voice-asr-homophone-fix"
           />
           <span>
-            激光行业同音错词 0ms 自动纠偏（默认开；云端与本地识别均 100% 生效：{BUILTIN_ASR_CORRECTION_PREVIEW}）
+            激光行业同音错词自动纠偏（默认开；云端和本地识别出的文字都会先过一遍这张纠偏表：{BUILTIN_ASR_CORRECTION_PREVIEW}）
           </span>
         </label>
         <label className="voice-check voice-wide">
@@ -2645,7 +2650,6 @@ export function LiveDebugTraces({ builtin }) {
   const enabled = pendingEnabled ?? Boolean(status?.debug_enabled);
   const traces = Array.isArray(status?.debug_traces) ? status.debug_traces : [];
   const timingItems = voiceTimingReport(status?.timings);
-  const events = Array.isArray(status?.events) ? status.events.slice(0, 20) : [];
   const [selectedWord, setSelectedWord] = useState("");
   const [rightWord, setRightWord] = useState("");
   const [feedback, setFeedback] = useState("");
@@ -2663,7 +2667,6 @@ export function LiveDebugTraces({ builtin }) {
   const summaryParts = [
     enabled ? `排障已开 (${traces.length} 轮)` : "排障默认关",
     timingItems.length ? `耗时 ${timingItems.length} 轮` : "",
-    events.length ? `事件 ${events.length} 条` : "",
   ].filter(Boolean);
 
   const toggleDebug = async (checked) => {
@@ -2754,7 +2757,7 @@ export function LiveDebugTraces({ builtin }) {
   return (
     <VoiceGroup
       id="live-debug-traces"
-      title="对话诊断与服务日志（仅内存）"
+      title="对话排障与耗时（仅内存）"
       summary={summaryParts.join(" · ")}
     >
       <div className="voice-stack" id="voice-live-debug">
@@ -2830,7 +2833,7 @@ export function LiveDebugTraces({ builtin }) {
         {!enabled ? (
           <p className="voice-muted">当前处于隐私静默状态，不留存任何语音识别文字。遇到“小智听错耗材名”或“不确定调了什么工具参数”时打开上方开关即可实时查看。</p>
         ) : traces.length === 0 ? (
-          <p className="voice-muted">已开启内存调试——请唤醒小智说一句话，识别原话、0ms 纠偏结果与工具参数会实时显示在这里（鼠标划选听错的词可一键加入纠偏表）。</p>
+          <p className="voice-muted">已开启内存调试——请唤醒小智说一句话，识别原话、纠偏结果与工具参数会实时显示在这里（鼠标划选听错的词可一键加入纠偏表）。</p>
         ) : (
           traces.map((trace, idx) => {
             const correctedChanged = trace.corrected_asr && trace.corrected_asr !== trace.raw_asr;
@@ -2839,7 +2842,12 @@ export function LiveDebugTraces({ builtin }) {
                 <div className="voice-debug-head">
                   <b>第 {trace.turn} 轮</b>
                   <span className="voice-muted mono">{formatTime(trace.at)}</span>
-                  <span className="ob-pill ob-pill--info">{trace.outcome === "done" ? "完成" : trace.outcome}</span>
+                  <span className={`ob-pill ob-pill--${voiceOutcomeLabel(trace.outcome).tone}`}>{voiceOutcomeLabel(trace.outcome).text}</span>
+                  {trace.truncated && (
+                    <span className="ob-pill ob-pill--warn" title="文字超过 240 字只留前 240 字，工具调用超过 8 个只留前 8 个">
+                      已截断{trace.tools_dropped ? `（另有 ${trace.tools_dropped} 个工具调用未保留）` : ""}
+                    </span>
+                  )}
                 </div>
                 <div className="voice-debug-line" onMouseUp={captureSelection}>
                   <span className="voice-muted">听到原话（划选错词可纠偏）：</span>
@@ -2859,7 +2867,7 @@ export function LiveDebugTraces({ builtin }) {
                 </div>
                 {correctedChanged && (
                   <div className="voice-debug-line">
-                    <span className="voice-ok">0ms 纠偏后：</span>
+                    <span className="voice-ok">纠偏后：</span>
                     <b>{trace.corrected_asr}</b>
                   </div>
                 )}
@@ -2886,11 +2894,11 @@ export function LiveDebugTraces({ builtin }) {
         )}
         {timingItems.length > 0 && (
           <div id="voice-turn-timings" className="voice-stack">
-            <span className="voice-muted">最近对话各阶段耗时（最近 {timingItems.length} 轮，从本轮开始拾音算起）：</span>
+            <span className="voice-muted">最近对话各阶段耗时（最近 {timingItems.length} 轮，最多保留 50 轮，服务重启不清空；从本轮开始拾音算起）：</span>
             {timingItems.map((item, index) => (
               <details key={index} open={index === 0}>
                 <summary>
-                  第 {item.turn} 轮 · {item.outcome === "done" ? "结束" : item.outcome === "interrupted" ? "被打断" : "未完成"} · {item.models.join(" / ")}
+                  第 {item.turn} 轮 · {voiceOutcomeLabel(item.outcome).text} · {item.models.join(" / ")}{item.device_id ? ` · 设备 ${item.device_id}` : ""}
                 </summary>
                 <div className="voice-table-wrap">
                   <table className="voice-table">
@@ -2903,7 +2911,7 @@ export function LiveDebugTraces({ builtin }) {
                     <tbody>
                       {Object.entries(item.stages).map(([stage, ms]) => (
                         <tr key={stage}>
-                          <td>{VOICE_TIMING_STAGES[stage]}</td>
+                          <td>{VOICE_TIMING_STAGES[stage] || stage}</td>
                           <td>{ms}</td>
                         </tr>
                       ))}
@@ -2918,14 +2926,6 @@ export function LiveDebugTraces({ builtin }) {
                 </div>
               </details>
             ))}
-          </div>
-        )}
-        {events.length > 0 && (
-          <div className="voice-stack">
-            <span className="voice-muted">最近服务事件（{events.length} 条）：</span>
-            <pre className="voice-log mono" id="voice-builtin-events">
-              {events.map((event) => `${formatTime(event.at)}  ${event.text}`).join("\n")}
-            </pre>
           </div>
         )}
       </div>
@@ -2946,14 +2946,14 @@ export function TurnTimings({ timings }) {
   return (
     <VoiceGroup id="turn-timings" title="最近对话耗时" summary={items.length ? `${items.length} 轮` : "暂无"}>
       <div id="voice-turn-timings" className="voice-stack">
-        <p className="voice-muted">最近 20 轮，只在内存、重启清空，不含对话内容。时间从本轮开始拾音算起。</p>
+        <p className="voice-muted">最近 50 轮，只在内存（退出 MOSS 清空，服务重启不清空），不含对话内容。时间从本轮开始拾音算起。</p>
         <span className="voice-actions">
           <button type="button" className="btn btn-ghost" onClick={copy} disabled={!items.length} id="voice-timings-copy">复制耗时数据</button>
         </span>
         {items.map((item, index) => (
           <details key={index} open={index === 0}>
             <summary>
-              第 {item.turn} 轮 · {item.outcome === "done" ? "结束" : item.outcome === "interrupted" ? "被打断" : "未完成"} · {item.models.join(" / ")}
+              第 {item.turn} 轮 · {voiceOutcomeLabel(item.outcome).text} · {item.models.join(" / ")}
             </summary>
             <div className="voice-table-wrap">
               <table className="voice-table">
@@ -2966,7 +2966,7 @@ export function TurnTimings({ timings }) {
                 <tbody>
                   {Object.entries(item.stages).map(([stage, ms]) => (
                     <tr key={stage}>
-                      <td>{VOICE_TIMING_STAGES[stage]}</td>
+                      <td>{VOICE_TIMING_STAGES[stage] || stage}</td>
                       <td>{ms}</td>
                     </tr>
                   ))}
@@ -2986,25 +2986,91 @@ export function TurnTimings({ timings }) {
   );
 }
 
-/** 内置服务最近 20 条事件。 */
-export function BuiltinEvents({ status }) {
-  const events = Array.isArray(status?.events) ? status.events.slice(0, 20) : [];
+/**
+ * 服务事件与诊断包（2026-11-07 技术书 n68）：显示全部保留的事件（日常记录 ≤300、错误与警告 ≤200，
+ * 服务停止 / 重启不清空），带级别、分类、下一步与技术细节；“只看错误和警告”筛选；被覆盖条数明确提示；
+ * “导出诊断包”由后端生成脱敏 JSON 并弹出系统保存框。
+ */
+export function BuiltinEvents({ builtin }) {
+  const status = builtin?.status;
+  const all = Array.isArray(status?.events) ? status.events : [];
+  const [onlyProblems, setOnlyProblems] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [notice, setNotice] = useState("");
+  const shown = filterVoiceEvents(all, onlyProblems).map(voiceEventView);
+  const problems = all.filter((event) => event?.level === "warn" || event?.level === "error").length;
+  const drops = voiceEventDropNotices(status?.events_dropped);
+  const warnings = Array.isArray(status?.warnings) ? status.warnings : [];
+
+  const exportBundle = async () => {
+    setExporting(true);
+    setNotice("");
+    try {
+      const result = await voiceApi.diagnosticsExport();
+      if (result?.saved) setNotice(`诊断包已保存：${result.file_name}（${result.events} 条事件，${Math.ceil((result.bytes || 0) / 1024)} KB）`);
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: "导出诊断包失败", tone: "error" });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
-    <VoiceGroup id="builtin-events" title="内置服务事件" summary={events.length ? `最近 ${events.length} 条` : "暂无"}>
-      <pre className="voice-log mono" id="voice-builtin-events">
-        {events.length ? events.map((event) => `${formatTime(event.at)}  ${event.text}`).join("\n") : "暂无事件"}
-      </pre>
+    <VoiceGroup
+      id="builtin-events"
+      title="服务事件与诊断包"
+      summary={all.length ? `${all.length} 条${problems ? ` · 错误/警告 ${problems} 条` : ""}` : "暂无"}
+      defaultOpen
+    >
+      <div className="voice-stack" id="voice-builtin-events-card">
+        <div className="voice-actions">
+          <label className="voice-check">
+            <input type="checkbox" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} id="voice-events-only-problems" />
+            <span>只看错误和警告</span>
+          </label>
+          <button type="button" className="btn btn-ghost" disabled={exporting} onClick={exportBundle} id="voice-diagnostics-export">
+            <Download size={13} /> {exporting ? "正在导出…" : "导出诊断包"}
+          </button>
+        </div>
+        <p className="voice-muted">
+          只存在本机内存，服务停止或重启不清空，退出 MOSS 后清空。诊断包会去掉密钥、令牌、带账号密码的地址和 IP，不含录音与对话记忆。
+        </p>
+        {notice && <div className="voice-ok" id="voice-diagnostics-export-result">{notice}</div>}
+        {status?.last_error && (
+          <div className="voice-hint voice-hint--bad" id="voice-events-last-error">最近一次启动失败：{status.last_error}</div>
+        )}
+        {warnings.map((warning) => (
+          <div className="voice-hint voice-hint--warn" key={warning}>{warning}</div>
+        ))}
+        {drops.map((text) => (
+          <div className="voice-hint voice-hint--warn voice-events-dropped" key={text}>{text}</div>
+        ))}
+        {shown.length === 0 ? (
+          <p className="voice-muted" id="voice-events-empty">{onlyProblems ? "没有错误或警告。" : "暂无事件。"}</p>
+        ) : (
+          <ul className="voice-event-list" id="voice-builtin-events">
+            {shown.map((view) => (
+              <li key={view.key} className={`voice-event voice-event--${view.level}`} data-level={view.level} data-category={view.category}>
+                <div className="voice-event-head">
+                  <span className={`ob-pill ob-pill--${view.tone}`}>{view.levelText}</span>
+                  <span className="ob-pill ob-pill--off" title={view.cause || undefined}>{view.categoryLabel}</span>
+                  <span className="voice-muted mono">{view.time}</span>
+                </div>
+                <div className="voice-event-text">{view.text}</div>
+                {view.hint && <div className="voice-event-hint">怎么办：{view.hint}</div>}
+                {view.detail && (
+                  <details className="voice-event-detail">
+                    <summary>技术细节</summary>
+                    <pre className="voice-log mono">{view.detail}</pre>
+                  </details>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </VoiceGroup>
   );
-}
-
-/** 主窗口只提供任务入口；私人数据与授权仍由打包的本机窗口处理。 */
-async function openPrivateTask(section) {
-  try {
-    await voiceApi.openPrivateSettings(section);
-  } catch (error) {
-    await showAlert(voiceErrorText(error), { title: "无法打开本机设置", tone: "error" });
-  }
 }
 
 const PRIVATE_TASKS = [
@@ -3019,6 +3085,32 @@ export function PrivateSettingsEntry({ status }) {
   const [advanced, setAdvanced] = useState(() => new Set());
   const expand = (key) => setOpened((old) => (old.has(key) ? old : new Set([...old, key])));
   const expandAdvanced = (key) => setAdvanced((old) => (old.has(key) ? old : new Set([...old, key])));
+  const homeRef = useRef(null);
+  const homeApprovalsRef = useRef(null);
+  const [focusApprovals, setFocusApprovals] = useState(false);
+  // 全局审批卡“去家居审批”跳过来时，展开“家居 → 家居审批”并滚到那里
+  useEffect(() => {
+    const focusHomeApprovals = () => {
+      expand("home");
+      expandAdvanced("home");
+      if (homeRef.current) homeRef.current.open = true;
+      setFocusApprovals(true);
+      clearVoiceFocus(HOME_APPROVALS);
+    };
+    if (peekVoiceFocus() === HOME_APPROVALS) focusHomeApprovals();
+    const onFocus = (event) => {
+      if (event.detail === HOME_APPROVALS) setTimeout(focusHomeApprovals, 0);
+    };
+    window.addEventListener(VOICE_FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(VOICE_FOCUS_EVENT, onFocus);
+  }, []);
+  // “家居”展开后家居审批才渲染，渲染出来再展开并滚动过去
+  useEffect(() => {
+    if (!focusApprovals || !homeApprovalsRef.current) return;
+    homeApprovalsRef.current.open = true;
+    homeApprovalsRef.current.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    setFocusApprovals(false);
+  }, [focusApprovals, opened]);
   return (
     <section className="voice-private-entry" aria-label="隐私与家居">
       <div className="voice-private-entry-heading">
@@ -3028,6 +3120,7 @@ export function PrivateSettingsEntry({ status }) {
       <div className="voice-private-tasks">
         {PRIVATE_TASKS.map(({ key, title, description }) => (
           <details key={key} className="voice-private-item" id={`voice-private-${key}-item`}
+            ref={key === "home" ? homeRef : undefined}
             onToggle={(event) => { if (event.currentTarget.open) expand(key); }}>
             <summary>
               <ChevronDown className="voice-private-item-arrow" size={15} aria-hidden="true" />
@@ -3042,6 +3135,7 @@ export function PrivateSettingsEntry({ status }) {
                 <>
                   <VoiceHomeCard />
                   <details className="voice-private-more" id="voice-private-home-approvals"
+                    ref={homeApprovalsRef}
                     onToggle={(event) => { if (event.currentTarget.open) expandAdvanced("home"); }}>
                     <summary>家居审批</summary>
                     {advanced.has("home") && <VoiceHomeApprovalCard />}
@@ -3057,12 +3151,3 @@ export function PrivateSettingsEntry({ status }) {
   );
 }
 
-export function PrivateFirmwareEntry() {
-  return (
-    <div className="voice-private-maintenance">
-      <span>固件升级仅在本机安全窗口逐台操作；唤醒词在“唤醒词与音量”标签。</span>
-      <button type="button" className="btn btn-ghost" id="voice-private-settings-open"
-        onClick={() => openPrivateTask("firmware")}>固件升级…</button>
-    </div>
-  );
-}

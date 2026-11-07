@@ -1590,11 +1590,14 @@ impl crate::ApiService {
                     }
                 },
             };
-            return match service.list(status, 50) {
+            const LIST_LIMIT: usize = 50;
+            return match service.list(status, LIST_LIMIT) {
                 Ok(records) => crate::http_json(
                     200,
                     crate::success(serde_json::json!({
                         "approvals": records.iter().map(approval_view).collect::<Vec<_>>(),
+                        // 最多返回最近 50 条；界面据此说“最近 N 条”，不把它当总数（2026-11-07 n68）
+                        "limit": LIST_LIMIT,
                         "server_time": (service.clock)(),
                         "ttl_seconds": service.ttl_seconds(),
                     })),

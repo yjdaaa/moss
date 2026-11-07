@@ -3524,7 +3524,10 @@ input:not([type]):focus {
   height: 520px;
   min-height: 220px;
   max-height: 960px;
-  background: radial-gradient(circle at 50% 35%, #1d263b 0%, #0f1422 80%);
+  /* 影棚背景：顶部略亮的冷灰渐变 + 暗角，3D 画布透明叠在上面 */
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 30%, rgba(120, 132, 168, 0.22) 0%, rgba(120, 132, 168, 0) 70%),
+    linear-gradient(180deg, #1b2030 0%, #12151f 62%, #0c0e15 100%);
   border-bottom: 1px solid var(--ob-line);
   overflow: hidden;
   user-select: none;
@@ -3533,7 +3536,9 @@ input:not([type]):focus {
   border-bottom-color: var(--ob-accent);
 }
 .twin-stage-wrap--bright {
-  background: radial-gradient(circle at 50% 35%, #232f49 0%, #131a2b 82%);
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 30%, rgba(160, 172, 210, 0.28) 0%, rgba(160, 172, 210, 0) 70%),
+    linear-gradient(180deg, #252b3d 0%, #181c28 62%, #10131b 100%);
 }
 .twin-stage-resize-handle {
   position: absolute;
@@ -3580,122 +3585,201 @@ input:not([type]):focus {
   cursor: grabbing;
 }
 
+/* 3D 视口浮层（2026-11-07 改版）：玻璃质感小卡片，左上读数、右侧竖排视角栏、底部图例 */
 .twin-hud-top {
   position: absolute;
   top: 12px;
   left: 12px;
-  right: 12px;
+  right: 76px;
   z-index: 3;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: flex-start;
   pointer-events: none;
 }
-
-.twin-coord-cluster,
-.twin-camera-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  pointer-events: auto;
+.twin-hud-top.is-collapsed {
+  right: 12px;
 }
 
-.twin-coord-chip,
-.twin-feed-chip {
+.twin-readout {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  background: rgba(14, 16, 24, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(12px) saturate(1.2);
+  pointer-events: auto;
+}
+.twin-readout-coords {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+}
+.twin-coord-chip {
   display: inline-flex;
   align-items: baseline;
   gap: 5px;
-  padding: 4px 9px;
-  border-radius: 8px;
-  background: rgba(10, 10, 14, 0.82);
-  border: 1px solid var(--ob-line-2);
-  backdrop-filter: blur(8px);
   font-family: var(--ob-mono);
-  font-size: 12px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ob-ink);
+}
+.twin-coord-chip b {
+  font-weight: 600;
+  min-width: 5.2ch;
+  text-align: right;
 }
 .twin-coord-axis {
-  color: var(--ob-accent-2);
+  color: var(--ob-ink-3);
+  font-size: 11px;
   font-weight: 700;
 }
 .twin-coord-chip small {
   color: var(--ob-ink-3);
   font-size: 10px;
 }
+.twin-feed-chip b {
+  min-width: 4ch;
+}
 
 .twin-laser-badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 3px 9px;
   border-radius: 999px;
-  font-family: var(--ob-mono);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
-  background: rgba(16, 185, 129, 0.14);
-  border: 1px solid rgba(52, 211, 153, 0.4);
+  background: rgba(52, 211, 153, 0.12);
+  border: 1px solid rgba(52, 211, 153, 0.32);
   color: var(--ob-green-2);
+  white-space: nowrap;
 }
 .twin-laser-badge.is-firing {
-  background: rgba(139, 123, 255, 0.24);
-  border-color: rgba(167, 139, 250, 0.8);
+  background: rgba(139, 123, 255, 0.22);
+  border-color: rgba(167, 139, 250, 0.7);
   color: #ede9fe;
-  box-shadow: 0 0 14px rgba(139, 123, 255, 0.45);
+  box-shadow: 0 0 14px rgba(139, 123, 255, 0.4);
 }
 .twin-laser-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: currentColor;
+  color: #34d399;
+}
+.twin-laser-badge .twin-laser-dot {
+  color: inherit;
+}
+.twin-laser-dot.is-firing,
+.twin-laser-badge.is-firing .twin-laser-dot {
+  color: #a78bfa;
+  animation: twin-laser-pulse 0.9s ease-in-out infinite;
+}
+@keyframes twin-laser-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.7); }
+  50% { box-shadow: 0 0 0 4px rgba(167, 139, 250, 0); }
 }
 
 .twin-hud-collapse-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
+  gap: 6px;
+  padding: 5px 10px;
   font-size: 11.5px;
   font-weight: 600;
   border-radius: 999px;
-  background: rgba(18, 22, 36, 0.88);
-  border: 1px solid rgba(139, 123, 255, 0.55);
-  color: #ede9fe;
-  backdrop-filter: blur(8px);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  background: rgba(14, 16, 24, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--ob-ink-2);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+  cursor: pointer;
+  pointer-events: auto;
 }
 .twin-hud-collapse-btn:hover {
-  border-color: var(--ob-accent);
-  background: rgba(139, 123, 255, 0.24);
-  color: #fff;
-}
-.twin-hud-collapse-btn.is-collapsed {
-  background: rgba(10, 12, 20, 0.72);
-  border-color: rgba(148, 163, 184, 0.38);
-  color: var(--ob-ink-2);
+  color: var(--ob-ink);
+  border-color: rgba(139, 123, 255, 0.55);
 }
 
-.twin-cam-btn {
-  padding: 4px 8px;
-  font-size: 11.5px;
-  background: rgba(12, 12, 18, 0.82);
+.twin-view-rail {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 22px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  pointer-events: none;
 }
-.twin-cam-btn.active {
-  border-color: var(--ob-accent);
-  color: var(--ob-accent-2);
+.twin-view-rail::-webkit-scrollbar {
+  display: none;
+}
+.twin-view-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(14, 16, 24, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(12px) saturate(1.2);
+  pointer-events: auto;
+}
+.twin-rail-btn {
+  width: 44px;
+  min-height: 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ob-ink-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.1;
+  cursor: pointer;
+  transition: background 0.14s var(--ob-ease), color 0.14s var(--ob-ease), border-color 0.14s var(--ob-ease);
+}
+.twin-rail-icon span {
+  font-size: 10px;
+  font-weight: 500;
+}
+.twin-rail-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ob-ink);
+}
+.twin-rail-btn.active {
   background: rgba(139, 123, 255, 0.2);
+  border-color: rgba(139, 123, 255, 0.45);
+  color: #ede9fe;
+}
+.twin-rail-btn:focus-visible {
+  outline: 2px solid var(--ob-accent);
+  outline-offset: 1px;
 }
 
 .twin-hud-bottom {
   position: absolute;
   left: 12px;
-  right: 12px;
-  bottom: 14px;
+  right: 76px;
+  bottom: 18px;
   z-index: 3;
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 8px;
   pointer-events: none;
@@ -3708,10 +3792,11 @@ input:not([type]):focus {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  padding: 4px 10px;
-  border-radius: 8px;
-  background: rgba(10, 10, 14, 0.78);
-  border: 1px solid var(--ob-line);
+  padding: 5px 10px;
+  border-radius: 10px;
+  background: rgba(14, 16, 24, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
 }
 .twin-legend-item {
   display: inline-flex;
@@ -3720,25 +3805,27 @@ input:not([type]):focus {
 }
 .twin-swatch {
   display: inline-block;
-  width: 10px;
+  width: 12px;
   height: 3px;
   border-radius: 2px;
 }
-.twin-swatch--cut { background: linear-gradient(90deg, #fbbf24, #f97316, #ff3b5c); }
-.twin-swatch--todo { background: #38bdf8; }
-.twin-swatch--rapid { background: #a78bfa; }
-.twin-swatch--origin { width: 7px; height: 7px; border-radius: 50%; background: #34d399; }
+.twin-swatch--todo { background: #67e8f9; opacity: 0.8; }
+.twin-swatch--cut { background: #4a2a14; box-shadow: 0 0 0 1px rgba(255, 220, 180, 0.35); height: 4px; }
+.twin-swatch--rapid { background: repeating-linear-gradient(90deg, #a78bfa 0 3px, transparent 3px 5px); }
+.twin-swatch--area { background: #8b7bff; }
 
 .twin-workspace-tag {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 8px;
-  background: rgba(10, 10, 14, 0.78);
-  border: 1px solid var(--ob-line);
+  justify-content: flex-end;
+  gap: 4px 10px;
   font-family: var(--ob-mono);
   font-size: 11px;
+  color: var(--ob-ink-3);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.twin-workspace-hint {
+  opacity: 0.75;
 }
 
 .twin-fallback-stage {
@@ -4547,6 +4634,23 @@ input:not([type]):focus {
   align-items: center;
   gap: 10px;
 }
+/* n68 服务事件列表：级别 / 分类胶囊、下一步与可展开的技术细节 */
+.voice-event-list {
+  list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.voice-event {
+  padding: 8px 10px; border-radius: 10px; border: 1px solid var(--ob-line);
+  background: var(--ob-well); font-size: 12.5px; line-height: 1.5;
+}
+.voice-event--warn { border-color: var(--ob-amber); }
+.voice-event--error { border-color: var(--ob-red); }
+.voice-event-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.voice-event-text { margin-top: 4px; color: var(--ob-ink); word-break: break-all; }
+.voice-event-hint { margin-top: 2px; color: var(--ob-ink-2); }
+.voice-event-detail summary { cursor: pointer; color: var(--ob-ink-2); font-size: 12px; }
+.voice-event-detail .voice-log { max-height: 160px; margin-top: 4px; }
+.voice-approval-reason { margin-top: 2px; font-size: 12px; word-break: break-all; }
 .voice-debug-line {
   display: flex;
   flex-wrap: wrap;
@@ -5005,48 +5109,6 @@ input:not([type]):focus {
   margin: 0 auto;
   width: 100%;
 }
-.camera-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  padding: 16px 20px;
-}
-.camera-header-title {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-}
-.camera-header-icon {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
-  background: var(--ob-accent-bg);
-  border: 1px solid rgba(139, 123, 255, 0.35);
-  color: var(--ob-accent-2);
-}
-.camera-header-title h1 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 650;
-  color: var(--ob-ink);
-}
-.camera-header-title p {
-  margin: 4px 0 0;
-  font-size: 12.5px;
-  color: var(--ob-ink-2);
-}
-.camera-header-badges {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
 .camera-jump-voice {
   display: inline-flex;
   align-items: center;
@@ -5061,7 +5123,8 @@ input:not([type]):focus {
   gap: 14px;
   flex-wrap: wrap;
   padding: 12px 18px;
-  border-color: var(--ob-amber-bd);
+  border: 1px solid var(--ob-amber-bd);
+  border-radius: var(--ob-radius);
   background: var(--ob-amber-bg);
 }
 .camera-banner--info {
@@ -5077,23 +5140,34 @@ input:not([type]):focus {
 }
 .camera-grid {
   display: grid;
-  grid-template-columns: 330px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 .camera-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 18px;
+  gap: 12px;
+  padding: 16px;
 }
-.camera-section {
+.camera-sidebar .camera-device-list,
+.camera-sidebar .camera-empty-devices {
+  flex: 1;
+  align-content: start;
+}
+.camera-section-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ob-ink-2);
+}
+.camera-service-row {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.camera-section + .camera-section {
-  padding-top: 16px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 12px;
   border-top: 1px solid var(--ob-line);
 }
 .camera-section-head {
@@ -5101,13 +5175,6 @@ input:not([type]):focus {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-}
-.camera-section h2 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--ob-ink-2);
 }
 .camera-empty-devices {
   padding: 14px;
@@ -5176,21 +5243,68 @@ input:not([type]):focus {
   font-family: var(--ob-mono);
   color: var(--ob-ink-3);
 }
-.camera-controls-primary {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
 .camera-capture-btn,
 .camera-auto-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 38px;
-  font-size: 13.5px;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 16px;
+  font-size: 13px;
   font-weight: 600;
+}
+.camera-capture-btn {
+  min-width: 108px;
+}
+.camera-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.camera-toolbar-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.camera-toolbar-tools {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--ob-raise);
+  border: 1px solid var(--ob-line);
+}
+.camera-icon-btn {
+  width: 32px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ob-ink-2);
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.camera-icon-btn:hover:not(:disabled) {
+  background: var(--ob-raise-2);
+  color: var(--ob-ink);
+}
+.camera-icon-btn.is-on {
+  background: var(--ob-accent-bg);
+  border-color: rgba(139, 123, 255, 0.45);
+  color: var(--ob-ink);
+}
+.camera-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.camera-icon-btn:focus-visible {
+  outline: 2px solid var(--ob-accent);
+  outline-offset: 1px;
 }
 .camera-hint {
   margin: 0;
@@ -5207,62 +5321,39 @@ input:not([type]):focus {
   background: var(--ob-accent-bg);
   color: var(--ob-accent-2);
 }
-.camera-view-tools {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-.camera-tool-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 7px 6px;
-  font-size: 12px;
-}
-.camera-tool-btn.is-on {
-  border-color: var(--ob-accent);
-  background: var(--ob-accent-bg);
-  color: var(--ob-ink);
-}
-.camera-tips ul {
-  margin: 0;
-  padding-left: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ob-ink-3);
-}
 .camera-stage {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px 18px 18px;
-  min-height: 520px;
-}
-.camera-stage-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.camera-stage-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  padding: 14px 16px 16px;
+  min-height: 560px;
 }
 .camera-meta-chip {
-  font-size: 12px;
+  font-size: 11.5px;
   font-family: var(--ob-mono);
   color: var(--ob-ink-2);
   padding: 3px 8px;
   border-radius: 6px;
-  background: var(--ob-raise);
-  border: 1px solid var(--ob-line);
+  background: rgba(10, 10, 14, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+}
+.camera-overlay {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+.camera-overlay--top {
+  top: 12px;
+  justify-content: space-between;
+}
+.camera-overlay--bottom {
+  bottom: 12px;
 }
 .camera-error {
   display: flex;
@@ -5276,15 +5367,16 @@ input:not([type]):focus {
   font-size: 12.5px;
 }
 .camera-viewport {
+  position: relative;
   flex: 1;
   display: grid;
   place-items: center;
-  min-height: 430px;
+  min-height: 440px;
   border-radius: 14px;
   border: 1px solid var(--ob-line-2);
   background: radial-gradient(circle at 50% 35%, rgba(139, 123, 255, 0.07), rgba(9, 9, 11, 0.96) 72%);
   overflow: hidden;
-  padding: 12px;
+  padding: 48px 12px;
 }
 .camera-frame-img {
   max-width: 100%;

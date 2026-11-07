@@ -21,19 +21,23 @@ test("NV8a 热词规范化、Unicode 长度、数量和字节上限", () => {
   assert.equal(localSettingsError({ ...form, custom_hotwords: Array(65).fill("椴木").join("\n") }), "");
 });
 
-test("NV8a 复制诊断仅保留允许字段，不复制对话、音频、凭据和地址", () => {
+test("NV8a 复制诊断仅保留允许字段，不复制对话、音频、凭据和地址；n68 带会话号与设备编号", () => {
   const sensitive = "never-copy-this-value";
   const item = {
+    session_id: "s-1", device_id: "aa:bb:cc:11:22:33", at_ms: 1_790_000_000_123,
     turn: 3, outcome: "interrupted", models: ["fake-asr"],
-    transcript: sensitive, audio: sensitive, authorization: sensitive, url: sensitive, device_id: sensitive,
-    stages: { recording_start: 0, barge_in: 430, first_audio_frame: 750, unknown: sensitive, final_asr: Infinity },
+    transcript: sensitive, audio: sensitive, authorization: sensitive, url: sensitive, ip: sensitive,
+    stages: { recording_start: 0, barge_in: 430, first_audio_frame: 750, unknown: sensitive, final_asr: Infinity, new_stage: 12 },
     tools: Array.from({ length: 70 }, () => ({ name: "fake_status", ms: 15, arguments: sensitive, result: sensitive })),
   };
-  const report = voiceTimingReport(Array(30).fill(item));
-  assert.equal(report.length, 20);
+  const report = voiceTimingReport(Array(60).fill(item));
+  assert.equal(report.length, 50, "后端最多保留 50 轮，复制时全部带上");
   assert.equal(report[0].tools.length, 50);
-  assert.deepEqual(report[0].stages, { barge_in: 430, recording_start: 0, first_audio_frame: 750 });
+  assert.deepEqual(report[0].stages, { barge_in: 430, recording_start: 0, first_audio_frame: 750, new_stage: 12 }, "未登记的数字阶段原样保留，非数字丢弃");
   assert.deepEqual(report[0].tools[0], { name: "fake_status", ms: 15 });
+  assert.equal(report[0].session_id, "s-1");
+  assert.equal(report[0].device_id, "aa:bb:cc:11:22:33");
+  assert.equal(report[0].at_ms, 1_790_000_000_123);
   assert.equal(JSON.stringify(report).includes(sensitive), false);
   assert.deepEqual(voiceTimingReport(null), []);
 });

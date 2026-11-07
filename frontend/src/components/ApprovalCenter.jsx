@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { HOME_APPROVALS, requestVoiceFocus } from "../voiceFocus.js";
 import { ShieldAlert } from "lucide-react";
 import { fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
 import { hasDesktopSession } from "../authSession.js";
@@ -247,13 +248,14 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
   const percent = shown && ttl > 0 ? Math.max(0, Math.min(100, (remaining / ttl) * 100)) : 0;
   const isWorkflow = shown?.kind === "workflow_confirm_send";
   const privateOnly = approvedInPrivateWindow(shown?.kind);
-  const openPrivateApproval = async () => {
-    try {
-      await voiceApi.openPrivateSettings("approvals");
-      onOpenChange?.(false);
-    } catch (error) {
-      setFailure({ code: "", text: `无法打开私密设置窗口：${error?.message || error}` });
+  // n67：独立安全窗口已取消，改为跳到语音中心“隐私与家居 → 家居 → 家居审批”
+  const openPrivateApproval = () => {
+    requestVoiceFocus(HOME_APPROVALS);
+    if (window.location.pathname !== "/voice") {
+      window.history.pushState({}, "", "/voice");
+      window.dispatchEvent(new PopStateEvent("popstate"));
     }
+    onOpenChange?.(false);
   };
 
   return (
@@ -330,7 +332,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                 </div>
               )}
               {privateOnly ? (
-                <div className="voice-hint" id="approval-private-hint">家居控制要在“私密设置”窗口的“家居控制审批”里核对参数后批准；批准后会实际操作设备。不确定时请拒绝。</div>
+                <div className="voice-hint" id="approval-private-hint">家居控制要在“语音中心 → 隐私与家居 → 家居审批”里核对参数后批准；批准后会实际操作设备。不确定时请拒绝。</div>
               ) : (
               <label className="approval-check">
                 <input
@@ -362,7 +364,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
                   </button>
                   {privateOnly ? (
                     <button type="button" className="btn btn-primary" id="approval-open-private" onClick={openPrivateApproval} disabled={busy}>
-                      去私密窗口审批
+                      去家居审批
                     </button>
                   ) : (
                   <button

@@ -1,14 +1,25 @@
 //! 运行中的会话与最近事件（供语音中心显示）。事件不含 token 与音频内容。
+//!
+//! 2026-11-07（技术书 n68）：事件带毫秒时间、级别、分类、大白话下一步与技术细节；事件与耗时记录放在
+//! [`DiagnosticsLog`] 里，由宿主（桌面端 `BuiltinVoice`）持有，服务停止、重启或崩溃重启后仍保留。
+//! 错误和警告单独一个环形缓冲，日常记录再多也挤不掉它们；任何一条被覆盖都计数并显示，绝不悄悄丢。
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-const MAX_EVENTS: usize = 100;
-const MAX_TIMINGS: usize = 20;
+pub use moss_voice_providers::DiagCategory;
+
+/// 日常记录（info）最多保留条数。
+pub const MAX_INFO_EVENTS: usize = 300;
+/// 错误与警告最多保留条数（独立缓冲，info 挤不掉）。
+pub const MAX_PROBLEM_EVENTS: usize = 200;
+/// 对话耗时最多保留轮数。
+pub const MAX_TIMINGS: usize = 50;
 const MAX_DEBUG_TRACES: usize = 10;
 const MAX_DEBUG_TEXT_CHARS: usize = 240;
+const MAX_DEBUG_TOOLS: usize = 8;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DebugToolTrace {
@@ -28,11 +39,24 @@ pub struct TurnDebugTrace {
     pub tools: Vec<DebugToolTrace>,
     pub reply: String,
     pub outcome: String,
+    /// 有文字被截到 240 字、或工具调用超过 8 个只留前 8 个时为真（界面显示“已截断”）。
+    #[serde(default)]
+    pub truncated: bool,
+    /// 超过 8 个而没有保留的工具调用数。
+    #[serde(default)]
+    pub tools_dropped: usize,
 }
 
 pub fn scrub_debug_text(raw: &str) -> String {
+    scrub_debug_text_flagged(raw).0
+}
+
+/// 同 [`scrub_debug_text`]，另返回是否截断过（超过 240 字只留前 240 字时为真）。
+pub fn scrub_debug_text_flagged(raw: &str) -> (String, bool) {
     let mut out = String::with_capacity(raw.len().min(MAX_DEBUG_TEXT_CHARS));
-    for token in raw.split_whitespace() {
+    let mut words = raw.split_whitespace().peekable();
+    let mut truncated = false;
+    while let Some(token) = words.next() {
         if !out.is_empty() {
             out.push(' ');
         }
@@ -50,11 +74,13 @@ pub fn scrub_debug_text(raw: &str) -> String {
             token
         };
         out.push_str(masked);
-        if out.chars().count() >= MAX_DEBUG_TEXT_CHARS {
+        let count = out.chars().count();
+        if count >= MAX_DEBUG_TEXT_CHARS {
+            truncated = count > MAX_DEBUG_TEXT_CHARS || words.peek().is_some();
             break;
         }
     }
-    out.chars().take(MAX_DEBUG_TEXT_CHARS).collect()
+    (out.chars().take(MAX_DEBUG_TEXT_CHARS).collect(), truncated)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -64,6 +90,10 @@ pub struct ToolTiming { pub name: String, pub ms: u64 }
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TurnTiming {
     pub session_id: String,
+    /// 本轮所在设备（2026-11-07 n68：排障时要知道是哪台小智）。
+    pub device_id: String,
+    /// 本轮结束时间（Unix 毫秒）。
+    pub at_ms: u64,
     pub turn: u64,
     pub models: Vec<String>,
     /// 相对本轮开始拾音的毫秒数；手动模式没有 VAD 点。
@@ -109,30 +139,226 @@ pub struct SessionView {
     pub screen_height: Option<u32>,
 }
 
+/// 事件级别。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventLevel {
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+/// 一条诊断事件（语音中心“记录与诊断”与诊断包）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ServerEvent {
+    /// 递增序号（两个缓冲合并排序、前端去重用）。
+    pub seq: u64,
+    /// Unix 秒（兼容旧界面）。
     pub at: u64,
+    /// Unix 毫秒。
+    pub at_ms: u64,
+    pub level: EventLevel,
+    pub category: DiagCategory,
+    /// 大白话说明发生了什么。
     pub text: String,
+    /// 大白话的下一步建议。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// 原始技术信息（已脱敏），排障时对照。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// 待写入的一条事件；用 [`EventRecord::info`] / [`EventRecord::warn`] / [`EventRecord::error`] 构造。
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventRecord {
+    pub level: EventLevel,
+    pub category: DiagCategory,
+    pub text: String,
+    pub hint: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl EventRecord {
+    pub fn new(level: EventLevel, category: DiagCategory, text: impl Into<String>) -> Self {
+        Self { level, category, text: text.into(), hint: None, detail: None }
+    }
+    pub fn info(category: DiagCategory, text: impl Into<String>) -> Self {
+        Self::new(EventLevel::Info, category, text)
+    }
+    pub fn warn(category: DiagCategory, text: impl Into<String>) -> Self {
+        Self::new(EventLevel::Warn, category, text)
+    }
+    pub fn error(category: DiagCategory, text: impl Into<String>) -> Self {
+        Self::new(EventLevel::Error, category, text)
+    }
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
+        let hint = hint.into();
+        self.hint = (!hint.trim().is_empty()).then_some(hint);
+        self
+    }
+    /// 技术细节，写入前脱敏。
+    pub fn detail(mut self, detail: impl AsRef<str>) -> Self {
+        let detail = moss_voice_providers::scrub_diagnostic_text(detail.as_ref());
+        self.detail = (!detail.trim().is_empty()).then_some(detail);
+        self
+    }
+    /// 由提供方错误生成：沿用它的分类、建议与技术细节。
+    pub fn from_provider(level: EventLevel, prefix: &str, error: &moss_voice_providers::ProviderError) -> Self {
+        Self {
+            level,
+            category: error.category,
+            text: format!("{prefix}{}", error.message),
+            hint: error.hint.clone(),
+            detail: error.detail.clone(),
+        }
+    }
+}
+
+impl From<String> for EventRecord {
+    fn from(text: String) -> Self {
+        Self::info(DiagCategory::General, text)
+    }
+}
+
+impl From<&str> for EventRecord {
+    fn from(text: &str) -> Self {
+        Self::info(DiagCategory::General, text)
+    }
+}
+
+/// 被覆盖（丢弃）的事件计数：前端据此显示“有 N 条较早的记录已被覆盖”。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct EventDrops {
+    /// 被覆盖的日常记录条数
+    pub info: u64,
+    /// 被覆盖的错误与警告条数
+    pub problems: u64,
+    /// 被覆盖的耗时记录轮数
+    pub timings: u64,
+    pub max_info: usize,
+    pub max_problems: usize,
+    pub max_timings: usize,
+}
+
+#[derive(Default)]
+struct LogInner {
+    next_seq: u64,
+    info: VecDeque<ServerEvent>,
+    problems: VecDeque<ServerEvent>,
+    timings: VecDeque<TurnTiming>,
+    drops: EventDrops,
+}
+
+/// 诊断记录本：事件（info 与 warn/error 分开两个环形缓冲）和对话耗时。
+///
+/// 只在内存；宿主持有同一个 `Arc`，传给每次启动的服务（[`crate::ServerConfig::diagnostics`]），
+/// 所以停止、重启和崩溃重启都不会清空。退出 MOSS 时随进程结束。
+pub struct DiagnosticsLog {
+    inner: Mutex<LogInner>,
+}
+
+impl Default for DiagnosticsLog {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(LogInner {
+                drops: EventDrops {
+                    max_info: MAX_INFO_EVENTS,
+                    max_problems: MAX_PROBLEM_EVENTS,
+                    max_timings: MAX_TIMINGS,
+                    ..EventDrops::default()
+                },
+                ..LogInner::default()
+            }),
+        }
+    }
+}
+
+impl DiagnosticsLog {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LogInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn push(&self, record: impl Into<EventRecord>) {
+        let record = record.into();
+        let at_ms = crate::unix_now_ms();
+        let mut inner = self.lock();
+        inner.next_seq += 1;
+        let event = ServerEvent {
+            seq: inner.next_seq,
+            at: at_ms / 1000,
+            at_ms,
+            level: record.level,
+            category: record.category,
+            text: record.text,
+            hint: record.hint,
+            detail: record.detail,
+        };
+        if event.level == EventLevel::Info {
+            inner.info.push_back(event);
+            while inner.info.len() > MAX_INFO_EVENTS {
+                inner.info.pop_front();
+                inner.drops.info += 1;
+            }
+        } else {
+            inner.problems.push_back(event);
+            while inner.problems.len() > MAX_PROBLEM_EVENTS {
+                inner.problems.pop_front();
+                inner.drops.problems += 1;
+            }
+        }
+    }
+
+    /// 全部保留的事件，新的在前（两个缓冲按序号合并）。
+    pub fn events(&self) -> Vec<ServerEvent> {
+        let inner = self.lock();
+        let mut all: Vec<ServerEvent> = inner.info.iter().chain(inner.problems.iter()).cloned().collect();
+        all.sort_by(|a, b| b.seq.cmp(&a.seq));
+        all
+    }
+
+    pub fn drops(&self) -> EventDrops {
+        self.lock().drops
+    }
+
+    pub fn finish_timing(&self, timing: TurnTiming) {
+        let mut inner = self.lock();
+        inner.timings.push_back(timing);
+        while inner.timings.len() > MAX_TIMINGS {
+            inner.timings.pop_front();
+            inner.drops.timings += 1;
+        }
+    }
+
+    /// 耗时记录，新的在前。
+    pub fn timings(&self) -> Vec<TurnTiming> {
+        self.lock().timings.iter().rev().cloned().collect()
+    }
 }
 
 #[derive(Default)]
 pub struct LiveState {
     sessions: Mutex<BTreeMap<String, SessionView>>,
-    events: Mutex<VecDeque<ServerEvent>>,
-    timings: Mutex<VecDeque<TurnTiming>>,
+    log: Arc<DiagnosticsLog>,
     debug_enabled: std::sync::atomic::AtomicBool,
     debug_traces: Mutex<VecDeque<TurnDebugTrace>>,
 }
 
 impl LiveState {
+    /// 事件与耗时写进宿主持有的记录本（服务停止后仍保留）。
+    pub fn with_log(log: Arc<DiagnosticsLog>) -> Self {
+        Self { log, ..Self::default() }
+    }
     pub fn finish_timing(&self, timing: TurnTiming) {
-        if let Ok(mut timings) = self.timings.lock() {
-            timings.push_back(timing);
-            while timings.len() > MAX_TIMINGS { timings.pop_front(); }
-        }
+        self.log.finish_timing(timing);
     }
     pub fn timings(&self) -> Vec<TurnTiming> {
-        self.timings.lock().map(|items| items.iter().rev().cloned().collect()).unwrap_or_default()
+        self.log.timings()
     }
     pub fn debug_enabled(&self) -> bool {
         self.debug_enabled.load(std::sync::atomic::Ordering::Acquire)
@@ -155,19 +381,28 @@ impl LiveState {
         if !self.debug_enabled() {
             return;
         }
-        trace.raw_asr = scrub_debug_text(&trace.raw_asr);
-        trace.corrected_asr = scrub_debug_text(&trace.corrected_asr);
-        trace.reply = scrub_debug_text(&trace.reply);
+        let mut truncated = false;
+        let mut scrub = |text: &str| {
+            let (out, cut) = scrub_debug_text_flagged(text);
+            truncated |= cut;
+            out
+        };
+        trace.raw_asr = scrub(&trace.raw_asr);
+        trace.corrected_asr = scrub(&trace.corrected_asr);
+        trace.reply = scrub(&trace.reply);
+        let total_tools = trace.tools.len();
         trace.tools = trace
             .tools
             .into_iter()
-            .take(8)
+            .take(MAX_DEBUG_TOOLS)
             .map(|t| DebugToolTrace {
                 name: t.name.chars().take(64).collect(),
-                arguments: scrub_debug_text(&t.arguments),
-                result: scrub_debug_text(&t.result),
+                arguments: scrub(&t.arguments),
+                result: scrub(&t.result),
             })
             .collect();
+        trace.tools_dropped = total_tools.saturating_sub(MAX_DEBUG_TOOLS);
+        trace.truncated = truncated || trace.tools_dropped > 0;
         if let Ok(mut traces) = self.debug_traces.lock() {
             if !self.debug_enabled() {
                 traces.clear();
@@ -189,17 +424,17 @@ impl LiveState {
             .map(|items| items.iter().rev().cloned().collect())
             .unwrap_or_default()
     }
-    pub fn event(&self, text: impl Into<String>) {
-        if let Ok(mut events) = self.events.lock() {
-            events.push_back(ServerEvent { at: crate::unix_now(), text: text.into() });
-            while events.len() > MAX_EVENTS {
-                events.pop_front();
-            }
-        }
+    /// 写一条事件：传字符串为日常记录（info / general），传 [`EventRecord`] 可指定级别与分类。
+    pub fn event(&self, record: impl Into<EventRecord>) {
+        self.log.push(record);
     }
 
     pub fn events(&self) -> Vec<ServerEvent> {
-        self.events.lock().map(|events| events.iter().rev().cloned().collect()).unwrap_or_default()
+        self.log.events()
+    }
+
+    pub fn event_drops(&self) -> EventDrops {
+        self.log.drops()
     }
 
     pub fn open(&self, view: SessionView) {
@@ -355,11 +590,12 @@ mod tests {
     #[test]
     fn timing_history_is_bounded_and_contains_only_diagnostics() {
         let state = LiveState::default();
-        for turn in 0..25 { state.finish_timing(TurnTiming { session_id: "s".into(), turn, models: vec!["fake-asr".into()], stages: BTreeMap::from([("final_asr".into(), 12)]), tools: vec![], outcome: "done".into() }); }
-        assert_eq!(state.timings().len(), 20);
+        for turn in 0..55 { state.finish_timing(TurnTiming { session_id: "s".into(), device_id: "dev-1".into(), at_ms: 1_000 + turn, turn, models: vec!["fake-asr".into()], stages: BTreeMap::from([("final_asr".into(), 12)]), tools: vec![], outcome: "done".into() }); }
+        assert_eq!(state.timings().len(), MAX_TIMINGS);
         assert_eq!(state.timings().last().unwrap().turn, 5);
+        assert_eq!(state.event_drops().timings, 5, "被覆盖的耗时轮数如实计数");
         let v = serde_json::to_value(&state.timings()[0]).unwrap();
-        assert_eq!(v.as_object().unwrap().keys().cloned().collect::<Vec<_>>(), ["models", "outcome", "session_id", "stages", "tools", "turn"]);
+        assert_eq!(v.as_object().unwrap().keys().cloned().collect::<Vec<_>>(), ["at_ms", "device_id", "models", "outcome", "session_id", "stages", "tools", "turn"]);
     }
 
     #[test]
@@ -448,6 +684,8 @@ mod tests {
             }],
             reply: "已生成预览。".into(),
             outcome: "done".into(),
+            truncated: false,
+            tools_dropped: 0,
         };
         state.finish_debug_trace(sample(1));
         assert!(state.debug_traces().is_empty(), "默认关闭时绝不留存任何对话文本");
@@ -462,7 +700,71 @@ mod tests {
         assert!(traces[0].raw_asr.contains("[REDACTED]") && !traces[0].raw_asr.contains("abc123"));
         assert!(traces[0].tools[0].result.contains("[REDACTED]") && !traces[0].tools[0].result.contains("sk-secret999"));
 
+        assert!(!traces[0].truncated, "短文本不标截断");
+
+        let mut long = sample(13);
+        long.reply = "很长".repeat(200);
+        long.tools = (0..11)
+            .map(|i| DebugToolTrace { name: format!("tool_{i}"), arguments: "{}".into(), result: "ok".into() })
+            .collect();
+        state.finish_debug_trace(long);
+        let trace = &state.debug_traces()[0];
+        assert!(trace.truncated, "回复超过 240 字、工具超过 8 个都要标“已截断”");
+        assert_eq!(trace.tools.len(), 8);
+        assert_eq!(trace.tools_dropped, 3);
+        assert_eq!(trace.reply.chars().count(), 240);
+
         state.set_debug_enabled(false);
         assert!(state.debug_traces().is_empty(), "关闭开关立即清空内存缓存");
+    }
+
+    /// n68：错误与警告单独缓冲，日常记录再多也挤不掉；被覆盖的条数如实计数。
+    #[test]
+    fn problems_survive_info_flood_and_drops_are_counted() {
+        let log = DiagnosticsLog::new();
+        log.push(
+            EventRecord::error(DiagCategory::Auth, "大模型密钥不对")
+                .hint("重新填写密钥")
+                .detail("HTTP 401 token=abc"),
+        );
+        log.push(EventRecord::warn(DiagCategory::Network, "流式识别失败，改用整段识别"));
+        for i in 0..(MAX_INFO_EVENTS + 40) {
+            log.push(format!("识别完成：{i} 字"));
+        }
+        let events = log.events();
+        assert_eq!(events.len(), MAX_INFO_EVENTS + 2);
+        let error = events.iter().find(|e| e.level == EventLevel::Error).expect("错误没被日常记录挤掉");
+        assert_eq!(error.category, DiagCategory::Auth);
+        assert_eq!(error.hint.as_deref(), Some("重新填写密钥"));
+        assert!(error.detail.as_deref().unwrap().contains("[REDACTED]") && !error.detail.as_deref().unwrap().contains("abc"));
+        assert!(error.at_ms >= error.at * 1000 && error.at_ms < (error.at + 1) * 1000);
+        assert!(events.iter().any(|e| e.level == EventLevel::Warn));
+        assert!(events.windows(2).all(|w| w[0].seq > w[1].seq), "新的在前");
+        let drops = log.drops();
+        assert_eq!(drops.info, 40);
+        assert_eq!(drops.problems, 0);
+        assert_eq!((drops.max_info, drops.max_problems), (MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS));
+
+        for i in 0..(MAX_PROBLEM_EVENTS + 5) {
+            log.push(EventRecord::warn(DiagCategory::Device, format!("设备断开 {i}")));
+        }
+        assert_eq!(log.drops().problems, 7);
+        assert_eq!(log.events().iter().filter(|e| e.level != EventLevel::Info).count(), MAX_PROBLEM_EVENTS);
+
+        let json = serde_json::to_value(&log.events()[0]).unwrap();
+        assert_eq!(json["level"], "warn");
+        assert_eq!(json["category"], "device");
+        assert!(json.get("hint").is_none(), "没有建议时不输出 hint 字段");
+    }
+
+    /// 同一个记录本挂到多个 LiveState（模拟服务停止后重启），记录仍在。
+    #[test]
+    fn log_shared_across_live_states_keeps_history() {
+        let log = DiagnosticsLog::new();
+        LiveState::with_log(log.clone()).event(EventRecord::error(DiagCategory::Model, "第一次运行出错"));
+        let restarted = LiveState::with_log(log.clone());
+        restarted.event("重启后的记录");
+        let texts: Vec<_> = restarted.events().into_iter().map(|e| e.text).collect();
+        assert_eq!(texts, ["重启后的记录", "第一次运行出错"]);
     }
 }

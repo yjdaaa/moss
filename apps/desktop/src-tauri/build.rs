@@ -36,6 +36,8 @@ fn main() {
         "voice_builtin_status",
         "voice_builtin_start",
         "voice_builtin_stop",
+        // n68 导出语音诊断包（与状态读取同权限，命令内固定主窗口）
+        "voice_diagnostics_export",
         "voice_device_set_status",
         "voice_device_rename",
         "voice_device_request",
@@ -60,7 +62,6 @@ fn main() {
         "voice_vision_status",
         "voice_vision_save",
         "voice_vision_test",
-        "open_voice_private",
         "voice_plugins_status",
         "voice_plugins_save",
         "voice_memory_list",

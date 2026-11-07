@@ -40,7 +40,7 @@ export function useVoiceDirty(dirty) {
  * 可折叠分组。`summary` 为折叠时的一行摘要；`dirty` 时标题旁显示“未保存”。
  * 展开状态按 `id` 记在本机（界面偏好）。
  */
-export function VoiceGroup({ id, title, summary, dirty = false, defaultOpen = false, tone, children, label }) {
+export function VoiceGroup({ id, title, summary, dirty = false, defaultOpen = false, tone, children, label, lazy = false }) {
   const [open, setOpen] = useState(() => readFoldOpen(`voice-${id}`, defaultOpen));
   useVoiceDirty(dirty);
   const toggle = () => {
@@ -58,7 +58,8 @@ export function VoiceGroup({ id, title, summary, dirty = false, defaultOpen = fa
         {summary ? <span className={`voice-group-summary${tone ? ` voice-${tone}` : ""}`}>{summary}</span> : null}
       </button>
       <div className="voice-group-body" hidden={!open}>
-        {children}
+        {/* lazy：收起时不挂载内容（如固件卡会定时查询，收起后不再后台轮询） */}
+        {(!lazy || open) && children}
       </div>
     </section>
   );

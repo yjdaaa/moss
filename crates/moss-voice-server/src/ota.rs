@@ -205,7 +205,11 @@ async fn ota_post(
     let info = match OtaInfo::from_request(header, &body) {
         Ok(info) => info,
         Err(error) => {
-            shared.state.event(format!("OTA 请求被拒绝（{}）：{error}", peer.ip()));
+            shared.state.event(
+                crate::EventRecord::warn(crate::DiagCategory::Firmware, format!("OTA 请求被拒绝（{}）：设备开机上报的信息不完整", peer.ip()))
+                    .hint("设备固件发来的 OTA 请求缺少必要字段：换用标准小智固件，或检查自编固件")
+                    .detail(&error),
+            );
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
     };
@@ -238,7 +242,11 @@ async fn ota_post(
     let (status, bound) = match registered {
         Ok(registered) => registered,
         Err(error) => {
-            shared.state.event(format!("OTA 登记设备失败：{error}"));
+            shared.state.event(
+                crate::EventRecord::error(crate::DiagCategory::Internal, "OTA 登记设备失败：本机设备记录读写出错")
+                    .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
+                    .detail(&error),
+            );
             return (StatusCode::INTERNAL_SERVER_ERROR, "设备登记失败").into_response();
         }
     };
@@ -283,7 +291,10 @@ async fn ota_post(
         _ => None,
     };
     if let Some((version, _)) = &firmware {
-        shared.state.event(format!("OTA：向设备 {} 下发固件 {version}（用户已确认推送）", info.device_id));
+        shared.state.event(crate::EventRecord::info(
+            crate::DiagCategory::Firmware,
+            format!("OTA：向设备 {} 下发固件 {version}（用户已确认推送）", info.device_id),
+        ));
     }
     shared.state.event(format!(
         "OTA：设备 {}（{}，固件 {}）{}",

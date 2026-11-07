@@ -181,84 +181,6 @@ fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
     handle.exit(0);
 }
 
-#[cfg(desktop)]
-fn private_section_script(section: &str) -> String {
-    // `section` has already matched the closed set in `open_voice_private`.
-    format!("window.__MOSS_PRIVATE_TARGET__ = '{section}'; window.dispatchEvent(new CustomEvent('moss:voice-private-selection', {{ detail: '{section}' }}));")
-}
-
-/// Opens a second packaged Tauri webview for private voice settings.
-/// The loopback-hosted main page can only request the window, not sensitive data.
-/// Must stay `async`: on Windows, building a webview window inside a synchronous command
-/// deadlocks the main thread (the window stays white and the app stops responding).
-#[tauri::command]
-async fn open_voice_private(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    section: Option<String>,
-) -> Result<(), String> {
-    #[cfg(desktop)]
-    {
-        // Navigation hint only. Never interpreted as a command or an URL.
-        let section = match section.as_deref() {
-            None | Some("overview") => "overview",
-            Some("memory") => "memory",
-            Some("plugins") => "plugins",
-            Some("speaker") => "speaker",
-            Some("home") => "home",
-            Some("approvals") => "approvals",
-            Some("firmware") => "firmware",
-            Some("wakeword") => "wakeword",
-            _ => return Err("未知的语音隐私设置类别".into()),
-        };
-        let current = window.url().map_err(|_| "无法校验当前窗口来源")?;
-        let on_expected_backend = window_is_trusted_main(&window);
-        let on_packaged_main = (
-            matches!(current.scheme(), "http" | "https")
-                && current.host_str() == Some("tauri.localhost")
-                && current.port().is_none()
-        ) || (current.scheme() == "tauri" && current.host_str() == Some("localhost"));
-        if window.label() != "main" || (!on_expected_backend && !on_packaged_main) {
-            return Err("只能从受信任的 MOSS 主窗口打开语音隐私设置".into());
-        }
-
-        if let Some(existing) = app.get_webview_window("voice-private") {
-            existing.show().map_err(|_| "无法显示语音隐私窗口")?;
-            existing.set_focus().map_err(|_| "无法聚焦语音隐私窗口")?;
-            existing.eval(private_section_script(section))
-                .map_err(|_| "无法切换本机设置类别")?;
-            return Ok(());
-        }
-        let first_section = section.to_owned();
-        let private = tauri::WebviewWindowBuilder::new(
-            &app, "voice-private", tauri::WebviewUrl::App("voice-private.html".into()),
-        )
-        .title("MOSS · 语音隐私设置")
-        .inner_size(980.0, 760.0)
-        .min_inner_size(700.0, 500.0)
-        .on_page_load(move |view, payload| {
-            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                let _ = view.eval(private_section_script(&first_section));
-            }
-        })
-        .on_navigation(|url| {
-            voice_builtin::is_voice_private_asset(
-                "voice-private", url.scheme(), url.host_str(), url.port(),
-                url.path(), url.query(), url.fragment(),
-            )
-        })
-        .build()
-        .map_err(|_| "无法创建语音隐私窗口")?;
-        private.set_focus().map_err(|_| "无法聚焦语音隐私窗口")?;
-        Ok(())
-    }
-    #[cfg(mobile)]
-    {
-        let _ = (app, window, section);
-        Err("语音隐私设置仅支持 MOSS 桌面端".into())
-    }
-}
-
 /// 启动进程内后端，返回（后端句柄, 前端使用的后端地址或失败原因, 导出设置状态）。
 fn start_backend(
     runtime_dir: Option<std::path::PathBuf>,
@@ -378,7 +300,6 @@ pub fn run() {
             voice_builtin::voice_vision_status,
             voice_builtin::voice_vision_save,
             voice_builtin::voice_vision_test,
-            open_voice_private,
             voice_builtin::voice_plugins_status,
             voice_builtin::voice_plugins_save,
             voice_builtin::voice_memory_list,
@@ -390,6 +311,7 @@ pub fn run() {
             voice_builtin::voice_builtin_status,
             voice_builtin::voice_builtin_start,
             voice_builtin::voice_builtin_stop,
+            voice_builtin::voice_diagnostics_export,
             voice_builtin::voice_device_set_status,
             voice_builtin::voice_device_rename,
             voice_builtin::voice_device_request,
@@ -582,9 +504,15 @@ mod tests {
     #[test]
     fn frontend_invoked_commands_are_registered_and_granted() {
         let build_rs = include_str!("../build.rs");
-        let capability = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}", include_str!("../capabilities/default.json"), include_str!("../capabilities/voice-memory.json"), include_str!("../capabilities/voice-plugins.json"), include_str!("../capabilities/voice-vision.json"), include_str!("../capabilities/voice-agent.json"), include_str!("../capabilities/voice-music.json"), include_str!("../capabilities/voice-home.json")) + "\n" + include_str!("../capabilities/voice-context.json") + "\n" + include_str!("../capabilities/voice-private-main.json");
+        let capability = [
+            include_str!("../capabilities/default.json"),
+            include_str!("../capabilities/voice-vision.json"),
+            include_str!("../capabilities/voice-agent.json"),
+            include_str!("../capabilities/voice-music.json"),
+            include_str!("../capabilities/voice-private-main.json"),
+        ]
+        .join("\n");
         for command in [
-            "open_voice_private",
             "get_backend_origin",
             "get_desktop_session",
             "save_export_file",
@@ -613,8 +541,9 @@ mod tests {
     /// (2026-10-15: the private window stayed white and the app hung, AppHangB1).
     #[test]
     fn window_creating_commands_are_async() {
-        let source = include_str!("lib.rs");
-        assert!(source.contains("#[tauri::command]\nasync fn open_voice_private("), "open_voice_private must be async");
+        // 只查测试模块之前的产品代码（测试体里的字符串本身不算）；n67 起已没有建窗口的命令
+        let full = include_str!("lib.rs");
+        let source = &full[..full.find("#[cfg(test)]\nmod tests").expect("tests module")];
         for (at, _) in source.match_indices("WebviewWindowBuilder::new(") {
             let head = &source[..at];
             let function = head.rfind("fn ").expect("builder outside a function");
@@ -622,125 +551,69 @@ mod tests {
         }
     }
 
-    /// NV19-08 / n26：长期记忆命令给打包私密页与经授权的主窗口，其他来源一律拒绝。
+    /// 敏感语音设置（记忆、信息服务、声纹、家居、长期记忆、唤醒词、固件）只授权给主窗口：
+    /// n26（2026-10-18）四项就地展开，n67（2026-11-07）取消独立安全窗口、唤醒词与固件放进语音中心。
+    /// 通配 / 远程 default capability 不得含这些权限；每条命令开头都由 require_private_settings_window
+    /// 把来源固定为本进程后端上的主窗口。
     #[test]
-    fn voice_context_permissions_are_packaged_private_and_trusted_main_only() {
-        let private: serde_json::Value = serde_json::from_str(include_str!("../capabilities/voice-context.json")).unwrap();
-        let general = include_str!("../capabilities/default.json");
-        assert_eq!(private["windows"], serde_json::json!(["voice-private"]));
-        assert!(private.get("remote").is_none() && private.get("webviews").is_none());
-        assert_eq!(private["permissions"], serde_json::json!(["allow-voice-context-manage", "allow-voice-context-pick-folder"]));
-        for permission in ["allow-voice-context-manage", "allow-voice-context-pick-folder"] {
-            assert!(!general.contains(permission), "{permission} 不进通配 / 远程 default capability");
-        }
-        let main_capability: serde_json::Value = serde_json::from_str(include_str!("../capabilities/voice-private-main.json")).unwrap();
-        assert_main_window_loopback_capability(&main_capability);
-        for permission in ["allow-voice-context-manage", "allow-voice-context-pick-folder"] {
-            assert!(main_capability["permissions"].as_array().unwrap().iter().any(|entry| entry == permission));
-        }
-        let source = include_str!("voice_context.rs");
-        for command in ["pub async fn voice_context_manage", "pub async fn voice_context_pick_folder"] {
-            let body = &source[source.find(command).unwrap()..];
-            let body = &body[..body.find("\n}\n").unwrap()];
-            assert!(body.contains("require_private_settings_window(&window)?"), "{command} must check the packaged private page or the trusted main window");
-        }
-    }
-
-    #[test]
-    fn voice_memory_permissions_are_packaged_private_window_only() {
-        let private: serde_json::Value = serde_json::from_str(include_str!("../capabilities/voice-memory.json")).unwrap();
-        let general = include_str!("../capabilities/default.json");
-        assert_eq!(private["windows"], serde_json::json!(["voice-private"]));
-        assert!(private.get("remote").is_none());
-        for permission in private["permissions"].as_array().unwrap() {
-            assert!(!general.contains(permission.as_str().unwrap()));
-        }
-    }
-
-    /// 主窗口导航到回环 HTTP：通配 / 远程 default capability 不得含私密权限；私密能力只给
-    /// `voice-private` 窗口，主窗口就地展开所需命令单独写在 `voice-private-main.json` 并由
-    /// 命令内来源判定固定（n26，2026-10-18）。
-    #[test]
-    fn voice_private_acl_keeps_wildcard_and_remote_capabilities_clean() {
-        let default: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        let memory: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/voice-memory.json")).unwrap();
-        let plugins: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/voice-plugins.json")).unwrap();
-        assert_eq!(default["windows"], serde_json::json!(["*"]));
-        assert!(default["remote"].get("urls").is_some());
-        assert!(default["permissions"].as_array().unwrap().iter()
-            .any(|item| item == "allow-open-voice-private"));
-        for (name, capability, expected) in [
-            ("memory", &memory, &[
-                "allow-voice-memory-list", "allow-voice-memory-set-enabled",
-                "allow-voice-memory-save", "allow-voice-memory-clear",
-                "allow-voice-speaker-manage",
-                "allow-voice-firmware-status",
-                "allow-voice-firmware-import", "allow-voice-firmware-manage",
-                "allow-voice-wakeword-status", "allow-voice-wakeword-import-base", "allow-voice-wakeword-manage",
-            ][..]),
-            ("plugins", &plugins, &[
-                "allow-voice-plugins-status", "allow-voice-plugins-save",
-            ][..]),
-        ] {
-            assert_eq!(capability["windows"], serde_json::json!(["voice-private"]), "{name}");
-            assert!(capability.get("remote").is_none(), "{name} cannot allow remote origins");
-            assert!(capability.get("webviews").is_none(), "{name} must be scoped by window label");
-            assert_eq!(capability["permissions"].as_array().unwrap().len(), expected.len());
-            for permission in expected {
-                assert!(capability["permissions"].as_array().unwrap()
-                    .iter().any(|entry| entry == permission));
-                assert!(!default["permissions"].as_array().unwrap()
-                    .iter().any(|entry| entry == permission),
-                    "{permission} must not appear in wildcard/remote default ACL");
-            }
-        }
-        // 2026-10-18 用户决定（技术书 n26）：四项设置在主语音页就地展开，主窗口因此挂载这些卡片；
-        // 来源仍由命令内 require_private_settings_window 固定，固件命令不进主窗口。
-        let main = include_str!("../../../../frontend/src/components/VoiceBuiltinCard.jsx");
-        let private = include_str!("../../../../frontend/src/voicePrivate.jsx");
-        for card in ["<VoiceMemoryCard", "<VoicePluginsCard", "<VoiceSpeakerCard", "<VoiceHomeCard"] {
-            assert!(main.contains(card), "主语音页就地展开需要 {card}");
-            assert!(private.contains(card), "私密窗口保留 {card}");
-        }
-        let main_capability: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/voice-private-main.json")).unwrap();
-        assert_main_window_loopback_capability(&main_capability);
-        for permission in [
+    fn sensitive_voice_settings_are_trusted_main_window_only() {
+        const SENSITIVE: &[&str] = &[
+            "allow-voice-memory-list", "allow-voice-memory-set-enabled", "allow-voice-memory-save", "allow-voice-memory-clear",
+            "allow-voice-speaker-manage", "allow-voice-plugins-status", "allow-voice-plugins-save",
+            "allow-voice-home-status", "allow-voice-home-save", "allow-voice-home-backup-export", "allow-voice-home-backup-audit",
+            "allow-voice-home-backup-restore", "allow-voice-home-token-save", "allow-voice-home-voice-consent",
+            "allow-voice-home-discover", "allow-voice-home-approvals", "allow-voice-home-approval-cancel",
+            "allow-voice-home-control-consent", "allow-voice-home-approval-approve",
+            "allow-voice-context-manage", "allow-voice-context-pick-folder",
             "allow-voice-firmware-status", "allow-voice-firmware-import", "allow-voice-firmware-manage",
             "allow-voice-wakeword-status", "allow-voice-wakeword-import-base", "allow-voice-wakeword-manage",
-        ] {
-            assert!(
-                !main_capability["permissions"].as_array().unwrap().iter().any(|entry| entry == permission),
-                "{permission} 仍只在打包私密窗口"
-            );
+        ];
+        let default: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(default["windows"], serde_json::json!(["*"]));
+        let default_permissions = default["permissions"].as_array().unwrap();
+        assert!(!default_permissions.iter().any(|item| item == "allow-open-voice-private"), "独立安全窗口已取消");
+        let main: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/voice-private-main.json")).unwrap();
+        assert_main_window_loopback_capability(&main);
+        let main_permissions = main["permissions"].as_array().unwrap();
+        assert_eq!(main_permissions.len(), SENSITIVE.len());
+        for permission in SENSITIVE {
+            assert!(main_permissions.iter().any(|entry| entry == permission), "{permission} 应授权给主窗口");
+            assert!(!default_permissions.iter().any(|entry| entry == permission),
+                "{permission} must not appear in wildcard/remote default ACL");
         }
-        let builtin = include_str!("voice_builtin.rs");
-        for command in [
-            "pub async fn voice_firmware_status", "pub async fn voice_firmware_import", "pub async fn voice_firmware_manage",
-            "pub async fn voice_wakeword_status", "pub async fn voice_wakeword_import_base", "pub async fn voice_wakeword_manage",
-        ] {
-            let body = &builtin[builtin.find(command).unwrap()..];
-            let body = &body[..body.find("\n}\n").unwrap()];
-            assert!(body.contains("require_voice_private_asset(&window)?"), "{command} 仍只认打包私密页");
+        let guarded = [
+            (include_str!("voice_builtin.rs"), &[
+                "voice_memory_list", "voice_memory_set_enabled", "voice_memory_save", "voice_memory_clear",
+                "voice_speaker_manage", "voice_plugins_status", "voice_plugins_save",
+                "voice_firmware_status", "voice_firmware_import", "voice_firmware_manage",
+                "voice_wakeword_status", "voice_wakeword_import_base", "voice_wakeword_manage",
+                "voice_home_status", "voice_home_save", "voice_home_token_save", "voice_home_approval_approve",
+            ][..]),
+            (include_str!("voice_context.rs"), &["voice_context_manage", "voice_context_pick_folder"][..]),
+        ];
+        for (source, commands) in guarded {
+            for command in commands {
+                let start = source.find(&format!("pub async fn {command}(")).expect(command);
+                let body = &source[start..start + source[start..].find("\n}\n").expect(command)];
+                assert!(body.contains("require_private_settings_window(&window)?"), "{command} 须固定主窗口来源");
+            }
         }
-        assert!(include_str!("../../../../frontend/voice-private.html")
-            .contains("src/voicePrivate.jsx"));
-    }
-
-    #[test]
-    fn voice_home_assistant_settings_are_packaged_private_window_only() {
-        let private: serde_json::Value = serde_json::from_str(
-            include_str!("../capabilities/voice-home.json")
-        ).unwrap();
-        let default = include_str!("../capabilities/default.json");
-        assert_eq!(private["windows"], serde_json::json!(["voice-private"]));
-        assert!(private.get("remote").is_none());
-        for permission in private["permissions"].as_array().unwrap() {
-            assert!(!default.contains(permission.as_str().unwrap()));
+        let guard = include_str!("voice_builtin.rs");
+        let start = guard.find("fn require_private_settings_window(").unwrap();
+        let body = &guard[start..start + guard[start..].find("\n}\n").unwrap()];
+        assert!(body.contains("crate::window_is_trusted_main(window)"));
+        assert!(!guard.contains("is_voice_private_asset"), "打包私密页判定已随独立窗口删除");
+        // 卡片都挂在主窗口语音中心
+        let builtin_card = include_str!("../../../../frontend/src/components/VoiceBuiltinCard.jsx");
+        for card in ["<VoiceMemoryCard", "<VoicePluginsCard", "<VoiceSpeakerCard", "<VoiceHomeCard"] {
+            assert!(builtin_card.contains(card), "主语音页需要 {card}");
         }
+        let voice_page = include_str!("../../../../frontend/src/pages/VoicePage.jsx");
+        assert!(voice_page.contains("<VoiceFirmwareCard"), "固件卡挂在“设备与工具”标签");
+        let wake_panel = include_str!("../../../../frontend/src/components/VoiceWakeVolumePanel.jsx");
+        assert!(wake_panel.contains("<VoiceWakeWordCard"), "唤醒词卡挂在“唤醒词与音量”标签");
     }
 
     #[test]
@@ -749,17 +622,6 @@ mod tests {
             include_str!("../capabilities/voice-music.json")).unwrap();
         let general = include_str!("../capabilities/default.json");
         assert_main_window_loopback_capability(&private);
-        for permission in private["permissions"].as_array().unwrap() {
-            assert!(!general.contains(permission.as_str().unwrap()));
-        }
-    }
-
-    #[test]
-    fn voice_plugin_credentials_are_packaged_private_window_only() {
-        let private: serde_json::Value = serde_json::from_str(include_str!("../capabilities/voice-plugins.json")).unwrap();
-        let general = include_str!("../capabilities/default.json");
-        assert_eq!(private["windows"], serde_json::json!(["voice-private"]));
-        assert!(private.get("remote").is_none());
         for permission in private["permissions"].as_array().unwrap() {
             assert!(!general.contains(permission.as_str().unwrap()));
         }
@@ -821,12 +683,18 @@ mod tests {
                 assert!(guard < body.find("imp::run").or(body.find("spawn_blocking")).unwrap(), "{command} 须先校验来源");
             }
         }
-        // 2026-11-05：状态读取含设备 IP 与调试原文，只给主窗口与打包私密页（两处前端调用方）
+        // 2026-11-05：状态读取含设备 IP 与调试原文，只给主窗口（n67 起独立安全窗口已取消）
         let builtin = include_str!("voice_builtin.rs");
         let start = builtin.find("pub async fn voice_builtin_status(").expect("voice_builtin_status");
         let body = &builtin[start..start + builtin[start..].find("\n}\n").expect("voice_builtin_status")];
         let guard = body.find("require_status_window(&window)?;").expect("voice_builtin_status 未校验窗口来源");
         assert!(guard < body.find("imp::run").unwrap(), "voice_builtin_status 须先校验来源");
+        // n68：诊断包含事件与审批结果，与状态读取同权限、先校验来源再生成
+        let start = builtin.find("pub async fn voice_diagnostics_export(").expect("voice_diagnostics_export");
+        let body = &builtin[start..start + builtin[start..].find("\n}\n").expect("voice_diagnostics_export")];
+        let guard = body.find("require_status_window(&window)?;").expect("voice_diagnostics_export 未校验窗口来源");
+        assert!(guard < body.find("imp::run").unwrap(), "voice_diagnostics_export 须先校验来源");
+        assert!(body.find("imp::run").unwrap() < body.find("blocking_save_file").unwrap(), "保存路径只来自系统对话框");
         let helper = builtin.find("fn require_status_window(").expect("require_status_window");
         let helper = &builtin[helper..helper + builtin[helper..].find("\n}\n").expect("require_status_window")];
         assert!(helper.contains("require_private_settings_window(window)"));

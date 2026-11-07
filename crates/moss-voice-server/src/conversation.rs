@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use moss_voice_providers::text::{Segmenter, emotion_of};
 use moss_voice_providers::{
-    Asr, AsrStream, BoxFuture, ChatMessage, Llm, Pcm, StreamingAsr, ToolCall, ToolSpec, Tts,
+    Asr, AsrStream, BoxFuture, ChatMessage, Llm, Pcm, ProviderError, StreamingAsr, ToolCall, ToolSpec, Tts,
     compact_stale_tool_results, truncate_history,
 };
 use serde_json::Value;
@@ -426,7 +426,7 @@ impl Conversation {
             })
     }
 
-    async fn cached_speech(&self, text: &str) -> Result<Pcm, String> {
+    async fn cached_speech(&self, text: &str) -> Result<Pcm, ProviderError> {
         if let Ok(cache) = self.cache.lock()
             && let Some((_, pcm)) = cache.iter().find(|(key, _)| key == text)
         {
@@ -439,9 +439,9 @@ impl Conversation {
                     fallback
                         .synthesize(text)
                         .await
-                        .map_err(|_| primary_err.to_string())?
+                        .map_err(|_| primary_err)?
                 } else {
-                    return Err(primary_err.to_string());
+                    return Err(primary_err);
                 }
             }
         };
@@ -696,8 +696,10 @@ pub enum TurnEvent {
         track_id: String,
         title: String,
     },
-    /// 出错（记入事件；不含密钥与地址）
-    Failed(String),
+    /// 出错（记入事件；不含密钥与地址）。带诊断分类、建议与技术细节（2026-11-07 n68）。
+    Failed(ProviderError),
+    /// 出了问题但已自动补救（如流式识别失败改整段识别、主合成失败降级本地合成），记为警告。
+    Warning(ProviderError),
     /// 结束：要追加到历史的消息；`close` 为真时播完后结束会话
     Done {
         messages: Vec<ChatMessage>,
@@ -1112,9 +1114,9 @@ impl Turn {
                 && let Some(fallback) = self.conversation.fallback_tts.clone()
                 && let Some(retry_text) = pending_text.take()
             {
-                self.send(TurnEvent::Failed(format!(
-                    "主语音合成失败（{error}），本句已自动降级为本地语音合成"
-                )));
+                self.send(TurnEvent::Warning(
+                    error.clone().prefixed("主语音合成失败，本句已自动降级为本地语音合成：")
+                ));
                 let fb_prepared = self.start_sentence_tts_with(fallback, retry_text, false);
                 let mut fb_closed = true;
                 return Box::pin(self.drain_prepared_sentence(
@@ -1126,7 +1128,7 @@ impl Turn {
                 ))
                 .await;
             }
-            self.send(TurnEvent::Failed(error.to_string()));
+            self.send(TurnEvent::Failed(error));
         }
         pending_text.is_none()
     }
@@ -1144,20 +1146,14 @@ impl Turn {
         pcm: &[i16],
         sample_rate: u32,
         stream: Option<AsrStream>,
-    ) -> Result<String, String> {
+    ) -> Result<String, ProviderError> {
         if let Some(stream) = stream {
             match stream.finish().await {
                 Ok(text) => return Ok(text),
-                Err(error) => self.send(TurnEvent::Failed(format!(
-                    "流式识别失败，改用整段识别：{error}"
-                ))),
+                Err(error) => self.send(TurnEvent::Warning(error.prefixed("流式识别失败，改用整段识别："))),
             }
         }
-        self.conversation
-            .asr
-            .transcribe(pcm, sample_rate)
-            .await
-            .map_err(|error| error.to_string())
+        self.conversation.asr.transcribe(pcm, sample_rate).await
     }
 
     /// 让模型生成一轮回复，边生成边切句合成。返回（回复，是否已朗读过内容）或错误。
@@ -1166,14 +1162,10 @@ impl Turn {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
         emotion_sent: &mut bool,
-    ) -> (Result<moss_voice_providers::LlmReply, String>, bool) {
+    ) -> (Result<moss_voice_providers::LlmReply, ProviderError>, bool) {
         let (delta_tx, mut delta_rx) = unbounded_channel::<String>();
         let llm = self.conversation.llm.clone();
-        let generation = async move {
-            llm.chat(messages, tools, delta_tx)
-                .await
-                .map_err(|error| error.to_string())
-        };
+        let generation = async move { llm.chat(messages, tools, delta_tx).await };
         let speaking = async {
             let (sentence_tx, mut sentence_rx) = tokio::sync::mpsc::channel::<String>(4);
             let feeder = async {
@@ -1518,10 +1510,13 @@ impl Turn {
                         "工具调用轮数超过上限，未执行",
                     ));
                 }
-                self.send(TurnEvent::Failed(format!(
-                    "工具调用超过 {} 轮，已停止",
-                    settings.max_tool_rounds
-                )));
+                self.send(TurnEvent::Failed(
+                    ProviderError::with_category(
+                        moss_voice_providers::DiagCategory::Model,
+                        format!("工具调用超过 {} 轮，已停止", settings.max_tool_rounds),
+                    )
+                    .hint("大模型反复调用工具没有收尾：换个说法再试，或换一个更擅长工具调用的模型"),
+                ));
                 self.speak_fixed(&settings.error_reply).await;
                 break;
             }
@@ -1533,7 +1528,7 @@ impl Turn {
                 .any(|call| call.function.name == "play_music")
                 && reply.tool_calls.len() != 1
             {
-                self.send(TurnEvent::Failed("音乐播放不能和其他工具同时执行".into()));
+                self.send(TurnEvent::Failed(ProviderError::new("音乐播放不能和其他工具同时执行")));
                 self.send(TurnEvent::Done {
                     messages: Vec::new(),
                     close: false,

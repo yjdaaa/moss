@@ -46,7 +46,15 @@ try {
         goggle_bot: Object.fromEntries(["idle", "engrave", "approval", "music", "celebrate"].map((id) => [id, `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-bot`])),
       },
       sessions: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", ip: "192.0.2.55", protocol_version: 1, connected_at: 1_790_000_000, state: "idle", level: 0, screen_monochrome: false, screen_width: 320, screen_height: 240, device_tools: ["self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness", "self.screen.set_theme", "self.screen.preview_image", "self.set_press_to_talk"] }],
-      events: [], timings: [],
+      // n68：结构化事件（级别 / 分类 / 下一步 / 技术细节）、覆盖计数与降级提示
+      events: [
+        { seq: 3, at: 1_790_000_002, at_ms: 1_790_000_002_345, level: "info", category: "general", text: "识别完成：7 字" },
+        { seq: 2, at: 1_790_000_001, at_ms: 1_790_000_001_120, level: "error", category: "auth", text: "对话出错：大模型返回 HTTP 401，密钥无效或没有权限", hint: "密钥填错、过期或被停用了：到服务方控制台复制新密钥重新填写", detail: "服务方原话：Incorrect API key provided" },
+        { seq: 1, at: 1_790_000_000, at_ms: 1_790_000_000_010, level: "warn", category: "device", text: "设备 aa:bb:cc:11:22:33 已断开：连接突然中断（最可能是 Wi-Fi 掉线、设备重启或断电）" },
+      ],
+      events_dropped: { info: 12, problems: 0, timings: 0, max_info: 300, max_problems: 200, max_timings: 50 },
+      warnings: ["本地音乐目录当前不可用（换电脑或移动盘拔出时请重新选择音乐文件夹），本次启动已跳过本地音乐"],
+      timings: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", at_ms: 1_790_000_003_000, turn: 2, outcome: "ignored", models: ["fake-asr"], stages: { recording_start: 0, final_asr: 320 }, tools: [] }],
       devices: [{ device_id: "aa:bb:cc:11:22:33", name: "立创实战派小智", model: "lichuang-dev", firmware_version: "2.2.0", status: "allowed", last_seen: 1_790_000_000, status_json: JSON.stringify({ audio_speaker: { volume: 65 }, screen: { brightness: 80, theme: "dark" } }) }],
     },
     agent: {
@@ -70,6 +78,7 @@ try {
     voice_status: () => voiceStatus(),
     voice_server_log: () => ({ lines: ["[fake] started api_key=secret"] }),
     voice_builtin_status: () => structuredClone(state.builtin),
+    voice_diagnostics_export: () => ({ saved: true, file_name: "moss-voice-diagnostics-1790000000.json", bytes: 4096, events: state.builtin.events.length }),
     voice_mcp_status: () => ({ servers: [], connections: [], audit: [], revision: "r1", max_servers: 8 }),
     voice_memory_list: () => [],
     voice_context_pick_folder: () => {
@@ -107,7 +116,14 @@ try {
     }),
     voice_vision_status: () => ({ settings: { enabled: false, url: "", model: "" }, key_configured: false }),
     voice_agent_status: () => ({ configured: state.agent.settings.enabled, strict_mode: state.agent.strict_mode, providers: state.agent.providers, runs: structuredClone(state.agent.runs), settings: structuredClone(state.agent.settings) }),
-    open_voice_private: () => null,
+    // n67：唤醒词与固件卡挂在主窗口语音中心（回环假数据，不连设备）
+    voice_wakeword_status: () => ({
+      running: true,
+      word: { text: "你好小智", command: "ni hao xiao zhi", threshold: 0.2 },
+      base: null,
+      devices: [],
+    }),
+    voice_firmware_status: () => ({ artifacts: [], devices: [], records: [], offer_hours: 24, now: 0 }),
     get_export_settings: () => ({ dir: "", effective_dir: "C:\\moss\\exports", available: true, ask_each_time: false }),
     voice_agent_save: ({ input }) => {
       state.agent.settings = structuredClone(input);
@@ -253,6 +269,11 @@ try {
   await context.route("**/*", async (route) => {
     const target = new URL(route.request().url());
     if (target.origin === new URL(local).origin) return route.continue();
+    if (target.hostname === "127.0.0.1" && target.port === "9666" && target.pathname === "/v1/approvals" && target.searchParams.get("status") === "all") {
+      // n68：失败的审批显示原因与错误码；标题按后端 limit 写“最近 N 条”
+      const approvals = [{ approval_id: "apr_fail", status: "failed", kind: "laser_job", summary: "椴木书签", source: "voice", created_at: 1_790_000_000, outcome: { success: false, message: "控制器忙，未开始加工", error_code: "controller_busy" } }];
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { approvals, limit: 50, server_time: 1_790_000_100, ttl_seconds: 120 } }) });
+    }
     if (target.hostname === "127.0.0.1" && target.port === "9666") {
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true, result: { mcp: {}, approvals: [] } }) });
     }
@@ -592,7 +613,7 @@ try {
   assert.equal(alignEdges.memLeft, alignEdges.twinLeft, "隐私与家居折叠项左边缘与上方卡片严格对齐");
   assert.equal(alignEdges.memRight, alignEdges.twinRight, "隐私与家居折叠项右边缘与上方卡片严格对齐");
   assert.equal(await page.locator(".voice-private-item-body .voice-card").count(), 0, "未展开时不挂载设置卡");
-  assert.equal(await page.locator("#voice-private-settings-open").isVisible(), false, "固件入口不在隐私与家居");
+  assert.equal(await page.locator("#voice-firmware-card, .firmware-card").count(), 0, "固件不在隐私与家居");
   if (process.env.VOICE_QA_DIR) await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-privacy-tab.png") });
   const memoryItem = page.locator("#voice-private-memory-item");
   await memoryItem.locator("> summary").click();
@@ -603,11 +624,35 @@ try {
   if (process.env.VOICE_QA_DIR) await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-privacy-tab-open.png") });
   await memoryItem.locator("> summary").click();
   assert.equal(await memoryItem.evaluate((el) => el.open), false, "再点收起");
+  // n67：固件升级在“设备与工具”标签，收起时不挂载（不后台轮询），展开后就地显示固件卡
+  await tab("设备").click();
+  assert.equal(calls.filter((call) => call.command === "voice_firmware_status").length, 0, "固件组收起时不查询");
+  await openGroup("device-firmware");
+  await page.locator("#voice-group-device-firmware #voice-firmware-card").waitFor();
+  assert.ok(calls.some((call) => call.command === "voice_firmware_status"), "展开后在主窗口直接读取固件状态");
   await tab("记录与诊断").click();
-  assert.equal(await page.locator("#voice-private-settings-open").isVisible(), false, "固件入口默认收在设备维护组里");
-  await openGroup("device-maintenance");
-  await page.locator("#voice-private-settings-open").click();
-  assert.deepEqual(last("open_voice_private").args, { section: "firmware" }, "设备维护入口打开私密固件任务");
+  // 8a. n68：服务事件带级别 / 分类 / 怎么办 / 技术细节，可只看错误和警告，覆盖计数明确提示，可导出诊断包
+  await page.locator("#voice-approvals-card").getByText("原因：控制器忙，未开始加工（错误码 controller_busy）").waitFor();
+  assert.match(await page.locator("#voice-group-approvals").innerText(), /最近 1 条/);
+  await openGroup("builtin-events");
+  const eventsCard = page.locator("#voice-builtin-events-card");
+  assert.equal(await eventsCard.locator(".voice-event").count(), 3, "全部保留的事件都显示，不再只截 20 条");
+  await eventsCard.getByText("有 12 条较早的日常记录已被覆盖（最多保留 300 条）").waitFor();
+  await eventsCard.getByText(/本地音乐目录当前不可用/).waitFor();
+  const errorEvent = eventsCard.locator('.voice-event[data-level="error"]');
+  assert.match(await errorEvent.innerText(), /错误[\s\S]*密钥\/权限[\s\S]*怎么办：密钥填错/);
+  await errorEvent.getByText("技术细节").click();
+  await errorEvent.getByText("服务方原话：Incorrect API key provided").waitFor();
+  assert.match(await eventsCard.locator('.voice-event[data-level="warn"]').innerText(), /怎么办：检查设备供电和 Wi-Fi/, "没有自带建议时用分类的大白话建议");
+  await page.locator("#voice-events-only-problems").check();
+  assert.equal(await eventsCard.locator(".voice-event").count(), 2, "只看错误和警告");
+  await page.locator("#voice-events-only-problems").uncheck();
+  await page.locator("#voice-diagnostics-export").click();
+  await page.locator("#voice-diagnostics-export-result").getByText(/诊断包已保存：moss-voice-diagnostics-1790000000\.json（3 条事件/).waitFor();
+  assert.ok(last("voice_diagnostics_export"), "导出走后端命令");
+  await openGroup("live-debug-traces");
+  assert.match(await page.locator("#voice-turn-timings").innerText(), /第 2 轮 · 没识别出文字，已忽略 · fake-asr · 设备 aa:bb:cc:11:22:33/);
+  assert.equal(await page.locator("#voice-live-debug").getByText(/0ms|100% 生效/).count(), 0, "不再出现未测量的 0ms / 100% 说法");
   // 8b. n51：记录与诊断 -> 仅内存实时对话排障镜（默认关闭，开启后展示原话与 0ms 纠偏并可一键追加纠偏规则）
   await openGroup("live-debug-traces");
   assert.equal(await page.locator("#voice-debug-trace-switch").isChecked(), false, "实时对话调试默认关闭");
@@ -652,7 +697,7 @@ try {
   await page.locator("#voice-card-style-moss_hud").click();
   await botCard.getByText("太空舱雕刻表盘").waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave", style: "moss_hud" } });
-  // 8d. 2026-11-07：“唤醒词与音量”标签——音量松手即下发 set_volume，唤醒词只打开安全窗口的 wakeword 任务
+  // 8d. 2026-11-07：“唤醒词与音量”标签——音量松手即下发 set_volume；n67 起唤醒词卡就地显示
   await tab("唤醒词与音量").click();
   const wakePanel = page.locator("#voice-wake-volume-panel");
   await wakePanel.waitFor();
@@ -665,8 +710,8 @@ try {
   await wakePanel.getByRole("button", { name: "静音 立创实战派小智" }).click();
   await wakePanel.getByText("已静音").waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 0 } });
-  await page.locator("#voice-wakeword-open").click();
-  assert.deepEqual(last("open_voice_private").args, { section: "wakeword" }, "唤醒词入口打开安全窗口的 wakeword 任务");
+  await wakePanel.locator("#voice-wakeword-card").waitFor();
+  assert.equal(await wakePanel.locator("#voice-wakeword-text").inputValue(), "你好小智", "唤醒词卡在主窗口就地读取当前唤醒词");
   await shot("voice-wake-volume");
   // 9. 窄屏无横向滚动
   await page.setViewportSize({ width: 820, height: 1000 });

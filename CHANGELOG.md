@@ -4,6 +4,36 @@
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-11-07
+
+### 取消独立的语音隐私安全窗口，唤醒词与固件升级直接在语音中心操作（2026-11-07）
+
+- **现象**：改唤醒词、升级固件都要点按钮另开一个“本机安全窗口”，主界面看不到也改不了；全局审批卡里的家居控制也要跳到那个窗口批准。
+- **根因与修复**：用户决定（n67）取消该窗口：删除打包页 `voice-private.html` / `voicePrivate.jsx`、命令 `open_voice_private`、`is_voice_private_asset` / `require_voice_private_asset` 和只授给该窗口的 `voice-memory/plugins/home/context.json` 四个 capability；固件 `voice_firmware_*` 与唤醒词 `voice_wakeword_*` 并入 `voice-private-main.json`，与记忆、家居等设置一样只授权给经 `window_is_trusted_main` 确认的主窗口（`require_private_settings_window`）。唤醒词卡就地挂在“唤醒词与音量”标签（只在该标签打开时挂载），固件卡在“设备与工具 → 固件升级”（`VoiceGroup lazy`，收起不轮询）；全局审批卡“去家居审批”改为经 `voiceFocus.js` 跳到“隐私与家居 → 家居 → 家居审批”。**安全边界变更（已获用户明确同意）**：主窗口页面若被注入脚本也能发起固件 / 唤醒词推送请求；固件与资源包仍只经原生文件框导入，推送前逐台确认不变，default 通配 capability 仍不含任何敏感权限；AGENTS.md 安全规则同步修改。
+- **验证**：桌面 `sensitive_voice_settings_are_trusted_main_window_only` 取代原私密窗口 ACL 测试；前端 `voicePrivacyAcl.test.mjs` 重写为主窗口唯一授权与卡片挂载断言，`approvalState.test.mjs`、`devQuickUpdate.test.mjs` 更新，`voice-center.browser.mjs` 改为在主窗口展开固件组（收起时不查询）并读取唤醒词卡；删除 `voice-private-navigation.browser.mjs`。未在真实 Windows WebView2 与小智设备上点击验收。
+- **关联**：`apps/desktop/src-tauri/src/{lib,voice_builtin,voice_context}.rs`、`build.rs`、`capabilities/{default,voice-private-main}.json`；`frontend/src/{voiceFocus.js,voiceApi.js,approvalState.js,components/{ApprovalCenter,VoiceBuiltinCard,VoiceWakeVolumePanel,VoiceLayout}.jsx,pages/VoicePage.jsx}`、`vite.config.mjs`、`scripts/dev-desktop.ps1`；`AGENTS.md`、`docs/integration/{voice-private-acl,moss-native-voice-spec}.md` n67、`docs/developer/{safety,api-contracts,frontend-behavior,packaging-install}.md`、`docs/user/quick-start.md`。
+
+### 摄像头页面重新排版：画面为主、按钮收进工具条（2026-11-07）
+
+- **现象**：摄像头页的卡片没有底色，内容像浮在背景上；顶部重复一遍“小智摄像头”大标题和长说明，左栏塞了抓拍、自动刷新、镜像、旋转、清空五个大按钮和一段使用说明，画面被挤到右边。
+- **根因与修复**：卡片补上与其他页面一致的 `hud-card` 底色；去掉重复标题和使用说明（要点并入空画面提示）。左边只放设备列表与内置语音状态，右边画面卡上方是“抓拍”“连续刷新”工具条，镜像 / 旋转 / 清空收成带提示的图标按钮，分辨率、大小、抓拍时间和来源叠在画面角上；提示语改成大白话。抓拍、自动让路、隐私边界等逻辑与接口不变。
+- **验证**：`camera.browser.mjs` 通过（元素 id 保持不变），无头 Chrome 截图核对空画面与语音问答两种状态。未连接真实小智摄像头。
+- **关联**：`frontend/src/pages/CameraPage.jsx`、`frontend/src/styles.css`（`.camera-toolbar`、`.camera-icon-btn`、`.camera-overlay`、`.camera-service-row`）。
+
+### 语音中心“记录与诊断”如实完整记录，报错改成大白话并可导出诊断包（2026-11-07）
+
+- **现象**：记录与诊断只显示最近 20 条事件，事件没有级别和分类，日常记录三四轮就把错误挤掉；停止或重启内置服务后事件与耗时全部清空；本地 Jev / OneJev / Laya 启动失败、固件记录恢复失败、Agent 工具挂载失败只打印到发行版看不见的控制台；网络错误一律“网络或 TLS 错误 / 无法连接”，数据库错误显示 Debug 原文，设备断线只说“连接出错”；耗时结果把“没识别出文字 / 转去放音乐 / 设备断开”都显示成“未完成”，复制耗时丢掉会话号；排障文字截断不提示；审批“N 条”其实是 50 条上限、失败原因不显示、读取失败悄悄沿用旧列表；界面写着未测量的“0ms 纠偏”“100% 生效”，MCP 协议版本是写死的；没有任何导出。
+- **根因与修复**：事件改为 `{seq, at, at_ms, level, category, text, hint?, detail?}`，分类为闭集 `DiagCategory`（general / network / auth / quota / config / device / firmware / model / audio / internal）；事件与耗时移到桌面端持有的 `DiagnosticsLog`，经 `ServerConfig.diagnostics` 传给每次启动的服务，停止 / 重启不清空，日常记录 300 条与错误 / 警告 200 条分开存、耗时 50 轮，覆盖条数 `events_dropped` 显示在界面上；上述只打到控制台的失败、服务启动或重启失败、音乐目录与声纹降级全部写进记录（状态另返回 `warnings`）。`ProviderError` 改为带 `category / hint / detail` 的结构，网络错误按超时 / 域名解析 / TLS / 拒绝连接 / 网络不通 / 中途断开分开说，HTTP 401·403·402·429·400·404·5xx 各有大白话，服务方原话进 `detail`；对话失败记错误、已自动补救的记警告；设备异常断开说明可能是 Wi-Fi 掉线、重启或断电；`CenterError` 增加可选 `detail`，数据库 Debug 文本只进 `detail`。新增桌面命令 `voice_diagnostics_export`（与 `voice_builtin_status` 同权限，系统保存框，整份 JSON 逐字段脱敏，包含 / 不包含清单写在文件里）与“导出诊断包”按钮；新增“服务事件与诊断包”分组（级别、分类、怎么办、技术细节、只看错误和警告）；结果全部中文；`voiceErrorText` 先看错误码与分类再附具体原因，不再出现 “[object Object]”；审批显示“最近 N 条（上限 50）”、失败原因与读取失败提示（`/v1/approvals` 增加 `limit`）；去掉“0ms / 100%”说法；MCP 协议版本改为握手实际应答值，未握手显示“未知”。**行为变更**：`voice_builtin_status` 的 `events` 字段形状扩展（保留 `at` / `text`），新增 `events_dropped` / `warnings`，`timings` 增加 `device_id` / `at_ms`；`/api/system/info` 的 `mcp.protocol_version` 未握手时为空串；记录仍只在内存、不落盘。不是破坏性变更。
+- **验证**：`cargo test --workspace --no-fail-fast` 1023 通过、0 失败、10 忽略（第一次不带 `--no-fail-fast` 时 `laser-host` 的 `voice_recent_workflows_is_read_only_and_never_counts_as_a_tool_call` 因共享全局遥测偶发失败，单独重跑 3 次均通过，与本次改动无关）；新增 Rust 测试覆盖错误不被日常记录挤掉与覆盖计数、记录本跨服务停止 / 重启保留、网络与 HTTP 错误分类（假输入）、诊断包内容与逐字段脱敏、排障截断标记；前端 `npm test` 225 项（新增 `voiceDiagnostics.test.mjs`）、`npm run build`、`PLAYWRIGHT_CHANNEL=chrome node tests/voice-center.browser.mjs` 通过。未验证：真实设备断线、真实云端 401 / 429 / 5xx、系统保存框实际写文件；`npm run test:e2e` 未跑。
+- **关联**：`crates/moss-voice-providers/src/lib.rs`（`DiagCategory`、`ProviderError`、`scrub_diagnostic_text`）、`openai.rs`（`classify_transport_error`、`classify_http_status`）、`doubao.rs`；`crates/moss-voice-server/src/state.rs`（`DiagnosticsLog`、`EventRecord`、`EventDrops`）、`session.rs`（`disconnect_event`）、`conversation.rs`（`TurnEvent::Failed / Warning`）；`apps/desktop/src-tauri/src/voice_builtin.rs`（`diagnostics_bundle`、`scrub_bundle`、`voice_diagnostics_export`）；`crates/moss-voice/src/center.rs`（`CenterError.detail`）；`crates/laser-api/src/approval.rs`、`crates/laser-contracts/src/lib.rs`（`protocol_version`）；`frontend/src/voiceState.js`（`VOICE_DIAG_CATEGORIES`、`voiceErrorText`、`voiceOutcomeLabel`、`voiceEventView`）、`components/VoiceBuiltinCard.jsx`（`BuiltinEvents`）、`pages/VoicePage.jsx`；`docs/developer/api-contracts.md` §5.0、技术书 n68。
+
+### 数字孪生 3D 雕刻机视口改版：影棚光影与真实材质，板面实时显示烧灼痕迹（2026-11-07）
+
+- **现象**：数字孪生页中间的 3D 雕刻机默认镜头贴着激光头，看不到整机；机台全是带青色描边的方块，配色偏玩具（蓝色激光头、绿色滑块），橙色亚克力把整台机器染成褐色；视口上两排共十几个按钮和长段文字盖住半个画面；已雕刻部分只是彩色线条，看不出刻出来的效果；刀路较多时每帧遍历全部线段。
+- **根因与修复**：`TwinStage3D.jsx` 改为透明画布叠 CSS 影棚背景、ACES 色调映射、`RoomEnvironment` 反射环境与主光软阴影；打印件、电机、板材改用圆角盒体，实体件只留淡棱线；配色改为石墨灰打印件、银色导轨、黑色阳极氧化叠片散热激光头。默认视角改为“整机”斜 45°，切换视角平滑过渡；“护罩”只控制亚克力顶盖等透明件，默认隐藏。“刀路”“俯视”视角下龙门与激光头渐变为半透明且不投影（`applyGhost`，用户决定），不再挡住板面。板面新增材料底纹画布，已完成的出光段按功率增量画成烧灼痕迹（`updateBurnSurface`），待雕刻线只画未完成部分；出光时为细亮蓝紫光束加落点辉光，不出光时只显示定位环；已雕刻顶点数改用前缀和（`cutVertexPrefix`）。浮层改为左上读数卡、右侧竖排视角栏、底部图例。**行为变更**：默认视角与护罩默认状态改变；坐标映射、刀路偏移与缩放、急停与轮询逻辑不变，不是破坏性变更。
+- **验证**：前端 `npm test` 223 项、`npm run build`、`twin-estop.browser.mjs`（含 WebGL 场景与卸载）通过；用回环假数据在无头 Chrome 中逐个点击五个视角、护罩、提亮、收起 / 展开浮层，无页面错误，并截图核对整机、刀路、俯视（龙门与激光头半透明）、护罩开启与暗场效果。未在真机加工时观察。
+- **关联**：`frontend/src/components/TwinStage3D.jsx`（`rbox`、`paintMaterialBase`、`updateBurnSurface`、`applyCoverVisibility`、`applyGhost`、`CAMERA_PRESETS`）、`frontend/src/styles.css`（`.twin-readout`、`.twin-view-rail`、`.twin-rail-btn`）；`docs/developer/frontend-behavior.md` §10。
+
 ## [0.3.9] - 2026-11-07
 
 ### 桌面端左侧栏新增「摄像头」标签页，支持免模型密钥实时抓拍与查看小智设备画面（2026-11-07）

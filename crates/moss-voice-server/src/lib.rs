@@ -57,7 +57,10 @@ pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_b
 pub use preview_push::{StyleSceneGifCatalog, cached_style_scene_gifs};
 pub use tools::{HostTools, ToolHost, ToolHostResult};
 pub use ota::{MDNS_HOST_LABEL, is_virtual_or_tunnel_ipv4, lan_ipv4_addrs, local_ip as primary_lan_ip};
-pub use state::{DebugToolTrace, ServerEvent, SessionView, ToolTiming, TurnDebugTrace, TurnTiming};
+pub use state::{
+    DebugToolTrace, DiagCategory, DiagnosticsLog, EventDrops, EventLevel, EventRecord, MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS,
+    MAX_TIMINGS, ServerEvent, SessionView, ToolTiming, TurnDebugTrace, TurnTiming, scrub_debug_text,
+};
 /// 设备登记状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,6 +181,8 @@ pub struct ServerConfig {
     pub preview_hold_duration: Duration,
     /// 小智彩屏卡片视觉画风（`MossHud` 硬核太空舱 / `GoggleBot` 可爱护目镜小机器人）。
     pub screen_card_style: ScreenCardStyle,
+    /// 诊断记录本（事件与耗时）。宿主传入同一个 `Arc`，服务停止、重启后记录仍在（2026-11-07 n68）。
+    pub diagnostics: Arc<DiagnosticsLog>,
 }
 
 impl Default for ServerConfig {
@@ -204,6 +209,7 @@ impl Default for ServerConfig {
             preview_hold_interval: Duration::from_secs(4),
             preview_hold_duration: Duration::from_secs(24),
             screen_card_style: ScreenCardStyle::MossHud,
+            diagnostics: DiagnosticsLog::new(),
         }
     }
 }
@@ -217,6 +223,8 @@ pub struct ServerStatusView {
     pub http_port: u16,
     pub sessions: Vec<SessionView>,
     pub events: Vec<ServerEvent>,
+    /// 被覆盖的事件 / 耗时计数（界面显示“有 N 条较早的记录已被覆盖”）
+    pub events_dropped: EventDrops,
     pub timings: Vec<TurnTiming>,
     #[serde(default)]
     pub debug_enabled: bool,
@@ -302,6 +310,10 @@ impl Shared {
 pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
+
+pub(crate) fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
 /// 运行中的内置语音服务。丢弃或调用 [`stop`](Self::stop) 时关闭。
 pub struct VoiceServer {
     runtime: Option<tokio::runtime::Runtime>,
@@ -360,7 +372,7 @@ impl VoiceServer {
             screen_card_style: std::sync::Mutex::new(config.screen_card_style),
             signer: TokenSigner::new(secret),
             registry,
-            state: state::LiveState::default(),
+            state: state::LiveState::with_log(config.diagnostics.clone()),
             shutdown: shutdown_rx,
             job_announcements: jobs::AnnounceLog::default(),
             device_requests: Default::default(),
@@ -385,7 +397,11 @@ impl VoiceServer {
                         })
                         .await;
                 }
-                Err(error) => events.state.event(format!("设备连接端口启动失败：{error}")),
+                Err(error) => events.state.event(
+                    EventRecord::error(DiagCategory::Network, "设备连接端口启动失败，小智连不上 MOSS")
+                        .hint("端口可能被别的程序占用：关掉占用的程序或在设置里换端口后重启内置服务")
+                        .detail(error.to_string()),
+                ),
             }
         });
         let events = shared.clone();
@@ -398,7 +414,11 @@ impl VoiceServer {
                         })
                         .await;
                 }
-                Err(error) => events.state.event(format!("OTA 端口启动失败：{error}")),
+                Err(error) => events.state.event(
+                    EventRecord::error(DiagCategory::Network, "OTA 端口启动失败，小智开机拿不到连接地址")
+                        .hint("端口可能被别的程序占用：关掉占用的程序或在设置里换端口后重启内置服务")
+                        .detail(error.to_string()),
+                ),
             }
         });
         let mdns = if config.bind.is_unspecified() {
@@ -425,6 +445,7 @@ impl VoiceServer {
             http_port: self.http_port,
             sessions: self.shared.state.sessions(),
             events: self.shared.state.events(),
+            events_dropped: self.shared.state.event_drops(),
             timings: self.shared.state.timings(),
             debug_enabled: self.shared.state.debug_enabled(),
             debug_traces: self.shared.state.debug_traces(),
@@ -455,7 +476,9 @@ impl VoiceServer {
         };
         if sender.send(request).is_err() {
             let message = format!("设备 {device_id} 的会话刚刚结束，请求未送达");
-            self.shared.state.event(message.clone());
+            self.shared.state.event(
+                EventRecord::warn(DiagCategory::Device, message.clone()).hint("设备刚断开：等它重新连上后再试"),
+            );
             return Err(message);
         }
         Ok(())

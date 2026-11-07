@@ -1,12 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "voice-private-settings-main",
-  "description": "2026-10-18 用户决定（技术书 n26）：记忆、信息服务、声纹、家居四项在主语音页就地展开，这些设置命令因此授权给主窗口；来源由命令内 window_is_trusted_main 固定为本进程回环后端地址，不给任何其他来源。固件导入与推送不在此列，仍只在打包的 voice-private 页面。",
+  "description": "2026-10-18 用户决定（技术书 n26）：记忆、信息服务、声纹、家居四项在主语音页就地展开；2026-11-07 用户决定（n67）：取消独立的本机安全设置窗口，唤醒词与固件升级也放进语音中心（推送前逐台确认不变）。这些命令只授权给主窗口，来源由命令内 window_is_trusted_main 固定为本进程回环后端地址，不给任何其他来源。",
   "windows": [
     "main"
   ],
   "remote": {
-    "urls": ["http://127.0.0.1:*"]
+    "urls": [
+      "http://127.0.0.1:*"
+    ]
   },
   "permissions": [
     "allow-voice-memory-list",
@@ -29,6 +31,12 @@
     "allow-voice-home-control-consent",
     "allow-voice-home-approval-approve",
     "allow-voice-context-manage",
-    "allow-voice-context-pick-folder"
+    "allow-voice-context-pick-folder",
+    "allow-voice-firmware-status",
+    "allow-voice-firmware-import",
+    "allow-voice-firmware-manage",
+    "allow-voice-wakeword-status",
+    "allow-voice-wakeword-import-base",
+    "allow-voice-wakeword-manage"
   ]
 }

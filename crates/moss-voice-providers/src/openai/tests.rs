@@ -106,7 +106,7 @@ fn accumulator_merges_tool_call_fragments() {
     assert_eq!(reply.tool_calls, vec![ToolCall::new("call_a", "get_time", r#"{"tz":"cn"}"#), ToolCall::new("call_1", "status", "{}")]);
     let mut accumulator = StreamAccumulator::default();
     let error = accumulator.apply(&json!({"error":{"message":"model overloaded"}})).unwrap_err();
-    assert!(error.0.contains("model overloaded"));
+    assert!(error.message.contains("model overloaded"));
 }
 
 #[tokio::test]
@@ -189,8 +189,11 @@ async fn errors_never_contain_key_or_url() {
     let llm = OpenAiLlm::new(&url, KEY, "m").unwrap();
     let (tx, _rx) = mpsc::unbounded_channel();
     let error = llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap_err();
-    assert!(error.0.contains("HTTP 401") && error.0.contains("密钥"), "{error}");
-    assert!(!error.0.contains(KEY) && !error.0.contains("127.0.0.1"), "{error}");
+    assert!(error.message.contains("HTTP 401") && error.message.contains("密钥"), "{error}");
+    assert_eq!(error.category, crate::DiagCategory::Auth);
+    assert!(error.hint.as_deref().is_some_and(|hint| hint.contains("密钥")), "{error:?}");
+    let full = format!("{error} {:?}", error.hint);
+    assert!(!full.contains(KEY) && !full.contains("127.0.0.1") && !full.contains("sk-test-secret-123"), "{full}");
 
     // 连不上：端口已关闭
     let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -198,15 +201,16 @@ async fn errors_never_contain_key_or_url() {
     drop(closed);
     let tts = OpenAiTts::new(&format!("http://{address}/v1"), KEY, "m", "v", 1.0).unwrap();
     let error = tts.synthesize("你好").await.unwrap_err();
-    assert!(error.0.contains("无法连接"), "{error}");
-    assert!(!error.0.contains(&address.to_string()) && !error.0.contains(KEY));
+    assert!(error.message.contains("无法连接"), "{error}");
+    assert_eq!(error.category, crate::DiagCategory::Network);
+    assert!(!error.to_string().contains(&address.to_string()) && !error.to_string().contains(KEY), "{error}");
 
     // 流中返回错误对象
     let parts = vec![sse_head(), b"data: {\"error\":{\"message\":\"rate limited\"}}\n\n".to_vec()];
     let (url, _) = serve_once(parts).await;
     let llm = OpenAiLlm::new(&url, KEY, "m").unwrap();
     let (tx, _rx) = mpsc::unbounded_channel();
-    assert!(llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap_err().0.contains("rate limited"));
+    assert!(llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap_err().to_string().contains("rate limited"));
 }
 
 #[tokio::test]
@@ -252,5 +256,51 @@ async fn tts_requests_wav_and_decodes_it() {
 
     let (url, _) = serve_once(vec![response("200 OK", "audio/mpeg", b"ID3\x04\x00mp3")]).await;
     let tts = OpenAiTts::new(&url, KEY, "m", "v", 1.0).unwrap();
-    assert!(tts.synthesize("你好").await.unwrap_err().0.contains("不是 WAV"));
+    assert!(tts.synthesize("你好").await.unwrap_err().to_string().contains("不是 WAV"));
+}
+
+/// n68：网络错误按底层原因分开说（假输入，不联网）。
+#[test]
+fn transport_errors_are_split_into_distinguishable_plain_causes() {
+    use super::classify_transport_error as classify;
+    use crate::DiagCategory::Network;
+    let cases = [
+        (classify("大模型", true, false, "operation timed out"), "请求超时"),
+        (classify("大模型", false, true, "dns error: failed to lookup address information: nodename nor servname provided, or not known"), "找不到服务器"),
+        (classify("大模型", false, true, "tcp connect error: Connection refused (os error 61)"), "拒绝了连接"),
+        (classify("大模型", false, true, "invalid peer certificate: UnknownIssuer"), "TLS"),
+        (classify("大模型", false, true, "tcp connect error: Network is unreachable (os error 51)"), "网络不通"),
+        (classify("大模型", false, false, "connection reset by peer"), "中途断开"),
+        (classify("大模型", false, true, "something else"), "无法连接到该地址"),
+        (classify("大模型", false, false, "weird"), "网络传输出错"),
+    ];
+    let mut messages = std::collections::BTreeSet::new();
+    for (error, expected) in &cases {
+        assert_eq!(error.category, Network);
+        assert!(error.message.starts_with("大模型") && error.message.contains(expected), "{error:?}");
+        assert!(error.hint.is_some(), "每种原因都给出下一步：{error:?}");
+        assert!(error.detail.is_some(), "保留底层原因：{error:?}");
+        messages.insert(error.message.clone());
+    }
+    assert_eq!(messages.len(), cases.len(), "每种原因的说法互不相同");
+    let leak = classify("识别", false, true, "tcp connect error 192.168.3.7:9000: Connection refused");
+    assert!(!leak.detail.unwrap().contains("192.168.3.7"));
+}
+
+#[test]
+fn http_status_maps_to_category_and_keeps_upstream_text_as_detail() {
+    use super::classify_http_status as classify;
+    use crate::DiagCategory::*;
+    for (status, category, needle) in [
+        (401, Auth, "密钥"), (403, Auth, "权限"), (402, Quota, "余额"), (429, Quota, "频繁"),
+        (404, Config, "模型名"), (400, Config, "参数"), (302, Config, "跳转"), (503, Model, "服务方服务器出错"),
+    ] {
+        let error = classify("合成", status, None);
+        assert_eq!(error.category, category, "{status}");
+        assert!(error.message.contains(&format!("HTTP {status}")) && error.message.contains(needle), "{error:?}");
+        assert!(error.hint.is_some());
+    }
+    let error = classify("大模型", 503, Some("model overloaded".into()));
+    assert_eq!(error.detail.as_deref(), Some("服务方原话：model overloaded"));
+    assert!(error.to_string().contains("model overloaded"), "Display 不丢服务方原话");
 }

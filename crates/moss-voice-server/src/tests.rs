@@ -684,3 +684,33 @@ fn device_request_preserves_reconnected_session_rejects_non_mcp_and_works_in_ech
     assert_eq!(call_2["payload"]["method"], "tools/call");
     assert_eq!(call_2["payload"]["params"]["name"], "self.get_device_status");
 }
+
+/// n68：宿主持有的诊断记录本在服务停止、再次启动后仍保留上次的事件（含错误），并显示被覆盖计数。
+#[test]
+fn diagnostics_survive_server_stop_and_restart() {
+    let registry = Arc::new(FakeRegistry::default());
+    let log = crate::DiagnosticsLog::new();
+    let config = || ServerConfig {
+        bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ws_port: 0,
+        http_port: 0,
+        diagnostics: log.clone(),
+        ..ServerConfig::default()
+    };
+    let server = VoiceServer::start(config(), registry.clone()).unwrap();
+    let (status, _) = ota(&server, None);
+    assert_eq!(status, 400);
+    let first = server.status().events;
+    let rejected = first.iter().find(|event| event.text.contains("OTA 请求被拒绝")).expect("OTA 拒绝记为警告");
+    assert_eq!(rejected.level, crate::EventLevel::Warn);
+    assert_eq!(rejected.category, crate::DiagCategory::Firmware);
+    assert!(rejected.hint.is_some());
+    server.stop();
+    assert!(log.events().iter().any(|event| event.text.contains("OTA 请求被拒绝")), "停止后记录仍在");
+    let restarted = VoiceServer::start(config(), registry).unwrap();
+    let events = restarted.status().events;
+    assert!(events.iter().any(|event| event.text.contains("OTA 请求被拒绝")), "重启后仍能看到上次的问题");
+    assert_eq!(events.iter().filter(|event| event.text.starts_with("内置语音服务已启动")).count(), 2);
+    assert_eq!(restarted.status().events_dropped.info, 0);
+    restarted.stop();
+}

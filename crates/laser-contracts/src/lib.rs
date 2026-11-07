@@ -83,6 +83,9 @@ pub struct McpTelemetrySnapshot {
     /// 工具调用统计（NV8；本次运行以来，重启后清零）。键为工具名。
     #[serde(default)]
     pub tool_stats: BTreeMap<String, ToolCallStat>,
+    /// 最近一次 `initialize` 握手里 MOSS 实际应答的 MCP 协议版本；还没握手时为空（2026-11-07 n68，不再写死）。
+    #[serde(default)]
+    pub protocol_version: String,
 }
 
 /// 一个接入点的连接状态。`endpoint` 已脱敏（token 显示为 `***`）。
@@ -249,6 +252,13 @@ impl McpTelemetry {
                 lock.client_name.clear();
                 lock.client_version.clear();
             }
+        }
+    }
+
+    /// 记录本次握手实际应答的协议版本。
+    pub fn record_protocol_version(&self, version: &str) {
+        if let Ok(mut lock) = self.data.lock() {
+            lock.protocol_version = version.to_string();
         }
     }
 

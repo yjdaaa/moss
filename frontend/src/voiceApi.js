@@ -80,7 +80,6 @@ export const voiceApi = {
   visionStatus: () => invokeVoice("voice_vision_status"),
   visionSave: (input) => invokeVoice("voice_vision_save", { input }),
   visionTest: () => invokeVoice("voice_vision_test"),
-  openPrivateSettings: (section) => invokeVoice("open_voice_private", { section }),
   pluginsStatus: () => invokeVoice("voice_plugins_status"),
   pluginsSave: (input) => invokeVoice("voice_plugins_save", { input }),
   memoryList: () => invokeVoice("voice_memory_list"),
@@ -89,6 +88,8 @@ export const voiceApi = {
   memoryClear: (deviceId, expectedRevision) => invokeVoice("voice_memory_clear", { deviceId, expectedRevision }),
   // 内置语音服务（内置语音技术书 NV1）
   builtinStatus: () => invokeVoice("voice_builtin_status"),
+  // n68：导出语音诊断包（后端生成并脱敏，弹出系统保存框；取消时返回 {saved:false}）
+  diagnosticsExport: () => invokeVoice("voice_diagnostics_export"),
   builtinStart: () => invokeVoice("voice_builtin_start"),
   builtinStop: () => invokeVoice("voice_builtin_stop"),
   deviceSetStatus: (deviceId, status) => invokeVoice("voice_device_set_status", { deviceId, status }),

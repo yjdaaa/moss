@@ -383,11 +383,14 @@ pub(crate) fn router(shared: std::sync::Arc<crate::Shared>) -> axum::Router {
         let token = file.strip_suffix(".bin").unwrap_or(&file);
         match shared.assets_store.fetch(token) {
             Some((device, bytes)) => {
-                shared.state.event(format!("唤醒词资源包：设备 {device}（{}）开始下载 {} 字节", peer.ip(), bytes.len()));
+                shared.state.event(crate::EventRecord::info(crate::DiagCategory::Firmware, format!("唤醒词资源包：设备 {device}（{}）开始下载 {} 字节", peer.ip(), bytes.len())));
                 ([(header::CONTENT_TYPE, "application/octet-stream")], bytes.as_ref().clone()).into_response()
             }
             None => {
-                shared.state.event(format!("唤醒词资源包下载被拒绝（{}）：令牌无效或已过期", peer.ip()));
+                shared.state.event(
+                    crate::EventRecord::warn(crate::DiagCategory::Firmware, format!("唤醒词资源包下载被拒绝（{}）：令牌无效或已过期", peer.ip()))
+                        .hint("资源包只保留 30 分钟：在“唤醒词与音量”里重新推送"),
+                );
                 StatusCode::NOT_FOUND.into_response()
             }
         }

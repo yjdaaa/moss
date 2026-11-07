@@ -56,22 +56,32 @@ pub trait HostHooks: Send + Sync {
 pub const MAX_EXTRA_ENDPOINTS: usize = 4;
 
 /// 页面需要的错误：机器可读的 `code` 与中文说明。
+///
+/// 2026-11-07（n68）：可选 `detail` 放原始技术信息（调用方负责脱敏），`message` 只写大白话。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CenterError {
     pub code: String,
     pub message: String,
     pub status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl CenterError {
     pub fn new(code: &str, status: u16, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), status }
+        Self { code: code.into(), message: message.into(), status, detail: None }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        self.detail = (!detail.trim().is_empty()).then_some(detail);
+        self
     }
 }
 
 impl From<VoiceError> for CenterError {
     fn from(error: VoiceError) -> Self {
-        Self { code: error.code().into(), message: error.message(), status: error.http_status() }
+        Self { code: error.code().into(), message: error.message(), status: error.http_status(), detail: None }
     }
 }
 

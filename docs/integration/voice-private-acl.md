@@ -4,6 +4,15 @@
 
 本轮新增 `voice_speaker_manage`（声纹登记、元数据/取消/CAS删除）和 `voice_firmware_status`（只读下载记录），同样只授予 `voice-memory.json` 的 `voice-private` 固定打包窗口；两条命令都复核原始窗口URL，Android拒绝。普通回环页面不能读取姓名、向量或交付记录；声纹向量在所有返回值中均不序列化。固件传输和声纹识别均保持关闭。
 
+## 2026-11-07 n67 取消独立安全窗口（权限扩大，已获用户明确同意）
+
+用户决定（“为什么唤醒词和 ota 升级要单独弹窗，不能在主界面吗”；确认风险后“你就把独立窗口取消然后放到语音中心吧”）：
+
+- 删除打包页 `voice-private.html` / `voicePrivate.jsx`、命令 `open_voice_private` 及其权限、`is_voice_private_asset` / `require_voice_private_asset`，以及只授给该窗口的 `voice-memory.json`、`voice-plugins.json`、`voice-home.json`、`voice-context.json` 四个 capability。
+- 全部敏感语音命令（记忆、信息服务、声纹、家居、长期记忆，以及新并入的固件 `voice_firmware_{status,import,manage}` 与唤醒词 `voice_wakeword_{status,import_base,manage}`）只由 `voice-private-main.json`（`windows:["main"]` + `remote:["http://127.0.0.1:*"]`，无 `webviews`）授权；处理函数开头的 `require_private_settings_window` 只接受经 `window_is_trusted_main` 确认的本进程回环后端上的 `main` 窗口。default 通配 capability 仍不含任何一项。
+- 界面：唤醒词卡在“唤醒词与音量”标签就地显示，固件卡在“设备与工具 → 固件升级”；全局审批卡的家居控制改为跳到“隐私与家居 → 家居 → 家居审批”。固件与资源包仍只经原生文件框导入，推送前仍逐台确认。
+- 代价：主窗口页面若被注入脚本，也能读取上述设置并发起固件 / 唤醒词推送请求（逐台确认框仍需用户点击）。以下历史小节描述的是 n67 之前的状态。
+
 ## 原因
 
 MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行

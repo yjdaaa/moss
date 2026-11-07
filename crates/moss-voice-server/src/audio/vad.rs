@@ -52,7 +52,7 @@ impl LocalVad {
     /// 打开一路判停流；失败返回错误（调用方改用能量判停）。
     pub fn open(helper: moss_voice_providers::local::LocalHelper, config: &VadConfig) -> Result<Self, String> {
         let stream = NEXT_STREAM.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        helper.vad_open(stream).map_err(|error| error.0)?;
+        helper.vad_open(stream).map_err(|error| error.message)?;
         Ok(Self {
             helper,
             stream: Some(stream),
@@ -95,7 +95,7 @@ impl Vad for LocalVad {
                 .collect(),
             Err(error) => {
                 // 本帧起交给能量判停；说话中途切换时能量判停会再报一次“开始”，会话对重复的开始不做处理
-                self.fail(error.0);
+                self.fail(error.message);
                 self.in_speech = false;
                 self.fallback.accept(pcm)
             }
@@ -119,7 +119,7 @@ impl Vad for LocalVad {
         let stream = NEXT_STREAM.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.helper.vad_open(stream) {
             Ok(()) => self.stream = Some(stream),
-            Err(error) => self.fail(error.0),
+            Err(error) => self.fail(error.message),
         }
     }
 

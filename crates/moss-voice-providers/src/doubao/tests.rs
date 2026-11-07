@@ -105,8 +105,8 @@ fn auth_headers_support_new_and_legacy_consoles() {
     assert_eq!(config.url, DEFAULT_ASR_URL, "地址留空用默认地址");
     assert!(!format!("{config:?}").contains("secret-key-123"));
     assert!(DoubaoConfig::new("https://h", "k", "r", DEFAULT_ASR_URL).is_err());
-    assert!(DoubaoConfig::new("", "", "r", DEFAULT_ASR_URL).unwrap_err().0.contains("密钥"));
-    assert!(DoubaoConfig::new("", "k", " ", DEFAULT_ASR_URL).unwrap_err().0.contains("资源 ID"));
+    assert!(DoubaoConfig::new("", "", "r", DEFAULT_ASR_URL).unwrap_err().to_string().contains("密钥"));
+    assert!(DoubaoConfig::new("", "k", " ", DEFAULT_ASR_URL).unwrap_err().to_string().contains("资源 ID"));
 }
 
 #[test]
@@ -225,13 +225,13 @@ async fn recognition_errors_are_explained_without_secrets() {
     let asr = DoubaoAsr::new(&server.url, "sk-secret-asr", "r").unwrap();
     let stream = asr.start();
     stream.feed(&[0; 960]);
-    let error = stream.finish().await.unwrap_err().0;
+    let error = stream.finish().await.unwrap_err().to_string();
     assert!(error.contains("音频格式不正确") && error.contains("bad audio"), "{error}");
 
     // 握手被拒（401），服务端回显的内容含疑似密钥：不回显
     let server = serve(Some(StatusCode::UNAUTHORIZED), |_, _| async {}).await;
     let asr = DoubaoAsr::new(&server.url, "sk-secret-asr", "r").unwrap();
-    let error = asr.transcribe(&[0; 1600], 16_000).await.unwrap_err().0;
+    let error = asr.transcribe(&[0; 1600], 16_000).await.unwrap_err().to_string();
     assert!(error.contains("HTTP 401") && error.contains("密钥"), "{error}");
     assert!(!error.contains("sk-") && !error.contains("127.0.0.1"), "{error}");
 
@@ -240,7 +240,7 @@ async fn recognition_errors_are_explained_without_secrets() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let asr = DoubaoAsr::new(&format!("ws://127.0.0.1:{port}/x?token=abc"), "k", "r").unwrap();
-    let error = asr.transcribe(&[0; 1600], 16_000).await.unwrap_err().0;
+    let error = asr.transcribe(&[0; 1600], 16_000).await.unwrap_err().to_string();
     assert!(error.contains("无法连接") && !error.contains("token=abc"), "{error}");
 }
 
@@ -385,7 +385,7 @@ async fn synthesis_failures_are_reported() {
     })
     .await;
     let tts = DoubaoTts::new(&server.url, "k", "r", "bad-voice", 1.0).unwrap();
-    let error = tts.synthesize("你好").await.unwrap_err().0;
+    let error = tts.synthesize("你好").await.unwrap_err().to_string();
     assert!(error.contains("speaker not found"), "{error}");
 
     // 错误帧
@@ -396,10 +396,10 @@ async fn synthesis_failures_are_reported() {
     })
     .await;
     let tts = DoubaoTts::new(&server.url, "k", "r", "v", 1.0).unwrap();
-    let error = tts.synthesize("你好").await.unwrap_err().0;
+    let error = tts.synthesize("你好").await.unwrap_err().to_string();
     assert!(error.contains("45000003") && error.contains("quota exceeded"), "{error}");
 
-    assert!(DoubaoTts::new("", "k", "r", " ", 1.0).err().unwrap().0.contains("音色"));
+    assert!(DoubaoTts::new("", "k", "r", " ", 1.0).err().unwrap().to_string().contains("音色"));
 }
 
 /// 真实服务的 TLS 与鉴权链路（不在常规测试中运行）：用假密钥连真实地址，应在 TLS 握手成功后被鉴权拒绝。
@@ -408,11 +408,11 @@ async fn synthesis_failures_are_reported() {
 #[ignore]
 async fn real_doubao_rejects_fake_key() {
     let tts = DoubaoTts::new("", "moss-fake-key-for-tls-check", DEFAULT_TTS_RESOURCE, "test", 1.0).unwrap();
-    let error = tts.synthesize("你好").await.unwrap_err().0;
+    let error = tts.synthesize("你好").await.unwrap_err().to_string();
     println!("合成：{error}");
     assert!(error.contains("HTTP 4") || error.contains("豆包合成出错"), "{error}");
     let asr = DoubaoAsr::new("", "moss-fake-key-for-tls-check", DEFAULT_ASR_RESOURCE).unwrap();
-    let error = asr.transcribe(&[0; 1600], 16_000).await.unwrap_err().0;
+    let error = asr.transcribe(&[0; 1600], 16_000).await.unwrap_err().to_string();
     println!("识别：{error}");
     assert!(error.contains("HTTP 4") || error.contains("豆包识别出错"), "{error}");
     assert!(!error.contains("moss-fake-key"));

@@ -1,10 +1,11 @@
 //! NV19-08 desktop wiring for long-term context (内置语音技术书 §15, 实施细则 §11).
 //!
-//! Two commands, both only from the packaged `voice-private` window (Tauri ACL in
-//! `capabilities/voice-context.json` plus the same asset check as other private commands):
+//! Two commands, both only from the trusted MOSS main window (Tauri ACL in
+//! `capabilities/voice-private-main.json` plus `require_private_settings_window`; the separate
+//! packaged private window was removed on 2026-11-07, n67):
 //! `voice_context_manage` dispatches on `action`; `voice_context_pick_folder` opens the folder
 //! dialog and indexes the chosen folder for the current project (the path never returns to JS).
-//! Retrieval and extraction are off until the user switches them on; the main window cannot.
+//! Retrieval and extraction are off until the user switches them on.
 
 use serde_json::Value;
 

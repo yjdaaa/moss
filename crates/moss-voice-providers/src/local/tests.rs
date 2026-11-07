@@ -88,7 +88,7 @@ fn requests_and_replies_are_matched_by_id() {
     assert_eq!(pcm, Pcm { samples: vec![50; 3], sample_rate: 24_000 });
     assert_eq!(helper.load_tts(Path::new("k"), TtsEngine::Kokoro).unwrap(), TtsInfo { sample_rate: 24_000, speakers: 53 });
     assert_eq!(helper.vad_feed(1, &[0; 960]).unwrap(), vec![VadEventKind::SpeechStart]);
-    assert_eq!(helper.load_asr(Path::new("x"), AsrEngine::SenseVoice).unwrap_err().0, "模型文件不存在：x", "辅助程序的错误原样返回");
+    assert_eq!(helper.load_asr(Path::new("x"), AsrEngine::SenseVoice).unwrap_err().message, "模型文件不存在：x", "辅助程序的错误原样返回");
     // 并发：多个线程同时请求，各自拿到自己的结果
     let handles: Vec<_> = (0..8)
         .map(|index| {
@@ -104,7 +104,7 @@ fn requests_and_replies_are_matched_by_id() {
 #[test]
 fn protocol_mismatch_is_reported() {
     let helper = fake(|_, _| Some((Reply::Hello { protocol: 99, version: "x".into(), vad: false, asr: false, tts: false }, vec![])));
-    assert!(helper.hello().unwrap_err().0.contains("版本不匹配"));
+    assert!(helper.hello().unwrap_err().to_string().contains("版本不匹配"));
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn slow_vad_times_out() {
         Some((Reply::VadEvents { events: vec![] }, vec![]))
     });
     let error = helper.vad_feed(1, &[0; 10]).unwrap_err();
-    assert!(error.0.contains("超时"), "{error}");
+    assert!(error.message.contains("超时"), "{error}");
     assert!(!helper.is_alive(), "等待超时可能是管道阻塞，旧辅助程序不可继续使用");
     assert_eq!(helper.vad_feed(1, &[0; 10]).unwrap_err(), dead());
 }
@@ -169,7 +169,7 @@ fn slow_vad_times_out() {
 #[test]
 fn missing_executable_is_reported() {
     let error = LocalHelper::spawn(Path::new("Z:/no/such/moss-voice-local.exe")).err().unwrap();
-    assert!(error.0.contains("未找到本地模型程序"), "{error}");
+    assert!(error.message.contains("未找到本地模型程序"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -260,7 +260,7 @@ async fn local_stream_reports_helper_errors_on_finish() {
     });
     let stream = LocalStreamingAsr { helper }.start();
     stream.feed(&[0; 160]);
-    assert_eq!(stream.finish().await.unwrap_err().0, "当前识别模型不支持流式识别");
+    assert_eq!(stream.finish().await.unwrap_err().message, "当前识别模型不支持流式识别");
 }
 
 /// 真实辅助程序 + 模型的冒烟测试（不在常规测试中运行）：
@@ -382,7 +382,7 @@ async fn real_optional_models() {
         assert!(text.contains("激光") || text.contains("雕刻"), "{text}");
     }
     let stream = helper.next_stream();
-    assert!(helper.asr_open(stream).unwrap_err().0.contains("不支持流式"), "整段模型拒绝流式");
+    assert!(helper.asr_open(stream).unwrap_err().to_string().contains("不支持流式"), "整段模型拒绝流式");
 
     // X-ASR 流式：按 60 ms 一段边送边解码，量说完到出字的时间
     let started = Instant::now();

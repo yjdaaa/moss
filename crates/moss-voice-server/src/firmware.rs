@@ -116,11 +116,14 @@ async fn download(
     let bytes = tokio::task::spawn_blocking(move || host.fetch(&lookup, &peer_ip)).await.ok().flatten();
     match bytes {
         Some(bytes) => {
-            shared.state.event(format!("固件下载：{} 开始下载 {} 字节", peer.ip(), bytes.len()));
+            shared.state.event(crate::EventRecord::info(crate::DiagCategory::Firmware, format!("固件下载：{} 开始下载 {} 字节", peer.ip(), bytes.len())));
             ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()
         }
         None => {
-            shared.state.event(format!("固件下载被拒绝（{}）：令牌无效、已过期或推送已取消", peer.ip()));
+            shared.state.event(
+                crate::EventRecord::warn(crate::DiagCategory::Firmware, format!("固件下载被拒绝（{}）：令牌无效、已过期或推送已取消", peer.ip()))
+                    .hint("在“设备与工具 → 固件升级”里重新确认推送这台设备"),
+            );
             StatusCode::NOT_FOUND.into_response()
         }
     }
