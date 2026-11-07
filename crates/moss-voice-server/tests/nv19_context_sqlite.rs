@@ -2,10 +2,12 @@
 //! the desktop host will mirror, driven through `ContextService`. In-memory database only.
 use laser_runtime::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow, RuntimeDb};
 use moss_voice_server::context::retrieve::SearchQuery;
-use moss_voice_server::context::service::{ContextService, ContextStore, ExtractionRun, MemoryPatch, RunAdd, RunSkip, ServiceError};
+use moss_voice_server::context::service::{
+    ContextService, ContextStore, ExtractionRun, MemoryPatch, RunAdd, RunSkip, ServiceError,
+};
 use moss_voice_server::context::{
-    AccessContext, Applicability, Category, ContextError, ContextMemory, Evidence, MemoryDraft, ScopeKey, ScopeKind, Source, SourceKind,
-    StoredMemory, TrustedScope, Verification,
+    AccessContext, Applicability, Category, ContextError, ContextMemory, Evidence, MemoryDraft,
+    ScopeKey, ScopeKind, Source, SourceKind, StoredMemory, TrustedScope, Verification,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,7 +62,11 @@ impl ContextStore for DbStore {
             source_kind: m.source.kind().as_str().into(),
             source_ref: m.source.reference().map(Into::into),
             device_model: m.applicability.as_ref().map(|a| a.device_model().into()),
-            firmware: m.applicability.as_ref().and_then(|a| a.firmware()).map(Into::into),
+            firmware: m
+                .applicability
+                .as_ref()
+                .and_then(|a| a.firmware())
+                .map(Into::into),
             revision: m.revision,
             created_at: m.created_at,
             updated_at: m.updated_at,
@@ -70,35 +76,89 @@ impl ContextStore for DbStore {
             seen_count: 1,
             last_seen_at: None,
         };
-        decode(self.db.lock().unwrap().insert_context_memory(&row).map_err(err)?)
+        decode(
+            self.db
+                .lock()
+                .unwrap()
+                .insert_context_memory(&row)
+                .map_err(err)?,
+        )
     }
     fn get(&self, id: &str) -> Result<Option<ContextMemory>, String> {
-        self.db.lock().unwrap().context_memory(id).map_err(err)?.map(decode).transpose()
+        self.db
+            .lock()
+            .unwrap()
+            .context_memory(id)
+            .map_err(err)?
+            .map(decode)
+            .transpose()
     }
     fn list(&self, scope: &ScopeKey, include_deleted: bool) -> Result<Vec<ContextMemory>, String> {
-        self.db.lock().unwrap().list_context_memories(scope.kind().as_str(), scope.id(), include_deleted, 500).map_err(err)?.into_iter().map(decode).collect()
+        self.db
+            .lock()
+            .unwrap()
+            .list_context_memories(scope.kind().as_str(), scope.id(), include_deleted, 500)
+            .map_err(err)?
+            .into_iter()
+            .map(decode)
+            .collect()
     }
     fn source_seen(&self, scope: &ScopeKey, source_ref: &str) -> Result<bool, String> {
-        self.db.lock().unwrap().context_source_seen(scope.kind().as_str(), scope.id(), source_ref).map_err(err)
+        self.db
+            .lock()
+            .unwrap()
+            .context_source_seen(scope.kind().as_str(), scope.id(), source_ref)
+            .map_err(err)
     }
-    fn update(&self, id: &str, expected: i64, patch: &MemoryPatch, now: f64) -> Result<Option<ContextMemory>, String> {
+    fn update(
+        &self,
+        id: &str,
+        expected: i64,
+        patch: &MemoryPatch,
+        now: f64,
+    ) -> Result<Option<ContextMemory>, String> {
         let row = ContextMemoryPatch {
             content: patch.content.clone(),
             verification: patch.verification.as_str().into(),
-            device_model: patch.applicability.as_ref().map(|a| a.device_model().into()),
-            firmware: patch.applicability.as_ref().and_then(|a| a.firmware()).map(Into::into),
+            device_model: patch
+                .applicability
+                .as_ref()
+                .map(|a| a.device_model().into()),
+            firmware: patch
+                .applicability
+                .as_ref()
+                .and_then(|a| a.firmware())
+                .map(Into::into),
             expires_at: patch.expires_at,
         };
-        self.db.lock().unwrap().update_context_memory_if_revision(id, expected, &row, now).map_err(err)?.map(decode).transpose()
+        self.db
+            .lock()
+            .unwrap()
+            .update_context_memory_if_revision(id, expected, &row, now)
+            .map_err(err)?
+            .map(decode)
+            .transpose()
     }
     fn reinforce(&self, id: &str, now: f64, extend_to: Option<f64>) -> Result<bool, String> {
-        self.db.lock().unwrap().reinforce_context_memory(id, now, extend_to).map_err(err)
+        self.db
+            .lock()
+            .unwrap()
+            .reinforce_context_memory(id, now, extend_to)
+            .map_err(err)
     }
     fn delete(&self, id: &str, expected: i64, now: f64) -> Result<bool, String> {
-        self.db.lock().unwrap().delete_context_memory_if_revision(id, expected, now).map_err(err)
+        self.db
+            .lock()
+            .unwrap()
+            .delete_context_memory_if_revision(id, expected, now)
+            .map_err(err)
     }
     fn clear(&self, scope: &ScopeKey, now: f64) -> Result<usize, String> {
-        self.db.lock().unwrap().clear_context_scope(scope.kind().as_str(), scope.id(), now).map_err(err)
+        self.db
+            .lock()
+            .unwrap()
+            .clear_context_scope(scope.kind().as_str(), scope.id(), now)
+            .map_err(err)
     }
     fn insert_run(&self, run: &ExtractionRun) -> Result<(), String> {
         let row = ContextExtractionRunRow {
@@ -113,26 +173,65 @@ impl ContextStore for DbStore {
             skipped_json: run.skipped_json(),
             reverted_at: None,
         };
-        self.db.lock().unwrap().insert_context_extraction_run(&row).map_err(err)
+        self.db
+            .lock()
+            .unwrap()
+            .insert_context_extraction_run(&row)
+            .map_err(err)
     }
     fn get_run(&self, id: &str) -> Result<Option<ExtractionRun>, String> {
-        self.db.lock().unwrap().context_extraction_run(id).map_err(err)?.map(decode_run).transpose()
+        self.db
+            .lock()
+            .unwrap()
+            .context_extraction_run(id)
+            .map_err(err)?
+            .map(decode_run)
+            .transpose()
     }
     fn list_runs(&self, scope: &ScopeKey, limit: usize) -> Result<Vec<ExtractionRun>, String> {
-        self.db.lock().unwrap().list_context_extraction_runs(scope.kind().as_str(), scope.id(), limit).map_err(err)?.into_iter().map(decode_run).collect()
+        self.db
+            .lock()
+            .unwrap()
+            .list_context_extraction_runs(scope.kind().as_str(), scope.id(), limit)
+            .map_err(err)?
+            .into_iter()
+            .map(decode_run)
+            .collect()
     }
     fn mark_run_reverted(&self, id: &str, now: f64) -> Result<bool, String> {
-        self.db.lock().unwrap().mark_context_extraction_reverted(id, now).map_err(err)
+        self.db
+            .lock()
+            .unwrap()
+            .mark_context_extraction_reverted(id, now)
+            .map_err(err)
     }
-    fn search(&self, scope: &ScopeKey, query: &SearchQuery, now: f64, limit: usize) -> Result<Vec<ContextMemory>, String> {
+    fn search(
+        &self,
+        scope: &ScopeKey,
+        query: &SearchQuery,
+        now: f64,
+        limit: usize,
+    ) -> Result<Vec<ContextMemory>, String> {
         // FTS5 for three-character windows, LIKE for two-character pieces; union by id.
         let db = self.db.lock().unwrap();
         let mut rows = Vec::new();
         if !query.terms.is_empty() {
-            rows.extend(db.match_context_memories(scope.kind().as_str(), scope.id(), &query.terms, now, limit).map_err(err)?);
+            rows.extend(
+                db.match_context_memories(
+                    scope.kind().as_str(),
+                    scope.id(),
+                    &query.terms,
+                    now,
+                    limit,
+                )
+                .map_err(err)?,
+            );
         }
         if !query.shorts.is_empty() {
-            for row in db.like_context_memories(scope.kind().as_str(), scope.id(), &query.shorts, now, limit).map_err(err)? {
+            for row in db
+                .like_context_memories(scope.kind().as_str(), scope.id(), &query.shorts, now, limit)
+                .map_err(err)?
+            {
                 if !rows.iter().any(|seen: &ContextMemoryRow| seen.id == row.id) {
                     rows.push(row);
                 }
@@ -144,11 +243,24 @@ impl ContextStore for DbStore {
 
 fn decode_run(row: ContextExtractionRunRow) -> Result<ExtractionRun, String> {
     let scope = ScopeKey::parse(&row.scope_kind, &row.scope_id).map_err(|e| e.code().to_owned())?;
-    ExtractionRun::from_json(&row.id, scope, row.started_at, row.finished_at, &row.adds_json, &row.updates_json, &row.deletes_json, &row.skipped_json, row.reverted_at)
+    ExtractionRun::from_json(
+        &row.id,
+        scope,
+        row.started_at,
+        row.finished_at,
+        &row.adds_json,
+        &row.updates_json,
+        &row.deletes_json,
+        &row.skipped_json,
+        row.reverted_at,
+    )
 }
 
 fn setup() -> (Arc<DbStore>, Arc<ContextService>) {
-    let store = Arc::new(DbStore { db: Mutex::new(RuntimeDb::open_memory().unwrap()), revoked: AtomicBool::new(false) });
+    let store = Arc::new(DbStore {
+        db: Mutex::new(RuntimeDb::open_memory().unwrap()),
+        revoked: AtomicBool::new(false),
+    });
     (store.clone(), ContextService::new(store))
 }
 
@@ -184,19 +296,46 @@ fn nv19_every_category_and_source_name_round_trips_through_schema_v10() {
             let scope_kind = category.allowed_scopes()[0];
             let scope = match scope_kind {
                 ScopeKind::Device => device_key(),
-                other => ScopeKey::new(other, if other == ScopeKind::Project { "p1" } else { "w1" }).unwrap(),
+                other => ScopeKey::new(
+                    other,
+                    if other == ScopeKind::Project {
+                        "p1"
+                    } else {
+                        "w1"
+                    },
+                )
+                .unwrap(),
             };
             let draft = MemoryDraft {
                 scope,
                 category,
                 content: "合成测试内容".into(),
-                verification: if kind.may_create_confirmed() { Verification::Confirmed } else { Verification::Candidate },
+                verification: if kind.may_create_confirmed() {
+                    Verification::Confirmed
+                } else {
+                    Verification::Candidate
+                },
                 source: Source::new(kind, reference).unwrap(),
-                applicability: category.needs_applicability().then(|| Applicability::new("MOSS-550W", Some("1.2.0")).unwrap()),
+                applicability: category
+                    .needs_applicability()
+                    .then(|| Applicability::new("MOSS-550W", Some("1.2.0")).unwrap()),
                 expires_at: Some(NOW + 60.0),
             };
             let row = service.create(&owner, draft.clone(), NOW).unwrap();
-            assert_eq!((row.category, row.verification, row.source.clone(), row.applicability.clone()), (category, draft.verification, draft.source, draft.applicability));
+            assert_eq!(
+                (
+                    row.category,
+                    row.verification,
+                    row.source.clone(),
+                    row.applicability.clone()
+                ),
+                (
+                    category,
+                    draft.verification,
+                    draft.source,
+                    draft.applicability
+                )
+            );
             created += 1;
         }
     }
@@ -217,32 +356,89 @@ fn nv19_service_over_sqlite_keeps_revisions_tombstones_and_scope_checks() {
         expires_at: None,
     };
     let item = service.create(&owner, draft.clone(), NOW).unwrap();
-    let edited = service.edit(&owner, &item.id, 1, "喜欢详细回答", None, None, NOW + 1.0).unwrap();
+    let edited = service
+        .edit(&owner, &item.id, 1, "喜欢详细回答", None, None, NOW + 1.0)
+        .unwrap();
     assert_eq!(edited.revision, 2);
-    assert_eq!(service.edit(&owner, &item.id, 1, "迟到", None, None, NOW + 2.0).unwrap_err(), ServiceError::Conflict);
-    let confirmed = service.set_verification(&owner, &item.id, 2, Verification::Confirmed, Some(&Evidence::UserConfirmed), NOW + 3.0).unwrap();
+    assert_eq!(
+        service
+            .edit(&owner, &item.id, 1, "迟到", None, None, NOW + 2.0)
+            .unwrap_err(),
+        ServiceError::Conflict
+    );
+    let confirmed = service
+        .set_verification(
+            &owner,
+            &item.id,
+            2,
+            Verification::Confirmed,
+            Some(&Evidence::UserConfirmed),
+            NOW + 3.0,
+        )
+        .unwrap();
     assert_eq!(confirmed.verification, Verification::Confirmed);
 
-    service.delete(&owner, &item.id, confirmed.revision, NOW + 4.0).unwrap();
-    let late = MemoryPatch { content: "复活".into(), verification: Verification::Confirmed, applicability: None, expires_at: None };
-    assert!(store.update(&item.id, confirmed.revision, &late, NOW + 5.0).unwrap().is_none(), "删除后旧版本的后台写入失败");
+    service
+        .delete(&owner, &item.id, confirmed.revision, NOW + 4.0)
+        .unwrap();
+    let late = MemoryPatch {
+        content: "复活".into(),
+        verification: Verification::Confirmed,
+        applicability: None,
+        expires_at: None,
+    };
+    assert!(
+        store
+            .update(&item.id, confirmed.revision, &late, NOW + 5.0)
+            .unwrap()
+            .is_none(),
+        "删除后旧版本的后台写入失败"
+    );
     let tomb = store.get(&item.id).unwrap().unwrap();
     assert!(tomb.content.is_empty() && tomb.deleted_at.is_some());
     assert!(service.list(&owner, &device_key(), NOW).unwrap().is_empty());
 
     // Legacy import is idempotent across deletion on the real store.
-    let report = service.import_legacy(&owner, "aa:bb:cc:dd:ee:ff", "喜欢简短回答\n周末不加工", 2, NOW).unwrap();
+    let report = service
+        .import_legacy(
+            &owner,
+            "aa:bb:cc:dd:ee:ff",
+            "喜欢简短回答\n周末不加工",
+            2,
+            NOW,
+        )
+        .unwrap();
     assert_eq!(report.created.len(), 1);
     service.clear(&owner, &device_key(), NOW + 6.0).unwrap();
-    assert_eq!(service.import_legacy(&owner, "aa:bb:cc:dd:ee:ff", "喜欢简短回答\n周末不加工", 2, NOW).unwrap().skipped, vec!["already_imported"]);
+    assert_eq!(
+        service
+            .import_legacy(
+                &owner,
+                "aa:bb:cc:dd:ee:ff",
+                "喜欢简短回答\n周末不加工",
+                2,
+                NOW
+            )
+            .unwrap()
+            .skipped,
+        vec!["already_imported"]
+    );
 
     // Device revoked between requests: the host check fails before the store is touched.
     store.revoked.store(true, Ordering::SeqCst);
-    assert_eq!(service.create(&owner, draft, NOW).unwrap_err(), ServiceError::ScopeStale);
-    let workspace = ScopeKey::new(ScopeKind::Workspace, "w1").unwrap();
-    assert!(service.list(&owner, &workspace, NOW).is_ok(), "撤销设备不影响工作区范围");
     assert_eq!(
-        service.list(&AccessContext::desktop_private(vec![]), &workspace, NOW).unwrap_err(),
+        service.create(&owner, draft, NOW).unwrap_err(),
+        ServiceError::ScopeStale
+    );
+    let workspace = ScopeKey::new(ScopeKind::Workspace, "w1").unwrap();
+    assert!(
+        service.list(&owner, &workspace, NOW).is_ok(),
+        "撤销设备不影响工作区范围"
+    );
+    assert_eq!(
+        service
+            .list(&AccessContext::desktop_private(vec![]), &workspace, NOW)
+            .unwrap_err(),
         ServiceError::Invalid(ContextError::AccessDenied)
     );
 }
@@ -251,7 +447,12 @@ fn nv19_service_over_sqlite_keeps_revisions_tombstones_and_scope_checks() {
 fn nv19_extraction_manifest_round_trips_and_reverts_once_over_sqlite() {
     let (store, service) = setup();
     let owner = owner();
-    let voice = AccessContext::voice(TrustedScope::device_grant("aa:bb:cc:dd:ee:ff", 1).unwrap(), None, None).unwrap();
+    let voice = AccessContext::voice(
+        TrustedScope::device_grant("aa:bb:cc:dd:ee:ff", 1).unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
     let draft = MemoryDraft {
         scope: device_key(),
         category: Category::Preference,
@@ -267,17 +468,34 @@ fn nv19_extraction_manifest_round_trips_and_reverts_once_over_sqlite() {
         scope: device_key(),
         started_at: NOW,
         finished_at: Some(NOW + 1.0),
-        adds: vec![RunAdd { id: row.id.clone(), revision: 1 }],
-        skipped: vec![RunSkip { op: "update".into(), reason: "op_not_allowed".into() }],
+        adds: vec![RunAdd {
+            id: row.id.clone(),
+            revision: 1,
+        }],
+        skipped: vec![RunSkip {
+            op: "update".into(),
+            reason: "op_not_allowed".into(),
+        }],
         reverted_at: None,
     };
     store.insert_run(&run).unwrap();
-    assert_eq!(store.get_run("run-abc").unwrap().unwrap(), run, "清单经 SQLite 往返不变");
+    assert_eq!(
+        store.get_run("run-abc").unwrap().unwrap(),
+        run,
+        "清单经 SQLite 往返不变"
+    );
 
-    let report = service.revert_extraction(&owner, "run-abc", NOW + 2.0).unwrap();
+    let report = service
+        .revert_extraction(&owner, "run-abc", NOW + 2.0)
+        .unwrap();
     assert_eq!((report.removed, report.kept.len()), (1, 0));
     assert!(store.get(&row.id).unwrap().unwrap().deleted_at.is_some());
-    assert_eq!(service.revert_extraction(&owner, "run-abc", NOW + 3.0).unwrap_err(), ServiceError::Conflict);
+    assert_eq!(
+        service
+            .revert_extraction(&owner, "run-abc", NOW + 3.0)
+            .unwrap_err(),
+        ServiceError::Conflict
+    );
 }
 
 /// NV19-04 fixed Chinese retrieval set over real FTS5 trigram. Expected answers are fixed in
@@ -293,14 +511,86 @@ fn nv19_fixed_chinese_retrieval_set_over_fts5() {
     ]);
     let m550 = || Some(Applicability::new("MOSS-550W", Some("1.2.0")).unwrap());
     let rows = [
-        ("A", ScopeKind::Device, "aa:bb:cc:dd:ee:ff", Category::TroubleshootingExperience, "边缘发黑时把功率降到百分之六十后改善", Verification::Confirmed, m550(), None),
-        ("B", ScopeKind::Device, "aa:bb:cc:dd:ee:ff", Category::TroubleshootingExperience, "雕刻线条断续是皮带松了，拧紧后恢复", Verification::Confirmed, m550(), None),
-        ("C", ScopeKind::Device, "aa:bb:cc:dd:ee:ff", Category::Preference, "回答时先说预计时长再说步骤", Verification::Confirmed, None, None),
-        ("D", ScopeKind::Device, "aa:bb:cc:dd:ee:ff", Category::Preference, "喜欢用椴木板做样品", Verification::Candidate, None, None),
-        ("E", ScopeKind::Device, "aa:bb:cc:dd:ee:ff", Category::Preference, "排风扇噪音大时提醒我关窗", Verification::Confirmed, None, Some(NOW - 1.0)),
-        ("F", ScopeKind::Device, "11:22:33:44:55:66", Category::Preference, "另一台机器：回答时先说预计时长", Verification::Confirmed, None, None),
-        ("G", ScopeKind::Project, "p1", Category::TaskContext, "本周先完成椴木杯垫样品，周五交付", Verification::Confirmed, None, None),
-        ("H", ScopeKind::Device, "aa:bb:cc:dd:ee:ff", Category::TroubleshootingExperience, "边缘发黑要更换镜片", Verification::Confirmed, Some(Applicability::new("MOSS-550W", Some("2.0.0")).unwrap()), None),
+        (
+            "A",
+            ScopeKind::Device,
+            "aa:bb:cc:dd:ee:ff",
+            Category::TroubleshootingExperience,
+            "边缘发黑时把功率降到百分之六十后改善",
+            Verification::Confirmed,
+            m550(),
+            None,
+        ),
+        (
+            "B",
+            ScopeKind::Device,
+            "aa:bb:cc:dd:ee:ff",
+            Category::TroubleshootingExperience,
+            "雕刻线条断续是皮带松了，拧紧后恢复",
+            Verification::Confirmed,
+            m550(),
+            None,
+        ),
+        (
+            "C",
+            ScopeKind::Device,
+            "aa:bb:cc:dd:ee:ff",
+            Category::Preference,
+            "回答时先说预计时长再说步骤",
+            Verification::Confirmed,
+            None,
+            None,
+        ),
+        (
+            "D",
+            ScopeKind::Device,
+            "aa:bb:cc:dd:ee:ff",
+            Category::Preference,
+            "喜欢用椴木板做样品",
+            Verification::Candidate,
+            None,
+            None,
+        ),
+        (
+            "E",
+            ScopeKind::Device,
+            "aa:bb:cc:dd:ee:ff",
+            Category::Preference,
+            "排风扇噪音大时提醒我关窗",
+            Verification::Confirmed,
+            None,
+            Some(NOW - 1.0),
+        ),
+        (
+            "F",
+            ScopeKind::Device,
+            "11:22:33:44:55:66",
+            Category::Preference,
+            "另一台机器：回答时先说预计时长",
+            Verification::Confirmed,
+            None,
+            None,
+        ),
+        (
+            "G",
+            ScopeKind::Project,
+            "p1",
+            Category::TaskContext,
+            "本周先完成椴木杯垫样品，周五交付",
+            Verification::Confirmed,
+            None,
+            None,
+        ),
+        (
+            "H",
+            ScopeKind::Device,
+            "aa:bb:cc:dd:ee:ff",
+            Category::TroubleshootingExperience,
+            "边缘发黑要更换镜片",
+            Verification::Confirmed,
+            Some(Applicability::new("MOSS-550W", Some("2.0.0")).unwrap()),
+            None,
+        ),
     ];
     let mut ids = std::collections::HashMap::new();
     for (name, kind, scope, category, content, verification, applicability, expires) in rows {
@@ -317,7 +607,12 @@ fn nv19_fixed_chinese_retrieval_set_over_fts5() {
         let created_at = if expires.is_some() { NOW - 10.0 } else { NOW };
         ids.insert(service.create(&owner, draft, created_at).unwrap().id, name);
     }
-    let device_a = AccessContext::voice(TrustedScope::device_grant("aa:bb:cc:dd:ee:ff", 1).unwrap(), None, Some(TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap())).unwrap();
+    let device_a = AccessContext::voice(
+        TrustedScope::device_grant("aa:bb:cc:dd:ee:ff", 1).unwrap(),
+        None,
+        Some(TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap()),
+    )
+    .unwrap();
     let current = Applicability::new("MOSS-550W", Some("1.2.0")).unwrap();
     // Top-1 must be one of the listed names; an empty list means nothing may be returned.
     let cases: [(&str, &[&str]); 10] = [
@@ -335,7 +630,9 @@ fn nv19_fixed_chinese_retrieval_set_over_fts5() {
     let mut correct = 0;
     for (question, expected) in cases {
         let query = fast_query(question).unwrap();
-        let hits = service.search(&device_a, &query, Some(&current), NOW).unwrap();
+        let hits = service
+            .search(&device_a, &query, Some(&current), NOW)
+            .unwrap();
         let names: Vec<&str> = hits.iter().map(|(row, _)| ids[&row.id]).collect();
         assert!(!names.contains(&"F"), "{question}: 不得读到另一台设备");
         assert!(!names.contains(&"E"), "{question}: 过期记录不得返回");
@@ -346,7 +643,10 @@ fn nv19_fixed_chinese_retrieval_set_over_fts5() {
         }
         correct += 1;
     }
-    println!("NV19_FIXED_SET top1={correct}/{} (含“边缘烧焦”同义说法在快速模式下按预期查不到)", cases.len());
+    println!(
+        "NV19_FIXED_SET top1={correct}/{} (含“边缘烧焦”同义说法在快速模式下按预期查不到)",
+        cases.len()
+    );
 }
 
 #[test]
@@ -354,9 +654,25 @@ fn nv19_retrieval_latency_over_500_rows_is_recorded() {
     use moss_voice_server::context::retrieve::fast_query;
     let (_, service) = setup();
     let owner = owner();
-    let words = ["边缘", "功率", "皮带", "镜片", "椴木", "亚克力", "排风", "对焦", "速度", "样品"];
+    let words = [
+        "边缘",
+        "功率",
+        "皮带",
+        "镜片",
+        "椴木",
+        "亚克力",
+        "排风",
+        "对焦",
+        "速度",
+        "样品",
+    ];
     for i in 0..500 {
-        let content = format!("第{i}条：{}和{}的经验记录，编号{}", words[i % 10], words[(i * 7 + 3) % 10], i * 13);
+        let content = format!(
+            "第{i}条：{}和{}的经验记录，编号{}",
+            words[i % 10],
+            words[(i * 7 + 3) % 10],
+            i * 13
+        );
         let draft = MemoryDraft {
             scope: device_key(),
             category: Category::Preference,
@@ -368,9 +684,24 @@ fn nv19_retrieval_latency_over_500_rows_is_recorded() {
         };
         service.create(&owner, draft, NOW).unwrap();
     }
-    let voice = AccessContext::voice(TrustedScope::device_grant("aa:bb:cc:dd:ee:ff", 1).unwrap(), None, None).unwrap();
+    let voice = AccessContext::voice(
+        TrustedScope::device_grant("aa:bb:cc:dd:ee:ff", 1).unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
     let mut samples = Vec::new();
-    for question in ["边缘和功率有什么经验", "皮带松了怎么办", "椴木样品", "亚克力对焦", "排风速度"].iter().cycle().take(100) {
+    for question in [
+        "边缘和功率有什么经验",
+        "皮带松了怎么办",
+        "椴木样品",
+        "亚克力对焦",
+        "排风速度",
+    ]
+    .iter()
+    .cycle()
+    .take(100)
+    {
         let query = fast_query(question).unwrap();
         let started = std::time::Instant::now();
         let _ = service.search(&voice, &query, None, NOW).unwrap();
@@ -378,7 +709,10 @@ fn nv19_retrieval_latency_over_500_rows_is_recorded() {
     }
     samples.sort_by(f64::total_cmp);
     // Recorded, not asserted: wall-clock limits would make the test depend on machine load.
-    println!("NV19_LATENCY rows=500 p50={:.2}ms p95={:.2}ms", samples[49], samples[94]);
+    println!(
+        "NV19_LATENCY rows=500 p50={:.2}ms p95={:.2}ms",
+        samples[49], samples[94]
+    );
 }
 
 mod knowledge_sqlite {
@@ -386,7 +720,10 @@ mod knowledge_sqlite {
     //! with a temporary folder.
     use super::*;
     use laser_runtime::{KnowledgeChunkRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
-    use moss_voice_server::context::knowledge::{format_knowledge, KnowledgeChunk, KnowledgeChunkHit, KnowledgeDir, KnowledgeError, KnowledgeFile, KnowledgeRoot, KnowledgeService, KnowledgeStore};
+    use moss_voice_server::context::knowledge::{
+        KnowledgeChunk, KnowledgeChunkHit, KnowledgeDir, KnowledgeError, KnowledgeFile,
+        KnowledgeRoot, KnowledgeService, KnowledgeStore, format_knowledge,
+    };
     use moss_voice_server::context::retrieve::fast_query;
     use std::path::PathBuf;
 
@@ -394,7 +731,8 @@ mod knowledge_sqlite {
 
     fn root_from(row: KnowledgeRootRow) -> Result<KnowledgeRoot, String> {
         Ok(KnowledgeRoot {
-            scope: ScopeKey::parse(&row.scope_kind, &row.scope_id).map_err(|e| e.code().to_owned())?,
+            scope: ScopeKey::parse(&row.scope_kind, &row.scope_id)
+                .map_err(|e| e.code().to_owned())?,
             id: row.id,
             label: row.label,
             root_path: PathBuf::from(row.root_path),
@@ -404,7 +742,14 @@ mod knowledge_sqlite {
         })
     }
     fn dir_from(d: KnowledgeDirRow) -> KnowledgeDir {
-        KnowledgeDir { id: d.id, root_id: d.root_id, rel_dir: d.rel_dir, l0: d.l0, l1: d.l1, file_count: d.file_count }
+        KnowledgeDir {
+            id: d.id,
+            root_id: d.root_id,
+            rel_dir: d.rel_dir,
+            l0: d.l0,
+            l1: d.l1,
+            file_count: d.file_count,
+        }
     }
 
     impl KnowledgeStore for DbKnowledge {
@@ -423,37 +768,142 @@ mod knowledge_sqlite {
                 indexed_at: None,
                 enabled: root.enabled,
             };
-            self.0.lock().unwrap().insert_knowledge_root(&row).map_err(err)
+            self.0
+                .lock()
+                .unwrap()
+                .insert_knowledge_root(&row)
+                .map_err(err)
         }
         fn root(&self, id: &str) -> Result<Option<KnowledgeRoot>, String> {
-            self.0.lock().unwrap().knowledge_root(id).map_err(err)?.map(root_from).transpose()
+            self.0
+                .lock()
+                .unwrap()
+                .knowledge_root(id)
+                .map_err(err)?
+                .map(root_from)
+                .transpose()
         }
         fn roots(&self, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, String> {
-            self.0.lock().unwrap().knowledge_roots(scope.kind().as_str(), scope.id()).map_err(err)?.into_iter().map(root_from).collect()
+            self.0
+                .lock()
+                .unwrap()
+                .knowledge_roots(scope.kind().as_str(), scope.id())
+                .map_err(err)?
+                .into_iter()
+                .map(root_from)
+                .collect()
         }
         fn all_roots(&self) -> Result<Vec<KnowledgeRoot>, String> {
-            self.0.lock().unwrap().all_knowledge_roots().map_err(err)?.into_iter().map(root_from).collect()
+            self.0
+                .lock()
+                .unwrap()
+                .all_knowledge_roots()
+                .map_err(err)?
+                .into_iter()
+                .map(root_from)
+                .collect()
         }
         fn set_root_enabled(&self, id: &str, expected: i64, enabled: bool) -> Result<bool, String> {
-            self.0.lock().unwrap().set_knowledge_root_enabled(id, expected, enabled).map_err(err)
+            self.0
+                .lock()
+                .unwrap()
+                .set_knowledge_root_enabled(id, expected, enabled)
+                .map_err(err)
         }
-        fn replace(&self, root_id: &str, expected: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], chunks: &[KnowledgeChunk], now: f64) -> Result<bool, String> {
-            let dirs: Vec<_> = dirs.iter().map(|d| KnowledgeDirRow { id: d.id.clone(), root_id: d.root_id.clone(), rel_dir: d.rel_dir.clone(), l0: d.l0.clone(), l1: d.l1.clone(), file_count: d.file_count }).collect();
+        fn replace(
+            &self,
+            root_id: &str,
+            expected: i64,
+            dirs: &[KnowledgeDir],
+            files: &[KnowledgeFile],
+            chunks: &[KnowledgeChunk],
+            now: f64,
+        ) -> Result<bool, String> {
+            let dirs: Vec<_> = dirs
+                .iter()
+                .map(|d| KnowledgeDirRow {
+                    id: d.id.clone(),
+                    root_id: d.root_id.clone(),
+                    rel_dir: d.rel_dir.clone(),
+                    l0: d.l0.clone(),
+                    l1: d.l1.clone(),
+                    file_count: d.file_count,
+                })
+                .collect();
             let files: Vec<_> = files
                 .iter()
-                .map(|f| KnowledgeFileRow { id: f.id.clone(), root_id: f.root_id.clone(), dir_id: f.dir_id.clone(), rel_path: f.rel_path.clone(), sha256: f.sha256.clone(), size: f.size, mtime: f.mtime })
+                .map(|f| KnowledgeFileRow {
+                    id: f.id.clone(),
+                    root_id: f.root_id.clone(),
+                    dir_id: f.dir_id.clone(),
+                    rel_path: f.rel_path.clone(),
+                    sha256: f.sha256.clone(),
+                    size: f.size,
+                    mtime: f.mtime,
+                })
                 .collect();
-            let chunks: Vec<_> = chunks.iter().map(|c| KnowledgeChunkRow { file_id: c.file_id.clone(), ord: c.ord, text: c.text.clone() }).collect();
-            self.0.lock().unwrap().replace_knowledge_index_with_chunks(root_id, expected, &dirs, &files, &chunks, now).map_err(err)
+            let chunks: Vec<_> = chunks
+                .iter()
+                .map(|c| KnowledgeChunkRow {
+                    file_id: c.file_id.clone(),
+                    ord: c.ord,
+                    text: c.text.clone(),
+                })
+                .collect();
+            self.0
+                .lock()
+                .unwrap()
+                .replace_knowledge_index_with_chunks(root_id, expected, &dirs, &files, &chunks, now)
+                .map_err(err)
         }
         fn delete_root(&self, id: &str, expected: i64) -> Result<bool, String> {
-            self.0.lock().unwrap().delete_knowledge_root_if_revision(id, expected).map_err(err)
+            self.0
+                .lock()
+                .unwrap()
+                .delete_knowledge_root_if_revision(id, expected)
+                .map_err(err)
         }
-        fn search_chunks(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeChunkHit>, String> {
-            Ok(self.0.lock().unwrap().search_knowledge_chunks(scope.kind().as_str(), scope.id(), &query.terms, limit).map_err(err)?.into_iter().map(|h| KnowledgeChunkHit { dir: dir_from(h.dir), file_id: h.file_id, ord: h.ord }).collect())
+        fn search_chunks(
+            &self,
+            scope: &ScopeKey,
+            query: &SearchQuery,
+            limit: usize,
+        ) -> Result<Vec<KnowledgeChunkHit>, String> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .search_knowledge_chunks(scope.kind().as_str(), scope.id(), &query.terms, limit)
+                .map_err(err)?
+                .into_iter()
+                .map(|h| KnowledgeChunkHit {
+                    dir: dir_from(h.dir),
+                    file_id: h.file_id,
+                    ord: h.ord,
+                })
+                .collect())
         }
-        fn search_dirs(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeDir>, String> {
-            Ok(self.0.lock().unwrap().search_knowledge_dirs(scope.kind().as_str(), scope.id(), &query.terms, &query.shorts, limit).map_err(err)?.into_iter().map(dir_from).collect())
+        fn search_dirs(
+            &self,
+            scope: &ScopeKey,
+            query: &SearchQuery,
+            limit: usize,
+        ) -> Result<Vec<KnowledgeDir>, String> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .search_knowledge_dirs(
+                    scope.kind().as_str(),
+                    scope.id(),
+                    &query.terms,
+                    &query.shorts,
+                    limit,
+                )
+                .map_err(err)?
+                .into_iter()
+                .map(dir_from)
+                .collect())
         }
         fn files(&self, dir_id: &str) -> Result<Vec<KnowledgeFile>, String> {
             Ok(self
@@ -463,7 +913,15 @@ mod knowledge_sqlite {
                 .knowledge_files(dir_id)
                 .map_err(err)?
                 .into_iter()
-                .map(|f| KnowledgeFile { id: f.id, root_id: f.root_id, dir_id: f.dir_id, rel_path: f.rel_path, sha256: f.sha256, size: f.size, mtime: f.mtime })
+                .map(|f| KnowledgeFile {
+                    id: f.id,
+                    root_id: f.root_id,
+                    dir_id: f.dir_id,
+                    rel_path: f.rel_path,
+                    sha256: f.sha256,
+                    size: f.size,
+                    mtime: f.mtime,
+                })
                 .collect())
         }
     }
@@ -476,49 +934,123 @@ mod knowledge_sqlite {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         };
-        write("对焦.md", "# 激光对焦\n\n先把焦距规放在材料上，降低激光头直到刚好接触。\n");
-        write("维护/皮带.md", "# 皮带张紧\n线条断续时检查皮带是否松动，拧紧张紧螺丝后恢复。\n");
-        let service = KnowledgeService::new(Arc::new(DbKnowledge(Mutex::new(RuntimeDb::open_memory().unwrap()))));
+        write(
+            "对焦.md",
+            "# 激光对焦\n\n先把焦距规放在材料上，降低激光头直到刚好接触。\n",
+        );
+        write(
+            "维护/皮带.md",
+            "# 皮带张紧\n线条断续时检查皮带是否松动，拧紧张紧螺丝后恢复。\n",
+        );
+        let service = KnowledgeService::new(Arc::new(DbKnowledge(Mutex::new(
+            RuntimeDb::open_memory().unwrap(),
+        ))));
         let project = ScopeKey::new(ScopeKind::Project, "p1").unwrap();
-        let owner = AccessContext::desktop_private(vec![TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap()]);
+        let owner = AccessContext::desktop_private(vec![
+            TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap(),
+        ]);
 
-        let (root, report) = service.add_root(&owner, &project, temp.path(), NOW).unwrap();
+        let (root, report) = service
+            .add_root(&owner, &project, temp.path(), NOW)
+            .unwrap();
         assert_eq!((report.directories, report.files), (2, 2));
-        assert_eq!(service.add_root(&owner, &project, temp.path(), NOW).unwrap_err().code(), "knowledge_store_failed", "同一目录不能重复登记");
+        assert_eq!(
+            service
+                .add_root(&owner, &project, temp.path(), NOW)
+                .unwrap_err()
+                .code(),
+            "knowledge_store_failed",
+            "同一目录不能重复登记"
+        );
 
-        let hits = service.search(&owner, &fast_query("线条断续怎么办").unwrap()).unwrap();
+        let hits = service
+            .search(&owner, &fast_query("线条断续怎么办").unwrap())
+            .unwrap();
         assert_eq!(hits[0].rel_dir, "维护");
         let block = format_knowledge(&hits).unwrap();
         assert!(block.contains("原文摘录") && block.contains("拧紧"));
-        assert!(!block.contains(temp.path().to_str().unwrap()), "本机绝对路径不进提示词");
+        assert!(
+            !block.contains(temp.path().to_str().unwrap()),
+            "本机绝对路径不进提示词"
+        );
 
         std::fs::remove_file(temp.path().join("维护/皮带.md")).unwrap();
         service.reindex(&owner, &root.id, NOW + 1.0).unwrap();
-        assert!(service.search(&owner, &fast_query("线条断续怎么办").unwrap()).unwrap().is_empty());
-        assert_eq!(service.search(&owner, &fast_query("怎么降低激光头").unwrap()).unwrap().len(), 1);
+        assert!(
+            service
+                .search(&owner, &fast_query("线条断续怎么办").unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .search(&owner, &fast_query("怎么降低激光头").unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
 
         let current = service.roots(&owner, &project).unwrap().remove(0);
-        assert_eq!(service.remove_root(&owner, &root.id, 1).unwrap_err(), KnowledgeError::Conflict);
-        service.remove_root(&owner, &root.id, current.revision).unwrap();
-        assert!(service.search(&owner, &fast_query("怎么降低激光头").unwrap()).unwrap().is_empty());
+        assert_eq!(
+            service.remove_root(&owner, &root.id, 1).unwrap_err(),
+            KnowledgeError::Conflict
+        );
+        service
+            .remove_root(&owner, &root.id, current.revision)
+            .unwrap();
+        assert!(
+            service
+                .search(&owner, &fast_query("怎么降低激光头").unwrap())
+                .unwrap()
+                .is_empty()
+        );
         assert!(service.roots(&owner, &project).unwrap().is_empty());
     }
 
     #[test]
     fn nv19_passage_index_over_sqlite_finds_deep_text_without_storing_it() {
         let temp = tempfile::tempdir().unwrap();
-        let filler = (0..15).map(|n| format!("第{n}段：椴木雕刻常规参数说明，按材料厚度与图案密度选择合适的速度和功率。")).collect::<Vec<_>>().join("\n\n");
-        std::fs::write(temp.path().join("手册.md"), format!("# 设备维护\n\n{filler}\n\n## 气泵\n\n空气辅助气泵噪音大时检查进气滤网是否堵塞。\n")).unwrap();
+        let filler = (0..15)
+            .map(|n| {
+                format!("第{n}段：椴木雕刻常规参数说明，按材料厚度与图案密度选择合适的速度和功率。")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        std::fs::write(
+            temp.path().join("手册.md"),
+            format!(
+                "# 设备维护\n\n{filler}\n\n## 气泵\n\n空气辅助气泵噪音大时检查进气滤网是否堵塞。\n"
+            ),
+        )
+        .unwrap();
         let db = Arc::new(DbKnowledge(Mutex::new(RuntimeDb::open_memory().unwrap())));
         let service = KnowledgeService::new(db.clone());
         let project = ScopeKey::new(ScopeKind::Project, "p1").unwrap();
-        let owner = AccessContext::desktop_private(vec![TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap()]);
-        let (_, report) = service.add_root(&owner, &project, temp.path(), NOW).unwrap();
+        let owner = AccessContext::desktop_private(vec![
+            TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap(),
+        ]);
+        let (_, report) = service
+            .add_root(&owner, &project, temp.path(), NOW)
+            .unwrap();
         assert_eq!(report.chunks, 16);
-        let hits = service.search(&owner, &fast_query("气泵噪音大怎么办").unwrap()).unwrap();
+        let hits = service
+            .search(&owner, &fast_query("气泵噪音大怎么办").unwrap())
+            .unwrap();
         let (_, excerpt) = hits[0].excerpt.clone().unwrap();
-        assert!(excerpt.starts_with("设备维护 / 气泵：") && excerpt.contains("进气滤网"), "{excerpt}");
-        let stored: i64 = db.0.lock().unwrap().connection.query_row("SELECT COUNT(*) FROM context_knowledge_dirs WHERE l1 LIKE '%进气滤网%'", [], |r| r.get(0)).unwrap();
+        assert!(
+            excerpt.starts_with("设备维护 / 气泵：") && excerpt.contains("进气滤网"),
+            "{excerpt}"
+        );
+        let stored: i64 =
+            db.0.lock()
+                .unwrap()
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM context_knowledge_dirs WHERE l1 LIKE '%进气滤网%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
         assert_eq!(stored, 0, "这句只在段落索引里，数据库里读不到原文");
     }
 }
@@ -528,22 +1060,31 @@ mod resume_sqlite {
     //! Read-only SELECTs; the test also proves resuming changes none of those rows.
     use super::*;
     use laser_runtime::AgentRunRecord;
-    use moss_voice_server::context::resume::{format_resume, RefKind, RefState, Reference, ResumeFacts, ResumeNote};
+    use moss_voice_server::context::resume::{
+        RefKind, RefState, Reference, ResumeFacts, ResumeNote, format_resume,
+    };
 
     struct DbFacts<'a>(&'a RuntimeDb);
 
     impl ResumeFacts for DbFacts<'_> {
         fn state(&self, reference: &Reference) -> RefState {
             let row = |sql: &str| -> Option<(String, Option<String>)> {
-                self.0.connection.query_row(sql, [&reference.id], |r| Ok((r.get(0)?, r.get(1)?))).ok()
+                self.0
+                    .connection
+                    .query_row(sql, [&reference.id], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .ok()
             };
             let found = match reference.kind {
-                RefKind::Approval => row("SELECT status, json_extract(outcome,'$.phase') FROM approvals WHERE approval_id=?1"),
+                RefKind::Approval => row(
+                    "SELECT status, json_extract(outcome,'$.phase') FROM approvals WHERE approval_id=?1",
+                ),
                 RefKind::Job => row("SELECT status, NULL FROM jobs WHERE job_id=?1"),
                 RefKind::AgentRun => row("SELECT status, NULL FROM voice_agent_runs WHERE id=?1"),
                 RefKind::Test => return RefState::Unverifiable,
             };
-            let Some((status, phase)) = found else { return RefState::Missing };
+            let Some((status, phase)) = found else {
+                return RefState::Missing;
+            };
             match (reference.kind, status.as_str(), phase.as_deref()) {
                 (RefKind::Approval, "pending" | "approved", _) => RefState::InProgress,
                 (RefKind::Approval, "expired" | "rejected" | "cancelled", _) => RefState::Revoked,
@@ -563,7 +1104,11 @@ mod resume_sqlite {
 
     fn snapshot(db: &RuntimeDb) -> String {
         let mut out = String::new();
-        for sql in ["SELECT approval_id||status||updated_at FROM approvals ORDER BY 1", "SELECT job_id||status FROM jobs ORDER BY 1", "SELECT id||status FROM voice_agent_runs ORDER BY 1"] {
+        for sql in [
+            "SELECT approval_id||status||updated_at FROM approvals ORDER BY 1",
+            "SELECT job_id||status FROM jobs ORDER BY 1",
+            "SELECT id||status FROM voice_agent_runs ORDER BY 1",
+        ] {
             let mut statement = db.connection.prepare(sql).unwrap();
             for row in statement.query_map([], |r| r.get::<_, String>(0)).unwrap() {
                 out.push_str(&row.unwrap());
@@ -607,24 +1152,55 @@ mod resume_sqlite {
 
         let (_, service) = setup();
         let project = ScopeKey::new(ScopeKind::Project, "p1").unwrap();
-        let owner = AccessContext::desktop_private(vec![TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap()]);
+        let owner = AccessContext::desktop_private(vec![
+            TrustedScope::desktop_selection(ScopeKind::Project, "p1", 1).unwrap(),
+        ]);
         let note = ResumeNote {
             decisions: vec!["统一用 3 毫米椴木".into()],
-            todos: vec!["等批准后走边框 [approval:apr-wait]".into(), "确认雕刻是否完成 [approval:apr-unknown]".into(), "看 Agent 输出 [agent_run:run-9]".into(), "继续中断的任务 [job:j-stop]".into()],
-            evidence: vec!["样品完成 [job:j-done]".into(), "旧的走边框 [approval:apr-old]".into(), "不存在的任务 [job:j-none]".into()],
+            todos: vec![
+                "等批准后走边框 [approval:apr-wait]".into(),
+                "确认雕刻是否完成 [approval:apr-unknown]".into(),
+                "看 Agent 输出 [agent_run:run-9]".into(),
+                "继续中断的任务 [job:j-stop]".into(),
+            ],
+            evidence: vec![
+                "样品完成 [job:j-done]".into(),
+                "旧的走边框 [approval:apr-old]".into(),
+                "不存在的任务 [job:j-none]".into(),
+            ],
             unverified: vec![],
         };
-        service.save_resume(&owner, &project, &note, None, NOW).unwrap();
-        let view = service.resume(&owner, &project, &DbFacts(&facts_db), NOW).unwrap().unwrap();
-        let state = |items: &[moss_voice_server::context::resume::CheckedItem], id: &str| items.iter().flat_map(|i| i.states.iter()).find(|(r, _)| r.id == id).unwrap().1;
+        service
+            .save_resume(&owner, &project, &note, None, NOW)
+            .unwrap();
+        let view = service
+            .resume(&owner, &project, &DbFacts(&facts_db), NOW)
+            .unwrap()
+            .unwrap();
+        let state = |items: &[moss_voice_server::context::resume::CheckedItem], id: &str| {
+            items
+                .iter()
+                .flat_map(|i| i.states.iter())
+                .find(|(r, _)| r.id == id)
+                .unwrap()
+                .1
+        };
         assert_eq!(state(&view.todos, "apr-wait"), RefState::InProgress);
         assert_eq!(state(&view.todos, "apr-unknown"), RefState::ResultUnknown);
-        assert_eq!(state(&view.todos, "run-9"), RefState::ResultUnknown, "重启后中断的 Agent 运行是结果未知");
+        assert_eq!(
+            state(&view.todos, "run-9"),
+            RefState::ResultUnknown,
+            "重启后中断的 Agent 运行是结果未知"
+        );
         assert_eq!(state(&view.todos, "j-stop"), RefState::Stopped);
         assert_eq!(view.evidence.len(), 1);
         assert_eq!(state(&view.unverified, "apr-old"), RefState::Revoked);
         assert_eq!(state(&view.unverified, "j-none"), RefState::Missing);
         assert!(format_resume(&view).contains("不会自动重试"));
-        assert_eq!(snapshot(&facts_db), before, "恢复只读：审批、任务和 Agent 记录一行都没变");
+        assert_eq!(
+            snapshot(&facts_db),
+            before,
+            "恢复只读：审批、任务和 Agent 记录一行都没变"
+        );
     }
 }

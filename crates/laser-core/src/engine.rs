@@ -11,7 +11,7 @@
 
 use crate::{font, gcode, path_opt, raster};
 use image::{GrayImage, Luma, RgbaImage};
-use laser_contracts::geometry::{Paths, PathOptimizationStats};
+use laser_contracts::geometry::{PathOptimizationStats, Paths};
 
 pub use font::TextAlignment;
 
@@ -28,7 +28,9 @@ impl TextFill {
             None | Some("outline") => Ok(Self::Outline),
             Some("fill") => Ok(Self::Fill),
             Some("hatch") => Ok(Self::Hatch),
-            Some(other) => Err(format!("text_fill 只能是 outline / fill / hatch，收到 {other}")),
+            Some(other) => Err(format!(
+                "text_fill 只能是 outline / fill / hatch，收到 {other}"
+            )),
         }
     }
 
@@ -69,7 +71,9 @@ pub fn parse_alignment(value: Option<&str>) -> Result<TextAlignment, String> {
         None | Some("center") => Ok(TextAlignment::Center),
         Some("left") => Ok(TextAlignment::Left),
         Some("right") => Ok(TextAlignment::Right),
-        Some(other) => Err(format!("text_align 只能是 left / center / right，收到 {other}")),
+        Some(other) => Err(format!(
+            "text_align 只能是 left / center / right，收到 {other}"
+        )),
     }
 }
 
@@ -134,13 +138,18 @@ const MIN_FONT_SIZE_MM: f64 = 1.0;
 fn ink_bounds(paths: &Paths) -> Option<(f64, f64, f64, f64)> {
     let mut points = paths.iter().flatten();
     let first = points.next()?;
-    Some(points.fold((first.0, first.1, first.0, first.1), |(x0, y0, x1, y1), p| {
-        (x0.min(p.0), y0.min(p.1), x1.max(p.0), y1.max(p.1))
-    }))
+    Some(points.fold(
+        (first.0, first.1, first.0, first.1),
+        |(x0, y0, x1, y1), p| (x0.min(p.0), y0.min(p.1), x1.max(p.0), y1.max(p.1)),
+    ))
 }
 
 /// 排版并把笔画平移到以墨迹左上角为 (0,0)（y 向下）；返回 (笔画, 宽, 高, 字数)。
-fn layout(data: &[u8], spec: &TextTaskSpec<'_>, size: f64) -> Result<(Paths, f64, f64, usize), String> {
+fn layout(
+    data: &[u8],
+    spec: &TextTaskSpec<'_>,
+    size: f64,
+) -> Result<(Paths, f64, f64, usize), String> {
     let layout = font::layout_text_advanced(
         data,
         0,
@@ -227,7 +236,11 @@ fn hatch_lines(paths: &Paths, height: f64, spacing: f64) -> Paths {
             spans.reverse();
         }
         for (a, b) in spans {
-            out.push(if forward { vec![(a, y), (b, y)] } else { vec![(b, y), (a, y)] });
+            out.push(if forward {
+                vec![(a, y), (b, y)]
+            } else {
+                vec![(b, y), (a, y)]
+            });
         }
         forward = !forward;
         y += spacing;
@@ -246,7 +259,9 @@ fn place_at_head(gcode: &str, start_x: f64, start_y: f64) -> Result<String, Stri
     }
     let placed = gcode.replacen(ORIGIN, &format!("G92 X{start_x:.3} Y{start_y:.3} Z0"), 1);
     let tail = "M5\nM2\n";
-    let body = placed.strip_suffix(tail).ok_or("生成的 G-code 结尾格式异常")?;
+    let body = placed
+        .strip_suffix(tail)
+        .ok_or("生成的 G-code 结尾格式异常")?;
     Ok(format!("{body}M5\nG0 X{start_x:.3} Y{start_y:.3}\nM2\n"))
 }
 
@@ -258,7 +273,8 @@ impl TextTaskEngine {
         if !(spec.margin_mm.is_finite() && spec.margin_mm >= 0.0) {
             return Err("留边必须是不小于 0 的数字".into());
         }
-        let data = std::fs::read(spec.font_path).map_err(|_| "font file cannot be read".to_owned())?;
+        let data =
+            std::fs::read(spec.font_path).map_err(|_| "font file cannot be read".to_owned())?;
         let positive = |v: Option<f64>, name: &str| -> Result<Option<f64>, String> {
             match v {
                 None => Ok(None),
@@ -276,7 +292,9 @@ impl TextTaskEngine {
 
         let mut size = spec.font_size_mm;
         let (mut paths, mut width, mut height, mut glyphs) = layout(&data, spec, size)?;
-        let fits = |w: f64, h: f64| avail_w.is_none_or(|a| w <= a + 1e-6) && avail_h.is_none_or(|a| h <= a + 1e-6);
+        let fits = |w: f64, h: f64| {
+            avail_w.is_none_or(|a| w <= a + 1e-6) && avail_h.is_none_or(|a| h <= a + 1e-6)
+        };
         if board_w.is_some() || board_h.is_some() {
             if spec.auto_size {
                 // 字号与笔画尺寸近似成正比，字距是固定 mm，迭代几次收敛到能放下的最大字号
@@ -289,7 +307,9 @@ impl TextTaskEngine {
                     }
                     size *= ratio * 0.999;
                     if size < MIN_FONT_SIZE_MM {
-                        return Err(format!("文字太长，放进这块木牌后字高不到 {MIN_FONT_SIZE_MM} mm，请减少字数或分行"));
+                        return Err(format!(
+                            "文字太长，放进这块木牌后字高不到 {MIN_FONT_SIZE_MM} mm，请减少字数或分行"
+                        ));
                     }
                     (paths, width, height, glyphs) = layout(&data, spec, size)?;
                 }
@@ -312,9 +332,15 @@ impl TextTaskEngine {
                 -board_h.map_or(0.0, |b| (b - height) / 2.0),
             ),
         };
-        let frame = HeadRelativeBox { min_x: -start_x, max_x: width - start_x, min_y: -start_y, max_y: height - start_y };
+        let frame = HeadRelativeBox {
+            min_x: -start_x,
+            max_x: width - start_x,
+            min_y: -start_y,
+            max_y: height - start_y,
+        };
 
-        let optimized = path_opt::optimize_with_threshold(&paths, width.max(height).max(1.0)).map_err(|e| e.to_string())?;
+        let optimized = path_opt::optimize_with_threshold(&paths, width.max(height).max(1.0))
+            .map_err(|e| e.to_string())?;
         let stats = optimized.stats;
         let (gcode, preview) = match spec.fill {
             TextFill::Outline | TextFill::Hatch => {
@@ -332,14 +358,21 @@ impl TextTaskEngine {
                     power_scale: None,
                 };
                 let written = gcode::write_outline(&all, &options)?;
-                let preview = gcode::preview_outline_rgba(&all, spec.preview_width_px, spec.preview_height_px, options.width_mm, options.height_mm)?;
+                let preview = gcode::preview_outline_rgba(
+                    &all,
+                    spec.preview_width_px,
+                    spec.preview_height_px,
+                    options.width_mm,
+                    options.height_mm,
+                )?;
                 (place_at_head(&written, start_x, start_y)?, preview)
             }
             TextFill::Fill => {
                 let bitmap = rasterize(&paths, width, height, spec.pixel_size_mm);
                 let rows = bitmap.len();
                 let cols = bitmap[0].len();
-                let plan = raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline").map_err(|e| e.to_string())?;
+                let plan = raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
+                    .map_err(|e| e.to_string())?;
                 let written = gcode::write_raster(
                     &plan,
                     cols,
@@ -347,7 +380,9 @@ impl TextTaskEngine {
                     &gcode::RasterWriterOptions {
                         pixel_size_mm: spec.pixel_size_mm,
                         overscan_mm: spec.overscan_mm,
-                        work_area_width_mm: cols as f64 * spec.pixel_size_mm + 2.0 * spec.overscan_mm + 1.0,
+                        work_area_width_mm: cols as f64 * spec.pixel_size_mm
+                            + 2.0 * spec.overscan_mm
+                            + 1.0,
                         work_area_height_mm: rows as f64 * spec.pixel_size_mm + 1.0,
                         power: spec.power,
                         feed_rate: spec.feed_rate,
@@ -359,9 +394,14 @@ impl TextTaskEngine {
                     },
                 )
                 .map_err(|e| e.to_string())?;
-                let gray = GrayImage::from_fn(cols as u32, rows as u32, |x, y| Luma([bitmap[y as usize][x as usize]]));
+                let gray = GrayImage::from_fn(cols as u32, rows as u32, |x, y| {
+                    Luma([bitmap[y as usize][x as usize]])
+                });
                 // 栅格写出器把图案右移一个过扫描距离
-                (place_at_head(&written, start_x + spec.overscan_mm, start_y)?, image::DynamicImage::ImageLuma8(gray).to_rgba8())
+                (
+                    place_at_head(&written, start_x + spec.overscan_mm, start_y)?,
+                    image::DynamicImage::ImageLuma8(gray).to_rgba8(),
+                )
             }
         };
         let estimate = gcode::estimate_time(&gcode, 3000.0);
@@ -385,7 +425,10 @@ impl TextTaskEngine {
 mod tests {
     use super::*;
 
-    const FONT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
+    const FONT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fonts/geometry.ttf"
+    );
 
     fn spec(text: &str) -> TextTaskSpec<'_> {
         TextTaskSpec {
@@ -418,11 +461,26 @@ mod tests {
         let job = TextTaskEngine::generate(&spec("AB")).unwrap();
         let e = extents(&job.gcode);
         // 激光头起点（0,0）位于笔画范围正中
-        assert!((e.min_x + e.max_x).abs() < 0.01 && (e.min_y + e.max_y).abs() < 0.01, "{e:?}");
+        assert!(
+            (e.min_x + e.max_x).abs() < 0.01 && (e.min_y + e.max_y).abs() < 0.01,
+            "{e:?}"
+        );
         assert!((job.frame.min_x + job.width_mm / 2.0).abs() < 1e-9);
-        assert!(job.gcode.trim_end().ends_with(&format!("G0 X{:.3} Y{:.3}\nM2", job.width_mm / 2.0, job.height_mm / 2.0)), "{}", job.gcode);
+        assert!(
+            job.gcode.trim_end().ends_with(&format!(
+                "G0 X{:.3} Y{:.3}\nM2",
+                job.width_mm / 2.0,
+                job.height_mm / 2.0
+            )),
+            "{}",
+            job.gcode
+        );
 
-        let lower_left = TextTaskEngine::generate(&TextTaskSpec { origin: TextOrigin::LowerLeft, ..spec("AB") }).unwrap();
+        let lower_left = TextTaskEngine::generate(&TextTaskSpec {
+            origin: TextOrigin::LowerLeft,
+            ..spec("AB")
+        })
+        .unwrap();
         let e = extents(&lower_left.gcode);
         assert!(e.min_x.abs() < 0.01 && e.min_y.abs() < 0.01, "{e:?}");
         assert!(lower_left.gcode.contains("G92 X0.000 Y0.000 Z0"));
@@ -437,8 +495,18 @@ mod tests {
             ..spec("ABAB")
         })
         .unwrap();
-        assert!(fitted.width_mm <= 76.0 + 1e-6 && fitted.height_mm <= 26.0 + 1e-6, "{} × {}", fitted.width_mm, fitted.height_mm);
-        assert!(fitted.width_mm > 70.0 || fitted.height_mm > 24.0, "应接近能放下的最大字号：{} × {}", fitted.width_mm, fitted.height_mm);
+        assert!(
+            fitted.width_mm <= 76.0 + 1e-6 && fitted.height_mm <= 26.0 + 1e-6,
+            "{} × {}",
+            fitted.width_mm,
+            fitted.height_mm
+        );
+        assert!(
+            fitted.width_mm > 70.0 || fitted.height_mm > 24.0,
+            "应接近能放下的最大字号：{} × {}",
+            fitted.width_mm,
+            fitted.height_mm
+        );
         assert!(fitted.font_size_mm > 10.0);
 
         // 木牌左下角为起点：笔画在木牌中居中
@@ -453,8 +521,15 @@ mod tests {
         // 激光头在木牌左下角（范围起点 0），笔画右侧到木牌右边的留白等于左侧留白
         let e = extents(&corner.gcode);
         let left = (80.0 - corner.width_mm) / 2.0;
-        assert!(corner.gcode.contains(&format!("G92 X{:.3}", -left)), "{}", &corner.gcode[..300]);
-        assert!(((80.0 - e.max_x) - left).abs() < 0.05, "左右留白应相等：{e:?}");
+        assert!(
+            corner.gcode.contains(&format!("G92 X{:.3}", -left)),
+            "{}",
+            &corner.gcode[..300]
+        );
+        assert!(
+            ((80.0 - e.max_x) - left).abs() < 0.05,
+            "左右留白应相等：{e:?}"
+        );
 
         let err = TextTaskEngine::generate(&TextTaskSpec {
             board_width_mm: Some(30.0),
@@ -463,7 +538,14 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("放不进"), "{err}");
-        assert!(TextTaskEngine::generate(&TextTaskSpec { board_width_mm: Some(3.0), auto_size: true, ..spec("A") }).is_err());
+        assert!(
+            TextTaskEngine::generate(&TextTaskSpec {
+                board_width_mm: Some(3.0),
+                auto_size: true,
+                ..spec("A")
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -493,7 +575,11 @@ mod tests {
         ];
         assert_eq!(scanline_spans(&overlap, 1.0), vec![(0.0, 10.0)]);
 
-        let filled = TextTaskEngine::generate(&TextTaskSpec { fill: TextFill::Fill, ..spec("AB") }).unwrap();
+        let filled = TextTaskEngine::generate(&TextTaskSpec {
+            fill: TextFill::Fill,
+            ..spec("AB")
+        })
+        .unwrap();
         let burns = filled.gcode.lines().filter(|l| l.contains(" S420")).count();
         let outline = TextTaskEngine::generate(&spec("AB")).unwrap();
         assert!(burns > 20, "扫描填充应有大量出光段：{burns}");
@@ -506,7 +592,12 @@ mod tests {
     #[test]
     fn hatch_adds_parallel_lines_to_the_outline() {
         let outline = TextTaskEngine::generate(&spec("A")).unwrap();
-        let hatch = TextTaskEngine::generate(&TextTaskSpec { fill: TextFill::Hatch, pixel_size_mm: 0.2, ..spec("A") }).unwrap();
+        let hatch = TextTaskEngine::generate(&TextTaskSpec {
+            fill: TextFill::Hatch,
+            pixel_size_mm: 0.2,
+            ..spec("A")
+        })
+        .unwrap();
         assert!(hatch.gcode.lines().count() > outline.gcode.lines().count() * 2);
         assert!(TextFill::parse(Some("solid")).is_err());
         assert!(TextOrigin::parse(Some("top")).is_err());

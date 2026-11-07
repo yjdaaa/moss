@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use crate::conversation::{ToolContext, ToolExecutor};
 
-
 /// 默认轮询间隔（4 秒：严格小于官方固件 `PREVIEW_IMAGE_DURATION_MS = 5000`，确保加工副屏 HUD 常驻不断帧）。
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(4);
 /// 最多记住多少条任务状态；超过就整表重来（重新记基线，绝不会因此多播一次）。
@@ -124,11 +123,18 @@ pub struct PollFullSnapshot {
 
 fn extract_pending_approval(body: &serde_json::Value) -> Option<PendingApprovalNotice> {
     let p = body.get("pending_approval")?.as_object()?;
-    let rem = p.get("remaining_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let rem = p
+        .get("remaining_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     if rem == 0 {
         return None;
     }
-    let total = p.get("total_secs").and_then(|v| v.as_u64()).unwrap_or(120).max(rem);
+    let total = p
+        .get("total_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(120)
+        .max(rem);
     let kind_raw = p.get("kind").and_then(|v| v.as_str()).unwrap_or("laser");
     let kind_ascii = match kind_raw {
         "home_control" => "HOME CONTROL",
@@ -141,7 +147,13 @@ fn extract_pending_approval(body: &serde_json::Value) -> Option<PendingApprovalN
     let summary = p
         .get("summary")
         .and_then(|v| v.as_str())
-        .map(|s| s.replace(['\r', '\n'], " ").trim().chars().take(72).collect::<String>())
+        .map(|s| {
+            s.replace(['\r', '\n'], " ")
+                .trim()
+                .chars()
+                .take(72)
+                .collect::<String>()
+        })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "请在电脑 MOSS 点击批准后开始".to_owned());
     Some(PendingApprovalNotice {
@@ -329,10 +341,10 @@ impl AnnounceLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::{ToolOutcome};
+    use crate::conversation::ToolOutcome;
 
     use moss_voice_providers::{BoxFuture, ToolSpec};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::Mutex;
 
     /// 假的宿主：`body` 是下一次 `recent` 返回的 result，可按脚本替换。
@@ -366,12 +378,11 @@ mod tests {
             _: &'a str,
             _: &'a str,
         ) -> BoxFuture<'a, ToolOutcome> {
-            Box::pin(async { panic!("任务观察器只走只读通道，不应调用普通工具") })
+            Box::pin(async {
+                panic!("任务观察器只走只读通道，不应调用普通工具")
+            })
         }
-        fn recent_workflows<'a>(
-            &'a self,
-            _: &'a ToolContext,
-        ) -> BoxFuture<'a, Option<Value>> {
+        fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
             Box::pin(async move {
                 *self.calls.lock().unwrap() += 1;
                 if *self.fail.lock().unwrap() {
@@ -383,7 +394,10 @@ mod tests {
     }
 
     fn context() -> ToolContext {
-        ToolContext { device_id: "d".into(), session_id: "s".into() }
+        ToolContext {
+            device_id: "d".into(),
+            session_id: "s".into(),
+        }
     }
 
     fn job(id: &str, status: &str, sent: u64, total: u64) -> Value {
@@ -399,8 +413,14 @@ mod tests {
     async fn first_poll_is_baseline_and_never_announces_history() {
         let host = FakeHost::new(json!([job("wf-old", "completed", 100, 100)]));
         let mut watcher = JobWatcher::new();
-        assert!(watcher.poll(&host, &context()).await.is_empty(), "基线不该播报");
-        assert!(watcher.poll(&host, &context()).await.is_empty(), "早完成的任务不能补播");
+        assert!(
+            watcher.poll(&host, &context()).await.is_empty(),
+            "基线不该播报"
+        );
+        assert!(
+            watcher.poll(&host, &context()).await.is_empty(),
+            "早完成的任务不能补播"
+        );
         assert_eq!(*host.calls.lock().unwrap(), 2);
     }
 
@@ -416,7 +436,10 @@ mod tests {
         assert_eq!(finished.len(), 1, "{finished:?}");
         assert_eq!(finished[0].workflow_id, "wf-1");
         assert_eq!(finished[0].speech(), "雕刻任务已完成，共 342 行。");
-        assert!(watcher.poll(&host, &context()).await.is_empty(), "同一条只播一次");
+        assert!(
+            watcher.poll(&host, &context()).await.is_empty(),
+            "同一条只播一次"
+        );
     }
 
     #[tokio::test]
@@ -431,14 +454,30 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_and_failed_jobs_say_where_they_stopped() {
-        let host = FakeHost::new(json!([job("wf-c", "sending", 1, 100), job("wf-f", "sending", 2, 100)]));
+        let host = FakeHost::new(json!([
+            job("wf-c", "sending", 1, 100),
+            job("wf-f", "sending", 2, 100)
+        ]));
         let mut watcher = JobWatcher::new();
         watcher.poll(&host, &context()).await;
-        host.set(json!([job("wf-c", "cancelled", 120, 342), job("wf-f", "failed", 88, 342)]));
+        host.set(json!([
+            job("wf-c", "cancelled", 120, 342),
+            job("wf-f", "failed", 88, 342)
+        ]));
         let finished = watcher.poll(&host, &context()).await;
         let speech: Vec<String> = finished.iter().map(FinishedJob::speech).collect();
-        assert!(speech.iter().any(|text| text == "任务已停止，停在第 120 行。"), "{speech:?}");
-        assert!(speech.iter().any(|text| text.contains("任务失败了，停在第 88 行")), "{speech:?}");
+        assert!(
+            speech
+                .iter()
+                .any(|text| text == "任务已停止，停在第 120 行。"),
+            "{speech:?}"
+        );
+        assert!(
+            speech
+                .iter()
+                .any(|text| text.contains("任务失败了，停在第 88 行")),
+            "{speech:?}"
+        );
     }
 
     #[tokio::test]

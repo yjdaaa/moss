@@ -8,12 +8,14 @@ pub mod approval;
 pub mod geometry;
 pub mod risk;
 
-pub use risk::{ALWAYS_ENABLED_TOOLS, RiskLevel, tool_can_be_disabled, tool_never_exposed, tool_risk};
+pub use risk::{
+    ALWAYS_ENABLED_TOOLS, RiskLevel, tool_can_be_disabled, tool_never_exposed, tool_risk,
+};
 
 pub use approval::{
-    APPROVAL_ID_PREFIX, ApprovalConnection, ApprovalKind, ApprovalOutcome, ApprovalPhase, ApprovalRecord, ApprovalSource,
-    ApprovalStatus, AuditAction, AuditDetail, AuditEntry, AuditResult, approval_ttl_seconds, audit_client,
-    safe_action_requires_approval,
+    APPROVAL_ID_PREFIX, ApprovalConnection, ApprovalKind, ApprovalOutcome, ApprovalPhase,
+    ApprovalRecord, ApprovalSource, ApprovalStatus, AuditAction, AuditDetail, AuditEntry,
+    AuditResult, approval_ttl_seconds, audit_client, safe_action_requires_approval,
 };
 
 pub const MATERIAL_LIBRARY_VERSION: u32 = 1;
@@ -44,7 +46,10 @@ pub enum CallerContext {
     /// 局域网配对 token
     Lan { pairing_id: String },
     /// MOSS 内置语音服务（内置语音技术书 §5.2，NV4）：设备与会话由语音服务提供，审计记为 `voice:<设备>`
-    Voice { device_id: String, session_id: String },
+    Voice {
+        device_id: String,
+        session_id: String,
+    },
     /// 回环且无任何凭据（本机其他进程或网页、测试）
     Loopback,
 }
@@ -154,14 +159,19 @@ impl VoiceTelemetry {
 
     pub fn set_device_sessions(&self, sessions: Option<u32>) {
         let value = sessions.map(i64::from).unwrap_or(-1);
-        self.device_sessions.store(value, std::sync::atomic::Ordering::SeqCst);
+        self.device_sessions
+            .store(value, std::sync::atomic::Ordering::SeqCst);
         if sessions.unwrap_or(0) == 0 {
             self.set_pulse(None, 0);
         }
     }
 
     pub fn device_sessions(&self) -> Option<u32> {
-        u32::try_from(self.device_sessions.load(std::sync::atomic::Ordering::SeqCst)).ok()
+        u32::try_from(
+            self.device_sessions
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
+        .ok()
     }
 
     pub fn set_pulse(&self, phase: Option<&str>, level: u8) {
@@ -172,9 +182,14 @@ impl VoiceTelemetry {
             Some("idle") => 1,
             _ => 0,
         };
-        let clamped: u8 = if matches!(code, 2 | 4) { level.min(100) } else { 0 };
+        let clamped: u8 = if matches!(code, 2 | 4) {
+            level.min(100)
+        } else {
+            0
+        };
         let packed = (u16::from(code) << 8) | u16::from(clamped);
-        self.pulse_packed.store(packed, std::sync::atomic::Ordering::SeqCst);
+        self.pulse_packed
+            .store(packed, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn pulse(&self) -> (Option<&'static str>, u8) {
@@ -207,7 +222,9 @@ fn unix_now() -> f64 {
 
 fn current_time_str() -> String {
     let now = std::time::SystemTime::now();
-    let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let duration = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = duration.as_secs();
     let h = (secs / 3600 % 24 + 8) % 24;
     let m = secs / 60 % 60;
@@ -223,7 +240,9 @@ impl Default for McpTelemetry {
 
 impl McpTelemetry {
     pub fn new() -> Self {
-        Self { data: Mutex::new(McpTelemetrySnapshot::default()) }
+        Self {
+            data: Mutex::new(McpTelemetrySnapshot::default()),
+        }
     }
 
     /// 记录一条事件日志（只进日志，不计入消息数）。
@@ -292,7 +311,11 @@ impl McpTelemetry {
                         .iter()
                         .find(|link| &link.id == id && &link.endpoint == endpoint)
                         .cloned()
-                        .unwrap_or_else(|| EndpointLink { id: id.clone(), endpoint: endpoint.clone(), ..EndpointLink::default() })
+                        .unwrap_or_else(|| EndpointLink {
+                            id: id.clone(),
+                            endpoint: endpoint.clone(),
+                            ..EndpointLink::default()
+                        })
                 })
                 .collect();
             lock.connected = lock.endpoints.iter().any(|link| link.connected);
@@ -303,7 +326,11 @@ impl McpTelemetry {
     pub fn link_up(&self, id: &str, endpoint: &str) {
         if let Ok(mut lock) = self.data.lock() {
             if !lock.endpoints.iter().any(|link| link.id == id) {
-                lock.endpoints.push(EndpointLink { id: id.to_owned(), endpoint: endpoint.to_owned(), ..EndpointLink::default() });
+                lock.endpoints.push(EndpointLink {
+                    id: id.to_owned(),
+                    endpoint: endpoint.to_owned(),
+                    ..EndpointLink::default()
+                });
             }
         }
         self.update_link(id, |link| {
@@ -355,7 +382,10 @@ impl McpTelemetry {
     /// 记一次工具调用（接入点与内置语音共用）。
     pub fn record_tool_call(&self, name: &str, caller: &str, outcome: ToolCallOutcome) {
         if let Ok(mut lock) = self.data.lock() {
-            let stat = lock.tool_stats.entry(name.chars().take(64).collect()).or_default();
+            let stat = lock
+                .tool_stats
+                .entry(name.chars().take(64).collect())
+                .or_default();
             stat.calls += 1;
             match outcome {
                 ToolCallOutcome::Ok => {}
@@ -479,12 +509,19 @@ impl ParamCell {
     /// 将当前参数单元按目标功率标尺（如 255 或 1000）等比例重算
     pub fn rescaled_to(&self, target_scale: f64) -> Self {
         let current_scale = self.power_scale.unwrap_or(1000) as f64;
-        if (current_scale - target_scale).abs() < 1e-6 || current_scale <= 0.0 || target_scale <= 0.0 {
+        if (current_scale - target_scale).abs() < 1e-6
+            || current_scale <= 0.0
+            || target_scale <= 0.0
+        {
             return self.clone();
         }
         let ratio = target_scale / current_scale;
-        let rescaled_min = (self.laser_min_power as f64 * ratio).round().clamp(0.0, target_scale) as i32;
-        let rescaled_max = (self.laser_max_power as f64 * ratio).round().clamp(0.0, target_scale) as i32;
+        let rescaled_min = (self.laser_min_power as f64 * ratio)
+            .round()
+            .clamp(0.0, target_scale) as i32;
+        let rescaled_max = (self.laser_max_power as f64 * ratio)
+            .round()
+            .clamp(0.0, target_scale) as i32;
         let mut clone = self.clone();
         clone.laser_min_power = rescaled_min;
         clone.laser_max_power = rescaled_max;
@@ -709,7 +746,11 @@ impl ToolCallResult {
         }
     }
 
-    pub fn with_detail(success: bool, result: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub fn with_detail(
+        success: bool,
+        result: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
             success,
             result: result.into(),
@@ -1026,8 +1067,14 @@ mod telemetry_tests {
     fn telemetry_tracks_each_endpoint_separately() {
         let telemetry = McpTelemetry::new();
         telemetry.register_endpoints(&[
-            ("primary".to_owned(), "wss://a.test/mcp/?token=***".to_owned()),
-            ("extra-1".to_owned(), "wss://b.test/mcp/?token=***".to_owned()),
+            (
+                "primary".to_owned(),
+                "wss://a.test/mcp/?token=***".to_owned(),
+            ),
+            (
+                "extra-1".to_owned(),
+                "wss://b.test/mcp/?token=***".to_owned(),
+            ),
         ]);
         telemetry.link_up("primary", "wss://a.test/mcp/?token=***");
         telemetry.link_up("extra-1", "wss://b.test/mcp/?token=***");
@@ -1037,11 +1084,18 @@ mod telemetry_tests {
         let snapshot = telemetry.snapshot();
         assert!(snapshot.connected, "另一个接入点仍在线");
         assert_eq!(snapshot.client_name, "xiaozhi");
-        assert_eq!(snapshot.endpoints[0].last_error.as_deref(), Some("连接被重置"));
+        assert_eq!(
+            snapshot.endpoints[0].last_error.as_deref(),
+            Some("连接被重置")
+        );
         assert!(!snapshot.endpoints[0].connected && snapshot.endpoints[0].connected_at.is_none());
         assert_eq!(snapshot.endpoints[1].client, "xiaozhi v2.0");
         telemetry.link_up("primary", "wss://a.test/mcp/?token=***");
-        assert_eq!(telemetry.snapshot().endpoints[0].connections, 2, "重连后计数增加");
+        assert_eq!(
+            telemetry.snapshot().endpoints[0].connections,
+            2,
+            "重连后计数增加"
+        );
         assert!(telemetry.snapshot().endpoints[0].last_error.is_none());
         telemetry.link_down("extra-1", None);
         telemetry.link_down("primary", None);
@@ -1049,19 +1103,32 @@ mod telemetry_tests {
         assert!(!snapshot.connected);
         assert!(snapshot.client_name.is_empty(), "全部断开后清空客户端标识");
         telemetry.link_down("nope", Some("x"));
-        assert_eq!(telemetry.snapshot().endpoints.len(), 2, "断开未登记的编号不新增条目");
+        assert_eq!(
+            telemetry.snapshot().endpoints.len(),
+            2,
+            "断开未登记的编号不新增条目"
+        );
         telemetry.link_up("solo", "ws://127.0.0.1/mcp/");
         assert!(telemetry.snapshot().connected, "单独运行的桥自动登记");
         telemetry.link_down("solo", None);
         // 重新登记：编号与地址都没变的保留计数，新的从零开始，列表外的删除
         telemetry.register_endpoints(&[
-            ("primary".to_owned(), "wss://a.test/mcp/?token=***".to_owned()),
+            (
+                "primary".to_owned(),
+                "wss://a.test/mcp/?token=***".to_owned(),
+            ),
             ("extra-2".to_owned(), "wss://c.test/mcp/".to_owned()),
         ]);
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.endpoints.len(), 2);
         assert_eq!(snapshot.endpoints[0].connections, 2);
-        assert_eq!((snapshot.endpoints[1].id.as_str(), snapshot.endpoints[1].connections), ("extra-2", 0));
+        assert_eq!(
+            (
+                snapshot.endpoints[1].id.as_str(),
+                snapshot.endpoints[1].connections
+            ),
+            ("extra-2", 0)
+        );
     }
 
     #[test]
@@ -1084,10 +1151,28 @@ mod caller_context_tests {
     #[test]
     fn caller_context_labels_are_stable() {
         assert_eq!(CallerContext::Desktop.label(), "desktop");
-        assert_eq!(CallerContext::Approval { approval_id: "apr_1".into() }.label(), "approval");
-        assert_eq!(CallerContext::Gateway { session_id: "s".into() }.label(), "gateway");
+        assert_eq!(
+            CallerContext::Approval {
+                approval_id: "apr_1".into()
+            }
+            .label(),
+            "approval"
+        );
+        assert_eq!(
+            CallerContext::Gateway {
+                session_id: "s".into()
+            }
+            .label(),
+            "gateway"
+        );
         assert_eq!(CallerContext::McpBridge.label(), "mcp_bridge");
-        assert_eq!(CallerContext::Lan { pairing_id: "p".into() }.label(), "lan");
+        assert_eq!(
+            CallerContext::Lan {
+                pairing_id: "p".into()
+            }
+            .label(),
+            "lan"
+        );
         assert_eq!(CallerContext::Loopback.label(), "loopback");
     }
 }

@@ -18,30 +18,30 @@
 
 pub mod audio;
 mod barge;
-mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
+pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod conversation;
-pub mod jobs; // 加工结束主动播报（2026-11-02 用户决定）
 pub mod fast;
-pub mod jev;
-pub mod vision;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
 pub mod goggle_bot;
+pub mod home_tools;
+pub mod jev;
+pub mod jobs; // 加工结束主动播报（2026-11-02 用户决定）
+pub mod memory;
+pub mod music;
+mod ota;
+pub mod person_context;
+pub mod persona; // n59 说话角色（只改语气，安全铁律锁死在末尾）
+pub mod plugins;
 pub mod preview_push;
-pub mod wake_assets; // n61 设备唤醒词资源包：私密窗口逐台确认推送（2026-11-06）
+mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
+mod session;
 #[cfg(test)]
 mod speaker; // NV16 synthetic-only policy, default disabled
 pub mod speaker_enrollment;
-pub mod person_context;
-pub mod home_tools;
-pub mod music;
-pub mod persona; // n59 说话角色（只改语气，安全铁律锁死在末尾）
-pub mod memory;
-pub mod context; // NV19-01 structured long-term context model (not wired yet)
-pub mod plugins;
-mod ota;
-mod session;
 mod state;
 pub mod tools;
+pub mod vision;
+pub mod wake_assets; // n61 设备唤醒词资源包：私密窗口逐台确认推送（2026-11-06）
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -51,16 +51,23 @@ use moss_xiaozhi_proto::TokenSigner;
 use serde::Serialize;
 
 pub use audio::{LocalVadFactory, VadConfig, VadFactory};
-pub use conversation::{Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome};
-pub use jev::{DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter};
-pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
-pub use preview_push::{StyleSceneGifCatalog, cached_style_scene_gifs};
-pub use tools::{HostTools, ToolHost, ToolHostResult};
-pub use ota::{MDNS_HOST_LABEL, is_virtual_or_tunnel_ipv4, lan_ipv4_addrs, local_ip as primary_lan_ip};
-pub use state::{
-    DebugToolTrace, DiagCategory, DiagnosticsLog, EventDrops, EventLevel, EventRecord, MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS,
-    MAX_TIMINGS, ServerEvent, SessionView, ToolTiming, TurnDebugTrace, TurnTiming, scrub_debug_text,
+pub use conversation::{
+    Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome,
 };
+pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
+pub use jev::{
+    DecisionClient, DecisionError, JevFilterOptions, OpenRouterDecisionClient, VoiceJevFilter,
+};
+pub use ota::{
+    MDNS_HOST_LABEL, is_virtual_or_tunnel_ipv4, lan_ipv4_addrs, local_ip as primary_lan_ip,
+};
+pub use preview_push::{StyleSceneGifCatalog, cached_style_scene_gifs};
+pub use state::{
+    DebugToolTrace, DiagCategory, DiagnosticsLog, EventDrops, EventLevel, EventRecord,
+    MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS, MAX_TIMINGS, ServerEvent, SessionView, ToolTiming,
+    TurnDebugTrace, TurnTiming, scrub_debug_text,
+};
+pub use tools::{HostTools, ToolHost, ToolHostResult};
 /// 设备登记状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,12 +102,19 @@ pub trait DeviceRegistry: Send + Sync {
     /// 设备 token 的签名密钥（首次调用时由宿主生成并保存）。
     fn token_secret(&self) -> Result<Vec<u8>, String>;
     /// Register a token-verified session against CURRENT authorization, after hello.
-    fn open_session(&self, device: &str, client: &str, session: &str) -> Result<Arc<std::sync::atomic::AtomicBool>, String>;
+    fn open_session(
+        &self,
+        device: &str,
+        client: &str,
+        session: &str,
+    ) -> Result<Arc<std::sync::atomic::AtomicBool>, String>;
     /// NV12 pure read-only authorization, no seen/last_seen writes or session creation.
     /// Default deny protects other registry implementations until explicitly updated.
     /// Returns the current grant generation; a previously acquired HTTP permit may
     /// not revive after revoke and allow, even if both happen while a model is working.
-    fn authorize_http(&self, _device: &str, _client: &str) -> Result<Option<u64>, String> { Ok(None) }
+    fn authorize_http(&self, _device: &str, _client: &str) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
     fn close_session(&self, session: &str);
     /// 已连接（通过授权）的设备会话数变化（NV5：桌面端据此更新顶栏的设备状态）。
     fn sessions_changed(&self, _count: usize) {}
@@ -124,7 +138,8 @@ pub(crate) struct SessionLease {
 }
 impl Drop for SessionLease {
     fn drop(&mut self) {
-        self.allowed.store(false, std::sync::atomic::Ordering::Release);
+        self.allowed
+            .store(false, std::sync::atomic::Ordering::Release);
         self.registry.close_session(&self.session);
     }
 }
@@ -293,9 +308,8 @@ pub(crate) struct Shared {
     /// 同一条加工任务只让一个在线会话播报结束。
     pub job_announcements: jobs::AnnounceLog,
     /// 桌面端 → 已连接设备的即时请求：按设备 MAC 绑定当前活跃会话（带 session_id 与 MCP 能力标志）
-    pub device_requests: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<String, DeviceRequestHandle>>,
-    >,
+    pub device_requests:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, DeviceRequestHandle>>>,
 }
 
 impl Shared {
@@ -308,11 +322,17 @@ impl Shared {
 }
 
 pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub(crate) fn unix_now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 /// 运行中的内置语音服务。丢弃或调用 [`stop`](Self::stop) 时关闭。
 pub struct VoiceServer {
@@ -332,7 +352,9 @@ fn bind(ip: IpAddr, port: u16, label: &str) -> Result<std::net::TcpListener, Str
             format!("{label}端口 {port} 无法监听：{error}")
         }
     })?;
-    listener.set_nonblocking(true).map_err(|error| format!("{label}端口设置失败：{error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("{label}端口设置失败：{error}"))?;
     Ok(listener)
 }
 
@@ -352,7 +374,10 @@ impl VoiceServer {
         let ws_listener = bind(config.bind, config.ws_port, "设备连接（WebSocket）")?;
         let http_listener = bind(config.bind, config.http_port, "OTA ")?;
         let ws_port = ws_listener.local_addr().map_err(|e| e.to_string())?.port();
-        let http_port = http_listener.local_addr().map_err(|e| e.to_string())?.port();
+        let http_port = http_listener
+            .local_addr()
+            .map_err(|e| e.to_string())?
+            .port();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("moss-voice")
@@ -364,8 +389,8 @@ impl VoiceServer {
             config: config.clone(),
             ws_port,
             http_port,
-            vision_quotas:Arc::new(vision::VisionQuotas::default()),
-            vision_photos:Arc::new(vision::VisionPhotos::default()),
+            vision_quotas: Arc::new(vision::VisionQuotas::default()),
+            vision_photos: Arc::new(vision::VisionPhotos::default()),
             camera_preview: Arc::new(vision::CameraPreviewStore::default()),
             preview_store: Arc::new(preview_push::PreviewStore::default()),
             assets_store: wake_assets::AssetsStore::default(),
@@ -377,7 +402,9 @@ impl VoiceServer {
             job_announcements: jobs::AnnounceLog::default(),
             device_requests: Default::default(),
         });
-        shared.state.event(format!("内置语音服务已启动：设备连接端口 {ws_port}，OTA 端口 {http_port}"));
+        shared.state.event(format!(
+            "内置语音服务已启动：设备连接端口 {ws_port}，OTA 端口 {http_port}"
+        ));
         let ws_app = session::router(shared.clone());
         let http_app = ota::router(shared.clone())
             .merge(vision::router(shared.clone()))
@@ -391,16 +418,22 @@ impl VoiceServer {
         runtime.spawn(async move {
             match tokio::net::TcpListener::from_std(ws_listener) {
                 Ok(listener) => {
-                    let _ = axum::serve(listener, ws_app.into_make_service_with_connect_info::<SocketAddr>())
-                        .with_graceful_shutdown(async move {
-                            let _ = stop_ws.wait_for(|stop| *stop).await;
-                        })
-                        .await;
+                    let _ = axum::serve(
+                        listener,
+                        ws_app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(async move {
+                        let _ = stop_ws.wait_for(|stop| *stop).await;
+                    })
+                    .await;
                 }
                 Err(error) => events.state.event(
-                    EventRecord::error(DiagCategory::Network, "设备连接端口启动失败，小智连不上 MOSS")
-                        .hint("端口可能被别的程序占用：关掉占用的程序或在设置里换端口后重启内置服务")
-                        .detail(error.to_string()),
+                    EventRecord::error(
+                        DiagCategory::Network,
+                        "设备连接端口启动失败，小智连不上 MOSS",
+                    )
+                    .hint("端口可能被别的程序占用：关掉占用的程序或在设置里换端口后重启内置服务")
+                    .detail(error.to_string()),
                 ),
             }
         });
@@ -408,16 +441,22 @@ impl VoiceServer {
         runtime.spawn(async move {
             match tokio::net::TcpListener::from_std(http_listener) {
                 Ok(listener) => {
-                    let _ = axum::serve(listener, http_app.into_make_service_with_connect_info::<SocketAddr>())
-                        .with_graceful_shutdown(async move {
-                            let _ = stop_http.wait_for(|stop| *stop).await;
-                        })
-                        .await;
+                    let _ = axum::serve(
+                        listener,
+                        http_app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(async move {
+                        let _ = stop_http.wait_for(|stop| *stop).await;
+                    })
+                    .await;
                 }
                 Err(error) => events.state.event(
-                    EventRecord::error(DiagCategory::Network, "OTA 端口启动失败，小智开机拿不到连接地址")
-                        .hint("端口可能被别的程序占用：关掉占用的程序或在设置里换端口后重启内置服务")
-                        .detail(error.to_string()),
+                    EventRecord::error(
+                        DiagCategory::Network,
+                        "OTA 端口启动失败，小智开机拿不到连接地址",
+                    )
+                    .hint("端口可能被别的程序占用：关掉占用的程序或在设置里换端口后重启内置服务")
+                    .detail(error.to_string()),
                 ),
             }
         });
@@ -426,7 +465,14 @@ impl VoiceServer {
         } else {
             None
         };
-        Ok(Self { runtime: Some(runtime), shutdown: shutdown_tx, shared, ws_port, http_port, mdns })
+        Ok(Self {
+            runtime: Some(runtime),
+            shutdown: shutdown_tx,
+            shared,
+            ws_port,
+            http_port,
+            mdns,
+        })
     }
 
     pub fn ws_port(&self) -> u16 {
@@ -477,7 +523,8 @@ impl VoiceServer {
         if sender.send(request).is_err() {
             let message = format!("设备 {device_id} 的会话刚刚结束，请求未送达");
             self.shared.state.event(
-                EventRecord::warn(DiagCategory::Device, message.clone()).hint("设备刚断开：等它重新连上后再试"),
+                EventRecord::warn(DiagCategory::Device, message.clone())
+                    .hint("设备刚断开：等它重新连上后再试"),
             );
             return Err(message);
         }
@@ -489,14 +536,16 @@ impl VoiceServer {
     /// 只在设备当前会话上报了 user-only 工具 `self.assets.set_download_url` 时发送；
     /// 调用方（私密窗口）负责逐台明确确认。
     pub fn install_wake_assets(&self, device_id: &str, package: Vec<u8>) -> Result<(), String> {
-        let supported = self
-            .shared
-            .state
-            .sessions()
-            .iter()
-            .any(|s| s.device_id == device_id && s.device_tools.iter().any(|t| t == "self.assets.set_download_url"));
+        let supported = self.shared.state.sessions().iter().any(|s| {
+            s.device_id == device_id
+                && s.device_tools
+                    .iter()
+                    .any(|t| t == "self.assets.set_download_url")
+        });
         if !supported {
-            return Err(format!("设备 {device_id} 不在线，或固件不支持网络更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"));
+            return Err(format!(
+                "设备 {device_id} 不在线，或固件不支持网络更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"
+            ));
         }
         let token = self.shared.assets_store.stage(device_id, package)?;
         self.device_request(device_id, DeviceRequest::InstallAssets { token })
@@ -521,7 +570,10 @@ impl VoiceServer {
         {
             return Err("该小智设备固件未上报摄像头工具（self.camera.take_photo）".into());
         }
-        let (ticket, seq) = self.shared.camera_preview.issue_ticket(device_id, unix_now())?;
+        let (ticket, seq) = self
+            .shared
+            .camera_preview
+            .issue_ticket(device_id, unix_now())?;
         if let Err(err) = self.device_request(
             device_id,
             DeviceRequest::CapturePhoto {
@@ -551,7 +603,10 @@ impl VoiceServer {
                 Some(s.device_tools.iter().any(|t| t == "self.camera.take_photo"))
             }
         });
-        let snap = self.shared.camera_preview.snapshot(device_id, after_seq, unix_now());
+        let snap = self
+            .shared
+            .camera_preview
+            .snapshot(device_id, after_seq, unix_now());
         serde_json::json!({
             "running": self.runtime.is_some(),
             "online": online,
@@ -613,10 +668,7 @@ impl VoiceServer {
         };
         if let Some(device_id) = target_device {
             let token = Some(stage_for_device(device_id)?);
-            self.device_request(
-                device_id,
-                DeviceRequest::PreviewScreen { token, summary },
-            )?;
+            self.device_request(device_id, DeviceRequest::PreviewScreen { token, summary })?;
             return Ok(1);
         }
         let online_devices: Vec<String> = self

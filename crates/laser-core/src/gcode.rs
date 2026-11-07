@@ -1,8 +1,8 @@
 use std::f64::consts::TAU;
 use std::fmt::Write;
 
-use laser_contracts::geometry::Paths;
 use crate::raster::RasterPlan;
+use laser_contracts::geometry::Paths;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Move {
@@ -78,10 +78,7 @@ pub fn write_outline(paths: &Paths, options: &WriterOptions) -> Result<String, &
             } else {
                 String::new()
             };
-            lines.push(format!(
-                "G1 X{x:.3} Y{y:.3} S{}{f_part}",
-                options.power
-            ));
+            lines.push(format!("G1 X{x:.3} Y{y:.3} S{}{f_part}", options.power));
         }
         if options.auto_close && path.len() > 2 && path.last() != path.first() {
             let f_part = if current_feed != Some(options.feed_rate) {
@@ -322,12 +319,23 @@ pub fn write_raster(
                 let x_coord = line_segs[0].start_x_mm;
                 let mut shifted_runs: Vec<(f64, f64)> = line_segs
                     .iter()
-                    .map(|seg| (seg.y_mm + options.overscan_mm, seg.end_y_mm + options.overscan_mm))
+                    .map(|seg| {
+                        (
+                            seg.y_mm + options.overscan_mm,
+                            seg.end_y_mm + options.overscan_mm,
+                        )
+                    })
                     .collect();
                 shifted_runs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-                let min_start = shifted_runs.iter().map(|(s, _)| *s).fold(f64::INFINITY, f64::min);
-                let max_end = shifted_runs.iter().map(|(_, e)| *e).fold(f64::NEG_INFINITY, f64::max);
+                let min_start = shifted_runs
+                    .iter()
+                    .map(|(s, _)| *s)
+                    .fold(f64::INFINITY, f64::min);
+                let max_end = shifted_runs
+                    .iter()
+                    .map(|(_, e)| *e)
+                    .fold(f64::NEG_INFINITY, f64::max);
                 let scan_start = (min_start - options.overscan_mm).max(0.0);
                 let scan_end = (max_end + options.overscan_mm).min(options.work_area_height_mm);
 
@@ -362,12 +370,23 @@ pub fn write_raster(
                 let y_coord = line_segs[0].y_mm;
                 let mut shifted_runs: Vec<(f64, f64)> = line_segs
                     .iter()
-                    .map(|seg| (seg.start_x_mm + options.overscan_mm, seg.end_x_mm + options.overscan_mm))
+                    .map(|seg| {
+                        (
+                            seg.start_x_mm + options.overscan_mm,
+                            seg.end_x_mm + options.overscan_mm,
+                        )
+                    })
                     .collect();
                 shifted_runs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-                let min_start = shifted_runs.iter().map(|(s, _)| *s).fold(f64::INFINITY, f64::min);
-                let max_end = shifted_runs.iter().map(|(_, e)| *e).fold(f64::NEG_INFINITY, f64::max);
+                let min_start = shifted_runs
+                    .iter()
+                    .map(|(s, _)| *s)
+                    .fold(f64::INFINITY, f64::min);
+                let max_end = shifted_runs
+                    .iter()
+                    .map(|(_, e)| *e)
+                    .fold(f64::NEG_INFINITY, f64::max);
                 let scan_start = (min_start - options.overscan_mm).max(0.0);
                 let scan_end = (max_end + options.overscan_mm).min(options.work_area_width_mm);
 
@@ -454,7 +473,12 @@ pub fn write_raster(
 /// 把像素坐标系中的线段裁剪到 `[min, max]` 矩形内（Liang–Barsky），返回可见部分的参数区间 `(t0, t1)`；
 /// 完全不可见时返回 `None`。预览只栅格化可见部分，单段工作量因此以画布对角线为上限，
 /// 不会因 `X1e12` 这类超大坐标把步数推到 `u32::MAX` 而卡死（2026-11-05 修订）。
-fn clip_segment(p0: (f64, f64), p1: (f64, f64), min: (f64, f64), max: (f64, f64)) -> Option<(f64, f64)> {
+fn clip_segment(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    min: (f64, f64),
+    max: (f64, f64),
+) -> Option<(f64, f64)> {
     let dx = p1.0 - p0.0;
     let dy = p1.1 - p0.1;
     let mut t0 = 0.0_f64;
@@ -510,8 +534,10 @@ pub fn preview_outline(
         if path.len() < 2 {
             continue;
         }
-        let mut pairs: Vec<(laser_contracts::geometry::Point, laser_contracts::geometry::Point)> =
-            path.windows(2).map(|w| (w[0], w[1])).collect();
+        let mut pairs: Vec<(
+            laser_contracts::geometry::Point,
+            laser_contracts::geometry::Point,
+        )> = path.windows(2).map(|w| (w[0], w[1])).collect();
         if path.len() > 2 {
             let first = path[0];
             let last = *path.last().unwrap();
@@ -626,8 +652,10 @@ pub fn preview_outline_rgba_with_options(
         if path.len() < 2 {
             continue;
         }
-        let mut pairs: Vec<(laser_contracts::geometry::Point, laser_contracts::geometry::Point)> =
-            path.windows(2).map(|w| (w[0], w[1])).collect();
+        let mut pairs: Vec<(
+            laser_contracts::geometry::Point,
+            laser_contracts::geometry::Point,
+        )> = path.windows(2).map(|w| (w[0], w[1])).collect();
         if close_paths && path.len() > 2 {
             let first = path[0];
             let last = *path.last().unwrap();
@@ -808,14 +836,23 @@ pub fn motion_extents(text: &str) -> Result<Option<MotionExtents>, String> {
     let mut absolute = true;
     let mut unit = 1.0;
     let mut motion = 0;
-    let mut extents = MotionExtents { min_x: 0.0, max_x: 0.0, min_y: 0.0, max_y: 0.0 };
+    let mut extents = MotionExtents {
+        min_x: 0.0,
+        max_x: 0.0,
+        min_y: 0.0,
+        max_y: 0.0,
+    };
     let mut moved = false;
     for (index, line) in text.lines().enumerate() {
         let ws = words(line);
         if ws.is_empty() {
             continue;
         }
-        let g_codes: Vec<f64> = ws.iter().filter(|(l, _)| *l == 'G').map(|(_, v)| *v).collect();
+        let g_codes: Vec<f64> = ws
+            .iter()
+            .filter(|(l, _)| *l == 'G')
+            .map(|(_, v)| *v)
+            .collect();
         let has = |code: f64| g_codes.iter().any(|v| (v - code).abs() < 1e-9);
         let word = |letter: char| ws.iter().rev().find(|(l, _)| *l == letter).map(|(_, v)| *v);
         if has(20.0) {
@@ -845,8 +882,14 @@ pub fn motion_extents(text: &str) -> Result<Option<MotionExtents>, String> {
             }
             continue;
         }
-        if [53.0, 28.0, 30.0, 10.0].iter().any(|code| has(*code)) && (x.is_some() || y.is_some() || has(28.0) || has(30.0)) {
-            return Err(format!("第 {} 行使用机床坐标、回参考点或改坐标系指令（{}），无法从文件计算加工范围", index + 1, line.trim()));
+        if [53.0, 28.0, 30.0, 10.0].iter().any(|code| has(*code))
+            && (x.is_some() || y.is_some() || has(28.0) || has(30.0))
+        {
+            return Err(format!(
+                "第 {} 行使用机床坐标、回参考点或改坐标系指令（{}），无法从文件计算加工范围",
+                index + 1,
+                line.trim()
+            ));
         }
         for code in &g_codes {
             if [0.0, 1.0, 2.0, 3.0].iter().any(|m| (code - m).abs() < 1e-9) {
@@ -874,7 +917,10 @@ pub fn motion_extents(text: &str) -> Result<Option<MotionExtents>, String> {
                 extents.include(cx - radius, cy - radius);
                 extents.include(cx + radius, cy + radius);
             } else {
-                let (cx, cy) = (sx + word('I').unwrap_or(0.0) * unit, sy + word('J').unwrap_or(0.0) * unit);
+                let (cx, cy) = (
+                    sx + word('I').unwrap_or(0.0) * unit,
+                    sy + word('J').unwrap_or(0.0) * unit,
+                );
                 let radius = (sx - cx).hypot(sy - cy);
                 let start = (sy - cy).atan2(sx - cx);
                 let end = (ty - cy).atan2(tx - cx);
@@ -882,9 +928,23 @@ pub fn motion_extents(text: &str) -> Result<Option<MotionExtents>, String> {
                 let tau = std::f64::consts::TAU;
                 // 逆时针（G3）从 start 扫到 end；顺时针（G2）反向
                 let (from, sweep) = if motion == 3 {
-                    (start, if full { tau } else { (end - start).rem_euclid(tau) })
+                    (
+                        start,
+                        if full {
+                            tau
+                        } else {
+                            (end - start).rem_euclid(tau)
+                        },
+                    )
                 } else {
-                    (end, if full { tau } else { (start - end).rem_euclid(tau) })
+                    (
+                        end,
+                        if full {
+                            tau
+                        } else {
+                            (start - end).rem_euclid(tau)
+                        },
+                    )
                 };
                 for quadrant in 0..4 {
                     let angle = f64::from(quadrant) * std::f64::consts::FRAC_PI_2;
@@ -1053,7 +1113,10 @@ pub fn detect_gcode_power_scale(text: &str) -> Option<f64> {
         let trimmed = line.trim();
         if let Some(pos) = trimmed.find("$30=") {
             let rest = &trimmed[pos + 4..];
-            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            let num_str: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
             if let Ok(val) = num_str.parse::<f64>() {
                 if val > 0.0 {
                     return Some(val);
@@ -1081,7 +1144,9 @@ pub fn rescale_gcode_power(text: &str, from_scale: f64, to_scale: f64) -> String
         let mut chars = content.chars().peekable();
         while let Some(c) = chars.next() {
             if (c == 'S' || c == 's')
-                && chars.peek().is_some_and(|next| next.is_ascii_digit() || *next == '+' || *next == '-')
+                && chars
+                    .peek()
+                    .is_some_and(|next| next.is_ascii_digit() || *next == '+' || *next == '-')
             {
                 let mut num_str = String::new();
                 while let Some(&next) = chars.peek() {
@@ -1126,31 +1191,46 @@ mod tests {
     #[test]
     fn motion_extents_follow_modes_offsets_units_and_arcs() {
         // 生成任务的典型开头：G92 把当前位置设为原点，再走 0..80 × 0..20
-        let job = "G21\nG90\nG92 X0 Y0 Z0\nM4 S0\nG0 X0 Y0\nG1 X80 Y0 S420\nG1 X80 Y20\nG0 X0 Y0\nM5";
+        let job =
+            "G21\nG90\nG92 X0 Y0 Z0\nM4 S0\nG0 X0 Y0\nG1 X80 Y0 S420\nG1 X80 Y20\nG0 X0 Y0\nM5";
         let e = motion_extents(job).unwrap().unwrap();
         assert_eq!((e.width(), e.height()), (80.0, 20.0));
         // 相对坐标与英寸
-        let e = motion_extents("G91\nG1 X10 Y5\nG1 X10 Y5").unwrap().unwrap();
+        let e = motion_extents("G91\nG1 X10 Y5\nG1 X10 Y5")
+            .unwrap()
+            .unwrap();
         assert_eq!((e.max_x, e.max_y), (20.0, 10.0));
         let e = motion_extents("G20\nG90\nG1 X2 Y1").unwrap().unwrap();
         assert!((e.max_x - 50.8).abs() < 1e-9 && (e.max_y - 25.4).abs() < 1e-9);
         // 中途 G92 改原点：之后的 X0 实际在开始点右侧 30 mm
-        let e = motion_extents("G90\nG0 X30\nG92 X0\nG1 X100").unwrap().unwrap();
+        let e = motion_extents("G90\nG0 X30\nG92 X0\nG1 X100")
+            .unwrap()
+            .unwrap();
         assert_eq!(e.max_x, 130.0);
         // 负方向同样计入
-        let e = motion_extents("G90\nG1 X-15 Y-5\nG1 X10 Y10").unwrap().unwrap();
+        let e = motion_extents("G90\nG1 X-15 Y-5\nG1 X10 Y10")
+            .unwrap()
+            .unwrap();
         assert_eq!((e.width(), e.height()), (25.0, 15.0));
         // 逆时针半圆从 (10,0) 绕 (0,0) 到 (-10,0)，经过最高点 (0,10)
-        let e = motion_extents("G90\nG0 X10 Y0\nG3 X-10 Y0 I-10 J0").unwrap().unwrap();
+        let e = motion_extents("G90\nG0 X10 Y0\nG3 X-10 Y0 I-10 J0")
+            .unwrap()
+            .unwrap();
         assert!((e.max_y - 10.0).abs() < 1e-9 && e.min_y.abs() < 1e-9);
         // 顺时针同一半圆经过最低点 (0,-10)
-        let e = motion_extents("G90\nG0 X10 Y0\nG2 X-10 Y0 I-10 J0").unwrap().unwrap();
+        let e = motion_extents("G90\nG0 X10 Y0\nG2 X-10 Y0 I-10 J0")
+            .unwrap()
+            .unwrap();
         assert!((e.min_y + 10.0).abs() < 1e-9 && e.max_y.abs() < 1e-9);
         // 整圆
-        let e = motion_extents("G90\nG0 X10 Y0\nG2 X10 Y0 I-10 J0").unwrap().unwrap();
+        let e = motion_extents("G90\nG0 X10 Y0\nG2 X10 Y0 I-10 J0")
+            .unwrap()
+            .unwrap();
         assert!((e.width() - 20.0).abs() < 1e-9 && (e.height() - 20.0).abs() < 1e-9);
         // 模态 G1 下只写坐标的行也算移动；注释里的坐标不算
-        let e = motion_extents("G1 X5\nX40 ; X999\n(Y999) Y7").unwrap().unwrap();
+        let e = motion_extents("G1 X5\nX40 ; X999\n(Y999) Y7")
+            .unwrap()
+            .unwrap();
         assert_eq!((e.max_x, e.max_y), (40.0, 7.0));
         assert_eq!(motion_extents("G21\nM5\n").unwrap(), None);
         assert!(motion_extents("G53 G0 X0 Y0").is_err());
@@ -1252,7 +1332,10 @@ mod tests {
     fn preview_with_huge_coordinates_finishes_quickly_and_stays_bounded() {
         // X1e12 让旧实现的单段步数饱和到 u32::MAX（约 43 亿次循环），预览接口会被拖死
         let moves = parse_moves("G0 X0 Y2\nG1 X1e12 Y2 S500\nG1 X1e12 Y-1e12\n");
-        let path: Vec<_> = moves.iter().map(|m| (m.x.unwrap_or(0.0), m.y.unwrap_or(0.0))).collect();
+        let path: Vec<_> = moves
+            .iter()
+            .map(|m| (m.x.unwrap_or(0.0), m.y.unwrap_or(0.0)))
+            .collect();
         assert_eq!(path[1], (1e12, 2.0));
         let paths = vec![path];
         let started = std::time::Instant::now();
@@ -1263,7 +1346,11 @@ mod tests {
         assert_eq!(gray.get_pixel(50, 80).0[0], 255);
         let rgba = preview_outline_rgba_with_options(&paths, 800, 600, 10.0, 10.0, false).unwrap();
         assert_eq!(rgba.dimensions(), (800, 600));
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "预览耗时 {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "预览耗时 {:?}",
+            started.elapsed()
+        );
         // 完全落在画布外的超大线段直接跳过
         let outside = vec![vec![(-1e15, -1e15), (-1e12, -2e12)]];
         let blank = preview_outline(&outside, 50, 50, 10.0, 10.0).unwrap();
@@ -1276,11 +1363,19 @@ mod tests {
         let preview = preview_outline(&paths, 101, 101, 10.0, 10.0).unwrap();
         assert_eq!(preview.get_pixel(50, 20).0[0], 0);
         assert_eq!(preview.get_pixel(50, 80).0[0], 255);
-        let output = write_outline(&paths, &WriterOptions {
-            width_mm: 10.0, height_mm: 10.0, power: 120,
-            feed_rate: 600, auto_close: false, laser_mode: "M4",
-            power_scale: None,
-        }).unwrap();
+        let output = write_outline(
+            &paths,
+            &WriterOptions {
+                width_mm: 10.0,
+                height_mm: 10.0,
+                power: 120,
+                feed_rate: 600,
+                auto_close: false,
+                laser_mode: "M4",
+                power_scale: None,
+            },
+        )
+        .unwrap();
         assert!(output.contains("G1 X10.000 Y8.000"));
     }
 
@@ -1307,10 +1402,7 @@ M5
 
     #[test]
     fn raster_writer_omits_redundant_m5_and_inherits_modal_feed_rate() {
-        let bitmap = vec![
-            vec![0, 0, 255, 0],
-            vec![255, 0, 0, 255],
-        ];
+        let bitmap = vec![vec![0, 0, 255, 0], vec![255, 0, 0, 255]];
         let plan = crate::raster::raster_plan(&bitmap, "scanline").unwrap();
         let options = RasterWriterOptions {
             pixel_size_mm: 0.1,
@@ -1328,11 +1420,17 @@ M5
         let gcode = write_raster(&plan, 4, 2, &options).unwrap();
         // 验证：中间各行换向处不含 M5，整个 G-code 仅在结束时出现一次 M5
         let m5_count = gcode.lines().filter(|l| l.trim() == "M5").count();
-        assert_eq!(m5_count, 1, "M5 should only appear once at the very end of the job");
+        assert_eq!(
+            m5_count, 1,
+            "M5 should only appear once at the very end of the job"
+        );
         // 验证：F3000 仅在首条 G1 出现，后续 G1 模态继承不再输出 F3000
         let f_count = gcode.lines().filter(|l| l.contains("F3000")).count();
         // 开头有 G0 F3000，以及首个 G1 带 F3000，共 2 次
-        assert_eq!(f_count, 2, "F3000 should only be output on initial G0 and first modal G1");
+        assert_eq!(
+            f_count, 2,
+            "F3000 should only be output on initial G0 and first modal G1"
+        );
     }
 
     #[test]

@@ -18,7 +18,10 @@ fn error_value(code: &str, message: &str) -> Value {
 
 #[cfg(mobile)]
 fn desktop_only<T>(_: T) -> CmdResult {
-    Err(error_value("voice_desktop_only", "语音中心仅在 MOSS 桌面端可用"))
+    Err(error_value(
+        "voice_desktop_only",
+        "语音中心仅在 MOSS 桌面端可用",
+    ))
 }
 
 /// 改写设置、启停进程、读日志的命令只接受后端地址上的主窗口（见 [`crate::is_trusted_main`]）。
@@ -27,7 +30,10 @@ fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), Value> {
     if crate::window_is_trusted_main(window) {
         Ok(())
     } else {
-        Err(error_value("voice_acl_denied", "只能在 MOSS 主窗口修改语音中心"))
+        Err(error_value(
+            "voice_acl_denied",
+            "只能在 MOSS 主窗口修改语音中心",
+        ))
     }
 }
 
@@ -44,10 +50,10 @@ mod imp {
 
     /// Tauri 托管状态：后端未启动时为空。
     pub struct VoiceState(
-    pub Option<Arc<VoiceCenter>>,
-    /// 同一份后端句柄：严格模式开关要写运行目录 `.env` 并即时生效（n27）。
-    pub Option<Arc<laser_host::HostApplication>>,
-);
+        pub Option<Arc<VoiceCenter>>,
+        /// 同一份后端句柄：严格模式开关要写运行目录 `.env` 并即时生效（n27）。
+        pub Option<Arc<laser_host::HostApplication>>,
+    );
 
     /// 自动探测本机 Python 3：只检查文件是否存在，不启动任何程序。
     ///
@@ -70,7 +76,9 @@ mod imp {
                 std::path::Path::new("/usr/local/bin/python3"),
                 std::path::Path::new("/usr/bin/python3"),
             ],
-            Some(std::path::Path::new("/Library/Frameworks/Python.framework/Versions")),
+            Some(std::path::Path::new(
+                "/Library/Frameworks/Python.framework/Versions",
+            )),
         );
         serde_json::json!({ "candidates": candidates, "suggested": candidates.first().cloned() })
     }
@@ -84,8 +92,14 @@ mod imp {
         unix_static_bins: &[&std::path::Path],
         macos_framework_versions: Option<&std::path::Path>,
     ) -> Vec<String> {
-        fn collect_versioned_dirs(root: &std::path::Path, prefix: &str, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(root) else { return };
+        fn collect_versioned_dirs(
+            root: &std::path::Path,
+            prefix: &str,
+            out: &mut Vec<std::path::PathBuf>,
+        ) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
             let mut dirs: Vec<std::path::PathBuf> = entries
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.path())
@@ -124,11 +138,17 @@ mod imp {
         if is_windows {
             let mut version_dirs: Vec<std::path::PathBuf> = Vec::new();
             if let Some(local) = local_app_data {
-                let root = std::path::PathBuf::from(local).join("Programs").join("Python");
+                let root = std::path::PathBuf::from(local)
+                    .join("Programs")
+                    .join("Python");
                 collect_versioned_dirs(&root, "Python3", &mut version_dirs);
             }
             for root in program_files.iter().flatten() {
-                collect_versioned_dirs(&std::path::PathBuf::from(root), "Python3", &mut version_dirs);
+                collect_versioned_dirs(
+                    &std::path::PathBuf::from(root),
+                    "Python3",
+                    &mut version_dirs,
+                );
             }
             for dir in version_dirs {
                 push(dir.join("python.exe"), &mut candidates);
@@ -151,7 +171,10 @@ mod imp {
                     &["miniconda3", "bin", "python3"][..],
                     &["anaconda3", "bin", "python3"][..],
                 ] {
-                    push(parts.iter().fold(home.clone(), |acc, part| acc.join(part)), &mut candidates);
+                    push(
+                        parts.iter().fold(home.clone(), |acc, part| acc.join(part)),
+                        &mut candidates,
+                    );
                 }
             }
         }
@@ -172,7 +195,9 @@ mod imp {
 
         fn set_strict_mode(&self, enabled: bool) {
             // `.env` 开启的严格模式不能被语音中心关闭
-            self.host.api_service.set_strict_mode(enabled || self.host.strict_from_env());
+            self.host
+                .api_service
+                .set_strict_mode(enabled || self.host.strict_from_env());
         }
 
         fn strict_from_env(&self) -> bool {
@@ -216,7 +241,10 @@ mod imp {
     /// 语音中心与小智桥对附加接入点数量上限的约定一致（两个 crate 各自定义，避免互相依赖）。
     #[test]
     fn extra_endpoint_limit_matches_the_bridge() {
-        assert_eq!(moss_voice::MAX_EXTRA_ENDPOINTS, laser_host::MAX_EXTRA_ENDPOINTS);
+        assert_eq!(
+            moss_voice::MAX_EXTRA_ENDPOINTS,
+            laser_host::MAX_EXTRA_ENDPOINTS
+        );
     }
 
     pub fn init(
@@ -227,7 +255,10 @@ mod imp {
         VoiceState(
             host.map(|host| {
                 let runtime_dir = host.runtime_root.path.clone();
-                let center = Arc::new(VoiceCenter::new(&runtime_dir, Arc::new(DesktopHooks { host, builtin })));
+                let center = Arc::new(VoiceCenter::new(
+                    &runtime_dir,
+                    Arc::new(DesktopHooks { host, builtin }),
+                ));
                 // 自建模式下每 5 秒查一次接入点 health，供状态卡与顶栏“等待设备”使用
                 center.spawn_health_poller(Duration::from_secs(5));
                 center
@@ -288,7 +319,9 @@ mod imp {
                 || candidate == runtime_env;
             if !same
                 && let Ok(existing) = std::fs::read_to_string(&candidate)
-                && existing.lines().any(|line| line.trim_start().starts_with(&prefix))
+                && existing
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(&prefix))
             {
                 let _ = write_env_flag(&candidate, key, value);
             }
@@ -303,7 +336,8 @@ mod imp {
     }
 
     fn to_value(error: CenterError) -> Value {
-        serde_json::to_value(error).unwrap_or_else(|_| error_value("voice_internal", "语音中心内部错误"))
+        serde_json::to_value(error)
+            .unwrap_or_else(|_| error_value("voice_internal", "语音中心内部错误"))
     }
 
     /// 在阻塞线程池中执行（测试连接最长 15 秒、停止服务端最长 5 秒，不能卡住界面）。
@@ -322,18 +356,25 @@ mod imp {
             "official" => Ok(moss_voice::VoiceMode::Official),
             "self_hosted" => Ok(moss_voice::VoiceMode::SelfHosted),
             "builtin" => Ok(moss_voice::VoiceMode::Builtin),
-            _ => Err(CenterError::new("voice_mode_invalid", 400, "链路模式只能是 official、self_hosted 或 builtin")),
+            _ => Err(CenterError::new(
+                "voice_mode_invalid",
+                400,
+                "链路模式只能是 official、self_hosted 或 builtin",
+            )),
         }
     }
 
     pub fn parse_section(section: &str) -> Result<moss_voice::Section, CenterError> {
-        moss_voice::Section::parse(section)
-            .ok_or_else(|| CenterError::new("model_input_invalid", 400, "分区只能是 llm、asr 或 tts"))
+        moss_voice::Section::parse(section).ok_or_else(|| {
+            CenterError::new("model_input_invalid", 400, "分区只能是 llm、asr 或 tts")
+        })
     }
 
     /// 是否有 MOSS 启动的服务端在运行（托盘退出时决定是否询问）。
     pub fn owns_running_server(app: &tauri::AppHandle) -> bool {
-        center(app).map(|center| center.supervisor().owns_running_server()).unwrap_or(false)
+        center(app)
+            .map(|center| center.supervisor().owns_running_server())
+            .unwrap_or(false)
     }
 
     /// MOSS 退出时处理服务端。必须在 `ShutdownState::request()`（急停）之后调用。
@@ -358,7 +399,11 @@ pub async fn voice_status(app: tauri::AppHandle) -> CmdResult {
 
 /// 保存服务端目录、Python、启动参数、端口、自建接入点与健康检查地址（不含任何模型密钥）。
 #[tauri::command]
-pub async fn voice_save_settings(app: tauri::AppHandle, window: tauri::WebviewWindow, settings: Value) -> CmdResult {
+pub async fn voice_save_settings(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    settings: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -383,7 +428,11 @@ pub async fn voice_mode_changes(app: tauri::AppHandle, mode: String) -> CmdResul
 }
 
 #[tauri::command]
-pub async fn voice_set_mode(app: tauri::AppHandle, window: tauri::WebviewWindow, mode: String) -> CmdResult {
+pub async fn voice_set_mode(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    mode: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -416,7 +465,10 @@ pub async fn voice_server_stop(app: tauri::AppHandle, window: tauri::WebviewWind
 }
 
 #[tauri::command]
-pub async fn voice_server_restart(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+pub async fn voice_server_restart(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -428,11 +480,18 @@ pub async fn voice_server_restart(app: tauri::AppHandle, window: tauri::WebviewW
 
 /// 已脱敏的服务端日志尾部（默认 200 行）。
 #[tauri::command]
-pub async fn voice_server_log(app: tauri::AppHandle, window: tauri::WebviewWindow, tail: Option<usize>) -> CmdResult {
+pub async fn voice_server_log(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    tail: Option<usize>,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result = imp::run(app, move |center| Ok(serde_json::json!({"lines": center.log_tail(tail.unwrap_or(200))}))).await;
+    let result = imp::run(app, move |center| {
+        Ok(serde_json::json!({"lines": center.log_tail(tail.unwrap_or(200))}))
+    })
+    .await;
     #[cfg(mobile)]
     let result = desktop_only((app, window, tail));
     result
@@ -440,16 +499,23 @@ pub async fn voice_server_log(app: tauri::AppHandle, window: tauri::WebviewWindo
 
 /// 测试一个分区。请求体中的密钥只在本次调用的内存中使用，结果不回显密钥。
 #[tauri::command]
-pub async fn voice_models_test(app: tauri::AppHandle, window: tauri::WebviewWindow, section: String, input: Value) -> CmdResult {
+pub async fn voice_models_test(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    section: String,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| {
         let section = imp::parse_section(&section)?;
-        let input: moss_voice::SectionInput = serde_json::from_value(input)
-            .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "测试内容格式不正确"))?;
+        let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {
+            moss_voice::CenterError::new("model_input_invalid", 400, "测试内容格式不正确")
+        })?;
         let outcome = center.models_test(section, &input)?;
-        serde_json::to_value(outcome).map_err(|_| moss_voice::CenterError::new("voice_internal", 500, "结果序列化失败"))
+        serde_json::to_value(outcome)
+            .map_err(|_| moss_voice::CenterError::new("voice_internal", 500, "结果序列化失败"))
     })
     .await;
     #[cfg(mobile)]
@@ -459,13 +525,18 @@ pub async fn voice_models_test(app: tauri::AppHandle, window: tauri::WebviewWind
 
 /// 保存到服务端 `data/.config.yaml`（每个非空分区须与测试通过的内容一致）。
 #[tauri::command]
-pub async fn voice_models_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
+pub async fn voice_models_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| {
-        let input: moss_voice::ModelsInput = serde_json::from_value(input)
-            .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "保存内容格式不正确"))?;
+        let input: moss_voice::ModelsInput = serde_json::from_value(input).map_err(|_| {
+            moss_voice::CenterError::new("model_input_invalid", 400, "保存内容格式不正确")
+        })?;
         center.models_save(&input)
     })
     .await;
@@ -484,7 +555,10 @@ pub async fn voice_detect_python(window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(mobile)]
     let result = {
         let _ = window;
-        Err(error_value("voice_desktop_only", "语音中心仅在 MOSS 桌面端可用"))
+        Err(error_value(
+            "voice_desktop_only",
+            "语音中心仅在 MOSS 桌面端可用",
+        ))
     };
     result
 }
@@ -504,33 +578,47 @@ pub async fn voice_strict_set(
     {
         require_main_window(&window)?;
         if !confirmed {
-            return Err(error_value("strict_confirm_required", "开启或关闭严格模式前需要先确认"));
+            return Err(error_value(
+                "strict_confirm_required",
+                "开启或关闭严格模式前需要先确认",
+            ));
         }
         let Some(state) = app.try_state::<imp::VoiceState>() else {
-            return Err(error_value("voice_unavailable", "严格模式开关不可用：本机后端未启动"));
+            return Err(error_value(
+                "voice_unavailable",
+                "严格模式开关不可用：本机后端未启动",
+            ));
         };
-        let host = state
-            .1
-            .clone()
-            .ok_or_else(|| error_value("voice_unavailable", "严格模式开关不可用：本机后端未启动"))?;
+        let host = state.1.clone().ok_or_else(|| {
+            error_value("voice_unavailable", "严格模式开关不可用：本机后端未启动")
+        })?;
         let locked = state
             .0
             .clone()
-            .map(|center| center.status()["strict"]["locked"].as_bool().unwrap_or(false))
+            .map(|center| {
+                center.status()["strict"]["locked"]
+                    .as_bool()
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
         if !enabled && locked {
-            return Err(error_value("strict_mode_locked", "自建链路必须开启严格模式，不能在语音中心关闭"));
+            return Err(error_value(
+                "strict_mode_locked",
+                "自建链路必须开启严格模式，不能在语音中心关闭",
+            ));
         }
         let flag = if enabled { "true" } else { "false" };
         let env_file = host.runtime_root.path.join(".env");
-        imp::write_env_flag(&env_file, "MOSS_FUSION_STRICT", flag)
-            .map_err(|error| error_value("strict_write_failed", &format!("写入 .env 失败：{error}")))?;
+        imp::write_env_flag(&env_file, "MOSS_FUSION_STRICT", flag).map_err(|error| {
+            error_value("strict_write_failed", &format!("写入 .env 失败：{error}"))
+        })?;
         if let Ok(cwd) = std::env::current_dir() {
             imp::sync_existing_startup_env_flag(&cwd, &env_file, "MOSS_FUSION_STRICT", flag);
         }
         host.set_strict_from_env(enabled);
         host.api_service.set_strict_mode(enabled);
-        let (stopped_cleanly, expected_bridges, spawned_bridges) = host.restart_mcp_bridge_checked();
+        let (stopped_cleanly, expected_bridges, spawned_bridges) =
+            host.restart_mcp_bridge_checked();
         let bridge_ok = stopped_cleanly && spawned_bridges == expected_bridges;
         let active = host.api_service.strict_mode();
         let mut payload = serde_json::json!({
@@ -550,7 +638,10 @@ pub async fn voice_strict_set(
     #[cfg(mobile)]
     {
         let _ = (app, window, enabled, confirmed);
-        Err(error_value("voice_desktop_only", "语音中心仅在 MOSS 桌面端可用"))
+        Err(error_value(
+            "voice_desktop_only",
+            "语音中心仅在 MOSS 桌面端可用",
+        ))
     }
 }
 
@@ -577,10 +668,22 @@ mod tests {
 
     #[test]
     fn mode_and_section_parsing() {
-        assert_eq!(parse_mode("self_hosted").unwrap(), moss_voice::VoiceMode::SelfHosted);
-        assert_eq!(parse_mode(" official ").unwrap(), moss_voice::VoiceMode::Official);
-        assert_eq!(parse_mode("builtin").unwrap(), moss_voice::VoiceMode::Builtin);
-        assert_eq!(parse_mode("gateway").unwrap_err().code, "voice_mode_invalid");
+        assert_eq!(
+            parse_mode("self_hosted").unwrap(),
+            moss_voice::VoiceMode::SelfHosted
+        );
+        assert_eq!(
+            parse_mode(" official ").unwrap(),
+            moss_voice::VoiceMode::Official
+        );
+        assert_eq!(
+            parse_mode("builtin").unwrap(),
+            moss_voice::VoiceMode::Builtin
+        );
+        assert_eq!(
+            parse_mode("gateway").unwrap_err().code,
+            "voice_mode_invalid"
+        );
         assert_eq!(parse_section("tts").unwrap(), moss_voice::Section::Tts);
         assert!(parse_section("vad").is_err());
     }
@@ -600,7 +703,10 @@ mod tests {
         assert!(text.contains("# 注释"), "注释必须保留");
         super::imp::write_env_flag(&path, "MOSS_GATEWAY_ENABLED", "false").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("MOSS_GATEWAY_ENABLED=false"), "缺失的键要追加");
+        assert!(
+            text.contains("MOSS_GATEWAY_ENABLED=false"),
+            "缺失的键要追加"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -615,7 +721,12 @@ mod tests {
 
         let startup_env = root.path().join(".env");
         std::fs::write(&startup_env, "MOSS_PORT=8080\n").unwrap();
-        super::imp::sync_existing_startup_env_flag(&cwd, &runtime_env, "MOSS_FUSION_STRICT", "false");
+        super::imp::sync_existing_startup_env_flag(
+            &cwd,
+            &runtime_env,
+            "MOSS_FUSION_STRICT",
+            "false",
+        );
         assert_eq!(
             std::fs::read_to_string(&startup_env).unwrap(),
             "MOSS_PORT=8080\n",
@@ -623,7 +734,12 @@ mod tests {
         );
 
         std::fs::write(&startup_env, "MOSS_PORT=8080\nMOSS_FUSION_STRICT=true\n").unwrap();
-        super::imp::sync_existing_startup_env_flag(&cwd, &runtime_env, "MOSS_FUSION_STRICT", "false");
+        super::imp::sync_existing_startup_env_flag(
+            &cwd,
+            &runtime_env,
+            "MOSS_FUSION_STRICT",
+            "false",
+        );
         let updated = std::fs::read_to_string(&startup_env).unwrap();
         assert!(updated.contains("MOSS_FUSION_STRICT=false"));
         assert!(updated.contains("MOSS_PORT=8080"));
@@ -655,8 +771,18 @@ mod tests {
         );
         assert_eq!(found.len(), 4);
         assert_eq!(found[0], brew.to_string_lossy());
-        assert_eq!(found[1], fw_312.join("python3").to_string_lossy(), "更高版本在前");
+        assert_eq!(
+            found[1],
+            fw_312.join("python3").to_string_lossy(),
+            "更高版本在前"
+        );
         assert_eq!(found[2], fw_310.join("python3").to_string_lossy());
-        assert_eq!(found[3], home.join("miniconda3").join("bin").join("python3").to_string_lossy());
+        assert_eq!(
+            found[3],
+            home.join("miniconda3")
+                .join("bin")
+                .join("python3")
+                .to_string_lossy()
+        );
     }
 }

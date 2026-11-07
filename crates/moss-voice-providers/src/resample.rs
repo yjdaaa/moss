@@ -13,7 +13,12 @@ pub struct Resampler {
 
 impl Resampler {
     pub fn new(from: u32, to: u32) -> Self {
-        Self { from, to, position: 0.0, last: None }
+        Self {
+            from,
+            to,
+            position: 0.0,
+            last: None,
+        }
     }
 
     pub fn process(&mut self, input: &[i16]) -> Vec<i16> {
@@ -22,7 +27,13 @@ impl Resampler {
         }
         let step = self.from as f64 / self.to as f64;
         let last = self.last.unwrap_or(input[0]);
-        let sample = |index: isize| if index < 0 { last } else { input[index as usize] };
+        let sample = |index: isize| {
+            if index < 0 {
+                last
+            } else {
+                input[index as usize]
+            }
+        };
         let mut output = Vec::with_capacity((input.len() as f64 / step) as usize + 2);
         loop {
             let base = self.position.floor();
@@ -31,7 +42,8 @@ impl Resampler {
                 break;
             }
             let fraction = self.position - base;
-            let value = sample(index) as f64 * (1.0 - fraction) + sample(index + 1) as f64 * fraction;
+            let value =
+                sample(index) as f64 * (1.0 - fraction) + sample(index + 1) as f64 * fraction;
             output.push(value.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16);
             self.position += step;
         }
@@ -40,4 +52,3 @@ impl Resampler {
         output
     }
 }
-

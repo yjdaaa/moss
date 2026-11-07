@@ -11,7 +11,6 @@ pub use pump::{PlaybackPump, PumpStats, PumpTick};
 pub use resample::Resampler;
 pub use vad::{EnergyVad, LocalVad, LocalVadFactory, Vad, VadConfig, VadEvent, VadFactory};
 
-
 /// 计算一帧 16-bit PCM 的归一化 RMS 振幅（0..=100），仅用于界面声波与机械眼状态同步，不含音频内容。
 pub fn pcm_rms_level(samples: &[i16]) -> u8 {
     if samples.is_empty() {
@@ -101,7 +100,11 @@ pub fn trim_trailing_silence_i16(
 pub(crate) mod test_signal {
     pub fn tone(rate: u32, hz: f64, ms: u32, amplitude: f64) -> Vec<i16> {
         let count = rate as usize * ms as usize / 1000;
-        (0..count).map(|i| ((i as f64 / rate as f64 * hz * std::f64::consts::TAU).sin() * amplitude) as i16).collect()
+        (0..count)
+            .map(|i| {
+                ((i as f64 / rate as f64 * hz * std::f64::consts::TAU).sin() * amplitude) as i16
+            })
+            .collect()
     }
 
     pub fn silence(rate: u32, ms: u32) -> Vec<i16> {
@@ -111,11 +114,15 @@ pub(crate) mod test_signal {
     /// 均匀分布噪声，RMS 约为 `level`。
     pub fn noise(rate: u32, ms: u32, level: f64, seed: u64) -> Vec<i16> {
         let count = rate as usize * ms as usize / 1000;
-        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let peak = level * 3f64.sqrt();
         (0..count)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let unit = (state >> 11) as f64 / (1u64 << 53) as f64;
                 ((unit * 2.0 - 1.0) * peak) as i16
             })
@@ -123,14 +130,19 @@ pub(crate) mod test_signal {
     }
 
     pub fn rms(samples: &[i16]) -> f64 {
-        (samples.iter().map(|&value| (value as f64) * (value as f64)).sum::<f64>() / samples.len().max(1) as f64).sqrt()
+        (samples
+            .iter()
+            .map(|&value| (value as f64) * (value as f64))
+            .sum::<f64>()
+            / samples.len().max(1) as f64)
+            .sqrt()
     }
 }
 
 #[cfg(test)]
 mod boundary_tests {
-    use super::*;
     use super::test_signal::{silence, tone};
+    use super::*;
 
     #[test]
     fn boundary_fade_and_trailing_silence_trim_smooth_edges_without_touching_active_tones() {
@@ -140,7 +152,12 @@ mod boundary_tests {
         active[0] = 5000;
         *active.last_mut().unwrap() = -5000;
         let orig_len = active.len();
-        trim_trailing_silence_i16(&mut active, rate, TRAILING_SILENCE_KEEP_MS, TRAILING_SILENCE_TRIGGER_MS);
+        trim_trailing_silence_i16(
+            &mut active,
+            rate,
+            TRAILING_SILENCE_KEEP_MS,
+            TRAILING_SILENCE_TRIGGER_MS,
+        );
         assert_eq!(active.len(), orig_len, "无尾部冗余静音时不改变样本数");
         fade_head_i16(&mut active, rate, BOUNDARY_FADE_MS);
         fade_tail_i16(&mut active, rate, BOUNDARY_FADE_MS);
@@ -150,7 +167,12 @@ mod boundary_tests {
         // 2. 句尾带 300ms 冗余静音时，自动裁剪至 60ms 自然气口
         let mut padded = tone(rate, 440.0, 200, 6000.0);
         padded.extend(silence(rate, 300));
-        trim_trailing_silence_i16(&mut padded, rate, TRAILING_SILENCE_KEEP_MS, TRAILING_SILENCE_TRIGGER_MS);
+        trim_trailing_silence_i16(
+            &mut padded,
+            rate,
+            TRAILING_SILENCE_KEEP_MS,
+            TRAILING_SILENCE_TRIGGER_MS,
+        );
         // 200ms 语音 + 60ms 保留气口 ≈ 260ms (4160 样本)
         let expected_max = (rate as usize * 265) / 1000;
         let expected_min = (rate as usize * 250) / 1000;

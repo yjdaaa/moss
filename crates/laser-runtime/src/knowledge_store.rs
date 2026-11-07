@@ -57,7 +57,8 @@ pub struct KnowledgeChunkHitRow {
     pub ord: i64,
 }
 
-const ROOT_COLUMNS: &str = "id,scope_kind,scope_id,label,root_path,revision,created_at,indexed_at,enabled";
+const ROOT_COLUMNS: &str =
+    "id,scope_kind,scope_id,label,root_path,revision,created_at,indexed_at,enabled";
 const DIR_COLUMNS: &str = "d.id,d.root_id,d.rel_dir,d.l0,d.l1,d.file_count";
 const MAX_LIST: usize = 200;
 
@@ -76,7 +77,14 @@ fn root_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeRootRow> 
 }
 
 fn dir_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeDirRow> {
-    Ok(KnowledgeDirRow { id: row.get(0)?, root_id: row.get(1)?, rel_dir: row.get(2)?, l0: row.get(3)?, l1: row.get(4)?, file_count: row.get(5)? })
+    Ok(KnowledgeDirRow {
+        id: row.get(0)?,
+        root_id: row.get(1)?,
+        rel_dir: row.get(2)?,
+        l0: row.get(3)?,
+        l1: row.get(4)?,
+        file_count: row.get(5)?,
+    })
 }
 
 fn invalid(message: &str) -> SchemaError {
@@ -86,7 +94,11 @@ fn invalid(message: &str) -> SchemaError {
 impl RuntimeDb {
     /// New roots start at revision 1 and unindexed.
     pub fn insert_knowledge_root(&self, row: &KnowledgeRootRow) -> Result<(), SchemaError> {
-        if row.id.is_empty() || row.revision != 1 || row.indexed_at.is_some() || !row.created_at.is_finite() {
+        if row.id.is_empty()
+            || row.revision != 1
+            || row.indexed_at.is_some()
+            || !row.created_at.is_finite()
+        {
             return Err(invalid("资料目录无效"));
         }
         self.connection.execute(
@@ -98,12 +110,20 @@ impl RuntimeDb {
 
     pub fn knowledge_root(&self, id: &str) -> Result<Option<KnowledgeRootRow>, SchemaError> {
         self.connection
-            .query_row(&format!("SELECT {ROOT_COLUMNS} FROM context_knowledge_roots WHERE id=?1"), [id], root_from_row)
+            .query_row(
+                &format!("SELECT {ROOT_COLUMNS} FROM context_knowledge_roots WHERE id=?1"),
+                [id],
+                root_from_row,
+            )
             .optional()
             .map_err(SchemaError::from)
     }
 
-    pub fn knowledge_roots(&self, scope_kind: &str, scope_id: &str) -> Result<Vec<KnowledgeRootRow>, SchemaError> {
+    pub fn knowledge_roots(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+    ) -> Result<Vec<KnowledgeRootRow>, SchemaError> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {ROOT_COLUMNS} FROM context_knowledge_roots WHERE scope_kind=?1 AND scope_id=?2 ORDER BY created_at,id LIMIT {MAX_LIST}"
         ))?;
@@ -119,7 +139,12 @@ impl RuntimeDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn set_knowledge_root_enabled(&self, id: &str, expected_revision: i64, enabled: bool) -> Result<bool, SchemaError> {
+    pub fn set_knowledge_root_enabled(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        enabled: bool,
+    ) -> Result<bool, SchemaError> {
         let updated = self.connection.execute(
             "UPDATE context_knowledge_roots SET enabled=?3, revision=revision+1 WHERE id=?1 AND revision=?2",
             params![id, expected_revision, i64::from(enabled)],
@@ -130,17 +155,42 @@ impl RuntimeDb {
     /// Replace the whole index of one root atomically, only if the root is still at
     /// `expected_revision`. Removed or renamed files disappear with their old summaries.
     /// `false` means a conflict (another reindex or a deletion won); nothing is written.
-    pub fn replace_knowledge_index(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDirRow], files: &[KnowledgeFileRow], now: f64) -> Result<bool, SchemaError> {
+    pub fn replace_knowledge_index(
+        &self,
+        root_id: &str,
+        expected_revision: i64,
+        dirs: &[KnowledgeDirRow],
+        files: &[KnowledgeFileRow],
+        now: f64,
+    ) -> Result<bool, SchemaError> {
         self.replace_knowledge_index_with_chunks(root_id, expected_revision, dirs, files, &[], now)
     }
 
     /// Same as `replace_knowledge_index`, also replacing the root's passage index (v17).
-    pub fn replace_knowledge_index_with_chunks(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDirRow], files: &[KnowledgeFileRow], chunks: &[KnowledgeChunkRow], now: f64) -> Result<bool, SchemaError> {
-        if !now.is_finite() || dirs.iter().any(|d| d.root_id != root_id) || files.iter().any(|f| f.root_id != root_id || !dirs.iter().any(|d| d.id == f.dir_id)) {
+    pub fn replace_knowledge_index_with_chunks(
+        &self,
+        root_id: &str,
+        expected_revision: i64,
+        dirs: &[KnowledgeDirRow],
+        files: &[KnowledgeFileRow],
+        chunks: &[KnowledgeChunkRow],
+        now: f64,
+    ) -> Result<bool, SchemaError> {
+        if !now.is_finite()
+            || dirs.iter().any(|d| d.root_id != root_id)
+            || files
+                .iter()
+                .any(|f| f.root_id != root_id || !dirs.iter().any(|d| d.id == f.dir_id))
+        {
             return Err(invalid("资料索引无效"));
         }
-        let dir_of: std::collections::HashMap<&str, &str> = files.iter().map(|f| (f.id.as_str(), f.dir_id.as_str())).collect();
-        if chunks.iter().any(|c| c.ord < 0 || c.text.trim().is_empty() || !dir_of.contains_key(c.file_id.as_str())) {
+        let dir_of: std::collections::HashMap<&str, &str> = files
+            .iter()
+            .map(|f| (f.id.as_str(), f.dir_id.as_str()))
+            .collect();
+        if chunks.iter().any(|c| {
+            c.ord < 0 || c.text.trim().is_empty() || !dir_of.contains_key(c.file_id.as_str())
+        }) {
             return Err(invalid("资料段落无效"));
         }
         let tx = self.connection.unchecked_transaction()?;
@@ -152,8 +202,14 @@ impl RuntimeDb {
             return Ok(false);
         }
         delete_chunks(&tx, root_id)?;
-        tx.execute("DELETE FROM context_knowledge_files WHERE root_id=?1", [root_id])?;
-        tx.execute("DELETE FROM context_knowledge_dirs WHERE root_id=?1", [root_id])?;
+        tx.execute(
+            "DELETE FROM context_knowledge_files WHERE root_id=?1",
+            [root_id],
+        )?;
+        tx.execute(
+            "DELETE FROM context_knowledge_dirs WHERE root_id=?1",
+            [root_id],
+        )?;
         for dir in dirs {
             tx.execute(
                 "INSERT INTO context_knowledge_dirs(id,root_id,rel_dir,l0,l1,file_count) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -178,9 +234,17 @@ impl RuntimeDb {
     }
 
     /// Remove a root with all its summaries and fingerprints (FTS entries go with them).
-    pub fn delete_knowledge_root_if_revision(&self, id: &str, expected_revision: i64) -> Result<bool, SchemaError> {
+    pub fn delete_knowledge_root_if_revision(
+        &self,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, SchemaError> {
         let tx = self.connection.unchecked_transaction()?;
-        if tx.execute("DELETE FROM context_knowledge_roots WHERE id=?1 AND revision=?2", params![id, expected_revision])? != 1 {
+        if tx.execute(
+            "DELETE FROM context_knowledge_roots WHERE id=?1 AND revision=?2",
+            params![id, expected_revision],
+        )? != 1
+        {
             return Ok(false);
         }
         delete_chunks(&tx, id)?;
@@ -199,34 +263,79 @@ impl RuntimeDb {
     pub fn knowledge_files(&self, dir_id: &str) -> Result<Vec<KnowledgeFileRow>, SchemaError> {
         let mut statement = self.connection.prepare("SELECT id,root_id,dir_id,rel_path,sha256,size,mtime FROM context_knowledge_files WHERE dir_id=?1 ORDER BY rel_path")?;
         let rows = statement.query_map([dir_id], |r| {
-            Ok(KnowledgeFileRow { id: r.get(0)?, root_id: r.get(1)?, dir_id: r.get(2)?, rel_path: r.get(3)?, sha256: r.get(4)?, size: r.get(5)?, mtime: r.get(6)? })
+            Ok(KnowledgeFileRow {
+                id: r.get(0)?,
+                root_id: r.get(1)?,
+                dir_id: r.get(2)?,
+                rel_path: r.get(3)?,
+                sha256: r.get(4)?,
+                size: r.get(5)?,
+                mtime: r.get(6)?,
+            })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Directory summaries of one scope whose L0 or L1 contains any three-character term
     /// (FTS5 trigram, phrase-quoted), and/or any short term (substring). Union, at most `limit`.
-    pub fn search_knowledge_dirs(&self, scope_kind: &str, scope_id: &str, terms: &[String], shorts: &[String], limit: usize) -> Result<Vec<KnowledgeDirRow>, SchemaError> {
-        if terms.len() > 64 || shorts.len() > 32 || terms.iter().any(|t| t.chars().count() < 3 || t.chars().count() > 64) || shorts.iter().any(|t| t.trim().is_empty() || t.chars().count() > 64) {
+    pub fn search_knowledge_dirs(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        terms: &[String],
+        shorts: &[String],
+        limit: usize,
+    ) -> Result<Vec<KnowledgeDirRow>, SchemaError> {
+        if terms.len() > 64
+            || shorts.len() > 32
+            || terms
+                .iter()
+                .any(|t| t.chars().count() < 3 || t.chars().count() > 64)
+            || shorts
+                .iter()
+                .any(|t| t.trim().is_empty() || t.chars().count() > 64)
+        {
             return Err(invalid("检索词无效"));
         }
         let limit = limit.min(MAX_LIST) as i64;
         let mut found: Vec<KnowledgeDirRow> = Vec::new();
         if !terms.is_empty() {
-            let query = terms.iter().map(|t| format!("\"{}\"", t.replace('"', "\"\""))).collect::<Vec<_>>().join(" OR ");
+            let query = terms
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" OR ");
             let mut statement = self.connection.prepare(&format!(
                 "SELECT {DIR_COLUMNS} FROM context_knowledge_fts f JOIN context_knowledge_dirs d ON d.rowid=f.rowid
                  JOIN context_knowledge_roots r ON r.id=d.root_id
                  WHERE context_knowledge_fts MATCH ?3 AND r.scope_kind=?1 AND r.scope_id=?2 AND r.enabled=1 ORDER BY bm25(context_knowledge_fts) LIMIT ?4"
             ))?;
-            for row in statement.query_map(params![scope_kind, scope_id, query, limit], dir_from_row)? {
+            for row in
+                statement.query_map(params![scope_kind, scope_id, query, limit], dir_from_row)?
+            {
                 found.push(row?);
             }
         }
         if !shorts.is_empty() {
             // `!` as the LIKE escape character: user text cannot act as a wildcard.
-            let patterns: Vec<String> = shorts.iter().map(|n| format!("%{}%", n.replace('!', "!!").replace('%', "!%").replace('_', "!_"))).collect();
-            let any = (0..patterns.len()).map(|i| format!("(d.l0 LIKE ?{0} ESCAPE '!' OR d.l1 LIKE ?{0} ESCAPE '!')", i + 4)).collect::<Vec<_>>().join(" OR ");
+            let patterns: Vec<String> = shorts
+                .iter()
+                .map(|n| {
+                    format!(
+                        "%{}%",
+                        n.replace('!', "!!").replace('%', "!%").replace('_', "!_")
+                    )
+                })
+                .collect();
+            let any = (0..patterns.len())
+                .map(|i| {
+                    format!(
+                        "(d.l0 LIKE ?{0} ESCAPE '!' OR d.l1 LIKE ?{0} ESCAPE '!')",
+                        i + 4
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
             let mut statement = self.connection.prepare(&format!(
                 "SELECT {DIR_COLUMNS} FROM context_knowledge_dirs d JOIN context_knowledge_roots r ON r.id=d.root_id
                  WHERE ({any}) AND r.scope_kind=?1 AND r.scope_id=?2 AND r.enabled=1 ORDER BY d.rel_dir LIMIT ?3"
@@ -247,18 +356,36 @@ impl RuntimeDb {
 /// Passage index entries of one root, FTS rows first (contentless_delete allows plain DELETE).
 fn delete_chunks(tx: &rusqlite::Transaction<'_>, root_id: &str) -> Result<(), SchemaError> {
     tx.execute("DELETE FROM context_knowledge_chunks_fts WHERE rowid IN (SELECT id FROM context_knowledge_chunks WHERE root_id=?1)", [root_id])?;
-    tx.execute("DELETE FROM context_knowledge_chunks WHERE root_id=?1", [root_id])?;
+    tx.execute(
+        "DELETE FROM context_knowledge_chunks WHERE root_id=?1",
+        [root_id],
+    )?;
     Ok(())
 }
 
 impl RuntimeDb {
     /// v17: passages of enabled roots in one scope matching any three-character term
     /// (phrase-quoted, OR-ed), best bm25 first. Only ids come back — never document text.
-    pub fn search_knowledge_chunks(&self, scope_kind: &str, scope_id: &str, terms: &[String], limit: usize) -> Result<Vec<KnowledgeChunkHitRow>, SchemaError> {
-        if terms.is_empty() || terms.len() > 64 || terms.iter().any(|t| t.chars().count() < 3 || t.chars().count() > 64) {
+    pub fn search_knowledge_chunks(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<KnowledgeChunkHitRow>, SchemaError> {
+        if terms.is_empty()
+            || terms.len() > 64
+            || terms
+                .iter()
+                .any(|t| t.chars().count() < 3 || t.chars().count() > 64)
+        {
             return Err(invalid("检索词无效"));
         }
-        let query = terms.iter().map(|t| format!("\"{}\"", t.replace('"', "\"\""))).collect::<Vec<_>>().join(" OR ");
+        let query = terms
+            .iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
         let mut statement = self.connection.prepare(&format!(
             "SELECT {DIR_COLUMNS}, c.file_id, c.ord FROM context_knowledge_chunks_fts f
              JOIN context_knowledge_chunks c ON c.id=f.rowid
@@ -267,9 +394,16 @@ impl RuntimeDb {
              WHERE context_knowledge_chunks_fts MATCH ?3 AND r.scope_kind=?1 AND r.scope_id=?2 AND r.enabled=1
              ORDER BY bm25(context_knowledge_chunks_fts) LIMIT ?4"
         ))?;
-        let rows = statement.query_map(params![scope_kind, scope_id, query, limit.min(MAX_LIST) as i64], |row| {
-            Ok(KnowledgeChunkHitRow { dir: dir_from_row(row)?, file_id: row.get(6)?, ord: row.get(7)? })
-        })?;
+        let rows = statement.query_map(
+            params![scope_kind, scope_id, query, limit.min(MAX_LIST) as i64],
+            |row| {
+                Ok(KnowledgeChunkHitRow {
+                    dir: dir_from_row(row)?,
+                    file_id: row.get(6)?,
+                    ord: row.get(7)?,
+                })
+            },
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

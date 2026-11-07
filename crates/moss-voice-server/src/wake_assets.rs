@@ -57,11 +57,15 @@ pub struct AssetEntry {
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    bytes.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().expect("four bytes")))
+    bytes
+        .get(at..at + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("four bytes")))
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    bytes.get(at..at + 2).map(|b| u16::from_le_bytes(b.try_into().expect("two bytes")))
+    bytes
+        .get(at..at + 2)
+        .map(|b| u16::from_le_bytes(b.try_into().expect("two bytes")))
 }
 
 fn fixed_name(raw: &[u8]) -> Option<String> {
@@ -71,7 +75,10 @@ fn fixed_name(raw: &[u8]) -> Option<String> {
 }
 
 fn checksum(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0u32, |sum, b| sum.wrapping_add(u32::from(*b))) & 0xFFFF
+    bytes
+        .iter()
+        .fold(0u32, |sum, b| sum.wrapping_add(u32::from(*b)))
+        & 0xFFFF
 }
 
 /// 解析资源包并逐项校验（头部长度、校验和、文件表边界、`ZZ` 魔数、重名）。
@@ -79,7 +86,9 @@ pub fn parse_assets(bytes: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
     if bytes.len() > ASSETS_MAX_BYTES {
         return Err("资源包超过 8 MB，设备装不下");
     }
-    let (Some(count), Some(stored_sum), Some(len)) = (u32_at(bytes, 0), u32_at(bytes, 4), u32_at(bytes, 8)) else {
+    let (Some(count), Some(stored_sum), Some(len)) =
+        (u32_at(bytes, 0), u32_at(bytes, 4), u32_at(bytes, 8))
+    else {
         return Err("不是小智资源包（文件太短）");
     };
     let (count, len) = (count as usize, len as usize);
@@ -104,14 +113,22 @@ pub fn parse_assets(bytes: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
         let width = u16_at(body, row + NAME_LEN + 8).ok_or("资源包文件表损坏")?;
         let height = u16_at(body, row + NAME_LEN + 10).ok_or("资源包文件表损坏")?;
         let start = table.checked_add(offset).ok_or("资源包文件表损坏")?;
-        let end = start.checked_add(2).and_then(|s| s.checked_add(size)).ok_or("资源包文件表损坏")?;
+        let end = start
+            .checked_add(2)
+            .and_then(|s| s.checked_add(size))
+            .ok_or("资源包文件表损坏")?;
         if end > body.len() || body[start] != 0x5A || body[start + 1] != 0x5A {
             return Err("资源包里的文件数据损坏");
         }
         if !seen.insert(name.clone()) {
             return Err("资源包里有重名文件");
         }
-        entries.push(AssetEntry { name, data: body[start + 2..end].to_vec(), width, height });
+        entries.push(AssetEntry {
+            name,
+            data: body[start + 2..end].to_vec(),
+            width,
+            height,
+        });
     }
     Ok(entries)
 }
@@ -124,7 +141,11 @@ pub fn pack_assets(entries: &[AssetEntry]) -> Result<Vec<u8>, &'static str> {
     let ext = |name: &str| name.rsplit_once('.').map_or("", |(_, e)| e).to_owned();
     let stem = |name: &str| name.rsplit_once('.').map_or(name, |(s, _)| s).to_owned();
     let mut sorted: Vec<&AssetEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| ext(&a.name).cmp(&ext(&b.name)).then_with(|| stem(&a.name).cmp(&stem(&b.name))));
+    sorted.sort_by(|a, b| {
+        ext(&a.name)
+            .cmp(&ext(&b.name))
+            .then_with(|| stem(&a.name).cmp(&stem(&b.name)))
+    });
     let mut table = Vec::with_capacity(sorted.len() * (NAME_LEN + 12));
     let mut data = Vec::new();
     for entry in &sorted {
@@ -153,7 +174,8 @@ pub fn pack_assets(entries: &[AssetEntry]) -> Result<Vec<u8>, &'static str> {
 
 /// 打包 `srmodels.bin`（与 ESP-SR `pack_model.py` 一致：模型、文件均按名字排序）。
 pub fn pack_srmodels(models: &[(&str, &[(&str, &[u8])])]) -> Vec<u8> {
-    let mut models: Vec<(&str, Vec<(&str, &[u8])>)> = models.iter().map(|(n, f)| (*n, f.to_vec())).collect();
+    let mut models: Vec<(&str, Vec<(&str, &[u8])>)> =
+        models.iter().map(|(n, f)| (*n, f.to_vec())).collect();
     models.sort_by(|a, b| a.0.cmp(b.0));
     for (_, files) in &mut models {
         files.sort_by(|a, b| a.0.cmp(b.0));
@@ -164,7 +186,10 @@ pub fn pack_srmodels(models: &[(&str, &[(&str, &[u8])])]) -> Vec<u8> {
         raw[..bytes.len().min(NAME_LEN)].copy_from_slice(&bytes[..bytes.len().min(NAME_LEN)]);
         raw
     };
-    let header: usize = 4 + models.iter().map(|(_, f)| NAME_LEN + 4 + f.len() * (NAME_LEN + 8)).sum::<usize>();
+    let header: usize = 4 + models
+        .iter()
+        .map(|(_, f)| NAME_LEN + 4 + f.len() * (NAME_LEN + 8))
+        .sum::<usize>();
     let mut out = Vec::new();
     out.extend_from_slice(&(models.len() as u32).to_le_bytes());
     let mut offset = header;
@@ -224,11 +249,15 @@ pub fn normalize_command(raw: &str) -> Result<String, String> {
     let lower = raw.trim().to_ascii_lowercase();
     let syllables: Vec<&str> = lower.split_whitespace().collect();
     if syllables.len() < MIN_SYLLABLES || syllables.len() > MAX_SYLLABLES {
-        return Err(format!("拼音需要 {MIN_SYLLABLES}～{MAX_SYLLABLES} 个音节，用空格隔开，例如 ni hao mo si"));
+        return Err(format!(
+            "拼音需要 {MIN_SYLLABLES}～{MAX_SYLLABLES} 个音节，用空格隔开，例如 ni hao mo si"
+        ));
     }
     let known = pinyin_syllables();
     if let Some(bad) = syllables.iter().find(|s| !known.contains(**s)) {
-        return Err(format!("“{bad}”不是模型认识的拼音音节（只写字母、不带声调，例如 mo si）"));
+        return Err(format!(
+            "“{bad}”不是模型认识的拼音音节（只写字母、不带声调，例如 mo si）"
+        ));
     }
     Ok(syllables.join(" "))
 }
@@ -243,7 +272,11 @@ pub fn normalize_threshold(raw: f64) -> Result<f64, String> {
 
 impl WakeWord {
     pub fn new(text: &str, command: &str, threshold: f64) -> Result<Self, String> {
-        Ok(Self { text: normalize_text(text)?, command: normalize_command(command)?, threshold: normalize_threshold(threshold)? })
+        Ok(Self {
+            text: normalize_text(text)?,
+            command: normalize_command(command)?,
+            threshold: normalize_threshold(threshold)?,
+        })
     }
 }
 
@@ -259,12 +292,28 @@ pub enum WakeTarget {
 fn srmodels_for(target: &WakeTarget) -> Vec<u8> {
     match target {
         WakeTarget::Custom(_) => pack_srmodels(&[
-            ("fst", &[("commands_cn.txt", FST_CN), ("commands_en.txt", FST_EN)]),
-            ("mn6_cn", &[("_MODEL_INFO_", MN6_INFO), ("mn6_data", MN6_DATA), ("mn6_index", MN6_INDEX), ("vocab", MN6_VOCAB)]),
+            (
+                "fst",
+                &[("commands_cn.txt", FST_CN), ("commands_en.txt", FST_EN)],
+            ),
+            (
+                "mn6_cn",
+                &[
+                    ("_MODEL_INFO_", MN6_INFO),
+                    ("mn6_data", MN6_DATA),
+                    ("mn6_index", MN6_INDEX),
+                    ("vocab", MN6_VOCAB),
+                ],
+            ),
         ]),
-        WakeTarget::Default => {
-            pack_srmodels(&[("wn9_nihaoxiaozhi_tts", &[("_MODEL_INFO_", WN9_INFO), ("wn9_data", WN9_DATA), ("wn9_index", WN9_INDEX)])])
-        }
+        WakeTarget::Default => pack_srmodels(&[(
+            "wn9_nihaoxiaozhi_tts",
+            &[
+                ("_MODEL_INFO_", WN9_INFO),
+                ("wn9_data", WN9_DATA),
+                ("wn9_index", WN9_INDEX),
+            ],
+        )]),
     }
 }
 
@@ -277,18 +326,36 @@ pub fn build_package(base: Option<&[u8]>, target: &WakeTarget) -> Result<Vec<u8>
     let (mut entries, mut index) = match base {
         Some(bytes) => {
             let entries = parse_assets(bytes).map_err(str::to_owned)?;
-            let raw = entries.iter().find(|e| e.name == INDEX_FILE).ok_or("基础资源包里没有 index.json")?;
-            let index: Value = serde_json::from_slice(&raw.data).map_err(|_| "基础资源包的 index.json 不是有效 JSON")?;
-            let Value::Object(index) = index else { return Err("基础资源包的 index.json 格式不对".into()) };
-            if index.get("version").and_then(Value::as_f64).is_some_and(|v| v > 1.0) {
+            let raw = entries
+                .iter()
+                .find(|e| e.name == INDEX_FILE)
+                .ok_or("基础资源包里没有 index.json")?;
+            let index: Value = serde_json::from_slice(&raw.data)
+                .map_err(|_| "基础资源包的 index.json 不是有效 JSON")?;
+            let Value::Object(index) = index else {
+                return Err("基础资源包的 index.json 格式不对".into());
+            };
+            if index
+                .get("version")
+                .and_then(Value::as_f64)
+                .is_some_and(|v| v > 1.0)
+            {
                 return Err("基础资源包版本比 MOSS 认识的新，请换一个资源包".into());
             }
             (entries, index)
         }
-        None => (Vec::new(), Map::from_iter([("version".to_owned(), json!(1))])),
+        None => (
+            Vec::new(),
+            Map::from_iter([("version".to_owned(), json!(1))]),
+        ),
     };
-    let old_models = index.get("srmodels").and_then(Value::as_str).map(str::to_owned);
-    entries.retain(|e| e.name != INDEX_FILE && e.name != SRMODELS_FILE && Some(&e.name) != old_models.as_ref());
+    let old_models = index
+        .get("srmodels")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    entries.retain(|e| {
+        e.name != INDEX_FILE && e.name != SRMODELS_FILE && Some(&e.name) != old_models.as_ref()
+    });
     index.insert("srmodels".into(), json!(SRMODELS_FILE));
     match target {
         WakeTarget::Custom(word) => {
@@ -306,12 +373,25 @@ pub fn build_package(base: Option<&[u8]>, target: &WakeTarget) -> Result<Vec<u8>
             index.remove("multinet_model");
         }
     }
-    entries.push(AssetEntry { name: SRMODELS_FILE.into(), data: srmodels_for(target), width: 0, height: 0 });
+    entries.push(AssetEntry {
+        name: SRMODELS_FILE.into(),
+        data: srmodels_for(target),
+        width: 0,
+        height: 0,
+    });
     let index = serde_json::to_vec(&Value::Object(index)).map_err(|_| "生成 index.json 失败")?;
-    entries.push(AssetEntry { name: INDEX_FILE.into(), data: index, width: 0, height: 0 });
+    entries.push(AssetEntry {
+        name: INDEX_FILE.into(),
+        data: index,
+        width: 0,
+        height: 0,
+    });
     let package = pack_assets(&entries).map_err(str::to_owned)?;
     if package.len() > ASSETS_MAX_BYTES {
-        return Err(format!("生成的资源包 {:.1} MB，超过设备资源分区 8 MB；请换一个更小的基础资源包", package.len() as f64 / 1048576.0));
+        return Err(format!(
+            "生成的资源包 {:.1} MB，超过设备资源分区 8 MB；请换一个更小的基础资源包",
+            package.len() as f64 / 1048576.0
+        ));
     }
     Ok(package)
 }
@@ -325,7 +405,9 @@ pub fn describe_base(bytes: &[u8]) -> Result<Value, String> {
         .and_then(|e| serde_json::from_slice::<Value>(&e.data).ok())
         .filter(Value::is_object)
         .ok_or("基础资源包里没有有效的 index.json")?;
-    let wake = index["multinet_model"]["commands"][0]["text"].as_str().map(str::to_owned);
+    let wake = index["multinet_model"]["commands"][0]["text"]
+        .as_str()
+        .map(str::to_owned);
     Ok(json!({
         "files": entries.len(),
         "size": bytes.len(),
@@ -354,10 +436,20 @@ impl AssetsStore {
         let mut raw = [0u8; 16];
         getrandom::fill(&mut raw).map_err(|_| "无法生成下载令牌".to_owned())?;
         let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let mut map = self.staged.lock().map_err(|_| "资源包表锁失败".to_owned())?;
+        let mut map = self
+            .staged
+            .lock()
+            .map_err(|_| "资源包表锁失败".to_owned())?;
         let now = Instant::now();
         map.retain(|_, s| s.expires > now && s.device_id != device_id);
-        map.insert(token.clone(), Staged { device_id: device_id.to_owned(), bytes: std::sync::Arc::new(bytes), expires: now + STAGED_TTL });
+        map.insert(
+            token.clone(),
+            Staged {
+                device_id: device_id.to_owned(),
+                bytes: std::sync::Arc::new(bytes),
+                expires: now + STAGED_TTL,
+            },
+        );
         Ok(token)
     }
 
@@ -367,7 +459,9 @@ impl AssetsStore {
             return None;
         }
         let map = self.staged.lock().ok()?;
-        map.get(token).filter(|s| s.expires > Instant::now()).map(|s| (s.device_id.clone(), s.bytes.clone()))
+        map.get(token)
+            .filter(|s| s.expires > Instant::now())
+            .map(|s| (s.device_id.clone(), s.bytes.clone()))
     }
 }
 
@@ -383,19 +477,35 @@ pub(crate) fn router(shared: std::sync::Arc<crate::Shared>) -> axum::Router {
         let token = file.strip_suffix(".bin").unwrap_or(&file);
         match shared.assets_store.fetch(token) {
             Some((device, bytes)) => {
-                shared.state.event(crate::EventRecord::info(crate::DiagCategory::Firmware, format!("唤醒词资源包：设备 {device}（{}）开始下载 {} 字节", peer.ip(), bytes.len())));
-                ([(header::CONTENT_TYPE, "application/octet-stream")], bytes.as_ref().clone()).into_response()
+                shared.state.event(crate::EventRecord::info(
+                    crate::DiagCategory::Firmware,
+                    format!(
+                        "唤醒词资源包：设备 {device}（{}）开始下载 {} 字节",
+                        peer.ip(),
+                        bytes.len()
+                    ),
+                ));
+                (
+                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes.as_ref().clone(),
+                )
+                    .into_response()
             }
             None => {
                 shared.state.event(
-                    crate::EventRecord::warn(crate::DiagCategory::Firmware, format!("唤醒词资源包下载被拒绝（{}）：令牌无效或已过期", peer.ip()))
-                        .hint("资源包只保留 30 分钟：在“唤醒词与音量”里重新推送"),
+                    crate::EventRecord::warn(
+                        crate::DiagCategory::Firmware,
+                        format!("唤醒词资源包下载被拒绝（{}）：令牌无效或已过期", peer.ip()),
+                    )
+                    .hint("资源包只保留 30 分钟：在“唤醒词与音量”里重新推送"),
                 );
                 StatusCode::NOT_FOUND.into_response()
             }
         }
     }
-    axum::Router::new().route("/xiaozhi/assets/{file}", axum::routing::get(download)).with_state(shared)
+    axum::Router::new()
+        .route("/xiaozhi/assets/{file}", axum::routing::get(download))
+        .with_state(shared)
 }
 
 #[cfg(test)]

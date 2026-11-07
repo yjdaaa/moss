@@ -4,7 +4,16 @@
 //! `secret` / `password` 后紧跟（可带引号的）`:` 或 `=` 的写法，以及 `Bearer` / `Basic` 前缀；
 //! 只替换值，保留字段名，便于排查。`tokens_used` 这类以关键词开头但不是该字段的名字不受影响。
 
-const MARKERS: [&str; 8] = ["access_token", "api_key", "api-key", "apikey", "authorization", "password", "secret", "token"];
+const MARKERS: [&str; 8] = [
+    "access_token",
+    "api_key",
+    "api-key",
+    "apikey",
+    "authorization",
+    "password",
+    "secret",
+    "token",
+];
 
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
@@ -70,15 +79,23 @@ fn redact_ascii_case(line: &str) -> String {
 
 /// Also redact bearer/basic authorization headers emitted without a field name.
 fn match_standalone_auth(chars: &[char], lower: &[char], index: usize) -> Option<(usize, usize)> {
-    if index > 0 && is_name_char(chars[index - 1]) { return None; }
+    if index > 0 && is_name_char(chars[index - 1]) {
+        return None;
+    }
     for prefix in ["bearer ", "basic "] {
         let mark: Vec<char> = prefix.chars().collect();
         let end = index + mark.len();
-        if end > lower.len() || lower[index..end] != mark[..] { continue; }
+        if end > lower.len() || lower[index..end] != mark[..] {
+            continue;
+        }
         let mut cursor = end;
-        while cursor < chars.len() && chars[cursor] == ' ' { cursor += 1; }
+        while cursor < chars.len() && chars[cursor] == ' ' {
+            cursor += 1;
+        }
         let start = cursor;
-        while cursor < chars.len() && !is_value_end(chars[cursor]) { cursor += 1; }
+        while cursor < chars.len() && !is_value_end(chars[cursor]) {
+            cursor += 1;
+        }
         if cursor > start && !chars[start..cursor].iter().all(|c| *c == '*') {
             return Some((start, cursor));
         }
@@ -88,7 +105,11 @@ fn match_standalone_auth(chars: &[char], lower: &[char], index: usize) -> Option
 
 /// 在 `index` 处匹配一个关键词；返回需要替换的值区间（字符下标）。
 fn match_marker(chars: &[char], lower: &[char], index: usize) -> Option<(usize, usize)> {
-    if index > 0 && is_name_char(chars[index - 1]) && chars[index - 1] != '_' && chars[index - 1] != '-' {
+    if index > 0
+        && is_name_char(chars[index - 1])
+        && chars[index - 1] != '_'
+        && chars[index - 1] != '-'
+    {
         return None;
     }
     for marker in MARKERS {
@@ -149,10 +170,19 @@ mod tests {
         let cases = [
             ("api_key: sk-abc123", "api_key: ***"),
             ("  api_key: \"sk-abc123\"", "  api_key: \"***\""),
-            ("{\"api_key\": \"sk-abc\", \"model\": \"x\"}", "{\"api_key\": \"***\", \"model\": \"x\"}"),
-            ("Authorization: Bearer eyJhbGciOi.abc", "Authorization: Bearer ***"),
+            (
+                "{\"api_key\": \"sk-abc\", \"model\": \"x\"}",
+                "{\"api_key\": \"***\", \"model\": \"x\"}",
+            ),
+            (
+                "Authorization: Bearer eyJhbGciOi.abc",
+                "Authorization: Bearer ***",
+            ),
             ("authorization=Basic dXNlcjpw", "authorization=Basic ***"),
-            ("wss://example.test/mcp/?token=abc.def&x=1", "wss://example.test/mcp/?token=***&x=1"),
+            (
+                "wss://example.test/mcp/?token=abc.def&x=1",
+                "wss://example.test/mcp/?token=***&x=1",
+            ),
             ("ACCESS_TOKEN=xyz", "ACCESS_TOKEN=***"),
             ("password = hunter2 ok", "password = *** ok"),
             ("LLM_API-KEY: k1", "LLM_API-KEY: ***"),
@@ -165,12 +195,22 @@ mod tests {
 
     #[test]
     fn nv15_standalone_auth_and_legacy_log_tail_secrets_are_redacted() {
-        for source in ["Bearer synthetic-old-token", "Basic synthetic-credential", "refresh Bearer synthetic-old-token now"] {
+        for source in [
+            "Bearer synthetic-old-token",
+            "Basic synthetic-credential",
+            "refresh Bearer synthetic-old-token now",
+        ] {
             let sanitized = redact_line(source);
-            assert!(!sanitized.contains("synthetic-old-token") && !sanitized.contains("synthetic-credential"));
+            assert!(
+                !sanitized.contains("synthetic-old-token")
+                    && !sanitized.contains("synthetic-credential")
+            );
             assert!(sanitized.contains("***"));
         }
-        assert_eq!(redact_line("Authorization: Bearer synthetic-old-token"),"Authorization: Bearer ***");
+        assert_eq!(
+            redact_line("Authorization: Bearer synthetic-old-token"),
+            "Authorization: Bearer ***"
+        );
     }
     #[test]
     fn ordinary_text_is_untouched() {

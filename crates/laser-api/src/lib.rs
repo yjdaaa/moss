@@ -15,8 +15,8 @@ fn current_moss_version() -> &'static str {
         _ => env!("CARGO_PKG_VERSION"),
     }
 }
-pub mod approval;
 pub mod agent_runs;
+pub mod approval;
 pub mod external_tools;
 mod feedback;
 mod voice_authority;
@@ -323,7 +323,10 @@ fn sd_offline_upload_payload(
     (text.into_bytes(), sha)
 }
 
-fn target_open_mutex(locks: &TargetOpenLocks, target: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+fn target_open_mutex(
+    locks: &TargetOpenLocks,
+    target: &str,
+) -> std::sync::Arc<std::sync::Mutex<()>> {
     let mut map = locks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -343,7 +346,10 @@ type SendLauncher<'a> = &'a dyn Fn(
 
 /// 前端页面路由：刷新这些地址时返回 index.html，由前端决定显示哪一页（摄像头与语音中心只在桌面端显示）。
 fn is_spa_route(route: &str) -> bool {
-    matches!(route, "/draw" | "/material-lab" | "/voice" | "/camera" | "/twin") || route.starts_with("/draw/")
+    matches!(
+        route,
+        "/draw" | "/material-lab" | "/voice" | "/camera" | "/twin"
+    ) || route.starts_with("/draw/")
 }
 
 /// SD 脱机：固件没有返回文件哈希时拒绝 `$SD/Run`（无法确认机器端文件就是确认过的刀路）。
@@ -468,14 +474,15 @@ impl AuthManager {
         };
         if let Some(path) = self.runtime_path.as_deref() {
             let hash_clone = next_hash.clone();
-            update_runtime_settings(Some(path), |current| {
-                match hash_clone {
-                    Some(h) => {
-                        current.insert("lan_static_pin_hash".to_owned(), serde_json::Value::String(h));
-                    }
-                    None => {
-                        current.remove("lan_static_pin_hash");
-                    }
+            update_runtime_settings(Some(path), |current| match hash_clone {
+                Some(h) => {
+                    current.insert(
+                        "lan_static_pin_hash".to_owned(),
+                        serde_json::Value::String(h),
+                    );
+                }
+                None => {
+                    current.remove("lan_static_pin_hash");
                 }
             })?;
         }
@@ -497,10 +504,7 @@ impl AuthManager {
     }
 
     pub fn paired_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.tokens.len())
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.tokens.len()).unwrap_or(0)
     }
 
     /// 撤销所有已配对设备的长久连接 Token。
@@ -535,14 +539,15 @@ impl AuthManager {
             {
                 return Err(AuthError::Locked(state.locked_until[source_ip] - now));
             }
-            let dynamic_valid =
-                !state.used && now < state.expires_at && !state.code.is_empty() && code == state.code;
+            let dynamic_valid = !state.used
+                && now < state.expires_at
+                && !state.code.is_empty()
+                && code == state.code;
             let static_valid = code.len() == 6
                 && code.bytes().all(|b| b.is_ascii_digit())
-                && state
-                    .static_pin_hash
-                    .as_deref()
-                    .is_some_and(|expected| expected == hex::encode(Sha256::digest(code.as_bytes())));
+                && state.static_pin_hash.as_deref().is_some_and(|expected| {
+                    expected == hex::encode(Sha256::digest(code.as_bytes()))
+                });
             if !dynamic_valid && !static_valid {
                 let entry = state
                     .failures
@@ -578,7 +583,10 @@ impl AuthManager {
                 .map(|(k, v)| (k, serde_json::Value::String(v)))
                 .collect();
             let _ = update_runtime_settings(Some(path), |current| {
-                current.insert("lan_paired_tokens".to_owned(), serde_json::Value::Object(map));
+                current.insert(
+                    "lan_paired_tokens".to_owned(),
+                    serde_json::Value::Object(map),
+                );
             });
         }
         Ok((token, pairing_id))
@@ -770,9 +778,9 @@ impl ApiService {
             workflows: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::BTreeMap::new()),
             ),
-            calibrations: std::sync::Arc::new(
-                std::sync::Mutex::new(std::collections::BTreeMap::new()),
-            ),
+            calibrations: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeMap::new(),
+            )),
             store: None,
             runtime_db: None,
             generated_root: None,
@@ -780,7 +788,9 @@ impl ApiService {
             runtime_path: None,
             active_jobs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             uncertain_jobs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            launching_workflows: std::sync::Arc::new(std::sync::Mutex::new(LaunchReservationState::default())),
+            launching_workflows: std::sync::Arc::new(std::sync::Mutex::new(
+                LaunchReservationState::default(),
+            )),
             target_open_locks: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             material_write_lock: std::sync::Mutex::new(()),
             feedback_adoption: std::sync::Mutex::new(()),
@@ -790,7 +800,8 @@ impl ApiService {
             strict_mode: std::sync::atomic::AtomicBool::new(false),
             approvals: None,
             desktop_session: std::sync::OnceLock::new(),
-            agent_runs: std::sync::OnceLock::new(),            external_tools: std::sync::OnceLock::new(),
+            agent_runs: std::sync::OnceLock::new(),
+            external_tools: std::sync::OnceLock::new(),
             disabled_tools: std::sync::RwLock::new(std::collections::BTreeSet::new()),
             voice_sessions: Default::default(),
         }
@@ -798,7 +809,8 @@ impl ApiService {
 
     /// 严格模式开关（来自 `MOSS_FUSION_STRICT`，见 [`laser_runtime::config::fusion_strict_from_env`]）。
     pub fn with_strict_mode(self, strict: bool) -> Self {
-        self.strict_mode.store(strict, std::sync::atomic::Ordering::SeqCst);
+        self.strict_mode
+            .store(strict, std::sync::atomic::Ordering::SeqCst);
         self
     }
 
@@ -808,7 +820,8 @@ impl ApiService {
 
     /// 运行中切换严格模式（语音中心切到自建链路时开启，切回官方时恢复 `.env` 的设置，技术书 §9.4.2）。
     pub fn set_strict_mode(&self, strict: bool) {
-        self.strict_mode.store(strict, std::sync::atomic::Ordering::SeqCst);
+        self.strict_mode
+            .store(strict, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 用户是否关闭了工具 `name`（NV8）。
@@ -823,7 +836,10 @@ impl ApiService {
 
     /// 当前关闭的工具（按名称排序）。
     pub fn disabled_tools(&self) -> Vec<String> {
-        self.disabled_tools.read().map(|set| set.iter().cloned().collect()).unwrap_or_default()
+        self.disabled_tools
+            .read()
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// 运行中替换关闭的工具列表（语音中心写入 `settings.json` 后调用）。不能关闭的工具与空名会被忽略。
@@ -839,7 +855,10 @@ impl ApiService {
     }
 
     /// 替换审批服务（测试注入固定时钟用）；生产环境由 [`Self::with_runtime_db`] 自动创建。
-    pub fn with_approval_service(mut self, service: std::sync::Arc<approval::ApprovalService>) -> Self {
+    pub fn with_approval_service(
+        mut self,
+        service: std::sync::Arc<approval::ApprovalService>,
+    ) -> Self {
         self.approvals = Some(service);
         self
     }
@@ -850,7 +869,11 @@ impl ApiService {
 
     /// 进程启动时调用：所有 pending / approved 审批一律过期（技术书 §5.5、A-32）。
     pub fn recover_approvals_after_restart(&self) -> usize {
-        match self.approvals.as_ref().map(|service| service.recover_after_restart()) {
+        match self
+            .approvals
+            .as_ref()
+            .map(|service| service.recover_after_restart())
+        {
             Some(Ok(count)) => count,
             Some(Err(error)) => {
                 eprintln!("[laser-api] 启动时处理遗留审批失败: {}", error.message());
@@ -888,7 +911,12 @@ impl ApiService {
         let busy = |held: Option<bool>| held.unwrap_or(true);
         busy(self.active_jobs.lock().ok().map(|jobs| !jobs.is_empty()))
             || busy(self.uncertain_jobs.lock().ok().map(|jobs| !jobs.is_empty()))
-            || busy(self.launching_workflows.lock().ok().map(|state| !state.active.is_empty()))
+            || busy(
+                self.launching_workflows
+                    .lock()
+                    .ok()
+                    .map(|state| !state.active.is_empty()),
+            )
     }
 
     /// 退出/崩溃兜底：对所有活动作业置取消并直接写 0x18（实时信道 + 裸句柄双路）。
@@ -915,7 +943,10 @@ impl ApiService {
         let mut first_error = None;
         for job in jobs {
             job.cancel.cancel();
-            if let Err(e) = job.transport.write_realtime(laser_device::RealtimeCommand::EmergencyStop) {
+            if let Err(e) = job
+                .transport
+                .write_realtime(laser_device::RealtimeCommand::EmergencyStop)
+            {
                 first_error.get_or_insert(e);
             }
             if let Some(raw) = job.transport.raw_abort_handle() {
@@ -923,7 +954,8 @@ impl ApiService {
             }
         }
         for job in uncertain {
-            if let Err(e) = job.abort_with_factory(&self.transport_factory, &self.target_open_locks) {
+            if let Err(e) = job.abort_with_factory(&self.transport_factory, &self.target_open_locks)
+            {
                 first_error.get_or_insert(e);
             }
         }
@@ -949,28 +981,96 @@ impl ApiService {
         self.handle_safe_action_for(args, _ctx, None)
     }
 
-    fn handle_safe_action_for(&self, args: &laser_contracts::LaserSafeActionArgs, _ctx: &laser_contracts::CallerContext, job_id: Option<&str>) -> laser_contracts::ToolCallResult {
+    fn handle_safe_action_for(
+        &self,
+        args: &laser_contracts::LaserSafeActionArgs,
+        _ctx: &laser_contracts::CallerContext,
+        job_id: Option<&str>,
+    ) -> laser_contracts::ToolCallResult {
         if !self.voice_caller_allowed(_ctx) {
-            return laser_contracts::ToolCallResult::with_detail(false, "语音设备授权已失效，请重新连接", "voice_session_revoked");
+            return laser_contracts::ToolCallResult::with_detail(
+                false,
+                "语音设备授权已失效，请重新连接",
+                "voice_session_revoked",
+            );
         }
         // 与 laser-tools 一致：动作名大小写不敏感，避免 "Emergency_Stop" 落空而不发 0x18（2026-11-05）。
         let action_owned = args.action.trim().to_ascii_lowercase();
         let action = action_owned.as_str();
         if job_id.is_some() && !matches!(action, "emergency_stop" | "soft_reset" | "status") {
-            return laser_contracts::ToolCallResult::err("job_id 只用于查询或停止任务，不能改变其他动作的目标");
+            return laser_contracts::ToolCallResult::err(
+                "job_id 只用于查询或停止任务，不能改变其他动作的目标",
+            );
         }
         let realtime_cmd_info = match action {
-            "emergency_stop" | "soft_reset" => Some((laser_device::RealtimeCommand::EmergencyStop, "急停 0x18", true)),
-            "feed_override_reset" | "feed_reset" | "feed_100" => Some((laser_device::RealtimeCommand::FeedOvrReset, "进给速度恢复100% (0x90)", false)),
-            "feed_override_plus_10" | "feed_plus_10" | "feed_+10%" => Some((laser_device::RealtimeCommand::FeedOvrCoarsePlus, "进给速度增加10% (0x91)", false)),
-            "feed_override_minus_10" | "feed_minus_10" | "feed_-10%" => Some((laser_device::RealtimeCommand::FeedOvrCoarseMinus, "进给速度降低10% (0x92)", false)),
-            "feed_override_plus_1" | "feed_plus_1" | "feed_+1%" => Some((laser_device::RealtimeCommand::FeedOvrFinePlus, "进给速度增加1% (0x93)", false)),
-            "feed_override_minus_1" | "feed_minus_1" | "feed_-1%" => Some((laser_device::RealtimeCommand::FeedOvrFineMinus, "进给速度降低1% (0x94)", false)),
-            "spindle_override_reset" | "power_override_reset" | "power_reset" | "power_100" => Some((laser_device::RealtimeCommand::SpindleOvrReset, "激光功率恢复100% (0x99)", false)),
-            "spindle_override_plus_10" | "power_override_plus_10" | "power_plus_10" | "power_+10%" => Some((laser_device::RealtimeCommand::SpindleOvrCoarsePlus, "激光功率增加10% (0x9A)", false)),
-            "spindle_override_minus_10" | "power_override_minus_10" | "power_minus_10" | "power_-10%" => Some((laser_device::RealtimeCommand::SpindleOvrCoarseMinus, "激光功率降低10% (0x9B)", false)),
-            "spindle_override_plus_1" | "power_override_plus_1" | "power_plus_1" | "power_+1%" => Some((laser_device::RealtimeCommand::SpindleOvrFinePlus, "激光功率增加1% (0x9C)", false)),
-            "spindle_override_minus_1" | "power_override_minus_1" | "power_minus_1" | "power_-1%" => Some((laser_device::RealtimeCommand::SpindleOvrFineMinus, "激光功率降低1% (0x9D)", false)),
+            "emergency_stop" | "soft_reset" => Some((
+                laser_device::RealtimeCommand::EmergencyStop,
+                "急停 0x18",
+                true,
+            )),
+            "feed_override_reset" | "feed_reset" | "feed_100" => Some((
+                laser_device::RealtimeCommand::FeedOvrReset,
+                "进给速度恢复100% (0x90)",
+                false,
+            )),
+            "feed_override_plus_10" | "feed_plus_10" | "feed_+10%" => Some((
+                laser_device::RealtimeCommand::FeedOvrCoarsePlus,
+                "进给速度增加10% (0x91)",
+                false,
+            )),
+            "feed_override_minus_10" | "feed_minus_10" | "feed_-10%" => Some((
+                laser_device::RealtimeCommand::FeedOvrCoarseMinus,
+                "进给速度降低10% (0x92)",
+                false,
+            )),
+            "feed_override_plus_1" | "feed_plus_1" | "feed_+1%" => Some((
+                laser_device::RealtimeCommand::FeedOvrFinePlus,
+                "进给速度增加1% (0x93)",
+                false,
+            )),
+            "feed_override_minus_1" | "feed_minus_1" | "feed_-1%" => Some((
+                laser_device::RealtimeCommand::FeedOvrFineMinus,
+                "进给速度降低1% (0x94)",
+                false,
+            )),
+            "spindle_override_reset" | "power_override_reset" | "power_reset" | "power_100" => {
+                Some((
+                    laser_device::RealtimeCommand::SpindleOvrReset,
+                    "激光功率恢复100% (0x99)",
+                    false,
+                ))
+            }
+            "spindle_override_plus_10"
+            | "power_override_plus_10"
+            | "power_plus_10"
+            | "power_+10%" => Some((
+                laser_device::RealtimeCommand::SpindleOvrCoarsePlus,
+                "激光功率增加10% (0x9A)",
+                false,
+            )),
+            "spindle_override_minus_10"
+            | "power_override_minus_10"
+            | "power_minus_10"
+            | "power_-10%" => Some((
+                laser_device::RealtimeCommand::SpindleOvrCoarseMinus,
+                "激光功率降低10% (0x9B)",
+                false,
+            )),
+            "spindle_override_plus_1" | "power_override_plus_1" | "power_plus_1" | "power_+1%" => {
+                Some((
+                    laser_device::RealtimeCommand::SpindleOvrFinePlus,
+                    "激光功率增加1% (0x9C)",
+                    false,
+                ))
+            }
+            "spindle_override_minus_1"
+            | "power_override_minus_1"
+            | "power_minus_1"
+            | "power_-1%" => Some((
+                laser_device::RealtimeCommand::SpindleOvrFineMinus,
+                "激光功率降低1% (0x9D)",
+                false,
+            )),
             _ => None,
         };
 
@@ -1012,7 +1112,9 @@ impl ApiService {
                 return laser_contracts::ToolCallResult::err("无法读取设备任务，请使用实体急停");
             };
             let Ok(uncertain) = self.uncertain_jobs.lock() else {
-                return laser_contracts::ToolCallResult::err("无法读取待确认停止的设备任务，请使用实体急停");
+                return laser_contracts::ToolCallResult::err(
+                    "无法读取待确认停止的设备任务，请使用实体急停",
+                );
             };
             if let Some(id) = job_id {
                 if let Some(job) = jobs.values().find(|j| j.workflow_id == id).cloned() {
@@ -1060,7 +1162,11 @@ impl ApiService {
                 if let Some(job) = jobs.values().next().cloned() {
                     Some(StopTarget::Running(job))
                 } else {
-                    uncertain.values().next().cloned().map(StopTarget::Uncertain)
+                    uncertain
+                        .values()
+                        .next()
+                        .cloned()
+                        .map(StopTarget::Uncertain)
                 }
             } else if jobs.len() > 1 {
                 return laser_contracts::ToolCallResult::err(
@@ -1121,7 +1227,10 @@ impl ApiService {
                         .load(std::sync::atomic::Ordering::Relaxed);
                     return laser_contracts::ToolCallResult::with_detail(
                         true,
-                        format!("设备正在加工中（目标 {}），已确认 {}/{} 行", job.target, sent, total),
+                        format!(
+                            "设备正在加工中（目标 {}），已确认 {}/{} 行",
+                            job.target, sent, total
+                        ),
                         "active_job_streaming",
                     );
                 } else {
@@ -1139,7 +1248,9 @@ impl ApiService {
                         ));
                     }
                     job.cancel.cancel();
-                    if let Err(error) = job.write_emergency_stop(&self.transport_factory, &self.target_open_locks) {
+                    if let Err(error) =
+                        job.write_emergency_stop(&self.transport_factory, &self.target_open_locks)
+                    {
                         return laser_contracts::ToolCallResult::err(format!(
                             "作业取消已请求，但急停 0x18 发送失败：{error}"
                         ));
@@ -1166,7 +1277,9 @@ impl ApiService {
 
         let permit = match self.voice_permit(_ctx) {
             Ok(permit) => permit,
-            Err(_) => return laser_contracts::ToolCallResult::err("语音设备授权已失效，请重新连接"),
+            Err(_) => {
+                return laser_contracts::ToolCallResult::err("语音设备授权已失效，请重新连接");
+            }
         };
         let factory = self.transport_factory.clone();
         let uncertain_for_opener = self.uncertain_jobs.clone();
@@ -1182,35 +1295,55 @@ impl ApiService {
                 (factory)(spec)
             },
         );
-        laser_tools::execute_laser_safe_action_with_gate(args, &opener, &|| permit.as_ref().is_none_or(|p| p.load(std::sync::atomic::Ordering::Acquire)))
+        laser_tools::execute_laser_safe_action_with_gate(args, &opener, &|| {
+            permit
+                .as_ref()
+                .is_none_or(|p| p.load(std::sync::atomic::Ordering::Acquire))
+        })
     }
 
     /// 走边框：真实驱动机器沿外接矩形运动，按发送链路对待（2026-10-14）。
     /// 与完整发送相同的设备占用检查、握手与 Idle 预检；运行期间登记为活动作业（`framing-…`），
     /// 顶栏 / 页面急停与取消都能找到它。默认不出光（`power` 缺省 0），弱光指示需显式传 `power`。
-    fn run_framing(&self, object: &serde_json::Map<String, serde_json::Value>, ctx: &laser_contracts::CallerContext) -> Vec<u8> {
+    fn run_framing(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+        ctx: &laser_contracts::CallerContext,
+    ) -> Vec<u8> {
         use std::sync::atomic::Ordering;
-        let permit = match self.voice_permit(ctx) { Ok(permit) => permit, Err((status,body)) => return http_json(status,body) };
+        let permit = match self.voice_permit(ctx) {
+            Ok(permit) => permit,
+            Err((status, body)) => return http_json(status, body),
+        };
         let min_x = object.get("min_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let min_y = object.get("min_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let max_x = object.get("max_x").and_then(|v| v.as_f64()).unwrap_or(100.0);
-        let max_y = object.get("max_y").and_then(|v| v.as_f64()).unwrap_or(100.0);
+        let max_x = object
+            .get("max_x")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(100.0);
+        let max_y = object
+            .get("max_y")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(100.0);
         let (feed_rate, power) = match framing_feed_and_power(object) {
             Ok(values) => values,
             Err(error) => return framing_params_invalid(error),
         };
 
-        let framing_gcode = match laser_core::gcode::generate_framing_gcode(min_x, min_y, max_x, max_y, feed_rate, power) {
+        let framing_gcode = match laser_core::gcode::generate_framing_gcode(
+            min_x, min_y, max_x, max_y, feed_rate, power,
+        ) {
             Ok(g) => g,
             Err(e) => return http_json(400, failure(format!("生成走边框 G-code 失败: {e}"), None)),
         };
         // relative_to_head（2026-11-06，AI 预览窗“先走边框”）：以激光头当前位置为 (0,0)，范围取预览返回的
         // frame_mm（可为负），与即将开刻的任务同一参照；生成器结尾的 G0 X0 Y0 即回到起点
-        let framing_gcode = if object.get("relative_to_head").and_then(|v| v.as_bool()) == Some(true) {
-            format!("G21\nG92 X0 Y0 Z0\n{framing_gcode}")
-        } else {
-            framing_gcode
-        };
+        let framing_gcode =
+            if object.get("relative_to_head").and_then(|v| v.as_bool()) == Some(true) {
+                format!("G21\nG92 X0 Y0 Z0\n{framing_gcode}")
+            } else {
+                framing_gcode
+            };
         let lines: Vec<String> = match laser_device::prepare_gcode_lines(&framing_gcode) {
             Ok(p) => p.lines,
             Err(e) => return http_json(400, failure(format!("走边框 G-code 校验失败: {e}"), None)),
@@ -1218,15 +1351,29 @@ impl ApiService {
 
         let spec = match self.connection_spec_from_request(object) {
             Ok(s) => s,
-            Err(e) => return http_json(400, failure(format!("连接参数无效: {e}"), Some(serde_json::json!({"error_code": "connection_params_invalid"})))),
+            Err(e) => {
+                return http_json(
+                    400,
+                    failure(
+                        format!("连接参数无效: {e}"),
+                        Some(serde_json::json!({"error_code": "connection_params_invalid"})),
+                    ),
+                );
+            }
         };
         let target = spec.describe();
         if let Ok(jobs) = self.active_jobs.lock() {
             if let Some(job) = jobs.values().find(|job| job.target == target) {
-                return http_json(409, failure(
-                    format!("设备 {target} 正在执行 {}，请等待完成或先取消", job.workflow_id),
-                    Some(serde_json::json!({"error_code": "device_busy"})),
-                ));
+                return http_json(
+                    409,
+                    failure(
+                        format!(
+                            "设备 {target} 正在执行 {}，请等待完成或先取消",
+                            job.workflow_id
+                        ),
+                        Some(serde_json::json!({"error_code": "device_busy"})),
+                    ),
+                );
             }
         }
         let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
@@ -1250,18 +1397,45 @@ impl ApiService {
         };
         let mut device = laser_device::DeviceConnection::new(transport.clone());
         if let Err(e) = device.handshake_with_deadline(std::time::Duration::from_secs(3)) {
-            return http_json(400, failure(format!("设备握手失败 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_not_ready"}))));
+            return http_json(
+                400,
+                failure(
+                    format!("设备握手失败 ({target}): {e}"),
+                    Some(serde_json::json!({"error_code": "device_not_ready"})),
+                ),
+            );
         }
         device.load_features(std::time::Duration::from_secs(3));
-        let device_scale = match device.verify_job_ready_adaptive(std::time::Duration::from_secs(3)) {
+        let device_scale = match device.verify_job_ready_adaptive(std::time::Duration::from_secs(3))
+        {
             Ok(scale) => scale,
-            Err(e) => return http_json(400, failure(format!("走边框前检查未通过 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_preflight_failed"})))),
+            Err(e) => {
+                return http_json(
+                    400,
+                    failure(
+                        format!("走边框前检查未通过 ({target}): {e}"),
+                        Some(serde_json::json!({"error_code": "device_preflight_failed"})),
+                    ),
+                );
+            }
         };
         if let Err(error) = check_job_fits_machine(&framing_gcode, &device.travel_limits) {
-            return http_json(400, failure(format!("{error}（{target}）"), Some(serde_json::json!({"error_code": "job_exceeds_travel"}))));
+            return http_json(
+                400,
+                failure(
+                    format!("{error}（{target}）"),
+                    Some(serde_json::json!({"error_code": "job_exceeds_travel"})),
+                ),
+            );
         }
         if permit.as_ref().is_some_and(|p| !p.load(Ordering::Acquire)) {
-            return http_json(403, failure("预检期间设备授权已撤销，未开始走边框", Some(serde_json::json!({"error_code":"voice_session_revoked"}))));
+            return http_json(
+                403,
+                failure(
+                    "预检期间设备授权已撤销，未开始走边框",
+                    Some(serde_json::json!({"error_code":"voice_session_revoked"})),
+                ),
+            );
         }
 
         let job_id = next_workflow_id().replacen("wf-", "framing-", 1);
@@ -1286,7 +1460,10 @@ impl ApiService {
                 return http_json(
                     409,
                     failure(
-                        format!("设备 {target} 正在执行 {}，请等待完成或先取消", busy.workflow_id),
+                        format!(
+                            "设备 {target} 正在执行 {}，请等待完成或先取消",
+                            busy.workflow_id
+                        ),
                         Some(serde_json::json!({"error_code": "device_busy"})),
                     ),
                 );
@@ -1309,22 +1486,27 @@ impl ApiService {
         };
         drop(cleared_uncertain);
         let outcome = {
-            let mut worker = laser_device::JobWorker::with_progress(device, cancel.clone(), progress)
-                .with_scale_factor(device_scale / 1000.0);
+            let mut worker =
+                laser_device::JobWorker::with_progress(device, cancel.clone(), progress)
+                    .with_scale_factor(device_scale / 1000.0);
             worker.send_lines(lines)
         };
-        let bounds = serde_json::json!({ "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y });
+        let bounds =
+            serde_json::json!({ "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y });
         match outcome {
             Ok(_) if !cancel.is_cancelled() => {
                 if let Ok(mut jobs) = self.active_jobs.lock() {
                     jobs.remove(&job_id);
                 }
-                http_json(200, success(serde_json::json!({
-                    "message": "走边框完成",
-                    "job_id": job_id,
-                    "laser_on": power > 0,
-                    "bounds": bounds,
-                })))
+                http_json(
+                    200,
+                    success(serde_json::json!({
+                        "message": "走边框完成",
+                        "job_id": job_id,
+                        "laser_on": power > 0,
+                        "bounds": bounds,
+                    })),
+                )
             }
             result => {
                 // 取消或失败都不能证明机器已停：在同锁对内原子完成 active -> uncertain 交接，杜绝急停空窗。
@@ -1358,14 +1540,24 @@ impl ApiService {
                 drop(job);
                 drop(transport);
                 match result {
-                    Err(e) if !cancel.is_cancelled() => http_json(500, failure(
-                        format!("走边框执行失败，已发送急停 0x18，请到设备旁确认: {e}"),
-                        Some(serde_json::json!({"error_code": "framing_failed", "job_id": job_id})),
-                    )),
-                    _ => http_json(409, failure(
-                        "走边框已取消，急停 0x18 已发送，请到设备旁确认机器已停",
-                        Some(serde_json::json!({"error_code": "framing_cancelled", "job_id": job_id})),
-                    )),
+                    Err(e) if !cancel.is_cancelled() => http_json(
+                        500,
+                        failure(
+                            format!("走边框执行失败，已发送急停 0x18，请到设备旁确认: {e}"),
+                            Some(
+                                serde_json::json!({"error_code": "framing_failed", "job_id": job_id}),
+                            ),
+                        ),
+                    ),
+                    _ => http_json(
+                        409,
+                        failure(
+                            "走边框已取消，急停 0x18 已发送，请到设备旁确认机器已停",
+                            Some(
+                                serde_json::json!({"error_code": "framing_cancelled", "job_id": job_id}),
+                            ),
+                        ),
+                    ),
                 }
             }
         }
@@ -1398,12 +1590,19 @@ impl ApiService {
                     .next()
                     .ok_or("未选择串口且未发现任何系统串口，请插入 USB 线并点击刷新")?;
             }
-            let baud = parse_int(object.get("baudrate").or_else(|| object.get("baud")), "baudrate", 115_200)
-                .map_err(|e| e.to_string())?;
+            let baud = parse_int(
+                object.get("baudrate").or_else(|| object.get("baud")),
+                "baudrate",
+                115_200,
+            )
+            .map_err(|e| e.to_string())?;
             if !(1200..=4_000_000).contains(&baud) {
                 return Err("baudrate 超出合法范围 (1200 ~ 4000000)".into());
             }
-            Ok(laser_device::ConnectionSpec::Serial { port, baud_rate: baud as u32 })
+            Ok(laser_device::ConnectionSpec::Serial {
+                port,
+                baud_rate: baud as u32,
+            })
         } else {
             let host = object
                 .get("network_host")
@@ -1416,7 +1615,9 @@ impl ApiService {
                 return Err("请填写设备 host/IP".into());
             }
             let port = parse_int(
-                object.get("network_telnet_port").or_else(|| object.get("telnet_port")),
+                object
+                    .get("network_telnet_port")
+                    .or_else(|| object.get("telnet_port")),
                 "network_telnet_port",
                 23,
             )
@@ -1424,7 +1625,10 @@ impl ApiService {
             if !(1..=65535).contains(&port) {
                 return Err("network_telnet_port 超出合法范围".into());
             }
-            Ok(laser_device::ConnectionSpec::Tcp { host, port: port as u16 })
+            Ok(laser_device::ConnectionSpec::Tcp {
+                host,
+                port: port as u16,
+            })
         }
     }
 
@@ -1438,7 +1642,14 @@ impl ApiService {
         object: &serde_json::Map<String, serde_json::Value>,
         ctx: &laser_contracts::CallerContext,
     ) -> Result<serde_json::Value, (u16, serde_json::Value)> {
-        self.launch_send_job_for(laser_runtime::RecordKind::Workflow, workflow_id, gcode_path, expected_sha, object, ctx)
+        self.launch_send_job_for(
+            laser_runtime::RecordKind::Workflow,
+            workflow_id,
+            gcode_path,
+            expected_sha,
+            object,
+            ctx,
+        )
     }
 
     /// 与 `launch_send_job` 相同的真实下发链路，但终态写回指定记录类型
@@ -1457,17 +1668,37 @@ impl ApiService {
         // 严格模式检查点（技术书 §6.2）：workflow confirm_send / send / resume、文字任务发送、
         // 标定矩阵发送都经过这里。严格模式关闭且不是审批执行时直接走原逻辑，不读取任何额外数据（A-40）。
         if !self.strict_mode() && !matches!(ctx, laser_contracts::CallerContext::Approval { .. }) {
-            return self.launch_send_job_unchecked(kind, workflow_id, gcode_path, expected_sha, object, None, voice_permit);
+            return self.launch_send_job_unchecked(
+                kind,
+                workflow_id,
+                gcode_path,
+                expected_sha,
+                object,
+                None,
+                voice_permit,
+            );
         }
         let (approval_kind, label) = match kind {
-            laser_runtime::RecordKind::Calibration => (laser_contracts::ApprovalKind::CalibrationSend, "发送标定矩阵"),
-            _ => (laser_contracts::ApprovalKind::WorkflowConfirmSend, "发送加工任务"),
+            laser_runtime::RecordKind::Calibration => (
+                laser_contracts::ApprovalKind::CalibrationSend,
+                "发送标定矩阵",
+            ),
+            _ => (
+                laser_contracts::ApprovalKind::WorkflowConfirmSend,
+                "发送加工任务",
+            ),
         };
         let facts = self.send_digest_facts(kind, expected_sha, workflow_id, object);
         let summary = send_approval_summary(label, workflow_id, &facts);
         let authority = self.require_r3_authority(
             ctx,
-            approval::R3Action { kind: approval_kind, target_record: workflow_id, facts, request: object, summary },
+            approval::R3Action {
+                kind: approval_kind,
+                target_record: workflow_id,
+                facts,
+                request: object,
+                summary,
+            },
         )?;
         let result = match &authority {
             approval::R3Authority::Approval(record) => match record.connection.as_ref() {
@@ -1477,18 +1708,38 @@ impl ApiService {
                     // 重启时据此把审批记为“结果未知”，不重放（技术书 §5.5，A-33）
                     let hook: Option<JobTerminalHook> = self.approvals.clone().map(|service| {
                         if let Err(error) = service.mark_running(&record.approval_id, workflow_id) {
-                            eprintln!("[laser-api] 审批 {} 记录发送中状态失败: {}", record.approval_id, error.message());
+                            eprintln!(
+                                "[laser-api] 审批 {} 记录发送中状态失败: {}",
+                                record.approval_id,
+                                error.message()
+                            );
                         }
                         let approval_id = record.approval_id.clone();
                         Box::new(move |status: &str, send_result: &serde_json::Value| {
                             service.record_job_result(&approval_id, status, send_result);
                         }) as JobTerminalHook
                     });
-                    self.launch_send_job_unchecked(kind, workflow_id, gcode_path, expected_sha, &effective, hook, voice_permit)
+                    self.launch_send_job_unchecked(
+                        kind,
+                        workflow_id,
+                        gcode_path,
+                        expected_sha,
+                        &effective,
+                        hook,
+                        voice_permit,
+                    )
                 }
                 None => Err(approval::error_response(&approval::ApprovalError::Mismatch)),
             },
-            _ => self.launch_send_job_unchecked(kind, workflow_id, gcode_path, expected_sha, object, None, voice_permit),
+            _ => self.launch_send_job_unchecked(
+                kind,
+                workflow_id,
+                gcode_path,
+                expected_sha,
+                object,
+                None,
+                voice_permit,
+            ),
         };
         // 成功时的结果由发送线程在作业结束时写回；这里只记录没能启动的情况
         if result.is_err() {
@@ -1548,19 +1799,36 @@ impl ApiService {
         }
         use std::sync::atomic::Ordering;
         let spec = self.connection_spec_from_request(object).map_err(|e| {
-            (400, failure(format!("连接参数无效: {e}"), Some(serde_json::json!({"error_code": "connection_params_invalid"}))))
+            (
+                400,
+                failure(
+                    format!("连接参数无效: {e}"),
+                    Some(serde_json::json!({"error_code": "connection_params_invalid"})),
+                ),
+            )
         })?;
         let mode = spec.mode();
         let target = spec.describe();
         let is_offline_sd = object
             .get("offline_sd")
             .and_then(|v| v.as_bool())
-            .or_else(|| object.get("send_mode").and_then(|v| v.as_str()).map(|s| s == "sd_offline"))
+            .or_else(|| {
+                object
+                    .get("send_mode")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "sd_offline")
+            })
             .unwrap_or(false);
         // 网络脱机上传端口在打开设备前校验：不截断（65616 不能变成 80），无效直接 400（2026-11-05）。
         let sd_http_port = if is_offline_sd && mode == "network" {
             sd_offline_http_port(object).map_err(|error| {
-                (400, failure(error, Some(serde_json::json!({"error_code": "sd_http_port_invalid"}))))
+                (
+                    400,
+                    failure(
+                        error,
+                        Some(serde_json::json!({"error_code": "sd_http_port_invalid"})),
+                    ),
+                )
             })?
         } else {
             80
@@ -1577,7 +1845,10 @@ impl ApiService {
                 return Err((
                     409,
                     failure(
-                        format!("设备 {target} 正在执行 workflow {}，请等待完成或先取消", job.workflow_id),
+                        format!(
+                            "设备 {target} 正在执行 workflow {}，请等待完成或先取消",
+                            job.workflow_id
+                        ),
                         Some(serde_json::json!({"error_code": "device_busy"})),
                     ),
                 ));
@@ -1590,7 +1861,9 @@ impl ApiService {
                 (existing, None)
             } else {
                 let token = laser_device::CancellationToken::default();
-                reservations.active.insert(workflow_id.to_owned(), token.clone());
+                reservations
+                    .active
+                    .insert(workflow_id.to_owned(), token.clone());
                 drop(reservations);
                 drop(jobs);
                 (
@@ -1602,11 +1875,26 @@ impl ApiService {
                 )
             }
         };
-        if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
-            return Err((403, failure("语音设备授权已撤销，未开始加工", Some(serde_json::json!({"error_code":"voice_session_revoked"})))));
+        if voice_permit
+            .as_ref()
+            .is_some_and(|permit| !permit.load(Ordering::Acquire))
+        {
+            return Err((
+                403,
+                failure(
+                    "语音设备授权已撤销，未开始加工",
+                    Some(serde_json::json!({"error_code":"voice_session_revoked"})),
+                ),
+            ));
         }
         if cancel.is_cancelled() {
-            return Err((409, failure("任务已在启动前取消，未开始发送", Some(serde_json::json!({"error_code": "workflow_cancelled"})))));
+            return Err((
+                409,
+                failure(
+                    "任务已在启动前取消，未开始发送",
+                    Some(serde_json::json!({"error_code": "workflow_cancelled"})),
+                ),
+            ));
         }
         // 按设备目标串行化“释放旧待确认停止句柄 -> 打开独占新句柄”，杜绝同串口并发关闭/打开竞争。
         let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
@@ -1616,7 +1904,13 @@ impl ApiService {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             release_uncertain_target_handle(&self.uncertain_jobs, &target);
             let opened = (self.transport_factory)(&spec).map_err(|e| {
-                (400, failure(format!("设备连接失败 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_unreachable"}))))
+                (
+                    400,
+                    failure(
+                        format!("设备连接失败 ({target}): {e}"),
+                        Some(serde_json::json!({"error_code": "device_unreachable"})),
+                    ),
+                )
             })?;
             std::sync::Arc::from(opened)
         };
@@ -1624,17 +1918,30 @@ impl ApiService {
         device
             .handshake_with_deadline(std::time::Duration::from_secs(3))
             .map_err(|e| {
-                (400, failure(format!("设备握手未通过 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_not_ready"}))))
+                (
+                    400,
+                    failure(
+                        format!("设备握手未通过 ({target}): {e}"),
+                        Some(serde_json::json!({"error_code": "device_not_ready"})),
+                    ),
+                )
             })?;
         // FluidNC：读取 $CD 配置以感知自动宏 / 急停引脚 / planner；旧 GRBL 静默跳过
         device.load_features(std::time::Duration::from_secs(3));
-        let device_scale = device.verify_job_ready_adaptive(std::time::Duration::from_secs(3)).map_err(|e| {
-            (400, failure(format!("加工前检查未通过 ({target}): {e}"), Some(serde_json::json!({"error_code": "device_preflight_failed"}))))
-        })?;
+        let device_scale = device
+            .verify_job_ready_adaptive(std::time::Duration::from_secs(3))
+            .map_err(|e| {
+                (
+                    400,
+                    failure(
+                        format!("加工前检查未通过 ({target}): {e}"),
+                        Some(serde_json::json!({"error_code": "device_preflight_failed"})),
+                    ),
+                )
+            })?;
         let scale_factor = device_scale / 1000.0;
-        let text = std::fs::read_to_string(&gcode_path).map_err(|e| {
-            (500, failure(format!("读取 G-code 文件失败: {e}"), None))
-        })?;
+        let text = std::fs::read_to_string(&gcode_path)
+            .map_err(|e| (500, failure(format!("读取 G-code 文件失败: {e}"), None)))?;
         let gcode_bytes = text.as_bytes().to_vec();
         use sha2::Digest;
         let actual_sha = hex::encode(sha2::Sha256::digest(&gcode_bytes));
@@ -1649,7 +1956,13 @@ impl ApiService {
         }
         let expected_sha = actual_sha;
         if let Err(error) = check_job_fits_machine(&text, &device.travel_limits) {
-            return Err((400, failure(format!("{error}（{target}）"), Some(serde_json::json!({"error_code": "job_exceeds_travel"})))));
+            return Err((
+                400,
+                failure(
+                    format!("{error}（{target}）"),
+                    Some(serde_json::json!({"error_code": "job_exceeds_travel"})),
+                ),
+            ));
         }
 
         let start_from_line = object
@@ -1658,7 +1971,13 @@ impl ApiService {
             .unwrap_or(0) as usize;
 
         let prepared = laser_device::prepare_gcode_lines(&text).map_err(|e| {
-            (400, failure(format!("G-code 发送前校验未通过: {e}"), Some(serde_json::json!({"error_code": "gcode_line_invalid"}))))
+            (
+                400,
+                failure(
+                    format!("G-code 发送前校验未通过: {e}"),
+                    Some(serde_json::json!({"error_code": "gcode_line_invalid"})),
+                ),
+            )
         })?;
         let lines: Vec<String> = prepared.lines;
         if prepared.comment_stripped_lines > 0 {
@@ -1668,20 +1987,44 @@ impl ApiService {
             );
         }
         if lines.is_empty() {
-            return Err((400, failure("G-code 文件为空，拒绝发送", Some(serde_json::json!({"error_code": "gcode_empty"})))));
+            return Err((
+                400,
+                failure(
+                    "G-code 文件为空，拒绝发送",
+                    Some(serde_json::json!({"error_code": "gcode_empty"})),
+                ),
+            ));
         }
         if start_from_line >= lines.len() {
-            return Err((400, failure(format!("断点行号 {start_from_line} 超出总行数 {}", lines.len()), Some(serde_json::json!({"error_code": "invalid_resume_line"})))));
+            return Err((
+                400,
+                failure(
+                    format!("断点行号 {start_from_line} 超出总行数 {}", lines.len()),
+                    Some(serde_json::json!({"error_code": "invalid_resume_line"})),
+                ),
+            ));
         }
-        if voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
-            return Err((403, failure("预检期间设备授权已撤销，未开始加工", Some(serde_json::json!({"error_code":"voice_session_revoked"})))));
+        if voice_permit
+            .as_ref()
+            .is_some_and(|permit| !permit.load(Ordering::Acquire))
+        {
+            return Err((
+                403,
+                failure(
+                    "预检期间设备授权已撤销，未开始加工",
+                    Some(serde_json::json!({"error_code":"voice_session_revoked"})),
+                ),
+            ));
         }
         // SD 脱机文件与流式发送使用同一功率标尺：设备 $30 不是 1000 时，上传按标尺换算后的已校验行，
         // 并以实际上传字节的 SHA-256 做固件侧哈希门禁（原文件 SHA 已在上面与确认快照比对）。
-        let (sd_upload_bytes, sd_upload_sha) = sd_offline_upload_payload(gcode_bytes, &expected_sha, &lines, scale_factor);
+        let (sd_upload_bytes, sd_upload_sha) =
+            sd_offline_upload_payload(gcode_bytes, &expected_sha, &lines, scale_factor);
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
         progress.total_lines.store(lines.len(), Ordering::Relaxed);
-        progress.lines_sent.store(start_from_line, Ordering::Relaxed);
+        progress
+            .lines_sent
+            .store(start_from_line, Ordering::Relaxed);
         let job = std::sync::Arc::new(ActiveJob {
             workflow_id: workflow_id.to_owned(),
             mode: if is_offline_sd { "sd_offline" } else { mode },
@@ -1714,7 +2057,10 @@ impl ApiService {
                 return Err((
                     409,
                     failure(
-                        format!("设备 {target} 正在执行 workflow {}，请等待完成或先取消", busy.workflow_id),
+                        format!(
+                            "设备 {target} 正在执行 workflow {}，请等待完成或先取消",
+                            busy.workflow_id
+                        ),
                         Some(serde_json::json!({"error_code": "device_busy"})),
                     ),
                 ));
@@ -1924,12 +2270,20 @@ impl ApiService {
 
     /// 读取标定矩阵记录（SQLite 优先，否则内存表）。
     /// 读取 workflow / 标定记录（持久化存储优先，否则内存表）。调用方不得持有内存表的锁。
-    fn load_record_payload(&self, kind: laser_runtime::RecordKind, id: &str) -> Option<serde_json::Value> {
+    fn load_record_payload(
+        &self,
+        kind: laser_runtime::RecordKind,
+        id: &str,
+    ) -> Option<serde_json::Value> {
         if kind == laser_runtime::RecordKind::Calibration {
             return self.load_calibration(id);
         }
         if let Some(store) = self.store.as_ref() {
-            return store.get(kind, id).ok().flatten().map(|record| record.payload);
+            return store
+                .get(kind, id)
+                .ok()
+                .flatten()
+                .map(|record| record.payload);
         }
         self.workflows.lock().ok()?.get(id).cloned()
     }
@@ -1952,7 +2306,10 @@ impl ApiService {
             .and_then(|v| v.as_str())
             .filter(|v| !v.is_empty())
             .ok_or("calibration_id 缺失")?;
-        let status = record.get("status").and_then(|v| v.as_str()).map(str::to_owned);
+        let status = record
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         if let Some(store) = self.store.as_ref() {
             let stored = laser_runtime::StoredRecord {
                 kind: laser_runtime::RecordKind::Calibration,
@@ -1992,7 +2349,8 @@ impl ApiService {
                 ),
             ));
         }
-        let thickness_mm = parse_float(object.get("thickness_mm"), "thickness_mm", 0.0).unwrap_or(0.0);
+        let thickness_mm =
+            parse_float(object.get("thickness_mm"), "thickness_mm", 0.0).unwrap_or(0.0);
         if !thickness_mm.is_finite() || thickness_mm <= 0.0 {
             return Err((400, failure("thickness_mm 必须大于 0", None)));
         }
@@ -2024,8 +2382,10 @@ impl ApiService {
                 .unwrap_or("raster")
                 .to_ascii_lowercase()
         };
-        let rows = parse_int(object.get("rows"), "rows", 5).map_err(|e| (400, failure(e.to_string(), None)))?;
-        let columns = parse_int(object.get("columns"), "columns", 5).map_err(|e| (400, failure(e.to_string(), None)))?;
+        let rows = parse_int(object.get("rows"), "rows", 5)
+            .map_err(|e| (400, failure(e.to_string(), None)))?;
+        let columns = parse_int(object.get("columns"), "columns", 5)
+            .map_err(|e| (400, failure(e.to_string(), None)))?;
         if !(1..=25).contains(&rows) || !(1..=25).contains(&columns) {
             return Err((400, failure("rows/columns 必须在 1..25 之间", None)));
         }
@@ -2044,27 +2404,52 @@ impl ApiService {
             material,
             thickness_mm,
             &laser_mode,
-            if laser_mode == "cut" { None } else { Some(engraving_mode.as_str()) },
+            if laser_mode == "cut" {
+                None
+            } else {
+                Some(engraving_mode.as_str())
+            },
             1000.0,
         );
         let (base_power, base_speed, base_passes) = recommendation
             .as_ref()
-            .map(|r| (r.params.laser_max_power, r.params.feed_rate, r.params.passes.max(1)))
+            .map(|r| {
+                (
+                    r.params.laser_max_power,
+                    r.params.feed_rate,
+                    r.params.passes.max(1),
+                )
+            })
             .unwrap_or((400, 1500, 1));
         let bound = |key: &str, fallback: i32| -> Result<i32, (u16, serde_json::Value)> {
-            let value = parse_int(object.get(key), key, -1).map_err(|e| (400, failure(e.to_string(), None)))?;
+            let value = parse_int(object.get(key), key, -1)
+                .map_err(|e| (400, failure(e.to_string(), None)))?;
             Ok(if value < 0 { fallback } else { value as i32 })
         };
         let power_min = bound("power_min", (base_power as f64 * 0.6).round() as i32)?;
-        let power_max = bound("power_max", (base_power as f64 * 1.4).round().min(1000.0) as i32)?;
-        let speed_min = bound("speed_min", (base_speed as f64 * 0.6).round().max(100.0) as i32)?;
+        let power_max = bound(
+            "power_max",
+            (base_power as f64 * 1.4).round().min(1000.0) as i32,
+        )?;
+        let speed_min = bound(
+            "speed_min",
+            (base_speed as f64 * 0.6).round().max(100.0) as i32,
+        )?;
         let speed_max = bound("speed_max", (base_speed as f64 * 1.4).round() as i32)?;
         let passes = {
-            let value = parse_int(object.get("passes"), "passes", 0).map_err(|e| (400, failure(e.to_string(), None)))?;
-            if value <= 0 { base_passes } else { value as i32 }
+            let value = parse_int(object.get("passes"), "passes", 0)
+                .map_err(|e| (400, failure(e.to_string(), None)))?;
+            if value <= 0 {
+                base_passes
+            } else {
+                value as i32
+            }
         };
         if power_min > power_max || speed_min > speed_max || power_min < 0 || speed_min <= 0 {
-            return Err((400, failure("功率/速度区间无效：min 必须 ≤ max 且为正数", None)));
+            return Err((
+                400,
+                failure("功率/速度区间无效：min 必须 ≤ max 且为正数", None),
+            ));
         }
         let cells = laser_core::material::calibration_matrix(
             rows as usize,
@@ -2076,7 +2461,11 @@ impl ApiService {
             passes,
         )
         .map_err(|e| (400, failure(format!("标定矩阵参数无效: {e}"), None)))?;
-        let task_type = if laser_mode == "cut" { "cut_contour" } else { "engrave_logo" };
+        let task_type = if laser_mode == "cut" {
+            "cut_contour"
+        } else {
+            "engrave_logo"
+        };
         let gcode = laser_core::material::build_calibration_gcode(material, task_type, &cells)
             .map_err(|e| (500, failure(format!("标定 G-code 生成失败: {e}"), None)))?;
 
@@ -2085,7 +2474,8 @@ impl ApiService {
             .as_deref()
             .or(self.upload_root.as_deref())
             .ok_or_else(|| (500, failure("生成目录未配置", None)))?;
-        std::fs::create_dir_all(root).map_err(|e| (500, failure(format!("创建生成目录失败: {e}"), None)))?;
+        std::fs::create_dir_all(root)
+            .map_err(|e| (500, failure(format!("创建生成目录失败: {e}"), None)))?;
         let calibration_id = format!("cal-{}", next_workflow_id().trim_start_matches("wf-"));
         let gcode_name = format!("{calibration_id}.gcode");
         let gcode_path = root.join(&gcode_name);
@@ -2185,14 +2575,23 @@ impl ApiService {
             .unwrap_or("network")
             .to_ascii_lowercase();
         if mode == "network" {
-            let host = request.get("network_host").and_then(serde_json::Value::as_str).unwrap_or("");
+            let host = request
+                .get("network_host")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             if host.trim().is_empty() {
                 return Err((400, failure("请填写设备 host/IP", None)));
             }
         }
-        let mut record = self
-            .load_calibration(&calibration_id)
-            .ok_or_else(|| (404, failure("未找到标定矩阵，请先生成", Some(serde_json::json!({"error_code": "calibration_missing"})))))?;
+        let mut record = self.load_calibration(&calibration_id).ok_or_else(|| {
+            (
+                404,
+                failure(
+                    "未找到标定矩阵，请先生成",
+                    Some(serde_json::json!({"error_code": "calibration_missing"})),
+                ),
+            )
+        })?;
         if let Err(error) = validate_material_safety_in_payload(&record) {
             return Err((
                 400,
@@ -2204,13 +2603,34 @@ impl ApiService {
         }
         let current_status = record.get("status").and_then(|v| v.as_str());
         if let Some(reason) = workflow_send_blocked_reason(current_status) {
-            return Err((400, failure(reason, Some(serde_json::json!({"error_code": "calibration_not_sendable"})))));
+            return Err((
+                400,
+                failure(
+                    reason,
+                    Some(serde_json::json!({"error_code": "calibration_not_sendable"})),
+                ),
+            ));
         }
         let send_roots = self.send_gcode_roots();
         let (preflight, gcode_sha, gcode_file) = build_send_preflight(&record, &send_roots)
-            .map_err(|e| (400, failure(format!("发送安全门禁未通过: {e}"), Some(serde_json::json!({"error_code": "send_gate_rejected"})))))?;
-        laser_device::authorize_send(&preflight)
-            .map_err(|e| (400, failure(format!("发送安全门禁未通过: {e}"), Some(serde_json::json!({"error_code": "send_gate_rejected"})))))?;
+            .map_err(|e| {
+                (
+                    400,
+                    failure(
+                        format!("发送安全门禁未通过: {e}"),
+                        Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                    ),
+                )
+            })?;
+        laser_device::authorize_send(&preflight).map_err(|e| {
+            (
+                400,
+                failure(
+                    format!("发送安全门禁未通过: {e}"),
+                    Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                ),
+            )
+        })?;
         let gcode_path = preflight.gcode_path.clone().unwrap_or_default();
         let send_result = self.launch_send_job_for(
             laser_runtime::RecordKind::Calibration,
@@ -2224,7 +2644,10 @@ impl ApiService {
             map.insert("status".into(), serde_json::Value::String("sending".into()));
             map.insert("updated_at".into(), serde_json::json!(unix_seconds()));
             map.insert("send_result".into(), send_result);
-            map.insert("job_id".into(), serde_json::Value::String(calibration_id.clone()));
+            map.insert(
+                "job_id".into(),
+                serde_json::Value::String(calibration_id.clone()),
+            );
             map.insert(
                 "probe".into(),
                 serde_json::json!({"connected": true, "mode": mode, "summary": "握手通过（$32=1），已开始逐行下发"}),
@@ -2256,15 +2679,26 @@ impl ApiService {
         if cell_number < 1 {
             return Err((400, failure("cell_number 必须大于等于 1", None)));
         }
-        let mut record = self
-            .load_calibration(&calibration_id)
-            .ok_or_else(|| (404, failure("未找到标定矩阵，请先生成", Some(serde_json::json!({"error_code": "calibration_missing"})))))?;
+        let mut record = self.load_calibration(&calibration_id).ok_or_else(|| {
+            (
+                404,
+                failure(
+                    "未找到标定矩阵，请先生成",
+                    Some(serde_json::json!({"error_code": "calibration_missing"})),
+                ),
+            )
+        })?;
         let cell = record
             .get("cells")
             .and_then(|v| v.as_array())
             .and_then(|cells| cells.get((cell_number - 1) as usize))
             .cloned()
-            .ok_or_else(|| (400, failure(format!("cell_number {cell_number} 超出矩阵范围"), None)))?;
+            .ok_or_else(|| {
+                (
+                    400,
+                    failure(format!("cell_number {cell_number} 超出矩阵范围"), None),
+                )
+            })?;
         let material = object
             .get("material")
             .and_then(|v| v.as_str())
@@ -2291,7 +2725,12 @@ impl ApiService {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .or_else(|| record.get("engraving_mode").and_then(|v| v.as_str()).filter(|v| !v.is_empty()))
+            .or_else(|| {
+                record
+                    .get("engraving_mode")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+            })
             .unwrap_or("raster")
             .to_ascii_lowercase();
         if material.is_empty() || thickness_mm <= 0.0 {
@@ -2309,32 +2748,54 @@ impl ApiService {
             .unwrap_or_else(|| format!("标定矩阵 {calibration_id} 单元格 #{cell_number}"));
         let mut save = serde_json::Map::new();
         save.insert("action".into(), serde_json::Value::String("save".into()));
-        save.insert("material".into(), serde_json::Value::String(material.clone()));
+        save.insert(
+            "material".into(),
+            serde_json::Value::String(material.clone()),
+        );
         save.insert("thickness_mm".into(), serde_json::json!(thickness_mm));
-        save.insert("laser_mode".into(), serde_json::Value::String(laser_mode.clone()));
-        save.insert("engraving_mode".into(), serde_json::Value::String(engraving_mode.clone()));
+        save.insert(
+            "laser_mode".into(),
+            serde_json::Value::String(laser_mode.clone()),
+        );
+        save.insert(
+            "engraving_mode".into(),
+            serde_json::Value::String(engraving_mode.clone()),
+        );
         save.insert("laser_max_power".into(), serde_json::json!(power));
         save.insert("feed_rate".into(), serde_json::json!(speed));
         save.insert("passes".into(), serde_json::json!(passes.max(1)));
         if let Some(pixel) = cell.get("pixel_size_mm").and_then(|v| v.as_f64()) {
             save.insert("pixel_size_mm".into(), serde_json::json!(pixel));
         }
-        save.insert("source".into(), serde_json::Value::String("calibration".into()));
+        save.insert(
+            "source".into(),
+            serde_json::Value::String("calibration".into()),
+        );
         save.insert("notes".into(), serde_json::Value::String(notes));
-        let response = handle_material_manage(&self.settings, self.runtime_db.as_ref(), &self.materials, &self.material_write_lock, &save);
+        let response = handle_material_manage(
+            &self.settings,
+            self.runtime_db.as_ref(),
+            &self.materials,
+            &self.material_write_lock,
+            &save,
+        );
         let separator = response
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .map(|i| i + 4)
             .unwrap_or(0);
-        let saved: serde_json::Value = serde_json::from_slice(&response[separator..]).unwrap_or_default();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&response[separator..]).unwrap_or_default();
         if saved.get("success") != Some(&serde_json::Value::Bool(true)) {
             let message = saved
                 .get("result")
                 .and_then(|v| v.as_str())
                 .unwrap_or("材料参数保存失败")
                 .to_owned();
-            return Err((400, failure(format!("单元格参数写回材料库失败: {message}"), None)));
+            return Err((
+                400,
+                failure(format!("单元格参数写回材料库失败: {message}"), None),
+            ));
         }
         let now = unix_seconds();
         if let Some(map) = record.as_object_mut() {
@@ -2353,7 +2814,10 @@ impl ApiService {
                     "selected_at": now,
                 }),
             );
-            map.insert("selected_cell_number".into(), serde_json::json!(cell_number));
+            map.insert(
+                "selected_cell_number".into(),
+                serde_json::json!(cell_number),
+            );
             map.insert("updated_at".into(), serde_json::json!(now));
         }
         self.save_calibration(&record)
@@ -2369,7 +2833,10 @@ impl ApiService {
 
     /// 握手探测：只发 `$$` 读取固件设置（不移动轴、不出光）。先探首选模式，
     /// 失败且另一模式参数可用时回退探测，输出与前端契约一致的 attempts/summary 结构。
-    fn probe_connections(&self, object: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    fn probe_connections(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Value {
         let preferred = object
             .get("connection_mode")
             .or_else(|| object.get("preferred_mode"))
@@ -2378,8 +2845,16 @@ impl ApiService {
             .filter(|v| !v.is_empty())
             .unwrap_or(self.settings.default_connection_mode.as_str())
             .to_ascii_lowercase();
-        let preferred = if preferred == "serial" { "serial" } else { "network" };
-        let other = if preferred == "network" { "serial" } else { "network" };
+        let preferred = if preferred == "serial" {
+            "serial"
+        } else {
+            "network"
+        };
+        let other = if preferred == "network" {
+            "serial"
+        } else {
+            "network"
+        };
         let timeout_secs = parse_float(object.get("network_timeout"), "network_timeout", 3.0)
             .unwrap_or(3.0)
             .clamp(0.5, 10.0);
@@ -2396,7 +2871,10 @@ impl ApiService {
 
         for (index, mode) in [preferred, other].into_iter().enumerate() {
             let mut request = object.clone();
-            request.insert("connection_mode".into(), serde_json::Value::String(mode.to_owned()));
+            request.insert(
+                "connection_mode".into(),
+                serde_json::Value::String(mode.to_owned()),
+            );
             let spec = match self.connection_spec_from_request(&request) {
                 Ok(spec) => spec,
                 Err(error) => {
@@ -2405,16 +2883,25 @@ impl ApiService {
                         "mode": mode, "target": "", "connected": false, "laser_mode_ok": false,
                         "summary": format!("{}: {error}", if index == 0 { "参数无效" } else { "未尝试" })
                     }));
-                    if index == 0 { summary = format!("{} 参数无效: {error}", if mode == "network" { "网络" } else { "串口" }); }
+                    if index == 0 {
+                        summary = format!(
+                            "{} 参数无效: {error}",
+                            if mode == "network" {
+                                "网络"
+                            } else {
+                                "串口"
+                            }
+                        );
+                    }
                     continue;
                 }
             };
             let target = spec.describe();
-            let active_workflow = self
-                .active_jobs
-                .lock()
-                .ok()
-                .and_then(|jobs| jobs.values().find(|j| j.target == target).map(|j| j.workflow_id.clone()));
+            let active_workflow = self.active_jobs.lock().ok().and_then(|jobs| {
+                jobs.values()
+                    .find(|j| j.target == target)
+                    .map(|j| j.workflow_id.clone())
+            });
             if let Some(wf_id) = active_workflow {
                 let busy_summary = format!("设备正在执行任务 {wf_id}");
                 attempts.push(serde_json::json!({
@@ -2452,7 +2939,11 @@ impl ApiService {
                 summary = report.summary.clone();
             }
             if report.connected && report.laser_mode_ok {
-                if mode == "serial" { serial_connected = true; } else { network_connected = true; }
+                if mode == "serial" {
+                    serial_connected = true;
+                } else {
+                    network_connected = true;
+                }
                 selected = Some(mode);
                 firmware_settings = report.firmware_settings.clone();
                 machine_limits = report.machine_limits.clone();
@@ -2489,7 +2980,13 @@ impl ApiService {
         let disabled = read_runtime_settings(Some(&runtime_path))
             .get("mcp_disabled_tools")
             .and_then(serde_json::Value::as_array)
-            .map(|names| names.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect::<Vec<_>>())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         self.set_disabled_tools(disabled);
         self.runtime_path = Some(runtime_path);
@@ -2497,7 +2994,8 @@ impl ApiService {
     }
 
     pub fn set_actual_port(&self, port: u16) {
-        self.actual_port.store(port, std::sync::atomic::Ordering::SeqCst);
+        self.actual_port
+            .store(port, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn get_actual_port(&self) -> u16 {
@@ -2542,7 +3040,9 @@ impl ApiService {
     ) -> Self {
         self.runtime_db = Some(runtime_db.clone());
         if self.approvals.is_none() {
-            self.approvals = Some(std::sync::Arc::new(approval::ApprovalService::new(runtime_db.clone())));
+            self.approvals = Some(std::sync::Arc::new(approval::ApprovalService::new(
+                runtime_db.clone(),
+            )));
         }
         self.with_store(runtime_db)
     }
@@ -2616,7 +3116,11 @@ impl ApiService {
                         mat,
                         thick,
                         laser_mode,
-                        if laser_mode.eq_ignore_ascii_case("cut") { None } else { Some(engraving_mode) },
+                        if laser_mode.eq_ignore_ascii_case("cut") {
+                            None
+                        } else {
+                            Some(engraving_mode)
+                        },
                         1000.0,
                     );
                     let params = if let Some(rec) = rec {
@@ -2670,7 +3174,9 @@ impl ApiService {
             let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
             // 认证要等读完请求才能做，因此在接入时就按来源分配名额：回环（桌面界面 / Tauri 内嵌页）
             // 始终保有预留名额，局域网慢连接占满也不会让本机急停拿到 503（2026-11-05）。
-            let Ok(peer) = stream.peer_addr() else { continue; };
+            let Ok(peer) = stream.peer_addr() else {
+                continue;
+            };
             let loopback = peer.ip().is_loopback();
             if !try_admit_http_connection(&active_conns, loopback) {
                 let busy = http_json(503, failure("并发连接过多，请稍后重试", None));
@@ -2688,7 +3194,9 @@ impl ApiService {
                     if let Ok(request) = read_http_request(&mut stream) {
                         if !request.is_empty() {
                             let response = missing_host_rejection(&request, loopback)
-                                .unwrap_or_else(|| service.handle_http_from(&request, loopback, &source, None));
+                                .unwrap_or_else(|| {
+                                    service.handle_http_from(&request, loopback, &source, None)
+                                });
                             let _ = stream.write_all(&response);
                             let _ = stream.flush();
                         }
@@ -2701,10 +3209,17 @@ impl ApiService {
 
 /// SD 脱机上传使用的 FluidNC HTTP 端口：`network_http_port`，其次 `http_port`，都缺省时为 80。
 /// 给出的值必须是 1..=65535 的整数，否则拒绝（不截断、不回落到 80）。
-fn sd_offline_http_port(object: &serde_json::Map<String, serde_json::Value>) -> Result<u16, String> {
+fn sd_offline_http_port(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<u16, String> {
     let Some((key, value)) = ["network_http_port", "http_port"]
         .into_iter()
-        .find_map(|key| object.get(key).filter(|value| !value.is_null()).map(|value| (key, value)))
+        .find_map(|key| {
+            object
+                .get(key)
+                .filter(|value| !value.is_null())
+                .map(|value| (key, value))
+        })
     else {
         return Ok(80);
     };
@@ -2712,7 +3227,9 @@ fn sd_offline_http_port(object: &serde_json::Map<String, serde_json::Value>) -> 
         .as_u64()
         .and_then(|raw| u16::try_from(raw).ok())
         .filter(|port| *port != 0)
-        .ok_or_else(|| format!("脱机上传端口 {key} 无效：{value}，必须是 1..=65535 的整数，未连接设备"))
+        .ok_or_else(|| {
+            format!("脱机上传端口 {key} 无效：{value}，必须是 1..=65535 的整数，未连接设备")
+        })
 }
 
 /// HTTP 并发连接总上限。
@@ -2817,14 +3334,17 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
 }
 
 impl ApiService {
-
     pub fn handle_http(&self, request: &[u8]) -> Vec<u8> {
         self.handle_http_from(request, true, "127.0.0.1", None)
     }
 
     /// 进程内调用方显式声明身份（技术书 §6.4 规则 2）：`InProcessBackend` 传 `McpBridge`，
     /// 网关分发传 `Gateway`。按本机回环处理鉴权，但上下文用调用方给的值，不借用 `Loopback`。
-    pub fn handle_http_with_ctx(&self, request: &[u8], ctx: laser_contracts::CallerContext) -> Vec<u8> {
+    pub fn handle_http_with_ctx(
+        &self,
+        request: &[u8],
+        ctx: laser_contracts::CallerContext,
+    ) -> Vec<u8> {
         self.handle_http_from(request, true, "127.0.0.1", Some(ctx))
     }
 
@@ -2867,7 +3387,12 @@ impl ApiService {
         let Some(origin) = header_value(&head, "origin") else {
             return self.route_http(request, loopback, source_ip, ctx_override.clone());
         };
-        if !is_allowed_origin(&origin, host.as_deref(), loopback, &self.extra_allowed_origins) {
+        if !is_allowed_origin(
+            &origin,
+            host.as_deref(),
+            loopback,
+            &self.extra_allowed_origins,
+        ) {
             if method == "GET" || method == "HEAD" {
                 return self.route_http(request, loopback, source_ip, ctx_override.clone());
             }
@@ -2882,7 +3407,10 @@ impl ApiService {
         if method == "OPTIONS" {
             return http_options(Some(&origin));
         }
-        with_cors_headers(self.route_http(request, loopback, source_ip, ctx_override.clone()), &origin)
+        with_cors_headers(
+            self.route_http(request, loopback, source_ip, ctx_override.clone()),
+            &origin,
+        )
     }
 
     fn route_http(
@@ -2974,7 +3502,9 @@ impl ApiService {
             };
         }
         let public_route = (method == "GET"
-            && (route == "/api/health" || route == "/v1/capabilities" || route == "/api/system/info"))
+            && (route == "/api/health"
+                || route == "/v1/capabilities"
+                || route == "/api/system/info"))
             || (method == "GET"
                 && (route == "/"
                     || is_spa_route(route)
@@ -3005,7 +3535,13 @@ impl ApiService {
             caller_context_for(ctx_override, loopback, pairing_id)
         };
         if !self.voice_caller_allowed(&ctx) {
-            return http_json(403, failure("语音设备授权已失效，请重新连接", Some(serde_json::json!({"error_code":"voice_session_revoked"}))));
+            return http_json(
+                403,
+                failure(
+                    "语音设备授权已失效，请重新连接",
+                    Some(serde_json::json!({"error_code":"voice_session_revoked"})),
+                ),
+            );
         }
         // 手机 / 局域网连接（技术书 §9.8）：可以操作雕刻机，但材料、校准参数与系统设置只读，只能在电脑上修改
         if matches!(ctx, laser_contracts::CallerContext::Lan { .. })
@@ -3023,11 +3559,19 @@ impl ApiService {
             let query = path.split_once('?').map(|(_, query)| query).unwrap_or("");
             return self.handle_approval_route(method, route, query, &body[..content_length], &ctx);
         }
-        if method == "POST" && matches!(route, "/api/text-task/generate" | "/api/draw/preview" | "/api/workflow")
+        if method == "POST"
+            && matches!(
+                route,
+                "/api/text-task/generate" | "/api/draw/preview" | "/api/workflow"
+            )
             && serde_json::from_slice::<serde_json::Value>(&body[..content_length])
-                .ok().is_some_and(|value| value.get("feedback_params").is_some())
+                .ok()
+                .is_some_and(|value| value.get("feedback_params").is_some())
         {
-            return http_json(400, failure("feedback_params 为内部字段，请通过已保存反馈确认采用", None));
+            return http_json(
+                400,
+                failure("feedback_params 为内部字段，请通过已保存反馈确认采用", None),
+            );
         }
         if method == "GET" && route == "/api/system/lan-info" {
             // 只给电脑本机看：偏好设置“手机连接”分区显示本机局域网地址与端口
@@ -3043,15 +3587,24 @@ impl ApiService {
                 .auth
                 .as_ref()
                 .map(|a| a.has_static_pin())
-                .unwrap_or_else(|| saved_map.get("lan_static_pin_hash").and_then(|v| v.as_str()).is_some());
+                .unwrap_or_else(|| {
+                    saved_map
+                        .get("lan_static_pin_hash")
+                        .and_then(|v| v.as_str())
+                        .is_some()
+                });
             let paired_devices_count = self
                 .auth
                 .as_ref()
                 .map(|a| a.paired_count())
                 .unwrap_or_default();
-            let listening_all = matches!(self.settings.web_host.as_str(), "0.0.0.0" | "::" | "[::]");
+            let listening_all =
+                matches!(self.settings.web_host.as_str(), "0.0.0.0" | "::" | "[::]");
             let port = self.get_actual_port();
-            let addresses: Vec<String> = primary_lan_ipv4().into_iter().map(|ip| ip.to_string()).collect();
+            let addresses: Vec<String> = primary_lan_ipv4()
+                .into_iter()
+                .map(|ip| ip.to_string())
+                .collect();
             return http_json(
                 200,
                 success(serde_json::json!({
@@ -3106,11 +3659,18 @@ impl ApiService {
         }
         if method == "GET" && route == "/api/jobs/stop-targets" {
             // 顶栏急停不依赖 React 页面的生命周期，从后端读取精确任务和原连接目标。
-            let Ok(running) = self.active_jobs.lock() else { return http_json(500, failure("设备任务表不可用", None)); };
-            let Ok(uncertain) = self.uncertain_jobs.lock() else { return http_json(500, failure("待确认停止任务表不可用", None)); };
+            let Ok(running) = self.active_jobs.lock() else {
+                return http_json(500, failure("设备任务表不可用", None));
+            };
+            let Ok(uncertain) = self.uncertain_jobs.lock() else {
+                return http_json(500, failure("待确认停止任务表不可用", None));
+            };
             let mut targets = std::collections::BTreeMap::<String, serde_json::Value>::new();
             for (id, job) in uncertain.iter() {
-                targets.insert(id.clone(), serde_json::json!({"job_id": id, "target": job.target, "state": "unknown"}));
+                targets.insert(
+                    id.clone(),
+                    serde_json::json!({"job_id": id, "target": job.target, "state": "unknown"}),
+                );
             }
             for (id, job) in running.iter() {
                 // 进度浮层（2026-11-02）：顶栏急停只用 job_id / state，这里额外带上只读进度字段
@@ -3124,7 +3684,10 @@ impl ApiService {
                 }
                 targets.insert(id.clone(), live);
             }
-            return http_json(200, success(serde_json::json!({"jobs": targets.into_values().collect::<Vec<_>>() })));
+            return http_json(
+                200,
+                success(serde_json::json!({"jobs": targets.into_values().collect::<Vec<_>>() })),
+            );
         }
         if method == "POST" && route == "/api/jobs/acknowledge-stop" {
             if matches!(
@@ -3157,7 +3720,10 @@ impl ApiService {
             let (Some(id), true) = (job_id, confirmed) else {
                 return http_json(
                     400,
-                    failure("请同时提供非空 job_id 与 confirmed=true 确认已现场核实停机", None),
+                    failure(
+                        "请同时提供非空 job_id 与 confirmed=true 确认已现场核实停机",
+                        None,
+                    ),
                 );
             };
             let dropped_job = {
@@ -3196,7 +3762,9 @@ impl ApiService {
             let tools_count = laser_tools::ToolCatalog::from_environment()
                 .specs()
                 .iter()
-                .filter(|spec| !(self.strict_mode() && laser_contracts::tool_never_exposed(spec.name)))
+                .filter(|spec| {
+                    !(self.strict_mode() && laser_contracts::tool_never_exposed(spec.name))
+                })
                 .filter(|spec| !self.tool_disabled(spec.name))
                 .count();
             return http_json(
@@ -3219,9 +3787,13 @@ impl ApiService {
         if method == "GET" && route == "/api/jev/status" {
             let settings = read_runtime_settings(self.runtime_path.as_deref());
             let api_key = match self.runtime_db.as_ref() {
-                Some(db) => match db.lock().map_err(|_| "运行时数据库锁失败".to_owned()).and_then(|db| {
-                    db.get_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}"))
-                }) {
+                Some(db) => match db
+                    .lock()
+                    .map_err(|_| "运行时数据库锁失败".to_owned())
+                    .and_then(|db| {
+                        db.get_secret(JEV_API_KEY_SECRET)
+                            .map_err(|error| format!("{error:?}"))
+                    }) {
                     Ok(value) => value,
                     Err(error) => return http_json(500, failure(error, None)),
                 },
@@ -3243,21 +3815,33 @@ impl ApiService {
             let Some(db) = self.runtime_db.as_ref() else {
                 return http_json(503, failure("运行时数据库未启用", None));
             };
-            let api_key = match db.lock().map_err(|_| "运行时数据库锁失败".to_owned()).and_then(|db| {
-                db.get_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}"))
-            }) {
+            let api_key = match db
+                .lock()
+                .map_err(|_| "运行时数据库锁失败".to_owned())
+                .and_then(|db| {
+                    db.get_secret(JEV_API_KEY_SECRET)
+                        .map_err(|error| format!("{error:?}"))
+                }) {
                 Ok(Some(value)) if !value.trim().is_empty() => value,
                 Ok(_) => return http_json(404, failure("请先保存 Jev API Key", None)),
                 Err(error) => return http_json(500, failure(error, None)),
             };
-            return match feedback::call_jev(DEFAULT_JEV_ENDPOINT, &api_key, &serde_json::json!({
-                "feedback_text": "效果正常，无需调整"
-            })) {
+            return match feedback::call_jev(
+                DEFAULT_JEV_ENDPOINT,
+                &api_key,
+                &serde_json::json!({
+                    "feedback_text": "效果正常，无需调整"
+                }),
+            ) {
                 Ok(_) => http_json(200, success(serde_json::json!({"message": "Jev 连接正常"}))),
                 Err(error) => http_json(502, failure(format!("Jev 连接失败: {error}"), None)),
             };
         }
-        if (method == "POST" && matches!(route, "/api/feedback" | "/api/jev/feedback" | "/api/feedback/accept"))
+        if (method == "POST"
+            && matches!(
+                route,
+                "/api/feedback" | "/api/jev/feedback" | "/api/feedback/accept"
+            ))
             || (method == "GET" && route == "/api/feedback/history")
         {
             return self.handle_feedback_route(route, path, &body[..content_length], ctx.label());
@@ -3277,9 +3861,13 @@ impl ApiService {
             let Some(db) = self.runtime_db.as_ref() else {
                 return http_json(503, failure("运行时数据库未启用", None));
             };
-            let api_key = match db.lock().map_err(|_| "运行时数据库锁失败".to_owned()).and_then(|db| {
-                db.get_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}"))
-            }) {
+            let api_key = match db
+                .lock()
+                .map_err(|_| "运行时数据库锁失败".to_owned())
+                .and_then(|db| {
+                    db.get_secret(JEV_API_KEY_SECRET)
+                        .map_err(|error| format!("{error:?}"))
+                }) {
                 Ok(Some(value)) if !value.trim().is_empty() => value,
                 Ok(_) => return http_json(404, failure("Jev API Key 尚未配置", None)),
                 Err(error) => return http_json(500, failure(error, None)),
@@ -3303,14 +3891,23 @@ impl ApiService {
                 Err(error) => return http_json(400, failure(error, None)),
             };
             if let Some(endpoint) = object.get("jev_endpoint") {
-                if !endpoint.as_str().is_some_and(|s| s.trim().is_empty() || s.trim() == DEFAULT_JEV_ENDPOINT) {
-                    return http_json(400, failure("Jev 仅支持固定 OpenRouter Decisions 地址", None));
+                if !endpoint
+                    .as_str()
+                    .is_some_and(|s| s.trim().is_empty() || s.trim() == DEFAULT_JEV_ENDPOINT)
+                {
+                    return http_json(
+                        400,
+                        failure("Jev 仅支持固定 OpenRouter Decisions 地址", None),
+                    );
                 }
             }
             if object.get("jev_enabled").is_some_and(|v| !v.is_boolean())
                 || object.get("jev_api_key").is_some_and(|v| !v.is_string())
             {
-                return http_json(400, failure("jev_enabled 必须是布尔值，jev_api_key 必须是字符串", None));
+                return http_json(
+                    400,
+                    failure("jev_enabled 必须是布尔值，jev_api_key 必须是字符串", None),
+                );
             }
             let mcp_endpoint = match object.get("mcp_endpoint") {
                 None => None,
@@ -3319,7 +3916,10 @@ impl ApiService {
                     let Some(normalized) = normalize_mcp_endpoint(value) else {
                         return http_json(
                             400,
-                            failure("小智 MCP 端点必须是 ws:// 或 wss:// 地址，且不能包含模板占位符", None),
+                            failure(
+                                "小智 MCP 端点必须是 ws:// 或 wss:// 地址，且不能包含模板占位符",
+                                None,
+                            ),
                         );
                     };
                     Some(Some(normalized))
@@ -3360,20 +3960,28 @@ impl ApiService {
                     return http_json(400, failure("lan_static_pin 必须是字符串", None));
                 };
                 let trimmed = pin_str.trim();
-                if !trimmed.is_empty() && (trimmed.len() != 6 || !trimmed.bytes().all(|b| b.is_ascii_digit())) {
+                if !trimmed.is_empty()
+                    && (trimmed.len() != 6 || !trimmed.bytes().all(|b| b.is_ascii_digit()))
+                {
                     return http_json(400, failure("自定义配对码必须是 6 位数字", None));
                 }
                 if let Some(auth) = self.auth.as_ref() {
-                    if let Err(err) = auth.set_static_pin((!trimmed.is_empty()).then_some(trimmed)) {
+                    if let Err(err) = auth.set_static_pin((!trimmed.is_empty()).then_some(trimmed))
+                    {
                         return http_json(500, failure(err, None));
                     }
                 } else {
-                    let hash = (!trimmed.is_empty())
-                        .then(|| serde_json::Value::String(hex::encode(Sha256::digest(trimmed.as_bytes()))));
+                    let hash = (!trimmed.is_empty()).then(|| {
+                        serde_json::Value::String(hex::encode(Sha256::digest(trimmed.as_bytes())))
+                    });
                     file_changes.push(("lan_static_pin_hash", hash));
                 }
             }
-            if object.get("lan_revoke_paired").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if object
+                .get("lan_revoke_paired")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 if let Some(auth) = self.auth.as_ref() {
                     if let Err(err) = auth.revoke_all_tokens() {
                         return http_json(500, failure(err, None));
@@ -3388,9 +3996,15 @@ impl ApiService {
                 };
                 let endpoint = endpoint.trim();
                 if !endpoint.is_empty() && endpoint != DEFAULT_JEV_ENDPOINT {
-                    return http_json(400, failure("Jev 仅支持固定 OpenRouter Decisions 地址", None));
+                    return http_json(
+                        400,
+                        failure("Jev 仅支持固定 OpenRouter Decisions 地址", None),
+                    );
                 }
-                file_changes.push(("jev_endpoint", (!endpoint.is_empty()).then(|| serde_json::json!(endpoint))));
+                file_changes.push((
+                    "jev_endpoint",
+                    (!endpoint.is_empty()).then(|| serde_json::json!(endpoint)),
+                ));
             }
             let has_mcp_setting = mcp_endpoint.is_some();
             if let Some(endpoint) = mcp_endpoint {
@@ -3406,7 +4020,13 @@ impl ApiService {
                     }
                 });
                 if let Err(error) = written {
-                    return http_json(500, failure(format!("设置没有保存：{error}"), Some(serde_json::json!({"error_code": "settings_write_failed"}))));
+                    return http_json(
+                        500,
+                        failure(
+                            format!("设置没有保存：{error}"),
+                            Some(serde_json::json!({"error_code": "settings_write_failed"})),
+                        ),
+                    );
                 }
             }
             if let Some(api_key) = object.get("jev_api_key") {
@@ -3415,7 +4035,10 @@ impl ApiService {
                 };
                 if !api_key.trim().is_empty() {
                     let Some(db) = self.runtime_db.as_ref() else {
-                        return http_json(503, failure("运行时数据库未启用，无法保存 Jev API Key", None));
+                        return http_json(
+                            503,
+                            failure("运行时数据库未启用，无法保存 Jev API Key", None),
+                        );
                     };
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -3424,18 +4047,28 @@ impl ApiService {
                     if let Err(error) = db
                         .lock()
                         .map_err(|_| "运行时数据库锁失败".to_owned())
-                        .and_then(|db| db.set_secret(JEV_API_KEY_SECRET, api_key.trim(), now).map_err(|error| format!("{error:?}")))
+                        .and_then(|db| {
+                            db.set_secret(JEV_API_KEY_SECRET, api_key.trim(), now)
+                                .map_err(|error| format!("{error:?}"))
+                        })
                     {
                         return http_json(500, failure(error, None));
                     }
                 }
             }
-            if object.get("jev_delete_api_key").and_then(|value| value.as_bool()).unwrap_or(false) {
+            if object
+                .get("jev_delete_api_key")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
                 if let Some(db) = self.runtime_db.as_ref() {
                     if let Err(error) = db
                         .lock()
                         .map_err(|_| "运行时数据库锁失败".to_owned())
-                        .and_then(|db| db.delete_secret(JEV_API_KEY_SECRET).map_err(|error| format!("{error:?}")))
+                        .and_then(|db| {
+                            db.delete_secret(JEV_API_KEY_SECRET)
+                                .map_err(|error| format!("{error:?}"))
+                        })
                     {
                         return http_json(500, failure(error, None));
                     }
@@ -3521,14 +4154,23 @@ impl ApiService {
                 Ok(bytes) => bytes,
                 Err(_) => return http_json(404, failure("文件不存在", None)),
             };
-            let is_download = query_param(query, "download").is_some_and(|v| v == "1" || v == "true");
+            let is_download =
+                query_param(query, "download").is_some_and(|v| v == "1" || v == "true");
             let disposition = if is_download {
-                let fname = requested.file_name().and_then(|v| v.to_str()).unwrap_or("download");
+                let fname = requested
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("download");
                 Some(format!("attachment; filename=\"{fname}\""))
             } else {
                 None
             };
-            return http_bytes_with_disposition(200, content_type(&resolved), disposition.as_deref(), bytes);
+            return http_bytes_with_disposition(
+                200,
+                content_type(&resolved),
+                disposition.as_deref(),
+                bytes,
+            );
         }
         if method == "GET" && route == "/api/ui/material-recommendation" {
             let query = path.split_once('?').map(|(_, value)| value).unwrap_or("");
@@ -3544,7 +4186,9 @@ impl ApiService {
             if material.trim().is_empty() || laser_mode.trim().is_empty() {
                 return http_json(400, failure("material 和 laser_mode 不能为空", None));
             }
-            let power_scale = query_param(query, "power_scale").and_then(|value| value.parse::<f64>().ok()).unwrap_or(1000.0);
+            let power_scale = query_param(query, "power_scale")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(1000.0);
             let effective_library = match self.effective_material_library() {
                 Ok(lib) => lib,
                 Err(error) => {
@@ -3609,9 +4253,15 @@ impl ApiService {
             object.remove("_origin");
             let creates_preview = route == "/api/text-task/generate"
                 || (route == "/api/workflow"
-                    && matches!(object.get("action").and_then(|v| v.as_str()), Some("preview" | "plan" | "create")));
+                    && matches!(
+                        object.get("action").and_then(|v| v.as_str()),
+                        Some("preview" | "plan" | "create")
+                    ));
             if creates_preview {
-                object.insert("_origin".into(), serde_json::Value::String(ctx.label().to_owned()));
+                object.insert(
+                    "_origin".into(),
+                    serde_json::Value::String(ctx.label().to_owned()),
+                );
             }
             if route == "/api/text-task/generate" {
                 let effective_library = match self.effective_material_library() {
@@ -3641,7 +4291,10 @@ impl ApiService {
             } else if route == "/api/workflow" {
                 let action = object.get("action").and_then(|v| v.as_str()).unwrap_or("");
                 if action == "preview" || action == "create" || action == "plan" {
-                    let source_type = object.get("source_type").and_then(|v| v.as_str()).unwrap_or("");
+                    let source_type = object
+                        .get("source_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     if source_type == "image" || source_type == "gcode" {
                         let effective_library = match self.effective_material_library() {
                             Ok(lib) => lib,
@@ -3663,7 +4316,10 @@ impl ApiService {
                             &effective_library,
                         ) {
                             Ok(Some(artifacts)) => {
-                                object.insert("_artifacts".into(), serde_json::Value::Object(artifacts));
+                                object.insert(
+                                    "_artifacts".into(),
+                                    serde_json::Value::Object(artifacts),
+                                );
                             }
                             Ok(None) => {}
                             Err(error) => return http_json(400, failure(error, None)),
@@ -3672,12 +4328,13 @@ impl ApiService {
                 }
             }
             let send_roots = self.send_gcode_roots();
-            let launcher = |workflow_id: &str,
-                            gcode_path: std::path::PathBuf,
-                            expected_sha: &str,
-                            request: &serde_json::Map<String, serde_json::Value>| {
-                self.launch_send_job(workflow_id, gcode_path, expected_sha, request, &ctx)
-            };
+            let launcher =
+                |workflow_id: &str,
+                 gcode_path: std::path::PathBuf,
+                 expected_sha: &str,
+                 request: &serde_json::Map<String, serde_json::Value>| {
+                    self.launch_send_job(workflow_id, gcode_path, expected_sha, request, &ctx)
+                };
             if let Some(store) = self.store.as_ref() {
                 return handle_workflow_store_request(
                     store.as_ref(),
@@ -3706,10 +4363,11 @@ impl ApiService {
                 Err(error) => return http_json(400, failure(error, None)),
             };
             strip_identity_fields(&mut object);
-            let mut args: laser_contracts::LaserSafeActionArgs = match serde_json::from_value(serde_json::Value::Object(object.clone())) {
-                Ok(a) => a,
-                Err(e) => return http_json(400, failure(format!("参数解析失败: {e}"), None)),
-            };
+            let mut args: laser_contracts::LaserSafeActionArgs =
+                match serde_json::from_value(serde_json::Value::Object(object.clone())) {
+                    Ok(a) => a,
+                    Err(e) => return http_json(400, failure(format!("参数解析失败: {e}"), None)),
+                };
             // 严格模式检查点（技术书 §6.2）：只对 R3 动作；急停、软复位、关激光、降低倍率永不追加条件（A-27）
             let mut authority = approval::R3Authority::Unchecked;
             if laser_contracts::safe_action_requires_approval(&args.action) {
@@ -3787,16 +4445,23 @@ impl ApiService {
             };
             if let approval::R3Authority::Approval(record) = &framing_authority {
                 match record.connection.as_ref() {
-                    Some(connection) => object = approval::object_with_connection(&object, connection),
+                    Some(connection) => {
+                        object = approval::object_with_connection(&object, connection)
+                    }
                     None => {
-                        let (status, body) = approval::error_response(&approval::ApprovalError::Mismatch);
+                        let (status, body) =
+                            approval::error_response(&approval::ApprovalError::Mismatch);
                         return http_json(status, body);
                     }
                 }
             }
             let response = self.run_framing(&object, &ctx);
             let outcome: Result<serde_json::Value, (u16, serde_json::Value)> =
-                if response.starts_with(b"HTTP/1.1 200") { Ok(serde_json::Value::Null) } else { Err((400, failure("走边框未完成", None))) };
+                if response.starts_with(b"HTTP/1.1 200") {
+                    Ok(serde_json::Value::Null)
+                } else {
+                    Err((400, failure("走边框未完成", None)))
+                };
             self.finish_r3_authority(&framing_authority, &outcome, None);
             return response;
         }
@@ -3828,14 +4493,38 @@ impl ApiService {
                 Err(error) => return http_json(400, failure(error, None)),
             };
             let workflow_id = format!("draw-{}", next_workflow_id());
-            let material = artifacts.get("material").and_then(|v| v.as_str()).unwrap_or("");
-            let thickness_mm = artifacts.get("thickness_mm").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let img_name = artifacts.get("image_file").and_then(|v| v.as_str()).unwrap_or("");
-            let gcode_name = artifacts.get("gcode_file").and_then(|v| v.as_str()).unwrap_or("");
-            let scene_name = artifacts.get("scene_file").and_then(|v| v.as_str()).unwrap_or("");
-            let path_preview_name = artifacts.get("path_preview_file").and_then(|v| v.as_str()).unwrap_or(img_name);
-            let fingerprint = artifacts.get("fingerprint").and_then(|v| v.as_str()).unwrap_or("");
-            let gcode_sha = artifacts.get("gcode_sha256").and_then(|v| v.as_str()).unwrap_or("");
+            let material = artifacts
+                .get("material")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let thickness_mm = artifacts
+                .get("thickness_mm")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let img_name = artifacts
+                .get("image_file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let gcode_name = artifacts
+                .get("gcode_file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let scene_name = artifacts
+                .get("scene_file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path_preview_name = artifacts
+                .get("path_preview_file")
+                .and_then(|v| v.as_str())
+                .unwrap_or(img_name);
+            let fingerprint = artifacts
+                .get("fingerprint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let gcode_sha = artifacts
+                .get("gcode_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let est_secs = artifacts
                 .get("time_estimate")
                 .and_then(|t| t.get("estimated_seconds"))
@@ -3931,7 +4620,11 @@ impl ApiService {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
             };
-            let calibration_id = object.get("calibration_id").and_then(serde_json::Value::as_str).unwrap_or("").trim();
+            let calibration_id = object
+                .get("calibration_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim();
             if calibration_id.is_empty() {
                 return http_json(400, failure("calibration_id 不能为空", None));
             }
@@ -3996,7 +4689,13 @@ impl ApiService {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
             };
-            return handle_material_manage(&self.settings, self.runtime_db.as_ref(), &self.materials, &self.material_write_lock, &object);
+            return handle_material_manage(
+                &self.settings,
+                self.runtime_db.as_ref(),
+                &self.materials,
+                &self.material_write_lock,
+                &object,
+            );
         }
         let response = self.handle(method, route, &body[..content_length]);
         http_json(response.status, response.body)
@@ -4021,15 +4720,18 @@ impl ApiService {
             ("POST", "/api/ui/discover-controllers") => {
                 // mDNS 只读浏览 _telnet._tcp / _http._tcp，约 2 秒；不向设备发送任何命令。
                 // 用 POST：跨站页面无法用不带 Origin 的 GET（如 <img>）反复触发局域网扫描
-                let controllers = laser_device::discover_controllers(std::time::Duration::from_millis(2000));
+                let controllers =
+                    laser_device::discover_controllers(std::time::Duration::from_millis(2000));
                 let list: Vec<serde_json::Value> = controllers
                     .iter()
-                    .map(|c| serde_json::json!({
-                        "hostname": c.hostname,
-                        "ip": c.ip,
-                        "telnet_port": c.telnet_port,
-                        "http_port": c.http_port,
-                    }))
+                    .map(|c| {
+                        serde_json::json!({
+                            "hostname": c.hostname,
+                            "ip": c.ip,
+                            "telnet_port": c.telnet_port,
+                            "http_port": c.http_port,
+                        })
+                    })
                     .collect();
                 (
                     200,
@@ -4118,13 +4820,15 @@ impl ApiService {
                     ),
                 ),
             },
-            ("GET" | "POST", "/api/material-lab/recent") => match self.find_recent_material_workflow() {
-                Some(recent) => (200, success(recent)),
-                None => (
-                    400,
-                    failure("最近的激光 workflow 中没有可保存的完整材料参数", None),
-                ),
-            },
+            ("GET" | "POST", "/api/material-lab/recent") => {
+                match self.find_recent_material_workflow() {
+                    Some(recent) => (200, success(recent)),
+                    None => (
+                        400,
+                        failure("最近的激光 workflow 中没有可保存的完整材料参数", None),
+                    ),
+                }
+            }
             ("GET", "/v1/material-lab/bootstrap") => {
                 let source_path = self
                     .settings
@@ -4245,7 +4949,8 @@ fn generate_text_artifacts(
         || raw_laser_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"));
     // 文字刻法（2026-11-06）：默认只描轮廓（用户决定）；fill 扫描填充用材料库 raster 参数，
     // outline / hatch 是矢量走线，用 outline 参数（此前一律取 engraving_mode，即工作台默认的 raster）
-    let text_fill = laser_core::engine::TextFill::parse(object.get("text_fill").and_then(|v| v.as_str()))?;
+    let text_fill =
+        laser_core::engine::TextFill::parse(object.get("text_fill").and_then(|v| v.as_str()))?;
     let (rec_laser_mode, rec_engraving_mode) = if is_cut {
         ("cut", None)
     } else if text_fill == laser_core::engine::TextFill::Fill {
@@ -4263,7 +4968,11 @@ fn generate_text_artifacts(
     )
     .ok_or("读取材料推荐失败")?;
 
-    let params = feedback::generation_params(object, recommendation.params.laser_max_power as f64, recommendation.params.feed_rate as f64)?;
+    let params = feedback::generation_params(
+        object,
+        recommendation.params.laser_max_power as f64,
+        recommendation.params.feed_rate as f64,
+    )?;
     // 排版与起点（2026-11-06）：width_mm / height_mm 为木牌尺寸；没指定字号时自动取能放下的最大字号；
     // 默认激光头对准木牌（图案）中心（用户决定）
     let optional_number = |keys: &[&str]| -> Result<Option<f64>, String> {
@@ -4274,7 +4983,11 @@ fn generate_text_artifacts(
                 Some(value) => {
                     return value
                         .as_f64()
-                        .or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+                        .or_else(|| {
+                            value
+                                .as_str()
+                                .and_then(|text| text.trim().parse::<f64>().ok())
+                        })
                         .filter(|v| v.is_finite())
                         .map(Some)
                         .ok_or_else(|| format!("{key} 必须是数字"));
@@ -4284,12 +4997,15 @@ fn generate_text_artifacts(
         Ok(None)
     };
     let explicit_font_size = optional_number(&["font_size_mm"])?.is_some();
-    let pixel_size = optional_number(&["pixel_size_mm"])?
-        .unwrap_or(if recommendation.params.pixel_size_mm.is_finite() && recommendation.params.pixel_size_mm > 0.0 {
+    let pixel_size = optional_number(&["pixel_size_mm"])?.unwrap_or(
+        if recommendation.params.pixel_size_mm.is_finite()
+            && recommendation.params.pixel_size_mm > 0.0
+        {
             recommendation.params.pixel_size_mm
         } else {
             0.1
-        });
+        },
+    );
     let spec = laser_core::TextTaskSpec {
         text,
         font_path,
@@ -4300,18 +5016,28 @@ fn generate_text_artifacts(
         preview_width_px: 800,
         preview_height_px: 600,
         fill: text_fill,
-        alignment: laser_core::engine::parse_alignment(object.get("text_align").and_then(|v| v.as_str()))?,
-        origin: laser_core::engine::TextOrigin::parse(object.get("origin").and_then(|v| v.as_str()))?,
+        alignment: laser_core::engine::parse_alignment(
+            object.get("text_align").and_then(|v| v.as_str()),
+        )?,
+        origin: laser_core::engine::TextOrigin::parse(
+            object.get("origin").and_then(|v| v.as_str()),
+        )?,
         board_width_mm: optional_number(&["board_width_mm", "width_mm"])?,
         board_height_mm: optional_number(&["board_height_mm", "height_mm"])?,
-        margin_mm: optional_number(&["margin_mm", "safe_margin_mm"])?.unwrap_or(TEXT_BOARD_MARGIN_MM),
+        margin_mm: optional_number(&["margin_mm", "safe_margin_mm"])?
+            .unwrap_or(TEXT_BOARD_MARGIN_MM),
         auto_size: !explicit_font_size,
         pixel_size_mm: pixel_size,
         overscan_mm: IMAGE_OVERSCAN_MM,
     };
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
     // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）
-    let area = |key: &str| parse_float(object.get(key), key, MACHINE_WORK_AREA_MM).ok().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(MACHINE_WORK_AREA_MM);
+    let area = |key: &str| {
+        parse_float(object.get(key), key, MACHINE_WORK_AREA_MM)
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(MACHINE_WORK_AREA_MM)
+    };
     let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
     if let Ok(Some(extents)) = laser_core::gcode::motion_extents(&artifacts.gcode) {
         if extents.width() > area_w + 0.01 || extents.height() > area_h + 0.01 {
@@ -4405,7 +5131,10 @@ fn generate_draw_artifacts(
         return Err("thickness_mm 必须是大于 0 的数字".into());
     }
 
-    let mode = object.get("mode").and_then(|v| v.as_str()).unwrap_or("raster");
+    let mode = object
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("raster");
 
     let data_part = if let Some((_, b64)) = image_data_url.split_once(',') {
         b64
@@ -4459,17 +5188,32 @@ fn generate_draw_artifacts(
         if mode == "cut" { None } else { Some(mode) },
         1000.0,
     );
-    let power = recommendation.as_ref().map(|r| r.params.laser_max_power).unwrap_or(400);
-    let feed_rate = recommendation.as_ref().map(|r| r.params.feed_rate).unwrap_or(1500);
+    let power = recommendation
+        .as_ref()
+        .map(|r| r.params.laser_max_power)
+        .unwrap_or(400);
+    let feed_rate = recommendation
+        .as_ref()
+        .map(|r| r.params.feed_rate)
+        .unwrap_or(1500);
     let params = feedback::generation_params(object, power as f64, feed_rate as f64)?;
     let power = params.power as i32;
     let feed_rate = params.feed as i32;
 
     // 成品尺寸：填了宽 / 高按填的尺寸（锁定比例，取能放进去的最大尺寸）；都没填按导出图 0.1 mm/像素。
     // 2026-11-06 起按机器幅面（默认 100 mm，请求可传 work_area_*）而不是 400 mm 画布限制；光栅模式宽度另留两侧过扫描
-    let area = |key: &str| parse_float(object.get(key), key, MACHINE_WORK_AREA_MM).ok().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(MACHINE_WORK_AREA_MM);
+    let area = |key: &str| {
+        parse_float(object.get(key), key, MACHINE_WORK_AREA_MM)
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(MACHINE_WORK_AREA_MM)
+    };
     let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
-    let usable_w = if mode == "outline" { area_w } else { area_w - 2.0 * IMAGE_OVERSCAN_MM };
+    let usable_w = if mode == "outline" {
+        area_w
+    } else {
+        area_w - 2.0 * IMAGE_OVERSCAN_MM
+    };
     let (width_mm, height_mm, draw_auto_fitted) = draw_target_size_mm(
         img_w,
         img_h,
@@ -4484,25 +5228,33 @@ fn generate_draw_artifacts(
         let gray: Vec<Vec<u8>> = (0..img_h)
             .map(|y| (0..img_w).map(|x| luma_img.get_pixel(x, y).0[0]).collect())
             .collect();
-        let simplify_factor = parse_float(object.get("vector_simplify_factor"), "vector_simplify_factor", 3.0)?;
+        let simplify_factor = parse_float(
+            object.get("vector_simplify_factor"),
+            "vector_simplify_factor",
+            3.0,
+        )?;
         if !(0.25..=8.0).contains(&simplify_factor) {
             return Err("vector_simplify_factor 必须在 0.25 ~ 8 之间".into());
         }
-        let traced = laser_core::trace::trace_grayscale(&gray, &laser_core::trace::TraceOptions {
-            size_mm: width_mm.max(height_mm),
-            width_mm: Some(width_mm),
-            height_mm: Some(height_mm),
-            lock_aspect_ratio: true,
-            work_area_width_mm: area_w,
-            work_area_height_mm: area_h,
-            simplify_factor,
-        })
+        let traced = laser_core::trace::trace_grayscale(
+            &gray,
+            &laser_core::trace::TraceOptions {
+                size_mm: width_mm.max(height_mm),
+                width_mm: Some(width_mm),
+                height_mm: Some(height_mm),
+                lock_aspect_ratio: true,
+                work_area_width_mm: area_w,
+                work_area_height_mm: area_h,
+                simplify_factor,
+            },
+        )
         .map_err(|e| e.to_string())?;
         if traced.paths.is_empty() {
             return Err("画板里没有可描边的深色图形，请改用光栅雕刻或加深线条".into());
         }
-        let optimized = laser_core::path_opt::optimize_with_threshold(&traced.paths, width_mm.max(height_mm))
-            .map_err(|e| e.to_string())?;
+        let optimized =
+            laser_core::path_opt::optimize_with_threshold(&traced.paths, width_mm.max(height_mm))
+                .map_err(|e| e.to_string())?;
         let preview_scale = (1024.0 / width_mm.max(height_mm)).max(1.0);
         laser_core::gcode::preview_outline_rgba(
             &optimized.paths,
@@ -4513,15 +5265,18 @@ fn generate_draw_artifacts(
         )?
         .save(root.join(&path_preview_name))
         .map_err(|e| e.to_string())?;
-        laser_core::gcode::write_outline(&optimized.paths, &laser_core::gcode::WriterOptions {
-            width_mm,
-            height_mm,
-            power,
-            feed_rate,
-            auto_close: true,
-            laser_mode: "M4",
-            power_scale: None,
-        })?
+        laser_core::gcode::write_outline(
+            &optimized.paths,
+            &laser_core::gcode::WriterOptions {
+                width_mm,
+                height_mm,
+                power,
+                feed_rate,
+                auto_close: true,
+                laser_mode: "M4",
+                power_scale: None,
+            },
+        )?
     } else {
         // 光栅：先把导出图缩放到成品尺寸（每像素 0.1 mm），再二值化逐行扫描
         let raster_w = ((width_mm / DRAW_PIXEL_MM).round() as u32).max(1);
@@ -4529,13 +5284,22 @@ fn generate_draw_artifacts(
         let scaled = if (raster_w, raster_h) == (img_w, img_h) {
             luma_img.clone()
         } else {
-            image::imageops::resize(&luma_img, raster_w, raster_h, image::imageops::FilterType::Triangle)
+            image::imageops::resize(
+                &luma_img,
+                raster_w,
+                raster_h,
+                image::imageops::FilterType::Triangle,
+            )
         };
         let mut bitmap = Vec::with_capacity(raster_h as usize);
         for y in 0..raster_h {
             let mut row = Vec::with_capacity(raster_w as usize);
             for x in 0..raster_w {
-                row.push(if scaled.get_pixel(x, y).0[0] < 128 { 0 } else { 255 });
+                row.push(if scaled.get_pixel(x, y).0[0] < 128 {
+                    0
+                } else {
+                    255
+                });
             }
             bitmap.push(row);
         }
@@ -4549,10 +5313,12 @@ fn generate_draw_artifacts(
                 }
             }
         }
-        bin.save(root.join(&path_preview_name)).map_err(|e| e.to_string())?;
-
-        let plan = laser_core::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
+        bin.save(root.join(&path_preview_name))
             .map_err(|e| e.to_string())?;
+
+        let plan =
+            laser_core::raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
+                .map_err(|e| e.to_string())?;
         laser_core::gcode::write_raster(
             &plan,
             raster_w as usize,
@@ -4570,7 +5336,8 @@ fn generate_draw_artifacts(
                 safety_note: None,
                 power_scale: None,
             },
-        ).map_err(|e| e.to_string())?
+        )
+        .map_err(|e| e.to_string())?
     };
 
     let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
@@ -4591,24 +5358,36 @@ fn generate_draw_artifacts(
         serde_json::Value::String(hex::encode(sha2::Sha256::digest(gcode_str.as_bytes()))),
     );
     res_map.insert("scene_file".into(), serde_json::Value::String(scene_name));
-    res_map.insert("path_preview_file".into(), serde_json::Value::String(path_preview_name));
-    res_map.insert("material".into(), serde_json::Value::String(material.to_string()));
+    res_map.insert(
+        "path_preview_file".into(),
+        serde_json::Value::String(path_preview_name),
+    );
+    res_map.insert(
+        "material".into(),
+        serde_json::Value::String(material.to_string()),
+    );
     res_map.insert("thickness_mm".into(), serde_json::json!(thickness));
     res_map.insert("width_mm".into(), serde_json::json!(width_mm));
     res_map.insert("height_mm".into(), serde_json::json!(height_mm));
     res_map.insert("auto_fitted".into(), serde_json::json!(draw_auto_fitted));
     if draw_auto_fitted {
-        res_map.insert("fit_note".into(), serde_json::json!(format!(
-            "画板按 0.1 mm/像素会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm"
-        )));
+        res_map.insert(
+            "fit_note".into(),
+            serde_json::json!(format!(
+                "画板按 0.1 mm/像素会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm"
+            )),
+        );
     }
     res_map.insert("mode".into(), serde_json::Value::String(mode.to_string()));
-    res_map.insert("time_estimate".into(), serde_json::json!({
-        "estimated_seconds": estimate.estimated_seconds,
-        "estimated_minutes": estimate.estimated_minutes,
-        "laser_seconds": estimate.laser_seconds,
-        "non_laser_seconds": estimate.non_laser_seconds,
-    }));
+    res_map.insert(
+        "time_estimate".into(),
+        serde_json::json!({
+            "estimated_seconds": estimate.estimated_seconds,
+            "estimated_minutes": estimate.estimated_minutes,
+            "laser_seconds": estimate.laser_seconds,
+            "non_laser_seconds": estimate.non_laser_seconds,
+        }),
+    );
     res_map.insert("fingerprint".into(), serde_json::Value::String(fingerprint));
 
     Ok(res_map)
@@ -4652,12 +5431,20 @@ fn check_job_fits_machine(gcode: &str, limits: &laser_device::MachineLimits) -> 
 }
 
 /// 可选的正数尺寸：缺省、null、空串或 0 表示“自动”。
-fn optional_positive_mm(value: Option<&serde_json::Value>, field: &str) -> Result<Option<f64>, String> {
+fn optional_positive_mm(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Option<f64>, String> {
     let number = match value {
         None | Some(serde_json::Value::Null) => return Ok(None),
         Some(serde_json::Value::String(text)) if text.trim().is_empty() => return Ok(None),
-        Some(serde_json::Value::String(text)) => text.trim().parse::<f64>().map_err(|_| format!("{field} 必须是数字"))?,
-        Some(other) => other.as_f64().ok_or_else(|| format!("{field} 必须是数字"))?,
+        Some(serde_json::Value::String(text)) => text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("{field} 必须是数字"))?,
+        Some(other) => other
+            .as_f64()
+            .ok_or_else(|| format!("{field} 必须是数字"))?,
     };
     if !number.is_finite() || number < 0.0 {
         return Err(format!("{field} 必须是不小于 0 的数字"));
@@ -4764,7 +5551,8 @@ fn generate_image_or_gcode_artifacts(
         hasher.update(&image_bytes);
         let _fingerprint = hex::encode(hasher.finalize());
 
-        let decoded = image::load_from_memory(&image_bytes).map_err(|e| format!("解析图片格式失败: {e}"))?;
+        let decoded =
+            image::load_from_memory(&image_bytes).map_err(|e| format!("解析图片格式失败: {e}"))?;
         // 透明背景按白色（不出光）处理，避免透明 PNG 整片出光
         let luma_img = laser_core::image_job::flatten_on_white(&decoded);
         if luma_img.width() == 0 || luma_img.height() == 0 {
@@ -4783,7 +5571,8 @@ fn generate_image_or_gcode_artifacts(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("raster");
-        let is_cut = laser_mode.eq_ignore_ascii_case("cut") || engraving_mode.eq_ignore_ascii_case("cut");
+        let is_cut =
+            laser_mode.eq_ignore_ascii_case("cut") || engraving_mode.eq_ignore_ascii_case("cut");
         let recommendation = laser_core::material::recommend_in_library(
             library,
             material,
@@ -4792,8 +5581,14 @@ fn generate_image_or_gcode_artifacts(
             if is_cut { None } else { Some(engraving_mode) },
             1000.0,
         );
-        let power = recommendation.as_ref().map(|r| r.params.laser_max_power).unwrap_or(400);
-        let feed_rate = recommendation.as_ref().map(|r| r.params.feed_rate).unwrap_or(1500);
+        let power = recommendation
+            .as_ref()
+            .map(|r| r.params.laser_max_power)
+            .unwrap_or(400);
+        let feed_rate = recommendation
+            .as_ref()
+            .map(|r| r.params.feed_rate)
+            .unwrap_or(1500);
         let material_pixel = recommendation
             .as_ref()
             .map(|r| r.params.pixel_size_mm)
@@ -4810,7 +5605,11 @@ fn generate_image_or_gcode_artifacts(
                 Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
                 Some(value) => value
                     .as_f64()
-                    .or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+                    .or_else(|| {
+                        value
+                            .as_str()
+                            .and_then(|text| text.trim().parse::<f64>().ok())
+                    })
                     .filter(|v| v.is_finite())
                     .map(Some)
                     .ok_or_else(|| format!("{key} 必须是数字")),
@@ -4825,17 +5624,25 @@ fn generate_image_or_gcode_artifacts(
             pixel_size_mm: optional_number("pixel_size_mm")?.unwrap_or(material_pixel),
             width_mm: optional_number("width_mm")?,
             height_mm: optional_number("height_mm")?,
-            work_area_width_mm: optional_number("work_area_width_mm")?.unwrap_or(MACHINE_WORK_AREA_MM),
-            work_area_height_mm: optional_number("work_area_height_mm")?.unwrap_or(MACHINE_WORK_AREA_MM),
+            work_area_width_mm: optional_number("work_area_width_mm")?
+                .unwrap_or(MACHINE_WORK_AREA_MM),
+            work_area_height_mm: optional_number("work_area_height_mm")?
+                .unwrap_or(MACHINE_WORK_AREA_MM),
             scan_overscan_mm: IMAGE_OVERSCAN_MM,
-            mode: laser_core::image_job::ToneMode::parse(object.get("image_mode").and_then(|v| v.as_str()))?,
+            mode: laser_core::image_job::ToneMode::parse(
+                object.get("image_mode").and_then(|v| v.as_str()),
+            )?,
             threshold,
         };
         let prepared = laser_core::image_job::prepare_raster(&luma_img, &raster_options)?;
         let (img_w, img_h) = (prepared.grid_width, prepared.grid_height);
 
-        let plan = laser_core::raster::raster_plan_with_direction(&prepared.bitmap, "horizontal", "scanline")
-            .map_err(|e| e.to_string())?;
+        let plan = laser_core::raster::raster_plan_with_direction(
+            &prepared.bitmap,
+            "horizontal",
+            "scanline",
+        )
+        .map_err(|e| e.to_string())?;
         let gcode_str = laser_core::gcode::write_raster(
             &plan,
             img_w as usize,
@@ -4853,7 +5660,8 @@ fn generate_image_or_gcode_artifacts(
                 safety_note: None,
                 power_scale: None,
             },
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
 
         let id = format!("img-{}-{}-{}", unix_seconds(), nanos, std::process::id());
         let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
@@ -4863,9 +5671,14 @@ fn generate_image_or_gcode_artifacts(
         // 预览图就是实际要雕刻的黑白网格（黑 = 出光），而不是原图；原图（透明已按白色合成）另存一份，
         // 供“采用反馈建议重新生成”从原图重新处理，避免对已抖动的图再抖动一次
         let preview_path = root.join(format!("{id}.png"));
-        prepared.preview().save(&preview_path).map_err(|e| e.to_string())?;
+        prepared
+            .preview()
+            .save(&preview_path)
+            .map_err(|e| e.to_string())?;
         let source_name = format!("{id}-source.png");
-        luma_img.save(root.join(&source_name)).map_err(|e| e.to_string())?;
+        luma_img
+            .save(root.join(&source_name))
+            .map_err(|e| e.to_string())?;
 
         let estimate = laser_core::gcode::estimate_time(&gcode_str, 3000.0);
         let (width_mm, height_mm) = (prepared.width_mm, prepared.height_mm);
@@ -4879,20 +5692,38 @@ fn generate_image_or_gcode_artifacts(
         res.insert("image_file".into(), serde_json::Value::String(img_name));
         res.insert("gcode_file".into(), serde_json::Value::String(gcode_name));
         res.insert("gcode_sha256".into(), serde_json::Value::String(gcode_sha));
-        res.insert("material".into(), serde_json::Value::String(material.to_string()));
+        res.insert(
+            "material".into(),
+            serde_json::Value::String(material.to_string()),
+        );
         res.insert("thickness_mm".into(), serde_json::json!(thickness));
         res.insert("width_mm".into(), serde_json::json!(width_mm));
         res.insert("height_mm".into(), serde_json::json!(height_mm));
-        res.insert("source_image_file".into(), serde_json::Value::String(source_name));
-        res.insert("pixel_size_mm".into(), serde_json::json!(raster_options.pixel_size_mm));
-        res.insert("image_mode".into(), serde_json::json!(prepared.mode.as_str()));
+        res.insert(
+            "source_image_file".into(),
+            serde_json::Value::String(source_name),
+        );
+        res.insert(
+            "pixel_size_mm".into(),
+            serde_json::json!(raster_options.pixel_size_mm),
+        );
+        res.insert(
+            "image_mode".into(),
+            serde_json::json!(prepared.mode.as_str()),
+        );
         if let Some(value) = prepared.threshold {
             res.insert("threshold".into(), serde_json::json!(value));
         }
-        res.insert("auto_fitted".into(), serde_json::json!(prepared.auto_fitted));
+        res.insert(
+            "auto_fitted".into(),
+            serde_json::json!(prepared.auto_fitted),
+        );
         // 图片任务以开始时激光头位置为图片左下角（栅格写出器右移一个过扫描距离），走边框按激光头实际经过的范围
         res.insert("origin".into(), serde_json::json!("lower_left"));
-        res.insert("origin_note".into(), serde_json::json!("开刻前把激光头移到图片左下角"));
+        res.insert(
+            "origin_note".into(),
+            serde_json::json!("开刻前把激光头移到图片左下角"),
+        );
         res.insert("frame_mm".into(), serde_json::json!({
             "min_x": 0.0, "max_x": width_mm + 2.0 * IMAGE_OVERSCAN_MM, "min_y": 0.0, "max_y": height_mm
         }));
@@ -4902,12 +5733,15 @@ fn generate_image_or_gcode_artifacts(
                 raster_options.pixel_size_mm
             )));
         }
-        res.insert("time_estimate".into(), serde_json::json!({
-            "estimated_seconds": estimate.estimated_seconds,
-            "estimated_minutes": estimate.estimated_minutes,
-            "laser_seconds": estimate.laser_seconds,
-            "non_laser_seconds": estimate.non_laser_seconds,
-        }));
+        res.insert(
+            "time_estimate".into(),
+            serde_json::json!({
+                "estimated_seconds": estimate.estimated_seconds,
+                "estimated_minutes": estimate.estimated_minutes,
+                "laser_seconds": estimate.laser_seconds,
+                "non_laser_seconds": estimate.non_laser_seconds,
+            }),
+        );
         return Ok(Some(res));
     } else if source_type == "gcode" {
         let gcode_file = object
@@ -4929,7 +5763,8 @@ fn generate_image_or_gcode_artifacts(
         let gcode_path = resolve_gcode_file(std::path::Path::new(gcode_file), &gcode_roots)
             .map_err(|_| "找不到指定的 G-code 刀路文件".to_string())?;
 
-        let gcode_bytes = std::fs::read(&gcode_path).map_err(|e| format!("读取刀路文件失败: {e}"))?;
+        let gcode_bytes =
+            std::fs::read(&gcode_path).map_err(|e| format!("读取刀路文件失败: {e}"))?;
         let gcode_str = String::from_utf8_lossy(&gcode_bytes);
 
         let mut hasher = sha2::Sha256::new();
@@ -4998,27 +5833,42 @@ fn generate_image_or_gcode_artifacts(
 
         let id = format!("gc-{}-{}-{}", unix_seconds(), nanos, std::process::id());
         let preview_path = root.join(format!("{id}.png"));
-        let preview_img = laser_core::gcode::preview_outline_rgba_with_options(&paths, 800, 600, width_mm, height_mm, false)
-            .map_err(|e| e.to_string())?;
+        let preview_img = laser_core::gcode::preview_outline_rgba_with_options(
+            &paths, 800, 600, width_mm, height_mm, false,
+        )
+        .map_err(|e| e.to_string())?;
         preview_img.save(&preview_path).map_err(|e| e.to_string())?;
 
         let img_name = format!("{id}.png");
-        let gcode_name = gcode_path.file_name().and_then(|v| v.to_str()).unwrap_or(gcode_file).to_string();
+        let gcode_name = gcode_path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or(gcode_file)
+            .to_string();
 
         let mut res = serde_json::Map::new();
         res.insert("image_file".into(), serde_json::Value::String(img_name));
         res.insert("gcode_file".into(), serde_json::Value::String(gcode_name));
-        res.insert("gcode_sha256".into(), serde_json::Value::String(fingerprint));
-        res.insert("material".into(), serde_json::Value::String(material.to_string()));
+        res.insert(
+            "gcode_sha256".into(),
+            serde_json::Value::String(fingerprint),
+        );
+        res.insert(
+            "material".into(),
+            serde_json::Value::String(material.to_string()),
+        );
         res.insert("thickness_mm".into(), serde_json::json!(thickness));
         res.insert("width_mm".into(), serde_json::json!(width_mm));
         res.insert("height_mm".into(), serde_json::json!(height_mm));
-        res.insert("time_estimate".into(), serde_json::json!({
-            "estimated_seconds": estimate.estimated_seconds,
-            "estimated_minutes": estimate.estimated_minutes,
-            "laser_seconds": estimate.laser_seconds,
-            "non_laser_seconds": estimate.non_laser_seconds,
-        }));
+        res.insert(
+            "time_estimate".into(),
+            serde_json::json!({
+                "estimated_seconds": estimate.estimated_seconds,
+                "estimated_minutes": estimate.estimated_minutes,
+                "laser_seconds": estimate.laser_seconds,
+                "non_laser_seconds": estimate.non_laser_seconds,
+            }),
+        );
         return Ok(Some(res));
     }
 
@@ -5057,7 +5907,12 @@ fn enumerate_system_serial_ports() -> Vec<String> {
     if ports.is_empty() {
         for n in 1..=32 {
             let com = format!("\\\\.\\COM{n}");
-            if std::fs::OpenOptions::new().read(true).write(true).open(&com).is_ok() {
+            if std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&com)
+                .is_ok()
+            {
                 let name = format!("COM{n}");
                 if !ports.contains(&name) {
                     ports.push(name);
@@ -5089,7 +5944,9 @@ fn workflow_send_blocked_reason(status: Option<&str>) -> Option<&'static str> {
         Some("cancelled") => Some("该 workflow 已取消，不能再发送，请重新生成预览"),
         Some("failed") => Some("该 workflow 已失败，不能再发送，请重新生成预览"),
         Some("sending") => Some("该 workflow 正在发送中，禁止重复下发"),
-        Some("completed") => Some("该 workflow 已完成加工；重复加工同一图案请重新生成预览（防止二次烧蚀）"),
+        Some("completed") => {
+            Some("该 workflow 已完成加工；重复加工同一图案请重新生成预览（防止二次烧蚀）")
+        }
         _ => None,
     }
 }
@@ -5111,7 +5968,12 @@ fn build_send_preflight(
                 .and_then(|c| c.get("gcode_file"))
                 .and_then(|v| v.as_str())
         })
-        .or_else(|| payload.get("input").and_then(|i| i.get("gcode_file")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            payload
+                .get("input")
+                .and_then(|i| i.get("gcode_file"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("")
         .trim();
     if gcode_file.is_empty() {
@@ -5136,7 +5998,8 @@ fn build_send_preflight(
         Some(sha) => sha,
         None => {
             // 快照尚未冻结 SHA：以当前物理文件首次冻结，之后每次发送都必须与之一致
-            let bytes = std::fs::read(&gcode_path).map_err(|e| format!("读取 G-code 文件失败: {e}"))?;
+            let bytes =
+                std::fs::read(&gcode_path).map_err(|e| format!("读取 G-code 文件失败: {e}"))?;
             hex::encode(Sha256::digest(&bytes))
         }
     };
@@ -5163,8 +6026,14 @@ fn freeze_confirmation_snapshot(
         .and_then(|value| value.as_object_mut())
     {
         Some(snapshot) => {
-            snapshot.insert("gcode_file".into(), serde_json::Value::String(gcode_file.to_owned()));
-            snapshot.insert("gcode_sha256".into(), serde_json::Value::String(gcode_sha.to_owned()));
+            snapshot.insert(
+                "gcode_file".into(),
+                serde_json::Value::String(gcode_file.to_owned()),
+            );
+            snapshot.insert(
+                "gcode_sha256".into(),
+                serde_json::Value::String(gcode_sha.to_owned()),
+            );
             snapshot.insert("confirmed_at".into(), serde_json::json!(now));
         }
         None => {
@@ -5183,7 +6052,9 @@ fn freeze_confirmation_snapshot(
 /// 后台发送线程收尾：把终态与 send_result 写回存储（SQLite/内存）。
 fn finalize_workflow_record(
     store: Option<&(dyn laser_runtime::RuntimeStore + Send + Sync)>,
-    workflows: &std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
+    workflows: &std::sync::Arc<
+        std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
+    >,
     kind: laser_runtime::RecordKind,
     workflow_id: &str,
     status: &str,
@@ -5194,10 +6065,17 @@ fn finalize_workflow_record(
         if let Ok(Some(mut stored)) = store.get(kind, workflow_id) {
             // 取消请求可能已由 HTTP 层写入 cancelled；不要用 completed 覆盖用户取消
             let already_cancelled = stored.status.as_deref() == Some("cancelled");
-            let final_status = if already_cancelled && status == "completed" { "cancelled" } else { status };
+            let final_status = if already_cancelled && status == "completed" {
+                "cancelled"
+            } else {
+                status
+            };
             stored.status = Some(final_status.into());
             if let Some(map) = stored.payload.as_object_mut() {
-                map.insert("status".into(), serde_json::Value::String(final_status.into()));
+                map.insert(
+                    "status".into(),
+                    serde_json::Value::String(final_status.into()),
+                );
                 map.insert("updated_at".into(), serde_json::json!(now));
                 map.insert("send_result".into(), send_result);
             }
@@ -5207,8 +6085,13 @@ fn finalize_workflow_record(
     }
     if let Ok(mut records) = workflows.lock() {
         if let Some(record) = records.get_mut(workflow_id) {
-            let already_cancelled = record.get("status").and_then(|v| v.as_str()) == Some("cancelled");
-            let final_status = if already_cancelled && status == "completed" { "cancelled" } else { status };
+            let already_cancelled =
+                record.get("status").and_then(|v| v.as_str()) == Some("cancelled");
+            let final_status = if already_cancelled && status == "completed" {
+                "cancelled"
+            } else {
+                status
+            };
             record["status"] = serde_json::Value::String(final_status.into());
             record["updated_at"] = serde_json::json!(now);
             record["send_result"] = send_result;
@@ -5253,7 +6136,9 @@ fn signal_job_cancel(
     }
     if let Some(job) = job {
         job.cancel.cancel();
-        let _ = job.transport.write_realtime(laser_device::RealtimeCommand::FeedHold);
+        let _ = job
+            .transport
+            .write_realtime(laser_device::RealtimeCommand::FeedHold);
         signalled = true;
     }
     signalled
@@ -5261,7 +6146,10 @@ fn signal_job_cancel(
 
 /// 只读探测是否仍有活动发送或启动预约；锁中毒时按“活动”处理，绝不因探测失败拦下取消。
 fn job_is_active(jobs: &ActiveJobs, reservations: &LaunchReservations, workflow_id: &str) -> bool {
-    let in_jobs = jobs.lock().map(|guard| guard.contains_key(workflow_id)).unwrap_or(true);
+    let in_jobs = jobs
+        .lock()
+        .map(|guard| guard.contains_key(workflow_id))
+        .unwrap_or(true);
     let reserved = reservations
         .lock()
         .map(|state| state.active.contains_key(workflow_id))
@@ -5283,7 +6171,9 @@ fn cancel_completed_rejected() -> Vec<u8> {
 
 /// 断点行号只能由 `resume` 从服务端记录的 `lines_sent` 写入；`confirm_send` / `send` 若接受客户端
 /// 自带的 `start_from_line`，会绕过续雕校验并在跳过开头 G21/G90/M5 设置行前先发 `$X` 解锁。
-fn reject_client_resume_line(object: &serde_json::Map<String, serde_json::Value>) -> Option<Vec<u8>> {
+fn reject_client_resume_line(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<u8>> {
     object.contains_key("start_from_line").then(|| {
         http_json(
             400,
@@ -5358,10 +6248,17 @@ fn handle_workflow_store_request(
                 );
             }
 
-            let gcode_name = artifacts.get("gcode_file").and_then(|v| v.as_str()).unwrap_or("");
-            let gcode_sha = artifacts.get("gcode_sha256").and_then(|v| v.as_str()).unwrap_or("");
+            let gcode_name = artifacts
+                .get("gcode_file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let gcode_sha = artifacts
+                .get("gcode_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let material = input.get("material").and_then(|v| v.as_str()).unwrap_or("");
-            let thickness = parse_float(input.get("thickness_mm"), "thickness_mm", 3.0).unwrap_or(3.0);
+            let thickness =
+                parse_float(input.get("thickness_mm"), "thickness_mm", 3.0).unwrap_or(3.0);
             let confirmation_snapshot = if !gcode_name.is_empty() {
                 serde_json::json!({
                     "gcode_file": gcode_name,
@@ -5437,9 +6334,12 @@ fn handle_workflow_store_request(
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
             if !job_is_active(jobs, reservations, &workflow_id) {
-                let stored = [laser_runtime::RecordKind::Workflow, laser_runtime::RecordKind::Calibration]
-                    .into_iter()
-                    .find_map(|kind| store.get(kind, &workflow_id).ok().flatten());
+                let stored = [
+                    laser_runtime::RecordKind::Workflow,
+                    laser_runtime::RecordKind::Calibration,
+                ]
+                .into_iter()
+                .find_map(|kind| store.get(kind, &workflow_id).ok().flatten());
                 let completed = stored.is_some_and(|stored| {
                     stored
                         .status
@@ -5501,15 +6401,23 @@ fn handle_workflow_store_request(
             let Some(workflow_id) = requested_id else {
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
-            let confirmed = object.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false);
+            let confirmed = object
+                .get("confirmed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !confirmed {
-                return http_json(400, failure("请确认断点恢复安全选项 (confirmed=true)", None));
+                return http_json(
+                    400,
+                    failure("请确认断点恢复安全选项 (confirmed=true)", None),
+                );
             }
             let cancel_epoch_before = current_cancel_epoch(reservations, &workflow_id);
-            let Some(mut stored) = (match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
-                Ok(value) => value,
-                Err(_) => return http_json(500, failure("读取 workflow 失败", None)),
-            }) else {
+            let Some(mut stored) =
+                (match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
+                    Ok(value) => value,
+                    Err(_) => return http_json(500, failure("读取 workflow 失败", None)),
+                })
+            else {
                 return http_json(404, failure("未找到 workflow", None));
             };
             if let Err(error) = validate_material_safety_in_payload(&stored.payload) {
@@ -5527,32 +6435,73 @@ fn handle_workflow_store_request(
                 .as_deref()
                 .or_else(|| stored.payload.get("status").and_then(|v| v.as_str()));
             if status == Some("sending") {
-                return http_json(409, failure("该 workflow 正在发送中，禁止重复操作", Some(serde_json::json!({"error_code": "device_busy"}))));
+                return http_json(
+                    409,
+                    failure(
+                        "该 workflow 正在发送中，禁止重复操作",
+                        Some(serde_json::json!({"error_code": "device_busy"})),
+                    ),
+                );
             }
             if status == Some("completed") {
-                return http_json(400, failure("该 workflow 已全量完成，无法断点继续", Some(serde_json::json!({"error_code": "workflow_completed"}))));
+                return http_json(
+                    400,
+                    failure(
+                        "该 workflow 已全量完成，无法断点继续",
+                        Some(serde_json::json!({"error_code": "workflow_completed"})),
+                    ),
+                );
             }
 
-            let send_result = stored.payload.get("send_result").cloned().unwrap_or_default();
-            let lines_sent = send_result.get("lines_sent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let total_lines = send_result.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let send_result = stored
+                .payload
+                .get("send_result")
+                .cloned()
+                .unwrap_or_default();
+            let lines_sent = send_result
+                .get("lines_sent")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let total_lines = send_result
+                .get("total_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
             if lines_sent == 0 || (total_lines > 0 && lines_sent >= total_lines) {
                 return http_json(
                     400,
                     failure(
-                        format!("该任务尚未开始或已完成（断点: {lines_sent}/{total_lines}），无法断点续雕"),
+                        format!(
+                            "该任务尚未开始或已完成（断点: {lines_sent}/{total_lines}），无法断点续雕"
+                        ),
                         Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
                     ),
                 );
             }
 
-            let _launch_guard = match reserve_workflow_launch(jobs, reservations, &workflow_id, Some(cancel_epoch_before)) {
+            let _launch_guard = match reserve_workflow_launch(
+                jobs,
+                reservations,
+                &workflow_id,
+                Some(cancel_epoch_before),
+            ) {
                 Ok(guard) => guard,
                 Err(ReserveLaunchError::Busy) => {
-                    return http_json(409, failure("该 workflow 正在启动或发送中，禁止重复操作", Some(serde_json::json!({"error_code": "device_busy"}))));
+                    return http_json(
+                        409,
+                        failure(
+                            "该 workflow 正在启动或发送中，禁止重复操作",
+                            Some(serde_json::json!({"error_code": "device_busy"})),
+                        ),
+                    );
                 }
                 Err(ReserveLaunchError::Cancelled) => {
-                    return http_json(409, failure("任务已被取消，未启动续雕", Some(serde_json::json!({"error_code": "workflow_cancelled"}))));
+                    return http_json(
+                        409,
+                        failure(
+                            "任务已被取消，未启动续雕",
+                            Some(serde_json::json!({"error_code": "workflow_cancelled"})),
+                        ),
+                    );
                 }
             };
             // 二次复核预约建立前未发生并发状态跳变
@@ -5563,24 +6512,31 @@ fn handle_workflow_store_request(
                         .as_deref()
                         .or_else(|| fresh.payload.get("status").and_then(|v| v.as_str()));
                     if fresh_status == Some("sending") || fresh_status == Some("completed") {
-                        return http_json(409, failure("workflow 状态已变更，请刷新后重试", Some(serde_json::json!({"error_code": "device_busy"}))));
+                        return http_json(
+                            409,
+                            failure(
+                                "workflow 状态已变更，请刷新后重试",
+                                Some(serde_json::json!({"error_code": "device_busy"})),
+                            ),
+                        );
                     }
                     stored = fresh;
                 }
                 _ => return http_json(500, failure("读取 workflow 失败", None)),
             }
-            let (preflight, gcode_sha, gcode_file) = match build_send_preflight(&stored.payload, send_roots) {
-                Ok(value) => value,
-                Err(error) => {
-                    return http_json(
-                        400,
-                        failure(
-                            format!("发送安全门禁未通过: {error}"),
-                            Some(serde_json::json!({"error_code": "send_gate_rejected"})),
-                        ),
-                    );
-                }
-            };
+            let (preflight, gcode_sha, gcode_file) =
+                match build_send_preflight(&stored.payload, send_roots) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return http_json(
+                            400,
+                            failure(
+                                format!("发送安全门禁未通过: {error}"),
+                                Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                            ),
+                        );
+                    }
+                };
             if let Err(error) = laser_device::authorize_send(&preflight) {
                 return http_json(
                     400,
@@ -5606,7 +6562,8 @@ fn handle_workflow_store_request(
                 freeze_confirmation_snapshot(map, &gcode_file, &gcode_sha);
             }
             if current_cancel_epoch(reservations, &workflow_id) == cancel_epoch_before
-                && let Ok(Some(mut latest)) = store.get(laser_runtime::RecordKind::Workflow, &workflow_id)
+                && let Ok(Some(mut latest)) =
+                    store.get(laser_runtime::RecordKind::Workflow, &workflow_id)
             {
                 if latest.payload == snapshot_before_launch {
                     latest.status = Some("sending".into());
@@ -5627,24 +6584,38 @@ fn handle_workflow_store_request(
             if let Some(rejected) = reject_client_resume_line(object) {
                 return rejected;
             }
-            let confirmed = object.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false);
+            let confirmed = object
+                .get("confirmed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !confirmed {
                 return http_json(400, failure("请确认发送安全选项 (confirmed=true)", None));
             };
             let cancel_epoch_before = current_cancel_epoch(reservations, &workflow_id);
             match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
                 Ok(Some(mut stored)) => {
-                    let has_gcode = stored.payload.get("artifacts")
+                    let has_gcode = stored
+                        .payload
+                        .get("artifacts")
                         .and_then(|a| a.get("gcode_file").or_else(|| a.get("gcode_sha256")))
                         .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-                        || stored.payload.get("confirmation_snapshot").is_some_and(|v| !v.is_null())
-                        || stored.payload.get("input").and_then(|i| i.get("gcode_file")).is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
+                        || stored
+                            .payload
+                            .get("confirmation_snapshot")
+                            .is_some_and(|v| !v.is_null())
+                        || stored
+                            .payload
+                            .get("input")
+                            .and_then(|i| i.get("gcode_file"))
+                            .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
                     if !has_gcode {
                         return http_json(
                             400,
                             failure(
                                 "当前 workflow 没有可确认发送的 G-code 快照",
-                                Some(serde_json::json!({"error_code": "confirmation_snapshot_missing"})),
+                                Some(
+                                    serde_json::json!({"error_code": "confirmation_snapshot_missing"}),
+                                ),
                             ),
                         );
                     }
@@ -5665,16 +6636,36 @@ fn handle_workflow_store_request(
                     if let Some(reason) = workflow_send_blocked_reason(current_status) {
                         return http_json(
                             400,
-                            failure(reason, Some(serde_json::json!({"error_code": "workflow_not_sendable"}))),
+                            failure(
+                                reason,
+                                Some(serde_json::json!({"error_code": "workflow_not_sendable"})),
+                            ),
                         );
                     }
-                    let _launch_guard = match reserve_workflow_launch(jobs, reservations, &workflow_id, Some(cancel_epoch_before)) {
+                    let _launch_guard = match reserve_workflow_launch(
+                        jobs,
+                        reservations,
+                        &workflow_id,
+                        Some(cancel_epoch_before),
+                    ) {
                         Ok(guard) => guard,
                         Err(ReserveLaunchError::Busy) => {
-                            return http_json(409, failure("该 workflow 正在启动或发送中，禁止重复操作", Some(serde_json::json!({"error_code": "device_busy"}))));
+                            return http_json(
+                                409,
+                                failure(
+                                    "该 workflow 正在启动或发送中，禁止重复操作",
+                                    Some(serde_json::json!({"error_code": "device_busy"})),
+                                ),
+                            );
                         }
                         Err(ReserveLaunchError::Cancelled) => {
-                            return http_json(409, failure("任务已被取消，未开始发送", Some(serde_json::json!({"error_code": "workflow_cancelled"}))));
+                            return http_json(
+                                409,
+                                failure(
+                                    "任务已被取消，未开始发送",
+                                    Some(serde_json::json!({"error_code": "workflow_cancelled"})),
+                                ),
+                            );
                         }
                     };
                     match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
@@ -5686,7 +6677,12 @@ fn handle_workflow_store_request(
                             if let Some(reason) = workflow_send_blocked_reason(fresh_status) {
                                 return http_json(
                                     400,
-                                    failure(reason, Some(serde_json::json!({"error_code": "workflow_not_sendable"}))),
+                                    failure(
+                                        reason,
+                                        Some(
+                                            serde_json::json!({"error_code": "workflow_not_sendable"}),
+                                        ),
+                                    ),
                                 );
                             }
                             stored = fresh;
@@ -5701,7 +6697,9 @@ fn handle_workflow_store_request(
                                     400,
                                     failure(
                                         format!("发送安全门禁未通过: {error}"),
-                                        Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                                        Some(
+                                            serde_json::json!({"error_code": "send_gate_rejected"}),
+                                        ),
                                     ),
                                 );
                             }
@@ -5730,7 +6728,8 @@ fn handle_workflow_store_request(
                         freeze_confirmation_snapshot(map, &gcode_file, &gcode_sha);
                     }
                     if current_cancel_epoch(reservations, &workflow_id) == cancel_epoch_before
-                        && let Ok(Some(mut latest)) = store.get(laser_runtime::RecordKind::Workflow, &workflow_id)
+                        && let Ok(Some(mut latest)) =
+                            store.get(laser_runtime::RecordKind::Workflow, &workflow_id)
                     {
                         if latest.payload == snapshot_before_launch {
                             latest.status = Some("sending".into());
@@ -5814,10 +6813,17 @@ fn handle_workflow_request(
                 );
             }
 
-            let gcode_name = artifacts.get("gcode_file").and_then(|v| v.as_str()).unwrap_or("");
-            let gcode_sha = artifacts.get("gcode_sha256").and_then(|v| v.as_str()).unwrap_or("");
+            let gcode_name = artifacts
+                .get("gcode_file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let gcode_sha = artifacts
+                .get("gcode_sha256")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let material = input.get("material").and_then(|v| v.as_str()).unwrap_or("");
-            let thickness = parse_float(input.get("thickness_mm"), "thickness_mm", 3.0).unwrap_or(3.0);
+            let thickness =
+                parse_float(input.get("thickness_mm"), "thickness_mm", 3.0).unwrap_or(3.0);
             let confirmation_snapshot = if !gcode_name.is_empty() {
                 serde_json::json!({
                     "gcode_file": gcode_name,
@@ -5888,11 +6894,13 @@ fn handle_workflow_request(
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
             if !job_is_active(jobs, reservations, &workflow_id) {
-                let status_of = |map: &std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>| {
+                let status_of = |map: &std::sync::Arc<
+                    std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
+                >| {
                     map.lock().ok().and_then(|records| {
-                        records
-                            .get(&workflow_id)
-                            .map(|record| record.get("status").and_then(|v| v.as_str()) == Some("completed"))
+                        records.get(&workflow_id).map(|record| {
+                            record.get("status").and_then(|v| v.as_str()) == Some("completed")
+                        })
                     })
                 };
                 if status_of(workflows).or_else(|| status_of(calibrations)) == Some(true) {
@@ -5941,7 +6949,10 @@ fn handle_workflow_request(
             if let Some(rejected) = reject_client_resume_line(object) {
                 return rejected;
             }
-            let confirmed = object.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false);
+            let confirmed = object
+                .get("confirmed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !confirmed {
                 return http_json(400, failure("请确认发送安全选项 (confirmed=true)", None));
             }
@@ -5956,11 +6967,21 @@ fn handle_workflow_request(
                 if let Some(reason) = workflow_send_blocked_reason(current_status) {
                     return http_json(
                         400,
-                        failure(reason, Some(serde_json::json!({"error_code": "workflow_not_sendable"}))),
+                        failure(
+                            reason,
+                            Some(serde_json::json!({"error_code": "workflow_not_sendable"})),
+                        ),
                     );
                 }
-                let Ok(guard) = reserve_workflow_launch(jobs, reservations, &workflow_id, None) else {
-                    return http_json(409, failure("该 workflow 正在启动或发送中，禁止重复操作", Some(serde_json::json!({"error_code": "device_busy"}))));
+                let Ok(guard) = reserve_workflow_launch(jobs, reservations, &workflow_id, None)
+                else {
+                    return http_json(
+                        409,
+                        failure(
+                            "该 workflow 正在启动或发送中，禁止重复操作",
+                            Some(serde_json::json!({"error_code": "device_busy"})),
+                        ),
+                    );
                 };
                 (record.clone(), guard)
             };
@@ -5973,9 +6994,21 @@ fn handle_workflow_request(
                     ),
                 );
             }
-            let has_snapshot = snapshot_before_launch.get("confirmation_snapshot").is_some_and(|v| !v.is_null())
-                || snapshot_before_launch.get("artifacts").and_then(|a| a.get("gcode_file")).and_then(|f| f.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
-                || snapshot_before_launch.get("input").and_then(|i| i.get("gcode_file")).and_then(|f| f.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
+            let has_snapshot = snapshot_before_launch
+                .get("confirmation_snapshot")
+                .is_some_and(|v| !v.is_null())
+                || snapshot_before_launch
+                    .get("artifacts")
+                    .and_then(|a| a.get("gcode_file"))
+                    .and_then(|f| f.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                || snapshot_before_launch
+                    .get("input")
+                    .and_then(|i| i.get("gcode_file"))
+                    .and_then(|f| f.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
             if !has_snapshot {
                 return http_json(
                     400,
@@ -5986,25 +7019,31 @@ fn handle_workflow_request(
                 );
             }
 
-            let current_status = snapshot_before_launch.get("status").and_then(|v| v.as_str());
+            let current_status = snapshot_before_launch
+                .get("status")
+                .and_then(|v| v.as_str());
             if let Some(reason) = workflow_send_blocked_reason(current_status) {
                 return http_json(
                     400,
-                    failure(reason, Some(serde_json::json!({"error_code": "workflow_not_sendable"}))),
+                    failure(
+                        reason,
+                        Some(serde_json::json!({"error_code": "workflow_not_sendable"})),
+                    ),
                 );
             }
-            let (preflight, gcode_sha, gcode_file) = match build_send_preflight(&snapshot_before_launch, send_roots) {
-                Ok(value) => value,
-                Err(error) => {
-                    return http_json(
-                        400,
-                        failure(
-                            format!("发送安全门禁未通过: {error}"),
-                            Some(serde_json::json!({"error_code": "send_gate_rejected"})),
-                        ),
-                    );
-                }
-            };
+            let (preflight, gcode_sha, gcode_file) =
+                match build_send_preflight(&snapshot_before_launch, send_roots) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return http_json(
+                            400,
+                            failure(
+                                format!("发送安全门禁未通过: {error}"),
+                                Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                            ),
+                        );
+                    }
+                };
             if let Err(error) = laser_device::authorize_send(&preflight) {
                 return http_json(
                     400,
@@ -6043,9 +7082,15 @@ fn handle_workflow_request(
             let Some(workflow_id) = requested_id else {
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
-            let confirmed = object.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false);
+            let confirmed = object
+                .get("confirmed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !confirmed {
-                return http_json(400, failure("请确认断点恢复安全选项 (confirmed=true)", None));
+                return http_json(
+                    400,
+                    failure("请确认断点恢复安全选项 (confirmed=true)", None),
+                );
             }
             let (snapshot_before_launch, _launch_guard) = {
                 let Ok(records) = workflows.lock() else {
@@ -6056,13 +7101,32 @@ fn handle_workflow_request(
                 };
                 let status = record.get("status").and_then(|v| v.as_str());
                 if status == Some("sending") {
-                    return http_json(409, failure("该 workflow 正在发送中，禁止重复操作", Some(serde_json::json!({"error_code": "device_busy"}))));
+                    return http_json(
+                        409,
+                        failure(
+                            "该 workflow 正在发送中，禁止重复操作",
+                            Some(serde_json::json!({"error_code": "device_busy"})),
+                        ),
+                    );
                 }
                 if status == Some("completed") {
-                    return http_json(400, failure("该 workflow 已全量完成，无法断点继续", Some(serde_json::json!({"error_code": "workflow_completed"}))));
+                    return http_json(
+                        400,
+                        failure(
+                            "该 workflow 已全量完成，无法断点继续",
+                            Some(serde_json::json!({"error_code": "workflow_completed"})),
+                        ),
+                    );
                 }
-                let Ok(guard) = reserve_workflow_launch(jobs, reservations, &workflow_id, None) else {
-                    return http_json(409, failure("该 workflow 正在启动或发送中，禁止重复操作", Some(serde_json::json!({"error_code": "device_busy"}))));
+                let Ok(guard) = reserve_workflow_launch(jobs, reservations, &workflow_id, None)
+                else {
+                    return http_json(
+                        409,
+                        failure(
+                            "该 workflow 正在启动或发送中，禁止重复操作",
+                            Some(serde_json::json!({"error_code": "device_busy"})),
+                        ),
+                    );
                 };
                 (record.clone(), guard)
             };
@@ -6076,40 +7140,66 @@ fn handle_workflow_request(
                 );
             }
 
-            let status = snapshot_before_launch.get("status").and_then(|v| v.as_str());
+            let status = snapshot_before_launch
+                .get("status")
+                .and_then(|v| v.as_str());
             if status == Some("sending") {
-                return http_json(409, failure("该 workflow 正在发送中，禁止重复操作", Some(serde_json::json!({"error_code": "device_busy"}))));
+                return http_json(
+                    409,
+                    failure(
+                        "该 workflow 正在发送中，禁止重复操作",
+                        Some(serde_json::json!({"error_code": "device_busy"})),
+                    ),
+                );
             }
             if status == Some("completed") {
-                return http_json(400, failure("该 workflow 已全量完成，无法断点继续", Some(serde_json::json!({"error_code": "workflow_completed"}))));
+                return http_json(
+                    400,
+                    failure(
+                        "该 workflow 已全量完成，无法断点继续",
+                        Some(serde_json::json!({"error_code": "workflow_completed"})),
+                    ),
+                );
             }
 
-            let send_result = snapshot_before_launch.get("send_result").cloned().unwrap_or_default();
-            let lines_sent = send_result.get("lines_sent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let total_lines = send_result.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let send_result = snapshot_before_launch
+                .get("send_result")
+                .cloned()
+                .unwrap_or_default();
+            let lines_sent = send_result
+                .get("lines_sent")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let total_lines = send_result
+                .get("total_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
 
             if lines_sent == 0 || (total_lines > 0 && lines_sent >= total_lines) {
                 return http_json(
                     400,
                     failure(
-                        format!("该任务尚未开始或已完成（断点: {lines_sent}/{total_lines}），无法断点续雕"),
+                        format!(
+                            "该任务尚未开始或已完成（断点: {lines_sent}/{total_lines}），无法断点续雕"
+                        ),
                         Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
                     ),
                 );
             }
 
-            let (preflight, gcode_sha, gcode_file) = match build_send_preflight(&snapshot_before_launch, send_roots) {
-                Ok(value) => value,
-                Err(error) => {
-                    return http_json(
-                        400,
-                        failure(
-                            format!("发送安全门禁未通过: {error}"),
-                            Some(serde_json::json!({"error_code": "send_gate_rejected"})),
-                        ),
-                    );
-                }
-            };
+            let (preflight, gcode_sha, gcode_file) =
+                match build_send_preflight(&snapshot_before_launch, send_roots) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return http_json(
+                            400,
+                            failure(
+                                format!("发送安全门禁未通过: {error}"),
+                                Some(serde_json::json!({"error_code": "send_gate_rejected"})),
+                            ),
+                        );
+                    }
+                };
             if let Err(error) = laser_device::authorize_send(&preflight) {
                 return http_json(
                     400,
@@ -6182,12 +7272,12 @@ fn load_effective_material_library(
 fn validate_material_safety(material: &str) -> Result<(), String> {
     match laser_core::safety::evaluate_material(material) {
         laser_core::safety::MaterialSafety::Allow => Ok(()),
-        laser_core::safety::MaterialSafety::Block { .. } => Err(
-            "材料安全门禁拒绝：PVC/聚氯乙烯及明确危险材料禁止激光加工".into(),
-        ),
-        laser_core::safety::MaterialSafety::Clarify { .. } => Err(
-            "材料成分不明确：请先确认材料不是塑料或其他危险材料".into(),
-        ),
+        laser_core::safety::MaterialSafety::Block { .. } => {
+            Err("材料安全门禁拒绝：PVC/聚氯乙烯及明确危险材料禁止激光加工".into())
+        }
+        laser_core::safety::MaterialSafety::Clarify { .. } => {
+            Err("材料成分不明确：请先确认材料不是塑料或其他危险材料".into())
+        }
     }
 }
 
@@ -6195,7 +7285,12 @@ fn material_from_payload(payload: &serde_json::Value) -> Option<&str> {
     payload
         .get("material")
         .and_then(serde_json::Value::as_str)
-        .or_else(|| payload.get("input").and_then(|v| v.get("material")).and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            payload
+                .get("input")
+                .and_then(|v| v.get("material"))
+                .and_then(serde_json::Value::as_str)
+        })
         .or_else(|| {
             payload
                 .get("confirmation_snapshot")
@@ -6812,7 +7907,10 @@ pub fn is_allowed_loopback_host(host: &str, extra_origins: &[String]) -> bool {
     if name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::Ipv4Addr>().is_ok() {
         return true;
     }
-    if let Some(inner) = name.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+    if let Some(inner) = name
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
         return inner.parse::<std::net::Ipv6Addr>().is_ok();
     }
     extra_origins.iter().any(|origin| {
@@ -6861,11 +7959,18 @@ pub fn is_reference_data_write(method: &str, route: &str, body: &[u8]) -> bool {
     }
     match route {
         // select-cell 会把校准单元格保存为材料推荐参数
-        "/api/settings" | "/api/jev/test" | "/api/jev/reveal" | "/api/material-lab/select-cell" => true,
+        "/api/settings" | "/api/jev/test" | "/api/jev/reveal" | "/api/material-lab/select-cell" => {
+            true
+        }
         "/api/material-lab/manage" => {
             let action = serde_json::from_slice::<serde_json::Value>(body)
                 .ok()
-                .and_then(|value| value.get("action").and_then(|a| a.as_str()).map(str::to_owned));
+                .and_then(|value| {
+                    value
+                        .get("action")
+                        .and_then(|a| a.as_str())
+                        .map(str::to_owned)
+                });
             // 只有导出是只读；解析失败或缺 action 一律按写入拒绝
             action.as_deref() != Some("export")
         }
@@ -6884,7 +7989,12 @@ fn primary_lan_ipv4() -> Option<std::net::Ipv4Addr> {
         // 排除 198.18.0.0/15 (Clash/Sing-box TUN) 与 100.64.0.0/10 (Tailscale CGNAT)
         !(o[0] == 198 && (o[1] == 18 || o[1] == 19)) && !(o[0] == 100 && (o[1] & 0xc0) == 64)
     };
-    for probe in ["192.0.2.1:9", "10.255.255.254:9", "192.168.1.1:9", "172.16.0.1:9"] {
+    for probe in [
+        "192.0.2.1:9",
+        "10.255.255.254:9",
+        "192.168.1.1:9",
+        "172.16.0.1:9",
+    ] {
         if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
             if socket.connect(probe).is_ok() {
                 if let Ok(addr) = socket.local_addr() {
@@ -6912,7 +8022,9 @@ fn caller_context_for(
     match (loopback, pairing_id) {
         (false, Some(pairing_id)) => laser_contracts::CallerContext::Lan { pairing_id },
         // 非回环且未鉴权只可能访问公开 GET 路由，不触发任何需要身份的动作
-        (false, None) => laser_contracts::CallerContext::Lan { pairing_id: String::new() },
+        (false, None) => laser_contracts::CallerContext::Lan {
+            pairing_id: String::new(),
+        },
         (true, _) => laser_contracts::CallerContext::Loopback,
     }
 }
@@ -6934,7 +8046,11 @@ fn send_approval_summary(
     facts: &serde_json::Map<String, serde_json::Value>,
 ) -> String {
     let mut parts = vec![format!("{label} {record_id}")];
-    if let Some(material) = facts.get("material").and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()) {
+    if let Some(material) = facts
+        .get("material")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+    {
         match facts.get("thickness_mm").and_then(|v| v.as_f64()) {
             Some(thickness) => parts.push(format!("{material} {thickness} mm")),
             None => parts.push(material.to_owned()),
@@ -6942,7 +8058,12 @@ fn send_approval_summary(
     }
     if let Some(params) = facts.get("params").and_then(|v| v.as_object()) {
         let mut items = Vec::new();
-        for (key, label) in [("power", "功率"), ("laser_max_power", "最大功率"), ("feed_rate", "速度"), ("passes", "遍数")] {
+        for (key, label) in [
+            ("power", "功率"),
+            ("laser_max_power", "最大功率"),
+            ("feed_rate", "速度"),
+            ("passes", "遍数"),
+        ] {
             if let Some(value) = params.get(key).filter(|v| !v.is_null()) {
                 items.push(format!("{label} {value}"));
             }
@@ -6952,7 +8073,11 @@ fn send_approval_summary(
         }
     }
     if let Some(mode) = facts.get("send_mode").and_then(|v| v.as_str()) {
-        parts.push(if mode == "sd_offline" { "脱机 SD 卡加工".into() } else { "逐行发送".into() });
+        parts.push(if mode == "sd_offline" {
+            "脱机 SD 卡加工".into()
+        } else {
+            "逐行发送".into()
+        });
     }
     if let Some(line) = facts.get("start_from_line").and_then(|v| v.as_u64()) {
         parts.push(format!("从第 {line} 行继续"));
@@ -6960,7 +8085,10 @@ fn send_approval_summary(
     parts.join("；")
 }
 
-fn safe_action_approval_summary(action: &str, facts: &serde_json::Map<String, serde_json::Value>) -> String {
+fn safe_action_approval_summary(
+    action: &str,
+    facts: &serde_json::Map<String, serde_json::Value>,
+) -> String {
     let label = match action {
         "unlock" => "解锁 $X",
         "home" => "回原点 $H",
@@ -6987,8 +8115,16 @@ const FRAMING_MAX_FEED_RATE: i32 = 20_000;
 /// 读取走边框的 `feed_rate`（缺省 2000）与 `power`（缺省 0，不出光）。
 /// 必须是 JSON 整数且可无损转为 `i32`；`power` 在 G-code S 标尺 0..=1000（下发时再按设备 `$30` 换算），
 /// `feed_rate` 在 1..=20000。不截断、不回绕，越界一律拒绝（2026-11-05）。
-fn framing_feed_and_power(object: &serde_json::Map<String, serde_json::Value>) -> Result<(i32, i32), String> {
-    fn read_int(object: &serde_json::Map<String, serde_json::Value>, key: &str, default: i32, min: i32, max: i32) -> Result<i32, String> {
+fn framing_feed_and_power(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(i32, i32), String> {
+    fn read_int(
+        object: &serde_json::Map<String, serde_json::Value>,
+        key: &str,
+        default: i32,
+        min: i32,
+        max: i32,
+    ) -> Result<i32, String> {
         let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
             return Ok(default);
         };
@@ -7014,7 +8150,12 @@ fn framing_params_invalid(error: String) -> Vec<u8> {
 }
 
 fn framing_approval_summary(facts: &serde_json::Map<String, serde_json::Value>) -> String {
-    let value = |key: &str, default: &str| facts.get(key).map(|v| v.to_string()).unwrap_or_else(|| default.to_owned());
+    let value = |key: &str, default: &str| {
+        facts
+            .get(key)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| default.to_owned())
+    };
     format!(
         "走边框：X {}..{}，Y {}..{} mm；速度 {}，功率 {}",
         value("min_x", "0"),
@@ -7033,9 +8174,20 @@ fn apply_connection_to_safe_action(
 ) {
     args.connection_mode = Some(connection.mode().to_owned());
     match connection {
-        laser_contracts::ApprovalConnection::Home { .. } => { args.host = None; args.port = None; args.telnet_port = None; },
-        laser_contracts::ApprovalConnection::Agent { .. } => { args.host = None; args.port = None; args.telnet_port = None; },
-        laser_contracts::ApprovalConnection::External { .. } => { args.host = None; args.port = None; }
+        laser_contracts::ApprovalConnection::Home { .. } => {
+            args.host = None;
+            args.port = None;
+            args.telnet_port = None;
+        }
+        laser_contracts::ApprovalConnection::Agent { .. } => {
+            args.host = None;
+            args.port = None;
+            args.telnet_port = None;
+        }
+        laser_contracts::ApprovalConnection::External { .. } => {
+            args.host = None;
+            args.port = None;
+        }
         laser_contracts::ApprovalConnection::Network { host, port } => {
             args.host = Some(host.clone());
             args.telnet_port = Some(i32::from(*port));
@@ -7093,7 +8245,12 @@ fn with_cors_headers(response: Vec<u8>, origin: &str) -> Vec<u8> {
 /// `OPTIONS` 响应：允许来源时带 CORS 头与缓存时长；无 `Origin` 时只返回空 200。
 fn http_options(origin: Option<&str>) -> Vec<u8> {
     let cors = origin
-        .map(|origin| format!("{}Access-Control-Max-Age: 86400\r\n", cors_header_block(origin)))
+        .map(|origin| {
+            format!(
+                "{}Access-Control-Max-Age: 86400\r\n",
+                cors_header_block(origin)
+            )
+        })
         .unwrap_or_default();
     format!("HTTP/1.1 200 OK\r\n{cors}Content-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
 }
@@ -7117,7 +8274,11 @@ fn normalize_mcp_endpoint(value: &str) -> Option<String> {
 /// （自建来自接入点健康检查，内置来自内置语音服务）；未知时为 null。
 fn voice_status_json(runtime_path: Option<&std::path::Path>) -> serde_json::Value {
     let settings = read_runtime_settings(runtime_path);
-    let mode = match settings.get("voice").and_then(|voice| voice.get("mode")).and_then(serde_json::Value::as_str) {
+    let mode = match settings
+        .get("voice")
+        .and_then(|voice| voice.get("mode"))
+        .and_then(serde_json::Value::as_str)
+    {
         Some("self_hosted") => "self_hosted",
         Some("builtin") => "builtin",
         _ => "official",
@@ -7144,7 +8305,9 @@ fn voice_status_json(runtime_path: Option<&std::path::Path>) -> serde_json::Valu
     })
 }
 
-fn read_runtime_settings(runtime_path: Option<&std::path::Path>) -> serde_json::Map<String, serde_json::Value> {
+fn read_runtime_settings(
+    runtime_path: Option<&std::path::Path>,
+) -> serde_json::Map<String, serde_json::Value> {
     runtime_path
         .map(|path| path.join("settings.json"))
         .and_then(|path| std::fs::read(path).ok())
@@ -7303,7 +8466,10 @@ pub fn check_github_release_update(
         if draft {
             return false;
         }
-        let pre = item.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false);
+        let pre = item
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         include_prerelease || !pre
     });
     let Some(release) = chosen else {
@@ -7326,7 +8492,10 @@ pub fn check_github_release_update(
         .trim();
     let latest_clean = raw_tag.trim_start_matches(['v', 'V']);
     let has_update = is_newer_version(latest_clean, current_version);
-    let prerelease = release.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false);
+    let prerelease = release
+        .get("prerelease")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let published_at = release
         .get("published_at")
         .and_then(|v| v.as_str())
@@ -7374,7 +8543,10 @@ fn mcp_status_json(
             None => ep.to_owned(),
         })
         .unwrap_or_default();
-    let client_info = match (telemetry.client_name.is_empty(), telemetry.client_version.is_empty()) {
+    let client_info = match (
+        telemetry.client_name.is_empty(),
+        telemetry.client_version.is_empty(),
+    ) {
         (true, _) => String::new(),
         (false, true) => telemetry.client_name.clone(),
         (false, false) => format!("{} v{}", telemetry.client_name, telemetry.client_version),
@@ -7411,11 +8583,20 @@ fn configured_mcp_endpoint(runtime_path: Option<&std::path::Path>) -> Option<Str
         .map(|path| path.join("settings.json"))
         .and_then(|path| std::fs::read(path).ok())
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|value| value.get("mcp_endpoint").and_then(|item| item.as_str()).map(str::to_owned));
+        .and_then(|value| {
+            value
+                .get("mcp_endpoint")
+                .and_then(|item| item.as_str())
+                .map(str::to_owned)
+        });
     saved
         .as_deref()
         .and_then(normalize_mcp_endpoint)
-        .or_else(|| std::env::var("MCP_ENDPOINT").ok().and_then(|value| normalize_mcp_endpoint(&value)))
+        .or_else(|| {
+            std::env::var("MCP_ENDPOINT")
+                .ok()
+                .and_then(|value| normalize_mcp_endpoint(&value))
+        })
 }
 
 fn http_json_with_headers(
@@ -7720,7 +8901,10 @@ mod tests {
     fn jev_key_is_masked_without_leaking_the_middle() {
         assert_eq!(mask_secret("sk-1234567890"), "sk-12••••••••7890");
         assert_eq!(mask_secret("short"), "••••••••");
-        assert_eq!(mask_secret("测试密钥一二三四五六七八九"), "测试密钥一••••••••六七八九");
+        assert_eq!(
+            mask_secret("测试密钥一二三四五六七八九"),
+            "测试密钥一••••••••六七八九"
+        );
         assert_eq!(mask_secret("中文短密钥"), "••••••••");
     }
 
@@ -7743,7 +8927,12 @@ mod tests {
         );
         assert_eq!(service.handle("GET", "/missing", b"").status, 404);
         // 局域网扫描只接受 POST：不带 Origin 的跨站 GET 不能触发 mDNS
-        assert_eq!(service.handle("GET", "/api/ui/discover-controllers", b"").status, 404);
+        assert_eq!(
+            service
+                .handle("GET", "/api/ui/discover-controllers", b"")
+                .status,
+            404
+        );
         assert_eq!(
             service.handle("GET", "/api/health", b"").headers[0].0,
             "Cache-Control"
@@ -7764,29 +8953,43 @@ mod tests {
         let uploads = temp.path().join("uploads");
         std::fs::create_dir_all(&uploads).unwrap();
         // 一个"Γ"形开放折线：竖线在左，横杠在机器坐标 Y=10（顶部）。
-        std::fs::write(uploads.join("gamma.gcode"), "G21\nG90\nM4 S0\nG0 X0 Y0\nG1 X0 Y10 S300 F1000\nG1 X20 Y10 S300 F1000\nM5\n").unwrap();
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_upload_root(uploads.clone())
-            .with_generated_root(temp.path().join("gen"))
-            .with_preview_roots(vec![uploads.clone(), temp.path().join("gen")]);
+        std::fs::write(
+            uploads.join("gamma.gcode"),
+            "G21\nG90\nM4 S0\nG0 X0 Y0\nG1 X0 Y10 S300 F1000\nG1 X20 Y10 S300 F1000\nM5\n",
+        )
+        .unwrap();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_upload_root(uploads.clone())
+        .with_generated_root(temp.path().join("gen"))
+        .with_preview_roots(vec![uploads.clone(), temp.path().join("gen")]);
         let body = serde_json::json!({
             "action": "preview", "source_type": "gcode", "gcode_file": "gamma.gcode",
             "material": "椴木", "thickness_mm": 3
-        }).to_string();
+        })
+        .to_string();
         let request = format!(
             "POST /api/workflow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(), body
+            body.len(),
+            body
         );
         let value = parse_json_response(&service.handle_http(request.as_bytes()));
         assert_eq!(value["success"], true, "{value}");
         let image_file = value["result"]["artifacts"]["image_file"].as_str().unwrap();
-        let img = image::open(temp.path().join("gen").join(image_file)).unwrap().to_rgba8();
+        let img = image::open(temp.path().join("gen").join(image_file))
+            .unwrap()
+            .to_rgba8();
         let (w, h) = (img.width(), img.height());
         let row_hits = |y: u32| (0..w).filter(|&x| img.get_pixel(x, y).0[3] > 0).count();
         let top: usize = (0..h / 2).map(row_hits).sum();
         let bottom: usize = (h / 2..h).map(row_hits).sum();
         // 横杠在 Y=10（机器坐标顶部）→ 翻转后应出现在图像上半部，上半部像素明显多于下半部
-        assert!(top > bottom * 2, "横杠必须渲染在图像上半部（top={top}, bottom={bottom}）");
+        assert!(
+            top > bottom * 2,
+            "横杠必须渲染在图像上半部（top={top}, bottom={bottom}）"
+        );
         // 开放折线不得被补画闭合斜线：右下角区域（对角线经过处）应基本无像素
         let diag_hits: usize = (h * 6 / 10..h * 8 / 10)
             .flat_map(|y| (w * 5 / 10..w * 7 / 10).map(move |x| (x, y)))
@@ -7823,7 +9026,8 @@ mod tests {
             "thickness_mm": 3.0,
             "mode": "raster",
             "scene_json": {"type": "excalidraw", "version": 2}
-        }).to_string();
+        })
+        .to_string();
 
         let request = format!(
             "POST /api/draw/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
@@ -7836,7 +9040,9 @@ mod tests {
         assert_eq!(json["success"], true);
         let wf_id = json["result"]["workflow_id"].as_str().unwrap();
         let gcode_file = json["result"]["artifacts"]["gcode_file"].as_str().unwrap();
-        let gcode_url = json["result"]["web"]["gcode_download_url"].as_str().unwrap();
+        let gcode_url = json["result"]["web"]["gcode_download_url"]
+            .as_str()
+            .unwrap();
         assert!(gen_dir.join(gcode_file).exists(), "物理 G-code 必须落盘");
         assert!(gcode_url.contains("download=1"));
 
@@ -7855,7 +9061,8 @@ mod tests {
             "connection_mode": "network",
             "network_host": "127.0.0.1",
             "network_telnet_port": 23
-        }).to_string();
+        })
+        .to_string();
         let send_req = format!(
             "POST /api/workflow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
             send_body.len(),
@@ -7879,17 +9086,30 @@ mod tests {
         }
         let mut bytes = Vec::new();
         image::DynamicImage::ImageLuma8(img)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
             .unwrap();
-        format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
     }
 
     fn gcode_max_xy(gcode: &str) -> (f64, f64) {
         let mut max = (0.0_f64, 0.0_f64);
-        for line in gcode.lines().filter(|line| line.starts_with("G0") || line.starts_with("G1")) {
+        for line in gcode
+            .lines()
+            .filter(|line| line.starts_with("G0") || line.starts_with("G1"))
+        {
             for word in line.split_whitespace() {
-                if let Some(value) = word.strip_prefix('X').and_then(|v| v.parse::<f64>().ok()) { max.0 = max.0.max(value); }
-                if let Some(value) = word.strip_prefix('Y').and_then(|v| v.parse::<f64>().ok()) { max.1 = max.1.max(value); }
+                if let Some(value) = word.strip_prefix('X').and_then(|v| v.parse::<f64>().ok()) {
+                    max.0 = max.0.max(value);
+                }
+                if let Some(value) = word.strip_prefix('Y').and_then(|v| v.parse::<f64>().ok()) {
+                    max.1 = max.1.max(value);
+                }
             }
         }
         max
@@ -7898,27 +9118,46 @@ mod tests {
     #[test]
     fn draw_natural_size_is_fitted_into_the_machine_and_explicit_size_is_not() {
         // 1500 × 100 像素按 0.1 mm 是 150 × 10 mm，可放范围 98 × 100 → 等比缩到 98 × 6.53
-        let (w, h, fitted) = draw_target_size_mm(1500, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
-        assert!(fitted && (w - 98.0).abs() < 1e-9 && (h - 98.0 / 15.0).abs() < 1e-9, "{w} {h}");
-        let (w, _, fitted) = draw_target_size_mm(200, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
+        let (w, h, fitted) =
+            draw_target_size_mm(1500, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
+        assert!(
+            fitted && (w - 98.0).abs() < 1e-9 && (h - 98.0 / 15.0).abs() < 1e-9,
+            "{w} {h}"
+        );
+        let (w, _, fitted) =
+            draw_target_size_mm(200, 100, None, None, (98.0, 100.0), (100.0, 100.0)).unwrap();
         assert!(!fitted && (w - 20.0).abs() < 1e-9);
-        assert!(draw_target_size_mm(200, 100, Some(99.0), None, (98.0, 100.0), (100.0, 100.0)).is_err());
+        assert!(
+            draw_target_size_mm(200, 100, Some(99.0), None, (98.0, 100.0), (100.0, 100.0)).is_err()
+        );
     }
 
     /// 画板按填写的宽 / 高出成品（锁定比例）；不填按 0.1 mm/像素；超出工作区拒绝；轮廓模式真的描边（2026-10-14）。
     #[test]
     fn draw_preview_honors_target_size_and_outline_mode() {
         let temp = tempfile::tempdir().unwrap();
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(temp.path().to_path_buf());
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf());
         let png = draw_test_png();
         let preview = |extra: serde_json::Value| {
             let mut body = serde_json::json!({"image_data_url": png, "material": "椴木", "thickness_mm": 3.0, "mode": "raster"});
-            for (key, value) in extra.as_object().unwrap() { body[key] = value.clone(); }
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
             post_json(&service, "/api/draw/preview", &body)
         };
         let gcode_of = |response: &serde_json::Value| {
-            std::fs::read_to_string(temp.path().join(response["result"]["artifacts"]["gcode_file"].as_str().unwrap())).unwrap()
+            std::fs::read_to_string(
+                temp.path().join(
+                    response["result"]["artifacts"]["gcode_file"]
+                        .as_str()
+                        .unwrap(),
+                ),
+            )
+            .unwrap()
         };
 
         let natural = preview(serde_json::json!({}));
@@ -7931,10 +9170,16 @@ mod tests {
         assert_eq!(sized["result"]["artifacts"]["height_mm"], 25.0);
         let (max_x, max_y) = gcode_max_xy(&gcode_of(&sized));
         // 黑块占中间一半：出光段约在 12.5..37.5 × 6.25..18.75 mm 内，X 另有过扫
-        assert!((36.0..=40.0).contains(&max_x) && (17.5..=20.0).contains(&max_y), "光栅没有按 50 mm 缩放（含 1 mm 过扫）: {max_x} {max_y}");
+        assert!(
+            (36.0..=40.0).contains(&max_x) && (17.5..=20.0).contains(&max_y),
+            "光栅没有按 50 mm 缩放（含 1 mm 过扫）: {max_x} {max_y}"
+        );
 
         let boxed = preview(serde_json::json!({"width_mm": 30, "height_mm": 30}));
-        assert_eq!(boxed["result"]["artifacts"]["width_mm"], 30.0, "锁定比例放进框内: {boxed}");
+        assert_eq!(
+            boxed["result"]["artifacts"]["width_mm"], 30.0,
+            "锁定比例放进框内: {boxed}"
+        );
         assert_eq!(boxed["result"]["artifacts"]["height_mm"], 15.0);
 
         // 2026-11-06 起按机器幅面（默认 100 mm，光栅宽度另留两侧 1 mm 过扫描）而不是 400 mm 画布
@@ -7942,8 +9187,16 @@ mod tests {
         assert_eq!(too_big["success"], false);
         assert!(too_big.to_string().contains("超出工作区"), "{too_big}");
         assert!(too_big.to_string().contains("100 × 100"), "{too_big}");
-        assert_eq!(preview(serde_json::json!({"width_mm": 99}))["success"], false, "光栅宽度须留出过扫描");
-        assert_eq!(preview(serde_json::json!({"width_mm": 99, "mode": "outline"}))["success"], true, "轮廓模式无过扫描");
+        assert_eq!(
+            preview(serde_json::json!({"width_mm": 99}))["success"],
+            false,
+            "光栅宽度须留出过扫描"
+        );
+        assert_eq!(
+            preview(serde_json::json!({"width_mm": 99, "mode": "outline"}))["success"],
+            true,
+            "轮廓模式无过扫描"
+        );
         assert_eq!(natural["result"]["artifacts"]["auto_fitted"], false);
 
         let outline = preview(serde_json::json!({"mode": "outline", "width_mm": 40}));
@@ -7951,9 +9204,15 @@ mod tests {
         assert_eq!(outline["result"]["artifacts"]["mode"], "outline");
         let gcode = gcode_of(&outline);
         let cuts = gcode.lines().filter(|line| line.starts_with("G1")).count();
-        assert!((4..=40).contains(&cuts), "轮廓应是少量矢量线段，不是逐行扫描: {cuts} 行");
+        assert!(
+            (4..=40).contains(&cuts),
+            "轮廓应是少量矢量线段，不是逐行扫描: {cuts} 行"
+        );
         let (max_x, max_y) = gcode_max_xy(&gcode);
-        assert!((29.0..=31.0).contains(&max_x) && (14.0..=16.0).contains(&max_y), "轮廓没有按 40 mm 缩放: {max_x} {max_y}");
+        assert!(
+            (29.0..=31.0).contains(&max_x) && (14.0..=16.0).contains(&max_y),
+            "轮廓没有按 40 mm 缩放: {max_x} {max_y}"
+        );
     }
 
     fn parse_json_response(response: &[u8]) -> serde_json::Value {
@@ -7977,12 +9236,12 @@ mod tests {
 
     #[test]
     fn material_safety_gate_rejects_pvc_and_unknown_plastic() {
-        assert!(validate_material_safety("PVC")
-            .unwrap_err()
-            .contains("PVC"));
-        assert!(validate_material_safety("塑料")
-            .unwrap_err()
-            .contains("成分不明确"));
+        assert!(validate_material_safety("PVC").unwrap_err().contains("PVC"));
+        assert!(
+            validate_material_safety("塑料")
+                .unwrap_err()
+                .contains("成分不明确")
+        );
         assert!(validate_material_safety("椴木").is_ok());
     }
 
@@ -7994,9 +9253,8 @@ mod tests {
                 laser_contracts::builtin_material_library(),
             );
             if use_store {
-                service = service.with_store(std::sync::Arc::new(
-                    laser_runtime::MemoryStore::new(),
-                ));
+                service =
+                    service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
             }
 
             let blocked = post_json(
@@ -8020,7 +9278,10 @@ mod tests {
     }
 
     /// 同 `fake_transport_factory`，`$$` 额外回报 `extra_settings`（如 `$130=100`）。
-    fn fake_transport_factory_with_settings(ok_lines: usize, extra_settings: &[&str]) -> TransportFactory {
+    fn fake_transport_factory_with_settings(
+        ok_lines: usize,
+        extra_settings: &[&str],
+    ) -> TransportFactory {
         struct ResponsiveGrbl {
             responses: std::sync::Mutex<std::collections::VecDeque<String>>,
             remaining: std::sync::atomic::AtomicUsize,
@@ -8035,14 +9296,22 @@ mod tests {
                 } else if line == "$CD" || line.starts_with("$RI=") {
                     // 模拟 FluidNC：配置读取与自动上报设置都只回 ok，不占用 G-code 行的 ack 配额
                     responses.push_back("ok".into());
-                } else if line == "G4 P0" || self.remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                } else if line == "G4 P0"
+                    || self
+                        .remaining
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                        > 0
+                {
                     responses.push_back("ok".into());
                 }
                 Ok(())
             }
             fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
                 if command == laser_device::RealtimeCommand::StatusQuery {
-                    self.responses.lock().unwrap().push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
                 }
                 Ok(())
             }
@@ -8050,7 +9319,10 @@ mod tests {
                 Ok(self.responses.lock().unwrap().pop_front())
             }
         }
-        let extra: Vec<String> = extra_settings.iter().map(|line| (*line).to_owned()).collect();
+        let extra: Vec<String> = extra_settings
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect();
         std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
             Ok(Box::new(ResponsiveGrbl {
                 responses: Default::default(),
@@ -8062,15 +9334,25 @@ mod tests {
 
     #[test]
     fn job_travel_check_compares_extents_with_firmware_travel() {
-        let limits = laser_device::MachineLimits { x_travel_mm: Some(100.0), y_travel_mm: Some(100.0), z_travel_mm: None };
+        let limits = laser_device::MachineLimits {
+            x_travel_mm: Some(100.0),
+            y_travel_mm: Some(100.0),
+            z_travel_mm: None,
+        };
         assert!(check_job_fits_machine("G92 X0 Y0\nG1 X100 Y60 S300", &limits).is_ok());
         let err = check_job_fits_machine("G92 X0 Y0\nG1 X200 Y60 S300", &limits).unwrap_err();
-        assert!(err.contains("200.0 × 60.0") && err.contains("100 × 100"), "{err}");
+        assert!(
+            err.contains("200.0 × 60.0") && err.contains("100 × 100"),
+            "{err}"
+        );
         // 固件没报告行程、或文件无法计算范围时交给固件软限位
         assert!(check_job_fits_machine("G1 X500", &laser_device::MachineLimits::default()).is_ok());
         assert!(check_job_fits_machine("G28\nG1 X500", &limits).is_ok());
         // 只知道 X 行程时仍检查 X
-        let x_only = laser_device::MachineLimits { x_travel_mm: Some(50.0), ..Default::default() };
+        let x_only = laser_device::MachineLimits {
+            x_travel_mm: Some(50.0),
+            ..Default::default()
+        };
         assert!(check_job_fits_machine("G1 X60 Y500", &x_only).is_err());
     }
 
@@ -8082,9 +9364,14 @@ mod tests {
         let gen_dir = temp.path().join("generated");
         std::fs::create_dir_all(&gen_dir).unwrap();
         // 2000 × 500 像素的渐变照片：按 0.1 mm/像素是 200 × 50 mm
-        let photo = image::GrayImage::from_fn(2000, 500, |x, _| image::Luma([(x * 255 / 1999) as u8]));
+        let photo =
+            image::GrayImage::from_fn(2000, 500, |x, _| image::Luma([(x * 255 / 1999) as u8]));
         photo.save(gen_dir.join("wide.png")).unwrap();
-        std::fs::write(gen_dir.join("wide.gcode"), "G21\nG90\nG92 X0 Y0\nM4 S0\nG1 X150 Y10 F1000 S200\nM5\n").unwrap();
+        std::fs::write(
+            gen_dir.join("wide.gcode"),
+            "G21\nG90\nG92 X0 Y0\nM4 S0\nG1 X150 Y10 F1000 S200\nM5\n",
+        )
+        .unwrap();
         let settings = laser_runtime::LaserSettings {
             default_connection_mode: "network".into(),
             engraving_mode: "raster".into(),
@@ -8096,11 +9383,18 @@ mod tests {
             .with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()))
             .with_generated_root(gen_dir.clone())
             .with_preview_roots(vec![gen_dir.clone()])
-            .with_transport_factory(fake_transport_factory_with_settings(10_000, &["$130=100.000", "$131=100.000"]));
+            .with_transport_factory(fake_transport_factory_with_settings(
+                10_000,
+                &["$130=100.000", "$131=100.000"],
+            ));
 
-        let fitted = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3
-        }));
+        let fitted = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3
+            }),
+        );
         assert_eq!(fitted["success"], true, "{fitted}");
         let artifacts = &fitted["result"]["artifacts"];
         assert_eq!(artifacts["auto_fitted"], true);
@@ -8108,27 +9402,56 @@ mod tests {
         assert_eq!(artifacts["width_mm"].as_f64().unwrap(), 98.0);
         assert_eq!(artifacts["height_mm"].as_f64().unwrap(), 24.5);
         assert_eq!(artifacts["image_mode"], "dither");
-        let gcode = std::fs::read_to_string(gen_dir.join(artifacts["gcode_file"].as_str().unwrap())).unwrap();
+        let gcode =
+            std::fs::read_to_string(gen_dir.join(artifacts["gcode_file"].as_str().unwrap()))
+                .unwrap();
         let extents = laser_core::gcode::motion_extents(&gcode).unwrap().unwrap();
-        assert!(extents.width() <= 100.0 + 1e-6, "生成的刀路必须在幅面内：{}", extents.width());
+        assert!(
+            extents.width() <= 100.0 + 1e-6,
+            "生成的刀路必须在幅面内：{}",
+            extents.width()
+        );
 
-        let sized = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3, "width_mm": 40
-        }));
-        assert_eq!(sized["result"]["artifacts"]["width_mm"].as_f64().unwrap().round(), 40.0, "{sized}");
-        let refused = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3, "width_mm": 150
-        }));
+        let sized = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3, "width_mm": 40
+            }),
+        );
+        assert_eq!(
+            sized["result"]["artifacts"]["width_mm"]
+                .as_f64()
+                .unwrap()
+                .round(),
+            40.0,
+            "{sized}"
+        );
+        let refused = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview", "source_type": "image", "image_file": "wide.png", "material": "椴木", "thickness_mm": 3, "width_mm": 150
+            }),
+        );
         assert_eq!(refused["success"], false, "{refused}");
 
-        let preview = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "preview", "source_type": "gcode", "gcode_file": "wide.gcode", "material": "椴木", "thickness_mm": 3
-        }));
+        let preview = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview", "source_type": "gcode", "gcode_file": "wide.gcode", "material": "椴木", "thickness_mm": 3
+            }),
+        );
         assert_eq!(preview["success"], true, "{preview}");
-        let send = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "confirm_send", "workflow_id": preview["result"]["workflow_id"], "confirmed": true,
-            "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23
-        }));
+        let send = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "confirm_send", "workflow_id": preview["result"]["workflow_id"], "confirmed": true,
+                "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23
+            }),
+        );
         assert_eq!(send["success"], false, "{send}");
         assert_eq!(send["detail"]["error_code"], "job_exceeds_travel", "{send}");
     }
@@ -8150,14 +9473,22 @@ mod tests {
                     responses.extend(["$30=1000", "$32=1", "ok"].map(str::to_owned));
                 } else if line == "$CD" || line.starts_with("$RI=") || line == "$X" {
                     responses.push_back("ok".into());
-                } else if line == "G4 P0" || self.remaining.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) > 0 {
+                } else if line == "G4 P0"
+                    || self
+                        .remaining
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                        > 0
+                {
                     responses.push_back("ok".into());
                 }
                 Ok(())
             }
             fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
                 if command == laser_device::RealtimeCommand::StatusQuery {
-                    self.responses.lock().unwrap().push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
                 }
                 Ok(())
             }
@@ -8178,17 +9509,31 @@ mod tests {
     fn job_launcher_rejects_power_or_busy_state_before_writing_gcode() {
         for (max, status) in [("0", "<Idle>"), ("1000", "<Run>"), ("1000", "<Check>")] {
             let fake = laser_device::FakeGrbl::new([
-                format!("$30={max}"), "$32=1".into(), "ok".into(), status.into(),
+                format!("$30={max}"),
+                "$32=1".into(),
+                "ok".into(),
+                status.into(),
             ]);
             let observed = fake.clone();
-            let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake.clone()))));
+            let service = ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake.clone()))));
             let temp = tempfile::tempdir().unwrap();
             let file = temp.path().join("job.gcode");
             std::fs::write(&file, "M4 S100\nG1 X1 F100\nM5\n").unwrap();
             let object = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23});
             let sha = hex::encode(Sha256::digest(std::fs::read(&file).unwrap()));
-            let (code, response) = service.launch_send_job("test-preflight", file, &sha, object.as_object().unwrap(), &laser_contracts::CallerContext::Loopback).unwrap_err();
+            let (code, response) = service
+                .launch_send_job(
+                    "test-preflight",
+                    file,
+                    &sha,
+                    object.as_object().unwrap(),
+                    &laser_contracts::CallerContext::Loopback,
+                )
+                .unwrap_err();
             assert_eq!(code, 400);
             assert_eq!(response["detail"]["error_code"], "device_preflight_failed");
             assert_eq!(observed.lines(), ["$$", "$CD"]);
@@ -8199,17 +9544,36 @@ mod tests {
     #[test]
     fn job_launcher_accepts_255_scale_and_adapts_dynamically() {
         let fake = laser_device::FakeGrbl::new([
-            "$30=255".into(), "$32=1".into(), "ok".into(), "<Idle>".into(), "ok".into(), "ok".into(), "ok".into(), "ok".into(), "<Idle>".into(),
+            "$30=255".into(),
+            "$32=1".into(),
+            "ok".into(),
+            "<Idle>".into(),
+            "ok".into(),
+            "ok".into(),
+            "ok".into(),
+            "ok".into(),
+            "<Idle>".into(),
         ]);
         let _observed = fake.clone();
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake.clone()))));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake.clone()))));
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("job.gcode");
         std::fs::write(&file, "M4 S1000\nG1 X1 F100\nM5\n").unwrap();
         let object = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23});
         let sha = hex::encode(Sha256::digest(std::fs::read(&file).unwrap()));
-        let res = service.launch_send_job("test-255-adaptive", file, &sha, object.as_object().unwrap(), &laser_contracts::CallerContext::Loopback).unwrap();
+        let res = service
+            .launch_send_job(
+                "test-255-adaptive",
+                file,
+                &sha,
+                object.as_object().unwrap(),
+                &laser_contracts::CallerContext::Loopback,
+            )
+            .unwrap();
         assert_eq!(res["success"], true);
     }
 
@@ -8224,7 +9588,9 @@ mod tests {
         loop {
             let value = parse_json_response(&service.handle_http(status_request.as_bytes()));
             // 成功即返回；20 秒上限只为全工作区并行测试负载下不误报（2026-11-05）。
-            if value["result"]["status"] == wanted || start.elapsed() > std::time::Duration::from_secs(20) {
+            if value["result"]["status"] == wanted
+                || start.elapsed() > std::time::Duration::from_secs(20)
+            {
                 return value;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -8244,9 +9610,18 @@ mod tests {
         );
         let generated = parse_json_response(&service.handle_http(request.as_bytes()));
         assert_eq!(generated["success"], true, "{generated}");
-        let workflow_id = generated["result"]["workflow_id"].as_str().unwrap().to_owned();
-        let gcode_file = generated["result"]["artifacts"]["gcode_file"].as_str().unwrap().to_owned();
-        let expected_sha = generated["result"]["artifacts"]["gcode_sha256"].as_str().unwrap().to_owned();
+        let workflow_id = generated["result"]["workflow_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let gcode_file = generated["result"]["artifacts"]["gcode_file"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let expected_sha = generated["result"]["artifacts"]["gcode_sha256"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let gcode_path = root.join(&gcode_file);
         let original = std::fs::read(&gcode_path).unwrap();
         assert_eq!(
@@ -8255,7 +9630,9 @@ mod tests {
             "冻结的 SHA 必须来自物理刀路文件"
         );
 
-        let send_body = format!(r#"{{"action":"confirm_send","workflow_id":"{workflow_id}","confirmed":true,"connection_mode":"network","network_host":"127.0.0.1","network_telnet_port":23}}"#);
+        let send_body = format!(
+            r#"{{"action":"confirm_send","workflow_id":"{workflow_id}","confirmed":true,"connection_mode":"network","network_host":"127.0.0.1","network_telnet_port":23}}"#
+        );
         let send_request = format!(
             "POST /api/workflow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
             send_body.len(),
@@ -8269,9 +9646,13 @@ mod tests {
             .unwrap()
             .write_all(b"\nG1 X999 Y999 S1000\n")
             .unwrap();
-        let rejected_text = String::from_utf8_lossy(&service.handle_http(send_request.as_bytes())).into_owned();
+        let rejected_text =
+            String::from_utf8_lossy(&service.handle_http(send_request.as_bytes())).into_owned();
         assert!(rejected_text.starts_with("HTTP/1.1 400"), "{rejected_text}");
-        assert!(rejected_text.contains("send_gate_rejected"), "{rejected_text}");
+        assert!(
+            rejected_text.contains("send_gate_rejected"),
+            "{rejected_text}"
+        );
         assert!(rejected_text.contains("SHA-256"), "{rejected_text}");
 
         // 2. 恢复原文件：门禁通过并推进到 sending，快照冻结物理 SHA
@@ -8279,23 +9660,46 @@ mod tests {
         let accepted = parse_json_response(&service.handle_http(send_request.as_bytes()));
         assert_eq!(accepted["success"], true, "{accepted}");
         assert_eq!(accepted["result"]["status"], "sending");
-        assert_eq!(accepted["result"]["confirmation_snapshot"]["gcode_sha256"], expected_sha);
+        assert_eq!(
+            accepted["result"]["confirmation_snapshot"]["gcode_sha256"],
+            expected_sha
+        );
 
-        assert_eq!(accepted["result"]["send_result"]["success"], true, "{accepted}");
+        assert_eq!(
+            accepted["result"]["send_result"]["success"], true,
+            "{accepted}"
+        );
 
         // 3. 发送中/已完成重复下发必须拦截（防二次烧蚀）
-        let duplicate_text = String::from_utf8_lossy(&service.handle_http(send_request.as_bytes())).into_owned();
-        assert!(duplicate_text.starts_with("HTTP/1.1 400"), "{duplicate_text}");
-        assert!(duplicate_text.contains("workflow_not_sendable"), "{duplicate_text}");
+        let duplicate_text =
+            String::from_utf8_lossy(&service.handle_http(send_request.as_bytes())).into_owned();
+        assert!(
+            duplicate_text.starts_with("HTTP/1.1 400"),
+            "{duplicate_text}"
+        );
+        assert!(
+            duplicate_text.contains("workflow_not_sendable"),
+            "{duplicate_text}"
+        );
 
         // 4. 真实 JobWorker 逐行发送并等待 ok，轮询推进到终态；取消后不可再发送
         let finished = wait_for_status(service, &workflow_id, "completed");
         assert_eq!(finished["result"]["status"], "completed", "{finished}");
-        let sent = finished["result"]["send_result"]["lines_sent"].as_u64().unwrap_or(0);
-        let total = finished["result"]["send_result"]["total_lines"].as_u64().unwrap_or(0);
-        assert!(total > 0 && sent == total, "全部刀路行必须收到设备 ok: {sent}/{total}");
+        let sent = finished["result"]["send_result"]["lines_sent"]
+            .as_u64()
+            .unwrap_or(0);
+        let total = finished["result"]["send_result"]["total_lines"]
+            .as_u64()
+            .unwrap_or(0);
+        assert!(
+            total > 0 && sent == total,
+            "全部刀路行必须收到设备 ok: {sent}/{total}"
+        );
         assert_eq!(service.active_job_count(), 0, "作业完成后必须从注册表移除");
-        assert!(!service.device_work_in_progress(), "作业完成后应用内更新不再被加工任务挡住");
+        assert!(
+            !service.device_work_in_progress(),
+            "作业完成后应用内更新不再被加工任务挡住"
+        );
         let cancel_body = format!(r#"{{"action":"cancel","workflow_id":"{workflow_id}"}}"#);
         let cancel_request = format!(
             "POST /api/workflow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
@@ -8303,25 +9707,38 @@ mod tests {
             cancel_body
         );
         // 5. 已完成任务不得被取消改写为 cancelled：拒绝并保留 completed 与逐行确认记录
-        let cancel_text = String::from_utf8_lossy(&service.handle_http(cancel_request.as_bytes())).into_owned();
+        let cancel_text =
+            String::from_utf8_lossy(&service.handle_http(cancel_request.as_bytes())).into_owned();
         assert!(cancel_text.starts_with("HTTP/1.1 400"), "{cancel_text}");
         assert!(cancel_text.contains("workflow_completed"), "{cancel_text}");
         let after = wait_for_status(service, &workflow_id, "completed");
         assert_eq!(after["result"]["status"], "completed", "{after}");
-        assert_eq!(after["result"]["send_result"]["lines_sent"].as_u64(), Some(sent), "{after}");
-        let after_cancel = String::from_utf8_lossy(&service.handle_http(send_request.as_bytes())).into_owned();
-        assert!(after_cancel.contains("workflow_not_sendable"), "{after_cancel}");
+        assert_eq!(
+            after["result"]["send_result"]["lines_sent"].as_u64(),
+            Some(sent),
+            "{after}"
+        );
+        let after_cancel =
+            String::from_utf8_lossy(&service.handle_http(send_request.as_bytes())).into_owned();
+        assert!(
+            after_cancel.contains("workflow_not_sendable"),
+            "{after_cancel}"
+        );
     }
 
     #[test]
     fn confirm_send_recomputes_physical_gcode_sha_for_store_and_memory_backends() {
         for use_store in [true, false] {
             let temp = tempfile::tempdir().unwrap();
-            let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                .with_generated_root(temp.path().to_path_buf())
-                .with_transport_factory(fake_transport_factory(200_000));
+            let mut service = ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_generated_root(temp.path().to_path_buf())
+            .with_transport_factory(fake_transport_factory(200_000));
             if use_store {
-                service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                service =
+                    service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
             }
             run_confirm_send_gate_scenario(&service, temp.path());
         }
@@ -8332,33 +9749,66 @@ mod tests {
     fn cancel_mid_send_is_still_accepted_for_store_and_memory_backends() {
         for use_store in [true, false] {
             let temp = tempfile::tempdir().unwrap();
-            let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                .with_generated_root(temp.path().to_path_buf())
-                .with_transport_factory(fake_transport_factory(5));
+            let mut service = ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_generated_root(temp.path().to_path_buf())
+            .with_transport_factory(fake_transport_factory(5));
             if use_store {
-                service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                service =
+                    service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
             }
-            let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-                "text": "MOSS-CANCEL", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 8
-            }));
-            assert_eq!(preview["success"], true, "文字须在 100 mm 幅面内：{preview}");
-            let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
-            let send = post_json(&service, "/api/workflow", &serde_json::json!({
-                "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
-                "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
-            }));
+            let preview = post_json(
+                &service,
+                "/api/text-task/generate",
+                &serde_json::json!({
+                    "text": "MOSS-CANCEL", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 8
+                }),
+            );
+            assert_eq!(
+                preview["success"], true,
+                "文字须在 100 mm 幅面内：{preview}"
+            );
+            let workflow_id = preview["result"]["workflow_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let send = post_json(
+                &service,
+                "/api/workflow",
+                &serde_json::json!({
+                    "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+                    "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
+                }),
+            );
             assert_eq!(send["success"], true, "{send}");
-            assert_eq!(service.active_job_count(), 1, "设备只回 5 个 ok，任务必须仍在发送中");
-            assert!(service.device_work_in_progress(), "发送中必须拒绝应用内更新重启");
+            assert_eq!(
+                service.active_job_count(),
+                1,
+                "设备只回 5 个 ok，任务必须仍在发送中"
+            );
+            assert!(
+                service.device_work_in_progress(),
+                "发送中必须拒绝应用内更新重启"
+            );
 
-            let cancel = post_json(&service, "/api/workflow", &serde_json::json!({"action": "cancel", "workflow_id": workflow_id}));
+            let cancel = post_json(
+                &service,
+                "/api/workflow",
+                &serde_json::json!({"action": "cancel", "workflow_id": workflow_id}),
+            );
             assert_eq!(cancel["success"], true, "use_store={use_store}: {cancel}");
             assert_eq!(cancel["result"]["status"], "cancelled", "{cancel}");
 
             let finished = wait_for_status(&service, &workflow_id, "cancelled");
             assert_eq!(finished["result"]["status"], "cancelled", "{finished}");
-            let sent = finished["result"]["send_result"]["lines_sent"].as_u64().unwrap_or(0);
-            let total = finished["result"]["send_result"]["total_lines"].as_u64().unwrap_or(0);
+            let sent = finished["result"]["send_result"]["lines_sent"]
+                .as_u64()
+                .unwrap_or(0);
+            let total = finished["result"]["send_result"]["total_lines"]
+                .as_u64()
+                .unwrap_or(0);
             assert!(sent < total, "取消必须发生在发送中途: {sent}/{total}");
         }
     }
@@ -8371,35 +9821,67 @@ mod tests {
         let http_port = upload.local_addr().unwrap().port();
         let uploads = std::thread::spawn(move || {
             let (mut stream, _) = upload.accept().unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                .unwrap();
             let mut buffer = [0u8; 4096];
             while let Ok(n) = stream.read(&mut buffer) {
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
             }
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
         });
         let temp = tempfile::tempdir().unwrap();
         let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(temp.path().to_path_buf())
-            .with_transport_factory(recording_transport_factory(200_000, written.clone()));
-        let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-            "text": "SD", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
-        }));
-        let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
-        let send = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
-            "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
-            "network_http_port": http_port, "offline_sd": true
-        }));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf())
+        .with_transport_factory(recording_transport_factory(200_000, written.clone()));
+        let preview = post_json(
+            &service,
+            "/api/text-task/generate",
+            &serde_json::json!({
+                "text": "SD", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+            }),
+        );
+        let workflow_id = preview["result"]["workflow_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let send = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+                "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
+                "network_http_port": http_port, "offline_sd": true
+            }),
+        );
         assert_eq!(send["success"], true, "{send}");
         let status = wait_for_status(&service, &workflow_id, "failed");
         uploads.join().unwrap();
         assert_eq!(status["result"]["status"], "failed", "{status}");
-        assert!(status["result"]["send_result"]["error"].as_str().unwrap_or("").contains("HashFS"), "{status}");
+        assert!(
+            status["result"]["send_result"]["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("HashFS"),
+            "{status}"
+        );
         let lines = written.lock().unwrap().clone();
-        assert!(lines.iter().any(|line| line.starts_with("$File/ShowHash=")), "{lines:?}");
-        assert!(!lines.iter().any(|line| line.starts_with("$SD/Run")), "没有固件哈希不能启动 SD 作业: {lines:?}");
+        assert!(
+            lines.iter().any(|line| line.starts_with("$File/ShowHash=")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("$SD/Run")),
+            "没有固件哈希不能启动 SD 作业: {lines:?}"
+        );
     }
 
     /// SD 脱机上传端口不能截断：65616 曾被 `as u16` 变成 80 并上传到错误端口；
@@ -8408,13 +9890,23 @@ mod tests {
     fn sd_offline_rejects_out_of_range_http_port_before_opening_device() {
         let temp = tempfile::tempdir().unwrap();
         let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(temp.path().to_path_buf())
-            .with_transport_factory(recording_transport_factory(200_000, written.clone()));
-        let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-            "text": "SD", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
-        }));
-        let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf())
+        .with_transport_factory(recording_transport_factory(200_000, written.clone()));
+        let preview = post_json(
+            &service,
+            "/api/text-task/generate",
+            &serde_json::json!({
+                "text": "SD", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+            }),
+        );
+        let workflow_id = preview["result"]["workflow_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         for (key, port) in [
             ("network_http_port", serde_json::json!(65_616)),
             ("network_http_port", serde_json::json!(0)),
@@ -8429,8 +9921,14 @@ mod tests {
             body[key] = port.clone();
             let send = post_json(&service, "/api/workflow", &body);
             assert_eq!(send["success"], false, "{key}={port}: {send}");
-            assert_eq!(send["detail"]["error_code"], "sd_http_port_invalid", "{key}={port}: {send}");
-            assert!(written.lock().unwrap().is_empty(), "端口无效时不能连接设备: {key}={port}");
+            assert_eq!(
+                send["detail"]["error_code"], "sd_http_port_invalid",
+                "{key}={port}: {send}"
+            );
+            assert!(
+                written.lock().unwrap().is_empty(),
+                "端口无效时不能连接设备: {key}={port}"
+            );
             assert_eq!(service.active_job_count(), 0);
         }
         let mut object = serde_json::Map::new();
@@ -8449,14 +9947,23 @@ mod tests {
         for _ in 0..remote_limit {
             assert!(try_admit_http_connection(&active, false));
         }
-        assert!(!try_admit_http_connection(&active, false), "非回环不能占用回环预留名额");
-        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), remote_limit);
+        assert!(
+            !try_admit_http_connection(&active, false),
+            "非回环不能占用回环预留名额"
+        );
+        assert_eq!(
+            active.load(std::sync::atomic::Ordering::SeqCst),
+            remote_limit
+        );
         for _ in 0..LOOPBACK_RESERVED_HTTP {
             assert!(try_admit_http_connection(&active, true), "回环必须还能接入");
         }
         assert!(!try_admit_http_connection(&active, true), "总上限仍然生效");
         assert!(!try_admit_http_connection(&active, false));
-        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), MAX_CONCURRENT_HTTP);
+        assert_eq!(
+            active.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_CONCURRENT_HTTP
+        );
         // 释放一个名额后，非回环在总数仍高于其上限时依旧被拒，回环可以补上
         active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         assert!(!try_admit_http_connection(&active, false));
@@ -8468,15 +9975,26 @@ mod tests {
     fn sd_offline_upload_payload_rescales_power_to_device_scale() {
         let original = b"M4 S1000\nG1X10S500 F600\nM5\n".to_vec();
         let original_sha = hex::encode(Sha256::digest(&original));
-        let lines: Vec<String> = ["M4 S1000", "G1X10S500 F600", "M5"].map(str::to_owned).to_vec();
+        let lines: Vec<String> = ["M4 S1000", "G1X10S500 F600", "M5"]
+            .map(str::to_owned)
+            .to_vec();
 
-        let (same, same_sha) = sd_offline_upload_payload(original.clone(), &original_sha, &lines, 1.0);
+        let (same, same_sha) =
+            sd_offline_upload_payload(original.clone(), &original_sha, &lines, 1.0);
         assert_eq!(same, original, "标尺 1000 时原样上传已门禁校验的文件");
         assert_eq!(same_sha, original_sha);
 
-        let (scaled, scaled_sha) = sd_offline_upload_payload(original.clone(), &original_sha, &lines, 255.0 / 1000.0);
-        assert_eq!(String::from_utf8(scaled.clone()).unwrap(), "M4 S255\nG1X10S128 F600\nM5\n");
-        assert_eq!(scaled_sha, hex::encode(Sha256::digest(&scaled)), "固件哈希门禁必须比对实际上传的字节");
+        let (scaled, scaled_sha) =
+            sd_offline_upload_payload(original.clone(), &original_sha, &lines, 255.0 / 1000.0);
+        assert_eq!(
+            String::from_utf8(scaled.clone()).unwrap(),
+            "M4 S255\nG1X10S128 F600\nM5\n"
+        );
+        assert_eq!(
+            scaled_sha,
+            hex::encode(Sha256::digest(&scaled)),
+            "固件哈希门禁必须比对实际上传的字节"
+        );
         assert_ne!(scaled_sha, original_sha);
     }
 
@@ -8488,24 +10006,48 @@ mod tests {
             for action in ["confirm_send", "send"] {
                 let temp = tempfile::tempdir().unwrap();
                 let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-                let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                    .with_generated_root(temp.path().to_path_buf())
-                    .with_transport_factory(recording_transport_factory(200_000, written.clone()));
+                let mut service = ApiService::new(
+                    test_loopback_settings(),
+                    laser_contracts::builtin_material_library(),
+                )
+                .with_generated_root(temp.path().to_path_buf())
+                .with_transport_factory(recording_transport_factory(200_000, written.clone()));
                 if use_store {
-                    service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                    service =
+                        service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
                 }
-                let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-                    "text": "SKIP", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
-                }));
-                let workflow_id = preview["result"]["workflow_id"].as_str().unwrap().to_owned();
-                let send = post_json(&service, "/api/workflow", &serde_json::json!({
-                    "action": action, "workflow_id": workflow_id, "confirmed": true, "start_from_line": 5,
-                    "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
-                }));
-                assert_eq!(send["success"], false, "use_store={use_store} action={action}: {send}");
-                assert_eq!(send["detail"]["error_code"], "resume_line_not_allowed", "{send}");
+                let preview = post_json(
+                    &service,
+                    "/api/text-task/generate",
+                    &serde_json::json!({
+                        "text": "SKIP", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+                    }),
+                );
+                let workflow_id = preview["result"]["workflow_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                let send = post_json(
+                    &service,
+                    "/api/workflow",
+                    &serde_json::json!({
+                        "action": action, "workflow_id": workflow_id, "confirmed": true, "start_from_line": 5,
+                        "connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": 23,
+                    }),
+                );
+                assert_eq!(
+                    send["success"], false,
+                    "use_store={use_store} action={action}: {send}"
+                );
+                assert_eq!(
+                    send["detail"]["error_code"], "resume_line_not_allowed",
+                    "{send}"
+                );
                 assert_eq!(service.active_job_count(), 0);
-                assert!(written.lock().unwrap().is_empty(), "被拒绝的发送不得打开设备或写任何行");
+                assert!(
+                    written.lock().unwrap().is_empty(),
+                    "被拒绝的发送不得打开设备或写任何行"
+                );
             }
         }
     }
@@ -8517,33 +10059,59 @@ mod tests {
                 let temp = tempfile::tempdir().unwrap();
                 let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
                 let base_factory = recording_transport_factory(200_000, written.clone());
-                let gcode_path = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+                let gcode_path =
+                    std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
                 let path_for_factory = gcode_path.clone();
                 let factory: TransportFactory = std::sync::Arc::new(move |spec| {
                     let path = path_for_factory.lock().unwrap().clone().unwrap();
                     std::fs::write(path, b"M4 S1000\nG1 X999 Y999 F100\nM5\n").unwrap();
                     base_factory(spec)
                 });
-                let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                    .with_generated_root(temp.path().to_path_buf())
-                    .with_transport_factory(factory);
+                let mut service = ApiService::new(
+                    test_loopback_settings(),
+                    laser_contracts::builtin_material_library(),
+                )
+                .with_generated_root(temp.path().to_path_buf())
+                .with_transport_factory(factory);
                 if use_store {
-                    service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                    service =
+                        service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
                 }
-                let preview = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-                    "text": "SHA", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
-                }));
+                let preview = post_json(
+                    &service,
+                    "/api/text-task/generate",
+                    &serde_json::json!({
+                        "text": "SHA", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+                    }),
+                );
                 assert_eq!(preview["success"], true, "{preview}");
                 let workflow_id = preview["result"]["workflow_id"].as_str().unwrap();
-                *gcode_path.lock().unwrap() = Some(temp.path().join(preview["result"]["artifacts"]["gcode_file"].as_str().unwrap()));
-                let send = post_json(&service, "/api/workflow", &serde_json::json!({
-                    "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
-                    "connection_mode": "network", "network_host": "127.0.0.1",
-                    "network_telnet_port": 23, "offline_sd": offline_sd
-                }));
+                *gcode_path.lock().unwrap() = Some(
+                    temp.path().join(
+                        preview["result"]["artifacts"]["gcode_file"]
+                            .as_str()
+                            .unwrap(),
+                    ),
+                );
+                let send = post_json(
+                    &service,
+                    "/api/workflow",
+                    &serde_json::json!({
+                        "action": "confirm_send", "workflow_id": workflow_id, "confirmed": true,
+                        "connection_mode": "network", "network_host": "127.0.0.1",
+                        "network_telnet_port": 23, "offline_sd": offline_sd
+                    }),
+                );
                 assert_eq!(send["detail"]["error_code"], "send_gate_rejected", "{send}");
-                assert!(written.lock().unwrap().iter().all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")),
-                    "校验失败不能写入 G-code、SD 启动或执行同步命令: {:?}", written.lock().unwrap());
+                assert!(
+                    written
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")),
+                    "校验失败不能写入 G-code、SD 启动或执行同步命令: {:?}",
+                    written.lock().unwrap()
+                );
                 assert_eq!(service.active_job_count(), 0);
             }
         }
@@ -8574,7 +10142,10 @@ mod tests {
         let issued = service.handle_http_from(local_challenge, true, "127.0.0.1", None);
         assert!(String::from_utf8_lossy(&issued).starts_with("HTTP/1.1 200 OK"));
         let payload = parse_json_response(&issued);
-        let code = payload["result"]["pairing_code"].as_str().unwrap().to_owned();
+        let code = payload["result"]["pairing_code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert_eq!(code.len(), 6);
         assert!(code.bytes().all(|b| b.is_ascii_digit()));
         assert_eq!(payload["result"]["valid_seconds"], 300);
@@ -8587,7 +10158,11 @@ mod tests {
         );
         let paired = service.handle_http_from(pair.as_bytes(), false, "10.0.0.8", None);
         assert!(String::from_utf8_lossy(&paired).starts_with("HTTP/1.1 200 OK"));
-        assert!(parse_json_response(&paired)["result"]["token"].as_str().is_some());
+        assert!(
+            parse_json_response(&paired)["result"]["token"]
+                .as_str()
+                .is_some()
+        );
     }
 
     #[test]
@@ -8600,7 +10175,11 @@ mod tests {
             let mut results = Vec::new();
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
-                results.push(read_http_request(&mut stream).map(|_| ()).map_err(|e| e.kind()));
+                results.push(
+                    read_http_request(&mut stream)
+                        .map(|_| ())
+                        .map_err(|e| e.kind()),
+                );
             }
             results
         });
@@ -8617,7 +10196,9 @@ mod tests {
         let results = server.join().unwrap();
         assert_eq!(results.len(), 2);
         assert!(
-            results.iter().all(|r| matches!(r, Err(std::io::ErrorKind::InvalidData))),
+            results
+                .iter()
+                .all(|r| matches!(r, Err(std::io::ErrorKind::InvalidData))),
             "{results:?}"
         );
         drop(oversized_header);
@@ -8650,14 +10231,27 @@ mod tests {
         let saved = parse_json_response(&service.handle_http(request.as_bytes()));
         assert_eq!(saved["success"], true, "{saved}");
         let count_cells = |sql: &str| -> i64 {
-            db.lock().unwrap().connection.query_row(sql, [], |row| row.get(0)).unwrap()
+            db.lock()
+                .unwrap()
+                .connection
+                .query_row(sql, [], |row| row.get(0))
+                .unwrap()
         };
         assert_eq!(
-            count_cells("SELECT COUNT(*) FROM material_params WHERE material_name='测试胶合板' AND thickness_key='4' AND laser_mode='cut'"),
+            count_cells(
+                "SELECT COUNT(*) FROM material_params WHERE material_name='测试胶合板' AND thickness_key='4' AND laser_mode='cut'"
+            ),
             1,
             "保存必须写入 SQLite material_params"
         );
-        assert!(db.lock().unwrap().export_material_library().unwrap().materials.contains_key("测试胶合板"));
+        assert!(
+            db.lock()
+                .unwrap()
+                .export_material_library()
+                .unwrap()
+                .materials
+                .contains_key("测试胶合板")
+        );
 
         let delete = serde_json::json!({
             "action": "delete", "material": "测试胶合板", "thickness_mm": 4, "confirmed": true
@@ -8670,7 +10264,10 @@ mod tests {
         );
         let deleted = parse_json_response(&service.handle_http(request.as_bytes()));
         assert_eq!(deleted["success"], true, "{deleted}");
-        assert_eq!(count_cells("SELECT COUNT(*) FROM material_params WHERE material_name='测试胶合板'"), 0);
+        assert_eq!(
+            count_cells("SELECT COUNT(*) FROM material_params WHERE material_name='测试胶合板'"),
+            0
+        );
     }
 
     #[test]
@@ -8723,9 +10320,16 @@ mod tests {
         assert!(page.contains("/assets/"));
         for route in ["/draw", "/material-lab", "/voice", "/camera", "/twin"] {
             // 在任一页面按 F5 刷新都应回到前端页面，而不是 404
-            let index = service.handle_http(format!("GET {route} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
-            assert!(String::from_utf8_lossy(&index).starts_with("HTTP/1.1 200 OK"), "{route}");
-            assert!(String::from_utf8_lossy(&index).contains("text/html"), "{route}");
+            let index = service
+                .handle_http(format!("GET {route} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
+            assert!(
+                String::from_utf8_lossy(&index).starts_with("HTTP/1.1 200 OK"),
+                "{route}"
+            );
+            assert!(
+                String::from_utf8_lossy(&index).contains("text/html"),
+                "{route}"
+            );
         }
         let traversal =
             service.handle_http(b"GET /assets/../index.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -8759,21 +10363,30 @@ mod tests {
                 material_params_file: Some(params_file.to_string_lossy().into_owned()),
                 ..test_loopback_settings()
             };
-            let mut service = ApiService::new(settings, laser_contracts::builtin_material_library())
-                .with_generated_root(gen_dir.clone())
-                .with_preview_roots(vec![gen_dir.clone()])
-                .with_transport_factory(fake_transport_factory(200_000));
+            let mut service =
+                ApiService::new(settings, laser_contracts::builtin_material_library())
+                    .with_generated_root(gen_dir.clone())
+                    .with_preview_roots(vec![gen_dir.clone()])
+                    .with_transport_factory(fake_transport_factory(200_000));
             if use_store {
-                service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                service =
+                    service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
             }
 
             // 1. 预览：真实生成 4x3 矩阵、落盘 G-code、返回 calibration_id 与 cells
-            let preview = post_json(&service, "/api/material-lab/preview", &serde_json::json!({
-                "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave", "matrix_kind": "engrave",
-                "rows": 4, "columns": 3, "power_min": 100, "power_max": 500, "speed_min": 600, "speed_max": 2400
-            }));
+            let preview = post_json(
+                &service,
+                "/api/material-lab/preview",
+                &serde_json::json!({
+                    "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave", "matrix_kind": "engrave",
+                    "rows": 4, "columns": 3, "power_min": 100, "power_max": 500, "speed_min": 600, "speed_max": 2400
+                }),
+            );
             assert_eq!(preview["success"], true, "{preview}");
-            let cal_id = preview["result"]["calibration_id"].as_str().unwrap().to_owned();
+            let cal_id = preview["result"]["calibration_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
             assert!(cal_id.starts_with("cal-"), "{cal_id}");
             assert_eq!(preview["result"]["status"], "prepared");
             let cells = preview["result"]["cells"].as_array().unwrap();
@@ -8792,64 +10405,120 @@ mod tests {
             );
 
             // 2. 未确认 / 缺 host 必须拒绝
-            let unconfirmed = post_json(&service, "/api/material-lab/send", &serde_json::json!({"calibration_id": cal_id}));
+            let unconfirmed = post_json(
+                &service,
+                "/api/material-lab/send",
+                &serde_json::json!({"calibration_id": cal_id}),
+            );
             assert_eq!(unconfirmed["success"], false);
-            let no_host = post_json(&service, "/api/material-lab/send", &serde_json::json!({"calibration_id": cal_id, "confirmed": true}));
+            let no_host = post_json(
+                &service,
+                "/api/material-lab/send",
+                &serde_json::json!({"calibration_id": cal_id, "confirmed": true}),
+            );
             assert_eq!(no_host["success"], false);
 
             // 3. 篡改落盘刀路：物理 SHA 门禁拒绝
             std::fs::write(&gcode_path, b"G1 X999 Y999 S1000\n").unwrap();
-            let tampered = post_json(&service, "/api/material-lab/send", &serde_json::json!({
-                "calibration_id": cal_id, "confirmed": true, "network_host": "127.0.0.1", "network_telnet_port": 23
-            }));
+            let tampered = post_json(
+                &service,
+                "/api/material-lab/send",
+                &serde_json::json!({
+                    "calibration_id": cal_id, "confirmed": true, "network_host": "127.0.0.1", "network_telnet_port": 23
+                }),
+            );
             assert_eq!(tampered["success"], false, "{tampered}");
-            assert_eq!(tampered["detail"]["error_code"], "send_gate_rejected", "{tampered}");
+            assert_eq!(
+                tampered["detail"]["error_code"], "send_gate_rejected",
+                "{tampered}"
+            );
             std::fs::write(&gcode_path, &original).unwrap();
 
             // 4. 真实 JobWorker 下发并推进到 completed
-            let sent = post_json(&service, "/api/material-lab/send", &serde_json::json!({
-                "calibration_id": cal_id, "confirmed": true, "network_host": "127.0.0.1", "network_telnet_port": 23
-            }));
+            let sent = post_json(
+                &service,
+                "/api/material-lab/send",
+                &serde_json::json!({
+                    "calibration_id": cal_id, "confirmed": true, "network_host": "127.0.0.1", "network_telnet_port": 23
+                }),
+            );
             assert_eq!(sent["success"], true, "{sent}");
             assert_eq!(sent["result"]["status"], "sending");
             assert_eq!(sent["result"]["probe"]["connected"], true);
             assert_eq!(sent["result"]["send_result"]["running"], true);
-            let total = sent["result"]["send_result"]["total_lines"].as_u64().unwrap();
+            let total = sent["result"]["send_result"]["total_lines"]
+                .as_u64()
+                .unwrap();
             assert!(total > 0);
             let start = std::time::Instant::now();
             let finished = loop {
-                let status = post_json(&service, "/api/material-lab/status", &serde_json::json!({"calibration_id": cal_id}));
-                if status["result"]["status"] == "completed" || start.elapsed() > std::time::Duration::from_secs(5) {
+                let status = post_json(
+                    &service,
+                    "/api/material-lab/status",
+                    &serde_json::json!({"calibration_id": cal_id}),
+                );
+                if status["result"]["status"] == "completed"
+                    || start.elapsed() > std::time::Duration::from_secs(5)
+                {
                     break status;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             };
             assert_eq!(finished["result"]["status"], "completed", "{finished}");
-            assert_eq!(finished["result"]["send_result"]["lines_sent"].as_u64().unwrap(), total);
+            assert_eq!(
+                finished["result"]["send_result"]["lines_sent"]
+                    .as_u64()
+                    .unwrap(),
+                total
+            );
             assert_eq!(service.active_job_count(), 0);
 
             // 5. 完成后禁止重复下发
-            let again = post_json(&service, "/api/material-lab/send", &serde_json::json!({
-                "calibration_id": cal_id, "confirmed": true, "network_host": "127.0.0.1", "network_telnet_port": 23
-            }));
-            assert_eq!(again["detail"]["error_code"], "calibration_not_sendable", "{again}");
+            let again = post_json(
+                &service,
+                "/api/material-lab/send",
+                &serde_json::json!({
+                    "calibration_id": cal_id, "confirmed": true, "network_host": "127.0.0.1", "network_telnet_port": 23
+                }),
+            );
+            assert_eq!(
+                again["detail"]["error_code"], "calibration_not_sendable",
+                "{again}"
+            );
 
             // 6. 选格：单元格 #6（第 2 行第 3 列）功率 500、速度 = 600+(2400-600)/3 = 1200 写回材料库
-            let selected = post_json(&service, "/api/material-lab/select-cell", &serde_json::json!({
-                "calibration_id": cal_id, "cell_number": 6, "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave"
-            }));
+            let selected = post_json(
+                &service,
+                "/api/material-lab/select-cell",
+                &serde_json::json!({
+                    "calibration_id": cal_id, "cell_number": 6, "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave"
+                }),
+            );
             assert_eq!(selected["success"], true, "{selected}");
             assert_eq!(selected["result"]["selected_cell"]["power"], 500);
             assert_eq!(selected["result"]["selected_cell"]["speed"], 1200);
-            let saved_cell = &selected["result"]["materials"]["materials"]["椴木"]["thicknesses"]["3"]["engrave"]["raster"];
+            let saved_cell = &selected["result"]["materials"]["materials"]["椴木"]["thicknesses"]["3"]
+                ["engrave"]["raster"];
             assert_eq!(saved_cell["laser_max_power"], 500, "{selected}");
             assert_eq!(saved_cell["feed_rate"], 1200, "{selected}");
             assert_eq!(saved_cell["source"], "calibration");
-            let on_disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&params_file).unwrap()).unwrap();
-            assert_eq!(on_disk["materials"]["椴木"]["thicknesses"]["3"]["engrave"]["raster"]["feed_rate"], 1200);
-            let out_of_range = post_json(&service, "/api/material-lab/select-cell", &serde_json::json!({"calibration_id": cal_id, "cell_number": 13}));
+            let on_disk: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&params_file).unwrap()).unwrap();
+            assert_eq!(
+                on_disk["materials"]["椴木"]["thicknesses"]["3"]["engrave"]["raster"]["feed_rate"],
+                1200
+            );
+            let out_of_range = post_json(
+                &service,
+                "/api/material-lab/select-cell",
+                &serde_json::json!({"calibration_id": cal_id, "cell_number": 13}),
+            );
             assert_eq!(out_of_range["success"], false);
-            let missing = post_json(&service, "/api/material-lab/select-cell", &serde_json::json!({"calibration_id": "cal-nope", "cell_number": 1}));
+            let missing = post_json(
+                &service,
+                "/api/material-lab/select-cell",
+                &serde_json::json!({"calibration_id": "cal-nope", "cell_number": 1}),
+            );
             assert_eq!(missing["success"], false);
         }
     }
@@ -9081,28 +10750,53 @@ mod tests {
             laser_contracts::builtin_material_library(),
         )
         .with_generated_root(temp.path().to_path_buf());
-        let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
-        let small = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-            "text": "AB", "font_path": font, "font_size_mm": 10, "material": "椴木", "thickness_mm": 3
-        }));
+        let font = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/geometry.ttf"
+        );
+        let small = post_json(
+            &service,
+            "/api/text-task/generate",
+            &serde_json::json!({
+                "text": "AB", "font_path": font, "font_size_mm": 10, "material": "椴木", "thickness_mm": 3
+            }),
+        );
         assert_eq!(small["success"], true, "{small}");
-        let huge = post_json(&service, "/api/text-task/generate", &serde_json::json!({
-            "text": "ABABABAB", "font_path": font, "font_size_mm": 40, "material": "椴木", "thickness_mm": 3
-        }));
+        let huge = post_json(
+            &service,
+            "/api/text-task/generate",
+            &serde_json::json!({
+                "text": "ABABABAB", "font_path": font, "font_size_mm": 40, "material": "椴木", "thickness_mm": 3
+            }),
+        );
         assert_eq!(huge["success"], false, "{huge}");
-        assert!(huge["result"].as_str().unwrap_or_default().contains("超出机器幅面"), "{huge}");
+        assert!(
+            huge["result"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("超出机器幅面"),
+            "{huge}"
+        );
     }
 
     /// 2026-11-06：文字默认描边、激光头对准中心；给木牌尺寸自动适配字号；填充用材料库 raster 参数。
     #[test]
     fn text_board_fill_and_origin_options_reach_the_engine() {
         let temp = tempfile::tempdir().unwrap();
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(temp.path().to_path_buf());
-        let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf());
+        let font = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/geometry.ttf"
+        );
         let base = |extra: serde_json::Value| {
             let mut body = serde_json::json!({"text": "ABAB", "font_path": font, "material": "椴木", "thickness_mm": 3});
-            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             post_json(&service, "/api/text-task/generate", &body)
         };
         let default = base(serde_json::json!({}));
@@ -9117,17 +10811,32 @@ mod tests {
         let artifacts = &board["result"]["artifacts"];
         assert_eq!(artifacts["text_fill"], "fill", "{board}");
         assert!(artifacts["width_mm"].as_f64().unwrap() <= 76.0 + 1e-6);
-        assert!(artifacts["font_size_mm"].as_f64().unwrap() > 10.0, "未指定字号时应自动放大到木牌");
+        assert!(
+            artifacts["font_size_mm"].as_f64().unwrap() > 10.0,
+            "未指定字号时应自动放大到木牌"
+        );
         assert_eq!(artifacts["origin_note"], "开刻前把激光头移到木牌中心");
-        assert_eq!(artifacts["actual_params"]["laser_max_power"].as_f64(), Some(420.0));
+        assert_eq!(
+            artifacts["actual_params"]["laser_max_power"].as_f64(),
+            Some(420.0)
+        );
 
         let fixed = base(serde_json::json!({"width_mm": 30, "font_size_mm": 20}));
         assert_eq!(fixed["success"], false, "{fixed}");
-        assert!(fixed["result"].as_str().unwrap().contains("放不进"), "{fixed}");
+        assert!(
+            fixed["result"].as_str().unwrap().contains("放不进"),
+            "{fixed}"
+        );
         let bad = base(serde_json::json!({"text_fill": "solid"}));
         assert_eq!(bad["success"], false, "{bad}");
         let corner = base(serde_json::json!({"origin": "lower_left"}));
-        assert_eq!(corner["result"]["artifacts"]["frame_mm"]["min_x"].as_f64().unwrap(), 0.0, "{corner}");
+        assert_eq!(
+            corner["result"]["artifacts"]["frame_mm"]["min_x"]
+                .as_f64()
+                .unwrap(),
+            0.0,
+            "{corner}"
+        );
     }
 
     #[test]
@@ -9226,11 +10935,13 @@ mod tests {
         let file = allowed.join("x.gcode");
         std::fs::write(&file, b"G0 X0").unwrap();
         assert!(resolve_preview_file(&file, std::slice::from_ref(&allowed)).is_ok());
-        assert!(resolve_preview_file(
-            std::path::Path::new("x.gcode"),
-            std::slice::from_ref(&allowed)
-        )
-        .is_ok());
+        assert!(
+            resolve_preview_file(
+                std::path::Path::new("x.gcode"),
+                std::slice::from_ref(&allowed)
+            )
+            .is_ok()
+        );
         let secret = temp.path().join("secret.txt");
         std::fs::write(&secret, b"secret").unwrap();
         assert_eq!(
@@ -9340,10 +11051,30 @@ mod tests {
     fn allowed_origin_rules_are_exact() {
         let none: Vec<String> = Vec::new();
         // 允许项
-        assert!(is_allowed_origin("http://tauri.localhost", Some("127.0.0.1:9666"), true, &none));
-        assert!(is_allowed_origin("tauri://localhost", Some("127.0.0.1:9666"), false, &none));
-        assert!(is_allowed_origin("http://127.0.0.1:9666", Some("127.0.0.1:9666"), true, &none));
-        assert!(is_allowed_origin("http://192.0.2.10:9666", Some("192.0.2.10:9666"), false, &none));
+        assert!(is_allowed_origin(
+            "http://tauri.localhost",
+            Some("127.0.0.1:9666"),
+            true,
+            &none
+        ));
+        assert!(is_allowed_origin(
+            "tauri://localhost",
+            Some("127.0.0.1:9666"),
+            false,
+            &none
+        ));
+        assert!(is_allowed_origin(
+            "http://127.0.0.1:9666",
+            Some("127.0.0.1:9666"),
+            true,
+            &none
+        ));
+        assert!(is_allowed_origin(
+            "http://192.0.2.10:9666",
+            Some("192.0.2.10:9666"),
+            false,
+            &none
+        ));
         for dev in [
             "http://127.0.0.1:5173",
             "http://localhost:5173",
@@ -9352,12 +11083,23 @@ mod tests {
             "http://127.0.0.1:5178",
             "http://localhost:5178",
         ] {
-            assert!(is_allowed_origin(dev, Some("127.0.0.1:9666"), true, &none), "{dev}");
+            assert!(
+                is_allowed_origin(dev, Some("127.0.0.1:9666"), true, &none),
+                "{dev}"
+            );
             // 非回环请求下开发端口不放行
-            assert!(!is_allowed_origin(dev, Some("192.0.2.10:9666"), false, &none), "{dev}");
+            assert!(
+                !is_allowed_origin(dev, Some("192.0.2.10:9666"), false, &none),
+                "{dev}"
+            );
         }
         let extra = vec!["http://lab.example:8080".to_owned()];
-        assert!(is_allowed_origin("http://lab.example:8080", Some("127.0.0.1:9666"), false, &extra));
+        assert!(is_allowed_origin(
+            "http://lab.example:8080",
+            Some("127.0.0.1:9666"),
+            false,
+            &extra
+        ));
 
         // 拒绝项
         for bad in [
@@ -9374,22 +11116,45 @@ mod tests {
             "http://lab.example:8081",
             "http://lab.example",
         ] {
-            assert!(!is_allowed_origin(bad, Some("127.0.0.1:9666"), true, &extra), "{bad:?}");
+            assert!(
+                !is_allowed_origin(bad, Some("127.0.0.1:9666"), true, &extra),
+                "{bad:?}"
+            );
         }
         // 没有 Host 时不能靠同源放行
-        assert!(!is_allowed_origin("http://127.0.0.1:9666", None, true, &none));
-        assert!(!is_allowed_origin("http://127.0.0.1:9666", Some(""), true, &none));
+        assert!(!is_allowed_origin(
+            "http://127.0.0.1:9666",
+            None,
+            true,
+            &none
+        ));
+        assert!(!is_allowed_origin(
+            "http://127.0.0.1:9666",
+            Some(""),
+            true,
+            &none
+        ));
     }
 
     /// 设置写不进 settings.json 时返回错误，不显示“已保存”；能写时一次写入并保留其他键（2026-10-14）。
     #[test]
     fn settings_save_reports_write_failure_instead_of_success() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("settings.json"), r#"{"voice":{"mode":"official"}}"#).unwrap();
+        std::fs::write(
+            temp.path().join("settings.json"),
+            r#"{"voice":{"mode":"official"}}"#,
+        )
+        .unwrap();
         let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
-        let saved = post_json(&service, "/api/settings", &serde_json::json!({"web_port": 9888, "lan_access": true, "jev_enabled": false}));
+        let saved = post_json(
+            &service,
+            "/api/settings",
+            &serde_json::json!({"web_port": 9888, "lan_access": true, "jev_enabled": false}),
+        );
         assert_eq!(saved["success"], true, "{saved}");
-        let file: serde_json::Value = serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap()).unwrap();
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap())
+                .unwrap();
         assert_eq!(file["web_port"], 9888);
         assert_eq!(file["lan_access"], true);
         assert_eq!(file["voice"]["mode"], "official", "其他键必须保留");
@@ -9399,12 +11164,23 @@ mod tests {
         let blocker = temp.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").unwrap();
         let broken = cors_test_service().with_runtime_path(blocker);
-        let failed = post_json(&broken, "/api/settings", &serde_json::json!({"lan_access": false}));
+        let failed = post_json(
+            &broken,
+            "/api/settings",
+            &serde_json::json!({"lan_access": false}),
+        );
         assert_eq!(failed["success"], false, "{failed}");
         assert_eq!(failed["detail"]["error_code"], "settings_write_failed");
 
-        let no_runtime = post_json(&cors_test_service(), "/api/settings", &serde_json::json!({"web_port": 9888}));
-        assert_eq!(no_runtime["detail"]["error_code"], "settings_write_failed", "{no_runtime}");
+        let no_runtime = post_json(
+            &cors_test_service(),
+            "/api/settings",
+            &serde_json::json!({"web_port": 9888}),
+        );
+        assert_eq!(
+            no_runtime["detail"]["error_code"], "settings_write_failed",
+            "{no_runtime}"
+        );
     }
 
     #[test]
@@ -9442,16 +11218,25 @@ mod tests {
         let response = String::from_utf8(service.handle_http(request.as_bytes())).unwrap();
         assert!(response.contains("\"success\":true"), "{response}");
         assert!(!response.contains("Access-Control-Allow-"));
-        assert!(std::fs::read_to_string(temp.path().join("settings.json")).unwrap().contains("9888"));
+        assert!(
+            std::fs::read_to_string(temp.path().join("settings.json"))
+                .unwrap()
+                .contains("9888")
+        );
     }
 
     #[test]
     fn caller_context_is_built_by_entry_never_from_body() {
         use laser_contracts::CallerContext;
-        assert_eq!(caller_context_for(None, true, None), CallerContext::Loopback);
+        assert_eq!(
+            caller_context_for(None, true, None),
+            CallerContext::Loopback
+        );
         assert_eq!(
             caller_context_for(None, false, Some("pair_1".into())),
-            CallerContext::Lan { pairing_id: "pair_1".into() }
+            CallerContext::Lan {
+                pairing_id: "pair_1".into()
+            }
         );
         assert_eq!(
             caller_context_for(Some(CallerContext::McpBridge), true, None),
@@ -9493,7 +11278,8 @@ mod tests {
         );
         let _ = service.handle_http(request.as_bytes());
         let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap())
+                .unwrap();
         assert_eq!(saved["export"]["dir"], "D:\\exports");
         assert_eq!(saved["export"]["ask_each_time"], false);
         assert!(saved.get("export.dir").is_none());
@@ -9506,7 +11292,8 @@ mod tests {
         );
         let _ = service.handle_http(request.as_bytes());
         let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(temp.path().join("settings.json")).unwrap())
+                .unwrap();
         assert_eq!(saved["web_port"], 9777);
         assert_eq!(saved["export"]["dir"], "D:\\exports");
     }
@@ -9556,7 +11343,10 @@ mod tests {
         let status = mcp_status_json(Some("wss://example.test/mcp/"), &live, 19);
         assert_eq!(status["connected"], true);
         assert_eq!(status["client_info"], "client-a v1.2");
-        assert_eq!(status["protocol_version"], "2024-11-05", "握手后显示实际应答的版本");
+        assert_eq!(
+            status["protocol_version"], "2024-11-05",
+            "握手后显示实际应答的版本"
+        );
         assert_eq!(status["messages_count"], 4);
         assert_eq!(status["recent_events"].as_array().unwrap().len(), 1);
         // NV8：各接入点的状态
@@ -9566,25 +11356,35 @@ mod tests {
     }
 
     fn empty_endpoints(status: &serde_json::Value) -> usize {
-        status["endpoints"].as_array().map(Vec::len).unwrap_or(usize::MAX)
+        status["endpoints"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(usize::MAX)
     }
 
     #[test]
     fn system_info_tools_count_matches_actual_catalog() {
         let service = cors_test_service();
-        let value = parse_json_response(&service.handle_http(
-            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
+        let value = parse_json_response(
+            &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        );
         let expected = laser_tools::ToolCatalog::from_environment().specs().len();
         assert_eq!(value["result"]["mcp"]["tools_count"], expected);
         assert_eq!(value["result"]["voice"]["mode"], "official");
         assert!(value["result"]["voice"]["device_sessions"].is_null());
         // NV8：关闭的工具不计入
-        service.set_disabled_tools(["material_params_tool".to_owned(), "laser_safe_action_tool".to_owned()]);
-        let value = parse_json_response(&service.handle_http(
-            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
-        assert_eq!(value["result"]["mcp"]["tools_count"], expected - 1, "停止类工具不能关闭，只少一个");
+        service.set_disabled_tools([
+            "material_params_tool".to_owned(),
+            "laser_safe_action_tool".to_owned(),
+        ]);
+        let value = parse_json_response(
+            &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        );
+        assert_eq!(
+            value["result"]["mcp"]["tools_count"],
+            expected - 1,
+            "停止类工具不能关闭，只少一个"
+        );
     }
 
     /// 技术书 §9.4.6 / A-68：语音中心只以桌面端 Tauri 命令提供，HTTP 后端（含 `moss-host serve`
@@ -9604,28 +11404,38 @@ mod tests {
                 String::from_utf8_lossy(&response)
             );
         }
-        std::fs::write(temp.path().join("settings.json"), br#"{"voice":{"mode":"self_hosted"}}"#).unwrap();
+        std::fs::write(
+            temp.path().join("settings.json"),
+            br#"{"voice":{"mode":"self_hosted"}}"#,
+        )
+        .unwrap();
         laser_contracts::global_voice_telemetry().set_device_sessions(Some(0));
-        let value = parse_json_response(&service.handle_http(
-            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
+        let value = parse_json_response(
+            &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        );
         laser_contracts::global_voice_telemetry().set_device_sessions(None);
         assert_eq!(value["result"]["voice"]["mode"], "self_hosted");
         assert_eq!(value["result"]["voice"]["device_sessions"], 0);
         // 内置链路（NV5）：会话数来自内置语音服务
-        std::fs::write(temp.path().join("settings.json"), br#"{"voice":{"mode":"builtin"}}"#).unwrap();
+        std::fs::write(
+            temp.path().join("settings.json"),
+            br#"{"voice":{"mode":"builtin"}}"#,
+        )
+        .unwrap();
         laser_contracts::global_voice_telemetry().set_device_sessions(Some(2));
         laser_contracts::global_voice_telemetry().set_pulse(Some("speaking"), 76);
-        let builtin = parse_json_response(&service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        let builtin = parse_json_response(
+            &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        );
         laser_contracts::global_voice_telemetry().set_device_sessions(None);
         assert_eq!(builtin["result"]["voice"]["mode"], "builtin");
         assert_eq!(builtin["result"]["voice"]["device_sessions"], 2);
         assert_eq!(builtin["result"]["voice"]["phase"], "speaking");
         assert_eq!(builtin["result"]["voice"]["level"], 76);
         // 未知（未配置健康检查或查询失败）时为 null，不猜
-        let value = parse_json_response(&service.handle_http(
-            b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
+        let value = parse_json_response(
+            &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        );
         assert!(value["result"]["voice"]["device_sessions"].is_null());
     }
 
@@ -9634,11 +11444,14 @@ mod tests {
         let service = cors_test_service().with_serial_port_lister(std::sync::Arc::new(|| {
             vec!["COM3".to_owned(), "COM7".to_owned()]
         }));
-        let value = parse_json_response(&service.handle_http(
-            b"GET /api/ui/serial-ports HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
+        let value = parse_json_response(
+            &service.handle_http(b"GET /api/ui/serial-ports HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        );
         assert_eq!(value["success"], true);
-        assert_eq!(value["result"]["ports"], serde_json::json!(["COM3", "COM7"]));
+        assert_eq!(
+            value["result"]["ports"],
+            serde_json::json!(["COM3", "COM7"])
+        );
         assert_eq!(value["result"]["default_port"], "COM3");
         assert_eq!(value["result"]["baudrate"], 115200);
     }
@@ -9697,28 +11510,47 @@ mod tests {
             assert!(!temp.path().join("settings.json").exists());
         }
         // 读接口同样拦截（重绑定页面同源，可读响应）
-        let read = String::from_utf8(service.handle_http(
-            b"GET /api/system/info HTTP/1.1\r\nHost: evil.example:9666\r\n\r\n",
-        ))
+        let read = String::from_utf8(
+            service
+                .handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: evil.example:9666\r\n\r\n"),
+        )
         .unwrap();
         assert!(read.starts_with("HTTP/1.1 403"), "{read}");
         assert!(!read.contains("actual_port"));
 
         // 真实 TCP 入口：回环请求缺少 Host 同样拒绝；带 Host 或非回环的请求交给正常入口
-        let missing = missing_host_rejection(b"POST /api/settings HTTP/1.0
+        let missing = missing_host_rejection(
+            b"POST /api/settings HTTP/1.0
 Content-Length: 0
 
-", true)
-            .map(|bytes| String::from_utf8(bytes).unwrap())
-            .expect("missing Host must be rejected on loopback");
-        assert!(missing.starts_with("HTTP/1.1 403") && missing.contains("host_not_allowed"), "{missing}");
-        assert!(missing_host_rejection(b"GET / HTTP/1.1
+",
+            true,
+        )
+        .map(|bytes| String::from_utf8(bytes).unwrap())
+        .expect("missing Host must be rejected on loopback");
+        assert!(
+            missing.starts_with("HTTP/1.1 403") && missing.contains("host_not_allowed"),
+            "{missing}"
+        );
+        assert!(
+            missing_host_rejection(
+                b"GET / HTTP/1.1
 Host: 127.0.0.1:9666
 
-", true).is_none());
-        assert!(missing_host_rejection(b"GET / HTTP/1.0
+",
+                true
+            )
+            .is_none()
+        );
+        assert!(
+            missing_host_rejection(
+                b"GET / HTTP/1.0
 
-", false).is_none());
+",
+                false
+            )
+            .is_none()
+        );
 
         // 非回环连接不做 Host 校验（仍由 Bearer 鉴权保护），局域网主机名访问公开页面不受影响。
         let lan = String::from_utf8(service.handle_http_from(
@@ -9731,7 +11563,8 @@ Host: 127.0.0.1:9666
         assert!(lan.starts_with("HTTP/1.1 200 OK"), "{lan}");
 
         // 不带 Host 的本机非浏览器请求照常
-        let no_host = String::from_utf8(service.handle_http(b"GET /api/health HTTP/1.1\r\n\r\n")).unwrap();
+        let no_host =
+            String::from_utf8(service.handle_http(b"GET /api/health HTTP/1.1\r\n\r\n")).unwrap();
         assert!(no_host.starts_with("HTTP/1.1 200 OK"), "{no_host}");
     }
 
@@ -9750,7 +11583,9 @@ Host: 127.0.0.1:9666
     fn dev_origin_is_rejected_for_non_loopback_peer() {
         let service = cors_test_service();
         let request = b"POST /api/workflow HTTP/1.1\r\nHost: 192.0.2.10:9666\r\nOrigin: http://127.0.0.1:5177\r\nContent-Length: 2\r\n\r\n{}";
-        let response = String::from_utf8(service.handle_http_from(request, false, "192.0.2.20", None)).unwrap();
+        let response =
+            String::from_utf8(service.handle_http_from(request, false, "192.0.2.20", None))
+                .unwrap();
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
         assert!(!response.contains("Access-Control-Allow-"));
     }
@@ -9770,15 +11605,23 @@ Host: 127.0.0.1:9666
             let text = String::from_utf8_lossy(response).into_owned();
             let head = text.split("\r\n\r\n").next().unwrap().to_owned();
             assert!(head.starts_with("HTTP/1.1 "), "{head}");
-            assert!(head.contains(&format!("\r\nAccess-Control-Allow-Origin: {origin}\r\n")), "{head}");
+            assert!(
+                head.contains(&format!("\r\nAccess-Control-Allow-Origin: {origin}\r\n")),
+                "{head}"
+            );
             assert!(head.contains("\r\nVary: Origin\r\n"), "{head}");
-            assert_eq!(head.matches("Access-Control-Allow-Origin").count(), 1, "{head}");
+            assert_eq!(
+                head.matches("Access-Control-Allow-Origin").count(),
+                1,
+                "{head}"
+            );
             assert!(!head.contains("Allow-Origin: *"));
         };
 
         // JSON
         let json = service.handle_http(
-            format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n").as_bytes(),
+            format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n")
+                .as_bytes(),
         );
         expect_cors(&json, origin);
         // 额外来源（MOSS_ALLOWED_ORIGINS）
@@ -9807,16 +11650,21 @@ Host: 127.0.0.1:9666
             .as_bytes(),
         );
         let preview_text = String::from_utf8_lossy(&preview).into_owned();
-        assert!(preview_text.starts_with("HTTP/1.1 200 OK"), "{preview_text}");
+        assert!(
+            preview_text.starts_with("HTTP/1.1 200 OK"),
+            "{preview_text}"
+        );
         assert!(preview_text.ends_with("G0 X0\n"), "{preview_text}");
         expect_cors(&preview, origin);
         // OPTIONS
         let options = service.handle_http(
-            format!("OPTIONS /api/workflow HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n").as_bytes(),
+            format!(
+                "OPTIONS /api/workflow HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nOrigin: {origin}\r\n\r\n"
+            )
+            .as_bytes(),
         );
         expect_cors(&options, origin);
     }
-
 
     #[test]
     fn system_info_and_settings_routes_work() {
@@ -10002,7 +11850,9 @@ Content-Length: 30
                 let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
             }
         });
-        let report = check_github_release_update("0.2.0", false, &format!("http://{addr}/releases")).unwrap();
+        let report =
+            check_github_release_update("0.2.0", false, &format!("http://{addr}/releases"))
+                .unwrap();
         let _ = handle.join();
         assert_eq!(report["has_update"], true);
         assert_eq!(report["latest_version"], "0.3.1");
@@ -10026,9 +11876,18 @@ Content-Length: 30
             "127.0.0.1",
             None,
         );
-        let default_json: serde_json::Value =
-            serde_json::from_slice(&info_default[info_default.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..]).unwrap();
-        assert_eq!(default_json["result"]["auto_check_update"], true, "新安装默认开启启动自动检查更新");
+        let default_json: serde_json::Value = serde_json::from_slice(
+            &info_default[info_default
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .unwrap()
+                + 4..],
+        )
+        .unwrap();
+        assert_eq!(
+            default_json["result"]["auto_check_update"], true,
+            "新安装默认开启启动自动检查更新"
+        );
 
         let body = br#"{"auto_check_update":false}"#;
         let save_req = format!(
@@ -10045,9 +11904,18 @@ Content-Length: 30
             "127.0.0.1",
             None,
         );
-        let after_json: serde_json::Value =
-            serde_json::from_slice(&info_after[info_after.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..]).unwrap();
-        assert_eq!(after_json["result"]["auto_check_update"], false, "用户关闭后持久化生效");
+        let after_json: serde_json::Value = serde_json::from_slice(
+            &info_after[info_after
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .unwrap()
+                + 4..],
+        )
+        .unwrap();
+        assert_eq!(
+            after_json["result"]["auto_check_update"], false,
+            "用户关闭后持久化生效"
+        );
     }
 
     #[test]
@@ -10097,12 +11965,36 @@ Content-Length: 30
     fn reference_data_writes_are_classified() {
         assert!(is_reference_data_write("POST", "/api/settings", b"{}"));
         assert!(is_reference_data_write("POST", "/api/jev/reveal", b""));
-        assert!(is_reference_data_write("POST", "/api/material-lab/select-cell", b"{}"));
-        assert!(is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"save"}"#));
-        assert!(is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"import"}"#));
-        assert!(is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"delete"}"#));
-        assert!(is_reference_data_write("POST", "/api/material-lab/manage", b"not json"));
-        assert!(!is_reference_data_write("POST", "/api/material-lab/manage", br#"{"action":"export"}"#));
+        assert!(is_reference_data_write(
+            "POST",
+            "/api/material-lab/select-cell",
+            b"{}"
+        ));
+        assert!(is_reference_data_write(
+            "POST",
+            "/api/material-lab/manage",
+            br#"{"action":"save"}"#
+        ));
+        assert!(is_reference_data_write(
+            "POST",
+            "/api/material-lab/manage",
+            br#"{"action":"import"}"#
+        ));
+        assert!(is_reference_data_write(
+            "POST",
+            "/api/material-lab/manage",
+            br#"{"action":"delete"}"#
+        ));
+        assert!(is_reference_data_write(
+            "POST",
+            "/api/material-lab/manage",
+            b"not json"
+        ));
+        assert!(!is_reference_data_write(
+            "POST",
+            "/api/material-lab/manage",
+            br#"{"action":"export"}"#
+        ));
         for route in [
             "/api/text-task/generate",
             "/api/draw/preview",
@@ -10123,22 +12015,42 @@ Content-Length: 30
     fn paired_lan_client_cannot_change_materials_or_settings_but_loopback_can() {
         let auth = std::sync::Arc::new(AuthManager::new());
         let challenge = auth.issue_code(unix_seconds()).unwrap();
-        let (token, _) = auth.pair("10.0.0.8", &challenge.code, unix_seconds()).unwrap();
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_auth(auth.clone());
+        let (token, _) = auth
+            .pair("10.0.0.8", &challenge.code, unix_seconds())
+            .unwrap();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_auth(auth.clone());
         let post = |route: &str, body: &str, loopback: bool| {
             let request = format!(
                 "POST {route} HTTP/1.1\r\nHost: 127.0.0.1:9666\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
-            String::from_utf8_lossy(&service.handle_http_from(request.as_bytes(), loopback, "10.0.0.8", None)).into_owned()
+            String::from_utf8_lossy(&service.handle_http_from(
+                request.as_bytes(),
+                loopback,
+                "10.0.0.8",
+                None,
+            ))
+            .into_owned()
         };
         for (route, body) in [
-            ("/api/material-lab/manage", r#"{"action":"save","material":"x"}"#),
-            ("/api/material-lab/manage", r#"{"action":"delete","material":"x","confirmed":true}"#),
+            (
+                "/api/material-lab/manage",
+                r#"{"action":"save","material":"x"}"#,
+            ),
+            (
+                "/api/material-lab/manage",
+                r#"{"action":"delete","material":"x","confirmed":true}"#,
+            ),
             ("/api/settings", r#"{"lan_access":true}"#),
             ("/api/jev/reveal", "{}"),
-            ("/api/material-lab/select-cell", r#"{"calibration_id":"c","cell_number":1}"#),
+            (
+                "/api/material-lab/select-cell",
+                r#"{"calibration_id":"c","cell_number":1}"#,
+            ),
         ] {
             let response = post(route, body, false);
             assert!(response.starts_with("HTTP/1.1 403"), "{route}: {response}");
@@ -10162,11 +12074,24 @@ Content-Length: 30
     fn lan_info_is_loopback_only() {
         let auth = std::sync::Arc::new(AuthManager::new());
         let challenge = auth.issue_code(unix_seconds()).unwrap();
-        let (token, _) = auth.pair("10.0.0.8", &challenge.code, unix_seconds()).unwrap();
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_auth(auth.clone());
-        let request = format!("GET /api/system/lan-info HTTP/1.1\r\nHost: 10.0.0.2:9666\r\nAuthorization: Bearer {token}\r\n\r\n");
-        let remote = String::from_utf8_lossy(&service.handle_http_from(request.as_bytes(), false, "10.0.0.8", None)).into_owned();
+        let (token, _) = auth
+            .pair("10.0.0.8", &challenge.code, unix_seconds())
+            .unwrap();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_auth(auth.clone());
+        let request = format!(
+            "GET /api/system/lan-info HTTP/1.1\r\nHost: 10.0.0.2:9666\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let remote = String::from_utf8_lossy(&service.handle_http_from(
+            request.as_bytes(),
+            false,
+            "10.0.0.8",
+            None,
+        ))
+        .into_owned();
         assert!(remote.starts_with("HTTP/1.1 403"), "{remote}");
         let local = String::from_utf8_lossy(&service.handle_http_from(
             b"GET /api/system/lan-info HTTP/1.1\r\nHost: 127.0.0.1:9666\r\n\r\n",
@@ -10274,16 +12199,22 @@ Content-Length: 30
         let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/golden/api")
             .join(file_name);
-        let mut expected: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&golden_path).expect("golden response must exist"))
-                .expect("golden response must be valid JSON");
+        let mut expected: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&golden_path).expect("golden response must exist"),
+        )
+        .expect("golden response must be valid JSON");
         mask_golden_dynamic_fields(&mut actual);
         mask_golden_dynamic_fields(&mut expected);
         mask_default_power_scales(&mut actual);
         mask_default_power_scales(&mut expected);
         normalize_golden_numbers(&mut actual);
         normalize_golden_numbers(&mut expected);
-        assert_eq!(actual, expected, "API response differs from {}", golden_path.display());
+        assert_eq!(
+            actual,
+            expected,
+            "API response differs from {}",
+            golden_path.display()
+        );
     }
 
     fn assert_golden_bootstrap_response(raw: &[u8], file_name: &str) {
@@ -10308,9 +12239,10 @@ Content-Length: 30
         let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/golden/api")
             .join(file_name);
-        let mut expected: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&golden_path).expect("golden response must exist"))
-                .expect("golden response must be valid JSON");
+        let mut expected: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&golden_path).expect("golden response must exist"),
+        )
+        .expect("golden response must be valid JSON");
         if let Some(materials) = expected.get_mut("materials") {
             if materials.get("version").is_none() {
                 let legacy_materials = materials.take();
@@ -10333,7 +12265,8 @@ Content-Length: 30
         normalize_golden_numbers(&mut expected);
         assert_eq!(actual["status"], 200);
         assert_eq!(
-            actual["result"], expected,
+            actual["result"],
+            expected,
             "bootstrap response differs from {}",
             golden_path.display()
         );
@@ -10368,15 +12301,18 @@ Content-Length: 30
         assert_golden_api_response(&res, "health.response.json");
 
         // 2. runtime-config
-        let res = service.handle_http(b"GET /api/ui/runtime-config HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let res =
+            service.handle_http(b"GET /api/ui/runtime-config HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert_golden_api_response(&res, "runtime-config.response.json");
 
         // 3. serial-ports
-        let res = service.handle_http(b"GET /api/ui/serial-ports HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let res =
+            service.handle_http(b"GET /api/ui/serial-ports HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert_golden_api_response(&res, "serial-ports.response.json");
 
         // 4. material-options
-        let res = service.handle_http(b"GET /api/ui/material-options HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let res = service
+            .handle_http(b"GET /api/ui/material-options HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert_golden_api_response(&res, "material-options.response.json");
 
         // 5. material-recommendation
@@ -10388,15 +12324,20 @@ Content-Length: 30
         assert_golden_api_response(&res, "preview-missing.response.json");
 
         // 7. material-lab-export
-        let res = service.handle_http(b"GET /api/material-lab/export HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let res = service
+            .handle_http(b"GET /api/material-lab/export HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert_golden_api_response(&res, "material-lab-export.response.json");
 
         // 8. upload (empty payload)
-        let res = service.handle_http(b"POST /api/upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}");
+        let res = service.handle_http(
+            b"POST /api/upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+        );
         assert_golden_api_response(&res, "upload.response.json");
 
         // 9. draw-preview (empty payload)
-        let res = service.handle_http(b"POST /api/draw/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}");
+        let res = service.handle_http(
+            b"POST /api/draw/preview HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+        );
         assert_golden_api_response(&res, "draw-preview.response.json");
 
         // 10. material-preview (empty payload)
@@ -10433,19 +12374,32 @@ Content-Length: 30
 
         // 17. workflow (status empty id)
         let b = r#"{"action":"status","workflow_id":""}"#;
-        let res = service.handle_http(format!("POST /api/workflow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}", b.len(), b).as_bytes());
+        let res = service.handle_http(
+            format!(
+                "POST /api/workflow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                b.len(),
+                b
+            )
+            .as_bytes(),
+        );
         assert_golden_api_response(&res, "workflow.response.json");
 
         // 18. bootstrap
-        let res = service.handle_http(b"GET /v1/material-lab/bootstrap HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let res = service
+            .handle_http(b"GET /v1/material-lab/bootstrap HTTP/1.1\r\nHost: localhost\r\n\r\n");
         assert_golden_bootstrap_response(&res, "get-v1-material-lab-bootstrap.json");
     }
 
     #[test]
     fn unknown_stop_state_keeps_exact_transport_for_retry() {
         let fake = laser_device::FakeGrbl::new(Vec::<String>::new());
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_transport_factory(std::sync::Arc::new(|_| panic!("retry must not open another device")));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(std::sync::Arc::new(|_| {
+            panic!("retry must not open another device")
+        }));
         service.uncertain_jobs.lock().unwrap().insert(
             "lost-job".into(),
             UncertainJob::from_active(
@@ -10462,62 +12416,129 @@ Content-Length: 30
             ),
         );
         assert!(service.active_jobs.lock().unwrap().is_empty());
-        let unknown = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"other"}));
+        let unknown = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"other"}),
+        );
         assert_eq!(unknown["success"], false);
         assert!(fake.realtime().is_empty());
-        let result = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"lost-job"}));
+        let result = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"lost-job"}),
+        );
         assert_eq!(result["success"], true, "{result}");
         assert_eq!(fake.realtime(), vec![0x18]);
-        let res = service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let res =
+            service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n");
         let text = String::from_utf8_lossy(&res);
-        assert!(text.contains("lost-job") && text.contains("unknown"), "{text}");
+        assert!(
+            text.contains("lost-job") && text.contains("unknown"),
+            "{text}"
+        );
     }
 
     #[test]
     fn emergency_stop_targets_only_requested_job_and_dry_run_never_writes() {
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_transport_factory(std::sync::Arc::new(|_| panic!("must reuse exact job transport")));
-        let devices: Vec<_> = (0..2).map(|_| laser_device::FakeGrbl::new(Vec::<String>::new())).collect();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(std::sync::Arc::new(|_| {
+            panic!("must reuse exact job transport")
+        }));
+        let devices: Vec<_> = (0..2)
+            .map(|_| laser_device::FakeGrbl::new(Vec::<String>::new()))
+            .collect();
         for (i, device) in devices.iter().enumerate() {
-            service.active_jobs.lock().unwrap().insert(format!("job-{i}"),std::sync::Arc::new(ActiveJob {
-                workflow_id:format!("job-{i}"), mode:"network", target:format!("127.0.0.1:{}",2300+i),
-                cancel:Default::default(), progress:Default::default(), transport:std::sync::Arc::new(device.clone()), started_at:std::time::Instant::now(),
-            }));
+            service.active_jobs.lock().unwrap().insert(
+                format!("job-{i}"),
+                std::sync::Arc::new(ActiveJob {
+                    workflow_id: format!("job-{i}"),
+                    mode: "network",
+                    target: format!("127.0.0.1:{}", 2300 + i),
+                    cancel: Default::default(),
+                    progress: Default::default(),
+                    transport: std::sync::Arc::new(device.clone()),
+                    started_at: std::time::Instant::now(),
+                }),
+            );
         }
         for args in [
             serde_json::json!({"action":"emergency_stop","confirmed":true}),
             serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"unknown"}),
             serde_json::json!({"action":"power_plus_10","job_id":"job-0"}),
             serde_json::json!({"action":"emergency_stop","confirmed":true,"job_id":"job-0","host":"127.0.0.1","telnet_port":2301}),
-        ] { assert_eq!(post_json(&service,"/api/safe-action",&args)["success"],false); }
-        let dry = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","job_id":"job-1","dry_run":true}));
-        assert_eq!(dry["success"],true);
+        ] {
+            assert_eq!(
+                post_json(&service, "/api/safe-action", &args)["success"],
+                false
+            );
+        }
+        let dry = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action":"emergency_stop","job_id":"job-1","dry_run":true}),
+        );
+        assert_eq!(dry["success"], true);
         assert!(devices.iter().all(|d| d.realtime().is_empty()));
-        let result = post_json(&service,"/api/safe-action",&serde_json::json!({"action":"emergency_stop","job_id":"job-1","confirmed":true}));
-        assert_eq!(result["success"],true);
+        let result = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action":"emergency_stop","job_id":"job-1","confirmed":true}),
+        );
+        assert_eq!(result["success"], true);
         assert!(devices[0].realtime().is_empty());
-        assert_eq!(devices[1].realtime(),vec![0x18]);
+        assert_eq!(devices[1].realtime(), vec![0x18]);
     }
 
     #[test]
     fn stop_targets_exposes_read_only_progress_for_the_global_panel() {
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_transport_factory(std::sync::Arc::new(|_| panic!("只读查询不得打开设备连接")));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(std::sync::Arc::new(|_| panic!("只读查询不得打开设备连接")));
         let device = laser_device::FakeGrbl::new(Vec::<String>::new());
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
-        progress.total_lines.store(100, std::sync::atomic::Ordering::Relaxed);
-        progress.lines_sent.store(37, std::sync::atomic::Ordering::Relaxed);
-        service.active_jobs.lock().unwrap().insert("job-9".into(), std::sync::Arc::new(ActiveJob {
-            workflow_id: "wf-9".into(), mode: "network", target: "127.0.0.1:2301".into(),
-            cancel: Default::default(), progress: progress.clone(),
-            transport: std::sync::Arc::new(device.clone()), started_at: std::time::Instant::now(),
-        }));
-        let res = service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        progress
+            .total_lines
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        progress
+            .lines_sent
+            .store(37, std::sync::atomic::Ordering::Relaxed);
+        service.active_jobs.lock().unwrap().insert(
+            "job-9".into(),
+            std::sync::Arc::new(ActiveJob {
+                workflow_id: "wf-9".into(),
+                mode: "network",
+                target: "127.0.0.1:2301".into(),
+                cancel: Default::default(),
+                progress: progress.clone(),
+                transport: std::sync::Arc::new(device.clone()),
+                started_at: std::time::Instant::now(),
+            }),
+        );
+        let res =
+            service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n");
         let text = String::from_utf8_lossy(&res);
-        assert!(text.contains("\"workflow_id\":\"wf-9\""), "浮层需要 workflow_id 才能取消或续雕: {text}");
-        assert!(text.contains("\"lines_sent\":37") && text.contains("\"total_lines\":100"), "浮层需要真实进度: {text}");
-        assert!(text.contains("\"phase\":\"streaming\"") && text.contains("\"state\":\"running\""), "{text}");
-        assert!(text.contains("\"elapsed_ms\"") && text.contains("\"mode\":\"network\""), "{text}");
+        assert!(
+            text.contains("\"workflow_id\":\"wf-9\""),
+            "浮层需要 workflow_id 才能取消或续雕: {text}"
+        );
+        assert!(
+            text.contains("\"lines_sent\":37") && text.contains("\"total_lines\":100"),
+            "浮层需要真实进度: {text}"
+        );
+        assert!(
+            text.contains("\"phase\":\"streaming\"") && text.contains("\"state\":\"running\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"elapsed_ms\"") && text.contains("\"mode\":\"network\""),
+            "{text}"
+        );
         assert!(device.realtime().is_empty(), "只读查询不得写实时通道");
     }
 
@@ -10535,12 +12556,16 @@ Content-Length: 30
             },
             laser_contracts::builtin_material_library(),
         )
-        .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake_clone.clone()))));
+        .with_transport_factory(std::sync::Arc::new(move |_| {
+            Ok(Box::new(fake_clone.clone()))
+        }));
 
         // 1. 模拟正在加工任务（注册进 active_jobs）
         let cancel = laser_device::CancellationToken::default();
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
-        progress.total_lines.store(100, std::sync::atomic::Ordering::Relaxed);
+        progress
+            .total_lines
+            .store(100, std::sync::atomic::Ordering::Relaxed);
         let active_job = std::sync::Arc::new(ActiveJob {
             workflow_id: "test-job-1".into(),
             started_at: std::time::Instant::now(),
@@ -10550,38 +12575,58 @@ Content-Length: 30
             progress: progress.clone(),
             transport: std::sync::Arc::new(fake.clone()),
         });
-        service.active_jobs.lock().unwrap().insert("test-job-1".into(), active_job);
+        service
+            .active_jobs
+            .lock()
+            .unwrap()
+            .insert("test-job-1".into(), active_job);
 
         // 2. 边刻边调：下发进给速度增加 10%
-        let feed_res = post_json(&service, "/api/safe-action", &serde_json::json!({
-            "action": "feed_plus_10",
-        }));
+        let feed_res = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "feed_plus_10",
+            }),
+        );
         assert_eq!(feed_res["success"], true, "{feed_res}");
         assert!(feed_res["result"].as_str().unwrap().contains("不停机"));
         assert!(fake.realtime().contains(&0x91));
 
         // 3. 边刻边调：下发功率降低 10%
-        let power_res = post_json(&service, "/api/safe-action", &serde_json::json!({
-            "action": "power_minus_10",
-        }));
+        let power_res = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "power_minus_10",
+            }),
+        );
         assert_eq!(power_res["success"], true, "{power_res}");
         assert!(power_res["result"].as_str().unwrap().contains("不停机"));
         assert!(fake.realtime().contains(&0x9B));
 
         // 4. 正在加工时下发移动指令应当被安全拦截
-        let move_res = post_json(&service, "/api/safe-action", &serde_json::json!({
-            "action": "relative_move",
-            "x": 10.0,
-            "y": 0.0,
-            "confirmed": true,
-        }));
+        let move_res = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "relative_move",
+                "x": 10.0,
+                "y": 0.0,
+                "confirmed": true,
+            }),
+        );
         assert_eq!(move_res["success"], false);
         assert!(move_res["result"].as_str().unwrap().contains("禁止下发"));
 
         // 5. 正在加工时下发急停：任务被取消且收到 0x18
-        let stop_res = post_json(&service, "/api/safe-action", &serde_json::json!({
-            "action": "emergency_stop",
-        }));
+        let stop_res = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "emergency_stop",
+            }),
+        );
         assert_eq!(stop_res["success"], true);
         assert!(cancel.is_cancelled());
         assert!(fake.realtime().contains(&0x18));
@@ -10603,7 +12648,9 @@ Content-Length: 30
             },
             laser_contracts::builtin_material_library(),
         )
-        .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake_clone.clone()))));
+        .with_transport_factory(std::sync::Arc::new(move |_| {
+            Ok(Box::new(fake_clone.clone()))
+        }));
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
         progress.total_lines.store(342, Ordering::Relaxed);
         progress.lines_sent.store(120, Ordering::Relaxed);
@@ -10622,7 +12669,11 @@ Content-Length: 30
             .unwrap()
             .insert("wf-status".into(), job);
 
-        let res = post_json(&service, "/api/safe-action", &serde_json::json!({"action": "status"}));
+        let res = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "status"}),
+        );
         assert_eq!(res["success"], true, "{res}");
         let text = res["result"].as_str().unwrap_or_default();
         assert!(
@@ -10661,10 +12712,13 @@ Content-Length: 30
         let expected_sha = hex::encode(sha2::Sha256::digest(gcode_content.as_bytes()));
 
         let written_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(gen_dir.clone())
-            .with_preview_roots(vec![gen_dir.clone()])
-            .with_transport_factory(recording_transport_factory(100, written_lines.clone()));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(gen_dir.clone())
+        .with_preview_roots(vec![gen_dir.clone()])
+        .with_transport_factory(recording_transport_factory(100, written_lines.clone()));
 
         // 1. 构造一个已取消且断点为 2/5 的 workflow 记录
         let wf_id = "test-resume-wf-001";
@@ -10686,7 +12740,11 @@ Content-Length: 30
                 "can_resume": true
             }
         });
-        service.workflows.lock().unwrap().insert(wf_id.into(), record);
+        service
+            .workflows
+            .lock()
+            .unwrap()
+            .insert(wf_id.into(), record);
 
         // 2. 调用 resume action
         let resume_req = serde_json::json!({
@@ -10707,20 +12765,30 @@ Content-Length: 30
         let finished = wait_for_status(&service, wf_id, "completed");
         assert_eq!(finished["result"]["status"], "completed", "{finished}");
         let lines = written_lines.lock().unwrap().clone();
-        assert!(lines.contains(&"$X".to_string()), "恢复首个命令必须下发 $X 解除锁定: {lines:?}");
+        assert!(
+            lines.contains(&"$X".to_string()),
+            "恢复首个命令必须下发 $X 解除锁定: {lines:?}"
+        );
         assert_eq!(finished["result"]["send_result"]["lines_sent"], 5);
         assert_eq!(finished["result"]["send_result"]["total_lines"], 5);
 
         // 4. 反向边界：若任务已完成，必须 400 拦截
         let invalid_wf = "test-invalid-resume";
-        service.workflows.lock().unwrap().insert(invalid_wf.into(), serde_json::json!({
-            "workflow_id": invalid_wf,
-            "status": "completed",
-            "send_result": { "lines_sent": 5, "total_lines": 5 }
-        }));
-        let bad_res = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "resume", "workflow_id": invalid_wf, "confirmed": true
-        }));
+        service.workflows.lock().unwrap().insert(
+            invalid_wf.into(),
+            serde_json::json!({
+                "workflow_id": invalid_wf,
+                "status": "completed",
+                "send_result": { "lines_sent": 5, "total_lines": 5 }
+            }),
+        );
+        let bad_res = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "resume", "workflow_id": invalid_wf, "confirmed": true
+            }),
+        );
         assert_eq!(bad_res["success"], false);
         assert_eq!(bad_res["detail"]["error_code"], "workflow_completed");
     }
@@ -10754,37 +12822,68 @@ Content-Length: 30
         let targets = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let base = recording_transport_factory(200_000, written.clone());
         let targets_for_factory = targets.clone();
-        let factory: TransportFactory = std::sync::Arc::new(move |spec: &laser_device::ConnectionSpec| {
-            targets_for_factory.lock().unwrap().push(spec.describe());
-            base(spec)
-        });
-        let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(temp.path().to_path_buf())
-            .with_transport_factory(factory)
-            .with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()))
-            .with_strict_mode(strict);
+        let factory: TransportFactory =
+            std::sync::Arc::new(move |spec: &laser_device::ConnectionSpec| {
+                targets_for_factory.lock().unwrap().push(spec.describe());
+                base(spec)
+            });
+        let mut service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf())
+        .with_transport_factory(factory)
+        .with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()))
+        .with_strict_mode(strict);
         let mut approvals_db = None;
         if with_approvals {
-            let db = std::sync::Arc::new(std::sync::Mutex::new(laser_runtime::RuntimeDb::open_memory().unwrap()));
+            let db = std::sync::Arc::new(std::sync::Mutex::new(
+                laser_runtime::RuntimeDb::open_memory().unwrap(),
+            ));
             approvals_db = Some(db.clone());
-            service = service.with_runtime_db(db.clone())
-                .with_approval_service(std::sync::Arc::new(approval::ApprovalService::new(db.clone()).with_ttl_seconds(120)));
+            service =
+                service
+                    .with_runtime_db(db.clone())
+                    .with_approval_service(std::sync::Arc::new(
+                        approval::ApprovalService::new(db.clone()).with_ttl_seconds(120),
+                    ));
             {
                 let db = db.lock().unwrap();
-                db.voice_device_seen("aa:bb:cc:dd:ee:ff", "test-client", "", "", "", 0.0).unwrap();
-                db.set_voice_device_status("aa:bb:cc:dd:ee:ff", laser_runtime::VOICE_DEVICE_ALLOWED, 0.0).unwrap();
+                db.voice_device_seen("aa:bb:cc:dd:ee:ff", "test-client", "", "", "", 0.0)
+                    .unwrap();
+                db.set_voice_device_status(
+                    "aa:bb:cc:dd:ee:ff",
+                    laser_runtime::VOICE_DEVICE_ALLOWED,
+                    0.0,
+                )
+                .unwrap();
             }
-            service.register_voice_session("aa:bb:cc:dd:ee:ff", "test-client", "sess-1").unwrap();
+            service
+                .register_voice_session("aa:bb:cc:dd:ee:ff", "test-client", "sess-1")
+                .unwrap();
         }
-        StrictFixture { service, _temp: temp, written, targets, db: approvals_db }
+        StrictFixture {
+            service,
+            _temp: temp,
+            written,
+            targets,
+            db: approvals_db,
+        }
     }
 
     fn preview_workflow(service: &ApiService) -> String {
-        let preview = post_json(service, "/api/text-task/generate", &serde_json::json!({
-            "text": "STRICT", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
-        }));
+        let preview = post_json(
+            service,
+            "/api/text-task/generate",
+            &serde_json::json!({
+                "text": "STRICT", "material": "椴木", "thickness_mm": 3.0, "font_size_mm": 12
+            }),
+        );
         assert_eq!(preview["success"], true, "{preview}");
-        preview["result"]["workflow_id"].as_str().unwrap().to_owned()
+        preview["result"]["workflow_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 
     /// 2026-11-06 统一 AI 预览：新预览记下发起方，客户端伪造的 `_origin` 被丢弃，
@@ -10794,33 +12893,65 @@ Content-Length: 30
         let temp = tempfile::tempdir().unwrap();
         let gen_dir = temp.path().join("generated");
         std::fs::create_dir_all(&gen_dir).unwrap();
-        image::GrayImage::from_fn(40, 20, |x, _| image::Luma([if x < 20 { 0 } else { 255 }])).save(gen_dir.join("logo.png")).unwrap();
+        image::GrayImage::from_fn(40, 20, |x, _| image::Luma([if x < 20 { 0 } else { 255 }]))
+            .save(gen_dir.join("logo.png"))
+            .unwrap();
         for use_store in [true, false] {
-            let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                .with_generated_root(gen_dir.clone())
-                .with_preview_roots(vec![gen_dir.clone()]);
+            let mut service = ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_generated_root(gen_dir.clone())
+            .with_preview_roots(vec![gen_dir.clone()]);
             if use_store {
-                service = service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
+                service =
+                    service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));
             }
-            let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
-            let (_, ai) = post_with_ctx(&service, "/api/text-task/generate", &serde_json::json!({
-                "text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3, "_origin": "desktop"
-            }), laser_contracts::CallerContext::McpBridge);
+            let font = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/fonts/geometry.ttf"
+            );
+            let (_, ai) = post_with_ctx(
+                &service,
+                "/api/text-task/generate",
+                &serde_json::json!({
+                    "text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3, "_origin": "desktop"
+                }),
+                laser_contracts::CallerContext::McpBridge,
+            );
             assert_eq!(ai["result"]["origin"], "mcp_bridge", "{ai}");
             assert!(ai["result"]["input"].get("_origin").is_none(), "{ai}");
-            let (_, voice) = post_with_ctx(&service, "/api/workflow", &serde_json::json!({
-                "action": "preview", "source_type": "image", "image_file": "logo.png", "material": "椴木", "thickness_mm": 3
-            }), laser_contracts::CallerContext::Gateway { session_id: "g".into() });
+            let (_, voice) = post_with_ctx(
+                &service,
+                "/api/workflow",
+                &serde_json::json!({
+                    "action": "preview", "source_type": "image", "image_file": "logo.png", "material": "椴木", "thickness_mm": 3
+                }),
+                laser_contracts::CallerContext::Gateway {
+                    session_id: "g".into(),
+                },
+            );
             assert_eq!(voice["result"]["origin"], "gateway", "{voice}");
-            let source = voice["result"]["artifacts"]["source_image_file"].as_str().unwrap();
+            let source = voice["result"]["artifacts"]["source_image_file"]
+                .as_str()
+                .unwrap();
             assert!(gen_dir.join(source).exists());
-            let (_, desk) = post_with_ctx(&service, "/api/text-task/generate", &serde_json::json!({
-                "text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3, "_origin": "voice"
-            }), laser_contracts::CallerContext::Desktop);
+            let (_, desk) = post_with_ctx(
+                &service,
+                "/api/text-task/generate",
+                &serde_json::json!({
+                    "text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3, "_origin": "voice"
+                }),
+                laser_contracts::CallerContext::Desktop,
+            );
             assert_eq!(desk["result"]["origin"], "desktop", "{desk}");
             // 其他动作不改写已有记录的来源
             let id = ai["result"]["workflow_id"].as_str().unwrap();
-            let status = post_json(&service, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": id, "_origin": "desktop"}));
+            let status = post_json(
+                &service,
+                "/api/workflow",
+                &serde_json::json!({"action": "status", "workflow_id": id, "_origin": "desktop"}),
+            );
             assert_eq!(status["result"]["origin"], "mcp_bridge", "{status}");
         }
     }
@@ -10854,28 +12985,71 @@ Content-Length: 30
     fn strict_mode_blocks_loopback_r3_without_touching_device() {
         let fixture = strict_fixture(true, true);
         let workflow_id = preview_workflow(&fixture.service);
-        let send = post_json(&fixture.service, "/api/workflow", &confirm_send_body(&workflow_id, "127.0.0.1"));
-        assert_eq!(send["detail"]["error_code"], "strict_mode_blocked", "{send}");
-        let framing = post_json(&fixture.service, "/api/device/framing", &serde_json::json!({
-            "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
-        }));
-        assert_eq!(framing["detail"]["error_code"], "strict_mode_blocked", "{framing}");
-        let home = post_json(&fixture.service, "/api/safe-action", &serde_json::json!({
-            "action": "home", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
-        }));
-        assert_eq!(home["detail"]["error_code"], "strict_mode_blocked", "{home}");
-        assert!(fixture.targets.lock().unwrap().is_empty(), "未授权的 R3 不得连接设备");
+        let send = post_json(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+        );
+        assert_eq!(
+            send["detail"]["error_code"], "strict_mode_blocked",
+            "{send}"
+        );
+        let framing = post_json(
+            &fixture.service,
+            "/api/device/framing",
+            &serde_json::json!({
+                "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+            }),
+        );
+        assert_eq!(
+            framing["detail"]["error_code"], "strict_mode_blocked",
+            "{framing}"
+        );
+        let home = post_json(
+            &fixture.service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "home", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
+            }),
+        );
+        assert_eq!(
+            home["detail"]["error_code"], "strict_mode_blocked",
+            "{home}"
+        );
+        assert!(
+            fixture.targets.lock().unwrap().is_empty(),
+            "未授权的 R3 不得连接设备"
+        );
         assert!(fixture.written.lock().unwrap().is_empty());
-        let status = post_json(&fixture.service, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": workflow_id}));
+        let status = post_json(
+            &fixture.service,
+            "/api/workflow",
+            &serde_json::json!({"action": "status", "workflow_id": workflow_id}),
+        );
         assert_eq!(status["result"]["status"], "preview_ready", "{status}");
-        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty(), "回环不创建审批");
+        assert!(
+            fixture
+                .service
+                .approvals()
+                .unwrap()
+                .list(None, 10)
+                .unwrap()
+                .is_empty(),
+            "回环不创建审批"
+        );
     }
 
     /// A-27：急停、软复位、降低倍率、查询状态与取消在严格模式下照常执行。
     #[test]
     fn strict_mode_never_blocks_stop_actions() {
         let fixture = strict_fixture(true, true);
-        for action in ["emergency_stop", "soft_reset", "status", "feed_override_minus_10", "power_reset"] {
+        for action in [
+            "emergency_stop",
+            "soft_reset",
+            "status",
+            "feed_override_minus_10",
+            "power_reset",
+        ] {
             let (status, response) = post_with_ctx(
                 &fixture.service,
                 "/api/safe-action",
@@ -10885,7 +13059,10 @@ Content-Length: 30
             assert_ne!(status, 202, "{action}: {response}");
             assert_ne!(status, 403, "{action}: {response}");
         }
-        assert!(!fixture.targets.lock().unwrap().is_empty(), "停止类动作照常连接设备");
+        assert!(
+            !fixture.targets.lock().unwrap().is_empty(),
+            "停止类动作照常连接设备"
+        );
         let workflow_id = preview_workflow(&fixture.service);
         let (status, cancel) = post_with_ctx(
             &fixture.service,
@@ -10894,33 +13071,61 @@ Content-Length: 30
             laser_contracts::CallerContext::McpBridge,
         );
         assert_eq!(status, 200, "{cancel}");
-        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+        assert!(
+            fixture
+                .service
+                .approvals()
+                .unwrap()
+                .list(None, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn voice_ctx() -> laser_contracts::CallerContext {
-        laser_contracts::CallerContext::Voice { device_id: "aa:bb:cc:dd:ee:ff".into(), session_id: "sess-1".into() }
+        laser_contracts::CallerContext::Voice {
+            device_id: "aa:bb:cc:dd:ee:ff".into(),
+            session_id: "sess-1".into(),
+        }
     }
 
     #[test]
     fn active_job_stop_write_failure_is_not_reported_as_success() {
         struct FailRealtime;
         impl laser_device::DeviceTransport for FailRealtime {
-            fn write_line(&self, _: &str) -> Result<(), String> { panic!("stop must bypass G-code") }
+            fn write_line(&self, _: &str) -> Result<(), String> {
+                panic!("stop must bypass G-code")
+            }
             fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
                 assert_eq!(command, laser_device::RealtimeCommand::EmergencyStop);
                 Err("injected realtime failure".into())
             }
-            fn read_line(&self) -> Result<Option<String>, String> { Ok(None) }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                Ok(None)
+            }
         }
         let fixture = strict_fixture(true, true);
         let cancel = laser_device::CancellationToken::default();
-        fixture.service.active_jobs.lock().unwrap().insert("wf-fail-stop".into(), std::sync::Arc::new(ActiveJob {
-            workflow_id:"wf-fail-stop".into(),mode:"stream",target:"fake".into(),cancel:cancel.clone(),
-            progress:std::sync::Arc::new(laser_device::JobProgress::default()),transport:std::sync::Arc::new(FailRealtime),started_at:std::time::Instant::now(),
-        }));
-        let args = serde_json::from_value(serde_json::json!({"action":"emergency_stop","confirmed":true})).unwrap();
+        fixture.service.active_jobs.lock().unwrap().insert(
+            "wf-fail-stop".into(),
+            std::sync::Arc::new(ActiveJob {
+                workflow_id: "wf-fail-stop".into(),
+                mode: "stream",
+                target: "fake".into(),
+                cancel: cancel.clone(),
+                progress: std::sync::Arc::new(laser_device::JobProgress::default()),
+                transport: std::sync::Arc::new(FailRealtime),
+                started_at: std::time::Instant::now(),
+            }),
+        );
+        let args =
+            serde_json::from_value(serde_json::json!({"action":"emergency_stop","confirmed":true}))
+                .unwrap();
         let result = fixture.service.handle_safe_action(&args, &voice_ctx());
-        assert!(!result.success && result.result.contains("0x18 发送失败"), "{result:?}");
+        assert!(
+            !result.success && result.result.contains("0x18 发送失败"),
+            "{result:?}"
+        );
         assert!(cancel.is_cancelled());
     }
 
@@ -10932,17 +13137,37 @@ Content-Length: 30
         let workflow_id = preview_workflow(&fixture.service);
         let mut request = confirm_send_body(&workflow_id, "127.0.0.1");
         request["confirmed"] = serde_json::json!(true);
-        let (status, pending) = post_with_ctx(&fixture.service, "/api/workflow", &request, voice_ctx());
+        let (status, pending) =
+            post_with_ctx(&fixture.service, "/api/workflow", &request, voice_ctx());
         assert_eq!(status, 202, "{pending}");
         assert_eq!(pending["result"]["status"], "approval_required");
-        assert!(fixture.targets.lock().unwrap().is_empty() && fixture.written.lock().unwrap().is_empty(), "未批准不连接设备");
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        assert!(
+            fixture.targets.lock().unwrap().is_empty()
+                && fixture.written.lock().unwrap().is_empty(),
+            "未批准不连接设备"
+        );
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let approvals = fixture.service.approvals().unwrap();
         let record = approvals.get(&approval_id).unwrap();
         assert_eq!(record.source, laser_contracts::ApprovalSource::Voice);
         assert_eq!(record.session_id.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
-        let audit = fixture.db.as_ref().unwrap().lock().unwrap().recent_audit(20).unwrap();
-        assert!(audit.iter().any(|entry| entry.client == "voice:aa:bb:cc:dd:ee:ff"), "{audit:?}");
+        let audit = fixture
+            .db
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .recent_audit(20)
+            .unwrap();
+        assert!(
+            audit
+                .iter()
+                .any(|entry| entry.client == "voice:aa:bb:cc:dd:ee:ff"),
+            "{audit:?}"
+        );
 
         let (status, origin) = post_with_ctx(
             &fixture.service,
@@ -10953,9 +13178,14 @@ Content-Length: 30
         assert_eq!(status, 202, "设定原点（R3）同样需要审批：{origin}");
         assert!(fixture.targets.lock().unwrap().is_empty());
 
-        approvals.approve(&approval_id, &record.digest, &record.digest).unwrap();
-        let approval_ctx = laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() };
-        let (status, sent) = post_with_ctx(&fixture.service, "/api/workflow", &request, approval_ctx);
+        approvals
+            .approve(&approval_id, &record.digest, &record.digest)
+            .unwrap();
+        let approval_ctx = laser_contracts::CallerContext::Approval {
+            approval_id: approval_id.clone(),
+        };
+        let (status, sent) =
+            post_with_ctx(&fixture.service, "/api/workflow", &request, approval_ctx);
         assert_eq!(status, 200, "{sent}");
         assert_eq!(sent["result"]["status"], "sending");
     }
@@ -10967,10 +13197,20 @@ Content-Length: 30
         let workflow_id = preview_workflow(&fixture.service);
         let mut request = confirm_send_body(&workflow_id, "127.0.0.1");
         request["confirmed"] = serde_json::json!(true);
-        let (status, sent) = post_with_ctx(&fixture.service, "/api/workflow", &request, voice_ctx());
+        let (status, sent) =
+            post_with_ctx(&fixture.service, "/api/workflow", &request, voice_ctx());
         assert_eq!(status, 200, "{sent}");
         assert_eq!(sent["result"]["status"], "sending");
-        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty(), "严格模式关闭不生成审批");
+        assert!(
+            fixture
+                .service
+                .approvals()
+                .unwrap()
+                .list(None, 10)
+                .unwrap()
+                .is_empty(),
+            "严格模式关闭不生成审批"
+        );
         let finished = wait_for_status(&fixture.service, &workflow_id, "completed");
         assert_eq!(finished["result"]["status"], "completed", "{finished}");
     }
@@ -10983,39 +13223,86 @@ Content-Length: 30
         let owner = slot.clone();
         let written = fixture.written.clone();
         let factory = recording_transport_factory(100, written.clone());
-        let service = std::sync::Arc::new(fixture.service.with_transport_factory(std::sync::Arc::new(move |spec| {
-            let api = owner.get().unwrap().upgrade().unwrap();
-            api.set_voice_device_status("aa:bb:cc:dd:ee:ff", laser_runtime::VOICE_DEVICE_REVOKED, 0.0).unwrap();
-            factory(spec)
-        })));
+        let service = std::sync::Arc::new(fixture.service.with_transport_factory(
+            std::sync::Arc::new(move |spec| {
+                let api = owner.get().unwrap().upgrade().unwrap();
+                api.set_voice_device_status(
+                    "aa:bb:cc:dd:ee:ff",
+                    laser_runtime::VOICE_DEVICE_REVOKED,
+                    0.0,
+                )
+                .unwrap();
+                factory(spec)
+            }),
+        ));
         slot.set(std::sync::Arc::downgrade(&service)).unwrap();
         let id = preview_workflow(&service);
-        let (status, result) = post_with_ctx(&service, "/api/workflow", &confirm_send_body(&id,"127.0.0.1"), voice_ctx());
-        assert_eq!(status,403,"{result}");
+        let (status, result) = post_with_ctx(
+            &service,
+            "/api/workflow",
+            &confirm_send_body(&id, "127.0.0.1"),
+            voice_ctx(),
+        );
+        assert_eq!(status, 403, "{result}");
         assert!(service.active_jobs.lock().unwrap().is_empty());
-        assert!(written.lock().unwrap().iter().all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")), "revoked request must not send machining lines");
+        assert!(
+            written
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")),
+            "revoked request must not send machining lines"
+        );
     }
 
     #[test]
     fn revoke_during_connect_prevents_safe_motion_and_framing() {
         for (route, status, body) in [
-            ("/api/safe-action",400,serde_json::json!({"action":"home","confirmed":true,"connection_mode":"network","host":"127.0.0.1"})),
-            ("/api/device/framing",403,serde_json::json!({"confirmed":true,"connection_mode":"network","host":"127.0.0.1","max_x":10,"max_y":10})),
+            (
+                "/api/safe-action",
+                400,
+                serde_json::json!({"action":"home","confirmed":true,"connection_mode":"network","host":"127.0.0.1"}),
+            ),
+            (
+                "/api/device/framing",
+                403,
+                serde_json::json!({"confirmed":true,"connection_mode":"network","host":"127.0.0.1","max_x":10,"max_y":10}),
+            ),
         ] {
-            let fixture = strict_fixture(false,true);
-            let slot = std::sync::Arc::new(std::sync::OnceLock::<std::sync::Weak<ApiService>>::new());
+            let fixture = strict_fixture(false, true);
+            let slot =
+                std::sync::Arc::new(std::sync::OnceLock::<std::sync::Weak<ApiService>>::new());
             let owner = slot.clone();
             let written = fixture.written.clone();
-            let factory = recording_transport_factory(100,written.clone());
-            let service = std::sync::Arc::new(fixture.service.with_transport_factory(std::sync::Arc::new(move |spec| {
-                owner.get().unwrap().upgrade().unwrap().set_voice_device_status("aa:bb:cc:dd:ee:ff",laser_runtime::VOICE_DEVICE_REVOKED,0.0).unwrap();
-                factory(spec)
-            })));
+            let factory = recording_transport_factory(100, written.clone());
+            let service = std::sync::Arc::new(fixture.service.with_transport_factory(
+                std::sync::Arc::new(move |spec| {
+                    owner
+                        .get()
+                        .unwrap()
+                        .upgrade()
+                        .unwrap()
+                        .set_voice_device_status(
+                            "aa:bb:cc:dd:ee:ff",
+                            laser_runtime::VOICE_DEVICE_REVOKED,
+                            0.0,
+                        )
+                        .unwrap();
+                    factory(spec)
+                }),
+            ));
             slot.set(std::sync::Arc::downgrade(&service)).unwrap();
-            let (code,result) = post_with_ctx(&service,route,&body,voice_ctx());
-            assert_eq!(code,status,"{route}: {result}");
-            assert_eq!(result["success"],false);
-            assert!(written.lock().unwrap().iter().all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")),"no motion after revoke");
+            let (code, result) = post_with_ctx(&service, route, &body, voice_ctx());
+            assert_eq!(code, status, "{route}: {result}");
+            assert_eq!(result["success"], false);
+            assert!(
+                written
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|line| line == "$$" || line == "$CD" || line.starts_with("$RI=")),
+                "no motion after revoke"
+            );
         }
     }
 
@@ -11025,14 +13312,20 @@ Content-Length: 30
             let fixture = strict_fixture(strict, true);
             let fake = laser_device::FakeGrbl::new(Vec::<String>::new());
             let observed = fake.clone();
-            let service = fixture.service.with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake.clone()))));
+            let service = fixture
+                .service
+                .with_transport_factory(std::sync::Arc::new(move |_| Ok(Box::new(fake.clone()))));
             assert!(service.active_jobs.lock().unwrap().is_empty());
             let body = serde_json::json!({"action":"emergency_stop","confirmed":true,"connection_mode":"network","host":"127.0.0.1"});
             let (status, result) = post_with_ctx(&service, "/api/safe-action", &body, voice_ctx());
             assert_eq!(status, 200, "{result}");
             assert_eq!(observed.realtime(), vec![0x18]);
-            assert!(observed.lines().is_empty(), "reset must not wait behind handshake/G-code");
-            let service = service.with_transport_factory(std::sync::Arc::new(|_| Err("fake disconnected".into())));
+            assert!(
+                observed.lines().is_empty(),
+                "reset must not wait behind handshake/G-code"
+            );
+            let service = service
+                .with_transport_factory(std::sync::Arc::new(|_| Err("fake disconnected".into())));
             let (status, result) = post_with_ctx(&service, "/api/safe-action", &body, voice_ctx());
             assert_eq!(status, 400);
             assert_eq!(result["success"], false);
@@ -11052,7 +13345,10 @@ Content-Length: 30
             assert_ne!(status, 202, "{action}: {response}");
             assert_ne!(status, 403, "{action}: {response}");
         }
-        assert!(!fixture.targets.lock().unwrap().is_empty(), "停止类动作照常连接设备");
+        assert!(
+            !fixture.targets.lock().unwrap().is_empty(),
+            "停止类动作照常连接设备"
+        );
         let workflow_id = preview_workflow(&fixture.service);
         let (status, cancel) = post_with_ctx(
             &fixture.service,
@@ -11061,7 +13357,15 @@ Content-Length: 30
             voice_ctx(),
         );
         assert_eq!(status, 200, "{cancel}");
-        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+        assert!(
+            fixture
+                .service
+                .approvals()
+                .unwrap()
+                .list(None, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A-25 / A-21：严格模式下小智桥接的发送只生成审批；桌面批准后以审批身份执行，
@@ -11072,36 +13376,81 @@ Content-Length: 30
         let workflow_id = preview_workflow(&fixture.service);
         let mut request = confirm_send_body(&workflow_id, "127.0.0.1");
         request["request_id"] = serde_json::json!("req-1");
-        let (status, pending) =
-            post_with_ctx(&fixture.service, "/api/workflow", &request, laser_contracts::CallerContext::McpBridge);
+        let (status, pending) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &request,
+            laser_contracts::CallerContext::McpBridge,
+        );
         assert_eq!(status, 202, "{pending}");
         assert_eq!(pending["success"], true);
         assert_eq!(pending["result"]["status"], "approval_required");
-        assert!(pending["result"]["speech"].as_str().is_some_and(|speech| !speech.is_empty()));
-        assert!(!pending.to_string().contains("127.0.0.1"), "响应不得包含设备地址: {pending}");
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
-        assert!(fixture.targets.lock().unwrap().is_empty() && fixture.written.lock().unwrap().is_empty());
-        let status_now = post_json(&fixture.service, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": workflow_id}));
+        assert!(
+            pending["result"]["speech"]
+                .as_str()
+                .is_some_and(|speech| !speech.is_empty())
+        );
+        assert!(
+            !pending.to_string().contains("127.0.0.1"),
+            "响应不得包含设备地址: {pending}"
+        );
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            fixture.targets.lock().unwrap().is_empty()
+                && fixture.written.lock().unwrap().is_empty()
+        );
+        let status_now = post_json(
+            &fixture.service,
+            "/api/workflow",
+            &serde_json::json!({"action": "status", "workflow_id": workflow_id}),
+        );
         assert_eq!(status_now["result"]["status"], "preview_ready");
-        let (_, again) =
-            post_with_ctx(&fixture.service, "/api/workflow", &request, laser_contracts::CallerContext::McpBridge);
-        assert_ne!(again["result"]["approval_id"], approval_id.as_str(), "旧桥接身份无法区分接入点，不得按自报编号复用另一条审批");
-        assert!(fixture.targets.lock().unwrap().is_empty(), "两次请求仍都未获执行授权");
+        let (_, again) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &request,
+            laser_contracts::CallerContext::McpBridge,
+        );
+        assert_ne!(
+            again["result"]["approval_id"],
+            approval_id.as_str(),
+            "旧桥接身份无法区分接入点，不得按自报编号复用另一条审批"
+        );
+        assert!(
+            fixture.targets.lock().unwrap().is_empty(),
+            "两次请求仍都未获执行授权"
+        );
 
-        let approval_ctx = laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() };
+        let approval_ctx = laser_contracts::CallerContext::Approval {
+            approval_id: approval_id.clone(),
+        };
         let execute = confirm_send_body(&workflow_id, "192.0.2.99");
-        let (status, early) = post_with_ctx(&fixture.service, "/api/workflow", &execute, approval_ctx.clone());
+        let (status, early) = post_with_ctx(
+            &fixture.service,
+            "/api/workflow",
+            &execute,
+            approval_ctx.clone(),
+        );
         assert_eq!(status, 409, "{early}");
         assert_eq!(early["detail"]["error_code"], "approval_not_approved");
 
         let approvals = fixture.service.approvals().unwrap();
         let record = approvals.get(&approval_id).unwrap();
-        assert_eq!(record.kind, laser_contracts::ApprovalKind::WorkflowConfirmSend);
+        assert_eq!(
+            record.kind,
+            laser_contracts::ApprovalKind::WorkflowConfirmSend
+        );
         assert_eq!(record.source, laser_contracts::ApprovalSource::McpBridge);
         assert_eq!(record.target_record, workflow_id);
-        approvals.approve(&approval_id, &record.digest, &record.digest).unwrap();
+        approvals
+            .approve(&approval_id, &record.digest, &record.digest)
+            .unwrap();
 
-        let (status, sent) = post_with_ctx(&fixture.service, "/api/workflow", &execute, approval_ctx);
+        let (status, sent) =
+            post_with_ctx(&fixture.service, "/api/workflow", &execute, approval_ctx);
         assert_eq!(status, 200, "{sent}");
         assert_eq!(sent["result"]["status"], "sending");
         assert_eq!(
@@ -11111,7 +13460,10 @@ Content-Length: 30
         );
         let executed = approvals.get(&approval_id).unwrap();
         assert_eq!(executed.status, laser_contracts::ApprovalStatus::Executed);
-        assert_eq!(executed.outcome.unwrap().job_id.as_deref(), Some(workflow_id.as_str()));
+        assert_eq!(
+            executed.outcome.unwrap().job_id.as_deref(),
+            Some(workflow_id.as_str())
+        );
         let finished = wait_for_status(&fixture.service, &workflow_id, "completed");
         assert_eq!(finished["result"]["status"], "completed", "{finished}");
     }
@@ -11123,24 +13475,44 @@ Content-Length: 30
         let body = serde_json::json!({
             "action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
         });
-        let lan = laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() };
+        let lan = laser_contracts::CallerContext::Lan {
+            pairing_id: "pair_test".into(),
+        };
         let (status, pending) = post_with_ctx(&fixture.service, "/api/safe-action", &body, lan);
         assert_eq!(status, 202, "{pending}");
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert!(fixture.targets.lock().unwrap().is_empty());
         let approvals = fixture.service.approvals().unwrap();
         let record = approvals.get(&approval_id).unwrap();
         assert_eq!(record.kind, laser_contracts::ApprovalKind::SafeAction);
         assert_eq!(record.source, laser_contracts::ApprovalSource::Lan);
-        approvals.approve(&approval_id, &record.digest, &record.digest).unwrap();
+        approvals
+            .approve(&approval_id, &record.digest, &record.digest)
+            .unwrap();
 
-        let approval_ctx = laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() };
-        let (_, done) = post_with_ctx(&fixture.service, "/api/safe-action", &body, approval_ctx.clone());
+        let approval_ctx = laser_contracts::CallerContext::Approval {
+            approval_id: approval_id.clone(),
+        };
+        let (_, done) = post_with_ctx(
+            &fixture.service,
+            "/api/safe-action",
+            &body,
+            approval_ctx.clone(),
+        );
         assert!(
-            fixture.written.lock().unwrap().iter().any(|line| line == "G92 X0 Y0"),
+            fixture
+                .written
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line == "G92 X0 Y0"),
             "批准后应执行一次: {done}"
         );
-        let (status, replay) = post_with_ctx(&fixture.service, "/api/safe-action", &body, approval_ctx);
+        let (status, replay) =
+            post_with_ctx(&fixture.service, "/api/safe-action", &body, approval_ctx);
         assert_eq!(status, 409, "{replay}");
         assert_eq!(replay["detail"]["error_code"], "approval_consumed");
 
@@ -11149,20 +13521,29 @@ Content-Length: 30
             &fixture.service,
             "/api/safe-action",
             &body,
-            laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() },
+            laser_contracts::CallerContext::Lan {
+                pairing_id: "pair_test".into(),
+            },
         );
         let second_id = second["result"]["approval_id"].as_str().unwrap().to_owned();
         let second_record = approvals.get(&second_id).unwrap();
-        approvals.approve(&second_id, &second_record.digest, &second_record.digest).unwrap();
+        approvals
+            .approve(&second_id, &second_record.digest, &second_record.digest)
+            .unwrap();
         let (status, mismatch) = post_with_ctx(
             &fixture.service,
             "/api/safe-action",
             &serde_json::json!({"action": "home", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"}),
-            laser_contracts::CallerContext::Approval { approval_id: second_id.clone() },
+            laser_contracts::CallerContext::Approval {
+                approval_id: second_id.clone(),
+            },
         );
         assert_eq!(status, 409, "{mismatch}");
         assert_eq!(mismatch["detail"]["error_code"], "approval_mismatch");
-        assert_eq!(approvals.get(&second_id).unwrap().status, laser_contracts::ApprovalStatus::Failed);
+        assert_eq!(
+            approvals.get(&second_id).unwrap().status,
+            laser_contracts::ApprovalStatus::Failed
+        );
     }
 
     #[test]
@@ -11206,11 +13587,26 @@ Content-Length: 30
         assert_eq!(status, 200, "{sent}");
         assert_eq!(sent["result"]["status"], "sending");
         wait_for_status(&fixture.service, &workflow_id, "completed");
-        let home = post_json(&fixture.service, "/api/safe-action", &serde_json::json!({
-            "action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
-        }));
-        assert_ne!(home["detail"]["error_code"], "strict_mode_blocked", "{home}");
-        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+        let home = post_json(
+            &fixture.service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"
+            }),
+        );
+        assert_ne!(
+            home["detail"]["error_code"], "strict_mode_blocked",
+            "{home}"
+        );
+        assert!(
+            fixture
+                .service
+                .approvals()
+                .unwrap()
+                .list(None, 10)
+                .unwrap()
+                .is_empty()
+        );
         assert!(!fixture.service.strict_mode());
     }
 
@@ -11224,7 +13620,9 @@ Content-Length: 30
         session: Option<&str>,
     ) -> (u16, serde_json::Value) {
         let body = body.map(|value| value.to_string()).unwrap_or_default();
-        let header = session.map(|value| format!("X-Moss-Desktop-Session: {value}\r\n")).unwrap_or_default();
+        let header = session
+            .map(|value| format!("X-Moss-Desktop-Session: {value}\r\n"))
+            .unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{header}Content-Length: {}\r\n\r\n{}",
             body.len(),
@@ -11241,22 +13639,52 @@ Content-Length: 30
         let workflow_id = preview_workflow(&fixture.service);
         let send = confirm_send_body(&workflow_id, "127.0.0.1");
         // 尚未开启桌面会话（如独立 moss-host）：带头即拒绝
-        let (status, rejected) = desktop_request(&fixture.service, "POST", "/api/workflow", Some(&send), Some(&"a".repeat(64)));
+        let (status, rejected) = desktop_request(
+            &fixture.service,
+            "POST",
+            "/api/workflow",
+            Some(&send),
+            Some(&"a".repeat(64)),
+        );
         assert_eq!(status, 403, "{rejected}");
         assert_eq!(rejected["detail"]["error_code"], "desktop_session_invalid");
 
         let session = fixture.service.enable_desktop_session().unwrap();
         assert_eq!(session.len(), 64);
-        assert_eq!(fixture.service.enable_desktop_session().unwrap(), session, "同一进程只有一个会话");
-        let (status, wrong) = desktop_request(&fixture.service, "POST", "/api/workflow", Some(&send), Some(&"b".repeat(64)));
+        assert_eq!(
+            fixture.service.enable_desktop_session().unwrap(),
+            session,
+            "同一进程只有一个会话"
+        );
+        let (status, wrong) = desktop_request(
+            &fixture.service,
+            "POST",
+            "/api/workflow",
+            Some(&send),
+            Some(&"b".repeat(64)),
+        );
         assert_eq!(status, 403, "{wrong}");
         assert_eq!(wrong["detail"]["error_code"], "desktop_session_invalid");
         assert!(fixture.targets.lock().unwrap().is_empty());
         // 非回环连接即使带对了值也不算桌面会话
-        assert!(fixture.service.check_desktop_session(&format!("GET / HTTP/1.1\r\nX-Moss-Desktop-Session: {session}"), false).is_err());
+        assert!(
+            fixture
+                .service
+                .check_desktop_session(
+                    &format!("GET / HTTP/1.1\r\nX-Moss-Desktop-Session: {session}"),
+                    false
+                )
+                .is_err()
+        );
 
         // 严格模式下带有效会话的本机发送 = 桌面端，直接执行
-        let (status, sent) = desktop_request(&fixture.service, "POST", "/api/workflow", Some(&send), Some(&session));
+        let (status, sent) = desktop_request(
+            &fixture.service,
+            "POST",
+            "/api/workflow",
+            Some(&send),
+            Some(&session),
+        );
         assert_eq!(status, 200, "{sent}");
         assert_eq!(sent["result"]["status"], "sending");
         wait_for_status(&fixture.service, &workflow_id, "completed");
@@ -11267,7 +13695,13 @@ Content-Length: 30
     fn approval_routes_require_desktop_session() {
         let fixture = strict_fixture(true, true);
         let session = fixture.service.enable_desktop_session().unwrap();
-        let (status, response) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=pending", None, None);
+        let (status, response) = desktop_request(
+            &fixture.service,
+            "GET",
+            "/v1/approvals?status=pending",
+            None,
+            None,
+        );
         assert_eq!(status, 403, "{response}");
         assert_eq!(response["detail"]["error_code"], "desktop_session_required");
         let (status, _) = post_with_ctx(
@@ -11277,15 +13711,34 @@ Content-Length: 30
             laser_contracts::CallerContext::McpBridge,
         );
         assert_eq!(status, 403);
-        let (status, response) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=bogus", None, Some(&session));
+        let (status, response) = desktop_request(
+            &fixture.service,
+            "GET",
+            "/v1/approvals?status=bogus",
+            None,
+            Some(&session),
+        );
         assert_eq!(status, 400, "{response}");
-        let (status, response) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=pending", None, Some(&session));
+        let (status, response) = desktop_request(
+            &fixture.service,
+            "GET",
+            "/v1/approvals?status=pending",
+            None,
+            Some(&session),
+        );
         assert_eq!(status, 200, "{response}");
         assert_eq!(response["result"]["approvals"].as_array().unwrap().len(), 0);
-        assert_eq!(response["result"]["limit"], 50, "列表上限随结果返回，界面不把它当总数");
+        assert_eq!(
+            response["result"]["limit"], 50,
+            "列表上限随结果返回，界面不把它当总数"
+        );
         assert_eq!(response["result"]["ttl_seconds"], 120);
         let (status, response) = desktop_request(
-            &fixture.service, "POST", "/v1/approvals/apr_missing/approve", Some(&serde_json::json!({"digest": "x"})), Some(&session),
+            &fixture.service,
+            "POST",
+            "/v1/approvals/apr_missing/approve",
+            Some(&serde_json::json!({"digest": "x"})),
+            Some(&session),
         );
         assert_eq!(status, 404, "{response}");
         assert_eq!(response["detail"]["error_code"], "approval_not_found");
@@ -11304,36 +13757,65 @@ Content-Length: 30
             laser_contracts::CallerContext::McpBridge,
         );
         assert_eq!(status, 202, "{pending}");
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
-        let (status, listed) = desktop_request(&fixture.service, "GET", "/v1/approvals?status=pending", None, Some(&session));
+        let (status, listed) = desktop_request(
+            &fixture.service,
+            "GET",
+            "/v1/approvals?status=pending",
+            None,
+            Some(&session),
+        );
         assert_eq!(status, 200, "{listed}");
         let card = &listed["result"]["approvals"][0];
         assert_eq!(card["approval_id"], approval_id.as_str());
         assert_eq!(card["target"]["mode"], "network");
         assert_eq!(card["target"]["label"], "网络设备");
-        assert!(!listed.to_string().contains("127.0.0.1"), "列表不得包含设备地址: {listed}");
+        assert!(
+            !listed.to_string().contains("127.0.0.1"),
+            "列表不得包含设备地址: {listed}"
+        );
         let digest = card["digest"].as_str().unwrap().to_owned();
 
         let approve_path = format!("/v1/approvals/{approval_id}/approve");
         let (status, wrong) = desktop_request(
-            &fixture.service, "POST", &approve_path, Some(&serde_json::json!({"digest": "0".repeat(64)})), Some(&session),
+            &fixture.service,
+            "POST",
+            &approve_path,
+            Some(&serde_json::json!({"digest": "0".repeat(64)})),
+            Some(&session),
         );
         assert_eq!(status, 409, "{wrong}");
         assert_eq!(wrong["detail"]["error_code"], "approval_mismatch");
         assert!(fixture.targets.lock().unwrap().is_empty());
 
-        let (status, approved) =
-            desktop_request(&fixture.service, "POST", &approve_path, Some(&serde_json::json!({"digest": digest})), Some(&session));
+        let (status, approved) = desktop_request(
+            &fixture.service,
+            "POST",
+            &approve_path,
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
         assert_eq!(status, 200, "{approved}");
         assert_eq!(approved["result"]["result"]["status"], "sending");
         assert_eq!(approved["result"]["approval"]["status"], "executed");
-        assert_eq!(fixture.targets.lock().unwrap().first().map(String::as_str), Some("127.0.0.1:23"));
+        assert_eq!(
+            fixture.targets.lock().unwrap().first().map(String::as_str),
+            Some("127.0.0.1:23")
+        );
         let finished = wait_for_status(&fixture.service, &workflow_id, "completed");
         assert_eq!(finished["result"]["status"], "completed", "{finished}");
 
-        let (status, again) =
-            desktop_request(&fixture.service, "POST", &approve_path, Some(&serde_json::json!({"digest": digest})), Some(&session));
+        let (status, again) = desktop_request(
+            &fixture.service,
+            "POST",
+            &approve_path,
+            Some(&serde_json::json!({"digest": digest})),
+            Some(&session),
+        );
         assert_eq!(status, 409, "{again}");
         assert_eq!(again["detail"]["error_code"], "approval_consumed");
     }
@@ -11350,11 +13832,23 @@ Content-Length: 30
             &confirm_send_body(&workflow_id, "127.0.0.1"),
             laser_contracts::CallerContext::McpBridge,
         );
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
-        let digest = fixture.service.approvals().unwrap().get(&approval_id).unwrap().digest;
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let digest = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&approval_id)
+            .unwrap()
+            .digest;
 
         let store = fixture.service.store.as_ref().unwrap();
-        let mut stored = store.get(laser_runtime::RecordKind::Workflow, &workflow_id).unwrap().unwrap();
+        let mut stored = store
+            .get(laser_runtime::RecordKind::Workflow, &workflow_id)
+            .unwrap()
+            .unwrap();
         stored.payload["artifacts"]["gcode_sha256"] = serde_json::json!("f".repeat(64));
         store.put(&stored).unwrap();
 
@@ -11368,7 +13862,10 @@ Content-Length: 30
         assert_eq!(status, 409, "{response}");
         assert_eq!(response["detail"]["error_code"], "approval_mismatch");
         assert_eq!(response["detail"]["approval"]["status"], "pending");
-        assert!(fixture.targets.lock().unwrap().is_empty(), "摘要不一致不得连接设备");
+        assert!(
+            fixture.targets.lock().unwrap().is_empty(),
+            "摘要不一致不得连接设备"
+        );
     }
 
     #[test]
@@ -11376,7 +13873,9 @@ Content-Length: 30
         let fixture = strict_fixture(true, true);
         let session = fixture.service.enable_desktop_session().unwrap();
         let body = serde_json::json!({"action": "set_origin", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1"});
-        let lan = || laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() };
+        let lan = || laser_contracts::CallerContext::Lan {
+            pairing_id: "pair_test".into(),
+        };
 
         let (_, first) = post_with_ctx(&fixture.service, "/api/safe-action", &body, lan());
         let first_id = first["result"]["approval_id"].as_str().unwrap().to_owned();
@@ -11389,7 +13888,13 @@ Content-Length: 30
         );
         assert_eq!(status, 200, "{rejected}");
         assert_eq!(rejected["result"]["status"], "rejected");
-        let digest = fixture.service.approvals().unwrap().get(&first_id).unwrap().digest;
+        let digest = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&first_id)
+            .unwrap()
+            .digest;
         let (status, after_reject) = desktop_request(
             &fixture.service,
             "POST",
@@ -11403,7 +13908,13 @@ Content-Length: 30
 
         let (_, second) = post_with_ctx(&fixture.service, "/api/safe-action", &body, lan());
         let second_id = second["result"]["approval_id"].as_str().unwrap().to_owned();
-        let digest = fixture.service.approvals().unwrap().get(&second_id).unwrap().digest;
+        let digest = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&second_id)
+            .unwrap()
+            .digest;
         let (_, approved) = desktop_request(
             &fixture.service,
             "POST",
@@ -11412,12 +13923,26 @@ Content-Length: 30
             Some(&session),
         );
         assert!(
-            fixture.written.lock().unwrap().iter().any(|line| line == "G92 X0 Y0"),
+            fixture
+                .written
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line == "G92 X0 Y0"),
             "批准后应执行设原点: {approved}"
         );
-        let state = fixture.service.approvals().unwrap().get(&second_id).unwrap().status;
+        let state = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&second_id)
+            .unwrap()
+            .status;
         assert!(
-            matches!(state, laser_contracts::ApprovalStatus::Executed | laser_contracts::ApprovalStatus::Failed),
+            matches!(
+                state,
+                laser_contracts::ApprovalStatus::Executed | laser_contracts::ApprovalStatus::Failed
+            ),
             "{state:?}"
         );
     }
@@ -11425,7 +13950,14 @@ Content-Length: 30
     // ----- 审计（技术书 §7.3，实施清单 P1-08，验收 A-20、A-34） -----
 
     fn audit_trail(fixture: &StrictFixture) -> Vec<laser_contracts::AuditEntry> {
-        let mut entries = fixture.db.as_ref().unwrap().lock().unwrap().recent_audit(100).unwrap();
+        let mut entries = fixture
+            .db
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .recent_audit(100)
+            .unwrap();
         entries.reverse();
         entries
     }
@@ -11439,7 +13971,11 @@ Content-Length: 30
         let session = fixture.service.enable_desktop_session().unwrap();
         let workflow_id = preview_workflow(&fixture.service);
 
-        let blocked = post_json(&fixture.service, "/api/workflow", &confirm_send_body(&workflow_id, "127.0.0.1"));
+        let blocked = post_json(
+            &fixture.service,
+            "/api/workflow",
+            &confirm_send_body(&workflow_id, "127.0.0.1"),
+        );
         assert_eq!(blocked["detail"]["error_code"], "strict_mode_blocked");
 
         let (status, pending) = post_with_ctx(
@@ -11449,8 +13985,17 @@ Content-Length: 30
             laser_contracts::CallerContext::McpBridge,
         );
         assert_eq!(status, 202, "{pending}");
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
-        let digest = fixture.service.approvals().unwrap().get(&approval_id).unwrap().digest;
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let digest = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&approval_id)
+            .unwrap()
+            .digest;
         let (status, approved) = desktop_request(
             &fixture.service,
             "POST",
@@ -11478,13 +14023,25 @@ Content-Length: 30
         assert_eq!(trail[0].result, AuditResult::Denied);
         assert_eq!(trail[0].target, workflow_id);
         assert_eq!(trail[1].client, "mcp");
-        assert_eq!(trail[2].detail.removed_fields, vec!["confirmed".to_string()]);
+        assert_eq!(
+            trail[2].detail.removed_fields,
+            vec!["confirmed".to_string()]
+        );
         assert_eq!(trail[3].client, "desktop");
-        assert!(trail[1..].iter().all(|entry| entry.detail.approval_id.as_deref() == Some(approval_id.as_str())));
+        assert!(
+            trail[1..]
+                .iter()
+                .all(|entry| entry.detail.approval_id.as_deref() == Some(approval_id.as_str()))
+        );
         let text = serde_json::to_string(&trail).unwrap();
         assert!(!text.contains("127.0.0.1"), "审计不得包含设备地址: {text}");
         // 审批保存的执行参数里也不保留模型自填的 confirmed
-        let stored = fixture.service.approvals().unwrap().get(&approval_id).unwrap();
+        let stored = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&approval_id)
+            .unwrap();
         assert!(!stored.request.unwrap().contains_key("confirmed"));
     }
 
@@ -11492,8 +14049,18 @@ Content-Length: 30
     #[test]
     fn audit_failure_refuses_r3_and_keeps_r2() {
         let fixture = strict_fixture(true, true);
-        fixture.db.as_ref().unwrap().lock().unwrap().connection.execute_batch("DROP TABLE audit_log;").unwrap();
-        let lan = || laser_contracts::CallerContext::Lan { pairing_id: "pair_test".into() };
+        fixture
+            .db
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .connection
+            .execute_batch("DROP TABLE audit_log;")
+            .unwrap();
+        let lan = || laser_contracts::CallerContext::Lan {
+            pairing_id: "pair_test".into(),
+        };
 
         let (status, refused) = post_with_ctx(
             &fixture.service,
@@ -11503,7 +14070,15 @@ Content-Length: 30
         );
         assert_eq!(status, 503, "{refused}");
         assert_eq!(refused["detail"]["error_code"], "approval_unavailable");
-        assert!(fixture.service.approvals().unwrap().list(None, 10).unwrap().is_empty());
+        assert!(
+            fixture
+                .service
+                .approvals()
+                .unwrap()
+                .list(None, 10)
+                .unwrap()
+                .is_empty()
+        );
         assert!(fixture.targets.lock().unwrap().is_empty());
 
         let (status, stopped) = post_with_ctx(
@@ -11513,12 +14088,19 @@ Content-Length: 30
             lan(),
         );
         assert!(status != 503 && status != 403 && status != 202, "{stopped}");
-        assert!(!fixture.targets.lock().unwrap().is_empty(), "急停照常连接设备");
+        assert!(
+            !fixture.targets.lock().unwrap().is_empty(),
+            "急停照常连接设备"
+        );
 
         // 回环被拦截时审计也写不进去，但拦截照常生效
-        let blocked = post_json(&fixture.service, "/api/device/framing", &serde_json::json!({
-            "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
-        }));
+        let blocked = post_json(
+            &fixture.service,
+            "/api/device/framing",
+            &serde_json::json!({
+                "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+            }),
+        );
         assert_eq!(blocked["detail"]["error_code"], "strict_mode_blocked");
     }
 
@@ -11526,7 +14108,9 @@ Content-Length: 30
 
     /// 握手与预检正常，第一条加工行写入时一直阻塞到测试放行：作业确定停在“发送中”，
     /// 模拟进程崩溃时的在途作业（不依赖心跳或超时的时序）。
-    fn gated_transport_factory(gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> TransportFactory {
+    fn gated_transport_factory(
+        gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> TransportFactory {
         struct GatedGrbl {
             responses: std::sync::Mutex<std::collections::VecDeque<String>>,
             gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -11549,7 +14133,10 @@ Content-Length: 30
             }
             fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
                 if command == laser_device::RealtimeCommand::StatusQuery {
-                    self.responses.lock().unwrap().push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
                 }
                 Ok(())
             }
@@ -11558,12 +14145,18 @@ Content-Length: 30
             }
         }
         std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
-            Ok(Box::new(GatedGrbl { responses: Default::default(), gate: gate.clone() }) as Box<dyn laser_device::DeviceTransport>)
+            Ok(Box::new(GatedGrbl {
+                responses: Default::default(),
+                gate: gate.clone(),
+            }) as Box<dyn laser_device::DeviceTransport>)
         })
     }
 
     /// 走边框用的假设备：实时状态固定为 `status`，记录写入的每一行。
-    fn status_transport_factory(status: &'static str, written: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> TransportFactory {
+    fn status_transport_factory(
+        status: &'static str,
+        written: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> TransportFactory {
         struct StatusGrbl {
             status: &'static str,
             responses: std::sync::Mutex<std::collections::VecDeque<String>>,
@@ -11582,7 +14175,10 @@ Content-Length: 30
             }
             fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
                 if command == laser_device::RealtimeCommand::StatusQuery {
-                    self.responses.lock().unwrap().push_back(format!("<{}|MPos:0,0,0|FS:0,0>", self.status));
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back(format!("<{}|MPos:0,0,0|FS:0,0>", self.status));
                 }
                 Ok(())
             }
@@ -11591,7 +14187,11 @@ Content-Length: 30
             }
         }
         std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
-            Ok(Box::new(StatusGrbl { status, responses: Default::default(), written: written.clone() }) as Box<dyn laser_device::DeviceTransport>)
+            Ok(Box::new(StatusGrbl {
+                status,
+                responses: Default::default(),
+                written: written.clone(),
+            }) as Box<dyn laser_device::DeviceTransport>)
         })
     }
 
@@ -11600,47 +14200,103 @@ Content-Length: 30
     fn framing_defaults_to_laser_off_and_requires_idle_preflight() {
         let framing = |service: &ApiService, power: Option<i64>| {
             let mut body = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "max_x": 20, "max_y": 10});
-            if let Some(power) = power { body["power"] = power.into(); }
+            if let Some(power) = power {
+                body["power"] = power.into();
+            }
             post_json(service, "/api/device/framing", &body)
         };
-        let motion = |lines: &[String]| lines.iter().filter(|line| line.starts_with("G0") || line.starts_with("G1") || line.starts_with("M4")).cloned().collect::<Vec<_>>();
+        let motion = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|line| {
+                    line.starts_with("G0") || line.starts_with("G1") || line.starts_with("M4")
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
 
         let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_transport_factory(status_transport_factory("Idle", written.clone()));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(status_transport_factory("Idle", written.clone()));
         let off = framing(&service, None);
         assert_eq!(off["success"], true, "{off}");
         assert_eq!(off["result"]["laser_on"], false);
         let lines = written.lock().unwrap().clone();
-        assert!(!lines.iter().any(|line| line.starts_with("M4")), "默认不能出光: {lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with("G1 X20")), "{lines:?}");
+        assert!(
+            !lines.iter().any(|line| line.starts_with("M4")),
+            "默认不能出光: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("G1 X20")),
+            "{lines:?}"
+        );
         assert_eq!(service.active_job_count(), 0, "完成后不再占用设备");
 
         // 以激光头当前位置为原点（AI 预览窗“先走边框”）：先 G92 置零，范围可为负，最后回到起点
         written.lock().unwrap().clear();
-        let relative = post_json(&service, "/api/device/framing", &serde_json::json!({
-            "connection_mode": "network", "network_host": "127.0.0.1", "relative_to_head": true,
-            "min_x": -15, "max_x": 15, "min_y": -5, "max_y": 5
-        }));
+        let relative = post_json(
+            &service,
+            "/api/device/framing",
+            &serde_json::json!({
+                "connection_mode": "network", "network_host": "127.0.0.1", "relative_to_head": true,
+                "min_x": -15, "max_x": 15, "min_y": -5, "max_y": 5
+            }),
+        );
         assert_eq!(relative["success"], true, "{relative}");
         let lines = written.lock().unwrap().clone();
-        let g92 = lines.iter().position(|line| line.starts_with("G92 X0 Y0")).expect("必须先把当前位置设为原点");
-        let first_move = lines.iter().position(|line| line.starts_with("G0") || line.starts_with("G1")).unwrap();
+        let g92 = lines
+            .iter()
+            .position(|line| line.starts_with("G92 X0 Y0"))
+            .expect("必须先把当前位置设为原点");
+        let first_move = lines
+            .iter()
+            .position(|line| line.starts_with("G0") || line.starts_with("G1"))
+            .unwrap();
         assert!(g92 < first_move, "{lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with("G0 X-15.000 Y-5.000")), "{lines:?}");
-        assert!(lines.iter().filter(|line| line.starts_with("G0") || line.starts_with("G1")).last().unwrap().starts_with("G0 X0 Y0"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("G0 X-15.000 Y-5.000")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("G0") || line.starts_with("G1"))
+                .last()
+                .unwrap()
+                .starts_with("G0 X0 Y0"),
+            "{lines:?}"
+        );
 
         written.lock().unwrap().clear();
         let weak = framing(&service, Some(1));
         assert_eq!(weak["result"]["laser_on"], true, "{weak}");
-        assert!(written.lock().unwrap().iter().any(|line| line == "M4 S1"), "{:?}", written.lock().unwrap());
+        assert!(
+            written.lock().unwrap().iter().any(|line| line == "M4 S1"),
+            "{:?}",
+            written.lock().unwrap()
+        );
 
         let alarm_written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let alarm = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_transport_factory(status_transport_factory("Alarm", alarm_written.clone()));
+        let alarm = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(status_transport_factory("Alarm", alarm_written.clone()));
         let refused = framing(&alarm, Some(1));
-        assert_eq!(refused["detail"]["error_code"], "device_preflight_failed", "{refused}");
-        assert!(motion(&alarm_written.lock().unwrap()).is_empty(), "预检失败不能运动: {:?}", alarm_written.lock().unwrap());
+        assert_eq!(
+            refused["detail"]["error_code"], "device_preflight_failed",
+            "{refused}"
+        );
+        assert!(
+            motion(&alarm_written.lock().unwrap()).is_empty(),
+            "预检失败不能运动: {:?}",
+            alarm_written.lock().unwrap()
+        );
     }
 
     /// 走边框的 `power` / `feed_rate` 必须是范围内整数：溢出不能回绕（4294968096 曾变成 S800），
@@ -11648,8 +14304,11 @@ Content-Length: 30
     #[test]
     fn framing_rejects_overflowing_or_out_of_range_power_and_feed() {
         let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_transport_factory(status_transport_factory("Idle", written.clone()));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_transport_factory(status_transport_factory("Idle", written.clone()));
         let framing = |extra: serde_json::Value| {
             let mut body = serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "max_x": 20, "max_y": 10});
             for (key, value) in extra.as_object().unwrap() {
@@ -11670,15 +14329,26 @@ Content-Length: 30
         for extra in rejected {
             let result = framing(extra.clone());
             assert_eq!(result["success"], false, "{extra}: {result}");
-            assert_eq!(result["detail"]["error_code"], "framing_params_invalid", "{extra}: {result}");
-            assert!(written.lock().unwrap().is_empty(), "参数无效时不能连接或写设备: {extra}");
+            assert_eq!(
+                result["detail"]["error_code"], "framing_params_invalid",
+                "{extra}: {result}"
+            );
+            assert!(
+                written.lock().unwrap().is_empty(),
+                "参数无效时不能连接或写设备: {extra}"
+            );
         }
 
         let accepted = framing(serde_json::json!({"power": 1000, "feed_rate": 2500}));
         assert_eq!(accepted["success"], true, "{accepted}");
         let lines = written.lock().unwrap().clone();
         assert!(lines.iter().any(|line| line == "M4 S1000"), "{lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with("G1 X20") && line.ends_with("F2500")), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("G1 X20") && line.ends_with("F2500")),
+            "{lines:?}"
+        );
     }
 
     /// 动作名大小写不敏感（与 laser-tools 一致）：运行中的作业收到 `Emergency_Stop` / `EMERGENCY_STOP`
@@ -11709,7 +14379,10 @@ Content-Length: 30
             }
             fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
                 if command == laser_device::RealtimeCommand::StatusQuery {
-                    self.responses.lock().unwrap().push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
                 } else {
                     self.realtime.lock().unwrap().push(command);
                 }
@@ -11726,17 +14399,31 @@ Content-Length: 30
             let (gate, realtime, opens) = (gate.clone(), realtime.clone(), opens.clone());
             std::sync::Arc::new(move |_spec: &laser_device::ConnectionSpec| {
                 opens.fetch_add(1, Ordering::SeqCst);
-                Ok(Box::new(GatedRecordingGrbl { responses: Default::default(), realtime: realtime.clone(), gate: gate.clone() }) as Box<dyn laser_device::DeviceTransport>)
+                Ok(Box::new(GatedRecordingGrbl {
+                    responses: Default::default(),
+                    realtime: realtime.clone(),
+                    gate: gate.clone(),
+                }) as Box<dyn laser_device::DeviceTransport>)
             })
         };
         let service = std::sync::Arc::new(
-            ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library()).with_transport_factory(factory),
+            ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_transport_factory(factory),
         );
         let runner = {
             let service = service.clone();
-            std::thread::spawn(move || post_json(&service, "/api/device/framing", &serde_json::json!({
-                "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
-            })))
+            std::thread::spawn(move || {
+                post_json(
+                    &service,
+                    "/api/device/framing",
+                    &serde_json::json!({
+                        "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+                    }),
+                )
+            })
         };
         let targets_request = b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let start = std::time::Instant::now();
@@ -11753,20 +14440,45 @@ Content-Length: 30
         };
         assert_eq!(opens.load(Ordering::SeqCst), 1);
 
-        let stop = post_json(&service, "/api/safe-action", &serde_json::json!({"action": "Emergency_Stop", "confirmed": true}));
+        let stop = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "Emergency_Stop", "confirmed": true}),
+        );
         assert_eq!(stop["success"], true, "{stop}");
-        assert!(stop["result"].as_str().unwrap_or("").contains("原设备通道"), "{stop}");
-        assert_eq!(*realtime.lock().unwrap(), vec![laser_device::RealtimeCommand::EmergencyStop]);
-        assert_eq!(opens.load(Ordering::SeqCst), 1, "急停必须复用运行中任务的通道，不能另开连接");
+        assert!(
+            stop["result"].as_str().unwrap_or("").contains("原设备通道"),
+            "{stop}"
+        );
+        assert_eq!(
+            *realtime.lock().unwrap(),
+            vec![laser_device::RealtimeCommand::EmergencyStop]
+        );
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "急停必须复用运行中任务的通道，不能另开连接"
+        );
 
-        let by_id = post_json(&service, "/api/safe-action", &serde_json::json!({"action": " EMERGENCY_STOP ", "confirmed": true, "job_id": job_id}));
+        let by_id = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action": " EMERGENCY_STOP ", "confirmed": true, "job_id": job_id}),
+        );
         assert_eq!(by_id["success"], true, "{by_id}");
-        assert_eq!(realtime.lock().unwrap().len(), 2, "按任务编号的大写急停也要写出 0x18");
+        assert_eq!(
+            realtime.lock().unwrap().len(),
+            2,
+            "按任务编号的大写急停也要写出 0x18"
+        );
         assert_eq!(opens.load(Ordering::SeqCst), 1);
 
         gate.store(true, Ordering::SeqCst);
         let result = runner.join().unwrap();
-        assert_eq!(result["detail"]["error_code"], "framing_cancelled", "{result}");
+        assert_eq!(
+            result["detail"]["error_code"], "framing_cancelled",
+            "{result}"
+        );
     }
 
     /// 走边框运行中登记为活动作业：顶栏急停能找到并停止它，结束后保留为“待确认停止”（2026-10-14）。
@@ -11774,14 +14486,23 @@ Content-Length: 30
     fn framing_is_listed_in_stop_targets_and_can_be_emergency_stopped() {
         let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let service = std::sync::Arc::new(
-            ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                .with_transport_factory(gated_transport_factory(gate.clone())),
+            ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_transport_factory(gated_transport_factory(gate.clone())),
         );
         let runner = {
             let service = service.clone();
-            std::thread::spawn(move || post_json(&service, "/api/device/framing", &serde_json::json!({
-                "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
-            })))
+            std::thread::spawn(move || {
+                post_json(
+                    &service,
+                    "/api/device/framing",
+                    &serde_json::json!({
+                        "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+                    }),
+                )
+            })
         };
         let targets_request = b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let start = std::time::Instant::now();
@@ -11798,20 +14519,34 @@ Content-Length: 30
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         assert!(job_id.starts_with("framing-"), "{job_id}");
-        let busy = post_json(&service, "/api/device/framing", &serde_json::json!({
-            "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
-        }));
+        let busy = post_json(
+            &service,
+            "/api/device/framing",
+            &serde_json::json!({
+                "connection_mode": "network", "network_host": "127.0.0.1", "max_x": 10, "max_y": 10
+            }),
+        );
         assert_eq!(busy["detail"]["error_code"], "device_busy", "{busy}");
-        let stop = post_json(&service, "/api/safe-action", &serde_json::json!({
-            "action": "emergency_stop", "confirmed": true, "job_id": job_id
-        }));
+        let stop = post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({
+                "action": "emergency_stop", "confirmed": true, "job_id": job_id
+            }),
+        );
         assert_eq!(stop["success"], true, "{stop}");
         gate.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = runner.join().unwrap();
-        assert_eq!(result["detail"]["error_code"], "framing_cancelled", "{result}");
+        assert_eq!(
+            result["detail"]["error_code"], "framing_cancelled",
+            "{result}"
+        );
         assert_eq!(service.active_job_count(), 0);
         let targets = parse_json_response(&service.handle_http(targets_request));
-        assert_eq!(targets["result"]["jobs"][0]["state"], "unknown", "停止未确认，保留原通道供重试急停: {targets}");
+        assert_eq!(
+            targets["result"]["jobs"][0]["state"], "unknown",
+            "停止未确认，保留原通道供重试急停: {targets}"
+        );
     }
 
     /// A-33：经审批的发送进行中进程崩溃 → 新进程启动恢复后 workflow 为 failed、审批结果未知，
@@ -11821,12 +14556,17 @@ Content-Length: 30
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("moss.sqlite");
         let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let db1 = std::sync::Arc::new(std::sync::Mutex::new(laser_runtime::RuntimeDb::open(&db_path).unwrap()));
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(temp.path().to_path_buf())
-            .with_transport_factory(gated_transport_factory(gate.clone()))
-            .with_runtime_db(db1)
-            .with_strict_mode(true);
+        let db1 = std::sync::Arc::new(std::sync::Mutex::new(
+            laser_runtime::RuntimeDb::open(&db_path).unwrap(),
+        ));
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf())
+        .with_transport_factory(gated_transport_factory(gate.clone()))
+        .with_runtime_db(db1)
+        .with_strict_mode(true);
         let session = service.enable_desktop_session().unwrap();
         let workflow_id = preview_workflow(&service);
         let (status, pending) = post_with_ctx(
@@ -11836,8 +14576,16 @@ Content-Length: 30
             laser_contracts::CallerContext::McpBridge,
         );
         assert_eq!(status, 202, "{pending}");
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
-        let digest = service.approvals().unwrap().get(&approval_id).unwrap().digest;
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let digest = service
+            .approvals()
+            .unwrap()
+            .get(&approval_id)
+            .unwrap()
+            .digest;
         let (status, approved) = desktop_request(
             &service,
             "POST",
@@ -11848,17 +14596,23 @@ Content-Length: 30
         assert_eq!(status, 200, "{approved}");
         assert_eq!(approved["result"]["result"]["status"], "sending");
         let running = service.approvals().unwrap().get(&approval_id).unwrap();
-        assert_eq!(running.outcome.unwrap().phase, Some(laser_contracts::ApprovalPhase::Running));
+        assert_eq!(
+            running.outcome.unwrap().phase,
+            Some(laser_contracts::ApprovalPhase::Running)
+        );
 
         // “崩溃后重启”：新进程打开同一个数据库，按 laser-host 的启动顺序恢复
         let db2 = laser_runtime::RuntimeDb::open(&db_path).unwrap();
         db2.recover_after_restart().unwrap();
         let written_after = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let restarted = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_generated_root(temp.path().to_path_buf())
-            .with_transport_factory(recording_transport_factory(200_000, written_after.clone()))
-            .with_runtime_db(std::sync::Arc::new(std::sync::Mutex::new(db2)))
-            .with_strict_mode(true);
+        let restarted = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf())
+        .with_transport_factory(recording_transport_factory(200_000, written_after.clone()))
+        .with_runtime_db(std::sync::Arc::new(std::sync::Mutex::new(db2)))
+        .with_strict_mode(true);
         assert_eq!(restarted.recover_approvals_after_restart(), 1);
 
         let record = restarted.approvals().unwrap().get(&approval_id).unwrap();
@@ -11866,7 +14620,11 @@ Content-Length: 30
         let outcome = record.outcome.unwrap();
         assert_eq!(outcome.error_code.as_deref(), Some("result_unknown"));
         assert_eq!(outcome.phase, Some(laser_contracts::ApprovalPhase::Unknown));
-        let status = post_json(&restarted, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": workflow_id}));
+        let status = post_json(
+            &restarted,
+            "/api/workflow",
+            &serde_json::json!({"action": "status", "workflow_id": workflow_id}),
+        );
         assert_eq!(status["result"]["status"], "failed", "{status}");
 
         // 不重放：重启后的服务没有连接设备；同一授权执行被拒
@@ -11874,13 +14632,22 @@ Content-Length: 30
             &restarted,
             "/api/workflow",
             &confirm_send_body(&workflow_id, "127.0.0.1"),
-            laser_contracts::CallerContext::Approval { approval_id: approval_id.clone() },
+            laser_contracts::CallerContext::Approval {
+                approval_id: approval_id.clone(),
+            },
         );
         assert_ne!(status, 200, "{replay}");
         assert_ne!(replay["result"]["status"], "sending", "{replay}");
-        assert!(written_after.lock().unwrap().is_empty(), "重启后不得向设备写入任何内容");
+        assert!(
+            written_after.lock().unwrap().is_empty(),
+            "重启后不得向设备写入任何内容"
+        );
         assert_eq!(
-            restarted.approvals().unwrap().consume(&approval_id, &digest).unwrap_err(),
+            restarted
+                .approvals()
+                .unwrap()
+                .consume(&approval_id, &digest)
+                .unwrap_err(),
             approval::ApprovalError::Consumed
         );
 
@@ -11889,7 +14656,14 @@ Content-Length: 30
         gate.store(true, std::sync::atomic::Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(500));
         assert_eq!(
-            restarted.approvals().unwrap().get(&approval_id).unwrap().outcome.unwrap().phase,
+            restarted
+                .approvals()
+                .unwrap()
+                .get(&approval_id)
+                .unwrap()
+                .outcome
+                .unwrap()
+                .phase,
             Some(laser_contracts::ApprovalPhase::Unknown)
         );
     }
@@ -11906,8 +14680,17 @@ Content-Length: 30
             &confirm_send_body(&workflow_id, "127.0.0.1"),
             laser_contracts::CallerContext::McpBridge,
         );
-        let approval_id = pending["result"]["approval_id"].as_str().unwrap().to_owned();
-        let digest = fixture.service.approvals().unwrap().get(&approval_id).unwrap().digest;
+        let approval_id = pending["result"]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let digest = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&approval_id)
+            .unwrap()
+            .digest;
         let (status, approved) = desktop_request(
             &fixture.service,
             "POST",
@@ -11917,11 +14700,19 @@ Content-Length: 30
         );
         assert_eq!(status, 200, "{approved}");
         wait_for_status(&fixture.service, &workflow_id, "completed");
-        let record = fixture.service.approvals().unwrap().get(&approval_id).unwrap();
+        let record = fixture
+            .service
+            .approvals()
+            .unwrap()
+            .get(&approval_id)
+            .unwrap();
         assert_eq!(record.status, laser_contracts::ApprovalStatus::Executed);
         let outcome = record.outcome.unwrap();
         assert!(outcome.success);
-        assert_eq!(outcome.phase, Some(laser_contracts::ApprovalPhase::Completed));
+        assert_eq!(
+            outcome.phase,
+            Some(laser_contracts::ApprovalPhase::Completed)
+        );
         assert_eq!(outcome.job_id.as_deref(), Some(workflow_id.as_str()));
     }
 
@@ -11974,10 +14765,17 @@ Content-Length: 30
 
         // 3. bootstrap / material-options / export / recommendation 均可读到两个材料
         let bootstrap = parse_json_response(
-            &service.handle_http(b"GET /v1/material-lab/bootstrap HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            &service
+                .handle_http(b"GET /v1/material-lab/bootstrap HTTP/1.1\r\nHost: localhost\r\n\r\n"),
         );
-        assert!(bootstrap["result"]["materials"]["materials"]["特制胡桃木"].is_object(), "{bootstrap}");
-        assert!(bootstrap["result"]["materials"]["materials"]["特制楠竹"].is_object(), "{bootstrap}");
+        assert!(
+            bootstrap["result"]["materials"]["materials"]["特制胡桃木"].is_object(),
+            "{bootstrap}"
+        );
+        assert!(
+            bootstrap["result"]["materials"]["materials"]["特制楠竹"].is_object(),
+            "{bootstrap}"
+        );
 
         let options = service.handle("GET", "/api/ui/material-options", b"");
         let names: Vec<&str> = options.body["result"]["materials"]
@@ -11986,7 +14784,10 @@ Content-Length: 30
             .iter()
             .filter_map(|m| m["name"].as_str())
             .collect();
-        assert!(names.contains(&"特制胡桃木") && names.contains(&"特制楠竹"), "{names:?}");
+        assert!(
+            names.contains(&"特制胡桃木") && names.contains(&"特制楠竹"),
+            "{names:?}"
+        );
 
         let exported = service.handle("GET", "/api/material-lab/export", b"");
         assert_eq!(exported.status, 200);
@@ -12001,7 +14802,10 @@ Content-Length: 30
         assert_eq!(rec["result"]["feed_rate"], 280);
 
         // 4. 文字生成支持自定义材料 + cut 模式
-        let font_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/fonts/geometry.ttf");
+        let font_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/geometry.ttf"
+        );
         let generated = post_json(
             &service,
             "/api/text-task/generate",
@@ -12014,7 +14818,9 @@ Content-Length: 30
             }),
         );
         assert_eq!(generated["success"], true, "{generated}");
-        let gcode_file = generated["result"]["artifacts"]["gcode_file"].as_str().unwrap();
+        let gcode_file = generated["result"]["artifacts"]["gcode_file"]
+            .as_str()
+            .unwrap();
         let gcode = std::fs::read_to_string(temp.path().join(gcode_file)).unwrap();
         assert!(gcode.contains("S820") && gcode.contains("F280"), "{gcode}");
     }
@@ -12057,7 +14863,10 @@ Content-Length: 30
             fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
                 self.realtime.lock().unwrap().push(command);
                 if command == laser_device::RealtimeCommand::StatusQuery {
-                    self.responses.lock().unwrap().push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back("<Idle|MPos:0,0,0|FS:0,0>".into());
                 }
                 Ok(())
             }
@@ -12070,7 +14879,9 @@ Content-Length: 30
         let gate = std::sync::Arc::new(AtomicBool::new(false));
         let first_run = std::sync::Arc::new(AtomicBool::new(true));
         let fail_open = std::sync::Arc::new(AtomicBool::new(false));
-        let realtime_log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<laser_device::RealtimeCommand>::new()));
+        let realtime_log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+            laser_device::RealtimeCommand,
+        >::new()));
 
         let port_flag = port_in_use.clone();
         let gate_flag = gate.clone();
@@ -12115,28 +14926,46 @@ Content-Length: 30
         let start = std::time::Instant::now();
         let framing_id = loop {
             let targets = parse_json_response(
-                &service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+                &service
+                    .handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n"),
             );
             if let Some(id) = targets["result"]["jobs"][0]["job_id"].as_str() {
                 break id.to_owned();
             }
-            assert!(start.elapsed() < std::time::Duration::from_secs(5), "framing did not start");
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "framing did not start"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
 
         // 验证加工期间 probe_connections 不打开冲突串口而直接回报连接正常
-        let probe_busy = post_json(&service, "/api/connection/check", &serde_json::json!({"connection_mode": "serial", "port": "COM3"}));
+        let probe_busy = post_json(
+            &service,
+            "/api/connection/check",
+            &serde_json::json!({"connection_mode": "serial", "port": "COM3"}),
+        );
         assert_eq!(probe_busy["result"]["connected"], true, "{probe_busy}");
 
         // /api/workflow cancel 对走边框返回 200 而不是 404
-        let cancelled = post_json(&service, "/api/workflow", &serde_json::json!({"action": "cancel", "workflow_id": framing_id}));
+        let cancelled = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({"action": "cancel", "workflow_id": framing_id}),
+        );
         assert_eq!(cancelled["success"], true, "{cancelled}");
         assert_eq!(cancelled["result"]["status"], "cancelled");
 
         gate.store(true, Ordering::SeqCst);
         let framing_res = framing_thread.join().unwrap();
-        assert_eq!(framing_res["detail"]["error_code"], "framing_cancelled", "{framing_res}");
-        assert!(port_in_use.load(Ordering::SeqCst), "待确认停止期间保留原句柄供急停重试");
+        assert_eq!(
+            framing_res["detail"]["error_code"], "framing_cancelled",
+            "{framing_res}"
+        );
+        assert!(
+            port_in_use.load(Ordering::SeqCst),
+            "待确认停止期间保留原句柄供急停重试"
+        );
 
         // 2. 语音快速急停（不传 job_id、不传串口）直接命中 uncertain_jobs 原句柄写出 0x18
         realtime_log.lock().unwrap().clear();
@@ -12146,7 +14975,12 @@ Content-Length: 30
             &serde_json::json!({"action": "emergency_stop", "confirmed": true}),
         );
         assert_eq!(fast_stop["success"], true, "{fast_stop}");
-        assert!(realtime_log.lock().unwrap().contains(&laser_device::RealtimeCommand::EmergencyStop));
+        assert!(
+            realtime_log
+                .lock()
+                .unwrap()
+                .contains(&laser_device::RealtimeCommand::EmergencyStop)
+        );
 
         // 3. 重连或探测失败不得弄丢 uncertain_jobs：模拟端口打不开时先走重连，记录必须仍在 stop-targets
         fail_open.store(true, Ordering::SeqCst);
@@ -12156,13 +14990,15 @@ Content-Length: 30
             &serde_json::json!({"connection_mode": "serial", "port": "COM3", "max_x": 10, "max_y": 10}),
         );
         assert_eq!(failed_framing["success"], false, "{failed_framing}");
-        assert!(!port_in_use.load(Ordering::SeqCst), "重连前旧串口句柄已被彻底释放（无残留 Arc）");
+        assert!(
+            !port_in_use.load(Ordering::SeqCst),
+            "重连前旧串口句柄已被彻底释放（无残留 Arc）"
+        );
         let targets_after_fail = parse_json_response(
             &service.handle_http(b"GET /api/jobs/stop-targets HTTP/1.1\r\nHost: localhost\r\n\r\n"),
         );
         assert_eq!(
-            targets_after_fail["result"]["jobs"][0]["job_id"],
-            framing_id,
+            targets_after_fail["result"]["jobs"][0]["job_id"], framing_id,
             "重连失败时绝不能删除待确认停止记录: {targets_after_fail}"
         );
         assert_eq!(targets_after_fail["result"]["jobs"][0]["state"], "unknown");
@@ -12175,7 +15011,12 @@ Content-Length: 30
             &serde_json::json!({"action": "emergency_stop", "confirmed": true}),
         );
         assert_eq!(retry_stop["success"], true, "{retry_stop}");
-        assert!(realtime_log.lock().unwrap().contains(&laser_device::RealtimeCommand::EmergencyStop));
+        assert!(
+            realtime_log
+                .lock()
+                .unwrap()
+                .contains(&laser_device::RealtimeCommand::EmergencyStop)
+        );
 
         // 4. 在同一串口成功启动并通过预检完成新任务后，旧 uncertain 记录自动清除且句柄正常释放
         let second = post_json(
@@ -12210,7 +15051,10 @@ Content-Length: 30
             serde_json::json!({"confirmed": true}),
         ] {
             let rejected = post_json(&service, "/api/jobs/acknowledge-stop", &invalid_body);
-            assert_eq!(rejected["success"], false, "invalid body must be rejected: {invalid_body}");
+            assert_eq!(
+                rejected["success"], false,
+                "invalid body must be rejected: {invalid_body}"
+            );
             assert!(!service.uncertain_jobs.lock().unwrap().is_empty());
         }
         for denied_ctx in [
@@ -12251,10 +15095,13 @@ Content-Length: 30
             std::fs::write(&gcode_path, gcode_content).unwrap();
             let expected_sha = hex::encode(Sha256::digest(gcode_content.as_bytes()));
 
-            let mut service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-                .with_generated_root(gen_dir.clone())
-                .with_preview_roots(vec![gen_dir.clone()])
-                .with_transport_factory(fake_transport_factory(100));
+            let mut service = ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_generated_root(gen_dir.clone())
+            .with_preview_roots(vec![gen_dir.clone()])
+            .with_transport_factory(fake_transport_factory(100));
             let wf_id = "wf-resume-gate";
             let payload = serde_json::json!({
                 "workflow_id": wf_id,
@@ -12264,7 +15111,9 @@ Content-Length: 30
                 "send_result": { "success": false, "lines_sent": 2, "total_lines": 5, "can_resume": true }
             });
             if use_store {
-                let db = std::sync::Arc::new(std::sync::Mutex::new(laser_runtime::RuntimeDb::open_memory().unwrap()));
+                let db = std::sync::Arc::new(std::sync::Mutex::new(
+                    laser_runtime::RuntimeDb::open_memory().unwrap(),
+                ));
                 use laser_runtime::RuntimeStore;
                 db.put(&laser_runtime::StoredRecord {
                     kind: laser_runtime::RecordKind::Workflow,
@@ -12275,7 +15124,11 @@ Content-Length: 30
                 .unwrap();
                 service = service.with_runtime_db(db);
             } else {
-                service.workflows.lock().unwrap().insert(wf_id.into(), payload);
+                service
+                    .workflows
+                    .lock()
+                    .unwrap()
+                    .insert(wf_id.into(), payload);
             }
 
             // 未传 confirmed（缺省 false）必须 400 拒绝
@@ -12287,7 +15140,10 @@ Content-Length: 30
                 )
                 .as_bytes(),
             );
-            assert!(String::from_utf8_lossy(&raw_unconfirmed).starts_with("HTTP/1.1 400"), "{use_store}");
+            assert!(
+                String::from_utf8_lossy(&raw_unconfirmed).starts_with("HTTP/1.1 400"),
+                "{use_store}"
+            );
             assert_eq!(parse_json_response(&raw_unconfirmed)["success"], false);
 
             // 合法续雕（文件未改 + confirmed=true）：必须通过门禁并从断点行启动
@@ -12303,7 +15159,10 @@ Content-Length: 30
                 }),
             );
             assert_eq!(valid_resume["success"], true, "{valid_resume}");
-            assert_eq!(valid_resume["result"]["send_result"]["resumed"], true, "{valid_resume}");
+            assert_eq!(
+                valid_resume["result"]["send_result"]["resumed"], true,
+                "{valid_resume}"
+            );
             let wait_start = std::time::Instant::now();
             while !service.active_jobs.lock().unwrap().is_empty() {
                 assert!(wait_start.elapsed() < std::time::Duration::from_secs(3));
@@ -12328,9 +15187,17 @@ Content-Length: 30
                     })
                     .unwrap();
             } else {
-                service.workflows.lock().unwrap().insert(wf_id.into(), payload_again);
+                service
+                    .workflows
+                    .lock()
+                    .unwrap()
+                    .insert(wf_id.into(), payload_again);
             }
-            std::fs::write(&gcode_path, "G21\nG90\nG0 X999 Y999\nG1 X10 Y10 F1000\nM5\n").unwrap();
+            std::fs::write(
+                &gcode_path,
+                "G21\nG90\nG0 X999 Y999\nG1 X10 Y10 F1000\nM5\n",
+            )
+            .unwrap();
             let tampered = post_json(
                 &service,
                 "/api/workflow",
@@ -12348,7 +15215,8 @@ Content-Length: 30
     }
 
     #[test]
-    fn material_object_thickness_merge_preserves_other_modes_empty_db_stays_empty_and_corrupt_file_fails() {
+    fn material_object_thickness_merge_preserves_other_modes_empty_db_stays_empty_and_corrupt_file_fails()
+     {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("materials.json");
         let mut settings = test_loopback_settings();
@@ -12384,9 +15252,16 @@ Content-Length: 30
             }),
         );
         assert_eq!(save_raster["success"], true, "{save_raster}");
-        let basswood_3 = &save_raster["result"]["materials"]["materials"]["椴木"]["thicknesses"]["3"];
-        assert_eq!(basswood_3["engrave"]["raster"]["laser_max_power"], 555, "{basswood_3}");
-        assert!(basswood_3["cut"].is_object(), "修改 raster 后不得擦除同厚度 cut: {basswood_3}");
+        let basswood_3 =
+            &save_raster["result"]["materials"]["materials"]["椴木"]["thicknesses"]["3"];
+        assert_eq!(
+            basswood_3["engrave"]["raster"]["laser_max_power"], 555,
+            "{basswood_3}"
+        );
+        assert!(
+            basswood_3["cut"].is_object(),
+            "修改 raster 后不得擦除同厚度 cut: {basswood_3}"
+        );
         assert!(
             basswood_3["engrave"]["outline"].is_object(),
             "修改 raster 后不得擦除同厚度 outline: {basswood_3}"
@@ -12423,7 +15298,8 @@ Content-Length: 30
         );
         assert_eq!(import_empty["success"], true, "{import_empty}");
         let bootstrap = parse_json_response(
-            &db_only_service.handle_http(b"GET /v1/material-lab/bootstrap HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            &db_only_service
+                .handle_http(b"GET /v1/material-lab/bootstrap HTTP/1.1\r\nHost: localhost\r\n\r\n"),
         );
         assert_eq!(
             bootstrap["result"]["materials"]["materials"],
@@ -12448,9 +15324,18 @@ Content-Length: 30
         let session = service.enable_desktop_session().unwrap();
 
         // 未携带桌面会话的本机回环进程禁止读取密钥或篡改设置
-        let (code, reveal_denied) = desktop_request(&service, "POST", "/api/jev/reveal", Some(&serde_json::json!({})), None);
+        let (code, reveal_denied) = desktop_request(
+            &service,
+            "POST",
+            "/api/jev/reveal",
+            Some(&serde_json::json!({})),
+            None,
+        );
         assert_eq!(code, 403, "{reveal_denied}");
-        assert_eq!(reveal_denied["detail"]["error_code"], "desktop_session_required");
+        assert_eq!(
+            reveal_denied["detail"]["error_code"],
+            "desktop_session_required"
+        );
         assert!(!reveal_denied.to_string().contains("sk-test-desktop-only"));
 
         let (code, settings_denied) = desktop_request(
@@ -12461,7 +15346,10 @@ Content-Length: 30
             None,
         );
         assert_eq!(code, 403, "{settings_denied}");
-        assert_eq!(settings_denied["detail"]["error_code"], "desktop_session_required");
+        assert_eq!(
+            settings_denied["detail"]["error_code"],
+            "desktop_session_required"
+        );
         assert!(!temp.path().join("settings.json").exists());
 
         // 携带有效桌面会话时正常放行
@@ -12496,42 +15384,70 @@ Content-Length: 30
         let db = std::sync::Arc::new(std::sync::Mutex::new(
             laser_runtime::RuntimeDb::open_memory().unwrap(),
         ));
-        let service = ApiService::new(test_loopback_settings(), laser_contracts::builtin_material_library())
-            .with_upload_root(uploads.clone())
-            .with_generated_root(gen_dir.clone())
-            .with_preview_roots(vec![uploads, gen_dir])
-            .with_runtime_db(db);
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_upload_root(uploads.clone())
+        .with_generated_root(gen_dir.clone())
+        .with_preview_roots(vec![uploads, gen_dir])
+        .with_runtime_db(db);
 
-        let encoded = base64::engine::general_purpose::STANDARD.encode("G21\nG90\nG0 X0 Y0\nG1 X10 Y10 S200 F1000\nM5\n");
-        let rejected_txt = post_json(&service, "/api/upload", &serde_json::json!({
-            "filename": "part.txt",
-            "content_base64": encoded,
-        }));
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode("G21\nG90\nG0 X0 Y0\nG1 X10 Y10 S200 F1000\nM5\n");
+        let rejected_txt = post_json(
+            &service,
+            "/api/upload",
+            &serde_json::json!({
+                "filename": "part.txt",
+                "content_base64": encoded,
+            }),
+        );
         assert_eq!(rejected_txt["success"], false, "{rejected_txt}");
 
-        let up_nc = post_json(&service, "/api/upload", &serde_json::json!({
-            "filename": "part.nc",
-            "content_base64": encoded,
-        }));
+        let up_nc = post_json(
+            &service,
+            "/api/upload",
+            &serde_json::json!({
+                "filename": "part.nc",
+                "content_base64": encoded,
+            }),
+        );
         assert_eq!(up_nc["success"], true, "{up_nc}");
         let saved_name = up_nc["result"]["filename"].as_str().unwrap();
 
-        let wf = post_json(&service, "/api/workflow", &serde_json::json!({
-            "action": "preview",
-            "source_type": "gcode",
-            "gcode_file": saved_name,
-            "material": "椴木",
-            "thickness_mm": 3
-        }));
+        let wf = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "preview",
+                "source_type": "gcode",
+                "gcode_file": saved_name,
+                "material": "椴木",
+                "thickness_mm": 3
+            }),
+        );
         assert_eq!(wf["success"], true, "{wf}");
-        let cal = post_json(&service, "/api/material-lab/preview", &serde_json::json!({
-            "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave", "rows": 2, "columns": 2
-        }));
+        let cal = post_json(
+            &service,
+            "/api/material-lab/preview",
+            &serde_json::json!({
+                "material": "椴木", "thickness_mm": 3, "laser_mode": "engrave", "rows": 2, "columns": 2
+            }),
+        );
         assert_eq!(cal["success"], true, "{cal}");
         let cal_id = cal["result"]["calibration_id"].as_str().unwrap();
-        let cal_status = post_json(&service, "/api/workflow", &serde_json::json!({"action": "status", "workflow_id": cal_id}));
+        let cal_status = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({"action": "status", "workflow_id": cal_id}),
+        );
         assert_eq!(cal_status["success"], true, "{cal_status}");
-        let cal_cancel = post_json(&service, "/api/workflow", &serde_json::json!({"action": "cancel", "workflow_id": cal_id}));
+        let cal_cancel = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({"action": "cancel", "workflow_id": cal_id}),
+        );
         assert_eq!(cal_cancel["success"], true, "{cal_cancel}");
         assert_eq!(cal_cancel["result"]["status"], "cancelled");
     }

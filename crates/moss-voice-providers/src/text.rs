@@ -13,7 +13,10 @@ const MAX_CHARS: usize = 180;
 const MAX_WAIT: Duration = Duration::from_secs(6);
 
 fn is_pause(c: char) -> bool {
-    matches!(c, '，' | ',' | '、' | '；' | ';' | '：' | ':' | '…' | '~' | '～') || is_end(c)
+    matches!(
+        c,
+        '，' | ',' | '、' | '；' | ';' | '：' | ':' | '…' | '~' | '～'
+    ) || is_end(c)
 }
 
 fn is_end(c: char) -> bool {
@@ -26,28 +29,30 @@ fn is_emoji(c: char) -> bool {
 
 /// 首个表情对应的设备表情名（固件支持的名称）。
 pub fn emotion_of(text: &str) -> Option<&'static str> {
-    text.chars().find(|c| is_emoji(*c) && *c != '\u{FE0F}' && *c != '\u{200D}').map(|c| match c {
-        '😂' | '🤣' | '😆' => "laughing",
-        '😊' | '😄' | '😁' | '🙂' | '😀' | '😃' => "happy",
-        '😢' | '😞' | '😔' | '☹' => "sad",
-        '😭' => "crying",
-        '😠' | '😡' => "angry",
-        '😍' | '🥰' | '❤' | '💕' => "loving",
-        '😳' | '😅' => "embarrassed",
-        '😮' | '😯' => "surprised",
-        '😱' => "shocked",
-        '🤔' => "thinking",
-        '😉' => "winking",
-        '😎' => "cool",
-        '😌' => "relaxed",
-        '😋' => "delicious",
-        '😘' => "kissy",
-        '😏' => "confident",
-        '😴' => "sleepy",
-        '🤪' | '😜' => "silly",
-        '😕' | '😵' => "confused",
-        _ => "happy",
-    })
+    text.chars()
+        .find(|c| is_emoji(*c) && *c != '\u{FE0F}' && *c != '\u{200D}')
+        .map(|c| match c {
+            '😂' | '🤣' | '😆' => "laughing",
+            '😊' | '😄' | '😁' | '🙂' | '😀' | '😃' => "happy",
+            '😢' | '😞' | '😔' | '☹' => "sad",
+            '😭' => "crying",
+            '😠' | '😡' => "angry",
+            '😍' | '🥰' | '❤' | '💕' => "loving",
+            '😳' | '😅' => "embarrassed",
+            '😮' | '😯' => "surprised",
+            '😱' => "shocked",
+            '🤔' => "thinking",
+            '😉' => "winking",
+            '😎' => "cool",
+            '😌' => "relaxed",
+            '😋' => "delicious",
+            '😘' => "kissy",
+            '😏' => "confident",
+            '😴' => "sleepy",
+            '🤪' | '😜' => "silly",
+            '😕' | '😵' => "confused",
+            _ => "happy",
+        })
 }
 
 /// 清洗为可朗读的文字：去掉 Markdown 标记（加粗、代码、标题、列表、引用）与表情，合并空白。
@@ -73,7 +78,10 @@ pub fn clean_for_speech(text: &str) -> String {
             lines.push(cleaned);
         }
     }
-    lines.join("，").trim_start_matches(|c: char| is_pause(c) || c.is_whitespace()).to_owned()
+    lines
+        .join("，")
+        .trim_start_matches(|c: char| is_pause(c) || c.is_whitespace())
+        .to_owned()
 }
 
 /// 是否有可读内容（字母、数字或汉字）。
@@ -129,7 +137,10 @@ impl Segmenter {
         while let Some(cut) = self.find_cut() {
             self.emit(cut, now, &mut out);
         }
-        let waited = self.since.map(|since| now.duration_since(since) >= MAX_WAIT).unwrap_or(false);
+        let waited = self
+            .since
+            .map(|since| now.duration_since(since) >= MAX_WAIT)
+            .unwrap_or(false);
         if !self.buffer.is_empty() && (self.buffer.chars().count() > MAX_CHARS || waited) {
             let cut = self.last_pause().unwrap_or(self.buffer.len());
             self.emit(cut, now, &mut out);
@@ -147,7 +158,11 @@ impl Segmenter {
 
     fn emit(&mut self, cut: usize, now: Instant, out: &mut Vec<String>) {
         let piece: String = self.buffer.drain(..cut).collect();
-        self.since = if self.buffer.is_empty() { None } else { Some(now) };
+        self.since = if self.buffer.is_empty() {
+            None
+        } else {
+            Some(now)
+        };
         let cleaned = clean_for_speech(&piece);
         if speakable(&cleaned) {
             self.sent_any = true;
@@ -160,12 +175,23 @@ impl Segmenter {
         let mut chars = self.buffer.char_indices().peekable();
         while let Some((at, c)) = chars.next() {
             let end = at + c.len_utf8();
-            let boundary = if self.sent_any { is_end(c) } else { is_pause(c) };
-            let min_chars = if self.sent_any { self.min_next_chars } else { self.min_first_chars };
+            let boundary = if self.sent_any {
+                is_end(c)
+            } else {
+                is_pause(c)
+            };
+            let min_chars = if self.sent_any {
+                self.min_next_chars
+            } else {
+                self.min_first_chars
+            };
             if boundary {
                 // 有足够可读内容才切（避免开头的孤立标点或句中 1 字碎句单独发起一次 TTS 请求；换行符保持分行）
                 let count = speakable_char_count(&self.buffer[..end]);
-                if count >= min_chars || (c == '\n' && count >= 1) || (c == '\n' && !self.buffer[..at].trim().is_empty()) {
+                if count >= min_chars
+                    || (c == '\n' && count >= 1)
+                    || (c == '\n' && !self.buffer[..at].trim().is_empty())
+                {
                     return Some(end);
                 }
                 if count == 0 && c == '\n' {
@@ -188,7 +214,11 @@ impl Segmenter {
     }
 
     fn last_pause(&self) -> Option<usize> {
-        self.buffer.char_indices().rev().find(|(_, c)| is_pause(*c)).map(|(at, c)| at + c.len_utf8())
+        self.buffer
+            .char_indices()
+            .rev()
+            .find(|(_, c)| is_pause(*c))
+            .map(|(at, c)| at + c.len_utf8())
     }
 }
 
@@ -209,8 +239,22 @@ mod tests {
 
     #[test]
     fn first_sentence_cuts_at_comma_then_at_sentence_end() {
-        let out = run(&["好的", "，我来", "帮你看看，", "激光机现在空闲。", "温度正常！还有别的吗"]);
-        assert_eq!(out, vec!["好的，", "我来帮你看看，激光机现在空闲。", "温度正常！", "还有别的吗"]);
+        let out = run(&[
+            "好的",
+            "，我来",
+            "帮你看看，",
+            "激光机现在空闲。",
+            "温度正常！还有别的吗",
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                "好的，",
+                "我来帮你看看，激光机现在空闲。",
+                "温度正常！",
+                "还有别的吗"
+            ]
+        );
     }
 
     #[test]
@@ -256,26 +300,46 @@ mod tests {
 
     #[test]
     fn punctuation_only_pieces_are_dropped() {
-        assert_eq!(run(&["，。", "你好。", "……"]), vec!["你好。"], "开头的孤立标点被去掉");
+        assert_eq!(
+            run(&["，。", "你好。", "……"]),
+            vec!["你好。"],
+            "开头的孤立标点被去掉"
+        );
         assert!(run(&["😊"]).is_empty());
     }
 
     #[test]
     fn short_mid_stream_fragments_coalesce_with_following_clause() {
         // 首句“好的，”立即切出保证首字延迟；后续仅有 1 个可读字的碎句（“嗯。”、“对！”）自动与下一句合并，避免浪费一次 TTS 往返
-        let out = run(&["好的，", "嗯。", "激光机目前处于空闲状态。", "对！", "随时可以开始。"]);
+        let out = run(&[
+            "好的，",
+            "嗯。",
+            "激光机目前处于空闲状态。",
+            "对！",
+            "随时可以开始。",
+        ]);
         assert_eq!(
             out,
-            vec!["好的，", "嗯。激光机目前处于空闲状态。", "对！随时可以开始。"]
+            vec![
+                "好的，",
+                "嗯。激光机目前处于空闲状态。",
+                "对！随时可以开始。"
+            ]
         );
 
         // 自定义合并阈值（如首句至少 4 字、后续至少 6 字）：不足阈值的碎句自动合并，流结束兜底冲刷
         let mut custom = Segmenter::new().with_min_chars(4, 6);
         let now = Instant::now();
         assert!(custom.push("好，", now).is_empty(), "不足 4 字暂存不切");
-        assert_eq!(custom.push("马上为您查询，", now), vec!["好，马上为您查询，"]);
+        assert_eq!(
+            custom.push("马上为您查询，", now),
+            vec!["好，马上为您查询，"]
+        );
         assert!(custom.push("正常。", now).is_empty(), "后续不足 6 字暂存");
-        assert_eq!(custom.push("可以开始雕刻。", now), vec!["正常。可以开始雕刻。"]);
+        assert_eq!(
+            custom.push("可以开始雕刻。", now),
+            vec!["正常。可以开始雕刻。"]
+        );
         assert_eq!(custom.push("尾句", now), Vec::<String>::new());
         assert_eq!(custom.finish().as_deref(), Some("尾句"));
     }

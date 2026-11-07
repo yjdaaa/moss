@@ -270,27 +270,45 @@ struct SyntheticPersonMemory {
 }
 impl SyntheticPersonMemory {
     fn read(&self, matcher: &SpeakerMatcher, hint: &IdentityHint) -> Option<&str> {
-        let IdentityHint::SyntheticMatch { id, .. } = hint else { return None; };
+        let IdentityHint::SyntheticMatch { id, .. } = hint else {
+            return None;
+        };
         if !matcher.calibrated || !matcher.people.iter().any(|p| p.id == *id) {
             return None;
         }
         self.summaries.get(id).map(|(_, summary)| summary.as_str())
     }
-    fn save(&mut self, matcher: &SpeakerMatcher, hint: &IdentityHint,
-        expected_revision: u64, summary: &str) -> Result<u64, SpeakerError> {
+    fn save(
+        &mut self,
+        matcher: &SpeakerMatcher,
+        hint: &IdentityHint,
+        expected_revision: u64,
+        summary: &str,
+    ) -> Result<u64, SpeakerError> {
         if !matches!(hint, IdentityHint::SyntheticMatch { .. })
-            || summary.len() > 4_096 || summary.chars().any(char::is_control)
-            || self.read(matcher, hint).is_none() && expected_revision != 0 {
+            || summary.len() > 4_096
+            || summary.chars().any(char::is_control)
+            || self.read(matcher, hint).is_none() && expected_revision != 0
+        {
             return Err(SpeakerError::InvalidIdentity);
         }
-        let IdentityHint::SyntheticMatch { id, .. } = hint else { unreachable!() };
+        let IdentityHint::SyntheticMatch { id, .. } = hint else {
+            unreachable!()
+        };
         if !matcher.calibrated || !matcher.people.iter().any(|p| p.id == *id) {
             return Err(SpeakerError::InvalidIdentity);
         }
-        let current = self.summaries.get(id).map(|(revision, _)| *revision).unwrap_or(0);
-        if current != expected_revision { return Err(SpeakerError::Duplicate); }
+        let current = self
+            .summaries
+            .get(id)
+            .map(|(revision, _)| *revision)
+            .unwrap_or(0);
+        if current != expected_revision {
+            return Err(SpeakerError::Duplicate);
+        }
         let next = current.checked_add(1).ok_or(SpeakerError::Capacity)?;
-        self.summaries.insert(id.clone(), (next, summary.to_owned()));
+        self.summaries
+            .insert(id.clone(), (next, summary.to_owned()));
         Ok(next)
     }
     fn delete(&mut self, id: &str) {
@@ -317,9 +335,17 @@ mod tests {
     #[test]
     fn person_memory_isolated_by_matcher_owned_identity_and_revision() {
         let mut matcher = SpeakerMatcher::disabled("synthetic", 64).unwrap();
-        matcher.enroll_fake("person-a", "甲", "synthetic", &clips(0)).unwrap();
-        matcher.enroll_fake("person-b", "乙", "synthetic", &clips(1)).unwrap();
-        let a_untrusted = IdentityHint::SyntheticMatch { id:"person-a".into(), score:1., margin:1. };
+        matcher
+            .enroll_fake("person-a", "甲", "synthetic", &clips(0))
+            .unwrap();
+        matcher
+            .enroll_fake("person-b", "乙", "synthetic", &clips(1))
+            .unwrap();
+        let a_untrusted = IdentityHint::SyntheticMatch {
+            id: "person-a".into(),
+            score: 1.,
+            margin: 1.,
+        };
         let mut memory = SyntheticPersonMemory::default();
         assert!(memory.save(&matcher, &a_untrusted, 0, "private").is_err());
         matcher.calibrated = true; // synthetic fixture only; never released
@@ -329,7 +355,10 @@ mod tests {
         assert_eq!(memory.read(&matcher, &a), Some("person-a-only"));
         assert_eq!(memory.read(&matcher, &b), None);
         assert_eq!(memory.read(&matcher, &IdentityHint::Unknown), None);
-        assert_eq!(memory.save(&matcher, &a, 0, "stale"), Err(SpeakerError::Duplicate));
+        assert_eq!(
+            memory.save(&matcher, &a, 0, "stale"),
+            Err(SpeakerError::Duplicate)
+        );
         assert_eq!(memory.save(&matcher, &a, 1, "updated"), Ok(2));
         matcher.remove_fake("person-a");
         memory.delete("person-a");

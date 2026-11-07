@@ -24,7 +24,12 @@ impl RotatingLog {
     }
 
     pub fn with_limits(path: impl Into<PathBuf>, max_bytes: u64, keep: usize) -> Self {
-        Self { path: path.into(), max_bytes: max_bytes.max(1), keep: keep.max(1), lock: Mutex::new(()) }
+        Self {
+            path: path.into(),
+            max_bytes: max_bytes.max(1),
+            keep: keep.max(1),
+            lock: Mutex::new(()),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -39,7 +44,10 @@ impl RotatingLog {
 
     /// 追加一行（自动脱敏）。写日志失败不影响服务端运行，只返回错误供调用方忽略。
     pub fn write_line(&self, line: &str) -> std::io::Result<()> {
-        let _guard = self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -47,7 +55,10 @@ impl RotatingLog {
         if size >= self.max_bytes {
             self.rotate()?;
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         let clean = redact_line(line.trim_end_matches(['\r', '\n']));
         writeln!(file, "{clean}")
     }
@@ -74,7 +85,10 @@ impl RotatingLog {
 
     /// 最近 `count` 行（当前文件不足时补上一份），已脱敏。读取时再脱敏一次，防止旧版本写入的内容泄露。
     pub fn tail(&self, count: usize) -> Vec<String> {
-        let _guard = self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut lines: Vec<String> = Vec::new();
         for path in [self.rotated(1), self.path.clone()] {
             if let Ok(text) = fs::read_to_string(&path) {
@@ -96,16 +110,26 @@ mod tests {
         let path = dir.path().join("logs").join("xiaozhi-server.log");
         let log = RotatingLog::with_limits(&path, 64, 3);
         for index in 0..20 {
-            log.write_line(&format!("line {index:02} api_key: sk-secret-{index}")).unwrap();
+            log.write_line(&format!("line {index:02} api_key: sk-secret-{index}"))
+                .unwrap();
         }
         assert!(path.exists());
         assert!(dir.path().join("logs/xiaozhi-server.log.1").exists());
         assert!(dir.path().join("logs/xiaozhi-server.log.2").exists());
         assert!(!dir.path().join("logs/xiaozhi-server.log.3").exists());
-        for name in ["xiaozhi-server.log", "xiaozhi-server.log.1", "xiaozhi-server.log.2"] {
+        for name in [
+            "xiaozhi-server.log",
+            "xiaozhi-server.log.1",
+            "xiaozhi-server.log.2",
+        ] {
             let text = fs::read_to_string(dir.path().join("logs").join(name)).unwrap();
             assert!(!text.contains("sk-secret"), "{name}: {text}");
-            assert!(fs::metadata(dir.path().join("logs").join(name)).unwrap().len() <= 64 + 40);
+            assert!(
+                fs::metadata(dir.path().join("logs").join(name))
+                    .unwrap()
+                    .len()
+                    <= 64 + 40
+            );
         }
         let tail = log.tail(2);
         assert_eq!(tail.len(), 2);
@@ -115,12 +139,15 @@ mod tests {
 
     #[test]
     fn nv15_legacy_raw_bearer_is_redacted_on_tail_without_touching_file() {
-        let dir=tempfile::tempdir().unwrap();
-        let path=dir.path().join("legacy.log");
-        std::fs::write(&path,b"Bearer synthetic-old-token\n").unwrap();
-        let log=RotatingLog::new(&path);
-        assert_eq!(log.tail(1),vec!["Bearer ***"]);
-        assert_eq!(std::fs::read(&path).unwrap(),b"Bearer synthetic-old-token\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.log");
+        std::fs::write(&path, b"Bearer synthetic-old-token\n").unwrap();
+        let log = RotatingLog::new(&path);
+        assert_eq!(log.tail(1), vec!["Bearer ***"]);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"Bearer synthetic-old-token\n"
+        );
     }
     #[test]
     fn tail_of_missing_log_is_empty() {

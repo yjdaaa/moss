@@ -106,7 +106,10 @@ impl Drop for ProcessGroupGuard {
 
 pub(super) fn confine_running_group(pid: u32) -> ProcessGroupGuard {
     let pgid = i32::try_from(pid).unwrap_or(0);
-    ProcessGroupGuard { pgid, reaped: pgid <= 1 }
+    ProcessGroupGuard {
+        pgid,
+        reaped: pgid <= 1,
+    }
 }
 
 fn reap_group(guard: &mut ProcessGroupGuard, child: &mut Child) -> Result<(), ProcessFailure> {
@@ -265,7 +268,10 @@ pub(super) fn run_fixture_process(
         let _ = child.wait();
         return Err(ProcessFailure::StartFailed);
     }
-    let mut group = ProcessGroupGuard { pgid, reaped: false };
+    let mut group = ProcessGroupGuard {
+        pgid,
+        reaped: false,
+    };
 
     // Re-check immediately after spawn before writing task stdin; kill entire group if revoked.
     if !alive() || cancel.load(Ordering::Acquire) {

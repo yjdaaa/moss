@@ -12,12 +12,17 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Sender, SyncSender, channel, sync_channel, TrySendError};
+use std::sync::mpsc::{Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub use moss_voice_local_proto::{AsrDecodeOptions, AsrEngine, TtsEngine, VadEngine, VadEventKind, VadParams};
-use moss_voice_local_proto::{Op, PROTOCOL_VERSION, Reply, Request, Response, bytes_to_pcm, pcm_to_bytes, read_frame, write_frame};
+pub use moss_voice_local_proto::{
+    AsrDecodeOptions, AsrEngine, TtsEngine, VadEngine, VadEventKind, VadParams,
+};
+use moss_voice_local_proto::{
+    Op, PROTOCOL_VERSION, Reply, Request, Response, bytes_to_pcm, pcm_to_bytes, read_frame,
+    write_frame,
+};
 
 use crate::{Asr, AsrStream, BoxFuture, Pcm, ProviderError, StreamingAsr, Tts};
 
@@ -52,9 +57,13 @@ struct Inner {
 impl Inner {
     fn invalidate(&self) {
         self.alive.store(false, Ordering::SeqCst);
-        if let Ok(mut pending) = self.pending.lock() { pending.clear(); }
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
         if let Ok(mut child) = self.child.lock() {
-            if let Some(child) = child.as_mut() { let _ = child.kill(); }
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill();
+            }
         }
     }
 }
@@ -87,10 +96,18 @@ impl SpeakerHelper {
         helper.load_speaker(models_root)?;
         Ok(Self { helper })
     }
-    pub fn embedding_blocking(&self, pcm: &[i16], sample_rate: u32, generation: u64) -> Result<Vec<f32>, ProviderError> {
-        self.helper.speaker_embedding_blocking(pcm, sample_rate, generation)
+    pub fn embedding_blocking(
+        &self,
+        pcm: &[i16],
+        sample_rate: u32,
+        generation: u64,
+    ) -> Result<Vec<f32>, ProviderError> {
+        self.helper
+            .speaker_embedding_blocking(pcm, sample_rate, generation)
     }
-    pub fn is_alive(&self) -> bool { self.helper.is_alive() }
+    pub fn is_alive(&self) -> bool {
+        self.helper.is_alive()
+    }
 }
 
 /// 辅助程序加载的合成模型信息。
@@ -110,20 +127,33 @@ impl LocalHelper {
         if !exe.is_file() {
             return Err(ProviderError::new(format!(
                 "未找到本地模型程序 {}（应与 MOSS 放在同一目录）",
-                exe.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+                exe.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
             )));
         }
         let mut command = Command::new(exe);
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             // CREATE_NO_WINDOW：不弹出控制台窗口
             command.creation_flags(0x0800_0000);
         }
-        let mut child = command.spawn().map_err(|error| ProviderError::new(format!("本地模型程序启动失败：{error}")))?;
-        let stdin = child.stdin.take().ok_or_else(|| ProviderError::new("本地模型程序启动失败：没有标准输入"))?;
-        let stdout = child.stdout.take().ok_or_else(|| ProviderError::new("本地模型程序启动失败：没有标准输出"))?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| ProviderError::new(format!("本地模型程序启动失败：{error}")))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ProviderError::new("本地模型程序启动失败：没有标准输入"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProviderError::new("本地模型程序启动失败：没有标准输出"))?;
         let helper = Self::from_streams(Box::new(stdout), Box::new(stdin));
         if let Ok(mut slot) = helper.inner.child.lock() {
             *slot = Some(child);
@@ -144,45 +174,51 @@ impl LocalHelper {
             child: Mutex::new(None),
         });
         let weak_writer = Arc::downgrade(&inner);
-        let _ = std::thread::Builder::new().name("moss-voice-local-writer".into()).spawn(move || {
-            let mut writer = BufWriter::new(writer);
-            while let Ok((request, payload)) = writer_rx.recv() {
-                if write_frame(&mut writer, &request, &payload).is_err() {
-                    if let Some(inner) = weak_writer.upgrade() { inner.invalidate(); }
-                    return;
-                }
-            }
-        });
-        let weak = Arc::downgrade(&inner);
-        let _ = std::thread::Builder::new().name("moss-voice-local-reader".into()).spawn(move || {
-            let mut reader = BufReader::new(reader);
-            loop {
-                let frame: Option<(Response, Vec<u8>)> = read_frame(&mut reader).ok().flatten();
-                let Some(inner) = weak.upgrade() else { return };
-                match frame {
-                    Some((Response { id, reply }, payload)) => {
-                        let waiter = inner.pending.lock().ok().and_then(|mut pending| {
-                            if matches!(reply, Reply::AudioChunk { .. }) {
-                                pending.get(&id).cloned()
-                            } else {
-                                pending.remove(&id)
-                            }
-                        });
-                        if let Some(waiter) = waiter {
-                            let _ = waiter.send((reply, payload));
-                        }
-                    }
-                    None => {
-                        // 辅助程序退出或输出损坏：丢弃全部等待者，它们立即收到错误
-                        inner.alive.store(false, Ordering::SeqCst);
-                        if let Ok(mut pending) = inner.pending.lock() {
-                            pending.clear();
+        let _ = std::thread::Builder::new()
+            .name("moss-voice-local-writer".into())
+            .spawn(move || {
+                let mut writer = BufWriter::new(writer);
+                while let Ok((request, payload)) = writer_rx.recv() {
+                    if write_frame(&mut writer, &request, &payload).is_err() {
+                        if let Some(inner) = weak_writer.upgrade() {
+                            inner.invalidate();
                         }
                         return;
                     }
                 }
-            }
-        });
+            });
+        let weak = Arc::downgrade(&inner);
+        let _ = std::thread::Builder::new()
+            .name("moss-voice-local-reader".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(reader);
+                loop {
+                    let frame: Option<(Response, Vec<u8>)> = read_frame(&mut reader).ok().flatten();
+                    let Some(inner) = weak.upgrade() else { return };
+                    match frame {
+                        Some((Response { id, reply }, payload)) => {
+                            let waiter = inner.pending.lock().ok().and_then(|mut pending| {
+                                if matches!(reply, Reply::AudioChunk { .. }) {
+                                    pending.get(&id).cloned()
+                                } else {
+                                    pending.remove(&id)
+                                }
+                            });
+                            if let Some(waiter) = waiter {
+                                let _ = waiter.send((reply, payload));
+                            }
+                        }
+                        None => {
+                            // 辅助程序退出或输出损坏：丢弃全部等待者，它们立即收到错误
+                            inner.alive.store(false, Ordering::SeqCst);
+                            if let Ok(mut pending) = inner.pending.lock() {
+                                pending.clear();
+                            }
+                            return;
+                        }
+                    }
+                }
+            });
         Self { inner }
     }
 
@@ -191,8 +227,14 @@ impl LocalHelper {
     }
 
     fn enqueue(&self, id: u64, op: Op, payload: &[u8]) -> Result<(), ProviderError> {
-        if !self.is_alive() { return Err(dead()); }
-        match self.inner.writer_tx.try_send((Request { id, op }, payload.to_vec())) {
+        if !self.is_alive() {
+            return Err(dead());
+        }
+        match self
+            .inner
+            .writer_tx
+            .try_send((Request { id, op }, payload.to_vec()))
+        {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.inner.invalidate();
@@ -205,17 +247,29 @@ impl LocalHelper {
         }
     }
 
-    fn call(&self, op: Op, payload: &[u8], timeout: Duration) -> Result<(Reply, Vec<u8>), ProviderError> {
-        if !self.is_alive() { return Err(dead()); }
+    fn call(
+        &self,
+        op: Op,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<(Reply, Vec<u8>), ProviderError> {
+        if !self.is_alive() {
+            return Err(dead());
+        }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = channel();
-        self.inner.pending.lock().map_err(|_| dead())?.insert(id, sender);
+        self.inner
+            .pending
+            .lock()
+            .map_err(|_| dead())?
+            .insert(id, sender);
         let deadline = std::time::Instant::now() + timeout;
         if let Err(error) = self.enqueue(id, op, payload) {
             self.forget(id);
             return Err(error);
         }
-        let result = receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+        let result =
+            receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         match result {
             Ok((Reply::Error { message }, _)) => Err(ProviderError::new(message)),
             Ok(reply) => Ok(reply),
@@ -245,89 +299,212 @@ impl LocalHelper {
 
     fn expect_loaded(reply: Reply) -> Result<(Option<u32>, Option<u32>), ProviderError> {
         match reply {
-            Reply::Loaded { sample_rate, speakers } => Ok((sample_rate, speakers)),
+            Reply::Loaded {
+                sample_rate,
+                speakers,
+            } => Ok((sample_rate, speakers)),
             _ => Err(ProviderError::new("本地模型程序返回了意外的结果")),
         }
     }
 
-    pub fn load_vad(&self, model: &Path, params: VadParams, engine: VadEngine) -> Result<(), ProviderError> {
-        let op = Op::LoadVad { model: model.to_string_lossy().into_owned(), params, engine };
+    pub fn load_vad(
+        &self,
+        model: &Path,
+        params: VadParams,
+        engine: VadEngine,
+    ) -> Result<(), ProviderError> {
+        let op = Op::LoadVad {
+            model: model.to_string_lossy().into_owned(),
+            params,
+            engine,
+        };
         Self::expect_loaded(self.call(op, &[], LOAD_TIMEOUT)?.0).map(|_| ())
     }
 
     pub fn load_asr(&self, dir: &Path, engine: AsrEngine) -> Result<(), ProviderError> {
-        self.load_asr_with_options(dir, engine, moss_voice_local_proto::AsrDecodeOptions::default())
+        self.load_asr_with_options(
+            dir,
+            engine,
+            moss_voice_local_proto::AsrDecodeOptions::default(),
+        )
     }
-    pub fn load_asr_with_options(&self, dir: &Path, engine: AsrEngine, options: moss_voice_local_proto::AsrDecodeOptions) -> Result<(), ProviderError> {
-        let op = Op::LoadAsr { dir: dir.to_string_lossy().into_owned(), engine, options };
+    pub fn load_asr_with_options(
+        &self,
+        dir: &Path,
+        engine: AsrEngine,
+        options: moss_voice_local_proto::AsrDecodeOptions,
+    ) -> Result<(), ProviderError> {
+        let op = Op::LoadAsr {
+            dir: dir.to_string_lossy().into_owned(),
+            engine,
+            options,
+        };
         Self::expect_loaded(self.call(op, &[], LOAD_TIMEOUT)?.0).map(|_| ())
     }
 
     pub fn load_tts(&self, dir: &Path, engine: TtsEngine) -> Result<TtsInfo, ProviderError> {
-        let op = Op::LoadTts { dir: dir.to_string_lossy().into_owned(), engine };
+        let op = Op::LoadTts {
+            dir: dir.to_string_lossy().into_owned(),
+            engine,
+        };
         let (sample_rate, speakers) = Self::expect_loaded(self.call(op, &[], LOAD_TIMEOUT)?.0)?;
-        Ok(TtsInfo { sample_rate: sample_rate.unwrap_or(24_000), speakers: speakers.unwrap_or(0) })
+        Ok(TtsInfo {
+            sample_rate: sample_rate.unwrap_or(24_000),
+            speakers: speakers.unwrap_or(0),
+        })
     }
 
-    fn load_speaker(&self,models_root:&Path)->Result<(),ProviderError>{
-        use moss_voice_local_proto::{SPEAKER_MODEL_ID,SPEAKER_SAMPLE_RATE,SPEAKER_DIMENSION};
-        let op=Op::LoadSpeaker{model_id:SPEAKER_MODEL_ID.into(),models_root:models_root.to_string_lossy().into_owned()};
-        let (reply,payload)=self.call(op,&[],LOAD_TIMEOUT)?;
+    fn load_speaker(&self, models_root: &Path) -> Result<(), ProviderError> {
+        use moss_voice_local_proto::{SPEAKER_DIMENSION, SPEAKER_MODEL_ID, SPEAKER_SAMPLE_RATE};
+        let op = Op::LoadSpeaker {
+            model_id: SPEAKER_MODEL_ID.into(),
+            models_root: models_root.to_string_lossy().into_owned(),
+        };
+        let (reply, payload) = self.call(op, &[], LOAD_TIMEOUT)?;
         match reply {
-            Reply::SpeakerLoaded{model_id,sample_rate,dimension} if model_id==SPEAKER_MODEL_ID && sample_rate==SPEAKER_SAMPLE_RATE && dimension==SPEAKER_DIMENSION && payload.is_empty()=>Ok(()),
-            _=>Err(ProviderError::new("声纹模型协议或维度不匹配")),
+            Reply::SpeakerLoaded {
+                model_id,
+                sample_rate,
+                dimension,
+            } if model_id == SPEAKER_MODEL_ID
+                && sample_rate == SPEAKER_SAMPLE_RATE
+                && dimension == SPEAKER_DIMENSION
+                && payload.is_empty() =>
+            {
+                Ok(())
+            }
+            _ => Err(ProviderError::new("声纹模型协议或维度不匹配")),
         }
     }
     /// Use a dedicated helper for speaker work: its 1.5s timeout invalidates that
     /// process and must never terminate the ASR/TTS/VAD helper or delay stop.
-    fn speaker_embedding_blocking(&self,pcm:&[i16],sample_rate:u32,generation:u64)->Result<Vec<f32>,ProviderError>{
-        use moss_voice_local_proto::{SPEAKER_MODEL_ID,SPEAKER_SAMPLE_RATE,SPEAKER_DIMENSION,valid_speaker_pcm,bytes_to_embedding};
-        if !valid_speaker_pcm(sample_rate,pcm.len().saturating_mul(2)){return Err(ProviderError::new("声纹采样必须为2～10秒16kHz单声道PCM"));}
-        let op=Op::SpeakerEmbed{model_id:SPEAKER_MODEL_ID.into(),sample_rate,utterance_generation:generation};
-        let (reply,bytes)=self.call(op,&pcm_to_bytes(pcm),Duration::from_millis(1500))?;
+    fn speaker_embedding_blocking(
+        &self,
+        pcm: &[i16],
+        sample_rate: u32,
+        generation: u64,
+    ) -> Result<Vec<f32>, ProviderError> {
+        use moss_voice_local_proto::{
+            SPEAKER_DIMENSION, SPEAKER_MODEL_ID, SPEAKER_SAMPLE_RATE, bytes_to_embedding,
+            valid_speaker_pcm,
+        };
+        if !valid_speaker_pcm(sample_rate, pcm.len().saturating_mul(2)) {
+            return Err(ProviderError::new("声纹采样必须为2～10秒16kHz单声道PCM"));
+        }
+        let op = Op::SpeakerEmbed {
+            model_id: SPEAKER_MODEL_ID.into(),
+            sample_rate,
+            utterance_generation: generation,
+        };
+        let (reply, bytes) = self.call(op, &pcm_to_bytes(pcm), Duration::from_millis(1500))?;
         match reply {
-            Reply::Embedding{model_id,sample_rate,dimension,utterance_generation,format}
-                if model_id==SPEAKER_MODEL_ID && sample_rate==SPEAKER_SAMPLE_RATE && dimension==SPEAKER_DIMENSION && utterance_generation==generation && format=="f32le"=>
-                    bytes_to_embedding(&bytes).map_err(|_|ProviderError::new("声纹向量长度或数值无效")),
-            _=>Err(ProviderError::new("声纹响应模型、采样率或代次不匹配")),
+            Reply::Embedding {
+                model_id,
+                sample_rate,
+                dimension,
+                utterance_generation,
+                format,
+            } if model_id == SPEAKER_MODEL_ID
+                && sample_rate == SPEAKER_SAMPLE_RATE
+                && dimension == SPEAKER_DIMENSION
+                && utterance_generation == generation
+                && format == "f32le" =>
+            {
+                bytes_to_embedding(&bytes).map_err(|_| ProviderError::new("声纹向量长度或数值无效"))
+            }
+            _ => Err(ProviderError::new("声纹响应模型、采样率或代次不匹配")),
         }
     }
 
     /// 同步识别（阻塞调用方线程）。
-    pub fn transcribe_blocking(&self, pcm: &[i16], sample_rate: u32) -> Result<String, ProviderError> {
-        match self.call(Op::Transcribe { sample_rate }, &pcm_to_bytes(pcm), TRANSCRIBE_TIMEOUT)?.0 {
+    pub fn transcribe_blocking(
+        &self,
+        pcm: &[i16],
+        sample_rate: u32,
+    ) -> Result<String, ProviderError> {
+        match self
+            .call(
+                Op::Transcribe { sample_rate },
+                &pcm_to_bytes(pcm),
+                TRANSCRIBE_TIMEOUT,
+            )?
+            .0
+        {
             Reply::Text { text } => Ok(text),
             _ => Err(ProviderError::new("本地识别返回了意外的结果")),
         }
     }
 
     /// 同步合成（阻塞调用方线程）。
-    pub fn synthesize_blocking(&self, text: &str, speaker: i32, speed: f32) -> Result<Pcm, ProviderError> {
-        let op = Op::Synthesize { text: text.to_owned(), speaker, speed };
+    pub fn synthesize_blocking(
+        &self,
+        text: &str,
+        speaker: i32,
+        speed: f32,
+    ) -> Result<Pcm, ProviderError> {
+        let op = Op::Synthesize {
+            text: text.to_owned(),
+            speaker,
+            speed,
+        };
         match self.call(op, &[], SYNTHESIZE_TIMEOUT)? {
-            (Reply::Audio { sample_rate }, payload) if sample_rate > 0 => Ok(Pcm { samples: bytes_to_pcm(&payload), sample_rate }),
+            (Reply::Audio { sample_rate }, payload) if sample_rate > 0 => Ok(Pcm {
+                samples: bytes_to_pcm(&payload),
+                sample_rate,
+            }),
             _ => Err(ProviderError::new("本地合成返回了意外的结果")),
         }
     }
 
     fn synthesize_stream_blocking(
-        &self, text: String, speaker: i32, speed: f32,
+        &self,
+        text: String,
+        speaker: i32,
+        speed: f32,
         chunks: tokio::sync::mpsc::UnboundedSender<Pcm>,
     ) -> Result<(), ProviderError> {
-        if !self.is_alive() { return Err(dead()); }
+        if !self.is_alive() {
+            return Err(dead());
+        }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = channel();
-        self.inner.pending.lock().map_err(|_| dead())?.insert(id, sender);
-        let op = Op::SynthesizeStream { text, speaker, speed };
-        if let Err(error) = self.enqueue(id, op, &[]) { self.forget(id); return Err(error); }
+        self.inner
+            .pending
+            .lock()
+            .map_err(|_| dead())?
+            .insert(id, sender);
+        let op = Op::SynthesizeStream {
+            text,
+            speaker,
+            speed,
+        };
+        if let Err(error) = self.enqueue(id, op, &[]) {
+            self.forget(id);
+            return Err(error);
+        }
         let deadline = std::time::Instant::now() + SYNTHESIZE_TIMEOUT;
         let result = loop {
-            if chunks.is_closed() { break Ok(()); }
+            if chunks.is_closed() {
+                break Ok(());
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() { self.inner.invalidate(); break Err(ProviderError::new("本地合成处理超时")); }
+            if remaining.is_zero() {
+                self.inner.invalidate();
+                break Err(ProviderError::new("本地合成处理超时"));
+            }
             match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
-                Ok((Reply::AudioChunk { sample_rate }, payload)) if sample_rate > 0 && payload.len() % 2 == 0 => {
-                    if chunks.send(Pcm { sample_rate, samples: bytes_to_pcm(&payload) }).is_err() { break Ok(()); }
+                Ok((Reply::AudioChunk { sample_rate }, payload))
+                    if sample_rate > 0 && payload.len() % 2 == 0 =>
+                {
+                    if chunks
+                        .send(Pcm {
+                            sample_rate,
+                            samples: bytes_to_pcm(&payload),
+                        })
+                        .is_err()
+                    {
+                        break Ok(());
+                    }
                 }
                 Ok((Reply::Done, _)) => break Ok(()),
                 Ok((Reply::Error { message }, _)) => break Err(ProviderError::new(message)),
@@ -346,7 +523,8 @@ impl LocalHelper {
     }
 
     pub fn asr_open(&self, stream: u64) -> Result<(), ProviderError> {
-        self.call(Op::AsrOpen { stream }, &[], STREAM_TIMEOUT).map(|_| ())
+        self.call(Op::AsrOpen { stream }, &[], STREAM_TIMEOUT)
+            .map(|_| ())
     }
 
     pub fn asr_feed(&self, stream: u64, pcm: &[i16]) -> Result<(), ProviderError> {
@@ -354,7 +532,10 @@ impl LocalHelper {
     }
 
     pub fn asr_feed_text(&self, stream: u64, pcm: &[i16]) -> Result<Option<String>, ProviderError> {
-        match self.call(Op::AsrFeed { stream }, &pcm_to_bytes(pcm), STREAM_TIMEOUT)?.0 {
+        match self
+            .call(Op::AsrFeed { stream }, &pcm_to_bytes(pcm), STREAM_TIMEOUT)?
+            .0
+        {
             Reply::Text { text } => Ok(Some(text)),
             Reply::Done => Ok(None),
             _ => Err(ProviderError::new("本地流式识别返回了意外的结果")),
@@ -363,7 +544,10 @@ impl LocalHelper {
 
     /// 说完：取最终文字（辅助程序随即关闭该路）。
     pub fn asr_finish(&self, stream: u64) -> Result<String, ProviderError> {
-        match self.call(Op::AsrFinish { stream }, &[], TRANSCRIBE_TIMEOUT)?.0 {
+        match self
+            .call(Op::AsrFinish { stream }, &[], TRANSCRIBE_TIMEOUT)?
+            .0
+        {
             Reply::Text { text } => Ok(text),
             _ => Err(ProviderError::new("本地流式识别返回了意外的结果")),
         }
@@ -376,11 +560,15 @@ impl LocalHelper {
     }
 
     pub fn vad_open(&self, stream: u64) -> Result<(), ProviderError> {
-        self.call(Op::VadOpen { stream }, &[], VAD_TIMEOUT).map(|_| ())
+        self.call(Op::VadOpen { stream }, &[], VAD_TIMEOUT)
+            .map(|_| ())
     }
 
     pub fn vad_feed(&self, stream: u64, pcm: &[i16]) -> Result<Vec<VadEventKind>, ProviderError> {
-        match self.call(Op::VadFeed { stream }, &pcm_to_bytes(pcm), VAD_TIMEOUT)?.0 {
+        match self
+            .call(Op::VadFeed { stream }, &pcm_to_bytes(pcm), VAD_TIMEOUT)?
+            .0
+        {
             Reply::VadEvents { events } => Ok(events),
             _ => Err(ProviderError::new("本地判停返回了意外的结果")),
         }
@@ -399,7 +587,11 @@ pub struct LocalAsr {
 }
 
 impl Asr for LocalAsr {
-    fn transcribe<'a>(&'a self, pcm: &'a [i16], sample_rate: u32) -> BoxFuture<'a, Result<String, ProviderError>> {
+    fn transcribe<'a>(
+        &'a self,
+        pcm: &'a [i16],
+        sample_rate: u32,
+    ) -> BoxFuture<'a, Result<String, ProviderError>> {
         let helper = self.helper.clone();
         let pcm = pcm.to_vec();
         Box::pin(async move {
@@ -430,8 +622,12 @@ impl Drop for StreamGuard {
     }
 }
 
-async fn blocking<T: Send + 'static>(job: impl FnOnce() -> Result<T, ProviderError> + Send + 'static) -> Result<T, ProviderError> {
-    tokio::task::spawn_blocking(job).await.map_err(|_| ProviderError::new("本地识别任务异常结束"))?
+async fn blocking<T: Send + 'static>(
+    job: impl FnOnce() -> Result<T, ProviderError> + Send + 'static,
+) -> Result<T, ProviderError> {
+    tokio::task::spawn_blocking(job)
+        .await
+        .map_err(|_| ProviderError::new("本地识别任务异常结束"))?
 }
 
 impl StreamingAsr for LocalStreamingAsr {
@@ -442,7 +638,11 @@ impl StreamingAsr for LocalStreamingAsr {
         let helper = self.helper.clone();
         let task = tokio::spawn(async move {
             let stream = helper.next_stream();
-            let mut guard = StreamGuard { helper: helper.clone(), stream, finished: false };
+            let mut guard = StreamGuard {
+                helper: helper.clone(),
+                stream,
+                finished: false,
+            };
             let outcome = async {
                 let opener = helper.clone();
                 blocking(move || opener.asr_open(stream)).await?;
@@ -452,9 +652,15 @@ impl StreamingAsr for LocalStreamingAsr {
                         pcm.extend_from_slice(&more);
                     }
                     let feeder = helper.clone();
-                    if let Some(text) = blocking(move || feeder.asr_feed_text(stream, &pcm)).await? {
+                    if let Some(text) = blocking(move || feeder.asr_feed_text(stream, &pcm)).await?
+                    {
                         interim_tx.send_if_modified(|current| {
-                            if *current == text { false } else { *current = text; true }
+                            if *current == text {
+                                false
+                            } else {
+                                *current = text;
+                                true
+                            }
                         });
                     }
                 }
@@ -490,12 +696,19 @@ impl Tts for LocalTts {
         })
     }
 
-    fn synthesize_stream<'a>(&'a self, text: &'a str, chunks: tokio::sync::mpsc::UnboundedSender<Pcm>) -> BoxFuture<'a, Result<(), ProviderError>> {
+    fn synthesize_stream<'a>(
+        &'a self,
+        text: &'a str,
+        chunks: tokio::sync::mpsc::UnboundedSender<Pcm>,
+    ) -> BoxFuture<'a, Result<(), ProviderError>> {
         let helper = self.helper.clone();
         let (text, speaker, speed) = (text.to_owned(), self.speaker, self.speed);
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || helper.synthesize_stream_blocking(text, speaker, speed, chunks))
-                .await.map_err(|_| ProviderError::new("本地合成任务异常结束"))?
+            tokio::task::spawn_blocking(move || {
+                helper.synthesize_stream_blocking(text, speaker, speed, chunks)
+            })
+            .await
+            .map_err(|_| ProviderError::new("本地合成任务异常结束"))?
         })
     }
 }

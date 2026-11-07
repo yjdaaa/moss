@@ -64,13 +64,18 @@ pub(crate) async fn context_manage(app: tauri::AppHandle, input: Value) -> CmdRe
 }
 
 #[cfg(desktop)]
-pub(crate) async fn context_add_folder(app: tauri::AppHandle, path: std::path::PathBuf) -> CmdResult {
+pub(crate) async fn context_add_folder(
+    app: tauri::AppHandle,
+    path: std::path::PathBuf,
+) -> CmdResult {
     imp::run(app, move |voice| voice.context_add_folder(&path)).await
 }
 
 #[cfg(mobile)]
 fn desktop_only<T>(_: T) -> CmdResult {
-    Err(serde_json::json!({"code": "voice_desktop_only", "message": "内置语音服务仅在 MOSS 桌面端可用"}))
+    Err(
+        serde_json::json!({"code": "voice_desktop_only", "message": "内置语音服务仅在 MOSS 桌面端可用"}),
+    )
 }
 
 #[cfg(desktop)]
@@ -83,14 +88,16 @@ mod imp {
     use moss_voice::{CenterError, ModelsInput, ProviderKind, Section, SectionInput, VoiceMode};
     use moss_voice_providers::doubao::{DoubaoAsr, DoubaoTts};
     use moss_voice_providers::local::{
-        AsrEngine, HELPER_FILE, LocalAsr, LocalHelper, LocalStreamingAsr, LocalTts, TtsEngine, VadEngine, VadParams,
+        AsrEngine, HELPER_FILE, LocalAsr, LocalHelper, LocalStreamingAsr, LocalTts, TtsEngine,
+        VadEngine, VadParams,
     };
     use moss_voice_providers::openai::{OpenAiAsr, OpenAiLlm, OpenAiTts};
     use moss_voice_providers::{Asr, StreamingAsr, Tts};
     use moss_voice_server::{
-        Conversation, ConversationSettings, DeviceRegistry, DeviceStatus, DeviceVisit, DiagCategory, EventRecord, HostTools,
-        JevFilterOptions, LocalVadFactory, OpenRouterDecisionClient, ServerConfig, ServerMode,
-        ToolContext, ToolHost, ToolHostResult, VadFactory, VoiceJevFilter, VoiceServer,
+        Conversation, ConversationSettings, DeviceRegistry, DeviceStatus, DeviceVisit,
+        DiagCategory, EventRecord, HostTools, JevFilterOptions, LocalVadFactory,
+        OpenRouterDecisionClient, ServerConfig, ServerMode, ToolContext, ToolHost, ToolHostResult,
+        VadFactory, VoiceJevFilter, VoiceServer,
     };
     use serde_json::Value;
     use tauri::Manager;
@@ -102,7 +109,10 @@ mod imp {
     const STREAMING_PLAYBACK_START_MS: u32 = 300;
 
     fn now() -> f64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
     }
 
     /// 字符串版本（设备登记、记忆等内部接口用）：大白话在前，脱敏后的原始错误在括号里。
@@ -116,7 +126,9 @@ mod imp {
     /// 本机数据库失败：界面只说大白话，原始错误（Debug 文本，已脱敏）放进 `detail`（2026-11-07 n68）。
     fn db_failure(error: impl std::fmt::Debug) -> CenterError {
         internal("MOSS 本机设置数据库读写失败，请重启 MOSS 再试；一直失败请导出诊断包反馈")
-            .with_detail(moss_voice_providers::scrub_diagnostic_text(&format!("{error:?}")))
+            .with_detail(moss_voice_providers::scrub_diagnostic_text(&format!(
+                "{error:?}"
+            )))
     }
 
     fn internal(message: impl Into<String>) -> CenterError {
@@ -131,12 +143,18 @@ mod imp {
         changes: &[(String, Option<String>)],
         save_settings: impl FnOnce() -> Result<(), CenterError>,
     ) -> Result<(), CenterError> {
-        let previous = db.apply_secret_changes(changes, now()).map_err(db_failure)?;
-        let Err(error) = save_settings() else { return Ok(()) };
+        let previous = db
+            .apply_secret_changes(changes, now())
+            .map_err(db_failure)?;
+        let Err(error) = save_settings() else {
+            return Ok(());
+        };
         if let Err(restore) = db.restore_secrets(&previous, now()) {
-            return Err(internal(format!("{}；密钥还原也失败，请重新保存", error.message)).with_detail(
-                moss_voice_providers::scrub_diagnostic_text(&format!("{restore:?}")),
-            ));
+            return Err(
+                internal(format!("{}；密钥还原也失败，请重新保存", error.message)).with_detail(
+                    moss_voice_providers::scrub_diagnostic_text(&format!("{restore:?}")),
+                ),
+            );
         }
         Err(error)
     }
@@ -156,11 +174,9 @@ mod imp {
             return Ok((Some(own), true));
         }
         let settings = moss_voice::settings::load(settings_file);
-        let openrouter_llm = settings
-            .builtin_models
-            .llm
-            .as_ref()
-            .is_some_and(|p| p.kind == ProviderKind::Openai && moss_voice::models::is_openrouter_https_url(&p.url));
+        let openrouter_llm = settings.builtin_models.llm.as_ref().is_some_and(|p| {
+            p.kind == ProviderKind::Openai && moss_voice::models::is_openrouter_https_url(&p.url)
+        });
         if openrouter_llm {
             let peer = db
                 .get_secret(builtin_secret_name(Section::Llm))
@@ -185,11 +201,18 @@ mod imp {
                 ("voice.plugin.rag".to_owned(), Some("new-rag".to_owned())),
             ];
             let error = commit_secrets_then_settings(&db, &changes, || {
-                Err(CenterError::new("plugin_settings_failed", 500, "插件配置保存失败"))
+                Err(CenterError::new(
+                    "plugin_settings_failed",
+                    500,
+                    "插件配置保存失败",
+                ))
             })
             .unwrap_err();
             assert_eq!(error.code, "plugin_settings_failed");
-            assert_eq!(db.get_secret("voice.plugin.weather").unwrap().as_deref(), Some("old"));
+            assert_eq!(
+                db.get_secret("voice.plugin.weather").unwrap().as_deref(),
+                Some("old")
+            );
             assert_eq!(db.get_secret("voice.plugin.rag").unwrap(), None);
         }
 
@@ -204,7 +227,10 @@ mod imp {
             })
             .unwrap();
             assert!(saved);
-            assert_eq!(db.get_secret("voice.vision.main").unwrap().as_deref(), Some("key"));
+            assert_eq!(
+                db.get_secret("voice.vision.main").unwrap().as_deref(),
+                Some("key")
+            );
         }
 
         #[test]
@@ -230,8 +256,14 @@ mod imp {
                 let guard = db.lock().unwrap();
                 commit_secrets_then_settings(
                     &guard,
-                    &[(builtin_secret_name(Section::Llm).to_owned(), Some("sk-or-v1-initial".into()))],
-                    || moss_voice::settings::save(&settings_file, &initial).map_err(|m| CenterError::new("err", 500, m)),
+                    &[(
+                        builtin_secret_name(Section::Llm).to_owned(),
+                        Some("sk-or-v1-initial".into()),
+                    )],
+                    || {
+                        moss_voice::settings::save(&settings_file, &initial)
+                            .map_err(|m| CenterError::new("err", 500, m))
+                    },
                 )
                 .unwrap();
             }
@@ -260,12 +292,22 @@ mod imp {
                 let guard = db.lock().unwrap();
                 commit_secrets_then_settings(
                     &guard,
-                    &[(builtin_secret_name(Section::Llm).to_owned(), Some("sk-deepseek-private".into()))],
-                    || moss_voice::settings::save(&settings_file, &switched).map_err(|m| CenterError::new("err", 500, m)),
+                    &[(
+                        builtin_secret_name(Section::Llm).to_owned(),
+                        Some("sk-deepseek-private".into()),
+                    )],
+                    || {
+                        moss_voice::settings::save(&settings_file, &switched)
+                            .map_err(|m| CenterError::new("err", 500, m))
+                    },
                 )
                 .unwrap();
             }
-            assert_eq!(reader(), None, "切换非 OpenRouter 大模型后绝不能把新服务商密钥暴露给 Jev");
+            assert_eq!(
+                reader(),
+                None,
+                "切换非 OpenRouter 大模型后绝不能把新服务商密钥暴露给 Jev"
+            );
         }
     }
 
@@ -287,35 +329,76 @@ mod imp {
 
         #[test]
         fn independent_vision_needs_its_own_key() {
-            let setting = BuiltinVision { enabled: true, url: "https://vision.example.test/v1".into(), model: "vl-1".into(), use_dialog_llm: false, keep_in_history: false };
-            assert!(vision_credentials(&setting, None, None, Some("llm-key")).is_none(), "独立的视觉模型没有密钥就不能用");
+            let setting = BuiltinVision {
+                enabled: true,
+                url: "https://vision.example.test/v1".into(),
+                model: "vl-1".into(),
+                use_dialog_llm: false,
+                keep_in_history: false,
+            };
+            assert!(
+                vision_credentials(&setting, None, None, Some("llm-key")).is_none(),
+                "独立的视觉模型没有密钥就不能用"
+            );
             assert_eq!(
                 vision_credentials(&setting, None, Some("vision-key"), Some("llm-key")),
-                Some(("https://vision.example.test/v1".into(), "vl-1".into(), "vision-key".into()))
+                Some((
+                    "https://vision.example.test/v1".into(),
+                    "vl-1".into(),
+                    "vision-key".into()
+                ))
             );
         }
 
         #[test]
         fn dialog_llm_mode_uses_the_conversation_model_and_key() {
-            let setting = BuiltinVision { enabled: true, url: String::new(), model: String::new(), use_dialog_llm: true, keep_in_history: false };
+            let setting = BuiltinVision {
+                enabled: true,
+                url: String::new(),
+                model: String::new(),
+                use_dialog_llm: true,
+                keep_in_history: false,
+            };
             let openai = provider(ProviderKind::Openai);
             assert_eq!(
                 vision_credentials(&setting, Some(&openai), Some("vision-key"), Some("llm-key")),
-                Some(("https://llm.example.test/v1".into(), "main-model".into(), "llm-key".into())),
+                Some((
+                    "https://llm.example.test/v1".into(),
+                    "main-model".into(),
+                    "llm-key".into()
+                )),
                 "多模态模式用对话模型的地址 / 模型名 / 密钥，视觉专用密钥与地址都不参与"
             );
-            assert!(vision_credentials(&setting, Some(&openai), Some("vision-key"), None).is_none(), "对话模型没有密钥就不能用");
-            assert!(vision_credentials(&setting, None, Some("vision-key"), Some("llm-key")).is_none(), "没有配置对话模型就不能用");
+            assert!(
+                vision_credentials(&setting, Some(&openai), Some("vision-key"), None).is_none(),
+                "对话模型没有密钥就不能用"
+            );
+            assert!(
+                vision_credentials(&setting, None, Some("vision-key"), Some("llm-key")).is_none(),
+                "没有配置对话模型就不能用"
+            );
         }
 
         #[test]
         fn dialog_llm_mode_refuses_non_openai_and_disabled() {
-            let mut setting = BuiltinVision { enabled: true, url: String::new(), model: String::new(), use_dialog_llm: true, keep_in_history: false };
+            let mut setting = BuiltinVision {
+                enabled: true,
+                url: String::new(),
+                model: String::new(),
+                use_dialog_llm: true,
+                keep_in_history: false,
+            };
             let doubao = provider(ProviderKind::Doubao);
-            assert!(vision_credentials(&setting, Some(&doubao), None, Some("llm-key")).is_none(), "非 OpenAI 兼容的对话模型不能看图");
+            assert!(
+                vision_credentials(&setting, Some(&doubao), None, Some("llm-key")).is_none(),
+                "非 OpenAI 兼容的对话模型不能看图"
+            );
             setting.enabled = false;
             let openai = provider(ProviderKind::Openai);
-            assert!(vision_credentials(&setting, Some(&openai), Some("k"), Some("k")).is_none(), "总开关关着就不提供");
+            assert!(
+                vision_credentials(&setting, Some(&openai), Some("k"), Some("k")).is_none(),
+                "总开关关着就不提供"
+            );
         }
     }
 
@@ -357,131 +440,314 @@ mod imp {
 
     use moss_voice_server::memory::{MemoryRecord, MemoryService, VoiceMemoryStore};
 
-    struct DbMemoryStore { db: Arc<Mutex<laser_runtime::RuntimeDb>> }
+    struct DbMemoryStore {
+        db: Arc<Mutex<laser_runtime::RuntimeDb>>,
+    }
     /// `tests`：简易标定时每人另录的测试音向量，只在内存里，算完阈值或删除声纹即丢弃。
-    struct DesktopSpeakerBackend {db:Arc<Mutex<laser_runtime::RuntimeDb>>,helper:Mutex<Option<moss_voice_providers::local::SpeakerHelper>>,personal:Mutex<Option<std::sync::Weak<moss_voice_server::person_context::PersonContext>>>,tests:Mutex<std::collections::HashMap<String,Vec<Vec<f32>>>>}
+    struct DesktopSpeakerBackend {
+        db: Arc<Mutex<laser_runtime::RuntimeDb>>,
+        helper: Mutex<Option<moss_voice_providers::local::SpeakerHelper>>,
+        personal: Mutex<Option<std::sync::Weak<moss_voice_server::person_context::PersonContext>>>,
+        tests: Mutex<std::collections::HashMap<String, Vec<Vec<f32>>>>,
+    }
     impl moss_voice_server::speaker_enrollment::EnrollmentBackend for DesktopSpeakerBackend {
-        fn save_test(&self,speaker_id:&str,clips:&[Vec<f32>])->Result<(),String>{
-            let known=self.db.lock().map_err(|_|"数据库不可用")?.list_voice_speakers().map_err(|_|"读取声纹失败")?.iter().any(|r|r.id==speaker_id);
-            if !known{return Err("这个人的声纹已删除".into());}
-            self.tests.lock().map_err(|_|"标定数据不可用")?.insert(speaker_id.into(),clips.to_vec());
+        fn save_test(&self, speaker_id: &str, clips: &[Vec<f32>]) -> Result<(), String> {
+            let known = self
+                .db
+                .lock()
+                .map_err(|_| "数据库不可用")?
+                .list_voice_speakers()
+                .map_err(|_| "读取声纹失败")?
+                .iter()
+                .any(|r| r.id == speaker_id);
+            if !known {
+                return Err("这个人的声纹已删除".into());
+            }
+            self.tests
+                .lock()
+                .map_err(|_| "标定数据不可用")?
+                .insert(speaker_id.into(), clips.to_vec());
             Ok(())
         }
-        fn embedding(&self,pcm:&[i16],generation:u64)->Result<Vec<f32>,String>{
-            let helper=self.helper.lock().map_err(|_|"声纹辅助程序不可用")?.clone().ok_or("声纹辅助程序未准备")?;
-            helper.embedding_blocking(pcm,16000,generation).map_err(|_|"声纹计算失败".into())
+        fn embedding(&self, pcm: &[i16], generation: u64) -> Result<Vec<f32>, String> {
+            let helper = self
+                .helper
+                .lock()
+                .map_err(|_| "声纹辅助程序不可用")?
+                .clone()
+                .ok_or("声纹辅助程序未准备")?;
+            helper
+                .embedding_blocking(pcm, 16000, generation)
+                .map_err(|_| "声纹计算失败".into())
         }
-        fn save(&self,name:&str,clips:&[Vec<f32>])->Result<(),String>{
-            let mut bytes=[0u8;16];getrandom::fill(&mut bytes).map_err(|_|"声纹编号生成失败")?;
-            let id=bytes.iter().map(|b|format!("{b:02x}")).collect::<String>();
-            self.db.lock().map_err(|_|"数据库不可用")?.enroll_voice_speaker(&id,name,"campplus_sv_zh_cn_16k_common",clips,now()).map_err(|_|"声纹登记失败")?;
-            if let Some(personal)=self.personal.lock().ok().and_then(|slot|slot.as_ref().and_then(std::sync::Weak::upgrade)){personal.directory_changed();}
+        fn save(&self, name: &str, clips: &[Vec<f32>]) -> Result<(), String> {
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).map_err(|_| "声纹编号生成失败")?;
+            let id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            self.db
+                .lock()
+                .map_err(|_| "数据库不可用")?
+                .enroll_voice_speaker(&id, name, "campplus_sv_zh_cn_16k_common", clips, now())
+                .map_err(|_| "声纹登记失败")?;
+            if let Some(personal) = self
+                .personal
+                .lock()
+                .ok()
+                .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
+            {
+                personal.directory_changed();
+            }
             Ok(())
         }
     }
-    use moss_voice_server::person_context::{IdentityResolver,IdentityRequest,PersonScope,PersonContext,PersonMemoryStore,PersonSummary,SpeakerTemplate,match_embedding,CalibrationReport,CalibrationSample};
-    const SPEAKER_CALIBRATION_KEY:&str="voice.speaker.calibration";
-    const SPEAKER_MODEL:&str="campplus_sv_zh_cn_16k_common";
+    use moss_voice_server::person_context::{
+        CalibrationReport, CalibrationSample, IdentityRequest, IdentityResolver, PersonContext,
+        PersonMemoryStore, PersonScope, PersonSummary, SpeakerTemplate, match_embedding,
+    };
+    const SPEAKER_CALIBRATION_KEY: &str = "voice.speaker.calibration";
+    const SPEAKER_MODEL: &str = "campplus_sv_zh_cn_16k_common";
     /// 简易标定结果（2026-10-14 用户决定，取代“源码写死 None”）：没有标定就不识别身份。
     /// 只对标定时的登记名单（编号 + 版本）有效；增删或重新登记任何人都会让它失效，需要重新标定。
-    #[derive(Clone,serde::Serialize,serde::Deserialize)]
-    struct Calibration {report:CalibrationReport,directory:String,calibrated_at:f64}
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    struct Calibration {
+        report: CalibrationReport,
+        directory: String,
+        calibrated_at: f64,
+    }
     /// 登记名单的比较键：CampPlus 192 维声纹的“编号:版本”，排序后拼接。
-    fn speaker_directory<'a>(items:impl Iterator<Item=(&'a str,i64)>)->String{
-        let mut keys=items.map(|(id,revision)|format!("{id}:{revision}")).collect::<Vec<_>>();keys.sort();keys.join(",")
+    fn speaker_directory<'a>(items: impl Iterator<Item = (&'a str, i64)>) -> String {
+        let mut keys = items
+            .map(|(id, revision)| format!("{id}:{revision}"))
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.join(",")
     }
     #[cfg(test)]
     mod speaker_directory_tests {
         /// 标定只对当时的登记名单有效：顺序无关，增删人或重新登记（版本变）都会得到不同的键。
         #[test]
-        fn directory_key_changes_when_anyone_is_added_removed_or_re_enrolled(){
-            let key=|items:&[(&str,i64)]|super::speaker_directory(items.iter().copied());
-            assert_eq!(key(&[("a",1),("b",1)]),key(&[("b",1),("a",1)]));
-            assert_ne!(key(&[("a",1),("b",1)]),key(&[("a",1)]));
-            assert_ne!(key(&[("a",1),("b",1)]),key(&[("a",1),("b",1),("c",1)]));
-            assert_ne!(key(&[("a",1),("b",1)]),key(&[("a",2),("b",1)]));
+        fn directory_key_changes_when_anyone_is_added_removed_or_re_enrolled() {
+            let key = |items: &[(&str, i64)]| super::speaker_directory(items.iter().copied());
+            assert_eq!(key(&[("a", 1), ("b", 1)]), key(&[("b", 1), ("a", 1)]));
+            assert_ne!(key(&[("a", 1), ("b", 1)]), key(&[("a", 1)]));
+            assert_ne!(
+                key(&[("a", 1), ("b", 1)]),
+                key(&[("a", 1), ("b", 1), ("c", 1)])
+            );
+            assert_ne!(key(&[("a", 1), ("b", 1)]), key(&[("a", 2), ("b", 1)]));
         }
     }
-    struct DesktopIdentity {host:std::sync::Weak<laser_host::HostApplication>,backend:Arc<DesktopSpeakerBackend>,calibration:Mutex<Option<Calibration>>,workers:Arc<tokio::sync::Semaphore>}
+    struct DesktopIdentity {
+        host: std::sync::Weak<laser_host::HostApplication>,
+        backend: Arc<DesktopSpeakerBackend>,
+        calibration: Mutex<Option<Calibration>>,
+        workers: Arc<tokio::sync::Semaphore>,
+    }
     impl DesktopIdentity {
         /// 有标定且登记名单没变时返回标定结果。
-        fn valid_calibration(&self)->Option<Calibration>{
-            let calibration=self.calibration.lock().ok()?.clone()?;
-            let rows=self.backend.db.lock().ok()?.list_voice_speakers().ok()?;
-            let current=speaker_directory(rows.iter().filter(|r|r.model_id==SPEAKER_MODEL&&r.dimension==192).map(|r|(r.id.as_str(),r.revision)));
-            (current==calibration.directory).then_some(calibration)
+        fn valid_calibration(&self) -> Option<Calibration> {
+            let calibration = self.calibration.lock().ok()?.clone()?;
+            let rows = self.backend.db.lock().ok()?.list_voice_speakers().ok()?;
+            let current = speaker_directory(
+                rows.iter()
+                    .filter(|r| r.model_id == SPEAKER_MODEL && r.dimension == 192)
+                    .map(|r| (r.id.as_str(), r.revision)),
+            );
+            (current == calibration.directory).then_some(calibration)
         }
     }
     impl IdentityResolver for DesktopIdentity {
-        fn identify<'a>(&'a self,_:&'a ToolContext,pcm:&'a [i16],rate:u32,request:IdentityRequest)->moss_voice_providers::BoxFuture<'a,Option<PersonScope>>{
+        fn identify<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            pcm: &'a [i16],
+            rate: u32,
+            request: IdentityRequest,
+        ) -> moss_voice_providers::BoxFuture<'a, Option<PersonScope>> {
             Box::pin(async move {
-                let calibration=self.calibration.lock().ok()?.clone()?;
-                let (threshold,margin,directory)=(calibration.report.threshold,calibration.report.margin,calibration.directory);
+                let calibration = self.calibration.lock().ok()?.clone()?;
+                let (threshold, margin, directory) = (
+                    calibration.report.threshold,
+                    calibration.report.margin,
+                    calibration.directory,
+                );
                 // Keep the physical worker slot until a cancelled blocking
                 // helper operation actually finishes; no unbounded queue.
-                let worker=self.workers.clone().try_acquire_owned().ok()?;
-                let backend=self.backend.clone();let pcm=pcm.to_vec();
-                tauri::async_runtime::spawn_blocking(move||{
-                    let _worker=worker;
-                    let pcm=if rate==16000{pcm}else{moss_voice_providers::resample::Resampler::new(rate,16000).process(&pcm)};
-                    let helper=backend.helper.lock().ok()?.clone()?;
-                    let embedding=helper.embedding_blocking(&pcm,16000,request.utterance_generation).ok()?;
-                    let templates=backend.db.lock().ok()?.native_voice_speaker_templates().ok()?.into_iter().map(|t|SpeakerTemplate{id:t.id,revision:t.revision,embedding:t.embedding}).collect::<Vec<_>>();
+                let worker = self.workers.clone().try_acquire_owned().ok()?;
+                let backend = self.backend.clone();
+                let pcm = pcm.to_vec();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let _worker = worker;
+                    let pcm = if rate == 16000 {
+                        pcm
+                    } else {
+                        moss_voice_providers::resample::Resampler::new(rate, 16000).process(&pcm)
+                    };
+                    let helper = backend.helper.lock().ok()?.clone()?;
+                    let embedding = helper
+                        .embedding_blocking(&pcm, 16000, request.utterance_generation)
+                        .ok()?;
+                    let templates = backend
+                        .db
+                        .lock()
+                        .ok()?
+                        .native_voice_speaker_templates()
+                        .ok()?
+                        .into_iter()
+                        .map(|t| SpeakerTemplate {
+                            id: t.id,
+                            revision: t.revision,
+                            embedding: t.embedding,
+                        })
+                        .collect::<Vec<_>>();
                     // 登记名单在标定后变过：阈值不再可信，不识别
-                    if speaker_directory(templates.iter().map(|t|(t.id.as_str(),t.revision)))!=directory{return None;}
-                    match_embedding(&embedding,&templates,request.directory_generation,threshold,margin)
-                }).await.ok().flatten()
+                    if speaker_directory(templates.iter().map(|t| (t.id.as_str(), t.revision)))
+                        != directory
+                    {
+                        return None;
+                    }
+                    match_embedding(
+                        &embedding,
+                        &templates,
+                        request.directory_generation,
+                        threshold,
+                        margin,
+                    )
+                })
+                .await
+                .ok()
+                .flatten()
             })
         }
-        fn permitted(&self,ctx:&ToolContext)->bool{self.host.upgrade().is_some_and(|h|h.api_service.voice_session_allowed(&ctx.device_id,&ctx.session_id))}
-        fn device_allowed(&self,device:&str)->bool{self.device_generation(device).is_some()}
-        fn device_generation(&self,device:&str)->Option<u64>{
-            let host=self.host.upgrade()?;let db=host.db.lock().ok()?;
-            let row=db.voice_device(device).ok()??;if !row.is_allowed(){return None;}Some(row.decided_at?.to_bits())
+        fn permitted(&self, ctx: &ToolContext) -> bool {
+            self.host.upgrade().is_some_and(|h| {
+                h.api_service
+                    .voice_session_allowed(&ctx.device_id, &ctx.session_id)
+            })
         }
-        fn current(&self,scope:&PersonScope)->bool{
-            self.backend.db.lock().ok().and_then(|db|db.list_voice_speakers().ok()).is_some_and(|rows|rows.iter().any(|r|r.id==scope.id()&&r.revision==scope.revision()&&r.model_id=="campplus_sv_zh_cn_16k_common"&&r.dimension==192))
+        fn device_allowed(&self, device: &str) -> bool {
+            self.device_generation(device).is_some()
+        }
+        fn device_generation(&self, device: &str) -> Option<u64> {
+            let host = self.host.upgrade()?;
+            let db = host.db.lock().ok()?;
+            let row = db.voice_device(device).ok()??;
+            if !row.is_allowed() {
+                return None;
+            }
+            Some(row.decided_at?.to_bits())
+        }
+        fn current(&self, scope: &PersonScope) -> bool {
+            self.backend
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.list_voice_speakers().ok())
+                .is_some_and(|rows| {
+                    rows.iter().any(|r| {
+                        r.id == scope.id()
+                            && r.revision == scope.revision()
+                            && r.model_id == "campplus_sv_zh_cn_16k_common"
+                            && r.dimension == 192
+                    })
+                })
         }
     }
-    struct DbPersonStore {db:Arc<Mutex<laser_runtime::RuntimeDb>>}
+    struct DbPersonStore {
+        db: Arc<Mutex<laser_runtime::RuntimeDb>>,
+    }
     impl PersonMemoryStore for DbPersonStore {
-        fn load(&self,scope:&PersonScope)->Result<Option<PersonSummary>,String>{
-            let db=self.db.lock().map_err(|_|"数据库不可用")?;
-            if !db.list_voice_speakers().map_err(db_error)?.iter().any(|r|r.id==scope.id()&&r.revision==scope.revision()){return Ok(None);}
-            db.voice_person_summary(scope.id()).map(|r|r.map(|(text,revision)|PersonSummary{text,revision})).map_err(db_error)
+        fn load(&self, scope: &PersonScope) -> Result<Option<PersonSummary>, String> {
+            let db = self.db.lock().map_err(|_| "数据库不可用")?;
+            if !db
+                .list_voice_speakers()
+                .map_err(db_error)?
+                .iter()
+                .any(|r| r.id == scope.id() && r.revision == scope.revision())
+            {
+                return Ok(None);
+            }
+            db.voice_person_summary(scope.id())
+                .map(|r| r.map(|(text, revision)| PersonSummary { text, revision }))
+                .map_err(db_error)
         }
-        fn update(&self,scope:&PersonScope,revision:i64,text:&str)->Result<bool,String>{
-            let db=self.db.lock().map_err(|_|"数据库不可用")?;
-            if !db.list_voice_speakers().map_err(db_error)?.iter().any(|r|r.id==scope.id()&&r.revision==scope.revision()){return Ok(false);}
-            db.update_voice_person_summary_if_revision(scope.id(),revision,text,now()).map_err(db_error)
+        fn update(&self, scope: &PersonScope, revision: i64, text: &str) -> Result<bool, String> {
+            let db = self.db.lock().map_err(|_| "数据库不可用")?;
+            if !db
+                .list_voice_speakers()
+                .map_err(db_error)?
+                .iter()
+                .any(|r| r.id == scope.id() && r.revision == scope.revision())
+            {
+                return Ok(false);
+            }
+            db.update_voice_person_summary_if_revision(scope.id(), revision, text, now())
+                .map_err(db_error)
         }
     }
     impl VoiceMemoryStore for DbMemoryStore {
         fn allowed(&self, id: &str) -> Result<bool, String> {
-            self.db.lock().map_err(|_| "数据库锁失败".to_owned())?.voice_device(id).map(|item| item.is_some_and(|d| d.is_allowed())).map_err(db_error)
+            self.db
+                .lock()
+                .map_err(|_| "数据库锁失败".to_owned())?
+                .voice_device(id)
+                .map(|item| item.is_some_and(|d| d.is_allowed()))
+                .map_err(db_error)
         }
         fn load(&self, id: &str) -> Result<Option<MemoryRecord>, String> {
-            self.db.lock().map_err(|_| "数据库锁失败".to_owned())?.voice_memory(id).map(|r| r.map(convert_memory)).map_err(db_error)
+            self.db
+                .lock()
+                .map_err(|_| "数据库锁失败".to_owned())?
+                .voice_memory(id)
+                .map(|r| r.map(convert_memory))
+                .map_err(db_error)
         }
         fn ensure(&self, id: &str) -> Result<MemoryRecord, String> {
-            self.db.lock().map_err(|_| "数据库锁失败".to_owned())?.ensure_voice_memory(id, now()).map(convert_memory).map_err(db_error)
+            self.db
+                .lock()
+                .map_err(|_| "数据库锁失败".to_owned())?
+                .ensure_voice_memory(id, now())
+                .map(convert_memory)
+                .map_err(db_error)
         }
-        fn update(&self, id: &str, revision: i64, summary: &str) -> Result<Option<MemoryRecord>, String> {
-            self.db.lock().map_err(|_| "数据库锁失败".to_owned())?.update_voice_memory_if_revision(id, revision, summary, now()).map(|r| r.map(convert_memory)).map_err(db_error)
+        fn update(
+            &self,
+            id: &str,
+            revision: i64,
+            summary: &str,
+        ) -> Result<Option<MemoryRecord>, String> {
+            self.db
+                .lock()
+                .map_err(|_| "数据库锁失败".to_owned())?
+                .update_voice_memory_if_revision(id, revision, summary, now())
+                .map(|r| r.map(convert_memory))
+                .map_err(db_error)
         }
         fn list(&self) -> Result<Vec<MemoryRecord>, String> {
-            self.db.lock().map_err(|_| "数据库锁失败".to_owned())?.voice_memories().map(|rows| rows.into_iter().map(convert_memory).collect()).map_err(db_error)
+            self.db
+                .lock()
+                .map_err(|_| "数据库锁失败".to_owned())?
+                .voice_memories()
+                .map(|rows| rows.into_iter().map(convert_memory).collect())
+                .map_err(db_error)
         }
     }
     fn convert_memory(value: laser_runtime::VoiceMemoryRecord) -> MemoryRecord {
-        MemoryRecord { device_id: value.device_id, summary: value.summary, revision: value.revision, updated_at: value.updated_at }
+        MemoryRecord {
+            device_id: value.device_id,
+            summary: value.summary,
+            revision: value.revision,
+            updated_at: value.updated_at,
+        }
     }
 
-    use moss_voice_server::plugins::runtime::{CombinedTools, InfoTools, PluginHost};
     use moss_voice_server::ToolExecutor;
     use moss_voice_server::home_tools::{HomeAvailability, HomeHost, HomeTools};
+    use moss_voice_server::plugins::runtime::{CombinedTools, InfoTools, PluginHost};
 
-    use moss_voice_server::persona::{CustomRole, PersonaConfig, PersonaStore, PersonaSwitch, PersonaTools};
+    use moss_voice_server::persona::{
+        CustomRole, PersonaConfig, PersonaStore, PersonaSwitch, PersonaTools,
+    };
 
     /// n59 当前说话角色的组成：内置 / 自建角色、共用的工坊补充背景。
     fn persona_config(local: &BuiltinLocal) -> PersonaConfig {
@@ -491,16 +757,26 @@ mod imp {
             custom: local
                 .custom_personas
                 .iter()
-                .map(|c| CustomRole { id: c.id.clone(), name: c.name.clone(), prompt: c.prompt.clone() })
+                .map(|c| CustomRole {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    prompt: c.prompt.clone(),
+                })
                 .collect(),
         }
     }
 
     /// 语音切换角色时写入设置（只改 `persona_style`，不重启服务）。核对与更新运行中的角色都在设置写入锁内，
     /// 与界面保存（`local_save`）排成同一顺序。
-    struct DesktopPersonaStore { settings_file: std::path::PathBuf }
+    struct DesktopPersonaStore {
+        settings_file: std::path::PathBuf,
+    }
     impl PersonaStore for DesktopPersonaStore {
-        fn save_active(&self, id: &str, apply: &mut dyn FnMut(PersonaConfig)) -> Result<(), String> {
+        fn save_active(
+            &self,
+            id: &str,
+            apply: &mut dyn FnMut(PersonaConfig),
+        ) -> Result<(), String> {
             let mut touched = false;
             let result = moss_voice::settings::update_voice(&self.settings_file, |settings| {
                 let local = &mut settings.builtin_local;
@@ -520,86 +796,153 @@ mod imp {
             });
             if result.is_err() && touched {
                 // The file write failed after the running role changed; follow the file again.
-                apply(persona_config(&moss_voice::settings::load(&self.settings_file).builtin_local));
+                apply(persona_config(
+                    &moss_voice::settings::load(&self.settings_file).builtin_local,
+                ));
             }
             result
         }
     }
 
-    struct DesktopInfoHost { host: Arc<laser_host::HostApplication> }
+    struct DesktopInfoHost {
+        host: Arc<laser_host::HostApplication>,
+    }
     impl PluginHost for DesktopInfoHost {
         fn config(&self) -> Value {
             let path = self.host.runtime_root.path.join("settings.json");
-            serde_json::to_value(moss_voice::settings::load(&path).builtin_plugins).unwrap_or(Value::Null)
+            serde_json::to_value(moss_voice::settings::load(&path).builtin_plugins)
+                .unwrap_or(Value::Null)
         }
         fn secret(&self, kind: &str) -> Option<String> {
-            let name = match kind { "weather" => "voice.plugin.weather", "search" => "voice.plugin.search", "metaso" => "voice.plugin.metaso", "rag" => "voice.plugin.rag", _ => return None };
-            self.host.db.lock().ok().and_then(|db|db.get_secret(name).ok().flatten()).filter(|s|!s.is_empty())
+            let name = match kind {
+                "weather" => "voice.plugin.weather",
+                "search" => "voice.plugin.search",
+                "metaso" => "voice.plugin.metaso",
+                "rag" => "voice.plugin.rag",
+                _ => return None,
+            };
+            self.host
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.get_secret(name).ok().flatten())
+                .filter(|s| !s.is_empty())
         }
         fn permitted(&self, ctx: &ToolContext) -> bool {
-            self.host.api_service.voice_session_allowed(&ctx.device_id,&ctx.session_id)
+            self.host
+                .api_service
+                .voice_session_allowed(&ctx.device_id, &ctx.session_id)
         }
     }
 
     // NV15 opt-in *read-only* model tool. Never expose the token or POST.
     // A saved grant binds the exact allowlist revision and token revision,
     // so editing either disables the tool until the desktop user re-consents.
-    const HOME_VOICE_GRANT:&str="voice.homeassistant.voice_read_consent";
-    struct DesktopHomeHost { host:Arc<laser_host::HostApplication>, control:Arc<laser_host::home_control::HomeControlCoordinator> }
+    const HOME_VOICE_GRANT: &str = "voice.homeassistant.voice_read_consent";
+    struct DesktopHomeHost {
+        host: Arc<laser_host::HostApplication>,
+        control: Arc<laser_host::home_control::HomeControlCoordinator>,
+    }
     impl DesktopHomeHost {
-        fn current(&self)->Option<(moss_voice::settings::BuiltinHomeAssistant,u64,u64,String)>{
-            let (settings,policy)=moss_voice::settings::read_home_offline(
-                &self.host.runtime_root.path.join("settings.json")).ok()?;
+        fn current(
+            &self,
+        ) -> Option<(moss_voice::settings::BuiltinHomeAssistant, u64, u64, String)> {
+            let (settings, policy) = moss_voice::settings::read_home_offline(
+                &self.host.runtime_root.path.join("settings.json"),
+            )
+            .ok()?;
             settings.validate_offline().ok()?;
-            if policy==0 || settings.base_url.is_empty() ||
-                !settings.entities.iter().any(|e|e.enabled) {return None;}
-            let db=self.host.db.lock().ok()?;
-            let (has_token,revision)=db.home_token_status().ok()?;
-            if !has_token || revision==0 {return None;}
-            let grant=db.get_secret(HOME_VOICE_GRANT).ok()??;
-            if grant!=format!("{policy}:{revision}") {return None;}
-            Some((settings,policy,revision,grant))
+            if policy == 0
+                || settings.base_url.is_empty()
+                || !settings.entities.iter().any(|e| e.enabled)
+            {
+                return None;
+            }
+            let db = self.host.db.lock().ok()?;
+            let (has_token, revision) = db.home_token_status().ok()?;
+            if !has_token || revision == 0 {
+                return None;
+            }
+            let grant = db.get_secret(HOME_VOICE_GRANT).ok()??;
+            if grant != format!("{policy}:{revision}") {
+                return None;
+            }
+            Some((settings, policy, revision, grant))
         }
     }
     impl HomeHost for DesktopHomeHost {
-        fn availability(&self)->HomeAvailability{
-            HomeAvailability{read:self.current().is_some(),control:self.control.enabled()}
-        }
-        fn permitted(&self,context:&ToolContext)->bool{
-            self.host.api_service.voice_session_allowed(&context.device_id,&context.session_id)
-        }
-        fn invoke(&self,context:&ToolContext,name:&str,arguments:&Value)->Value{
-            let deny=|code:&str|serde_json::json!({"ok":false,"error":{"code":code,"retryable":false}});
-            if !self.permitted(context) {return deny("home_disabled");}
-            if name!="hass_get_state" {
-                return self.control.prepare(&context.device_id,&context.session_id,name,arguments).unwrap_or_else(|code|deny(code));
+        fn availability(&self) -> HomeAvailability {
+            HomeAvailability {
+                read: self.current().is_some(),
+                control: self.control.enabled(),
             }
-            let Some((config,policy,revision,_))=self.current()else{return deny("home_disabled")};
-            let target=arguments["entity"].as_str().unwrap_or("");
-            if !config.entities.iter().any(|e|e.enabled&&e.entity_id==target) {
+        }
+        fn permitted(&self, context: &ToolContext) -> bool {
+            self.host
+                .api_service
+                .voice_session_allowed(&context.device_id, &context.session_id)
+        }
+        fn invoke(&self, context: &ToolContext, name: &str, arguments: &Value) -> Value {
+            let deny = |code: &str| serde_json::json!({"ok":false,"error":{"code":code,"retryable":false}});
+            if !self.permitted(context) {
+                return deny("home_disabled");
+            }
+            if name != "hass_get_state" {
+                return self
+                    .control
+                    .prepare(&context.device_id, &context.session_id, name, arguments)
+                    .unwrap_or_else(|code| deny(code));
+            }
+            let Some((config, policy, revision, _)) = self.current() else {
+                return deny("home_disabled");
+            };
+            let target = arguments["entity"].as_str().unwrap_or("");
+            if !config
+                .entities
+                .iter()
+                .any(|e| e.enabled && e.entity_id == target)
+            {
                 return deny("home_unknown_entity");
             }
-            let token={
-                let Ok(db)=self.host.db.lock()else{return deny("home_unavailable")};
-                match db.home_token_for_connection(){Ok(Some(token))=>token,_=>return deny("home_unavailable")}
+            let token = {
+                let Ok(db) = self.host.db.lock() else {
+                    return deny("home_unavailable");
+                };
+                match db.home_token_for_connection() {
+                    Ok(Some(token)) => token,
+                    _ => return deny("home_unavailable"),
+                }
             };
-            let discovered=moss_voice::home_readonly::discover_guarded(&config,&token,policy,revision,||{
-                self.permitted(context) && self.current()
-                    .is_some_and(|(latest,p,r,_)|latest==config&&p==policy&&r==revision)
-            });
-            if !self.permitted(context) || self.current()
-                .is_none_or(|(new,p,r,_)|new!=config||p!=policy||r!=revision){
+            let discovered = moss_voice::home_readonly::discover_guarded(
+                &config,
+                &token,
+                policy,
+                revision,
+                || {
+                    self.permitted(context)
+                        && self.current().is_some_and(|(latest, p, r, _)| {
+                            latest == config && p == policy && r == revision
+                        })
+                },
+            );
+            if !self.permitted(context)
+                || self
+                    .current()
+                    .is_none_or(|(new, p, r, _)| new != config || p != policy || r != revision)
+            {
                 return deny("home_stale_permission");
             }
             match discovered {
-                Ok(output)=>match output.entities.iter().find(|e|e.entity_id==target) {
-                    Some(entity)=>serde_json::json!({"ok":true,"entity_id":entity.entity_id,
+                Ok(output) => match output.entities.iter().find(|e| e.entity_id == target) {
+                    Some(entity) => serde_json::json!({"ok":true,"entity_id":entity.entity_id,
                         "state":entity.state,"last_updated":entity.last_updated,
                         "attributes":entity.attributes,"actions_available":entity.actions_available}),
-                    None=>deny("home_unknown_entity"),
+                    None => deny("home_unknown_entity"),
                 },
-                Err(moss_voice::home_readonly::DiscoveryError::Unauthorized)=>deny("home_unauthorized"),
-                Err(_)=>deny("home_unavailable"),
+                Err(moss_voice::home_readonly::DiscoveryError::Unauthorized) => {
+                    deny("home_unauthorized")
+                }
+                Err(_) => deny("home_unavailable"),
             }
         }
     }
@@ -609,67 +952,94 @@ mod imp {
     /// 2026-10-16：`use_dialog_llm` 打开时改用当前对话大模型的地址 / 模型名与 `voice.llm.main` 密钥，
     /// 仍然只发这一次请求、不进对话历史；对话模型必须 OpenAI 兼容且支持看图。
     fn vision_credentials(
-        setting:&moss_voice::settings::BuiltinVision,
-        llm:Option<&moss_voice::settings::BuiltinProvider>,
-        vision_key:Option<&str>,
-        llm_key:Option<&str>,
-    )->Option<(String,String,String)>{
-        if !setting.enabled{return None;}
-        let usable=|url:&str,model:&str,key:&str|{
-            !model.trim().is_empty()&&!key.trim().is_empty()
-                &&moss_voice_providers::vision::endpoint(url).is_ok()
-        };
-        if setting.use_dialog_llm{
-            let llm=llm.filter(|llm|llm.kind.is_openai())?;
-            let key=llm_key?;
-            return usable(&llm.url,&llm.model,key).then(||(llm.url.clone(),llm.model.clone(),key.to_owned()));
+        setting: &moss_voice::settings::BuiltinVision,
+        llm: Option<&moss_voice::settings::BuiltinProvider>,
+        vision_key: Option<&str>,
+        llm_key: Option<&str>,
+    ) -> Option<(String, String, String)> {
+        if !setting.enabled {
+            return None;
         }
-        let key=vision_key?;
-        usable(&setting.url,&setting.model,key).then(||(setting.url.clone(),setting.model.clone(),key.to_owned()))
+        let usable = |url: &str, model: &str, key: &str| {
+            !model.trim().is_empty()
+                && !key.trim().is_empty()
+                && moss_voice_providers::vision::endpoint(url).is_ok()
+        };
+        if setting.use_dialog_llm {
+            let llm = llm.filter(|llm| llm.kind.is_openai())?;
+            let key = llm_key?;
+            return usable(&llm.url, &llm.model, key)
+                .then(|| (llm.url.clone(), llm.model.clone(), key.to_owned()));
+        }
+        let key = vision_key?;
+        usable(&setting.url, &setting.model, key)
+            .then(|| (setting.url.clone(), setting.model.clone(), key.to_owned()))
     }
-    struct DesktopVisionFactory { host: Arc<laser_host::HostApplication> }
+    struct DesktopVisionFactory {
+        host: Arc<laser_host::HostApplication>,
+    }
     impl DesktopVisionFactory {
-        fn vision_setting(&self)->moss_voice::settings::BuiltinVision {
-            moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json")).builtin_vision
+        fn vision_setting(&self) -> moss_voice::settings::BuiltinVision {
+            moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json"))
+                .builtin_vision
         }
         /// 返回（地址、模型、密钥、配置修订号）。
-        fn profile(&self) -> Option<(String,String,String,u64)> {
-            use std::hash::{Hash,Hasher};
-            let settings=moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json"));
-            let setting=settings.builtin_vision;
-            let (vision_key,llm_key)={
-                let db=self.host.db.lock().ok()?;
-                (db.get_secret("voice.vision.main").ok().flatten(),db.get_secret("voice.llm.main").ok().flatten())
+        fn profile(&self) -> Option<(String, String, String, u64)> {
+            use std::hash::{Hash, Hasher};
+            let settings =
+                moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json"));
+            let setting = settings.builtin_vision;
+            let (vision_key, llm_key) = {
+                let db = self.host.db.lock().ok()?;
+                (
+                    db.get_secret("voice.vision.main").ok().flatten(),
+                    db.get_secret("voice.llm.main").ok().flatten(),
+                )
             };
-            let (url,model,key)=vision_credentials(&setting,settings.builtin_models.llm.as_ref(),vision_key.as_deref(),llm_key.as_deref())?;
-            let mut hasher=std::collections::hash_map::DefaultHasher::new();
+            let (url, model, key) = vision_credentials(
+                &setting,
+                settings.builtin_models.llm.as_ref(),
+                vision_key.as_deref(),
+                llm_key.as_deref(),
+            )?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
             setting.enabled.hash(&mut hasher);
             setting.use_dialog_llm.hash(&mut hasher);
             url.hash(&mut hasher);
             model.hash(&mut hasher);
             key.hash(&mut hasher);
-            Some((url,model,key,hasher.finish()))
+            Some((url, model, key, hasher.finish()))
         }
     }
     impl moss_voice_server::vision::VisionFactory for DesktopVisionFactory {
-        fn ready(&self)->bool {self.profile().is_some()}
-        fn open(&self)->Option<moss_voice_server::vision::VisionSession>{
-            let (url,model,key,generation)=self.profile()?;
-            let provider=moss_voice_providers::vision::OpenAiVision::new(&url,&model,&key).ok()?;
-            Some(moss_voice_server::vision::VisionSession{provider:Arc::new(provider),generation})
+        fn ready(&self) -> bool {
+            self.profile().is_some()
         }
-        fn still_current(&self,generation:u64)->bool{
-            self.profile().is_some_and(|(_,_,_,revision)|revision==generation)
+        fn open(&self) -> Option<moss_voice_server::vision::VisionSession> {
+            let (url, model, key, generation) = self.profile()?;
+            let provider =
+                moss_voice_providers::vision::OpenAiVision::new(&url, &model, &key).ok()?;
+            Some(moss_voice_server::vision::VisionSession {
+                provider: Arc::new(provider),
+                generation,
+            })
+        }
+        fn still_current(&self, generation: u64) -> bool {
+            self.profile()
+                .is_some_and(|(_, _, _, revision)| revision == generation)
         }
         /// 2026-10-16：视觉卡片打开“把照片留在对话上下文里”时，服务端才会把这张照片交给会话。
-        fn keep_in_history(&self)->bool{
-            let setting=self.vision_setting();
-            setting.enabled&&setting.keep_in_history
+        fn keep_in_history(&self) -> bool {
+            let setting = self.vision_setting();
+            setting.enabled && setting.keep_in_history
         }
     }
 
     /// NV17 固件 OTA（2026-10-15）：推送记录在 SQLite，固件文件在运行目录 `firmware/<sha256>.bin`。
-    struct DesktopFirmwareHost { db: Arc<Mutex<laser_runtime::RuntimeDb>>, dir: std::path::PathBuf }
+    struct DesktopFirmwareHost {
+        db: Arc<Mutex<laser_runtime::RuntimeDb>>,
+        dir: std::path::PathBuf,
+    }
     /// 推送有效期：设备在这段时间内开机检查更新才会拿到。
     const FIRMWARE_OFFER_SECONDS: f64 = 24.0 * 3600.0;
     use moss_voice_server::firmware::sha256_hex;
@@ -680,8 +1050,14 @@ mod imp {
     }
     impl moss_voice_server::firmware::FirmwareHost for DesktopFirmwareHost {
         fn offer(&self, device_id: &str, current_version: &str) -> Option<(String, String)> {
-            let (version, token) = self.db.lock().ok()?.active_firmware_offer(device_id, now()).ok()??;
-            moss_voice_server::firmware::is_newer(&version, current_version).then_some((version, token))
+            let (version, token) = self
+                .db
+                .lock()
+                .ok()?
+                .active_firmware_offer(device_id, now())
+                .ok()??;
+            moss_voice_server::firmware::is_newer(&version, current_version)
+                .then_some((version, token))
         }
         fn fetch(&self, token: &str, peer: &str) -> Option<Vec<u8>> {
             let db = self.db.lock().ok()?;
@@ -692,13 +1068,19 @@ mod imp {
                 return None;
             }
             drop(db);
-            let bytes = std::fs::read(self.dir.join(format!("{}.bin", offer.artifact_sha256))).ok()?;
+            let bytes =
+                std::fs::read(self.dir.join(format!("{}.bin", offer.artifact_sha256))).ok()?;
             if sha256_hex(&bytes) != offer.artifact_sha256 {
                 return None;
             }
             let db = self.db.lock().ok()?;
             if offer.download_status == "pending" {
-                let _ = db.update_firmware_download_if_revision(&offer.delivery_id, offer.revision, "downloading", now());
+                let _ = db.update_firmware_download_if_revision(
+                    &offer.delivery_id,
+                    offer.revision,
+                    "downloading",
+                    now(),
+                );
             }
             Some(bytes)
         }
@@ -715,27 +1097,63 @@ mod imp {
         use moss_voice_server::firmware::FirmwareHost;
         /// 下载必须来自这台已允许设备最近请求 OTA 的地址，文件按 SHA-256 核对，第一次下载记为“已开始下载”。
         #[test]
-        fn download_is_bound_to_device_ip_and_verified_by_hash(){
-            let dir=tempfile::tempdir().unwrap();
-            let db=Arc::new(Mutex::new(laser_runtime::RuntimeDb::open_memory().unwrap()));
-            let bytes=vec![0xE9u8;2048];let sha=sha256_hex(&bytes);
-            std::fs::write(dir.path().join(format!("{sha}.bin")),&bytes).unwrap();
-            {let db=db.lock().unwrap();
-             db.voice_device_seen("dev","client","board","1.0.0","192.168.1.9",now()).unwrap();
-             db.set_voice_device_status("dev",laser_runtime::VOICE_DEVICE_ALLOWED,now()).unwrap();
-             db.add_firmware_artifact(&sha,"1.1.0","",2048,now()).unwrap();
-             db.create_firmware_offer("fw-1","dev",&sha,"1.1.0",&"a".repeat(32),now()+60.0,now()).unwrap();}
-            let host=DesktopFirmwareHost{db:db.clone(),dir:dir.path().to_path_buf()};
-            assert_eq!(host.offer("dev","1.0.0"),Some(("1.1.0".into(),"a".repeat(32))));
-            assert_eq!(host.offer("dev","1.1.0"),None,"不比设备新就不下发");
-            assert!(host.fetch(&"a".repeat(32),"192.168.1.50").is_none(),"别的地址拿不到");
-            assert_eq!(host.fetch(&"a".repeat(32),"192.168.1.9").unwrap().len(),2048);
-            assert_eq!(db.lock().unwrap().list_firmware_deliveries().unwrap()[0].download_status,"downloading");
-            std::fs::write(dir.path().join(format!("{sha}.bin")),b"tampered").unwrap();
-            assert!(host.fetch(&"a".repeat(32),"192.168.1.9").is_none(),"文件被改动就不发");
-            host.reported("dev","1.1.0");
-            assert_eq!(db.lock().unwrap().list_firmware_deliveries().unwrap()[0].device_report_status,"reported");
-            assert!(host.offer("dev","1.0.0").is_none(),"升级完成后不再下发");
+        fn download_is_bound_to_device_ip_and_verified_by_hash() {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Mutex::new(laser_runtime::RuntimeDb::open_memory().unwrap()));
+            let bytes = vec![0xE9u8; 2048];
+            let sha = sha256_hex(&bytes);
+            std::fs::write(dir.path().join(format!("{sha}.bin")), &bytes).unwrap();
+            {
+                let db = db.lock().unwrap();
+                db.voice_device_seen("dev", "client", "board", "1.0.0", "192.168.1.9", now())
+                    .unwrap();
+                db.set_voice_device_status("dev", laser_runtime::VOICE_DEVICE_ALLOWED, now())
+                    .unwrap();
+                db.add_firmware_artifact(&sha, "1.1.0", "", 2048, now())
+                    .unwrap();
+                db.create_firmware_offer(
+                    "fw-1",
+                    "dev",
+                    &sha,
+                    "1.1.0",
+                    &"a".repeat(32),
+                    now() + 60.0,
+                    now(),
+                )
+                .unwrap();
+            }
+            let host = DesktopFirmwareHost {
+                db: db.clone(),
+                dir: dir.path().to_path_buf(),
+            };
+            assert_eq!(
+                host.offer("dev", "1.0.0"),
+                Some(("1.1.0".into(), "a".repeat(32)))
+            );
+            assert_eq!(host.offer("dev", "1.1.0"), None, "不比设备新就不下发");
+            assert!(
+                host.fetch(&"a".repeat(32), "192.168.1.50").is_none(),
+                "别的地址拿不到"
+            );
+            assert_eq!(
+                host.fetch(&"a".repeat(32), "192.168.1.9").unwrap().len(),
+                2048
+            );
+            assert_eq!(
+                db.lock().unwrap().list_firmware_deliveries().unwrap()[0].download_status,
+                "downloading"
+            );
+            std::fs::write(dir.path().join(format!("{sha}.bin")), b"tampered").unwrap();
+            assert!(
+                host.fetch(&"a".repeat(32), "192.168.1.9").is_none(),
+                "文件被改动就不发"
+            );
+            host.reported("dev", "1.1.0");
+            assert_eq!(
+                db.lock().unwrap().list_firmware_deliveries().unwrap()[0].device_report_status,
+                "reported"
+            );
+            assert!(host.offer("dev", "1.0.0").is_none(), "升级完成后不再下发");
         }
     }
 
@@ -750,10 +1168,21 @@ mod imp {
         fn seen(&self, visit: &DeviceVisit) -> Result<DeviceStatus, String> {
             let db = self.db.lock().map_err(|_| "数据库锁失败".to_owned())?;
             let record = db
-                .voice_device_seen(&visit.device_id, &visit.client_id, &visit.model, &visit.firmware_version, &visit.ip, now())
+                .voice_device_seen(
+                    &visit.device_id,
+                    &visit.client_id,
+                    &visit.model,
+                    &visit.firmware_version,
+                    &visit.ip,
+                    now(),
+                )
                 .map_err(db_error)?;
             drop(db);
-            if !record.is_allowed() { self.host.api_service.revoke_voice_sessions(&visit.device_id); }
+            if !record.is_allowed() {
+                self.host
+                    .api_service
+                    .revoke_voice_sessions(&visit.device_id);
+            }
             Ok(match record.status.as_str() {
                 laser_runtime::VOICE_DEVICE_ALLOWED => DeviceStatus::Allowed,
                 laser_runtime::VOICE_DEVICE_REVOKED => DeviceStatus::Revoked,
@@ -762,15 +1191,29 @@ mod imp {
         }
 
         fn authorize_http(&self, device: &str, client: &str) -> Result<Option<u64>, String> {
-            let db=self.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-            db.voice_device(device).map(|row|row.and_then(|row|{
-                (row.is_allowed() && row.client_id==client).then_some(row.decided_at?.to_bits())
-            })).map_err(db_error)
+            let db = self.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+            db.voice_device(device)
+                .map(|row| {
+                    row.and_then(|row| {
+                        (row.is_allowed() && row.client_id == client)
+                            .then_some(row.decided_at?.to_bits())
+                    })
+                })
+                .map_err(db_error)
         }
-        fn open_session(&self, device: &str, client: &str, session: &str) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
-            self.host.api_service.register_voice_session(device, client, session)
+        fn open_session(
+            &self,
+            device: &str,
+            client: &str,
+            session: &str,
+        ) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
+            self.host
+                .api_service
+                .register_voice_session(device, client, session)
         }
-        fn close_session(&self, session: &str) { self.host.api_service.unregister_voice_session(session); }
+        fn close_session(&self, session: &str) {
+            self.host.api_service.unregister_voice_session(session);
+        }
 
         fn token_secret(&self) -> Result<Vec<u8>, String> {
             let db = self.db.lock().map_err(|_| "数据库锁失败".to_owned())?;
@@ -782,7 +1225,8 @@ mod imp {
             let mut bytes = [0u8; 32];
             getrandom::fill(&mut bytes).map_err(|error| format!("生成设备密钥失败：{error}"))?;
             let secret: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-            db.set_secret(TOKEN_SECRET_NAME, &secret, now()).map_err(db_error)?;
+            db.set_secret(TOKEN_SECRET_NAME, &secret, now())
+                .map_err(db_error)?;
             Ok(secret.into_bytes())
         }
 
@@ -801,10 +1245,7 @@ mod imp {
             }
         }
 
-        fn device_hardware_prefs(
-            &self,
-            device: &str,
-        ) -> Option<moss_voice_server::HardwarePrefs> {
+        fn device_hardware_prefs(&self, device: &str) -> Option<moss_voice_server::HardwarePrefs> {
             let mut prefs = moss_voice::settings::load(&self.settings_file).builtin_device_prefs;
             let entry = prefs.remove(device)?;
             (!entry.is_empty()).then_some(moss_voice_server::HardwarePrefs {
@@ -844,7 +1285,10 @@ mod imp {
         let input = wf.get("input").unwrap_or(wf);
         let snap = wf.get("confirmation_snapshot").unwrap_or(wf);
         let artifacts = wf.get("artifacts").unwrap_or(wf);
-        let estimate = wf.get("estimate").or_else(|| artifacts.get("estimate")).unwrap_or(wf);
+        let estimate = wf
+            .get("estimate")
+            .or_else(|| artifacts.get("estimate"))
+            .unwrap_or(wf);
 
         let mut parts: Vec<String> = Vec::new();
         let mat = input
@@ -879,7 +1323,9 @@ mod imp {
                 parts.push(format!("{t_str}{m}{mode_label}"));
             }
             (None, Some(m)) => parts.push(format!("{m}{mode_label}")),
-            (Some(t), None) if !mode_label.is_empty() => parts.push(format!("{t:.1}mm{mode_label}")),
+            (Some(t), None) if !mode_label.is_empty() => {
+                parts.push(format!("{t:.1}mm{mode_label}"))
+            }
             _ if !mode_label.is_empty() => parts.push(mode_label.to_owned()),
             _ => {}
         }
@@ -1067,20 +1513,33 @@ mod imp {
     }
     impl ToolHost for DesktopToolHost {
         fn list(&self) -> Value {
-            let mut base=laser_host::voice_tools_list(&self.host.api_service);
-            let extra=self.host.api_service.agent_tools_list();
-            if let (Some(base_tools),Some(agent_tools))=(base["tools"].as_array_mut(),extra["tools"].as_array()) {
+            let mut base = laser_host::voice_tools_list(&self.host.api_service);
+            let extra = self.host.api_service.agent_tools_list();
+            if let (Some(base_tools), Some(agent_tools)) =
+                (base["tools"].as_array_mut(), extra["tools"].as_array())
+            {
                 base_tools.extend(agent_tools.iter().cloned());
             }
             base
         }
 
         fn call(&self, context: &ToolContext, name: &str, arguments: &Value) -> ToolHostResult {
-            let result=if matches!(name,"agent_codex"|"agent_claude_code") {
-                let caller=laser_contracts::CallerContext::Voice {device_id:context.device_id.clone(),session_id:context.session_id.clone()};
-                self.host.api_service.call_agent_tool(&caller,name,arguments)
+            let result = if matches!(name, "agent_codex" | "agent_claude_code") {
+                let caller = laser_contracts::CallerContext::Voice {
+                    device_id: context.device_id.clone(),
+                    session_id: context.session_id.clone(),
+                };
+                self.host
+                    .api_service
+                    .call_agent_tool(&caller, name, arguments)
             } else {
-                laser_host::voice_tool_call(&self.host.api_service, &context.device_id, &context.session_id, name, arguments)
+                laser_host::voice_tool_call(
+                    &self.host.api_service,
+                    &context.device_id,
+                    &context.session_id,
+                    name,
+                    arguments,
+                )
             };
             if result.success
                 && matches!(
@@ -1107,7 +1566,11 @@ mod imp {
                     None,
                 );
             }
-            ToolHostResult { success: result.success, result: result.result, detail: result.detail }
+            ToolHostResult {
+                success: result.success,
+                result: result.result,
+                detail: result.detail,
+            }
         }
 
         /// 加工结束播报的只读轮询：走不计入调用统计的进程内只读通道。
@@ -1128,7 +1591,9 @@ mod imp {
         let _ = stream.set_write_timeout(io_timeout);
         let _ = stream.set_read_timeout(io_timeout);
         if stream
-            .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:18090\r\nConnection: close\r\n\r\n")
+            .write_all(
+                b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:18090\r\nConnection: close\r\n\r\n",
+            )
             .is_err()
         {
             return None;
@@ -1168,11 +1633,17 @@ mod imp {
             || json
                 .get("status")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "ok" | "healthy" | "ready"));
+                .is_some_and(|s| {
+                    matches!(
+                        s.trim().to_ascii_lowercase().as_str(),
+                        "ok" | "healthy" | "ready"
+                    )
+                });
         if !healthy {
             return None;
         }
-        let is_onejev_like = json.get("engine").and_then(serde_json::Value::as_str) == Some("onejev")
+        let is_onejev_like = json.get("engine").and_then(serde_json::Value::as_str)
+            == Some("onejev")
             || json.get("fork_mode").is_some()
             || json.get("prompt_version").is_some();
         if let Some(raw_model) = json
@@ -1288,11 +1759,11 @@ mod imp {
         /// 仅内存、重启即清的实时对话调试流总开关（默认 false，不落盘）
         debug_trace_enabled: std::sync::atomic::AtomicBool,
         memory: Arc<MemoryService>,
-        speaker:Arc<moss_voice_server::speaker_enrollment::SpeakerEnrollment>,
-        speaker_backend:Arc<DesktopSpeakerBackend>,
-        personal:Arc<PersonContext>,
-        identity:Arc<DesktopIdentity>,
-        home_control:Arc<laser_host::home_control::HomeControlCoordinator>,
+        speaker: Arc<moss_voice_server::speaker_enrollment::SpeakerEnrollment>,
+        speaker_backend: Arc<DesktopSpeakerBackend>,
+        personal: Arc<PersonContext>,
+        identity: Arc<DesktopIdentity>,
+        home_control: Arc<laser_host::home_control::HomeControlCoordinator>,
         /// 最近一次自动启动失败的原因（语音链路为内置服务时随 MOSS 启动）
         last_error: Mutex<Option<String>>,
         /// 诊断记录本（2026-11-07 n68）：服务事件、对话耗时与桌面端后台失败（本地模型、Laya、固件记录等），
@@ -1349,7 +1820,8 @@ mod imp {
         mut path_if_installed: impl FnMut(&str) -> Option<std::path::PathBuf>,
     ) -> Vec<LocalFallbackCandidate> {
         let mut candidates = Vec::new();
-        let to_candidate = |spec: &'static moss_voice::local_models::ModelSpec, dir: std::path::PathBuf| {
+        let to_candidate = |spec: &'static moss_voice::local_models::ModelSpec,
+                            dir: std::path::PathBuf| {
             let engine = if spec.engine == Engine::Matcha {
                 TtsEngine::Matcha
             } else {
@@ -1440,13 +1912,16 @@ mod imp {
                 }
                 let reuse_helper = guard
                     .as_ref()
-                    .and_then(|(_, existing)| existing.helper.is_alive().then(|| existing.helper.clone()))
+                    .and_then(|(_, existing)| {
+                        existing.helper.is_alive().then(|| existing.helper.clone())
+                    })
                     .or_else(|| shared_helper.filter(|h| h.is_alive()));
                 let helper = match reuse_helper {
                     Some(h) => h,
                     None => LocalHelper::spawn(&exe)?,
                 };
-                let mut last_err = moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
+                let mut last_err =
+                    moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
                 for (idx, cand) in candidates.iter().enumerate().skip(start_index) {
                     match helper.load_tts(&cand.dir, cand.engine) {
                         Ok(info) => {
@@ -1500,10 +1975,14 @@ mod imp {
         fn synthesize<'a>(
             &'a self,
             text: &'a str,
-        ) -> moss_voice_providers::BoxFuture<'a, Result<moss_voice_providers::Pcm, moss_voice_providers::ProviderError>> {
+        ) -> moss_voice_providers::BoxFuture<
+            'a,
+            Result<moss_voice_providers::Pcm, moss_voice_providers::ProviderError>,
+        > {
             Box::pin(async move {
                 let mut start_idx = 0;
-                let mut last_err = moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
+                let mut last_err =
+                    moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
                 while start_idx < self.candidates.len() {
                     let (idx, tts) = self.get_or_init_from(start_idx).await?;
                     match tts.synthesize(text).await {
@@ -1523,10 +2002,12 @@ mod imp {
             &'a self,
             text: &'a str,
             chunks: tokio::sync::mpsc::UnboundedSender<moss_voice_providers::Pcm>,
-        ) -> moss_voice_providers::BoxFuture<'a, Result<(), moss_voice_providers::ProviderError>> {
+        ) -> moss_voice_providers::BoxFuture<'a, Result<(), moss_voice_providers::ProviderError>>
+        {
             Box::pin(async move {
                 let mut start_idx = 0;
-                let mut last_err = moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
+                let mut last_err =
+                    moss_voice_providers::ProviderError::new("没有可用的本地降级语音合成模型");
                 while start_idx < self.candidates.len() {
                     let (idx, tts) = self.get_or_init_from(start_idx).await?;
                     let (stage_tx, mut stage_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1552,7 +2033,10 @@ mod imp {
     }
     /// 辅助程序与 MOSS 放在同一目录。
     fn helper_path() -> Option<std::path::PathBuf> {
-        std::env::current_exe().ok()?.parent().map(|dir| dir.join(HELPER_FILE))
+        std::env::current_exe()
+            .ok()?
+            .parent()
+            .map(|dir| dir.join(HELPER_FILE))
     }
 
     /// 若 MOSS 运行在用户自定义独立目录（排除 Cargo `target/` 与 macOS `.app` 签名包目录且当前用户可写），返回该安装目录。
@@ -1561,7 +2045,10 @@ mod imp {
             return None;
         }
         let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-        let norm = exe_dir.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+        let norm = exe_dir
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
         if norm.ends_with("\\target\\release")
             || norm.ends_with("\\target\\debug")
             || norm.contains("\\target\\")
@@ -1628,15 +2115,21 @@ mod imp {
     pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
         BuiltinState(host.map(|host| {
             let diagnostics = moss_voice_server::DiagnosticsLog::new();
-            let setting_path=host.runtime_root.path.join("settings.json");
-            if let Err(error)=laser_host::voice_agent::AgentCoordinator::attach(
-                &host.api_service,host.db.clone(),setting_path.clone(),vec![host.runtime_root.path.clone()]
+            let setting_path = host.runtime_root.path.join("settings.json");
+            if let Err(error) = laser_host::voice_agent::AgentCoordinator::attach(
+                &host.api_service,
+                host.db.clone(),
+                setting_path.clone(),
+                vec![host.runtime_root.path.clone()],
             ) {
                 eprintln!("[moss-desktop] AgentRun 只读工具不可用：{error}");
                 diagnostics.push(
-                    EventRecord::warn(DiagCategory::Internal, "本机 Agent 的只读工具没能挂上，语音里暂时用不了 Agent 查询")
-                        .hint("重启 MOSS 再试；不用 Agent 功能可以忽略")
-                        .detail(&error),
+                    EventRecord::warn(
+                        DiagCategory::Internal,
+                        "本机 Agent 的只读工具没能挂上，语音里暂时用不了 Agent 查询",
+                    )
+                    .hint("重启 MOSS 再试；不用 Agent 功能可以忽略")
+                    .detail(&error),
                 );
             }
             let default_models_dir = writable_install_dir()
@@ -1663,7 +2156,9 @@ mod imp {
                 eprintln!("[moss-desktop] 已清理 {cleaned} 个本地模型下载残留");
                 diagnostics.push(EventRecord::info(
                     DiagCategory::Model,
-                    format!("已清理 {cleaned} 个本地模型下载残留（上次下载中途退出留下的半截文件）"),
+                    format!(
+                        "已清理 {cleaned} 个本地模型下载残留（上次下载中途退出留下的半截文件）"
+                    ),
                 ));
             }
             // 2026-11-07：macOS / Linux 上 MOSS 崩溃或被强制结束后，OneJev 推理进程会被系统收养继续占着内存；
@@ -1677,52 +2172,89 @@ mod imp {
                 roots.dedup();
                 let reaped = moss_voice::onejev::reap_orphaned_llama_servers(&roots);
                 if reaped > 0 {
-                    eprintln!("[moss-desktop] 已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程");
+                    eprintln!(
+                        "[moss-desktop] 已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程"
+                    );
                     diagnostics.push(
                         EventRecord::warn(
                             DiagCategory::Model,
                             format!("已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程"),
                         )
-                        .hint("说明 MOSS 上次没有正常退出（崩溃、强制结束或断电）；偶尔一次不用处理"),
+                        .hint(
+                            "说明 MOSS 上次没有正常退出（崩溃、强制结束或断电）；偶尔一次不用处理",
+                        ),
                     );
                 }
             }
-            let memory = MemoryService::new(Arc::new(DbMemoryStore { db: host.db.clone() }));
-            let enabled = moss_voice::settings::load(&host.runtime_root.path.join("settings.json")).builtin_memory_enabled;
+            let memory = MemoryService::new(Arc::new(DbMemoryStore {
+                db: host.db.clone(),
+            }));
+            let enabled = moss_voice::settings::load(&host.runtime_root.path.join("settings.json"))
+                .builtin_memory_enabled;
             let _ = memory.configure(enabled, || Ok(()));
-            let home_control=laser_host::home_control::HomeControlCoordinator::attach(&host);
-            let speaker_backend=Arc::new(DesktopSpeakerBackend{db:host.db.clone(),helper:Mutex::new(None),personal:Mutex::new(None),tests:Mutex::new(Default::default())});
-            let speaker=moss_voice_server::speaker_enrollment::SpeakerEnrollment::new(speaker_backend.clone());
-            let saved_calibration=host.db.lock().ok().and_then(|db|db.get_secret(SPEAKER_CALIBRATION_KEY).ok().flatten()).and_then(|text|serde_json::from_str::<Calibration>(&text).ok());
-            let identity=Arc::new(DesktopIdentity{host:Arc::downgrade(&host),backend:speaker_backend.clone(),calibration:Mutex::new(saved_calibration),workers:Arc::new(tokio::sync::Semaphore::new(2))});
-            let personal=PersonContext::new(identity.clone(),Arc::new(DbPersonStore{db:host.db.clone()}));
-            if let Ok(mut slot)=speaker_backend.personal.lock(){*slot=Some(Arc::downgrade(&personal));}
-            if let Ok(db)=host.db.lock()
-                && let Err(error)=db.recover_firmware_downloads(now())
+            let home_control = laser_host::home_control::HomeControlCoordinator::attach(&host);
+            let speaker_backend = Arc::new(DesktopSpeakerBackend {
+                db: host.db.clone(),
+                helper: Mutex::new(None),
+                personal: Mutex::new(None),
+                tests: Mutex::new(Default::default()),
+            });
+            let speaker = moss_voice_server::speaker_enrollment::SpeakerEnrollment::new(
+                speaker_backend.clone(),
+            );
+            let saved_calibration = host
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.get_secret(SPEAKER_CALIBRATION_KEY).ok().flatten())
+                .and_then(|text| serde_json::from_str::<Calibration>(&text).ok());
+            let identity = Arc::new(DesktopIdentity {
+                host: Arc::downgrade(&host),
+                backend: speaker_backend.clone(),
+                calibration: Mutex::new(saved_calibration),
+                workers: Arc::new(tokio::sync::Semaphore::new(2)),
+            });
+            let personal = PersonContext::new(
+                identity.clone(),
+                Arc::new(DbPersonStore {
+                    db: host.db.clone(),
+                }),
+            );
+            if let Ok(mut slot) = speaker_backend.personal.lock() {
+                *slot = Some(Arc::downgrade(&personal));
+            }
+            if let Ok(db) = host.db.lock()
+                && let Err(error) = db.recover_firmware_downloads(now())
             {
                 eprintln!("[moss-desktop] 固件下载记录恢复失败，固件传输仍禁用");
                 diagnostics.push(
-                    EventRecord::error(DiagCategory::Firmware, "固件下载记录恢复失败，这次运行不能给设备推送固件")
-                        .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
-                        .detail(format!("{error:?}")),
+                    EventRecord::error(
+                        DiagCategory::Firmware,
+                        "固件下载记录恢复失败，这次运行不能给设备推送固件",
+                    )
+                    .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
+                    .detail(format!("{error:?}")),
                 );
             }
             let identity_for_context = identity.clone();
             let db_for_context = host.db.clone();
-            let calibrated_speakers: crate::voice_context::host::CalibratedSpeakersFn = Arc::new(move || {
-                if identity_for_context.valid_calibration().is_none() {
-                    return Vec::new();
-                }
-                db_for_context
-                    .lock()
-                    .ok()
-                    .and_then(|db| db.list_voice_speakers().ok())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|r| r.model_id == SPEAKER_MODEL && r.dimension == 192 && r.revision > 0)
-                    .map(|r| (r.id, r.name, r.revision))
-                    .collect()
-            });
+            let calibrated_speakers: crate::voice_context::host::CalibratedSpeakersFn =
+                Arc::new(move || {
+                    if identity_for_context.valid_calibration().is_none() {
+                        return Vec::new();
+                    }
+                    db_for_context
+                        .lock()
+                        .ok()
+                        .and_then(|db| db.list_voice_speakers().ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|r| {
+                            r.model_id == SPEAKER_MODEL && r.dimension == 192 && r.revision > 0
+                        })
+                        .map(|r| (r.id, r.name, r.revision))
+                        .collect()
+                });
             let context = crate::voice_context::host::ContextHost::with_speakers(
                 host.db.clone(),
                 setting_path.clone(),
@@ -1730,7 +2262,9 @@ mod imp {
             );
             let persona = Arc::new(PersonaSwitch::new(
                 persona_config(&moss_voice::settings::load(&setting_path).builtin_local),
-                Some(Arc::new(DesktopPersonaStore { settings_file: setting_path.clone() })),
+                Some(Arc::new(DesktopPersonaStore {
+                    settings_file: setting_path.clone(),
+                })),
             ));
             Arc::new(BuiltinVoice {
                 host,
@@ -1748,7 +2282,9 @@ mod imp {
                 music_warning: Mutex::new(None),
                 speaker_warning: Mutex::new(None),
                 models,
-                laya_setup: moss_voice::laya_env::LayaSetup::new(Arc::new(moss_voice::laya_env::SystemHost)),
+                laya_setup: moss_voice::laya_env::LayaSetup::new(Arc::new(
+                    moss_voice::laya_env::SystemHost,
+                )),
                 #[cfg(test)]
                 laya_root_for_test: Mutex::new(None),
                 helper: Mutex::new(None),
@@ -1799,7 +2335,9 @@ mod imp {
     pub(super) fn scrub_bundle(value: &mut Value) {
         match value {
             Value::String(text) => {
-                *text = moss_voice_providers::scrub_diagnostic_text(&moss_voice::redact::redact_line(text));
+                *text = moss_voice_providers::scrub_diagnostic_text(
+                    &moss_voice::redact::redact_line(text),
+                );
             }
             Value::Array(items) => items.iter_mut().for_each(scrub_bundle),
             Value::Object(map) => map.values_mut().for_each(scrub_bundle),
@@ -1816,7 +2354,11 @@ mod imp {
 
     /// 内置语音服务启动失败 → 诊断事件（端口占用归网络类，其余按配置类）。
     fn start_failure_event(what: &str, error: &CenterError) -> EventRecord {
-        let category = if error.message.contains("端口") { DiagCategory::Network } else { DiagCategory::Config };
+        let category = if error.message.contains("端口") {
+            DiagCategory::Network
+        } else {
+            DiagCategory::Config
+        };
         EventRecord::error(category, format!("{what}：{}", error.message))
             .hint("按提示改好后，在“服务”标签点“启动”重试")
             .detail(format!("错误码 {}", error.code))
@@ -1824,28 +2366,35 @@ mod imp {
 
     /// 语音链路为“内置服务”时，在后台启动内置语音服务；若启用了本地 Laya 加工反馈，即使当前非内置语音模式也在后台拉起本地 Laya。
     pub fn autostart(state: &BuiltinState) {
-        let Some(builtin) = state.0.clone() else { return };
+        let Some(builtin) = state.0.clone() else {
+            return;
+        };
         let start_voice = builtin.settings().mode == VoiceMode::Builtin;
         let start_feedback_laya = builtin.should_run_local_laya_for_feedback();
         if !start_voice && !start_feedback_laya {
             return;
         }
-        let _ = std::thread::Builder::new().name("voice-builtin-autostart".into()).spawn(move || {
-            if start_feedback_laya {
-                if let Err(err) = builtin.ensure_laya_running(false) {
-                    eprintln!("[moss-desktop] 本地 Laya 决策服务自动启动失败：{err}");
-                    builtin.diagnostics.push(local_jev_failure("MOSS 启动时自动拉起本地 Jev 决策服务失败", &err));
-                }
-            }
-            if start_voice {
-                if let Err(error) = builtin.start() {
-                    eprintln!("[moss-desktop] 内置语音服务自动启动失败：{}", error.message);
-                    if let Ok(mut last) = builtin.last_error.lock() {
-                        *last = Some(error.message);
+        let _ = std::thread::Builder::new()
+            .name("voice-builtin-autostart".into())
+            .spawn(move || {
+                if start_feedback_laya {
+                    if let Err(err) = builtin.ensure_laya_running(false) {
+                        eprintln!("[moss-desktop] 本地 Laya 决策服务自动启动失败：{err}");
+                        builtin.diagnostics.push(local_jev_failure(
+                            "MOSS 启动时自动拉起本地 Jev 决策服务失败",
+                            &err,
+                        ));
                     }
                 }
-            }
-        });
+                if start_voice {
+                    if let Err(error) = builtin.start() {
+                        eprintln!("[moss-desktop] 内置语音服务自动启动失败：{}", error.message);
+                        if let Ok(mut last) = builtin.last_error.lock() {
+                            *last = Some(error.message);
+                        }
+                    }
+                }
+            });
     }
 
     /// 本机真实局域网地址（跳过 Clash TUN 198.18.0.0/15、Tailscale 与 VMware 等虚拟网卡）。
@@ -1854,17 +2403,38 @@ mod imp {
     }
 
     impl BuiltinVoice {
-        fn prepare_speaker_helper(&self)->Result<(),CenterError>{
-            let mut helper=self.speaker_backend.helper.lock().map_err(|_|internal("声纹辅助程序锁失败"))?;
-            if helper.as_ref().is_none_or(|h|!h.is_alive()){
-                let exe=helper_path().ok_or_else(||CenterError::new("speaker_helper_missing",409,"请先准备声纹辅助程序"))?;
-                *helper=Some(moss_voice_providers::local::SpeakerHelper::spawn(&exe,self.models.root()).map_err(|_|CenterError::new("speaker_model_missing",409,"声纹模型未安装或校验失败"))?);
+        fn prepare_speaker_helper(&self) -> Result<(), CenterError> {
+            let mut helper = self
+                .speaker_backend
+                .helper
+                .lock()
+                .map_err(|_| internal("声纹辅助程序锁失败"))?;
+            if helper.as_ref().is_none_or(|h| !h.is_alive()) {
+                let exe = helper_path().ok_or_else(|| {
+                    CenterError::new("speaker_helper_missing", 409, "请先准备声纹辅助程序")
+                })?;
+                *helper = Some(
+                    moss_voice_providers::local::SpeakerHelper::spawn(&exe, self.models.root())
+                        .map_err(|_| {
+                            CenterError::new(
+                                "speaker_model_missing",
+                                409,
+                                "声纹模型未安装或校验失败",
+                            )
+                        })?,
+                );
             }
             Ok(())
         }
         fn hotwords(&self, local: &BuiltinLocal) -> Vec<String> {
-            let materials: Vec<String> = self.host.db.lock().ok().and_then(|db| db.export_material_library().ok())
-                .map(|library| library.materials.into_keys().collect()).unwrap_or_default();
+            let materials: Vec<String> = self
+                .host
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.export_material_library().ok())
+                .map(|library| library.materials.into_keys().collect())
+                .unwrap_or_default();
             moss_voice::settings::effective_hotwords(&local.custom_hotwords, &materials)
         }
         fn settings_file(&self) -> std::path::PathBuf {
@@ -1877,7 +2447,8 @@ mod imp {
 
         fn secret(&self, section: Section) -> Result<Option<String>, CenterError> {
             let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-            db.get_secret(builtin_secret_name(section)).map_err(db_failure)
+            db.get_secret(builtin_secret_name(section))
+                .map_err(db_failure)
         }
 
         fn devices(&self) -> Value {
@@ -1900,11 +2471,10 @@ mod imp {
                 return None;
             }
             let exe = helper_path().filter(|path| path.is_file())?;
-            let candidates = ordered_local_tts_candidates(
-                &local.tts_model,
-                local.tts_speaker,
-                |id| self.models.path_if_installed(id),
-            );
+            let candidates =
+                ordered_local_tts_candidates(&local.tts_model, local.tts_speaker, |id| {
+                    self.models.path_if_installed(id)
+                });
             if candidates.is_empty() {
                 return None;
             }
@@ -1918,11 +2488,22 @@ mod imp {
         }
 
         /// 按开关启动辅助程序并加载选用且已安装的本地模型。没有打开任何本地开关（或模型未安装）时不启动辅助程序。
-        fn local_parts(&self, local: &BuiltinLocal) -> Result<(LocalParts, Option<LocalHelper>), CenterError> {
+        fn local_parts(
+            &self,
+            local: &BuiltinLocal,
+        ) -> Result<(LocalParts, Option<LocalHelper>), CenterError> {
             let pick = |kind| {
-                local.selected(kind).and_then(|spec| self.models.path_if_installed(spec.id).map(|path| (spec, path)))
+                local.selected(kind).and_then(|spec| {
+                    self.models
+                        .path_if_installed(spec.id)
+                        .map(|path| (spec, path))
+                })
             };
-            let (vad, asr, tts) = (pick(ModelKind::Vad), pick(ModelKind::Asr), pick(ModelKind::Tts));
+            let (vad, asr, tts) = (
+                pick(ModelKind::Vad),
+                pick(ModelKind::Asr),
+                pick(ModelKind::Tts),
+            );
             if vad.is_none() && asr.is_none() && tts.is_none() {
                 return Ok((
                     LocalParts {
@@ -1933,39 +2514,78 @@ mod imp {
                 ));
             }
             let exe = helper_path().ok_or_else(|| start_error("无法确定 MOSS 程序所在目录"))?;
-            let helper = LocalHelper::spawn(&exe).map_err(|error| start_error(error.to_string()))?;
+            let helper =
+                LocalHelper::spawn(&exe).map_err(|error| start_error(error.to_string()))?;
             let mut parts = LocalParts::default();
             if let Some((spec, model)) = vad {
-                let engine = if spec.engine == Engine::TenVad { VadEngine::Ten } else { VadEngine::Silero };
+                let engine = if spec.engine == Engine::TenVad {
+                    VadEngine::Ten
+                } else {
+                    VadEngine::Silero
+                };
                 helper
                     .load_vad(&model, VadParams::for_engine(engine), engine)
-                    .map_err(|error| start_error(format!("本地判停（{}）：{}", spec.label, error)))?;
-                parts.vad = Some(Arc::new(LocalVadFactory { helper: helper.clone() }));
+                    .map_err(|error| {
+                        start_error(format!("本地判停（{}）：{}", spec.label, error))
+                    })?;
+                parts.vad = Some(Arc::new(LocalVadFactory {
+                    helper: helper.clone(),
+                }));
             }
             if let Some((spec, dir)) = asr {
-                let engine =
-                    if spec.engine == Engine::StreamingTransducer { AsrEngine::StreamingTransducer } else { AsrEngine::SenseVoice };
-                helper.load_asr_with_options(&dir, engine, moss_voice_providers::local::AsrDecodeOptions { beam_search: local.asr_beam_search, hotwords: self.hotwords(local) })
-                    .map_err(|error| start_error(format!("本地识别（{}）：{}", spec.label, error)))?;
-                parts.asr = Some(LocalAsr { helper: helper.clone() });
+                let engine = if spec.engine == Engine::StreamingTransducer {
+                    AsrEngine::StreamingTransducer
+                } else {
+                    AsrEngine::SenseVoice
+                };
+                helper
+                    .load_asr_with_options(
+                        &dir,
+                        engine,
+                        moss_voice_providers::local::AsrDecodeOptions {
+                            beam_search: local.asr_beam_search,
+                            hotwords: self.hotwords(local),
+                        },
+                    )
+                    .map_err(|error| {
+                        start_error(format!("本地识别（{}）：{}", spec.label, error))
+                    })?;
+                parts.asr = Some(LocalAsr {
+                    helper: helper.clone(),
+                });
                 if engine.streaming() {
-                    parts.streaming_asr = Some(Arc::new(LocalStreamingAsr { helper: helper.clone() }));
+                    parts.streaming_asr = Some(Arc::new(LocalStreamingAsr {
+                        helper: helper.clone(),
+                    }));
                 }
             }
             if let Some((spec, dir)) = tts {
-                let engine = if spec.engine == Engine::Matcha { TtsEngine::Matcha } else { TtsEngine::Kokoro };
-                let info =
-                    helper.load_tts(&dir, engine).map_err(|error| start_error(format!("本地合成（{}）：{}", spec.label, error)))?;
+                let engine = if spec.engine == Engine::Matcha {
+                    TtsEngine::Matcha
+                } else {
+                    TtsEngine::Kokoro
+                };
+                let info = helper.load_tts(&dir, engine).map_err(|error| {
+                    start_error(format!("本地合成（{}）：{}", spec.label, error))
+                })?;
                 // 单音色模型忽略音色编号
                 let speaker = if info.speakers > 1 {
                     if local.tts_speaker < 0 || local.tts_speaker as u32 >= info.speakers {
-                        return Err(start_error(format!("{} 的音色编号须在 0 ~ {} 之间", spec.label, info.speakers - 1)));
+                        return Err(start_error(format!(
+                            "{} 的音色编号须在 0 ~ {} 之间",
+                            spec.label,
+                            info.speakers - 1
+                        )));
                     }
                     local.tts_speaker
                 } else {
                     0
                 };
-                parts.tts = Some(LocalTts { helper: helper.clone(), speaker, speed: local.tts_speed });
+                parts.tts = Some(LocalTts {
+                    helper: helper.clone(),
+                    speaker,
+                    speed: local.tts_speed,
+                });
             } else {
                 parts.fallback_tts = self.local_fallback_tts(local, Some(helper.clone()));
             }
@@ -1980,9 +2600,13 @@ mod imp {
             local: &mut LocalParts,
             experience: &BuiltinLocal,
         ) -> Result<Option<(Conversation, bool)>, CenterError> {
-            let Some(llm) = &models.llm else { return Ok(None) };
+            let Some(llm) = &models.llm else {
+                return Ok(None);
+            };
             let key = |section| self.secret(section).map(Option::unwrap_or_default);
-            let invalid = |error: moss_voice_providers::ProviderError| CenterError::new("builtin_models_invalid", 400, error.to_string());
+            let invalid = |error: moss_voice_providers::ProviderError| {
+                CenterError::new("builtin_models_invalid", 400, error.to_string())
+            };
             let hotwords = self.hotwords(experience);
             let mut streaming_asr: Option<Arc<dyn StreamingAsr>> = None;
             let asr: Arc<dyn Asr> = match (local.asr.take(), &models.asr) {
@@ -1991,21 +2615,41 @@ mod imp {
                     Arc::new(local_asr)
                 }
                 (None, Some(cloud)) if cloud.kind == ProviderKind::Doubao => {
-                    let doubao = Arc::new(DoubaoAsr::new(&cloud.url, &key(Section::Asr)?, &cloud.model).map_err(invalid)?.with_hotwords(&hotwords));
+                    let doubao = Arc::new(
+                        DoubaoAsr::new(&cloud.url, &key(Section::Asr)?, &cloud.model)
+                            .map_err(invalid)?
+                            .with_hotwords(&hotwords),
+                    );
                     streaming_asr = Some(doubao.clone());
                     doubao
                 }
-                (None, Some(cloud)) => Arc::new(OpenAiAsr::new(&cloud.url, &key(Section::Asr)?, &cloud.model, None).map_err(invalid)?.with_hotwords(&hotwords)),
+                (None, Some(cloud)) => Arc::new(
+                    OpenAiAsr::new(&cloud.url, &key(Section::Asr)?, &cloud.model, None)
+                        .map_err(invalid)?
+                        .with_hotwords(&hotwords),
+                ),
                 (None, None) => return Ok(None),
             };
             let (tts, streaming_tts): (Arc<dyn Tts>, bool) = match (local.tts.take(), &models.tts) {
                 (Some(local), _) => (Arc::new(local), true),
                 (None, Some(cloud)) if cloud.kind == ProviderKind::Doubao => {
-                    let doubao = DoubaoTts::new(&cloud.url, &key(Section::Tts)?, &cloud.model, &cloud.voice, cloud.speed);
+                    let doubao = DoubaoTts::new(
+                        &cloud.url,
+                        &key(Section::Tts)?,
+                        &cloud.model,
+                        &cloud.voice,
+                        cloud.speed,
+                    );
                     (Arc::new(doubao.map_err(invalid)?), true)
                 }
                 (None, Some(cloud)) => {
-                    let openai = OpenAiTts::new(&cloud.url, &key(Section::Tts)?, &cloud.model, &cloud.voice, cloud.speed);
+                    let openai = OpenAiTts::new(
+                        &cloud.url,
+                        &key(Section::Tts)?,
+                        &cloud.model,
+                        &cloud.voice,
+                        cloud.speed,
+                    );
                     (Arc::new(openai.map_err(invalid)?), false)
                 }
                 (None, None) => return Ok(None),
@@ -2030,27 +2674,65 @@ mod imp {
                 Some(id) => self.models.path_if_installed(id).is_some(),
                 None => self.jev_effective_secret()?.is_some(),
             };
-            let mut labels = vec![format!("LLM:{}", llm.model),
-                format!("ASR:{}", if experience.asr { experience.asr_model.as_str() } else { models.asr.as_ref().map(|v| v.model.as_str()).unwrap_or("unknown") }),
-                format!("TTS:{}", if experience.tts { experience.tts_model.as_str() } else { models.tts.as_ref().map(|v| v.model.as_str()).unwrap_or("unknown") })];
+            let mut labels = vec![
+                format!("LLM:{}", llm.model),
+                format!(
+                    "ASR:{}",
+                    if experience.asr {
+                        experience.asr_model.as_str()
+                    } else {
+                        models
+                            .asr
+                            .as_ref()
+                            .map(|v| v.model.as_str())
+                            .unwrap_or("unknown")
+                    }
+                ),
+                format!(
+                    "TTS:{}",
+                    if experience.tts {
+                        experience.tts_model.as_str()
+                    } else {
+                        models
+                            .tts
+                            .as_ref()
+                            .map(|v| v.model.as_str())
+                            .unwrap_or("unknown")
+                    }
+                ),
+            ];
             if jev_options.active() && jev_ready {
                 labels.push(format!("Jev:{jev_model}"));
             }
             let llm = OpenAiLlm::new(&llm.url, &key(Section::Llm)?, &llm.model).map_err(invalid)?;
 
-            let original: Arc<dyn ToolExecutor> = Arc::new(HostTools::new(Arc::new(DesktopToolHost {
+            let original: Arc<dyn ToolExecutor> =
+                Arc::new(HostTools::new(Arc::new(DesktopToolHost {
+                    host: self.host.clone(),
+                    settings_file: self.settings_file(),
+                    server: Arc::downgrade(&self.server),
+                })));
+            let plugin_host = Arc::new(DesktopInfoHost {
                 host: self.host.clone(),
-                settings_file: self.settings_file(),
-                server: Arc::downgrade(&self.server),
-            })));
-            let plugin_host = Arc::new(DesktopInfoHost { host: self.host.clone() });
-            let info = InfoTools::new(plugin_host).map_err(|_| internal("信息插件 HTTP 客户端初始化失败"))?;
-            let combined: Arc<dyn ToolExecutor> = Arc::new(CombinedTools { original, info: Arc::new(info) });
+            });
+            let info = InfoTools::new(plugin_host)
+                .map_err(|_| internal("信息插件 HTTP 客户端初始化失败"))?;
+            let combined: Arc<dyn ToolExecutor> = Arc::new(CombinedTools {
+                original,
+                info: Arc::new(info),
+            });
             let tools: Arc<dyn ToolExecutor> = Arc::new(HomeTools {
-                original:combined, home:Arc::new(DesktopHomeHost{host:self.host.clone(),control:self.home_control.clone()})
+                original: combined,
+                home: Arc::new(DesktopHomeHost {
+                    host: self.host.clone(),
+                    control: self.home_control.clone(),
+                }),
             });
             self.persona.configure(persona_config(experience));
-            let tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools { original: tools, persona: self.persona.clone() });
+            let tools: Arc<dyn ToolExecutor> = Arc::new(PersonaTools {
+                original: tools,
+                persona: self.persona.clone(),
+            });
             let system_prompt = self.persona.system_prompt();
             let asr_corrections = moss_voice::settings::effective_asr_corrections(
                 experience.asr_homophone_fix,
@@ -2081,7 +2763,8 @@ mod imp {
                 let filter = if let Some(local_id) = local_jev_id {
                     let reader: moss_voice_server::jev::SecretReader =
                         Arc::new(|| Some("moss-local-jev".to_owned()));
-                    let upstream_model = moss_voice::settings::local_jev_upstream_model_name(local_id);
+                    let upstream_model =
+                        moss_voice::settings::local_jev_upstream_model_name(local_id);
                     let client = Arc::new(OpenRouterDecisionClient::with_endpoint(
                         moss_voice::models::DEFAULT_LOCAL_LAYA_DECISIONS_URL,
                         reader,
@@ -2110,21 +2793,32 @@ mod imp {
             }
             // NV19: both hooks stay inert until the user switches them on in the private window.
             let (retrieval, extraction) = self.context.hooks();
-            conversation = conversation.with_context_retrieval(retrieval).with_context_extraction(extraction);
-            if self.identity.valid_calibration().is_some() && self.settings().builtin_person_memory_enabled {
+            conversation = conversation
+                .with_context_retrieval(retrieval)
+                .with_context_extraction(extraction);
+            if self.identity.valid_calibration().is_some()
+                && self.settings().builtin_person_memory_enabled
+            {
                 // 换设备后若尚未下载声纹模型，仍必须挂上个人上下文：未知身份绝不回退共享设备记忆，同时不阻断语音服务启动
                 match self.prepare_speaker_helper() {
                     Ok(()) => {
-                        if let Ok(mut slot) = self.speaker_warning.lock() { *slot = None; }
+                        if let Ok(mut slot) = self.speaker_warning.lock() {
+                            *slot = None;
+                        }
                     }
                     Err(error) => {
-                        let warning = format!("声纹按人记忆暂未生效（{}）：当前按未知身份处理、不会回退共享设备记忆，请下载声纹模型后重启内置服务", error.message);
+                        let warning = format!(
+                            "声纹按人记忆暂未生效（{}）：当前按未知身份处理、不会回退共享设备记忆，请下载声纹模型后重启内置服务",
+                            error.message
+                        );
                         eprintln!("[moss-desktop] {warning}");
                         self.diagnostics.push(
                             EventRecord::warn(DiagCategory::Model, warning.clone())
                                 .hint("到“隐私与家居 → 声纹”下载声纹模型，再重启内置服务"),
                         );
-                        if let Ok(mut slot) = self.speaker_warning.lock() { *slot = Some(warning); }
+                        if let Ok(mut slot) = self.speaker_warning.lock() {
+                            *slot = Some(warning);
+                        }
                     }
                 }
                 conversation = conversation.with_personal_context(self.personal.clone());
@@ -2138,22 +2832,26 @@ mod imp {
         }
 
         pub fn status(&self) -> Value {
-            let guard = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let guard = self
+                .server
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let view = guard.as_ref().map(VoiceServer::status);
             drop(guard);
             let db = self.host.db.lock().ok();
             let settings = self.settings();
-            let jev_feedback_enabled = moss_voice::settings::jev_feedback_enabled(&self.settings_file());
+            let jev_feedback_enabled =
+                moss_voice::settings::jev_feedback_enabled(&self.settings_file());
             let key_set = |name: &str| {
-                db.as_ref().and_then(|db| db.get_secret(name).ok().flatten()).is_some_and(|value| !value.is_empty())
+                db.as_ref()
+                    .and_then(|db| db.get_secret(name).ok().flatten())
+                    .is_some_and(|value| !value.is_empty())
             };
             let jev_key_configured = key_set("jev_api_key");
-            let openrouter_llm_key_set = settings
-                .builtin_models
-                .llm
-                .as_ref()
-                .is_some_and(|p| p.kind == ProviderKind::Openai && moss_voice::models::is_openrouter_https_url(&p.url))
-                && key_set(builtin_secret_name(Section::Llm));
+            let openrouter_llm_key_set = settings.builtin_models.llm.as_ref().is_some_and(|p| {
+                p.kind == ProviderKind::Openai
+                    && moss_voice::models::is_openrouter_https_url(&p.url)
+            }) && key_set(builtin_secret_name(Section::Llm));
             let models = builtin::status_view(&settings.builtin_models, key_set);
             drop(db);
             let (ws_port, http_port) = view
@@ -2163,15 +2861,22 @@ mod imp {
             // 运行中显示实际模式；未运行时显示下次启动的模式
             let mode = match &view {
                 Some(view) => serde_json::to_value(view.mode).unwrap_or_default(),
-                None => Value::String(if settings.builtin_chat_ready(self.models.root()) { "chat" } else { "echo" }.into()),
+                None => Value::String(
+                    if settings.builtin_chat_ready(self.models.root()) {
+                        "chat"
+                    } else {
+                        "echo"
+                    }
+                    .into(),
+                ),
             };
             let active_local_jev_id =
                 moss_voice::settings::canonical_local_jev_model(&settings.builtin_local.jev_model);
             let any_local_jev_installed = moss_voice::settings::LOCAL_JEV_MODEL_IDS
                 .iter()
                 .any(|id| self.models.path_if_installed(id).is_some());
-            let active_local_jev_installed = active_local_jev_id
-                .is_some_and(|id| self.models.path_if_installed(id).is_some());
+            let active_local_jev_installed =
+                active_local_jev_id.is_some_and(|id| self.models.path_if_installed(id).is_some());
             let local_jev_installed = if active_local_jev_id.is_some() {
                 active_local_jev_installed
             } else {
@@ -2191,10 +2896,8 @@ mod imp {
                     .find(|id| self.models.path_if_installed(id).is_some())
                 })
                 .unwrap_or(moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL);
-            let onejev_env = moss_voice::onejev::detect_onejev_env(
-                self.models.root_for(onejev_probe_id),
-                false,
-            );
+            let onejev_env =
+                moss_voice::onejev::detect_onejev_env(self.models.root_for(onejev_probe_id), false);
             let laya_env = Self::detect_laya_env_with_probe(false);
             serde_json::json!({
                 "running": view.is_some(),
@@ -2267,12 +2970,16 @@ mod imp {
         pub fn diagnostics_bundle(&self) -> Value {
             let status = self.status();
             let settings = self.settings();
-            let (approvals, approvals_error) = match laser_api::approval::ApprovalService::new(self.host.db.clone())
-                .list(None, APPROVALS_IN_BUNDLE)
-            {
-                Ok(rows) => (serde_json::to_value(rows).unwrap_or_default(), Value::Null),
-                Err(error) => (Value::Array(Vec::new()), Value::String(format!("审批记录读取失败：{error:?}"))),
-            };
+            let (approvals, approvals_error) =
+                match laser_api::approval::ApprovalService::new(self.host.db.clone())
+                    .list(None, APPROVALS_IN_BUNDLE)
+                {
+                    Ok(rows) => (serde_json::to_value(rows).unwrap_or_default(), Value::Null),
+                    Err(error) => (
+                        Value::Array(Vec::new()),
+                        Value::String(format!("审批记录读取失败：{error:?}")),
+                    ),
+                };
             let devices: Vec<Value> = status["devices"]
                 .as_array()
                 .map(|rows| {
@@ -2343,7 +3050,8 @@ mod imp {
         fn start_locked(&self) -> Result<(), CenterError> {
             let result = self.start_locked_inner();
             if let Err(error) = &result {
-                self.diagnostics.push(start_failure_event("内置语音服务启动失败", error));
+                self.diagnostics
+                    .push(start_failure_event("内置语音服务启动失败", error));
             }
             result
         }
@@ -2352,11 +3060,19 @@ mod imp {
             if !self.running() {
                 let settings = self.settings();
                 let (mut local, helper) = self.local_parts(&settings.builtin_local)?;
-                let mut conversation = self.conversation(&settings.builtin_models, &mut local, &settings.builtin_local)?;
+                let mut conversation = self.conversation(
+                    &settings.builtin_models,
+                    &mut local,
+                    &settings.builtin_local,
+                )?;
                 // No music scanning while disabled or chat unavailable;换机或拔盘目录不可用时跳过音乐索引，不阻断内置语音主服务启动。
-                let (music, next_music_warning) = scan_music_for_start(&settings.builtin_music, conversation.is_some());
+                let (music, next_music_warning) =
+                    scan_music_for_start(&settings.builtin_music, conversation.is_some());
                 if let (Some(index), Some((chat, _))) = (&music, conversation.as_mut()) {
-                    chat.tools = Arc::new(moss_voice_server::music::MusicTools::new(chat.tools.clone(), index.clone()));
+                    chat.tools = Arc::new(moss_voice_server::music::MusicTools::new(
+                        chat.tools.clone(),
+                        index.clone(),
+                    ));
                 }
                 let defaults = ServerConfig::default();
                 let playback_start_ms = match &conversation {
@@ -2366,11 +3082,20 @@ mod imp {
                 let config = ServerConfig {
                     ws_port: settings.builtin_ws_port,
                     http_port: settings.builtin_http_port,
-                    mode: if conversation.is_some() { ServerMode::Chat } else { ServerMode::Echo },
+                    mode: if conversation.is_some() {
+                        ServerMode::Chat
+                    } else {
+                        ServerMode::Echo
+                    },
                     conversation: conversation.map(|(conversation, _)| Arc::new(conversation)),
                     music,
-                    vision: Some(Arc::new(DesktopVisionFactory { host: self.host.clone() })),
-                    firmware: Some(Arc::new(DesktopFirmwareHost { db: self.host.db.clone(), dir: self.firmware_dir() })),
+                    vision: Some(Arc::new(DesktopVisionFactory {
+                        host: self.host.clone(),
+                    })),
+                    firmware: Some(Arc::new(DesktopFirmwareHost {
+                        db: self.host.db.clone(),
+                        dir: self.firmware_dir(),
+                    })),
                     vad_factory: local.vad.take(),
                     barge_in: settings.builtin_local.barge_in,
                     barge_in_ms: settings.builtin_local.barge_in_ms,
@@ -2388,10 +3113,16 @@ mod imp {
                 });
                 let server = VoiceServer::start(config, registry)
                     .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
-                server.set_debug_enabled(self.debug_trace_enabled.load(std::sync::atomic::Ordering::Acquire));
+                server.set_debug_enabled(
+                    self.debug_trace_enabled
+                        .load(std::sync::atomic::Ordering::Acquire),
+                );
                 server.prewarm_speech_cache();
                 {
-                    let mut guard = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut guard = self
+                        .server
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     *guard = Some(server);
                 }
                 if let Ok(mut slot) = self.helper.lock() {
@@ -2416,7 +3147,10 @@ mod imp {
             if self.should_run_local_laya() {
                 if let Err(err) = self.ensure_laya_running(false) {
                     eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
-                    self.diagnostics.push(local_jev_failure("开启内置语音时拉起本地 Jev 决策服务失败", &err));
+                    self.diagnostics.push(local_jev_failure(
+                        "开启内置语音时拉起本地 Jev 决策服务失败",
+                        &err,
+                    ));
                 }
             }
             Ok(())
@@ -2438,7 +3172,11 @@ mod imp {
             if let Ok(mut slot) = self.speaker_warning.lock() {
                 *slot = None;
             }
-            let server = self.server.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+            let server = self
+                .server
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
             if let Some(server) = server {
                 server.stop();
                 laser_host::set_voice_device_sessions(None);
@@ -2455,7 +3193,10 @@ mod imp {
 
         pub fn start(&self) -> Result<Value, CenterError> {
             {
-                let _lifecycle = self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let _lifecycle = self
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 self.start_locked()?;
             }
             Ok(self.status())
@@ -2463,14 +3204,20 @@ mod imp {
 
         pub fn stop(&self) -> Value {
             {
-                let _lifecycle = self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let _lifecycle = self
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 self.stop_locked();
             }
             self.status()
         }
 
         fn restart_if_running(&self) -> Result<bool, CenterError> {
-            let _lifecycle = self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !self.running() {
                 return Ok(false);
             }
@@ -2493,7 +3240,10 @@ mod imp {
                 None => None,
             };
             let clear_debug_patch = match patch.get("clear_debug_traces") {
-                Some(v) => Some(v.as_bool().ok_or_else(|| invalid("清空调试记录取值不正确"))?),
+                Some(v) => Some(
+                    v.as_bool()
+                        .ok_or_else(|| invalid("清空调试记录取值不正确"))?,
+                ),
                 None => None,
             };
             if debug_enable_patch.is_some() || clear_debug_patch.is_some() {
@@ -2542,31 +3292,51 @@ mod imp {
                 "screen_preview_sync",
             ] {
                 if let Some(value) = patch.get(key) {
-                    bool_patches.push((key, value.as_bool().ok_or_else(|| invalid("开关取值不正确"))?));
+                    bool_patches.push((
+                        key,
+                        value.as_bool().ok_or_else(|| invalid("开关取值不正确"))?,
+                    ));
                 }
             }
             let jev_model_patch = match patch.get("jev_model") {
                 Some(value) => {
-                    let raw = value.as_str().ok_or_else(|| invalid("Jev 模型名称须为字符串"))?;
-                    Some(moss_voice::settings::validate_jev_model(raw).map_err(|message| invalid(&message))?)
+                    let raw = value
+                        .as_str()
+                        .ok_or_else(|| invalid("Jev 模型名称须为字符串"))?;
+                    Some(
+                        moss_voice::settings::validate_jev_model(raw)
+                            .map_err(|message| invalid(&message))?,
+                    )
                 }
                 None => None,
             };
             let jev_feedback_patch = match patch.get("jev_feedback_enabled") {
-                Some(v) => Some(v.as_bool().ok_or_else(|| invalid("Jev 加工反馈开关取值不正确"))?),
+                Some(v) => Some(
+                    v.as_bool()
+                        .ok_or_else(|| invalid("Jev 加工反馈开关取值不正确"))?,
+                ),
                 None => None,
             };
             let barge_in_ms_patch = match patch.get("barge_in_ms") {
                 Some(value) => {
-                    let ms = value.as_u64().ok_or_else(|| invalid("插话时长须为 300 ~ 600 毫秒的整数"))?;
-                    Some(moss_voice::settings::validate_barge_in_ms(ms).map_err(|message| invalid(&message))?)
+                    let ms = value
+                        .as_u64()
+                        .ok_or_else(|| invalid("插话时长须为 300 ~ 600 毫秒的整数"))?;
+                    Some(
+                        moss_voice::settings::validate_barge_in_ms(ms)
+                            .map_err(|message| invalid(&message))?,
+                    )
                 }
                 None => None,
             };
             let custom_hotwords_patch = match patch.get("custom_hotwords") {
                 Some(value) => {
-                    let words: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| invalid("热词须为文字数组"))?;
-                    Some(moss_voice::settings::normalize_hotwords(&words).map_err(|message| invalid(&message))?)
+                    let words: Vec<String> = serde_json::from_value(value.clone())
+                        .map_err(|_| invalid("热词须为文字数组"))?;
+                    Some(
+                        moss_voice::settings::normalize_hotwords(&words)
+                            .map_err(|message| invalid(&message))?,
+                    )
                 }
                 None => None,
             };
@@ -2583,20 +3353,32 @@ mod imp {
             };
             let custom_personas_patch = match patch.get("custom_personas") {
                 Some(value) => {
-                    let roles: Vec<moss_voice::settings::CustomPersona> = serde_json::from_value(value.clone())
-                        .map_err(|_| invalid("自建角色格式无效"))?;
-                    Some(moss_voice::settings::normalize_custom_personas(&roles).map_err(|message| invalid(&message))?)
+                    let roles: Vec<moss_voice::settings::CustomPersona> =
+                        serde_json::from_value(value.clone())
+                            .map_err(|_| invalid("自建角色格式无效"))?;
+                    Some(
+                        moss_voice::settings::normalize_custom_personas(&roles)
+                            .map_err(|message| invalid(&message))?,
+                    )
                 }
                 None => None,
             };
             // The active role is checked against the custom list inside the settings lock below.
             let persona_style_patch = match patch.get("persona_style") {
-                Some(value) => Some(value.as_str().ok_or_else(|| invalid("说话角色须为字符串"))?.trim().to_owned()),
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| invalid("说话角色须为字符串"))?
+                        .trim()
+                        .to_owned(),
+                ),
                 None => None,
             };
             let persona_prompt_patch = match patch.get("persona_prompt") {
                 Some(value) => {
-                    let raw = value.as_str().ok_or_else(|| invalid("补充说明须为字符串"))?;
+                    let raw = value
+                        .as_str()
+                        .ok_or_else(|| invalid("补充说明须为字符串"))?;
                     Some(
                         moss_voice::settings::normalize_persona_prompt(raw)
                             .map_err(|message| invalid(&message))?,
@@ -2606,7 +3388,9 @@ mod imp {
             };
             let screen_card_style_patch = match patch.get("screen_card_style") {
                 Some(value) => {
-                    let raw = value.as_str().ok_or_else(|| invalid("屏幕卡片画风须为字符串"))?;
+                    let raw = value
+                        .as_str()
+                        .ok_or_else(|| invalid("屏幕卡片画风须为字符串"))?;
                     Some(
                         moss_voice::settings::validate_screen_card_style(raw)
                             .map_err(|message| invalid(&message))?,
@@ -2621,8 +3405,14 @@ mod imp {
                 ("tts_model", ModelKind::Tts),
             ] {
                 if let Some(value) = patch.get(key) {
-                    let id = value.as_str().filter(|id| local_models::spec_of(id, kind).is_some());
-                    model_patches.push((key, id.ok_or_else(|| invalid("选择的本地模型不存在"))?.to_owned()));
+                    let id = value
+                        .as_str()
+                        .filter(|id| local_models::spec_of(id, kind).is_some());
+                    model_patches.push((
+                        key,
+                        id.ok_or_else(|| invalid("选择的本地模型不存在"))?
+                            .to_owned(),
+                    ));
                 }
             }
             let tts_speaker_patch = match patch.get("tts_speaker") {
@@ -2630,7 +3420,8 @@ mod imp {
                     value
                         .as_i64()
                         .filter(|value| (0..=999).contains(value))
-                        .ok_or_else(|| invalid("音色编号须在 0 ~ 999 之间"))? as i32,
+                        .ok_or_else(|| invalid("音色编号须在 0 ~ 999 之间"))?
+                        as i32,
                 ),
                 None => None,
             };
@@ -2639,7 +3430,8 @@ mod imp {
                     value
                         .as_f64()
                         .filter(|value| (0.5..=2.0).contains(value))
-                        .ok_or_else(|| invalid("本地合成语速须在 0.5 ~ 2.0 之间"))? as f32,
+                        .ok_or_else(|| invalid("本地合成语速须在 0.5 ~ 2.0 之间"))?
+                        as f32,
                 ),
                 None => None,
             };
@@ -2648,7 +3440,9 @@ mod imp {
                     let mirror = value.as_str().map(str::trim).unwrap_or_default();
                     if mirror.is_empty() {
                         Some(None)
-                    } else if (mirror.starts_with("https://") || mirror.starts_with("http://")) && !mirror.contains(char::is_whitespace) {
+                    } else if (mirror.starts_with("https://") || mirror.starts_with("http://"))
+                        && !mirror.contains(char::is_whitespace)
+                    {
                         Some(Some(mirror.trim_end_matches('/').to_owned()))
                     } else {
                         return Err(invalid("下载地址必须以 http:// 或 https:// 开头"));
@@ -2656,8 +3450,9 @@ mod imp {
                 }
                 None => None,
             };
-            let persona_touched =
-                persona_style_patch.is_some() || custom_personas_patch.is_some() || persona_prompt_patch.is_some();
+            let persona_touched = persona_style_patch.is_some()
+                || custom_personas_patch.is_some()
+                || persona_prompt_patch.is_some();
             let (is_local_laya, laya_needed) = {
                 let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
                 let saved = moss_voice::settings::update_voice_with_jev_feedback(
@@ -2701,12 +3496,21 @@ mod imp {
                         match &persona_style_patch {
                             Some(style) => {
                                 local.persona_style =
-                                    moss_voice::settings::validate_active_persona(style, &local.custom_personas)?;
+                                    moss_voice::settings::validate_active_persona(
+                                        style,
+                                        &local.custom_personas,
+                                    )?;
                             }
                             // Deleting the active custom role falls back to the default role.
                             None => {
-                                if moss_voice::settings::validate_active_persona(&local.persona_style, &local.custom_personas).is_err() {
-                                    local.persona_style = moss_voice::settings::DEFAULT_PERSONA_STYLE.into();
+                                if moss_voice::settings::validate_active_persona(
+                                    &local.persona_style,
+                                    &local.custom_personas,
+                                )
+                                .is_err()
+                                {
+                                    local.persona_style =
+                                        moss_voice::settings::DEFAULT_PERSONA_STYLE.into();
                                 }
                             }
                         }
@@ -2744,11 +3548,14 @@ mod imp {
                 );
                 if saved.is_err() && persona_touched {
                     // A rejected or failed save must leave the running role equal to the file.
-                    self.persona.configure(persona_config(&self.settings().builtin_local));
+                    self.persona
+                        .configure(persona_config(&self.settings().builtin_local));
                 }
-                let (is_local_jev, filter_on) =
-                    saved.map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))?;
-                let jev_feedback_on = moss_voice::settings::jev_feedback_enabled(&self.settings_file());
+                let (is_local_jev, filter_on) = saved.map_err(|message| {
+                    CenterError::new("voice_settings_write_failed", 500, message)
+                })?;
+                let jev_feedback_on =
+                    moss_voice::settings::jev_feedback_enabled(&self.settings_file());
                 (is_local_jev, filter_on || jev_feedback_on)
             };
             if is_local_laya && laya_needed {
@@ -2756,8 +3563,13 @@ mod imp {
                     self.ensure_laya_running(false)
                         .map_err(|msg| CenterError::new("laya_env_missing", 412, msg))?;
                 } else if let Err(err) = self.ensure_laya_running(false) {
-                    eprintln!("[moss-desktop] 本地 Jev 决策服务未就绪（不影响其余本地设置保存）：{err}");
-                    self.diagnostics.push(local_jev_failure("保存本地设置后，本地 Jev 决策服务没有就绪（其余设置已保存）", &err));
+                    eprintln!(
+                        "[moss-desktop] 本地 Jev 决策服务未就绪（不影响其余本地设置保存）：{err}"
+                    );
+                    self.diagnostics.push(local_jev_failure(
+                        "保存本地设置后，本地 Jev 决策服务没有就绪（其余设置已保存）",
+                        &err,
+                    ));
                 }
             } else if !is_local_laya || !laya_needed {
                 self.stop_laya();
@@ -2766,7 +3578,9 @@ mod imp {
                 && let Ok(guard) = self.server.lock()
                 && let Some(server) = guard.as_ref()
             {
-                server.set_screen_card_style(moss_voice_server::ScreenCardStyle::from_setting(card_style));
+                server.set_screen_card_style(moss_voice_server::ScreenCardStyle::from_setting(
+                    card_style,
+                ));
             }
             let hot_only = patch.as_object().is_some_and(|obj| {
                 !obj.is_empty()
@@ -2825,8 +3639,19 @@ mod imp {
         }
 
         pub fn model_delete(&self, id: &str) -> Result<Value, CenterError> {
-            if id=="campplus_sv_zh_cn_16k_common" && self.speaker_backend.helper.lock().map(|h|h.is_some()).unwrap_or(true) {
-                return Err(CenterError::new("local_model_in_use",409,"声纹模型已加载，请先停止内置服务"));
+            if id == "campplus_sv_zh_cn_16k_common"
+                && self
+                    .speaker_backend
+                    .helper
+                    .lock()
+                    .map(|h| h.is_some())
+                    .unwrap_or(true)
+            {
+                return Err(CenterError::new(
+                    "local_model_in_use",
+                    409,
+                    "声纹模型已加载，请先停止内置服务",
+                ));
             }
             if moss_voice::settings::is_local_jev_model(id) {
                 let configured_id = moss_voice::settings::canonical_local_jev_model(
@@ -2850,16 +3675,29 @@ mod imp {
                 {
                     r.cancelling_model = None;
                 }
-            } else if self.running() && self.helper.lock().map(|helper| helper.is_some()).unwrap_or(false) {
-                return Err(CenterError::new("local_model_in_use", 409, "内置服务正在使用本地模型，请先停止内置服务再删除"));
+            } else if self.running()
+                && self
+                    .helper
+                    .lock()
+                    .map(|helper| helper.is_some())
+                    .unwrap_or(false)
+            {
+                return Err(CenterError::new(
+                    "local_model_in_use",
+                    409,
+                    "内置服务正在使用本地模型，请先停止内置服务再删除",
+                ));
             }
-            self.models.delete(id).map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
+            self.models
+                .delete(id)
+                .map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
             if id == moss_voice::settings::LOCAL_LAYA_JEV_MODEL {
                 // 2026-11-07：连同 MOSS 自动创建的 Python 虚拟环境一起删（用户自建、未带标记的环境不动）
                 self.laya_setup.cancel_and_wait();
                 if let Some(root) = self.laya_env_root() {
-                    moss_voice::laya_env::remove_managed_env(&root)
-                        .map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
+                    moss_voice::laya_env::remove_managed_env(&root).map_err(|message| {
+                        CenterError::new("local_model_delete_failed", 500, message)
+                    })?;
                 }
             }
             Ok(self.status())
@@ -2872,7 +3710,10 @@ mod imp {
             }
             #[cfg(test)]
             {
-                self.laya_root_for_test.lock().ok().and_then(|root| root.clone())
+                self.laya_root_for_test
+                    .lock()
+                    .ok()
+                    .and_then(|root| root.clone())
             }
             #[cfg(not(test))]
             {
@@ -2892,13 +3733,31 @@ mod imp {
                     "已通过 MOSS_LAYA_PYTHON 指定外部 Python，MOSS 不会改动该环境；请在其中自行执行 pip install \"laya[serve]\"",
                 )
             })?;
-            self.laya_setup.find_python().map_err(|message| CenterError::new("laya_env_missing", 412, message))?;
-            let mirror = self.settings().builtin_local.mirror.unwrap_or_default().to_ascii_lowercase();
-            let prefer_mirror = ["mirror", "ghfast", "tuna", "aliyun", "ustc", "huaweicloud", "tencent"]
-                .iter()
-                .any(|hint| mirror.contains(hint));
             self.laya_setup
-                .start(moss_voice::laya_env::SetupRequest { root, prefer_mirror })
+                .find_python()
+                .map_err(|message| CenterError::new("laya_env_missing", 412, message))?;
+            let mirror = self
+                .settings()
+                .builtin_local
+                .mirror
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let prefer_mirror = [
+                "mirror",
+                "ghfast",
+                "tuna",
+                "aliyun",
+                "ustc",
+                "huaweicloud",
+                "tencent",
+            ]
+            .iter()
+            .any(|hint| mirror.contains(hint));
+            self.laya_setup
+                .start(moss_voice::laya_env::SetupRequest {
+                    root,
+                    prefer_mirror,
+                })
                 .map_err(|message| CenterError::new("laya_setup_failed", 500, message))
         }
 
@@ -2907,25 +3766,40 @@ mod imp {
             match action {
                 "start" => self.start_laya_setup()?,
                 "cancel" => self.laya_setup.cancel(),
-                _ => return Err(CenterError::new("voice_settings_invalid", 400, "action 只能是 start 或 cancel")),
+                _ => {
+                    return Err(CenterError::new(
+                        "voice_settings_invalid",
+                        400,
+                        "action 只能是 start 或 cancel",
+                    ));
+                }
             }
             Ok(self.status())
         }
 
         fn running(&self) -> bool {
-            self.server.lock().map(|guard| guard.is_some()).unwrap_or(false)
+            self.server
+                .lock()
+                .map(|guard| guard.is_some())
+                .unwrap_or(false)
         }
 
         /// 测试一个分区的连接：密钥留空时用已保存的密钥。结果不含密钥。
         /// 读取当前分区密钥；若当前分区尚未保存密钥且填写的地址与另一个已保存 OpenAI 兼容分区同源（基础 `/models` 地址一致），自动沿用同源分区的本机密钥。
-        fn secret_or_same_origin(&self, section: Section, input: &SectionInput) -> Result<Option<String>, CenterError> {
+        fn secret_or_same_origin(
+            &self,
+            section: Section,
+            input: &SectionInput,
+        ) -> Result<Option<String>, CenterError> {
             if let Some(own) = self.secret(section)?.filter(|value| !value.is_empty()) {
                 return Ok(Some(own));
             }
             if input.kind != ProviderKind::Openai {
                 return Ok(None);
             }
-            if section != Section::Llm && moss_voice::models::chat_only_gateway_name(&input.url).is_some() {
+            if section != Section::Llm
+                && moss_voice::models::chat_only_gateway_name(&input.url).is_some()
+            {
                 return Ok(None);
             }
             let target_list_url = moss_voice::models::models_list_url(&input.url);
@@ -2937,7 +3811,9 @@ mod imp {
                 if other == section {
                     continue;
                 }
-                let Some(provider) = settings.builtin_models.get(other) else { continue };
+                let Some(provider) = settings.builtin_models.get(other) else {
+                    continue;
+                };
                 if provider.kind == ProviderKind::Openai
                     && moss_voice::models::models_list_url(&provider.url) == target_list_url
                     && let Some(peer_key) = self.secret(other)?.filter(|value| !value.is_empty())
@@ -2949,7 +3825,11 @@ mod imp {
         }
 
         /// 测试一个分区的连接：密钥留空时用已保存的密钥（或同基础地址分区的已存密钥）。结果不含密钥。
-        pub fn models_test(&self, section: Section, input: &SectionInput) -> Result<Value, CenterError> {
+        pub fn models_test(
+            &self,
+            section: Section,
+            input: &SectionInput,
+        ) -> Result<Value, CenterError> {
             let stored = self.secret_or_same_origin(section, input)?;
             let resolved = builtin::resolve_for_test(section, input, stored)
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
@@ -2961,7 +3841,11 @@ mod imp {
         }
 
         /// 读取一个分区服务商支持的全部模型列表：密钥留空时用已保存的密钥（或同基础地址分区的已存密钥）。结果不含密钥。
-        pub fn models_list(&self, section: Section, input: &SectionInput) -> Result<Value, CenterError> {
+        pub fn models_list(
+            &self,
+            section: Section,
+            input: &SectionInput,
+        ) -> Result<Value, CenterError> {
             let stored = self.secret_or_same_origin(section, input)?;
             let resolved = builtin::resolve_for_list(section, input, stored)
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
@@ -2970,7 +3854,11 @@ mod imp {
         }
 
         /// 保存模型设置（地址等写 settings.json，密钥写 app_secrets）；运行中则重启服务以生效。
-        pub fn models_save(&self, input: &ModelsInput, clear: &[Section]) -> Result<Value, CenterError> {
+        pub fn models_save(
+            &self,
+            input: &ModelsInput,
+            clear: &[Section],
+        ) -> Result<Value, CenterError> {
             let settings = self.settings();
             let plan = builtin::plan_save(&settings.builtin_models, input, clear)
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
@@ -2981,7 +3869,8 @@ mod imp {
                     KeyChange::Keep => {
                         if let Some(raw_input) = input.section(*section)
                             && self.secret(*section)?.filter(|v| !v.is_empty()).is_none()
-                            && let Some(peer_key) = self.secret_or_same_origin(*section, raw_input)?
+                            && let Some(peer_key) =
+                                self.secret_or_same_origin(*section, raw_input)?
                         {
                             changes.push((name, Some(peer_key)));
                         }
@@ -2998,7 +3887,9 @@ mod imp {
                         latest.builtin_models = next_models.clone();
                         Ok(())
                     })
-                    .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
+                    .map_err(|message| {
+                        CenterError::new("voice_settings_write_failed", 500, message)
+                    })
                 })?;
             }
             let restarted = self.restart_if_running()?;
@@ -3010,7 +3901,8 @@ mod imp {
         /// 读取 Jev 可用密钥：优先本机 `jev_api_key`，未设时若大模型指向 `openrouter.ai` 则沿用大模型密钥。
         fn jev_effective_secret(&self) -> Result<Option<String>, CenterError> {
             let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-            resolve_openrouter_jev_secret_locked(&db, &self.settings_file()).map(|(secret, _)| secret)
+            resolve_openrouter_jev_secret_locked(&db, &self.settings_file())
+                .map(|(secret, _)| secret)
         }
 
         fn stop_laya(&self) {
@@ -3029,9 +3921,13 @@ mod imp {
             }
         }
 
-        fn is_local_laya_configured_and_installed(&self, settings: &moss_voice::VoiceSettings) -> bool {
-            let jev_model = moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
-                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+        fn is_local_laya_configured_and_installed(
+            &self,
+            settings: &moss_voice::VoiceSettings,
+        ) -> bool {
+            let jev_model =
+                moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
+                    .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
             moss_voice::settings::canonical_local_jev_model(&jev_model)
                 .is_some_and(|id| self.models.path_if_installed(id).is_some())
         }
@@ -3223,23 +4119,23 @@ mod imp {
                 .ok()
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("cpu"));
             let python_found = py.is_file();
-            let site_packages = py
-                .parent()
-                .and_then(|s| s.parent())
-                .and_then(|venv| {
-                    let win_sp = venv.join("Lib").join("site-packages");
-                    if win_sp.is_dir() {
-                        return Some(win_sp);
-                    }
-                    let lib_dir = venv.join("lib");
-                    std::fs::read_dir(&lib_dir).ok()?.flatten().find_map(|entry| {
+            let site_packages = py.parent().and_then(|s| s.parent()).and_then(|venv| {
+                let win_sp = venv.join("Lib").join("site-packages");
+                if win_sp.is_dir() {
+                    return Some(win_sp);
+                }
+                let lib_dir = venv.join("lib");
+                std::fs::read_dir(&lib_dir)
+                    .ok()?
+                    .flatten()
+                    .find_map(|entry| {
                         let name = entry.file_name();
                         let name = name.to_string_lossy();
                         name.starts_with("python")
                             .then(|| entry.path().join("site-packages"))
                             .filter(|p| p.is_dir())
                     })
-                });
+            });
             let laya_serve_found = site_packages.as_ref().is_some_and(|sp| {
                 sp.join("laya").join("serve.py").is_file() && sp.join("uvicorn").is_dir()
             });
@@ -3253,8 +4149,13 @@ mod imp {
             });
             let ready = python_found && laya_serve_found;
             // 虚拟环境由 MOSS 自动创建（删除 Laya 时一并删除）
-            let venv_dir = py.parent().and_then(|bin| bin.parent()).map(std::path::Path::to_path_buf);
-            let managed = venv_dir.as_deref().is_some_and(moss_voice::laya_env::is_managed);
+            let venv_dir = py
+                .parent()
+                .and_then(|bin| bin.parent())
+                .map(std::path::Path::to_path_buf);
+            let managed = venv_dir
+                .as_deref()
+                .is_some_and(moss_voice::laya_env::is_managed);
             let is_apple_silicon = cfg!(all(target_os = "macos", target_arch = "aarch64"));
             let cuda_found = if !ready || force_cpu {
                 false
@@ -3282,11 +4183,13 @@ mod imp {
             } else if ready && mps_found {
                 "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。".to_owned()
             } else if ready {
-                "运行环境检测通过（Python + laya[serve] CPU 模式已就绪），可直接下载并启用。".to_owned()
+                "运行环境检测通过（Python + laya[serve] CPU 模式已就绪），可直接下载并启用。"
+                    .to_owned()
             } else if !python_found {
                 "尚未准备 Laya 运行环境：点“下载”或“准备运行环境”后，MOSS 会用本机 Python 3.10+ 自动创建虚拟环境并安装 laya[serve]（有 NVIDIA 显卡时装 CUDA 版 PyTorch）；也可直接选用上方免 Python 的 OneJev 1.6。".to_owned()
             } else {
-                "已找到 Python 虚拟环境，但缺少 laya[serve] 依赖包：点“准备运行环境”自动补齐。".to_owned()
+                "已找到 Python 虚拟环境，但缺少 laya[serve] 依赖包：点“准备运行环境”自动补齐。"
+                    .to_owned()
             };
             serde_json::json!({
                 "ready": ready,
@@ -3305,14 +4208,18 @@ mod imp {
             let label = local_models::spec(canonical_id)
                 .map(|s| s.label)
                 .unwrap_or(canonical_id);
-            format!("本地决策模型“{label}”（{canonical_id}）尚未下载：请先在下方“本地模型（断网可用）”点击下载")
+            format!(
+                "本地决策模型“{label}”（{canonical_id}）尚未下载：请先在下方“本地模型（断网可用）”点击下载"
+            )
         }
 
         fn ensure_laya_running(&self, wait_ready: bool) -> Result<(), String> {
             let settings = self.settings();
-            let validated = moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
-                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
-            let Some(canonical_id) = moss_voice::settings::canonical_local_jev_model(&validated) else {
+            let validated =
+                moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
+                    .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+            let Some(canonical_id) = moss_voice::settings::canonical_local_jev_model(&validated)
+            else {
                 return Ok(());
             };
             let result = self.ensure_local_jev_running_for(canonical_id, wait_ready);
@@ -3339,22 +4246,36 @@ mod imp {
 
         /// 当前所选本地 Jev 的实际运行情况（2026-11-07）：未下载 / 未启用 / 加载中 / 已就绪 / 启动失败 / 已停止。
         /// 后台启动失败或推理进程意外退出时带上原因，界面据此提示，不再“看着开着、实际每轮都跳过”。
-        fn local_jev_runtime_status(&self, settings: &moss_voice::VoiceSettings, feedback_enabled: bool) -> Value {
-            let validated = moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
-                .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
+        fn local_jev_runtime_status(
+            &self,
+            settings: &moss_voice::VoiceSettings,
+            feedback_enabled: bool,
+        ) -> Value {
+            let validated =
+                moss_voice::settings::validate_jev_model(&settings.builtin_local.jev_model)
+                    .unwrap_or_else(|_| moss_voice::settings::default_jev_model());
             let Some(id) = moss_voice::settings::canonical_local_jev_model(&validated) else {
                 return serde_json::json!({ "state": "cloud" });
             };
             let is_onejev = moss_voice::settings::is_local_onejev_model(id);
             let installed = self.models.path_if_installed(id).is_some();
             let wanted = settings.builtin_local.jev_filter_enabled || feedback_enabled;
-            let (alive, starting, crashed, accelerator, crash_log, failure) = match self.laya.lock() {
+            let (alive, starting, crashed, accelerator, crash_log, failure) = match self.laya.lock()
+            {
                 Ok(mut runner) => {
                     let alive = runner.is_alive_for(id);
                     let starting = runner.is_starting_for(id);
                     let crashed = !alive && runner.active_model.as_deref() == Some(id);
-                    let gw = runner.onejev.as_ref().filter(|_| runner.active_model.as_deref() == Some(id));
-                    let accelerator = gw.map(|gw| (gw.accelerator().display_text(), gw.accelerator().kind.uses_gpu()));
+                    let gw = runner
+                        .onejev
+                        .as_ref()
+                        .filter(|_| runner.active_model.as_deref() == Some(id));
+                    let accelerator = gw.map(|gw| {
+                        (
+                            gw.accelerator().display_text(),
+                            gw.accelerator().kind.uses_gpu(),
+                        )
+                    });
                     let crash_log = gw.map(|gw| gw.log_summary()).unwrap_or_default();
                     let failure = runner
                         .last_failure
@@ -3381,8 +4302,17 @@ mod imp {
             } else if starting || alive {
                 ("starting", None)
             } else if crashed {
-                let hint = if crash_log.is_empty() { String::new() } else { format!("（{crash_log}）") };
-                ("failed", Some(format!("本地推理进程已意外退出{hint}；关闭再打开 Jev 开关或重启语音服务即可重新拉起")))
+                let hint = if crash_log.is_empty() {
+                    String::new()
+                } else {
+                    format!("（{crash_log}）")
+                };
+                (
+                    "failed",
+                    Some(format!(
+                        "本地推理进程已意外退出{hint}；关闭再打开 Jev 开关或重启语音服务即可重新拉起"
+                    )),
+                )
             } else if let Some(message) = failure {
                 ("failed", Some(message))
             } else if !wanted {
@@ -3408,7 +4338,11 @@ mod imp {
             })
         }
 
-        fn ensure_local_jev_running_for(&self, canonical_id: &str, wait_ready: bool) -> Result<(), String> {
+        fn ensure_local_jev_running_for(
+            &self,
+            canonical_id: &str,
+            wait_ready: bool,
+        ) -> Result<(), String> {
             let Some(model_dir) = self.models.path_if_installed(canonical_id) else {
                 return Err(Self::local_jev_missing_message(canonical_id));
             };
@@ -3416,7 +4350,10 @@ mod imp {
                 return Ok(());
             }
             {
-                let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                let mut runner = self
+                    .laya
+                    .lock()
+                    .map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
                 if !wait_ready
                     && (runner.is_alive_for(canonical_id) || runner.is_starting_for(canonical_id))
                 {
@@ -3436,7 +4373,10 @@ mod imp {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 18090));
             let (already_alive, start_generation) = {
-                let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                let mut runner = self
+                    .laya
+                    .lock()
+                    .map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
                 let alive = runner.is_alive_for(canonical_id);
                 if !alive {
                     runner.cancel_in_flight();
@@ -3479,13 +4419,11 @@ mod imp {
                     let has_override = env_device.as_deref().is_some_and(|v| !v.trim().is_empty());
                     let env_info = Self::detect_laya_env_with_probe(!has_override);
                     if env_info.get("ready").and_then(Value::as_bool) != Some(true) {
-                        return Err(
-                            env_info
-                                .get("summary")
-                                .and_then(Value::as_str)
-                                .unwrap_or("未找到本地 Laya 运行环境")
-                                .to_owned(),
-                        );
+                        return Err(env_info
+                            .get("summary")
+                            .and_then(Value::as_str)
+                            .unwrap_or("未找到本地 Laya 运行环境")
+                            .to_owned());
                     }
                     let cuda_available =
                         env_info.get("cuda_found").and_then(Value::as_bool) == Some(true);
@@ -3500,13 +4438,17 @@ mod imp {
                     let tmp_existed = tmp_dir.exists();
                     let _ = std::fs::create_dir_all(&tmp_dir);
                     if !tmp_existed {
-                        let _ = std::fs::write(tmp_dir.join(moss_voice::laya_env::MANAGED_MARKER), b"");
+                        let _ =
+                            std::fs::write(tmp_dir.join(moss_voice::laya_env::MANAGED_MARKER), b"");
                     }
                     let extra_models = serde_json::json!({
                         "multilingual": model_dir.to_string_lossy().replace('\\', "/")
                     })
                     .to_string();
-                    let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                    let mut runner = self
+                        .laya
+                        .lock()
+                        .map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
                     if runner.generation != start_generation {
                         return Err("本地 Laya 启动已取消（开关已关闭或服务已停止）".into());
                     }
@@ -3586,7 +4528,10 @@ mod imp {
                 let mirror_hint = self.settings().builtin_local.mirror;
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 {
-                    let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                    let mut runner = self
+                        .laya
+                        .lock()
+                        .map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
                     if runner.generation != start_generation {
                         return Err("本地 OneJev 启动已取消（开关已关闭或服务已停止）".into());
                     }
@@ -3682,7 +4627,10 @@ mod imp {
                     mirror_hint.as_deref(),
                     &cancel,
                 );
-                let mut runner = self.laya.lock().map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
+                let mut runner = self
+                    .laya
+                    .lock()
+                    .map_err(|_| "本地 Jev 进程锁失败".to_owned())?;
                 if runner.generation == start_generation {
                     runner.starting_model = None;
                     runner.starting_cancel = None;
@@ -3738,8 +4686,9 @@ mod imp {
             let api_key = if !typed_key.is_empty() {
                 typed_key.to_owned()
             } else {
-                self.jev_effective_secret()?
-                    .ok_or_else(|| CenterError::new("model_input_invalid", 400, "请填写 OpenRouter API Key"))?
+                self.jev_effective_secret()?.ok_or_else(|| {
+                    CenterError::new("model_input_invalid", 400, "请填写 OpenRouter API Key")
+                })?
             };
             Ok(moss_voice::models::test_jev_decisions(
                 moss_voice::models::DEFAULT_JEV_DECISIONS_URL,
@@ -3787,14 +4736,18 @@ mod imp {
                 .map(str::trim)
                 .filter(|m| !m.is_empty())
                 .unwrap_or(current_settings.builtin_local.jev_model.as_str());
-            let model = moss_voice::settings::validate_jev_model(model_raw)
-                .map_err(|msg| invalid(&msg))?;
+            let model =
+                moss_voice::settings::validate_jev_model(model_raw).map_err(|msg| invalid(&msg))?;
             let next_voice = match obj.get("voice_enabled") {
-                Some(v) => v.as_bool().ok_or_else(|| invalid("语音筛选开关取值不正确"))?,
+                Some(v) => v
+                    .as_bool()
+                    .ok_or_else(|| invalid("语音筛选开关取值不正确"))?,
                 None => current_settings.builtin_local.jev_filter_enabled,
             };
             let effective_feedback = match obj.get("feedback_enabled") {
-                Some(v) => v.as_bool().ok_or_else(|| invalid("加工反馈开关取值不正确"))?,
+                Some(v) => v
+                    .as_bool()
+                    .ok_or_else(|| invalid("加工反馈开关取值不正确"))?,
                 None => moss_voice::settings::jev_feedback_enabled(&self.settings_file()),
             };
             if let Some(local_id) = moss_voice::settings::canonical_local_jev_model(&model) {
@@ -3821,13 +4774,16 @@ mod imp {
             {
                 return Ok(());
             }
-            let plan = builtin::plan_save(&current_settings.builtin_models, pending_models, clearing_sections)
-                .map_err(|message| invalid(&message))?;
-            let next_openrouter_llm = plan
-                .models
-                .llm
-                .as_ref()
-                .is_some_and(|p| p.kind == ProviderKind::Openai && moss_voice::models::is_openrouter_https_url(&p.url));
+            let plan = builtin::plan_save(
+                &current_settings.builtin_models,
+                pending_models,
+                clearing_sections,
+            )
+            .map_err(|message| invalid(&message))?;
+            let next_openrouter_llm = plan.models.llm.as_ref().is_some_and(|p| {
+                p.kind == ProviderKind::Openai
+                    && moss_voice::models::is_openrouter_https_url(&p.url)
+            });
             let llm_has_key = plan
                 .keys
                 .iter()
@@ -3889,15 +4845,21 @@ mod imp {
                         .map(str::trim)
                         .unwrap_or("");
                     next_voice = match obj.get("voice_enabled") {
-                        Some(v) => v.as_bool().ok_or_else(|| invalid("语音筛选开关取值不正确"))?,
+                        Some(v) => v
+                            .as_bool()
+                            .ok_or_else(|| invalid("语音筛选开关取值不正确"))?,
                         None => snapshot.builtin_local.jev_filter_enabled,
                     };
                     feedback_patch = match obj.get("feedback_enabled") {
-                        Some(v) => Some(v.as_bool().ok_or_else(|| invalid("加工反馈开关取值不正确"))?),
+                        Some(v) => Some(
+                            v.as_bool()
+                                .ok_or_else(|| invalid("加工反馈开关取值不正确"))?,
+                        ),
                         None => None,
                     };
-                    let effective_feedback = feedback_patch
-                        .unwrap_or_else(|| moss_voice::settings::jev_feedback_enabled(&self.settings_file()));
+                    let effective_feedback = feedback_patch.unwrap_or_else(|| {
+                        moss_voice::settings::jev_feedback_enabled(&self.settings_file())
+                    });
                     if let Some(lid) = local_id {
                         if (next_voice || effective_feedback)
                             && self.models.path_if_installed(lid).is_none()
@@ -3927,12 +4889,17 @@ mod imp {
                     };
                 }
                 commit_secrets_then_settings(&db, &changes, || {
-                    moss_voice::settings::update_voice_with_jev_feedback(&self.settings_file(), |settings| {
-                        settings.builtin_local.jev_model = next_model.clone();
-                        settings.builtin_local.jev_filter_enabled = next_voice;
-                        Ok(((), feedback_patch))
+                    moss_voice::settings::update_voice_with_jev_feedback(
+                        &self.settings_file(),
+                        |settings| {
+                            settings.builtin_local.jev_model = next_model.clone();
+                            settings.builtin_local.jev_filter_enabled = next_voice;
+                            Ok(((), feedback_patch))
+                        },
+                    )
+                    .map_err(|message| {
+                        CenterError::new("voice_settings_write_failed", 500, message)
                     })
-                    .map_err(|message| CenterError::new("voice_settings_write_failed", 500, message))
                 })?;
                 action
             };
@@ -3940,7 +4907,10 @@ mod imp {
                 LayaAction::Start => {
                     if let Err(err) = self.ensure_laya_running(false) {
                         eprintln!("[moss-desktop] 本地 Jev 决策服务启动失败：{err}");
-                        self.diagnostics.push(local_jev_failure("切换 Jev 设置后本地 Jev 决策服务启动失败", &err));
+                        self.diagnostics.push(local_jev_failure(
+                            "切换 Jev 设置后本地 Jev 决策服务启动失败",
+                            &err,
+                        ));
                     }
                 }
                 LayaAction::Stop => self.stop_laya(),
@@ -3956,7 +4926,10 @@ mod imp {
                 .lock()
                 .ok()
                 .and_then(|db| db.voice_devices().ok())
-                .is_some_and(|list| list.into_iter().any(|d| d.device_id == device_id && d.is_allowed()))
+                .is_some_and(|list| {
+                    list.into_iter()
+                        .any(|d| d.device_id == device_id && d.is_allowed())
+                })
         }
 
         /// 2026-11-02：桌面端直接向一台已连接设备发请求（`refresh_info` / `reboot`），不经过模型。
@@ -3985,7 +4958,10 @@ mod imp {
                         "该设备尚未在语音中心允许连接或已被撤销",
                     ));
                 }
-                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = self
+                    .server
+                    .lock()
+                    .map_err(|_| internal("内置语音服务状态锁失败"))?;
                 let server = server.as_ref().ok_or_else(|| {
                     CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
                 })?;
@@ -4002,7 +4978,10 @@ mod imp {
                     .and_then(|v| v.get("after_seq").or(Some(v)))
                     .and_then(Value::as_u64);
                 let allowed = self.is_device_allowed(device_id);
-                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = self
+                    .server
+                    .lock()
+                    .map_err(|_| internal("内置语音服务状态锁失败"))?;
                 let Some(server) = server.as_ref() else {
                     return Ok(serde_json::json!({
                         "running": false,
@@ -4035,7 +5014,10 @@ mod imp {
                 return Ok(server.camera_frame_view(device_id, after_seq));
             }
             if label == "clear_camera_frame" {
-                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = self
+                    .server
+                    .lock()
+                    .map_err(|_| internal("内置语音服务状态锁失败"))?;
                 if let Some(server) = server.as_ref() {
                     server.clear_camera_frame(device_id);
                 }
@@ -4044,7 +5026,10 @@ mod imp {
             if label == "push_preview" {
                 let (bytes, summary, ruler) = extract_preview_bundle_for_host(&self.host, None)
                     .map_err(|msg| CenterError::new("voice_preview_missing", 404, msg))?;
-                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = self
+                    .server
+                    .lock()
+                    .map_err(|_| internal("内置语音服务状态锁失败"))?;
                 let server = server.as_ref().ok_or_else(|| {
                     CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
                 })?;
@@ -4063,13 +5048,19 @@ mod imp {
                     .and_then(|v| v.get("pose").or(Some(v)))
                     .and_then(Value::as_str)
                     .unwrap_or("idle");
-                let pose = moss_voice_server::BotPose::from_slug(raw_pose)
-                    .ok_or_else(|| invalid("小机器人动作只能是 idle、engrave、approval、music、celebrate 或 halted"))?;
+                let pose = moss_voice_server::BotPose::from_slug(raw_pose).ok_or_else(|| {
+                    invalid(
+                        "小机器人动作只能是 idle、engrave、approval、music、celebrate 或 halted",
+                    )
+                })?;
                 let style_override = value
                     .and_then(|v| v.get("style"))
                     .and_then(Value::as_str)
                     .map(moss_voice_server::ScreenCardStyle::from_setting);
-                let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+                let server = self
+                    .server
+                    .lock()
+                    .map_err(|_| internal("内置语音服务状态锁失败"))?;
                 let server = server.as_ref().ok_or_else(|| {
                     CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
                 })?;
@@ -4091,7 +5082,8 @@ mod imp {
                         .and_then(|v| v.get("volume").or(Some(v)))
                         .and_then(Value::as_u64)
                         .filter(|v| *v <= 100)
-                        .ok_or_else(|| invalid("音量须为 0 ~ 100 的整数"))? as u8;
+                        .ok_or_else(|| invalid("音量须为 0 ~ 100 的整数"))?
+                        as u8;
                     moss_voice::settings::update_voice(&self.settings_file(), |s| {
                         s.builtin_device_prefs
                             .entry(device_id.to_owned())
@@ -4107,7 +5099,8 @@ mod imp {
                         .and_then(|v| v.get("brightness").or(Some(v)))
                         .and_then(Value::as_u64)
                         .filter(|v| *v <= 100)
-                        .ok_or_else(|| invalid("屏幕亮度须为 0 ~ 100 的整数"))? as u8;
+                        .ok_or_else(|| invalid("屏幕亮度须为 0 ~ 100 的整数"))?
+                        as u8;
                     moss_voice::settings::update_voice(&self.settings_file(), |s| {
                         s.builtin_device_prefs
                             .entry(device_id.to_owned())
@@ -4158,7 +5151,10 @@ mod imp {
                     ));
                 }
             };
-            let server = self.server.lock().map_err(|_| internal("内置语音服务状态锁失败"))?;
+            let server = self
+                .server
+                .lock()
+                .map_err(|_| internal("内置语音服务状态锁失败"))?;
             let server = server.as_ref().ok_or_else(|| {
                 CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
             })?;
@@ -4168,17 +5164,40 @@ mod imp {
             Ok(serde_json::json!({ "requested": label }))
         }
 
-        pub fn set_device_status(&self, device_id: &str, status: &str) -> Result<Value, CenterError> {
+        pub fn set_device_status(
+            &self,
+            device_id: &str,
+            status: &str,
+        ) -> Result<Value, CenterError> {
             let device_id = device_id.trim();
             if device_id.is_empty() || device_id.len() > 128 {
-                return Err(CenterError::new("voice_device_invalid", 400, "设备编号不能为空"));
+                return Err(CenterError::new(
+                    "voice_device_invalid",
+                    400,
+                    "设备编号不能为空",
+                ));
             }
             let status = match status.trim() {
                 "allowed" => laser_runtime::VOICE_DEVICE_ALLOWED,
                 "revoked" => laser_runtime::VOICE_DEVICE_REVOKED,
-                _ => return Err(CenterError::new("voice_device_invalid", 400, "设备状态只能是 allowed 或 revoked")),
+                _ => {
+                    return Err(CenterError::new(
+                        "voice_device_invalid",
+                        400,
+                        "设备状态只能是 allowed 或 revoked",
+                    ));
+                }
             };
-            let found = self.personal.device_changed(device_id,||self.memory.device_changed(device_id, || self.host.api_service.set_voice_device_status(device_id, status, now()))).map_err(internal)?;
+            let found = self
+                .personal
+                .device_changed(device_id, || {
+                    self.memory.device_changed(device_id, || {
+                        self.host
+                            .api_service
+                            .set_voice_device_status(device_id, status, now())
+                    })
+                })
+                .map_err(internal)?;
             self.context.device_changed(device_id);
             if status != laser_runtime::VOICE_DEVICE_ALLOWED
                 && let Ok(guard) = self.server.lock()
@@ -4187,7 +5206,11 @@ mod imp {
                 server.clear_camera_frame(device_id);
             }
             if !found {
-                return Err(CenterError::new("voice_device_not_found", 404, "找不到该设备"));
+                return Err(CenterError::new(
+                    "voice_device_not_found",
+                    404,
+                    "找不到该设备",
+                ));
             }
             Ok(self.status())
         }
@@ -4205,7 +5228,9 @@ mod imp {
                     && let Ok(devices) = db.voice_devices()
                 {
                     for d in devices.into_iter().filter(|d| d.is_allowed()) {
-                        let _ = self.memory.device_changed(&d.device_id, || Ok::<_, String>(()));
+                        let _ = self
+                            .memory
+                            .device_changed(&d.device_id, || Ok::<_, String>(()));
                     }
                 }
             }
@@ -4230,30 +5255,33 @@ mod imp {
             let settings = self.settings();
             let llm = settings.builtin_models.llm.as_ref()?;
             let key = self.secret(Section::Llm).ok()?.unwrap_or_default();
-            OpenAiLlm::new(&llm.url, &key, &llm.model).ok().map(|llm| Arc::new(llm) as Arc<dyn moss_voice_providers::Llm>)
+            OpenAiLlm::new(&llm.url, &key, &llm.model)
+                .ok()
+                .map(|llm| Arc::new(llm) as Arc<dyn moss_voice_providers::Llm>)
         }
 
         /// NV13 desktop-only inert configuration. Live execution remains locked
         /// until separately authorized real CLI sandbox-negative tests succeed.
-        pub fn agent_stop(&self,run_id:&str)->Value{
-            let stopped=self.host.api_service.agent_stop(run_id);
-            let mut status=self.agent_status();
-            status["stopped"]=Value::Bool(stopped);
+        pub fn agent_stop(&self, run_id: &str) -> Value {
+            let stopped = self.host.api_service.agent_stop(run_id);
+            let mut status = self.agent_status();
+            status["stopped"] = Value::Bool(stopped);
             status
         }
-        pub fn agent_status(&self)->Value{
-            let mut status=self.host.api_service.agent_status();
-            status["settings"]=serde_json::to_value(self.settings().builtin_agents).unwrap_or(Value::Null);
+        pub fn agent_status(&self) -> Value {
+            let mut status = self.host.api_service.agent_status();
+            status["settings"] =
+                serde_json::to_value(self.settings().builtin_agents).unwrap_or(Value::Null);
             status
         }
         /// NV13 Agent 配置（2026-10-15 起可开启；2026-10-25 支持留空自动读取本机 CLI 与换机自动适配）：
         /// 开启时必须有工作目录，且本机至少有一个手动填写或自动检测到的 CLI；每次运行仍要桌面批准并要求严格模式。
-        pub fn agent_save(&self,input:&Value)->Result<Value,CenterError>{
+        pub fn agent_save(&self, input: &Value) -> Result<Value, CenterError> {
             use laser_host::voice_agent::detect_cli;
             use moss_voice::settings::BuiltinAgents;
-            let invalid=|message:&str|CenterError::new("agent_config_invalid",400,message);
-            let raw:BuiltinAgents=serde_json::from_value(input.clone())
-                .map_err(|_|invalid("Agent 配置格式无效"))?;
+            let invalid = |message: &str| CenterError::new("agent_config_invalid", 400, message);
+            let raw: BuiltinAgents =
+                serde_json::from_value(input.clone()).map_err(|_| invalid("Agent 配置格式无效"))?;
             let sensitive = [self.host.runtime_root.path.clone()];
             let mut validation_err: Option<CenterError> = None;
             moss_voice::settings::update_voice(&self.settings_file(), |settings| {
@@ -4269,11 +5297,12 @@ mod imp {
                 }
             })
             .map_err(|_| {
-                validation_err.unwrap_or_else(|| CenterError::new("agent_save_failed", 500, "Agent 配置保存失败"))
+                validation_err.unwrap_or_else(|| {
+                    CenterError::new("agent_save_failed", 500, "Agent 配置保存失败")
+                })
             })?;
             Ok(self.agent_status())
         }
-
 
         /// NV14: main-window-only local music settings. Reading status does not
         /// scan the user's filesystem; saving with enabled=true explicitly
@@ -4292,23 +5321,25 @@ mod imp {
                 "warning":warning
             })
         }
-        pub fn music_save(&self, input:&Value) -> Result<Value, CenterError> {
+        pub fn music_save(&self, input: &Value) -> Result<Value, CenterError> {
             use moss_voice::settings::BuiltinMusic;
-            let invalid=|message:&str|CenterError::new("music_invalid",400,message);
-            let config:BuiltinMusic = serde_json::from_value(
-                input.get("settings").cloned().unwrap_or(Value::Null)
-            ).map_err(|_|invalid("本地音乐配置格式无效"))?;
-            if config.directory.len()>1024 || config.directory.chars().any(char::is_control) {
+            let invalid = |message: &str| CenterError::new("music_invalid", 400, message);
+            let config: BuiltinMusic =
+                serde_json::from_value(input.get("settings").cloned().unwrap_or(Value::Null))
+                    .map_err(|_| invalid("本地音乐配置格式无效"))?;
+            if config.directory.len() > 1024 || config.directory.chars().any(char::is_control) {
                 return Err(invalid("目录太长或含非法字符"));
             }
             let track_count = if config.enabled {
                 if config.directory.trim().is_empty() {
                     return Err(invalid("先明确选择本地音乐目录"));
                 }
-                moss_voice_server::music::MusicIndex::scan(
-                    std::path::Path::new(&config.directory)
-                ).map_err(|_|invalid("音乐目录无法读取、路径不安全或超过索引限制"))?.len()
-            } else {0};
+                moss_voice_server::music::MusicIndex::scan(std::path::Path::new(&config.directory))
+                    .map_err(|_| invalid("音乐目录无法读取、路径不安全或超过索引限制"))?
+                    .len()
+            } else {
+                0
+            };
             moss_voice::settings::update_voice(&self.settings_file(), |settings| {
                 settings.builtin_music = config;
                 Ok(())
@@ -4318,27 +5349,38 @@ mod imp {
                 *slot = None;
             }
             let restarted = self.restart_if_running()?;
-            let mut result=self.music_status();
-            result["restarted"]=Value::Bool(restarted);
-            result["track_count"]=serde_json::json!(track_count);
+            let mut result = self.music_status();
+            result["restarted"] = Value::Bool(restarted);
+            result["track_count"] = serde_json::json!(track_count);
             Ok(result)
         }
 
         /// NV15 inert Home Assistant configuration with optimistic revision.
         pub fn home_status(&self) -> Value {
-            let credentials = self.host.db.lock().ok()
+            let credentials = self
+                .host
+                .db
+                .lock()
+                .ok()
                 .and_then(|db| db.home_token_status().ok());
-            let (key_configured,credential_revision)=match credentials {
-                Some(status)=>status,
-                None=>{
+            let (key_configured, credential_revision) = match credentials {
+                Some(status) => status,
+                None => {
                     // A copied SQLite file may hold an un-decryptable DPAPI or Keychain
                     // envelope from another device or OS account. Permit ONLY private
                     // window import/recovery with revision CAS, not use of the
                     // foreign bearer nor any read/control authority.
-                    let recover=self.host.db.lock().ok()
-                        .and_then(|db|db.home_token_recovery_revision().ok());
-                    let profile=moss_voice::settings::read_home_offline(&self.settings_file()).ok();
-                    if let (Some(credential_revision),Some((settings,revision)))=(recover,profile){
+                    let recover = self
+                        .host
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|db| db.home_token_recovery_revision().ok());
+                    let profile =
+                        moss_voice::settings::read_home_offline(&self.settings_file()).ok();
+                    if let (Some(credential_revision), Some((settings, revision))) =
+                        (recover, profile)
+                    {
                         return serde_json::json!({
                             "settings":settings,"revision":revision,
                             "credential_revision":credential_revision,
@@ -4353,7 +5395,7 @@ mod imp {
                         "key_configured":false,"ready":false,"can_control":false,
                         "reason":"Home Assistant 凭据或版本损坏，安全恢复不可用"
                     });
-                },
+                }
             };
             match moss_voice::settings::read_home_offline(&self.settings_file()) {
                 Ok((settings, revision)) => serde_json::json!({
@@ -4367,85 +5409,165 @@ mod imp {
                     "settings":null, "revision":null,"credential_revision":null,
                     "ready":false, "can_control":false, "key_configured":false,
                     "reason":"Home Assistant 配置损坏或无法读取，禁止覆盖，请先修复设置文件"
-                })
+                }),
             }
         }
         pub fn home_save(&self, input: &Value) -> Result<Value, CenterError> {
             use moss_voice::settings::{BuiltinHomeAssistant, HomeOfflineError};
-            let invalid = |message:&str| CenterError::new("home_invalid",400,message);
-            let object=input.as_object().ok_or_else(||invalid("Home Assistant 配置必须是对象"))?;
-            if object.len()!=2 || !object.contains_key("settings") || !object.contains_key("expected_revision") {
-                return Err(invalid("只接受 settings 和 expected_revision，拒绝令牌、密钥及控制字段"));
+            let invalid = |message: &str| CenterError::new("home_invalid", 400, message);
+            let object = input
+                .as_object()
+                .ok_or_else(|| invalid("Home Assistant 配置必须是对象"))?;
+            if object.len() != 2
+                || !object.contains_key("settings")
+                || !object.contains_key("expected_revision")
+            {
+                return Err(invalid(
+                    "只接受 settings 和 expected_revision，拒绝令牌、密钥及控制字段",
+                ));
             }
-            let revision=object["expected_revision"].as_u64()
+            let revision = object["expected_revision"]
+                .as_u64()
                 .filter(|value| *value <= 9_007_199_254_740_991)
-                .ok_or_else(||invalid("缺少有效的 Home Assistant 配置版本"))?;
-            let next:BuiltinHomeAssistant=serde_json::from_value(object["settings"].clone())
-                .map_err(|_|invalid("实体白名单格式无效或有禁止字段"))?;
-            self.home_control.fence_sensitive_change(||
-                moss_voice::settings::save_home_offline(&self.settings_file(),&next,revision)
-            ).map_err(|_|internal("无法安全撤销在途家居授权"))?
-                .map_err(|error|match error {
-                    HomeOfflineError::Invalid(message)=>invalid(message),
-                    HomeOfflineError::Conflict=>CenterError::new("home_conflict",409,"白名单已在其他窗口修改，请重新加载后再保存"),
-                    HomeOfflineError::Storage(_)=>CenterError::new("home_save_failed",500,"Home Assistant 配置保存失败；原设置未被覆盖"),
+                .ok_or_else(|| invalid("缺少有效的 Home Assistant 配置版本"))?;
+            let next: BuiltinHomeAssistant = serde_json::from_value(object["settings"].clone())
+                .map_err(|_| invalid("实体白名单格式无效或有禁止字段"))?;
+            self.home_control
+                .fence_sensitive_change(|| {
+                    moss_voice::settings::save_home_offline(&self.settings_file(), &next, revision)
+                })
+                .map_err(|_| internal("无法安全撤销在途家居授权"))?
+                .map_err(|error| match error {
+                    HomeOfflineError::Invalid(message) => invalid(message),
+                    HomeOfflineError::Conflict => CenterError::new(
+                        "home_conflict",
+                        409,
+                        "白名单已在其他窗口修改，请重新加载后再保存",
+                    ),
+                    HomeOfflineError::Storage(_) => CenterError::new(
+                        "home_save_failed",
+                        500,
+                        "Home Assistant 配置保存失败；原设置未被覆盖",
+                    ),
                 })?;
             Ok(self.home_status())
         }
 
-        pub fn home_voice_consent(&self,input:&Value)->Result<Value,CenterError>{
-            let invalid=||CenterError::new("home_invalid",400,"语音只读授权参数无效");
-            let obj=input.as_object().ok_or_else(invalid)?;
-            if obj.len()!=3||!obj.contains_key("enabled")||!obj.contains_key("policy_revision")
-                ||!obj.contains_key("credential_revision"){return Err(invalid());}
-            let enabled=obj["enabled"].as_bool().ok_or_else(invalid)?;
-            let expected_policy=obj["policy_revision"].as_u64().ok_or_else(invalid)?;
-            let expected_credential=obj["credential_revision"].as_u64().ok_or_else(invalid)?;
+        pub fn home_voice_consent(&self, input: &Value) -> Result<Value, CenterError> {
+            let invalid = || CenterError::new("home_invalid", 400, "语音只读授权参数无效");
+            let obj = input.as_object().ok_or_else(invalid)?;
+            if obj.len() != 3
+                || !obj.contains_key("enabled")
+                || !obj.contains_key("policy_revision")
+                || !obj.contains_key("credential_revision")
+            {
+                return Err(invalid());
+            }
+            let enabled = obj["enabled"].as_bool().ok_or_else(invalid)?;
+            let expected_policy = obj["policy_revision"].as_u64().ok_or_else(invalid)?;
+            let expected_credential = obj["credential_revision"].as_u64().ok_or_else(invalid)?;
             // The configuration read is protected by revision. A later change
             // automatically invalidates this exact grant.
-            let (config,policy)=moss_voice::settings::read_home_offline(&self.settings_file())
-                .map_err(|_|invalid())?;
-            config.validate_offline().map_err(|_|invalid())?;
-            if policy!=expected_policy {return Err(CenterError::new("home_conflict",409,"家居白名单已改变，拒绝授权"));}
-            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-            let (present,credential)=db.home_token_status().map_err(|_|invalid())?;
-            if credential!=expected_credential ||(enabled&&(!present||config.base_url.is_empty()
-                ||!config.entities.iter().any(|e|e.enabled))){
-                return Err(CenterError::new("home_conflict",409,"令牌或实体已更改，拒绝授权"));
+            let (config, policy) = moss_voice::settings::read_home_offline(&self.settings_file())
+                .map_err(|_| invalid())?;
+            config.validate_offline().map_err(|_| invalid())?;
+            if policy != expected_policy {
+                return Err(CenterError::new(
+                    "home_conflict",
+                    409,
+                    "家居白名单已改变，拒绝授权",
+                ));
+            }
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+            let (present, credential) = db.home_token_status().map_err(|_| invalid())?;
+            if credential != expected_credential
+                || (enabled
+                    && (!present
+                        || config.base_url.is_empty()
+                        || !config.entities.iter().any(|e| e.enabled)))
+            {
+                return Err(CenterError::new(
+                    "home_conflict",
+                    409,
+                    "令牌或实体已更改，拒绝授权",
+                ));
             }
             if enabled {
-                db.set_secret(HOME_VOICE_GRANT,&format!("{policy}:{credential}"),now())
-                    .map_err(|_|internal("语音只读授权未保存"))?;
-            }else{
-                db.delete_secret(HOME_VOICE_GRANT).map_err(|_|internal("撤销语音只读授权失败"))?;
+                db.set_secret(HOME_VOICE_GRANT, &format!("{policy}:{credential}"), now())
+                    .map_err(|_| internal("语音只读授权未保存"))?;
+            } else {
+                db.delete_secret(HOME_VOICE_GRANT)
+                    .map_err(|_| internal("撤销语音只读授权失败"))?;
             }
             drop(db);
             Ok(self.home_status())
         }
-        pub fn home_control_consent(&self,input:&Value)->Result<Value,CenterError>{
-            let invalid=||CenterError::new("home_invalid",400,"家居控制授权参数无效");
-            let map=input.as_object().ok_or_else(invalid)?;
-            if map.len()!=4 || map.keys().any(|key|!matches!(key.as_str(),"enabled"|"confirmed"|"policy_revision"|"credential_revision")){return Err(invalid());}
-            self.home_control.consent(map["enabled"].as_bool().ok_or_else(invalid)?,map["policy_revision"].as_u64().ok_or_else(invalid)?,map["credential_revision"].as_u64().ok_or_else(invalid)?,map["confirmed"].as_bool().ok_or_else(invalid)?)
-                .map_err(|code|CenterError::new(code,409,"家居控制授权未生效，请核对白名单、凭据与确认"))?;
+        pub fn home_control_consent(&self, input: &Value) -> Result<Value, CenterError> {
+            let invalid = || CenterError::new("home_invalid", 400, "家居控制授权参数无效");
+            let map = input.as_object().ok_or_else(invalid)?;
+            if map.len() != 4
+                || map.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "enabled" | "confirmed" | "policy_revision" | "credential_revision"
+                    )
+                })
+            {
+                return Err(invalid());
+            }
+            self.home_control
+                .consent(
+                    map["enabled"].as_bool().ok_or_else(invalid)?,
+                    map["policy_revision"].as_u64().ok_or_else(invalid)?,
+                    map["credential_revision"].as_u64().ok_or_else(invalid)?,
+                    map["confirmed"].as_bool().ok_or_else(invalid)?,
+                )
+                .map_err(|code| {
+                    CenterError::new(code, 409, "家居控制授权未生效，请核对白名单、凭据与确认")
+                })?;
             Ok(self.home_status())
         }
-        pub fn home_approval_approve(&self,input:&Value)->Result<Value,CenterError>{
-            let invalid=||CenterError::new("home_approval_invalid",400,"家居批准参数无效");
-            let map=input.as_object().ok_or_else(invalid)?;
-            if map.len()!=3 || map.keys().any(|key|!matches!(key.as_str(),"approval_id"|"digest"|"confirmed")){return Err(invalid());}
-            let id=map["approval_id"].as_str().filter(|s|s.len()<=128).ok_or_else(invalid)?;
-            let digest=map["digest"].as_str().filter(|s|s.len()==64 && s.bytes().all(|b|b.is_ascii_hexdigit())).ok_or_else(invalid)?;
-            self.home_control.approve(id,digest,map["confirmed"].as_bool().ok_or_else(invalid)?)
-                .map_err(|code|CenterError::new(code,409,"家居批准或执行未确认；请查看持久结果，不自动重发"))
+        pub fn home_approval_approve(&self, input: &Value) -> Result<Value, CenterError> {
+            let invalid = || CenterError::new("home_approval_invalid", 400, "家居批准参数无效");
+            let map = input.as_object().ok_or_else(invalid)?;
+            if map.len() != 3
+                || map
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "approval_id" | "digest" | "confirmed"))
+            {
+                return Err(invalid());
+            }
+            let id = map["approval_id"]
+                .as_str()
+                .filter(|s| s.len() <= 128)
+                .ok_or_else(invalid)?;
+            let digest = map["digest"]
+                .as_str()
+                .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(invalid)?;
+            self.home_control
+                .approve(id, digest, map["confirmed"].as_bool().ok_or_else(invalid)?)
+                .map_err(|code| {
+                    CenterError::new(
+                        code,
+                        409,
+                        "家居批准或执行未确认；请查看持久结果，不自动重发",
+                    )
+                })
         }
 
         /// Main-window private-only redacted profile export. A portable
         /// profile NEVER contains the DPAPI ciphertext, bearer key, grants,
         /// approvals or the rest of settings.json.
-        pub fn home_backup_export(&self)->Result<Value,CenterError>{
-            let profile=moss_voice::settings::export_home_portable(&self.settings_file())
-                .map_err(|_|CenterError::new("home_backup_invalid",409,"白名单损坏或过大，无法生成安全备份"))?;
+        pub fn home_backup_export(&self) -> Result<Value, CenterError> {
+            let profile = moss_voice::settings::export_home_portable(&self.settings_file())
+                .map_err(|_| {
+                    CenterError::new(
+                        "home_backup_invalid",
+                        409,
+                        "白名单损坏或过大，无法生成安全备份",
+                    )
+                })?;
             Ok(serde_json::json!({
                 "profile":profile,
                 "credentials_included":false,
@@ -4456,91 +5578,180 @@ mod imp {
         /// Import is explicitly destructive to old *authority*, but not to
         /// user files: revoke token/grants FIRST, then CAS-save an inert
         /// imported profile. If settings write fails, privileges remain revoked.
-        pub fn home_backup_restore(&self,input:&Value)->Result<Value,CenterError>{
-            use moss_voice::settings::{self,HomeOfflineError};
-            let invalid=||CenterError::new("home_backup_invalid",400,"备份格式、版本或确认无效");
-            let map=input.as_object().ok_or_else(invalid)?;
-            if map.len()!=4 || !map.keys().all(|key|matches!(key.as_str(),
-                "profile"|"expected_revision"|"expected_credential_revision"|"confirmed")) {
+        pub fn home_backup_restore(&self, input: &Value) -> Result<Value, CenterError> {
+            use moss_voice::settings::{self, HomeOfflineError};
+            let invalid =
+                || CenterError::new("home_backup_invalid", 400, "备份格式、版本或确认无效");
+            let map = input.as_object().ok_or_else(invalid)?;
+            if map.len() != 4
+                || !map.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "profile"
+                            | "expected_revision"
+                            | "expected_credential_revision"
+                            | "confirmed"
+                    )
+                })
+            {
                 return Err(invalid());
             }
-            if map["confirmed"].as_bool()!=Some(true) {return Err(invalid());}
-            let payload=map["profile"].as_str().filter(|s|!s.is_empty()&&s.len()<=65536)
+            if map["confirmed"].as_bool() != Some(true) {
+                return Err(invalid());
+            }
+            let payload = map["profile"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 65536)
                 .ok_or_else(invalid)?;
-            let imported=settings::validate_home_portable(payload.as_bytes())
-                .map_err(|_|invalid())?;
-            let revision=map["expected_revision"].as_u64()
-                .filter(|v|*v<=9_007_199_254_740_991).ok_or_else(invalid)?;
-            let credential=map["expected_credential_revision"].as_u64()
-                .filter(|v|*v<=9_007_199_254_740_991).ok_or_else(invalid)?;
-            let file=self.settings_file();
-            self.home_control.fence_sensitive_change(||->Result<(),CenterError>{
-                let (_,current)=settings::read_home_offline(&file)
-                    .map_err(|_|CenterError::new("home_conflict",409,"白名单状态已改变或损坏，未恢复"))?;
-                if current!=revision {return Err(CenterError::new("home_conflict",409,"其他窗口已修改白名单，请重新加载"));}
-                // Import must also recover a database copied from another
-                // Windows user: it can revoke a foreign DPAPI blob without
-                // decrypting it. SQLite compares the expected revision under
-                // BEGIN IMMEDIATE; it never imports old credentials.
-                let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-                let changed=db.update_home_token_if_revision(credential,None,now())
-                    .map_err(|_|CenterError::new("home_unavailable",503,"撤销旧令牌失败，备份未导入"))?;
-                if changed.is_none() {return Err(CenterError::new("home_conflict",409,"令牌版本并发冲突，备份未导入"));}
-                // DB mutation and config file write are not one transaction.
-                // If writing the inactive template fails, the old token and
-                // grants remain REVOKED (fail closed), never rolled back.
-                settings::save_home_offline(&file,&imported,revision)
-                    .map_err(|error|match error {
-                        HomeOfflineError::Invalid(_)=>invalid(),
-                        HomeOfflineError::Conflict=>CenterError::new("home_conflict",409,"令牌已撤销，但白名单版本变更；请重新加载"),
-                        HomeOfflineError::Storage(_)=>CenterError::new("home_save_failed",500,"令牌已撤销，但白名单保存失败；请重新加载"),
+            let imported =
+                settings::validate_home_portable(payload.as_bytes()).map_err(|_| invalid())?;
+            let revision = map["expected_revision"]
+                .as_u64()
+                .filter(|v| *v <= 9_007_199_254_740_991)
+                .ok_or_else(invalid)?;
+            let credential = map["expected_credential_revision"]
+                .as_u64()
+                .filter(|v| *v <= 9_007_199_254_740_991)
+                .ok_or_else(invalid)?;
+            let file = self.settings_file();
+            self.home_control
+                .fence_sensitive_change(|| -> Result<(), CenterError> {
+                    let (_, current) = settings::read_home_offline(&file).map_err(|_| {
+                        CenterError::new("home_conflict", 409, "白名单状态已改变或损坏，未恢复")
                     })?;
-                Ok(())
-            }).map_err(|_|internal("无法安全撤销在途家居授权"))??;
+                    if current != revision {
+                        return Err(CenterError::new(
+                            "home_conflict",
+                            409,
+                            "其他窗口已修改白名单，请重新加载",
+                        ));
+                    }
+                    // Import must also recover a database copied from another
+                    // Windows user: it can revoke a foreign DPAPI blob without
+                    // decrypting it. SQLite compares the expected revision under
+                    // BEGIN IMMEDIATE; it never imports old credentials.
+                    let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                    let changed = db
+                        .update_home_token_if_revision(credential, None, now())
+                        .map_err(|_| {
+                            CenterError::new("home_unavailable", 503, "撤销旧令牌失败，备份未导入")
+                        })?;
+                    if changed.is_none() {
+                        return Err(CenterError::new(
+                            "home_conflict",
+                            409,
+                            "令牌版本并发冲突，备份未导入",
+                        ));
+                    }
+                    // DB mutation and config file write are not one transaction.
+                    // If writing the inactive template fails, the old token and
+                    // grants remain REVOKED (fail closed), never rolled back.
+                    settings::save_home_offline(&file, &imported, revision).map_err(|error| {
+                        match error {
+                            HomeOfflineError::Invalid(_) => invalid(),
+                            HomeOfflineError::Conflict => CenterError::new(
+                                "home_conflict",
+                                409,
+                                "令牌已撤销，但白名单版本变更；请重新加载",
+                            ),
+                            HomeOfflineError::Storage(_) => CenterError::new(
+                                "home_save_failed",
+                                500,
+                                "令牌已撤销，但白名单保存失败；请重新加载",
+                            ),
+                        }
+                    })?;
+                    Ok(())
+                })
+                .map_err(|_| internal("无法安全撤销在途家居授权"))??;
             Ok(self.home_status())
         }
 
         /// NV15 desktop-only token mutation: stored only in app_secrets,
         /// guarded by monotonic credential revision. No network call is made.
-        pub fn home_token_save(&self,input:&Value)->Result<Value,CenterError>{
-            let invalid=|message:&str|CenterError::new("home_token_invalid",400,message);
-            let map=input.as_object().ok_or_else(||invalid("凭据变更必须是对象"))?;
-            let action=map.get("action").and_then(Value::as_str).ok_or_else(||invalid("必须选择更新或清除"))?;
-            let expected=map.get("expected_revision").and_then(Value::as_u64)
+        pub fn home_token_save(&self, input: &Value) -> Result<Value, CenterError> {
+            let invalid = |message: &str| CenterError::new("home_token_invalid", 400, message);
+            let map = input
+                .as_object()
+                .ok_or_else(|| invalid("凭据变更必须是对象"))?;
+            let action = map
+                .get("action")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("必须选择更新或清除"))?;
+            let expected = map
+                .get("expected_revision")
+                .and_then(Value::as_u64)
                 .filter(|rev| *rev <= 9_007_199_254_740_991)
-                .ok_or_else(||invalid("缺少有效的凭据版本"))?;
-            if map.keys().any(|key| !matches!(key.as_str(),"action"|"expected_revision"|"value")) {
+                .ok_or_else(|| invalid("缺少有效的凭据版本"))?;
+            if map
+                .keys()
+                .any(|key| !matches!(key.as_str(), "action" | "expected_revision" | "value"))
+            {
                 return Err(invalid("凭据操作包含禁止字段"));
             }
-            let replacement=match action {
-                "set"=>Some(map.get("value").and_then(Value::as_str).ok_or_else(||invalid("请输入长期访问令牌"))?),
-                "clear"=>{if map.contains_key("value") {return Err(invalid("清除操作不能携带令牌"));} None},
-                _=>return Err(invalid("仅支持更新或清除令牌")),
+            let replacement = match action {
+                "set" => Some(
+                    map.get("value")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| invalid("请输入长期访问令牌"))?,
+                ),
+                "clear" => {
+                    if map.contains_key("value") {
+                        return Err(invalid("清除操作不能携带令牌"));
+                    }
+                    None
+                }
+                _ => return Err(invalid("仅支持更新或清除令牌")),
             };
-            let changed=self.home_control.fence_sensitive_change(||{
-                let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-                db.update_home_token_if_revision(expected,replacement,now())
-                    .map_err(|_|CenterError::new("home_token_invalid",400,"访问令牌未保存；请检查令牌格式和数据库"))
-            }).map_err(|_|internal("无法安全撤销在途家居授权"))??;
-            if changed.is_none() {return Err(CenterError::new("home_conflict",409,"凭据已更新，请重新加载最新状态"));}
+            let changed = self
+                .home_control
+                .fence_sensitive_change(|| {
+                    let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                    db.update_home_token_if_revision(expected, replacement, now())
+                        .map_err(|_| {
+                            CenterError::new(
+                                "home_token_invalid",
+                                400,
+                                "访问令牌未保存；请检查令牌格式和数据库",
+                            )
+                        })
+                })
+                .map_err(|_| internal("无法安全撤销在途家居授权"))??;
+            if changed.is_none() {
+                return Err(CenterError::new(
+                    "home_conflict",
+                    409,
+                    "凭据已更新，请重新加载最新状态",
+                ));
+            }
             Ok(self.home_status())
         }
 
         /// Explicit trusted main-window read-only discovery; never sends a
         /// Home Assistant service POST and never exposes the bearer token.
-        pub fn home_discover(&self)->Result<Value,CenterError>{
-            use moss_voice::home_readonly::{self,DiscoveryError};
-            let (settings,policy_revision)=moss_voice::settings::read_home_offline(&self.settings_file())
-                .map_err(|_|CenterError::new("home_unavailable",409,"无法安全读取家居白名单"))?;
-            let (token,credential_revision)={
-                let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-                let (has_token,revision)=db.home_token_status()
-                    .map_err(|_|CenterError::new("home_unavailable",409,"访问令牌配置损坏"))?;
-                if !has_token {return Err(CenterError::new("home_unauthorized",401,"请先设置访问令牌"));}
-                let token=db.home_token_for_connection()
-                    .map_err(|_|CenterError::new("home_unavailable",409,"无法读取访问令牌"))?
-                    .ok_or_else(||CenterError::new("home_unauthorized",401,"访问令牌不存在"))?;
-                (token,revision)
+        pub fn home_discover(&self) -> Result<Value, CenterError> {
+            use moss_voice::home_readonly::{self, DiscoveryError};
+            let (settings, policy_revision) =
+                moss_voice::settings::read_home_offline(&self.settings_file()).map_err(|_| {
+                    CenterError::new("home_unavailable", 409, "无法安全读取家居白名单")
+                })?;
+            let (token, credential_revision) = {
+                let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                let (has_token, revision) = db
+                    .home_token_status()
+                    .map_err(|_| CenterError::new("home_unavailable", 409, "访问令牌配置损坏"))?;
+                if !has_token {
+                    return Err(CenterError::new(
+                        "home_unauthorized",
+                        401,
+                        "请先设置访问令牌",
+                    ));
+                }
+                let token = db
+                    .home_token_for_connection()
+                    .map_err(|_| CenterError::new("home_unavailable", 409, "无法读取访问令牌"))?
+                    .ok_or_else(|| CenterError::new("home_unauthorized", 401, "访问令牌不存在"))?;
+                (token, revision)
             };
             let output=home_readonly::discover_guarded(&settings,&token,policy_revision,credential_revision,||{
                 let current_policy=moss_voice::settings::read_home_offline(&self.settings_file()).ok();
@@ -4556,59 +5767,135 @@ mod imp {
                     DiscoveryError::InvalidSettings=>CenterError::new("home_invalid",400,"地址、白名单或配置版本无效"),
                     DiscoveryError::InvalidResponse=>CenterError::new("home_bad_response",502,"Home Assistant 返回无效或过大的响应"),
                 })?;
-            let (_,latest_policy)=moss_voice::settings::read_home_offline(&self.settings_file())
-                .map_err(|_|CenterError::new("home_conflict",409,"家居配置读取失败，请重新加载"))?;
-            let latest_token=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?
-                .home_token_status().map_err(|_|CenterError::new("home_conflict",409,"令牌状态读取失败"))?;
-            if latest_policy!=policy_revision || latest_token.1!=credential_revision || !latest_token.0 {
-                return Err(CenterError::new("home_conflict",409,"查询期间配置已更改，结果已丢弃"));
+            let (_, latest_policy) = moss_voice::settings::read_home_offline(&self.settings_file())
+                .map_err(|_| {
+                    CenterError::new("home_conflict", 409, "家居配置读取失败，请重新加载")
+                })?;
+            let latest_token = self
+                .host
+                .db
+                .lock()
+                .map_err(|_| internal("数据库锁失败"))?
+                .home_token_status()
+                .map_err(|_| CenterError::new("home_conflict", 409, "令牌状态读取失败"))?;
+            if latest_policy != policy_revision
+                || latest_token.1 != credential_revision
+                || !latest_token.0
+            {
+                return Err(CenterError::new(
+                    "home_conflict",
+                    409,
+                    "查询期间配置已更改，结果已丢弃",
+                ));
             }
-            serde_json::to_value(output).map_err(|_|internal("Home Assistant 查询结果序列化失败"))
+            serde_json::to_value(output).map_err(|_| internal("Home Assistant 查询结果序列化失败"))
         }
 
         /// NV15 private HomeControl inbox. Only sanitized previews; never return
         /// saved connection fingerprint, the request body, secrets or raw URLs.
-        pub fn home_approvals(&self)->Result<Value,CenterError>{
-            use laser_contracts::{ApprovalKind,ApprovalStatus};
-            let approvals=laser_api::approval::ApprovalService::new(self.host.db.clone());
-            let rows=approvals.list(None,250)
-                .map_err(|_|CenterError::new("home_approval_unavailable",503,"无法读取家居审批记录"))?;
-            let (policy,credential)={
-                let (_,p)=moss_voice::settings::read_home_offline(&self.settings_file())
-                    .map_err(|_|CenterError::new("home_unavailable",409,"Home Assistant 白名单不可读取"))?;
-                let (_,c)=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?
-                    .home_token_status().map_err(|_|CenterError::new("home_unavailable",409,"HA 凭据状态不可读取"))?;
-                (p,c)
+        pub fn home_approvals(&self) -> Result<Value, CenterError> {
+            use laser_contracts::{ApprovalKind, ApprovalStatus};
+            let approvals = laser_api::approval::ApprovalService::new(self.host.db.clone());
+            let rows = approvals.list(None, 250).map_err(|_| {
+                CenterError::new("home_approval_unavailable", 503, "无法读取家居审批记录")
+            })?;
+            let (policy, credential) = {
+                let (_, p) = moss_voice::settings::read_home_offline(&self.settings_file())
+                    .map_err(|_| {
+                        CenterError::new("home_unavailable", 409, "Home Assistant 白名单不可读取")
+                    })?;
+                let (_, c) = self
+                    .host
+                    .db
+                    .lock()
+                    .map_err(|_| internal("数据库锁失败"))?
+                    .home_token_status()
+                    .map_err(|_| {
+                        CenterError::new("home_unavailable", 409, "HA 凭据状态不可读取")
+                    })?;
+                (p, c)
             };
-            let mut items=Vec::new();
-            for row in rows.iter().filter(|r|r.kind==ApprovalKind::HomeControl).take(60) {
-                let requested=row.request.as_ref();
-                let path=requested.and_then(|req|req.get("path")).and_then(Value::as_str).unwrap_or("");
-                let service=path.strip_prefix("/api/services/")
-                    .and_then(|tail|tail.split_once('/'))
-                    .filter(|(domain,action)|{
-                        matches!(*domain,"light"|"switch"|"climate"|"lock"|"alarm_control_panel"|"cover"|"media_player")
-                        && matches!(*action,"turn_on"|"turn_off"|"set_temperature"|"lock"|"unlock"
-                            |"alarm_arm_home"|"alarm_arm_away"|"alarm_disarm"
-                            |"open_cover"|"close_cover"|"stop_cover"|"play_media")
-                    }).map(|(domain,action)|format!("{domain}.{action}"))
-                    .unwrap_or_else(||"unsupported".into());
-                let mut safe_parameters=serde_json::Map::new();
-                if let Some(body)=requested.and_then(|req|req.get("body")).and_then(Value::as_object) {
-                    if let Some(brightness)=body.get("brightness").and_then(Value::as_u64).filter(|n|*n<=255) {
-                        safe_parameters.insert("brightness".into(),brightness.into());
+            let mut items = Vec::new();
+            for row in rows
+                .iter()
+                .filter(|r| r.kind == ApprovalKind::HomeControl)
+                .take(60)
+            {
+                let requested = row.request.as_ref();
+                let path = requested
+                    .and_then(|req| req.get("path"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let service = path
+                    .strip_prefix("/api/services/")
+                    .and_then(|tail| tail.split_once('/'))
+                    .filter(|(domain, action)| {
+                        matches!(
+                            *domain,
+                            "light"
+                                | "switch"
+                                | "climate"
+                                | "lock"
+                                | "alarm_control_panel"
+                                | "cover"
+                                | "media_player"
+                        ) && matches!(
+                            *action,
+                            "turn_on"
+                                | "turn_off"
+                                | "set_temperature"
+                                | "lock"
+                                | "unlock"
+                                | "alarm_arm_home"
+                                | "alarm_arm_away"
+                                | "alarm_disarm"
+                                | "open_cover"
+                                | "close_cover"
+                                | "stop_cover"
+                                | "play_media"
+                        )
+                    })
+                    .map(|(domain, action)| format!("{domain}.{action}"))
+                    .unwrap_or_else(|| "unsupported".into());
+                let mut safe_parameters = serde_json::Map::new();
+                if let Some(body) = requested
+                    .and_then(|req| req.get("body"))
+                    .and_then(Value::as_object)
+                {
+                    if let Some(brightness) = body
+                        .get("brightness")
+                        .and_then(Value::as_u64)
+                        .filter(|n| *n <= 255)
+                    {
+                        safe_parameters.insert("brightness".into(), brightness.into());
                     }
-                    if let Some(temperature)=body.get("temperature").and_then(Value::as_f64).filter(|n|n.is_finite()&&(-40.0..=100.0).contains(n)) {
-                        safe_parameters.insert("temperature".into(),serde_json::json!(temperature));
+                    if let Some(temperature) = body
+                        .get("temperature")
+                        .and_then(Value::as_f64)
+                        .filter(|n| n.is_finite() && (-40.0..=100.0).contains(n))
+                    {
+                        safe_parameters
+                            .insert("temperature".into(), serde_json::json!(temperature));
                     }
                 }
-                let (saved_policy,saved_credential)=requested.map(|req|{
-                    (req.get("policy").or_else(||req.get("policy_revision")).and_then(Value::as_u64),
-                     req.get("credential").or_else(||req.get("credential_revision")).and_then(Value::as_u64))
-                }).unwrap_or_default();
-                let stale=saved_policy!=Some(policy)||saved_credential!=Some(credential);
-                let phase=row.outcome.as_ref().and_then(|o|o.phase)
-                    .and_then(|phase|serde_json::to_value(phase).ok());
+                let (saved_policy, saved_credential) = requested
+                    .map(|req| {
+                        (
+                            req.get("policy")
+                                .or_else(|| req.get("policy_revision"))
+                                .and_then(Value::as_u64),
+                            req.get("credential")
+                                .or_else(|| req.get("credential_revision"))
+                                .and_then(Value::as_u64),
+                        )
+                    })
+                    .unwrap_or_default();
+                let stale = saved_policy != Some(policy) || saved_credential != Some(credential);
+                let phase = row
+                    .outcome
+                    .as_ref()
+                    .and_then(|o| o.phase)
+                    .and_then(|phase| serde_json::to_value(phase).ok());
                 items.push(serde_json::json!({
                     "approval_id":row.approval_id,
                     "digest":row.digest,
@@ -4642,26 +5929,38 @@ mod imp {
 
         /// Independent private-window revoke. Unlike the general approval
         /// routes, this operation accepts HomeControl ONLY and cannot execute.
-        pub fn home_approval_cancel(&self,input:&Value)->Result<Value,CenterError>{
-            let invalid=||CenterError::new("home_approval_invalid",400,"家居撤销请求格式无效");
-            let object=input.as_object().ok_or_else(invalid)?;
-            if object.len()!=3 || object.get("confirmed")!=Some(&Value::Bool(true)) {
+        pub fn home_approval_cancel(&self, input: &Value) -> Result<Value, CenterError> {
+            let invalid = || CenterError::new("home_approval_invalid", 400, "家居撤销请求格式无效");
+            let object = input.as_object().ok_or_else(invalid)?;
+            if object.len() != 3 || object.get("confirmed") != Some(&Value::Bool(true)) {
                 return Err(invalid());
             }
-            let id=object.get("approval_id").and_then(Value::as_str).filter(|id|{
-                (12..=128).contains(&id.len()) &&
-                id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_')
-            }).ok_or_else(invalid)?;
-            let digest=object.get("digest").and_then(Value::as_str)
-                .filter(|d|d.len()==64&&d.bytes().all(|b|b.is_ascii_hexdigit()))
+            let id = object
+                .get("approval_id")
+                .and_then(Value::as_str)
+                .filter(|id| {
+                    (12..=128).contains(&id.len())
+                        && id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+                .ok_or_else(invalid)?;
+            let digest = object
+                .get("digest")
+                .and_then(Value::as_str)
+                .filter(|d| d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()))
                 .ok_or_else(invalid)?;
             // Cancellation cannot race between the final permit check and
             // the first byte of a HomeControl POST.
-            let result=self.home_control.fence_request_change(id,||{
-                let service=laser_api::approval::ApprovalService::new(self.host.db.clone());
-                service.cancel_home_control(id,digest)
-                    .map_err(|err|CenterError::new(err.code(),err.http_status(),err.message()))
-            }).map_err(|_|internal("家居待执行请求撤销失败"))??;
+            let result = self
+                .home_control
+                .fence_request_change(id, || {
+                    let service = laser_api::approval::ApprovalService::new(self.host.db.clone());
+                    service.cancel_home_control(id, digest).map_err(|err| {
+                        CenterError::new(err.code(), err.http_status(), err.message())
+                    })
+                })
+                .map_err(|_| internal("家居待执行请求撤销失败"))??;
             Ok(serde_json::json!({
                 "approval_id":result.approval_id,
                 "status":result.status.as_str(),
@@ -4670,60 +5969,116 @@ mod imp {
         }
 
         /// NV12: private desktop-only settings and API-key presence. Never return the key.
-        pub fn vision_status(&self)->Value{
+        pub fn vision_status(&self) -> Value {
             use moss_voice_server::vision::VisionFactory;
-            let settings=self.settings();
-            let vision=settings.builtin_vision;
-            let key_configured=self.host.db.lock().ok().and_then(|db|db.get_secret("voice.vision.main").ok().flatten()).is_some_and(|s|!s.trim().is_empty());
+            let settings = self.settings();
+            let vision = settings.builtin_vision;
+            let key_configured = self
+                .host
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.get_secret("voice.vision.main").ok().flatten())
+                .is_some_and(|s| !s.trim().is_empty());
             // 2026-10-16：只回对话模型的地址与模型名，用于卡片显示“照片会发给谁”，不回密钥。
-            let dialog_llm=match settings.builtin_models.llm.as_ref(){
-                Some(llm)=>{
-                    let key=self.host.db.lock().ok().and_then(|db|db.get_secret("voice.llm.main").ok().flatten()).is_some_and(|s|!s.trim().is_empty());
+            let dialog_llm = match settings.builtin_models.llm.as_ref() {
+                Some(llm) => {
+                    let key = self
+                        .host
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|db| db.get_secret("voice.llm.main").ok().flatten())
+                        .is_some_and(|s| !s.trim().is_empty());
                     serde_json::json!({
                         "configured":llm.kind.is_openai()&&!llm.model.trim().is_empty()
                             &&moss_voice_providers::vision::endpoint(&llm.url).is_ok()&&key,
                         "url":llm.url,"model":llm.model,
                     })
-                },
-                None=>serde_json::json!({"configured":false,"url":"","model":""}),
+                }
+                None => serde_json::json!({"configured":false,"url":"","model":""}),
             };
-            let ready=DesktopVisionFactory{host:self.host.clone()}.ready();
+            let ready = DesktopVisionFactory {
+                host: self.host.clone(),
+            }
+            .ready();
             serde_json::json!({"settings":vision,"key_configured":key_configured,"ready":ready,"dialog_llm":dialog_llm})
         }
 
-        pub fn vision_save(&self,input:&Value)->Result<Value,CenterError>{
+        pub fn vision_save(&self, input: &Value) -> Result<Value, CenterError> {
             use moss_voice::settings::BuiltinVision;
-            let invalid=|reason:&str|CenterError::new("vision_invalid",400,reason);
-            let next:BuiltinVision=serde_json::from_value(input.get("settings").cloned().unwrap_or(Value::Null))
-                .map_err(|_|invalid("视觉配置格式错误"))?;
-            if next.url.len()>1024||next.model.len()>200 {return Err(invalid("模型名称或地址太长"));}
-            // 2026-10-16：对话大模型看图模式不校验视觉模型地址，改为要求对话模型可用且已存密钥。
-            if next.enabled&&next.use_dialog_llm{
-                let llm_ok=self.settings().builtin_models.llm.as_ref().is_some_and(|llm|
-                    llm.kind.is_openai()&&!llm.model.trim().is_empty()
-                        &&moss_voice_providers::vision::endpoint(&llm.url).is_ok());
-                if !llm_ok{return Err(invalid("请先在模型设置里填写 OpenAI 兼容的对话模型地址与模型名，再用它看照片"));}
-                let llm_key=self.host.db.lock().ok().and_then(|db|db.get_secret("voice.llm.main").ok().flatten()).is_some_and(|s|!s.trim().is_empty());
-                if !llm_key{return Err(invalid("请先保存对话大模型的密钥"));}
-            } else if next.enabled&&(next.model.trim().is_empty()||moss_voice_providers::vision::endpoint(&next.url).is_err()){
-                return Err(invalid("请填写有效的模型名称和 HTTPS 地址（或本地明确的 HTTP 地址）"));
+            let invalid = |reason: &str| CenterError::new("vision_invalid", 400, reason);
+            let next: BuiltinVision =
+                serde_json::from_value(input.get("settings").cloned().unwrap_or(Value::Null))
+                    .map_err(|_| invalid("视觉配置格式错误"))?;
+            if next.url.len() > 1024 || next.model.len() > 200 {
+                return Err(invalid("模型名称或地址太长"));
             }
-            let action=input["key"]["action"].as_str().unwrap_or("keep");
-            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-            let existing=db.get_secret("voice.vision.main").map_err(db_failure)?.is_some_and(|s|!s.is_empty());
-            let new_key=match action{
-                "keep"=>None,
-                "set"=>{
-                    let key=input["key"]["value"].as_str().unwrap_or("");
-                    if key.trim().is_empty()||key.len()>8192 {return Err(invalid("视觉模型密钥不能空或超过 8192 字节"));}
+            // 2026-10-16：对话大模型看图模式不校验视觉模型地址，改为要求对话模型可用且已存密钥。
+            if next.enabled && next.use_dialog_llm {
+                let llm_ok = self
+                    .settings()
+                    .builtin_models
+                    .llm
+                    .as_ref()
+                    .is_some_and(|llm| {
+                        llm.kind.is_openai()
+                            && !llm.model.trim().is_empty()
+                            && moss_voice_providers::vision::endpoint(&llm.url).is_ok()
+                    });
+                if !llm_ok {
+                    return Err(invalid(
+                        "请先在模型设置里填写 OpenAI 兼容的对话模型地址与模型名，再用它看照片",
+                    ));
+                }
+                let llm_key = self
+                    .host
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.get_secret("voice.llm.main").ok().flatten())
+                    .is_some_and(|s| !s.trim().is_empty());
+                if !llm_key {
+                    return Err(invalid("请先保存对话大模型的密钥"));
+                }
+            } else if next.enabled
+                && (next.model.trim().is_empty()
+                    || moss_voice_providers::vision::endpoint(&next.url).is_err())
+            {
+                return Err(invalid(
+                    "请填写有效的模型名称和 HTTPS 地址（或本地明确的 HTTP 地址）",
+                ));
+            }
+            let action = input["key"]["action"].as_str().unwrap_or("keep");
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+            let existing = db
+                .get_secret("voice.vision.main")
+                .map_err(db_failure)?
+                .is_some_and(|s| !s.is_empty());
+            let new_key = match action {
+                "keep" => None,
+                "set" => {
+                    let key = input["key"]["value"].as_str().unwrap_or("");
+                    if key.trim().is_empty() || key.len() > 8192 {
+                        return Err(invalid("视觉模型密钥不能空或超过 8192 字节"));
+                    }
                     Some(Some(key.to_owned()))
-                },
-                "clear"=>Some(None),
-                _=>return Err(invalid("密钥操作只能保留、更新或清除")),
+                }
+                "clear" => Some(None),
+                _ => return Err(invalid("密钥操作只能保留、更新或清除")),
             };
-            let has_key=match &new_key{None=>existing,Some(Some(_))=>true,Some(None)=>false};
-            if next.enabled&&!next.use_dialog_llm&&!has_key{return Err(invalid("启用视觉前必须保存对应模型密钥"));}
-            let changes:Vec<(String,Option<String>)>=new_key.into_iter().map(|key|("voice.vision.main".to_owned(),key)).collect();
+            let has_key = match &new_key {
+                None => existing,
+                Some(Some(_)) => true,
+                Some(None) => false,
+            };
+            if next.enabled && !next.use_dialog_llm && !has_key {
+                return Err(invalid("启用视觉前必须保存对应模型密钥"));
+            }
+            let changes: Vec<(String, Option<String>)> = new_key
+                .into_iter()
+                .map(|key| ("voice.vision.main".to_owned(), key))
+                .collect();
             commit_secrets_then_settings(&db, &changes, || {
                 moss_voice::settings::update_voice(&self.settings_file(), |settings| {
                     settings.builtin_vision = next.clone();
@@ -4737,32 +6092,57 @@ mod imp {
 
         /// A button press uses only an in-memory synthetic 8x8 image.
         /// It does not access a device or a computer camera.
-        pub fn vision_test(&self)->Result<Value,CenterError>{
+        pub fn vision_test(&self) -> Result<Value, CenterError> {
             use moss_voice_server::vision::VisionFactory;
-            let factory=DesktopVisionFactory{host:self.host.clone()};
-            let missing=if self.settings().builtin_vision.use_dialog_llm{"请先启用视觉，并在模型设置里配好支持看图的对话模型与密钥"}else{"请先启用并保存视觉模型与密钥"};
-            let session=factory.open().ok_or_else(||CenterError::new("vision_disabled",409,missing))?;
-            let mut output=std::io::Cursor::new(Vec::new());
-            image::DynamicImage::new_rgb8(8,8).write_to(&mut output,image::ImageFormat::Png)
-                .map_err(|_|internal("生成内存测试图片失败"))?;
-            let png=output.into_inner();
-            let started=std::time::Instant::now();
-            let result=tauri::async_runtime::block_on(session.provider.explain("请仅用一句话描述此测试图像。","image/png",&png));
-            match result{
-                Ok(text) if factory.still_current(session.generation)=>Ok(serde_json::json!({
+            let factory = DesktopVisionFactory {
+                host: self.host.clone(),
+            };
+            let missing = if self.settings().builtin_vision.use_dialog_llm {
+                "请先启用视觉，并在模型设置里配好支持看图的对话模型与密钥"
+            } else {
+                "请先启用并保存视觉模型与密钥"
+            };
+            let session = factory
+                .open()
+                .ok_or_else(|| CenterError::new("vision_disabled", 409, missing))?;
+            let mut output = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(8, 8)
+                .write_to(&mut output, image::ImageFormat::Png)
+                .map_err(|_| internal("生成内存测试图片失败"))?;
+            let png = output.into_inner();
+            let started = std::time::Instant::now();
+            let result = tauri::async_runtime::block_on(session.provider.explain(
+                "请仅用一句话描述此测试图像。",
+                "image/png",
+                &png,
+            ));
+            match result {
+                Ok(text) if factory.still_current(session.generation) => Ok(serde_json::json!({
                     "ok":true,"elapsed_ms":started.elapsed().as_millis(),"preview":text.chars().take(160).collect::<String>(),
                 })),
-                Ok(_)=>Err(CenterError::new("vision_settings_changed",409,"测试中配置发生变化，请重试")),
-                Err(error)=>Err(CenterError::new(error.code(),502,"视觉模型连接或返回内容异常，请核对模型和密钥")),
+                Ok(_) => Err(CenterError::new(
+                    "vision_settings_changed",
+                    409,
+                    "测试中配置发生变化，请重试",
+                )),
+                Err(error) => Err(CenterError::new(
+                    error.code(),
+                    502,
+                    "视觉模型连接或返回内容异常，请核对模型和密钥",
+                )),
             }
         }
 
         pub fn plugins_status(&self) -> Value {
             let settings = self.settings().builtin_plugins;
             let mut keys = serde_json::Map::new();
-            for kind in ["weather","search","metaso","rag"] {
+            for kind in ["weather", "search", "metaso", "rag"] {
                 let name = format!("voice.plugin.{kind}");
-                let found = self.host.db.lock().ok()
+                let found = self
+                    .host
+                    .db
+                    .lock()
+                    .ok()
                     .and_then(|db| db.get_secret(&name).ok().flatten())
                     .is_some_and(|value| !value.is_empty());
                 keys.insert(kind.into(), Value::Bool(found));
@@ -4773,38 +6153,68 @@ mod imp {
         pub fn plugins_save(&self, input: &Value) -> Result<Value, CenterError> {
             use moss_voice::settings::BuiltinPlugins;
             use moss_voice_server::plugins::http;
-            let invalid = |message: &str| CenterError::new("plugin_config_invalid",400,message);
-            let config: BuiltinPlugins = serde_json::from_value(input.get("settings").cloned().unwrap_or(Value::Null))
-                .map_err(|_| invalid("信息插件配置格式不正确"))?;
-            if !["api_key","bearer"].contains(&config.weather_auth.as_str()) {
+            let invalid = |message: &str| CenterError::new("plugin_config_invalid", 400, message);
+            let config: BuiltinPlugins =
+                serde_json::from_value(input.get("settings").cloned().unwrap_or(Value::Null))
+                    .map_err(|_| invalid("信息插件配置格式不正确"))?;
+            if !["api_key", "bearer"].contains(&config.weather_auth.as_str()) {
                 return Err(invalid("天气认证方式必须为 API Key 或 Bearer"));
             }
             if config.weather_enabled {
-                http::validate_endpoint(&config.weather_host,false).map_err(|_| invalid("天气服务地址必须是合法 HTTPS 地址"))?;
-                let lat=config.weather_latitude.ok_or_else(||invalid("请设置天气地点纬度"))?;
-                let lon=config.weather_longitude.ok_or_else(||invalid("请设置天气地点经度"))?;
-                if !lat.is_finite() || !(-90.0..=90.0).contains(&lat)
-                    || !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+                http::validate_endpoint(&config.weather_host, false)
+                    .map_err(|_| invalid("天气服务地址必须是合法 HTTPS 地址"))?;
+                let lat = config
+                    .weather_latitude
+                    .ok_or_else(|| invalid("请设置天气地点纬度"))?;
+                let lon = config
+                    .weather_longitude
+                    .ok_or_else(|| invalid("请设置天气地点经度"))?;
+                if !lat.is_finite()
+                    || !(-90.0..=90.0).contains(&lat)
+                    || !lon.is_finite()
+                    || !(-180.0..=180.0).contains(&lon)
+                {
                     return Err(invalid("纬度经度不在允许范围"));
                 }
             }
             if !(-720..=840).contains(&config.lunar_utc_offset_minutes) {
                 return Err(invalid("农历时区偏移无效"));
             }
-            if config.news_sources.len()>10 {return Err(invalid("RSS 来源最多 10 个"));}
+            if config.news_sources.len() > 10 {
+                return Err(invalid("RSS 来源最多 10 个"));
+            }
             let mut unique = std::collections::HashSet::new();
             for source in &config.news_sources {
-                if source.id.is_empty() || source.id.len()>40
-                    || !source.id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_')
-                    || !unique.insert(source.id.clone()) {
-                    return Err(invalid("RSS 来源编号必须唯一且仅含字母、数字、短横线和下划线"));
+                if source.id.is_empty()
+                    || source.id.len() > 40
+                    || !source
+                        .id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    || !unique.insert(source.id.clone())
+                {
+                    return Err(invalid(
+                        "RSS 来源编号必须唯一且仅含字母、数字、短横线和下划线",
+                    ));
                 }
-                let is_newsnow=matches!(source.kind, moss_voice::settings::NewsSourceKind::Newsnow);
-                let url=http::validate_endpoint(&source.url,is_newsnow).map_err(|_|invalid("RSS 必须使用 HTTPS；NewsNow 可使用明确配置的本机/LAN 地址"))?;
-                if url.query().is_some() { return Err(invalid("新闻源地址不得包含查询参数，避免将密钥写入普通配置")); }
+                let is_newsnow =
+                    matches!(source.kind, moss_voice::settings::NewsSourceKind::Newsnow);
+                let url = http::validate_endpoint(&source.url, is_newsnow).map_err(|_| {
+                    invalid("RSS 必须使用 HTTPS；NewsNow 可使用明确配置的本机/LAN 地址")
+                })?;
+                if url.query().is_some() {
+                    return Err(invalid(
+                        "新闻源地址不得包含查询参数，避免将密钥写入普通配置",
+                    ));
+                }
                 if matches!(source.kind, moss_voice::settings::NewsSourceKind::Newsnow)
-                    && (source.source_id.is_empty() || source.source_id.len()>80
-                        || !source.source_id.chars().all(|c| c.is_ascii_alphanumeric() || c=='-' || c=='_')) {
+                    && (source.source_id.is_empty()
+                        || source.source_id.len() > 80
+                        || !source
+                            .source_id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                {
                     return Err(invalid("NewsNow 来源 ID 必须为字母、数字、短横线或下划线"));
                 }
             }
@@ -4812,44 +6222,65 @@ mod imp {
                 return Err(invalid("开启新闻插件前必须添加 RSS 来源"));
             }
             if config.search_enabled {
-                let host=match config.search_provider {
-                    moss_voice::settings::SearchProvider::Tavily=>&config.search_host,
-                    moss_voice::settings::SearchProvider::Metaso=>&config.metaso_host,
+                let host = match config.search_provider {
+                    moss_voice::settings::SearchProvider::Tavily => &config.search_host,
+                    moss_voice::settings::SearchProvider::Metaso => &config.metaso_host,
                 };
-                http::validate_endpoint(host,false).map_err(|_|invalid("联网搜索必须使用 HTTPS 服务地址"))?;
+                http::validate_endpoint(host, false)
+                    .map_err(|_| invalid("联网搜索必须使用 HTTPS 服务地址"))?;
             }
             if config.rag_enabled {
-                http::validate_endpoint(&config.rag_host,true).map_err(|_|invalid("RAGFlow 服务地址必须为 HTTPS 或明确的本机/LAN 地址"))?;
-                if config.rag_dataset_ids.is_empty() || config.rag_dataset_ids.len()>20
-                   || config.rag_dataset_ids.iter().any(|id|id.trim().is_empty()||id.len()>128) {
+                http::validate_endpoint(&config.rag_host, true)
+                    .map_err(|_| invalid("RAGFlow 服务地址必须为 HTTPS 或明确的本机/LAN 地址"))?;
+                if config.rag_dataset_ids.is_empty()
+                    || config.rag_dataset_ids.len() > 20
+                    || config
+                        .rag_dataset_ids
+                        .iter()
+                        .any(|id| id.trim().is_empty() || id.len() > 128)
+                {
                     return Err(invalid("RAGFlow 数据集白名单格式不正确"));
                 }
             }
 
             // Keep/Set/Clear: missing key input means keep; no returned secret.
             let keys = &input["keys"];
-            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-            let mut operations=Vec::<(String,Option<String>)>::new();
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+            let mut operations = Vec::<(String, Option<String>)>::new();
             for (kind, enabled) in [
-                ("weather",config.weather_enabled),
-                ("search",config.search_enabled && config.search_provider==moss_voice::settings::SearchProvider::Tavily),
-                ("metaso",config.search_enabled && config.search_provider==moss_voice::settings::SearchProvider::Metaso),
-                ("rag",config.rag_enabled)
+                ("weather", config.weather_enabled),
+                (
+                    "search",
+                    config.search_enabled
+                        && config.search_provider == moss_voice::settings::SearchProvider::Tavily,
+                ),
+                (
+                    "metaso",
+                    config.search_enabled
+                        && config.search_provider == moss_voice::settings::SearchProvider::Metaso,
+                ),
+                ("rag", config.rag_enabled),
             ] {
-                let name=format!("voice.plugin.{kind}");
-                let command=keys[kind]["action"].as_str().unwrap_or("keep");
-                let existing=db.get_secret(&name).map_err(db_failure)?.is_some_and(|k|!k.is_empty());
-                let available=match command {
+                let name = format!("voice.plugin.{kind}");
+                let command = keys[kind]["action"].as_str().unwrap_or("keep");
+                let existing = db
+                    .get_secret(&name)
+                    .map_err(db_failure)?
+                    .is_some_and(|k| !k.is_empty());
+                let available = match command {
                     "keep" => existing,
                     "set" => {
-                        let value=keys[kind]["value"].as_str().unwrap_or("");
-                        if value.trim().is_empty() || value.len()>4096 {
+                        let value = keys[kind]["value"].as_str().unwrap_or("");
+                        if value.trim().is_empty() || value.len() > 4096 {
                             return Err(invalid("API 密钥格式不正确（不能空或超过4096字节）"));
                         }
-                        operations.push((name,Some(value.to_owned())));
+                        operations.push((name, Some(value.to_owned())));
                         true
                     }
-                    "clear" => { operations.push((name,None)); false }
+                    "clear" => {
+                        operations.push((name, None));
+                        false
+                    }
                     _ => return Err(invalid("API 密钥操作必须为 keep/set/clear")),
                 };
                 if enabled && !available {
@@ -4870,11 +6301,23 @@ mod imp {
         }
 
         pub fn memory_list(&self) -> Result<Value, CenterError> {
-            serde_json::to_value(self.memory.list().map_err(internal)?).map_err(|_| internal("记忆列表序列化失败"))
+            serde_json::to_value(self.memory.list().map_err(internal)?)
+                .map_err(|_| internal("记忆列表序列化失败"))
         }
-        pub fn memory_edit(&self, device_id: &str, revision: i64, summary: &str) -> Result<Value, CenterError> {
-            let updated = self.memory.edit(device_id, revision, summary).map_err(|e| CenterError::new("memory_invalid", 400, e))?;
-            serde_json::to_value(updated.ok_or_else(|| CenterError::new("memory_conflict", 409, "记忆已更新，请刷新后重试"))?).map_err(|_| internal("保存结果序列化失败"))
+        pub fn memory_edit(
+            &self,
+            device_id: &str,
+            revision: i64,
+            summary: &str,
+        ) -> Result<Value, CenterError> {
+            let updated = self
+                .memory
+                .edit(device_id, revision, summary)
+                .map_err(|e| CenterError::new("memory_invalid", 400, e))?;
+            serde_json::to_value(updated.ok_or_else(|| {
+                CenterError::new("memory_conflict", 409, "记忆已更新，请刷新后重试")
+            })?)
+            .map_err(|_| internal("保存结果序列化失败"))
         }
         pub fn memory_enable(&self, enabled: bool) -> Result<Value, CenterError> {
             self.memory
@@ -4892,75 +6335,158 @@ mod imp {
             self.host.runtime_root.path.join("firmware")
         }
 
-        pub fn firmware_status(&self)->Result<Value,CenterError>{
-            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-            let records=db.list_firmware_deliveries().map_err(|_|internal("读取固件记录失败"))?;
-            let artifacts=db.list_firmware_artifacts().map_err(|_|internal("读取固件清单失败"))?;
+        pub fn firmware_status(&self) -> Result<Value, CenterError> {
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+            let records = db
+                .list_firmware_deliveries()
+                .map_err(|_| internal("读取固件记录失败"))?;
+            let artifacts = db
+                .list_firmware_artifacts()
+                .map_err(|_| internal("读取固件清单失败"))?;
             let devices=db.voice_devices().map_err(|_|internal("读取设备失败"))?.into_iter().filter(|d|d.is_allowed())
                 .map(|d|serde_json::json!({"device_id":d.device_id,"name":d.name,"model":d.model,"firmware_version":d.firmware_version,"last_seen":d.last_seen}))
                 .collect::<Vec<_>>();
-            Ok(serde_json::json!({"enabled":true,"records":records,"artifacts":artifacts,"devices":devices,"now":now(),"offer_hours":FIRMWARE_OFFER_SECONDS/3600.0}))
+            Ok(
+                serde_json::json!({"enabled":true,"records":records,"artifacts":artifacts,"devices":devices,"now":now(),"offer_hours":FIRMWARE_OFFER_SECONDS/3600.0}),
+            )
         }
 
         /// 导入用户选中的固件：必须是 ESP32 应用镜像，版本号与项目名取自固件头。
-        pub fn firmware_import(&self,path:&std::path::Path)->Result<Value,CenterError>{
-            let invalid=|message:&str|CenterError::new("firmware_invalid",400,message);
-            let meta=std::fs::metadata(path).map_err(|_|invalid("无法读取所选文件"))?;
-            if !meta.is_file() || meta.len() as usize>moss_voice_server::firmware::FIRMWARE_MAX_BYTES {return Err(invalid("请选择 16 MB 以内的固件文件"));}
-            let bytes=std::fs::read(path).map_err(|_|invalid("无法读取所选文件"))?;
-            let image=moss_voice_server::firmware::parse_app_image(&bytes).map_err(invalid)?;
-            let sha=sha256_hex(&bytes);
-            let dir=self.firmware_dir();
-            std::fs::create_dir_all(&dir).map_err(|e|internal(format!("创建固件目录失败：{e}")))?;
-            let target=dir.join(format!("{sha}.bin"));
-            if !target.exists() {
-                let temp=dir.join(format!(".{sha}.part"));
-                std::fs::write(&temp,&bytes).and_then(|()|std::fs::rename(&temp,&target)).map_err(|e|{let _=std::fs::remove_file(&temp);internal(format!("保存固件失败：{e}"))})?;
+        pub fn firmware_import(&self, path: &std::path::Path) -> Result<Value, CenterError> {
+            let invalid = |message: &str| CenterError::new("firmware_invalid", 400, message);
+            let meta = std::fs::metadata(path).map_err(|_| invalid("无法读取所选文件"))?;
+            if !meta.is_file()
+                || meta.len() as usize > moss_voice_server::firmware::FIRMWARE_MAX_BYTES
+            {
+                return Err(invalid("请选择 16 MB 以内的固件文件"));
             }
-            let project:String=image.project.chars().take(32).collect();
-            self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.add_firmware_artifact(&sha,&image.version,&project,bytes.len() as i64,now()).map_err(|_|internal("登记固件失败"))?;
-            Ok(serde_json::json!({"sha256":sha,"version":image.version,"project":project,"size":bytes.len()}))
+            let bytes = std::fs::read(path).map_err(|_| invalid("无法读取所选文件"))?;
+            let image = moss_voice_server::firmware::parse_app_image(&bytes).map_err(invalid)?;
+            let sha = sha256_hex(&bytes);
+            let dir = self.firmware_dir();
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| internal(format!("创建固件目录失败：{e}")))?;
+            let target = dir.join(format!("{sha}.bin"));
+            if !target.exists() {
+                let temp = dir.join(format!(".{sha}.part"));
+                std::fs::write(&temp, &bytes)
+                    .and_then(|()| std::fs::rename(&temp, &target))
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&temp);
+                        internal(format!("保存固件失败：{e}"))
+                    })?;
+            }
+            let project: String = image.project.chars().take(32).collect();
+            self.host
+                .db
+                .lock()
+                .map_err(|_| internal("数据库锁失败"))?
+                .add_firmware_artifact(&sha, &image.version, &project, bytes.len() as i64, now())
+                .map_err(|_| internal("登记固件失败"))?;
+            Ok(
+                serde_json::json!({"sha256":sha,"version":image.version,"project":project,"size":bytes.len()}),
+            )
         }
 
         /// 推送 / 取消 / 删除固件。推送必须逐台、明确确认，且固件版本比设备当前版本新（否则设备不会升级）。
-        pub fn firmware_manage(&self,input:&Value)->Result<Value,CenterError>{
-            let invalid=||CenterError::new("firmware_invalid",400,"固件操作格式无效");
-            let object=input.as_object().ok_or_else(invalid)?;
-            let action=input["action"].as_str().ok_or_else(invalid)?;
-            let allowed:&[&str]=match action {"offer"=>&["action","device_id","sha256","confirmed"],"cancel"=>&["action","delivery_id"],"delete"=>&["action","sha256","confirmed"],_=>return Err(invalid())};
-            if object.len()!=allowed.len() || object.keys().any(|k|!allowed.contains(&k.as_str())){return Err(invalid());}
-            let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
+        pub fn firmware_manage(&self, input: &Value) -> Result<Value, CenterError> {
+            let invalid = || CenterError::new("firmware_invalid", 400, "固件操作格式无效");
+            let object = input.as_object().ok_or_else(invalid)?;
+            let action = input["action"].as_str().ok_or_else(invalid)?;
+            let allowed: &[&str] = match action {
+                "offer" => &["action", "device_id", "sha256", "confirmed"],
+                "cancel" => &["action", "delivery_id"],
+                "delete" => &["action", "sha256", "confirmed"],
+                _ => return Err(invalid()),
+            };
+            if object.len() != allowed.len()
+                || object.keys().any(|k| !allowed.contains(&k.as_str()))
+            {
+                return Err(invalid());
+            }
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
             match action {
-                "offer"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    let device_id=input["device_id"].as_str().ok_or_else(invalid)?;
-                    let sha=input["sha256"].as_str().ok_or_else(invalid)?;
-                    let device=db.voice_device(device_id).map_err(|_|internal("读取设备失败"))?.filter(|d|d.is_allowed())
-                        .ok_or_else(||CenterError::new("firmware_device_invalid",409,"只能推送给已允许的设备"))?;
-                    let artifact=db.list_firmware_artifacts().map_err(|_|internal("读取固件清单失败"))?.into_iter().find(|a|a.sha256==sha)
-                        .ok_or_else(||CenterError::new("firmware_missing",404,"找不到这个固件"))?;
-                    if !moss_voice_server::firmware::is_newer(&artifact.version,&device.firmware_version) {
-                        return Err(CenterError::new("firmware_not_newer",409,"固件版本不比设备当前版本新，设备不会升级"));
+                "offer" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
                     }
-                    let (delivery,token)=(format!("fw-{}",random_hex(16)?),random_hex(32)?);
-                    db.create_firmware_offer(&delivery,device_id,sha,&artifact.version,&token,now()+FIRMWARE_OFFER_SECONDS,now()).map_err(|_|internal("创建推送失败"))?;
-                },
-                "cancel"=>{
-                    let id=input["delivery_id"].as_str().ok_or_else(invalid)?;
-                    if !db.cancel_firmware_offer(id,now()).map_err(|_|internal("取消推送失败"))? {
-                        return Err(CenterError::new("firmware_conflict",409,"这条推送已完成或已取消"));
+                    let device_id = input["device_id"].as_str().ok_or_else(invalid)?;
+                    let sha = input["sha256"].as_str().ok_or_else(invalid)?;
+                    let device = db
+                        .voice_device(device_id)
+                        .map_err(|_| internal("读取设备失败"))?
+                        .filter(|d| d.is_allowed())
+                        .ok_or_else(|| {
+                            CenterError::new(
+                                "firmware_device_invalid",
+                                409,
+                                "只能推送给已允许的设备",
+                            )
+                        })?;
+                    let artifact = db
+                        .list_firmware_artifacts()
+                        .map_err(|_| internal("读取固件清单失败"))?
+                        .into_iter()
+                        .find(|a| a.sha256 == sha)
+                        .ok_or_else(|| {
+                            CenterError::new("firmware_missing", 404, "找不到这个固件")
+                        })?;
+                    if !moss_voice_server::firmware::is_newer(
+                        &artifact.version,
+                        &device.firmware_version,
+                    ) {
+                        return Err(CenterError::new(
+                            "firmware_not_newer",
+                            409,
+                            "固件版本不比设备当前版本新，设备不会升级",
+                        ));
                     }
-                },
-                "delete"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    let sha=input["sha256"].as_str().ok_or_else(invalid)?;
-                    if sha.len()!=64 || !sha.bytes().all(|b|b.is_ascii_hexdigit()){return Err(invalid());}
-                    if !db.delete_firmware_artifact(sha,now()).map_err(|_|internal("删除固件失败"))? {
-                        return Err(CenterError::new("firmware_in_use",409,"还有推送在用这个固件，请先取消推送"));
+                    let (delivery, token) = (format!("fw-{}", random_hex(16)?), random_hex(32)?);
+                    db.create_firmware_offer(
+                        &delivery,
+                        device_id,
+                        sha,
+                        &artifact.version,
+                        &token,
+                        now() + FIRMWARE_OFFER_SECONDS,
+                        now(),
+                    )
+                    .map_err(|_| internal("创建推送失败"))?;
+                }
+                "cancel" => {
+                    let id = input["delivery_id"].as_str().ok_or_else(invalid)?;
+                    if !db
+                        .cancel_firmware_offer(id, now())
+                        .map_err(|_| internal("取消推送失败"))?
+                    {
+                        return Err(CenterError::new(
+                            "firmware_conflict",
+                            409,
+                            "这条推送已完成或已取消",
+                        ));
                     }
-                    let _=std::fs::remove_file(self.firmware_dir().join(format!("{sha}.bin")));
-                },
-                _=>{}
+                }
+                "delete" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
+                    }
+                    let sha = input["sha256"].as_str().ok_or_else(invalid)?;
+                    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(invalid());
+                    }
+                    if !db
+                        .delete_firmware_artifact(sha, now())
+                        .map_err(|_| internal("删除固件失败"))?
+                    {
+                        return Err(CenterError::new(
+                            "firmware_in_use",
+                            409,
+                            "还有推送在用这个固件，请先取消推送",
+                        ));
+                    }
+                    let _ = std::fs::remove_file(self.firmware_dir().join(format!("{sha}.bin")));
+                }
+                _ => {}
             }
             drop(db);
             self.firmware_status()
@@ -4973,10 +6499,21 @@ mod imp {
         /// n61：当前保存的自定义唤醒词；没保存过或文件损坏时用“你好 MOSS”。
         fn wakeword_word(&self) -> moss_voice_server::wake_assets::WakeWord {
             use moss_voice_server::wake_assets::{DEFAULT_THRESHOLD, WakeWord};
-            std::fs::read(self.wakeword_dir().join("settings.json")).ok()
-                .and_then(|raw|serde_json::from_slice::<Value>(&raw).ok())
-                .and_then(|v|WakeWord::new(v["text"].as_str()?,v["command"].as_str()?,v["threshold"].as_f64()?).ok())
-                .unwrap_or_else(||WakeWord::new("你好 MOSS","ni hao mo si",DEFAULT_THRESHOLD).expect("default wake word is valid"))
+            std::fs::read(self.wakeword_dir().join("settings.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                .and_then(|v| {
+                    WakeWord::new(
+                        v["text"].as_str()?,
+                        v["command"].as_str()?,
+                        v["threshold"].as_f64()?,
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| {
+                    WakeWord::new("你好 MOSS", "ni hao mo si", DEFAULT_THRESHOLD)
+                        .expect("default wake word is valid")
+                })
         }
 
         fn wakeword_base(&self) -> Option<Vec<u8>> {
@@ -4984,25 +6521,53 @@ mod imp {
         }
 
         fn wakeword_write(&self, name: &str, bytes: &[u8]) -> Result<(), CenterError> {
-            let dir=self.wakeword_dir();
-            std::fs::create_dir_all(&dir).map_err(|e|internal(format!("创建唤醒词目录失败：{e}")))?;
-            let temp=dir.join(format!(".{name}.part"));
-            std::fs::write(&temp,bytes).and_then(|()|std::fs::rename(&temp,dir.join(name)))
-                .map_err(|e|{let _=std::fs::remove_file(&temp);internal(format!("保存失败：{e}"))})
+            let dir = self.wakeword_dir();
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| internal(format!("创建唤醒词目录失败：{e}")))?;
+            let temp = dir.join(format!(".{name}.part"));
+            std::fs::write(&temp, bytes)
+                .and_then(|()| std::fs::rename(&temp, dir.join(name)))
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&temp);
+                    internal(format!("保存失败：{e}"))
+                })
         }
 
         /// n61 设备唤醒词：当前设置、基础资源包摘要、在线且已允许的设备及其固件是否支持网络更新资源包。
-        pub fn wakeword_status(&self)->Result<Value,CenterError>{
-            let word=self.wakeword_word();
-            let base=self.wakeword_base().and_then(|b|moss_voice_server::wake_assets::describe_base(&b).ok());
-            let allowed:std::collections::HashMap<String,String>=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?
-                .voice_devices().map_err(|_|internal("读取设备失败"))?.into_iter().filter(|d|d.is_allowed()).map(|d|(d.device_id,d.name)).collect();
-            let sessions=self.server.lock().map_err(|_|internal("语音服务锁失败"))?.as_ref().map(|s|s.status().sessions).unwrap_or_default();
-            let mut seen=std::collections::BTreeSet::new();
-            let devices=sessions.iter().filter(|r|allowed.contains_key(&r.device_id) && seen.insert(r.device_id.clone())).map(|r|serde_json::json!({
-                "device_id":r.device_id,"name":allowed.get(&r.device_id),
-                "supported":r.device_tools.iter().any(|t|t=="self.assets.set_download_url"),
-            })).collect::<Vec<_>>();
+        pub fn wakeword_status(&self) -> Result<Value, CenterError> {
+            let word = self.wakeword_word();
+            let base = self
+                .wakeword_base()
+                .and_then(|b| moss_voice_server::wake_assets::describe_base(&b).ok());
+            let allowed: std::collections::HashMap<String, String> = self
+                .host
+                .db
+                .lock()
+                .map_err(|_| internal("数据库锁失败"))?
+                .voice_devices()
+                .map_err(|_| internal("读取设备失败"))?
+                .into_iter()
+                .filter(|d| d.is_allowed())
+                .map(|d| (d.device_id, d.name))
+                .collect();
+            let sessions = self
+                .server
+                .lock()
+                .map_err(|_| internal("语音服务锁失败"))?
+                .as_ref()
+                .map(|s| s.status().sessions)
+                .unwrap_or_default();
+            let mut seen = std::collections::BTreeSet::new();
+            let devices = sessions
+                .iter()
+                .filter(|r| allowed.contains_key(&r.device_id) && seen.insert(r.device_id.clone()))
+                .map(|r| {
+                    serde_json::json!({
+                        "device_id":r.device_id,"name":allowed.get(&r.device_id),
+                        "supported":r.device_tools.iter().any(|t|t=="self.assets.set_download_url"),
+                    })
+                })
+                .collect::<Vec<_>>();
             Ok(serde_json::json!({
                 "word":{"text":word.text,"command":word.command,"threshold":word.threshold},
                 "base":base,"devices":devices,
@@ -5011,149 +6576,416 @@ mod imp {
         }
 
         /// 导入基础资源包（官方网页生成器导出的 assets.bin）：推送时保留它的字体、表情和背景，只换唤醒词。
-        pub fn wakeword_import_base(&self,path:&std::path::Path)->Result<Value,CenterError>{
-            use moss_voice_server::wake_assets::{ASSETS_MAX_BYTES,describe_base};
-            let invalid=|message:&str|CenterError::new("wakeword_invalid",400,message);
-            let meta=std::fs::metadata(path).map_err(|_|invalid("无法读取所选文件"))?;
-            if !meta.is_file() || meta.len() as usize>ASSETS_MAX_BYTES {return Err(invalid("请选择 8 MB 以内的资源包（assets.bin）"));}
-            let bytes=std::fs::read(path).map_err(|_|invalid("无法读取所选文件"))?;
-            let summary=describe_base(&bytes).map_err(|e|invalid(&e))?;
-            self.wakeword_write("base-assets.bin",&bytes)?;
+        pub fn wakeword_import_base(&self, path: &std::path::Path) -> Result<Value, CenterError> {
+            use moss_voice_server::wake_assets::{ASSETS_MAX_BYTES, describe_base};
+            let invalid = |message: &str| CenterError::new("wakeword_invalid", 400, message);
+            let meta = std::fs::metadata(path).map_err(|_| invalid("无法读取所选文件"))?;
+            if !meta.is_file() || meta.len() as usize > ASSETS_MAX_BYTES {
+                return Err(invalid("请选择 8 MB 以内的资源包（assets.bin）"));
+            }
+            let bytes = std::fs::read(path).map_err(|_| invalid("无法读取所选文件"))?;
+            let summary = describe_base(&bytes).map_err(|e| invalid(&e))?;
+            self.wakeword_write("base-assets.bin", &bytes)?;
             Ok(summary)
         }
 
         /// 保存唤醒词 / 移除基础资源包 / 逐台确认推送（自定义唤醒词或恢复“你好小智”）。
-        pub fn wakeword_manage(&self,input:&Value)->Result<Value,CenterError>{
-            use moss_voice_server::wake_assets::{WakeTarget,WakeWord,build_package};
-            let invalid=||CenterError::new("wakeword_invalid",400,"唤醒词操作格式无效");
-            let object=input.as_object().ok_or_else(invalid)?;
-            let action=input["action"].as_str().ok_or_else(invalid)?;
-            let allowed:&[&str]=match action {"save"=>&["action","text","command","threshold"],"clear_base"=>&["action","confirmed"],"push"=>&["action","device_id","target","confirmed"],_=>return Err(invalid())};
-            if object.len()!=allowed.len() || object.keys().any(|k|!allowed.contains(&k.as_str())){return Err(invalid());}
+        pub fn wakeword_manage(&self, input: &Value) -> Result<Value, CenterError> {
+            use moss_voice_server::wake_assets::{WakeTarget, WakeWord, build_package};
+            let invalid = || CenterError::new("wakeword_invalid", 400, "唤醒词操作格式无效");
+            let object = input.as_object().ok_or_else(invalid)?;
+            let action = input["action"].as_str().ok_or_else(invalid)?;
+            let allowed: &[&str] = match action {
+                "save" => &["action", "text", "command", "threshold"],
+                "clear_base" => &["action", "confirmed"],
+                "push" => &["action", "device_id", "target", "confirmed"],
+                _ => return Err(invalid()),
+            };
+            if object.len() != allowed.len()
+                || object.keys().any(|k| !allowed.contains(&k.as_str()))
+            {
+                return Err(invalid());
+            }
             match action {
-                "save"=>{
-                    let word=WakeWord::new(input["text"].as_str().ok_or_else(invalid)?,input["command"].as_str().ok_or_else(invalid)?,input["threshold"].as_f64().ok_or_else(invalid)?)
-                        .map_err(|e|CenterError::new("wakeword_invalid",400,e))?;
+                "save" => {
+                    let word = WakeWord::new(
+                        input["text"].as_str().ok_or_else(invalid)?,
+                        input["command"].as_str().ok_or_else(invalid)?,
+                        input["threshold"].as_f64().ok_or_else(invalid)?,
+                    )
+                    .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
                     let raw=serde_json::to_vec(&serde_json::json!({"text":word.text,"command":word.command,"threshold":word.threshold})).map_err(|_|internal("保存唤醒词失败"))?;
-                    self.wakeword_write("settings.json",&raw)?;
-                },
-                "clear_base"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    match std::fs::remove_file(self.wakeword_dir().join("base-assets.bin")) {
-                        Ok(())=>{},
-                        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
-                        Err(e)=>return Err(internal(format!("移除基础资源包失败：{e}"))),
+                    self.wakeword_write("settings.json", &raw)?;
+                }
+                "clear_base" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
                     }
-                },
-                "push"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    let device_id=input["device_id"].as_str().ok_or_else(invalid)?;
-                    let target=match input["target"].as_str() {Some("custom")=>WakeTarget::Custom(self.wakeword_word()),Some("default")=>WakeTarget::Default,_=>return Err(invalid())};
-                    let device_ok=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.voice_device(device_id).map_err(|_|internal("读取设备失败"))?.is_some_and(|d|d.is_allowed());
-                    if !device_ok {return Err(CenterError::new("wakeword_device_invalid",409,"只能推送给已允许的设备"));}
-                    let package=build_package(self.wakeword_base().as_deref(),&target).map_err(|e|CenterError::new("wakeword_invalid",400,e))?;
-                    let size=package.len();
-                    let server=self.server.lock().map_err(|_|internal("语音服务锁失败"))?;
-                    let server=server.as_ref().ok_or_else(||CenterError::new("voice_builtin_stopped",409,"内置语音服务未运行"))?;
-                    server.install_wake_assets(device_id,package).map_err(|e|CenterError::new("wakeword_device_unsupported",409,e))?;
-                    let mut status=self.wakeword_status()?;
-                    status["pushed"]=serde_json::json!({"device_id":device_id,"size":size,"target":input["target"]});
+                    match std::fs::remove_file(self.wakeword_dir().join("base-assets.bin")) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(internal(format!("移除基础资源包失败：{e}"))),
+                    }
+                }
+                "push" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
+                    }
+                    let device_id = input["device_id"].as_str().ok_or_else(invalid)?;
+                    let target = match input["target"].as_str() {
+                        Some("custom") => WakeTarget::Custom(self.wakeword_word()),
+                        Some("default") => WakeTarget::Default,
+                        _ => return Err(invalid()),
+                    };
+                    let device_ok = self
+                        .host
+                        .db
+                        .lock()
+                        .map_err(|_| internal("数据库锁失败"))?
+                        .voice_device(device_id)
+                        .map_err(|_| internal("读取设备失败"))?
+                        .is_some_and(|d| d.is_allowed());
+                    if !device_ok {
+                        return Err(CenterError::new(
+                            "wakeword_device_invalid",
+                            409,
+                            "只能推送给已允许的设备",
+                        ));
+                    }
+                    let package = build_package(self.wakeword_base().as_deref(), &target)
+                        .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
+                    let size = package.len();
+                    let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
+                    let server = server.as_ref().ok_or_else(|| {
+                        CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                    })?;
+                    server
+                        .install_wake_assets(device_id, package)
+                        .map_err(|e| CenterError::new("wakeword_device_unsupported", 409, e))?;
+                    let mut status = self.wakeword_status()?;
+                    status["pushed"] = serde_json::json!({"device_id":device_id,"size":size,"target":input["target"]});
                     return Ok(status);
-                },
-                _=>{}
+                }
+                _ => {}
             }
             self.wakeword_status()
         }
 
-        pub fn speaker_manage(&self,input:&Value)->Result<Value,CenterError>{
-            let invalid=||CenterError::new("speaker_invalid",400,"声纹操作格式无效");
-            let object=input.as_object().ok_or_else(invalid)?;
-            let action=input["action"].as_str().ok_or_else(invalid)?;
-            let allowed:&[&str]=match action {"status"|"cancel"=>&["action"],"begin"=>&["action","device_id","session_id","name","confirmed"],"delete"=>&["action","id","revision","confirmed"],"save_memory"=>&["action","id","revision","summary"],"personal_mode"=>&["action","enabled","confirmed"],"begin_test"=>&["action","device_id","session_id","id","confirmed"],"calibrate"|"reset_calibration"=>&["action","confirmed"],_=>return Err(invalid())};
-            if object.len()!=allowed.len() || object.keys().any(|k|!allowed.contains(&k.as_str())){return Err(invalid());}
+        pub fn speaker_manage(&self, input: &Value) -> Result<Value, CenterError> {
+            let invalid = || CenterError::new("speaker_invalid", 400, "声纹操作格式无效");
+            let object = input.as_object().ok_or_else(invalid)?;
+            let action = input["action"].as_str().ok_or_else(invalid)?;
+            let allowed: &[&str] = match action {
+                "status" | "cancel" => &["action"],
+                "begin" => &["action", "device_id", "session_id", "name", "confirmed"],
+                "delete" => &["action", "id", "revision", "confirmed"],
+                "save_memory" => &["action", "id", "revision", "summary"],
+                "personal_mode" => &["action", "enabled", "confirmed"],
+                "begin_test" => &["action", "device_id", "session_id", "id", "confirmed"],
+                "calibrate" | "reset_calibration" => &["action", "confirmed"],
+                _ => return Err(invalid()),
+            };
+            if object.len() != allowed.len()
+                || object.keys().any(|k| !allowed.contains(&k.as_str()))
+            {
+                return Err(invalid());
+            }
             match action {
-                "begin"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    let device=input["device_id"].as_str().ok_or_else(invalid)?;
-                    let session=input["session_id"].as_str().ok_or_else(invalid)?;
-                    let name=input["name"].as_str().ok_or_else(invalid)?;
-                    let chat=self.server.lock().map_err(|_|internal("语音服务锁失败"))?.as_ref().is_some_and(|s|{
-                        let status=s.status();status.mode==ServerMode::Chat && status.sessions.iter().any(|r|r.device_id==device&&r.session_id==session)
-                    });
-                    if !chat{return Err(CenterError::new("speaker_session_required",409,"请选择已连接的对话模式设备"));}
-                    let context=laser_contracts::CallerContext::Voice{device_id:device.into(),session_id:session.into()};
-                    let permit=self.host.api_service.external_voice_permit(&context).map_err(|_|CenterError::new("speaker_revoked",403,"当前设备会话已撤销"))?;
+                "begin" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
+                    }
+                    let device = input["device_id"].as_str().ok_or_else(invalid)?;
+                    let session = input["session_id"].as_str().ok_or_else(invalid)?;
+                    let name = input["name"].as_str().ok_or_else(invalid)?;
+                    let chat = self
+                        .server
+                        .lock()
+                        .map_err(|_| internal("语音服务锁失败"))?
+                        .as_ref()
+                        .is_some_and(|s| {
+                            let status = s.status();
+                            status.mode == ServerMode::Chat
+                                && status
+                                    .sessions
+                                    .iter()
+                                    .any(|r| r.device_id == device && r.session_id == session)
+                        });
+                    if !chat {
+                        return Err(CenterError::new(
+                            "speaker_session_required",
+                            409,
+                            "请选择已连接的对话模式设备",
+                        ));
+                    }
+                    let context = laser_contracts::CallerContext::Voice {
+                        device_id: device.into(),
+                        session_id: session.into(),
+                    };
+                    let permit = self
+                        .host
+                        .api_service
+                        .external_voice_permit(&context)
+                        .map_err(|_| {
+                            CenterError::new("speaker_revoked", 403, "当前设备会话已撤销")
+                        })?;
                     self.prepare_speaker_helper()?;
-                    self.speaker.begin(device,session,name,permit,true).map_err(|code|CenterError::new(code,409,"登记无法启动，请检查会话、名称或正在进行的登记"))?;
-                },
-                "cancel"=>{self.speaker.cancel().map_err(|_|internal("取消声纹登记失败"))?;},
+                    self.speaker
+                        .begin(device, session, name, permit, true)
+                        .map_err(|code| {
+                            CenterError::new(
+                                code,
+                                409,
+                                "登记无法启动，请检查会话、名称或正在进行的登记",
+                            )
+                        })?;
+                }
+                "cancel" => {
+                    self.speaker
+                        .cancel()
+                        .map_err(|_| internal("取消声纹登记失败"))?;
+                }
                 // 简易标定（2026-10-14）：已登记的人各录三段测试音 → 计算阈值并自检 → 通过才开放识别
-                "begin_test"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    let device=input["device_id"].as_str().ok_or_else(invalid)?;
-                    let session=input["session_id"].as_str().ok_or_else(invalid)?;
-                    let id=input["id"].as_str().ok_or_else(invalid)?;
-                    let known=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.list_voice_speakers().map_err(|_|internal("读取声纹失败"))?.iter().any(|r|r.id==id);
-                    if !known{return Err(CenterError::new("speaker_conflict",409,"这个人的声纹已不存在，请刷新"));}
-                    let chat=self.server.lock().map_err(|_|internal("语音服务锁失败"))?.as_ref().is_some_and(|s|{
-                        let status=s.status();status.mode==ServerMode::Chat && status.sessions.iter().any(|r|r.device_id==device&&r.session_id==session)
-                    });
-                    if !chat{return Err(CenterError::new("speaker_session_required",409,"请选择已连接的对话模式设备"));}
-                    let context=laser_contracts::CallerContext::Voice{device_id:device.into(),session_id:session.into()};
-                    let permit=self.host.api_service.external_voice_permit(&context).map_err(|_|CenterError::new("speaker_revoked",403,"当前设备会话已撤销"))?;
+                "begin_test" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
+                    }
+                    let device = input["device_id"].as_str().ok_or_else(invalid)?;
+                    let session = input["session_id"].as_str().ok_or_else(invalid)?;
+                    let id = input["id"].as_str().ok_or_else(invalid)?;
+                    let known = self
+                        .host
+                        .db
+                        .lock()
+                        .map_err(|_| internal("数据库锁失败"))?
+                        .list_voice_speakers()
+                        .map_err(|_| internal("读取声纹失败"))?
+                        .iter()
+                        .any(|r| r.id == id);
+                    if !known {
+                        return Err(CenterError::new(
+                            "speaker_conflict",
+                            409,
+                            "这个人的声纹已不存在，请刷新",
+                        ));
+                    }
+                    let chat = self
+                        .server
+                        .lock()
+                        .map_err(|_| internal("语音服务锁失败"))?
+                        .as_ref()
+                        .is_some_and(|s| {
+                            let status = s.status();
+                            status.mode == ServerMode::Chat
+                                && status
+                                    .sessions
+                                    .iter()
+                                    .any(|r| r.device_id == device && r.session_id == session)
+                        });
+                    if !chat {
+                        return Err(CenterError::new(
+                            "speaker_session_required",
+                            409,
+                            "请选择已连接的对话模式设备",
+                        ));
+                    }
+                    let context = laser_contracts::CallerContext::Voice {
+                        device_id: device.into(),
+                        session_id: session.into(),
+                    };
+                    let permit = self
+                        .host
+                        .api_service
+                        .external_voice_permit(&context)
+                        .map_err(|_| {
+                            CenterError::new("speaker_revoked", 403, "当前设备会话已撤销")
+                        })?;
                     self.prepare_speaker_helper()?;
-                    self.speaker.begin_test(device,session,id,permit,true).map_err(|code|CenterError::new(code,409,"测试音采集无法启动，请检查会话或正在进行的登记"))?;
-                },
-                "calibrate"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    let templates=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.native_voice_speaker_templates().map_err(|_|internal("读取声纹失败"))?
-                        .into_iter().map(|t|SpeakerTemplate{id:t.id,revision:t.revision,embedding:t.embedding}).collect::<Vec<_>>();
-                    let samples=self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.iter()
-                        .flat_map(|(id,clips)|clips.iter().map(|clip|CalibrationSample{speaker_id:id.clone(),embedding:clip.clone()}))
+                    self.speaker
+                        .begin_test(device, session, id, permit, true)
+                        .map_err(|code| {
+                            CenterError::new(
+                                code,
+                                409,
+                                "测试音采集无法启动，请检查会话或正在进行的登记",
+                            )
+                        })?;
+                }
+                "calibrate" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
+                    }
+                    let templates = self
+                        .host
+                        .db
+                        .lock()
+                        .map_err(|_| internal("数据库锁失败"))?
+                        .native_voice_speaker_templates()
+                        .map_err(|_| internal("读取声纹失败"))?
+                        .into_iter()
+                        .map(|t| SpeakerTemplate {
+                            id: t.id,
+                            revision: t.revision,
+                            embedding: t.embedding,
+                        })
                         .collect::<Vec<_>>();
-                    let report=moss_voice_server::person_context::calibrate(&templates,&samples).map_err(|reason|CenterError::new("speaker_calibration_failed",409,reason))?;
-                    let calibration=Calibration{report,directory:speaker_directory(templates.iter().map(|t|(t.id.as_str(),t.revision))),calibrated_at:now()};
-                    let text=serde_json::to_string(&calibration).map_err(|_|internal("标定结果序列化失败"))?;
-                    self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.set_secret(SPEAKER_CALIBRATION_KEY,&text,now()).map_err(|_|internal("保存标定结果失败"))?;
-                    *self.identity.calibration.lock().map_err(|_|internal("标定状态锁失败"))?=Some(calibration);
-                    self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.clear();
+                    let samples = self
+                        .speaker_backend
+                        .tests
+                        .lock()
+                        .map_err(|_| internal("标定数据不可用"))?
+                        .iter()
+                        .flat_map(|(id, clips)| {
+                            clips.iter().map(|clip| CalibrationSample {
+                                speaker_id: id.clone(),
+                                embedding: clip.clone(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let report = moss_voice_server::person_context::calibrate(&templates, &samples)
+                        .map_err(|reason| {
+                            CenterError::new("speaker_calibration_failed", 409, reason)
+                        })?;
+                    let calibration = Calibration {
+                        report,
+                        directory: speaker_directory(
+                            templates.iter().map(|t| (t.id.as_str(), t.revision)),
+                        ),
+                        calibrated_at: now(),
+                    };
+                    let text = serde_json::to_string(&calibration)
+                        .map_err(|_| internal("标定结果序列化失败"))?;
+                    self.host
+                        .db
+                        .lock()
+                        .map_err(|_| internal("数据库锁失败"))?
+                        .set_secret(SPEAKER_CALIBRATION_KEY, &text, now())
+                        .map_err(|_| internal("保存标定结果失败"))?;
+                    *self
+                        .identity
+                        .calibration
+                        .lock()
+                        .map_err(|_| internal("标定状态锁失败"))? = Some(calibration);
+                    self.speaker_backend
+                        .tests
+                        .lock()
+                        .map_err(|_| internal("标定数据不可用"))?
+                        .clear();
                     self.personal.directory_changed();
                     self.context.speakers_invalidated();
-                    if self.settings().builtin_person_memory_enabled{self.restart_if_running()?;}
-                },
-                "reset_calibration"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.delete_secret(SPEAKER_CALIBRATION_KEY).map_err(|_|internal("清除标定结果失败"))?;
-                    *self.identity.calibration.lock().map_err(|_|internal("标定状态锁失败"))?=None;
-                    self.speaker_backend.tests.lock().map_err(|_|internal("标定数据不可用"))?.clear();
+                    if self.settings().builtin_person_memory_enabled {
+                        self.restart_if_running()?;
+                    }
+                }
+                "reset_calibration" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
+                    }
+                    self.host
+                        .db
+                        .lock()
+                        .map_err(|_| internal("数据库锁失败"))?
+                        .delete_secret(SPEAKER_CALIBRATION_KEY)
+                        .map_err(|_| internal("清除标定结果失败"))?;
+                    *self
+                        .identity
+                        .calibration
+                        .lock()
+                        .map_err(|_| internal("标定状态锁失败"))? = None;
+                    self.speaker_backend
+                        .tests
+                        .lock()
+                        .map_err(|_| internal("标定数据不可用"))?
+                        .clear();
                     self.personal.directory_changed();
                     self.context.speakers_invalidated();
-                    if self.settings().builtin_person_memory_enabled{self.restart_if_running()?;}
-                },
-                "delete"=>{
-                    if input["confirmed"].as_bool()!=Some(true){return Err(invalid());}
-                    let id=input["id"].as_str().ok_or_else(invalid)?;let revision=input["revision"].as_i64().ok_or_else(invalid)?;
-                    if id.is_empty() || id.len()>64 || !id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_') || revision<1{return Err(invalid());}
-                    if !self.personal.person_deleted(id,||self.host.db.lock().map_err(|_|"数据库锁失败".to_owned())?.delete_voice_speaker_if_revision(id,revision).map_err(db_error)).map_err(internal)? {
-                        return Err(CenterError::new("speaker_conflict",409,"声纹记录已变化，请刷新"));
+                    if self.settings().builtin_person_memory_enabled {
+                        self.restart_if_running()?;
+                    }
+                }
+                "delete" => {
+                    if input["confirmed"].as_bool() != Some(true) {
+                        return Err(invalid());
+                    }
+                    let id = input["id"].as_str().ok_or_else(invalid)?;
+                    let revision = input["revision"].as_i64().ok_or_else(invalid)?;
+                    if id.is_empty()
+                        || id.len() > 64
+                        || !id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                        || revision < 1
+                    {
+                        return Err(invalid());
+                    }
+                    if !self
+                        .personal
+                        .person_deleted(id, || {
+                            self.host
+                                .db
+                                .lock()
+                                .map_err(|_| "数据库锁失败".to_owned())?
+                                .delete_voice_speaker_if_revision(id, revision)
+                                .map_err(db_error)
+                        })
+                        .map_err(internal)?
+                    {
+                        return Err(CenterError::new(
+                            "speaker_conflict",
+                            409,
+                            "声纹记录已变化，请刷新",
+                        ));
                     }
                     self.context.person_changed(id);
-                    if let Ok(mut tests)=self.speaker_backend.tests.lock(){tests.remove(id);}
-                },
-                "save_memory"=>{
-                    let id=input["id"].as_str().ok_or_else(invalid)?;let revision=input["revision"].as_i64().ok_or_else(invalid)?;
-                    let text=input["summary"].as_str().ok_or_else(invalid)?;
-                    let row=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.list_voice_speakers().map_err(|_|internal("读取声纹失败"))?.into_iter().find(|r|r.id==id).ok_or_else(invalid)?;
-                    let scope=PersonScope::candidate(&row.id,row.revision,self.personal.generation()).ok_or_else(invalid)?;
-                    if !self.personal.operator_edit(&scope,revision,text).map_err(|_|invalid())? {return Err(CenterError::new("speaker_memory_conflict",409,"个人摘要已改变，请刷新后重试"));}
-                },
-                "personal_mode"=>{
-                    let enabled=input["enabled"].as_bool().ok_or_else(invalid)?;
-                    input["confirmed"].as_bool().ok_or_else(invalid)?;
-                    if enabled && (input["confirmed"].as_bool()!=Some(true)||self.identity.valid_calibration().is_none()) {
-                        return Err(CenterError::new("speaker_calibration_required",409,"请先完成声纹简易标定（登记名单变化后需重新标定）"));
+                    if let Ok(mut tests) = self.speaker_backend.tests.lock() {
+                        tests.remove(id);
                     }
-                    if enabled{self.prepare_speaker_helper()?;}
+                }
+                "save_memory" => {
+                    let id = input["id"].as_str().ok_or_else(invalid)?;
+                    let revision = input["revision"].as_i64().ok_or_else(invalid)?;
+                    let text = input["summary"].as_str().ok_or_else(invalid)?;
+                    let row = self
+                        .host
+                        .db
+                        .lock()
+                        .map_err(|_| internal("数据库锁失败"))?
+                        .list_voice_speakers()
+                        .map_err(|_| internal("读取声纹失败"))?
+                        .into_iter()
+                        .find(|r| r.id == id)
+                        .ok_or_else(invalid)?;
+                    let scope =
+                        PersonScope::candidate(&row.id, row.revision, self.personal.generation())
+                            .ok_or_else(invalid)?;
+                    if !self
+                        .personal
+                        .operator_edit(&scope, revision, text)
+                        .map_err(|_| invalid())?
+                    {
+                        return Err(CenterError::new(
+                            "speaker_memory_conflict",
+                            409,
+                            "个人摘要已改变，请刷新后重试",
+                        ));
+                    }
+                }
+                "personal_mode" => {
+                    let enabled = input["enabled"].as_bool().ok_or_else(invalid)?;
+                    input["confirmed"].as_bool().ok_or_else(invalid)?;
+                    if enabled
+                        && (input["confirmed"].as_bool() != Some(true)
+                            || self.identity.valid_calibration().is_none())
+                    {
+                        return Err(CenterError::new(
+                            "speaker_calibration_required",
+                            409,
+                            "请先完成声纹简易标定（登记名单变化后需重新标定）",
+                        ));
+                    }
+                    if enabled {
+                        self.prepare_speaker_helper()?;
+                    }
                     self.personal.directory_changed();
                     self.context.speakers_invalidated();
                     moss_voice::settings::update_voice(&self.settings_file(), |settings| {
@@ -5162,30 +6994,92 @@ mod imp {
                     })
                     .map_err(internal)?;
                     self.restart_if_running()?;
-                },_=>{}
+                }
+                _ => {}
             }
-            let rows=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?.list_voice_speakers().map_err(|_|internal("读取声纹失败"))?;
-            let rows={let db=self.host.db.lock().map_err(|_|internal("数据库锁失败"))?;
-                rows.into_iter().map(|row|{let (summary,revision)=db.voice_person_summary(&row.id).map_err(|_|internal("读取个人记忆失败"))?.unwrap_or((String::new(),0));
-                    let mut value=serde_json::to_value(row).map_err(|_|internal("声纹元数据序列化失败"))?;value["memory_summary"]=Value::String(summary);value["memory_revision"]=Value::from(revision);Ok(value)}).collect::<Result<Vec<_>,CenterError>>()?};
-            let sessions=self.server.lock().map_err(|_|internal("语音服务锁失败"))?.as_ref().map(|s|s.status().sessions).unwrap_or_default().into_iter().map(|r|serde_json::json!({"device_id":r.device_id,"session_id":r.session_id})).collect::<Vec<_>>();
-            let valid=self.identity.valid_calibration();
-            let calibration=match (&valid,self.identity.calibration.lock().ok().and_then(|c|c.clone())) {
-                (Some(c),_)=>serde_json::json!({"state":"valid","report":c.report,"calibrated_at":c.calibrated_at}),
-                (None,Some(c))=>serde_json::json!({"state":"stale","report":c.report,"calibrated_at":c.calibrated_at}),
-                (None,None)=>serde_json::json!({"state":"none"}),
+            let rows = self
+                .host
+                .db
+                .lock()
+                .map_err(|_| internal("数据库锁失败"))?
+                .list_voice_speakers()
+                .map_err(|_| internal("读取声纹失败"))?;
+            let rows = {
+                let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                rows.into_iter()
+                    .map(|row| {
+                        let (summary, revision) = db
+                            .voice_person_summary(&row.id)
+                            .map_err(|_| internal("读取个人记忆失败"))?
+                            .unwrap_or((String::new(), 0));
+                        let mut value = serde_json::to_value(row)
+                            .map_err(|_| internal("声纹元数据序列化失败"))?;
+                        value["memory_summary"] = Value::String(summary);
+                        value["memory_revision"] = Value::from(revision);
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>, CenterError>>()?
             };
-            let test_clips=self.speaker_backend.tests.lock().map(|tests|tests.iter().map(|(id,clips)|(id.clone(),Value::from(clips.len()))).collect::<serde_json::Map<_,_>>()).unwrap_or_default();
-            let warning=self.speaker_warning.lock().ok().and_then(|slot|slot.clone());
-            Ok(serde_json::json!({"enrollment":self.speaker.status(),"speakers":rows,"sessions":sessions,"recognition_enabled":valid.is_some(),"personal_memory_enabled":valid.is_some()&&self.settings().builtin_person_memory_enabled,"calibration":calibration,"test_clips":test_clips,"warning":warning}))
+            let sessions = self
+                .server
+                .lock()
+                .map_err(|_| internal("语音服务锁失败"))?
+                .as_ref()
+                .map(|s| s.status().sessions)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| serde_json::json!({"device_id":r.device_id,"session_id":r.session_id}))
+                .collect::<Vec<_>>();
+            let valid = self.identity.valid_calibration();
+            let calibration = match (
+                &valid,
+                self.identity
+                    .calibration
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.clone()),
+            ) {
+                (Some(c), _) => {
+                    serde_json::json!({"state":"valid","report":c.report,"calibrated_at":c.calibrated_at})
+                }
+                (None, Some(c)) => {
+                    serde_json::json!({"state":"stale","report":c.report,"calibrated_at":c.calibrated_at})
+                }
+                (None, None) => serde_json::json!({"state":"none"}),
+            };
+            let test_clips = self
+                .speaker_backend
+                .tests
+                .lock()
+                .map(|tests| {
+                    tests
+                        .iter()
+                        .map(|(id, clips)| (id.clone(), Value::from(clips.len())))
+                        .collect::<serde_json::Map<_, _>>()
+                })
+                .unwrap_or_default();
+            let warning = self
+                .speaker_warning
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone());
+            Ok(
+                serde_json::json!({"enrollment":self.speaker.status(),"speakers":rows,"sessions":sessions,"recognition_enabled":valid.is_some(),"personal_memory_enabled":valid.is_some()&&self.settings().builtin_person_memory_enabled,"calibration":calibration,"test_clips":test_clips,"warning":warning}),
+            )
         }
 
         pub fn rename_device(&self, device_id: &str, name: &str) -> Result<Value, CenterError> {
             let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-            let found = db.rename_voice_device(device_id, name).map_err(db_failure)?;
+            let found = db
+                .rename_voice_device(device_id, name)
+                .map_err(db_failure)?;
             drop(db);
             if !found {
-                return Err(CenterError::new("voice_device_not_found", 404, "找不到该设备"));
+                return Err(CenterError::new(
+                    "voice_device_not_found",
+                    404,
+                    "找不到该设备",
+                ));
             }
             Ok(self.status())
         }
@@ -5195,7 +7089,10 @@ mod imp {
     fn scan_music_for_start(
         config: &moss_voice::settings::BuiltinMusic,
         chat_ready: bool,
-    ) -> (Option<Arc<moss_voice_server::music::MusicIndex>>, Option<String>) {
+    ) -> (
+        Option<Arc<moss_voice_server::music::MusicIndex>>,
+        Option<String>,
+    ) {
         if !config.enabled || !chat_ready {
             return (None, None);
         }
@@ -5221,7 +7118,11 @@ mod imp {
     ) -> Result<moss_voice::settings::BuiltinAgents, CenterError> {
         use laser_host::voice_agent::{Provider, executable, is_foreign_os_path, workspace};
         let invalid = |message: &str| CenterError::new("agent_config_invalid", 400, message);
-        for text in [&config.workspace, &config.codex_executable, &config.claude_executable] {
+        for text in [
+            &config.workspace,
+            &config.codex_executable,
+            &config.claude_executable,
+        ] {
             if text.len() > 1024 || text.chars().any(char::is_control) {
                 return Err(invalid("Agent 路径最长 1024 字节且不能包含控制字符"));
             }
@@ -5233,8 +7134,16 @@ mod imp {
             return Err(invalid("开启 Agent 前必须先填写工作目录"));
         }
         for (field, old_field, provider) in [
-            (&mut config.codex_executable, &previous.codex_executable, Provider::Codex),
-            (&mut config.claude_executable, &previous.claude_executable, Provider::ClaudeCode),
+            (
+                &mut config.codex_executable,
+                &previous.codex_executable,
+                Provider::Codex,
+            ),
+            (
+                &mut config.claude_executable,
+                &previous.claude_executable,
+                Provider::ClaudeCode,
+            ),
         ] {
             let trimmed = field.trim();
             if trimmed.is_empty() {
@@ -5251,17 +7160,27 @@ mod imp {
             && detect(Provider::Codex).is_none()
             && detect(Provider::ClaudeCode).is_none()
         {
-            return Err(invalid("未在本机自动检测到 Codex 或 Claude Code，请先安装或手动填写路径"));
+            return Err(invalid(
+                "未在本机自动检测到 Codex 或 Claude Code，请先安装或手动填写路径",
+            ));
         }
         workspace(std::path::Path::new(&config.workspace), sensitive)
             .map_err(|_| invalid("工作目录必须为现有、独立、非敏感的本地目录"))?;
         if !config.codex_executable.trim().is_empty() {
-            executable(std::path::Path::new(config.codex_executable.trim()), Provider::Codex)
-                .map_err(|_| invalid("Codex 路径无效：请填写本机原生可执行文件，或留空自动读取"))?;
+            executable(
+                std::path::Path::new(config.codex_executable.trim()),
+                Provider::Codex,
+            )
+            .map_err(|_| invalid("Codex 路径无效：请填写本机原生可执行文件，或留空自动读取"))?;
         }
         if !config.claude_executable.trim().is_empty() {
-            executable(std::path::Path::new(config.claude_executable.trim()), Provider::ClaudeCode)
-                .map_err(|_| invalid("Claude Code 路径无效：请填写本机原生可执行文件，或留空自动读取"))?;
+            executable(
+                std::path::Path::new(config.claude_executable.trim()),
+                Provider::ClaudeCode,
+            )
+            .map_err(|_| {
+                invalid("Claude Code 路径无效：请填写本机原生可执行文件，或留空自动读取")
+            })?;
         }
         Ok(config)
     }
@@ -5292,7 +7211,8 @@ mod imp {
             // 1. 换电脑后直接关掉开关点保存：不被旧工作目录或旧命令路径拦住
             let mut turn_off = old.clone();
             turn_off.enabled = false;
-            let saved_off = normalize_agent_save(turn_off.clone(), &old, &sensitive, |_| None).unwrap();
+            let saved_off =
+                normalize_agent_save(turn_off.clone(), &old, &sensitive, |_| None).unwrap();
             assert!(!saved_off.enabled);
             assert_eq!(saved_off.workspace, turn_off.workspace);
 
@@ -5305,19 +7225,32 @@ mod imp {
             })
             .unwrap();
             assert!(saved_on.enabled);
-            assert!(saved_on.codex_executable.is_empty(), "旧设备的失效 Codex 路径应清空回退自动读取");
-            assert!(saved_on.claude_executable.is_empty(), "旧账户的失效 Claude 路径应清空回退自动读取");
+            assert!(
+                saved_on.codex_executable.is_empty(),
+                "旧设备的失效 Codex 路径应清空回退自动读取"
+            );
+            assert!(
+                saved_on.claude_executable.is_empty(),
+                "旧账户的失效 Claude 路径应清空回退自动读取"
+            );
 
             // 3. 开启状态下若用户新填了一个不存在的手动路径，照常报错拦截
             let freshly_typed_bad = BuiltinAgents {
                 enabled: true,
                 workspace: work.display().to_string(),
-                codex_executable: temp.path().join("nonexistent-codex.exe").display().to_string(),
+                codex_executable: temp
+                    .path()
+                    .join("nonexistent-codex.exe")
+                    .display()
+                    .to_string(),
                 claude_executable: String::new(),
             };
-            let err = normalize_agent_save(freshly_typed_bad, &BuiltinAgents::default(), &sensitive, |_| {
-                Some(detected_claude.clone())
-            })
+            let err = normalize_agent_save(
+                freshly_typed_bad,
+                &BuiltinAgents::default(),
+                &sensitive,
+                |_| Some(detected_claude.clone()),
+            )
             .unwrap_err();
             assert_eq!(err.code, "agent_config_invalid");
 
@@ -5328,15 +7261,30 @@ mod imp {
                 codex_executable: String::new(),
                 claude_executable: String::new(),
             };
-            assert!(normalize_agent_save(stale_work, &old, &sensitive, |_| Some(detected_claude.clone())).is_err());
+            assert!(
+                normalize_agent_save(stale_work, &old, &sensitive, |_| Some(
+                    detected_claude.clone()
+                ))
+                .is_err()
+            );
         }
 
         #[test]
         fn builtin_voice_starts_cleanly_when_migrated_music_dir_and_speaker_model_are_missing() {
             let temp = tempfile::tempdir().unwrap();
-            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
-            let ws_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-            let http_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let ws_port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let http_port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
 
             // 模拟从旧电脑拷来的数据库与配置：配齐云端对话三件套、开启了不存在的旧音乐目录、开启了声纹按人记忆但新电脑还没装声纹模型
             {
@@ -5349,8 +7297,22 @@ mod imp {
                 v1[0] = 1.0;
                 let mut v2 = vec![0.0f32; 192];
                 v2[1] = 1.0;
-                db.enroll_voice_speaker("sp-a", "甲", SPEAKER_MODEL, &[v1.clone(), v1.clone(), v1], 1.0).unwrap();
-                db.enroll_voice_speaker("sp-b", "乙", SPEAKER_MODEL, &[v2.clone(), v2.clone(), v2], 1.0).unwrap();
+                db.enroll_voice_speaker(
+                    "sp-a",
+                    "甲",
+                    SPEAKER_MODEL,
+                    &[v1.clone(), v1.clone(), v1],
+                    1.0,
+                )
+                .unwrap();
+                db.enroll_voice_speaker(
+                    "sp-b",
+                    "乙",
+                    SPEAKER_MODEL,
+                    &[v2.clone(), v2.clone(), v2],
+                    1.0,
+                )
+                .unwrap();
                 let cal = Calibration {
                     report: CalibrationReport {
                         threshold: 0.72,
@@ -5365,55 +7327,122 @@ mod imp {
                     directory: speaker_directory([("sp-a", 1), ("sp-b", 1)].into_iter()),
                     calibrated_at: 2.0,
                 };
-                db.set_secret(SPEAKER_CALIBRATION_KEY, &serde_json::to_string(&cal).unwrap(), 2.0).unwrap();
+                db.set_secret(
+                    SPEAKER_CALIBRATION_KEY,
+                    &serde_json::to_string(&cal).unwrap(),
+                    2.0,
+                )
+                .unwrap();
             }
 
             let mut voice_settings = moss_voice::VoiceSettings::default();
             voice_settings.builtin_ws_port = ws_port;
             voice_settings.builtin_http_port = http_port;
             voice_settings.builtin_models = BuiltinModels {
-                llm: Some(BuiltinProvider { kind: ProviderKind::Openai, url: "https://llm.example.test/v1".into(), model: "gpt-test".into(), voice: String::new(), speed: 1.0 }),
-                asr: Some(BuiltinProvider { kind: ProviderKind::Openai, url: "https://asr.example.test/v1/audio/transcriptions".into(), model: "whisper-1".into(), voice: String::new(), speed: 1.0 }),
-                tts: Some(BuiltinProvider { kind: ProviderKind::Openai, url: "https://tts.example.test/v1/audio/speech".into(), model: "tts-1".into(), voice: "alloy".into(), speed: 1.0 }),
+                llm: Some(BuiltinProvider {
+                    kind: ProviderKind::Openai,
+                    url: "https://llm.example.test/v1".into(),
+                    model: "gpt-test".into(),
+                    voice: String::new(),
+                    speed: 1.0,
+                }),
+                asr: Some(BuiltinProvider {
+                    kind: ProviderKind::Openai,
+                    url: "https://asr.example.test/v1/audio/transcriptions".into(),
+                    model: "whisper-1".into(),
+                    voice: String::new(),
+                    speed: 1.0,
+                }),
+                tts: Some(BuiltinProvider {
+                    kind: ProviderKind::Openai,
+                    url: "https://tts.example.test/v1/audio/speech".into(),
+                    model: "tts-1".into(),
+                    voice: "alloy".into(),
+                    speed: 1.0,
+                }),
             };
             voice_settings.builtin_music = BuiltinMusic {
                 enabled: true,
-                directory: temp.path().join("unplugged-old-music-drive").display().to_string(),
+                directory: temp
+                    .path()
+                    .join("unplugged-old-music-drive")
+                    .display()
+                    .to_string(),
             };
             voice_settings.builtin_person_memory_enabled = true;
-            moss_voice::settings::save(&temp.path().join("settings.json"), &voice_settings).unwrap();
+            moss_voice::settings::save(&temp.path().join("settings.json"), &voice_settings)
+                .unwrap();
 
             let state = init(Some(host));
             let builtin = state.0.unwrap();
 
-            let status = builtin.start().expect("旧音乐目录缺失与声纹模型未安装不应阻断内置语音主服务启动");
+            let status = builtin
+                .start()
+                .expect("旧音乐目录缺失与声纹模型未安装不应阻断内置语音主服务启动");
             assert_eq!(status["running"], true);
             assert_eq!(status["mode"], "chat");
 
             let music_view = builtin.music_status();
-            assert!(music_view["warning"].as_str().unwrap_or_default().contains("本地音乐目录当前不可用"), "{music_view}");
+            assert!(
+                music_view["warning"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("本地音乐目录当前不可用"),
+                "{music_view}"
+            );
 
-            let speaker_view = builtin.speaker_manage(&serde_json::json!({"action": "status"})).unwrap();
-            assert!(speaker_view["warning"].as_str().unwrap_or_default().contains("声纹按人记忆暂未生效"), "{speaker_view}");
+            let speaker_view = builtin
+                .speaker_manage(&serde_json::json!({"action": "status"}))
+                .unwrap();
+            assert!(
+                speaker_view["warning"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("声纹按人记忆暂未生效"),
+                "{speaker_view}"
+            );
 
             // n68：降级提示出现在状态里，也写进诊断记录（警告级别、带分类与下一步）
             let warnings = status["warnings"].as_array().unwrap();
             assert_eq!(warnings.len(), 2, "{status}");
             let events = builtin.status()["events"].as_array().unwrap().clone();
-            let music_event = events.iter().find(|e| e["text"].as_str().unwrap().contains("本地音乐目录当前不可用")).expect("音乐降级写进记录");
+            let music_event = events
+                .iter()
+                .find(|e| {
+                    e["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("本地音乐目录当前不可用")
+                })
+                .expect("音乐降级写进记录");
             assert_eq!(music_event["level"], "warn");
             assert_eq!(music_event["category"], "config");
             assert!(music_event["hint"].is_string());
-            assert!(events.iter().any(|e| e["level"] == "warn" && e["text"].as_str().unwrap().contains("声纹按人记忆暂未生效")));
-            assert!(events.iter().any(|e| e["text"].as_str().unwrap().starts_with("内置语音服务已启动")));
+            assert!(events.iter().any(|e| e["level"] == "warn"
+                && e["text"].as_str().unwrap().contains("声纹按人记忆暂未生效")));
+            assert!(events.iter().any(|e| {
+                e["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("内置语音服务已启动")
+            }));
 
             builtin.stop();
             assert!(builtin.music_status()["warning"].is_null());
-            assert!(builtin.speaker_manage(&serde_json::json!({"action": "status"})).unwrap()["warning"].is_null());
+            assert!(
+                builtin
+                    .speaker_manage(&serde_json::json!({"action": "status"}))
+                    .unwrap()["warning"]
+                    .is_null()
+            );
             let after_stop = builtin.status();
             assert_eq!(after_stop["running"], false);
             assert!(after_stop["warnings"].as_array().unwrap().is_empty());
-            assert_eq!(after_stop["events"].as_array().unwrap().len(), events.len(), "停止服务不清空诊断记录");
+            assert_eq!(
+                after_stop["events"].as_array().unwrap().len(),
+                events.len(),
+                "停止服务不清空诊断记录"
+            );
 
             // 诊断包：整份记录 + 不含任何密钥
             let bundle = builtin.diagnostics_bundle();
@@ -5422,14 +7451,22 @@ mod imp {
             assert_eq!(bundle["events"].as_array().unwrap().len(), events.len());
             assert_eq!(bundle["events_dropped"]["info"], 0);
             assert_eq!(bundle["approvals"]["limit"], APPROVALS_IN_BUNDLE);
-            assert!(bundle["approvals"]["items"].is_array() && bundle["approvals"]["error"].is_null());
+            assert!(
+                bundle["approvals"]["items"].is_array() && bundle["approvals"]["error"].is_null()
+            );
             assert_eq!(bundle["models"]["llm"]["model"], "gpt-test");
             assert_eq!(bundle["models"]["llm"]["key_set"], true);
             let text = bundle.to_string();
             for secret in ["sk-test-llm", "sk-test-asr", "sk-test-tts"] {
                 assert!(!text.contains(secret), "诊断包泄露了 {secret}");
             }
-            assert!(bundle["excluded"].as_array().unwrap().iter().any(|e| e.as_str().unwrap().contains("密钥")));
+            assert!(
+                bundle["excluded"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.as_str().unwrap().contains("密钥"))
+            );
         }
 
         /// n68：诊断包脱敏覆盖每一个字符串字段（键值写法的密钥、Bearer、带凭据地址、设备 IP）。
@@ -5444,13 +7481,27 @@ mod imp {
             });
             scrub_bundle(&mut bundle);
             let text = bundle.to_string();
-            for leak in ["192.168.31.20", "sk-abc123", "tok.en", "user:pw", "zzz", "10.1.2.3", "abcd"] {
+            for leak in [
+                "192.168.31.20",
+                "sk-abc123",
+                "tok.en",
+                "user:pw",
+                "zzz",
+                "10.1.2.3",
+                "abcd",
+            ] {
                 assert!(!text.contains(leak), "{leak} 未脱敏：{text}");
             }
-            assert_eq!(bundle["models"]["llm"]["url"], "https://[REDACTED]@llm.example.test/v1?[REDACTED]");
+            assert_eq!(
+                bundle["models"]["llm"]["url"],
+                "https://[REDACTED]@llm.example.test/v1?[REDACTED]"
+            );
             assert_eq!(bundle["models"]["llm"]["model"], "gpt-test");
             assert_eq!(bundle["sessions"][0]["ip"], "<ip>");
-            assert_eq!(bundle["sessions"][0]["device_id"], "aa:bb:cc:11:22:33", "设备编号保留用于排障");
+            assert_eq!(
+                bundle["sessions"][0]["device_id"], "aa:bb:cc:11:22:33",
+                "设备编号保留用于排障"
+            );
             assert_eq!(bundle["number"], 42);
         }
 
@@ -5461,7 +7512,9 @@ mod imp {
             let port = listener.local_addr().unwrap().port();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let Ok((mut stream, _)) = listener.accept() else { return };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
                 let mut buf = [0u8; 4096];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let head = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -5476,8 +7529,14 @@ mod imp {
             });
 
             let temp = tempfile::tempdir().unwrap();
-            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
-            host.db.lock().unwrap().set_secret("voice.asr.main", "sk-stored-asr-secret", 1.0).unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            host.db
+                .lock()
+                .unwrap()
+                .set_secret("voice.asr.main", "sk-stored-asr-secret", 1.0)
+                .unwrap();
             let builtin = init(Some(host)).0.unwrap();
 
             let input = SectionInput {
@@ -5486,11 +7545,18 @@ mod imp {
             };
             let out = builtin.models_list(Section::Asr, &input).unwrap();
             assert_eq!(out["ok"], true);
-            assert_eq!(out["models"], serde_json::json!(["FunAudioLLM/SenseVoiceSmall", "Qwen/Qwen2.5-7B-Instruct"]));
+            assert_eq!(
+                out["models"],
+                serde_json::json!(["FunAudioLLM/SenseVoiceSmall", "Qwen/Qwen2.5-7B-Instruct"])
+            );
             assert!(!out.to_string().contains("sk-stored-asr-secret"));
             let head = rx.recv().unwrap();
             assert!(head.starts_with("GET /v1/models "), "{head}");
-            assert!(head.to_ascii_lowercase().contains("authorization: bearer sk-stored-asr-secret"), "{head}");
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("authorization: bearer sk-stored-asr-secret"),
+                "{head}"
+            );
 
             // 同基础地址跨分区复用已保存密钥（例如 TTS 填同一个基础地址且留空密钥时，自动沿用 ASR 已保存的本机密钥）
             let mut settings = builtin.settings();
@@ -5507,7 +7573,10 @@ mod imp {
                 ..Default::default()
             };
             assert_eq!(
-                builtin.secret_or_same_origin(Section::Tts, &tts_input).unwrap().as_deref(),
+                builtin
+                    .secret_or_same_origin(Section::Tts, &tts_input)
+                    .unwrap()
+                    .as_deref(),
                 Some("sk-stored-asr-secret")
             );
         }
@@ -5515,7 +7584,9 @@ mod imp {
         #[test]
         fn jev_save_shares_system_secret_switches_model_and_clears_cleanly() {
             let temp = tempfile::tempdir().unwrap();
-            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
             let builtin = init(Some(host.clone())).0.unwrap();
 
             // 初始未配置
@@ -5541,10 +7612,17 @@ mod imp {
             assert_eq!(saved["jev"]["feedback_enabled"], true);
             assert!(!saved.to_string().contains("sk-or-shared-jev-secret"));
             assert_eq!(
-                host.db.lock().unwrap().get_secret("jev_api_key").unwrap().as_deref(),
+                host.db
+                    .lock()
+                    .unwrap()
+                    .get_secret("jev_api_key")
+                    .unwrap()
+                    .as_deref(),
                 Some("sk-or-shared-jev-secret")
             );
-            assert!(moss_voice::settings::jev_feedback_enabled(&builtin.settings_file()));
+            assert!(moss_voice::settings::jev_feedback_enabled(
+                &builtin.settings_file()
+            ));
 
             // 顶部第 5 栏下拉框通过 local_save 切换模型版本与开关
             let switched = builtin
@@ -5554,28 +7632,43 @@ mod imp {
                 }))
                 .unwrap();
             assert_eq!(switched["jev"]["model"], "typesafe/jev-1.14");
-            assert!(builtin.local_save(&serde_json::json!({"jev_model": "gpt-4o"})).is_err());
+            assert!(
+                builtin
+                    .local_save(&serde_json::json!({"jev_model": "gpt-4o"}))
+                    .is_err()
+            );
 
             // 删除此项：清理 jev_api_key，并重置语音筛选与加工反馈开关
             let cleared = builtin.jev_save(None, true).unwrap();
             assert_eq!(cleared["jev"]["key_set"], false);
             assert_eq!(cleared["jev"]["voice_enabled"], false);
             assert_eq!(cleared["jev"]["feedback_enabled"], false);
-            assert_eq!(host.db.lock().unwrap().get_secret("jev_api_key").unwrap(), None);
+            assert_eq!(
+                host.db.lock().unwrap().get_secret("jev_api_key").unwrap(),
+                None
+            );
         }
 
         #[test]
         fn n61_wake_word_settings_base_package_and_push_guards() {
             let temp = tempfile::tempdir().unwrap();
-            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
             let builtin = init(Some(host)).0.unwrap();
             let status = builtin.wakeword_status().unwrap();
-            assert_eq!(status["word"]["text"], "你好 MOSS", "default suggestion is MOSS");
+            assert_eq!(
+                status["word"]["text"], "你好 MOSS",
+                "default suggestion is MOSS"
+            );
             assert_eq!(status["word"]["command"], "ni hao mo si");
             assert!(status["base"].is_null() && status["devices"].as_array().unwrap().is_empty());
 
             let saved = builtin.wakeword_manage(&serde_json::json!({"action": "save", "text": " MOSS MOSS ", "command": "Mo Si  mo si", "threshold": 0.3})).unwrap();
-            assert_eq!(saved["word"], serde_json::json!({"text": "MOSS MOSS", "command": "mo si mo si", "threshold": 0.3}));
+            assert_eq!(
+                saved["word"],
+                serde_json::json!({"text": "MOSS MOSS", "command": "mo si mo si", "threshold": 0.3})
+            );
             for bad in [
                 serde_json::json!({"action": "save", "text": "MOSS", "command": "moss", "threshold": 0.2}),
                 serde_json::json!({"action": "save", "text": "", "command": "mo si", "threshold": 0.2}),
@@ -5588,33 +7681,74 @@ mod imp {
             ] {
                 assert!(builtin.wakeword_manage(&bad).is_err(), "{bad}");
             }
-            assert_eq!(builtin.wakeword_status().unwrap()["word"]["command"], "mo si mo si", "rejected saves change nothing");
+            assert_eq!(
+                builtin.wakeword_status().unwrap()["word"]["command"],
+                "mo si mo si",
+                "rejected saves change nothing"
+            );
             let push = builtin.wakeword_manage(&serde_json::json!({"action": "push", "device_id": "never-allowed", "target": "custom", "confirmed": true}));
-            assert_eq!(push.unwrap_err().code, "wakeword_device_invalid", "only allowed devices");
+            assert_eq!(
+                push.unwrap_err().code,
+                "wakeword_device_invalid",
+                "only allowed devices"
+            );
 
             let base_path = temp.path().join("picked-assets.bin");
-            let base = moss_voice_server::wake_assets::pack_assets(&[moss_voice_server::wake_assets::AssetEntry {
-                name: "index.json".into(), data: br#"{"version":1,"text_font":"f.bin"}"#.to_vec(), width: 0, height: 0,
-            }, moss_voice_server::wake_assets::AssetEntry { name: "f.bin".into(), data: vec![1; 10], width: 0, height: 0 }]).unwrap();
+            let base = moss_voice_server::wake_assets::pack_assets(&[
+                moss_voice_server::wake_assets::AssetEntry {
+                    name: "index.json".into(),
+                    data: br#"{"version":1,"text_font":"f.bin"}"#.to_vec(),
+                    width: 0,
+                    height: 0,
+                },
+                moss_voice_server::wake_assets::AssetEntry {
+                    name: "f.bin".into(),
+                    data: vec![1; 10],
+                    width: 0,
+                    height: 0,
+                },
+            ])
+            .unwrap();
             std::fs::write(&base_path, &base).unwrap();
-            assert_eq!(builtin.wakeword_import_base(&base_path).unwrap()["text_font"], "f.bin");
+            assert_eq!(
+                builtin.wakeword_import_base(&base_path).unwrap()["text_font"],
+                "f.bin"
+            );
             assert_eq!(builtin.wakeword_status().unwrap()["base"]["files"], 2);
             std::fs::write(&base_path, b"not a package").unwrap();
             assert!(builtin.wakeword_import_base(&base_path).is_err());
-            assert_eq!(builtin.wakeword_status().unwrap()["base"]["files"], 2, "a bad import keeps the old base");
-            builtin.wakeword_manage(&serde_json::json!({"action": "clear_base", "confirmed": true})).unwrap();
+            assert_eq!(
+                builtin.wakeword_status().unwrap()["base"]["files"],
+                2,
+                "a bad import keeps the old base"
+            );
+            builtin
+                .wakeword_manage(&serde_json::json!({"action": "clear_base", "confirmed": true}))
+                .unwrap();
             assert!(builtin.wakeword_status().unwrap()["base"].is_null());
         }
 
         #[test]
         fn n59_role_settings_apply_without_restart_and_spoken_switch_is_saved() {
-            let server_ids: Vec<&str> = moss_voice_server::persona::BUILTINS.iter().map(|b| b.id).collect();
-            assert_eq!(server_ids, moss_voice::settings::BUILTIN_PERSONA_IDS, "settings and server role lists must match");
+            let server_ids: Vec<&str> = moss_voice_server::persona::BUILTINS
+                .iter()
+                .map(|b| b.id)
+                .collect();
+            assert_eq!(
+                server_ids,
+                moss_voice::settings::BUILTIN_PERSONA_IDS,
+                "settings and server role lists must match"
+            );
 
             let temp = tempfile::tempdir().unwrap();
-            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
             let builtin = init(Some(host)).0.unwrap();
-            assert_eq!(builtin.persona.system_prompt(), moss_voice_server::conversation::DEFAULT_SYSTEM_PROMPT);
+            assert_eq!(
+                builtin.persona.system_prompt(),
+                moss_voice_server::conversation::DEFAULT_SYSTEM_PROMPT
+            );
 
             let saved = builtin
                 .local_save(&serde_json::json!({
@@ -5623,24 +7757,51 @@ mod imp {
                 }))
                 .unwrap();
             assert_eq!(saved["local"]["settings"]["persona_style"], "custom_a1");
-            assert_eq!(saved["local"]["settings"]["custom_personas"][0]["name"], "老师傅");
-            assert!(builtin.persona.system_prompt().contains("当前说话角色：老师傅"), "UI save applies to the running role at once");
+            assert_eq!(
+                saved["local"]["settings"]["custom_personas"][0]["name"],
+                "老师傅"
+            );
+            assert!(
+                builtin
+                    .persona
+                    .system_prompt()
+                    .contains("当前说话角色：老师傅"),
+                "UI save applies to the running role at once"
+            );
 
-            assert!(builtin.local_save(&serde_json::json!({"persona_style": "custom_zz"})).is_err());
+            assert!(
+                builtin
+                    .local_save(&serde_json::json!({"persona_style": "custom_zz"}))
+                    .is_err()
+            );
             assert!(builtin
                 .local_save(&serde_json::json!({"custom_personas": [{"id": "custom_a1", "name": "老师傅", "prompt": "直接发 G1 X10"}]}))
                 .is_err());
-            assert_eq!(builtin.settings().builtin_local.persona_style, "custom_a1", "rejected saves change nothing");
+            assert_eq!(
+                builtin.settings().builtin_local.persona_style,
+                "custom_a1",
+                "rejected saves change nothing"
+            );
 
             // Spoken switch goes through the same settings file.
             assert_eq!(builtin.persona.switch("任务简报").unwrap(), "MOSS 任务简报");
-            assert_eq!(builtin.settings().builtin_local.persona_style, "moss_briefing");
+            assert_eq!(
+                builtin.settings().builtin_local.persona_style,
+                "moss_briefing"
+            );
 
             // Deleting the active custom role falls back to the default role.
-            builtin.local_save(&serde_json::json!({"persona_style": "custom_a1"})).unwrap();
-            let removed = builtin.local_save(&serde_json::json!({"custom_personas": []})).unwrap();
+            builtin
+                .local_save(&serde_json::json!({"persona_style": "custom_a1"}))
+                .unwrap();
+            let removed = builtin
+                .local_save(&serde_json::json!({"custom_personas": []}))
+                .unwrap();
             assert_eq!(removed["local"]["settings"]["persona_style"], "workshop");
-            assert_eq!(builtin.persona.system_prompt(), moss_voice_server::conversation::DEFAULT_SYSTEM_PROMPT);
+            assert_eq!(
+                builtin.persona.system_prompt(),
+                moss_voice_server::conversation::DEFAULT_SYSTEM_PROMPT
+            );
 
             // A spoken switch to a role the UI just deleted on disk fails instead of claiming success.
             builtin
@@ -5652,7 +7813,10 @@ mod imp {
             })
             .unwrap();
             assert!(builtin.persona.switch("守门员").is_err());
-            assert_eq!(builtin.persona.config(), persona_config(&builtin.settings().builtin_local));
+            assert_eq!(
+                builtin.persona.config(),
+                persona_config(&builtin.settings().builtin_local)
+            );
 
             // UI saves and spoken switches racing each other leave the running role equal to the file.
             std::thread::scope(|scope| {
@@ -5669,21 +7833,45 @@ mod imp {
                     }
                 });
             });
-            assert_eq!(builtin.persona.config(), persona_config(&builtin.settings().builtin_local));
+            assert_eq!(
+                builtin.persona.config(),
+                persona_config(&builtin.settings().builtin_local)
+            );
         }
 
         #[test]
         fn local_laya_device_selection_lifecycle_and_jev_save_preserve_local_routing() {
-            assert_eq!(BuiltinVoice::select_laya_device(true, false, None), "cuda:0");
+            assert_eq!(
+                BuiltinVoice::select_laya_device(true, false, None),
+                "cuda:0"
+            );
             assert_eq!(BuiltinVoice::select_laya_device(true, true, None), "cuda:0");
             assert_eq!(BuiltinVoice::select_laya_device(false, true, None), "mps");
             assert_eq!(BuiltinVoice::select_laya_device(false, false, None), "cpu");
-            assert_eq!(BuiltinVoice::select_laya_device(false, true, Some(" cuda:1 ")), "cuda:1");
-            assert_eq!(BuiltinVoice::select_laya_device(true, false, Some("   ")), "cuda:0");
-            assert!(!BuiltinVoice::probe_laya_cuda_available(std::path::Path::new("nonexistent-python"), true));
-            assert!(!BuiltinVoice::probe_laya_cuda_available(std::path::Path::new("nonexistent-python"), false));
-            assert!(!BuiltinVoice::probe_laya_mps_available(std::path::Path::new("nonexistent-python"), true));
-            assert!(!BuiltinVoice::probe_laya_mps_available(std::path::Path::new("nonexistent-python"), false));
+            assert_eq!(
+                BuiltinVoice::select_laya_device(false, true, Some(" cuda:1 ")),
+                "cuda:1"
+            );
+            assert_eq!(
+                BuiltinVoice::select_laya_device(true, false, Some("   ")),
+                "cuda:0"
+            );
+            assert!(!BuiltinVoice::probe_laya_cuda_available(
+                std::path::Path::new("nonexistent-python"),
+                true
+            ));
+            assert!(!BuiltinVoice::probe_laya_cuda_available(
+                std::path::Path::new("nonexistent-python"),
+                false
+            ));
+            assert!(!BuiltinVoice::probe_laya_mps_available(
+                std::path::Path::new("nonexistent-python"),
+                true
+            ));
+            assert!(!BuiltinVoice::probe_laya_mps_available(
+                std::path::Path::new("nonexistent-python"),
+                false
+            ));
 
             let temp = tempfile::tempdir().unwrap();
             let fake_install = |model_id: &str| {
@@ -5701,7 +7889,9 @@ mod imp {
             fake_install("onejev_1_6_0_8b");
             fake_install("onejev_1_6_4b");
 
-            let host = Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
             let mut voice_settings = moss_voice::VoiceSettings::default();
             voice_settings.mode = VoiceMode::Official;
             voice_settings.builtin_local.jev_model = "laya_multilingual".into();
@@ -5765,18 +7955,26 @@ mod imp {
                 let mut runner = builtin.laya.lock().unwrap();
                 runner.starting_model = None;
                 runner.starting_cancel = None;
-                runner.last_failure = Some(("onejev_1_6_4b".to_owned(), "OneJev 模型加载超时".to_owned()));
+                runner.last_failure =
+                    Some(("onejev_1_6_4b".to_owned(), "OneJev 模型加载超时".to_owned()));
             }
             assert_eq!(runtime(&builtin)["state"], "failed");
             assert_eq!(runtime(&builtin)["error"], "OneJev 模型加载超时");
             builtin.laya.lock().unwrap().last_failure =
                 Some(("onejev_1_6_0_8b".to_owned(), "别的档位的旧失败".to_owned()));
-            assert_eq!(runtime(&builtin)["state"], "stopped", "其他档位的失败不串到当前模型");
+            assert_eq!(
+                runtime(&builtin)["state"],
+                "stopped",
+                "其他档位的失败不串到当前模型"
+            );
             builtin.laya.lock().unwrap().last_failure = None;
-            let cpu_gpu = moss_voice::onejev::expected_gpu(builtin.models.root_for("onejev_1_6_4b"));
+            let cpu_gpu =
+                moss_voice::onejev::expected_gpu(builtin.models.root_for("onejev_1_6_4b"));
             assert_eq!(
                 runtime(&builtin)["notice"].as_str(),
-                moss_voice::onejev::local_jev_budget("onejev_1_6_4b", cpu_gpu).unwrap().notice
+                moss_voice::onejev::local_jev_budget("onejev_1_6_4b", cpu_gpu)
+                    .unwrap()
+                    .notice
             );
 
             // 切回 laya_multilingual 继续验证免密钥与备用密钥共存
@@ -5830,7 +8028,12 @@ mod imp {
             assert_eq!(saved_backup_key["jev"]["model"], "laya_multilingual");
             assert_eq!(saved_backup_key["jev"]["feedback_enabled"], true);
             assert_eq!(
-                host.db.lock().unwrap().get_secret("jev_api_key").unwrap().as_deref(),
+                host.db
+                    .lock()
+                    .unwrap()
+                    .get_secret("jev_api_key")
+                    .unwrap()
+                    .as_deref(),
                 Some("sk-or-backup-only")
             );
 
@@ -5848,12 +8051,21 @@ mod imp {
             // 2026-11-07：删除 Laya 时连同 MOSS 创建（带标记）的虚拟环境与 tmp 一起删
             let laya_root = temp.path().join("laya-env");
             std::fs::create_dir_all(laya_root.join(".venv").join("bin")).unwrap();
-            std::fs::write(laya_root.join(".venv").join(moss_voice::laya_env::MANAGED_MARKER), b"").unwrap();
+            std::fs::write(
+                laya_root
+                    .join(".venv")
+                    .join(moss_voice::laya_env::MANAGED_MARKER),
+                b"",
+            )
+            .unwrap();
             std::fs::create_dir_all(laya_root.join("tmp")).unwrap();
             *builtin.laya_root_for_test.lock().unwrap() = Some(laya_root.clone());
             assert_eq!(builtin.status()["local"]["laya_setup"]["state"], "idle");
             builtin.model_delete("laya_multilingual").unwrap();
-            assert!(!laya_root.exists(), "MOSS 创建的 Laya 虚拟环境随模型一起删除");
+            assert!(
+                !laya_root.exists(),
+                "MOSS 创建的 Laya 虚拟环境随模型一起删除"
+            );
             assert_eq!(
                 builtin.laya.lock().unwrap().generation,
                 gen_on_onejev,
@@ -6032,7 +8244,10 @@ mod imp {
                     let _ = stream.write_all(b"NOT_HTTP_BANNER\r\n");
                 }
             });
-            assert!(probe_local_jev_health_model(non_http_addr, std::time::Duration::from_millis(200)).is_none());
+            assert!(
+                probe_local_jev_health_model(non_http_addr, std::time::Duration::from_millis(200))
+                    .is_none()
+            );
 
             for bad_http in [
                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found".as_slice(),
@@ -6065,7 +8280,8 @@ mod imp {
                 }
             });
             assert_eq!(
-                probe_local_jev_health_model(http_addr, std::time::Duration::from_millis(200)).as_deref(),
+                probe_local_jev_health_model(http_addr, std::time::Duration::from_millis(200))
+                    .as_deref(),
                 Some("laya_multilingual")
             );
 
@@ -6089,7 +8305,8 @@ mod imp {
                 }
             });
             assert_eq!(
-                probe_local_jev_health_model(onejev_addr, std::time::Duration::from_millis(200)).as_deref(),
+                probe_local_jev_health_model(onejev_addr, std::time::Duration::from_millis(200))
+                    .as_deref(),
                 Some("onejev_1_6_4b")
             );
 
@@ -6110,7 +8327,8 @@ mod imp {
                 }
             });
             assert_eq!(
-                probe_local_jev_health_model(ext_addr, std::time::Duration::from_millis(200)).as_deref(),
+                probe_local_jev_health_model(ext_addr, std::time::Duration::from_millis(200))
+                    .as_deref(),
                 Some("external_onejev:custom-qev")
             );
         }
@@ -6119,24 +8337,42 @@ mod imp {
     /// 测试豆包识别或合成（NV7）：识别送 1 秒低音量正弦音，合成一句短话。结果与错误都不含密钥。
     fn test_doubao(resolved: &moss_voice::models::ResolvedSection) -> moss_voice::TestResult {
         let started = std::time::Instant::now();
-        let outcome: Result<(String, Option<String>), moss_voice_providers::ProviderError> = tauri::async_runtime::block_on(async {
-            match resolved.section {
-                Section::Asr => {
-                    let asr = DoubaoAsr::new(&resolved.url, &resolved.api_key, &resolved.model)?;
-                    let tone: Vec<i16> =
-                        (0..3_200).map(|index| ((index as f64 / 16_000.0 * 440.0 * std::f64::consts::TAU).sin() * 1200.0) as i16).collect();
-                    asr.transcribe(&tone, 16_000).await.map(|_| ("连接成功，识别接口已返回结果（流式）".to_owned(), None))
+        let outcome: Result<(String, Option<String>), moss_voice_providers::ProviderError> =
+            tauri::async_runtime::block_on(async {
+                match resolved.section {
+                    Section::Asr => {
+                        let asr =
+                            DoubaoAsr::new(&resolved.url, &resolved.api_key, &resolved.model)?;
+                        let tone: Vec<i16> = (0..3_200)
+                            .map(|index| {
+                                ((index as f64 / 16_000.0 * 440.0 * std::f64::consts::TAU).sin()
+                                    * 1200.0) as i16
+                            })
+                            .collect();
+                        asr.transcribe(&tone, 16_000)
+                            .await
+                            .map(|_| ("连接成功，识别接口已返回结果（流式）".to_owned(), None))
+                    }
+                    _ => {
+                        let tts = DoubaoTts::new(
+                            &resolved.url,
+                            &resolved.api_key,
+                            &resolved.model,
+                            &resolved.voice,
+                            resolved.speed as f32,
+                        )?;
+                        let pcm = tts.synthesize("你好。").await?;
+                        let seconds = pcm.samples.len() as f64 / pcm.sample_rate as f64;
+                        let wav =
+                            moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
+                        let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
+                        Ok((
+                            format!("连接成功，合成了 {seconds:.1} 秒音频（流式）"),
+                            Some(data_url),
+                        ))
+                    }
                 }
-                _ => {
-                    let tts = DoubaoTts::new(&resolved.url, &resolved.api_key, &resolved.model, &resolved.voice, resolved.speed as f32)?;
-                    let pcm = tts.synthesize("你好。").await?;
-                    let seconds = pcm.samples.len() as f64 / pcm.sample_rate as f64;
-                    let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
-                    let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
-                    Ok((format!("连接成功，合成了 {seconds:.1} 秒音频（流式）"), Some(data_url)))
-                }
-            }
-        });
+            });
         let (ok, detail, audio_data_url) = match outcome {
             Ok((detail, audio_data_url)) => (true, detail, audio_data_url),
             Err(error) => (false, error.to_string(), None),
@@ -6174,7 +8410,11 @@ mod imp {
     pub fn parse_sections(values: &[String]) -> Result<Vec<Section>, CenterError> {
         values
             .iter()
-            .map(|value| Section::parse(value).ok_or_else(|| CenterError::new("model_input_invalid", 400, "分区只能是 llm、asr 或 tts")))
+            .map(|value| {
+                Section::parse(value).ok_or_else(|| {
+                    CenterError::new("model_input_invalid", 400, "分区只能是 llm、asr 或 tts")
+                })
+            })
             .collect()
     }
 
@@ -6196,7 +8436,10 @@ pub use imp::{BuiltinVoice, autostart, init, shutdown};
 /// 2026-11-05：只给前端实际调用它的两个窗口——主窗口语音页（`VoiceBuiltinCard`）与打包私密页
 /// （`voicePrivate.jsx` 轮询运行状态），其他窗口即使拿到 `default` capability（`windows:["*"]`）也读不到。
 #[tauri::command]
-pub async fn voice_builtin_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+pub async fn voice_builtin_status(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_status_window(&window)?;
     #[cfg(desktop)]
@@ -6232,7 +8475,10 @@ pub async fn voice_builtin_stop(app: tauri::AppHandle, window: tauri::WebviewWin
 /// 路径与内容都不来自网页。与状态读取同权限：只给经 `require_status_window` 确认的 MOSS 主窗口。
 /// 用户取消时返回 `{saved: false}`；成功返回文件名（不回传完整路径）、字节数与事件条数。
 #[tauri::command]
-pub async fn voice_diagnostics_export(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+pub async fn voice_diagnostics_export(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_status_window(&window)?;
     #[cfg(desktop)]
@@ -6242,7 +8488,10 @@ pub async fn voice_diagnostics_export(app: tauri::AppHandle, window: tauri::Webv
         let text = serde_json::to_string_pretty(&bundle).map_err(|_| {
             serde_json::json!({"code": "diagnostics_export_failed", "message": "诊断包生成失败（内容无法转成 JSON）"})
         })?;
-        let default_name = format!("moss-voice-diagnostics-{}.json", bundle["generated_at_ms"].as_u64().unwrap_or(0) / 1000);
+        let default_name = format!(
+            "moss-voice-diagnostics-{}.json",
+            bundle["generated_at_ms"].as_u64().unwrap_or(0) / 1000
+        );
         let picker = app.clone();
         let name = default_name.clone();
         let picked = tauri::async_runtime::spawn_blocking(move || {
@@ -6282,11 +8531,19 @@ pub async fn voice_diagnostics_export(app: tauri::AppHandle, window: tauri::Webv
 
 /// 允许（`allowed`）或撤销（`revoked`）设备。允许后设备需重启以重新获取 token。
 #[tauri::command]
-pub async fn voice_device_set_status(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, status: String) -> CmdResult {
+pub async fn voice_device_set_status(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    device_id: String,
+    status: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result = imp::run(app, move |builtin| builtin.set_device_status(&device_id, &status)).await;
+    let result = imp::run(app, move |builtin| {
+        builtin.set_device_status(&device_id, &status)
+    })
+    .await;
     #[cfg(mobile)]
     let result = desktop_only((app, window, device_id, status));
     result
@@ -6313,7 +8570,12 @@ pub async fn voice_device_request(
 }
 
 #[tauri::command]
-pub async fn voice_device_rename(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, name: String) -> CmdResult {
+pub async fn voice_device_rename(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    device_id: String,
+    name: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6325,7 +8587,12 @@ pub async fn voice_device_rename(app: tauri::AppHandle, window: tauri::WebviewWi
 
 /// 测试内置服务的一个模型分区（`llm` / `asr` / `tts`）；密钥留空时用已保存的密钥。
 #[tauri::command]
-pub async fn voice_builtin_models_test(app: tauri::AppHandle, window: tauri::WebviewWindow, section: String, input: Value) -> CmdResult {
+pub async fn voice_builtin_models_test(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    section: String,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6334,8 +8601,9 @@ pub async fn voice_builtin_models_test(app: tauri::AppHandle, window: tauri::Web
             return builtin.jev_test(&input);
         }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
-        let input: moss_voice::SectionInput = serde_json::from_value(input)
-            .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确"))?;
+        let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {
+            moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确")
+        })?;
         builtin.models_test(section, &input)
     })
     .await;
@@ -6346,7 +8614,12 @@ pub async fn voice_builtin_models_test(app: tauri::AppHandle, window: tauri::Web
 
 /// 读取内置服务一个模型分区（`llm` / `asr` / `tts` / `jev`）支持的模型列表；密钥留空时用已保存的密钥。
 #[tauri::command]
-pub async fn voice_builtin_models_list(app: tauri::AppHandle, window: tauri::WebviewWindow, section: String, input: Value) -> CmdResult {
+pub async fn voice_builtin_models_list(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    section: String,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6355,8 +8628,9 @@ pub async fn voice_builtin_models_list(app: tauri::AppHandle, window: tauri::Web
             return builtin.jev_models_list(&input);
         }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
-        let input: moss_voice::SectionInput = serde_json::from_value(input)
-            .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确"))?;
+        let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {
+            moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确")
+        })?;
         builtin.models_list(section, &input)
     })
     .await;
@@ -6367,7 +8641,12 @@ pub async fn voice_builtin_models_list(app: tauri::AppHandle, window: tauri::Web
 
 /// 保存内置服务的模型设置。`clear` 中的分区删除设置与密钥。
 #[tauri::command]
-pub async fn voice_builtin_models_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value, clear: Option<Vec<String>>) -> CmdResult {
+pub async fn voice_builtin_models_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+    clear: Option<Vec<String>>,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6378,16 +8657,25 @@ pub async fn voice_builtin_models_save(app: tauri::AppHandle, window: tauri::Web
         if clear_jev && clear_list.len() == 1 && input.as_object().is_none_or(|o| o.is_empty()) {
             return builtin.jev_save(None, true);
         }
-        if !clear_jev && clear_list.is_empty() && jev_input.is_some() && input.as_object().is_some_and(|o| o.len() == 1) {
+        if !clear_jev
+            && clear_list.is_empty()
+            && jev_input.is_some()
+            && input.as_object().is_some_and(|o| o.len() == 1)
+        {
             return builtin.jev_save(jev_input, false);
         }
-        let non_jev_clear: Vec<String> = clear_list.into_iter().filter(|s| s.trim() != "jev").collect();
+        let non_jev_clear: Vec<String> = clear_list
+            .into_iter()
+            .filter(|s| s.trim() != "jev")
+            .collect();
         let mut non_jev_input = input.clone();
         if let Some(obj) = non_jev_input.as_object_mut() {
             obj.remove("jev");
         }
-        let parsed_input: moss_voice::ModelsInput = serde_json::from_value(non_jev_input)
-            .map_err(|_| moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确"))?;
+        let parsed_input: moss_voice::ModelsInput =
+            serde_json::from_value(non_jev_input).map_err(|_| {
+                moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确")
+            })?;
         let parsed_clear = imp::parse_sections(&non_jev_clear)?;
         if clear_jev || jev_input.is_some() {
             builtin.precheck_jev_save_input(jev_input, clear_jev, &parsed_input, &parsed_clear)?;
@@ -6406,7 +8694,11 @@ pub async fn voice_builtin_models_save(app: tauri::AppHandle, window: tauri::Web
 
 /// 保存本地模型设置（`asr` / `tts` / `vad` 开关、`tts_speaker`、`tts_speed`、`mirror`）。
 #[tauri::command]
-pub async fn voice_local_save(app: tauri::AppHandle, window: tauri::WebviewWindow, settings: Value) -> CmdResult {
+pub async fn voice_local_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    settings: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6418,7 +8710,11 @@ pub async fn voice_local_save(app: tauri::AppHandle, window: tauri::WebviewWindo
 
 /// 开始下载本地模型（id 见 `local_models::CATALOG`）；进度在状态的 `local.models` 中。
 #[tauri::command]
-pub async fn voice_local_model_download(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> CmdResult {
+pub async fn voice_local_model_download(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6429,7 +8725,11 @@ pub async fn voice_local_model_download(app: tauri::AppHandle, window: tauri::We
 }
 
 #[tauri::command]
-pub async fn voice_local_model_cancel(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> CmdResult {
+pub async fn voice_local_model_cancel(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6440,7 +8740,11 @@ pub async fn voice_local_model_cancel(app: tauri::AppHandle, window: tauri::Webv
 }
 
 #[tauri::command]
-pub async fn voice_local_model_delete(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> CmdResult {
+pub async fn voice_local_model_delete(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6452,7 +8756,11 @@ pub async fn voice_local_model_delete(app: tauri::AppHandle, window: tauri::Webv
 
 /// 自动准备 Laya 的 Python 运行环境（2026-11-07）：`action` 为 `start` / `cancel`。
 #[tauri::command]
-pub async fn voice_local_laya_setup(app: tauri::AppHandle, window: tauri::WebviewWindow, action: String) -> CmdResult {
+pub async fn voice_local_laya_setup(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    action: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6466,7 +8774,9 @@ pub async fn voice_local_laya_setup(app: tauri::AppHandle, window: tauri::Webvie
 #[cfg(all(test, desktop))]
 #[test]
 fn doubao_defaults_match_the_provider() {
-    use moss_voice::models::{DOUBAO_ASR_RESOURCE, DOUBAO_ASR_URL, DOUBAO_TTS_RESOURCE, DOUBAO_TTS_URL};
+    use moss_voice::models::{
+        DOUBAO_ASR_RESOURCE, DOUBAO_ASR_URL, DOUBAO_TTS_RESOURCE, DOUBAO_TTS_URL,
+    };
     use moss_voice_providers::doubao;
     assert_eq!(DOUBAO_ASR_URL, doubao::DEFAULT_ASR_URL);
     assert_eq!(DOUBAO_ASR_RESOURCE, doubao::DEFAULT_ASR_RESOURCE);
@@ -6475,41 +8785,50 @@ fn doubao_defaults_match_the_provider() {
 }
 
 #[tauri::command]
-pub async fn voice_agent_status(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult{
+pub async fn voice_agent_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|Ok(voice.agent_status())).await;
+    let result = imp::run(app, |voice| Ok(voice.agent_status())).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window));
+    let result = desktop_only((app, window));
     result
 }
 #[tauri::command]
-pub async fn voice_agent_save(app:tauri::AppHandle, window: tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_agent_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.agent_save(&input)).await;
+    let result = imp::run(app, move |voice| voice.agent_save(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window,input));
+    let result = desktop_only((app, window, input));
     result
 }
 /// 停止正在运行的 Agent 任务（进程树随 Job Object 结束）。
 #[tauri::command]
-pub async fn voice_agent_stop(app:tauri::AppHandle, window: tauri::WebviewWindow,run_id:String)->CmdResult{
+pub async fn voice_agent_stop(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    run_id: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|Ok(voice.agent_stop(&run_id))).await;
+    let result = imp::run(app, move |voice| Ok(voice.agent_stop(&run_id))).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window,run_id));
+    let result = desktop_only((app, window, run_id));
     result
 }
 
-
-
 #[tauri::command]
-pub async fn voice_music_pick_directory(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+pub async fn voice_music_pick_directory(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
@@ -6517,47 +8836,64 @@ pub async fn voice_music_pick_directory(app: tauri::AppHandle, window: tauri::We
         use tauri_plugin_dialog::DialogExt;
         // Opens only after an explicit click in the desktop main window.
         // The user-selected path is returned to the form, not saved or scanned.
-        let Some(picked) = app.dialog().file().set_title("选择本地音乐文件夹").blocking_pick_folder() else {
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_title("选择本地音乐文件夹")
+            .blocking_pick_folder()
+        else {
             return Ok(Value::Null);
         };
-        let path = picked.into_path().map_err(|_|serde_json::json!({
-            "code":"music_invalid","message":"无法识别选择的音乐目录"
-        }))?;
-        let name = path.to_str().ok_or_else(||serde_json::json!({
-            "code":"music_invalid","message":"音乐目录包含不支持的字符"
-        }))?;
+        let path = picked.into_path().map_err(|_| {
+            serde_json::json!({
+                "code":"music_invalid","message":"无法识别选择的音乐目录"
+            })
+        })?;
+        let name = path.to_str().ok_or_else(|| {
+            serde_json::json!({
+                "code":"music_invalid","message":"音乐目录包含不支持的字符"
+            })
+        })?;
         if !path.is_absolute() || name.len() > 1024 || name.chars().any(char::is_control) {
             return Err(serde_json::json!({
                 "code":"music_invalid","message":"所选路径无效或过长"
             }));
         }
         Ok(serde_json::json!({"directory":name}))
-    }).await.map_err(|_|serde_json::json!({
-        "code":"voice_internal","message":"选择音乐目录失败"
-    }))?;
+    })
+    .await
+    .map_err(|_| {
+        serde_json::json!({
+            "code":"voice_internal","message":"选择音乐目录失败"
+        })
+    })?;
     #[cfg(mobile)]
     let result = desktop_only((app, window));
     result
 }
 
 #[tauri::command]
-pub async fn voice_music_status(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult {
+pub async fn voice_music_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|Ok(voice.music_status())).await;
+    let result = imp::run(app, |voice| Ok(voice.music_status())).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window));
+    let result = desktop_only((app, window));
     result
 }
 #[tauri::command]
-pub async fn voice_music_save(app:tauri::AppHandle, window: tauri::WebviewWindow,input:Value)->CmdResult {
+pub async fn voice_music_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.music_save(&input)).await;
+    let result = imp::run(app, move |voice| voice.music_save(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window,input));
+    let result = desktop_only((app, window, input));
     result
 }
 
@@ -6572,29 +8908,39 @@ pub async fn voice_home_status(app: tauri::AppHandle, window: tauri::WebviewWind
     result
 }
 #[tauri::command]
-pub async fn voice_home_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
+pub async fn voice_home_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.home_save(&input)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 
 #[tauri::command]
-pub async fn voice_home_backup_export(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+pub async fn voice_home_backup_export(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|voice.home_backup_export()).await;
+    let result = imp::run(app, |voice| voice.home_backup_export()).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result = desktop_only(app);
     result
 }
 /// Explicit local-file picker; no path or bytes are supplied by web content.
 #[tauri::command]
-pub async fn voice_home_backup_audit(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+pub async fn voice_home_backup_audit(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
@@ -6614,38 +8960,50 @@ pub async fn voice_home_backup_audit(app:tauri::AppHandle,window:tauri::WebviewW
         Ok(serde_json::json!({"risk":category,"inspected_bytes":audit.inspected_bytes,"safe_to_share":false}))
     }).await.map_err(|_|serde_json::json!({"code":"home_audit_failed","message":"历史文件审计未完成"}))?;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result = desktop_only(app);
     result
 }
 
 #[tauri::command]
-pub async fn voice_home_backup_restore(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_home_backup_restore(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.home_backup_restore(&input)).await;
+    let result = imp::run(app, move |voice| voice.home_backup_restore(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
-pub async fn voice_home_token_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
+pub async fn voice_home_token_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |voice| voice.home_token_save(&input)).await;
     #[cfg(mobile)]
-    let result = desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
-pub async fn voice_home_voice_consent(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_home_voice_consent(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.home_voice_consent(&input)).await;
+    let result = imp::run(app, move |voice| voice.home_voice_consent(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
@@ -6659,171 +9017,233 @@ pub async fn voice_home_discover(app: tauri::AppHandle, window: tauri::WebviewWi
     result
 }
 #[tauri::command]
-pub async fn voice_home_approvals(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+pub async fn voice_home_approvals(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|voice.home_approvals()).await;
+    let result = imp::run(app, |voice| voice.home_approvals()).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result = desktop_only(app);
     result
 }
 #[tauri::command]
-pub async fn voice_home_approval_cancel(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_home_approval_cancel(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.home_approval_cancel(&input)).await;
+    let result = imp::run(app, move |voice| voice.home_approval_cancel(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
-pub async fn voice_home_control_consent(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_home_control_consent(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.home_control_consent(&input)).await;
+    let result = imp::run(app, move |voice| voice.home_control_consent(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
-pub async fn voice_speaker_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_speaker_manage(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.speaker_manage(&input)).await;
+    let result = imp::run(app, move |voice| voice.speaker_manage(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
-pub async fn voice_firmware_status(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+pub async fn voice_firmware_status(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|voice.firmware_status()).await;
+    let result = imp::run(app, |voice| voice.firmware_status()).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result = desktop_only(app);
     result
 }
 /// 弹出文件选择框导入固件；路径和内容都不来自网页。
 #[tauri::command]
-pub async fn voice_firmware_import(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+pub async fn voice_firmware_import(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result={
-        let picker=app.clone();
-        let picked=tauri::async_runtime::spawn_blocking(move||{
+    let result = {
+        let picker = app.clone();
+        let picked = tauri::async_runtime::spawn_blocking(move || {
             use tauri_plugin_dialog::DialogExt;
-            picker.dialog().file().set_title("选择 ESP32 应用固件（.bin）").add_filter("固件",&["bin"]).blocking_pick_file().and_then(|p|p.into_path().ok())
-        }).await.map_err(|_|serde_json::json!({"code":"firmware_invalid","message":"选择固件失败"}))?;
+            picker
+                .dialog()
+                .file()
+                .set_title("选择 ESP32 应用固件（.bin）")
+                .add_filter("固件", &["bin"])
+                .blocking_pick_file()
+                .and_then(|p| p.into_path().ok())
+        })
+        .await
+        .map_err(|_| serde_json::json!({"code":"firmware_invalid","message":"选择固件失败"}))?;
         match picked {
-            None=>Ok(Value::Null),
-            Some(path)=>imp::run(app,move|voice|voice.firmware_import(&path)).await,
+            None => Ok(Value::Null),
+            Some(path) => imp::run(app, move |voice| voice.firmware_import(&path)).await,
         }
     };
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result = desktop_only(app);
     result
 }
 #[tauri::command]
-pub async fn voice_firmware_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_firmware_manage(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.firmware_manage(&input)).await;
+    let result = imp::run(app, move |voice| voice.firmware_manage(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 /// n61 设备唤醒词（n67 起与固件一样在主窗口语音中心操作，来源固定为本进程后端上的主窗口）。
 #[tauri::command]
-pub async fn voice_wakeword_status(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+pub async fn voice_wakeword_status(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|voice.wakeword_status()).await;
+    let result = imp::run(app, |voice| voice.wakeword_status()).await;
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result = desktop_only(app);
     result
 }
 /// 弹出文件选择框导入基础资源包；路径和内容都不来自网页。
 #[tauri::command]
-pub async fn voice_wakeword_import_base(app:tauri::AppHandle,window:tauri::WebviewWindow)->CmdResult{
+pub async fn voice_wakeword_import_base(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result={
-        let picker=app.clone();
-        let picked=tauri::async_runtime::spawn_blocking(move||{
+    let result = {
+        let picker = app.clone();
+        let picked = tauri::async_runtime::spawn_blocking(move || {
             use tauri_plugin_dialog::DialogExt;
-            picker.dialog().file().set_title("选择小智资源包（assets.bin）").add_filter("资源包",&["bin"]).blocking_pick_file().and_then(|p|p.into_path().ok())
-        }).await.map_err(|_|serde_json::json!({"code":"wakeword_invalid","message":"选择资源包失败"}))?;
+            picker
+                .dialog()
+                .file()
+                .set_title("选择小智资源包（assets.bin）")
+                .add_filter("资源包", &["bin"])
+                .blocking_pick_file()
+                .and_then(|p| p.into_path().ok())
+        })
+        .await
+        .map_err(|_| serde_json::json!({"code":"wakeword_invalid","message":"选择资源包失败"}))?;
         match picked {
-            None=>Ok(Value::Null),
-            Some(path)=>imp::run(app,move|voice|voice.wakeword_import_base(&path)).await,
+            None => Ok(Value::Null),
+            Some(path) => imp::run(app, move |voice| voice.wakeword_import_base(&path)).await,
         }
     };
     #[cfg(mobile)]
-    let result=desktop_only(app);
+    let result = desktop_only(app);
     result
 }
 #[tauri::command]
-pub async fn voice_wakeword_manage(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_wakeword_manage(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.wakeword_manage(&input)).await;
+    let result = imp::run(app, move |voice| voice.wakeword_manage(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
-pub async fn voice_home_approval_approve(app:tauri::AppHandle,window:tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_home_approval_approve(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.home_approval_approve(&input)).await;
+    let result = imp::run(app, move |voice| voice.home_approval_approve(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app,input));
+    let result = desktop_only((app, input));
     result
 }
 #[tauri::command]
-pub async fn voice_vision_status(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult{
+pub async fn voice_vision_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|Ok(voice.vision_status())).await;
+    let result = imp::run(app, |voice| Ok(voice.vision_status())).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window));
+    let result = desktop_only((app, window));
     result
 }
 #[tauri::command]
-pub async fn voice_vision_save(app:tauri::AppHandle, window: tauri::WebviewWindow,input:Value)->CmdResult{
+pub async fn voice_vision_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,move|voice|voice.vision_save(&input)).await;
+    let result = imp::run(app, move |voice| voice.vision_save(&input)).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window,input));
+    let result = desktop_only((app, window, input));
     result
 }
 #[tauri::command]
-pub async fn voice_vision_test(app:tauri::AppHandle, window: tauri::WebviewWindow)->CmdResult{
+pub async fn voice_vision_test(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
     #[cfg(desktop)]
     require_main_window(&window)?;
     #[cfg(desktop)]
-    let result=imp::run(app,|voice|voice.vision_test()).await;
+    let result = imp::run(app, |voice| voice.vision_test()).await;
     #[cfg(mobile)]
-    let result=desktop_only((app, window));
+    let result = desktop_only((app, window));
     result
 }
 
 #[tauri::command]
-pub async fn voice_plugins_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+pub async fn voice_plugins_status(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
@@ -6834,7 +9254,11 @@ pub async fn voice_plugins_status(app: tauri::AppHandle, window: tauri::WebviewW
 }
 
 #[tauri::command]
-pub async fn voice_plugins_save(app: tauri::AppHandle, window: tauri::WebviewWindow, input: Value) -> CmdResult {
+pub async fn voice_plugins_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    input: Value,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
@@ -6856,7 +9280,11 @@ pub async fn voice_memory_list(app: tauri::AppHandle, window: tauri::WebviewWind
 }
 
 #[tauri::command]
-pub async fn voice_memory_set_enabled(app: tauri::AppHandle, window: tauri::WebviewWindow, enabled: bool) -> CmdResult {
+pub async fn voice_memory_set_enabled(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
@@ -6867,22 +9295,39 @@ pub async fn voice_memory_set_enabled(app: tauri::AppHandle, window: tauri::Webv
 }
 
 #[tauri::command]
-pub async fn voice_memory_save(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, expected_revision: i64, summary: String) -> CmdResult {
+pub async fn voice_memory_save(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    device_id: String,
+    expected_revision: i64,
+    summary: String,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result = imp::run(app, move |voice| voice.memory_edit(&device_id, expected_revision, &summary)).await;
+    let result = imp::run(app, move |voice| {
+        voice.memory_edit(&device_id, expected_revision, &summary)
+    })
+    .await;
     #[cfg(mobile)]
     let result = desktop_only((app, device_id, expected_revision, summary));
     result
 }
 
 #[tauri::command]
-pub async fn voice_memory_clear(app: tauri::AppHandle, window: tauri::WebviewWindow, device_id: String, expected_revision: i64) -> CmdResult {
+pub async fn voice_memory_clear(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    device_id: String,
+    expected_revision: i64,
+) -> CmdResult {
     #[cfg(desktop)]
     require_private_settings_window(&window)?;
     #[cfg(desktop)]
-    let result = imp::run(app, move |voice| voice.memory_edit(&device_id, expected_revision, "")).await;
+    let result = imp::run(app, move |voice| {
+        voice.memory_edit(&device_id, expected_revision, "")
+    })
+    .await;
     #[cfg(mobile)]
     let result = desktop_only((app, device_id, expected_revision));
     result

@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::safe_action_requires_approval;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub enum RiskLevel {
     /// 只读
     R0,
@@ -35,13 +37,20 @@ impl RiskLevel {
 }
 
 fn text<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    arguments.get(key).and_then(serde_json::Value::as_str).map(str::trim).filter(|value| !value.is_empty())
+    arguments
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn flag(arguments: &serde_json::Value, key: &str) -> bool {
     match arguments.get(key) {
         Some(serde_json::Value::Bool(value)) => *value,
-        Some(serde_json::Value::String(value)) => matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+        Some(serde_json::Value::String(value)) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes"
+        ),
         Some(serde_json::Value::Number(value)) => value.as_i64() == Some(1),
         _ => false,
     }
@@ -52,7 +61,10 @@ fn flag(arguments: &serde_json::Value, key: &str) -> bool {
 pub fn tool_never_exposed(name: &str) -> bool {
     matches!(
         name,
-        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool" | "open_jsjds_website_tool"
+        "command_execution_tool"
+            | "open_app_tool"
+            | "shortcut_key_execution_tool"
+            | "open_jsjds_website_tool"
     )
 }
 
@@ -99,8 +111,12 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
             // 保存、导入可能覆盖已有参数，删除不可逆：材料库删除 / 覆盖属于 R4
             _ => R4,
         },
-        "generate_text_image_tool" | "select_calibration_cell_tool" | "refine_laser_params_from_feedback_tool" => R1,
-        "generate_text_laser_task_tool" | "generate_text_image_gcode_tool" | "ai_laser_gcode_tool" => {
+        "generate_text_image_tool"
+        | "select_calibration_cell_tool"
+        | "refine_laser_params_from_feedback_tool" => R1,
+        "generate_text_laser_task_tool"
+        | "generate_text_image_gcode_tool"
+        | "ai_laser_gcode_tool" => {
             if flag(arguments, "confirmed") && flag(arguments, "send_after_generate") {
                 R3
             } else {
@@ -129,7 +145,10 @@ pub fn tool_risk(name: &str, arguments: &serde_json::Value) -> Option<RiskLevel>
                 R1
             }
         }
-        "command_execution_tool" | "open_app_tool" | "shortcut_key_execution_tool" | "open_jsjds_website_tool" => R4,
+        "command_execution_tool"
+        | "open_app_tool"
+        | "shortcut_key_execution_tool"
+        | "open_jsjds_website_tool" => R4,
         _ => return None,
     };
     Some(level)
@@ -147,22 +166,46 @@ mod tests {
             ("check_laser_connection_tool", json!({}), R0),
             ("laser_workflow_tool", json!({}), R0),
             ("laser_workflow_tool", json!({"action": "status"}), R0),
-            ("laser_workflow_tool", json!({"action": "preview", "text": "你好"}), R1),
+            (
+                "laser_workflow_tool",
+                json!({"action": "preview", "text": "你好"}),
+                R1,
+            ),
             ("laser_workflow_tool", json!({"action": "cancel"}), R2),
-            ("laser_workflow_tool", json!({"action": "confirm_send", "confirmed": true}), R3),
+            (
+                "laser_workflow_tool",
+                json!({"action": "confirm_send", "confirmed": true}),
+                R3,
+            ),
             ("laser_workflow_tool", json!({"action": "resume"}), R3),
             ("laser_workflow_tool", json!({"action": "SEND"}), R3),
             ("laser_safe_action_tool", json!({"action": "status"}), R0),
-            ("laser_safe_action_tool", json!({"action": "emergency_stop"}), R2),
+            (
+                "laser_safe_action_tool",
+                json!({"action": "emergency_stop"}),
+                R2,
+            ),
             ("laser_safe_action_tool", json!({"action": "laser_off"}), R2),
-            ("laser_safe_action_tool", json!({"action": "feed_override_minus_10"}), R2),
+            (
+                "laser_safe_action_tool",
+                json!({"action": "feed_override_minus_10"}),
+                R2,
+            ),
             ("laser_safe_action_tool", json!({"action": "home"}), R3),
-            ("laser_safe_action_tool", json!({"action": "power_override_plus_10"}), R3),
+            (
+                "laser_safe_action_tool",
+                json!({"action": "power_override_plus_10"}),
+                R3,
+            ),
             ("laser_safe_action_tool", json!({}), R3),
             ("laser_grbl_tool", json!({"action": "probe"}), R0),
             ("laser_network_grbl_tool", json!({"action": "stop"}), R2),
             ("laser_grbl_tool", json!({"action": "send_command"}), R4),
-            ("laser_network_grbl_tool", json!({"action": "send_file"}), R4),
+            (
+                "laser_network_grbl_tool",
+                json!({"action": "send_file"}),
+                R4,
+            ),
             ("material_params_tool", json!({}), R0),
             ("material_params_tool", json!({"action": "get"}), R0),
             ("material_params_tool", json!({"action": "save"}), R4),
@@ -172,29 +215,74 @@ mod tests {
             ("generate_text_image_tool", json!({}), R1),
             ("select_calibration_cell_tool", json!({}), R1),
             ("refine_laser_params_from_feedback_tool", json!({}), R1),
-            ("generate_text_laser_task_tool", json!({"confirmed": true}), R1),
-            ("generate_text_laser_task_tool", json!({"confirmed": true, "send_after_generate": true}), R3),
-            ("ai_laser_gcode_tool", json!({"confirmed": "true", "send_after_generate": "true"}), R3),
+            (
+                "generate_text_laser_task_tool",
+                json!({"confirmed": true}),
+                R1,
+            ),
+            (
+                "generate_text_laser_task_tool",
+                json!({"confirmed": true, "send_after_generate": true}),
+                R3,
+            ),
+            (
+                "ai_laser_gcode_tool",
+                json!({"confirmed": "true", "send_after_generate": "true"}),
+                R3,
+            ),
             ("run_calibration_grid_tool", json!({"material": "椴木"}), R1),
-            ("run_calibration_grid_tool", json!({"calibration_id": "cal_1"}), R1),
-            ("run_calibration_grid_tool", json!({"calibration_id": "cal_1", "confirmed": true}), R3),
+            (
+                "run_calibration_grid_tool",
+                json!({"calibration_id": "cal_1"}),
+                R1,
+            ),
+            (
+                "run_calibration_grid_tool",
+                json!({"calibration_id": "cal_1", "confirmed": true}),
+                R3,
+            ),
             ("start_tuned_job_tool", json!({"task_id": "wf"}), R0),
-            ("start_tuned_job_tool", json!({"task_id": "wf", "confirmed": true, "dry_run": true}), R0),
-            ("start_tuned_job_tool", json!({"task_id": "wf", "confirmed": true}), R3),
-            ("regenerate_text_laser_task_tool", json!({"task_id": "wf"}), R1),
-            ("regenerate_text_laser_task_tool", json!({"task_id": "wf", "feedback_id": "fb"}), R3),
+            (
+                "start_tuned_job_tool",
+                json!({"task_id": "wf", "confirmed": true, "dry_run": true}),
+                R0,
+            ),
+            (
+                "start_tuned_job_tool",
+                json!({"task_id": "wf", "confirmed": true}),
+                R3,
+            ),
+            (
+                "regenerate_text_laser_task_tool",
+                json!({"task_id": "wf"}),
+                R1,
+            ),
+            (
+                "regenerate_text_laser_task_tool",
+                json!({"task_id": "wf", "feedback_id": "fb"}),
+                R3,
+            ),
             ("command_execution_tool", json!({}), R4),
             ("open_app_tool", json!({}), R4),
             ("shortcut_key_execution_tool", json!({}), R4),
             ("open_jsjds_website_tool", json!({}), R4),
         ];
         for (name, arguments, expected) in cases {
-            assert_eq!(tool_risk(name, &arguments), Some(expected), "{name} {arguments}");
+            assert_eq!(
+                tool_risk(name, &arguments),
+                Some(expected),
+                "{name} {arguments}"
+            );
         }
         assert_eq!(tool_risk("unknown_tool", &json!({})), None);
         assert!(RiskLevel::R2 < RiskLevel::R3 && RiskLevel::R3 < RiskLevel::R4);
         assert_eq!(RiskLevel::R3.as_str(), "R3");
-        for name in ["command_execution_tool", "open_app_tool", "shortcut_key_execution_tool", "open_jsjds_website_tool"] {
+        for name in [
+            "command_execution_tool",
+            "open_app_tool",
+            "shortcut_key_execution_tool",
+            "open_jsjds_website_tool",
+        ] {
             assert!(tool_never_exposed(name));
         }
         assert!(!tool_never_exposed("laser_grbl_tool"));

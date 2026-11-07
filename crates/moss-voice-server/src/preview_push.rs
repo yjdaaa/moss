@@ -13,6 +13,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::goggle_bot::{
+    BotPose, ScreenCardStyle, base64_encode, draw_cute_frame, draw_goggle_bot,
+};
+use crate::{Shared, unix_now};
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
@@ -22,8 +26,6 @@ use image::codecs::gif::{GifEncoder, Repeat};
 use image::imageops::FilterType;
 use image::{Delay, Frame, ImageFormat, ImageReader, Limits, Rgb, RgbImage, Rgba, RgbaImage};
 use serde::Serialize;
-use crate::goggle_bot::{BotPose, ScreenCardStyle, base64_encode, draw_cute_frame, draw_goggle_bot};
-use crate::{Shared, unix_now};
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_THUMBNAIL_PNG_BYTES: usize = 128 * 1024;
 /// 立创·实战派 ESP32-S3（320×240）对应的默认 1:1 预览框像素尺寸（160×120）。
@@ -35,10 +37,7 @@ const PREVIEW_TTL_SECS: u64 = 300;
 /// 根据 `self.screen.get_info` 上报的屏幕宽高推导 1:1 点对点预览画布尺寸 `(width / 2, height / 2)`。
 pub fn optimal_canvas_for_screen(screen_size: Option<(u32, u32)>) -> (u32, u32) {
     match screen_size {
-        Some((w, h)) if w >= 120 && h >= 120 => (
-            (w / 2).clamp(80, 240),
-            (h / 2).clamp(80, 240),
-        ),
+        Some((w, h)) if w >= 120 && h >= 120 => ((w / 2).clamp(80, 240), (h / 2).clamp(80, 240)),
         _ => (DEFAULT_CANVAS_W, DEFAULT_CANVAS_H),
     }
 }
@@ -95,50 +94,138 @@ pub fn token_ok(token: &str) -> bool {
 /// 极简内置 5×7 ASCII 位图字模（0-9, A-Z, %, ., x, /, :, -, 空格），零外部字体依赖。
 fn glyph_5x7(ch: char) -> [u8; 7] {
     match ch.to_ascii_uppercase() {
-        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        '2' => [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111],
-        '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
-        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-        '5' => [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
-        '6' => [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
-        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100],
-        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-        'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
-        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110],
-        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'I' => [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100],
-        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
-        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
-        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
-        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
-        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
-        'X' => [0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b00000],
-        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
-        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
-        '%' => [0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011],
-        '!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100],
-        '?' => [0b01110, 0b10001, 0b00001, 0b00110, 0b00100, 0b00000, 0b00100],
-        '+' => [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000],
-        '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100],
-        ':' => [0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000],
-        '/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
-        '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+        ],
+        '6' => [
+            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+        ],
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001,
+        ],
+        'X' => [
+            0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b00000,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '%' => [
+            0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011,
+        ],
+        '!' => [
+            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100,
+        ],
+        '?' => [
+            0b01110, 0b10001, 0b00001, 0b00110, 0b00100, 0b00000, 0b00100,
+        ],
+        '+' => [
+            0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000,
+        ],
+        '.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100,
+        ],
+        ':' => [
+            0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000,
+        ],
+        '/' => [
+            0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000,
+        ],
+        '-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
         _ => [0; 7],
     }
 }
@@ -179,7 +266,11 @@ fn draw_text_5x7(img: &mut RgbImage, x0: i32, y0: i32, scale: i32, text: &str, c
 
 fn text_width_px(text: &str, scale: i32) -> i32 {
     let count = text.chars().count() as i32;
-    if count <= 0 { 0 } else { count * 6 * scale - scale }
+    if count <= 0 {
+        0
+    } else {
+        count * 6 * scale - scale
+    }
 }
 
 fn draw_moss_frame(img: &mut RgbImage, accent: Rgb<u8>) {
@@ -428,7 +519,14 @@ pub fn make_device_thumbnail_png(source_bytes: &[u8]) -> Result<Vec<u8>, String>
     make_device_thumbnail_png_for_canvas(source_bytes, DEFAULT_CANVAS_W, DEFAULT_CANVAS_H, None)
 }
 
-fn draw_moss_optical_eye(img: &mut RgbImage, cx: i32, cy: i32, r: i32, core: Rgb<u8>, ring: Rgb<u8>) {
+fn draw_moss_optical_eye(
+    img: &mut RgbImage,
+    cx: i32,
+    cy: i32,
+    r: i32,
+    core: Rgb<u8>,
+    ring: Rgb<u8>,
+) {
     let r2_outer = r * r;
     let r2_outer_in = (r - 2).max(1).pow(2);
     let r2_mid = (r * 2 / 3).max(2).pow(2);
@@ -474,7 +572,11 @@ fn draw_segmented_bar(
 }
 
 /// 生成激光加工实时副屏 HUD PNG（兼容默认硬核太空舱风格）。
-pub fn make_job_hud_png(spec: &JobHudSpec, canvas_w: u32, canvas_h: u32) -> Result<Vec<u8>, String> {
+pub fn make_job_hud_png(
+    spec: &JobHudSpec,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Result<Vec<u8>, String> {
     make_job_hud_png_for_style(spec, ScreenCardStyle::MossHud, 0, canvas_w, canvas_h)
 }
 
@@ -507,7 +609,14 @@ pub fn make_job_hud_png_for_style(
         let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([12, 16, 26]));
         draw_cute_frame(&mut canvas, Rgb([72, 250, 210]), Rgb([255, 118, 98]));
         // 左侧绘制拉下防激光护目镜认真雕刻的小机器人 (52×52)
-        draw_goggle_bot(&mut canvas, 6, (ch as i32 - 60) / 2, 2, BotPose::GogglesEngrave, frame);
+        draw_goggle_bot(
+            &mut canvas,
+            6,
+            (ch as i32 - 60) / 2,
+            2,
+            BotPose::GogglesEngrave,
+            frame,
+        );
         let rx = 64i32;
         draw_text_5x7(&mut canvas, rx, 9, 1, "GOGGLES ON!", Rgb([255, 146, 72]));
         let pct_str = format!("{pct}%");
@@ -529,7 +638,14 @@ pub fn make_job_hud_png_for_style(
         };
         let max_r = ((cw as i32 - rx - 6).max(6) / 6) as usize;
         let c1: String = line1.chars().take(max_r).collect();
-        draw_text_5x7(&mut canvas, rx, ch as i32 - 26, 1, &c1, Rgb([190, 206, 228]));
+        draw_text_5x7(
+            &mut canvas,
+            rx,
+            ch as i32 - 26,
+            1,
+            &c1,
+            Rgb([190, 206, 228]),
+        );
         let line2 = match spec.eta_seconds {
             Some(eta) => format!("ETA {:02}:{:02}", eta / 60, eta % 60),
             None => sf_line,
@@ -586,9 +702,23 @@ pub fn make_job_hud_png_for_style(
     };
     let max_chars = ((cw.saturating_sub(12)) / 6) as usize;
     let line1_clip: String = line1.chars().take(max_chars).collect();
-    draw_text_5x7(&mut canvas, 10, ch as i32 - 21, 1, &line1_clip, Rgb([178, 194, 216]));
+    draw_text_5x7(
+        &mut canvas,
+        10,
+        ch as i32 - 21,
+        1,
+        &line1_clip,
+        Rgb([178, 194, 216]),
+    );
     let line2_clip: String = sf_line.chars().take(max_chars).collect();
-    draw_text_5x7(&mut canvas, 10, ch as i32 - 11, 1, &line2_clip, Rgb([0, 212, 255]));
+    draw_text_5x7(
+        &mut canvas,
+        10,
+        ch as i32 - 11,
+        1,
+        &line2_clip,
+        Rgb([0, 212, 255]),
+    );
 
     encode_png_checked(&canvas)
 }
@@ -612,7 +742,14 @@ pub fn make_approval_card_png(
     if style == ScreenCardStyle::GoggleBot {
         let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([20, 15, 24]));
         draw_cute_frame(&mut canvas, amber, red);
-        draw_goggle_bot(&mut canvas, 6, (ch as i32 - 56) / 2, 2, BotPose::ApprovalWave, frame);
+        draw_goggle_bot(
+            &mut canvas,
+            6,
+            (ch as i32 - 56) / 2,
+            2,
+            BotPose::ApprovalWave,
+            frame,
+        );
         let rx = 64i32;
         draw_text_5x7(&mut canvas, rx, 12, 1, "CHECK PC!", amber);
         draw_text_5x7(&mut canvas, rx, 26, 2, "CONFIRM", Rgb([255, 236, 200]));
@@ -627,9 +764,23 @@ pub fn make_approval_card_png(
             amber,
         );
         let wait_str = format!("WAIT {}S", spec.remaining_secs);
-        draw_text_5x7(&mut canvas, rx, ch as i32 - 26, 1, &wait_str, Rgb([255, 198, 112]));
+        draw_text_5x7(
+            &mut canvas,
+            rx,
+            ch as i32 - 26,
+            1,
+            &wait_str,
+            Rgb([255, 198, 112]),
+        );
         let kind_clip: String = spec.kind_ascii.chars().take(14).collect();
-        draw_text_5x7(&mut canvas, rx, ch as i32 - 14, 1, &kind_clip, Rgb([188, 174, 196]));
+        draw_text_5x7(
+            &mut canvas,
+            rx,
+            ch as i32 - 14,
+            1,
+            &kind_clip,
+            Rgb([188, 174, 196]),
+        );
         return encode_png_checked(&canvas);
     }
 
@@ -651,9 +802,23 @@ pub fn make_approval_card_png(
         amber,
     );
     let wait_str = format!("CHECK PC {}S", spec.remaining_secs);
-    draw_text_5x7(&mut canvas, rx, ch as i32 - 25, 1, &wait_str, Rgb([255, 196, 118]));
+    draw_text_5x7(
+        &mut canvas,
+        rx,
+        ch as i32 - 25,
+        1,
+        &wait_str,
+        Rgb([255, 196, 118]),
+    );
     let kind_clip: String = spec.kind_ascii.chars().take(16).collect();
-    draw_text_5x7(&mut canvas, rx, ch as i32 - 13, 1, &kind_clip, Rgb([176, 184, 202]));
+    draw_text_5x7(
+        &mut canvas,
+        rx,
+        ch as i32 - 13,
+        1,
+        &kind_clip,
+        Rgb([176, 184, 202]),
+    );
     encode_png_checked(&canvas)
 }
 
@@ -743,7 +908,14 @@ pub fn make_terminal_badge_png_frame(
         draw_text_5x7(&mut canvas, rx, 32, 2, "HALTED", crimson);
         let l_str = format!("STOP AT {}L", spec.lines);
         draw_text_5x7(&mut canvas, rx, 58, 1, &l_str, Rgb([236, 198, 202]));
-        draw_text_5x7(&mut canvas, rx, 72, 1, "VERIFY MACHINE", Rgb([255, 178, 56]));
+        draw_text_5x7(
+            &mut canvas,
+            rx,
+            72,
+            1,
+            "VERIFY MACHINE",
+            Rgb([255, 178, 56]),
+        );
     }
     encode_png_checked(&canvas)
 }
@@ -764,7 +936,14 @@ pub fn make_music_card_png(
     if style == ScreenCardStyle::GoggleBot {
         let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([14, 14, 28]));
         draw_cute_frame(&mut canvas, cyan, pink);
-        draw_goggle_bot(&mut canvas, 6, (ch as i32 - 56) / 2, 2, BotPose::MusicGroove, frame);
+        draw_goggle_bot(
+            &mut canvas,
+            6,
+            (ch as i32 - 56) / 2,
+            2,
+            BotPose::MusicGroove,
+            frame,
+        );
         let rx = 64i32;
         draw_text_5x7(&mut canvas, rx, 14, 1, "MOSS AUDIO", pink);
         draw_text_5x7(&mut canvas, rx, 28, 2, "GROOVE", cyan);
@@ -778,7 +957,11 @@ pub fn make_music_card_png(
         let base_y = 74i32;
         for (idx, &bh) in heights.iter().enumerate() {
             let bx = rx + (idx as i32) * 10;
-            let bar_c = if idx % 2 == 0 { cyan } else { Rgb([72, 250, 210]) };
+            let bar_c = if idx % 2 == 0 {
+                cyan
+            } else {
+                Rgb([72, 250, 210])
+            };
             for yy in (base_y - bh)..base_y {
                 for xx in bx..(bx + 6) {
                     put_px(&mut canvas, xx, yy, bar_c);
@@ -786,7 +969,14 @@ pub fn make_music_card_png(
             }
         }
         let clip: String = spec.title_ascii.chars().take(14).collect();
-        draw_text_5x7(&mut canvas, rx, ch as i32 - 14, 1, &clip, Rgb([208, 218, 240]));
+        draw_text_5x7(
+            &mut canvas,
+            rx,
+            ch as i32 - 14,
+            1,
+            &clip,
+            Rgb([208, 218, 240]),
+        );
         return encode_png_checked(&canvas);
     }
 
@@ -840,7 +1030,14 @@ pub fn make_music_card_png(
         }
     }
     let clip: String = spec.title_ascii.chars().take(14).collect();
-    draw_text_5x7(&mut canvas, rx, ch as i32 - 14, 1, &clip, Rgb([182, 198, 222]));
+    draw_text_5x7(
+        &mut canvas,
+        rx,
+        ch as i32 - 14,
+        1,
+        &clip,
+        Rgb([182, 198, 222]),
+    );
     encode_png_checked(&canvas)
 }
 
@@ -858,7 +1055,14 @@ pub fn make_goggle_bot_showcase_png(
         draw_text_5x7(&mut canvas, rx, 18, 1, "MOSS BOT", Rgb([255, 146, 72]));
         let tag = pose.slug().to_ascii_uppercase();
         draw_text_5x7(&mut canvas, rx, 34, 2, &tag, Rgb([72, 250, 210]));
-        draw_text_5x7(&mut canvas, rx, 62, 1, "GOGGLES READY", Rgb([194, 212, 236]));
+        draw_text_5x7(
+            &mut canvas,
+            rx,
+            62,
+            1,
+            "GOGGLES READY",
+            Rgb([194, 212, 236]),
+        );
         png = encode_png_checked(&canvas)?;
     }
     Ok(png)
@@ -881,7 +1085,14 @@ pub fn make_scene_showcase_png(
             if style == ScreenCardStyle::GoggleBot {
                 let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([12, 16, 26]));
                 draw_cute_frame(&mut canvas, mint, Rgb([255, 126, 108]));
-                draw_goggle_bot(&mut canvas, 6, (ch as i32 - 62) / 2, 2, BotPose::IdleBlink, frame);
+                draw_goggle_bot(
+                    &mut canvas,
+                    6,
+                    (ch as i32 - 62) / 2,
+                    2,
+                    BotPose::IdleBlink,
+                    frame,
+                );
                 let bx0 = 64i32;
                 let by0 = 12i32;
                 let bw = (cw as i32 - bx0 - 8).max(48);
@@ -902,8 +1113,22 @@ pub fn make_scene_showcase_png(
                 for x in (bx0 + 6)..(bx0 + bw - 6) {
                     put_px(&mut canvas, x, by0 + 32, cyan);
                 }
-                draw_text_5x7(&mut canvas, bx0 + 6, by0 + bh - 12, 1, "PREVIEW 1:1", Rgb([188, 208, 232]));
-                draw_text_5x7(&mut canvas, 10, ch as i32 - 12, 1, "40X30MM S600 F1200", cyan);
+                draw_text_5x7(
+                    &mut canvas,
+                    bx0 + 6,
+                    by0 + bh - 12,
+                    1,
+                    "PREVIEW 1:1",
+                    Rgb([188, 208, 232]),
+                );
+                draw_text_5x7(
+                    &mut canvas,
+                    10,
+                    ch as i32 - 12,
+                    1,
+                    "40X30MM S600 F1200",
+                    cyan,
+                );
                 encode_png_checked(&canvas)
             } else {
                 let mut canvas = RgbImage::from_pixel(cw, ch, Rgb([9, 12, 18]));
@@ -913,7 +1138,14 @@ pub fn make_scene_showcase_png(
                 } else {
                     Rgb([255, 118, 96])
                 };
-                draw_moss_optical_eye(&mut canvas, 28, ch as i32 / 2 - 4, 17, core_c, Rgb([255, 78, 66]));
+                draw_moss_optical_eye(
+                    &mut canvas,
+                    28,
+                    ch as i32 / 2 - 4,
+                    17,
+                    core_c,
+                    Rgb([255, 78, 66]),
+                );
                 let bx0 = 54i32;
                 let by0 = 12i32;
                 let bw = (cw as i32 - bx0 - 8).max(52);
@@ -926,7 +1158,14 @@ pub fn make_scene_showcase_png(
                     put_px(&mut canvas, bx0, y, Rgb([34, 48, 72]));
                     put_px(&mut canvas, bx0 + bw, y, Rgb([34, 48, 72]));
                 }
-                draw_text_5x7(&mut canvas, bx0 + 6, by0 + 6, 1, "MOSS PATH", Rgb([168, 186, 212]));
+                draw_text_5x7(
+                    &mut canvas,
+                    bx0 + 6,
+                    by0 + 6,
+                    1,
+                    "MOSS PATH",
+                    Rgb([168, 186, 212]),
+                );
                 draw_text_5x7(&mut canvas, bx0 + 10, by0 + 20, 2, "MOSS", cyan);
                 let scan_x = bx0 + 8 + ((frame as i32 % 4) * ((bw - 18).max(12) / 3));
                 for y in (by0 + 18)..(by0 + 38) {
@@ -935,7 +1174,14 @@ pub fn make_scene_showcase_png(
                 for x in (bx0 + 6)..(bx0 + bw - 6) {
                     put_px(&mut canvas, x, by0 + 42, Rgb([52, 245, 168]));
                 }
-                draw_text_5x7(&mut canvas, 10, ch as i32 - 12, 1, "40X30MM S600 F1200", cyan);
+                draw_text_5x7(
+                    &mut canvas,
+                    10,
+                    ch as i32 - 12,
+                    1,
+                    "40X30MM S600 F1200",
+                    cyan,
+                );
                 encode_png_checked(&canvas)
             }
         }
@@ -1229,12 +1475,19 @@ mod tests {
                 .unwrap();
         assert!(&card[..8] == b"\x89PNG\r\n\x1a\n");
         let decoded = image::load_from_memory(&card).unwrap().to_rgb8();
-        assert_eq!(decoded.dimensions(), (160, 120), "精确匹配立创实战派 160×120 1:1 零缩放画布");
+        assert_eq!(
+            decoded.dimensions(),
+            (160, 120),
+            "精确匹配立创实战派 160×120 1:1 零缩放画布"
+        );
         let bright_toolpath_px = decoded
             .pixels()
             .filter(|p| p[1] > 140 && p[2] > 100 && p[0] < 120)
             .count();
-        assert!(bright_toolpath_px >= 80, "1px 细线经形态学加粗后必须清晰可见，实际像素={bright_toolpath_px}");
+        assert!(
+            bright_toolpath_px >= 80,
+            "1px 细线经形态学加粗后必须清晰可见，实际像素={bright_toolpath_px}"
+        );
 
         // 构造实时加工进度副屏 HUD
         let hud = make_job_hud_png(
@@ -1250,7 +1503,11 @@ mod tests {
             120,
         )
         .unwrap();
-        assert!(hud.len() < 16 * 1024, "实时副屏 HUD 必须极轻量，实际={}B", hud.len());
+        assert!(
+            hud.len() < 16 * 1024,
+            "实时副屏 HUD 必须极轻量，实际={}B",
+            hud.len()
+        );
         let hud_img = image::load_from_memory(&hud).unwrap();
         assert_eq!((hud_img.width(), hud_img.height()), (160, 120));
 
@@ -1268,13 +1525,29 @@ mod tests {
     /// 2026-11-05：免鉴权 GIF 路由取进程级缓存，字节与现场编码完全一致，同一姿势只编码一次。
     #[test]
     fn goggle_bot_gif_route_cache_is_encoded_once_with_identical_bytes() {
-        for slug in ["idle", "engrave", "approval", "music", "celebrate", "halted"] {
+        for slug in [
+            "idle",
+            "engrave",
+            "approval",
+            "music",
+            "celebrate",
+            "halted",
+        ] {
             let pose = BotPose::from_slug(slug).unwrap();
             let first = crate::goggle_bot::cached_goggle_bot_gif(pose).unwrap();
             let again = crate::goggle_bot::cached_goggle_bot_gif(pose).unwrap();
             assert!(std::ptr::eq(first, again), "{slug} 不应重复编码");
-            assert_eq!(crate::goggle_bot::goggle_bot_gif_if_encoded(pose), Some(Some(first)));
-            assert_eq!(first, crate::goggle_bot::encode_goggle_bot_gif(pose).unwrap().as_slice(), "{slug}");
+            assert_eq!(
+                crate::goggle_bot::goggle_bot_gif_if_encoded(pose),
+                Some(Some(first))
+            );
+            assert_eq!(
+                first,
+                crate::goggle_bot::encode_goggle_bot_gif(pose)
+                    .unwrap()
+                    .as_slice(),
+                "{slug}"
+            );
         }
     }
 
@@ -1283,7 +1556,11 @@ mod tests {
         let gifs = crate::goggle_bot::cached_goggle_bot_gifs();
         assert_eq!(gifs.len(), 5);
         for item in gifs {
-            assert!(item.data_url.starts_with("data:image/gif;base64,R0lGODlh"), "{}", item.id);
+            assert!(
+                item.data_url.starts_with("data:image/gif;base64,R0lGODlh"),
+                "{}",
+                item.id
+            );
         }
         let raw_gif = crate::goggle_bot::encode_goggle_bot_gif(BotPose::GogglesEngrave).unwrap();
         assert_eq!(&raw_gif[..6], b"GIF89a");

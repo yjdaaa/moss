@@ -143,7 +143,10 @@ impl PlaybackPump {
             self.consumed = end;
             self.stats.frames += 1;
             self.last_level = super::pcm_rms_level(&block);
-            return self.encoder.encode(&block).map(|data| PumpTick::Frame { data, marks });
+            return self
+                .encoder
+                .encode(&block)
+                .map(|data| PumpTick::Frame { data, marks });
         }
         if self.finished {
             self.last_level = 0;
@@ -152,7 +155,10 @@ impl PlaybackPump {
         // 播放中供不上：补一帧静音保持设备连续播放（不足一帧的尾巴留到下一拍凑满）
         self.stats.underruns += 1;
         self.last_level = 0;
-        self.encoder.encode(&[]).map(|data| PumpTick::Frame { data, marks: Vec::new() })
+        self.encoder.encode(&[]).map(|data| PumpTick::Frame {
+            data,
+            marks: Vec::new(),
+        })
     }
 }
 
@@ -190,9 +196,18 @@ mod tests {
         let frames = drain(&mut pump);
         // 1000 ms = 16 帧 + 1 帧尾巴补零
         assert_eq!(frames.len(), 17);
-        assert_eq!(pump.stats(), PumpStats { frames: 17, underruns: 0 });
+        assert_eq!(
+            pump.stats(),
+            PumpStats {
+                frames: 17,
+                underruns: 0
+            }
+        );
         let mut decoder = OpusDecoder::new(RATE).unwrap();
-        let output: Vec<i16> = frames.iter().flat_map(|frame| decoder.decode(frame).unwrap()).collect();
+        let output: Vec<i16> = frames
+            .iter()
+            .flat_map(|frame| decoder.decode(frame).unwrap())
+            .collect();
         assert_eq!(output.len(), 17 * FRAME);
         let ratio = rms(&output[FRAME..input.len()]) / rms(&input[FRAME..]);
         assert!((0.7..1.3).contains(&ratio), "{ratio}");
@@ -204,19 +219,32 @@ mod tests {
         let mut pump = pump(300);
         pump.begin();
         pump.push(&tone(RATE, 440.0, 120, 8000.0));
-        assert_eq!(pump.next_frame().unwrap(), PumpTick::Waiting, "未满 300 ms 启动缓冲");
+        assert_eq!(
+            pump.next_frame().unwrap(),
+            PumpTick::Waiting,
+            "未满 300 ms 启动缓冲"
+        );
         pump.push(&tone(RATE, 440.0, 200, 8000.0));
         // 320 ms：5 帧有内容，剩 20 ms 尾巴
         for _ in 0..5 {
             assert!(matches!(pump.next_frame().unwrap(), PumpTick::Frame { .. }));
         }
-        assert!(matches!(pump.next_frame().unwrap(), PumpTick::Frame { .. }), "供不上时补静音而不是停");
+        assert!(
+            matches!(pump.next_frame().unwrap(), PumpTick::Frame { .. }),
+            "供不上时补静音而不是停"
+        );
         assert_eq!(pump.stats().underruns, 1);
         assert_eq!(pump.buffered_samples(), 480, "尾巴留到下一拍");
         pump.push(&tone(RATE, 440.0, 60, 8000.0));
         pump.finish();
         assert_eq!(drain(&mut pump).len(), 2);
-        assert_eq!(pump.stats(), PumpStats { frames: 7, underruns: 1 });
+        assert_eq!(
+            pump.stats(),
+            PumpStats {
+                frames: 7,
+                underruns: 1
+            }
+        );
     }
 
     #[test]
@@ -236,7 +264,14 @@ mod tests {
             }
         }
         // 100 ms = 2400 样本：第 1 帧 0..1440 含第一句；第 2 帧 1440..2880 含第二句（起点 2400）；空句起点 3840 落在第 3 帧
-        assert_eq!(seen, vec![vec!["第一句".to_owned()], vec!["第二句".to_owned()], vec!["空句".to_owned()]]);
+        assert_eq!(
+            seen,
+            vec![
+                vec!["第一句".to_owned()],
+                vec!["第二句".to_owned()],
+                vec!["空句".to_owned()]
+            ]
+        );
         pump.begin();
         pump.push_marked(&tone(RATE, 440.0, 60, 8000.0), "打断前".into());
         pump.clear();

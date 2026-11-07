@@ -85,7 +85,14 @@ pub(crate) fn sensitive_catalog_root(root: &Path) -> bool {
         .to_lowercase();
     if matches!(
         leaf.as_str(),
-        "users" | "home" | "volumes" | "appdata" | "local" | "roaming" | "locallow" | "documents and settings"
+        "users"
+            | "home"
+            | "volumes"
+            | "appdata"
+            | "local"
+            | "roaming"
+            | "locallow"
+            | "documents and settings"
     ) {
         return true;
     }
@@ -96,12 +103,27 @@ pub(crate) fn sensitive_catalog_root(root: &Path) -> bool {
 }
 /// Prevent indexing credentials hidden inside an otherwise allowed music root.
 pub(crate) fn sensitive_descendant(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-        matches!(name.to_ascii_lowercase().as_str(),
-            ".git" | ".ssh" | ".aws" | ".config" | ".gnupg" | "appdata" |
-            "library" | "keychains" | ".trash" |
-            "credentials" | "secrets" | "private" | "tokens" | "keys")
-    })
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                ".git"
+                    | ".ssh"
+                    | ".aws"
+                    | ".config"
+                    | ".gnupg"
+                    | "appdata"
+                    | "library"
+                    | "keychains"
+                    | ".trash"
+                    | "credentials"
+                    | "secrets"
+                    | "private"
+                    | "tokens"
+                    | "keys"
+            )
+        })
 }
 
 pub(crate) fn valid_local_root(root: &Path) -> Result<PathBuf, FsError> {
@@ -200,13 +222,21 @@ pub(crate) fn open_verified(canonical: &Path, root: &Path) -> Result<std::fs::Fi
         use std::os::windows::fs::OpenOptionsExt;
         // FILE_FLAG_OPEN_REPARSE_POINT prevents a replaced final link
         // from quietly following another file during open.
-        std::fs::OpenOptions::new().read(true).custom_flags(0x0020_0000).open(canonical).map_err(|_| FsError::Unavailable)?
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x0020_0000)
+            .open(canonical)
+            .map_err(|_| FsError::Unavailable)?
     };
     #[cfg(target_os = "macos")]
     let opened = {
         use std::os::unix::fs::OpenOptionsExt;
         // O_NOFOLLOW (0x0100 on Darwin) refuses to follow a replaced final symlink.
-        std::fs::OpenOptions::new().read(true).custom_flags(0x0100).open(canonical).map_err(|_| FsError::Unavailable)?
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x0100)
+            .open(canonical)
+            .map_err(|_| FsError::Unavailable)?
     };
     #[cfg(not(any(windows, target_os = "macos")))]
     let opened = std::fs::File::open(canonical).map_err(|_| FsError::Unavailable)?;

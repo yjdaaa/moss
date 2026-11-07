@@ -9,7 +9,10 @@ fn main() {
     // dependency Cargo can reuse a stale laser-api even after Vite is rebuilt.
     println!("cargo:rerun-if-env-changed=MOSS_RELEASE_VERSION");
     println!("cargo:rerun-if-changed={}", dist.display());
-    println!("cargo:rerun-if-changed={}", dist.join("index.html").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        dist.join("index.html").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         dist.join("voice-private.html").display()

@@ -105,7 +105,17 @@ pub struct GoggleBotGifItem {
     pub data_url: String,
 }
 
-fn fill_rect(img: &mut RgbImage, x0: i32, y0: i32, w: i32, h: i32, scale: i32, ox: i32, oy: i32, color: Rgb<u8>) {
+fn fill_rect(
+    img: &mut RgbImage,
+    x0: i32,
+    y0: i32,
+    w: i32,
+    h: i32,
+    scale: i32,
+    ox: i32,
+    oy: i32,
+    color: Rgb<u8>,
+) {
     let sx0 = ox + x0 * scale;
     let sy0 = oy + y0 * scale;
     let sw = w * scale;
@@ -124,14 +134,7 @@ fn dot(img: &mut RgbImage, x: i32, y: i32, scale: i32, ox: i32, oy: i32, color: 
 }
 
 /// 在 `(ox, oy)` 左上角按 `26×26 * scale` 绘制一帧「小 MOSS · 护目镜小机器人」。
-pub fn draw_goggle_bot(
-    img: &mut RgbImage,
-    ox: i32,
-    oy: i32,
-    scale: i32,
-    pose: BotPose,
-    frame: u8,
-) {
+pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: BotPose, frame: u8) {
     let s = scale.max(1);
     let f = frame % 4;
     let dx = match pose {
@@ -225,7 +228,9 @@ pub fn draw_goggle_bot(
 
         // 面罩上的可爱发光像素眼与粉红腮红
         match pose {
-            BotPose::CelebrateDone | BotPose::MusicGroove if f % 2 == 1 || pose == BotPose::CelebrateDone => {
+            BotPose::CelebrateDone | BotPose::MusicGroove
+                if f % 2 == 1 || pose == BotPose::CelebrateDone =>
+            {
                 // 弯弯笑眼 ^ ^
                 dot(img, 8, 13, s, bx, by, cyan_eye);
                 dot(img, 9, 12, s, bx, by, cyan_eye);

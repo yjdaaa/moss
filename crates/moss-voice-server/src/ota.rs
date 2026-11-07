@@ -4,14 +4,14 @@
 //! 连接后会收到“请在电脑上允许”的提示。WebSocket 地址的主机名取自设备请求 OTA 时用的地址
 //! （`Host` 请求头），保证设备能用同一个地址连回来。
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
 use axum::Router;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use moss_xiaozhi_proto::{FirmwareOffer, OtaInfo, OtaReply};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
 
 use crate::{DeviceStatus, DeviceVisit, Shared, unix_now};
 
@@ -85,7 +85,11 @@ fn interface_priority(if_name: &str, ip: Ipv4Addr) -> (u8, u8, u8) {
     let octets = ip.octets();
     // Windows 移动热点固定为 192.168.137.1，属于真实可用热点网关；其余 .1 结尾多为未命名的本地虚拟网桥
     let is_windows_hotspot = octets == [192, 168, 137, 1];
-    let host_rank = if octets[3] != 1 || is_windows_hotspot { 0 } else { 1 };
+    let host_rank = if octets[3] != 1 || is_windows_hotspot {
+        0
+    } else {
+        1
+    };
     let private_rank = if ip.is_private() { 0 } else { 1 };
     (name_rank, host_rank, private_rank)
 }
@@ -187,7 +191,9 @@ pub(crate) fn host_without_port(host: &str) -> Option<String> {
         Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
         _ => host,
     };
-    let valid = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    let valid = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
     (valid && !name.is_empty()).then(|| name.to_owned())
 }
 
@@ -201,14 +207,22 @@ async fn ota_post(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_owned);
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
     let info = match OtaInfo::from_request(header, &body) {
         Ok(info) => info,
         Err(error) => {
             shared.state.event(
-                crate::EventRecord::warn(crate::DiagCategory::Firmware, format!("OTA 请求被拒绝（{}）：设备开机上报的信息不完整", peer.ip()))
-                    .hint("设备固件发来的 OTA 请求缺少必要字段：换用标准小智固件，或检查自编固件")
-                    .detail(&error),
+                crate::EventRecord::warn(
+                    crate::DiagCategory::Firmware,
+                    format!("OTA 请求被拒绝（{}）：设备开机上报的信息不完整", peer.ip()),
+                )
+                .hint("设备固件发来的 OTA 请求缺少必要字段：换用标准小智固件，或检查自编固件")
+                .detail(&error),
             );
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
@@ -231,7 +245,11 @@ async fn ota_post(
         // 所以只在设备已允许且 Client-Id 与绑定记录一致（`authorize_http`，纯读）时才写快照，
         // 冒用 Device-Id 的局域网主机不能改写桌面端「设备信息」。
         let bound = status == DeviceStatus::Allowed
-            && registry.authorize_http(&device_id, &client_id).ok().flatten().is_some();
+            && registry
+                .authorize_http(&device_id, &client_id)
+                .ok()
+                .flatten()
+                .is_some();
         if bound {
             registry.device_snapshot(&device_id, crate::SNAPSHOT_INFO, &report);
         }
@@ -243,18 +261,23 @@ async fn ota_post(
         Ok(registered) => registered,
         Err(error) => {
             shared.state.event(
-                crate::EventRecord::error(crate::DiagCategory::Internal, "OTA 登记设备失败：本机设备记录读写出错")
-                    .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
-                    .detail(&error),
+                crate::EventRecord::error(
+                    crate::DiagCategory::Internal,
+                    "OTA 登记设备失败：本机设备记录读写出错",
+                )
+                .hint("重启 MOSS 再试；一直失败请导出诊断包反馈")
+                .detail(&error),
             );
             return (StatusCode::INTERNAL_SERVER_ERROR, "设备登记失败").into_response();
         }
     };
     let raw_host = header("host").as_deref().and_then(host_without_port);
     let host = match raw_host.as_deref() {
-        Some(h) if h.eq_ignore_ascii_case("localhost") || h == "0.0.0.0" => local_ip_for_peer(peer.ip())
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "127.0.0.1".into()),
+        Some(h) if h.eq_ignore_ascii_case("localhost") || h == "0.0.0.0" => {
+            local_ip_for_peer(peer.ip())
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "127.0.0.1".into())
+        }
         Some(h) if h.to_ascii_lowercase().ends_with(".local") => {
             if !peer.ip().is_loopback() {
                 local_ip_for_peer(peer.ip())
@@ -270,7 +293,9 @@ async fn ota_post(
             .unwrap_or_else(|| "127.0.0.1".into()),
     };
     let token = if status == DeviceStatus::Allowed {
-        shared.signer.issue(&info.client_id, &info.device_id, unix_now())
+        shared
+            .signer
+            .issue(&info.client_id, &info.device_id, unix_now())
     } else {
         String::new()
     };
@@ -293,7 +318,10 @@ async fn ota_post(
     if let Some((version, _)) = &firmware {
         shared.state.event(crate::EventRecord::info(
             crate::DiagCategory::Firmware,
-            format!("OTA：向设备 {} 下发固件 {version}（用户已确认推送）", info.device_id),
+            format!(
+                "OTA：向设备 {} 下发固件 {version}（用户已确认推送）",
+                info.device_id
+            ),
         ));
     }
     shared.state.event(format!(
@@ -316,7 +344,10 @@ async fn ota_post(
         current_version: info.version,
         firmware: firmware.map(|(version, token)| FirmwareOffer {
             version,
-            url: format!("http://{host}:{}/xiaozhi/firmware/{token}.bin", shared.http_port),
+            url: format!(
+                "http://{host}:{}/xiaozhi/firmware/{token}.bin",
+                shared.http_port
+            ),
         }),
     };
     axum::Json(reply.to_json()).into_response()
@@ -324,15 +355,24 @@ async fn ota_post(
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
     use super::{host_without_port, is_virtual_or_tunnel_ipv4};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn host_header_parsing() {
-        assert_eq!(host_without_port("192.168.1.5:8003").as_deref(), Some("192.168.1.5"));
-        assert_eq!(host_without_port("moss.local:8003").as_deref(), Some("moss.local"));
+        assert_eq!(
+            host_without_port("192.168.1.5:8003").as_deref(),
+            Some("192.168.1.5")
+        );
+        assert_eq!(
+            host_without_port("moss.local:8003").as_deref(),
+            Some("moss.local")
+        );
         assert_eq!(host_without_port("moss-pc").as_deref(), Some("moss-pc"));
-        assert_eq!(host_without_port("[fe80::1]:8003").as_deref(), Some("[fe80::1]"));
+        assert_eq!(
+            host_without_port("[fe80::1]:8003").as_deref(),
+            Some("[fe80::1]")
+        );
         assert_eq!(host_without_port(""), None);
         assert_eq!(host_without_port("evil/host:80"), None);
     }
@@ -340,14 +380,32 @@ mod tests {
     #[test]
     fn virtual_and_tunnel_interfaces_are_filtered_out() {
         // Clash / Sing-box TUN 虚拟网卡 (198.18.0.0/15) 必须被过滤
-        assert!(is_virtual_or_tunnel_ipv4("Meta", Ipv4Addr::new(198, 18, 0, 1)));
-        assert!(is_virtual_or_tunnel_ipv4("utun3", Ipv4Addr::new(198, 19, 1, 1)));
+        assert!(is_virtual_or_tunnel_ipv4(
+            "Meta",
+            Ipv4Addr::new(198, 18, 0, 1)
+        ));
+        assert!(is_virtual_or_tunnel_ipv4(
+            "utun3",
+            Ipv4Addr::new(198, 19, 1, 1)
+        ));
         // Tailscale CGNAT (100.64.0.0/10) 必须被过滤
-        assert!(is_virtual_or_tunnel_ipv4("Tailscale", Ipv4Addr::new(100, 101, 50, 60)));
+        assert!(is_virtual_or_tunnel_ipv4(
+            "Tailscale",
+            Ipv4Addr::new(100, 101, 50, 60)
+        ));
         // VMware 虚拟网卡必须被过滤
-        assert!(is_virtual_or_tunnel_ipv4("VMware Network Adapter VMnet8", Ipv4Addr::new(192, 168, 51, 1)));
+        assert!(is_virtual_or_tunnel_ipv4(
+            "VMware Network Adapter VMnet8",
+            Ipv4Addr::new(192, 168, 51, 1)
+        ));
         // 真实 WLAN 局域网地址保留
-        assert!(!is_virtual_or_tunnel_ipv4("WLAN", Ipv4Addr::new(10, 12, 19, 12)));
-        assert!(!is_virtual_or_tunnel_ipv4("Wi-Fi", Ipv4Addr::new(192, 168, 1, 105)));
+        assert!(!is_virtual_or_tunnel_ipv4(
+            "WLAN",
+            Ipv4Addr::new(10, 12, 19, 12)
+        ));
+        assert!(!is_virtual_or_tunnel_ipv4(
+            "Wi-Fi",
+            Ipv4Addr::new(192, 168, 1, 105)
+        ));
     }
 }

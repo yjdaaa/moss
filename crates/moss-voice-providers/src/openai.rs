@@ -26,12 +26,20 @@ const MAX_ERROR_BYTES: usize = 64 * 1024;
 /// 大模型基础地址；误填了完整 `/chat/completions` 时去掉。
 pub fn llm_base_url(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
-    trimmed.strip_suffix("/chat/completions").unwrap_or(trimmed).trim_end_matches('/').to_owned()
+    trimmed
+        .strip_suffix("/chat/completions")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 fn full_url(input: &str, suffix: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.ends_with(suffix) { trimmed.to_owned() } else { format!("{trimmed}{suffix}") }
+    if trimmed.ends_with(suffix) {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}{suffix}")
+    }
 }
 
 pub fn asr_full_url(input: &str) -> String {
@@ -43,7 +51,8 @@ pub fn tts_full_url(input: &str) -> String {
 }
 
 fn client() -> Result<reqwest::Client, ProviderError> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
@@ -68,35 +77,64 @@ fn describe_send_error(label: &str, error: &reqwest::Error) -> ProviderError {
         chain.push(inner.to_string());
         source = inner.source();
     }
-    classify_transport_error(label, error.is_timeout(), error.is_connect(), &chain.join(": "))
+    classify_transport_error(
+        label,
+        error.is_timeout(),
+        error.is_connect(),
+        &chain.join(": "),
+    )
 }
 
 /// 按底层原因区分网络错误（纯函数，测试用假输入覆盖）。每种原因各自一句大白话和下一步。
-pub(crate) fn classify_transport_error(label: &str, timeout: bool, connect: bool, chain: &str) -> ProviderError {
+pub(crate) fn classify_transport_error(
+    label: &str,
+    timeout: bool,
+    connect: bool,
+    chain: &str,
+) -> ProviderError {
     use crate::DiagCategory::Network;
     let lower = chain.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
     let error = if timeout {
         ProviderError::with_category(Network, format!("{label}请求超时：对方服务器太久没有回应"))
             .hint("检查电脑网络是否通畅；服务方繁忙时稍后再试，一直超时就换一个更近或更稳定的服务地址")
-    } else if has(&["dns", "failed to lookup", "nodename nor servname", "name or service not known", "no such host", "name resolution"]) {
+    } else if has(&[
+        "dns",
+        "failed to lookup",
+        "nodename nor servname",
+        "name or service not known",
+        "no such host",
+        "name resolution",
+    ]) {
         ProviderError::with_category(Network, format!("{label}找不到服务器：域名解析失败"))
             .hint("检查地址里的域名有没有拼错，电脑能不能正常上网；用了代理或公司网络时确认它没有拦截这个域名")
     } else if has(&["certificate", "tls", "ssl", "handshake"]) {
-        ProviderError::with_category(Network, format!("{label}安全连接失败：TLS 握手或证书校验没通过"))
-            .hint("确认地址是 https:// 且证书有效；电脑时间不对、代理软件替换了证书时也会这样")
+        ProviderError::with_category(
+            Network,
+            format!("{label}安全连接失败：TLS 握手或证书校验没通过"),
+        )
+        .hint("确认地址是 https:// 且证书有效；电脑时间不对、代理软件替换了证书时也会这样")
     } else if has(&["refused"]) {
-        ProviderError::with_category(Network, format!("{label}无法连接：对方拒绝了连接（服务没开或端口填错）"))
-            .hint("确认服务已经启动、地址和端口填对；本机服务（如 127.0.0.1）要先在电脑上运行起来")
+        ProviderError::with_category(
+            Network,
+            format!("{label}无法连接：对方拒绝了连接（服务没开或端口填错）"),
+        )
+        .hint("确认服务已经启动、地址和端口填对；本机服务（如 127.0.0.1）要先在电脑上运行起来")
     } else if has(&["unreachable", "no route"]) {
-        ProviderError::with_category(Network, format!("{label}无法连接：网络不通，到不了这个地址"))
-            .hint("检查电脑是否联网、Wi-Fi 或网线是否正常；内网地址要和电脑在同一个网络里")
+        ProviderError::with_category(
+            Network,
+            format!("{label}无法连接：网络不通，到不了这个地址"),
+        )
+        .hint("检查电脑是否联网、Wi-Fi 或网线是否正常；内网地址要和电脑在同一个网络里")
     } else if connect {
         ProviderError::with_category(Network, format!("{label}无法连接到该地址"))
             .hint("检查地址、端口和电脑网络；具体原因见技术细节")
     } else if has(&["reset", "broken pipe", "closed", "eof", "incomplete"]) {
-        ProviderError::with_category(Network, format!("{label}连接中途断开：数据还没收完对方就断了"))
-            .hint("多半是网络不稳或服务方主动断开；稍后再试，一直这样就换个网络或服务地址")
+        ProviderError::with_category(
+            Network,
+            format!("{label}连接中途断开：数据还没收完对方就断了"),
+        )
+        .hint("多半是网络不稳或服务方主动断开；稍后再试，一直这样就换个网络或服务地址")
     } else {
         ProviderError::with_category(Network, format!("{label}请求失败：网络传输出错"))
             .hint("检查电脑网络后再试；具体原因见技术细节")
@@ -105,20 +143,58 @@ pub(crate) fn classify_transport_error(label: &str, timeout: bool, connect: bool
 }
 
 /// HTTP 错误状态 → 分类与大白话（纯函数）。`upstream` 是服务方原话（已截断、不含地址），放进技术细节。
-pub(crate) fn classify_http_status(label: &str, status: u16, upstream: Option<String>) -> ProviderError {
+pub(crate) fn classify_http_status(
+    label: &str,
+    status: u16,
+    upstream: Option<String>,
+) -> ProviderError {
     use crate::DiagCategory::{Auth, Config, Model, Quota};
     let (category, reason, hint) = match status {
-        401 => (Auth, "，密钥无效或没有权限", "密钥填错、过期或被停用了：到服务方控制台复制新密钥重新填写"),
-        403 => (Auth, "，密钥无效或没有权限", "这个密钥没有调用该模型的权限，或账号被限制：到服务方控制台检查权限"),
-        402 => (Quota, "，账户余额不足", "到服务方控制台充值或换一个有余额的账号"),
-        429 => (Quota, "，请求太频繁或额度不足", "调用太快或今天的额度用完了：等一会儿再试，或到控制台提高限额"),
-        404 => (Config, "，地址或模型名不对", "检查服务地址和模型名称是否和服务方文档一致"),
-        400 | 422 => (Config, "，请求参数不被接受", "通常是模型名、音色或参数不被这个服务支持：对照服务方文档检查设置"),
-        300..=399 => (Config, "，服务要求跳转（MOSS 不跟随重定向，请填写最终地址）", "把地址换成跳转后的最终地址"),
-        500..=599 => (Model, "，服务方服务器出错", "这是服务方那边的问题，不是你的设置：稍后再试或换一个模型服务"),
+        401 => (
+            Auth,
+            "，密钥无效或没有权限",
+            "密钥填错、过期或被停用了：到服务方控制台复制新密钥重新填写",
+        ),
+        403 => (
+            Auth,
+            "，密钥无效或没有权限",
+            "这个密钥没有调用该模型的权限，或账号被限制：到服务方控制台检查权限",
+        ),
+        402 => (
+            Quota,
+            "，账户余额不足",
+            "到服务方控制台充值或换一个有余额的账号",
+        ),
+        429 => (
+            Quota,
+            "，请求太频繁或额度不足",
+            "调用太快或今天的额度用完了：等一会儿再试，或到控制台提高限额",
+        ),
+        404 => (
+            Config,
+            "，地址或模型名不对",
+            "检查服务地址和模型名称是否和服务方文档一致",
+        ),
+        400 | 422 => (
+            Config,
+            "，请求参数不被接受",
+            "通常是模型名、音色或参数不被这个服务支持：对照服务方文档检查设置",
+        ),
+        300..=399 => (
+            Config,
+            "，服务要求跳转（MOSS 不跟随重定向，请填写最终地址）",
+            "把地址换成跳转后的最终地址",
+        ),
+        500..=599 => (
+            Model,
+            "，服务方服务器出错",
+            "这是服务方那边的问题，不是你的设置：稍后再试或换一个模型服务",
+        ),
         _ => (Model, "", "具体原因见技术细节"),
     };
-    let error = ProviderError::with_category(category, format!("{label}返回 HTTP {status}{reason}")).hint(hint);
+    let error =
+        ProviderError::with_category(category, format!("{label}返回 HTTP {status}{reason}"))
+            .hint(hint);
     match upstream {
         Some(text) => error.detail(format!("服务方原话：{text}")),
         None => error,
@@ -143,9 +219,17 @@ fn error_upstream(bytes: &[u8]) -> Option<String> {
     crate::upstream_text(&text)
 }
 
-async fn read_body(label: &str, mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ProviderError> {
+async fn read_body(
+    label: &str,
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ProviderError> {
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| describe_send_error(label, &error))? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| describe_send_error(label, &error))?
+    {
         body.extend_from_slice(&chunk);
         if body.len() > limit {
             return Err(ProviderError::new(format!("{label}返回的数据过大")));
@@ -154,17 +238,30 @@ async fn read_body(label: &str, mut response: reqwest::Response, limit: usize) -
     Ok(body)
 }
 
-async fn check_status(label: &str, response: reqwest::Response) -> Result<reqwest::Response, ProviderError> {
+async fn check_status(
+    label: &str,
+    response: reqwest::Response,
+) -> Result<reqwest::Response, ProviderError> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
     }
-    let body = read_body(label, response, MAX_ERROR_BYTES).await.unwrap_or_default();
-    Err(classify_http_status(label, status.as_u16(), error_upstream(&body)))
+    let body = read_body(label, response, MAX_ERROR_BYTES)
+        .await
+        .unwrap_or_default();
+    Err(classify_http_status(
+        label,
+        status.as_u16(),
+        error_upstream(&body),
+    ))
 }
 
 fn with_auth(builder: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
-    if api_key.is_empty() { builder } else { builder.bearer_auth(api_key) }
+    if api_key.is_empty() {
+        builder
+    } else {
+        builder.bearer_auth(api_key)
+    }
 }
 
 fn is_cline_api_url(url: &str) -> bool {
@@ -179,7 +276,11 @@ fn is_cline_api_url(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn with_llm_compat(builder: reqwest::RequestBuilder, url: &str, api_key: &str) -> reqwest::RequestBuilder {
+fn with_llm_compat(
+    builder: reqwest::RequestBuilder,
+    url: &str,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
     let builder = with_auth(builder, api_key);
     if is_cline_api_url(url) {
         builder
@@ -205,19 +306,36 @@ pub struct OpenAiAsr {
 }
 
 impl OpenAiAsr {
-    pub fn new(url: &str, api_key: &str, model: &str, language: Option<&str>) -> Result<Self, ProviderError> {
+    pub fn new(
+        url: &str,
+        api_key: &str,
+        model: &str,
+        language: Option<&str>,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             prompt: None,
             client: client()?,
             url: asr_full_url(url),
             api_key: api_key.trim().to_owned(),
             model: model.trim().to_owned(),
-            language: language.map(str::to_owned).filter(|language| !language.is_empty()),
+            language: language
+                .map(str::to_owned)
+                .filter(|language| !language.is_empty()),
         })
     }
 
     pub fn with_hotwords(mut self, words: &[String]) -> Self {
-        let prompt = words.iter().take(64).map(|w| w.chars().filter(|c| !c.is_control()).take(32).collect::<String>()).collect::<Vec<_>>().join("、");
+        let prompt = words
+            .iter()
+            .take(64)
+            .map(|w| {
+                w.chars()
+                    .filter(|c| !c.is_control())
+                    .take(32)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("、");
         self.prompt = (!prompt.is_empty()).then_some(prompt);
         self
     }
@@ -238,7 +356,9 @@ impl OpenAiAsr {
         };
         field("model", &self.model);
         field("response_format", "json");
-        if let Some(prompt) = &self.prompt { field("prompt", prompt); }
+        if let Some(prompt) = &self.prompt {
+            field("prompt", prompt);
+        }
         if let Some(language) = &self.language {
             field("language", language);
         }
@@ -248,7 +368,11 @@ impl OpenAiAsr {
 }
 
 impl Asr for OpenAiAsr {
-    fn transcribe<'a>(&'a self, pcm: &'a [i16], sample_rate: u32) -> BoxFuture<'a, Result<String, ProviderError>> {
+    fn transcribe<'a>(
+        &'a self,
+        pcm: &'a [i16],
+        sample_rate: u32,
+    ) -> BoxFuture<'a, Result<String, ProviderError>> {
         Box::pin(async move {
             const LABEL: &str = "语音识别";
             let boundary = "moss-voice-7d1a5c0e9b";
@@ -257,10 +381,15 @@ impl Asr for OpenAiAsr {
                 .client
                 .post(&self.url)
                 .timeout(AUDIO_TIMEOUT)
-                .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+                .header(
+                    "Content-Type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
                 .body(body);
-            let response =
-                with_auth(request, &self.api_key).send().await.map_err(|error| describe_send_error(LABEL, &error))?;
+            let response = with_auth(request, &self.api_key)
+                .send()
+                .await
+                .map_err(|error| describe_send_error(LABEL, &error))?;
             let response = check_status(LABEL, response).await?;
             let bytes = read_body(LABEL, response, MAX_ERROR_BYTES).await?;
             match serde_json::from_slice::<Value>(&bytes) {
@@ -288,7 +417,13 @@ pub struct OpenAiTts {
 }
 
 impl OpenAiTts {
-    pub fn new(url: &str, api_key: &str, model: &str, voice: &str, speed: f32) -> Result<Self, ProviderError> {
+    pub fn new(
+        url: &str,
+        api_key: &str,
+        model: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             client: client()?,
             url: tts_full_url(url),
@@ -311,9 +446,15 @@ impl Tts for OpenAiTts {
                 "speed": self.speed,
                 "response_format": "wav",
             });
-            let request = self.client.post(&self.url).timeout(AUDIO_TIMEOUT).json(&body);
-            let response =
-                with_auth(request, &self.api_key).send().await.map_err(|error| describe_send_error(LABEL, &error))?;
+            let request = self
+                .client
+                .post(&self.url)
+                .timeout(AUDIO_TIMEOUT)
+                .json(&body);
+            let response = with_auth(request, &self.api_key)
+                .send()
+                .await
+                .map_err(|error| describe_send_error(LABEL, &error))?;
             let response = check_status(LABEL, response).await?;
             decode_wav(&read_body(LABEL, response, MAX_AUDIO_BYTES).await?)
         })
@@ -344,7 +485,8 @@ impl SseDecoder {
                     self.data.clear();
                 }
             } else if let Some(value) = line.strip_prefix("data:") {
-                self.data.push(value.strip_prefix(' ').unwrap_or(value).to_owned());
+                self.data
+                    .push(value.strip_prefix(' ').unwrap_or(value).to_owned());
             }
         }
         events
@@ -386,17 +528,26 @@ impl StreamAccumulator {
             chunk.get("data").unwrap_or(chunk)
         };
         if let Some(error) = payload.get("error") {
-            let message = error.get("message").and_then(Value::as_str).unwrap_or("未知错误");
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误");
             let short: String = message.chars().take(120).collect();
             return Err(ProviderError::new(format!("大模型返回错误：{short}")));
         }
-        let Some(choice) = payload.get("choices").and_then(|choices| choices.get(0)) else { return Ok(None) };
+        let Some(choice) = payload.get("choices").and_then(|choices| choices.get(0)) else {
+            return Ok(None);
+        };
         // 流式为 delta；不支持流式的服务返回完整 message
         let delta = choice.get("delta").or_else(|| choice.get("message"));
         let Some(delta) = delta else { return Ok(None) };
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for (position, call) in calls.iter().enumerate() {
-                let index = call.get("index").and_then(Value::as_u64).map(|index| index as usize).unwrap_or(position);
+                let index = call
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|index| index as usize)
+                    .unwrap_or(position);
                 while self.calls.len() <= index {
                     self.calls.push(PartialCall::default());
                 }
@@ -430,12 +581,23 @@ impl StreamAccumulator {
             .enumerate()
             .filter(|(_, call)| !call.name.is_empty())
             .map(|(index, call)| {
-                let id = if call.id.is_empty() { format!("call_{index}") } else { call.id };
-                let arguments = if call.arguments.trim().is_empty() { "{}".to_owned() } else { call.arguments };
+                let id = if call.id.is_empty() {
+                    format!("call_{index}")
+                } else {
+                    call.id
+                };
+                let arguments = if call.arguments.trim().is_empty() {
+                    "{}".to_owned()
+                } else {
+                    call.arguments
+                };
                 ToolCall::new(id, call.name, arguments)
             })
             .collect();
-        LlmReply { text: self.text, tool_calls }
+        LlmReply {
+            text: self.text,
+            tool_calls,
+        }
     }
 }
 
@@ -474,7 +636,10 @@ impl OpenAiLlm {
         const LABEL: &str = "大模型";
         let deadline = Instant::now() + LLM_TOTAL_TIMEOUT;
         let endpoint = format!("{}/chat/completions", self.base_url);
-        let request = self.client.post(&endpoint).json(&self.request_body(messages, tools));
+        let request = self
+            .client
+            .post(&endpoint)
+            .json(&self.request_body(messages, tools));
         let send = with_llm_compat(request, &endpoint, &self.api_key).send();
         let response = tokio::time::timeout(LLM_IDLE_TIMEOUT, send)
             .await
@@ -485,16 +650,19 @@ impl OpenAiLlm {
         let mut accumulator = StreamAccumulator::default();
         let mut raw = Vec::new();
         let mut saw_event = false;
-        let handle = |payload: &str, accumulator: &mut StreamAccumulator| -> Result<bool, ProviderError> {
-            if payload.trim() == "[DONE]" {
-                return Ok(true);
-            }
-            let Ok(value) = serde_json::from_str::<Value>(payload) else { return Ok(false) };
-            if let Some(text) = accumulator.apply(&value)? {
-                let _ = deltas.send(text);
-            }
-            Ok(false)
-        };
+        let handle =
+            |payload: &str, accumulator: &mut StreamAccumulator| -> Result<bool, ProviderError> {
+                if payload.trim() == "[DONE]" {
+                    return Ok(true);
+                }
+                let Ok(value) = serde_json::from_str::<Value>(payload) else {
+                    return Ok(false);
+                };
+                if let Some(text) = accumulator.apply(&value)? {
+                    let _ = deltas.send(text);
+                }
+                Ok(false)
+            };
         'stream: loop {
             let wait = LLM_IDLE_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
             let chunk = tokio::time::timeout(wait, response.chunk())
@@ -518,8 +686,8 @@ impl OpenAiLlm {
         }
         if !saw_event {
             // 服务忽略了 stream=true，直接返回完整 JSON
-            let value: Value =
-                serde_json::from_slice(&raw).map_err(|_| ProviderError::new("大模型返回的数据无法解析"))?;
+            let value: Value = serde_json::from_slice(&raw)
+                .map_err(|_| ProviderError::new("大模型返回的数据无法解析"))?;
             if let Some(text) = accumulator.apply(&value)? {
                 let _ = deltas.send(text);
             }

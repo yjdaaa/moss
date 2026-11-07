@@ -38,11 +38,13 @@ const LLAMA_GHFAST_MIRROR_BASE: &str =
 
 const PROMPT_VERSION: &str = "qev-labels-v2";
 const SYSTEM_PROMPT: &str = "Apply the question to the state. Choose exactly one of the listed options. Respond with only its uppercase letter, with no explanation or reasoning.";
-const NOUL_DEFAULT_INSTRUCTIONS: &str = "Is the statement true, or is the answer to the question yes?";
+const NOUL_DEFAULT_INSTRUCTIONS: &str =
+    "Is the statement true, or is the answer to the question yes?";
 const NOUL_DEFAULT_TRUE: &str = "the statement is true / the answer is yes";
 const NOUL_DEFAULT_FALSE: &str = "the statement is false / the answer is no";
 const NONE_OPTION: &str = "none of the options listed here";
-const NONE_DESCRIPTION: &str = "The correct option is not among the options listed in this question.";
+const NONE_DESCRIPTION: &str =
+    "The correct option is not among the options listed in this question.";
 const LETTERS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const NOT_ONE_TOKEN: [&str; 25] = [
     "BQ", "BZ", "CJ", "CQ", "CZ", "DQ", "DZ", "EJ", "EY", "FJ", "FQ", "FV", "FZ", "GJ", "GK", "GQ",
@@ -108,7 +110,9 @@ pub struct DetectedAccelerator {
 impl DetectedAccelerator {
     pub fn display_text(&self) -> String {
         match &self.device_detail {
-            Some(detail) if !detail.is_empty() => format!("{}（{detail}）", self.kind.short_label()),
+            Some(detail) if !detail.is_empty() => {
+                format!("{}（{detail}）", self.kind.short_label())
+            }
             _ => self.kind.short_label().to_owned(),
         }
     }
@@ -180,7 +184,9 @@ fn current_platform_asset() -> Option<LlamaReleaseAsset> {
             file_name: "llama-b12167-bin-macos-arm64.tar.gz",
             sha256: "2b7324ea05035e2cd7ba4ca54b695575c65752e2cef15291a4531b8a1fafbe12",
             size: 16_674_382,
-            archive: RuntimeArchiveKind::TarGz { top_dir: "llama-b12167" },
+            archive: RuntimeArchiveKind::TarGz {
+                top_dir: "llama-b12167",
+            },
             expected_accel: "Apple Metal 统一内存硬件加速",
         })
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
@@ -189,7 +195,9 @@ fn current_platform_asset() -> Option<LlamaReleaseAsset> {
             file_name: "llama-b12167-bin-macos-x64.tar.gz",
             sha256: "db6df599cf86fc5329a5e2f46f3081a5befa3e665936538cf8093e5b16658560",
             size: 12_411_336,
-            archive: RuntimeArchiveKind::TarGz { top_dir: "llama-b12167" },
+            archive: RuntimeArchiveKind::TarGz {
+                top_dir: "llama-b12167",
+            },
             expected_accel: "Intel CPU 原生推理",
         })
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
@@ -239,7 +247,9 @@ fn current_platform_asset() -> Option<LlamaReleaseAsset> {
                 file_name: "llama-b12167-bin-ubuntu-vulkan-x64.tar.gz",
                 sha256: "0a27da2be4ea383e18eb7558f7e5b05f1a3b5876ec141415e8f6d3c192932931",
                 size: 35_856_178,
-                archive: RuntimeArchiveKind::TarGz { top_dir: "llama-b12167" },
+                archive: RuntimeArchiveKind::TarGz {
+                    top_dir: "llama-b12167",
+                },
                 expected_accel: "Linux Vulkan 显卡加速",
             })
         } else {
@@ -248,7 +258,9 @@ fn current_platform_asset() -> Option<LlamaReleaseAsset> {
                 file_name: "llama-b12167-bin-ubuntu-x64.tar.gz",
                 sha256: "b9fcdc51ca6e747085070ae01c7c8acaecdfeb4b6c8386166e2d4b067b36186f",
                 size: 23_046_778,
-                archive: RuntimeArchiveKind::TarGz { top_dir: "llama-b12167" },
+                archive: RuntimeArchiveKind::TarGz {
+                    top_dir: "llama-b12167",
+                },
                 expected_accel: "Linux x64 CPU 推理",
             })
         }
@@ -258,7 +270,9 @@ fn current_platform_asset() -> Option<LlamaReleaseAsset> {
             file_name: "llama-b12167-bin-ubuntu-arm64.tar.gz",
             sha256: "17fda66c2c358d32dc7d3b15089b4ba01de207e7ac78832fefe54bb9f3390dd5",
             size: 18_727_515,
-            archive: RuntimeArchiveKind::TarGz { top_dir: "llama-b12167" },
+            archive: RuntimeArchiveKind::TarGz {
+                top_dir: "llama-b12167",
+            },
             expected_accel: "Linux ARM64 CPU 推理",
         })
     } else {
@@ -372,10 +386,7 @@ pub fn probe_llama_accelerator_with_cancel(
             || dir.join("libggml-vulkan.dylib").is_file()
     });
 
-    if run_probe
-        && llama_bin.is_file()
-        && !cancel.is_some_and(|flag| flag.load(Ordering::SeqCst))
-    {
+    if run_probe && llama_bin.is_file() && !cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         let mut cmd = Command::new(llama_bin);
         cmd.arg("--list-devices")
             .stdin(Stdio::null())
@@ -420,17 +431,32 @@ pub fn probe_llama_accelerator_with_cancel(
     }
 
     if has_cuda_lib {
-        DetectedAccelerator { kind: AcceleratorKind::Cuda, device_detail: None }
+        DetectedAccelerator {
+            kind: AcceleratorKind::Cuda,
+            device_detail: None,
+        }
     } else if has_metal_lib {
-        DetectedAccelerator { kind: AcceleratorKind::Metal, device_detail: None }
+        DetectedAccelerator {
+            kind: AcceleratorKind::Metal,
+            device_detail: None,
+        }
     } else if has_vulkan_lib {
-        DetectedAccelerator { kind: AcceleratorKind::Vulkan, device_detail: None }
+        DetectedAccelerator {
+            kind: AcceleratorKind::Vulkan,
+            device_detail: None,
+        }
     } else {
-        DetectedAccelerator { kind: AcceleratorKind::Cpu, device_detail: None }
+        DetectedAccelerator {
+            kind: AcceleratorKind::Cpu,
+            device_detail: None,
+        }
     }
 }
 
-fn parse_list_devices_output_for_arch(output: &str, allow_metal: bool) -> Option<DetectedAccelerator> {
+fn parse_list_devices_output_for_arch(
+    output: &str,
+    allow_metal: bool,
+) -> Option<DetectedAccelerator> {
     let mut cuda_dev = None;
     let mut metal_dev = None;
     let mut vulkan_dev = None;
@@ -445,13 +471,25 @@ fn parse_list_devices_output_for_arch(output: &str, allow_metal: bool) -> Option
         }
     }
     if let Some(detail) = cuda_dev {
-        Some(DetectedAccelerator { kind: AcceleratorKind::Cuda, device_detail: Some(detail) })
+        Some(DetectedAccelerator {
+            kind: AcceleratorKind::Cuda,
+            device_detail: Some(detail),
+        })
     } else if let Some(detail) = metal_dev {
-        Some(DetectedAccelerator { kind: AcceleratorKind::Metal, device_detail: Some(detail) })
+        Some(DetectedAccelerator {
+            kind: AcceleratorKind::Metal,
+            device_detail: Some(detail),
+        })
     } else if let Some(detail) = vulkan_dev {
-        Some(DetectedAccelerator { kind: AcceleratorKind::Vulkan, device_detail: Some(detail) })
+        Some(DetectedAccelerator {
+            kind: AcceleratorKind::Vulkan,
+            device_detail: Some(detail),
+        })
     } else if output.contains("Available devices:") {
-        Some(DetectedAccelerator { kind: AcceleratorKind::Cpu, device_detail: None })
+        Some(DetectedAccelerator {
+            kind: AcceleratorKind::Cpu,
+            device_detail: None,
+        })
     } else {
         None
     }
@@ -608,9 +646,8 @@ pub fn ensure_llama_runtime(
     let staging = models_root.join(".download");
     fs::create_dir_all(&staging).map_err(|e| format!("创建运行时下载目录失败：{e}"))?;
     let part = staging.join(format!("llama-runtime-{}.part", asset.file_name));
-    let prefer_china_mirror = mirror_hint.is_some_and(|m| {
-        m.contains("hf-mirror") || m.contains("ghfast") || m.contains("mirror")
-    });
+    let prefer_china_mirror = mirror_hint
+        .is_some_and(|m| m.contains("hf-mirror") || m.contains("ghfast") || m.contains("mirror"));
     let bases = if prefer_china_mirror {
         [LLAMA_GHFAST_MIRROR_BASE, LLAMA_GITHUB_RELEASE_BASE]
     } else {
@@ -639,7 +676,9 @@ pub fn ensure_llama_runtime(
     }
     if let Some(err) = last_err {
         let _ = fs::remove_file(&part);
-        return Err(format!("下载 OneJev 原生推理引擎（llama-server）失败：{err}"));
+        return Err(format!(
+            "下载 OneJev 原生推理引擎（llama-server）失败：{err}"
+        ));
     }
 
     let extract_root = models_root.join(format!(".extract-llama-{}", asset.platform_dir));
@@ -651,7 +690,11 @@ pub fn ensure_llama_runtime(
             RuntimeArchiveKind::TarGz { top_dir } => {
                 extract_tar_gz(&part, &extract_root, cancel)?;
                 let sub = extract_root.join(top_dir);
-                if sub.is_dir() { sub } else { extract_root.clone() }
+                if sub.is_dir() {
+                    sub
+                } else {
+                    extract_root.clone()
+                }
             }
             RuntimeArchiveKind::Zip => {
                 extract_zip(&part, &extract_root, cancel)?;
@@ -690,7 +733,9 @@ fn extract_tar_gz(archive_file: &Path, dest: &Path, cancel: &AtomicBool) -> Resu
     let file = fs::File::open(archive_file).map_err(|e| format!("打开 tar.gz 失败：{e}"))?;
     let gz = flate2::read::GzDecoder::new(BufReader::new(file));
     let mut archive = tar::Archive::new(gz);
-    let entries = archive.entries().map_err(|_| "tar.gz 压缩包损坏".to_owned())?;
+    let entries = archive
+        .entries()
+        .map_err(|_| "tar.gz 压缩包损坏".to_owned())?;
     for entry in entries {
         if cancel.load(Ordering::SeqCst) {
             return Err("已取消".into());
@@ -719,8 +764,7 @@ fn extract_tar_gz(archive_file: &Path, dest: &Path, cancel: &AtomicBool) -> Resu
                     if safe_intra_dir_symlink_target(&link_target) {
                         let full_dest = dest.join(&path);
                         if let Some(parent) = full_dest.parent() {
-                            fs::create_dir_all(parent)
-                                .map_err(|e| format!("创建目录失败：{e}"))?;
+                            fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
                         }
                         let _ = fs::remove_file(&full_dest);
                         std::os::unix::fs::symlink(&link_target, &full_dest)
@@ -826,7 +870,8 @@ fn extract_zip_bytes(bytes: &[u8], dest: &Path, cancel: &AtomicBool) -> Result<(
             fs::create_dir_all(&out_path).map_err(|e| format!("创建目录失败：{e}"))?;
             continue;
         }
-        if local_offset + 30 > bytes.len() || &bytes[local_offset..local_offset + 4] != b"PK\x03\x04"
+        if local_offset + 30 > bytes.len()
+            || &bytes[local_offset..local_offset + 4] != b"PK\x03\x04"
         {
             return Err("zip 本地文件头损坏".into());
         }
@@ -963,7 +1008,10 @@ fn parse_question(raw: &Value) -> Result<ParsedQuestion, String> {
                 .iter()
                 .map(|(k, v)| (k.clone(), render_entry(Some(v))))
                 .collect();
-            Ok(ParsedQuestion::Choice { instructions, options })
+            Ok(ParsedQuestion::Choice {
+                instructions,
+                options,
+            })
         }
         "score" => {
             let instructions = if inst_raw.is_empty() {
@@ -982,7 +1030,10 @@ fn parse_question(raw: &Value) -> Result<ParsedQuestion, String> {
                 .iter()
                 .map(|v| (v.clone(), render_entry(Some(v))))
                 .collect();
-            Ok(ParsedQuestion::Score { instructions, levels })
+            Ok(ParsedQuestion::Score {
+                instructions,
+                levels,
+            })
         }
         other => Err(format!("不支持的 question 类型：{other}")),
     }
@@ -1005,10 +1056,19 @@ fn format_options_block(names: &[String], descs: &[String]) -> String {
         .join("\n")
 }
 
-fn build_suffix(kind: &'static str, instructions: &str, names: &[String], descs: &[String]) -> String {
+fn build_suffix(
+    kind: &'static str,
+    instructions: &str,
+    names: &[String],
+    descs: &[String],
+) -> String {
     let slots = slot_labels();
     let letters: Vec<&str> = slots[..names.len()].iter().map(String::as_str).collect();
-    let header = if kind == "score" { "Rate the state:" } else { "Question:" };
+    let header = if kind == "score" {
+        "Rate the state:"
+    } else {
+        "Question:"
+    };
     let answer_line = if letters.len() <= LETTERS.len() {
         format!("Answer with one letter: {}.", letters.join(", "))
     } else {
@@ -1045,7 +1105,10 @@ fn render_branches(
                     chunk_index: None,
                 });
             }
-            ParsedQuestion::Choice { instructions, options } => {
+            ParsedQuestion::Choice {
+                instructions,
+                options,
+            } => {
                 let all_keys: Vec<String> = options.iter().map(|(k, _)| k.clone()).collect();
                 choice_orders.insert(qid.clone(), all_keys);
                 if options.len() <= max_slots {
@@ -1081,9 +1144,15 @@ fn render_branches(
                     }
                 }
             }
-            ParsedQuestion::Score { instructions, levels } => {
+            ParsedQuestion::Score {
+                instructions,
+                levels,
+            } => {
                 if levels.len() > max_slots {
-                    return Err(format!("score 等级数 {} 超过上限 {max_slots}", levels.len()));
+                    return Err(format!(
+                        "score 等级数 {} 超过上限 {max_slots}",
+                        levels.len()
+                    ));
                 }
                 let names: Vec<String> = (0..levels.len()).map(|i| format!("level {i}")).collect();
                 let descs: Vec<String> = levels.iter().map(|(_, d)| d.clone()).collect();
@@ -1111,7 +1180,12 @@ fn render_chatml_prompt(user_content: &str) -> String {
     )
 }
 
-fn render_full_prompt(state: &Value, suffix: &str, media_marker: Option<&str>, media_len: usize) -> Result<String, String> {
+fn render_full_prompt(
+    state: &Value,
+    suffix: &str,
+    media_marker: Option<&str>,
+    media_len: usize,
+) -> Result<String, String> {
     let state_str = render_state(state);
     let raw_user = format!("<state>\n{state_str}\n</state>\n\n{suffix}");
     if media_len == 0 {
@@ -1262,7 +1336,10 @@ fn make_score_answer(levels: &[Value], probs: &[f64]) -> Value {
     })
 }
 
-fn parse_inline_media(media_val: Option<&Value>, vision_supported: bool) -> Result<Vec<String>, String> {
+fn parse_inline_media(
+    media_val: Option<&Value>,
+    vision_supported: bool,
+) -> Result<Vec<String>, String> {
     let Some(val) = media_val else {
         return Ok(Vec::new());
     };
@@ -1285,12 +1362,13 @@ fn parse_inline_media(media_val: Option<&Value>, vision_supported: bool) -> Resu
             .ok_or_else(|| format!("media[{idx}] 必须是对象"))?;
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("");
         if kind != "image" {
-            return Err(format!("本地 OneJev 网关仅支持 image 类型 media（收到 {kind:?}）"));
+            return Err(format!(
+                "本地 OneJev 网关仅支持 image 类型 media（收到 {kind:?}）"
+            ));
         }
-        let raw_data = obj
-            .get("data")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("media[{idx}] 须提供内联 base64 data 字段（禁止外发未知 URL）"))?;
+        let raw_data = obj.get("data").and_then(Value::as_str).ok_or_else(|| {
+            format!("media[{idx}] 须提供内联 base64 data 字段（禁止外发未知 URL）")
+        })?;
         let b64 = match raw_data.split_once(',') {
             Some((head, rest)) if head.starts_with("data:") => rest.trim(),
             _ => raw_data.trim(),
@@ -1369,11 +1447,12 @@ impl UpstreamClient {
             .send()
             .map_err(|e| format!("llama-server 分词请求失败：{e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("llama-server /tokenize 返回 HTTP {}", resp.status().as_u16()));
+            return Err(format!(
+                "llama-server /tokenize 返回 HTTP {}",
+                resp.status().as_u16()
+            ));
         }
-        let body: Value = resp
-            .json()
-            .map_err(|e| format!("解析分词结果失败：{e}"))?;
+        let body: Value = resp.json().map_err(|e| format!("解析分词结果失败：{e}"))?;
         let arr = body
             .get("tokens")
             .and_then(Value::as_array)
@@ -1389,7 +1468,10 @@ impl UpstreamClient {
         for label in &labels[..LETTERS.len()] {
             let toks = self.tokenize(label, false)?;
             if toks.len() != 1 {
-                return Err(format!("基础选项槽位 {label} 不是单 token（长度 {}）", toks.len()));
+                return Err(format!(
+                    "基础选项槽位 {label} 不是单 token（长度 {}）",
+                    toks.len()
+                ));
             }
             ids.push(toks[0]);
         }
@@ -1429,9 +1511,7 @@ impl UpstreamClient {
                 text.chars().take(200).collect::<String>()
             ));
         }
-        let parsed: Value = resp
-            .json()
-            .map_err(|e| format!("解析推理输出失败：{e}"))?;
+        let parsed: Value = resp.json().map_err(|e| format!("解析推理输出失败：{e}"))?;
         let mut items = match parsed {
             Value::Array(arr) => arr,
             other => vec![other],
@@ -1465,7 +1545,10 @@ impl UpstreamClient {
         // 2026-11-07：网关单槽串行推理。排队期间调用方已放弃（预热被新的中间结果取代、超时）的请求直接丢弃，
         // 不再占用推理，避免正式轮次排在一串作废请求之后超时并触发熔断。
         if abandoned() {
-            return Ok((CLIENT_GONE_STATUS, json!({ "detail": "client disconnected" })));
+            return Ok((
+                CLIENT_GONE_STATUS,
+                json!({ "detail": "client disconnected" }),
+            ));
         }
         let (prompts, prefix_prompt, total_tokens) = if images.is_empty() {
             let mut full_ids = Vec::with_capacity(branches.len());
@@ -1480,13 +1563,16 @@ impl UpstreamClient {
             let cut = marker_text.find("QEV_PREFIX_MARK").unwrap_or(0);
             let mut prefix_ids = self.tokenize(&marker_text[..cut], true)?;
             while !prefix_ids.is_empty()
-                && !full_ids
-                    .iter()
-                    .all(|ids| ids.len() > prefix_ids.len() && ids[..prefix_ids.len()] == prefix_ids[..])
+                && !full_ids.iter().all(|ids| {
+                    ids.len() > prefix_ids.len() && ids[..prefix_ids.len()] == prefix_ids[..]
+                })
             {
                 prefix_ids.pop();
             }
-            let suffix_sum: usize = full_ids.iter().map(|ids| ids.len() - prefix_ids.len()).sum();
+            let suffix_sum: usize = full_ids
+                .iter()
+                .map(|ids| ids.len() - prefix_ids.len())
+                .sum();
             let longest = full_ids.iter().map(Vec::len).max().unwrap_or(0);
             let total = prefix_ids.len() + suffix_sum;
             if longest > DEFAULT_CTX_TOKENS || total > MAX_REQUEST_TOKENS {
@@ -1498,11 +1584,15 @@ impl UpstreamClient {
             let prompt_vals: Vec<Value> = full_ids.into_iter().map(|ids| json!(ids)).collect();
             (prompt_vals, json!(prefix_ids), total)
         } else {
-            let marker_prompt =
-                match render_full_prompt(state, "QEV_PREFIX_MARK", Some(&self.media_marker), images.len()) {
-                    Ok(t) => t,
-                    Err(msg) => return Ok((422, json!({ "detail": msg }))),
-                };
+            let marker_prompt = match render_full_prompt(
+                state,
+                "QEV_PREFIX_MARK",
+                Some(&self.media_marker),
+                images.len(),
+            ) {
+                Ok(t) => t,
+                Err(msg) => return Ok((422, json!({ "detail": msg }))),
+            };
             let Some((head, tail)) = marker_prompt.split_once("QEV_PREFIX_MARK") else {
                 return Err("内部前缀切分标记丢失".into());
             };
@@ -1523,7 +1613,10 @@ impl UpstreamClient {
         };
 
         if abandoned() {
-            return Ok((CLIENT_GONE_STATUS, json!({ "detail": "client disconnected" })));
+            return Ok((
+                CLIENT_GONE_STATUS,
+                json!({ "detail": "client disconnected" }),
+            ));
         }
         let mut pin_slot: Option<i64> = None;
         if prompts.len() > 1 {
@@ -1618,14 +1711,19 @@ impl UpstreamClient {
         }
 
         let mut answers = Map::new();
-        let mut chunk_accum: BTreeMap<String, (BTreeMap<String, (f64, f64)>, Vec<f64>)> = BTreeMap::new();
+        let mut chunk_accum: BTreeMap<String, (BTreeMap<String, (f64, f64)>, Vec<f64>)> =
+            BTreeMap::new();
 
         for (br, probs) in branches.iter().zip(branch_probs.iter()) {
             if br.chunk_index.is_some() {
                 let entry = chunk_accum
                     .entry(br.qid.clone())
                     .or_insert_with(|| (BTreeMap::new(), Vec::new()));
-                let none_idx = br.labels.iter().position(|l| l == NONE_OPTION).unwrap_or(probs.len() - 1);
+                let none_idx = br
+                    .labels
+                    .iter()
+                    .position(|l| l == NONE_OPTION)
+                    .unwrap_or(probs.len() - 1);
                 let keep = (1.0 - probs[none_idx]).max(1e-9);
                 for (lab, &p) in br.labels.iter().zip(probs.iter()) {
                     if lab != NONE_OPTION {
@@ -1693,18 +1791,44 @@ pub struct LocalJevBudget {
     pub notice: Option<&'static str>,
 }
 
-pub const NOTICE_9B_NO_HOLD: &str = "9B 推理较慢，来不及在续听窗口内判断“没说完”，已自动关闭这一项（其余筛选照常）";
-pub const NOTICE_SLOW_ON_CPU: &str = "当前没有显卡加速，4B / 9B 推理较慢，语音筛选经常来不及而被自动跳过；建议改用 0.8B";
+pub const NOTICE_9B_NO_HOLD: &str =
+    "9B 推理较慢，来不及在续听窗口内判断“没说完”，已自动关闭这一项（其余筛选照常）";
+pub const NOTICE_SLOW_ON_CPU: &str =
+    "当前没有显卡加速，4B / 9B 推理较慢，语音筛选经常来不及而被自动跳过；建议改用 0.8B";
 
 /// 按模型档位与是否有显卡加速给出等待预算；Laya 等非 OneJev 模型返回 `None`（沿用默认值）。
 pub fn local_jev_budget(model_id: &str, gpu: bool) -> Option<LocalJevBudget> {
     let budget = match (model_id, gpu) {
-        ("onejev_1_6_0_8b", true) => LocalJevBudget { turn_ms: 1500, hold_ms: Some(600), notice: None },
-        ("onejev_1_6_0_8b", false) => LocalJevBudget { turn_ms: 2000, hold_ms: Some(800), notice: None },
-        ("onejev_1_6_4b", true) => LocalJevBudget { turn_ms: 2500, hold_ms: Some(800), notice: None },
-        ("onejev_1_6_4b", false) => LocalJevBudget { turn_ms: 2500, hold_ms: None, notice: Some(NOTICE_SLOW_ON_CPU) },
-        ("onejev_1_6_9b", true) => LocalJevBudget { turn_ms: 3500, hold_ms: None, notice: Some(NOTICE_9B_NO_HOLD) },
-        ("onejev_1_6_9b", false) => LocalJevBudget { turn_ms: 3500, hold_ms: None, notice: Some(NOTICE_SLOW_ON_CPU) },
+        ("onejev_1_6_0_8b", true) => LocalJevBudget {
+            turn_ms: 1500,
+            hold_ms: Some(600),
+            notice: None,
+        },
+        ("onejev_1_6_0_8b", false) => LocalJevBudget {
+            turn_ms: 2000,
+            hold_ms: Some(800),
+            notice: None,
+        },
+        ("onejev_1_6_4b", true) => LocalJevBudget {
+            turn_ms: 2500,
+            hold_ms: Some(800),
+            notice: None,
+        },
+        ("onejev_1_6_4b", false) => LocalJevBudget {
+            turn_ms: 2500,
+            hold_ms: None,
+            notice: Some(NOTICE_SLOW_ON_CPU),
+        },
+        ("onejev_1_6_9b", true) => LocalJevBudget {
+            turn_ms: 3500,
+            hold_ms: None,
+            notice: Some(NOTICE_9B_NO_HOLD),
+        },
+        ("onejev_1_6_9b", false) => LocalJevBudget {
+            turn_ms: 3500,
+            hold_ms: None,
+            notice: Some(NOTICE_SLOW_ON_CPU),
+        },
         _ => return None,
     };
     Some(budget)
@@ -1731,7 +1855,9 @@ fn orphan_llama_pids(ps_output: &str, model_roots: &[String]) -> Vec<u32> {
             let command = command.trim_start();
             let ours = command.contains("llama-server")
                 && command.contains("OneJev1.6-")
-                && model_roots.iter().any(|root| !root.is_empty() && command.contains(root.as_str()));
+                && model_roots
+                    .iter()
+                    .any(|root| !root.is_empty() && command.contains(root.as_str()));
             (ppid == 1 && ours).then_some(pid)
         })
         .collect()
@@ -1829,17 +1955,30 @@ impl LlamaLog {
 
     /// 最近几行里最能说明问题的：优先带 error / failed 字样的行，否则取最后几行。
     pub fn summary(&self, max_lines: usize) -> String {
-        let Ok(lines) = self.0.lock() else { return String::new() };
+        let Ok(lines) = self.0.lock() else {
+            return String::new();
+        };
         let lower_hit = |l: &String| {
             let l = l.to_ascii_lowercase();
-            l.contains("error") || l.contains("failed") || l.contains("unable") || l.contains("out of memory")
+            l.contains("error")
+                || l.contains("failed")
+                || l.contains("unable")
+                || l.contains("out of memory")
         };
         let picked: Vec<&String> = {
             let hits: Vec<&String> = lines.iter().filter(|l| lower_hit(l)).collect();
-            if hits.is_empty() { lines.iter().collect() } else { hits }
+            if hits.is_empty() {
+                lines.iter().collect()
+            } else {
+                hits
+            }
         };
         let start = picked.len().saturating_sub(max_lines);
-        picked[start..].iter().map(|l| l.as_str()).collect::<Vec<_>>().join(" | ")
+        picked[start..]
+            .iter()
+            .map(|l| l.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 }
 
@@ -1883,7 +2022,10 @@ impl OneJevGateway {
             return Err("本地 OneJev 启动已取消".into());
         }
         let (gguf_name, mmproj_name) = match model_id {
-            "onejev_1_6_0_8b" => ("OneJev1.6-0.8B.Q8_0.gguf", "OneJev1.6-0.8B.mmproj-Q8_0.gguf"),
+            "onejev_1_6_0_8b" => (
+                "OneJev1.6-0.8B.Q8_0.gguf",
+                "OneJev1.6-0.8B.mmproj-Q8_0.gguf",
+            ),
             "onejev_1_6_4b" => ("OneJev1.6-4B.Q4_K_M.gguf", "OneJev1.6-4B.mmproj-Q8_0.gguf"),
             "onejev_1_6_9b" => ("OneJev1.6-9B.Q4_K_M.gguf", "OneJev1.6-9B.mmproj-Q8_0.gguf"),
             other => return Err(format!("未知的 OneJev 模型编号：{other}")),
@@ -2350,7 +2492,11 @@ fn handle_gateway_conn(
         header_lines += 1;
         header_bytes += line.len();
         if header_lines > MAX_HTTP_HEADER_LINES || header_bytes > MAX_HTTP_HEADER_BYTES {
-            write_json_response(&mut stream, 431, &json!({ "detail": "request headers too large" }));
+            write_json_response(
+                &mut stream,
+                431,
+                &json!({ "detail": "request headers too large" }),
+            );
             return;
         }
         if let Some((name, val)) = line.split_once(':') {
@@ -2358,7 +2504,11 @@ fn handle_gateway_conn(
             let value = val.trim();
             if key.eq_ignore_ascii_case("content-length") {
                 let Ok(parsed) = value.parse::<usize>() else {
-                    write_json_response(&mut stream, 400, &json!({ "detail": "invalid content-length" }));
+                    write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "detail": "invalid content-length" }),
+                    );
                     return;
                 };
                 content_length = parsed;
@@ -2376,13 +2526,14 @@ fn handle_gateway_conn(
 
     // 回环免鉴权安全防护（对齐 safety.md §2）：在路由与读取请求体前拦截 DNS 重绑定与跨站浏览器请求
     if method.eq_ignore_ascii_case("OPTIONS") {
-        write_json_response(&mut stream, 403, &json!({ "detail": "preflight forbidden" }));
+        write_json_response(
+            &mut stream,
+            403,
+            &json!({ "detail": "preflight forbidden" }),
+        );
         return;
     }
-    if !host_header
-        .as_deref()
-        .is_some_and(is_allowed_loopback_host)
-    {
+    if !host_header.as_deref().is_some_and(is_allowed_loopback_host) {
         write_json_response(&mut stream, 403, &json!({ "detail": "forbidden host" }));
         return;
     }
@@ -2391,16 +2542,28 @@ fn handle_gateway_conn(
             .as_deref()
             .is_some_and(|site| !matches!(site, "none" | "same-origin"))
     {
-        write_json_response(&mut stream, 403, &json!({ "detail": "cross-origin requests forbidden" }));
+        write_json_response(
+            &mut stream,
+            403,
+            &json!({ "detail": "cross-origin requests forbidden" }),
+        );
         return;
     }
     if has_transfer_encoding {
-        write_json_response(&mut stream, 400, &json!({ "detail": "transfer-encoding unsupported" }));
+        write_json_response(
+            &mut stream,
+            400,
+            &json!({ "detail": "transfer-encoding unsupported" }),
+        );
         return;
     }
 
     if content_length > MAX_HTTP_BODY_BYTES {
-        write_json_response(&mut stream, 413, &json!({ "detail": "request body too large" }));
+        write_json_response(
+            &mut stream,
+            413,
+            &json!({ "detail": "request body too large" }),
+        );
         return;
     }
 
@@ -2408,7 +2571,11 @@ fn handle_gateway_conn(
     if content_length > 0 {
         let mut limited = (&mut reader).take(content_length as u64);
         if limited.read_to_end(&mut body).is_err() || body.len() != content_length {
-            write_json_response(&mut stream, 400, &json!({ "detail": "incomplete request body" }));
+            write_json_response(
+                &mut stream,
+                400,
+                &json!({ "detail": "incomplete request body" }),
+            );
             return;
         }
     }
@@ -2421,7 +2588,11 @@ fn handle_gateway_conn(
             None => true,
         });
     if !child_alive {
-        write_json_response(&mut stream, 503, &json!({ "status": "error", "detail": "llama-server exited" }));
+        write_json_response(
+            &mut stream,
+            503,
+            &json!({ "status": "error", "detail": "llama-server exited" }),
+        );
         return;
     }
 
@@ -2467,7 +2638,11 @@ fn handle_gateway_conn(
             }
             let state = payload.get("state").unwrap_or(&Value::Null);
             let Some(questions) = payload.get("questions").and_then(Value::as_object) else {
-                write_json_response(&mut stream, 422, &json!({ "detail": "questions must be an object" }));
+                write_json_response(
+                    &mut stream,
+                    422,
+                    &json!({ "detail": "questions must be an object" }),
+                );
                 return;
             };
             let media = payload.get("media");
@@ -2475,7 +2650,9 @@ fn handle_gateway_conn(
             match upstream.evaluate(model_id, state, questions, media, &abandoned) {
                 Ok((CLIENT_GONE_STATUS, _)) => {}
                 Ok((status, resp_json)) => write_json_response(&mut stream, status, &resp_json),
-                Err(err) => write_json_response(&mut stream, 502, &json!({ "error": err, "detail": err })),
+                Err(err) => {
+                    write_json_response(&mut stream, 502, &json!({ "error": err, "detail": err }))
+                }
             }
         }
         _ => {
@@ -2558,7 +2735,9 @@ mod tests {
         assert_eq!(branches.len(), 1);
         let full = render_full_prompt(&state, &branches[0].suffix, None, 0).unwrap();
         assert!(full.starts_with("<|im_start|>system\nApply the question to the state."));
-        assert!(full.contains("<state>\n{\n  \"utterance\": \"检查激光雕刻机连接状态\"\n}\n</state>"));
+        assert!(
+            full.contains("<state>\n{\n  \"utterance\": \"检查激光雕刻机连接状态\"\n}\n</state>")
+        );
         assert!(full.contains("Question: Does state.utterance ask to check connection status?\n\nOptions:\nA. yes: the statement is true / the answer is yes\nB. no: the statement is false / the answer is no\n\nAnswer with one letter: A, B."));
         assert!(full.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
 
@@ -2566,7 +2745,10 @@ mod tests {
         assert_eq!(choice["choice"], "a");
         assert!((choice["confidence"].as_f64().unwrap() - 0.775).abs() < 1e-6);
 
-        let score = make_score_answer(&[json!("bad"), json!("ok"), json!("great")], &[0.0, 0.25, 0.75]);
+        let score = make_score_answer(
+            &[json!("bad"), json!("ok"), json!("great")],
+            &[0.0, 0.25, 0.75],
+        );
         assert!((score["score"].as_f64().unwrap() - 1.75).abs() < 1e-6);
         assert!(score["confidence"].as_f64().unwrap() > 0.6);
     }
@@ -2582,15 +2764,23 @@ mod tests {
         assert_eq!(det_intel_mac.kind, AcceleratorKind::Cpu);
         assert!(det_intel_mac.device_detail.is_none());
 
-        let win_cuda = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4060 (8188 MiB, 7100 MiB free)\n";
+        let win_cuda =
+            "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4060 (8188 MiB, 7100 MiB free)\n";
         let det_cuda = parse_list_devices_output(win_cuda).unwrap();
         assert_eq!(det_cuda.kind, AcceleratorKind::Cuda);
-        assert_eq!(det_cuda.device_detail.as_deref(), Some("NVIDIA GeForce RTX 4060"));
+        assert_eq!(
+            det_cuda.device_detail.as_deref(),
+            Some("NVIDIA GeForce RTX 4060")
+        );
 
-        let win_vk = "Available devices:\n  Vulkan0: AMD Radeon RX 7800 XT (16384 MiB, 15000 MiB free)\n";
+        let win_vk =
+            "Available devices:\n  Vulkan0: AMD Radeon RX 7800 XT (16384 MiB, 15000 MiB free)\n";
         let det_vk = parse_list_devices_output(win_vk).unwrap();
         assert_eq!(det_vk.kind, AcceleratorKind::Vulkan);
-        assert_eq!(det_vk.device_detail.as_deref(), Some("AMD Radeon RX 7800 XT"));
+        assert_eq!(
+            det_vk.device_detail.as_deref(),
+            Some("AMD Radeon RX 7800 XT")
+        );
     }
 
     fn make_test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -2598,7 +2788,8 @@ mod tests {
         let mut cd = Vec::new();
         for &(name, content) in entries {
             let local_offset = buf.len() as u32;
-            let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            let mut enc =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
             enc.write_all(content).unwrap();
             let comp = enc.finish().unwrap();
             let name_bytes = name.as_bytes();
@@ -2653,14 +2844,18 @@ mod tests {
     /// 2026-11-07：多档 OneJev 同时下载时，后来的排队等推理引擎并报告“等待”，等待中可取消。
     #[test]
     fn runtime_install_wait_reports_waiting_and_is_cancellable() {
-        let held = RUNTIME_INSTALL_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner());
+        let held = RUNTIME_INSTALL_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let cancel = Arc::new(AtomicBool::new(false));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let waiter = {
             let cancel = cancel.clone();
             let seen = seen.clone();
             std::thread::spawn(move || {
-                lock_runtime_install(&cancel, &|progress| seen.lock().unwrap().push(progress)).map(drop)
+                lock_runtime_install(&cancel, &|progress| seen.lock().unwrap().push(progress))
+                    .map(drop)
             })
         };
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2672,17 +2867,29 @@ mod tests {
         cancel.store(true, Ordering::SeqCst);
         assert_eq!(waiter.join().unwrap(), Err("已取消".to_owned()));
         drop(held);
-        assert!(lock_runtime_install(&AtomicBool::new(false), &|_| {}).is_ok(), "释放后立即可拿到");
+        assert!(
+            lock_runtime_install(&AtomicBool::new(false), &|_| {}).is_ok(),
+            "释放后立即可拿到"
+        );
     }
 
     #[test]
     fn zip_extractor_unpacks_deflate_and_blocks_path_traversal() {
         let tmp = tempfile::tempdir().unwrap();
         let cancel = AtomicBool::new(false);
-        let ok_zip = make_test_zip(&[("llama-server.exe", b"MZ-test-binary"), ("sub/mtmd.dll", b"dll-bytes")]);
+        let ok_zip = make_test_zip(&[
+            ("llama-server.exe", b"MZ-test-binary"),
+            ("sub/mtmd.dll", b"dll-bytes"),
+        ]);
         extract_zip_bytes(&ok_zip, tmp.path(), &cancel).unwrap();
-        assert_eq!(fs::read(tmp.path().join("llama-server.exe")).unwrap(), b"MZ-test-binary");
-        assert_eq!(fs::read(tmp.path().join("sub").join("mtmd.dll")).unwrap(), b"dll-bytes");
+        assert_eq!(
+            fs::read(tmp.path().join("llama-server.exe")).unwrap(),
+            b"MZ-test-binary"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("sub").join("mtmd.dll")).unwrap(),
+            b"dll-bytes"
+        );
 
         let evil_zip = make_test_zip(&[("../escape.exe", b"bad")]);
         let out_dir = tmp.path().join("evil");
@@ -2716,7 +2923,9 @@ mod tests {
 
         let mock_thread = std::thread::spawn(move || {
             while !stop_mock_t.load(Ordering::SeqCst) {
-                let Ok((mut s, _)) = mock_llama.accept() else { break };
+                let Ok((mut s, _)) = mock_llama.accept() else {
+                    break;
+                };
                 if stop_mock_t.load(Ordering::SeqCst) {
                     break;
                 }
@@ -2752,11 +2961,12 @@ mod tests {
                     let v: Value = serde_json::from_slice(&body).unwrap();
                     let content = v["content"].as_str().unwrap_or("");
                     let slots = slot_labels();
-                    let tokens: Vec<i64> = if let Some(idx) = slots.iter().position(|l| l == content) {
-                        vec![1000 + idx as i64]
-                    } else {
-                        content.bytes().map(|b| b as i64).collect()
-                    };
+                    let tokens: Vec<i64> =
+                        if let Some(idx) = slots.iter().position(|l| l == content) {
+                            vec![1000 + idx as i64]
+                        } else {
+                            content.bytes().map(|b| b as i64).collect()
+                        };
                     write_json_response(&mut s, 200, &json!({ "tokens": tokens }));
                 } else if path == "/completion" {
                     completions_t.fetch_add(1, Ordering::SeqCst);
@@ -2787,7 +2997,12 @@ mod tests {
             }
         });
 
-        MockLlama { port: mock_port, stop: stop_mock, completions, thread: mock_thread }
+        MockLlama {
+            port: mock_port,
+            stop: stop_mock,
+            completions,
+            thread: mock_thread,
+        }
     }
 
     fn spawn_test_gateway(upstream: Arc<UpstreamClient>) -> (OneJevGateway, SocketAddr) {
@@ -2814,7 +3029,8 @@ mod tests {
     fn gateway_round_trips_systemone_over_mock_llama_server() {
         let mock = spawn_mock_llama();
         let mock_port = mock.port;
-        let upstream = Arc::new(UpstreamClient::connect(format!("http://127.0.0.1:{mock_port}")).unwrap());
+        let upstream =
+            Arc::new(UpstreamClient::connect(format!("http://127.0.0.1:{mock_port}")).unwrap());
         let (mut gw, gw_addr) = spawn_test_gateway(upstream);
 
         let client = reqwest::blocking::Client::new();
@@ -2846,11 +3062,16 @@ mod tests {
 
         let mut rebind_stream = TcpStream::connect(gw_addr).unwrap();
         rebind_stream
-            .write_all(b"GET /health HTTP/1.1\r\nHost: evil.example:18090\r\nConnection: close\r\n\r\n")
+            .write_all(
+                b"GET /health HTTP/1.1\r\nHost: evil.example:18090\r\nConnection: close\r\n\r\n",
+            )
             .unwrap();
         let mut rebind_resp = String::new();
         rebind_stream.read_to_string(&mut rebind_resp).unwrap();
-        assert!(rebind_resp.starts_with("HTTP/1.1 403"), "got: {rebind_resp}");
+        assert!(
+            rebind_resp.starts_with("HTTP/1.1 403"),
+            "got: {rebind_resp}"
+        );
 
         let resp: Value = client
             .post(format!("http://{gw_addr}/v1/systemone"))
@@ -2893,7 +3114,8 @@ mod tests {
     #[test]
     fn gateway_drops_requests_abandoned_while_queued_behind_the_single_slot() {
         let mock = spawn_mock_llama();
-        let upstream = Arc::new(UpstreamClient::connect(format!("http://127.0.0.1:{}", mock.port)).unwrap());
+        let upstream =
+            Arc::new(UpstreamClient::connect(format!("http://127.0.0.1:{}", mock.port)).unwrap());
         let (mut gw, gw_addr) = spawn_test_gateway(upstream.clone());
         let body = serde_json::to_vec(&json!({
             "model": "jev-latest",
@@ -2925,7 +3147,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         drop(busy);
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(mock.completions.load(Ordering::SeqCst), 0, "已放弃的请求不应再推理");
+        assert_eq!(
+            mock.completions.load(Ordering::SeqCst),
+            0,
+            "已放弃的请求不应再推理"
+        );
 
         // 仍在等待的请求照常推理并返回结果
         let mut alive = request(false).unwrap();
@@ -2944,16 +3170,42 @@ mod tests {
         for id in ["onejev_1_6_0_8b", "onejev_1_6_4b", "onejev_1_6_9b"] {
             for gpu in [true, false] {
                 let budget = local_jev_budget(id, gpu).unwrap();
-                assert!(budget.hold_ms.is_none_or(|ms| ms <= 800), "{id} gpu={gpu}: {budget:?}");
-                assert!(budget.turn_ms >= 1500 && budget.turn_ms <= 3500, "{id} gpu={gpu}: {budget:?}");
+                assert!(
+                    budget.hold_ms.is_none_or(|ms| ms <= 800),
+                    "{id} gpu={gpu}: {budget:?}"
+                );
+                assert!(
+                    budget.turn_ms >= 1500 && budget.turn_ms <= 3500,
+                    "{id} gpu={gpu}: {budget:?}"
+                );
             }
         }
-        assert_eq!(local_jev_budget("onejev_1_6_0_8b", true).unwrap().hold_ms, Some(600));
-        assert_eq!(local_jev_budget("onejev_1_6_9b", true).unwrap().hold_ms, None);
-        assert_eq!(local_jev_budget("onejev_1_6_9b", true).unwrap().notice, Some(NOTICE_9B_NO_HOLD));
-        assert_eq!(local_jev_budget("onejev_1_6_4b", false).unwrap().notice, Some(NOTICE_SLOW_ON_CPU));
-        assert_eq!(local_jev_budget("onejev_1_6_4b", false).unwrap().hold_ms, None);
-        assert!(local_jev_budget("onejev_1_6_0_8b", false).unwrap().notice.is_none());
+        assert_eq!(
+            local_jev_budget("onejev_1_6_0_8b", true).unwrap().hold_ms,
+            Some(600)
+        );
+        assert_eq!(
+            local_jev_budget("onejev_1_6_9b", true).unwrap().hold_ms,
+            None
+        );
+        assert_eq!(
+            local_jev_budget("onejev_1_6_9b", true).unwrap().notice,
+            Some(NOTICE_9B_NO_HOLD)
+        );
+        assert_eq!(
+            local_jev_budget("onejev_1_6_4b", false).unwrap().notice,
+            Some(NOTICE_SLOW_ON_CPU)
+        );
+        assert_eq!(
+            local_jev_budget("onejev_1_6_4b", false).unwrap().hold_ms,
+            None
+        );
+        assert!(
+            local_jev_budget("onejev_1_6_0_8b", false)
+                .unwrap()
+                .notice
+                .is_none()
+        );
         assert!(local_jev_budget("laya_multilingual", true).is_none());
     }
 
@@ -2986,7 +3238,10 @@ garbage line
         assert!(log.summary(3).contains("error loading model"));
         assert!(log.0.lock().unwrap().back().unwrap().chars().count() <= LLAMA_LOG_LINE_CHARS);
         assert!(with_log_hint("启动失败".into(), &log).contains("推理进程输出"));
-        assert_eq!(with_log_hint("启动失败".into(), &LlamaLog::default()), "启动失败");
+        assert_eq!(
+            with_log_hint("启动失败".into(), &LlamaLog::default()),
+            "启动失败"
+        );
     }
 
     #[test]
@@ -3027,6 +3282,9 @@ garbage line
         );
         assert!(res.is_err());
         let rebound = TcpListener::bind(occupied_addr);
-        assert!(rebound.is_ok(), "port should remain unbound after cancelled start");
+        assert!(
+            rebound.is_ok(),
+            "port should remain unbound after cancelled start"
+        );
     }
 }

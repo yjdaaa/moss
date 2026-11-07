@@ -9,7 +9,13 @@ use std::path::{Path, PathBuf};
 const GUARDED_CRATES: [&str; 3] = ["laser-tools", "laser-device", "laser-core"];
 
 /// `String`/`str` 没有这些方法，只有 `serde_json::Value` 有，因此不会误判。
-const VALUE_ONLY_ACCESSORS: [&str; 5] = [".as_f64(", ".as_i64(", ".as_u64(", ".as_bool(", ".as_object("];
+const VALUE_ONLY_ACCESSORS: [&str; 5] = [
+    ".as_f64(",
+    ".as_i64(",
+    ".as_u64(",
+    ".as_bool(",
+    ".as_object(",
+];
 
 fn workspace_crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,10 +62,17 @@ fn contract_crates_do_not_depend_on_serde_json() {
         let manifest = std::fs::read_to_string(&manifest_path)
             .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", manifest_path.display()));
         if runtime_dependencies_section(&manifest).contains("serde_json") {
-            violations.push(format!("{}: [dependencies] 含 serde_json", manifest_path.display()));
+            violations.push(format!(
+                "{}: [dependencies] 含 serde_json",
+                manifest_path.display()
+            ));
         }
     }
-    assert!(violations.is_empty(), "TYPE_BOUNDARY_VIOLATION\n{}", violations.join("\n"));
+    assert!(
+        violations.is_empty(),
+        "TYPE_BOUNDARY_VIOLATION\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
@@ -77,20 +90,30 @@ fn contract_crate_sources_do_not_touch_serde_json_values() {
             for (index, line) in text.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or("");
                 let hit = code.contains("serde_json")
-                    || VALUE_ONLY_ACCESSORS.iter().any(|needle| code.contains(needle));
+                    || VALUE_ONLY_ACCESSORS
+                        .iter()
+                        .any(|needle| code.contains(needle));
                 if hit {
                     violations.push(format!("{}:{}: {}", file.display(), index + 1, line.trim()));
                 }
             }
         }
     }
-    assert!(violations.is_empty(), "TYPE_BOUNDARY_VIOLATION\n{}", violations.join("\n"));
+    assert!(
+        violations.is_empty(),
+        "TYPE_BOUNDARY_VIOLATION\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
 fn string_as_str_is_not_a_boundary_violation() {
     // 回归：`(host.as_str(), *port).to_socket_addrs()` 这类标准库用法不得被判违规。
     let sample = "let addrs = (host.as_str(), *port).to_socket_addrs();";
-    assert!(!VALUE_ONLY_ACCESSORS.iter().any(|needle| sample.contains(needle)));
+    assert!(
+        !VALUE_ONLY_ACCESSORS
+            .iter()
+            .any(|needle| sample.contains(needle))
+    );
     assert!(!sample.contains("serde_json"));
 }

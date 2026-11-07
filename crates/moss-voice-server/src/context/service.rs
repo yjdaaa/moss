@@ -2,11 +2,12 @@
 //! with the host (`ContextStore::current`) and applies the NV19-01 contracts before the store
 //! is touched. Management actions (edit, confirm, delete, clear, legacy import, export) are
 //! private-window only; the voice channel may only create extraction candidates and read.
-use super::{
-    check_content, transition, AccessContext, Applicability, Category, Channel, ContextError, ContextMemory, Evidence, MemoryDraft,
-    ScopeKey, ScopeKind, Source, SourceKind, TrustedScope, Verification, MAX_CONTENT_CHARS,
-};
 use super::retrieve::SearchQuery;
+use super::{
+    AccessContext, Applicability, Category, Channel, ContextError, ContextMemory, Evidence,
+    MAX_CONTENT_CHARS, MemoryDraft, ScopeKey, ScopeKind, Source, SourceKind, TrustedScope,
+    Verification, check_content, transition,
+};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
@@ -48,32 +49,73 @@ pub struct ExtractionRun {
 
 impl ExtractionRun {
     pub fn adds_json(&self) -> String {
-        serde_json::Value::Array(self.adds.iter().map(|a| serde_json::json!({"id": a.id, "revision": a.revision})).collect()).to_string()
+        serde_json::Value::Array(
+            self.adds
+                .iter()
+                .map(|a| serde_json::json!({"id": a.id, "revision": a.revision}))
+                .collect(),
+        )
+        .to_string()
     }
 
     pub fn skipped_json(&self) -> String {
-        serde_json::Value::Array(self.skipped.iter().map(|s| serde_json::json!({"op": s.op, "reason": s.reason})).collect()).to_string()
+        serde_json::Value::Array(
+            self.skipped
+                .iter()
+                .map(|s| serde_json::json!({"op": s.op, "reason": s.reason}))
+                .collect(),
+        )
+        .to_string()
     }
 
     /// Rebuild from stored JSON columns; anything unexpected fails closed.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_json(id: &str, scope: ScopeKey, started_at: f64, finished_at: Option<f64>, adds: &str, updates: &str, deletes: &str, skipped: &str, reverted_at: Option<f64>) -> Result<Self, String> {
+    pub fn from_json(
+        id: &str,
+        scope: ScopeKey,
+        started_at: f64,
+        finished_at: Option<f64>,
+        adds: &str,
+        updates: &str,
+        deletes: &str,
+        skipped: &str,
+        reverted_at: Option<f64>,
+    ) -> Result<Self, String> {
         let bad = || "提取清单格式无效".to_owned();
-        let array = |text: &str| serde_json::from_str::<Vec<serde_json::Value>>(text).map_err(|_| bad());
+        let array =
+            |text: &str| serde_json::from_str::<Vec<serde_json::Value>>(text).map_err(|_| bad());
         if !array(updates)?.is_empty() || !array(deletes)?.is_empty() {
             return Err(bad());
         }
         let adds = array(adds)?
             .iter()
-            .map(|v| Some(RunAdd { id: v.get("id")?.as_str()?.to_owned(), revision: v.get("revision")?.as_i64()? }))
+            .map(|v| {
+                Some(RunAdd {
+                    id: v.get("id")?.as_str()?.to_owned(),
+                    revision: v.get("revision")?.as_i64()?,
+                })
+            })
             .collect::<Option<Vec<_>>>()
             .ok_or_else(bad)?;
         let skipped = array(skipped)?
             .iter()
-            .map(|v| Some(RunSkip { op: v.get("op")?.as_str()?.to_owned(), reason: v.get("reason")?.as_str()?.to_owned() }))
+            .map(|v| {
+                Some(RunSkip {
+                    op: v.get("op")?.as_str()?.to_owned(),
+                    reason: v.get("reason")?.as_str()?.to_owned(),
+                })
+            })
             .collect::<Option<Vec<_>>>()
             .ok_or_else(bad)?;
-        Ok(Self { id: id.into(), scope, started_at, finished_at, adds, skipped, reverted_at })
+        Ok(Self {
+            id: id.into(),
+            scope,
+            started_at,
+            finished_at,
+            adds,
+            skipped,
+            reverted_at,
+        })
     }
 }
 
@@ -96,7 +138,13 @@ pub trait ContextStore: Send + Sync {
     /// Includes deleted tombstones, so deleted imports are not recreated.
     fn source_seen(&self, scope: &ScopeKey, source_ref: &str) -> Result<bool, String>;
     /// `None`: revision conflict, or the row was deleted/invalidated meanwhile.
-    fn update(&self, id: &str, expected_revision: i64, patch: &MemoryPatch, now: f64) -> Result<Option<ContextMemory>, String>;
+    fn update(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        patch: &MemoryPatch,
+        now: f64,
+    ) -> Result<Option<ContextMemory>, String>;
     fn delete(&self, id: &str, expected_revision: i64, now: f64) -> Result<bool, String>;
     /// The same fact was proposed again: count it and push out an extracted candidate's expiry
     /// to `extend_to` (never earlier). Content, verification and revision stay unchanged.
@@ -109,7 +157,13 @@ pub trait ContextStore: Send + Sync {
     fn mark_run_reverted(&self, id: &str, now: f64) -> Result<bool, String>;
     /// NV19-04: live, non-invalidated, unexpired rows of one scope containing any of
     /// `query.terms` (FTS5 trigram, each 3 chars) or any of `query.shorts` (substring).
-    fn search(&self, scope: &ScopeKey, query: &SearchQuery, now: f64, limit: usize) -> Result<Vec<ContextMemory>, String>;
+    fn search(
+        &self,
+        scope: &ScopeKey,
+        query: &SearchQuery,
+        now: f64,
+        limit: usize,
+    ) -> Result<Vec<ContextMemory>, String>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,7 +216,10 @@ pub const PROFILE_LIMIT: usize = 3;
 fn new_id() -> Result<String, ServiceError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| ServiceError::Store("无法生成记忆编号".into()))?;
-    Ok(format!("ctx-{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+    Ok(format!(
+        "ctx-{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
 }
 
 /// Split at line boundaries into pieces of at most `MAX_CONTENT_CHARS`.
@@ -171,7 +228,9 @@ fn chunks(text: &str) -> Vec<String> {
     let mut current = String::new();
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let line: String = line.chars().take(MAX_CONTENT_CHARS).collect();
-        if !current.is_empty() && current.chars().count() + 1 + line.chars().count() > MAX_CONTENT_CHARS {
+        if !current.is_empty()
+            && current.chars().count() + 1 + line.chars().count() > MAX_CONTENT_CHARS
+        {
             parts.push(std::mem::take(&mut current));
         }
         if !current.is_empty() {
@@ -187,11 +246,16 @@ fn chunks(text: &str) -> Vec<String> {
 
 impl ContextService {
     pub fn new(store: Arc<dyn ContextStore>) -> Arc<Self> {
-        Arc::new(Self { store, gate: Mutex::new(()) })
+        Arc::new(Self {
+            store,
+            gate: Mutex::new(()),
+        })
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, ServiceError> {
-        self.gate.lock().map_err(|_| ServiceError::Store("记忆管理锁不可用".into()))
+        self.gate
+            .lock()
+            .map_err(|_| ServiceError::Store("记忆管理锁不可用".into()))
     }
 
     fn store<T>(result: Result<T, String>) -> Result<T, ServiceError> {
@@ -199,17 +263,34 @@ impl ContextService {
     }
 
     /// The caller must hold the scope and the host must still vouch for it.
-    fn verified<'a>(&self, access: &'a AccessContext, key: &ScopeKey) -> Result<&'a TrustedScope, ServiceError> {
+    fn verified<'a>(
+        &self,
+        access: &'a AccessContext,
+        key: &ScopeKey,
+    ) -> Result<&'a TrustedScope, ServiceError> {
         let scope = access.trusted(key).ok_or(ContextError::AccessDenied)?;
-        if self.store.current(scope) { Ok(scope) } else { Err(ServiceError::ScopeStale) }
+        if self.store.current(scope) {
+            Ok(scope)
+        } else {
+            Err(ServiceError::ScopeStale)
+        }
     }
 
     fn private_only(access: &AccessContext) -> Result<(), ServiceError> {
-        if access.channel() == Channel::DesktopPrivate { Ok(()) } else { Err(ContextError::AccessDenied.into()) }
+        if access.channel() == Channel::DesktopPrivate {
+            Ok(())
+        } else {
+            Err(ContextError::AccessDenied.into())
+        }
     }
 
     /// Load a live record the caller may manage, checking the expected revision.
-    fn managed(&self, access: &AccessContext, id: &str, expected_revision: i64) -> Result<ContextMemory, ServiceError> {
+    fn managed(
+        &self,
+        access: &AccessContext,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<ContextMemory, ServiceError> {
         Self::private_only(access)?;
         let record = Self::store(self.store.get(id))?.ok_or(ServiceError::NotFound)?;
         if record.deleted_at.is_some() {
@@ -222,20 +303,35 @@ impl ContextService {
         Ok(record)
     }
 
-    pub fn create(&self, access: &AccessContext, draft: MemoryDraft, now: f64) -> Result<ContextMemory, ServiceError> {
+    pub fn create(
+        &self,
+        access: &AccessContext,
+        draft: MemoryDraft,
+        now: f64,
+    ) -> Result<ContextMemory, ServiceError> {
         self.create_superseding(access, draft, None, now)
     }
 
     /// Create a record that replaces `supersedes` once confirmed. The link is kept only when the
     /// older record is live, readable by this request and in the same scope and category;
     /// otherwise the record is created without it (the link is a hint, never an authority).
-    fn create_superseding(&self, access: &AccessContext, draft: MemoryDraft, supersedes: Option<&str>, now: f64) -> Result<ContextMemory, ServiceError> {
+    fn create_superseding(
+        &self,
+        access: &AccessContext,
+        draft: MemoryDraft,
+        supersedes: Option<&str>,
+        now: f64,
+    ) -> Result<ContextMemory, ServiceError> {
         draft.validate(access, now)?;
         let _gate = self.lock()?;
         self.verified(access, &draft.scope)?;
         let supersedes = match supersedes {
             Some(id) => Self::store(self.store.get(id))?
-                .filter(|old| old.scope == draft.scope && old.category == draft.category && old.readable(access, now))
+                .filter(|old| {
+                    old.scope == draft.scope
+                        && old.category == draft.category
+                        && old.readable(access, now)
+                })
                 .map(|old| old.id),
             None => None,
         };
@@ -261,26 +357,45 @@ impl ContextService {
 
     /// Voice: an extraction proposed a fact that is already stored. Counts it and keeps an
     /// unreviewed extracted candidate from expiring; never confirms or edits anything.
-    pub(crate) fn reinforce(&self, access: &AccessContext, id: &str, now: f64) -> Result<bool, ServiceError> {
+    pub(crate) fn reinforce(
+        &self,
+        access: &AccessContext,
+        id: &str,
+        now: f64,
+    ) -> Result<bool, ServiceError> {
         if access.channel() != Channel::Voice {
             return Err(ContextError::AccessDenied.into());
         }
         let _gate = self.lock()?;
-        let Some(record) = Self::store(self.store.get(id))? else { return Ok(false) };
+        let Some(record) = Self::store(self.store.get(id))? else {
+            return Ok(false);
+        };
         if !record.readable(access, now) {
             return Ok(false);
         }
         self.verified(access, &record.scope)?;
-        Self::store(self.store.reinforce(id, now, Some(now + super::extract::CANDIDATE_TTL_SECONDS)))
+        Self::store(self.store.reinforce(
+            id,
+            now,
+            Some(now + super::extract::CANDIDATE_TTL_SECONDS),
+        ))
     }
 
     /// Ids replaced by a live record that this request can read (hidden from voice retrieval
     /// until the user decides). Uses every scope the request holds.
-    pub(crate) fn superseded_ids(&self, access: &AccessContext, now: f64) -> std::collections::HashSet<String> {
+    pub(crate) fn superseded_ids(
+        &self,
+        access: &AccessContext,
+        now: f64,
+    ) -> std::collections::HashSet<String> {
         let mut ids = std::collections::HashSet::new();
         for scope in access.scopes() {
             for row in self.list(access, scope.key(), now).unwrap_or_default() {
-                if let Some(old) = row.supersedes.as_ref().filter(|_| row.readable(access, now)) {
+                if let Some(old) = row
+                    .supersedes
+                    .as_ref()
+                    .filter(|_| row.readable(access, now))
+                {
                     ids.insert(old.clone());
                 }
             }
@@ -290,7 +405,12 @@ impl ContextService {
 
     /// Voice sees only active records; the private window also sees expired and invalidated
     /// ones so they can be reviewed. Deleted tombstones are never returned.
-    pub fn list(&self, access: &AccessContext, scope: &ScopeKey, now: f64) -> Result<Vec<ContextMemory>, ServiceError> {
+    pub fn list(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        now: f64,
+    ) -> Result<Vec<ContextMemory>, ServiceError> {
         self.verified(access, scope)?;
         let rows = Self::store(self.store.list(scope, false))?;
         Ok(rows
@@ -301,7 +421,16 @@ impl ContextService {
     }
 
     /// The user rewrites content / applicability / expiry; verification is unchanged.
-    pub fn edit(&self, access: &AccessContext, id: &str, expected_revision: i64, content: &str, applicability: Option<Applicability>, expires_at: Option<f64>, now: f64) -> Result<ContextMemory, ServiceError> {
+    pub fn edit(
+        &self,
+        access: &AccessContext,
+        id: &str,
+        expected_revision: i64,
+        content: &str,
+        applicability: Option<Applicability>,
+        expires_at: Option<f64>,
+        now: f64,
+    ) -> Result<ContextMemory, ServiceError> {
         let _gate = self.lock()?;
         let record = self.managed(access, id, expected_revision)?;
         if record.verification == Verification::Invalidated {
@@ -314,24 +443,56 @@ impl ContextService {
         if expires_at.is_some_and(|at| !at.is_finite() || at <= now) {
             return Err(ContextError::ExpiryInvalid.into());
         }
-        let patch = MemoryPatch { content: content.into(), verification: record.verification, applicability, expires_at };
-        Self::store(self.store.update(id, expected_revision, &patch, now))?.ok_or(ServiceError::Conflict)
+        let patch = MemoryPatch {
+            content: content.into(),
+            verification: record.verification,
+            applicability,
+            expires_at,
+        };
+        Self::store(self.store.update(id, expected_revision, &patch, now))?
+            .ok_or(ServiceError::Conflict)
     }
 
     /// Confirm needs evidence; invalidation is always allowed and terminal.
-    pub fn set_verification(&self, access: &AccessContext, id: &str, expected_revision: i64, to: Verification, evidence: Option<&Evidence>, now: f64) -> Result<ContextMemory, ServiceError> {
+    pub fn set_verification(
+        &self,
+        access: &AccessContext,
+        id: &str,
+        expected_revision: i64,
+        to: Verification,
+        evidence: Option<&Evidence>,
+        now: f64,
+    ) -> Result<ContextMemory, ServiceError> {
         let _gate = self.lock()?;
         let record = self.managed(access, id, expected_revision)?;
         transition(record.verification, to, evidence)?;
         let supersedes = record.supersedes.clone();
         let (scope, category) = (record.scope.clone(), record.category);
-        let patch = MemoryPatch { content: record.content, verification: to, applicability: record.applicability, expires_at: record.expires_at };
-        let updated = Self::store(self.store.update(id, expected_revision, &patch, now))?.ok_or(ServiceError::Conflict)?;
+        let patch = MemoryPatch {
+            content: record.content,
+            verification: to,
+            applicability: record.applicability,
+            expires_at: record.expires_at,
+        };
+        let updated = Self::store(self.store.update(id, expected_revision, &patch, now))?
+            .ok_or(ServiceError::Conflict)?;
         // Confirming a correction retires the record it replaces (same scope and category only).
         if to == Verification::Confirmed {
-            if let Some(old) = supersedes.and_then(|old| Self::store(self.store.get(&old)).ok().flatten()) {
-                if old.scope == scope && old.category == category && old.deleted_at.is_none() && old.verification != Verification::Invalidated && self.verified(access, &old.scope).is_ok() {
-                    let retire = MemoryPatch { content: old.content.clone(), verification: Verification::Invalidated, applicability: old.applicability.clone(), expires_at: old.expires_at };
+            if let Some(old) =
+                supersedes.and_then(|old| Self::store(self.store.get(&old)).ok().flatten())
+            {
+                if old.scope == scope
+                    && old.category == category
+                    && old.deleted_at.is_none()
+                    && old.verification != Verification::Invalidated
+                    && self.verified(access, &old.scope).is_ok()
+                {
+                    let retire = MemoryPatch {
+                        content: old.content.clone(),
+                        verification: Verification::Invalidated,
+                        applicability: old.applicability.clone(),
+                        expires_at: old.expires_at,
+                    };
                     let _ = Self::store(self.store.update(&old.id, old.revision, &retire, now))?;
                 }
             }
@@ -339,20 +500,38 @@ impl ContextService {
         Ok(updated)
     }
 
-    pub fn delete(&self, access: &AccessContext, id: &str, expected_revision: i64, now: f64) -> Result<(), ServiceError> {
+    pub fn delete(
+        &self,
+        access: &AccessContext,
+        id: &str,
+        expected_revision: i64,
+        now: f64,
+    ) -> Result<(), ServiceError> {
         let _gate = self.lock()?;
         self.managed(access, id, expected_revision)?;
-        if Self::store(self.store.delete(id, expected_revision, now))? { Ok(()) } else { Err(ServiceError::Conflict) }
+        if Self::store(self.store.delete(id, expected_revision, now))? {
+            Ok(())
+        } else {
+            Err(ServiceError::Conflict)
+        }
     }
 
     /// Voice-channel conflict/correction superseding: soft-delete an older `Preference` record
     /// in the same verified scope when the user states an updated or corrected habit.
-    pub(crate) fn supersede_voice_preference(&self, access: &AccessContext, id: &str, expected_revision: i64, now: f64) -> Result<bool, ServiceError> {
+    pub(crate) fn supersede_voice_preference(
+        &self,
+        access: &AccessContext,
+        id: &str,
+        expected_revision: i64,
+        now: f64,
+    ) -> Result<bool, ServiceError> {
         if access.channel() != Channel::Voice {
             return Err(ContextError::AccessDenied.into());
         }
         let _gate = self.lock()?;
-        let Some(record) = Self::store(self.store.get(id))? else { return Ok(false) };
+        let Some(record) = Self::store(self.store.get(id))? else {
+            return Ok(false);
+        };
         if record.deleted_at.is_some() || record.category != Category::Preference {
             return Ok(false);
         }
@@ -371,16 +550,23 @@ impl ContextService {
         let target = if access.personal_mode() {
             access.scope_of(ScopeKind::Person)
         } else {
-            access.scope_of(ScopeKind::Person).or_else(|| access.scope_of(ScopeKind::Device))
+            access
+                .scope_of(ScopeKind::Person)
+                .or_else(|| access.scope_of(ScopeKind::Device))
         };
-        let Some(scope) = target else { return Vec::new() };
-        let Ok(mut rows) = self.list(access, scope.key(), now) else { return Vec::new() };
+        let Some(scope) = target else {
+            return Vec::new();
+        };
+        let Ok(mut rows) = self.list(access, scope.key(), now) else {
+            return Vec::new();
+        };
         let superseded = self.superseded_ids(access, now);
         rows.retain(|r| {
             r.category == Category::Preference
                 && r.readable(access, now)
                 && !superseded.contains(&r.id)
-                && (super::extract::classify_preference_slot(&r.content).is_some() || super::retrieve::is_global_style_preference(&r.content))
+                && (super::extract::classify_preference_slot(&r.content).is_some()
+                    || super::retrieve::is_global_style_preference(&r.content))
         });
         rows.sort_by(|a, b| {
             (b.verification == Verification::Confirmed)
@@ -388,12 +574,20 @@ impl ContextService {
                 .then_with(|| b.updated_at.total_cmp(&a.updated_at))
         });
         let mut slots = std::collections::HashSet::new();
-        rows.retain(|r| super::extract::classify_preference_slot(&r.content).is_none_or(|slot| slots.insert(slot)));
+        rows.retain(|r| {
+            super::extract::classify_preference_slot(&r.content)
+                .is_none_or(|slot| slots.insert(slot))
+        });
         rows.truncate(PROFILE_LIMIT);
         rows
     }
 
-    pub fn clear(&self, access: &AccessContext, scope: &ScopeKey, now: f64) -> Result<usize, ServiceError> {
+    pub fn clear(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        now: f64,
+    ) -> Result<usize, ServiceError> {
         Self::private_only(access)?;
         let _gate = self.lock()?;
         self.verified(access, scope)?;
@@ -402,10 +596,21 @@ impl ContextService {
 
     /// Turn one NV10 per-device summary into `preference` candidates. Idempotent per
     /// (device, NV10 revision), including after the user deleted the imported rows.
-    pub fn import_legacy(&self, access: &AccessContext, device_id: &str, summary: &str, nv10_revision: i64, now: f64) -> Result<ImportReport, ServiceError> {
+    pub fn import_legacy(
+        &self,
+        access: &AccessContext,
+        device_id: &str,
+        summary: &str,
+        nv10_revision: i64,
+        now: f64,
+    ) -> Result<ImportReport, ServiceError> {
         Self::private_only(access)?;
         let scope = ScopeKey::new(ScopeKind::Device, device_id)?;
-        let digest: String = Sha256::digest(device_id.as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect();
+        let digest: String = Sha256::digest(device_id.as_bytes())
+            .iter()
+            .take(12)
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let reference = format!("nv10:r{nv10_revision}-{digest}");
         let source = Source::new(SourceKind::LegacyNv10Import, Some(&reference))?;
         let _gate = self.lock()?;
@@ -421,15 +626,21 @@ impl ContextService {
         }
         // Filter line by line first, so one sensitive line does not drop its neighbours.
         let mut kept = Vec::new();
-        for line in summary.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in summary
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             let clipped: String = line.chars().take(MAX_CONTENT_CHARS).collect();
             match check_content(&clipped) {
                 Ok(()) => kept.push(clipped),
                 Err(error) => report.skipped.push(error.code()),
             }
         }
-        for content in chunks(&kept.join("
-")) {
+        for content in chunks(&kept.join(
+            "
+",
+        )) {
             let draft = MemoryDraft {
                 scope: scope.clone(),
                 category: Category::Preference,
@@ -458,7 +669,9 @@ impl ContextService {
                         seen_count: 1,
                         last_seen_at: None,
                     };
-                    report.created.push(Self::store(self.store.insert(&memory))?);
+                    report
+                        .created
+                        .push(Self::store(self.store.insert(&memory))?);
                 }
                 Err(error) => report.skipped.push(error.code()),
             }
@@ -466,16 +679,33 @@ impl ContextService {
         Ok(report)
     }
 
-    pub(crate) fn verify_for_search(&self, access: &AccessContext, key: &ScopeKey) -> Result<(), ServiceError> {
+    pub(crate) fn verify_for_search(
+        &self,
+        access: &AccessContext,
+        key: &ScopeKey,
+    ) -> Result<(), ServiceError> {
         self.verified(access, key).map(|_| ())
     }
 
-    pub(crate) fn search_store(&self, key: &ScopeKey, query: &SearchQuery, now: f64) -> Result<Vec<ContextMemory>, ServiceError> {
-        Self::store(self.store.search(key, query, now, super::retrieve::CANDIDATES_PER_SCOPE))
+    pub(crate) fn search_store(
+        &self,
+        key: &ScopeKey,
+        query: &SearchQuery,
+        now: f64,
+    ) -> Result<Vec<ContextMemory>, ServiceError> {
+        Self::store(
+            self.store
+                .search(key, query, now, super::retrieve::CANDIDATES_PER_SCOPE),
+        )
     }
 
     /// Manifests of one scope, newest first (private window).
-    pub fn list_extractions(&self, access: &AccessContext, scope: &ScopeKey, limit: usize) -> Result<Vec<ExtractionRun>, ServiceError> {
+    pub fn list_extractions(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        limit: usize,
+    ) -> Result<Vec<ExtractionRun>, ServiceError> {
         Self::private_only(access)?;
         self.verified(access, scope)?;
         Self::store(self.store.list_runs(scope, limit.min(200)))
@@ -483,7 +713,12 @@ impl ContextService {
 
     /// Undo a whole extraction run: remove each added candidate that is still exactly as the
     /// run left it. Anything the user has since edited, confirmed or deleted is kept as is.
-    pub fn revert_extraction(&self, access: &AccessContext, run_id: &str, now: f64) -> Result<RevertReport, ServiceError> {
+    pub fn revert_extraction(
+        &self,
+        access: &AccessContext,
+        run_id: &str,
+        now: f64,
+    ) -> Result<RevertReport, ServiceError> {
         Self::private_only(access)?;
         let _gate = self.lock()?;
         let run = Self::store(self.store.get_run(run_id))?.ok_or(ServiceError::NotFound)?;
@@ -496,7 +731,11 @@ impl ContextService {
             let current = Self::store(self.store.get(&add.id))?;
             // Candidates may live in the device, person or project scope of the session; each
             // must still be held by this window and vouched for by the host.
-            let untouched = current.as_ref().is_some_and(|row| row.deleted_at.is_none() && row.revision == add.revision && self.verified(access, &row.scope).is_ok());
+            let untouched = current.as_ref().is_some_and(|row| {
+                row.deleted_at.is_none()
+                    && row.revision == add.revision
+                    && self.verified(access, &row.scope).is_ok()
+            });
             if untouched && Self::store(self.store.delete(&add.id, add.revision, now))? {
                 report.removed += 1;
             } else {
@@ -509,20 +748,38 @@ impl ContextService {
     /// Commit one extraction run from the voice channel: every candidate goes through
     /// `create` (contracts + host scope check); the manifest is written last.
     /// Each draft may name an older record it replaces (see `create_superseding`).
-    pub(crate) fn commit_extraction(&self, access: &AccessContext, run: &mut ExtractionRun, drafts: Vec<(MemoryDraft, Option<String>)>, now: f64) -> Result<(), ServiceError> {
+    pub(crate) fn commit_extraction(
+        &self,
+        access: &AccessContext,
+        run: &mut ExtractionRun,
+        drafts: Vec<(MemoryDraft, Option<String>)>,
+        now: f64,
+    ) -> Result<(), ServiceError> {
         let mut stopped = None;
         for (draft, supersedes) in drafts {
             if stopped.is_some() {
-                run.skipped.push(RunSkip { op: "add".into(), reason: "run_stopped".into() });
+                run.skipped.push(RunSkip {
+                    op: "add".into(),
+                    reason: "run_stopped".into(),
+                });
                 continue;
             }
             match self.create_superseding(access, draft, supersedes.as_deref(), now) {
-                Ok(row) => run.adds.push(RunAdd { id: row.id, revision: row.revision }),
-                Err(ServiceError::Invalid(error)) => run.skipped.push(RunSkip { op: "add".into(), reason: error.code().into() }),
+                Ok(row) => run.adds.push(RunAdd {
+                    id: row.id,
+                    revision: row.revision,
+                }),
+                Err(ServiceError::Invalid(error)) => run.skipped.push(RunSkip {
+                    op: "add".into(),
+                    reason: error.code().into(),
+                }),
                 // Scope went stale or the store failed mid-run: stop adding, but still write
                 // the manifest so whatever was added stays revertible.
                 Err(other) => {
-                    run.skipped.push(RunSkip { op: "add".into(), reason: other.code().into() });
+                    run.skipped.push(RunSkip {
+                        op: "add".into(),
+                        reason: other.code().into(),
+                    });
                     stopped = Some(other);
                 }
             }
@@ -533,7 +790,12 @@ impl ContextService {
     }
 
     /// Private backup of one scope as plain JSON (no tombstones). Never sent to a model.
-    pub fn export(&self, access: &AccessContext, scope: &ScopeKey, now: f64) -> Result<serde_json::Value, ServiceError> {
+    pub fn export(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        now: f64,
+    ) -> Result<serde_json::Value, ServiceError> {
         Self::private_only(access)?;
         let rows = self.list(access, scope, now)?;
         Ok(serde_json::Value::Array(

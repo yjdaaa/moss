@@ -34,13 +34,20 @@ async fn serve_once(parts: Vec<Vec<u8>>) -> (String, oneshot::Receiver<Recorded>
         let head = String::from_utf8_lossy(&buffer[..header_end]).to_string();
         let length = head
             .lines()
-            .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().parse::<usize>().unwrap())
+            })
             .unwrap_or(0);
         while buffer.len() < header_end + length {
             let n = stream.read(&mut chunk).await.unwrap();
             buffer.extend_from_slice(&chunk[..n]);
         }
-        let _ = tx.send(Recorded { head, body: buffer[header_end..header_end + length].to_vec() });
+        let _ = tx.send(Recorded {
+            head,
+            body: buffer[header_end..header_end + length].to_vec(),
+        });
         for part in parts {
             stream.write_all(&part).await.unwrap();
             stream.flush().await.unwrap();
@@ -63,9 +70,18 @@ fn sse_head() -> Vec<u8> {
 
 #[test]
 fn urls_are_normalized() {
-    assert_eq!(llm_base_url(" https://h/v1/chat/completions/ "), "https://h/v1");
-    assert_eq!(asr_full_url("https://h/v1/"), "https://h/v1/audio/transcriptions");
-    assert_eq!(tts_full_url("https://h/v1/audio/speech"), "https://h/v1/audio/speech");
+    assert_eq!(
+        llm_base_url(" https://h/v1/chat/completions/ "),
+        "https://h/v1"
+    );
+    assert_eq!(
+        asr_full_url("https://h/v1/"),
+        "https://h/v1/audio/transcriptions"
+    );
+    assert_eq!(
+        tts_full_url("https://h/v1/audio/speech"),
+        "https://h/v1/audio/speech"
+    );
 }
 
 #[test]
@@ -81,7 +97,11 @@ fn sse_decoder_handles_split_lines_and_utf8() {
     assert_eq!(events, vec!["{\"a\":\"你好\"}", "[DONE]"]);
     assert!(decoder.finish().is_none());
     let mut decoder = SseDecoder::default();
-    assert!(decoder.push(b": comment\nevent: x\ndata: 1\ndata: 2").is_empty());
+    assert!(
+        decoder
+            .push(b": comment\nevent: x\ndata: 1\ndata: 2")
+            .is_empty()
+    );
     assert_eq!(decoder.finish().as_deref(), Some("1\n2"));
 }
 
@@ -103,9 +123,17 @@ fn accumulator_merges_tool_call_fragments() {
     assert_eq!(text, vec!["好的"]);
     let reply = accumulator.finish();
     assert_eq!(reply.text, "好的");
-    assert_eq!(reply.tool_calls, vec![ToolCall::new("call_a", "get_time", r#"{"tz":"cn"}"#), ToolCall::new("call_1", "status", "{}")]);
+    assert_eq!(
+        reply.tool_calls,
+        vec![
+            ToolCall::new("call_a", "get_time", r#"{"tz":"cn"}"#),
+            ToolCall::new("call_1", "status", "{}")
+        ]
+    );
     let mut accumulator = StreamAccumulator::default();
-    let error = accumulator.apply(&json!({"error":{"message":"model overloaded"}})).unwrap_err();
+    let error = accumulator
+        .apply(&json!({"error":{"message":"model overloaded"}}))
+        .unwrap_err();
     assert!(error.message.contains("model overloaded"));
 }
 
@@ -126,18 +154,41 @@ async fn llm_streams_deltas_and_tool_calls() {
     let (url, recorded) = serve_once(parts).await;
     let llm = OpenAiLlm::new(&format!("{url}/v1/chat/completions"), KEY, "test-model").unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let tools = vec![ToolSpec { name: "get_time".into(), description: "时间".into(), parameters: json!({"type":"object"}) }];
-    let reply = llm.chat(&[ChatMessage::system("s"), ChatMessage::user("你好")], &tools, tx).await.unwrap();
+    let tools = vec![ToolSpec {
+        name: "get_time".into(),
+        description: "时间".into(),
+        parameters: json!({"type":"object"}),
+    }];
+    let reply = llm
+        .chat(
+            &[ChatMessage::system("s"), ChatMessage::user("你好")],
+            &tools,
+            tx,
+        )
+        .await
+        .unwrap();
     assert_eq!(reply.text, "你好，我是 MOSS。");
-    assert_eq!(reply.tool_calls, vec![ToolCall::new("c1", "get_time", "{}")]);
+    assert_eq!(
+        reply.tool_calls,
+        vec![ToolCall::new("c1", "get_time", "{}")]
+    );
     let mut deltas = Vec::new();
     while let Ok(delta) = rx.try_recv() {
         deltas.push(delta);
     }
     assert_eq!(deltas, vec!["你好，", "我是 MOSS。"]);
     let request = recorded.await.unwrap();
-    assert!(request.head.starts_with("POST /v1/chat/completions "), "{}", request.head);
-    assert!(request.head.to_ascii_lowercase().contains(&format!("authorization: bearer {KEY}").to_ascii_lowercase()));
+    assert!(
+        request.head.starts_with("POST /v1/chat/completions "),
+        "{}",
+        request.head
+    );
+    assert!(
+        request
+            .head
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {KEY}").to_ascii_lowercase())
+    );
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["model"], "test-model");
     assert_eq!(body["stream"], true);
@@ -148,15 +199,24 @@ async fn llm_streams_deltas_and_tool_calls() {
 
 #[tokio::test]
 async fn llm_accepts_non_streaming_json_and_omits_empty_tools() {
-    let full = json!({"choices":[{"message":{"role":"assistant","content":"直接回答"}}]}).to_string();
-    let (url, recorded) = serve_once(vec![response("200 OK", "application/json", full.as_bytes())]).await;
+    let full =
+        json!({"choices":[{"message":{"role":"assistant","content":"直接回答"}}]}).to_string();
+    let (url, recorded) = serve_once(vec![response(
+        "200 OK",
+        "application/json",
+        full.as_bytes(),
+    )])
+    .await;
     let llm = OpenAiLlm::new(&format!("{url}/v1"), "", "m").unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let reply = llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap();
     assert_eq!(reply.text, "直接回答");
     assert_eq!(rx.try_recv().unwrap(), "直接回答");
     let request = recorded.await.unwrap();
-    assert!(!request.head.to_ascii_lowercase().contains("authorization"), "没有密钥时不发 Authorization");
+    assert!(
+        !request.head.to_ascii_lowercase().contains("authorization"),
+        "没有密钥时不发 Authorization"
+    );
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert!(body.get("tools").is_none() && body.get("tool_choice").is_none());
 
@@ -174,26 +234,60 @@ async fn llm_accepts_non_streaming_json_and_omits_empty_tools() {
         }
     })
     .to_string();
-    let (url, _) = serve_once(vec![response("200 OK", "application/json", wrapped.as_bytes())]).await;
-    let llm = OpenAiLlm::new(&format!("{url}/api/v1"), KEY, "cline-pass/deepseek-v4.1-flash").unwrap();
+    let (url, _) = serve_once(vec![response(
+        "200 OK",
+        "application/json",
+        wrapped.as_bytes(),
+    )])
+    .await;
+    let llm = OpenAiLlm::new(
+        &format!("{url}/api/v1"),
+        KEY,
+        "cline-pass/deepseek-v4.1-flash",
+    )
+    .unwrap();
     let (tx, _rx) = mpsc::unbounded_channel();
     let reply = llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap();
     assert_eq!(reply.text, "套壳回答");
-    assert_eq!(reply.tool_calls, vec![ToolCall::new("c9", "get_time", "{}")]);
+    assert_eq!(
+        reply.tool_calls,
+        vec![ToolCall::new("c9", "get_time", "{}")]
+    );
 }
 
 #[tokio::test]
 async fn errors_never_contain_key_or_url() {
-    let body = json!({"error":{"message":"Incorrect API key provided: sk-test-secret-123"}}).to_string();
-    let (url, _) = serve_once(vec![response("401 Unauthorized", "application/json", body.as_bytes())]).await;
+    let body =
+        json!({"error":{"message":"Incorrect API key provided: sk-test-secret-123"}}).to_string();
+    let (url, _) = serve_once(vec![response(
+        "401 Unauthorized",
+        "application/json",
+        body.as_bytes(),
+    )])
+    .await;
     let llm = OpenAiLlm::new(&url, KEY, "m").unwrap();
     let (tx, _rx) = mpsc::unbounded_channel();
-    let error = llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap_err();
-    assert!(error.message.contains("HTTP 401") && error.message.contains("密钥"), "{error}");
+    let error = llm
+        .chat(&[ChatMessage::user("hi")], &[], tx)
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.contains("HTTP 401") && error.message.contains("密钥"),
+        "{error}"
+    );
     assert_eq!(error.category, crate::DiagCategory::Auth);
-    assert!(error.hint.as_deref().is_some_and(|hint| hint.contains("密钥")), "{error:?}");
+    assert!(
+        error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("密钥")),
+        "{error:?}"
+    );
     let full = format!("{error} {:?}", error.hint);
-    assert!(!full.contains(KEY) && !full.contains("127.0.0.1") && !full.contains("sk-test-secret-123"), "{full}");
+    assert!(
+        !full.contains(KEY) && !full.contains("127.0.0.1") && !full.contains("sk-test-secret-123"),
+        "{full}"
+    );
 
     // 连不上：端口已关闭
     let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -203,25 +297,48 @@ async fn errors_never_contain_key_or_url() {
     let error = tts.synthesize("你好").await.unwrap_err();
     assert!(error.message.contains("无法连接"), "{error}");
     assert_eq!(error.category, crate::DiagCategory::Network);
-    assert!(!error.to_string().contains(&address.to_string()) && !error.to_string().contains(KEY), "{error}");
+    assert!(
+        !error.to_string().contains(&address.to_string()) && !error.to_string().contains(KEY),
+        "{error}"
+    );
 
     // 流中返回错误对象
-    let parts = vec![sse_head(), b"data: {\"error\":{\"message\":\"rate limited\"}}\n\n".to_vec()];
+    let parts = vec![
+        sse_head(),
+        b"data: {\"error\":{\"message\":\"rate limited\"}}\n\n".to_vec(),
+    ];
     let (url, _) = serve_once(parts).await;
     let llm = OpenAiLlm::new(&url, KEY, "m").unwrap();
     let (tx, _rx) = mpsc::unbounded_channel();
-    assert!(llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap_err().to_string().contains("rate limited"));
+    assert!(
+        llm.chat(&[ChatMessage::user("hi")], &[], tx)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("rate limited")
+    );
 }
 
 #[tokio::test]
 async fn asr_uploads_wav_multipart() {
-    let (url, recorded) = serve_once(vec![response("200 OK", "application/json", r#"{"text":" 打开 "}"#.as_bytes())]).await;
-    let asr = OpenAiAsr::new(&format!("{url}/v1"), KEY, "whisper-1", Some("zh")).unwrap().with_hotwords(&["椴木".into(), "亚克力".into()]);
+    let (url, recorded) = serve_once(vec![response(
+        "200 OK",
+        "application/json",
+        r#"{"text":" 打开 "}"#.as_bytes(),
+    )])
+    .await;
+    let asr = OpenAiAsr::new(&format!("{url}/v1"), KEY, "whisper-1", Some("zh"))
+        .unwrap()
+        .with_hotwords(&["椴木".into(), "亚克力".into()]);
     let pcm = vec![100i16; 1600];
     assert_eq!(asr.transcribe(&pcm, 16_000).await.unwrap(), "打开");
     let request = recorded.await.unwrap();
     assert!(request.head.starts_with("POST /v1/audio/transcriptions "));
-    assert!(request.head.contains("multipart/form-data; boundary=moss-voice-7d1a5c0e9b"));
+    assert!(
+        request
+            .head
+            .contains("multipart/form-data; boundary=moss-voice-7d1a5c0e9b")
+    );
     let body = String::from_utf8_lossy(&request.body);
     assert!(body.contains("name=\"file\"; filename=\"speech.wav\""));
     assert!(body.contains("RIFF") && body.contains("WAVEfmt "));
@@ -234,7 +351,12 @@ async fn asr_uploads_wav_multipart() {
     let pcm_back = crate::wav::decode_wav(&request.body[wav_start..wav_start + 44 + 3200]).unwrap();
     assert_eq!(pcm_back.samples, pcm);
 
-    let (url, _) = serve_once(vec![response("200 OK", "text/plain", "纯文本结果\n".as_bytes())]).await;
+    let (url, _) = serve_once(vec![response(
+        "200 OK",
+        "text/plain",
+        "纯文本结果\n".as_bytes(),
+    )])
+    .await;
     let asr = OpenAiAsr::new(&url, "", "m", None).unwrap();
     assert_eq!(asr.transcribe(&pcm, 16_000).await.unwrap(), "纯文本结果");
 }
@@ -245,7 +367,13 @@ async fn tts_requests_wav_and_decodes_it() {
     let (url, recorded) = serve_once(vec![response("200 OK", "audio/wav", &wav)]).await;
     let tts = OpenAiTts::new(&format!("{url}/v1"), KEY, "tts-1", "alloy", 1.2).unwrap();
     let pcm = tts.synthesize("你好").await.unwrap();
-    assert_eq!(pcm, Pcm { samples: vec![1, 2, 3, 4], sample_rate: 22_050 });
+    assert_eq!(
+        pcm,
+        Pcm {
+            samples: vec![1, 2, 3, 4],
+            sample_rate: 22_050
+        }
+    );
     let request = recorded.await.unwrap();
     assert!(request.head.starts_with("POST /v1/audio/speech "));
     let body: Value = serde_json::from_slice(&request.body).unwrap();
@@ -256,7 +384,13 @@ async fn tts_requests_wav_and_decodes_it() {
 
     let (url, _) = serve_once(vec![response("200 OK", "audio/mpeg", b"ID3\x04\x00mp3")]).await;
     let tts = OpenAiTts::new(&url, KEY, "m", "v", 1.0).unwrap();
-    assert!(tts.synthesize("你好").await.unwrap_err().to_string().contains("不是 WAV"));
+    assert!(
+        tts.synthesize("你好")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("不是 WAV")
+    );
 }
 
 /// n68：网络错误按底层原因分开说（假输入，不联网）。
@@ -265,25 +399,74 @@ fn transport_errors_are_split_into_distinguishable_plain_causes() {
     use super::classify_transport_error as classify;
     use crate::DiagCategory::Network;
     let cases = [
-        (classify("大模型", true, false, "operation timed out"), "请求超时"),
-        (classify("大模型", false, true, "dns error: failed to lookup address information: nodename nor servname provided, or not known"), "找不到服务器"),
-        (classify("大模型", false, true, "tcp connect error: Connection refused (os error 61)"), "拒绝了连接"),
-        (classify("大模型", false, true, "invalid peer certificate: UnknownIssuer"), "TLS"),
-        (classify("大模型", false, true, "tcp connect error: Network is unreachable (os error 51)"), "网络不通"),
-        (classify("大模型", false, false, "connection reset by peer"), "中途断开"),
-        (classify("大模型", false, true, "something else"), "无法连接到该地址"),
+        (
+            classify("大模型", true, false, "operation timed out"),
+            "请求超时",
+        ),
+        (
+            classify(
+                "大模型",
+                false,
+                true,
+                "dns error: failed to lookup address information: nodename nor servname provided, or not known",
+            ),
+            "找不到服务器",
+        ),
+        (
+            classify(
+                "大模型",
+                false,
+                true,
+                "tcp connect error: Connection refused (os error 61)",
+            ),
+            "拒绝了连接",
+        ),
+        (
+            classify(
+                "大模型",
+                false,
+                true,
+                "invalid peer certificate: UnknownIssuer",
+            ),
+            "TLS",
+        ),
+        (
+            classify(
+                "大模型",
+                false,
+                true,
+                "tcp connect error: Network is unreachable (os error 51)",
+            ),
+            "网络不通",
+        ),
+        (
+            classify("大模型", false, false, "connection reset by peer"),
+            "中途断开",
+        ),
+        (
+            classify("大模型", false, true, "something else"),
+            "无法连接到该地址",
+        ),
         (classify("大模型", false, false, "weird"), "网络传输出错"),
     ];
     let mut messages = std::collections::BTreeSet::new();
     for (error, expected) in &cases {
         assert_eq!(error.category, Network);
-        assert!(error.message.starts_with("大模型") && error.message.contains(expected), "{error:?}");
+        assert!(
+            error.message.starts_with("大模型") && error.message.contains(expected),
+            "{error:?}"
+        );
         assert!(error.hint.is_some(), "每种原因都给出下一步：{error:?}");
         assert!(error.detail.is_some(), "保留底层原因：{error:?}");
         messages.insert(error.message.clone());
     }
     assert_eq!(messages.len(), cases.len(), "每种原因的说法互不相同");
-    let leak = classify("识别", false, true, "tcp connect error 192.168.3.7:9000: Connection refused");
+    let leak = classify(
+        "识别",
+        false,
+        true,
+        "tcp connect error 192.168.3.7:9000: Connection refused",
+    );
     assert!(!leak.detail.unwrap().contains("192.168.3.7"));
 }
 
@@ -292,15 +475,30 @@ fn http_status_maps_to_category_and_keeps_upstream_text_as_detail() {
     use super::classify_http_status as classify;
     use crate::DiagCategory::*;
     for (status, category, needle) in [
-        (401, Auth, "密钥"), (403, Auth, "权限"), (402, Quota, "余额"), (429, Quota, "频繁"),
-        (404, Config, "模型名"), (400, Config, "参数"), (302, Config, "跳转"), (503, Model, "服务方服务器出错"),
+        (401, Auth, "密钥"),
+        (403, Auth, "权限"),
+        (402, Quota, "余额"),
+        (429, Quota, "频繁"),
+        (404, Config, "模型名"),
+        (400, Config, "参数"),
+        (302, Config, "跳转"),
+        (503, Model, "服务方服务器出错"),
     ] {
         let error = classify("合成", status, None);
         assert_eq!(error.category, category, "{status}");
-        assert!(error.message.contains(&format!("HTTP {status}")) && error.message.contains(needle), "{error:?}");
+        assert!(
+            error.message.contains(&format!("HTTP {status}")) && error.message.contains(needle),
+            "{error:?}"
+        );
         assert!(error.hint.is_some());
     }
     let error = classify("大模型", 503, Some("model overloaded".into()));
-    assert_eq!(error.detail.as_deref(), Some("服务方原话：model overloaded"));
-    assert!(error.to_string().contains("model overloaded"), "Display 不丢服务方原话");
+    assert_eq!(
+        error.detail.as_deref(),
+        Some("服务方原话：model overloaded")
+    );
+    assert!(
+        error.to_string().contains("model overloaded"),
+        "Display 不丢服务方原话"
+    );
 }

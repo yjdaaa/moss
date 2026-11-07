@@ -1,6 +1,6 @@
 //! NV8b：独立的保守插话判停。这里只检测已在设备端消除回声的音频，不冒充 AEC。
-use std::collections::VecDeque;
 use crate::audio::{EnergyVad, Vad, VadConfig, VadEvent};
+use std::collections::VecDeque;
 
 pub(crate) struct BargeIn {
     vad: EnergyVad,
@@ -16,7 +16,11 @@ impl BargeIn {
             start_over_noise: base.start_over_noise.max(6.0),
             ..base.clone()
         };
-        Self { vad: EnergyVad::new(rate, config), preroll: VecDeque::new(), max_samples: rate as usize }
+        Self {
+            vad: EnergyVad::new(rate, config),
+            preroll: VecDeque::new(),
+            max_samples: rate as usize,
+        }
     }
 
     pub fn reset(&mut self) {
@@ -52,11 +56,25 @@ mod tests {
     fn continuous_speech_not_bursts_or_guarded_audio_triggers() {
         for duration in [300, 400, 600] {
             let mut detector = BargeIn::new(16_000, duration, &VadConfig::default());
-            assert!(detector.accept(&tone(16_000, 300.0, 600, 8000.0), true).is_none());
-            assert!(detector.accept(&tone(16_000, 300.0, duration - 20, 8000.0), false).is_none());
+            assert!(
+                detector
+                    .accept(&tone(16_000, 300.0, 600, 8000.0), true)
+                    .is_none()
+            );
+            assert!(
+                detector
+                    .accept(&tone(16_000, 300.0, duration - 20, 8000.0), false)
+                    .is_none()
+            );
             assert!(detector.accept(&silence(16_000, 40), false).is_none());
-            assert!(detector.accept(&tone(16_000, 300.0, duration - 20, 8000.0), false).is_none());
-            let head = detector.accept(&tone(16_000, 300.0, 20, 8000.0), false).unwrap();
+            assert!(
+                detector
+                    .accept(&tone(16_000, 300.0, duration - 20, 8000.0), false)
+                    .is_none()
+            );
+            let head = detector
+                .accept(&tone(16_000, 300.0, 20, 8000.0), false)
+                .unwrap();
             assert!(head.len() >= (16 * duration) as usize && head.len() <= 16_000);
         }
     }
@@ -65,7 +83,11 @@ mod tests {
     fn quiet_noise_is_bounded_and_does_not_trigger() {
         let mut detector = BargeIn::new(16_000, 400, &VadConfig::default());
         for _ in 0..100 {
-            assert!(detector.accept(&tone(16_000, 300.0, 60, 200.0), false).is_none());
+            assert!(
+                detector
+                    .accept(&tone(16_000, 300.0, 60, 200.0), false)
+                    .is_none()
+            );
             assert!(detector.preroll.len() <= 16_000);
         }
     }

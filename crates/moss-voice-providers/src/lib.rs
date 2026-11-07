@@ -14,10 +14,10 @@
 pub mod doubao;
 pub mod history;
 pub mod local;
-pub mod vision;
 pub mod openai;
 pub mod resample;
 pub mod text;
+pub mod vision;
 pub mod wav;
 
 use std::fmt;
@@ -44,7 +44,9 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// - `model`：模型服务本身（云端 5xx、返回内容异常、本地模型程序出错）
 /// - `audio`：声音处理（解码、判停、播放、音乐）
 /// - `internal`：MOSS 程序内部（锁、线程、数据库、序列化）
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagCategory {
     #[default]
@@ -105,11 +107,19 @@ pub struct ProviderError {
 impl ProviderError {
     /// 默认归为“模型服务”类；能判断具体原因时改用 [`Self::with_category`]。
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), category: DiagCategory::Model, hint: None, detail: None }
+        Self {
+            message: message.into(),
+            category: DiagCategory::Model,
+            hint: None,
+            detail: None,
+        }
     }
 
     pub fn with_category(category: DiagCategory, message: impl Into<String>) -> Self {
-        Self { category, ..Self::new(message) }
+        Self {
+            category,
+            ..Self::new(message)
+        }
     }
 
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
@@ -203,7 +213,10 @@ fn mask_url(token: &str, scheme_end: usize) -> String {
         Some(at) => format!("[REDACTED]@{}", mask_ipv4(&authority[at + 1..])),
         None => mask_ipv4(authority),
     };
-    format!("{scheme}{host}{path}{}", if had_query { "?[REDACTED]" } else { "" })
+    format!(
+        "{scheme}{host}{path}{}",
+        if had_query { "?[REDACTED]" } else { "" }
+    )
 }
 
 /// 把文字里形如 `a.b.c.d`（每段 0..=255）的 IPv4 地址替换成 `<ip>`。
@@ -212,7 +225,8 @@ fn mask_ipv4(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
     while index < chars.len() {
-        let boundary = index == 0 || !(chars[index - 1].is_ascii_digit() || chars[index - 1] == '.');
+        let boundary =
+            index == 0 || !(chars[index - 1].is_ascii_digit() || chars[index - 1] == '.');
         if boundary && chars[index].is_ascii_digit() {
             let mut cursor = index;
             let mut parts = 0;
@@ -223,7 +237,10 @@ fn mask_ipv4(text: &str) -> String {
                     cursor += 1;
                 }
                 let digits: String = chars[start..cursor].iter().collect();
-                if digits.is_empty() || digits.len() > 3 || digits.parse::<u16>().map_or(true, |v| v > 255) {
+                if digits.is_empty()
+                    || digits.len() > 3
+                    || digits.parse::<u16>().map_or(true, |v| v > 255)
+                {
                     valid = false;
                     break;
                 }
@@ -233,7 +250,11 @@ fn mask_ipv4(text: &str) -> String {
                 }
                 cursor += 1;
             }
-            let ends_cleanly = cursor >= chars.len() || !(chars[cursor].is_ascii_digit() || chars[cursor] == '.' && cursor + 1 < chars.len() && chars[cursor + 1].is_ascii_digit());
+            let ends_cleanly = cursor >= chars.len()
+                || !(chars[cursor].is_ascii_digit()
+                    || chars[cursor] == '.'
+                        && cursor + 1 < chars.len()
+                        && chars[cursor + 1].is_ascii_digit());
             if valid && parts == 4 && ends_cleanly {
                 out.push_str("<ip>");
                 index = cursor;
@@ -257,7 +278,11 @@ pub struct Pcm {
 
 /// 语音识别：一段完整的话 → 文字。
 pub trait Asr: Send + Sync {
-    fn transcribe<'a>(&'a self, pcm: &'a [i16], sample_rate: u32) -> BoxFuture<'a, Result<String, ProviderError>>;
+    fn transcribe<'a>(
+        &'a self,
+        pcm: &'a [i16],
+        sample_rate: u32,
+    ) -> BoxFuture<'a, Result<String, ProviderError>>;
 }
 
 /// 流式识别（NV7）：用户开始说话时建立连接，边说边送音频，说完后只需等最后一包的结果。
@@ -283,7 +308,12 @@ impl AsrStream {
         result: tokio::sync::oneshot::Receiver<Result<String, ProviderError>>,
         task: tokio::task::JoinHandle<()>,
     ) -> Self {
-        Self { audio: Some(audio), result, task, interim: None }
+        Self {
+            audio: Some(audio),
+            result,
+            task,
+            interim: None,
+        }
     }
 
     pub fn with_interim(mut self, interim: tokio::sync::watch::Receiver<String>) -> Self {
@@ -321,7 +351,9 @@ impl AsrStream {
     /// 说完：等待最终结果。
     pub async fn finish(mut self) -> Result<String, ProviderError> {
         self.audio = None;
-        (&mut self.result).await.unwrap_or_else(|_| Err(ProviderError::new("流式识别意外结束")))
+        (&mut self.result)
+            .await
+            .unwrap_or_else(|_| Err(ProviderError::new("流式识别意外结束")))
     }
 }
 
@@ -369,13 +401,16 @@ pub trait Tts: Send + Sync {
 
 /// 服务端返回的错误说明：截断，含地址或疑似密钥时不回显（服务端可能把请求内容带回来）。
 pub(crate) fn safe_hint(text: &str) -> String {
-    upstream_text(text).map(|short| format!("：{short}")).unwrap_or_default()
+    upstream_text(text)
+        .map(|short| format!("：{short}"))
+        .unwrap_or_default()
 }
 
 /// 服务方原话（截断到 120 字）；含地址或疑似密钥时不保留。
 pub(crate) fn upstream_text(text: &str) -> Option<String> {
     let short: String = text.trim().chars().take(120).collect();
-    if short.is_empty() || short.contains("http") || short.contains("sk-") || short.contains("wss:") {
+    if short.is_empty() || short.contains("http") || short.contains("sk-") || short.contains("wss:")
+    {
         None
     } else {
         Some(short)
@@ -390,15 +425,33 @@ mod diag_tests {
     fn scrub_masks_secrets_url_credentials_and_ips_but_keeps_reason() {
         let raw = "tcp connect error 192.168.1.23:8000 Bearer abc.def token=xyz sk-live-1 https://user:pw@10.0.0.2:8443/v1/chat?key=k1 Connection refused (os error 61)";
         let out = scrub_diagnostic_text(raw);
-        for leak in ["192.168.1.23", "abc.def", "xyz", "sk-live-1", "user:pw", "10.0.0.2", "k1"] {
+        for leak in [
+            "192.168.1.23",
+            "abc.def",
+            "xyz",
+            "sk-live-1",
+            "user:pw",
+            "10.0.0.2",
+            "k1",
+        ] {
             assert!(!out.contains(leak), "{leak} leaked: {out}");
         }
         assert!(out.contains("<ip>:8000"), "{out}");
-        assert!(out.contains("https://[REDACTED]@<ip>:8443/v1/chat?[REDACTED]"), "{out}");
+        assert!(
+            out.contains("https://[REDACTED]@<ip>:8443/v1/chat?[REDACTED]"),
+            "{out}"
+        );
         assert!(out.contains("Connection refused (os error 61)"), "{out}");
-        assert_eq!(scrub_diagnostic_text("固件 2.2.0 版本 1.2"), "固件 2.2.0 版本 1.2", "三段版本号不是 IP");
+        assert_eq!(
+            scrub_diagnostic_text("固件 2.2.0 版本 1.2"),
+            "固件 2.2.0 版本 1.2",
+            "三段版本号不是 IP"
+        );
         let long = "字".repeat(2500);
-        assert!(scrub_diagnostic_text(&long).ends_with("…（已截断）"), "超长时明确标注截断");
+        assert!(
+            scrub_diagnostic_text(&long).ends_with("…（已截断）"),
+            "超长时明确标注截断"
+        );
     }
 
     #[test]
@@ -413,7 +466,13 @@ mod diag_tests {
         assert!(error.to_string().starts_with("大模型密钥不对"));
         assert_eq!(ProviderError::new("x").category, DiagCategory::Model);
         let json = serde_json::to_value(DiagCategory::ALL).unwrap();
-        assert_eq!(json, serde_json::json!(["general", "network", "auth", "quota", "config", "device", "firmware", "model", "audio", "internal"]));
+        assert_eq!(
+            json,
+            serde_json::json!([
+                "general", "network", "auth", "quota", "config", "device", "firmware", "model",
+                "audio", "internal"
+            ])
+        );
         for category in DiagCategory::ALL {
             assert_eq!(serde_json::to_value(category).unwrap(), category.as_str());
         }

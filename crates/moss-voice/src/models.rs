@@ -208,7 +208,11 @@ fn reject_chat_only_audio_gateway(section: Section, url: &str) -> Result<(), Str
         return Ok(());
     }
     if let Some(gateway) = chat_only_gateway_name(url) {
-        let endpoint = if section == Section::Asr { "/audio/transcriptions" } else { "/audio/speech" };
+        let endpoint = if section == Section::Asr {
+            "/audio/transcriptions"
+        } else {
+            "/audio/speech"
+        };
         return Err(format!(
             "{}：{gateway} 仅提供大模型对话接口，不支持{}（无 {endpoint} 端点）；请在顶部下拉框切换为「本地{}」，或填写支持语音的服务商（如硅基流动 SiliconFlow、OpenAI、豆包流式）",
             section.label(),
@@ -243,7 +247,14 @@ impl std::fmt::Debug for SectionInput {
         f.debug_struct("SectionInput")
             .field("kind", &self.kind)
             .field("url", &self.url)
-            .field("api_key", &if self.api_key.trim().is_empty() { "" } else { "***" })
+            .field(
+                "api_key",
+                &if self.api_key.trim().is_empty() {
+                    ""
+                } else {
+                    "***"
+                },
+            )
             .field("model", &self.model)
             .field("voice", &self.voice)
             .field("speed", &self.speed)
@@ -320,7 +331,10 @@ fn validate_http_url(url: &str) -> Result<(), String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("地址必须以 http:// 或 https:// 开头".into());
     }
-    if url.chars().any(|c| c.is_whitespace() || c == '<' || c == '>') {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || c == '<' || c == '>')
+    {
         return Err("地址包含空白或占位符".into());
     }
     Ok(())
@@ -329,12 +343,20 @@ fn validate_http_url(url: &str) -> Result<(), String> {
 /// 大模型写入 `url` 的基础地址（如 `https://<host>/v1`）；误填了完整 `/chat/completions` 时去掉。
 pub fn llm_base_url(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
-    trimmed.strip_suffix("/chat/completions").unwrap_or(trimmed).trim_end_matches('/').to_owned()
+    trimmed
+        .strip_suffix("/chat/completions")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 fn full_url(input: &str, suffix: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.ends_with(suffix) { trimmed.to_owned() } else { format!("{trimmed}{suffix}") }
+    if trimmed.ends_with(suffix) {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}{suffix}")
+    }
 }
 
 /// 语音识别 `base_url` 必须是完整的 `/audio/transcriptions` 地址；填基础地址时自动补全。
@@ -356,10 +378,23 @@ pub fn models_list_url(input: &str) -> String {
     if trimmed.ends_with("/models") {
         return trimmed.to_owned();
     }
-    let base = ["/chat/completions", "/audio/transcriptions", "/audio/speech"]
-        .into_iter()
-        .fold(trimmed, |current, suffix| current.strip_suffix(suffix).unwrap_or(current).trim_end_matches('/'));
-    if base.is_empty() { String::new() } else { format!("{base}/models") }
+    let base = [
+        "/chat/completions",
+        "/audio/transcriptions",
+        "/audio/speech",
+    ]
+    .into_iter()
+    .fold(trimmed, |current, suffix| {
+        current
+            .strip_suffix(suffix)
+            .unwrap_or(current)
+            .trim_end_matches('/')
+    });
+    if base.is_empty() {
+        String::new()
+    } else {
+        format!("{base}/models")
+    }
 }
 
 /// 校验后的模型列表查询请求（查询时不要求先填模型名与音色）。
@@ -383,7 +418,10 @@ impl std::fmt::Debug for ResolvedListRequest {
 }
 
 /// 校验并规范化模型列表查询输入（内置服务云端模型）。
-pub fn resolve_list_request(section: Section, input: &SectionInput) -> Result<ResolvedListRequest, String> {
+pub fn resolve_list_request(
+    section: Section,
+    input: &SectionInput,
+) -> Result<ResolvedListRequest, String> {
     match input.kind {
         ProviderKind::Openai => {
             if input.url.trim().is_empty() {
@@ -400,17 +438,28 @@ pub fn resolve_list_request(section: Section, input: &SectionInput) -> Result<Re
             })
         }
         ProviderKind::Doubao => {
-            let default_url = match section {
-                Section::Llm => return Err("大模型只支持 OpenAI 兼容接口（豆包大模型请填火山方舟的 OpenAI 兼容地址）".into()),
-                Section::Asr => DOUBAO_ASR_URL,
-                Section::Tts => DOUBAO_TTS_URL,
-            };
+            let default_url =
+                match section {
+                    Section::Llm => return Err(
+                        "大模型只支持 OpenAI 兼容接口（豆包大模型请填火山方舟的 OpenAI 兼容地址）"
+                            .into(),
+                    ),
+                    Section::Asr => DOUBAO_ASR_URL,
+                    Section::Tts => DOUBAO_TTS_URL,
+                };
             let url = input.url.trim().trim_end_matches('/');
-            let url = if url.is_empty() { default_url.to_owned() } else { url.to_owned() };
+            let url = if url.is_empty() {
+                default_url.to_owned()
+            } else {
+                url.to_owned()
+            };
             if !url.starts_with("wss://") {
                 return Err(format!("{}：豆包地址必须以 wss:// 开头", section.label()));
             }
-            if url.chars().any(|c| c.is_whitespace() || c == '<' || c == '>') {
+            if url
+                .chars()
+                .any(|c| c.is_whitespace() || c == '<' || c == '>')
+            {
                 return Err(format!("{}：地址包含空白或占位符", section.label()));
             }
             Ok(ResolvedListRequest {
@@ -434,7 +483,10 @@ pub fn resolve(section: Section, input: &SectionInput) -> Result<Option<Resolved
         return Ok(None);
     }
     if !input.kind.is_openai() {
-        return Err(format!("{}：外部服务端链路只支持 OpenAI 兼容接口", section.label()));
+        return Err(format!(
+            "{}：外部服务端链路只支持 OpenAI 兼容接口",
+            section.label()
+        ));
     }
     resolve_openai(section, input)
 }
@@ -442,7 +494,10 @@ pub fn resolve(section: Section, input: &SectionInput) -> Result<Option<Resolved
 /// 内置语音服务的分区校验（NV7）：识别与合成可选豆包流式；留空返回 `Ok(None)`。
 ///
 /// 豆包：地址留空用默认地址（必须是 `wss://`），“模型”留空用默认资源 ID；合成必须填音色。
-pub fn resolve_builtin(section: Section, input: &SectionInput) -> Result<Option<ResolvedSection>, String> {
+pub fn resolve_builtin(
+    section: Section,
+    input: &SectionInput,
+) -> Result<Option<ResolvedSection>, String> {
     if is_blank(input) {
         return Ok(None);
     }
@@ -454,20 +509,35 @@ pub fn resolve_builtin(section: Section, input: &SectionInput) -> Result<Option<
 
 fn resolve_doubao(section: Section, input: &SectionInput) -> Result<ResolvedSection, String> {
     let (default_url, default_resource) = match section {
-        Section::Llm => return Err("大模型只支持 OpenAI 兼容接口（豆包大模型请填火山方舟的 OpenAI 兼容地址）".into()),
+        Section::Llm => {
+            return Err(
+                "大模型只支持 OpenAI 兼容接口（豆包大模型请填火山方舟的 OpenAI 兼容地址）".into(),
+            );
+        }
         Section::Asr => (DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE),
         Section::Tts => (DOUBAO_TTS_URL, DOUBAO_TTS_RESOURCE),
     };
     let url = input.url.trim().trim_end_matches('/');
-    let url = if url.is_empty() { default_url.to_owned() } else { url.to_owned() };
+    let url = if url.is_empty() {
+        default_url.to_owned()
+    } else {
+        url.to_owned()
+    };
     if !url.starts_with("wss://") {
         return Err(format!("{}：豆包地址必须以 wss:// 开头", section.label()));
     }
-    if url.chars().any(|c| c.is_whitespace() || c == '<' || c == '>') {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || c == '<' || c == '>')
+    {
         return Err(format!("{}：地址包含空白或占位符", section.label()));
     }
     let model = input.model.trim();
-    let model = if model.is_empty() { default_resource.to_owned() } else { model.to_owned() };
+    let model = if model.is_empty() {
+        default_resource.to_owned()
+    } else {
+        model.to_owned()
+    };
     let (voice, speed) = if section == Section::Tts {
         let voice = input.voice.trim().to_owned();
         if voice.is_empty() {
@@ -492,7 +562,10 @@ fn resolve_doubao(section: Section, input: &SectionInput) -> Result<ResolvedSect
     })
 }
 
-fn resolve_openai(section: Section, input: &SectionInput) -> Result<Option<ResolvedSection>, String> {
+fn resolve_openai(
+    section: Section,
+    input: &SectionInput,
+) -> Result<Option<ResolvedSection>, String> {
     let url = match section {
         Section::Llm => llm_base_url(&input.url),
         Section::Asr => asr_full_url(&input.url),
@@ -520,7 +593,15 @@ fn resolve_openai(section: Section, input: &SectionInput) -> Result<Option<Resol
     } else {
         (String::new(), 1.0)
     };
-    Ok(Some(ResolvedSection { section, kind: ProviderKind::Openai, url, api_key: input.api_key.trim().to_owned(), model, voice, speed }))
+    Ok(Some(ResolvedSection {
+        section,
+        kind: ProviderKind::Openai,
+        url,
+        api_key: input.api_key.trim().to_owned(),
+        model,
+        voice,
+        speed,
+    }))
 }
 
 /// 一次测试的结果（不含密钥）。
@@ -617,7 +698,10 @@ fn describe_send_error(error: &reqwest::Error) -> String {
     }
 }
 
-fn read_limited_bytes(response: reqwest::blocking::Response, limit: u64) -> Result<Vec<u8>, String> {
+fn read_limited_bytes(
+    response: reqwest::blocking::Response,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     response
         .take(limit + 1)
@@ -638,13 +722,19 @@ fn http_error_detail(code: u16, bytes: &[u8], secret: Option<&str>) -> String {
     let detail = if code == 401 || code == 403 {
         format!("鉴权失败（HTTP {code}），请检查密钥")
     } else if code == 402 {
-        format!("账户余额不足（HTTP {code}；若已开通 ClinePass 等包月订阅，请选用 cline-pass/ 前缀模型）")
+        format!(
+            "账户余额不足（HTTP {code}；若已开通 ClinePass 等包月订阅，请选用 cline-pass/ 前缀模型）"
+        )
     } else if code == 404 {
         format!("地址不存在（HTTP {code}），请检查地址")
     } else {
         format!("HTTP {code}")
     };
-    if hint.is_empty() { detail } else { format!("{detail}：{hint}") }
+    if hint.is_empty() {
+        detail
+    } else {
+        format!("{detail}：{hint}")
+    }
 }
 
 /// 从错误响应里取一段可读的说明（只取 `error.message` 一类字段，截断，并脱敏）。
@@ -685,7 +775,10 @@ fn error_hint(bytes: &[u8], secret: Option<&str>) -> String {
 fn chat_completions_payload(value: &serde_json::Value) -> &serde_json::Value {
     if value.get("choices").is_some() {
         value
-    } else if let Some(inner) = value.get("data").filter(|inner| inner.get("choices").is_some()) {
+    } else if let Some(inner) = value
+        .get("data")
+        .filter(|inner| inner.get("choices").is_some())
+    {
         inner
     } else {
         value
@@ -723,7 +816,10 @@ enum LlmProbeOutcome {
     StreamError(String),
 }
 
-fn inspect_llm_chunk(value: &serde_json::Value, secret: Option<&str>) -> (bool, bool, Option<String>) {
+fn inspect_llm_chunk(
+    value: &serde_json::Value,
+    secret: Option<&str>,
+) -> (bool, bool, Option<String>) {
     let payload = chat_completions_payload(value);
     if value.get("type").and_then(serde_json::Value::as_str) == Some("error")
         || value.get("error").is_some_and(|err| !err.is_null())
@@ -731,7 +827,15 @@ fn inspect_llm_chunk(value: &serde_json::Value, secret: Option<&str>) -> (bool, 
     {
         let raw = serde_json::to_vec(value).unwrap_or_default();
         let hint = error_hint(&raw, secret);
-        return (false, false, Some(if hint.is_empty() { "流式响应返回错误".into() } else { hint }));
+        return (
+            false,
+            false,
+            Some(if hint.is_empty() {
+                "流式响应返回错误".into()
+            } else {
+                hint
+            }),
+        );
     }
     let Some(choice) = payload.get("choices").and_then(|choices| choices.get(0)) else {
         return (false, false, None);
@@ -746,7 +850,10 @@ fn inspect_llm_chunk(value: &serde_json::Value, secret: Option<&str>) -> (bool, 
     (has_tool_call, true, None)
 }
 
-fn parse_sse_lines<R: BufRead>(mut reader: R, secret: Option<&str>) -> Result<LlmProbeOutcome, String> {
+fn parse_sse_lines<R: BufRead>(
+    mut reader: R,
+    secret: Option<&str>,
+) -> Result<LlmProbeOutcome, String> {
     let mut total_bytes: u64 = 0;
     let mut line = String::new();
     let mut saw_sse = false;
@@ -754,7 +861,9 @@ fn parse_sse_lines<R: BufRead>(mut reader: R, secret: Option<&str>) -> Result<Ll
     let mut raw_fallback = String::new();
     loop {
         line.clear();
-        let count = reader.read_line(&mut line).map_err(|_| "响应读取失败".to_owned())?;
+        let count = reader
+            .read_line(&mut line)
+            .map_err(|_| "响应读取失败".to_owned())?;
         if count == 0 {
             break;
         }
@@ -814,12 +923,24 @@ fn parse_sse_lines<R: BufRead>(mut reader: R, secret: Option<&str>) -> Result<Ll
     }
 }
 
-fn probe_llm_response(response: reqwest::blocking::Response, content_type: &str, secret: Option<&str>) -> Result<LlmProbeOutcome, String> {
+fn probe_llm_response(
+    response: reqwest::blocking::Response,
+    content_type: &str,
+    secret: Option<&str>,
+) -> Result<LlmProbeOutcome, String> {
     if content_type.contains("text/event-stream") {
-        return parse_sse_lines(BufReader::new(response.take(MAX_RESPONSE_BYTES + 1)), secret);
+        return parse_sse_lines(
+            BufReader::new(response.take(MAX_RESPONSE_BYTES + 1)),
+            secret,
+        );
     }
     let bytes = read_limited(response)?;
-    let trimmed_ascii = bytes.iter().copied().skip_while(|b| b.is_ascii_whitespace()).take(5).collect::<Vec<_>>();
+    let trimmed_ascii = bytes
+        .iter()
+        .copied()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .take(5)
+        .collect::<Vec<_>>();
     if trimmed_ascii.eq_ignore_ascii_case(b"data:") || trimmed_ascii.starts_with(b"event") {
         return parse_sse_lines(BufReader::new(std::io::Cursor::new(bytes)), secret);
     }
@@ -879,11 +1000,22 @@ fn multipart_body(boundary: &str, model: &str, wav: &[u8]) -> Vec<u8> {
     body
 }
 
-fn with_auth(builder: reqwest::blocking::RequestBuilder, api_key: &str) -> reqwest::blocking::RequestBuilder {
-    if api_key.is_empty() { builder } else { builder.bearer_auth(api_key) }
+fn with_auth(
+    builder: reqwest::blocking::RequestBuilder,
+    api_key: &str,
+) -> reqwest::blocking::RequestBuilder {
+    if api_key.is_empty() {
+        builder
+    } else {
+        builder.bearer_auth(api_key)
+    }
 }
 
-fn with_openai_compat(builder: reqwest::blocking::RequestBuilder, url: &str, api_key: &str) -> reqwest::blocking::RequestBuilder {
+fn with_openai_compat(
+    builder: reqwest::blocking::RequestBuilder,
+    url: &str,
+    api_key: &str,
+) -> reqwest::blocking::RequestBuilder {
     let builder = with_auth(builder, api_key);
     if is_cline_api_url(url) {
         builder
@@ -906,7 +1038,11 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
         _ => resolved.url.clone(),
     };
     let finish = |ok: bool, http_status: Option<u16>, detail: String| {
-        let detail = if resolved.api_key.is_empty() { detail } else { detail.replace(&resolved.api_key, "***") };
+        let detail = if resolved.api_key.is_empty() {
+            detail
+        } else {
+            detail.replace(&resolved.api_key, "***")
+        };
         TestResult {
             section,
             ok,
@@ -922,7 +1058,10 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
         Err(detail) => return finish(false, None, detail),
     };
     let request = match section {
-        Section::Llm => with_openai_compat(client.post(&request_url), &request_url, &resolved.api_key).json(&llm_request_body(&resolved.model)),
+        Section::Llm => {
+            with_openai_compat(client.post(&request_url), &request_url, &resolved.api_key)
+                .json(&llm_request_body(&resolved.model))
+        }
         Section::Asr => {
             let boundary = format!(
                 "moss-voice-test-{}",
@@ -932,16 +1071,21 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
                     .unwrap_or(0)
             );
             with_auth(client.post(&request_url), &resolved.api_key)
-                .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+                .header(
+                    "Content-Type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
                 .body(multipart_body(&boundary, &resolved.model, &test_wav()))
         }
-        Section::Tts => with_auth(client.post(&request_url), &resolved.api_key).json(&serde_json::json!({
-            "model": resolved.model,
-            "input": "你好，我是 MOSS。",
-            "voice": resolved.voice,
-            "speed": resolved.speed,
-            "response_format": "mp3"
-        })),
+        Section::Tts => {
+            with_auth(client.post(&request_url), &resolved.api_key).json(&serde_json::json!({
+                "model": resolved.model,
+                "input": "你好，我是 MOSS。",
+                "voice": resolved.voice,
+                "speed": resolved.speed,
+                "response_format": "mp3"
+            }))
+        }
     };
     let response = match request.send() {
         Ok(response) => response,
@@ -950,7 +1094,11 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
     let status = response.status();
     let code = status.as_u16();
     if status.is_redirection() {
-        return finish(false, Some(code), format!("服务器返回重定向（HTTP {code}），按规则不跟随，请填写最终地址"));
+        return finish(
+            false,
+            Some(code),
+            format!("服务器返回重定向（HTTP {code}），按规则不跟随，请填写最终地址"),
+        );
     }
     let content_type = response
         .headers()
@@ -963,17 +1111,35 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
             Ok(bytes) => bytes,
             Err(detail) => return finish(false, Some(code), detail),
         };
-        return finish(false, Some(code), http_error_detail(code, &bytes, Some(&resolved.api_key)));
+        return finish(
+            false,
+            Some(code),
+            http_error_detail(code, &bytes, Some(&resolved.api_key)),
+        );
     }
     if section == Section::Llm {
         return match probe_llm_response(response, &content_type, Some(&resolved.api_key)) {
-            Ok(LlmProbeOutcome::ToolCall) => finish(true, Some(code), "连接成功，模型返回了工具调用（tool_calls）".into()),
-            Ok(LlmProbeOutcome::MessageWithoutToolCall) => {
-                finish(false, Some(code), "连接成功，但模型没有返回工具调用；MOSS 的工具需要支持函数调用的模型".into())
+            Ok(LlmProbeOutcome::ToolCall) => finish(
+                true,
+                Some(code),
+                "连接成功，模型返回了工具调用（tool_calls）".into(),
+            ),
+            Ok(LlmProbeOutcome::MessageWithoutToolCall) => finish(
+                false,
+                Some(code),
+                "连接成功，但模型没有返回工具调用；MOSS 的工具需要支持函数调用的模型".into(),
+            ),
+            Ok(LlmProbeOutcome::StreamError(err)) => {
+                finish(false, Some(code), format!("模型流式响应报错：{err}"))
             }
-            Ok(LlmProbeOutcome::StreamError(err)) => finish(false, Some(code), format!("模型流式响应报错：{err}")),
-            Ok(LlmProbeOutcome::InvalidFormat) => finish(false, Some(code), "返回格式不是 chat/completions".into()),
-            Ok(LlmProbeOutcome::NotJson) => finish(false, Some(code), "返回的不是 JSON（地址可能不是 OpenAI 兼容接口）".into()),
+            Ok(LlmProbeOutcome::InvalidFormat) => {
+                finish(false, Some(code), "返回格式不是 chat/completions".into())
+            }
+            Ok(LlmProbeOutcome::NotJson) => finish(
+                false,
+                Some(code),
+                "返回的不是 JSON（地址可能不是 OpenAI 兼容接口）".into(),
+            ),
             Err(detail) => finish(false, Some(code), detail),
         };
     }
@@ -986,16 +1152,30 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
         Section::Asr => {
             let value: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
             match value.as_ref().and_then(|value| value.get("text")) {
-                Some(serde_json::Value::String(_)) => finish(true, Some(code), "连接成功，识别接口已返回结果".into()),
-                _ => finish(false, Some(code), "返回中没有 text 字段（地址可能不是 /audio/transcriptions）".into()),
+                Some(serde_json::Value::String(_)) => {
+                    finish(true, Some(code), "连接成功，识别接口已返回结果".into())
+                }
+                _ => finish(
+                    false,
+                    Some(code),
+                    "返回中没有 text 字段（地址可能不是 /audio/transcriptions）".into(),
+                ),
             }
         }
         Section::Tts => {
             let looks_json = content_type.contains("json") || bytes.first() == Some(&b'{');
             if bytes.is_empty() || looks_json {
-                finish(false, Some(code), "没有返回音频数据（地址可能不是 /audio/speech）".into())
+                finish(
+                    false,
+                    Some(code),
+                    "没有返回音频数据（地址可能不是 /audio/speech）".into(),
+                )
             } else {
-                let mut res = finish(true, Some(code), format!("连接成功，合成了 {} 字节音频", bytes.len()));
+                let mut res = finish(
+                    true,
+                    Some(code),
+                    format!("连接成功，合成了 {} 字节音频", bytes.len()),
+                );
                 res.audio_data_url = Some(audio_data_url(&bytes, &content_type));
                 res
             }
@@ -1014,10 +1194,16 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
     let mut sections = Vec::new();
     let mut explicit_non_voice = false;
 
-    if let Some(endpoints) = obj.get("supported_endpoints").and_then(serde_json::Value::as_array) {
+    if let Some(endpoints) = obj
+        .get("supported_endpoints")
+        .and_then(serde_json::Value::as_array)
+    {
         for ep in endpoints.iter().filter_map(serde_json::Value::as_str) {
             let lower = ep.to_ascii_lowercase();
-            if lower.contains("chat/completions") || lower.contains("/responses") || lower.contains("/messages") {
+            if lower.contains("chat/completions")
+                || lower.contains("/responses")
+                || lower.contains("/messages")
+            {
                 push_unique_section(&mut sections, Section::Llm);
             }
             if lower.contains("audio/transcriptions") {
@@ -1033,7 +1219,11 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
         if let Some(val) = obj.get(key).and_then(serde_json::Value::as_str) {
             let lower = val.trim().to_ascii_lowercase();
             match lower.as_str() {
-                "asr" | "stt" | "speech-to-text" | "automatic-speech-recognition" | "audio-transcriptions" => {
+                "asr"
+                | "stt"
+                | "speech-to-text"
+                | "automatic-speech-recognition"
+                | "audio-transcriptions" => {
                     push_unique_section(&mut sections, Section::Asr);
                 }
                 "tts" | "text-to-speech" | "audio-speech" => {
@@ -1042,7 +1232,8 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
                 "chat" | "llm" | "text-generation" | "conversational" => {
                     push_unique_section(&mut sections, Section::Llm);
                 }
-                "embedding" | "embeddings" | "rerank" | "reranker" | "text-to-image" | "image-to-image" | "text-to-video" | "moderation" | "image" | "video" => {
+                "embedding" | "embeddings" | "rerank" | "reranker" | "text-to-image"
+                | "image-to-image" | "text-to-video" | "moderation" | "image" | "video" => {
                     explicit_non_voice = true;
                 }
                 _ => {}
@@ -1050,7 +1241,10 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
         }
     }
 
-    if let Some(modality) = item.pointer("/architecture/modality").and_then(serde_json::Value::as_str) {
+    if let Some(modality) = item
+        .pointer("/architecture/modality")
+        .and_then(serde_json::Value::as_str)
+    {
         let lower = modality.to_ascii_lowercase();
         if let Some((ins, outs)) = lower.split_once("->") {
             if ins.contains("audio") && outs.contains("text") {
@@ -1059,9 +1253,17 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
             if outs.contains("audio") {
                 push_unique_section(&mut sections, Section::Tts);
             }
-            if ins.contains("text") && outs.contains("text") && !ins.contains("audio") && !outs.contains("audio") {
+            if ins.contains("text")
+                && outs.contains("text")
+                && !ins.contains("audio")
+                && !outs.contains("audio")
+            {
                 push_unique_section(&mut sections, Section::Llm);
-            } else if ins.contains("text") && outs.contains("text") && ins.contains("audio") && outs.contains("audio") {
+            } else if ins.contains("text")
+                && outs.contains("text")
+                && ins.contains("audio")
+                && outs.contains("audio")
+            {
                 push_unique_section(&mut sections, Section::Llm);
             }
             if outs.contains("image") && !outs.contains("text") {
@@ -1081,13 +1283,24 @@ fn extract_item_sections(item: &serde_json::Value) -> Option<Vec<Section>> {
 
 fn extract_models_and_sections(
     value: &serde_json::Value,
-) -> Option<(Vec<String>, std::collections::BTreeMap<String, Vec<Section>>)> {
+) -> Option<(
+    Vec<String>,
+    std::collections::BTreeMap<String, Vec<Section>>,
+)> {
     let items = value
         .get("data")
         .and_then(serde_json::Value::as_array)
         .or_else(|| value.get("models").and_then(serde_json::Value::as_array))
-        .or_else(|| value.pointer("/data/data").and_then(serde_json::Value::as_array))
-        .or_else(|| value.pointer("/data/models").and_then(serde_json::Value::as_array))
+        .or_else(|| {
+            value
+                .pointer("/data/data")
+                .and_then(serde_json::Value::as_array)
+        })
+        .or_else(|| {
+            value
+                .pointer("/data/models")
+                .and_then(serde_json::Value::as_array)
+        })
         .or_else(|| value.as_array())?;
     let mut seen = std::collections::HashSet::new();
     let mut models = Vec::new();
@@ -1119,7 +1332,8 @@ fn extract_models_and_sections(
 /// （对齐 `yetone/magpie` `internal/provider/cline.go`）。
 pub fn prepend_cline_pass_models(remote: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    let mut merged = Vec::with_capacity(CLINE_PASS_MODELS.len() + CLINE_FREE_MODELS.len() + remote.len());
+    let mut merged =
+        Vec::with_capacity(CLINE_PASS_MODELS.len() + CLINE_FREE_MODELS.len() + remote.len());
     for preset in CLINE_PASS_MODELS.iter().chain(CLINE_FREE_MODELS.iter()) {
         if seen.insert((*preset).to_owned()) {
             merged.push((*preset).to_owned());
@@ -1182,7 +1396,10 @@ pub fn test_jev_decisions(endpoint: &str, api_key: &str, model: &str) -> serde_j
             }
         }
     });
-    let response = match with_auth(client.post(endpoint), api_key).json(&payload).send() {
+    let response = match with_auth(client.post(endpoint), api_key)
+        .json(&payload)
+        .send()
+    {
         Ok(resp) => resp,
         Err(err) => return finish(false, None, describe_send_error(&err)),
     };
@@ -1200,7 +1417,11 @@ pub fn test_jev_decisions(endpoint: &str, api_key: &str, model: &str) -> serde_j
         Err(detail) => return finish(false, Some(code), detail),
     };
     if !status.is_success() {
-        return finish(false, Some(code), http_error_detail(code, &bytes, Some(api_key)));
+        return finish(
+            false,
+            Some(code),
+            http_error_detail(code, &bytes, Some(api_key)),
+        );
     }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return finish(false, Some(code), "返回的不是合法 JSON".into());
@@ -1253,7 +1474,8 @@ pub fn list_jev_models(models_url: &str, api_key: Option<&str>) -> serde_json::V
         .map(|m| (*m).to_owned())
         .collect();
     let key = api_key.map(str::trim).unwrap_or("");
-    let mut detail = "已列出内置常用 Jev 决策模型（也可直接手填新的 typesafe/jev-* 版本）".to_owned();
+    let mut detail =
+        "已列出内置常用 Jev 决策模型（也可直接手填新的 typesafe/jev-* 版本）".to_owned();
     let mut http_status = None;
     if !key.is_empty()
         && let Ok(client) = client()
@@ -1300,7 +1522,11 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
                   models: Vec<String>,
                   model_sections: std::collections::BTreeMap<String, Vec<Section>>,
                   detail: String| {
-        let detail = if resolved.api_key.is_empty() { detail } else { detail.replace(&resolved.api_key, "***") };
+        let detail = if resolved.api_key.is_empty() {
+            detail
+        } else {
+            detail.replace(&resolved.api_key, "***")
+        };
         ModelsListResult {
             section,
             ok,
@@ -1313,8 +1539,14 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
     };
     if resolved.kind == ProviderKind::Doubao {
         let presets: Vec<String> = match section {
-            Section::Asr => DOUBAO_ASR_RESOURCES.iter().map(|item| (*item).to_owned()).collect(),
-            Section::Tts => DOUBAO_TTS_RESOURCES.iter().map(|item| (*item).to_owned()).collect(),
+            Section::Asr => DOUBAO_ASR_RESOURCES
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect(),
+            Section::Tts => DOUBAO_TTS_RESOURCES
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect(),
             Section::Llm => Vec::new(),
         };
         return finish(
@@ -1328,11 +1560,33 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
     let cline_llm = section == Section::Llm && is_cline_api_url(&resolved.url);
     let client = match client() {
         Ok(client) => client,
-        Err(detail) => return finish(false, None, Vec::new(), std::collections::BTreeMap::new(), detail),
+        Err(detail) => {
+            return finish(
+                false,
+                None,
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+                detail,
+            );
+        }
     };
-    let response = match with_openai_compat(client.get(&resolved.url).timeout(LIST_TIMEOUT), &resolved.url, &resolved.api_key).send() {
+    let response = match with_openai_compat(
+        client.get(&resolved.url).timeout(LIST_TIMEOUT),
+        &resolved.url,
+        &resolved.api_key,
+    )
+    .send()
+    {
         Ok(response) => response,
-        Err(error) => return finish(false, None, Vec::new(), std::collections::BTreeMap::new(), describe_send_error(&error)),
+        Err(error) => {
+            return finish(
+                false,
+                None,
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+                describe_send_error(&error),
+            );
+        }
     };
     let status = response.status();
     let code = status.as_u16();
@@ -1347,7 +1601,15 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
     }
     let bytes = match read_limited_bytes(response, MAX_MODELS_RESPONSE_BYTES) {
         Ok(bytes) => bytes,
-        Err(detail) => return finish(false, Some(code), Vec::new(), std::collections::BTreeMap::new(), detail),
+        Err(detail) => {
+            return finish(
+                false,
+                Some(code),
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+                detail,
+            );
+        }
     };
     if !status.is_success() {
         if cline_llm && code == 404 {
@@ -1360,7 +1622,13 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
                 "Cline 在线列表不可用，已列出 ClinePass 订阅模型（也可手动输入其他模型名）".into(),
             );
         }
-        return finish(false, Some(code), Vec::new(), std::collections::BTreeMap::new(), http_error_detail(code, &bytes, Some(&resolved.api_key)));
+        return finish(
+            false,
+            Some(code),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            http_error_detail(code, &bytes, Some(&resolved.api_key)),
+        );
     }
     let value: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
@@ -1406,13 +1674,31 @@ pub fn list_models(resolved: &ResolvedListRequest) -> ModelsListResult {
     if cline_llm {
         let models = prepend_cline_pass_models(models);
         let count = models.len();
-        return finish(true, Some(code), models, model_sections, format!("已读取 {count} 个模型（ClinePass 订阅模型已置顶）"));
+        return finish(
+            true,
+            Some(code),
+            models,
+            model_sections,
+            format!("已读取 {count} 个模型（ClinePass 订阅模型已置顶）"),
+        );
     }
     if models.is_empty() {
-        finish(true, Some(code), models, model_sections, "接口返回了空列表，请直接手动填写模型名".into())
+        finish(
+            true,
+            Some(code),
+            models,
+            model_sections,
+            "接口返回了空列表，请直接手动填写模型名".into(),
+        )
     } else {
         let count = models.len();
-        finish(true, Some(code), models, model_sections, format!("已读取 {count} 个模型"))
+        finish(
+            true,
+            Some(code),
+            models,
+            model_sections,
+            format!("已读取 {count} 个模型"),
+        )
     }
 }
 
@@ -1428,12 +1714,18 @@ pub(crate) mod fake_http {
         pub body: Vec<u8>,
     }
 
-    pub fn serve_once(status_line: &'static str, headers: &'static str, body: Vec<u8>) -> (String, mpsc::Receiver<Received>) {
+    pub fn serve_once(
+        status_line: &'static str,
+        headers: &'static str,
+        body: Vec<u8>,
+    ) -> (String, mpsc::Receiver<Received>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else { return };
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
             let mut buffer = Vec::new();
             let mut chunk = [0u8; 8192];
             let (head_end, length) = loop {
@@ -1448,7 +1740,8 @@ pub(crate) mod fake_http {
                         .lines()
                         .find_map(|line| {
                             let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok())?
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
                         })
                         .unwrap_or(0);
                     break (pos + 4, length);
@@ -1463,10 +1756,16 @@ pub(crate) mod fake_http {
             }
             let head = String::from_utf8_lossy(&buffer[..head_end]).to_string();
             let request_body = buffer[head_end..].to_vec();
-            let response = format!("{status_line}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let response = format!(
+                "{status_line}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.write_all(&body);
-            let _ = tx.send(Received { head, body: request_body });
+            let _ = tx.send(Received {
+                head,
+                body: request_body,
+            });
         });
         (format!("http://127.0.0.1:{port}"), rx)
     }
@@ -1478,48 +1777,98 @@ mod tests {
     use super::*;
 
     fn input(url: &str, key: &str, model: &str) -> SectionInput {
-        SectionInput { url: url.into(), api_key: key.into(), model: model.into(), ..Default::default() }
+        SectionInput {
+            url: url.into(),
+            api_key: key.into(),
+            model: model.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn urls_are_normalized_to_final_values() {
         assert_eq!(llm_base_url(" https://h/v1/ "), "https://h/v1");
-        assert_eq!(llm_base_url("https://h/v1/chat/completions"), "https://h/v1");
-        assert_eq!(asr_full_url("https://h/v1"), "https://h/v1/audio/transcriptions");
-        assert_eq!(asr_full_url("https://h/v1/audio/transcriptions/"), "https://h/v1/audio/transcriptions");
+        assert_eq!(
+            llm_base_url("https://h/v1/chat/completions"),
+            "https://h/v1"
+        );
+        assert_eq!(
+            asr_full_url("https://h/v1"),
+            "https://h/v1/audio/transcriptions"
+        );
+        assert_eq!(
+            asr_full_url("https://h/v1/audio/transcriptions/"),
+            "https://h/v1/audio/transcriptions"
+        );
         assert_eq!(tts_full_url("https://h/v1/"), "https://h/v1/audio/speech");
-        assert_eq!(tts_full_url("https://h/v1/audio/speech"), "https://h/v1/audio/speech");
+        assert_eq!(
+            tts_full_url("https://h/v1/audio/speech"),
+            "https://h/v1/audio/speech"
+        );
     }
 
     #[test]
     fn resolve_validates_and_blank_means_unchanged() {
-        assert_eq!(resolve(Section::Llm, &SectionInput::default()).unwrap(), None);
+        assert_eq!(
+            resolve(Section::Llm, &SectionInput::default()).unwrap(),
+            None
+        );
         assert!(resolve(Section::Llm, &input("ftp://h", "k", "m")).is_err());
         assert!(resolve(Section::Llm, &input("https://h/v1", "k", "")).is_err());
         assert!(resolve(Section::Llm, &input("https://<host>/v1", "k", "m")).is_err());
-        let tts = SectionInput { voice: String::new(), ..input("https://h/v1", "k", "tts-1") };
+        let tts = SectionInput {
+            voice: String::new(),
+            ..input("https://h/v1", "k", "tts-1")
+        };
         assert!(resolve(Section::Tts, &tts).unwrap_err().contains("音色"));
-        let tts = SectionInput { voice: "alloy".into(), speed: Some(9.0), ..input("https://h/v1", "k", "tts-1") };
+        let tts = SectionInput {
+            voice: "alloy".into(),
+            speed: Some(9.0),
+            ..input("https://h/v1", "k", "tts-1")
+        };
         assert!(resolve(Section::Tts, &tts).unwrap_err().contains("语速"));
-        let resolved = resolve(Section::Asr, &input("https://h/v1", " k ", "whisper-1")).unwrap().unwrap();
+        let resolved = resolve(Section::Asr, &input("https://h/v1", " k ", "whisper-1"))
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.url, "https://h/v1/audio/transcriptions");
         assert_eq!(resolved.api_key, "k");
         // Debug 输出不含密钥
-        let debug = format!("{resolved:?} {:?}", input("https://h", "sk-secret-123", "m"));
+        let debug = format!(
+            "{resolved:?} {:?}",
+            input("https://h", "sk-secret-123", "m")
+        );
         assert!(!debug.contains("sk-secret-123"), "{debug}");
     }
 
     #[test]
     fn llm_test_checks_tool_calls_and_sends_key_only_in_header() {
         let reply = br#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}]}"#;
-        let (base, rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/json\r\n", reply.to_vec());
-        let resolved = resolve(Section::Llm, &input(&format!("{base}/v1"), "sk-fake-llm-key", "m1")).unwrap().unwrap();
+        let (base, rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json\r\n",
+            reply.to_vec(),
+        );
+        let resolved = resolve(
+            Section::Llm,
+            &input(&format!("{base}/v1"), "sk-fake-llm-key", "m1"),
+        )
+        .unwrap()
+        .unwrap();
         let result = test_section(&resolved);
         assert!(result.ok, "{result:?}");
         assert_eq!(result.final_url, format!("{base}/v1"));
         let received = rx.recv().unwrap();
-        assert!(received.head.starts_with("POST /v1/chat/completions"), "{}", received.head);
-        assert!(received.head.to_ascii_lowercase().contains("authorization: bearer sk-fake-llm-key"));
+        assert!(
+            received.head.starts_with("POST /v1/chat/completions"),
+            "{}",
+            received.head
+        );
+        assert!(
+            received
+                .head
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-fake-llm-key")
+        );
         let body: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
         assert_eq!(body["model"], "m1");
         assert_eq!(body["tools"][0]["function"]["name"], "get_time");
@@ -1528,8 +1877,14 @@ mod tests {
 
         // 有回答但没有工具调用：不算通过
         let reply = br#"{"choices":[{"message":{"role":"assistant","content":"12:00"}}]}"#;
-        let (base, _rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/json\r\n", reply.to_vec());
-        let resolved = resolve(Section::Llm, &input(&base, "k", "m")).unwrap().unwrap();
+        let (base, _rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json\r\n",
+            reply.to_vec(),
+        );
+        let resolved = resolve(Section::Llm, &input(&base, "k", "m"))
+            .unwrap()
+            .unwrap();
         let result = test_section(&resolved);
         assert!(!result.ok);
         assert!(result.detail.contains("工具调用"), "{result:?}");
@@ -1537,8 +1892,20 @@ mod tests {
 
     #[test]
     fn redirects_are_not_followed_and_auth_errors_are_explained() {
-        let (base, _rx) = serve_once("HTTP/1.1 302 Found", "Location: http://127.0.0.1:1/elsewhere\r\n", Vec::new());
-        let resolved = resolve(Section::Tts, &SectionInput { voice: "alloy".into(), ..input(&base, "k", "tts-1") }).unwrap().unwrap();
+        let (base, _rx) = serve_once(
+            "HTTP/1.1 302 Found",
+            "Location: http://127.0.0.1:1/elsewhere\r\n",
+            Vec::new(),
+        );
+        let resolved = resolve(
+            Section::Tts,
+            &SectionInput {
+                voice: "alloy".into(),
+                ..input(&base, "k", "tts-1")
+            },
+        )
+        .unwrap()
+        .unwrap();
         let result = test_section(&resolved);
         assert!(!result.ok);
         assert_eq!(result.http_status, Some(302));
@@ -1549,7 +1916,9 @@ mod tests {
             "Content-Type: application/json\r\n",
             br#"{"error":{"message":"Incorrect API key provided: sk-fake***"}}"#.to_vec(),
         );
-        let resolved = resolve(Section::Llm, &input(&base, "sk-fake-key", "m")).unwrap().unwrap();
+        let resolved = resolve(Section::Llm, &input(&base, "sk-fake-key", "m"))
+            .unwrap()
+            .unwrap();
         let result = test_section(&resolved);
         assert!(!result.ok);
         assert!(result.detail.contains("鉴权失败"), "{result:?}");
@@ -1558,52 +1927,146 @@ mod tests {
 
     #[test]
     fn asr_sends_multipart_audio_and_tts_expects_audio() {
-        let (base, rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/json\r\n", br#"{"text":""}"#.to_vec());
-        let resolved = resolve(Section::Asr, &input(&base, "k", "whisper-1")).unwrap().unwrap();
+        let (base, rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json\r\n",
+            br#"{"text":""}"#.to_vec(),
+        );
+        let resolved = resolve(Section::Asr, &input(&base, "k", "whisper-1"))
+            .unwrap()
+            .unwrap();
         let result = test_section(&resolved);
         assert!(result.ok, "{result:?}");
         let received = rx.recv().unwrap();
-        assert!(received.head.starts_with("POST /audio/transcriptions"), "{}", received.head);
+        assert!(
+            received.head.starts_with("POST /audio/transcriptions"),
+            "{}",
+            received.head
+        );
         assert!(received.head.contains("multipart/form-data; boundary="));
         let text = String::from_utf8_lossy(&received.body);
-        assert!(text.contains("name=\"model\"") && text.contains("whisper-1") && text.contains("RIFF"));
+        assert!(
+            text.contains("name=\"model\"") && text.contains("whisper-1") && text.contains("RIFF")
+        );
 
-        let (base, rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: audio/mpeg\r\n", vec![0xFF, 0xFB, 0x90, 0x00, 1, 2, 3]);
-        let tts = SectionInput { voice: "alloy".into(), speed: Some(1.2), ..input(&base, "k", "tts-1") };
+        let (base, rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: audio/mpeg\r\n",
+            vec![0xFF, 0xFB, 0x90, 0x00, 1, 2, 3],
+        );
+        let tts = SectionInput {
+            voice: "alloy".into(),
+            speed: Some(1.2),
+            ..input(&base, "k", "tts-1")
+        };
         let result = test_section(&resolve(Section::Tts, &tts).unwrap().unwrap());
         assert!(result.ok, "{result:?}");
         let body: serde_json::Value = serde_json::from_slice(&rx.recv().unwrap().body).unwrap();
         assert_eq!(body["voice"], "alloy");
         assert_eq!(body["speed"], 1.2);
 
-        let (base, _rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/json\r\n", br#"{"error":"x"}"#.to_vec());
-        let tts = SectionInput { voice: "alloy".into(), ..input(&base, "k", "tts-1") };
+        let (base, _rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json\r\n",
+            br#"{"error":"x"}"#.to_vec(),
+        );
+        let tts = SectionInput {
+            voice: "alloy".into(),
+            ..input(&base, "k", "tts-1")
+        };
         assert!(!test_section(&resolve(Section::Tts, &tts).unwrap().unwrap()).ok);
     }
 
     #[test]
     fn doubao_is_only_for_builtin_asr_and_tts() {
-        let doubao = |url: &str, model: &str| SectionInput { kind: ProviderKind::Doubao, ..input(url, "k", model) };
+        let doubao = |url: &str, model: &str| SectionInput {
+            kind: ProviderKind::Doubao,
+            ..input(url, "k", model)
+        };
         // 外部服务端链路不接受豆包
-        assert!(resolve(Section::Asr, &doubao("", "")).unwrap_err().contains("外部服务端"));
-        assert!(resolve_builtin(Section::Llm, &doubao("", "")).unwrap_err().contains("OpenAI 兼容"));
+        assert!(
+            resolve(Section::Asr, &doubao("", ""))
+                .unwrap_err()
+                .contains("外部服务端")
+        );
+        assert!(
+            resolve_builtin(Section::Llm, &doubao("", ""))
+                .unwrap_err()
+                .contains("OpenAI 兼容")
+        );
         // 地址与资源 ID 留空用默认值
-        let asr = resolve_builtin(Section::Asr, &doubao("", "")).unwrap().unwrap();
-        assert_eq!((asr.kind, asr.url.as_str(), asr.model.as_str()), (ProviderKind::Doubao, DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE));
-        let custom = resolve_builtin(Section::Asr, &doubao("wss://h/api/v3/sauc/bigmodel/", "volc.seedasr.sauc.duration")).unwrap().unwrap();
-        assert_eq!((custom.url.as_str(), custom.model.as_str()), ("wss://h/api/v3/sauc/bigmodel", "volc.seedasr.sauc.duration"));
-        assert!(resolve_builtin(Section::Asr, &doubao("https://h", "")).unwrap_err().contains("wss://"));
+        let asr = resolve_builtin(Section::Asr, &doubao("", ""))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (asr.kind, asr.url.as_str(), asr.model.as_str()),
+            (ProviderKind::Doubao, DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE)
+        );
+        let custom = resolve_builtin(
+            Section::Asr,
+            &doubao(
+                "wss://h/api/v3/sauc/bigmodel/",
+                "volc.seedasr.sauc.duration",
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (custom.url.as_str(), custom.model.as_str()),
+            ("wss://h/api/v3/sauc/bigmodel", "volc.seedasr.sauc.duration")
+        );
+        assert!(
+            resolve_builtin(Section::Asr, &doubao("https://h", ""))
+                .unwrap_err()
+                .contains("wss://")
+        );
         // 合成：音色必填，语速 0.5 ~ 2.0
-        assert!(resolve_builtin(Section::Tts, &doubao("", "")).unwrap_err().contains("音色"));
-        let tts = SectionInput { voice: "zh_female_test".into(), speed: Some(1.5), ..doubao("", "") };
+        assert!(
+            resolve_builtin(Section::Tts, &doubao("", ""))
+                .unwrap_err()
+                .contains("音色")
+        );
+        let tts = SectionInput {
+            voice: "zh_female_test".into(),
+            speed: Some(1.5),
+            ..doubao("", "")
+        };
         let resolved = resolve_builtin(Section::Tts, &tts).unwrap().unwrap();
-        assert_eq!((resolved.url.as_str(), resolved.model.as_str(), resolved.speed), (DOUBAO_TTS_URL, DOUBAO_TTS_RESOURCE, 1.5));
-        assert!(resolve_builtin(Section::Tts, &SectionInput { speed: Some(3.0), ..tts.clone() }).unwrap_err().contains("0.5"));
+        assert_eq!(
+            (
+                resolved.url.as_str(),
+                resolved.model.as_str(),
+                resolved.speed
+            ),
+            (DOUBAO_TTS_URL, DOUBAO_TTS_RESOURCE, 1.5)
+        );
+        assert!(
+            resolve_builtin(
+                Section::Tts,
+                &SectionInput {
+                    speed: Some(3.0),
+                    ..tts.clone()
+                }
+            )
+            .unwrap_err()
+            .contains("0.5")
+        );
         // 接口类型参与“测试通过的就是保存的”比对
-        let openai = resolve_builtin(Section::Tts, &SectionInput { kind: ProviderKind::Openai, url: "https://h/v1".into(), model: "tts-1".into(), ..tts }).unwrap().unwrap();
+        let openai = resolve_builtin(
+            Section::Tts,
+            &SectionInput {
+                kind: ProviderKind::Openai,
+                url: "https://h/v1".into(),
+                model: "tts-1".into(),
+                ..tts
+            },
+        )
+        .unwrap()
+        .unwrap();
         assert_ne!(openai.fingerprint(), resolved.fingerprint());
         // 旧版输入没有 kind：按 OpenAI 兼容处理
-        let legacy: SectionInput = serde_json::from_str(r#"{"url":"https://h/v1","model":"m"}"#).unwrap();
+        let legacy: SectionInput =
+            serde_json::from_str(r#"{"url":"https://h/v1","model":"m"}"#).unwrap();
         assert_eq!(legacy.kind, ProviderKind::Openai);
     }
 
@@ -1612,7 +2075,12 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let resolved = resolve(Section::Llm, &input(&format!("http://127.0.0.1:{port}/v1?key=abc"), "k", "m")).unwrap().unwrap();
+        let resolved = resolve(
+            Section::Llm,
+            &input(&format!("http://127.0.0.1:{port}/v1?key=abc"), "k", "m"),
+        )
+        .unwrap()
+        .unwrap();
         let result = test_section(&resolved);
         assert!(!result.ok);
         assert!(!result.detail.contains("key=abc"), "{result:?}");
@@ -1629,33 +2097,97 @@ mod tests {
     #[test]
     fn list_models_normalizes_section_urls_deduplicates_and_hides_secrets() {
         assert_eq!(models_list_url(" https://h/v1/ "), "https://h/v1/models");
-        assert_eq!(models_list_url("https://h/v1/chat/completions"), "https://h/v1/models");
-        assert_eq!(models_list_url("https://h/v1/audio/transcriptions/"), "https://h/v1/models");
-        assert_eq!(models_list_url("https://h/v1/audio/speech"), "https://h/v1/models");
-        assert_eq!(models_list_url("https://h/v1/models/"), "https://h/v1/models");
+        assert_eq!(
+            models_list_url("https://h/v1/chat/completions"),
+            "https://h/v1/models"
+        );
+        assert_eq!(
+            models_list_url("https://h/v1/audio/transcriptions/"),
+            "https://h/v1/models"
+        );
+        assert_eq!(
+            models_list_url("https://h/v1/audio/speech"),
+            "https://h/v1/models"
+        );
+        assert_eq!(
+            models_list_url("https://h/v1/models/"),
+            "https://h/v1/models"
+        );
 
         // 不要求提前填模型名或音色
-        let asr_input = SectionInput { url: "https://h/v1/audio/transcriptions".into(), api_key: "sk-list-secret".into(), ..Default::default() };
+        let asr_input = SectionInput {
+            url: "https://h/v1/audio/transcriptions".into(),
+            api_key: "sk-list-secret".into(),
+            ..Default::default()
+        };
         let req = resolve_list_request(Section::Asr, &asr_input).unwrap();
         assert_eq!(req.url, "https://h/v1/models");
         assert!(!format!("{req:?}").contains("sk-list-secret"));
 
         let reply = br#"{"object":"list","data":[{"id":"Qwen/Qwen2.5-7B-Instruct","type":"text","sub_type":"chat"},{"id":"FunAudioLLM/SenseVoiceSmall","type":"audio","sub_type":"asr"},{"id":"Qwen/Qwen2.5-7B-Instruct"},{"id":"  "},{"id":"bad\nname"},{"id":"MOSS/TTS-1","supported_endpoints":["/v1/audio/speech"]}]}"#;
-        let (base, rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/json\r\n", reply.to_vec());
-        let req = resolve_list_request(Section::Asr, &input(&format!("{base}/v1/audio/transcriptions"), "sk-list-secret", "")).unwrap();
+        let (base, rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json\r\n",
+            reply.to_vec(),
+        );
+        let req = resolve_list_request(
+            Section::Asr,
+            &input(
+                &format!("{base}/v1/audio/transcriptions"),
+                "sk-list-secret",
+                "",
+            ),
+        )
+        .unwrap();
         let result = list_models(&req);
         assert!(result.ok, "{result:?}");
-        assert_eq!(result.models, vec!["Qwen/Qwen2.5-7B-Instruct", "FunAudioLLM/SenseVoiceSmall", "MOSS/TTS-1"]);
-        assert_eq!(result.model_sections.get("Qwen/Qwen2.5-7B-Instruct"), Some(&vec![Section::Llm]));
-        assert_eq!(result.model_sections.get("FunAudioLLM/SenseVoiceSmall"), Some(&vec![Section::Asr]));
-        assert_eq!(result.model_sections.get("MOSS/TTS-1"), Some(&vec![Section::Tts]));
+        assert_eq!(
+            result.models,
+            vec![
+                "Qwen/Qwen2.5-7B-Instruct",
+                "FunAudioLLM/SenseVoiceSmall",
+                "MOSS/TTS-1"
+            ]
+        );
+        assert_eq!(
+            result.model_sections.get("Qwen/Qwen2.5-7B-Instruct"),
+            Some(&vec![Section::Llm])
+        );
+        assert_eq!(
+            result.model_sections.get("FunAudioLLM/SenseVoiceSmall"),
+            Some(&vec![Section::Asr])
+        );
+        assert_eq!(
+            result.model_sections.get("MOSS/TTS-1"),
+            Some(&vec![Section::Tts])
+        );
         let received = rx.recv().unwrap();
-        assert!(received.head.starts_with("GET /v1/models "), "{}", received.head);
-        assert!(received.head.to_ascii_lowercase().contains("authorization: bearer sk-list-secret"));
-        assert!(!serde_json::to_string(&result).unwrap().contains("sk-list-secret"));
+        assert!(
+            received.head.starts_with("GET /v1/models "),
+            "{}",
+            received.head
+        );
+        assert!(
+            received
+                .head
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-list-secret")
+        );
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("sk-list-secret")
+        );
 
         // 豆包流式直接返回常用资源 ID 候选，不发 HTTP 请求
-        let doubao_req = resolve_list_request(Section::Asr, &SectionInput { kind: ProviderKind::Doubao, ..Default::default() }).unwrap();
+        let doubao_req = resolve_list_request(
+            Section::Asr,
+            &SectionInput {
+                kind: ProviderKind::Doubao,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let doubao_res = list_models(&doubao_req);
         assert!(doubao_res.ok);
         assert!(doubao_res.models.contains(&DOUBAO_ASR_RESOURCE.to_owned()));
@@ -1666,7 +2198,9 @@ mod tests {
         assert!(is_cline_api_url("https://api.cline.bot/api/v1"));
         assert!(is_cline_api_url("https://API.CLINE.BOT/api/v1/models"));
         assert!(!is_cline_api_url("https://api.openai.com/v1"));
-        assert!(!is_cline_api_url("https://evil-api.cline.bot.example.com/v1"));
+        assert!(!is_cline_api_url(
+            "https://evil-api.cline.bot.example.com/v1"
+        ));
 
         let merged = prepend_cline_pass_models(vec![
             "deepseek/deepseek-v4.1-flash-1017".into(),
@@ -1674,28 +2208,69 @@ mod tests {
         ]);
         assert_eq!(merged[0], "cline-pass/deepseek-v4.1-flash");
         assert!(merged.contains(&"cline-pass/deepseek-v4.1-flash-1017".to_owned()));
-        assert_eq!(merged.iter().filter(|m| m.as_str() == "cline-pass/deepseek-v4.1-flash").count(), 1);
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|m| m.as_str() == "cline-pass/deepseek-v4.1-flash")
+                .count(),
+            1
+        );
         assert_eq!(merged.last().unwrap(), "deepseek/deepseek-v4.1-flash-1017");
 
         // 非流式 `{ success: true, data: { choices: [...] } }` 包裹结构兼容解析
         let wrapped = br#"{"success":true,"data":{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}]}}"#;
-        let (base, _rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/json\r\n", wrapped.to_vec());
-        let resolved = resolve(Section::Llm, &input(&format!("{base}/api/v1"), "sk-cline-secret", "cline-pass/deepseek-v4.1-flash")).unwrap().unwrap();
+        let (base, _rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json\r\n",
+            wrapped.to_vec(),
+        );
+        let resolved = resolve(
+            Section::Llm,
+            &input(
+                &format!("{base}/api/v1"),
+                "sk-cline-secret",
+                "cline-pass/deepseek-v4.1-flash",
+            ),
+        )
+        .unwrap()
+        .unwrap();
         let result = test_section(&resolved);
         assert!(result.ok, "{result:?}");
 
         // 嵌套模型列表 `{ success: true, data: { data: [...] } }` 兼容解析
-        let wrapped_models = br#"{"success":true,"data":{"object":"list","data":[{"id":"cline-pass/kimi-k3"}]}}"#;
-        let (base, _rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/json\r\n", wrapped_models.to_vec());
-        let req = resolve_list_request(Section::Llm, &input(&format!("{base}/api/v1"), "sk-cline-secret", "")).unwrap();
+        let wrapped_models =
+            br#"{"success":true,"data":{"object":"list","data":[{"id":"cline-pass/kimi-k3"}]}}"#;
+        let (base, _rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json\r\n",
+            wrapped_models.to_vec(),
+        );
+        let req = resolve_list_request(
+            Section::Llm,
+            &input(&format!("{base}/api/v1"), "sk-cline-secret", ""),
+        )
+        .unwrap();
         let listed = list_models(&req);
         assert!(listed.ok, "{listed:?}");
         assert_eq!(listed.models, vec!["cline-pass/kimi-k3"]);
 
         // HTTP 402 提示使用订阅前缀，且绝不泄露密钥
         let err_402 = br#"{"error":{"message":"Insufficient balance. Your Cline Credits balance is $-0.05"}}"#;
-        let (base, _rx) = serve_once("HTTP/1.1 402 Payment Required", "Content-Type: application/json\r\n", err_402.to_vec());
-        let resolved = resolve(Section::Llm, &input(&format!("{base}/api/v1"), "sk-cline-secret", "deepseek/deepseek-v4.1-flash-1017")).unwrap().unwrap();
+        let (base, _rx) = serve_once(
+            "HTTP/1.1 402 Payment Required",
+            "Content-Type: application/json\r\n",
+            err_402.to_vec(),
+        );
+        let resolved = resolve(
+            Section::Llm,
+            &input(
+                &format!("{base}/api/v1"),
+                "sk-cline-secret",
+                "deepseek/deepseek-v4.1-flash-1017",
+            ),
+        )
+        .unwrap()
+        .unwrap();
         let failed = test_section(&resolved);
         assert!(!failed.ok);
         assert!(failed.detail.contains("cline-pass/"), "{failed:?}");
@@ -1704,16 +2279,26 @@ mod tests {
         // 纯大模型网关（Cline / OpenRouter / DeepSeek 等）在语音识别或语音合成中直接拒绝，不拼凑虚假的 /audio/transcriptions
         let asr_cline_err = resolve_builtin(
             Section::Asr,
-            &input("https://api.cline.bot/api/v1", "sk-cline-secret", "cline-pass/deepseek-v4.1-flash"),
+            &input(
+                "https://api.cline.bot/api/v1",
+                "sk-cline-secret",
+                "cline-pass/deepseek-v4.1-flash",
+            ),
         )
         .unwrap_err();
-        assert!(asr_cline_err.contains("仅提供大模型对话接口"), "{asr_cline_err}");
+        assert!(
+            asr_cline_err.contains("仅提供大模型对话接口"),
+            "{asr_cline_err}"
+        );
         let list_cline_err = resolve_list_request(
             Section::Asr,
             &input("https://api.cline.bot/api/v1", "sk-cline-secret", ""),
         )
         .unwrap_err();
-        assert!(list_cline_err.contains("仅提供大模型对话接口"), "{list_cline_err}");
+        assert!(
+            list_cline_err.contains("仅提供大模型对话接口"),
+            "{list_cline_err}"
+        );
     }
 
     #[test]
@@ -1724,7 +2309,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else { return };
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
             let head = concat!(
@@ -1742,19 +2329,44 @@ mod tests {
             let _ = stream.write_all(b"data: [DONE]\n\n");
         });
         let base = format!("http://127.0.0.1:{port}/v1");
-        let resolved = resolve(Section::Llm, &input(&base, "sk-stream-secret", "deepseek-reasoner")).unwrap().unwrap();
+        let resolved = resolve(
+            Section::Llm,
+            &input(&base, "sk-stream-secret", "deepseek-reasoner"),
+        )
+        .unwrap()
+        .unwrap();
         let result = test_section(&resolved);
         assert!(result.ok, "{result:?}");
-        assert!(result.elapsed_ms < 2_000, "应在首包 tool_calls 到达时立即结束，实际耗时 {} ms", result.elapsed_ms);
-        assert!(!serde_json::to_string(&result).unwrap().contains("sk-stream-secret"));
+        assert!(
+            result.elapsed_ms < 2_000,
+            "应在首包 tool_calls 到达时立即结束，实际耗时 {} ms",
+            result.elapsed_ms
+        );
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("sk-stream-secret")
+        );
 
         // SSE 流内返回 error 事件时按失败报告且脱敏
         let sse_err = b"data: {\"error\":{\"message\":\"Rate limit exceeded for sk-stream-secret\"}}\n\ndata: [DONE]\n\n";
-        let (err_base, _rx) = serve_once("HTTP/1.1 200 OK", "Content-Type: text/event-stream\r\n", sse_err.to_vec());
-        let err_resolved = resolve(Section::Llm, &input(&format!("{err_base}/v1"), "sk-stream-secret", "m")).unwrap().unwrap();
+        let (err_base, _rx) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/event-stream\r\n",
+            sse_err.to_vec(),
+        );
+        let err_resolved = resolve(
+            Section::Llm,
+            &input(&format!("{err_base}/v1"), "sk-stream-secret", "m"),
+        )
+        .unwrap()
+        .unwrap();
         let err_res = test_section(&err_resolved);
         assert!(!err_res.ok, "{err_res:?}");
-        assert!(err_res.detail.contains("Rate limit exceeded"), "{err_res:?}");
+        assert!(
+            err_res.detail.contains("Rate limit exceeded"),
+            "{err_res:?}"
+        );
         assert!(!err_res.detail.contains("sk-stream-secret"));
 
         // Jev Decisions 探针：校验 noul 响应且绝不泄露密钥
@@ -1763,7 +2375,11 @@ mod tests {
             "Content-Type: application/json\r\n",
             br#"{"answers":{"probe":{"type":"noul","noul":0.92}}}"#.to_vec(),
         );
-        let jev_ok = test_jev_decisions(&format!("{jev_ok_url}/api/alpha/decisions"), "sk-jev-secret", "typesafe/jev-1.14");
+        let jev_ok = test_jev_decisions(
+            &format!("{jev_ok_url}/api/alpha/decisions"),
+            "sk-jev-secret",
+            "typesafe/jev-1.14",
+        );
         assert_eq!(jev_ok["ok"], true, "{jev_ok}");
         assert!(!jev_ok.to_string().contains("sk-jev-secret"));
 
@@ -1772,7 +2388,11 @@ mod tests {
             "Content-Type: application/json\r\n",
             br#"{"error":{"message":"Invalid key sk-jev-secret"}}"#.to_vec(),
         );
-        let jev_err = test_jev_decisions(&format!("{jev_err_url}/api/alpha/decisions"), "sk-jev-secret", "typesafe/jev-1.14");
+        let jev_err = test_jev_decisions(
+            &format!("{jev_err_url}/api/alpha/decisions"),
+            "sk-jev-secret",
+            "typesafe/jev-1.14",
+        );
         assert_eq!(jev_err["ok"], false);
         assert!(!jev_err.to_string().contains("sk-jev-secret"));
     }
@@ -1783,17 +2403,30 @@ mod tests {
         let prefix = "Upstream gateway rejected request with diagnostic context: ".to_owned()
             + &"x".repeat(80)
             + " Invalid key ";
-        assert!(prefix.chars().count() < 155 && prefix.chars().count() + boundary_secret.len() > 168);
-        let body = serde_json::json!({"error": {"message": format!("{prefix}{boundary_secret}")}}).to_string();
+        assert!(
+            prefix.chars().count() < 155 && prefix.chars().count() + boundary_secret.len() > 168
+        );
+        let body = serde_json::json!({"error": {"message": format!("{prefix}{boundary_secret}")}})
+            .to_string();
         let (trunc_url, _rx) = serve_once(
             "HTTP/1.1 401 Unauthorized",
             "Content-Type: application/json\r\n",
             body.into_bytes(),
         );
-        let trunc_err = test_jev_decisions(&format!("{trunc_url}/api/alpha/decisions"), &boundary_secret, "typesafe/jev-1.14");
+        let trunc_err = test_jev_decisions(
+            &format!("{trunc_url}/api/alpha/decisions"),
+            &boundary_secret,
+            "typesafe/jev-1.14",
+        );
         let trunc_str = trunc_err.to_string();
-        assert!(!trunc_str.contains("firsthalf_"), "密钥前缀片段不得因截断泄漏: {trunc_str}");
-        assert!(!trunc_str.contains("_secondhalf"), "密钥后段不得泄漏: {trunc_str}");
+        assert!(
+            !trunc_str.contains("firsthalf_"),
+            "密钥前缀片段不得因截断泄漏: {trunc_str}"
+        );
+        assert!(
+            !trunc_str.contains("_secondhalf"),
+            "密钥后段不得泄漏: {trunc_str}"
+        );
 
         // HTTP 200 SSE 流内错误在 160 字符边界截断前同样须传入当前密钥脱敏，不得回显密钥前缀
         let sse_line = format!(
@@ -1805,17 +2438,30 @@ mod tests {
             "Content-Type: text/event-stream\r\n",
             sse_line.into_bytes(),
         );
-        let sse_resolved = resolve(Section::Llm, &input(&format!("{sse_trunc_base}/v1"), &boundary_secret, "m"))
-            .unwrap()
-            .unwrap();
+        let sse_resolved = resolve(
+            Section::Llm,
+            &input(&format!("{sse_trunc_base}/v1"), &boundary_secret, "m"),
+        )
+        .unwrap()
+        .unwrap();
         let sse_res = test_section(&sse_resolved);
         assert!(!sse_res.ok, "{sse_res:?}");
-        assert!(!sse_res.detail.contains("firsthalf_"), "SSE 流内错误不得泄露密钥前缀: {:?}", sse_res.detail);
-        assert!(!sse_res.detail.contains("_secondhalf"), "SSE 流内错误不得泄露密钥后段: {:?}", sse_res.detail);
+        assert!(
+            !sse_res.detail.contains("firsthalf_"),
+            "SSE 流内错误不得泄露密钥前缀: {:?}",
+            sse_res.detail
+        );
+        assert!(
+            !sse_res.detail.contains("_secondhalf"),
+            "SSE 流内错误不得泄露密钥后段: {:?}",
+            sse_res.detail
+        );
 
         // OpenRouter origin 严格校验：拒绝伪后缀域名、userinfo、http、非标端口及路径/query 伪装
         assert!(is_openrouter_https_url("https://openrouter.ai/api/v1"));
-        assert!(is_openrouter_https_url("https://OPENROUTER.AI:443/api/v1/chat/completions"));
+        assert!(is_openrouter_https_url(
+            "https://OPENROUTER.AI:443/api/v1/chat/completions"
+        ));
         for bad in [
             "https://openrouter.ai.example/v1",
             "https://evil-openrouter.ai/v1",

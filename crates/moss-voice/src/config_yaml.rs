@@ -39,7 +39,10 @@ impl Scalar {
     fn matches(&self, value: &serde_yaml::Value) -> bool {
         match self {
             Self::Str(expected) => value.as_str() == Some(expected.as_str()),
-            Self::Num(expected) => value.as_f64().map(|actual| (actual - expected).abs() < 1e-9).unwrap_or(false),
+            Self::Num(expected) => value
+                .as_f64()
+                .map(|actual| (actual - expected).abs() < 1e-9)
+                .unwrap_or(false),
         }
     }
 }
@@ -84,7 +87,10 @@ pub fn edits_for(sections: &[ResolvedSection], mcp_endpoint: Option<&str>) -> Ed
                 }
                 edits.push((path(&["TTS", TTS_NAME, "model"]), s(&resolved.model)));
                 edits.push((path(&["TTS", TTS_NAME, "voice"]), s(&resolved.voice)));
-                edits.push((path(&["TTS", TTS_NAME, "speed"]), Scalar::Num(resolved.speed)));
+                edits.push((
+                    path(&["TTS", TTS_NAME, "speed"]),
+                    Scalar::Num(resolved.speed),
+                ));
                 edits.push((path(&["TTS", TTS_NAME, "output_dir"]), s("tmp/")));
                 edits.push((path(&["selected_module", "TTS"]), s(TTS_NAME)));
             }
@@ -93,7 +99,10 @@ pub fn edits_for(sections: &[ResolvedSection], mcp_endpoint: Option<&str>) -> Ed
     if !sections.is_empty() {
         edits.push((path(&["selected_module", "Intent"]), s("function_call")));
     }
-    if let Some(endpoint) = mcp_endpoint.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(endpoint) = mcp_endpoint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         edits.push((path(&["mcp_endpoint"]), s(endpoint)));
     }
     edits
@@ -124,7 +133,11 @@ fn key_of(line: &str) -> Option<String> {
         let mut end = None;
         let bytes = trimmed.as_bytes();
         for (index, byte) in bytes.iter().enumerate() {
-            if *byte == b':' && (index + 1 == bytes.len() || bytes[index + 1] == b' ' || bytes[index + 1] == b'\t') {
+            if *byte == b':'
+                && (index + 1 == bytes.len()
+                    || bytes[index + 1] == b' '
+                    || bytes[index + 1] == b'\t')
+            {
                 end = Some(index);
                 break;
             }
@@ -146,12 +159,23 @@ fn inline_value(line: &str) -> String {
     let trimmed = line.trim_start();
     let after = if trimmed.starts_with('"') || trimmed.starts_with('\'') {
         let quote = trimmed.as_bytes()[0] as char;
-        trimmed[1..].split_once(quote).map(|(_, rest)| rest.trim_start_matches(':')).unwrap_or("")
+        trimmed[1..]
+            .split_once(quote)
+            .map(|(_, rest)| rest.trim_start_matches(':'))
+            .unwrap_or("")
     } else {
-        trimmed.split_once(": ").map(|(_, rest)| rest).or_else(|| trimmed.strip_suffix(':').map(|_| "")).unwrap_or("")
+        trimmed
+            .split_once(": ")
+            .map(|(_, rest)| rest)
+            .or_else(|| trimmed.strip_suffix(':').map(|_| ""))
+            .unwrap_or("")
     };
     let value = after.trim();
-    if value.starts_with('#') { String::new() } else { value.split(" #").next().unwrap_or("").trim().to_owned() }
+    if value.starts_with('#') {
+        String::new()
+    } else {
+        value.split(" #").next().unwrap_or("").trim().to_owned()
+    }
 }
 
 struct Doc {
@@ -196,7 +220,11 @@ impl Doc {
             None => (0, self.lines.len()),
             Some(index) => (index, self.block_end(index)),
         };
-        (start..end).rev().find(|cursor| is_content(&self.lines[*cursor])).map(|cursor| cursor + 1).unwrap_or(end)
+        (start..end)
+            .rev()
+            .find(|cursor| is_content(&self.lines[*cursor]))
+            .map(|cursor| cursor + 1)
+            .unwrap_or(end)
     }
 
     fn child_indent(&self, parent: Option<usize>) -> usize {
@@ -237,14 +265,18 @@ impl Doc {
                             .map(|cursor| cursor + 1)
                             .unwrap_or(index + 1);
                         self.lines.drain(index + 1..content_end);
-                        self.lines[index] = format!("{}{key}: {}", " ".repeat(indent), value.literal());
+                        self.lines[index] =
+                            format!("{}{key}: {}", " ".repeat(indent), value.literal());
                     } else {
                         let inline = inline_value(&self.lines[index]);
                         if !inline.is_empty() {
                             if matches!(inline.as_str(), "{}" | "null" | "~") {
                                 self.lines[index] = format!("{}{key}:", " ".repeat(indent));
                             } else {
-                                return Err(format!("{} 使用了单行写法，无法自动修改，请改成多行后再保存", path[..=depth].join(".")));
+                                return Err(format!(
+                                    "{} 使用了单行写法，无法自动修改，请改成多行后再保存",
+                                    path[..=depth].join(".")
+                                ));
                             }
                         }
                         parent = Some(index);
@@ -277,7 +309,9 @@ impl Doc {
 }
 
 fn lookup<'a>(value: &'a serde_yaml::Value, path: &[String]) -> Option<&'a serde_yaml::Value> {
-    path.iter().try_fold(value, |current, key| current.as_mapping()?.get(key.as_str()))
+    path.iter().try_fold(value, |current, key| {
+        current.as_mapping()?.get(key.as_str())
+    })
 }
 
 /// 是否为全模块部署（`manager-api.url` 非空）：此时配置由智控台管理，向导只测试不写。
@@ -295,23 +329,30 @@ pub fn is_full_module(text: &str) -> bool {
 /// 在内存中应用改动并校验，返回新文本。原文本无法解析时拒绝修改。
 pub fn apply(original: &str, edits: &Edits) -> Result<String, String> {
     if !original.trim().is_empty() {
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(original).map_err(|_| "现有 data/.config.yaml 无法解析，为避免损坏未做修改".to_owned())?;
+        let parsed: serde_yaml::Value = serde_yaml::from_str(original)
+            .map_err(|_| "现有 data/.config.yaml 无法解析，为避免损坏未做修改".to_owned())?;
         if !(parsed.is_mapping() || parsed.is_null()) {
             return Err("现有 data/.config.yaml 顶层不是映射，未做修改".into());
         }
     }
     if is_full_module(original) {
-        return Err("检测到 manager-api.url（全模块部署），模型配置由智控台管理；向导只测试连接，不写文件".into());
+        return Err(
+            "检测到 manager-api.url（全模块部署），模型配置由智控台管理；向导只测试连接，不写文件"
+                .into(),
+        );
     }
     let mut doc = Doc::parse(original);
     for (path, value) in edits {
         doc.set(path, value)?;
     }
     let text = doc.render();
-    let parsed: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|_| "写入后的配置无法解析，已放弃写入".to_owned())?;
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(&text).map_err(|_| "写入后的配置无法解析，已放弃写入".to_owned())?;
     for (path, value) in edits {
-        if !lookup(&parsed, path).map(|actual| value.matches(actual)).unwrap_or(false) {
+        if !lookup(&parsed, path)
+            .map(|actual| value.matches(actual))
+            .unwrap_or(false)
+        {
             return Err(format!("写入后核对失败：{}，已放弃写入", path.join(".")));
         }
     }
@@ -329,7 +370,10 @@ pub struct WriteOutcome {
 /// 读-改-写 `config_path`：先备份为 `.bak`，临时文件写好后替换。
 pub fn write(config_path: &Path, edits: &Edits) -> Result<WriteOutcome, String> {
     let existing = match std::fs::read(config_path) {
-        Ok(bytes) => Some(String::from_utf8(bytes).map_err(|_| "现有 data/.config.yaml 不是 UTF-8 文本，未做修改".to_owned())?),
+        Ok(bytes) => Some(
+            String::from_utf8(bytes)
+                .map_err(|_| "现有 data/.config.yaml 不是 UTF-8 文本，未做修改".to_owned())?,
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return Err("无法读取 data/.config.yaml".into()),
     };
@@ -342,7 +386,8 @@ pub fn write(config_path: &Path, edits: &Edits) -> Result<WriteOutcome, String> 
         let mut name = config_path.as_os_str().to_owned();
         name.push(".bak");
         let backup = PathBuf::from(name);
-        std::fs::copy(config_path, &backup).map_err(|_| "备份 data/.config.yaml.bak 失败，未做修改".to_owned())?;
+        std::fs::copy(config_path, &backup)
+            .map_err(|_| "备份 data/.config.yaml.bak 失败，未做修改".to_owned())?;
         Some(backup)
     } else {
         None
@@ -356,14 +401,17 @@ pub fn write(config_path: &Path, edits: &Edits) -> Result<WriteOutcome, String> 
         "替换 data/.config.yaml 失败".to_owned()
     })?;
     // 写入后从磁盘重新读取并解析一次
-    let reread = std::fs::read_to_string(config_path).map_err(|_| "写入后无法重新读取配置".to_owned())?;
-    serde_yaml::from_str::<serde_yaml::Value>(&reread).map_err(|_| "写入后的配置无法解析，请用 .bak 恢复".to_owned())?;
-    let mut changed_keys: Vec<String> = edits
-        .iter()
-        .map(|(path, _)| path.join("."))
-        .collect();
+    let reread =
+        std::fs::read_to_string(config_path).map_err(|_| "写入后无法重新读取配置".to_owned())?;
+    serde_yaml::from_str::<serde_yaml::Value>(&reread)
+        .map_err(|_| "写入后的配置无法解析，请用 .bak 恢复".to_owned())?;
+    let mut changed_keys: Vec<String> = edits.iter().map(|(path, _)| path.join(".")).collect();
     changed_keys.dedup();
-    Ok(WriteOutcome { created: existing.is_none(), backup, changed_keys })
+    Ok(WriteOutcome {
+        created: existing.is_none(),
+        backup,
+        changed_keys,
+    })
 }
 
 #[cfg(test)]
@@ -387,26 +435,63 @@ mod tests {
 
     fn get(text: &str, path: &[&str]) -> serde_yaml::Value {
         let value: serde_yaml::Value = serde_yaml::from_str(text).unwrap();
-        lookup(&value, &path.iter().map(|p| p.to_string()).collect::<Vec<_>>()).cloned().unwrap_or(serde_yaml::Value::Null)
+        lookup(
+            &value,
+            &path.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+        )
+        .cloned()
+        .unwrap_or(serde_yaml::Value::Null)
     }
 
     #[test]
     fn llm_only_update_keeps_comments_other_modules_and_extra_fields() {
-        let llm = resolved(Section::Llm, "https://new.example/v1/", "sk-new-llm-key", "new-model");
+        let llm = resolved(
+            Section::Llm,
+            "https://new.example/v1/",
+            "sk-new-llm-key",
+            "new-model",
+        );
         let text = apply(SAMPLE, &edits_for(&[llm], None)).unwrap();
         assert!(text.contains("# 自定义配置：只写需要覆盖的项"));
         assert!(text.contains("port: 8000 # 服务端口"));
         assert!(text.contains("# 大模型"));
-        assert_eq!(get(&text, &["LLM", "MossLLM", "url"]).as_str(), Some("https://new.example/v1"));
-        assert_eq!(get(&text, &["LLM", "MossLLM", "api_key"]).as_str(), Some("sk-new-llm-key"));
-        assert_eq!(get(&text, &["LLM", "MossLLM", "model_name"]).as_str(), Some("new-model"));
-        assert_eq!(get(&text, &["LLM", "MossLLM", "temperature"]).as_f64(), Some(0.7));
-        assert_eq!(get(&text, &["LLM", "ChatGLMLLM", "api_key"]).as_str(), Some("old-glm-key"));
-        assert_eq!(get(&text, &["selected_module", "LLM"]).as_str(), Some("MossLLM"));
-        assert_eq!(get(&text, &["selected_module", "Intent"]).as_str(), Some("function_call"));
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "url"]).as_str(),
+            Some("https://new.example/v1")
+        );
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "api_key"]).as_str(),
+            Some("sk-new-llm-key")
+        );
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "model_name"]).as_str(),
+            Some("new-model")
+        );
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "temperature"]).as_f64(),
+            Some(0.7)
+        );
+        assert_eq!(
+            get(&text, &["LLM", "ChatGLMLLM", "api_key"]).as_str(),
+            Some("old-glm-key")
+        );
+        assert_eq!(
+            get(&text, &["selected_module", "LLM"]).as_str(),
+            Some("MossLLM")
+        );
+        assert_eq!(
+            get(&text, &["selected_module", "Intent"]).as_str(),
+            Some("function_call")
+        );
         // 留空的分区不改
-        assert_eq!(get(&text, &["selected_module", "ASR"]).as_str(), Some("FunASR"));
-        assert_eq!(get(&text, &["prompt"]).as_str(), Some("你是小智。\n请简短回答。\n"));
+        assert_eq!(
+            get(&text, &["selected_module", "ASR"]).as_str(),
+            Some("FunASR")
+        );
+        assert_eq!(
+            get(&text, &["prompt"]).as_str(),
+            Some("你是小智。\n请简短回答。\n")
+        );
         assert!(!text.contains("sk-old-llm-key"));
     }
 
@@ -414,8 +499,14 @@ mod tests {
     fn blank_key_keeps_existing_key() {
         let llm = resolved(Section::Llm, "https://new.example/v1", "", "m2");
         let text = apply(SAMPLE, &edits_for(&[llm], None)).unwrap();
-        assert_eq!(get(&text, &["LLM", "MossLLM", "api_key"]).as_str(), Some("sk-old-llm-key"));
-        assert_eq!(get(&text, &["LLM", "MossLLM", "model_name"]).as_str(), Some("m2"));
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "api_key"]).as_str(),
+            Some("sk-old-llm-key")
+        );
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "model_name"]).as_str(),
+            Some("m2")
+        );
     }
 
     #[test]
@@ -425,29 +516,65 @@ mod tests {
             resolved(Section::Asr, "https://h/v1", "k2", "whisper-1"),
             resolved(Section::Tts, "https://h/v1", "k3", "tts-1"),
         ];
-        let edits = edits_for(&sections, Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=t"));
+        let edits = edits_for(
+            &sections,
+            Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=t"),
+        );
         for original in ["", SAMPLE, "server:\n    port: 8000\nASR: {}\n"] {
             let text = apply(original, &edits).unwrap();
-            assert_eq!(get(&text, &["ASR", "MossASR", "base_url"]).as_str(), Some("https://h/v1/audio/transcriptions"));
-            assert_eq!(get(&text, &["ASR", "MossASR", "output_dir"]).as_str(), Some("tmp/"));
-            assert_eq!(get(&text, &["TTS", "MossTTS", "api_url"]).as_str(), Some("https://h/v1/audio/speech"));
-            assert_eq!(get(&text, &["TTS", "MossTTS", "model"]).as_str(), Some("tts-1"));
-            assert_eq!(get(&text, &["TTS", "MossTTS", "voice"]).as_str(), Some("alloy"));
-            assert_eq!(get(&text, &["TTS", "MossTTS", "speed"]).as_f64(), Some(1.25));
-            assert_eq!(get(&text, &["selected_module", "TTS"]).as_str(), Some("MossTTS"));
-            assert_eq!(get(&text, &["mcp_endpoint"]).as_str(), Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=t"));
+            assert_eq!(
+                get(&text, &["ASR", "MossASR", "base_url"]).as_str(),
+                Some("https://h/v1/audio/transcriptions")
+            );
+            assert_eq!(
+                get(&text, &["ASR", "MossASR", "output_dir"]).as_str(),
+                Some("tmp/")
+            );
+            assert_eq!(
+                get(&text, &["TTS", "MossTTS", "api_url"]).as_str(),
+                Some("https://h/v1/audio/speech")
+            );
+            assert_eq!(
+                get(&text, &["TTS", "MossTTS", "model"]).as_str(),
+                Some("tts-1")
+            );
+            assert_eq!(
+                get(&text, &["TTS", "MossTTS", "voice"]).as_str(),
+                Some("alloy")
+            );
+            assert_eq!(
+                get(&text, &["TTS", "MossTTS", "speed"]).as_f64(),
+                Some(1.25)
+            );
+            assert_eq!(
+                get(&text, &["selected_module", "TTS"]).as_str(),
+                Some("MossTTS")
+            );
+            assert_eq!(
+                get(&text, &["mcp_endpoint"]).as_str(),
+                Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=t")
+            );
         }
         // 四空格缩进的文件沿用四空格
         let text = apply("server:\n    port: 8000\n", &edits).unwrap();
-        assert!(text.contains("\n    MossLLM:\n        type: \"openai\""), "{text}");
+        assert!(
+            text.contains("\n    MossLLM:\n        type: \"openai\""),
+            "{text}"
+        );
     }
 
     #[test]
     fn special_characters_are_quoted_safely() {
         let llm = resolved(Section::Llm, "https://h/v1", "k:#\"'\\ x", "m: #1");
         let text = apply("", &edits_for(&[llm], None)).unwrap();
-        assert_eq!(get(&text, &["LLM", "MossLLM", "api_key"]).as_str(), Some("k:#\"'\\ x"));
-        assert_eq!(get(&text, &["LLM", "MossLLM", "model_name"]).as_str(), Some("m: #1"));
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "api_key"]).as_str(),
+            Some("k:#\"'\\ x")
+        );
+        assert_eq!(
+            get(&text, &["LLM", "MossLLM", "model_name"]).as_str(),
+            Some("m: #1")
+        );
     }
 
     #[test]
@@ -458,8 +585,16 @@ mod tests {
         assert!(is_full_module(full));
         assert!(apply(full, &edits).unwrap_err().contains("智控台"));
         assert!(!is_full_module("manager-api:\n  url: \"\"\n"));
-        assert!(apply("a: [1, 2\n", &edits).unwrap_err().contains("无法解析"));
-        assert!(apply("LLM: {MossLLM: {url: x}}\n", &edits).unwrap_err().contains("单行"));
+        assert!(
+            apply("a: [1, 2\n", &edits)
+                .unwrap_err()
+                .contains("无法解析")
+        );
+        assert!(
+            apply("LLM: {MossLLM: {url: x}}\n", &edits)
+                .unwrap_err()
+                .contains("单行")
+        );
     }
 
     #[test]
@@ -471,7 +606,11 @@ mod tests {
         assert!(outcome.created);
         assert_eq!(outcome.backup, None);
         let first = std::fs::read_to_string(&config).unwrap();
-        let outcome = write(&config, &edits_for(&[resolved(Section::Llm, "https://h2/v1", "", "m2")], None)).unwrap();
+        let outcome = write(
+            &config,
+            &edits_for(&[resolved(Section::Llm, "https://h2/v1", "", "m2")], None),
+        )
+        .unwrap();
         assert!(!outcome.created);
         let backup = outcome.backup.unwrap();
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), first);
@@ -479,10 +618,17 @@ mod tests {
         assert!(second.contains("sk-fake-write"), "空密钥保留原值");
         assert!(second.contains("https://h2/v1"));
         assert!(!dir.path().join("data").join(".config.yaml.tmp").exists());
-        assert!(!serde_json::to_string(&outcome.changed_keys).unwrap().contains("sk-fake"));
+        assert!(
+            !serde_json::to_string(&outcome.changed_keys)
+                .unwrap()
+                .contains("sk-fake")
+        );
         // 全模块部署：文件不变
         std::fs::write(&config, "manager-api:\n  url: http://x/xiaozhi\n").unwrap();
         assert!(write(&config, &edits_for(&[llm], None)).is_err());
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), "manager-api:\n  url: http://x/xiaozhi\n");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "manager-api:\n  url: http://x/xiaozhi\n"
+        );
     }
 }

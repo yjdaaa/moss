@@ -190,7 +190,9 @@ fn personal_context_bridges_vision_photos_per_speaker_and_runs_nv19_extraction_o
             let dev = TrustedScope::device_grant(&context.device_id, 1).ok()?;
             let p = person.and_then(|s| TrustedScope::calibrated_person(s).ok());
             Some((
-                AccessContext::voice(dev, p, None).ok()?.with_personal_mode(true),
+                AccessContext::voice(dev, p, None)
+                    .ok()?
+                    .with_personal_mode(true),
                 Applicability::new("MOSS-550W", Some("1.2.0")).ok(),
             ))
         }
@@ -284,9 +286,18 @@ fn personal_context_bridges_vision_photos_per_speaker_and_runs_nv19_extraction_o
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        assert!(flatten(0).contains("木板纹理怎么样"), "第 1 轮说话人 a 应看到视觉照片");
-        assert!(!flatten(1).contains("木板纹理怎么样"), "第 2 轮说话人 b 严禁看到 a 的照片");
-        assert!(flatten(2).contains("木板纹理怎么样"), "第 3 轮说话人 a 追问时照片仍在其个人历史中");
+        assert!(
+            flatten(0).contains("木板纹理怎么样"),
+            "第 1 轮说话人 a 应看到视觉照片"
+        );
+        assert!(
+            !flatten(1).contains("木板纹理怎么样"),
+            "第 2 轮说话人 b 严禁看到 a 的照片"
+        );
+        assert!(
+            flatten(2).contains("木板纹理怎么样"),
+            "第 3 轮说话人 a 追问时照片仍在其个人历史中"
+        );
     }
 
     // 正常说退出词关闭会话，触发按人摘要与 NV19 结构化自动提取
@@ -384,7 +395,11 @@ fn short_and_overlong_utterances_fail_closed_without_leaking_or_wiping_verified_
     speak_manual(&mut device, 1, 2100);
     let _ = collect_items(&mut device);
 
-    assert_eq!(resolver.calls.load(Ordering::SeqCst), 3, "<2s 与 >10s 语句不应调用声纹提取器");
+    assert_eq!(
+        resolver.calls.load(Ordering::SeqCst),
+        3,
+        "<2s 与 >10s 语句不应调用声纹提取器"
+    );
     let seen = llm.seen.lock().unwrap();
     assert_eq!(seen.len(), 5);
     let flatten = |idx: usize| -> String {

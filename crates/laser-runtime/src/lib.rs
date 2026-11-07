@@ -1,26 +1,29 @@
 pub mod agent_store;
-pub mod firmware_store;
 pub mod config;
 pub mod context_store;
-pub mod knowledge_store;
 pub mod db;
+pub mod firmware_store;
 mod home_secret;
+pub mod knowledge_store;
 pub mod migration;
 pub mod root;
 pub mod store;
 
 pub use agent_store::AgentRunRecord;
-pub use firmware_store::{FirmwareArtifactRow, FirmwareOfferRow};
-pub use context_store::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow};
-pub use knowledge_store::{KnowledgeChunkHitRow, KnowledgeChunkRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow};
 pub use config::LaserSettings;
+pub use context_store::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow};
 pub use db::{
-    MaterialConflictPolicy, RuntimeDb, SCHEMA_VERSION, SchemaError, VOICE_DEVICE_ALLOWED, VOICE_DEVICE_PENDING,
-    VOICE_DEVICE_REVOKED, VoiceDeviceRecord, VoiceMemoryRecord,
+    MaterialConflictPolicy, RuntimeDb, SCHEMA_VERSION, SchemaError, VOICE_DEVICE_ALLOWED,
+    VOICE_DEVICE_PENDING, VOICE_DEVICE_REVOKED, VoiceDeviceRecord, VoiceMemoryRecord,
+};
+pub use firmware_store::{FirmwareArtifactRow, FirmwareOfferRow};
+pub use knowledge_store::{
+    KnowledgeChunkHitRow, KnowledgeChunkRow, KnowledgeDirRow, KnowledgeFileRow, KnowledgeRootRow,
 };
 pub use migration::{
     ConflictPolicy, MigrationCounts, MigrationError, MigrationOptions, MigrationReport,
-    normalize_material_version, remap_path, remap_path_to, run_migration, scan_uploads, sha256_file,
+    normalize_material_version, remap_path, remap_path_to, run_migration, scan_uploads,
+    sha256_file,
 };
 pub use root::{RuntimeRoot, RuntimeRootError};
 pub use store::{MemoryStore, RecordKind, RuntimeStore, SqliteStore, StoredRecord};
@@ -70,9 +73,15 @@ mod tests {
         let db = RuntimeDb::open_memory().unwrap();
         assert_eq!(db.get_secret("jev_api_key").unwrap(), None);
         db.set_secret("jev_api_key", "sk-test-123", 10.0).unwrap();
-        assert_eq!(db.get_secret("jev_api_key").unwrap().as_deref(), Some("sk-test-123"));
+        assert_eq!(
+            db.get_secret("jev_api_key").unwrap().as_deref(),
+            Some("sk-test-123")
+        );
         db.set_secret("jev_api_key", "sk-test-456", 11.0).unwrap();
-        assert_eq!(db.get_secret("jev_api_key").unwrap().as_deref(), Some("sk-test-456"));
+        assert_eq!(
+            db.get_secret("jev_api_key").unwrap().as_deref(),
+            Some("sk-test-456")
+        );
         assert!(db.delete_secret("jev_api_key").unwrap());
         assert_eq!(db.get_secret("jev_api_key").unwrap(), None);
         assert!(!db.delete_secret("jev_api_key").unwrap());
@@ -96,19 +105,31 @@ mod tests {
     #[test]
     fn restart_recovery_fails_running_and_pending_jobs() {
         let db = RuntimeDb::open_memory().unwrap();
-        db.connection.execute(
-            "INSERT INTO jobs(job_id,status,created_at,payload) VALUES
+        db.connection
+            .execute(
+                "INSERT INTO jobs(job_id,status,created_at,payload) VALUES
              ('running-job','running',unixepoch(),'{}'),
              ('pending-job','pending',unixepoch(),'{}')",
-            [],
-        ).unwrap();
+                [],
+            )
+            .unwrap();
         assert_eq!(db.recover_after_restart().unwrap(), 2);
-        let running: String = db.connection.query_row(
-            "SELECT status FROM jobs WHERE job_id='running-job'", [], |row| row.get(0)
-        ).unwrap();
-        let pending: String = db.connection.query_row(
-            "SELECT status FROM jobs WHERE job_id='pending-job'", [], |row| row.get(0)
-        ).unwrap();
+        let running: String = db
+            .connection
+            .query_row(
+                "SELECT status FROM jobs WHERE job_id='running-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let pending: String = db
+            .connection
+            .query_row(
+                "SELECT status FROM jobs WHERE job_id='pending-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(running, "failed");
         assert_eq!(pending, "failed");
     }
@@ -131,18 +152,31 @@ mod tests {
         let read = |table: &str, key: &str, id: &str| -> (String, serde_json::Value) {
             let status: String = db
                 .connection
-                .query_row(&format!("SELECT status FROM {table} WHERE {key}=?1"), [id], |row| row.get(0))
+                .query_row(
+                    &format!("SELECT status FROM {table} WHERE {key}=?1"),
+                    [id],
+                    |row| row.get(0),
+                )
                 .unwrap();
             (status, db.read_payload(table, key, id).unwrap().unwrap())
         };
-        for (table, key, id) in [("workflows", "workflow_id", "wf-sending"), ("calibrations", "calibration_id", "cal-sending")] {
+        for (table, key, id) in [
+            ("workflows", "workflow_id", "wf-sending"),
+            ("calibrations", "calibration_id", "cal-sending"),
+        ] {
             let (status, payload) = read(table, key, id);
             assert_eq!(status, "failed", "{id}");
             assert_eq!(payload["status"], "failed", "{id}");
             assert_eq!(payload["detail"], "host 重启中断，任务安全终止", "{id}");
         }
-        assert_eq!(read("workflows", "workflow_id", "wf-done").1["status"], "completed");
-        assert_eq!(read("calibrations", "calibration_id", "cal-prepared").1["status"], "prepared");
+        assert_eq!(
+            read("workflows", "workflow_id", "wf-done").1["status"],
+            "completed"
+        );
+        assert_eq!(
+            read("calibrations", "calibration_id", "cal-prepared").1["status"],
+            "prepared"
+        );
     }
 
     #[test]
@@ -284,18 +318,37 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         let columns = table_columns(&db, "approvals");
         for column in [
-            "approval_id", "status", "kind", "target_record", "digest", "summary", "source",
-            "session_id", "request_id", "connection", "created_at", "decided_at", "expires_at",
-            "updated_at", "outcome",
+            "approval_id",
+            "status",
+            "kind",
+            "target_record",
+            "digest",
+            "summary",
+            "source",
+            "session_id",
+            "request_id",
+            "connection",
+            "created_at",
+            "decided_at",
+            "expires_at",
+            "updated_at",
+            "outcome",
         ] {
-            assert!(columns.iter().any(|c| c == column), "approvals 缺少列 {column}: {columns:?}");
+            assert!(
+                columns.iter().any(|c| c == column),
+                "approvals 缺少列 {column}: {columns:?}"
+            );
         }
         db.migrate().unwrap();
         db.migrate().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         let rows: i64 = db
             .connection
-            .query_row("SELECT COUNT(*) FROM schema_version WHERE version=4", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version=4",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(rows, 1);
         let materials: i64 = db
@@ -330,12 +383,21 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
         assert!(db.migrate().is_err());
         assert_eq!(db.schema_version().unwrap(), 3, "失败的迁移不得写入版本号");
-        assert_eq!(table_columns(&db, "approvals"), vec!["unexpected".to_string()]);
+        assert_eq!(
+            table_columns(&db, "approvals"),
+            vec!["unexpected".to_string()]
+        );
 
-        db.connection.execute_batch("DROP TABLE approvals;").unwrap();
+        db.connection
+            .execute_batch("DROP TABLE approvals;")
+            .unwrap();
         db.migrate().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-        assert!(table_columns(&db, "approvals").iter().any(|c| c == "connection"));
+        assert!(
+            table_columns(&db, "approvals")
+                .iter()
+                .any(|c| c == "connection")
+        );
     }
 
     /// A-41：迁移只执行 `current < N` 的步骤、不拒绝更高版本，
@@ -344,7 +406,10 @@ mod tests {
     fn newer_schema_is_opened_without_changes() {
         let db = RuntimeDb::open_memory().unwrap();
         db.connection
-            .execute("INSERT INTO schema_version(version, applied_at) VALUES(?1, unixepoch())", [SCHEMA_VERSION + 1])
+            .execute(
+                "INSERT INTO schema_version(version, applied_at) VALUES(?1, unixepoch())",
+                [SCHEMA_VERSION + 1],
+            )
             .unwrap();
         db.migrate().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION + 1);
@@ -360,31 +425,60 @@ mod tests {
     fn voice_devices_registration_and_client_change() {
         let db = RuntimeDb::open_memory().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-        let record = db.voice_device_seen("aa:bb", "uuid-1", "lichuang-dev", "1.9.2", "192.0.2.10", 10.0).unwrap();
+        let record = db
+            .voice_device_seen(
+                "aa:bb",
+                "uuid-1",
+                "lichuang-dev",
+                "1.9.2",
+                "192.0.2.10",
+                10.0,
+            )
+            .unwrap();
         assert_eq!(record.status, VOICE_DEVICE_PENDING);
         assert!(!record.is_allowed());
-        assert!(db.set_voice_device_status("aa:bb", VOICE_DEVICE_ALLOWED, 11.0).unwrap());
-        let again = db.voice_device_seen("aa:bb", "uuid-1", "", "", "", 12.0).unwrap();
+        assert!(
+            db.set_voice_device_status("aa:bb", VOICE_DEVICE_ALLOWED, 11.0)
+                .unwrap()
+        );
+        let again = db
+            .voice_device_seen("aa:bb", "uuid-1", "", "", "", 12.0)
+            .unwrap();
         assert!(again.is_allowed());
         assert_eq!(again.model, "lichuang-dev", "空值不覆盖已记录的信息");
         assert_eq!(again.first_seen, 10.0);
         assert_eq!(again.last_seen, 12.0);
         // 同一 Device-Id 被其他 Client-Id 冒用：不修改绑定、授权或最近访问时间。
-        let changed = db.voice_device_seen("aa:bb", "uuid-other", "", "", "203.0.113.12", 13.0).unwrap();
+        let changed = db
+            .voice_device_seen("aa:bb", "uuid-other", "", "", "203.0.113.12", 13.0)
+            .unwrap();
         assert_eq!(changed.status, VOICE_DEVICE_ALLOWED);
         assert_eq!(changed.client_id, "uuid-1");
         assert_eq!(changed.last_seen, 12.0);
         assert_eq!(changed.last_ip, "192.0.2.10");
         // 撤销后再次来访仍是撤销
-        db.set_voice_device_status("aa:bb", VOICE_DEVICE_REVOKED, 14.0).unwrap();
-        let revoked = db.voice_device_seen("aa:bb", "uuid-x", "", "", "", 15.0).unwrap();
+        db.set_voice_device_status("aa:bb", VOICE_DEVICE_REVOKED, 14.0)
+            .unwrap();
+        let revoked = db
+            .voice_device_seen("aa:bb", "uuid-x", "", "", "", 15.0)
+            .unwrap();
         assert_eq!(revoked.status, VOICE_DEVICE_REVOKED);
         assert_eq!(revoked.client_id, "uuid-1");
         assert!(db.rename_voice_device("aa:bb", "  工作台小智  ").unwrap());
-        assert_eq!(db.voice_device("aa:bb").unwrap().unwrap().name, "工作台小智");
-        assert!(db.set_voice_device_status("aa:bb", "unknown", 16.0).is_err());
-        assert!(!db.set_voice_device_status("zz", VOICE_DEVICE_ALLOWED, 16.0).unwrap());
-        db.voice_device_seen("cc:dd", "uuid-2", "m", "1", "", 20.0).unwrap();
+        assert_eq!(
+            db.voice_device("aa:bb").unwrap().unwrap().name,
+            "工作台小智"
+        );
+        assert!(
+            db.set_voice_device_status("aa:bb", "unknown", 16.0)
+                .is_err()
+        );
+        assert!(
+            !db.set_voice_device_status("zz", VOICE_DEVICE_ALLOWED, 16.0)
+                .unwrap()
+        );
+        db.voice_device_seen("cc:dd", "uuid-2", "m", "1", "", 20.0)
+            .unwrap();
         let list = db.voice_devices().unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].device_id, "cc:dd", "最近来访的在前");
@@ -414,10 +508,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
-        assert!(!table_columns(&db, "approvals").iter().any(|c| c == "request"));
+        assert!(
+            !table_columns(&db, "approvals")
+                .iter()
+                .any(|c| c == "request")
+        );
         db.migrate().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
-        assert!(table_columns(&db, "approvals").iter().any(|c| c == "request"));
+        assert!(
+            table_columns(&db, "approvals")
+                .iter()
+                .any(|c| c == "request")
+        );
         let record = db.get_approval("apr_v4").unwrap().unwrap();
         assert_eq!(record.request, None);
         assert_eq!(record.kind, laser_contracts::ApprovalKind::Framing);
@@ -432,15 +534,32 @@ mod tests {
         assert_eq!((original.revision, original.summary.as_str()), (0, ""));
         let same = db.ensure_voice_memory("device-a", 11.0).unwrap();
         assert_eq!(same, original, "重复初始化不能清除旧记忆");
-        let updated = db.update_voice_memory_if_revision("device-a", 0, "喜欢喝茶", 12.0).unwrap().unwrap();
+        let updated = db
+            .update_voice_memory_if_revision("device-a", 0, "喜欢喝茶", 12.0)
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.revision, 1);
-        assert!(db.update_voice_memory_if_revision("device-a", 0, "过期总结", 13.0).unwrap().is_none());
-        let cleared = db.update_voice_memory_if_revision("device-a", 1, "", 14.0).unwrap().unwrap();
+        assert!(
+            db.update_voice_memory_if_revision("device-a", 0, "过期总结", 13.0)
+                .unwrap()
+                .is_none()
+        );
+        let cleared = db
+            .update_voice_memory_if_revision("device-a", 1, "", 14.0)
+            .unwrap()
+            .unwrap();
         assert_eq!((cleared.revision, cleared.summary.as_str()), (2, ""));
-        assert!(db.update_voice_memory_if_revision("device-a", 1, "应被拒绝", 15.0).unwrap().is_none());
+        assert!(
+            db.update_voice_memory_if_revision("device-a", 1, "应被拒绝", 15.0)
+                .unwrap()
+                .is_none()
+        );
         assert!(db.voice_memory("device-b").unwrap().is_none());
         assert_eq!(db.voice_memories().unwrap().len(), 1);
-        assert!(db.update_voice_memory_if_revision("device-a", 2, &"记".repeat(1501), 16.0).is_err());
+        assert!(
+            db.update_voice_memory_if_revision("device-a", 2, &"记".repeat(1501), 16.0)
+                .is_err()
+        );
         db.migrate().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(db.voice_memory("device-a").unwrap().unwrap(), cleared);
@@ -453,8 +572,13 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 6);
         assert!(db.migrate().is_err());
         assert_eq!(db.schema_version().unwrap(), 6);
-        assert_eq!(table_columns(&db, "voice_memory"), vec!["unexpected".to_string()]);
-        db.connection.execute_batch("DROP TABLE voice_memory;").unwrap();
+        assert_eq!(
+            table_columns(&db, "voice_memory"),
+            vec!["unexpected".to_string()]
+        );
+        db.connection
+            .execute_batch("DROP TABLE voice_memory;")
+            .unwrap();
         db.migrate().unwrap();
         assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
     }
@@ -491,12 +615,18 @@ mod tests {
         assert_eq!(db.recent_audit(1).unwrap(), vec![blocked]);
         let raw: String = db
             .connection
-            .query_row("SELECT detail FROM audit_log WHERE id=?1", [second], |row| row.get(0))
+            .query_row(
+                "SELECT detail FROM audit_log WHERE id=?1",
+                [second],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(raw, "{}");
         let action: String = db
             .connection
-            .query_row("SELECT action FROM audit_log WHERE id=?1", [first], |row| row.get(0))
+            .query_row("SELECT action FROM audit_log WHERE id=?1", [first], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(action, "approval_created");
     }

@@ -67,7 +67,8 @@ pub fn format_float(value: f64) -> String {
     let negative = text.starts_with('-');
     let s = text.trim_start_matches('-');
 
-    let (digits, exponent): (String, i32) = if let Some(index) = s.find('e').or_else(|| s.find('E')) {
+    let (digits, exponent): (String, i32) = if let Some(index) = s.find('e').or_else(|| s.find('E'))
+    {
         let (mantissa, exp_str) = (&s[..index], &s[index + 1..]);
         let exp_val: i32 = exp_str.parse().expect("float exponent");
         let d = mantissa.replace('.', "");
@@ -102,11 +103,7 @@ pub fn format_float(value: f64) -> String {
         format!("{}.{}", &digits[..split], &digits[split..])
     };
 
-    if negative {
-        format!("-{body}")
-    } else {
-        body
-    }
+    if negative { format!("-{body}") } else { body }
 }
 
 pub fn uuid4_hex() -> String {

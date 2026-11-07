@@ -58,9 +58,15 @@ pub fn validate_endpoint(endpoint: &str, allow_private_http: bool) -> Result<Url
 }
 
 fn is_private_target(url: &Url) -> bool {
-    let Some(host) = url.host_str() else { return false };
-    if host.eq_ignore_ascii_case("localhost") { return true; }
-    let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() else { return false };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() else {
+        return false;
+    };
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
         std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
@@ -81,48 +87,89 @@ pub(super) fn client_builder() -> reqwest::blocking::ClientBuilder {
 
 pub fn read_bounded(mut response: Response) -> Result<Vec<u8>, FetchError> {
     let code = response.status().as_u16();
-    if code == 401 || code == 403 { return Err(FetchError::Unauthorized); }
-    if code == 429 { return Err(FetchError::RateLimited); }
+    if code == 401 || code == 403 {
+        return Err(FetchError::Unauthorized);
+    }
+    if code == 429 {
+        return Err(FetchError::RateLimited);
+    }
     // Tavily uses these statuses for plan/pay-as-you-go quota exhaustion.
     // Retrying the same billable query cannot restore quota.
-    if code == 432 || code == 433 { return Err(FetchError::QuotaExceeded); }
-    if !(200..300).contains(&code) { return Err(FetchError::Network); }
-    if response.content_length().is_some_and(|n| n > MAX_BODY_BYTES as u64) {
+    if code == 432 || code == 433 {
+        return Err(FetchError::QuotaExceeded);
+    }
+    if !(200..300).contains(&code) {
+        return Err(FetchError::Network);
+    }
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_BODY_BYTES as u64)
+    {
         return Err(FetchError::ResponseTooLarge);
     }
     let mut limited = Vec::new();
-    response.by_ref().take(MAX_BODY_BYTES as u64 + 1)
-        .read_to_end(&mut limited).map_err(|error| {
+    response
+        .by_ref()
+        .take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut limited)
+        .map_err(|error| {
             if error.kind() == std::io::ErrorKind::TimedOut
-                || error.get_ref().and_then(|inner| inner.downcast_ref::<reqwest::Error>()).is_some_and(|inner| inner.is_timeout()) {
+                || error
+                    .get_ref()
+                    .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+                    .is_some_and(|inner| inner.is_timeout())
+            {
                 FetchError::Timeout
-            } else { FetchError::Network }
+            } else {
+                FetchError::Network
+            }
         })?;
-    if limited.len() > MAX_BODY_BYTES { return Err(FetchError::ResponseTooLarge); }
+    if limited.len() > MAX_BODY_BYTES {
+        return Err(FetchError::ResponseTooLarge);
+    }
     Ok(limited)
 }
 
 pub fn request_json(
-    client: &Client, method: Method, url: &Url, token: Option<(&str, &str)>, body: Option<Value>,
+    client: &Client,
+    method: Method,
+    url: &Url,
+    token: Option<(&str, &str)>,
+    body: Option<Value>,
 ) -> Result<Value, FetchError> {
     let request = build_json_request(client, method, url, token, body)?;
     send_json(client, request)
 }
 
 pub(crate) fn build_json_request(
-    client: &Client, method: Method, url: &Url, token: Option<(&str, &str)>, body: Option<Value>,
+    client: &Client,
+    method: Method,
+    url: &Url,
+    token: Option<(&str, &str)>,
+    body: Option<Value>,
 ) -> Result<reqwest::blocking::Request, FetchError> {
-    let mut request = client.request(method, url.clone()).header(CONTENT_TYPE, "application/json");
+    let mut request = client
+        .request(method, url.clone())
+        .header(CONTENT_TYPE, "application/json");
     if let Some((header, secret)) = token {
         request = request.header(header, secret);
     }
-    if let Some(body) = body { request = request.json(&body); }
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
     request.build().map_err(|_| FetchError::InvalidResponse)
 }
 
-pub(crate) fn send_json(client: &Client, request: reqwest::blocking::Request) -> Result<Value, FetchError> {
+pub(crate) fn send_json(
+    client: &Client,
+    request: reqwest::blocking::Request,
+) -> Result<Value, FetchError> {
     let response = client.execute(request).map_err(|e| {
-        if e.is_timeout() { FetchError::Timeout } else { FetchError::Network }
+        if e.is_timeout() {
+            FetchError::Timeout
+        } else {
+            FetchError::Network
+        }
     })?;
     serde_json::from_slice(&read_bounded(response)?).map_err(|_| FetchError::InvalidResponse)
 }
@@ -132,14 +179,22 @@ pub fn trim_result(data: Value) -> (Value, bool) {
     let count = serialized.chars().count();
     // Leave room for the outer result envelope.
     const MAX_DATA_CHARS: usize = MAX_REPLY_CHARS - 320;
-    if count <= MAX_DATA_CHARS { return (data, false); }
+    if count <= MAX_DATA_CHARS {
+        return (data, false);
+    }
     // Budget the JSON-escaped output, not the unescaped string. Quotes, slashes
     // and control characters otherwise multiply its size after serialization.
     let mut summary = String::new();
     let mut remaining = MAX_DATA_CHARS.saturating_sub(80);
     for ch in serialized.chars() {
-        let cost = serde_json::to_string(&ch.to_string()).unwrap().chars().count() - 2;
-        if cost > remaining { break; }
+        let cost = serde_json::to_string(&ch.to_string())
+            .unwrap()
+            .chars()
+            .count()
+            - 2;
+        if cost > remaining {
+            break;
+        }
         remaining -= cost;
         summary.push(ch);
     }
@@ -171,41 +226,62 @@ mod tests {
         assert!(!truncated);
     }
     fn fake_http(status: &str, body: &str, extra_headers: &str) -> Result<Vec<u8>, FetchError> {
-        use std::io::{Read,Write};
-        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port=listener.local_addr().unwrap().port();
-        let status=status.to_owned();
-        let body=body.to_owned();
-        let extra=extra_headers.to_owned();
-        let server=std::thread::spawn(move || {
-            let (mut stream,_) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            let mut incoming=[0u8;1024];
-            let _=stream.read(&mut incoming);
-            let response=format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",body.len());
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let status = status.to_owned();
+        let body = body.to_owned();
+        let extra = extra_headers.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut incoming = [0u8; 1024];
+            let _ = stream.read(&mut incoming);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",
+                body.len()
+            );
             // 客户端按 Content-Length 超限拒收时会立即断开；macOS 的 socket 缓冲较小，
             // 剩余写入会收到 ECONNRESET。客户端提前断开正是被测行为，模拟服务器不得因此 panic。
             let _ = stream.write_all(response.as_bytes());
         });
-        let target=format!("http://127.0.0.1:{port}/");
-        let response=client().unwrap().get(target).send().unwrap();
-        let result=read_bounded(response);
+        let target = format!("http://127.0.0.1:{port}/");
+        let response = client().unwrap().get(target).send().unwrap();
+        let result = read_bounded(response);
         server.join().unwrap();
         result
     }
 
     #[test]
     fn loopback_mock_enforces_http_error_mapping_and_redirect_block() {
-        assert_eq!(fake_http("401 Unauthorized","secret","").unwrap_err(),FetchError::Unauthorized);
-        assert_eq!(fake_http("429 Too Many Requests","secret","").unwrap_err(),FetchError::RateLimited);
-        assert_eq!(fake_http("302 Found","","Location: http://example.org/leak\r\n").unwrap_err(),FetchError::Network);
-        assert_eq!(fake_http("200 OK","{}","").unwrap(),b"{}");
-        assert_eq!(fake_http("200 OK",&"x".repeat(MAX_BODY_BYTES+1),"").unwrap_err(),FetchError::ResponseTooLarge);
+        assert_eq!(
+            fake_http("401 Unauthorized", "secret", "").unwrap_err(),
+            FetchError::Unauthorized
+        );
+        assert_eq!(
+            fake_http("429 Too Many Requests", "secret", "").unwrap_err(),
+            FetchError::RateLimited
+        );
+        assert_eq!(
+            fake_http("302 Found", "", "Location: http://example.org/leak\r\n").unwrap_err(),
+            FetchError::Network
+        );
+        assert_eq!(fake_http("200 OK", "{}", "").unwrap(), b"{}");
+        assert_eq!(
+            fake_http("200 OK", &"x".repeat(MAX_BODY_BYTES + 1), "").unwrap_err(),
+            FetchError::ResponseTooLarge
+        );
     }
 
     #[test]
     fn errors_are_sanitized() {
-        for issue in [FetchError::Unauthorized, FetchError::RateLimited, FetchError::Timeout] {
+        for issue in [
+            FetchError::Unauthorized,
+            FetchError::RateLimited,
+            FetchError::Timeout,
+        ] {
             assert!(!issue.result().to_string().contains("sk-secret"));
         }
     }

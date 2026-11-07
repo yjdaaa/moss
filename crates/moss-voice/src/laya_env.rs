@@ -34,7 +34,8 @@ const PYPI_TUNA: &str = "https://pypi.tuna.tsinghua.edu.cn/simple";
 const TORCH_INDEX: &str = "https://download.pytorch.org/whl";
 
 /// 检查 Python 版本、`venv` 与 `ensurepip` 是否可用（Debian 未装 python3-venv 时缺 ensurepip，建不了虚拟环境）。
-const PYTHON_PROBE: &str = "import sys, venv, ensurepip; print('%d.%d' % sys.version_info[:2]); print(sys.executable)";
+const PYTHON_PROBE: &str =
+    "import sys, venv, ensurepip; print('%d.%d' % sys.version_info[:2]); print(sys.executable)";
 /// 安装后验证：PyTorch 可导入、laya.serve 与 uvicorn 存在，输出可用加速。
 const VERIFY_PROBE: &str = "import sys, importlib.util as u, torch\n\
 if u.find_spec('laya.serve') is None or u.find_spec('uvicorn') is None: sys.exit('laya[serve] 未安装完整')\n\
@@ -75,7 +76,10 @@ pub fn is_managed(venv: &Path) -> bool {
 
 /// 解析 [`PYTHON_PROBE`] 的输出：第一行版本，第二行解释器绝对路径。
 pub fn parse_python_probe(output: &str) -> Option<((u32, u32), PathBuf)> {
-    let mut lines = output.lines().map(str::trim).filter(|line| !line.is_empty());
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
     let version = lines.next()?;
     let (major, minor) = version.split_once('.')?;
     let version = (major.parse().ok()?, minor.parse().ok()?);
@@ -86,8 +90,13 @@ pub fn parse_python_probe(output: &str) -> Option<((u32, u32), PathBuf)> {
 /// 从 `nvidia-smi` 输出读驱动支持的最高 CUDA 版本（“CUDA Version: 12.4”）。
 pub fn parse_driver_cuda(output: &str) -> Option<(u32, u32)> {
     let rest = &output[output.find("CUDA Version")?..];
-    let rest = rest.trim_start_matches("CUDA Version").trim_start_matches([':', ' ']);
-    let token: String = rest.chars().take_while(|ch| ch.is_ascii_digit() || *ch == '.').collect();
+    let rest = rest
+        .trim_start_matches("CUDA Version")
+        .trim_start_matches([':', ' ']);
+    let token: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
     let (major, minor) = token.split_once('.')?;
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
@@ -96,7 +105,10 @@ pub fn parse_driver_cuda(output: &str) -> Option<(u32, u32)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TorchPlan {
     /// 从 PyTorch 官方 CUDA 索引安装（`tag` 如 `cu124`）
-    Cuda { tag: &'static str, version: (u32, u32) },
+    Cuda {
+        tag: &'static str,
+        version: (u32, u32),
+    },
     /// 从 PyTorch 官方 CPU 索引安装（Linux 无显卡时避免下载数 GB 的 CUDA 版）
     CpuIndex,
     /// 交给 `laya[serve]` 从 PyPI 拉取（macOS 带 MPS；Windows PyPI 版即 CPU 版）
@@ -106,9 +118,16 @@ pub enum TorchPlan {
 /// 按平台与驱动 CUDA 版本选择 PyTorch，返回方案与给用户看的说明。
 pub fn plan_torch(platform: Platform, driver_cuda: Option<(u32, u32)>) -> (TorchPlan, String) {
     if platform == Platform::MacOs {
-        return (TorchPlan::Pypi, "macOS 使用 Apple Metal（MPS）或 CPU 运行，不需要 CUDA".into());
+        return (
+            TorchPlan::Pypi,
+            "macOS 使用 Apple Metal（MPS）或 CPU 运行，不需要 CUDA".into(),
+        );
     }
-    let cpu = if platform == Platform::Linux { TorchPlan::CpuIndex } else { TorchPlan::Pypi };
+    let cpu = if platform == Platform::Linux {
+        TorchPlan::CpuIndex
+    } else {
+        TorchPlan::Pypi
+    };
     let Some(version) = driver_cuda else {
         return (
             cpu,
@@ -133,7 +152,10 @@ pub fn plan_torch(platform: Platform, driver_cuda: Option<(u32, u32)>) -> (Torch
     };
     (
         TorchPlan::Cuda { tag, version },
-        format!("检测到 NVIDIA 显卡（驱动支持 CUDA {}.{}），安装 {tag} 版 PyTorch（约 2.5 GB，CUDA 运行库随包安装，无需另装 CUDA Toolkit）", version.0, version.1),
+        format!(
+            "检测到 NVIDIA 显卡（驱动支持 CUDA {}.{}），安装 {tag} 版 PyTorch（约 2.5 GB，CUDA 运行库随包安装，无需另装 CUDA Toolkit）",
+            version.0, version.1
+        ),
     )
 }
 
@@ -147,24 +169,52 @@ pub struct PipStep {
 }
 
 fn pip_args(extra: &[&str]) -> Vec<String> {
-    ["-m", "pip", "install", "--no-cache-dir", "--disable-pip-version-check", "--progress-bar", "off", "--retries", "5", "--timeout", "60"]
-        .iter()
-        .chain(extra)
-        .map(|arg| (*arg).to_owned())
-        .collect()
+    [
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--disable-pip-version-check",
+        "--progress-bar",
+        "off",
+        "--retries",
+        "5",
+        "--timeout",
+        "60",
+    ]
+    .iter()
+    .chain(extra)
+    .map(|arg| (*arg).to_owned())
+    .collect()
 }
 
 /// 依次执行的 pip 步骤。`prefer_mirror` 为真（用户在模型下载地址填了国内镜像）时先用清华 PyPI 镜像。
 pub fn pip_steps(plan: &TorchPlan, prefer_mirror: bool) -> Vec<PipStep> {
-    let indexes = if prefer_mirror { [PYPI_TUNA, PYPI_OFFICIAL] } else { [PYPI_OFFICIAL, PYPI_TUNA] };
+    let indexes = if prefer_mirror {
+        [PYPI_TUNA, PYPI_OFFICIAL]
+    } else {
+        [PYPI_OFFICIAL, PYPI_TUNA]
+    };
     let mut steps = vec![PipStep {
         label: "升级 pip".into(),
-        attempts: indexes.iter().map(|index| pip_args(&["--upgrade", "pip", "-i", index])).collect(),
+        attempts: indexes
+            .iter()
+            .map(|index| pip_args(&["--upgrade", "pip", "-i", index]))
+            .collect(),
         fatal: false,
     }];
     let torch = match plan {
-        TorchPlan::Cuda { tag, version } => Some((format!("安装 PyTorch（CUDA {}.{} · {tag}，约 2.5 GB）", version.0, version.1), format!("{TORCH_INDEX}/{tag}"))),
-        TorchPlan::CpuIndex => Some(("安装 PyTorch（CPU 版）".to_owned(), format!("{TORCH_INDEX}/cpu"))),
+        TorchPlan::Cuda { tag, version } => Some((
+            format!(
+                "安装 PyTorch（CUDA {}.{} · {tag}，约 2.5 GB）",
+                version.0, version.1
+            ),
+            format!("{TORCH_INDEX}/{tag}"),
+        )),
+        TorchPlan::CpuIndex => Some((
+            "安装 PyTorch（CPU 版）".to_owned(),
+            format!("{TORCH_INDEX}/cpu"),
+        )),
         TorchPlan::Pypi => None,
     };
     if let Some((label, torch_index)) = torch {
@@ -173,14 +223,25 @@ pub fn pip_steps(plan: &TorchPlan, prefer_mirror: bool) -> Vec<PipStep> {
             // PyTorch 只从官方索引装（国内镜像不同步 CUDA 轮子）；依赖包走 PyPI
             attempts: indexes
                 .iter()
-                .map(|index| pip_args(&["torch", "--index-url", &torch_index, "--extra-index-url", index]))
+                .map(|index| {
+                    pip_args(&[
+                        "torch",
+                        "--index-url",
+                        &torch_index,
+                        "--extra-index-url",
+                        index,
+                    ])
+                })
                 .collect(),
             fatal: true,
         });
     }
     steps.push(PipStep {
         label: "安装 laya[serve]".into(),
-        attempts: indexes.iter().map(|index| pip_args(&["laya[serve]", "-i", index])).collect(),
+        attempts: indexes
+            .iter()
+            .map(|index| pip_args(&["laya[serve]", "-i", index]))
+            .collect(),
         fatal: true,
     });
     steps
@@ -203,11 +264,17 @@ pub struct PythonCandidate {
 /// 没有可用 Python 时给用户的说明。
 pub fn python_missing_message(platform: Platform) -> String {
     let how = match platform {
-        Platform::Windows => "请从 python.org 下载安装 Python 3.12（安装时勾选“Add python.exe to PATH”；微软商店版不支持）",
-        Platform::MacOs => "请从 python.org 下载安装 Python 3.12，或在终端执行 brew install python@3.12",
+        Platform::Windows => {
+            "请从 python.org 下载安装 Python 3.12（安装时勾选“Add python.exe to PATH”；微软商店版不支持）"
+        }
+        Platform::MacOs => {
+            "请从 python.org 下载安装 Python 3.12，或在终端执行 brew install python@3.12"
+        }
         Platform::Linux => "请用系统包管理器安装 python3（3.10 以上）与 python3-venv",
     };
-    format!("未检测到可用的 Python 3.10 或更高版本，MOSS 无法自动创建 Laya 运行环境。{how}，装好后回到这里点“准备运行环境”。也可以直接选用免 Python 的 OneJev 1.6。")
+    format!(
+        "未检测到可用的 Python 3.10 或更高版本，MOSS 无法自动创建 Laya 运行环境。{how}，装好后回到这里点“准备运行环境”。也可以直接选用免 Python 的 OneJev 1.6。"
+    )
 }
 
 /// 命令输出逐行回调。
@@ -219,7 +286,14 @@ pub trait SetupHost: Send + Sync {
     fn python_candidates(&self) -> Vec<PythonCandidate>;
     fn nvidia_smi(&self) -> Option<PathBuf>;
     /// 运行命令直到退出，返回 stdout；非零退出、超时或取消返回 `Err`（取消时为 `"已取消"`）。
-    fn run(&self, program: &Path, args: &[String], cancel: &AtomicBool, timeout: Option<Duration>, line: LineSink<'_>) -> Result<String, String>;
+    fn run(
+        &self,
+        program: &Path,
+        args: &[String],
+        cancel: &AtomicBool,
+        timeout: Option<Duration>,
+        line: LineSink<'_>,
+    ) -> Result<String, String>;
 }
 
 /// 准备状态（`voice_builtin_status().local.laya_setup`）。
@@ -235,8 +309,14 @@ pub enum SetupStatus {
         detail: Option<String>,
         elapsed_secs: u64,
     },
-    Done { summary: String, accelerator: String },
-    Failed { message: String, log: Vec<String> },
+    Done {
+        summary: String,
+        accelerator: String,
+    },
+    Failed {
+        message: String,
+        log: Vec<String>,
+    },
     Cancelled,
 }
 
@@ -265,19 +345,36 @@ impl LayaSetup {
     pub fn new(host: Arc<dyn SetupHost>) -> Self {
         Self {
             host,
-            inner: Arc::new(Mutex::new(Inner { status: SetupStatus::Idle, started: None, cancel: Arc::default(), worker: None })),
+            inner: Arc::new(Mutex::new(Inner {
+                status: SetupStatus::Idle,
+                started: None,
+                cancel: Arc::default(),
+                worker: None,
+            })),
         }
     }
 
     pub fn status(&self) -> SetupStatus {
-        let inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match &inner.status {
-            SetupStatus::Running { stage, step, steps, detail, .. } => SetupStatus::Running {
+            SetupStatus::Running {
+                stage,
+                step,
+                steps,
+                detail,
+                ..
+            } => SetupStatus::Running {
                 stage: stage.clone(),
                 step: *step,
                 steps: *steps,
                 detail: detail.clone(),
-                elapsed_secs: inner.started.map(|at| at.elapsed().as_secs()).unwrap_or_default(),
+                elapsed_secs: inner
+                    .started
+                    .map(|at| at.elapsed().as_secs())
+                    .unwrap_or_default(),
             },
             other => other.clone(),
         }
@@ -305,7 +402,13 @@ impl LayaSetup {
         let cancel = Arc::new(AtomicBool::new(false));
         inner.cancel = cancel.clone();
         inner.started = Some(Instant::now());
-        inner.status = SetupStatus::Running { stage: "准备开始".into(), step: 0, steps: STEPS, detail: None, elapsed_secs: 0 };
+        inner.status = SetupStatus::Running {
+            stage: "准备开始".into(),
+            step: 0,
+            steps: STEPS,
+            detail: None,
+            elapsed_secs: 0,
+        };
         let host = self.host.clone();
         let shared = self.inner.clone();
         let worker = std::thread::Builder::new()
@@ -315,7 +418,13 @@ impl LayaSetup {
                     if let Ok(mut inner) = shared.lock()
                         && matches!(inner.status, SetupStatus::Running { .. })
                     {
-                        inner.status = SetupStatus::Running { stage: stage.to_owned(), step, steps: STEPS, detail, elapsed_secs: 0 };
+                        inner.status = SetupStatus::Running {
+                            stage: stage.to_owned(),
+                            step,
+                            steps: STEPS,
+                            detail,
+                            elapsed_secs: 0,
+                        };
                     }
                 };
                 let mut log = VecDeque::new();
@@ -323,8 +432,14 @@ impl LayaSetup {
                 if let Ok(mut inner) = shared.lock() {
                     inner.status = match result {
                         _ if cancel.load(Ordering::SeqCst) => SetupStatus::Cancelled,
-                        Ok((summary, accelerator)) => SetupStatus::Done { summary, accelerator },
-                        Err(message) => SetupStatus::Failed { message, log: log.into_iter().collect() },
+                        Ok((summary, accelerator)) => SetupStatus::Done {
+                            summary,
+                            accelerator,
+                        },
+                        Err(message) => SetupStatus::Failed {
+                            message,
+                            log: log.into_iter().collect(),
+                        },
                     };
                 }
             })
@@ -346,7 +461,11 @@ impl LayaSetup {
     /// 取消并等后台线程结束（删除虚拟环境、退出程序前调用）。
     pub fn cancel_and_wait(&self) {
         self.cancel();
-        let worker = self.inner.lock().ok().and_then(|mut inner| inner.worker.take());
+        let worker = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|mut inner| inner.worker.take());
         if let Some(worker) = worker {
             let _ = worker.join();
         }
@@ -374,19 +493,41 @@ fn find_python(host: &dyn SetupHost, cancel: &AtomicBool) -> Result<PythonFound,
         if cancel.load(Ordering::SeqCst) {
             return Err("已取消".into());
         }
-        let args: Vec<String> = candidate.args.iter().cloned().chain(probe.iter().cloned()).collect();
-        let Ok(output) = host.run(&candidate.program, &args, cancel, Some(Duration::from_secs(15)), &mut |_| {}) else {
+        let args: Vec<String> = candidate
+            .args
+            .iter()
+            .cloned()
+            .chain(probe.iter().cloned())
+            .collect();
+        let Ok(output) = host.run(
+            &candidate.program,
+            &args,
+            cancel,
+            Some(Duration::from_secs(15)),
+            &mut |_| {},
+        ) else {
             continue;
         };
         if let Some((version, executable)) = parse_python_probe(&output)
             && version >= MIN_PYTHON
             && !found.iter().any(|item| item.executable == executable)
         {
-            found.push(PythonFound { version, executable });
+            found.push(PythonFound {
+                version,
+                executable,
+            });
         }
     }
-    let rank = |item: &PythonFound| PREFERRED_PYTHON.iter().position(|v| *v == item.version).unwrap_or(PREFERRED_PYTHON.len());
-    found.into_iter().min_by_key(rank).ok_or_else(|| python_missing_message(host.platform()))
+    let rank = |item: &PythonFound| {
+        PREFERRED_PYTHON
+            .iter()
+            .position(|v| *v == item.version)
+            .unwrap_or(PREFERRED_PYTHON.len())
+    };
+    found
+        .into_iter()
+        .min_by_key(rank)
+        .ok_or_else(|| python_missing_message(host.platform()))
 }
 
 fn run_setup(
@@ -405,7 +546,15 @@ fn run_setup(
         None
     } else {
         host.nvidia_smi().and_then(|smi| {
-            host.run(&smi, &[], cancel, Some(Duration::from_secs(15)), &mut |_| {}).ok().and_then(|out| parse_driver_cuda(&out))
+            host.run(
+                &smi,
+                &[],
+                cancel,
+                Some(Duration::from_secs(15)),
+                &mut |_| {},
+            )
+            .ok()
+            .and_then(|out| parse_driver_cuda(&out))
         })
     };
     let (plan, plan_note) = plan_torch(platform, driver_cuda);
@@ -413,28 +562,55 @@ fn run_setup(
         return Err("已取消".into());
     }
 
-    progress("创建 Python 虚拟环境", 3, Some(request.root.join(".venv").display().to_string()));
+    progress(
+        "创建 Python 虚拟环境",
+        3,
+        Some(request.root.join(".venv").display().to_string()),
+    );
     let venv = request.root.join(".venv");
     let venv_py = venv_python(&venv, platform);
     let probe_ok = |log: &mut VecDeque<String>| {
         venv_py.is_file()
             && host
-                .run(&venv_py, &["-c".into(), "import sys".into()], cancel, Some(Duration::from_secs(15)), &mut |line| remember(log, line))
+                .run(
+                    &venv_py,
+                    &["-c".into(), "import sys".into()],
+                    cancel,
+                    Some(Duration::from_secs(15)),
+                    &mut |line| remember(log, line),
+                )
                 .is_ok()
     };
     if !probe_ok(log) {
         if venv.exists() {
             if !is_managed(&venv) {
-                return Err(format!("{} 已存在但无法使用，且不是 MOSS 创建的，为避免误删请手动处理后重试", venv.display()));
+                return Err(format!(
+                    "{} 已存在但无法使用，且不是 MOSS 创建的，为避免误删请手动处理后重试",
+                    venv.display()
+                ));
             }
-            fs::remove_dir_all(&venv).map_err(|error| format!("清理损坏的虚拟环境失败：{error}"))?;
+            fs::remove_dir_all(&venv)
+                .map_err(|error| format!("清理损坏的虚拟环境失败：{error}"))?;
         }
         fs::create_dir_all(&request.root).map_err(|error| format!("创建目录失败：{error}"))?;
-        let args = vec!["-m".to_owned(), "venv".to_owned(), venv.display().to_string()];
-        host.run(&python.executable, &args, cancel, Some(Duration::from_secs(300)), &mut |line| remember(log, line))
-            .map_err(|error| format!("创建虚拟环境失败：{error}"))?;
-        fs::write(venv.join(MANAGED_MARKER), b"created by MOSS for Laya; removed together with the Laya model\n")
-            .map_err(|error| format!("写入虚拟环境标记失败：{error}"))?;
+        let args = vec![
+            "-m".to_owned(),
+            "venv".to_owned(),
+            venv.display().to_string(),
+        ];
+        host.run(
+            &python.executable,
+            &args,
+            cancel,
+            Some(Duration::from_secs(300)),
+            &mut |line| remember(log, line),
+        )
+        .map_err(|error| format!("创建虚拟环境失败：{error}"))?;
+        fs::write(
+            venv.join(MANAGED_MARKER),
+            b"created by MOSS for Laya; removed together with the Laya model\n",
+        )
+        .map_err(|error| format!("写入虚拟环境标记失败：{error}"))?;
         if !venv_py.is_file() {
             return Err(format!("虚拟环境已创建，但找不到 {}", venv_py.display()));
         }
@@ -471,14 +647,23 @@ fn run_setup(
                 return Err("已取消".into());
             }
             if step.fatal {
-                return Err(format!("{}失败：{error}（可检查网络，或在“模型下载地址”填国内镜像后重试）", step.label));
+                return Err(format!(
+                    "{}失败：{error}（可检查网络，或在“模型下载地址”填国内镜像后重试）",
+                    step.label
+                ));
             }
         }
     }
 
     progress("验证运行环境", STEPS, None);
     let accelerator = host
-        .run(&venv_py, &["-c".into(), VERIFY_PROBE.into()], cancel, Some(Duration::from_secs(180)), &mut |line| remember(log, line))
+        .run(
+            &venv_py,
+            &["-c".into(), VERIFY_PROBE.into()],
+            cancel,
+            Some(Duration::from_secs(180)),
+            &mut |line| remember(log, line),
+        )
         .map_err(|error| format!("安装完成但验证失败：{error}"))?
         .trim()
         .to_owned();
@@ -494,7 +679,9 @@ fn run_setup(
         python.version.1
     );
     if matches!(plan, TorchPlan::Cuda { .. }) && accelerator != "cuda" {
-        summary.push_str("已安装 CUDA 版 PyTorch，但当前检测不到可用显卡（驱动异常或被占用），暂按 CPU 运行。");
+        summary.push_str(
+            "已安装 CUDA 版 PyTorch，但当前检测不到可用显卡（驱动异常或被占用），暂按 CPU 运行。",
+        );
     }
     Ok((summary, accelerator))
 }
@@ -503,19 +690,31 @@ fn run_setup(
 pub struct SystemHost;
 
 fn path_dirs() -> Vec<PathBuf> {
-    std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default()
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default()
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute())
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 /// Windows 下按版本号倒序列出 `<dir>/Python3XX/python.exe`。
 fn windows_python_dirs(base: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(base) else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(base) else {
+        return Vec::new();
+    };
     let mut found: Vec<PathBuf> = entries
         .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase().starts_with("python3"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("python3")
+        })
         .map(|entry| entry.path().join("python.exe"))
         .filter(|exe| exe.is_file())
         .collect();
@@ -532,19 +731,31 @@ impl SetupHost for SystemHost {
     fn python_candidates(&self) -> Vec<PythonCandidate> {
         let mut out: Vec<PythonCandidate> = Vec::new();
         let mut push = |program: PathBuf, args: &[&str]| {
-            let candidate = PythonCandidate { program, args: args.iter().map(|arg| (*arg).to_owned()).collect() };
+            let candidate = PythonCandidate {
+                program,
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            };
             if !out.contains(&candidate) {
                 out.push(candidate);
             }
         };
         match Platform::current() {
             Platform::Windows => {
-                let mut launchers: Vec<PathBuf> = path_dirs().into_iter().map(|dir| dir.join("py.exe")).collect();
+                let mut launchers: Vec<PathBuf> = path_dirs()
+                    .into_iter()
+                    .map(|dir| dir.join("py.exe"))
+                    .collect();
                 if let Some(root) = env_dir("SystemRoot") {
                     launchers.push(root.join("py.exe"));
                 }
                 if let Some(local) = env_dir("LOCALAPPDATA") {
-                    launchers.push(local.join("Programs").join("Python").join("Launcher").join("py.exe"));
+                    launchers.push(
+                        local
+                            .join("Programs")
+                            .join("Python")
+                            .join("Launcher")
+                            .join("py.exe"),
+                    );
                 }
                 if let Some(launcher) = launchers.into_iter().find(|path| path.is_file()) {
                     for version in ["-3.12", "-3.11", "-3.13", "-3.10", "-3"] {
@@ -564,7 +775,11 @@ impl SetupHost for SystemHost {
                     push(exe, &[]);
                 }
                 // WindowsApps 下的 python.exe 是商店占位符，运行会弹出微软商店，跳过
-                for dir in path_dirs().into_iter().filter(|dir| !dir.to_string_lossy().to_ascii_lowercase().contains("windowsapps")) {
+                for dir in path_dirs().into_iter().filter(|dir| {
+                    !dir.to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("windowsapps")
+                }) {
                     for name in ["python.exe", "python3.exe"] {
                         let exe = dir.join(name);
                         if exe.is_file() {
@@ -577,18 +792,29 @@ impl SetupHost for SystemHost {
                 let mut dirs = path_dirs();
                 // 从访达启动的程序 PATH 很短，补上常见安装位置
                 let extra: &[&str] = if platform == Platform::MacOs {
-                    &["/opt/homebrew/bin", "/usr/local/bin", "/Library/Frameworks/Python.framework/Versions/Current/bin"]
+                    &[
+                        "/opt/homebrew/bin",
+                        "/usr/local/bin",
+                        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+                    ]
                 } else {
                     &["/usr/local/bin", "/usr/bin"]
                 };
                 dirs.extend(extra.iter().map(PathBuf::from));
-                for name in ["python3.12", "python3.11", "python3.13", "python3.10", "python3"] {
+                for name in [
+                    "python3.12",
+                    "python3.11",
+                    "python3.13",
+                    "python3.10",
+                    "python3",
+                ] {
                     for dir in &dirs {
                         let exe = dir.join(name);
                         // macOS 的 /usr/bin/python3 在没装命令行工具时会弹安装对话框，只在命令行工具已装时使用
                         if platform == Platform::MacOs
                             && exe == Path::new("/usr/bin/python3")
-                            && !Path::new("/Library/Developer/CommandLineTools/usr/bin/python3").is_file()
+                            && !Path::new("/Library/Developer/CommandLineTools/usr/bin/python3")
+                                .is_file()
                         {
                             continue;
                         }
@@ -603,7 +829,11 @@ impl SetupHost for SystemHost {
     }
 
     fn nvidia_smi(&self) -> Option<PathBuf> {
-        let name = if cfg!(windows) { "nvidia-smi.exe" } else { "nvidia-smi" };
+        let name = if cfg!(windows) {
+            "nvidia-smi.exe"
+        } else {
+            "nvidia-smi"
+        };
         let mut dirs = path_dirs();
         if let Some(root) = env_dir("SystemRoot") {
             dirs.push(root.join("System32"));
@@ -612,10 +842,19 @@ impl SetupHost for SystemHost {
             dirs.push(base.join("NVIDIA Corporation").join("NVSMI"));
         }
         dirs.push(PathBuf::from("/usr/bin"));
-        dirs.into_iter().map(|dir| dir.join(name)).find(|path| path.is_file())
+        dirs.into_iter()
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
     }
 
-    fn run(&self, program: &Path, args: &[String], cancel: &AtomicBool, timeout: Option<Duration>, line: LineSink<'_>) -> Result<String, String> {
+    fn run(
+        &self,
+        program: &Path,
+        args: &[String],
+        cancel: &AtomicBool,
+        timeout: Option<Duration>,
+        line: LineSink<'_>,
+    ) -> Result<String, String> {
         let mut command = Command::new(program);
         command
             .args(args)
@@ -635,20 +874,41 @@ impl SetupHost for SystemHost {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = command.spawn().map_err(|error| format!("无法运行 {}：{error}", program.display()))?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("无法运行 {}：{error}", program.display()))?;
         let (tx, rx) = mpsc::channel::<(bool, String)>();
         let mut readers = Vec::new();
         for (is_stdout, stream) in [
-            (true, child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>)),
-            (false, child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>)),
+            (
+                true,
+                child
+                    .stdout
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            ),
+            (
+                false,
+                child
+                    .stderr
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            ),
         ] {
             let Some(stream) = stream else { continue };
             let tx = tx.clone();
             readers.push(std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream);
                 let mut buf = Vec::new();
-                while reader.read_until(b'\n', &mut buf).map(|n| n > 0).unwrap_or(false) {
-                    let _ = tx.send((is_stdout, String::from_utf8_lossy(&buf).trim_end().to_owned()));
+                while reader
+                    .read_until(b'\n', &mut buf)
+                    .map(|n| n > 0)
+                    .unwrap_or(false)
+                {
+                    let _ = tx.send((
+                        is_stdout,
+                        String::from_utf8_lossy(&buf).trim_end().to_owned(),
+                    ));
                     buf.clear();
                 }
             }));
@@ -657,7 +917,9 @@ impl SetupHost for SystemHost {
         let deadline = timeout.map(|limit| Instant::now() + limit);
         let mut stdout = String::new();
         let mut tail: VecDeque<String> = VecDeque::new();
-        let mut handle = |(is_stdout, text): (bool, String), stdout: &mut String, tail: &mut VecDeque<String>| {
+        let mut handle = |(is_stdout, text): (bool, String),
+                          stdout: &mut String,
+                          tail: &mut VecDeque<String>| {
             if is_stdout {
                 stdout.push_str(&text);
                 stdout.push('\n');
@@ -698,7 +960,10 @@ impl SetupHost for SystemHost {
         if status.success() {
             Ok(stdout)
         } else {
-            let last = tail.back().cloned().unwrap_or_else(|| format!("退出码 {:?}", status.code()));
+            let last = tail
+                .back()
+                .cloned()
+                .unwrap_or_else(|| format!("退出码 {:?}", status.code()));
             Err(last)
         }
     }
@@ -710,7 +975,9 @@ pub fn remove_managed_env(root: &Path) -> Result<bool, String> {
     let venv = root.join(".venv");
     let mut removed = false;
     if is_managed(&venv) {
-        fs::remove_dir_all(&venv).map_err(|error| format!("删除 Laya 运行环境失败（文件可能正被占用，关闭后重试）：{error}"))?;
+        fs::remove_dir_all(&venv).map_err(|error| {
+            format!("删除 Laya 运行环境失败（文件可能正被占用，关闭后重试）：{error}")
+        })?;
         removed = true;
     }
     let tmp = root.join("tmp");
@@ -740,8 +1007,15 @@ mod tests {
 
     #[test]
     fn parses_python_probe_and_driver_cuda() {
-        let exe = if cfg!(windows) { r"C:\Python312\python.exe" } else { "/usr/local/bin/python3.12" };
-        assert_eq!(parse_python_probe(&format!("3.12\n{exe}\n")), Some(((3, 12), PathBuf::from(exe))));
+        let exe = if cfg!(windows) {
+            r"C:\Python312\python.exe"
+        } else {
+            "/usr/local/bin/python3.12"
+        };
+        assert_eq!(
+            parse_python_probe(&format!("3.12\n{exe}\n")),
+            Some(((3, 12), PathBuf::from(exe)))
+        );
         assert_eq!(parse_python_probe("3.12\nrelative/python\n"), None);
         assert_eq!(parse_python_probe("garbage"), None);
         let smi = "| NVIDIA-SMI 560.94    Driver Version: 560.94    CUDA Version: 12.6     |";
@@ -752,12 +1026,45 @@ mod tests {
 
     #[test]
     fn torch_plan_follows_platform_and_driver() {
-        assert_eq!(plan_torch(Platform::MacOs, Some((12, 4))).0, TorchPlan::Pypi);
-        assert_eq!(plan_torch(Platform::Windows, Some((13, 0))).0, TorchPlan::Cuda { tag: "cu128", version: (13, 0) });
-        assert_eq!(plan_torch(Platform::Windows, Some((12, 6))).0, TorchPlan::Cuda { tag: "cu126", version: (12, 6) });
-        assert_eq!(plan_torch(Platform::Windows, Some((12, 5))).0, TorchPlan::Cuda { tag: "cu124", version: (12, 5) });
-        assert_eq!(plan_torch(Platform::Linux, Some((12, 2))).0, TorchPlan::Cuda { tag: "cu121", version: (12, 2) });
-        assert_eq!(plan_torch(Platform::Windows, Some((11, 8))).0, TorchPlan::Cuda { tag: "cu118", version: (11, 8) });
+        assert_eq!(
+            plan_torch(Platform::MacOs, Some((12, 4))).0,
+            TorchPlan::Pypi
+        );
+        assert_eq!(
+            plan_torch(Platform::Windows, Some((13, 0))).0,
+            TorchPlan::Cuda {
+                tag: "cu128",
+                version: (13, 0)
+            }
+        );
+        assert_eq!(
+            plan_torch(Platform::Windows, Some((12, 6))).0,
+            TorchPlan::Cuda {
+                tag: "cu126",
+                version: (12, 6)
+            }
+        );
+        assert_eq!(
+            plan_torch(Platform::Windows, Some((12, 5))).0,
+            TorchPlan::Cuda {
+                tag: "cu124",
+                version: (12, 5)
+            }
+        );
+        assert_eq!(
+            plan_torch(Platform::Linux, Some((12, 2))).0,
+            TorchPlan::Cuda {
+                tag: "cu121",
+                version: (12, 2)
+            }
+        );
+        assert_eq!(
+            plan_torch(Platform::Windows, Some((11, 8))).0,
+            TorchPlan::Cuda {
+                tag: "cu118",
+                version: (11, 8)
+            }
+        );
         let (old, note) = plan_torch(Platform::Windows, Some((11, 4)));
         assert_eq!(old, TorchPlan::Pypi);
         assert!(note.contains("驱动过旧"), "{note}");
@@ -769,19 +1076,44 @@ mod tests {
 
     #[test]
     fn pip_steps_use_cuda_index_no_cache_and_mirror_order() {
-        let steps = pip_steps(&TorchPlan::Cuda { tag: "cu124", version: (12, 4) }, true);
+        let steps = pip_steps(
+            &TorchPlan::Cuda {
+                tag: "cu124",
+                version: (12, 4),
+            },
+            true,
+        );
         assert_eq!(steps.len(), 3);
         assert!(!steps[0].fatal && steps[1].fatal && steps[2].fatal);
         let torch = steps[1].attempts[0].join(" ");
-        assert!(torch.contains("torch --index-url https://download.pytorch.org/whl/cu124"), "{torch}");
-        assert!(torch.contains("--extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple"), "{torch}");
-        let laya = steps[2].attempts.iter().map(|args| args.join(" ")).collect::<Vec<_>>();
+        assert!(
+            torch.contains("torch --index-url https://download.pytorch.org/whl/cu124"),
+            "{torch}"
+        );
+        assert!(
+            torch.contains("--extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple"),
+            "{torch}"
+        );
+        let laya = steps[2]
+            .attempts
+            .iter()
+            .map(|args| args.join(" "))
+            .collect::<Vec<_>>();
         assert!(laya[0].contains("laya[serve] -i https://pypi.tuna.tsinghua.edu.cn/simple"));
         assert!(laya[1].contains("-i https://pypi.org/simple"));
-        assert!(steps.iter().flat_map(|step| &step.attempts).all(|args| args.contains(&"--no-cache-dir".to_owned())));
+        assert!(
+            steps
+                .iter()
+                .flat_map(|step| &step.attempts)
+                .all(|args| args.contains(&"--no-cache-dir".to_owned()))
+        );
         // macOS / Windows CPU：PyTorch 交给 laya[serve] 从 PyPI 拉
         assert_eq!(pip_steps(&TorchPlan::Pypi, false).len(), 2);
-        assert!(pip_steps(&TorchPlan::CpuIndex, false)[1].attempts[0].join(" ").contains("whl/cpu"));
+        assert!(
+            pip_steps(&TorchPlan::CpuIndex, false)[1].attempts[0]
+                .join(" ")
+                .contains("whl/cpu")
+        );
     }
 
     /// 假环境：按命令内容返回脚本化结果；`-m venv` 时在临时目录里造出虚拟环境的 Python。
@@ -814,12 +1146,25 @@ mod tests {
             self.platform
         }
         fn python_candidates(&self) -> Vec<PythonCandidate> {
-            self.pythons.iter().map(|(program, _)| PythonCandidate { program: PathBuf::from(program), args: Vec::new() }).collect()
+            self.pythons
+                .iter()
+                .map(|(program, _)| PythonCandidate {
+                    program: PathBuf::from(program),
+                    args: Vec::new(),
+                })
+                .collect()
         }
         fn nvidia_smi(&self) -> Option<PathBuf> {
             self.smi.map(|_| PathBuf::from("nvidia-smi"))
         }
-        fn run(&self, program: &Path, args: &[String], cancel: &AtomicBool, _: Option<Duration>, line: LineSink<'_>) -> Result<String, String> {
+        fn run(
+            &self,
+            program: &Path,
+            args: &[String],
+            cancel: &AtomicBool,
+            _: Option<Duration>,
+            line: LineSink<'_>,
+        ) -> Result<String, String> {
             let joined = format!("{} {}", program.display(), args.join(" "));
             self.calls.lock().unwrap().push(joined.clone());
             if args.iter().any(|arg| arg == PYTHON_PROBE) {
@@ -869,7 +1214,14 @@ mod tests {
     }
 
     fn abs(name: &str) -> &'static str {
-        Box::leak(if cfg!(windows) { format!(r"C:\py\{name}.exe") } else { format!("/py/{name}") }.into_boxed_str())
+        Box::leak(
+            if cfg!(windows) {
+                format!(r"C:\py\{name}.exe")
+            } else {
+                format!("/py/{name}")
+            }
+            .into_boxed_str(),
+        )
     }
 
     #[test]
@@ -885,12 +1237,21 @@ mod tests {
             (p312, Box::leak(format!("3.12\n{p312}").into_boxed_str())),
         ];
         let setup = LayaSetup::new(Arc::new(host));
-        assert_eq!(setup.find_python().unwrap(), PythonFound { version: (3, 12), executable: PathBuf::from(p312) });
+        assert_eq!(
+            setup.find_python().unwrap(),
+            PythonFound {
+                version: (3, 12),
+                executable: PathBuf::from(p312)
+            }
+        );
 
         let mut none = FakeHost::new(Platform::Windows);
         none.pythons = vec![(p39, Box::leak(format!("3.9\n{p39}").into_boxed_str()))];
         let error = LayaSetup::new(Arc::new(none)).find_python().unwrap_err();
-        assert!(error.contains("python.org") && error.contains("OneJev"), "{error}");
+        assert!(
+            error.contains("python.org") && error.contains("OneJev"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -904,14 +1265,31 @@ mod tests {
         host.fail_torch_once = true;
         let host = Arc::new(host);
         let setup = LayaSetup::new(host.clone());
-        setup.start(SetupRequest { root: root.clone(), prefer_mirror: false }).unwrap();
+        setup
+            .start(SetupRequest {
+                root: root.clone(),
+                prefer_mirror: false,
+            })
+            .unwrap();
         let status = wait_done(&setup);
-        let SetupStatus::Done { summary, accelerator } = status else { panic!("{status:?}") };
+        let SetupStatus::Done {
+            summary,
+            accelerator,
+        } = status
+        else {
+            panic!("{status:?}")
+        };
         assert_eq!(accelerator, "cuda");
-        assert!(summary.contains("CUDA 12.4") && summary.contains("NVIDIA CUDA 显卡加速"), "{summary}");
+        assert!(
+            summary.contains("CUDA 12.4") && summary.contains("NVIDIA CUDA 显卡加速"),
+            "{summary}"
+        );
         assert!(is_managed(&root.join(".venv")));
         let calls = host.calls.lock().unwrap().clone();
-        let torch: Vec<_> = calls.iter().filter(|call| call.contains(" torch --index-url")).collect();
+        let torch: Vec<_> = calls
+            .iter()
+            .filter(|call| call.contains(" torch --index-url"))
+            .collect();
         assert_eq!(torch.len(), 2, "第一次超时后换备用 PyPI 重试");
         assert!(torch[0].contains("whl/cu124") && torch[0].contains("pypi.org"));
         assert!(torch[1].contains("pypi.tuna"));
@@ -935,17 +1313,38 @@ mod tests {
     fn setup_without_python_fails_with_explanation_and_cpu_note_without_gpu() {
         let dir = tempfile::tempdir().unwrap();
         let setup = LayaSetup::new(Arc::new(FakeHost::new(Platform::Windows)));
-        setup.start(SetupRequest { root: dir.path().join("laya"), prefer_mirror: false }).unwrap();
-        let SetupStatus::Failed { message, .. } = wait_done(&setup) else { panic!() };
+        setup
+            .start(SetupRequest {
+                root: dir.path().join("laya"),
+                prefer_mirror: false,
+            })
+            .unwrap();
+        let SetupStatus::Failed { message, .. } = wait_done(&setup) else {
+            panic!()
+        };
         assert!(message.contains("未检测到可用的 Python"), "{message}");
-        assert!(!dir.path().join("laya").exists(), "没有 Python 时不创建任何目录");
+        assert!(
+            !dir.path().join("laya").exists(),
+            "没有 Python 时不创建任何目录"
+        );
 
         let p311 = abs("p311");
         let mut host = FakeHost::new(Platform::Windows);
         host.pythons = vec![(p311, Box::leak(format!("3.11\n{p311}").into_boxed_str()))];
         let setup = LayaSetup::new(Arc::new(host));
-        setup.start(SetupRequest { root: dir.path().join("laya"), prefer_mirror: false }).unwrap();
-        let SetupStatus::Done { summary, accelerator } = wait_done(&setup) else { panic!() };
+        setup
+            .start(SetupRequest {
+                root: dir.path().join("laya"),
+                prefer_mirror: false,
+            })
+            .unwrap();
+        let SetupStatus::Done {
+            summary,
+            accelerator,
+        } = wait_done(&setup)
+        else {
+            panic!()
+        };
         assert_eq!(accelerator, "cpu");
         assert!(summary.contains("未检测到 NVIDIA 显卡驱动"), "{summary}");
     }
@@ -959,9 +1358,15 @@ mod tests {
         host.pythons = vec![(p312, Box::leak(format!("3.12\n{p312}").into_boxed_str()))];
         host.block_on_laya.store(true, Ordering::SeqCst);
         let setup = LayaSetup::new(Arc::new(host));
-        setup.start(SetupRequest { root: root.clone(), prefer_mirror: false }).unwrap();
+        setup
+            .start(SetupRequest {
+                root: root.clone(),
+                prefer_mirror: false,
+            })
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !matches!(setup.status(), SetupStatus::Running { ref stage, .. } if stage.contains("laya")) {
+        while !matches!(setup.status(), SetupStatus::Running { ref stage, .. } if stage.contains("laya"))
+        {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }

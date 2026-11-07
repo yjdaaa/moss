@@ -52,7 +52,10 @@ pub struct DecodedFrame {
 /// 按协议版本解析设备发来的二进制帧。
 pub fn decode_frame(version: u32, data: &[u8]) -> Result<DecodedFrame, FrameError> {
     let frame = match version {
-        1 => DecodedFrame { payload: data.to_vec(), timestamp: 0 },
+        1 => DecodedFrame {
+            payload: data.to_vec(),
+            timestamp: 0,
+        },
         2 => {
             if data.len() < V2_HEADER {
                 return Err(FrameError::Truncated);
@@ -68,7 +71,10 @@ pub fn decode_frame(version: u32, data: &[u8]) -> Result<DecodedFrame, FrameErro
             if data.len() < end {
                 return Err(FrameError::Truncated);
             }
-            DecodedFrame { payload: data[V2_HEADER..end].to_vec(), timestamp }
+            DecodedFrame {
+                payload: data[V2_HEADER..end].to_vec(),
+                timestamp,
+            }
         }
         3 => {
             if data.len() < V3_HEADER {
@@ -81,7 +87,10 @@ pub fn decode_frame(version: u32, data: &[u8]) -> Result<DecodedFrame, FrameErro
             if data.len() < V3_HEADER + size {
                 return Err(FrameError::Truncated);
             }
-            DecodedFrame { payload: data[V3_HEADER..V3_HEADER + size].to_vec(), timestamp: 0 }
+            DecodedFrame {
+                payload: data[V3_HEADER..V3_HEADER + size].to_vec(),
+                timestamp: 0,
+            }
         }
         other => return Err(FrameError::UnsupportedVersion(other)),
     };
@@ -164,7 +173,10 @@ mod tests {
         assert_eq!(decode_frame(2, &[0; 10]), Err(FrameError::Truncated));
         let mut wrong_version = encode_frame(2, &OPUS, 0).unwrap();
         wrong_version[1] = 3;
-        assert_eq!(decode_frame(2, &wrong_version), Err(FrameError::InvalidHeader));
+        assert_eq!(
+            decode_frame(2, &wrong_version),
+            Err(FrameError::InvalidHeader)
+        );
         let mut json_type = encode_frame(2, &OPUS, 0).unwrap();
         json_type[3] = 1;
         assert_eq!(decode_frame(2, &json_type), Err(FrameError::InvalidHeader));
@@ -172,7 +184,10 @@ mod tests {
         short.pop();
         assert_eq!(decode_frame(3, &short), Err(FrameError::Truncated));
         assert_eq!(decode_frame(1, &[]), Err(FrameError::Empty));
-        assert_eq!(decode_frame(4, &OPUS), Err(FrameError::UnsupportedVersion(4)));
+        assert_eq!(
+            decode_frame(4, &OPUS),
+            Err(FrameError::UnsupportedVersion(4))
+        );
         assert!(encode_frame(3, &vec![0u8; 70_000], 0).is_err());
     }
 }

@@ -50,8 +50,10 @@ pub fn resize_nearest(image: &GrayImage, grid_width: u32, grid_height: u32) -> G
     }
     let (width, height) = (image.width(), image.height());
     GrayImage::from_fn(grid_width, grid_height, |x_index, y_index| {
-        let source_y = ((y_index as u64 * height as u64) / grid_height as u64).min((height - 1) as u64) as u32;
-        let source_x = ((x_index as u64 * width as u64) / grid_width as u64).min((width - 1) as u64) as u32;
+        let source_y =
+            ((y_index as u64 * height as u64) / grid_height as u64).min((height - 1) as u64) as u32;
+        let source_x =
+            ((x_index as u64 * width as u64) / grid_width as u64).min((width - 1) as u64) as u32;
         *image.get_pixel(source_x, source_y)
     })
 }
@@ -63,9 +65,11 @@ pub fn resize_darkest(image: &GrayImage, grid_width: u32, grid_height: u32) -> G
     let (width, height) = (image.width(), image.height());
     GrayImage::from_fn(grid_width, grid_height, |x_index, y_index| {
         let y0 = ((y_index as u64 * height as u64) / grid_height as u64) as u32;
-        let y1 = (((y_index + 1) as u64 * height as u64) / grid_height as u64).max((y0 + 1) as u64) as u32;
+        let y1 = (((y_index + 1) as u64 * height as u64) / grid_height as u64).max((y0 + 1) as u64)
+            as u32;
         let x0 = ((x_index as u64 * width as u64) / grid_width as u64) as u32;
-        let x1 = (((x_index + 1) as u64 * width as u64) / grid_width as u64).max((x0 + 1) as u64) as u32;
+        let x1 =
+            (((x_index + 1) as u64 * width as u64) / grid_width as u64).max((x0 + 1) as u64) as u32;
         let mut darkest = 255_u8;
         for sy in y0..y1.min(height) {
             for sx in x0..x1.min(width) {
@@ -95,9 +99,15 @@ pub fn adjust_contrast(image: &mut GrayImage, factor: f32) {
     }
     let sum: u64 = image.pixels().map(|p| p.0[0] as u64).sum();
     let count = (image.width() * image.height()) as f32;
-    let mean = if count > 0.0 { sum as f32 / count } else { 128.0 };
+    let mean = if count > 0.0 {
+        sum as f32 / count
+    } else {
+        128.0
+    };
     for pixel in image.pixels_mut() {
-        let val = (mean + (pixel.0[0] as f32 - mean) * factor).round().clamp(0.0, 255.0) as u8;
+        let val = (mean + (pixel.0[0] as f32 - mean) * factor)
+            .round()
+            .clamp(0.0, 255.0) as u8;
         pixel.0[0] = val;
     }
 }

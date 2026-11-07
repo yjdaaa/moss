@@ -32,8 +32,7 @@ fn loopback_origin(port: u16) -> String {
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(crate) fn parse_dev_ui_origin(raw: Option<&str>) -> Option<String> {
     let trimmed = raw?.trim().trim_end_matches('/');
-    matches!(trimmed, "http://127.0.0.1:5177" | "http://127.0.0.1:5173")
-        .then(|| trimmed.to_owned())
+    matches!(trimmed, "http://127.0.0.1:5177" | "http://127.0.0.1:5173").then(|| trimmed.to_owned())
 }
 
 /// 读取开发热重载前端来源：release 构建恒为 `None`，环境变量在正式版中完全失效。
@@ -127,7 +126,10 @@ fn get_desktop_session(
         if !window_is_trusted_main(&window) {
             return Err("桌面会话只提供给 MOSS 主窗口".into());
         }
-        state.0.clone().ok_or_else(|| "桌面会话不可用：本机后端未启动".into())
+        state
+            .0
+            .clone()
+            .ok_or_else(|| "桌面会话不可用：本机后端未启动".into())
     }
 }
 
@@ -184,29 +186,36 @@ fn shutdown_and_exit(handle: &tauri::AppHandle, stop_server: bool) {
 /// 启动进程内后端，返回（后端句柄, 前端使用的后端地址或失败原因, 导出设置状态）。
 fn start_backend(
     runtime_dir: Option<std::path::PathBuf>,
-) -> (Option<laser_host::HostApplication>, Result<String, String>, export::ExportState) {
-    let (host, backend_origin) = match laser_host::HostApplication::init_with_runtime_dir(runtime_dir.as_deref()) {
-        Ok(host) => {
-            let origin = match host.spawn_http_server() {
-                Ok((_handle, port)) => Ok(loopback_origin(port)),
-                Err(e) => {
-                    eprintln!("警告: 后端服务监听启动失败: {e}");
-                    Err(format!("后端服务无法监听本机端口: {e}"))
-                }
-            };
-            // 小智 MCP 桥接（MCP_ENDPOINT 未配置时静默跳过）
-            let _mcp_bridge = host.spawn_mcp_bridge();
-            (Some(host), origin)
-        }
-        Err(e) => {
-            eprintln!("警告: 后端服务进程内初始化提示: {e}");
-            // Windows 发行版与 Android 没有控制台，eprintln 看不到；把原因交给页面显示。
-            (None, Err(format!("后端服务初始化失败: {e}")))
-        }
-    };
+) -> (
+    Option<laser_host::HostApplication>,
+    Result<String, String>,
+    export::ExportState,
+) {
+    let (host, backend_origin) =
+        match laser_host::HostApplication::init_with_runtime_dir(runtime_dir.as_deref()) {
+            Ok(host) => {
+                let origin = match host.spawn_http_server() {
+                    Ok((_handle, port)) => Ok(loopback_origin(port)),
+                    Err(e) => {
+                        eprintln!("警告: 后端服务监听启动失败: {e}");
+                        Err(format!("后端服务无法监听本机端口: {e}"))
+                    }
+                };
+                // 小智 MCP 桥接（MCP_ENDPOINT 未配置时静默跳过）
+                let _mcp_bridge = host.spawn_mcp_bridge();
+                (Some(host), origin)
+            }
+            Err(e) => {
+                eprintln!("警告: 后端服务进程内初始化提示: {e}");
+                // Windows 发行版与 Android 没有控制台，eprintln 看不到；把原因交给页面显示。
+                (None, Err(format!("后端服务初始化失败: {e}")))
+            }
+        };
     // 导出设置保存在运行目录 settings.json（与后端共用文件，读-改-写时保留其他键）
     let export_state = export::ExportState {
-        settings_file: host.as_ref().map(|host| host.runtime_root.path.join("settings.json")),
+        settings_file: host
+            .as_ref()
+            .map(|host| host.runtime_root.path.join("settings.json")),
     };
     (host, backend_origin, export_state)
 }
@@ -351,11 +360,16 @@ pub fn run() {
             Err(e) => (
                 None,
                 Err(format!("后端服务初始化失败: 找不到应用数据目录: {e}")),
-                export::ExportState { settings_file: None },
+                export::ExportState {
+                    settings_file: None,
+                },
             ),
         };
         let host = host.map(Arc::new);
-        app.manage(app_update::init(host.clone(), app.path().app_cache_dir().ok()));
+        app.manage(app_update::init(
+            host.clone(),
+            app.path().app_cache_dir().ok(),
+        ));
         // 后端（数据库、数据目录锁、HTTP 服务）须与进程同寿命；移动端 run() 可能先于应用结束返回。
         if let Some(host) = host {
             std::mem::forget(host);
@@ -531,9 +545,15 @@ mod tests {
         .chain(crate::voice_builtin::COMMANDS)
         .chain(crate::voice_context::COMMANDS)
         {
-            assert!(build_rs.contains(&format!("\"{command}\"")), "build.rs 未登记 {command}");
+            assert!(
+                build_rs.contains(&format!("\"{command}\"")),
+                "build.rs 未登记 {command}"
+            );
             let permission = format!("\"allow-{}\"", command.replace('_', "-"));
-            assert!(capability.contains(&permission), "capability 未授权 {permission}");
+            assert!(
+                capability.contains(&permission),
+                "capability 未授权 {permission}"
+            );
         }
     }
 
@@ -547,7 +567,10 @@ mod tests {
         for (at, _) in source.match_indices("WebviewWindowBuilder::new(") {
             let head = &source[..at];
             let function = head.rfind("fn ").expect("builder outside a function");
-            assert!(head[..function].ends_with("async "), "window builder inside a non-async fn");
+            assert!(
+                head[..function].ends_with("async "),
+                "window builder inside a non-async fn"
+            );
         }
     }
 
@@ -558,68 +581,134 @@ mod tests {
     #[test]
     fn sensitive_voice_settings_are_trusted_main_window_only() {
         const SENSITIVE: &[&str] = &[
-            "allow-voice-memory-list", "allow-voice-memory-set-enabled", "allow-voice-memory-save", "allow-voice-memory-clear",
-            "allow-voice-speaker-manage", "allow-voice-plugins-status", "allow-voice-plugins-save",
-            "allow-voice-home-status", "allow-voice-home-save", "allow-voice-home-backup-export", "allow-voice-home-backup-audit",
-            "allow-voice-home-backup-restore", "allow-voice-home-token-save", "allow-voice-home-voice-consent",
-            "allow-voice-home-discover", "allow-voice-home-approvals", "allow-voice-home-approval-cancel",
-            "allow-voice-home-control-consent", "allow-voice-home-approval-approve",
-            "allow-voice-context-manage", "allow-voice-context-pick-folder",
-            "allow-voice-firmware-status", "allow-voice-firmware-import", "allow-voice-firmware-manage",
-            "allow-voice-wakeword-status", "allow-voice-wakeword-import-base", "allow-voice-wakeword-manage",
+            "allow-voice-memory-list",
+            "allow-voice-memory-set-enabled",
+            "allow-voice-memory-save",
+            "allow-voice-memory-clear",
+            "allow-voice-speaker-manage",
+            "allow-voice-plugins-status",
+            "allow-voice-plugins-save",
+            "allow-voice-home-status",
+            "allow-voice-home-save",
+            "allow-voice-home-backup-export",
+            "allow-voice-home-backup-audit",
+            "allow-voice-home-backup-restore",
+            "allow-voice-home-token-save",
+            "allow-voice-home-voice-consent",
+            "allow-voice-home-discover",
+            "allow-voice-home-approvals",
+            "allow-voice-home-approval-cancel",
+            "allow-voice-home-control-consent",
+            "allow-voice-home-approval-approve",
+            "allow-voice-context-manage",
+            "allow-voice-context-pick-folder",
+            "allow-voice-firmware-status",
+            "allow-voice-firmware-import",
+            "allow-voice-firmware-manage",
+            "allow-voice-wakeword-status",
+            "allow-voice-wakeword-import-base",
+            "allow-voice-wakeword-manage",
         ];
         let default: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
         assert_eq!(default["windows"], serde_json::json!(["*"]));
         let default_permissions = default["permissions"].as_array().unwrap();
-        assert!(!default_permissions.iter().any(|item| item == "allow-open-voice-private"), "独立安全窗口已取消");
+        assert!(
+            !default_permissions
+                .iter()
+                .any(|item| item == "allow-open-voice-private"),
+            "独立安全窗口已取消"
+        );
         let main: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/voice-private-main.json")).unwrap();
         assert_main_window_loopback_capability(&main);
         let main_permissions = main["permissions"].as_array().unwrap();
         assert_eq!(main_permissions.len(), SENSITIVE.len());
         for permission in SENSITIVE {
-            assert!(main_permissions.iter().any(|entry| entry == permission), "{permission} 应授权给主窗口");
-            assert!(!default_permissions.iter().any(|entry| entry == permission),
-                "{permission} must not appear in wildcard/remote default ACL");
+            assert!(
+                main_permissions.iter().any(|entry| entry == permission),
+                "{permission} 应授权给主窗口"
+            );
+            assert!(
+                !default_permissions.iter().any(|entry| entry == permission),
+                "{permission} must not appear in wildcard/remote default ACL"
+            );
         }
         let guarded = [
-            (include_str!("voice_builtin.rs"), &[
-                "voice_memory_list", "voice_memory_set_enabled", "voice_memory_save", "voice_memory_clear",
-                "voice_speaker_manage", "voice_plugins_status", "voice_plugins_save",
-                "voice_firmware_status", "voice_firmware_import", "voice_firmware_manage",
-                "voice_wakeword_status", "voice_wakeword_import_base", "voice_wakeword_manage",
-                "voice_home_status", "voice_home_save", "voice_home_token_save", "voice_home_approval_approve",
-            ][..]),
-            (include_str!("voice_context.rs"), &["voice_context_manage", "voice_context_pick_folder"][..]),
+            (
+                include_str!("voice_builtin.rs"),
+                &[
+                    "voice_memory_list",
+                    "voice_memory_set_enabled",
+                    "voice_memory_save",
+                    "voice_memory_clear",
+                    "voice_speaker_manage",
+                    "voice_plugins_status",
+                    "voice_plugins_save",
+                    "voice_firmware_status",
+                    "voice_firmware_import",
+                    "voice_firmware_manage",
+                    "voice_wakeword_status",
+                    "voice_wakeword_import_base",
+                    "voice_wakeword_manage",
+                    "voice_home_status",
+                    "voice_home_save",
+                    "voice_home_token_save",
+                    "voice_home_approval_approve",
+                ][..],
+            ),
+            (
+                include_str!("voice_context.rs"),
+                &["voice_context_manage", "voice_context_pick_folder"][..],
+            ),
         ];
         for (source, commands) in guarded {
             for command in commands {
-                let start = source.find(&format!("pub async fn {command}(")).expect(command);
+                let start = source
+                    .find(&format!("pub async fn {command}("))
+                    .expect(command);
                 let body = &source[start..start + source[start..].find("\n}\n").expect(command)];
-                assert!(body.contains("require_private_settings_window(&window)?"), "{command} 须固定主窗口来源");
+                assert!(
+                    body.contains("require_private_settings_window(&window)?"),
+                    "{command} 须固定主窗口来源"
+                );
             }
         }
         let guard = include_str!("voice_builtin.rs");
         let start = guard.find("fn require_private_settings_window(").unwrap();
         let body = &guard[start..start + guard[start..].find("\n}\n").unwrap()];
         assert!(body.contains("crate::window_is_trusted_main(window)"));
-        assert!(!guard.contains("is_voice_private_asset"), "打包私密页判定已随独立窗口删除");
+        assert!(
+            !guard.contains("is_voice_private_asset"),
+            "打包私密页判定已随独立窗口删除"
+        );
         // 卡片都挂在主窗口语音中心
         let builtin_card = include_str!("../../../../frontend/src/components/VoiceBuiltinCard.jsx");
-        for card in ["<VoiceMemoryCard", "<VoicePluginsCard", "<VoiceSpeakerCard", "<VoiceHomeCard"] {
+        for card in [
+            "<VoiceMemoryCard",
+            "<VoicePluginsCard",
+            "<VoiceSpeakerCard",
+            "<VoiceHomeCard",
+        ] {
             assert!(builtin_card.contains(card), "主语音页需要 {card}");
         }
         let voice_page = include_str!("../../../../frontend/src/pages/VoicePage.jsx");
-        assert!(voice_page.contains("<VoiceFirmwareCard"), "固件卡挂在“设备与工具”标签");
-        let wake_panel = include_str!("../../../../frontend/src/components/VoiceWakeVolumePanel.jsx");
-        assert!(wake_panel.contains("<VoiceWakeWordCard"), "唤醒词卡挂在“唤醒词与音量”标签");
+        assert!(
+            voice_page.contains("<VoiceFirmwareCard"),
+            "固件卡挂在“设备与工具”标签"
+        );
+        let wake_panel =
+            include_str!("../../../../frontend/src/components/VoiceWakeVolumePanel.jsx");
+        assert!(
+            wake_panel.contains("<VoiceWakeWordCard"),
+            "唤醒词卡挂在“唤醒词与音量”标签"
+        );
     }
 
     #[test]
     fn voice_music_folder_configuration_main_window_only() {
-        let private:serde_json::Value = serde_json::from_str(
-            include_str!("../capabilities/voice-music.json")).unwrap();
+        let private: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/voice-music.json")).unwrap();
         let general = include_str!("../capabilities/default.json");
         assert_main_window_loopback_capability(&private);
         for permission in private["permissions"].as_array().unwrap() {
@@ -628,21 +717,23 @@ mod tests {
     }
 
     #[test]
-    fn agent_approval_configuration_main_window_only(){
-        let private:serde_json::Value=serde_json::from_str(include_str!("../capabilities/voice-agent.json")).unwrap();
-        let general=include_str!("../capabilities/default.json");
+    fn agent_approval_configuration_main_window_only() {
+        let private: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/voice-agent.json")).unwrap();
+        let general = include_str!("../capabilities/default.json");
         assert_main_window_loopback_capability(&private);
-        for permission in private["permissions"].as_array().unwrap(){
+        for permission in private["permissions"].as_array().unwrap() {
             assert!(!general.contains(permission.as_str().unwrap()));
         }
     }
 
     #[test]
     fn vision_credentials_private_capability() {
-        let private:serde_json::Value=serde_json::from_str(include_str!("../capabilities/voice-vision.json")).unwrap();
-        let default=include_str!("../capabilities/default.json");
+        let private: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/voice-vision.json")).unwrap();
+        let default = include_str!("../capabilities/default.json");
         assert_main_window_loopback_capability(&private);
-        for value in private["permissions"].as_array().unwrap(){
+        for value in private["permissions"].as_array().unwrap() {
             assert!(!default.contains(value.as_str().unwrap()));
         }
     }
@@ -652,7 +743,10 @@ mod tests {
     /// 端口无法写进静态 capability，由命令内 `require_main_window` 固定为本进程后端地址。
     fn assert_main_window_loopback_capability(capability: &serde_json::Value) {
         assert_eq!(capability["windows"], serde_json::json!(["main"]));
-        assert_eq!(capability["remote"]["urls"], serde_json::json!(["http://127.0.0.1:*"]));
+        assert_eq!(
+            capability["remote"]["urls"],
+            serde_json::json!(["http://127.0.0.1:*"])
+        );
         assert!(capability.get("webviews").is_none());
     }
 
@@ -660,59 +754,141 @@ mod tests {
     #[test]
     fn main_window_commands_pin_backend_origin() {
         let sources = [
-            (include_str!("voice.rs"), &[
-                "voice_save_settings", "voice_set_mode", "voice_server_start", "voice_server_stop",
-                "voice_server_restart", "voice_server_log", "voice_models_test", "voice_models_save",
-            ][..]),
-            (include_str!("voice_builtin.rs"), &[
-                "voice_builtin_start", "voice_builtin_stop", "voice_device_set_status", "voice_device_rename",
-                "voice_device_request",
-                "voice_builtin_models_test", "voice_builtin_models_list", "voice_builtin_models_save", "voice_local_save",
-                "voice_local_model_download", "voice_local_model_cancel", "voice_local_model_delete", "voice_local_laya_setup",
-                "voice_agent_status", "voice_agent_save", "voice_agent_stop", "voice_music_pick_directory", "voice_music_status",
-                "voice_music_save", "voice_vision_status", "voice_vision_save", "voice_vision_test",
-            ][..]),
+            (
+                include_str!("voice.rs"),
+                &[
+                    "voice_save_settings",
+                    "voice_set_mode",
+                    "voice_server_start",
+                    "voice_server_stop",
+                    "voice_server_restart",
+                    "voice_server_log",
+                    "voice_models_test",
+                    "voice_models_save",
+                ][..],
+            ),
+            (
+                include_str!("voice_builtin.rs"),
+                &[
+                    "voice_builtin_start",
+                    "voice_builtin_stop",
+                    "voice_device_set_status",
+                    "voice_device_rename",
+                    "voice_device_request",
+                    "voice_builtin_models_test",
+                    "voice_builtin_models_list",
+                    "voice_builtin_models_save",
+                    "voice_local_save",
+                    "voice_local_model_download",
+                    "voice_local_model_cancel",
+                    "voice_local_model_delete",
+                    "voice_local_laya_setup",
+                    "voice_agent_status",
+                    "voice_agent_save",
+                    "voice_agent_stop",
+                    "voice_music_pick_directory",
+                    "voice_music_status",
+                    "voice_music_save",
+                    "voice_vision_status",
+                    "voice_vision_save",
+                    "voice_vision_test",
+                ][..],
+            ),
         ];
         for (source, commands) in sources {
             for command in commands {
-                let start = source.find(&format!("pub async fn {command}(")).expect(command);
-                let body = &source[start..start + source[start..].find("
+                let start = source
+                    .find(&format!("pub async fn {command}("))
+                    .expect(command);
+                let body = &source[start
+                    ..start
+                        + source[start..]
+                            .find(
+                                "
 }
-").expect(command)];
-                let guard = body.find("require_main_window(&window)?;").unwrap_or_else(|| panic!("{command} 未校验主窗口来源"));
-                assert!(guard < body.find("imp::run").or(body.find("spawn_blocking")).unwrap(), "{command} 须先校验来源");
+",
+                            )
+                            .expect(command)];
+                let guard = body
+                    .find("require_main_window(&window)?;")
+                    .unwrap_or_else(|| panic!("{command} 未校验主窗口来源"));
+                assert!(
+                    guard
+                        < body
+                            .find("imp::run")
+                            .or(body.find("spawn_blocking"))
+                            .unwrap(),
+                    "{command} 须先校验来源"
+                );
             }
         }
         // 2026-11-05：状态读取含设备 IP 与调试原文，只给主窗口（n67 起独立安全窗口已取消）
         let builtin = include_str!("voice_builtin.rs");
-        let start = builtin.find("pub async fn voice_builtin_status(").expect("voice_builtin_status");
-        let body = &builtin[start..start + builtin[start..].find("\n}\n").expect("voice_builtin_status")];
-        let guard = body.find("require_status_window(&window)?;").expect("voice_builtin_status 未校验窗口来源");
-        assert!(guard < body.find("imp::run").unwrap(), "voice_builtin_status 须先校验来源");
+        let start = builtin
+            .find("pub async fn voice_builtin_status(")
+            .expect("voice_builtin_status");
+        let body = &builtin[start
+            ..start
+                + builtin[start..]
+                    .find("\n}\n")
+                    .expect("voice_builtin_status")];
+        let guard = body
+            .find("require_status_window(&window)?;")
+            .expect("voice_builtin_status 未校验窗口来源");
+        assert!(
+            guard < body.find("imp::run").unwrap(),
+            "voice_builtin_status 须先校验来源"
+        );
         // n68：诊断包含事件与审批结果，与状态读取同权限、先校验来源再生成
-        let start = builtin.find("pub async fn voice_diagnostics_export(").expect("voice_diagnostics_export");
-        let body = &builtin[start..start + builtin[start..].find("\n}\n").expect("voice_diagnostics_export")];
-        let guard = body.find("require_status_window(&window)?;").expect("voice_diagnostics_export 未校验窗口来源");
-        assert!(guard < body.find("imp::run").unwrap(), "voice_diagnostics_export 须先校验来源");
-        assert!(body.find("imp::run").unwrap() < body.find("blocking_save_file").unwrap(), "保存路径只来自系统对话框");
-        let helper = builtin.find("fn require_status_window(").expect("require_status_window");
-        let helper = &builtin[helper..helper + builtin[helper..].find("\n}\n").expect("require_status_window")];
+        let start = builtin
+            .find("pub async fn voice_diagnostics_export(")
+            .expect("voice_diagnostics_export");
+        let body = &builtin[start
+            ..start
+                + builtin[start..]
+                    .find("\n}\n")
+                    .expect("voice_diagnostics_export")];
+        let guard = body
+            .find("require_status_window(&window)?;")
+            .expect("voice_diagnostics_export 未校验窗口来源");
+        assert!(
+            guard < body.find("imp::run").unwrap(),
+            "voice_diagnostics_export 须先校验来源"
+        );
+        assert!(
+            body.find("imp::run").unwrap() < body.find("blocking_save_file").unwrap(),
+            "保存路径只来自系统对话框"
+        );
+        let helper = builtin
+            .find("fn require_status_window(")
+            .expect("require_status_window");
+        let helper = &builtin[helper
+            ..helper
+                + builtin[helper..]
+                    .find("\n}\n")
+                    .expect("require_status_window")];
         assert!(helper.contains("require_private_settings_window(window)"));
         let session = include_str!("lib.rs");
         let start = session.find("fn get_desktop_session(").unwrap();
         assert!(session[start..start + 800].contains("window_is_trusted_main(&window)"));
         let updater = include_str!("app_update.rs");
         for command in crate::app_update::COMMANDS {
-            let start = updater.find(&format!("pub async fn {command}(")).expect(command);
+            let start = updater
+                .find(&format!("pub async fn {command}("))
+                .expect(command);
             let body = &updater[start..start + updater[start..].find("\n}\n").expect(command)];
             let open_brace = body.find("{\n").expect(command);
             assert!(
-                body[open_brace..].trim_start_matches("{\n").trim_start().starts_with("require_main(&window)?;"),
+                body[open_brace..]
+                    .trim_start_matches("{\n")
+                    .trim_start()
+                    .starts_with("require_main(&window)?;"),
                 "{command} 必须在函数首行固定主窗口来源"
             );
         }
         let guard = updater.find("fn require_main(").expect("require_main");
-        let guard_body = &updater[guard..guard + updater[guard..].find("\n}\n").expect("require_main")];
+        let guard_body =
+            &updater[guard..guard + updater[guard..].find("\n}\n").expect("require_main")];
         assert!(guard_body.contains("crate::window_is_trusted_main(window)"));
         assert!(guard_body.contains("is_trusted_mobile_main(window.label(), &url)"));
     }
@@ -721,7 +897,11 @@ mod tests {
     #[test]
     fn trusted_main_requires_main_label_and_exact_backend_origin() {
         let expected = "http://127.0.0.1:19666";
-        assert!(super::is_trusted_main("main", &"http://127.0.0.1:19666/voice".parse().unwrap(), expected));
+        assert!(super::is_trusted_main(
+            "main",
+            &"http://127.0.0.1:19666/voice".parse().unwrap(),
+            expected
+        ));
         for (label, url) in [
             ("voice-private", "http://127.0.0.1:19666/"),
             ("main", "http://127.0.0.1:8003/"),
@@ -730,7 +910,10 @@ mod tests {
             ("main", "https://127.0.0.1:19666/"),
             ("main", "http://u@127.0.0.1:19666/"),
         ] {
-            assert!(!super::is_trusted_main(label, &url.parse().unwrap(), expected), "{label} {url}");
+            assert!(
+                !super::is_trusted_main(label, &url.parse().unwrap(), expected),
+                "{label} {url}"
+            );
         }
     }
 
@@ -759,7 +942,9 @@ mod tests {
 
         let expected = "http://127.0.0.1:19666";
         let vite_url: tauri::Url = "http://127.0.0.1:5177/voice".parse().unwrap();
-        assert!(!super::is_trusted_main_with_dev("main", &vite_url, expected, None));
+        assert!(!super::is_trusted_main_with_dev(
+            "main", &vite_url, expected, None
+        ));
         assert!(!super::is_trusted_main_with_dev(
             "voice-private",
             &vite_url,
@@ -816,8 +1001,24 @@ mod tests {
         };
         let desktop = csp(include_str!("../tauri.conf.json"));
         let android = csp(include_str!("../tauri.android.conf.json"));
-        assert!(!desktop.split([' ', ';']).any(|token| token == "http:"), "桌面版不能放开任意 http 来源: {desktop}");
-        assert_eq!(android, format!("{desktop} http: ws:"), "Android 只在 connect-src 末尾追加 http: ws:");
-        assert!(desktop.trim_end().split(';').last().unwrap().trim_start().starts_with("connect-src"), "connect-src 必须是最后一条指令: {desktop}");
+        assert!(
+            !desktop.split([' ', ';']).any(|token| token == "http:"),
+            "桌面版不能放开任意 http 来源: {desktop}"
+        );
+        assert_eq!(
+            android,
+            format!("{desktop} http: ws:"),
+            "Android 只在 connect-src 末尾追加 http: ws:"
+        );
+        assert!(
+            desktop
+                .trim_end()
+                .split(';')
+                .last()
+                .unwrap()
+                .trim_start()
+                .starts_with("connect-src"),
+            "connect-src 必须是最后一条指令: {desktop}"
+        );
     }
 }

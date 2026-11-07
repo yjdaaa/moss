@@ -46,7 +46,12 @@ pub trait RuntimeStore {
     -> Result<Vec<StoredRecord>, SchemaError>;
     /// Atomically append or replace only feedback history, without overwriting job state.
     fn save_feedback(&self, workflow_id: &str, feedback: &Value) -> Result<bool, SchemaError>;
-    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError>;
+    fn adopt_feedback(
+        &self,
+        workflow_id: &str,
+        feedback: &Value,
+        preview: &StoredRecord,
+    ) -> Result<bool, SchemaError>;
 }
 
 #[derive(Debug, Default)]
@@ -61,10 +66,19 @@ impl MemoryStore {
 }
 
 impl RuntimeStore for MemoryStore {
-    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError> {
+    fn adopt_feedback(
+        &self,
+        workflow_id: &str,
+        feedback: &Value,
+        preview: &StoredRecord,
+    ) -> Result<bool, SchemaError> {
         let mut records = self.records.lock().map_err(|_| SchemaError::Busy)?;
-        let Some(record) = records.get_mut(&(RecordKind::Workflow, workflow_id.to_owned())) else { return Ok(false); };
-        if !feedback_adoptable(&record.payload, feedback) { return Ok(false); }
+        let Some(record) = records.get_mut(&(RecordKind::Workflow, workflow_id.to_owned())) else {
+            return Ok(false);
+        };
+        if !feedback_adoptable(&record.payload, feedback) {
+            return Ok(false);
+        }
         merge_feedback(&mut record.payload, feedback);
         records.insert((preview.kind, preview.id.clone()), preview.clone());
         Ok(true)
@@ -90,8 +104,10 @@ impl RuntimeStore for MemoryStore {
         let mut records = self.records.lock().expect("memory store lock");
         let mut record = record.clone();
         if record.kind == RecordKind::Workflow {
-            if let Some(history) = records.get(&(record.kind, record.id.clone()))
-                .and_then(|previous| previous.payload.get("feedback_history")).filter(|v| v.is_array())
+            if let Some(history) = records
+                .get(&(record.kind, record.id.clone()))
+                .and_then(|previous| previous.payload.get("feedback_history"))
+                .filter(|v| v.is_array())
             {
                 record.payload["feedback_history"] = history.clone();
             }
@@ -133,7 +149,8 @@ impl RuntimeStore for MemoryStore {
             .cloned()
             .collect();
         records.sort_by(|a, b| {
-            updated_at(&b.payload).total_cmp(&updated_at(&a.payload))
+            updated_at(&b.payload)
+                .total_cmp(&updated_at(&a.payload))
                 .then_with(|| a.id.cmp(&b.id))
         });
         records.truncate(limit);
@@ -156,13 +173,29 @@ impl<'a> SqliteStore<'a> {
 }
 
 impl RuntimeStore for SqliteStore<'_> {
-    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError> {
+    fn adopt_feedback(
+        &self,
+        workflow_id: &str,
+        feedback: &Value,
+        preview: &StoredRecord,
+    ) -> Result<bool, SchemaError> {
         let tx = self.db.connection.unchecked_transaction()?;
-        let changed = tx.execute("UPDATE workflows SET payload=payload WHERE workflow_id=?1", [workflow_id])?;
-        if changed == 0 { return Ok(false); }
-        let raw: String = tx.query_row("SELECT payload FROM workflows WHERE workflow_id=?1", [workflow_id], |row| row.get(0))?;
+        let changed = tx.execute(
+            "UPDATE workflows SET payload=payload WHERE workflow_id=?1",
+            [workflow_id],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        let raw: String = tx.query_row(
+            "SELECT payload FROM workflows WHERE workflow_id=?1",
+            [workflow_id],
+            |row| row.get(0),
+        )?;
         let mut payload: Value = serde_json::from_str(&raw)?;
-        if !feedback_adoptable(&payload, feedback) { return Ok(false); }
+        if !feedback_adoptable(&payload, feedback) {
+            return Ok(false);
+        }
         merge_feedback(&mut payload, feedback);
         put_record(&tx, preview)?;
         tx.execute("UPDATE workflows SET payload=json_set(payload,'$.feedback_history',json(?2)) WHERE workflow_id=?1",
@@ -204,7 +237,9 @@ impl RuntimeStore for SqliteStore<'_> {
             return Ok(None);
         };
         let status: Option<String> = self.db.connection.query_row(
-            &format!("SELECT status FROM {table} WHERE {key}=?1"), [id], |row| row.get(0)
+            &format!("SELECT status FROM {table} WHERE {key}=?1"),
+            [id],
+            |row| row.get(0),
         )?;
         Ok(Some(StoredRecord {
             kind,
@@ -227,8 +262,10 @@ impl RuntimeStore for SqliteStore<'_> {
     ) -> Result<bool, SchemaError> {
         let (table, key) = Self::table(kind);
         let changed = self.db.connection.execute(
-            &format!("UPDATE {table} SET status=?1, updated_at=?2,
-                payload=json_set(payload,'$.status',?1,'$.updated_at',?2) WHERE {key}=?3"),
+            &format!(
+                "UPDATE {table} SET status=?1, updated_at=?2,
+                payload=json_set(payload,'$.status',?1,'$.updated_at',?2) WHERE {key}=?3"
+            ),
             rusqlite::params![status, now, id],
         )?;
         Ok(changed == 1)
@@ -240,8 +277,10 @@ impl RuntimeStore for SqliteStore<'_> {
         limit: usize,
     ) -> Result<Vec<StoredRecord>, SchemaError> {
         let (table, key) = Self::table(kind);
-        let sql = format!("SELECT {key}, payload, status FROM {table}
-            ORDER BY updated_at DESC, {key} ASC LIMIT ?1");
+        let sql = format!(
+            "SELECT {key}, payload, status FROM {table}
+            ORDER BY updated_at DESC, {key} ASC LIMIT ?1"
+        );
         let mut statement = self.db.connection.prepare(&sql)?;
         let rows = statement.query_map([limit as i64], |row| {
             let id: String = row.get(0)?;
@@ -265,7 +304,12 @@ impl RuntimeStore for SqliteStore<'_> {
 }
 
 impl RuntimeStore for std::sync::Mutex<RuntimeDb> {
-    fn adopt_feedback(&self, workflow_id: &str, feedback: &Value, preview: &StoredRecord) -> Result<bool, SchemaError> {
+    fn adopt_feedback(
+        &self,
+        workflow_id: &str,
+        feedback: &Value,
+        preview: &StoredRecord,
+    ) -> Result<bool, SchemaError> {
         let db = self.lock().map_err(|_| SchemaError::Busy)?;
         SqliteStore::new(&db).adopt_feedback(workflow_id, feedback, preview)
     }
@@ -306,10 +350,18 @@ impl RuntimeStore for std::sync::Mutex<RuntimeDb> {
 
 fn feedback_adoptable(payload: &Value, feedback: &Value) -> bool {
     payload["stale"] != true
-        && !matches!(payload["status"].as_str(), Some("sending" | "running" | "preparing"))
-        && payload["feedback_history"].as_array().is_some_and(|entries| entries.iter().any(|entry|
-            entry["feedback_id"] == feedback["feedback_id"] && entry["adopted_params"].is_null()
-        ))
+        && !matches!(
+            payload["status"].as_str(),
+            Some("sending" | "running" | "preparing")
+        )
+        && payload["feedback_history"]
+            .as_array()
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry["feedback_id"] == feedback["feedback_id"]
+                        && entry["adopted_params"].is_null()
+                })
+            })
 }
 
 fn merge_feedback(payload: &mut Value, feedback: &Value) {
@@ -317,7 +369,10 @@ fn merge_feedback(payload: &mut Value, feedback: &Value) {
         payload["feedback_history"] = serde_json::json!([]);
     }
     let history = payload["feedback_history"].as_array_mut().unwrap();
-    if let Some(existing) = history.iter_mut().find(|item| item["feedback_id"] == feedback["feedback_id"]) {
+    if let Some(existing) = history
+        .iter_mut()
+        .find(|item| item["feedback_id"] == feedback["feedback_id"])
+    {
         // Adoption is monotonic: concurrent stale responses cannot erase a completed adoption.
         if existing["adopted_params"].is_null() && !feedback["adopted_params"].is_null() {
             *existing = feedback.clone();
@@ -466,12 +521,18 @@ pub fn decode_calibration(payload: &Value) -> Result<CalibrationRecord, (bool, S
     if let Some(t) = normalized.get_mut("thickness_mm") {
         coerce_numeric_to_f64(t);
     }
-    if let Some(conn) = normalized.get_mut("connection").and_then(Value::as_object_mut) {
+    if let Some(conn) = normalized
+        .get_mut("connection")
+        .and_then(Value::as_object_mut)
+    {
         if let Some(timeout) = conn.get_mut("network_timeout") {
             coerce_numeric_to_f64(timeout);
         }
     }
-    if let Some(cell) = normalized.get_mut("selected_cell").and_then(Value::as_object_mut) {
+    if let Some(cell) = normalized
+        .get_mut("selected_cell")
+        .and_then(Value::as_object_mut)
+    {
         if let Some(cell_num) = cell.get_mut("cell_number") {
             coerce_numeric_to_i64(cell_num);
         }
@@ -489,46 +550,83 @@ pub fn decode_calibration(payload: &Value) -> Result<CalibrationRecord, (bool, S
 
 pub(crate) fn numeric(value: Option<&Value>) -> Option<f64> {
     let value = value?;
-    value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()).filter(|n| n.is_finite())
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|n| n.is_finite())
 }
 
 pub(crate) fn updated_at(payload: &Value) -> f64 {
-    numeric(payload.get("updated_at")).or_else(|| numeric(payload.get("created_at"))).unwrap_or(0.0)
+    numeric(payload.get("updated_at"))
+        .or_else(|| numeric(payload.get("created_at")))
+        .unwrap_or(0.0)
 }
 
-pub(crate) fn put_record(connection: &rusqlite::Connection, record: &StoredRecord) -> Result<(), SchemaError> {
+pub(crate) fn put_record(
+    connection: &rusqlite::Connection,
+    record: &StoredRecord,
+) -> Result<(), SchemaError> {
     use rusqlite::types::Value as SqlValue;
     if !record.payload.is_object() || record.id.is_empty() {
-        return Err(SchemaError::InvalidRecord("record must have an id and object payload".into()));
+        return Err(SchemaError::InvalidRecord(
+            "record must have an id and object payload".into(),
+        ));
     }
     let payload = &record.payload;
     let (table, key) = record.kind.table();
-    let text = |pointer: &str| payload.pointer(pointer).and_then(Value::as_str)
-        .map(|s| SqlValue::Text(s.into())).unwrap_or(SqlValue::Null);
-    let real = |pointer: &str| numeric(payload.pointer(pointer))
-        .map(SqlValue::Real).unwrap_or(SqlValue::Null);
-    let integer = |pointer: &str| numeric(payload.pointer(pointer))
-        .filter(|n| *n >= i64::MIN as f64 && *n < -(i64::MIN as f64))
-        .map(|n| SqlValue::Integer(n.trunc() as i64)).unwrap_or(SqlValue::Null);
+    let text = |pointer: &str| {
+        payload
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(|s| SqlValue::Text(s.into()))
+            .unwrap_or(SqlValue::Null)
+    };
+    let real = |pointer: &str| {
+        numeric(payload.pointer(pointer))
+            .map(SqlValue::Real)
+            .unwrap_or(SqlValue::Null)
+    };
+    let integer = |pointer: &str| {
+        numeric(payload.pointer(pointer))
+            .filter(|n| *n >= i64::MIN as f64 && *n < -(i64::MIN as f64))
+            .map(|n| SqlValue::Integer(n.trunc() as i64))
+            .unwrap_or(SqlValue::Null)
+    };
     let stale = payload.get("stale").is_some_and(|v| v == true || v == 1);
     let mut columns = vec![key, "status", "created_at", "updated_at", "payload"];
     let mut values = vec![
-        SqlValue::Text(record.id.clone()), SqlValue::Text(record.status.clone().unwrap_or_default()),
+        SqlValue::Text(record.id.clone()),
+        SqlValue::Text(record.status.clone().unwrap_or_default()),
         SqlValue::Real(numeric(payload.get("created_at")).unwrap_or(0.0)),
-        SqlValue::Real(updated_at(payload)), SqlValue::Text(serde_json::to_string(payload)?),
+        SqlValue::Real(updated_at(payload)),
+        SqlValue::Text(serde_json::to_string(payload)?),
     ];
-    let mut push = |column, value| { columns.push(column); values.push(value); };
+    let mut push = |column, value| {
+        columns.push(column);
+        values.push(value);
+    };
     match record.kind {
         RecordKind::Workflow => {
             for (column, pointer) in [
-                ("source_type","/source_type"), ("material","/input/material"),
-                ("laser_mode","/input/laser_mode"), ("connection_mode","/input/connection_mode"),
-                ("gcode_path","/artifacts/gcode_file"), ("gcode_sha256","/artifacts/gcode_sha256"),
-            ] { push(column, text(pointer)); }
+                ("source_type", "/source_type"),
+                ("material", "/input/material"),
+                ("laser_mode", "/input/laser_mode"),
+                ("connection_mode", "/input/connection_mode"),
+                ("gcode_path", "/artifacts/gcode_file"),
+                ("gcode_sha256", "/artifacts/gcode_sha256"),
+            ] {
+                push(column, text(pointer));
+            }
             push("thickness_mm", real("/input/thickness_mm"));
-            push("has_snapshot", SqlValue::Integer(i64::from(
-                payload.get("confirmation_snapshot").and_then(Value::as_object).is_some_and(|v| !v.is_empty())
-            )));
+            push(
+                "has_snapshot",
+                SqlValue::Integer(i64::from(
+                    payload
+                        .get("confirmation_snapshot")
+                        .and_then(Value::as_object)
+                        .is_some_and(|v| !v.is_empty()),
+                )),
+            );
             push("stale", SqlValue::Integer(i64::from(stale)));
         }
         RecordKind::TextTask => {
@@ -536,33 +634,78 @@ pub(crate) fn put_record(connection: &rusqlite::Connection, record: &StoredRecor
                 push(name, text(&format!("/{name}")));
             }
             push("thickness_mm", real("/thickness_mm"));
-            push("attempt_count", SqlValue::Integer(payload.get("attempts").and_then(Value::as_array)
-                .map_or(0, |v| v.len()) as i64));
+            push(
+                "attempt_count",
+                SqlValue::Integer(
+                    payload
+                        .get("attempts")
+                        .and_then(Value::as_array)
+                        .map_or(0, |v| v.len()) as i64,
+                ),
+            );
             push("stale", SqlValue::Integer(i64::from(stale)));
         }
         RecordKind::Job => {
-            for name in ["workflow_id", "port", "host", "expected_gcode_sha256", "calibration_id"] {
+            for name in [
+                "workflow_id",
+                "port",
+                "host",
+                "expected_gcode_sha256",
+                "calibration_id",
+            ] {
                 push(name, text(&format!("/{name}")));
             }
-            push("transport", SqlValue::Text(payload.get("transport").and_then(Value::as_str).unwrap_or("").into()));
+            push(
+                "transport",
+                SqlValue::Text(
+                    payload
+                        .get("transport")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                ),
+            );
             push("gcode_path", text("/prepared/gcode_file"));
-            for name in ["baudrate", "http_port", "telnet_port", "process_id", "progress_lines"] {
+            for name in [
+                "baudrate",
+                "http_port",
+                "telnet_port",
+                "process_id",
+                "progress_lines",
+            ] {
                 push(name, integer(&format!("/{name}")));
             }
-            for name in ["timeout", "started_at", "finished_at", "progress_updated_at"] {
+            for name in [
+                "timeout",
+                "started_at",
+                "finished_at",
+                "progress_updated_at",
+            ] {
                 push(name, real(&format!("/{name}")));
             }
         }
         RecordKind::Calibration => {
-            for name in ["material", "laser_mode", "engraving_mode", "matrix_kind", "job_id"] {
+            for name in [
+                "material",
+                "laser_mode",
+                "engraving_mode",
+                "matrix_kind",
+                "job_id",
+            ] {
                 push(name, text(&format!("/{name}")));
             }
             push("thickness_mm", real("/thickness_mm"));
             push("gcode_path", text("/gcode_file"));
-            push("selected_cell_number", integer("/selected_cell/cell_number"));
+            push(
+                "selected_cell_number",
+                integer("/selected_cell/cell_number"),
+            );
         }
     }
-    let placeholders = (1..=values.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+    let placeholders = (1..=values.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
     let updates = columns.iter().skip(1).map(|c| {
         if record.kind == RecordKind::Workflow && *c == "payload" {
             "payload=CASE WHEN json_type(workflows.payload,'$.feedback_history')='array'
@@ -628,25 +771,39 @@ mod tests {
     fn feedback_merge_preserves_status_and_first_adoption_in_all_stores() {
         let db = RuntimeDb::open_memory().unwrap();
         let stores: Vec<Box<dyn RuntimeStore + '_>> = vec![
-            Box::new(MemoryStore::new()), Box::new(SqliteStore::new(&db)),
+            Box::new(MemoryStore::new()),
+            Box::new(SqliteStore::new(&db)),
         ];
         for store in stores {
             store.put(&record("wf-feedback", "preview_ready")).unwrap();
             let entry = serde_json::json!({"feedback_id":"fb-1","adopted_params":null});
             assert!(!store.save_feedback("missing", &entry).unwrap());
             store.save_feedback("wf-feedback", &entry).unwrap();
-            store.set_status(RecordKind::Workflow, "wf-feedback", "completed", 42.0).unwrap();
+            store
+                .set_status(RecordKind::Workflow, "wf-feedback", "completed", 42.0)
+                .unwrap();
             let adopted = serde_json::json!({"feedback_id":"fb-1","adopted_params":{"passes":2}});
             store.save_feedback("wf-feedback", &adopted).unwrap();
             store.save_feedback("wf-feedback", &entry).unwrap();
-            store.save_feedback("wf-feedback", &serde_json::json!({"feedback_id":"fb-2","adopted_params":null})).unwrap();
+            store
+                .save_feedback(
+                    "wf-feedback",
+                    &serde_json::json!({"feedback_id":"fb-2","adopted_params":null}),
+                )
+                .unwrap();
             let mut stale = record("wf-feedback", "completed");
             stale.payload["updated_at"] = serde_json::json!(42.0);
             store.put(&stale).unwrap();
-            let saved = store.get(RecordKind::Workflow, "wf-feedback").unwrap().unwrap();
+            let saved = store
+                .get(RecordKind::Workflow, "wf-feedback")
+                .unwrap()
+                .unwrap();
             assert_eq!(saved.status.as_deref(), Some("completed"));
             assert_eq!(saved.payload["updated_at"], 42.0);
-            assert_eq!(saved.payload["feedback_history"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                saved.payload["feedback_history"].as_array().unwrap().len(),
+                2
+            );
             assert_eq!(saved.payload["feedback_history"][0], adopted);
         }
     }
@@ -656,21 +813,69 @@ mod tests {
         let db = RuntimeDb::open_memory().unwrap();
         let store = SqliteStore::new(&db);
         store.put(&record("original", "completed")).unwrap();
-        store.save_feedback("original", &serde_json::json!({"feedback_id":"fb-1","adopted_params":null})).unwrap();
+        store
+            .save_feedback(
+                "original",
+                &serde_json::json!({"feedback_id":"fb-1","adopted_params":null}),
+            )
+            .unwrap();
         let adopted = serde_json::json!({"feedback_id":"fb-1","adopted_params":{"passes":2}});
-        db.connection.execute_batch("CREATE TRIGGER fail_feedback BEFORE UPDATE ON workflows
+        db.connection
+            .execute_batch(
+                "CREATE TRIGGER fail_feedback BEFORE UPDATE ON workflows
             WHEN json_extract(NEW.payload,'$.feedback_history[0].adopted_params') IS NOT NULL
-            BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
-        assert!(store.adopt_feedback("original", &adopted, &record("preview", "preview_ready")).is_err());
-        assert!(store.get(RecordKind::Workflow, "preview").unwrap().is_none());
-        assert!(store.get(RecordKind::Workflow, "original").unwrap().unwrap().payload["feedback_history"][0]["adopted_params"].is_null());
-        db.connection.execute_batch("DROP TRIGGER fail_feedback").unwrap();
-        store.set_status(RecordKind::Workflow, "original", "sending", 1.0).unwrap();
-        assert!(!store.adopt_feedback("original", &adopted, &record("preview", "preview_ready")).unwrap());
-        store.set_status(RecordKind::Workflow, "original", "completed", 2.0).unwrap();
-        assert!(store.adopt_feedback("original", &adopted, &record("preview", "preview_ready")).unwrap());
-        assert!(!store.adopt_feedback("original", &adopted, &record("duplicate", "preview_ready")).unwrap());
-        assert!(store.get(RecordKind::Workflow, "duplicate").unwrap().is_none());
+            BEGIN SELECT RAISE(ABORT,'test failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            store
+                .adopt_feedback("original", &adopted, &record("preview", "preview_ready"))
+                .is_err()
+        );
+        assert!(
+            store
+                .get(RecordKind::Workflow, "preview")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get(RecordKind::Workflow, "original")
+                .unwrap()
+                .unwrap()
+                .payload["feedback_history"][0]["adopted_params"]
+                .is_null()
+        );
+        db.connection
+            .execute_batch("DROP TRIGGER fail_feedback")
+            .unwrap();
+        store
+            .set_status(RecordKind::Workflow, "original", "sending", 1.0)
+            .unwrap();
+        assert!(
+            !store
+                .adopt_feedback("original", &adopted, &record("preview", "preview_ready"))
+                .unwrap()
+        );
+        store
+            .set_status(RecordKind::Workflow, "original", "completed", 2.0)
+            .unwrap();
+        assert!(
+            store
+                .adopt_feedback("original", &adopted, &record("preview", "preview_ready"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .adopt_feedback("original", &adopted, &record("duplicate", "preview_ready"))
+                .unwrap()
+        );
+        assert!(
+            store
+                .get(RecordKind::Workflow, "duplicate")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -710,16 +915,22 @@ mod tests {
                 }),
             },
         ];
-        for record in &records { store.put(record).unwrap(); }
+        for record in &records {
+            store.put(record).unwrap();
+        }
         let task: (String, f64, i64) = db.connection.query_row(
             "SELECT material, thickness_mm, attempt_count FROM text_tasks WHERE task_id='task_1'",
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         ).unwrap();
         assert_eq!(task, ("椴木".into(), 3.0, 1));
-        let job: (String, String, i64) = db.connection.query_row(
-            "SELECT transport, gcode_path, baudrate FROM jobs WHERE job_id='job_1'",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        ).unwrap();
+        let job: (String, String, i64) = db
+            .connection
+            .query_row(
+                "SELECT transport, gcode_path, baudrate FROM jobs WHERE job_id='job_1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(job, ("serial".into(), "x.gcode".into(), 115200));
         let calibration: (String, f64, i64) = db.connection.query_row(
             "SELECT material, thickness_mm, selected_cell_number FROM calibrations WHERE calibration_id='cal_1'",

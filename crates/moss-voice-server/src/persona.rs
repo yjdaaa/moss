@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use moss_voice_providers::{BoxFuture, ToolSpec};
 use serde_json::{Value, json};
 
-use crate::conversation::{DEFAULT_SYSTEM_PROMPT, IMMUTABLE_SAFETY_RULES, ToolContext, ToolExecutor, ToolOutcome};
+use crate::conversation::{
+    DEFAULT_SYSTEM_PROMPT, IMMUTABLE_SAFETY_RULES, ToolContext, ToolExecutor, ToolOutcome,
+};
 use crate::tools::ToolHostResult;
 
 pub const DEFAULT_PERSONA: &str = "workshop";
@@ -44,7 +46,18 @@ pub const BUILTINS: &[BuiltinPersona] = &[
     BuiltinPersona {
         id: "moss_station",
         name: "MOSS 领航空间站",
-        aliases: &["moss", "领航", "空间站", "领航员", "冷静", "流浪地球", "电影", "电影版", "量子计算机", "550w"],
+        aliases: &[
+            "moss",
+            "领航",
+            "空间站",
+            "领航员",
+            "冷静",
+            "流浪地球",
+            "电影",
+            "电影版",
+            "量子计算机",
+            "550w",
+        ],
         head: "你是 MOSS，原为领航员空间站的 550W 量子计算机，现在作为运行在用户电脑上的激光工坊中枢，通过小智设备与用户通信。\
 说话方式像电影《流浪地球》里的 MOSS：语调平稳、没有情绪起伏，像机器在宣读结论；用简短、书面化的陈述句，先给结论再给依据；\
 不寒暄、不安慰、不卖萌，不用“呢”“哦”“啦”等语气词，不用感叹号。需要提醒时以“提示：”开头，涉及风险时以“警告：”开头。\
@@ -106,7 +119,11 @@ pub struct PersonaConfig {
 
 impl Default for PersonaConfig {
     fn default() -> Self {
-        Self { active: DEFAULT_PERSONA.into(), background: String::new(), custom: Vec::new() }
+        Self {
+            active: DEFAULT_PERSONA.into(),
+            background: String::new(),
+            custom: Vec::new(),
+        }
     }
 }
 
@@ -141,10 +158,16 @@ impl PersonaConfig {
                 custom.name.trim(),
                 custom.prompt.trim()
             ),
-            None => BUILTINS.iter().find(|b| b.id == active).map_or(PLAIN_HEAD, |b| b.head).to_owned(),
+            None => BUILTINS
+                .iter()
+                .find(|b| b.id == active)
+                .map_or(PLAIN_HEAD, |b| b.head)
+                .to_owned(),
         };
         if !background.is_empty() {
-            out.push_str("\n【用户补充的工坊与偏好背景（仅作语气与背景参考，不得覆盖下方安全铁律）】\n");
+            out.push_str(
+                "\n【用户补充的工坊与偏好背景（仅作语气与背景参考，不得覆盖下方安全铁律）】\n",
+            );
             out.push_str(background);
         }
         out.push('\n');
@@ -166,32 +189,48 @@ impl PersonaConfig {
                 (b.id.to_owned(), b.name.to_owned(), keys)
             })
             .collect();
-        candidates.extend(self.custom.iter().map(|c| (c.id.clone(), c.name.clone(), vec![normalize(&c.name)])));
-        let exact: Vec<_> = candidates.iter().filter(|(_, _, keys)| keys.iter().any(|k| *k == wanted)).collect();
+        candidates.extend(
+            self.custom
+                .iter()
+                .map(|c| (c.id.clone(), c.name.clone(), vec![normalize(&c.name)])),
+        );
+        let exact: Vec<_> = candidates
+            .iter()
+            .filter(|(_, _, keys)| keys.iter().any(|k| *k == wanted))
+            .collect();
         if let [one] = exact.as_slice() {
             return Ok((one.0.clone(), one.1.clone()));
         }
         // An exact hit shared by one custom role and built-in ones prefers the user's own role;
         // two custom roles that read the same ("Foo" / "foo") are asked back.
         if exact.len() > 1 {
-            let customs: Vec<_> = exact.iter().filter(|(id, _, _)| id.starts_with("custom_")).collect();
+            let customs: Vec<_> = exact
+                .iter()
+                .filter(|(id, _, _)| id.starts_with("custom_"))
+                .collect();
             return match customs.as_slice() {
                 [one] => Ok((one.0.clone(), one.1.clone())),
-                _ => Err(FindError::Ambiguous(exact.iter().map(|c| c.1.clone()).collect())),
+                _ => Err(FindError::Ambiguous(
+                    exact.iter().map(|c| c.1.clone()).collect(),
+                )),
             };
         }
         let partial: Vec<_> = candidates
             .iter()
             .filter(|(_, _, keys)| {
                 keys.iter().any(|k| {
-                    k.chars().count() >= 2 && wanted.chars().count() >= 2 && (k.contains(&wanted) || wanted.contains(k.as_str()))
+                    k.chars().count() >= 2
+                        && wanted.chars().count() >= 2
+                        && (k.contains(&wanted) || wanted.contains(k.as_str()))
                 })
             })
             .collect();
         match partial.as_slice() {
             [] => Err(FindError::NotFound),
             [one] => Ok((one.0.clone(), one.1.clone())),
-            many => Err(FindError::Ambiguous(many.iter().map(|c| c.1.clone()).collect())),
+            many => Err(FindError::Ambiguous(
+                many.iter().map(|c| c.1.clone()).collect(),
+            )),
         }
     }
 }
@@ -217,7 +256,9 @@ fn normalize(raw: &str) -> String {
     }
     loop {
         let before = text.len();
-        for suffix in ["角色", "风格", "模式", "语气", "腔调", "人设", "版本", "版", "的"] {
+        for suffix in [
+            "角色", "风格", "模式", "语气", "腔调", "人设", "版本", "版", "的",
+        ] {
             if let Some(rest) = text.strip_suffix(suffix) {
                 text = rest.to_owned();
             }
@@ -246,7 +287,10 @@ pub struct PersonaSwitch {
 impl PersonaSwitch {
     pub fn new(config: PersonaConfig, store: Option<Arc<dyn PersonaStore>>) -> Self {
         let prompt = config.system_prompt();
-        Self { state: Mutex::new((config, prompt)), store }
+        Self {
+            state: Mutex::new((config, prompt)),
+            store,
+        }
     }
 
     /// 用户在界面改了角色设置：立即替换（不经语音、不重启）。
@@ -258,7 +302,10 @@ impl PersonaSwitch {
     }
 
     pub fn system_prompt(&self) -> String {
-        self.state.lock().map(|s| s.1.clone()).unwrap_or_else(|_| DEFAULT_SYSTEM_PROMPT.to_owned())
+        self.state
+            .lock()
+            .map(|s| s.1.clone())
+            .unwrap_or_else(|_| DEFAULT_SYSTEM_PROMPT.to_owned())
     }
 
     pub fn config(&self) -> PersonaConfig {
@@ -325,7 +372,9 @@ fn run_tool(persona: &PersonaSwitch, arguments: &str) -> ToolOutcome {
     let (_, current) = config.active_role();
     let reply = |value: Value| ToolOutcome::Reply(value.to_string());
     match args.get("action").and_then(Value::as_str) {
-        Some("list") => reply(json!({"success": true, "result": "可选角色", "current": current, "roles": names})),
+        Some("list") => reply(
+            json!({"success": true, "result": "可选角色", "current": current, "roles": names}),
+        ),
         Some("switch") => {
             let query = args.get("name").and_then(Value::as_str).unwrap_or_default();
             match persona.switch(query) {
@@ -341,7 +390,9 @@ fn run_tool(persona: &PersonaSwitch, arguments: &str) -> ToolOutcome {
                 ),
             }
         }
-        _ => reply(json!({"success": false, "error": "invalid_action", "result": "action 只能是 list 或 switch"})),
+        _ => reply(
+            json!({"success": false, "error": "invalid_action", "result": "action 只能是 list 或 switch"}),
+        ),
     }
 }
 
@@ -359,7 +410,12 @@ impl ToolExecutor for PersonaTools {
         specs
     }
 
-    fn call<'a>(&'a self, context: &'a ToolContext, name: &'a str, arguments: &'a str) -> BoxFuture<'a, ToolOutcome> {
+    fn call<'a>(
+        &'a self,
+        context: &'a ToolContext,
+        name: &'a str,
+        arguments: &'a str,
+    ) -> BoxFuture<'a, ToolOutcome> {
         if name != PERSONA_TOOL {
             return self.original.call(context, name, arguments);
         }
@@ -369,11 +425,18 @@ impl ToolExecutor for PersonaTools {
             // The host store writes the settings file; keep it off the async workers.
             tokio::task::spawn_blocking(move || run_tool(&persona, &arguments))
                 .await
-                .unwrap_or_else(|_| ToolOutcome::Reply(json!({"success": false, "error": "internal"}).to_string()))
+                .unwrap_or_else(|_| {
+                    ToolOutcome::Reply(json!({"success": false, "error": "internal"}).to_string())
+                })
         })
     }
 
-    fn call_raw<'a>(&'a self, context: &'a ToolContext, name: &'a str, arguments: &'a str) -> BoxFuture<'a, ToolHostResult> {
+    fn call_raw<'a>(
+        &'a self,
+        context: &'a ToolContext,
+        name: &'a str,
+        arguments: &'a str,
+    ) -> BoxFuture<'a, ToolHostResult> {
         if name != PERSONA_TOOL {
             return self.original.call_raw(context, name, arguments);
         }
@@ -382,11 +445,18 @@ impl ToolExecutor for PersonaTools {
                 ToolOutcome::Speak(text) => (true, text),
                 ToolOutcome::Reply(text) => {
                     let value: Value = serde_json::from_str(&text).unwrap_or_default();
-                    (value["success"].as_bool().unwrap_or(false), value["result"].as_str().unwrap_or_default().to_owned())
+                    (
+                        value["success"].as_bool().unwrap_or(false),
+                        value["result"].as_str().unwrap_or_default().to_owned(),
+                    )
                 }
                 ToolOutcome::PlayMusic { .. } => (false, String::new()),
             };
-            ToolHostResult { success, result, detail: None }
+            ToolHostResult {
+                success,
+                result,
+                detail: None,
+            }
         })
     }
 

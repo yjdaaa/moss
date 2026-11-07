@@ -35,8 +35,21 @@ const ACTIVE: &str = "device_report_status='not_reported' AND download_status IN
 
 impl RuntimeDb {
     /// 登记导入的固件（同一 SHA-256 重复导入不变）。
-    pub fn add_firmware_artifact(&self, sha256: &str, version: &str, project: &str, size: i64, now: f64) -> Result<(), SchemaError> {
-        if !sha_ok(sha256) || version.is_empty() || version.len() > 32 || project.len() > 32 || size <= 0 || !now.is_finite() {
+    pub fn add_firmware_artifact(
+        &self,
+        sha256: &str,
+        version: &str,
+        project: &str,
+        size: i64,
+        now: f64,
+    ) -> Result<(), SchemaError> {
+        if !sha_ok(sha256)
+            || version.is_empty()
+            || version.len() > 32
+            || project.len() > 32
+            || size <= 0
+            || !now.is_finite()
+        {
             return Err(invalid("固件信息无效"));
         }
         self.connection.execute(
@@ -51,7 +64,13 @@ impl RuntimeDb {
             "SELECT sha256,version,project,size,created_at FROM voice_firmware_artifacts ORDER BY created_at DESC LIMIT 64",
         )?;
         let rows = statement.query_map([], |r| {
-            Ok(FirmwareArtifactRow { sha256: r.get(0)?, version: r.get(1)?, project: r.get(2)?, size: r.get(3)?, created_at: r.get(4)? })
+            Ok(FirmwareArtifactRow {
+                sha256: r.get(0)?,
+                version: r.get(1)?,
+                project: r.get(2)?,
+                size: r.get(3)?,
+                created_at: r.get(4)?,
+            })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -59,29 +78,50 @@ impl RuntimeDb {
     /// 删除固件；还有有效推送在用时拒绝（返回 false）。
     pub fn delete_firmware_artifact(&self, sha256: &str, now: f64) -> Result<bool, SchemaError> {
         let in_use: i64 = self.connection.query_row(
-            &format!("SELECT COUNT(*) FROM voice_firmware_delivery WHERE artifact_sha256=?1 AND {}", ACTIVE.replace('?', "?2")),
+            &format!(
+                "SELECT COUNT(*) FROM voice_firmware_delivery WHERE artifact_sha256=?1 AND {}",
+                ACTIVE.replace('?', "?2")
+            ),
             params![sha256, now],
             |r| r.get(0),
         )?;
         if in_use > 0 {
             return Ok(false);
         }
-        Ok(self.connection.execute("DELETE FROM voice_firmware_artifacts WHERE sha256=?1", params![sha256])? == 1)
+        Ok(self.connection.execute(
+            "DELETE FROM voice_firmware_artifacts WHERE sha256=?1",
+            params![sha256],
+        )? == 1)
     }
 
     /// 新建一台设备的推送；同一设备还没开始下载的旧推送被替换。
     #[allow(clippy::too_many_arguments)]
     pub fn create_firmware_offer(
-        &self, delivery_id: &str, device_id: &str, sha256: &str, version: &str,
-        token: &str, expires_at: f64, now: f64,
+        &self,
+        delivery_id: &str,
+        device_id: &str,
+        sha256: &str,
+        version: &str,
+        token: &str,
+        expires_at: f64,
+        now: f64,
     ) -> Result<(), SchemaError> {
-        if delivery_id.is_empty() || device_id.is_empty() || !sha_ok(sha256) || token.len() != 32
-            || !expires_at.is_finite() || expires_at <= now {
+        if delivery_id.is_empty()
+            || device_id.is_empty()
+            || !sha_ok(sha256)
+            || token.len() != 32
+            || !expires_at.is_finite()
+            || expires_at <= now
+        {
             return Err(invalid("固件推送参数无效"));
         }
         let tx = self.connection.unchecked_transaction()?;
         let artifact: Option<String> = tx
-            .query_row("SELECT version FROM voice_firmware_artifacts WHERE sha256=?1", params![sha256], |r| r.get(0))
+            .query_row(
+                "SELECT version FROM voice_firmware_artifacts WHERE sha256=?1",
+                params![sha256],
+                |r| r.get(0),
+            )
             .optional()?;
         if artifact.as_deref() != Some(version) {
             return Err(invalid("找不到这个固件，或版本不符"));
@@ -100,7 +140,11 @@ impl RuntimeDb {
     }
 
     /// 设备请求 OTA 时：这台设备是否有有效推送，返回 (版本, 令牌)。
-    pub fn active_firmware_offer(&self, device_id: &str, now: f64) -> Result<Option<(String, String)>, SchemaError> {
+    pub fn active_firmware_offer(
+        &self,
+        device_id: &str,
+        now: f64,
+    ) -> Result<Option<(String, String)>, SchemaError> {
         Ok(self.connection.query_row(
             &format!("SELECT firmware_version,token FROM voice_firmware_delivery WHERE device_id=?1 AND {} ORDER BY updated_at DESC LIMIT 1", ACTIVE.replace('?', "?2")),
             params![device_id, now],
@@ -108,7 +152,11 @@ impl RuntimeDb {
         ).optional()?)
     }
 
-    pub fn firmware_offer_by_token(&self, token: &str, now: f64) -> Result<Option<FirmwareOfferRow>, SchemaError> {
+    pub fn firmware_offer_by_token(
+        &self,
+        token: &str,
+        now: f64,
+    ) -> Result<Option<FirmwareOfferRow>, SchemaError> {
         if token.len() != 32 {
             return Ok(None);
         }
@@ -120,7 +168,12 @@ impl RuntimeDb {
     }
 
     /// 设备上报的版本等于有效推送的版本：记为已上报（已升级），令牌作废。
-    pub fn firmware_device_reported(&self, device_id: &str, version: &str, now: f64) -> Result<bool, SchemaError> {
+    pub fn firmware_device_reported(
+        &self,
+        device_id: &str,
+        version: &str,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
         Ok(self.connection.execute(
             "UPDATE voice_firmware_delivery SET device_report_status='reported',
                download_status=CASE WHEN download_status IN ('downloading','unknown') THEN 'downloaded' ELSE download_status END,
@@ -156,22 +209,62 @@ mod tests {
         let db = RuntimeDb::open_memory().unwrap();
         let sha = "a".repeat(64);
         let token = "b".repeat(32);
-        db.add_firmware_artifact(&sha, "1.9.0", "xiaozhi", 2048, 1.0).unwrap();
-        assert!(db.create_firmware_offer("d1", "dev", &sha, "1.8.0", &token, 100.0, 1.0).is_err(), "版本必须与固件一致");
-        db.create_firmware_offer("d1", "dev", &sha, "1.9.0", &token, 100.0, 1.0).unwrap();
-        assert_eq!(db.active_firmware_offer("dev", 2.0).unwrap(), Some(("1.9.0".into(), token.clone())));
-        assert_eq!(db.active_firmware_offer("other", 2.0).unwrap(), None, "只对这台设备");
-        assert_eq!(db.active_firmware_offer("dev", 100.0).unwrap(), None, "到期失效");
-        assert!(!db.delete_firmware_artifact(&sha, 2.0).unwrap(), "有效推送在用时不能删固件");
+        db.add_firmware_artifact(&sha, "1.9.0", "xiaozhi", 2048, 1.0)
+            .unwrap();
+        assert!(
+            db.create_firmware_offer("d1", "dev", &sha, "1.8.0", &token, 100.0, 1.0)
+                .is_err(),
+            "版本必须与固件一致"
+        );
+        db.create_firmware_offer("d1", "dev", &sha, "1.9.0", &token, 100.0, 1.0)
+            .unwrap();
+        assert_eq!(
+            db.active_firmware_offer("dev", 2.0).unwrap(),
+            Some(("1.9.0".into(), token.clone()))
+        );
+        assert_eq!(
+            db.active_firmware_offer("other", 2.0).unwrap(),
+            None,
+            "只对这台设备"
+        );
+        assert_eq!(
+            db.active_firmware_offer("dev", 100.0).unwrap(),
+            None,
+            "到期失效"
+        );
+        assert!(
+            !db.delete_firmware_artifact(&sha, 2.0).unwrap(),
+            "有效推送在用时不能删固件"
+        );
 
         let offer = db.firmware_offer_by_token(&token, 2.0).unwrap().unwrap();
-        assert_eq!((offer.device_id.as_str(), offer.download_status.as_str()), ("dev", "pending"));
-        assert!(db.update_firmware_download_if_revision("d1", offer.revision, "downloading", 3.0).unwrap());
-        assert!(!db.firmware_device_reported("dev", "1.8.0", 4.0).unwrap(), "旧版本上报不算升级");
+        assert_eq!(
+            (offer.device_id.as_str(), offer.download_status.as_str()),
+            ("dev", "pending")
+        );
+        assert!(
+            db.update_firmware_download_if_revision("d1", offer.revision, "downloading", 3.0)
+                .unwrap()
+        );
+        assert!(
+            !db.firmware_device_reported("dev", "1.8.0", 4.0).unwrap(),
+            "旧版本上报不算升级"
+        );
         assert!(db.firmware_device_reported("dev", "1.9.0", 5.0).unwrap());
-        assert_eq!(db.firmware_offer_by_token(&token, 6.0).unwrap(), None, "升级后令牌作废");
+        assert_eq!(
+            db.firmware_offer_by_token(&token, 6.0).unwrap(),
+            None,
+            "升级后令牌作废"
+        );
         let record = &db.list_firmware_deliveries().unwrap()[0];
-        assert_eq!((record.download_status.as_str(), record.device_report_status.as_str(), record.firmware_version.as_str()), ("downloaded", "reported", "1.9.0"));
+        assert_eq!(
+            (
+                record.download_status.as_str(),
+                record.device_report_status.as_str(),
+                record.firmware_version.as_str()
+            ),
+            ("downloaded", "reported", "1.9.0")
+        );
         assert!(db.delete_firmware_artifact(&sha, 7.0).unwrap());
     }
 
@@ -179,18 +272,29 @@ mod tests {
     fn cancel_deletes_pending_and_invalidates_started_download() {
         let db = RuntimeDb::open_memory().unwrap();
         let sha = "c".repeat(64);
-        db.add_firmware_artifact(&sha, "2.0", "", 2048, 1.0).unwrap();
-        db.create_firmware_offer("p", "dev", &sha, "2.0", &"1".repeat(32), 100.0, 1.0).unwrap();
+        db.add_firmware_artifact(&sha, "2.0", "", 2048, 1.0)
+            .unwrap();
+        db.create_firmware_offer("p", "dev", &sha, "2.0", &"1".repeat(32), 100.0, 1.0)
+            .unwrap();
         // 同一设备新推送替换还没开始下载的旧推送
-        db.create_firmware_offer("q", "dev", &sha, "2.0", &"2".repeat(32), 100.0, 2.0).unwrap();
+        db.create_firmware_offer("q", "dev", &sha, "2.0", &"2".repeat(32), 100.0, 2.0)
+            .unwrap();
         assert_eq!(db.list_firmware_deliveries().unwrap().len(), 1);
         assert!(db.cancel_firmware_offer("q", 3.0).unwrap());
         assert!(db.list_firmware_deliveries().unwrap().is_empty());
 
-        db.create_firmware_offer("r", "dev", &sha, "2.0", &"3".repeat(32), 100.0, 4.0).unwrap();
-        assert!(db.update_firmware_download_if_revision("r", 0, "downloading", 5.0).unwrap());
+        db.create_firmware_offer("r", "dev", &sha, "2.0", &"3".repeat(32), 100.0, 4.0)
+            .unwrap();
+        assert!(
+            db.update_firmware_download_if_revision("r", 0, "downloading", 5.0)
+                .unwrap()
+        );
         assert!(db.cancel_firmware_offer("r", 6.0).unwrap());
         assert_eq!(db.active_firmware_offer("dev", 7.0).unwrap(), None);
-        assert_eq!(db.list_firmware_deliveries().unwrap()[0].download_status, "downloading", "已开始下载的记录保留");
+        assert_eq!(
+            db.list_firmware_deliveries().unwrap()[0].download_status,
+            "downloading",
+            "已开始下载的记录保留"
+        );
     }
 }

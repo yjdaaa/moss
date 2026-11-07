@@ -32,11 +32,18 @@ fn function_type() -> String {
 }
 
 impl ToolCall {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             kind: function_type(),
-            function: FunctionCall { name: name.into(), arguments: arguments.into() },
+            function: FunctionCall {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
         }
     }
 }
@@ -67,7 +74,11 @@ impl Serialize for ChatMessage {
             map.serialize_entry("content", &self.content)?;
         } else {
             let mut parts: Vec<Value> = Vec::with_capacity(self.images.len() + 1);
-            if let Some(text) = self.content.as_deref().filter(|text| !text.trim().is_empty()) {
+            if let Some(text) = self
+                .content
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+            {
                 parts.push(serde_json::json!({"type": "text", "text": text}));
             }
             for url in &self.images {
@@ -87,37 +98,78 @@ impl Serialize for ChatMessage {
 
 impl ChatMessage {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: Role::System, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: Vec::new() }
+        Self {
+            role: Role::System,
+            content: Some(text.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            images: Vec::new(),
+        }
     }
 
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: Vec::new() }
+        Self {
+            role: Role::User,
+            content: Some(text.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            images: Vec::new(),
+        }
     }
 
     pub fn assistant(text: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: Vec::new() }
+        Self {
+            role: Role::Assistant,
+            content: Some(text.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            images: Vec::new(),
+        }
     }
 
     pub fn assistant_tools(text: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: Role::Assistant, content: text.filter(|text| !text.is_empty()), tool_calls, tool_call_id: None, images: Vec::new() }
+        Self {
+            role: Role::Assistant,
+            content: text.filter(|text| !text.is_empty()),
+            tool_calls,
+            tool_call_id: None,
+            images: Vec::new(),
+        }
     }
 
     pub fn tool(call_id: impl Into<String>, result: impl Into<String>) -> Self {
-        Self { role: Role::Tool, content: Some(result.into()), tool_calls: Vec::new(), tool_call_id: Some(call_id.into()), images: Vec::new() }
+        Self {
+            role: Role::Tool,
+            content: Some(result.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+            images: Vec::new(),
+        }
     }
 
     /// 带一张图片的用户消息（data URL）。只在“把照片留在对话上下文里”打开时由服务端构造。
     pub fn photo(text: impl Into<String>, data_url: impl Into<String>) -> Self {
-        Self { role: Role::User, content: Some(text.into()), tool_calls: Vec::new(), tool_call_id: None, images: vec![data_url.into()] }
+        Self {
+            role: Role::User,
+            content: Some(text.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            images: vec![data_url.into()],
+        }
     }
 
     /// 估算长度：中文约 1 字 1 token，取字符数作为保守估计；一张照片按 1500 token 计。
     pub fn weight(&self) -> usize {
-        self.content.as_deref().map(|text| text.chars().count()).unwrap_or(0)
+        self.content
+            .as_deref()
+            .map(|text| text.chars().count())
+            .unwrap_or(0)
             + self
                 .tool_calls
                 .iter()
-                .map(|call| call.function.name.chars().count() + call.function.arguments.chars().count())
+                .map(|call| {
+                    call.function.name.chars().count() + call.function.arguments.chars().count()
+                })
                 .sum::<usize>()
             + self.images.len() * 1500
             + 4
@@ -147,11 +199,20 @@ pub fn truncate_history(history: &mut Vec<ChatMessage>, budget: usize) {
     let total = |messages: &[ChatMessage]| messages.iter().map(ChatMessage::weight).sum::<usize>();
     while history.len() > 1 && total(history) > budget {
         // 下一轮的起点：第一条之后的下一条用户消息
-        let Some(next_user) = history.iter().skip(1).position(|message| message.role == Role::User) else { break };
+        let Some(next_user) = history
+            .iter()
+            .skip(1)
+            .position(|message| message.role == Role::User)
+        else {
+            break;
+        };
         history.drain(..next_user + 1);
     }
     // 开头若不是用户消息（例如残留的工具结果），丢到第一条用户消息为止
-    if let Some(first_user) = history.iter().position(|message| message.role == Role::User) {
+    if let Some(first_user) = history
+        .iter()
+        .position(|message| message.role == Role::User)
+    {
         history.drain(..first_user);
     }
 }
@@ -211,32 +272,50 @@ mod tests {
     fn round(index: usize, with_tool: bool) -> Vec<ChatMessage> {
         let mut messages = vec![ChatMessage::user(format!("问题{index}{}", "字".repeat(20)))];
         if with_tool {
-            messages.push(ChatMessage::assistant_tools(None, vec![ToolCall::new(format!("c{index}"), "get_time", "{}")]));
+            messages.push(ChatMessage::assistant_tools(
+                None,
+                vec![ToolCall::new(format!("c{index}"), "get_time", "{}")],
+            ));
             messages.push(ChatMessage::tool(format!("c{index}"), "12:00"));
         }
-        messages.push(ChatMessage::assistant(format!("回答{index}{}", "字".repeat(20))));
+        messages.push(ChatMessage::assistant(format!(
+            "回答{index}{}",
+            "字".repeat(20)
+        )));
         messages
     }
 
     #[test]
     fn serializes_like_openai() {
-        let call = ChatMessage::assistant_tools(Some(String::new()), vec![ToolCall::new("c1", "f", r#"{"a":1}"#)]);
+        let call = ChatMessage::assistant_tools(
+            Some(String::new()),
+            vec![ToolCall::new("c1", "f", r#"{"a":1}"#)],
+        );
         let value = serde_json::to_value(&call).unwrap();
         assert_eq!(value["role"], "assistant");
         assert!(value["content"].is_null());
         assert_eq!(value["tool_calls"][0]["type"], "function");
-        assert_eq!(value["tool_calls"][0]["function"]["arguments"], r#"{"a":1}"#);
+        assert_eq!(
+            value["tool_calls"][0]["function"]["arguments"],
+            r#"{"a":1}"#
+        );
         let tool = serde_json::to_value(ChatMessage::tool("c1", "ok")).unwrap();
         assert_eq!(tool["tool_call_id"], "c1");
         let user = serde_json::to_value(ChatMessage::user("hi")).unwrap();
         assert!(user.get("tool_calls").is_none() && user.get("tool_call_id").is_none());
-        let spec = ToolSpec { name: "f".into(), description: "d".into(), parameters: serde_json::json!({"type":"object"}) };
+        let spec = ToolSpec {
+            name: "f".into(),
+            description: "d".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        };
         assert_eq!(spec.to_openai()["function"]["name"], "f");
     }
 
     #[test]
     fn drops_whole_old_rounds_and_keeps_tool_pairs() {
-        let mut history: Vec<ChatMessage> = (0..6).flat_map(|index| round(index, index % 2 == 0)).collect();
+        let mut history: Vec<ChatMessage> = (0..6)
+            .flat_map(|index| round(index, index % 2 == 0))
+            .collect();
         let full: usize = history.iter().map(ChatMessage::weight).sum();
         truncate_history(&mut history, full / 2);
         assert!(history.iter().map(ChatMessage::weight).sum::<usize>() <= full / 2);
@@ -245,10 +324,17 @@ mod tests {
         for (index, message) in history.iter().enumerate() {
             if message.role == Role::Tool {
                 let id = message.tool_call_id.as_deref().unwrap();
-                assert!(history[..index].iter().any(|m| m.tool_calls.iter().any(|call| call.id == id)));
+                assert!(
+                    history[..index]
+                        .iter()
+                        .any(|m| m.tool_calls.iter().any(|call| call.id == id))
+                );
             }
         }
-        assert_eq!(history.last().unwrap().content.as_deref().unwrap(), format!("回答5{}", "字".repeat(20)));
+        assert_eq!(
+            history.last().unwrap().content.as_deref().unwrap(),
+            format!("回答5{}", "字".repeat(20))
+        );
     }
 
     #[test]
@@ -268,7 +354,10 @@ mod tests {
         assert_eq!(value["role"], "user");
         assert_eq!(value["content"][0]["type"], "text");
         assert_eq!(value["content"][1]["type"], "image_url");
-        assert_eq!(value["content"][1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+        assert_eq!(
+            value["content"][1]["image_url"]["url"],
+            "data:image/jpeg;base64,QUJD"
+        );
         // 普通文字消息仍是字符串 content，不带 parts
         let text = serde_json::to_value(ChatMessage::user("你好")).unwrap();
         assert_eq!(text["content"], "你好");
@@ -293,7 +382,11 @@ mod tests {
             history.push(ChatMessage::user(format!("第{idx}句用户原话")));
             history.push(ChatMessage::assistant_tools(
                 None,
-                vec![ToolCall::new(format!("call-{idx}"), "laser_workflow_tool", "{}")],
+                vec![ToolCall::new(
+                    format!("call-{idx}"),
+                    "laser_workflow_tool",
+                    "{}",
+                )],
             ));
             history.push(ChatMessage::tool(format!("call-{idx}"), big_json.clone()));
             history.push(ChatMessage::assistant(format!("第{idx}句助手回答")));
@@ -301,12 +394,14 @@ mod tests {
         let compacted = compact_stale_tool_results(&history, 2);
         assert_eq!(compacted.len(), history.len());
         // 第 0 轮早于最近 2 轮：detail 被剥掉，但 call_id 与 result 摘要完整保留
-        let old_tool: Value = serde_json::from_str(compacted[2].content.as_deref().unwrap()).unwrap();
+        let old_tool: Value =
+            serde_json::from_str(compacted[2].content.as_deref().unwrap()).unwrap();
         assert_eq!(old_tool["result"], "查询成功");
         assert!(old_tool.get("detail").is_none());
         assert_eq!(compacted[2].tool_call_id.as_deref(), Some("call-0"));
         // 最近 2 轮（idx 1、2）完整保留 detail，所有用户/助手原文不变
-        let recent_tool: Value = serde_json::from_str(compacted[6].content.as_deref().unwrap()).unwrap();
+        let recent_tool: Value =
+            serde_json::from_str(compacted[6].content.as_deref().unwrap()).unwrap();
         assert!(recent_tool["detail"].as_str().unwrap().chars().count() == 800);
         assert_eq!(compacted[0].content.as_deref(), Some("第0句用户原话"));
         assert_eq!(compacted[3].content.as_deref(), Some("第0句助手回答"));

@@ -7,17 +7,17 @@
 //! No real devices, user tokens, network endpoints, or smart homes are read.
 #![allow(dead_code)]
 
+#[cfg(test)]
+mod approval_mock;
 pub(crate) mod approved;
+#[cfg(test)]
+mod control_mock;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) mod https_transport;
 #[cfg(test)]
-mod approval_mock;
-#[cfg(test)]
-mod control_mock;
+mod mock_http;
 #[cfg(test)]
 mod observe_mock;
-#[cfg(test)]
-mod mock_http;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -298,8 +298,7 @@ impl HomeCatalog {
             // Even a not-yet-listed entity ID must never be a voice alias
             // for another entity: a future HA sync could otherwise make an
             // explicitly requested device ID target the wrong device.
-            if (domain_of(&alias_key).is_some()
-                && alias_key != item.entity_id.to_ascii_lowercase())
+            if (domain_of(&alias_key).is_some() && alias_key != item.entity_id.to_ascii_lowercase())
                 || selected_ids
                     .get(&alias_key)
                     .is_some_and(|id| id != &item.entity_id)
@@ -633,13 +632,17 @@ mod tests {
         ));
         let mut items = selected();
         items[0].alias = "light.desk".into();
-        let index = HomeCatalog::from_snapshots(
-            &sample_states(), &sample_services(), items, 7, 9,
-        ).unwrap();
+        let index =
+            HomeCatalog::from_snapshots(&sample_states(), &sample_services(), items, 7, 9).unwrap();
         assert_eq!(index.lookup("light.desk").unwrap().entity_id, "light.desk");
-        let plan = index.plan(
-            "switch.fan", HomeAction::TurnOff, &json!({}), &AtomicBool::new(true),
-        ).unwrap();
+        let plan = index
+            .plan(
+                "switch.fan",
+                HomeAction::TurnOff,
+                &json!({}),
+                &AtomicBool::new(true),
+            )
+            .unwrap();
         assert_eq!(plan.body["entity_id"], "switch.fan");
     }
     #[test]

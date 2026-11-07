@@ -30,7 +30,13 @@ pub(crate) fn sanitize_export_name(name: &str) -> Result<String, String> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = base
         .chars()
-        .map(|c| if c.is_control() || r#"<>:"|?*"#.contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || r#"<>:"|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let cleaned = cleaned.trim().trim_matches('.').trim().to_owned();
     if cleaned.is_empty() {
@@ -59,15 +65,23 @@ fn check_export_extension(path: &Path) -> Result<(), String> {
 pub(crate) fn write_new_export(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     use std::io::Write;
     let path = Path::new(name);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("export");
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("export");
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     let candidates = std::iter::once(dir.join(name))
         .chain((1..10_000).map(|n| dir.join(format!("{stem} ({n}).{ext}"))));
     for candidate in candidates {
         ensure_inside(dir, &candidate)?;
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
             Ok(mut file) => {
-                file.write_all(bytes).map_err(|e| format!("写入文件失败: {e}"))?;
+                file.write_all(bytes)
+                    .map_err(|e| format!("写入文件失败: {e}"))?;
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -97,13 +111,19 @@ pub(crate) fn read_export_settings(settings_file: &Path) -> ExportSettings {
 }
 
 /// 写回 `export` 设置：保留文件中其他键，先写临时文件再重命名，避免写出半截文件。
-pub(crate) fn write_export_settings(settings_file: &Path, settings: &ExportSettings) -> Result<(), String> {
+pub(crate) fn write_export_settings(
+    settings_file: &Path,
+    settings: &ExportSettings,
+) -> Result<(), String> {
     let apply = |root: &mut serde_json::Map<String, serde_json::Value>| {
         let mut export = serde_json::Map::new();
         if let Some(dir) = &settings.dir {
             export.insert("dir".into(), serde_json::Value::String(dir.clone()));
         }
-        export.insert("ask_each_time".into(), serde_json::Value::Bool(settings.ask_each_time));
+        export.insert(
+            "ask_each_time".into(),
+            serde_json::Value::Bool(settings.ask_each_time),
+        );
         root.insert("export".into(), serde_json::Value::Object(export));
     };
     #[cfg(desktop)]
@@ -208,7 +228,9 @@ pub struct ExportSettingsView {
 }
 
 fn view(app: &tauri::AppHandle, settings: &ExportSettings) -> ExportSettingsView {
-    let default_dir = default_export_dir(app).ok().map(|p| p.display().to_string());
+    let default_dir = default_export_dir(app)
+        .ok()
+        .map(|p| p.display().to_string());
     let available = settings
         .dir
         .as_deref()
@@ -244,9 +266,11 @@ pub async fn pick_export_dir(
     state: tauri::State<'_, ExportState>,
 ) -> Result<Option<ExportSettingsView>, String> {
     let settings_file = state.settings_file.clone();
-    tauri::async_runtime::spawn_blocking(move || pick_export_dir_impl(&app, settings_file.as_deref()))
-        .await
-        .map_err(|_| "打开导出目录选择框失败".to_owned())?
+    tauri::async_runtime::spawn_blocking(move || {
+        pick_export_dir_impl(&app, settings_file.as_deref())
+    })
+    .await
+    .map_err(|_| "打开导出目录选择框失败".to_owned())?
 }
 
 #[cfg(desktop)]
@@ -317,7 +341,10 @@ pub fn set_export_ask_each_time(
 
 /// 用系统文件管理器打开当前生效的导出目录
 #[tauri::command]
-pub fn open_export_dir(app: tauri::AppHandle, state: tauri::State<'_, ExportState>) -> Result<(), String> {
+pub fn open_export_dir(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ExportState>,
+) -> Result<(), String> {
     let settings = state
         .settings_file
         .as_deref()
@@ -350,7 +377,9 @@ fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
     } else {
         cmd.arg(path);
     }
-    cmd.spawn().map(|_| ()).map_err(|e| format!("无法打开文件夹: {e}"))
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件夹: {e}"))
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
@@ -359,12 +388,19 @@ fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
     if select {
         cmd.arg("-R");
     }
-    cmd.arg(path).spawn().map(|_| ()).map_err(|e| format!("无法打开文件夹: {e}"))
+    cmd.arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件夹: {e}"))
 }
 
 #[cfg(all(desktop, not(windows), not(target_os = "macos")))]
 fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
-    let dir = if select { path.parent().unwrap_or(path) } else { path };
+    let dir = if select {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
     std::process::Command::new("xdg-open")
         .arg(dir)
         .spawn()
@@ -418,7 +454,12 @@ pub async fn save_export_file(
 
 /// “每次询问”：弹出系统“另存为”框，初始目录与文件名为本次默认值；取消返回 None。
 #[cfg(desktop)]
-fn save_via_dialog(app: &tauri::AppHandle, dir: &Path, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+fn save_via_dialog(
+    app: &tauri::AppHandle,
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let picked = app
         .dialog()
@@ -440,7 +481,12 @@ fn save_via_dialog(app: &tauri::AppHandle, dir: &Path, name: &str, bytes: &[u8])
 }
 
 #[cfg(not(desktop))]
-fn save_via_dialog(_app: &tauri::AppHandle, _dir: &Path, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
+fn save_via_dialog(
+    _app: &tauri::AppHandle,
+    _dir: &Path,
+    _name: &str,
+    _bytes: &[u8],
+) -> Result<Option<String>, String> {
     Err("当前平台不支持每次询问保存位置".into())
 }
 
@@ -457,8 +503,14 @@ mod tests {
 
     #[test]
     fn export_names_are_sanitized_and_restricted() {
-        assert_eq!(sanitize_export_name("excalidraw-laser-lab.png").unwrap(), "excalidraw-laser-lab.png");
-        assert_eq!(sanitize_export_name("..\\..\\evil/plan.json").unwrap(), "plan.json");
+        assert_eq!(
+            sanitize_export_name("excalidraw-laser-lab.png").unwrap(),
+            "excalidraw-laser-lab.png"
+        );
+        assert_eq!(
+            sanitize_export_name("..\\..\\evil/plan.json").unwrap(),
+            "plan.json"
+        );
         assert_eq!(sanitize_export_name("a:b?.gcode").unwrap(), "a_b_.gcode");
         assert_eq!(sanitize_export_name("材料库.JSON").unwrap(), "材料库.JSON");
         assert!(sanitize_export_name("run.exe").is_err());
@@ -482,34 +534,74 @@ mod tests {
     fn export_settings_round_trip_preserves_other_keys() {
         let dir = temp_dir("settings");
         let file = dir.join("settings.json");
-        std::fs::write(&file, br#"{"web_port":9777,"mcp_endpoint":"wss://example.test/mcp/"}"#).unwrap();
+        std::fs::write(
+            &file,
+            br#"{"web_port":9777,"mcp_endpoint":"wss://example.test/mcp/"}"#,
+        )
+        .unwrap();
         assert_eq!(read_export_settings(&file), ExportSettings::default());
 
-        let custom = ExportSettings { dir: Some(dir.display().to_string()), ask_each_time: true };
+        let custom = ExportSettings {
+            dir: Some(dir.display().to_string()),
+            ask_each_time: true,
+        };
         write_export_settings(&file, &custom).unwrap();
         assert_eq!(read_export_settings(&file), custom);
-        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(raw["web_port"], 9777, "其他键必须保留");
         assert_eq!(raw["mcp_endpoint"], "wss://example.test/mcp/");
 
-        write_export_settings(&file, &ExportSettings { dir: None, ask_each_time: false }).unwrap();
+        write_export_settings(
+            &file,
+            &ExportSettings {
+                dir: None,
+                ask_each_time: false,
+            },
+        )
+        .unwrap();
         assert_eq!(read_export_settings(&file), ExportSettings::default());
-        assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains(".tmp-")));
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn missing_or_broken_settings_file_gives_defaults() {
         let dir = temp_dir("broken");
-        assert_eq!(read_export_settings(&dir.join("absent.json")), ExportSettings::default());
+        assert_eq!(
+            read_export_settings(&dir.join("absent.json")),
+            ExportSettings::default()
+        );
         let file = dir.join("settings.json");
         std::fs::write(&file, b"{not json").unwrap();
         assert_eq!(read_export_settings(&file), ExportSettings::default());
         // 非空损坏文件拒绝覆盖，防止抹掉其他模块配置；空文件或缺失文件可正常写入
-        assert!(write_export_settings(&file, &ExportSettings { dir: None, ask_each_time: true }).is_err());
+        assert!(
+            write_export_settings(
+                &file,
+                &ExportSettings {
+                    dir: None,
+                    ask_each_time: true
+                }
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&file).unwrap(), b"{not json");
         let fresh = dir.join("fresh.json");
-        write_export_settings(&fresh, &ExportSettings { dir: None, ask_each_time: true }).unwrap();
+        write_export_settings(
+            &fresh,
+            &ExportSettings {
+                dir: None,
+                ask_each_time: true,
+            },
+        )
+        .unwrap();
         assert!(read_export_settings(&fresh).ask_each_time);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -531,11 +623,13 @@ mod tests {
         assert!(!missing.exists(), "不得自动创建导出目录");
 
         // 用户明确选择“本次保存到下载文件夹”
-        let fallback = resolve_export_dir(Some(&missing_str), true, || Ok(base.join("downloads"))).unwrap();
+        let fallback =
+            resolve_export_dir(Some(&missing_str), true, || Ok(base.join("downloads"))).unwrap();
         assert_eq!(fallback, base.join("downloads"));
 
         // 可用的自定义目录直接使用
-        let ok = resolve_export_dir(Some(&base.display().to_string()), false, || unreachable!()).unwrap();
+        let ok = resolve_export_dir(Some(&base.display().to_string()), false, || unreachable!())
+            .unwrap();
         assert_eq!(ok, base);
 
         // 相对路径被拒

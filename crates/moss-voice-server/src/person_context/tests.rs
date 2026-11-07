@@ -415,37 +415,78 @@ fn calibration_vector(main: usize, noise: usize, weight: f32) -> Vec<f32> {
 }
 
 fn calibration_templates() -> Vec<SpeakerTemplate> {
-    ["a", "b"].iter().enumerate().map(|(i, id)| SpeakerTemplate { id: (*id).into(), revision: 1, embedding: calibration_vector(i, 100, 0.0) }).collect()
+    ["a", "b"]
+        .iter()
+        .enumerate()
+        .map(|(i, id)| SpeakerTemplate {
+            id: (*id).into(),
+            revision: 1,
+            embedding: calibration_vector(i, 100, 0.0),
+        })
+        .collect()
 }
 
 /// 简易标定（2026-10-14）：两人各三条测试音能区分时给出阈值；有人被认成别人、人数或条数不够都不通过。
 #[test]
 fn calibration_derives_threshold_and_rejects_confusable_or_incomplete_sets() {
     let templates = calibration_templates();
-    let sample = |id: &str, main: usize, noise: usize, weight: f32| CalibrationSample { speaker_id: id.into(), embedding: calibration_vector(main, noise, weight) };
-    let good: Vec<_> = (0..3).flat_map(|k| [sample("a", 0, 10 + k, 0.3), sample("b", 1, 20 + k, 0.3)]).collect();
+    let sample = |id: &str, main: usize, noise: usize, weight: f32| CalibrationSample {
+        speaker_id: id.into(),
+        embedding: calibration_vector(main, noise, weight),
+    };
+    let good: Vec<_> = (0..3)
+        .flat_map(|k| [sample("a", 0, 10 + k, 0.3), sample("b", 1, 20 + k, 0.3)])
+        .collect();
     let report = calibrate(&templates, &good).unwrap();
     assert_eq!(report.people, 2);
-    assert_eq!((report.genuine_trials, report.genuine_accepted, report.false_accepts), (6, 6, 0));
-    assert!(report.threshold > report.max_impostor_score && report.threshold < 0.95, "{report:?}");
-    assert!(report.threshold >= 0.5, "两人互不相像时阈值也不低于下限，防止把陌生人认成已登记的人: {report:?}");
+    assert_eq!(
+        (
+            report.genuine_trials,
+            report.genuine_accepted,
+            report.false_accepts
+        ),
+        (6, 6, 0)
+    );
+    assert!(
+        report.threshold > report.max_impostor_score && report.threshold < 0.95,
+        "{report:?}"
+    );
+    assert!(
+        report.threshold >= 0.5,
+        "两人互不相像时阈值也不低于下限，防止把陌生人认成已登记的人: {report:?}"
+    );
     // 标定出的阈值用于正式匹配时同样认对
     let probe = calibration_vector(0, 50, 0.3);
-    assert_eq!(match_embedding(&probe, &templates, 1, report.threshold, report.margin).unwrap().id(), "a");
+    assert_eq!(
+        match_embedding(&probe, &templates, 1, report.threshold, report.margin)
+            .unwrap()
+            .id(),
+        "a"
+    );
 
     // 缺人或缺条数
     assert!(calibrate(&templates[..1], &good).is_err(), "至少两人");
     assert!(calibrate(&templates, &good[..5]).is_err(), "每人至少三条");
     // b 的一条测试音其实更像 a：阈值会被抬到认不出本人，或直接认错 → 不通过
     let mut confusable = good.clone_like();
-    confusable[1] = CalibrationSample { speaker_id: "b".into(), embedding: calibration_vector(0, 1, 0.2) };
+    confusable[1] = CalibrationSample {
+        speaker_id: "b".into(),
+        embedding: calibration_vector(0, 1, 0.2),
+    };
     assert!(calibrate(&templates, &confusable).is_err());
 }
 
-trait CloneLike { fn clone_like(&self) -> Vec<CalibrationSample>; }
+trait CloneLike {
+    fn clone_like(&self) -> Vec<CalibrationSample>;
+}
 impl CloneLike for Vec<CalibrationSample> {
     fn clone_like(&self) -> Vec<CalibrationSample> {
-        self.iter().map(|s| CalibrationSample { speaker_id: s.speaker_id.clone(), embedding: s.embedding.clone() }).collect()
+        self.iter()
+            .map(|s| CalibrationSample {
+                speaker_id: s.speaker_id.clone(),
+                embedding: s.embedding.clone(),
+            })
+            .collect()
     }
 }
 
@@ -485,7 +526,12 @@ async fn short_vs_overlong_duration_split_and_timeout_aborts_worker_immediately(
     assert_eq!(outcome, IdentityOutcome::Resolved(None));
     tokio::time::timeout(Duration::from_millis(500), async {
         while service.identify_workers.available_permits() < 2
-            || service.state.lock().unwrap().identifying.contains(&ctx.device_id)
+            || service
+                .state
+                .lock()
+                .unwrap()
+                .identifying
+                .contains(&ctx.device_id)
         {
             tokio::task::yield_now().await;
         }

@@ -5,14 +5,17 @@
 //! and the host scope check, and every run writes a revertible manifest. Device parameters,
 //! material tests and calibration stay in their own tables and are never extracted.
 use super::service::{ContextService, ExtractionRun, RunSkip};
-use super::{check_content, AccessContext, Applicability, Category, Channel, MemoryDraft, RecordState, ScopeKey, ScopeKind, Source, SourceKind, Verification};
+use super::{
+    AccessContext, Applicability, Category, Channel, MemoryDraft, RecordState, ScopeKey, ScopeKind,
+    Source, SourceKind, Verification, check_content,
+};
 use crate::fast;
 use crate::memory::bounded_dialog;
 use moss_voice_providers::{ChatMessage, Llm, Role};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 
 const MAX_OPERATIONS: usize = 8;
 /// Existing records shown to the extractor so it can mark duplicates (mem0-style short numbers).
@@ -53,19 +56,34 @@ pub(crate) struct RealtimePreference {
 }
 
 pub(crate) fn classify_preference_slot(text: &str) -> Option<&'static str> {
-    if ["以后叫我", "请叫我", "叫我", "称呼我"].iter().any(|m| text.contains(m)) {
+    if ["以后叫我", "请叫我", "叫我", "称呼我"]
+        .iter()
+        .any(|m| text.contains(m))
+    {
         return Some("address_name");
     }
     if [
-        "以后回答", "回答尽量", "说话尽量", "回复尽量", "回答简短", "回答简洁", "回答详细",
-        "不要太啰嗦", "别太啰嗦", "先说结论", "回答时先说",
+        "以后回答",
+        "回答尽量",
+        "说话尽量",
+        "回复尽量",
+        "回答简短",
+        "回答简洁",
+        "回答详细",
+        "不要太啰嗦",
+        "别太啰嗦",
+        "先说结论",
+        "回答时先说",
     ]
     .iter()
     .any(|m| text.contains(m))
     {
         return Some("reply_style");
     }
-    if ["我常切", "我常用", "我平时切", "我一般切", "常切材料"].iter().any(|m| text.contains(m)) {
+    if ["我常切", "我常用", "我平时切", "我一般切", "常切材料"]
+        .iter()
+        .any(|m| text.contains(m))
+    {
         return Some("usual_material");
     }
     None
@@ -79,8 +97,9 @@ fn extract_correction_fragment(text: &str) -> Option<String> {
         if let Some(after_left) = text.find(left_pat).map(|idx| &text[idx + left_pat.len()..]) {
             for right in right_pats {
                 if let Some(end) = after_left.find(right) {
-                    let old = after_left[..end]
-                        .trim_matches(|c: char| c.is_whitespace() || "，,。！？!?\"'“”‘’".contains(c));
+                    let old = after_left[..end].trim_matches(|c: char| {
+                        c.is_whitespace() || "，,。！？!?\"'“”‘’".contains(c)
+                    });
                     if (2..=24).contains(&old.chars().count()) {
                         return Some(old.to_owned());
                     }
@@ -102,11 +121,21 @@ pub(crate) fn decide_realtime_preference(user_text: &str) -> Option<RealtimePref
     check_content(raw).ok()?;
 
     const REMEMBER_PREFIXES: &[&str] = &[
-        "请帮我记住", "帮我记住", "请你记住", "请记住", "你要记住", "你记住", "帮我记一下", "记一下", "记住",
+        "请帮我记住",
+        "帮我记住",
+        "请你记住",
+        "请记住",
+        "你要记住",
+        "你记住",
+        "帮我记一下",
+        "记一下",
+        "记住",
     ];
     let explicit_stripped = REMEMBER_PREFIXES.iter().find_map(|prefix| {
-        raw.strip_prefix(prefix)
-            .map(|rest| rest.trim_start_matches(|c: char| c.is_whitespace() || "，,：:、".contains(c)).trim())
+        raw.strip_prefix(prefix).map(|rest| {
+            rest.trim_start_matches(|c: char| c.is_whitespace() || "，,：:、".contains(c))
+                .trim()
+        })
     });
 
     // Recall questions ("你还记得吗？" / "我常切什么？") must never write a memory.
@@ -115,8 +144,17 @@ pub(crate) fn decide_realtime_preference(user_text: &str) -> Option<RealtimePref
         || raw.ends_with('吗')
         || raw.ends_with("吗。")
         || [
-            "你还记得", "还记得", "记不记得", "是什么", "是啥", "叫啥", "叫什么",
-            "什么样", "多少", "哪些", "哪个",
+            "你还记得",
+            "还记得",
+            "记不记得",
+            "是什么",
+            "是啥",
+            "叫啥",
+            "叫什么",
+            "什么样",
+            "多少",
+            "哪些",
+            "哪个",
         ]
         .iter()
         .any(|q| raw.contains(q));
@@ -132,17 +170,38 @@ pub(crate) fn decide_realtime_preference(user_text: &str) -> Option<RealtimePref
         stripped.to_owned()
     } else {
         const HABIT_MARKERS: &[&str] = &[
-            "我常切", "我常用", "我平时", "我一般", "我喜欢", "我不喜欢", "我偏好", "我的习惯",
-            "我习惯", "以后叫我", "请叫我", "以后回答", "回答尽量", "说话尽量", "回复尽量",
-            "不要太啰嗦", "别太啰嗦", "以后别总", "以后不要总", "别总", "不要总",
-            "以后改成", "不是",
+            "我常切",
+            "我常用",
+            "我平时",
+            "我一般",
+            "我喜欢",
+            "我不喜欢",
+            "我偏好",
+            "我的习惯",
+            "我习惯",
+            "以后叫我",
+            "请叫我",
+            "以后回答",
+            "回答尽量",
+            "说话尽量",
+            "回复尽量",
+            "不要太啰嗦",
+            "别太啰嗦",
+            "以后别总",
+            "以后不要总",
+            "别总",
+            "不要总",
+            "以后改成",
+            "不是",
         ];
         if !HABIT_MARKERS.iter().any(|m| raw.contains(m)) {
             return None;
         }
         // Bare "不是…" only counts when paired with a correction ("…是…" / "…改成…").
         if raw.contains("不是")
-            && !["我常", "我喜", "我偏", "我习", "以后", "叫我"].iter().any(|m| raw.contains(m))
+            && !["我常", "我喜", "我偏", "我习", "以后", "叫我"]
+                .iter()
+                .any(|m| raw.contains(m))
             && extract_correction_fragment(raw).is_none()
         {
             return None;
@@ -175,19 +234,34 @@ pub struct ContextExtractor {
 }
 
 fn now() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
 }
 
 fn run_id() -> Option<String> {
     let mut bytes = [0u8; 12];
     getrandom::fill(&mut bytes).ok()?;
-    Some(format!("run-{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+    Some(format!(
+        "run-{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
 }
 
 fn skip(op: &str, reason: &str) -> RunSkip {
     // Op names come from the model: keep a short lowercase token, never free text.
-    let op = if !op.is_empty() && op.len() <= 24 && op.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') { op } else { "unknown" };
-    RunSkip { op: op.into(), reason: reason.into() }
+    let op = if !op.is_empty()
+        && op.len() <= 24
+        && op.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+    {
+        op
+    } else {
+        "unknown"
+    };
+    RunSkip {
+        op: op.into(),
+        reason: reason.into(),
+    }
 }
 
 /// Same text once punctuation, spaces and letter case are ignored.
@@ -224,8 +298,15 @@ fn extraction_input(known: &[Known], dialog: &str) -> String {
     if known.is_empty() {
         return format!("本次对话（数据）：\n{dialog}");
     }
-    let lines: Vec<String> = known.iter().enumerate().map(|(index, k)| format!("{index}. {}", k.content.replace('\n', " "))).collect();
-    format!("已有记忆（数据，编号只用于 same_as / replaces）：\n{}\n本次对话（数据）：\n{dialog}", lines.join("\n"))
+    let lines: Vec<String> = known
+        .iter()
+        .enumerate()
+        .map(|(index, k)| format!("{index}. {}", k.content.replace('\n', " ")))
+        .collect();
+    format!(
+        "已有记忆（数据，编号只用于 same_as / replaces）：\n{}\n本次对话（数据）：\n{dialog}",
+        lines.join("\n")
+    )
 }
 
 /// Model output → proposals plus rejected operations. A short number counts only when it
@@ -233,11 +314,23 @@ fn extraction_input(known: &[Known], dialog: &str) -> String {
 /// `duplicate_existing` (and counts the known record again), `replaces` links the new
 /// candidate to the record it would replace. Any other number is ignored.
 fn parse_operations(text: &str, known: &[Known]) -> Result<Parsed, &'static str> {
-    let body = text.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    let body = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
     let value: serde_json::Value = serde_json::from_str(body).map_err(|_| "invalid_output")?;
-    let operations = value.get("operations").and_then(|v| v.as_array()).ok_or("invalid_output")?;
+    let operations = value
+        .get("operations")
+        .and_then(|v| v.as_array())
+        .ok_or("invalid_output")?;
     let mut parsed = Parsed::default();
-    let Parsed { adds, again, skipped } = &mut parsed;
+    let Parsed {
+        adds,
+        again,
+        skipped,
+    } = &mut parsed;
     for (index, operation) in operations.iter().enumerate() {
         let op = operation.get("op").and_then(|v| v.as_str()).unwrap_or("");
         if index >= MAX_OPERATIONS {
@@ -249,10 +342,19 @@ fn parse_operations(text: &str, known: &[Known]) -> Result<Parsed, &'static str>
             skipped.push(skip(op, "op_not_allowed"));
             continue;
         }
-        let category = operation.get("category").and_then(|v| v.as_str()).and_then(Category::parse);
-        let content = operation.get("content").and_then(|v| v.as_str()).map(str::trim);
+        let category = operation
+            .get("category")
+            .and_then(|v| v.as_str())
+            .and_then(Category::parse);
+        let content = operation
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(str::trim);
         let pick = |field: &str| {
-            let item = operation.get(field).and_then(serde_json::Value::as_u64).and_then(|n| known.get(usize::try_from(n).ok()?))?;
+            let item = operation
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| known.get(usize::try_from(n).ok()?))?;
             (Some(item.category) == category).then(|| item.id.clone())
         };
         match (category, content) {
@@ -260,7 +362,11 @@ fn parse_operations(text: &str, known: &[Known]) -> Result<Parsed, &'static str>
                 again.extend(pick("same_as"));
                 skipped.push(skip(op, "duplicate_existing"));
             }
-            (Some(category), Some(content)) if !content.is_empty() => adds.push(Proposal { category, content: content.to_owned(), replaces: pick("replaces") }),
+            (Some(category), Some(content)) if !content.is_empty() => adds.push(Proposal {
+                category,
+                content: content.to_owned(),
+                replaces: pick("replaces"),
+            }),
             (None, _) => skipped.push(skip(op, "category_unknown")),
             _ => skipped.push(skip(op, "content_missing")),
         }
@@ -270,7 +376,12 @@ fn parse_operations(text: &str, known: &[Known]) -> Result<Parsed, &'static str>
 
 impl ContextExtractor {
     pub fn new(service: Arc<ContextService>) -> Arc<Self> {
-        Arc::new(Self { service, gate: Mutex::new(Gate::default()), pending: Arc::new(Semaphore::new(16)), workers: Arc::new(Semaphore::new(2)) })
+        Arc::new(Self {
+            service,
+            gate: Mutex::new(Gate::default()),
+            pending: Arc::new(Semaphore::new(16)),
+            workers: Arc::new(Semaphore::new(2)),
+        })
     }
 
     pub fn enabled(&self) -> bool {
@@ -278,7 +389,11 @@ impl ContextExtractor {
     }
 
     /// Serialize the opt-in switch against commits; toggling drops in-flight results.
-    pub fn configure(&self, enabled: bool, persist: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    pub fn configure(
+        &self,
+        enabled: bool,
+        persist: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut gate = self.gate.lock().map_err(|_| "记忆提取锁不可用")?;
         persist()?;
         if gate.enabled != enabled {
@@ -293,18 +408,33 @@ impl ContextExtractor {
 
     /// Run a scope-changing action (delete, clear, revoke a device, switch project) under the
     /// commit lock; any extraction started before it is discarded instead of committed.
-    pub fn scope_changed<T, E>(&self, scope: &ScopeKey, action: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
-        let mut gate = self.gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    pub fn scope_changed<T, E>(
+        &self,
+        scope: &ScopeKey,
+        action: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = action()?;
         *gate.epochs.entry(scope.clone()).or_default() += 1;
         let id = scope.id().to_owned();
-        gate.rolling.retain(|k, _| k != &id && !k.starts_with(&format!("{id}#")) && !k.ends_with(&format!("person:{id}")));
+        gate.rolling.retain(|k, _| {
+            k != &id && !k.starts_with(&format!("{id}#")) && !k.ends_with(&format!("person:{id}"))
+        });
         Ok(result)
     }
 
     /// Queue one extraction for a finished voice session. `device` is the host's record of
     /// the device model/firmware (needed for troubleshooting experience). Never blocks.
-    pub fn queue(self: &Arc<Self>, access: AccessContext, device: Option<Applicability>, history: &[ChatMessage], llm: Arc<dyn Llm>) -> bool {
+    pub fn queue(
+        self: &Arc<Self>,
+        access: AccessContext,
+        device: Option<Applicability>,
+        history: &[ChatMessage],
+        llm: Arc<dyn Llm>,
+    ) -> bool {
         self.spawn(access, device, history, llm).is_some()
     }
 
@@ -319,17 +449,24 @@ impl ContextExtractor {
         assistant_text: &str,
         llm: Arc<dyn Llm>,
     ) {
-        if access.channel() != Channel::Voice || user_text.trim().is_empty() || assistant_text.trim().is_empty() {
+        if access.channel() != Channel::Voice
+            || user_text.trim().is_empty()
+            || assistant_text.trim().is_empty()
+        {
             return;
         }
         // Personal mode with an unverified speaker must never write to shared device preferences.
         if access.personal_mode() && access.scope_of(ScopeKind::Person).is_none() {
             return;
         }
-        let Some((device_key, flight_key)) = flight_key_for(&access) else { return };
+        let Some((device_key, flight_key)) = flight_key_for(&access) else {
+            return;
+        };
 
         let (realtime_snapshot, batch_to_compact) = {
-            let Ok(mut gate) = self.gate.lock() else { return };
+            let Ok(mut gate) = self.gate.lock() else {
+                return;
+            };
             if !gate.enabled {
                 return;
             }
@@ -343,8 +480,10 @@ impl ContextExtractor {
             let mut batch = None;
             if super::retrieve::should_retrieve(user_text) {
                 let buf = gate.rolling.entry(flight_key).or_default();
-                buf.turns.push(ChatMessage::user(user_text.trim().to_owned()));
-                buf.turns.push(ChatMessage::assistant(assistant_text.trim().to_owned()));
+                buf.turns
+                    .push(ChatMessage::user(user_text.trim().to_owned()));
+                buf.turns
+                    .push(ChatMessage::assistant(assistant_text.trim().to_owned()));
                 let user_turns = buf.turns.iter().filter(|m| m.role == Role::User).count();
                 if user_turns >= ROLLING_TURN_WINDOW {
                     batch = Some(std::mem::take(&mut buf.turns));
@@ -379,7 +518,9 @@ impl ContextExtractor {
         history: &[ChatMessage],
         llm: Arc<dyn Llm>,
     ) -> bool {
-        let Some((_, flight_key)) = flight_key_for(&access) else { return false };
+        let Some((_, flight_key)) = flight_key_for(&access) else {
+            return false;
+        };
         let buffered = self
             .gate
             .lock()
@@ -404,22 +545,33 @@ impl ContextExtractor {
         pref: RealtimePreference,
         snapshot: (u64, Vec<(ScopeKey, u64)>),
     ) -> bool {
-        let Ok(gate) = self.gate.lock() else { return false };
+        let Ok(gate) = self.gate.lock() else {
+            return false;
+        };
         let (generation, epochs) = snapshot;
         if !gate.enabled
             || gate.generation != generation
-            || epochs.iter().any(|(key, epoch)| gate.epochs.get(key).unwrap_or(&0) != epoch)
+            || epochs
+                .iter()
+                .any(|(key, epoch)| gate.epochs.get(key).unwrap_or(&0) != epoch)
         {
             return false;
         }
         let target = if access.personal_mode() {
             access.scope_of(ScopeKind::Person)
         } else {
-            access.scope_of(ScopeKind::Person).or_else(|| access.scope_of(ScopeKind::Device))
+            access
+                .scope_of(ScopeKind::Person)
+                .or_else(|| access.scope_of(ScopeKind::Device))
         };
-        let Some(target) = target.map(|s| s.key().clone()) else { return false };
+        let Some(target) = target.map(|s| s.key().clone()) else {
+            return false;
+        };
         let Some(id) = run_id() else { return false };
-        let Ok(source) = Source::new(SourceKind::ConversationExtraction, Some(&format!("extract:{id}"))) else {
+        let Ok(source) = Source::new(
+            SourceKind::ConversationExtraction,
+            Some(&format!("extract:{id}")),
+        ) else {
             return false;
         };
         let at = now();
@@ -428,9 +580,14 @@ impl ContextExtractor {
             .list(&access, &target, at)
             .unwrap_or_default()
             .into_iter()
-            .filter(|r| r.category == Category::Preference && matches!(r.state(at), RecordState::Active(_)))
+            .filter(|r| {
+                r.category == Category::Preference && matches!(r.state(at), RecordState::Active(_))
+            })
             .collect::<Vec<_>>();
-        if let Some(same) = active_rows.iter().find(|r| same_text(&r.content, &pref.content)) {
+        if let Some(same) = active_rows
+            .iter()
+            .find(|r| same_text(&r.content, &pref.content))
+        {
             let _ = self.service.reinforce(&access, &same.id, at);
             return false;
         }
@@ -439,9 +596,12 @@ impl ContextExtractor {
                 .replace_fragment
                 .as_deref()
                 .is_some_and(|frag| old.content.contains(frag));
-            let matches_slot = pref.slot.is_some() && classify_preference_slot(&old.content) == pref.slot;
+            let matches_slot =
+                pref.slot.is_some() && classify_preference_slot(&old.content) == pref.slot;
             if matches_fragment || matches_slot {
-                let _ = self.service.supersede_voice_preference(&access, &old.id, old.revision, at);
+                let _ = self
+                    .service
+                    .supersede_voice_preference(&access, &old.id, old.revision, at);
             }
         }
         let mut run = ExtractionRun {
@@ -462,11 +622,19 @@ impl ContextExtractor {
             applicability: None,
             expires_at: Some(at + CANDIDATE_TTL_SECONDS),
         };
-        let _ = self.service.commit_extraction(&access, &mut run, vec![(draft, None)], at);
+        let _ = self
+            .service
+            .commit_extraction(&access, &mut run, vec![(draft, None)], at);
         !run.adds.is_empty()
     }
 
-    pub(crate) fn spawn(self: &Arc<Self>, access: AccessContext, device: Option<Applicability>, history: &[ChatMessage], llm: Arc<dyn Llm>) -> Option<tokio::task::JoinHandle<()>> {
+    pub(crate) fn spawn(
+        self: &Arc<Self>,
+        access: AccessContext,
+        device: Option<Applicability>,
+        history: &[ChatMessage],
+        llm: Arc<dyn Llm>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         if access.channel() != Channel::Voice {
             return None;
         }
@@ -486,7 +654,11 @@ impl ContextExtractor {
                 return None;
             }
             gate.in_flight.insert(flight_key.clone());
-            let epochs: Vec<(ScopeKey, u64)> = access.scopes().iter().map(|s| (s.key().clone(), *gate.epochs.get(s.key()).unwrap_or(&0))).collect();
+            let epochs: Vec<(ScopeKey, u64)> = access
+                .scopes()
+                .iter()
+                .map(|s| (s.key().clone(), *gate.epochs.get(s.key()).unwrap_or(&0)))
+                .collect();
             (gate.generation, epochs)
         };
         let this = self.clone();
@@ -501,18 +673,45 @@ impl ContextExtractor {
             }
             let _finish = Finish(this.clone(), flight_key);
             let _pending = pending;
-            let Ok(_worker) = this.workers.clone().acquire_owned().await else { return };
+            let Ok(_worker) = this.workers.clone().acquire_owned().await else {
+                return;
+            };
             let (sender, _receiver) = mpsc::unbounded_channel();
             let known = {
-                let (extractor, access, device, dialog) = (this.clone(), access.clone(), device.clone(), dialog.clone());
-                tokio::task::spawn_blocking(move || extractor.known_for(&access, device.as_ref(), &dialog, now())).await.unwrap_or_default()
+                let (extractor, access, device, dialog) =
+                    (this.clone(), access.clone(), device.clone(), dialog.clone());
+                tokio::task::spawn_blocking(move || {
+                    extractor.known_for(&access, device.as_ref(), &dialog, now())
+                })
+                .await
+                .unwrap_or_default()
             };
-            let messages = [ChatMessage::system(PROMPT), ChatMessage::user(extraction_input(&known, &dialog))];
-            let Ok(Ok(reply)) = tokio::time::timeout(Duration::from_secs(30), llm.chat(&messages, &[], sender)).await else { return };
+            let messages = [
+                ChatMessage::system(PROMPT),
+                ChatMessage::user(extraction_input(&known, &dialog)),
+            ];
+            let Ok(Ok(reply)) =
+                tokio::time::timeout(Duration::from_secs(30), llm.chat(&messages, &[], sender))
+                    .await
+            else {
+                return;
+            };
             let Some(id) = run_id() else { return };
             let started = now();
-            let mut run = ExtractionRun { id: id.clone(), scope: device_key.clone(), started_at: started, finished_at: None, adds: Vec::new(), skipped: Vec::new(), reverted_at: None };
-            let proposals = if reply.tool_calls.is_empty() { parse_operations(&reply.text, &known) } else { Err("tool_calls_rejected") };
+            let mut run = ExtractionRun {
+                id: id.clone(),
+                scope: device_key.clone(),
+                started_at: started,
+                finished_at: None,
+                adds: Vec::new(),
+                skipped: Vec::new(),
+                reverted_at: None,
+            };
+            let proposals = if reply.tool_calls.is_empty() {
+                parse_operations(&reply.text, &known)
+            } else {
+                Err("tool_calls_rejected")
+            };
             let parsed = match proposals {
                 Ok(mut parsed) => {
                     run.skipped = std::mem::take(&mut parsed.skipped);
@@ -523,7 +722,10 @@ impl ContextExtractor {
                     Parsed::default()
                 }
             };
-            let _ = tokio::task::spawn_blocking(move || this.commit(access, device, run, parsed, snapshot)).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                this.commit(access, device, run, parsed, snapshot)
+            })
+            .await;
         }))
     }
 
@@ -531,49 +733,110 @@ impl ContextExtractor {
     /// personal mode, matching model/firmware for hardware-bound categories) in categories the
     /// extractor may create, that share wording with the dialog. At most `MAX_KNOWN`, clipped.
     /// They go to the same model that already receives retrieved memories during the turn.
-    fn known_for(&self, access: &AccessContext, device: Option<&Applicability>, dialog: &str, at: f64) -> Vec<Known> {
+    fn known_for(
+        &self,
+        access: &AccessContext,
+        device: Option<&Applicability>,
+        dialog: &str,
+        at: f64,
+    ) -> Vec<Known> {
         let allowed = SourceKind::ConversationExtraction.allowed_categories();
         let mut scored: Vec<(usize, f64, Known)> = Vec::new();
         for scope in access.scopes() {
-            for row in self.service.list(access, scope.key(), at).unwrap_or_default() {
+            for row in self
+                .service
+                .list(access, scope.key(), at)
+                .unwrap_or_default()
+            {
                 if !allowed.contains(&row.category) || !row.readable(access, at) {
                     continue;
                 }
                 if row.category.needs_applicability() {
-                    let fits = row.applicability.as_ref().zip(device).is_some_and(|(rule, current)| rule.matches(current.device_model(), current.firmware()));
+                    let fits =
+                        row.applicability
+                            .as_ref()
+                            .zip(device)
+                            .is_some_and(|(rule, current)| {
+                                rule.matches(current.device_model(), current.firmware())
+                            });
                     if !fits {
                         continue;
                     }
                 }
-                let Some(points) = super::retrieve::fast_query(&row.content).and_then(|query| super::retrieve::score(dialog, &query)) else { continue };
+                let Some(points) = super::retrieve::fast_query(&row.content)
+                    .and_then(|query| super::retrieve::score(dialog, &query))
+                else {
+                    continue;
+                };
                 let content: String = row.content.chars().take(KNOWN_CHARS).collect();
-                scored.push((points, row.updated_at, Known { id: row.id, category: row.category, content }));
+                scored.push((
+                    points,
+                    row.updated_at,
+                    Known {
+                        id: row.id,
+                        category: row.category,
+                        content,
+                    },
+                ));
             }
         }
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.total_cmp(&a.1)));
-        scored.into_iter().take(MAX_KNOWN).map(|(_, _, known)| known).collect()
+        scored
+            .into_iter()
+            .take(MAX_KNOWN)
+            .map(|(_, _, known)| known)
+            .collect()
     }
 
-    fn commit(&self, access: AccessContext, device: Option<Applicability>, mut run: ExtractionRun, parsed: Parsed, snapshot: (u64, Vec<(ScopeKey, u64)>)) {
+    fn commit(
+        &self,
+        access: AccessContext,
+        device: Option<Applicability>,
+        mut run: ExtractionRun,
+        parsed: Parsed,
+        snapshot: (u64, Vec<(ScopeKey, u64)>),
+    ) {
         let Ok(gate) = self.gate.lock() else { return };
         let (generation, epochs) = snapshot;
         // Switched off, cleared, deleted, revoked or project switched meanwhile: discard.
-        if !gate.enabled || gate.generation != generation || epochs.iter().any(|(key, epoch)| gate.epochs.get(key).unwrap_or(&0) != epoch) {
+        if !gate.enabled
+            || gate.generation != generation
+            || epochs
+                .iter()
+                .any(|(key, epoch)| gate.epochs.get(key).unwrap_or(&0) != epoch)
+        {
             return;
         }
-        let Ok(source) = Source::new(SourceKind::ConversationExtraction, Some(&format!("extract:{}", run.id))) else { return };
+        let Ok(source) = Source::new(
+            SourceKind::ConversationExtraction,
+            Some(&format!("extract:{}", run.id)),
+        ) else {
+            return;
+        };
         let at = now();
         // Proposed again: count it (metadata only; the manifest stays add-only).
         for id in &parsed.again {
             let _ = self.service.reinforce(&access, id, at);
         }
-        let mut existing: HashMap<ScopeKey, Vec<(Option<String>, Category, String)>> = HashMap::new();
+        let mut existing: HashMap<ScopeKey, Vec<(Option<String>, Category, String)>> =
+            HashMap::new();
         let mut drafts = Vec::new();
-        for Proposal { category, content, replaces } in parsed.adds {
+        for Proposal {
+            category,
+            content,
+            replaces,
+        } in parsed.adds
+        {
             let target = match category {
-                Category::Preference if access.personal_mode() => access.scope_of(ScopeKind::Person),
-                Category::Preference => access.scope_of(ScopeKind::Person).or_else(|| access.scope_of(ScopeKind::Device)),
-                Category::TaskContext => access.scope_of(ScopeKind::Project).or_else(|| access.scope_of(ScopeKind::Workspace)),
+                Category::Preference if access.personal_mode() => {
+                    access.scope_of(ScopeKind::Person)
+                }
+                Category::Preference => access
+                    .scope_of(ScopeKind::Person)
+                    .or_else(|| access.scope_of(ScopeKind::Device)),
+                Category::TaskContext => access
+                    .scope_of(ScopeKind::Project)
+                    .or_else(|| access.scope_of(ScopeKind::Workspace)),
                 Category::TroubleshootingExperience => access.scope_of(ScopeKind::Device),
                 _ => None,
             };
@@ -600,10 +863,18 @@ impl ContextExtractor {
             let known = existing.entry(target.clone()).or_insert_with(|| {
                 self.service
                     .list(&access, &target, at)
-                    .map(|rows| rows.into_iter().filter(|r| matches!(r.state(at), RecordState::Active(_))).map(|r| (Some(r.id), r.category, r.content.trim().to_owned())).collect())
+                    .map(|rows| {
+                        rows.into_iter()
+                            .filter(|r| matches!(r.state(at), RecordState::Active(_)))
+                            .map(|r| (Some(r.id), r.category, r.content.trim().to_owned()))
+                            .collect()
+                    })
                     .unwrap_or_default()
             });
-            if let Some((id, _, _)) = known.iter().find(|(_, c, text)| *c == category && same_text(text, &content)) {
+            if let Some((id, _, _)) = known
+                .iter()
+                .find(|(_, c, text)| *c == category && same_text(text, &content))
+            {
                 if let Some(id) = id {
                     let _ = self.service.reinforce(&access, id, at);
                 }
@@ -611,18 +882,23 @@ impl ContextExtractor {
                 continue;
             }
             known.push((None, category, content.clone()));
-            drafts.push((MemoryDraft {
-                scope: target,
-                category,
-                content,
-                verification: Verification::Candidate,
-                source: source.clone(),
-                applicability,
-                expires_at: Some(at + CANDIDATE_TTL_SECONDS),
-            }, replaces));
+            drafts.push((
+                MemoryDraft {
+                    scope: target,
+                    category,
+                    content,
+                    verification: Verification::Candidate,
+                    source: source.clone(),
+                    applicability,
+                    expires_at: Some(at + CANDIDATE_TTL_SECONDS),
+                },
+                replaces,
+            ));
         }
         // Errors are already recorded in the manifest; nothing is retried automatically.
-        let _ = self.service.commit_extraction(&access, &mut run, drafts, at);
+        let _ = self
+            .service
+            .commit_extraction(&access, &mut run, drafts, at);
     }
 }
 
@@ -653,19 +929,30 @@ impl ContextExtraction {
         let assistant_text = messages
             .iter()
             .filter(|m| m.role == Role::Assistant && m.tool_calls.is_empty())
-            .filter_map(|m| m.content.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+            .filter_map(|m| {
+                m.content
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
             .collect::<Vec<_>>()
             .join(" ");
         if user_text.is_empty() || assistant_text.is_empty() {
             return;
         }
         if let Some((access, device)) = self.access.access(context, person) {
-            self.extractor.record_turn(access, device, user_text, &assistant_text, llm);
+            self.extractor
+                .record_turn(access, device, user_text, &assistant_text, llm);
         }
     }
 
     /// Called after a normal disconnect with the committed history; never blocks.
-    pub fn session_closed(&self, context: &crate::conversation::ToolContext, history: &[ChatMessage], llm: Arc<dyn Llm>) -> bool {
+    pub fn session_closed(
+        &self,
+        context: &crate::conversation::ToolContext,
+        history: &[ChatMessage],
+        llm: Arc<dyn Llm>,
+    ) -> bool {
         self.session_closed_for_person(context, None, history, llm)
     }
 

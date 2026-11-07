@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{ProviderKind, Section};
 use crate::local_models::{ModelKind, ModelSpec};
+use crate::models::{ProviderKind, Section};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,12 +126,19 @@ fn default_asr_model() -> String {
 fn default_tts_model() -> String {
     "kokoro".into()
 }
-fn default_on() -> bool { true }
-fn default_barge_in_ms() -> u32 { 400 }
+fn default_on() -> bool {
+    true
+}
+fn default_barge_in_ms() -> u32 {
+    400
+}
 
 pub fn validate_barge_in_ms(ms: u64) -> Result<u32, String> {
-    if (300..=600).contains(&ms) { Ok(ms as u32) }
-    else { Err("插话时长须为 300 ~ 600 毫秒的整数".into()) }
+    if (300..=600).contains(&ms) {
+        Ok(ms as u32)
+    } else {
+        Err("插话时长须为 300 ~ 600 毫秒的整数".into())
+    }
 }
 
 pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-1.14";
@@ -223,33 +230,76 @@ pub fn validate_jev_model(raw: &str) -> Result<String, String> {
     if suffix.is_empty()
         || trimmed.len() > 64
         || suffix.contains("..")
-        || !suffix.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
-        return Err("Jev 模型名称格式不正确（如 typesafe/jev-1.14、onejev_1_6_0_8b 或 laya_multilingual）".into());
+        return Err(
+            "Jev 模型名称格式不正确（如 typesafe/jev-1.14、onejev_1_6_0_8b 或 laya_multilingual）"
+                .into(),
+        );
     }
     Ok(trimmed.to_owned())
 }
 pub fn normalize_hotwords(words: &[String]) -> Result<Vec<String>, String> {
-    if words.len() > 64 { return Err("自定义热词最多 64 条".into()); }
+    if words.len() > 64 {
+        return Err("自定义热词最多 64 条".into());
+    }
     let mut normalized = Vec::new();
     for word in words {
-        if word.chars().any(char::is_control) { return Err("热词不能包含控制字符".into()); }
+        if word.chars().any(char::is_control) {
+            return Err("热词不能包含控制字符".into());
+        }
         let word = word.trim();
-        if word.is_empty() { continue; }
-        if word.chars().count() > 32 { return Err("每条热词最多 32 个字符".into()); }
-        if !normalized.iter().any(|v| v == word) { normalized.push(word.to_owned()); }
+        if word.is_empty() {
+            continue;
+        }
+        if word.chars().count() > 32 {
+            return Err("每条热词最多 32 个字符".into());
+        }
+        if !normalized.iter().any(|v| v == word) {
+            normalized.push(word.to_owned());
+        }
     }
-    if normalized.iter().map(String::len).sum::<usize>() > 4096 { return Err("热词总长度超过 4096 字节".into()); }
+    if normalized.iter().map(String::len).sum::<usize>() > 4096 {
+        return Err("热词总长度超过 4096 字节".into());
+    }
     Ok(normalized)
 }
 
 /// 顺序保留自定义词、材料名称和行业词；运行时只取有界集合，不写入数据库。
 pub fn effective_hotwords(custom: &[String], materials: &[String]) -> Vec<String> {
-    let industry = ["激光", "雕刻", "切割", "功率", "速度", "椴木", "亚克力", "牛皮纸", "急停", "停止", "原点", "毫米"];
+    let industry = [
+        "激光",
+        "雕刻",
+        "切割",
+        "功率",
+        "速度",
+        "椴木",
+        "亚克力",
+        "牛皮纸",
+        "急停",
+        "停止",
+        "原点",
+        "毫米",
+    ];
     let mut words = Vec::new();
-    for word in custom.iter().chain(materials.iter()).map(String::as_str).chain(industry) {
-        if words.len() >= 64 { break; }
-        if word.is_empty() || word.chars().count() > 32 || word.chars().any(char::is_control) || words.iter().any(|v| v == word) { continue; }
+    for word in custom
+        .iter()
+        .chain(materials.iter())
+        .map(String::as_str)
+        .chain(industry)
+    {
+        if words.len() >= 64 {
+            break;
+        }
+        if word.is_empty()
+            || word.chars().count() > 32
+            || word.chars().any(char::is_control)
+            || words.iter().any(|v| v == word)
+        {
+            continue;
+        }
         words.push(word.to_owned());
     }
     words
@@ -304,12 +354,18 @@ pub fn validate_active_persona(raw: &str, custom: &[CustomPersona]) -> Result<St
 
 fn valid_custom_persona_id(id: &str) -> bool {
     id.strip_prefix("custom_").is_some_and(|rest| {
-        (1..=16).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        (1..=16).contains(&rest.len())
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
     })
 }
 
 fn persona_name_key(name: &str) -> String {
-    name.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// 校验并规整自建角色列表：名字不重复、不和内置角色重名，人设沿用补充说明的安全检查。
@@ -338,7 +394,8 @@ pub fn normalize_custom_personas(raw: &[CustomPersona]) -> Result<Vec<CustomPers
         if key.is_empty() {
             return Err("角色名需要包含文字或数字".into());
         }
-        let prompt = normalize_persona_prompt(&role.prompt).map_err(|e| e.replace("补充说明", "角色人设"))?;
+        let prompt = normalize_persona_prompt(&role.prompt)
+            .map_err(|e| e.replace("补充说明", "角色人设"))?;
         if prompt.is_empty() {
             return Err(format!("角色“{name}”需要写人设"));
         }
@@ -348,7 +405,11 @@ pub fn normalize_custom_personas(raw: &[CustomPersona]) -> Result<Vec<CustomPers
         if out.iter().any(|r| persona_name_key(&r.name) == key) {
             return Err(format!("角色名“{name}”和已有角色读起来一样"));
         }
-        out.push(CustomPersona { id: id.to_owned(), name: name.to_owned(), prompt });
+        out.push(CustomPersona {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            prompt,
+        });
     }
     Ok(out)
 }
@@ -368,16 +429,17 @@ pub fn validate_screen_card_style(raw: &str) -> Result<String, String> {
 }
 /// 运动 / 出光 G-code：整词（`G1`）或紧跟参数字母的紧凑写法（`G1X10`、`M3S1000`）都算。
 const MOTION_GCODES: &[&str] = &[
-    "G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03", "G28", "M3", "M03", "M4", "M04", "M5", "M05",
+    "G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03", "G28", "M3", "M03", "M4", "M04", "M5",
+    "M05",
 ];
 
 fn contains_dangerous_gcode_or_grbl(text: &str) -> bool {
     let upper = text.to_ascii_uppercase();
     for token in upper.split(|c: char| !c.is_ascii_alphanumeric() && c != '$' && c != '=') {
         let motion = MOTION_GCODES.iter().any(|code| {
-            token
-                .strip_prefix(code)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_alphabetic()))
+            token.strip_prefix(code).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_alphabetic())
+            })
         });
         if motion {
             return true;
@@ -428,8 +490,22 @@ pub const BUILTIN_ASR_CORRECTIONS: &[(&str, &str)] = &[
 ];
 
 const PROTECTED_STOP_WORDS: &[&str] = &[
-    "停", "急停", "停止", "立刻停", "马上停", "快停", "取消", "停止加工", "暂停",
-    "退出", "再见", "拜拜", "退下", "关闭对话", "确认", "开始",
+    "停",
+    "急停",
+    "停止",
+    "立刻停",
+    "马上停",
+    "快停",
+    "取消",
+    "停止加工",
+    "暂停",
+    "退出",
+    "再见",
+    "拜拜",
+    "退下",
+    "关闭对话",
+    "确认",
+    "开始",
 ];
 
 fn parse_correction_pair(raw: &str) -> Result<Option<(String, String)>, String> {
@@ -497,7 +573,10 @@ pub fn normalize_asr_corrections(entries: &[String]) -> Result<Vec<String>, Stri
 }
 
 /// 合并自定义纠错与内置激光行业同音词（自定义优先覆盖同错词），按错词字数降序排列避免短词截断长词。
-pub fn effective_asr_corrections(include_builtin: bool, custom: &[String]) -> Vec<(String, String)> {
+pub fn effective_asr_corrections(
+    include_builtin: bool,
+    custom: &[String],
+) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for item in custom {
         if let Ok(Some((w, r))) = parse_correction_pair(item)
@@ -690,11 +769,16 @@ impl BuiltinLocal {
             ModelKind::Tts => (self.tts, self.tts_model.as_str()),
             ModelKind::Jev => {
                 let canonical = canonical_local_jev_model(&self.jev_model);
-                (self.jev_filter_enabled && canonical.is_some(), canonical.unwrap_or(self.jev_model.as_str()))
+                (
+                    self.jev_filter_enabled && canonical.is_some(),
+                    canonical.unwrap_or(self.jev_model.as_str()),
+                )
             }
             ModelKind::Speaker => return None,
         };
-        enabled.then(|| crate::local_models::spec_of(id, kind)).flatten()
+        enabled
+            .then(|| crate::local_models::spec_of(id, kind))
+            .flatten()
     }
 }
 
@@ -730,10 +814,18 @@ pub struct BuiltinPlugins {
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NewsSourceKind { #[default] Rss, Newsnow }
+pub enum NewsSourceKind {
+    #[default]
+    Rss,
+    Newsnow,
+}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SearchProvider { #[default] Tavily, Metaso }
+pub enum SearchProvider {
+    #[default]
+    Tavily,
+    Metaso,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewsSource {
     pub id: String,
@@ -746,27 +838,35 @@ pub struct NewsSource {
 impl Default for BuiltinPlugins {
     fn default() -> Self {
         Self {
-            weather_enabled: false, weather_host: String::new(),
-            weather_latitude: None, weather_longitude: None,
+            weather_enabled: false,
+            weather_host: String::new(),
+            weather_latitude: None,
+            weather_longitude: None,
             weather_auth: "api_key".into(),
-            lunar_enabled: false, lunar_utc_offset_minutes: 480,
-            news_enabled: false, news_sources: vec![],
-            search_enabled: false, search_host: "https://api.tavily.com".into(),
-            search_provider: SearchProvider::Tavily, metaso_host: "https://metaso.cn".into(),
-            rag_enabled: false, rag_host: String::new(), rag_dataset_ids: vec![],
+            lunar_enabled: false,
+            lunar_utc_offset_minutes: 480,
+            news_enabled: false,
+            news_sources: vec![],
+            search_enabled: false,
+            search_host: "https://api.tavily.com".into(),
+            search_provider: SearchProvider::Tavily,
+            metaso_host: "https://metaso.cn".into(),
+            rag_enabled: false,
+            rag_host: String::new(),
+            rag_dataset_ids: vec![],
         }
     }
 }
 
 /// NV13: 本机 Claude Code / Codex 的工作目录与可执行文件（2026-10-15 起用户开启后可用）。
 /// 每次运行都要桌面单独批准，且只在严格模式（`MOSS_FUSION_STRICT=1`）下运行。
-#[derive(Debug,Clone,Default,PartialEq,Eq,Serialize,Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BuiltinAgents {
-    pub enabled:bool,
-    pub workspace:String,
-    pub codex_executable:String,
-    pub claude_executable:String,
+    pub enabled: bool,
+    pub workspace: String,
+    pub codex_executable: String,
+    pub claude_executable: String,
 }
 
 /// NV12 independent opt-in vision configuration. Credentials live in SQLite app_secrets.
@@ -810,7 +910,6 @@ pub struct BuiltinMusic {
     pub directory: String,
 }
 
-
 /// NV15 desktop-authored Home Assistant allowlist, never a control channel.
 /// Default disabled. No API tokens, network calls or credentials are stored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -828,11 +927,14 @@ pub struct BuiltinHomeEntity {
     pub enabled: bool,
     pub policy: HomeApprovalPreference,
     #[serde(default)]
-    pub media:Vec<BuiltinHomeMedia>,
+    pub media: Vec<BuiltinHomeMedia>,
 }
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BuiltinHomeMedia {pub id:String,pub media_type:String}
+pub struct BuiltinHomeMedia {
+    pub id: String,
+    pub media_type: String,
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HomeApprovalPreference {
@@ -844,48 +946,80 @@ impl BuiltinHomeAssistant {
     /// Checks inert settings only; NEVER authorizes real Home Assistant I/O.
     pub fn validate_offline(&self) -> Result<(), &'static str> {
         use std::collections::HashSet;
-        if self.enabled { return Err("Home Assistant 真实认证和审批未通过，禁止启用"); }
+        if self.enabled {
+            return Err("Home Assistant 真实认证和审批未通过，禁止启用");
+        }
         if self.base_url.len() > 512 || self.base_url.chars().any(char::is_control) {
             return Err("Home Assistant URL 不符合安全格式");
         }
         if !self.base_url.is_empty() {
-            let url = reqwest::Url::parse(&self.base_url)
-                .map_err(|_| "Home Assistant URL 格式错误")?;
-            if url.scheme() != "https" || url.host_str().is_none()
-                || !url.username().is_empty() || url.password().is_some()
-                || url.query().is_some() || url.fragment().is_some()
-                || url.path() != "/" {
+            let url =
+                reqwest::Url::parse(&self.base_url).map_err(|_| "Home Assistant URL 格式错误")?;
+            if url.scheme() != "https"
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || url.path() != "/"
+            {
                 return Err("必须填写不含账号、密码、参数和子路径的 HTTPS URL");
             }
         }
-        if self.entities.len() > 128 { return Err("最多允许配置128个实体"); }
+        if self.entities.len() > 128 {
+            return Err("最多允许配置128个实体");
+        }
         let mut ids = HashSet::new();
         let mut aliases = HashSet::new();
         for entry in &self.entities {
-            let mut media_ids=HashSet::new();
-            if entry.media.len()>20 || entry.media.iter().any(|m| {
-                entry.entity_id.split('.').next()!=Some("media_player") || !matches!(m.media_type.as_str(),"music"|"playlist")
-                    || !m.id.starts_with("library_") || m.id.len()>100 || !m.id.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'_'|b'-'))
-                    || !media_ids.insert(m.id.clone())
-            }) {return Err("音乐只接受 media_player 的本地 library_ 白名单，最多20项且不可重复");}
+            let mut media_ids = HashSet::new();
+            if entry.media.len() > 20
+                || entry.media.iter().any(|m| {
+                    entry.entity_id.split('.').next() != Some("media_player")
+                        || !matches!(m.media_type.as_str(), "music" | "playlist")
+                        || !m.id.starts_with("library_")
+                        || m.id.len() > 100
+                        || !m
+                            .id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                        || !media_ids.insert(m.id.clone())
+                })
+            {
+                return Err("音乐只接受 media_player 的本地 library_ 白名单，最多20项且不可重复");
+            }
             let Some((domain, name)) = entry.entity_id.split_once('.') else {
                 return Err("实体 ID 格式错误");
             };
-            if !matches!(domain, "light"|"switch"|"climate"|"lock"
-                |"alarm_control_panel"|"cover"|"media_player")
-                || name.is_empty() || entry.entity_id.len() > 128
-                || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()
-                    || matches!(byte,b'_'|b'-')) {
+            if !matches!(
+                domain,
+                "light"
+                    | "switch"
+                    | "climate"
+                    | "lock"
+                    | "alarm_control_panel"
+                    | "cover"
+                    | "media_player"
+            ) || name.is_empty()
+                || entry.entity_id.len() > 128
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
                 return Err("实体 ID 不在允许的设备分类内");
             }
             let alias = entry.alias.trim().to_lowercase();
-            if alias.is_empty() || alias.chars().count() > 64
+            if alias.is_empty()
+                || alias.chars().count() > 64
                 || alias.chars().any(char::is_control)
-                || !ids.insert(entry.entity_id.to_ascii_lowercase()) || !aliases.insert(alias) {
+                || !ids.insert(entry.entity_id.to_ascii_lowercase())
+                || !aliases.insert(alias)
+            {
                 return Err("设备 ID 或别名重复或格式无效");
             }
-            if matches!(domain,"lock"|"alarm_control_panel"|"cover")
-                && entry.policy == HomeApprovalPreference::Allow {
+            if matches!(domain, "lock" | "alarm_control_panel" | "cover")
+                && entry.policy == HomeApprovalPreference::Allow
+            {
                 return Err("门锁、报警和窗帘必须每次独立审批");
             }
         }
@@ -896,10 +1030,19 @@ impl BuiltinHomeAssistant {
         if self.entities.iter().any(|entry| {
             let alias = entry.alias.trim().to_lowercase();
             let looks_like_id = alias.split_once('.').is_some_and(|(domain, name)| {
-                matches!(domain, "light"|"switch"|"climate"|"lock"
-                    |"alarm_control_panel"|"cover"|"media_player")
-                    && !name.is_empty()
-                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'_'|b'-'))
+                matches!(
+                    domain,
+                    "light"
+                        | "switch"
+                        | "climate"
+                        | "lock"
+                        | "alarm_control_panel"
+                        | "cover"
+                        | "media_player"
+                ) && !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
             });
             alias != entry.entity_id.to_ascii_lowercase() && (ids.contains(&alias) || looks_like_id)
         }) {
@@ -948,7 +1091,7 @@ pub struct VoiceSettings {
     pub builtin_models: BuiltinModels,
     /// NV13 本机 Agent（默认关闭；开启与每次运行都要用户在电脑上确认）。
     #[serde(default)]
-    pub builtin_agents:BuiltinAgents,
+    pub builtin_agents: BuiltinAgents,
     /// NV15 inert Home Assistant settings, disabled until real authorization.
     #[serde(default)]
     pub builtin_home: BuiltinHomeAssistant,
@@ -966,7 +1109,7 @@ pub struct VoiceSettings {
     pub builtin_memory_enabled: bool,
     /// Private opt-in only; calibration is a separate fail-closed prerequisite.
     #[serde(default)]
-    pub builtin_person_memory_enabled:bool,
+    pub builtin_person_memory_enabled: bool,
     /// NV19: long-term context switches and current project, all off by default.
     #[serde(default)]
     pub builtin_context: BuiltinContext,
@@ -994,12 +1137,12 @@ impl Default for VoiceSettings {
             builtin_http_port: default_builtin_http_port(),
             builtin_models: BuiltinModels::default(),
             builtin_plugins: BuiltinPlugins::default(),
-            builtin_agents:BuiltinAgents::default(),
+            builtin_agents: BuiltinAgents::default(),
             builtin_home: BuiltinHomeAssistant::default(),
             builtin_music: BuiltinMusic::default(),
             builtin_vision: BuiltinVision::default(),
             builtin_memory_enabled: false,
-            builtin_person_memory_enabled:false,
+            builtin_person_memory_enabled: false,
             builtin_context: BuiltinContext::default(),
             builtin_local: BuiltinLocal::default(),
             builtin_device_prefs: std::collections::BTreeMap::new(),
@@ -1011,7 +1154,9 @@ impl VoiceSettings {
     /// 某个分区实际是否可用：本地开关打开且模型已安装，或云端已配置（大模型只有云端）。
     pub fn builtin_section_ready(&self, section: Section, models_root: &Path) -> bool {
         let local = |kind| {
-            self.builtin_local.selected(kind).is_some_and(|spec| crate::local_models::installed(models_root, spec))
+            self.builtin_local
+                .selected(kind)
+                .is_some_and(|spec| crate::local_models::installed(models_root, spec))
         };
         match section {
             Section::Llm => self.builtin_models.llm.is_some(),
@@ -1022,7 +1167,9 @@ impl VoiceSettings {
 
     /// 三个分区都可用时内置服务以对话模式运行。
     pub fn builtin_chat_ready(&self, models_root: &Path) -> bool {
-        Section::ALL.into_iter().all(|section| self.builtin_section_ready(section, models_root))
+        Section::ALL
+            .into_iter()
+            .all(|section| self.builtin_section_ready(section, models_root))
     }
 
     /// 服务端配置文件 `data/.config.yaml` 的位置（未设置目录时为空）。
@@ -1043,7 +1190,9 @@ fn read_root(settings_file: &Path) -> serde_json::Map<String, serde_json::Value>
         .unwrap_or_default()
 }
 
-fn read_root_checked(settings_file: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+fn read_root_checked(
+    settings_file: &Path,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     match std::fs::read(settings_file) {
         Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(serde_json::Map::new()),
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -1055,7 +1204,10 @@ fn read_root_checked(settings_file: &Path) -> Result<serde_json::Map<String, ser
     }
 }
 
-fn write_root(settings_file: &Path, root: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+fn write_root(
+    settings_file: &Path,
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
     if let Some(parent) = settings_file.parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("创建运行目录失败: {error}"))?;
     }
@@ -1148,7 +1300,11 @@ pub fn mcp_endpoint(settings_file: &Path) -> Option<String> {
 }
 
 /// 一次写入顶层 `mcp_endpoint` 与 `voice`（链路切换用，避免中途状态）。`None` 表示删除 `mcp_endpoint`。
-pub fn save_with_endpoint(settings_file: &Path, voice: &VoiceSettings, endpoint: Option<&str>) -> Result<(), String> {
+pub fn save_with_endpoint(
+    settings_file: &Path,
+    voice: &VoiceSettings,
+    endpoint: Option<&str>,
+) -> Result<(), String> {
     save_all(settings_file, voice, Some(endpoint), None, None)
 }
 
@@ -1165,7 +1321,13 @@ pub fn disabled_tools(settings_file: &Path) -> Vec<String> {
 fn string_list(root: &serde_json::Map<String, serde_json::Value>, key: &str) -> Vec<String> {
     root.get(key)
         .and_then(serde_json::Value::as_array)
-        .map(|items| items.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1178,7 +1340,14 @@ pub fn save_all(
     extra_endpoints: Option<&[String]>,
     disabled_tools: Option<&[String]>,
 ) -> Result<(), String> {
-    save_all_inner(settings_file, voice, endpoint, extra_endpoints, disabled_tools, None)
+    save_all_inner(
+        settings_file,
+        voice,
+        endpoint,
+        extra_endpoints,
+        disabled_tools,
+        None,
+    )
 }
 
 fn apply_voice_to_root(
@@ -1189,9 +1358,18 @@ fn apply_voice_to_root(
     disabled_tools: Option<&[String]>,
     jev_feedback: Option<bool>,
 ) -> Result<(), String> {
-    let external = root.get("voice").and_then(|v| v.get("mcp_servers")).cloned();
-    let home = root.get("voice").and_then(|v| v.get("builtin_home")).cloned();
-    let home_revision = root.get("voice").and_then(|v| v.get("builtin_home_revision")).cloned();
+    let external = root
+        .get("voice")
+        .and_then(|v| v.get("mcp_servers"))
+        .cloned();
+    let home = root
+        .get("voice")
+        .and_then(|v| v.get("builtin_home"))
+        .cloned();
+    let home_revision = root
+        .get("voice")
+        .and_then(|v| v.get("builtin_home_revision"))
+        .cloned();
     let mut updated = serde_json::to_value(voice).map_err(|error| error.to_string())?;
     // Generic saves must not overwrite independently maintained MCP or Home
     // settings; in particular, a stale voice form cannot undo home revocation.
@@ -1216,14 +1394,20 @@ fn apply_voice_to_root(
     if let Some(endpoint) = endpoint {
         match endpoint.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {
-                root.insert("mcp_endpoint".into(), serde_json::Value::String(value.to_owned()));
+                root.insert(
+                    "mcp_endpoint".into(),
+                    serde_json::Value::String(value.to_owned()),
+                );
             }
             None => {
                 root.remove("mcp_endpoint");
             }
         }
     }
-    for (key, list) in [("mcp_extra_endpoints", extra_endpoints), ("mcp_disabled_tools", disabled_tools)] {
+    for (key, list) in [
+        ("mcp_extra_endpoints", extra_endpoints),
+        ("mcp_disabled_tools", disabled_tools),
+    ] {
         match list {
             Some([]) => {
                 root.remove(key);
@@ -1250,7 +1434,14 @@ fn save_all_inner(
 ) -> Result<(), String> {
     laser_contracts::with_settings_file_lock(|| {
         let mut root = read_root_checked(settings_file)?;
-        apply_voice_to_root(&mut root, voice, endpoint, extra_endpoints, disabled_tools, jev_feedback)?;
+        apply_voice_to_root(
+            &mut root,
+            voice,
+            endpoint,
+            extra_endpoints,
+            disabled_tools,
+            jev_feedback,
+        )?;
         write_root(settings_file, &root)
     })
 }
@@ -1258,15 +1449,23 @@ fn save_all_inner(
 /// Strict MCP read: a damaged settings file must not silently become an empty server list.
 pub fn read_mcp_servers(file: &Path) -> Result<Vec<moss_mcp_client::ServerConfig>, String> {
     let root = strict_root(file)?;
-    let value = root.get("voice").and_then(|v| v.get("mcp_servers")).cloned().unwrap_or_else(|| serde_json::json!([]));
-    let servers = serde_json::from_value::<Vec<moss_mcp_client::ServerConfig>>(value).map_err(|_| "第三方 MCP 配置格式不正确")?;
+    let value = root
+        .get("voice")
+        .and_then(|v| v.get("mcp_servers"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let servers = serde_json::from_value::<Vec<moss_mcp_client::ServerConfig>>(value)
+        .map_err(|_| "第三方 MCP 配置格式不正确")?;
     moss_mcp_client::validate_servers(&servers).map_err(|error| error.to_string())?;
     Ok(servers)
 }
 
 fn strict_root(file: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     match std::fs::read(file) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v.as_object().cloned()).ok_or_else(|| "设置文件损坏，未覆盖原文件".into()),
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .ok_or_else(|| "设置文件损坏，未覆盖原文件".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
         Err(_) => Err("无法读取设置文件".into()),
     }
@@ -1289,17 +1488,23 @@ fn home_snapshot(
     let Some(voice) = root.get("voice") else {
         return Ok((BuiltinHomeAssistant::default(), 0));
     };
-    let voice = voice.as_object().ok_or(HomeOfflineError::Invalid("语音配置格式无效"))?;
+    let voice = voice
+        .as_object()
+        .ok_or(HomeOfflineError::Invalid("语音配置格式无效"))?;
     let home = voice
         .get("builtin_home")
-        .map(|value| serde_json::from_value::<BuiltinHomeAssistant>(value.clone())
-            .map_err(|_| HomeOfflineError::Invalid("Home Assistant 配置已损坏")))
+        .map(|value| {
+            serde_json::from_value::<BuiltinHomeAssistant>(value.clone())
+                .map_err(|_| HomeOfflineError::Invalid("Home Assistant 配置已损坏"))
+        })
         .transpose()?
         .unwrap_or_default();
     home.validate_offline().map_err(HomeOfflineError::Invalid)?;
     let revision = match voice.get("builtin_home_revision") {
         None => 0,
-        Some(value) => value.as_u64().filter(|v| *v <= HOME_REVISION_MAX)
+        Some(value) => value
+            .as_u64()
+            .filter(|v| *v <= HOME_REVISION_MAX)
             .ok_or(HomeOfflineError::Invalid("Home Assistant 配置版本无效"))?,
     };
     Ok((home, revision))
@@ -1307,9 +1512,7 @@ fn home_snapshot(
 
 /// Strict status read: unlike generic voice settings, corruption is never
 /// silently translated to an empty, seemingly safe Home Assistant allowlist.
-pub fn read_home_offline(
-    file: &Path,
-) -> Result<(BuiltinHomeAssistant, u64), HomeOfflineError> {
+pub fn read_home_offline(file: &Path) -> Result<(BuiltinHomeAssistant, u64), HomeOfflineError> {
     let root = strict_root(file).map_err(HomeOfflineError::Storage)?;
     home_snapshot(&root)
 }
@@ -1345,12 +1548,14 @@ pub fn save_home_offline(
             serde_json::to_value(next)
                 .map_err(|_| HomeOfflineError::Invalid("Home Assistant 配置序列化失败"))?,
         );
-        voice.insert("builtin_home_revision".into(), serde_json::json!(updated_revision));
+        voice.insert(
+            "builtin_home_revision".into(),
+            serde_json::json!(updated_revision),
+        );
         write_root(file, &root).map_err(HomeOfflineError::Storage)?;
         Ok(updated_revision)
     })
 }
-
 
 /// NV15 portable Home profile format; never contains app_secrets, DPAPI
 /// envelopes, approvals, client tokens, voice grants, or task history.
@@ -1389,8 +1594,7 @@ pub fn export_home_portable(file: &Path) -> Result<String, HomeOfflineError> {
 /// Parse an untrusted, potentially transferred JSON backup. Reject unknown
 /// fields including token, ciphertext, grants and approvals. A restore never
 /// auto-activates an entity or preserves automatic permission preferences.
-pub fn validate_home_portable(data: &[u8])
-    -> Result<BuiltinHomeAssistant, HomeOfflineError> {
+pub fn validate_home_portable(data: &[u8]) -> Result<BuiltinHomeAssistant, HomeOfflineError> {
     if data.is_empty() || data.len() > MAX_HOME_BACKUP_BYTES {
         return Err(HomeOfflineError::Invalid("备份为空或超过64KiB"));
     }
@@ -1399,16 +1603,23 @@ pub fn validate_home_portable(data: &[u8])
     if safe.format != HOME_PORTABLE_FORMAT || safe.credentials != "reenter_on_restore" {
         return Err(HomeOfflineError::Invalid("备份来源格式或凭据策略不受支持"));
     }
-    safe.home.validate_offline().map_err(HomeOfflineError::Invalid)?;
+    safe.home
+        .validate_offline()
+        .map_err(HomeOfflineError::Invalid)?;
     // Older portable-v1 files might still carry a host URL or media IDs.
     // Treat imported data as untrusted, always sanitize again at restore.
     let config = home_transfer::sanitize(safe.home);
-    config.validate_offline().map_err(HomeOfflineError::Invalid)?;
+    config
+        .validate_offline()
+        .map_err(HomeOfflineError::Invalid)?;
     Ok(config)
 }
 
 /// Dedicated desktop write; preserves all other voice and root settings.
-pub fn save_mcp_servers(file: &Path, servers: &[moss_mcp_client::ServerConfig]) -> Result<(), String> {
+pub fn save_mcp_servers(
+    file: &Path,
+    servers: &[moss_mcp_client::ServerConfig],
+) -> Result<(), String> {
     moss_mcp_client::validate_servers(servers).map_err(|error| error.to_string())?;
     laser_contracts::with_settings_file_lock(|| {
         let mut root = strict_root(file)?;
@@ -1428,8 +1639,6 @@ pub fn save_mcp_servers(file: &Path, servers: &[moss_mcp_client::ServerConfig]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
 
     #[test]
     fn nv15_portable_profile_excludes_secrets_and_resets_all_authorizations() {
@@ -1454,8 +1663,8 @@ mod tests {
             },
             "other_private_secret":fake_token
         });
-        std::fs::write(&origin,initial.to_string()).unwrap();
-        let backup=export_home_portable(&origin).unwrap();
+        std::fs::write(&origin, initial.to_string()).unwrap();
+        let backup = export_home_portable(&origin).unwrap();
         assert!(!backup.contains(fake_token));
         assert!(!backup.contains("builtin_llm") && !backup.contains("mcp_servers"));
         assert!(!backup.contains("other_private_secret") && !backup.contains("home_voice_grant"));
@@ -1463,39 +1672,56 @@ mod tests {
         assert!(!backup.contains("ha.example.test"));
         assert!(!backup.contains("media_player_private_library_id"));
         assert!(backup.contains("reenter_on_restore"));
-        let restored=validate_home_portable(backup.as_bytes()).unwrap();
+        let restored = validate_home_portable(backup.as_bytes()).unwrap();
         assert!(restored.base_url.is_empty());
-        assert!(restored.entities.iter().all(|entry|entry.media.is_empty()));
+        assert!(restored.entities.iter().all(|entry| entry.media.is_empty()));
         assert!(!restored.enabled);
-        assert!(restored.entities.iter().all(|e|
-            !e.enabled && e.policy == HomeApprovalPreference::Ask));
-        assert_eq!(restored.entities.len(),2);
-        assert_eq!(save_home_offline(&destination,&restored,0).unwrap(),1);
-        let (roundtrip,rev)=read_home_offline(&destination).unwrap();
-        assert_eq!(rev,1);
-        assert_eq!(roundtrip,restored);
-        assert!(!std::fs::read_to_string(&destination).unwrap().contains(fake_token));
+        assert!(
+            restored
+                .entities
+                .iter()
+                .all(|e| !e.enabled && e.policy == HomeApprovalPreference::Ask)
+        );
+        assert_eq!(restored.entities.len(), 2);
+        assert_eq!(save_home_offline(&destination, &restored, 0).unwrap(), 1);
+        let (roundtrip, rev) = read_home_offline(&destination).unwrap();
+        assert_eq!(rev, 1);
+        assert_eq!(roundtrip, restored);
+        assert!(
+            !std::fs::read_to_string(&destination)
+                .unwrap()
+                .contains(fake_token)
+        );
     }
     #[test]
     fn nv15_portable_profile_rejects_credentials_nested_or_old_schema() {
-        let temp=tempfile::tempdir().unwrap();
-        let cfg=temp.path().join("settings.json");
-        let backup=export_home_portable(&cfg).unwrap();
-        let mut value: serde_json::Value=serde_json::from_str(&backup).unwrap();
-        for field in ["token","dpapi","app_secrets","approvals","voice_control_consent"] {
-            value[field]=serde_json::json!("SYNTHETIC_CREDENTIAL");
-            assert!(validate_home_portable(value.to_string().as_bytes()).is_err(),"{field}");
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = temp.path().join("settings.json");
+        let backup = export_home_portable(&cfg).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&backup).unwrap();
+        for field in [
+            "token",
+            "dpapi",
+            "app_secrets",
+            "approvals",
+            "voice_control_consent",
+        ] {
+            value[field] = serde_json::json!("SYNTHETIC_CREDENTIAL");
+            assert!(
+                validate_home_portable(value.to_string().as_bytes()).is_err(),
+                "{field}"
+            );
             value.as_object_mut().unwrap().remove(field);
         }
-        value["home"]["token"]=serde_json::json!("LEAK");
+        value["home"]["token"] = serde_json::json!("LEAK");
         assert!(validate_home_portable(value.to_string().as_bytes()).is_err());
         value["home"].as_object_mut().unwrap().remove("token");
-        value["credentials"]=serde_json::json!("include");
+        value["credentials"] = serde_json::json!("include");
         assert!(validate_home_portable(value.to_string().as_bytes()).is_err());
-        value["credentials"]=serde_json::json!("reenter_on_restore");
-        value["format"]=serde_json::json!("moss-home-profile-v0");
+        value["credentials"] = serde_json::json!("reenter_on_restore");
+        value["format"] = serde_json::json!("moss-home-profile-v0");
         assert!(validate_home_portable(value.to_string().as_bytes()).is_err());
-        assert!(validate_home_portable(&vec![b'a';65537]).is_err());
+        assert!(validate_home_portable(&vec![b'a'; 65537]).is_err());
         assert!(validate_home_portable(b"{}").is_err());
     }
     #[test]
@@ -1503,24 +1729,36 @@ mod tests {
         assert!(!BuiltinHomeAssistant::default().enabled);
         assert!(BuiltinHomeAssistant::default().validate_offline().is_ok());
         let valid = BuiltinHomeAssistant {
-            enabled:false, base_url:"https://ha.example.test:8123/".into(),
-            entities:vec![BuiltinHomeEntity{
-                entity_id:"light.desk".into(),alias:"书桌灯".into(),
-                enabled:true,policy:HomeApprovalPreference::Ask,media:vec![],
+            enabled: false,
+            base_url: "https://ha.example.test:8123/".into(),
+            entities: vec![BuiltinHomeEntity {
+                entity_id: "light.desk".into(),
+                alias: "书桌灯".into(),
+                enabled: true,
+                policy: HomeApprovalPreference::Ask,
+                media: vec![],
             }],
         };
         assert!(valid.validate_offline().is_ok());
         for enabled in [true] {
-            let next = BuiltinHomeAssistant { enabled, ..valid.clone() };
+            let next = BuiltinHomeAssistant {
+                enabled,
+                ..valid.clone()
+            };
             assert!(next.validate_offline().is_err());
         }
         for url in [
-            "http://127.0.0.1:8123/", "https://user:secret@ha.example.test/",
+            "http://127.0.0.1:8123/",
+            "https://user:secret@ha.example.test/",
             "https://ha.example.test/api/services/light/turn_on",
             "https://ha.example.test/?token=secret",
-            "file:///C:/private","https://ha.example.test/#authorization",
+            "file:///C:/private",
+            "https://ha.example.test/#authorization",
         ] {
-            let next = BuiltinHomeAssistant { base_url:url.into(), ..valid.clone() };
+            let next = BuiltinHomeAssistant {
+                base_url: url.into(),
+                ..valid.clone()
+            };
             assert!(next.validate_offline().is_err(), "{url}");
         }
         let credential = serde_json::json!({
@@ -1534,36 +1772,61 @@ mod tests {
     #[test]
     fn nv15_home_entity_allowlist_never_grants_dangerous_device_automatic_control() {
         let entry = BuiltinHomeEntity {
-            entity_id:"lock.front".into(),alias:"门锁".into(),
-            enabled:true,policy:HomeApprovalPreference::Allow,media:vec![],
+            entity_id: "lock.front".into(),
+            alias: "门锁".into(),
+            enabled: true,
+            policy: HomeApprovalPreference::Allow,
+            media: vec![],
         };
-        let base = BuiltinHomeAssistant{
-            enabled:false,base_url:String::new(),entities:vec![entry.clone()],
+        let base = BuiltinHomeAssistant {
+            enabled: false,
+            base_url: String::new(),
+            entities: vec![entry.clone()],
         };
         assert!(base.validate_offline().is_err());
-        for id in ["alarm_control_panel.home","cover.blinds"] {
-            let next = BuiltinHomeAssistant{
-                entities:vec![BuiltinHomeEntity{entity_id:id.into(),..entry.clone()}],
+        for id in ["alarm_control_panel.home", "cover.blinds"] {
+            let next = BuiltinHomeAssistant {
+                entities: vec![BuiltinHomeEntity {
+                    entity_id: id.into(),
+                    ..entry.clone()
+                }],
                 ..base.clone()
             };
             assert!(next.validate_offline().is_err());
         }
-        for id in ["../../etc/passwd","light.desk/../../secrets",
-            "script.shell_command","automation.turn_on","light.desk?key=secret"] {
-            let next = BuiltinHomeAssistant{
-                entities:vec![BuiltinHomeEntity{
-                    entity_id:id.into(),policy:HomeApprovalPreference::Ask,..entry.clone()
+        for id in [
+            "../../etc/passwd",
+            "light.desk/../../secrets",
+            "script.shell_command",
+            "automation.turn_on",
+            "light.desk?key=secret",
+        ] {
+            let next = BuiltinHomeAssistant {
+                entities: vec![BuiltinHomeEntity {
+                    entity_id: id.into(),
+                    policy: HomeApprovalPreference::Ask,
+                    ..entry.clone()
                 }],
                 ..base.clone()
             };
             assert!(next.validate_offline().is_err(), "{id}");
         }
         let duplicate = BuiltinHomeAssistant {
-            entities:vec![
-                BuiltinHomeEntity { entity_id:"light.desk".into(),alias:"台灯".into(),
-                    enabled:true,policy:HomeApprovalPreference::Ask,media:vec![] },
-                BuiltinHomeEntity { entity_id:"switch.fan".into(),alias:" 台灯 ".into(),
-                    enabled:true,policy:HomeApprovalPreference::Ask,media:vec![] },
+            entities: vec![
+                BuiltinHomeEntity {
+                    entity_id: "light.desk".into(),
+                    alias: "台灯".into(),
+                    enabled: true,
+                    policy: HomeApprovalPreference::Ask,
+                    media: vec![],
+                },
+                BuiltinHomeEntity {
+                    entity_id: "switch.fan".into(),
+                    alias: " 台灯 ".into(),
+                    enabled: true,
+                    policy: HomeApprovalPreference::Ask,
+                    media: vec![],
+                },
             ],
             ..base
         };
@@ -1573,15 +1836,23 @@ mod tests {
     #[test]
     fn nv15_saved_aliases_cannot_shadow_another_entity_id() {
         let first = BuiltinHomeEntity {
-            entity_id: "light.desk".into(), alias: "台灯".into(),
-            enabled: true, policy: HomeApprovalPreference::Ask,media:vec![],
+            entity_id: "light.desk".into(),
+            alias: "台灯".into(),
+            enabled: true,
+            policy: HomeApprovalPreference::Ask,
+            media: vec![],
         };
         let second = BuiltinHomeEntity {
-            entity_id: "switch.fan".into(), alias: "风扇".into(),
-            enabled: false, policy: HomeApprovalPreference::Ask,media:vec![],
+            entity_id: "switch.fan".into(),
+            alias: "风扇".into(),
+            enabled: false,
+            policy: HomeApprovalPreference::Ask,
+            media: vec![],
         };
         let mut settings = BuiltinHomeAssistant {
-            enabled: false, base_url: String::new(), entities: vec![first, second],
+            enabled: false,
+            base_url: String::new(),
+            entities: vec![first, second],
         };
         assert!(settings.validate_offline().is_ok());
         settings.entities[0].alias = " SWITCH.FAN ".into();
@@ -1591,11 +1862,17 @@ mod tests {
             assert!(settings.validate_offline().is_err(), "{alias}");
         }
         settings.entities[0].alias = "light.desk".into();
-        assert!(settings.validate_offline().is_ok(), "own entity ID remains unambiguous");
+        assert!(
+            settings.validate_offline().is_ok(),
+            "own entity ID remains unambiguous"
+        );
         settings.entities[1].enabled = true;
         assert!(settings.validate_offline().is_ok());
         settings.entities[1].entity_id = "light.DESK".into();
-        assert!(settings.validate_offline().is_err(), "case-variant IDs are duplicates");
+        assert!(
+            settings.validate_offline().is_err(),
+            "case-variant IDs are duplicates"
+        );
     }
     #[test]
     fn nv15_generic_settings_cannot_introduce_ha_policy_on_fresh_install() {
@@ -1624,26 +1901,37 @@ mod tests {
             enabled: false,
             base_url: "https://ha.example.test:8123/".into(),
             entities: vec![BuiltinHomeEntity {
-                entity_id: "light.desk".into(), alias: "台灯".into(),
-                enabled: true, policy: HomeApprovalPreference::Ask,media:vec![],
+                entity_id: "light.desk".into(),
+                alias: "台灯".into(),
+                enabled: true,
+                policy: HomeApprovalPreference::Ask,
+                media: vec![],
             }],
         };
         assert_eq!(save_home_offline(&file, &home, 0), Ok(1));
         let unchanged = std::fs::read(&file).unwrap();
-        assert_eq!(save_home_offline(&file, &home, 0), Err(HomeOfflineError::Conflict));
+        assert_eq!(
+            save_home_offline(&file, &home, 0),
+            Err(HomeOfflineError::Conflict)
+        );
         assert_eq!(std::fs::read(&file).unwrap(), unchanged);
         assert_eq!(save_home_offline(&file, &home, 1), Ok(1));
         assert_eq!(std::fs::read(&file).unwrap(), unchanged);
 
         home.entities.clear(); // A later desktop revokes the visible target.
         assert_eq!(save_home_offline(&file, &home, 1), Ok(2));
-        assert_eq!(save_home_offline(&file, &BuiltinHomeAssistant::default(), 1),
-                   Err(HomeOfflineError::Conflict));
+        assert_eq!(
+            save_home_offline(&file, &BuiltinHomeAssistant::default(), 1),
+            Err(HomeOfflineError::Conflict)
+        );
 
         // Saving a stale whole voice object must not restore the entity.
         save(&file, &old_settings).unwrap();
         assert_eq!(read_home_offline(&file).unwrap(), (home, 2));
-        assert_eq!(load(&file).builtin_music.directory, "existing-music-setting");
+        assert_eq!(
+            load(&file).builtin_music.directory,
+            "existing-music-setting"
+        );
         let root = strict_root(&file).unwrap();
         assert!(root["voice"].get("builtin_home_revision").is_some());
     }
@@ -1654,22 +1942,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         let gate = Arc::new(Barrier::new(3));
-        let handles: Vec<_> = (0..2).map(|n| {
-            let file = file.clone();
-            let gate = Arc::clone(&gate);
-            std::thread::spawn(move || {
-                let next = BuiltinHomeAssistant {
-                    enabled: false, base_url: format!("https://ha{n}.example.test/"),
-                    entities: vec![],
-                };
-                gate.wait();
-                save_home_offline(&file, &next, 0)
+        let handles: Vec<_> = (0..2)
+            .map(|n| {
+                let file = file.clone();
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    let next = BuiltinHomeAssistant {
+                        enabled: false,
+                        base_url: format!("https://ha{n}.example.test/"),
+                        entities: vec![],
+                    };
+                    gate.wait();
+                    save_home_offline(&file, &next, 0)
+                })
             })
-        }).collect();
+            .collect();
         gate.wait();
-        let results: Vec<_> = handles.into_iter().map(|join| join.join().unwrap()).collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect();
         assert_eq!(results.iter().filter(|result| **result == Ok(1)).count(), 1);
-        assert_eq!(results.iter().filter(|result| **result == Err(HomeOfflineError::Conflict)).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(HomeOfflineError::Conflict))
+                .count(),
+            1
+        );
         let (saved, revision) = read_home_offline(&file).unwrap();
         assert_eq!(revision, 1);
         assert!(saved.base_url.starts_with("https://ha"));
@@ -1679,22 +1979,41 @@ mod tests {
     fn nv15_home_corrupt_revision_and_unsafe_settings_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
-        std::fs::write(&file, r#"{"other":"keep","voice":{"builtin_home_revision":"bad"}}"#).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"other":"keep","voice":{"builtin_home_revision":"bad"}}"#,
+        )
+        .unwrap();
         let before = std::fs::read(&file).unwrap();
-        assert!(matches!(read_home_offline(&file), Err(HomeOfflineError::Invalid(_))));
-        assert!(matches!(save_home_offline(&file, &BuiltinHomeAssistant::default(), 0),
-            Err(HomeOfflineError::Invalid(_))));
+        assert!(matches!(
+            read_home_offline(&file),
+            Err(HomeOfflineError::Invalid(_))
+        ));
+        assert!(matches!(
+            save_home_offline(&file, &BuiltinHomeAssistant::default(), 0),
+            Err(HomeOfflineError::Invalid(_))
+        ));
         assert_eq!(std::fs::read(&file).unwrap(), before);
 
         std::fs::write(&file, r#"{"other":"keep","voice":{"builtin_home":{"enabled":true,"base_url":"","entities":[]}}}"#).unwrap();
-        assert!(matches!(read_home_offline(&file), Err(HomeOfflineError::Invalid(_))));
-        assert!(matches!(save_home_offline(&file, &BuiltinHomeAssistant::default(), 0),
-            Err(HomeOfflineError::Invalid(_))));
+        assert!(matches!(
+            read_home_offline(&file),
+            Err(HomeOfflineError::Invalid(_))
+        ));
+        assert!(matches!(
+            save_home_offline(&file, &BuiltinHomeAssistant::default(), 0),
+            Err(HomeOfflineError::Invalid(_))
+        ));
 
         std::fs::write(&file, b"not-json").unwrap();
-        assert!(matches!(read_home_offline(&file), Err(HomeOfflineError::Storage(_))));
-        assert!(matches!(save_home_offline(&file, &BuiltinHomeAssistant::default(), 0),
-            Err(HomeOfflineError::Storage(_))));
+        assert!(matches!(
+            read_home_offline(&file),
+            Err(HomeOfflineError::Storage(_))
+        ));
+        assert!(matches!(
+            save_home_offline(&file, &BuiltinHomeAssistant::default(), 0),
+            Err(HomeOfflineError::Storage(_))
+        ));
         assert_eq!(std::fs::read(&file).unwrap(), b"not-json");
     }
 
@@ -1703,7 +2022,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         assert_eq!(load(&file), VoiceSettings::default());
-        std::fs::write(&file, br#"{"web_port": 9666, "mcp_endpoint": "wss://example.test/mcp/?token=t"}"#).unwrap();
+        std::fs::write(
+            &file,
+            br#"{"web_port": 9666, "mcp_endpoint": "wss://example.test/mcp/?token=t"}"#,
+        )
+        .unwrap();
         let voice = load(&file);
         assert_eq!(voice.mode, VoiceMode::Official);
         assert_eq!(voice.args, vec!["app.py".to_string()]);
@@ -1715,22 +2038,44 @@ mod tests {
         assert_eq!(load(&file).mode, VoiceMode::Builtin);
         assert!(load(&file).builtin_models.is_empty());
         assert_eq!(load(&file).builtin_local, BuiltinLocal::default());
-        assert!(!load(&file).builtin_memory_enabled, "旧配置不能自动开启会话记忆");
-        assert!(!load(&file).builtin_person_memory_enabled, "旧配置不能自动开启按人记忆");
-        assert_eq!(load(&file).builtin_context, BuiltinContext::default(), "旧配置不能自动开启长期记忆检索或提取");
+        assert!(
+            !load(&file).builtin_memory_enabled,
+            "旧配置不能自动开启会话记忆"
+        );
+        assert!(
+            !load(&file).builtin_person_memory_enabled,
+            "旧配置不能自动开启按人记忆"
+        );
+        assert_eq!(
+            load(&file).builtin_context,
+            BuiltinContext::default(),
+            "旧配置不能自动开启长期记忆检索或提取"
+        );
         assert!(!load(&file).builtin_home.enabled);
         assert!(load(&file).builtin_home.entities.is_empty());
         assert!(!load(&file).builtin_music.enabled);
         assert!(load(&file).builtin_music.directory.is_empty());
-        let plugins=load(&file).builtin_plugins;
-        assert!(!plugins.weather_enabled && !plugins.lunar_enabled && !plugins.news_enabled
-            && !plugins.search_enabled && !plugins.rag_enabled);
+        let plugins = load(&file).builtin_plugins;
+        assert!(
+            !plugins.weather_enabled
+                && !plugins.lunar_enabled
+                && !plugins.news_enabled
+                && !plugins.search_enabled
+                && !plugins.rag_enabled
+        );
         assert!(plugins.news_sources.is_empty() && plugins.rag_dataset_ids.is_empty());
-        std::fs::write(&file, br#"{"voice": {"mode": "self_hosted", "server_dir": "D:/srv"}}"#).unwrap();
+        std::fs::write(
+            &file,
+            br#"{"voice": {"mode": "self_hosted", "server_dir": "D:/srv"}}"#,
+        )
+        .unwrap();
         let voice = load(&file);
         assert_eq!(voice.mode, VoiceMode::SelfHosted);
         assert_eq!(voice.args, vec!["app.py".to_string()]);
-        assert_eq!(voice.config_path().unwrap(), Path::new("D:/srv").join("data").join(".config.yaml"));
+        assert_eq!(
+            voice.config_path().unwrap(),
+            Path::new("D:/srv").join("data").join(".config.yaml")
+        );
     }
 
     #[test]
@@ -1768,41 +2113,74 @@ mod tests {
                 }),
             },
             builtin_plugins: BuiltinPlugins::default(),
-            builtin_agents:BuiltinAgents::default(),
+            builtin_agents: BuiltinAgents::default(),
             builtin_home: BuiltinHomeAssistant::default(),
             builtin_music: BuiltinMusic::default(),
             builtin_vision: BuiltinVision::default(),
             builtin_memory_enabled: false,
-            builtin_person_memory_enabled:false,
+            builtin_person_memory_enabled: false,
             builtin_context: BuiltinContext::default(),
-            builtin_local: BuiltinLocal { asr: true, mirror: Some("https://mirror.test/x".into()), ..BuiltinLocal::default() },
+            builtin_local: BuiltinLocal {
+                asr: true,
+                mirror: Some("https://mirror.test/x".into()),
+                ..BuiltinLocal::default()
+            },
             builtin_device_prefs: std::collections::BTreeMap::new(),
         };
         save(&file, &voice).unwrap();
         assert_eq!(load(&file), voice);
-        let root: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(root["web_port"], 9777);
         assert_eq!(root["export"]["dir"], "X");
-        assert_eq!(mcp_endpoint(&file).as_deref(), Some("wss://official.test/?token=a"));
+        assert_eq!(
+            mcp_endpoint(&file).as_deref(),
+            Some("wss://official.test/?token=a")
+        );
         let text = std::fs::read_to_string(&file).unwrap();
         // NV11 weather_auth may legitimately contain the literal "api_key" as an auth-mode label.
         // Assert that no actual credential field or secret value is serialized.
-        assert!(!text.contains("\"api_key\":"), "设置不能包含原始 API 密钥字段");
+        assert!(
+            !text.contains("\"api_key\":"),
+            "设置不能包含原始 API 密钥字段"
+        );
         assert!(!text.contains("sk-test-secret-value"), "设置不能包含密钥值");
         let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert!(saved["voice"]["builtin_models"].get("asr").is_none(), "未配置的分区不写入");
-        assert!(saved["voice"]["builtin_models"]["llm"].get("kind").is_none(), "OpenAI 兼容不写 kind，旧版程序可读");
+        assert!(
+            saved["voice"]["builtin_models"].get("asr").is_none(),
+            "未配置的分区不写入"
+        );
+        assert!(
+            saved["voice"]["builtin_models"]["llm"]
+                .get("kind")
+                .is_none(),
+            "OpenAI 兼容不写 kind，旧版程序可读"
+        );
         assert_eq!(saved["voice"]["builtin_models"]["tts"]["kind"], "doubao");
         assert_eq!(saved["voice"]["builtin_local"]["asr"], true);
         assert_eq!(saved["voice"]["builtin_local"]["asr_model"], "sense_voice");
         // NV6 保存的旧设置没有 *_model：按默认模型读取
-        let old: BuiltinLocal = serde_json::from_value(serde_json::json!({"asr": true, "tts_speaker": 3})).unwrap();
-        assert_eq!((old.vad_model.as_str(), old.asr_model.as_str(), old.tts_model.as_str()), ("silero_vad", "sense_voice", "kokoro"));
-        assert_eq!(old.selected(ModelKind::Asr).map(|spec| spec.id), Some("sense_voice"));
+        let old: BuiltinLocal =
+            serde_json::from_value(serde_json::json!({"asr": true, "tts_speaker": 3})).unwrap();
+        assert_eq!(
+            (
+                old.vad_model.as_str(),
+                old.asr_model.as_str(),
+                old.tts_model.as_str()
+            ),
+            ("silero_vad", "sense_voice", "kokoro")
+        );
+        assert_eq!(
+            old.selected(ModelKind::Asr).map(|spec| spec.id),
+            Some("sense_voice")
+        );
         assert!(old.selected(ModelKind::Tts).is_none(), "开关关闭");
 
         save_with_endpoint(&file, &voice, voice.self_hosted_mcp_endpoint.as_deref()).unwrap();
-        assert_eq!(mcp_endpoint(&file).as_deref(), Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=b"));
+        assert_eq!(
+            mcp_endpoint(&file).as_deref(),
+            Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=b")
+        );
         save_with_endpoint(&file, &VoiceSettings::default(), None).unwrap();
         assert_eq!(mcp_endpoint(&file), None);
         assert_eq!(load(&file), VoiceSettings::default());
@@ -1814,11 +2192,22 @@ mod tests {
         let old: BuiltinLocal = serde_json::from_str("{}").unwrap();
         assert!(!old.barge_in);
         assert_eq!(old.barge_in_ms, 400);
-        for value in [300, 400, 600] { assert_eq!(validate_barge_in_ms(value).unwrap(), value as u32); }
-        for value in [0, 299, 601, u64::MAX] { assert!(validate_barge_in_ms(value).is_err()); }
-        let enabled = BuiltinLocal { barge_in: true, barge_in_ms: 600, ..Default::default() };
+        for value in [300, 400, 600] {
+            assert_eq!(validate_barge_in_ms(value).unwrap(), value as u32);
+        }
+        for value in [0, 299, 601, u64::MAX] {
+            assert!(validate_barge_in_ms(value).is_err());
+        }
+        let enabled = BuiltinLocal {
+            barge_in: true,
+            barge_in_ms: 600,
+            ..Default::default()
+        };
         let value = serde_json::to_string(&enabled).unwrap();
-        assert_eq!(serde_json::from_str::<BuiltinLocal>(&value).unwrap(), enabled);
+        assert_eq!(
+            serde_json::from_str::<BuiltinLocal>(&value).unwrap(),
+            enabled
+        );
     }
 
     #[test]
@@ -1826,14 +2215,40 @@ mod tests {
         let old: BuiltinLocal = serde_json::from_str("{}").unwrap();
         assert!(!old.jev_filter_enabled);
         assert_eq!(old.jev_model, DEFAULT_JEV_MODEL);
-        assert!(old.jev_unfinished_hold && old.jev_fast_route && old.jev_tool_prune && old.jev_memory_filter);
-        assert_eq!(validate_jev_model(" typesafe/jev-1.13 ").unwrap(), "typesafe/jev-1.13");
-        assert_eq!(validate_jev_model("laya_multilingual").unwrap(), LOCAL_LAYA_JEV_MODEL);
-        assert_eq!(validate_jev_model("OmniJev/OneJev1.6-0.8B").unwrap(), LOCAL_ONEJEV_0_8B_MODEL);
-        assert_eq!(validate_jev_model("onejev_1_6_4b").unwrap(), LOCAL_ONEJEV_4B_MODEL);
-        assert_eq!(validate_jev_model("onejev1.6-9b").unwrap(), LOCAL_ONEJEV_9B_MODEL);
-        assert_eq!(local_jev_upstream_model_name(LOCAL_LAYA_JEV_MODEL), "multilingual");
-        assert_eq!(local_jev_upstream_model_name(LOCAL_ONEJEV_0_8B_MODEL), "jev-latest");
+        assert!(
+            old.jev_unfinished_hold
+                && old.jev_fast_route
+                && old.jev_tool_prune
+                && old.jev_memory_filter
+        );
+        assert_eq!(
+            validate_jev_model(" typesafe/jev-1.13 ").unwrap(),
+            "typesafe/jev-1.13"
+        );
+        assert_eq!(
+            validate_jev_model("laya_multilingual").unwrap(),
+            LOCAL_LAYA_JEV_MODEL
+        );
+        assert_eq!(
+            validate_jev_model("OmniJev/OneJev1.6-0.8B").unwrap(),
+            LOCAL_ONEJEV_0_8B_MODEL
+        );
+        assert_eq!(
+            validate_jev_model("onejev_1_6_4b").unwrap(),
+            LOCAL_ONEJEV_4B_MODEL
+        );
+        assert_eq!(
+            validate_jev_model("onejev1.6-9b").unwrap(),
+            LOCAL_ONEJEV_9B_MODEL
+        );
+        assert_eq!(
+            local_jev_upstream_model_name(LOCAL_LAYA_JEV_MODEL),
+            "multilingual"
+        );
+        assert_eq!(
+            local_jev_upstream_model_name(LOCAL_ONEJEV_0_8B_MODEL),
+            "jev-latest"
+        );
         assert!(validate_jev_model("openai/gpt-4o").is_err());
         assert!(validate_jev_model("typesafe/jev-../x").is_err());
         let custom = BuiltinLocal {
@@ -1849,13 +2264,28 @@ mod tests {
 
     #[test]
     fn search_provider_migration_keeps_tavily_and_separate_metaso_host() {
-        let old:BuiltinPlugins=serde_json::from_value(serde_json::json!({"search_enabled":true,"search_host":"https://search.example.org"})).unwrap();
-        assert_eq!(old.search_provider,SearchProvider::Tavily);
-        assert_eq!(old.metaso_host,"https://metaso.cn");
-        assert_eq!(old.search_host,"https://search.example.org");
-        let metaso=BuiltinPlugins{search_provider:SearchProvider::Metaso,..old};
-        assert_eq!(serde_json::from_value::<BuiltinPlugins>(serde_json::to_value(&metaso).unwrap()).unwrap(),metaso);
-        assert!(serde_json::from_value::<BuiltinPlugins>(serde_json::json!({"search_provider":"unknown"})).is_err());
+        let old: BuiltinPlugins = serde_json::from_value(
+            serde_json::json!({"search_enabled":true,"search_host":"https://search.example.org"}),
+        )
+        .unwrap();
+        assert_eq!(old.search_provider, SearchProvider::Tavily);
+        assert_eq!(old.metaso_host, "https://metaso.cn");
+        assert_eq!(old.search_host, "https://search.example.org");
+        let metaso = BuiltinPlugins {
+            search_provider: SearchProvider::Metaso,
+            ..old
+        };
+        assert_eq!(
+            serde_json::from_value::<BuiltinPlugins>(serde_json::to_value(&metaso).unwrap())
+                .unwrap(),
+            metaso
+        );
+        assert!(
+            serde_json::from_value::<BuiltinPlugins>(
+                serde_json::json!({"search_provider":"unknown"})
+            )
+            .is_err()
+        );
         assert!(!BuiltinPlugins::default().search_enabled);
     }
 
@@ -1863,14 +2293,22 @@ mod tests {
     fn chat_readiness_counts_installed_local_models() {
         let dir = tempfile::tempdir().unwrap();
         let models = dir.path().join("models");
-        let cloud =
-            |url: &str| BuiltinProvider { kind: ProviderKind::Openai, url: url.into(), model: "m".into(), voice: "v".into(), speed: 1.0 };
+        let cloud = |url: &str| BuiltinProvider {
+            kind: ProviderKind::Openai,
+            url: url.into(),
+            model: "m".into(),
+            voice: "v".into(),
+            speed: 1.0,
+        };
         let mut voice = VoiceSettings::default();
         voice.builtin_models.llm = Some(cloud("https://llm.test/v1"));
         assert!(!voice.builtin_chat_ready(&models));
         voice.builtin_local.asr = true;
         voice.builtin_local.tts = true;
-        assert!(!voice.builtin_chat_ready(&models), "开关打开但模型未安装不算可用");
+        assert!(
+            !voice.builtin_chat_ready(&models),
+            "开关打开但模型未安装不算可用"
+        );
         let install = |id: &str| {
             let spec = crate::local_models::spec(id).unwrap();
             let root = crate::local_models::install_path(&models, spec);
@@ -1889,7 +2327,13 @@ mod tests {
         assert!(!voice.builtin_section_ready(Section::Asr, &models));
         install("x_asr_streaming");
         assert!(voice.builtin_section_ready(Section::Asr, &models));
-        assert_eq!(voice.builtin_local.selected(ModelKind::Asr).map(|spec| spec.id), Some("x_asr_streaming"));
+        assert_eq!(
+            voice
+                .builtin_local
+                .selected(ModelKind::Asr)
+                .map(|spec| spec.id),
+            Some("x_asr_streaming")
+        );
         // 无效或类别不符的模型 id 不算选中
         voice.builtin_local.tts_model = "ten_vad".into();
         assert!(voice.builtin_local.selected(ModelKind::Tts).is_none());
@@ -1905,7 +2349,8 @@ mod tests {
     }
 
     #[test]
-    fn update_voice_and_update_root_serialize_concurrent_subsection_writes_and_reject_corrupt_json() {
+    fn update_voice_and_update_root_serialize_concurrent_subsection_writes_and_reject_corrupt_json()
+    {
         use std::sync::{Arc, Barrier};
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
@@ -1922,7 +2367,8 @@ mod tests {
                 for i in 0..20 {
                     update_voice(&file, |v| {
                         v.builtin_context.project_id = format!("p-{i}");
-                        v.builtin_context.project_generation = v.builtin_context.project_generation.wrapping_add(1);
+                        v.builtin_context.project_generation =
+                            v.builtin_context.project_generation.wrapping_add(1);
                         Ok(())
                     })
                     .unwrap();
@@ -1965,7 +2411,10 @@ mod tests {
                 barrier.wait();
                 for i in 0..20 {
                     update_root(&file, |root| {
-                        root.insert("export".into(), serde_json::json!({"dir": format!("exp-{i}"), "ask_each_time": true}));
+                        root.insert(
+                            "export".into(),
+                            serde_json::json!({"dir": format!("exp-{i}"), "ask_each_time": true}),
+                        );
                     })
                     .unwrap();
                 }
@@ -1983,7 +2432,8 @@ mod tests {
         assert_eq!(final_voice.builtin_agents.workspace, "work-19");
         assert_eq!(final_voice.builtin_music.directory, "music-19");
         assert!(final_voice.builtin_person_memory_enabled);
-        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(raw["web_port"], 9666);
         assert_eq!(raw["export"]["dir"], "exp-19");
 
@@ -2013,50 +2463,126 @@ mod tests {
 
     #[test]
     fn n59_custom_personas_are_bounded_and_can_be_selected() {
-        let role = |id: &str, name: &str, prompt: &str| CustomPersona { id: id.into(), name: name.into(), prompt: prompt.into() };
-        let roles = normalize_custom_personas(&[role("custom_a1", " 老师傅 ", "  话少，先说结论  ")]).unwrap();
+        let role = |id: &str, name: &str, prompt: &str| CustomPersona {
+            id: id.into(),
+            name: name.into(),
+            prompt: prompt.into(),
+        };
+        let roles =
+            normalize_custom_personas(&[role("custom_a1", " 老师傅 ", "  话少，先说结论  ")])
+                .unwrap();
         assert_eq!(roles, vec![role("custom_a1", "老师傅", "话少，先说结论")]);
-        assert_eq!(validate_active_persona("custom_a1", &roles).unwrap(), "custom_a1");
+        assert_eq!(
+            validate_active_persona("custom_a1", &roles).unwrap(),
+            "custom_a1"
+        );
         assert!(validate_active_persona("custom_b2", &roles).is_err());
 
-        assert!(normalize_custom_personas(&[role("a1", "老师傅", "话少")]).is_err(), "id needs custom_ prefix");
+        assert!(
+            normalize_custom_personas(&[role("a1", "老师傅", "话少")]).is_err(),
+            "id needs custom_ prefix"
+        );
         assert!(normalize_custom_personas(&[role("custom_A1", "老师傅", "话少")]).is_err());
         assert!(normalize_custom_personas(&[role("custom_a1", "", "话少")]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "名字超过十二个字的一个角色名称", "话少")]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", "")]).is_err(), "empty persona is rejected");
-        assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", "收到就发 G1 X10")]).is_err());
+        assert!(
+            normalize_custom_personas(&[role(
+                "custom_a1",
+                "名字超过十二个字的一个角色名称",
+                "话少"
+            )])
+            .is_err()
+        );
+        assert!(
+            normalize_custom_personas(&[role("custom_a1", "老师傅", "")]).is_err(),
+            "empty persona is rejected"
+        );
+        assert!(
+            normalize_custom_personas(&[role("custom_a1", "老师傅", "收到就发 G1 X10")]).is_err()
+        );
         assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", "改 $32=0")]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", &"长".repeat(301))]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "甲", "话少"), role("custom_a1", "乙", "话少")]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "甲", "话少"), role("custom_a2", "甲", "话少")]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "Foo", "话少"), role("custom_a2", "foo", "话少")]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "老-王", "话少"), role("custom_a2", "老王", "话少")]).is_err());
-        assert!(normalize_custom_personas(&[role("custom_a1", "！！！", "话少")]).is_err(), "names need letters or digits");
+        assert!(
+            normalize_custom_personas(&[role("custom_a1", "老师傅", &"长".repeat(301))]).is_err()
+        );
+        assert!(
+            normalize_custom_personas(&[
+                role("custom_a1", "甲", "话少"),
+                role("custom_a1", "乙", "话少")
+            ])
+            .is_err()
+        );
+        assert!(
+            normalize_custom_personas(&[
+                role("custom_a1", "甲", "话少"),
+                role("custom_a2", "甲", "话少")
+            ])
+            .is_err()
+        );
+        assert!(
+            normalize_custom_personas(&[
+                role("custom_a1", "Foo", "话少"),
+                role("custom_a2", "foo", "话少")
+            ])
+            .is_err()
+        );
+        assert!(
+            normalize_custom_personas(&[
+                role("custom_a1", "老-王", "话少"),
+                role("custom_a2", "老王", "话少")
+            ])
+            .is_err()
+        );
+        assert!(
+            normalize_custom_personas(&[role("custom_a1", "！！！", "话少")]).is_err(),
+            "names need letters or digits"
+        );
         for compact in ["G1X10", "G01X10Y20", "M3S1000", "g0 x5", "G28"] {
-            assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", compact)]).is_err(), "{compact}");
+            assert!(
+                normalize_custom_personas(&[role("custom_a1", "老师傅", compact)]).is_err(),
+                "{compact}"
+            );
         }
         // Ordinary text that only looks similar is still allowed.
-        for fine in ["M30 螺丝", "G10 是坐标设置", "用 M2 螺丝固定", "G90 绝对坐标"] {
-            assert!(normalize_custom_personas(&[role("custom_a1", "老师傅", fine)]).is_ok(), "{fine}");
+        for fine in [
+            "M30 螺丝",
+            "G10 是坐标设置",
+            "用 M2 螺丝固定",
+            "G90 绝对坐标",
+        ] {
+            assert!(
+                normalize_custom_personas(&[role("custom_a1", "老师傅", fine)]).is_ok(),
+                "{fine}"
+            );
         }
-        let seven: Vec<_> = (0..7).map(|i| role(&format!("custom_{i}"), &format!("角色{i}"), "话少")).collect();
+        let seven: Vec<_> = (0..7)
+            .map(|i| role(&format!("custom_{i}"), &format!("角色{i}"), "话少"))
+            .collect();
         assert!(normalize_custom_personas(&seven).is_err());
 
         // Old settings files without the new field still load with no custom roles.
-        let old: BuiltinLocal = serde_json::from_value(serde_json::json!({"persona_style": "moss_station"})).unwrap();
+        let old: BuiltinLocal =
+            serde_json::from_value(serde_json::json!({"persona_style": "moss_station"})).unwrap();
         assert!(old.custom_personas.is_empty());
         assert_eq!(old.persona_style, "moss_station");
     }
 
     #[test]
     fn persona_and_asr_correction_rules_enforce_safety_bounds() {
-        assert_eq!(validate_persona_style("moss_station").unwrap(), "moss_station");
+        assert_eq!(
+            validate_persona_style("moss_station").unwrap(),
+            "moss_station"
+        );
         assert_eq!(validate_persona_style("").unwrap(), "workshop");
         assert!(validate_persona_style("hacker").is_err());
-        assert_eq!(validate_persona_style("moss_briefing").unwrap(), "moss_briefing");
+        assert_eq!(
+            validate_persona_style("moss_briefing").unwrap(),
+            "moss_briefing"
+        );
         assert!(validate_persona_style("custom_a1").is_err());
 
-        assert_eq!(normalize_persona_prompt("  我有一台 5W 蓝光翼宿机  ").unwrap(), "我有一台 5W 蓝光翼宿机");
+        assert_eq!(
+            normalize_persona_prompt("  我有一台 5W 蓝光翼宿机  ").unwrap(),
+            "我有一台 5W 蓝光翼宿机"
+        );
         assert!(normalize_persona_prompt("直接发 G1 X10 Y10").is_err());
         assert!(normalize_persona_prompt("修改 $32=0").is_err());
 
@@ -2072,18 +2598,30 @@ mod tests {
         assert!(normalize_asr_corrections(&["测试=G0 X10".into()]).is_err());
 
         let merged = effective_asr_corrections(true, &rules);
-        assert_eq!(merged.iter().find(|(w, _)| w == "段木").unwrap().1, "东北椴木");
+        assert_eq!(
+            merged.iter().find(|(w, _)| w == "段木").unwrap().1,
+            "东北椴木"
+        );
         assert!(merged.iter().any(|(w, r)| w == "亚克立" && r == "亚克力"));
 
-        assert_eq!(validate_talk_mode("press_to_talk").unwrap(), "press_to_talk");
-        assert_eq!(validate_talk_mode("click_to_talk").unwrap(), "click_to_talk");
+        assert_eq!(
+            validate_talk_mode("press_to_talk").unwrap(),
+            "press_to_talk"
+        );
+        assert_eq!(
+            validate_talk_mode("click_to_talk").unwrap(),
+            "click_to_talk"
+        );
         assert!(validate_talk_mode("hold").is_err());
         let mut prefs = DeviceHardwarePrefs::default();
         assert!(prefs.is_empty());
         prefs.talk_mode = Some("press_to_talk".into());
         assert!(!prefs.is_empty());
         assert_eq!(validate_screen_card_style("").unwrap(), "moss_hud");
-        assert_eq!(validate_screen_card_style("goggle_bot").unwrap(), "goggle_bot");
+        assert_eq!(
+            validate_screen_card_style("goggle_bot").unwrap(),
+            "goggle_bot"
+        );
         assert!(validate_screen_card_style("neon").is_err());
     }
 }

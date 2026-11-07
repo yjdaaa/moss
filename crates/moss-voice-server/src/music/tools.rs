@@ -96,10 +96,7 @@ impl ToolExecutor for MusicTools {
             }
         })
     }
-    fn recent_workflows<'a>(
-        &'a self,
-        context: &'a ToolContext,
-    ) -> BoxFuture<'a, Option<Value>> {
+    fn recent_workflows<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         self.underlying.recent_workflows(context)
     }
 }
@@ -167,10 +164,7 @@ mod tests {
             ) -> BoxFuture<'a, ToolOutcome> {
                 Box::pin(async { ToolOutcome::Reply("{}".into()) })
             }
-            fn recent_workflows<'a>(
-                &'a self,
-                _: &'a ToolContext,
-            ) -> BoxFuture<'a, Option<Value>> {
+            fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
                 let snapshot = self.0.lock().unwrap().clone();
                 Box::pin(async move { Some(snapshot) })
             }
@@ -230,7 +224,11 @@ mod tests {
             session_id: "sess-1".into(),
         };
         let mut poller = crate::jobs::JobWatcher::new();
-        assert!(rt.block_on(poller.poll(full_stack.as_ref(), &ctx)).is_empty(), "首次轮询建立基线");
+        assert!(
+            rt.block_on(poller.poll(full_stack.as_ref(), &ctx))
+                .is_empty(),
+            "首次轮询建立基线"
+        );
 
         *leaf.0.lock().unwrap() = json!({
             "workflows": [{"workflow_id": "wf-wrap-1", "status": "completed", "send_result": {"lines_sent": 50, "total_lines": 50}}]

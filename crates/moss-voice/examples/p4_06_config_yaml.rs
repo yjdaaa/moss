@@ -40,11 +40,29 @@ fn main() {
         std::process::exit(2);
     }
     let sections = [
-        section(Section::Llm, "https://llm.example.invalid/v1", "moss-llm-model", ""),
-        section(Section::Asr, "https://asr.example.invalid/v1/audio/transcriptions", "moss-asr-model", ""),
-        section(Section::Tts, "https://tts.example.invalid/v1/audio/speech", "moss-tts-model", "moss-voice"),
+        section(
+            Section::Llm,
+            "https://llm.example.invalid/v1",
+            "moss-llm-model",
+            "",
+        ),
+        section(
+            Section::Asr,
+            "https://asr.example.invalid/v1/audio/transcriptions",
+            "moss-asr-model",
+            "",
+        ),
+        section(
+            Section::Tts,
+            "https://tts.example.invalid/v1/audio/speech",
+            "moss-tts-model",
+            "moss-voice",
+        ),
     ];
-    let edits = edits_for(&sections, Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=placeholder"));
+    let edits = edits_for(
+        &sections,
+        Some("ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=placeholder"),
+    );
     let updated = apply(&original, &edits).unwrap_or_else(|error| {
         eprintln!("写入失败：{error}");
         std::process::exit(1);

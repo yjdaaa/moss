@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use rusqlite::OptionalExtension;
 
-use crate::{RuntimeDb, RuntimeRoot, SchemaError};
 use crate::db::MaterialConflictPolicy;
 use crate::store::{RecordKind, RuntimeStore, SqliteStore, StoredRecord};
+use crate::{RuntimeDb, RuntimeRoot, SchemaError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictPolicy {
@@ -44,16 +44,24 @@ pub enum MigrationError {
 }
 
 impl From<std::io::Error> for MigrationError {
-    fn from(error: std::io::Error) -> Self { Self::Io(error) }
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 impl From<serde_json::Error> for MigrationError {
-    fn from(error: serde_json::Error) -> Self { Self::Json(error) }
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
 }
 impl From<rusqlite::Error> for MigrationError {
-    fn from(error: rusqlite::Error) -> Self { Self::Sql(error) }
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sql(error)
+    }
 }
 impl From<SchemaError> for MigrationError {
-    fn from(error: SchemaError) -> Self { Self::Schema(error) }
+    fn from(error: SchemaError) -> Self {
+        Self::Schema(error)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -66,10 +74,13 @@ pub struct MigrationOptions {
     pub on_conflict: ConflictPolicy,
 }
 
-pub fn run_migration(options: &MigrationOptions) -> Result<(MigrationReport, PathBuf), MigrationError> {
+pub fn run_migration(
+    options: &MigrationOptions,
+) -> Result<(MigrationReport, PathBuf), MigrationError> {
     if !options.source_root.is_dir() {
         return Err(MigrationError::InvalidArgument(format!(
-            "旧根目录不存在：{}", options.source_root.display()
+            "旧根目录不存在：{}",
+            options.source_root.display()
         )));
     }
     let source_roots = if options.source_roots.is_empty() {
@@ -92,10 +103,15 @@ pub fn run_migration(options: &MigrationOptions) -> Result<(MigrationReport, Pat
         dry_run: options.dry_run,
         ..MigrationReport::default()
     };
-    let material_path = source_roots.iter().flat_map(|root| [
-        root.join(".runtime").join("lasergrbl_materials.json"),
-        root.join(".lasergrbl_materials.json"),
-    ]).find(|path| path.is_file());
+    let material_path = source_roots
+        .iter()
+        .flat_map(|root| {
+            [
+                root.join(".runtime").join("lasergrbl_materials.json"),
+                root.join(".lasergrbl_materials.json"),
+            ]
+        })
+        .find(|path| path.is_file());
     let material_value: Option<Value> = if let Some(path) = &material_path {
         report.material_source = Some(path.display().to_string());
         let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
@@ -131,15 +147,23 @@ pub fn run_migration(options: &MigrationOptions) -> Result<(MigrationReport, Pat
             &target_db_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?)
-    } else { None };
+    } else {
+        None
+    };
     let runtime = if !options.dry_run {
-        Some(RuntimeRoot::resolve(Some(&options.target_root), None)
-            .map_err(|error| MigrationError::InvalidArgument(format!("运行目录不可用：{error:?}")))?
+        Some(
+            RuntimeRoot::resolve(Some(&options.target_root), None).map_err(|error| {
+                MigrationError::InvalidArgument(format!("运行目录不可用：{error:?}"))
+            })?,
         )
-    } else { None };
+    } else {
+        None
+    };
     let db = if let Some(runtime) = runtime.as_ref() {
         Some(RuntimeDb::open(&runtime.database)?)
-    } else { None };
+    } else {
+        None
+    };
     if let Some(db) = db.as_ref() {
         for (source, hash, size) in &upload_entries {
             let relative_name = upload_name(source, hash, &runtime.as_ref().unwrap().uploads)?;
@@ -193,15 +217,15 @@ pub fn run_migration(options: &MigrationOptions) -> Result<(MigrationReport, Pat
             &mut report,
         );
         let table_name = format!("{kind:?}").to_lowercase();
-        let (action, changed) = existing_record_action(
-            target_read.as_ref(), &record
-        )?;
+        let (action, changed) = existing_record_action(target_read.as_ref(), &record)?;
         let counts = report.tables.entry(table_name).or_default();
         match action.as_str() {
             "skip" => counts.skipped += 1,
             "conflict" => {
                 counts.conflicts += 1;
-                if options.on_conflict == ConflictPolicy::Keep { continue; }
+                if options.on_conflict == ConflictPolicy::Keep {
+                    continue;
+                }
             }
             _ => counts.added += 1,
         }
@@ -221,49 +245,91 @@ pub fn run_migration(options: &MigrationOptions) -> Result<(MigrationReport, Pat
     Ok((report, report_path))
 }
 
-fn collect_records(source_roots: &[PathBuf]) -> Result<Vec<(RecordKind, StoredRecord)>, MigrationError> {
+fn collect_records(
+    source_roots: &[PathBuf],
+) -> Result<Vec<(RecordKind, StoredRecord)>, MigrationError> {
     let mut result = Vec::new();
     for source_root in source_roots {
         let roots = [
-            (RecordKind::Workflow, vec![source_root.join(".runtime/laser_workflows")]),
-            (RecordKind::TextTask, vec![
-                source_root.join(".runtime/lasergrbl_text_tasks"),
-                source_root.join(".lasergrbl_text_tasks"),
-            ]),
-            (RecordKind::Job, vec![
-                source_root.join(".runtime/lasergrbl_jobs"),
-                source_root.join(".runtime/lasergrbl_network_jobs"),
-            ]),
-            (RecordKind::Calibration, vec![source_root.join(".runtime/lasergrbl_calibrations")]),
+            (
+                RecordKind::Workflow,
+                vec![source_root.join(".runtime/laser_workflows")],
+            ),
+            (
+                RecordKind::TextTask,
+                vec![
+                    source_root.join(".runtime/lasergrbl_text_tasks"),
+                    source_root.join(".lasergrbl_text_tasks"),
+                ],
+            ),
+            (
+                RecordKind::Job,
+                vec![
+                    source_root.join(".runtime/lasergrbl_jobs"),
+                    source_root.join(".runtime/lasergrbl_network_jobs"),
+                ],
+            ),
+            (
+                RecordKind::Calibration,
+                vec![source_root.join(".runtime/lasergrbl_calibrations")],
+            ),
         ];
         for (kind, directories) in roots {
-          for directory in directories {
-            if !directory.is_dir() { continue; }
-            for entry in walk_json_files(&directory)? {
-                let payload: Value = serde_json::from_slice(&std::fs::read(&entry)?)?;
-                let id = record_id(kind, &payload, &entry);
-                let mut payload = payload;
-                normalize_old_job(kind, &mut payload);
-                result.push((kind, StoredRecord {
-                    kind, id, status: payload.get("status").and_then(Value::as_str).map(String::from),
-                    payload,
-                }));
+            for directory in directories {
+                if !directory.is_dir() {
+                    continue;
+                }
+                for entry in walk_json_files(&directory)? {
+                    let payload: Value = serde_json::from_slice(&std::fs::read(&entry)?)?;
+                    let id = record_id(kind, &payload, &entry);
+                    let mut payload = payload;
+                    normalize_old_job(kind, &mut payload);
+                    result.push((
+                        kind,
+                        StoredRecord {
+                            kind,
+                            id,
+                            status: payload
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                            payload,
+                        },
+                    ));
+                }
             }
-          }
         }
     }
     Ok(result)
 }
 
-fn upload_name(source: &Path, hash: &str, destination_root: &Path) -> Result<String, MigrationError> {
-    let name = source.file_name().and_then(|value| value.to_str()).unwrap_or("upload");
+fn upload_name(
+    source: &Path,
+    hash: &str,
+    destination_root: &Path,
+) -> Result<String, MigrationError> {
+    let name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("upload");
     let candidate = destination_root.join(name);
-    if !candidate.exists() || sha256_file(&candidate).map(|value| value == hash).unwrap_or(false) {
+    if !candidate.exists()
+        || sha256_file(&candidate)
+            .map(|value| value == hash)
+            .unwrap_or(false)
+    {
         return Ok(name.to_string());
     }
     let path = Path::new(name);
-    let stem = path.file_stem().and_then(|v| v.to_str()).unwrap_or("upload");
-    let extension = path.extension().and_then(|v| v.to_str()).map(|v| format!(".{v}")).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .unwrap_or("upload");
+    let extension = path
+        .extension()
+        .and_then(|v| v.to_str())
+        .map(|v| format!(".{v}"))
+        .unwrap_or_default();
     Ok(format!("{stem}--{}{extension}", &hash[..8.min(hash.len())]))
 }
 
@@ -276,8 +342,12 @@ fn walk_json_files(root: &Path) -> Result<Vec<PathBuf>, MigrationError> {
             continue;
         }
         let path = entry.path();
-        if path.is_dir() { files.extend(walk_json_files(&path)?); }
-        else if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+        if path.is_dir() {
+            files.extend(walk_json_files(&path)?);
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
             files.push(path);
         }
     }
@@ -291,21 +361,35 @@ fn record_id(kind: RecordKind, payload: &Value, path: &Path) -> String {
         RecordKind::Job => "job_id",
         RecordKind::Calibration => "calibration_id",
     };
-    payload.get(key).and_then(Value::as_str).map(str::to_owned)
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
         .or_else(|| path.file_stem().and_then(|v| v.to_str()).map(str::to_owned))
         .unwrap_or_else(|| hex::encode(Sha256::digest(path.to_string_lossy().as_bytes())))
 }
 
 fn normalize_old_job(kind: RecordKind, payload: &mut Value) {
-    if kind != RecordKind::Job { return; }
+    if kind != RecordKind::Job {
+        return;
+    }
     let status = payload.get("status").and_then(Value::as_str).unwrap_or("");
-    if matches!(status, "pending" | "running" | "queued") ||
-        payload.get("expected_gcode_sha256").and_then(Value::as_str).is_none() {
+    if matches!(status, "pending" | "running" | "queued")
+        || payload
+            .get("expected_gcode_sha256")
+            .and_then(Value::as_str)
+            .is_none()
+    {
         if let Some(object) = payload.as_object_mut() {
             object.insert("status".into(), Value::String("failed".into()));
-            let result = object.entry("result").or_insert_with(|| serde_json::json!({}));
+            let result = object
+                .entry("result")
+                .or_insert_with(|| serde_json::json!({}));
             if let Some(result) = result.as_object_mut() {
-                result.insert("detail".into(), Value::String("旧系统未完成任务，迁移时安全终止".into()));
+                result.insert(
+                    "detail".into(),
+                    Value::String("旧系统未完成任务，迁移时安全终止".into()),
+                );
             }
         }
     }
@@ -315,12 +399,20 @@ fn existing_record_action(
     connection: Option<&rusqlite::Connection>,
     record: &StoredRecord,
 ) -> Result<(String, StoredRecord), MigrationError> {
-    let Some(connection) = connection else { return Ok(("add".into(), record.clone())); };
+    let Some(connection) = connection else {
+        return Ok(("add".into(), record.clone()));
+    };
     let (table, key) = record.kind.table();
-    let raw: Option<String> = connection.query_row(
-        &format!("SELECT payload FROM {table} WHERE {key}=?1"), [&record.id], |row| row.get(0)
-    ).optional()?;
-    let Some(raw) = raw else { return Ok(("add".into(), record.clone())); };
+    let raw: Option<String> = connection
+        .query_row(
+            &format!("SELECT payload FROM {table} WHERE {key}=?1"),
+            [&record.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(("add".into(), record.clone()));
+    };
     let existing: Value = serde_json::from_str(&raw)?;
     if existing == record.payload {
         Ok(("skip".into(), record.clone()))
@@ -352,7 +444,10 @@ pub fn remap_path(raw: &Path, historical_roots: &[PathBuf]) -> PathBuf {
     for root in historical_roots {
         let old = root.join(".lasergrbl_text_tasks");
         if let Ok(relative) = mapped.strip_prefix(&old) {
-            return root.join(".runtime").join("lasergrbl_text_tasks").join(relative);
+            return root
+                .join(".runtime")
+                .join("lasergrbl_text_tasks")
+                .join(relative);
         }
     }
     mapped
@@ -364,7 +459,10 @@ pub fn remap_path_to(raw: &Path, historical_roots: &[PathBuf], target_root: &Pat
             let candidate = target_root.join(relative);
             let old_layout = target_root.join(".lasergrbl_text_tasks");
             if let Ok(task_relative) = candidate.strip_prefix(&old_layout) {
-                return target_root.join(".runtime").join("lasergrbl_text_tasks").join(task_relative);
+                return target_root
+                    .join(".runtime")
+                    .join("lasergrbl_text_tasks")
+                    .join(task_relative);
             }
             return candidate;
         }
@@ -499,7 +597,10 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hex::encode(digest))
 }
 
-pub fn scan_uploads(root: &Path, report: &mut MigrationReport) -> std::io::Result<Vec<(PathBuf, String, u64)>> {
+pub fn scan_uploads(
+    root: &Path,
+    report: &mut MigrationReport,
+) -> std::io::Result<Vec<(PathBuf, String, u64)>> {
     let mut entries = Vec::new();
     if !root.exists() {
         return Ok(entries);
@@ -528,9 +629,18 @@ mod tests {
     #[test]
     fn version_normalization_is_strict_about_unknown_values() {
         assert_eq!(normalize_material_version(None).unwrap(), 1);
-        assert_eq!(normalize_material_version(Some(&serde_json::json!(1))).unwrap(), 1);
-        assert_eq!(normalize_material_version(Some(&serde_json::json!(1.0))).unwrap(), 1);
-        assert_eq!(normalize_material_version(Some(&serde_json::json!(" 1 "))).unwrap(), 1);
+        assert_eq!(
+            normalize_material_version(Some(&serde_json::json!(1))).unwrap(),
+            1
+        );
+        assert_eq!(
+            normalize_material_version(Some(&serde_json::json!(1.0))).unwrap(),
+            1
+        );
+        assert_eq!(
+            normalize_material_version(Some(&serde_json::json!(" 1 "))).unwrap(),
+            1
+        );
         assert!(normalize_material_version(Some(&serde_json::json!(2))).is_err());
         assert!(normalize_material_version(Some(&serde_json::json!("1.1"))).is_err());
     }
@@ -538,11 +648,17 @@ mod tests {
     #[test]
     fn old_task_layout_is_remapped_without_writing() {
         let root = PathBuf::from(r"C:\old");
-        let source = root.join(".lasergrbl_text_tasks").join("a").join("task.json");
+        let source = root
+            .join(".lasergrbl_text_tasks")
+            .join("a")
+            .join("task.json");
         let mapped = remap_path(&source, std::slice::from_ref(&root));
         assert_eq!(
             mapped,
-            root.join(".runtime").join("lasergrbl_text_tasks").join("a").join("task.json")
+            root.join(".runtime")
+                .join("lasergrbl_text_tasks")
+                .join("a")
+                .join("task.json")
         );
     }
 
@@ -603,10 +719,21 @@ mod tests {
         let rewritten = payload["artifacts"]["gcode_file"].as_str().unwrap();
         assert_eq!(rewritten, "external/secret-host-path.gcode");
         assert!(!std::path::Path::new(rewritten).is_absolute());
-        assert!(!rewritten.contains(':'), "must not carry a drive letter or host prefix");
-        assert_eq!(payload["stale"], true, "files outside RuntimeRoot must be marked stale");
+        assert!(
+            !rewritten.contains(':'),
+            "must not carry a drive letter or host prefix"
+        );
+        assert_eq!(
+            payload["stale"], true,
+            "files outside RuntimeRoot must be marked stale"
+        );
         assert_eq!(report.counts.stale, 1);
-        assert!(report.stale_paths.iter().all(|p| !std::path::Path::new(p).is_absolute()));
+        assert!(
+            report
+                .stale_paths
+                .iter()
+                .all(|p| !std::path::Path::new(p).is_absolute())
+        );
     }
 
     #[test]
@@ -616,7 +743,10 @@ mod tests {
         let mut report = MigrationReport::default();
         let entries = scan_uploads(temp.path(), &mut report).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].1, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            entries[0].1,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         assert_eq!(report.counts.uploads, 1);
     }
 
@@ -631,27 +761,52 @@ mod tests {
         for path in [&workflow_dir, &task_dir, &job_dir, &calibration_dir] {
             std::fs::create_dir_all(path).unwrap();
         }
-        std::fs::write(workflow_dir.join("wf_1.json"), serde_json::to_vec(&serde_json::json!({
-            "workflow_id":"wf_1","status":"preview_ready","source_type":"image",
-            "input":{"material":"椴木","thickness_mm":"3"},
-            "created_at":1,"updated_at":2
-        })).unwrap()).unwrap();
-        std::fs::write(task_dir.join("task.json"), serde_json::to_vec(&serde_json::json!({
-            "task_id":"task_1","status":"prepared","text":"Hi","material":"椴木",
-            "thickness_mm":"3","attempts":[],"created_at":1,"updated_at":2
-        })).unwrap()).unwrap();
-        std::fs::write(job_dir.join("job_1.json"), serde_json::to_vec(&serde_json::json!({
-            "job_id":"job_1","status":"completed","expected_gcode_sha256":"abc",
-            "transport":"serial","created_at":1,"updated_at":2
-        })).unwrap()).unwrap();
-        std::fs::write(job_dir.join("job_pending.json"), serde_json::to_vec(&serde_json::json!({
-            "job_id":"job_pending","status":"pending",
-            "transport":"serial","created_at":1,"updated_at":2
-        })).unwrap()).unwrap();
-        std::fs::write(calibration_dir.join("cal_1.json"), serde_json::to_vec(&serde_json::json!({
-            "calibration_id":"cal_1","status":"prepared","material":"椴木",
-            "thickness_mm":"3","created_at":1,"updated_at":2
-        })).unwrap()).unwrap();
+        std::fs::write(
+            workflow_dir.join("wf_1.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "workflow_id":"wf_1","status":"preview_ready","source_type":"image",
+                "input":{"material":"椴木","thickness_mm":"3"},
+                "created_at":1,"updated_at":2
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            task_dir.join("task.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "task_id":"task_1","status":"prepared","text":"Hi","material":"椴木",
+                "thickness_mm":"3","attempts":[],"created_at":1,"updated_at":2
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            job_dir.join("job_1.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "job_id":"job_1","status":"completed","expected_gcode_sha256":"abc",
+                "transport":"serial","created_at":1,"updated_at":2
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            job_dir.join("job_pending.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "job_id":"job_pending","status":"pending",
+                "transport":"serial","created_at":1,"updated_at":2
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            calibration_dir.join("cal_1.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "calibration_id":"cal_1","status":"prepared","material":"椴木",
+                "thickness_mm":"3","created_at":1,"updated_at":2
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let options = MigrationOptions {
             source_root: source.path().to_path_buf(),
             source_roots: vec![source.path().to_path_buf()],
@@ -670,15 +825,28 @@ mod tests {
         let (second, _) = run_migration(&options).unwrap();
         assert_eq!(second.tables.values().map(|v| v.skipped).sum::<u64>(), 5);
         let db = RuntimeDb::open(target.path().join("moss.sqlite")).unwrap();
-        for (table, count) in [("workflows", 1), ("text_tasks", 1), ("jobs", 2), ("calibrations", 1)] {
-            let actual: i64 = db.connection.query_row(
-                &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)
-            ).unwrap();
+        for (table, count) in [
+            ("workflows", 1),
+            ("text_tasks", 1),
+            ("jobs", 2),
+            ("calibrations", 1),
+        ] {
+            let actual: i64 = db
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
             assert_eq!(actual, count);
         }
-        let pending_status: String = db.connection.query_row(
-            "SELECT status FROM jobs WHERE job_id='job_pending'", [], |row| row.get(0)
-        ).unwrap();
+        let pending_status: String = db
+            .connection
+            .query_row(
+                "SELECT status FROM jobs WHERE job_id='job_pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(pending_status, "failed");
     }
 }

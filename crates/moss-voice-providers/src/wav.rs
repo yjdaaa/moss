@@ -25,16 +25,22 @@ pub fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    bytes
+        .get(at..at + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    bytes
+        .get(at..at + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// 解析 WAV 为单声道 16 位 PCM。流式 WAV 的 data 长度常写成 0xFFFFFFFF，按实际剩余字节处理。
 pub fn decode_wav(bytes: &[u8]) -> Result<Pcm, ProviderError> {
-    let not_wav = || ProviderError::new("合成接口返回的不是 WAV 音频（请确认该接口支持 response_format=wav）");
+    let not_wav = || {
+        ProviderError::new("合成接口返回的不是 WAV 音频（请确认该接口支持 response_format=wav）")
+    };
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(not_wav());
     }
@@ -78,19 +84,31 @@ pub fn decode_wav(bytes: &[u8]) -> Result<Pcm, ProviderError> {
                             let sum: f32 = (0..channels)
                                 .map(|ch| {
                                     let at = (frame * channels + ch) * 4;
-                                    f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
+                                    f32::from_le_bytes([
+                                        data[at],
+                                        data[at + 1],
+                                        data[at + 2],
+                                        data[at + 3],
+                                    ])
                                 })
                                 .sum();
                             ((sum / channels as f32).clamp(-1.0, 1.0) * 32767.0) as i16
                         })
                         .collect()
                 }
-                _ => return Err(ProviderError::new(format!("不支持的 WAV 编码（格式 {tag}，{bits} 位）"))),
+                _ => {
+                    return Err(ProviderError::new(format!(
+                        "不支持的 WAV 编码（格式 {tag}，{bits} 位）"
+                    )));
+                }
             };
             if rate == 0 {
                 return Err(not_wav());
             }
-            return Ok(Pcm { samples: mono, sample_rate: rate });
+            return Ok(Pcm {
+                samples: mono,
+                sample_rate: rate,
+            });
         }
         // 块按偶数字节对齐
         at = body.saturating_add(size).saturating_add(size & 1);
@@ -106,7 +124,13 @@ mod tests {
     fn round_trip() {
         let samples: Vec<i16> = (0..1000).map(|i| (i * 13 % 2000 - 1000) as i16).collect();
         let pcm = decode_wav(&encode_wav(&samples, 16_000)).unwrap();
-        assert_eq!(pcm, Pcm { samples, sample_rate: 16_000 });
+        assert_eq!(
+            pcm,
+            Pcm {
+                samples,
+                sample_rate: 16_000
+            }
+        );
     }
 
     #[test]
@@ -133,10 +157,20 @@ mod tests {
 
     #[test]
     fn rejects_non_wav() {
-        assert!(decode_wav(b"ID3\x04mp3data....").unwrap_err().to_string().contains("不是 WAV"));
+        assert!(
+            decode_wav(b"ID3\x04mp3data....")
+                .unwrap_err()
+                .to_string()
+                .contains("不是 WAV")
+        );
         assert!(decode_wav(b"").is_err());
         let mut eight_bit = encode_wav(&[0; 4], 8000);
         eight_bit[34] = 8;
-        assert!(decode_wav(&eight_bit).unwrap_err().to_string().contains("不支持"));
+        assert!(
+            decode_wav(&eight_bit)
+                .unwrap_err()
+                .to_string()
+                .contains("不支持")
+        );
     }
 }

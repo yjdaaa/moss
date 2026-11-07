@@ -35,9 +35,9 @@ pub(crate) fn normalize_release_tag(raw: &str) -> Option<String> {
     };
     let parts: Vec<&str> = core.split('.').collect();
     let core_ok = parts.len() == 3
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.len() <= 6 && part.chars().all(|c| c.is_ascii_digit()));
+        && parts.iter().all(|part| {
+            !part.is_empty() && part.len() <= 6 && part.chars().all(|c| c.is_ascii_digit())
+        });
     let suffix_ok = suffix.len() <= 32
         && suffix
             .chars()
@@ -76,7 +76,12 @@ pub(crate) fn parse_pubkey(raw: &str) -> Option<String> {
     raw.lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter(|line| line.len() > 40 && line.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')))
+        .filter(|line| {
+            line.len() > 40
+                && line
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+        })
         .map(str::to_owned)
 }
 
@@ -147,7 +152,9 @@ pub(crate) fn is_allowed_update_redirect_url(next: &reqwest::Url, allow_loopback
             )
         );
     }
-    allow_loopback && next.scheme() == "http" && matches!(next.host_str(), Some("127.0.0.1" | "localhost"))
+    allow_loopback
+        && next.scheme() == "http"
+        && matches!(next.host_str(), Some("127.0.0.1" | "localhost"))
 }
 
 /// 更新下载重定向策略：最多 5 跳，仅允许 HTTPS 跳转至 GitHub 官方发布资产域名（测试回环除外），拒绝 HTTP 降级与内网 SSRF。
@@ -227,7 +234,8 @@ fn verify_package_reader<R: std::io::Read>(
         String::from_utf8(raw).map_err(|e| format!("{label} 编码无效：{e}"))
     };
     let pubkey_str = decode_b64(pubkey_b64, "更新公钥")?;
-    let public_key = PublicKey::decode(&pubkey_str).map_err(|e| format!("解析更新公钥失败：{e}"))?;
+    let public_key =
+        PublicKey::decode(&pubkey_str).map_err(|e| format!("解析更新公钥失败：{e}"))?;
     let sig_str = decode_b64(signature_b64, "更新包签名")?;
     let signature = Signature::decode(&sig_str).map_err(|e| format!("解析更新包签名失败：{e}"))?;
 
@@ -337,7 +345,10 @@ impl Progress {
     }
 
     fn busy(&self) -> bool {
-        matches!(self.phase, "checking" | "downloading" | "installing" | "restarting")
+        matches!(
+            self.phase,
+            "checking" | "downloading" | "installing" | "restarting"
+        )
     }
 }
 
@@ -370,7 +381,9 @@ fn require_main(window: &tauri::WebviewWindow) -> Result<(), String> {
     }
     #[cfg(mobile)]
     {
-        let url = window.url().map_err(|_| "无法校验当前页面来源".to_owned())?;
+        let url = window
+            .url()
+            .map_err(|_| "无法校验当前页面来源".to_owned())?;
         if is_trusted_mobile_main(window.label(), &url) {
             Ok(())
         } else {
@@ -401,7 +414,10 @@ fn current_platform_name() -> &'static str {
 /// 当前安装形态对应的清单平台键；`Ok(None)` 表示用桌面插件默认的平台键（macOS）。
 fn update_target() -> Result<Option<&'static str>, String> {
     if embedded_pubkey().is_none() {
-        return Err("此版本没有内置更新签名公钥，暂不支持应用内更新，请到 GitHub Releases 手动下载".to_owned());
+        return Err(
+            "此版本没有内置更新签名公钥，暂不支持应用内更新，请到 GitHub Releases 手动下载"
+                .to_owned(),
+        );
     }
     #[cfg(target_os = "windows")]
     {
@@ -411,9 +427,9 @@ fn update_target() -> Result<Option<&'static str>, String> {
             dir.join("uninstall.exe").is_file(),
             dir.join("moss-voice-local.exe").is_file(),
         );
-        windows_target(flavor)
-            .map(Some)
-            .ok_or_else(|| "免安装便携版不支持应用内更新，请到 GitHub Releases 下载新的便携版替换".to_owned())
+        windows_target(flavor).map(Some).ok_or_else(|| {
+            "免安装便携版不支持应用内更新，请到 GitHub Releases 下载新的便携版替换".to_owned()
+        })
     }
     #[cfg(target_os = "macos")]
     {
@@ -499,7 +515,9 @@ pub(crate) fn download_and_stage_android_apk(
     let entry = manifest
         .get("platforms")
         .and_then(|p| p.get("android-aarch64"))
-        .ok_or_else(|| format!("{tag} 清单中没有 Android 更新包，请前往 GitHub Releases 手动下载"))?;
+        .ok_or_else(|| {
+            format!("{tag} 清单中没有 Android 更新包，请前往 GitHub Releases 手动下载")
+        })?;
     let expected_asset_prefix = format!("{allowed_download_prefix}{tag}/");
     let apk_url = entry
         .get("url")
@@ -548,7 +566,10 @@ pub(crate) fn download_and_stage_android_apk(
         .send()
         .map_err(|e| format!("下载 Android 更新包失败：{e}"))?;
     if !apk_resp.status().is_success() {
-        return Err(format!("下载 Android 更新包失败（HTTP {}）", apk_resp.status().as_u16()));
+        return Err(format!(
+            "下载 Android 更新包失败（HTTP {}）",
+            apk_resp.status().as_u16()
+        ));
     }
     let total = apk_resp.content_length();
     if total.is_some_and(|len| len > MAX_ANDROID_APK_BYTES) {
@@ -618,7 +639,12 @@ fn launch_android_apk_installer(apk_path: &Path) -> Result<(), String> {
         return Err("Android 应用上下文不可用".into());
     }
     let class_loader = env
-        .call_method(&*context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .call_method(
+            &*context,
+            "getClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            &[],
+        )
         .and_then(|v| v.l())
         .map_err(|e| {
             let _ = env.exception_clear();
@@ -671,11 +697,7 @@ fn launch_android_apk_installer(apk_path: &Path) -> Result<(), String> {
             format!("读取安装器返回信息失败：{e}")
         })?
         .into();
-    if msg.is_empty() {
-        Ok(())
-    } else {
-        Err(msg)
-    }
+    if msg.is_empty() { Ok(()) } else { Err(msg) }
 }
 
 /// 下载并安装 `tag` 对应的新版本（桌面端完成后自动重启；Android 拉起系统安装界面）。立即返回，进度用 [`app_update_status`] 轮询。
@@ -767,7 +789,11 @@ pub async fn app_update_install(
                 );
             }
             let expected_asset_prefix = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/");
-            if !update.download_url.as_str().starts_with(&expected_asset_prefix) {
+            if !update
+                .download_url
+                .as_str()
+                .starts_with(&expected_asset_prefix)
+            {
                 return fail(&progress, "更新清单中的安装包下载地址不受信任".into());
             }
             if let Ok(mut p) = progress.lock() {
@@ -818,7 +844,8 @@ pub async fn app_update_install(
         let cache_root = match state.cache_dir.clone() {
             Some(dir) => dir,
             None => {
-                let msg = "找不到 Android 应用缓存目录，请前往 GitHub Releases 手动下载 APK".to_owned();
+                let msg =
+                    "找不到 Android 应用缓存目录，请前往 GitHub Releases 手动下载 APK".to_owned();
                 fail(&progress, msg.clone());
                 return Err(msg);
             }
@@ -845,7 +872,8 @@ pub async fn app_update_install(
             {
                 return fail(
                     &progress,
-                    "下载完成，但设备正在加工，已暂停打开安装界面。完成任务后再点一次即可直接安装".into(),
+                    "下载完成，但设备正在加工，已暂停打开安装界面。完成任务后再点一次即可直接安装"
+                        .into(),
                 );
             }
             if let Ok(mut p) = progress.lock() {
@@ -872,7 +900,11 @@ pub async fn app_update_install(
         fail(&progress, "当前移动系统暂不支持应用内更新".into());
     }
 
-    Ok(state.progress.lock().map(|p| p.to_json()).unwrap_or(Value::Null))
+    Ok(state
+        .progress
+        .lock()
+        .map(|p| p.to_json())
+        .unwrap_or(Value::Null))
 }
 
 /// 前端调用的应用内更新命令（build.rs 登记与 capability 授权测试核对）。
@@ -895,7 +927,10 @@ mod tests {
     fn release_tag_only_accepts_version_characters() {
         assert_eq!(normalize_release_tag("v0.3.8").as_deref(), Some("v0.3.8"));
         assert_eq!(normalize_release_tag("0.4.0").as_deref(), Some("v0.4.0"));
-        assert_eq!(normalize_release_tag(" V1.2.3-beta.1 ").as_deref(), Some("v1.2.3-beta.1"));
+        assert_eq!(
+            normalize_release_tag(" V1.2.3-beta.1 ").as_deref(),
+            Some("v1.2.3-beta.1")
+        );
         for bad in [
             "",
             "v1.2",
@@ -921,19 +956,35 @@ mod tests {
         assert_eq!(windows_flavor(false, true), WindowsFlavor::Portable);
         assert_eq!(windows_flavor(true, false), WindowsFlavor::Lite);
         assert_eq!(windows_flavor(true, true), WindowsFlavor::OfflineVoice);
-        assert_eq!(windows_target(WindowsFlavor::Lite), Some("windows-x86_64-lite"));
+        assert_eq!(
+            windows_target(WindowsFlavor::Lite),
+            Some("windows-x86_64-lite")
+        );
         assert_eq!(
             windows_target(WindowsFlavor::OfflineVoice),
             Some("windows-x86_64-offline-voice")
         );
-        assert_eq!(windows_target(WindowsFlavor::Portable), None, "便携版没有安装目录可覆盖");
+        assert_eq!(
+            windows_target(WindowsFlavor::Portable),
+            None,
+            "便携版没有安装目录可覆盖"
+        );
     }
 
     #[test]
     fn mobile_main_origin_requires_packaged_host_and_main_label() {
-        assert!(is_trusted_mobile_main("main", &"http://tauri.localhost/".parse().unwrap()));
-        assert!(is_trusted_mobile_main("main", &"https://tauri.localhost/index.html".parse().unwrap()));
-        assert!(is_trusted_mobile_main("main", &"tauri://localhost/".parse().unwrap()));
+        assert!(is_trusted_mobile_main(
+            "main",
+            &"http://tauri.localhost/".parse().unwrap()
+        ));
+        assert!(is_trusted_mobile_main(
+            "main",
+            &"https://tauri.localhost/index.html".parse().unwrap()
+        ));
+        assert!(is_trusted_mobile_main(
+            "main",
+            &"tauri://localhost/".parse().unwrap()
+        ));
         for (label, url) in [
             ("other", "http://tauri.localhost/"),
             ("main", "http://tauri.localhost:8080/"),
@@ -941,7 +992,10 @@ mod tests {
             ("main", "https://evil.example/"),
             ("main", "http://user@tauri.localhost/"),
         ] {
-            assert!(!is_trusted_mobile_main(label, &url.parse().unwrap()), "{label} {url}");
+            assert!(
+                !is_trusted_mobile_main(label, &url.parse().unwrap()),
+                "{label} {url}"
+            );
         }
     }
 
@@ -963,10 +1017,21 @@ mod tests {
     #[test]
     fn pubkey_file_takes_first_non_comment_line() {
         let key = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCQ0RFRg==";
-        assert_eq!(parse_pubkey(&format!("# 说明\n\n  {key}  \n")).as_deref(), Some(key));
-        assert_eq!(parse_pubkey("# 只有注释\n"), None, "未填公钥时不启用应用内更新");
+        assert_eq!(
+            parse_pubkey(&format!("# 说明\n\n  {key}  \n")).as_deref(),
+            Some(key)
+        );
+        assert_eq!(
+            parse_pubkey("# 只有注释\n"),
+            None,
+            "未填公钥时不启用应用内更新"
+        );
         assert_eq!(parse_pubkey("short"), None);
-        assert_eq!(parse_pubkey(&format!("{key} trailing")), None, "公钥只含 base64 字符");
+        assert_eq!(
+            parse_pubkey(&format!("{key} trailing")),
+            None,
+            "公钥只含 base64 字符"
+        );
         let raw = include_str!("../updater-pubkey.txt");
         assert!(
             !raw.contains("secret key") && !raw.contains("PRIVATE"),
@@ -993,7 +1058,10 @@ mod tests {
             embedded_pubkey().as_deref(),
             "tauri.conf.json 的 plugins.updater.pubkey 必须与 updater-pubkey.txt 一致"
         );
-        assert_eq!(updater["requireSignedVersion"], true, "签名必须带版本，防止旧版冒充新版");
+        assert_eq!(
+            updater["requireSignedVersion"], true,
+            "签名必须带版本，防止旧版冒充新版"
+        );
         assert_eq!(updater["windows"]["installMode"], "passive");
         assert!(
             config["bundle"].get("createUpdaterArtifacts").is_none(),
@@ -1048,7 +1116,8 @@ mod tests {
     fn minisign_version_verification_and_android_loopback_staging_work() {
         let pubkey = b64(TEST_PUBKEY_PLAIN);
         let sig = b64(TEST_SIG_PAYLOAD_V200);
-        verify_package_signature(b"test", &sig, &pubkey, "2.0.0").expect("合法签名与匹配版本应通过");
+        verify_package_signature(b"test", &sig, &pubkey, "2.0.0")
+            .expect("合法签名与匹配版本应通过");
         verify_package_signature(b"test", &sig, &pubkey, "v2.0.0").expect("带 v 前缀同版本应通过");
         assert!(
             verify_package_signature(b"tampered", &sig, &pubkey, "2.0.0").is_err(),
@@ -1076,46 +1145,64 @@ mod tests {
         let requests_srv = requests.clone();
         let server = std::thread::spawn(move || {
             for _ in 0..5 {
-                let Ok((mut stream, _)) = listener.accept() else { break };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
                 let mut req_buf = [0u8; 2048];
                 let n = std::io::Read::read(&mut stream, &mut req_buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&req_buf[..n]);
                 requests_srv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let (status, extra_hdr, ct, body): (&str, String, &str, Vec<u8>) =
-                    if req.contains("GET /releases/download/v2.0.0/latest.json") {
-                        let m = serde_json::json!({
-                            "version": "2.0.0",
-                            "platforms": {
-                                "android-aarch64": {
-                                    "url": format!("http://{addr}/releases/download/v2.0.0/MOSS_2.0.0_android_aarch64.apk"),
-                                    "signature": sig_for_srv,
-                                }
+                let (status, extra_hdr, ct, body): (&str, String, &str, Vec<u8>) = if req
+                    .contains("GET /releases/download/v2.0.0/latest.json")
+                {
+                    let m = serde_json::json!({
+                        "version": "2.0.0",
+                        "platforms": {
+                            "android-aarch64": {
+                                "url": format!("http://{addr}/releases/download/v2.0.0/MOSS_2.0.0_android_aarch64.apk"),
+                                "signature": sig_for_srv,
                             }
-                        });
-                        ("200 OK", String::new(), "application/json", serde_json::to_vec(&m).unwrap())
-                    } else if req.contains("GET /releases/download/v1.9.0/latest.json") {
-                        // 清单声称的版本（2.0.0）与请求的标签（v1.9.0）不一致，必须拒绝
-                        let m = serde_json::json!({
-                            "version": "2.0.0",
-                            "platforms": {
-                                "android-aarch64": {
-                                    "url": format!("http://{addr}/releases/download/v1.9.0/MOSS_2.0.0_android_aarch64.apk"),
-                                    "signature": sig_for_srv,
-                                }
+                        }
+                    });
+                    (
+                        "200 OK",
+                        String::new(),
+                        "application/json",
+                        serde_json::to_vec(&m).unwrap(),
+                    )
+                } else if req.contains("GET /releases/download/v1.9.0/latest.json") {
+                    // 清单声称的版本（2.0.0）与请求的标签（v1.9.0）不一致，必须拒绝
+                    let m = serde_json::json!({
+                        "version": "2.0.0",
+                        "platforms": {
+                            "android-aarch64": {
+                                "url": format!("http://{addr}/releases/download/v1.9.0/MOSS_2.0.0_android_aarch64.apk"),
+                                "signature": sig_for_srv,
                             }
-                        });
-                        ("200 OK", String::new(), "application/json", serde_json::to_vec(&m).unwrap())
-                    } else if req.contains("GET /releases/download/v2.0.1/latest.json") {
-                        // 跳转到不受信任外部主机必须被重定向策略拦截
-                        (
-                            "302 Found",
-                            "Location: http://evil.invalid/latest.json\r\n".to_owned(),
-                            "text/plain",
-                            Vec::new(),
-                        )
-                    } else {
-                        ("200 OK", String::new(), "application/vnd.android.package-archive", b"test".to_vec())
-                    };
+                        }
+                    });
+                    (
+                        "200 OK",
+                        String::new(),
+                        "application/json",
+                        serde_json::to_vec(&m).unwrap(),
+                    )
+                } else if req.contains("GET /releases/download/v2.0.1/latest.json") {
+                    // 跳转到不受信任外部主机必须被重定向策略拦截
+                    (
+                        "302 Found",
+                        "Location: http://evil.invalid/latest.json\r\n".to_owned(),
+                        "text/plain",
+                        Vec::new(),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        String::new(),
+                        "application/vnd.android.package-archive",
+                        b"test".to_vec(),
+                    )
+                };
                 let header = format!(
                     "HTTP/1.1 {status}\r\n{extra_hdr}Content-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
@@ -1139,7 +1226,11 @@ mod tests {
         )
         .expect("首次下载并验签应成功");
         assert_eq!(std::fs::read(&staged).unwrap(), b"test");
-        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2, "清单 + APK 共 2 次请求");
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "清单 + APK 共 2 次请求"
+        );
 
         // 第二次点击（模拟用户在 Android 设置开启安装权限后返回重试）：复用已验签缓存，只请求清单不重下 APK
         let staged_again = download_and_stage_android_apk(
@@ -1153,7 +1244,11 @@ mod tests {
         )
         .expect("缓存命中应直接通过");
         assert_eq!(staged_again, staged);
-        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 3, "第二次仅核对清单，不重复下载 APK");
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "第二次仅核对清单，不重复下载 APK"
+        );
 
         // 标签与清单版本不一致必须拒绝
         let mismatch = download_and_stage_android_apk(
@@ -1216,12 +1311,15 @@ mod tests {
         std::fs::create_dir_all(&new_app).unwrap();
         let new_bin = new_app.join("moss-desktop");
         std::fs::write(&new_bin, b"#!/bin/sh\necho MOSS-9.9.9\n").unwrap();
-        let tar_gz_path = build_dir.path().join("MOSS_9.9.9_macos_universal.app.tar.gz");
+        let tar_gz_path = build_dir
+            .path()
+            .join("MOSS_9.9.9_macos_universal.app.tar.gz");
         {
             let file = std::fs::File::create(&tar_gz_path).unwrap();
             let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
             let mut tar = tar::Builder::new(enc);
-            tar.append_dir_all("MOSS.app", build_dir.path().join("MOSS.app")).unwrap();
+            tar.append_dir_all("MOSS.app", build_dir.path().join("MOSS.app"))
+                .unwrap();
             tar.into_inner().unwrap().finish().unwrap();
         }
         let sign = std::process::Command::new("cargo")
@@ -1248,7 +1346,9 @@ mod tests {
 
         // 2. 在临时目录准备旧版“已安装”的 MOSS.app（0.3.0）
         let install_root = tempfile::tempdir().unwrap();
-        let installed_bin = install_root.path().join("MOSS.app/Contents/MacOS/moss-desktop");
+        let installed_bin = install_root
+            .path()
+            .join("MOSS.app/Contents/MacOS/moss-desktop");
         std::fs::create_dir_all(installed_bin.parent().unwrap()).unwrap();
         std::fs::write(&installed_bin, b"OLD-0.3.0").unwrap();
 
@@ -1259,7 +1359,9 @@ mod tests {
         let sig_srv = sig.clone();
         let server = std::thread::spawn(move || {
             for _ in 0..2 {
-                let Ok((mut stream, _)) = listener.accept() else { break };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
                 let mut buf = [0u8; 2048];
                 let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
@@ -1315,7 +1417,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let update = updater.check().await.expect("请求本地更新源").expect("应检测到 9.9.9 新版");
+        let update = updater
+            .check()
+            .await
+            .expect("请求本地更新源")
+            .expect("应检测到 9.9.9 新版");
         assert_eq!(update.version, "9.9.9");
         let downloaded_total = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let dl_counter = downloaded_total.clone();
@@ -1328,16 +1434,25 @@ mod tests {
             )
             .await
             .expect("下载并通过带版本号的 minisign 验签");
-        assert_eq!(downloaded_total.load(std::sync::atomic::Ordering::SeqCst), archive_bytes.len() as u64);
+        assert_eq!(
+            downloaded_total.load(std::sync::atomic::Ordering::SeqCst),
+            archive_bytes.len() as u64
+        );
 
         // 篡改一个字节必须被 install 二次验签拦截
         let mut tampered = bytes.clone();
         *tampered.last_mut().unwrap() ^= 0xff;
         assert!(update.install(&tampered).is_err(), "篡改包必须拒绝安装");
-        assert_eq!(std::fs::read(&installed_bin).unwrap(), b"OLD-0.3.0", "拒绝安装后原程序完好无损");
+        assert_eq!(
+            std::fs::read(&installed_bin).unwrap(),
+            b"OLD-0.3.0",
+            "拒绝安装后原程序完好无损"
+        );
 
         // 合法包原地替换 MOSS.app
-        update.install(bytes).expect("合法更新包原地替换 MOSS.app 应成功");
+        update
+            .install(bytes)
+            .expect("合法更新包原地替换 MOSS.app 应成功");
         assert_eq!(
             std::fs::read(&installed_bin).unwrap(),
             b"#!/bin/sh\necho MOSS-9.9.9\n",

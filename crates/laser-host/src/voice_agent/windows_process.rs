@@ -41,8 +41,8 @@ use windows_sys::Win32::{
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
             DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-            InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            PROCESS_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE, OpenProcess, ResumeThread,
+            InitializeProcThreadAttributeList, OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            PROCESS_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE, ResumeThread,
             STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
         },
     },
@@ -265,7 +265,9 @@ fn make_command_line(program: &Path, args: &[String]) -> Result<Vec<u16>, Proces
     }
     Ok(wide(OsStr::new(&line)))
 }
-pub(crate) fn environment_block(env: &BTreeMap<String, String>) -> Result<Vec<u16>, ProcessFailure> {
+pub(crate) fn environment_block(
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<u16>, ProcessFailure> {
     let mut sorted = env.iter().collect::<Vec<_>>();
     sorted.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
     let mut output = Vec::new();

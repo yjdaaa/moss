@@ -25,14 +25,20 @@ impl OpusDecoder {
         if !supported_rate(rate) {
             return Err(format!("不支持的采样率 {rate} Hz"));
         }
-        let inner = Decoder::new(rate, Channels::Mono).map_err(|error| format!("创建 Opus 解码器失败：{error}"))?;
+        let inner = Decoder::new(rate, Channels::Mono)
+            .map_err(|error| format!("创建 Opus 解码器失败：{error}"))?;
         // Opus 单包最长 120 ms
-        Ok(Self { inner, buffer: vec![0; frame_samples(rate, 120)] })
+        Ok(Self {
+            inner,
+            buffer: vec![0; frame_samples(rate, 120)],
+        })
     }
 
     pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<i16>, String> {
-        let samples =
-            self.inner.decode(packet, &mut self.buffer, false).map_err(|error| format!("Opus 解码失败：{error}"))?;
+        let samples = self
+            .inner
+            .decode(packet, &mut self.buffer, false)
+            .map_err(|error| format!("Opus 解码失败：{error}"))?;
         Ok(self.buffer[..samples].to_vec())
     }
 }
@@ -54,7 +60,11 @@ impl OpusEncoder {
             .map_err(|error| format!("创建 Opus 编码器失败：{error}"))?;
         let _ = inner.set_vbr(true);
         let _ = inner.set_complexity(10);
-        Ok(Self { inner, frame: frame_samples(rate, frame_ms), packet: vec![0; 4000] })
+        Ok(Self {
+            inner,
+            frame: frame_samples(rate, frame_ms),
+            packet: vec![0; 4000],
+        })
     }
 
     /// 每帧样本数。

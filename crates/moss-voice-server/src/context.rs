@@ -55,7 +55,13 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Self; 5] = [Self::Preference, Self::DeviceFact, Self::TechnicalNote, Self::TaskContext, Self::TroubleshootingExperience];
+    pub const ALL: [Self; 5] = [
+        Self::Preference,
+        Self::DeviceFact,
+        Self::TechnicalNote,
+        Self::TaskContext,
+        Self::TroubleshootingExperience,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -113,7 +119,11 @@ impl ScopeKind {
 }
 
 fn valid_token(value: &str, max: usize, extra: &[u8]) -> bool {
-    !value.is_empty() && value.len() <= max && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || extra.contains(&b))
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || extra.contains(&b))
 }
 
 /// A scope as stored in a row. Plain data: holding one grants nothing.
@@ -126,12 +136,24 @@ pub struct ScopeKey {
 impl ScopeKey {
     pub fn new(kind: ScopeKind, id: &str) -> Result<Self, ContextError> {
         // Device ids are MAC-like (`aa:bb:..`); other ids are host-generated tokens.
-        let extra: &[u8] = if kind == ScopeKind::Device { b":." } else { b"." };
-        valid_token(id, MAX_SCOPE_ID, extra).then(|| Self { kind, id: id.into() }).ok_or(ContextError::ScopeInvalid)
+        let extra: &[u8] = if kind == ScopeKind::Device {
+            b":."
+        } else {
+            b"."
+        };
+        valid_token(id, MAX_SCOPE_ID, extra)
+            .then(|| Self {
+                kind,
+                id: id.into(),
+            })
+            .ok_or(ContextError::ScopeInvalid)
     }
 
     pub fn parse(kind: &str, id: &str) -> Result<Self, ContextError> {
-        Self::new(ScopeKind::parse(kind).ok_or(ContextError::ScopeInvalid)?, id)
+        Self::new(
+            ScopeKind::parse(kind).ok_or(ContextError::ScopeInvalid)?,
+            id,
+        )
     }
 
     pub fn kind(&self) -> ScopeKind {
@@ -168,19 +190,35 @@ impl TrustedScope {
         if grant_generation == 0 {
             return Err(ContextError::ScopeInvalid);
         }
-        Ok(Self { key: ScopeKey::new(ScopeKind::Device, device_id)?, origin: ScopeOrigin::DeviceGrant, generation: grant_generation })
+        Ok(Self {
+            key: ScopeKey::new(ScopeKind::Device, device_id)?,
+            origin: ScopeOrigin::DeviceGrant,
+            generation: grant_generation,
+        })
     }
 
     pub fn calibrated_person(scope: &PersonScope) -> Result<Self, ContextError> {
         let generation = u64::try_from(scope.revision()).map_err(|_| ContextError::ScopeInvalid)?;
-        Ok(Self { key: ScopeKey::new(ScopeKind::Person, scope.id())?, origin: ScopeOrigin::CalibratedSpeaker, generation })
+        Ok(Self {
+            key: ScopeKey::new(ScopeKind::Person, scope.id())?,
+            origin: ScopeOrigin::CalibratedSpeaker,
+            generation,
+        })
     }
 
-    pub fn desktop_selection(kind: ScopeKind, id: &str, selection_generation: u64) -> Result<Self, ContextError> {
+    pub fn desktop_selection(
+        kind: ScopeKind,
+        id: &str,
+        selection_generation: u64,
+    ) -> Result<Self, ContextError> {
         if !matches!(kind, ScopeKind::Project | ScopeKind::Workspace) || selection_generation == 0 {
             return Err(ContextError::ScopeInvalid);
         }
-        Ok(Self { key: ScopeKey::new(kind, id)?, origin: ScopeOrigin::DesktopSelection, generation: selection_generation })
+        Ok(Self {
+            key: ScopeKey::new(kind, id)?,
+            origin: ScopeOrigin::DesktopSelection,
+            generation: selection_generation,
+        })
     }
 
     pub fn key(&self) -> &ScopeKey {
@@ -216,22 +254,38 @@ pub struct AccessContext {
 impl AccessContext {
     /// Voice: the allowed device, optionally a calibrated person and a project/workspace the
     /// desktop attached to this device. Each slot must carry the matching kind and origin.
-    pub fn voice(device: TrustedScope, person: Option<TrustedScope>, selection: Option<TrustedScope>) -> Result<Self, ContextError> {
+    pub fn voice(
+        device: TrustedScope,
+        person: Option<TrustedScope>,
+        selection: Option<TrustedScope>,
+    ) -> Result<Self, ContextError> {
         if device.origin != ScopeOrigin::DeviceGrant
-            || person.as_ref().is_some_and(|p| p.origin != ScopeOrigin::CalibratedSpeaker)
-            || selection.as_ref().is_some_and(|s| s.origin != ScopeOrigin::DesktopSelection)
+            || person
+                .as_ref()
+                .is_some_and(|p| p.origin != ScopeOrigin::CalibratedSpeaker)
+            || selection
+                .as_ref()
+                .is_some_and(|s| s.origin != ScopeOrigin::DesktopSelection)
         {
             return Err(ContextError::ScopeInvalid);
         }
         let mut scopes = vec![device];
         scopes.extend(person);
         scopes.extend(selection);
-        Ok(Self { channel: Channel::Voice, scopes, personal_mode: false })
+        Ok(Self {
+            channel: Channel::Voice,
+            scopes,
+            personal_mode: false,
+        })
     }
 
     /// Private window: the scopes the host enumerated for the owner of this machine.
     pub fn desktop_private(scopes: Vec<TrustedScope>) -> Self {
-        Self { channel: Channel::DesktopPrivate, scopes, personal_mode: false }
+        Self {
+            channel: Channel::DesktopPrivate,
+            scopes,
+            personal_mode: false,
+        }
     }
 
     /// NV14 personal mode: isolate `Category::Preference` strictly to `ScopeKind::Person` on the
@@ -242,7 +296,9 @@ impl AccessContext {
     }
     /// Attach an independent workspace scope (e.g. `local-kb`) alongside any active project.
     pub fn with_workspace(mut self, workspace: TrustedScope) -> Result<Self, ContextError> {
-        if workspace.origin != ScopeOrigin::DesktopSelection || workspace.key.kind != ScopeKind::Workspace {
+        if workspace.origin != ScopeOrigin::DesktopSelection
+            || workspace.key.kind != ScopeKind::Workspace
+        {
             return Err(ContextError::ScopeInvalid);
         }
         if !self.scopes.iter().any(|s| s.key == workspace.key) {
@@ -250,7 +306,6 @@ impl AccessContext {
         }
         Ok(self)
     }
-
 
     pub fn personal_mode(&self) -> bool {
         self.personal_mode
@@ -298,7 +353,14 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    pub const ALL: [Self; 6] = [Self::UserEdit, Self::ConversationExtraction, Self::LegacyNv10Import, Self::DocumentIndex, Self::TrustedTest, Self::AgentRunRecord];
+    pub const ALL: [Self; 6] = [
+        Self::UserEdit,
+        Self::ConversationExtraction,
+        Self::LegacyNv10Import,
+        Self::DocumentIndex,
+        Self::TrustedTest,
+        Self::AgentRunRecord,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -367,7 +429,10 @@ impl Source {
         let reference = match (kind.ref_prefix(), reference) {
             (None, None) => None,
             (Some(prefix), Some(value)) => {
-                let token = value.strip_prefix(prefix).and_then(|rest| rest.strip_prefix(':')).ok_or(ContextError::SourceRefInvalid)?;
+                let token = value
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_prefix(':'))
+                    .ok_or(ContextError::SourceRefInvalid)?;
                 if !valid_token(token, MAX_REF_TOKEN, b".") || private_content(value) {
                     return Err(ContextError::SourceRefInvalid);
                 }
@@ -404,7 +469,9 @@ impl Verification {
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        [Self::Candidate, Self::Confirmed, Self::Invalidated].into_iter().find(|item| item.as_str() == value)
+        [Self::Candidate, Self::Confirmed, Self::Invalidated]
+            .into_iter()
+            .find(|item| item.as_str() == value)
     }
 }
 
@@ -416,12 +483,18 @@ pub enum Evidence {
 }
 
 /// Allowed state changes. Invalidated is terminal: a corrected fact becomes a new record.
-pub fn transition(from: Verification, to: Verification, evidence: Option<&Evidence>) -> Result<(), ContextError> {
+pub fn transition(
+    from: Verification,
+    to: Verification,
+    evidence: Option<&Evidence>,
+) -> Result<(), ContextError> {
     use Verification::*;
     let ok = match (from, to) {
         (Candidate, Confirmed) => match evidence {
             Some(Evidence::UserConfirmed) => true,
-            Some(Evidence::TrustedTest(source)) => source.kind() == SourceKind::TrustedTest && source.reference().is_some(),
+            Some(Evidence::TrustedTest(source)) => {
+                source.kind() == SourceKind::TrustedTest && source.reference().is_some()
+            }
             None => false,
         },
         (Candidate | Confirmed, Invalidated) => true,
@@ -441,14 +514,20 @@ impl Applicability {
     pub fn new(device_model: &str, firmware: Option<&str>) -> Result<Self, ContextError> {
         let clean = |value: &str| {
             let value = value.trim();
-            (!value.is_empty() && value.chars().count() <= MAX_APPLICABILITY && !value.chars().any(char::is_control)).then(|| value.to_owned())
+            (!value.is_empty()
+                && value.chars().count() <= MAX_APPLICABILITY
+                && !value.chars().any(char::is_control))
+            .then(|| value.to_owned())
         };
         let device_model = clean(device_model).ok_or(ContextError::ApplicabilityInvalid)?;
         let firmware = match firmware {
             Some(value) => Some(clean(value).ok_or(ContextError::ApplicabilityInvalid)?),
             None => None,
         };
-        Ok(Self { device_model, firmware })
+        Ok(Self {
+            device_model,
+            firmware,
+        })
     }
 
     pub fn device_model(&self) -> &str {
@@ -461,7 +540,9 @@ impl Applicability {
 
     pub fn matches(&self, model: &str, firmware: Option<&str>) -> bool {
         self.device_model.eq_ignore_ascii_case(model.trim())
-            && self.firmware.as_deref().is_none_or(|pinned| firmware.is_some_and(|current| pinned.eq_ignore_ascii_case(current.trim())))
+            && self.firmware.as_deref().is_none_or(|pinned| {
+                firmware.is_some_and(|current| pinned.eq_ignore_ascii_case(current.trim()))
+            })
     }
 }
 
@@ -471,13 +552,27 @@ impl Applicability {
 fn looks_like_machine_data(text: &str) -> bool {
     text.lines().any(|line| {
         // ASCII words, split on anything else (spaces, CJK, punctuation).
-        let words: Vec<&str> = line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')).filter(|w| !w.is_empty()).collect();
-        let code = |w: &str| w.len() >= 2 && w.len() <= 4 && w.starts_with(['G', 'g', 'M', 'm']) && w[1..].bytes().all(|b| b.is_ascii_digit());
+        let words: Vec<&str> = line
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let code = |w: &str| {
+            w.len() >= 2
+                && w.len() <= 4
+                && w.starts_with(['G', 'g', 'M', 'm'])
+                && w[1..].bytes().all(|b| b.is_ascii_digit())
+        };
         let parameter = |w: &str| {
             let mut chars = w.chars();
-            chars.next().is_some_and(|c| "XYZSFxyzsf".contains(c)) && chars.next().is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '.')
+            chars.next().is_some_and(|c| "XYZSFxyzsf".contains(c))
+                && chars
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '.')
         };
-        let gcode = words.iter().position(|w| code(w)).is_some_and(|at| words[at + 1..].iter().any(|w| parameter(w)));
+        let gcode = words
+            .iter()
+            .position(|w| code(w))
+            .is_some_and(|at| words[at + 1..].iter().any(|w| parameter(w)));
         let setting = line.match_indices('$').any(|(at, _)| {
             let rest = &line[at + 1..];
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -489,7 +584,10 @@ fn looks_like_machine_data(text: &str) -> bool {
 
 fn check_content(content: &str) -> Result<(), ContextError> {
     let trimmed = content.trim();
-    if trimmed.is_empty() || content.chars().count() > MAX_CONTENT_CHARS || content.chars().any(|c| c.is_control() && c != '\n') {
+    if trimmed.is_empty()
+        || content.chars().count() > MAX_CONTENT_CHARS
+        || content.chars().any(|c| c.is_control() && c != '\n')
+    {
         return Err(ContextError::ContentInvalid);
     }
     if private_content(content) || looks_like_machine_data(content) {
@@ -518,10 +616,18 @@ impl MemoryDraft {
         if !access.can_write(&self.scope, self.source.kind()) {
             return Err(ContextError::AccessDenied);
         }
-        if access.personal_mode() && self.scope.kind() == ScopeKind::Device && self.category == Category::Preference {
+        if access.personal_mode()
+            && self.scope.kind() == ScopeKind::Device
+            && self.category == Category::Preference
+        {
             return Err(ContextError::AccessDenied);
         }
-        if !self.source.kind().allowed_categories().contains(&self.category) {
+        if !self
+            .source
+            .kind()
+            .allowed_categories()
+            .contains(&self.category)
+        {
             return Err(ContextError::SourceNotAllowed);
         }
         match self.verification {
@@ -533,7 +639,10 @@ impl MemoryDraft {
         if self.category.needs_applicability() && self.applicability.is_none() {
             return Err(ContextError::ApplicabilityRequired);
         }
-        if self.expires_at.is_some_and(|at| !at.is_finite() || at <= now) {
+        if self
+            .expires_at
+            .is_some_and(|at| !at.is_finite() || at <= now)
+        {
             return Err(ContextError::ExpiryInvalid);
         }
         Ok(())
@@ -608,8 +717,12 @@ impl ContextMemory {
             scope: ScopeKey::parse(row.scope_kind, row.scope_id)?,
             category: Category::parse(row.category).ok_or(ContextError::ContentInvalid)?,
             content: row.content.into(),
-            verification: Verification::parse(row.verification).ok_or(ContextError::ContentInvalid)?,
-            source: Source::new(SourceKind::parse(row.source_kind).ok_or(ContextError::SourceRefInvalid)?, row.source_ref)?,
+            verification: Verification::parse(row.verification)
+                .ok_or(ContextError::ContentInvalid)?,
+            source: Source::new(
+                SourceKind::parse(row.source_kind).ok_or(ContextError::SourceRefInvalid)?,
+                row.source_ref,
+            )?,
             applicability,
             revision: row.revision,
             created_at: row.created_at,
@@ -636,7 +749,10 @@ impl ContextMemory {
 
     /// Visible to this request at all (candidates included, labelled as such by the caller).
     pub fn readable(&self, access: &AccessContext, now: f64) -> bool {
-        if access.personal_mode() && self.scope.kind() == ScopeKind::Device && self.category == Category::Preference {
+        if access.personal_mode()
+            && self.scope.kind() == ScopeKind::Device
+            && self.category == Category::Preference
+        {
             return false;
         }
         access.can_read(&self.scope) && matches!(self.state(now), RecordState::Active(_))
@@ -644,11 +760,20 @@ impl ContextMemory {
 
     /// May be presented as a fact: confirmed, active, and — for hardware-bound categories —
     /// matching the current device model/firmware. Still read-only data, never an instruction.
-    pub fn usable_as_fact(&self, access: &AccessContext, now: f64, device: Option<(&str, Option<&str>)>) -> bool {
+    pub fn usable_as_fact(
+        &self,
+        access: &AccessContext,
+        now: f64,
+        device: Option<(&str, Option<&str>)>,
+    ) -> bool {
         self.readable(access, now)
             && self.verification == Verification::Confirmed
             && (!self.category.needs_applicability()
-                || self.applicability.as_ref().zip(device).is_some_and(|(rule, (model, firmware))| rule.matches(model, firmware)))
+                || self
+                    .applicability
+                    .as_ref()
+                    .zip(device)
+                    .is_some_and(|(rule, (model, firmware))| rule.matches(model, firmware)))
     }
 }
 

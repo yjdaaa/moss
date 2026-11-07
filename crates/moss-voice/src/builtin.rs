@@ -38,7 +38,11 @@ pub struct SavePlan {
 }
 
 /// 根据页面输入计算新的模型设置与密钥变化。分区缺省或全部留空时不修改；`clear` 中的分区删除设置与密钥。
-pub fn plan_save(current: &BuiltinModels, input: &ModelsInput, clear: &[Section]) -> Result<SavePlan, String> {
+pub fn plan_save(
+    current: &BuiltinModels,
+    input: &ModelsInput,
+    clear: &[Section],
+) -> Result<SavePlan, String> {
     let mut models = current.clone();
     let mut keys = Vec::new();
     for section in Section::ALL {
@@ -47,8 +51,12 @@ pub fn plan_save(current: &BuiltinModels, input: &ModelsInput, clear: &[Section]
             keys.push((section, KeyChange::Clear));
             continue;
         }
-        let Some(section_input) = input.section(section) else { continue };
-        let Some(resolved) = models::resolve_builtin(section, section_input)? else { continue };
+        let Some(section_input) = input.section(section) else {
+            continue;
+        };
+        let Some(resolved) = models::resolve_builtin(section, section_input)? else {
+            continue;
+        };
         models.set(
             section,
             Some(BuiltinProvider {
@@ -59,15 +67,26 @@ pub fn plan_save(current: &BuiltinModels, input: &ModelsInput, clear: &[Section]
                 speed: resolved.speed as f32,
             }),
         );
-        keys.push((section, if resolved.api_key.is_empty() { KeyChange::Keep } else { KeyChange::Set(resolved.api_key) }));
+        keys.push((
+            section,
+            if resolved.api_key.is_empty() {
+                KeyChange::Keep
+            } else {
+                KeyChange::Set(resolved.api_key)
+            },
+        ));
     }
     Ok(SavePlan { models, keys })
 }
 
 /// 测试连接用的分区：输入的密钥留空时用已保存的密钥（`stored`），保证“保存的就是测试通过的”。
-pub fn resolve_for_test(section: Section, input: &SectionInput, stored: Option<String>) -> Result<ResolvedSection, String> {
-    let mut resolved =
-        models::resolve_builtin(section, input)?.ok_or_else(|| format!("{}：请填写地址与模型", section.label()))?;
+pub fn resolve_for_test(
+    section: Section,
+    input: &SectionInput,
+    stored: Option<String>,
+) -> Result<ResolvedSection, String> {
+    let mut resolved = models::resolve_builtin(section, input)?
+        .ok_or_else(|| format!("{}：请填写地址与模型", section.label()))?;
     if resolved.api_key.is_empty() {
         resolved.api_key = stored.unwrap_or_default();
     }
@@ -75,7 +94,11 @@ pub fn resolve_for_test(section: Section, input: &SectionInput, stored: Option<S
 }
 
 /// 读取模型列表用的分区参数：输入的密钥留空时用已保存的密钥（`stored`），不要求先填模型名与音色。
-pub fn resolve_for_list(section: Section, input: &SectionInput, stored: Option<String>) -> Result<models::ResolvedListRequest, String> {
+pub fn resolve_for_list(
+    section: Section,
+    input: &SectionInput,
+    stored: Option<String>,
+) -> Result<models::ResolvedListRequest, String> {
     let mut resolved = models::resolve_list_request(section, input)?;
     if resolved.api_key.is_empty() {
         resolved.api_key = stored.unwrap_or_default();
@@ -112,41 +135,89 @@ mod tests {
     use super::*;
 
     fn input(url: &str, key: &str, model: &str) -> SectionInput {
-        SectionInput { url: url.into(), api_key: key.into(), model: model.into(), ..SectionInput::default() }
+        SectionInput {
+            url: url.into(),
+            api_key: key.into(),
+            model: model.into(),
+            ..SectionInput::default()
+        }
     }
 
     #[test]
     fn save_plan_normalizes_urls_and_keeps_blank_keys() {
         let mut models_input = ModelsInput {
-            llm: Some(input("https://llm.test/v1/chat/completions", "sk-new-llm", "qwen")),
+            llm: Some(input(
+                "https://llm.test/v1/chat/completions",
+                "sk-new-llm",
+                "qwen",
+            )),
             asr: Some(input("https://asr.test/v1/", "", "whisper-1")),
-            tts: Some(SectionInput { voice: "alloy".into(), speed: Some(1.2), ..input("https://tts.test/v1", "", "tts-1") }),
+            tts: Some(SectionInput {
+                voice: "alloy".into(),
+                speed: Some(1.2),
+                ..input("https://tts.test/v1", "", "tts-1")
+            }),
         };
         let plan = plan_save(&BuiltinModels::default(), &models_input, &[]).unwrap();
         assert_eq!(plan.models.llm.as_ref().unwrap().url, "https://llm.test/v1");
-        assert_eq!(plan.models.asr.as_ref().unwrap().url, "https://asr.test/v1/audio/transcriptions");
+        assert_eq!(
+            plan.models.asr.as_ref().unwrap().url,
+            "https://asr.test/v1/audio/transcriptions"
+        );
         let tts = plan.models.tts.as_ref().unwrap();
-        assert_eq!((tts.url.as_str(), tts.voice.as_str(), tts.speed), ("https://tts.test/v1/audio/speech", "alloy", 1.2));
+        assert_eq!(
+            (tts.url.as_str(), tts.voice.as_str(), tts.speed),
+            ("https://tts.test/v1/audio/speech", "alloy", 1.2)
+        );
         assert!(plan.models.complete());
         assert_eq!(
             plan.keys,
-            vec![(Section::Llm, KeyChange::Set("sk-new-llm".into())), (Section::Asr, KeyChange::Keep), (Section::Tts, KeyChange::Keep)]
+            vec![
+                (Section::Llm, KeyChange::Set("sk-new-llm".into())),
+                (Section::Asr, KeyChange::Keep),
+                (Section::Tts, KeyChange::Keep)
+            ]
         );
-        assert!(!format!("{plan:?}").contains("sk-new-llm"), "调试输出不含密钥");
+        assert!(
+            !format!("{plan:?}").contains("sk-new-llm"),
+            "调试输出不含密钥"
+        );
 
         // 只改一个分区，其余不动；清除的分区删除设置与密钥
-        models_input = ModelsInput { asr: Some(input("https://asr2.test/v1", "", "sense")), ..ModelsInput::default() };
+        models_input = ModelsInput {
+            asr: Some(input("https://asr2.test/v1", "", "sense")),
+            ..ModelsInput::default()
+        };
         let next = plan_save(&plan.models, &models_input, &[Section::Tts]).unwrap();
         assert_eq!(next.models.llm, plan.models.llm);
         assert_eq!(next.models.asr.as_ref().unwrap().model, "sense");
         assert!(next.models.tts.is_none() && !next.models.complete());
-        assert_eq!(next.keys, vec![(Section::Asr, KeyChange::Keep), (Section::Tts, KeyChange::Clear)]);
+        assert_eq!(
+            next.keys,
+            vec![
+                (Section::Asr, KeyChange::Keep),
+                (Section::Tts, KeyChange::Clear)
+            ]
+        );
         // 全部留空的分区不修改
-        let blank = ModelsInput { llm: Some(input("", "", "")), ..ModelsInput::default() };
-        assert_eq!(plan_save(&plan.models, &blank, &[]).unwrap().models, plan.models);
+        let blank = ModelsInput {
+            llm: Some(input("", "", "")),
+            ..ModelsInput::default()
+        };
+        assert_eq!(
+            plan_save(&plan.models, &blank, &[]).unwrap().models,
+            plan.models
+        );
         // 校验错误原样返回
-        let bad = ModelsInput { llm: Some(input("ftp://x", "", "m")), ..ModelsInput::default() };
-        assert!(plan_save(&BuiltinModels::default(), &bad, &[]).unwrap_err().contains("http"));
+        let bad = ModelsInput {
+            llm: Some(input("ftp://x", "", "m")),
+            ..ModelsInput::default()
+        };
+        assert!(
+            plan_save(&BuiltinModels::default(), &bad, &[])
+                .unwrap_err()
+                .contains("http")
+        );
 
         // 豆包流式（NV7）：地址与资源 ID 用默认值，接口类型写入设置
         let doubao = ModelsInput {
@@ -160,19 +231,46 @@ mod tests {
         let plan = plan_save(&BuiltinModels::default(), &doubao, &[]).unwrap();
         let tts = plan.models.tts.unwrap();
         assert_eq!(tts.kind, crate::models::ProviderKind::Doubao);
-        assert_eq!((tts.url.as_str(), tts.model.as_str()), (crate::models::DOUBAO_TTS_URL, crate::models::DOUBAO_TTS_RESOURCE));
-        assert_eq!(plan.keys, vec![(Section::Tts, KeyChange::Set("doubao-key".into()))]);
+        assert_eq!(
+            (tts.url.as_str(), tts.model.as_str()),
+            (
+                crate::models::DOUBAO_TTS_URL,
+                crate::models::DOUBAO_TTS_RESOURCE
+            )
+        );
+        assert_eq!(
+            plan.keys,
+            vec![(Section::Tts, KeyChange::Set("doubao-key".into()))]
+        );
     }
 
     #[test]
     fn test_resolution_uses_stored_key_when_blank_and_status_hides_keys() {
-        let resolved = resolve_for_test(Section::Llm, &input("https://llm.test/v1", "", "m"), Some("sk-stored".into())).unwrap();
+        let resolved = resolve_for_test(
+            Section::Llm,
+            &input("https://llm.test/v1", "", "m"),
+            Some("sk-stored".into()),
+        )
+        .unwrap();
         assert_eq!(resolved.api_key, "sk-stored");
-        let typed = resolve_for_test(Section::Llm, &input("https://llm.test/v1", "sk-typed", "m"), Some("sk-stored".into())).unwrap();
+        let typed = resolve_for_test(
+            Section::Llm,
+            &input("https://llm.test/v1", "sk-typed", "m"),
+            Some("sk-stored".into()),
+        )
+        .unwrap();
         assert_eq!(typed.api_key, "sk-typed");
         assert!(resolve_for_test(Section::Asr, &input("", "", ""), None).is_err());
-        let list_req = resolve_for_list(Section::Tts, &input("https://tts.test/v1/audio/speech", "", ""), Some("sk-stored-tts".into())).unwrap();
-        assert_eq!((list_req.url.as_str(), list_req.api_key.as_str()), ("https://tts.test/v1/models", "sk-stored-tts"));
+        let list_req = resolve_for_list(
+            Section::Tts,
+            &input("https://tts.test/v1/audio/speech", "", ""),
+            Some("sk-stored-tts".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            (list_req.url.as_str(), list_req.api_key.as_str()),
+            ("https://tts.test/v1/models", "sk-stored-tts")
+        );
 
         let models = BuiltinModels {
             llm: Some(BuiltinProvider {

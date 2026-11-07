@@ -156,7 +156,11 @@ pub(super) fn call_jev_with_model(
     state: &Value,
 ) -> Result<Value, String> {
     let local = is_local_jev_endpoint(endpoint);
-    let service = if local { "本机 Jev 服务" } else { "OpenRouter" };
+    let service = if local {
+        "本机 Jev 服务"
+    } else {
+        "OpenRouter"
+    };
     let timeout_secs = if local { 12 } else { 5 };
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -191,7 +195,11 @@ fn is_local_jev_endpoint(endpoint: &str) -> bool {
 
 /// 反馈记录的分类来源（2026-11-07）：本机 Jev 与 OpenRouter 分开记，界面不再把本机模型标成 OpenRouter。
 fn decision_source(used_local_jev: bool) -> &'static str {
-    if used_local_jev { "local_jev" } else { "openrouter" }
+    if used_local_jev {
+        "local_jev"
+    } else {
+        "openrouter"
+    }
 }
 
 fn local_jev_upstream_model(raw: &str) -> Option<&'static str> {
@@ -375,7 +383,13 @@ impl ApiService {
         Ok(())
     }
 
-    pub(super) fn handle_feedback_route(&self, route: &str, path: &str, body: &[u8], origin: &str) -> Vec<u8> {
+    pub(super) fn handle_feedback_route(
+        &self,
+        route: &str,
+        path: &str,
+        body: &[u8],
+        origin: &str,
+    ) -> Vec<u8> {
         let result = (|| -> Result<Value, (u16, String)> {
             let object = if route == "/api/feedback/history" {
                 let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
@@ -513,7 +527,9 @@ impl ApiService {
                 } else {
                     let model_to_use = jev_model.unwrap_or(JEV_MODEL);
                     match effective_key.as_deref() {
-                        Some(key) => call_jev_with_model(DEFAULT_JEV_ENDPOINT, key, model_to_use, &state),
+                        Some(key) => {
+                            call_jev_with_model(DEFAULT_JEV_ENDPOINT, key, model_to_use, &state)
+                        }
                         None => Err("未配置 OpenRouter API Key".into()),
                     }
                 }
@@ -523,7 +539,11 @@ impl ApiService {
                 Err("未启用 OpenRouter Jev".into())
             };
             let (answer, source, fallback) = match decision {
-                Ok(value) => (value, decision_source(local_upstream.is_some()), Value::Null),
+                Ok(value) => (
+                    value,
+                    decision_source(local_upstream.is_some()),
+                    Value::Null,
+                ),
                 Err(error) => (
                     json!({"feedback_type": local_class(text)}),
                     "local_rules",
@@ -587,7 +607,9 @@ impl ApiService {
         input.insert("feedback_params".into(), params.json());
         let effective_library = self.effective_material_library()?;
         let artifacts = match workflow["source_type"].as_str() {
-            Some("text") => generate_text_artifacts(&input, self.generated_root.as_deref(), &effective_library)?,
+            Some("text") => {
+                generate_text_artifacts(&input, self.generated_root.as_deref(), &effective_library)?
+            }
             Some("draw" | "image") => {
                 // 图片任务的预览是抖动后的黑白网格，优先用另存的原图重新处理
                 let file = workflow["artifacts"]["source_image_file"]
@@ -1033,27 +1055,65 @@ mod tests {
     fn text_and_uploaded_image_adoption_preserve_geometry_and_parameters() {
         let temp = tempfile::tempdir().unwrap();
         let service = service(temp.path(), true);
-        let image = draw_input()["image_data_url"].as_str().unwrap().split_once(',').unwrap().1.to_owned();
-        std::fs::write(temp.path().join("input.png"), base64::engine::general_purpose::STANDARD.decode(image).unwrap()).unwrap();
+        let image = draw_input()["image_data_url"]
+            .as_str()
+            .unwrap()
+            .split_once(',')
+            .unwrap()
+            .1
+            .to_owned();
+        std::fs::write(
+            temp.path().join("input.png"),
+            base64::engine::general_purpose::STANDARD
+                .decode(image)
+                .unwrap(),
+        )
+        .unwrap();
         for (route, input) in [
-            ("/api/text-task/generate", json!({"text":"AB","font_path":concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/fixtures/fonts/geometry.ttf"),"material":"椴木","thickness_mm":3})),
-            ("/api/workflow", json!({"action":"preview","source_type":"image","image_file":"input.png","material":"椴木","thickness_mm":3})),
+            (
+                "/api/text-task/generate",
+                json!({"text":"AB","font_path":concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/fixtures/fonts/geometry.ttf"),"material":"椴木","thickness_mm":3}),
+            ),
+            (
+                "/api/workflow",
+                json!({"action":"preview","source_type":"image","image_file":"input.png","material":"椴木","thickness_mm":3}),
+            ),
         ] {
             let (status, preview) = post(&service, route, input);
             assert_eq!(status, 200, "{preview}");
             let workflow = &preview["result"];
-            let (_, feedback) = post(&service, "/api/feedback", json!({"workflow_id":workflow["workflow_id"],"feedback_text":"太焦了"}));
-            let (status, adoption) = post(&service, "/api/feedback/accept", json!({
-                "workflow_id":workflow["workflow_id"],"feedback_id":feedback["result"]["feedback_id"],"confirmed":true
-            }));
+            let (_, feedback) = post(
+                &service,
+                "/api/feedback",
+                json!({"workflow_id":workflow["workflow_id"],"feedback_text":"太焦了"}),
+            );
+            let (status, adoption) = post(
+                &service,
+                "/api/feedback/accept",
+                json!({
+                    "workflow_id":workflow["workflow_id"],"feedback_id":feedback["result"]["feedback_id"],"confirmed":true
+                }),
+            );
             assert_eq!(status, 200, "{adoption}");
             let new_id = adoption["result"]["adopted_workflow_id"].as_str().unwrap();
             let regenerated = service.feedback_workflow(new_id).unwrap();
-            assert_eq!(regenerated["artifacts"]["width_mm"], workflow["artifacts"]["width_mm"]);
-            assert_eq!(regenerated["artifacts"]["height_mm"], workflow["artifacts"]["height_mm"]);
-            assert_eq!(regenerated["artifacts"]["actual_params"], feedback["result"]["suggested_params"]);
+            assert_eq!(
+                regenerated["artifacts"]["width_mm"],
+                workflow["artifacts"]["width_mm"]
+            );
+            assert_eq!(
+                regenerated["artifacts"]["height_mm"],
+                workflow["artifacts"]["height_mm"]
+            );
+            assert_eq!(
+                regenerated["artifacts"]["actual_params"],
+                feedback["result"]["suggested_params"]
+            );
             assert_eq!(regenerated["source_type"], workflow["source_type"]);
-            assert_ne!(regenerated["artifacts"]["gcode_file"], workflow["artifacts"]["gcode_file"]);
+            assert_ne!(
+                regenerated["artifacts"]["gcode_file"],
+                workflow["artifacts"]["gcode_file"]
+            );
         }
     }
 
@@ -1080,10 +1140,15 @@ mod tests {
             assert!(!is_openrouter_https_url(invalid), "{invalid}");
         }
 
-        let ok_default_kind = json!({"voice": {"builtin_models": {"llm": {"url": "https://openrouter.ai/api/v1"}}}});
-        assert!(can_reuse_openrouter_llm_key(ok_default_kind.as_object().unwrap()));
+        let ok_default_kind =
+            json!({"voice": {"builtin_models": {"llm": {"url": "https://openrouter.ai/api/v1"}}}});
+        assert!(can_reuse_openrouter_llm_key(
+            ok_default_kind.as_object().unwrap()
+        ));
         let ok_openai_kind = json!({"voice": {"builtin_models": {"llm": {"kind": "openai", "url": "https://openrouter.ai/api/v1"}}}});
-        assert!(can_reuse_openrouter_llm_key(ok_openai_kind.as_object().unwrap()));
+        assert!(can_reuse_openrouter_llm_key(
+            ok_openai_kind.as_object().unwrap()
+        ));
         let bad_kind = json!({"voice": {"builtin_models": {"llm": {"kind": "anthropic", "url": "https://openrouter.ai/api/v1"}}}});
         assert!(!can_reuse_openrouter_llm_key(bad_kind.as_object().unwrap()));
 
@@ -1111,12 +1176,25 @@ mod tests {
         let (status, preview) = post(&svc, "/api/draw/preview", draw_input());
         assert_eq!(status, 200);
         let wf_id = preview["result"]["workflow_id"].as_str().unwrap();
-        let (status, fb) = post(&svc, "/api/jev/feedback", json!({"workflow_id": wf_id, "feedback_text": "太焦了"}));
+        let (status, fb) = post(
+            &svc,
+            "/api/jev/feedback",
+            json!({"workflow_id": wf_id, "feedback_text": "太焦了"}),
+        );
         assert_eq!(status, 200);
         assert_eq!(fb["result"]["feedback_type"], "too_dark");
-        assert_eq!(local_jev_upstream_model("laya_multilingual"), Some("multilingual"));
-        assert_eq!(local_jev_upstream_model("onejev_1_6_0_8b"), Some("jev-latest"));
-        assert_eq!(local_jev_upstream_model("OmniJev/OneJev1.6-4B"), Some("jev-latest"));
+        assert_eq!(
+            local_jev_upstream_model("laya_multilingual"),
+            Some("multilingual")
+        );
+        assert_eq!(
+            local_jev_upstream_model("onejev_1_6_0_8b"),
+            Some("jev-latest")
+        );
+        assert_eq!(
+            local_jev_upstream_model("OmniJev/OneJev1.6-4B"),
+            Some("jev-latest")
+        );
         assert_eq!(local_jev_upstream_model("onejev1.6-9b"), Some("jev-latest"));
         assert_eq!(local_jev_upstream_model("typesafe/jev-1.14"), None);
         assert_eq!(decision_source(true), "local_jev");

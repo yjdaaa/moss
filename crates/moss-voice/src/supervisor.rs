@@ -61,11 +61,15 @@ impl VoiceError {
     pub fn message(&self) -> String {
         match self {
             Self::AlreadyRunning => "服务端已由 MOSS 启动并在运行".into(),
-            Self::ExternalRunning => "服务端端口已被其他程序占用（外部运行的服务端），MOSS 不会再启动一个".into(),
+            Self::ExternalRunning => {
+                "服务端端口已被其他程序占用（外部运行的服务端），MOSS 不会再启动一个".into()
+            }
             Self::NotRunning => "服务端没有在运行".into(),
             Self::NotOwned => "正在运行的服务端不是 MOSS 启动的，请在启动它的地方关闭".into(),
             Self::Config(detail) => format!("语音中心设置不完整：{detail}"),
-            Self::ConfigMissing(detail) => format!("服务端配置缺失：{detail}。请先在“模型配置”中完成并保存"),
+            Self::ConfigMissing(detail) => {
+                format!("服务端配置缺失：{detail}。请先在“模型配置”中完成并保存")
+            }
             Self::Spawn(detail) => format!("启动服务端失败：{detail}"),
         }
     }
@@ -127,17 +131,31 @@ impl ServerSpec {
         if !cwd.is_dir() {
             return Err(VoiceError::Config("xiaozhi-server 目录不存在".into()));
         }
-        let config = voice.config_path().ok_or_else(|| VoiceError::Config("未设置 xiaozhi-server 目录".into()))?;
+        let config = voice
+            .config_path()
+            .ok_or_else(|| VoiceError::Config("未设置 xiaozhi-server 目录".into()))?;
         if !config.is_file() {
             return Err(VoiceError::ConfigMissing("data/.config.yaml 不存在".into()));
         }
-        let args = if voice.args.is_empty() { vec!["app.py".into()] } else { voice.args.clone() };
-        Ok(Self { program: PathBuf::from(python), args, cwd, port: voice.server_port })
+        let args = if voice.args.is_empty() {
+            vec!["app.py".into()]
+        } else {
+            voice.args.clone()
+        };
+        Ok(Self {
+            program: PathBuf::from(python),
+            args,
+            cwd,
+            port: voice.server_port,
+        })
     }
 }
 
 fn unix_now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// 本机端口是否有程序在监听。
@@ -154,8 +172,8 @@ mod job {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        TerminateJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject,
     };
 
     /// 子进程所在的 Job Object；句柄关闭（含 MOSS 异常退出）时结束整个进程树。
@@ -177,10 +195,13 @@ mod job {
                 let configured = SetInformationJobObject(
                     job,
                     JobObjectExtendedLimitInformation,
-                    &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const core::ffi::c_void,
+                    &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+                        as *const core::ffi::c_void,
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
                 );
-                if configured == 0 || AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                if configured == 0
+                    || AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0
+                {
                     CloseHandle(job);
                     return None;
                 }
@@ -201,7 +222,8 @@ mod job {
                 SetInformationJobObject(
                     self.0,
                     JobObjectExtendedLimitInformation,
-                    &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const core::ffi::c_void,
+                    &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+                        as *const core::ffi::c_void,
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
                 ) != 0
             }
@@ -266,7 +288,11 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn new(log: RotatingLog) -> Self {
-        Self { inner: Arc::new(Mutex::new(Inner::default())), log: Arc::new(log), graceful_timeout: Duration::from_secs(5) }
+        Self {
+            inner: Arc::new(Mutex::new(Inner::default())),
+            log: Arc::new(log),
+            graceful_timeout: Duration::from_secs(5),
+        }
     }
 
     /// 正常退出的等待时间（默认 5 秒，测试可缩短）。
@@ -280,7 +306,9 @@ impl Supervisor {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// 当前状态。`port` 用于识别外部运行的实例。
@@ -314,7 +342,9 @@ impl Supervisor {
             };
         }
         if crashed {
-            let code = exit_code.map(|code| code.to_string()).unwrap_or_else(|| "未知".into());
+            let code = exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "未知".into());
             return ServerStatus {
                 state: ServerState::Exited,
                 pid: None,
@@ -322,7 +352,9 @@ impl Supervisor {
                 exit_code,
                 exited_at,
                 owned: false,
-                message: Some(format!("服务端意外退出（退出码 {code}），不会自动重启，请查看日志后手动启动")),
+                message: Some(format!(
+                    "服务端意外退出（退出码 {code}），不会自动重启，请查看日志后手动启动"
+                )),
             };
         }
         ServerStatus {
@@ -363,34 +395,55 @@ impl Supervisor {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = command.spawn().map_err(|error| VoiceError::Spawn(error.to_string()))?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| VoiceError::Spawn(error.to_string()))?;
         let job = job::JobHandle::for_child(&child);
         let pid = child.id();
-        for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>), child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>)]
-            .into_iter()
-            .flatten()
+        for stream in [
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
         {
             let log = self.log.clone();
-            let _ = std::thread::Builder::new().name("voice-server-log".into()).spawn(move || {
-                let mut reader = BufReader::new(stream);
-                let mut buffer = Vec::new();
-                loop {
-                    buffer.clear();
-                    match reader.read_until(b'\n', &mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let _ = log.write_line(&String::from_utf8_lossy(&buffer));
+            let _ = std::thread::Builder::new()
+                .name("voice-server-log".into())
+                .spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut buffer = Vec::new();
+                    loop {
+                        buffer.clear();
+                        match reader.read_until(b'\n', &mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let _ = log.write_line(&String::from_utf8_lossy(&buffer));
+                            }
                         }
                     }
-                }
-            });
+                });
         }
         let started_at = unix_now();
         let stopping = Arc::new(AtomicBool::new(false));
-        inner.running = Some(Running { child, pid, started_at, job, stopping });
+        inner.running = Some(Running {
+            child,
+            pid,
+            started_at,
+            job,
+            stopping,
+        });
         inner.last_exit = None;
         drop(inner);
-        let _ = self.log.write_line(&format!("[MOSS] 已启动服务端，进程 {pid}"));
+        let _ = self
+            .log
+            .write_line(&format!("[MOSS] 已启动服务端，进程 {pid}"));
         self.spawn_monitor(pid);
         Ok(self.status(spec.port))
     }
@@ -399,31 +452,45 @@ impl Supervisor {
     fn spawn_monitor(&self, pid: u32) {
         let inner = self.inner.clone();
         let log = self.log.clone();
-        let _ = std::thread::Builder::new().name("voice-server-monitor".into()).spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(200));
-            let mut guard = inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(running) = guard.running.as_mut().filter(|running| running.pid == pid) else {
-                break;
-            };
-            match running.child.try_wait() {
-                Ok(Some(status)) => {
-                    let by_user = running.stopping.load(Ordering::SeqCst);
-                    guard.last_exit = Some(LastExit { code: status.code(), at: unix_now(), by_user });
-                    guard.running = None;
-                    drop(guard);
-                    let code = status.code().map(|code| code.to_string()).unwrap_or_else(|| "未知".into());
-                    let text = if by_user {
-                        format!("[MOSS] 服务端已停止（退出码 {code}）")
-                    } else {
-                        format!("[MOSS] 服务端意外退出（退出码 {code}），不会自动重启")
+        let _ = std::thread::Builder::new()
+            .name("voice-server-monitor".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(200));
+                    let mut guard = inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let Some(running) = guard.running.as_mut().filter(|running| running.pid == pid)
+                    else {
+                        break;
                     };
-                    let _ = log.write_line(&text);
-                    break;
+                    match running.child.try_wait() {
+                        Ok(Some(status)) => {
+                            let by_user = running.stopping.load(Ordering::SeqCst);
+                            guard.last_exit = Some(LastExit {
+                                code: status.code(),
+                                at: unix_now(),
+                                by_user,
+                            });
+                            guard.running = None;
+                            drop(guard);
+                            let code = status
+                                .code()
+                                .map(|code| code.to_string())
+                                .unwrap_or_else(|| "未知".into());
+                            let text = if by_user {
+                                format!("[MOSS] 服务端已停止（退出码 {code}）")
+                            } else {
+                                format!("[MOSS] 服务端意外退出（退出码 {code}），不会自动重启")
+                            };
+                            let _ = log.write_line(&text);
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
                 }
-                Ok(None) => {}
-                Err(_) => break,
-            }
-        });
+            });
     }
 
     /// 停止 MOSS 启动的服务端：先请求正常退出，超时后强制结束（连同子进程树）。
@@ -437,7 +504,11 @@ impl Supervisor {
                 }
                 None => {
                     drop(inner);
-                    return Err(if port_in_use(port) { VoiceError::NotOwned } else { VoiceError::NotRunning });
+                    return Err(if port_in_use(port) {
+                        VoiceError::NotOwned
+                    } else {
+                        VoiceError::NotRunning
+                    });
                 }
             }
         };
@@ -446,11 +517,16 @@ impl Supervisor {
         loop {
             {
                 let mut inner = self.lock();
-                let Some(running) = inner.running.as_mut().filter(|running| running.pid == pid) else {
+                let Some(running) = inner.running.as_mut().filter(|running| running.pid == pid)
+                else {
                     break; // 监控线程已记录退出
                 };
                 if let Ok(Some(status)) = running.child.try_wait() {
-                    inner.last_exit = Some(LastExit { code: status.code(), at: unix_now(), by_user: true });
+                    inner.last_exit = Some(LastExit {
+                        code: status.code(),
+                        at: unix_now(),
+                        by_user: true,
+                    });
                     inner.running = None;
                     break;
                 }
@@ -460,10 +536,16 @@ impl Supervisor {
                         job.terminate();
                     }
                     let code = running.child.wait().ok().and_then(|status| status.code());
-                    inner.last_exit = Some(LastExit { code, at: unix_now(), by_user: true });
+                    inner.last_exit = Some(LastExit {
+                        code,
+                        at: unix_now(),
+                        by_user: true,
+                    });
                     inner.running = None;
                     drop(inner);
-                    let _ = self.log.write_line("[MOSS] 服务端未在限定时间内退出，已强制结束");
+                    let _ = self
+                        .log
+                        .write_line("[MOSS] 服务端未在限定时间内退出，已强制结束");
                     break;
                 }
             }
@@ -484,10 +566,14 @@ impl Supervisor {
         let pid = running.pid;
         if let Some(job) = running.job.as_ref() {
             if !job.release_on_close() {
-                let _ = self.log.write_line("[MOSS] 无法解除 Job Object 关联，MOSS 退出时服务端仍会结束");
+                let _ = self
+                    .log
+                    .write_line("[MOSS] 无法解除 Job Object 关联，MOSS 退出时服务端仍会结束");
             }
         }
-        let _ = self.log.write_line(&format!("[MOSS] 退出 MOSS 时保留服务端运行（进程 {pid}），之后其输出不再写入本日志"));
+        let _ = self.log.write_line(&format!(
+            "[MOSS] 退出 MOSS 时保留服务端运行（进程 {pid}），之后其输出不再写入本日志"
+        ));
         // 丢弃 Child 句柄不会结束进程；监控线程发现 running 为空后自行退出
         drop(running);
         Some(pid)
@@ -526,25 +612,43 @@ mod tests {
         static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(38_100);
         for _ in 0..500 {
             let candidate = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() && !port_in_use(candidate) {
+            if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok()
+                && !port_in_use(candidate)
+            {
                 return candidate;
             }
         }
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     /// 假服务端（不启动真实 xiaozhi-server）：Windows 用 cmd，其他平台用 sh。
     fn fake_spec(dir: &std::path::Path, unix: &str, windows: &str, port: u16) -> ServerSpec {
         if cfg!(windows) {
-            ServerSpec { program: "cmd".into(), args: vec!["/C".into(), windows.into()], cwd: dir.into(), port }
+            ServerSpec {
+                program: "cmd".into(),
+                args: vec!["/C".into(), windows.into()],
+                cwd: dir.into(),
+                port,
+            }
         } else {
-            ServerSpec { program: "sh".into(), args: vec!["-c".into(), unix.into()], cwd: dir.into(), port }
+            ServerSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), unix.into()],
+                cwd: dir.into(),
+                port,
+            }
         }
     }
 
     fn supervisor(dir: &std::path::Path) -> Supervisor {
-        Supervisor::new(RotatingLog::new(dir.join("logs").join("xiaozhi-server.log")))
-            .with_graceful_timeout(Duration::from_millis(800))
+        Supervisor::new(RotatingLog::new(
+            dir.join("logs").join("xiaozhi-server.log"),
+        ))
+        .with_graceful_timeout(Duration::from_millis(800))
     }
 
     fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
@@ -577,13 +681,21 @@ mod tests {
         assert_eq!(status.state, ServerState::Running);
         assert!(status.owned && status.pid.is_some());
         assert!(supervisor.owns_running_server());
-        assert_eq!(supervisor.start(&spec).unwrap_err(), VoiceError::AlreadyRunning);
-        assert!(wait_for(|| supervisor.log().tail(20).iter().any(|line| line.contains("api_key: ***"))));
+        assert_eq!(
+            supervisor.start(&spec).unwrap_err(),
+            VoiceError::AlreadyRunning
+        );
+        assert!(wait_for(|| supervisor
+            .log()
+            .tail(20)
+            .iter()
+            .any(|line| line.contains("api_key: ***"))));
 
         let stopped = supervisor.stop(port).unwrap();
         assert_eq!(stopped.state, ServerState::Stopped, "{stopped:?}");
         assert!(!supervisor.owns_running_server());
-        let text = std::fs::read_to_string(dir.path().join("logs").join("xiaozhi-server.log")).unwrap();
+        let text =
+            std::fs::read_to_string(dir.path().join("logs").join("xiaozhi-server.log")).unwrap();
         assert!(!text.contains("sk-test-secret"), "{text}");
         // 用户停止不算崩溃，也不会自动重启
         std::thread::sleep(Duration::from_millis(500));
@@ -619,17 +731,38 @@ mod tests {
         let supervisor = supervisor(dir.path());
         let spec = fake_spec(dir.path(), "echo boom; exit 3", "echo boom & exit 3", port);
         supervisor.start(&spec).unwrap();
-        assert!(wait_for(|| supervisor.status(port).state == ServerState::Exited));
+        assert!(wait_for(
+            || supervisor.status(port).state == ServerState::Exited
+        ));
         let status = supervisor.status(port);
         assert_eq!(status.exit_code, Some(3));
         assert!(status.message.unwrap().contains("不会自动重启"));
         std::thread::sleep(Duration::from_millis(600));
-        assert_eq!(supervisor.status(port).state, ServerState::Exited, "不得自动重启");
-        assert!(supervisor.log().tail(20).iter().any(|line| line.contains("boom")));
-        assert!(supervisor.log().tail(20).iter().any(|line| line.contains("意外退出")));
+        assert_eq!(
+            supervisor.status(port).state,
+            ServerState::Exited,
+            "不得自动重启"
+        );
+        assert!(
+            supervisor
+                .log()
+                .tail(20)
+                .iter()
+                .any(|line| line.contains("boom"))
+        );
+        assert!(
+            supervisor
+                .log()
+                .tail(20)
+                .iter()
+                .any(|line| line.contains("意外退出"))
+        );
         // 手动再次启动可以
         let again = fake_spec(dir.path(), "sleep 30", "ping -n 30 127.0.0.1 >nul", port);
-        assert_eq!(supervisor.start(&again).unwrap().state, ServerState::Running);
+        assert_eq!(
+            supervisor.start(&again).unwrap().state,
+            ServerState::Running
+        );
         supervisor.stop(port).unwrap();
     }
 
@@ -646,13 +779,27 @@ mod tests {
         assert!(!supervisor.owns_running_server());
         assert_eq!(supervisor.stop(port).unwrap_err(), VoiceError::NotRunning);
         std::thread::sleep(Duration::from_millis(400));
-        assert_eq!(supervisor.status(port).state, ServerState::Stopped, "放开后不算崩溃");
-        assert!(supervisor.log().tail(10).iter().any(|line| line.contains("保留服务端运行")));
+        assert_eq!(
+            supervisor.status(port).state,
+            ServerState::Stopped,
+            "放开后不算崩溃"
+        );
+        assert!(
+            supervisor
+                .log()
+                .tail(10)
+                .iter()
+                .any(|line| line.contains("保留服务端运行"))
+        );
         // 清理：测试自己结束这个假进程
         if cfg!(windows) {
-            let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status();
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status();
         } else {
-            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
         }
     }
 
@@ -660,14 +807,24 @@ mod tests {
     fn spec_from_settings_reports_missing_parts() {
         let dir = tempfile::tempdir().unwrap();
         let mut voice = VoiceSettings::default();
-        assert!(matches!(ServerSpec::from_settings(&voice), Err(VoiceError::Config(_))));
+        assert!(matches!(
+            ServerSpec::from_settings(&voice),
+            Err(VoiceError::Config(_))
+        ));
         voice.server_dir = Some(dir.path().to_string_lossy().into_owned());
-        assert!(matches!(ServerSpec::from_settings(&voice), Err(VoiceError::Config(_))));
+        assert!(matches!(
+            ServerSpec::from_settings(&voice),
+            Err(VoiceError::Config(_))
+        ));
         voice.python = Some("python".into());
         let error = ServerSpec::from_settings(&voice).unwrap_err();
         assert_eq!(error.code(), "server_config_missing");
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
-        std::fs::write(dir.path().join("data").join(".config.yaml"), "selected_module: {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("data").join(".config.yaml"),
+            "selected_module: {}\n",
+        )
+        .unwrap();
         let spec = ServerSpec::from_settings(&voice).unwrap();
         assert_eq!(spec.args, vec!["app.py".to_string()]);
         assert_eq!(spec.port, 8000);

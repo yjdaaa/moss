@@ -9,8 +9,13 @@ fn main() {
     }
     if args.get(1).map(String::as_str) == Some("serve") {
         let host = laser_host::HostApplication::init().expect("failed to init host");
-        let (server, actual_port) = host.spawn_http_server().expect("failed to spawn http server");
-        println!("moss-host serving on {}:{}", host.settings.web_host, actual_port);
+        let (server, actual_port) = host
+            .spawn_http_server()
+            .expect("failed to spawn http server");
+        println!(
+            "moss-host serving on {}:{}",
+            host.settings.web_host, actual_port
+        );
         match host.spawn_mcp_bridge() {
             0 => println!("moss-host mcp bridge disabled (MCP_ENDPOINT 未配置)"),
             count => println!("moss-host mcp bridge connecting to {count} endpoint(s)"),
@@ -20,7 +25,12 @@ fn main() {
     }
     assert!(laser_api::embedded_fixture_is_valid());
     assert_eq!(laser_runtime::packaging_sqlite_probe().unwrap(), 42);
-    assert_eq!(laser_mcp::tools_list_json(true)["tools"].as_array().map(Vec::len), Some(20));
+    assert_eq!(
+        laser_mcp::tools_list_json(true)["tools"]
+            .as_array()
+            .map(Vec::len),
+        Some(20)
+    );
     println!("moss-host stage-0 probes passed");
 }
 

@@ -29,8 +29,10 @@ pub fn approval_ttl_seconds(raw: Option<&str>) -> u64 {
 /// 其他一律按 R3 处理（含未来新增的动作），严格模式下需要桌面授权。
 pub fn safe_action_requires_approval(action: &str) -> bool {
     let action = action.trim().to_ascii_lowercase();
-    let lowers_risk = matches!(action.as_str(), "status" | "emergency_stop" | "soft_reset" | "laser_off")
-        || action.ends_with("_reset")
+    let lowers_risk = matches!(
+        action.as_str(),
+        "status" | "emergency_stop" | "soft_reset" | "laser_off"
+    ) || action.ends_with("_reset")
         || action.ends_with("_100")
         || action.contains("minus")
         || action.contains("_-");
@@ -72,7 +74,9 @@ impl ApprovalStatus {
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|status| status.as_str() == value)
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == value)
     }
 
     /// 仍可能导致执行的状态；进程重启时一律改为 `expired`（§5.5）。
@@ -164,7 +168,9 @@ impl ApprovalSource {
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|source| source.as_str() == value)
+        Self::ALL
+            .into_iter()
+            .find(|source| source.as_str() == value)
     }
 
     /// 由调用方上下文得到审批来源。桌面会话本身就是批准方，审批执行与本机回环
@@ -175,7 +181,9 @@ impl ApprovalSource {
             CallerContext::McpBridge => Some(Self::McpBridge),
             CallerContext::Lan { .. } => Some(Self::Lan),
             CallerContext::Voice { .. } => Some(Self::Voice),
-            CallerContext::Desktop | CallerContext::Approval { .. } | CallerContext::Loopback => None,
+            CallerContext::Desktop | CallerContext::Approval { .. } | CallerContext::Loopback => {
+                None
+            }
         }
     }
 }
@@ -189,11 +197,25 @@ pub enum ApprovalConnection {
     /// Read-only CLI execution intent; fingerprint binds provider, executable, workspace and policy.
     /// Opaque HA configuration/credential/allowlist fingerprint. No URL,
     /// token or entity action is disclosed through the approval response.
-    Home { fingerprint: String },
-    Agent { provider: String, fingerprint: String },
-    External { server: String, fingerprint: String },
-    Network { host: String, port: u16 },
-    Serial { port: String, baud_rate: u32 },
+    Home {
+        fingerprint: String,
+    },
+    Agent {
+        provider: String,
+        fingerprint: String,
+    },
+    External {
+        server: String,
+        fingerprint: String,
+    },
+    Network {
+        host: String,
+        port: u16,
+    },
+    Serial {
+        port: String,
+        baud_rate: u32,
+    },
 }
 
 impl ApprovalConnection {
@@ -210,9 +232,15 @@ impl ApprovalConnection {
     /// 与 `laser_device::ConnectionSpec::describe()` 同一格式；摘要里只放它的哈希（§5.4）。
     pub fn describe(&self) -> String {
         match self {
-            Self::Agent { provider, fingerprint } => format!("agent:{provider}:{fingerprint}"),
+            Self::Agent {
+                provider,
+                fingerprint,
+            } => format!("agent:{provider}:{fingerprint}"),
             Self::Home { fingerprint } => format!("home:{fingerprint}"),
-            Self::External { server, fingerprint } => format!("external:{server}:{fingerprint}"),
+            Self::External {
+                server,
+                fingerprint,
+            } => format!("external:{server}:{fingerprint}"),
             Self::Network { host, port } => format!("{host}:{port}"),
             Self::Serial { port, baud_rate } => format!("{port}@{baud_rate}"),
         }
@@ -349,7 +377,9 @@ impl AuditAction {
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|action| action.as_str() == value)
+        Self::ALL
+            .into_iter()
+            .find(|action| action.as_str() == value)
     }
 }
 
@@ -374,7 +404,9 @@ impl AuditResult {
     }
 
     pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|result| result.as_str() == value)
+        Self::ALL
+            .into_iter()
+            .find(|result| result.as_str() == value)
     }
 }
 
@@ -421,17 +453,21 @@ pub fn audit_client(ctx: &CallerContext) -> String {
         CallerContext::McpBridge => "mcp".to_owned(),
         CallerContext::Lan { pairing_id } if !pairing_id.is_empty() => pairing_id.clone(),
         CallerContext::Lan { .. } => "lan".to_owned(),
-        CallerContext::Voice { device_id, .. } => format!("voice:{}", device_id.chars().take(64).collect::<String>()),
+        CallerContext::Voice { device_id, .. } => {
+            format!("voice:{}", device_id.chars().take(64).collect::<String>())
+        }
         CallerContext::Loopback => "local".to_owned(),
     }
 }
 
 pub fn approval_record_json_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(ApprovalRecord)).expect("approval record schema must serialize")
+    serde_json::to_value(schemars::schema_for!(ApprovalRecord))
+        .expect("approval record schema must serialize")
 }
 
 pub fn audit_entry_json_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(AuditEntry)).expect("audit entry schema must serialize")
+    serde_json::to_value(schemars::schema_for!(AuditEntry))
+        .expect("audit entry schema must serialize")
 }
 
 #[cfg(test)]
@@ -449,8 +485,16 @@ mod tests {
             source: ApprovalSource::McpBridge,
             session_id: None,
             request_id: Some("req-1".into()),
-            connection: Some(ApprovalConnection::Network { host: "192.0.2.10".into(), port: 23 }),
-            request: Some(serde_json::json!({"send_mode": "stream"}).as_object().cloned().unwrap()),
+            connection: Some(ApprovalConnection::Network {
+                host: "192.0.2.10".into(),
+                port: 23,
+            }),
+            request: Some(
+                serde_json::json!({"send_mode": "stream"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            ),
             created_at: 100.0,
             decided_at: None,
             expires_at: 220.0,
@@ -462,14 +506,35 @@ mod tests {
     #[test]
     fn safe_actions_are_graded_fail_closed() {
         for action in [
-            "status", "emergency_stop", "soft_reset", "laser_off", "feed_override_reset", "feed_100",
-            "power_reset", "spindle_override_minus_10", "feed_minus_1", "power_-10%", "feed_-1%",
+            "status",
+            "emergency_stop",
+            "soft_reset",
+            "laser_off",
+            "feed_override_reset",
+            "feed_100",
+            "power_reset",
+            "spindle_override_minus_10",
+            "feed_minus_1",
+            "power_-10%",
+            "feed_-1%",
         ] {
-            assert!(!safe_action_requires_approval(action), "{action} 应为 R0/R2");
+            assert!(
+                !safe_action_requires_approval(action),
+                "{action} 应为 R0/R2"
+            );
         }
         for action in [
-            "unlock", "home", "set_origin", "absolute_move", "relative_move", "feed_override_plus_10",
-            "power_plus_1", "power_+10%", "feed_+1%", "spindle_override_plus_10", "some_future_action",
+            "unlock",
+            "home",
+            "set_origin",
+            "absolute_move",
+            "relative_move",
+            "feed_override_plus_10",
+            "power_plus_1",
+            "power_+10%",
+            "feed_+1%",
+            "spindle_override_plus_10",
+            "some_future_action",
         ] {
             assert!(safe_action_requires_approval(action), "{action} 应为 R3");
         }
@@ -543,7 +608,14 @@ mod tests {
         let back: ApprovalRecord = serde_json::from_str(&text).unwrap();
         assert_eq!(back.connection, None);
         assert_eq!(back.request, None);
-        assert_eq!(ApprovalRecord { connection: None, request: None, ..record }, back);
+        assert_eq!(
+            ApprovalRecord {
+                connection: None,
+                request: None,
+                ..record
+            },
+            back
+        );
 
         let schema = approval_record_json_schema();
         assert_eq!(schema["title"], "ApprovalRecord");
@@ -554,8 +626,14 @@ mod tests {
 
     #[test]
     fn connection_round_trips_for_storage_and_describes_like_device_spec() {
-        let network = ApprovalConnection::Network { host: "192.0.2.10".into(), port: 23 };
-        let serial = ApprovalConnection::Serial { port: "COMX".into(), baud_rate: 115200 };
+        let network = ApprovalConnection::Network {
+            host: "192.0.2.10".into(),
+            port: 23,
+        };
+        let serial = ApprovalConnection::Serial {
+            port: "COMX".into(),
+            baud_rate: 115200,
+        };
         assert_eq!(network.describe(), "192.0.2.10:23");
         assert_eq!(serial.describe(), "COMX@115200");
         assert_eq!(network.mode(), "network");
@@ -563,7 +641,10 @@ mod tests {
         for connection in [network, serial] {
             let value = serde_json::to_value(&connection).unwrap();
             assert_eq!(value["mode"], connection.mode());
-            assert_eq!(serde_json::from_value::<ApprovalConnection>(value).unwrap(), connection);
+            assert_eq!(
+                serde_json::from_value::<ApprovalConnection>(value).unwrap(),
+                connection
+            );
         }
     }
 
@@ -587,7 +668,10 @@ mod tests {
 
     #[test]
     fn audit_detail_is_typed_and_compact() {
-        assert_eq!(serde_json::to_string(&AuditDetail::default()).unwrap(), "{}");
+        assert_eq!(
+            serde_json::to_string(&AuditDetail::default()).unwrap(),
+            "{}"
+        );
         let detail = AuditDetail {
             approval_id: Some("apr_test1".into()),
             kind: Some(ApprovalKind::Framing),
@@ -597,28 +681,62 @@ mod tests {
         let value = serde_json::to_value(&detail).unwrap();
         assert_eq!(value["kind"], "framing");
         assert_eq!(value["removed_fields"][0], "confirmed");
-        assert_eq!(serde_json::from_value::<AuditDetail>(value).unwrap(), detail);
+        assert_eq!(
+            serde_json::from_value::<AuditDetail>(value).unwrap(),
+            detail
+        );
         assert_eq!(audit_entry_json_schema()["title"], "AuditEntry");
     }
 
     #[test]
     fn audit_client_and_approval_source_follow_caller_context() {
         assert_eq!(audit_client(&CallerContext::Desktop), "desktop");
-        assert_eq!(audit_client(&CallerContext::Approval { approval_id: "apr_1".into() }), "desktop");
-        assert_eq!(audit_client(&CallerContext::Gateway { session_id: "s".into() }), "gateway");
+        assert_eq!(
+            audit_client(&CallerContext::Approval {
+                approval_id: "apr_1".into()
+            }),
+            "desktop"
+        );
+        assert_eq!(
+            audit_client(&CallerContext::Gateway {
+                session_id: "s".into()
+            }),
+            "gateway"
+        );
         assert_eq!(audit_client(&CallerContext::McpBridge), "mcp");
-        assert_eq!(audit_client(&CallerContext::Lan { pairing_id: "pair_1".into() }), "pair_1");
-        assert_eq!(audit_client(&CallerContext::Lan { pairing_id: String::new() }), "lan");
+        assert_eq!(
+            audit_client(&CallerContext::Lan {
+                pairing_id: "pair_1".into()
+            }),
+            "pair_1"
+        );
+        assert_eq!(
+            audit_client(&CallerContext::Lan {
+                pairing_id: String::new()
+            }),
+            "lan"
+        );
         assert_eq!(audit_client(&CallerContext::Loopback), "local");
-        let voice = CallerContext::Voice { device_id: "aa:bb:cc:dd:ee:ff".into(), session_id: "s1".into() };
+        let voice = CallerContext::Voice {
+            device_id: "aa:bb:cc:dd:ee:ff".into(),
+            session_id: "s1".into(),
+        };
         assert_eq!(audit_client(&voice), "voice:aa:bb:cc:dd:ee:ff");
         assert_eq!(voice.label(), "voice");
-        assert_eq!(ApprovalSource::from_caller(&voice), Some(ApprovalSource::Voice));
+        assert_eq!(
+            ApprovalSource::from_caller(&voice),
+            Some(ApprovalSource::Voice)
+        );
         assert_eq!(ApprovalSource::parse("voice"), Some(ApprovalSource::Voice));
 
-        assert_eq!(ApprovalSource::from_caller(&CallerContext::McpBridge), Some(ApprovalSource::McpBridge));
         assert_eq!(
-            ApprovalSource::from_caller(&CallerContext::Lan { pairing_id: "pair_1".into() }),
+            ApprovalSource::from_caller(&CallerContext::McpBridge),
+            Some(ApprovalSource::McpBridge)
+        );
+        assert_eq!(
+            ApprovalSource::from_caller(&CallerContext::Lan {
+                pairing_id: "pair_1".into()
+            }),
             Some(ApprovalSource::Lan)
         );
         assert_eq!(ApprovalSource::from_caller(&CallerContext::Desktop), None);

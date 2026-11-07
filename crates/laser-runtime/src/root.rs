@@ -107,7 +107,10 @@ fn default_base_from(
     }
     match os {
         "macos" => match non_empty_path(home) {
-            Some(home) => home.join("Library").join("Application Support").join("moss"),
+            Some(home) => home
+                .join("Library")
+                .join("Application Support")
+                .join("moss"),
             None => current_dir.join(".runtime"),
         },
         "linux" | "freebsd" | "openbsd" | "netbsd" | "dragonfly" => {
@@ -159,7 +162,13 @@ mod tests {
     fn default_base_resolves_windows_macos_linux_and_fallback() {
         let cwd = Path::new("/work/moss");
         assert_eq!(
-            default_base_from("windows", Some(OsStr::new(r"C:\Users\Alice\AppData\Roaming")), None, None, cwd),
+            default_base_from(
+                "windows",
+                Some(OsStr::new(r"C:\Users\Alice\AppData\Roaming")),
+                None,
+                None,
+                cwd
+            ),
             PathBuf::from(r"C:\Users\Alice\AppData\Roaming").join("moss"),
         );
         assert_eq!(
@@ -167,22 +176,47 @@ mod tests {
             cwd.join(".runtime"),
         );
         assert_eq!(
-            default_base_from("macos", None, None, Some(OsStr::new("/Users/alice")), Path::new("/")),
+            default_base_from(
+                "macos",
+                None,
+                None,
+                Some(OsStr::new("/Users/alice")),
+                Path::new("/")
+            ),
             PathBuf::from("/Users/alice/Library/Application Support/moss"),
         );
         assert_eq!(
             default_base_from("macos", None, None, None, cwd),
             cwd.join(".runtime"),
         );
-        let abs_xdg = if cfg!(windows) { r"C:\xdg-data" } else { "/custom/xdg" };
+        let abs_xdg = if cfg!(windows) {
+            r"C:\xdg-data"
+        } else {
+            "/custom/xdg"
+        };
         assert_eq!(
-            default_base_from("linux", None, Some(OsStr::new(abs_xdg)), Some(OsStr::new("/home/alice")), cwd),
+            default_base_from(
+                "linux",
+                None,
+                Some(OsStr::new(abs_xdg)),
+                Some(OsStr::new("/home/alice")),
+                cwd
+            ),
             PathBuf::from(abs_xdg).join("moss"),
         );
         // XDG_DATA_HOME relative path is ignored per XDG spec, falling back to ~/.local/share/moss.
         assert_eq!(
-            default_base_from("linux", None, Some(OsStr::new("relative/xdg")), Some(OsStr::new("/home/alice")), cwd),
-            PathBuf::from("/home/alice").join(".local").join("share").join("moss"),
+            default_base_from(
+                "linux",
+                None,
+                Some(OsStr::new("relative/xdg")),
+                Some(OsStr::new("/home/alice")),
+                cwd
+            ),
+            PathBuf::from("/home/alice")
+                .join(".local")
+                .join("share")
+                .join("moss"),
         );
     }
 }

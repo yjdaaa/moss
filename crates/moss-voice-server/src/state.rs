@@ -84,7 +84,10 @@ pub fn scrub_debug_text_flagged(raw: &str) -> (String, bool) {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ToolTiming { pub name: String, pub ms: u64 }
+pub struct ToolTiming {
+    pub name: String,
+    pub ms: u64,
+}
 
 /// 内存诊断：受控字段，不保存对话、音频、地址或凭据。
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -182,7 +185,13 @@ pub struct EventRecord {
 
 impl EventRecord {
     pub fn new(level: EventLevel, category: DiagCategory, text: impl Into<String>) -> Self {
-        Self { level, category, text: text.into(), hint: None, detail: None }
+        Self {
+            level,
+            category,
+            text: text.into(),
+            hint: None,
+            detail: None,
+        }
     }
     pub fn info(category: DiagCategory, text: impl Into<String>) -> Self {
         Self::new(EventLevel::Info, category, text)
@@ -205,7 +214,11 @@ impl EventRecord {
         self
     }
     /// 由提供方错误生成：沿用它的分类、建议与技术细节。
-    pub fn from_provider(level: EventLevel, prefix: &str, error: &moss_voice_providers::ProviderError) -> Self {
+    pub fn from_provider(
+        level: EventLevel,
+        prefix: &str,
+        error: &moss_voice_providers::ProviderError,
+    ) -> Self {
         Self {
             level,
             category: error.category,
@@ -281,7 +294,9 @@ impl DiagnosticsLog {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, LogInner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn push(&self, record: impl Into<EventRecord>) {
@@ -317,7 +332,12 @@ impl DiagnosticsLog {
     /// 全部保留的事件，新的在前（两个缓冲按序号合并）。
     pub fn events(&self) -> Vec<ServerEvent> {
         let inner = self.lock();
-        let mut all: Vec<ServerEvent> = inner.info.iter().chain(inner.problems.iter()).cloned().collect();
+        let mut all: Vec<ServerEvent> = inner
+            .info
+            .iter()
+            .chain(inner.problems.iter())
+            .cloned()
+            .collect();
         all.sort_by(|a, b| b.seq.cmp(&a.seq));
         all
     }
@@ -352,7 +372,10 @@ pub struct LiveState {
 impl LiveState {
     /// 事件与耗时写进宿主持有的记录本（服务停止后仍保留）。
     pub fn with_log(log: Arc<DiagnosticsLog>) -> Self {
-        Self { log, ..Self::default() }
+        Self {
+            log,
+            ..Self::default()
+        }
     }
     pub fn finish_timing(&self, timing: TurnTiming) {
         self.log.finish_timing(timing);
@@ -361,11 +384,13 @@ impl LiveState {
         self.log.timings()
     }
     pub fn debug_enabled(&self) -> bool {
-        self.debug_enabled.load(std::sync::atomic::Ordering::Acquire)
+        self.debug_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn set_debug_enabled(&self, enabled: bool) {
-        self.debug_enabled.store(enabled, std::sync::atomic::Ordering::Release);
+        self.debug_enabled
+            .store(enabled, std::sync::atomic::Ordering::Release);
         if !enabled {
             self.clear_debug_traces();
         }
@@ -559,7 +584,11 @@ impl LiveState {
         let mut best_key = (0u8, 0u8);
         for view in sessions.values() {
             let r = rank(&view.state);
-            let effective_level = if matches!(r, 2 | 4) { view.level.min(100) } else { 0 };
+            let effective_level = if matches!(r, 2 | 4) {
+                view.level.min(100)
+            } else {
+                0
+            };
             let key = (r, effective_level);
             if key > best_key {
                 best_key = key;
@@ -580,7 +609,10 @@ impl LiveState {
     }
 
     pub fn sessions(&self) -> Vec<SessionView> {
-        self.sessions.lock().map(|sessions| sessions.values().cloned().collect()).unwrap_or_default()
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.values().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -590,12 +622,35 @@ mod tests {
     #[test]
     fn timing_history_is_bounded_and_contains_only_diagnostics() {
         let state = LiveState::default();
-        for turn in 0..55 { state.finish_timing(TurnTiming { session_id: "s".into(), device_id: "dev-1".into(), at_ms: 1_000 + turn, turn, models: vec!["fake-asr".into()], stages: BTreeMap::from([("final_asr".into(), 12)]), tools: vec![], outcome: "done".into() }); }
+        for turn in 0..55 {
+            state.finish_timing(TurnTiming {
+                session_id: "s".into(),
+                device_id: "dev-1".into(),
+                at_ms: 1_000 + turn,
+                turn,
+                models: vec!["fake-asr".into()],
+                stages: BTreeMap::from([("final_asr".into(), 12)]),
+                tools: vec![],
+                outcome: "done".into(),
+            });
+        }
         assert_eq!(state.timings().len(), MAX_TIMINGS);
         assert_eq!(state.timings().last().unwrap().turn, 5);
         assert_eq!(state.event_drops().timings, 5, "被覆盖的耗时轮数如实计数");
         let v = serde_json::to_value(&state.timings()[0]).unwrap();
-        assert_eq!(v.as_object().unwrap().keys().cloned().collect::<Vec<_>>(), ["at_ms", "device_id", "models", "outcome", "session_id", "stages", "tools", "turn"]);
+        assert_eq!(
+            v.as_object().unwrap().keys().cloned().collect::<Vec<_>>(),
+            [
+                "at_ms",
+                "device_id",
+                "models",
+                "outcome",
+                "session_id",
+                "stages",
+                "tools",
+                "turn"
+            ]
+        );
     }
 
     #[test]
@@ -627,7 +682,11 @@ mod tests {
         state.set_state("s1", "thinking");
         state.set_active_tool("s1", Some("laser_workflow_tool".into()));
         state.set_emotion("s1", "thinking");
-        assert_eq!(state.aggregate_pulse(), (Some("thinking".into()), 0), "进入思考态时音量归零");
+        assert_eq!(
+            state.aggregate_pulse(),
+            (Some("thinking".into()), 0),
+            "进入思考态时音量归零"
+        );
         state.set_state("s1", "speaking");
         state.set_level("s1", 82);
         state.inc_spoken_sentences("s1");
@@ -658,9 +717,17 @@ mod tests {
             screen_height: None,
         });
         state.set_level("s1", 10);
-        assert_eq!(state.aggregate_pulse(), (Some("speaking".into()), 10), "speaking 优先级高于 listening，level 必须来自同一 s1 会话");
+        assert_eq!(
+            state.aggregate_pulse(),
+            (Some("speaking".into()), 10),
+            "speaking 优先级高于 listening，level 必须来自同一 s1 会话"
+        );
         state.set_state("s1", "idle");
-        let s1 = state.sessions().into_iter().find(|s| s.session_id == "s1").unwrap();
+        let s1 = state
+            .sessions()
+            .into_iter()
+            .find(|s| s.session_id == "s1")
+            .unwrap();
         assert_eq!(s1.level, 0, "回到空闲态时音量归零");
         assert_eq!(s1.active_tool, None, "回到空闲态时清理本轮工具名");
         assert_eq!(s1.emotion, "", "回到空闲态时清理本轮情绪");
@@ -688,7 +755,10 @@ mod tests {
             tools_dropped: 0,
         };
         state.finish_debug_trace(sample(1));
-        assert!(state.debug_traces().is_empty(), "默认关闭时绝不留存任何对话文本");
+        assert!(
+            state.debug_traces().is_empty(),
+            "默认关闭时绝不留存任何对话文本"
+        );
 
         state.set_debug_enabled(true);
         for t in 1..=12 {
@@ -698,18 +768,28 @@ mod tests {
         assert_eq!(traces.len(), 10);
         assert_eq!(traces[0].turn, 12);
         assert!(traces[0].raw_asr.contains("[REDACTED]") && !traces[0].raw_asr.contains("abc123"));
-        assert!(traces[0].tools[0].result.contains("[REDACTED]") && !traces[0].tools[0].result.contains("sk-secret999"));
+        assert!(
+            traces[0].tools[0].result.contains("[REDACTED]")
+                && !traces[0].tools[0].result.contains("sk-secret999")
+        );
 
         assert!(!traces[0].truncated, "短文本不标截断");
 
         let mut long = sample(13);
         long.reply = "很长".repeat(200);
         long.tools = (0..11)
-            .map(|i| DebugToolTrace { name: format!("tool_{i}"), arguments: "{}".into(), result: "ok".into() })
+            .map(|i| DebugToolTrace {
+                name: format!("tool_{i}"),
+                arguments: "{}".into(),
+                result: "ok".into(),
+            })
             .collect();
         state.finish_debug_trace(long);
         let trace = &state.debug_traces()[0];
-        assert!(trace.truncated, "回复超过 240 字、工具超过 8 个都要标“已截断”");
+        assert!(
+            trace.truncated,
+            "回复超过 240 字、工具超过 8 个都要标“已截断”"
+        );
         assert_eq!(trace.tools.len(), 8);
         assert_eq!(trace.tools_dropped, 3);
         assert_eq!(trace.reply.chars().count(), 240);
@@ -727,29 +807,50 @@ mod tests {
                 .hint("重新填写密钥")
                 .detail("HTTP 401 token=abc"),
         );
-        log.push(EventRecord::warn(DiagCategory::Network, "流式识别失败，改用整段识别"));
+        log.push(EventRecord::warn(
+            DiagCategory::Network,
+            "流式识别失败，改用整段识别",
+        ));
         for i in 0..(MAX_INFO_EVENTS + 40) {
             log.push(format!("识别完成：{i} 字"));
         }
         let events = log.events();
         assert_eq!(events.len(), MAX_INFO_EVENTS + 2);
-        let error = events.iter().find(|e| e.level == EventLevel::Error).expect("错误没被日常记录挤掉");
+        let error = events
+            .iter()
+            .find(|e| e.level == EventLevel::Error)
+            .expect("错误没被日常记录挤掉");
         assert_eq!(error.category, DiagCategory::Auth);
         assert_eq!(error.hint.as_deref(), Some("重新填写密钥"));
-        assert!(error.detail.as_deref().unwrap().contains("[REDACTED]") && !error.detail.as_deref().unwrap().contains("abc"));
+        assert!(
+            error.detail.as_deref().unwrap().contains("[REDACTED]")
+                && !error.detail.as_deref().unwrap().contains("abc")
+        );
         assert!(error.at_ms >= error.at * 1000 && error.at_ms < (error.at + 1) * 1000);
         assert!(events.iter().any(|e| e.level == EventLevel::Warn));
         assert!(events.windows(2).all(|w| w[0].seq > w[1].seq), "新的在前");
         let drops = log.drops();
         assert_eq!(drops.info, 40);
         assert_eq!(drops.problems, 0);
-        assert_eq!((drops.max_info, drops.max_problems), (MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS));
+        assert_eq!(
+            (drops.max_info, drops.max_problems),
+            (MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS)
+        );
 
         for i in 0..(MAX_PROBLEM_EVENTS + 5) {
-            log.push(EventRecord::warn(DiagCategory::Device, format!("设备断开 {i}")));
+            log.push(EventRecord::warn(
+                DiagCategory::Device,
+                format!("设备断开 {i}"),
+            ));
         }
         assert_eq!(log.drops().problems, 7);
-        assert_eq!(log.events().iter().filter(|e| e.level != EventLevel::Info).count(), MAX_PROBLEM_EVENTS);
+        assert_eq!(
+            log.events()
+                .iter()
+                .filter(|e| e.level != EventLevel::Info)
+                .count(),
+            MAX_PROBLEM_EVENTS
+        );
 
         let json = serde_json::to_value(&log.events()[0]).unwrap();
         assert_eq!(json["level"], "warn");
@@ -761,7 +862,8 @@ mod tests {
     #[test]
     fn log_shared_across_live_states_keeps_history() {
         let log = DiagnosticsLog::new();
-        LiveState::with_log(log.clone()).event(EventRecord::error(DiagCategory::Model, "第一次运行出错"));
+        LiveState::with_log(log.clone())
+            .event(EventRecord::error(DiagCategory::Model, "第一次运行出错"));
         let restarted = LiveState::with_log(log.clone());
         restarted.event("重启后的记录");
         let texts: Vec<_> = restarted.events().into_iter().map(|e| e.text).collect();

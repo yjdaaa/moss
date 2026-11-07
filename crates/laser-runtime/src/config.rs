@@ -32,7 +32,8 @@ impl LaserSettings {
             .unwrap_or(false);
 
         let web_port = if let Ok(val) = env::var("LASER_WEB_PORT") {
-            val.parse::<u16>().map_err(|_| "LASER_WEB_PORT must be a valid port".to_owned())?
+            val.parse::<u16>()
+                .map_err(|_| "LASER_WEB_PORT must be a valid port".to_owned())?
         } else if let Some(p) = port_from_file {
             p
         } else {
@@ -59,7 +60,10 @@ impl LaserSettings {
 /// HTTP 监听地址：环境变量 `LASER_WEB_HOST` 优先；否则偏好设置开启“允许手机连接”时监听全部网卡
 /// `0.0.0.0`（局域网访问仍需配对 token），默认只监听本机 `127.0.0.1`。
 pub fn web_host_from(env_value: Option<String>, lan_access: bool) -> String {
-    match env_value.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
+    match env_value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
         Some(value) => value,
         None if lan_access => "0.0.0.0".into(),
         None => "127.0.0.1".into(),
@@ -96,7 +100,11 @@ pub fn load_env_files(runtime_dir: Option<&Path>) -> Vec<PathBuf> {
 /// 出现 `*` 时返回错误——MOSS 不允许任意来源跨站访问（技术书 §6.5 / D11）。
 pub fn parse_allowed_origins(raw: &str) -> Result<Vec<String>, String> {
     let mut origins = Vec::new();
-    for item in raw.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+    for item in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
         if item.contains('*') {
             return Err("MOSS_ALLOWED_ORIGINS 不允许包含 *（禁止任意来源跨站访问）".into());
         }
@@ -104,7 +112,11 @@ pub fn parse_allowed_origins(raw: &str) -> Result<Vec<String>, String> {
             .strip_prefix("http://")
             .or_else(|| item.strip_prefix("https://"))
             .or_else(|| item.strip_prefix("tauri://"))
-            .ok_or_else(|| format!("MOSS_ALLOWED_ORIGINS 项 `{item}` 必须以 http://、https:// 或 tauri:// 开头"))?;
+            .ok_or_else(|| {
+                format!(
+                    "MOSS_ALLOWED_ORIGINS 项 `{item}` 必须以 http://、https:// 或 tauri:// 开头"
+                )
+            })?;
         if rest.is_empty() || rest.contains('/') || rest.contains(char::is_whitespace) {
             return Err(format!(
                 "MOSS_ALLOWED_ORIGINS 项 `{item}` 必须是 scheme://host[:port]，不能带路径或末尾斜杠"
@@ -132,15 +144,20 @@ fn parse_bool_setting(name: &str, raw: Option<String>) -> Result<Option<bool>, S
         "" => Ok(None),
         "true" | "1" | "yes" | "on" => Ok(Some(true)),
         "false" | "0" | "no" | "off" => Ok(Some(false)),
-        _ => Err(format!("{name} 只能是 true 或 false，当前为 `{}`", raw.trim())),
+        _ => Err(format!(
+            "{name} 只能是 true 或 false，当前为 `{}`",
+            raw.trim()
+        )),
     }
 }
 
 /// 严格模式开关（技术书 §6.2）：`MOSS_FUSION_STRICT`，默认 `false`。
 /// `MOSS_GATEWAY_ENABLED=true` 而严格模式关闭时返回错误，宿主据此拒绝启动；写错的值也报错，不静默当作关闭。
 pub fn fusion_strict_from(lookup: impl Fn(&str) -> Option<String>) -> Result<bool, String> {
-    let strict = parse_bool_setting("MOSS_FUSION_STRICT", lookup("MOSS_FUSION_STRICT"))?.unwrap_or(false);
-    let gateway = parse_bool_setting("MOSS_GATEWAY_ENABLED", lookup("MOSS_GATEWAY_ENABLED"))?.unwrap_or(false);
+    let strict =
+        parse_bool_setting("MOSS_FUSION_STRICT", lookup("MOSS_FUSION_STRICT"))?.unwrap_or(false);
+    let gateway = parse_bool_setting("MOSS_GATEWAY_ENABLED", lookup("MOSS_GATEWAY_ENABLED"))?
+        .unwrap_or(false);
     if gateway && !strict {
         return Err("已开启 MOSS_GATEWAY_ENABLED，必须同时设置 MOSS_FUSION_STRICT=true".into());
     }
@@ -158,20 +175,43 @@ mod tests {
 
     #[test]
     fn fusion_strict_defaults_off_and_gateway_requires_it() {
-        fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
-            move |name| pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| value.to_string())
+        fn env_of(
+            pairs: &'static [(&'static str, &'static str)],
+        ) -> impl Fn(&str) -> Option<String> {
+            move |name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
         }
         assert_eq!(fusion_strict_from(env_of(&[])), Ok(false));
-        assert_eq!(fusion_strict_from(env_of(&[("MOSS_FUSION_STRICT", "")])), Ok(false));
-        assert_eq!(fusion_strict_from(env_of(&[("MOSS_FUSION_STRICT", "TRUE")])), Ok(true));
-        assert_eq!(fusion_strict_from(env_of(&[("MOSS_FUSION_STRICT", "0")])), Ok(false));
+        assert_eq!(
+            fusion_strict_from(env_of(&[("MOSS_FUSION_STRICT", "")])),
+            Ok(false)
+        );
+        assert_eq!(
+            fusion_strict_from(env_of(&[("MOSS_FUSION_STRICT", "TRUE")])),
+            Ok(true)
+        );
+        assert_eq!(
+            fusion_strict_from(env_of(&[("MOSS_FUSION_STRICT", "0")])),
+            Ok(false)
+        );
         assert!(fusion_strict_from(env_of(&[("MOSS_FUSION_STRICT", "maybe")])).is_err());
         assert!(fusion_strict_from(env_of(&[("MOSS_GATEWAY_ENABLED", "true")])).is_err());
         assert!(
-            fusion_strict_from(env_of(&[("MOSS_GATEWAY_ENABLED", "true"), ("MOSS_FUSION_STRICT", "false")])).is_err()
+            fusion_strict_from(env_of(&[
+                ("MOSS_GATEWAY_ENABLED", "true"),
+                ("MOSS_FUSION_STRICT", "false")
+            ]))
+            .is_err()
         );
         assert_eq!(
-            fusion_strict_from(env_of(&[("MOSS_GATEWAY_ENABLED", "true"), ("MOSS_FUSION_STRICT", "true")])),
+            fusion_strict_from(env_of(&[
+                ("MOSS_GATEWAY_ENABLED", "true"),
+                ("MOSS_FUSION_STRICT", "true")
+            ])),
             Ok(true)
         );
     }
@@ -180,7 +220,10 @@ mod tests {
         assert_eq!(web_host_from(None, false), "127.0.0.1");
         assert_eq!(web_host_from(None, true), "0.0.0.0");
         assert_eq!(web_host_from(Some("  ".into()), true), "0.0.0.0");
-        assert_eq!(web_host_from(Some("192.168.1.5".into()), false), "192.168.1.5");
+        assert_eq!(
+            web_host_from(Some("192.168.1.5".into()), false),
+            "192.168.1.5"
+        );
         assert_eq!(web_host_from(Some("127.0.0.1".into()), true), "127.0.0.1");
     }
 
@@ -243,8 +286,12 @@ mod tests {
             vec!["http://lab.example:8080".to_owned()]
         );
         assert_eq!(
-            parse_allowed_origins(" http://a.example:1 ,https://b.example, http://a.example:1 ").unwrap(),
-            vec!["http://a.example:1".to_owned(), "https://b.example".to_owned()]
+            parse_allowed_origins(" http://a.example:1 ,https://b.example, http://a.example:1 ")
+                .unwrap(),
+            vec![
+                "http://a.example:1".to_owned(),
+                "https://b.example".to_owned()
+            ]
         );
         assert!(parse_allowed_origins("*").is_err());
         assert!(parse_allowed_origins("http://a.example, *").is_err());

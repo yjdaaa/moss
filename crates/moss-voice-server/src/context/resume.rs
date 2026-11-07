@@ -5,7 +5,10 @@
 //! approval or a stopped job is never retried, re-approved or replayed, and there is no code
 //! path here that executes anything (the NV13 Runner stays disabled by its own gate).
 use super::service::{ContextService, ServiceError};
-use super::{check_content, AccessContext, Category, Channel, ContextError, ContextMemory, MemoryDraft, RecordState, ScopeKey, ScopeKind, Source, SourceKind, Verification};
+use super::{
+    AccessContext, Category, Channel, ContextError, ContextMemory, MemoryDraft, RecordState,
+    ScopeKey, ScopeKind, Source, SourceKind, Verification, check_content,
+};
 
 const HEADER: &str = "【项目恢复摘要】";
 const SECTIONS: [&str; 4] = ["决策：", "待办：", "证据：", "未验证："];
@@ -21,17 +24,32 @@ pub struct ResumeNote {
 }
 
 fn clean(item: &str) -> String {
-    item.split_whitespace().collect::<Vec<_>>().join(" ").replace('；', "，")
+    item.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('；', "，")
 }
 
 impl ResumeNote {
     fn sections(&self) -> [&Vec<String>; 4] {
-        [&self.decisions, &self.todos, &self.evidence, &self.unverified]
+        [
+            &self.decisions,
+            &self.todos,
+            &self.evidence,
+            &self.unverified,
+        ]
     }
 
     fn validate(&self) -> Result<(), ContextError> {
         let items = self.sections();
-        if items.iter().all(|list| list.is_empty()) || items.iter().any(|list| list.len() > MAX_ITEMS || list.iter().any(|i| i.trim().is_empty() || i.chars().count() > ITEM_CHARS)) {
+        if items.iter().all(|list| list.is_empty())
+            || items.iter().any(|list| {
+                list.len() > MAX_ITEMS
+                    || list
+                        .iter()
+                        .any(|i| i.trim().is_empty() || i.chars().count() > ITEM_CHARS)
+            })
+        {
             return Err(ContextError::ContentInvalid);
         }
         Ok(())
@@ -41,7 +59,10 @@ impl ResumeNote {
         let mut lines = vec![HEADER.to_owned()];
         for (name, list) in SECTIONS.iter().zip(self.sections()) {
             if !list.is_empty() {
-                lines.push(format!("{name}{}", list.iter().map(|i| clean(i)).collect::<Vec<_>>().join("；")));
+                lines.push(format!(
+                    "{name}{}",
+                    list.iter().map(|i| clean(i)).collect::<Vec<_>>().join("；")
+                ));
             }
         }
         lines.join("\n")
@@ -57,7 +78,12 @@ impl ResumeNote {
         for line in lines {
             for (index, name) in SECTIONS.iter().enumerate() {
                 if let Some(text) = line.strip_prefix(name) {
-                    let items: Vec<String> = text.split('；').map(str::trim).filter(|i| !i.is_empty()).map(str::to_owned).collect();
+                    let items: Vec<String> = text
+                        .split('；')
+                        .map(str::trim)
+                        .filter(|i| !i.is_empty())
+                        .map(str::to_owned)
+                        .collect();
                     match index {
                         0 => note.decisions = items,
                         1 => note.todos = items,
@@ -89,8 +115,12 @@ pub struct Reference {
 pub fn references(item: &str) -> Vec<Reference> {
     let mut found = Vec::new();
     for part in item.split('[').skip(1) {
-        let Some((body, _)) = part.split_once(']') else { continue };
-        let Some((kind, id)) = body.split_once(':') else { continue };
+        let Some((body, _)) = part.split_once(']') else {
+            continue;
+        };
+        let Some((kind, id)) = body.split_once(':') else {
+            continue;
+        };
         let kind = match kind {
             "approval" => RefKind::Approval,
             "job" => RefKind::Job,
@@ -98,8 +128,16 @@ pub fn references(item: &str) -> Vec<Reference> {
             "test" => RefKind::Test,
             _ => continue,
         };
-        if !id.is_empty() && id.len() <= 96 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') {
-            let reference = Reference { kind, id: id.into() };
+        if !id.is_empty()
+            && id.len() <= 96
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        {
+            let reference = Reference {
+                kind,
+                id: id.into(),
+            };
             if !found.contains(&reference) {
                 found.push(reference);
             }
@@ -155,7 +193,9 @@ pub struct CheckedItem {
 
 impl CheckedItem {
     pub fn attention(&self) -> bool {
-        self.states.iter().any(|(_, state)| *state != RefState::Done)
+        self.states
+            .iter()
+            .any(|(_, state)| *state != RefState::Done)
     }
 }
 
@@ -173,7 +213,17 @@ pub struct ResumeView {
 fn check(items: &[String], facts: &dyn ResumeFacts) -> Vec<CheckedItem> {
     items
         .iter()
-        .map(|text| CheckedItem { text: text.clone(), states: references(text).into_iter().map(|r| { let s = facts.state(&r); (r, s) }).collect(), moved_from_evidence: false })
+        .map(|text| CheckedItem {
+            text: text.clone(),
+            states: references(text)
+                .into_iter()
+                .map(|r| {
+                    let s = facts.state(&r);
+                    (r, s)
+                })
+                .collect(),
+            moved_from_evidence: false,
+        })
         .collect()
 }
 
@@ -182,7 +232,9 @@ fn resume_rows(rows: Vec<ContextMemory>, now: f64) -> Option<(ContextMemory, Res
         // Only the user's own confirmed entry counts: an extracted candidate that merely starts
         // with the header (e.g. a model imitating the format) is never taken as the summary.
         .filter(|row| {
-            row.category == Category::TaskContext && row.source.kind() == SourceKind::UserEdit && matches!(row.state(now), RecordState::Active(Verification::Confirmed))
+            row.category == Category::TaskContext
+                && row.source.kind() == SourceKind::UserEdit
+                && matches!(row.state(now), RecordState::Active(Verification::Confirmed))
         })
         .filter_map(|row| ResumeNote::parse(&row.content).map(|note| (row, note)))
         .max_by(|a, b| a.0.updated_at.total_cmp(&b.0.updated_at))
@@ -202,23 +254,36 @@ impl ContextService {
     /// Save the project's summary (private window). The first save needs `expected = None`;
     /// later saves must name the current record and revision, so two windows cannot silently
     /// overwrite each other.
-    pub fn save_resume(&self, access: &AccessContext, scope: &ScopeKey, note: &ResumeNote, expected: Option<(&str, i64)>, now: f64) -> Result<ContextMemory, ServiceError> {
+    pub fn save_resume(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        note: &ResumeNote,
+        expected: Option<(&str, i64)>,
+        now: f64,
+    ) -> Result<ContextMemory, ServiceError> {
         Self::resume_scope(access, scope)?;
         note.validate()?;
         let content = note.to_content();
         check_content(&content)?;
         let existing = resume_rows(self.list(access, scope, now)?, now);
         match (expected, existing) {
-            (None, None) => self.create(access, MemoryDraft {
-                scope: scope.clone(),
-                category: Category::TaskContext,
-                content,
-                verification: Verification::Confirmed,
-                source: Source::new(SourceKind::UserEdit, None)?,
-                applicability: None,
-                expires_at: None,
-            }, now),
-            (Some((id, revision)), Some((row, _))) if row.id == id => self.edit(access, id, revision, &content, None, None, now),
+            (None, None) => self.create(
+                access,
+                MemoryDraft {
+                    scope: scope.clone(),
+                    category: Category::TaskContext,
+                    content,
+                    verification: Verification::Confirmed,
+                    source: Source::new(SourceKind::UserEdit, None)?,
+                    applicability: None,
+                    expires_at: None,
+                },
+                now,
+            ),
+            (Some((id, revision)), Some((row, _))) if row.id == id => {
+                self.edit(access, id, revision, &content, None, None, now)
+            }
             _ => Err(ServiceError::Conflict),
         }
     }
@@ -226,14 +291,25 @@ impl ContextService {
     /// Re-check every citation against the host's current records and report. Evidence whose
     /// citations no longer hold (failed, unknown, revoked, missing, unverifiable) is moved to
     /// “unverified”. Nothing is executed, approved or retried.
-    pub fn resume(&self, access: &AccessContext, scope: &ScopeKey, facts: &dyn ResumeFacts, now: f64) -> Result<Option<ResumeView>, ServiceError> {
+    pub fn resume(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        facts: &dyn ResumeFacts,
+        now: f64,
+    ) -> Result<Option<ResumeView>, ServiceError> {
         Self::resume_scope(access, scope)?;
-        let Some((row, note)) = resume_rows(self.list(access, scope, now)?, now) else { return Ok(None) };
+        let Some((row, note)) = resume_rows(self.list(access, scope, now)?, now) else {
+            return Ok(None);
+        };
         let mut evidence = Vec::new();
         let mut unverified = check(&note.unverified, facts);
         for item in check(&note.evidence, facts) {
             if item.attention() {
-                unverified.push(CheckedItem { moved_from_evidence: true, ..item });
+                unverified.push(CheckedItem {
+                    moved_from_evidence: true,
+                    ..item
+                });
             } else {
                 evidence.push(item);
             }
@@ -261,7 +337,12 @@ fn kind_name(kind: RefKind) -> &'static str {
 
 pub fn format_resume(view: &ResumeView) -> String {
     let mut out = vec!["【项目恢复：上次会话的记录，仅供参考；开始前须重新核对代码、数据库与设备的实际状态；结果未知、已撤销或已停止的任务不会自动重试或重放】".to_owned()];
-    for (name, items) in [("决策", &view.decisions), ("待办", &view.todos), ("证据", &view.evidence), ("未验证", &view.unverified)] {
+    for (name, items) in [
+        ("决策", &view.decisions),
+        ("待办", &view.todos),
+        ("证据", &view.evidence),
+        ("未验证", &view.unverified),
+    ] {
         out.push(format!("{name}："));
         if items.is_empty() {
             out.push("- （无）".into());
@@ -269,7 +350,12 @@ pub fn format_resume(view: &ResumeView) -> String {
         for item in items {
             let mut line = format!("- {}", item.text);
             for (reference, state) in &item.states {
-                line.push_str(&format!("（{} {}：{}）", kind_name(reference.kind), reference.id, state.label()));
+                line.push_str(&format!(
+                    "（{} {}：{}）",
+                    kind_name(reference.kind),
+                    reference.id,
+                    state.label()
+                ));
             }
             if item.moved_from_evidence {
                 line.push_str("（原记为证据，现在核实不了）");

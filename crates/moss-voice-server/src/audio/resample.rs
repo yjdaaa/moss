@@ -12,7 +12,11 @@ mod tests {
         let input = tone(16_000, 300.0, 1000, 8000.0);
         let mut resampler = Resampler::new(16_000, 24_000);
         let output = resampler.process(&input);
-        assert!((output.len() as i64 - 24_000).abs() <= 2, "{}", output.len());
+        assert!(
+            (output.len() as i64 - 24_000).abs() <= 2,
+            "{}",
+            output.len()
+        );
         let ratio = rms(&output) / rms(&input);
         assert!((0.95..1.05).contains(&ratio), "{ratio}");
     }
@@ -28,8 +32,15 @@ mod tests {
         }
         assert!((whole.len() as i64 - chunked.len() as i64).abs() <= 1);
         let common = whole.len().min(chunked.len());
-        let max_diff = whole[..common].iter().zip(&chunked[..common]).map(|(a, b)| (*a as i32 - *b as i32).abs()).max();
-        assert!(max_diff.unwrap_or(0) <= 1, "分块与整体结果一致：{max_diff:?}");
+        let max_diff = whole[..common]
+            .iter()
+            .zip(&chunked[..common])
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max();
+        assert!(
+            max_diff.unwrap_or(0) <= 1,
+            "分块与整体结果一致：{max_diff:?}"
+        );
     }
 
     #[test]

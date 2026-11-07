@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use moss_voice_providers::text::{Segmenter, emotion_of};
 use moss_voice_providers::{
-    Asr, AsrStream, BoxFuture, ChatMessage, Llm, Pcm, ProviderError, StreamingAsr, ToolCall, ToolSpec, Tts,
-    compact_stale_tool_results, truncate_history,
+    Asr, AsrStream, BoxFuture, ChatMessage, Llm, Pcm, ProviderError, StreamingAsr, ToolCall,
+    ToolSpec, Tts, compact_stale_tool_results, truncate_history,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -75,7 +75,11 @@ pub fn local_clock_line() -> String {
     )
 }
 
-pub fn build_turn_system_prompt(base_prompt: &str, include_clock: bool, ongoing_dialogue: bool) -> String {
+pub fn build_turn_system_prompt(
+    base_prompt: &str,
+    include_clock: bool,
+    ongoing_dialogue: bool,
+) -> String {
     let mut out = String::with_capacity(base_prompt.len() + 160);
     out.push_str(base_prompt);
     if include_clock {
@@ -160,10 +164,7 @@ pub trait ToolExecutor: Send + Sync {
     }
     /// 只读读取最近的加工任务（加工结束播报轮询用）。
     /// 默认不支持：宿主没有提供“不计入工具调用统计”的只读通道时，不做任何轮询。
-    fn recent_workflows<'a>(
-        &'a self,
-        _context: &'a ToolContext,
-    ) -> BoxFuture<'a, Option<Value>> {
+    fn recent_workflows<'a>(&'a self, _context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         Box::pin(async { None })
     }
 }
@@ -218,11 +219,13 @@ fn is_slow_generate_preview_call(call: &ToolCall) -> bool {
         "ai_laser_gcode_tool"
         | "generate_text_image_gcode_tool"
         | "generate_text_laser_task_tool" => {
-            let parsed: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+            let parsed: Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
             !(arg_flag_true(&parsed, "confirmed") && arg_flag_true(&parsed, "send_after_generate"))
         }
         "regenerate_text_laser_task_tool" => {
-            let parsed: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+            let parsed: Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
             !parsed
                 .get("feedback_id")
                 .and_then(Value::as_str)
@@ -318,7 +321,7 @@ pub struct Conversation {
     pub settings: ConversationSettings,
     pub memory: Option<Arc<crate::memory::MemoryService>>,
     pub speaker_enrollment: Option<Arc<crate::speaker_enrollment::SpeakerEnrollment>>,
-    pub personal_context:Option<Arc<crate::person_context::PersonContext>>,
+    pub personal_context: Option<Arc<crate::person_context::PersonContext>>,
     /// NV19-04 长期记忆检索；宿主不接入时为空，NV10 摘要照常使用
     pub context_retrieval: Option<crate::context::retrieve::ContextRetrieval>,
     /// NV19-03 会话结束后的候选提取；宿主不接入时为空
@@ -357,7 +360,7 @@ impl Conversation {
             settings,
             memory: None,
             speaker_enrollment: None,
-            personal_context:None,
+            personal_context: None,
             context_retrieval: None,
             context_extraction: None,
             jev_filter: None,
@@ -385,17 +388,31 @@ impl Conversation {
         self
     }
 
-    pub fn with_speaker_enrollment(mut self, enrollment:Arc<crate::speaker_enrollment::SpeakerEnrollment>)->Self {
-        self.speaker_enrollment=Some(enrollment);self
+    pub fn with_speaker_enrollment(
+        mut self,
+        enrollment: Arc<crate::speaker_enrollment::SpeakerEnrollment>,
+    ) -> Self {
+        self.speaker_enrollment = Some(enrollment);
+        self
     }
-    pub fn with_personal_context(mut self,context:Arc<crate::person_context::PersonContext>)->Self {
-        self.personal_context=Some(context);self
+    pub fn with_personal_context(
+        mut self,
+        context: Arc<crate::person_context::PersonContext>,
+    ) -> Self {
+        self.personal_context = Some(context);
+        self
     }
-    pub fn with_context_retrieval(mut self, retrieval: crate::context::retrieve::ContextRetrieval) -> Self {
+    pub fn with_context_retrieval(
+        mut self,
+        retrieval: crate::context::retrieve::ContextRetrieval,
+    ) -> Self {
         self.context_retrieval = Some(retrieval);
         self
     }
-    pub fn with_context_extraction(mut self, extraction: crate::context::extract::ContextExtraction) -> Self {
+    pub fn with_context_extraction(
+        mut self,
+        extraction: crate::context::extract::ContextExtraction,
+    ) -> Self {
         self.context_extraction = Some(extraction);
         self
     }
@@ -436,10 +453,7 @@ impl Conversation {
             Ok(pcm) => pcm,
             Err(primary_err) => {
                 if let Some(fallback) = &self.fallback_tts {
-                    fallback
-                        .synthesize(text)
-                        .await
-                        .map_err(|_| primary_err)?
+                    fallback.synthesize(text).await.map_err(|_| primary_err)?
                 } else {
                     return Err(primary_err);
                 }
@@ -451,8 +465,16 @@ impl Conversation {
             crate::audio::TRAILING_SILENCE_KEEP_MS,
             crate::audio::TRAILING_SILENCE_TRIGGER_MS,
         );
-        crate::audio::fade_head_i16(&mut pcm.samples, pcm.sample_rate, crate::audio::BOUNDARY_FADE_MS);
-        crate::audio::fade_tail_i16(&mut pcm.samples, pcm.sample_rate, crate::audio::BOUNDARY_FADE_MS);
+        crate::audio::fade_head_i16(
+            &mut pcm.samples,
+            pcm.sample_rate,
+            crate::audio::BOUNDARY_FADE_MS,
+        );
+        crate::audio::fade_tail_i16(
+            &mut pcm.samples,
+            pcm.sample_rate,
+            crate::audio::BOUNDARY_FADE_MS,
+        );
         const MAX_SPEECH_CACHE_ENTRIES: usize = 32;
         if let Ok(mut cache) = self.cache.lock()
             && !cache.iter().any(|(key, _)| key == text)
@@ -860,7 +882,9 @@ impl Turn {
         };
         let (scope, verified) = match identity {
             Some(task) => match task.finish_outcome().await {
-                crate::person_context::IdentityOutcome::Resolved(Some(scope)) => (Some(scope), true),
+                crate::person_context::IdentityOutcome::Resolved(Some(scope)) => {
+                    (Some(scope), true)
+                }
                 crate::person_context::IdentityOutcome::Resolved(None)
                 | crate::person_context::IdentityOutcome::SkippedShortDuration
                 | crate::person_context::IdentityOutcome::Denied => (None, false),
@@ -1052,9 +1076,15 @@ impl Turn {
                 continue;
             }
             if pending_text.is_some() && held_tail.is_empty() {
-                crate::audio::fade_head_i16(&mut pcm.samples, sample_rate, crate::audio::BOUNDARY_FADE_MS);
+                crate::audio::fade_head_i16(
+                    &mut pcm.samples,
+                    sample_rate,
+                    crate::audio::BOUNDARY_FADE_MS,
+                );
             }
-            let hold_samples = ((u64::from(sample_rate) * u64::from(crate::audio::BOUNDARY_FADE_MS)) / 1000) as usize;
+            let hold_samples = ((u64::from(sample_rate)
+                * u64::from(crate::audio::BOUNDARY_FADE_MS))
+                / 1000) as usize;
             if hold_samples > 1 {
                 let mut combined = if held_tail.is_empty() {
                     pcm.samples
@@ -1076,7 +1106,10 @@ impl Turn {
                 match pending_text.take() {
                     Some(text) => {
                         self.timing("first_synthesis_ready");
-                        self.send(TurnEvent::Speech { text, pcm: emit_pcm });
+                        self.send(TurnEvent::Speech {
+                            text,
+                            pcm: emit_pcm,
+                        });
                     }
                     None => self.send(TurnEvent::SpeechMore(emit_pcm)),
                 }
@@ -1093,9 +1126,17 @@ impl Turn {
 
         if !held_tail.is_empty() && sample_rate > 0 {
             if pending_text.is_some() {
-                crate::audio::fade_head_i16(&mut held_tail, sample_rate, crate::audio::BOUNDARY_FADE_MS);
+                crate::audio::fade_head_i16(
+                    &mut held_tail,
+                    sample_rate,
+                    crate::audio::BOUNDARY_FADE_MS,
+                );
             }
-            crate::audio::fade_tail_i16(&mut held_tail, sample_rate, crate::audio::BOUNDARY_FADE_MS);
+            crate::audio::fade_tail_i16(
+                &mut held_tail,
+                sample_rate,
+                crate::audio::BOUNDARY_FADE_MS,
+            );
             let tail_pcm = Pcm {
                 samples: held_tail,
                 sample_rate,
@@ -1103,7 +1144,10 @@ impl Turn {
             match pending_text.take() {
                 Some(text) => {
                     self.timing("first_synthesis_ready");
-                    self.send(TurnEvent::Speech { text, pcm: tail_pcm });
+                    self.send(TurnEvent::Speech {
+                        text,
+                        pcm: tail_pcm,
+                    });
                 }
                 None => self.send(TurnEvent::SpeechMore(tail_pcm)),
             }
@@ -1115,7 +1159,9 @@ impl Turn {
                 && let Some(retry_text) = pending_text.take()
             {
                 self.send(TurnEvent::Warning(
-                    error.clone().prefixed("主语音合成失败，本句已自动降级为本地语音合成：")
+                    error
+                        .clone()
+                        .prefixed("主语音合成失败，本句已自动降级为本地语音合成："),
                 ));
                 let fb_prepared = self.start_sentence_tts_with(fallback, retry_text, false);
                 let mut fb_closed = true;
@@ -1150,7 +1196,9 @@ impl Turn {
         if let Some(stream) = stream {
             match stream.finish().await {
                 Ok(text) => return Ok(text),
-                Err(error) => self.send(TurnEvent::Warning(error.prefixed("流式识别失败，改用整段识别："))),
+                Err(error) => self.send(TurnEvent::Warning(
+                    error.prefixed("流式识别失败，改用整段识别："),
+                )),
             }
         }
         self.conversation.asr.transcribe(pcm, sample_rate).await
@@ -1352,11 +1400,12 @@ impl Turn {
         let Ok(scope) = self.resolve_person(identity).await else {
             return;
         };
-        let (history, personal_turn_prefix) = if let Some(personal) = &self.conversation.personal_context {
-            (personal.history(&self.context, scope.as_ref()), history)
-        } else {
-            (history, Vec::new())
-        };
+        let (history, personal_turn_prefix) =
+            if let Some(personal) = &self.conversation.personal_context {
+                (personal.history(&self.context, scope.as_ref()), history)
+            } else {
+                (history, Vec::new())
+            };
         let mut tools = self.conversation.tools.tools();
         if let Some(device) = &self.device {
             // Reserved play_music is always owned by the trusted desktop index,
@@ -1395,7 +1444,10 @@ impl Turn {
             let retrieved = match &self.conversation.context_retrieval {
                 Some(retrieval) => match retrieval.access.access(&self.context, scope.as_ref()) {
                     Some((access, device)) => {
-                        retrieval.retriever.retrieve_candidates(access, &text, device).await
+                        retrieval
+                            .retriever
+                            .retrieve_candidates(access, &text, device)
+                            .await
                     }
                     None => None,
                 },
@@ -1408,7 +1460,9 @@ impl Turn {
             let summary_fut = async {
                 if let Some(personal) = &self.conversation.personal_context {
                     personal.prompt_for(&self.context, scope.as_ref()).await
-                } else if let Some(memory) = self.conversation.memory.as_ref().filter(|_| nv10_summary) {
+                } else if let Some(memory) =
+                    self.conversation.memory.as_ref().filter(|_| nv10_summary)
+                {
                     memory.prompt_for(&self.context.device_id).await
                 } else {
                     None
@@ -1450,7 +1504,8 @@ impl Turn {
                 if let Some(context) = personal.prompt_for(&self.context, scope.as_ref()).await {
                     messages.push(ChatMessage::system(context));
                 }
-            } else if let Some(memory) = self.conversation.memory.as_ref().filter(|_| nv10_summary) {
+            } else if let Some(memory) = self.conversation.memory.as_ref().filter(|_| nv10_summary)
+            {
                 if let Some(context) = memory.prompt_for(&self.context.device_id).await {
                     messages.push(ChatMessage::system(context));
                 }
@@ -1478,8 +1533,17 @@ impl Turn {
         let mut filler_spoken = false;
         let mut rounds = 0;
         loop {
-            if self.conversation.personal_context.as_ref().is_some_and(|personal|!personal.permitted(&self.context,scope.as_ref())) {
-                self.send(TurnEvent::Done{messages:vec![],close:false});return;
+            if self
+                .conversation
+                .personal_context
+                .as_ref()
+                .is_some_and(|personal| !personal.permitted(&self.context, scope.as_ref()))
+            {
+                self.send(TurnEvent::Done {
+                    messages: vec![],
+                    close: false,
+                });
+                return;
             }
             let (reply, spoke) = self.generate(&messages, &tools, &mut emotion_sent).await;
             spoke_any |= spoke;
@@ -1528,7 +1592,9 @@ impl Turn {
                 .any(|call| call.function.name == "play_music")
                 && reply.tool_calls.len() != 1
             {
-                self.send(TurnEvent::Failed(ProviderError::new("音乐播放不能和其他工具同时执行")));
+                self.send(TurnEvent::Failed(ProviderError::new(
+                    "音乐播放不能和其他工具同时执行",
+                )));
                 self.send(TurnEvent::Done {
                     messages: Vec::new(),
                     close: false,
@@ -1543,10 +1609,8 @@ impl Turn {
                 && let Some(filler) = slow_tool_filler(&reply.tool_calls)
             {
                 filler_spoken = true;
-                let (_, outcomes) = tokio::join!(
-                    self.speak_fixed(filler),
-                    self.run_tools(&reply.tool_calls),
-                );
+                let (_, outcomes) =
+                    tokio::join!(self.speak_fixed(filler), self.run_tools(&reply.tool_calls),);
                 outcomes
             } else {
                 self.run_tools(&reply.tool_calls).await
@@ -1659,13 +1723,15 @@ pub fn spawn_turn_with_person_hint(
             TurnInput::FastStop { text } => {
                 let mut no_identity = None;
                 let mut no_prefix = Vec::new();
-                let corrected = apply_asr_corrections(&text, &turn.conversation.settings.asr_corrections);
+                let corrected =
+                    apply_asr_corrections(&text, &turn.conversation.settings.asr_corrections);
                 turn.send(TurnEvent::RawHeard {
                     raw: text,
                     corrected: corrected.clone(),
                 });
                 turn.send(TurnEvent::Heard(corrected.clone()));
-                turn.fast_answer(&corrected, &mut no_identity, &mut no_prefix).await;
+                turn.fast_answer(&corrected, &mut no_identity, &mut no_prefix)
+                    .await;
             }
             TurnInput::Utterance {
                 pcm,

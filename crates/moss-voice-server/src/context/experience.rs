@@ -5,7 +5,10 @@
 //! authorization: motion, laser output, firmware and home-control actions keep their own gates.
 use super::retrieve::fast_query;
 use super::service::{ContextService, ServiceError};
-use super::{AccessContext, Applicability, Category, ContextError, ContextMemory, Evidence, MemoryDraft, ScopeKey, Source, SourceKind, Verification};
+use super::{
+    AccessContext, Applicability, Category, ContextError, ContextMemory, Evidence, MemoryDraft,
+    ScopeKey, Source, SourceKind, Verification,
+};
 
 const SYMPTOM_CHARS: usize = 200;
 const CHECK_CHARS: usize = 150;
@@ -25,13 +28,20 @@ pub struct Experience {
 
 /// Single line with the section separator `；` normalized away, so items round-trip.
 fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ").replace('；', "，")
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('；', "，")
 }
 
 impl Experience {
     fn validate(&self) -> Result<(), ContextError> {
         let bad = |text: &str, max: usize| text.trim().is_empty() || text.chars().count() > max;
-        if bad(&self.symptom, SYMPTOM_CHARS) || bad(&self.conclusion, CONCLUSION_CHARS) || self.checks.len() > MAX_CHECKS || self.checks.iter().any(|c| bad(c, CHECK_CHARS)) {
+        if bad(&self.symptom, SYMPTOM_CHARS)
+            || bad(&self.conclusion, CONCLUSION_CHARS)
+            || self.checks.len() > MAX_CHECKS
+            || self.checks.iter().any(|c| bad(c, CHECK_CHARS))
+        {
             return Err(ContextError::ContentInvalid);
         }
         Ok(())
@@ -60,11 +70,19 @@ impl Experience {
             if let Some(text) = line.strip_prefix("现象：") {
                 experience.symptom = text.into();
             } else if let Some(text) = line.strip_prefix("排查：") {
-                experience.checks = text.split('；').map(|part| part.trim().to_owned()).filter(|part| !part.is_empty()).collect();
+                experience.checks = text
+                    .split('；')
+                    .map(|part| part.trim().to_owned())
+                    .filter(|part| !part.is_empty())
+                    .collect();
             } else if let Some(text) = line.strip_prefix("结论：") {
                 experience.conclusion = text.into();
             } else if let Some(text) = line.strip_prefix("证据：") {
-                experience.evidence = text.split('；').map(str::to_owned).filter(|e| !e.is_empty()).collect();
+                experience.evidence = text
+                    .split('；')
+                    .map(str::to_owned)
+                    .filter(|e| !e.is_empty())
+                    .collect();
             } else if !line.trim().is_empty() {
                 loose.push(line.trim());
             }
@@ -105,50 +123,112 @@ impl ContextService {
     /// Record an experience in the private window. Model AND firmware are required. Without
     /// evidence it is a candidate; with a trusted test it is confirmed and sourced to that test;
     /// with the user's confirmation it is confirmed as the user's own entry.
-    pub fn record_experience(&self, access: &AccessContext, scope: &ScopeKey, device: &Applicability, mut experience: Experience, evidence: Option<Evidence>, now: f64) -> Result<Recorded, ServiceError> {
+    pub fn record_experience(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        device: &Applicability,
+        mut experience: Experience,
+        evidence: Option<Evidence>,
+        now: f64,
+    ) -> Result<Recorded, ServiceError> {
         if device.firmware().is_none() {
             return Err(ContextError::ApplicabilityRequired.into());
         }
         experience.evidence.clear();
         experience.validate()?;
-        let similar = self.recall_experience(access, &experience.symptom, Some(device), now).unwrap_or_default();
+        let similar = self
+            .recall_experience(access, &experience.symptom, Some(device), now)
+            .unwrap_or_default();
         let (source, verification) = match &evidence {
-            None => (Source::new(SourceKind::UserEdit, None)?, Verification::Candidate),
-            Some(Evidence::UserConfirmed) => (Source::new(SourceKind::UserEdit, None)?, Verification::Confirmed),
-            Some(Evidence::TrustedTest(source)) if source.kind() == SourceKind::TrustedTest && source.reference().is_some() => (source.clone(), Verification::Confirmed),
+            None => (
+                Source::new(SourceKind::UserEdit, None)?,
+                Verification::Candidate,
+            ),
+            Some(Evidence::UserConfirmed) => (
+                Source::new(SourceKind::UserEdit, None)?,
+                Verification::Confirmed,
+            ),
+            Some(Evidence::TrustedTest(source))
+                if source.kind() == SourceKind::TrustedTest && source.reference().is_some() =>
+            {
+                (source.clone(), Verification::Confirmed)
+            }
             Some(Evidence::TrustedTest(_)) => return Err(ContextError::TransitionInvalid.into()),
         };
         if let Some(evidence) = &evidence {
             experience.evidence.push(evidence_line(evidence));
         }
-        let memory = self.create(access, MemoryDraft {
-            scope: scope.clone(),
-            category: Category::TroubleshootingExperience,
-            content: experience.to_content(),
-            verification,
-            source,
-            applicability: Some(device.clone()),
-            expires_at: None,
-        }, now)?;
+        let memory = self.create(
+            access,
+            MemoryDraft {
+                scope: scope.clone(),
+                category: Category::TroubleshootingExperience,
+                content: experience.to_content(),
+                verification,
+                source,
+                applicability: Some(device.clone()),
+                expires_at: None,
+            },
+            now,
+        )?;
         Ok(Recorded { memory, similar })
     }
 
     /// Promote a candidate with evidence and write that evidence into the record.
-    pub fn confirm_experience(&self, access: &AccessContext, id: &str, expected_revision: i64, evidence: &Evidence, now: f64) -> Result<ContextMemory, ServiceError> {
-        let confirmed = self.set_verification(access, id, expected_revision, Verification::Confirmed, Some(evidence), now)?;
+    pub fn confirm_experience(
+        &self,
+        access: &AccessContext,
+        id: &str,
+        expected_revision: i64,
+        evidence: &Evidence,
+        now: f64,
+    ) -> Result<ContextMemory, ServiceError> {
+        let confirmed = self.set_verification(
+            access,
+            id,
+            expected_revision,
+            Verification::Confirmed,
+            Some(evidence),
+            now,
+        )?;
         if confirmed.category != Category::TroubleshootingExperience {
             return Ok(confirmed);
         }
         let mut experience = Experience::parse(&confirmed.content);
         experience.evidence.push(evidence_line(evidence));
-        let content = if experience.symptom.is_empty() { format!("{}\n证据：{}", confirmed.content, experience.evidence.join("；")) } else { experience.to_content() };
-        self.edit(access, id, confirmed.revision, &content, confirmed.applicability.clone(), confirmed.expires_at, now)
+        let content = if experience.symptom.is_empty() {
+            format!(
+                "{}\n证据：{}",
+                confirmed.content,
+                experience.evidence.join("；")
+            )
+        } else {
+            experience.to_content()
+        };
+        self.edit(
+            access,
+            id,
+            confirmed.revision,
+            &content,
+            confirmed.applicability.clone(),
+            confirmed.expires_at,
+            now,
+        )
     }
 
     /// Experiences for a symptom on the current device. Records for another model or firmware,
     /// or when the current device is unknown, are never returned (NV19-04 `search` rule).
-    pub fn recall_experience(&self, access: &AccessContext, symptom: &str, device: Option<&Applicability>, now: f64) -> Result<Vec<Recalled>, ServiceError> {
-        let Some(query) = fast_query(symptom) else { return Ok(Vec::new()) };
+    pub fn recall_experience(
+        &self,
+        access: &AccessContext,
+        symptom: &str,
+        device: Option<&Applicability>,
+        now: f64,
+    ) -> Result<Vec<Recalled>, ServiceError> {
+        let Some(query) = fast_query(symptom) else {
+            return Ok(Vec::new());
+        };
         Ok(self
             .search(access, &query, device, now)?
             .into_iter()
@@ -157,8 +237,16 @@ impl ContextService {
             .map(|(row, _)| Recalled {
                 experience: Experience::parse(&row.content),
                 verified: row.verification == Verification::Confirmed,
-                device_model: row.applicability.as_ref().map(|a| a.device_model().to_owned()).unwrap_or_default(),
-                firmware: row.applicability.as_ref().and_then(|a| a.firmware()).map(str::to_owned),
+                device_model: row
+                    .applicability
+                    .as_ref()
+                    .map(|a| a.device_model().to_owned())
+                    .unwrap_or_default(),
+                firmware: row
+                    .applicability
+                    .as_ref()
+                    .and_then(|a| a.firmware())
+                    .map(str::to_owned),
                 id: row.id,
             })
             .collect())
@@ -170,8 +258,16 @@ pub fn format_experience(items: &[Recalled]) -> Option<String> {
     let lines: Vec<String> = items
         .iter()
         .map(|item| {
-            let state = if item.verified { "已验证" } else { "未验证，不能当作已知解决方法" };
-            let firmware = item.firmware.as_deref().map(|f| format!(" {f}")).unwrap_or_default();
+            let state = if item.verified {
+                "已验证"
+            } else {
+                "未验证，不能当作已知解决方法"
+            };
+            let firmware = item
+                .firmware
+                .as_deref()
+                .map(|f| format!(" {f}"))
+                .unwrap_or_default();
             let mut parts = Vec::new();
             if !item.experience.symptom.is_empty() {
                 parts.push(format!("现象：{}", item.experience.symptom));
@@ -183,7 +279,11 @@ pub fn format_experience(items: &[Recalled]) -> Option<String> {
             if !item.experience.evidence.is_empty() {
                 parts.push(format!("证据：{}", item.experience.evidence.join("；")));
             }
-            format!("- [{state}·{}{firmware}] {}", item.device_model, parts.join("；"))
+            format!(
+                "- [{state}·{}{firmware}] {}",
+                item.device_model,
+                parts.join("；")
+            )
         })
         .collect();
     (!lines.is_empty()).then(|| {

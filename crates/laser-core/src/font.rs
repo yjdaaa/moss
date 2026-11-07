@@ -114,7 +114,10 @@ pub(crate) fn windows_font_candidates_from_env(
     if let Some(local) = local_app_data.filter(|v| !v.is_empty()) {
         push_unique_path(
             &mut dirs,
-            Path::new(local).join("Microsoft").join("Windows").join("Fonts"),
+            Path::new(local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts"),
         );
     }
     let mut out = Vec::new();
@@ -211,7 +214,9 @@ pub(crate) fn select_font_from_candidates(
             first_valid = Some(path.clone());
         }
         if required_chars.is_empty()
-            || required_chars.iter().all(|&ch| face.glyph_index(ch).is_some())
+            || required_chars
+                .iter()
+                .all(|&ch| face.glyph_index(ch).is_some())
         {
             return Some(path.clone());
         }
@@ -258,14 +263,7 @@ impl Builder {
     }
 }
 
-fn subdivide_quad(
-    p0: Point,
-    p1: Point,
-    p2: Point,
-    tol: f64,
-    depth: usize,
-    out: &mut Vec<Point>,
-) {
+fn subdivide_quad(p0: Point, p1: Point, p2: Point, tol: f64, depth: usize, out: &mut Vec<Point>) {
     let chord = (p2.0 - p0.0).hypot(p2.1 - p0.1);
     let dist = if chord < 1e-6 {
         (p1.0 - p0.0).hypot(p1.1 - p0.1)
@@ -294,7 +292,10 @@ fn subdivide_cubic(
 ) {
     let chord = (p3.0 - p0.0).hypot(p3.1 - p0.1);
     let (d1, d2) = if chord < 1e-6 {
-        ((p1.0 - p0.0).hypot(p1.1 - p0.1), (p2.0 - p0.0).hypot(p2.1 - p0.1))
+        (
+            (p1.0 - p0.0).hypot(p1.1 - p0.1),
+            (p2.0 - p0.0).hypot(p2.1 - p0.1),
+        )
     } else {
         let a = p3.1 - p0.1;
         let b = -(p3.0 - p0.0);
@@ -499,8 +500,7 @@ pub fn layout_text_advanced(
                 }
                 paths.push(path);
             }
-            x += f64::from(face.glyph_hor_advance(glyph).unwrap_or(0)) * scale
-                + options.spacing_mm;
+            x += f64::from(face.glyph_hor_advance(glyph).unwrap_or(0)) * scale + options.spacing_mm;
             glyphs += 1;
         }
         baseline += line_height;
@@ -627,9 +627,20 @@ mod tests {
             .join("Microsoft")
             .join("Windows")
             .join("Fonts");
-        assert_eq!(win_candidates.first(), Some(&custom_fonts.join("simhei.ttf")));
-        assert!(win_candidates.iter().any(|p| p == &custom_fonts.join("arial.ttf")));
-        assert!(win_candidates.iter().any(|p| p == &user_fonts.join("msyh.ttc")));
+        assert_eq!(
+            win_candidates.first(),
+            Some(&custom_fonts.join("simhei.ttf"))
+        );
+        assert!(
+            win_candidates
+                .iter()
+                .any(|p| p == &custom_fonts.join("arial.ttf"))
+        );
+        assert!(
+            win_candidates
+                .iter()
+                .any(|p| p == &user_fonts.join("msyh.ttc"))
+        );
         #[cfg(windows)]
         assert_eq!(
             win_candidates.first().and_then(|p| p.to_str()),

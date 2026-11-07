@@ -50,7 +50,10 @@ static NEXT_STREAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 
 impl LocalVad {
     /// 打开一路判停流；失败返回错误（调用方改用能量判停）。
-    pub fn open(helper: moss_voice_providers::local::LocalHelper, config: &VadConfig) -> Result<Self, String> {
+    pub fn open(
+        helper: moss_voice_providers::local::LocalHelper,
+        config: &VadConfig,
+    ) -> Result<Self, String> {
         let stream = NEXT_STREAM.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         helper.vad_open(stream).map_err(|error| error.message)?;
         Ok(Self {
@@ -78,7 +81,9 @@ impl Vad for LocalVad {
         if self.failed {
             return self.fallback.accept(pcm);
         }
-        let Some(stream) = self.stream else { return Vec::new() };
+        let Some(stream) = self.stream else {
+            return Vec::new();
+        };
         match self.helper.vad_feed(stream, pcm) {
             Ok(events) => events
                 .into_iter()
@@ -103,7 +108,11 @@ impl Vad for LocalVad {
     }
 
     fn in_speech(&self) -> bool {
-        if self.failed { self.fallback.in_speech() } else { self.in_speech }
+        if self.failed {
+            self.fallback.in_speech()
+        } else {
+            self.in_speech
+        }
     }
 
     fn reset(&mut self) {
@@ -146,7 +155,9 @@ impl VadFactory for LocalVadFactory {
         if sample_rate != 16_000 {
             return None;
         }
-        LocalVad::open(self.helper.clone(), config).ok().map(|vad| Box::new(vad) as Box<dyn Vad>)
+        LocalVad::open(self.helper.clone(), config)
+            .ok()
+            .map(|vad| Box::new(vad) as Box<dyn Vad>)
     }
 }
 
@@ -198,13 +209,25 @@ pub struct EnergyVad {
 impl EnergyVad {
     pub fn new(sample_rate: u32, config: VadConfig) -> Self {
         let window = (sample_rate as usize * WINDOW_MS as usize / 1000).max(1);
-        Self { config, window, pending: Vec::new(), noise: INITIAL_NOISE, in_speech: false, loud_ms: 0, quiet_ms: 0 }
+        Self {
+            config,
+            window,
+            pending: Vec::new(),
+            noise: INITIAL_NOISE,
+            in_speech: false,
+            loud_ms: 0,
+            quiet_ms: 0,
+        }
     }
 
     fn thresholds(&self) -> (f64, f64) {
         (
-            self.config.start_rms.max(self.noise * self.config.start_over_noise),
-            self.config.keep_rms.max(self.noise * self.config.keep_over_noise),
+            self.config
+                .start_rms
+                .max(self.noise * self.config.start_over_noise),
+            self.config
+                .keep_rms
+                .max(self.noise * self.config.keep_over_noise),
         )
     }
 
@@ -244,7 +267,12 @@ fn rms(samples: &[i16]) -> f64 {
     if samples.is_empty() {
         return 0.0;
     }
-    (samples.iter().map(|&value| (value as f64) * (value as f64)).sum::<f64>() / samples.len() as f64).sqrt()
+    (samples
+        .iter()
+        .map(|&value| (value as f64) * (value as f64))
+        .sum::<f64>()
+        / samples.len() as f64)
+        .sqrt()
 }
 
 impl Vad for EnergyVad {
@@ -318,7 +346,10 @@ mod tests {
         pcm.extend(silence(RATE, 120));
         pcm.extend(tone(RATE, 220.0, 500, 6000.0));
         pcm.extend(silence(RATE, 400));
-        let events: Vec<_> = feed(&mut vad, &pcm).into_iter().map(|(event, _)| event).collect();
+        let events: Vec<_> = feed(&mut vad, &pcm)
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect();
         assert_eq!(events, vec![VadEvent::SpeechStart, VadEvent::SpeechEnd]);
     }
 
@@ -334,7 +365,10 @@ mod tests {
         let mut loud = noise(RATE, 1000, 900.0, 11);
         loud.extend(tone(RATE, 220.0, 600, 9000.0));
         loud.extend(noise(RATE, 600, 900.0, 13));
-        let events: Vec<_> = feed(&mut vad, &loud).into_iter().map(|(event, _)| event).collect();
+        let events: Vec<_> = feed(&mut vad, &loud)
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect();
         assert_eq!(events, vec![VadEvent::SpeechStart, VadEvent::SpeechEnd]);
     }
 
@@ -352,13 +386,18 @@ mod tests {
         use std::net::{TcpListener, TcpStream};
         use std::sync::{Arc, Mutex};
 
-        use moss_voice_local_proto::{Op, Reply, Request, Response, VadEventKind, read_frame, write_frame};
+        use moss_voice_local_proto::{
+            Op, Reply, Request, Response, VadEventKind, read_frame, write_frame,
+        };
         use moss_voice_providers::local::LocalHelper;
 
         use super::*;
 
         /// 假辅助程序：第 N 次送入（从 1 起）时按脚本回应；`die_at` 那次之后断开连接。记录收到的请求。
-        fn fake(script: Vec<(usize, Vec<VadEventKind>)>, die_at: Option<usize>) -> (LocalHelper, Arc<Mutex<Vec<Op>>>) {
+        fn fake(
+            script: Vec<(usize, Vec<VadEventKind>)>,
+            die_at: Option<usize>,
+        ) -> (LocalHelper, Arc<Mutex<Vec<Op>>>) {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
             let (server, _) = listener.accept().unwrap();
@@ -375,24 +414,49 @@ mod tests {
                             if Some(feeds) == die_at {
                                 return;
                             }
-                            let events = script.iter().find(|(at, _)| *at == feeds).map(|(_, e)| e.clone()).unwrap_or_default();
+                            let events = script
+                                .iter()
+                                .find(|(at, _)| *at == feeds)
+                                .map(|(_, e)| e.clone())
+                                .unwrap_or_default();
                             Reply::VadEvents { events }
                         }
                         _ => Reply::Done,
                     };
-                    if write_frame(&mut writer, &Response { id: request.id, reply }, &[]).is_err() {
+                    if write_frame(
+                        &mut writer,
+                        &Response {
+                            id: request.id,
+                            reply,
+                        },
+                        &[],
+                    )
+                    .is_err()
+                    {
                         return;
                     }
                 }
             });
-            (LocalHelper::from_streams(Box::new(client.try_clone().unwrap()), Box::new(client)), seen)
+            (
+                LocalHelper::from_streams(Box::new(client.try_clone().unwrap()), Box::new(client)),
+                seen,
+            )
         }
 
         #[test]
         fn silero_events_are_mapped_and_reset_opens_a_new_stream() {
-            let (helper, seen) = fake(vec![(2, vec![VadEventKind::SpeechStart]), (4, vec![VadEventKind::SpeechEnd])], None);
+            let (helper, seen) = fake(
+                vec![
+                    (2, vec![VadEventKind::SpeechStart]),
+                    (4, vec![VadEventKind::SpeechEnd]),
+                ],
+                None,
+            );
             let factory = LocalVadFactory { helper };
-            assert!(factory.create(24_000, &VadConfig::default()).is_none(), "只支持 16 kHz");
+            assert!(
+                factory.create(24_000, &VadConfig::default()).is_none(),
+                "只支持 16 kHz"
+            );
             let mut vad = factory.create(RATE, &VadConfig::default()).unwrap();
             let frame = silence(RATE, 60);
             assert!(vad.accept(&frame).is_empty());
@@ -406,17 +470,31 @@ mod tests {
             drop(vad);
             std::thread::sleep(std::time::Duration::from_millis(200));
             let ops = seen.lock().unwrap();
-            let opened: Vec<u64> = ops.iter().filter_map(|op| if let Op::VadOpen { stream } = op { Some(*stream) } else { None }).collect();
+            let opened: Vec<u64> = ops
+                .iter()
+                .filter_map(|op| {
+                    if let Op::VadOpen { stream } = op {
+                        Some(*stream)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(opened.len(), 2, "初始一路 + 重置后新开一路：{ops:?}");
             assert_ne!(opened[0], opened[1]);
-            let closed = ops.iter().filter(|op| matches!(op, Op::VadClose { .. })).count();
+            let closed = ops
+                .iter()
+                .filter(|op| matches!(op, Op::VadClose { .. }))
+                .count();
             assert_eq!(closed, 2, "重置关旧流，丢弃时关新流");
         }
 
         #[test]
         fn helper_failure_falls_back_to_energy_vad_with_a_notice() {
             let (helper, _) = fake(vec![], Some(2));
-            let mut vad = LocalVadFactory { helper }.create(RATE, &VadConfig::default()).unwrap();
+            let mut vad = LocalVadFactory { helper }
+                .create(RATE, &VadConfig::default())
+                .unwrap();
             assert!(vad.accept(&silence(RATE, 60)).is_empty());
             // 辅助程序在第二帧时退出：本帧起改用能量判停，会话照常判停
             let mut pcm = tone(RATE, 220.0, 600, 6000.0);
@@ -430,7 +508,10 @@ mod tests {
             assert!(notice.contains("改用能量判停"), "{notice}");
             assert!(vad.take_notice().is_none(), "提示只给一次");
             vad.reset();
-            assert!(vad.take_notice().is_none(), "已改用能量判停，重置不再尝试辅助程序");
+            assert!(
+                vad.take_notice().is_none(),
+                "已改用能量判停，重置不再尝试辅助程序"
+            );
         }
     }
 }

@@ -7,6 +7,12 @@
 //!
 //! 本程序静态链接 sherpa-onnx（Apache-2.0），其中包含 espeak-ng（GPL-3.0），因此以 GPL-3.0-or-later 发布。
 
+use moss_voice_local_proto::{
+    SPEAKER_DIMENSION, SPEAKER_MODEL_BYTES, SPEAKER_MODEL_FILE, SPEAKER_MODEL_ID,
+    SPEAKER_MODEL_SHA256, SPEAKER_SAMPLE_RATE, embedding_to_bytes, valid_speaker_pcm,
+};
+use sha2::{Digest, Sha256};
+use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::path::Path;
@@ -14,19 +20,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use sha2::{Digest,Sha256};
-use moss_voice_local_proto::{SPEAKER_MODEL_ID,SPEAKER_MODEL_FILE,SPEAKER_MODEL_BYTES,SPEAKER_MODEL_SHA256,SPEAKER_DIMENSION,SPEAKER_SAMPLE_RATE,valid_speaker_pcm,embedding_to_bytes};
-use sherpa_onnx::{SpeakerEmbeddingExtractor,SpeakerEmbeddingExtractorConfig};
 
 use moss_voice_local_proto::{
-    AsrEngine, Op, PROTOCOL_VERSION, Reply, Request, Response, TtsEngine, VadEngine, VadEventKind, VadParams,
-    bytes_to_pcm, pcm_to_bytes, read_frame, write_frame,
+    AsrEngine, Op, PROTOCOL_VERSION, Reply, Request, Response, TtsEngine, VadEngine, VadEventKind,
+    VadParams, bytes_to_pcm, pcm_to_bytes, read_frame, write_frame,
 };
 use sherpa_onnx::{
-    GenerationConfig, OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig, OfflineTts,
-    OfflineTtsConfig, OfflineTtsKokoroModelConfig, OfflineTtsMatchaModelConfig, OfflineTtsModelConfig, OnlineRecognizer,
-    OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig, SileroVadModelConfig, TenVadModelConfig,
-    VadModelConfig, VoiceActivityDetector,
+    GenerationConfig, OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig,
+    OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig, OfflineTtsMatchaModelConfig,
+    OfflineTtsModelConfig, OnlineRecognizer, OnlineRecognizerConfig, OnlineStream,
+    OnlineTransducerModelConfig, SileroVadModelConfig, TenVadModelConfig, VadModelConfig,
+    VoiceActivityDetector,
 };
 
 type Out = Arc<Mutex<BufWriter<io::Stdout>>>;
@@ -45,7 +49,14 @@ fn send(out: &Out, id: u64, reply: Reply, payload: &[u8]) {
 }
 
 fn error(out: &Out, id: u64, message: impl Into<String>) {
-    send(out, id, Reply::Error { message: message.into() }, &[]);
+    send(
+        out,
+        id,
+        Reply::Error {
+            message: message.into(),
+        },
+        &[],
+    );
 }
 
 fn to_f32(pcm: &[i16]) -> Vec<f32> {
@@ -53,7 +64,10 @@ fn to_f32(pcm: &[i16]) -> Vec<f32> {
 }
 
 fn to_i16(samples: &[f32]) -> Vec<i16> {
-    samples.iter().map(|&sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16).collect()
+    samples
+        .iter()
+        .map(|&sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+        .collect()
 }
 
 /// Windows 上 `std::fs::canonicalize` 会返回 `\\?\C:\...` 或 `\\?\UNC\...` 逐字路径前缀。
@@ -141,8 +155,11 @@ fn vad_config(engine: VadEngine, model: &str, params: &VadParams) -> VadModelCon
         debug: false,
         ..Default::default()
     };
-    let (threshold, silence, speech) =
-        (params.threshold, params.min_silence_ms as f32 / 1000.0, params.min_speech_ms as f32 / 1000.0);
+    let (threshold, silence, speech) = (
+        params.threshold,
+        params.min_silence_ms as f32 / 1000.0,
+        params.min_speech_ms as f32 / 1000.0,
+    );
     match engine {
         VadEngine::Silero => {
             config.silero_vad = SileroVadModelConfig {
@@ -174,7 +191,11 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
     let mut streams: HashMap<u64, VadStream> = HashMap::new();
     for (id, op, payload) in jobs {
         match op {
-            Op::LoadVad { model, params, engine } => {
+            Op::LoadVad {
+                model,
+                params,
+                engine,
+            } => {
                 // 试建一个检测器确认模型可用
                 match require(Path::new(&model)).and_then(|clean_model| {
                     let candidate = vad_config(engine, &clean_model, &params);
@@ -186,14 +207,31 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         config = Some(candidate);
                         streams.clear();
                         loaded.vad.store(true, Ordering::SeqCst);
-                        send(&out, id, Reply::Loaded { sample_rate: Some(16_000), speakers: None }, &[]);
+                        send(
+                            &out,
+                            id,
+                            Reply::Loaded {
+                                sample_rate: Some(16_000),
+                                speakers: None,
+                            },
+                            &[],
+                        );
                     }
                     Err(message) => error(&out, id, message),
                 }
             }
-            Op::VadOpen { stream } => match config.as_ref().and_then(|config| VoiceActivityDetector::create(config, 30.0)) {
+            Op::VadOpen { stream } => match config
+                .as_ref()
+                .and_then(|config| VoiceActivityDetector::create(config, 30.0))
+            {
                 Some(detector) => {
-                    streams.insert(stream, VadStream { detector, in_speech: false });
+                    streams.insert(
+                        stream,
+                        VadStream {
+                            detector,
+                            in_speech: false,
+                        },
+                    );
                     send(&out, id, Reply::Done, &[]);
                 }
                 None => error(&out, id, "判停模型未加载"),
@@ -203,7 +241,9 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     error(&out, id, "判停流不存在");
                     continue;
                 };
-                state.detector.accept_waveform(&to_f32(&bytes_to_pcm(&payload)));
+                state
+                    .detector
+                    .accept_waveform(&to_f32(&bytes_to_pcm(&payload)));
                 let mut events = Vec::new();
                 // 已完成的语音段：之前没报过开始的先补开始
                 while state.detector.front().is_some() {
@@ -238,8 +278,17 @@ enum Recognizer {
     Online(OnlineRecognizer),
 }
 
-fn load_recognizer(dir: &Path, engine: AsrEngine, options: moss_voice_local_proto::AsrDecodeOptions) -> Result<Recognizer, String> {
-    if options.hotwords.len() > 64 || options.hotwords.iter().any(|word| word.chars().count() > 32 || word.chars().any(char::is_control)) {
+fn load_recognizer(
+    dir: &Path,
+    engine: AsrEngine,
+    options: moss_voice_local_proto::AsrDecodeOptions,
+) -> Result<Recognizer, String> {
+    if options.hotwords.len() > 64
+        || options
+            .hotwords
+            .iter()
+            .any(|word| word.chars().count() > 32 || word.chars().any(char::is_control))
+    {
         return Err("热词超过限制或包含控制字符".into());
     }
     match engine {
@@ -254,7 +303,9 @@ fn load_recognizer(dir: &Path, engine: AsrEngine, options: moss_voice_local_prot
             config.model_config.provider = Some("cpu".into());
             config.model_config.num_threads = 2;
             config.model_config.debug = false;
-            OfflineRecognizer::create(&config).map(Recognizer::Offline).ok_or_else(|| "SenseVoice 模型加载失败".to_owned())
+            OfflineRecognizer::create(&config)
+                .map(Recognizer::Offline)
+                .ok_or_else(|| "SenseVoice 模型加载失败".to_owned())
         }
         AsrEngine::StreamingTransducer => {
             let mut config = OnlineRecognizerConfig::default();
@@ -267,16 +318,28 @@ fn load_recognizer(dir: &Path, engine: AsrEngine, options: moss_voice_local_prot
             config.model_config.provider = Some("cpu".into());
             config.model_config.num_threads = 2;
             config.model_config.debug = false;
-            config.decoding_method = Some(if options.beam_search { "modified_beam_search" } else { "greedy_search" }.into());
+            config.decoding_method = Some(
+                if options.beam_search {
+                    "modified_beam_search"
+                } else {
+                    "greedy_search"
+                }
+                .into(),
+            );
             config.max_active_paths = 4;
             config.hotwords_score = 1.5;
             config.model_config.modeling_unit = Some("cjkchar".into());
             if options.beam_search && !options.hotwords.is_empty() {
-                let tokens = std::fs::read_to_string(dir.join("tokens.txt")).map_err(|_| "无法读取识别词表".to_owned())?;
+                let tokens = std::fs::read_to_string(dir.join("tokens.txt"))
+                    .map_err(|_| "无法读取识别词表".to_owned())?;
                 let buffer = moss_voice_local_proto::cjk_hotwords(&options.hotwords, &tokens);
-                if !buffer.is_empty() { config.hotwords_buf = Some(buffer); }
+                if !buffer.is_empty() {
+                    config.hotwords_buf = Some(buffer);
+                }
             }
-            OnlineRecognizer::create(&config).map(Recognizer::Online).ok_or_else(|| "流式识别模型加载失败".to_owned())
+            OnlineRecognizer::create(&config)
+                .map(Recognizer::Online)
+                .ok_or_else(|| "流式识别模型加载失败".to_owned())
         }
     }
 }
@@ -290,10 +353,16 @@ fn decode_ready(recognizer: &OnlineRecognizer, stream: &OnlineStream) {
 
 /// 说完：补静音、结束输入、解码余下部分并取文字。
 fn finish_online(recognizer: &OnlineRecognizer, stream: &OnlineStream) -> String {
-    stream.accept_waveform(16_000, &vec![0.0; (16_000.0 * STREAM_TAIL_SECONDS) as usize]);
+    stream.accept_waveform(
+        16_000,
+        &vec![0.0; (16_000.0 * STREAM_TAIL_SECONDS) as usize],
+    );
     stream.input_finished();
     decode_ready(recognizer, stream);
-    recognizer.get_result(stream).map(|result| result.text.trim().to_owned()).unwrap_or_default()
+    recognizer
+        .get_result(stream)
+        .map(|result| result.text.trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
@@ -301,14 +370,26 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
     let mut streams: HashMap<u64, OnlineStream> = HashMap::new();
     for (id, op, payload) in jobs {
         match op {
-            Op::LoadAsr { dir, engine, options } => {
+            Op::LoadAsr {
+                dir,
+                engine,
+                options,
+            } => {
                 // 先释放旧模型上的流，再换模型
                 streams.clear();
                 match load_recognizer(Path::new(&dir), engine, options) {
                     Ok(created) => {
                         recognizer = Some(created);
                         loaded.asr.store(true, Ordering::SeqCst);
-                        send(&out, id, Reply::Loaded { sample_rate: None, speakers: None }, &[]);
+                        send(
+                            &out,
+                            id,
+                            Reply::Loaded {
+                                sample_rate: None,
+                                speakers: None,
+                            },
+                            &[],
+                        );
                     }
                     Err(message) => error(&out, id, message),
                 }
@@ -324,7 +405,10 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         let stream = recognizer.create_stream();
                         stream.accept_waveform(sample_rate as i32, &samples);
                         recognizer.decode(&stream);
-                        stream.get_result().map(|result| result.text.trim().to_owned()).unwrap_or_default()
+                        stream
+                            .get_result()
+                            .map(|result| result.text.trim().to_owned())
+                            .unwrap_or_default()
                     }
                     Some(Recognizer::Online(recognizer)) => {
                         let stream = recognizer.create_stream();
@@ -346,7 +430,10 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 (Some(Recognizer::Online(recognizer)), Some(online)) => {
                     online.accept_waveform(16_000, &to_f32(&bytes_to_pcm(&payload)));
                     decode_ready(recognizer, online);
-                    let text = recognizer.get_result(online).map(|result| result.text.trim().to_owned()).unwrap_or_default();
+                    let text = recognizer
+                        .get_result(online)
+                        .map(|result| result.text.trim().to_owned())
+                        .unwrap_or_default();
                     send(&out, id, Reply::Text { text }, &[]);
                 }
                 _ => error(&out, id, "识别流不存在"),
@@ -372,7 +459,11 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
 fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String> {
     let model = match engine {
         TtsEngine::Kokoro => {
-            let lexicon = format!("{},{}", require(&dir.join("lexicon-us-en.txt"))?, require(&dir.join("lexicon-zh.txt"))?);
+            let lexicon = format!(
+                "{},{}",
+                require(&dir.join("lexicon-us-en.txt"))?,
+                require(&dir.join("lexicon-zh.txt"))?
+            );
             OfflineTtsModelConfig {
                 kokoro: OfflineTtsKokoroModelConfig {
                     model: Some(first_of(dir, &["model.onnx", "model.int8.onnx"])?),
@@ -392,11 +483,17 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
         TtsEngine::Matcha => OfflineTtsModelConfig {
             matcha: OfflineTtsMatchaModelConfig {
                 acoustic_model: Some(first_of(dir, &["model-steps-3.onnx", "model.onnx"])?),
-                vocoder: Some(first_of(dir, &["vocos-16khz-univ.onnx", "vocos-22khz-univ.onnx"])?),
+                vocoder: Some(first_of(
+                    dir,
+                    &["vocos-16khz-univ.onnx", "vocos-22khz-univ.onnx"],
+                )?),
                 lexicon: Some(require(&dir.join("lexicon.txt"))?),
                 tokens: Some(require(&dir.join("tokens.txt"))?),
                 data_dir: Some(require(&dir.join("espeak-ng-data"))?),
-                dict_dir: dir.join("dict").is_dir().then(|| native_path_string(&dir.join("dict"))),
+                dict_dir: dir
+                    .join("dict")
+                    .is_dir()
+                    .then(|| native_path_string(&dir.join("dict"))),
                 ..Default::default()
             },
             num_threads: 2,
@@ -404,7 +501,11 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
             ..Default::default()
         },
     };
-    Ok(OfflineTtsConfig { model, rule_fsts: rule_fsts(dir), ..Default::default() })
+    Ok(OfflineTtsConfig {
+        model,
+        rule_fsts: rule_fsts(dir),
+        ..Default::default()
+    })
 }
 
 fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
@@ -425,49 +526,110 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         let speakers = created.num_speakers().max(0);
                         tts = Some((created, speakers));
                         loaded.tts.store(true, Ordering::SeqCst);
-                        send(&out, id, Reply::Loaded { sample_rate: Some(sample_rate), speakers: Some(speakers as u32) }, &[]);
+                        send(
+                            &out,
+                            id,
+                            Reply::Loaded {
+                                sample_rate: Some(sample_rate),
+                                speakers: Some(speakers as u32),
+                            },
+                            &[],
+                        );
                     }
                     Err(message) => error(&out, id, message),
                 }
             }
-            Op::Synthesize { text, speaker, speed } => {
+            Op::Synthesize {
+                text,
+                speaker,
+                speed,
+            } => {
                 let Some((tts, speakers)) = tts.as_ref() else {
                     error(&out, id, "合成模型未加载");
                     continue;
                 };
                 // 单音色模型忽略音色编号
-                let sid = if *speakers > 1 { speaker.clamp(0, speakers - 1) } else { 0 };
-                let config = GenerationConfig { sid, speed: speed.clamp(0.25, 4.0), ..Default::default() };
+                let sid = if *speakers > 1 {
+                    speaker.clamp(0, speakers - 1)
+                } else {
+                    0
+                };
+                let config = GenerationConfig {
+                    sid,
+                    speed: speed.clamp(0.25, 4.0),
+                    ..Default::default()
+                };
                 match tts.generate_with_config(&text, &config, None::<fn(&[f32], f32) -> bool>) {
                     Some(audio) => {
                         let pcm = to_i16(audio.samples());
-                        send(&out, id, Reply::Audio { sample_rate: audio.sample_rate().max(0) as u32 }, &pcm_to_bytes(&pcm));
+                        send(
+                            &out,
+                            id,
+                            Reply::Audio {
+                                sample_rate: audio.sample_rate().max(0) as u32,
+                            },
+                            &pcm_to_bytes(&pcm),
+                        );
                     }
                     None => error(&out, id, "合成失败"),
                 }
             }
-            Op::SynthesizeStream { text, speaker, speed } => {
+            Op::SynthesizeStream {
+                text,
+                speaker,
+                speed,
+            } => {
                 let Some((tts, speakers)) = tts.as_ref() else {
                     error(&out, id, "合成模型未加载");
                     continue;
                 };
-                let sid = if *speakers > 1 { speaker.clamp(0, speakers - 1) } else { 0 };
-                let config = GenerationConfig { sid, speed: speed.clamp(0.25, 4.0), ..Default::default() };
+                let sid = if *speakers > 1 {
+                    speaker.clamp(0, speakers - 1)
+                } else {
+                    0
+                };
+                let config = GenerationConfig {
+                    sid,
+                    speed: speed.clamp(0.25, 4.0),
+                    ..Default::default()
+                };
                 let mut failed = false;
                 for segment in moss_voice_local_proto::synthesis_segments(&text) {
-                    match tts.generate_with_config(&segment, &config, None::<fn(&[f32], f32) -> bool>) {
-                        Some(audio) => send(&out, id, Reply::AudioChunk { sample_rate: audio.sample_rate().max(0) as u32 }, &pcm_to_bytes(&to_i16(audio.samples()))),
-                        None => { error(&out, id, "分段合成失败"); failed = true; break; }
+                    match tts.generate_with_config(
+                        &segment,
+                        &config,
+                        None::<fn(&[f32], f32) -> bool>,
+                    ) {
+                        Some(audio) => send(
+                            &out,
+                            id,
+                            Reply::AudioChunk {
+                                sample_rate: audio.sample_rate().max(0) as u32,
+                            },
+                            &pcm_to_bytes(&to_i16(audio.samples())),
+                        ),
+                        None => {
+                            error(&out, id, "分段合成失败");
+                            failed = true;
+                            break;
+                        }
                     }
                 }
-                if !failed { send(&out, id, Reply::Done, &[]); }
+                if !failed {
+                    send(&out, id, Reply::Done, &[]);
+                }
             }
             _ => error(&out, id, "合成线程收到不支持的请求"),
         }
     }
 }
 
-fn spawn_worker(name: &str, worker: fn(Receiver<Job>, Out, Arc<Loaded>), out: &Out, loaded: &Arc<Loaded>) -> Sender<Job> {
+fn spawn_worker(
+    name: &str,
+    worker: fn(Receiver<Job>, Out, Arc<Loaded>),
+    out: &Out,
+    loaded: &Arc<Loaded>,
+) -> Sender<Job> {
     let (sender, receiver) = channel();
     let (out, loaded) = (out.clone(), loaded.clone());
     thread::Builder::new()
@@ -477,14 +639,18 @@ fn spawn_worker(name: &str, worker: fn(Receiver<Job>, Out, Arc<Loaded>), out: &O
     sender
 }
 
-fn speaker_worker(jobs:Receiver<Job>,out:Out){
+fn speaker_worker(jobs: Receiver<Job>, out: Out) {
     // Keep the verified file open for the extractor lifetime. On Windows the
     // share mode forbids writes/deletion while native ORT opens the same file.
-    let mut extractor:Option<(SpeakerEmbeddingExtractor,std::fs::File,Vec<std::fs::File>)>=None;
-    for (id,op,payload) in jobs {
+    let mut extractor: Option<(SpeakerEmbeddingExtractor, std::fs::File, Vec<std::fs::File>)> =
+        None;
+    for (id, op, payload) in jobs {
         match op {
-            Op::LoadSpeaker{model_id,models_root}=>{
-                extractor=None;
+            Op::LoadSpeaker {
+                model_id,
+                models_root,
+            } => {
+                extractor = None;
                 let result=(||->Result<(SpeakerEmbeddingExtractor,std::fs::File,Vec<std::fs::File>),String>{
                     if model_id!=SPEAKER_MODEL_ID || !payload.is_empty(){return Err("声纹模型编号无效".into());}
                     let root=std::fs::canonicalize(&models_root).map_err(|_|"声纹模型目录不可读")?;
@@ -553,30 +719,75 @@ fn speaker_worker(jobs:Receiver<Job>,out:Out){
                     Ok((created,file,directory_guards))
                 })();
                 match result {
-                    Ok(created)=>{extractor=Some(created);send(&out,id,Reply::SpeakerLoaded{model_id:SPEAKER_MODEL_ID.into(),sample_rate:SPEAKER_SAMPLE_RATE,dimension:SPEAKER_DIMENSION},&[]);},
-                    Err(message)=>error(&out,id,message),
+                    Ok(created) => {
+                        extractor = Some(created);
+                        send(
+                            &out,
+                            id,
+                            Reply::SpeakerLoaded {
+                                model_id: SPEAKER_MODEL_ID.into(),
+                                sample_rate: SPEAKER_SAMPLE_RATE,
+                                dimension: SPEAKER_DIMENSION,
+                            },
+                            &[],
+                        );
+                    }
+                    Err(message) => error(&out, id, message),
                 }
-            },
-            Op::SpeakerEmbed{model_id,sample_rate,utterance_generation}=>{
-                if model_id!=SPEAKER_MODEL_ID || !valid_speaker_pcm(sample_rate,payload.len()){error(&out,id,"声纹采样必须为2～10秒16kHz单声道PCM");continue;}
-                let Some((extractor,_verified_file,_directories))=extractor.as_ref() else{error(&out,id,"声纹模型未加载");continue;};
-                let Some(stream)=extractor.create_stream() else{error(&out,id,"声纹流创建失败");continue;};
-                stream.accept_waveform(sample_rate as i32,&to_f32(&bytes_to_pcm(&payload)));
+            }
+            Op::SpeakerEmbed {
+                model_id,
+                sample_rate,
+                utterance_generation,
+            } => {
+                if model_id != SPEAKER_MODEL_ID || !valid_speaker_pcm(sample_rate, payload.len()) {
+                    error(&out, id, "声纹采样必须为2～10秒16kHz单声道PCM");
+                    continue;
+                }
+                let Some((extractor, _verified_file, _directories)) = extractor.as_ref() else {
+                    error(&out, id, "声纹模型未加载");
+                    continue;
+                };
+                let Some(stream) = extractor.create_stream() else {
+                    error(&out, id, "声纹流创建失败");
+                    continue;
+                };
+                stream.accept_waveform(sample_rate as i32, &to_f32(&bytes_to_pcm(&payload)));
                 stream.input_finished();
-                if !extractor.is_ready(&stream){error(&out,id,"声纹片段不足");continue;}
-                match extractor.compute(&stream).and_then(|v|embedding_to_bytes(&v).ok()) {
-                    Some(bytes)=>send(&out,id,Reply::Embedding{model_id:SPEAKER_MODEL_ID.into(),sample_rate,dimension:SPEAKER_DIMENSION,utterance_generation,format:"f32le".into()},&bytes),
-                    None=>error(&out,id,"声纹向量无效"),
+                if !extractor.is_ready(&stream) {
+                    error(&out, id, "声纹片段不足");
+                    continue;
                 }
-            },
-            _=>error(&out,id,"声纹线程收到不支持的请求"),
+                match extractor
+                    .compute(&stream)
+                    .and_then(|v| embedding_to_bytes(&v).ok())
+                {
+                    Some(bytes) => send(
+                        &out,
+                        id,
+                        Reply::Embedding {
+                            model_id: SPEAKER_MODEL_ID.into(),
+                            sample_rate,
+                            dimension: SPEAKER_DIMENSION,
+                            utterance_generation,
+                            format: "f32le".into(),
+                        },
+                        &bytes,
+                    ),
+                    None => error(&out, id, "声纹向量无效"),
+                }
+            }
+            _ => error(&out, id, "声纹线程收到不支持的请求"),
         }
     }
 }
 
 fn main() {
     if std::env::args().any(|arg| arg == "--version") {
-        println!("moss-voice-local {} (protocol {PROTOCOL_VERSION}, GPL-3.0-or-later)", env!("CARGO_PKG_VERSION"));
+        println!(
+            "moss-voice-local {} (protocol {PROTOCOL_VERSION}, GPL-3.0-or-later)",
+            env!("CARGO_PKG_VERSION")
+        );
         return;
     }
     let out: Out = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
@@ -584,9 +795,12 @@ fn main() {
     let vad = spawn_worker("vad", vad_worker, &out, &loaded);
     let asr = spawn_worker("asr", asr_worker, &out, &loaded);
     let tts = spawn_worker("tts", tts_worker, &out, &loaded);
-    let (speaker,speaker_jobs)=std::sync::mpsc::sync_channel::<Job>(2);
-    let speaker_out=out.clone();
-    thread::Builder::new().name("speaker".into()).spawn(move||speaker_worker(speaker_jobs,speaker_out)).expect("创建声纹线程失败");
+    let (speaker, speaker_jobs) = std::sync::mpsc::sync_channel::<Job>(2);
+    let speaker_out = out.clone();
+    thread::Builder::new()
+        .name("speaker".into())
+        .spawn(move || speaker_worker(speaker_jobs, speaker_out))
+        .expect("创建声纹线程失败");
     let mut input = BufReader::new(io::stdin());
     loop {
         let (request, payload): (Request, Vec<u8>) = match read_frame(&mut input) {
@@ -595,11 +809,16 @@ fn main() {
             Ok(None) | Err(_) => break,
         };
         let Request { id, op } = request;
-        if matches!(&op,Op::LoadSpeaker{..}|Op::SpeakerEmbed{..}) {
-            if let Op::SpeakerEmbed{sample_rate,..}=&op {
-                if !valid_speaker_pcm(*sample_rate,payload.len()){error(&out,id,"声纹采样格式无效");continue;}
+        if matches!(&op, Op::LoadSpeaker { .. } | Op::SpeakerEmbed { .. }) {
+            if let Op::SpeakerEmbed { sample_rate, .. } = &op {
+                if !valid_speaker_pcm(*sample_rate, payload.len()) {
+                    error(&out, id, "声纹采样格式无效");
+                    continue;
+                }
             }
-            if speaker.try_send((id,op,payload)).is_err(){error(&out,id,"声纹队列已满或退出");}
+            if speaker.try_send((id, op, payload)).is_err() {
+                error(&out, id, "声纹队列已满或退出");
+            }
             continue;
         }
         let target = match &op {
@@ -614,7 +833,9 @@ fn main() {
                 send(&out, id, reply, &[]);
                 continue;
             }
-            Op::LoadVad { .. } | Op::VadOpen { .. } | Op::VadFeed { .. } | Op::VadClose { .. } => &vad,
+            Op::LoadVad { .. } | Op::VadOpen { .. } | Op::VadFeed { .. } | Op::VadClose { .. } => {
+                &vad
+            }
             Op::LoadAsr { .. }
             | Op::Transcribe { .. }
             | Op::AsrOpen { .. }
@@ -622,7 +843,9 @@ fn main() {
             | Op::AsrFinish { .. }
             | Op::AsrClose { .. } => &asr,
             Op::LoadTts { .. } | Op::Synthesize { .. } | Op::SynthesizeStream { .. } => &tts,
-            Op::LoadSpeaker{..}|Op::SpeakerEmbed{..}=>unreachable!("speaker routed independently"),
+            Op::LoadSpeaker { .. } | Op::SpeakerEmbed { .. } => {
+                unreachable!("speaker routed independently")
+            }
         };
         if target.send((id, op, payload)).is_err() {
             error(&out, id, "工作线程已退出");
@@ -637,7 +860,9 @@ mod tests {
     #[test]
     fn strip_windows_verbatim_prefix_handles_drive_unc_and_plain_paths() {
         assert_eq!(
-            strip_windows_verbatim_prefix(r"\\?\C:\Users\demo\AppData\Roaming\moss\models\kokoro-multi-lang-v1_0\espeak-ng-data"),
+            strip_windows_verbatim_prefix(
+                r"\\?\C:\Users\demo\AppData\Roaming\moss\models\kokoro-multi-lang-v1_0\espeak-ng-data"
+            ),
             r"C:\Users\demo\AppData\Roaming\moss\models\kokoro-multi-lang-v1_0\espeak-ng-data"
         );
         assert_eq!(
@@ -669,7 +894,14 @@ mod tests {
         let kokoro_dir = temp.join("kokoro");
         std::fs::create_dir_all(kokoro_dir.join("espeak-ng-data")).unwrap();
         std::fs::create_dir_all(kokoro_dir.join("dict")).unwrap();
-        for file in ["model.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt", "phone-zh.fst"] {
+        for file in [
+            "model.onnx",
+            "voices.bin",
+            "tokens.txt",
+            "lexicon-us-en.txt",
+            "lexicon-zh.txt",
+            "phone-zh.fst",
+        ] {
             std::fs::write(kokoro_dir.join(file), b"stub").unwrap();
         }
         let canonical = std::fs::canonicalize(&kokoro_dir).unwrap();
@@ -687,7 +919,10 @@ mod tests {
             cfg.rule_fsts.as_deref(),
         ] {
             let value = field.expect("populated kokoro path");
-            assert!(!value.contains(r"\\?\"), "unexpected verbatim prefix in {value}");
+            assert!(
+                !value.contains(r"\\?\"),
+                "unexpected verbatim prefix in {value}"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&temp);

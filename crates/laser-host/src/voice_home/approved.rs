@@ -49,7 +49,9 @@ impl ExpectedObservation {
                     && attributes
                         .get("temperature")
                         .and_then(serde_json::Value::as_f64)
-                        .is_some_and(|actual| actual.is_finite() && (actual - *target).abs() <= 0.05)
+                        .is_some_and(|actual| {
+                            actual.is_finite() && (actual - *target).abs() <= 0.05
+                        })
             }
             Self::PlayingMedia(expected_id) => {
                 state == "playing"
@@ -509,7 +511,6 @@ mod tests {
         assert_eq!(fake.inner.sends, 1, "a revoked request is never repeated");
     }
 
-
     struct RevokeAtSimulatedSubmit {
         sends: u32,
         read_count: u32,
@@ -534,63 +535,124 @@ mod tests {
         let (service, catalog, plan, fp, id, permit) = fixture();
         let digest = service.get(&id).unwrap().digest;
         service.approve(&id, &digest, &digest).unwrap();
-        assert_eq!(service.consume(&id, &digest).unwrap_err(), ApprovalError::Mismatch,
-            "general laser approval executor cannot consume HomeControl");
+        assert_eq!(
+            service.consume(&id, &digest).unwrap_err(),
+            ApprovalError::Mismatch,
+            "general laser approval executor cannot consume HomeControl"
+        );
         let mut fake = RevokeAtSimulatedSubmit {
-            sends: 0, read_count: 0, permit: permit.clone(),
+            sends: 0,
+            read_count: 0,
+            permit: permit.clone(),
         };
         assert_eq!(
-            dispatch_approved(&service,&id,"nv15-device",&fp,
-                &catalog,&plan,&permit,&mut fake).unwrap(),
+            dispatch_approved(
+                &service,
+                &id,
+                "nv15-device",
+                &fp,
+                &catalog,
+                &plan,
+                &permit,
+                &mut fake
+            )
+            .unwrap(),
             HomeDispatchResult::ResultUnknown
         );
-        assert_eq!(fake.sends,1);
-        assert_eq!(fake.read_count,0,"do not trust observation after revocation");
+        assert_eq!(fake.sends, 1);
+        assert_eq!(
+            fake.read_count, 0,
+            "do not trust observation after revocation"
+        );
         let saved = service.get(&id).unwrap();
         assert_eq!(saved.status, ApprovalStatus::Failed);
         let outcome = saved.outcome.unwrap();
-        assert_eq!(outcome.phase,Some(ApprovalPhase::Unknown));
-        assert_eq!(outcome.error_code.as_deref(),Some("result_unknown"));
-        assert!(service.record_outcome(&id,ApprovalOutcome {
-            success:true,phase:Some(ApprovalPhase::Completed),
-            message:"forged stale confirmation".into(),..Default::default()
-        }).is_err(),"late success may not overwrite unknown");
-        assert_eq!(service.consume_home_control(&id,&digest,&fp,"nv15-device",&permit)
-            .unwrap_err(),ApprovalError::Consumed);
+        assert_eq!(outcome.phase, Some(ApprovalPhase::Unknown));
+        assert_eq!(outcome.error_code.as_deref(), Some("result_unknown"));
+        assert!(
+            service
+                .record_outcome(
+                    &id,
+                    ApprovalOutcome {
+                        success: true,
+                        phase: Some(ApprovalPhase::Completed),
+                        message: "forged stale confirmation".into(),
+                        ..Default::default()
+                    }
+                )
+                .is_err(),
+            "late success may not overwrite unknown"
+        );
+        assert_eq!(
+            service
+                .consume_home_control(&id, &digest, &fp, "nv15-device", &permit)
+                .unwrap_err(),
+            ApprovalError::Consumed
+        );
     }
 
-    struct StaleStateReplies { sends:u32, reads:u32 }
+    struct StaleStateReplies {
+        sends: u32,
+        reads: u32,
+    }
     impl HomeControlTransport for StaleStateReplies {
         fn submit_once(&mut self, _: &str, _: &Value) -> Result<(), ()> {
-            self.sends+=1;Ok(())
+            self.sends += 1;
+            Ok(())
         }
         fn read_target_state(&mut self, _: &str, budget: Duration) -> Result<String, ()> {
             assert!(!budget.is_zero() && budget <= Duration::from_millis(900));
-            self.reads+=1;
+            self.reads += 1;
             Ok("off".into())
         }
     }
     #[test]
     fn nv15_independent_approval_mock_accepted_not_confirmed_durable_unknown() {
-        let (service,catalog,plan,fp,id,permit)=fixture();
-        let digest=service.get(&id).unwrap().digest;
-        service.approve(&id,&digest,&digest).unwrap();
-        let mut fake=StaleStateReplies{sends:0,reads:0};
-        assert_eq!(dispatch_approved(&service,&id,"nv15-device",&fp,
-            &catalog,&plan,&permit,&mut fake).unwrap(),
-            HomeDispatchResult::AcceptedUnconfirmed);
-        assert_eq!((fake.sends,fake.reads),(1,3));
-        let saved=service.get(&id).unwrap();
-        assert_eq!(saved.status,ApprovalStatus::Failed);
-        let outcome=saved.outcome.unwrap();
-        assert_eq!(outcome.phase,Some(ApprovalPhase::Unknown));
-        assert_eq!(outcome.error_code.as_deref(),Some("home_state_unconfirmed"));
-        assert_eq!(service.consume(&id,&digest).unwrap_err(),ApprovalError::Mismatch);
-        assert!(service.record_outcome(&id,ApprovalOutcome {
-            success:true,phase:Some(ApprovalPhase::Completed),
-            message:"fabricated late GET".into(),..Default::default()
-        }).is_err());
-        assert_eq!(fake.sends,1,"no repeated control POST");
+        let (service, catalog, plan, fp, id, permit) = fixture();
+        let digest = service.get(&id).unwrap().digest;
+        service.approve(&id, &digest, &digest).unwrap();
+        let mut fake = StaleStateReplies { sends: 0, reads: 0 };
+        assert_eq!(
+            dispatch_approved(
+                &service,
+                &id,
+                "nv15-device",
+                &fp,
+                &catalog,
+                &plan,
+                &permit,
+                &mut fake
+            )
+            .unwrap(),
+            HomeDispatchResult::AcceptedUnconfirmed
+        );
+        assert_eq!((fake.sends, fake.reads), (1, 3));
+        let saved = service.get(&id).unwrap();
+        assert_eq!(saved.status, ApprovalStatus::Failed);
+        let outcome = saved.outcome.unwrap();
+        assert_eq!(outcome.phase, Some(ApprovalPhase::Unknown));
+        assert_eq!(
+            outcome.error_code.as_deref(),
+            Some("home_state_unconfirmed")
+        );
+        assert_eq!(
+            service.consume(&id, &digest).unwrap_err(),
+            ApprovalError::Mismatch
+        );
+        assert!(
+            service
+                .record_outcome(
+                    &id,
+                    ApprovalOutcome {
+                        success: true,
+                        phase: Some(ApprovalPhase::Completed),
+                        message: "fabricated late GET".into(),
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(fake.sends, 1, "no repeated control POST");
     }
 
     #[test]
@@ -812,8 +874,14 @@ mod tests {
             expected_path: "/api/services/media_player/play_media",
             expected_entity: "media_player.room",
             replies: vec![
-                ("buffering".into(), json!({"media_content_id": "library_demo_song"})),
-                ("playing".into(), json!({"media_content_id": "library_demo_song"})),
+                (
+                    "buffering".into(),
+                    json!({"media_content_id": "library_demo_song"}),
+                ),
+                (
+                    "playing".into(),
+                    json!({"media_content_id": "library_demo_song"}),
+                ),
             ],
             sends: 0,
             reads: 0,

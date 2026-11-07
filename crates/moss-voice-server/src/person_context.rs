@@ -161,7 +161,12 @@ pub fn calibrate(
         return Err("至少需要两个已登记的人");
     }
     for template in templates {
-        if samples.iter().filter(|s| s.speaker_id == template.id).count() < CALIBRATION_MIN_CLIPS {
+        if samples
+            .iter()
+            .filter(|s| s.speaker_id == template.id)
+            .count()
+            < CALIBRATION_MIN_CLIPS
+        {
             return Err("每个已登记的人都要录满三段测试音");
         }
     }
@@ -170,7 +175,8 @@ pub fn calibrate(
             return None;
         }
         let norm = v.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
-        (norm.is_finite() && norm > 1e-8).then(|| v.iter().map(|x| (f64::from(*x) / norm) as f32).collect())
+        (norm.is_finite() && norm > 1e-8)
+            .then(|| v.iter().map(|x| (f64::from(*x) / norm) as f32).collect())
     };
     let templates = templates
         .iter()
@@ -178,17 +184,35 @@ pub fn calibrate(
         .collect::<Option<Vec<_>>>()
         .ok_or("声纹模板无效")?;
     let mut trials = Vec::new();
-    for sample in samples.iter().filter(|s| templates.iter().any(|(id, _)| *id == s.speaker_id)) {
+    for sample in samples
+        .iter()
+        .filter(|s| templates.iter().any(|(id, _)| *id == s.speaker_id))
+    {
         let vector = unit(&sample.embedding).ok_or("测试音向量无效")?;
         let scores = templates
             .iter()
-            .map(|(id, e)| (*id, vector.iter().zip(e).map(|(a, b)| a * b).sum::<f32>().clamp(-1., 1.)))
+            .map(|(id, e)| {
+                (
+                    *id,
+                    vector
+                        .iter()
+                        .zip(e)
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>()
+                        .clamp(-1., 1.),
+                )
+            })
             .collect::<Vec<_>>();
         trials.push((sample.speaker_id.as_str(), scores));
     }
     let max_impostor = trials
         .iter()
-        .flat_map(|(own, scores)| scores.iter().filter(move |(id, _)| id != own).map(|(_, s)| *s))
+        .flat_map(|(own, scores)| {
+            scores
+                .iter()
+                .filter(move |(id, _)| id != own)
+                .map(|(_, s)| *s)
+        })
         .fold(-1.0_f32, f32::max);
     let threshold = (max_impostor + CALIBRATION_GUARD).max(CALIBRATION_MIN_THRESHOLD);
     if threshold > CALIBRATION_MAX_THRESHOLD {
@@ -201,7 +225,11 @@ pub fn calibrate(
         let (top_id, top) = ranked[0];
         let second = ranked.get(1).map_or(-1., |s| s.1);
         if top >= threshold && top - second >= CALIBRATION_MARGIN {
-            if top_id == *own { accepted += 1 } else { false_accepts += 1 }
+            if top_id == *own {
+                accepted += 1
+            } else {
+                false_accepts += 1
+            }
         }
     }
     let report = CalibrationReport {

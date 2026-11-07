@@ -51,7 +51,12 @@ impl Default for AudioParams {
 
 impl AudioParams {
     pub fn opus(sample_rate: u32, frame_duration: u32) -> Self {
-        Self { format: "opus".into(), sample_rate, channels: 1, frame_duration }
+        Self {
+            format: "opus".into(),
+            sample_rate,
+            channels: 1,
+            frame_duration,
+        }
     }
 }
 
@@ -79,17 +84,35 @@ pub enum ListenState {
 /// 设备发来的消息。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
-    Hello { version: u32, transport: String, audio_params: AudioParams, features: Features },
-    Listen { state: ListenState, mode: Option<String>, text: Option<String> },
-    Abort { reason: Option<String> },
+    Hello {
+        version: u32,
+        transport: String,
+        audio_params: AudioParams,
+        features: Features,
+    },
+    Listen {
+        state: ListenState,
+        mode: Option<String>,
+        text: Option<String>,
+    },
+    Abort {
+        reason: Option<String>,
+    },
     /// 设备 MCP 的 JSON-RPC 负载
-    Mcp { payload: Value },
+    Mcp {
+        payload: Value,
+    },
     /// 旧版 IoT 描述或状态
-    Iot { body: Value },
+    Iot {
+        body: Value,
+    },
     Ping,
     Goodbye,
     /// 不认识的类型，原样保留
-    Other { kind: String, body: Value },
+    Other {
+        kind: String,
+        body: Value,
+    },
 }
 
 fn text_field(value: &Value, key: &str) -> Option<String> {
@@ -99,8 +122,13 @@ fn text_field(value: &Value, key: &str) -> Option<String> {
 impl ClientMessage {
     /// 解析一条文本消息。只有不是 JSON 对象、缺少 `type` 或已知类型的必需字段不合法时才报错。
     pub fn parse(text: &str) -> Result<Self, String> {
-        let value: Value = serde_json::from_str(text).map_err(|_| "消息不是合法的 JSON".to_owned())?;
-        let kind = value.get("type").and_then(Value::as_str).ok_or("消息缺少 type 字段")?.to_owned();
+        let value: Value =
+            serde_json::from_str(text).map_err(|_| "消息不是合法的 JSON".to_owned())?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or("消息缺少 type 字段")?
+            .to_owned();
         Ok(match kind.as_str() {
             "hello" => Self::Hello {
                 version: value.get("version").and_then(Value::as_u64).unwrap_or(1) as u32,
@@ -127,10 +155,18 @@ impl ClientMessage {
                     Some("stop") => ListenState::Stop,
                     _ => return Err("listen 的 state 不合法".into()),
                 };
-                Self::Listen { state, mode: text_field(&value, "mode"), text: text_field(&value, "text") }
+                Self::Listen {
+                    state,
+                    mode: text_field(&value, "mode"),
+                    text: text_field(&value, "text"),
+                }
             }
-            "abort" => Self::Abort { reason: text_field(&value, "reason") },
-            "mcp" => Self::Mcp { payload: value.get("payload").cloned().unwrap_or(Value::Null) },
+            "abort" => Self::Abort {
+                reason: text_field(&value, "reason"),
+            },
+            "mcp" => Self::Mcp {
+                payload: value.get("payload").cloned().unwrap_or(Value::Null),
+            },
             "iot" => Self::Iot { body: value },
             "ping" => Self::Ping,
             "goodbye" => Self::Goodbye,
@@ -151,9 +187,17 @@ pub enum TtsState {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    Hello { version: u32, transport: String, session_id: String, audio_params: AudioParams },
+    Hello {
+        version: u32,
+        transport: String,
+        session_id: String,
+        audio_params: AudioParams,
+    },
     /// 识别结果，设备显示为用户说的话
-    Stt { session_id: String, text: String },
+    Stt {
+        session_id: String,
+        text: String,
+    },
     /// 合成状态；`sentence_start` 带文字，设备显示为助手说的话
     Tts {
         session_id: String,
@@ -162,11 +206,22 @@ pub enum ServerMessage {
         text: Option<String>,
     },
     /// 表情
-    Llm { session_id: String, text: String, emotion: String },
+    Llm {
+        session_id: String,
+        text: String,
+        emotion: String,
+    },
     /// 设备弹出提示（状态、文字、表情）
-    Alert { status: String, message: String, emotion: String },
+    Alert {
+        status: String,
+        message: String,
+        emotion: String,
+    },
     /// 设备 MCP 的 JSON-RPC 负载
-    Mcp { session_id: String, payload: Value },
+    Mcp {
+        session_id: String,
+        payload: Value,
+    },
     Pong,
 }
 
@@ -185,7 +240,12 @@ mod tests {
         // 固件 GetHelloMessage 的实际格式
         let text = r#"{"type":"hello","version":1,"features":{"mcp":true},"transport":"websocket","audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}}"#;
         match ClientMessage::parse(text).unwrap() {
-            ClientMessage::Hello { version, transport, audio_params, features } => {
+            ClientMessage::Hello {
+                version,
+                transport,
+                audio_params,
+                features,
+            } => {
                 assert_eq!(version, 1);
                 assert_eq!(transport, "websocket");
                 assert_eq!(audio_params, AudioParams::opus(16_000, 60));
@@ -199,18 +259,36 @@ mod tests {
     #[test]
     fn listen_abort_and_unknown_types() {
         assert_eq!(
-            ClientMessage::parse(r#"{"session_id":"s","type":"listen","state":"start","mode":"auto"}"#).unwrap(),
-            ClientMessage::Listen { state: ListenState::Start, mode: Some("auto".into()), text: None }
+            ClientMessage::parse(
+                r#"{"session_id":"s","type":"listen","state":"start","mode":"auto"}"#
+            )
+            .unwrap(),
+            ClientMessage::Listen {
+                state: ListenState::Start,
+                mode: Some("auto".into()),
+                text: None
+            }
         );
         assert_eq!(
-            ClientMessage::parse(r#"{"type":"listen","state":"detect","text":"你好小智"}"#).unwrap(),
-            ClientMessage::Listen { state: ListenState::Detect, mode: None, text: Some("你好小智".into()) }
+            ClientMessage::parse(r#"{"type":"listen","state":"detect","text":"你好小智"}"#)
+                .unwrap(),
+            ClientMessage::Listen {
+                state: ListenState::Detect,
+                mode: None,
+                text: Some("你好小智".into())
+            }
         );
         assert_eq!(
             ClientMessage::parse(r#"{"type":"abort","reason":"wake_word_detected"}"#).unwrap(),
-            ClientMessage::Abort { reason: Some("wake_word_detected".into()) }
+            ClientMessage::Abort {
+                reason: Some("wake_word_detected".into())
+            }
         );
-        match ClientMessage::parse(r#"{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"result":{}}}"#).unwrap() {
+        match ClientMessage::parse(
+            r#"{"type":"mcp","payload":{"jsonrpc":"2.0","id":1,"result":{}}}"#,
+        )
+        .unwrap()
+        {
             ClientMessage::Mcp { payload } => assert_eq!(payload["id"], 1),
             other => panic!("{other:?}"),
         }
@@ -235,13 +313,25 @@ mod tests {
         assert_eq!(value["type"], "hello");
         assert_eq!(value["transport"], "websocket");
         assert_eq!(value["audio_params"]["sample_rate"], 24_000);
-        let tts = ServerMessage::Tts { session_id: "abc".into(), state: TtsState::SentenceStart, text: Some("你好".into()) };
+        let tts = ServerMessage::Tts {
+            session_id: "abc".into(),
+            state: TtsState::SentenceStart,
+            text: Some("你好".into()),
+        };
         let value: Value = serde_json::from_str(&tts.to_text()).unwrap();
         assert_eq!(value["state"], "sentence_start");
         assert_eq!(value["text"], "你好");
-        let stop = ServerMessage::Tts { session_id: "abc".into(), state: TtsState::Stop, text: None };
+        let stop = ServerMessage::Tts {
+            session_id: "abc".into(),
+            state: TtsState::Stop,
+            text: None,
+        };
         assert!(!stop.to_text().contains("text"));
-        let alert = ServerMessage::Alert { status: "s".into(), message: "m".into(), emotion: "sad".into() };
+        let alert = ServerMessage::Alert {
+            status: "s".into(),
+            message: "m".into(),
+            emotion: "sad".into(),
+        };
         let value: Value = serde_json::from_str(&alert.to_text()).unwrap();
         assert_eq!(value["type"], "alert");
         assert_eq!(value["emotion"], "sad");

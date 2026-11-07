@@ -25,23 +25,51 @@ pub struct OtaInfo {
 }
 
 fn clean(value: Option<String>) -> Option<String> {
-    value.map(|text| text.trim().to_owned()).filter(|text| !text.is_empty() && text.len() <= 128)
+    value
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty() && text.len() <= 128)
 }
 
 impl OtaInfo {
     /// `header` 按名称（小写）取请求头；`body` 为请求正文。
-    pub fn from_request(header: impl Fn(&str) -> Option<String>, body: &str) -> Result<Self, String> {
+    pub fn from_request(
+        header: impl Fn(&str) -> Option<String>,
+        body: &str,
+    ) -> Result<Self, String> {
         let device_id = clean(header("device-id")).ok_or("OTA 请求缺少 Device-Id")?;
         let client_id = clean(header("client-id")).ok_or("OTA 请求缺少 Client-Id")?;
         let json: Value = serde_json::from_str(body).unwrap_or(Value::Null);
         let model = clean(header("device-model"))
-            .or_else(|| clean(json.pointer("/board/type").and_then(Value::as_str).map(str::to_owned)))
+            .or_else(|| {
+                clean(
+                    json.pointer("/board/type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                )
+            })
             .unwrap_or_else(|| "default".into());
         let version = clean(header("device-version"))
-            .or_else(|| clean(json.pointer("/application/version").and_then(Value::as_str).map(str::to_owned)))
+            .or_else(|| {
+                clean(
+                    json.pointer("/application/version")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                )
+            })
             .unwrap_or_else(|| "0.0.0".into());
-        let board_name = clean(json.pointer("/board/name").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
-        Ok(Self { device_id, client_id, model, version, board_name })
+        let board_name = clean(
+            json.pointer("/board/name")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        )
+        .unwrap_or_default();
+        Ok(Self {
+            device_id,
+            client_id,
+            model,
+            version,
+            board_name,
+        })
     }
 }
 
@@ -86,7 +114,12 @@ fn numeric_parts(version: &str) -> Vec<u64> {
     let mut current: Option<u64> = None;
     for ch in version.chars() {
         if let Some(digit) = ch.to_digit(10) {
-            current = Some(current.unwrap_or(0).saturating_mul(10).saturating_add(digit as u64));
+            current = Some(
+                current
+                    .unwrap_or(0)
+                    .saturating_mul(10)
+                    .saturating_add(digit as u64),
+            );
         } else if let Some(value) = current.take() {
             parts.push(value);
         }
@@ -101,7 +134,10 @@ fn numeric_parts(version: &str) -> Vec<u64> {
 pub fn is_newer_version(candidate: &str, current: &str) -> bool {
     let (a, b) = (numeric_parts(candidate), numeric_parts(current));
     for index in 0..a.len().max(b.len()) {
-        let (x, y) = (a.get(index).copied().unwrap_or(0), b.get(index).copied().unwrap_or(0));
+        let (x, y) = (
+            a.get(index).copied().unwrap_or(0),
+            b.get(index).copied().unwrap_or(0),
+        );
         if x != y {
             return x > y;
         }
@@ -115,23 +151,33 @@ mod tests {
     use std::collections::HashMap;
 
     fn headers(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         move |name: &str| map.get(name).cloned()
     }
 
     #[test]
     fn request_fields_come_from_headers_and_body() {
         let body = r#"{"application":{"name":"xiaozhi","version":"1.9.2"},"board":{"type":"lichuang-dev","name":"立创实战派"}}"#;
-        let info = OtaInfo::from_request(headers(&[("device-id", "aa:bb:cc:dd:ee:ff"), ("client-id", "uuid-1")]), body).unwrap();
+        let info = OtaInfo::from_request(
+            headers(&[("device-id", "aa:bb:cc:dd:ee:ff"), ("client-id", "uuid-1")]),
+            body,
+        )
+        .unwrap();
         assert_eq!(info.device_id, "aa:bb:cc:dd:ee:ff");
         assert_eq!(info.model, "lichuang-dev");
         assert_eq!(info.version, "1.9.2");
         assert_eq!(info.board_name, "立创实战派");
-        let info = OtaInfo::from_request(headers(&[("device-id", "d"), ("client-id", "c")]), "").unwrap();
+        let info =
+            OtaInfo::from_request(headers(&[("device-id", "d"), ("client-id", "c")]), "").unwrap();
         assert_eq!(info.model, "default");
         assert_eq!(info.version, "0.0.0");
         assert!(OtaInfo::from_request(headers(&[("client-id", "c")]), "").is_err());
-        assert!(OtaInfo::from_request(headers(&[("device-id", "d"), ("client-id", " ")]), "").is_err());
+        assert!(
+            OtaInfo::from_request(headers(&[("device-id", "d"), ("client-id", " ")]), "").is_err()
+        );
     }
 
     #[test]
@@ -146,7 +192,10 @@ mod tests {
             firmware: None,
         };
         let json = reply.to_json();
-        assert_eq!(json["websocket"]["url"], "ws://192.168.1.5:8000/xiaozhi/v1/");
+        assert_eq!(
+            json["websocket"]["url"],
+            "ws://192.168.1.5:8000/xiaozhi/v1/"
+        );
         assert_eq!(json["websocket"]["version"], 1);
         assert_eq!(json["firmware"]["version"], "1.9.2");
         assert_eq!(json["firmware"]["url"], "");

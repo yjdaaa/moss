@@ -8,9 +8,14 @@
 //!   whatever remains is injected only inside a block labelled “data, not instructions”.
 //! - RAGFlow is not called from here: the NV11 `search_rag` tool with its dataset whitelist
 //!   remains the only RAGFlow path, so there is no second, unreviewed route.
-use super::retrieve::{score, SearchQuery};
-use super::{check_content, AccessContext, Channel, ContextError, ScopeKey, ScopeKind, TrustedScope};
-use crate::safe_fs::{is_link_or_reparse, no_link_ancestry, open_verified, sensitive_catalog_root, sensitive_descendant, valid_local_root, FsError};
+use super::retrieve::{SearchQuery, score};
+use super::{
+    AccessContext, Channel, ContextError, ScopeKey, ScopeKind, TrustedScope, check_content,
+};
+use crate::safe_fs::{
+    FsError, is_link_or_reparse, no_link_ancestry, open_verified, sensitive_catalog_root,
+    sensitive_descendant, valid_local_root,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -160,14 +165,37 @@ pub trait KnowledgeStore: Send + Sync {
     fn root(&self, id: &str) -> Result<Option<KnowledgeRoot>, String>;
     fn roots(&self, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, String>;
     fn all_roots(&self) -> Result<Vec<KnowledgeRoot>, String>;
-    fn set_root_enabled(&self, id: &str, expected_revision: i64, enabled: bool) -> Result<bool, String>;
+    fn set_root_enabled(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        enabled: bool,
+    ) -> Result<bool, String>;
     /// `false`: the root is no longer at `expected_revision`; nothing written.
-    fn replace(&self, root_id: &str, expected_revision: i64, dirs: &[KnowledgeDir], files: &[KnowledgeFile], chunks: &[KnowledgeChunk], now: f64) -> Result<bool, String>;
+    fn replace(
+        &self,
+        root_id: &str,
+        expected_revision: i64,
+        dirs: &[KnowledgeDir],
+        files: &[KnowledgeFile],
+        chunks: &[KnowledgeChunk],
+        now: f64,
+    ) -> Result<bool, String>;
     fn delete_root(&self, id: &str, expected_revision: i64) -> Result<bool, String>;
-    fn search_dirs(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeDir>, String>;
+    fn search_dirs(
+        &self,
+        scope: &ScopeKey,
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeDir>, String>;
     /// v17: passages of enabled roots in one scope matching any three-character term of
     /// `query.terms`, best first. Two-character terms are not indexed at passage level.
-    fn search_chunks(&self, scope: &ScopeKey, query: &SearchQuery, limit: usize) -> Result<Vec<KnowledgeChunkHit>, String>;
+    fn search_chunks(
+        &self,
+        scope: &ScopeKey,
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeChunkHit>, String>;
     fn files(&self, dir_id: &str) -> Result<Vec<KnowledgeFile>, String>;
 }
 
@@ -196,27 +224,54 @@ fn short_id(prefix: &str, parts: &[&str]) -> String {
 
 fn mtime_seconds(meta: &fs::Metadata) -> Result<f64, KnowledgeError> {
     let modified = meta.modified().map_err(|_| KnowledgeError::Unavailable)?;
-    Ok(modified.duration_since(std::time::UNIX_EPOCH).map_err(|_| KnowledgeError::Unavailable)?.as_secs_f64())
+    Ok(modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| KnowledgeError::Unavailable)?
+        .as_secs_f64())
 }
 
 fn supported(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "txt" | "md" | "markdown" | "csv"))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "txt" | "md" | "markdown" | "csv"
+        )
+    })
 }
 
 /// Credential-looking file names are skipped even inside an allowed folder.
 fn sensitive_name(path: &Path) -> bool {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     name.starts_with('.')
-        || ["password", "passwd", "secret", "token", "credential", "id_rsa", "密码", "密钥"].iter().any(|word| name.contains(word))
+        || [
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "credential",
+            "id_rsa",
+            "密码",
+            "密钥",
+        ]
+        .iter()
+        .any(|word| name.contains(word))
         || sensitive_descendant(path)
 }
 
 fn relative(root: &Path, path: &Path) -> Result<String, KnowledgeError> {
-    let rel = path.strip_prefix(root).map_err(|_| KnowledgeError::UnsafePath)?;
+    let rel = path
+        .strip_prefix(root)
+        .map_err(|_| KnowledgeError::UnsafePath)?;
     let mut parts = Vec::new();
     for component in rel.components() {
         match component {
-            Component::Normal(name) => parts.push(name.to_str().ok_or(KnowledgeError::UnsafePath)?.to_owned()),
+            Component::Normal(name) => {
+                parts.push(name.to_str().ok_or(KnowledgeError::UnsafePath)?.to_owned())
+            }
             _ => return Err(KnowledgeError::UnsafePath),
         }
     }
@@ -224,10 +279,16 @@ fn relative(root: &Path, path: &Path) -> Result<String, KnowledgeError> {
 }
 
 /// Read one file through a verified handle; `None` when it is not UTF-8 text.
-fn read_text(canonical: &Path, root: &Path, limit: u64) -> Result<Option<(Vec<u8>, String)>, KnowledgeError> {
+fn read_text(
+    canonical: &Path,
+    root: &Path,
+    limit: u64,
+) -> Result<Option<(Vec<u8>, String)>, KnowledgeError> {
     let file = open_verified(canonical, root)?;
     let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes).map_err(|_| KnowledgeError::Unavailable)?;
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| KnowledgeError::Unavailable)?;
     if bytes.len() as u64 > limit {
         return Err(KnowledgeError::LimitExceeded);
     }
@@ -240,17 +301,23 @@ fn read_text(canonical: &Path, root: &Path, limit: u64) -> Result<Option<(Vec<u8
 
 /// Walk an explicitly chosen root: bounded, no links or reparse points, no sensitive folders
 /// or credential-looking files, text formats only. Directory → files.
-fn scan(root: &Path, report: &mut IndexReport) -> Result<BTreeMap<String, Vec<ScannedFile>>, KnowledgeError> {
+fn scan(
+    root: &Path,
+    report: &mut IndexReport,
+) -> Result<BTreeMap<String, Vec<ScannedFile>>, KnowledgeError> {
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let (mut dirs, mut entries, mut files, mut total) = (0usize, 0usize, 0usize, 0u64);
     let mut found: BTreeMap<String, Vec<ScannedFile>> = BTreeMap::new();
-    let skip = |report: &mut IndexReport, reason: &'static str| *report.skipped.entry(reason).or_default() += 1;
+    let skip = |report: &mut IndexReport, reason: &'static str| {
+        *report.skipped.entry(reason).or_default() += 1
+    };
     while let Some((dir, depth)) = pending.pop() {
         dirs += 1;
         if dirs > MAX_DIRECTORIES {
             return Err(KnowledgeError::LimitExceeded);
         }
-        if is_link_or_reparse(&fs::symlink_metadata(&dir).map_err(|_| KnowledgeError::Unavailable)?) {
+        if is_link_or_reparse(&fs::symlink_metadata(&dir).map_err(|_| KnowledgeError::Unavailable)?)
+        {
             return Err(KnowledgeError::UnsafePath);
         }
         for entry in fs::read_dir(&dir).map_err(|_| KnowledgeError::Unavailable)? {
@@ -291,13 +358,17 @@ fn scan(root: &Path, report: &mut IndexReport) -> Result<BTreeMap<String, Vec<Sc
             if files > MAX_FILES || total > MAX_TOTAL_BYTES {
                 return Err(KnowledgeError::LimitExceeded);
             }
-            let canonical = path.canonicalize().map_err(|_| KnowledgeError::Unavailable)?;
+            let canonical = path
+                .canonicalize()
+                .map_err(|_| KnowledgeError::Unavailable)?;
             let Some((bytes, text)) = read_text(&canonical, root, MAX_FILE_BYTES)? else {
                 skip(report, "not_utf8");
                 continue;
             };
             let rel_path = relative(root, &path)?;
-            let rel_dir = rel_path.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.to_owned());
+            let rel_dir = rel_path
+                .rsplit_once('/')
+                .map_or(String::new(), |(dir, _)| dir.to_owned());
             found.entry(rel_dir).or_default().push(ScannedFile {
                 rel_path,
                 sha256: hex(&Sha256::digest(&bytes)),
@@ -338,7 +409,10 @@ pub(crate) fn paragraphs(text: &str) -> Vec<String> {
         current.clear();
     };
     for line in text.lines() {
-        let line = line.trim().trim_start_matches(['#', '>', '-', '*', '|']).trim();
+        let line = line
+            .trim()
+            .trim_start_matches(['#', '>', '-', '*', '|'])
+            .trim();
         if line.is_empty() || line.starts_with("```") {
             flush(&mut current, &mut out);
             continue;
@@ -370,8 +444,19 @@ pub(crate) fn passages(text: &str) -> Vec<String> {
         if body.is_empty() {
             return;
         }
-        let path = clip(&headings.iter().map(|(_, h)| h.as_str()).collect::<Vec<_>>().join(" / "), HEADING_CHARS);
-        let passage = if path.is_empty() { body } else { format!("{path}：{body}") };
+        let path = clip(
+            &headings
+                .iter()
+                .map(|(_, h)| h.as_str())
+                .collect::<Vec<_>>()
+                .join(" / "),
+            HEADING_CHARS,
+        );
+        let passage = if path.is_empty() {
+            body
+        } else {
+            format!("{path}：{body}")
+        };
         if check_content(&passage).is_ok() {
             out.push(passage);
         }
@@ -419,7 +504,11 @@ fn file_name(rel_path: &str) -> &str {
 
 /// (L0, L1) for one directory, built only from usable paragraphs and file names.
 fn summarize(label: &str, rel_dir: &str, files: &[ScannedFile]) -> (String, String) {
-    let place = if rel_dir.is_empty() { label.to_owned() } else { format!("{label}/{rel_dir}") };
+    let place = if rel_dir.is_empty() {
+        label.to_owned()
+    } else {
+        format!("{label}/{rel_dir}")
+    };
     let names: Vec<&str> = files.iter().map(|f| file_name(&f.rel_path)).collect();
     let mut leads = Vec::new();
     let mut l1 = String::new();
@@ -432,7 +521,9 @@ fn summarize(label: &str, rel_dir: &str, files: &[ScannedFile]) -> (String, Stri
             leads.push(clip(first, 40));
         }
         let header = format!("【{name}】");
-        let room = share.saturating_sub(header.chars().count() + 1).min(FILE_OVERVIEW_CHARS);
+        let room = share
+            .saturating_sub(header.chars().count() + 1)
+            .min(FILE_OVERVIEW_CHARS);
         let mut body = String::new();
         for part in &parts {
             if body.chars().count() + part.chars().count() > FILE_OVERVIEW_CHARS {
@@ -454,15 +545,29 @@ fn summarize(label: &str, rel_dir: &str, files: &[ScannedFile]) -> (String, Stri
         }
         l1.push_str(&entry);
     }
-    let l0 = clip(&format!("{place}：{} 个文件（{}）。{}", files.len(), names.join("、"), leads.join("；")), L0_CHARS);
-    let l1 = if l1.trim().is_empty() { clip(&format!("{place}：{}", names.join("、")), L1_CHARS) } else { clip(l1.trim_end(), L1_CHARS) };
+    let l0 = clip(
+        &format!(
+            "{place}：{} 个文件（{}）。{}",
+            files.len(),
+            names.join("、"),
+            leads.join("；")
+        ),
+        L0_CHARS,
+    );
+    let l1 = if l1.trim().is_empty() {
+        clip(&format!("{place}：{}", names.join("、")), L1_CHARS)
+    } else {
+        clip(l1.trim_end(), L1_CHARS)
+    };
     (l0, l1)
 }
 
 /// The `【name】overview` line of one file inside a directory's L1 (empty when cut off).
 fn l1_entry<'a>(l1: &'a str, name: &str) -> &'a str {
     let header = format!("【{name}】");
-    l1.lines().find(|line| line.starts_with(&header)).unwrap_or("")
+    l1.lines()
+        .find(|line| line.starts_with(&header))
+        .unwrap_or("")
 }
 
 // ---------- reading L2 on demand ----------
@@ -473,9 +578,19 @@ fn read_l2(root: &KnowledgeRoot, file: &KnowledgeFile) -> Option<String> {
     if root.root_path.canonicalize().ok()? != root.root_path {
         return None;
     }
-    let path = file.rel_path.split('/').fold(root.root_path.clone(), |path, part| path.join(part));
+    let path = file
+        .rel_path
+        .split('/')
+        .fold(root.root_path.clone(), |path, part| path.join(part));
     let rel = Path::new(&file.rel_path);
-    if file.rel_path.split('/').any(|part| part.is_empty() || part == "." || part == "..") || rel.components().any(|c| matches!(c, Component::Normal(n) if sensitive_descendant(Path::new(n)))) {
+    if file
+        .rel_path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+        || rel
+            .components()
+            .any(|c| matches!(c, Component::Normal(n) if sensitive_descendant(Path::new(n))))
+    {
         return None;
     }
     no_link_ancestry(&path).ok()?;
@@ -484,7 +599,8 @@ fn read_l2(root: &KnowledgeRoot, file: &KnowledgeFile) -> Option<String> {
         return None;
     }
     let meta = fs::symlink_metadata(&canonical).ok()?;
-    if !meta.is_file() || meta.len() as i64 != file.size || mtime_seconds(&meta).ok()? != file.mtime {
+    if !meta.is_file() || meta.len() as i64 != file.size || mtime_seconds(&meta).ok()? != file.mtime
+    {
         return None;
     }
     let (bytes, text) = read_text(&canonical, &root.root_path, MAX_FILE_BYTES).ok()??;
@@ -509,10 +625,25 @@ pub fn format_knowledge(hits: &[KnowledgeHit]) -> Option<String> {
     let mut lines = Vec::new();
     let mut budget = KNOWLEDGE_BUDGET_CHARS;
     for hit in hits {
-        let place = if hit.rel_dir.is_empty() { hit.label.clone() } else { format!("{}/{}", hit.label, hit.rel_dir) };
-        let mut block = format!("- [资料·{place}{}] {}", if hit.stale { "·部分文件已变化，请让用户重新建立索引" } else { "" }, hit.l0);
+        let place = if hit.rel_dir.is_empty() {
+            hit.label.clone()
+        } else {
+            format!("{}/{}", hit.label, hit.rel_dir)
+        };
+        let mut block = format!(
+            "- [资料·{place}{}] {}",
+            if hit.stale {
+                "·部分文件已变化，请让用户重新建立索引"
+            } else {
+                ""
+            },
+            hit.l0
+        );
         if let Some((rel_path, text)) = &hit.excerpt {
-            block.push_str(&format!("\n  原文摘录（{}/{}）：{}", hit.label, rel_path, text));
+            block.push_str(&format!(
+                "\n  原文摘录（{}/{}）：{}",
+                hit.label, rel_path, text
+            ));
         }
         let length = block.chars().count();
         if length > budget {
@@ -545,9 +676,17 @@ impl KnowledgeService {
         result.map_err(KnowledgeError::Store)
     }
 
-    fn verified<'a>(&self, access: &'a AccessContext, key: &ScopeKey) -> Result<&'a TrustedScope, KnowledgeError> {
+    fn verified<'a>(
+        &self,
+        access: &'a AccessContext,
+        key: &ScopeKey,
+    ) -> Result<&'a TrustedScope, KnowledgeError> {
         let scope = access.trusted(key).ok_or(ContextError::AccessDenied)?;
-        if self.store.current(scope) { Ok(scope) } else { Err(KnowledgeError::ScopeStale) }
+        if self.store.current(scope) {
+            Ok(scope)
+        } else {
+            Err(KnowledgeError::ScopeStale)
+        }
     }
 
     fn private(&self, access: &AccessContext, key: &ScopeKey) -> Result<(), KnowledgeError> {
@@ -561,12 +700,32 @@ impl KnowledgeService {
     }
 
     /// Register a folder the user picked in the private window, then index it.
-    pub fn add_root(&self, access: &AccessContext, scope: &ScopeKey, path: &Path, now: f64) -> Result<(KnowledgeRoot, IndexReport), KnowledgeError> {
+    pub fn add_root(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+        path: &Path,
+        now: f64,
+    ) -> Result<(KnowledgeRoot, IndexReport), KnowledgeError> {
         self.private(access, scope)?;
         let canonical = valid_local_root(path)?;
         canonical.to_str().ok_or(KnowledgeError::InvalidRoot)?;
-        let label = clip(canonical.file_name().and_then(|n| n.to_str()).ok_or(KnowledgeError::InvalidRoot)?, 128);
-        let root = KnowledgeRoot { id: random_id()?, scope: scope.clone(), label, root_path: canonical, revision: 1, indexed_at: None, enabled: true };
+        let label = clip(
+            canonical
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or(KnowledgeError::InvalidRoot)?,
+            128,
+        );
+        let root = KnowledgeRoot {
+            id: random_id()?,
+            scope: scope.clone(),
+            label,
+            root_path: canonical,
+            revision: 1,
+            indexed_at: None,
+            enabled: true,
+        };
         Self::store(self.store.insert_root(&root, now))?;
         let report = self.reindex(access, &root.id, now)?;
         let root = Self::store(self.store.root(&root.id))?.ok_or(KnowledgeError::NotFound)?;
@@ -575,14 +734,23 @@ impl KnowledgeService {
 
     /// Rebuild one root from disk. Removed or renamed files drop out; changed files get new
     /// fingerprints. A concurrent rebuild or deletion makes this one fail with `Conflict`.
-    pub fn reindex(&self, access: &AccessContext, root_id: &str, now: f64) -> Result<IndexReport, KnowledgeError> {
+    pub fn reindex(
+        &self,
+        access: &AccessContext,
+        root_id: &str,
+        now: f64,
+    ) -> Result<IndexReport, KnowledgeError> {
         let root = Self::store(self.store.root(root_id))?.ok_or(KnowledgeError::NotFound)?;
         self.private(access, &root.scope)?;
         // The stored path is already canonical (Windows may prefix it with `\\?\`): recheck it
         // the way NV14 does instead of re-applying the external-input UNC guard.
         no_link_ancestry(&root.root_path)?;
-        let root_path = root.root_path.canonicalize().map_err(|_| KnowledgeError::Unavailable)?;
-        if root_path != root.root_path || !root_path.is_dir() || sensitive_catalog_root(&root_path) {
+        let root_path = root
+            .root_path
+            .canonicalize()
+            .map_err(|_| KnowledgeError::Unavailable)?;
+        if root_path != root.root_path || !root_path.is_dir() || sensitive_catalog_root(&root_path)
+        {
             return Err(KnowledgeError::UnsafePath);
         }
         let mut report = IndexReport::default();
@@ -593,7 +761,14 @@ impl KnowledgeService {
         for (rel_dir, list) in &found {
             let dir_id = short_id("kd", &[&root.id, rel_dir]);
             let (l0, l1) = summarize(&root.label, rel_dir, list);
-            dirs.push(KnowledgeDir { id: dir_id.clone(), root_id: root.id.clone(), rel_dir: rel_dir.clone(), l0, l1, file_count: list.len() as i64 });
+            dirs.push(KnowledgeDir {
+                id: dir_id.clone(),
+                root_id: root.id.clone(),
+                rel_dir: rel_dir.clone(),
+                l0,
+                l1,
+                file_count: list.len() as i64,
+            });
             for file in list {
                 let file_id = short_id("kf", &[&root.id, &file.rel_path]);
                 for (ord, text) in passages(&file.text).into_iter().enumerate() {
@@ -601,7 +776,11 @@ impl KnowledgeService {
                         *report.skipped.entry("chunk_limit").or_default() += 1;
                         break;
                     }
-                    chunks.push(KnowledgeChunk { file_id: file_id.clone(), ord: ord as i64, text });
+                    chunks.push(KnowledgeChunk {
+                        file_id: file_id.clone(),
+                        ord: ord as i64,
+                        text,
+                    });
                 }
                 files.push(KnowledgeFile {
                     id: file_id,
@@ -617,10 +796,21 @@ impl KnowledgeService {
         report.directories = dirs.len();
         report.files = files.len();
         report.chunks = chunks.len();
-        if Self::store(self.store.replace(&root.id, root.revision, &dirs, &files, &chunks, now))? { Ok(report) } else { Err(KnowledgeError::Conflict) }
+        if Self::store(
+            self.store
+                .replace(&root.id, root.revision, &dirs, &files, &chunks, now),
+        )? {
+            Ok(report)
+        } else {
+            Err(KnowledgeError::Conflict)
+        }
     }
 
-    pub fn roots(&self, access: &AccessContext, scope: &ScopeKey) -> Result<Vec<KnowledgeRoot>, KnowledgeError> {
+    pub fn roots(
+        &self,
+        access: &AccessContext,
+        scope: &ScopeKey,
+    ) -> Result<Vec<KnowledgeRoot>, KnowledgeError> {
         self.private(access, scope)?;
         Self::store(self.store.roots(scope))
     }
@@ -630,13 +820,25 @@ impl KnowledgeService {
             return Err(ContextError::AccessDenied.into());
         }
         let roots = Self::store(self.store.all_roots())?;
-        Ok(roots.into_iter().filter(|r| self.verified(access, &r.scope).is_ok()).collect())
+        Ok(roots
+            .into_iter()
+            .filter(|r| self.verified(access, &r.scope).is_ok())
+            .collect())
     }
 
-    pub fn set_enabled(&self, access: &AccessContext, root_id: &str, expected_revision: i64, enabled: bool) -> Result<KnowledgeRoot, KnowledgeError> {
+    pub fn set_enabled(
+        &self,
+        access: &AccessContext,
+        root_id: &str,
+        expected_revision: i64,
+        enabled: bool,
+    ) -> Result<KnowledgeRoot, KnowledgeError> {
         let root = Self::store(self.store.root(root_id))?.ok_or(KnowledgeError::NotFound)?;
         self.private(access, &root.scope)?;
-        if !Self::store(self.store.set_root_enabled(root_id, expected_revision, enabled))? {
+        if !Self::store(
+            self.store
+                .set_root_enabled(root_id, expected_revision, enabled),
+        )? {
             return Err(KnowledgeError::Conflict);
         }
         Self::store(self.store.root(root_id))?.ok_or(KnowledgeError::NotFound)
@@ -650,31 +852,61 @@ impl KnowledgeService {
             .any(|s| {
                 let key = s.key();
                 self.verified(access, key).is_ok()
-                    && self.store.roots(key).ok().is_some_and(|roots| roots.iter().any(|r| r.enabled))
+                    && self
+                        .store
+                        .roots(key)
+                        .ok()
+                        .is_some_and(|roots| roots.iter().any(|r| r.enabled))
             })
     }
 
     /// Forget a root: summaries and fingerprints go; files on disk are never touched.
-    pub fn remove_root(&self, access: &AccessContext, root_id: &str, expected_revision: i64) -> Result<(), KnowledgeError> {
+    pub fn remove_root(
+        &self,
+        access: &AccessContext,
+        root_id: &str,
+        expected_revision: i64,
+    ) -> Result<(), KnowledgeError> {
         let root = Self::store(self.store.root(root_id))?.ok_or(KnowledgeError::NotFound)?;
         self.private(access, &root.scope)?;
-        if Self::store(self.store.delete_root(root_id, expected_revision))? { Ok(()) } else { Err(KnowledgeError::Conflict) }
+        if Self::store(self.store.delete_root(root_id, expected_revision))? {
+            Ok(())
+        } else {
+            Err(KnowledgeError::Conflict)
+        }
     }
 
     /// One filtered search over every project/workspace scope the caller holds (voice or
     /// private window): L0/L1 match and rank directories, then only the top directories read
     /// L2 for an excerpt. Any stale scope fails the whole search.
-    pub fn search(&self, access: &AccessContext, query: &SearchQuery) -> Result<Vec<KnowledgeHit>, KnowledgeError> {
+    pub fn search(
+        &self,
+        access: &AccessContext,
+        query: &SearchQuery,
+    ) -> Result<Vec<KnowledgeHit>, KnowledgeError> {
         // (directory, root, points, passage hits in index order)
-        let mut ranked: Vec<(KnowledgeDir, KnowledgeRoot, usize, Vec<KnowledgeChunkHit>)> = Vec::new();
-        for scope in access.scopes().iter().filter(|s| matches!(s.key().kind(), ScopeKind::Project | ScopeKind::Workspace)) {
+        let mut ranked: Vec<(KnowledgeDir, KnowledgeRoot, usize, Vec<KnowledgeChunkHit>)> =
+            Vec::new();
+        for scope in access
+            .scopes()
+            .iter()
+            .filter(|s| matches!(s.key().kind(), ScopeKind::Project | ScopeKind::Workspace))
+        {
             let key = scope.key().clone();
             self.verified(access, &key)?;
             let roots = Self::store(self.store.roots(&key))?;
-            let root_of = |dir: &KnowledgeDir| roots.iter().find(|r| r.id == dir.root_id && r.scope == key && r.enabled).cloned();
+            let root_of = |dir: &KnowledgeDir| {
+                roots
+                    .iter()
+                    .find(|r| r.id == dir.root_id && r.scope == key && r.enabled)
+                    .cloned()
+            };
             // v17 passage index: each hit adds weight to its directory (earlier hits more).
             if !query.terms.is_empty() {
-                for (index, hit) in Self::store(self.store.search_chunks(&key, query, CHUNK_HITS))?.into_iter().enumerate() {
+                for (index, hit) in Self::store(self.store.search_chunks(&key, query, CHUNK_HITS))?
+                    .into_iter()
+                    .enumerate()
+                {
                     let bonus = 3 + (CHUNK_HITS - index.min(CHUNK_HITS)) / 10;
                     match ranked.iter_mut().find(|(dir, ..)| dir.id == hit.dir.id) {
                         Some((_, _, points, chunks)) => {
@@ -682,14 +914,17 @@ impl KnowledgeService {
                             chunks.push(hit);
                         }
                         None => {
-                            let Some(root) = root_of(&hit.dir) else { continue };
+                            let Some(root) = root_of(&hit.dir) else {
+                                continue;
+                            };
                             ranked.push((hit.dir.clone(), root, bonus, vec![hit]));
                         }
                     }
                 }
             }
             for dir in Self::store(self.store.search_dirs(&key, query, 20))? {
-                let points = score(&dir.l0, query).map(|p| p * 2).unwrap_or(0) + score(&dir.l1, query).unwrap_or(0);
+                let points = score(&dir.l0, query).map(|p| p * 2).unwrap_or(0)
+                    + score(&dir.l1, query).unwrap_or(0);
                 if points == 0 {
                     continue;
                 }
@@ -708,18 +943,31 @@ impl KnowledgeService {
             let files = Self::store(self.store.files(&dir.id))?;
             let (mut best, mut stale) = Self::excerpt_from_passages(&root, &files, &chunks, query);
             if best.is_none() {
-                let (fallback, fallback_stale) = Self::excerpt_from_files(&root, &dir, &files, query);
+                let (fallback, fallback_stale) =
+                    Self::excerpt_from_files(&root, &dir, &files, query);
                 best = fallback;
                 stale |= fallback_stale;
             }
-            hits.push(KnowledgeHit { label: root.label, rel_dir: dir.rel_dir, l0: dir.l0, excerpt: best.map(|(_, path, text)| (path, text)), stale, score: points });
+            hits.push(KnowledgeHit {
+                label: root.label,
+                rel_dir: dir.rel_dir,
+                l0: dir.l0,
+                excerpt: best.map(|(_, path, text)| (path, text)),
+                stale,
+                score: points,
+            });
         }
         Ok(hits)
     }
 
     /// Read only the files of the best passage hits (fingerprint re-checked) and take the
     /// passage at the indexed position. A changed file or missing position marks it stale.
-    fn excerpt_from_passages(root: &KnowledgeRoot, files: &[KnowledgeFile], chunks: &[KnowledgeChunkHit], query: &SearchQuery) -> (Option<(usize, String, String)>, bool) {
+    fn excerpt_from_passages(
+        root: &KnowledgeRoot,
+        files: &[KnowledgeFile],
+        chunks: &[KnowledgeChunkHit],
+        query: &SearchQuery,
+    ) -> (Option<(usize, String, String)>, bool) {
         let mut best: Option<(usize, String, String)> = None;
         let mut stale = false;
         let mut read: Vec<(&str, Option<Vec<String>>)> = Vec::new();
@@ -732,7 +980,10 @@ impl KnowledgeService {
                 if read.len() >= CHUNK_READS_PER_DIRECTORY {
                     continue;
                 }
-                read.push((file.id.as_str(), read_l2(root, file).map(|text| passages(&text))));
+                read.push((
+                    file.id.as_str(),
+                    read_l2(root, file).map(|text| passages(&text)),
+                ));
             }
             let Some((_, Some(list))) = read.iter().find(|(id, _)| *id == file.id) else {
                 stale = true;
@@ -753,14 +1004,22 @@ impl KnowledgeService {
 
     /// No usable passage hit (old index, two-character query): read the files whose name or
     /// L1 overview matches first (ties keep path order) and take the best paragraph.
-    fn excerpt_from_files(root: &KnowledgeRoot, dir: &KnowledgeDir, files: &[KnowledgeFile], query: &SearchQuery) -> (Option<(usize, String, String)>, bool) {
+    fn excerpt_from_files(
+        root: &KnowledgeRoot,
+        dir: &KnowledgeDir,
+        files: &[KnowledgeFile],
+        query: &SearchQuery,
+    ) -> (Option<(usize, String, String)>, bool) {
         let mut best: Option<(usize, String, String)> = None;
         let mut stale = false;
         let mut candidates: Vec<(usize, &KnowledgeFile)> = files
             .iter()
             .map(|file| {
                 let name = file_name(&file.rel_path);
-                (score(&format!("{name} {}", l1_entry(&dir.l1, name)), query).unwrap_or(0), file)
+                (
+                    score(&format!("{name} {}", l1_entry(&dir.l1, name)), query).unwrap_or(0),
+                    file,
+                )
             })
             .collect();
         candidates.sort_by(|a, b| b.0.cmp(&a.0));

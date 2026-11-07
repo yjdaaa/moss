@@ -80,11 +80,11 @@ pub enum RealtimeCommand {
     SpindleOvrFinePlus,    // 0x9C: +1%
     SpindleOvrFineMinus,   // 0x9D: -1%
     // 空程快速移动倍率控制 (Rapid Override)
-    RapidOvrReset,         // 0x95: 恢复 100%
-    RapidOvrMedium,        // 0x96: 50%
-    RapidOvrLow,           // 0x97: 25%
+    RapidOvrReset,  // 0x95: 恢复 100%
+    RapidOvrMedium, // 0x96: 50%
+    RapidOvrLow,    // 0x97: 25%
     // 辅助吹气实时控制 (Air Assist Toggle)
-    AirAssistToggle,       // 0xA0: 实时切换辅助吹气
+    AirAssistToggle, // 0xA0: 实时切换辅助吹气
 }
 
 impl RealtimeCommand {
@@ -149,7 +149,10 @@ pub struct LineReader<R> {
 
 impl<R: Read> LineReader<R> {
     pub fn new(inner: R) -> Self {
-        Self { inner: BufReader::new(inner), partial: Vec::new() }
+        Self {
+            inner: BufReader::new(inner),
+            partial: Vec::new(),
+        }
     }
 
     /// `Ok(Some(line))`：完整一行（只去行尾 CR/LF，保留行首缩进）；`Ok(None)`：EOF；
@@ -173,7 +176,9 @@ impl<R: Read> LineReader<R> {
                 Err(e) => {
                     if self.partial.len() > MAX_PARTIAL_LINE_BYTES {
                         self.partial.clear();
-                        return Err(format!("设备输出超过 {MAX_PARTIAL_LINE_BYTES} 字节仍无换行，已丢弃: {e}"));
+                        return Err(format!(
+                            "设备输出超过 {MAX_PARTIAL_LINE_BYTES} 字节仍无换行，已丢弃: {e}"
+                        ));
                     }
                     return Err(e.to_string());
                 }
@@ -184,7 +189,9 @@ impl<R: Read> LineReader<R> {
     fn take_line(partial: &mut Vec<u8>) -> String {
         let bytes = std::mem::take(partial);
         // 只去行尾 CR/LF：$CD 返回的 YAML 依赖行首缩进表达层级，不能 trim 行首
-        String::from_utf8_lossy(&bytes).trim_end_matches(['\r', '\n']).to_string()
+        String::from_utf8_lossy(&bytes)
+            .trim_end_matches(['\r', '\n'])
+            .to_string()
     }
 }
 
@@ -220,8 +227,9 @@ impl TcpGrbl {
 
 /// 控制器在字节流任意位置（包括 `;` 注释内）都会立即执行实时单字节，所以顺序信道按整行检查。
 fn contains_realtime_byte(line: &str) -> bool {
-    line.bytes()
-        .any(|byte| matches!(byte, 0x18 | b'!' | b'~' | 0x85 | b'?' | 0x90..=0x97 | 0x99..=0x9D | 0xA0))
+    line.bytes().any(
+        |byte| matches!(byte, 0x18 | b'!' | b'~' | 0x85 | b'?' | 0x90..=0x97 | 0x99..=0x9D | 0xA0),
+    )
 }
 
 impl DeviceTransport for TcpGrbl {
@@ -233,7 +241,9 @@ impl DeviceTransport for TcpGrbl {
             .writer
             .lock()
             .map_err(|_| "TCP writer lock poisoned".to_string())?;
-        writer.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
         writer.write_all(b"\n").map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())
     }
@@ -270,7 +280,6 @@ impl DeviceTransport for TcpGrbl {
     }
 }
 
-
 impl DeviceTransport for Box<dyn DeviceTransport> {
     fn write_line(&self, line: &str) -> Result<(), String> {
         (**self).write_line(line)
@@ -288,7 +297,6 @@ impl DeviceTransport for Box<dyn DeviceTransport> {
         (**self).default_rx_buffer_size()
     }
 }
-
 
 impl DeviceTransport for Arc<dyn DeviceTransport> {
     fn write_line(&self, line: &str) -> Result<(), String> {
@@ -350,7 +358,9 @@ impl DeviceTransport for SerialGrbl {
             .writer
             .lock()
             .map_err(|_| "串口 writer lock poisoned".to_string())?;
-        writer.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
         writer.write_all(b"\n").map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())
     }
@@ -516,8 +526,14 @@ pub fn validate_gcode_line(line: &str) -> Result<(), String> {
             line.len()
         ));
     }
-    if let Some(pos) = line.bytes().position(|b| b >= 0x80 || (b < 0x20 && b != b'\t')) {
-        return Err(format!("第 {} 列含非 ASCII 或控制字符，固件不会将其当作 G-code", pos + 1));
+    if let Some(pos) = line
+        .bytes()
+        .position(|b| b >= 0x80 || (b < 0x20 && b != b'\t'))
+    {
+        return Err(format!(
+            "第 {} 列含非 ASCII 或控制字符，固件不会将其当作 G-code",
+            pos + 1
+        ));
     }
     Ok(())
 }
@@ -560,7 +576,11 @@ pub fn extract_device_explanation(line: &str) -> Option<String> {
         .or_else(|| trimmed.strip_prefix("[MSG:ERR:"))
         .or_else(|| trimmed.strip_prefix("[MSG:FATAL:"))?;
     let text = body.trim_end_matches(']').trim();
-    if text.is_empty() { None } else { Some(text.to_string()) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
 /// SD 脱机作业进度字段。
@@ -609,14 +629,23 @@ impl StatusReport {
     /// 会阻止解锁 / 回零 / 加工的引脚：`E` 急停、`F` 故障、`D` 门开。
     pub fn blocking_pins(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if self.pins.contains('E') { out.push("急停按钮 (E)"); }
-        if self.pins.contains('F') { out.push("故障输入 (F)"); }
-        if self.pins.contains('D') { out.push("安全门 (D)"); }
+        if self.pins.contains('E') {
+            out.push("急停按钮 (E)");
+        }
+        if self.pins.contains('F') {
+            out.push("故障输入 (F)");
+        }
+        if self.pins.contains('D') {
+            out.push("安全门 (D)");
+        }
         out
     }
 
     pub fn has_sd_job(&self) -> bool {
-        matches!(self.sd, Some(SdProgress::Running { .. }) | Some(SdProgress::Unknown(_)))
+        matches!(
+            self.sd,
+            Some(SdProgress::Running { .. }) | Some(SdProgress::Unknown(_))
+        )
     }
 }
 
@@ -655,11 +684,16 @@ pub fn parse_status_report(line: &str) -> Option<StatusReport> {
             let sd = sd.trim();
             report.sd = Some(if let Some((pct, path)) = sd.split_once(',') {
                 match pct.trim().parse::<f64>() {
-                    Ok(percent) => SdProgress::Running { percent, path: path.trim().to_string() },
+                    Ok(percent) => SdProgress::Running {
+                        percent,
+                        path: path.trim().to_string(),
+                    },
                     Err(_) => SdProgress::Unknown(sd.to_string()),
                 }
             } else if let Some(name) = sd.strip_suffix(": Sent") {
-                SdProgress::Sent { name: name.trim().to_string() }
+                SdProgress::Sent {
+                    name: name.trim().to_string(),
+                }
             } else {
                 SdProgress::Unknown(sd.to_string())
             });
@@ -716,7 +750,9 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
             if indent == 0 {
                 match key {
                     "planner_blocks" => features.planner_blocks = val.parse().ok(),
-                    "use_line_numbers" => features.use_line_numbers = val.eq_ignore_ascii_case("true"),
+                    "use_line_numbers" => {
+                        features.use_line_numbers = val.eq_ignore_ascii_case("true")
+                    }
                     "verbose_errors" => features.verbose_errors = val.eq_ignore_ascii_case("true"),
                     _ => {}
                 }
@@ -753,11 +789,23 @@ pub fn parse_grbl_settings_limits(settings: &[String]) -> MachineLimits {
     let mut limits = MachineLimits::default();
     for line in settings {
         if let Some(val) = line.strip_prefix("$130=") {
-            limits.x_travel_mm = val.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
+            limits.x_travel_mm = val
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v > 0.0);
         } else if let Some(val) = line.strip_prefix("$131=") {
-            limits.y_travel_mm = val.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
+            limits.y_travel_mm = val
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v > 0.0);
         } else if let Some(val) = line.strip_prefix("$132=") {
-            limits.z_travel_mm = val.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0);
+            limits.z_travel_mm = val
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v > 0.0);
         }
     }
     limits
@@ -780,7 +828,11 @@ pub struct ProbeReport {
 pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
     let target = spec.describe();
     let mode = spec.mode();
-    let label = if mode == "network" { "网络" } else { "串口" };
+    let label = if mode == "network" {
+        "网络"
+    } else {
+        "串口"
+    };
     let transport = match open_transport(spec, timeout) {
         Ok(t) => t,
         Err(error) => {
@@ -810,7 +862,11 @@ pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
             };
             let limits = match yaml_limits {
                 Some(l) if l.x_travel_mm.is_some() || l.y_travel_mm.is_some() => Some(l),
-                _ if fallback_limits.x_travel_mm.is_some() || fallback_limits.y_travel_mm.is_some() => Some(fallback_limits),
+                _ if fallback_limits.x_travel_mm.is_some()
+                    || fallback_limits.y_travel_mm.is_some() =>
+                {
+                    Some(fallback_limits)
+                }
                 _ => None,
             };
             let mut summary = format!("{label} 握手成功 ({target})，固件 $32=1 激光模式就绪");
@@ -1046,17 +1102,26 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// - 尚未观测：经 `$CD` 确认是 FluidNC 时取 `min(传输层建议, 256)`，否则一律 `min(传输层建议, 127)`；
     /// - 固件不报 `Bf:`（`$10` 缺 bit1）时上限 256，其余情况硬上限 [`MAX_RX_WINDOW`]。
     pub fn effective_rx_window(&self, transport_default: usize) -> usize {
-        self.rx_window(self.rx_window_guess(transport_default)).size()
+        self.rx_window(self.rx_window_guess(transport_default))
+            .size()
     }
 
     /// 未观测到设备容量时的保守初始窗口。
     fn rx_window_guess(&self, transport_default: usize) -> usize {
-        let limit = if self.features.is_some() { FLUIDNC_CHANNEL_RX_WINDOW } else { GRBL_CLASSIC_RX_WINDOW };
+        let limit = if self.features.is_some() {
+            FLUIDNC_CHANNEL_RX_WINDOW
+        } else {
+            GRBL_CLASSIC_RX_WINDOW
+        };
         transport_default.min(limit)
     }
 
     fn rx_window(&self, guess: usize) -> RxWindow {
-        let cap = if self.reports_buffer_state() == Some(false) { FLUIDNC_CHANNEL_RX_WINDOW } else { MAX_RX_WINDOW };
+        let cap = if self.reports_buffer_state() == Some(false) {
+            FLUIDNC_CHANNEL_RX_WINDOW
+        } else {
+            MAX_RX_WINDOW
+        };
         RxWindow {
             guess: guess.min(cap),
             max_free_seen: self.rx_capacity_observed,
@@ -1068,12 +1133,16 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// 顺序信道无未确认字节时收到的 `Bf:` 剩余值即 RX 缓冲容量，取历史最大值。
     fn record_idle_rx_free(&mut self, report: &StatusReport) {
         if let Some(free) = report.rx_buffer_free {
-            self.rx_capacity_observed = Some(self.rx_capacity_observed.map_or(free, |seen| seen.max(free)));
+            self.rx_capacity_observed = Some(
+                self.rx_capacity_observed
+                    .map_or(free, |seen| seen.max(free)),
+            );
         }
     }
 
     pub fn handshake(&mut self) -> Result<(), String> {
-        self.handshake_with_deadline(Duration::from_secs(3)).map(|_| ())
+        self.handshake_with_deadline(Duration::from_secs(3))
+            .map(|_| ())
     }
 
     /// 有界握手：消费完整 `$$` 响应直到终止 `ok`，避免旧 ACK 被下一条命令使用。
@@ -1108,7 +1177,10 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         laser_mode = Some(value.trim() == "1");
                     }
                     if let Some(value) = line.strip_prefix("$30=") {
-                        self.max_spindle_speed = value.trim().parse::<f64>().ok()
+                        self.max_spindle_speed = value
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
                             .filter(|value| value.is_finite() && *value > 0.0);
                     }
                     if let Some(value) = line.strip_prefix("$10=") {
@@ -1130,7 +1202,9 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         if laser_mode != Some(true) {
             if got_any {
                 self.state = DeviceState::Alarm;
-                return Err("$32=1 固件激光模式门禁未通过，控制器已进入 Alarm 态，拒绝发送".to_string());
+                return Err(
+                    "$32=1 固件激光模式门禁未通过，控制器已进入 Alarm 态，拒绝发送".to_string(),
+                );
             }
             self.state = DeviceState::Disconnected;
             return Err(format!(
@@ -1193,7 +1267,9 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         let enabled = acks[0].is_ok();
         self.auto_report_ms = if enabled { interval_ms } else { 0 };
         if let Some(Err(line)) = acks.get(1) {
-            return Err(format!("同步指令 G4 P0 被固件拒绝（{line}），未开始发送任何 G-code"));
+            return Err(format!(
+                "同步指令 G4 P0 被固件拒绝（{line}），未开始发送任何 G-code"
+            ));
         }
         Ok(enabled)
     }
@@ -1240,7 +1316,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             let start = Instant::now();
             while start.elapsed() < Duration::from_millis(800) {
                 match self.transport.read_line() {
-                    Ok(Some(line)) if line.eq_ignore_ascii_case("ok") || line.starts_with("error:") => break,
+                    Ok(Some(line))
+                        if line.eq_ignore_ascii_case("ok") || line.starts_with("error:") =>
+                    {
+                        break;
+                    }
                     Ok(Some(_)) => continue,
                     _ => break,
                 }
@@ -1259,15 +1339,18 @@ impl<T: DeviceTransport> DeviceConnection<T> {
 
     /// 自适应功率标尺检查：只要设备 $30 是合法有限正数即通过，并返回设备实际标尺（如 255.0、1000.0 等）。
     pub fn verify_job_ready_adaptive(&mut self, timeout: Duration) -> Result<f64, String> {
-        let scale = self.max_spindle_speed.ok_or_else(|| {
-            "固件未报告有效的 $30 功率标尺（缺少 $30 或非正数）".to_string()
-        })?;
+        let scale = self
+            .max_spindle_speed
+            .ok_or_else(|| "固件未报告有效的 $30 功率标尺（缺少 $30 或非正数）".to_string())?;
         self.require_idle(timeout, None)?;
         Ok(scale)
     }
 
     /// 发送 $CD 读取 FluidNC 的 YAML 配置文件并解析出机械行程与外设引脚
-    pub fn fetch_fluidnc_config(&mut self, timeout: Duration) -> Result<(MachineLimits, MachineFeatures), String> {
+    pub fn fetch_fluidnc_config(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(MachineLimits, MachineFeatures), String> {
         self.transport.write_line("$CD")?;
         let start = Instant::now();
         let mut yaml_lines = Vec::new();
@@ -1306,7 +1389,10 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         if is_reset_banner(line) {
             self.state = DeviceState::Lost;
             self.sd_job_active = false;
-            return Err(format!("控制器在{context}时复位（{}），执行结果未知；禁止自动重发", line.trim()));
+            return Err(format!(
+                "控制器在{context}时复位（{}），执行结果未知；禁止自动重发",
+                line.trim()
+            ));
         }
         if line.starts_with("ALARM:") {
             self.state = DeviceState::Alarm;
@@ -1329,8 +1415,13 @@ impl<T: DeviceTransport> DeviceConnection<T> {
 
     /// 发送前预检：`?` 一次，要求 Idle、无 SD 作业、无 E/F/D 阻断引脚。
     /// Run/Jog/Home 直接拒绝（不等待），Hold/Door/Alarm/Sleep/Check 均拒绝并说明原因。
-    fn require_idle(&mut self, timeout: Duration, cancel: Option<&CancellationToken>) -> Result<(), String> {
-        self.transport.write_realtime(RealtimeCommand::StatusQuery)?;
+    fn require_idle(
+        &mut self,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), String> {
+        self.transport
+            .write_realtime(RealtimeCommand::StatusQuery)?;
         let start = Instant::now();
         while start.elapsed() < timeout {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
@@ -1359,14 +1450,23 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             return Ok(());
                         }
                         MachineActivity::Idle => {
-                            return Err(format!("控制器正在执行 SD 脱机作业 ({})，拒绝启动新任务", report.raw));
+                            return Err(format!(
+                                "控制器正在执行 SD 脱机作业 ({})，拒绝启动新任务",
+                                report.raw
+                            ));
                         }
                         MachineActivity::Busy => {
-                            return Err(format!("控制器正在运行中 ({})，拒绝启动新任务", report.raw));
+                            return Err(format!(
+                                "控制器正在运行中 ({})，拒绝启动新任务",
+                                report.raw
+                            ));
                         }
                         MachineActivity::Held => {
                             self.state = DeviceState::Hold;
-                            return Err(format!("控制器处于进给保持 ({})，请先恢复或急停后再发送", report.raw));
+                            return Err(format!(
+                                "控制器处于进给保持 ({})，请先恢复或急停后再发送",
+                                report.raw
+                            ));
                         }
                         MachineActivity::DoorOpen => {
                             self.state = DeviceState::Hold;
@@ -1378,11 +1478,17 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         }
                         MachineActivity::Check => {
                             self.state = DeviceState::Alarm;
-                            return Err(format!("控制器处于 G-code 检查模式 ({})，请先退出检查模式", report.raw));
+                            return Err(format!(
+                                "控制器处于 G-code 检查模式 ({})，请先退出检查模式",
+                                report.raw
+                            ));
                         }
                         MachineActivity::Alarm | MachineActivity::Unknown => {
                             self.state = DeviceState::Alarm;
-                            return Err(format!("控制器尚未安全就绪：{}，需要人工核验", report.raw));
+                            return Err(format!(
+                                "控制器尚未安全就绪：{}，需要人工核验",
+                                report.raw
+                            ));
                         }
                     }
                 }
@@ -1400,11 +1506,16 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// 发送文件全部内容后，等待控制器清空规划器缓冲区并恢复 Idle 状态。
     /// Run / Jog / Home（含解锁、回零后的自动宏）持续等待；Hold / Door 也等待（用户可能恢复），
     /// Alarm / Sleep / Check 立即失败；支持取消与超时。
-    pub fn wait_until_idle(&mut self, timeout: Duration, cancel: Option<&CancellationToken>) -> Result<(), String> {
+    pub fn wait_until_idle(
+        &mut self,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), String> {
         let start = Instant::now();
         let mut last_poll = Instant::now();
         let interval = self.poll_interval(Duration::from_millis(200));
-        self.transport.write_realtime(RealtimeCommand::StatusQuery)?;
+        self.transport
+            .write_realtime(RealtimeCommand::StatusQuery)?;
         while start.elapsed() < timeout {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
                 return Err("用户取消，停止等待控制器".into());
@@ -1435,9 +1546,15 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             std::thread::sleep(Duration::from_millis(50));
                             continue;
                         }
-                        MachineActivity::Alarm | MachineActivity::Sleep | MachineActivity::Check | MachineActivity::Unknown => {
+                        MachineActivity::Alarm
+                        | MachineActivity::Sleep
+                        | MachineActivity::Check
+                        | MachineActivity::Unknown => {
                             self.state = DeviceState::Alarm;
-                            return Err(format!("控制器进入异常状态：{}，需要人工核验", report.raw));
+                            return Err(format!(
+                                "控制器进入异常状态：{}，需要人工核验",
+                                report.raw
+                            ));
                         }
                     }
                 }
@@ -1464,7 +1581,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         expected_sha256: &str,
         timeout: Duration,
     ) -> Result<bool, String> {
-        self.transport.write_line(&format!("$File/ShowHash={file_path}"))?;
+        self.transport
+            .write_line(&format!("$File/ShowHash={file_path}"))?;
         let start = Instant::now();
         let mut got_hash: Option<String> = None;
         let mut terminated = false;
@@ -1492,7 +1610,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                                 .next()
                                 .unwrap_or("")
                                 .trim();
-                            if cleaned.len() == 64 && cleaned.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            if cleaned.len() == 64 && cleaned.bytes().all(|b| b.is_ascii_hexdigit())
+                            {
                                 got_hash = Some(cleaned.to_ascii_lowercase());
                             }
                         }
@@ -1528,7 +1647,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         let mut last_poll = Instant::now();
         let interval = self.poll_interval(Duration::from_millis(500));
         self.sd_job_active = true;
-        self.transport.write_realtime(RealtimeCommand::StatusQuery)?;
+        self.transport
+            .write_realtime(RealtimeCommand::StatusQuery)?;
         let result = loop {
             if start.elapsed() >= timeout {
                 self.state = DeviceState::Lost;
@@ -1581,7 +1701,10 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             std::thread::sleep(Duration::from_millis(50));
                             continue;
                         }
-                        MachineActivity::Alarm | MachineActivity::Sleep | MachineActivity::Check | MachineActivity::Unknown => {
+                        MachineActivity::Alarm
+                        | MachineActivity::Sleep
+                        | MachineActivity::Check
+                        | MachineActivity::Unknown => {
                             self.state = DeviceState::Alarm;
                             break Err(format!("控制器在 SD 执行中进入异常状态：{}", report.raw));
                         }
@@ -1619,7 +1742,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         self.send_line_wait_ack_cancellable(line, None)
     }
 
-    fn send_line_wait_ack_cancellable(&mut self, line: &str, cancel: Option<&CancellationToken>) -> Result<(), String> {
+    fn send_line_wait_ack_cancellable(
+        &mut self,
+        line: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), String> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err("用户取消，停止发送".into());
         }
@@ -1636,7 +1763,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                     self.state = DeviceState::Lost;
                     return Err("控制器连续 500ms 无响应，已判定失联，急停无法送达".to_string());
                 }
-                self.transport.write_realtime(RealtimeCommand::StatusQuery)?;
+                self.transport
+                    .write_realtime(RealtimeCommand::StatusQuery)?;
                 heartbeat_sent = true;
                 self.last_response_at = Instant::now();
             }
@@ -1645,15 +1773,13 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                     self.last_response_at = Instant::now();
                     return Ok(());
                 }
-                Ok(Some(response)) => {
-                    match self.classify_line(&response, "等待 ACK") {
-                        Ok(_) => {
-                            heartbeat_sent = false;
-                            continue;
-                        }
-                        Err(e) => return Err(e),
+                Ok(Some(response)) => match self.classify_line(&response, "等待 ACK") {
+                    Ok(_) => {
+                        heartbeat_sent = false;
+                        continue;
                     }
-                }
+                    Err(e) => return Err(e),
+                },
                 Ok(None) => {
                     self.state = DeviceState::Disconnected;
                     return Err("设备连接在收到 ok/error 前断开".to_string());
@@ -1678,7 +1804,8 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         let start = Instant::now();
         let timeout = Duration::from_millis(500);
         while start.elapsed() < timeout {
-            self.transport.write_realtime(RealtimeCommand::StatusQuery)?;
+            self.transport
+                .write_realtime(RealtimeCommand::StatusQuery)?;
             if let Ok(Some(line)) = self.transport.read_line() {
                 self.last_response_at = Instant::now();
                 if line.contains("Hold:0") || line.contains("Alarm") {
@@ -1706,9 +1833,16 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         self.recover_with("$H", "回零", Duration::from_secs(120))
     }
 
-    fn recover_with(&mut self, command: &str, label: &str, settle_timeout: Duration) -> Result<(), String> {
+    fn recover_with(
+        &mut self,
+        command: &str,
+        label: &str,
+        settle_timeout: Duration,
+    ) -> Result<(), String> {
         if self.sd_job_active {
-            return Err(format!("{label}拒绝执行：控制器正在执行 SD 脱机作业，请先急停"));
+            return Err(format!(
+                "{label}拒绝执行：控制器正在执行 SD 脱机作业，请先急停"
+            ));
         }
         self.state = DeviceState::Ready;
         if let Err(e) = self.send_line_wait_ack(command) {
@@ -1722,7 +1856,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             "$H" => f.has_after_homing_macro,
             _ => false,
         });
-        let timeout = if has_macro { settle_timeout * 2 } else { settle_timeout };
+        let timeout = if has_macro {
+            settle_timeout * 2
+        } else {
+            settle_timeout
+        };
         self.wait_until_idle(timeout, None).map_err(|e| {
             if has_macro {
                 format!("{label}后固件自动宏尚未结束或出错：{e}")
@@ -1783,7 +1921,10 @@ impl JobProgress {
 /// "M4 S1000" -> "M4 S255", "G1 X10 Y10 S500" -> "G1 X10 Y10 S128"。
 /// 紧凑写法 "G1X10S500" 同样识别（S 紧跟在上一个字的数值之后）；`$` 开头的系统指令原样保留。
 pub fn rescale_gcode_line_s(line: &str, scale_factor: f64) -> String {
-    if (scale_factor - 1.0).abs() < 1e-6 || scale_factor <= 0.0 || line.trim_start().starts_with('$') {
+    if (scale_factor - 1.0).abs() < 1e-6
+        || scale_factor <= 0.0
+        || line.trim_start().starts_with('$')
+    {
         return line.to_string();
     }
     let mut result = String::with_capacity(line.len());
@@ -1914,7 +2055,9 @@ impl<T: DeviceTransport> JobWorker<T> {
                 };
                 let line_len = line.len() + 1; // +1 表示尾随换行符 '\n'
                 // 如果单行就超过 current_rx_buffer_size，在缓冲区完全排空时单独发送该行
-                if chars_in_buffer + line_len <= window.size() || (chars_in_buffer == 0 && in_flight.is_empty()) {
+                if chars_in_buffer + line_len <= window.size()
+                    || (chars_in_buffer == 0 && in_flight.is_empty())
+                {
                     let _ = lines_iter.next();
                     if let Err(e) = self.device.send_line(&line) {
                         if self.cancel.is_cancelled() {
@@ -1937,7 +2080,9 @@ impl<T: DeviceTransport> JobWorker<T> {
                     self.device.state = DeviceState::Lost;
                     return Err("控制器连续 500ms 无响应，已判定失联，急停无法送达".to_string());
                 }
-                self.device.transport.write_realtime(RealtimeCommand::StatusQuery)?;
+                self.device
+                    .transport
+                    .write_realtime(RealtimeCommand::StatusQuery)?;
                 heartbeat_sent = true;
                 self.device.last_response_at = Instant::now();
             }
@@ -1956,7 +2101,9 @@ impl<T: DeviceTransport> JobWorker<T> {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    self.progress.updated_at_millis.store(now, Ordering::Relaxed);
+                    self.progress
+                        .updated_at_millis
+                        .store(now, Ordering::Relaxed);
                 }
                 Ok(Some(response)) => {
                     // 说明行 / 复位横幅 / ALARM / error / 状态报告统一分类；出错即中止
@@ -1974,7 +2121,11 @@ impl<T: DeviceTransport> JobWorker<T> {
                         let blocking = report.blocking_pins();
                         if !blocking.is_empty() {
                             self.device.state = DeviceState::Alarm;
-                            return Err(format!("发送中检测到阻断引脚触发：{}（{}）", blocking.join("、"), report.raw));
+                            return Err(format!(
+                                "发送中检测到阻断引脚触发：{}（{}）",
+                                blocking.join("、"),
+                                report.raw
+                            ));
                         }
                     }
                     continue;
@@ -1991,10 +2142,17 @@ impl<T: DeviceTransport> JobWorker<T> {
         }
 
         // 5. 全部文件内容发送并 ACK 完成后，进入执行完成等待阶段
-        self.progress.awaiting_completion.store(true, Ordering::Release);
+        self.progress
+            .awaiting_completion
+            .store(true, Ordering::Release);
         // G4 P0 同步 FluidNC/GRBL 规划器缓冲区
-        let completion = self.device.send_line_wait_ack_cancellable("G4 P0", Some(&self.cancel))
-            .and_then(|()| self.device.wait_until_idle(Duration::from_secs(30), Some(&self.cancel)));
+        let completion = self
+            .device
+            .send_line_wait_ack_cancellable("G4 P0", Some(&self.cancel))
+            .and_then(|()| {
+                self.device
+                    .wait_until_idle(Duration::from_secs(30), Some(&self.cancel))
+            });
         if self.cancel.is_cancelled() {
             self.device.cancel()?;
             return Ok(acked_count);
@@ -2017,9 +2175,15 @@ pub fn diagnose_device_message(line: &str) -> Option<String> {
     }
     let upper = trimmed.to_ascii_uppercase();
     if let Some(alarm_part) = upper.strip_prefix("ALARM:") {
-        let code = alarm_part.split_whitespace().next().unwrap_or(alarm_part).trim();
+        let code = alarm_part
+            .split_whitespace()
+            .next()
+            .unwrap_or(alarm_part)
+            .trim();
         let desc = match code {
-            "1" => "硬限位开关触发（物理撞机或轴触碰限位，控制器已紧急制动停机，建议重新执行 $H 回零）",
+            "1" => {
+                "硬限位开关触发（物理撞机或轴触碰限位，控制器已紧急制动停机，建议重新执行 $H 回零）"
+            }
             "2" => "软限位超程（目标运动坐标超出了设置的最大行程，已安全拦截，可执行 $X 解锁）",
             "3" => "运动中控制器复位（可能丢失步进步数，建议重新执行 $H 回零）",
             "4" => "对刀/探针初始状态错误（探针在探测前已处于闭合导通状态）",
@@ -2029,7 +2193,9 @@ pub fn diagnose_device_message(line: &str) -> Option<String> {
             "8" => "回零脱开限位失败（建议增大 pull-off 距离或检查限位开关接线）",
             "9" => "回零未找到限位开关（未在搜索距离内触发开关，请检查接线或行程）",
             "10" => "双电机双限位脱开失败",
-            "11" => "启动引脚电平异常（限位开关或急停按键在上电时已处于触发闭合状态，请检查接线或引脚反相设置）",
+            "11" => {
+                "启动引脚电平异常（限位开关或急停按键在上电时已处于触发闭合状态，请检查接线或引脚反相设置）"
+            }
             "12" => "回零开关信号歧义（双限位开关触发顺序异常）",
             "13" => "硬停止保护触发（控制器强制断电保护）",
             "14" => "未回零安全锁定（机床启用了强制回零策略，请先执行 $H 回零再开始加工）",
@@ -2043,7 +2209,11 @@ pub fn diagnose_device_message(line: &str) -> Option<String> {
     }
     let lower = trimmed.to_ascii_lowercase();
     if let Some(error_part) = lower.strip_prefix("error:") {
-        let code = error_part.split_whitespace().next().unwrap_or(error_part).trim();
+        let code = error_part
+            .split_whitespace()
+            .next()
+            .unwrap_or(error_part)
+            .trim();
         let desc = match code {
             "1" => "G-code 语法错误：缺少字母前缀",
             "2" => "G-code 数值格式无效或缺少预期数值",
@@ -2160,19 +2330,30 @@ pub fn discover_controllers(timeout: Duration) -> Vec<DiscoveredController> {
             while let Ok(event) = rx.try_recv() {
                 idle = false;
                 if let ServiceEvent::ServiceResolved(info) = event {
-                    let hostname = info.get_hostname().trim_end_matches('.').trim_end_matches(".local").to_string();
+                    let hostname = info
+                        .get_hostname()
+                        .trim_end_matches('.')
+                        .trim_end_matches(".local")
+                        .to_string();
                     for addr in info.get_addresses() {
                         let ip = addr.to_string();
                         // IPv6 链路本地地址对上位机 TCP 连接价值不大，优先记录 IPv4
-                        if ip.contains(':') && found.keys().any(|(h, i)| h == &hostname && !i.contains(':')) {
+                        if ip.contains(':')
+                            && found
+                                .keys()
+                                .any(|(h, i)| h == &hostname && !i.contains(':'))
+                        {
                             continue;
                         }
-                        let entry = found.entry((hostname.clone(), ip.clone())).or_insert_with(|| DiscoveredController {
-                            hostname: hostname.clone(),
-                            ip: ip.clone(),
-                            telnet_port: None,
-                            http_port: None,
-                        });
+                        let entry =
+                            found
+                                .entry((hostname.clone(), ip.clone()))
+                                .or_insert_with(|| DiscoveredController {
+                                    hostname: hostname.clone(),
+                                    ip: ip.clone(),
+                                    telnet_port: None,
+                                    http_port: None,
+                                });
                         if svc.starts_with("_telnet") {
                             entry.telnet_port = Some(info.get_port());
                         } else {
@@ -2193,8 +2374,11 @@ pub fn discover_controllers(timeout: Duration) -> Vec<DiscoveredController> {
     let mut list: Vec<DiscoveredController> = found.into_values().collect();
     // IPv4 排前面；同一主机同时有 IPv4 与 IPv6 时只保留 IPv4
     list.sort_by_key(|c| (c.ip.contains(':'), c.hostname.clone(), c.ip.clone()));
-    let hosts_with_v4: std::collections::HashSet<String> =
-        list.iter().filter(|c| !c.ip.contains(':')).map(|c| c.hostname.clone()).collect();
+    let hosts_with_v4: std::collections::HashSet<String> = list
+        .iter()
+        .filter(|c| !c.ip.contains(':'))
+        .map(|c| c.hostname.clone())
+        .collect();
     list.retain(|c| !c.ip.contains(':') || !hosts_with_v4.contains(&c.hostname));
     list
 }
@@ -2244,17 +2428,28 @@ pub fn upload_gcode_to_fluidnc_sd(
     }
 
     let mut stream = stream_opt.ok_or(last_err)?;
-    stream.write_all(request_header.as_bytes()).map_err(|e| e.to_string())?;
-    stream.write_all(header_part.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(request_header.as_bytes())
+        .map_err(|e| e.to_string())?;
+    stream
+        .write_all(header_part.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.write_all(file_bytes).map_err(|e| e.to_string())?;
-    stream.write_all(footer_part.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(footer_part.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).map_err(|e| e.to_string())?;
+    stream
+        .read_to_end(&mut response)
+        .map_err(|e| e.to_string())?;
     let resp_str = String::from_utf8_lossy(&response);
     let status_line = resp_str.lines().next().unwrap_or("");
-    if status_line.contains(" 200 ") || status_line.contains(" 204 ") || status_line.contains(" 201 ") {
+    if status_line.contains(" 200 ")
+        || status_line.contains(" 204 ")
+        || status_line.contains(" 201 ")
+    {
         Ok(())
     } else {
         Err(format!("FluidNC HTTP 上传失败，响应: {status_line}"))
@@ -2292,7 +2487,8 @@ mod tests {
         let held_sequential_writer = grbl.writer.lock().unwrap();
         let realtime = grbl.clone();
         let started = Instant::now();
-        let abort = std::thread::spawn(move || realtime.write_realtime(RealtimeCommand::EmergencyStop));
+        let abort =
+            std::thread::spawn(move || realtime.write_realtime(RealtimeCommand::EmergencyStop));
         assert!(abort.join().unwrap().is_ok());
         assert!(
             started.elapsed() < Duration::from_millis(100),
@@ -2316,7 +2512,10 @@ mod tests {
         let grbl = TcpGrbl::connect(&address.to_string()).unwrap();
         let started = Instant::now();
         let result = grbl.read_line();
-        assert!(result.is_err(), "silent peer must surface a timeout error, got {result:?}");
+        assert!(
+            result.is_err(),
+            "silent peer must surface a timeout error, got {result:?}"
+        );
         assert!(started.elapsed() < Duration::from_millis(1200));
         server.join().unwrap();
     }
@@ -2355,7 +2554,15 @@ mod tests {
     fn unlock_and_home_recover_alarm_state() {
         // 解锁：ok 之后仍要等到 Idle（FluidNC 可能跑 after_unlock 宏），中间的 [MSG:INFO: Caution: Unlocked] 被忽略
         let fake = FakeGrbl::new(
-            ["$32=1", "ok", "[MSG:INFO: Caution: Unlocked]", "ok", "<Run|MPos:0,0,0>", "<Idle|MPos:0,0,0>"].map(str::to_owned),
+            [
+                "$32=1",
+                "ok",
+                "[MSG:INFO: Caution: Unlocked]",
+                "ok",
+                "<Run|MPos:0,0,0>",
+                "<Idle|MPos:0,0,0>",
+            ]
+            .map(str::to_owned),
         );
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
@@ -2367,7 +2574,17 @@ mod tests {
         assert_eq!(fake.lines().last().unwrap(), "$X");
 
         // 回零：Home 状态视为忙碌持续等待，不再被当成报警
-        let fake = FakeGrbl::new(["$32=1", "ok", "ok", "<Home|MPos:0,0,0>", "<Home|MPos:1,0,0>", "<Idle|MPos:0,0,0>"].map(str::to_owned));
+        let fake = FakeGrbl::new(
+            [
+                "$32=1",
+                "ok",
+                "ok",
+                "<Home|MPos:0,0,0>",
+                "<Home|MPos:1,0,0>",
+                "<Idle|MPos:0,0,0>",
+            ]
+            .map(str::to_owned),
+        );
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
         device.emergency_stop().unwrap();
@@ -2433,16 +2650,27 @@ mod tests {
 
     #[test]
     fn serial_open_on_missing_port_reports_error_and_probe_says_not_connected() {
-        let bogus = if cfg!(windows) { "COM254" } else { "/dev/ttyMOSS_NOT_EXIST" };
+        let bogus = if cfg!(windows) {
+            "COM254"
+        } else {
+            "/dev/ttyMOSS_NOT_EXIST"
+        };
         assert!(SerialGrbl::open(bogus, 115_200).is_err());
         assert!(SerialGrbl::open("", 115_200).is_err());
         let report = probe_device(
-            &ConnectionSpec::Serial { port: bogus.into(), baud_rate: 115_200 },
+            &ConnectionSpec::Serial {
+                port: bogus.into(),
+                baud_rate: 115_200,
+            },
             Duration::from_millis(500),
         );
         assert_eq!(report.mode, "serial");
         assert!(!report.connected);
-        assert!(report.summary.contains("串口 连接失败"), "{}", report.summary);
+        assert!(
+            report.summary.contains("串口 连接失败"),
+            "{}",
+            report.summary
+        );
     }
 
     #[test]
@@ -2463,7 +2691,10 @@ mod tests {
                 }
             });
             let report = probe_device(
-                &ConnectionSpec::Tcp { host: "127.0.0.1".into(), port },
+                &ConnectionSpec::Tcp {
+                    host: "127.0.0.1".into(),
+                    port,
+                },
                 Duration::from_secs(2),
             );
             assert_eq!(report.mode, "network");
@@ -2477,7 +2708,10 @@ mod tests {
         }
         // 无监听端口：连接失败而非挂起
         let dead = probe_device(
-            &ConnectionSpec::Tcp { host: "127.0.0.1".into(), port: 1 },
+            &ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port: 1,
+            },
             Duration::from_millis(500),
         );
         assert!(!dead.connected);
@@ -2489,8 +2723,12 @@ mod tests {
         /// 响应耗尽后模拟"线路沉默"（读超时 Err）而非 EOF，贴近真实串口/TCP 行为
         struct SilentAfterDrain(FakeGrbl);
         impl DeviceTransport for SilentAfterDrain {
-            fn write_line(&self, line: &str) -> Result<(), String> { self.0.write_line(line) }
-            fn write_realtime(&self, c: RealtimeCommand) -> Result<(), String> { self.0.write_realtime(c) }
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                self.0.write_line(line)
+            }
+            fn write_realtime(&self, c: RealtimeCommand) -> Result<(), String> {
+                self.0.write_realtime(c)
+            }
             fn read_line(&self) -> Result<Option<String>, String> {
                 match self.0.read_line()? {
                     Some(line) => Ok(Some(line)),
@@ -2502,7 +2740,12 @@ mod tests {
             }
         }
         // 规划器满载：ack 前夹杂状态报告，不应误判失联
-        let fake = FakeGrbl::new(["$32=1".into(), "ok".into(), "<Run|MPos:1,1,0>".into(), "ok".into()]);
+        let fake = FakeGrbl::new([
+            "$32=1".into(),
+            "ok".into(),
+            "<Run|MPos:1,1,0>".into(),
+            "ok".into(),
+        ]);
         let mut device = DeviceConnection::new(SilentAfterDrain(fake.clone()));
         device.handshake().unwrap();
         assert!(device.send_line_wait_ack("G1 X1").is_ok());
@@ -2529,7 +2772,12 @@ mod tests {
     fn fake_device_100ms_backpressure_emergency_stop_test() {
         // Verify §19 Stage 4 requirement: 10,000 lines backlog, emergency stop reaches write end < 100ms
         let responses = (0..10_000).map(|_| "ok".to_string());
-        let fake = FakeGrbl::new(["$32=1", "ok"].map(str::to_owned).into_iter().chain(responses));
+        let fake = FakeGrbl::new(
+            ["$32=1", "ok"]
+                .map(str::to_owned)
+                .into_iter()
+                .chain(responses),
+        );
         // Add artificial backpressure so 10,000 lines take appreciable wall-clock time
         fake.set_backpressure(Duration::from_micros(100));
         let mut device = DeviceConnection::new(fake.clone());
@@ -2542,9 +2790,7 @@ mod tests {
         let lines: Vec<String> = (0..10_000).map(|i| format!("G1 X{i}")).collect();
 
         // Spawn worker sending 10,000 lines in background
-        let worker_handle = std::thread::spawn(move || {
-            worker.send_lines(lines)
-        });
+        let worker_handle = std::thread::spawn(move || worker.send_lines(lines));
 
         // Sleep briefly to let worker start sending
         std::thread::sleep(Duration::from_millis(15));
@@ -2557,7 +2803,10 @@ mod tests {
         let abort_events = fake.realtime_events();
         let first_stop = abort_events.iter().find(|(cmd, _)| *cmd == 0x18).unwrap();
         let duration = first_stop.1.duration_since(abort_start);
-        assert!(duration < Duration::from_millis(100), "0x18 must arrive within 100ms");
+        assert!(
+            duration < Duration::from_millis(100),
+            "0x18 must arrive within 100ms"
+        );
 
         let _ = worker_handle.join();
         assert!(progress.lines_sent.load(Ordering::Relaxed) < 10_000);
@@ -2573,9 +2822,12 @@ mod tests {
 
     #[test]
     fn handshake_consumes_terminal_ack_and_all_settings() {
-        let fake = FakeGrbl::new(["$32=1", "$30=1000", "$130=100", "ok", "error:2"].map(str::to_owned));
+        let fake =
+            FakeGrbl::new(["$32=1", "$30=1000", "$130=100", "ok", "error:2"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake);
-        let settings = device.handshake_with_deadline(Duration::from_secs(1)).unwrap();
+        let settings = device
+            .handshake_with_deadline(Duration::from_secs(1))
+            .unwrap();
         assert_eq!(settings.len(), 3);
         assert_eq!(device.max_spindle_speed, Some(1000.0));
         assert_eq!(device.send_line_wait_ack("M5").unwrap_err(), "error:2");
@@ -2598,26 +2850,59 @@ mod tests {
             let fake = FakeGrbl::new(responses);
             let mut device = DeviceConnection::new(fake.clone());
             device.handshake().unwrap();
-            assert!(device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap_err().contains("$30"), "{max:?}");
+            assert!(
+                device
+                    .verify_job_ready_adaptive(Duration::from_secs(1))
+                    .unwrap_err()
+                    .contains("$30"),
+                "{max:?}"
+            );
             assert_eq!(fake.lines(), ["$$"]);
             assert!(fake.realtime().is_empty());
         }
-        for state in ["<Run|MPos:0,0,0>", "<Alarm|MPos:0,0,0>", "<Hold:0>", "<Check>", "<Idle|SD:50,file.nc>"] {
+        for state in [
+            "<Run|MPos:0,0,0>",
+            "<Alarm|MPos:0,0,0>",
+            "<Hold:0>",
+            "<Check>",
+            "<Idle|SD:50,file.nc>",
+        ] {
             let fake = FakeGrbl::new(["$30=1000", "$32=1", "ok", state].map(str::to_owned));
             let mut device = DeviceConnection::new(fake.clone());
             device.handshake().unwrap();
-            assert!(device.verify_job_ready_adaptive(Duration::from_secs(1)).is_err(), "{state}");
+            assert!(
+                device
+                    .verify_job_ready_adaptive(Duration::from_secs(1))
+                    .is_err(),
+                "{state}"
+            );
             assert_eq!(fake.lines(), ["$$"]);
         }
-        let fake = FakeGrbl::new(["$30=1000", "$32=1", "ok", "<Idle|MPos:0,0,0>"].map(str::to_owned));
+        let fake =
+            FakeGrbl::new(["$30=1000", "$32=1", "ok", "<Idle|MPos:0,0,0>"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake);
         device.handshake().unwrap();
-        assert_eq!(device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap(), 1000.0);
+        assert_eq!(
+            device
+                .verify_job_ready_adaptive(Duration::from_secs(1))
+                .unwrap(),
+            1000.0
+        );
     }
 
     #[test]
     fn completion_requires_fence_ack_then_idle_and_does_not_count_fence() {
-        let fake = FakeGrbl::new(["$32=1", "ok", "ok", "<Run|MPos:1,0,0>", "ok", "<Idle|MPos:1,0,0>"].map(str::to_owned));
+        let fake = FakeGrbl::new(
+            [
+                "$32=1",
+                "ok",
+                "ok",
+                "<Run|MPos:1,0,0>",
+                "ok",
+                "<Idle|MPos:1,0,0>",
+            ]
+            .map(str::to_owned),
+        );
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
         let mut worker = JobWorker::new(device, CancellationToken::default());
@@ -2630,14 +2915,18 @@ mod tests {
 
     #[test]
     fn completion_waits_for_run_to_transition_to_idle() {
-        let fake = FakeGrbl::new([
-            "$32=1", "ok", // handshake
-            "ok", // M5
-            "ok", // G4 P0
-            "<Run|MPos:1,0,0>",
-            "<Run|MPos:2,0,0>",
-            "<Idle|MPos:2,0,0>",
-        ].map(str::to_owned));
+        let fake = FakeGrbl::new(
+            [
+                "$32=1",
+                "ok", // handshake
+                "ok", // M5
+                "ok", // G4 P0
+                "<Run|MPos:1,0,0>",
+                "<Run|MPos:2,0,0>",
+                "<Idle|MPos:2,0,0>",
+            ]
+            .map(str::to_owned),
+        );
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
         let mut worker = JobWorker::new(device, CancellationToken::default());
@@ -2648,8 +2937,19 @@ mod tests {
 
     #[test]
     fn completed_file_ack_without_execution_confirmation_is_not_success() {
-        for tail in [vec![], vec!["error:2"], vec!["ok"], vec!["ok", "<Run|MPos:1,0,0>"], vec!["Grbl 1.1h"]] {
-            let fake = FakeGrbl::new(["$32=1", "ok", "ok"].into_iter().chain(tail).map(str::to_owned));
+        for tail in [
+            vec![],
+            vec!["error:2"],
+            vec!["ok"],
+            vec!["ok", "<Run|MPos:1,0,0>"],
+            vec!["Grbl 1.1h"],
+        ] {
+            let fake = FakeGrbl::new(
+                ["$32=1", "ok", "ok"]
+                    .into_iter()
+                    .chain(tail)
+                    .map(str::to_owned),
+            );
             let mut device = DeviceConnection::new(fake);
             device.handshake().unwrap();
             let mut worker = JobWorker::new(device, CancellationToken::default());
@@ -2660,10 +2960,17 @@ mod tests {
 
     #[test]
     fn cancellation_interrupts_ack_wait_with_continuous_status_output() {
-        struct CancelOnRead { fake: FakeGrbl, cancel: CancellationToken }
+        struct CancelOnRead {
+            fake: FakeGrbl,
+            cancel: CancellationToken,
+        }
         impl DeviceTransport for CancelOnRead {
-            fn write_line(&self, line: &str) -> Result<(), String> { self.fake.write_line(line) }
-            fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> { self.fake.write_realtime(cmd) }
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                self.fake.write_line(line)
+            }
+            fn write_realtime(&self, cmd: RealtimeCommand) -> Result<(), String> {
+                self.fake.write_realtime(cmd)
+            }
             fn read_line(&self) -> Result<Option<String>, String> {
                 self.cancel.cancel();
                 Ok(Some("<Hold:0>".into()))
@@ -2671,7 +2978,10 @@ mod tests {
         }
         let cancel = CancellationToken::default();
         let fake = FakeGrbl::new([]);
-        let mut device = DeviceConnection::new(CancelOnRead { fake: fake.clone(), cancel: cancel.clone() });
+        let mut device = DeviceConnection::new(CancelOnRead {
+            fake: fake.clone(),
+            cancel: cancel.clone(),
+        });
         device.state = DeviceState::Ready;
         let mut worker = JobWorker::new(device, cancel);
         // 在字符计数流控下，M5 (3B) 与 G1 X1 (6B) 均在 127 字节 RX 缓冲内连续下发；
@@ -2688,14 +2998,15 @@ mod tests {
         // 前 2 行 (6 + 6 = 12 字节 <= 15) 在无任何 ACK 时立即连续下发；
         // 第 3 行 (12 + 6 = 18 > 15) 必须等待第 1 行的 ok 被消费后才下发。
         let responses = [
-            "$32=1", "ok", // handshake
-            "ok", // ack for line 1 -> triggers line 3 to be sent
-            "ok", // ack for line 2 -> triggers line 4 to be sent
-            "ok", // ack for line 3
-            "ok", // ack for line 4
-            "ok", // ack for G4 P0
+            "$32=1", "ok",     // handshake
+            "ok",     // ack for line 1 -> triggers line 3 to be sent
+            "ok",     // ack for line 2 -> triggers line 4 to be sent
+            "ok",     // ack for line 3
+            "ok",     // ack for line 4
+            "ok",     // ack for G4 P0
             "<Idle>", // wait_until_idle
-        ].map(str::to_owned);
+        ]
+        .map(str::to_owned);
         let fake = FakeGrbl::new(responses);
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
@@ -2740,7 +3051,10 @@ mod tests {
     fn rescale_gcode_line_s_scales_properly() {
         let factor = 255.0 / 1000.0;
         assert_eq!(rescale_gcode_line_s("M4 S1000", factor), "M4 S255");
-        assert_eq!(rescale_gcode_line_s("G1 X10 Y20 S500 F3000", factor), "G1 X10 Y20 S128 F3000");
+        assert_eq!(
+            rescale_gcode_line_s("G1 X10 Y20 S500 F3000", factor),
+            "G1 X10 Y20 S128 F3000"
+        );
         assert_eq!(rescale_gcode_line_s("M5 S0", factor), "M5 S0");
         assert_eq!(rescale_gcode_line_s("M4 S1000", 1.0), "M4 S1000");
     }
@@ -2751,18 +3065,31 @@ mod tests {
         // 紧凑写法（含剥离括号注释后拼接出的 "X10S500"）同样必须换算，否则按原值满功率出光
         assert_eq!(rescale_gcode_line_s("G1X10S500", factor), "G1X10S128");
         assert_eq!(rescale_gcode_line_s("M4S1000", factor), "M4S255");
-        assert_eq!(rescale_gcode_line_s("G1 X10.5S1000F600", factor), "G1 X10.5S255F600");
+        assert_eq!(
+            rescale_gcode_line_s("G1 X10.5S1000F600", factor),
+            "G1 X10.5S255F600"
+        );
         // `$` 系统指令（如 $SD/Run=）不是 G-code 字，不得改写
-        assert_eq!(rescale_gcode_line_s("$SD/Run=/sd/S500.gcode", factor), "$SD/Run=/sd/S500.gcode");
+        assert_eq!(
+            rescale_gcode_line_s("$SD/Run=/sd/S500.gcode", factor),
+            "$SD/Run=/sd/S500.gcode"
+        );
     }
 
     #[test]
     fn verify_job_ready_adaptive_accepts_valid_scales() {
         for max in ["255", "1000", "500"] {
-            let fake = FakeGrbl::new([format!("$30={max}"), "$32=1".into(), "ok".into(), "<Idle>".into()]);
+            let fake = FakeGrbl::new([
+                format!("$30={max}"),
+                "$32=1".into(),
+                "ok".into(),
+                "<Idle>".into(),
+            ]);
             let mut device = DeviceConnection::new(fake);
             device.handshake().unwrap();
-            let scale = device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap();
+            let scale = device
+                .verify_job_ready_adaptive(Duration::from_secs(1))
+                .unwrap();
             assert_eq!(scale, max.parse::<f64>().unwrap());
         }
     }
@@ -2832,12 +3159,18 @@ control:
         let alarm14 = diagnose_device_message("ALARM:14").unwrap();
         assert!(alarm14.contains("未回零安全锁定"), "{alarm14}");
         let alarm18 = diagnose_device_message("ALARM:18").unwrap();
-        assert!(alarm18.contains("对刀过程触碰到了物理硬限位开关"), "{alarm18}");
+        assert!(
+            alarm18.contains("对刀过程触碰到了物理硬限位开关"),
+            "{alarm18}"
+        );
 
         let err60 = diagnose_device_message("error:60").unwrap();
         assert!(err60.contains("SD 卡挂载失败"), "{err60}");
         let err65 = diagnose_device_message("error:65").unwrap();
-        assert!(err65.contains("指定的文件在 SD 卡或内部 Flash 中不存在"), "{err65}");
+        assert!(
+            err65.contains("指定的文件在 SD 卡或内部 Flash 中不存在"),
+            "{err65}"
+        );
         let err150 = diagnose_device_message("error:150").unwrap();
         assert!(err150.contains("引脚配置冲突"), "{err150}");
         let err152 = diagnose_device_message("error:152").unwrap();
@@ -2847,14 +3180,16 @@ control:
     #[test]
     fn stream_lines_dynamically_adapts_to_reported_rx_buffer() {
         let responses = [
-            "$32=1", "ok",
+            "$32=1",
+            "ok",
             "<Run|Bf:35,1024>", // 动态报告 1024 字节 RX 缓冲
             "ok",
             "ok",
             "ok",
             "ok",
             "<Idle>",
-        ].map(str::to_owned);
+        ]
+        .map(str::to_owned);
         let fake = FakeGrbl::new(responses);
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
@@ -2873,11 +3208,17 @@ control:
     fn verify_sd_file_hash_checks_sha256() {
         let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let fake = FakeGrbl::new([
-            format!("{{\"signature\":{{\"algorithm\":\"SHA2-256\",\"value\":\"{sha}\"}},\"path\":\"/sd/test.gcode\"}}"),
+            format!(
+                "{{\"signature\":{{\"algorithm\":\"SHA2-256\",\"value\":\"{sha}\"}},\"path\":\"/sd/test.gcode\"}}"
+            ),
             "ok".to_string(),
         ]);
         let mut device = DeviceConnection::new(fake);
-        assert!(device.verify_sd_file_hash("/sd/test.gcode", sha, Duration::from_secs(1)).is_ok());
+        assert!(
+            device
+                .verify_sd_file_hash("/sd/test.gcode", sha, Duration::from_secs(1))
+                .is_ok()
+        );
 
         // 校验失败分支
         let fake_bad = FakeGrbl::new([
@@ -2885,7 +3226,9 @@ control:
             "ok".to_string(),
         ]);
         let mut device_bad = DeviceConnection::new(fake_bad);
-        let err = device_bad.verify_sd_file_hash("/sd/test.gcode", sha, Duration::from_secs(1)).unwrap_err();
+        let err = device_bad
+            .verify_sd_file_hash("/sd/test.gcode", sha, Duration::from_secs(1))
+            .unwrap_err();
         assert!(err.contains("物理校验不匹配"), "{err}");
     }
 
@@ -2895,23 +3238,41 @@ control:
 
     #[test]
     fn status_report_parser_covers_fluidnc_states_pins_buffer_and_sd() {
-        let r = parse_status_report("<Home|MPos:0,0,0|Bf:15,1200|Pn:XE|SD:12.50,/sd/a.nc>").unwrap();
+        let r =
+            parse_status_report("<Home|MPos:0,0,0|Bf:15,1200|Pn:XE|SD:12.50,/sd/a.nc>").unwrap();
         assert_eq!(r.activity, MachineActivity::Busy);
         assert_eq!(r.pins, "XE");
         assert_eq!(r.blocking_pins(), vec!["急停按钮 (E)"]);
         assert_eq!(r.planner_free, Some(15));
         assert_eq!(r.rx_buffer_free, Some(1200));
-        assert_eq!(r.sd, Some(SdProgress::Running { percent: 12.5, path: "/sd/a.nc".into() }));
+        assert_eq!(
+            r.sd,
+            Some(SdProgress::Running {
+                percent: 12.5,
+                path: "/sd/a.nc".into()
+            })
+        );
         assert!(r.has_sd_job());
 
         let sent = parse_status_report("<Idle|MPos:0,0,0|SD: a.nc: Sent>").unwrap();
-        assert_eq!(sent.sd, Some(SdProgress::Sent { name: "a.nc".into() }));
+        assert_eq!(
+            sent.sd,
+            Some(SdProgress::Sent {
+                name: "a.nc".into()
+            })
+        );
         assert!(!sent.has_sd_job(), "Sent 不是运行中");
 
         for (line, act) in [
-            ("<Idle>", MachineActivity::Idle), ("<Run>", MachineActivity::Busy), ("<Jog>", MachineActivity::Busy),
-            ("<Starting>", MachineActivity::Busy), ("<Hold:0>", MachineActivity::Held), ("<Hold:1>", MachineActivity::Held),
-            ("<Door:1>", MachineActivity::DoorOpen), ("<Alarm>", MachineActivity::Alarm), ("<Sleep>", MachineActivity::Sleep),
+            ("<Idle>", MachineActivity::Idle),
+            ("<Run>", MachineActivity::Busy),
+            ("<Jog>", MachineActivity::Busy),
+            ("<Starting>", MachineActivity::Busy),
+            ("<Hold:0>", MachineActivity::Held),
+            ("<Hold:1>", MachineActivity::Held),
+            ("<Door:1>", MachineActivity::DoorOpen),
+            ("<Alarm>", MachineActivity::Alarm),
+            ("<Sleep>", MachineActivity::Sleep),
             ("<Check>", MachineActivity::Check),
         ] {
             assert_eq!(parse_status_report(line).unwrap().activity, act, "{line}");
@@ -2922,16 +3283,28 @@ control:
 
     #[test]
     fn wait_until_idle_treats_home_and_door_as_transient_not_alarm() {
-        let fake = FakeGrbl::new(["<Home|MPos:0,0,0>", "<Door:1|MPos:0,0,0>", "<Hold:0>", "<Idle|MPos:0,0,0>"].map(str::to_owned));
+        let fake = FakeGrbl::new(
+            [
+                "<Home|MPos:0,0,0>",
+                "<Door:1|MPos:0,0,0>",
+                "<Hold:0>",
+                "<Idle|MPos:0,0,0>",
+            ]
+            .map(str::to_owned),
+        );
         let mut device = DeviceConnection::new(fake);
         device.state = DeviceState::Ready;
-        device.wait_until_idle(Duration::from_secs(2), None).unwrap();
+        device
+            .wait_until_idle(Duration::from_secs(2), None)
+            .unwrap();
         assert_eq!(device.state(), DeviceState::Ready);
 
         for bad in ["<Sleep>", "<Check>", "<Alarm|MPos:0,0,0>"] {
             let mut device = DeviceConnection::new(FakeGrbl::new([bad.to_string()]));
             device.state = DeviceState::Ready;
-            let err = device.wait_until_idle(Duration::from_secs(1), None).unwrap_err();
+            let err = device
+                .wait_until_idle(Duration::from_secs(1), None)
+                .unwrap_err();
             assert!(err.contains("异常状态"), "{bad}: {err}");
         }
     }
@@ -2940,18 +3313,31 @@ control:
     fn preflight_rejects_blocking_pins_and_explains_which_one() {
         for (pins, expect) in [("E", "急停按钮"), ("XF", "故障输入"), ("D", "安全门")] {
             let status = format!("<Idle|MPos:0,0,0|Pn:{pins}>");
-            let fake = FakeGrbl::new(["$30=1000".to_string(), "$32=1".to_string(), "ok".to_string(), status]);
+            let fake = FakeGrbl::new([
+                "$30=1000".to_string(),
+                "$32=1".to_string(),
+                "ok".to_string(),
+                status,
+            ]);
             let mut device = DeviceConnection::new(fake);
             device.handshake().unwrap();
-            let err = device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap_err();
+            let err = device
+                .verify_job_ready_adaptive(Duration::from_secs(1))
+                .unwrap_err();
             assert!(err.contains(expect), "{pins}: {err}");
             assert_eq!(device.state(), DeviceState::Alarm);
         }
         // 限位字母 X/Y 不阻断（只是限位开关状态）
-        let fake = FakeGrbl::new(["$30=1000", "$32=1", "ok", "<Idle|MPos:0,0,0|Pn:XY>"].map(str::to_owned));
+        let fake = FakeGrbl::new(
+            ["$30=1000", "$32=1", "ok", "<Idle|MPos:0,0,0|Pn:XY>"].map(str::to_owned),
+        );
         let mut device = DeviceConnection::new(fake);
         device.handshake().unwrap();
-        assert!(device.verify_job_ready_adaptive(Duration::from_secs(1)).is_ok());
+        assert!(
+            device
+                .verify_job_ready_adaptive(Duration::from_secs(1))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2994,7 +3380,9 @@ control:
         device.state = DeviceState::Ready;
         let progress = Arc::new(JobProgress::default());
         progress.total_lines.store(200, Ordering::Relaxed);
-        device.wait_until_sd_completed(Duration::from_secs(2), Some(&progress), None).unwrap();
+        device
+            .wait_until_sd_completed(Duration::from_secs(2), Some(&progress), None)
+            .unwrap();
         assert_eq!(progress.lines_sent.load(Ordering::Relaxed), 200);
         assert!(!device.sd_job_active);
 
@@ -3029,7 +3417,11 @@ control:
 
     #[test]
     fn reset_detection_covers_restart_message_and_ver_banner() {
-        let banners = ["Grbl 3.9 [FluidNC v3.9.1 (wifi) for help]", "[MSG:INFO: Restarting]", "[VER:3.9 FluidNC v3.9.1:]"];
+        let banners = [
+            "Grbl 3.9 [FluidNC v3.9.1 (wifi) for help]",
+            "[MSG:INFO: Restarting]",
+            "[VER:3.9 FluidNC v3.9.1:]",
+        ];
         for banner in banners {
             assert!(is_reset_banner(banner), "{banner}");
             let mut device = DeviceConnection::new(FakeGrbl::new([banner.to_string()]));
@@ -3053,27 +3445,57 @@ control:
         // 已确认 FluidNC 但不报 Bf:：网络窗口 256，串口仍是 127
         device.features = Some(MachineFeatures::default());
         assert_eq!(device.effective_rx_window(1024), 256);
-        assert_eq!(device.effective_rx_window(GRBL_CLASSIC_RX_WINDOW), GRBL_CLASSIC_RX_WINDOW);
+        assert_eq!(
+            device.effective_rx_window(GRBL_CLASSIC_RX_WINDOW),
+            GRBL_CLASSIC_RX_WINDOW
+        );
 
         // 报 Bf: 但尚未观测：仍按保守初始值；预检 ? 观测到空闲 Bf:15,1200 后放大到硬上限 1024
-        let fake = FakeGrbl::new(["$10=3", "$30=1000", "$32=1", "ok", "<Idle|MPos:0,0,0|Bf:15,1200>"].map(str::to_owned));
+        let fake = FakeGrbl::new(
+            [
+                "$10=3",
+                "$30=1000",
+                "$32=1",
+                "ok",
+                "<Idle|MPos:0,0,0|Bf:15,1200>",
+            ]
+            .map(str::to_owned),
+        );
         let mut device = DeviceConnection::new(fake);
         device.handshake().unwrap();
         assert_eq!(device.reports_buffer_state(), Some(true));
         assert_eq!(device.effective_rx_window(1024), GRBL_CLASSIC_RX_WINDOW);
         device.features = Some(MachineFeatures::default());
         assert_eq!(device.effective_rx_window(1024), 256);
-        device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap();
+        device
+            .verify_job_ready_adaptive(Duration::from_secs(1))
+            .unwrap();
         assert_eq!(device.rx_capacity_observed, Some(1200));
         assert_eq!(device.effective_rx_window(1024), MAX_RX_WINDOW);
 
         // $10=1 时即使 Bf: 报告 1200，窗口也不得扩到 256 以上；3 行仍应正常完成
-        let responses = ["$10=1", "$32=1", "ok", "<Run|Bf:15,1200>", "ok", "ok", "ok", "ok", "<Idle>"].map(str::to_owned);
+        let responses = [
+            "$10=1",
+            "$32=1",
+            "ok",
+            "<Run|Bf:15,1200>",
+            "ok",
+            "ok",
+            "ok",
+            "ok",
+            "<Idle>",
+        ]
+        .map(str::to_owned);
         let fake = FakeGrbl::new(responses);
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
         let mut worker = JobWorker::new(device, CancellationToken::default());
-        assert_eq!(worker.send_lines(["G1 X1".into(), "G1 X2".into(), "G1 X3".into()]).unwrap(), 3);
+        assert_eq!(
+            worker
+                .send_lines(["G1 X1".into(), "G1 X2".into(), "G1 X3".into()])
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
@@ -3101,15 +3523,30 @@ control:
                 let mut line = String::new();
                 while reader.read_line(&mut line).is_ok() && !line.is_empty() {
                     match line.trim() {
-                        "$$" => { let _ = write!(writer, "$10=1\r\n$30=1000\r\n$32=1\r\nok\r\n"); }
-                        "$CD" => { let _ = write!(writer, "macros:\r\n  after_unlock: G0 X0\r\naxes:\r\n  x:\r\n    max_travel_mm: 100\r\nok\r\n"); }
-                        _ => { let _ = write!(writer, "ok\r\n"); }
+                        "$$" => {
+                            let _ = write!(writer, "$10=1\r\n$30=1000\r\n$32=1\r\nok\r\n");
+                        }
+                        "$CD" => {
+                            let _ = write!(
+                                writer,
+                                "macros:\r\n  after_unlock: G0 X0\r\naxes:\r\n  x:\r\n    max_travel_mm: 100\r\nok\r\n"
+                            );
+                        }
+                        _ => {
+                            let _ = write!(writer, "ok\r\n");
+                        }
                     }
                     line.clear();
                 }
             }
         });
-        let report = probe_device(&ConnectionSpec::Tcp { host: "127.0.0.1".into(), port }, Duration::from_secs(2));
+        let report = probe_device(
+            &ConnectionSpec::Tcp {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            Duration::from_secs(2),
+        );
         assert!(report.connected, "{}", report.summary);
         let f = report.features.expect("features from $CD");
         assert!(f.has_after_unlock_macro);
@@ -3129,7 +3566,8 @@ control:
         assert_eq!(fake.lines(), ["$$", "M5", "G4 P0"]);
 
         // FluidNC：$RI=200 的 ok 先被消费，行 ack 计数不受影响；结束后 $RI=0
-        let fake = FakeGrbl::new(["$32=1", "ok", "ok", "ok", "ok", "<Idle>", "ok"].map(str::to_owned));
+        let fake =
+            FakeGrbl::new(["$32=1", "ok", "ok", "ok", "ok", "<Idle>", "ok"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
         device.features = Some(MachineFeatures::default());
@@ -3140,7 +3578,8 @@ control:
         assert_eq!(fake.lines(), ["$$", "$RI=200", "M5", "G4 P0", "$RI=0"]);
 
         // 固件不认识 $RI（error:3）：静默关闭，不影响后续
-        let fake = FakeGrbl::new(["$32=1", "ok", "error:3", "ok", "ok", "<Idle>"].map(str::to_owned));
+        let fake =
+            FakeGrbl::new(["$32=1", "ok", "error:3", "ok", "ok", "<Idle>"].map(str::to_owned));
         let mut device = DeviceConnection::new(fake.clone());
         device.handshake().unwrap();
         device.features = Some(MachineFeatures::default());
@@ -3154,7 +3593,12 @@ control:
         let fake = FakeGrbl::new(["ok".to_string()]);
         let mut device = DeviceConnection::new(fake);
         let zeros = "0".repeat(64);
-        assert_eq!(device.verify_sd_file_hash("/sd/x.nc", &zeros, Duration::from_secs(1)).unwrap(), false);
+        assert_eq!(
+            device
+                .verify_sd_file_hash("/sd/x.nc", &zeros, Duration::from_secs(1))
+                .unwrap(),
+            false
+        );
     }
 
     // ---- 2026-11-05：读超时半行续接 ----
@@ -3177,13 +3621,25 @@ control:
     #[test]
     fn line_reader_keeps_partial_line_across_read_timeout() {
         use std::io::ErrorKind::{TimedOut, WouldBlock};
-        let script = [Ok(&b"o"[..]), Err(TimedOut), Ok(&b"k\r\n<Idle|Bf:15,"[..]), Err(WouldBlock), Ok(&b"128>\n  indented: 1\ntail"[..])];
+        let script = [
+            Ok(&b"o"[..]),
+            Err(TimedOut),
+            Ok(&b"k\r\n<Idle|Bf:15,"[..]),
+            Err(WouldBlock),
+            Ok(&b"128>\n  indented: 1\ntail"[..]),
+        ];
         let mut reader = LineReader::new(ScriptedReader(script.into_iter().collect()));
         assert!(reader.read_line().is_err(), "第一次读到半行后超时应报错");
         assert_eq!(reader.read_line().unwrap().as_deref(), Some("ok"));
         assert!(reader.read_line().is_err());
-        assert_eq!(reader.read_line().unwrap().as_deref(), Some("<Idle|Bf:15,128>"));
-        assert_eq!(reader.read_line().unwrap().as_deref(), Some("  indented: 1"));
+        assert_eq!(
+            reader.read_line().unwrap().as_deref(),
+            Some("<Idle|Bf:15,128>")
+        );
+        assert_eq!(
+            reader.read_line().unwrap().as_deref(),
+            Some("  indented: 1")
+        );
         // EOF 前无换行的尾巴作为最后一行交出，随后报 EOF
         assert_eq!(reader.read_line().unwrap().as_deref(), Some("tail"));
         assert_eq!(reader.read_line().unwrap(), None);
@@ -3205,7 +3661,10 @@ control:
             std::thread::sleep(Duration::from_millis(300));
         });
         let grbl = TcpGrbl::connect(&address.to_string()).unwrap();
-        assert!(grbl.read_line().is_err(), "半行之后的读超时应报错而不是交出半行");
+        assert!(
+            grbl.read_line().is_err(),
+            "半行之后的读超时应报错而不是交出半行"
+        );
         let mut completed = None;
         for _ in 0..4 {
             match grbl.read_line() {
@@ -3245,14 +3704,40 @@ control:
     }
 
     impl SimRx {
-        fn new(usable: usize, idle_reported_free: usize, transport_default: usize, report_every: usize) -> Arc<Self> {
-            Arc::new(Self { usable, idle_reported_free, transport_default, report_every, state: Mutex::default() })
+        fn new(
+            usable: usize,
+            idle_reported_free: usize,
+            transport_default: usize,
+            report_every: usize,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                usable,
+                idle_reported_free,
+                transport_default,
+                report_every,
+                state: Mutex::default(),
+            })
         }
         fn peak(&self) -> usize {
-            self.state.lock().unwrap().occupancy.iter().copied().max().unwrap_or(0)
+            self.state
+                .lock()
+                .unwrap()
+                .occupancy
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
         }
         fn peak_after_writes(&self, skip: usize) -> usize {
-            self.state.lock().unwrap().occupancy.iter().skip(skip).copied().max().unwrap_or(0)
+            self.state
+                .lock()
+                .unwrap()
+                .occupancy
+                .iter()
+                .skip(skip)
+                .copied()
+                .max()
+                .unwrap_or(0)
         }
     }
 
@@ -3283,7 +3768,9 @@ control:
                 let used: usize = st.pending.iter().sum();
                 let free = self.idle_reported_free.saturating_sub(used);
                 let state = if st.pending.is_empty() { "Idle" } else { "Run" };
-                return Ok(Some(format!("<{state}|MPos:0.000,0.000,0.000|Bf:15,{free}>")));
+                return Ok(Some(format!(
+                    "<{state}|MPos:0.000,0.000,0.000|Bf:15,{free}>"
+                )));
             }
             if st.pending.pop_front().is_some() {
                 return Ok(Some("ok".into()));
@@ -3309,7 +3796,9 @@ control:
     }
 
     fn sim_lines(count: usize) -> Vec<String> {
-        (0..count).map(|i| format!("G1 X{:.3} Y{:.3} S500", i as f64 * 0.1, i as f64 * 0.2)).collect()
+        (0..count)
+            .map(|i| format!("G1 X{:.3} Y{:.3} S500", i as f64 * 0.1, i as f64 * 0.2))
+            .collect()
     }
 
     #[test]
@@ -3321,15 +3810,27 @@ control:
                 let sim = SimRx::new(GRBL_CLASSIC_RX_WINDOW, idle_free, 255, 3);
                 let mut device = sim_device(&sim, false);
                 if preflight {
-                    device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap();
+                    device
+                        .verify_job_ready_adaptive(Duration::from_secs(1))
+                        .unwrap();
                     assert_eq!(device.rx_capacity_observed, Some(idle_free));
                     assert!(device.effective_rx_window(255) <= GRBL_CLASSIC_RX_WINDOW);
                 }
                 let mut worker = JobWorker::new(device, CancellationToken::default());
-                assert_eq!(worker.send_lines(sim_lines(200)).unwrap(), 200, "Bf:15,{idle_free} preflight={preflight}");
+                assert_eq!(
+                    worker.send_lines(sim_lines(200)).unwrap(),
+                    200,
+                    "Bf:15,{idle_free} preflight={preflight}"
+                );
                 let peak = sim.peak();
-                assert!(!sim.state.lock().unwrap().overflow, "RX 溢出：峰值 {peak} 字节 (Bf:15,{idle_free}, preflight={preflight})");
-                assert!(peak <= GRBL_CLASSIC_RX_WINDOW && peak < idle_free, "峰值 {peak} 超过设备容量 {idle_free}");
+                assert!(
+                    !sim.state.lock().unwrap().overflow,
+                    "RX 溢出：峰值 {peak} 字节 (Bf:15,{idle_free}, preflight={preflight})"
+                );
+                assert!(
+                    peak <= GRBL_CLASSIC_RX_WINDOW && peak < idle_free,
+                    "峰值 {peak} 超过设备容量 {idle_free}"
+                );
                 // 窗口仍被有效利用，不是退化成逐行往返
                 assert!(peak >= 100, "峰值 {peak} 过低");
                 assert_eq!(sim.state.lock().unwrap().written.len(), 201); // 200 行 + G4 P0
@@ -3344,18 +3845,30 @@ control:
             let sim = SimRx::new(1200, 1200, MAX_RX_WINDOW, 4);
             let mut device = sim_device(&sim, true);
             if preflight {
-                device.verify_job_ready_adaptive(Duration::from_secs(1)).unwrap();
+                device
+                    .verify_job_ready_adaptive(Duration::from_secs(1))
+                    .unwrap();
                 assert_eq!(device.effective_rx_window(MAX_RX_WINDOW), MAX_RX_WINDOW);
             } else {
-                assert_eq!(device.effective_rx_window(MAX_RX_WINDOW), FLUIDNC_CHANNEL_RX_WINDOW);
+                assert_eq!(
+                    device.effective_rx_window(MAX_RX_WINDOW),
+                    FLUIDNC_CHANNEL_RX_WINDOW
+                );
             }
             let mut worker = JobWorker::new(device, CancellationToken::default());
             assert_eq!(worker.send_lines(sim_lines(400)).unwrap(), 400);
             assert!(!sim.state.lock().unwrap().overflow);
-            assert!(sim.peak() <= MAX_RX_WINDOW, "峰值 {} 超过窗口上限", sim.peak());
+            assert!(
+                sim.peak() <= MAX_RX_WINDOW,
+                "峰值 {} 超过窗口上限",
+                sim.peak()
+            );
             // 后半程（已收到多次发送中 Bf 报告之后）仍保持大窗口
             let late_peak = sim.peak_after_writes(200);
-            assert!(late_peak > 900, "后半程峰值 {late_peak}，大容量未被利用 (preflight={preflight})");
+            assert!(
+                late_peak > 900,
+                "后半程峰值 {late_peak}，大容量未被利用 (preflight={preflight})"
+            );
             let written = sim.state.lock().unwrap().written.clone();
             assert_eq!(written.first().map(String::as_str), Some("$RI=200"));
             assert_eq!(written.last().map(String::as_str), Some("$RI=0"));
@@ -3370,15 +3883,20 @@ control:
         gate: Mutex<Option<Instant>>,
     }
     impl DeviceTransport for SlowLink {
-        fn write_line(&self, line: &str) -> Result<(), String> { self.fake.write_line(line) }
-        fn write_realtime(&self, c: RealtimeCommand) -> Result<(), String> { self.fake.write_realtime(c) }
+        fn write_line(&self, line: &str) -> Result<(), String> {
+            self.fake.write_line(line)
+        }
+        fn write_realtime(&self, c: RealtimeCommand) -> Result<(), String> {
+            self.fake.write_realtime(c)
+        }
         fn read_line(&self) -> Result<Option<String>, String> {
             let mut queue = self.fake.responses.lock().unwrap();
             match queue.front().cloned() {
                 Some(front) if front.starts_with("\u{0}wait:") => {
                     let ms: u64 = front["\u{0}wait:".len()..].parse().unwrap();
                     let mut gate = self.gate.lock().unwrap();
-                    let until = *gate.get_or_insert_with(|| Instant::now() + Duration::from_millis(ms));
+                    let until =
+                        *gate.get_or_insert_with(|| Instant::now() + Duration::from_millis(ms));
                     if Instant::now() >= until {
                         queue.pop_front();
                         *gate = None;
@@ -3395,7 +3913,10 @@ control:
 
     fn slow_fluidnc(responses: &[&str]) -> (FakeGrbl, DeviceConnection<SlowLink>) {
         let fake = FakeGrbl::new(responses.iter().map(|s| s.to_string()));
-        let mut device = DeviceConnection::new(SlowLink { fake: fake.clone(), gate: Mutex::new(None) });
+        let mut device = DeviceConnection::new(SlowLink {
+            fake: fake.clone(),
+            gate: Mutex::new(None),
+        });
         device.handshake().unwrap();
         device.features = Some(MachineFeatures::default());
         (fake, device)
@@ -3404,20 +3925,24 @@ control:
     #[test]
     fn late_auto_report_ack_is_resynchronised_before_streaming() {
         let (fake, device) = slow_fluidnc(&[
-            "$32=1", "ok",       // 握手
-            "\u{0}wait:2300",    // $RI 应答迟到，超过 2s 常规等待
-            "ok",                // $RI 的 ok（迟到）
-            "ok",                // 同步 G4 P0 的 ok
-            "ok",                // M5
-            "ok",                // 完成栅栏 G4 P0
+            "$32=1",
+            "ok",             // 握手
+            "\u{0}wait:2300", // $RI 应答迟到，超过 2s 常规等待
+            "ok",             // $RI 的 ok（迟到）
+            "ok",             // 同步 G4 P0 的 ok
+            "ok",             // M5
+            "ok",             // 完成栅栏 G4 P0
             "<Idle>",
-            "ok",                // $RI=0
+            "ok", // $RI=0
         ]);
         let mut worker = JobWorker::new(device, CancellationToken::default());
         assert_eq!(worker.send_lines(["M5".into()]).unwrap(), 1);
         assert_eq!(worker.progress.lines_sent.load(Ordering::Relaxed), 1);
         // 迟到的 ok 被同步消费掉，M5 只在同步之后发出，完成后关闭自动上报
-        assert_eq!(fake.lines(), ["$$", "$RI=200", "G4 P0", "M5", "G4 P0", "$RI=0"]);
+        assert_eq!(
+            fake.lines(),
+            ["$$", "$RI=200", "G4 P0", "M5", "G4 P0", "$RI=0"]
+        );
     }
 
     #[test]

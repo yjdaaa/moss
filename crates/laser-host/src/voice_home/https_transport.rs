@@ -39,10 +39,13 @@ impl HttpsHomeTransport {
         let client = moss_voice::home_readonly::pinned_client(&url).map_err(|_| ())?;
         #[cfg(test)]
         let client = Client::builder()
-            .https_only(true).no_proxy().redirect(reqwest::redirect::Policy::none())
+            .https_only(true)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(7))
-            .build().map_err(|_| ())?;
+            .build()
+            .map_err(|_| ())?;
         Ok(Self {
             origin: url,
             bearer: bearer.to_owned(),

@@ -63,10 +63,15 @@ mod envelope {
 
     fn xor_keystream(enc_key: &[u8; 32], input: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; input.len()];
-        for (block_idx, (dst_chunk, src_chunk)) in out.chunks_mut(32).zip(input.chunks(32)).enumerate() {
+        for (block_idx, (dst_chunk, src_chunk)) in
+            out.chunks_mut(32).zip(input.chunks(32)).enumerate()
+        {
             let counter = (block_idx as u64).to_le_bytes();
             let stream = hmac_sha256(enc_key, &[&counter]);
-            for (d, (s, k)) in dst_chunk.iter_mut().zip(src_chunk.iter().zip(stream.iter())) {
+            for (d, (s, k)) in dst_chunk
+                .iter_mut()
+                .zip(src_chunk.iter().zip(stream.iter()))
+            {
                 *d = *s ^ *k;
             }
         }
@@ -111,10 +116,14 @@ mod envelope {
         master: &[u8; MASTER_KEY_LEN],
         sealed: &[u8],
     ) -> Result<Vec<u8>, HomeSecretError> {
-        if sealed.len() <= NONCE_LEN + TAG_LEN || sealed.len() > NONCE_LEN + MAX_PLAINTEXT_LEN + TAG_LEN {
+        if sealed.len() <= NONCE_LEN + TAG_LEN
+            || sealed.len() > NONCE_LEN + MAX_PLAINTEXT_LEN + TAG_LEN
+        {
             return Err(HomeSecretError::Invalid);
         }
-        let nonce: &[u8; NONCE_LEN] = sealed[..NONCE_LEN].try_into().map_err(|_| HomeSecretError::Invalid)?;
+        let nonce: &[u8; NONCE_LEN] = sealed[..NONCE_LEN]
+            .try_into()
+            .map_err(|_| HomeSecretError::Invalid)?;
         let ciphertext = &sealed[NONCE_LEN..sealed.len() - TAG_LEN];
         let tag = &sealed[sealed.len() - TAG_LEN..];
 
@@ -178,23 +187,48 @@ fn crypt(input: &[u8], decrypt: bool) -> Result<Vec<u8>, HomeSecretError> {
     if input.is_empty() || input.len() > 64 * 1024 {
         return Err(HomeSecretError::Invalid);
     }
-    let mut source = DataBlob { len: input.len() as u32, data: input.as_ptr().cast_mut() };
-    let mut entropy = DataBlob { len: ENTROPY.len() as u32, data: ENTROPY.as_ptr().cast_mut() };
-    let mut output = DataBlob { len: 0, data: ptr::null_mut() };
+    let mut source = DataBlob {
+        len: input.len() as u32,
+        data: input.as_ptr().cast_mut(),
+    };
+    let mut entropy = DataBlob {
+        len: ENTROPY.len() as u32,
+        data: ENTROPY.as_ptr().cast_mut(),
+    };
+    let mut output = DataBlob {
+        len: 0,
+        data: ptr::null_mut(),
+    };
     // Safety: Windows DPAPI takes borrowed buffers and allocates the result
     // with LocalAlloc. We always release via LocalFree, even on malformed data.
     let success = unsafe {
         if decrypt {
-            CryptUnprotectData(&mut source, ptr::null_mut(), &mut entropy,
-                ptr::null(), ptr::null(), 0x1 /* UI_FORBIDDEN */, &mut output)
+            CryptUnprotectData(
+                &mut source,
+                ptr::null_mut(),
+                &mut entropy,
+                ptr::null(),
+                ptr::null(),
+                0x1, /* UI_FORBIDDEN */
+                &mut output,
+            )
         } else {
-            CryptProtectData(&mut source, ptr::null(), &mut entropy,
-                ptr::null(), ptr::null(), 0x1 /* UI_FORBIDDEN */, &mut output)
+            CryptProtectData(
+                &mut source,
+                ptr::null(),
+                &mut entropy,
+                ptr::null(),
+                ptr::null(),
+                0x1, /* UI_FORBIDDEN */
+                &mut output,
+            )
         }
     };
     if success == 0 || output.data.is_null() || output.len == 0 || output.len > 64 * 1024 {
         if !output.data.is_null() {
-            unsafe { LocalFree(output.data.cast()); }
+            unsafe {
+                LocalFree(output.data.cast());
+            }
         }
         return Err(HomeSecretError::CryptoFailure);
     }
@@ -207,18 +241,25 @@ fn crypt(input: &[u8], decrypt: bool) -> Result<Vec<u8>, HomeSecretError> {
             }
         }
     }
-    unsafe { LocalFree(output.data.cast()); }
+    unsafe {
+        LocalFree(output.data.cast());
+    }
     Ok(result)
 }
 
 #[cfg(windows)]
 pub(crate) fn seal(token: &str) -> Result<String, HomeSecretError> {
-    Ok(format!("{DPAPI_PREFIX}{}", hex::encode(crypt(token.as_bytes(), false)?)))
+    Ok(format!(
+        "{DPAPI_PREFIX}{}",
+        hex::encode(crypt(token.as_bytes(), false)?)
+    ))
 }
 
 #[cfg(windows)]
 pub(crate) fn open(ciphertext: &str) -> Result<String, HomeSecretError> {
-    let encoded = ciphertext.strip_prefix(DPAPI_PREFIX).ok_or(HomeSecretError::Invalid)?;
+    let encoded = ciphertext
+        .strip_prefix(DPAPI_PREFIX)
+        .ok_or(HomeSecretError::Invalid)?;
     let bytes = hex::decode(encoded).map_err(|_| HomeSecretError::Invalid)?;
     String::from_utf8(crypt(&bytes, true)?).map_err(|_| HomeSecretError::Invalid)
 }
@@ -261,7 +302,11 @@ mod macos_keychain {
             key_callbacks: *const c_void,
             value_callbacks: *const c_void,
         ) -> CFMutableDictionaryRef;
-        fn CFDictionarySetValue(dict: CFMutableDictionaryRef, key: *const c_void, value: *const c_void);
+        fn CFDictionarySetValue(
+            dict: CFMutableDictionaryRef,
+            key: *const c_void,
+            value: *const c_void,
+        );
         fn CFStringCreateWithBytes(
             alloc: CFAllocatorRef,
             bytes: *const u8,
@@ -330,7 +375,8 @@ mod macos_keychain {
     }
 
     fn sec_random(dest: &mut [u8]) -> Result<(), HomeSecretError> {
-        let status = unsafe { SecRandomCopyBytes(kSecRandomDefault, dest.len(), dest.as_mut_ptr()) };
+        let status =
+            unsafe { SecRandomCopyBytes(kSecRandomDefault, dest.len(), dest.as_mut_ptr()) };
         if status == 0 {
             Ok(())
         } else {
@@ -381,7 +427,9 @@ mod macos_keychain {
 
     /// 正式构建：主密钥存放在当前用户登录钥匙串（device-only）。
     #[cfg(not(any(test, feature = "test-memory-secret-store")))]
-    fn load_or_create_master_key(create_if_missing: bool) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
+    fn load_or_create_master_key(
+        create_if_missing: bool,
+    ) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
         load_or_create_keychain_master_key(create_if_missing)
     }
 
@@ -389,9 +437,14 @@ mod macos_keychain {
     /// 否则测试会把生产同名条目写进钥匙串，且每次重新编译的测试二进制都会触发授权弹窗导致 `cargo test` 卡死。
     /// 仅通过 dev-dependency 的 `test-memory-secret-store` feature 或本 crate 单元测试启用，正式打包不含 dev-dependency。
     #[cfg(any(test, feature = "test-memory-secret-store"))]
-    fn load_or_create_master_key(create_if_missing: bool) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
-        static TEST_MASTER_KEY: std::sync::Mutex<Option<[u8; MASTER_KEY_LEN]>> = std::sync::Mutex::new(None);
-        let mut slot = TEST_MASTER_KEY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn load_or_create_master_key(
+        create_if_missing: bool,
+    ) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
+        static TEST_MASTER_KEY: std::sync::Mutex<Option<[u8; MASTER_KEY_LEN]>> =
+            std::sync::Mutex::new(None);
+        let mut slot = TEST_MASTER_KEY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(existing) = *slot {
             return Ok(existing);
         }
@@ -404,7 +457,9 @@ mod macos_keychain {
         Ok(generated)
     }
 
-    fn load_or_create_keychain_master_key(create_if_missing: bool) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
+    fn load_or_create_keychain_master_key(
+        create_if_missing: bool,
+    ) -> Result<[u8; MASTER_KEY_LEN], HomeSecretError> {
         if let Some(existing) = query_master_key()? {
             return Ok(existing);
         }
@@ -435,7 +490,11 @@ mod macos_keychain {
             CFDictionarySetValue(dict, kSecClass, kSecClassGenericPassword);
             CFDictionarySetValue(dict, kSecAttrService, service.0);
             CFDictionarySetValue(dict, kSecAttrAccount, account.0);
-            CFDictionarySetValue(dict, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
+            CFDictionarySetValue(
+                dict,
+                kSecAttrAccessible,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            );
             CFDictionarySetValue(dict, kSecValueData, value.0);
         }
         let status = unsafe { SecItemAdd(dict.cast(), ptr::null_mut()) };
@@ -472,7 +531,9 @@ mod macos_keychain {
     }
 
     pub(crate) fn open(ciphertext: &str) -> Result<String, HomeSecretError> {
-        let encoded = ciphertext.strip_prefix(KEYCHAIN_PREFIX).ok_or(HomeSecretError::Invalid)?;
+        let encoded = ciphertext
+            .strip_prefix(KEYCHAIN_PREFIX)
+            .ok_or(HomeSecretError::Invalid)?;
         let bytes = hex::decode(encoded).map_err(|_| HomeSecretError::Invalid)?;
         let mut master = load_or_create_master_key(false)?;
         let res = envelope::open_with_key(&master, &bytes);
@@ -531,12 +592,18 @@ mod tests {
         let sealed = envelope::seal_with_key(&master, &nonce, original).unwrap();
         assert!(!sealed.windows(original.len()).any(|w| w == original));
         assert_eq!(envelope::open_with_key(&master, &sealed).unwrap(), original);
-        assert_eq!(envelope::open_with_key(&other_master, &sealed), Err(HomeSecretError::CryptoFailure));
+        assert_eq!(
+            envelope::open_with_key(&other_master, &sealed),
+            Err(HomeSecretError::CryptoFailure)
+        );
 
         for pos in [0, envelope::NONCE_LEN, sealed.len() - 1] {
             let mut tampered = sealed.clone();
             tampered[pos] ^= 0x01;
-            assert_eq!(envelope::open_with_key(&master, &tampered), Err(HomeSecretError::CryptoFailure));
+            assert_eq!(
+                envelope::open_with_key(&master, &tampered),
+                Err(HomeSecretError::CryptoFailure)
+            );
         }
     }
 

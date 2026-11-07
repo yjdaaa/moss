@@ -336,7 +336,14 @@ fn infer_groups_from_spec(spec: &ToolSpec) -> &'static [ToolGroup] {
         || name.starts_with("agent_")
         || contains_any(
             &desc,
-            &["home assistant", "智能家居", "家居实体", "桌面编码", "codex", "claude code"],
+            &[
+                "home assistant",
+                "智能家居",
+                "家居实体",
+                "桌面编码",
+                "codex",
+                "claude code",
+            ],
         )
     {
         return &[ToolGroup::HomeAndAgent];
@@ -344,33 +351,101 @@ fn infer_groups_from_spec(spec: &ToolSpec) -> &'static [ToolGroup] {
 
     if name.starts_with("music_")
         || name.contains("music")
-        || contains_any(&desc, &["本地音乐", "播放音乐", "设备音量", "屏幕亮度", "摄像头拍照"])
+        || contains_any(
+            &desc,
+            &["本地音乐", "播放音乐", "设备音量", "屏幕亮度", "摄像头拍照"],
+        )
     {
         return &[ToolGroup::MusicAndDevice];
     }
 
     let is_laser = contains_any(
         &name,
-        &["laser", "grbl", "gcode", "engrav", "calibrat", "material", "carv", "cut"],
+        &[
+            "laser", "grbl", "gcode", "engrav", "calibrat", "material", "carv", "cut",
+        ],
     ) || contains_any(
         &desc,
-        &["激光", "雕刻", "切割", "刀路", "g-code", "gcode", "grbl", "fluidnc", "校准", "材料参数"],
+        &[
+            "激光",
+            "雕刻",
+            "切割",
+            "刀路",
+            "g-code",
+            "gcode",
+            "grbl",
+            "fluidnc",
+            "校准",
+            "材料参数",
+        ],
     );
     if is_laser {
         let query = contains_any(
             &name,
-            &["check", "query", "status", "connect", "progress", "param", "recommend", "inspect"],
-        ) || contains_any(&desc, &["查询", "查看", "检查", "连接状态", "进度", "推荐参数", "只读"]);
-        let generate = contains_any(
-            &name,
-            &["generate", "regenerate", "preview", "refine", "feedback", "svg", "image", "text", "select_cell", "draft"],
-        ) || contains_any(&desc, &["生成", "预览", "反馈", "微调", "调参", "栅格", "矢量"]);
-        let control = contains_any(
-            &name,
-            &["start", "run", "send", "stop", "cancel", "pause", "resume", "home", "frame", "unlock", "control", "jog", "action", "move"],
+            &[
+                "check",
+                "query",
+                "status",
+                "connect",
+                "progress",
+                "param",
+                "recommend",
+                "inspect",
+            ],
         ) || contains_any(
             &desc,
-            &["开始", "启动", "发送", "停止", "急停", "取消", "暂停", "继续", "归零", "回零", "走边框", "巡边", "解锁", "移动"],
+            &[
+                "查询",
+                "查看",
+                "检查",
+                "连接状态",
+                "进度",
+                "推荐参数",
+                "只读",
+            ],
+        );
+        let generate = contains_any(
+            &name,
+            &[
+                "generate",
+                "regenerate",
+                "preview",
+                "refine",
+                "feedback",
+                "svg",
+                "image",
+                "text",
+                "select_cell",
+                "draft",
+            ],
+        ) || contains_any(
+            &desc,
+            &["生成", "预览", "反馈", "微调", "调参", "栅格", "矢量"],
+        );
+        let control = contains_any(
+            &name,
+            &[
+                "start", "run", "send", "stop", "cancel", "pause", "resume", "home", "frame",
+                "unlock", "control", "jog", "action", "move",
+            ],
+        ) || contains_any(
+            &desc,
+            &[
+                "开始",
+                "启动",
+                "发送",
+                "停止",
+                "急停",
+                "取消",
+                "暂停",
+                "继续",
+                "归零",
+                "回零",
+                "走边框",
+                "巡边",
+                "解锁",
+                "移动",
+            ],
         );
         return match (query, generate, control) {
             (true, false, false) => &[ToolGroup::LaserQuery],
@@ -389,10 +464,29 @@ fn infer_groups_from_spec(spec: &ToolSpec) -> &'static [ToolGroup] {
 
     if contains_any(
         &name,
-        &["weather", "lunar", "news", "search", "rag", "wiki", "rss", "calendar", "knowledge"],
+        &[
+            "weather",
+            "lunar",
+            "news",
+            "search",
+            "rag",
+            "wiki",
+            "rss",
+            "calendar",
+            "knowledge",
+        ],
     ) || contains_any(
         &desc,
-        &["天气", "农历", "黄历", "日历", "新闻", "网页搜索", "联网搜索", "知识库"],
+        &[
+            "天气",
+            "农历",
+            "黄历",
+            "日历",
+            "新闻",
+            "网页搜索",
+            "联网搜索",
+            "知识库",
+        ],
     ) {
         return &[ToolGroup::InfoPlugin];
     }
@@ -404,9 +498,9 @@ fn infer_groups_from_spec(spec: &ToolSpec) -> &'static [ToolGroup] {
 /// 第三方外部 MCP（`<server>__<tool>`）不走此表，由独立的外部 MCP 开关处理。
 pub fn groups_of_builtin_tool(spec: &ToolSpec) -> &'static [ToolGroup] {
     match spec.name.as_str() {
-        "check_laser_connection_tool"
-        | "material_params_tool"
-        | "recommend_laser_params_tool" => &[ToolGroup::LaserQuery],
+        "check_laser_connection_tool" | "material_params_tool" | "recommend_laser_params_tool" => {
+            &[ToolGroup::LaserQuery]
+        }
         // GRBL 工具同时开放只读 status/check/probe 与 R2 的 cancel/stop
         "laser_grbl_tool" | "laser_network_grbl_tool" => {
             &[ToolGroup::LaserQuery, ToolGroup::LaserControl]
@@ -487,7 +581,12 @@ impl JevTurnDecision {
     }
 
     /// 根据本轮筛选结果裁剪工具清单；短确认回复（如“确认”“开始”）自动保留上一轮刚调用过的工具。
-    pub fn filter_tools(&self, tools: &[ToolSpec], text: &str, history: &[ChatMessage]) -> Vec<ToolSpec> {
+    pub fn filter_tools(
+        &self,
+        tools: &[ToolSpec],
+        text: &str,
+        history: &[ChatMessage],
+    ) -> Vec<ToolSpec> {
         if self.allowed_groups.is_none() && self.external_mcp == ExternalMcpFilter::KeepAll {
             return tools.to_vec();
         }
@@ -532,11 +631,9 @@ fn recently_used_tools<'a>(text: &str, history: &'a [ChatMessage]) -> HashSet<&'
                 for call in &msg.tool_calls {
                     keep.insert(call.function.name.as_str());
                 }
-                if msg
-                    .content
-                    .as_deref()
-                    .is_some_and(|c| c.contains("确认") || c.contains("功率") || c.contains("开始吗"))
-                {
+                if msg.content.as_deref().is_some_and(|c| {
+                    c.contains("确认") || c.contains("功率") || c.contains("开始吗")
+                }) {
                     keep.insert("laser_workflow_tool");
                     keep.insert("laser_safe_action_tool");
                 }
@@ -712,14 +809,18 @@ impl VoiceJevFilter {
             return JevTurnDecision::passthrough();
         }
         let clean = crate::fast::normalized(text);
-        if clean.is_empty()
-            || crate::fast::is_stop(text)
-            || crate::fast::is_noise_filler(text)
-        {
+        if clean.is_empty() || crate::fast::is_stop(text) || crate::fast::is_noise_filler(text) {
             return JevTurnDecision::passthrough();
         }
-        self.evaluate_internal(text, history, tools, memory_candidates, false, self.turn_timeout)
-            .await
+        self.evaluate_internal(
+            text,
+            history,
+            tools,
+            memory_candidates,
+            false,
+            self.turn_timeout,
+        )
+        .await
     }
 
     async fn evaluate_internal(
@@ -760,7 +861,8 @@ impl VoiceJevFilter {
                 Err(_) => return JevTurnDecision::passthrough(),
             }
         } else {
-            match tokio::time::timeout(Duration::from_millis(120), self.turn_in_flight.acquire()).await
+            match tokio::time::timeout(Duration::from_millis(120), self.turn_in_flight.acquire())
+                .await
             {
                 Ok(Ok(permit)) => permit,
                 _ => return JevTurnDecision::passthrough(),
@@ -891,8 +993,7 @@ impl VoiceJevFilter {
         };
 
         let unfinished = if ask_unfinished {
-            parse_noul(answers.get("unfinished"))
-                .is_some_and(|p| p >= UNFINISHED_THRESHOLD)
+            parse_noul(answers.get("unfinished")).is_some_and(|p| p >= UNFINISHED_THRESHOLD)
         } else {
             false
         };
@@ -1424,8 +1525,14 @@ mod tests {
 
     #[test]
     fn parses_noul_and_enforces_choice_confidence_plus_runner_up_margin() {
-        assert_eq!(parse_noul(Some(&json!({"type": "noul", "noul": 0.91}))), Some(0.91));
-        assert_eq!(parse_noul(Some(&json!({"type": "boolean", "noul": 0.91}))), None);
+        assert_eq!(
+            parse_noul(Some(&json!({"type": "noul", "noul": 0.91}))),
+            Some(0.91)
+        );
+        assert_eq!(
+            parse_noul(Some(&json!({"type": "boolean", "noul": 0.91}))),
+            None
+        );
 
         // 高置信 + 大分差 → 命中快通道
         let clear = json!({
@@ -1434,7 +1541,10 @@ mod tests {
             "confidence": 0.90,
             "probabilities": {"progress": 0.91, "status": 0.05, "none": 0.04}
         });
-        assert_eq!(parse_fast_route_choice(Some(&clear)), Some(ReadIntent::Progress));
+        assert_eq!(
+            parse_fast_route_choice(Some(&clear)),
+            Some(ReadIntent::Progress)
+        );
 
         // 冠亚军咬得太紧（0.52 vs 0.42，margin < 0.20）→ 拒绝走快通道，交回主模型
         let close_race = json!({
@@ -1472,7 +1582,10 @@ mod tests {
         };
         let filter = VoiceJevFilter::new(fake.clone(), opts);
         let tools = sample_tools();
-        let memories = vec!["椴木3毫米功率400".to_owned(), "用户偏好简短播报天气".to_owned()];
+        let memories = vec![
+            "椴木3毫米功率400".to_owned(),
+            "用户偏好简短播报天气".to_owned(),
+        ];
 
         let d1 = filter
             .evaluate_turn("今天外面下不下雨", &[], &tools, &memories)
@@ -1556,7 +1669,10 @@ mod tests {
         let tools = sample_tools();
         let first = filter.evaluate_turn("随便聊聊", &[], &tools, &[]).await;
         assert!(!first.applied);
-        assert_eq!(first.filter_tools(&tools, "随便聊聊", &[]).len(), tools.len());
+        assert_eq!(
+            first.filter_tools(&tools, "随便聊聊", &[]).len(),
+            tools.len()
+        );
 
         // 冷却期内第二句直接 0ms 跳过，不触碰底层客户端
         let second = filter.evaluate_turn("再聊一句", &[], &tools, &[]).await;
@@ -1674,7 +1790,10 @@ mod tests {
             })
             .collect();
         // 生成预览新工具被命中保留；只读与知识库新工具被剪除；完全未知的新领域工具保底保留不误剪
-        assert_eq!(kept, vec!["draft_svg_laser_preview_tool", "custom_erp_order_sync"]);
+        assert_eq!(
+            kept,
+            vec!["draft_svg_laser_preview_tool", "custom_erp_order_sync"]
+        );
     }
 
     #[tokio::test]
@@ -1736,13 +1855,20 @@ mod tests {
             .map(|t| t.name)
             .collect();
         assert_eq!(kept1, vec!["notes__read", "notes__search"]);
-        assert!(!kept1.iter().any(|n| n.starts_with("device__") || n == "play_music"));
+        assert!(
+            !kept1
+                .iter()
+                .any(|n| n.starts_with("device__") || n == "play_music")
+        );
 
         let d2 = filter
             .evaluate_turn("今天心情真不错呀", &[], &tools, &[])
             .await;
         let kept2 = d2.filter_tools(&tools, "今天心情真不错呀", &[]);
-        assert!(kept2.is_empty(), "纯闲聊时内置工具与外部 MCP 工具均应裁剪为 0 个");
+        assert!(
+            kept2.is_empty(),
+            "纯闲聊时内置工具与外部 MCP 工具均应裁剪为 0 个"
+        );
     }
 
     #[tokio::test]
@@ -1852,15 +1978,21 @@ mod tests {
         assert_eq!(parse_fast_route_choice(Some(&mismatched)), None);
         // 缺少 probabilities、非对象或只有单个残缺候选时一律拒绝短路
         assert_eq!(
-            parse_fast_route_choice(Some(&json!({"type": "choice", "choice": "progress", "confidence": 0.99}))),
+            parse_fast_route_choice(Some(
+                &json!({"type": "choice", "choice": "progress", "confidence": 0.99})
+            )),
             None
         );
         assert_eq!(
-            parse_fast_route_choice(Some(&json!({"type": "choice", "choice": "progress", "confidence": 0.99, "probabilities": null}))),
+            parse_fast_route_choice(Some(
+                &json!({"type": "choice", "choice": "progress", "confidence": 0.99, "probabilities": null})
+            )),
             None
         );
         assert_eq!(
-            parse_fast_route_choice(Some(&json!({"type": "choice", "choice": "progress", "confidence": 0.99, "probabilities": {"progress": 1.0}}))),
+            parse_fast_route_choice(Some(
+                &json!({"type": "choice", "choice": "progress", "confidence": 0.99, "probabilities": {"progress": 1.0}})
+            )),
             None
         );
 
@@ -1892,7 +2024,11 @@ mod tests {
             },
         );
         // 带尾逗号的流式片段不会毒化定稿问句的快答缓存
-        assert!(filter.should_hold_unfinished("打到几成啦，", &[], &[]).await);
+        assert!(
+            filter
+                .should_hold_unfinished("打到几成啦，", &[], &[])
+                .await
+        );
         let final_turn = filter.evaluate_turn("打到几成啦？", &[], &[], &[]).await;
         assert_eq!(final_turn.fast_read, Some(ReadIntent::Progress));
         assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
@@ -1927,10 +2063,17 @@ mod tests {
                 description: "较长工具说明文字用于触发紧凑短名摘要模式".repeat(3),
                 parameters: json!({"type": "object"}),
             })
-        .collect();
+            .collect();
         let plan = build_external_mcp_plan(&fourteen_tools);
-        assert!(!plan.any_incomplete, "14 个工具短名未超 500 字符，应完整可见");
-        assert!(plan.summaries[0].contains("tool_14"), "{}", plan.summaries[0]);
+        assert!(
+            !plan.any_incomplete,
+            "14 个工具短名未超 500 字符，应完整可见"
+        );
+        assert!(
+            plan.summaries[0].contains("tool_14"),
+            "{}",
+            plan.summaries[0]
+        );
 
         // 3. 超长原话（> 500 字）与超长记忆候选（> 580 字）因尾部被截断，禁止快答短路/误剪工具/误删长记忆
         let huge_tools = vec![
@@ -1968,13 +2111,17 @@ mod tests {
         );
         let truncated_utterance = "今天天气真不错顺便聊聊天".repeat(45) + "最后帮我回零";
         assert!(truncated_utterance.chars().count() > MAX_UTTERANCE_CHARS);
-        let memories = vec!["短无关记忆".into(), "长记忆前置背景".repeat(90) + "关键木板功率参数"];
+        let memories = vec![
+            "短无关记忆".into(),
+            "长记忆前置背景".repeat(90) + "关键木板功率参数",
+        ];
         let d1 = filter
             .evaluate_turn(&truncated_utterance, &[], &huge_tools, &memories)
             .await;
         assert_eq!(d1.fast_read, None, "超长原话不得走快答短路");
         assert_eq!(
-            d1.filter_tools(&huge_tools, &truncated_utterance, &[]).len(),
+            d1.filter_tools(&huge_tools, &truncated_utterance, &[])
+                .len(),
             2,
             "超长原话不得剪除尾部可能需要的工具"
         );
@@ -1992,7 +2139,10 @@ mod tests {
             .map(|t| t.name)
             .collect();
         assert_eq!(kept_short.len(), 1);
-        assert!(kept_short[0].starts_with("mega__"), "被截断的超大 MCP Server 不得盲删");
+        assert!(
+            kept_short[0].starts_with("mega__"),
+            "被截断的超大 MCP Server 不得盲删"
+        );
     }
 
     #[test]
@@ -2005,12 +2155,20 @@ mod tests {
             ChatMessage::user("第三轮最新话"),
         ];
         let turns = build_recent_turns(&history);
-        assert_eq!(turns.len(), 2, "收齐倒数第 2 条 User 后立即截断，不得把第 1 轮 Assistant 回复带进 Jev state");
+        assert_eq!(
+            turns.len(),
+            2,
+            "收齐倒数第 2 条 User 后立即截断，不得把第 1 轮 Assistant 回复带进 Jev state"
+        );
         assert_eq!(turns[0]["text"], "第二轮失败话");
         assert_eq!(turns[1]["text"], "第三轮最新话");
 
         // 多步工具调用产生多条带文本的中间 assistant_tools 消息时，不得挤掉最近两轮用户发言
-        let tc = vec![moss_voice_providers::ToolCall::new("c1", "get_status_tool", "{}")];
+        let tc = vec![moss_voice_providers::ToolCall::new(
+            "c1",
+            "get_status_tool",
+            "{}",
+        )];
         let tool_heavy_history = vec![
             ChatMessage::user("帮我查当前状态"),
             ChatMessage::assistant_tools(Some("我先查设备".into()), tc.clone()),
@@ -2043,8 +2201,14 @@ mod tests {
             })
             .collect();
         let plan = build_external_mcp_plan(&ext_tools);
-        assert!(plan.server_keys.is_none(), "<= 6 个外部工具必须始终合并为单个开关");
-        assert!(plan.any_incomplete, "合并摘要被截断时必须标记不完整以防误删");
+        assert!(
+            plan.server_keys.is_none(),
+            "<= 6 个外部工具必须始终合并为单个开关"
+        );
+        assert!(
+            plan.any_incomplete,
+            "合并摘要被截断时必须标记不完整以防误删"
+        );
         let mut low_answers = Map::new();
         low_answers.insert("tool_mcp_0".into(), json!({"type": "noul", "noul": 0.01}));
         assert!(matches!(

@@ -21,12 +21,17 @@ use sha2::{Digest, Sha256};
 /// sherpa-onnx 官方发布地址（可在语音中心换成镜像；校验值不变）
 pub const DEFAULT_BASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download";
 /// Laya 多语言决策模型官方发布地址與国内镜像回退地址（SHA-256 校验值恒定不变）
-pub const DEFAULT_LAYA_BASE: &str = "https://huggingface.co/convaiinnovations/laya-multilingual/resolve/main";
-pub const DEFAULT_LAYA_MIRROR_BASE: &str = "https://hf-mirror.com/convaiinnovations/laya-multilingual/resolve/main";
+pub const DEFAULT_LAYA_BASE: &str =
+    "https://huggingface.co/convaiinnovations/laya-multilingual/resolve/main";
+pub const DEFAULT_LAYA_MIRROR_BASE: &str =
+    "https://hf-mirror.com/convaiinnovations/laya-multilingual/resolve/main";
 /// OneJev 1.6 多模态决策模型 GGUF 官方发布地址（SHA-256 校验值恒定不变，支持 hf-mirror 自动回退）
-pub const DEFAULT_ONEJEV_0_8B_BASE: &str = "https://huggingface.co/mradermacher/OneJev1.6-0.8B-GGUF/resolve/main";
-pub const DEFAULT_ONEJEV_4B_BASE: &str = "https://huggingface.co/mradermacher/OneJev1.6-4B-GGUF/resolve/main";
-pub const DEFAULT_ONEJEV_9B_BASE: &str = "https://huggingface.co/mradermacher/OneJev1.6-9B-GGUF/resolve/main";
+pub const DEFAULT_ONEJEV_0_8B_BASE: &str =
+    "https://huggingface.co/mradermacher/OneJev1.6-0.8B-GGUF/resolve/main";
+pub const DEFAULT_ONEJEV_4B_BASE: &str =
+    "https://huggingface.co/mradermacher/OneJev1.6-4B-GGUF/resolve/main";
+pub const DEFAULT_ONEJEV_9B_BASE: &str =
+    "https://huggingface.co/mradermacher/OneJev1.6-9B-GGUF/resolve/main";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archive {
@@ -35,7 +40,10 @@ pub enum Archive {
     /// tar.bz2，解出顶层目录 `models/<dir>`
     TarBz2 { dir: &'static str },
     /// 多文件模型目录，逐个文件校验 SHA-256 后组装为 `models/<dir>`
-    Directory { dir: &'static str, base_url: &'static str },
+    Directory {
+        dir: &'static str,
+        base_url: &'static str,
+    },
 }
 
 /// 模型类别：判停、识别、合成、Jev 决策各选一个。
@@ -113,7 +121,14 @@ impl ModelSpec {
     }
 }
 
-const KOKORO_FILES: [&str; 6] = ["voices.bin", "tokens.txt", "lexicon-zh.txt", "lexicon-us-en.txt", "espeak-ng-data", "dict"];
+const KOKORO_FILES: [&str; 6] = [
+    "voices.bin",
+    "tokens.txt",
+    "lexicon-zh.txt",
+    "lexicon-us-en.txt",
+    "espeak-ng-data",
+    "dict",
+];
 const LAYA_MULTILINGUAL_FILES: [&str; 6] = [
     "model.safetensors",
     "config.json",
@@ -161,20 +176,14 @@ const ONEJEV_0_8B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
     size: 115_923_712,
 }];
 
-const ONEJEV_4B_FILES: [&str; 2] = [
-    "OneJev1.6-4B.Q4_K_M.gguf",
-    "OneJev1.6-4B.mmproj-Q8_0.gguf",
-];
+const ONEJEV_4B_FILES: [&str; 2] = ["OneJev1.6-4B.Q4_K_M.gguf", "OneJev1.6-4B.mmproj-Q8_0.gguf"];
 const ONEJEV_4B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
     path: "OneJev1.6-4B.mmproj-Q8_0.gguf",
     sha256: "bb24088d1d1a051677a16811facb39a6cfd1f3fbb0e6139695fc5ab2f48dbe77",
     size: 366_894_656,
 }];
 
-const ONEJEV_9B_FILES: [&str; 2] = [
-    "OneJev1.6-9B.Q4_K_M.gguf",
-    "OneJev1.6-9B.mmproj-Q8_0.gguf",
-];
+const ONEJEV_9B_FILES: [&str; 2] = ["OneJev1.6-9B.Q4_K_M.gguf", "OneJev1.6-9B.mmproj-Q8_0.gguf"];
 const ONEJEV_9B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
     path: "OneJev1.6-9B.mmproj-Q8_0.gguf",
     sha256: "40d295bdd324b1a1c8b716c6b4e6a88152db13338bba4097cac60ea536ed6cbd",
@@ -186,13 +195,17 @@ const ONEJEV_9B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
 pub const CATALOG: [ModelSpec; 13] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
-        kind: ModelKind::Speaker, engine: Engine::CampPlus,
+        kind: ModelKind::Speaker,
+        engine: Engine::CampPlus,
         label: "CampPlus 声纹（中文 16kHz）",
         note: "Apache-2.0；192维向量。仅准备模型，真人阈值未标定，身份识别默认关闭。",
         path: "speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
         sha256: "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
-        size: 28_281_138, archive: Archive::File,
-        required: &[], extras: &[], voices: None,
+        size: 28_281_138,
+        archive: Archive::File,
+        required: &[],
+        extras: &[],
+        voices: None,
     },
     ModelSpec {
         id: "silero_vad",
@@ -231,7 +244,9 @@ pub const CATALOG: [ModelSpec; 13] = [
         path: "asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
         sha256: "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
         size: 163_002_883,
-        archive: Archive::TarBz2 { dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17" },
+        archive: Archive::TarBz2 {
+            dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+        },
         required: &["model.int8.onnx", "tokens.txt"],
         extras: &[],
         voices: None,
@@ -245,7 +260,9 @@ pub const CATALOG: [ModelSpec; 13] = [
         path: "asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2",
         sha256: "7305f7905bfcf77fa0b39388a313f3da35c68d971661a65475b56fb2162c8e63",
         size: 165_783_878,
-        archive: Archive::TarBz2 { dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09" },
+        archive: Archive::TarBz2 {
+            dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09",
+        },
         required: &["model.int8.onnx", "tokens.txt"],
         extras: &[],
         voices: None,
@@ -259,8 +276,15 @@ pub const CATALOG: [ModelSpec; 13] = [
         path: "asr-models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
         sha256: "fa5f63d618e5a01526e275a358bb7772e403f84808a4769fba52cffd8160bf74",
         size: 133_895_136,
-        archive: Archive::TarBz2 { dir: "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05" },
-        required: &["encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt"],
+        archive: Archive::TarBz2 {
+            dir: "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05",
+        },
+        required: &[
+            "encoder.int8.onnx",
+            "decoder.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+        ],
         extras: &[],
         voices: None,
     },
@@ -273,10 +297,24 @@ pub const CATALOG: [ModelSpec; 13] = [
         path: "tts-models/kokoro-multi-lang-v1_0.tar.bz2",
         sha256: "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298",
         size: 349_906_910,
-        archive: Archive::TarBz2 { dir: "kokoro-multi-lang-v1_0" },
-        required: &["model.onnx", KOKORO_FILES[0], KOKORO_FILES[1], KOKORO_FILES[2], KOKORO_FILES[3], KOKORO_FILES[4], KOKORO_FILES[5]],
+        archive: Archive::TarBz2 {
+            dir: "kokoro-multi-lang-v1_0",
+        },
+        required: &[
+            "model.onnx",
+            KOKORO_FILES[0],
+            KOKORO_FILES[1],
+            KOKORO_FILES[2],
+            KOKORO_FILES[3],
+            KOKORO_FILES[4],
+            KOKORO_FILES[5],
+        ],
         extras: &[],
-        voices: Some(Voices { default: 50, max: 53, hint: "45–48 中文女声，49–52 中文男声" }),
+        voices: Some(Voices {
+            default: 50,
+            max: 53,
+            hint: "45–48 中文女声，49–52 中文男声",
+        }),
     },
     ModelSpec {
         id: "kokoro_v11",
@@ -287,10 +325,24 @@ pub const CATALOG: [ModelSpec; 13] = [
         path: "tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
         sha256: "a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6",
         size: 147_031_220,
-        archive: Archive::TarBz2 { dir: "kokoro-int8-multi-lang-v1_1" },
-        required: &["model.int8.onnx", KOKORO_FILES[0], KOKORO_FILES[1], KOKORO_FILES[2], KOKORO_FILES[3], KOKORO_FILES[4], KOKORO_FILES[5]],
+        archive: Archive::TarBz2 {
+            dir: "kokoro-int8-multi-lang-v1_1",
+        },
+        required: &[
+            "model.int8.onnx",
+            KOKORO_FILES[0],
+            KOKORO_FILES[1],
+            KOKORO_FILES[2],
+            KOKORO_FILES[3],
+            KOKORO_FILES[4],
+            KOKORO_FILES[5],
+        ],
         extras: &[],
-        voices: Some(Voices { default: 3, max: 102, hint: "3–57 中文女声，58–102 中文男声" }),
+        voices: Some(Voices {
+            default: 3,
+            max: 102,
+            hint: "3–57 中文女声，58–102 中文男声",
+        }),
     },
     ModelSpec {
         id: "matcha_zh_en",
@@ -301,8 +353,16 @@ pub const CATALOG: [ModelSpec; 13] = [
         path: "tts-models/matcha-icefall-zh-en.tar.bz2",
         sha256: "271b804af570400d3bcdcb53bf6e53cc9f75180ee763b9f13eb5eaf2b0d086ef",
         size: 79_033_838,
-        archive: Archive::TarBz2 { dir: "matcha-icefall-zh-en" },
-        required: &["model-steps-3.onnx", "tokens.txt", "lexicon.txt", "espeak-ng-data", "vocos-16khz-univ.onnx"],
+        archive: Archive::TarBz2 {
+            dir: "matcha-icefall-zh-en",
+        },
+        required: &[
+            "model-steps-3.onnx",
+            "tokens.txt",
+            "lexicon.txt",
+            "espeak-ng-data",
+            "vocos-16khz-univ.onnx",
+        ],
         extras: &[ExtraFile {
             path: "vocoder-models/vocos-16khz-univ.onnx",
             sha256: "b599142a1fb8ff03de3e84ac35ff537c619e56f4267a6fe894851a42844acf9e",
@@ -422,7 +482,9 @@ fn extra_file_installed(dir: &Path, extra: &ExtraFile) -> bool {
     if is_config_json && (2..=65_536).contains(&meta.len()) {
         return fs::read(&file_path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).ok())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).ok()
+            })
             .is_some_and(|obj| !obj.is_empty());
     }
     false
@@ -432,12 +494,24 @@ fn extra_file_installed(dir: &Path, extra: &ExtraFile) -> bool {
 pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
     let path = install_path(root, spec);
     match spec.archive {
-        Archive::File => path.metadata().map(|meta| meta.is_file() && meta.len() == spec.size).unwrap_or(false),
-        Archive::TarBz2 { .. } => path.is_dir() && spec.required.iter().all(|item| path.join(item).exists()),
+        Archive::File => path
+            .metadata()
+            .map(|meta| meta.is_file() && meta.len() == spec.size)
+            .unwrap_or(false),
+        Archive::TarBz2 { .. } => {
+            path.is_dir() && spec.required.iter().all(|item| path.join(item).exists())
+        }
         Archive::Directory { .. } => {
             path.is_dir()
-                && path.join(spec.path).metadata().map(|m| m.is_file() && m.len() == spec.size).unwrap_or(false)
-                && spec.extras.iter().all(|extra| extra_file_installed(&path, extra))
+                && path
+                    .join(spec.path)
+                    .metadata()
+                    .map(|m| m.is_file() && m.len() == spec.size)
+                    .unwrap_or(false)
+                && spec
+                    .extras
+                    .iter()
+                    .all(|extra| extra_file_installed(&path, extra))
                 && spec.required.iter().all(|item| path.join(item).exists())
         }
     }
@@ -446,14 +520,22 @@ pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Progress {
-    Downloading { done: u64, total: u64 },
+    Downloading {
+        done: u64,
+        total: u64,
+    },
     /// OneJev：正在下载三档共用的推理引擎 llama-server（2026-11-07）
-    PreparingRuntime { done: u64, total: u64 },
+    PreparingRuntime {
+        done: u64,
+        total: u64,
+    },
     /// OneJev：另一档正在安装推理引擎，排队等待（可取消）
     WaitingRuntime,
     Verifying,
     Installing,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
     Cancelled,
 }
 
@@ -514,7 +596,10 @@ impl ModelManager {
     }
 
     pub fn root_for(&self, id: &str) -> &Path {
-        self.overrides.get(id).map(PathBuf::as_path).unwrap_or(&self.root)
+        self.overrides
+            .get(id)
+            .map(PathBuf::as_path)
+            .unwrap_or(&self.root)
     }
 
     pub fn path_if_installed(&self, id: &str) -> Option<PathBuf> {
@@ -524,7 +609,10 @@ impl ModelManager {
     }
 
     pub fn status(&self) -> Vec<ModelStatus> {
-        let tasks = self.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         CATALOG
             .iter()
             .map(|spec| {
@@ -580,16 +668,25 @@ impl ModelManager {
         }
         let mut removed = 0;
         for root in self.roots() {
-            let Ok(entries) = fs::read_dir(&root) else { continue };
+            let Ok(entries) = fs::read_dir(&root) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if !(name == ".download" || name.starts_with(".extract-") || name.starts_with(".trash-")) {
+                if !(name == ".download"
+                    || name.starts_with(".extract-")
+                    || name.starts_with(".trash-"))
+                {
                     continue;
                 }
                 let path = entry.path();
                 let is_real_dir = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir());
-                let result = if is_real_dir { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+                let result = if is_real_dir {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
                 if result.is_ok() {
                     removed += 1;
                 }
@@ -600,10 +697,19 @@ impl ModelManager {
 
     /// 同一目录下是否还有已安装或正在下载的 OneJev（决定能否删掉共用的推理引擎）。
     fn onejev_still_needed(&self, root: &Path) -> bool {
-        let tasks = self.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        CATALOG.iter().filter(|spec| spec.engine == Engine::OneJev && self.root_for(spec.id) == root).any(|spec| {
-            installed(root, spec) || tasks.get(spec.id).is_some_and(|task| Self::busy(&task.progress))
-        })
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        CATALOG
+            .iter()
+            .filter(|spec| spec.engine == Engine::OneJev && self.root_for(spec.id) == root)
+            .any(|spec| {
+                installed(root, spec)
+                    || tasks
+                        .get(spec.id)
+                        .is_some_and(|task| Self::busy(&task.progress))
+            })
     }
 
     /// 开始下载（后台线程）。`base` 为发布地址或镜像。
@@ -625,13 +731,19 @@ impl ModelManager {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst);
         {
             let mut tasks = self.tasks.lock().map_err(|_| "内部错误".to_owned())?;
-            if tasks.get(spec.id).is_some_and(|task| Self::busy(&task.progress)) {
+            if tasks
+                .get(spec.id)
+                .is_some_and(|task| Self::busy(&task.progress))
+            {
                 return Err("该模型正在下载".into());
             }
             tasks.insert(
                 spec.id,
                 Task {
-                    progress: Progress::Downloading { done: 0, total: spec.download_size() },
+                    progress: Progress::Downloading {
+                        done: 0,
+                        total: spec.download_size(),
+                    },
                     cancel: cancel.clone(),
                     generation,
                 },
@@ -652,7 +764,15 @@ impl ModelManager {
                         task.progress = progress;
                     }
                 };
-                let result = run_download(&root, &spec, &candidate_bases, generation, &cancel, &install_lock, &report);
+                let result = run_download(
+                    &root,
+                    &spec,
+                    &candidate_bases,
+                    generation,
+                    &cancel,
+                    &install_lock,
+                    &report,
+                );
                 if let Ok(mut tasks) = tasks.lock()
                     && let Some(task) = tasks.get(spec.id)
                     && task.generation == generation
@@ -695,7 +815,10 @@ impl ModelManager {
         self.cancel(id);
         let root = self.root_for(spec.id).to_path_buf();
         {
-            let _guard = self.install_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _guard = self
+                .install_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Ok(mut tasks) = self.tasks.lock() {
                 tasks.remove(spec.id);
             }
@@ -719,9 +842,15 @@ fn remove_installed(root: &Path, spec: &ModelSpec) -> Result<(), String> {
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
     let trash = root.join(format!(".trash-{}-{stamp}", spec.id));
-    fs::rename(&path, &trash).map_err(|error| format!("删除失败（模型文件可能正被其他程序占用，关闭后重试）：{error}"))?;
+    fs::rename(&path, &trash).map_err(|error| {
+        format!("删除失败（模型文件可能正被其他程序占用，关闭后重试）：{error}")
+    })?;
     let is_real_dir = fs::symlink_metadata(&trash).is_ok_and(|m| m.file_type().is_dir());
-    let _ = if is_real_dir { fs::remove_dir_all(&trash) } else { fs::remove_file(&trash) };
+    let _ = if is_real_dir {
+        fs::remove_dir_all(&trash)
+    } else {
+        fs::remove_file(&trash)
+    };
     Ok(())
 }
 
@@ -777,7 +906,9 @@ fn resolve_download_bases(spec: &ModelSpec, trimmed_base: &str) -> Vec<String> {
 }
 
 fn is_loopback_test_base(base: &str) -> bool {
-    base.starts_with("http://127.0.0.1") || base.starts_with("http://localhost") || base.starts_with("http://[::1]")
+    base.starts_with("http://127.0.0.1")
+        || base.starts_with("http://localhost")
+        || base.starts_with("http://[::1]")
 }
 
 fn run_download(
@@ -791,27 +922,53 @@ fn run_download(
 ) -> Result<(), String> {
     let staging = root.join(".download");
     fs::create_dir_all(&staging).map_err(|error| format!("创建下载目录失败：{error}"))?;
-    let items: Vec<Item> = std::iter::once(Item { path: spec.path, sha256: spec.sha256, size: spec.size })
-        .chain(spec.extras.iter().map(|extra| Item { path: extra.path, sha256: extra.sha256, size: extra.size }))
-        .collect();
+    let items: Vec<Item> = std::iter::once(Item {
+        path: spec.path,
+        sha256: spec.sha256,
+        size: spec.size,
+    })
+    .chain(spec.extras.iter().map(|extra| Item {
+        path: extra.path,
+        sha256: extra.sha256,
+        size: extra.size,
+    }))
+    .collect();
     let parts: Vec<PathBuf> = items
         .iter()
         .enumerate()
         // 文件名带任务号：取消后立刻重下时，旧线程收尾不会删掉新任务的临时文件
-        .map(|(idx, item)| staging.join(format!("{}-{generation}-{idx}-{}.part", spec.id, base_name(item.path))))
+        .map(|(idx, item)| {
+            staging.join(format!(
+                "{}-{generation}-{idx}-{}.part",
+                spec.id,
+                base_name(item.path)
+            ))
+        })
         .collect();
     let total = spec.download_size();
     let result = (|| {
         if spec.engine == Engine::OneJev && !bases.iter().any(|b| is_loopback_test_base(b)) {
-            crate::onejev::ensure_llama_runtime(root, bases.first().map(String::as_str), cancel, &|progress| match progress {
-                crate::onejev::RuntimeProgress::Waiting => report(Progress::WaitingRuntime),
-                crate::onejev::RuntimeProgress::Downloading { done, total } => report(Progress::PreparingRuntime { done, total }),
-            })?;
+            crate::onejev::ensure_llama_runtime(
+                root,
+                bases.first().map(String::as_str),
+                cancel,
+                &|progress| match progress {
+                    crate::onejev::RuntimeProgress::Waiting => report(Progress::WaitingRuntime),
+                    crate::onejev::RuntimeProgress::Downloading { done, total } => {
+                        report(Progress::PreparingRuntime { done, total })
+                    }
+                },
+            )?;
             report(Progress::Downloading { done: 0, total });
         }
         let mut offset = 0;
         for (item, part) in items.iter().zip(&parts) {
-            let progress = |done: u64| report(Progress::Downloading { done: offset + done, total });
+            let progress = |done: u64| {
+                report(Progress::Downloading {
+                    done: offset + done,
+                    total,
+                })
+            };
             let mut last_err = None;
             for (idx, base) in bases.iter().enumerate() {
                 if idx > 0 && cancel.load(Ordering::SeqCst) {
@@ -835,7 +992,15 @@ fn run_download(
         }
         report(Progress::Verifying);
         report(Progress::Installing);
-        install(root, spec, &parts[0], &parts[1..], generation, cancel, install_lock)
+        install(
+            root,
+            spec,
+            &parts[0],
+            &parts[1..],
+            generation,
+            cancel,
+            install_lock,
+        )
     })();
     for part in &parts {
         let _ = fs::remove_file(part);
@@ -845,7 +1010,10 @@ fn run_download(
 
 fn is_private_or_loopback_host(host: &str) -> bool {
     let clean = host.trim_matches(['[', ']']);
-    if clean.eq_ignore_ascii_case("localhost") || clean.ends_with(".localhost") || clean.ends_with(".local") {
+    if clean.eq_ignore_ascii_case("localhost")
+        || clean.ends_with(".localhost")
+        || clean.ends_with(".local")
+    {
         return true;
     }
     if let Ok(ip) = clean.parse::<std::net::IpAddr>() {
@@ -868,7 +1036,10 @@ fn is_private_or_loopback_host(host: &str) -> bool {
     false
 }
 
-fn safe_model_redirect_policy(initial_loopback: bool, initial_https: bool) -> reqwest::redirect::Policy {
+fn safe_model_redirect_policy(
+    initial_loopback: bool,
+    initial_https: bool,
+) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= 5 {
             return attempt.error("重定向次数过多");
@@ -928,7 +1099,9 @@ pub(crate) fn fetch_verified_file(
         if cancel.load(Ordering::SeqCst) {
             return Err("已取消".into());
         }
-        let read = response.read(&mut buffer).map_err(|_| "下载中断，请重试".to_owned())?;
+        let read = response
+            .read(&mut buffer)
+            .map_err(|_| "下载中断，请重试".to_owned())?;
         if read == 0 {
             break;
         }
@@ -937,7 +1110,8 @@ pub(crate) fn fetch_verified_file(
             return Err("下载的文件比预期大，已停止".into());
         }
         hasher.update(&buffer[..read]);
-        file.write_all(&buffer[..read]).map_err(|error| format!("写入失败（磁盘空间不足？）：{error}"))?;
+        file.write_all(&buffer[..read])
+            .map_err(|error| format!("写入失败（磁盘空间不足？）：{error}"))?;
         if done - last_report >= 1024 * 1024 || done == expected_size {
             last_report = done;
             progress(done);
@@ -946,7 +1120,9 @@ pub(crate) fn fetch_verified_file(
     file.flush().map_err(|error| format!("写入失败：{error}"))?;
     drop(file);
     if done != expected_size {
-        return Err(format!("下载不完整（{done} / {expected_size} 字节），请重试"));
+        return Err(format!(
+            "下载不完整（{done} / {expected_size} 字节），请重试"
+        ));
     }
     let digest = hex(&hasher.finalize());
     if digest != expected_sha256 {
@@ -955,22 +1131,43 @@ pub(crate) fn fetch_verified_file(
     Ok(())
 }
 
-fn fetch(item: &Item, url: &str, part: &Path, cancel: &AtomicBool, progress: &dyn Fn(u64)) -> Result<(), String> {
+fn fetch(
+    item: &Item,
+    url: &str,
+    part: &Path,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(u64),
+) -> Result<(), String> {
     fetch_verified_file(url, item.sha256, item.size, part, cancel, progress)
 }
 
 /// 压缩包内的路径是否安全（相对路径、无 `..`）。
 pub(crate) fn safe_relative(path: &Path) -> bool {
-    !path.as_os_str().is_empty() && path.components().all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
 /// 安装最后一步：持锁复核取消标志后把成品改名就位（与 [`ModelManager::delete`] 互斥）。
-fn place(install_lock: &Mutex<()>, cancel: &AtomicBool, from: &Path, target: &Path, is_dir: bool) -> Result<(), String> {
-    let _guard = install_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+fn place(
+    install_lock: &Mutex<()>,
+    cancel: &AtomicBool,
+    from: &Path,
+    target: &Path,
+    is_dir: bool,
+) -> Result<(), String> {
+    let _guard = install_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if cancel.load(Ordering::SeqCst) {
         return Err("已取消".to_owned());
     }
-    let _ = if is_dir { fs::remove_dir_all(target) } else { fs::remove_file(target) };
+    let _ = if is_dir {
+        fs::remove_dir_all(target)
+    } else {
+        fs::remove_file(target)
+    };
     fs::rename(from, target).map_err(|error| format!("安装失败：{error}"))
 }
 
@@ -991,15 +1188,20 @@ fn install(
             let _ = fs::remove_dir_all(&extract);
             fs::create_dir_all(&extract).map_err(|error| format!("创建解压目录失败：{error}"))?;
             let result = (|| {
-                let file = fs::File::open(part).map_err(|error| format!("读取压缩包失败：{error}"))?;
-                let mut archive = tar::Archive::new(bzip2::read::BzDecoder::new(std::io::BufReader::new(file)));
+                let file =
+                    fs::File::open(part).map_err(|error| format!("读取压缩包失败：{error}"))?;
+                let mut archive =
+                    tar::Archive::new(bzip2::read::BzDecoder::new(std::io::BufReader::new(file)));
                 let entries = archive.entries().map_err(|_| "压缩包无法读取".to_owned())?;
                 for entry in entries {
                     if cancel.load(Ordering::SeqCst) {
                         return Err("已取消".to_owned());
                     }
                     let mut entry = entry.map_err(|_| "压缩包已损坏".to_owned())?;
-                    let path = entry.path().map_err(|_| "压缩包路径无效".to_owned())?.into_owned();
+                    let path = entry
+                        .path()
+                        .map_err(|_| "压缩包路径无效".to_owned())?
+                        .into_owned();
                     if !safe_relative(&path) {
                         return Err(format!("压缩包含不安全的路径：{}", path.display()));
                     }
@@ -1008,7 +1210,10 @@ fn install(
                         // 链接等特殊条目一律跳过
                         continue;
                     }
-                    if !entry.unpack_in(&extract).map_err(|error| format!("解压失败：{error}"))? {
+                    if !entry
+                        .unpack_in(&extract)
+                        .map_err(|error| format!("解压失败：{error}"))?
+                    {
                         return Err(format!("压缩包含不安全的路径：{}", path.display()));
                     }
                 }
@@ -1016,9 +1221,14 @@ fn install(
                 // 附加文件放进模型目录（已校验）
                 for (extra, file) in spec.extras.iter().zip(extras) {
                     fs::create_dir_all(&unpacked).map_err(|error| format!("安装失败：{error}"))?;
-                    fs::rename(file, unpacked.join(base_name(extra.path))).map_err(|error| format!("安装失败：{error}"))?;
+                    fs::rename(file, unpacked.join(base_name(extra.path)))
+                        .map_err(|error| format!("安装失败：{error}"))?;
                 }
-                if let Some(missing) = spec.required.iter().find(|item| !unpacked.join(item).exists()) {
+                if let Some(missing) = spec
+                    .required
+                    .iter()
+                    .find(|item| !unpacked.join(item).exists())
+                {
                     return Err(format!("压缩包缺少 {missing}"));
                 }
                 place(install_lock, cancel, &unpacked, &target, true)
@@ -1032,7 +1242,12 @@ fn install(
             fs::create_dir_all(&extract).map_err(|error| format!("创建安装目录失败：{error}"))?;
             let result = (|| {
                 let unpacked = extract.join(dir);
-                let all_files = std::iter::once((spec.path, part)).chain(spec.extras.iter().map(|e| e.path).zip(extras.iter().map(PathBuf::as_path)));
+                let all_files = std::iter::once((spec.path, part)).chain(
+                    spec.extras
+                        .iter()
+                        .map(|e| e.path)
+                        .zip(extras.iter().map(PathBuf::as_path)),
+                );
                 for (rel_path, src_part) in all_files {
                     if cancel.load(Ordering::SeqCst) {
                         return Err("已取消".to_owned());
@@ -1047,7 +1262,11 @@ fn install(
                     }
                     fs::rename(src_part, &dest).map_err(|error| format!("安装失败：{error}"))?;
                 }
-                if let Some(missing) = spec.required.iter().find(|item| !unpacked.join(item).exists()) {
+                if let Some(missing) = spec
+                    .required
+                    .iter()
+                    .find(|item| !unpacked.join(item).exists())
+                {
                     return Err(format!("模型目录缺少 {missing}"));
                 }
                 place(install_lock, cancel, &unpacked, &target, true)
@@ -1084,7 +1303,12 @@ mod tests {
         Box::leak(hex(&Sha256::digest(bytes)).into_boxed_str())
     }
 
-    fn spec_for(bytes: &[u8], archive: Archive, path: &'static str, required: &'static [&'static str]) -> ModelSpec {
+    fn spec_for(
+        bytes: &[u8],
+        archive: Archive,
+        path: &'static str,
+        required: &'static [&'static str],
+    ) -> ModelSpec {
         ModelSpec {
             id: "test",
             kind: ModelKind::Tts,
@@ -1104,7 +1328,12 @@ mod tests {
     fn wait(manager: &ModelManager) -> Option<Progress> {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let progress = manager.tasks.lock().unwrap().get("test").map(|task| task.progress.clone());
+            let progress = manager
+                .tasks
+                .lock()
+                .unwrap()
+                .get("test")
+                .map(|task| task.progress.clone());
             match &progress {
                 Some(progress) if ModelManager::busy(progress) => {}
                 _ => return progress,
@@ -1118,17 +1347,42 @@ mod tests {
     fn archive_is_verified_extracted_and_installed() {
         let dir = tempfile::tempdir().unwrap();
         let manager = ModelManager::new(dir.path().join("models"));
-        let bytes = tar_bz2(&[("pkg/model.onnx", b"model"), ("pkg/tokens.txt", b"a 1"), ("pkg/sub/x.txt", b"x")]);
-        let spec = spec_for(&bytes, Archive::TarBz2 { dir: "pkg" }, "tts-models/pkg.tar.bz2", &["model.onnx", "tokens.txt", "sub"]);
-        let (url, requests) = serve_once("HTTP/1.1 200 OK", "Content-Type: application/octet-stream\r\n", bytes);
+        let bytes = tar_bz2(&[
+            ("pkg/model.onnx", b"model"),
+            ("pkg/tokens.txt", b"a 1"),
+            ("pkg/sub/x.txt", b"x"),
+        ]);
+        let spec = spec_for(
+            &bytes,
+            Archive::TarBz2 { dir: "pkg" },
+            "tts-models/pkg.tar.bz2",
+            &["model.onnx", "tokens.txt", "sub"],
+        );
+        let (url, requests) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/octet-stream\r\n",
+            bytes,
+        );
         manager.download_spec(spec, &format!("{url}/")).unwrap();
         assert_eq!(wait(&manager), None, "成功后任务移除");
-        assert!(requests.recv().unwrap().head.starts_with("GET /tts-models/pkg.tar.bz2 "));
+        assert!(
+            requests
+                .recv()
+                .unwrap()
+                .head
+                .starts_with("GET /tts-models/pkg.tar.bz2 ")
+        );
         let root = dir.path().join("models");
         assert!(installed(&root, &spec));
         assert_eq!(fs::read(root.join("pkg/sub/x.txt")).unwrap(), b"x");
         assert!(!root.join(".extract-test").exists());
-        assert!(fs::read_dir(root.join(".download")).unwrap().next().is_none(), "临时文件已清理");
+        assert!(
+            fs::read_dir(root.join(".download"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "临时文件已清理"
+        );
     }
 
     /// 按清单造出“已安装”的模型（大文件用 set_len 生成稀疏文件，不真的写入数据）。
@@ -1163,28 +1417,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("models");
         let laya_root = dir.path().join("external").join("models");
-        let manager = ModelManager::new(root.clone()).with_root_override("laya_multilingual", laya_root.clone());
+        let manager = ModelManager::new(root.clone())
+            .with_root_override("laya_multilingual", laya_root.clone());
         let kokoro = spec("kokoro").unwrap();
         fake_install(&root, kokoro);
         fs::create_dir_all(root.join(".download")).unwrap();
-        fs::write(root.join(".download").join("onejev_1_6_9b-3-0-x.gguf.part"), b"half").unwrap();
+        fs::write(
+            root.join(".download").join("onejev_1_6_9b-3-0-x.gguf.part"),
+            b"half",
+        )
+        .unwrap();
         fs::create_dir_all(root.join(".extract-kokoro-7").join("pkg")).unwrap();
         fs::create_dir_all(root.join(".extract-llama-macos-arm64")).unwrap();
         fs::create_dir_all(root.join(".trash-kokoro-1")).unwrap();
         fs::create_dir_all(laya_root.join(".download")).unwrap();
         assert_eq!(manager.clean_leftovers(), 5);
-        let left: Vec<_> = fs::read_dir(&root).unwrap().flatten().map(|entry| entry.file_name()).collect();
-        assert_eq!(left, vec![std::ffi::OsString::from(base_name_dir(kokoro))], "只剩已安装的模型");
+        let left: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from(base_name_dir(kokoro))],
+            "只剩已安装的模型"
+        );
         assert!(!laya_root.join(".download").exists(), "外置目录也清理");
 
         manager.delete("kokoro").unwrap();
         assert!(!install_path(&root, kokoro).exists());
-        assert!(fs::read_dir(&root).unwrap().next().is_none(), "删除后不留 .trash 残留");
+        assert!(
+            fs::read_dir(&root).unwrap().next().is_none(),
+            "删除后不留 .trash 残留"
+        );
         // 安装最后一步看到取消标志就放弃，不会在删除之后又装回去
         let cancelled = AtomicBool::new(true);
         let staged = dir.path().join("staged");
         fs::create_dir_all(&staged).unwrap();
-        assert!(place(&Mutex::new(()), &cancelled, &staged, &install_path(&root, kokoro), true).is_err());
+        assert!(
+            place(
+                &Mutex::new(()),
+                &cancelled,
+                &staged,
+                &install_path(&root, kokoro),
+                true
+            )
+            .is_err()
+        );
         assert!(!install_path(&root, kokoro).exists());
     }
 
@@ -1212,10 +1491,19 @@ mod tests {
         fs::write(root.join("llama").join("llama-server"), b"user").unwrap();
 
         manager.delete(mid.id).unwrap();
-        assert!(managed.join("llama-server").is_file(), "还有 0.8B 在用，推理引擎保留");
+        assert!(
+            managed.join("llama-server").is_file(),
+            "还有 0.8B 在用，推理引擎保留"
+        );
         manager.delete(small.id).unwrap();
-        assert!(!root.join(".runtime").exists(), "最后一档删掉后推理引擎一起删");
-        assert!(root.join("llama").join("llama-server").is_file(), "用户自备的 llama/ 不动");
+        assert!(
+            !root.join(".runtime").exists(),
+            "最后一档删掉后推理引擎一起删"
+        );
+        assert!(
+            root.join("llama").join("llama-server").is_file(),
+            "用户自备的 llama/ 不动"
+        );
         // 删除非 OneJev 模型不影响推理引擎
         fs::create_dir_all(&managed).unwrap();
         manager.delete("kokoro").unwrap();
@@ -1233,10 +1521,19 @@ mod tests {
                 let mut line = String::new();
                 BufReader::new(&stream).read_line(&mut line).unwrap();
                 let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
-                let body = files.iter().find(|(name, _)| path == format!("/{name}")).map(|(_, body)| body.clone());
+                let body = files
+                    .iter()
+                    .find(|(name, _)| path == format!("/{name}"))
+                    .map(|(_, body)| body.clone());
                 let head = match &body {
-                    Some(body) => format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()),
-                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                    Some(body) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    }
                 };
                 stream.write_all(head.as_bytes()).unwrap();
                 stream.write_all(&body.unwrap_or_default()).unwrap();
@@ -1252,24 +1549,59 @@ mod tests {
         let manager = ModelManager::new(root.clone());
         let archive = tar_bz2(&[("pkg/model.onnx", b"am")]);
         let vocoder = b"vocoder-bytes".to_vec();
-        let extras: &'static [ExtraFile] =
-            Box::leak(vec![ExtraFile { path: "voc/vocos.onnx", sha256: sha(&vocoder), size: vocoder.len() as u64 }].into_boxed_slice());
+        let extras: &'static [ExtraFile] = Box::leak(
+            vec![ExtraFile {
+                path: "voc/vocos.onnx",
+                sha256: sha(&vocoder),
+                size: vocoder.len() as u64,
+            }]
+            .into_boxed_slice(),
+        );
         let spec = ModelSpec {
             extras,
-            ..spec_for(&archive, Archive::TarBz2 { dir: "pkg" }, "tts/pkg.tar.bz2", &["model.onnx", "vocos.onnx"])
+            ..spec_for(
+                &archive,
+                Archive::TarBz2 { dir: "pkg" },
+                "tts/pkg.tar.bz2",
+                &["model.onnx", "vocos.onnx"],
+            )
         };
-        let url = serve_paths(vec![("tts/pkg.tar.bz2", archive.clone()), ("voc/vocos.onnx", vocoder.clone())]);
+        let url = serve_paths(vec![
+            ("tts/pkg.tar.bz2", archive.clone()),
+            ("voc/vocos.onnx", vocoder.clone()),
+        ]);
         manager.download_spec(spec, &url).unwrap();
-        assert_eq!(wait(&manager), None, "{:?}", manager.tasks.lock().unwrap().get("test").map(|task| task.progress.clone()));
+        assert_eq!(
+            wait(&manager),
+            None,
+            "{:?}",
+            manager
+                .tasks
+                .lock()
+                .unwrap()
+                .get("test")
+                .map(|task| task.progress.clone())
+        );
         assert!(installed(&root, &spec));
         assert_eq!(fs::read(root.join("pkg/vocos.onnx")).unwrap(), vocoder);
         // 附加文件校验不一致：整体不安装
         fs::remove_dir_all(root.join("pkg")).unwrap();
-        let url = serve_paths(vec![("tts/pkg.tar.bz2", archive), ("voc/vocos.onnx", b"vocoder-bytez".to_vec())]);
+        let url = serve_paths(vec![
+            ("tts/pkg.tar.bz2", archive),
+            ("voc/vocos.onnx", b"vocoder-bytez".to_vec()),
+        ]);
         manager.download_spec(spec, &url).unwrap();
-        assert!(matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("SHA-256")));
+        assert!(
+            matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("SHA-256"))
+        );
         assert!(!root.join("pkg").exists());
-        assert!(fs::read_dir(root.join(".download")).unwrap().next().is_none(), "临时文件已清理");
+        assert!(
+            fs::read_dir(root.join(".download"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "临时文件已清理"
+        );
     }
 
     #[test]
@@ -1288,10 +1620,14 @@ mod tests {
         assert!(!root.join("vad.onnx").exists(), "校验失败不安装");
         let (url, _) = serve_once("HTTP/1.1 200 OK", "", b"01234".to_vec());
         manager.download_spec(spec, &url).unwrap();
-        assert!(matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("不完整")));
+        assert!(
+            matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("不完整"))
+        );
         let (url, _) = serve_once("HTTP/1.1 404 Not Found", "", Vec::new());
         manager.download_spec(spec, &url).unwrap();
-        assert!(matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("404")));
+        assert!(
+            matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("404"))
+        );
         // 正确的单文件模型
         let (url, _) = serve_once("HTTP/1.1 200 OK", "", good.clone());
         manager.download_spec(spec, &url).unwrap();
@@ -1299,7 +1635,12 @@ mod tests {
         assert_eq!(fs::read(root.join("vad.onnx")).unwrap(), good);
         spec.size += 1;
         assert!(!installed(&root, &spec), "大小不符视为未安装");
-        assert!(manager.download_spec(spec, "ftp://x").unwrap_err().contains("http"));
+        assert!(
+            manager
+                .download_spec(spec, "ftp://x")
+                .unwrap_err()
+                .contains("http")
+        );
     }
 
     #[test]
@@ -1308,7 +1649,12 @@ mod tests {
         let root = dir.path().join("models");
         let manager = ModelManager::new(root.clone());
         let bytes = tar_bz2(&[("pkg/model.onnx", b"m"), ("pkg/../../evil.txt", b"pwned")]);
-        let spec = spec_for(&bytes, Archive::TarBz2 { dir: "pkg" }, "x/pkg.tar.bz2", &["model.onnx"]);
+        let spec = spec_for(
+            &bytes,
+            Archive::TarBz2 { dir: "pkg" },
+            "x/pkg.tar.bz2",
+            &["model.onnx"],
+        );
         let (url, _) = serve_once("HTTP/1.1 200 OK", "", bytes);
         manager.download_spec(spec, &url).unwrap();
         match wait(&manager) {
@@ -1325,14 +1671,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = ModelManager::new(dir.path().join("models"));
         let bytes = tar_bz2(&[("pkg/model.onnx", b"m")]);
-        let spec = spec_for(&bytes, Archive::TarBz2 { dir: "pkg" }, "x/pkg.tar.bz2", &["model.onnx", "tokens.txt"]);
+        let spec = spec_for(
+            &bytes,
+            Archive::TarBz2 { dir: "pkg" },
+            "x/pkg.tar.bz2",
+            &["model.onnx", "tokens.txt"],
+        );
         let (url, _) = serve_once("HTTP/1.1 200 OK", "", bytes);
         manager.download_spec(spec, &url).unwrap();
-        assert!(matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("tokens.txt")));
-        let digests = CATALOG.iter().map(|spec| spec.sha256).chain(CATALOG.iter().flat_map(|spec| spec.extras.iter().map(|extra| extra.sha256)));
+        assert!(
+            matches!(wait(&manager), Some(Progress::Failed { message }) if message.contains("tokens.txt"))
+        );
+        let digests = CATALOG.iter().map(|spec| spec.sha256).chain(
+            CATALOG
+                .iter()
+                .flat_map(|spec| spec.extras.iter().map(|extra| extra.sha256)),
+        );
         for digest in digests {
             assert_eq!(digest.len(), 64, "{digest}");
-            assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+            assert!(
+                digest
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            );
         }
         let mut ids: Vec<_> = CATALOG.iter().map(|spec| spec.id).collect();
         ids.dedup();
@@ -1343,8 +1704,14 @@ mod tests {
             // 附加文件只用于压缩包或多文件目录模型，且安装检查包含它
             for extra in spec.extras {
                 match spec.archive {
-                    Archive::TarBz2 { .. } => assert!(spec.required.contains(&base_name(extra.path)), "{}", spec.id),
-                    Archive::Directory { .. } => assert!(spec.required.contains(&extra.path), "{}", spec.id),
+                    Archive::TarBz2 { .. } => assert!(
+                        spec.required.contains(&base_name(extra.path)),
+                        "{}",
+                        spec.id
+                    ),
+                    Archive::Directory { .. } => {
+                        assert!(spec.required.contains(&extra.path), "{}", spec.id)
+                    }
                     Archive::File => panic!("unexpected extra file for {}", spec.id),
                 }
             }
@@ -1368,9 +1735,26 @@ mod tests {
         assert_eq!(matcha.download_size(), 79_033_838 + 53_882_848);
         let status = manager.status();
         assert_eq!(status.len(), CATALOG.len());
-        assert_eq!(status.iter().find(|model| model.id == "matcha_zh_en").unwrap().size, matcha.download_size());
-        assert!(status.iter().find(|model| model.id == "x_asr_streaming").unwrap().streaming);
-        assert!(status.iter().all(|model| !model.installed && model.progress.is_none()));
+        assert_eq!(
+            status
+                .iter()
+                .find(|model| model.id == "matcha_zh_en")
+                .unwrap()
+                .size,
+            matcha.download_size()
+        );
+        assert!(
+            status
+                .iter()
+                .find(|model| model.id == "x_asr_streaming")
+                .unwrap()
+                .streaming
+        );
+        assert!(
+            status
+                .iter()
+                .all(|model| !model.installed && model.progress.is_none())
+        );
         assert!(manager.download("nope", DEFAULT_BASE).is_err());
         assert!(manager.delete("kokoro").is_ok(), "未安装时删除也成功");
     }
@@ -1383,7 +1767,11 @@ mod tests {
         let manager = ModelManager::new(dir.path().join("models"));
         manager.download("silero_vad", DEFAULT_BASE).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
-        while manager.status()[0].progress.as_ref().is_some_and(ModelManager::busy) {
+        while manager.status()[0]
+            .progress
+            .as_ref()
+            .is_some_and(ModelManager::busy)
+        {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -1407,18 +1795,27 @@ mod tests {
         let laya = super::spec("laya_multilingual").unwrap();
         assert_eq!(
             resolve_download_bases(laya, DEFAULT_BASE),
-            vec![DEFAULT_LAYA_BASE.to_owned(), DEFAULT_LAYA_MIRROR_BASE.to_owned()]
+            vec![
+                DEFAULT_LAYA_BASE.to_owned(),
+                DEFAULT_LAYA_MIRROR_BASE.to_owned()
+            ]
         );
         assert_eq!(
             resolve_download_bases(
                 laya,
                 "https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download"
             ),
-            vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), DEFAULT_LAYA_BASE.to_owned()]
+            vec![
+                DEFAULT_LAYA_MIRROR_BASE.to_owned(),
+                DEFAULT_LAYA_BASE.to_owned()
+            ]
         );
         assert_eq!(
             resolve_download_bases(laya, "https://hf-mirror.com"),
-            vec![DEFAULT_LAYA_MIRROR_BASE.to_owned(), DEFAULT_LAYA_BASE.to_owned()]
+            vec![
+                DEFAULT_LAYA_MIRROR_BASE.to_owned(),
+                DEFAULT_LAYA_BASE.to_owned()
+            ]
         );
         assert_eq!(
             resolve_download_bases(laya, "http://127.0.0.1:19999/laya"),
@@ -1429,11 +1826,17 @@ mod tests {
         let expected_mirror = "https://hf-mirror.com/mradermacher/OneJev1.6-0.8B-GGUF/resolve/main";
         assert_eq!(
             resolve_download_bases(onejev, DEFAULT_BASE),
-            vec![DEFAULT_ONEJEV_0_8B_BASE.to_owned(), expected_mirror.to_owned()]
+            vec![
+                DEFAULT_ONEJEV_0_8B_BASE.to_owned(),
+                expected_mirror.to_owned()
+            ]
         );
         assert_eq!(
             resolve_download_bases(onejev, "https://hf-mirror.com"),
-            vec![expected_mirror.to_owned(), DEFAULT_ONEJEV_0_8B_BASE.to_owned()]
+            vec![
+                expected_mirror.to_owned(),
+                DEFAULT_ONEJEV_0_8B_BASE.to_owned()
+            ]
         );
     }
 
@@ -1464,7 +1867,11 @@ mod tests {
         assert!(installed(dir.path(), laya));
 
         // 损坏的非 JSON 内容不可视为已安装
-        fs::write(model_dir.join("tokenizer/tokenizer_config.json"), b"{broken").unwrap();
+        fs::write(
+            model_dir.join("tokenizer/tokenizer_config.json"),
+            b"{broken",
+        )
+        .unwrap();
         assert!(!installed(dir.path(), laya));
 
         // 恢复合法配置，但主权重或词表大小不符时必须拒绝

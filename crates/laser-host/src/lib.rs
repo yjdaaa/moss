@@ -1,8 +1,8 @@
 // NV15 restricted mock Home Assistant policy; NOT registered for control.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod voice_home;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod home_control;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod voice_home;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod voice_agent;
@@ -327,14 +327,21 @@ fn in_process_request(
     body: &serde_json::Value,
     caller: laser_contracts::CallerContext,
 ) -> Result<(u16, serde_json::Value), String> {
-    let payload = if body.is_null() { String::new() } else { body.to_string() };
+    let payload = if body.is_null() {
+        String::new()
+    } else {
+        body.to_string()
+    };
     let request = format!(
         "{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         payload.len(),
         payload
     );
     let raw = api.handle_http_with_ctx(request.as_bytes(), caller);
-    let separator = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("后端响应缺少头部分隔符")?;
+    let separator = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or("后端响应缺少头部分隔符")?;
     let head = String::from_utf8_lossy(&raw[..separator]);
     let status = head
         .lines()
@@ -348,9 +355,20 @@ fn in_process_request(
 }
 
 impl laser_mcp::HostBackend for InProcessBackend {
-    fn request(&self, method: &str, route: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value), String> {
+    fn request(
+        &self,
+        method: &str,
+        route: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, serde_json::Value), String> {
         // 技术书 §6.4 规则 2：进程内 MCP 转发显式声明身份，不借用回环语义
-        in_process_request(&self.api, method, route, body, laser_contracts::CallerContext::McpBridge)
+        in_process_request(
+            &self.api,
+            method,
+            route,
+            body,
+            laser_contracts::CallerContext::McpBridge,
+        )
     }
 
     fn strict_mode(&self) -> bool {
@@ -377,12 +395,20 @@ pub struct VoiceBackend {
 
 impl VoiceBackend {
     fn caller(&self) -> laser_contracts::CallerContext {
-        laser_contracts::CallerContext::Voice { device_id: self.device_id.clone(), session_id: self.session_id.clone() }
+        laser_contracts::CallerContext::Voice {
+            device_id: self.device_id.clone(),
+            session_id: self.session_id.clone(),
+        }
     }
 }
 
 impl laser_mcp::HostBackend for VoiceBackend {
-    fn request(&self, method: &str, route: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value), String> {
+    fn request(
+        &self,
+        method: &str,
+        route: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, serde_json::Value), String> {
         in_process_request(&self.api, method, route, body, self.caller())
     }
 
@@ -413,7 +439,14 @@ pub fn voice_tools_list(api: &ApiService) -> serde_json::Value {
     let mut list = laser_mcp::tools_list_for(false, true);
     if let Some(tools) = list["tools"].as_array_mut() {
         tools.retain(|tool| !api.tool_disabled(tool["name"].as_str().unwrap_or("")));
-        if let Some(external) = api.external_tools_list()["tools"].as_array() { tools.extend(external.iter().filter(|tool| !api.tool_disabled(tool["name"].as_str().unwrap_or(""))).cloned()); }
+        if let Some(external) = api.external_tools_list()["tools"].as_array() {
+            tools.extend(
+                external
+                    .iter()
+                    .filter(|tool| !api.tool_disabled(tool["name"].as_str().unwrap_or("")))
+                    .cloned(),
+            );
+        }
     }
     list
 }
@@ -427,25 +460,55 @@ pub fn voice_tool_call(
     arguments: &serde_json::Value,
 ) -> laser_contracts::ToolCallResult {
     if !api.voice_session_allowed(device_id, session_id) {
-        return laser_contracts::ToolCallResult::with_detail(false, "语音设备授权已失效，请重新连接", "voice_session_revoked");
+        return laser_contracts::ToolCallResult::with_detail(
+            false,
+            "语音设备授权已失效，请重新连接",
+            "voice_session_revoked",
+        );
     }
     if name.contains("__") {
-        if api.tool_disabled(name) { return laser_contracts::ToolCallResult::err("该工具已关闭"); }
-        return api.call_external_tool(&laser_contracts::CallerContext::Voice { device_id:device_id.into(),session_id:session_id.into() }, name, arguments);
+        if api.tool_disabled(name) {
+            return laser_contracts::ToolCallResult::err("该工具已关闭");
+        }
+        return api.call_external_tool(
+            &laser_contracts::CallerContext::Voice {
+                device_id: device_id.into(),
+                session_id: session_id.into(),
+            },
+            name,
+            arguments,
+        );
     }
-    let backend = VoiceBackend { api: api.clone(), device_id: device_id.to_owned(), session_id: session_id.to_owned() };
+    let backend = VoiceBackend {
+        api: api.clone(),
+        device_id: device_id.to_owned(),
+        session_id: session_id.to_owned(),
+    };
     let result = laser_mcp::dispatch_tool_call_with(name, arguments, false, Some(&backend));
     if name == "laser_safe_action_tool" && arguments["action"] == "emergency_stop" {
         // 执行优先：审计存储失败不能阻止停止请求。不记录识别文本、设备地址或返回原文。
         let entry = laser_contracts::AuditEntry {
-            at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0),
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
             client: laser_contracts::audit_client(&backend.caller()),
             action: laser_contracts::AuditAction::VoiceStopRequested,
             target: session_id.to_owned(),
-            result: if result.success { laser_contracts::AuditResult::Ok } else { laser_contracts::AuditResult::Failed },
-            detail: laser_contracts::AuditDetail { tool: Some(name.into()), reason: Some("emergency_stop request; physical state unverified".into()), ..Default::default() },
+            result: if result.success {
+                laser_contracts::AuditResult::Ok
+            } else {
+                laser_contracts::AuditResult::Failed
+            },
+            detail: laser_contracts::AuditDetail {
+                tool: Some(name.into()),
+                reason: Some("emergency_stop request; physical state unverified".into()),
+                ..Default::default()
+            },
         };
-        if api.record_audit(&entry).is_err() { eprintln!("[moss-host] voice stop audit write failed"); }
+        if api.record_audit(&entry).is_err() {
+            eprintln!("[moss-host] voice stop audit write failed");
+        }
     }
     result
 }
@@ -458,7 +521,8 @@ pub fn voice_recent_workflows(
     device_id: &str,
     session_id: &str,
 ) -> Option<serde_json::Value> {
-    if !api.voice_session_allowed(device_id, session_id) || api.tool_disabled("laser_workflow_tool") {
+    if !api.voice_session_allowed(device_id, session_id) || api.tool_disabled("laser_workflow_tool")
+    {
         return None;
     }
     let make_caller = || laser_contracts::CallerContext::Voice {
@@ -466,14 +530,17 @@ pub fn voice_recent_workflows(
         session_id: session_id.into(),
     };
     let body = serde_json::json!({"action": "recent"});
-    let (status, response) = in_process_request(api, "POST", "/api/workflow", &body, make_caller()).ok()?;
+    let (status, response) =
+        in_process_request(api, "POST", "/api/workflow", &body, make_caller()).ok()?;
     if status >= 400 {
         return None;
     }
     let mut result = response.get("result").cloned()?;
-    let has_sending = result["workflows"]
-        .as_array()
-        .is_some_and(|items| items.iter().any(|w| w["status"].as_str() == Some("sending")));
+    let has_sending = result["workflows"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|w| w["status"].as_str() == Some("sending"))
+    });
     if has_sending
         && let Ok((200, targets_res)) = in_process_request(
             api,
@@ -552,7 +619,9 @@ pub fn mcp_bridge_connected() -> bool {
     laser_contracts::global_mcp_telemetry().snapshot().connected
 }
 
-fn read_runtime_settings(runtime_dir: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+fn read_runtime_settings(
+    runtime_dir: &std::path::Path,
+) -> serde_json::Map<String, serde_json::Value> {
     std::fs::read(runtime_dir.join("settings.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -576,10 +645,23 @@ pub fn configured_mcp_endpoints(runtime_dir: &std::path::Path) -> Vec<(String, S
         endpoints.push(("primary".to_owned(), primary, true));
     }
     let extras_active = !voice_mode_is_self_hosted(runtime_dir);
-    let extras = settings.get("mcp_extra_endpoints").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
-    for (index, value) in extras.iter().take(laser_mcp::MAX_EXTRA_ENDPOINTS).enumerate() {
-        let Some(endpoint) = value.as_str().and_then(laser_mcp::endpoint_from_value) else { continue };
-        if endpoints.iter().any(|(_, existing, _)| existing == &endpoint) {
+    let extras = settings
+        .get("mcp_extra_endpoints")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for (index, value) in extras
+        .iter()
+        .take(laser_mcp::MAX_EXTRA_ENDPOINTS)
+        .enumerate()
+    {
+        let Some(endpoint) = value.as_str().and_then(laser_mcp::endpoint_from_value) else {
+            continue;
+        };
+        if endpoints
+            .iter()
+            .any(|(_, existing, _)| existing == &endpoint)
+        {
             continue;
         }
         endpoints.push((format!("extra-{}", index + 1), endpoint, extras_active));
@@ -601,7 +683,13 @@ pub fn voice_mode_is_self_hosted(runtime_dir: &std::path::Path) -> bool {
     std::fs::read(runtime_dir.join("settings.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|value| value.get("voice")?.get("mode")?.as_str().map(|mode| mode == "self_hosted"))
+        .and_then(|value| {
+            value
+                .get("voice")?
+                .get("mode")?
+                .as_str()
+                .map(|mode| mode == "self_hosted")
+        })
         .unwrap_or(false)
 }
 
@@ -611,7 +699,12 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
     let endpoints: Vec<serde_json::Value> = configured_mcp_endpoints(runtime_dir)
         .into_iter()
         .map(|(id, endpoint, active)| {
-            let link = telemetry.endpoints.iter().find(|link| link.id == id).cloned().unwrap_or_default();
+            let link = telemetry
+                .endpoints
+                .iter()
+                .find(|link| link.id == id)
+                .cloned()
+                .unwrap_or_default();
             serde_json::json!({
                 "id": id,
                 "endpoint": laser_mcp::redact_endpoint(&endpoint),
@@ -633,7 +726,12 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
         .into_iter()
         .filter_map(|tool| {
             let name = tool["name"].as_str()?.to_owned();
-            let description: String = tool["description"].as_str().unwrap_or("").chars().take(80).collect();
+            let description: String = tool["description"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
             let stat = telemetry.tool_stats.get(&name).cloned().unwrap_or_default();
             Some(serde_json::json!({
                 "name": name,
@@ -660,7 +758,15 @@ pub fn mcp_overview(runtime_dir: &std::path::Path, api: &ApiService) -> serde_js
 /// 校验关闭的工具名单：只接受工具清单里可关闭的工具，去重并排序。
 pub fn validate_disabled_tools(names: &[String]) -> Result<Vec<String>, String> {
     let known = laser_mcp::tools_list_json(true);
-    let known: Vec<&str> = known["tools"].as_array().map(|tools| tools.iter().filter_map(|tool| tool["name"].as_str()).collect()).unwrap_or_default();
+    let known: Vec<&str> = known["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut accepted = Vec::new();
     for name in names {
         let name = name.trim();
@@ -677,7 +783,6 @@ pub fn validate_disabled_tools(names: &[String]) -> Result<Vec<String>, String> 
     accepted.sort();
     Ok(accepted)
 }
-
 
 impl HostApplication {
     pub fn init() -> Result<Self, String> {
@@ -737,7 +842,9 @@ impl HostApplication {
                     runtime_root.generated_assets.clone(),
                 ])
                 .with_runtime_db(db_arc.clone())
-                .with_auth(Arc::new(laser_api::AuthManager::with_runtime_path(runtime_root.path.clone())))
+                .with_auth(Arc::new(laser_api::AuthManager::with_runtime_path(
+                    runtime_root.path.clone(),
+                )))
                 .with_allowed_origins(allowed_origins)
                 .with_strict_mode(strict_mode),
         );
@@ -767,11 +874,19 @@ impl HostApplication {
 
     /// 停止当前所有小智桥并等待其退出（最多 `wait`）。返回旧桥是否都已确认退出。
     pub fn stop_mcp_bridge(&self, wait: Duration) -> bool {
-        let controls = self.bridge.lock().map(|mut guard| std::mem::take(&mut *guard)).unwrap_or_default();
+        let controls = self
+            .bridge
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default();
         for control in &controls {
             control.shutdown.store(true, Ordering::SeqCst);
         }
-        let all_done = || controls.iter().all(|control| control.done.load(Ordering::SeqCst));
+        let all_done = || {
+            controls
+                .iter()
+                .all(|control| control.done.load(Ordering::SeqCst))
+        };
         let deadline = Instant::now() + wait;
         while Instant::now() < deadline {
             if all_done() {
@@ -809,8 +924,10 @@ impl HostApplication {
     /// 接入点见 [`configured_mcp_endpoints`]。返回启动的桥数量（0 表示未配置）。
     pub fn spawn_mcp_bridge(&self) -> usize {
         let endpoints = configured_mcp_endpoints(&self.runtime_root.path);
-        let redacted: Vec<(String, String)> =
-            endpoints.iter().map(|(id, endpoint, _)| (id.clone(), laser_mcp::redact_endpoint(endpoint))).collect();
+        let redacted: Vec<(String, String)> = endpoints
+            .iter()
+            .map(|(id, endpoint, _)| (id.clone(), laser_mcp::redact_endpoint(endpoint)))
+            .collect();
         laser_contracts::global_mcp_telemetry().register_endpoints(&redacted);
         let developer_mode = laser_tools::developer_mode_enabled();
         let mut controls = Vec::new();
@@ -818,15 +935,26 @@ impl HostApplication {
             if !active {
                 continue;
             }
-            let backend: laser_mcp::SharedBackend = Arc::new(InProcessBackend { api: self.api_service.clone() });
+            let backend: laser_mcp::SharedBackend = Arc::new(InProcessBackend {
+                api: self.api_service.clone(),
+            });
             let shutdown = Arc::new(AtomicBool::new(false));
             let done = Arc::new(AtomicBool::new(false));
             let stats = Arc::new(laser_mcp::BridgeStats::default());
             let (thread_shutdown, thread_done) = (shutdown.clone(), done.clone());
-            let spawned = std::thread::Builder::new().name(format!("mcp-bridge-{id}")).spawn(move || {
-                laser_mcp::run_bridge(&id, &endpoint, Some(backend), developer_mode, thread_shutdown, stats);
-                thread_done.store(true, Ordering::SeqCst);
-            });
+            let spawned = std::thread::Builder::new()
+                .name(format!("mcp-bridge-{id}"))
+                .spawn(move || {
+                    laser_mcp::run_bridge(
+                        &id,
+                        &endpoint,
+                        Some(backend),
+                        developer_mode,
+                        thread_shutdown,
+                        stats,
+                    );
+                    thread_done.store(true, Ordering::SeqCst);
+                });
             if spawned.is_ok() {
                 controls.push(BridgeControl { shutdown, done });
             }
@@ -858,7 +986,9 @@ impl HostApplication {
         let (listener, actual_port) = match TcpListener::bind(format!("{host}:{preferred}")) {
             Ok(l) => (l, preferred),
             Err(e) => {
-                eprintln!("提示: 首选端口 {host}:{preferred} 无法绑定 ({e})，正在自动搜寻可用端口...");
+                eprintln!(
+                    "提示: 首选端口 {host}:{preferred} 无法绑定 ({e})，正在自动搜寻可用端口..."
+                );
                 let mut found = None;
                 for p in (preferred + 1)..=(preferred + 50) {
                     if let Ok(l) = TcpListener::bind(format!("{host}:{p}")) {
@@ -903,7 +1033,13 @@ mod tests {
             builtin_material_library(),
         ));
         let backend = InProcessBackend { api: service };
-        let (status, body) = laser_mcp::HostBackend::request(&backend, "GET", "/api/health", &serde_json::Value::Null).unwrap();
+        let (status, body) = laser_mcp::HostBackend::request(
+            &backend,
+            "GET",
+            "/api/health",
+            &serde_json::Value::Null,
+        )
+        .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body["result"]["status"], "ok");
         let result = laser_mcp::dispatch_tool_call_with(
@@ -934,7 +1070,9 @@ mod tests {
             )
             .with_strict_mode(false)
             .with_runtime_db(db.clone())
-            .with_approval_service(Arc::new(laser_api::approval::ApprovalService::new(db.clone()))),
+            .with_approval_service(Arc::new(
+                laser_api::approval::ApprovalService::new(db.clone()),
+            )),
         );
         let names: Vec<String> = voice_tools_list(&service)["tools"]
             .as_array()
@@ -943,25 +1081,76 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
         assert!(names.iter().any(|name| name == "laser_workflow_tool"));
-        for hidden in ["command_execution_tool", "open_app_tool", "shortcut_key_execution_tool", "open_jsjds_website_tool"] {
-            assert!(!names.iter().any(|name| name == hidden), "{hidden} 不对内置语音开放");
+        for hidden in [
+            "command_execution_tool",
+            "open_app_tool",
+            "shortcut_key_execution_tool",
+            "open_jsjds_website_tool",
+        ] {
+            assert!(
+                !names.iter().any(|name| name == hidden),
+                "{hidden} 不对内置语音开放"
+            );
         }
         allow_test_voice(&service, &db, "aa:bb:cc:dd:ee:ff", "s1");
-        let denied = voice_tool_call(&service, "aa:bb:cc:dd:ee:ff", "s1", "open_app_tool", &serde_json::json!({"app_name": "notepad"}));
+        let denied = voice_tool_call(
+            &service,
+            "aa:bb:cc:dd:ee:ff",
+            "s1",
+            "open_app_tool",
+            &serde_json::json!({"app_name": "notepad"}),
+        );
         assert!(!denied.success);
-        assert!(denied.detail.as_deref().unwrap_or("").contains("tool_not_allowed"), "{denied:?}");
+        assert!(
+            denied
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("tool_not_allowed"),
+            "{denied:?}"
+        );
         let audit = db.lock().unwrap().recent_audit(10).unwrap();
-        assert!(audit.iter().any(|entry| entry.client == "voice:aa:bb:cc:dd:ee:ff" && entry.target == "open_app_tool"), "{audit:?}");
-        let status = voice_tool_call(&service, "aa:bb:cc:dd:ee:ff", "s1", "laser_workflow_tool", &serde_json::json!({"action": "status", "workflow_id": "wf-missing"}));
-        assert!(!status.success && status.result.contains("未找到"), "只读工具照常执行: {status:?}");
+        assert!(
+            audit
+                .iter()
+                .any(|entry| entry.client == "voice:aa:bb:cc:dd:ee:ff"
+                    && entry.target == "open_app_tool"),
+            "{audit:?}"
+        );
+        let status = voice_tool_call(
+            &service,
+            "aa:bb:cc:dd:ee:ff",
+            "s1",
+            "laser_workflow_tool",
+            &serde_json::json!({"action": "status", "workflow_id": "wf-missing"}),
+        );
+        assert!(
+            !status.success && status.result.contains("未找到"),
+            "只读工具照常执行: {status:?}"
+        );
         // 关闭连接的 fake factory；不能触及真实设备。停止失败仍必须留下有界审计。
-        let service = Arc::new(plain_service().with_runtime_db(db.clone()).with_approval_service(Arc::new(laser_api::approval::ApprovalService::new(db.clone())))
-            .with_transport_factory(Arc::new(|_| Err("injected connection failure".into()))));
+        let service = Arc::new(
+            plain_service()
+                .with_runtime_db(db.clone())
+                .with_approval_service(Arc::new(laser_api::approval::ApprovalService::new(
+                    db.clone(),
+                )))
+                .with_transport_factory(Arc::new(|_| Err("injected connection failure".into()))),
+        );
         allow_test_voice(&service, &db, "fake-device", "s-stop");
-        let stopped = voice_tool_call(&service, "fake-device", "s-stop", "laser_safe_action_tool", &serde_json::json!({"action":"emergency_stop","connection_mode":"network","host":"127.0.0.1"}));
+        let stopped = voice_tool_call(
+            &service,
+            "fake-device",
+            "s-stop",
+            "laser_safe_action_tool",
+            &serde_json::json!({"action":"emergency_stop","connection_mode":"network","host":"127.0.0.1"}),
+        );
         assert!(!stopped.success);
         let audit = db.lock().unwrap().recent_audit(10).unwrap();
-        let entry = audit.iter().find(|entry| entry.action == laser_contracts::AuditAction::VoiceStopRequested).unwrap();
+        let entry = audit
+            .iter()
+            .find(|entry| entry.action == laser_contracts::AuditAction::VoiceStopRequested)
+            .unwrap();
         assert_eq!(entry.client, "voice:fake-device");
         assert_eq!(entry.target, "s-stop");
         assert_eq!(entry.result, laser_contracts::AuditResult::Failed);
@@ -1000,10 +1189,22 @@ mod tests {
         );
     }
 
-    fn allow_test_voice(service: &ApiService, db: &Arc<Mutex<RuntimeDb>>, device: &str, session: &str) {
-        db.lock().unwrap().voice_device_seen(device, "test-client", "", "", "", 0.0).unwrap();
-        service.set_voice_device_status(device, laser_runtime::VOICE_DEVICE_ALLOWED, 0.0).unwrap();
-        service.register_voice_session(device, "test-client", session).unwrap();
+    fn allow_test_voice(
+        service: &ApiService,
+        db: &Arc<Mutex<RuntimeDb>>,
+        device: &str,
+        session: &str,
+    ) {
+        db.lock()
+            .unwrap()
+            .voice_device_seen(device, "test-client", "", "", "", 0.0)
+            .unwrap();
+        service
+            .set_voice_device_status(device, laser_runtime::VOICE_DEVICE_ALLOWED, 0.0)
+            .unwrap();
+        service
+            .register_voice_session(device, "test-client", session)
+            .unwrap();
     }
 
     fn plain_service() -> ApiService {
@@ -1024,7 +1225,8 @@ mod tests {
 
     impl TempRuntime {
         fn new(name: &str, settings: serde_json::Value) -> Self {
-            let dir = std::env::temp_dir().join(format!("laser-host-{name}-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("laser-host-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("settings.json"), settings.to_string()).unwrap();
@@ -1042,47 +1244,76 @@ mod tests {
     #[test]
     fn configured_endpoints_include_extras_and_pause_them_in_self_hosted_mode() {
         let primary = "wss://official.example/mcp/?token=primary";
-        let runtime = TempRuntime::new("endpoints", serde_json::json!({
-            "mcp_endpoint": primary,
-            "mcp_extra_endpoints": [
-                "wss://official.example/mcp/?token=a",
-                "http://not-websocket.example/",
-                primary,
-                "wss://official.example/mcp/?token=b",
-                "wss://official.example/mcp/?token=c",
-                "wss://official.example/mcp/?token=d"
-            ]
-        }));
+        let runtime = TempRuntime::new(
+            "endpoints",
+            serde_json::json!({
+                "mcp_endpoint": primary,
+                "mcp_extra_endpoints": [
+                    "wss://official.example/mcp/?token=a",
+                    "http://not-websocket.example/",
+                    primary,
+                    "wss://official.example/mcp/?token=b",
+                    "wss://official.example/mcp/?token=c",
+                    "wss://official.example/mcp/?token=d"
+                ]
+            }),
+        );
         let endpoints = configured_mcp_endpoints(&runtime.0);
         let ids: Vec<&str> = endpoints.iter().map(|(id, _, _)| id.as_str()).collect();
-        assert_eq!(ids, ["primary", "extra-1", "extra-4"], "无效与重复跳过，只看前 {MAX_EXTRA_ENDPOINTS} 项");
+        assert_eq!(
+            ids,
+            ["primary", "extra-1", "extra-4"],
+            "无效与重复跳过，只看前 {MAX_EXTRA_ENDPOINTS} 项"
+        );
         assert!(endpoints.iter().all(|(_, _, active)| *active));
 
-        let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(runtime.0.join("settings.json")).unwrap()).unwrap();
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(runtime.0.join("settings.json")).unwrap())
+                .unwrap();
         settings["voice"] = serde_json::json!({"mode": "self_hosted"});
         std::fs::write(runtime.0.join("settings.json"), settings.to_string()).unwrap();
         let endpoints = configured_mcp_endpoints(&runtime.0);
         assert!(endpoints[0].2, "主接入点照常连接");
-        assert!(endpoints[1..].iter().all(|(_, _, active)| !active), "自建模式下附加接入点暂停");
+        assert!(
+            endpoints[1..].iter().all(|(_, _, active)| !active),
+            "自建模式下附加接入点暂停"
+        );
 
         // 总览：地址脱敏、带身份字段；自建模式标记暂停
         let overview = mcp_overview(&runtime.0, &plain_service());
         assert_eq!(overview["extras_paused"], true);
-        assert_eq!(overview["endpoints"][0]["endpoint"], "wss://official.example/mcp/?token=***");
-        assert!(!overview.to_string().contains("token=primary"), "总览不得含 token");
+        assert_eq!(
+            overview["endpoints"][0]["endpoint"],
+            "wss://official.example/mcp/?token=***"
+        );
+        assert!(
+            !overview.to_string().contains("token=primary"),
+            "总览不得含 token"
+        );
         assert_eq!(overview["endpoints"][1]["connected"], false);
     }
 
     /// NV8：工具开关从 settings.json 读入；关闭的工具不出现在内置语音清单里，调用被拒绝；停止类工具不能关闭。
     #[test]
     fn disabled_tools_are_hidden_from_voice_and_refused() {
-        let runtime = TempRuntime::new("switches", serde_json::json!({
-            "mcp_disabled_tools": ["material_params_tool", "laser_safe_action_tool", ""]
-        }));
+        let runtime = TempRuntime::new(
+            "switches",
+            serde_json::json!({
+                "mcp_disabled_tools": ["material_params_tool", "laser_safe_action_tool", ""]
+            }),
+        );
         let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
-        let service = Arc::new(plain_service().with_runtime_path(runtime.0.clone()).with_runtime_db(db.clone()));
+        let service = Arc::new(
+            plain_service()
+                .with_runtime_path(runtime.0.clone())
+                .with_runtime_db(db.clone()),
+        );
         allow_test_voice(&service, &db, "aa:bb:cc:dd:ee:ff", "s1");
-        assert_eq!(service.disabled_tools(), vec!["material_params_tool".to_string()], "停止类工具与空名被忽略");
+        assert_eq!(
+            service.disabled_tools(),
+            vec!["material_params_tool".to_string()],
+            "停止类工具与空名被忽略"
+        );
         let names: Vec<String> = voice_tools_list(&service)["tools"]
             .as_array()
             .unwrap()
@@ -1091,27 +1322,75 @@ mod tests {
             .collect();
         assert!(!names.contains(&"material_params_tool".to_owned()));
         assert!(names.contains(&"laser_safe_action_tool".to_owned()));
-        let refused = voice_tool_call(&service, "aa:bb:cc:dd:ee:ff", "s1", "material_params_tool", &serde_json::json!({"action": "list"}));
-        assert!(!refused.success && refused.detail.as_deref().unwrap_or("").contains("tool_disabled"), "{refused:?}");
-        let backend = InProcessBackend { api: service.clone() };
-        assert!(laser_mcp::HostBackend::tool_disabled(&backend, "material_params_tool"));
+        let refused = voice_tool_call(
+            &service,
+            "aa:bb:cc:dd:ee:ff",
+            "s1",
+            "material_params_tool",
+            &serde_json::json!({"action": "list"}),
+        );
+        assert!(
+            !refused.success
+                && refused
+                    .detail
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("tool_disabled"),
+            "{refused:?}"
+        );
+        let backend = InProcessBackend {
+            api: service.clone(),
+        };
+        assert!(laser_mcp::HostBackend::tool_disabled(
+            &backend,
+            "material_params_tool"
+        ));
         let listed = laser_mcp::tools_list_with(false, Some(&backend));
         assert!(!listed.to_string().contains("\"material_params_tool\""));
         let overview = mcp_overview(&runtime.0, &service);
-        let tool = overview["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "material_params_tool").unwrap();
+        let tool = overview["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "material_params_tool")
+            .unwrap();
         assert_eq!(tool["enabled"], false);
-        let stop = overview["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "laser_safe_action_tool").unwrap();
+        let stop = overview["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "laser_safe_action_tool")
+            .unwrap();
         assert_eq!(stop["can_disable"], false);
 
         service.set_disabled_tools(Vec::new());
-        assert!(!service.tool_disabled("material_params_tool"), "运行中可重新打开");
+        assert!(
+            !service.tool_disabled("material_params_tool"),
+            "运行中可重新打开"
+        );
 
         assert_eq!(
-            validate_disabled_tools(&["open_app_tool".into(), "material_params_tool".into(), "open_app_tool".into()]).unwrap(),
-            vec!["material_params_tool".to_string(), "open_app_tool".to_string()]
+            validate_disabled_tools(&[
+                "open_app_tool".into(),
+                "material_params_tool".into(),
+                "open_app_tool".into()
+            ])
+            .unwrap(),
+            vec![
+                "material_params_tool".to_string(),
+                "open_app_tool".to_string()
+            ]
         );
-        assert!(validate_disabled_tools(&["laser_safe_action_tool".into()]).unwrap_err().contains("不能关闭"));
-        assert!(validate_disabled_tools(&["no_such_tool".into()]).unwrap_err().contains("没有名为"));
+        assert!(
+            validate_disabled_tools(&["laser_safe_action_tool".into()])
+                .unwrap_err()
+                .contains("不能关闭")
+        );
+        assert!(
+            validate_disabled_tools(&["no_such_tool".into()])
+                .unwrap_err()
+                .contains("没有名为")
+        );
     }
 
     #[test]
@@ -1126,11 +1405,15 @@ mod tests {
         });
 
         let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
-        db.lock().unwrap().connection.execute(
-            "INSERT INTO jobs(job_id, status, created_at, payload) VALUES
+        db.lock()
+            .unwrap()
+            .connection
+            .execute(
+                "INSERT INTO jobs(job_id, status, created_at, payload) VALUES
              ('active_job', 'running', unixepoch(), '{}')",
-            [],
-        ).unwrap();
+                [],
+            )
+            .unwrap();
 
         coordinator.register_db(db.clone());
 
@@ -1140,17 +1423,22 @@ mod tests {
 
         assert!(aborted.load(Ordering::SeqCst), "必须触发裸写急停");
 
-        let job_status: String = db.lock().unwrap().connection.query_row(
-            "SELECT status FROM jobs WHERE job_id='active_job'",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let job_status: String = db
+            .lock()
+            .unwrap()
+            .connection
+            .query_row(
+                "SELECT status FROM jobs WHERE job_id='active_job'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(job_status, "failed", "活动 job 必须在退出时标记为 failed");
     }
 
     #[test]
     fn fake_device_receives_0x18_on_host_shutdown() {
-        use laser_device::{FakeGrbl, DeviceTransport};
+        use laser_device::{DeviceTransport, FakeGrbl};
 
         let fake = FakeGrbl::new(["$32=1".to_string()]);
         let abort_handle = fake.raw_abort_handle().expect("raw handle must exist");
@@ -1159,7 +1447,11 @@ mod tests {
         coordinator.register_raw_abort(abort_handle);
 
         assert!(coordinator.trigger_shutdown());
-        assert_eq!(fake.realtime(), vec![0x18], "假设备必须在关机时收到 0x18 单字节软复位急停");
+        assert_eq!(
+            fake.realtime(),
+            vec![0x18],
+            "假设备必须在关机时收到 0x18 单字节软复位急停"
+        );
     }
 
     #[test]
@@ -1241,7 +1533,10 @@ mod tests {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .unwrap();
-            assert_eq!(status, "failed", "{table} must be marked failed on shutdown");
+            assert_eq!(
+                status, "failed",
+                "{table} must be marked failed on shutdown"
+            );
             assert_eq!(detail, "host 退出中断，任务安全终止");
         }
     }

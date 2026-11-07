@@ -1,10 +1,13 @@
 //! Secure, bounded, read-only local-file discovery and selection.
 //! No network, file write, process spawn, model API, or music playback.
-use getrandom::fill;
-use sha2::{Digest, Sha256};
-use crate::safe_fs::{is_link_or_reparse, no_link_ancestry, open_verified, sensitive_descendant, valid_local_root, FsError};
 #[cfg(test)]
 use crate::safe_fs::sensitive_catalog_root;
+use crate::safe_fs::{
+    FsError, is_link_or_reparse, no_link_ancestry, open_verified, sensitive_descendant,
+    valid_local_root,
+};
+use getrandom::fill;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
@@ -136,7 +139,9 @@ impl MusicIndex {
                 if is_link_or_reparse(&metadata) {
                     continue;
                 }
-                if sensitive_descendant(&path) { continue; }
+                if sensitive_descendant(&path) {
+                    continue;
+                }
                 if metadata.is_dir() {
                     if depth < MAX_DEPTH {
                         pending.push((path, depth + 1));
@@ -275,7 +280,9 @@ impl MusicIndex {
         if track.relative.components().any(|part| match part {
             Component::Normal(name) => sensitive_descendant(Path::new(name)),
             _ => true,
-        }) { return Err(MusicError::UnsafePath); }
+        }) {
+            return Err(MusicError::UnsafePath);
+        }
         no_link_ancestry(&path)?;
         let canonical = path.canonicalize().map_err(|_| MusicError::Unavailable)?;
         if !canonical.starts_with(&self.root) {
@@ -380,15 +387,21 @@ mod tests {
     }
     #[test]
     fn nv14_sensitive_descendant_directories_are_excluded_from_library() {
-        let temp=tempfile::tempdir().unwrap();
-        canary(temp.path(),"album/normal.mp3");
+        let temp = tempfile::tempdir().unwrap();
+        canary(temp.path(), "album/normal.mp3");
         for name in [".ssh", ".aws", "AppData", "credentials", "Secrets", ".git"] {
             canary(temp.path(), &format!("album/{name}/synthetic_secret.wav"));
         }
-        let index=MusicIndex::scan(temp.path()).unwrap();
-        assert_eq!(index.len(),1);
-        assert!(matches!(index.choose(Some("normal"),false),Ok(MusicChoice::Selected(_))));
-        assert_eq!(index.choose(Some("synthetic_secret"),false),Ok(MusicChoice::Missing));
+        let index = MusicIndex::scan(temp.path()).unwrap();
+        assert_eq!(index.len(), 1);
+        assert!(matches!(
+            index.choose(Some("normal"), false),
+            Ok(MusicChoice::Selected(_))
+        ));
+        assert_eq!(
+            index.choose(Some("synthetic_secret"), false),
+            Ok(MusicChoice::Missing)
+        );
     }
     #[test]
     fn stale_moved_modified_and_unknown_ids_fail_closed() {
@@ -465,10 +478,15 @@ mod tests {
             "/Volumes",
             "/Volumes/ExternalSSD",
         ] {
-            assert!(sensitive_catalog_root(Path::new(unix_like)), "accepted {unix_like}");
+            assert!(
+                sensitive_catalog_root(Path::new(unix_like)),
+                "accepted {unix_like}"
+            );
         }
         assert!(!sensitive_catalog_root(Path::new("/Users/someone/Music")));
-        assert!(!sensitive_catalog_root(Path::new("/Volumes/ExternalSSD/Music")));
+        assert!(!sensitive_catalog_root(Path::new(
+            "/Volumes/ExternalSSD/Music"
+        )));
         let temp = tempfile::tempdir().unwrap();
         assert!(!sensitive_catalog_root(temp.path()));
     }

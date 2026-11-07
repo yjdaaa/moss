@@ -54,7 +54,9 @@ pub fn parse_app_image(bytes: &[u8]) -> Result<AppImage, &'static str> {
         return Err("固件超过 16 MB");
     }
     if bytes[0] != 0xE9 {
-        return Err("不是 ESP32 应用固件（镜像头不对）；请选择编译输出里的应用 .bin，不要选整片烧录包");
+        return Err(
+            "不是 ESP32 应用固件（镜像头不对）；请选择编译输出里的应用 .bin，不要选整片烧录包",
+        );
     }
     let magic = u32::from_le_bytes(bytes[32..36].try_into().expect("four bytes"));
     if magic != 0xABCD_5432 {
@@ -74,20 +76,30 @@ pub fn version_parts(version: &str) -> Option<Vec<u32>> {
     if version.is_empty() || version.len() > 32 {
         return None;
     }
-    let parts = version.split('.').map(|part| part.parse::<u32>().ok()).collect::<Option<Vec<_>>>()?;
+    let parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()?;
     (1..=5).contains(&parts.len()).then_some(parts)
 }
 
 /// 推送前预检：xiaozhi 固件只在服务器版本更新时才升级；设备当前版本不是数字版本时不推送。
 pub fn is_newer(candidate: &str, current: &str) -> bool {
-    version_parts(candidate).is_some() && version_parts(current).is_some()
-        && moss_xiaozhi_proto::is_newer_version(candidate.trim_start_matches(['v', 'V']), current.trim_start_matches(['v', 'V']))
+    version_parts(candidate).is_some()
+        && version_parts(current).is_some()
+        && moss_xiaozhi_proto::is_newer_version(
+            candidate.trim_start_matches(['v', 'V']),
+            current.trim_start_matches(['v', 'V']),
+        )
 }
 
 /// 固件文件的 SHA-256（小写十六进制）。
 pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
-    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// 下载令牌：32 位十六进制。
@@ -96,7 +108,9 @@ pub fn token_ok(token: &str) -> bool {
 }
 
 pub(crate) fn router(shared: Arc<Shared>) -> Router {
-    Router::new().route("/xiaozhi/firmware/{file}", get(download)).with_state(shared)
+    Router::new()
+        .route("/xiaozhi/firmware/{file}", get(download))
+        .with_state(shared)
 }
 
 async fn download(
@@ -113,16 +127,28 @@ async fn download(
     }
     let peer_ip = peer.ip().to_string();
     let lookup = token.clone();
-    let bytes = tokio::task::spawn_blocking(move || host.fetch(&lookup, &peer_ip)).await.ok().flatten();
+    let bytes = tokio::task::spawn_blocking(move || host.fetch(&lookup, &peer_ip))
+        .await
+        .ok()
+        .flatten();
     match bytes {
         Some(bytes) => {
-            shared.state.event(crate::EventRecord::info(crate::DiagCategory::Firmware, format!("固件下载：{} 开始下载 {} 字节", peer.ip(), bytes.len())));
+            shared.state.event(crate::EventRecord::info(
+                crate::DiagCategory::Firmware,
+                format!("固件下载：{} 开始下载 {} 字节", peer.ip(), bytes.len()),
+            ));
             ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()
         }
         None => {
             shared.state.event(
-                crate::EventRecord::warn(crate::DiagCategory::Firmware, format!("固件下载被拒绝（{}）：令牌无效、已过期或推送已取消", peer.ip()))
-                    .hint("在“设备与工具 → 固件升级”里重新确认推送这台设备"),
+                crate::EventRecord::warn(
+                    crate::DiagCategory::Firmware,
+                    format!(
+                        "固件下载被拒绝（{}）：令牌无效、已过期或推送已取消",
+                        peer.ip()
+                    ),
+                )
+                .hint("在“设备与工具 → 固件升级”里重新确认推送这台设备"),
             );
             StatusCode::NOT_FOUND.into_response()
         }
@@ -144,14 +170,26 @@ mod tests {
 
     #[test]
     fn app_image_header_is_required_and_version_is_read() {
-        assert_eq!(parse_app_image(&image("1.8.2", "xiaozhi")).unwrap(), AppImage { version: "1.8.2".into(), project: "xiaozhi".into() });
+        assert_eq!(
+            parse_app_image(&image("1.8.2", "xiaozhi")).unwrap(),
+            AppImage {
+                version: "1.8.2".into(),
+                project: "xiaozhi".into()
+            }
+        );
         let mut merged = image("1.8.2", "xiaozhi");
         merged[0] = 0xFF;
-        assert!(parse_app_image(&merged).is_err(), "整片烧录包 / 非应用镜像要拒绝");
+        assert!(
+            parse_app_image(&merged).is_err(),
+            "整片烧录包 / 非应用镜像要拒绝"
+        );
         let mut no_desc = image("1.8.2", "xiaozhi");
         no_desc[32] = 0;
         assert!(parse_app_image(&no_desc).is_err());
-        assert!(parse_app_image(&image("dev-build", "x")).is_err(), "非数字版本设备无法比较");
+        assert!(
+            parse_app_image(&image("dev-build", "x")).is_err(),
+            "非数字版本设备无法比较"
+        );
         assert!(parse_app_image(&[0xE9; 100]).is_err(), "太小");
     }
 

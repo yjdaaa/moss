@@ -72,8 +72,18 @@ fn invalid(message: &str) -> SchemaError {
 
 impl RuntimeDb {
     /// New rows always start at revision 1, seen once, and are never born deleted.
-    pub fn insert_context_memory(&self, row: &ContextMemoryRow) -> Result<ContextMemoryRow, SchemaError> {
-        if row.revision != 1 || row.seen_count != 1 || row.last_seen_at.is_some() || row.deleted_at.is_some() || !row.created_at.is_finite() || row.updated_at != row.created_at || row.expires_at.is_some_and(|at| !at.is_finite()) {
+    pub fn insert_context_memory(
+        &self,
+        row: &ContextMemoryRow,
+    ) -> Result<ContextMemoryRow, SchemaError> {
+        if row.revision != 1
+            || row.seen_count != 1
+            || row.last_seen_at.is_some()
+            || row.deleted_at.is_some()
+            || !row.created_at.is_finite()
+            || row.updated_at != row.created_at
+            || row.expires_at.is_some_and(|at| !at.is_finite())
+        {
             return Err(invalid("记忆条目无效"));
         }
         self.connection.execute(
@@ -84,28 +94,52 @@ impl RuntimeDb {
                 row.supersedes
             ],
         )?;
-        self.context_memory(&row.id)?.ok_or_else(|| invalid("记忆条目写入失败"))
+        self.context_memory(&row.id)?
+            .ok_or_else(|| invalid("记忆条目写入失败"))
     }
 
     pub fn context_memory(&self, id: &str) -> Result<Option<ContextMemoryRow>, SchemaError> {
         self.connection
-            .query_row(&format!("SELECT {COLUMNS} FROM context_memories WHERE id=?1"), [id], from_row)
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM context_memories WHERE id=?1"),
+                [id],
+                from_row,
+            )
             .optional()
             .map_err(SchemaError::from)
     }
 
     /// One scope only, newest first. Deleted tombstones are listed only when asked.
-    pub fn list_context_memories(&self, scope_kind: &str, scope_id: &str, include_deleted: bool, limit: usize) -> Result<Vec<ContextMemoryRow>, SchemaError> {
+    pub fn list_context_memories(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        include_deleted: bool,
+        limit: usize,
+    ) -> Result<Vec<ContextMemoryRow>, SchemaError> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {COLUMNS} FROM context_memories WHERE scope_kind=?1 AND scope_id=?2 AND (?3 OR deleted_at IS NULL) ORDER BY updated_at DESC,id LIMIT ?4"
         ))?;
-        let rows = statement.query_map(params![scope_kind, scope_id, include_deleted, limit.min(MAX_LIST) as i64], from_row)?;
+        let rows = statement.query_map(
+            params![
+                scope_kind,
+                scope_id,
+                include_deleted,
+                limit.min(MAX_LIST) as i64
+            ],
+            from_row,
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Whether a source reference was ever recorded in this scope, tombstones included,
     /// so a deleted import or extraction is not silently recreated.
-    pub fn context_source_seen(&self, scope_kind: &str, scope_id: &str, source_ref: &str) -> Result<bool, SchemaError> {
+    pub fn context_source_seen(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        source_ref: &str,
+    ) -> Result<bool, SchemaError> {
         let found: Option<i64> = self.connection.query_row(
             "SELECT 1 FROM context_memories WHERE scope_kind=?1 AND scope_id=?2 AND source_ref=?3 LIMIT 1",
             params![scope_kind, scope_id, source_ref],
@@ -117,8 +151,17 @@ impl RuntimeDb {
     /// Conditional edit of a live, non-invalidated row. Invalidated is terminal and a
     /// confirmed row is never demoted to candidate. `None` means a revision conflict
     /// (or the row was deleted/invalidated meanwhile); nothing is written.
-    pub fn update_context_memory_if_revision(&self, id: &str, expected_revision: i64, patch: &ContextMemoryPatch, now: f64) -> Result<Option<ContextMemoryRow>, SchemaError> {
-        if expected_revision < 1 || !now.is_finite() || patch.expires_at.is_some_and(|at| !at.is_finite()) {
+    pub fn update_context_memory_if_revision(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        patch: &ContextMemoryPatch,
+        now: f64,
+    ) -> Result<Option<ContextMemoryRow>, SchemaError> {
+        if expected_revision < 1
+            || !now.is_finite()
+            || patch.expires_at.is_some_and(|at| !at.is_finite())
+        {
             return Err(invalid("记忆条目或版本无效"));
         }
         let changed = self.connection.execute(
@@ -127,12 +170,21 @@ impl RuntimeDb {
                AND NOT (verification='confirmed' AND ?4='candidate')",
             params![id, expected_revision, patch.content, patch.verification, patch.device_model, patch.firmware, patch.expires_at, now],
         )?;
-        if changed == 1 { self.context_memory(id) } else { Ok(None) }
+        if changed == 1 {
+            self.context_memory(id)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Deletion keeps an empty tombstone (id, scope, source reference, revision) so late
     /// background work fails its revision check. The content itself is gone.
-    pub fn delete_context_memory_if_revision(&self, id: &str, expected_revision: i64, now: f64) -> Result<bool, SchemaError> {
+    pub fn delete_context_memory_if_revision(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
         if expected_revision < 1 || !now.is_finite() {
             return Err(invalid("记忆条目或版本无效"));
         }
@@ -146,7 +198,12 @@ impl RuntimeDb {
     /// v17: the same fact was proposed again. Counts it and, for an unreviewed extracted
     /// candidate whose expiry is earlier than `extend_to`, pushes the expiry out. Content,
     /// verification and revision are untouched, so user edits and run reverts keep working.
-    pub fn reinforce_context_memory(&self, id: &str, now: f64, extend_to: Option<f64>) -> Result<bool, SchemaError> {
+    pub fn reinforce_context_memory(
+        &self,
+        id: &str,
+        now: f64,
+        extend_to: Option<f64>,
+    ) -> Result<bool, SchemaError> {
         if !now.is_finite() || extend_to.is_some_and(|at| !at.is_finite()) {
             return Err(invalid("时间无效"));
         }
@@ -160,7 +217,12 @@ impl RuntimeDb {
     }
 
     /// Clear every live row in one scope (tombstones, same as single deletion).
-    pub fn clear_context_scope(&self, scope_kind: &str, scope_id: &str, now: f64) -> Result<usize, SchemaError> {
+    pub fn clear_context_scope(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        now: f64,
+    ) -> Result<usize, SchemaError> {
         if !now.is_finite() {
             return Err(invalid("时间无效"));
         }
@@ -207,10 +269,26 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextExtractionRu
 }
 
 impl RuntimeDb {
-    pub fn insert_context_extraction_run(&self, run: &ContextExtractionRunRow) -> Result<(), SchemaError> {
-        let json_ok = |text: &str| text.len() <= MAX_MANIFEST && serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| v.is_array());
-        if run.id.is_empty() || run.id.len() > 64 || run.reverted_at.is_some() || !run.started_at.is_finite()
-            || ![&run.adds_json, &run.updates_json, &run.deletes_json, &run.skipped_json].iter().all(|text| json_ok(text))
+    pub fn insert_context_extraction_run(
+        &self,
+        run: &ContextExtractionRunRow,
+    ) -> Result<(), SchemaError> {
+        let json_ok = |text: &str| {
+            text.len() <= MAX_MANIFEST
+                && serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| v.is_array())
+        };
+        if run.id.is_empty()
+            || run.id.len() > 64
+            || run.reverted_at.is_some()
+            || !run.started_at.is_finite()
+            || ![
+                &run.adds_json,
+                &run.updates_json,
+                &run.deletes_json,
+                &run.skipped_json,
+            ]
+            .iter()
+            .all(|text| json_ok(text))
         {
             return Err(invalid("提取清单无效"));
         }
@@ -221,27 +299,49 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn context_extraction_run(&self, id: &str) -> Result<Option<ContextExtractionRunRow>, SchemaError> {
+    pub fn context_extraction_run(
+        &self,
+        id: &str,
+    ) -> Result<Option<ContextExtractionRunRow>, SchemaError> {
         self.connection
-            .query_row(&format!("SELECT {RUN_COLUMNS} FROM context_extraction_runs WHERE id=?1"), [id], run_from_row)
+            .query_row(
+                &format!("SELECT {RUN_COLUMNS} FROM context_extraction_runs WHERE id=?1"),
+                [id],
+                run_from_row,
+            )
             .optional()
             .map_err(SchemaError::from)
     }
 
-    pub fn list_context_extraction_runs(&self, scope_kind: &str, scope_id: &str, limit: usize) -> Result<Vec<ContextExtractionRunRow>, SchemaError> {
+    pub fn list_context_extraction_runs(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ContextExtractionRunRow>, SchemaError> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {RUN_COLUMNS} FROM context_extraction_runs WHERE scope_kind=?1 AND scope_id=?2 ORDER BY started_at DESC,id LIMIT ?3"
         ))?;
-        let rows = statement.query_map(params![scope_kind, scope_id, limit.min(MAX_LIST) as i64], run_from_row)?;
+        let rows = statement.query_map(
+            params![scope_kind, scope_id, limit.min(MAX_LIST) as i64],
+            run_from_row,
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// One-shot: a manifest can be reverted only once.
-    pub fn mark_context_extraction_reverted(&self, id: &str, now: f64) -> Result<bool, SchemaError> {
+    pub fn mark_context_extraction_reverted(
+        &self,
+        id: &str,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
         if !now.is_finite() {
             return Err(invalid("时间无效"));
         }
-        Ok(self.connection.execute("UPDATE context_extraction_runs SET reverted_at=?2 WHERE id=?1 AND reverted_at IS NULL", params![id, now])? == 1)
+        Ok(self.connection.execute(
+            "UPDATE context_extraction_runs SET reverted_at=?2 WHERE id=?1 AND reverted_at IS NULL",
+            params![id, now],
+        )? == 1)
     }
 }
 
@@ -251,30 +351,82 @@ const SEARCHABLE: &str = "m.scope_kind=?1 AND m.scope_id=?2 AND m.deleted_at IS 
 impl RuntimeDb {
     /// NV19-04 full-text search (schema v11, FTS5 trigram). Each term must be at least three
     /// characters; terms are quoted as phrases and OR-ed, best bm25 first.
-    pub fn match_context_memories(&self, scope_kind: &str, scope_id: &str, terms: &[String], now: f64, limit: usize) -> Result<Vec<ContextMemoryRow>, SchemaError> {
-        if terms.is_empty() || terms.len() > 64 || terms.iter().any(|t| t.chars().count() < 3 || t.chars().count() > 64) || !now.is_finite() {
+    pub fn match_context_memories(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        terms: &[String],
+        now: f64,
+        limit: usize,
+    ) -> Result<Vec<ContextMemoryRow>, SchemaError> {
+        if terms.is_empty()
+            || terms.len() > 64
+            || terms
+                .iter()
+                .any(|t| t.chars().count() < 3 || t.chars().count() > 64)
+            || !now.is_finite()
+        {
             return Err(invalid("检索词无效"));
         }
-        let query = terms.iter().map(|t| format!("\"{}\"", t.replace('"', "\"\""))).collect::<Vec<_>>().join(" OR ");
-        let columns = COLUMNS.split(',').map(|c| format!("m.{c}")).collect::<Vec<_>>().join(",");
+        let query = terms
+            .iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let columns = COLUMNS
+            .split(',')
+            .map(|c| format!("m.{c}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let mut statement = self.connection.prepare(&format!(
             "SELECT {columns} FROM context_memories_fts f JOIN context_memories m ON m.rowid=f.rowid
              WHERE context_memories_fts MATCH ?4 AND {SEARCHABLE} ORDER BY bm25(context_memories_fts) LIMIT ?5"
         ))?;
-        let rows = statement.query_map(params![scope_kind, scope_id, now, query, limit.min(MAX_LIST) as i64], from_row)?;
+        let rows = statement.query_map(
+            params![scope_kind, scope_id, now, query, limit.min(MAX_LIST) as i64],
+            from_row,
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Substring search for short terms (one or two characters), which trigram cannot index.
     /// Rows containing any of `needles` (OR), newest first.
-    pub fn like_context_memories(&self, scope_kind: &str, scope_id: &str, needles: &[String], now: f64, limit: usize) -> Result<Vec<ContextMemoryRow>, SchemaError> {
-        if needles.is_empty() || needles.len() > 32 || needles.iter().any(|n| n.trim().is_empty() || n.chars().count() > 64) || !now.is_finite() {
+    pub fn like_context_memories(
+        &self,
+        scope_kind: &str,
+        scope_id: &str,
+        needles: &[String],
+        now: f64,
+        limit: usize,
+    ) -> Result<Vec<ContextMemoryRow>, SchemaError> {
+        if needles.is_empty()
+            || needles.len() > 32
+            || needles
+                .iter()
+                .any(|n| n.trim().is_empty() || n.chars().count() > 64)
+            || !now.is_finite()
+        {
             return Err(invalid("检索词无效"));
         }
         // `!` as the LIKE escape character: user text cannot act as a wildcard.
-        let patterns: Vec<String> = needles.iter().map(|n| format!("%{}%", n.replace('!', "!!").replace('%', "!%").replace('_', "!_"))).collect();
-        let any = (0..patterns.len()).map(|i| format!("m.content LIKE ?{} ESCAPE '!'", i + 5)).collect::<Vec<_>>().join(" OR ");
-        let columns = COLUMNS.split(',').map(|c| format!("m.{c}")).collect::<Vec<_>>().join(",");
+        let patterns: Vec<String> = needles
+            .iter()
+            .map(|n| {
+                format!(
+                    "%{}%",
+                    n.replace('!', "!!").replace('%', "!%").replace('_', "!_")
+                )
+            })
+            .collect();
+        let any = (0..patterns.len())
+            .map(|i| format!("m.content LIKE ?{} ESCAPE '!'", i + 5))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let columns = COLUMNS
+            .split(',')
+            .map(|c| format!("m.{c}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let mut statement = self.connection.prepare(&format!(
             "SELECT {columns} FROM context_memories m WHERE ({any}) AND {SEARCHABLE} ORDER BY m.updated_at DESC,m.id LIMIT ?4"
         ))?;

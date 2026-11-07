@@ -123,7 +123,10 @@ impl Message {
 
 /// 连接级事件不带会话号。
 fn connection_level(event: Option<i32>) -> bool {
-    matches!(event, Some(START_CONNECTION | FINISH_CONNECTION | CONNECTION_STARTED | CONNECTION_FAILED))
+    matches!(
+        event,
+        Some(START_CONNECTION | FINISH_CONNECTION | CONNECTION_STARTED | CONNECTION_FAILED)
+    )
 }
 
 fn has_sequence(message: &Message) -> bool {
@@ -215,7 +218,10 @@ pub fn unmarshal(data: &[u8]) -> Result<Message, ProviderError> {
             let id = String::from_utf8_lossy(reader.bytes()?).into_owned();
             message.session_id = (!id.is_empty()).then_some(id);
         }
-        if matches!(event, CONNECTION_STARTED | CONNECTION_FAILED | CONNECTION_FINISHED) {
+        if matches!(
+            event,
+            CONNECTION_STARTED | CONNECTION_FAILED | CONNECTION_FINISHED
+        ) {
             let id = String::from_utf8_lossy(reader.bytes()?).into_owned();
             message.connect_id = (!id.is_empty()).then_some(id);
         }
@@ -230,7 +236,16 @@ pub(crate) mod tests {
 
     /// 服务端消息（测试用）：带事件；会话事件带会话号，连接事件带连接号。
     pub(crate) fn server_event(msg_type: MsgType, event: i32, id: &str, payload: &[u8]) -> Vec<u8> {
-        let mut buffer = vec![0x11, (msg_type.bits() << 4) | FLAG_WITH_EVENT, if msg_type == MsgType::AudioOnlyServer { 0 } else { 0x10 }, 0];
+        let mut buffer = vec![
+            0x11,
+            (msg_type.bits() << 4) | FLAG_WITH_EVENT,
+            if msg_type == MsgType::AudioOnlyServer {
+                0
+            } else {
+                0x10
+            },
+            0,
+        ];
         buffer.extend_from_slice(&event.to_be_bytes());
         buffer.extend_from_slice(&(id.len() as u32).to_be_bytes());
         buffer.extend_from_slice(id.as_bytes());
@@ -251,7 +266,10 @@ pub(crate) mod tests {
     fn client_messages_match_univoice_bytes() {
         // univoice 测试 p1：StartConnection 共 14 字节
         let bytes = marshal(&Message::start_connection());
-        assert_eq!(bytes, vec![0x11, 0x14, 0x10, 0x00, 0, 0, 0, 1, 0, 0, 0, 2, b'{', b'}']);
+        assert_eq!(
+            bytes,
+            vec![0x11, 0x14, 0x10, 0x00, 0, 0, 0, 1, 0, 0, 0, 2, b'{', b'}']
+        );
         // 会话事件写会话号
         let bytes = marshal(&Message::start_session("s-1", br#"{"a":1}"#.to_vec()));
         assert_eq!(&bytes[4..8], &[0, 0, 0, 100]);
@@ -260,33 +278,65 @@ pub(crate) mod tests {
         assert_eq!(&bytes[15..19], &[0, 0, 0, 7]);
         // 客户端消息能被自己解析回来
         let parsed = unmarshal(&marshal(&Message::task_request("s-1", b"{}".to_vec()))).unwrap();
-        assert_eq!((parsed.event, parsed.session_id.as_deref()), (Some(TASK_REQUEST), Some("s-1")));
-        assert_eq!(unmarshal(&marshal(&Message::finish_session("s-1"))).unwrap().event, Some(FINISH_SESSION));
+        assert_eq!(
+            (parsed.event, parsed.session_id.as_deref()),
+            (Some(TASK_REQUEST), Some("s-1"))
+        );
+        assert_eq!(
+            unmarshal(&marshal(&Message::finish_session("s-1")))
+                .unwrap()
+                .event,
+            Some(FINISH_SESSION)
+        );
     }
 
     #[test]
     fn server_messages_keep_unknown_events_and_reject_truncation() {
-        let started = server_event(MsgType::FullServerResponse, CONNECTION_STARTED, "conn-9", b"{}");
+        let started = server_event(
+            MsgType::FullServerResponse,
+            CONNECTION_STARTED,
+            "conn-9",
+            b"{}",
+        );
         let parsed = unmarshal(&started).unwrap();
-        assert_eq!((parsed.event, parsed.connect_id.as_deref(), parsed.session_id), (Some(50), Some("conn-9"), None));
+        assert_eq!(
+            (
+                parsed.event,
+                parsed.connect_id.as_deref(),
+                parsed.session_id
+            ),
+            (Some(50), Some("conn-9"), None)
+        );
 
         // 句子事件 352（univoice 的枚举里没有）：仍按会话事件读会话号
         let audio = server_event(MsgType::AudioOnlyServer, 352, "s-1", &[1, 0, 2, 0]);
         let parsed = unmarshal(&audio).unwrap();
         assert_eq!(parsed.msg_type, MsgType::AudioOnlyServer);
-        assert_eq!((parsed.event, parsed.session_id.as_deref()), (Some(352), Some("s-1")));
+        assert_eq!(
+            (parsed.event, parsed.session_id.as_deref()),
+            (Some(352), Some("s-1"))
+        );
         assert_eq!(parsed.payload, vec![1, 0, 2, 0]);
 
         let error = unmarshal(&server_error(45000000, "quota exceeded")).unwrap();
-        assert_eq!((error.msg_type, error.error_code), (MsgType::Error, Some(45000000)));
+        assert_eq!(
+            (error.msg_type, error.error_code),
+            (MsgType::Error, Some(45000000))
+        );
         assert_eq!(error.payload_text(), "quota exceeded");
 
         assert!(unmarshal(&[0x11, 0x94]).is_err());
-        assert!(unmarshal(&started[..started.len() - 1]).is_err(), "载荷不完整");
+        assert!(
+            unmarshal(&started[..started.len() - 1]).is_err(),
+            "载荷不完整"
+        );
         let mut huge = started.clone();
         let len = huge.len();
         huge[len - 6..len - 2].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(unmarshal(&huge).is_err(), "载荷长度越界不 panic");
-        assert!(unmarshal(&[0x12, 0x94, 0x10, 0]).is_err(), "头长不是 4 字节");
+        assert!(
+            unmarshal(&[0x12, 0x94, 0x10, 0]).is_err(),
+            "头长不是 4 字节"
+        );
     }
 }

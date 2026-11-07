@@ -62,8 +62,14 @@ impl HostTools {
                     .filter_map(|tool| {
                         Some(ToolSpec {
                             name: tool["name"].as_str()?.to_owned(),
-                            description: tool["description"].as_str().unwrap_or_default().to_owned(),
-                            parameters: tool.get("inputSchema").cloned().unwrap_or_else(|| json!({"type": "object"})),
+                            description: tool["description"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            parameters: tool
+                                .get("inputSchema")
+                                .cloned()
+                                .unwrap_or_else(|| json!({"type": "object"})),
                         })
                     })
                     .collect()
@@ -77,7 +83,12 @@ pub fn approval_speech(result: &ToolHostResult) -> Option<String> {
     let body: Value = serde_json::from_str(result.detail.as_deref()?).ok()?;
     let inner = body.get("result")?;
     (inner.get("status")?.as_str()? == "approval_required").then(|| {
-        inner.get("speech").and_then(Value::as_str).filter(|speech| !speech.is_empty()).unwrap_or(APPROVAL_SPEECH).to_owned()
+        inner
+            .get("speech")
+            .and_then(Value::as_str)
+            .filter(|speech| !speech.is_empty())
+            .unwrap_or(APPROVAL_SPEECH)
+            .to_owned()
     })
 }
 
@@ -100,16 +111,30 @@ pub fn outcome_for_model(result: &ToolHostResult) -> String {
 }
 
 impl ToolExecutor for HostTools {
-    fn call_raw<'a>(&'a self, context: &'a ToolContext, name: &'a str, arguments: &'a str) -> BoxFuture<'a, ToolHostResult> {
+    fn call_raw<'a>(
+        &'a self,
+        context: &'a ToolContext,
+        name: &'a str,
+        arguments: &'a str,
+    ) -> BoxFuture<'a, ToolHostResult> {
         Box::pin(async move {
             let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
-                return ToolHostResult { success: false, result: "工具参数无效".into(), detail: None };
+                return ToolHostResult {
+                    success: false,
+                    result: "工具参数无效".into(),
+                    detail: None,
+                };
             };
             let host = self.host.clone();
             let context = context.clone();
             let name = name.to_owned();
-            tokio::task::spawn_blocking(move || host.call(&context, &name, &arguments)).await
-                .unwrap_or_else(|_| ToolHostResult { success: false, result: "工具执行失败".into(), detail: None })
+            tokio::task::spawn_blocking(move || host.call(&context, &name, &arguments))
+                .await
+                .unwrap_or_else(|_| ToolHostResult {
+                    success: false,
+                    result: "工具执行失败".into(),
+                    detail: None,
+                })
         })
     }
     fn recent_workflows<'a>(&'a self, context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
@@ -127,16 +152,29 @@ impl ToolExecutor for HostTools {
         self.specs()
     }
 
-    fn call<'a>(&'a self, context: &'a ToolContext, name: &'a str, arguments: &'a str) -> BoxFuture<'a, ToolOutcome> {
+    fn call<'a>(
+        &'a self,
+        context: &'a ToolContext,
+        name: &'a str,
+        arguments: &'a str,
+    ) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
-            let arguments = if arguments.trim().is_empty() { "{}" } else { arguments };
+            let arguments = if arguments.trim().is_empty() {
+                "{}"
+            } else {
+                arguments
+            };
             let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
-                return ToolOutcome::Reply(format!("调用 {name} 的参数不是合法的 JSON，请重新生成参数"));
+                return ToolOutcome::Reply(format!(
+                    "调用 {name} 的参数不是合法的 JSON，请重新生成参数"
+                ));
             };
             let host = self.host.clone();
             let context = context.clone();
             let name_owned = name.to_owned();
-            let joined = tokio::task::spawn_blocking(move || host.call(&context, &name_owned, &arguments)).await;
+            let joined =
+                tokio::task::spawn_blocking(move || host.call(&context, &name_owned, &arguments))
+                    .await;
             let result = match joined {
                 Ok(result) => result,
                 Err(_) => return ToolOutcome::Reply(format!("工具 {name} 执行失败")),
@@ -169,7 +207,11 @@ mod tests {
         }
 
         fn call(&self, context: &ToolContext, name: &str, arguments: &Value) -> ToolHostResult {
-            self.calls.lock().unwrap().push((name.to_owned(), arguments.clone(), context.device_id.clone()));
+            self.calls.lock().unwrap().push((
+                name.to_owned(),
+                arguments.clone(),
+                context.device_id.clone(),
+            ));
             match arguments["action"].as_str() {
                 Some("confirm_send") => ToolHostResult {
                     success: true,
@@ -183,28 +225,62 @@ mod tests {
     }
 
     fn context() -> ToolContext {
-        ToolContext { device_id: "aa:bb".into(), session_id: "s1".into() }
+        ToolContext {
+            device_id: "aa:bb".into(),
+            session_id: "s1".into(),
+        }
     }
 
     #[tokio::test]
     async fn approval_results_are_spoken_verbatim_and_others_go_to_the_model() {
-        let host = Arc::new(FakeHost { calls: Mutex::default() });
+        let host = Arc::new(FakeHost {
+            calls: Mutex::default(),
+        });
         let tools = HostTools::new(host.clone());
         let specs = tools.tools();
         assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].parameters["properties"]["action"]["type"], "string");
+        assert_eq!(
+            specs[0].parameters["properties"]["action"]["type"],
+            "string"
+        );
         assert_eq!(specs[1].parameters, json!({"type": "object"}));
 
-        let outcome = tools.call(&context(), "laser_workflow_tool", r#"{"action":"confirm_send","confirmed":true}"#).await;
-        assert_eq!(outcome, ToolOutcome::Speak("已提交，请在电脑上的 MOSS 里确认后开始。".into()));
-        let outcome = tools.call(&context(), "laser_workflow_tool", r#"{"action":"status"}"#).await;
-        let ToolOutcome::Reply(text) = outcome else { panic!() };
+        let outcome = tools
+            .call(
+                &context(),
+                "laser_workflow_tool",
+                r#"{"action":"confirm_send","confirmed":true}"#,
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            ToolOutcome::Speak("已提交，请在电脑上的 MOSS 里确认后开始。".into())
+        );
+        let outcome = tools
+            .call(&context(), "laser_workflow_tool", r#"{"action":"status"}"#)
+            .await;
+        let ToolOutcome::Reply(text) = outcome else {
+            panic!()
+        };
         let value: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!((value["success"].as_bool(), value["result"].as_str()), (Some(false), Some("未找到该任务")));
-        let ToolOutcome::Reply(text) = tools.call(&context(), "laser_workflow_tool", r#"{"action":"big"}"#).await else { panic!() };
+        assert_eq!(
+            (value["success"].as_bool(), value["result"].as_str()),
+            (Some(false), Some("未找到该任务"))
+        );
+        let ToolOutcome::Reply(text) = tools
+            .call(&context(), "laser_workflow_tool", r#"{"action":"big"}"#)
+            .await
+        else {
+            panic!()
+        };
         assert!(text.chars().count() < 1700 && text.contains("已截断"));
         // 参数不合法时不调用宿主
-        let ToolOutcome::Reply(text) = tools.call(&context(), "laser_workflow_tool", "{not json").await else { panic!() };
+        let ToolOutcome::Reply(text) = tools
+            .call(&context(), "laser_workflow_tool", "{not json")
+            .await
+        else {
+            panic!()
+        };
         assert!(text.contains("不是合法的 JSON"));
         let calls = host.calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
@@ -217,15 +293,29 @@ mod tests {
 
     #[test]
     fn approval_detection_needs_the_status_field() {
-        let plain = ToolHostResult { success: true, result: "ok".into(), detail: Some(r#"{"result":{"status":"sending"}}"#.into()) };
+        let plain = ToolHostResult {
+            success: true,
+            result: "ok".into(),
+            detail: Some(r#"{"result":{"status":"sending"}}"#.into()),
+        };
         assert_eq!(approval_speech(&plain), None);
         let no_speech = ToolHostResult {
             success: true,
             result: "ok".into(),
             detail: Some(r#"{"result":{"status":"approval_required"}}"#.into()),
         };
-        assert_eq!(approval_speech(&no_speech).as_deref(), Some(APPROVAL_SPEECH));
-        assert_eq!(approval_speech(&ToolHostResult { success: true, result: String::new(), detail: Some("not json".into()) }), None);
+        assert_eq!(
+            approval_speech(&no_speech).as_deref(),
+            Some(APPROVAL_SPEECH)
+        );
+        assert_eq!(
+            approval_speech(&ToolHostResult {
+                success: true,
+                result: String::new(),
+                detail: Some("not json".into())
+            }),
+            None
+        );
     }
 
     /// NV8：工具清单每轮重新读取，宿主关闭工具后下一轮对话就看不到它。
@@ -241,7 +331,11 @@ mod tests {
                 }
             }
             fn call(&self, _: &ToolContext, _: &str, _: &Value) -> ToolHostResult {
-                ToolHostResult { success: true, result: String::new(), detail: None }
+                ToolHostResult {
+                    success: true,
+                    result: String::new(),
+                    detail: None,
+                }
             }
         }
         let host = Arc::new(SwitchHost(std::sync::atomic::AtomicBool::new(true)));

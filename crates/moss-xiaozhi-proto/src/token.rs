@@ -20,13 +20,18 @@ pub struct TokenSigner {
 // 密钥不出现在调试输出中
 impl std::fmt::Debug for TokenSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TokenSigner").field("expire_seconds", &self.expire_seconds).finish_non_exhaustive()
+        f.debug_struct("TokenSigner")
+            .field("expire_seconds", &self.expire_seconds)
+            .finish_non_exhaustive()
     }
 }
 
 impl TokenSigner {
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
-        Self { secret: secret.into(), expire_seconds: DEFAULT_EXPIRE_SECONDS }
+        Self {
+            secret: secret.into(),
+            expire_seconds: DEFAULT_EXPIRE_SECONDS,
+        }
     }
 
     pub fn with_expire_seconds(mut self, seconds: u64) -> Self {
@@ -42,19 +47,28 @@ impl TokenSigner {
 
     /// 为设备签发 token；`now` 为 Unix 秒。
     pub fn issue(&self, client_id: &str, device_id: &str, now: u64) -> String {
-        format!("{}.{now}", self.sign(&format!("{client_id}|{device_id}|{now}")))
+        format!(
+            "{}.{now}",
+            self.sign(&format!("{client_id}|{device_id}|{now}"))
+        )
     }
 
     /// 校验 token（可带 `Bearer ` 前缀）。签名不符、过期、格式错误都返回 false。
     pub fn verify(&self, token: &str, client_id: &str, device_id: &str, now: u64) -> bool {
         let token = token.trim();
         let token = token.strip_prefix("Bearer ").unwrap_or(token).trim();
-        let Some((signature, ts)) = token.rsplit_once('.') else { return false };
-        let Ok(ts) = ts.parse::<u64>() else { return false };
+        let Some((signature, ts)) = token.rsplit_once('.') else {
+            return false;
+        };
+        let Ok(ts) = ts.parse::<u64>() else {
+            return false;
+        };
         if ts > now.saturating_add(300) || now.saturating_sub(ts) > self.expire_seconds {
             return false;
         }
-        let Ok(provided) = URL_SAFE_NO_PAD.decode(signature) else { return false };
+        let Ok(provided) = URL_SAFE_NO_PAD.decode(signature) else {
+            return false;
+        };
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC 接受任意长度密钥");
         mac.update(format!("{client_id}|{device_id}|{ts}").as_bytes());
         // verify_slice 为常量时间比较
@@ -73,14 +87,29 @@ mod tests {
         let signer = TokenSigner::new(b"secret-for-test".to_vec());
         let token = signer.issue("client-1", "aa:bb:cc:dd:ee:ff", NOW);
         assert!(signer.verify(&token, "client-1", "aa:bb:cc:dd:ee:ff", NOW + 10));
-        assert!(signer.verify(&format!("Bearer {token}"), "client-1", "aa:bb:cc:dd:ee:ff", NOW));
+        assert!(signer.verify(
+            &format!("Bearer {token}"),
+            "client-1",
+            "aa:bb:cc:dd:ee:ff",
+            NOW
+        ));
         // 身份不符、密钥不同、篡改、过期、格式错误
         assert!(!signer.verify(&token, "client-2", "aa:bb:cc:dd:ee:ff", NOW));
         assert!(!signer.verify(&token, "client-1", "aa:bb:cc:dd:ee:00", NOW));
-        assert!(!TokenSigner::new(b"other".to_vec()).verify(&token, "client-1", "aa:bb:cc:dd:ee:ff", NOW));
+        assert!(!TokenSigner::new(b"other".to_vec()).verify(
+            &token,
+            "client-1",
+            "aa:bb:cc:dd:ee:ff",
+            NOW
+        ));
         let tampered = token.replacen('.', "x.", 1);
         assert!(!signer.verify(&tampered, "client-1", "aa:bb:cc:dd:ee:ff", NOW));
-        assert!(!signer.verify(&token, "client-1", "aa:bb:cc:dd:ee:ff", NOW + DEFAULT_EXPIRE_SECONDS + 1));
+        assert!(!signer.verify(
+            &token,
+            "client-1",
+            "aa:bb:cc:dd:ee:ff",
+            NOW + DEFAULT_EXPIRE_SECONDS + 1
+        ));
         assert!(!signer.verify("", "client-1", "aa:bb:cc:dd:ee:ff", NOW));
         assert!(!signer.verify("abc.notanumber", "client-1", "aa:bb:cc:dd:ee:ff", NOW));
         // 签发时间在未来（超过 5 分钟容差）

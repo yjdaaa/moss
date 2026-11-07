@@ -126,7 +126,9 @@ fn main() {
             laser_mode,
             snake_scan,
         } => {
-            let plan = raster::raster_plan_with_direction(&bitmap, &scan_direction, &output_strategy).unwrap();
+            let plan =
+                raster::raster_plan_with_direction(&bitmap, &scan_direction, &output_strategy)
+                    .unwrap();
             let width = bitmap.first().map_or(0, Vec::len);
             let height = bitmap.len();
             let gcode_str = gcode::write_raster(

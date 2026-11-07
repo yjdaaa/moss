@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use laser_contracts::{
-    ApprovalConnection, ApprovalKind, ApprovalOutcome, ApprovalRecord, ApprovalSource, ApprovalStatus,
-    AuditAction, AuditDetail, AuditEntry, AuditResult, EngraveModes, MaterialEntry, MaterialLibrary,
-    ParamCell, ThicknessEntry, builtin_material_library,
+    ApprovalConnection, ApprovalKind, ApprovalOutcome, ApprovalRecord, ApprovalSource,
+    ApprovalStatus, AuditAction, AuditDetail, AuditEntry, AuditResult, EngraveModes, MaterialEntry,
+    MaterialLibrary, ParamCell, ThicknessEntry, builtin_material_library,
 };
 
 const APPROVAL_COLUMNS: &str = "approval_id, status, kind, target_record, digest, summary, source, \
@@ -57,10 +57,14 @@ impl ApprovalRow {
     }
 
     fn into_record(self) -> Result<ApprovalRecord, SchemaError> {
-        let invalid = |what: &str, value: &str| SchemaError::InvalidRecord(format!("审批记录{what}无效: {value}"));
-        let status = ApprovalStatus::parse(&self.status).ok_or_else(|| invalid("状态", &self.status))?;
+        let invalid = |what: &str, value: &str| {
+            SchemaError::InvalidRecord(format!("审批记录{what}无效: {value}"))
+        };
+        let status =
+            ApprovalStatus::parse(&self.status).ok_or_else(|| invalid("状态", &self.status))?;
         let kind = ApprovalKind::parse(&self.kind).ok_or_else(|| invalid("类别", &self.kind))?;
-        let source = ApprovalSource::parse(&self.source).ok_or_else(|| invalid("来源", &self.source))?;
+        let source =
+            ApprovalSource::parse(&self.source).ok_or_else(|| invalid("来源", &self.source))?;
         let connection = match self.connection.as_deref() {
             Some(text) => Some(serde_json::from_str::<ApprovalConnection>(text)?),
             None => None,
@@ -70,7 +74,9 @@ impl ApprovalRow {
             None => None,
         };
         let request = match self.request.as_deref() {
-            Some(text) => Some(serde_json::from_str::<serde_json::Map<String, Value>>(text)?),
+            Some(text) => Some(serde_json::from_str::<serde_json::Map<String, Value>>(
+                text,
+            )?),
             None => None,
         };
         Ok(ApprovalRecord {
@@ -121,18 +127,32 @@ pub struct VoiceMemoryRecord {
 /// Private desktop metadata. Embeddings are deliberately never serialized.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VoiceSpeakerRecord {
-    pub id:String, pub name:String, pub model_id:String,
-    pub dimension:u32, pub revision:i64, pub created_at:f64,
+    pub id: String,
+    pub name: String,
+    pub model_id: String,
+    pub dimension: u32,
+    pub revision: i64,
+    pub created_at: f64,
 }
 /// Internal-only biometric material; intentionally not Serialize/Deserialize.
-pub struct VoiceSpeakerTemplate {pub id:String,pub revision:i64,pub embedding:Vec<f32>}
+pub struct VoiceSpeakerTemplate {
+    pub id: String,
+    pub revision: i64,
+    pub embedding: Vec<f32>,
+}
 
-#[derive(Debug,Clone,Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VoiceFirmwareDeliveryRecord {
-    pub delivery_id:String,pub device_id:String,pub artifact_sha256:String,
-    pub download_status:String,pub device_report_status:String,pub revision:i64,pub updated_at:f64,
+    pub delivery_id: String,
+    pub device_id: String,
+    pub artifact_sha256: String,
+    pub download_status: String,
+    pub device_report_status: String,
+    pub revision: i64,
+    pub updated_at: f64,
     /// 推送的固件版本与推送到期时间（schema 13；旧记录为空串 / 0）
-    pub firmware_version:String,pub expires_at:f64,
+    pub firmware_version: String,
+    pub expires_at: f64,
 }
 
 /// 内置语音服务登记的小智设备（内置语音技术书 §6：新设备首次连接需在桌面端允许）。
@@ -186,8 +206,7 @@ pub const VOICE_SNAPSHOT_LISTEN: &str = "listen";
 
 const VOICE_SNAPSHOT_MAX_BYTES: usize = 8 * 1024;
 
-const VOICE_DEVICE_COLUMNS: &str =
-    "device_id, client_id, status, name, model, firmware_version, last_ip, first_seen, last_seen, decided_at, info_json, info_at, hello_json, hello_at, status_json, status_at, listen_json, listen_at";
+const VOICE_DEVICE_COLUMNS: &str = "device_id, client_id, status, name, model, firmware_version, last_ip, first_seen, last_seen, decided_at, info_json, info_at, hello_json, hello_at, status_json, status_at, listen_json, listen_at";
 
 fn voice_device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceDeviceRecord> {
     Ok(VoiceDeviceRecord {
@@ -423,7 +442,8 @@ impl RuntimeDb {
                 ))?;
             }
             tx.execute(
-                "INSERT INTO schema_version(version,applied_at) VALUES(2,unixepoch())", [],
+                "INSERT INTO schema_version(version,applied_at) VALUES(2,unixepoch())",
+                [],
             )?;
         }
         if current.unwrap_or(0) < 3 {
@@ -518,7 +538,7 @@ impl RuntimeDb {
                    error_code TEXT
                  );
                  CREATE INDEX voice_agent_runs_started ON voice_agent_runs(started_at DESC);
-                 INSERT INTO schema_version(version,applied_at) VALUES(8,unixepoch());"
+                 INSERT INTO schema_version(version,applied_at) VALUES(8,unixepoch());",
             )?;
         }
         if current.unwrap_or(0) < 9 {
@@ -668,8 +688,11 @@ impl RuntimeDb {
             // NV17 固件 OTA（2026-10-15）：导入的固件与逐台推送。令牌只用于这一次推送的下载地址。
             // 加列前先查表结构，重跑迁移（失败回滚后重试）时不会重复加列。
             let existing = {
-                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('voice_firmware_delivery')")?;
-                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('voice_firmware_delivery')")?;
+                let names = statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
                 names
             };
             for (column, definition) in [
@@ -678,7 +701,9 @@ impl RuntimeDb {
                 ("expires_at", "REAL NOT NULL DEFAULT 0"),
             ] {
                 if !existing.iter().any(|name| name == column) {
-                    tx.execute_batch(&format!("ALTER TABLE voice_firmware_delivery ADD COLUMN {column} {definition};"))?;
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE voice_firmware_delivery ADD COLUMN {column} {definition};"
+                    ))?;
                 }
             }
             tx.execute_batch(
@@ -697,8 +722,11 @@ impl RuntimeDb {
             // 2026-11-02：小智设备信息快照（开机 OTA 上报 / 连接 hello / 实时状态查询），
             // 只存原始 JSON，字段随固件版本变化时不改表结构。加列前先查表结构，重跑迁移不会重复加列。
             let existing = {
-                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
-                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
+                let names = statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
                 names
             };
             for (column, definition) in [
@@ -710,32 +738,46 @@ impl RuntimeDb {
                 ("status_at", "REAL"),
             ] {
                 if !existing.iter().any(|name| name == column) {
-                    tx.execute_batch(&format!("ALTER TABLE voice_devices ADD COLUMN {column} {definition};"))?;
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE voice_devices ADD COLUMN {column} {definition};"
+                    ))?;
                 }
             }
-            tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(14,unixepoch());")?;
+            tx.execute_batch(
+                "INSERT INTO schema_version(version,applied_at) VALUES(14,unixepoch());",
+            )?;
         }
         if current.unwrap_or(0) < 15 {
             // 2026-11-02：设备实际使用的拾音模式（auto / manual / realtime）。它是判断设备端 AEC
             // 是否开启的唯一行为证据——固件只在 AEC 开启时才选 realtime。加列前先查表结构。
             let existing = {
-                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
-                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('voice_devices')")?;
+                let names = statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
                 names
             };
             for (column, definition) in [("listen_json", "TEXT"), ("listen_at", "REAL")] {
                 if !existing.iter().any(|name| name == column) {
-                    tx.execute_batch(&format!("ALTER TABLE voice_devices ADD COLUMN {column} {definition};"))?;
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE voice_devices ADD COLUMN {column} {definition};"
+                    ))?;
                 }
             }
-            tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(15,unixepoch());")?;
+            tx.execute_batch(
+                "INSERT INTO schema_version(version,applied_at) VALUES(15,unixepoch());",
+            )?;
         }
         if current.unwrap_or(0) < 16 {
             // 2026-11-04（技术书 n50）：本地知识库独立化，支持按每个资料目录单独勾选启用/停用。
             // 加列前先查表结构，重跑迁移不会重复加列。
             let existing = {
-                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('context_knowledge_roots')")?;
-                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('context_knowledge_roots')")?;
+                let names = statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
                 names
             };
             if !existing.iter().any(|name| name == "enabled") {
@@ -743,24 +785,37 @@ impl RuntimeDb {
                     "ALTER TABLE context_knowledge_roots ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1));",
                 )?;
             }
-            tx.execute_batch("INSERT INTO schema_version(version,applied_at) VALUES(16,unixepoch());")?;
+            tx.execute_batch(
+                "INSERT INTO schema_version(version,applied_at) VALUES(16,unixepoch());",
+            )?;
         }
         if current.unwrap_or(0) < 17 {
             // 2026-11-06（技术书 n57）：记忆新增“取代哪条旧记录”与被再次提到的次数；资料新增段落级
             // 索引。段落 FTS5 为无正文（content=''）表，只存三字片段的倒排索引（detail=column，
             // 不存位置），原文仍只在磁盘上，检索命中后按指纹核对再读。加列前先查表结构，可重跑。
             let existing = {
-                let mut statement = tx.prepare("SELECT name FROM pragma_table_info('context_memories')")?;
-                let names = statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                let mut statement =
+                    tx.prepare("SELECT name FROM pragma_table_info('context_memories')")?;
+                let names = statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
                 names
             };
             for (column, definition) in [
-                ("supersedes", "TEXT CHECK(supersedes IS NULL OR length(supersedes) BETWEEN 1 AND 64)"),
-                ("seen_count", "INTEGER NOT NULL DEFAULT 1 CHECK(seen_count >= 1)"),
+                (
+                    "supersedes",
+                    "TEXT CHECK(supersedes IS NULL OR length(supersedes) BETWEEN 1 AND 64)",
+                ),
+                (
+                    "seen_count",
+                    "INTEGER NOT NULL DEFAULT 1 CHECK(seen_count >= 1)",
+                ),
                 ("last_seen_at", "REAL"),
             ] {
                 if !existing.iter().any(|name| name == column) {
-                    tx.execute_batch(&format!("ALTER TABLE context_memories ADD COLUMN {column} {definition};"))?;
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE context_memories ADD COLUMN {column} {definition};"
+                    ))?;
                 }
             }
             tx.execute_batch(
@@ -802,18 +857,35 @@ impl RuntimeDb {
     }
 
     /// Private desktop diagnostic only. A finished download is never a flash claim.
-    pub fn list_firmware_deliveries(&self)->Result<Vec<VoiceFirmwareDeliveryRecord>,SchemaError>{
+    pub fn list_firmware_deliveries(
+        &self,
+    ) -> Result<Vec<VoiceFirmwareDeliveryRecord>, SchemaError> {
         let mut statement=self.connection.prepare("SELECT delivery_id,device_id,artifact_sha256,download_status,device_report_status,revision,updated_at,firmware_version,expires_at FROM voice_firmware_delivery ORDER BY updated_at DESC,delivery_id LIMIT 200")?;
-        let rows=statement.query_map([],|r|Ok(VoiceFirmwareDeliveryRecord{delivery_id:r.get(0)?,device_id:r.get(1)?,artifact_sha256:r.get(2)?,download_status:r.get(3)?,device_report_status:r.get(4)?,revision:r.get(5)?,updated_at:r.get(6)?,firmware_version:r.get(7)?,expires_at:r.get(8)?}))?;
-        rows.collect::<Result<Vec<_>,_>>().map_err(Into::into)
+        let rows = statement.query_map([], |r| {
+            Ok(VoiceFirmwareDeliveryRecord {
+                delivery_id: r.get(0)?,
+                device_id: r.get(1)?,
+                artifact_sha256: r.get(2)?,
+                download_status: r.get(3)?,
+                device_report_status: r.get(4)?,
+                revision: r.get(5)?,
+                updated_at: r.get(6)?,
+                firmware_version: r.get(7)?,
+                expires_at: r.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// NV17 fail-closed conditional transition: callers cannot use completion
     /// of a download to assert that firmware was flashed. The device report
     /// must be separately authenticated by the upper layer.
     pub fn update_firmware_download_if_revision(
-        &self, delivery_id: &str, expected_revision: i64,
-        next: &str, now: f64,
+        &self,
+        delivery_id: &str,
+        expected_revision: i64,
+        next: &str,
+        now: f64,
     ) -> Result<bool, SchemaError> {
         if delivery_id.is_empty() || expected_revision < 0 || !now.is_finite() {
             return Err(SchemaError::InvalidRecord("固件记录或版本无效".into()));
@@ -832,67 +904,167 @@ impl RuntimeDb {
 
     /// NV16 internal enrollment from three independently extracted clips.
     /// IDs come from the host, never an LLM or a device's identity claim.
-    pub fn enroll_voice_speaker(&self,id:&str,name:&str,model_id:&str,clips:&[Vec<f32>],now:f64)
-        ->Result<VoiceSpeakerRecord,SchemaError>{
-        let invalid=||SchemaError::InvalidRecord("声纹登记数据无效".into());
-        if id.is_empty() || id.len()>64 || !id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_')
-            || name.trim()!=name || name.is_empty() || name.chars().count()>64 || name.chars().any(char::is_control)
-            || model_id!="campplus_sv_zh_cn_16k_common" || clips.len()!=3 || !now.is_finite(){return Err(invalid());}
-        let normalize=|v:&[f32]|->Result<Vec<f32>,SchemaError>{
-            if v.len()!=192 || v.iter().any(|n|!n.is_finite()){return Err(invalid());}
-            let norm=v.iter().map(|n|f64::from(*n).powi(2)).sum::<f64>().sqrt();
-            if !norm.is_finite() || norm<=1e-8{return Err(invalid());}
-            Ok(v.iter().map(|n|(f64::from(*n)/norm) as f32).collect())
+    pub fn enroll_voice_speaker(
+        &self,
+        id: &str,
+        name: &str,
+        model_id: &str,
+        clips: &[Vec<f32>],
+        now: f64,
+    ) -> Result<VoiceSpeakerRecord, SchemaError> {
+        let invalid = || SchemaError::InvalidRecord("声纹登记数据无效".into());
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || name.trim() != name
+            || name.is_empty()
+            || name.chars().count() > 64
+            || name.chars().any(char::is_control)
+            || model_id != "campplus_sv_zh_cn_16k_common"
+            || clips.len() != 3
+            || !now.is_finite()
+        {
+            return Err(invalid());
+        }
+        let normalize = |v: &[f32]| -> Result<Vec<f32>, SchemaError> {
+            if v.len() != 192 || v.iter().any(|n| !n.is_finite()) {
+                return Err(invalid());
+            }
+            let norm = v.iter().map(|n| f64::from(*n).powi(2)).sum::<f64>().sqrt();
+            if !norm.is_finite() || norm <= 1e-8 {
+                return Err(invalid());
+            }
+            Ok(v.iter().map(|n| (f64::from(*n) / norm) as f32).collect())
         };
-        let vectors=clips.iter().map(|v|normalize(v)).collect::<Result<Vec<_>,_>>()?;
-        for i in 0..3 {for j in i+1..3 {
-            if vectors[i].iter().zip(&vectors[j]).map(|(a,b)|a*b).sum::<f32>()<0.70{return Err(invalid());}
-        }}
-        let mean=(0..192).map(|i|vectors.iter().map(|v|v[i]).sum::<f32>()/3.).collect::<Vec<_>>();
-        let embedding=normalize(&mean)?.iter().flat_map(|v|v.to_le_bytes()).collect::<Vec<_>>();
-        let tx=self.connection.unchecked_transaction()?;
-        let (count,duplicate):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(name=?1),0) FROM voice_speakers",[name],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        if count>=64 || duplicate>0{return Err(invalid());}
+        let vectors = clips
+            .iter()
+            .map(|v| normalize(v))
+            .collect::<Result<Vec<_>, _>>()?;
+        for i in 0..3 {
+            for j in i + 1..3 {
+                if vectors[i]
+                    .iter()
+                    .zip(&vectors[j])
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>()
+                    < 0.70
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        let mean = (0..192)
+            .map(|i| vectors.iter().map(|v| v[i]).sum::<f32>() / 3.)
+            .collect::<Vec<_>>();
+        let embedding = normalize(&mean)?
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>();
+        let tx = self.connection.unchecked_transaction()?;
+        let (count, duplicate): (i64, i64) = tx.query_row(
+            "SELECT count(*),coalesce(sum(name=?1),0) FROM voice_speakers",
+            [name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if count >= 64 || duplicate > 0 {
+            return Err(invalid());
+        }
         tx.execute("INSERT INTO voice_speakers(id,name,model_id,dimension,embedding,revision,created_at) VALUES(?1,?2,?3,192,?4,1,?5)",params![id,name,model_id,embedding,now])?;
         tx.execute("INSERT INTO voice_person_memory(speaker_id,summary,revision,updated_at) VALUES(?1,'',0,?2)",params![id,now])?;
         tx.commit()?;
-        Ok(VoiceSpeakerRecord{id:id.into(),name:name.into(),model_id:model_id.into(),dimension:192,revision:1,created_at:now})
+        Ok(VoiceSpeakerRecord {
+            id: id.into(),
+            name: name.into(),
+            model_id: model_id.into(),
+            dimension: 192,
+            revision: 1,
+            created_at: now,
+        })
     }
 
-    pub fn list_voice_speakers(&self)->Result<Vec<VoiceSpeakerRecord>,SchemaError>{
+    pub fn list_voice_speakers(&self) -> Result<Vec<VoiceSpeakerRecord>, SchemaError> {
         let mut statement=self.connection.prepare("SELECT id,name,model_id,dimension,revision,created_at FROM voice_speakers ORDER BY created_at,id LIMIT 64")?;
-        let rows=statement.query_map([],|r|Ok(VoiceSpeakerRecord{id:r.get(0)?,name:r.get(1)?,model_id:r.get(2)?,dimension:r.get(3)?,revision:r.get(4)?,created_at:r.get(5)?}))?;
-        rows.collect::<Result<Vec<_>,_>>().map_err(Into::into)
+        let rows = statement.query_map([], |r| {
+            Ok(VoiceSpeakerRecord {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                model_id: r.get(2)?,
+                dimension: r.get(3)?,
+                revision: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
-    pub fn native_voice_speaker_templates(&self)->Result<Vec<VoiceSpeakerTemplate>,SchemaError>{
+    pub fn native_voice_speaker_templates(&self) -> Result<Vec<VoiceSpeakerTemplate>, SchemaError> {
         let mut statement=self.connection.prepare("SELECT id,revision,embedding FROM voice_speakers WHERE model_id='campplus_sv_zh_cn_16k_common' AND dimension=192 ORDER BY id LIMIT 65")?;
-        let rows=statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,Vec<u8>>(2)?)))?;
-        let mut result=Vec::new();
+        let rows = statement.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        let mut result = Vec::new();
         for row in rows {
-            let (id,revision,bytes)=row?;
-            if bytes.len()!=768 || revision<1 || id.is_empty() || id.len()>64 || !id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_') {return Err(SchemaError::InvalidRecord("声纹记录损坏".into()));}
-            let embedding=bytes.chunks_exact(4).map(|v|f32::from_le_bytes(v.try_into().expect("four bytes"))).collect::<Vec<_>>();
-            let norm=embedding.iter().map(|v|f64::from(*v).powi(2)).sum::<f64>();
-            if !norm.is_finite() || norm<=1e-16 || embedding.iter().any(|v|!v.is_finite()){return Err(SchemaError::InvalidRecord("声纹向量损坏".into()));}
-            result.push(VoiceSpeakerTemplate{id,revision,embedding});
+            let (id, revision, bytes) = row?;
+            if bytes.len() != 768
+                || revision < 1
+                || id.is_empty()
+                || id.len() > 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                return Err(SchemaError::InvalidRecord("声纹记录损坏".into()));
+            }
+            let embedding = bytes
+                .chunks_exact(4)
+                .map(|v| f32::from_le_bytes(v.try_into().expect("four bytes")))
+                .collect::<Vec<_>>();
+            let norm = embedding.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+            if !norm.is_finite() || norm <= 1e-16 || embedding.iter().any(|v| !v.is_finite()) {
+                return Err(SchemaError::InvalidRecord("声纹向量损坏".into()));
+            }
+            result.push(VoiceSpeakerTemplate {
+                id,
+                revision,
+                embedding,
+            });
         }
-        if result.len()>64{return Err(SchemaError::InvalidRecord("声纹库超过限额".into()));}
+        if result.len() > 64 {
+            return Err(SchemaError::InvalidRecord("声纹库超过限额".into()));
+        }
         Ok(result)
     }
 
     /// NV16 internal-only person memory storage. This API accepts a server-
     /// validated speaker ID, never a model-supplied identity claim.
-    pub fn voice_person_summary(&self, speaker_id: &str) -> Result<Option<(String,i64)>, SchemaError> {
+    pub fn voice_person_summary(
+        &self,
+        speaker_id: &str,
+    ) -> Result<Option<(String, i64)>, SchemaError> {
         self.connection.query_row(
             "SELECT m.summary,m.revision FROM voice_person_memory m JOIN voice_speakers s ON s.id=m.speaker_id WHERE s.id=?1",
             [speaker_id], |r| Ok((r.get(0)?,r.get(1)?)),
         ).optional().map_err(Into::into)
     }
 
-    pub fn update_voice_person_summary_if_revision(&self, speaker_id: &str,
-        expected_revision: i64, summary: &str, now: f64) -> Result<bool, SchemaError> {
-        if speaker_id.is_empty() || expected_revision < 0 || !now.is_finite()
-            || summary.chars().count() > 1500 || summary.chars().any(char::is_control) {
+    pub fn update_voice_person_summary_if_revision(
+        &self,
+        speaker_id: &str,
+        expected_revision: i64,
+        summary: &str,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
+        if speaker_id.is_empty()
+            || expected_revision < 0
+            || !now.is_finite()
+            || summary.chars().count() > 1500
+            || summary.chars().any(char::is_control)
+        {
             return Err(SchemaError::InvalidRecord("个人摘要或版本无效".into()));
         }
         // Do not create an identity/memory row on reads or failed writes.
@@ -905,8 +1077,11 @@ impl RuntimeDb {
 
     /// Explicit internal delete removes the entire identity and its personal
     /// summary in the same transaction, even when FK enforcement is disabled.
-    pub fn delete_voice_speaker_if_revision(&self, speaker_id: &str,
-        expected_revision: i64) -> Result<bool, SchemaError> {
+    pub fn delete_voice_speaker_if_revision(
+        &self,
+        speaker_id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, SchemaError> {
         if speaker_id.is_empty() || expected_revision < 1 {
             return Err(SchemaError::InvalidRecord("说话人版本无效".into()));
         }
@@ -916,46 +1091,81 @@ impl RuntimeDb {
             params![speaker_id, expected_revision],
         )? == 1;
         if removed {
-            tx.execute("DELETE FROM voice_person_memory WHERE speaker_id=?1",[speaker_id])?;
+            tx.execute(
+                "DELETE FROM voice_person_memory WHERE speaker_id=?1",
+                [speaker_id],
+            )?;
         }
         tx.commit()?;
         Ok(removed)
     }
 
     /// 首次开启记忆时创建空摘要；重复调用不覆盖已有内容或 revision。
-    pub fn ensure_voice_memory(&self, device_id: &str, now: f64) -> Result<VoiceMemoryRecord, SchemaError> {
+    pub fn ensure_voice_memory(
+        &self,
+        device_id: &str,
+        now: f64,
+    ) -> Result<VoiceMemoryRecord, SchemaError> {
         self.connection.execute(
             "INSERT OR IGNORE INTO voice_memory(device_id,summary,revision,updated_at) VALUES(?1,'',0,?2)",
             params![device_id, now],
         )?;
-        self.voice_memory(device_id)?.ok_or_else(|| SchemaError::InvalidRecord("记忆行创建失败".into()))
+        self.voice_memory(device_id)?
+            .ok_or_else(|| SchemaError::InvalidRecord("记忆行创建失败".into()))
     }
 
     /// 不存在时返回 None；不能因为一次后台读就替设备悄悄开启记忆。
     pub fn voice_memory(&self, device_id: &str) -> Result<Option<VoiceMemoryRecord>, SchemaError> {
-        self.connection.query_row(
-            "SELECT device_id,summary,revision,updated_at FROM voice_memory WHERE device_id=?1",
-            params![device_id],
-            |row| Ok(VoiceMemoryRecord { device_id: row.get(0)?, summary: row.get(1)?, revision: row.get(2)?, updated_at: row.get(3)? }),
-        ).optional().map_err(Into::into)
+        self.connection
+            .query_row(
+                "SELECT device_id,summary,revision,updated_at FROM voice_memory WHERE device_id=?1",
+                params![device_id],
+                |row| {
+                    Ok(VoiceMemoryRecord {
+                        device_id: row.get(0)?,
+                        summary: row.get(1)?,
+                        revision: row.get(2)?,
+                        updated_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// 所有记忆只读列表，不含原会话。
     pub fn voice_memories(&self) -> Result<Vec<VoiceMemoryRecord>, SchemaError> {
         let mut query = self.connection.prepare("SELECT device_id,summary,revision,updated_at FROM voice_memory ORDER BY updated_at DESC")?;
-        let rows = query.query_map([], |row| Ok(VoiceMemoryRecord { device_id: row.get(0)?, summary: row.get(1)?, revision: row.get(2)?, updated_at: row.get(3)? }))?;
+        let rows = query.query_map([], |row| {
+            Ok(VoiceMemoryRecord {
+                device_id: row.get(0)?,
+                summary: row.get(1)?,
+                revision: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// 用于后台总结和用户编辑/清空：只有旧 revision 一致才改变内容。
     /// 返回 None 说明用户或另一会话已编辑，调用方不能无条件重试覆盖。
-    pub fn update_voice_memory_if_revision(&self, device_id: &str, expected_revision: i64, summary: &str, now: f64) -> Result<Option<VoiceMemoryRecord>, SchemaError> {
-        if summary.chars().count() > 1500 { return Err(SchemaError::InvalidRecord("语音记忆最多 1500 字符".into())); }
+    pub fn update_voice_memory_if_revision(
+        &self,
+        device_id: &str,
+        expected_revision: i64,
+        summary: &str,
+        now: f64,
+    ) -> Result<Option<VoiceMemoryRecord>, SchemaError> {
+        if summary.chars().count() > 1500 {
+            return Err(SchemaError::InvalidRecord("语音记忆最多 1500 字符".into()));
+        }
         let count = self.connection.execute(
             "UPDATE voice_memory SET summary=?3,revision=revision+1,updated_at=?4 WHERE device_id=?1 AND revision=?2",
             params![device_id, expected_revision, summary, now],
         )?;
-        if count == 0 { return Ok(None); }
+        if count == 0 {
+            return Ok(None);
+        }
         self.voice_memory(device_id)
     }
 
@@ -1000,16 +1210,35 @@ impl RuntimeDb {
             let result = AuditResult::parse(&result)
                 .ok_or_else(|| SchemaError::InvalidRecord(format!("未知审计结果: {result}")))?;
             let detail: AuditDetail = serde_json::from_str(&detail)?;
-            entries.push(AuditEntry { at, client, action, target, result, detail });
+            entries.push(AuditEntry {
+                at,
+                client,
+                action,
+                target,
+                result,
+                detail,
+            });
         }
         Ok(entries)
     }
 
     /// 写入一条新审批（技术书 §7.1）。`connection` 与 `outcome` 以 JSON 存入各自的列。
     pub fn insert_approval(&self, record: &ApprovalRecord) -> Result<(), SchemaError> {
-        let connection = record.connection.as_ref().map(serde_json::to_string).transpose()?;
-        let outcome = record.outcome.as_ref().map(serde_json::to_string).transpose()?;
-        let request = record.request.as_ref().map(serde_json::to_string).transpose()?;
+        let connection = record
+            .connection
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let outcome = record
+            .outcome
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let request = record
+            .request
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         self.connection.execute(
             &format!(
                 "INSERT INTO approvals({APPROVAL_COLUMNS}) \
@@ -1059,7 +1288,9 @@ impl RuntimeDb {
         let row = self
             .connection
             .query_row(
-                &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE source=?1 AND request_id=?2"),
+                &format!(
+                    "SELECT {APPROVAL_COLUMNS} FROM approvals WHERE source=?1 AND request_id=?2"
+                ),
                 params![source.as_str(), request_id],
                 ApprovalRow::read,
             )
@@ -1113,7 +1344,14 @@ impl RuntimeDb {
                decided_at=CASE WHEN ?3 THEN ?2 ELSE decided_at END, \
                outcome=COALESCE(?4, outcome) \
              WHERE approval_id=?5 AND status=?6",
-            params![to.as_str(), now, decided, outcome, approval_id, from.as_str()],
+            params![
+                to.as_str(),
+                now,
+                decided,
+                outcome,
+                approval_id,
+                from.as_str()
+            ],
         )?;
         Ok(changed == 1)
     }
@@ -1146,7 +1384,11 @@ impl RuntimeDb {
     }
 
     /// 将被 [`Self::expire_approvals`] 标为过期的审批（同样条件），供逐条记审计。
-    pub fn approvals_due_for_expiry(&self, now: f64, all_open: bool) -> Result<Vec<ApprovalRecord>, SchemaError> {
+    pub fn approvals_due_for_expiry(
+        &self,
+        now: f64,
+        all_open: bool,
+    ) -> Result<Vec<ApprovalRecord>, SchemaError> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {APPROVAL_COLUMNS} FROM approvals \
              WHERE status IN ('pending','approved') AND (?2 OR expires_at <= ?1) ORDER BY created_at"
@@ -1204,7 +1446,8 @@ impl RuntimeDb {
                 return Ok(record);
             }
             Some(record) => {
-                let keep = |new: &str, old: String| if new.is_empty() { old } else { new.to_owned() };
+                let keep =
+                    |new: &str, old: String| if new.is_empty() { old } else { new.to_owned() };
                 tx.execute(
                     "UPDATE voice_devices SET client_id=?2, status=?3, model=?4, firmware_version=?5, last_ip=?6, last_seen=?7
                      WHERE device_id=?1",
@@ -1268,17 +1511,30 @@ impl RuntimeDb {
 
     /// 全部登记设备，最近来访的在前。
     pub fn voice_devices(&self) -> Result<Vec<VoiceDeviceRecord>, SchemaError> {
-        let mut statement = self
-            .connection
-            .prepare(&format!("SELECT {VOICE_DEVICE_COLUMNS} FROM voice_devices ORDER BY last_seen DESC"))?;
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {VOICE_DEVICE_COLUMNS} FROM voice_devices ORDER BY last_seen DESC"
+        ))?;
         let rows = statement.query_map([], voice_device_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// 桌面端允许或撤销设备；返回是否找到该设备。
-    pub fn set_voice_device_status(&self, device_id: &str, status: &str, now: f64) -> Result<bool, SchemaError> {
-        if ![VOICE_DEVICE_PENDING, VOICE_DEVICE_ALLOWED, VOICE_DEVICE_REVOKED].contains(&status) {
-            return Err(SchemaError::InvalidRecord(format!("未知的设备状态: {status}")));
+    pub fn set_voice_device_status(
+        &self,
+        device_id: &str,
+        status: &str,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
+        if ![
+            VOICE_DEVICE_PENDING,
+            VOICE_DEVICE_ALLOWED,
+            VOICE_DEVICE_REVOKED,
+        ]
+        .contains(&status)
+        {
+            return Err(SchemaError::InvalidRecord(format!(
+                "未知的设备状态: {status}"
+            )));
         }
         let tx = self.connection.unchecked_transaction()?;
         let found = tx.execute(
@@ -1295,7 +1551,10 @@ impl RuntimeDb {
     /// 修改设备显示名（最长 32 字）。
     pub fn rename_voice_device(&self, device_id: &str, name: &str) -> Result<bool, SchemaError> {
         let name: String = name.trim().chars().take(32).collect();
-        Ok(self.connection.execute("UPDATE voice_devices SET name=?2 WHERE device_id=?1", params![device_id, name])? > 0)
+        Ok(self.connection.execute(
+            "UPDATE voice_devices SET name=?2 WHERE device_id=?1",
+            params![device_id, name],
+        )? > 0)
     }
 
     /// NV15 desktop-owned HA token store, separate from voice JSON settings.
@@ -1307,9 +1566,14 @@ impl RuntimeDb {
     /// Never use this as proof a token is configured or valid.
     pub fn home_token_recovery_revision(&self) -> Result<u64, SchemaError> {
         self.get_secret("voice.homeassistant.token_revision")?
-            .map(|raw| raw.parse::<u64>().ok().filter(|v| *v <= 9_007_199_254_740_991)
-                 .ok_or_else(|| SchemaError::InvalidRecord("HA 令牌版本损坏".into())))
-            .transpose().map(|revision| revision.unwrap_or(0))
+            .map(|raw| {
+                raw.parse::<u64>()
+                    .ok()
+                    .filter(|v| *v <= 9_007_199_254_740_991)
+                    .ok_or_else(|| SchemaError::InvalidRecord("HA 令牌版本损坏".into()))
+            })
+            .transpose()
+            .map(|revision| revision.unwrap_or(0))
     }
     pub fn home_token_status(&self) -> Result<(bool, u64), SchemaError> {
         let revision = self.home_token_recovery_revision()?;
@@ -1317,49 +1581,88 @@ impl RuntimeDb {
             None => false,
             Some(value) if crate::home_secret::is_sealed(&value) => {
                 // A malformed envelope fails closed, not a configured usable token.
-                crate::home_secret::open(&value).map_err(|_| SchemaError::InvalidRecord("HA 令牌加密数据无效".into()))?;
+                crate::home_secret::open(&value)
+                    .map_err(|_| SchemaError::InvalidRecord("HA 令牌加密数据无效".into()))?;
                 true
             }
-            Some(_) => return Err(SchemaError::InvalidRecord("检测到旧版明文 HA 凭据，需安全迁移".into())),
+            Some(_) => {
+                return Err(SchemaError::InvalidRecord(
+                    "检测到旧版明文 HA 凭据，需安全迁移".into(),
+                ));
+            }
         };
-        Ok((configured,revision))
+        Ok((configured, revision))
     }
 
-    pub fn update_home_token_if_revision(&self, expected_revision: u64,
-        replacement: Option<&str>, now: f64) -> Result<Option<u64>, SchemaError> {
+    pub fn update_home_token_if_revision(
+        &self,
+        expected_revision: u64,
+        replacement: Option<&str>,
+        now: f64,
+    ) -> Result<Option<u64>, SchemaError> {
         if expected_revision > 9_007_199_254_740_990 || !now.is_finite() || now < 0.0 {
             return Err(SchemaError::InvalidRecord("HA 令牌版本或时间无效".into()));
         }
         if let Some(token) = replacement {
-            if token.len() < 20 || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control()) {
+            if token.len() < 20
+                || token.len() > 8192
+                || token
+                    .bytes()
+                    .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+            {
                 return Err(SchemaError::InvalidRecord("HA 访问令牌格式无效".into()));
             }
         }
-        let sealed = replacement.map(|token|crate::home_secret::seal(token)
-            .map_err(|_|SchemaError::InvalidRecord("无法使用系统安全存储保护 HA 令牌".into())))
+        let sealed = replacement
+            .map(|token| {
+                crate::home_secret::seal(token).map_err(|_| {
+                    SchemaError::InvalidRecord("无法使用系统安全存储保护 HA 令牌".into())
+                })
+            })
             .transpose()?;
         // BEGIN IMMEDIATE acquires the SQLite write reservation *before* the
         // revision read. With multiple connections, the loser waits then sees
         // the incremented revision (conflict) instead of SQLITE_BUSY_SNAPSHOT.
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.connection, rusqlite::TransactionBehavior::Immediate)?;
-        let raw: Option<String> = tx.query_row(
-            "SELECT value FROM app_secrets WHERE name='voice.homeassistant.token_revision'",[],|r|r.get(0)
-        ).optional()?;
-        let current = raw.map(|raw|raw.parse::<u64>().ok()
-            .filter(|v| *v<=9_007_199_254_740_991)
-            .ok_or_else(||SchemaError::InvalidRecord("HA 令牌版本损坏".into())))
-            .transpose()?.unwrap_or(0);
-        if current != expected_revision { return Ok(None); }
-        let next=current.checked_add(1)
-            .filter(|v| *v<=9_007_199_254_740_991)
-            .ok_or_else(||SchemaError::InvalidRecord("HA 令牌版本上限".into()))?;
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT value FROM app_secrets WHERE name='voice.homeassistant.token_revision'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let current = raw
+            .map(|raw| {
+                raw.parse::<u64>()
+                    .ok()
+                    .filter(|v| *v <= 9_007_199_254_740_991)
+                    .ok_or_else(|| SchemaError::InvalidRecord("HA 令牌版本损坏".into()))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        if current != expected_revision {
+            return Ok(None);
+        }
+        let next = current
+            .checked_add(1)
+            .filter(|v| *v <= 9_007_199_254_740_991)
+            .ok_or_else(|| SchemaError::InvalidRecord("HA 令牌版本上限".into()))?;
         match replacement {
             Some(_) => {
-                let sealed = sealed.as_ref().ok_or_else(||SchemaError::InvalidRecord("HA 令牌密封失败".into()))?;
+                let sealed = sealed
+                    .as_ref()
+                    .ok_or_else(|| SchemaError::InvalidRecord("HA 令牌密封失败".into()))?;
                 tx.execute("INSERT INTO app_secrets(name,value,updated_at) VALUES('voice.homeassistant.token',?1,?2) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",params![sealed,now])?;
             }
-            None => {tx.execute("DELETE FROM app_secrets WHERE name='voice.homeassistant.token'",[])?;}
+            None => {
+                tx.execute(
+                    "DELETE FROM app_secrets WHERE name='voice.homeassistant.token'",
+                    [],
+                )?;
+            }
         }
         tx.execute("INSERT INTO app_secrets(name,value,updated_at) VALUES('voice.homeassistant.token_revision',?1,?2) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",params![next.to_string(),now])?;
         // Both voice-read and HomeControl grants were bound to the old
@@ -1376,10 +1679,12 @@ impl RuntimeDb {
     /// Only the trusted internal HA connector may request decrypted credentials.
     /// Do not expose this through the Tauri command or general settings APIs.
     pub fn home_token_for_connection(&self) -> Result<Option<String>, SchemaError> {
-        let Some(sealed) = self.get_secret("voice.homeassistant.token")? else { return Ok(None); };
+        let Some(sealed) = self.get_secret("voice.homeassistant.token")? else {
+            return Ok(None);
+        };
         crate::home_secret::open(&sealed)
             .map(Some)
-            .map_err(|_|SchemaError::InvalidRecord("Home Assistant 令牌无法解密或已损坏".into()))
+            .map_err(|_| SchemaError::InvalidRecord("Home Assistant 令牌无法解密或已损坏".into()))
     }
 
     /// One-time upgrade for an existing plaintext HA token saved by the older
@@ -1391,11 +1696,19 @@ impl RuntimeDb {
             return Err(SchemaError::InvalidRecord("令牌迁移时间无效".into()));
         }
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.connection, rusqlite::TransactionBehavior::Immediate)?;
-        let original: Option<String> = tx.query_row(
-            "SELECT value FROM app_secrets WHERE name='voice.homeassistant.token'",[],|row|row.get(0)
-        ).optional()?;
-        let Some(original) = original else { return Ok(false); };
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let original: Option<String> = tx
+            .query_row(
+                "SELECT value FROM app_secrets WHERE name='voice.homeassistant.token'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(original) = original else {
+            return Ok(false);
+        };
         if crate::home_secret::is_sealed(&original) {
             // A sealed blob copied from another Windows principal may be
             // impossible to decrypt. Never fail the *entire database startup*:
@@ -1405,19 +1718,36 @@ impl RuntimeDb {
             // Do not unseal, reencrypt or grant any HomeControl permission.
             return Ok(false);
         }
-        if original.len()<20 || original.len()>8192 ||
-            original.bytes().any(|b|b.is_ascii_whitespace() || b.is_ascii_control()) {
-            return Err(SchemaError::InvalidRecord("旧版明文令牌格式不合法，拒绝迁移".into()));
+        if original.len() < 20
+            || original.len() > 8192
+            || original
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        {
+            return Err(SchemaError::InvalidRecord(
+                "旧版明文令牌格式不合法，拒绝迁移".into(),
+            ));
         }
-        let cipher=crate::home_secret::seal(&original)
-            .map_err(|_|SchemaError::InvalidRecord("DPAPI 旧凭据迁移失败".into()))?;
-        let old:Option<String>=tx.query_row(
-            "SELECT value FROM app_secrets WHERE name='voice.homeassistant.token_revision'",[],|row|row.get(0)
-        ).optional()?;
-        let current=old.as_deref().unwrap_or("0").parse::<u64>()
-            .ok().filter(|v|*v<9_007_199_254_740_991)
-            .ok_or_else(||SchemaError::InvalidRecord("旧 HA 凭据版本损坏".into()))?;
-        tx.execute("UPDATE app_secrets SET value=?1,updated_at=?2 WHERE name='voice.homeassistant.token'",params![cipher,now])?;
+        let cipher = crate::home_secret::seal(&original)
+            .map_err(|_| SchemaError::InvalidRecord("DPAPI 旧凭据迁移失败".into()))?;
+        let old: Option<String> = tx
+            .query_row(
+                "SELECT value FROM app_secrets WHERE name='voice.homeassistant.token_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current = old
+            .as_deref()
+            .unwrap_or("0")
+            .parse::<u64>()
+            .ok()
+            .filter(|v| *v < 9_007_199_254_740_991)
+            .ok_or_else(|| SchemaError::InvalidRecord("旧 HA 凭据版本损坏".into()))?;
+        tx.execute(
+            "UPDATE app_secrets SET value=?1,updated_at=?2 WHERE name='voice.homeassistant.token'",
+            params![cipher, now],
+        )?;
         tx.execute("INSERT INTO app_secrets(name,value,updated_at) VALUES('voice.homeassistant.token_revision',?1,?2) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",params![(current+1).to_string(),now])?;
         tx.execute("DELETE FROM app_secrets WHERE name IN ('voice.homeassistant.voice_read_consent','voice.homeassistant.voice_control_consent')", [])?;
         tx.execute("UPDATE approvals SET status='expired',updated_at=?1 WHERE kind='home_control' AND status IN ('pending','approved')",params![now])?;
@@ -1463,7 +1793,11 @@ impl RuntimeDb {
         let mut previous = Vec::with_capacity(changes.len());
         for (name, value) in changes {
             let old: Option<String> = tx
-                .query_row("SELECT value FROM app_secrets WHERE name=?1", [name], |row| row.get(0))
+                .query_row(
+                    "SELECT value FROM app_secrets WHERE name=?1",
+                    [name],
+                    |row| row.get(0),
+                )
                 .optional()?;
             match value {
                 Some(value) => tx.execute(
@@ -1480,7 +1814,11 @@ impl RuntimeDb {
     }
 
     /// 按 [`Self::apply_secret_changes`] 返回的原值还原（逆序应用，同名多次修改也回到批次前的值）。
-    pub fn restore_secrets(&self, previous: &[(String, Option<String>)], now: f64) -> Result<(), SchemaError> {
+    pub fn restore_secrets(
+        &self,
+        previous: &[(String, Option<String>)],
+        now: f64,
+    ) -> Result<(), SchemaError> {
         let reversed: Vec<_> = previous.iter().rev().cloned().collect();
         self.apply_secret_changes(&reversed, now).map(|_| ())
     }
@@ -1709,7 +2047,9 @@ impl RuntimeDb {
                     if let Some(thick_obj) = thick_val.as_object() {
                         // Handle engrave
                         if let Some(engrave_val) = thick_obj.get("engrave") {
-                            if engrave_val.is_null() || engrave_val.as_object().is_some_and(|o| o.is_empty()) {
+                            if engrave_val.is_null()
+                                || engrave_val.as_object().is_some_and(|o| o.is_empty())
+                            {
                                 let deleted = tx.execute(
                                     "DELETE FROM material_params WHERE material_name=?1 AND thickness_key=?2 AND laser_mode='engrave'",
                                     params![name, thickness],
@@ -1718,10 +2058,16 @@ impl RuntimeDb {
                                     counts.tombstones += deleted as u64;
                                 }
                             } else if let Some(engrave_obj) = engrave_val.as_object() {
-                                if engrave_obj.contains_key("raster") || engrave_obj.contains_key("outline") {
+                                if engrave_obj.contains_key("raster")
+                                    || engrave_obj.contains_key("outline")
+                                {
                                     for mode in ["raster", "outline"] {
                                         if let Some(cell_val) = engrave_obj.get(mode) {
-                                            if cell_val.is_null() || cell_val.as_object().is_some_and(|o| o.is_empty()) {
+                                            if cell_val.is_null()
+                                                || cell_val
+                                                    .as_object()
+                                                    .is_some_and(|o| o.is_empty())
+                                            {
                                                 let deleted = tx.execute(
                                                     "DELETE FROM material_params WHERE material_name=?1 AND thickness_key=?2 AND laser_mode='engrave' AND engraving_mode=?3",
                                                     params![name, thickness, mode],
@@ -1729,20 +2075,45 @@ impl RuntimeDb {
                                                 if deleted > 0 {
                                                     counts.tombstones += deleted as u64;
                                                 }
-                                            } else if let Some(cell) = parse_param_cell_from_value(cell_val) {
-                                                self.upsert_cell_with_conflict(&tx, name, thickness, "engrave", mode, &cell, policy, now, &mut counts)?;
+                                            } else if let Some(cell) =
+                                                parse_param_cell_from_value(cell_val)
+                                            {
+                                                self.upsert_cell_with_conflict(
+                                                    &tx,
+                                                    name,
+                                                    thickness,
+                                                    "engrave",
+                                                    mode,
+                                                    &cell,
+                                                    policy,
+                                                    now,
+                                                    &mut counts,
+                                                )?;
                                             }
                                         }
                                     }
-                                } else if let Some(cell) = parse_param_cell_from_value(engrave_val) {
-                                    self.upsert_cell_with_conflict(&tx, name, thickness, "engrave", "raster", &cell, policy, now, &mut counts)?;
+                                } else if let Some(cell) = parse_param_cell_from_value(engrave_val)
+                                {
+                                    self.upsert_cell_with_conflict(
+                                        &tx,
+                                        name,
+                                        thickness,
+                                        "engrave",
+                                        "raster",
+                                        &cell,
+                                        policy,
+                                        now,
+                                        &mut counts,
+                                    )?;
                                 }
                             }
                         }
 
                         // Handle cut
                         if let Some(cut_val) = thick_obj.get("cut") {
-                            if cut_val.is_null() || cut_val.as_object().is_some_and(|o| o.is_empty()) {
+                            if cut_val.is_null()
+                                || cut_val.as_object().is_some_and(|o| o.is_empty())
+                            {
                                 let deleted = tx.execute(
                                     "DELETE FROM material_params WHERE material_name=?1 AND thickness_key=?2 AND laser_mode='cut'",
                                     params![name, thickness],
@@ -1751,7 +2122,17 @@ impl RuntimeDb {
                                     counts.tombstones += deleted as u64;
                                 }
                             } else if let Some(cell) = parse_param_cell_from_value(cut_val) {
-                                self.upsert_cell_with_conflict(&tx, name, thickness, "cut", "", &cell, policy, now, &mut counts)?;
+                                self.upsert_cell_with_conflict(
+                                    &tx,
+                                    name,
+                                    thickness,
+                                    "cut",
+                                    "",
+                                    &cell,
+                                    policy,
+                                    now,
+                                    &mut counts,
+                                )?;
                             }
                         }
                     }
@@ -1798,13 +2179,27 @@ impl RuntimeDb {
                         threshold, passes, pixel_size_mm, source, updated_at, notes, extra
                      ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
-                        material, thickness, mode, engraving,
-                        cell.laser_min_power, cell.laser_max_power, cell.feed_rate, cell.travel_rate,
-                        cell.threshold, cell.passes, cell.pixel_size_mm, cell.source, cell.updated_at.or(Some(now)),
-                        cell.notes, extra_json
+                        material,
+                        thickness,
+                        mode,
+                        engraving,
+                        cell.laser_min_power,
+                        cell.laser_max_power,
+                        cell.feed_rate,
+                        cell.travel_rate,
+                        cell.threshold,
+                        cell.passes,
+                        cell.pixel_size_mm,
+                        cell.source,
+                        cell.updated_at.or(Some(now)),
+                        cell.notes,
+                        extra_json
                     ],
                 )?;
-                tx.execute("UPDATE materials SET updated_at=?2 WHERE name=?1", params![material, now])?;
+                tx.execute(
+                    "UPDATE materials SET updated_at=?2 WHERE name=?1",
+                    params![material, now],
+                )?;
                 counts.added += 1;
             }
             Some((id, min_p, max_p, feed, travel, thresh, passes, px_size, src, nts)) => {
@@ -1837,7 +2232,8 @@ impl RuntimeDb {
                             params![now, id],
                         )?;
 
-                        let extra_json = serde_json::to_string(&cell.extra).unwrap_or_else(|_| "{}".into());
+                        let extra_json =
+                            serde_json::to_string(&cell.extra).unwrap_or_else(|_| "{}".into());
                         tx.execute(
                             "UPDATE material_params SET
                                 laser_min_power=?1, laser_max_power=?2, feed_rate=?3, travel_rate=?4,
@@ -1850,7 +2246,10 @@ impl RuntimeDb {
                                 cell.notes, extra_json, id
                             ],
                         )?;
-                        tx.execute("UPDATE materials SET updated_at=?2 WHERE name=?1", params![material, now])?;
+                        tx.execute(
+                            "UPDATE materials SET updated_at=?2 WHERE name=?1",
+                            params![material, now],
+                        )?;
                     }
                 }
             }

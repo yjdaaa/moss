@@ -113,7 +113,10 @@ fn unix_environment_validation_rejects_non_whitelisted_keys() {
     let mut env = BTreeMap::new();
     env.insert("PATH".into(), "/usr/bin:/bin".into());
     env.insert("Path".into(), "/bin".into());
-    assert_eq!(validate_environment(&env), Err(ProcessFailure::InvalidInput));
+    assert_eq!(
+        validate_environment(&env),
+        Err(ProcessFailure::InvalidInput)
+    );
     env.remove("Path");
     assert!(validate_environment(&env).is_ok());
     for name in [
@@ -141,7 +144,15 @@ fn bounded_stdout_stderr_and_stdin_are_isolated_from_argv() {
     let marker = root.path().join("ignored-marker");
     let cancel = AtomicBool::new(false);
     let data = b"hello \"quoted\" $(rm -rf fake)\n";
-    let result = run_mode(&cwd, "stdin", &marker, data, &cancel, Duration::from_secs(8)).unwrap();
+    let result = run_mode(
+        &cwd,
+        "stdin",
+        &marker,
+        data,
+        &cancel,
+        Duration::from_secs(8),
+    )
+    .unwrap();
     assert_eq!(result.finish, Finish::Completed, "{result:?}");
     assert!(result.output.contains("hello \"quoted\""));
     assert!(result.output.contains("NV13_STDERR_OK"));
@@ -149,11 +160,24 @@ fn bounded_stdout_stderr_and_stdin_are_isolated_from_argv() {
     assert!(result.output.contains("[redacted]"));
     assert!(result.children_reaped);
 
-    let large = run_mode(&cwd, "flood", &marker, b"", &cancel, Duration::from_secs(10)).unwrap();
+    let large = run_mode(
+        &cwd,
+        "flood",
+        &marker,
+        b"",
+        &cancel,
+        Duration::from_secs(10),
+    )
+    .unwrap();
     assert_eq!(large.finish, Finish::Completed, "{large:?}");
     assert!(large.truncated);
     assert!(large.output.len() <= MAX_OUTPUT_BYTES);
-    assert!(large.output.lines().all(|line| line.len() <= MAX_OUTPUT_LINE_BYTES));
+    assert!(
+        large
+            .output
+            .lines()
+            .all(|line| line.len() <= MAX_OUTPUT_LINE_BYTES)
+    );
     assert!(large.children_reaped);
 }
 
@@ -198,13 +222,28 @@ fn cancellation_kills_descendant_not_just_parent() {
             std::thread::sleep(Duration::from_millis(30));
         }
     });
-    let result = run_mode(&cwd, "spawn", &marker, b"", &cancel, Duration::from_secs(10)).unwrap();
+    let result = run_mode(
+        &cwd,
+        "spawn",
+        &marker,
+        b"",
+        &cancel,
+        Duration::from_secs(10),
+    )
+    .unwrap();
     signal.join().unwrap();
     assert_eq!(result.finish, Finish::Cancelled, "{result:?}");
     assert!(result.children_reaped);
-    let grandchild: i32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+    let grandchild: i32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     let probe = unsafe { libc::kill(grandchild, 0) };
-    assert_eq!(probe, -1, "grandchild PID {grandchild} survived process-group cancellation");
+    assert_eq!(
+        probe, -1,
+        "grandchild PID {grandchild} survived process-group cancellation"
+    );
 }
 
 #[test]
@@ -228,5 +267,8 @@ fn permission_change_before_stdin_delivery_cancels_without_sending_task() {
     .unwrap();
     assert_eq!(result.finish, Finish::Cancelled);
     assert!(result.children_reaped);
-    assert!(!marker.exists(), "revoked run unexpectedly delivered task stdin");
+    assert!(
+        !marker.exists(),
+        "revoked run unexpectedly delivered task stdin"
+    );
 }
