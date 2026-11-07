@@ -642,7 +642,7 @@ export function DrawPage({ onNavigate }) {
   return (
     <main className="app-shell ob-page ob-draw-page">
 
-      {/* 左侧大画布，右侧三张卡：材料与尺寸、设备、预览与发送（技术书 §9.5.5 B；支持自由缩放/拖动/折叠） */}
+      {/* 大画布占满整行，下方三张卡并排：材料与尺寸、设备、预览与发送（技术书 §9.5.5 B、r25；支持自由缩放/拖动/折叠） */}
       <section className="workspace ob-draw">
         <WorkbenchCanvas
           defaultLayout={DRAW_DEFAULT_LAYOUT}

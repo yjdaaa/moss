@@ -694,13 +694,18 @@ mod tests {
         let voice_page = include_str!("../../../../frontend/src/pages/VoicePage.jsx");
         assert!(
             voice_page.contains("<VoiceFirmwareCard"),
-            "固件卡挂在“设备与工具”标签"
+            "固件卡挂在“设备”标签"
         );
-        let wake_panel =
-            include_str!("../../../../frontend/src/components/VoiceWakeVolumePanel.jsx");
+        // n69：“唤醒词与音量”标签并入“设备”，唤醒词卡由 VoiceWakeWordSection 挂载
         assert!(
-            wake_panel.contains("<VoiceWakeWordCard"),
-            "唤醒词卡挂在“唤醒词与音量”标签"
+            voice_page.contains("<VoiceWakeWordSection"),
+            "唤醒词区块挂在“设备”标签"
+        );
+        let wake_section =
+            include_str!("../../../../frontend/src/components/VoiceWakeWordSection.jsx");
+        assert!(
+            wake_section.contains("<VoiceWakeWordCard"),
+            "唤醒词卡挂在主窗口语音中心"
         );
     }
 

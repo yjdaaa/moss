@@ -1,6 +1,7 @@
 // Manual, isolated browser repro for the Voice Center route.
 // Uses only a Vite loopback server and synthetic Tauri/HTTP fixtures.
-// Run: node tests/voice-center-render.smoke.mjs (from frontend/).
+// Run: node tests/voice-center-render.smoke.mjs (from frontend/; Windows Edge by default,
+// or PLAYWRIGHT_CHANNEL=chrome on other systems).
 import assert from "node:assert/strict";
 import { createServer, preview } from "vite";
 import { chromium } from "playwright";
@@ -17,13 +18,17 @@ try {
   if (!production) await vite.listen();
   const local = vite.resolvedUrls?.local?.[0];
   if (!local) throw new Error("Vite loopback server URL unavailable");
+  // 设了 PLAYWRIGHT_CHANNEL（如 macOS 上的 chrome）就用对应浏览器，否则沿用 Windows 本机 Edge
   browser = await chromium.launch({
     headless: true,
-    executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    ...(process.env.PLAYWRIGHT_CHANNEL
+      ? { channel: process.env.PLAYWRIGHT_CHANNEL }
+      : { executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" }),
   });
   const fixture = {
     voice_status: {
-      mode: "official", settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000,
+      // 内置链路：音乐卡等内置子卡片与 n69 的设备 / 副屏预览分组都会渲染（官方链路下音乐卡本来就不出现，旧断言永远不成立）
+      mode: "builtin", settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000,
         builtin_ws_port: 8000, builtin_http_port: 8003 },
       server: { state: "stopped", owned: false }, server_config: { exists: false, full_module: false },
       endpoint: { health: null }, device: { state: "unknown" }, bridge: { connected: false },
@@ -31,7 +36,7 @@ try {
       models: {}, mcp: { endpoints: [], tools: [], max_extra_endpoints: 4 },
     },
     voice_builtin_status: {
-      running: false, mode: "echo", link_mode: "official", ws_port: 8000,
+      running: false, mode: "echo", link_mode: "builtin", ws_port: 8000,
       http_port: 8003, models: {}, local: { settings: {}, models: [], ready: {} },
       sessions: [], events: [], timings: [], devices: [], memory_enabled: false,
     },

@@ -73,7 +73,7 @@ export function VoiceMcpCard({ defaultOpen = true }) {
   const formChanged = Boolean(form && editing && JSON.stringify(form) !== editing.pristine);
   const summary = !status ? "读取中…" : servers.length ? `${servers.length} 个服务 · ${servers.filter((item) => item.config.enabled).length} 个启用` : "未添加";
   return <VoiceGroup id="mcp" title="第三方 MCP 工具（外部程序，可随时添加或移除）" summary={summary} dirty={formChanged} defaultOpen={defaultOpen}><div id="voice-mcp-card" className="voice-stack">
-    <p className="voice-muted">这些是 MOSS 之外独立运行的外部工具服务（现成的社区 MCP 或你自己写的小程序），用下面的「添加服务」随时加、用「移除」随时删，和「设备与工具 → MOSS 内置工具」里那些编译进 MOSS、只能开关的原生工具不是一回事。</p>
+    <p className="voice-muted">这些是 MOSS 之外独立运行的外部工具服务（现成的社区 MCP 或你自己写的小程序），用下面的「添加服务」随时加、用「移除」随时删，和上面「MOSS 内置工具」里那些编译进 MOSS、只能开关的原生工具不是一回事。</p>
     <p className="voice-muted">服务默认停用，工具默认每次需批准。密钥填在凭据栏，不要放进地址或启动参数。</p>
     {error && <div className="voice-hint voice-hint--bad" role="alert">{error}</div>}
     {status?.last_error && <div className="voice-hint voice-hint--warn">{status.last_error}</div>}

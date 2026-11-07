@@ -6,7 +6,8 @@
  */
 
 export const STORAGE_KEY = "moss_wb_layout_v3";
-export const DRAW_STORAGE_KEY = "moss_draw_layout_v1";
+// v2：2026-11-07 画布改为整行、设置卡移到画布下方，旧的“右侧竖排”记忆不再沿用
+export const DRAW_STORAGE_KEY = "moss_draw_layout_v2";
 export const LAYOUT_VERSION = 5;
 export const COLS = 48;
 export const ROW_UNIT = 4;
@@ -36,12 +37,15 @@ export const DEFAULT_LAYOUT = {
   feedback: { x: 16, y: 65, w: 32, h: 10 },
 };
 
-/** 创作画板默认排布：左侧大画布（34 列），右侧三张卡片竖排（14 列）。 */
+/**
+ * 创作画板默认排布（2026-11-07 用户决定“右边的设置放到下面，画板可以更好绘画”）：
+ * 画布占满整行（62 行 ≈ 一屏），材料与尺寸 / 设备 / 预览与发送三张卡在画布下方并排。
+ */
 export const DRAW_DEFAULT_LAYOUT = {
-  board: { x: 0, y: 0, w: 34, h: 68 },
-  "draw-material": { x: 34, y: 0, w: 14, h: 28 },
-  "draw-device": { x: 34, y: 29, w: 14, h: 22 },
-  "draw-send": { x: 34, y: 52, w: 14, h: 28 },
+  board: { x: 0, y: 0, w: 48, h: 62 },
+  "draw-material": { x: 0, y: 63, w: 16, h: 28 },
+  "draw-device": { x: 16, y: 63, w: 16, h: 22 },
+  "draw-send": { x: 32, y: 63, w: 16, h: 28 },
 };
 
 export function clamp(value, min, max) {
@@ -181,4 +185,61 @@ export function clearLayout(storage = globalThis.localStorage, key = STORAGE_KEY
   } catch (_error) {
     // 忽略
   }
+}
+
+/** 窄窗口两栏模式下，窄的一侧至少占的列数（48 列里的 20 列 ≈ 42%），避免表单卡被挤扁。 */
+export const TWO_COLUMN_MIN = 20;
+
+/** 宽度达到这么多列的卡片在两栏模式下仍占满整行（如整行的创作画布）。 */
+export const FULL_ROW_MIN = 40;
+
+/**
+ * 窄窗口（761–1200px）自动两栏（2026-11-07 用户决定“可以并排显示 2 个，没必要做竖排”）：
+ * 按上下顺序处理，宽度 ≥ FULL_ROW_MIN 的卡片单独占满整行；夹在整行卡之间的其余卡片按中心落在左半还是右半
+ * 分成两栏，各栏按原来的上下顺序紧贴堆叠（行距 1 行），高度沿用布局里的行数。
+ * 分界沿用左栏原来的宽度，但钳制在 [TWO_COLUMN_MIN, COLS - TWO_COLUMN_MIN]；整行卡输出 w = COLS。
+ * 只用于显示，不写回记忆；用户拖过的宽布局回到宽窗口时原样恢复。
+ */
+export function stackTwoColumns(layout) {
+  const byTop = (a, b) => a[1].y - b[1].y || a[1].x - b[1].x;
+  const entries = Object.entries(layout || {}).filter(([, box]) => box).sort(byTop);
+  const isFull = ([, box]) => box.w >= FULL_ROW_MIN;
+  const leftCards = entries.filter((entry) => !isFull(entry) && entry[1].x + entry[1].w / 2 < COLS / 2);
+  const leftEdge = leftCards.length ? Math.max(...leftCards.map(([, box]) => box.x + box.w)) : COLS / 2;
+  const split = clamp(leftEdge, TWO_COLUMN_MIN, COLS - TWO_COLUMN_MIN);
+  const out = {};
+  let top = 0;
+  const flush = (items) => {
+    if (!items.length) return;
+    let left = items.filter(([, box]) => box.x + box.w / 2 < COLS / 2);
+    let right = items.filter(([, box]) => box.x + box.w / 2 >= COLS / 2);
+    if (items.length > 1 && (left.length === 0 || right.length === 0)) {
+      // 卡片都在同一侧：按上下顺序交替分到两栏，仍然并排
+      left = items.filter((_, index) => index % 2 === 0);
+      right = items.filter((_, index) => index % 2 === 1);
+    }
+    let bottom = top;
+    for (const [column, x, w] of [[left, 0, split], [right, split, COLS - split]]) {
+      let y = top;
+      for (const [id, box] of column) {
+        out[id] = { x, y, w, h: box.h };
+        y += box.h + 1;
+      }
+      bottom = Math.max(bottom, y);
+    }
+    top = bottom;
+  };
+  let segment = [];
+  for (const entry of entries) {
+    if (!isFull(entry)) {
+      segment.push(entry);
+      continue;
+    }
+    flush(segment);
+    segment = [];
+    out[entry[0]] = { x: 0, y: top, w: COLS, h: entry[1].h };
+    top += entry[1].h + 1;
+  }
+  flush(segment);
+  return out;
 }

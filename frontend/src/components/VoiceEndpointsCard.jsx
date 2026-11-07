@@ -5,7 +5,8 @@ import { showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { TOOL_EDIT_PROMPTS, endpointLabel, endpointView, extraEndpointError, identityView, toolEditPrompt, toolStatText, toolSwitchPayload } from "../voiceState.js";
 
-// 接入点与工具（内置语音技术书 NV8）：附加官方接入点、各接入点连接状态与身份（仅官方/自建链路渲染）、工具开关与调用统计。
+// 接入点与工具（内置语音技术书 NV8）：附加官方接入点、各接入点连接状态与身份（仅官方/自建链路渲染，放在“设备”标签）；
+// 内置工具开关与调用统计（所有链路共用，n69 起放在“扩展”标签，紧挨第三方 MCP 工具，方便对照两者区别）。
 // 地址一律由后端脱敏后返回；新增时填写的完整地址只在本页内存中，提交后清空。
 
 const TONE_CLASS = { ok: "ob-pill--ok", info: "ob-pill--info", warn: "ob-pill--warn", bad: "ob-pill--bad", off: "ob-pill--off" };
@@ -18,10 +19,8 @@ function formatTime(seconds) {
 export function VoiceEndpointsCard({ mode, overview, busy, run }) {
   const [extra, setExtra] = useState("");
   const [extraError, setExtraError] = useState("");
-  const [copiedPrompt, setCopiedPrompt] = useState("");
-  if (!overview) return null;
+  if (!overview || mode === "builtin") return null;
   const endpoints = Array.isArray(overview.endpoints) ? overview.endpoints : [];
-  const tools = Array.isArray(overview.tools) ? overview.tools : [];
   const max = overview.max_extra_endpoints || 4;
 
   const addExtra = async () => {
@@ -41,25 +40,8 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
     if (ok) await run("删除接入点", () => voiceApi.saveSettings({ remove_extra_mcp_endpoint: endpoint.id }));
   };
 
-  const switchTool = (tool, enabled) =>
-    run("切换工具", () => voiceApi.saveSettings({ disabled_tools: toolSwitchPayload(tools, tool.name, enabled) }));
-
-  // 内置工具是编译进 MOSS 的原生工具，界面只能开关；增删要改代码，所以给一段可复制的施工提示词交给 AI。
-  const copyPrompt = async (kind) => {
-    try {
-      await navigator.clipboard.writeText(toolEditPrompt(kind));
-      setCopiedPrompt(kind);
-    } catch {
-      setCopiedPrompt("error");
-    }
-  };
-
   const connected = endpoints.filter((endpoint) => endpoint.connected).length;
-  const disabled = tools.filter((tool) => tool.enabled === false).length;
-  const showEndpoints = mode !== "builtin";
   return (
-    <>
-    {showEndpoints && (
     <VoiceGroup id="endpoints" title="接入点状态" dirty={Boolean(extra.trim())} summary={endpoints.length ? `${connected} / ${endpoints.length} 已连接` : "未配置"} tone={endpoints.length && connected === endpoints.length ? "ok" : undefined}>
       <div id="voice-endpoints-card" className="voice-stack">
       <p className="voice-muted">
@@ -79,7 +61,7 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
           <tbody>
             {endpoints.length === 0 ? (
               <tr>
-                <td colSpan={4} className="voice-muted">未配置接入点：在上面的“官方接入点”中填写</td>
+                <td colSpan={4} className="voice-muted">未配置接入点：在“服务”标签的“官方接入点”中填写</td>
               </tr>
             ) : (
               endpoints.map((endpoint) => {
@@ -134,10 +116,32 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
 
       </div>
     </VoiceGroup>
-    )}
+  );
+}
+
+export function VoiceToolsCard({ overview, busy, run }) {
+  const [copiedPrompt, setCopiedPrompt] = useState("");
+  if (!overview) return null;
+  const tools = Array.isArray(overview.tools) ? overview.tools : [];
+
+  const switchTool = (tool, enabled) =>
+    run("切换工具", () => voiceApi.saveSettings({ disabled_tools: toolSwitchPayload(tools, tool.name, enabled) }));
+
+  // 内置工具是编译进 MOSS 的原生工具，界面只能开关；增删要改代码，所以给一段可复制的施工提示词交给 AI。
+  const copyPrompt = async (kind) => {
+    try {
+      await navigator.clipboard.writeText(toolEditPrompt(kind));
+      setCopiedPrompt(kind);
+    } catch {
+      setCopiedPrompt("error");
+    }
+  };
+
+  const disabled = tools.filter((tool) => tool.enabled === false).length;
+  return (
     <VoiceGroup id="tools" title="MOSS 内置工具（只能开关，不能在这里增删）" summary={disabled ? `${disabled} 个工具已关闭` : `${tools.length} 个工具全部开启`}>
       <p className="voice-muted">勾选立即生效。关闭的工具不提供给任何接入点和内置语音；停止与急停工具不能关闭。统计为本次运行以来。</p>
-      <p className="voice-muted"><b>和「扩展 → 第三方 MCP 工具」不是一回事</b>：这里是编译在 MOSS 里的原生工具（激光、画板、材料库等），由 MOSS 自己执行，所以只能开关；第三方 MCP 是独立的外部程序，能在那里随时添加和移除。</p>
+      <p className="voice-muted"><b>和下面的「第三方 MCP 工具」不是一回事</b>：这里是编译在 MOSS 里的原生工具（激光、画板、材料库等），由 MOSS 自己执行，所以只能开关；第三方 MCP 是独立的外部程序，能在那里随时添加和移除。</p>
       <div className="ob-tbl voice-tbl">
         <table>
           <thead>
@@ -194,6 +198,5 @@ export function VoiceEndpointsCard({ mode, overview, busy, run }) {
         ))}
       </details>
     </VoiceGroup>
-    </>
   );
 }

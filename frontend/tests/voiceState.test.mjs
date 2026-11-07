@@ -99,6 +99,7 @@ import {
   experienceSettingsError,
   localModelSettingsError,
   mergeGroup,
+  localGroupPatch,
   savedNoteText,
   dirtyTabs,
   builtinModelSummary,
@@ -498,6 +499,14 @@ test("UI-3 本地模型与语音体验分开保存：合并时只取本组草稿
   assert.equal(formDirty(null, draft), false);
   // 只出现在表单里的字段（如切到豆包时加上的 kind）也算改动
   assert.equal(formDirty({ url: "u", model: "m" }, { url: "u", model: "m", kind: "doubao" }), true);
+  // n69：画风只在“设备 › 副屏预览”、Jev 开关只在顶部混搭栏编辑，对话体验组的草稿和保存载荷都不含这两个键
+  for (const key of ["screen_card_style", "jev_filter_enabled"]) {
+    assert.equal(EXPERIENCE_KEYS.includes(key), false, `${key} 不属于对话体验组`);
+    assert.equal(LOCAL_MODEL_KEYS.includes(key), false, `${key} 不属于本地模型组`);
+  }
+  const otherEdits = { ...saved, screen_card_style: "goggle_bot", jev_filter_enabled: true };
+  assert.equal(formDirty(saved, otherEdits, EXPERIENCE_KEYS), false, "外部改了画风或 Jev 开关不会让对话体验组显示未保存");
+  assert.deepEqual(localGroupPatch(saved, { ...otherEdits, barge_in: true }, EXPERIENCE_KEYS), { barge_in: true }, "对话体验保存不回写画风与 Jev 开关");
   assert.equal(formDirty({ url: "u", kind: "doubao" }, { url: "u" }), true);
 });
 
@@ -1407,35 +1416,6 @@ test("n61 wake word drafts are checked before saving", async () => {
   assert.match(wakeWordDraftError({ text: "MOSS", command: "moss", threshold: 0.2 }), /2～6/);
   assert.match(wakeWordDraftError({ text: "MOSS", command: "mó sī", threshold: 0.2 }), /声调/);
   assert.match(wakeWordDraftError({ text: "MOSS", command: "mo si", threshold: 1 }), /阈值/);
-});
-
-test("唤醒词与音量：只列已允许设备，在线且支持音量工具才可调，在线排前", async () => {
-  const { volumeDevicesView, volumeLevelText } = await import("../src/voiceState.js");
-  const status = {
-    devices: [
-      { device_id: "off", name: "客厅", status: "allowed" },
-      { device_id: "on", name: "书房", status: "allowed", status_json: JSON.stringify({ audio_speaker: { volume: 45 } }) },
-      { device_id: "old", name: "旧固件", status: "allowed" },
-      { device_id: "wait", name: "待审", status: "pending" },
-    ],
-    sessions: [
-      { device_id: "on", device_tools: ["self.audio_speaker.set_volume"] },
-      { device_id: "old", device_tools: ["self.get_device_status"] },
-    ],
-    device_prefs: { off: { volume: 0 } },
-  };
-  const rows = volumeDevicesView(status);
-  assert.deepEqual(rows.map((row) => row.device_id), ["on", "old", "off"], "待审设备不列出，在线排前");
-  assert.deepEqual(rows[0], { device_id: "on", name: "书房", online: true, adjustable: true, volume: 45, hint: "" });
-  assert.equal(rows[1].adjustable, false);
-  assert.match(rows[1].hint, /不支持/);
-  assert.equal(rows[2].volume, 0, "离线设备显示记忆的音量偏好");
-  assert.match(rows[2].hint, /离线/);
-  assert.deepEqual(volumeDevicesView(null), []);
-  assert.equal(volumeLevelText(0), "静音");
-  assert.equal(volumeLevelText(30), "较小");
-  assert.equal(volumeLevelText(60), "适中");
-  assert.equal(volumeLevelText(100), "较大");
 });
 
 test("本地 Jev 运行状态：失败带原因、加载中说明会跳过、9B / CPU 提示随状态带出", () => {

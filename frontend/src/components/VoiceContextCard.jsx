@@ -192,7 +192,7 @@ export default function VoiceContextCard() {
           </label>
 
           {writableOptions.length === 0 ? (
-            <p>暂无已允许的小智设备；在“服务”标签允许设备接入后，对话习惯会自动按设备记录，也可在此手动补充。</p>
+            <p>暂无已允许的小智设备；在“设备”标签允许设备接入后，对话习惯会自动按设备记录，也可在此手动补充。</p>
           ) : (
             <span>
               {multiScope && (

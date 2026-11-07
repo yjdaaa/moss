@@ -3,7 +3,7 @@ import { Play, Square, ShieldCheck, ShieldOff, Pencil, Check, X, FlaskConical, T
 import { showAlert, showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { createPollRunner } from "../pollGuard.js";
-import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
+import { SaveBar, VoiceGroup, focusVoiceGroup, gotoVoiceGroup } from "./VoiceLayout.jsx";
 import VoiceMemoryCard from "./VoiceMemoryCard.jsx";
 import VoicePluginsCard from "./VoicePluginsCard.jsx";
 import VoiceSpeakerCard from "./VoiceSpeakerCard.jsx";
@@ -93,7 +93,15 @@ import {
 
 // 内置语音服务（内置语音技术书 NV1 起）。设备连到 MOSS 本身，不需要外部服务端。
 // 识别、大模型、合成三项配齐后为对话模式（NV5），否则为回声测试。
-// 语音中心页按标签分开摆放本文件导出的各部分（UI-3）：服务与设备、模型、记录与诊断。
+// 语音中心页按标签分开摆放本文件导出的各部分（UI-3；n69 起）：服务、设备、模型、隐私与家居、记录与诊断。
+
+/** Jev 云端配置分组的标题：顶部混搭栏的提示与对话体验里的跳转文字都引用它，改名时只改这里。 */
+const JEV_GROUP_TITLE = "Jev 前置粗筛 · OpenRouter 云端（高级）";
+
+/** 跳到“模型”标签顶部第 3 栏 Jev 下拉框：Jev 开关只在那里切换（n69 去重）。 */
+function focusJevSwitch() {
+  gotoVoiceGroup("models", "", "voice-builtin-mix-select-jev");
+}
 
 const TONE_CLASS = { ok: "ob-pill--ok", info: "ob-pill--info", warn: "ob-pill--warn", bad: "ob-pill--bad", off: "ob-pill--off" };
 const LAYA_HINT_CLASS = { ok: "voice-hint--ok", warn: "voice-hint--warn", bad: "voice-hint--bad" };
@@ -176,85 +184,107 @@ export function useBuiltinStatus() {
   return { status, setStatus, busy, setBusy, act };
 }
 
-/** 服务与设备：运行状态、启停、设备要填的 OTA 地址、设备允许列表。 */
+/** 服务：运行状态、启停、设备要填的连接地址（n69 起设备表移到“设备 › 已连接设备”，副屏预览移到“设备 › 副屏预览”）。 */
 export function BuiltinServicePanel({ builtin }) {
+  const { status, busy, act } = builtin;
+  if (!status) return <p className="voice-muted">正在读取内置服务状态…</p>;
+  if (status.error) return <div className="voice-hint voice-hint--bad">{status.error}</div>;
+
+  const running = Boolean(status.running);
+  const sessions = Array.isArray(status.sessions) ? status.sessions : [];
+  const modeView = builtinModeView(status);
+  const copyOta = async (url = status.ota_url, label = "设备 OTA 地址") => {
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      await showAlert(`${label}已复制，粘贴到设备配网页面即可`, { title: "已复制", tone: "success" });
+    } catch {
+      await showAlert("无法访问剪贴板，请手动选中地址复制", { title: "复制失败", tone: "error" });
+    }
+  };
+  return (
+    <VoiceGroup
+      id="builtin-service"
+      title="内置语音服务"
+      summary={`${running ? "运行中" : "未运行"} · ${modeView.text}模式 · ${sessions.length} 台在线`}
+      tone={running ? "ok" : undefined}
+      defaultOpen
+    >
+      <div className="voice-block" id="voice-builtin-card">
+        <div className="voice-block-h">
+          <h3>运行状态</h3>
+          <span className={`ob-pill ${TONE_CLASS[modeView.tone]}`} id="voice-builtin-mode" title={modeView.hint}>
+            {modeView.text}
+          </span>
+          <span className={`ob-pill ${running ? TONE_CLASS.ok : TONE_CLASS.off}`} id="voice-builtin-state">
+            {running ? "运行中" : "未运行"}
+          </span>
+          <span className="voice-actions voice-push">
+            {running ? (
+              <button type="button" className="btn btn-danger" disabled={Boolean(busy)} onClick={() => act("停止内置服务", () => voiceApi.builtinStop())} id="voice-builtin-stop">
+                <Square size={13} /> 停止
+              </button>
+            ) : (
+              <button type="button" className="btn btn-primary" disabled={Boolean(busy)} onClick={() => act("启动内置服务", () => voiceApi.builtinStart())} id="voice-builtin-start">
+                <Play size={13} /> 启动
+              </button>
+            )}
+          </span>
+        </div>
+        <p className="voice-muted">
+          {modeView.text === "对话" ? "识别、大模型、合成已配齐。" : "模型没配齐，先以回声测试运行；在“模型”标签配齐后自动切换为对话。"}
+          {modeView.autostart}
+        </p>
+        {status.poll_error && <div className="voice-hint voice-hint--warn">状态刷新失败（显示的是上次读取的结果）：{status.poll_error}</div>}
+        {status.last_error && !running && (
+          <div className="voice-hint voice-hint--bad" id="voice-builtin-error">
+            自动启动失败：{status.last_error}
+          </div>
+        )}
+        <div className="voice-kv">
+          <span className="voice-inline">
+            设备 OTA 地址（固定不变）：<b className="mono voice-break" id="voice-builtin-ota">{status.ota_url || "未能获取本机局域网地址"}</b>
+            {status.ota_url && (
+              <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_url, "设备 OTA 地址")} id="voice-builtin-ota-copy" title="复制设备 OTA 地址">
+                <Copy size={13} /> 复制
+              </button>
+            )}
+            {status.ota_ip_url && status.ota_ip_url !== status.ota_url && (
+              <>
+                <span className="voice-muted">· 当前 Wi-Fi IP：</span>
+                <span className="mono voice-break" id="voice-builtin-ota-ip">{status.ota_ip_url}</span>
+                <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_ip_url, "当前 Wi-Fi OTA 地址")} id="voice-builtin-ota-ip-copy" title="复制当前 Wi-Fi IP 地址">
+                  <Copy size={13} /> 复制 IP
+                </button>
+              </>
+            )}
+          </span>
+          <span className="voice-muted">
+            在设备配网页面填入上方 <code>moss.local</code> 地址后，换 Wi-Fi 无需重改；若公共网络屏蔽局域网广播，可改用右侧当前 Wi-Fi IP 地址。端口 {status.ws_port} / {status.http_port}，在下面“内置服务端口”组修改。
+          </span>
+        </div>
+      </div>
+    </VoiceGroup>
+  );
+}
+
+/** 设备：允许 / 撤销 / 改名；展开后是在线快捷控制（音量、亮度、深浅屏、投送预览、按键拾音）与设备信息。n69 起放在“设备”标签。 */
+export function BuiltinDevicesPanel({ builtin }) {
   const { status, busy, act } = builtin;
   const [editing, setEditing] = useState({ id: "", name: "" });
   const [expanded, setExpanded] = useState("");
   const [asking, setAsking] = useState("");
   const [controlDrafts, setControlDrafts] = useState({});
   const [controlNotice, setControlNotice] = useState({});
-  const [botNotice, setBotNotice] = useState("");
-  const [optimisticStyle, setOptimisticStyle] = useState("");
-  const [lastPushedPose, setLastPushedPose] = useState("");
   if (!status) return <p className="voice-muted">正在读取内置服务状态…</p>;
   if (status.error) return <div className="voice-hint voice-hint--bad">{status.error}</div>;
 
-  const running = Boolean(status.running);
   const devices = Array.isArray(status.devices) ? status.devices : [];
   const sessions = Array.isArray(status.sessions) ? status.sessions : [];
-  const modeView = builtinModeView(status);
-  const savedCardStyle = status.local?.settings?.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud";
-  const currentCardStyle = optimisticStyle || savedCardStyle;
-  const legacyBotGifs = Array.isArray(status.goggle_bot_gifs)
-    ? Object.fromEntries(status.goggle_bot_gifs.filter((item) => item?.id && item?.data_url).map((item) => [item.id, item.data_url]))
-    : (status.goggle_bot_gifs && typeof status.goggle_bot_gifs === "object" ? status.goggle_bot_gifs : {});
-  const styleGifCatalog = status.screen_style_gifs && typeof status.screen_style_gifs === "object"
-    ? status.screen_style_gifs
-    : {};
-  const activeSceneGifs = currentCardStyle === "goggle_bot"
-    ? { ...legacyBotGifs, ...(styleGifCatalog.goggle_bot || {}) }
-    : (styleGifCatalog.moss_hud || {});
-  const onlineColorDevice = devices.find((d) => {
-    if (d.status !== "allowed") return false;
-    const sess = sessions.find((s) => s.device_id === d.device_id);
-    return Boolean(sess && sess.screen_monochrome !== true);
-  }) || null;
-
-  const switchCardStyle = async (nextStyle) => {
-    if (nextStyle === currentCardStyle) return;
-    setOptimisticStyle(nextStyle);
-    setBotNotice("");
-    const opt = SCREEN_CARD_STYLE_OPTIONS.find((item) => item.id === nextStyle);
-    const updated = await act("切换卡片画风", () => voiceApi.localSave({ screen_card_style: nextStyle }));
-    if (updated) {
-      setOptimisticStyle("");
-      if (onlineColorDevice && lastPushedPose) {
-        try {
-          await voiceApi.deviceRequest(onlineColorDevice.device_id, "push_bot_pose", {
-            pose: lastPushedPose,
-            style: nextStyle,
-          });
-          setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风，并同步刷新在线小智屏幕预览`);
-          return;
-        } catch {
-          // 若设备刚好断开，不影响画风保存提示
-        }
-      }
-      setBotNotice(`已换成「${opt?.shortLabel || nextStyle}」画风，在线小智不用重连，马上生效`);
-    } else {
-      setOptimisticStyle("");
-    }
-  };
-
-  const pushBotPose = async (pose) => {
-    if (!onlineColorDevice) return;
-    const sceneTitle = currentCardStyle === "goggle_bot" ? (pose.botLabel || pose.label) : (pose.mossLabel || pose.label);
-    setAsking(onlineColorDevice.device_id);
-    setBotNotice("");
-    try {
-      await voiceApi.deviceRequest(onlineColorDevice.device_id, "push_bot_pose", {
-        pose: pose.id,
-        style: currentCardStyle,
-      });
-      setLastPushedPose(pose.id);
-      setBotNotice(`已将「${sceneTitle}」1:1 投送到 ${builtinDeviceView(onlineColorDevice).title}`);
-    } catch (error) {
-      await showAlert(voiceErrorText(error), { title: "投送屏幕预览失败", tone: "error" });
-    } finally {
-      setAsking("");
-    }
-  };
+  const pending = devices.filter((device) => builtinDeviceView(device).status === "pending").length;
+  const summary = devices.length
+    ? [`${devices.length} 台`, `${sessions.length} 台在线`, pending ? `${pending} 台待允许` : ""].filter(Boolean).join(" · ")
+    : "还没有设备连接过";
 
   const allow = async (device) => {
     if (!(await showConfirm(allowDeviceConfirmText(device), { title: "允许此设备？", tone: "warning", confirmText: "允许" }))) return;
@@ -311,390 +341,416 @@ export function BuiltinServicePanel({ builtin }) {
     }
   };
 
-  const copyOta = async (url = status.ota_url, label = "设备 OTA 地址") => {
-    if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url);
-      await showAlert(`${label}已复制，粘贴到设备配网页面即可`, { title: "已复制", tone: "success" });
-    } catch {
-      await showAlert("无法访问剪贴板，请手动选中地址复制", { title: "复制失败", tone: "error" });
-    }
-  };
   return (
-    <div className="voice-block" id="voice-builtin-card">
-      <div className="voice-block-h">
-        <h3>内置语音服务</h3>
-        <span className={`ob-pill ${TONE_CLASS[modeView.tone]}`} id="voice-builtin-mode" title={modeView.hint}>
-          {modeView.text}
-        </span>
-        <span className={`ob-pill ${running ? TONE_CLASS.ok : TONE_CLASS.off}`} id="voice-builtin-state">
-          {running ? "运行中" : "未运行"}
-        </span>
-        <span className="voice-actions voice-push">
-          {running ? (
-            <button type="button" className="btn btn-danger" disabled={Boolean(busy)} onClick={() => act("停止内置服务", () => voiceApi.builtinStop())} id="voice-builtin-stop">
-              <Square size={13} /> 停止
-            </button>
-          ) : (
-            <button type="button" className="btn btn-primary" disabled={Boolean(busy)} onClick={() => act("启动内置服务", () => voiceApi.builtinStart())} id="voice-builtin-start">
-              <Play size={13} /> 启动
-            </button>
-          )}
-        </span>
-      </div>
+    <VoiceGroup id="builtin-devices" title="已连接设备" summary={summary} tone={pending ? "warn" : undefined} defaultOpen>
       <p className="voice-muted">
-        {modeView.text === "对话" ? "识别、大模型、合成已配齐。" : "模型没配齐，先以回声测试运行；在“模型”标签配齐后自动切换为对话。"}
-        {modeView.autostart}
+        新设备第一次连上来是“待允许”，点“允许”后才能对话。点“控制与信息”展开这台设备的扬声器音量、屏幕亮度、深浅屏、按键拾音和设备信息；调节会记住，设备断电重连后自动恢复。
       </p>
-      {status.poll_error && <div className="voice-hint voice-hint--warn">状态刷新失败（显示的是上次读取的结果）：{status.poll_error}</div>}
-      {status.last_error && !running && (
-        <div className="voice-hint voice-hint--bad" id="voice-builtin-error">
-          自动启动失败：{status.last_error}
-        </div>
-      )}
-      <div className="voice-kv">
-        <span className="voice-inline">
-          设备 OTA 地址（固定不变）：<b className="mono voice-break" id="voice-builtin-ota">{status.ota_url || "未能获取本机局域网地址"}</b>
-          {status.ota_url && (
-            <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_url, "设备 OTA 地址")} id="voice-builtin-ota-copy" title="复制设备 OTA 地址">
-              <Copy size={13} /> 复制
-            </button>
-          )}
-          {status.ota_ip_url && status.ota_ip_url !== status.ota_url && (
-            <>
-              <span className="voice-muted">· 当前 Wi-Fi IP：</span>
-              <span className="mono voice-break" id="voice-builtin-ota-ip">{status.ota_ip_url}</span>
-              <button type="button" className="btn btn-ghost voice-inline-btn" onClick={() => copyOta(status.ota_ip_url, "当前 Wi-Fi OTA 地址")} id="voice-builtin-ota-ip-copy" title="复制当前 Wi-Fi IP 地址">
-                <Copy size={13} /> 复制 IP
-              </button>
-            </>
-          )}
-        </span>
-        <span className="voice-muted">
-          在设备配网页面填入上方 <code>moss.local</code> 地址后，换 Wi-Fi 无需重改；若公共网络屏蔽局域网广播，可改用右侧当前 Wi-Fi IP 地址。端口 {status.ws_port} / {status.http_port}，在“服务”标签下方修改。
-        </span>
-      </div>
-
-      <div className="ob-tbl voice-tbl">
-        <table>
-          <thead>
-            <tr>
-              <th>设备</th>
-              <th>型号 / 固件</th>
-              <th>最近来访</th>
-              <th>状态</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {devices.length === 0 ? (
+      <div id="voice-builtin-devices">
+        <div className="ob-tbl voice-tbl">
+          <table>
+            <thead>
               <tr>
-                <td colSpan={5} className="voice-muted">还没有设备连接过。启动服务并把设备 OTA 地址指向本机后，设备会出现在这里。</td>
+                <th>设备</th>
+                <th>型号 / 固件</th>
+                <th>最近来访</th>
+                <th>状态</th>
+                <th>操作</th>
               </tr>
-            ) : (
-              devices.map((device) => {
-                const view = builtinDeviceView(device);
-                const session = sessions.find((item) => item.device_id === device.device_id) || null;
-                const online = Boolean(session);
-                const details = builtinDeviceInfoView(device);
-                const controls = builtinDeviceControlsView(device, session, status.device_prefs);
-                const draftCtrl = controlDrafts[device.device_id] || {};
-                const volVal = draftCtrl.volume ?? controls.volume;
-                const briVal = draftCtrl.brightness ?? controls.brightness;
-                return (
-                  <React.Fragment key={device.device_id}>
-                  <tr>
-                    <td>
-                      {editing.id === device.device_id ? (
-                        <span className="voice-actions">
-                          <input className="text-input" value={editing.name} maxLength={32} onChange={(e) => setEditing({ id: device.device_id, name: e.target.value })} aria-label="设备名称" />
-                          <button type="button" className="btn btn-ghost" onClick={saveName} title="保存设备名称">
-                            <Check size={13} />
-                          </button>
-                          <button type="button" className="btn btn-ghost" onClick={() => setEditing({ id: "", name: "" })} title="取消">
-                            <X size={13} />
-                          </button>
-                        </span>
-                      ) : (
-                        <>
-                          <b>{view.title}</b>
-                          {device.name && <div className="voice-muted mono">{device.device_id}</div>}
-                          {online && <div className="voice-ok">在线</div>}
-                        </>
-                      )}
-                    </td>
-                    <td>
-                      {device.model || "—"}
-                      <div className="voice-muted">{device.firmware_version || "—"}</div>
-                    </td>
-                    <td className="mono">{formatTime(device.last_seen)}</td>
-                    <td>
-                      <span className={`ob-pill ${TONE_CLASS[view.tone]}`}>{view.text}</span>
-                    </td>
-                    <td>
-                      <span className="voice-actions">
-                        {view.canAllow && (
-                          <button type="button" className="btn btn-primary" disabled={Boolean(busy)} onClick={() => allow(device)}>
-                            <ShieldCheck size={13} /> 允许
-                          </button>
-                        )}
-                        {view.canRevoke && (
-                          <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => revoke(device)}>
-                            <ShieldOff size={13} /> 撤销
-                          </button>
-                        )}
-                        <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => setEditing({ id: device.device_id, name: device.name || "" })} title="修改名称">
-                          <Pencil size={13} />
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          disabled={Boolean(busy)}
-                          onClick={() => setExpanded(expanded === device.device_id ? "" : device.device_id)}
-                          title="设备信息"
-                        >
-                          {expanded === device.device_id ? "收起" : "信息"}
-                        </button>
-                      </span>
-                    </td>
-                  </tr>
-                  {expanded === device.device_id && (
+            </thead>
+            <tbody>
+              {devices.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="voice-muted">还没有设备连接过。启动服务并把设备 OTA 地址指向本机后，设备会出现在这里。</td>
+                </tr>
+              ) : (
+                devices.map((device) => {
+                  const view = builtinDeviceView(device);
+                  const session = sessions.find((item) => item.device_id === device.device_id) || null;
+                  const online = Boolean(session);
+                  const details = builtinDeviceInfoView(device);
+                  const controls = builtinDeviceControlsView(device, session, status.device_prefs);
+                  const draftCtrl = controlDrafts[device.device_id] || {};
+                  const volVal = draftCtrl.volume ?? controls.volume;
+                  const briVal = draftCtrl.brightness ?? controls.brightness;
+                  return (
+                    <React.Fragment key={device.device_id}>
                     <tr>
-                      <td colSpan={5}>
-                        {device.status === "allowed" && (
-                          <div className="voice-device-controls" id={`voice-device-controls-${device.device_id}`}>
-                            <div className="voice-device-controls-head">
-                              <span className="voice-actions">
-                                <b>小智硬件在线快捷控制</b>
-                                {controls.screenResolution && (
-                                  <span className="ob-pill ob-pill--info voice-tag mono">
-                                    {controls.screenResolution}
-                                    {controls.screenMonochrome === true ? " OLED" : " 彩屏"}
-                                  </span>
-                                )}
-                              </span>
-                              <span className="voice-muted">
-                                {online
-                                  ? "调节后自动记忆偏好（静音 0% / 息屏 0% / 按键模式在设备断电重连后自动恢复）"
-                                  : "设备离线（上线后可即时调节音量、亮度、深浅色主题、按键抗噪模式与投送雕刻预览）"}
-                              </span>
-                            </div>
-                            <div className="voice-device-controls-grid">
-                              <div className="voice-device-control-item">
-                                <span className="voice-device-control-label">
-                                  <span>扬声器音量</span>
-                                  <b className="mono">{volVal}%</b>
-                                </span>
-                                <div className="voice-actions">
-                                  <input
-                                    type="range"
-                                    min="0"
-                                    max="100"
-                                    step="5"
-                                    value={volVal}
-                                    disabled={Boolean(asking) || !online || !controls.canVolume}
-                                    onChange={(e) =>
-                                      setControlDrafts((prev) => ({
-                                        ...prev,
-                                        [device.device_id]: { ...(prev[device.device_id] || {}), volume: Number(e.target.value) },
-                                      }))
-                                    }
-                                    aria-label="设备音量"
-                                  />
-                                  <button
-                                    type="button"
-                                    className="btn btn-ghost"
-                                    disabled={Boolean(asking) || !online || !controls.canVolume}
-                                    onClick={() => sendDeviceControl(device, "set_volume", { volume: volVal }, `音量已设为 ${volVal}%（重连自动保持）`)}
-                                  >
-                                    应用
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn btn-ghost"
-                                    disabled={Boolean(asking) || !online || !controls.canVolume}
-                                    onClick={() => {
-                                      setControlDrafts((prev) => ({
-                                        ...prev,
-                                        [device.device_id]: { ...(prev[device.device_id] || {}), volume: 0 },
-                                      }));
-                                      sendDeviceControl(device, "set_volume", { volume: 0 }, "已静音（0%，设备重启后 MOSS 会自动恢复静音）");
-                                    }}
-                                  >
-                                    静音
-                                  </button>
-                                </div>
-                              </div>
-                              <div className="voice-device-control-item">
-                                <span className="voice-device-control-label">
-                                  <span>屏幕亮度</span>
-                                  <b className="mono">{briVal}%</b>
-                                </span>
-                                <div className="voice-actions">
-                                  <input
-                                    type="range"
-                                    min="0"
-                                    max="100"
-                                    step="5"
-                                    value={briVal}
-                                    disabled={Boolean(asking) || !online || !controls.canBrightness}
-                                    onChange={(e) =>
-                                      setControlDrafts((prev) => ({
-                                        ...prev,
-                                        [device.device_id]: { ...(prev[device.device_id] || {}), brightness: Number(e.target.value) },
-                                      }))
-                                    }
-                                    aria-label="设备屏幕亮度"
-                                  />
-                                  <button
-                                    type="button"
-                                    className="btn btn-ghost"
-                                    disabled={Boolean(asking) || !online || !controls.canBrightness}
-                                    onClick={() => sendDeviceControl(device, "set_brightness", { brightness: briVal }, `屏幕亮度已设为 ${briVal}%`)}
-                                  >
-                                    应用
-                                  </button>
-                                </div>
-                              </div>
-                              <div className="voice-device-control-item">
-                                <span className="voice-device-control-label">
-                                  <span>屏幕主题与激光预览投屏</span>
-                                </span>
-                                <div className="voice-actions">
-                                  <button
-                                    type="button"
-                                    className={`btn btn-ghost${controls.theme === "dark" ? " is-active" : ""}`}
-                                    disabled={Boolean(asking) || !online || !controls.canTheme}
-                                    onClick={() => sendDeviceControl(device, "set_theme", { theme: "dark" }, "已切换为深色主题")}
-                                  >
-                                    深色屏
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={`btn btn-ghost${controls.theme === "light" ? " is-active" : ""}`}
-                                    disabled={Boolean(asking) || !online || !controls.canTheme}
-                                    onClick={() => sendDeviceControl(device, "set_theme", { theme: "light" }, "已切换为浅色主题")}
-                                  >
-                                    浅色屏
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn btn-primary"
-                                    disabled={Boolean(asking) || !online}
-                                    title={
-                                      controls.screenMonochrome === true
-                                        ? "已识别为单色 OLED 官方固件：将把最新雕刻预览的材料、尺寸、功率与速度作为滚动文字预览卡投送到 OLED 屏"
-                                        : controls.canPreviewImage
-                                          ? "已识别为彩屏：将把最近生成的激光雕刻预览缩略图推送到小智屏幕上显示"
-                                          : "彩屏推送 PNG 缩略图，普通单色 OLED 自动适配推送滚动参数预览卡（无需改官方固件）"
-                                    }
-                                    onClick={() =>
-                                      sendDeviceControl(
-                                        device,
-                                        "push_preview",
-                                        undefined,
-                                        controls.screenMonochrome === true
-                                          ? "已将雕刻预览参数卡推送到小智 OLED 屏幕滚动显示"
-                                          : "已将最新雕刻预览推送到小智屏幕",
-                                      )
-                                    }
-                                  >
-                                    {controls.screenMonochrome === true ? "投送预览参数卡" : "投送雕刻预览"}
-                                  </button>
-                                </div>
-                              </div>
-                              <div className="voice-device-control-item">
-                                <span className="voice-device-control-label">
-                                  <span>按键拾音模式（排风抗噪）</span>
-                                  <span className="voice-muted mono">
-                                    {controls.talkMode === "press_to_talk" ? "长按说话" : "单击唤醒"}
-                                  </span>
-                                </span>
-                                <div className="voice-actions">
-                                  <button
-                                    type="button"
-                                    className={`btn btn-ghost${controls.talkMode === "click_to_talk" ? " is-active" : ""}`}
-                                    disabled={Boolean(asking) || !online || !controls.canPressToTalk}
-                                    title="安静环境推荐：短按 BOOT 键或说唤醒词即可连续对话"
-                                    onClick={() =>
-                                      sendDeviceControl(
-                                        device,
-                                        "set_talk_mode",
-                                        { mode: "click_to_talk" },
-                                        "已切换为「单击唤醒」模式（已同步写入设备 NVS 与上位机记忆）",
-                                      )
-                                    }
-                                  >
-                                    单击唤醒
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={`btn btn-ghost${controls.talkMode === "press_to_talk" ? " is-active" : ""}`}
-                                    disabled={Boolean(asking) || !online || !controls.canPressToTalk}
-                                    title="激光雕刻排风/气泵轰鸣时推荐：按住 BOOT 键说话、松手立即判停，彻底隔绝环境噪音误触发"
-                                    onClick={() =>
-                                      sendDeviceControl(
-                                        device,
-                                        "set_talk_mode",
-                                        { mode: "press_to_talk" },
-                                        "已切换为「长按说话（抗噪）」模式：按住设备按键说话，松手即停",
-                                      )
-                                    }
-                                  >
-                                    长按说话（抗噪）
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                            {controlNotice[device.device_id] && (
-                              <div className="voice-ok" style={{ marginTop: 6 }}>{controlNotice[device.device_id]}</div>
-                            )}
-                          </div>
+                      <td>
+                        {editing.id === device.device_id ? (
+                          <span className="voice-actions">
+                            <input className="text-input" value={editing.name} maxLength={32} onChange={(e) => setEditing({ id: device.device_id, name: e.target.value })} aria-label="设备名称" />
+                            <button type="button" className="btn btn-ghost" onClick={saveName} title="保存设备名称">
+                              <Check size={13} />
+                            </button>
+                            <button type="button" className="btn btn-ghost" onClick={() => setEditing({ id: "", name: "" })} title="取消">
+                              <X size={13} />
+                            </button>
+                          </span>
+                        ) : (
+                          <>
+                            <b>{view.title}</b>
+                            {device.name && <div className="voice-muted mono">{device.device_id}</div>}
+                            {online && <div className="voice-ok">在线</div>}
+                          </>
                         )}
-                        <p className="voice-muted">
-                          设备信息：版本与芯片来自设备开机上报，协议与音频参数来自连接握手；「刷新信息」只更新实时状态。回声消除不在本面板断言——固件只在启用服务端 AEC 时才上报 `aec` 字段，设备端 AEC 不上报。
-                        </p>
-                        <table className="voice-table">
-                          <tbody>
-                            {details.rows.map(([label, value]) => (
-                              <tr key={label}>
-                                <th scope="row">{label}</th>
-                                <td className="mono">{value}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      </td>
+                      <td>
+                        {device.model || "—"}
+                        <div className="voice-muted">{device.firmware_version || "—"}</div>
+                      </td>
+                      <td className="mono">{formatTime(device.last_seen)}</td>
+                      <td>
+                        <span className={`ob-pill ${TONE_CLASS[view.tone]}`}>{view.text}</span>
+                      </td>
+                      <td>
                         <span className="voice-actions">
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            disabled={Boolean(asking) || !online}
-                            onClick={() => refreshDeviceInfo(device)}
-                            title="让设备重新上报实时状态（音量、屏幕、电池、网络）"
-                          >
-                            刷新信息
+                          {view.canAllow && (
+                            <button type="button" className="btn btn-primary" disabled={Boolean(busy)} onClick={() => allow(device)}>
+                              <ShieldCheck size={13} /> 允许
+                            </button>
+                          )}
+                          {view.canRevoke && (
+                            <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => revoke(device)}>
+                              <ShieldOff size={13} /> 撤销
+                            </button>
+                          )}
+                          <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => setEditing({ id: device.device_id, name: device.name || "" })} title="修改名称">
+                            <Pencil size={13} />
                           </button>
                           <button
                             type="button"
                             className="btn btn-ghost"
-                            disabled={Boolean(asking) || !online}
-                            onClick={() => rebootDevice(device)}
-                            title="重启设备，让它重新上报固件版本"
+                            disabled={Boolean(busy)}
+                            onClick={() => setExpanded(expanded === device.device_id ? "" : device.device_id)}
+                            title="展开这台设备的在线快捷控制（音量、亮度、深浅屏、按键拾音、投送预览）与设备信息"
                           >
-                            重启设备
+                            {expanded === device.device_id ? "收起" : "控制与信息"}
                           </button>
                         </span>
                       </td>
                     </tr>
-                  )}
-                  </React.Fragment>
-                );
-              })
-            )}
-          </tbody>
-        </table>
+                    {expanded === device.device_id && (
+                      <tr>
+                        <td colSpan={5}>
+                          {device.status === "allowed" && (
+                            <div className="voice-device-controls" id={`voice-device-controls-${device.device_id}`}>
+                              <div className="voice-device-controls-head">
+                                <span className="voice-actions">
+                                  <b>小智硬件在线快捷控制</b>
+                                  {controls.screenResolution && (
+                                    <span className="ob-pill ob-pill--info voice-tag mono">
+                                      {controls.screenResolution}
+                                      {controls.screenMonochrome === true ? " OLED" : " 彩屏"}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="voice-muted">
+                                  {online
+                                    ? "调节后自动记忆偏好（静音 0% / 息屏 0% / 按键模式在设备断电重连后自动恢复）"
+                                    : "设备离线（上线后可即时调节音量、亮度、深浅色主题、按键抗噪模式与投送雕刻预览）"}
+                                </span>
+                              </div>
+                              <div className="voice-device-controls-grid">
+                                <div className="voice-device-control-item">
+                                  <span className="voice-device-control-label">
+                                    <span>扬声器音量</span>
+                                    <b className="mono">{volVal}%</b>
+                                  </span>
+                                  <div className="voice-actions">
+                                    <input
+                                      type="range"
+                                      min="0"
+                                      max="100"
+                                      step="5"
+                                      value={volVal}
+                                      disabled={Boolean(asking) || !online || !controls.canVolume}
+                                      onChange={(e) =>
+                                        setControlDrafts((prev) => ({
+                                          ...prev,
+                                          [device.device_id]: { ...(prev[device.device_id] || {}), volume: Number(e.target.value) },
+                                        }))
+                                      }
+                                      aria-label="设备音量"
+                                    />
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      disabled={Boolean(asking) || !online || !controls.canVolume}
+                                      onClick={() => sendDeviceControl(device, "set_volume", { volume: volVal }, `音量已设为 ${volVal}%（重连自动保持）`)}
+                                    >
+                                      应用
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      disabled={Boolean(asking) || !online || !controls.canVolume}
+                                      onClick={() => {
+                                        setControlDrafts((prev) => ({
+                                          ...prev,
+                                          [device.device_id]: { ...(prev[device.device_id] || {}), volume: 0 },
+                                        }));
+                                        sendDeviceControl(device, "set_volume", { volume: 0 }, "已静音（0%，设备重启后 MOSS 会自动恢复静音）");
+                                      }}
+                                    >
+                                      静音
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="voice-device-control-item">
+                                  <span className="voice-device-control-label">
+                                    <span>屏幕亮度</span>
+                                    <b className="mono">{briVal}%</b>
+                                  </span>
+                                  <div className="voice-actions">
+                                    <input
+                                      type="range"
+                                      min="0"
+                                      max="100"
+                                      step="5"
+                                      value={briVal}
+                                      disabled={Boolean(asking) || !online || !controls.canBrightness}
+                                      onChange={(e) =>
+                                        setControlDrafts((prev) => ({
+                                          ...prev,
+                                          [device.device_id]: { ...(prev[device.device_id] || {}), brightness: Number(e.target.value) },
+                                        }))
+                                      }
+                                      aria-label="设备屏幕亮度"
+                                    />
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      disabled={Boolean(asking) || !online || !controls.canBrightness}
+                                      onClick={() => sendDeviceControl(device, "set_brightness", { brightness: briVal }, `屏幕亮度已设为 ${briVal}%`)}
+                                    >
+                                      应用
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="voice-device-control-item">
+                                  <span className="voice-device-control-label">
+                                    <span>屏幕主题与激光预览投屏</span>
+                                  </span>
+                                  <div className="voice-actions">
+                                    <button
+                                      type="button"
+                                      className={`btn btn-ghost${controls.theme === "dark" ? " is-active" : ""}`}
+                                      disabled={Boolean(asking) || !online || !controls.canTheme}
+                                      onClick={() => sendDeviceControl(device, "set_theme", { theme: "dark" }, "已切换为深色主题")}
+                                    >
+                                      深色屏
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`btn btn-ghost${controls.theme === "light" ? " is-active" : ""}`}
+                                      disabled={Boolean(asking) || !online || !controls.canTheme}
+                                      onClick={() => sendDeviceControl(device, "set_theme", { theme: "light" }, "已切换为浅色主题")}
+                                    >
+                                      浅色屏
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      disabled={Boolean(asking) || !online}
+                                      title={
+                                        controls.screenMonochrome === true
+                                          ? "已识别为单色 OLED 官方固件：将把最新雕刻预览的材料、尺寸、功率与速度作为滚动文字预览卡投送到 OLED 屏"
+                                          : controls.canPreviewImage
+                                            ? "已识别为彩屏：将把最近生成的激光雕刻预览缩略图推送到小智屏幕上显示"
+                                            : "彩屏推送 PNG 缩略图，普通单色 OLED 自动适配推送滚动参数预览卡（无需改官方固件）"
+                                      }
+                                      onClick={() =>
+                                        sendDeviceControl(
+                                          device,
+                                          "push_preview",
+                                          undefined,
+                                          controls.screenMonochrome === true
+                                            ? "已将雕刻预览参数卡推送到小智 OLED 屏幕滚动显示"
+                                            : "已将最新雕刻预览推送到小智屏幕",
+                                        )
+                                      }
+                                    >
+                                      {controls.screenMonochrome === true ? "投送预览参数卡" : "投送雕刻预览"}
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="voice-device-control-item">
+                                  <span className="voice-device-control-label">
+                                    <span>按键拾音模式（排风抗噪）</span>
+                                    <span className="voice-muted mono">
+                                      {controls.talkMode === "press_to_talk" ? "长按说话" : "单击唤醒"}
+                                    </span>
+                                  </span>
+                                  <div className="voice-actions">
+                                    <button
+                                      type="button"
+                                      className={`btn btn-ghost${controls.talkMode === "click_to_talk" ? " is-active" : ""}`}
+                                      disabled={Boolean(asking) || !online || !controls.canPressToTalk}
+                                      title="安静环境推荐：短按 BOOT 键或说唤醒词即可连续对话"
+                                      onClick={() =>
+                                        sendDeviceControl(
+                                          device,
+                                          "set_talk_mode",
+                                          { mode: "click_to_talk" },
+                                          "已切换为「单击唤醒」模式（已同步写入设备 NVS 与上位机记忆）",
+                                        )
+                                      }
+                                    >
+                                      单击唤醒
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`btn btn-ghost${controls.talkMode === "press_to_talk" ? " is-active" : ""}`}
+                                      disabled={Boolean(asking) || !online || !controls.canPressToTalk}
+                                      title="激光雕刻排风/气泵轰鸣时推荐：按住 BOOT 键说话、松手立即判停，彻底隔绝环境噪音误触发"
+                                      onClick={() =>
+                                        sendDeviceControl(
+                                          device,
+                                          "set_talk_mode",
+                                          { mode: "press_to_talk" },
+                                          "已切换为「长按说话（抗噪）」模式：按住设备按键说话，松手即停",
+                                        )
+                                      }
+                                    >
+                                      长按说话（抗噪）
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                              {controlNotice[device.device_id] && (
+                                <div className="voice-ok" style={{ marginTop: 6 }}>{controlNotice[device.device_id]}</div>
+                              )}
+                            </div>
+                          )}
+                          <p className="voice-muted">
+                            设备信息：版本与芯片来自设备开机上报，协议与音频参数来自连接握手；「刷新信息」只更新实时状态。回声消除不在本面板断言——固件只在启用服务端 AEC 时才上报 `aec` 字段，设备端 AEC 不上报。
+                          </p>
+                          <table className="voice-table">
+                            <tbody>
+                              {details.rows.map(([label, value]) => (
+                                <tr key={label}>
+                                  <th scope="row">{label}</th>
+                                  <td className="mono">{value}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          <span className="voice-actions">
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              disabled={Boolean(asking) || !online}
+                              onClick={() => refreshDeviceInfo(device)}
+                              title="让设备重新上报实时状态（音量、屏幕、电池、网络）"
+                            >
+                              刷新信息
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              disabled={Boolean(asking) || !online}
+                              onClick={() => rebootDevice(device)}
+                              title="重启设备，让它重新上报固件版本"
+                            >
+                              重启设备
+                            </button>
+                          </span>
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
+    </VoiceGroup>
+  );
+}
 
+/** 副屏预览：小智彩屏画风（点选即存，在线设备不用重连）与 5 个场景试看推送。n69 起是 `screen_card_style` 唯一的编辑处。 */
+export function BuiltinScreenPreview({ builtin }) {
+  const { status, busy, act } = builtin;
+  const [asking, setAsking] = useState("");
+  const [botNotice, setBotNotice] = useState("");
+  const [optimisticStyle, setOptimisticStyle] = useState("");
+  const [lastPushedPose, setLastPushedPose] = useState("");
+  if (!status || status.error) return null;
+
+  const devices = Array.isArray(status.devices) ? status.devices : [];
+  const sessions = Array.isArray(status.sessions) ? status.sessions : [];
+  const savedCardStyle = status.local?.settings?.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud";
+  const currentCardStyle = optimisticStyle || savedCardStyle;
+  const legacyBotGifs = Array.isArray(status.goggle_bot_gifs)
+    ? Object.fromEntries(status.goggle_bot_gifs.filter((item) => item?.id && item?.data_url).map((item) => [item.id, item.data_url]))
+    : (status.goggle_bot_gifs && typeof status.goggle_bot_gifs === "object" ? status.goggle_bot_gifs : {});
+  const styleGifCatalog = status.screen_style_gifs && typeof status.screen_style_gifs === "object"
+    ? status.screen_style_gifs
+    : {};
+  const activeSceneGifs = currentCardStyle === "goggle_bot"
+    ? { ...legacyBotGifs, ...(styleGifCatalog.goggle_bot || {}) }
+    : (styleGifCatalog.moss_hud || {});
+  const onlineColorDevice = devices.find((d) => {
+    if (d.status !== "allowed") return false;
+    const sess = sessions.find((s) => s.device_id === d.device_id);
+    return Boolean(sess && sess.screen_monochrome !== true);
+  }) || null;
+  const styleLabel = SCREEN_CARD_STYLE_OPTIONS.find((item) => item.id === currentCardStyle)?.shortLabel || currentCardStyle;
+
+  const switchCardStyle = async (nextStyle) => {
+    if (nextStyle === currentCardStyle) return;
+    setOptimisticStyle(nextStyle);
+    setBotNotice("");
+    const opt = SCREEN_CARD_STYLE_OPTIONS.find((item) => item.id === nextStyle);
+    const updated = await act("切换卡片画风", () => voiceApi.localSave({ screen_card_style: nextStyle }));
+    if (updated) {
+      setOptimisticStyle("");
+      if (onlineColorDevice && lastPushedPose) {
+        try {
+          await voiceApi.deviceRequest(onlineColorDevice.device_id, "push_bot_pose", {
+            pose: lastPushedPose,
+            style: nextStyle,
+          });
+          setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风，并同步刷新在线小智屏幕预览`);
+          return;
+        } catch {
+          // 若设备刚好断开，不影响画风保存提示
+        }
+      }
+      setBotNotice(`已换成「${opt?.shortLabel || nextStyle}」画风，在线小智不用重连，马上生效`);
+    } else {
+      setOptimisticStyle("");
+    }
+  };
+
+  const pushBotPose = async (pose) => {
+    if (!onlineColorDevice) return;
+    const sceneTitle = currentCardStyle === "goggle_bot" ? (pose.botLabel || pose.label) : (pose.mossLabel || pose.label);
+    setAsking(onlineColorDevice.device_id);
+    setBotNotice("");
+    try {
+      await voiceApi.deviceRequest(onlineColorDevice.device_id, "push_bot_pose", {
+        pose: pose.id,
+        style: currentCardStyle,
+      });
+      setLastPushedPose(pose.id);
+      setBotNotice(`已将「${sceneTitle}」1:1 投送到 ${builtinDeviceView(onlineColorDevice).title}`);
+    } catch (error) {
+      await showAlert(voiceErrorText(error), { title: "投送屏幕预览失败", tone: "error" });
+    } finally {
+      setAsking("");
+    }
+  };
+
+  return (
+    <VoiceGroup
+      id="screen-preview"
+      title="副屏预览（小智彩屏画风）"
+      summary={`当前画风：${styleLabel} · 5 个场景${onlineColorDevice ? " · 可推到小智试看" : ""}`}
+    >
       <div
         className={`voice-bot-showcase ${currentCardStyle === "goggle_bot" ? "voice-bot-showcase--bot" : "voice-bot-showcase--moss"}`}
         id="voice-goggle-bot-card"
@@ -794,7 +850,7 @@ export function BuiltinServicePanel({ builtin }) {
         </details>
         {botNotice && <div className="voice-ok" id="voice-bot-showcase-notice">{botNotice}</div>}
       </div>
-    </div>
+    </VoiceGroup>
   );
 }
 
@@ -1633,7 +1689,7 @@ function BuiltinJevGroup({ builtin }) {
   };
 
   return (
-    <VoiceGroup id="builtin-model-jev" title="OpenRouter · Jev 前置粗筛模型（共享反馈密钥）" summary={builtinJevSummary(status)} dirty={dirty} tab="models">
+    <VoiceGroup id="builtin-model-jev" title={JEV_GROUP_TITLE} summary={builtinJevSummary(status)} dirty={dirty}>
       {localOn && (
         <p className="voice-muted">
           当前已在上方下拉框选用本地 Jev 决策（{sourceView.selectedLocalModel?.label || activeLocalId}）；这里的 OpenRouter 云端配置与密钥作为备用保留，随时可在上方下拉切回。
@@ -1717,15 +1773,16 @@ function BuiltinJevGroup({ builtin }) {
             )}
           </div>
         </div>
-        <label className="voice-check voice-wide">
-          <input
-            type="checkbox"
-            checked={form.voice_enabled}
-            onChange={(e) => update("voice_enabled", e.target.checked)}
-            id="voice-builtin-jev-voice-enabled"
-          />
-          <span>启用内置语音 Jev 智能筛选与提速（也可在上方顶部下拉框直接一键切换；细项开关见“服务 → 语音体验”）</span>
-        </label>
+        {/* n69：语音里用不用 Jev（jev_filter_enabled）只在顶部第 3 栏切换，这里只显示状态；细项在“对话体验” */}
+        <div className="voice-wide voice-inline" id="voice-builtin-jev-voice-state">
+          <span>
+            语音对话里用 Jev 粗筛：<b>{baseline.voice_enabled ? (localOn ? "已开启（用本地模型）" : "已开启（用这里的云端模型）") : "未开启"}</b>
+            <span className="voice-muted">（在本页顶部第 3 栏“Jev 前置粗筛”下拉切换；具体筛哪些在下面“对话体验”里设）</span>
+          </span>
+          <button type="button" className="voice-link-btn" onClick={focusJevSwitch} id="voice-builtin-jev-goto-switch">
+            去顶部切换
+          </button>
+        </div>
         <label className="voice-check voice-wide">
           <input
             type="checkbox"
@@ -1733,7 +1790,7 @@ function BuiltinJevGroup({ builtin }) {
             onChange={(e) => update("feedback_enabled", e.target.checked)}
             id="voice-builtin-jev-feedback-enabled"
           />
-          <span>同时启用雕刻任务加工反馈判断（共用此 OpenRouter 密钥，按契约使用 typesafe/jev-1.13 判断“太焦、太浅、切不透”等调参建议）</span>
+          <span>加工反馈判断（和语音无关的另一项功能：雕完后用这把 OpenRouter 密钥、固定 typesafe/jev-1.13 判断“太焦、太浅、切不透”并给调参建议；在这里开关、点保存生效）</span>
         </label>
       </div>
       <div className="voice-final mono">最终请求地址：{DEFAULT_JEV_DECISIONS_URL}</div>
@@ -1790,16 +1847,7 @@ export function BuiltinModelGroups({ builtin }) {
   const [mixNote, setMixNote] = useState(null);
   if (!status || status.error) return <p className="voice-muted">{status?.error || "正在读取内置服务状态…"}</p>;
   const views = MIX_SECTIONS.map((item) => ({ ...item, view: builtinSectionSourceView(item.key, status) }));
-  const focusConfigGroup = (groupId, scrollTargetId) => {
-    const header = document.querySelector(`#voice-group-${groupId} > .voice-group-h`);
-    if (header && header.getAttribute("aria-expanded") !== "true") {
-      header.click();
-    }
-    const target = document.getElementById(scrollTargetId || `voice-group-${groupId}`);
-    if (target && typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  };
+  const focusConfigGroup = focusVoiceGroup;
 
   const handleSelectSource = async (section, label, nextValue) => {
     if (section === "llm") {
@@ -1820,7 +1868,7 @@ export function BuiltinModelGroups({ builtin }) {
           focusConfigGroup("builtin-model-jev", "voice-group-builtin-model-jev");
           setMixNote({
             ok: false,
-            text: "尚未配置 OpenRouter API Key：已为你展开下方“OpenRouter · Jev 前置粗筛与反馈模型”，填入密钥测试并保存后即可在此直接下拉切换。",
+            text: `尚未配置 OpenRouter API Key：已为你展开下方“${JEV_GROUP_TITLE}”，填入密钥测试并保存后即可在此直接下拉切换。`,
           });
         }
         return;
@@ -1933,15 +1981,21 @@ export function BuiltinModelGroups({ builtin }) {
           </div>
         )}
         <span className="voice-muted">
-          按真实语音链路从左到右排列：拾音判停 → 语音识别 → Jev 前置粗筛（识别后·进大模型前） → 大模型 → 语音合成；直接下拉选完立即生效，下方卡片用于配置对应项密钥、模型版本与下载本地模型。
+          按真实语音链路从左到右排列：拾音判停 → 语音识别 → Jev 前置粗筛（识别后·进大模型前） → 大模型 → 语音合成；直接下拉选完立即生效，这里是切换“用哪个模型、开不开 Jev”的唯一位置。下方卡片只用于填密钥、选模型版本和下载本地模型。
         </span>
       </div>
+      <h3 className="voice-section-h">云端模型（密钥只存本机）</h3>
       <BuiltinModelGroup section="asr" builtin={builtin} />
-      <BuiltinJevGroup builtin={builtin} />
       <BuiltinModelGroup section="llm" builtin={builtin} />
       <BuiltinModelGroup section="tts" builtin={builtin} />
     </>
   );
+}
+
+/** Jev 云端配置（高级）：n69 起排在语音识别 / 大模型 / 语音合成 / 视觉理解之后，由语音中心页单独摆放。 */
+export function BuiltinJevModelGroup({ builtin }) {
+  if (!builtin.status || builtin.status.error) return null;
+  return <BuiltinJevGroup builtin={builtin} />;
 }
 
 /**
@@ -2045,7 +2099,7 @@ export function LocalModelsGroup({ builtin }) {
   };
 
   return (
-    <VoiceGroup id="local-models" title="本地模型（断网可用）" summary={on.length ? `已开启：${on.join("、")}` : "未开启"} dirty={dirty}>
+    <VoiceGroup id="local-models" title="本地模型包、本地合成音色与下载地址" summary={on.length ? `已开启：${on.join("、")}` : "未开启"} dirty={dirty}>
       <div id="voice-local-models" className="voice-stack">
         {!local.helper_found && (
           <div className="voice-hint voice-hint--warn">没有找到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录）。可以先下载模型，但打开本地开关后内置服务将无法启动。</div>
@@ -2158,7 +2212,7 @@ export function LocalModelsGroup({ builtin }) {
                   ? `当前在顶部已选用：${models.find((m) => m.id === canonicalLocalJevModel(form.jev_model))?.label || form.jev_model}`
                   : form.jev_filter_enabled
                     ? `当前在顶部使用：云端 Jev（${form.jev_model}）`
-                    : "当前在顶部未启用（可在顶部第 3 栏下拉或下方已下载行直接点“选用”）"}
+                    : "当前在顶部未启用（已下载的模型在顶部第 3 栏下拉里选用）"}
               </span>
             </div>
             {local.onejev_env?.summary && (
@@ -2223,26 +2277,6 @@ export function LocalModelsGroup({ builtin }) {
                         form.jev_filter_enabled && canonicalLocalJevModel(form.jev_model) === model.id,
                       );
                       const isOneJevRow = model.id !== "laya_multilingual";
-                      const handleUseLocalJev = async () => {
-                        builtin.setBusy(`local-use-${model.id}`);
-                        try {
-                          const next = await voiceApi.localSave({
-                            jev_filter_enabled: true,
-                            jev_model: model.id,
-                          });
-                          const nextForm = localSettingsForm(next.local?.settings);
-                          builtin.setStatus(next);
-                          setDraft(nextForm);
-                          setResult({
-                            ok: true,
-                            text: `已选用本地决策模型“${model.label}” · ${restartEffect(next)}`,
-                          });
-                        } catch (err) {
-                          setResult({ ok: false, text: `选用失败：${voiceErrorText(err)}` });
-                        } finally {
-                          builtin.setBusy("");
-                        }
-                      };
                       const handleDownloadJev = async () => {
                         setPending((prev) => ({ ...prev, [model.id]: "下载模型" }));
                         try {
@@ -2304,15 +2338,16 @@ export function LocalModelsGroup({ builtin }) {
                           </td>
                           <td>
                             <span className="voice-actions">
+                              {/* n69：和其他本地模型一样只在顶部下拉里选用，这里不再另设“选用”按钮写同一个开关 */}
                               {Boolean(model.installed) && !chosen && (
                                 <button
                                   type="button"
-                                  className="btn btn-ghost"
-                                  disabled={Boolean(busy)}
-                                  onClick={handleUseLocalJev}
-                                  id={`voice-local-use-${model.id}`}
+                                  className="voice-link-btn"
+                                  onClick={focusJevSwitch}
+                                  title="Jev 用哪个模型只在本页顶部第 3 栏“Jev 前置粗筛”下拉里切换"
+                                  id={`voice-local-pick-${model.id}`}
                                 >
-                                  选用
+                                  去顶部选用
                                 </button>
                               )}
                               {view.canDownload && (
@@ -2454,7 +2489,10 @@ function CustomPersonaEditor({ value, onChange, onRemove }) {
   );
 }
 
-/** 语音体验：快捷查询、热词、自然插话。 */
+/**
+ * 对话体验：说话角色、快捷查询、热词与纠偏、Jev 细项、插话。
+ * n69：小智彩屏画风只在“设备 › 副屏预览”切换、Jev 开关只在顶部第 3 栏切换，这里各显示一行状态和跳转按钮。
+ */
 export function ExperienceGroup({ builtin }) {
   const group = useLocalGroup(builtin, EXPERIENCE_KEYS, experienceSettingsError);
   const { baseline, draft: form, update, dirty, error, result } = group;
@@ -2468,6 +2506,8 @@ export function ExperienceGroup({ builtin }) {
   const jevKeyConfigured = isLocalJev
     ? localJevInstalled
     : Boolean(builtin.status?.jev?.key_set || builtin.status?.jev?.openrouter_llm_key_set || builtin.status?.local?.jev_key_configured);
+  const jevOn = Boolean(baseline.jev_filter_enabled);
+  const cardStyleLabel = SCREEN_CARD_STYLE_OPTIONS.find((opt) => opt.id === (baseline.screen_card_style || "moss_hud"))?.shortLabel || "硬核太空舱";
   const jevActive = Boolean(baseline.jev_filter_enabled && (baseline.jev_unfinished_hold || (baseline.read_only_shortcuts && baseline.jev_fast_route) || baseline.jev_tool_prune || baseline.jev_memory_filter));
   const styleLabel = personaOptions(baseline.custom_personas).find((opt) => opt.id === (baseline.persona_style || "workshop"))?.label?.replace(/（.*）$/, "") || "简明工坊助手";
   const corrCount = String(baseline.custom_asr_corrections || "").split(/\r?\n/).filter((w) => w.trim()).length;
@@ -2476,12 +2516,11 @@ export function ExperienceGroup({ builtin }) {
     baseline.read_only_shortcuts ? "快捷查询开" : "快捷查询关",
     baseline.asr_homophone_fix !== false ? `同音纠偏开${corrCount ? `(+${corrCount})` : ""}` : "同音纠偏关",
     baseline.screen_preview_sync !== false ? "小智屏预览同步开" : "小智屏预览同步关",
-    baseline.screen_card_style === "goggle_bot" ? "可爱小机器人画风" : "硬核太空舱画风",
     jevActive ? "Jev 筛选开" : "Jev 筛选关",
     baseline.barge_in ? "插话开" : "插话关",
   ].join(" · ");
   return (
-    <VoiceGroup id="experience" title="语音体验" summary={summary} dirty={dirty}>
+    <VoiceGroup id="experience" title="角色、快捷查询、热词纠偏与插话" summary={summary} dirty={dirty}>
       <p className="voice-muted">停止词整句命中时立即请求急停，不能关闭；设备是否停下仍需确认。</p>
       <div className="voice-form-grid">
         <label className="voice-wide">
@@ -2538,21 +2577,15 @@ export function ExperienceGroup({ builtin }) {
           />
           <span>生成激光预览及加工发送期间，自动同步到在线小智屏幕（彩屏 1:1 点对点显示加粗刀路预览与太空舱实时进度副屏 HUD，单色 OLED 显示滚动参数卡；日常聊天不触发，默认开）</span>
         </label>
-        <label className="voice-wide">
-          <span>小智彩屏卡片视觉画风（不刷机、不擦写设备 Flash；预览、实时进度、待电脑审批、5 秒完工庆祝与本地音乐卡同步切换）</span>
-          <select
-            className="select-input"
-            value={form.screen_card_style || "moss_hud"}
-            onChange={(e) => update("screen_card_style", e.target.value)}
-            id="voice-screen-card-style"
-          >
-            {SCREEN_CARD_STYLE_OPTIONS.map((opt) => (
-              <option key={opt.id} value={opt.id}>
-                {opt.label} — {opt.hint}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="voice-wide voice-inline" id="voice-screen-card-style-state">
+          <span>
+            小智彩屏画风：<b>{cardStyleLabel}</b>
+            <span className="voice-muted">（在“设备 › 副屏预览”点选即生效，可先看 5 个场景再选）</span>
+          </span>
+          <button type="button" className="voice-link-btn" onClick={() => gotoVoiceGroup("devices", "screen-preview")} id="voice-screen-card-style-goto">
+            去副屏预览
+          </button>
+        </div>
         <label className="voice-check voice-wide">
           <input
             type="checkbox"
@@ -2568,13 +2601,16 @@ export function ExperienceGroup({ builtin }) {
           <input type="checkbox" checked={form.asr_beam_search} onChange={(e) => update("asr_beam_search", e.target.checked)} id="voice-asr-beam" />
           <span>X-ASR 热词识别（默认开；识别较慢时可关闭）</span>
         </label>
-        <label className="voice-check voice-wide">
-          <input type="checkbox" checked={form.jev_filter_enabled} onChange={(e) => update("jev_filter_enabled", e.target.checked)} id="voice-jev-filter-enabled" />
+        <div className="voice-wide voice-inline" id="voice-jev-filter-state">
           <span title={`使用 ${isLocalJev ? `本地决策模型 (${activeLocalJevId})` : `OpenRouter Decisions（${selectedJevModel}）`} 在单次请求中并发执行断句、快答分流与上下文/工具剪枝；只做信息筛选，绝不授权任何机器动作。`}>
-            Jev 智能信息筛选与提速（默认关；{isLocalJev ? `当前选用本地 ${activeLocalJevId}` : `当前选用 ${selectedJevModel}`}，只做信息筛选不授权动作）
+            Jev 智能信息筛选与提速：<b>{jevOn ? (isLocalJev ? `已开启（本地 ${activeLocalJevId}）` : `已开启（${selectedJevModel}）`) : "未开启"}</b>
+            <span className="voice-muted">（默认关；只做信息筛选不授权动作；开关在本页顶部第 3 栏，下面细项开启后才显示）</span>
           </span>
-        </label>
-        {form.jev_filter_enabled && (
+          <button type="button" className="voice-link-btn" onClick={focusJevSwitch} id="voice-jev-filter-goto">
+            去顶部切换
+          </button>
+        </div>
+        {jevOn && (
           <div className="voice-wide voice-stack" id="voice-jev-suboptions">
             <div className={`voice-hint ${jevKeyConfigured ? "" : "voice-hint--bad"}`}>
               {isLocalJev
@@ -2583,7 +2619,7 @@ export function ExperienceGroup({ builtin }) {
                   : `本地决策模型（${activeLocalJevId}）尚未下载：请前往“本地模型（断网可用）”下载，未就绪时自动回退常规对话链路。`
                 : jevKeyConfigured
                   ? `已就绪 OpenRouter API Key（当前语音粗筛模型 ${selectedJevModel}）；单次请求并发筛选，超时或限流时自动无感回退常规链路。`
-                  : `尚未配置 OpenRouter API Key：请前往“模型与服务 → OpenRouter · Jev 前置粗筛模型”保存密钥；未配置时自动回退常规对话链路。`}
+                  : `尚未配置 OpenRouter API Key：请到本标签上方“${JEV_GROUP_TITLE}”保存密钥；未配置时自动回退常规对话链路。`}
             </div>
             <label className="voice-check voice-wide">
               <input type="checkbox" checked={form.jev_unfinished_hold} onChange={(e) => update("jev_unfinished_hold", e.target.checked)} id="voice-jev-unfinished" />
@@ -2633,12 +2669,11 @@ export function ExperienceGroup({ builtin }) {
         </label>
       </div>
       {dirty && error && <div className="voice-hint voice-hint--bad">{error}</div>}
-      <SaveBar id="voice-experience-save" target="语音体验设置" dirty={dirty} busy={Boolean(busy)} saving={busy === "local-save-语音体验设置"} blocked={error ? "请先改正上面的错误" : ""} result={result} onSave={() => group.save("语音体验设置")} />
+      <SaveBar id="voice-experience-save" target="对话体验设置" dirty={dirty} busy={Boolean(busy)} saving={busy === "local-save-对话体验设置"} blocked={error ? "请先改正上面的错误" : ""} result={result} onSave={() => group.save("对话体验设置")} />
     </VoiceGroup>
   );
 }
 
-/** 最近 20 轮对话各环节耗时（只在内存）。 */
 /** 默认关闭、仅存本机内存（关闭或重启即清）的实时对话识别与工具调用排障面板，支持划词一键加入纠错或热词。 */
 export function LiveDebugTraces({ builtin }) {
   const status = builtin?.status;
@@ -2720,7 +2755,7 @@ export function LiveDebugTraces({ builtin }) {
       const nextRules = [...current.filter((item) => !String(item).startsWith(`${wrong}=`)), `${wrong}=${right}`];
       const next = await voiceApi.localSave({ custom_asr_corrections: nextRules });
       if (next && builtin?.setStatus) builtin.setStatus(next);
-      setFeedback(`已添加同音纠偏：${wrong} → ${right}`);
+      setFeedback(`已添加同音纠偏：${wrong} → ${right}（列表在“模型 › 对话体验”里管理）`);
       setSelectedWord("");
       setRightWord("");
     } catch (error) {
@@ -2742,7 +2777,7 @@ export function LiveDebugTraces({ builtin }) {
       const nextWords = current.includes(word) ? current : [...current, word];
       const next = await voiceApi.localSave({ custom_hotwords: nextWords });
       if (next && builtin?.setStatus) builtin.setStatus(next);
-      setFeedback(`已加入自定义热词：${word}`);
+      setFeedback(`已加入自定义热词：${word}（列表在“模型 › 对话体验”里管理）`);
       setSelectedWord("");
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "添加热词失败", tone: "error" });
@@ -2825,6 +2860,7 @@ export function LiveDebugTraces({ builtin }) {
             <button type="button" className="btn btn-ghost" onClick={() => setSelectedWord("")}>
               取消
             </button>
+            <span className="voice-muted voice-debug-note">这里只是顺手加一条；纠偏表和热词的完整列表在“模型 › 对话体验”里查看、修改和删除。</span>
           </div>
         )}
         {!enabled ? (
@@ -2925,59 +2961,6 @@ export function LiveDebugTraces({ builtin }) {
             ))}
           </div>
         )}
-      </div>
-    </VoiceGroup>
-  );
-}
-
-export function TurnTimings({ timings }) {
-  const items = voiceTimingReport(timings);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(items, null, 2));
-      await showAlert("耗时数据已复制", { title: "已复制", tone: "success" });
-    } catch {
-      await showAlert("无法访问剪贴板，请检查浏览器权限", { title: "复制失败", tone: "error" });
-    }
-  };
-  return (
-    <VoiceGroup id="turn-timings" title="最近对话耗时" summary={items.length ? `${items.length} 轮` : "暂无"}>
-      <div id="voice-turn-timings" className="voice-stack">
-        <p className="voice-muted">最近 50 轮，只在内存（退出 MOSS 清空，服务重启不清空），不含对话内容。时间从本轮开始拾音算起。</p>
-        <span className="voice-actions">
-          <button type="button" className="btn btn-ghost" onClick={copy} disabled={!items.length} id="voice-timings-copy">复制耗时数据</button>
-        </span>
-        {items.map((item, index) => (
-          <details key={index} open={index === 0}>
-            <summary>
-              第 {item.turn} 轮 · {voiceOutcomeLabel(item.outcome).text} · {item.models.join(" / ")}
-            </summary>
-            <div className="voice-table-wrap">
-              <table className="voice-table">
-                <thead>
-                  <tr>
-                    <th>阶段</th>
-                    <th>毫秒</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(item.stages).map(([stage, ms]) => (
-                    <tr key={stage}>
-                      <td>{VOICE_TIMING_STAGES[stage] || stage}</td>
-                      <td>{ms}</td>
-                    </tr>
-                  ))}
-                  {item.tools.map((tool, i) => (
-                    <tr key={`tool-${i}`}>
-                      <td>工具 {tool.name}</td>
-                      <td>{tool.ms}（调用耗时）</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
-        ))}
       </div>
     </VoiceGroup>
   );

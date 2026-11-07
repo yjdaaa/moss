@@ -36,8 +36,6 @@ export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl,
   return resolveUrl(`/preview?path=${encodeURIComponent(imageFile)}`);
 }
 
-const ENGRAVING_MODE_LABELS = { raster: "光栅填充", outline: "轮廓扫描", cut: "边缘切割" };
-
 export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) {
   // Connection state
   const [connectionMode, setConnectionMode] = useState(
@@ -1098,15 +1096,46 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 <div className="wb-origin-note" id="wb-origin-note">{dimensions.originNote}</div>
               )}
 
-              <button
-                type="button"
-                className="btn btn-ghost twin-jump-btn"
-                onClick={() => onNavigate("/twin")}
-                id="btn-open-twin"
-              >
-                <Box size={14} />
-                <span>进入 3D 数字孪生舱 (刀路仿真 / 实机遥测)</span>
-              </button>
+              {/* 生成与下发按钮放在监视舱刀路摘要下方，与孪生入口同一行（2026-11-07 用户反馈“布局还长了”，
+                  撤掉底部悬浮操作栏，不额外增加页面高度） */}
+              <div className="wb-dispatch-actions" id="wb-dispatch-actions" role="toolbar" aria-label="生成与下发">
+                <button type="button" className="btn btn-hud-primary" onClick={handleGeneratePreview} disabled={busy}>
+                  <Cpu size={15} aria-hidden="true" />
+                  <span>{busy ? "正在解算..." : currentWorkflow ? "重新生成轨迹" : "计算加工轨迹"}</span>
+                </button>
+                {(() => {
+                  const canResume = canResumeJob(sendProgress, overlayStatus);
+                  return (
+                    <button
+                      type="button"
+                      className={`btn ${currentWorkflow ? "btn-hud-fire" : "btn-ghost"}${canResume ? " btn-resume" : ""}`}
+                      onClick={canResume ? handleResumeSend : handleConfirmSend}
+                      disabled={busy || !currentWorkflow || overlayStatus === "running"}
+                    >
+                      <Flame size={16} aria-hidden="true" />
+                      <span>
+                        {overlayStatus === "running"
+                          ? "JobWorker 正在下发中..."
+                          : canResume
+                          ? formatResumeActionLabel(sendProgress)
+                          : currentWorkflow
+                          ? "启动 JobWorker 逐行下发"
+                          : "待计算加工轨迹"}
+                      </span>
+                    </button>
+                  );
+                })()}
+                <button
+                  type="button"
+                  className="btn btn-ghost twin-jump-btn"
+                  onClick={() => onNavigate("/twin")}
+                  id="btn-open-twin"
+                  title="进入 3D 数字孪生舱（刀路仿真 / 实机遥测）"
+                >
+                  <Box size={14} aria-hidden="true" />
+                  <span>3D 孪生</span>
+                </button>
+              </div>
 
               {/* 大号醒目急停安全制动按钮 */}
               <button
@@ -1203,45 +1232,6 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
       </WorkbenchCanvas>
 
-      {/* 底部操作栏（2026-11-07 用户决定“布局再优化”）：生成与下发按钮固定在窗口底部，
-          小窗口也不用滚到左栏最下面才找得到；卡片仍可自由拖动。 */}
-      <div className="wb-action-bar" id="wb-action-bar" role="toolbar" aria-label="生成与下发">
-        <div className="wb-action-buttons">
-          <button className="btn btn-hud-primary" onClick={handleGeneratePreview} disabled={busy}>
-            <Cpu size={16} aria-hidden="true" />
-            <span>{busy ? "正在解算..." : currentWorkflow ? "重新生成轨迹" : "计算加工轨迹"}</span>
-          </button>
-          {(() => {
-            const canResume = canResumeJob(sendProgress, overlayStatus);
-            return (
-              <button
-                className={`btn ${currentWorkflow ? "btn-hud-fire" : "btn-ghost"}${canResume ? " btn-resume" : ""}`}
-                onClick={canResume ? handleResumeSend : handleConfirmSend}
-                disabled={busy || !currentWorkflow || overlayStatus === "running"}
-              >
-                <Flame size={17} aria-hidden="true" />
-                <span>
-                  {overlayStatus === "running"
-                    ? "JobWorker 正在下发中..."
-                    : canResume
-                    ? formatResumeActionLabel(sendProgress)
-                    : currentWorkflow
-                    ? "启动 JobWorker 逐行下发"
-                    : "待计算加工轨迹"}
-                </span>
-              </button>
-            );
-          })()}
-        </div>
-        <div className="wb-action-summary" aria-live="polite">
-          <span>{selectedMaterial || "未选材料"} · {selectedThickness} mm · {ENGRAVING_MODE_LABELS[engravingMode] || engravingMode}</span>
-          <span className="wb-action-summary-meta">
-            {currentWorkflow
-              ? `${dimensions ? `${dimensions.width.toFixed(1)}×${dimensions.height.toFixed(1)} mm` : "轨迹已生成"}${timeEstimate ? ` · 预估 ${timeEstimate.estimated_seconds}s` : ""}`
-              : "尚未生成轨迹"}
-          </span>
-        </div>
-      </div>
       {/* 底部三标签遥测控制台抽屉 (ConsoleDrawer) */}
       <ConsoleDrawer
         logs={logs}

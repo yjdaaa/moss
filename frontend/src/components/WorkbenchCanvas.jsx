@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { LayoutGrid, Lock, RotateCcw, Unlock } from "lucide-react";
 import {
   COL_GAP, COLS, DEFAULT_LAYOUT, MIN_COLS, MIN_ROWS, ROW_GAP, ROW_UNIT, STORAGE_KEY,
-  clearLayout, clamp, readLayout, reflowVertical, settle, writeLayout,
+  clearLayout, clamp, readLayout, reflowVertical, settle, stackTwoColumns, writeLayout,
 } from "../workbenchLayout.js";
 
 /**
@@ -13,7 +13,8 @@ import {
  * - 与其它卡相交就把它往下推（不允许重叠）；松手写进 localStorage。
  * - 卡片折叠时高度收到标题条那么高，展开恢复用户拖过的行数。
  * - `locked` 打开后禁用拖动与缩放；「还原默认布局」清掉记忆回默认排布。
- * - 窄屏（< 1200px）由 CSS 退回单列堆叠，忽略保存的布局。
+ * - 窄窗口（761–1200px）自动排成两栏（`stackTwoColumns`，只用于显示、不写回记忆，期间暂停拖动）；
+ *   两栏时只能拖上下边框调高度；手机宽度（≤ 760px）由 CSS 退回单列堆叠（2026-11-07 用户决定“可以并排显示 2 个，没必要做竖排”）。
  * 纯逻辑（栅格、让位、读写记忆）在 `src/workbenchLayout.js`，单独有单元测试。
  */
 
@@ -41,6 +42,24 @@ function alignDualColumns(layout, manualHeightSet) {
 
 const WbContext = createContext(null);
 
+/** 与 styles.css 里两栏 / 单列的断点保持一致。 */
+export const TWO_COLUMN_QUERY = "(min-width: 761px) and (max-width: 1200px)";
+
+function useMediaQuery(query) {
+  const getMatch = () => typeof window !== "undefined" && typeof window.matchMedia === "function"
+    && window.matchMedia(query).matches;
+  const [matches, setMatches] = useState(getMatch);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return undefined;
+    const list = window.matchMedia(query);
+    const onChange = () => setMatches(list.matches);
+    onChange();
+    list.addEventListener("change", onChange);
+    return () => list.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 export function WorkbenchCanvas({
   children,
   defaultLayout = DEFAULT_LAYOUT,
@@ -55,6 +74,11 @@ export function WorkbenchCanvas({
   const drag = useRef(null);
   const expandedRows = useRef({}); // 折叠前记下的行数，展开时还原
   const manualHeightIds = useRef(new Set()); // 用户在本轮显式上下拖拽过高度的卡片
+  const twoColumn = useMediaQuery(TWO_COLUMN_QUERY);
+  // 窄窗口只换显示位置；layout 本身（含内容自适应行数）照常更新，拉宽窗口后回到用户的排布
+  const shown = useMemo(() => (twoColumn ? stackTwoColumns(layout) : layout), [twoColumn, layout]);
+  // 两栏时画布换成真正的 2 列网格：48 列网格的 47 道列间距在 960px 窗口下就比画布还宽
+  const split = twoColumn ? Object.values(shown).find((box) => box.x === 0 && box.w < COLS)?.w || COLS / 2 : 0;
 
   // 列宽随容器变化：拖拽时要把像素位移换算成格子，必须用实时宽度
   useEffect(() => {
@@ -155,7 +179,10 @@ export function WorkbenchCanvas({
       width = state.size.width - clampedLeftDx;
       tx = clampedLeftDx;
     }
-    if (dir.includes("n") && !state.isCollapsed) {
+    if (dir.includes("n") && !state.isCollapsed && state.twoColumn) {
+      // 两栏：顶边位置固定，往上拖只把卡片变高（与松手后的结果一致）
+      height = Math.max(minHeightPx, state.size.height - dy);
+    } else if (dir.includes("n") && !state.isCollapsed) {
       const minTopDy = -Math.round(state.origin.y * rowStep);
       const maxTopDy = Math.max(0, state.size.height - minHeightPx);
       const clampedTopDy = clamp(dy, minTopDy, maxTopDy);
@@ -225,7 +252,10 @@ export function WorkbenchCanvas({
         w = origin.w + (origin.x - nextX);
         x = nextX;
       }
-      if (dir.includes("n") && !state.isCollapsed) {
+      if (dir.includes("n") && !state.isCollapsed && state.twoColumn) {
+        // 两栏模式下卡片顶边位置由堆叠决定，拖顶边只改高度（往上拖变高）
+        h = Math.max(minRowsAllowed, origin.h - rows);
+      } else if (dir.includes("n") && !state.isCollapsed) {
         const nextY = clamp(origin.y + rows, 0, origin.y + origin.h - minRowsAllowed);
         h = Math.max(minRowsAllowed, origin.h + (origin.y - nextY));
         y = nextY;
@@ -259,12 +289,14 @@ export function WorkbenchCanvas({
     const inHeader = event.clientY - rect.top < 58;
     const mode = handle ? handle.dataset.wbResize : inHeader ? "move" : "";
     if (!mode) return;
+    // 窄窗口两栏：位置与宽度由自动排布决定，只允许拖上下边框改高度（2026-11-07 用户反馈画板拉不动上下边框）
+    if (twoColumn && mode !== "n" && mode !== "s") return;
     // 收起状态下禁止上下拉高
     if (isCollapsed && (mode.includes("n") || mode.includes("s"))) return;
     if (handle) event.preventDefault();
     drag.current = {
       id, mode, isCollapsed, armed: false, startX: event.clientX, startY: event.clientY,
-      origin: { ...box }, layout, element: cardElement,
+      origin: { ...box }, layout, element: cardElement, twoColumn,
       size: { width: cardElement.offsetWidth, height: cardElement.offsetHeight },
       dx: 0, dy: 0,
     };
@@ -311,17 +343,20 @@ export function WorkbenchCanvas({
   };
 
   const cardProps = useCallback((id) => ({
-    style: layout[id]
+    style: shown[id]
       ? {
-          gridColumn: `${layout[id].x + 1} / span ${layout[id].w}`,
-          gridRow: `${layout[id].y + 1} / span ${layout[id].h}`,
+          gridColumn: twoColumn
+            ? (shown[id].w >= COLS ? "1 / -1" : shown[id].x === 0 ? "1" : "2")
+            : `${shown[id].x + 1} / span ${shown[id].w}`,
+          gridRow: `${shown[id].y + 1} / span ${shown[id].h}`,
         }
       : undefined,
-  }), [layout]);
+  }), [shown, twoColumn]);
 
   const context = useMemo(
-    () => ({ cardProps, setCollapsed, fitCardRows, clearManualHeight, locked }),
-    [cardProps, setCollapsed, fitCardRows, clearManualHeight, locked],
+    // 两栏模式只保留上下边框把手（调高度），不能移动、不能改宽
+    () => ({ cardProps, setCollapsed, fitCardRows, clearManualHeight, locked, twoColumn }),
+    [cardProps, setCollapsed, fitCardRows, clearManualHeight, locked, twoColumn],
   );
 
   return (
@@ -330,7 +365,11 @@ export function WorkbenchCanvas({
       <div className="ob-canvas-tools">
         {toolbarStart && <div className="ob-canvas-tools-start">{toolbarStart}</div>}
         <span className="ob-canvas-hint">
-          {!locked && (
+          {twoColumn ? (
+            <>
+              <LayoutGrid size={13} aria-hidden="true" /> 窗口较窄，已自动排成两栏；可拖上下边框调高度，拉宽窗口可移动卡片
+            </>
+          ) : !locked && (
             <>
               <LayoutGrid size={13} aria-hidden="true" /> 拖标题移动 · 拖边框缩放
             </>
@@ -346,8 +385,9 @@ export function WorkbenchCanvas({
         </button>
       </div>
       <div
-        className={`ob-canvas${locked ? " ob-canvas--locked" : ""}`}
+        className={`ob-canvas${locked || twoColumn ? " ob-canvas--locked" : ""}${twoColumn ? " ob-canvas--two" : ""}`}
         ref={canvasRef}
+        style={twoColumn ? { gridTemplateColumns: `minmax(0, ${split}fr) minmax(0, ${COLS - split}fr)` } : undefined}
         onPointerDown={startDrag}
       >
         {children}
@@ -364,6 +404,7 @@ export function WbCard({ id, className, label, children }) {
   const [collapsed, setCollapsedState] = useState(false);
   const style = context ? context.cardProps(id).style : undefined;
   const locked = Boolean(context?.locked);
+  const twoColumn = Boolean(context?.twoColumn);
   const setCollapsed = context?.setCollapsed;
   const fitCardRows = context?.fitCardRows;
   const clearManualHeight = context?.clearManualHeight;
@@ -414,7 +455,7 @@ export function WbCard({ id, className, label, children }) {
     }
   }, [id, clearManualHeight, fitCardRows]);
 
-  const activeHandles = collapsed ? ["e", "w"] : HANDLES;
+  const activeHandles = twoColumn ? (collapsed ? [] : ["n", "s"]) : collapsed ? ["e", "w"] : HANDLES;
 
   return (
     <section

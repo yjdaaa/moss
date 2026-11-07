@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   COLS, DEFAULT_LAYOUT, DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY, MIN_ROWS, STORAGE_KEY,
-  clearLayout, collides, normalizeLayout, readLayout, reflowVertical, settle, writeLayout,
+  TWO_COLUMN_MIN, clearLayout, collides, normalizeLayout, readLayout, reflowVertical, settle, stackTwoColumns,
+  writeLayout,
 } from "../src/workbenchLayout.js";
 
 /** 画布上任意两张卡都不允许重叠。 */
@@ -138,4 +139,60 @@ test("收起或调矮上方卡片时，同列下方卡片自动往上贴合；�
   assertNoOverlap(restored, "展开恢复后");
   assert.equal(restored.source.y, DEFAULT_LAYOUT.source.y, "展开后加工内容卡回到原位");
   assert.equal(restored.material.y, DEFAULT_LAYOUT.material.y, "展开后材质卡回到原位");
+});
+
+test("窄窗口两栏：工作台默认排布左栏放宽到 20 列，两栏各自紧贴堆叠且不重叠", () => {
+  const two = stackTwoColumns(DEFAULT_LAYOUT);
+  assertNoOverlap(two, "工作台两栏");
+  for (const id of ["link", "source", "material"]) assert.deepEqual([two[id].x, two[id].w], [0, TWO_COLUMN_MIN], id);
+  for (const id of ["monitor", "feedback"]) assert.deepEqual([two[id].x, two[id].w], [TWO_COLUMN_MIN, COLS - TWO_COLUMN_MIN], id);
+  assert.equal(two.link.y, 0);
+  assert.equal(two.source.y, DEFAULT_LAYOUT.link.h + 1, "上下顺序不变、行距 1 行");
+  assert.equal(two.material.y, two.source.y + DEFAULT_LAYOUT.source.h + 1);
+  assert.equal(two.feedback.y, DEFAULT_LAYOUT.monitor.h + 1);
+  for (const id of Object.keys(DEFAULT_LAYOUT)) assert.equal(two[id].h, DEFAULT_LAYOUT[id].h, `${id} 行数沿用`);
+});
+
+test("创作画板默认排布：画布占满整行，三张设置卡在画布下方并排", () => {
+  const { board } = DRAW_DEFAULT_LAYOUT;
+  assert.deepEqual([board.x, board.w], [0, COLS]);
+  const cards = ["draw-material", "draw-device", "draw-send"].map((id) => DRAW_DEFAULT_LAYOUT[id]);
+  for (const box of cards) assert.equal(box.y, board.y + board.h + 1, "紧贴画布下方");
+  assert.deepEqual(cards.map((box) => box.x), [0, 16, 32]);
+  assert.equal(DRAW_STORAGE_KEY, "moss_draw_layout_v2", "换排布后旧的右侧竖排记忆不再沿用");
+});
+
+test("窄窗口两栏：整行画布仍占满整行，下方三张卡分成两栏", () => {
+  const two = stackTwoColumns(DRAW_DEFAULT_LAYOUT);
+  assertNoOverlap(two, "画板两栏");
+  assert.deepEqual([two.board.x, two.board.y, two.board.w], [0, 0, COLS]);
+  const below = DRAW_DEFAULT_LAYOUT.board.h + 1;
+  assert.deepEqual([two["draw-material"].x, two["draw-material"].y], [0, below]);
+  assert.deepEqual([two["draw-device"].x, two["draw-device"].y], [TWO_COLUMN_MIN, below]);
+  assert.equal(two["draw-send"].x, TWO_COLUMN_MIN);
+  assert.ok(two["draw-send"].y > two["draw-device"].y);
+});
+
+test("窄窗口两栏：整行卡夹在中间时，上下两段各自分栏且不重叠", () => {
+  const two = stackTwoColumns({
+    a: { x: 0, y: 0, w: 20, h: 10 },
+    b: { x: 20, y: 0, w: 28, h: 30 },
+    wide: { x: 0, y: 31, w: 48, h: 12 },
+    c: { x: 0, y: 44, w: 24, h: 10 },
+  });
+  assertNoOverlap(two, "夹整行");
+  assert.equal(two.wide.y, 31, "整行卡排在上一段最高一栏之后");
+  assert.equal(two.c.y, 44);
+});
+
+test("窄窗口两栏：卡片全拖到同一侧或横跨整行时仍分成两栏、不重叠", () => {
+  const oneSide = {
+    a: { x: 0, y: 0, w: 36, h: 12 },
+    b: { x: 0, y: 13, w: 36, h: 20 },
+    c: { x: 0, y: 34, w: 20, h: 15 },
+  };
+  const two = stackTwoColumns(oneSide);
+  assertNoOverlap(two, "同侧");
+  assert.equal(new Set(Object.values(two).map((box) => box.x)).size, 2, "必须分到两栏");
+  assert.deepEqual(stackTwoColumns({}), {});
 });

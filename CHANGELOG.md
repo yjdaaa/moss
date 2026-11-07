@@ -4,12 +4,49 @@
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-11-07
+
+### 窄窗口两栏模式下画板等卡片恢复拖上下边框调高度（2026-11-07）
+
+- **现象**：窗口宽 761–1200px 进入自动两栏后，所有卡片的缩放把手都被隐藏，创作画板拉不动上下边框放大缩小（用户反馈）；宽窗口不受影响。
+- **根因与修复**：两栏模式为避免打乱保存的位置，连同上下把手一起禁用了。现在两栏模式保留 `n` / `s` 把手：拖下边框或往上拖顶边只改卡片高度（顶边位置由两栏堆叠决定，预览也不平移），高度经 `reflowVertical` 写回布局记忆；移动卡片、改宽和角把手仍只在宽窗口可用。
+- **验证**：`tests/workbench-layout.browser.mjs` 第 8 段新增：两栏下只有上下把手、每张卡都有下边框把手；1180 / 960px 下画板拖下边框 +160px 变高、往上拖顶边 120px 变高、拖下边框 −200px 变低，调完仍占满整行；`npm test`、lint、构建与 e2e 见下方提交前检查。未在 Windows / Android 实机上拖过。
+- **关联**：`frontend/src/components/WorkbenchCanvas.jsx`（`startDrag`、`previewDrag`、`onDragEnd`、`WbCard` 的 `activeHandles`）；技术书 r26、`docs/developer/frontend-behavior.md`。
+
+### 语音中心整理：内置服务每个设置只在一处可改，“唤醒词与音量”并入“设备”（2026-11-07）
+
+- **现象**：用户反馈语音中心“MOSS 内置服务”里的东西有点乱、不少设置放的位置不好：服务标签里塞着设备表和副屏预览；扬声器音量有两份（设备快捷控制 + “MOSS 说话音量”）；小智画风在副屏预览和语音体验各能改一次；Jev 开关有顶部混搭栏、Jev 卡片、语音体验、本地 Jev 行“选用”四处；几处说明还指向已经挪走的位置（“服务 → 语音体验”“在‘服务’标签允许设备 / 切换链路”）。
+- **根因与修复**：按用户选的“完整整理”重排（技术书 n69）。标签：“唤醒词与音量”并入“设备”，“设备与工具”改名“设备”，内置链路 7 → 6 个（服务 / 设备 / 模型 / 扩展 / 隐私与家居 / 记录与诊断），官方 5 → 4、自建 6 → 5，三条链路都按 服务 → 设备 → 模型 的顺序；记住的旧标签 `moss_voice_tab = "wake"` 打开时落到“设备”（`normalizeVoiceTab`）。服务标签只剩可折叠的“内置语音服务”组（启停、胶囊、失败原因、OTA / Wi-Fi IP 地址）和端口组；设备标签依次为已连接设备（原设备表与快捷控制，按钮改叫“控制与信息”）→ 唤醒词 → 副屏预览 →（官方 / 自建）接入点状态 → 固件升级；“MOSS 内置工具”挪到扩展、排在第三方 MCP 前；视觉理解挪到模型，模型标签顺序为混搭栏 → 识别 → 大模型 → 合成 → 视觉理解 → “Jev 前置粗筛 · OpenRouter 云端（高级）” → 本地模型 → 对话体验（原“语音体验”）。去重：两份音量发的是同一条 `set_volume` 设备请求，删掉“MOSS 说话音量”；画风只在副屏预览点选即存；核实 Jev 卡片的 `voice_enabled` 在后端写的也是 `jev_filter_enabled`，开关只留顶部第 3 栏，其余三处改为只读状态 + 跳转（加工反馈判断写 `jev_feedback_enabled`，是另一项，保留并改写说明）；`EXPERIENCE_KEYS` 去掉 `screen_card_style` 与 `jev_filter_enabled`，对话体验保存不再携带这两个键。修正指向旧位置的文字，删除没人引用的 `TurnTimings` 与只服务于已删滑块的 `volumeDevicesView` / `volumeLevelText`。不改后端命令、设置键、审批 / 同意流程和隐私与家居标签；唤醒词卡仍只在设备标签打开时挂载，固件组仍懒挂载、逐台确认。
+- **验证**：`npm run lint` 0 error（17 条警告与改前相同）、`npm test` 231 通过（`voiceTabs.test.mjs` 改为新标签顺序并新增 2 例；`voiceState.test.mjs` 新增两键不属于对话体验组的断言，删除 `volumeDevicesView` 用例；`voicePrivacyAcl.test.mjs` 唤醒词 / 固件 / `set_volume` 的结构断言改指向设备标签与 `BuiltinDevicesPanel`，安全含义不变）、`npm run build` 通过；macOS Chrome 下 `voice-center.browser.mjs`（新增各标签内容与顺序、音量不再重复、画风与 Jev 只读跳转、旧标签 `wake` 落到设备等断言）、`voice-center-render.smoke.mjs`（新增 `PLAYWRIGHT_CHANNEL`，固定数据改为内置链路——原官方链路下“音乐卡应显示”的断言在改动前就不成立）、`voiceMcp.browser.mjs`、`voice-context.browser.mjs` 通过。`voice-plugins` / `voice-speaker` 浏览器用例写死 Windows Chrome 路径未跑；未跑 e2e、快更与 Windows / Android 实机界面。
+- **关联**：`frontend/src/pages/VoicePage.jsx`、`frontend/src/components/VoiceBuiltinCard.jsx`（`BuiltinServicePanel`、`BuiltinDevicesPanel`、`BuiltinScreenPreview`、`BuiltinJevModelGroup`、`ExperienceGroup`、`JEV_GROUP_TITLE`）、`frontend/src/components/VoiceWakeWordSection.jsx`（原 `VoiceWakeVolumePanel.jsx`）、`frontend/src/components/VoiceEndpointsCard.jsx`（拆出 `VoiceToolsCard`）、`frontend/src/components/VoiceLayout.jsx`（`gotoVoiceGroup`、`focusVoiceGroup`）、`frontend/src/voiceState.js`（`VOICE_TABS`、`normalizeVoiceTab`、`EXPERIENCE_KEYS`）；内置语音技术书 n69、`docs/developer/frontend-behavior.md`、`docs/user/quick-start.md`；摄像头页空设备提示同步改为「语音中心 → 设备」（`frontend/src/pages/CameraPage.jsx`）；桌面端测试 `sensitive_voice_settings_are_trusted_main_window_only`（`apps/desktop/src-tauri/src/lib.rs`）改读 `VoiceWakeWordSection.jsx` 并断言设备标签挂载唤醒词区块。
+
+### 创作画板画布占满整行，材料 / 设备 / 预览与发送三张卡移到画布下方（2026-11-07）
+
+- **现象**：创作画板默认把三张设置卡竖排在画布右侧，画布只有约 70% 宽，用户反馈“右边的设置可以放到下面，这样画板可以更好绘画”。
+- **根因与修复**：`DRAW_DEFAULT_LAYOUT` 改为画布 48 列 × 62 行（1440×900 下约占满第一屏），三张卡在画布下方各 16 列并排；存储键换成 `moss_draw_layout_v2`，旧的右侧竖排记忆不再沿用（之前在画板上手动拖过的布局会回到新默认）。`stackTwoColumns` 新增 `FULL_ROW_MIN = 40`：窄窗口两栏模式下整行卡仍占满整行，夹在整行卡之间的卡片分段分栏；`WorkbenchCanvas` 给整行卡输出 `grid-column: 1 / -1`。卡片仍可拖动、缩放、折叠；发送确认与急停不变。
+- **验证**：`tests/workbenchLayout.test.mjs` 新增画板默认排布、整行画布两栏、整行卡夹中间 3 个用例（共 13 个通过）；`tests/workbench-layout.browser.mjs` 断言画布 `1 / span 48`、三张卡 `1/17/33 / span 16` 且在画布下方，窄窗口下设置卡在画布下方两栏并排；`npm run lint` 0 error、`npm test` 230 通过、`npm run build` 通过，重编 release `moss-host` 后 `npm run test:e2e` 35 通过。未在 Windows / Android 实机上看过。
+- **关联**：`frontend/src/workbenchLayout.js`（`DRAW_DEFAULT_LAYOUT`、`DRAW_STORAGE_KEY`、`FULL_ROW_MIN`、`stackTwoColumns`）、`frontend/src/components/WorkbenchCanvas.jsx`、`frontend/src/pages/DrawPage.jsx`；技术书 r25 与 §9.5.5 表、`docs/developer/frontend-behavior.md`。
+
+### 窄窗口不再整页竖排：工作台、创作画板、数字孪生在 761–1200px 下自动两栏并排（2026-11-07）
+
+- **现象**：窗口宽度 ≤ 1200px（小屏笔记本、Windows 缩放 125% 以上、窗口没最大化时都会遇到）时，雕刻工作台和创作画板的所有卡片排成一列，数字孪生舱在 ≤ 1180px 时也上下堆叠；1180px 窗口下工作台长 1874px、画板 2503px、孪生 2723px，要一直往下翻。
+- **根因与修复**：原先为避免自由布局在窄屏挤爆，CSS 直接退回单列；实际上 48 列网格的 47 道列间距（752px）在 960px 窗口下就比画布宽。新增 `stackTwoColumns`（按卡片中心分左右两栏、各栏按原顺序紧贴堆叠，窄的一侧至少 20/48 列），`WorkbenchCanvas` 在 761–1200px 用它显示并把画布换成真正的 2 列网格，期间暂停拖动、隐藏缩放把手，不写回布局记忆，拉宽窗口回到用户自己的排布；数字孪生 ≤ 1180px 改为 `minmax(0, 1.35fr) minmax(280px, 1fr)` 两栏；只有 ≤ 760px（手机宽度）才单列。1180px 窗口下三页降到 1284 / 1913 / 2090px，960px 最小窗口下无横向滚动。
+- **验证**：`tests/workbenchLayout.test.mjs` 新增 3 个 `stackTwoColumns` 用例；`tests/workbench-layout.browser.mjs` 新增第 8 段（1180 / 960px 两栏并排且无横向滚动、两栏隐藏把手、700px 单列、拉宽后恢复默认自由布局）；`npm run lint` 0 error（17 条警告与改前相同）、`npm test` 228 通过、`npm run build` 通过；`camera` / `job-dock` / `twin-estop` / `app-update` / `voice-center` 浏览器用例通过；重编 release `moss-host` 后 `npm run test:e2e` 35 通过。未在 Windows 高缩放与 Android 平板上实机看过。
+- **关联**：`frontend/src/workbenchLayout.js`（`stackTwoColumns`、`TWO_COLUMN_MIN`）、`frontend/src/components/WorkbenchCanvas.jsx`（`TWO_COLUMN_QUERY`、`useMediaQuery`）、`frontend/src/styles.css`（`.ob-canvas` 单列断点改为 760px、`.twin-main-grid`）；技术书 r24、`docs/developer/frontend-behavior.md`。
+
 ### 清理 Windows 专属代码的 clippy 警告，避免 Windows 上改代码被零警告规则拦住（2026-11-07）
 
 - **现象**：CI 的 clippy 只在 macOS 上跑，Windows 专属代码一直没检查过；在 Windows 上按 AGENTS.md 跑 `cargo clippy --workspace --all-targets -- -D warnings` 会因这些警告失败（Windows 会话报告约 12 条）。
 - **根因与修复**：`home_secret.rs` `crypt` 给 DPAPI 的只读参数多传了 `&mut`，改为 `&`；`onejev.rs` 的 `safe_intra_dir_symlink_target` 只在 Unix 解压里用，加 `#[cfg(unix)]`；`orphan_llama_pids` 加 `#[cfg(any(target_os = "macos", target_os = "linux", test))]`（单元测试各平台都跑，不能只挂 `unix`）；`windows_process.rs` `environment_block` 改用 `sort_by_key`；`safe_fs.rs` `actual_handle_path` 的 Windows / Linux 分支去掉多余的 `return`；`laser-api` 串口枚举合并两层 `if`。只改写法，行为不变。
 - **验证**：macOS 上 `cargo fmt --all`、`cargo clippy --workspace --all-targets -- -D warnings` 零警告，`cargo test --workspace` 1023 通过 / 0 失败 / 10 忽略。在 macOS 上交叉跑 Windows 目标的 clippy 会卡在 `ring` / `aws-lc-sys` 需要 Windows C 头文件，未能执行；Windows 上是否零警告尚待在 Windows 机器上确认。
 - **关联**：`crates/laser-runtime/src/home_secret.rs`、`crates/moss-voice/src/onejev.rs`、`crates/laser-host/src/voice_agent/windows_process.rs`、`crates/moss-voice-server/src/safe_fs.rs`、`crates/laser-api/src/lib.rs`（`enumerate_system_serial_ports`）。
+
+### 工作台与摄像头页撤回变长的改动：生成 / 下发按钮放回监视舱，摄像头不再按窗口撑满（2026-11-07）
+
+- **现象**：上一条布局优化后，雕刻工作台在 1440×900 下反而从 1368px 变成 1382px，底部悬浮操作栏滚动时盖住“材质与参数”“加工反馈”等卡片；摄像头页在 1440×900 下多出约 30px 滚动，空的设备列表被拉得很长。用户反馈“布局还长了，还不如之前”。
+- **根因与修复**：悬浮栏放在画布下方另占一行（约 80px），并没有省掉高度；摄像头画面区 `min-height` 按 `100vh` 计算时少算了页面上下边距。撤掉 `#wb-action-bar`，两个按钮与原来独占一行的孪生入口合并为监视舱里的一行 `#wb-dispatch-actions`（按钮名称不变，孪生入口缩为“3D 孪生”）；摄像头画面区恢复 `min-height: 560px`。工作台在 1440×900 / 1280×720 下降到 1284 / 1296px，摄像头 1440×900 恢复一屏放下；画板、孪生、顶栏、语音中心的收紧保留。发送门禁、急停位置不变。
+- **验证**：`npm run lint` 0 error（HomePage 警告数不变）、`npm test` 225 通过、`npm run build` 通过；浏览器用例 `workbench-layout`、`camera`、`job-dock`、`twin-estop`、`app-update` 通过；重编 release `moss-host` 后 `npm run test:e2e` 35 通过（含按按钮名点击“计算加工轨迹 / 启动 JobWorker 逐行下发”的 UI-01）；按 1440×900 与 1280×720 截图逐页对比 v0.3.10、上一版与本版。摄像头页在 1280×720 下仍需滚动约 40px（v0.3.10 起即如此）。未在 Windows 与 Android 实机上看过。
+- **关联**：`frontend/src/pages/HomePage.jsx`（`#wb-dispatch-actions`）、`frontend/src/styles.css`（`.wb-dispatch-actions`、`.camera-stage`）；技术书 r23、`docs/developer/frontend-behavior.md`。
 
 ### 布局优化：工作台操作栏常驻底部，顶部与各页标题行收紧，语音中心标签吸顶（2026-11-07）
 

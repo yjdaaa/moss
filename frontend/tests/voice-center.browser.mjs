@@ -299,10 +299,12 @@ try {
 
   await page.goto(new URL("voice", local).href, { waitUntil: "domcontentloaded" });
   await page.locator("#voice-mode-card").waitFor();
-  assert.equal(await page.getByRole("tab").count(), 5, "官方链路没有“模型”和“隐私与家居”标签（有“唤醒词与音量”）");
-  await tab("唤醒词与音量").click();
-  await page.locator("#voice-wake-volume-mode-hint").waitFor();
-  assert.equal(await page.locator("#voice-wake-volume-panel").count(), 0, "非内置链路只提示切换，不渲染音量与唤醒词入口");
+  assert.equal(await page.getByRole("tab").count(), 4, "官方链路只有 服务 / 设备 / 扩展 / 记录与诊断（n69：唤醒词并入设备）");
+  assert.equal(await page.getByRole("tab", { name: /^唤醒词与音量/ }).count(), 0, "“唤醒词与音量”标签已并入“设备”");
+  await tab("设备").click();
+  assert.match(await page.locator("#voice-wake-volume-mode-hint").innerText(), /页面顶部“语音链路”/, "非内置链路提示到顶部语音链路卡片切换");
+  assert.equal(await page.locator("#voice-group-wake-word").count(), 0, "非内置链路只提示切换，不渲染唤醒词入口");
+  assert.equal(await page.locator("#voice-group-builtin-devices").count(), 0, "非内置链路不渲染内置设备列表");
   await tab("服务").click();
   assert.equal(await page.getByRole("tab", { name: /^模型/ }).count(), 0, "官方链路的模型在小智控制台配置");
   assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "非内置链路不显示隐私与家居标签");
@@ -316,9 +318,11 @@ try {
   await shot("voice-official");
   await tab("设备").click();
   assert.ok(await page.locator("#voice-group-endpoints").isVisible(), "官方链路渲染接入点状态");
-  assert.ok(await page.locator("#voice-group-tools").isVisible(), "官方链路渲染工具开关与调用统计");
+  assert.equal(await page.locator("#voice-panel-devices #voice-group-tools").count(), 0, "n69：内置工具不在设备标签");
 
-  // 1b. 内置工具与第三方 MCP 是两类东西：内置工具只能开关，增删用可复制的 AI 提示词模板（2026-11-02）
+  // 1b. 内置工具与第三方 MCP 是两类东西：内置工具只能开关，增删用可复制的 AI 提示词模板（2026-11-02）；n69 起两者都在“扩展”
+  await tab("扩展").click();
+  assert.ok(await page.locator("#voice-panel-features #voice-group-tools").isVisible(), "官方链路在扩展标签渲染工具开关与调用统计");
   await openGroup("tools");
   assert.equal(await page.locator("#voice-tool-prompt-copy-add").count(), 1);
   assert.equal(await page.locator("#voice-tool-prompt-copy-remove").count(), 1);
@@ -330,7 +334,6 @@ try {
     const box = document.querySelector("#voice-group-tools");
     return Boolean(box && (/已复制/.test(box.textContent) || /剪贴板/.test(box.textContent)));
   }, null, { timeout: 5_000 });
-  await tab("扩展").click();
   assert.match(await page.locator("#voice-group-mcp > .voice-group-h").innerText(), /第三方 MCP 工具/, "外部工具仍叫第三方 MCP 工具，和内置工具区分开");
   await openGroup("mcp");
   assert.ok(await page.locator("#voice-mcp-card").getByText(/MOSS 内置工具/).isVisible(), "MCP 卡说明与内置工具的区别");
@@ -449,6 +452,9 @@ try {
   await page.locator(".settings-modal .mat-modal-close").click();
   await page.locator("#voice-builtin-mix-select-jev").selectOption("jev:typesafe/jev-1.14");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "尚未配置 OpenRouter API Key" }).waitFor();
+  assert.equal(await page.locator("#voice-builtin-jev-voice-enabled").count(), 0, "n69：Jev 语音开关只在顶部第 3 栏，Jev 卡片不再重复一个勾选框");
+  assert.match(await page.locator("#voice-builtin-jev-voice-state").innerText(), /未开启/);
+  assert.match(await page.locator("#voice-group-builtin-model-jev > .voice-group-h").innerText(), /Jev 前置粗筛 · OpenRouter 云端（高级）/);
   await page.locator("#voice-builtin-apikey-jev").fill("sk-or-test-jev");
   await page.locator("#voice-builtin-jev-feedback-enabled").check();
   await page.locator("#voice-builtin-model-test-jev").click();
@@ -464,10 +470,15 @@ try {
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "尚未下载" }).waitFor();
   assert.match(await page.locator("#voice-local-onejev-env-hint").innerText(), /Apple Metal GPU 加速/);
   assert.match(await page.locator("#voice-local-jev-runtime").innerText(), /本地 Jev 启动失败：OneJev 模型加载超时/);
-  await page.locator("#voice-local-use-onejev_1_6_0_8b").click();
-  await page.locator("#voice-group-local-models [role=status]").filter({ hasText: "OneJev 1.6 0.8B" }).waitFor();
+  // n69：已下载的本地 Jev 行不再有自己的“选用”按钮（它和顶部第 3 栏写的是同一个开关），改为跳到顶部下拉
+  assert.equal(await page.locator("#voice-local-use-onejev_1_6_0_8b").count(), 0, "本地 Jev 行不再重复一个“选用”开关");
+  await page.locator("#voice-local-pick-onejev_1_6_0_8b").click();
+  await page.waitForFunction(() => document.activeElement?.id === "voice-builtin-mix-select-jev");
+  await page.locator("#voice-builtin-mix-select-jev").selectOption("local:onejev_1_6_0_8b");
+  await page.locator("#voice-builtin-mix-status").filter({ hasText: "OneJev 1.6 0.8B" }).waitFor();
   assert.equal(last("voice_local_save").args.settings.jev_model, "onejev_1_6_0_8b");
   assert.equal(await page.locator("#voice-builtin-mix-select-jev").inputValue(), "local:onejev_1_6_0_8b");
+  assert.match(await page.locator("#voice-builtin-jev-voice-state").innerText(), /已开启（用本地模型）/, "Jev 卡片只读显示顶部开关的状态");
   await page.locator("#voice-builtin-mix-select-jev").selectOption("local:onejev_1_6_4b");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "OneJev 1.6 4B" }).filter({ hasText: "Apple Metal GPU 加速" }).waitFor();
   assert.equal(last("voice_local_save").args.settings.jev_model, "onejev_1_6_4b");
@@ -500,13 +511,26 @@ try {
   delete state.builtin.local.models.find((item) => item.id === "onejev_1_6_9b").progress;
   state.builtin.local.laya_env = savedLayaEnv;
   state.builtin.local.laya_setup = { state: "idle" };
-  // 6. 本地模型与语音体验分开保存：保存体验时不带上本地模型未保存的改动
+  // 5e. n69：模型标签顺序——混搭栏 → 识别 → 大模型 → 合成 → 视觉理解 → Jev（高级）→ 本地模型 → 对话体验
+  const modelOrder = await page.locator("#voice-builtin-models-panel > .voice-group").evaluateAll((els) => els.map((el) => el.id));
+  assert.deepEqual(modelOrder, [
+    "voice-group-builtin-model-asr", "voice-group-builtin-model-llm", "voice-group-builtin-model-tts", "voice-group-vision",
+    "voice-group-builtin-model-jev", "voice-group-local-models", "voice-group-experience",
+  ]);
+  const modelHeadings = await page.locator("#voice-builtin-models-panel > .voice-section-h").allInnerTexts();
+  assert.deepEqual(modelHeadings, ["云端模型（密钥只存本机）", "本地模型（断网可用）", "对话体验"], "不再有“内置服务 · 本地模型与体验”这种混在一起的标题");
+  assert.equal(await page.locator("#voice-panel-features #voice-group-vision").count(), 0, "视觉理解从扩展移到模型标签");
+  // 6. 本地模型与对话体验分开保存：保存体验时不带上本地模型未保存的改动
   await openGroup("local-models");
   await openGroup("experience");
+  assert.equal(await page.locator("#voice-screen-card-style").count(), 0, "n69：对话体验里不再有画风下拉（只在设备 › 副屏预览切换）");
+  assert.equal(await page.locator("#voice-jev-filter-enabled").count(), 0, "n69：对话体验里不再有 Jev 开关勾选框");
+  assert.match(await page.locator("#voice-jev-filter-state").innerText(), /未开启/, "对话体验只读显示 Jev 开关状态（上面刚在顶部关掉）");
+  assert.equal(await page.locator("#voice-jev-suboptions").count(), 0, "Jev 未开启时不显示细项");
   await page.getByLabel("本地合成语速（0.5 ~ 2.0）").fill("1.5");
   await page.locator("#voice-barge-in").check();
   await page.locator("#voice-experience-save").click();
-  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存语音体验设置" }).waitFor();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存对话体验设置" }).waitFor();
   const localPayload = last("voice_local_save").args.settings;
   assert.equal(localPayload.barge_in, true);
   assert.equal("tts_speed" in localPayload, false, "局部补丁不携带本地模型分组字段");
@@ -515,16 +539,18 @@ try {
   // 6b. 顶部切换开启 Jev 后再修改并保存语音体验其他字段，绝不把 Jev 开关覆盖回旧值 false
   await page.locator("#voice-builtin-mix-select-jev").selectOption("jev:typesafe/jev-1.14");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为 Jev 决策（typesafe/jev-1.14）" }).waitFor();
+  await page.locator("#voice-jev-filter-state").filter({ hasText: "已开启（typesafe/jev-1.14）" }).waitFor();
+  await page.locator("#voice-jev-suboptions").waitFor();
   await page.locator("#voice-barge-in-ms").fill("460");
   await page.locator("#voice-experience-save").click();
-  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存语音体验设置" }).waitFor();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存对话体验设置" }).waitFor();
   assert.equal(state.builtin.local.settings.jev_filter_enabled, true, "保存语音体验插话时长后 Jev 仍保持开启");
   // 6c. n51：切换《流浪地球》MOSS 领航空间站风格 + 工坊补充说明 + 自定义同音纠偏
   await page.locator("#voice-persona-style").selectOption("moss_station");
   await page.locator("#voice-persona-prompt").fill("工坊主力机为翼宿 5W 蓝光机");
   await page.locator("#voice-asr-corrections").fill("红松木=樟子松");
   await page.locator("#voice-experience-save").click();
-  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存语音体验设置" }).waitFor();
+  await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存对话体验设置" }).waitFor();
   assert.equal(state.builtin.local.settings.persona_style, "moss_station");
   assert.equal(state.builtin.local.settings.persona_prompt, "工坊主力机为翼宿 5W 蓝光机");
   assert.deepEqual(state.builtin.local.settings.custom_asr_corrections, ["红松木=樟子松"]);
@@ -624,7 +650,7 @@ try {
   if (process.env.VOICE_QA_DIR) await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-privacy-tab-open.png") });
   await memoryItem.locator("> summary").click();
   assert.equal(await memoryItem.evaluate((el) => el.open), false, "再点收起");
-  // n67：固件升级在“设备与工具”标签，收起时不挂载（不后台轮询），展开后就地显示固件卡
+  // n67：固件升级在“设备”标签，收起时不挂载（不后台轮询），展开后就地显示固件卡
   await tab("设备").click();
   assert.equal(calls.filter((call) => call.command === "voice_firmware_status").length, 0, "固件组收起时不查询");
   await openGroup("device-firmware");
@@ -666,21 +692,39 @@ try {
   await page.locator("#voice-debug-trace-switch").uncheck();
   assert.equal(state.builtin.debug_traces.length, 0, "关闭开关立即清空内存排障记录");
 
-  // 8c. n51 + n52：服务 -> 在线小智硬件快捷控制（320×240 彩屏识别、一键静音记忆 0%、投送雕刻预览、一键切换长按说话抗噪模式）
+  // 8c. n51 + n52（n69 起在“设备”标签）：在线小智硬件快捷控制（320×240 彩屏识别、一键静音记忆 0%、投送雕刻预览、一键切换长按说话抗噪模式）
   await tab("服务").click();
-  await page.locator("#voice-builtin-card").getByRole("button", { name: "信息" }).click();
+  assert.ok(await page.locator("#voice-panel-service #voice-builtin-card").isVisible(), "服务标签只放内置服务启停与连接地址");
+  assert.ok(await page.locator("#voice-group-builtin-service").isVisible());
+  assert.equal(await page.locator("#voice-panel-service #voice-builtin-devices, #voice-panel-service #voice-goggle-bot-card").count(), 0, "设备表与副屏预览不在服务标签");
+  await tab("设备").click();
+  const deviceOrder = await page.locator("#voice-devices-panel > .voice-group").evaluateAll((els) => els.map((el) => el.id));
+  assert.deepEqual(deviceOrder, ["voice-group-builtin-devices", "voice-group-wake-word", "voice-group-screen-preview", "voice-group-device-firmware"], "设备标签：已连接设备 → 唤醒词 → 副屏预览 → 固件升级");
+  await page.locator("#voice-builtin-devices").getByRole("button", { name: "控制与信息" }).click();
   const ctrlBox = page.locator("#voice-device-controls-aa\\:bb\\:cc\\:11\\:22\\:33");
   await ctrlBox.waitFor();
   await ctrlBox.getByText("320×240 彩屏").waitFor();
   await ctrlBox.getByRole("button", { name: "静音" }).click();
   await ctrlBox.getByText(/已静音/).waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 0 } });
+  await ctrlBox.getByLabel("设备音量").focus();
+  await page.keyboard.press("ArrowRight");
+  await ctrlBox.getByRole("button", { name: "应用" }).first().click();
+  await ctrlBox.getByText("音量已设为 5%").waitFor();
+  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 5 } }, "扬声器音量在快捷控制里调，仍走 set_volume");
+  assert.equal(await page.locator('[id^="voice-volume-"]').count(), 0, "n69：不再另有一份“MOSS 说话音量”滑块");
   await ctrlBox.getByRole("button", { name: "长按说话（抗噪）" }).click();
   await ctrlBox.getByText(/长按说话（抗噪）/).first().waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_talk_mode", value: { mode: "press_to_talk" } });
   await ctrlBox.getByRole("button", { name: /投送.*预览/ }).click();
   await ctrlBox.getByText(/已将.*预览.*推送到小智/).waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_preview" });
+  // 对话体验里的画风只读行“去副屏预览”跳到设备标签并展开副屏预览组
+  await tab("模型").click();
+  assert.match(await page.locator("#voice-screen-card-style-state").innerText(), /硬核太空舱/);
+  await page.locator("#voice-screen-card-style-goto").click();
+  await page.locator("#voice-page-tab-devices[aria-selected=true]").waitFor();
+  assert.equal(await page.locator("#voice-group-screen-preview > .voice-group-h").getAttribute("aria-expanded"), "true", "跳转后副屏预览组已展开");
   const botCard = page.locator("#voice-goggle-bot-card");
   await botCard.waitFor();
   assert.equal(await botCard.locator(".voice-bot-gif-img").count(), 5, "展示 5 组 160×120 动态场景屏");
@@ -697,27 +741,22 @@ try {
   await page.locator("#voice-card-style-moss_hud").click();
   await botCard.getByText("太空舱雕刻表盘").waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave", style: "moss_hud" } });
-  // 8d. 2026-11-07：“唤醒词与音量”标签——音量松手即下发 set_volume；n67 起唤醒词卡就地显示
-  await tab("唤醒词与音量").click();
-  const wakePanel = page.locator("#voice-wake-volume-panel");
-  await wakePanel.waitFor();
-  const volumeSlider = wakePanel.locator("#voice-volume-aa\\:bb\\:cc\\:11\\:22\\:33");
-  assert.equal(await volumeSlider.inputValue(), "65", "显示设备实时上报的音量");
-  await volumeSlider.focus();
-  await page.keyboard.press("ArrowRight");
-  await wakePanel.getByText("已设为 70%").waitFor();
-  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 70 } });
-  await wakePanel.getByRole("button", { name: "静音 立创实战派小智" }).click();
-  await wakePanel.getByText("已静音").waitFor();
-  assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "set_volume", value: { volume: 0 } });
-  await wakePanel.locator("#voice-wakeword-card").waitFor();
-  assert.equal(await wakePanel.locator("#voice-wakeword-text").inputValue(), "你好小智", "唤醒词卡在主窗口就地读取当前唤醒词");
-  await shot("voice-wake-volume");
+  // 8d. n67 / n69：唤醒词卡在“设备”标签就地显示（原“唤醒词与音量”标签已并入）
+  const wakeGroup = page.locator("#voice-group-wake-word");
+  await wakeGroup.locator("#voice-wakeword-card").waitFor();
+  assert.equal(await wakeGroup.locator("#voice-wakeword-text").inputValue(), "你好小智", "唤醒词卡在主窗口就地读取当前唤醒词");
+  await shot("voice-devices");
+  // 8e. 记住的旧标签 "wake" 重新打开时落到“设备”
+  await page.evaluate(() => localStorage.setItem("moss_voice_tab", "wake"));
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator("#voice-page-tab-devices[aria-selected=true]").waitFor();
+  await page.locator("#voice-group-builtin-devices").waitFor();
   // 9. 窄屏无横向滚动
   await page.setViewportSize({ width: 820, height: 1000 });
   await tab("设备").click();
   assert.equal(await page.locator("#voice-group-endpoints").count(), 0, "内置链路不渲染接入点状态");
-  assert.ok(await page.locator("#voice-group-tools").isVisible(), "内置链路只保留工具开关与调用统计");
+  assert.ok(await page.locator("#voice-group-builtin-devices").isVisible(), "内置链路设备标签显示已连接设备");
+  assert.equal(await page.locator("#voice-panel-devices #voice-group-tools").count(), 0, "内置工具在扩展标签");
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   assert.ok(overflow <= 1, `窄屏横向溢出 ${overflow}px`);
   await shot("voice-narrow");

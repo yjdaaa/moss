@@ -161,12 +161,21 @@ try {
   for (const id of ["board", "draw-material", "draw-device", "draw-send"]) {
     assert.equal(await card(id).count(), 1, `创作画板 ${id} 应在画布里`);
   }
+  // 画布占满整行，设置卡在画布下方三张并排（2026-11-07 用户决定）
+  assert.equal(await colOf("board"), "1 / span 48", "创作画布默认占满整行");
+  assert.deepEqual(
+    await Promise.all(["draw-material", "draw-device", "draw-send"].map(colOf)),
+    ["1 / span 16", "17 / span 16", "33 / span 16"],
+    "三张设置卡在画布下方并排",
+  );
+  const wideBoard = await card("board").boundingBox();
+  assert.ok((await card("draw-send").boundingBox()).y >= wideBoard.y + wideBoard.height, "预览与发送在画布下方");
   const boardFoldBtn = page.locator('[data-wb-card="board"] .ob-card-h button');
   await boardFoldBtn.click();
   assert.match(await gridOf("board"), /span 8$/, "创作画布折叠后高度应收到标题条");
   assert.equal(await card("board").getAttribute("data-wb-collapsed"), "true", "创作画布折叠后标记 data-wb-collapsed=true");
   await boardFoldBtn.click();
-  assert.match(await gridOf("board"), /span 68$/, "创作画布展开应恢复原来的高度");
+  assert.match(await gridOf("board"), /span 62$/, "创作画布展开应恢复原来的高度");
 
   const beforeBoardRows = await gridOf("board");
   const boardSouthHandle = page.locator('[data-wb-card="board"] [data-wb-resize="s"]');
@@ -177,8 +186,67 @@ try {
   await page.mouse.move(southBox.x + southBox.width / 2, southBox.y - 240, { steps: 8 });
   await page.mouse.up();
   assert.notEqual(await gridOf("board"), beforeBoardRows, "拖底边框应能缩小创作画布高度");
-  const drawStored = await page.evaluate(() => globalThis.localStorage.getItem("moss_draw_layout_v1"));
-  assert.ok(drawStored && drawStored.includes("version"), "创作画板布局应写进 moss_draw_layout_v1");
+  const drawStored = await page.evaluate(() => globalThis.localStorage.getItem("moss_draw_layout_v2"));
+  assert.ok(drawStored && drawStored.includes("version"), "创作画板布局应写进 moss_draw_layout_v2");
+
+  // 8. 窄窗口（761–1200px）自动两栏并排，不再整页竖排；手机宽度才单列；拉宽后回到自由布局（2026-11-07 用户决定）
+  const sideBySide = async (leftId, rightId, label) => {
+    const left = await card(leftId).boundingBox();
+    const right = await card(rightId).boundingBox();
+    assert.ok(right.x >= left.x + left.width, `${label}：${rightId} 应在 ${leftId} 右侧`);
+    assert.ok(Math.abs(right.y - left.y) <= 2, `${label}：两栏顶部对齐`);
+  };
+  const noHorizontalOverflow = async (label) => {
+    const [sw, cw] = await page.evaluate(() => [document.scrollingElement.scrollWidth, document.documentElement.clientWidth]);
+    assert.ok(sw <= cw, `${label}：不应出现横向滚动（${sw} > ${cw}）`);
+  };
+  // 第 6 段把工作台锁定了（锁定时本来就没有把手），这里清掉工作台记忆回到未锁定的默认布局
+  await page.evaluate(() => globalThis.localStorage.removeItem("moss_wb_layout_v3"));
+  for (const width of [1180, 960]) {
+    await page.setViewportSize({ width, height: 760 });
+    await page.goto(new URL("index.html", local).href, { waitUntil: "domcontentloaded" });
+    await page.locator(".ob-canvas.ob-canvas--two").waitFor({ timeout: 20_000 });
+    await sideBySide("link", "monitor", `工作台 ${width}px`);
+    const source = await card("source").boundingBox();
+    const link = await card("link").boundingBox();
+    assert.ok(source.y > link.y && Math.abs(source.x - link.x) <= 2, `工作台 ${width}px：左栏上下堆叠`);
+    // 两栏模式只保留上下边框把手：不能移动、不能改宽，但能调高度
+    assert.equal(await page.locator(".wb-handle--e, .wb-handle--w, .wb-handle--se").count(), 0, "两栏模式没有左右与角把手");
+    assert.ok(await page.locator(".wb-handle--s").count() >= 5, "两栏模式每张卡都有下边框把手");
+    await noHorizontalOverflow(`工作台 ${width}px`);
+    await page.goto(new URL("draw", local).href, { waitUntil: "domcontentloaded" });
+    await page.locator(".ob-draw-page .ob-canvas.ob-canvas--two").waitFor({ timeout: 20_000 });
+    const board = await card("board").boundingBox();
+    const drawMaterial = await card("draw-material").boundingBox();
+    assert.ok(drawMaterial.y >= board.y + board.height, `画板 ${width}px：设置卡在画布下方`);
+    await sideBySide("draw-material", "draw-device", `画板 ${width}px`);
+    // 用户反馈：窄窗口下画板也要能拖上下边框放大缩小
+    for (const [dir, dy, grow] of [["s", 160, true], ["n", -120, true], ["s", -200, false]]) {
+      const handle = card("board").locator(`[data-wb-resize="${dir}"]`);
+      await handle.scrollIntoViewIfNeeded();
+      const hb = await handle.boundingBox();
+      const before = (await card("board").boundingBox()).height;
+      await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2 + dy, { steps: 8 });
+      await page.mouse.up();
+      await page.waitForTimeout(200);
+      const after = (await card("board").boundingBox()).height;
+      assert.ok(grow ? after > before + 60 : after < before - 60, `画板 ${width}px：拖${dir === "s" ? "下" : "上"}边框 ${dy}px 高度应${grow ? "变大" : "变小"}（${before} → ${after}）`);
+    }
+    assert.ok(await card("board").evaluate((el) => el.style.gridColumn === "1 / -1"), `画板 ${width}px：调完高度仍占满整行`);
+    await noHorizontalOverflow(`画板 ${width}px`);
+  }
+  await page.setViewportSize({ width: 700, height: 900 });
+  await page.goto(new URL("index.html", local).href, { waitUntil: "domcontentloaded" });
+  await page.locator(".ob-canvas").waitFor({ timeout: 20_000 });
+  assert.equal(await page.locator(".ob-canvas--two").count(), 0, "手机宽度不进两栏");
+  const narrowMonitor = await card("monitor").boundingBox();
+  const narrowLink = await card("link").boundingBox();
+  assert.ok(narrowMonitor.y > narrowLink.y && Math.abs(narrowMonitor.x - narrowLink.x) <= 2, "手机宽度单列堆叠");
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.locator(".ob-canvas:not(.ob-canvas--two)").waitFor({ timeout: 5_000 });
+  assert.equal(await colOf("monitor"), "17 / span 32", "拉宽后回到默认自由布局");
 
   assert.deepEqual(errors, [], "不应有前端未处理异常");
   console.log("WORKBENCH_LAYOUT_BROWSER_TEST=PASS");

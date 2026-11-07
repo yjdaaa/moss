@@ -2280,7 +2280,7 @@ input:not([type]):focus {
   border-radius: 10px;
   overflow: hidden;
 }
-@media (max-width: 1200px) {
+@media (max-width: 760px) {
   .ob-draw-page .canvas-panel.ob-board:not([data-wb-collapsed="true"]) .ob-board-stage {
     min-height: 520px;
   }
@@ -3448,8 +3448,9 @@ input:not([type]):focus {
 }
 .wb-handle:hover { background: rgba(140, 175, 255, 0.28); }
 .ob-canvas--locked > .hud-card { cursor: default; }
-/* 窄屏：忽略保存的布局，退回单列堆叠，避免自由布局挤爆 */
-@media (max-width: 1200px) {
+/* 761–1200px 由 WorkbenchCanvas 自动排成两栏（stackTwoColumns）；只有手机宽度才退回单列堆叠
+   （2026-11-07 用户决定“可以并排显示 2 个，没必要做竖排”） */
+@media (max-width: 760px) {
   .ob-canvas { display: flex; flex-direction: column; gap: 18px; }
   .ob-canvas > .hud-card { grid-column: auto !important; grid-row: auto !important; height: auto !important; }
   .wb-card-body { height: auto; overflow: visible; }
@@ -4164,7 +4165,16 @@ input:not([type]):focus {
   font-size: 12px;
 }
 
+/* 窄窗口仍左右并排，只把右侧参数栏收窄；手机宽度才上下堆叠（2026-11-07 用户决定“没必要做竖排”） */
 @media (max-width: 1180px) {
+  .twin-main-grid {
+    grid-template-columns: minmax(0, 1.35fr) minmax(280px, 1fr);
+  }
+  .twin-stage-wrap {
+    height: 460px;
+  }
+}
+@media (max-width: 760px) {
   .twin-main-grid {
     grid-template-columns: 1fr;
   }
@@ -4658,6 +4668,9 @@ input:not([type]):focus {
 .voice-debug-selection-bar .text-input {
   max-width: 200px;
 }
+.voice-debug-selection-bar .voice-debug-note {
+  flex-basis: 100%;
+}
 .voice-debug-card {
   padding: 10px 12px;
   border: 1px solid var(--ob-line);
@@ -4967,7 +4980,7 @@ input:not([type]):focus {
 }
 .ai-preview-origin b { color: #fbbf24; }
 
-/* ===== 2026-11-07 本机安全窗口重排 + “唤醒词与音量”标签 ===== */
+/* ===== 2026-11-07 本机安全窗口重排 + 唤醒词卡（n69 起在“设备”标签） ===== */
 .voice-private-page { min-height: 100vh; box-sizing: border-box; padding: 36px 28px 48px; }
 .voice-private-box { max-width: 760px; }
 .voice-private-box > h1, .voice-private-header h1 { font-size: 24px; letter-spacing: 0.01em; }
@@ -5060,55 +5073,7 @@ input:not([type]):focus {
 .firmware-card li > .btn, .firmware-card li > select { margin-left: auto; }
 .firmware-card li > select + .btn { margin-left: 0; }
 
-/* 语音中心“唤醒词与音量”标签 */
-.wake-volume { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
-.wake-volume-card { display: flex; flex-direction: column; gap: 14px; padding: 18px; border: 1px solid var(--ob-line); border-radius: 14px; background: var(--ob-panel-2); min-width: 0; }
-.wake-volume-card-head { display: flex; align-items: flex-start; gap: 12px; }
-.wake-volume-card-head h3 { margin: 0 0 3px; font-size: 14.5px; font-weight: 600; color: var(--ob-ink); }
-.wake-volume-card-head p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ob-ink-3); }
-.wake-volume-icon { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--ob-accent-bg); color: var(--ob-accent-2); }
-.wake-volume-empty { padding: 14px; border: 1px dashed var(--ob-line-2); border-radius: 10px; text-align: center; }
-.wake-volume-list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
-.wake-volume-row { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--ob-line); border-radius: 12px; background: var(--ob-raise); }
-.wake-volume-row[data-online="false"] { opacity: 0.6; }
-.wake-volume-row-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.wake-volume-row-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--ob-ink); }
-.wake-volume-row-head small { flex: none; font-size: 11.5px; color: var(--ob-ink-3); }
-.wake-volume-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ob-ink-3); }
-.wake-volume-row[data-online="true"] .wake-volume-dot { background: var(--ob-green); box-shadow: 0 0 0 3px var(--ob-green-bg); }
-.wake-volume-value { margin-left: auto; display: inline-flex; align-items: baseline; gap: 6px; font-size: 18px; font-weight: 600; color: var(--ob-ink); }
-.wake-volume-value em { font-style: normal; font-family: var(--ob-font); font-size: 11.5px; font-weight: 500; color: var(--ob-ink-3); }
-.wake-volume-row-control { display: flex; align-items: center; gap: 12px; }
-.wake-volume-mute {
-  flex: none; display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--ob-line-2); border-radius: 50%;
-  background: transparent; color: var(--ob-ink-2); cursor: pointer; transition: border-color 0.15s, color 0.15s;
-}
-.wake-volume-mute:hover:not(:disabled) { border-color: var(--ob-accent-2); color: var(--ob-ink); }
-.wake-volume-mute:disabled { opacity: 0.45; cursor: default; }
-.wake-volume-slider {
-  flex: 1; min-width: 0; height: 6px; margin: 0; border-radius: 999px; appearance: none; -webkit-appearance: none; cursor: pointer;
-  background: linear-gradient(90deg, var(--ob-accent) 0 var(--fill, 0%), rgba(255, 255, 255, 0.1) var(--fill, 0%) 100%);
-}
-.wake-volume-slider:disabled { cursor: default; opacity: 0.5; }
-.wake-volume-slider::-webkit-slider-thumb {
-  -webkit-appearance: none; appearance: none; width: 18px; height: 18px; border-radius: 50%;
-  background: #fff; border: 3px solid var(--ob-accent); box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-}
-.wake-volume-slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 3px solid var(--ob-accent); }
-.wake-volume-slider:focus-visible { outline: 2px solid var(--ob-accent-2); outline-offset: 4px; }
-.wake-volume-note { margin: 0; font-size: 12px; color: var(--ob-ink-3); }
-.wake-volume-entry {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 14px 16px;
-  border: 1px solid var(--ob-line-2); border-radius: 12px; background: var(--ob-raise); color: var(--ob-ink);
-  font: inherit; text-align: left; cursor: pointer; transition: border-color 0.15s, background 0.15s;
-}
-.wake-volume-entry:hover, .wake-volume-entry:focus-visible { border-color: var(--ob-accent-2); background: var(--ob-accent-bg); }
-.wake-volume-entry:focus-visible { outline: 2px solid var(--ob-accent-2); outline-offset: 2px; }
-.wake-volume-entry > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.wake-volume-entry strong { font-size: 14px; }
-.wake-volume-entry small { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ob-ink-3); }
 @media (max-width: 860px) {
-  .wake-volume { grid-template-columns: minmax(0, 1fr); }
   .wakeword-fields { grid-template-columns: minmax(0, 1fr); }
   .voice-private-page { padding: 24px 16px 40px; }
 }
@@ -5372,8 +5337,8 @@ input:not([type]):focus {
   flex-direction: column;
   gap: 12px;
   padding: 14px 16px 16px;
-  /* 画面区撑满窗口剩余高度（2026-11-07 布局优化），大屏不再下面空一截 */
-  min-height: max(560px, calc(100vh - var(--ob-top-h, 60px) - 110px));
+  /* 2026-11-07 用户反馈“布局还长了”：撤回按窗口撑满，恢复固定最小高度，一屏放得下不出滚动条 */
+  min-height: 560px;
 }
 .camera-meta-chip {
   font-size: 11.5px;
@@ -5493,53 +5458,26 @@ input:not([type]):focus {
   }
 }
 
-/* ---- 工作台底部操作栏（2026-11-07 布局优化）：生成 / 下发按钮固定在窗口底部 ---- */
-.wb-action-bar {
-  position: sticky;
-  bottom: 12px;
-  z-index: 25;
-  margin-top: 16px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 16px;
-  padding: 10px 14px;
-  border: 1px solid var(--ob-line);
-  border-radius: 12px;
-  background: rgba(14, 14, 18, 0.88);
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  box-shadow: 0 16px 40px -20px rgba(0, 0, 0, 0.9);
+/* ---- 监视舱生成 / 下发 / 孪生入口同一行（2026-11-07 用户反馈“布局还长了”，替代底部悬浮操作栏） ---- */
+.wb-dispatch-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) auto;
+  gap: 8px;
+  margin-bottom: 8px;
 }
-.wb-action-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+.wb-dispatch-actions .btn {
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px 12px;
+  white-space: nowrap;
 }
-.wb-action-buttons .btn {
-  min-width: 168px;
-  padding: 10px 16px;
-}
-.wb-action-buttons .btn-resume {
+.wb-dispatch-actions .btn > span { overflow: hidden; text-overflow: ellipsis; }
+.wb-dispatch-actions .btn-resume {
   background: linear-gradient(135deg, #059669, #10b981);
 }
-.wb-action-summary {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  margin-left: auto;
-  font-size: 12.5px;
-  color: var(--ink);
-  text-align: right;
-}
-.wb-action-summary-meta {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-dim);
-}
-@media (max-width: 720px) {
-  .wb-action-bar { bottom: 8px; }
-  .wb-action-buttons, .wb-action-buttons .btn { flex: 1 1 100%; }
-  .wb-action-summary { margin-left: 0; text-align: left; }
+.wb-dispatch-actions .twin-jump-btn { width: auto; margin-bottom: 0; }
+@container (max-width: 420px) {
+  .wb-dispatch-actions { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .wb-dispatch-actions .twin-jump-btn { grid-column: 1 / -1; }
 }

@@ -72,15 +72,22 @@ test("四项私密设置在主语音页“隐私与家居”就地展开", () =>
   assert.doesNotMatch(frontend("src/pages/VoicePage.jsx"), /VoiceContextCard|contextManage|contextPickFolder/, "长期记忆不挂到整页顶层");
 });
 
-test("n67：唤醒词卡挂在“唤醒词与音量”，固件卡挂在“设备与工具”，推送前仍逐台确认", () => {
-  const panel = frontend("src/components/VoiceWakeVolumePanel.jsx");
+test("n67 / n69：唤醒词卡与固件卡都挂在主窗口语音中心“设备”标签，推送前仍逐台确认", () => {
+  const panel = frontend("src/components/VoiceWakeWordSection.jsx");
   assert.match(panel, /<VoiceWakeWordCard \/>/);
   assert.match(panel, /active && <VoiceWakeWordCard/, "只在标签打开时挂载，避免后台轮询");
-  assert.match(panel, /deviceRequest\(row\.device_id, "set_volume"/);
   const page = frontend("src/pages/VoicePage.jsx");
   const devices = page.split('<VoiceTabPanel tab="devices"')[1].split("</VoiceTabPanel>")[0];
+  assert.match(devices, /<VoiceWakeWordSection mode=\{mode\} active=\{activeTab === "devices"\} \/>/, "唤醒词只在设备标签打开时挂载");
   assert.match(devices, /<VoiceFirmwareCard \/>/);
   assert.match(devices, /lazy>/, "固件卡收起时不挂载");
+  assert.doesNotMatch(page, /<VoiceTabPanel tab="wake"/, "“唤醒词与音量”标签已并入设备标签");
+  // n69 音量去重：扬声器音量只在“已连接设备”的快捷控制里调，仍走主窗口设备即时请求 set_volume
+  assert.match(devices, /<BuiltinDevicesPanel builtin=\{builtin\} \/>/);
+  const builtinCard = frontend("src/components/VoiceBuiltinCard.jsx");
+  const devicesPanel = builtinCard.split("export function BuiltinDevicesPanel")[1].split("\nexport function ")[0];
+  assert.match(devicesPanel, /sendDeviceControl\(device, "set_volume", \{ volume: volVal \}/);
+  assert.match(devicesPanel, /voiceApi\.deviceRequest\(device\.device_id, request, value\)/);
   const wake = frontend("src/components/VoiceWakeWordCard.jsx");
   assert.match(wake, /showConfirm\(/, "唤醒词推送前逐台确认");
   assert.match(wake, /confirmed: true/);

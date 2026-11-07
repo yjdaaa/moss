@@ -446,7 +446,7 @@ export function deviceView(mode, device) {
     return {
       text: "见内置服务",
       tone: "info",
-      hint: "内置链路：设备的 OTA 地址应指向本机，地址与设备连接情况见“服务与设备”。",
+      hint: "内置链路：设备的 OTA 地址应指向本机；地址见“服务”标签，设备连接情况见“设备”标签。",
     };
   }
   if (mode !== "self_hosted") {
@@ -1499,7 +1499,7 @@ export const TOOL_EDIT_PROMPTS = {
       "请把 MOSS 内置工具里的 <工具名> 下线或删除。",
       "",
       "先判断用哪种做法：",
-      "1. 只是不想让模型用到它：不用改代码。在「设备与工具 → MOSS 内置工具」里取消勾选即可，关闭的工具不会出现在任何接入点与内置语音的工具列表中。",
+      "1. 只是不想让模型用到它：不用改代码。在「扩展 → MOSS 内置工具」里取消勾选即可，关闭的工具不会出现在任何接入点与内置语音的工具列表中。",
       "2. 要彻底删掉代码：按下面顺序执行。",
       "",
       "彻底删除的顺序：",
@@ -1532,16 +1532,27 @@ export function extraEndpointError(url, endpoints = [], max = 4) {
 
 // ---------- 语音中心分组与保存（UI-3，技术书 §9.5.1 r15） ----------
 
-/** 页面标签。**当前链路用不到的部分不渲染**（2026-10-18 用户决定）；切标签不会丢失未保存的填写。 */
+/**
+ * 页面标签。**当前链路用不到的部分不渲染**（2026-10-18 用户决定）；切标签不会丢失未保存的填写。
+ * n69（2026-11-07 用户决定“完整整理”）：“唤醒词与音量”并入“设备”，“设备与工具”改名“设备”，内置工具移到“扩展”。
+ */
 export const VOICE_TABS = [
   { key: "service", label: "服务" },
+  { key: "devices", label: "设备" },
   { key: "models", label: "模型" },
-  { key: "devices", label: "设备与工具" },
-  { key: "wake", label: "唤醒词与音量" },
   { key: "features", label: "扩展" },
   { key: "privacy", label: "隐私与家居" },
   { key: "records", label: "记录与诊断" },
 ];
+
+/** 已取消的旧标签 → 新位置（记住的标签或跳转目标仍指向旧标签时使用）。 */
+const LEGACY_VOICE_TABS = { wake: "devices" };
+
+/** 把记住的 / 外部传来的标签 key 换成现有标签；不认识的返回空串。 */
+export function normalizeVoiceTab(key) {
+  const value = LEGACY_VOICE_TABS[key] || key;
+  return VOICE_TABS.some((item) => item.key === value) ? value : "";
+}
 
 /**
  * 当前链路要显示的标签（2026-10-18 / 2026-11-02 用户决定）：
@@ -1620,20 +1631,22 @@ export function settingsGroupPayload(group, form) {
   return payload;
 }
 
-/** 本地模型设置拆成两组分别保存：模型选择与语音体验。 */
+/**
+ * 本地模型设置拆成两组分别保存：模型选择与对话体验。
+ * n69（2026-11-07）：`screen_card_style` 只在“设备 › 副屏预览”点选即存，`jev_filter_enabled` 只由“模型”标签顶部第 3 栏切换，
+ * 两者都不再属于对话体验组的草稿与保存载荷（避免两处编辑同一个键）。
+ */
 export const LOCAL_MODEL_KEYS = ["vad", "vad_model", "asr", "asr_model", "tts", "tts_model", "tts_speaker", "tts_speed", "mirror"];
 export const EXPERIENCE_KEYS = [
   "read_only_shortcuts",
   "asr_beam_search",
   "job_done_announce",
   "screen_preview_sync",
-  "screen_card_style",
   "persona_style",
   "persona_prompt",
   "custom_personas",
   "asr_homophone_fix",
   "custom_asr_corrections",
-  "jev_filter_enabled",
   "jev_unfinished_hold",
   "jev_fast_route",
   "jev_tool_prune",
@@ -2822,37 +2835,4 @@ export function wakeWordDraftError(draft) {
   const threshold = Number(draft?.threshold);
   if (!Number.isFinite(threshold) || threshold < 0.05 || threshold > 0.95) return "灵敏度阈值须在 0.05～0.95 之间";
   return "";
-}
-
-/**
- * “唤醒词与音量”标签（2026-11-07 用户决定：唤醒词单独放一处，并加 MOSS 说话音量调节）。
- * MOSS 的声音从小智设备的扬声器播出，音量即设备扬声器音量；只列已允许的设备，在线且支持音量工具才可调。
- */
-export function volumeDevicesView(status) {
-  const devices = Array.isArray(status?.devices) ? status.devices : [];
-  const sessions = Array.isArray(status?.sessions) ? status.sessions : [];
-  return devices
-    .filter((device) => device?.status === "allowed")
-    .map((device) => {
-      const session = sessions.find((item) => item.device_id === device.device_id) || null;
-      const controls = builtinDeviceControlsView(device, session, status?.device_prefs);
-      return {
-        device_id: device.device_id,
-        name: builtinDeviceView(device).title,
-        online: controls.online,
-        adjustable: controls.online && controls.canVolume,
-        volume: controls.volume,
-        hint: !controls.online ? "离线，上线后可调" : controls.canVolume ? "" : "固件不支持远程调音量",
-      };
-    })
-    .sort((a, b) => Number(b.online) - Number(a.online));
-}
-
-/** 音量档位文字：0 为静音。 */
-export function volumeLevelText(volume) {
-  const value = Math.max(0, Math.min(100, Math.round(Number(volume) || 0)));
-  if (value === 0) return "静音";
-  if (value <= 30) return "较小";
-  if (value <= 70) return "适中";
-  return "较大";
 }

@@ -5,8 +5,11 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { kindLabel, sourceLabel } from "../approvalState.js";
 import { voiceApi } from "../voiceApi.js";
 import {
+  BuiltinDevicesPanel,
   BuiltinEvents,
+  BuiltinJevModelGroup,
   BuiltinModelGroups,
+  BuiltinScreenPreview,
   BuiltinServicePanel,
   ExperienceGroup,
   LiveDebugTraces,
@@ -20,9 +23,9 @@ import VoiceAgentCard from "../components/VoiceAgentCard.jsx";
 import VoiceVisionCard from "../components/VoiceVisionCard.jsx";
 import VoiceKnowledgeCard from "../components/VoiceKnowledgeCard.jsx";
 import { VoiceMcpCard } from "../components/VoiceMcpCard.jsx";
-import { VoiceEndpointsCard } from "../components/VoiceEndpointsCard.jsx";
-import VoiceWakeVolumePanel from "../components/VoiceWakeVolumePanel.jsx";
-import { SaveBar, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel } from "../components/VoiceLayout.jsx";
+import { VoiceEndpointsCard, VoiceToolsCard } from "../components/VoiceEndpointsCard.jsx";
+import VoiceWakeWordSection from "../components/VoiceWakeWordSection.jsx";
+import { SaveBar, VOICE_GOTO_EVENT, VoiceDirtyProvider, VoiceGroup, VoiceTabPanel, focusVoiceGroup } from "../components/VoiceLayout.jsx";
 import { HOME_APPROVALS, VOICE_FOCUS_EVENT, peekVoiceFocus } from "../voiceFocus.js";
 import { MossVoiceTwin } from "../components/MossVoiceTwin.jsx";
 import {
@@ -31,6 +34,7 @@ import {
   VOICE_MODE_LABEL,
   VOICE_POLL_MS,
   VOICE_TABS,
+  normalizeVoiceTab,
   voiceTabsFor,
   approvalHistoryStatus,
   approvalListSummary,
@@ -58,7 +62,9 @@ import {
 
 // 语音中心（技术书 §9.5.1，实施清单 P4-08；r15 起按标签与链路分组，UI-3）。只在 MOSS 桌面端显示（A-69）。
 // 所有操作经 Tauri 命令执行；模型密钥只在本页内存中，提交后清空，不回显已保存的密钥（A-67）。
-// 顶部选链路，下面按任务分标签；每个标签里当前链路用得到的分组在前，其他链路的分组折叠在后。
+// 顶部选链路，下面按任务分标签；当前链路用不到的分组不渲染（2026-10-18）。
+// n69（2026-11-07“完整整理”）：内置链路 6 个标签——服务（启停与连接地址）/ 设备（设备列表与快捷控制、唤醒词、副屏预览、固件）/
+// 模型（混搭栏、云端、本地、对话体验）/ 扩展（含 MOSS 内置工具）/ 隐私与家居 / 记录与诊断；同一个设置只在一处可改。
 // 标签和分组都只隐藏、不卸载，切换标签、收起分组或切换链路都不会丢失未保存的填写。
 
 const TONE_CLASS = { ok: "ob-pill--ok", info: "ob-pill--info", warn: "ob-pill--warn", bad: "ob-pill--bad", off: "ob-pill--off" };
@@ -80,8 +86,9 @@ function formatTime(seconds) {
 
 function readTab() {
   try {
-    const value = globalThis.localStorage?.getItem(TAB_KEY);
-    if (VOICE_TABS.some((item) => item.key === value)) return value;
+    // 记住的旧标签（如已并入“设备”的 "wake"）换到新位置
+    const value = normalizeVoiceTab(globalThis.localStorage?.getItem(TAB_KEY));
+    if (value) return value;
   } catch (_error) {
     // 存储不可用时打开第一个标签
   }
@@ -379,6 +386,24 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
     window.addEventListener(VOICE_FOCUS_EVENT, onFocus);
     return () => window.removeEventListener(VOICE_FOCUS_EVENT, onFocus);
   }, []);
+  // n69 页面内“去设置”跳转：先切标签，等标签面板显示后再展开并滚动到目标分组
+  const [gotoTarget, setGotoTarget] = useState(null);
+  useEffect(() => {
+    const onGoto = (event) => {
+      const key = normalizeVoiceTab(event.detail?.tab);
+      if (!key) return;
+      setTab(key);
+      writeTab(key);
+      setGotoTarget({ group: event.detail?.group || "", target: event.detail?.target || "" });
+    };
+    window.addEventListener(VOICE_GOTO_EVENT, onGoto);
+    return () => window.removeEventListener(VOICE_GOTO_EVENT, onGoto);
+  }, []);
+  useEffect(() => {
+    if (!gotoTarget) return;
+    focusVoiceGroup(gotoTarget.group, gotoTarget.target);
+    setGotoTarget(null);
+  }, [gotoTarget]);
   const [dirty, setDirty] = useState({});
   const [logLines, setLogLines] = useState([]);
   const [approvals, setApprovals] = useState([]);
@@ -630,7 +655,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
             工具连接 {endpointHealth.tool_connections ?? "—"} · 设备会话 {endpointHealth.robot_connections ?? "—"}
           </span>
         ) : (
-        <span className="voice-muted">未填写接入点健康检查地址，无法判断设备是否在线（在“服务”标签填写）</span>
+        <span className="voice-muted">未填写接入点健康检查地址，无法判断设备是否在线（在下面“自建接入点”组填写）</span>
         )}
       </div>
     </div>
@@ -643,7 +668,7 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
         <Pill tone={status.bridge?.connected ? "ok" : "bad"}>{status.bridge?.connected ? "MOSS 桥已连接" : "MOSS 桥未连接"}</Pill>
       </div>
       <div className="voice-kv">
-        <span className="mono voice-break">{status.mcp_endpoint || "未设置接入点（在“服务”标签填写）"}</span>
+        <span className="mono voice-break">{status.mcp_endpoint || "未设置接入点（在下面“官方接入点”组填写）"}</span>
       </div>
     </div>
   );
@@ -786,13 +811,16 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                   key: "builtin",
                   modes: ["builtin"],
                   node: (
-                    <div className="voice-stack">
-                      <h3 className="voice-section-h">内置服务 · 云端模型（密钥存本机）</h3>
+                    <div className="voice-stack" id="voice-builtin-models-panel">
+                      {/* n69 顺序：混搭栏 → 识别 → 大模型 → 合成 → 视觉理解 → Jev（高级）→ 本地模型 → 对话体验 */}
                       <BuiltinModelGroups builtin={builtin} />
+                      <VoiceVisionCard />
+                      <BuiltinJevModelGroup builtin={builtin} />
                       {builtinStatus && (
                         <>
-                          <h3 className="voice-section-h">内置服务 · 本地模型与体验</h3>
+                          <h3 className="voice-section-h">本地模型（断网可用）</h3>
                           <LocalModelsGroup builtin={builtin} />
+                          <h3 className="voice-section-h">对话体验</h3>
                           <ExperienceGroup builtin={builtin} />
                         </>
                       )}
@@ -818,16 +846,16 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
 
           <VoiceTabPanel tab="devices" active={activeTab === "devices"}>
             <div className="voice-stack" id="voice-devices-panel">
+              {/* n69：设备列表与快捷控制（音量只在这里调）、唤醒词、副屏预览、固件都在“设备”标签 */}
+              {mode === "builtin" && <BuiltinDevicesPanel builtin={builtin} />}
               <VoiceEndpointsCard mode={mode} overview={status.mcp} busy={busy} run={run} />
+              <VoiceWakeWordSection mode={mode} active={activeTab === "devices"} />
+              {mode === "builtin" && <BuiltinScreenPreview builtin={builtin} />}
               {/* n67（2026-11-07）：独立安全窗口取消，固件升级直接在这里；每台推送前仍逐台确认 */}
               <VoiceGroup id="device-firmware" title="固件升级" summary="导入自己编译的固件，逐台确认推送" lazy>
                 <VoiceFirmwareCard />
               </VoiceGroup>
             </div>
-          </VoiceTabPanel>
-
-          <VoiceTabPanel tab="wake" active={activeTab === "wake"}>
-            <VoiceWakeVolumePanel builtin={builtin} mode={mode} active={activeTab === "wake"} />
           </VoiceTabPanel>
 
           <VoiceTabPanel tab="features" active={activeTab === "features"}>
@@ -836,10 +864,11 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                 <>
                   <h3 className="voice-section-h">内置服务能力（只在“MOSS 内置服务”链路生效）</h3>
                   <VoiceMusicCard />
-                  <VoiceVisionCard />
                   <VoiceKnowledgeCard />
                 </>
               )}
+              <h3 className="voice-section-h">MOSS 内置工具（所有链路共用）</h3>
+              <VoiceToolsCard overview={status.mcp} busy={busy} run={run} />
               <h3 className="voice-section-h">第三方扩展与本机代理（内置服务链路调用）</h3>
               {mode !== "builtin" && (
                 <div className="voice-hint voice-hint--warn">

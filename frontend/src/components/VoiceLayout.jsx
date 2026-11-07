@@ -25,6 +25,25 @@ export function VoiceTabPanel({ tab, active, children }) {
   );
 }
 
+/** 页面内跳转事件（n69）：别的标签里的“去设置”按钮用它切标签并展开目标分组；只是导航，不改任何设置。 */
+export const VOICE_GOTO_EVENT = "moss:voice-goto";
+
+export function gotoVoiceGroup(tab, group, target = "") {
+  globalThis.dispatchEvent?.(new CustomEvent(VOICE_GOTO_EVENT, { detail: { tab, group, target } }));
+}
+
+/** 展开分组（已展开则不动）并滚动到分组或其中某个元素；目标是表单控件时顺便聚焦。 */
+export function focusVoiceGroup(group, target = "") {
+  if (group) {
+    const header = document.querySelector(`#voice-group-${group} > .voice-group-h`);
+    if (header && header.getAttribute("aria-expanded") !== "true") header.click();
+  }
+  const element = document.getElementById(target || `voice-group-${group}`);
+  if (!element) return;
+  if (typeof element.scrollIntoView === "function") element.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (target && typeof element.focus === "function") element.focus({ preventScroll: true });
+}
+
 /** 向页面上报“本分组有未保存改动”；卸载时自动清除。 */
 export function useVoiceDirty(dirty) {
   const report = useContext(VoiceDirtyContext);

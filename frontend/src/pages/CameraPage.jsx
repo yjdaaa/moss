@@ -401,7 +401,7 @@ export function CameraPage({ onNavigate }) {
           {view.devices.length === 0 ? (
             <div className="camera-empty-devices" id="camera-no-devices">
               <p>还没有已允许的小智设备。</p>
-              <small>把小智固件的 OTA 地址指向本机语音中心后开机，再到「语音中心 → 服务与设备」点一次允许。</small>
+              <small>把小智固件的 OTA 地址指向本机语音中心后开机，再到「语音中心 → 设备」点一次允许。</small>
             </div>
           ) : (
             <div className="camera-device-list" role="listbox" aria-label="已允许的小智设备">
