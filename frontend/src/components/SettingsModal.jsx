@@ -11,6 +11,11 @@ import { readHideTopPills, writeHideTopPills } from "../foldState.js";
 import { trayActionCopy } from "../platform.js";
 import { appUpdateActionLabel, appUpdateAvailable, appUpdateBusy, appUpdateInstall, appUpdateProgressView, appUpdateScopeProgress, appUpdateStatus } from "../appUpdate.js";
 
+const FALLBACK_APP_VERSION =
+  typeof __MOSS_FRONTEND_VERSION__ === "string" && __MOSS_FRONTEND_VERSION__
+    ? __MOSS_FRONTEND_VERSION__
+    : "0.3.7";
+
 export function SettingsModal({
   visible,
   onClose,
@@ -550,7 +555,7 @@ export function SettingsModal({
             <div className="ob-fold settings-box-3" id="settings-update-section">
               <FoldHeader variant="section" id="settings-update" icon={RefreshCw} title="软件更新" defaultOpen={false} />
               <div className="settings-box-4">
-                当前版本：<strong className="mono">MOSS v{systemInfo?.version || "0.2.0"}</strong>
+                当前版本：<strong className="mono">MOSS v{systemInfo?.version || FALLBACK_APP_VERSION}</strong>
               </div>
               <label className="settings-label">
                 <input
@@ -588,7 +593,7 @@ export function SettingsModal({
                   >
                     {updateReport.has_update
                       ? `发现新版本 v${updateReport.latest_version}${updateReport.prerelease ? " (预览版)" : ""}`
-                      : `✓ 已是最新版本 (v${updateReport.current_version || systemInfo?.version || "0.2.0"})`}
+                      : `✓ 已是最新版本 (v${updateReport.current_version || systemInfo?.version || FALLBACK_APP_VERSION})`}
                   </span>
                 )}
                 {updateError && (

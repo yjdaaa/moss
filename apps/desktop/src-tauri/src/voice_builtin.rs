@@ -1625,6 +1625,46 @@ mod imp {
         CenterError::new("builtin_start_failed", 409, message)
     }
 
+    fn parse_abs_env_path(raw: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+        let raw = raw?;
+        if raw.is_empty() {
+            return None;
+        }
+        let path = match raw.to_str() {
+            Some(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                std::path::PathBuf::from(trimmed)
+            }
+            None => std::path::PathBuf::from(raw),
+        };
+        path.is_absolute().then_some(path)
+    }
+
+    fn parse_non_empty_env_path(raw: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+        let raw = raw?;
+        if raw.is_empty() {
+            return None;
+        }
+        match raw.to_str() {
+            Some(text) => {
+                let trimmed = text.trim();
+                (!trimmed.is_empty()).then(|| std::path::PathBuf::from(trimmed))
+            }
+            None => Some(std::path::PathBuf::from(raw)),
+        }
+    }
+
+    fn moss_laya_root_env() -> Option<std::path::PathBuf> {
+        parse_abs_env_path(std::env::var_os("MOSS_LAYA_ROOT").as_deref())
+    }
+
+    fn moss_laya_python_env() -> Option<std::path::PathBuf> {
+        parse_non_empty_env_path(std::env::var_os("MOSS_LAYA_PYTHON").as_deref())
+    }
+
     /// Tauri 托管状态：后端未启动时为空。
     pub struct BuiltinState(pub Option<Arc<BuiltinVoice>>);
 
@@ -1641,14 +1681,14 @@ mod imp {
                 .unwrap_or_else(|| host.runtime_root.path.join("models"));
             let mut models = ModelManager::new(default_models_dir.clone());
             if !cfg!(test)
-                && writable_install_dir().is_none()
-                && let Some(env_root) =
-                    std::env::var_os("MOSS_LAYA_ROOT").map(std::path::PathBuf::from)
+                && let Some(env_root) = moss_laya_root_env()
             {
                 let e_models = env_root.join("models");
                 if std::fs::create_dir_all(&e_models).is_ok() {
                     for id in moss_voice::settings::LOCAL_JEV_MODEL_IDS {
-                        if !default_models_dir.join(id).is_dir() {
+                        let installed_in_default = local_models::spec(id)
+                            .is_some_and(|spec| local_models::installed(&default_models_dir, spec));
+                        if !installed_in_default {
                             models = models.with_root_override(id, e_models.clone());
                         }
                     }
@@ -2091,8 +2131,20 @@ mod imp {
             };
             let is_local_jev = active_local_jev_id.is_some();
             let models_dir_ref = active_local_jev_id.unwrap_or("laya_multilingual");
+            let onejev_probe_id = active_local_jev_id
+                .filter(|id| moss_voice::settings::is_local_onejev_model(id))
+                .or_else(|| {
+                    [
+                        moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL,
+                        moss_voice::settings::LOCAL_ONEJEV_4B_MODEL,
+                        moss_voice::settings::LOCAL_ONEJEV_9B_MODEL,
+                    ]
+                    .into_iter()
+                    .find(|id| self.models.path_if_installed(id).is_some())
+                })
+                .unwrap_or(moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL);
             let onejev_env = moss_voice::onejev::detect_onejev_env(
-                self.models.root_for(moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL),
+                self.models.root_for(onejev_probe_id),
                 false,
             );
             let laya_env = Self::detect_laya_env_with_probe(false);
@@ -2658,7 +2710,7 @@ mod imp {
 
         /// MOSS 可以自动管理的 Laya 根目录；用户用 `MOSS_LAYA_PYTHON` 指定了外部 Python 时返回 `None`。
         fn laya_env_root(&self) -> Option<std::path::PathBuf> {
-            if std::env::var_os("MOSS_LAYA_PYTHON").is_some() {
+            if moss_laya_python_env().is_some() {
                 return None;
             }
             #[cfg(test)]
@@ -2945,9 +2997,8 @@ mod imp {
 
         fn resolve_laya_python() -> (std::path::PathBuf, std::path::PathBuf) {
             let install_dir = writable_install_dir();
-            let env_py = std::env::var_os("MOSS_LAYA_PYTHON").map(std::path::PathBuf::from);
-            let laya_root = std::env::var_os("MOSS_LAYA_ROOT")
-                .map(std::path::PathBuf::from)
+            let env_py = moss_laya_python_env();
+            let laya_root = moss_laya_root_env()
                 .or_else(|| {
                     install_dir.as_ref().and_then(|dir| {
                         [dir.join("laya"), dir.join("moss-laya")]
@@ -5481,9 +5532,24 @@ mod imp {
             assert!(builtin.laya.lock().unwrap().cancelling_model.is_none());
             assert!(builtin.models.path_if_installed("onejev_1_6_9b").is_none());
 
-            if std::env::var_os("MOSS_LAYA_ROOT").is_none()
-                && std::env::var_os("MOSS_LAYA_PYTHON").is_none()
-            {
+            assert!(parse_abs_env_path(None).is_none());
+            assert!(parse_abs_env_path(Some(std::ffi::OsStr::new(""))).is_none());
+            assert!(parse_abs_env_path(Some(std::ffi::OsStr::new("   "))).is_none());
+            assert!(parse_abs_env_path(Some(std::ffi::OsStr::new("relative/laya"))).is_none());
+            let abs_sample = std::env::temp_dir().join("moss-laya-sample");
+            let abs_padded = format!("  {}  ", abs_sample.display());
+            assert_eq!(
+                parse_abs_env_path(Some(std::ffi::OsStr::new(&abs_padded))),
+                Some(abs_sample.clone())
+            );
+            assert!(parse_non_empty_env_path(None).is_none());
+            assert!(parse_non_empty_env_path(Some(std::ffi::OsStr::new("  "))).is_none());
+            assert_eq!(
+                parse_non_empty_env_path(Some(std::ffi::OsStr::new("  python3  "))),
+                Some(std::path::PathBuf::from("python3"))
+            );
+
+            if moss_laya_root_env().is_none() && moss_laya_python_env().is_none() {
                 let (laya_root, laya_py) = BuiltinVoice::resolve_laya_python();
                 let tmp = std::env::temp_dir();
                 assert!(

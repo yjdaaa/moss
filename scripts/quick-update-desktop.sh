@@ -106,15 +106,54 @@ if [[ "$BUILD_ONLY" -eq 0 ]]; then
   APP="$(resolve_app)"
 fi
 
-if [[ -z "$VERSION_OVERRIDE" && -n "$APP" ]]; then
-  VERSION_OVERRIDE="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist" 2>/dev/null || true)"
-fi
-if [[ -n "$VERSION_OVERRIDE" ]]; then
-  if [[ ! "$VERSION_OVERRIDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-    echo "Invalid version: $VERSION_OVERRIDE" >&2; exit 2
+CONF_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$TAURI_DIR/tauri.conf.json" | head -1)"
+
+newer_three_part_version() {
+  local cand="$1" base="$2"
+  [[ "$cand" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local c1="${BASH_REMATCH[1]}" c2="${BASH_REMATCH[2]}" c3="${BASH_REMATCH[3]}"
+  [[ "$base" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 0
+  local b1="${BASH_REMATCH[1]}" b2="${BASH_REMATCH[2]}" b3="${BASH_REMATCH[3]}"
+  if (( 10#$c1 != 10#$b1 )); then (( 10#$c1 > 10#$b1 )); return; fi
+  if (( 10#$c2 != 10#$b2 )); then (( 10#$c2 > 10#$b2 )); return; fi
+  (( 10#$c3 > 10#$b3 ))
+}
+
+resolve_effective_version() {
+  local explicit="${1#v}"
+  if [[ -n "$explicit" ]]; then
+    if [[ ! "$explicit" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+      echo "Invalid version: $1" >&2
+      exit 2
+    fi
+    echo "$explicit"
+    return
   fi
-  export MOSS_RELEASE_VERSION="$VERSION_OVERRIDE"
-  log "Embedding version $VERSION_OVERRIDE (matches the installed MOSS.app unless --version is given)"
+  local best="$CONF_VERSION"
+  if [[ -n "$APP" ]]; then
+    local app_ver
+    app_ver="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist" 2>/dev/null || true)"
+    if newer_three_part_version "$app_ver" "$best"; then
+      best="$app_ver"
+    fi
+  fi
+  local tag tag_ver
+  while IFS= read -r tag; do
+    if [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+      tag_ver="${BASH_REMATCH[1]}"
+      if newer_three_part_version "$tag_ver" "$best"; then
+        best="$tag_ver"
+      fi
+      break
+    fi
+  done < <(git -C "$REPO" tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname 2>/dev/null || true)
+  echo "$best"
+}
+
+EFFECTIVE_VERSION="$(resolve_effective_version "$VERSION_OVERRIDE")"
+if [[ -n "$EFFECTIVE_VERSION" ]]; then
+  export MOSS_RELEASE_VERSION="$EFFECTIVE_VERSION"
+  log "Embedding release version $EFFECTIVE_VERSION ..."
 fi
 
 EXPECTED_PROTO="$(expected_protocol)"
@@ -140,11 +179,19 @@ fi
 STARTED_AT="$(date +%s)"
 log "Running cargo tauri build --no-bundle (frontend/dist + release moss-desktop, skips .app/.dmg packaging) ..."
 if cargo tauri --version >/dev/null 2>&1; then
-  (cd "$TAURI_DIR" && run cargo tauri build --no-bundle)
+  if [[ -n "$EFFECTIVE_VERSION" && "$EFFECTIVE_VERSION" != "$CONF_VERSION" ]]; then
+    (cd "$TAURI_DIR" && run cargo tauri build --no-bundle --config "{\"version\":\"$EFFECTIVE_VERSION\"}")
+  else
+    (cd "$TAURI_DIR" && run cargo tauri build --no-bundle)
+  fi
 else
   log "cargo-tauri not found; falling back to npm run build + cargo build --features tauri/custom-protocol"
   (cd "$REPO/frontend" && run npm run build)
-  (cd "$REPO" && run cargo build --release -p moss-desktop --features tauri/custom-protocol)
+  if [[ -n "$EFFECTIVE_VERSION" && "$EFFECTIVE_VERSION" != "$CONF_VERSION" ]]; then
+    (cd "$REPO" && TAURI_CONFIG="{\"version\":\"$EFFECTIVE_VERSION\"}" run cargo build --release -p moss-desktop --features tauri/custom-protocol)
+  else
+    (cd "$REPO" && run cargo build --release -p moss-desktop --features tauri/custom-protocol)
+  fi
 fi
 
 if [[ "$WITH_HOST" -eq 1 ]]; then
@@ -169,8 +216,10 @@ if [[ "$BUILD_ONLY" -eq 0 ]]; then
     moss_running && RUNNING_DURING_PATCH=1
     MACOS_DIR="$APP/Contents/MacOS"
     CHANGED=0
+    MAIN_REPLACED=0
     if replace_binary "$RELEASE_BIN" "$MACOS_DIR/moss-desktop"; then
       CHANGED=1
+      MAIN_REPLACED=1
       log "Patched $MACOS_DIR/moss-desktop"
     else
       log "Installed moss-desktop already identical; skipped"
@@ -181,9 +230,30 @@ if [[ "$BUILD_ONLY" -eq 0 ]]; then
         log "Patched voice helper (protocol $EXPECTED_PROTO) -> $MACOS_DIR/moss-voice-local"
       fi
     fi
+    if [[ -n "$EFFECTIVE_VERSION" && -f "$APP/Contents/Info.plist" ]]; then
+      CURRENT_SHORT="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist" 2>/dev/null || true)"
+      CURRENT_BUILD="$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist" 2>/dev/null || true)"
+      if [[ "$CURRENT_SHORT" != "$EFFECTIVE_VERSION" || "$CURRENT_BUILD" != "$EFFECTIVE_VERSION" ]]; then
+        PLIST_TMP="$APP/Contents/Info.plist.new-$$"
+        run cp "$APP/Contents/Info.plist" "$PLIST_TMP"
+        run chmod 644 "$PLIST_TMP"
+        run plutil -replace CFBundleShortVersionString -string "$EFFECTIVE_VERSION" "$PLIST_TMP"
+        run plutil -replace CFBundleVersion -string "$EFFECTIVE_VERSION" "$PLIST_TMP"
+        run mv -f "$PLIST_TMP" "$APP/Contents/Info.plist"
+        CHANGED=1
+        log "Updated Info.plist bundle version -> $EFFECTIVE_VERSION"
+      fi
+    fi
     # Re-seal the bundle only when something was replaced (ad-hoc, same identity '-' as tauri.conf.json).
-    # Re-signing rewrites the main executable, which by then is the new (not running) inode.
+    # If moss-desktop itself matched SHA-256 (MAIN_REPLACED=0), swap it onto a fresh inode first so
+    # codesign never mutates an active Mach-O vnode mapped by a running MOSS process (Apple Silicon SIGKILL).
     if [[ "$CHANGED" -eq 1 ]]; then
+      if [[ "$MAIN_REPLACED" -eq 0 && -f "$MACOS_DIR/moss-desktop" ]]; then
+        MAIN_TMP="$MACOS_DIR/moss-desktop.new-$$"
+        run cp "$MACOS_DIR/moss-desktop" "$MAIN_TMP"
+        run chmod 755 "$MAIN_TMP"
+        run mv -f "$MAIN_TMP" "$MACOS_DIR/moss-desktop"
+      fi
       run codesign --force --sign - --preserve-metadata=entitlements,requirements,flags "$APP"
     else
       RUNNING_DURING_PATCH=0

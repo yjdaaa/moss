@@ -4,13 +4,11 @@
 
 ## [Unreleased]
 
-## [0.3.8] - 2026-11-07
-
 ### 本地模型可同时下载、删除不留残留，Laya 运行环境改为自动准备（2026-11-07）
 
 - **现象**：语音中心点下载后所有模型按钮会短暂变灰；OneJev 多档同时下载时，后点的排队等共用推理引擎，一直显示“下载中 0%”且取消不生效，第一档下载推理引擎时进度也不动。删除模型后，MOSS 自动下载的推理引擎 `<models>/.runtime/llama-*` 永远不删；下载中途强关或崩溃留下的半截文件（9B 可达数 GB）不清理；Windows 下文件被占用时会删掉一半。Laya 需要用户自己建 Python 虚拟环境并 `pip install "laya[serve]"`，不会自动装 CUDA 版 PyTorch。
 - **根因与修复**：前端下载 / 取消 / 删除改为按模型各自加锁；`moss_voice::local_models::Progress` 新增 `preparing_runtime{done,total}` 与 `waiting_runtime`，`onejev::ensure_llama_runtime` 报告引擎下载进度，排队等锁期间可取消。`ModelManager::clean_leftovers` 在桌面启动时清理 `.download/`、`.extract-*`、`.trash-*`；`delete` 先改名到 `.trash-*` 再删，占用时模型原样保留；临时文件与解压目录带任务号，安装最后一步与删除互斥；删掉同目录最后一档 OneJev 时调用 `onejev::remove_managed_runtime`（用户自备的 `<models>/llama/` 不动）。新增 `moss_voice::laya_env`：下载 Laya 且运行环境未就绪时，先确认本机有 Python 3.10+，再在 Laya 根目录（可写的软件目录 `laya/`，否则用户目录 `moss-laya/`）后台创建带 `.moss-managed` 标记的 `.venv`，按 `nvidia-smi` 报告的驱动 CUDA 版本装 `cu118`～`cu128` 版 PyTorch，然后装 `laya[serve]`（`--no-cache-dir`；镜像优先顺序跟随模型下载地址）并验证可用加速。没有 NVIDIA 驱动或驱动过旧时按 CPU 安装并说明；没有 Python 时不建任何目录，返回 412 说明怎样安装，界面仍可选择只下载权重。新命令 `voice_local_laya_setup({action})`、状态 `local.laya_setup`、`laya_env.managed` / `venv_dir`；删除 Laya 时连同带标记的虚拟环境与 `tmp/` 一起删，退出 MOSS 时取消进行中的 pip。**行为变更**：删除最后一档 OneJev 会删推理引擎；删除 Laya 会删 MOSS 自建的虚拟环境；下载 Laya 会联网执行 pip（只在用户点击时）。设置了 `MOSS_LAYA_PYTHON` 的外部环境不改动。默认值与安全门禁不变，不是破坏性变更。
-- **验证**：新增 `moss-voice` `laya_env` 6 项（Python 探测解析与版本优选、CUDA 版本到 PyTorch 索引的映射、pip 参数与镜像回退、带标记虚拟环境的创建与删除、无 Python 说明与无显卡 CPU 说明、取消 pip 且不删用户自建环境）、`local_models` 2 项（启动清理残留与经回收目录删除、最后一档 OneJev 删推理引擎）、`onejev` 1 项（排队等待可取消）；桌面 `local_laya_device_selection…` 补充删除 Laya 时删除自建虚拟环境；前端 `voiceState.test.mjs` 1 项、`voice-center.browser.mjs` 增加同时下载与环境准备 / 取消。在含另一会话进行中改动的合并工作树上：`cargo test --workspace` 1007 通过 / 0 失败 / 10 忽略，`npm test` 216 项、`npm run build`、`voice-center` 与 `voice-speaker` 浏览器用例通过。用本机真实 Python 跑过一次探测（`real_python_probe`，只有系统自带的 3.9，正确给出说明）；未在真实网络上执行 pip 安装，未在 Windows / NVIDIA 显卡上验证 CUDA 版 PyTorch。
+- **验证**：新增 `moss-voice` `laya_env` 6 项（Python 探测解析与版本优选、CUDA 版本到 PyTorch 索引的映射、pip 参数与镜像回退、带标记虚拟环境的创建与删除、无 Python 说明与无显卡 CPU 说明、取消 pip 且不删用户自建环境）、`local_models` 2 项（启动清理残留与经回收目录删除、最后一档 OneJev 删推理引擎）、`onejev` 1 项（排队等待可取消）；桌面 `local_laya_device_selection…` 补充删除 Laya 时删除自建虚拟环境；前端 `voiceState.test.mjs` 1 项、`voice-center.browser.mjs` 增加同时下载与环境准备 / 取消。`voice-center` 与 `voice-speaker` 浏览器用例、`npm run test:e2e` 通过；与同日应用内更新、唤醒词与音量、外置 `MOSS_LAYA_ROOT` 修复、版本号同步合并后复测：`cargo test --workspace` 1012 通过 / 0 失败 / 10 忽略，`npm test` 218 项、`npm run build` 通过。用本机真实 Python 跑过一次探测（`real_python_probe`，只有系统自带的 3.9，正确给出说明）；未在真实网络上执行 pip 安装，未在 Windows / NVIDIA 显卡上验证 CUDA 版 PyTorch。
 - **关联**：`crates/moss-voice/src/{laya_env,local_models,onejev,lib}.rs`；`apps/desktop/src-tauri/src/voice_builtin.rs`（`start_laya_setup`、`laya_setup_action`、`laya_env_root`、`model_download`、`model_delete`、`voice_local_laya_setup`）、`src/lib.rs`、`build.rs`、`capabilities/default.json`；`frontend/src/{voiceApi.js,voiceState.js,styles.css,components/VoiceBuiltinCard.jsx}`（`layaSetupView`、`localModelDeleteText`）；`frontend/tests/{voiceState.test.mjs,voice-center.browser.mjs}`；`docs/integration/moss-native-voice-spec.md` n64、`docs/developer/api-contracts.md`。
 
 ### 桌面版与 Android 支持在软件内下载新版并完成更新，默认启动自动检查并顶栏提醒（2026-11-07）
@@ -26,6 +24,20 @@
 - **根因与修复**：新增 `wake` 标签与 `VoiceWakeVolumePanel`：左边“MOSS 说话音量”，按已允许设备显示滑块，松手即通过已有的 `voice_device_request set_volume` 下发（离线或固件不支持时禁用并说明原因，纯函数 `volumeDevicesView` / `volumeLevelText`）；右边“修改唤醒词”入口，打开安全窗口新增的 `wakeword` 任务（`open_voice_private` 白名单加 `wakeword`）。安全窗口总览分成“隐私与家居”四项和“设备”两项（唤醒词 / 固件升级各自独立）；唤醒词卡改为“① 选择 → ② 逐台推送 → 高级：基础资源包”的分步卡片，固件卡列表改成卡片行。**权限不变**：唤醒词三条命令仍只授予打包私密窗口，主窗口不读不写唤醒词；推送前逐台确认不变。
 - **验证**：`voiceState.test.mjs` 新增音量列表用例，`voiceTabs.test.mjs` 更新标签顺序，`voicePrivacyAcl.test.mjs` 新增入口与 ACL 断言，`voice-private-navigation.browser.mjs` 任务数改为 6；用模拟数据截图核对了新版排版。未验证：没有在真实小智设备上调过音量、推过唤醒词。
 - **关联**：`frontend/src/components/VoiceWakeVolumePanel.jsx`、`VoiceWakeWordCard.jsx`、`VoiceFirmwareCard.jsx`、`VoiceBuiltinCard.jsx`（`PrivateFirmwareEntry`）、`voicePrivate.jsx`、`pages/VoicePage.jsx`、`voiceState.js`（`VOICE_TABS`、`volumeDevicesView`）、`styles.css`；`apps/desktop/src-tauri/src/lib.rs`（`open_voice_private`）。
+
+### 修复外置 `MOSS_LAYA_ROOT` 模型目录因兼容修补或 CRLF 配置字节差被误判为未下载（2026-11-07）
+
+- **现象**：用户已通过 `MOSS_LAYA_ROOT` 准备外置 `laya_multilingual` 目录，但若 `tokenizer/tokenizer_config.json` 等配置文件在 Windows 下经 CRLF 转换或为兼容新版 `transformers` 调整了 `tokenizer_class` 字段导致字节数与原始清单（502B）不同，或桌面程序运行于可写独立目录，`laya_multilingual` 仍被判定为未下载。
+- **根因与修复**：`moss_voice::local_models::installed` 对目录型模型的主权重与大体积词表继续核对精确字节大小，对 `*config.json` 元数据在字节数变化时校验其为非空合法 JSON 对象后放行；`moss_desktop::voice_builtin::init` 在显式配置 `MOSS_LAYA_ROOT` 且默认 `models/` 下对应模型尚未完整安装时始终挂载 `<path>/models`。不改默认值与安全门禁，不是破坏性变更。
+- **验证**：新增 `moss-voice` `directory_model_installed_accepts_patched_config_json_but_rejects_broken_weights`，`cargo test --workspace` 通过，并执行 `quick-update-desktop.ps1` 原地更新正式版 `moss-desktop.exe`。未连接物理硬件。
+- **关联**：`crates/moss-voice/src/local_models.rs`（`extra_file_installed`、`installed`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`init`）。
+
+### 统一同步仓库包版本至 `0.3.7` 并让双端快更与热重载脚本自动对齐最新发版标签（2026-11-06）
+
+- **现象**：`v0.3.1`～`v0.3.7` 期间采用纯 Git 标签触发云端流水线注入 `MOSS_RELEASE_VERSION`，仓库内 `tauri.conf.json`、`Cargo.toml` 与 `frontend/package.json` 仍停留在 `0.3.0`，且 `scripts/quick-update-desktop.sh` 默认读取已安装旧版 `MOSS.app` 的 `CFBundleShortVersionString` 覆盖编译版本，导致本机编译产物文件属性与启动自动检查更新显示当前版本 `v0.3.0` 并误报发现 `v0.3.7`。
+- **根因与修复**：将 `apps/desktop/src-tauri/tauri.conf.json`、主工作区与 `apps/moss-voice-local` 共 17 个 `Cargo.toml`（及对应 `Cargo.lock`）、`frontend/package.json`（及 `package-lock.json`）统一升级至 `0.3.7`，`SettingsModal` 版本兜底改为注入前端 `package.json` 版本号，`crates/laser-api/build.rs` 显式追踪 `MOSS_RELEASE_VERSION`；同时为 `scripts/quick-update-desktop.ps1`、`scripts/quick-update-desktop.sh` 与 `scripts/dev-desktop.ps1` 增加最新正式 `vX.Y.Z` Git 标签版本解析（macOS 快更同步更新 `MOSS.app/Contents/Info.plist` 并重签名），确保后续打标后本机快更与热重载产物自动同步最新版本。无功能与安全门禁变更，不是破坏性变更。
+- **验证**：`frontend` `npm test`（含 `devQuickUpdate.test.mjs` 全量 17 个 `Cargo.toml` 版本一致性与双端脚本 ASCII 断言）、`npm run build`、`npm run test:e2e`、`apps/moss-voice-local` `cargo test`、根工作区 `cargo test --workspace` 通过，并执行 `quick-update-desktop.ps1 -WithVoiceHelper -WithHost` 核对 `moss-desktop.exe` 文件属性与 `/api/system/info` 版本为 `0.3.7`。未连接物理硬件。
+- **关联**：`apps/desktop/src-tauri/tauri.conf.json`、`apps/*/Cargo.toml`、`crates/*/Cargo.toml`、`crates/laser-api/build.rs`、`frontend/{package.json,vite.config.mjs,src/components/SettingsModal.jsx,tests/devQuickUpdate.test.mjs}`、`scripts/{quick-update-desktop.ps1,quick-update-desktop.sh,dev-desktop.ps1}`、`docs/developer/packaging-install.md`。
 
 ## [0.3.7] - 2026-11-06
 

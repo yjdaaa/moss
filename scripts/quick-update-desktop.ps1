@@ -3,12 +3,13 @@
 # Never force-kills running MOSS processes (preserves I-7 emergency-stop shutdown order).
 # Usage:
 #   powershell -File scripts/quick-update-desktop.ps1 [-BuildOnly] [-InstallDir <dir>]
-#       [-WithVoiceHelper] [-WithHost] [-Launch] [-SkipCacheSweep] [-WhatIf]
+#       [-Version <ver>] [-WithVoiceHelper] [-WithHost] [-Launch] [-SkipCacheSweep] [-WhatIf]
 # Pure ASCII script for Windows PowerShell 5.1 compatibility.
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [switch]$BuildOnly,
     [string]$InstallDir = '',
+    [string]$Version = '',
     [switch]$WithVoiceHelper,
     [switch]$WithHost,
     [switch]$Launch,
@@ -204,10 +205,67 @@ if (-not $WhatIfPreference) {
 }
 
 $expectedProto = Get-ExpectedVoiceHelperProtocol
+$tauriConfPath = Join-Path $tauriDir 'tauri.conf.json'
+$tauriConfObj = Get-Content -LiteralPath $tauriConfPath -Raw | ConvertFrom-Json
+$confVersion = [string]$tauriConfObj.version
+
+function Test-NewerThreePartVersion([string]$cand, [string]$base) {
+    $mc = [regex]::Match($cand, '^(\d+)\.(\d+)\.(\d+)$')
+    $mb = [regex]::Match($base, '^(\d+)\.(\d+)\.(\d+)$')
+    if (-not $mc.Success) { return $false }
+    if (-not $mb.Success) { return $true }
+    for ($i = 1; $i -le 3; $i++) {
+        $vc = [int]$mc.Groups[$i].Value
+        $vb = [int]$mb.Groups[$i].Value
+        if ($vc -gt $vb) { return $true }
+        if ($vc -lt $vb) { return $false }
+    }
+    return $false
+}
+
+function Resolve-EffectiveMossVersion([string]$explicitVer, [string]$defaultVer) {
+    $clean = $explicitVer.Trim()
+    if ($clean.StartsWith('v')) { $clean = $clean.Substring(1) }
+    if ($clean -ne '') {
+        if ($clean -notmatch '^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$') {
+            throw "Invalid -Version '$explicitVer' (expected semantic version X.Y.Z)."
+        }
+        return $clean
+    }
+    $best = $defaultVer
+    try {
+        $tags = @(& git -C $repo tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname 2>$null)
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($t in $tags) {
+                $mt = [regex]::Match([string]$t, '^v(\d+\.\d+\.\d+)$')
+                if ($mt.Success) {
+                    $tagVer = $mt.Groups[1].Value
+                    if (Test-NewerThreePartVersion $tagVer $best) {
+                        $best = $tagVer
+                    }
+                    break
+                }
+            }
+        }
+    } catch {
+        # Ignore missing git binary and fall back to tauri.conf.json version.
+    }
+    return $best
+}
+
+$effectiveVersion = Resolve-EffectiveMossVersion $Version $confVersion
 $activeHelperSource = $null
 $startedAt = (Get-Date).AddSeconds(-2)
 
-if ($PSCmdlet.ShouldProcess($releaseExe, 'Build official release moss-desktop.exe (--no-bundle)')) {
+if ($PSCmdlet.ShouldProcess($releaseExe, "Build official release moss-desktop.exe v$effectiveVersion (--no-bundle)")) {
+    $prevReleaseVer = $env:MOSS_RELEASE_VERSION
+    $prevTauriCfg = $env:TAURI_CONFIG
+    $env:MOSS_RELEASE_VERSION = $effectiveVersion
+    if ($effectiveVersion -ne $confVersion) {
+        $env:TAURI_CONFIG = (@{ version = $effectiveVersion } | ConvertTo-Json -Compress)
+    }
+    try {
+    Write-Host "[MOSS QuickUpdate] Embedding release version $effectiveVersion ..." -ForegroundColor Cyan
     if (-not $WithVoiceHelper) {
         foreach ($cand in @($helperExe, $sidecarExe, $releaseHelperExe)) {
             if ((Get-BinaryVoiceHelperProtocol $cand) -eq $expectedProto) {
@@ -243,9 +301,19 @@ if ($PSCmdlet.ShouldProcess($releaseExe, 'Build official release moss-desktop.ex
 
     if ($hasCargoTauri) {
         Write-Host '[MOSS QuickUpdate] Running cargo tauri build --no-bundle (builds frontend/dist + release moss-desktop.exe, skips NSIS installer)...' -ForegroundColor Cyan
+        $versionOverlay = $null
+        if ($effectiveVersion -ne $confVersion) {
+            $versionOverlay = Join-Path ([System.IO.Path]::GetTempPath()) "moss-tauri-ver-$PID.json"
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($versionOverlay, (@{ version = $effectiveVersion } | ConvertTo-Json -Compress), $utf8NoBom)
+        }
         Push-Location $tauriDir
         try {
-            & cargo tauri build --no-bundle
+            if ($null -ne $versionOverlay) {
+                & cargo tauri build --no-bundle --config $versionOverlay
+            } else {
+                & cargo tauri build --no-bundle
+            }
             if ($LASTEXITCODE -ne 0) {
                 if (Move-AsideIfLocked $releaseExe) {
                     $movedRunningAside = $true
@@ -257,6 +325,9 @@ if ($PSCmdlet.ShouldProcess($releaseExe, 'Build official release moss-desktop.ex
             }
         } finally {
             Pop-Location
+            if ($null -ne $versionOverlay -and (Test-Path -LiteralPath $versionOverlay -PathType Leaf)) {
+                Remove-Item -LiteralPath $versionOverlay -Force -ErrorAction SilentlyContinue
+            }
         }
     } else {
         Write-Host '[MOSS QuickUpdate] cargo-tauri not found; building frontend/dist + cargo build --release -p moss-desktop --features tauri/custom-protocol ...' -ForegroundColor Cyan
@@ -309,6 +380,18 @@ if ($PSCmdlet.ShouldProcess($releaseExe, 'Build official release moss-desktop.ex
     if (Test-Path -LiteralPath (Split-Path -Parent $debugHelperExe) -PathType Container) {
         if (Sync-HelperBinary $activeHelperSource $debugHelperExe) {
             Write-Host "[MOSS QuickUpdate] Synced voice helper (protocol $expectedProto) -> $debugHelperExe" -ForegroundColor Green
+        }
+    }
+    } finally {
+        if ($null -eq $prevReleaseVer) {
+            Remove-Item Env:MOSS_RELEASE_VERSION -ErrorAction SilentlyContinue
+        } else {
+            $env:MOSS_RELEASE_VERSION = $prevReleaseVer
+        }
+        if ($null -eq $prevTauriCfg) {
+            Remove-Item Env:TAURI_CONFIG -ErrorAction SilentlyContinue
+        } else {
+            $env:TAURI_CONFIG = $prevTauriCfg
         }
     }
 }

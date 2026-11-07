@@ -57,6 +57,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Build frontend once
+        env:
+          MOSS_RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           cd frontend
           npm ci

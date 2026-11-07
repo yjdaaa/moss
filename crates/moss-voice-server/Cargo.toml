@@ -1,6 +1,6 @@
 [package]
 name = "moss-voice-server"
-version = "0.3.0"
+version = "0.3.7"
 edition = "2024"
 description = "MOSS 内置语音服务（内置语音技术书 NV1 起）：小智设备的 OTA 与 WebSocket 服务、设备允许流程、会话。仅桌面端使用，不进入 laser-api / moss-host / Android。"
 license = "MIT"

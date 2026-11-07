@@ -1,6 +1,6 @@
 [package]
 name = "moss-voice-local"
-version = "0.3.0"
+version = "0.3.7"
 edition = "2024"
 description = "MOSS 本地模型辅助程序（内置语音技术书 §11.2，NV6）：Silero 判停、SenseVoice 识别、Kokoro 合成。经标准输入输出与 MOSS 通信。因静态链接的 sherpa-onnx 含 GPL-3.0 的 espeak-ng，本程序以 GPL-3.0-or-later 单独发布；MOSS 本体仍为 MIT。"
 license = "GPL-3.0-or-later"

@@ -15,8 +15,23 @@ test("dev-desktop.ps1, quick-update-desktop.ps1, and clean-build-cache.ps1 stay 
   const quick = readRepoText("scripts/quick-update-desktop.ps1");
   assert.match(quick, /--no-bundle/);
   assert.match(quick, /Assert-MossNotRunning/);
+  assert.match(quick, /Resolve-EffectiveMossVersion/);
+  assert.match(quick, /MOSS_RELEASE_VERSION/);
   assert.doesNotMatch(quick, /Stop-Process[^\r\n]*(moss-desktop|moss-voice-local)/i, "must never force-kill running MOSS or voice helper");
   assert.doesNotMatch(quick, /taskkill[^\r\n]*(moss-desktop|moss-voice-local)/i, "must never force-kill running MOSS or voice helper");
+
+  const tauriConf = JSON.parse(readRepoText("apps/desktop/src-tauri/tauri.conf.json"));
+  const pkgJson = JSON.parse(readRepoText("frontend/package.json"));
+  assert.equal(pkgJson.version, tauriConf.version, "frontend/package.json version must match tauri.conf.json");
+
+  const rootCargo = readRepoText("Cargo.toml");
+  const memberMatches = [...rootCargo.matchAll(/"((?:apps|crates)\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(memberMatches.length >= 16, "workspace members must be parsable from root Cargo.toml");
+  const versionPattern = new RegExp(`^version\\s*=\\s*"${tauriConf.version.replace(/\./g, "\\.")}"`, "m");
+  for (const dir of [...memberMatches, "apps/moss-voice-local"]) {
+    const manifest = readRepoText(`${dir}/Cargo.toml`);
+    assert.match(manifest, versionPattern, `${dir}/Cargo.toml version must match tauri.conf.json (${tauriConf.version})`);
+  }
 });
 
 test("quick-update, dev-desktop, and start.bat verify PROTOCOL_VERSION and sync moss-voice-local.exe next to moss-desktop.exe", () => {
@@ -32,6 +47,9 @@ test("quick-update, dev-desktop, and start.bat verify PROTOCOL_VERSION and sync 
 
   const dev = readRepoText("scripts/dev-desktop.ps1");
   assert.match(dev, /Ensure-DevVoiceHelper/);
+  assert.match(dev, /Resolve-EffectiveMossVersion/);
+  assert.match(dev, /MOSS_RELEASE_VERSION/);
+  assert.match(dev, /TAURI_CONFIG/);
   assert.match(dev, /Test-MossViteHttp/);
   assert.match(dev, /Test-CommandLineMatchesFrontendDir/);
   assert.match(dev, /Test-MossViteProcess/);
@@ -58,6 +76,10 @@ test("macOS quick-update-desktop.sh stays ASCII, patches MOSS.app atomically, re
   assert.match(quick, /\.new-\$\$/);
   assert.match(quick, /mv -f "\$tmp" "\$dst"/);
   assert.match(quick, /codesign --verify --deep --strict/);
+  assert.match(quick, /resolve_effective_version/);
+  assert.match(quick, /MAIN_REPLACED=0/);
+  assert.match(quick, /Info\.plist\.new-\$\$/);
+  assert.match(quick, /plutil -replace CFBundleShortVersionString/);
   assert.match(quick, /MOSS_RELEASE_VERSION/);
   // Running detection must match the executable path (ps comm), not argv, and must not use grep -q under pipefail
   assert.match(quick, /ps -axo comm=/);

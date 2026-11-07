@@ -212,30 +212,80 @@ function Test-VerifiedMossViteOrigin([string]$origin, [int]$port, [string]$expec
 
 $needDist = $RebuildDist -or (-not (Test-Path -LiteralPath $distIndex -PathType Leaf)) -or (-not (Test-Path -LiteralPath $distPrivate -PathType Leaf))
 
-if ($DryRun) {
-    Write-Host "[DryRun] Repo: $repo"
-    Write-Host "[DryRun] Need initial frontend/dist build (for packaged voice-private.html): $needDist"
-    Write-Host "[DryRun] Dev UI origin: $devOrigin"
-    Write-Host "[DryRun] Command: MOSS_DEV_UI_ORIGIN=$devOrigin cargo run -p moss-desktop"
-    exit 0
+$tauriConfPath = Join-Path $repo 'apps/desktop/src-tauri/tauri.conf.json'
+$tauriConfObj = Get-Content -LiteralPath $tauriConfPath -Raw | ConvertFrom-Json
+$confVersion = [string]$tauriConfObj.version
+
+function Test-NewerThreePartVersion([string]$cand, [string]$base) {
+    $mc = [regex]::Match($cand, '^(\d+)\.(\d+)\.(\d+)$')
+    $mb = [regex]::Match($base, '^(\d+)\.(\d+)\.(\d+)$')
+    if (-not $mc.Success) { return $false }
+    if (-not $mb.Success) { return $true }
+    for ($i = 1; $i -le 3; $i++) {
+        $vc = [int]$mc.Groups[$i].Value
+        $vb = [int]$mb.Groups[$i].Value
+        if ($vc -gt $vb) { return $true }
+        if ($vc -lt $vb) { return $false }
+    }
+    return $false
 }
 
-if ($needDist) {
-    Write-Host '[MOSS Dev] Building frontend/dist once so packaged voice-private.html is present...' -ForegroundColor Cyan
-    Push-Location $frontendDir
+function Resolve-EffectiveMossVersion([string]$defaultVer) {
+    $best = $defaultVer
     try {
-        & $npmCmd run build
-        if ($LASTEXITCODE -ne 0) { throw 'Initial frontend build failed.' }
-    } finally {
-        Pop-Location
+        $tags = @(& git -C $repo tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname 2>$null)
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($t in $tags) {
+                $mt = [regex]::Match([string]$t, '^v(\d+\.\d+\.\d+)$')
+                if ($mt.Success) {
+                    $tagVer = $mt.Groups[1].Value
+                    if (Test-NewerThreePartVersion $tagVer $best) {
+                        $best = $tagVer
+                    }
+                    break
+                }
+            }
+        }
+    } catch {
+        # Ignore missing git binary and fall back to tauri.conf.json version.
     }
+    return $best
+}
+
+$effectiveVersion = Resolve-EffectiveMossVersion $confVersion
+
+if ($DryRun) {
+    Write-Host "[DryRun] Repo: $repo"
+    Write-Host "[DryRun] Effective version: $effectiveVersion"
+    Write-Host "[DryRun] Need initial frontend/dist build (for packaged voice-private.html): $needDist"
+    Write-Host "[DryRun] Dev UI origin: $devOrigin"
+    Write-Host "[DryRun] Command: MOSS_DEV_UI_ORIGIN=$devOrigin MOSS_RELEASE_VERSION=$effectiveVersion cargo run -p moss-desktop"
+    exit 0
 }
 
 Ensure-DevVoiceHelper
 
 $viteProc = $null
 $prevDevOrigin = $env:MOSS_DEV_UI_ORIGIN
+$prevReleaseVer = $env:MOSS_RELEASE_VERSION
+$prevTauriCfg = $env:TAURI_CONFIG
 try {
+    $env:MOSS_RELEASE_VERSION = $effectiveVersion
+    if ($effectiveVersion -ne $confVersion) {
+        $env:TAURI_CONFIG = (@{ version = $effectiveVersion } | ConvertTo-Json -Compress)
+    }
+
+    if ($needDist) {
+        Write-Host '[MOSS Dev] Building frontend/dist once so packaged voice-private.html is present...' -ForegroundColor Cyan
+        Push-Location $frontendDir
+        try {
+            & $npmCmd run build
+            if ($LASTEXITCODE -ne 0) { throw 'Initial frontend build failed.' }
+        } finally {
+            Pop-Location
+        }
+    }
+
     if (Test-LoopbackPort $devHost $devPort) {
         if (-not (Test-VerifiedMossViteOrigin $devOrigin $devPort $frontendDir)) {
             throw "Port $devPort is already in use by an unverified or non-MOSS server. Stop that listener before running dev-desktop.ps1."
@@ -261,7 +311,7 @@ try {
     }
 
     $env:MOSS_DEV_UI_ORIGIN = $devOrigin
-    Write-Host "[MOSS Dev] Launching MOSS native desktop window with hot reload ($devOrigin)..." -ForegroundColor Green
+    Write-Host "[MOSS Dev] Launching MOSS native desktop window v$effectiveVersion with hot reload ($devOrigin)..." -ForegroundColor Green
     Push-Location $repo
     try {
         & cargo run -p moss-desktop
@@ -274,6 +324,16 @@ try {
         Remove-Item Env:MOSS_DEV_UI_ORIGIN -ErrorAction SilentlyContinue
     } else {
         $env:MOSS_DEV_UI_ORIGIN = $prevDevOrigin
+    }
+    if ($null -eq $prevReleaseVer) {
+        Remove-Item Env:MOSS_RELEASE_VERSION -ErrorAction SilentlyContinue
+    } else {
+        $env:MOSS_RELEASE_VERSION = $prevReleaseVer
+    }
+    if ($null -eq $prevTauriCfg) {
+        Remove-Item Env:TAURI_CONFIG -ErrorAction SilentlyContinue
+    } else {
+        $env:TAURI_CONFIG = $prevTauriCfg
     }
     if ($null -ne $viteProc -and -not $viteProc.HasExited) {
         Write-Host '[MOSS Dev] Stopping Vite dev server...' -ForegroundColor Yellow

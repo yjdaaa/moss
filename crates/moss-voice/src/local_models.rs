@@ -405,6 +405,29 @@ pub fn install_path(root: &Path, spec: &ModelSpec) -> PathBuf {
     }
 }
 
+fn extra_file_installed(dir: &Path, extra: &ExtraFile) -> bool {
+    let file_path = dir.join(extra.path);
+    let Ok(meta) = file_path.metadata() else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    if meta.len() == extra.size {
+        return true;
+    }
+    let is_config_json = extra.path == "config.json"
+        || extra.path.ends_with("/config.json")
+        || extra.path.ends_with("_config.json");
+    if is_config_json && (2..=65_536).contains(&meta.len()) {
+        return fs::read(&file_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).ok())
+            .is_some_and(|obj| !obj.is_empty());
+    }
+    false
+}
+
 /// 模型是否已完整安装。
 pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
     let path = install_path(root, spec);
@@ -414,9 +437,7 @@ pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
         Archive::Directory { .. } => {
             path.is_dir()
                 && path.join(spec.path).metadata().map(|m| m.is_file() && m.len() == spec.size).unwrap_or(false)
-                && spec.extras.iter().all(|extra| {
-                    path.join(extra.path).metadata().map(|m| m.is_file() && m.len() == extra.size).unwrap_or(false)
-                })
+                && spec.extras.iter().all(|extra| extra_file_installed(&path, extra))
                 && spec.required.iter().all(|item| path.join(item).exists())
         }
     }
@@ -1414,5 +1435,45 @@ mod tests {
             resolve_download_bases(onejev, "https://hf-mirror.com"),
             vec![expected_mirror.to_owned(), DEFAULT_ONEJEV_0_8B_BASE.to_owned()]
         );
+    }
+
+    #[test]
+    fn directory_model_installed_accepts_patched_config_json_but_rejects_broken_weights() {
+        let dir = tempfile::tempdir().unwrap();
+        let laya = super::spec("laya_multilingual").unwrap();
+        let model_dir = dir.path().join("laya_multilingual");
+        fs::create_dir_all(model_dir.join("encoder")).unwrap();
+        fs::create_dir_all(model_dir.join("tokenizer")).unwrap();
+
+        let write_sized = |rel: &str, len: u64| {
+            let f = fs::File::create(model_dir.join(rel)).unwrap();
+            f.set_len(len).unwrap();
+        };
+        write_sized("model.safetensors", laya.size);
+        write_sized("config.json", 160);
+        write_sized("rl_agent_config.json", 472);
+        write_sized("encoder/config.json", 1_938);
+        write_sized("tokenizer/tokenizer.json", 34_363_188);
+
+        // 本地为兼容新版 transformers 修补或转为 CRLF 的有效 JSON 对象（545 字节 != 502）仍视为已安装
+        fs::write(
+            model_dir.join("tokenizer/tokenizer_config.json"),
+            br#"{"bos_token":"<bos>","tokenizer_class":"PreTrainedTokenizerFast","unk_token":"<unk>"}"#,
+        )
+        .unwrap();
+        assert!(installed(dir.path(), laya));
+
+        // 损坏的非 JSON 内容不可视为已安装
+        fs::write(model_dir.join("tokenizer/tokenizer_config.json"), b"{broken").unwrap();
+        assert!(!installed(dir.path(), laya));
+
+        // 恢复合法配置，但主权重或词表大小不符时必须拒绝
+        fs::write(
+            model_dir.join("tokenizer/tokenizer_config.json"),
+            br#"{"tokenizer_class":"PreTrainedTokenizerFast"}"#,
+        )
+        .unwrap();
+        write_sized("tokenizer/tokenizer.json", 1024);
+        assert!(!installed(dir.path(), laya));
     }
 }

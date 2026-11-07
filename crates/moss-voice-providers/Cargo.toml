@@ -1,6 +1,6 @@
 [package]
 name = "moss-voice-providers"
-version = "0.3.0"
+version = "0.3.7"
 edition = "2024"
 description = "MOSS 内置语音服务的模型提供方（内置语音技术书 NV3 起）：ASR / LLM / TTS 接口与 OpenAI 兼容、本地模型、豆包流式实现，以及切句、Markdown 清洗、对话历史截断、WAV 编解码、重采样等纯函数。仅桌面端使用。"
 license = "MIT"
