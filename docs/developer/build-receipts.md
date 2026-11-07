@@ -2,6 +2,26 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## GitHub 仓库 `v0.3.9` 云端四端并行交付安装包构建（含应用内更新包，2026-11-07）
+
+用户 2026-11-07 决定“帮我吧项目所有没提交的都git一下然后推送到远端，并release一下”，并在 `v0.3.8` 桌面三端因配置公钥为空签名失败后选择“重打 v0.3.9”：将本地 Jev 运行状态可见（`81ee163`）、发布流水线公钥修复（`1919697`）与桌面摄像头标签页（`2a9e428`）一并推送 `main`，删除指向未完成提交的旧 `v0.3.9` 标签后在 `2a9e428` 重建带附注标签，触发 `.github/workflows/release.yml` Run `42364413826`（同提交主分支 CI Run `42364396731` 同步全绿），全部 6 个作业成功并发布 [Release v0.3.9](https://github.com/yjdaaa/moss/releases/tag/v0.3.9)。`v0.3.8` 标签保留但没有 Release。
+
+| 产物 | UTC时间（2026-11-07） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.9_x64-offline-voice-setup.exe` | 11:00:15 | 29,684,672 | `d69374986a9285ac640704567a07e3d5a02116ef16f66cfb2d87bdc5f875e264` |
+| `MOSS_0.3.9_x64-lite-setup.exe` | 11:00:15 | 24,072,825 | `608de5c1403a304832f61ae7a791ce6eb868f5495fd1c834dc3e3456062dea9c` |
+| `MOSS_0.3.9_windows_x64_portable.exe` | 11:00:18 | 72,281,600 | `d7c0aa01f39a99e7d2d4dc6b7a972a117d109c4bc4667c66ffa57b3925860987` |
+| `MOSS_0.3.9_macos_universal.dmg` | 11:00:17 | 81,697,266 | `3b35c6c33ff1d967ba0c0aa93516b7748d0d2a3bdb0c99bfb7510ab75ebf877f` |
+| `MOSS_0.3.9_macos_universal.app.tar.gz` | 11:00:19 | 82,557,765 | `fd7056ed6bb23f3a5bf89fbbf17eb3766691cbd21b39439f0c7f57f18de0b74e` |
+| `MOSS_0.3.9_android_aarch64.apk` | 11:00:16 | 55,443,634 | `bd7a7274462791cfac9106a43d35089d49372e0955d8f279dcc6b3df166c68de` |
+| `latest.json` | 11:00:16 | 3,073 | `12c547edcb669203f4fa89c63488300f4f9c196c836ac5690676b2eccca723f9` |
+| `moss-voice-local-0.3.9-gpl-source.zip` | 11:00:16 | 121,618 | `396589f420ef92dc6c3021dea505917bdb1e7e74f6da62ee8805bd0263b66447` |
+| `SHA256SUMS.txt` | 11:00:16 | 783 | `a552f6de776aaab00e1377e84c6bcea625de3fbe82cd89d15b1d99a98144c441` |
+
+核对：SHA-256、字节与 UTC 时间取自 GitHub Release API 资产 `digest` / `size` / `updated_at`，并与发布的 `SHA256SUMS.txt` 逐项一致，未将大体积安装包重新下载到本机复算；`latest.json` 版本为 `0.3.9`，`windows-x86_64-lite` / `windows-x86_64-offline-voice` / `darwin-aarch64` / `darwin-x86_64` / `android-aarch64` 五个平台都带签名并指向本次资产。构建前同一代码在 macOS 通过 `cargo test --workspace`（1020 通过，10 忽略）、前端 `npm test`（223 通过）、`npm run build`、`camera.browser.mjs`、`voice-center.browser.mjs`、`npm run test:e2e`（35/35），并已用 `quick-update-desktop.sh` 同步本机 MOSS。
+
+**未验证**：未下载安装任何一个云端安装包，未实测从旧版经应用内更新升到 `0.3.9`；未连接真实小智摄像头设备与激光雕刻机；未在真实 OneJev 模型、显卡或 CPU 环境上实测 Jev 延迟；macOS 包 ad-hoc 签名、未公证。
+
 ## GitHub 仓库 `v0.3.7` 云端四端并行交付安装包构建（2026-11-06）
 
 用户 2026-11-06 决定“直接把所有修改都 git 然后推送到远端上，并 release 发布新版本”：将本地 Jev 三档 `OneJev 1.6`（`0.8B` / `4B` / `9B`）与 `Laya` 跨平台硬件加速、小智自定义唤醒词、AI 雕刻预览确认弹窗、图片灰度抖动与固件行程门禁合入提交 `0d3144b`，按 `scripts/release-tag.ps1` 步骤推送 `main` 与带附注标签 `v0.3.7`，触发 `.github/workflows/release.yml` Run `42252269752`（同提交主分支 CI Run `42252263422` 同步全绿），全部 6 个作业成功并发布 [Release v0.3.7](https://github.com/yjdaaa/moss/releases/tag/v0.3.7)。
