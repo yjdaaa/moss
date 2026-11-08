@@ -286,14 +286,13 @@ mod tests {
                         &self.name,
                     ])
                     .output();
-                if let Ok(result) = result {
-                    if result.status.success()
-                        && String::from_utf8_lossy(&result.stdout).trim() == self.name
-                    {
-                        let _ = Command::new(self.docker)
-                            .args(["rm", "--force", &self.name])
-                            .output();
-                    }
+                if let Ok(result) = result
+                    && result.status.success()
+                    && String::from_utf8_lossy(&result.stdout).trim() == self.name
+                {
+                    let _ = Command::new(self.docker)
+                        .args(["rm", "--force", &self.name])
+                        .output();
                 }
             }
         }
