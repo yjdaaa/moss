@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Windows 上 `onejev.rs` 不再多出一条未使用引用的警告（2026-11-08）
+
+- **现象**：Windows 上跑 `cargo clippy -- -D warnings` 时，`crates/moss-voice/src/onejev.rs` 报 `Component` 未使用，零警告验收被拦；运行与打包不受影响。
+- **根因与修复**：上次清理警告时只给仅 Unix 使用的 `safe_intra_dir_symlink_target` 加了 `#[cfg(unix)]`，它独用的 `std::path::Component` 仍留在文件顶部引用；现在挪进函数内部。同时把 Windows 权限生成清单 `gen/schemas/windows-schema.json` 同步为与 `desktop-schema.json` 一致（去掉已删除的 `open_voice_private`，补上 `voice_diagnostics_export`），与 Windows 编译时自动生成的结果相同。
+- **验证**：macOS 上 clippy 零警告、`moss-voice` 105 个测试通过。未验证：本机没有 Windows 编译目标，Windows 零警告需在 Windows 上复跑确认。
+- **关联**：`crates/moss-voice/src/onejev.rs`、`apps/desktop/src-tauri/gen/schemas/windows-schema.json`。
+
 ### 应用内更新不再卡在“安装完成，MOSS 正在重启…”（2026-11-08）
 
 - **现象**：开着内置语音服务时在软件内更新，新版已装好但旧窗口一直停在“安装完成，MOSS 正在重启…”，不退出也不重启，只能手动完全退出再打开（用户在 macOS 从 0.3.10 更新到 0.3.11 时遇到）；Windows 安装版在结束进程前走同一段收尾，同样会停在“正在安装”。

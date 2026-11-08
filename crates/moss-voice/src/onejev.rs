@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -727,6 +727,7 @@ pub fn ensure_llama_runtime(
 // 只有 Unix 解压会还原符号链接（见 extract_tar_gz），Windows 上不编译这个函数
 #[cfg(unix)]
 fn safe_intra_dir_symlink_target(target: &Path) -> bool {
+    use std::path::Component;
     let mut comps = target.components();
     matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }

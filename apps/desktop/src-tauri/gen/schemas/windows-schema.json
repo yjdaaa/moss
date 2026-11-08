@@ -225,12 +225,6 @@
           "markdownDescription": "Enables the open_export_dir command without any pre-configured scope."
         },
         {
-          "description": "Enables the open_voice_private command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-open-voice-private",
-          "markdownDescription": "Enables the open_voice_private command without any pre-configured scope."
-        },
-        {
           "description": "Enables the pick_export_dir command without any pre-configured scope.",
           "type": "string",
           "const": "allow-pick-export-dir",
@@ -349,6 +343,12 @@
           "type": "string",
           "const": "allow-voice-device-set-status",
           "markdownDescription": "Enables the voice_device_set_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voice_diagnostics_export command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-diagnostics-export",
+          "markdownDescription": "Enables the voice_diagnostics_export command without any pre-configured scope."
         },
         {
           "description": "Enables the voice_firmware_import command without any pre-configured scope.",
@@ -705,12 +705,6 @@
           "markdownDescription": "Denies the open_export_dir command without any pre-configured scope."
         },
         {
-          "description": "Denies the open_voice_private command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-open-voice-private",
-          "markdownDescription": "Denies the open_voice_private command without any pre-configured scope."
-        },
-        {
           "description": "Denies the pick_export_dir command without any pre-configured scope.",
           "type": "string",
           "const": "deny-pick-export-dir",
@@ -829,6 +823,12 @@
           "type": "string",
           "const": "deny-voice-device-set-status",
           "markdownDescription": "Denies the voice_device_set_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_diagnostics_export command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-diagnostics-export",
+          "markdownDescription": "Denies the voice_diagnostics_export command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_firmware_import command without any pre-configured scope.",
