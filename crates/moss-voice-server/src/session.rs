@@ -104,13 +104,20 @@ async fn upgrade(
         .on_upgrade(move |socket| run(shared, socket, identity))
 }
 
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
     let mut bytes = [0u8; 8];
     let _ = getrandom::fill(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> bool {
+async fn send_json(socket: &mut crate::link::Link, message: &ServerMessage) -> bool {
+    socket
+        .send(Message::Text(message.to_text().into()))
+        .await
+        .is_ok()
+}
+
+async fn send_json_ws(socket: &mut WebSocket, message: &ServerMessage) -> bool {
     socket
         .send(Message::Text(message.to_text().into()))
         .await
@@ -229,153 +236,17 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         "aec": device_aec,
     });
     let session_id = random_id();
-    let lease = if token_ok {
-        let (registry, d, c, s) = (
-            shared.registry.clone(),
-            device_id.clone(),
-            client_id.clone(),
-            session_id.clone(),
-        );
-        let snapshot = hello_snapshot.to_string();
-        let opened = tokio::task::spawn_blocking(move || {
-            let allowed = registry.open_session(&d, &c, &s)?;
-            registry.device_snapshot(&d, crate::SNAPSHOT_HELLO, &snapshot);
-            Ok::<_, String>(allowed)
-        });
-        match opened.await {
-            Ok(Ok(allowed)) => Some(crate::SessionLease {
-                allowed,
-                registry: shared.registry.clone(),
-                session: session_id.clone(),
-            }),
-            _ => {
-                let _ = socket.send(Message::Close(None)).await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    // 已授权的设备先建好会话（音频编解码器）并登记，再回 hello：设备收到 hello 时语音中心已能看到它
-    let mut session = if token_ok {
-        let uplink_rate =
-            if uplink.format == "opus" && supported_rate(uplink.sample_rate) {
-                uplink.sample_rate
-            } else {
-                shared.state.event(EventRecord::warn(
-                DiagCategory::Audio,
-                format!(
-                    "设备 {device_id} 声明的上行音频为 {} {} Hz，不支持，按 Opus 16000 Hz 处理",
-                    uplink.format, uplink.sample_rate
-                ),
-            ).hint("如果听不清或识别全错，换用标准小智固件"));
-                16_000
-            };
-        match Session::new(
-            &shared,
-            &session_id,
-            &device_id,
-            &client_id,
-            version,
-            uplink_rate,
-            lease.as_ref().unwrap().allowed.clone(),
-        ) {
-            Ok(mut session) => {
-                if device_mcp {
-                    session.device_mcp = Some(DeviceMcp::new());
-                    session.vision_host = identity.host.clone();
-                    if session.conversation.is_some() {
-                        session.vision_token = identity.authorization.clone().map(|value| {
-                            value
-                                .trim()
-                                .strip_prefix("Bearer ")
-                                .unwrap_or(value.trim())
-                                .to_owned()
-                        });
-                    }
-                }
-                shared.state.open(SessionView {
-                    session_id: session_id.clone(),
-                    device_id: device_id.clone(),
-                    ip: identity.ip.clone(),
-                    protocol_version: version,
-                    connected_at: unix_now(),
-                    state: "idle".into(),
-                    level: 0,
-                    emotion: String::new(),
-                    active_tool: None,
-                    utterance_chars: 0,
-                    spoken_sentences: 0,
-                    device_tools: Vec::new(),
-                    screen_monochrome: None,
-                    screen_width: None,
-                    screen_height: None,
-                    screen_pack: false,
-                });
-                shared
-                    .registry
-                    .sessions_changed(shared.state.sessions().len());
-                let (phase, level) = shared.state.aggregate_pulse();
-                shared.registry.pulse_changed(phase.as_deref(), level);
-                shared.state.event(format!(
-                    "设备 {device_id} 已连接（帧协议 v{version}，上行 {uplink_rate} Hz，下行 {} Hz）",
-                    shared.config.downlink_sample_rate
-                ));
-                Some(session)
-            }
-            Err(error) => {
-                shared.state.event(
-                    EventRecord::error(
-                        DiagCategory::Audio,
-                        format!("设备 {device_id} 的音频初始化失败，已断开"),
-                    )
-                    .hint("设备声明的音频格式 MOSS 处理不了：换用标准小智固件后重试")
-                    .detail(&error),
-                );
-                let _ = socket.send(Message::Close(None)).await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    let mut requests = session.as_ref().map(|s| {
-        let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
-        if let Ok(mut map) = shared.device_requests.lock() {
-            map.insert(
-                device_id.clone(),
-                crate::DeviceRequestHandle {
-                    session_id: session_id.clone(),
-                    supports_mcp: s.device_mcp.is_some(),
-                    sender: requests_tx,
-                },
-            );
-        }
-        requests_rx
-    });
     let hello = ServerMessage::Hello {
         version,
         transport: "websocket".into(),
         session_id: session_id.clone(),
         audio_params: AudioParams::opus(shared.config.downlink_sample_rate, FRAME_MS as u32),
     };
-    if !send_json(&mut socket, &hello).await {
-        if let Ok(mut map) = shared.device_requests.lock()
-            && map
-                .get(&device_id)
-                .is_some_and(|handle| handle.session_id == session_id)
-        {
-            map.remove(&device_id);
+    if !token_ok {
+        // 未授权：回 hello 后提示原因并断开
+        if !send_json_ws(&mut socket, &hello).await {
+            return;
         }
-        shared.state.close(&session_id);
-        shared
-            .registry
-            .sessions_changed(shared.state.sessions().len());
-        let (phase, level) = shared.state.aggregate_pulse();
-        shared.registry.pulse_changed(phase.as_deref(), level);
-        return;
-    }
-    let Some(session) = session.as_mut() else {
         let (status_text, message, log) = match status {
             DeviceStatus::Pending => (
                 "等待允许",
@@ -406,15 +277,212 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             message: message.into(),
             emotion: "sad".into(),
         };
-        send_json(&mut socket, &alert).await;
+        send_json_ws(&mut socket, &alert).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let _ = socket.send(Message::Close(None)).await;
         return;
+    }
+    let (registry, d, c, s) = (
+        shared.registry.clone(),
+        device_id.clone(),
+        client_id.clone(),
+        session_id.clone(),
+    );
+    let snapshot = hello_snapshot.to_string();
+    let opened = tokio::task::spawn_blocking(move || {
+        let allowed = registry.open_session(&d, &c, &s)?;
+        registry.device_snapshot(&d, crate::SNAPSHOT_HELLO, &snapshot);
+        Ok::<_, String>(allowed)
+    });
+    let lease = match opened.await {
+        Ok(Ok(allowed)) => crate::SessionLease {
+            allowed,
+            registry: shared.registry.clone(),
+            session: session_id.clone(),
+        },
+        _ => {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
     };
-    let permission = lease.as_ref().unwrap().allowed.clone();
-    let mut requests_rx = requests
-        .take()
-        .expect("requests channel initialized with session");
+    let uplink_rate = if uplink.format == "opus" && supported_rate(uplink.sample_rate) {
+        uplink.sample_rate
+    } else {
+        shared.state.event(
+            EventRecord::warn(
+                DiagCategory::Audio,
+                format!(
+                    "设备 {device_id} 声明的上行音频为 {} {} Hz，不支持，按 Opus 16000 Hz 处理",
+                    uplink.format, uplink.sample_rate
+                ),
+            )
+            .hint("如果听不清或识别全错，换用标准小智固件"),
+        );
+        16_000
+    };
+    let vision_token = identity.authorization.clone().map(|value| {
+        value
+            .trim()
+            .strip_prefix("Bearer ")
+            .unwrap_or(value.trim())
+            .to_owned()
+    });
+    serve_session(
+        shared,
+        crate::link::Link::Ws(socket),
+        SessionStart {
+            device_id,
+            client_id,
+            session_id,
+            ip: identity.ip.clone(),
+            version,
+            uplink_rate,
+            device_mcp,
+            vision_host: identity.host.clone(),
+            vision_token,
+            transport: "websocket",
+            lease,
+            hello: Some(hello),
+        },
+    )
+    .await;
+}
+
+/// 建好会话所需的连接信息（WebSocket 在 hello 后、常连模式在 MQTT 登录后）。
+pub(crate) struct SessionStart {
+    pub device_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub ip: String,
+    pub version: u32,
+    pub uplink_rate: u32,
+    pub device_mcp: bool,
+    pub vision_host: Option<String>,
+    pub vision_token: Option<String>,
+    /// `websocket` / `mqtt`
+    pub transport: &'static str,
+    pub lease: crate::SessionLease,
+    /// WebSocket：登记好会话后回给设备的 hello；常连模式在设备唤醒时由连接层回 hello
+    pub hello: Option<ServerMessage>,
+}
+
+/// 已授权设备的会话：登记、运行到断开，再做收尾（记忆摘要、清理登记）。
+pub(crate) async fn serve_session(
+    shared: Arc<Shared>,
+    mut socket: crate::link::Link,
+    start: SessionStart,
+) {
+    let SessionStart {
+        device_id,
+        client_id,
+        session_id,
+        ip,
+        version,
+        uplink_rate,
+        device_mcp,
+        vision_host,
+        vision_token,
+        transport,
+        lease,
+        hello,
+    } = start;
+    let mqtt = socket.is_mqtt();
+    // 已授权的设备先建好会话（音频编解码器）并登记，再回 hello：设备收到 hello 时语音中心已能看到它
+    let mut session = match Session::new(
+        &shared,
+        &session_id,
+        &device_id,
+        &client_id,
+        version,
+        uplink_rate,
+        lease.allowed.clone(),
+    ) {
+        Ok(mut session) => {
+            session.mqtt = mqtt;
+            if device_mcp {
+                session.device_mcp = Some(DeviceMcp::new());
+                session.vision_host = vision_host;
+                if session.conversation.is_some() {
+                    session.vision_token = vision_token;
+                }
+            }
+            shared.state.open(SessionView {
+                session_id: session_id.clone(),
+                device_id: device_id.clone(),
+                ip: ip.clone(),
+                protocol_version: version,
+                connected_at: unix_now(),
+                state: "idle".into(),
+                level: 0,
+                emotion: String::new(),
+                active_tool: None,
+                utterance_chars: 0,
+                spoken_sentences: 0,
+                device_tools: Vec::new(),
+                screen_monochrome: None,
+                screen_width: None,
+                screen_height: None,
+                screen_pack: false,
+                transport: transport.into(),
+            });
+            shared
+                .registry
+                .sessions_changed(shared.state.sessions().len());
+            let (phase, level) = shared.state.aggregate_pulse();
+            shared.registry.pulse_changed(phase.as_deref(), level);
+            shared.state.event(if mqtt {
+                format!("设备 {device_id} 已常连在线（MQTT，唤醒后语音走加密 UDP）")
+            } else {
+                format!(
+                    "设备 {device_id} 已连接（帧协议 v{version}，上行 {uplink_rate} Hz，下行 {} Hz）",
+                    shared.config.downlink_sample_rate
+                )
+            });
+            session
+        }
+        Err(error) => {
+            shared.state.event(
+                EventRecord::error(
+                    DiagCategory::Audio,
+                    format!("设备 {device_id} 的音频初始化失败，已断开"),
+                )
+                .hint("设备声明的音频格式 MOSS 处理不了：换用标准小智固件后重试")
+                .detail(&error),
+            );
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+    if let Ok(mut map) = shared.device_requests.lock() {
+        map.insert(
+            device_id.clone(),
+            crate::DeviceRequestHandle {
+                session_id: session_id.clone(),
+                supports_mcp: session.device_mcp.is_some(),
+                sender: requests_tx,
+            },
+        );
+    }
+    if let Some(hello) = hello
+        && !send_json(&mut socket, &hello).await
+    {
+        if let Ok(mut map) = shared.device_requests.lock()
+            && map
+                .get(&device_id)
+                .is_some_and(|handle| handle.session_id == session_id)
+        {
+            map.remove(&device_id);
+        }
+        shared.state.close(&session_id);
+        shared
+            .registry
+            .sessions_changed(shared.state.sessions().len());
+        let (phase, level) = shared.state.aggregate_pulse();
+        shared.registry.pulse_changed(phase.as_deref(), level);
+        return;
+    }
+    let permission = lease.allowed.clone();
     let reason = tokio::select! {
         biased;
         _ = async {
@@ -426,38 +494,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
     };
     // NV10: background summary uses only committed, bounded history and never delays disconnect.
     if permission.load(std::sync::atomic::Ordering::Acquire) {
-        if let Some(conversation) = &session.conversation {
-            let end_ctx = ToolContext {
-                device_id: device_id.clone(),
-                session_id: session_id.clone(),
-            };
-            if let Some(personal) = &conversation.personal_context {
-                let person_histories = personal.session_closed(&end_ctx, conversation.llm.clone());
-                if let Some(extraction) = &conversation.context_extraction {
-                    for (scope, person_history) in &person_histories {
-                        extraction.session_closed_for_person(
-                            &end_ctx,
-                            Some(scope),
-                            person_history,
-                            conversation.llm.clone(),
-                        );
-                    }
-                }
-            } else {
-                // n57: structured extraction replaces the NV10 whole-summary rewrite once it is on.
-                let extracting = conversation
-                    .context_extraction
-                    .as_ref()
-                    .is_some_and(|e| e.extractor.enabled());
-                if let Some(memory) = conversation.memory.as_ref().filter(|_| !extracting) {
-                    memory.queue_summary(&device_id, &session.history, conversation.llm.clone());
-                }
-                // NV19-03: independent of the NV10 summary; off unless the user enabled it.
-                if let Some(extraction) = &conversation.context_extraction {
-                    extraction.session_closed(&end_ctx, &session.history, conversation.llm.clone());
-                }
-            }
-        }
+        session.conversation_closed();
     } else {
         shared.camera_preview.clear_device(&device_id);
         let _ = shared.vision_photos.take(&device_id);
@@ -980,6 +1017,10 @@ struct Session<'a> {
     engrave_preview: Option<(String, Option<Arc<Vec<u8>>>)>,
     /// n70 本轮回复的表情场景（大模型的表情往往先于第一句音频到，开口时再显示）
     turn_scene: Option<crate::BotPose>,
+    /// n71 常连模式（MQTT）：会话跟着控制通道一直在，一轮对话结束只关语音通道
+    mqtt: bool,
+    /// n71 常连模式下这一轮对话要结束（说完再见、用户说退出、空闲到期）：在会话循环里关语音通道
+    pending_goodbye: Option<String>,
     /// 加工结束播报：只读观察最近任务，发现“发送中 → 终态”时在空闲时播报一次。
     jobs: crate::jobs::JobWatcher,
     next_job_poll: Instant,
@@ -1121,6 +1162,8 @@ impl<'a> Session<'a> {
             last_screen_emotion: None,
             engrave_preview: None,
             turn_scene: None,
+            mqtt: false,
+            pending_goodbye: None,
             jobs: crate::jobs::JobWatcher::new(),
             next_job_poll: Instant::now() + shared.config.job_poll_interval,
         })
@@ -1146,7 +1189,7 @@ impl<'a> Session<'a> {
 
     async fn tts(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         state: TtsState,
         text: Option<String>,
     ) -> Result<(), String> {
@@ -1167,6 +1210,74 @@ impl<'a> Session<'a> {
                 .unwrap_or(crate::BotPose::Talking);
             self.show_screen(socket, scene, true).await?;
         }
+        Ok(())
+    }
+
+    /// 一轮对话（WebSocket 一次连接 / 常连模式一次唤醒）结束：按设置排队记忆摘要与结构化提取。
+    fn conversation_closed(&self) {
+        let Some(conversation) = &self.conversation else {
+            return;
+        };
+        let end_ctx = ToolContext {
+            device_id: self.device_id.to_owned(),
+            session_id: self.session_id.to_owned(),
+        };
+        if let Some(personal) = &conversation.personal_context {
+            let person_histories = personal.session_closed(&end_ctx, conversation.llm.clone());
+            if let Some(extraction) = &conversation.context_extraction {
+                for (scope, person_history) in &person_histories {
+                    extraction.session_closed_for_person(
+                        &end_ctx,
+                        Some(scope),
+                        person_history,
+                        conversation.llm.clone(),
+                    );
+                }
+            }
+        } else {
+            // n57: structured extraction replaces the NV10 whole-summary rewrite once it is on.
+            let extracting = conversation
+                .context_extraction
+                .as_ref()
+                .is_some_and(|e| e.extractor.enabled());
+            if let Some(memory) = conversation.memory.as_ref().filter(|_| !extracting) {
+                memory.queue_summary(self.device_id, &self.history, conversation.llm.clone());
+            }
+            // NV19-03: independent of the NV10 summary; off unless the user enabled it.
+            if let Some(extraction) = &conversation.context_extraction {
+                extraction.session_closed(&end_ctx, &self.history, conversation.llm.clone());
+            }
+        }
+    }
+
+    /// n71 常连模式结束这一轮对话：停下正在说的话与拾音，关语音通道（`notify` 时让设备也关），
+    /// 做与 WebSocket 断开相同的记忆收尾，控制通道与设备在线状态保持不变。
+    async fn end_conversation(
+        &mut self,
+        socket: &mut crate::link::Link,
+        reason: &str,
+        notify: bool,
+    ) -> Result<(), String> {
+        if let Some(music) = self.music.as_mut() {
+            music.cancel(&mut self.pump);
+        }
+        self.turn = None;
+        self.pump.clear();
+        self.hold_check = None;
+        self.pending_listen_stop = false;
+        if let Some(worker) = self.vad_worker.as_mut() {
+            worker.reset();
+        }
+        self.phase = Phase::Idle;
+        self.set_state("idle");
+        socket.end_audio(self.session_id, notify);
+        if self.permission.load(std::sync::atomic::Ordering::Acquire) {
+            self.conversation_closed();
+        }
+        self.history.clear();
+        self.last_verified_person = None;
+        self.finish_timing("disconnected");
+        self.event(format!("这一轮对话结束（{reason}），设备保持常连在线"));
         Ok(())
     }
 
@@ -1208,7 +1319,7 @@ impl<'a> Session<'a> {
     /// n70 让设备切到当前画风的某个全屏场景（发 `llm` 表情名）。没刷画风包的设备什么也不发。
     async fn show_screen(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         scene: crate::BotPose,
         force: bool,
     ) -> Result<(), String> {
@@ -1232,7 +1343,11 @@ impl<'a> Session<'a> {
     }
 
     /// n70 在全屏画面上叠一行字（固件字幕位置）。
-    async fn screen_text(&mut self, socket: &mut WebSocket, text: String) -> Result<(), String> {
+    async fn screen_text(
+        &mut self,
+        socket: &mut crate::link::Link,
+        text: String,
+    ) -> Result<(), String> {
         if send_json(
             socket,
             &ServerMessage::Stt {
@@ -1251,7 +1366,7 @@ impl<'a> Session<'a> {
     /// n70 回到常驻场景（没有就显示 `fallback`）并重发那行字；设备状态切换（固件会重置成 `neutral`）后调用。
     async fn show_ambient(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         fallback: crate::BotPose,
     ) -> Result<(), String> {
         if !self.pack_active() {
@@ -1271,7 +1386,7 @@ impl<'a> Session<'a> {
     /// n70 设定常驻场景；画面或那行字变了才发给设备。
     async fn set_sticky(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         scene: crate::BotPose,
         text: Option<String>,
         ttl: Option<Duration>,
@@ -1295,7 +1410,7 @@ impl<'a> Session<'a> {
     /// n70 结束雕刻 / 待批准这类常驻场景，回到聆听或待命画面。
     async fn clear_sticky(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         scenes: &[crate::BotPose],
     ) -> Result<(), String> {
         if !self
@@ -1317,7 +1432,11 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    async fn send_frame(&mut self, socket: &mut WebSocket, payload: &[u8]) -> Result<(), String> {
+    async fn send_frame(
+        &mut self,
+        socket: &mut crate::link::Link,
+        payload: &[u8],
+    ) -> Result<(), String> {
         let frame = encode_frame(self.version, payload, self.timestamp)
             .map_err(|error| error.to_string())?;
         self.timestamp = self.timestamp.wrapping_add(FRAME_MS as u32);
@@ -1565,7 +1684,7 @@ impl<'a> Session<'a> {
     /// 会话循环继续实时响应 `Abort`、`ListenStop`、`Ping`、停止词与提前续说音频。
     async fn finish_or_hold_utterance(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         pcm: Vec<i16>,
         end: UtteranceEnd,
     ) -> Result<(), String> {
@@ -1631,7 +1750,7 @@ impl<'a> Session<'a> {
 
     async fn on_hold_check_done(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         paused_at: Instant,
         held: bool,
     ) -> Result<(), String> {
@@ -1653,7 +1772,7 @@ impl<'a> Session<'a> {
         self.finalize_held_utterance(socket).await
     }
 
-    async fn on_hold_expired(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn on_hold_expired(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         let active = matches!(&self.phase, Phase::Listening(l) if l.hold_deadline.is_some());
         if !active {
             return Ok(());
@@ -1663,7 +1782,10 @@ impl<'a> Session<'a> {
 
     /// 结束挂起中的半句录音：若此刻 `VadWorker` 仍有已接收但尚未消费的在途帧，
     /// 先记录帧序号屏障，待这些在途帧经 `hear` 确认无续说后再提交，防止 `worker.reset()` 丢弃已入队续说语音。
-    async fn finalize_held_utterance(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn finalize_held_utterance(
+        &mut self,
+        socket: &mut crate::link::Link,
+    ) -> Result<(), String> {
         if !self.listen_manual
             && let Some(target) = self
                 .vad_worker
@@ -1690,7 +1812,7 @@ impl<'a> Session<'a> {
     /// 一段话结束：记录并交给应答。
     async fn finish_utterance(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         pcm: Vec<i16>,
         end: UtteranceEnd,
     ) -> Result<(), String> {
@@ -1853,7 +1975,7 @@ impl<'a> Session<'a> {
     }
 
     /// 回声：把这段话重采样到下行采样率后重新编码播回，验证编解码、重采样与播放节奏。
-    async fn echo(&mut self, socket: &mut WebSocket, pcm: Vec<i16>) -> Result<(), String> {
+    async fn echo(&mut self, socket: &mut crate::link::Link, pcm: Vec<i16>) -> Result<(), String> {
         let seconds = pcm.len() as f64 / self.uplink_rate as f64;
         let text = if pcm.is_empty() {
             "回声测试：没有听到声音".to_owned()
@@ -1890,7 +2012,7 @@ impl<'a> Session<'a> {
     /// message in conversation history. Only the trusted catalog opens a song.
     async fn start_music(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         track_id: String,
         title: String,
     ) -> Result<(), String> {
@@ -2026,7 +2148,7 @@ impl<'a> Session<'a> {
 
     async fn on_turn_event(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         event: Option<TurnEvent>,
     ) -> Result<(), String> {
         if self.turn.is_none() {
@@ -2324,13 +2446,18 @@ impl<'a> Session<'a> {
                 // 给设备时间播完已发出的帧
                 tokio::time::sleep(Duration::from_millis(600)).await;
             }
-            return Err(match turn.kind {
+            let reason = match turn.kind {
                 TurnKind::Goodbye => format!(
                     "{} 秒没有对话，已说再见",
                     self.shared.config.idle_timeout.as_secs()
                 ),
                 _ => "用户说了退出词".into(),
-            });
+            };
+            if self.mqtt {
+                self.pending_goodbye = Some(reason);
+                return Ok(());
+            }
+            return Err(reason);
         }
         if let Some(manual) = turn.listen_after {
             self.start_listening(manual);
@@ -2344,7 +2471,11 @@ impl<'a> Session<'a> {
     }
 
     /// 打断：中止对话任务、丢弃未播音频；已识别的原话与已播的句子记入历史。
-    async fn interrupt(&mut self, socket: &mut WebSocket, reason: &str) -> Result<(), String> {
+    async fn interrupt(
+        &mut self,
+        socket: &mut crate::link::Link,
+        reason: &str,
+    ) -> Result<(), String> {
         self.finish_timing("interrupted");
         self.preview_hold = None;
         self.pending_oled_preview = None;
@@ -2418,7 +2549,7 @@ impl<'a> Session<'a> {
     }
 
     /// 播放节奏的一拍：开头连发预缓冲帧，之后每拍一帧；按绝对时钟推进，不受发送耗时影响。
-    async fn tick(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn tick(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         let was_music = self.music.as_ref().is_some_and(|music| music.active());
         if was_music && let Some(music) = self.music.as_mut() {
             match music.refill(&mut self.pump) {
@@ -2506,7 +2637,7 @@ impl<'a> Session<'a> {
     /// 结束播放。`interrupted` 为打断原因时立即丢弃未播内容。
     async fn stop_speaking(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         interrupted: Option<&str>,
     ) -> Result<(), String> {
         let stats = self.pump.stats();
@@ -2552,7 +2683,11 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    async fn on_binary(&mut self, socket: &mut WebSocket, data: &[u8]) -> Result<(), String> {
+    async fn on_binary(
+        &mut self,
+        socket: &mut crate::link::Link,
+        data: &[u8],
+    ) -> Result<(), String> {
         let listening = matches!(self.phase, Phase::Listening(_));
         let may_interrupt = self.shared.config.barge_in
             && self.listen_realtime
@@ -2633,7 +2768,7 @@ impl<'a> Session<'a> {
         }
     }
 
-    async fn finish_listen_stop(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn finish_listen_stop(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         if !self.listen_manual
             && self
                 .vad_worker
@@ -2658,7 +2793,7 @@ impl<'a> Session<'a> {
 
     async fn on_vad_result(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         frame: Result<crate::audio::worker::VadFrame, String>,
     ) -> Result<(), String> {
         let frame = frame?;
@@ -2697,7 +2832,11 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    async fn send_mcp(&mut self, socket: &mut WebSocket, payload: Value) -> Result<(), String> {
+    async fn send_mcp(
+        &mut self,
+        socket: &mut crate::link::Link,
+        payload: Value,
+    ) -> Result<(), String> {
         let message = ServerMessage::Mcp {
             session_id: self.session_id.into(),
             payload,
@@ -2710,14 +2849,14 @@ impl<'a> Session<'a> {
     }
 
     /// 对话模式会话开始时向声明了 MCP 的设备发 `initialize`（回声模式按需在首次桌面端请求时握手）。
-    async fn start_device_mcp(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn start_device_mcp(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         if self.conversation.is_none() {
             return Ok(());
         }
         self.send_mcp_initialize(socket).await
     }
 
-    async fn send_mcp_initialize(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn send_mcp_initialize(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         let Some(device) = self.device_mcp.as_mut() else {
             return Ok(());
         };
@@ -2754,7 +2893,7 @@ impl<'a> Session<'a> {
     /// 设备发来的 MCP 消息：只处理对我们请求的响应，设备主动发来的请求与通知忽略。
     async fn on_device_mcp(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         payload: Value,
     ) -> Result<(), String> {
         let Some(device) = self.device_mcp.as_mut() else {
@@ -3059,7 +3198,7 @@ impl<'a> Session<'a> {
 
     async fn on_device_request(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
         if let crate::DeviceRequest::ShowScene { scene, style } = request {
@@ -3112,7 +3251,7 @@ impl<'a> Session<'a> {
 
     async fn send_quiet_device_call(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         tool: &'static str,
         arguments: Value,
     ) -> Result<(), String> {
@@ -3130,7 +3269,7 @@ impl<'a> Session<'a> {
     /// n70 语音中心“推到小智试看”：已刷全屏画风包的设备直接切到该场景（按指定画风）。
     async fn show_scene_request(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         scene: crate::BotPose,
         style: crate::ScreenCardStyle,
     ) -> Result<(), String> {
@@ -3153,7 +3292,7 @@ impl<'a> Session<'a> {
 
     async fn dispatch_device_request(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
         match request {
@@ -3505,7 +3644,7 @@ impl<'a> Session<'a> {
 
     async fn forward_device_call(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         call: Option<DeviceCall>,
     ) -> Result<(), String> {
         if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
@@ -3524,7 +3663,7 @@ impl<'a> Session<'a> {
         self.turn.is_some() || matches!(self.phase, Phase::Speaking { .. } | Phase::Thinking)
     }
 
-    async fn on_text(&mut self, socket: &mut WebSocket, text: &str) -> Result<(), String> {
+    async fn on_text(&mut self, socket: &mut crate::link::Link, text: &str) -> Result<(), String> {
         self.last_activity = Instant::now();
         match ClientMessage::parse(text) {
             Ok(ClientMessage::Listen {
@@ -3614,6 +3753,11 @@ impl<'a> Session<'a> {
                     return Err("发送失败".into());
                 }
             }
+            Ok(ClientMessage::Goodbye) if self.mqtt => {
+                // 常连模式：设备关了语音通道（按键结束、语音通道超时），控制通道还在
+                self.end_conversation(socket, "设备结束了这一轮对话", false)
+                    .await?;
+            }
             Ok(ClientMessage::Goodbye) => return Err("设备结束会话".into()),
             Ok(ClientMessage::Mcp { payload }) => self.on_device_mcp(socket, payload).await?,
             Ok(_) => {}
@@ -3641,6 +3785,10 @@ impl<'a> Session<'a> {
                 self.event(format!("{idle} 秒没有对话，说再见后断开"));
                 self.last_activity = Instant::now();
                 self.start_turn(TurnInput::Say { text, close: true }, TurnKind::Goodbye);
+                Ok(())
+            }
+            _ if self.mqtt => {
+                self.pending_goodbye = Some(format!("{idle} 秒无语音或消息"));
                 Ok(())
             }
             _ => Err(format!("{idle} 秒无语音或消息")),
@@ -3692,7 +3840,7 @@ impl<'a> Session<'a> {
     }
 
     /// 彩屏预览确认窗口内的 4 秒无声续期：重置官方固件 5000ms `preview_timer_`，用户一旦开口或到期立即停止。
-    async fn on_preview_hold_tick(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn on_preview_hold_tick(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         let now = Instant::now();
         let speaking = self.actively_speaking_user();
         let Some(hold) = self.preview_hold.as_mut() else {
@@ -3712,7 +3860,7 @@ impl<'a> Session<'a> {
     }
 
     /// 本地音乐播放期间每 4 秒刷新一次黑胶旋转 / 护目镜小机器人听歌摇摆帧；停播自动停止。
-    async fn on_music_hud_tick(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn on_music_hud_tick(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         let music_active = self.music.as_ref().is_some_and(|m| m.active());
         let can_color = self.device_mcp.as_ref().is_some_and(|d| {
             d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
@@ -3779,7 +3927,7 @@ impl<'a> Session<'a> {
     /// - 任务从 `sending` 进入终态时：彩屏弹出 5 秒完工庆祝/急停断点徽章卡（自动淡出）并语音播报；
     /// - 任务处于 `sending` 时：彩屏刷新双画风实时进度副屏 HUD；
     /// - 严格模式有待电脑批准请求时：彩屏刷新待电脑审批警戒卡（含倒计时条）。
-    async fn poll_jobs(&mut self, socket: &mut WebSocket) -> Result<(), String> {
+    async fn poll_jobs(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
         self.next_job_poll = Instant::now() + self.shared.config.job_poll_interval;
         if self.busy() || !self.permission.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(());
@@ -3844,6 +3992,39 @@ impl<'a> Session<'a> {
                             json!({ "url": badge_url }),
                         )
                         .await?;
+                    }
+                    if self.mqtt && !socket.audio_open() {
+                        // n71 常连模式没在对话：没有语音通道可播，改发提示（屏幕显示结果并响一声提示音）
+                        let completed = job.status == "completed";
+                        let emotion = if self.pack_active() {
+                            crate::screen_pack::emotion_name(
+                                self.shared.card_style(),
+                                if completed {
+                                    crate::BotPose::CelebrateDone
+                                } else {
+                                    crate::BotPose::HaltedShield
+                                },
+                            )
+                        } else if completed {
+                            "happy".into()
+                        } else {
+                            "sad".into()
+                        };
+                        let alert = ServerMessage::Alert {
+                            status: if completed {
+                                "雕刻完成"
+                            } else {
+                                "雕刻已停止"
+                            }
+                            .into(),
+                            message: job.speech(),
+                            emotion,
+                        };
+                        if !send_json(socket, &alert).await {
+                            return Err("发送失败".into());
+                        }
+                        self.event("加工任务已结束：设备没在对话，已在屏幕上提示结果");
+                        return Ok(());
                     }
                     self.event("加工任务已结束，播报结果");
                     self.start_turn(
@@ -4066,7 +4247,7 @@ impl<'a> Session<'a> {
     /// n70 加工结束：全屏切到完工 / 急停画面 10 秒，叠一行结果；之后回到聆听或待命。
     async fn show_finished_scene(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         job: &crate::jobs::FinishedJob,
     ) -> Result<(), String> {
         let (scene, text) = if job.status == "completed" {
@@ -4087,7 +4268,7 @@ impl<'a> Session<'a> {
     /// 会话循环；返回断开原因。
     async fn run(
         &mut self,
-        socket: &mut WebSocket,
+        socket: &mut crate::link::Link,
         requests: &mut tokio::sync::mpsc::UnboundedReceiver<crate::DeviceRequest>,
     ) -> String {
         let mut shutdown = self.shared.shutdown.clone();
@@ -4107,6 +4288,10 @@ impl<'a> Session<'a> {
                 Phase::Speaking { next, .. } => *next,
                 // 对话任务有自己的超时（识别 / 合成 30 秒，大模型 120 秒），等待期间不算空闲
                 Phase::Thinking => Instant::now() + Duration::from_secs(3600),
+                // n71 常连模式没在对话（语音通道关着）时不算空闲，设备一直在线
+                _ if !socket.audio_open() && self.turn.is_none() => {
+                    Instant::now() + Duration::from_secs(3600)
+                }
                 _ => self.last_activity + idle_timeout,
             };
             let hold_deadline = match &self.phase {
@@ -4180,6 +4365,12 @@ impl<'a> Session<'a> {
                 _ = tokio::time::sleep_until(job_deadline) => self.poll_jobs(socket).await,
             };
             if let Err(reason) = result {
+                return reason;
+            }
+            // n71 常连模式：这一轮对话该结束了（再见说完、用户说退出、空闲到期）
+            if let Some(reason) = self.pending_goodbye.take()
+                && let Err(reason) = self.end_conversation(socket, &reason, true).await
+            {
                 return reason;
             }
         }

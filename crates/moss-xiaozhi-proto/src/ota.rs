@@ -80,6 +80,19 @@ pub struct FirmwareOffer {
     pub url: String,
 }
 
+/// n71 常连模式：OTA 回复里的 `mqtt` 段。固件见到它就改用 MQTT + UDP（优先于 `websocket`），
+/// 下次 OTA 回复不带它时回到 WebSocket。端口 8883 会让固件改走 TLS，不要用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqttOffer {
+    /// `主机:端口`
+    pub endpoint: String,
+    pub client_id: String,
+    pub username: String,
+    pub password: String,
+    pub publish_topic: String,
+    pub keepalive: u32,
+}
+
 /// OTA 响应。
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtaReply {
@@ -93,6 +106,8 @@ pub struct OtaReply {
     /// 设备当前版本（无新固件时原样返回，设备据此判断无需升级）
     pub current_version: String,
     pub firmware: Option<FirmwareOffer>,
+    /// n71 常连模式（只发给已允许的设备）；`None` 时设备用 WebSocket
+    pub mqtt: Option<MqttOffer>,
 }
 
 impl OtaReply {
@@ -101,11 +116,22 @@ impl OtaReply {
             Some(offer) => serde_json::json!({"version": offer.version, "url": offer.url}),
             None => serde_json::json!({"version": self.current_version, "url": ""}),
         };
-        serde_json::json!({
+        let mut reply = serde_json::json!({
             "server_time": {"timestamp": self.now_ms, "timezone_offset": self.timezone_offset_minutes},
             "firmware": firmware,
             "websocket": {"url": self.websocket_url, "token": self.token, "version": self.protocol_version},
-        })
+        });
+        if let Some(mqtt) = &self.mqtt {
+            reply["mqtt"] = serde_json::json!({
+                "endpoint": mqtt.endpoint,
+                "client_id": mqtt.client_id,
+                "username": mqtt.username,
+                "password": mqtt.password,
+                "publish_topic": mqtt.publish_topic,
+                "keepalive": mqtt.keepalive,
+            });
+        }
+        reply
     }
 }
 
@@ -190,6 +216,7 @@ mod tests {
             timezone_offset_minutes: 480,
             current_version: "1.9.2".into(),
             firmware: None,
+            mqtt: None,
         };
         let json = reply.to_json();
         assert_eq!(
@@ -201,6 +228,24 @@ mod tests {
         assert_eq!(json["firmware"]["url"], "");
         assert_eq!(json["server_time"]["timezone_offset"], 480);
         assert!(json.get("mqtt").is_none() && json.get("activation").is_none());
+
+        // n71 常连模式：带上 mqtt 段，websocket 段照旧保留（关掉常连后设备据此回到 WebSocket）
+        let with_mqtt = OtaReply {
+            mqtt: Some(MqttOffer {
+                endpoint: "192.168.1.5:1883".into(),
+                client_id: "uuid-1".into(),
+                username: "aa:bb".into(),
+                password: "t.1".into(),
+                publish_topic: "device-server".into(),
+                keepalive: 240,
+            }),
+            ..reply
+        }
+        .to_json();
+        assert_eq!(with_mqtt["mqtt"]["endpoint"], "192.168.1.5:1883");
+        assert_eq!(with_mqtt["mqtt"]["keepalive"], 240);
+        assert_eq!(with_mqtt["mqtt"]["password"], "t.1");
+        assert_eq!(with_mqtt["websocket"]["token"], "t.1");
     }
 
     #[test]

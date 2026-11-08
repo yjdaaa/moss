@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 任务结束后记录不再被“发送中”覆盖，修复三个偶发失败的测试（2026-11-08）
+
+- **现象**：机器负载高时，发送很快结束的任务可能永远显示“发送中”；全工作区测试偶发失败（`desktop_approval_executes_bridge_request_with_saved_target`、`voice_follows_strict_mode_switch_when_off`、`cancel_mid_send_is_still_accepted_for_store_and_memory_backends`、`voice_recent_workflows_is_read_only_and_never_counts_as_a_tool_call`）。
+- **根因与修复**：启动方在任务启动后“读记录 → 比对快照 → 写 sending”，发送线程收尾“读 → 写终态”，两者都没加锁；启动方读完写回前被挂起时，会把线程已写入的 `completed` 覆盖成 `sending`。新增 `RECORD_TRANSITION_LOCK` 串行化两处读改写；材料实验室标定发送原先启动后无条件整份写回，补上同样的快照比对（响应仍返回 sending）。测试侧：“发送途中取消”改用读空报超时的静默模拟设备 `stalling_transport_factory`（原模拟设备读空即断开，任务立即失败）；laser-host 中读全局工具计数的测试与调用该工具的测试共用 `WORKFLOW_TOOL_STATS` 锁。
+- **验证**：CPU 满负载下整包重复运行 laser-api，修复前 15 次失败 4 次，修复后 30 次 0 失败；laser-api 139、laser-host 112 通过，clippy 零警告。未验证：laser-host 那项在对照组 20 次中也未复现，修复依据代码中的共享计数竞争。
+- **关联**：`crates/laser-api/src/lib.rs`（`record_transition_guard`、`finalize_workflow_record`、标定发送、`stalling_transport_factory`）、`crates/laser-host/src/lib.rs`（`workflow_tool_stats_guard`）。
+
 ### 语音中心模型链路栏可一键测试全部环节，不通的环节就地报错（2026-11-08）
 
 - **现象**：内置语音的拾音判停、语音识别、Jev、大模型、语音合成只能到各自卡片里逐个点“测试连接”，看不出整条链路哪一环不通（用户要求在链路栏右上角加“测试全部环节”）。

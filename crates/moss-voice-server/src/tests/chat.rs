@@ -13,6 +13,7 @@ use crate::conversation::{
 };
 
 mod barge;
+mod mqtt;
 mod music;
 mod person;
 mod screen;

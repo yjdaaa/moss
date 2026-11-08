@@ -11,7 +11,7 @@ moss-voice-providers = { path = "../moss-voice-providers" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 专用运行时：只在启用内置语音时创建，与 MOSS 现有线程模型隔离（技术书 §4）
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 axum = { version = "0.8", features = ["ws", "multipart"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "pcm"] }
@@ -20,6 +20,9 @@ getrandom = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Opus 编解码：纯 Rust 后端 mousiki，不需要 CMake（NV0 实测，技术书 §11.3）
 opus2 = { version = "0.4", default-features = false, features = ["backend-mousiki"] }
+# n71 常连模式：小智 MQTT + UDP 语音通道的 AES-128-CTR（与官方固件 mbedTLS/PSA CTR 一致）
+aes = "0.8"
+ctr = "0.9"
 
 # NV11 bounded, non-redirecting external information adapters; no device/network side effects in tests.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }

@@ -53,6 +53,14 @@ fn default_builtin_http_port() -> u16 {
     8003
 }
 
+fn default_builtin_mqtt_port() -> u16 {
+    1883
+}
+
+fn default_builtin_udp_port() -> u16 {
+    8888
+}
+
 fn default_speed() -> f32 {
     1.0
 }
@@ -1090,6 +1098,15 @@ pub struct VoiceSettings {
     /// 内置语音服务的 OTA 端口，默认 8003
     #[serde(default = "default_builtin_http_port")]
     pub builtin_http_port: u16,
+    /// n71 常连模式（MQTT 控制 + 加密 UDP 语音，小智开机即在线）：默认关，实验功能（2026-11-08 用户决定）
+    #[serde(default)]
+    pub builtin_mqtt_enabled: bool,
+    /// n71 常连模式 MQTT 端口，默认 1883（不能用 8883：固件会改走 TLS）
+    #[serde(default = "default_builtin_mqtt_port")]
+    pub builtin_mqtt_port: u16,
+    /// n71 常连模式语音 UDP 端口，默认 8888
+    #[serde(default = "default_builtin_udp_port")]
+    pub builtin_udp_port: u16,
     /// 内置语音服务的模型（不含密钥）
     #[serde(default, skip_serializing_if = "BuiltinModels::is_empty")]
     pub builtin_models: BuiltinModels,
@@ -1139,6 +1156,9 @@ impl Default for VoiceSettings {
             endpoint_health_url: None,
             builtin_ws_port: default_builtin_ws_port(),
             builtin_http_port: default_builtin_http_port(),
+            builtin_mqtt_enabled: false,
+            builtin_mqtt_port: default_builtin_mqtt_port(),
+            builtin_udp_port: default_builtin_udp_port(),
             builtin_models: BuiltinModels::default(),
             builtin_plugins: BuiltinPlugins::default(),
             builtin_agents: BuiltinAgents::default(),
@@ -2100,6 +2120,9 @@ mod tests {
             endpoint_health_url: None,
             builtin_ws_port: 8100,
             builtin_http_port: 8103,
+            builtin_mqtt_enabled: true,
+            builtin_mqtt_port: 1884,
+            builtin_udp_port: 8889,
             builtin_models: BuiltinModels {
                 llm: Some(BuiltinProvider {
                     kind: ProviderKind::Openai,

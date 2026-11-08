@@ -143,6 +143,9 @@ pub struct SessionView {
     /// n70 这台设备已刷 MOSS 全屏画风包（对话与加工画面按全屏场景切换）。
     #[serde(default)]
     pub screen_pack: bool,
+    /// n71 连接方式：`websocket`（唤醒时才连）/ `mqtt`（常连模式）。
+    #[serde(default)]
+    pub transport: String,
 }
 
 /// 事件级别。
@@ -685,6 +688,7 @@ mod tests {
             screen_width: None,
             screen_height: None,
             screen_pack: false,
+            transport: "websocket".into(),
         });
         assert_eq!(state.aggregate_pulse(), (Some("idle".into()), 0));
         state.set_state("s1", "listening");
@@ -728,6 +732,7 @@ mod tests {
             screen_width: None,
             screen_height: None,
             screen_pack: false,
+            transport: "websocket".into(),
         });
         state.set_level("s1", 10);
         assert_eq!(

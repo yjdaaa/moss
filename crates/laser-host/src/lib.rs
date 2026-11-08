@@ -1019,8 +1019,20 @@ impl HostApplication {
 mod tests {
     use super::*;
 
+    /// `laser_workflow_tool` 的调用计数全进程共享（`global_mcp_telemetry`）。断言“不计入调用统计”的测试
+    /// 与会经工具分发调用它的测试互斥，免得并行时被别的测试带动计数而误报（2026-11-08）。
+    /// 新增经分发调用 `laser_workflow_tool` 的测试也要先取这把锁。
+    static WORKFLOW_TOOL_STATS: Mutex<()> = Mutex::new(());
+
+    fn workflow_tool_stats_guard() -> std::sync::MutexGuard<'static, ()> {
+        WORKFLOW_TOOL_STATS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn in_process_backend_routes_mcp_calls_through_api_service() {
+        let _stats = workflow_tool_stats_guard();
         let service = Arc::new(ApiService::new(
             LaserSettings {
                 default_connection_mode: "network".into(),
@@ -1055,6 +1067,7 @@ mod tests {
     /// 只读工具照常执行。
     #[test]
     fn voice_backend_denies_desktop_control_tools_and_audits() {
+        let _stats = workflow_tool_stats_guard();
         let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
         let service = Arc::new(
             ApiService::new(
@@ -1160,6 +1173,7 @@ mod tests {
     /// 授权失效或用户在语音中心关了 `laser_workflow_tool` 时静默返回 `None`。
     #[test]
     fn voice_recent_workflows_is_read_only_and_never_counts_as_a_tool_call() {
+        let _stats = workflow_tool_stats_guard();
         let db = Arc::new(Mutex::new(RuntimeDb::open_memory().unwrap()));
         let service = Arc::new(plain_service().with_runtime_db(db.clone()));
         allow_test_voice(&service, &db, "watch-device", "watch-session");

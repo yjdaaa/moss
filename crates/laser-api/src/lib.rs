@@ -2636,6 +2636,7 @@ impl ApiService {
             )
         })?;
         let gcode_path = preflight.gcode_path.clone().unwrap_or_default();
+        let snapshot_before_launch = record.clone();
         let send_result = self.launch_send_job_for(
             laser_runtime::RecordKind::Calibration,
             &calibration_id,
@@ -2658,8 +2659,13 @@ impl ApiService {
             );
             freeze_confirmation_snapshot(map, &gcode_file, &gcode_sha);
         }
-        self.save_calibration(&record)
-            .map_err(|e| (500, failure(format!("保存标定矩阵失败: {e}"), None)))?;
+        // 与工作流同理：发送线程可能已写入终态，只在记录仍是启动前的样子时补写 sending；
+        // 响应照旧返回本次启动的 sending 视图
+        let _transition = record_transition_guard();
+        if self.load_calibration(&calibration_id).as_ref() == Some(&snapshot_before_launch) {
+            self.save_calibration(&record)
+                .map_err(|e| (500, failure(format!("保存标定矩阵失败: {e}"), None)))?;
+        }
         Ok(record)
     }
 
@@ -6052,6 +6058,18 @@ fn freeze_confirmation_snapshot(
 }
 
 /// 后台发送线程收尾：把终态与 send_result 写回存储（SQLite/内存）。
+/// 串行化任务记录的两次“读 → 改 → 写”（2026-11-08）：启动方在任务启动后补写 `sending`，
+/// 发送线程收尾写终态。二者都对同一条记录先读后写；不加锁时启动方读完、写回前被挂起，
+/// 线程恰好在这个空档写入 `completed`，随后会被启动方的 `sending` 覆盖，任务永远显示“发送中”
+/// （全工作区并行测试负载下复现）。只在任务启动与结束时各持有一次，开销可以忽略。
+static RECORD_TRANSITION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn record_transition_guard() -> std::sync::MutexGuard<'static, ()> {
+    RECORD_TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn finalize_workflow_record(
     store: Option<&(dyn laser_runtime::RuntimeStore + Send + Sync)>,
     workflows: &std::sync::Arc<
@@ -6063,6 +6081,7 @@ fn finalize_workflow_record(
     send_result: serde_json::Value,
 ) {
     let now = unix_seconds();
+    let _transition = record_transition_guard();
     if let Some(store) = store {
         if let Ok(Some(mut stored)) = store.get(kind, workflow_id) {
             // 取消请求可能已由 HTTP 层写入 cancelled；不要用 completed 覆盖用户取消
@@ -6561,6 +6580,7 @@ fn handle_workflow_store_request(
                 map.insert("send_result".into(), send_result);
                 freeze_confirmation_snapshot(map, &gcode_file, &gcode_sha);
             }
+            let _transition = record_transition_guard();
             if current_cancel_epoch(reservations, &workflow_id) == cancel_epoch_before
                 && let Ok(Some(mut latest)) =
                     store.get(laser_runtime::RecordKind::Workflow, &workflow_id)
@@ -6727,6 +6747,7 @@ fn handle_workflow_store_request(
                         map.insert("send_result".into(), send_result);
                         freeze_confirmation_snapshot(map, &gcode_file, &gcode_sha);
                     }
+                    let _transition = record_transition_guard();
                     if current_cancel_epoch(reservations, &workflow_id) == cancel_epoch_before
                         && let Ok(Some(mut latest)) =
                             store.get(laser_runtime::RecordKind::Workflow, &workflow_id)
@@ -9271,6 +9292,36 @@ mod tests {
         fake_transport_factory_with_settings(ok_lines, &[])
     }
 
+    /// 回完 `ok_lines` 个 ok 后保持静默：没有数据时按真实串口那样报读超时，而不是“连接断开”，
+    /// 发送线程会一直停在发送中（每 500ms 心跳一次，设备回状态报告），直到被取消。
+    /// 2026-11-08：此前用 `fake_transport_factory` 模拟“设备不再回 ok”，读空即断开，任务立即失败；
+    /// 断言“仍在发送中”是否成立全看测试线程先跑还是发送线程先跑，满负载时会误报。
+    fn stalling_transport_factory(ok_lines: usize) -> TransportFactory {
+        struct Stalling(Box<dyn laser_device::DeviceTransport>);
+        impl laser_device::DeviceTransport for Stalling {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                self.0.write_line(line)
+            }
+            fn write_realtime(&self, command: laser_device::RealtimeCommand) -> Result<(), String> {
+                self.0.write_realtime(command)
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                match self.0.read_line()? {
+                    Some(line) => Ok(Some(line)),
+                    None => {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        Err("read timeout".into())
+                    }
+                }
+            }
+        }
+        let inner = fake_transport_factory(ok_lines);
+        std::sync::Arc::new(move |spec: &laser_device::ConnectionSpec| {
+            let device = inner(spec)?;
+            Ok(Box::new(Stalling(device)) as Box<dyn laser_device::DeviceTransport>)
+        })
+    }
+
     /// 同 `fake_transport_factory`，`$$` 额外回报 `extra_settings`（如 `$130=100`）。
     fn fake_transport_factory_with_settings(
         ok_lines: usize,
@@ -9749,7 +9800,7 @@ mod tests {
                 laser_contracts::builtin_material_library(),
             )
             .with_generated_root(temp.path().to_path_buf())
-            .with_transport_factory(fake_transport_factory(5));
+            .with_transport_factory(stalling_transport_factory(5));
             if use_store {
                 service =
                     service.with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()));

@@ -26,7 +26,9 @@ pub mod goggle_bot;
 pub mod home_tools;
 pub mod jev;
 pub mod jobs; // 加工结束主动播报（2026-11-02 用户决定）
+mod link; // n71 会话底下的设备连接：WebSocket 或常连模式
 pub mod memory;
+pub mod mqtt; // n71 常连模式：内置精简 MQTT 服务端 + UDP 语音（2026-11-08 用户决定）
 pub mod music;
 mod ota;
 pub mod person_context;
@@ -201,6 +203,24 @@ pub struct ServerConfig {
     pub screen_card_style: ScreenCardStyle,
     /// 诊断记录本（事件与耗时）。宿主传入同一个 `Arc`，服务停止、重启后记录仍在（2026-11-07 n68）。
     pub diagnostics: Arc<DiagnosticsLog>,
+    /// n71 常连模式（MQTT + UDP）：`None` 为关（默认），设备照旧用 WebSocket。
+    pub mqtt: Option<MqttConfig>,
+}
+
+/// n71 常连模式的两个端口。MQTT 端口不能用 8883：官方固件见到 8883 会改走 TLS。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MqttConfig {
+    pub port: u16,
+    pub udp_port: u16,
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            port: 1883,
+            udp_port: 8888,
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -226,6 +246,7 @@ impl Default for ServerConfig {
             job_poll_interval: jobs::DEFAULT_POLL_INTERVAL,
             preview_hold_interval: Duration::from_secs(4),
             preview_hold_duration: Duration::from_secs(24),
+            mqtt: None,
             screen_card_style: ScreenCardStyle::MossHud,
             diagnostics: DiagnosticsLog::new(),
         }
@@ -239,6 +260,12 @@ pub struct ServerStatusView {
     pub mode: ServerMode,
     pub ws_port: u16,
     pub http_port: u16,
+    /// n71 常连模式实际监听的 MQTT 端口（没开为 `None`）
+    #[serde(default)]
+    pub mqtt_port: Option<u16>,
+    /// n71 常连模式语音 UDP 端口
+    #[serde(default)]
+    pub udp_port: Option<u16>,
     pub sessions: Vec<SessionView>,
     pub events: Vec<ServerEvent>,
     /// 被覆盖的事件 / 耗时计数（界面显示“有 N 条较早的记录已被覆盖”）
@@ -309,6 +336,8 @@ pub(crate) struct Shared {
     pub assets_store: wake_assets::AssetsStore,
     pub screen_card_style: std::sync::Mutex<ScreenCardStyle>,
     pub ws_port: u16,
+    /// n71 常连模式实际监听的 MQTT / UDP 端口；没开或端口开不了为 `None`（OTA 不下发 MQTT）
+    pub mqtt_ports: Option<MqttConfig>,
     pub signer: TokenSigner,
     pub registry: Arc<dyn DeviceRegistry>,
     pub state: state::LiveState,
@@ -381,6 +410,43 @@ impl VoiceServer {
         }
         let ws_listener = bind(config.bind, config.ws_port, "设备连接（WebSocket）")?;
         let http_listener = bind(config.bind, config.http_port, "OTA ")?;
+        // n71 常连模式端口开不了时不影响主服务：记一条事件，OTA 照旧只下发 WebSocket
+        let mut mqtt_error = None;
+        let mqtt_sockets = match config.mqtt {
+            Some(mqtt) if mqtt.port == 8883 => {
+                mqtt_error = Some("MQTT 端口不能用 8883（小智固件会改走加密连接）".to_owned());
+                None
+            }
+            Some(mqtt) => match (
+                bind(config.bind, mqtt.port, "常连（MQTT）"),
+                std::net::UdpSocket::bind(SocketAddr::new(config.bind, mqtt.udp_port)),
+            ) {
+                (Ok(tcp), Ok(udp)) if udp.set_nonblocking(true).is_ok() => Some((tcp, udp)),
+                (Err(error), _) => {
+                    mqtt_error = Some(error);
+                    None
+                }
+                (_, Err(error)) => {
+                    mqtt_error = Some(format!(
+                        "常连语音 UDP 端口 {} 无法监听：{error}",
+                        mqtt.udp_port
+                    ));
+                    None
+                }
+                _ => {
+                    mqtt_error = Some("常连语音 UDP 端口设置失败".to_owned());
+                    None
+                }
+            },
+            None => None,
+        };
+        let mqtt_ports = match &mqtt_sockets {
+            Some((tcp, udp)) => Some(MqttConfig {
+                port: tcp.local_addr().map_err(|e| e.to_string())?.port(),
+                udp_port: udp.local_addr().map_err(|e| e.to_string())?.port(),
+            }),
+            None => None,
+        };
         let ws_port = ws_listener.local_addr().map_err(|e| e.to_string())?.port();
         let http_port = http_listener
             .local_addr()
@@ -397,6 +463,7 @@ impl VoiceServer {
             config: config.clone(),
             ws_port,
             http_port,
+            mqtt_ports,
             vision_quotas: Arc::new(vision::VisionQuotas::default()),
             vision_photos: Arc::new(vision::VisionPhotos::default()),
             camera_preview: Arc::new(vision::CameraPreviewStore::default()),
@@ -468,6 +535,43 @@ impl VoiceServer {
                 ),
             }
         });
+        if let Some(error) = mqtt_error {
+            shared.state.event(
+                EventRecord::error(
+                    DiagCategory::Network,
+                    "常连模式没能启动，设备照旧用唤醒后连接",
+                )
+                .hint("端口被占用或被系统拒绝：在设置里换常连端口后重启内置服务")
+                .detail(&error),
+            );
+        }
+        if let (Some((tcp, udp)), Some(ports)) = (mqtt_sockets, mqtt_ports) {
+            shared.state.event(format!(
+                "常连模式已开启：MQTT 端口 {}，语音 UDP 端口 {}；设备重启一次后改用常连",
+                ports.port, ports.udp_port
+            ));
+            let events = shared.clone();
+            let mqtt_shared = shared.clone();
+            let stop_mqtt = shutdown_tx.subscribe();
+            let stop_udp = shutdown_tx.subscribe();
+            runtime.spawn(async move {
+                match (
+                    tokio::net::TcpListener::from_std(tcp),
+                    tokio::net::UdpSocket::from_std(udp),
+                ) {
+                    (Ok(listener), Ok(udp)) => {
+                        let hub = mqtt::udp::UdpHub::new(udp);
+                        tokio::spawn(hub.clone().run(stop_udp));
+                        mqtt::serve(mqtt_shared, listener, hub, stop_mqtt).await;
+                    }
+                    (Err(error), _) | (_, Err(error)) => events.state.event(
+                        EventRecord::error(DiagCategory::Network, "常连模式端口启动失败")
+                            .hint("在设置里换常连端口后重启内置服务")
+                            .detail(error.to_string()),
+                    ),
+                }
+            });
+        }
         let mdns = if config.bind.is_unspecified() {
             ota::start_mdns_responder(http_port, ws_port)
         } else {
@@ -491,12 +595,19 @@ impl VoiceServer {
         self.http_port
     }
 
+    /// n71 常连模式实际监听的端口；没开或没开成为 `None`。
+    pub fn mqtt_ports(&self) -> Option<MqttConfig> {
+        self.shared.mqtt_ports
+    }
+
     pub fn status(&self) -> ServerStatusView {
         ServerStatusView {
             running: self.runtime.is_some(),
             mode: self.shared.config.mode,
             ws_port: self.ws_port,
             http_port: self.http_port,
+            mqtt_port: self.shared.mqtt_ports.map(|p| p.port),
+            udp_port: self.shared.mqtt_ports.map(|p| p.udp_port),
             sessions: self.shared.state.sessions(),
             events: self.shared.state.events(),
             events_dropped: self.shared.state.event_drops(),

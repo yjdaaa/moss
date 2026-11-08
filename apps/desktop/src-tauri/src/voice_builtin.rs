@@ -2903,6 +2903,8 @@ mod imp {
                 "link_mode": settings.mode.as_str(),
                 "ws_port": ws_port,
                 "http_port": http_port,
+                "mqtt_port": view.as_ref().and_then(|v| v.mqtt_port),
+                "udp_port": view.as_ref().and_then(|v| v.udp_port),
                 "ota_url": format!("http://{}:{http_port}/xiaozhi/ota/", moss_voice_server::MDNS_HOST_LABEL),
                 "ota_ip_url": local_ip().map(|ip| format!("http://{ip}:{http_port}/xiaozhi/ota/")),
                 "models": models,
@@ -3102,6 +3104,13 @@ mod imp {
                         &settings.builtin_local.screen_card_style,
                     ),
                     diagnostics: self.diagnostics.clone(),
+                    // n71 常连模式（默认关）
+                    mqtt: settings
+                        .builtin_mqtt_enabled
+                        .then_some(moss_voice_server::MqttConfig {
+                            port: settings.builtin_mqtt_port,
+                            udp_port: settings.builtin_udp_port,
+                        }),
                     ..defaults
                 };
                 let registry = Arc::new(DbRegistry {

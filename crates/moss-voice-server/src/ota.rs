@@ -336,11 +336,23 @@ async fn ota_post(
     ));
     let reply = OtaReply {
         websocket_url: format!("ws://{host}:{}/xiaozhi/v1/", shared.ws_port),
-        token,
+        token: token.clone(),
         protocol_version: shared.config.protocol_version,
         now_ms: unix_now().saturating_mul(1000),
         timezone_offset_minutes: timezone_offset_minutes(),
         current_version: info.version,
+        // n71 常连模式：只给已允许、拿到 token 的设备；MQTT 用户名是设备编号，密码就是同一个 token
+        mqtt: shared
+            .mqtt_ports
+            .filter(|_| status == DeviceStatus::Allowed && !token.is_empty())
+            .map(|ports| moss_xiaozhi_proto::ota::MqttOffer {
+                endpoint: format!("{host}:{}", ports.port),
+                client_id: info.client_id.clone(),
+                username: info.device_id.clone(),
+                password: token.clone(),
+                publish_topic: crate::mqtt::PUBLISH_TOPIC.into(),
+                keepalive: u32::from(crate::mqtt::KEEPALIVE_SECS),
+            }),
         firmware: firmware.map(|(version, token)| FirmwareOffer {
             version,
             url: format!(

@@ -253,6 +253,9 @@ impl VoiceCenter {
                 "server_port": voice.server_port,
                 "builtin_ws_port": voice.builtin_ws_port,
                 "builtin_http_port": voice.builtin_http_port,
+                "builtin_mqtt_enabled": voice.builtin_mqtt_enabled,
+                "builtin_mqtt_port": voice.builtin_mqtt_port,
+                "builtin_udp_port": voice.builtin_udp_port,
                 "self_hosted_mcp_endpoint": voice.self_hosted_mcp_endpoint.as_deref().map(redact_url),
                 "self_hosted_mcp_endpoint_set": voice.self_hosted_mcp_endpoint.is_some(),
                 "endpoint_health_url": voice.endpoint_health_url.as_deref().map(redact_url),
@@ -343,6 +346,8 @@ impl VoiceCenter {
         for (key, label) in [
             ("builtin_ws_port", "内置服务设备连接端口"),
             ("builtin_http_port", "内置服务 OTA 端口"),
+            ("builtin_mqtt_port", "常连模式 MQTT 端口"),
+            ("builtin_udp_port", "常连模式语音 UDP 端口"),
         ] {
             if let Some(port) = patch.get(key) {
                 let port = port
@@ -350,15 +355,34 @@ impl VoiceCenter {
                     .filter(|port| (1..=65535).contains(port))
                     .ok_or_else(|| invalid(&format!("{label}必须在 1 ~ 65535 之间")))?
                     as u16;
-                if key == "builtin_ws_port" {
-                    voice.builtin_ws_port = port;
-                } else {
-                    voice.builtin_http_port = port;
+                match key {
+                    "builtin_ws_port" => voice.builtin_ws_port = port,
+                    "builtin_http_port" => voice.builtin_http_port = port,
+                    "builtin_mqtt_port" => voice.builtin_mqtt_port = port,
+                    _ => voice.builtin_udp_port = port,
                 }
             }
         }
+        if let Some(enabled) = patch.get("builtin_mqtt_enabled") {
+            voice.builtin_mqtt_enabled = enabled
+                .as_bool()
+                .ok_or_else(|| invalid("常连模式开关格式不正确"))?;
+        }
         if voice.builtin_ws_port == voice.builtin_http_port {
             return Err(invalid("内置服务的两个端口不能相同"));
+        }
+        // n71：常连 MQTT 端口与另外两个 TCP 端口不能相同，也不能是 8883（小智固件见到 8883 会改走加密连接，连不上）
+        if voice.builtin_mqtt_port == 8883 {
+            return Err(invalid(
+                "常连模式 MQTT 端口不能用 8883（小智固件会改走加密连接）",
+            ));
+        }
+        if voice.builtin_mqtt_port == voice.builtin_ws_port
+            || voice.builtin_mqtt_port == voice.builtin_http_port
+        {
+            return Err(invalid(
+                "常连模式 MQTT 端口不能和设备连接端口、OTA 端口相同",
+            ));
         }
         let mut endpoint_changed = false;
         if let Some(endpoint) = text("self_hosted_mcp_endpoint").filter(|value| !value.is_empty()) {
@@ -1210,6 +1234,49 @@ mod tests {
         assert_eq!(settings::load(&file).mode, VoiceMode::Official);
         assert!(!host.builtin_running.load(Ordering::SeqCst));
         assert_eq!(settings::mcp_endpoint(&file).as_deref(), Some(OFFICIAL));
+    }
+
+    /// n71 常连模式：开关与两个端口随“内置服务”设置保存；8883 和与其他 TCP 端口撞车的端口被拒绝。
+    #[test]
+    fn mqtt_continuous_mode_settings_are_validated() {
+        let (dir, _host, center) = fixture();
+        let file = dir.path().join("settings.json");
+        let status = center.status();
+        assert_eq!(status["settings"]["builtin_mqtt_enabled"], false, "默认关");
+        assert_eq!(status["settings"]["builtin_mqtt_port"], 1883);
+        assert_eq!(status["settings"]["builtin_udp_port"], 8888);
+        let saved = center
+            .save_settings(&serde_json::json!({
+                "builtin_mqtt_enabled": true,
+                "builtin_mqtt_port": 1884,
+                "builtin_udp_port": 8890
+            }))
+            .unwrap();
+        assert_eq!(saved["settings"]["builtin_mqtt_enabled"], true);
+        let stored = settings::load(&file);
+        assert!(stored.builtin_mqtt_enabled);
+        assert_eq!(
+            (stored.builtin_mqtt_port, stored.builtin_udp_port),
+            (1884, 8890)
+        );
+        for bad in [
+            serde_json::json!({"builtin_mqtt_port": 8883}),
+            serde_json::json!({"builtin_mqtt_port": 8000}),
+            serde_json::json!({"builtin_mqtt_port": 8003}),
+            serde_json::json!({"builtin_udp_port": 0}),
+            serde_json::json!({"builtin_mqtt_enabled": "yes"}),
+        ] {
+            assert_eq!(
+                center.save_settings(&bad).unwrap_err().code,
+                "voice_settings_invalid",
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            settings::load(&file).builtin_mqtt_port,
+            1884,
+            "被拒绝的保存不改设置"
+        );
     }
 
     /// A-77：官方接入点只在语音中心修改；官方模式下保存即重连，自建模式下只改备份。
