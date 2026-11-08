@@ -394,7 +394,11 @@ export function BuiltinDevicesPanel({ builtin }) {
                           <>
                             <b>{view.title}</b>
                             {device.name && <div className="voice-muted mono">{device.device_id}</div>}
-                            {online && <div className="voice-ok">在线</div>}
+                            {online && (
+                              <div className="voice-ok">
+                                {session?.transport === "mqtt" ? "常连在线" : "在线"}
+                              </div>
+                            )}
                           </>
                         )}
                       </td>

@@ -1551,9 +1551,12 @@ export const SETTINGS_GROUPS = {
     secret: ["self_hosted_mcp_endpoint", "endpoint_health_url"],
   },
   builtinPorts: { mode: "builtin", title: "内置服务端口", keys: ["builtin_ws_port", "builtin_http_port"], secret: [] },
+  // n71（2026-11-08）：常连模式（MQTT + 加密 UDP），默认关
+  builtinMqtt: { mode: "builtin", title: "常连模式（实验）", keys: ["builtin_mqtt_enabled", "builtin_mqtt_port", "builtin_udp_port"], secret: [] },
 };
 
-const PORT_KEYS = new Set(["server_port", "builtin_ws_port", "builtin_http_port"]);
+const PORT_KEYS = new Set(["server_port", "builtin_ws_port", "builtin_http_port", "builtin_mqtt_port", "builtin_udp_port"]);
+const BOOL_KEYS = new Set(["builtin_mqtt_enabled"]);
 
 /** 表单值与已保存值逐项比较（都按去首尾空白的字符串比较）；`keys` 缺省为两边字段的并集。 */
 export function formDirty(baseline, form, keys) {
@@ -1568,6 +1571,7 @@ export function formDirty(baseline, form, keys) {
 export function settingsSaveEffect(group, mode, reconnected) {
   if (group === "selfHostedServer") return "下次启动服务端时生效";
   if (group === "builtinPorts") return "重启内置服务后生效";
+  if (group === "builtinMqtt") return "重启内置服务后生效；小智要再重启一次才会换连接方式";
   if (reconnected) return group === "official" ? "正在重新连接小智" : "正在重新连接自建接入点";
   if (group === "official") return mode === "self_hosted" ? "切回官方链路时使用" : "接入点未变，没有重新连接";
   return mode === "self_hosted" ? "接入点未变，没有重新连接" : "切到自建链路时使用";
@@ -1589,6 +1593,8 @@ export function settingsGroupPayload(group, form) {
     const value = String(form[key] ?? "").trim();
     if (spec.secret.includes(key)) {
       if (value) payload[key] = value;
+    } else if (BOOL_KEYS.has(key)) {
+      payload[key] = value === "true";
     } else if (PORT_KEYS.has(key)) {
       const port = Number(value);
       payload[key] = Number.isFinite(port) ? port : 0;

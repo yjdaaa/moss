@@ -469,6 +469,14 @@ test("UI-3 设置分组：只提交本组字段，带令牌的字段留空不提
   assert.deepEqual(settingsGroupPayload("official", form), { official_mcp_endpoint: "wss://example.test/mcp/?token=t" });
   assert.deepEqual(settingsGroupPayload("selfHostedEndpoint", form), {});
   assert.deepEqual(settingsGroupPayload("builtinPorts", form), { builtin_ws_port: 8100, builtin_http_port: 8103 });
+  // n71 常连模式：开关按布尔值提交，端口转数字
+  assert.deepEqual(
+    settingsGroupPayload("builtinMqtt", { builtin_mqtt_enabled: "true", builtin_mqtt_port: "1884", builtin_udp_port: " 8890 " }),
+    { builtin_mqtt_enabled: true, builtin_mqtt_port: 1884, builtin_udp_port: 8890 },
+  );
+  assert.equal(settingsGroupPayload("builtinMqtt", { builtin_mqtt_enabled: "false", builtin_mqtt_port: "1883", builtin_udp_port: "8888" }).builtin_mqtt_enabled, false);
+  assert.ok(settingsGroupDirty("builtinMqtt", { builtin_mqtt_enabled: "true", builtin_mqtt_port: "1883", builtin_udp_port: "8888" }, { builtin_mqtt_enabled: "false", builtin_mqtt_port: "1883", builtin_udp_port: "8888" }));
+  assert.match(settingsSaveEffect("builtinMqtt", "builtin", false), /小智要再重启一次/);
   assert.deepEqual(settingsGroupPayload("selfHostedServer", form), { server_dir: "D:/xz", python: "py", args: "app.py", server_port: 8000 });
   // 各组字段互不重叠：保存一组不会顺带提交另一组
   const keys = Object.values(SETTINGS_GROUPS).flatMap((group) => group.keys);

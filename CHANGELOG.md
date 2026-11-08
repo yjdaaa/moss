@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 小智常连模式（实验）：开机就在线，不唤醒也能调音量、看雕刻画面（2026-11-08）
+
+- **现象**：内置语音服务用 WebSocket 连接，官方固件只在唤醒或按键时才连服务器；小智重启后不说“你好小智”，语音中心就显示离线，音量、亮度、推屏、雕刻进度画面都发不过去。
+- **根因与修复**：新增 MOSS 内置精简 MQTT 服务端（`mqtt.rs`、`mqtt/codec.rs`）与 AES-128-CTR 加密 UDP 语音通道（`mqtt/udp.rs`），与官方固件 MQTT + UDP 协议一致；OTA 对已允许设备附加 `mqtt` 段后，小智开机即连控制通道，MOSS 不唤醒也能发设备工具调用、表情与提示，唤醒后语音走 UDP。会话层改为在 `Link`（WebSocket / MQTT）上运行（`serve_session`），常连模式一轮对话结束只发 `goodbye` 关语音通道并做记忆收尾，设备保持在线；没在对话时加工结束改发屏幕提示。**行为变更**：新设置 `builtin_mqtt_enabled`（默认关）、`builtin_mqtt_port`（默认 1883，禁止 8883）、`builtin_udp_port`（默认 8888），语音中心“服务 › 常连模式（实验）”可改；开启后要重启内置服务并让小智重启一次，关掉同理回到 WebSocket；端口开不了时只记错误事件、不影响主服务。登录沿用设备 token，只放行已允许设备。推翻 n70“离线时调音量仍需唤醒”。
+- **验证**：新增 MQTT 编解码 4 项、UDP 加解密（NIST SP 800-38A 向量）与补发 / 防重放 3 项、端到端假设备 2 项（不唤醒即在线并调音量、唤醒后经加密 UDP 对话、空闲结束仍在线、没在对话时改发提示、断开下线；8883 被拒并回落 WebSocket）、OTA `mqtt` 段与设置校验各 1 项、前端设置提交 1 项与语音中心浏览器用例；`cargo test --workspace`、clippy 零警告、前端 `npm test` / lint / build 通过。未验证：未连实机——立创·实战派上的开机在线、对话延迟与断字、长时间挂机、Windows / macOS 防火墙放行都需实测。
+- **关联**：`crates/moss-voice-server/src/mqtt.rs`、`mqtt/codec.rs`、`mqtt/udp.rs`、`link.rs`、`session.rs`（`serve_session`、`end_conversation`、`pending_goodbye`）、`ota.rs`、`lib.rs`（`MqttConfig`）、`crates/moss-xiaozhi-proto/src/ota.rs`（`MqttOffer`）、`crates/moss-voice/src/settings.rs`、`center.rs`、`apps/desktop/src-tauri/src/voice_builtin.rs`、`frontend/src/pages/VoicePage.jsx`、`voiceState.js`、`VoiceBuiltinCard.jsx`；技术书 n71。
+
 ### 任务结束后记录不再被“发送中”覆盖，修复三个偶发失败的测试（2026-11-08）
 
 - **现象**：机器负载高时，发送很快结束的任务可能永远显示“发送中”；全工作区测试偶发失败（`desktop_approval_executes_bridge_request_with_saved_target`、`voice_follows_strict_mode_switch_when_off`、`cancel_mid_send_is_still_accepted_for_store_and_memory_backends`、`voice_recent_workflows_is_read_only_and_never_counts_as_a_tool_call`）。

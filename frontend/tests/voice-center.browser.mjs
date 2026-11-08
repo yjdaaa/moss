@@ -714,6 +714,16 @@ try {
   assert.ok(await page.locator("#voice-panel-service #voice-builtin-card").isVisible(), "服务标签只放内置服务启停与连接地址");
   assert.ok(await page.locator("#voice-group-builtin-service").isVisible());
   assert.equal(await page.locator("#voice-panel-service #voice-builtin-devices, #voice-panel-service #voice-goggle-bot-card").count(), 0, "设备表与副屏预览不在服务标签");
+  // n71：常连模式开关在服务标签，默认关；打开后只提交本组三个字段
+  const mqttGroup = page.locator("#voice-group-settings-builtinMqtt");
+  await mqttGroup.locator(".voice-group-h").click();
+  const mqttSwitch = page.locator("#voice-builtin-mqtt-enabled");
+  await mqttSwitch.waitFor();
+  assert.equal(await mqttSwitch.isChecked(), false, "常连模式默认关");
+  await mqttSwitch.check();
+  await page.locator("#voice-settings-save-builtinMqtt").click();
+  await mqttGroup.getByText(/小智要再重启一次/).waitFor();
+  assert.deepEqual(last("voice_save_settings").args.settings, { builtin_mqtt_enabled: true, builtin_mqtt_port: 1883, builtin_udp_port: 8888 });
   await tab("设备").click();
   const deviceOrder = await page.locator("#voice-devices-panel > .voice-group").evaluateAll((els) => els.map((el) => el.id));
   assert.deepEqual(deviceOrder, ["voice-group-builtin-devices", "voice-group-wake-word", "voice-group-screen-preview", "voice-group-device-firmware"], "设备标签：已连接设备 → 唤醒词 → 副屏预览 → 固件升级");

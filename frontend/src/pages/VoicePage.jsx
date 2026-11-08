@@ -112,6 +112,9 @@ function settingsForm(status) {
     server_port: String(settings.server_port || 8000),
     builtin_ws_port: String(settings.builtin_ws_port || 8000),
     builtin_http_port: String(settings.builtin_http_port || 8003),
+    builtin_mqtt_enabled: String(settings.builtin_mqtt_enabled === true),
+    builtin_mqtt_port: String(settings.builtin_mqtt_port || 1883),
+    builtin_udp_port: String(settings.builtin_udp_port || 8888),
     // 带令牌的地址不回填，只显示脱敏后的当前值；留空表示不改
     self_hosted_mcp_endpoint: "",
     endpoint_health_url: "",
@@ -147,10 +150,13 @@ const FIELD = {
   endpoint_health_url: { label: "接入点健康检查地址（用来判断设备在线，可不填）", wide: true, mono: true, secret: true, placeholder: "http://<接入点地址>:8004/mcp_endpoint/health?key=…" },
   builtin_ws_port: { label: "设备连接端口（默认 8000）", numeric: true, id: "voice-builtin-ws-port" },
   builtin_http_port: { label: "OTA 端口（默认 8003）", numeric: true, id: "voice-builtin-http-port" },
+  builtin_mqtt_enabled: { label: "开启常连模式：小智开机就在线，不唤醒也能调音量、推屏；说话时语音走加密 UDP", toggle: true, wide: true, id: "voice-builtin-mqtt-enabled" },
+  builtin_mqtt_port: { label: "常连 MQTT 端口（默认 1883，不能用 8883）", numeric: true, id: "voice-builtin-mqtt-port" },
+  builtin_udp_port: { label: "常连语音 UDP 端口（默认 8888）", numeric: true, id: "voice-builtin-udp-port" },
 };
 
 /** 链路与服务端设置的一个分组：只提交本组字段，按钮写明保存对象。 */
-function SettingsGroup({ group, mode, status, form, baseline, onChange, onSaved, busy, setBusy }) {
+function SettingsGroup({ group, mode, status, form, baseline, onChange, onSaved, busy, setBusy, children }) {
   const spec = SETTINGS_GROUPS[group];
   const settings = status.settings || {};
   const [result, setResult] = useState(null);
@@ -162,6 +168,9 @@ function SettingsGroup({ group, mode, status, form, baseline, onChange, onSaved,
     selfHostedServer: settings.server_dir ? settings.server_dir : "未设置目录",
     selfHostedEndpoint: settings.self_hosted_mcp_endpoint ? `已设置 · ${settings.self_hosted_mcp_endpoint}` : "未设置",
     builtinPorts: `设备连接 ${settings.builtin_ws_port || 8000} · OTA ${settings.builtin_http_port || 8003}`,
+    builtinMqtt: settings.builtin_mqtt_enabled
+      ? `已开启 · MQTT ${settings.builtin_mqtt_port || 1883} · 语音 UDP ${settings.builtin_udp_port || 8888}`
+      : "未开启（小智唤醒后才连接）",
   }[group];
 
   const save = async () => {
@@ -197,6 +206,22 @@ function SettingsGroup({ group, mode, status, form, baseline, onChange, onSaved,
   const renderField = (key) => {
     const field = FIELD[key];
     const current = settings[key];
+    if (field.toggle) {
+      return (
+        <label key={key} className="voice-wide voice-check">
+          <input
+            type="checkbox"
+            id={field.id}
+            checked={form[key] === "true"}
+            onChange={(e) => {
+              onChange(key, e.target.checked ? "true" : "false");
+              setResult(null);
+            }}
+          />
+          <span>{field.label}</span>
+        </label>
+      );
+    }
     const input = (
       <input
         className={`text-input${field.mono ? " mono" : ""}`}
@@ -232,6 +257,7 @@ function SettingsGroup({ group, mode, status, form, baseline, onChange, onSaved,
 
   return (
     <VoiceGroup id={`settings-${group}`} title={spec.title} summary={summary} dirty={dirty}>
+      {children}
       <div className="voice-form-grid">
         {spec.keys.filter((key) => !advancedKeys.has(key)).map(renderField)}
       </div>
@@ -795,6 +821,13 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                     <div className="voice-stack">
                       <BuiltinServicePanel builtin={builtin} />
                       <SettingsGroup group="builtinPorts" {...groupProps} />
+                      <SettingsGroup group="builtinMqtt" {...groupProps}>
+                        <p className="voice-muted" id="voice-builtin-mqtt-note">
+                          实验功能，默认关。打开后小智开机自动连上 MOSS，语音中心直接显示在线；麦克风声音只在唤醒后才发。
+                          保存后重启内置服务，再把小智重启一次它才会换连接方式；关掉开关、小智重启一次就回到原来的方式。
+                          第一次用时电脑防火墙要放行这两个端口。
+                        </p>
+                      </SettingsGroup>
                     </div>
                   ),
                 },
