@@ -320,15 +320,27 @@ pub fn default_persona_style() -> String {
 }
 
 /// 内置说话角色编号（n59；名称与提示词在 `moss_voice_server::persona::BUILTINS`，两边由桌面端测试核对一致）。
-pub const BUILTIN_PERSONA_IDS: &[&str] = &[
-    "workshop",
-    "beginner_guide",
-    "moss_station",
-    "moss_briefing",
-    "moss_risk",
-    "moss_deadpan",
-    "moss_night",
-];
+/// n75（2026-11-08 用户决定）：7 个减为 4 个，旧编号见 [`canonical_persona_style`]。
+pub const BUILTIN_PERSONA_IDS: &[&str] =
+    &["workshop", "beginner_guide", "moss_station", "moss_deadpan"];
+
+/// n75 已合并的旧角色编号 → 现在的编号（与 `moss_voice_server::persona::canonical_persona` 一致）。
+pub fn canonical_persona_style(id: &str) -> &str {
+    match id.trim() {
+        "moss_briefing" | "moss_risk" => "moss_station",
+        "moss_night" => "workshop",
+        other => other,
+    }
+}
+
+/// n75 旧设置迁移：并掉的角色换成合并后的角色；原来用“风险评估”角色的，打开“附把握和风险”开关。
+pub fn migrate_personas(local: &mut BuiltinLocal) {
+    if local.persona_style.trim() == "moss_risk" {
+        local.persona_risk_notes = true;
+    }
+    let canonical = canonical_persona_style(&local.persona_style).to_owned();
+    local.persona_style = canonical;
+}
 /// 用户自建角色最多条数、角色名与人设的字数上限。
 pub const MAX_CUSTOM_PERSONAS: usize = 6;
 pub const MAX_PERSONA_NAME_CHARS: usize = 12;
@@ -350,7 +362,7 @@ pub fn validate_persona_style(raw: &str) -> Result<String, String> {
 
 /// 当前角色：内置编号，或本次自建角色列表里已有的编号。
 pub fn validate_active_persona(raw: &str, custom: &[CustomPersona]) -> Result<String, String> {
-    let id = raw.trim();
+    let id = canonical_persona_style(raw.trim());
     if id.is_empty() {
         return Ok(DEFAULT_PERSONA_STYLE.into());
     }
@@ -678,6 +690,9 @@ pub struct BuiltinLocal {
     /// 用户自建的说话角色（n59，最多 6 个）；`persona_style` 可指向其中一个
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_personas: Vec<CustomPersona>,
+    /// n75 给加工建议时附上把握高低和主要风险（所有角色可用，默认关；原“MOSS 风险评估”角色）
+    #[serde(default)]
+    pub persona_risk_notes: bool,
     /// 生成激光雕刻预览及加工发送期间自动将画面同步到在线小智彩屏（默认开）
     #[serde(default = "default_on")]
     pub screen_preview_sync: bool,
@@ -746,6 +761,7 @@ impl Default for BuiltinLocal {
             persona_style: default_persona_style(),
             persona_prompt: String::new(),
             custom_personas: Vec::new(),
+            persona_risk_notes: false,
             screen_preview_sync: true,
             screen_card_style: default_screen_card_style(),
             job_done_announce: true,
@@ -791,7 +807,7 @@ impl BuiltinLocal {
                     canonical.unwrap_or(self.jev_model.as_str()),
                 )
             }
-            ModelKind::Speaker => return None,
+            ModelKind::Speaker | ModelKind::Vision => return None,
         };
         enabled
             .then(|| crate::local_models::spec_of(id, kind))
@@ -903,6 +919,10 @@ pub struct BuiltinVision {
     /// 要求当前对话模型本身支持看图，否则每轮请求都会失败。
     #[serde(default)]
     pub keep_in_history: bool,
+    /// 本地视觉模型编号（`local_models::CATALOG` 中 `kind = vision`，如 `qwen3_vl_2b`；2026-11-08 n74）。
+    /// 非空且未选“对话大模型看图”时照片只交给本机推理，不出电脑、不用密钥；空为云端视觉模型。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local_model: String,
 }
 
 /// NV19: long-term context. Retrieval and extraction are separately opt-in and off for every
@@ -1281,11 +1301,13 @@ pub fn update_voice_with_jev_feedback<R>(
 ) -> Result<R, String> {
     laser_contracts::with_settings_file_lock(|| {
         let mut root = read_root_checked(settings_file)?;
-        let mut voice = root
+        let mut voice: VoiceSettings = root
             .get("voice")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
+        // n75：写回前先迁移旧角色编号，避免把旧值原样写回
+        migrate_personas(&mut voice.builtin_local);
         let (out, jev_feedback) = mutate(&mut voice)?;
         apply_voice_to_root(&mut root, &voice, None, None, None, jev_feedback)?;
         write_root(settings_file, &root)?;
@@ -1295,11 +1317,13 @@ pub fn update_voice_with_jev_feedback<R>(
 
 /// 读取语音设置；文件缺失、损坏或旧版本没有 `voice` 时返回默认值。
 pub fn load(settings_file: &Path) -> VoiceSettings {
-    read_root(settings_file)
+    let mut voice: VoiceSettings = read_root(settings_file)
         .get("voice")
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    migrate_personas(&mut voice.builtin_local);
+    voice
 }
 
 /// 保存语音设置，保留 `settings.json` 中的其他键。
@@ -2612,10 +2636,26 @@ mod tests {
         );
         assert_eq!(validate_persona_style("").unwrap(), "workshop");
         assert!(validate_persona_style("hacker").is_err());
+        // n75：旧编号按合并后的角色接受
         assert_eq!(
             validate_persona_style("moss_briefing").unwrap(),
-            "moss_briefing"
+            "moss_station"
         );
+        assert_eq!(validate_persona_style("moss_night").unwrap(), "workshop");
+        let mut local = BuiltinLocal {
+            persona_style: "moss_risk".into(),
+            ..BuiltinLocal::default()
+        };
+        migrate_personas(&mut local);
+        assert_eq!(local.persona_style, "moss_station");
+        assert!(local.persona_risk_notes, "原风险评估角色迁移后打开风险开关");
+        let mut night = BuiltinLocal {
+            persona_style: "moss_night".into(),
+            ..BuiltinLocal::default()
+        };
+        migrate_personas(&mut night);
+        assert_eq!(night.persona_style, "workshop");
+        assert!(!night.persona_risk_notes);
         assert!(validate_persona_style("custom_a1").is_err());
 
         assert_eq!(

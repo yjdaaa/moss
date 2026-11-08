@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 视觉理解可用本地视觉模型（Qwen3-VL），断网看图、照片不出电脑（2026-11-08）
+
+- **现象**：视觉理解只能用云端视觉模型或对话大模型，要密钥、会产生费用、照片要发出去；用户问能否用本地模型或本地 OneJev 代替。
+- **根因与修复**：OneJev 虽带视觉投影，但只是做选择题的决策模型，且与 Jev 共用单槽会拖慢对话，故不复用（用户选定方案 B）。本地模型新增“视觉理解”类：Qwen3-VL 2B / 4B（阿里官方 GGUF，Apache-2.0，约 1.5 GB / 3 GB，校验 SHA-256，与 OneJev 共用 llama.cpp 推理引擎）；新增 `local_vision::LocalVisionServer` 在本机回环地址启动 `llama-server` + 视觉投影，视觉理解按 OpenAI 兼容地址调用。新设置 `builtin_vision.local_model`（默认空，不影响现有配置）；内置服务启动与保存后后台预加载，看图或测试时未就绪会等加载完；停止服务、退出、换来源、删模型时结束进程，设置变更重启不重载。视觉卡片改为“看图用哪个模型”三选一，云端地址与密钥只在选云端时显示。
+- **验证**：新增 Rust 测试（模型目录一致性、运行管理缺模型 / 缺文件、保存校验与就绪、删除前停用）与前端单元测试、`voice-center.browser.mjs` 6f；真实模型冒烟测试 `local_vision::tests::real_model_answers_questions_about_images`（默认跳过，需下载模型）。未验证：Windows / Android 上的运行与加速，4B 档的速度。
+- **关联**：`crates/moss-voice/src/local_vision.rs`、`crates/moss-voice/src/local_models.rs`（`qwen3_vl_2b` / `qwen3_vl_4b`、`Engine::uses_llama_runtime`）、`crates/moss-voice/src/settings.rs`（`BuiltinVision::local_model`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`LocalVision`、`DesktopVisionFactory`、`sync_local_vision`）、`frontend/src/components/VoiceVisionCard.jsx`、`frontend/src/voiceState.js`、语音技术书 n74。
+
+### 说话角色精简为 4 个，风险提示改为所有角色可用的开关，回复开头可带表情切换小智屏幕表情（2026-11-08）
+
+- **现象**：内置说话角色有 7 个，其中 5 个 MOSS 风格：“任务简报”和“领航空间站”几乎一样，“风险评估”其实是功能（只有选它才会说把握和风险），“守夜”和默认差别不大；下拉框每项都塞着很长的说明。锁定规则禁止表情符号，大模型基本不带表情，小智说话时屏幕表情（含全屏画风的开心、难过、惊讶场景）几乎不切换。
+- **根因与修复**：内置角色改为简明工坊助手、新手引导、MOSS（并入任务简报的说法）、MOSS 冷面幽默；旧编号自动迁移（任务简报、风险评估 → MOSS，守夜 → 简明工坊助手），原用风险评估的自动打开新开关，语音说旧名字照样能换。新增“给加工建议时附上把握高低和主要风险”开关（`persona_risk_notes`，默认关），所有角色可用，保存即生效。安全铁律改为允许在回答最开头放一个表情，只用来切换屏幕表情、朗读前去掉。界面标题改为“说话角色”，说明移到下拉框下面。**行为变更**：`BUILTIN_PERSONA_IDS` 只剩 4 个，旧编号仍被接受并映射；锁定规则中表情一句的措辞变化（复述确认与急停规则不变）。
+- **验证**：`moss-voice-server` 角色测试（4 个角色、旧编号映射、风险开关只在打开时附上且安全铁律仍在最后、表情只切屏幕不朗读、语音用旧名字切换），`moss-voice` 迁移与校验测试，前端角色选项与保存载荷测试；`moss-voice` 110 项、`moss-voice-server` 308 项通过。未完成：同时另有会话在改本地视觉模型，桌面端测试与前端一条视觉测试暂时编译 / 失败于那部分未完成的代码，全量验证与正式版同步待其完成后再做；没有用真实大模型检验表情的实际使用频率。
+- **关联**：`crates/moss-voice-server/src/persona.rs`（`BUILTINS`、`canonical_persona`、`RISK_NOTES_RULE`）、`crates/moss-voice-server/src/conversation.rs`（`IMMUTABLE_SAFETY_RULES`、`DEFAULT_SYSTEM_PROMPT`）、`crates/moss-voice/src/settings.rs`（`migrate_personas`、`persona_risk_notes`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`persona_config`）、`frontend/src/voiceState.js`、`frontend/src/components/VoiceBuiltinCard.jsx`；技术书 n75。
+
 ### 大模型默认快速回答（关闭思考），测试结果写清慢在哪里；对话体验只留常用项（2026-11-08）
 
 - **现象**：云端大模型“测试连接”很慢，真实对话每轮也要等；“对话体验”一组平铺约 18 项，说明冗长（用户反馈）。

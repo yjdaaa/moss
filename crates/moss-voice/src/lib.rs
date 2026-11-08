@@ -20,6 +20,7 @@ pub mod home_backup_audit;
 pub mod home_readonly;
 pub mod laya_env;
 pub mod local_models;
+pub mod local_vision;
 pub mod logfile;
 pub mod models;
 pub mod onejev;

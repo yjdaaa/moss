@@ -15,6 +15,7 @@ fn config(active: &str, custom: Vec<CustomRole>) -> PersonaConfig {
         active: active.into(),
         background: String::new(),
         custom,
+        risk_notes: false,
     }
 }
 
@@ -34,6 +35,7 @@ fn n59_default_prompt_is_unchanged_and_every_role_keeps_the_safety_rules_last() 
             active: builtin.id.into(),
             background: "工坊主力机是 5W 蓝光".into(),
             custom: vec![],
+            risk_notes: false,
         }
         .system_prompt();
         assert!(prompt.starts_with(builtin.head), "{}", builtin.id);
@@ -91,10 +93,11 @@ fn n59_spoken_role_names_resolve_to_one_role_or_ask_back() {
         "n60 movie MOSS"
     );
     assert_eq!(id("换成电影版").unwrap(), "moss_station");
-    assert_eq!(id("moss 任务简报").unwrap(), "moss_briefing");
-    assert_eq!(id("换成守夜模式").unwrap(), "moss_night");
+    // n75：并掉的旧角色，说旧名字换到合并后的角色
+    assert_eq!(id("moss 任务简报").unwrap(), "moss_station");
+    assert_eq!(id("换成守夜模式").unwrap(), "workshop");
     assert_eq!(id("冷笑话风格").unwrap(), "moss_deadpan");
-    assert_eq!(id("风险评估的语气").unwrap(), "moss_risk");
+    assert_eq!(id("风险评估的语气").unwrap(), "moss_station");
     assert_eq!(id("默认").unwrap(), "workshop");
     assert_eq!(id("老王师傅").unwrap(), "custom_a1");
     assert_eq!(id("老王").unwrap(), "custom_a1", "unique partial match");
@@ -159,6 +162,7 @@ fn n59_spoken_switch_follows_the_settings_file_not_a_stale_running_copy() {
             active: "workshop".into(),
             background: "新背景".into(),
             custom: vec![],
+            risk_notes: false,
         }),
     });
     let switch = PersonaSwitch::new(running, Some(store.clone()));
@@ -168,7 +172,7 @@ fn n59_spoken_switch_follows_the_settings_file_not_a_stale_running_copy() {
     );
     assert!(!switch.system_prompt().contains("老师傅"));
 
-    assert_eq!(switch.switch("守夜").unwrap(), "MOSS 守夜");
+    assert_eq!(switch.switch("冷面幽默").unwrap(), "MOSS 冷面幽默");
     let config = switch.config();
     assert_eq!(
         config,
@@ -185,14 +189,17 @@ fn n59_switch_saves_first_and_a_failed_save_keeps_the_old_role() {
         fail: AtomicBool::new(false),
     });
     let switch = PersonaSwitch::new(PersonaConfig::default(), Some(store.clone()));
-    assert_eq!(switch.switch("守夜").unwrap(), "MOSS 守夜");
-    assert_eq!(*store.saved.lock().unwrap(), vec!["moss_night".to_owned()]);
-    assert!(switch.system_prompt().contains("守夜风格"));
+    assert_eq!(switch.switch("冷面幽默").unwrap(), "MOSS 冷面幽默");
+    assert_eq!(
+        *store.saved.lock().unwrap(),
+        vec!["moss_deadpan".to_owned()]
+    );
+    assert!(switch.system_prompt().contains("冷面幽默风格"));
 
     store.fail.store(true, Ordering::SeqCst);
     assert!(matches!(switch.switch("简报"), Err(SwitchError::Save(_))));
     assert!(
-        switch.system_prompt().contains("守夜风格"),
+        switch.system_prompt().contains("冷面幽默风格"),
         "role must not change when saving failed"
     );
     assert!(matches!(
@@ -201,13 +208,20 @@ fn n59_switch_saves_first_and_a_failed_save_keeps_the_old_role() {
     ));
 
     // A UI save replaces the whole config immediately.
+    // n75：设置文件里的旧编号 moss_briefing 按合并后的 MOSS 处理
     switch.configure(PersonaConfig {
         active: "moss_briefing".into(),
         background: "排风很弱".into(),
         custom: vec![],
+        risk_notes: false,
     });
     let prompt = switch.system_prompt();
-    assert!(prompt.contains("任务简报风格") && prompt.contains("排风很弱"));
+    assert!(
+        prompt.contains("550W 量子计算机")
+            && prompt.contains("收到")
+            && prompt.contains("排风很弱")
+    );
+    assert_eq!(switch.config().active_role().1, "MOSS");
 }
 
 struct Impostor;
@@ -282,10 +296,10 @@ async fn n59_persona_tool_switches_lists_and_never_lets_others_impersonate_it() 
         )
         .await
     {
-        ToolOutcome::Speak(text) => assert_eq!(text, "好的，已切换为MOSS 任务简报。"),
+        ToolOutcome::Speak(text) => assert_eq!(text, "好的，已切换为MOSS。"),
         other => panic!("switch is spoken directly: {other:?}"),
     }
-    assert!(persona.system_prompt().contains("任务简报风格"));
+    assert!(persona.system_prompt().contains("550W 量子计算机"));
     match tools
         .call(
             &ctx,
@@ -295,12 +309,12 @@ async fn n59_persona_tool_switches_lists_and_never_lets_others_impersonate_it() 
         .await
     {
         ToolOutcome::Reply(text) => {
-            assert!(text.contains("not_found") && text.contains("MOSS 守夜"))
+            assert!(text.contains("not_found") && text.contains("MOSS 冷面幽默"))
         }
         other => panic!("unknown role is handed back with the list: {other:?}"),
     }
     assert!(
-        persona.system_prompt().contains("任务简报风格"),
+        persona.system_prompt().contains("550W 量子计算机"),
         "failed switch keeps the role"
     );
 }
@@ -323,5 +337,46 @@ fn n60_station_role_speaks_like_the_film_but_never_invents_numbers() {
     assert!(
         prompt.ends_with(IMMUTABLE_SAFETY_RULES),
         "safety rules stay last"
+    );
+}
+
+/// n75：内置角色只剩 4 个；风险提示是所有角色可用的开关，打开才附上，且仍在安全铁律之前；
+/// 旧编号经 canonical_persona 映射。
+#[test]
+fn n75_four_roles_risk_notes_switch_and_legacy_ids() {
+    let ids: Vec<&str> = BUILTINS.iter().map(|b| b.id).collect();
+    assert_eq!(
+        ids,
+        ["workshop", "beginner_guide", "moss_station", "moss_deadpan"]
+    );
+    assert_eq!(canonical_persona("moss_risk"), "moss_station");
+    assert_eq!(canonical_persona("moss_night"), "workshop");
+    assert_eq!(canonical_persona("custom_a1"), "custom_a1");
+    for active in ["workshop", "moss_deadpan", "custom_a1"] {
+        let mut cfg = config(active, vec![custom("custom_a1", "老师傅", "话少")]);
+        assert!(
+            !cfg.system_prompt().contains("把握较大"),
+            "{active} 默认不附"
+        );
+        cfg.risk_notes = true;
+        let prompt = cfg.system_prompt();
+        assert!(
+            prompt.contains("把握较大") && prompt.contains("边角料"),
+            "{active}"
+        );
+        assert!(
+            prompt.ends_with(IMMUTABLE_SAFETY_RULES),
+            "{active} 安全铁律仍在最后"
+        );
+    }
+    // 表情只放开头、只换屏幕表情；朗读前会去掉
+    assert!(IMMUTABLE_SAFETY_RULES.contains("最开头放一个表情"));
+    assert_eq!(
+        moss_voice_providers::text::emotion_of("😊好的"),
+        Some("happy")
+    );
+    assert_eq!(
+        moss_voice_providers::text::clean_for_speech("😊好的，马上开始。"),
+        "好的，马上开始。"
     );
 }

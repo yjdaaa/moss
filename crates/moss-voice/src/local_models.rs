@@ -32,6 +32,11 @@ pub const DEFAULT_ONEJEV_4B_BASE: &str =
     "https://huggingface.co/mradermacher/OneJev1.6-4B-GGUF/resolve/main";
 pub const DEFAULT_ONEJEV_9B_BASE: &str =
     "https://huggingface.co/mradermacher/OneJev1.6-9B-GGUF/resolve/main";
+/// 本地视觉模型 Qwen3-VL（阿里官方 GGUF，Apache-2.0；2026-11-08 n74），与 OneJev 共用 llama.cpp 推理引擎
+pub const DEFAULT_QWEN3_VL_2B_BASE: &str =
+    "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main";
+pub const DEFAULT_QWEN3_VL_4B_BASE: &str =
+    "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archive {
@@ -55,6 +60,8 @@ pub enum ModelKind {
     Tts,
     Jev,
     Speaker,
+    /// 本地视觉理解（看图回答，n74）
+    Vision,
 }
 
 /// 辅助程序加载模型的方式（与 `moss-voice-local-proto` 的引擎及本地 Laya 决策服务对应）。
@@ -72,6 +79,15 @@ pub enum Engine {
     Laya,
     OneJev,
     CampPlus,
+    /// llama.cpp `llama-server` + 视觉投影（mmproj），提供 OpenAI 兼容 `/v1/chat/completions`（n74）
+    LlamaVision,
+}
+
+impl Engine {
+    /// 是否运行在 MOSS 自动下载的 llama.cpp 推理引擎上（OneJev 与本地视觉模型共用一份）。
+    pub fn uses_llama_runtime(self) -> bool {
+        matches!(self, Engine::OneJev | Engine::LlamaVision)
+    }
 }
 
 /// 与压缩包一起下载、放进模型目录的附加文件（同样校验 SHA-256）。
@@ -190,9 +206,37 @@ const ONEJEV_9B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
     size: 624_229_728,
 }];
 
+const QWEN3_VL_2B_FILES: [&str; 2] = [
+    "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+    "mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
+];
+const QWEN3_VL_2B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
+    path: "mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
+    sha256: "f9a68fabba69c3b81e153367b2c7521030b0fa8bb0de400c9599c8e6725f9c82",
+    size: 445_053_216,
+}];
+const QWEN3_VL_4B_FILES: [&str; 2] = [
+    "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+    "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf",
+];
+const QWEN3_VL_4B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
+    path: "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf",
+    sha256: "30ba2c7dd3127a4561b6cba9d13d0f711c91bdb38742e2f56d73c8cb596bd06d",
+    size: 453_974_304,
+}];
+
+/// 本地视觉模型的主权重与视觉投影文件名（`local_vision` 启动 llama-server 用）。
+pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
+    match id {
+        "qwen3_vl_2b" => Some((QWEN3_VL_2B_FILES[0], QWEN3_VL_2B_FILES[1])),
+        "qwen3_vl_4b" => Some((QWEN3_VL_4B_FILES[0], QWEN3_VL_4B_FILES[1])),
+        _ => None,
+    }
+}
+
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 13] = [
+pub const CATALOG: [ModelSpec; 15] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker,
@@ -436,6 +480,40 @@ pub const CATALOG: [ModelSpec; 13] = [
         },
         required: &LAYA_MULTILINGUAL_FILES,
         extras: &LAYA_MULTILINGUAL_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
+        id: "qwen3_vl_2b",
+        kind: ModelKind::Vision,
+        engine: Engine::LlamaVision,
+        label: "Qwen3-VL · 2B 本地视觉（推荐）",
+        note: "Apache-2.0；阿里官方 GGUF（Q4_K_M + 视觉投影，约 1.5 GB）。断网看图、认材料与读字，与 OneJev 共用推理引擎；无显卡时单张图约数秒。",
+        path: "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+        sha256: "089d75c52f4b7ffc56ba998ffc50aae89fcafc755f9e7208aacca281dca6c2ae",
+        size: 1_107_409_952,
+        archive: Archive::Directory {
+            dir: "qwen3_vl_2b",
+            base_url: DEFAULT_QWEN3_VL_2B_BASE,
+        },
+        required: &QWEN3_VL_2B_FILES,
+        extras: &QWEN3_VL_2B_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
+        id: "qwen3_vl_4b",
+        kind: ModelKind::Vision,
+        engine: Engine::LlamaVision,
+        label: "Qwen3-VL · 4B 本地视觉（更准）",
+        note: "Apache-2.0；阿里官方 GGUF（Q4_K_M + 视觉投影，约 3 GB）。描述与读字更准，适合 16 GB+ 内存或独显；无显卡时明显偏慢。",
+        path: "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+        sha256: "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a",
+        size: 2_497_281_664,
+        archive: Archive::Directory {
+            dir: "qwen3_vl_4b",
+            base_url: DEFAULT_QWEN3_VL_4B_BASE,
+        },
+        required: &QWEN3_VL_4B_FILES,
+        extras: &QWEN3_VL_4B_EXTRAS,
         voices: None,
     },
 ];
@@ -703,7 +781,7 @@ impl ModelManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         CATALOG
             .iter()
-            .filter(|spec| spec.engine == Engine::OneJev && self.root_for(spec.id) == root)
+            .filter(|spec| spec.engine.uses_llama_runtime() && self.root_for(spec.id) == root)
             .any(|spec| {
                 installed(root, spec)
                     || tasks
@@ -824,7 +902,7 @@ impl ModelManager {
             }
             remove_installed(&root, spec)?;
         }
-        if spec.engine == Engine::OneJev && !self.onejev_still_needed(&root) {
+        if spec.engine.uses_llama_runtime() && !self.onejev_still_needed(&root) {
             crate::onejev::remove_managed_runtime(&root)?;
         }
         Ok(())
@@ -947,7 +1025,7 @@ fn run_download(
         .collect();
     let total = spec.download_size();
     let result = (|| {
-        if spec.engine == Engine::OneJev && !bases.iter().any(|b| is_loopback_test_base(b)) {
+        if spec.engine.uses_llama_runtime() && !bases.iter().any(|b| is_loopback_test_base(b)) {
             crate::onejev::ensure_llama_runtime(
                 root,
                 bases.first().map(String::as_str),
@@ -1726,6 +1804,7 @@ mod tests {
                 Engine::Kokoro | Engine::Matcha => ModelKind::Tts,
                 Engine::Laya | Engine::OneJev => ModelKind::Jev,
                 Engine::CampPlus => ModelKind::Speaker,
+                Engine::LlamaVision => ModelKind::Vision,
             };
             assert_eq!(spec.kind, kind, "{} 的引擎与类别一致", spec.id);
         }
@@ -1882,5 +1961,44 @@ mod tests {
         .unwrap();
         write_sized("tokenizer/tokenizer.json", 1024);
         assert!(!installed(dir.path(), laya));
+    }
+}
+
+#[cfg(test)]
+mod local_vision_catalog_tests {
+    use super::*;
+
+    /// n74：本地视觉模型两档都用 llama.cpp 推理引擎（与 OneJev 共用、删最后一个才删引擎），
+    /// 启动用的文件名与下载清单一致，来源是阿里官方仓库。
+    #[test]
+    fn vision_models_share_llama_runtime_and_list_their_files() {
+        for id in ["qwen3_vl_2b", "qwen3_vl_4b"] {
+            let spec = spec_of(id, ModelKind::Vision).expect(id);
+            assert_eq!(spec.engine, Engine::LlamaVision);
+            assert!(spec.engine.uses_llama_runtime());
+            let (gguf, mmproj) = vision_model_files(id).unwrap();
+            assert_eq!(gguf, spec.path);
+            assert_eq!(spec.required, &[gguf, mmproj]);
+            assert_eq!(spec.extras.len(), 1);
+            assert_eq!(spec.extras[0].path, mmproj);
+            assert_eq!(spec.sha256.len(), 64);
+            match spec.archive {
+                Archive::Directory { dir, base_url } => {
+                    assert_eq!(dir, id);
+                    assert!(
+                        base_url.starts_with("https://huggingface.co/Qwen/"),
+                        "{base_url}"
+                    );
+                }
+                other => panic!("{id} 应为多文件目录：{other:?}"),
+            }
+        }
+        assert!(Engine::OneJev.uses_llama_runtime());
+        assert!(!Engine::SenseVoice.uses_llama_runtime());
+        assert!(vision_model_files("onejev_1_6_4b").is_none());
+        assert_eq!(
+            spec("qwen3_vl_2b").unwrap().download_size(),
+            1_107_409_952 + 445_053_216
+        );
     }
 }

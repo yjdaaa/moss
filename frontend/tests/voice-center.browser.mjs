@@ -65,6 +65,18 @@ try {
     },
     kbRoots: [],
     memoryState: { enabled: false, rows: [] },
+    // n74：本地视觉模型（2B 未下载、4B 已下载）
+    vision: {
+      settings: { enabled: false, url: "", model: "" },
+      key_configured: false,
+      ready: false,
+      dialog_llm: { configured: false, url: "", model: "" },
+      local_models: [
+        { id: "qwen3_vl_2b", label: "Qwen3-VL · 2B 本地视觉（推荐）", size: 1552463168, installed: false },
+        { id: "qwen3_vl_4b", label: "Qwen3-VL · 4B 本地视觉（更准）", size: 2951255968, installed: true },
+      ],
+      local_runtime: { state: "idle", model: null, accelerator: null, error: null },
+    },
   };
   const voiceStatus = (extra = {}) => ({
     mode: state.mode, settings: structuredClone(state.settings), server: structuredClone(state.server),
@@ -116,7 +128,12 @@ try {
       track_count: 0,
       warning: "本地音乐目录当前不可用（换电脑或移动盘拔出时请重新选择音乐文件夹），本次启动已跳过本地音乐",
     }),
-    voice_vision_status: () => ({ settings: { enabled: false, url: "", model: "" }, key_configured: false }),
+    voice_vision_status: () => structuredClone(state.vision),
+    voice_vision_save: ({ input }) => {
+      state.vision.settings = structuredClone(input.settings);
+      state.vision.ready = Boolean(input.settings.enabled);
+      return structuredClone(state.vision);
+    },
     voice_agent_status: () => ({ configured: state.agent.settings.enabled, strict_mode: state.agent.strict_mode, providers: state.agent.providers, runs: structuredClone(state.agent.runs), settings: structuredClone(state.agent.settings) }),
     // n67：唤醒词与固件卡挂在主窗口语音中心（回环假数据，不连设备）
     voice_wakeword_status: () => ({
@@ -594,7 +611,9 @@ try {
   await page.locator("#voice-custom-persona-add").click();
   await page.getByLabel("自建角色 1 名字").fill("老师傅");
   await page.getByLabel("自建角色 1 人设").fill("话少，先说结论");
-  await page.locator("#voice-persona-style").selectOption({ label: "老师傅（自建） — 话少，先说结论" });
+  // n75：选项只显示角色名，说明在下拉框下方 #voice-persona-hint
+  await page.locator("#voice-persona-style").selectOption({ label: "老师傅（自建）" });
+  assert.match(await page.locator("#voice-persona-hint").innerText(), /话少，先说结论/);
   await page.locator("#voice-experience-save").click();
   await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已立即生效" }).waitFor();
   const rolePatch = last("voice_local_save").args.settings;
@@ -609,6 +628,28 @@ try {
   const deletePatch = last("voice_local_save").args.settings;
   assert.deepEqual(deletePatch.custom_personas, []);
   assert.equal(deletePatch.persona_style, "workshop");
+  // 6f. n74：视觉理解可选本地视觉模型——云端地址与密钥栏隐藏，未下载给出去下载入口，保存只提交本地模型编号
+  await openGroup("vision");
+  assert.equal(await page.locator("#voice-vision-source").inputValue(), "cloud", "旧配置（无本地模型、未用对话模型）显示为云端");
+  await page.locator("#voice-vision-source").selectOption("local");
+  assert.equal(await page.locator("#voice-vision-local-model").inputValue(), "qwen3_vl_4b", "切到本地时优先选已下载的模型");
+  assert.equal(await page.getByLabel("视觉模型密钥操作").count(), 0, "本地视觉不需要地址与密钥");
+  await page.locator("#voice-vision-local-model").selectOption("qwen3_vl_2b");
+  await page.locator("#voice-vision-local-missing").filter({ hasText: "还没下载" }).waitFor();
+  await page.locator("#voice-vision-local-model").selectOption("qwen3_vl_4b");
+  assert.equal(await page.locator("#voice-vision-local-missing").count(), 0);
+  await page.locator("#voice-vision-enabled").check();
+  await page.locator("#voice-vision-save").click();
+  await page.locator("#voice-group-vision [role=status]").filter({ hasText: "已保存视觉设置" }).waitFor();
+  const visionSaved = last("voice_vision_save").args.input;
+  assert.equal(visionSaved.settings.local_model, "qwen3_vl_4b");
+  assert.equal(visionSaved.settings.use_dialog_llm, false);
+  assert.equal(visionSaved.key.action, "keep", "本地视觉不改密钥");
+  assert.match(await page.locator("#voice-group-vision > .voice-group-h").innerText(), /本地 Qwen3-VL · 4B/);
+  await page.locator("#voice-vision-source").selectOption("dialog");
+  assert.equal(await page.locator("#voice-vision-local-model").count(), 0, "切到对话大模型后不再显示本地模型");
+  await page.locator("#voice-vision-source").selectOption("local");
+
   await page.locator("#voice-group-experience").scrollIntoViewIfNeeded();
   await shot("voice-builtin");
 

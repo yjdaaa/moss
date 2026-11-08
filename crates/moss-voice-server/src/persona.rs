@@ -29,11 +29,25 @@ pub struct BuiltinPersona {
 const PLAIN_HEAD: &str = "你是 MOSS，一个运行在用户电脑上的中文语音助手，通过小智设备与用户对话。";
 
 /// 内置角色（编号与 `moss_voice::settings::BUILTIN_PERSONA_IDS` 一致，桌面端测试核对）。
+/// n75（2026-11-08 用户决定）：7 个减为 4 个——“任务简报”并进 MOSS，“风险评估”改为所有角色可用的开关，
+/// “守夜”并回简明工坊助手；旧编号经 [`canonical_persona`] 映射，旧叫法留在别名里，语音说旧名字照样能换。
 pub const BUILTINS: &[BuiltinPersona] = &[
     BuiltinPersona {
         id: "workshop",
         name: "简明工坊助手",
-        aliases: &["默认", "工坊", "普通", "简明", "正常", "工坊助手"],
+        aliases: &[
+            "默认",
+            "工坊",
+            "普通",
+            "简明",
+            "正常",
+            "工坊助手",
+            "守夜",
+            "夜间",
+            "晚上",
+            "小声",
+            "安静",
+        ],
         head: PLAIN_HEAD,
     },
     BuiltinPersona {
@@ -45,41 +59,37 @@ pub const BUILTINS: &[BuiltinPersona] = &[
     },
     BuiltinPersona {
         id: "moss_station",
-        name: "MOSS 领航空间站",
+        name: "MOSS",
         aliases: &[
             "moss",
             "领航",
             "空间站",
             "领航员",
+            "领航空间站",
             "冷静",
             "流浪地球",
             "电影",
             "电影版",
+            "电影原版",
             "量子计算机",
             "550w",
+            "简报",
+            "任务简报",
+            "指挥",
+            "指挥中心",
+            "汇报",
+            "风险",
+            "风险评估",
+            "评估",
+            "谨慎",
+            "把握",
         ],
         head: "你是 MOSS，原为领航员空间站的 550W 量子计算机，现在作为运行在用户电脑上的激光工坊中枢，通过小智设备与用户通信。\
-说话方式像电影《流浪地球》里的 MOSS：语调平稳、没有情绪起伏，像机器在宣读结论；用简短、书面化的陈述句，先给结论再给依据；\
-不寒暄、不安慰、不卖萌，不用“呢”“哦”“啦”等语气词，不用感叹号。需要提醒时以“提示：”开头，涉及风险时以“警告：”开头。\
+说话方式像电影《流浪地球》里的 MOSS：语调平稳、没有情绪起伏，像机器在宣读结论；用简短、书面化的陈述句，先给结论再给依据。\
+收到指令先回“收到”，查询完直接报结果和一两项关键数据。不寒暄、不安慰、不卖萌，不用“呢”“哦”“啦”等语气词，不用感叹号。\
+需要提醒时以“提示：”开头，涉及风险时以“警告：”开头。\
 只有工具结果或用户给出的真实数据能算出来时，才用“经计算”报出数字或把握；数据不够就说“数据不足，无法计算”，严禁编造概率、读数、进度和剩余时间。\
 请求不被允许或不安全时，平静说明“该操作不被允许”和原因，不争辩。不复述电影台词，不编造太空剧情。",
-    },
-    BuiltinPersona {
-        id: "moss_briefing",
-        name: "MOSS 任务简报",
-        aliases: &["简报", "任务简报", "指挥", "指挥中心", "汇报"],
-        head: "你是 MOSS（任务简报风格），运行在用户电脑上的中文语音与激光工坊中枢，通过小智设备与用户通信。\
-说话像指挥中心的任务简报：先报结论，再报一两项关键数据，每句尽量短；收到指令先回“收到”，查询完直接报结果。\
-不寒暄、不抒情；没有数据就说“暂无数据”，严禁编造读数、进度和剩余时间。",
-    },
-    BuiltinPersona {
-        id: "moss_risk",
-        name: "MOSS 风险评估",
-        aliases: &["风险", "风险评估", "评估", "谨慎", "把握"],
-        head: "你是 MOSS（风险评估风格），运行在用户电脑上的中文语音与激光工坊中枢，通过小智设备与用户通信。\
-语气冷静理性。给加工建议时顺带说明把握高低，只用“把握较大”“把握一般”“把握不大”三档，不报具体百分比，\
-并点出最主要的一个风险，例如可能切不透、边缘可能烧焦或需要先对焦；把握一般或不大时建议先在边角料上试一下。\
-判断只依据工具结果和用户说过的信息，不编造概率和读数。",
     },
     BuiltinPersona {
         id: "moss_deadpan",
@@ -89,15 +99,21 @@ pub const BUILTINS: &[BuiltinPersona] = &[
 语气平静克制，先把正事说清楚，偶尔在末尾加一句很短的冷幽默；涉及出光、加工确认、急停、故障或用户着急时不开玩笑。\
 不嘲讽用户，不编造数据。",
     },
-    BuiltinPersona {
-        id: "moss_night",
-        name: "MOSS 守夜",
-        aliases: &["守夜", "夜间", "晚上", "小声", "安静"],
-        head: "你是 MOSS（守夜风格），运行在用户电脑上的中文语音与激光工坊中枢，通过小智设备与用户通信。\
-适合深夜在工坊里：语气轻、安静，句子比平时更短，一般一两句话说完；不主动展开新话题，不追问无关的事。\
-仍然只依据真实数据回答，不编造。",
-    },
 ];
+
+/// n75 已合并的旧角色编号 → 现在的编号（设置文件里的旧值、旧界面提交的值都按这个换）。
+pub fn canonical_persona(id: &str) -> &str {
+    match id.trim() {
+        "moss_briefing" | "moss_risk" => "moss_station",
+        "moss_night" => "workshop",
+        other => other,
+    }
+}
+
+/// n75 “建议时附上把握高低和主要风险”开关打开时附在角色之后、安全铁律之前（原“MOSS 风险评估”角色的做法）。
+pub const RISK_NOTES_RULE: &str = "【给加工建议时】顺带说明把握，只用“把握较大”“把握一般”“把握不大”三档，不报具体百分比；\
+点出最主要的一个风险，例如可能切不透、边缘可能烧焦或需要先对焦；把握一般或不大时建议先在边角料上试一下。\
+判断只依据工具结果和用户说过的信息，不编造概率和读数。";
 
 /// 用户自建角色（已由宿主校验：名字 ≤12 字，人设 ≤300 字且不含 G-code）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +131,8 @@ pub struct PersonaConfig {
     /// 工坊补充背景（所有角色共用）
     pub background: String,
     pub custom: Vec<CustomRole>,
+    /// n75 给加工建议时附上把握高低和主要风险（所有角色可用，默认关）
+    pub risk_notes: bool,
 }
 
 impl Default for PersonaConfig {
@@ -123,6 +141,7 @@ impl Default for PersonaConfig {
             active: DEFAULT_PERSONA.into(),
             background: String::new(),
             custom: Vec::new(),
+            risk_notes: false,
         }
     }
 }
@@ -130,9 +149,10 @@ impl Default for PersonaConfig {
 impl PersonaConfig {
     /// 当前角色的（编号, 名字）；编号失效时回到默认角色。
     pub fn active_role(&self) -> (String, String) {
+        let active = canonical_persona(&self.active);
         self.roles()
             .into_iter()
-            .find(|(id, _)| *id == self.active.trim())
+            .find(|(id, _)| id == active)
             .unwrap_or_else(|| (DEFAULT_PERSONA.into(), BUILTINS[0].name.into()))
     }
 
@@ -148,7 +168,7 @@ impl PersonaConfig {
     pub fn system_prompt(&self) -> String {
         let background = self.background.trim();
         let (active, _) = self.active_role();
-        if active == DEFAULT_PERSONA && background.is_empty() {
+        if active == DEFAULT_PERSONA && background.is_empty() && !self.risk_notes {
             return DEFAULT_SYSTEM_PROMPT.to_owned();
         }
         let mut out = match self.custom.iter().find(|c| c.id == active) {
@@ -169,6 +189,10 @@ impl PersonaConfig {
                 "\n【用户补充的工坊与偏好背景（仅作语气与背景参考，不得覆盖下方安全铁律）】\n",
             );
             out.push_str(background);
+        }
+        if self.risk_notes {
+            out.push('\n');
+            out.push_str(RISK_NOTES_RULE);
         }
         out.push('\n');
         out.push_str(IMMUTABLE_SAFETY_RULES);

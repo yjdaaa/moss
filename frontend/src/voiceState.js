@@ -757,16 +757,23 @@ export function builtinDeviceInfoView(device) {
     updatedAt: Number(device?.info_at) || 0,
   };
 }
-/** 内置说话角色（n59；编号与后端 `BUILTIN_PERSONA_IDS` 一致）。角色只改语气，声音由语音合成设置决定。 */
+/**
+ * 内置说话角色（n59；编号与后端 `BUILTIN_PERSONA_IDS` 一致）。角色只改语气，声音由语音合成设置决定。
+ * n75（2026-11-08 用户决定）：7 个减为 4 个；“风险评估”改为所有角色可用的开关 `persona_risk_notes`。
+ */
 export const PERSONA_STYLE_OPTIONS = [
   { id: "workshop", label: "简明工坊助手（默认）", hint: "干练直接，专注激光雕刻指令与状态反馈" },
-  { id: "beginner_guide", label: "新手引导模式（耐心讲解工艺）", hint: "针对耗材、对焦、排风与走边框多给一句大白话提醒" },
-  { id: "moss_station", label: "MOSS 领航空间站（电影原版腔调）", hint: "像《流浪地球》的 MOSS：平稳无起伏、先报结论，用“提示：”“警告：”开头；只有真实数据才说“经计算”，否则说“数据不足，无法计算”" },
-  { id: "moss_briefing", label: "MOSS 任务简报（先报结论）", hint: "像指挥中心简报：收到、结论、一两项关键数据，句子极短" },
-  { id: "moss_risk", label: "MOSS 风险评估（附把握高低）", hint: "建议时说明把握较大 / 一般 / 不大和最主要的风险，没把握先试边角料" },
-  { id: "moss_deadpan", label: "MOSS 冷面幽默（偶尔冷笑话）", hint: "正事说完偶尔一句冷幽默；出光、急停、故障时不开玩笑" },
-  { id: "moss_night", label: "MOSS 守夜（深夜轻声）", hint: "语气轻、话更短，不主动扯新话题" },
+  { id: "beginner_guide", label: "新手引导", hint: "耗材、对焦、排风、走边框多给一句大白话提醒" },
+  { id: "moss_station", label: "MOSS（电影原版）", hint: "像《流浪地球》的 MOSS：收到、先报结论，平稳无起伏，用“提示：”“警告：”开头；没有真实数据就说“数据不足，无法计算”" },
+  { id: "moss_deadpan", label: "MOSS 冷面幽默", hint: "正事说完偶尔一句冷幽默；出光、急停、故障时不开玩笑" },
 ];
+
+/** n75 已合并的旧角色编号 → 现在的编号（与后端 `canonical_persona_style` 一致）。 */
+export function canonicalPersonaStyle(id) {
+  if (id === "moss_briefing" || id === "moss_risk") return "moss_station";
+  if (id === "moss_night") return "workshop";
+  return id;
+}
 export const MAX_CUSTOM_PERSONAS = 6;
 
 /** 自建角色在表单里存为 JSON 文字（便于未保存改动比较），这里读回数组。 */
@@ -1183,6 +1190,7 @@ export const LOCAL_KINDS = [
   { kind: "vad", title: "拾音判停", fallback: "silero_vad" },
   { kind: "asr", title: "语音识别", fallback: "sense_voice" },
   { kind: "tts", title: "语音合成", fallback: "kokoro" },
+  { kind: "vision", title: "视觉理解", fallback: "qwen3_vl_2b" },
 ];
 
 /** 按类别分组的本地模型（保持后端清单顺序）。 */
@@ -1211,7 +1219,8 @@ export function localSettingsForm(settings) {
     custom_hotwords: (Array.isArray(value.custom_hotwords) ? value.custom_hotwords : []).join("\n"),
     asr_homophone_fix: value.asr_homophone_fix !== false,
     custom_asr_corrections: (Array.isArray(value.custom_asr_corrections) ? value.custom_asr_corrections : []).join("\n"),
-    persona_style: value.persona_style || "workshop",
+    persona_style: canonicalPersonaStyle(value.persona_style || "workshop"),
+    persona_risk_notes: value.persona_risk_notes === true,
     persona_prompt: value.persona_prompt || "",
     custom_personas: JSON.stringify(parseCustomPersonas(value.custom_personas)),
     screen_preview_sync: value.screen_preview_sync !== false,
@@ -1327,7 +1336,8 @@ export function localSettingsPayload(form) {
       }
       return [...map.values()];
     })(),
-    persona_style: String(form.persona_style || "workshop").trim() || "workshop",
+    persona_style: canonicalPersonaStyle(String(form.persona_style || "workshop").trim() || "workshop"),
+    persona_risk_notes: form.persona_risk_notes === true,
     persona_prompt: String(form.persona_prompt || "").replace(/\r\n?/g, "\n").trim(),
     custom_personas: parseCustomPersonas(form.custom_personas).map((role) => ({
       id: role.id,
@@ -1687,6 +1697,7 @@ export const EXPERIENCE_KEYS = [
   "persona_style",
   "persona_prompt",
   "custom_personas",
+  "persona_risk_notes",
   "asr_homophone_fix",
   "custom_asr_corrections",
   "jev_unfinished_hold",
@@ -2950,4 +2961,40 @@ export function pipelineTestSummary(results) {
   const passed = MIX_SECTIONS.filter(({ key }) => results?.[key]?.ok && !results[key].skipped).length;
   if (failed.length === 0) return { ok: true, text: `全部环节测试通过（${passed} 项正常${passed < MIX_SECTIONS.length ? "，其余已关闭跳过" : ""}）` };
   return { ok: false, text: `${failed.length} 个环节不通：${failed.join("、")}。原因见对应下拉框下方` };
+}
+
+/**
+ * 视觉理解的看图来源（n74，2026-11-08）：`local` 本地视觉模型、`dialog` 当前对话大模型、`cloud` 云端视觉模型。
+ * 存储上仍是 `use_dialog_llm` 与 `local_model` 两个字段：对话大模型优先，其次本地，否则云端。
+ */
+export function visionSource(config) {
+  if (config?.use_dialog_llm) return "dialog";
+  if (config?.local_model) return "local";
+  return "cloud";
+}
+
+/** 切换看图来源时要改的字段；切到本地时优先选已下载的模型。 */
+export function visionSourcePatch(source, config, localModels = []) {
+  if (source === "dialog") return { use_dialog_llm: true, local_model: "" };
+  if (source === "local") {
+    const list = Array.isArray(localModels) ? localModels : [];
+    const keep = list.find((item) => item.id === config?.local_model);
+    const pick = keep || list.find((item) => item.installed) || list[0];
+    return { use_dialog_llm: false, local_model: pick?.id || "" };
+  }
+  return { use_dialog_llm: false, local_model: "" };
+}
+
+/** 本地视觉推理进程的状态说明。 */
+export function visionRuntimeText(runtime) {
+  switch (runtime?.state) {
+    case "ready":
+      return `本地视觉模型已就绪${runtime.accelerator ? `（${runtime.accelerator}）` : ""}，照片只在这台电脑上处理。`;
+    case "starting":
+      return "正在加载本地视觉模型（首次把权重读进内存约十几秒到一分钟）…";
+    case "failed":
+      return `本地视觉模型启动失败：${runtime.error || "未知原因"}`;
+    default:
+      return "内置服务启动后会在后台加载本地视觉模型；点“测试模型”会等它加载完再测。";
+  }
 }

@@ -335,6 +335,7 @@ mod imp {
                 model: "vl-1".into(),
                 use_dialog_llm: false,
                 keep_in_history: false,
+                local_model: String::new(),
             };
             assert!(
                 vision_credentials(&setting, None, None, Some("llm-key")).is_none(),
@@ -358,6 +359,7 @@ mod imp {
                 model: String::new(),
                 use_dialog_llm: true,
                 keep_in_history: false,
+                local_model: String::new(),
             };
             let openai = provider(ProviderKind::Openai);
             assert_eq!(
@@ -387,6 +389,7 @@ mod imp {
                 model: String::new(),
                 use_dialog_llm: true,
                 keep_in_history: false,
+                local_model: String::new(),
             };
             let doubao = provider(ProviderKind::Doubao);
             assert!(
@@ -763,6 +766,7 @@ mod imp {
                     prompt: c.prompt.clone(),
                 })
                 .collect(),
+            risk_notes: local.persona_risk_notes,
         }
     }
 
@@ -975,8 +979,161 @@ mod imp {
         usable(&setting.url, &setting.model, key)
             .then(|| (setting.url.clone(), setting.model.clone(), key.to_owned()))
     }
+    /// 本地视觉模型要怎么启动（由 `BuiltinVoice::sync_local_vision` 按设置与安装情况给出）。
+    #[derive(Clone, PartialEq, Eq)]
+    struct LocalVisionLaunch {
+        model: String,
+        dir: std::path::PathBuf,
+        root: std::path::PathBuf,
+        mirror: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct LocalVisionState {
+        launch: Option<LocalVisionLaunch>,
+        server: Option<moss_voice::local_vision::LocalVisionServer>,
+        starting: Option<Arc<std::sync::atomic::AtomicBool>>,
+        failure: Option<String>,
+        generation: u64,
+    }
+
+    /// n74 本地视觉模型（Qwen3-VL）运行管理：后台预加载，就绪后视觉理解直接调用本机地址；
+    /// 停用、换模型或服务停止时结束推理进程释放内存。与本地 Jev 分开运行，互不排队。
+    #[derive(Default)]
+    pub(crate) struct LocalVision {
+        state: Mutex<LocalVisionState>,
+        /// 串行化启动，避免预加载与设备请求同时各起一个进程
+        start_lock: Mutex<()>,
+    }
+
+    impl LocalVision {
+        fn lock(&self) -> std::sync::MutexGuard<'_, LocalVisionState> {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        /// 设置要用的模型；为 `None` 时停掉推理进程。模型或路径变了也会先停掉旧的。
+        fn configure(&self, launch: Option<LocalVisionLaunch>) {
+            let mut state = self.lock();
+            if state.launch == launch {
+                return;
+            }
+            state.generation += 1;
+            if let Some(cancel) = state.starting.take() {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            state.server = None;
+            state.failure = None;
+            state.launch = launch;
+        }
+
+        fn launch(&self) -> Option<LocalVisionLaunch> {
+            self.lock().launch.clone()
+        }
+
+        fn ready_url(&self) -> Option<String> {
+            let mut state = self.lock();
+            let alive = state.server.as_mut()?.check_alive();
+            match alive {
+                Ok(()) => state.server.as_ref().map(|server| server.base_url()),
+                Err(error) => {
+                    state.server = None;
+                    state.failure = Some(error);
+                    None
+                }
+            }
+        }
+
+        /// 确保推理进程在跑，返回本机地址；没在跑就启动并等它就绪（会阻塞，只在后台线程调用）。
+        fn ensure(&self) -> Result<String, String> {
+            if let Some(url) = self.ready_url() {
+                return Ok(url);
+            }
+            let _start = self
+                .start_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(url) = self.ready_url() {
+                return Ok(url);
+            }
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (launch, generation) = {
+                let mut state = self.lock();
+                let launch = state
+                    .launch
+                    .clone()
+                    .ok_or_else(|| "没有选用已下载的本地视觉模型".to_owned())?;
+                state.starting = Some(cancel.clone());
+                state.failure = None;
+                (launch, state.generation)
+            };
+            let result = moss_voice::local_vision::LocalVisionServer::start(
+                &launch.model,
+                &launch.dir,
+                &launch.root,
+                launch.mirror.as_deref(),
+                &cancel,
+            );
+            let mut state = self.lock();
+            if state.generation != generation {
+                return Err("本地视觉模型设置已变化，请重试".into());
+            }
+            state.starting = None;
+            match result {
+                Ok(server) => {
+                    let url = server.base_url();
+                    state.server = Some(server);
+                    Ok(url)
+                }
+                Err(error) => {
+                    state.failure = Some(error.clone());
+                    Err(error)
+                }
+            }
+        }
+
+        /// 后台预加载（服务启动、保存设置后调用），不阻塞调用方。
+        fn preload(self: &Arc<Self>) {
+            if self.launch().is_none()
+                || self.ready_url().is_some()
+                || self.lock().starting.is_some()
+            {
+                return;
+            }
+            let this = self.clone();
+            let _ = std::thread::Builder::new()
+                .name("moss-local-vision".into())
+                .spawn(move || {
+                    let _ = this.ensure();
+                });
+        }
+
+        /// 给语音中心卡片显示：`idle` / `starting` / `ready` / `failed`。
+        fn status(&self) -> Value {
+            let ready = self.ready_url().is_some();
+            let state = self.lock();
+            let phase = if ready {
+                "ready"
+            } else if state.starting.is_some() {
+                "starting"
+            } else if state.failure.is_some() {
+                "failed"
+            } else {
+                "idle"
+            };
+            serde_json::json!({
+                "state": phase,
+                "model": state.launch.as_ref().map(|launch| launch.model.clone()),
+                "accelerator": state.server.as_ref().map(|server| server.accelerator_text()),
+                "error": state.failure,
+            })
+        }
+    }
+
     struct DesktopVisionFactory {
         host: Arc<laser_host::HostApplication>,
+        local: Arc<LocalVision>,
     }
     impl DesktopVisionFactory {
         fn vision_setting(&self) -> moss_voice::settings::BuiltinVision {
@@ -989,6 +1146,18 @@ mod imp {
             let settings =
                 moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json"));
             let setting = settings.builtin_vision;
+            if setting.enabled && !setting.use_dialog_llm && !setting.local_model.is_empty() {
+                // 本地视觉：地址在打开会话时才确定（推理进程按需启动），这里只看是否已选好并下载
+                let launch = self
+                    .local
+                    .launch()
+                    .filter(|launch| launch.model == setting.local_model)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                "local".hash(&mut hasher);
+                launch.model.hash(&mut hasher);
+                launch.dir.hash(&mut hasher);
+                return Some((String::new(), launch.model, String::new(), hasher.finish()));
+            }
             let (vision_key, llm_key) = {
                 let db = self.host.db.lock().ok()?;
                 (
@@ -1017,6 +1186,15 @@ mod imp {
         }
         fn open(&self) -> Option<moss_voice_server::vision::VisionSession> {
             let (url, model, key, generation) = self.profile()?;
+            let (url, model) = if url.is_empty() {
+                // 本地视觉：在后台线程里调用，推理进程没在跑就等它加载好（服务启动时已预加载，通常立即可用）
+                (
+                    self.local.ensure().ok()?,
+                    moss_voice::local_vision::LOCAL_VISION_MODEL_NAME.to_owned(),
+                )
+            } else {
+                (url, model)
+            };
             let provider =
                 moss_voice_providers::vision::OpenAiVision::new(&url, &model, &key).ok()?;
             Some(moss_voice_server::vision::VisionSession {
@@ -1787,6 +1965,8 @@ mod imp {
         helper: Mutex<Option<LocalHelper>>,
         /// 串行化本地 Jev 决策服务（OneJev / Laya）启动与模型切换，不阻塞 `stop_laya`
         jev_start_lock: Arc<Mutex<()>>,
+        /// n74 本地视觉模型运行管理
+        local_vision: Arc<LocalVision>,
         /// 运行中的本地 Jev `/v1/systemone` 决策服务（OneJev `llama-server` 网关或 Laya 子进程，随本地 Jev 开关启停）
         laya: Arc<Mutex<LocalLayaRunner>>,
         /// NV19 长期记忆、资料与恢复摘要；检索与提取默认关闭
@@ -2293,6 +2473,7 @@ mod imp {
                 laya_root_for_test: Mutex::new(None),
                 helper: Mutex::new(None),
                 jev_start_lock: Arc::new(Mutex::new(())),
+                local_vision: Arc::new(LocalVision::default()),
                 laya: Arc::new(Mutex::new(LocalLayaRunner {
                     active_model: None,
                     starting_model: None,
@@ -3054,6 +3235,9 @@ mod imp {
             if let Err(error) = &result {
                 self.diagnostics
                     .push(start_failure_event("内置语音服务启动失败", error));
+            } else {
+                // n74：选了本地视觉模型时在后台预加载，设备第一次看图不用等
+                self.sync_local_vision(true);
             }
             result
         }
@@ -3093,6 +3277,7 @@ mod imp {
                     music,
                     vision: Some(Arc::new(DesktopVisionFactory {
                         host: self.host.clone(),
+                        local: self.local_vision.clone(),
                     })),
                     firmware: Some(Arc::new(DesktopFirmwareHost {
                         db: self.host.db.clone(),
@@ -3167,6 +3352,8 @@ mod imp {
 
         fn stop_locked(&self) {
             self.stop_locked_inner(false);
+            // n74：手动停止服务与退出时结束本地视觉推理进程；设置变更触发的重启不经过这里，模型保持加载
+            self.local_vision.configure(None);
         }
 
         fn stop_locked_inner(&self, keep_local_jev: bool) {
@@ -3300,6 +3487,7 @@ mod imp {
                 "jev_memory_filter",
                 "asr_homophone_fix",
                 "screen_preview_sync",
+                "persona_risk_notes",
             ] {
                 if let Some(value) = patch.get(key) {
                     bool_patches.push((
@@ -3462,7 +3650,8 @@ mod imp {
             };
             let persona_touched = persona_style_patch.is_some()
                 || custom_personas_patch.is_some()
-                || persona_prompt_patch.is_some();
+                || persona_prompt_patch.is_some()
+                || patch.get("persona_risk_notes").is_some();
             let (is_local_laya, laya_needed) = {
                 let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
                 let saved = moss_voice::settings::update_voice_with_jev_feedback(
@@ -3486,6 +3675,7 @@ mod imp {
                                 "jev_memory_filter" => local.jev_memory_filter = *val,
                                 "asr_homophone_fix" => local.asr_homophone_fix = *val,
                                 "screen_preview_sync" => local.screen_preview_sync = *val,
+                                "persona_risk_notes" => local.persona_risk_notes = *val,
                                 _ => {}
                             }
                         }
@@ -3604,6 +3794,7 @@ mod imp {
                                 | "persona_style"
                                 | "persona_prompt"
                                 | "custom_personas"
+                                | "persona_risk_notes"
                         )
                     })
             });
@@ -3650,6 +3841,14 @@ mod imp {
         }
 
         pub fn model_delete(&self, id: &str) -> Result<Value, CenterError> {
+            // n74：删正在用的本地视觉模型前先停掉它的推理进程（Windows 上运行中的文件删不掉）
+            if self
+                .local_vision
+                .launch()
+                .is_some_and(|launch| launch.model == id)
+            {
+                self.local_vision.configure(None);
+            }
             if id == "campplus_sv_zh_cn_16k_common"
                 && self
                     .speaker_backend
@@ -6032,9 +6231,23 @@ mod imp {
             };
             let ready = DesktopVisionFactory {
                 host: self.host.clone(),
+                local: self.local_vision.clone(),
             }
             .ready();
-            serde_json::json!({"settings":vision,"key_configured":key_configured,"ready":ready,"dialog_llm":dialog_llm})
+            // n74：可选的本地视觉模型及是否已下载（下载在“本地模型”里做）
+            let local_models: Vec<Value> = moss_voice::local_models::CATALOG
+                .iter()
+                .filter(|spec| spec.kind == moss_voice::local_models::ModelKind::Vision)
+                .map(|spec| {
+                    serde_json::json!({
+                        "id": spec.id,
+                        "label": spec.label,
+                        "size": spec.download_size(),
+                        "installed": self.models.path_if_installed(spec.id).is_some(),
+                    })
+                })
+                .collect();
+            serde_json::json!({"settings":vision,"key_configured":key_configured,"ready":ready,"dialog_llm":dialog_llm,"local_models":local_models,"local_runtime":self.local_vision.status()})
         }
 
         pub fn vision_save(&self, input: &Value) -> Result<Value, CenterError> {
@@ -6046,8 +6259,22 @@ mod imp {
             if next.url.len() > 1024 || next.model.len() > 200 {
                 return Err(invalid("模型名称或地址太长"));
             }
-            // 2026-10-16：对话大模型看图模式不校验视觉模型地址，改为要求对话模型可用且已存密钥。
-            if next.enabled && next.use_dialog_llm {
+            let local = next.enabled && !next.use_dialog_llm && !next.local_model.is_empty();
+            if !next.local_model.is_empty()
+                && moss_voice::local_models::spec_of(
+                    &next.local_model,
+                    moss_voice::local_models::ModelKind::Vision,
+                )
+                .is_none()
+            {
+                return Err(invalid("未知的本地视觉模型"));
+            }
+            // n74：本地视觉只要求模型已下载，不需要地址与密钥
+            if local {
+                if self.models.path_if_installed(&next.local_model).is_none() {
+                    return Err(invalid("请先在“本地模型”里下载这个视觉模型"));
+                }
+            } else if next.enabled && next.use_dialog_llm {
                 let llm_ok = self
                     .settings()
                     .builtin_models
@@ -6104,7 +6331,7 @@ mod imp {
                 Some(Some(_)) => true,
                 Some(None) => false,
             };
-            if next.enabled && !next.use_dialog_llm && !has_key {
+            if next.enabled && !next.use_dialog_llm && !local && !has_key {
                 return Err(invalid("启用视觉前必须保存对应模型密钥"));
             }
             let changes: Vec<(String, Option<String>)> = new_key
@@ -6119,16 +6346,49 @@ mod imp {
                 .map_err(|_| CenterError::new("vision_save_failed", 500, "视觉配置保存失败"))
             })?;
             drop(db);
+            self.sync_local_vision(true);
             Ok(self.vision_status())
+        }
+
+        /// 按当前设置配置本地视觉模型：选了已下载的本地模型就记下启动方式（`preload` 时后台加载），
+        /// 否则停掉推理进程。服务启动 / 停止、保存视觉设置、删除模型后调用。
+        fn sync_local_vision(&self, preload: bool) {
+            let vision = self.settings().builtin_vision;
+            let launch =
+                (vision.enabled && !vision.use_dialog_llm && !vision.local_model.is_empty())
+                    .then(|| self.models.path_if_installed(&vision.local_model))
+                    .flatten()
+                    .map(|dir| LocalVisionLaunch {
+                        root: self.models.root_for(&vision.local_model).to_path_buf(),
+                        model: vision.local_model.clone(),
+                        dir,
+                        mirror: self.settings().builtin_local.mirror,
+                    });
+            self.local_vision.configure(launch);
+            if preload && self.running() {
+                self.local_vision.preload();
+            }
         }
 
         /// A button press uses only an in-memory synthetic 8x8 image.
         /// It does not access a device or a computer camera.
         pub fn vision_test(&self) -> Result<Value, CenterError> {
             use moss_voice_server::vision::VisionFactory;
+            self.sync_local_vision(false);
             let factory = DesktopVisionFactory {
                 host: self.host.clone(),
+                local: self.local_vision.clone(),
             };
+            let vision_setting = self.settings().builtin_vision;
+            if vision_setting.enabled
+                && !vision_setting.use_dialog_llm
+                && !vision_setting.local_model.is_empty()
+            {
+                // 点测试时等本地模型加载完再测；加载失败直接说原因
+                self.local_vision
+                    .ensure()
+                    .map_err(|error| CenterError::new("vision_local_failed", 502, error))?;
+            }
             let missing = if self.settings().builtin_vision.use_dialog_llm {
                 "请先启用视觉，并在模型设置里配好支持看图的对话模型与密钥"
             } else {
@@ -7276,6 +7536,115 @@ mod imp {
     }
 
     #[cfg(test)]
+    mod local_vision_tests {
+        use super::*;
+
+        /// 用同样大小的稀疏文件模拟“已下载”的本地视觉模型（不真的启动推理进程）。
+        fn fake_install(builtin: &BuiltinVoice, id: &str) -> std::path::PathBuf {
+            let spec = moss_voice::local_models::spec(id).unwrap();
+            let dir = builtin.models.root_for(id).join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::File::create(dir.join(spec.path))
+                .unwrap()
+                .set_len(spec.size)
+                .unwrap();
+            for extra in spec.extras {
+                std::fs::File::create(dir.join(extra.path))
+                    .unwrap()
+                    .set_len(extra.size)
+                    .unwrap();
+            }
+            assert!(
+                builtin.models.path_if_installed(id).is_some(),
+                "模拟安装应被识别为已下载"
+            );
+            dir
+        }
+
+        /// n74：没选本地模型时不启动；模型文件不全时启动失败并记下原因；停用后回到空闲。
+        #[test]
+        fn local_vision_runtime_reports_missing_launch_and_files() {
+            let runtime = LocalVision::default();
+            assert!(runtime.ensure().unwrap_err().contains("没有选用"));
+            assert_eq!(runtime.status()["state"], "idle");
+            let temp = tempfile::tempdir().unwrap();
+            runtime.configure(Some(LocalVisionLaunch {
+                model: "qwen3_vl_2b".into(),
+                dir: temp.path().join("qwen3_vl_2b"),
+                root: temp.path().to_path_buf(),
+                mirror: None,
+            }));
+            let error = runtime.ensure().unwrap_err();
+            assert!(error.contains("还没下载完整"), "{error}");
+            assert_eq!(runtime.status()["state"], "failed");
+            assert_eq!(runtime.status()["model"], "qwen3_vl_2b");
+            runtime.configure(None);
+            assert_eq!(runtime.status()["state"], "idle");
+        }
+
+        /// 本地视觉只要求模型已下载、不要密钥；未下载或未知模型拒绝保存；保存后视觉工厂就绪且不需要地址。
+        #[test]
+        fn vision_save_accepts_installed_local_model_without_key() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host)).0.unwrap();
+            let save = |model: &str, enabled: bool| {
+                builtin.vision_save(&serde_json::json!({
+                    "settings": {"enabled": enabled, "url": "", "model": "", "local_model": model},
+                    "key": {"action": "keep"},
+                }))
+            };
+            let unknown = save("qwen3_vl_99b", true).unwrap_err();
+            assert_eq!(unknown.code, "vision_invalid");
+            let missing = save("qwen3_vl_2b", true).unwrap_err();
+            assert!(
+                missing.message.contains("先在“本地模型”里下载"),
+                "{}",
+                missing.message
+            );
+            let status = builtin.vision_status();
+            assert_eq!(
+                status["local_models"].as_array().unwrap().len(),
+                2,
+                "2B 与 4B 两档"
+            );
+            assert_eq!(status["local_models"][0]["installed"], false);
+
+            fake_install(&builtin, "qwen3_vl_2b");
+            let status = save("qwen3_vl_2b", true).expect("已下载的本地视觉模型不需要地址与密钥");
+            assert_eq!(status["settings"]["local_model"], "qwen3_vl_2b");
+            assert_eq!(
+                status["ready"], true,
+                "选好已下载的本地模型即视为就绪（推理进程按需启动）"
+            );
+            assert_eq!(
+                status["local_runtime"]["state"], "idle",
+                "服务没运行时不预加载"
+            );
+            assert_eq!(status["local_runtime"]["model"], "qwen3_vl_2b");
+            assert_eq!(
+                builtin.local_vision.launch().map(|launch| launch.model),
+                Some("qwen3_vl_2b".to_owned())
+            );
+
+            // 改回云端（未填地址、没有密钥）且关闭：不再保留本地启动方式
+            builtin
+                .vision_save(&serde_json::json!({
+                    "settings": {"enabled": false, "url": "", "model": ""},
+                    "key": {"action": "keep"},
+                }))
+                .unwrap();
+            assert!(builtin.local_vision.launch().is_none());
+            // 删除模型前先停掉（此处未运行，确认不会报错并能删掉）
+            fake_install(&builtin, "qwen3_vl_2b");
+            builtin.model_delete("qwen3_vl_2b").unwrap();
+            assert!(builtin.models.path_if_installed("qwen3_vl_2b").is_none());
+        }
+    }
+
+    #[cfg(test)]
     mod device_switch_tests {
         use super::*;
         use laser_host::voice_agent::Provider;
@@ -7885,11 +8254,22 @@ mod imp {
             );
 
             // Spoken switch goes through the same settings file.
-            assert_eq!(builtin.persona.switch("任务简报").unwrap(), "MOSS 任务简报");
+            // n75：旧叫法“任务简报”换到合并后的 MOSS
+            assert_eq!(builtin.persona.switch("任务简报").unwrap(), "MOSS");
             assert_eq!(
                 builtin.settings().builtin_local.persona_style,
-                "moss_briefing"
+                "moss_station"
             );
+            // n75：“附把握和风险”开关所有角色可用，界面保存立即生效、不重启服务
+            let saved = builtin
+                .local_save(&serde_json::json!({"persona_risk_notes": true}))
+                .unwrap();
+            assert_eq!(saved["local"]["settings"]["persona_risk_notes"], true);
+            assert!(builtin.persona.system_prompt().contains("把握较大"));
+            builtin
+                .local_save(&serde_json::json!({"persona_risk_notes": false}))
+                .unwrap();
+            assert!(!builtin.persona.system_prompt().contains("把握较大"));
 
             // Deleting the active custom role falls back to the default role.
             builtin

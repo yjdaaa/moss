@@ -303,7 +303,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.deepEqual(form, {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: "",
-    asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_prompt: "", custom_personas: "[]", screen_preview_sync: true, screen_card_style: "moss_hud",
+    asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_risk_notes: false, persona_prompt: "", custom_personas: "[]", screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: "400",
     tts_speaker: "3", tts_speed: "1.2", mirror: "",
@@ -315,7 +315,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.deepEqual(localSettingsPayload({ ...form, mirror: " https://m.test/x " }), {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: [],
-    asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_prompt: "", custom_personas: [], screen_preview_sync: true, screen_card_style: "moss_hud",
+    asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_risk_notes: false, persona_prompt: "", custom_personas: [], screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: 400,
     tts_speaker: 3, tts_speed: 1.2, mirror: "https://m.test/x",
@@ -359,14 +359,16 @@ test("本地模型可选：分组、改选合成模型换默认音色、按模�
     { id: "kokoro", kind: "tts", voices: { default: 50, max: 53, hint: "45–48 中文女声" } },
     { id: "kokoro_v11", kind: "tts", voices: { default: 3, max: 102, hint: "3–57 中文女声" } },
     { id: "matcha_zh_en", kind: "tts" },
+    { id: "qwen3_vl_2b", kind: "vision" },
   ];
   const groups = localModelGroups(models);
   assert.deepEqual(groups.map((group) => [group.kind, group.models.map((model) => model.id)]), [
     ["vad", ["silero_vad", "ten_vad"]],
     ["asr", ["sense_voice", "x_asr_streaming"]],
     ["tts", ["kokoro", "kokoro_v11", "matcha_zh_en"]],
+    ["vision", ["qwen3_vl_2b"]],
   ]);
-  assert.deepEqual(localModelGroups(null).map((group) => group.models.length), [0, 0, 0]);
+  assert.deepEqual(localModelGroups(null).map((group) => group.models.length), [0, 0, 0, 0], "判停 / 识别 / 合成 / 视觉理解四组");
 
   const form = localSettingsForm({ tts: true, tts_speaker: 50 });
   // 识别、判停改选不动音色
@@ -1321,7 +1323,12 @@ test("OneJev 1.6 (0.8B / 4B / 9B) 与 Laya 本地决策模型共存：规范化�
 test("n59：内置 MOSS 角色、自建角色的校验与保存载荷", () => {
   const base = localSettingsForm();
   const ids = personaOptions(base.custom_personas).map((opt) => opt.id);
-  assert.deepEqual(ids, ["workshop", "beginner_guide", "moss_station", "moss_briefing", "moss_risk", "moss_deadpan", "moss_night"]);
+  assert.deepEqual(ids, ["workshop", "beginner_guide", "moss_station", "moss_deadpan"], "n75：内置角色减为 4 个");
+  // n75：旧编号按合并后的角色显示与提交；原风险评估角色的开关单独保存
+  assert.equal(localSettingsForm({ persona_style: "moss_briefing" }).persona_style, "moss_station");
+  assert.equal(localSettingsForm({ persona_style: "moss_night" }).persona_style, "workshop");
+  assert.equal(localSettingsPayload({ ...base, persona_style: "moss_risk" }).persona_style, "moss_station");
+  assert.equal(localSettingsPayload({ ...base, persona_risk_notes: true }).persona_risk_notes, true);
   for (const id of ids) assert.equal(localSettingsError({ ...base, persona_style: id }), "", id);
   assert.match(localSettingsError({ ...base, persona_style: "custom_a1" }), /说话角色/);
 
@@ -1562,4 +1569,21 @@ test("快速回答默认开并随对话体验保存；大模型结果自带分�
     pipelineTestOutcome({ ok: true, elapsed_ms: 1500, detail: "连接成功，模型返回了工具调用（tool_calls）；首次响应 0.4 秒，工具调用 1.5 秒" }),
     { ok: true, detail: "连接成功，模型返回了工具调用（tool_calls）；首次响应 0.4 秒，工具调用 1.5 秒" },
   );
+});
+
+test("视觉理解看图来源：对话大模型优先、其次本地、否则云端；切到本地优先选已下载的模型（n74）", async () => {
+  const { visionSource, visionSourcePatch, visionRuntimeText } = await import("../src/voiceState.js");
+  assert.equal(visionSource({}), "cloud");
+  assert.equal(visionSource({ local_model: "qwen3_vl_2b" }), "local");
+  assert.equal(visionSource({ local_model: "qwen3_vl_2b", use_dialog_llm: true }), "dialog");
+  const models = [{ id: "qwen3_vl_2b", installed: false }, { id: "qwen3_vl_4b", installed: true }];
+  assert.deepEqual(visionSourcePatch("local", {}, models), { use_dialog_llm: false, local_model: "qwen3_vl_4b" });
+  assert.deepEqual(visionSourcePatch("local", { local_model: "qwen3_vl_2b" }, models), { use_dialog_llm: false, local_model: "qwen3_vl_2b" }, "已选的保留");
+  assert.deepEqual(visionSourcePatch("local", {}, [{ id: "qwen3_vl_2b", installed: false }]), { use_dialog_llm: false, local_model: "qwen3_vl_2b" });
+  assert.deepEqual(visionSourcePatch("dialog", { local_model: "qwen3_vl_2b" }, models), { use_dialog_llm: true, local_model: "" });
+  assert.deepEqual(visionSourcePatch("cloud", { local_model: "qwen3_vl_2b" }, models), { use_dialog_llm: false, local_model: "" });
+  assert.match(visionRuntimeText({ state: "ready", accelerator: "Apple Metal" }), /已就绪（Apple Metal）/);
+  assert.match(visionRuntimeText({ state: "failed", error: "加载超时" }), /启动失败：加载超时/);
+  assert.match(visionRuntimeText({ state: "starting" }), /正在加载/);
+  assert.match(visionRuntimeText(null), /后台加载/);
 });

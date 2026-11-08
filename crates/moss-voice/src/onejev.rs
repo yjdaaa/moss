@@ -344,7 +344,7 @@ pub fn resolve_llama_server(models_root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn configure_no_window(cmd: &mut Command) {
+pub(crate) fn configure_no_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1941,7 +1941,7 @@ impl LlamaLog {
     }
 
     /// 持续读完子进程 stderr（读到 EOF 即子进程已退出），避免管道写满阻塞推理进程。
-    fn drain<R: Read + Send + 'static>(&self, pipe: R) {
+    pub(crate) fn drain<R: Read + Send + 'static>(&self, pipe: R) {
         let log = self.clone();
         let _ = std::thread::Builder::new()
             .name("onejev-llama-log".into())
@@ -1987,7 +1987,7 @@ impl LlamaLog {
     }
 }
 
-fn with_log_hint(message: String, log: &LlamaLog) -> String {
+pub(crate) fn with_log_hint(message: String, log: &LlamaLog) -> String {
     let tail = log.summary(3);
     if tail.is_empty() {
         message
@@ -2298,7 +2298,7 @@ impl Drop for OneJevGateway {
     }
 }
 
-fn probe_http_health(addr: SocketAddr, timeout: Duration) -> bool {
+pub(crate) fn probe_http_health(addr: SocketAddr, timeout: Duration) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) else {
         return false;
     };

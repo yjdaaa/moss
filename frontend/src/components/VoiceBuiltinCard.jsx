@@ -2210,7 +2210,9 @@ export function LocalModelsGroup({ builtin }) {
               <div className="voice-field-head">
                 <b>{item.title}模型包</b>
                 <span className="voice-muted">
-                  {activeOn
+                  {item.kind === "vision"
+                    ? "下载后到“视觉理解”卡片的“看图用哪个模型”里选“本地视觉模型”"
+                    : activeOn
                     ? selected?.installed
                       ? `当前在顶部已选用：${selected.label}`
                       : `顶部已选 ${selected?.label || "本地模型"}（未下载，暂不生效）`
@@ -2618,9 +2620,7 @@ export function ExperienceGroup({ builtin }) {
       <p className="voice-muted">停止词整句命中时立即请求急停，不能关闭；设备是否停下仍需确认。</p>
       <div className="voice-form-grid">
         <label className="voice-wide">
-          <span title="只改语气和说话方式；声音在“语音合成”里换；也可以对小智说“换成 MOSS 守夜”。动机器前复述确认与急停对所有角色锁定，不可覆盖。">
-            说话角色（只改语气，安全规则对所有角色锁定）
-          </span>
+          <span>说话角色</span>
           <select
             className="select-input"
             value={form.persona_style || "workshop"}
@@ -2629,10 +2629,25 @@ export function ExperienceGroup({ builtin }) {
           >
             {personaOptions(form.custom_personas).map((opt) => (
               <option key={opt.id} value={opt.id}>
-                {opt.label}{opt.hint ? ` — ${opt.hint}` : ""}
+                {opt.label}
               </option>
             ))}
           </select>
+          <small className="voice-muted" id="voice-persona-hint">
+            {personaOptions(form.custom_personas).find((opt) => opt.id === (form.persona_style || "workshop"))?.hint || ""}
+            {" "}只改语气，复述确认与急停对所有角色锁定；声音在“语音合成”里换；也可以对小智说“换成冷面幽默”。
+          </small>
+        </label>
+        <label className="voice-check voice-wide">
+          <input
+            type="checkbox"
+            checked={form.persona_risk_notes === true}
+            onChange={(e) => update("persona_risk_notes", e.target.checked)}
+            id="voice-persona-risk-notes"
+          />
+          <span title="所有角色都能用：建议时只说把握较大 / 一般 / 不大，不报百分比，点出最主要的风险；没把握建议先在边角料上试。">
+            给加工建议时附上把握高低和主要风险
+          </span>
         </label>
         <CustomPersonaEditor
           value={form.custom_personas}

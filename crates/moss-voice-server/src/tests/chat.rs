@@ -2038,7 +2038,7 @@ async fn n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety
                 calls: vec![ToolCall::new(
                     "call-persona",
                     PERSONA_TOOL,
-                    r#"{"action":"switch","name":"守夜"}"#,
+                    r#"{"action":"switch","name":"冷面幽默"}"#,
                 )],
                 delay_ms: 0,
             },
@@ -2048,7 +2048,7 @@ async fn n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety
     });
     let asr = Arc::new(FakeAsr {
         replies: Mutex::new(VecDeque::from([
-            Ok("换成守夜模式".into()),
+            Ok("换成冷面幽默".into()),
             Ok("现在几点".into()),
         ])),
         ..Default::default()
@@ -2096,7 +2096,10 @@ async fn n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety
     }
     assert_eq!(
         spoken,
-        vec!["好的，已切换为MOSS 守夜。".to_owned(), "收到。".to_owned()]
+        vec![
+            "好的，已切换为MOSS 冷面幽默。".to_owned(),
+            "收到。".to_owned()
+        ]
     );
     let seen = llm.seen.lock().unwrap();
     assert_eq!(
@@ -2106,8 +2109,11 @@ async fn n59_spoken_persona_switch_changes_the_next_turn_prompt_and_keeps_safety
     );
     let first = seen[0].0[0].content.clone().unwrap();
     let second = seen[1].0[0].content.clone().unwrap();
-    assert!(!first.contains("守夜风格"));
-    assert!(second.contains("守夜风格"), "next turn uses the new role");
+    assert!(!first.contains("冷面幽默风格"));
+    assert!(
+        second.contains("冷面幽默风格"),
+        "next turn uses the new role"
+    );
     let base = second.split("\n当前本机时间").next().unwrap();
     assert!(
         base.ends_with(IMMUTABLE_SAFETY_RULES),

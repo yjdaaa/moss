@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { FlaskConical } from "lucide-react";
 import { voiceApi } from "../voiceApi.js";
-import { formDirty, savedNoteText } from "../voiceState.js";
-import { SaveBar, VoiceGroup } from "./VoiceLayout.jsx";
+import { formDirty, formatBytes, savedNoteText, visionSource, visionSourcePatch, visionRuntimeText } from "../voiceState.js";
+import { SaveBar, VoiceGroup, focusVoiceGroup } from "./VoiceLayout.jsx";
 
-const defaults = { enabled: false, url: "", model: "", use_dialog_llm: false, keep_in_history: false };
+const defaults = { enabled: false, url: "", model: "", use_dialog_llm: false, keep_in_history: false, local_model: "" };
 
 export default function VoiceVisionCard() {
   const [saved, setSaved] = useState(defaults);
@@ -13,6 +13,8 @@ export default function VoiceVisionCard() {
   const [hasKey, setHasKey] = useState(false);
   const [ready, setReady] = useState(false);
   const [dialog, setDialog] = useState({ configured: false, url: "", model: "" });
+  const [localModels, setLocalModels] = useState([]);
+  const [runtime, setRuntime] = useState(null);
   const [keyChange, setKeyChange] = useState("keep");
   const [keyValue, setKeyValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -29,6 +31,8 @@ export default function VoiceVisionCard() {
     setHasKey(!!state.key_configured);
     setReady(!!state.ready);
     setDialog(state.dialog_llm || { configured: false, url: "", model: "" });
+    setLocalModels(Array.isArray(state.local_models) ? state.local_models : []);
+    setRuntime(state.local_runtime || null);
     setKeyChange("keep");
     setKeyValue("");
     setLoaded(true);
@@ -38,6 +42,19 @@ export default function VoiceVisionCard() {
     voiceApi.visionStatus().then((state) => { if (mounted) apply(state); }).catch((e) => { if (mounted) setLoadError(e.message); });
     return () => { mounted = false; };
   }, []);
+  // 本地视觉模型加载中时每 2 秒刷新一次运行状态（只更新状态，不覆盖正在编辑的表单）
+  useEffect(() => {
+    if (runtime?.state !== "starting") return undefined;
+    const timer = setInterval(() => {
+      voiceApi.visionStatus().then((state) => {
+        setRuntime(state.local_runtime || null);
+        setReady(!!state.ready);
+      }).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [runtime?.state]);
+  const source = visionSource(config);
+  const localPicked = localModels.find((item) => item.id === config.local_model);
   const update = (field, value) => {
     setConfig((current) => ({ ...current, [field]: value }));
     setResult(null);
@@ -77,21 +94,74 @@ export default function VoiceVisionCard() {
       setTesting(false);
     }
   };
-  const summary = loadError ? "读取失败" : !loaded ? "读取中…" : saved.enabled ? (saved.use_dialog_llm ? `已开启 · 对话模型 ${dialog.model || "未配置"}` : `已开启 · ${saved.model || "未填模型"}`) : "未开启";
+  const savedSource = visionSource(saved);
+  const savedLocalLabel = localModels.find((item) => item.id === saved.local_model)?.label || saved.local_model;
+  const summary = loadError
+    ? "读取失败"
+    : !loaded
+      ? "读取中…"
+      : !saved.enabled
+        ? "未开启"
+        : savedSource === "dialog"
+          ? `已开启 · 对话模型 ${dialog.model || "未配置"}`
+          : savedSource === "local"
+            ? `已开启 · 本地 ${savedLocalLabel}`
+            : `已开启 · ${saved.model || "未填模型"}`;
   return (
     <VoiceGroup id="vision" title="视觉理解" label="语音视觉模型" summary={summary} tone={saved.enabled ? "ok" : undefined} dirty={dirty}>
-      <p className="voice-muted">默认关闭。开启后，已允许的小智设备可以上传图片请模型解释；不会自动打开摄像头，结果也不能控制机器。图片会发给你配置的模型服务商（独立视觉模型，或你勾选的当前对话大模型），可能产生费用。</p>
+      <p className="voice-muted">默认关闭。开启后，已允许的小智设备可以上传图片请模型解释；不会自动打开摄像头，结果也不能控制机器。选云端或对话大模型时图片会发给对应服务商，可能产生费用；选本地视觉模型时图片只在这台电脑上处理。</p>
       {loadError && <div className="voice-hint voice-hint--bad" role="alert">{loadError}</div>}
       <div className="voice-form-grid">
         <label className="voice-check voice-wide">
           <input type="checkbox" checked={config.enabled} disabled={busy || testing} onChange={(e) => update("enabled", e.target.checked)} id="voice-vision-enabled" />
           <span>启用视觉理解</span>
         </label>
-        <label className="voice-check voice-wide">
-          <input type="checkbox" checked={config.use_dialog_llm} disabled={busy || testing} onChange={(e) => update("use_dialog_llm", e.target.checked)} id="voice-vision-dialog-llm" />
-          <span>用当前对话大模型看照片（多模态，替掉下面的独立视觉模型）</span>
+        <label className="voice-wide">
+          <span>看图用哪个模型</span>
+          <select
+            className="text-input"
+            value={source}
+            disabled={busy || testing}
+            onChange={(e) => {
+              setConfig((current) => ({ ...current, ...visionSourcePatch(e.target.value, current, localModels) }));
+              setResult(null);
+            }}
+            id="voice-vision-source"
+          >
+            <option value="local">本地视觉模型（断网可用，照片不出电脑）</option>
+            <option value="cloud">云端视觉模型（填地址与密钥）</option>
+            <option value="dialog">当前对话大模型（需支持看图）</option>
+          </select>
         </label>
-        {config.use_dialog_llm && (
+        {source === "local" && (
+          <>
+            <label className="voice-wide">
+              <span>本地视觉模型</span>
+              <select className="text-input" value={config.local_model} disabled={busy || testing} onChange={(e) => update("local_model", e.target.value)} id="voice-vision-local-model">
+                {localModels.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}（{formatBytes(item.size)}{item.installed ? "" : "，未下载"}）
+                  </option>
+                ))}
+              </select>
+            </label>
+            {localPicked && !localPicked.installed ? (
+              <div className="voice-hint voice-hint--bad voice-wide voice-inline" role="status" id="voice-vision-local-missing">
+                <span>{localPicked.label} 还没下载：先到“本地模型”的“视觉理解”里下载，再回来保存。</span>
+                <button type="button" className="voice-link-btn" onClick={() => focusVoiceGroup("local-models", "voice-local-group-vision")} id="voice-vision-local-goto">
+                  去下载
+                </button>
+              </div>
+            ) : (
+              runtime && saved.local_model === config.local_model && saved.enabled && (
+                <div className={`voice-hint voice-wide voice-hint--${runtime.state === "failed" ? "bad" : runtime.state === "ready" ? "ok" : ""}`} role="status" id="voice-vision-local-runtime">
+                  {visionRuntimeText(runtime)}
+                </div>
+              )
+            )}
+          </>
+        )}
+        {source === "dialog" && (
           <div className={`voice-hint voice-wide voice-hint--${dialog.configured ? "ok" : "bad"}`} role="status">
             {dialog.configured
               ? `照片会发给当前对话模型 ${dialog.model}（${dialog.url}）。`
@@ -102,23 +172,27 @@ export default function VoiceVisionCard() {
           <input type="checkbox" checked={config.keep_in_history} disabled={busy || testing || !config.enabled} onChange={(e) => update("keep_in_history", e.target.checked)} id="voice-vision-keep-image" />
           <span>把这张照片留在对话上下文里（多模态；后续追问会重发这张图，费用更高，且要求对话模型支持看图）</span>
         </label>
-        <label>
-          <span>模型地址（OpenAI 兼容）</span>
-          <input className="text-input mono" value={config.url} disabled={busy || testing || config.use_dialog_llm} placeholder="https://example.com/v1" onChange={(e) => update("url", e.target.value)} />
-        </label>
-        <label>
-          <span>视觉模型名称</span>
-          <input className="text-input mono" value={config.model} disabled={busy || testing || config.use_dialog_llm} placeholder="视觉模型 ID" onChange={(e) => update("model", e.target.value)} />
-        </label>
-        <label>
-          <span>密钥（{hasKey ? "已保存" : "未设置"}）</span>
-          <select className="text-input" aria-label="视觉模型密钥操作" value={keyChange} disabled={busy || testing || config.use_dialog_llm} onChange={(e) => { setKeyChange(e.target.value); setKeyValue(""); setResult(null); }}>
-            <option value="keep">保留原密钥</option>
-            <option value="set">设置新密钥</option>
-            <option value="clear">清除密钥</option>
-          </select>
-        </label>
-        {keyChange === "set" && !config.use_dialog_llm && (
+        {source === "cloud" && (
+          <>
+            <label>
+              <span>模型地址（OpenAI 兼容）</span>
+              <input className="text-input mono" value={config.url} disabled={busy || testing} placeholder="https://example.com/v1" onChange={(e) => update("url", e.target.value)} />
+            </label>
+            <label>
+              <span>视觉模型名称</span>
+              <input className="text-input mono" value={config.model} disabled={busy || testing} placeholder="视觉模型 ID" onChange={(e) => update("model", e.target.value)} />
+            </label>
+            <label>
+              <span>密钥（{hasKey ? "已保存" : "未设置"}）</span>
+              <select className="text-input" aria-label="视觉模型密钥操作" value={keyChange} disabled={busy || testing} onChange={(e) => { setKeyChange(e.target.value); setKeyValue(""); setResult(null); }}>
+                <option value="keep">保留原密钥</option>
+                <option value="set">设置新密钥</option>
+                <option value="clear">清除密钥</option>
+              </select>
+            </label>
+          </>
+        )}
+        {keyChange === "set" && source === "cloud" && (
           <label>
             <span>新密钥</span>
             <input className="text-input" aria-label="新的视觉模型 API 密钥" type="password" autoComplete="new-password" value={keyValue} disabled={busy || testing} onChange={(e) => setKeyValue(e.target.value)} />
