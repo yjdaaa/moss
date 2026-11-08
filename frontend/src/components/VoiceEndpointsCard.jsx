@@ -3,7 +3,7 @@ import { Copy, Plus, Trash2 } from "lucide-react";
 import { VoiceGroup } from "./VoiceLayout.jsx";
 import { showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
-import { TOOL_EDIT_PROMPTS, endpointLabel, endpointView, extraEndpointError, identityView, toolEditPrompt, toolStatText, toolSwitchPayload } from "../voiceState.js";
+import { TOOL_EDIT_PROMPTS, TOOL_RISK_LABELS, endpointLabel, endpointView, extraEndpointError, groupedTools, identityView, toolEditPrompt, toolStatText, toolSwitchPayload } from "../voiceState.js";
 
 // 接入点与工具（内置语音技术书 NV8）：附加官方接入点、各接入点连接状态与身份（仅官方/自建链路渲染，放在“设备”标签）；
 // 内置工具开关与调用统计（所有链路共用，n69 起放在“扩展”标签，紧挨第三方 MCP 工具，方便对照两者区别）。
@@ -123,9 +123,12 @@ export function VoiceToolsCard({ overview, busy, run }) {
   const [copiedPrompt, setCopiedPrompt] = useState("");
   if (!overview) return null;
   const tools = Array.isArray(overview.tools) ? overview.tools : [];
+  const fullList = overview.full_tool_list === true;
 
   const switchTool = (tool, enabled) =>
     run("切换工具", () => voiceApi.saveSettings({ disabled_tools: toolSwitchPayload(tools, tool.name, enabled) }));
+  const switchFullList = (full) =>
+    run("切换工具清单", () => voiceApi.saveSettings({ mcp_full_tool_list: full }));
 
   // 内置工具是编译进 MOSS 的原生工具，界面只能开关；增删要改代码，所以给一段可复制的施工提示词交给 AI。
   const copyPrompt = async (kind) => {
@@ -138,48 +141,60 @@ export function VoiceToolsCard({ overview, busy, run }) {
   };
 
   const disabled = tools.filter((tool) => tool.enabled === false).length;
+  const offered = tools.filter((tool) => tool.enabled !== false && (fullList || tool.in_compact !== false)).length;
   return (
-    <VoiceGroup id="tools" title="MOSS 内置工具（只能开关，不能在这里增删）" summary={disabled ? `${disabled} 个工具已关闭` : `${tools.length} 个工具全部开启`}>
-      <p className="voice-muted">勾选立即生效。关闭的工具不提供给任何接入点和内置语音；停止与急停工具不能关闭。统计为本次运行以来。</p>
-      <p className="voice-muted"><b>和下面的「第三方 MCP 工具」不是一回事</b>：这里是编译在 MOSS 里的原生工具（激光、画板、材料库等），由 MOSS 自己执行，所以只能开关；第三方 MCP 是独立的外部程序，能在那里随时添加和移除。</p>
-      <div className="ob-tbl voice-tbl">
-        <table>
-          <thead>
-            <tr>
-              <th>开关</th>
-              <th>工具</th>
-              <th>调用</th>
-              <th>最近</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tools.map((tool) => (
-              <tr key={tool.name}>
-                <td>
+    <VoiceGroup id="tools" title="MOSS 内置工具（所有链路共用）" summary={`${fullList ? "完整清单" : "精简清单"} · AI 可用 ${offered} 个${disabled ? ` · ${disabled} 个已关闭` : ""}`}>
+      <p className="voice-muted">这些是 MOSS 自带的工具，官方小智、自建服务端和内置语音都用这一套。勾选立即生效；“停止与机器控制”不能关闭。</p>
+      <label className="voice-check voice-tools-full" id="voice-tools-full-switch">
+        <input type="checkbox" checked={fullList} disabled={Boolean(busy)} onChange={(e) => switchFullList(e.target.checked)} />
+        <span>
+          完整工具（高级）
+          <small className="voice-muted">
+            默认只给 AI 精简的 8 个激光工具，说明短、选得准、回答更快。打开后连同重复入口和底层收发一起给，一般不需要。
+          </small>
+        </span>
+      </label>
+      {groupedTools(tools).map((group) => (
+        <section className="voice-tools-group" key={group.id} id={`voice-tools-group-${group.id}`}>
+          <h4>{group.title}</h4>
+          <ul className="voice-tools-list">
+            {group.tools.map((tool) => {
+              const offeredToAi = fullList || tool.in_compact !== false;
+              return (
+                <li className={`voice-tools-item${tool.enabled === false ? " is-off" : ""}`} key={tool.name} data-tool={tool.name}>
                   <input
                     type="checkbox"
                     checked={tool.enabled !== false}
                     disabled={Boolean(busy) || tool.can_disable === false}
                     onChange={(e) => switchTool(tool, e.target.checked)}
-                    aria-label={`${tool.enabled !== false ? "关闭" : "打开"} ${tool.name}`}
+                    aria-label={`${tool.enabled !== false ? "关闭" : "打开"} ${tool.label}`}
                     title={tool.can_disable === false ? "停止与急停工具不能关闭" : ""}
                     id={`voice-tool-${tool.name}`}
                   />
-                </td>
-                <td>
-                  <div className="mono">{tool.name}</div>
-                  <div className="voice-muted">
-                    {tool.description}
-                    {tool.voice_hidden ? "（桌面控制类，内置语音与严格模式下不开放）" : ""}
+                  <div className="voice-tools-body">
+                    <div className="voice-tools-head">
+                      <b>{tool.label}</b>
+                      {tool.risk && <span className={`voice-tools-risk is-${tool.risk}`}>{TOOL_RISK_LABELS[tool.risk]}</span>}
+                      {!offeredToAi && tool.enabled !== false && <span className="voice-tools-risk is-muted">完整工具打开后才给 AI</span>}
+                      <span className="voice-muted voice-tools-stat">{toolStatText(tool)}</span>
+                    </div>
+                    <div className="voice-muted">
+                      {tool.summary}
+                      {tool.voice_hidden && tool.group !== "desktop" ? "（内置语音与严格模式下不开放）" : ""}
+                    </div>
+                    <details className="voice-tools-tech">
+                      <summary>技术信息</summary>
+                      <div className="mono">{tool.name}</div>
+                      {tool.description && <div className="voice-muted">{tool.description}</div>}
+                      {tool.last_at && <div className="voice-muted mono">最近调用：{formatTime(tool.last_at)} {tool.last_caller || ""}</div>}
+                    </details>
                   </div>
-                </td>
-                <td>{toolStatText(tool)}</td>
-                <td className="mono">{tool.last_at ? `${formatTime(tool.last_at)} ${tool.last_caller || ""}` : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
       <details className="voice-builtin-models" id="voice-tool-prompts">
         <summary>要新增或删除内置工具？复制这两段提示词交给 AI</summary>
         <p className="voice-muted">内置工具的增删是改代码：复制下面的施工说明，粘给任意 AI 编码助手（Codex / Claude Code / Cursor 等），它会按仓库规则改代码、加测试、同步文档。这里只是给你复制用，不会自己执行。</p>

@@ -19,6 +19,7 @@ import { MaterialModal } from "../components/MaterialModal.jsx";
 import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
+import { actualParamsText, manualParamsPayload, MANUAL_LIMITS } from "../workbenchParams.js";
 import { showAlert, showConfirm } from "../appDialog.js";
 import { canResumeJob, formatResumeActionLabel } from "../estopResumeState.js";
 import { estopTargetArgs } from "../globalEstop.js";
@@ -78,6 +79,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
   const [engravingMode, setEngravingMode] = useState("raster"); // raster, outline, cut
   const [powerPercent, setPowerPercent] = useState(50);
   const [speedMms, setSpeedMms] = useState(100);
+  // n73：这次自定义功率 / 速度 / 遍数（只影响这次生成的刀路，不写回材料库）
+  const [customParams, setCustomParams] = useState(false);
+  const [customPower, setCustomPower] = useState("50");
+  const [customFeed, setCustomFeed] = useState("1200");
+  const [customPasses, setCustomPasses] = useState("1");
 
   // Workflow / Output / Preview state
   const [currentWorkflow, setCurrentWorkflow] = useState(null);
@@ -281,7 +287,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           connectionMode === "serial" ? result.serial_connected : result.network_connected;
         setConnectionStatus({ connected: isConnected, summary: result.summary, checkedAt: Date.now() });
         if (isConnected) {
-          addLog("DEVICE", `硬件握手通过: ${result.summary || "控制器已连接 ($32=1 就绪)"}`, "ok");
+          addLog("DEVICE", `硬件握手通过: ${result.summary || "控制器已连接 ($32=1 就绪)"}；语音和 AI 发送时没指定串口或 IP 就用这个连接`, "ok");
         } else if (!silent) {
           addLog("DEVICE", result.summary || "未检测到控制器连接", "warn");
         }
@@ -353,6 +359,18 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
       }
     }
 
+    const manual = activeTool === "gcode" ? null : manualParamsPayload({
+      enabled: customParams,
+      powerPercent: customPower,
+      feedRate: customFeed,
+      passes: customPasses,
+    });
+    if (manual?.error) {
+      showAlert(manual.error, { title: "自定义参数不对", tone: "warning" });
+      return;
+    }
+    const manualField = manual ? { manual_params: manual } : {};
+
     setBusy(true);
     addLog("PREVIEW", `正在为 [${selectedMaterial} ${selectedThickness}mm] 解算激光加工轨迹与 G-code...`, "info");
 
@@ -371,6 +389,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           font_size_mm: Number(fontSizeMm),
           laser_mode: engravingMode === "cut" ? "cut" : "engrave",
           engraving_mode: engravingMode,
+          ...manualField,
         });
       } else if (activeTool === "image") {
         if (!uploadedFilePath) {
@@ -386,6 +405,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           image_file: uploadedFilePath,
           laser_mode: engravingMode === "cut" ? "cut" : "engrave",
           engraving_mode: engravingMode,
+          ...manualField,
         });
       } else if (activeTool === "gcode") {
         if (!uploadedFilePath) {
@@ -1007,6 +1027,58 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                   </select>
                 </div>
               </div>
+
+              <div className="wb-params" id="wb-params">
+                <label className="wb-params-switch">
+                  <input
+                    type="checkbox"
+                    id="wb-custom-params"
+                    checked={customParams}
+                    disabled={activeTool === "gcode"}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setCustomParams(on);
+                      if (on) {
+                        setCustomPower(String(Math.round(powerPercent)));
+                        setCustomFeed(String(Math.round(speedMms * 60)));
+                        setCustomPasses("1");
+                      }
+                    }}
+                  />
+                  <span>这次自定义功率和速度</span>
+                </label>
+                {activeTool === "gcode" ? (
+                  <div className="wb-params-hint">上传的刀路文件按文件里的参数加工，这里不生效。</div>
+                ) : customParams ? (
+                  <>
+                    <div className="wb-params-grid">
+                      <label>
+                        <span>功率 %</span>
+                        <input className="text-input" id="wb-custom-power" type="number" inputMode="decimal"
+                          min={MANUAL_LIMITS.power.min} max={MANUAL_LIMITS.power.max} value={customPower}
+                          onChange={(e) => setCustomPower(e.target.value)} />
+                      </label>
+                      <label>
+                        <span>速度 mm/min</span>
+                        <input className="text-input" id="wb-custom-feed" type="number" inputMode="numeric" step="10"
+                          min={MANUAL_LIMITS.feed.min} max={MANUAL_LIMITS.feed.max} value={customFeed}
+                          onChange={(e) => setCustomFeed(e.target.value)} />
+                      </label>
+                      <label>
+                        <span>遍数</span>
+                        <input className="text-input" id="wb-custom-passes" type="number" inputMode="numeric"
+                          min={MANUAL_LIMITS.passes.min} max={MANUAL_LIMITS.passes.max} value={customPasses}
+                          onChange={(e) => setCustomPasses(e.target.value)} />
+                      </label>
+                    </div>
+                    <div className="wb-params-hint">只用于这一次生成，不会改材料库；重新计算轨迹后生效，发送前仍要你确认。</div>
+                  </>
+                ) : (
+                  <div className="wb-params-hint" id="wb-params-recommended">
+                    材料库推荐：功率 {Math.round(powerPercent)}% · 速度 {Math.round(speedMms * 60)} mm/min · 1 遍
+                  </div>
+                )}
+              </div>
             </div>
 
         </WbCard>
@@ -1092,6 +1164,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                   </span>
                 </div>
               </div>
+              {actualParamsText(currentWorkflow) && (
+                <div className="wb-origin-note" id="wb-actual-params">加工参数：{actualParamsText(currentWorkflow)}</div>
+              )}
               {dimensions?.originNote && (
                 <div className="wb-origin-note" id="wb-origin-note">{dimensions.originNote}</div>
               )}

@@ -13,6 +13,7 @@ use crate::conversation::{
 };
 
 mod barge;
+mod guide;
 mod mqtt;
 mod music;
 mod person;
@@ -3096,8 +3097,8 @@ fn second_sentence_tts_prefetches_concurrently_while_first_sentence_is_streaming
 #[tokio::test]
 async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     use crate::conversation::{
-        SLOW_GENERATE_FILLER, SLOW_QUERY_FILLER, STOP_ERR_SPEECH, STOP_OK_SPEECH, TurnEvent,
-        TurnInput, slow_tool_filler, spawn_turn,
+        SLOW_CHECK_FILLER, SLOW_GENERATE_FILLER, SLOW_QUERY_FILLER, STOP_ERR_SPEECH,
+        STOP_OK_SPEECH, TurnEvent, TurnInput, slow_tool_filler, spawn_turn,
     };
     let mk_call = |name: &str, args: &str| ToolCall::new(format!("call-{name}"), name, args);
 
@@ -3125,6 +3126,47 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
         );
     }
 
+    // n72：精简清单的刻字预览、测试矩阵生成播“生成预览”，只读检查机器播“看一下机器”
+    assert_eq!(
+        slow_tool_filler(&[mk_call(
+            "laser_workflow_tool",
+            r#"{"action":"preview","text":"你好"}"#
+        )]),
+        Some(SLOW_GENERATE_FILLER)
+    );
+    assert_eq!(
+        slow_tool_filler(&[mk_call(
+            "run_calibration_grid_tool",
+            r#"{"material":"椴木"}"#
+        )]),
+        Some(SLOW_GENERATE_FILLER)
+    );
+    assert_eq!(
+        slow_tool_filler(&[mk_call("check_laser_connection_tool", "{}")]),
+        Some(SLOW_CHECK_FILLER)
+    );
+    // 开始刻矩阵、确认发送、续雕都是 R3：绝不播垫音
+    for (name, args) in [
+        (
+            "run_calibration_grid_tool",
+            r#"{"calibration_id":"cal-1","confirmed":true}"#,
+        ),
+        (
+            "laser_workflow_tool",
+            r#"{"action":"confirm_send","workflow_id":"wf-1","confirmed":true}"#,
+        ),
+        (
+            "laser_workflow_tool",
+            r#"{"action":"resume","workflow_id":"wf-1","confirmed":true}"#,
+        ),
+    ] {
+        assert_eq!(
+            slow_tool_filler(&[mk_call(name, args)]),
+            None,
+            "{name} {args}"
+        );
+    }
+
     // 3. 安全边界：一旦携带 R3 动作参数或属于控制/审批/本地毫秒级快工具，绝不播垫音
     assert_eq!(
         slow_tool_filler(&[mk_call(
@@ -3143,9 +3185,7 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     for forbidden in [
         "laser_workflow_tool",
         "laser_safe_action_tool",
-        "run_calibration_grid_tool",
         "start_tuned_job_tool",
-        "check_laser_connection_tool",
         "material_params_tool",
         "get_lunar",
         "hass_set_state",

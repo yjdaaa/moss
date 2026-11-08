@@ -50,6 +50,8 @@ pub trait HostHooks: Send + Sync {
     fn apply_disabled_tools(&self, _names: &[String]) -> Result<Vec<String>, String> {
         Err("此环境不支持工具开关".into())
     }
+    /// n72 立即切换完整 / 精简工具清单（保存设置后调用）。
+    fn apply_full_tool_list(&self, _full: bool) {}
 }
 
 /// 附加接入点的数量上限（与 `laser_mcp::MAX_EXTRA_ENDPOINTS` 一致；本 crate 不依赖 laser-*）。
@@ -490,6 +492,15 @@ impl VoiceCenter {
                 tools_change = Some(applied);
             }
         }
+        // n72 完整 / 精简工具清单：换了就重连小智桥，让接入点重新拿工具清单
+        let mut full_list_changed = false;
+        if let Some(full) = patch.get("mcp_full_tool_list") {
+            let full = full
+                .as_bool()
+                .ok_or_else(|| invalid("完整工具开关格式不正确"))?;
+            full_list_changed = full != voice.mcp_full_tool_list;
+            voice.mcp_full_tool_list = full;
+        }
         let mut reconnect = false;
         let endpoint_to_write: Option<Option<String>> = match voice.mode {
             VoiceMode::SelfHosted => {
@@ -506,7 +517,7 @@ impl VoiceCenter {
             }),
         };
         reconnect |= extras_changed && voice.mode != VoiceMode::SelfHosted;
-        reconnect |= tools_change.is_some();
+        reconnect |= tools_change.is_some() || full_list_changed;
         let saved = settings::save_all(
             &self.settings_file,
             &voice,
@@ -521,6 +532,9 @@ impl VoiceCenter {
                 let _ = self.hooks.apply_disabled_tools(&previous_tools);
             }
             return Err(CenterError::new("voice_settings_write_failed", 500, error));
+        }
+        if full_list_changed {
+            self.hooks.apply_full_tool_list(voice.mcp_full_tool_list);
         }
         // `reconnected`：本次保存是否重新发起了接入点连接（且有桥启动）；握手结果看 `bridge.connected`
         let reconnected = reconnect && self.hooks.restart_bridge();
@@ -998,6 +1012,8 @@ mod tests {
         builtin_running: AtomicBool,
         /// 当前生效的关闭工具名单（NV8）
         disabled: Mutex<Vec<String>>,
+        /// n72 当前生效的完整 / 精简工具清单
+        full_tools: AtomicBool,
     }
 
     impl HostHooks for FakeHost {
@@ -1035,6 +1051,9 @@ mod tests {
         }
         fn mcp_overview(&self) -> serde_json::Value {
             serde_json::json!({"disabled": *self.disabled.lock().unwrap()})
+        }
+        fn apply_full_tool_list(&self, full: bool) {
+            self.full_tools.store(full, Ordering::SeqCst);
         }
         fn apply_disabled_tools(&self, names: &[String]) -> Result<Vec<String>, String> {
             let known = [
@@ -1739,6 +1758,40 @@ mod tests {
         assert!(
             root.get("mcp_disabled_tools").is_none(),
             "全部打开后不留空键"
+        );
+    }
+
+    /// n72：“完整工具（高级）”默认关；打开后立即生效、写进设置并重连小智桥；格式不对拒绝。
+    #[test]
+    fn full_tool_list_switch_applies_and_reconnects() {
+        let (dir, host, center) = fixture();
+        let file = dir.path().join("settings.json");
+        assert!(!settings::load(&file).mcp_full_tool_list);
+        let before = host.restarts.load(Ordering::SeqCst);
+        center
+            .save_settings(&serde_json::json!({"mcp_full_tool_list": true}))
+            .unwrap();
+        assert!(settings::load(&file).mcp_full_tool_list);
+        assert!(host.full_tools.load(Ordering::SeqCst), "立即生效");
+        assert_eq!(
+            host.restarts.load(Ordering::SeqCst),
+            before + 1,
+            "接入点重新拿清单"
+        );
+        center
+            .save_settings(&serde_json::json!({"mcp_full_tool_list": true}))
+            .unwrap();
+        assert_eq!(
+            host.restarts.load(Ordering::SeqCst),
+            before + 1,
+            "没变不重连"
+        );
+        assert_eq!(
+            center
+                .save_settings(&serde_json::json!({"mcp_full_tool_list": "yes"}))
+                .unwrap_err()
+                .code,
+            "voice_settings_invalid"
         );
     }
 

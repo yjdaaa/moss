@@ -686,6 +686,10 @@ pub struct BuiltinLocal {
     pub screen_card_style: String,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,
+    /// 快速回答（默认开，2026-11-08 n73）：对认识的服务商请求关闭大模型思考，语音每轮少等数秒；
+    /// 复述确认、审批与急停由代码把关，不依赖模型推理
+    #[serde(default = "default_on")]
+    pub llm_fast_reply: bool,
     /// 内置语音 Jev 信息筛选与提速总开关（默认关闭；开启后识别文本发往 OpenRouter Decisions 接口）
     #[serde(default)]
     pub jev_filter_enabled: bool,
@@ -745,6 +749,7 @@ impl Default for BuiltinLocal {
             screen_preview_sync: true,
             screen_card_style: default_screen_card_style(),
             job_done_announce: true,
+            llm_fast_reply: true,
             jev_filter_enabled: false,
             jev_model: default_jev_model(),
             jev_unfinished_hold: true,
@@ -1098,6 +1103,10 @@ pub struct VoiceSettings {
     /// 内置语音服务的 OTA 端口，默认 8003
     #[serde(default = "default_builtin_http_port")]
     pub builtin_http_port: u16,
+    /// n72 给接入点与内置语音完整工具清单（“完整工具（高级）”）；默认关：只给精简清单（2026-11-08 用户决定）。
+    /// MOSS 后端启动时从 `voice.mcp_full_tool_list` 读取。
+    #[serde(default)]
+    pub mcp_full_tool_list: bool,
     /// n71 常连模式（MQTT 控制 + 加密 UDP 语音，小智开机即在线）：默认关，实验功能（2026-11-08 用户决定）
     #[serde(default)]
     pub builtin_mqtt_enabled: bool,
@@ -1156,6 +1165,7 @@ impl Default for VoiceSettings {
             endpoint_health_url: None,
             builtin_ws_port: default_builtin_ws_port(),
             builtin_http_port: default_builtin_http_port(),
+            mcp_full_tool_list: false,
             builtin_mqtt_enabled: false,
             builtin_mqtt_port: default_builtin_mqtt_port(),
             builtin_udp_port: default_builtin_udp_port(),
@@ -2120,6 +2130,7 @@ mod tests {
             endpoint_health_url: None,
             builtin_ws_port: 8100,
             builtin_http_port: 8103,
+            mcp_full_tool_list: false,
             builtin_mqtt_enabled: true,
             builtin_mqtt_port: 1884,
             builtin_udp_port: 8889,

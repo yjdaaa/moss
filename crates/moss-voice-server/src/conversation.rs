@@ -203,6 +203,20 @@ pub const STOP_ERR_SPEECH: &str = "停止请求发送失败，请使用设备急
 pub const SLOW_QUERY_FILLER: &str = "稍等，正在查询。";
 /// 慢速 AI 生图/刀路预览生成工具触发时的过渡垫音（仅预览生成，不涉及硬件动作）
 pub const SLOW_GENERATE_FILLER: &str = "稍等，正在生成预览。";
+/// n72 只读检查机器连接（串口 / 网络探测要几秒）时的过渡垫音
+pub const SLOW_CHECK_FILLER: &str = "稍等，我看一下机器。";
+
+/// n72（2026-11-08 用户决定）：激光工具在场时附在每轮系统提示后的用法表，让模型按用户说法选对工具。
+/// 只写工具怎么选，确认与停止规则仍以 [`IMMUTABLE_SAFETY_RULES`] 为准。
+pub const LASER_TOOL_GUIDE: &str = "激光工具怎么选：\
+问机器连没连、在干什么，用 check_laser_connection_tool。\
+要刻字，先用 laser_workflow_tool 的 preview（带文字、材料、厚度，知道木牌尺寸就带上），预览会弹到电脑上；\
+用户核对后明确说确认，再用 confirm_send 带同一个 workflow_id。功率速度默认来自材料库，用户明确说了这次的功率、速度或遍数就放进 manual_params。\
+问进度用 status，取消用 cancel，从中断处继续用 resume。用户说停或急停，立即用 laser_safe_action_tool 的 emergency_stop 并带 confirmed=true，不要先问。\
+边刻边调快慢或功率，用 laser_safe_action_tool 的 feed_ 或 power_ 动作。查某种材料的参数用 material_params_tool 的 get。\
+刻完用户说太焦、太浅、切不透，用 refine_laser_params_from_feedback_tool 给建议，用户同意后用 regenerate_text_laser_task_tool 采用并重新预览。\
+不知道参数就用 run_calibration_grid_tool 刻测试矩阵，用户说第几格最好再用 select_calibration_cell_tool 保存。\
+用户没说串口号或 IP 就不要填；工具报错说缺连接时，再问用户。";
 
 fn arg_flag_true(arguments: &Value, key: &str) -> bool {
     match arguments.get(key) {
@@ -220,10 +234,29 @@ fn is_slow_query_call(call: &ToolCall) -> bool {
     )
 }
 
+fn is_slow_check_call(call: &ToolCall) -> bool {
+    call.function.name == "check_laser_connection_tool"
+}
+
 fn is_slow_generate_preview_call(call: &ToolCall) -> bool {
     let name = call.function.name.as_str();
     match name {
         "generate_text_image_tool" => true,
+        // n72 精简清单的刻字预览与测试矩阵生成（都不动机器）；发送、续雕、开始刻矩阵不在此列
+        "laser_workflow_tool" => {
+            let parsed: Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+            parsed.get("action").and_then(Value::as_str) == Some("preview")
+        }
+        "run_calibration_grid_tool" => {
+            let parsed: Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+            !(arg_flag_true(&parsed, "confirmed")
+                && parsed
+                    .get("calibration_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty()))
+        }
         "ai_laser_gcode_tool"
         | "generate_text_image_gcode_tool"
         | "generate_text_laser_task_tool" => {
@@ -251,15 +284,20 @@ pub fn slow_tool_filler(calls: &[ToolCall]) -> Option<&'static str> {
         return None;
     }
     let mut has_generate = false;
+    let mut has_check = false;
     for call in calls {
         if is_slow_generate_preview_call(call) {
             has_generate = true;
+        } else if is_slow_check_call(call) {
+            has_check = true;
         } else if !is_slow_query_call(call) {
             return None;
         }
     }
     if has_generate {
         Some(SLOW_GENERATE_FILLER)
+    } else if has_check {
+        Some(SLOW_CHECK_FILLER)
     } else {
         Some(SLOW_QUERY_FILLER)
     }
@@ -519,6 +557,7 @@ impl Conversation {
         push_unique(crate::tools::SUBMITTED_APPROVAL_SPEECH);
         push_unique(SLOW_QUERY_FILLER);
         push_unique(SLOW_GENERATE_FILLER);
+        push_unique(SLOW_CHECK_FILLER);
         phrases
     }
 
@@ -1427,11 +1466,17 @@ impl Turn {
             );
         }
         let mut messages = Vec::with_capacity(history.len() + 4);
-        messages.push(ChatMessage::system(build_turn_system_prompt(
+        let mut system = build_turn_system_prompt(
             &self.conversation.system_prompt(),
             settings.include_local_clock,
             !history.is_empty(),
-        )));
+        );
+        // n72：激光工具在场时附上“说法 → 工具”用法表
+        if tools.iter().any(|tool| tool.name == "laser_workflow_tool") {
+            system.push('\n');
+            system.push_str(LASER_TOOL_GUIDE);
+        }
+        messages.push(ChatMessage::system(system));
 
         // n57: once structured memory retrieval is on, the old NV10 per-device summary (imported
         // as candidates when the switch was turned on) is no longer injected next to it.

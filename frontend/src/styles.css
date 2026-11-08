@@ -3352,6 +3352,11 @@ input:not([type]):focus {
 .voice-private-header .btn { margin-bottom: 18px; }
 .voice-private-panel[hidden] { display: none !important; }
 .voice-private-panel { display: grid; gap: 14px; }
+/* 对话体验等组里默认收起的小节（2026-11-08 n73） */
+.voice-more { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--ob-line); border-radius: 10px; background: rgba(255, 255, 255, 0.015); min-width: 0; }
+.voice-more > summary { color: var(--ob-ink); font-size: 13px; font-weight: 600; cursor: pointer; }
+.voice-more[open] > summary { margin-bottom: 10px; }
+.voice-more > summary:focus-visible { outline: 2px solid var(--ob-accent-2); outline-offset: 2px; }
 .voice-private-more { padding: 12px 14px; border: 1px solid var(--ob-line); border-radius: 10px; background: rgba(255, 255, 255, 0.015); min-width: 0; }
 .voice-private-more > summary { color: var(--ob-ink); font-size: 13px; font-weight: 600; cursor: pointer; }
 .voice-private-more[open] > summary { margin-bottom: 12px; }
@@ -5529,3 +5534,34 @@ input:not([type]):focus {
   .wb-dispatch-actions { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .wb-dispatch-actions .twin-jump-btn { grid-column: 1 / -1; }
 }
+
+/* n72 内置工具卡片：按用途分组，中文名 + 风险标签，技术信息收起 */
+.voice-tools-full { margin: 8px 0 4px; }
+.voice-tools-full span { display: flex; flex-direction: column; gap: 2px; }
+.voice-tools-group { margin-top: 14px; }
+.voice-tools-group h4 { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--ob-ink-2); }
+.voice-tools-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.voice-tools-item { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border: 1px solid var(--ob-line); border-radius: 10px; background: var(--ob-well); }
+.voice-tools-item > input { margin-top: 3px; flex: none; }
+.voice-tools-item.is-off { opacity: 0.6; }
+.voice-tools-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; font-size: 12.5px; }
+.voice-tools-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.voice-tools-head b { font-size: 13px; color: var(--ob-ink); }
+.voice-tools-stat { margin-left: auto; font-size: 11.5px; }
+.voice-tools-risk { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--ob-line); color: var(--ob-ink-2); white-space: nowrap; }
+.voice-tools-risk.is-read, .voice-tools-risk.is-file { color: var(--ob-green); background: var(--ob-green-bg); border-color: transparent; }
+.voice-tools-risk.is-confirm { color: var(--ob-amber); background: var(--ob-amber-bg); border-color: var(--ob-amber-bd); }
+.voice-tools-risk.is-stop { color: var(--ob-accent); background: var(--ob-accent-bg); border-color: transparent; }
+.voice-tools-risk.is-desktop { color: var(--ob-red); background: var(--ob-red-bg); border-color: transparent; }
+.voice-tools-risk.is-muted { font-style: normal; }
+.voice-tools-tech summary { cursor: pointer; font-size: 11.5px; color: var(--ob-ink-3); }
+.voice-tools-tech > div { overflow-wrap: anywhere; font-size: 11.5px; }
+
+/* n73 工作台“这次自定义功率和速度” */
+.wb-params { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--ob-line); }
+.wb-params-switch { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ob-ink); cursor: pointer; }
+.wb-params-switch input:disabled + span { color: var(--ob-ink-3); }
+.wb-params-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.wb-params-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ob-ink-2); min-width: 0; }
+.wb-params-grid input { width: 100%; min-width: 0; }
+.wb-params-hint { font-size: 11.5px; color: var(--ob-ink-3); line-height: 1.5; }

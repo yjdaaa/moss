@@ -9,6 +9,63 @@ const JEV_API_KEY_SECRET: &str = "jev_api_key";
 const DEFAULT_JEV_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
 const JEV_MODEL: &str = "typesafe/jev-1.13";
 
+/// n73 握手成功的连接 → 记录：`fields` 同时带两套别名（串口 `port`/`baudrate`，网络 `host`/`network_host`、
+/// `telnet_port`/`network_telnet_port`），各工具按自己认的字段名取用。
+fn verified_connection_value(spec: &laser_device::ConnectionSpec, at: u64) -> serde_json::Value {
+    match spec {
+        laser_device::ConnectionSpec::Serial { port, baud_rate } => serde_json::json!({
+            "mode": "serial",
+            "label": format!("串口 {port}（{baud_rate}）"),
+            "verified_at": at,
+            "fields": {"connection_mode": "serial", "port": port, "baudrate": baud_rate},
+        }),
+        laser_device::ConnectionSpec::Tcp { host, port } => serde_json::json!({
+            "mode": "network",
+            "label": format!("网络 {host}:{port}"),
+            "verified_at": at,
+            "fields": {
+                "connection_mode": "network",
+                "host": host, "network_host": host,
+                "telnet_port": port, "network_telnet_port": port,
+            },
+        }),
+    }
+}
+
+/// 设置文件里读回的记录必须是上面这种形状，否则忽略。
+fn valid_verified_connection(value: &serde_json::Value) -> bool {
+    let fields = &value["fields"];
+    match fields["connection_mode"].as_str() {
+        Some("serial") => fields["port"]
+            .as_str()
+            .is_some_and(|p| !p.trim().is_empty()),
+        Some("network") => fields["network_host"]
+            .as_str()
+            .is_some_and(|h| !h.trim().is_empty()),
+        _ => false,
+    }
+}
+
+/// n72 精简工具清单里的工具（与 `laser_mcp::COMPACT_LASER_TOOLS` 加电脑控制类工具一致；
+/// laser-api 不依赖 laser-mcp，`laser-host` 的测试核对两边一致）。
+pub fn laser_mcp_compact_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "check_laser_connection_tool"
+            | "laser_safe_action_tool"
+            | "laser_workflow_tool"
+            | "material_params_tool"
+            | "refine_laser_params_from_feedback_tool"
+            | "regenerate_text_laser_task_tool"
+            | "run_calibration_grid_tool"
+            | "select_calibration_cell_tool"
+            | "command_execution_tool"
+            | "open_app_tool"
+            | "shortcut_key_execution_tool"
+            | "open_jsjds_website_tool"
+    )
+}
+
 fn current_moss_version() -> &'static str {
     match option_env!("MOSS_RELEASE_VERSION") {
         Some(ver) if !ver.is_empty() => ver,
@@ -64,6 +121,12 @@ pub struct ApiService {
     external_tools: std::sync::OnceLock<std::sync::Arc<dyn external_tools::ExternalTools>>,
     /// 用户关闭的工具（`settings.json` 的 `mcp_disabled_tools`，NV8）：接入点与内置语音都不列出、不可调用。
     disabled_tools: std::sync::RwLock<std::collections::BTreeSet<String>>,
+    /// n72 “完整工具（高级）”（`settings.json` 的 `voice.mcp_full_tool_list`）：关（默认）时接入点与内置语音
+    /// 只拿到精简工具清单（`laser_mcp::compact_tools_list_json`）。
+    full_tool_list: std::sync::atomic::AtomicBool,
+    /// n73 工作台最近一次握手成功的连接（`settings.json` 的 `laser_verified_connection`）：
+    /// 语音与接入点调用激光工具时没给串口号 / IP，就用它（2026-11-08 用户决定）。
+    verified_connection: std::sync::RwLock<Option<serde_json::Value>>,
     voice_sessions: voice_authority::VoiceSessions,
 }
 
@@ -808,6 +871,8 @@ impl ApiService {
             agent_runs: std::sync::OnceLock::new(),
             external_tools: std::sync::OnceLock::new(),
             disabled_tools: std::sync::RwLock::new(std::collections::BTreeSet::new()),
+            full_tool_list: std::sync::atomic::AtomicBool::new(false),
+            verified_connection: std::sync::RwLock::new(None),
             voice_sessions: Default::default(),
         }
     }
@@ -845,6 +910,37 @@ impl ApiService {
             .read()
             .map(|set| set.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// n73 工作台最近一次握手成功的连接：`{mode, label, verified_at, fields}`，`fields` 是要补进工具参数的连接字段。
+    pub fn verified_connection(&self) -> Option<serde_json::Value> {
+        self.verified_connection
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    /// n73 记住一次握手成功的连接，并写进 `settings.json`（写不进去只影响重启后是否还记得）。
+    pub fn remember_verified_connection(&self, spec: &laser_device::ConnectionSpec) {
+        let value = verified_connection_value(spec, unix_seconds());
+        if let Ok(mut slot) = self.verified_connection.write() {
+            *slot = Some(value.clone());
+        }
+        let _ = update_runtime_settings(self.runtime_path.as_deref(), |current| {
+            current.insert("laser_verified_connection".into(), value);
+        });
+    }
+
+    /// n72 是否给接入点与内置语音完整工具清单（默认否：精简清单）。
+    pub fn full_tool_list(&self) -> bool {
+        self.full_tool_list
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// n72 运行中切换完整 / 精简工具清单（语音中心写入 `settings.json` 后调用）。
+    pub fn set_full_tool_list(&self, full: bool) {
+        self.full_tool_list
+            .store(full, std::sync::atomic::Ordering::Release);
     }
 
     /// 运行中替换关闭的工具列表（语音中心写入 `settings.json` 后调用）。不能关闭的工具与空名会被忽略。
@@ -2846,7 +2942,8 @@ impl ApiService {
     fn probe_connections(
         &self,
         object: &serde_json::Map<String, serde_json::Value>,
-    ) -> serde_json::Value {
+    ) -> (serde_json::Value, Option<laser_device::ConnectionSpec>) {
+        let mut verified: Option<laser_device::ConnectionSpec> = None;
         let preferred = object
             .get("connection_mode")
             .or_else(|| object.get("preferred_mode"))
@@ -2949,6 +3046,7 @@ impl ApiService {
                 summary = report.summary.clone();
             }
             if report.connected && report.laser_mode_ok {
+                verified = Some(spec.clone());
                 if mode == "serial" {
                     serial_connected = true;
                 } else {
@@ -2962,7 +3060,7 @@ impl ApiService {
                 break;
             }
         }
-        serde_json::json!({
+        let result = serde_json::json!({
             "preferred_mode": preferred,
             "selected_mode": selected,
             "fallback_used": selected.is_some_and(|m| m != preferred),
@@ -2983,11 +3081,27 @@ impl ApiService {
             })),
             "timeout_seconds": timeout_secs,
             "summary": summary,
-        })
+        });
+        (result, verified)
     }
 
     pub fn with_runtime_path(mut self, runtime_path: std::path::PathBuf) -> Self {
-        let disabled = read_runtime_settings(Some(&runtime_path))
+        let runtime_settings = read_runtime_settings(Some(&runtime_path));
+        if let Some(saved) = runtime_settings
+            .get("laser_verified_connection")
+            .filter(|value| valid_verified_connection(value))
+            && let Ok(mut slot) = self.verified_connection.write()
+        {
+            *slot = Some(saved.clone());
+        }
+        self.set_full_tool_list(
+            runtime_settings
+                .get("voice")
+                .and_then(|voice| voice.get("mcp_full_tool_list"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        );
+        let disabled = runtime_settings
             .get("mcp_disabled_tools")
             .and_then(serde_json::Value::as_array)
             .map(|names| {
@@ -3777,6 +3891,8 @@ impl ApiService {
                     !(self.strict_mode() && laser_contracts::tool_never_exposed(spec.name))
                 })
                 .filter(|spec| !self.tool_disabled(spec.name))
+                // n72：精简清单（默认）只列 8 个激光工具与电脑控制类工具
+                .filter(|spec| self.full_tool_list() || laser_mcp_compact_tool(spec.name))
                 .count();
             return http_json(
                 200,
@@ -4422,7 +4538,19 @@ impl ApiService {
                 Ok(value) => value,
                 Err(error) => return http_json(400, failure(error, None)),
             };
-            return http_json(200, success(self.probe_connections(&object)));
+            let (result, verified) = self.probe_connections(&object);
+            // n73：工作台（桌面、本机网页、局域网配对）握手成功的连接记下来，语音与接入点默认用它
+            if let Some(spec) = verified
+                && matches!(
+                    ctx,
+                    laser_contracts::CallerContext::Desktop
+                        | laser_contracts::CallerContext::Loopback
+                        | laser_contracts::CallerContext::Lan { .. }
+                )
+            {
+                self.remember_verified_connection(&spec);
+            }
+            return http_json(200, success(result));
         }
         if method == "POST" && route == "/api/device/framing" {
             let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
@@ -10825,6 +10953,49 @@ mod tests {
         );
     }
 
+    /// n73：文字预览带这次临时指定的功率 / 速度 / 遍数，刀路就按它生成并在 actual_params 里如实显示；越界拒绝。
+    #[test]
+    fn text_preview_applies_manual_params_to_the_gcode() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf());
+        let font = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/geometry.ttf"
+        );
+        let body = serde_json::json!({
+            "text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3,
+            "manual_params": {"power_percent": 37, "feed_rate": 900, "passes": 2}
+        });
+        let res = post_json(&service, "/api/text-task/generate", &body);
+        assert_eq!(res["success"], true, "{res}");
+        let params = &res["result"]["artifacts"]["actual_params"];
+        assert_eq!(params["laser_max_power"].as_f64(), Some(370.0));
+        assert_eq!(params["feed_rate"].as_f64(), Some(900.0));
+        assert_eq!(params["passes"], 2);
+        let gcode = std::fs::read_to_string(
+            temp.path()
+                .join(res["result"]["artifacts"]["gcode_file"].as_str().unwrap()),
+        )
+        .unwrap();
+        assert!(gcode.contains("S370"), "刀路用指定功率");
+        assert!(gcode.contains("F900"), "刀路用指定速度");
+        assert_eq!(
+            res["result"]["input"]["manual_params"]["power_percent"], 37,
+            "任务记录里留着这次的手动参数"
+        );
+        let bad = post_json(
+            &service,
+            "/api/text-task/generate",
+            &serde_json::json!({"text": "AB", "font_path": font, "material": "椴木", "thickness_mm": 3,
+                "manual_params": {"power_percent": 150}}),
+        );
+        assert_eq!(bad["success"], false, "{bad}");
+    }
+
     /// 2026-11-06：文字默认描边、激光头对准中心；给木牌尺寸自动适配字号；填充用材料库 raster 参数。
     #[test]
     fn text_board_fill_and_origin_options_reach_the_engine() {
@@ -11408,14 +11579,119 @@ mod tests {
             .unwrap_or(usize::MAX)
     }
 
+    /// 回环假 GRBL：应答一次 `$$` 握手，`$32` 由参数决定。
+    fn fake_grbl_handshake(laser_mode: u8) -> u16 {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() && line.trim() == "$$" {
+                    let _ = write!(writer, "$0=10\r\n$32={laser_mode}\r\nok\r\n");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+        port
+    }
+
+    fn check_connection(
+        service: &ApiService,
+        port: u16,
+        ctx: Option<laser_contracts::CallerContext>,
+    ) {
+        let body = format!(
+            r#"{{"connection_mode":"network","network_host":"127.0.0.1","network_telnet_port":{port},"network_timeout":2}}"#
+        );
+        let request = format!(
+            "POST /api/connection/check HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = match ctx {
+            Some(ctx) => service.handle_http_with_ctx(request.as_bytes(), ctx),
+            None => service.handle_http(request.as_bytes()),
+        };
+    }
+
+    /// n73：工作台握手成功的连接被记下并写进设置（重启后还在）；握手失败、或语音 / 接入点调用的检查不记。
+    #[test]
+    fn workbench_handshake_success_is_remembered_for_ai_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+        assert!(service.verified_connection().is_none());
+
+        // 激光模式没开（$32=0）：握手不算成功，不记
+        check_connection(&service, fake_grbl_handshake(0), None);
+        assert!(service.verified_connection().is_none());
+
+        // 语音身份做的检查不记（只认工作台）
+        check_connection(
+            &service,
+            fake_grbl_handshake(1),
+            Some(laser_contracts::CallerContext::Voice {
+                device_id: "d".into(),
+                session_id: "s".into(),
+            }),
+        );
+        assert!(service.verified_connection().is_none());
+
+        let port = fake_grbl_handshake(1);
+        check_connection(&service, port, None);
+        let record = service.verified_connection().expect("握手成功要记下");
+        assert_eq!(record["mode"], "network");
+        assert_eq!(record["fields"]["network_host"], "127.0.0.1");
+        assert_eq!(record["fields"]["host"], "127.0.0.1");
+        assert_eq!(record["fields"]["network_telnet_port"], port);
+        assert_eq!(record["fields"]["connection_mode"], "network");
+
+        let reloaded = cors_test_service().with_runtime_path(temp.path().to_path_buf());
+        assert_eq!(
+            reloaded.verified_connection().unwrap()["fields"],
+            record["fields"],
+            "写进 settings.json，重启后还记得"
+        );
+        // 设置文件里被改坏的记录不采用
+        std::fs::write(
+            temp.path().join("settings.json"),
+            r#"{"laser_verified_connection":{"fields":{"connection_mode":"serial","port":""}}}"#,
+        )
+        .unwrap();
+        assert!(
+            cors_test_service()
+                .with_runtime_path(temp.path().to_path_buf())
+                .verified_connection()
+                .is_none()
+        );
+    }
+
     #[test]
     fn system_info_tools_count_matches_actual_catalog() {
         let service = cors_test_service();
         let value = parse_json_response(
             &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
         );
-        let expected = laser_tools::ToolCatalog::from_environment().specs().len();
+        // n72：默认精简清单，只数精简名单里的工具
+        let catalog = laser_tools::ToolCatalog::from_environment();
+        let expected = catalog
+            .specs()
+            .iter()
+            .filter(|spec| laser_mcp_compact_tool(spec.name))
+            .count();
         assert_eq!(value["result"]["mcp"]["tools_count"], expected);
+        service.set_full_tool_list(true);
+        let full = parse_json_response(
+            &service.handle_http(b"GET /api/system/info HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        );
+        assert_eq!(
+            full["result"]["mcp"]["tools_count"],
+            catalog.specs().len(),
+            "完整清单数全部"
+        );
+        service.set_full_tool_list(false);
         assert_eq!(value["result"]["voice"]["mode"], "official");
         assert!(value["result"]["voice"]["device_sessions"].is_null());
         // NV8：关闭的工具不计入

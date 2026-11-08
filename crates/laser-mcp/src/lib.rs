@@ -53,6 +53,63 @@ pub trait HostBackend: Send + Sync {
     fn tool_disabled(&self, _name: &str) -> bool {
         false
     }
+
+    /// n72 是否列出完整工具清单（“完整工具（高级）”开关）。默认是（兼容没接这个开关的后端）；
+    /// `laser-host` 的后端按用户设置返回，默认给 AI 精简清单（[`compact_tools_list_json`]）。
+    fn full_tool_list(&self) -> bool {
+        true
+    }
+
+    /// n73 工作台最近一次握手成功的连接字段（`port`/`baudrate` 或 `host`/`network_host`/`telnet_port`…）。
+    /// 工具调用没给任何连接参数时补进去；默认没有（行为不变，仍按 `.env` 兜底）。
+    fn default_connection(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        None
+    }
+}
+
+/// n73 需要连接机器的工具。
+const CONNECTION_TOOLS: [&str; 7] = [
+    "check_laser_connection_tool",
+    "laser_safe_action_tool",
+    "laser_workflow_tool",
+    "run_calibration_grid_tool",
+    "start_tuned_job_tool",
+    "laser_grbl_tool",
+    "laser_network_grbl_tool",
+];
+
+/// 调用方没给任何连接参数时补上已验证的连接；给了任何一个（串口号、IP、连接方式）就完全按调用方的来。
+fn with_default_connection(
+    name: &str,
+    arguments: &serde_json::Value,
+    backend: Option<&dyn HostBackend>,
+) -> Option<serde_json::Value> {
+    if !CONNECTION_TOOLS.contains(&name) {
+        return None;
+    }
+    let object = arguments.as_object()?;
+    let given = [
+        "port",
+        "serial_port",
+        "host",
+        "network_host",
+        "connection_mode",
+    ]
+    .iter()
+    .any(|key| {
+        object
+            .get(*key)
+            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty()))
+    });
+    if given {
+        return None;
+    }
+    let fields = backend?.default_connection()?;
+    let mut merged = object.clone();
+    for (key, value) in fields {
+        merged.entry(key).or_insert(value);
+    }
+    Some(serde_json::Value::Object(merged))
 }
 
 pub type SharedBackend = Arc<dyn HostBackend>;
@@ -139,6 +196,47 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
             .collect::<Vec<_>>();
         serde_json::json!({ "tools": tools })
     }
+}
+
+/// n72（2026-11-08 用户决定）：精简清单里的激光工具。其余激光工具（重复的生成 / 发送入口、
+/// 底层 GRBL 收发）只在“完整工具（高级）”打开时列出；执行逻辑与安全门禁不变，按名字仍可调用。
+pub const COMPACT_LASER_TOOLS: [&str; 8] = [
+    "check_laser_connection_tool",
+    "laser_safe_action_tool",
+    "laser_workflow_tool",
+    "material_params_tool",
+    "refine_laser_params_from_feedback_tool",
+    "regenerate_text_laser_task_tool",
+    "run_calibration_grid_tool",
+    "select_calibration_cell_tool",
+];
+
+/// 不属于激光的电脑控制类工具：两种清单都原样列出（内置语音与严格模式下另由 `tool_never_exposed` 去掉）。
+fn is_desktop_control_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "command_execution_tool"
+            | "open_app_tool"
+            | "shortcut_key_execution_tool"
+            | "open_jsjds_website_tool"
+    )
+}
+
+/// n72 精简清单：8 个激光工具用面向用户意图重写的说明与参数（`tests/golden/mcp_tools_compact.json`，
+/// 每个参数都有中文说明，连接参数只留可不填的串口号与 IP），再加上电脑控制类工具。
+pub fn compact_tools_list_json(developer_mode: bool) -> serde_json::Value {
+    let compact: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/golden/mcp_tools_compact.json"))
+            .expect("golden mcp_tools_compact.json must parse");
+    let mut tools = compact["tools"].as_array().cloned().unwrap_or_default();
+    if let Some(full) = tools_list_json(developer_mode)["tools"].as_array() {
+        tools.extend(
+            full.iter()
+                .filter(|tool| is_desktop_control_tool(tool["name"].as_str().unwrap_or("")))
+                .cloned(),
+        );
+    }
+    serde_json::json!({ "tools": tools })
 }
 
 pub fn format_mcp_response(result: &laser_contracts::ToolCallResult) -> String {
@@ -230,14 +328,45 @@ fn with_desktop_preview_hint(
     } else {
         ""
     };
+    let params = result
+        .detail
+        .as_deref()
+        .and_then(|detail| serde_json::from_str::<serde_json::Value>(detail).ok())
+        .map(|body| preview_params_sentence(&body["result"]))
+        .unwrap_or_default();
     laser_contracts::ToolCallResult {
         success: true,
         result: format!(
-            "{}。{DESKTOP_PREVIEW_HINT}{note}",
+            "{}。{params}{DESKTOP_PREVIEW_HINT}{note}",
             result.result.trim_end_matches('。')
         ),
         detail: result.detail,
     }
+}
+
+/// n73 预览实际用的功率 / 速度 / 遍数，告诉模型以便如实复述给用户（手动指定的注明）。
+fn preview_params_sentence(record: &serde_json::Value) -> String {
+    let params = &record["artifacts"]["actual_params"];
+    let (Some(power), Some(feed)) = (
+        params["laser_max_power"].as_f64(),
+        params["feed_rate"].as_f64(),
+    ) else {
+        return String::new();
+    };
+    let scale = params["power_scale"]
+        .as_f64()
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1000.0);
+    let passes = params["passes"].as_u64().unwrap_or(1);
+    let source = if record["input"]["manual_params"].is_object() {
+        "（这次手动指定）"
+    } else {
+        "（材料库推荐）"
+    };
+    format!(
+        "这次参数：功率 {:.0}%，速度 {feed:.0} mm/min，{passes} 遍{source}。",
+        power / scale * 100.0
+    )
 }
 
 fn summarize_success(tool: &str, result: &serde_json::Value) -> String {
@@ -289,7 +418,11 @@ fn with_connection_fields(
     copy("port", "port", &mut body);
     copy("baudrate", "baudrate", &mut body);
     copy("connection_mode", "connection_mode", &mut body);
-    if !body.contains_key("connection_mode") {
+    // 只有给了串口号或 IP 才推断连接方式；都没给时留空，由后端按 `.env` 的默认连接方式决定
+    // （n72 修正：原来一律补成 network，`.env` 配的默认串口会被忽略）
+    if !body.contains_key("connection_mode")
+        && (body.contains_key("port") || body.contains_key("network_host"))
+    {
         let mode = if body.contains_key("port") && !body.contains_key("network_host") {
             "serial"
         } else {
@@ -305,7 +438,16 @@ fn with_connection_fields(
 
 /// 严格模式下接入点实际列出的工具：去掉永不对语音开放的 R4 工具（技术书 §6.1）。
 pub fn tools_list_for(developer_mode: bool, strict: bool) -> serde_json::Value {
-    let raw = tools_list_json(developer_mode);
+    tools_list_profile(developer_mode, strict, true)
+}
+
+/// 按清单档位列出：`full` 为完整清单，否则为精简清单；严格模式再去掉永不开放的工具。
+pub fn tools_list_profile(developer_mode: bool, strict: bool, full: bool) -> serde_json::Value {
+    let raw = if full {
+        tools_list_json(developer_mode)
+    } else {
+        compact_tools_list_json(developer_mode)
+    };
     if !strict {
         return raw;
     }
@@ -330,7 +472,8 @@ pub fn tools_list_with(
     backend: Option<&dyn HostBackend>,
 ) -> serde_json::Value {
     let strict = backend.is_some_and(|backend| backend.strict_mode());
-    let mut list = tools_list_for(developer_mode, strict);
+    let full = backend.is_none_or(|backend| backend.full_tool_list());
+    let mut list = tools_list_profile(developer_mode, strict, full);
     if let (Some(backend), Some(tools)) = (backend, list["tools"].as_array_mut()) {
         tools.retain(|tool| !backend.tool_disabled(tool["name"].as_str().unwrap_or("")));
     }
@@ -436,6 +579,9 @@ pub fn dispatch_tool_call_with(
     backend: Option<&dyn HostBackend>,
 ) -> laser_contracts::ToolCallResult {
     use laser_contracts::ToolCallOutcome;
+    // n73：没给连接参数时用工作台握手成功的连接（审批与门禁看到的就是补全后的目标）
+    let filled = with_default_connection(name, arguments, backend);
+    let arguments = filled.as_ref().unwrap_or(arguments);
     let gate = disabled_gate(name, arguments, backend)
         .or_else(|| strict_bridge_gate(name, arguments, backend));
     let (result, outcome) = match gate {
@@ -866,6 +1012,7 @@ fn dispatch_allowed(
                 "material",
                 "thickness_mm",
                 "text",
+                "manual_params",
             ] {
                 if let Some(value) = arguments.get(key).filter(|v| !v.is_null()) {
                     body.insert(key.into(), value.clone());
@@ -1697,6 +1844,229 @@ mod tests {
         }
         let rpc = handle_json_rpc(&serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"laser_grbl_tool","arguments":{"action":"send_command","gcode_command":"G0 X10"}}}), false).unwrap();
         assert_eq!(rpc["result"]["isError"], true);
+    }
+
+    /// n72 精简清单：只含 8 个激光工具与电脑控制类工具；每个工具都在完整清单里且有风险分级，
+    /// 每个参数都有中文说明，没有 Python 旧版残留；内置语音看到的说明总量大幅缩小。
+    #[test]
+    fn compact_tool_list_is_small_described_and_consistent() {
+        let full = tools_list_json(true);
+        let full_names: Vec<&str> = full["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        let compact = compact_tools_list_json(false);
+        let tools = compact["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        for name in COMPACT_LASER_TOOLS {
+            assert!(names.contains(&name), "精简清单缺 {name}");
+        }
+        for name in &names {
+            assert!(
+                full_names.contains(name),
+                "{name} 必须是已有工具（执行逻辑不变）"
+            );
+            assert!(
+                laser_contracts::tool_risk(name, &serde_json::json!({})).is_some(),
+                "{name} 要有风险分级"
+            );
+        }
+        for hidden in [
+            "laser_grbl_tool",
+            "laser_network_grbl_tool",
+            "start_tuned_job_tool",
+            "generate_text_laser_task_tool",
+            "generate_text_image_gcode_tool",
+            "ai_laser_gcode_tool",
+            "recommend_laser_params_tool",
+            "generate_text_image_tool",
+            "command_execution_tool",
+        ] {
+            assert!(!names.contains(&hidden), "{hidden} 只在完整清单里");
+        }
+        for tool in tools
+            .iter()
+            .filter(|t| COMPACT_LASER_TOOLS.contains(&t["name"].as_str().unwrap()))
+        {
+            let text = tool.to_string();
+            for leftover in ["core.", ":param", "LASER_NETWORK_HOST", "LASER_DEFAULT"] {
+                assert!(
+                    !text.contains(leftover),
+                    "{} 还有旧说明 {leftover}",
+                    tool["name"]
+                );
+            }
+            for (key, prop) in tool["inputSchema"]["properties"].as_object().unwrap() {
+                assert!(
+                    prop["description"]
+                        .as_str()
+                        .is_some_and(|d| !d.trim().is_empty()),
+                    "{} 的参数 {key} 没有说明",
+                    tool["name"]
+                );
+            }
+        }
+        // 急停在执行层要求 confirmed=true（laser_tools::execute_laser_safe_action）：说明必须让模型带上，不能写成“不用确认”
+        let safe = tools
+            .iter()
+            .find(|t| t["name"] == "laser_safe_action_tool")
+            .unwrap();
+        assert!(
+            safe["description"]
+                .as_str()
+                .unwrap()
+                .contains("emergency_stop 并带 confirmed=true")
+        );
+        let voice = tools_list_profile(false, true, false).to_string();
+        let voice_full = tools_list_profile(false, true, true).to_string();
+        assert!(
+            voice.chars().count() < 12_000,
+            "内置语音每轮发给模型的工具说明 {} 字符，过大",
+            voice.chars().count()
+        );
+        assert!(voice.chars().count() * 3 < voice_full.chars().count());
+    }
+
+    struct RememberedBackend {
+        inner: FakeBackend,
+    }
+    impl HostBackend for RememberedBackend {
+        fn request(
+            &self,
+            method: &str,
+            route: &str,
+            body: &serde_json::Value,
+        ) -> Result<(u16, serde_json::Value), String> {
+            self.inner.request(method, route, body)
+        }
+        fn default_connection(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+            serde_json::json!({"connection_mode": "serial", "port": "COM7", "baudrate": 115200})
+                .as_object()
+                .cloned()
+        }
+    }
+
+    /// n73：没给任何连接参数时补上工作台握手成功的连接；给了任何一个就完全按调用方的来；不连机器的工具不补。
+    #[test]
+    fn remembered_connection_fills_only_when_caller_gave_none() {
+        let ok = || (200, serde_json::json!({"success": true, "result": {}}));
+        let backend = RememberedBackend {
+            inner: FakeBackend::new(vec![ok()]),
+        };
+        let _ = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action":"confirm_send","workflow_id":"wf-1","confirmed":true}),
+            false,
+            Some(&backend),
+        );
+        let sent = &backend.inner.calls()[0].2;
+        assert_eq!(sent["port"], "COM7");
+        assert_eq!(sent["connection_mode"], "serial");
+
+        let backend = RememberedBackend {
+            inner: FakeBackend::new(vec![ok()]),
+        };
+        let _ = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action":"confirm_send","workflow_id":"wf-1","confirmed":true,"network_host":"10.0.0.9"}),
+            false,
+            Some(&backend),
+        );
+        let sent = &backend.inner.calls()[0].2;
+        assert_eq!(sent["network_host"], "10.0.0.9");
+        assert!(
+            sent.get("port").is_none(),
+            "调用方给了 IP 就不混入记住的串口"
+        );
+
+        let backend = RememberedBackend {
+            inner: FakeBackend::new(vec![ok()]),
+        };
+        let _ = dispatch_tool_call_with(
+            "material_params_tool",
+            &serde_json::json!({"action":"get","material":"椴木","thickness_mm":3}),
+            false,
+            Some(&backend),
+        );
+        assert!(backend.inner.calls()[0].2.get("port").is_none());
+    }
+
+    /// n73：预览结果把这次实际的功率 / 速度 / 遍数告诉模型，并注明是手动指定还是材料库推荐。
+    #[test]
+    fn preview_result_tells_the_model_the_actual_params() {
+        let record = |manual: bool| {
+            let mut input = serde_json::json!({"text": "AB"});
+            if manual {
+                input["manual_params"] = serde_json::json!({"power_percent": 37});
+            }
+            (
+                200,
+                serde_json::json!({"success": true, "result": {
+                    "workflow_id": "wf-1", "status": "preview_ready", "input": input,
+                    "artifacts": {"actual_params": {"laser_max_power": 370.0, "feed_rate": 900.0, "passes": 2, "power_scale": 1000.0}}
+                }}),
+            )
+        };
+        let backend = FakeBackend::new(vec![record(true)]);
+        let result = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action":"preview","text":"AB","material":"椴木","thickness_mm":3,"manual_params":{"power_percent":37}}),
+            false,
+            Some(&backend),
+        );
+        assert!(
+            result
+                .result
+                .contains("功率 37%，速度 900 mm/min，2 遍（这次手动指定）"),
+            "{}",
+            result.result
+        );
+        assert_eq!(
+            backend.calls()[0].2["manual_params"]["power_percent"],
+            37,
+            "原样交给后端"
+        );
+        let backend = FakeBackend::new(vec![record(false)]);
+        let result = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action":"preview","text":"AB","material":"椴木","thickness_mm":3}),
+            false,
+            Some(&backend),
+        );
+        assert!(
+            result.result.contains("（材料库推荐）"),
+            "{}",
+            result.result
+        );
+    }
+
+    /// n72：没给串口号或 IP 时不擅自补成网络模式，由后端按 `.env` 默认连接方式决定。
+    #[test]
+    fn missing_connection_does_not_force_network_mode() {
+        let backend = FakeBackend::new(vec![(
+            200,
+            serde_json::json!({"success": true, "result": {}}),
+        )]);
+        let _ = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action":"confirm_send","workflow_id":"wf-1","confirmed":true}),
+            false,
+            Some(&backend),
+        );
+        assert!(backend.calls()[0].2.get("connection_mode").is_none());
+        let backend = FakeBackend::new(vec![(
+            200,
+            serde_json::json!({"success": true, "result": {}}),
+        )]);
+        let _ = dispatch_tool_call_with(
+            "laser_workflow_tool",
+            &serde_json::json!({"action":"confirm_send","workflow_id":"wf-1","confirmed":true,"port":"COM3"}),
+            false,
+            Some(&backend),
+        );
+        assert_eq!(backend.calls()[0].2["connection_mode"], "serial");
     }
 
     #[test]

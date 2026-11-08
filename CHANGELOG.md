@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### 大模型默认快速回答（关闭思考），测试结果写清慢在哪里；对话体验只留常用项（2026-11-08）
+
+- **现象**：云端大模型“测试连接”很慢，真实对话每轮也要等；“对话体验”一组平铺约 18 项，说明冗长（用户反馈）。
+- **根因与修复**：测试机制本身没有额外等待（收到首个工具调用即返回、连接复用），慢在思考型模型先推理数秒与服务首字延迟，且请求没有关闭思考的参数。新增“快速回答”（`builtin_local.llm_fast_reply`，**默认开**）：对阿里云百炼、硅基流动、火山方舟、智谱、OpenRouter、OpenAI GPT-5 在测试与真实对话中附带各自的关闭思考参数（`thinking_off_params`），服务返回 400 / 422 时去掉参数重试并记住不再携带；复述确认、审批与急停仍由代码把关。大模型测试结论附“首次响应 / 先思考约 N 秒 / 工具调用”分段耗时与思考提示，模型只回正文不调工具时满 60 字即判定。对话体验改为常用项直接显示，热词与纠偏、快捷查询与 Jev 细项收进两个默认折叠区，删去只读的画风与 Jev 状态行。
+- **验证**：新增 Rust 测试 5 项（服务商参数表、真实对话 400 去参数重试并记忆、测试计时与思考提示、提前判定与 `<think>` 不误判、测试带参数与去参数重测），前端单元测试 236、`voice-center.browser.mjs` 更新；`cargo test --workspace` 1057、clippy 零警告、lint 0 error。未验证：没有用真实的各家云端密钥实测关闭思考参数是否被接受、提速多少。
+- **关联**：`crates/moss-voice-providers/src/openai.rs`（`thinking_off_params`、`fast_reply_params`、`OpenAiLlm::with_fast_reply`）、`crates/moss-voice/src/models.rs`（`test_section_with`、`ProbeStats`、`llm_timing_text`）、`crates/moss-voice/src/settings.rs`、`apps/desktop/src-tauri/src/voice_builtin.rs`、`frontend/src/components/VoiceBuiltinCard.jsx`（`ExperienceGroup`）、`frontend/src/voiceState.js`、语音技术书 n73。
+
+### 工作台握手成功的连接给语音和 AI 自动用；预览可临时指定功率、速度、遍数（2026-11-08）
+
+- **现象**：工作台选的串口或 IP 只存在浏览器里，用语音或小智说“开始刻”时若没报串口号，只能用 `.env` 默认值，没配就报错；说“这次用 60% 功率”会被忽略，文字 / 图片预览只能用材料库参数；工作台也看不到、改不了这次的功率速度。
+- **根因与修复**：工作台连接检查真实握手成功（`$32=1`）时，后端记住这个连接并写进 `settings.json`（`laser_verified_connection`），接入点与内置语音调用激光工具没给任何连接参数时自动用它（`HostBackend::default_connection`、`with_default_connection`），补全在门禁之前，审批与发送前握手照旧；语音 / 接入点自己的检查不改写它。文字、图片、画板预览新增 `manual_params`（功率 1~100%、速度 100~6000 mm/min、遍数 1~5），只影响这一次、不改材料库；AI 工具的预览与重新生成可传它，预览结果把实际参数告诉模型。工作台“材质与参数”卡显示材料库推荐值并可勾选“这次自定义功率和速度”，刀路摘要显示实际参数与来源。**行为变更**：`/api/connection/check` 成功会写设置文件；`/api/text-task/generate` 与 `/api/workflow` preview 接受 `manual_params`；精简工具说明改为“用户明确说了就放进 manual_params”。
+- **验证**：新增握手成功才记、语音身份不记、重启后仍在、坏记录忽略（`laser-api`），只在调用方没给连接时补全、给了不混入、不连机器的工具不补，预览结果带实际参数（`laser-mcp`），`manual_params` 覆盖与越界拒绝、真实生成的 G-code 带指定的 S 与 F（`laser-api`），工作台参数校验与摘要（前端）；全量测试见收尾。未验证：没有连实机做握手后语音发送；创作画板还没有自定义入口。
+- **关联**：`crates/laser-api/src/lib.rs`（`remember_verified_connection`、`verified_connection`、`probe_connections`）、`crates/laser-api/src/feedback.rs`（`apply_manual_params`）、`crates/laser-mcp/src/lib.rs`（`with_default_connection`、`preview_params_sentence`）、`crates/laser-host/src/lib.rs`、`tests/golden/mcp_tools_compact.json`、`crates/moss-voice-server/src/conversation.rs`、`frontend/src/pages/HomePage.jsx`、`frontend/src/workbenchParams.js`；融合技术书 r29。
+
+### 激光工具给 AI 改为精简清单：说明短八成、每个参数有中文说明，语音中心工具卡片按用途分组（2026-11-08）
+
+- **现象**：内置语音每说一句都要把 16 个工具约 4.7 万字符的说明发给大模型，开口慢、容易挑错工具；“刻字”有 5 个入口、“发送”有 4 个入口；很多参数没有说明，`laser_workflow_tool` 的 `action` 没写取值范围，说明里还残留 Python 旧版代码名并声称能在预览里直接指定功率（实际不能）；检查机器、生成预览时没有“稍等”提示；语音中心工具卡片直接显示英文名和给模型看的长说明，用户看不懂。
+- **根因与修复**：新增精简清单 `tests/golden/mcp_tools_compact.json`（`laser_mcp::COMPACT_LASER_TOOLS`）：8 个激光工具按用户说法重写说明，每个参数都有中文说明与取值范围，连接参数只留可不填的串口号与 IP，写明功率速度来自材料库、急停要带 `confirmed=true`；接入点与内置语音默认只拿精简清单（约 7.8k 字符），“完整工具（高级）”开关（`mcp_full_tool_list`，默认关）可切回完整清单。内置语音每轮附“说法 → 工具”用法表 `LASER_TOOL_GUIDE`，检查机器、刻字预览、测试矩阵生成补上过渡垫音。语音中心工具卡片改为按用途分组、中文名、一句话说明与风险标签，英文名和原始说明收进“技术信息”。顺带修正确认发送时没给串口号或 IP 会被擅自补成网络模式、忽略 `.env` 默认串口的问题。**行为变更**：三条链路的 `tools/list` 默认变为精简清单；工具名、执行逻辑、风险分级、审批与严格模式门禁都不变，不在清单里的工具按名字仍可调用。
+- **验证**：新增精简清单一致性与说明完整性、急停说明、不补网络模式（`laser-mcp`），精简 / 完整切换与名单两边一致（`laser-host`），开关保存与重连（`moss-voice`），用法表只在激光工具在场时附上、新垫音与 R3 不播垫音（`moss-voice-server`），前端分组与浏览器用例；`cargo test --workspace`、clippy 零警告、前端 `npm test` / lint / build 通过。未验证：没有用真实大模型对比改前改后选工具的准确率与首句延迟；没有连实机。
+- **关联**：`tests/golden/mcp_tools_compact.json`、`crates/laser-mcp/src/lib.rs`（`compact_tools_list_json`、`tools_list_profile`、`HostBackend::full_tool_list`、`with_connection_fields`）、`crates/laser-api/src/lib.rs`（`full_tool_list`、`laser_mcp_compact_tool`）、`crates/laser-host/src/lib.rs`（`voice_tools_list`、`mcp_overview`）、`crates/moss-voice/src/{settings,center}.rs`、`crates/moss-voice-server/src/conversation.rs`（`LASER_TOOL_GUIDE`、`SLOW_CHECK_FILLER`）、`apps/desktop/src-tauri/src/voice.rs`、`frontend/src/components/VoiceEndpointsCard.jsx`、`frontend/src/voiceState.js`；融合技术书 r28、内置语音技术书 n72。
+
 ### 小智常连模式（实验）：开机就在线，不唤醒也能调音量、看雕刻画面（2026-11-08）
 
 - **现象**：内置语音服务用 WebSocket 连接，官方固件只在唤醒或按键时才连服务器；小智重启后不说“你好小智”，语音中心就显示离线，音量、亮度、推屏、雕刻进度画面都发不过去。

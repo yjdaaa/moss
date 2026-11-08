@@ -2704,7 +2704,9 @@ mod imp {
             if jev_options.active() && jev_ready {
                 labels.push(format!("Jev:{jev_model}"));
             }
-            let llm = OpenAiLlm::new(&llm.url, &key(Section::Llm)?, &llm.model).map_err(invalid)?;
+            let llm = OpenAiLlm::new(&llm.url, &key(Section::Llm)?, &llm.model)
+                .map_err(invalid)?
+                .with_fast_reply(experience.llm_fast_reply);
 
             let original: Arc<dyn ToolExecutor> =
                 Arc::new(HostTools::new(Arc::new(DesktopToolHost {
@@ -3290,6 +3292,7 @@ mod imp {
                 "asr_beam_search",
                 "barge_in",
                 "job_done_announce",
+                "llm_fast_reply",
                 "jev_filter_enabled",
                 "jev_unfinished_hold",
                 "jev_fast_route",
@@ -3475,6 +3478,7 @@ mod imp {
                                 "asr_beam_search" => local.asr_beam_search = *val,
                                 "barge_in" => local.barge_in = *val,
                                 "job_done_announce" => local.job_done_announce = *val,
+                                "llm_fast_reply" => local.llm_fast_reply = *val,
                                 "jev_filter_enabled" => local.jev_filter_enabled = *val,
                                 "jev_unfinished_hold" => local.jev_unfinished_hold = *val,
                                 "jev_fast_route" => local.jev_fast_route = *val,
@@ -3841,7 +3845,27 @@ mod imp {
             let resolved = builtin::resolve_for_test(section, input, stored)
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
             let result = match resolved.kind {
-                ProviderKind::Openai => moss_voice::models::test_section(&resolved),
+                ProviderKind::Openai => {
+                    // 快速回答开启时，测试与真实对话带同样的关闭思考参数，测出来的就是实际对话的速度
+                    let thinking_off = (section == Section::Llm
+                        && self.settings().builtin_local.llm_fast_reply)
+                        .then(|| {
+                            moss_voice_providers::openai::fast_reply_params(
+                                &resolved.url,
+                                &resolved.model,
+                            )
+                        })
+                        .flatten();
+                    let result =
+                        moss_voice::models::test_section_with(&resolved, thinking_off.as_ref());
+                    if result.thinking_off.as_deref() == Some("unsupported") {
+                        moss_voice_providers::openai::mark_thinking_off_unsupported(
+                            &resolved.url,
+                            &resolved.model,
+                        );
+                    }
+                    result
+                }
                 ProviderKind::Doubao => test_doubao(&resolved),
             };
             serde_json::to_value(result).map_err(|error| internal(error.to_string()))
@@ -5264,6 +5288,7 @@ mod imp {
             let key = self.secret(Section::Llm).ok()?.unwrap_or_default();
             OpenAiLlm::new(&llm.url, &key, &llm.model)
                 .ok()
+                .map(|llm| llm.with_fast_reply(settings.builtin_local.llm_fast_reply))
                 .map(|llm| Arc::new(llm) as Arc<dyn moss_voice_providers::Llm>)
         }
 
@@ -8463,6 +8488,7 @@ mod imp {
             final_url: resolved.url.clone(),
             detail,
             audio_data_url,
+            thinking_off: None,
         }
     }
 

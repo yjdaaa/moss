@@ -94,6 +94,8 @@ import {
   EXPERIENCE_KEYS,
   formDirty,
   settingsGroupDirty,
+  groupedTools,
+  TOOL_META,
   settingsGroupPayload,
   settingsSaveEffect,
   experienceSettingsError,
@@ -300,7 +302,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   const form = localSettingsForm({ asr: true, tts_speaker: 3, tts_speed: 1.2 });
   assert.deepEqual(form, {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
-    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: "",
+    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: "",
     asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_prompt: "", custom_personas: "[]", screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: "400",
@@ -312,7 +314,7 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.match(localSettingsError({ ...form, mirror: "ftp://x" }), /http/);
   assert.deepEqual(localSettingsPayload({ ...form, mirror: " https://m.test/x " }), {
     asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
-    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, custom_hotwords: [],
+    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: [],
     asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_prompt: "", custom_personas: [], screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: 400,
@@ -1527,5 +1529,37 @@ test("测试全部环节：按每个环节当前选用的来源决定怎么测�
   assert.deepEqual(
     pipelineTestSummary({ vad: { ok: true }, asr: { ok: true }, jev: { ok: true, skipped: true }, llm: { ok: true }, tts: { ok: true } }),
     { ok: true, text: "全部环节测试通过（4 项正常，其余已关闭跳过）" },
+  );
+});
+
+test("n72 内置工具按用途分组、显示中文名与风险标签，未登记的工具放进“其他”", () => {
+  const groups = groupedTools([
+    { name: "laser_safe_action_tool", description: "x", in_compact: true },
+    { name: "laser_workflow_tool", description: "x", in_compact: true },
+    { name: "laser_grbl_tool", description: "x", in_compact: false },
+    { name: "open_app_tool", description: "x", in_compact: true },
+    { name: "ext_unknown", description: "外部说明" },
+  ]);
+  assert.deepEqual(groups.map((g) => g.id), ["safety", "job", "advanced", "desktop", "other"]);
+  const stop = groups[0].tools[0];
+  assert.equal(stop.label, "停止与机器控制");
+  assert.equal(stop.risk, "confirm");
+  assert.equal(groups.at(-1).tools[0].summary, "外部说明");
+  // 精简清单里的 8 个激光工具都有中文名
+  for (const name of ["check_laser_connection_tool", "laser_safe_action_tool", "laser_workflow_tool", "material_params_tool",
+    "refine_laser_params_from_feedback_tool", "regenerate_text_laser_task_tool", "run_calibration_grid_tool", "select_calibration_cell_tool"]) {
+    assert.ok(TOOL_META[name]?.label && TOOL_META[name].group !== "advanced", name);
+  }
+});
+
+test("快速回答默认开并随对话体验保存；大模型结果自带分段耗时时不重复补总耗时（n73）", async () => {
+  const { localSettingsForm, localSettingsPayload, EXPERIENCE_KEYS, pipelineTestOutcome } = await import("../src/voiceState.js");
+  assert.equal(localSettingsForm({}).llm_fast_reply, true, "旧设置没有这个键时按开启处理");
+  assert.equal(localSettingsForm({ llm_fast_reply: false }).llm_fast_reply, false);
+  assert.equal(localSettingsPayload(localSettingsForm({ llm_fast_reply: false })).llm_fast_reply, false);
+  assert.ok(EXPERIENCE_KEYS.includes("llm_fast_reply"), "属于对话体验分组");
+  assert.deepEqual(
+    pipelineTestOutcome({ ok: true, elapsed_ms: 1500, detail: "连接成功，模型返回了工具调用（tool_calls）；首次响应 0.4 秒，工具调用 1.5 秒" }),
+    { ok: true, detail: "连接成功，模型返回了工具调用（tool_calls）；首次响应 0.4 秒，工具调用 1.5 秒" },
   );
 });

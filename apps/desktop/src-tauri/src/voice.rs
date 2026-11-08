@@ -236,6 +236,10 @@ mod imp {
             self.host.api_service.set_disabled_tools(accepted.clone());
             Ok(accepted)
         }
+
+        fn apply_full_tool_list(&self, full: bool) {
+            self.host.api_service.set_full_tool_list(full);
+        }
     }
 
     /// 语音中心与小智桥对附加接入点数量上限的约定一致（两个 crate 各自定义，避免互相依赖）。

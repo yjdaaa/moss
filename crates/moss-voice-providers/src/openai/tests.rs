@@ -502,3 +502,167 @@ fn http_status_maps_to_category_and_keeps_upstream_text_as_detail() {
         "Display 不丢服务方原话"
     );
 }
+
+/// 快速回答（n73）：只对认识的服务商给关闭思考参数，各家写法不同；不认识的地址不加任何参数。
+#[test]
+fn thinking_off_params_follow_each_provider() {
+    let param = |url: &str, model: &str| thinking_off_params(url, model).map(Value::Object);
+    assert_eq!(
+        param(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "qwen3-max"
+        ),
+        Some(json!({"enable_thinking": false}))
+    );
+    assert_eq!(
+        param("https://api.siliconflow.cn/v1", "Qwen/Qwen3-8B"),
+        Some(json!({"enable_thinking": false}))
+    );
+    assert_eq!(
+        param(
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "doubao-seed-1-6"
+        ),
+        Some(json!({"thinking": {"type": "disabled"}}))
+    );
+    assert_eq!(
+        param("https://open.bigmodel.cn/api/paas/v4", "glm-4.6"),
+        Some(json!({"thinking": {"type": "disabled"}}))
+    );
+    assert_eq!(
+        param("https://openrouter.ai/api/v1", "qwen/qwen3-32b"),
+        Some(json!({"reasoning": {"enabled": false}}))
+    );
+    assert_eq!(
+        param("https://api.openai.com/v1", "gpt-5-mini"),
+        Some(json!({"reasoning_effort": "minimal"}))
+    );
+    // GPT-4o 不认 reasoning_effort；DeepSeek、本机 Ollama、冒充域名都不加
+    assert_eq!(param("https://api.openai.com/v1", "gpt-4o"), None);
+    assert_eq!(param("https://api.deepseek.com/v1", "deepseek-chat"), None);
+    assert_eq!(param("http://127.0.0.1:11434/v1", "qwen3"), None);
+    assert_eq!(
+        param("https://dashscope.aliyuncs.com.evil.test/v1", "qwen3"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn fast_reply_adds_thinking_param_and_drops_it_when_the_service_rejects_it() {
+    let base = |url: &str| format!("{url}/v1");
+    let model = format!("fast-reply-{}", std::process::id());
+    let off = json!({"enable_thinking": false})
+        .as_object()
+        .cloned()
+        .unwrap();
+    let sse = |text: &str| {
+        let mut parts = vec![sse_head()];
+        parts.push(
+            format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{"content": text}}]})
+            )
+            .into_bytes(),
+        );
+        parts.push(b"data: [DONE]\n\n".to_vec());
+        parts
+    };
+
+    // 服务认参数：请求里带上，正常回答
+    let (url, recorded) = serve_once(sse("好的")).await;
+    let llm = OpenAiLlm::new(&base(&url), KEY, &model)
+        .unwrap()
+        .with_thinking_off(off.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    assert_eq!(
+        llm.chat(&[ChatMessage::user("hi")], &[], tx)
+            .await
+            .unwrap()
+            .text,
+        "好的"
+    );
+    let body: Value = serde_json::from_slice(&recorded.await.unwrap().body).unwrap();
+    assert_eq!(body["enable_thinking"], false);
+
+    // 服务不认（400）：去掉参数重试一次成功，并记住这个地址 + 模型不再携带
+    let rejecting = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", rejecting.local_addr().unwrap());
+    let (bodies_tx, mut bodies) = mpsc::unbounded_channel::<Value>();
+    tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut stream, _) = rejecting.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let header_end = loop {
+                let n = stream.read(&mut chunk).await.unwrap();
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|l| {
+                    l.strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            while buffer.len() < header_end + length {
+                let n = stream.read(&mut chunk).await.unwrap();
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            let _ = bodies_tx
+                .send(serde_json::from_slice(&buffer[header_end..header_end + length]).unwrap());
+            let reply = if attempt == 0 {
+                response(
+                    "400 Bad Request",
+                    "application/json",
+                    br#"{"error":{"message":"unknown parameter enable_thinking"}}"#,
+                )
+            } else {
+                let mut out = sse_head();
+                out.extend_from_slice(
+                    format!(
+                        "data: {}\n\ndata: [DONE]\n\n",
+                        json!({"choices":[{"delta":{"content":"重试成功"}}]})
+                    )
+                    .as_bytes(),
+                );
+                out
+            };
+            stream.write_all(&reply).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+    });
+    let llm = OpenAiLlm::new(&base(&url), KEY, &model)
+        .unwrap()
+        .with_thinking_off(off.clone());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let reply = llm.chat(&[ChatMessage::user("hi")], &[], tx).await.unwrap();
+    assert_eq!(reply.text, "重试成功");
+    assert_eq!(
+        bodies.recv().await.unwrap()["enable_thinking"],
+        false,
+        "第一次带参数"
+    );
+    assert!(
+        bodies
+            .recv()
+            .await
+            .unwrap()
+            .get("enable_thinking")
+            .is_none(),
+        "重试去掉参数"
+    );
+    let again = OpenAiLlm::new(&base(&url), KEY, &model)
+        .unwrap()
+        .with_thinking_off(off);
+    assert!(
+        again
+            .request_body(&[ChatMessage::user("hi")], &[])
+            .get("enable_thinking")
+            .is_none(),
+        "已证实不支持后，同一地址与模型不再携带"
+    );
+}

@@ -1201,6 +1201,7 @@ export function localSettingsForm(settings) {
     read_only_shortcuts: value.read_only_shortcuts !== false,
     asr_beam_search: value.asr_beam_search !== false,
     job_done_announce: value.job_done_announce !== false,
+    llm_fast_reply: value.llm_fast_reply !== false,
     jev_filter_enabled: Boolean(value.jev_filter_enabled),
     jev_model: value.jev_model || "typesafe/jev-1.14",
     jev_unfinished_hold: value.jev_unfinished_hold !== false,
@@ -1309,6 +1310,7 @@ export function localSettingsPayload(form) {
     read_only_shortcuts: form.read_only_shortcuts !== false,
     asr_beam_search: form.asr_beam_search !== false,
     job_done_announce: form.job_done_announce !== false,
+    llm_fast_reply: form.llm_fast_reply !== false,
     jev_filter_enabled: Boolean(form.jev_filter_enabled),
     jev_model: String(form.jev_model || "typesafe/jev-1.14").trim() || "typesafe/jev-1.14",
     jev_unfinished_hold: form.jev_unfinished_hold !== false,
@@ -1427,6 +1429,71 @@ export function toolSwitchPayload(tools, name, enabled) {
   return [...disabled].sort();
 }
 
+/**
+ * n72（2026-11-08 用户决定）：内置工具卡片给人看的名字、分组和风险标签。
+ * `risk`：read 只读 / file 只生成预览或文件 / confirm 会让机器动、要你确认 / stop 停止与调速（不用确认）/ desktop 控制电脑。
+ * 精简清单（默认给 AI）以后端 `in_compact` 为准；这里只管显示。
+ */
+export const TOOL_GROUPS = [
+  { id: "safety", title: "检查与安全" },
+  { id: "job", title: "刻字与发送" },
+  { id: "tuning", title: "材料与调参" },
+  { id: "advanced", title: "高级：重复入口与底层收发（只在“完整工具”打开时给 AI）" },
+  { id: "desktop", title: "电脑控制（内置语音和严格模式下不开放）" },
+  { id: "other", title: "其他" },
+];
+
+export const TOOL_RISK_LABELS = {
+  read: "只读",
+  file: "只生成预览",
+  stop: "停止与调速",
+  confirm: "会让机器动 · 要你确认",
+  desktop: "控制电脑",
+};
+
+export const TOOL_META = {
+  check_laser_connection_tool: { label: "检查机器连接", group: "safety", risk: "read", summary: "看激光机连没连上、现在空闲还是在刻。" },
+  laser_safe_action_tool: { label: "停止与机器控制", group: "safety", risk: "confirm", summary: "急停、边刻边调速度和功率不用确认；回零、设原点、移动激光头要你确认。不能关闭。" },
+  laser_workflow_tool: { label: "刻字：预览、发送、进度", group: "job", risk: "confirm", summary: "先生成预览弹到电脑上，你核对并确认后才开始刻；也能查进度、取消、断点续刻。" },
+  regenerate_text_laser_task_tool: { label: "按建议重新生成预览", group: "job", risk: "file", summary: "采用调参建议或改文字、材料后重新出预览；发送仍要你确认。" },
+  material_params_tool: { label: "材料参数库", group: "tuning", risk: "read", summary: "查某种材料该用多大功率、多快速度；保存和删除只能在电脑上做。" },
+  refine_laser_params_from_feedback_tool: { label: "按效果给调参建议", group: "tuning", risk: "file", summary: "你说“太焦”“太浅”后给出调整建议，不改参数、不动机器。" },
+  run_calibration_grid_tool: { label: "测试矩阵", group: "tuning", risk: "confirm", summary: "刻一块不同功率×速度的小方格找最佳参数；开始刻前要你确认。" },
+  select_calibration_cell_tool: { label: "保存最佳格子", group: "tuning", risk: "file", summary: "你说第几格最好，就把它的参数存进材料库。" },
+  recommend_laser_params_tool: { label: "推荐参数（旧入口）", group: "advanced", risk: "read", summary: "和“材料参数库”的查询重复。" },
+  start_tuned_job_tool: { label: "按调参结果开刻（旧入口）", group: "advanced", risk: "confirm", summary: "和“刻字”的确认发送重复。" },
+  generate_text_laser_task_tool: { label: "生成刻字任务（旧入口）", group: "advanced", risk: "file", summary: "和“刻字”的预览重复。" },
+  generate_text_image_gcode_tool: { label: "文字转刀路文件", group: "advanced", risk: "file", summary: "只生成图片和刀路文件。" },
+  ai_laser_gcode_tool: { label: "素材转刀路（旧入口）", group: "advanced", risk: "file", summary: "和“刻字”的预览重复。" },
+  generate_text_image_tool: { label: "生成文字图片", group: "advanced", risk: "file", summary: "只生成白底黑字图片。" },
+  laser_grbl_tool: { label: "串口底层收发", group: "advanced", risk: "confirm", summary: "直接对串口查状态、取消；发任意 G-code 已禁用。" },
+  laser_network_grbl_tool: { label: "网络底层收发", group: "advanced", risk: "confirm", summary: "直接对网络雕刻机查状态、取消；发任意 G-code 已禁用。" },
+  open_app_tool: { label: "打开电脑应用", group: "desktop", risk: "desktop", summary: "打开浏览器、微信等应用或网址。" },
+  shortcut_key_execution_tool: { label: "电脑快捷键", group: "desktop", risk: "desktop", summary: "播放、暂停音乐，调电脑音量。" },
+  open_jsjds_website_tool: { label: "打开计算机设计大赛官网", group: "desktop", risk: "desktop", summary: "打开大赛官网。" },
+  command_execution_tool: { label: "执行终端命令（开发者）", group: "desktop", risk: "desktop", summary: "只在开发者模式出现。" },
+};
+
+/** 工具按分组排好，未登记的工具放进“其他”，用后端给的说明。 */
+export function groupedTools(tools) {
+  const list = Array.isArray(tools) ? tools : [];
+  return TOOL_GROUPS.map((group) => ({
+    ...group,
+    tools: list
+      .map((tool) => {
+        const meta = TOOL_META[tool.name];
+        return {
+          ...tool,
+          label: meta?.label || tool.name,
+          group: meta?.group || "other",
+          risk: meta?.risk || "",
+          summary: meta?.summary || tool.description || "",
+        };
+      })
+      .filter((tool) => tool.group === group.id),
+  })).filter((group) => group.tools.length > 0);
+}
+
 /** 工具调用统计的简短文字。 */
 export function toolStatText(tool) {
   const calls = Number(tool?.calls || 0);
@@ -1450,7 +1517,7 @@ export const TOOL_EDIT_PROMPTS = {
       "",
       "按下面顺序改，只动相关文件，不要顺手重构：",
       "1. 登记：crates/laser-tools/src/lib.rs 的 PRIORITY_TOOLS / SECONDARY_TOOLS 名单里加入新工具名（snake_case、以 _tool 结尾，不含双下划线 __，与现有工具一致）；ToolCatalog 会自动把它收进名单。",
-      "2. 声明：tests/golden/mcp_tools.json（被 crates/laser-mcp/src/lib.rs 的 tools_list_json / tools_list_with 编译期加载）增加它的 name、description 与 inputSchema（JSON Schema，必填项与取值范围写清楚）。",
+      "2. 声明：tests/golden/mcp_tools.json（被 crates/laser-mcp/src/lib.rs 的 tools_list_json / tools_list_with 编译期加载）增加它的 name、description 与 inputSchema（JSON Schema，必填项与取值范围写清楚）。默认给 AI 的是精简清单：若这个工具也要默认提供，同时把面向用户意图写的短说明加进 tests/golden/mcp_tools_compact.json、名字加进 laser_mcp::COMPACT_LASER_TOOLS 与 laser_api::laser_mcp_compact_tool，并在 frontend/src/voiceState.js 的 TOOL_META 里写中文名、分组与风险标签。",
       "3. 分发与分级：crates/laser-mcp/src/lib.rs 的 dispatch_tool_call_with 增加同名 match 分支（非法参数返回结构化错误，不 panic），并在 crates/laser-contracts/src/risk.rs 的 tool_risk 显式标定 R0–R4 风险等级。",
       "4. 实现：复用现有的连接解析 resolve_connection_spec、发送门禁 authorize_send 与错误处理，不新增抽象层。",
       "5. 门禁：涉及运动、出光、发送 G-code、急停、删除、OTA、密钥的动作必须走现有审批与严格模式门禁，不得放宽；只读工具不得有副作用；急停类工具必须 can_disable=false。",
@@ -1472,7 +1539,7 @@ export const TOOL_EDIT_PROMPTS = {
       "",
       "彻底删除的顺序：",
       "1. 从 crates/laser-tools/src/lib.rs 的 PRIORITY_TOOLS / SECONDARY_TOOLS 名单移除。",
-      "2. 从 tests/golden/mcp_tools.json、crates/laser-mcp/src/lib.rs（tools_list_with / dispatch_tool_call_with）及 crates/laser-contracts/src/risk.rs（tool_risk）移除对应 schema、分发与分级分支。",
+      "2. 从 tests/golden/mcp_tools.json、tests/golden/mcp_tools_compact.json（若在精简清单里，同时从 COMPACT_LASER_TOOLS 与 laser_api::laser_mcp_compact_tool 去掉）、crates/laser-mcp/src/lib.rs（tools_list_with / dispatch_tool_call_with）及 crates/laser-contracts/src/risk.rs（tool_risk）移除对应 schema、分发与分级分支，并删掉 frontend/src/voiceState.js 的 TOOL_META 条目。",
       "3. 删除该工具的实现、只属于它的测试，并从 crates/moss-voice-server/src/jev.rs 的 groups_of_builtin_tool 清理该工具名（Jev 按当轮启用工具动态提问，删空某组也无需改 ToolGroup 枚举）。",
       "4. 在 crates/、frontend/、docs/、scripts/ 全局搜索残留引用并逐条清理，把清单告诉我。",
       "",
@@ -1615,6 +1682,7 @@ export const EXPERIENCE_KEYS = [
   "read_only_shortcuts",
   "asr_beam_search",
   "job_done_announce",
+  "llm_fast_reply",
   "screen_preview_sync",
   "persona_style",
   "persona_prompt",
@@ -2871,7 +2939,9 @@ export function pipelineTestOutcome(result, error, errorText = (e) => String(e?.
   const elapsed = Number(result?.elapsed_ms);
   const timing = Number.isFinite(elapsed) && elapsed > 0 ? `（${elapsed} ms）` : "";
   const detail = String(result?.detail || "").trim() || (ok ? "连接正常" : "测试未通过");
-  return { ok, detail: `${detail}${ok ? timing : ""}` };
+  // 大模型结果自带分段耗时（首次响应 / 思考 / 工具调用，n73），不再重复补总耗时
+  const hasTiming = /首次响应/.test(detail);
+  return { ok, detail: `${detail}${ok && !hasTiming ? timing : ""}` };
 }
 
 /** 汇总一句话：全部通过 / 哪几个环节不通。`results` 为 `{key: {ok, skipped}}`。 */

@@ -618,6 +618,10 @@ pub struct TestResult {
     /// 语音合成测试成功时附带的音频 data URL（供页面点击“试听”播放，不含密钥）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_data_url: Option<String>,
+    /// 大模型测试附带“关闭思考”参数时的结果：`applied` 已带上；`unsupported` 服务不认、已去掉重测
+    /// （调用方据此记入 `moss_voice_providers::openai::mark_thinking_off_unsupported`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_off: Option<String>,
 }
 
 /// 一次模型列表读取的结果（不含密钥）。
@@ -807,6 +811,22 @@ pub fn llm_request_body(model: &str) -> serde_json::Value {
     })
 }
 
+/// 大模型探针的分段计时（毫秒，自发出请求起算；2026-11-08 n73）：分清慢在网络 / 排队还是模型思考。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ProbeStats {
+    /// 收到响应头
+    headers_ms: Option<u64>,
+    /// 第一段推理内容（`reasoning_content` / `reasoning` / `<think>`）
+    first_reasoning_ms: Option<u64>,
+    /// 最后一段推理内容
+    last_reasoning_ms: Option<u64>,
+    /// 收到工具调用
+    tool_call_ms: Option<u64>,
+}
+
+/// 模型只回文字、不调工具时，正文累计到这么多字就判定，不等整段回答结束。
+const TEXT_WITHOUT_TOOL_LIMIT: usize = 60;
+
 #[derive(Debug, PartialEq, Eq)]
 enum LlmProbeOutcome {
     ToolCall,
@@ -850,15 +870,44 @@ fn inspect_llm_chunk(
     (has_tool_call, true, None)
 }
 
+/// 一个流式分片里的推理文字与正文文字（`<think>` 包裹的正文按推理算）。
+fn chunk_texts(value: &serde_json::Value) -> (bool, String) {
+    let payload = chat_completions_payload(value);
+    let Some(node) = payload
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("delta").or_else(|| choice.get("message")))
+    else {
+        return (false, String::new());
+    };
+    let text = |key: &str| {
+        node.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    let reasoning = !text("reasoning_content").is_empty()
+        || !text("reasoning").is_empty()
+        || node
+            .get("reasoning_details")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+    (reasoning, text("content"))
+}
+
 fn parse_sse_lines<R: BufRead>(
     mut reader: R,
     secret: Option<&str>,
+    started: Instant,
+    stats: &mut ProbeStats,
 ) -> Result<LlmProbeOutcome, String> {
     let mut total_bytes: u64 = 0;
     let mut line = String::new();
     let mut saw_sse = false;
     let mut saw_message = false;
     let mut raw_fallback = String::new();
+    let mut answer_chars = 0usize;
+    let mut in_think_tag = false;
     loop {
         line.clear();
         let count = reader
@@ -889,12 +938,31 @@ fn parse_sse_lines<R: BufRead>(
                 if let Some(err) = err {
                     return Ok(LlmProbeOutcome::StreamError(err));
                 }
+                let now = started.elapsed().as_millis() as u64;
                 if has_tool_call {
                     // 首包见到 tool_calls 立即返回，不再等待后续分片与流结束
+                    stats.tool_call_ms = Some(now);
                     return Ok(LlmProbeOutcome::ToolCall);
+                }
+                let (reasoning, content) = chunk_texts(&value);
+                if content.contains("<think>") {
+                    in_think_tag = true;
+                }
+                if reasoning || in_think_tag {
+                    stats.first_reasoning_ms.get_or_insert(now);
+                    stats.last_reasoning_ms = Some(now);
+                } else {
+                    answer_chars += content.chars().count();
+                }
+                if content.contains("</think>") {
+                    in_think_tag = false;
                 }
                 if saw_choice {
                     saw_message = true;
+                }
+                // 已经在正文里作答却迟迟不调工具：读够几十个字就判定，不等整段回答
+                if answer_chars >= TEXT_WITHOUT_TOOL_LIMIT {
+                    return Ok(LlmProbeOutcome::MessageWithoutToolCall);
                 }
             }
         } else if !saw_sse {
@@ -927,11 +995,15 @@ fn probe_llm_response(
     response: reqwest::blocking::Response,
     content_type: &str,
     secret: Option<&str>,
+    started: Instant,
+    stats: &mut ProbeStats,
 ) -> Result<LlmProbeOutcome, String> {
     if content_type.contains("text/event-stream") {
         return parse_sse_lines(
             BufReader::new(response.take(MAX_RESPONSE_BYTES + 1)),
             secret,
+            started,
+            stats,
         );
     }
     let bytes = read_limited(response)?;
@@ -942,7 +1014,12 @@ fn probe_llm_response(
         .take(5)
         .collect::<Vec<_>>();
     if trimmed_ascii.eq_ignore_ascii_case(b"data:") || trimmed_ascii.starts_with(b"event") {
-        return parse_sse_lines(BufReader::new(std::io::Cursor::new(bytes)), secret);
+        return parse_sse_lines(
+            BufReader::new(std::io::Cursor::new(bytes)),
+            secret,
+            started,
+            stats,
+        );
     }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(LlmProbeOutcome::NotJson);
@@ -1029,8 +1106,56 @@ fn with_openai_compat(
     }
 }
 
+fn seconds(ms: u64) -> String {
+    format!("{:.1} 秒", ms as f64 / 1000.0)
+}
+
+/// 分段计时与思考提示，附在大模型测试结论后面（空串表示没有可说的）。
+fn llm_timing_text(stats: &ProbeStats, thinking_note: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(ms) = stats.headers_ms {
+        parts.push(format!("首次响应 {}", seconds(ms)));
+    }
+    let thought_ms = match (
+        stats.first_reasoning_ms,
+        stats.last_reasoning_ms.or(stats.tool_call_ms),
+    ) {
+        (Some(first), Some(last)) => Some(last.saturating_sub(first)),
+        _ => None,
+    };
+    if let Some(ms) = thought_ms {
+        parts.push(format!("先思考约 {}", seconds(ms.max(100))));
+    }
+    if let Some(ms) = stats.tool_call_ms {
+        parts.push(format!("工具调用 {}", seconds(ms)));
+    }
+    let mut text = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("；{}", parts.join("，"))
+    };
+    if thought_ms.is_some() {
+        text.push_str(match thinking_note {
+            Some("applied") => "。已请求关闭思考，但这个模型仍会先思考（推理专用模型关不掉），每轮对话都要多等这么久，建议换非思考模型",
+            _ => "。这是思考型模型，每轮对话都要多等这么久；“对话体验”里的快速回答会对常见服务商自动关闭思考，这家不支持时建议换非思考模型",
+        });
+    } else if thinking_note == Some("unsupported") {
+        text.push_str("。这个服务不认关闭思考参数，已按默认方式测试");
+    }
+    text
+}
+
 /// 执行一次测试连接。密钥只在本函数内使用，返回值不含密钥。
 pub fn test_section(resolved: &ResolvedSection) -> TestResult {
+    test_section_with(resolved, None)
+}
+
+/// 同 [`test_section`]；大模型分区可附带 `thinking_off`（“快速回答”的关闭思考参数，由调用方按服务商给出）。
+/// 服务返回 400 / 422 时去掉参数重测一次，结果 `thinking_off = "unsupported"`。
+pub fn test_section_with(
+    resolved: &ResolvedSection,
+    thinking_off: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> TestResult {
     let started = Instant::now();
     let section = resolved.section;
     let request_url = match section {
@@ -1051,16 +1176,32 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
             final_url: resolved.url.clone(),
             detail,
             audio_data_url: None,
+            thinking_off: None,
         }
     };
     let client = match client() {
         Ok(client) => client,
         Err(detail) => return finish(false, None, detail),
     };
+    let llm_body = |extra: Option<&serde_json::Map<String, serde_json::Value>>| {
+        let mut body = llm_request_body(&resolved.model);
+        if let (Some(extra), Some(map)) = (extra, body.as_object_mut()) {
+            for (key, value) in extra {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+        body
+    };
+    let thinking_off = if section == Section::Llm {
+        thinking_off
+    } else {
+        None
+    };
+    let mut thinking_note = thinking_off.map(|_| "applied");
     let request = match section {
         Section::Llm => {
             with_openai_compat(client.post(&request_url), &request_url, &resolved.api_key)
-                .json(&llm_request_body(&resolved.model))
+                .json(&llm_body(thinking_off))
         }
         Section::Asr => {
             let boundary = format!(
@@ -1087,10 +1228,26 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
             }))
         }
     };
-    let response = match request.send() {
+    let mut response = match request.send() {
         Ok(response) => response,
         Err(error) => return finish(false, None, describe_send_error(&error)),
     };
+    if thinking_off.is_some() && matches!(response.status().as_u16(), 400 | 422) {
+        // 服务不认“关闭思考”参数：去掉后按默认方式重测一次
+        let retry = with_openai_compat(client.post(&request_url), &request_url, &resolved.api_key)
+            .json(&llm_body(None))
+            .send();
+        response = match retry {
+            Ok(response) => response,
+            Err(error) => return finish(false, None, describe_send_error(&error)),
+        };
+        if response.status().is_success() {
+            thinking_note = Some("unsupported");
+        } else {
+            thinking_note = None;
+        }
+    }
+    let headers_ms = started.elapsed().as_millis() as u64;
     let status = response.status();
     let code = status.as_u16();
     if status.is_redirection() {
@@ -1118,16 +1275,30 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
         );
     }
     if section == Section::Llm {
-        return match probe_llm_response(response, &content_type, Some(&resolved.api_key)) {
+        let mut stats = ProbeStats {
+            headers_ms: Some(headers_ms),
+            ..ProbeStats::default()
+        };
+        let outcome = probe_llm_response(
+            response,
+            &content_type,
+            Some(&resolved.api_key),
+            started,
+            &mut stats,
+        );
+        let timing = llm_timing_text(&stats, thinking_note);
+        let mut result = match outcome {
             Ok(LlmProbeOutcome::ToolCall) => finish(
                 true,
                 Some(code),
-                "连接成功，模型返回了工具调用（tool_calls）".into(),
+                format!("连接成功，模型返回了工具调用（tool_calls）{timing}"),
             ),
             Ok(LlmProbeOutcome::MessageWithoutToolCall) => finish(
                 false,
                 Some(code),
-                "连接成功，但模型没有返回工具调用；MOSS 的工具需要支持函数调用的模型".into(),
+                format!(
+                    "连接成功，但模型没有返回工具调用；MOSS 的工具需要支持函数调用的模型{timing}"
+                ),
             ),
             Ok(LlmProbeOutcome::StreamError(err)) => {
                 finish(false, Some(code), format!("模型流式响应报错：{err}"))
@@ -1142,6 +1313,8 @@ pub fn test_section(resolved: &ResolvedSection) -> TestResult {
             ),
             Err(detail) => finish(false, Some(code), detail),
         };
+        result.thinking_off = thinking_note.map(str::to_owned);
+        return result;
     }
     let bytes = match read_limited(response) {
         Ok(bytes) => bytes,
@@ -2468,5 +2641,224 @@ mod tests {
         ] {
             assert!(!is_openrouter_https_url(bad), "{bad} must be rejected");
         }
+    }
+
+    /// 本机 SSE 服务：按顺序写出各段（每段之间停 `gap_ms`），最后停 `tail_ms` 再结束，模拟慢速流。
+    fn serve_sse(chunks: Vec<String>, gap_ms: u64, tail_ms: u64) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            );
+            for chunk in chunks {
+                let _ = stream.write_all(format!("data: {chunk}\n\n").as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(gap_ms));
+            }
+            std::thread::sleep(Duration::from_millis(tail_ms));
+            let _ = stream.write_all(b"data: [DONE]\n\n");
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    fn delta(node: serde_json::Value) -> String {
+        serde_json::json!({"choices": [{"delta": node}]}).to_string()
+    }
+
+    fn tool_call_chunk() -> String {
+        delta(
+            serde_json::json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {"name": "get_time", "arguments": ""}}]}),
+        )
+    }
+
+    /// n73：测试结果拆开显示首次响应 / 思考 / 工具调用耗时；检测到先思考时提示每轮都会多等。
+    #[test]
+    fn llm_probe_reports_thinking_time_and_hint() {
+        let base = serve_sse(
+            vec![
+                delta(serde_json::json!({"reasoning_content": "先想一想"})),
+                delta(serde_json::json!({"reasoning_content": "再想一想"})),
+                tool_call_chunk(),
+            ],
+            300,
+            0,
+        );
+        let resolved = resolve(Section::Llm, &input(&base, "", "qwen3"))
+            .unwrap()
+            .unwrap();
+        let result = test_section(&resolved);
+        assert!(result.ok, "{result:?}");
+        assert!(result.detail.contains("首次响应"), "{}", result.detail);
+        assert!(result.detail.contains("先思考约"), "{}", result.detail);
+        assert!(result.detail.contains("工具调用"), "{}", result.detail);
+        assert!(result.detail.contains("思考型模型"), "{}", result.detail);
+        assert_eq!(result.thinking_off, None);
+
+        // 不思考的模型：只有首次响应与工具调用，不出现思考提示
+        let base = serve_sse(vec![tool_call_chunk()], 0, 0);
+        let resolved = resolve(Section::Llm, &input(&base, "", "fast"))
+            .unwrap()
+            .unwrap();
+        let result = test_section(&resolved);
+        assert!(
+            result.ok && !result.detail.contains("思考"),
+            "{}",
+            result.detail
+        );
+    }
+
+    /// 模型直接回文字、迟迟不调工具：读够几十个字就判定，不等整段回答（服务端故意再拖 5 秒）。
+    #[test]
+    fn llm_probe_stops_early_when_model_answers_without_tool() {
+        let base = serve_sse(
+            vec![
+                delta(
+                    serde_json::json!({"content": "现在是下午三点整，我无法调用工具，但可以直接告诉你大概的时间。"}),
+                ),
+                delta(
+                    serde_json::json!({"content": "如果需要更准确的时间，请查看设备上的时钟或者联网同步一下系统时间。"}),
+                ),
+            ],
+            10,
+            5_000,
+        );
+        let resolved = resolve(Section::Llm, &input(&base, "", "chatty"))
+            .unwrap()
+            .unwrap();
+        let result = test_section(&resolved);
+        assert!(!result.ok);
+        assert!(
+            result.detail.contains("没有返回工具调用"),
+            "{}",
+            result.detail
+        );
+        assert!(
+            result.elapsed_ms < 2_000,
+            "应提前判定，实际 {} ms",
+            result.elapsed_ms
+        );
+
+        // `<think>` 包裹在正文里的推理不算作答：后面照常等到工具调用
+        let thinking = "思".repeat(80);
+        let base = serve_sse(
+            vec![
+                delta(serde_json::json!({"content": format!("<think>{thinking}")})),
+                delta(serde_json::json!({"content": "</think>"})),
+                tool_call_chunk(),
+            ],
+            10,
+            0,
+        );
+        let resolved = resolve(Section::Llm, &input(&base, "", "think-tag"))
+            .unwrap()
+            .unwrap();
+        let result = test_section(&resolved);
+        assert!(result.ok, "{result:?}");
+        assert!(result.detail.contains("先思考约"), "{}", result.detail);
+    }
+
+    /// 快速回答：带上关闭思考参数；服务返回 400 时去掉参数重测，结果标记 `unsupported`。
+    #[test]
+    fn llm_thinking_off_param_is_sent_and_dropped_when_rejected() {
+        use std::io::{Read, Write};
+        let off = serde_json::json!({"enable_thinking": false})
+            .as_object()
+            .cloned()
+            .unwrap();
+
+        let (base, received) = serve_once(
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/event-stream\r\n",
+            format!("data: {}\n\ndata: [DONE]\n\n", tool_call_chunk()).into_bytes(),
+        );
+        let resolved = resolve(Section::Llm, &input(&format!("{base}/v1"), "", "qwen3"))
+            .unwrap()
+            .unwrap();
+        let result = test_section_with(&resolved, Some(&off));
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.thinking_off.as_deref(), Some("applied"));
+        let body: serde_json::Value =
+            serde_json::from_slice(&received.recv().unwrap().body).unwrap();
+        assert_eq!(body["enable_thinking"], false);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let tool = tool_call_chunk();
+        std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buffer).to_string();
+                    if let Some(pos) = text.find("\r\n\r\n") {
+                        let length = text[..pos]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if buffer.len() >= pos + 4 + length {
+                            let _ = tx.send(
+                                String::from_utf8_lossy(&buffer[pos + 4..pos + 4 + length])
+                                    .to_string(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let reply = if attempt == 0 {
+                    let body = r#"{"error":{"message":"unknown field enable_thinking"}}"#;
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {tool}\n\ndata: [DONE]\n\n"
+                    )
+                };
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        let resolved = resolve(
+            Section::Llm,
+            &input(&format!("http://127.0.0.1:{port}/v1"), "", "qwen3"),
+        )
+        .unwrap()
+        .unwrap();
+        let result = test_section_with(&resolved, Some(&off));
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.thinking_off.as_deref(), Some("unsupported"));
+        assert!(
+            result.detail.contains("不认关闭思考参数"),
+            "{}",
+            result.detail
+        );
+        assert!(
+            rx.recv().unwrap().contains("enable_thinking"),
+            "第一次带参数"
+        );
+        assert!(
+            !rx.recv().unwrap().contains("enable_thinking"),
+            "重测去掉参数"
+        );
     }
 }

@@ -263,6 +263,66 @@ fn with_auth(builder: reqwest::RequestBuilder, api_key: &str) -> reqwest::Reques
     }
 }
 
+/// “快速回答”：让思考型模型跳过推理直接回答的请求参数（2026-11-08，n73）。
+///
+/// 语音对话每轮都要等大模型开口，思考型模型（Qwen3、豆包 Seed、GLM-4.5+、GPT-5 等）默认先推理
+/// 数秒；动机器前的复述确认、桌面审批与急停都由代码把关，不依赖模型推理。各家参数写法不同，
+/// 只对认识的服务商给参数；服务不认（返回 400 / 422）时由调用方去掉参数重试一次并记入
+/// [`mark_thinking_off_unsupported`]，之后同一地址与模型不再携带。推理专用模型（如 DeepSeek-R1）关不掉，照常运行。
+pub fn thinking_off_params(base_url: &str, model: &str) -> Option<serde_json::Map<String, Value>> {
+    let host = reqwest::Url::parse(base_url.trim())
+        .ok()?
+        .host_str()?
+        .to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+    let on = |suffix: &str| host == suffix || host.ends_with(&format!(".{suffix}"));
+    let value = if on("dashscope.aliyuncs.com")
+        || on("dashscope-intl.aliyuncs.com")
+        || on("siliconflow.cn")
+        || on("siliconflow.com")
+    {
+        json!({"enable_thinking": false})
+    } else if on("volces.com") || on("bigmodel.cn") || on("z.ai") {
+        json!({"thinking": {"type": "disabled"}})
+    } else if on("openrouter.ai") {
+        json!({"reasoning": {"enabled": false}})
+    } else if on("api.openai.com") && model.starts_with("gpt-5") {
+        json!({"reasoning_effort": "minimal"})
+    } else {
+        return None;
+    };
+    value.as_object().cloned()
+}
+
+fn thinking_unsupported() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+fn thinking_key(base_url: &str, model: &str) -> String {
+    format!("{}|{}", llm_base_url(base_url), model.trim())
+}
+
+/// 这个地址与模型已证实不认“关闭思考”参数（本次运行内有效）。
+pub fn mark_thinking_off_unsupported(base_url: &str, model: &str) {
+    if let Ok(mut set) = thinking_unsupported().lock() {
+        set.insert(thinking_key(base_url, model));
+    }
+}
+
+/// 开启“快速回答”时本次请求要附带的参数：服务商不在表里或已证实不支持时为 `None`。
+pub fn fast_reply_params(base_url: &str, model: &str) -> Option<serde_json::Map<String, Value>> {
+    let unsupported = thinking_unsupported()
+        .lock()
+        .map(|set| set.contains(&thinking_key(base_url, model)))
+        .unwrap_or(false);
+    if unsupported {
+        return None;
+    }
+    thinking_off_params(base_url, model)
+}
+
 fn is_cline_api_url(url: &str) -> bool {
     reqwest::Url::parse(url.trim())
         .ok()
@@ -605,6 +665,8 @@ pub struct OpenAiLlm {
     base_url: String,
     api_key: String,
     model: String,
+    /// 快速回答开启且服务商在表里时要附带的关闭思考参数（见 [`thinking_off_params`]）
+    thinking_off: Option<serde_json::Map<String, Value>>,
 }
 
 impl OpenAiLlm {
@@ -614,16 +676,78 @@ impl OpenAiLlm {
             base_url: llm_base_url(base_url),
             api_key: api_key.trim().to_owned(),
             model: model.trim().to_owned(),
+            thinking_off: None,
         })
     }
 
+    /// 开启后对认识的服务商附带“关闭思考”参数（语音中心“对话体验 › 快速回答”，默认开）。
+    pub fn with_fast_reply(mut self, enabled: bool) -> Self {
+        self.thinking_off = if enabled {
+            thinking_off_params(&self.base_url, &self.model)
+        } else {
+            None
+        };
+        self
+    }
+
+    /// 测试用：直接指定关闭思考参数（本机假服务的地址不在服务商表里）。
+    #[cfg(test)]
+    fn with_thinking_off(mut self, params: serde_json::Map<String, Value>) -> Self {
+        self.thinking_off = Some(params);
+        self
+    }
+
     pub fn request_body(&self, messages: &[ChatMessage], tools: &[ToolSpec]) -> Value {
+        let extra = self.extra_params();
+        self.request_body_with(messages, tools, extra.as_ref())
+    }
+
+    fn extra_params(&self) -> Option<serde_json::Map<String, Value>> {
+        let unsupported = thinking_unsupported()
+            .lock()
+            .map(|set| set.contains(&thinking_key(&self.base_url, &self.model)))
+            .unwrap_or(false);
+        if unsupported {
+            None
+        } else {
+            self.thinking_off.clone()
+        }
+    }
+
+    fn request_body_with(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        extra: Option<&serde_json::Map<String, Value>>,
+    ) -> Value {
         let mut body = json!({"model": self.model, "messages": messages, "stream": true});
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.iter().map(ToolSpec::to_openai).collect());
             body["tool_choice"] = json!("auto");
         }
+        if let (Some(extra), Some(map)) = (extra, body.as_object_mut()) {
+            for (key, value) in extra {
+                map.insert(key.clone(), value.clone());
+            }
+        }
         body
+    }
+
+    async fn send_once(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let send = with_llm_compat(
+            self.client.post(endpoint).json(body),
+            endpoint,
+            &self.api_key,
+        )
+        .send();
+        tokio::time::timeout(LLM_IDLE_TIMEOUT, send)
+            .await
+            .map_err(|_| ProviderError::new("大模型请求超时（30 秒无响应）"))?
+            .map_err(|error| describe_send_error("大模型", &error))
     }
 
     async fn run(
@@ -635,15 +759,23 @@ impl OpenAiLlm {
         const LABEL: &str = "大模型";
         let deadline = Instant::now() + LLM_TOTAL_TIMEOUT;
         let endpoint = format!("{}/chat/completions", self.base_url);
-        let request = self
-            .client
-            .post(&endpoint)
-            .json(&self.request_body(messages, tools));
-        let send = with_llm_compat(request, &endpoint, &self.api_key).send();
-        let response = tokio::time::timeout(LLM_IDLE_TIMEOUT, send)
-            .await
-            .map_err(|_| ProviderError::new("大模型请求超时（30 秒无响应）"))?
-            .map_err(|error| describe_send_error(LABEL, &error))?;
+        let extra = self.extra_params();
+        let mut response = self
+            .send_once(
+                &endpoint,
+                &self.request_body_with(messages, tools, extra.as_ref()),
+            )
+            .await?;
+        if extra.is_some() && matches!(response.status().as_u16(), 400 | 422) {
+            // 服务不认“关闭思考”参数：去掉后重试一次；重试成功才记为不支持，免得把别的 400 误记
+            let retry = self
+                .send_once(&endpoint, &self.request_body_with(messages, tools, None))
+                .await?;
+            if retry.status().is_success() {
+                mark_thinking_off_unsupported(&self.base_url, &self.model);
+            }
+            response = retry;
+        }
         let mut response = check_status(LABEL, response).await?;
         let mut decoder = SseDecoder::default();
         let mut accumulator = StreamAccumulator::default();

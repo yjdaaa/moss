@@ -1,0 +1,467 @@
+{
+  "tools": [
+    {
+      "name": "check_laser_connection_tool",
+      "description": "只读检查激光机连没连上、现在在干什么（空闲、运行、报警）。不让机器动、不出光。用户问“机器开了没”“连上没有”“现在什么状态”时用。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_detail": {
+            "type": "boolean",
+            "default": false,
+            "description": "排查故障时才设 true，会返回固件与配置详情"
+          },
+          "port": {
+            "type": "string",
+            "description": "串口号，如 COM3 或 /dev/ttyUSB0。用户没说就不填，用 MOSS 的默认连接"
+          },
+          "host": {
+            "type": "string",
+            "description": "网络连接的机器的 IP。用户没说就不填，用 MOSS 的默认连接"
+          }
+        }
+      }
+    },
+    {
+      "name": "laser_safe_action_tool",
+      "description": "机器的即时控制。用户说“停”“急停”时立即调用 emergency_stop 并带 confirmed=true，不要先问用户。查状态、边刻边调快慢和功率不用带 confirmed。解锁、回零、设原点、关激光、移动激光头会让机器动：先说清要做什么，用户明确说确认后再带 confirmed=true。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "emergency_stop",
+              "soft_reset",
+              "feed_plus_10",
+              "feed_minus_10",
+              "feed_plus_1",
+              "feed_minus_1",
+              "feed_reset",
+              "power_plus_10",
+              "power_minus_10",
+              "power_plus_1",
+              "power_minus_1",
+              "power_reset",
+              "unlock",
+              "home",
+              "set_origin",
+              "laser_off",
+              "absolute_move",
+              "relative_move"
+            ],
+            "description": "status 查状态；emergency_stop 急停；soft_reset 软复位；feed_*/power_* 加工中把速度或功率调高、调低 10% 或 1%，*_reset 恢复 100%；unlock 解除报警锁定；home 回零；set_origin 把当前位置设为原点；laser_off 关激光；absolute_move / relative_move 移动激光头（不出光）"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "default": false,
+            "description": "emergency_stop、soft_reset 一律设 true（不用问用户）；unlock、home、set_origin、laser_off、移动要用户明确确认后才设 true；status 和调速调功率不用设"
+          },
+          "x": {
+            "type": "number",
+            "description": "移动目标 X（mm）：absolute_move 是绝对坐标，relative_move 是相对当前位置"
+          },
+          "y": {
+            "type": "number",
+            "description": "移动目标 Y（mm）"
+          },
+          "z": {
+            "type": "number",
+            "description": "移动目标 Z（mm），一般不用"
+          },
+          "feed_rate": {
+            "type": "number",
+            "description": "移动速度 mm/min，不填用默认"
+          },
+          "port": {
+            "type": "string",
+            "description": "串口号。用户没说就不填，用 MOSS 的默认连接"
+          },
+          "host": {
+            "type": "string",
+            "description": "网络连接的机器的 IP。用户没说就不填"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "laser_workflow_tool",
+      "description": "刻字任务从预览到加工的全过程（只支持文字，图片请用户在电脑上传）。preview：按文字、材料、厚度生成刀路预览并弹到电脑屏幕，不让机器动；功率、速度、遍数默认按材料库推荐；用户明确说了就放进 manual_params，预览里会如实显示。confirm_send：用户核对预览后明确说确认，再带 preview 返回的 workflow_id 和 confirmed=true 开始加工。status 查进度（不带 workflow_id 看最近的任务）；recent 列最近任务；cancel 取消正在发送的任务；resume 从中断的地方继续刻（同样要用户确认）。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "confirm_send",
+              "status",
+              "recent",
+              "cancel",
+              "resume"
+            ],
+            "default": "status",
+            "description": "要做的事，见工具说明"
+          },
+          "text": {
+            "type": "string",
+            "description": "preview：要刻的文字，多行用换行分开"
+          },
+          "material": {
+            "type": "string",
+            "description": "preview：材料，如 椴木、亚克力、牛皮纸"
+          },
+          "thickness_mm": {
+            "type": "number",
+            "description": "preview：材料厚度 mm"
+          },
+          "width_mm": {
+            "type": "number",
+            "description": "preview：木牌宽度 mm；不给字号时自动取能放下的最大字号并居中"
+          },
+          "height_mm": {
+            "type": "number",
+            "description": "preview：木牌高度 mm，可只给宽或高"
+          },
+          "font_size_mm": {
+            "type": "number",
+            "description": "preview：字高 mm；不填就按木牌大小自动决定"
+          },
+          "safe_margin_mm": {
+            "type": "number",
+            "default": 2,
+            "description": "preview：文字离木牌边缘至少留多少 mm"
+          },
+          "text_fill": {
+            "type": "string",
+            "enum": [
+              "outline",
+              "fill",
+              "hatch"
+            ],
+            "default": "outline",
+            "description": "preview：outline 只描轮廓（默认）；fill 扫描填满（小字、中文更清楚）；hatch 平行线填满并描边（大字更快）"
+          },
+          "text_align": {
+            "type": "string",
+            "enum": [
+              "left",
+              "center",
+              "right"
+            ],
+            "default": "center",
+            "description": "preview：多行文字的对齐方式"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "center",
+              "lower_left"
+            ],
+            "default": "center",
+            "description": "preview：开刻前激光头对准木牌中心（默认）还是左下角"
+          },
+          "manual_params": {
+            "type": "object",
+            "description": "preview：用户明确说了这次的功率、速度或遍数时才填，只影响这一次，不改材料库；没说的项不填，用材料库推荐",
+            "properties": {
+              "power_percent": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 100,
+                "description": "功率百分比 1~100，如用户说“60% 功率”填 60"
+              },
+              "feed_rate": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 6000,
+                "description": "速度 mm/min，100~6000"
+              },
+              "passes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5,
+                "description": "刻几遍，1~5"
+              }
+            }
+          },
+          "workflow_id": {
+            "type": "string",
+            "description": "confirm_send / status / cancel / resume：preview 返回的任务编号"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "default": false,
+            "description": "confirm_send / resume：只有用户核对后明确说确认才设 true"
+          },
+          "port": {
+            "type": "string",
+            "description": "confirm_send / resume：串口号。用户没说就不填，用 MOSS 的默认连接；默认连接没设置时会报错，再问用户"
+          },
+          "network_host": {
+            "type": "string",
+            "description": "confirm_send / resume：网络连接的机器的 IP。用户没说就不填"
+          }
+        }
+      }
+    },
+    {
+      "name": "material_params_tool",
+      "description": "材料参数库：get 查某种材料、厚度该用多大功率、多快速度、刻几遍；list 列出全部材料。刻字预览会自动用这里的参数。save 保存参数、delete 删除会改动材料库：内置语音和严格模式下不开放，请用户到电脑的材料页面操作。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "get",
+              "list",
+              "save",
+              "delete"
+            ],
+            "default": "list",
+            "description": "get 查推荐参数；list 列全部；save / delete 改材料库（见说明）"
+          },
+          "material": {
+            "type": "string",
+            "description": "材料，如 椴木、亚克力"
+          },
+          "thickness_mm": {
+            "type": "number",
+            "description": "厚度 mm"
+          },
+          "laser_mode": {
+            "type": "string",
+            "enum": [
+              "engrave",
+              "cut"
+            ],
+            "default": "engrave",
+            "description": "engrave 雕刻（默认），cut 切割"
+          },
+          "engraving_mode": {
+            "type": "string",
+            "enum": [
+              "raster",
+              "outline"
+            ],
+            "default": "raster",
+            "description": "雕刻方式：raster 扫描填充（默认），outline 描边"
+          },
+          "laser_max_power": {
+            "type": "integer",
+            "description": "save：最大功率 S 值，0~1000，1000 为满功率"
+          },
+          "feed_rate": {
+            "type": "integer",
+            "description": "save：速度 mm/min"
+          },
+          "passes": {
+            "type": "integer",
+            "description": "save：刻几遍"
+          },
+          "notes": {
+            "type": "string",
+            "description": "save：备注"
+          }
+        }
+      }
+    },
+    {
+      "name": "refine_laser_params_from_feedback_tool",
+      "description": "刻完后用户说“太焦了”“太浅”“切不透”“有毛边”时，根据这次任务给出调整建议并保存。只给建议、不改参数、不让机器动。用户同意采用后再用 regenerate_text_laser_task_tool。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "刚才那次任务的 workflow_id"
+          },
+          "feedback_text": {
+            "type": "string",
+            "description": "用户对效果的原话，如“边缘有点焦”"
+          },
+          "laser_max_power": {
+            "type": "integer",
+            "description": "只有旧任务没记下参数时才填：当时的最大功率 S 值"
+          },
+          "feed_rate": {
+            "type": "integer",
+            "description": "只有旧任务没记下参数时才填：当时的速度 mm/min"
+          },
+          "passes": {
+            "type": "integer",
+            "description": "只有旧任务没记下参数时才填：当时刻了几遍"
+          }
+        },
+        "required": [
+          "task_id",
+          "feedback_text"
+        ]
+      }
+    },
+    {
+      "name": "regenerate_text_laser_task_tool",
+      "description": "按调整建议或改过的文字、材料重新生成刻字预览，不让机器动。采用建议：带 task_id、feedback_id（refine_laser_params_from_feedback_tool 返回的）和 confirmed=true，用户要先同意采用；只改文字、材料或这次的功率速度：带 task_id 和要改的字段。新预览发送前仍要用户确认。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "原任务的 workflow_id"
+          },
+          "feedback_id": {
+            "type": "string",
+            "description": "要采用的调整建议编号"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "default": false,
+            "description": "采用建议时，用户同意后设 true"
+          },
+          "text": {
+            "type": "string",
+            "description": "改成的文字（不改就不填）"
+          },
+          "material": {
+            "type": "string",
+            "description": "改成的材料（不改就不填）"
+          },
+          "thickness_mm": {
+            "type": "number",
+            "description": "改成的厚度 mm（不改就不填）"
+          },
+          "font_size_mm": {
+            "type": "number",
+            "description": "改成的字高 mm（不改就不填）"
+          },
+          "manual_params": {
+            "type": "object",
+            "description": "改成这次的功率 / 速度 / 遍数（不改就不填）",
+            "properties": {
+              "power_percent": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 100,
+                "description": "功率百分比 1~100，如用户说“60% 功率”填 60"
+              },
+              "feed_rate": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 6000,
+                "description": "速度 mm/min，100~6000"
+              },
+              "passes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5,
+                "description": "刻几遍，1~5"
+              }
+            }
+          }
+        },
+        "required": [
+          "task_id"
+        ]
+      }
+    },
+    {
+      "name": "run_calibration_grid_tool",
+      "description": "不知道某种材料用多少功率和速度时，刻一块测试矩阵（不同功率×速度的小方格）。第一次只生成矩阵、不动机器，返回 calibration_id；用户确认放好材料后，再带 calibration_id 和 confirmed=true 开始刻。刻完让用户看哪一格最好，再用 select_calibration_cell_tool。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "material": {
+            "type": "string",
+            "description": "材料"
+          },
+          "thickness_mm": {
+            "type": "number",
+            "description": "厚度 mm"
+          },
+          "laser_mode": {
+            "type": "string",
+            "enum": [
+              "engrave",
+              "cut"
+            ],
+            "default": "engrave",
+            "description": "engrave 雕刻（默认），cut 切割"
+          },
+          "power_min": {
+            "type": "integer",
+            "description": "最小功率 S 值（0~1000），不填自动定"
+          },
+          "power_max": {
+            "type": "integer",
+            "description": "最大功率 S 值，不填自动定"
+          },
+          "speed_min": {
+            "type": "integer",
+            "description": "最慢速度 mm/min，不填自动定"
+          },
+          "speed_max": {
+            "type": "integer",
+            "description": "最快速度 mm/min，不填自动定"
+          },
+          "rows": {
+            "type": "integer",
+            "default": 5,
+            "description": "行数"
+          },
+          "columns": {
+            "type": "integer",
+            "default": 5,
+            "description": "列数"
+          },
+          "calibration_id": {
+            "type": "string",
+            "description": "开始刻已生成的矩阵时填"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "default": false,
+            "description": "开始刻时，用户确认放好材料后设 true"
+          },
+          "port": {
+            "type": "string",
+            "description": "开始刻时：串口号。用户没说就不填"
+          },
+          "network_host": {
+            "type": "string",
+            "description": "开始刻时：网络连接的机器的 IP。用户没说就不填"
+          }
+        }
+      }
+    },
+    {
+      "name": "select_calibration_cell_tool",
+      "description": "用户看完测试矩阵说“第几格最好”后，把那一格的功率和速度存进材料库，以后刻这种材料自动用它。格子按从左到右、从上到下数。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calibration_id": {
+            "type": "string",
+            "description": "测试矩阵的编号"
+          },
+          "cell_number": {
+            "type": "integer",
+            "description": "第几格，从 1 开始"
+          },
+          "notes": {
+            "type": "string",
+            "description": "备注，如用户对效果的描述"
+          }
+        },
+        "required": [
+          "calibration_id",
+          "cell_number"
+        ]
+      }
+    }
+  ]
+}

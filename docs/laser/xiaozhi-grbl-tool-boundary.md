@@ -6,6 +6,8 @@
 
 ## 边界原则
 
+- 默认给 AI 的是精简清单（2026-11-08 起，`tests/golden/mcp_tools_compact.json`）：检查连接、安全动作、刻字全流程、材料参数库、调参建议、重新生成、测试矩阵、保存最佳格子 8 个激光工具；重复入口与底层 GRBL 收发只在语音中心“完整工具（高级）”打开时列出。执行与门禁不变。
+
 - `self.grbl.*` 名称属于小智设备固件侧能力，可能直接控制设备本地 UART；不要把它们和本仓库的 MCP 工具混用。
 - 完整任务只有一条路径：`laser_workflow_tool` 先 `preview` 冻结文件 SHA-256 与加工参数，再 `confirm_send` 且 `confirmed=true`。发送前后端会重算 SHA、握手、读 `$30`、确认 Idle 与引脚状态。
 - `laser_safe_action_tool` 把自然动作映射到受控命令：`status` 与进给/功率倍率不需确认，`unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset` 必须 `confirmed=true`。移动动作固定先 `M5` 关光。

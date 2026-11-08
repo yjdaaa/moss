@@ -61,21 +61,70 @@ pub(super) fn generation_params(
     power: f64,
     feed: f64,
 ) -> Result<Params, String> {
-    match object.get("feedback_params") {
+    let mut params = match object.get("feedback_params") {
         Some(value) => {
             let params = Params::parse(value)?;
             if params.scale != 1000.0 || params.power.fract() != 0.0 || params.feed.fract() != 0.0 {
                 return Err("生成预览使用 1000 功率标尺，功率和速度必须为整数".into());
             }
-            Ok(params)
+            params
         }
-        None => Ok(Params {
+        None => Params {
             power,
             feed,
             passes: 1,
             scale: 1000.0,
-        }),
+        },
+    };
+    if let Some(manual) = object.get("manual_params").filter(|v| !v.is_null()) {
+        apply_manual_params(&mut params, manual)?;
     }
+    Ok(params)
+}
+
+/// n73（2026-11-08 用户决定）：这一次临时指定的功率 / 速度 / 遍数，覆盖材料库推荐或已采用的调参建议；
+/// 只影响这次生成的刀路（预览里显示，确认后才发送），不改材料库。范围与反馈调参相同。
+fn apply_manual_params(params: &mut Params, value: &Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or("manual_params 必须是对象：{power_percent, feed_rate, passes}")?;
+    if let Some(key) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "power_percent" | "feed_rate" | "passes"))
+    {
+        return Err(format!(
+            "manual_params 不支持 {key}，只能是 power_percent、feed_rate、passes"
+        ));
+    }
+    let number = |key: &str| -> Result<Option<f64>, String> {
+        match object.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_f64()
+                .filter(|n| n.is_finite())
+                .map(Some)
+                .ok_or_else(|| format!("{key} 必须是数字")),
+        }
+    };
+    if let Some(percent) = number("power_percent")? {
+        if !(1.0..=100.0).contains(&percent) {
+            return Err("功率百分比须在 1 ~ 100 之间".into());
+        }
+        params.power = (percent * params.scale / 100.0).round().max(1.0);
+    }
+    if let Some(feed) = number("feed_rate")? {
+        if !(100.0..=6000.0).contains(&feed) || feed.fract() != 0.0 {
+            return Err("速度须为 100 ~ 6000 mm/min 的整数".into());
+        }
+        params.feed = feed;
+    }
+    if let Some(passes) = number("passes")? {
+        if !(1.0..=5.0).contains(&passes) || passes.fract() != 0.0 {
+            return Err("遍数须为 1 ~ 5 的整数".into());
+        }
+        params.passes = passes as u32;
+    }
+    Ok(())
 }
 
 /// Only for our absolute-coordinate generated programs, never for uploaded G-code.
@@ -740,6 +789,49 @@ pub(super) fn add_draw_view(workflow: &mut Value) {
 
 #[cfg(test)]
 mod tests {
+
+    /// n73：这次临时指定的功率 / 速度 / 遍数覆盖推荐值；只给一部分时其余照旧；越界与未知字段拒绝。
+    #[test]
+    fn manual_params_override_recommendation_within_bounds() {
+        let object = |manual: Value| {
+            let mut map = Map::new();
+            map.insert("manual_params".into(), manual);
+            map
+        };
+        let base = generation_params(&Map::new(), 600.0, 1200.0).unwrap();
+        assert_eq!((base.power, base.feed, base.passes), (600.0, 1200.0, 1));
+        let all = generation_params(
+            &object(json!({"power_percent": 60, "feed_rate": 1500, "passes": 2})),
+            600.0,
+            1200.0,
+        )
+        .unwrap();
+        assert_eq!((all.power, all.feed, all.passes), (600.0, 1500.0, 2));
+        let only_power =
+            generation_params(&object(json!({"power_percent": 35})), 600.0, 1200.0).unwrap();
+        assert_eq!(
+            (only_power.power, only_power.feed, only_power.passes),
+            (350.0, 1200.0, 1)
+        );
+        assert!(generation_params(&object(json!({"power_percent": null})), 600.0, 1200.0).is_ok());
+        for bad in [
+            json!({"power_percent": 0}),
+            json!({"power_percent": 120}),
+            json!({"feed_rate": 50}),
+            json!({"feed_rate": 9000}),
+            json!({"feed_rate": 1200.5}),
+            json!({"passes": 6}),
+            json!({"passes": 1.5}),
+            json!({"laser_max_power": 900}),
+            json!("60%"),
+        ] {
+            assert!(
+                generation_params(&object(bad.clone()), 600.0, 1200.0).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
     use super::*;
 
     fn params() -> Params {

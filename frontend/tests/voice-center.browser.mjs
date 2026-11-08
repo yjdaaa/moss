@@ -71,7 +71,7 @@ try {
     server_config: { exists: true, full_module: false }, endpoint: { health: null }, device: { state: state.mode === "self_hosted" ? "waiting" : "unknown" },
     bridge: { connected: true }, strict: { enabled: state.mode === "self_hosted", locked: state.mode === "self_hosted", from_env: false }, gateway: { enabled: false },
     models: {}, mcp_endpoint: masked,
-    mcp: { endpoints: [{ id: "primary", endpoint: masked, connected: true }], tools: [{ name: "get_status", description: "状态", enabled: true }], max_extra_endpoints: 4 },
+    mcp: { endpoints: [{ id: "primary", endpoint: masked, connected: true }], tools: [{ name: "get_status", description: "状态", enabled: true }, { name: "laser_workflow_tool", description: "workflow", enabled: true, in_compact: true }, { name: "laser_grbl_tool", description: "grbl", enabled: true, in_compact: false }], full_tool_list: false, max_extra_endpoints: 4 },
     ...extra,
   });
   const handlers = {
@@ -326,6 +326,12 @@ try {
   await tab("扩展").click();
   assert.ok(await page.locator("#voice-panel-features #voice-group-tools").isVisible(), "官方链路在扩展标签渲染工具开关与调用统计");
   await openGroup("tools");
+  // n72：中文名、按用途分组；不在精简清单的工具标明“完整工具打开后才给 AI”；完整工具开关只提交这一项
+  await page.locator('#voice-tools-group-job [data-tool="laser_workflow_tool"]').getByText("刻字：预览、发送、进度").waitFor();
+  await page.locator('#voice-tools-group-advanced [data-tool="laser_grbl_tool"]').getByText("完整工具打开后才给 AI").waitFor();
+  await page.locator("#voice-tools-full-switch input").click();
+  for (let i = 0; i < 50 && last("voice_save_settings")?.args.settings.mcp_full_tool_list !== true; i += 1) await page.waitForTimeout(50);
+  assert.deepEqual(last("voice_save_settings").args.settings, { mcp_full_tool_list: true });
   assert.equal(await page.locator("#voice-tool-prompt-copy-add").count(), 1);
   assert.equal(await page.locator("#voice-tool-prompt-copy-remove").count(), 1);
   await page.locator("#voice-tool-prompts > summary").click();
@@ -542,22 +548,35 @@ try {
   await openGroup("experience");
   assert.equal(await page.locator("#voice-screen-card-style").count(), 0, "n69：对话体验里不再有画风下拉（只在设备 › 副屏预览切换）");
   assert.equal(await page.locator("#voice-jev-filter-enabled").count(), 0, "n69：对话体验里不再有 Jev 开关勾选框");
-  assert.match(await page.locator("#voice-jev-filter-state").innerText(), /未开启/, "对话体验只读显示 Jev 开关状态（上面刚在顶部关掉）");
+  // n73：常用项直接显示，识别准确度与高级项默认收起；只读的画风 / Jev 状态行已删除
+  assert.equal(await page.locator("#voice-screen-card-style-state").count(), 0, "n73：画风只在设备 › 副屏预览显示");
+  assert.equal(await page.locator("#voice-jev-filter-state").count(), 0, "n73：Jev 状态只在顶部链路栏显示");
+  assert.equal(await page.locator("#voice-experience-accuracy").getAttribute("open"), null, "识别准确度默认收起");
+  assert.equal(await page.locator("#voice-experience-advanced").getAttribute("open"), null, "高级默认收起");
+  assert.equal(await page.locator("#voice-llm-fast-reply").isChecked(), true, "快速回答默认开");
+  assert.equal(await page.locator("#voice-barge-in-ms").count(), 0, "插话关闭时不显示插话时长");
+  await page.locator("#voice-experience-advanced > summary").click();
+  await page.locator("#voice-jev-off-note").waitFor();
   assert.equal(await page.locator("#voice-jev-suboptions").count(), 0, "Jev 未开启时不显示细项");
+  await page.locator("#voice-experience-accuracy > summary").click();
+  await page.locator("#voice-hotwords").waitFor();
+  assert.equal(await page.locator("#voice-asr-beam").count(), 0, "没用本地 X-ASR 时不显示 X-ASR 热词识别");
+  await page.locator("#voice-llm-fast-reply").uncheck();
   await page.getByLabel("本地合成语速（0.5 ~ 2.0）").fill("1.5");
   await page.locator("#voice-barge-in").check();
   await page.locator("#voice-experience-save").click();
   await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存对话体验设置" }).waitFor();
   const localPayload = last("voice_local_save").args.settings;
   assert.equal(localPayload.barge_in, true);
+  assert.equal(localPayload.llm_fast_reply, false, "快速回答开关随对话体验一起保存");
+  await page.locator("#voice-barge-in-ms").waitFor();
   assert.equal("tts_speed" in localPayload, false, "局部补丁不携带本地模型分组字段");
   assert.equal(state.builtin.local.settings.tts_speed ?? 1, 1, "本地模型的未保存改动没有被一起提交");
   assert.ok(await page.locator("#voice-group-local-models .voice-dirty").isVisible(), "本地模型仍显示未保存");
   // 6b. 顶部切换开启 Jev 后再修改并保存语音体验其他字段，绝不把 Jev 开关覆盖回旧值 false
   await page.locator("#voice-builtin-mix-select-jev").selectOption("jev:typesafe/jev-1.14");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "已切换为 Jev 决策（typesafe/jev-1.14）" }).waitFor();
-  await page.locator("#voice-jev-filter-state").filter({ hasText: "已开启（typesafe/jev-1.14）" }).waitFor();
-  await page.locator("#voice-jev-suboptions").waitFor();
+  await page.locator("#voice-jev-suboptions").filter({ hasText: "Jev 已开启" }).waitFor();
   await page.locator("#voice-barge-in-ms").fill("460");
   await page.locator("#voice-experience-save").click();
   await page.locator("#voice-group-experience [role=status]").filter({ hasText: "已保存对话体验设置" }).waitFor();
@@ -746,12 +765,11 @@ try {
   await ctrlBox.getByRole("button", { name: /投送.*预览/ }).click();
   await ctrlBox.getByText(/已将.*预览.*推送到小智/).waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_preview" });
-  // 对话体验里的画风只读行“去副屏预览”跳到设备标签并展开副屏预览组
-  await tab("模型").click();
-  assert.match(await page.locator("#voice-screen-card-style-state").innerText(), /硬核太空舱/);
-  await page.locator("#voice-screen-card-style-goto").click();
+  // 画风在设备 › 副屏预览里选（n73 起对话体验不再有只读画风行）
+  await tab("设备").click();
   await page.locator("#voice-page-tab-devices[aria-selected=true]").waitFor();
-  assert.equal(await page.locator("#voice-group-screen-preview > .voice-group-h").getAttribute("aria-expanded"), "true", "跳转后副屏预览组已展开");
+  await openGroup("screen-preview");
+  assert.equal(await page.locator("#voice-group-screen-preview > .voice-group-h").getAttribute("aria-expanded"), "true", "副屏预览组已展开");
   const botCard = page.locator("#voice-goggle-bot-card");
   await botCard.waitFor();
   assert.equal(await botCard.locator(".voice-bot-gif-img").count(), 12, "展示 12 个全屏场景的缩小动图");
