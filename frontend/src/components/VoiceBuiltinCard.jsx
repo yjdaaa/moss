@@ -18,6 +18,9 @@ import {
   JEV_PRESET_MODELS,
   LOCAL_MODEL_KEYS,
   MIX_SECTIONS,
+  pipelineTestOutcome,
+  pipelineTestPlan,
+  pipelineTestSummary,
   SECTIONS,
   VOICE_POLL_MS,
   allowDeviceConfirmText,
@@ -671,7 +674,10 @@ export function BuiltinDevicesPanel({ builtin }) {
   );
 }
 
-/** 副屏预览：小智彩屏画风（点选即存，在线设备不用重连）与 5 个场景试看推送。n69 起是 `screen_card_style` 唯一的编辑处。 */
+/**
+ * 副屏预览：小智彩屏画风（点选即存，在线设备不用重连）与 12 个全屏场景试看。n69 起是 `screen_card_style` 唯一的编辑处。
+ * n70（2026-11-08）：刷了全屏画风包的小智按场景铺满整屏、一直显示；没刷的只能中央半屏试看 5 秒。
+ */
 export function BuiltinScreenPreview({ builtin }) {
   const { status, busy, act } = builtin;
   const [asking, setAsking] = useState("");
@@ -699,6 +705,7 @@ export function BuiltinScreenPreview({ builtin }) {
     return Boolean(sess && sess.screen_monochrome !== true);
   }) || null;
   const styleLabel = SCREEN_CARD_STYLE_OPTIONS.find((item) => item.id === currentCardStyle)?.shortLabel || currentCardStyle;
+  const onlinePackReady = Boolean(onlineColorDevice) && sessions.some((s) => s.device_id === onlineColorDevice.device_id && s.screen_pack === true);
 
   const switchCardStyle = async (nextStyle) => {
     if (nextStyle === currentCardStyle) return;
@@ -714,13 +721,13 @@ export function BuiltinScreenPreview({ builtin }) {
             pose: lastPushedPose,
             style: nextStyle,
           });
-          setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风，并同步刷新在线小智屏幕预览`);
+          setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风，并同步刷新在线小智屏幕${onlinePackReady ? "（待命画面跟随刷包时的画风，想一起换就在“唤醒词”里重新推送一次）" : ""}`);
           return;
         } catch {
           // 若设备刚好断开，不影响画风保存提示
         }
       }
-      setBotNotice(`已换成「${opt?.shortLabel || nextStyle}」画风，在线小智不用重连，马上生效`);
+      setBotNotice(`已换成「${opt?.shortLabel || nextStyle}」画风，在线小智不用重连，马上生效${onlinePackReady ? "（待命画面跟随刷包时的画风，想一起换就在“唤醒词”里重新推送一次）" : ""}`);
     } else {
       setOptimisticStyle("");
     }
@@ -737,7 +744,9 @@ export function BuiltinScreenPreview({ builtin }) {
         style: currentCardStyle,
       });
       setLastPushedPose(pose.id);
-      setBotNotice(`已将「${sceneTitle}」1:1 投送到 ${builtinDeviceView(onlineColorDevice).title}`);
+      setBotNotice(onlinePackReady
+        ? `${builtinDeviceView(onlineColorDevice).title} 已切到「${sceneTitle}」全屏画面`
+        : `已将「${sceneTitle}」投到 ${builtinDeviceView(onlineColorDevice).title} 屏幕中央试看（没刷全屏画风，5 秒后回到官方画面）`);
     } catch (error) {
       await showAlert(voiceErrorText(error), { title: "投送屏幕预览失败", tone: "error" });
     } finally {
@@ -749,7 +758,7 @@ export function BuiltinScreenPreview({ builtin }) {
     <VoiceGroup
       id="screen-preview"
       title="副屏预览（小智彩屏画风）"
-      summary={`当前画风：${styleLabel} · 5 个场景${onlineColorDevice ? " · 可推到小智试看" : ""}`}
+      summary={`当前画风：${styleLabel} · 12 个全屏场景${onlineColorDevice ? (onlinePackReady ? " · 小智已刷全屏画风" : " · 可推到小智试看") : ""}`}
     >
       <div
         className={`voice-bot-showcase ${currentCardStyle === "goggle_bot" ? "voice-bot-showcase--bot" : "voice-bot-showcase--moss"}`}
@@ -763,7 +772,7 @@ export function BuiltinScreenPreview({ builtin }) {
             </span>
             <span>
               <b>小智副屏预览</b>
-              <small>5 个动态场景 · 这里按比例缩小预览，小智实机仍按 320×240 全屏显示</small>
+              <small>12 个全屏场景 · 这里缩小一半预览；刷进小智后铺满整屏、一直显示，固件的状态字和字幕叠在画面上</small>
             </span>
           </div>
           <div className="voice-bot-style-switch" role="radiogroup" aria-label="小智彩屏卡片画风">
@@ -793,6 +802,20 @@ export function BuiltinScreenPreview({ builtin }) {
           <div className="voice-bot-offline-tip" id="voice-bot-offline-tip">
             <Sparkles size={13} aria-hidden="true" />
             连上并允许一台彩屏小智（如立创·实战派 320×240）后，点画面右上角的小飞机就能推过去试看
+          </div>
+        )}
+        {onlineColorDevice && (
+          <div className={`voice-bot-pack-tip${onlinePackReady ? " is-ready" : ""}`} id="voice-bot-pack-tip">
+            <Sparkles size={13} aria-hidden="true" />
+            {onlinePackReady ? (
+              <span>{builtinDeviceView(onlineColorDevice).title} 已刷全屏画风：对话、雕刻、审批、听歌都铺满整屏一直显示；点小飞机直接切到那个画面。</span>
+            ) : (
+              <span>
+                {builtinDeviceView(onlineColorDevice).title} 还没刷全屏画风，现在只能在屏幕中央半屏试看 5 秒。
+                想铺满整屏一直显示：在“唤醒词”推送时勾选“同时刷入全屏画风”（写一次资源分区并重启，不刷主程序）。
+                <button type="button" className="voice-link-btn" id="voice-bot-pack-goto" onClick={() => gotoVoiceGroup("devices", "wake-word", "voice-wakeword-screen-pack")}>去推送</button>
+              </span>
+            )}
           </div>
         )}
         <div className="voice-bot-gif-grid" id="voice-goggle-bot-gallery">
@@ -841,11 +864,13 @@ export function BuiltinScreenPreview({ builtin }) {
         <details className="voice-bot-showcase-more">
           <summary>这些画面什么时候出现？</summary>
           <ul>
-            <li>等电脑点批准时：警戒卡，底部带倒计时条</li>
-            <li>雕完或急停时：5 秒庆祝 / 断点徽章，固件自动淡出</li>
-            <li>放本地音乐时：像素唱机 / 戴耳机的小机器人</li>
-            <li>激光刀路预览和加工进度屏也会跟着换画风</li>
-            <li>全部在内存里画，不写小智的 Flash</li>
+            <li>待命：固件自己显示，跟随刷包时选的画风</li>
+            <li>对话：聆听 → 思考 → 说话；回复里带表情时换成开心 / 难过 / 惊讶</li>
+            <li>开始雕刻后：雕刻画面，中央叠这次的刀路和进度，字幕写百分比与剩余时间；生成预览时不推</li>
+            <li>等电脑点批准：警戒画面，倒计时写在字幕里</li>
+            <li>雕完或急停：完工 / 急停画面停约 10 秒后回到聆听</li>
+            <li>放本地音乐：唱机 / 听歌小机器人，停播为止</li>
+            <li>没刷全屏画风的小智：雕刻进度、审批、完工等仍在屏幕中央半屏显示，几秒后回到官方画面</li>
           </ul>
         </details>
         {botNotice && <div className="voice-ok" id="voice-bot-showcase-notice">{botNotice}</div>}
@@ -1845,11 +1870,49 @@ export function BuiltinModelGroups({ builtin }) {
   const { status, setStatus, busy } = builtin;
   const [mixBusy, setMixBusy] = useState("");
   const [mixNote, setMixNote] = useState(null);
+  // 测试全部环节：{ running, results: {key: {ok, skipped, running, detail}}, summary }
+  const [pipeline, setPipeline] = useState(null);
   if (!status || status.error) return <p className="voice-muted">{status?.error || "正在读取内置服务状态…"}</p>;
   const views = MIX_SECTIONS.map((item) => ({ ...item, view: builtinSectionSourceView(item.key, status) }));
   const focusConfigGroup = focusVoiceGroup;
 
+  const runPipelineTest = async () => {
+    const plan = pipelineTestPlan(status);
+    const results = Object.fromEntries(
+      plan.map((step) => [
+        step.key,
+        step.kind === "static" ? { ok: step.ok, skipped: Boolean(step.skipped), detail: step.detail } : { running: true, detail: "测试中…" },
+      ]),
+    );
+    setMixNote(null);
+    setPipeline({ running: true, results: { ...results }, summary: null });
+    builtin.setBusy("pipeline-test");
+    try {
+      // 各环节互不依赖，同时测；每个返回后立即显示，不等最慢的那个
+      await Promise.all(
+        plan
+          .filter((step) => step.kind !== "static")
+          .map(async (step) => {
+            let result = null;
+            let failure = null;
+            try {
+              result = await voiceApi.builtinModelsTest(step.kind === "jev" ? "jev" : step.section, step.input);
+            } catch (error) {
+              failure = error;
+            }
+            results[step.key] = pipelineTestOutcome(result, failure, voiceErrorText);
+            setPipeline((prev) => (prev ? { ...prev, results: { ...prev.results, [step.key]: results[step.key] } } : prev));
+          }),
+      );
+      setPipeline({ running: false, results, summary: pipelineTestSummary(results) });
+    } finally {
+      builtin.setBusy("");
+    }
+  };
+
   const handleSelectSource = async (section, label, nextValue) => {
+    // 换了模型，上一次的测试结果不再代表当前链路
+    setPipeline(null);
     if (section === "llm") {
       focusConfigGroup("builtin-model-llm", "voice-group-builtin-model-llm");
       return;
@@ -1943,7 +2006,20 @@ export function BuiltinModelGroups({ builtin }) {
   return (
     <>
       <div className="voice-mix-bar" id="voice-builtin-mix-bar">
-        <div className="voice-mix-grid">
+        <div className="voice-mix-head">
+          <b>当前语音链路</b>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            id="voice-builtin-test-all"
+            onClick={runPipelineTest}
+            disabled={Boolean(busy || mixBusy || pipeline?.running)}
+            title="按当前选用的模型逐个测试每个环节：云端模型真实请求一次，本地模型检查是否就绪"
+          >
+            <FlaskConical size={13} /> {pipeline?.running ? "测试中…" : "测试全部环节"}
+          </button>
+        </div>
+        <div className={`voice-mix-grid${pipeline ? " voice-mix-grid--tested" : ""}`}>
           {views.map(({ key, label, hint, view }) => (
             <label className="voice-mix-field" key={key} id={`voice-builtin-mix-${key}`} title={hint || ""}>
               <span className="voice-mix-field-head">
@@ -1972,9 +2048,23 @@ export function BuiltinModelGroups({ builtin }) {
                   </option>
                 ))}
               </select>
+              {pipeline?.results?.[key] && (
+                <span
+                  className={`voice-mix-test voice-mix-test--${pipeline.results[key].running ? "running" : pipeline.results[key].skipped ? "skip" : pipeline.results[key].ok ? "ok" : "fail"}`}
+                  id={`voice-builtin-test-${key}`}
+                  role={pipeline.results[key].ok === false ? "alert" : undefined}
+                >
+                  {pipeline.results[key].running ? "测试中…" : `${pipeline.results[key].skipped ? "—" : pipeline.results[key].ok ? "✓" : "✗"} ${pipeline.results[key].detail}`}
+                </span>
+              )}
             </label>
           ))}
         </div>
+        {pipeline?.summary && (
+          <div className={`voice-hint voice-hint--${pipeline.summary.ok ? "ok" : "warn"}`} role="status" id="voice-builtin-test-summary">
+            {pipeline.summary.text}
+          </div>
+        )}
         {mixNote && (
           <div className={`voice-hint voice-hint--${mixNote.ok ? "ok" : "warn"}`} role="status" id="voice-builtin-mix-status">
             {mixNote.text}
@@ -2575,7 +2665,7 @@ export function ExperienceGroup({ builtin }) {
             onChange={(e) => update("screen_preview_sync", e.target.checked)}
             id="voice-screen-preview-sync"
           />
-          <span>生成激光预览及加工发送期间，自动同步到在线小智屏幕（彩屏 1:1 点对点显示加粗刀路预览与太空舱实时进度副屏 HUD，单色 OLED 显示滚动参数卡；日常聊天不触发，默认开）</span>
+          <span>开始雕刻后自动同步到在线小智屏幕（彩屏显示这次的刀路与实时进度，等电脑批准、完工、急停、听歌也有对应画面；单色 OLED 显示滚动参数卡；只生成预览不推，默认开）</span>
         </label>
         <div className="voice-wide voice-inline" id="voice-screen-card-style-state">
           <span>

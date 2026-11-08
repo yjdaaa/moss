@@ -41,6 +41,15 @@ pub trait ToolHost: Send + Sync {
     fn recent_workflows(&self, _device_id: &str, _session_id: &str) -> Option<Value> {
         None
     }
+    /// n70 只读读取某个加工任务的刀路预览原图（PNG / JPEG 字节），同样不走工具分发。默认不支持。
+    fn workflow_preview(
+        &self,
+        _device_id: &str,
+        _session_id: &str,
+        _workflow_id: &str,
+    ) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// 把宿主的工具交给对话。工具清单每轮重新读取：用户在语音中心关闭或打开工具（NV8）后，下一轮对话即生效。
@@ -143,6 +152,22 @@ impl ToolExecutor for HostTools {
             let device = context.device_id.clone();
             let session = context.session_id.clone();
             tokio::task::spawn_blocking(move || host.recent_workflows(&device, &session))
+                .await
+                .ok()
+                .flatten()
+        })
+    }
+    fn workflow_preview<'a>(
+        &'a self,
+        context: &'a ToolContext,
+        workflow_id: &'a str,
+    ) -> BoxFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let host = self.host.clone();
+            let device = context.device_id.clone();
+            let session = context.session_id.clone();
+            let workflow = workflow_id.to_owned();
+            tokio::task::spawn_blocking(move || host.workflow_preview(&device, &session, &workflow))
                 .await
                 .ok()
                 .flatten()

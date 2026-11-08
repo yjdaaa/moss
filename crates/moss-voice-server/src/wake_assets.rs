@@ -323,6 +323,26 @@ fn srmodels_for(target: &WakeTarget) -> Vec<u8> {
 /// `srmodels` / `multinet_model`，其余文件与配置原样保留；没有基础包时只含模型和最小 `index.json`，
 /// 设备屏幕的字体和表情会回到固件自带的。
 pub fn build_package(base: Option<&[u8]>, target: &WakeTarget) -> Result<Vec<u8>, String> {
+    build_package_with_screen(base, target, None)
+}
+
+/// n70 全屏画风：随唤醒词一起写进资源包的表情动图、皮肤背景（见 `screen_pack`）。
+#[derive(Debug, Clone, Default)]
+pub struct ScreenExtras {
+    /// 要写入的文件（表情 GIF、背景 RGB565 图）
+    pub entries: Vec<AssetEntry>,
+    /// `index.json` 的 `emoji_collection` 条目（`{"name","file"}`），同名条目覆盖基础包里的
+    pub emoji_collection: Vec<Value>,
+    /// `index.json` 的 `skin`（整体替换基础包里的）
+    pub skin: Option<Value>,
+}
+
+/// 生成资源包，可选附带 n70 全屏画风。基础包的字体与其余表情保留，同名表情被画风覆盖。
+pub fn build_package_with_screen(
+    base: Option<&[u8]>,
+    target: &WakeTarget,
+    screen: Option<&ScreenExtras>,
+) -> Result<Vec<u8>, String> {
     let (mut entries, mut index) = match base {
         Some(bytes) => {
             let entries = parse_assets(bytes).map_err(str::to_owned)?;
@@ -379,6 +399,32 @@ pub fn build_package(base: Option<&[u8]>, target: &WakeTarget) -> Result<Vec<u8>
         width: 0,
         height: 0,
     });
+    if let Some(screen) = screen {
+        let names: BTreeSet<&str> = screen
+            .emoji_collection
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        let files: BTreeSet<&str> = screen.entries.iter().map(|e| e.name.as_str()).collect();
+        entries.retain(|e| !files.contains(e.name.as_str()));
+        let mut collection: Vec<Value> = index
+            .get("emoji_collection")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|e| e["name"].as_str().is_none_or(|n| !names.contains(n)))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        collection.extend(screen.emoji_collection.iter().cloned());
+        index.insert("emoji_collection".into(), Value::Array(collection));
+        if let Some(skin) = &screen.skin {
+            index.insert("skin".into(), skin.clone());
+        }
+        entries.extend(screen.entries.iter().cloned());
+    }
     let index = serde_json::to_vec(&Value::Object(index)).map_err(|_| "生成 index.json 失败")?;
     entries.push(AssetEntry {
         name: INDEX_FILE.into(),

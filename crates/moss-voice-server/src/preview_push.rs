@@ -13,9 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::goggle_bot::{
-    BotPose, ScreenCardStyle, base64_encode, draw_cute_frame, draw_goggle_bot,
-};
+use crate::goggle_bot::{BotPose, ScreenCardStyle, draw_cute_frame, draw_goggle_bot};
 use crate::{Shared, unix_now};
 use axum::Router;
 use axum::extract::{Path, State};
@@ -230,13 +228,20 @@ fn glyph_5x7(ch: char) -> [u8; 7] {
     }
 }
 
-fn put_px(img: &mut RgbImage, x: i32, y: i32, color: Rgb<u8>) {
+pub(crate) fn put_px(img: &mut RgbImage, x: i32, y: i32, color: Rgb<u8>) {
     if x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height() {
         img.put_pixel(x as u32, y as u32, color);
     }
 }
 
-fn draw_text_5x7(img: &mut RgbImage, x0: i32, y0: i32, scale: i32, text: &str, color: Rgb<u8>) {
+pub(crate) fn draw_text_5x7(
+    img: &mut RgbImage,
+    x0: i32,
+    y0: i32,
+    scale: i32,
+    text: &str,
+    color: Rgb<u8>,
+) {
     let mut cx = x0;
     let step = 6 * scale;
     for ch in text.chars() {
@@ -264,7 +269,7 @@ fn draw_text_5x7(img: &mut RgbImage, x0: i32, y0: i32, scale: i32, text: &str, c
     }
 }
 
-fn text_width_px(text: &str, scale: i32) -> i32 {
+pub(crate) fn text_width_px(text: &str, scale: i32) -> i32 {
     let count = text.chars().count() as i32;
     if count <= 0 {
         0
@@ -519,7 +524,7 @@ pub fn make_device_thumbnail_png(source_bytes: &[u8]) -> Result<Vec<u8>, String>
     make_device_thumbnail_png_for_canvas(source_bytes, DEFAULT_CANVAS_W, DEFAULT_CANVAS_H, None)
 }
 
-fn draw_moss_optical_eye(
+pub(crate) fn draw_moss_optical_eye(
     img: &mut RgbImage,
     cx: i32,
     cy: i32,
@@ -546,7 +551,7 @@ fn draw_moss_optical_eye(
     put_px(img, cx - r / 5, cy - r / 5, Rgb([255, 240, 240]));
 }
 
-fn draw_segmented_bar(
+pub(crate) fn draw_segmented_bar(
     img: &mut RgbImage,
     x0: i32,
     y0: i32,
@@ -569,6 +574,44 @@ fn draw_segmented_bar(
             }
         }
     }
+}
+
+/// n70 雕刻中的副屏卡：真实刀路预览 + 分段进度条 + 百分比与剩余时间。
+/// 只在开始雕刻（任务进入发送）后推送，屏幕中央半屏显示，每 4 秒刷新一次续住固件的 5 秒计时。
+pub fn make_engrave_progress_png(
+    source_bytes: &[u8],
+    spec: &JobHudSpec,
+    style: ScreenCardStyle,
+    frame: u8,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Result<Vec<u8>, String> {
+    let pct = spec.percent.min(100);
+    let eta = spec
+        .eta_seconds
+        .map(|s| format!(" ETA {}:{:02}", s / 60, s % 60))
+        .unwrap_or_default();
+    let ruler = format!("{pct}%{eta}");
+    let png =
+        make_device_thumbnail_png_for_style(source_bytes, canvas_w, canvas_h, Some(&ruler), style)?;
+    let mut canvas = image::load_from_memory(&png)
+        .map_err(|_| "解码刀路预览卡失败".to_owned())?
+        .to_rgb8();
+    let (w, h) = (canvas.width() as i32, canvas.height() as i32);
+    let fg = match style {
+        ScreenCardStyle::MossHud => Rgb([255, 68, 56]),
+        ScreenCardStyle::GoggleBot => Rgb([72, 250, 210]),
+    };
+    let bar_w = w - 8;
+    draw_segmented_bar(&mut canvas, 4, h - 13, bar_w, 2, 20, pct, fg);
+    // 进度前沿的一点亮光，随帧闪动，表示还在雕
+    let head = 4 + bar_w * i32::from(pct) / 100;
+    if frame.is_multiple_of(2) && pct < 100 {
+        for dy in -1..=2 {
+            put_px(&mut canvas, head, h - 13 + dy, Rgb([255, 236, 200]));
+        }
+    }
+    encode_png_checked(&canvas)
 }
 
 /// 生成激光加工实时副屏 HUD PNG（兼容默认硬核太空舱风格）。
@@ -1247,6 +1290,13 @@ pub fn make_scene_showcase_png(
             cw,
             ch,
         ),
+        // n70 对话场景没有专门的半屏卡，直接用全屏画风的半分辨率帧
+        BotPose::Listening
+        | BotPose::Thinking
+        | BotPose::Talking
+        | BotPose::Happy
+        | BotPose::Sad
+        | BotPose::Surprised => crate::screen_pack::scene_card_png(style, pose, frame, cw, ch),
     }
 }
 
@@ -1283,32 +1333,16 @@ pub struct StyleSceneGifCatalog {
     pub goggle_bot: BTreeMap<&'static str, String>,
 }
 
-/// 进程级缓存「硬核太空舱」与「可爱像素小机器人」两套完整的 160×120 5 场景动态 GIF89a。
+/// 语音中心“副屏预览”展示的两套画风场景动图（n70 起为全屏画风 12 个场景的 160×120 缩小版）。
 pub fn cached_style_scene_gifs() -> &'static StyleSceneGifCatalog {
     static CACHE: OnceLock<StyleSceneGifCatalog> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let poses = [
-            BotPose::IdleBlink,
-            BotPose::GogglesEngrave,
-            BotPose::ApprovalWave,
-            BotPose::MusicGroove,
-            BotPose::CelebrateDone,
-        ];
-        let build_map = |style: ScreenCardStyle| -> BTreeMap<&'static str, String> {
-            let mut map = BTreeMap::new();
-            for pose in poses {
-                if let Ok(gif) = encode_scene_showcase_gif(pose, style) {
-                    map.insert(
-                        pose.slug(),
-                        format!("data:image/gif;base64,{}", base64_encode(&gif)),
-                    );
-                }
-            }
-            map
-        };
+        let catalog = crate::screen_pack::cached_scene_gif_catalog();
+        let pick =
+            |style: ScreenCardStyle| catalog.get(style.as_str()).cloned().unwrap_or_default();
         StyleSceneGifCatalog {
-            moss_hud: build_map(ScreenCardStyle::MossHud),
-            goggle_bot: build_map(ScreenCardStyle::GoggleBot),
+            moss_hud: pick(ScreenCardStyle::MossHud),
+            goggle_bot: pick(ScreenCardStyle::GoggleBot),
         }
     })
 }

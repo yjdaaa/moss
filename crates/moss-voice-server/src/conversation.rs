@@ -167,6 +167,14 @@ pub trait ToolExecutor: Send + Sync {
     fn recent_workflows<'a>(&'a self, _context: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
         Box::pin(async { None })
     }
+    /// n70 只读读取某个加工任务的刀路预览原图（开始雕刻后推到小智屏幕）。默认不支持。
+    fn workflow_preview<'a>(
+        &'a self,
+        _context: &'a ToolContext,
+        _workflow_id: &'a str,
+    ) -> BoxFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async { None })
+    }
 }
 
 /// 不提供任何工具（NV3 默认）。

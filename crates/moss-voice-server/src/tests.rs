@@ -28,6 +28,8 @@ struct FakeRegistry {
     /// 按真实数据库语义登记：同 Device-Id、不同 Client-Id 的来访不改绑定，返回已绑定记录的状态
     /// （`laser_runtime::RuntimeDb::voice_device_seen`）。
     keep_binding: std::sync::atomic::AtomicBool,
+    /// 上位机为设备记忆的硬件偏好（n70 测试全屏画风包标记）
+    hardware_prefs: Mutex<Option<HardwarePrefs>>,
 }
 
 impl FakeRegistry {
@@ -66,6 +68,9 @@ impl FakeRegistry {
 }
 
 impl DeviceRegistry for FakeRegistry {
+    fn device_hardware_prefs(&self, _device: &str) -> Option<HardwarePrefs> {
+        self.hardware_prefs.lock().unwrap().clone()
+    }
     fn seen(&self, visit: &DeviceVisit) -> Result<DeviceStatus, String> {
         let mut devices = self.devices.lock().unwrap();
         let entry = devices

@@ -192,6 +192,29 @@ function makeGlowTexture() {
   return tex;
 }
 
+/**
+ * 全应用只建一个孪生渲染器（WebGL 上下文），离开页面时摘下画布留着下次复用（2026-11-08）。
+ * 实测在 macOS WebKit 上每新建、丢弃一次 three.js 渲染器，图形进程就留下约 100 MB 不还，
+ * 即使 dispose + forceContextLoss；复用同一个上下文后反复进出不再增长。上下文被系统回收时才重建。
+ */
+let sharedTwinRenderer = null;
+function acquireTwinRenderer() {
+  if (sharedTwinRenderer && !sharedTwinRenderer.getContext().isContextLost()) return sharedTwinRenderer;
+  sharedTwinRenderer?.dispose();
+  sharedTwinRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+  return sharedTwinRenderer;
+}
+
+/** 高分屏最多按 1.5 倍渲染：比 2 倍少约 44% 像素，配合抗锯齿肉眼几乎看不出差别（2026-11-08）。 */
+const MAX_PIXEL_RATIO = 1.5;
+
+/** 把 2D 画布尺寸清零，立即交还位图内存，不等垃圾回收（2026-11-08）。 */
+function releaseCanvas(canvas) {
+  if (!canvas || typeof canvas.width !== "number") return;
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
 function donePowerToRgb(powerRatio) {
   const t = Math.min(1, Math.max(0, Number(powerRatio) || 0));
   if (t < 0.5) {
@@ -421,6 +444,7 @@ export function TwinStage3D({
       orb.target.z + orb.distance * sinPhi * cosTheta,
     );
     camera.lookAt(orb.target);
+    ctx.requestRender?.();
   }, []);
 
   const selectPreset = useCallback((presetKey, { instant = false } = {}) => {
@@ -453,6 +477,7 @@ export function TwinStage3D({
       return;
     }
     orb.goal = { theta, phi: preset.phi, distance, target };
+    sceneRef.current?.requestRender?.();
   }, [xMax, yMax, matThick, getFocusBox, applyCameraOrbit]);
 
   // 初始化 Three.js 场景与渲染循环
@@ -462,11 +487,7 @@ export function TwinStage3D({
 
     let renderer;
     try {
-      renderer = new THREE.WebGLRenderer({
-        antialias: true,
-        alpha: true,
-        powerPreference: "high-performance",
-      });
+      renderer = acquireTwinRenderer();
     } catch (err) {
       setWebglError(err?.message || "当前环境不支持 WebGL 3D 渲染");
       return undefined;
@@ -474,7 +495,7 @@ export function TwinStage3D({
 
     const width = Math.max(320, container.clientWidth || 640);
     const height = Math.max(200, container.clientHeight || 420);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
     renderer.setSize(width, height, false);
     // 透明清屏，背景交给 CSS 的影棚渐变；ACES 色调映射 + 软阴影
     renderer.setClearColor(0x000000, 0);
@@ -492,7 +513,10 @@ export function TwinStage3D({
 
     // 室内反射环境：让导轨、光轴、电机端盖等金属件有真实高光
     const pmrem = new THREE.PMREMGenerator(renderer);
-    const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    const roomEnvironment = new RoomEnvironment();
+    const envTexture = pmrem.fromScene(roomEnvironment, 0.04).texture;
+    // 只用来生成反射贴图，生成后立即释放它自己的几何体与材质
+    roomEnvironment.dispose();
     scene.environment = envTexture;
     scene.environmentIntensity = 0.55;
 
@@ -675,11 +699,14 @@ export function TwinStage3D({
       animId: 0,
     };
 
+    // 按需渲染（2026-11-08）：场景有变化（推演进度、设备位置、拖动视角、窗口尺寸）时排一帧；只有视角过渡、
+    // 护罩淡入淡出进行中才连续出帧，推演暂停或播完后不再重画（此前 60 fps 常驻）。
+    // 帧内 animId 非零，期间的 requestRender 不会重复排帧。
     let pulsePhase = 0;
-    const animate = () => {
+    const renderFrame = () => {
       const ctx = sceneRef.current;
       if (!ctx) return;
-      ctx.animId = requestAnimationFrame(animate);
+      let animating = false;
       pulsePhase += 0.12;
       // 视角切换平滑过渡
       const orb = orbitRef.current;
@@ -702,27 +729,29 @@ export function TwinStage3D({
           orb.goal = null;
         }
         applyCameraOrbit();
+        animating = Boolean(orb.goal);
       }
       if (ctx.laserOn) {
-        // 出光时落点辉光轻微闪烁
+        // 出光时落点辉光轻微闪烁、散热风扇转动：随推演 / 实时位置更新逐帧推进，暂停时保持静止
         const flicker = 1 + Math.sin(pulsePhase * 2.7) * 0.08 + Math.sin(pulsePhase * 6.1) * 0.05;
         const size = (5 + ctx.powerRatio * 6) * flicker;
         ctx.spotGlow.scale.set(size, size, 1);
-      } else {
-        const s = 1 + Math.sin(pulsePhase * 0.6) * 0.12;
-        ctx.spotRingMesh.scale.set(s, 1, s);
+        if (ctx.fanHubMesh) ctx.fanHubMesh.rotation.z += 0.18;
       }
       if (ctx.ghostMats && ctx.ghostLevel !== ctx.ghostTarget) {
         ctx.ghostLevel += (ctx.ghostTarget - ctx.ghostLevel) * 0.15;
         if (Math.abs(ctx.ghostTarget - ctx.ghostLevel) < 0.01) ctx.ghostLevel = ctx.ghostTarget;
         applyGhost(ctx, ctx.ghostLevel);
-      }
-      if (ctx.fanHubMesh) {
-        ctx.fanHubMesh.rotation.z += 0.18;
+        animating = animating || ctx.ghostLevel !== ctx.ghostTarget;
       }
       ctx.renderer.render(ctx.scene, ctx.camera);
+      ctx.animId = animating ? requestAnimationFrame(renderFrame) : 0;
     };
-    animate();
+    sceneRef.current.requestRender = () => {
+      const ctx = sceneRef.current;
+      if (ctx && !ctx.animId) ctx.animId = requestAnimationFrame(renderFrame);
+    };
+    renderFrame();
 
     const handleResize = () => {
       syncStageViewport();
@@ -737,12 +766,18 @@ export function TwinStage3D({
       if (sceneRef.current?.animId) {
         cancelAnimationFrame(sceneRef.current.animId);
       }
-      // 卸载时释放全部几何体 / 材质并主动丢弃 WebGL 上下文，避免反复进出页面耗尽上下文与显存
+      // 卸载时释放全部几何体 / 材质 / 贴图与阴影贴图；渲染器（WebGL 上下文）摘下画布留给下次复用
+      const ctx = sceneRef.current;
       disposeObjectResources(scene);
+      // 阴影贴图（2048² 渲染目标）不在材质上，要单独释放
+      scene.traverse((object) => object.shadow?.dispose?.());
       envTexture.dispose();
       pmrem.dispose();
-      renderer.dispose();
-      renderer.forceContextLoss?.();
+      releaseCanvas(ctx?.burn?.canvas);
+      releaseCanvas(ctx?.burn?.base);
+      releaseCanvas(floorDiscCanvas);
+      releaseCanvas(glowTexture?.image);
+      renderer.renderLists.dispose();
       renderer.domElement?.remove?.();
       sceneRef.current = null;
     };
@@ -798,6 +833,10 @@ export function TwinStage3D({
     clearAndDispose(workpieceGroup);
     clearAndDispose(cursorGroup);
     clearAndDispose(headGroup);
+    // 板材尺寸变了会新建烧灼画布：旧画布（最长边约 1500 px ×2 张）立即释放
+    releaseCanvas(ctx.burn?.canvas);
+    releaseCanvas(ctx.burn?.base);
+    ctx.burn = null;
     clearAndDispose(gantryGroup);
     gantryGroup.add(headGroup);
     ctx.slabMesh = null;
@@ -1985,6 +2024,11 @@ export function TwinStage3D({
       applyCameraOrbit();
     }
   }, [pose, toolpath, xMax, yMax, matWidth, matHeight, matThick, matName, offsetX, offsetY, toolpathOffsetX, toolpathOffsetY, toolpathScaleX, toolpathScaleY, followHead, applyCameraOrbit]);
+
+  // 按需渲染：上面各 effect 改完场景后统一排一帧（必须放在所有改场景的 effect 之后）
+  useEffect(() => {
+    sceneRef.current?.requestRender?.();
+  });
   // 鼠标拖拽旋转 / 平移 / 滚轮缩放
   const handlePointerDown = (e) => {
     const orb = orbitRef.current;

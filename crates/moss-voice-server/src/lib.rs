@@ -34,6 +34,7 @@ pub mod persona; // n59 说话角色（只改语气，安全铁律锁死在末�
 pub mod plugins;
 pub mod preview_push;
 mod safe_fs; // shared read-only path safety (NV14 music, NV19-05 knowledge)
+pub mod screen_pack; // n70 小智全屏画风资源包（2026-11-08 用户决定）
 mod session;
 #[cfg(test)]
 mod speaker; // NV16 synthetic-only policy, default disabled
@@ -93,6 +94,8 @@ pub struct HardwarePrefs {
     pub brightness: Option<u8>,
     pub theme: Option<String>,
     pub talk_mode: Option<String>,
+    /// n70 已刷入的 MOSS 全屏画风包标记（`moss-screen-1:moss_hud`），见 [`screen_pack`]。
+    pub screen_pack: Option<String>,
 }
 
 /// 宿主提供的设备登记与密钥。实现须线程安全；调用很快（本地数据库），在运行时线程中直接调用。
@@ -280,6 +283,11 @@ pub enum DeviceRequest {
     InstallAssets { token: String },
     /// 桌面端「摄像头」标签页主动抓拍一张画面（下发一次性票据，仅存内存，不调外部视觉模型）。
     CapturePhoto { ticket: String },
+    /// n70 已刷全屏画风包的设备：直接切到某个全屏场景试看（发 `llm` 表情名，不写闪存、不推图）。
+    ShowScene {
+        scene: BotPose,
+        style: ScreenCardStyle,
+    },
 }
 
 pub(crate) struct DeviceRequestHandle {
@@ -515,7 +523,12 @@ impl VoiceServer {
             let Some(handle) = map.get(device_id) else {
                 return Err(format!("设备 {device_id} 当前不在线"));
             };
-            if !handle.supports_mcp && !matches!(request, DeviceRequest::PreviewScreen { .. }) {
+            if !handle.supports_mcp
+                && !matches!(
+                    request,
+                    DeviceRequest::PreviewScreen { .. } | DeviceRequest::ShowScene { .. }
+                )
+            {
                 return Err(format!("设备 {device_id} 未启用设备端 MCP，无法执行该操作"));
             }
             handle.sender.clone()
@@ -549,6 +562,17 @@ impl VoiceServer {
         }
         let token = self.shared.assets_store.stage(device_id, package)?;
         self.device_request(device_id, DeviceRequest::InstallAssets { token })
+    }
+
+    /// n70 能刷全屏画风包的在线设备返回其屏幕宽高：彩屏（`self.screen.get_info` 没报单色）且报了分辨率。
+    pub fn screen_pack_size(&self, device_id: &str) -> Option<(u32, u32)> {
+        self.shared
+            .state
+            .sessions()
+            .into_iter()
+            .find(|s| s.device_id == device_id)
+            .filter(|s| s.screen_monochrome != Some(true))
+            .and_then(|s| s.screen_width.zip(s.screen_height))
     }
 
     /// 桌面端「摄像头」标签页向指定在线设备发起一次抓拍：签发 15 秒一次性票据并触发 `self.camera.take_photo`。
@@ -660,35 +684,34 @@ impl VoiceServer {
             ScreenCardStyle::MossHud => format!("MOSS太空舱 · {}", pose.moss_hud_label_zh()),
             ScreenCardStyle::GoggleBot => format!("小MOSS护目镜机器人 · {}", pose.label_zh()),
         };
-        let stage_for_device = |device_id: &str| -> Result<String, String> {
+        let sessions = self.shared.state.sessions();
+        // n70 已刷全屏画风包的设备直接切全屏场景；没刷的照旧推半屏试看卡
+        let request_for = |device_id: &str| -> Result<DeviceRequest, String> {
+            if sessions
+                .iter()
+                .any(|s| s.device_id == device_id && s.screen_pack)
+            {
+                return Ok(DeviceRequest::ShowScene {
+                    scene: pose,
+                    style: active_style,
+                });
+            }
             let screen_size = self.shared.state.session_screen_size(device_id);
             let (cw, ch) = preview_push::optimal_canvas_for_screen(screen_size);
             let png = preview_push::make_scene_showcase_png(pose, active_style, 1, cw, ch)?;
-            self.shared.preview_store.stage_prebuilt_png(png)
+            Ok(DeviceRequest::PreviewScreen {
+                token: Some(self.shared.preview_store.stage_prebuilt_png(png)?),
+                summary: summary.clone(),
+            })
         };
         if let Some(device_id) = target_device {
-            let token = Some(stage_for_device(device_id)?);
-            self.device_request(device_id, DeviceRequest::PreviewScreen { token, summary })?;
+            self.device_request(device_id, request_for(device_id)?)?;
             return Ok(1);
         }
-        let online_devices: Vec<String> = self
-            .shared
-            .state
-            .sessions()
-            .into_iter()
-            .map(|s| s.device_id)
-            .collect();
         let mut pushed = 0usize;
-        for device_id in online_devices {
-            let token = Some(stage_for_device(&device_id)?);
+        for device_id in sessions.iter().map(|s| s.device_id.clone()) {
             if self
-                .device_request(
-                    &device_id,
-                    DeviceRequest::PreviewScreen {
-                        token,
-                        summary: summary.clone(),
-                    },
-                )
+                .device_request(&device_id, request_for(&device_id)?)
                 .is_ok()
             {
                 pushed += 1;

@@ -1437,3 +1437,87 @@ test("本地 Jev 运行状态：失败带原因、加载中说明会跳过、9B 
   assert.equal(localJevRuntimeView({ state: "idle" }), null);
   assert.equal(localJevRuntimeView({ state: "idle", notice: "9B 已关闭没说完判断" }).tone, "off");
 });
+
+test("测试全部环节：按每个环节当前选用的来源决定怎么测，不通的给出下一步（2026-11-08）", async () => {
+  const { pipelineTestPlan, pipelineTestOutcome, pipelineTestSummary } = await import("../src/voiceState.js");
+  const base = {
+    models: {
+      llm: { configured: true, url: "https://llm.test/v1", model: "qwen-max", key_set: true },
+      asr: { configured: true, url: "https://asr.test/v1/audio/transcriptions", model: "SenseVoiceSmall", key_set: true },
+      tts: { configured: true, url: "https://tts.test/v1/audio/speech", model: "MOSS/TTS-1", voice: "alloy", speed: 1, key_set: true },
+    },
+    jev: { key_set: false, model: "typesafe/jev-1.14" },
+    local: {
+      helper_found: true,
+      settings: { vad: false, asr: false, tts: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro", jev_filter_enabled: false },
+      models: [
+        { id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true },
+        { id: "sense_voice", kind: "asr", label: "SenseVoice 2024", installed: true },
+        { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: false },
+        { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B", installed: true },
+      ],
+    },
+  };
+  const byKey = (plan) => Object.fromEntries(plan.map((step) => [step.key, step]));
+
+  // 全部云端 + 能量判停 + Jev 关闭：三个云端环节真实请求，载荷来自已保存配置且密钥留空
+  let plan = byKey(pipelineTestPlan(base));
+  assert.deepEqual(Object.keys(plan), ["vad", "asr", "jev", "llm", "tts"], "顺序与链路栏一致");
+  assert.equal(plan.vad.kind, "static");
+  assert.equal(plan.vad.ok, true);
+  assert.equal(plan.jev.skipped, true);
+  assert.equal(plan.llm.kind, "section");
+  assert.deepEqual(plan.llm.input, { url: "https://llm.test/v1", api_key: "", model: "qwen-max" });
+  assert.equal(plan.tts.input.voice, "alloy");
+
+  // 本地识别已下载 → 就绪；本地合成未下载 → 报错并给出下一步；本地判停已下载 → 就绪
+  const local = structuredClone(base);
+  Object.assign(local.local.settings, { vad: true, asr: true, tts: true });
+  plan = byKey(pipelineTestPlan(local));
+  assert.equal(plan.vad.ok, true);
+  assert.match(plan.asr.detail, /本地 SenseVoice 2024 已下载/);
+  assert.equal(plan.tts.ok, false);
+  assert.match(plan.tts.detail, /Kokoro v1\.0.*还没下载/);
+  // 找不到本地模型程序：已下载的本地环节也判不通
+  local.local.helper_found = false;
+  plan = byKey(pipelineTestPlan(local));
+  assert.equal(plan.asr.ok, false);
+  assert.match(plan.asr.detail, /moss-voice-local/);
+
+  // Jev：云端未配密钥 → 报错；配了密钥 → 用已保存密钥测已选模型；本地已下载 → 测本地模型
+  const jevCloud = structuredClone(base);
+  jevCloud.local.settings.jev_filter_enabled = true;
+  jevCloud.local.settings.jev_model = "typesafe/jev-1.13";
+  plan = byKey(pipelineTestPlan(jevCloud));
+  assert.equal(plan.jev.ok, false);
+  assert.match(plan.jev.detail, /OpenRouter API Key/);
+  jevCloud.jev.key_set = true;
+  plan = byKey(pipelineTestPlan(jevCloud));
+  assert.deepEqual(plan.jev, { key: "jev", kind: "jev", input: { api_key: "", model: "typesafe/jev-1.13" } });
+  jevCloud.local.settings.jev_model = "onejev_1_6_0_8b";
+  plan = byKey(pipelineTestPlan(jevCloud));
+  assert.deepEqual(plan.jev.input, { model: "onejev_1_6_0_8b" });
+
+  // 云端未配置或已保存配置缺字段：不发请求，直接报错
+  const missing = structuredClone(base);
+  delete missing.models.asr;
+  missing.models.llm.model = "";
+  plan = byKey(pipelineTestPlan(missing));
+  assert.equal(plan.asr.ok, false);
+  assert.match(plan.asr.detail, /云端语音识别还没配置.*或在上方改用本地模型/);
+  assert.equal(plan.llm.kind, "static");
+  assert.match(plan.llm.detail, /已保存的配置不完整：请填写模型名/);
+
+  // 结论：通过带耗时，失败保留服务方原因，调用异常走错误文案；汇总点名不通的环节
+  assert.deepEqual(pipelineTestOutcome({ ok: true, elapsed_ms: 320, detail: "回复正常" }), { ok: true, detail: "回复正常（320 ms）" });
+  assert.deepEqual(pipelineTestOutcome({ ok: false, elapsed_ms: 90, detail: "HTTP 401 密钥无效" }), { ok: false, detail: "HTTP 401 密钥无效" });
+  assert.deepEqual(pipelineTestOutcome(null, new Error("网络不通"), (e) => `出错：${e.message}`), { ok: false, detail: "出错：网络不通" });
+  assert.deepEqual(
+    pipelineTestSummary({ vad: { ok: true }, asr: { ok: false }, jev: { ok: true, skipped: true }, llm: { ok: true }, tts: { ok: false } }),
+    { ok: false, text: "2 个环节不通：语音识别、语音合成。原因见对应下拉框下方" },
+  );
+  assert.deepEqual(
+    pipelineTestSummary({ vad: { ok: true }, asr: { ok: true }, jev: { ok: true, skipped: true }, llm: { ok: true }, tts: { ok: true } }),
+    { ok: true, text: "全部环节测试通过（4 项正常，其余已关闭跳过）" },
+  );
+});

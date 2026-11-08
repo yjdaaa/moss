@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### 语音中心模型链路栏可一键测试全部环节，不通的环节就地报错（2026-11-08）
+
+- **现象**：内置语音的拾音判停、语音识别、Jev、大模型、语音合成只能到各自卡片里逐个点“测试连接”，看不出整条链路哪一环不通（用户要求在链路栏右上角加“测试全部环节”）。
+- **根因与修复**：新增链路栏右上角按钮 `#voice-builtin-test-all`。按每个环节当前选用的来源测试、只用已保存的配置：云端识别 / 大模型 / 合成与 Jev（云端或本地）调用既有 `voice_builtin_models_test` 真实请求一次（密钥留空沿用已保存的）；内置能量判停标“无需测试”、Jev 关闭标“跳过”；本地判停 / 识别 / 合成只检查是否已下载与 `moss-voice-local` 是否存在；未配置或配置不完整的环节不发请求直接报错并给出下一步。结果显示在对应下拉框下方，底部汇总不通的环节。纯前端，不改后端命令、权限与设置。
+- **验证**：`voiceState.test.mjs` 新增 1 项（各来源分支、结论与汇总）；`voice-center.browser.mjs` 新增 5d-1（通过 / 不通 / 跳过同时出现、只对已配置的云端环节发请求且密钥留空）；`npm test` 232、lint 0 error、e2e 35 项通过。未验证：未用真实云端密钥、真实本地 Jev 进程测过；本地识别 / 合成 / 判停没有试跑接口，只检查就绪状态。
+- **关联**：`frontend/src/voiceState.js`（`pipelineTestPlan`、`pipelineTestOutcome`、`pipelineTestSummary`）、`frontend/src/components/VoiceBuiltinCard.jsx`（`BuiltinModelGroups`）、`frontend/src/styles.css`（`.voice-mix-head`、`.voice-mix-test`）、语音技术书 n71。
+
+### 小智彩屏可刷 MOSS 全屏画风：对话和加工画面铺满整屏、一直显示；开始雕刻后才投刀路（2026-11-08）
+
+- **现象**：彩屏小智上，MOSS 的副屏卡只能经 `self.screen.preview_image` 显示在屏幕中央半屏，固件 5 秒后收起、一发表情就被收掉，看起来“显示几秒又换回官方”；对话时的“聆听中 / 说话中”画面仍是官方表情；生成激光预览时就把刀路推到小智，还没开始雕刻。
+- **根因与修复**：官方固件的资源包支持 GIF 表情，表情控件在最底层、尺寸随图、没有计时器，固件的状态字和字幕叠在上面；新增 `screen_pack`，按设备分辨率生成两套画风 × 12 个场景的全屏 GIF（约 0.36 MB）、21 个标准表情别名和整屏背景，随唤醒词资源包一起逐台确认推送（“同时刷入 MOSS 全屏画风”默认勾选），推送后记在设备偏好 `screen_pack`。服务端对已刷包的设备按场景发表情名：聆听 → 思考 → 说话 / 回复表情，雕刻、待电脑批准、听歌、完工 / 急停为常驻场景，进度和倒计时写在字幕里；没刷包的设备照旧推半屏卡。生成预览时不再自动推屏，任务进入发送后经新增只读通道 `workflow_preview` 取这次的刀路，每 4 秒推“刀路 + 进度条”卡。顺手修正听歌小机器人右臂画到头顶的错位。**行为变更**：取代 n52“日常聊天绝不推图”（对话画面由设备资源包里的表情切换，不推图）；`voice_wakeword_manage` 的 `push` 新增可选 `screen_pack`，`voice_wakeword_status` 设备项新增 `screen_pack_size` / `screen_pack`；“聆听中…”等状态字在固件主程序里，改不了。
+- **验证**：新增 `screen_pack` 单元测试 7 项（场景全屏尺寸与动画、标准表情别名、背景图格式、保留基础包字体、其他分辨率）与假设备会话测试 2 项（表情顺序、开始雕刻才取刀路且只取一次、完工画面、试看直接切场景；未刷包设备只转发原表情），桌面端推送参数校验与设置存取测试；`cargo test --workspace` 1033 项、clippy 零警告；前端 `npm test` 231 项、lint 0 error、build、语音中心浏览器测试通过。未验证：未连实机——全屏 GIF 在 ESP32-S3 上的帧率与资源分区写入、各场景实际观感都需在立创·实战派上看过才算数。
+- **关联**：`crates/moss-voice-server/src/screen_pack.rs`、`session.rs`（`show_screen` / `show_ambient` / `set_sticky`、`poll_jobs`）、`wake_assets.rs`（`build_package_with_screen`）、`preview_push.rs`（`make_engrave_progress_png`）、`goggle_bot.rs`（6 个新姿态）、`tools.rs` / `conversation.rs`（`workflow_preview`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`wakeword_manage`、`DesktopToolHost`）、`crates/moss-voice/src/settings.rs`（`DeviceHardwarePrefs.screen_pack`）、`frontend/src/components/VoiceBuiltinCard.jsx`、`VoiceWakeWordCard.jsx`、`voiceState.js`；技术书 n70。
+
+### 数字孪生反复进出不再越占越多内存，静止时不再重画，应用在后台时背景与动画暂停（2026-11-08）
+
+- **现象**：MOSS 网页部分常驻约 390 MB、闲置也占 CPU（用户反馈“为什么占用这么多内存”）。实测（WebKit，1440×900 @2x）：每进出一次数字孪生页多留约 100 MB 且永不释放（3 次后 264 → 660 MB）；停在孪生页推演暂停后仍约 15%～45% CPU；动态背景让窗口开着就占约 25% CPU，切到别的应用也不停。
+- **根因与修复**：① 每次进入孪生页都新建 three.js 渲染器，macOS WebKit 图形进程每次留下约 100 MB（即使 `dispose` + `forceContextLoss`）；改为全应用复用一个渲染器（`acquireTwinRenderer`），卸载时补释放灯光阴影贴图、`RoomEnvironment` 并清零 2D 画布。② 渲染循环 60 fps 常驻；改为按需渲染，推演暂停或播完后不再重画，高分屏渲染倍数上限 2 → 1.5，离线推演刷新限约 30 fps（总时长不变），「出光中」指示点脉冲从 `box-shadow` 改为合成器动画。③ 动态背景在窗口失去焦点、最小化或收进托盘时暂停，并经 `<html data-app-active="false">` 暂停页面全部 CSS 循环动画（用户决定不加背景开关，技术书 r27）。行为变化：推演暂停时出光辉光与风扇不再自行闪烁 / 转动。
+- **验证**：实测孪生 3 次进出后 420 / 426 / 374 MB 不再增长；推演中 CPU 约 67% → 43%，暂停后约 15% → 3%；后台 CPU 约 25% → 2%。新增 `tests/twin-render.browser.mjs`（修复前失败）；更新 `threeDispose.test.mjs`；`npm test` 231、lint 0 error、浏览器测试 7 项、e2e 35 项通过。未验证：数字来自 Playwright WebKit 无界面模式，未在 MOSS 真实窗口、Windows WebView2 与 Android 上复测；语音中心与摄像头页未测。顶栏状态眼的 SVG 动画（离线“z”、待命呼吸光晕）前台仍约占 10% CPU，本次未改。
+- **关联**：`frontend/src/components/TwinStage3D.jsx`（`acquireTwinRenderer`、`renderFrame` / `requestRender`、`releaseCanvas`）、`frontend/src/components/CyberBackground.jsx`、`frontend/src/pages/TwinPage.jsx`（`SIM_FRAME_MS`）、`frontend/src/styles.css`、`docs/developer/frontend-behavior.md`、技术书 r27。
+
 ### Windows 上 `onejev.rs` 不再多出一条未使用引用的警告（2026-11-08）
 
 - **现象**：Windows 上跑 `cargo clippy -- -D warnings` 时，`crates/moss-voice/src/onejev.rs` 报 `Component` 未使用，零警告验收被拦；运行与打包不受影响。

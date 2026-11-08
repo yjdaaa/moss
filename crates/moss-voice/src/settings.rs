@@ -607,6 +607,9 @@ pub struct DeviceHardwarePrefs {
     pub theme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub talk_mode: Option<String>,
+    /// n70 推送资源包时一并刷入的 MOSS 全屏画风包标记（`moss-screen-1:moss_hud`）；推送不带画风的包时清掉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_pack: Option<String>,
 }
 
 impl DeviceHardwarePrefs {
@@ -615,6 +618,7 @@ impl DeviceHardwarePrefs {
             && self.brightness.is_none()
             && self.theme.is_none()
             && self.talk_mode.is_none()
+            && self.screen_pack.is_none()
     }
 }
 
@@ -2618,6 +2622,21 @@ mod tests {
         assert!(prefs.is_empty());
         prefs.talk_mode = Some("press_to_talk".into());
         assert!(!prefs.is_empty());
+        // n70：只记了全屏画风包也算有偏好（重连握手要读到它），并且能存取
+        let pack_only = DeviceHardwarePrefs {
+            screen_pack: Some("moss-screen-1:goggle_bot".into()),
+            ..DeviceHardwarePrefs::default()
+        };
+        assert!(!pack_only.is_empty());
+        let round: DeviceHardwarePrefs =
+            serde_json::from_value(serde_json::to_value(&pack_only).unwrap()).unwrap();
+        assert_eq!(
+            round.screen_pack.as_deref(),
+            Some("moss-screen-1:goggle_bot")
+        );
+        let old_file: DeviceHardwarePrefs =
+            serde_json::from_value(serde_json::json!({"volume": 40})).unwrap();
+        assert_eq!(old_file.screen_pack, None, "旧设置文件没有这个字段");
         assert_eq!(validate_screen_card_style("").unwrap(), "moss_hud");
         assert_eq!(
             validate_screen_card_style("goggle_bot").unwrap(),

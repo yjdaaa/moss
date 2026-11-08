@@ -310,6 +310,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                     screen_monochrome: None,
                     screen_width: None,
                     screen_height: None,
+                    screen_pack: false,
                 });
                 shared
                     .registry
@@ -969,9 +970,31 @@ struct Session<'a> {
     one_shot_badge_url: Option<String>,
     /// 本地音乐播放期间的黑胶/听歌小机器人动态卡状态
     music_hud: Option<MusicHud>,
+    /// n70 设备已刷 MOSS 全屏画风包（设备偏好 `screen_pack`）：对话与加工场景改发表情名，切换全屏动图
+    screen_pack: bool,
+    /// n70 常驻场景（雕刻 / 待批准 / 听歌 / 完工 / 急停）与叠在画面上的一行字
+    screen_scene: Option<ScreenSceneState>,
+    /// n70 最近一次发给设备的画风表情名（轮询拍内去重；设备状态切换后强制重发）
+    last_screen_emotion: Option<String>,
+    /// n70 正在雕刻的任务与它的刀路预览原图（每个任务只向宿主取一次）
+    engrave_preview: Option<(String, Option<Arc<Vec<u8>>>)>,
+    /// n70 本轮回复的表情场景（大模型的表情往往先于第一句音频到，开口时再显示）
+    turn_scene: Option<crate::BotPose>,
     /// 加工结束播报：只读观察最近任务，发现“发送中 → 终态”时在空闲时播报一次。
     jobs: crate::jobs::JobWatcher,
     next_job_poll: Instant,
+}
+
+/// n70 完工 / 急停全屏画面停留多久（雕刻时的刀路卡最多再挡 5 秒，固件计时到了才露出底下的完工画面）。
+const FINISHED_SCENE_HOLD: Duration = Duration::from_secs(10);
+
+/// n70 全屏画风的常驻场景。
+struct ScreenSceneState {
+    scene: crate::BotPose,
+    /// 叠在画面上的一行字（经 `stt` 显示在固件字幕位置）
+    text: Option<String>,
+    /// 到期自动回到聆听 / 待命（完工、急停徽章）
+    until: Option<Instant>,
 }
 
 impl<'a> Session<'a> {
@@ -1093,6 +1116,11 @@ impl<'a> Session<'a> {
             last_approval_summary: None,
             one_shot_badge_url: None,
             music_hud: None,
+            screen_pack: false,
+            screen_scene: None,
+            last_screen_emotion: None,
+            engrave_preview: None,
+            turn_scene: None,
             jobs: crate::jobs::JobWatcher::new(),
             next_job_poll: Instant::now() + shared.config.job_poll_interval,
         })
@@ -1122,16 +1150,171 @@ impl<'a> Session<'a> {
         state: TtsState,
         text: Option<String>,
     ) -> Result<(), String> {
+        let starting = matches!(state, TtsState::Start);
         let message = ServerMessage::Tts {
             session_id: self.session_id.into(),
             state,
             text,
         };
-        if send_json(socket, &message).await {
+        if !send_json(socket, &message).await {
+            return Err("发送失败".into());
+        }
+        if starting {
+            // n70 开口说话：全屏画风切到“说话”（听歌、完工、急停画面说话时保持）
+            let scene = self
+                .sticky_while_talking()
+                .or(self.turn_scene)
+                .unwrap_or(crate::BotPose::Talking);
+            self.show_screen(socket, scene, true).await?;
+        }
+        Ok(())
+    }
+
+    /// n70 这台设备是否按全屏画风包显示（单色屏不算）。
+    fn pack_active(&self) -> bool {
+        self.screen_pack
+            && self
+                .device_mcp
+                .as_ref()
+                .is_none_or(|d| d.screen_monochrome != Some(true))
+    }
+
+    /// n70 当前有效的常驻场景（到期的完工 / 急停徽章、已停播的音乐不算）。
+    fn sticky_scene(&self) -> Option<&ScreenSceneState> {
+        let scene = self.screen_scene.as_ref()?;
+        if scene.until.is_some_and(|t| Instant::now() >= t) {
+            return None;
+        }
+        if scene.scene == crate::BotPose::MusicGroove
+            && !self.music.as_ref().is_some_and(|m| m.active())
+        {
+            return None;
+        }
+        Some(scene)
+    }
+
+    /// n70 说话时也保持的常驻场景：听歌、完工、急停。
+    fn sticky_while_talking(&self) -> Option<crate::BotPose> {
+        self.sticky_scene().map(|s| s.scene).filter(|scene| {
+            matches!(
+                scene,
+                crate::BotPose::MusicGroove
+                    | crate::BotPose::CelebrateDone
+                    | crate::BotPose::HaltedShield
+            )
+        })
+    }
+
+    /// n70 让设备切到当前画风的某个全屏场景（发 `llm` 表情名）。没刷画风包的设备什么也不发。
+    async fn show_screen(
+        &mut self,
+        socket: &mut WebSocket,
+        scene: crate::BotPose,
+        force: bool,
+    ) -> Result<(), String> {
+        if !self.pack_active() {
+            return Ok(());
+        }
+        let name = crate::screen_pack::emotion_name(self.shared.card_style(), scene);
+        if !force && self.last_screen_emotion.as_deref() == Some(name.as_str()) {
+            return Ok(());
+        }
+        let message = ServerMessage::Llm {
+            session_id: self.session_id.into(),
+            text: name.clone(),
+            emotion: name.clone(),
+        };
+        if !send_json(socket, &message).await {
+            return Err("发送失败".into());
+        }
+        self.last_screen_emotion = Some(name);
+        Ok(())
+    }
+
+    /// n70 在全屏画面上叠一行字（固件字幕位置）。
+    async fn screen_text(&mut self, socket: &mut WebSocket, text: String) -> Result<(), String> {
+        if send_json(
+            socket,
+            &ServerMessage::Stt {
+                session_id: self.session_id.into(),
+                text,
+            },
+        )
+        .await
+        {
             Ok(())
         } else {
             Err("发送失败".into())
         }
+    }
+
+    /// n70 回到常驻场景（没有就显示 `fallback`）并重发那行字；设备状态切换（固件会重置成 `neutral`）后调用。
+    async fn show_ambient(
+        &mut self,
+        socket: &mut WebSocket,
+        fallback: crate::BotPose,
+    ) -> Result<(), String> {
+        if !self.pack_active() {
+            return Ok(());
+        }
+        let (scene, text) = match self.sticky_scene() {
+            Some(sticky) => (sticky.scene, sticky.text.clone()),
+            None => (fallback, None),
+        };
+        self.show_screen(socket, scene, true).await?;
+        if let Some(text) = text {
+            self.screen_text(socket, text).await?;
+        }
+        Ok(())
+    }
+
+    /// n70 设定常驻场景；画面或那行字变了才发给设备。
+    async fn set_sticky(
+        &mut self,
+        socket: &mut WebSocket,
+        scene: crate::BotPose,
+        text: Option<String>,
+        ttl: Option<Duration>,
+    ) -> Result<(), String> {
+        let text_changed = self
+            .screen_scene
+            .as_ref()
+            .is_none_or(|old| old.scene != scene || old.text != text);
+        self.screen_scene = Some(ScreenSceneState {
+            scene,
+            text: text.clone(),
+            until: ttl.map(|d| Instant::now() + d),
+        });
+        self.show_screen(socket, scene, false).await?;
+        if text_changed && let Some(text) = text {
+            self.screen_text(socket, text).await?;
+        }
+        Ok(())
+    }
+
+    /// n70 结束雕刻 / 待批准这类常驻场景，回到聆听或待命画面。
+    async fn clear_sticky(
+        &mut self,
+        socket: &mut WebSocket,
+        scenes: &[crate::BotPose],
+    ) -> Result<(), String> {
+        if !self
+            .screen_scene
+            .as_ref()
+            .is_some_and(|s| scenes.contains(&s.scene))
+        {
+            return Ok(());
+        }
+        self.screen_scene = None;
+        if !self.busy() {
+            let fallback = if matches!(self.phase, Phase::Listening(_)) {
+                crate::BotPose::Listening
+            } else {
+                crate::BotPose::IdleBlink
+            };
+            self.show_screen(socket, fallback, false).await?;
+        }
+        Ok(())
     }
 
     async fn send_frame(&mut self, socket: &mut WebSocket, payload: &[u8]) -> Result<(), String> {
@@ -1553,6 +1736,7 @@ impl<'a> Session<'a> {
         let Some(conversation) = self.conversation.clone() else {
             return;
         };
+        self.turn_scene = None;
         if matches!(kind, TurnKind::Answer | TurnKind::Goodbye) {
             self.preview_hold = None;
             self.pending_oled_preview = None;
@@ -1769,6 +1953,18 @@ impl<'a> Session<'a> {
             .conversation
             .as_ref()
             .is_none_or(|c| c.settings.screen_preview_sync);
+        if want_hud && self.pack_active() {
+            // n70 刷了画风包：全屏唱机 / 听歌小机器人一直显示到停播，不再每 4 秒推半屏卡
+            let short_title: String = title.chars().take(48).collect();
+            self.set_sticky(
+                socket,
+                crate::BotPose::MusicGroove,
+                Some(format!("[音乐] {short_title}")),
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
         let can_color_music = want_hud
             && self.device_mcp.as_ref().is_some_and(|d| {
                 d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
@@ -1948,6 +2144,11 @@ impl<'a> Session<'a> {
                 {
                     return Err("发送失败".into());
                 }
+                // n70 听完开始想：全屏画风切到“思考”
+                if self.sticky_while_talking().is_none() {
+                    self.show_screen(socket, crate::BotPose::Thinking, true)
+                        .await?;
+                }
             }
             TurnEvent::Ignored => {
                 self.finish_timing("ignored");
@@ -1959,6 +2160,18 @@ impl<'a> Session<'a> {
                 } else {
                     // 自动模式下设备仍在拾音（还没收到 tts start）
                     self.start_listening(false);
+                }
+            }
+            TurnEvent::Emotion(emotion) if self.pack_active() => {
+                // n70 刷了画风包：大模型的表情换成当前画风的对应全屏场景
+                self.shared.state.set_emotion(self.session_id, emotion);
+                let scene = crate::screen_pack::speaking_scene(emotion);
+                self.turn_scene = Some(scene);
+                // 已经开口就马上换；还没开口的等发 tts start 时一起换
+                if self.sticky_while_talking().is_none()
+                    && self.turn.as_ref().is_some_and(|t| t.audio_started)
+                {
+                    self.show_screen(socket, scene, true).await?;
                 }
             }
             TurnEvent::Emotion(emotion) => {
@@ -2618,6 +2831,13 @@ impl<'a> Session<'a> {
                         if let Some(prefs) =
                             self.shared.registry.device_hardware_prefs(self.device_id)
                         {
+                            self.screen_pack = prefs
+                                .screen_pack
+                                .as_deref()
+                                .is_some_and(crate::screen_pack::marker_installed);
+                            self.shared
+                                .state
+                                .set_screen_pack(self.session_id, self.screen_pack);
                             let mut replayed = false;
                             if let Some(v) = prefs.volume
                                 && self
@@ -2842,6 +3062,9 @@ impl<'a> Session<'a> {
         socket: &mut WebSocket,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
+        if let crate::DeviceRequest::ShowScene { scene, style } = request {
+            return self.show_scene_request(socket, scene, style).await;
+        }
         if matches!(request, crate::DeviceRequest::PreviewScreen { .. })
             && self.device_mcp.is_none()
         {
@@ -2904,12 +3127,39 @@ impl<'a> Session<'a> {
         self.send_mcp(socket, payload).await
     }
 
+    /// n70 语音中心“推到小智试看”：已刷全屏画风包的设备直接切到该场景（按指定画风）。
+    async fn show_scene_request(
+        &mut self,
+        socket: &mut WebSocket,
+        scene: crate::BotPose,
+        style: crate::ScreenCardStyle,
+    ) -> Result<(), String> {
+        if !self.pack_active() {
+            return Ok(());
+        }
+        let name = crate::screen_pack::emotion_name(style, scene);
+        let message = ServerMessage::Llm {
+            session_id: self.session_id.into(),
+            text: name.clone(),
+            emotion: name.clone(),
+        };
+        if !send_json(socket, &message).await {
+            return Err("发送失败".into());
+        }
+        self.last_screen_emotion = Some(name);
+        self.event(format!("小智全屏试看：{}", scene.label_zh()));
+        Ok(())
+    }
+
     async fn dispatch_device_request(
         &mut self,
         socket: &mut WebSocket,
         request: crate::DeviceRequest,
     ) -> Result<(), String> {
         match request {
+            crate::DeviceRequest::ShowScene { scene, style } => {
+                return self.show_scene_request(socket, scene, style).await;
+            }
             crate::DeviceRequest::RefreshInfo => {
                 let Some(device) = self.device_mcp.as_mut() else {
                     return Ok(());
@@ -3309,6 +3559,8 @@ impl<'a> Session<'a> {
                     self.interrupt(socket, "重新开始拾音").await?;
                 }
                 self.start_listening(manual);
+                // n70 固件进入聆听时把表情重置成 neutral：换回常驻场景或“聆听”
+                self.show_ambient(socket, crate::BotPose::Listening).await?;
             }
             Ok(ClientMessage::Listen {
                 state: ListenState::Stop,
@@ -3532,6 +3784,15 @@ impl<'a> Session<'a> {
         if self.busy() || !self.permission.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(());
         }
+        // n70 完工 / 急停画面到时间了：回到聆听或待命
+        if self
+            .screen_scene
+            .as_ref()
+            .is_some_and(|scene| scene.until.is_some_and(|t| Instant::now() >= t))
+            && let Some(scene) = self.screen_scene.as_ref().map(|s| s.scene)
+        {
+            self.clear_sticky(socket, &[scene]).await?;
+        }
         let Some(conversation) = self.conversation.clone() else {
             return Ok(());
         };
@@ -3569,7 +3830,10 @@ impl<'a> Session<'a> {
                     self.preview_hold = None;
                     self.last_hud_workflow = None;
                     self.last_approval_summary = None;
-                    if want_hud
+                    self.engrave_preview = None;
+                    if want_hud && self.pack_active() {
+                        self.show_finished_scene(socket, &job).await?;
+                    } else if want_hud
                         && can_color_hud
                         && let Some(badge_url) = self.stage_terminal_badge_url(&job)
                     {
@@ -3589,6 +3853,12 @@ impl<'a> Session<'a> {
                         },
                         TurnKind::Notice,
                     );
+                    return Ok(());
+                } else if want_hud && self.pack_active() {
+                    self.preview_hold = None;
+                    self.last_hud_workflow = None;
+                    self.engrave_preview = None;
+                    self.show_finished_scene(socket, &job).await?;
                     return Ok(());
                 } else if want_hud && can_color_hud {
                     self.preview_hold = None;
@@ -3611,16 +3881,61 @@ impl<'a> Session<'a> {
             self.last_approval_summary = None;
             let frame = self.hud_frame;
             self.hud_frame = self.hud_frame.wrapping_add(1);
-            if can_color_hud {
+            // n70 开始雕刻后才取这个任务的刀路预览（每个任务只取一次）
+            if self
+                .engrave_preview
+                .as_ref()
+                .is_none_or(|(id, _)| id != &progress.workflow_id)
+            {
+                let bytes = conversation
+                    .tools
+                    .workflow_preview(&context, &progress.workflow_id)
+                    .await
+                    .map(Arc::new);
+                self.engrave_preview = Some((progress.workflow_id.clone(), bytes));
+            }
+            let toolpath = self.engrave_preview.as_ref().and_then(|(_, b)| b.clone());
+            if self.pack_active() {
+                // 全屏画风：先把底层切到“雕刻”并叠一行进度字，再在中央盖刀路进度卡（有刀路时）
+                self.set_sticky(
+                    socket,
+                    crate::BotPose::GogglesEngrave,
+                    Some(format!("[雕刻中] {}", progress.subtitle())),
+                    None,
+                )
+                .await?;
+            }
+            if can_color_hud && (toolpath.is_some() || !self.pack_active()) {
                 let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
                 let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
-                if let Ok(png) = crate::preview_push::make_job_hud_png_for_style(
-                    &progress.to_hud_spec(),
-                    self.shared.card_style(),
-                    frame,
-                    cw,
-                    ch,
-                ) && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
+                let png = match toolpath.as_deref() {
+                    Some(source) => crate::preview_push::make_engrave_progress_png(
+                        source,
+                        &progress.to_hud_spec(),
+                        self.shared.card_style(),
+                        frame,
+                        cw,
+                        ch,
+                    )
+                    .or_else(|_| {
+                        crate::preview_push::make_job_hud_png_for_style(
+                            &progress.to_hud_spec(),
+                            self.shared.card_style(),
+                            frame,
+                            cw,
+                            ch,
+                        )
+                    }),
+                    None => crate::preview_push::make_job_hud_png_for_style(
+                        &progress.to_hud_spec(),
+                        self.shared.card_style(),
+                        frame,
+                        cw,
+                        ch,
+                    ),
+                };
+                if let Ok(png) = png
+                    && let Ok(tok) = self.shared.preview_store.stage_prebuilt_png(png)
                 {
                     let host = self.preview_http_host();
                     let url = format!(
@@ -3664,6 +3979,9 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         self.last_hud_workflow = None;
+        self.engrave_preview = None;
+        self.clear_sticky(socket, &[crate::BotPose::GogglesEngrave])
+            .await?;
 
         if let Some(pending) = snap.pending_approval.filter(|_| want_hud) {
             self.preview_hold = None;
@@ -3671,7 +3989,24 @@ impl<'a> Session<'a> {
             self.hud_frame = self.hud_frame.wrapping_add(1);
             let first_for_approval =
                 self.last_approval_summary.as_deref() != Some(pending.summary.as_str());
-            if can_color_hud {
+            if self.pack_active() {
+                // n70 全屏警戒画面一直显示，倒计时写在那行字里
+                self.last_activity = Instant::now();
+                if first_for_approval {
+                    self.last_approval_summary = Some(pending.summary.clone());
+                    self.event("小智全屏切到待电脑批准画面");
+                }
+                self.set_sticky(
+                    socket,
+                    crate::BotPose::ApprovalWave,
+                    Some(format!(
+                        "[待电脑批准] {} · 剩 {} 秒",
+                        pending.summary, pending.remaining_secs
+                    )),
+                    None,
+                )
+                .await?;
+            } else if can_color_hud {
                 let screen_size = self.device_mcp.as_ref().and_then(|d| d.screen_size);
                 let (cw, ch) = crate::preview_push::optimal_canvas_for_screen(screen_size);
                 if let Ok(png) = crate::preview_push::make_approval_card_png(
@@ -3723,7 +4058,30 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         self.last_approval_summary = None;
+        self.clear_sticky(socket, &[crate::BotPose::ApprovalWave])
+            .await?;
         Ok(())
+    }
+
+    /// n70 加工结束：全屏切到完工 / 急停画面 10 秒，叠一行结果；之后回到聆听或待命。
+    async fn show_finished_scene(
+        &mut self,
+        socket: &mut WebSocket,
+        job: &crate::jobs::FinishedJob,
+    ) -> Result<(), String> {
+        let (scene, text) = if job.status == "completed" {
+            (
+                crate::BotPose::CelebrateDone,
+                format!("[雕刻完成] 共 {} 行", job.total_lines),
+            )
+        } else {
+            (
+                crate::BotPose::HaltedShield,
+                format!("[已停止] 停在第 {} 行", job.lines_sent),
+            )
+        };
+        self.set_sticky(socket, scene, Some(text), Some(FINISHED_SCENE_HOLD))
+            .await
     }
 
     /// 会话循环；返回断开原因。

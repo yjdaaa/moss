@@ -14,6 +14,8 @@ const { chromium } = require("playwright");
 const root = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const baselineDir = path.join(root, "tests", "visual-baseline");
 const writeBaseline = process.argv.includes("--baseline");
+// n70：全屏画风 12 个场景（与 voiceState.js 的 GOGGLE_BOT_POSES 同序）
+const SCREEN_SCENES = ["idle", "listen", "think", "talk", "happy", "sad", "surprised", "engrave", "approval", "music", "celebrate", "halted"];
 
 const vite = await createServer({ root, server: { host: "127.0.0.1", port: 0, strictPort: false }, logLevel: "error" });
 let browser;
@@ -42,8 +44,8 @@ try {
       device_prefs: {},
       goggle_bot_gifs: ["idle", "engrave", "approval", "music", "celebrate"].map((id) => ({ id, label: id, data_url: `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-bot` })),
       screen_style_gifs: {
-        moss_hud: Object.fromEntries(["idle", "engrave", "approval", "music", "celebrate"].map((id) => [id, `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-moss`])),
-        goggle_bot: Object.fromEntries(["idle", "engrave", "approval", "music", "celebrate"].map((id) => [id, `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-bot`])),
+        moss_hud: Object.fromEntries(SCREEN_SCENES.map((id) => [id, `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-moss`])),
+        goggle_bot: Object.fromEntries(SCREEN_SCENES.map((id) => [id, `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-bot`])),
       },
       sessions: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", ip: "192.0.2.55", protocol_version: 1, connected_at: 1_790_000_000, state: "idle", level: 0, screen_monochrome: false, screen_width: 320, screen_height: 240, device_tools: ["self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness", "self.screen.set_theme", "self.screen.preview_image", "self.set_press_to_talk"] }],
       // n68：结构化事件（级别 / 分类 / 下一步 / 技术细节）、覆盖计数与降级提示
@@ -446,6 +448,21 @@ try {
   // 5d. 顶部五栏按真实语音执行链路排序（拾音判停 -> 语音识别 -> Jev 前置粗筛 -> 大模型 -> 语音合成），且右上角偏好设置不再重复渲染 Jev
   const mixOrder = await page.locator("#voice-builtin-mix-bar .voice-mix-field").evaluateAll((els) => els.map((el) => el.id));
   assert.deepEqual(mixOrder, ["voice-builtin-mix-vad", "voice-builtin-mix-asr", "voice-builtin-mix-jev", "voice-builtin-mix-llm", "voice-builtin-mix-tts"]);
+  // 5d-1. 链路栏右上角“测试全部环节”（2026-11-08）：按当前选用逐个测，不通的环节在对应下拉框下方报错。
+  // 此时只保存了大模型：判停为内置能量判停（无需测试）、Jev 关闭（跳过）、识别与合成未配置（报错）、大模型真实请求一次
+  const testsBefore = calls.filter((call) => call.command === "voice_builtin_models_test").length;
+  await page.locator("#voice-builtin-test-all").click();
+  await page.locator("#voice-builtin-test-summary").filter({ hasText: "2 个环节不通：语音识别、语音合成" }).waitFor();
+  assert.match(await page.locator("#voice-builtin-test-vad").innerText(), /✓ 内置能量判停，无需测试/);
+  assert.match(await page.locator("#voice-builtin-test-asr").innerText(), /✗ 云端语音识别还没配置/);
+  assert.match(await page.locator("#voice-builtin-test-jev").innerText(), /已关闭，跳过/);
+  assert.match(await page.locator("#voice-builtin-test-llm").innerText(), /✓ .*（180 ms）/);
+  assert.match(await page.locator("#voice-builtin-test-tts").innerText(), /✗ 云端语音合成还没配置/);
+  assert.equal(await page.locator("#voice-builtin-test-asr").getAttribute("role"), "alert", "不通的环节作为警示播报");
+  const pipelineCalls = calls.filter((call) => call.command === "voice_builtin_models_test").slice(testsBefore);
+  assert.deepEqual(pipelineCalls.map((call) => call.args.section), ["llm"], "只对已配置的云端环节发起真实测试");
+  assert.equal(pipelineCalls[0].args.input.api_key, "", "密钥留空，由桌面端沿用已保存的密钥");
+  assert.equal(pipelineCalls[0].args.input.model, "fake-model");
   await page.getByTitle("系统偏好设置").click();
   await page.locator(".settings-modal").waitFor();
   assert.equal(await page.locator("#settings-jev").count(), 0, "桌面端右上角系统设置已移除重复的 Jev 配置，仅保留语音中心唯一入口");
@@ -727,7 +744,9 @@ try {
   assert.equal(await page.locator("#voice-group-screen-preview > .voice-group-h").getAttribute("aria-expanded"), "true", "跳转后副屏预览组已展开");
   const botCard = page.locator("#voice-goggle-bot-card");
   await botCard.waitFor();
-  assert.equal(await botCard.locator(".voice-bot-gif-img").count(), 5, "展示 5 组 160×120 动态场景屏");
+  assert.equal(await botCard.locator(".voice-bot-gif-img").count(), 12, "展示 12 个全屏场景的缩小动图");
+  // n70：在线彩屏小智还没刷全屏画风时提示去唤醒词推送
+  await botCard.locator("#voice-bot-pack-tip").getByText(/还没刷全屏画风/).waitFor();
   await botCard.getByText("太空舱雕刻表盘").waitFor();
   assert.match(await botCard.locator('[data-pose="engrave"] .voice-bot-gif-img').getAttribute("src"), /#engrave-moss$/);
   await page.locator("#voice-card-style-goggle_bot").click();

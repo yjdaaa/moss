@@ -113,9 +113,9 @@ schema v8 的 voice_agent_runs 最近 50 条记录包含 run id、approval id、
 
 桌面 Tauri 命令与 NV17 一样只在 MOSS 主窗口可用（capability `voice-private-main.json`，处理函数复核 `require_private_settings_window`），Android 返回仅桌面：
 
-- `voice_wakeword_status()` → `{word:{text,command,threshold}, base:{files,size,chip_model,text_font,emoji_count,wake_word}|null, devices:[{device_id,name,supported}], running}`；`devices` 只含在线且已允许的设备，`supported` 表示固件上报了 `self.assets.set_download_url`。
+- `voice_wakeword_status()` → `{word:{text,command,threshold}, base:{files,size,chip_model,text_font,emoji_count,wake_word}|null, devices:[{device_id,name,supported,screen_pack_size,screen_pack}], running}`；`devices` 只含在线且已允许的设备，`supported` 表示固件上报了 `self.assets.set_download_url`；n70 起 `screen_pack_size` 为彩屏上报的 `[宽,高]`（单色屏或没报分辨率为 `null`），`screen_pack` 表示这台已刷 MOSS 全屏画风（来自设备偏好）。
 - `voice_wakeword_import_base()`：弹本机文件框（只筛 `.bin`），校验资源包格式、校验和与 `index.json`（≤8 MB），存为运行目录 `wakeword/base-assets.bin`；取消返回 `null`，失败 `wakeword_invalid` 且保留旧文件。
-- `voice_wakeword_manage({input})`：字段集合必须完全匹配。`save{text,command,threshold}`（显示文字 1～16 字、拼音 2～6 个 `mn6_cn` 词表音节、阈值 0.05～0.95）；`clear_base{confirmed:true}`；`push{device_id,target:"custom"|"default",confirmed:true}` 要求设备已允许（`wakeword_device_invalid`）、服务运行中（`voice_builtin_stopped`）、设备在线且支持（`wakeword_device_unsupported`），返回状态加 `pushed{device_id,size,target}`。
+- `voice_wakeword_manage({input})`：字段集合必须完全匹配。`save{text,command,threshold}`（显示文字 1～16 字、拼音 2～6 个 `mn6_cn` 词表音节、阈值 0.05～0.95）；`clear_base{confirmed:true}`；`push{device_id,target:"custom"|"default",confirmed:true,screen_pack?:bool}` 要求设备已允许（`wakeword_device_invalid`）、服务运行中（`voice_builtin_stopped`）、设备在线且支持（`wakeword_device_unsupported`），返回状态加 `pushed{device_id,size,target,screen_pack}`；n70 `screen_pack:true` 时按设备分辨率与当前画风把全屏画风一起打进资源包（设备没报彩屏分辨率返回 `screen_pack_unsupported`），推送后把 `builtin_device_prefs.<设备>.screen_pack` 记为 `moss-screen-1:<画风>`，不带画风推送时清掉。
 
 ### NV14 本地音乐（桌面 Tauri 命令，非公共 HTTP）
 

@@ -15,6 +15,7 @@ use crate::conversation::{
 mod barge;
 mod music;
 mod person;
+mod screen;
 
 #[derive(Default)]
 struct FakeAsr {

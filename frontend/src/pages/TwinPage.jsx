@@ -69,6 +69,7 @@ const DEMO_GCODE = [
 ].join("\n");
 
 const WORKSPACE_STORAGE_KEY = "moss_yisu_workspace_limits_v1";
+const SIM_FRAME_MS = 1000 / 30;
 const MATERIAL_STORAGE_KEY = "moss_yisu_material_config_v1";
 
 function loadSavedWorkspaceLimits() {
@@ -378,6 +379,12 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
     const tick = (now) => {
       if (stopped) return;
+      // 推演画面约 30 fps（2026-11-08）：每帧都会重新渲染整页并重画 3D，60 fps 时 CPU 约 70%；
+      // 进度按真实经过时间累计，总时长仍与 G-code 推算一致
+      if (now - lastTime < SIM_FRAME_MS) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
       const dt = Math.max(0, (now - lastTime) / 1000);
       lastTime = now;
       setSimProgress((prev) => {

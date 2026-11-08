@@ -140,6 +140,9 @@ pub struct SessionView {
     pub screen_width: Option<u32>,
     #[serde(default)]
     pub screen_height: Option<u32>,
+    /// n70 这台设备已刷 MOSS 全屏画风包（对话与加工画面按全屏场景切换）。
+    #[serde(default)]
+    pub screen_pack: bool,
 }
 
 /// 事件级别。
@@ -538,6 +541,14 @@ impl LiveState {
         }
     }
 
+    pub fn set_screen_pack(&self, session_id: &str, installed: bool) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.screen_pack = installed;
+        }
+    }
+
     pub fn set_screen_info(
         &self,
         session_id: &str,
@@ -673,6 +684,7 @@ mod tests {
             screen_monochrome: None,
             screen_width: None,
             screen_height: None,
+            screen_pack: false,
         });
         assert_eq!(state.aggregate_pulse(), (Some("idle".into()), 0));
         state.set_state("s1", "listening");
@@ -715,6 +727,7 @@ mod tests {
             screen_monochrome: None,
             screen_width: None,
             screen_height: None,
+            screen_pack: false,
         });
         state.set_level("s1", 10);
         assert_eq!(

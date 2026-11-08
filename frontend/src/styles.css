@@ -2926,6 +2926,15 @@ input:not([type]):focus {
 .voice-mix-field-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .voice-mix-field-head b { color: var(--ob-ink); font-size: 12.5px; font-weight: 600; }
 .voice-mix-field .text-input { width: 100%; box-sizing: border-box; }
+/* 测试全部环节（2026-11-08）：按钮在链路栏右上角，结果贴在各环节下拉框下方 */
+.voice-mix-grid--tested { align-items: start; }
+.voice-mix-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.voice-mix-head b { color: var(--ob-ink); font-size: 13px; font-weight: 600; }
+.voice-mix-test { font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.voice-mix-test--ok { color: #34d399; }
+.voice-mix-test--fail { color: #f87171; }
+.voice-mix-test--skip,
+.voice-mix-test--running { color: var(--ob-ink-3, var(--ob-ink-2)); }
 @media (max-width: 1280px) {
   .voice-mix-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
@@ -3705,6 +3714,7 @@ input:not([type]):focus {
   box-shadow: 0 0 14px rgba(139, 123, 255, 0.4);
 }
 .twin-laser-dot {
+  position: relative;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -3717,11 +3727,29 @@ input:not([type]):focus {
 .twin-laser-dot.is-firing,
 .twin-laser-badge.is-firing .twin-laser-dot {
   color: #a78bfa;
+}
+/* 应用在后台（窗口失焦、最小化、收进托盘）时暂停所有 CSS 循环动画，回到前台从原处继续（2026-11-08）。
+   开关由 CyberBackground 写在 <html> 上；页面里的 SVG 小动画在 WebKit 上每帧都要重算样式，单个就占约 10% CPU */
+:root[data-app-active="false"] *,
+:root[data-app-active="false"] *::before,
+:root[data-app-active="false"] *::after {
+  animation-play-state: paused !important;
+}
+
+/* 出光脉冲只动 transform / opacity，交给合成器（2026-11-08）：此前动画 box-shadow 每帧重绘，
+   叠在 3D 画面上连带整块画面重新合成，推演暂停时也占约 13%～25% CPU */
+.twin-laser-dot.is-firing::after,
+.twin-laser-badge.is-firing .twin-laser-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(167, 139, 250, 0.7);
   animation: twin-laser-pulse 0.9s ease-in-out infinite;
 }
 @keyframes twin-laser-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.7); }
-  50% { box-shadow: 0 0 0 4px rgba(167, 139, 250, 0); }
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(2.2); opacity: 0; }
 }
 
 .twin-hud-collapse-btn {
@@ -4837,9 +4865,24 @@ input:not([type]):focus {
   font-size: 12px;
 }
 .voice-bot-offline-tip svg { flex: none; color: var(--bot-tint); }
+/* n70 全屏画风是否已刷进在线小智 */
+.voice-bot-pack-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  border: 1px dashed color-mix(in srgb, var(--bot-tint) 45%, transparent);
+  color: var(--ob-ink-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.voice-bot-pack-tip.is-ready { border-style: solid; background: var(--bot-tint-bg); }
+.voice-bot-pack-tip svg { flex: none; margin-top: 3px; color: var(--bot-tint); }
+.voice-bot-pack-tip .voice-link-btn { margin-left: 4px; }
 .voice-bot-gif-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(112px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 12px;
   overflow-x: auto; /* 只在极窄窗口（每屏 <112px）时横向滚动，平时始终一行 */
   padding: 4px 0 6px; /* 悬停上浮与阴影不被滚动容器裁掉 */
@@ -5054,6 +5097,11 @@ input:not([type]):focus {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px;
   padding: 12px 14px; border: 1px solid var(--ob-line); border-radius: 12px; background: var(--ob-raise);
 }
+/* n70 推送时一并刷入全屏画风 */
+.wakeword-screen-pack { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 10px; font-size: 13px; color: var(--ob-ink); cursor: pointer; }
+.wakeword-screen-pack input { margin-top: 3px; flex: none; }
+.wakeword-screen-pack span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wakeword-screen-pack small { font-size: 11.5px; color: var(--ob-ink-3); line-height: 1.5; }
 .wakeword-device-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .wakeword-device-name strong { font-size: 13.5px; color: var(--ob-ink); }
 .wakeword-device-name small { font-size: 11.5px; color: var(--ob-ink-3); }

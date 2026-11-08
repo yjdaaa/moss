@@ -49,6 +49,18 @@ pub enum BotPose {
     CelebrateDone,
     /// 停机护盾：戴好护目镜举起停机小盾牌
     HaltedShield,
+    /// n70 聆听：手拢在耳边，耳罩亮起
+    Listening,
+    /// n70 思考：眼睛往右上看，手托下巴
+    Thinking,
+    /// n70 说话：嘴巴一张一合
+    Talking,
+    /// n70 开心：月牙笑眼，双手举起
+    Happy,
+    /// n70 难过：耷拉眼，掉小眼泪
+    Sad,
+    /// n70 惊讶：圆眼 + O 形嘴
+    Surprised,
 }
 
 impl BotPose {
@@ -60,6 +72,12 @@ impl BotPose {
             "music" => Some(Self::MusicGroove),
             "celebrate" => Some(Self::CelebrateDone),
             "halted" => Some(Self::HaltedShield),
+            "listen" => Some(Self::Listening),
+            "think" => Some(Self::Thinking),
+            "talk" => Some(Self::Talking),
+            "happy" => Some(Self::Happy),
+            "sad" => Some(Self::Sad),
+            "surprised" => Some(Self::Surprised),
             _ => None,
         }
     }
@@ -72,6 +90,12 @@ impl BotPose {
             Self::MusicGroove => "music",
             Self::CelebrateDone => "celebrate",
             Self::HaltedShield => "halted",
+            Self::Listening => "listen",
+            Self::Thinking => "think",
+            Self::Talking => "talk",
+            Self::Happy => "happy",
+            Self::Sad => "sad",
+            Self::Surprised => "surprised",
         }
     }
 
@@ -83,6 +107,12 @@ impl BotPose {
             Self::MusicGroove => "听歌摇摆",
             Self::CelebrateDone => "完工欢呼",
             Self::HaltedShield => "急停护盾",
+            Self::Listening => "竖耳聆听",
+            Self::Thinking => "托腮思考",
+            Self::Talking => "张嘴说话",
+            Self::Happy => "开心举手",
+            Self::Sad => "难过掉泪",
+            Self::Surprised => "惊讶圆眼",
         }
     }
 
@@ -94,6 +124,12 @@ impl BotPose {
             Self::MusicGroove => "太空舱黑胶像素唱机",
             Self::CelebrateDone => "太空舱 5 秒完工徽章",
             Self::HaltedShield => "太空舱安全急停徽章",
+            Self::Listening => "太空舱声波聆听",
+            Self::Thinking => "太空舱扫描思考",
+            Self::Talking => "太空舱波形说话",
+            Self::Happy => "太空舱青色愉悦",
+            Self::Sad => "太空舱蓝色低落",
+            Self::Surprised => "太空舱白光惊讶",
         }
     }
 }
@@ -146,8 +182,11 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
         _ => 0,
     };
     let dy = match pose {
-        BotPose::IdleBlink | BotPose::ApprovalWave => i32::from(f == 1 || f == 2),
-        BotPose::CelebrateDone => -i32::from(f % 2 == 1),
+        BotPose::IdleBlink | BotPose::ApprovalWave | BotPose::Listening => {
+            i32::from(f == 1 || f == 2)
+        }
+        BotPose::CelebrateDone | BotPose::Happy => -i32::from(f % 2 == 1),
+        BotPose::Surprised => -i32::from(f == 0),
         _ => 0,
     };
     let bx = ox + dx * s;
@@ -192,6 +231,15 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
         fill_rect(img, 22, 9, 2, 7, s, bx, by, neon_cyan);
         dot(img, 2, 10, s, bx, by, Rgb([220, 255, 255]));
         dot(img, 22, 10, s, bx, by, Rgb([220, 255, 255]));
+    } else if pose == BotPose::Listening {
+        // 聆听：两侧耳罩亮起青色
+        let ear = if f.is_multiple_of(2) {
+            neon_cyan
+        } else {
+            cyan_eye
+        };
+        fill_rect(img, 2, 10, 2, 5, s, bx, by, ear);
+        fill_rect(img, 22, 10, 2, 5, s, bx, by, ear);
     } else {
         fill_rect(img, 3, 10, 1, 5, s, bx, by, shell_hi);
         fill_rect(img, 22, 10, 1, 5, s, bx, by, shell_hi);
@@ -249,6 +297,59 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
                 // 眨眼帧 - -
                 fill_rect(img, 8, 13, 3, 1, s, bx, by, cyan_eye);
                 fill_rect(img, 15, 13, 3, 1, s, bx, by, cyan_eye);
+            }
+            BotPose::Happy => {
+                // 月牙笑眼 + 大笑嘴
+                dot(img, 8, 13, s, bx, by, cyan_eye);
+                dot(img, 9, 12, s, bx, by, cyan_eye);
+                dot(img, 10, 13, s, bx, by, cyan_eye);
+                dot(img, 15, 13, s, bx, by, cyan_eye);
+                dot(img, 16, 12, s, bx, by, cyan_eye);
+                dot(img, 17, 13, s, bx, by, cyan_eye);
+                fill_rect(img, 11, 15, 4, 1, s, bx, by, cyan_eye);
+                dot(img, 10, 14, s, bx, by, cyan_eye);
+                dot(img, 15, 14, s, bx, by, cyan_eye);
+            }
+            BotPose::Sad => {
+                // 耷拉眼（外低内高）+ 下撇嘴 + 一滴往下掉的眼泪
+                fill_rect(img, 8, 13, 3, 1, s, bx, by, cyan_eye);
+                dot(img, 10, 12, s, bx, by, cyan_eye);
+                fill_rect(img, 15, 13, 3, 1, s, bx, by, cyan_eye);
+                dot(img, 15, 12, s, bx, by, cyan_eye);
+                fill_rect(img, 12, 15, 2, 1, s, bx, by, cyan_eye);
+                dot(img, 11, 16, s, bx, by, cyan_eye);
+                dot(img, 14, 16, s, bx, by, cyan_eye);
+                let tear_y = 14 + (f as i32 % 3);
+                dot(img, 8, tear_y, s, bx, by, Rgb([110, 170, 255]));
+            }
+            BotPose::Surprised => {
+                // 圆圈眼 + O 形嘴
+                fill_rect(img, 8, 11, 3, 3, s, bx, by, cyan_eye);
+                fill_rect(img, 15, 11, 3, 3, s, bx, by, cyan_eye);
+                dot(img, 9, 12, s, bx, by, visor);
+                dot(img, 16, 12, s, bx, by, visor);
+                fill_rect(img, 12, 15, 2, 2, s, bx, by, cyan_eye);
+            }
+            BotPose::Thinking => {
+                // 眼睛往右上看 + 歪嘴
+                fill_rect(img, 9, 11, 2, 2, s, bx, by, cyan_eye);
+                fill_rect(img, 16, 11, 2, 2, s, bx, by, cyan_eye);
+                dot(img, 10, 11, s, bx, by, Rgb([255, 255, 255]));
+                dot(img, 17, 11, s, bx, by, Rgb([255, 255, 255]));
+                fill_rect(img, 13, 15, 2, 1, s, bx, by, cyan_eye);
+            }
+            BotPose::Talking => {
+                // 大眼睛 + 一张一合的嘴
+                fill_rect(img, 8, 11, 3, 3, s, bx, by, cyan_eye);
+                fill_rect(img, 15, 11, 3, 3, s, bx, by, cyan_eye);
+                dot(img, 8, 11, s, bx, by, Rgb([255, 255, 255]));
+                dot(img, 15, 11, s, bx, by, Rgb([255, 255, 255]));
+                if f.is_multiple_of(2) {
+                    fill_rect(img, 11, 15, 4, 2, s, bx, by, cyan_eye);
+                    fill_rect(img, 12, 15, 2, 1, s, bx, by, visor);
+                } else {
+                    fill_rect(img, 12, 15, 2, 1, s, bx, by, cyan_eye);
+                }
             }
             _ => {
                 // 水灵大眼睛（带白色高光点）
@@ -309,7 +410,7 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
         BotPose::MusicGroove => {
             let arm_y = if f.is_multiple_of(2) { 18 } else { 20 };
             fill_rect(img, 5, arm_y, 2, 3, s, bx, by, shell_hi);
-            fill_rect(img, 19, 38 - arm_y - 19, 2, 3, s, bx, by, shell_hi);
+            fill_rect(img, 19, 38 - arm_y, 2, 3, s, bx, by, shell_hi);
             // 飘动的像素八分音符
             let ny = 4 - (f as i32 % 3);
             fill_rect(img, 0, ny + 2, 2, 2, s, bx, by, neon_cyan);
@@ -338,6 +439,40 @@ pub fn draw_goggle_bot(img: &mut RgbImage, ox: i32, oy: i32, scale: i32, pose: B
             fill_rect(img, 19, 16, 6, 6, s, bx, by, moss_red);
             fill_rect(img, 20, 17, 4, 4, s, bx, by, gold);
             fill_rect(img, 21, 18, 2, 2, s, bx, by, moss_red);
+        }
+        BotPose::Listening => {
+            fill_rect(img, 5, 20, 2, 3, s, bx, by, shell_hi);
+            // 右手拢在耳边
+            fill_rect(img, 19, 17, 2, 3, s, bx, by, shell_hi);
+            fill_rect(img, 21, 14, 2, 4, s, bx, by, shell_hi);
+        }
+        BotPose::Thinking => {
+            fill_rect(img, 5, 20, 2, 3, s, bx, by, shell_hi);
+            // 右手托下巴
+            fill_rect(img, 18, 19, 2, 2, s, bx, by, shell_hi);
+            fill_rect(img, 15, 17, 4, 2, s, bx, by, shell_hi);
+        }
+        BotPose::Talking => {
+            // 说话时小手跟着比划
+            let left_y = if f.is_multiple_of(2) { 19 } else { 20 };
+            fill_rect(img, 5, left_y, 2, 3, s, bx, by, shell_hi);
+            fill_rect(img, 19, 39 - left_y, 2, 3, s, bx, by, shell_hi);
+        }
+        BotPose::Happy => {
+            // 双手高举
+            let arm_y = if f.is_multiple_of(2) { 15 } else { 16 };
+            fill_rect(img, 4, arm_y, 2, 4, s, bx, by, shell_hi);
+            fill_rect(img, 20, arm_y, 2, 4, s, bx, by, shell_hi);
+        }
+        BotPose::Sad => {
+            // 小手垂下
+            fill_rect(img, 5, 21, 2, 3, s, bx, by, shell_dark);
+            fill_rect(img, 19, 21, 2, 3, s, bx, by, shell_dark);
+        }
+        BotPose::Surprised => {
+            // 双手张开
+            fill_rect(img, 3, 18, 3, 2, s, bx, by, shell_hi);
+            fill_rect(img, 20, 18, 3, 2, s, bx, by, shell_hi);
         }
     }
 }
@@ -428,7 +563,7 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
 
 /// 每个姿势一格的 GIF 原始字节缓存槽（编码结果确定，失败也只试一次）。
 fn goggle_bot_gif_slot(pose: BotPose) -> &'static OnceLock<Option<Vec<u8>>> {
-    static SLOTS: [OnceLock<Option<Vec<u8>>>; 6] = [const { OnceLock::new() }; 6];
+    static SLOTS: [OnceLock<Option<Vec<u8>>>; 12] = [const { OnceLock::new() }; 12];
     let index = match pose {
         BotPose::IdleBlink => 0,
         BotPose::GogglesEngrave => 1,
@@ -436,6 +571,12 @@ fn goggle_bot_gif_slot(pose: BotPose) -> &'static OnceLock<Option<Vec<u8>>> {
         BotPose::MusicGroove => 3,
         BotPose::CelebrateDone => 4,
         BotPose::HaltedShield => 5,
+        BotPose::Listening => 6,
+        BotPose::Thinking => 7,
+        BotPose::Talking => 8,
+        BotPose::Happy => 9,
+        BotPose::Sad => 10,
+        BotPose::Surprised => 11,
     };
     &SLOTS[index]
 }

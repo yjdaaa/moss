@@ -1253,6 +1253,7 @@ mod imp {
                 brightness: entry.brightness,
                 theme: entry.theme,
                 talk_mode: entry.talk_mode,
+                screen_pack: entry.screen_pack,
             })
         }
     }
@@ -1508,8 +1509,6 @@ mod imp {
     /// 对话中调用 MOSS 工具（NV4）：身份 `CallerContext::Voice`；运动与出光跟随严格模式开关，桌面控制类工具始终拒绝。
     struct DesktopToolHost {
         host: Arc<laser_host::HostApplication>,
-        settings_file: std::path::PathBuf,
-        server: std::sync::Weak<Mutex<Option<VoiceServer>>>,
     }
     impl ToolHost for DesktopToolHost {
         fn list(&self) -> Value {
@@ -1541,31 +1540,7 @@ mod imp {
                     arguments,
                 )
             };
-            if result.success
-                && matches!(
-                    name,
-                    "generate_text_laser_task_tool"
-                        | "ai_laser_gcode_tool"
-                        | "generate_text_image_gcode_tool"
-                        | "regenerate_text_laser_task_tool"
-                        | "generate_text_image_tool"
-                )
-                && moss_voice::settings::load(&self.settings_file)
-                    .builtin_local
-                    .screen_preview_sync
-                && let Ok((bytes, summary, ruler)) =
-                    extract_preview_bundle_for_host(&self.host, result.detail.as_deref())
-                && let Some(server_arc) = self.server.upgrade()
-                && let Ok(guard) = server_arc.lock()
-                && let Some(server) = guard.as_ref()
-            {
-                let _ = server.push_preview_adaptive_with_ruler(
-                    bytes.as_deref(),
-                    &summary,
-                    ruler.as_deref(),
-                    None,
-                );
-            }
+            // n70（2026-11-08 用户决定）：生成预览时不再自动推到小智屏幕，开始雕刻后才显示刀路（见 `workflow_preview`）
             ToolHostResult {
                 success: result.success,
                 result: result.result,
@@ -1576,6 +1551,38 @@ mod imp {
         /// 加工结束播报的只读轮询：走不计入调用统计的进程内只读通道。
         fn recent_workflows(&self, device_id: &str, session_id: &str) -> Option<Value> {
             laser_host::voice_recent_workflows(&self.host.api_service, device_id, session_id)
+        }
+
+        /// n70 正在雕刻的任务的刀路预览原图：只读本机任务记录里的预览文件（限预览目录内），不走工具分发。
+        fn workflow_preview(
+            &self,
+            device_id: &str,
+            session_id: &str,
+            workflow_id: &str,
+        ) -> Option<Vec<u8>> {
+            use laser_runtime::RuntimeStore;
+            if !self
+                .host
+                .api_service
+                .voice_session_allowed(device_id, session_id)
+            {
+                return None;
+            }
+            let record = self
+                .host
+                .db
+                .get(laser_runtime::RecordKind::Workflow, workflow_id)
+                .ok()
+                .flatten()?;
+            let rel = preview_candidate_from_json(&record.payload)?;
+            let resolved = laser_api::resolve_preview_file(
+                std::path::Path::new(rel),
+                self.host.api_service.preview_roots(),
+            )
+            .ok()?;
+            std::fs::read(resolved).ok().filter(|b| {
+                !b.is_empty() && b.len() <= moss_voice_server::preview_push::MAX_SOURCE_IMAGE_BYTES
+            })
         }
     }
 
@@ -2702,8 +2709,6 @@ mod imp {
             let original: Arc<dyn ToolExecutor> =
                 Arc::new(HostTools::new(Arc::new(DesktopToolHost {
                     host: self.host.clone(),
-                    settings_file: self.settings_file(),
-                    server: Arc::downgrade(&self.server),
                 })));
             let plugin_host = Arc::new(DesktopInfoHost {
                 host: self.host.clone(),
@@ -6555,9 +6560,14 @@ mod imp {
                 .iter()
                 .filter(|r| allowed.contains_key(&r.device_id) && seen.insert(r.device_id.clone()))
                 .map(|r| {
+                    let screen = (r.screen_monochrome != Some(true))
+                        .then_some(r.screen_width.zip(r.screen_height))
+                        .flatten();
                     serde_json::json!({
                         "device_id":r.device_id,"name":allowed.get(&r.device_id),
                         "supported":r.device_tools.iter().any(|t|t=="self.assets.set_download_url"),
+                        "screen_pack_size":screen.map(|(w,h)|[w,h]),
+                        "screen_pack":r.screen_pack,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -6584,17 +6594,19 @@ mod imp {
 
         /// 保存唤醒词 / 移除基础资源包 / 逐台确认推送（自定义唤醒词或恢复“你好小智”）。
         pub fn wakeword_manage(&self, input: &Value) -> Result<Value, CenterError> {
-            use moss_voice_server::wake_assets::{WakeTarget, WakeWord, build_package};
+            use moss_voice_server::wake_assets::{WakeTarget, WakeWord};
             let invalid = || CenterError::new("wakeword_invalid", 400, "唤醒词操作格式无效");
             let object = input.as_object().ok_or_else(invalid)?;
             let action = input["action"].as_str().ok_or_else(invalid)?;
             let allowed: &[&str] = match action {
                 "save" => &["action", "text", "command", "threshold"],
                 "clear_base" => &["action", "confirmed"],
-                "push" => &["action", "device_id", "target", "confirmed"],
+                "push" => &["action", "device_id", "target", "confirmed", "screen_pack"],
                 _ => return Err(invalid()),
             };
-            if object.len() != allowed.len()
+            // n70：push 的 screen_pack 可省略（省略即不带全屏画风），其余字段必须齐全
+            let optional = usize::from(action == "push" && !object.contains_key("screen_pack"));
+            if object.len() + optional != allowed.len()
                 || object.keys().any(|k| !allowed.contains(&k.as_str()))
             {
                 return Err(invalid());
@@ -6645,18 +6657,69 @@ mod imp {
                             "只能推送给已允许的设备",
                         ));
                     }
-                    let package = build_package(self.wakeword_base().as_deref(), &target)
-                        .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
+                    let with_screen = match input.get("screen_pack") {
+                        None => false,
+                        Some(Value::Bool(b)) => *b,
+                        Some(_) => return Err(invalid()),
+                    };
+                    // n70 全屏画风：按这台设备的屏幕分辨率和当前画风生成，随唤醒词一起写进资源分区
+                    let screen = if with_screen {
+                        let (size, style) = {
+                            let server =
+                                self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
+                            let server = server.as_ref().ok_or_else(|| {
+                                CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                            })?;
+                            (
+                                server.screen_pack_size(device_id),
+                                server.screen_card_style(),
+                            )
+                        };
+                        let size = size.ok_or_else(|| {
+                            CenterError::new(
+                                "screen_pack_unsupported",
+                                409,
+                                "这台设备没有上报彩屏分辨率（或是单色屏），不能刷全屏画风；可以取消勾选只推唤醒词",
+                            )
+                        })?;
+                        let extras =
+                            moss_voice_server::screen_pack::build_screen_extras(style, size)
+                                .map_err(internal)?;
+                        Some((extras, style))
+                    } else {
+                        None
+                    };
+                    let package = moss_voice_server::wake_assets::build_package_with_screen(
+                        self.wakeword_base().as_deref(),
+                        &target,
+                        screen.as_ref().map(|(extras, _)| extras),
+                    )
+                    .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
                     let size = package.len();
-                    let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
-                    let server = server.as_ref().ok_or_else(|| {
-                        CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
-                    })?;
-                    server
-                        .install_wake_assets(device_id, package)
-                        .map_err(|e| CenterError::new("wakeword_device_unsupported", 409, e))?;
+                    {
+                        let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
+                        let server = server.as_ref().ok_or_else(|| {
+                            CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                        })?;
+                        server
+                            .install_wake_assets(device_id, package)
+                            .map_err(|e| CenterError::new("wakeword_device_unsupported", 409, e))?;
+                    }
+                    // 设备重启装好后按这个标记切换全屏画风；不带画风的包会把画风清掉
+                    let marker = screen
+                        .as_ref()
+                        .map(|(_, style)| moss_voice_server::screen_pack::pack_marker(*style));
+                    moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                        let entry = s
+                            .builtin_device_prefs
+                            .entry(device_id.to_owned())
+                            .or_default();
+                        entry.screen_pack = marker.clone();
+                        Ok(())
+                    })
+                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
                     let mut status = self.wakeword_status()?;
-                    status["pushed"] = serde_json::json!({"device_id":device_id,"size":size,"target":input["target"]});
+                    status["pushed"] = serde_json::json!({"device_id":device_id,"size":size,"target":input["target"],"screen_pack":with_screen});
                     return Ok(status);
                 }
                 _ => {}
@@ -7673,6 +7736,9 @@ mod imp {
                 serde_json::json!({"action": "push", "device_id": "dev", "target": "custom", "confirmed": false}),
                 serde_json::json!({"action": "clear_base", "confirmed": false}),
                 serde_json::json!({"action": "flash"}),
+                // n70：screen_pack 只能是布尔值，且不能夹带别的字段
+                serde_json::json!({"action": "push", "device_id": "dev", "target": "custom", "confirmed": true, "screen_pack": "yes"}),
+                serde_json::json!({"action": "push", "device_id": "dev", "target": "custom", "confirmed": true, "screen_pack": true, "extra": 1}),
             ] {
                 assert!(builtin.wakeword_manage(&bad).is_err(), "{bad}");
             }
@@ -7686,6 +7752,12 @@ mod imp {
                 push.unwrap_err().code,
                 "wakeword_device_invalid",
                 "only allowed devices"
+            );
+            let push = builtin.wakeword_manage(&serde_json::json!({"action": "push", "device_id": "never-allowed", "target": "custom", "confirmed": true, "screen_pack": true}));
+            assert_eq!(
+                push.unwrap_err().code,
+                "wakeword_device_invalid",
+                "the full-screen pack follows the same per-device guard"
             );
 
             let base_path = temp.path().join("picked-assets.bin");

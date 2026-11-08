@@ -842,62 +842,30 @@ export const SCREEN_CARD_STYLE_OPTIONS = [
     id: "moss_hud",
     label: "硬核太空舱（MOSS HUD）",
     shortLabel: "硬核太空舱",
-    hint: "直角战术瞄准刻度、深空暗底与领航空间站仪表盘",
+    hint: "直角瞄准刻度、深空暗底与 MOSS 红色光学眼",
   },
   {
     id: "goggle_bot",
     label: "可爱像素小机器人（Goggle Bot）",
     shortLabel: "可爱像素小机器人",
-    hint: "圆角星光边框、小 MOSS 护目镜像素小机器人陪同雕刻/审批/听歌/庆祝",
+    hint: "星空暗底、小 MOSS 护目镜像素小机器人陪你聊天、雕刻、审批、听歌",
   },
 ];
 
+// n70（2026-11-08）：小智全屏画风 12 个场景，顺序与 `moss-voice-server::screen_pack::SCENES` 一致。
 export const GOGGLE_BOT_POSES = [
-  {
-    id: "idle",
-    label: "待机眨眼",
-    desc: "护目镜架额头，灵动眨眼",
-    mossLabel: "1:1 刀路预览 · 太空舱",
-    mossDesc: "MOSS 红眼扫描 + 发光刀路标尺",
-    botLabel: "1:1 刀路预览 · 小机器人",
-    botDesc: "护目镜架额头眨眼 + 发光刀路",
-  },
-  {
-    id: "engrave",
-    label: "戴护目镜雕刻",
-    desc: "拉下琥珀防激光镜与火花",
-    mossLabel: "太空舱雕刻表盘",
-    mossDesc: "大号百分比 + 16 段进度与剩余时间",
-    botLabel: "戴护目镜雕刻",
-    botDesc: "拉下琥珀防激光镜伴随火花闪烁",
-  },
-  {
-    id: "approval",
-    label: "待电脑审批",
-    desc: "举牌挥手提醒电脑点批准",
-    mossLabel: "太空舱审批警戒门禁",
-    mossDesc: "红琥珀脉冲机械眼 + 批准倒计时条",
-    botLabel: "待电脑审批提醒",
-    botDesc: "小机器人举牌挥手催电脑点批准",
-  },
-  {
-    id: "music",
-    label: "听歌摇摆",
-    desc: "戴青色耳机随本地音乐律动",
-    mossLabel: "太空舱黑胶像素唱机",
-    mossDesc: "旋转黑胶唱盘 + 8 柱频谱跳动",
-    botLabel: "听歌摇摆",
-    botDesc: "戴青色耳机跟拍 + 音符频谱律动",
-  },
-  {
-    id: "celebrate",
-    label: "完工欢呼",
-    desc: "5 秒庆祝徽章自动淡出",
-    mossLabel: "太空舱 5 秒完工徽章",
-    mossDesc: "翠绿完成徽章，5 秒后自动淡出",
-    botLabel: "完工欢呼徽章",
-    botDesc: "竖大拇指星光闪烁，5 秒自动淡出",
-  },
+  { id: "idle", label: "待命眨眼", desc: "护目镜架额头眨眼；固件待命时显示", mossLabel: "太空舱待命红眼", mossDesc: "红色光学眼慢呼吸；固件待命时显示", botLabel: "待命眨眼", botDesc: "护目镜架额头眨眼；固件待命时显示" },
+  { id: "listen", label: "竖耳聆听", desc: "耳罩亮起，手拢在耳边", mossLabel: "太空舱声波聆听", mossDesc: "青色声波圈一圈圈扩散", botLabel: "竖耳聆听", botDesc: "耳罩亮起，手拢在耳边" },
+  { id: "think", label: "托腮思考", desc: "眼睛往右上看，冒思考泡泡", mossLabel: "太空舱扫描思考", mossDesc: "琥珀扫描环转圈", botLabel: "托腮思考", botDesc: "眼睛往右上看，冒思考泡泡" },
+  { id: "talk", label: "张嘴说话", desc: "嘴巴一张一合，小手比划", mossLabel: "太空舱波形说话", mossDesc: "两侧声波柱跟着跳", botLabel: "张嘴说话", botDesc: "嘴巴一张一合，小手比划" },
+  { id: "happy", label: "开心举手", desc: "开心类表情：月牙笑眼、双手举起", mossLabel: "太空舱青色愉悦", mossDesc: "开心类表情：青色光眼 + 上升箭头", botLabel: "开心举手", botDesc: "开心类表情：月牙笑眼、双手举起" },
+  { id: "sad", label: "难过掉泪", desc: "难过类表情：耷拉眼、小乌云下雨", mossLabel: "太空舱蓝色低落", mossDesc: "难过类表情：蓝色光眼 + 雨丝", botLabel: "难过掉泪", botDesc: "难过类表情：耷拉眼、小乌云下雨" },
+  { id: "surprised", label: "惊讶圆眼", desc: "惊讶类表情：圆眼 O 形嘴、感叹号", mossLabel: "太空舱白光惊讶", mossDesc: "惊讶类表情：白光眼 + 闪光环", botLabel: "惊讶圆眼", botDesc: "惊讶类表情：圆眼 O 形嘴、感叹号" },
+  { id: "engrave", label: "戴护目镜雕刻", desc: "开始雕刻后显示；有刀路时中央叠刀路与进度", mossLabel: "太空舱雕刻表盘", mossDesc: "开始雕刻后显示；有刀路时中央叠刀路与进度", botLabel: "戴护目镜雕刻", botDesc: "开始雕刻后显示；有刀路时中央叠刀路与进度" },
+  { id: "approval", label: "待电脑审批提醒", desc: "举牌挥手，倒计时写在字幕", mossLabel: "太空舱审批警戒门禁", mossDesc: "琥珀边框闪烁，倒计时写在字幕", botLabel: "待电脑审批提醒", botDesc: "举牌挥手，倒计时写在字幕" },
+  { id: "music", label: "听歌摇摆", desc: "戴耳机摇摆、音符飘起，停播为止", mossLabel: "太空舱黑胶像素唱机", mossDesc: "唱盘旋转、音符飘起，停播为止", botLabel: "听歌摇摆", botDesc: "戴耳机摇摆、音符飘起，停播为止" },
+  { id: "celebrate", label: "完工欢呼", desc: "竖大拇指、彩纸落下，停留约 10 秒", mossLabel: "太空舱完工徽章", mossDesc: "青色光芒旋转，停留约 10 秒", botLabel: "完工欢呼", botDesc: "竖大拇指、彩纸落下，停留约 10 秒" },
+  { id: "halted", label: "急停护盾", desc: "戴好护目镜举盾，停留约 10 秒", mossLabel: "太空舱安全急停", mossDesc: "红框警示角闪烁，停留约 10 秒", botLabel: "急停护盾", botDesc: "戴好护目镜举盾，停留约 10 秒" },
 ];
 
 export const BUILTIN_ASR_CORRECTION_PREVIEW =
@@ -2835,4 +2803,75 @@ export function wakeWordDraftError(draft) {
   const threshold = Number(draft?.threshold);
   if (!Number.isFinite(threshold) || threshold < 0.05 || threshold > 0.95) return "灵敏度阈值须在 0.05～0.95 之间";
   return "";
+}
+
+/**
+ * “测试全部环节”（2026-11-08 用户要求：链路栏右上角一键测试，哪个环节不通就在哪里报错）。
+ * 按每个环节**当前选用**的来源决定怎么测，只用已保存的配置（密钥留空由桌面端沿用已保存的）：
+ * - `static`：无需请求，直接给出结论（内置能量判停、Jev 已关闭、本地模型就绪 / 未下载、云端未配置等）；
+ * - `section`：调用 `voice_builtin_models_test(section, payload)` 真实请求一次云端识别 / 大模型 / 合成；
+ * - `jev`：调用 `voice_builtin_models_test("jev", {model})`，云端用已保存密钥、本地会先确认推理进程已启动。
+ * 本地识别 / 合成 / 判停没有推理测试接口，只检查模型是否已下载、本地模型程序是否存在，文案如实说明。
+ */
+export function pipelineTestPlan(status) {
+  const helperFound = status?.local?.helper_found !== false;
+  const localStep = (key, label, view) => {
+    const model = view.selectedLocalModel;
+    if (!model?.installed) {
+      return { key, kind: "static", ok: false, detail: `本地${label}模型“${model?.label || "未选择"}”还没下载：到下方“本地模型”下载，或在上方改回${key === "vad" ? "内置能量判停" : "云端"}` };
+    }
+    if (!helperFound) {
+      return { key, kind: "static", ok: false, detail: "找不到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录），本地模型无法运行" };
+    }
+    return { key, kind: "static", ok: true, detail: `本地 ${model.label} 已下载（本地模型只检查是否就绪，不做试跑）` };
+  };
+  return MIX_SECTIONS.map(({ key, label }) => {
+    const cleanLabel = label.replace(/^\d+\.\s*/, "");
+    const view = builtinSectionSourceView(key, status);
+    if (key === "vad") {
+      if (view.source !== "local") return { key, kind: "static", ok: true, detail: "内置能量判停，无需测试" };
+      return localStep(key, cleanLabel, view);
+    }
+    if (key === "jev") {
+      if (view.source === "off") return { key, kind: "static", ok: true, skipped: true, detail: "已关闭，跳过" };
+      if (view.source === "local") {
+        const model = view.selectedLocalModel;
+        if (!model?.installed) {
+          return { key, kind: "static", ok: false, detail: `本地决策模型“${model?.label || "未选择"}”还没下载：到下方“本地模型”下载，或在上方关闭 Jev` };
+        }
+        return { key, kind: "jev", input: { model: model.id } };
+      }
+      if (!view.cloudConfigured) {
+        return { key, kind: "static", ok: false, detail: "还没配置 OpenRouter API Key：到下方 Jev 卡片填写，或在上方关闭 Jev" };
+      }
+      return { key, kind: "jev", input: { api_key: "", model: view.cloudModel } };
+    }
+    if (view.source === "local") return localStep(key, cleanLabel, view);
+    const entry = status?.models?.[key];
+    if (!entry?.configured) {
+      return { key, kind: "static", ok: false, detail: `云端${cleanLabel}还没配置：到下方“${cleanLabel}”卡片填写并保存${key === "llm" ? "" : "，或在上方改用本地模型"}` };
+    }
+    const form = builtinModelForm(key, entry);
+    const inputError = sectionInputError(key, form);
+    if (inputError) return { key, kind: "static", ok: false, detail: `已保存的配置不完整：${inputError}` };
+    return { key, kind: "section", section: key, input: sectionPayload(key, form) };
+  });
+}
+
+/** 把一次测试返回（`TestResult`）或调用异常变成环节结论；`errorText` 由调用方传入（通常是 `voiceErrorText`）。 */
+export function pipelineTestOutcome(result, error, errorText = (e) => String(e?.message || e || "测试失败")) {
+  if (error) return { ok: false, detail: errorText(error) };
+  const ok = Boolean(result?.ok);
+  const elapsed = Number(result?.elapsed_ms);
+  const timing = Number.isFinite(elapsed) && elapsed > 0 ? `（${elapsed} ms）` : "";
+  const detail = String(result?.detail || "").trim() || (ok ? "连接正常" : "测试未通过");
+  return { ok, detail: `${detail}${ok ? timing : ""}` };
+}
+
+/** 汇总一句话：全部通过 / 哪几个环节不通。`results` 为 `{key: {ok, skipped}}`。 */
+export function pipelineTestSummary(results) {
+  const failed = MIX_SECTIONS.filter(({ key }) => results?.[key] && results[key].ok === false).map(({ label }) => label.replace(/^\d+\.\s*/, ""));
+  const passed = MIX_SECTIONS.filter(({ key }) => results?.[key]?.ok && !results[key].skipped).length;
+  if (failed.length === 0) return { ok: true, text: `全部环节测试通过（${passed} 项正常${passed < MIX_SECTIONS.length ? "，其余已关闭跳过" : ""}）` };
+  return { ok: false, text: `${failed.length} 个环节不通：${failed.join("、")}。原因见对应下拉框下方` };
 }

@@ -11,6 +11,8 @@ export default function VoiceWakeWordCard() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  // n70 推送时默认一并刷入 MOSS 全屏画风（只对报了彩屏分辨率的设备生效）
+  const [withScreen, setWithScreen] = useState(true);
   const refresh = async (resetDraft = false) => {
     try {
       const next = await voiceApi.wakewordStatus();
@@ -51,9 +53,11 @@ export default function VoiceWakeWordCard() {
   };
   const push = async (device, target) => {
     const name = device.name || device.device_id;
-    const what = target === "custom" ? `唤醒词“${saved.text}”（拼音 ${saved.command}）` : "官方唤醒词“你好小智”";
+    const screen = withScreen && Array.isArray(device.screen_pack_size);
+    const what = (target === "custom" ? `唤醒词“${saved.text}”（拼音 ${saved.command}）` : "官方唤醒词“你好小智”") + (screen ? "和 MOSS 全屏画风" : "");
     const ok = await showConfirm(
       `把${what}推送给设备 ${name}？\n` +
+      (screen ? `全屏画风按这台的屏幕 ${device.screen_pack_size[0]}×${device.screen_pack_size[1]} 和当前画风生成：对话、雕刻、审批、听歌画面铺满整屏一直显示；顶部“聆听中”等状态字由固件显示，改不了。\n` : (device.screen_pack ? "这次不带全屏画风：装好后屏幕回到官方表情。\n" : "")) +
       "设备会立即重启，开机后自己下载资源包并写入闪存的资源分区，屏幕会显示下载进度，期间不要断电。" +
       (data?.base ? "会保留基础资源包里的字体、表情和背景。" : "没有导入基础资源包：设备屏幕的字体和表情会回到固件自带的。") +
       "\n只支持 ESP32-S3、16 MB 闪存、小智固件 2.0.2 以上（v2 分区表）的设备；不满足时设备会拒收，原有内容不变。" +
@@ -61,8 +65,8 @@ export default function VoiceWakeWordCard() {
       { title: "推送唤醒词？", tone: "warning", danger: true, confirmText: "确认推送这一台" },
     );
     if (!ok) return;
-    await run(() => voiceApi.wakewordManage({ action: "push", device_id: device.device_id, target, confirmed: true }),
-      (next) => `已发送：${name} 正在重启并下载资源包（${((next?.pushed?.size || 0) / 1048576).toFixed(1)} MB）。装好后对它说“${target === "custom" ? saved.text : "你好小智"}”试试。`);
+    await run(() => voiceApi.wakewordManage({ action: "push", device_id: device.device_id, target, confirmed: true, screen_pack: screen }),
+      (next) => `已发送：${name} 正在重启并下载资源包（${((next?.pushed?.size || 0) / 1048576).toFixed(1)} MB${screen ? "，含全屏画风" : ""}）。装好后对它说“${target === "custom" ? saved.text : "你好小智"}”试试。`);
   };
   const devices = Array.isArray(data?.devices) ? data.devices : [];
   const base = data?.base;
@@ -134,13 +138,23 @@ export default function VoiceWakeWordCard() {
             <p>需要 ESP32-S3、16 MB 闪存、小智固件 2.0.2 以上；推送期间不要断电。</p>
           </div>
         </div>
+        <label className="wakeword-screen-pack" id="voice-wakeword-screen-pack">
+          <input type="checkbox" checked={withScreen} disabled={busy} onChange={(event) => setWithScreen(event.target.checked)} />
+          <span>
+            同时刷入 MOSS 全屏画风
+            <small>彩屏小智的对话、雕刻、审批、听歌画面铺满整屏、一直显示，按“副屏预览”里当前选的画风；单色屏或没报分辨率的设备自动只推唤醒词。不勾就是官方表情。</small>
+          </span>
+        </label>
         {!data?.running ? <p className="wakeword-empty">内置语音服务未运行。</p> : devices.length === 0 ? <p className="wakeword-empty">没有在线的已允许设备。</p> : (
           <ul className="wakeword-devices" aria-label="可推送唤醒词的设备">
             {devices.map((device) => (
               <li key={device.device_id} className="wakeword-device">
                 <span className="wakeword-device-name">
                   <strong>{device.name || device.device_id}</strong>
-                  <small>{device.supported ? "支持在线更新唤醒词" : "固件不支持在线更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"}</small>
+                  <small>
+                    {device.supported ? "支持在线更新唤醒词" : "固件不支持在线更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"}
+                    {device.supported && (device.screen_pack ? " · 已刷全屏画风" : Array.isArray(device.screen_pack_size) ? ` · 彩屏 ${device.screen_pack_size[0]}×${device.screen_pack_size[1]}，可刷全屏画风` : " · 没报彩屏分辨率，只能推唤醒词")}
+                  </small>
                 </span>
                 {device.supported && (
                   <span className="wakeword-device-actions">

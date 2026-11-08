@@ -5,7 +5,9 @@ import React, { useEffect, useRef } from "react";
  *
  * - WebGL 片元着色器：多层域扭曲噪声，紫 / 赤红 / 蓝等离子缓慢流动，随鼠标轻微偏移。
  * - 叠加一层 2D 星点（闪烁），以及静态暗角与细噪点。
- * - 性能：着色器以 50% 分辨率渲染后由 CSS 放大；限帧约 40 fps；页面隐藏时暂停；
+ * - 性能：着色器以 50% 分辨率渲染后由 CSS 放大；限帧约 40 fps；页面隐藏或窗口不在前台（切到别的应用、
+ *   最小化、收进托盘）时暂停，回到前台继续，并给 <html> 标 `data-app-active="false"` 让页面 CSS 循环动画
+ *   一起暂停（2026-11-08，此前窗口开着就一直占约 25% CPU）；
  *   启动 2 秒内自测帧率，低于 28 fps 自动降到 33% 分辨率并减少星点。
  * - WebGL 不可用时退回 CSS 静态渐变（不报错、不影响业务）。
  * - prefers-reduced-motion：只绘制一帧静态画面。
@@ -89,7 +91,8 @@ export function CyberBackground() {
     const ctx = starCanvas.getContext("2d");
 
     let animId = null;
-    let isVisible = !document.hidden;
+    let focused = typeof document.hasFocus === "function" ? document.hasFocus() : true;
+    let isVisible = !document.hidden && focused;
     let lowPower = false;
     let lastFrame = 0;
     let probeStart = 0;
@@ -183,14 +186,28 @@ export function CyberBackground() {
       mouse.x = e.clientX / window.innerWidth - 0.5;
       mouse.y = e.clientY / window.innerHeight - 0.5;
     };
+    const markState = () => {
+      root.dataset.state = reduceMotion ? "static" : isVisible ? "running" : "paused";
+      // 整个应用在后台时，页面上的 CSS 循环动画也一起暂停（styles.css `[data-app-active="false"]`）
+      document.documentElement.dataset.appActive = isVisible ? "true" : "false";
+    };
     const onVisibility = () => {
-      isVisible = !document.hidden;
+      isVisible = !document.hidden && focused;
       if (!isVisible && probeStart > 0) {
         // 隐藏期间不计入帧率自检，回到前台后重新测
         probeStart = 0;
         probeFrames = 0;
       }
       if (isVisible && !reduceMotion && !animId) animId = requestAnimationFrame(loop);
+      markState();
+    };
+    const onFocus = () => {
+      focused = true;
+      onVisibility();
+    };
+    const onBlur = () => {
+      focused = false;
+      onVisibility();
     };
     const onResize = () => {
       resize();
@@ -200,11 +217,16 @@ export function CyberBackground() {
     resize();
     window.addEventListener("resize", onResize);
     document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    markState();
     if (reduceMotion) {
       drawFrame(0);
     } else {
       window.addEventListener("pointermove", onPointerMove, { passive: true });
-      animId = requestAnimationFrame(loop);
+      // 启动时不在前台也先画一帧，窗口出现时不是空白
+      if (isVisible) animId = requestAnimationFrame(loop);
+      else drawFrame(0);
     }
 
     return () => {
@@ -212,6 +234,9 @@ export function CyberBackground() {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointermove", onPointerMove);
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+      delete document.documentElement.dataset.appActive;
       const lose = plasma?.gl.getExtension("WEBGL_lose_context");
       if (lose) lose.loseContext();
     };
