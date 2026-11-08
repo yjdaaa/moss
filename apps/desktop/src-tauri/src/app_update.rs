@@ -826,15 +826,28 @@ pub async fn app_update_install(
             if let Ok(mut p) = progress.lock() {
                 p.phase = "installing";
             }
-            if let Err(e) = update.install(bytes) {
-                return fail(&progress, format!("安装更新失败：{e}"));
+            // 安装、停服务与重启都会阻塞（Windows 的 on_before_exit 同样在 install 里收尾），放到阻塞线程，
+            // 与“完全退出”一致；在异步任务里直接收尾曾因停止语音服务 panic，界面一直停在“正在重启”（2026-11-08）。
+            let blocking_progress = progress.clone();
+            let finished = tauri::async_runtime::spawn_blocking(move || {
+                let progress = blocking_progress;
+                if let Err(e) = update.install(bytes) {
+                    return fail(&progress, format!("安装更新失败：{e}"));
+                }
+                // macOS：新 .app 已就位，按完全退出的顺序收尾后重启（Windows 不会走到这里）
+                if let Ok(mut p) = progress.lock() {
+                    p.phase = "restarting";
+                }
+                crate::shutdown_desktop_services(&app, true);
+                app.restart();
+            })
+            .await;
+            if finished.is_err() {
+                fail(
+                    &progress,
+                    "新版本可能已安装，但自动重启失败。请从菜单栏或托盘图标完全退出 MOSS 后重新打开".into(),
+                );
             }
-            // macOS：新 .app 已就位，按完全退出的顺序收尾后重启（Windows 不会走到这里）
-            if let Ok(mut p) = progress.lock() {
-                p.phase = "restarting";
-            }
-            crate::shutdown_desktop_services(&app, true);
-            app.restart();
         });
     }
 

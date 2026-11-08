@@ -829,7 +829,12 @@ impl VoiceServer {
         }
         let _ = self.shutdown.send(true);
         if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_timeout(Duration::from_secs(2));
+            // 调用方可能处在别的 tokio 运行时的异步任务里（如应用内更新收尾），在那里直接
+            // shutdown_timeout 会 panic；换到普通线程关闭并等待，仍最多 2 秒（2026-11-08）。
+            let _ = std::thread::Builder::new()
+                .name("moss-voice-stop".into())
+                .spawn(move || runtime.shutdown_timeout(Duration::from_secs(2)))
+                .map(|handle| handle.join());
         }
     }
 }

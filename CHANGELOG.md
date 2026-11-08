@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 应用内更新不再卡在“安装完成，MOSS 正在重启…”（2026-11-08）
+
+- **现象**：开着内置语音服务时在软件内更新，新版已装好但旧窗口一直停在“安装完成，MOSS 正在重启…”，不退出也不重启，只能手动完全退出再打开（用户在 macOS 从 0.3.10 更新到 0.3.11 时遇到）；Windows 安装版在结束进程前走同一段收尾，同样会停在“正在安装”。
+- **根因与修复**：更新任务在 tokio 异步任务里调用 `shutdown_desktop_services`，停止内置语音服务时 `VoiceServer` 的 `runtime.shutdown_timeout` 在异步上下文直接 panic，任务被吞掉，没走到 `app.restart()`。现在安装、停服务与重启放到 `spawn_blocking`（与“完全退出”一致），万一仍失败就把进度置为错误并提示手动完全退出；`VoiceServer` 关闭运行时改在独立线程执行并等待（仍最多 2 秒），从任何线程停止都不会 panic。已经装着 0.3.10 及更早版本的用户这次更新仍可能卡住，手动完全退出后重开即是新版。
+- **验证**：新增 `server_stops_cleanly_from_async_task`（修复前复现同一 panic）；`cargo test --workspace`、clippy 零警告。未验证：没有用真实安装包实测从带此修复的版本再做一次应用内更新（需下一个版本发布后才能验证）。
+- **关联**：`apps/desktop/src-tauri/src/app_update.rs`（`app_update_install`）、`crates/moss-voice-server/src/lib.rs`（`VoiceServer::shutdown_now`）、`docs/developer/packaging-install.md`。
+
 ## [0.3.11] - 2026-11-07
 
 ### 窄窗口两栏模式下画板等卡片恢复拖上下边框调高度（2026-11-07）

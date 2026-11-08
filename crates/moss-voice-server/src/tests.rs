@@ -1020,3 +1020,27 @@ fn diagnostics_survive_server_stop_and_restart() {
     assert_eq!(restarted.status().events_dropped.info, 0);
     restarted.stop();
 }
+
+/// 2026-11-08：桌面端应用内更新在 tokio 异步任务里收尾并停止内置语音服务。此前 `shutdown_timeout`
+/// 在异步上下文直接 panic，更新任务被吞掉、界面卡在“安装完成，MOSS 正在重启…”。
+#[test]
+fn server_stops_cleanly_from_async_task() {
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            ..ServerConfig::default()
+        },
+        Arc::new(FakeRegistry::default()),
+    )
+    .unwrap();
+    let outer = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    outer
+        .block_on(outer.spawn(async move { server.stop() }))
+        .expect("在异步任务里停止语音服务不应 panic");
+}
