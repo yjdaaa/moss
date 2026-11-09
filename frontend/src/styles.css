@@ -3425,6 +3425,10 @@ input:not([type]):focus {
 .voice-private-panel { display: grid; gap: 14px; }
 /* 对话体验等组里默认收起的小节（2026-11-08 n73） */
 /* 事件来源标签与筛选（2026-11-09）：小智 / 激光雕刻 / MOSS 软件 */
+/* 自动保持全屏画风（2026-11-09） */
+.voice-pack-auto { margin: 10px 0 12px; padding: 10px 12px; border: 1px solid var(--ob-line); border-radius: 10px; background: rgba(255, 255, 255, 0.02); }
+.voice-pack-auto .voice-check small { display: block; margin-top: 2px; color: var(--ob-ink-3); font-size: 12px; }
+.voice-pack-auto p { margin: 8px 0 0; }
 .voice-event-sources { display: flex; flex-wrap: wrap; gap: 6px; }
 .voice-chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--ob-line-2); background: transparent; color: var(--ob-ink-2); font-size: 12px; cursor: pointer; }
 .voice-chip.is-active { border-color: var(--ob-accent-2, #8b7bff); color: var(--ob-ink); background: rgba(139, 123, 255, 0.16); }

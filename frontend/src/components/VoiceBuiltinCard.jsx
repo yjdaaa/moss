@@ -712,6 +712,23 @@ export function BuiltinScreenPreview({ builtin }) {
   }) || null;
   const styleLabel = SCREEN_CARD_STYLE_OPTIONS.find((item) => item.id === currentCardStyle)?.shortLabel || currentCardStyle;
   const onlinePackReady = Boolean(onlineColorDevice) && sessions.some((s) => s.device_id === onlineColorDevice.device_id && s.screen_pack === true);
+  const autoKeep = status.local?.settings?.screen_pack_auto_keep === true;
+  const alwaysOnline = status.mqtt_port != null;
+
+  // 2026-11-09 用户决定：自动保持全屏画风（默认关）。开启时确认一次，之后 MOSS 自动给没装好的彩屏小智推送画风包
+  const toggleAutoKeep = async (on) => {
+    if (on) {
+      const ok = await showConfirm(
+        "开启后，MOSS 每次打开、每台彩屏小智连上来时会自动检查：还没装全屏画风（或画风包版本过旧）的，就在它空闲时自动推送，不再逐次询问。\n" +
+          "推送会让小智重启一次，开机后自己下载并写入资源分区（不刷主程序），沿用它原来的唤醒词；期间不要断电。\n" +
+          "加工中、有待批准请求、小智正在对话时不推；同一台一天最多自动推一次，结果记在“记录与诊断”。装好以后上电就是全屏画面，不再推送。\n" +
+          "只支持 ESP32-S3、16 MB 闪存、小智固件 2.0.2 以上的彩屏设备。随时可以关掉。",
+        { title: "开启自动保持全屏画风？", tone: "warning", danger: true, confirmText: "开启并允许自动推送" },
+      );
+      if (!ok) return;
+    }
+    await act(on ? "开启自动保持全屏画风" : "关闭自动保持全屏画风", () => voiceApi.localSave({ screen_pack_auto_keep: on }));
+  };
 
   const switchCardStyle = async (nextStyle) => {
     if (nextStyle === currentCardStyle) return;
@@ -824,6 +841,21 @@ export function BuiltinScreenPreview({ builtin }) {
             )}
           </div>
         )}
+        <div className="voice-pack-auto" id="voice-screen-pack-auto">
+          <label className="voice-check">
+            <input type="checkbox" id="voice-screen-pack-auto-keep" checked={autoKeep} disabled={busy} onChange={(e) => toggleAutoKeep(e.target.checked)} />
+            <span>
+              自动保持全屏画风
+              <small>打开 MOSS 就自动给还没装好的彩屏小智刷入全屏画风，装好后上电就是全屏画面（开启时确认一次，之后不再逐次询问）</small>
+            </span>
+          </label>
+          {autoKeep && !alwaysOnline && (
+            <p className="voice-muted" id="voice-screen-pack-auto-mqtt-tip">
+              建议同时打开“服务 › 常连模式（实验）”：小智开机就连上 MOSS，不用先唤醒，打开 MOSS 后马上就能检查补刷。
+              <button type="button" className="voice-link-btn" onClick={() => gotoVoiceGroup("service", "settings-builtinMqtt")}>去打开</button>
+            </p>
+          )}
+        </div>
         <div className="voice-bot-gif-grid" id="voice-goggle-bot-gallery">
           {GOGGLE_BOT_POSES.map((pose) => {
             const gifSrc = activeSceneGifs[pose.id] || legacyBotGifs[pose.id];

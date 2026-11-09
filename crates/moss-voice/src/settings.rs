@@ -640,6 +640,9 @@ pub struct DeviceHardwarePrefs {
     /// 最近一次推送给这台的唤醒词：`custom`（自定义）或 `default`（你好小智），“一键刷入画风”沿用它
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target: Option<String>,
+    /// 最近一次“自动保持全屏画风”自动推送的 Unix 秒（每台一天最多自动推一次，失败也不反复重试）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_pack_auto_at: Option<u64>,
 }
 
 /// 推送时记下“等下载”的资源包；`marker` 为 `None` 表示这次不带全屏画风。
@@ -664,6 +667,7 @@ impl DeviceHardwarePrefs {
             && self.screen_pack.is_none()
             && self.screen_pack_pending.is_none()
             && self.wake_target.is_none()
+            && self.screen_pack_auto_at.is_none()
     }
 }
 
@@ -724,6 +728,10 @@ pub struct BuiltinLocal {
     /// 小智彩屏卡片视觉画风（`"moss_hud"` 硬核太空舱 / `"goggle_bot"` 可爱护目镜小机器人；默认 `"moss_hud"`）
     #[serde(default = "default_screen_card_style")]
     pub screen_card_style: String,
+    /// 自动保持全屏画风（2026-11-09 用户决定，默认关）：开启时由用户确认一次，之后 MOSS 发现在线彩屏小智
+    /// 没装画风包（或包版本过旧）就在它空闲时自动推送，不再逐次确认；每台一天最多自动推一次
+    #[serde(default)]
+    pub screen_pack_auto_keep: bool,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,
     /// 快速回答（默认开，2026-11-08 n73）：对认识的服务商请求关闭大模型思考，语音每轮少等数秒；
@@ -789,6 +797,7 @@ impl Default for BuiltinLocal {
             persona_risk_notes: false,
             screen_preview_sync: true,
             screen_card_style: default_screen_card_style(),
+            screen_pack_auto_keep: false,
             job_done_announce: true,
             llm_fast_reply: true,
             jev_filter_enabled: false,

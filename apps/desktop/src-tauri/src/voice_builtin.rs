@@ -2325,6 +2325,32 @@ mod imp {
     static HOST_LOG: std::sync::OnceLock<Arc<moss_voice_server::DiagnosticsLog>> =
         std::sync::OnceLock::new();
 
+    /// 自动保持全屏画风：这台该不该自动推送——没装好（含包版本过旧）、没有在等下载、一天内没自动推过。
+    fn screen_pack_auto_due(
+        pref: Option<&moss_voice::settings::DeviceHardwarePrefs>,
+        now: u64,
+    ) -> bool {
+        const DAY: u64 = 24 * 60 * 60;
+        let Some(pref) = pref else {
+            return true;
+        };
+        if pref
+            .screen_pack
+            .as_deref()
+            .is_some_and(moss_voice_server::screen_pack::marker_installed)
+        {
+            return false;
+        }
+        if pref.screen_pack_pending.is_some()
+            && now.saturating_sub(pref.screen_pack_pending_at.unwrap_or(0))
+                <= moss_voice_server::wake_assets::STAGED_TTL.as_secs()
+        {
+            return false;
+        }
+        pref.screen_pack_auto_at
+            .is_none_or(|at| now.saturating_sub(at) >= DAY)
+    }
+
     /// 写一条“MOSS 软件”事件到语音中心“记录与诊断”（2026-11-09）；后端没起来时静默丢弃。
     pub fn record_moss_event(record: EventRecord) {
         if let Some(log) = HOST_LOG.get() {
@@ -2619,6 +2645,23 @@ mod imp {
         let Some(builtin) = state.0.clone() else {
             return;
         };
+        // 2026-11-09 自动保持全屏画风：开关默认关，开着时每 20 秒看一眼在线小智（只持弱引用，随 MOSS 退出）
+        let weak = Arc::downgrade(&builtin);
+        let _ = std::thread::Builder::new()
+            .name("voice-screen-pack-keeper".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                    let Some(builtin) = weak.upgrade() else {
+                        break;
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    builtin.screen_pack_auto_tick(now);
+                }
+            });
         let start_voice = builtin.settings().mode == VoiceMode::Builtin;
         let start_feedback_laya = builtin.should_run_local_laya_for_feedback();
         if !start_voice && !start_feedback_laya {
@@ -3557,6 +3600,7 @@ mod imp {
                 "asr_homophone_fix",
                 "screen_preview_sync",
                 "persona_risk_notes",
+                "screen_pack_auto_keep",
             ] {
                 if let Some(value) = patch.get(key) {
                     bool_patches.push((
@@ -3745,6 +3789,7 @@ mod imp {
                                 "asr_homophone_fix" => local.asr_homophone_fix = *val,
                                 "screen_preview_sync" => local.screen_preview_sync = *val,
                                 "persona_risk_notes" => local.persona_risk_notes = *val,
+                                "screen_pack_auto_keep" => local.screen_pack_auto_keep = *val,
                                 _ => {}
                             }
                         }
@@ -3867,6 +3912,7 @@ mod imp {
                                 | "persona_prompt"
                                 | "custom_personas"
                                 | "persona_risk_notes"
+                                | "screen_pack_auto_keep"
                         )
                     })
             });
@@ -6983,6 +7029,187 @@ mod imp {
         }
 
         /// 保存唤醒词 / 移除基础资源包 / 逐台确认推送（自定义唤醒词或恢复“你好小智”）。
+        /// 自动保持全屏画风（2026-11-09 用户决定，开关默认关）：开着时，挑一台空闲、彩屏、支持在线更新资源包、
+        /// 还没装好画风包（或包版本过旧）的在线小智自动推送，沿用它上次的唤醒词。加工中、有待批准请求时不推；
+        /// 每台一天最多自动推一次（失败也不反复重试），结果写进“记录与诊断”（来源 MOSS 软件）。返回推送了哪台。
+        fn screen_pack_auto_tick(&self, now: u64) -> Option<String> {
+            let settings = self.settings();
+            if !settings.builtin_local.screen_pack_auto_keep {
+                return None;
+            }
+            if self.host.api_service.device_work_in_progress()
+                || self
+                    .host
+                    .api_service
+                    .pending_approval_display_summary()
+                    .is_some()
+            {
+                return None;
+            }
+            let sessions = self
+                .server
+                .lock()
+                .ok()?
+                .as_ref()
+                .map(|server| server.status().sessions)?;
+            let allowed: std::collections::HashMap<String, String> = self
+                .host
+                .db
+                .lock()
+                .ok()?
+                .voice_devices()
+                .ok()?
+                .into_iter()
+                .filter(|d| d.is_allowed())
+                .map(|d| (d.device_id, d.name))
+                .collect();
+            let candidate = sessions.into_iter().find(|r| {
+                allowed.contains_key(&r.device_id)
+                    && r.state == "idle"
+                    && r.device_tools
+                        .iter()
+                        .any(|t| t == "self.assets.set_download_url")
+                    && r.screen_monochrome != Some(true)
+                    && r.screen_width.is_some()
+                    && screen_pack_auto_due(settings.builtin_device_prefs.get(&r.device_id), now)
+            })?;
+            let device_id = candidate.device_id;
+            let name = allowed
+                .get(&device_id)
+                .filter(|name| !name.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| device_id.clone());
+            let target = match settings
+                .builtin_device_prefs
+                .get(&device_id)
+                .and_then(|p| p.wake_target.as_deref())
+            {
+                Some("custom") => "custom",
+                _ => "default",
+            };
+            // 先记下这次尝试，失败也不会每 20 秒重推、反复重启设备
+            let _ = moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                s.builtin_device_prefs
+                    .entry(device_id.clone())
+                    .or_default()
+                    .screen_pack_auto_at = Some(now);
+                Ok(())
+            });
+            let record = match self.push_device_assets(&device_id, target, true) {
+                Ok(size) => EventRecord::info(
+                    DiagCategory::Firmware,
+                    format!(
+                        "自动保持全屏画风：已给 {name} 推送全屏画风（{:.1} MB），它会重启并下载",
+                        size as f64 / 1_048_576.0
+                    ),
+                )
+                .hint("下载完设备列表显示“已刷全屏画风”，之后上电就是全屏画面；期间不要断电"),
+                Err(error) => EventRecord::warn(
+                    DiagCategory::Firmware,
+                    format!("自动保持全屏画风：给 {name} 推送没成功：{}", error.message),
+                )
+                .hint("一天后会再自动试一次；也可以在“设备 › 唤醒词”手动一键刷入"),
+            };
+            self.diagnostics
+                .push_from(moss_voice_server::DiagSource::Moss, record);
+            Some(device_id)
+        }
+
+        /// 给一台已允许的在线小智推送资源包（唤醒词，可带全屏画风）：生成、下发下载地址并让它重启，
+        /// 设置里记为“等下载”。手动推送（逐台确认）与“自动保持全屏画风”共用；返回资源包字节数。
+        fn push_device_assets(
+            &self,
+            device_id: &str,
+            target_name: &str,
+            with_screen: bool,
+        ) -> Result<usize, CenterError> {
+            use moss_voice_server::wake_assets::WakeTarget;
+            let target = match target_name {
+                "custom" => WakeTarget::Custom(self.wakeword_word()),
+                _ => WakeTarget::Default,
+            };
+            let device_ok = self
+                .host
+                .db
+                .lock()
+                .map_err(|_| internal("数据库锁失败"))?
+                .voice_device(device_id)
+                .map_err(|_| internal("读取设备失败"))?
+                .is_some_and(|d| d.is_allowed());
+            if !device_ok {
+                return Err(CenterError::new(
+                    "wakeword_device_invalid",
+                    409,
+                    "只能推送给已允许的设备",
+                ));
+            }
+            // n70 全屏画风：按这台设备的屏幕分辨率和当前画风生成，随唤醒词一起写进资源分区
+            let screen = if with_screen {
+                let (size, style) = {
+                    let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
+                    let server = server.as_ref().ok_or_else(|| {
+                        CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                    })?;
+                    (
+                        server.screen_pack_size(device_id),
+                        server.screen_card_style(),
+                    )
+                };
+                let size = size.ok_or_else(|| {
+                            CenterError::new(
+                                "screen_pack_unsupported",
+                                409,
+                                "这台设备没有上报彩屏分辨率（或是单色屏），不能刷全屏画风；可以取消勾选只推唤醒词",
+                            )
+                        })?;
+                let extras = moss_voice_server::screen_pack::build_screen_extras(style, size)
+                    .map_err(internal)?;
+                Some((extras, style))
+            } else {
+                None
+            };
+            let package = moss_voice_server::wake_assets::build_package_with_screen(
+                self.wakeword_base().as_deref(),
+                &target,
+                screen.as_ref().map(|(extras, _)| extras),
+            )
+            .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
+            let size = package.len();
+            {
+                let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
+                let server = server.as_ref().ok_or_else(|| {
+                    CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                })?;
+                server
+                    .install_wake_assets(device_id, package)
+                    .map_err(|e| CenterError::new("wakeword_device_unsupported", 409, e))?;
+            }
+            // 2026-11-09：先记为“已推送、等下载”，设备整包下载完（`assets_downloaded`）才算已装；
+            // 不带画风的包下载完会把已装标记清掉。同时记下这次的唤醒词，“一键刷入画风”沿用它。
+            let marker = screen
+                .as_ref()
+                .map(|(_, style)| moss_voice_server::screen_pack::pack_marker(*style))
+                .unwrap_or_else(|| moss_voice::settings::SCREEN_PACK_NONE.to_owned());
+            let wake_target = Some(target_name.to_owned());
+            moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                let entry = s
+                    .builtin_device_prefs
+                    .entry(device_id.to_owned())
+                    .or_default();
+                entry.screen_pack_pending = Some(marker.clone());
+                entry.screen_pack_pending_at = Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                );
+                entry.wake_target = wake_target.clone();
+                Ok(())
+            })
+            .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+            Ok(size)
+        }
+
         pub fn wakeword_manage(&self, input: &Value) -> Result<Value, CenterError> {
             use moss_voice_server::wake_assets::{WakeTarget, WakeWord};
             let invalid = || CenterError::new("wakeword_invalid", 400, "唤醒词操作格式无效");
@@ -7032,92 +7259,17 @@ mod imp {
                         Some("default") => WakeTarget::Default,
                         _ => return Err(invalid()),
                     };
-                    let device_ok = self
-                        .host
-                        .db
-                        .lock()
-                        .map_err(|_| internal("数据库锁失败"))?
-                        .voice_device(device_id)
-                        .map_err(|_| internal("读取设备失败"))?
-                        .is_some_and(|d| d.is_allowed());
-                    if !device_ok {
-                        return Err(CenterError::new(
-                            "wakeword_device_invalid",
-                            409,
-                            "只能推送给已允许的设备",
-                        ));
-                    }
                     let with_screen = match input.get("screen_pack") {
                         None => false,
                         Some(Value::Bool(b)) => *b,
                         Some(_) => return Err(invalid()),
                     };
-                    // n70 全屏画风：按这台设备的屏幕分辨率和当前画风生成，随唤醒词一起写进资源分区
-                    let screen = if with_screen {
-                        let (size, style) = {
-                            let server =
-                                self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
-                            let server = server.as_ref().ok_or_else(|| {
-                                CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
-                            })?;
-                            (
-                                server.screen_pack_size(device_id),
-                                server.screen_card_style(),
-                            )
-                        };
-                        let size = size.ok_or_else(|| {
-                            CenterError::new(
-                                "screen_pack_unsupported",
-                                409,
-                                "这台设备没有上报彩屏分辨率（或是单色屏），不能刷全屏画风；可以取消勾选只推唤醒词",
-                            )
-                        })?;
-                        let extras =
-                            moss_voice_server::screen_pack::build_screen_extras(style, size)
-                                .map_err(internal)?;
-                        Some((extras, style))
+                    let target_name = if matches!(target, WakeTarget::Default) {
+                        "default"
                     } else {
-                        None
+                        "custom"
                     };
-                    let package = moss_voice_server::wake_assets::build_package_with_screen(
-                        self.wakeword_base().as_deref(),
-                        &target,
-                        screen.as_ref().map(|(extras, _)| extras),
-                    )
-                    .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
-                    let size = package.len();
-                    {
-                        let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
-                        let server = server.as_ref().ok_or_else(|| {
-                            CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
-                        })?;
-                        server
-                            .install_wake_assets(device_id, package)
-                            .map_err(|e| CenterError::new("wakeword_device_unsupported", 409, e))?;
-                    }
-                    // 2026-11-09：先记为“已推送、等下载”，设备整包下载完（`assets_downloaded`）才算已装；
-                    // 不带画风的包下载完会把已装标记清掉。同时记下这次的唤醒词，“一键刷入画风”沿用它。
-                    let marker = screen
-                        .as_ref()
-                        .map(|(_, style)| moss_voice_server::screen_pack::pack_marker(*style))
-                        .unwrap_or_else(|| moss_voice::settings::SCREEN_PACK_NONE.to_owned());
-                    let wake_target = input["target"].as_str().map(str::to_owned);
-                    moss_voice::settings::update_voice(&self.settings_file(), |s| {
-                        let entry = s
-                            .builtin_device_prefs
-                            .entry(device_id.to_owned())
-                            .or_default();
-                        entry.screen_pack_pending = Some(marker.clone());
-                        entry.screen_pack_pending_at = Some(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0),
-                        );
-                        entry.wake_target = wake_target.clone();
-                        Ok(())
-                    })
-                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
+                    let size = self.push_device_assets(device_id, target_name, with_screen)?;
                     let mut status = self.wakeword_status()?;
                     status["pushed"] = serde_json::json!({"device_id":device_id,"size":size,"target":input["target"],"screen_pack":with_screen});
                     return Ok(status);
@@ -8254,6 +8406,74 @@ mod imp {
             assert_eq!(
                 host.db.lock().unwrap().get_secret("jev_api_key").unwrap(),
                 None
+            );
+        }
+
+        #[test]
+        fn screen_pack_auto_keep_is_opt_in_and_only_retries_once_a_day() {
+            use moss_voice::settings::DeviceHardwarePrefs;
+            const NOW: u64 = 1_790_000_000;
+            // 判定：没记录 / 没装 → 推；已装 → 不推；等下载未过期 → 不推；过期 → 推；一天内自动推过 → 不推
+            assert!(screen_pack_auto_due(None, NOW));
+            assert!(screen_pack_auto_due(
+                Some(&DeviceHardwarePrefs::default()),
+                NOW
+            ));
+            let installed = DeviceHardwarePrefs {
+                screen_pack: Some("moss-screen-1:moss_hud".into()),
+                ..DeviceHardwarePrefs::default()
+            };
+            assert!(!screen_pack_auto_due(Some(&installed), NOW));
+            let old_version = DeviceHardwarePrefs {
+                screen_pack: Some("moss-screen-0:moss_hud".into()),
+                ..DeviceHardwarePrefs::default()
+            };
+            assert!(
+                screen_pack_auto_due(Some(&old_version), NOW),
+                "包版本过旧要重刷"
+            );
+            let pending = DeviceHardwarePrefs {
+                screen_pack_pending: Some("moss-screen-1:moss_hud".into()),
+                screen_pack_pending_at: Some(NOW - 60),
+                ..DeviceHardwarePrefs::default()
+            };
+            assert!(
+                !screen_pack_auto_due(Some(&pending), NOW),
+                "等下载时不重复推"
+            );
+            let expired = DeviceHardwarePrefs {
+                screen_pack_pending_at: Some(NOW - 31 * 60),
+                ..pending.clone()
+            };
+            assert!(screen_pack_auto_due(Some(&expired), NOW));
+            let tried = DeviceHardwarePrefs {
+                screen_pack_auto_at: Some(NOW - 3600),
+                ..DeviceHardwarePrefs::default()
+            };
+            assert!(
+                !screen_pack_auto_due(Some(&tried), NOW),
+                "失败也不在一天内反复重启设备"
+            );
+            assert!(screen_pack_auto_due(Some(&tried), NOW + 24 * 3600));
+
+            // 开关默认关；关着或服务没运行时什么也不推
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host)).0.unwrap();
+            assert!(!builtin.settings().builtin_local.screen_pack_auto_keep);
+            assert_eq!(builtin.screen_pack_auto_tick(NOW), None);
+            let saved = builtin
+                .local_save(&serde_json::json!({"screen_pack_auto_keep": true}))
+                .unwrap();
+            assert_eq!(saved["local"]["settings"]["screen_pack_auto_keep"], true);
+            assert_eq!(saved["restarted"], false, "开关热生效，不重启服务");
+            assert_eq!(builtin.screen_pack_auto_tick(NOW), None, "服务没运行时不推");
+            assert!(
+                builtin
+                    .local_save(&serde_json::json!({"screen_pack_auto_keep": "yes"}))
+                    .is_err()
             );
         }
 

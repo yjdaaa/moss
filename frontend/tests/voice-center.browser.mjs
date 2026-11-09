@@ -857,6 +857,17 @@ try {
   await page.locator("#voice-card-style-moss_hud").click();
   await botCard.getByText("太空舱雕刻表盘").waitFor();
   assert.deepEqual(last("voice_device_request").args, { deviceId: "aa:bb:cc:11:22:33", request: "push_bot_pose", value: { pose: "engrave", style: "moss_hud" } });
+  // 2026-11-09 自动保持全屏画风：默认关，开启时确认一次；没开常连模式时提示一起打开
+  const autoKeep = botCard.locator("#voice-screen-pack-auto-keep");
+  assert.equal(await autoKeep.isChecked(), false, "默认关");
+  await autoKeep.click();
+  await confirmDialog("开启并允许自动推送");
+  await page.waitForFunction(() => document.querySelector("#voice-screen-pack-auto-keep")?.checked === true);
+  assert.deepEqual(last("voice_local_save").args, { settings: { screen_pack_auto_keep: true } });
+  await botCard.locator("#voice-screen-pack-auto-mqtt-tip").getByText(/常连模式/).waitFor();
+  await autoKeep.click();
+  await page.waitForFunction(() => document.querySelector("#voice-screen-pack-auto-keep")?.checked === false);
+  assert.deepEqual(last("voice_local_save").args, { settings: { screen_pack_auto_keep: false } }, "关闭不用确认");
   // 8d. n67 / n69：唤醒词卡在“设备”标签就地显示（原“唤醒词与音量”标签已并入）
   const wakeGroup = page.locator("#voice-group-wake-word");
   await wakeGroup.locator("#voice-wakeword-card").waitFor();
