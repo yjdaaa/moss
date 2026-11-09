@@ -3048,6 +3048,10 @@ export function screenPackDeviceView(device) {
   } else if (state === "installed") {
     text = "已刷全屏画风，上电就是全屏画面";
     tone = "ok";
+  } else if (state === "style_outdated") {
+    // 2026-11-09 用户决定：换了画风要重刷，开机待命画面才跟着换
+    text = "装的是换画风之前的全屏画风：重刷后开机待命画面才会换";
+    tone = "warn";
   } else if (size) {
     text = `彩屏 ${size[0]}×${size[1]}，还没刷全屏画风`;
     tone = "warn";
@@ -3055,5 +3059,6 @@ export function screenPackDeviceView(device) {
     text = "没报彩屏分辨率，只能推唤醒词";
   }
   const canQuickPack = Boolean(device?.supported && size && state !== "installed" && state !== "pending_download");
-  return { state, text, tone, canQuickPack };
+  const quickLabel = state === "style_outdated" ? "一键重刷全屏画风" : "一键刷入全屏画风";
+  return { state, text, tone, canQuickPack, quickLabel };
 }

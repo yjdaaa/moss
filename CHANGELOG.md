@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 换画风后按新画风重刷全屏画风包（2026-11-09）
+
+- **现象**：用户要求更换画风后画风包也要重刷。此前换画风只改在线场景，开机待命画面仍是刷包时的画风，“自动保持全屏画风”也认为已装好、不会重刷。
+- **根因与修复**：已装判定改为设备偏好里的画风包标记等于按当前画风生成的标记；装的是旧画风时 `voice_wakeword_status` 标 `style_outdated`（并给出 `screen_pack_style`），唤醒词卡显示“一键重刷全屏画风”。`voice_local_save` 改了画风时清掉各台“一天内已自动推过”记录，开着自动保持时 20 秒内在小智空闲时按新画风自动重刷；没开时副屏预览提示去一键重刷。AGENTS.md 自动推送例外的说明同步补上“含换画风后重刷”。
+- **验证**：`screen_pack_auto_keep_is_opt_in_and_only_retries_once_a_day` 补充换画风判定与清除记录（画风没变不清）；`screenPackDeviceView` 单测与语音中心浏览器用例覆盖 `style_outdated` 与“一键重刷”。未验证：真机重刷后开机待命画面切换。
+- **关联**：`apps/desktop/src-tauri/src/voice_builtin.rs`（`current_screen_pack_marker`、`screen_pack_auto_due`、`wakeword_status`、`local_save`）、`frontend/src/voiceState.js`（`screenPackDeviceView`）、`frontend/src/components/VoiceWakeWordCard.jsx`、`frontend/src/components/VoiceBuiltinCard.jsx`。
+
 ### 新增“自动保持全屏画风”：开一次开关，MOSS 打开后自动给没装好的彩屏小智刷入全屏画风（2026-11-09）
 
 - **现象**：用户希望打开 MOSS 小智屏幕就能一直显示全屏画风，不用每台手动推送。此前全屏画风包只能在“唤醒词”里逐台确认推送。

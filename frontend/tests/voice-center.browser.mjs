@@ -40,6 +40,7 @@ try {
       devices: [
         { device_id: "aa:bb:cc:11:22:33", name: "工坊小智", supported: true, screen_pack_size: [320, 240], screen_pack: false, screen_pack_state: "none", wake_target: null },
         { device_id: "aa:bb:cc:44:55:66", name: "书房小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "installed", wake_target: "default" },
+        { device_id: "aa:bb:cc:77:88:99", name: "客厅小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "style_outdated", screen_pack_style: "goggle_bot", wake_target: "default" },
       ],
     },
     mode: "official",
@@ -877,6 +878,8 @@ try {
   await wakeDevices.nth(0).getByText(/还没刷全屏画风/).waitFor();
   await wakeDevices.nth(1).getByText(/已刷全屏画风，上电就是全屏画面/).waitFor();
   assert.equal(await wakeGroup.locator('[data-quick-pack="aa:bb:cc:44:55:66"]').count(), 0, "已刷的不再显示一键刷入");
+  await wakeDevices.nth(2).getByText(/重刷后开机待命画面才会换/).waitFor();
+  assert.equal((await wakeGroup.locator('[data-quick-pack="aa:bb:cc:77:88:99"]').innerText()).trim(), "一键重刷全屏画风", "换了画风要重刷");
   await wakeGroup.locator('[data-quick-pack="aa:bb:cc:11:22:33"]').click();
   await confirmDialog("确认推送这一台");
   assert.deepEqual(last("voice_wakeword_manage").args.input, { action: "push", device_id: "aa:bb:cc:11:22:33", target: "default", confirmed: true, screen_pack: true }, "没推过自定义唤醒词时沿用“你好小智”");

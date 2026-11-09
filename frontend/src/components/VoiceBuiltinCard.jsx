@@ -744,13 +744,13 @@ export function BuiltinScreenPreview({ builtin }) {
             pose: lastPushedPose,
             style: nextStyle,
           });
-          setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风，并同步刷新在线小智屏幕${onlinePackReady ? "（待命画面跟随刷包时的画风，想一起换就在“唤醒词”里重新推送一次）" : ""}`);
+          setBotNotice(`已切换为「${opt?.shortLabel || nextStyle}」画风，并同步刷新在线小智屏幕${onlinePackReady ? (autoKeep ? "；画风包会自动按新画风重刷（小智重启一次），之后开机待命画面也换成新画风" : "；开机待命画面要重刷画风包才换：到“唤醒词”点“一键重刷全屏画风”") : ""}`);
           return;
         } catch {
           // 若设备刚好断开，不影响画风保存提示
         }
       }
-      setBotNotice(`已换成「${opt?.shortLabel || nextStyle}」画风，在线小智不用重连，马上生效${onlinePackReady ? "（待命画面跟随刷包时的画风，想一起换就在“唤醒词”里重新推送一次）" : ""}`);
+      setBotNotice(`已换成「${opt?.shortLabel || nextStyle}」画风，在线小智不用重连，马上生效${onlinePackReady ? (autoKeep ? "；画风包会自动按新画风重刷（小智重启一次），之后开机待命画面也换成新画风" : "；开机待命画面要重刷画风包才换：到“唤醒词”点“一键重刷全屏画风”") : ""}`);
     } else {
       setOptimisticStyle("");
     }

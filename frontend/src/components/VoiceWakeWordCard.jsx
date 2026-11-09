@@ -165,7 +165,7 @@ export default function VoiceWakeWordCard() {
                   <span className="wakeword-device-actions">
                     {screenPackDeviceView(device).canQuickPack && (
                       <button className="btn btn-hud-primary" type="button" disabled={busy} data-quick-pack={device.device_id} onClick={() => quickPack(device)}>
-                        一键刷入全屏画风
+                        {screenPackDeviceView(device).quickLabel}
                       </button>
                     )}
                     <button className="btn btn-hud-primary" type="button" disabled={busy || dirty || !saved} onClick={() => push(device, "custom")}>推送“{saved?.text}”</button>

@@ -1631,3 +1631,12 @@ test("全屏画风包状态以设备下载完为准，没装好时可一键刷�
   assert.equal(screenPackDeviceView({ supported: false, screen_pack_size: [320, 240] }).canQuickPack, false, "固件不支持在线更新");
   assert.equal(screenPackDeviceView({ ...color, screen_pack: true }).state, "installed", "旧后端只有 screen_pack 布尔值");
 });
+
+test("换了画风后装的是旧画风：提示重刷并可一键重刷（2026-11-09）", async () => {
+  const { screenPackDeviceView } = await import("../src/voiceState.js");
+  const view = screenPackDeviceView({ supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "style_outdated" });
+  assert.equal(view.canQuickPack, true);
+  assert.equal(view.quickLabel, "一键重刷全屏画风");
+  assert.match(view.text, /重刷后开机待命画面才会换/);
+  assert.equal(screenPackDeviceView({ supported: true, screen_pack_size: [320, 240], screen_pack_state: "none" }).quickLabel, "一键刷入全屏画风");
+});

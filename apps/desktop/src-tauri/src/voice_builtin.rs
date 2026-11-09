@@ -2326,19 +2326,17 @@ mod imp {
         std::sync::OnceLock::new();
 
     /// 自动保持全屏画风：这台该不该自动推送——没装好（含包版本过旧）、没有在等下载、一天内没自动推过。
+    /// `current` 为按当前画风应装的标记（[`current_screen_pack_marker`]）：画风换了也要重刷，开机待命画面才跟着换。
     fn screen_pack_auto_due(
         pref: Option<&moss_voice::settings::DeviceHardwarePrefs>,
+        current: &str,
         now: u64,
     ) -> bool {
         const DAY: u64 = 24 * 60 * 60;
         let Some(pref) = pref else {
             return true;
         };
-        if pref
-            .screen_pack
-            .as_deref()
-            .is_some_and(moss_voice_server::screen_pack::marker_installed)
-        {
+        if pref.screen_pack.as_deref() == Some(current) {
             return false;
         }
         if pref.screen_pack_pending.is_some()
@@ -2349,6 +2347,15 @@ mod imp {
         }
         pref.screen_pack_auto_at
             .is_none_or(|at| now.saturating_sub(at) >= DAY)
+    }
+
+    /// 按当前选的画风应装的画风包标记（`moss-screen-1:moss_hud`）。
+    fn current_screen_pack_marker(settings: &moss_voice::VoiceSettings) -> String {
+        moss_voice_server::screen_pack::pack_marker(
+            moss_voice_server::ScreenCardStyle::from_setting(
+                &settings.builtin_local.screen_card_style,
+            ),
+        )
     }
 
     /// 写一条“MOSS 软件”事件到语音中心“记录与诊断”（2026-11-09）；后端没起来时静默丢弃。
@@ -3761,6 +3768,7 @@ mod imp {
                 }
                 None => None,
             };
+            let old_card_style = self.settings().builtin_local.screen_card_style;
             let persona_touched = persona_style_patch.is_some()
                 || custom_personas_patch.is_some()
                 || persona_prompt_patch.is_some()
@@ -3891,6 +3899,18 @@ mod imp {
                 }
             } else if !is_local_laya || !laya_needed {
                 self.stop_laya();
+            }
+            // 2026-11-09 用户决定：换画风后画风包要重刷（开机待命画面才跟着换）。清掉各台“一天内已自动推过”的记录，
+            // 开着“自动保持全屏画风”时马上按新画风自动重刷
+            if let Some(card_style) = &screen_card_style_patch
+                && *card_style != old_card_style
+            {
+                let _ = moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                    for entry in s.builtin_device_prefs.values_mut() {
+                        entry.screen_pack_auto_at = None;
+                    }
+                    Ok(())
+                });
             }
             if let Some(card_style) = &screen_card_style_patch
                 && let Ok(guard) = self.server.lock()
@@ -6968,7 +6988,9 @@ mod imp {
                 .map(|s| s.status().sessions)
                 .unwrap_or_default();
             let mut seen = std::collections::BTreeSet::new();
-            let prefs = moss_voice::settings::load(&self.settings_file()).builtin_device_prefs;
+            let settings = moss_voice::settings::load(&self.settings_file());
+            let current_marker = current_screen_pack_marker(&settings);
+            let prefs = settings.builtin_device_prefs;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -6989,11 +7011,14 @@ mod imp {
                     let expired = pending.is_some()
                         && now.saturating_sub(pending_at)
                             > moss_voice_server::wake_assets::STAGED_TTL.as_secs();
-                    // 2026-11-09：画风包状态以“设备整包下载完”为准，推送了没下载不算已刷
+                    // 2026-11-09：画风包状态以“设备整包下载完”为准，推送了没下载不算已刷；
+                    // 装的是别的画风时为 style_outdated（开机待命画面还是旧画风，要重刷）
+                    let installed_marker = pref.and_then(|p| p.screen_pack.as_deref());
                     let screen_pack_state = match (pending, expired) {
                         (Some(_), true) => "download_expired",
                         (Some(_), false) => "pending_download",
-                        (None, _) if installed => "installed",
+                        (None, _) if installed_marker == Some(current_marker.as_str()) => "installed",
+                        (None, _) if installed => "style_outdated",
                         (None, _) => "none",
                     };
                     serde_json::json!({
@@ -7002,6 +7027,7 @@ mod imp {
                         "screen_pack_size":screen.map(|(w,h)|[w,h]),
                         "screen_pack":installed,
                         "screen_pack_state":screen_pack_state,
+                        "screen_pack_style":installed_marker.filter(|_| installed).and_then(|m| m.split(':').nth(1)),
                         "screen_pack_pending_with_pack":pending.map(|p| p != moss_voice::settings::SCREEN_PACK_NONE),
                         "wake_target":pref.and_then(|p| p.wake_target.clone()),
                     })
@@ -7063,6 +7089,7 @@ mod imp {
                 .filter(|d| d.is_allowed())
                 .map(|d| (d.device_id, d.name))
                 .collect();
+            let current_marker = current_screen_pack_marker(&settings);
             let candidate = sessions.into_iter().find(|r| {
                 allowed.contains_key(&r.device_id)
                     && r.state == "idle"
@@ -7071,7 +7098,11 @@ mod imp {
                         .any(|t| t == "self.assets.set_download_url")
                     && r.screen_monochrome != Some(true)
                     && r.screen_width.is_some()
-                    && screen_pack_auto_due(settings.builtin_device_prefs.get(&r.device_id), now)
+                    && screen_pack_auto_due(
+                        settings.builtin_device_prefs.get(&r.device_id),
+                        &current_marker,
+                        now,
+                    )
             })?;
             let device_id = candidate.device_id;
             let name = allowed
@@ -8413,23 +8444,33 @@ mod imp {
         fn screen_pack_auto_keep_is_opt_in_and_only_retries_once_a_day() {
             use moss_voice::settings::DeviceHardwarePrefs;
             const NOW: u64 = 1_790_000_000;
+            const HUD: &str = "moss-screen-1:moss_hud";
             // 判定：没记录 / 没装 → 推；已装 → 不推；等下载未过期 → 不推；过期 → 推；一天内自动推过 → 不推
-            assert!(screen_pack_auto_due(None, NOW));
+            assert!(screen_pack_auto_due(None, HUD, NOW));
             assert!(screen_pack_auto_due(
                 Some(&DeviceHardwarePrefs::default()),
+                HUD,
                 NOW
             ));
             let installed = DeviceHardwarePrefs {
                 screen_pack: Some("moss-screen-1:moss_hud".into()),
                 ..DeviceHardwarePrefs::default()
             };
-            assert!(!screen_pack_auto_due(Some(&installed), NOW));
+            assert!(!screen_pack_auto_due(Some(&installed), HUD, NOW));
             let old_version = DeviceHardwarePrefs {
                 screen_pack: Some("moss-screen-0:moss_hud".into()),
                 ..DeviceHardwarePrefs::default()
             };
+            let other_style = DeviceHardwarePrefs {
+                screen_pack: Some("moss-screen-1:goggle_bot".into()),
+                ..DeviceHardwarePrefs::default()
+            };
             assert!(
-                screen_pack_auto_due(Some(&old_version), NOW),
+                screen_pack_auto_due(Some(&other_style), HUD, NOW),
+                "换了画风要重刷，开机待命画面才跟着换"
+            );
+            assert!(
+                screen_pack_auto_due(Some(&old_version), HUD, NOW),
                 "包版本过旧要重刷"
             );
             let pending = DeviceHardwarePrefs {
@@ -8438,23 +8479,23 @@ mod imp {
                 ..DeviceHardwarePrefs::default()
             };
             assert!(
-                !screen_pack_auto_due(Some(&pending), NOW),
+                !screen_pack_auto_due(Some(&pending), HUD, NOW),
                 "等下载时不重复推"
             );
             let expired = DeviceHardwarePrefs {
                 screen_pack_pending_at: Some(NOW - 31 * 60),
                 ..pending.clone()
             };
-            assert!(screen_pack_auto_due(Some(&expired), NOW));
+            assert!(screen_pack_auto_due(Some(&expired), HUD, NOW));
             let tried = DeviceHardwarePrefs {
                 screen_pack_auto_at: Some(NOW - 3600),
                 ..DeviceHardwarePrefs::default()
             };
             assert!(
-                !screen_pack_auto_due(Some(&tried), NOW),
+                !screen_pack_auto_due(Some(&tried), HUD, NOW),
                 "失败也不在一天内反复重启设备"
             );
-            assert!(screen_pack_auto_due(Some(&tried), NOW + 24 * 3600));
+            assert!(screen_pack_auto_due(Some(&tried), HUD, NOW + 24 * 3600));
 
             // 开关默认关；关着或服务没运行时什么也不推
             let temp = tempfile::tempdir().unwrap();
@@ -8475,6 +8516,40 @@ mod imp {
                     .local_save(&serde_json::json!({"screen_pack_auto_keep": "yes"}))
                     .is_err()
             );
+            // 换画风：清掉“一天内已自动推过”，开着自动保持时马上按新画风重刷；状态里旧画风标为 style_outdated
+            moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
+                let entry = s.builtin_device_prefs.entry("dev-1".into()).or_default();
+                entry.screen_pack = Some(HUD.into());
+                entry.screen_pack_auto_at = Some(NOW);
+                Ok(())
+            })
+            .unwrap();
+            builtin
+                .local_save(&serde_json::json!({"screen_card_style": "moss_hud"}))
+                .unwrap();
+            assert_eq!(
+                moss_voice::settings::load(&builtin.settings_file()).builtin_device_prefs["dev-1"]
+                    .screen_pack_auto_at,
+                Some(NOW),
+                "画风没变不清"
+            );
+            builtin
+                .local_save(&serde_json::json!({"screen_card_style": "goggle_bot"}))
+                .unwrap();
+            let settings = moss_voice::settings::load(&builtin.settings_file());
+            assert_eq!(
+                settings.builtin_device_prefs["dev-1"].screen_pack_auto_at,
+                None
+            );
+            assert_eq!(
+                current_screen_pack_marker(&settings),
+                "moss-screen-1:goggle_bot"
+            );
+            assert!(screen_pack_auto_due(
+                settings.builtin_device_prefs.get("dev-1"),
+                &current_screen_pack_marker(&settings),
+                NOW
+            ));
         }
 
         #[test]
