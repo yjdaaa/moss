@@ -2537,6 +2537,7 @@ name = "laser-device"
 version = "0.3.7"
 dependencies = [
  "hex",
+ "if-addrs",
  "mdns-sd",
  "serialport",
  "sha2 0.10.9",

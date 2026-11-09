@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### 握手时提醒 FluidNC 激光段没开 off_on_alarm、配置关掉了 verbose_errors（2026-11-09）
+
+- **现象**：FluidNC 的 `Laser.off_on_alarm` 默认关（`Spindle.h`），报警时固件不主动关激光，M3 恒功率下停在原地也可能继续出光；配置里关掉 `verbose_errors` 后，报错不再附原因，上位机表里没有的新错误码只能看到编号。上位机此前都不提示。
+- **根因与修复**：`$CD` 解析新增 `has_laser`、`laser_off_on_alarm`、`verbose_errors_disabled`；握手摘要在有激光段而 `off_on_alarm` 不是 true 时提醒加上 `off_on_alarm: true`，明确写了 `verbose_errors: false` 时提醒改回（没写按固件默认 true，不提醒）。只提醒，不拦截加工。核对后确认：`verbose_errors` 开着时，新错误码的原因已随 `[MSG:ERR: …]` 带进报错，因此不额外发 `$E` / `$A` 查询。
+- **验证**：新增 `laser_off_on_alarm_is_read_from_config_and_warned_when_off`（激光段缺项 / false / true / 非激光主轴、段名大小写、verbose_errors 明确关与未写）、`unknown_error_code_still_carries_firmware_explanation`；`laser-device` 57 项通过。未验证：未在真机上看到握手提示。
+- **关联**：`crates/laser-device/src/lib.rs`（`MachineFeatures`、`parse_fluidnc_yaml`、`laser_off_on_alarm_warning`、`probe_device`）、`docs/laser/fluidnc-setup.md`。
+
+### 按 FluidNC 源码核对后修正：SD 脱机取消不再卡死、文件哈希不再被误判缺失、发送窗口避开固件整行丢弃；扫描约 1 秒（2026-11-09）
+
+- **现象**：用户要求针对 FluidNC 固件审查已有适配并优化扫描时间。读 FluidNC main（v4.1.1 之后）源码核对后发现：① SD 脱机作业进行中进度条不动，点取消后任务一直停在“取消中”、设备被占用；② 在当前 FluidNC 上 SD 脱机很可能每次都被拒绝（“固件没有返回文件哈希”）；③ Telnet 下字符计数窗口上限 1024 高于固件 1020 字节行队列，极端情况下会整行丢失；④ 扫描在网络里有非 GRBL 的 23 端口设备时每台白等 1.5 秒；另有报警 17、错误 120 说明与源码不符。
+- **根因与修复**：① `$SD/Run` 是推迟应答（`FileCommands.cpp` `runFile` 返回 `Error::Deferred`），文件跑完才回 `ok`，原先“发一行等 ok”整段作业都卡在等待里；新增 `run_sd_file_and_wait`，发出后直接监控进度、取消（走 `!`→`?`→`0x18`）与结束，看到 `SD:` 进度 / 运行态 / 推迟的 `ok` 才算开始，5 秒仍空闲无开始迹象报错。② `$File/ShowHash` 的 JSON 每满 100 个字符切一行（`JSONEncoder::add`），哈希必然跨行；改为拼接（含串口 `[JSON:` 前缀）后取值。③ `MAX_RX_WINDOW` 改为 `FLUIDNC_LINE_QUEUE_LIMIT`(1020) − 4 = 1016。④ 扫描改为边找边验：mDNS 1 秒与 254 线程网段扫描同时进行，候选一到就确认；回了别的协议立即判定、0.7 秒无回应即放弃；识别适配 FluidNC 4.x 的 `$I` / 启动横幅格式并读出机器名（`[MSG:Machine: …]`）。报警 17 改为“文件作业中遇到无效 G-code 行”、错误 120 改为“另一个通道正在运行作业”。
+- **验证**：新增 `laser-device` 测试（推迟应答下的开始判定与完成、固件拒绝与取消、100 字符分段哈希的 Telnet / 串口两种格式、提前判定、4.x 版本格式与机器名、峰值低于 1020）；扫描接口测试由 0.31 秒降到 0.01 秒，满负载连跑 25 次通过；本机真实局域网扫描 3 次均约 1.0 秒（原约 1.5 秒）。未验证：没有真机，SD 脱机的推迟应答、哈希分段与 1016 窗口均按源码与模拟设备验证，需在翼宿机器上实测。
+- **关联**：`crates/laser-device/src/lib.rs`（`run_sd_file_and_wait`、`wait_sd_job`、`sha256_from_hash_json`、`FLUIDNC_LINE_QUEUE_LIMIT`、`identify_grbl`、`firmware_from_line`、`discover_controllers_with`、`scan_hosts_port_with`）、`crates/laser-api/src/lib.rs`（`discover_verified_controllers`、`ControllerCandidateFinder`）、`frontend/src/controllerDiscovery.js`、`docs/laser/fluidnc-setup.md`、`docs/laser/fluidnc-yisu-v1.md`。
+
+### 扫描局域网改为逐台确认是雕刻机才列出，不再把打印机、路由器当成控制器自动填入（2026-11-09）
+
+- **现象**：工作台“扫描局域网”没有和设备对话，只要局域网里有设备广播 `_telnet` / `_http`（打印机、路由器、NAS、别的电脑都会）就列出来，并把第一台的 IP 直接填进连接框（用户反馈“没有跟激光雕刻机回复就已经填上了”）。
+- **根因与修复**：原实现只做 mDNS 浏览、不向设备发命令。改为 mDNS 与本机局域网网卡所在 /24 的 23 端口扫描只产生候选，逐台连接后发只读的实时状态查询 `?` 与 `$I`（不发运动、出光或改设置的命令），回了状态报告、`[VER:…]` 或 GRBL 横幅的才算找到，并带回固件与状态；正在加工或待确认停机的目标不另开连接。网卡用枚举而不是出口路由（开着代理 TUN 时出口是虚拟网卡）。前端只找到 1 台时填入，多台时给选择框让用户选，没有时写明扫了哪个网段；串口模式提示握手探测会打开串口、部分板子会重启（串口验证沿用已有的“握手探测”，不新增按钮）。行为变更：扫描现在会向局域网里开着 23 端口或广播服务的设备发送 `?` / `$I`。
+- **验证**：新增 `laser-device` 测试 2 项（识别 GRBL / FluidNC、拒绝 SSH / HTTP / 单个 ok、只发只读查询；网段地址与端口扫描）、`laser-api` 测试 1 项（本机假 FluidNC / 假 SSH / 关闭端口 / 加工中目标）、前端单元测试 1 项与 `tests/lan-discovery.browser.mjs`；在本机真实局域网（10.12.0.0/16，代理 TUN 开启）实跑一次，正确只扫 10.12.4.0/24、无误报。未验证：没有真实雕刻机在网时的正向识别（由本机假 FluidNC 覆盖），Windows 上的网卡枚举。
+- **关联**：`crates/laser-device/src/lib.rs`（`identify_grbl`、`identify_controller`、`scan_subnet_port`、`local_lan_ipv4`）、`crates/laser-api/src/lib.rs`（`discover_verified_controllers`、`ControllerCandidate`、`with_controller_candidates`）、`frontend/src/controllerDiscovery.js`、`frontend/src/pages/HomePage.jsx`、`docs/developer/api-contracts.md`。
+
 ### 视觉理解可用本地视觉模型（Qwen3-VL），断网看图、照片不出电脑（2026-11-08）
 
 - **现象**：视觉理解只能用云端视觉模型或对话大模型，要密钥、会产生费用、照片要发出去；用户问能否用本地模型或本地 OneJev 代替。

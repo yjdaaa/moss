@@ -5512,6 +5512,8 @@ input:not([type]):focus {
 }
 
 /* ---- 监视舱生成 / 下发 / 孪生入口同一行（2026-11-07 用户反馈“布局还长了”，替代底部悬浮操作栏） ---- */
+/* 通信链路下方的一行说明（2026-11-09：串口握手探测提示） */
+.wb-hint { margin: 2px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--ob-ink-3, var(--ob-ink-2)); }
 .wb-dispatch-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) auto;

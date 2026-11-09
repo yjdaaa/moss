@@ -28,6 +28,7 @@ import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { defaultSerialPortHint } from "../platform.js";
+import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
 
 export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
   if (!imageFile) return "";
@@ -312,27 +313,29 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
   // Test connection (用户主动点击)
   const handleTestConnection = () => performConnectionProbe(false);
 
-  // mDNS 局域网发现：只读浏览，不向设备发送任何命令；找到后自动填入 IP / telnet 端口
+  // 局域网发现（2026-11-09）：mDNS 与本网段 23 端口只是候选，后端逐台发只读的 `?` / `$I`，
+  // 按 GRBL / FluidNC 回应的才列出；只找到 1 台时自动填入，多台时让用户选，不替用户挑第一个
   const [discovering, setDiscovering] = useState(false);
+  const [discoveredChoices, setDiscoveredChoices] = useState([]);
+  const pickController = (controller) => {
+    setNetworkHost(controller.ip);
+    if (controller.telnet_port) setTelnetPort(controller.telnet_port);
+  };
   const discoverControllers = async () => {
     if (discovering) return;
     setDiscovering(true);
-    addLog("DEVICE", "正在通过 mDNS 扫描局域网控制器（约 2 秒）...", "info");
+    setDiscoveredChoices([]);
+    addLog("DEVICE", "正在查找局域网里的雕刻机，并逐台发送只读查询确认（约 3～5 秒）...", "info");
     try {
       const res = await postJson("/api/ui/discover-controllers", {});
-      const list = res.ok && res.data?.success ? res.data.result?.controllers || [] : [];
-      if (list.length === 0) {
-        addLog("DEVICE", res.data?.result?.hint || "未发现控制器", "warn");
-      } else {
-        const first = list[0];
-        setNetworkHost(first.ip);
-        if (first.telnet_port) setTelnetPort(first.telnet_port);
-        addLog(
-          "DEVICE",
-          `发现 ${list.length} 台控制器：${list.map((c) => `${c.hostname}.local (${c.ip})`).join("、")}，已填入 ${first.ip}`,
-          "ok",
-        );
+      if (!res.ok || !res.data?.success) {
+        addLog("DEVICE", `扫描失败: ${res.data?.result || res.error || "后端无响应"}`, "error");
+        return;
       }
+      const outcome = discoveryOutcome(res.data.result);
+      if (outcome.fill) pickController(outcome.fill);
+      setDiscoveredChoices(outcome.choices);
+      addLog("DEVICE", outcome.log.text, outcome.log.level);
     } catch (e) {
       addLog("DEVICE", `扫描失败: ${e.message}`, "error");
     } finally {
@@ -752,12 +755,36 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 className="btn btn-ghost"
                 onClick={discoverControllers}
                 disabled={discovering}
-                title="通过 mDNS 在局域网内查找 FluidNC（fluidnc.local），自动填入 IP 与端口"
+                title="查找局域网里的设备（mDNS 广播 + 本网段 23 端口），逐台发送只读的状态查询，只列出按 GRBL / FluidNC 回应的雕刻机"
               >
                 <RefreshCw size={13} className="wb-icon" />
                 <span>{discovering ? "扫描中…" : "扫描局域网"}</span>
               </button>
             </div>
+          )}
+          {connectionMode === "network" && discoveredChoices.length > 1 && (
+            <div className="wb-row-2">
+              <span className="wb-text-2">选择雕刻机:</span>
+              <select
+                className="select-input wb-field"
+                id="wb-discovered-controllers"
+                value={discoveredChoices.find((c) => c.ip === networkHost && c.telnet_port === telnetPort) ? `${networkHost}:${telnetPort}` : ""}
+                onChange={(e) => {
+                  const picked = discoveredChoices.find((c) => `${c.ip}:${c.telnet_port}` === e.target.value);
+                  if (picked) pickController(picked);
+                }}
+              >
+                <option value="" disabled>找到 {discoveredChoices.length} 台，请选择…</option>
+                {discoveredChoices.map((c) => (
+                  <option key={`${c.ip}:${c.telnet_port}`} value={`${c.ip}:${c.telnet_port}`}>{controllerLabel(c)}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {connectionMode === "serial" && (
+            <p className="wb-hint" id="wb-serial-probe-hint">
+              点“握手探测”会打开所选串口确认是不是雕刻机；部分 ESP32 / Arduino 板子打开串口时会自动重启，加工中不要探测别的串口。
+            </p>
           )}
 
           <button className="btn btn-ghost wb-btn" onClick={handleTestConnection}>

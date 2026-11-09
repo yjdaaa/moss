@@ -110,6 +110,9 @@ pub struct ApiService {
     extra_allowed_origins: Vec<String>,
     /// 系统串口枚举：默认查询本机真实串口；测试注入固定列表，避免结果随插拔的设备变化。
     serial_port_lister: SerialPortLister,
+    controller_candidates: ControllerCandidateFinder,
+    /// 局域网扫描时等每台设备回应的时限（默认 1.5 秒；收齐回应即返回）
+    discovery_reply_timeout: std::time::Duration,
     /// 严格模式（`MOSS_FUSION_STRICT`，技术书 §6.2）：开启后 R3 动作需要桌面会话或审批授权。
     /// 语音中心切换链路时可在运行中改变（自建模式必须开启），因此用原子量。
     strict_mode: std::sync::atomic::AtomicBool,
@@ -135,6 +138,55 @@ pub type JobTerminalHook = Box<dyn FnOnce(&str, &serde_json::Value) + Send + 'st
 
 /// 串口枚举函数类型（见 [`ApiService::with_serial_port_lister`]）。
 pub type SerialPortLister = std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+/// 局域网扫描的候选地址（2026-11-09）：mDNS 广播到的设备 + 本网段开着 23 端口的设备。
+/// 候选只是“可能是”，必须再经 [`laser_device::identify_controller`] 只读识别出 GRBL / FluidNC 才算找到。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerCandidate {
+    pub ip: String,
+    pub telnet_port: u16,
+    /// mDNS 主机名（不含 `.local`）；网段扫描到的为空
+    pub hostname: String,
+    pub http_port: Option<u16>,
+    /// `mdns` / `scan` / `mdns+scan`
+    pub source: &'static str,
+}
+
+/// 候选地址收集函数类型（见 [`ApiService::with_controller_candidates`]；测试注入本机假设备，不扫真实网络）。
+/// 每找到一个候选就调用一次 `emit`，扫描接口随即开始确认（边找边验）；函数返回即表示找完。
+pub type ControllerCandidateFinder =
+    std::sync::Arc<dyn Fn(&(dyn Fn(ControllerCandidate) + Sync)) + Send + Sync>;
+
+/// 默认候选：mDNS 浏览（1 秒）与本网段 23 端口扫描同时进行，各自找到一个就交出一个。
+fn find_controller_candidates(emit: &(dyn Fn(ControllerCandidate) + Sync)) {
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            laser_device::discover_controllers_with(
+                std::time::Duration::from_millis(1000),
+                |found| {
+                    if !found.ip.contains(':') {
+                        emit(ControllerCandidate {
+                            ip: found.ip.clone(),
+                            telnet_port: found.telnet_port.unwrap_or(23),
+                            hostname: found.hostname.clone(),
+                            http_port: found.http_port,
+                            source: "mdns",
+                        });
+                    }
+                },
+            );
+        });
+        laser_device::scan_subnet_port_with(23, std::time::Duration::from_millis(300), &|ip| {
+            emit(ControllerCandidate {
+                ip: ip.to_string(),
+                telnet_port: 23,
+                hostname: String::new(),
+                http_port: None,
+                source: "scan",
+            });
+        });
+    });
+}
 
 /// 传输工厂：默认按连接描述真实打开 TCP/串口；测试可注入 FakeGrbl。
 pub type TransportFactory = std::sync::Arc<
@@ -865,6 +917,8 @@ impl ApiService {
             transport_factory: default_transport_factory(),
             extra_allowed_origins: Vec::new(),
             serial_port_lister: std::sync::Arc::new(enumerate_system_serial_ports),
+            controller_candidates: std::sync::Arc::new(find_controller_candidates),
+            discovery_reply_timeout: std::time::Duration::from_millis(1500),
             strict_mode: std::sync::atomic::AtomicBool::new(false),
             approvals: None,
             desktop_session: std::sync::OnceLock::new(),
@@ -985,6 +1039,151 @@ impl ApiService {
     }
 
     /// 替换系统串口枚举（测试用；生产环境使用默认的真实枚举）。
+    /// 替换局域网扫描的候选地址来源（测试用本机假设备，不扫真实网络）。
+    pub fn with_controller_candidates(mut self, finder: ControllerCandidateFinder) -> Self {
+        self.controller_candidates = finder;
+        self
+    }
+
+    /// 调整局域网扫描等每台设备回应的时限（测试在满负载下放宽；收齐回应即返回，不会因此变慢）。
+    pub fn with_discovery_reply_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.discovery_reply_timeout = timeout;
+        self
+    }
+
+    /// 局域网扫描（2026-11-09 用户要求）：收集候选后逐台只读识别（`?` + `$I`），只返回按 GRBL / FluidNC
+    /// 回应的设备；正在加工或待确认停机的目标不另开连接打扰，单独列出。
+    fn discover_verified_controllers(&self) -> serde_json::Value {
+        let busy: std::collections::BTreeMap<String, String> = {
+            let mut busy = std::collections::BTreeMap::new();
+            if let Ok(jobs) = self.active_jobs.lock() {
+                for job in jobs.values() {
+                    busy.insert(job.target.clone(), job.workflow_id.clone());
+                }
+            }
+            if let Ok(uncertain) = self.uncertain_jobs.lock() {
+                for job in uncertain.values() {
+                    busy.entry(job.target.clone())
+                        .or_insert_with(|| job.workflow_id.clone());
+                }
+            }
+            busy
+        };
+        // 2026-11-09：边找边验——候选一到就开线程确认，不等 mDNS 与网段扫描都结束
+        let (candidate_tx, candidate_rx) = std::sync::mpsc::channel::<ControllerCandidate>();
+        let finder = self.controller_candidates.clone();
+        let finder_thread = std::thread::spawn(move || {
+            finder(&move |candidate| {
+                let _ = candidate_tx.send(candidate);
+            });
+        });
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reply_timeout = self.discovery_reply_timeout;
+        let mut seen: std::collections::BTreeMap<String, ControllerCandidate> = Default::default();
+        let mut skipped = Vec::new();
+        let mut probes = Vec::new();
+        for candidate in candidate_rx {
+            let key = format!("{}:{}", candidate.ip, candidate.telnet_port);
+            if let Some(known) = seen.get_mut(&key) {
+                // 同一地址 mDNS 与网段扫描各来一次：合并主机名、HTTP 端口与来源
+                if known.hostname.is_empty() {
+                    known.hostname = candidate.hostname.clone();
+                }
+                known.http_port = known.http_port.or(candidate.http_port);
+                if known.source != candidate.source {
+                    known.source = "mdns+scan";
+                }
+                continue;
+            }
+            seen.insert(key.clone(), candidate.clone());
+            if let Some(workflow) = busy.get(&key) {
+                skipped.push(serde_json::json!({
+                    "ip": candidate.ip, "telnet_port": candidate.telnet_port, "workflow_id": workflow,
+                }));
+                continue;
+            }
+            let result_tx = result_tx.clone();
+            probes.push(std::thread::spawn(move || {
+                let spec = laser_device::ConnectionSpec::Tcp {
+                    host: candidate.ip.clone(),
+                    port: candidate.telnet_port,
+                };
+                let result = laser_device::identify_controller(
+                    &spec,
+                    std::time::Duration::from_millis(800),
+                    reply_timeout,
+                );
+                let _ = result_tx.send((key, result));
+            }));
+        }
+        let _ = finder_thread.join();
+        drop(result_tx);
+        for probe in probes {
+            let _ = probe.join();
+        }
+        let candidates: Vec<ControllerCandidate> = seen.values().cloned().collect();
+        let probed: Vec<(
+            ControllerCandidate,
+            Result<laser_device::ControllerIdentity, String>,
+        )> = result_rx
+            .into_iter()
+            .filter_map(|(key, result)| {
+                seen.get(&key).cloned().map(|candidate| (candidate, result))
+            })
+            .collect();
+        let mut controllers = Vec::new();
+        let mut not_controllers = 0usize;
+        for (candidate, result) in probed {
+            match result {
+                Ok(identity) => controllers.push(serde_json::json!({
+                    "ip": candidate.ip,
+                    "telnet_port": candidate.telnet_port,
+                    "hostname": candidate.hostname,
+                    "http_port": candidate.http_port,
+                    "source": candidate.source,
+                    "firmware": identity.firmware,
+                    "state": identity.state,
+                    "machine": identity.machine,
+                })),
+                Err(_) => not_controllers += 1,
+            }
+        }
+        let hint = if !controllers.is_empty() {
+            String::new()
+        } else if !skipped.is_empty() {
+            "找到的雕刻机正在加工，未另开连接打扰；可直接用当前连接".to_owned()
+        } else if candidates.is_empty() {
+            let subnets: Vec<String> = laser_device::local_lan_ipv4()
+                .iter()
+                .map(|ip| {
+                    let [a, b, c, _] = ip.octets();
+                    format!("{a}.{b}.{c}.0/24")
+                })
+                .collect();
+            if subnets.is_empty() {
+                "没有找到可用的局域网网卡，也没收到 mDNS 广播：确认电脑已连上和雕刻机相同的网络"
+                    .to_owned()
+            } else {
+                format!(
+                    "在 {} 扫描了 23 端口并监听 mDNS 广播，没找到可能的控制器：确认雕刻机已开机、和电脑在同一网段（大网段只扫本机所在的这一段；FluidNC 可开启 $MDNS/Enable=ON，或直接填 IP）",
+                    subnets.join("、")
+                )
+            }
+        } else {
+            format!(
+                "检查了 {} 个地址，没有设备按 GRBL / FluidNC 回应",
+                candidates.len()
+            )
+        };
+        serde_json::json!({
+            "controllers": controllers,
+            "busy": skipped,
+            "checked": candidates.len(),
+            "not_controllers": not_controllers,
+            "hint": hint,
+        })
+    }
+
     pub fn with_serial_port_lister(mut self, lister: SerialPortLister) -> Self {
         self.serial_port_lister = lister;
         self
@@ -2250,13 +2449,12 @@ impl ApiService {
                             if cancel.is_cancelled() || voice_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
                                 Err("SD 启动前加工已取消或语音授权已撤销，未发送 $SD/Run".to_owned())
                             } else {
-                                // $SD/Run 走顺序信道并等 ok；固件在 Alarm 态会回 error:8
-                                match device.send_line_wait_ack(&format!("$SD/Run={remote_path}")) {
-                                Err(e) => Err(format!("启动 SD 脱机任务失败: {e}")),
-                                Ok(()) => device
-                                    .wait_until_sd_completed(std::time::Duration::from_secs(7200), Some(&progress), Some(&cancel))
-                                    .map(|_| total),
-                                }
+                                // 2026-11-09：$SD/Run 的 ok 要等整个文件跑完才回（FluidNC 推迟应答），
+                                // 发出后直接监控进度、取消与结束，不再“发一行等 ok”
+                                device
+                                    .run_sd_file_and_wait(&remote_path, std::time::Duration::from_secs(7200), Some(&progress), Some(&cancel))
+                                    .map(|_| total)
+                                    .map_err(|e| format!("SD 脱机任务未完成: {e}"))
                             }
                         }
                     }
@@ -4853,28 +5051,10 @@ impl ApiService {
                 })),
             ),
             ("POST", "/api/ui/discover-controllers") => {
-                // mDNS 只读浏览 _telnet._tcp / _http._tcp，约 2 秒；不向设备发送任何命令。
+                // 2026-11-09：mDNS 与本网段 23 端口只是候选，逐台发只读的 `?` 与 `$I`，按 GRBL / FluidNC
+                // 回应的才算找到（不再把广播 _http 的打印机、路由器当成雕刻机）。
                 // 用 POST：跨站页面无法用不带 Origin 的 GET（如 <img>）反复触发局域网扫描
-                let controllers =
-                    laser_device::discover_controllers(std::time::Duration::from_millis(2000));
-                let list: Vec<serde_json::Value> = controllers
-                    .iter()
-                    .map(|c| {
-                        serde_json::json!({
-                            "hostname": c.hostname,
-                            "ip": c.ip,
-                            "telnet_port": c.telnet_port,
-                            "http_port": c.http_port,
-                        })
-                    })
-                    .collect();
-                (
-                    200,
-                    success(serde_json::json!({
-                        "controllers": list,
-                        "hint": if list.is_empty() { "未发现广播 mDNS 的控制器；FluidNC 需开启 $MDNS/Enable=ON，且电脑与机器在同一网段" } else { "" },
-                    })),
-                )
+                (200, success(self.discover_verified_controllers()))
             }
             ("GET", "/api/ui/serial-ports") => {
                 let ports = (self.serial_port_lister)();
@@ -15772,5 +15952,124 @@ Content-Length: 30
         );
         assert_eq!(cal_cancel["success"], true, "{cal_cancel}");
         assert_eq!(cal_cancel["result"]["status"], "cancelled");
+    }
+
+    /// 本机假 TCP 设备：`grbl` 时对 `?` 回状态报告、对 `$I` 回固件信息；否则一连上就回一行别的协议横幅。
+    fn spawn_fake_tcp_device(grbl: bool) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { continue };
+                if !grbl {
+                    let _ = stream.write_all(b"SSH-2.0-OpenSSH_9.6\r\n");
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    continue;
+                }
+                // 满负载下客户端两次写入之间可能被挂起较久：读超时放宽，避免假设备提前断开
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 256];
+                let (mut status_sent, mut version_sent) = (false, false);
+                while let Ok(n) = stream.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                    if !status_sent && seen.contains(&b'?') {
+                        let _ = stream.write_all(b"<Idle|MPos:0.000,0.000,0.000|FS:0,0>\r\n");
+                        status_sent = true;
+                    }
+                    if !version_sent && seen.windows(2).any(|w| w == b"$I") {
+                        let _ = stream.write_all(b"[VER:4.1 FluidNC v4.1.1 (esp32-wifi) :yisu\r\n[OPT:PHS\r\n[MSG:Machine: Yisu V1.0]\r\nok\r\n");
+                        version_sent = true;
+                    }
+                    // 回完也不主动断开：像真实 FluidNC 一样等客户端关闭。先关会让晚到的字节触发 RST，
+                    // 客户端缓冲里还没读的回复随之被丢弃
+                }
+            }
+        });
+        port
+    }
+
+    /// 2026-11-09：局域网扫描只返回按 GRBL / FluidNC 回应的设备（不再把广播 _http 的打印机、
+    /// 路由器当成雕刻机）；正在加工的目标不另开连接，单独列出；连不上或不是 GRBL 的只计数。
+    #[test]
+    fn lan_discovery_lists_only_devices_that_answer_like_grbl() {
+        let grbl_port = spawn_fake_tcp_device(true);
+        let ssh_port = spawn_fake_tcp_device(false);
+        let closed_port = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let busy_port = 2399u16;
+        let candidate = |port: u16, hostname: &str, source: &'static str| ControllerCandidate {
+            ip: "127.0.0.1".into(),
+            telnet_port: port,
+            hostname: hostname.into(),
+            http_port: Some(80),
+            source,
+        };
+        let candidates = vec![
+            candidate(grbl_port, "fluidnc", "mdns"),
+            candidate(ssh_port, "printer", "mdns"),
+            candidate(closed_port, "", "scan"),
+            candidate(busy_port, "", "scan"),
+        ];
+        let service = cors_test_service()
+            .with_controller_candidates(std::sync::Arc::new(
+                move |emit: &(dyn Fn(ControllerCandidate) + Sync)| {
+                    for candidate in &candidates {
+                        emit(candidate.clone());
+                    }
+                },
+            ))
+            .with_discovery_reply_timeout(std::time::Duration::from_secs(5));
+        service.active_jobs.lock().unwrap().insert(
+            "wf-busy".into(),
+            std::sync::Arc::new(ActiveJob {
+                workflow_id: "wf-busy".into(),
+                mode: "network",
+                target: format!("127.0.0.1:{busy_port}"),
+                cancel: Default::default(),
+                progress: Default::default(),
+                transport: std::sync::Arc::new(laser_device::FakeGrbl::new(Vec::<String>::new())),
+                started_at: std::time::Instant::now(),
+            }),
+        );
+        let response = service.handle("POST", "/api/ui/discover-controllers", b"{}");
+        assert_eq!(response.status, 200);
+        let result = &response.body["result"];
+        let controllers = result["controllers"].as_array().unwrap();
+        assert_eq!(controllers.len(), 1, "{result}");
+        assert_eq!(controllers[0]["telnet_port"], grbl_port);
+        assert_eq!(controllers[0]["hostname"], "fluidnc");
+        assert_eq!(controllers[0]["firmware"], "FluidNC v4.1.1");
+        assert_eq!(controllers[0]["machine"], "Yisu V1.0");
+        assert_eq!(controllers[0]["state"], "Idle");
+        assert_eq!(
+            result["busy"][0]["workflow_id"], "wf-busy",
+            "正在加工的目标不另开连接"
+        );
+        assert_eq!(result["checked"], 4);
+        assert_eq!(result["not_controllers"], 2, "SSH 横幅与连不上的都不算");
+        assert_eq!(result["hint"], "");
+
+        let none = cors_test_service().with_controller_candidates(std::sync::Arc::new(
+            |_: &(dyn Fn(ControllerCandidate) + Sync)| {},
+        ));
+        let empty = none.handle("POST", "/api/ui/discover-controllers", b"{}");
+        assert!(
+            empty.body["result"]["controllers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let hint = empty.body["result"]["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("没找到可能的控制器") || hint.contains("没有找到可用的局域网网卡"),
+            "{hint}"
+        );
     }
 }

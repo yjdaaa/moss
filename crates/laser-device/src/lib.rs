@@ -132,8 +132,13 @@ pub trait DeviceTransport: Send + Sync {
 pub const GRBL_CLASSIC_RX_WINDOW: usize = 127;
 /// 已通过 `$CD` 确认是 FluidNC、但尚未观测到空闲 `Bf:` 时的网络初始窗口：FluidNC `Channel` 通用 256 字节。
 pub const FLUIDNC_CHANNEL_RX_WINDOW: usize = 256;
-/// 字符计数窗口硬上限（字节），即使设备报告更大的空闲缓冲也不超过它。
-pub const MAX_RX_WINDOW: usize = 1024;
+/// FluidNC 每个通道同一时刻只处理一行，其余字节进行队列，上限 `4 * maxLine` = 1020 字节；
+/// 新的一行开始时队列已满就整行丢弃且不回错误（FluidNC `Channel.h` `_queue_limit`、
+/// `Channel.cpp` `queue_push`）。Telnet 空闲时 `Bf:` 却报约 1200，不能照单全收（2026-11-09 核对源码）。
+pub const FLUIDNC_LINE_QUEUE_LIMIT: usize = 4 * 255;
+/// 字符计数窗口硬上限（字节），即使设备报告更大的空闲缓冲也不超过它：
+/// 取 FluidNC 行队列上限再留 4 字节余量，未确认字节永远到不了整行丢弃的边界。
+pub const MAX_RX_WINDOW: usize = FLUIDNC_LINE_QUEUE_LIMIT - 4;
 /// 半行续接缓冲上限：设备持续输出不带换行的数据时丢弃，避免无界增长。
 const MAX_PARTIAL_LINE_BYTES: usize = 64 * 1024;
 
@@ -480,6 +485,12 @@ pub struct MachineFeatures {
     pub verbose_errors: bool,
     /// `start.must_home: true` 时上电即 `ALARM:14`，必须先 `$H`
     pub must_home: bool,
+    /// 配置里有顶层 `Laser:` 主轴段
+    pub has_laser: bool,
+    /// `Laser.off_on_alarm`：报警时是否由固件关激光。FluidNC 默认 false（`Spindle.h`），没写这一项就是 `None`
+    pub laser_off_on_alarm: Option<bool>,
+    /// 配置里明确写了 `verbose_errors: false`（FluidNC 默认 true）：报错不再附 `[MSG:ERR: 原因]`
+    pub verbose_errors_disabled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +714,14 @@ pub fn parse_status_report(line: &str) -> Option<StatusReport> {
 }
 
 /// 解析 FluidNC YAML 配置文本，提取机械行程与外设引脚能力
+/// 2026-11-09：FluidNC 的 `Laser.off_on_alarm` 默认关（`Spindle.h`），报警时固件不主动关激光；
+/// M3 恒功率模式下停在原地也可能继续出光。配置了激光段却没开时给出提醒（只提醒，不拦截）。
+pub fn laser_off_on_alarm_warning(features: &MachineFeatures) -> Option<&'static str> {
+    (features.has_laser && features.laser_off_on_alarm != Some(true)).then_some(
+        "config.yaml 的 Laser 段没有开启 off_on_alarm：报警时固件不会主动关激光，建议加上 off_on_alarm: true 后重启控制器",
+    )
+}
+
 pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
     let mut limits = MachineLimits::default();
     let mut features = MachineFeatures::default();
@@ -718,6 +737,7 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
         if indent == 0 && trimmed.ends_with(':') {
             current_section = trimmed.trim_end_matches(':').trim();
             current_axis = "";
+            features.has_laser |= current_section.eq_ignore_ascii_case("laser");
             continue;
         }
         if current_section == "axes" && indent <= 4 && trimmed.ends_with(':') {
@@ -747,13 +767,20 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
                 features.must_home = val.eq_ignore_ascii_case("true");
                 continue;
             }
+            if current_section.eq_ignore_ascii_case("laser") && key == "off_on_alarm" {
+                features.laser_off_on_alarm = Some(val.eq_ignore_ascii_case("true"));
+                continue;
+            }
             if indent == 0 {
                 match key {
                     "planner_blocks" => features.planner_blocks = val.parse().ok(),
                     "use_line_numbers" => {
                         features.use_line_numbers = val.eq_ignore_ascii_case("true")
                     }
-                    "verbose_errors" => features.verbose_errors = val.eq_ignore_ascii_case("true"),
+                    "verbose_errors" => {
+                        features.verbose_errors = val.eq_ignore_ascii_case("true");
+                        features.verbose_errors_disabled = val.eq_ignore_ascii_case("false");
+                    }
                     _ => {}
                 }
             }
@@ -879,6 +906,13 @@ pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
                 }
                 if f.must_home {
                     summary.push_str("；start.must_home=true，上电后必须先回零");
+                }
+                if let Some(warning) = laser_off_on_alarm_warning(f) {
+                    summary.push('；');
+                    summary.push_str(warning);
+                }
+                if f.verbose_errors_disabled {
+                    summary.push_str("；config.yaml 关掉了 verbose_errors：固件报错不再附原因，遇到新错误码只能看到编号，建议改回 verbose_errors: true");
                 }
             }
             ProbeReport {
@@ -1586,12 +1620,28 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         let start = Instant::now();
         let mut got_hash: Option<String> = None;
         let mut terminated = false;
+        // 2026-11-09：FluidNC 的 JSON 输出每满 100 个字符切一行（`JSONEncoder::add`），
+        // `"value":"` 前缀占 46 个字符，64 位哈希必然被切成两行；Telnet 为原始分段，
+        // 串口每段前加 `[JSON:`（`UartChannel::out`）。先拼起来再取值。
+        let mut json = String::new();
         while start.elapsed() < timeout {
             match self.transport.read_line() {
                 Ok(Some(line)) => {
                     self.last_response_at = Instant::now();
                     if self.note_line(&line) {
                         continue;
+                    }
+                    if !line.eq_ignore_ascii_case("ok")
+                        && !line.starts_with("error:")
+                        && !line.starts_with("ALARM:")
+                        && !line.starts_with("[MSG:")
+                        && !line.starts_with('<')
+                    {
+                        json.push_str(
+                            line.strip_prefix("[JSON:")
+                                .unwrap_or(&line)
+                                .trim_end_matches(['\r', '\n']),
+                        );
                     }
                     if line.eq_ignore_ascii_case("ok") {
                         terminated = true;
@@ -1620,6 +1670,9 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                 Err(_) => continue,
             }
         }
+        if got_hash.is_none() {
+            got_hash = sha256_from_hash_json(&json);
+        }
         if !terminated && got_hash.is_none() {
             return Err("读取固件文件哈希超时或未响应".into());
         }
@@ -1642,6 +1695,41 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         progress: Option<&Arc<JobProgress>>,
         cancel: Option<&CancellationToken>,
     ) -> Result<(), String> {
+        self.wait_sd_job(timeout, progress, cancel, false)
+    }
+
+    /// 发 `$SD/Run=<path>` 并监控到作业结束（2026-11-09 按 FluidNC 源码修正）。
+    ///
+    /// FluidNC 的 `$SD/Run` 回的是推迟应答（`FileCommands.cpp` `runFile` 返回 `Error::Deferred`）：
+    /// `ok` / `error:N` 要等整个文件跑完才回，期间本通道不再接收新行，实时字节照常。
+    /// 因此不能用“发一行等 ok”——那会在整个作业期间既不更新进度、也看不到取消，暂停后永远等不到 ok。
+    /// 这里发出后直接进入监控：看到 `SD:` 进度、运行态或推迟回来的 `ok` 才算已开始，之后回到空闲才完成；
+    /// 发出后长时间空闲且没有任何开始迹象则报错。
+    pub fn run_sd_file_and_wait(
+        &mut self,
+        remote_path: &str,
+        timeout: Duration,
+        progress: Option<&Arc<JobProgress>>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), String> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err("用户取消，未启动 SD 脱机任务".into());
+        }
+        self.send_line(&format!("$SD/Run={remote_path}"))?;
+        self.last_response_at = Instant::now();
+        self.wait_sd_job(timeout, progress, cancel, true)
+    }
+
+    fn wait_sd_job(
+        &mut self,
+        timeout: Duration,
+        progress: Option<&Arc<JobProgress>>,
+        cancel: Option<&CancellationToken>,
+        require_start: bool,
+    ) -> Result<(), String> {
+        /// 发出 `$SD/Run` 后这么久仍空闲且没有任何开始迹象，判定没有启动
+        const START_GRACE: Duration = Duration::from_secs(5);
+        let mut started = !require_start;
         let start = Instant::now();
         let mut last_poll = Instant::now();
         let interval = self.poll_interval(Duration::from_millis(500));
@@ -1663,6 +1751,13 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             }
             match self.transport.read_line() {
                 Ok(Some(line)) => {
+                    // 推迟应答：文件已跑完（或空文件），接下来回到空闲即完成
+                    if line.trim().eq_ignore_ascii_case("ok") {
+                        started = true;
+                        let _ = self.transport.write_realtime(RealtimeCommand::StatusQuery);
+                        last_poll = Instant::now();
+                        continue;
+                    }
                     let report = match self.classify_line(&line, "SD 执行") {
                         Ok(Some(report)) => report,
                         Ok(None) => continue,
@@ -1682,7 +1777,20 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             _ => {}
                         }
                     }
+                    if report.has_sd_job() || report.activity == MachineActivity::Busy {
+                        started = true;
+                    }
                     match report.activity {
+                        MachineActivity::Idle if !report.has_sd_job() && !started => {
+                            if start.elapsed() >= START_GRACE {
+                                break Err(
+                                    "发出 $SD/Run 后控制器一直空闲，SD 任务没有开始（文件不存在或固件拒绝时会回 error）"
+                                        .into(),
+                                );
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
                         MachineActivity::Idle if !report.has_sd_job() => {
                             if let Some(prog) = progress {
                                 let total = prog.total_lines.load(Ordering::Relaxed);
@@ -2200,7 +2308,9 @@ pub fn diagnose_device_message(line: &str) -> Option<String> {
             "14" => "未回零安全锁定（机床启用了强制回零策略，请先执行 $H 回零再开始加工）",
             "15" => "固件初始化配置锁定（配置文件加载异常）",
             "16" => "IO 扩展芯片复位故障",
-            "17" => "G-code 严重几何冲突锁定",
+            "17" => {
+                "文件作业中遇到无效 G-code 行，固件已停止作业（FluidNC GCodeError，原因见前一行 [MSG:ERR: Bad GCode: …]）"
+            }
             "18" => "对刀过程触碰到了物理硬限位开关",
             _ => "控制器安全锁定，请检查机床状态",
         };
@@ -2271,7 +2381,9 @@ pub fn diagnose_device_message(line: &str) -> Option<String> {
             "110" => "Web 认证失败（密码错误）",
             "111" | "112" | "114" => "行/文件结束或无数据（通常不是错误）",
             "113" => "固件在执行中被复位",
-            "120" => "设备接口忙（FluidNC WebUI 网页或其他上位机正在独占连接）",
+            "120" => {
+                "另一个通道正在运行作业（如 SD 卡任务或 WebUI 发起的加工），本连接的 G-code 被拒绝；等它结束或先停止它"
+            }
             "130" => "点动 (Jog) 被取消",
             "150" => "引脚配置冲突（YAML 文件中 GPIO 编号重复或引脚不存在）",
             "151" => "运行时设置无效",
@@ -2306,6 +2418,14 @@ pub struct DiscoveredController {
 /// FluidNC 会把两种服务都注册在 `<hostname>.local`（默认 `fluidnc.local`）。
 /// 只读操作，不向任何设备发送命令；没有多播权限或无网卡时返回空列表而不报错。
 pub fn discover_controllers(timeout: Duration) -> Vec<DiscoveredController> {
+    discover_controllers_with(timeout, |_| {})
+}
+
+/// 同 [`discover_controllers`]，每解析出一个地址（或补上一个端口）就立即回调，便于边发现边确认（2026-11-09）。
+pub fn discover_controllers_with(
+    timeout: Duration,
+    mut on_found: impl FnMut(&DiscoveredController),
+) -> Vec<DiscoveredController> {
     use mdns_sd::{ServiceDaemon, ServiceEvent};
     use std::collections::BTreeMap;
 
@@ -2358,6 +2478,7 @@ pub fn discover_controllers(timeout: Duration) -> Vec<DiscoveredController> {
                         } else {
                             entry.http_port = Some(info.get_port());
                         }
+                        on_found(entry);
                     }
                 }
             }
@@ -2380,6 +2501,246 @@ pub fn discover_controllers(timeout: Duration) -> Vec<DiscoveredController> {
         .collect();
     list.retain(|c| !c.ip.contains(':') || !hosts_with_v4.contains(&c.hostname));
     list
+}
+
+/// 从拼接后的 `$File/ShowHash` JSON（`{"signature":{"algorithm":"SHA2-256","value":"<HEX>"},...}`）
+/// 取出 64 位十六进制哈希并转小写；没有或长度不对时为 None。
+fn sha256_from_hash_json(json: &str) -> Option<String> {
+    let after = &json[json.find("\"value\"")? + "\"value\"".len()..];
+    let after = after
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start()
+        .strip_prefix('"')?;
+    let value: String = after.chars().take_while(|c| *c != '"').collect();
+    (value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+/// 局域网扫描时识别出的控制器信息（2026-11-09，只读识别）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControllerIdentity {
+    /// 固件名与版本，如 `FluidNC v3.7.8`、`Grbl 1.1h`；只回了状态报告时为 None
+    pub firmware: Option<String>,
+    /// 状态报告里的机器状态，如 `Idle`、`Run`、`Alarm`
+    pub state: Option<String>,
+    /// FluidNC `$I` 的 `[MSG:Machine: <配置名>]`，多台机器时用来区分
+    pub machine: Option<String>,
+}
+
+/// `FluidNC` 后面紧跟的版本号（`v4.1.1`），去掉结尾的 `:` / `]`。
+fn fluidnc_version(text: &str) -> Option<String> {
+    let rest = &text[text.find("FluidNC")? + "FluidNC".len()..];
+    let version = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([':', ']']);
+    Some(if version.is_empty() {
+        "FluidNC".to_owned()
+    } else {
+        format!("FluidNC {version}")
+    })
+}
+
+/// `[VER:...]` / 启动横幅 → 可读的固件名（2026-11-09 按 FluidNC 源码格式核对）。
+/// - FluidNC 4.x `$I`：`[VER:4.1 FluidNC v4.1.1 (esp32-wifi) :<build>`（没有右括号）；3.x：`[VER:3.7.8 FluidNC v3.7.8:]`
+/// - 经典 GRBL：`[VER:1.1h.20190825:]`
+/// - 启动横幅：`Grbl 4.1 [FluidNC v4.1.1 (esp32-wifi) '$' for help]`、`Grbl 1.1h ['$' for help]`
+fn firmware_from_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix("[VER:") {
+        if rest.contains("FluidNC") {
+            return fluidnc_version(rest);
+        }
+        let version = rest.split([':', ' ', ']']).next().unwrap_or("");
+        let short = version.split('.').take(2).collect::<Vec<_>>().join(".");
+        return Some(format!(
+            "Grbl {}",
+            if short.is_empty() { version } else { &short }
+        ));
+    }
+    if trimmed.starts_with("Grbl ") || trimmed.starts_with("GrblHAL ") {
+        if trimmed.contains("[FluidNC") {
+            return fluidnc_version(trimmed);
+        }
+        return trimmed
+            .split(" [")
+            .next()
+            .map(|banner| banner.trim().to_owned());
+    }
+    None
+}
+
+/// 只读识别 GRBL / FluidNC：发实时状态查询 `?` 与 `$I`（读固件信息），不发任何会让机器运动或出光的命令。
+/// 只有回了状态报告 `<State|...>`、`[VER:...]` 或 GRBL 启动横幅才算雕刻机控制器；单回一个 `ok` 不算。
+pub fn identify_grbl(
+    transport: &dyn DeviceTransport,
+    timeout: Duration,
+) -> Option<ControllerIdentity> {
+    let _ = transport.write_realtime(RealtimeCommand::StatusQuery);
+    let _ = transport.write_line("$I");
+    let started = Instant::now();
+    let deadline = started + timeout;
+    // GRBL / FluidNC 回 `?` 只要几毫秒：这么久一行都没有就不是（扫描时不在别的设备上白等满时限）
+    let first_reply_deadline = started + timeout.min(Duration::from_millis(700));
+    let mut identity = ControllerIdentity::default();
+    let mut grbl = false;
+    let mut saw_ok = false;
+    let mut any_line = false;
+    while Instant::now() < deadline {
+        if !any_line && Instant::now() >= first_reply_deadline {
+            break;
+        }
+        match transport.read_line() {
+            Ok(Some(line)) => {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                any_line = true;
+                // 还没认出是 GRBL 时先回了别的协议（`login:`、SSH / HTTP 横幅等）：立即判定，不等时限
+                let grbl_like = line.starts_with('<')
+                    || line.starts_with('[')
+                    || line.starts_with("Grbl")
+                    || line.eq_ignore_ascii_case("ok")
+                    || line.starts_with("error:")
+                    || line.starts_with("ALARM:");
+                if !grbl && !grbl_like {
+                    return None;
+                }
+                if line.starts_with('<') && line.ends_with('>') && line.contains('|') {
+                    let state = line[1..].split(['|', ':', '>']).next().unwrap_or("").trim();
+                    if !state.is_empty() {
+                        identity.state = Some(state.to_owned());
+                        grbl = true;
+                    }
+                } else if let Some(firmware) = firmware_from_line(line) {
+                    identity.firmware = Some(firmware);
+                    grbl = true;
+                } else if let Some(name) = line
+                    .strip_prefix("[MSG:Machine:")
+                    .map(|rest| rest.trim_end_matches(']').trim())
+                    .filter(|name| !name.is_empty())
+                {
+                    identity.machine = Some(name.to_owned());
+                } else if line.eq_ignore_ascii_case("ok") {
+                    saw_ok = true;
+                }
+                // `$I` 以 ok 结束（VER / OPT / Machine 都在它之前），收齐即返回
+                if identity.state.is_some() && saw_ok {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    grbl.then_some(identity)
+}
+
+/// 连上 `spec` 做一次只读识别；连不上或不是 GRBL 时返回原因。
+pub fn identify_controller(
+    spec: &ConnectionSpec,
+    connect_timeout: Duration,
+    reply_timeout: Duration,
+) -> Result<ControllerIdentity, String> {
+    let transport = open_transport(spec, connect_timeout)?;
+    identify_grbl(transport.as_ref(), reply_timeout)
+        .ok_or_else(|| "没有按 GRBL / FluidNC 回应".to_owned())
+}
+
+/// 本机局域网网卡所在 IPv4 私有网段（各取本机所在的 /24）里开着 `port` 的地址（不含本机）。
+/// 只做 TCP 连接尝试，不发数据。直接枚举网卡而不是看出口路由：开着代理 TUN 时出口是虚拟网卡。
+pub fn scan_subnet_port(port: u16, connect_timeout: Duration) -> Vec<std::net::Ipv4Addr> {
+    scan_subnet_port_with(port, connect_timeout, &|_| {})
+}
+
+/// 同 [`scan_subnet_port`]，每连上一个地址就立即回调（2026-11-09：边扫边确认）。
+pub fn scan_subnet_port_with(
+    port: u16,
+    connect_timeout: Duration,
+    on_open: &(dyn Fn(std::net::Ipv4Addr) + Sync),
+) -> Vec<std::net::Ipv4Addr> {
+    let locals = local_lan_ipv4();
+    let mut hosts: Vec<std::net::Ipv4Addr> = Vec::new();
+    for local in &locals {
+        for host in subnet_hosts(*local) {
+            if !hosts.contains(&host) && !locals.contains(&host) {
+                hosts.push(host);
+            }
+        }
+    }
+    scan_hosts_port_with(hosts, port, connect_timeout, on_open)
+}
+
+/// 本机局域网网卡的私有 IPv4 地址：有广播地址（Wi-Fi / 有线网），跳过回环与代理 / VPN 的点对点虚拟网卡。
+pub fn local_lan_ipv4() -> Vec<std::net::Ipv4Addr> {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for interface in interfaces {
+        let if_addrs::IfAddr::V4(v4) = &interface.addr else {
+            continue;
+        };
+        let name = interface.name.to_ascii_lowercase();
+        let virtual_tunnel = ["utun", "tun", "tap", "ppp", "wg", "ipsec", "gif", "stf"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix));
+        if v4.ip.is_loopback() || !v4.ip.is_private() || v4.broadcast.is_none() || virtual_tunnel {
+            continue;
+        }
+        if !found.contains(&v4.ip) {
+            found.push(v4.ip);
+        }
+    }
+    found
+}
+
+/// `local` 所在 /24 的其余 253 个主机地址。
+pub fn subnet_hosts(local: std::net::Ipv4Addr) -> Vec<std::net::Ipv4Addr> {
+    let [a, b, c, d] = local.octets();
+    (1..=254u8)
+        .filter(|host| *host != d)
+        .map(|host| std::net::Ipv4Addr::new(a, b, c, host))
+        .collect()
+}
+
+/// 并行尝试连接一批地址的 `port`，返回连得上的。
+pub fn scan_hosts_port(
+    hosts: Vec<std::net::Ipv4Addr>,
+    port: u16,
+    connect_timeout: Duration,
+) -> Vec<std::net::Ipv4Addr> {
+    scan_hosts_port_with(hosts, port, connect_timeout, &|_| {})
+}
+
+/// 每个地址一个线程同时连接（一个 /24 最多 253 个，约一个连接超时即可扫完），连上即回调。
+pub fn scan_hosts_port_with(
+    hosts: Vec<std::net::Ipv4Addr>,
+    port: u16,
+    connect_timeout: Duration,
+    on_open: &(dyn Fn(std::net::Ipv4Addr) + Sync),
+) -> Vec<std::net::Ipv4Addr> {
+    let open = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for host in hosts {
+            let open = &open;
+            scope.spawn(move || {
+                let addr = std::net::SocketAddr::from((host, port));
+                if TcpStream::connect_timeout(&addr, connect_timeout).is_ok() {
+                    on_open(host);
+                    if let Ok(mut found) = open.lock() {
+                        found.push(host);
+                    }
+                }
+            });
+        }
+    });
+    let mut found = open.into_inner().unwrap_or_default();
+    found.sort();
+    found
 }
 
 /// 将 G-code 文件内容通过 FluidNC 的 HTTP /upload 接口上传至 SD 卡
@@ -3151,6 +3512,181 @@ control:
         assert_eq!(device.state(), DeviceState::Ready);
     }
 
+    /// 2026-11-09：表里没有的新错误码也能看到原因——FluidNC 默认 `verbose_errors: true`，
+    /// 在 `error:N` 之前先发 `[MSG:ERR: …]`，上位机把它拼进报错（不额外发 `$E` 查询）。
+    #[test]
+    fn unknown_error_code_still_carries_firmware_explanation() {
+        let fake = FakeGrbl::new(
+            ["[MSG:ERR: Brand new firmware check failed]", "error:199"].map(str::to_owned),
+        );
+        let mut device = DeviceConnection::new(fake);
+        device.state = DeviceState::Ready;
+        let error = device.send_line_wait_ack("G1 X1 F600").unwrap_err();
+        assert!(error.contains("error:199"), "{error}");
+        assert!(
+            error.contains("Brand new firmware check failed"),
+            "带上固件自己的原因: {error}"
+        );
+    }
+
+    /// 2026-11-09：FluidNC `Laser.off_on_alarm` 默认 false，配置了激光段却没开时握手摘要给出提醒。
+    #[test]
+    fn laser_off_on_alarm_is_read_from_config_and_warned_when_off() {
+        let missing = "Laser:\n  pwm_hz: 5000\n  speed_map: 0=0% 1000=100%\n";
+        let (_, features) = parse_fluidnc_yaml(missing);
+        assert!(features.has_laser);
+        assert_eq!(features.laser_off_on_alarm, None);
+        assert!(
+            laser_off_on_alarm_warning(&features)
+                .unwrap()
+                .contains("off_on_alarm: true")
+        );
+
+        let off = "laser:\n  off_on_alarm: false\n";
+        let (_, features) = parse_fluidnc_yaml(off);
+        assert_eq!(features.laser_off_on_alarm, Some(false), "段名大小写都认");
+        assert!(laser_off_on_alarm_warning(&features).is_some());
+
+        let on = "Laser:\n  off_on_alarm: true\n";
+        let (_, features) = parse_fluidnc_yaml(on);
+        assert_eq!(features.laser_off_on_alarm, Some(true));
+        assert!(laser_off_on_alarm_warning(&features).is_none());
+
+        let (_, features) =
+            parse_fluidnc_yaml("verbose_errors: false\nPWM:\n  output_pin: gpio.17\n");
+        assert!(
+            features.verbose_errors_disabled,
+            "明确关掉 verbose_errors 要提醒"
+        );
+        let (_, features) = parse_fluidnc_yaml("Laser:\n  off_on_alarm: true\n");
+        assert!(
+            !features.verbose_errors_disabled,
+            "没写这一项按固件默认（开）处理，不提醒"
+        );
+        let (_, features) = parse_fluidnc_yaml("PWM:\n  output_pin: gpio.17\n");
+        assert!(!features.has_laser);
+        assert!(
+            laser_off_on_alarm_warning(&features).is_none(),
+            "不是激光主轴不提醒"
+        );
+    }
+
+    /// 2026-11-09：按 FluidNC 源码规则（JSON 每满 100 个字符切一行；Telnet 原样、串口每段加 `[JSON:`；
+    /// 哈希为大写十六进制）构造 `$File/ShowHash` 输出，哈希被切成两行时仍能拼出并核对。
+    #[test]
+    fn sd_file_hash_is_reassembled_from_100_char_json_chunks() {
+        let sha = "9F2C4E7A1B3D5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8";
+        let json = format!(
+            r#"{{"signature":{{"algorithm":"SHA2-256","value":"{sha}"}},"path":"/sd/moss_job.gcode"}}"#
+        );
+        let chunks: Vec<String> = json
+            .as_bytes()
+            .chunks(100)
+            .map(|chunk| String::from_utf8(chunk.to_vec()).unwrap())
+            .collect();
+        assert!(
+            chunks.len() >= 2 && !chunks[0].contains(sha),
+            "哈希确实被切开"
+        );
+        for uart in [false, true] {
+            let mut lines: Vec<String> = chunks
+                .iter()
+                .map(|chunk| {
+                    if uart {
+                        format!("[JSON:{chunk}")
+                    } else {
+                        chunk.clone()
+                    }
+                })
+                .collect();
+            lines.push("ok".into());
+            let mut device = DeviceConnection::new(FakeGrbl::new(lines.clone()));
+            assert_eq!(
+                device.verify_sd_file_hash(
+                    "/sd/moss_job.gcode",
+                    &sha.to_ascii_lowercase(),
+                    Duration::from_secs(1)
+                ),
+                Ok(true),
+                "uart={uart}"
+            );
+            let mut device = DeviceConnection::new(FakeGrbl::new(lines));
+            let mismatch = device
+                .verify_sd_file_hash(
+                    "/sd/moss_job.gcode",
+                    &"0".repeat(64),
+                    Duration::from_secs(1),
+                )
+                .unwrap_err();
+            assert!(mismatch.contains("不匹配"), "{mismatch}");
+        }
+        // 固件没有返回哈希（未启用 HashFS）：仍按“没有哈希”处理，由上层拒绝执行
+        let mut device = DeviceConnection::new(FakeGrbl::new(["ok".to_owned()]));
+        assert_eq!(
+            device.verify_sd_file_hash("/sd/x.gcode", &"0".repeat(64), Duration::from_secs(1)),
+            Ok(false)
+        );
+    }
+
+    /// 2026-11-09：FluidNC 的 `$SD/Run` 回推迟应答（文件跑完才回 ok）。发出后直接监控：
+    /// 发出后的第一次空闲不能当完成，进入 SD 运行后按百分比推进度，收到推迟的 ok 后回到空闲才完成。
+    #[test]
+    fn run_sd_file_waits_for_start_then_completes_on_deferred_ok() {
+        let responses = [
+            "<Idle|MPos:0,0,0>",
+            "<Run|MPos:10,20,0|SD:40.00,/sd/job.gcode>",
+            "<Run|MPos:30,40,0|SD: job.gcode: Sent>",
+            "ok",
+            "<Idle|MPos:0,0,0>",
+        ]
+        .map(str::to_owned);
+        let fake = FakeGrbl::new(responses);
+        let mut device = DeviceConnection::new(fake.clone());
+        device.state = DeviceState::Ready;
+        let progress = Arc::new(JobProgress::default());
+        progress.total_lines.store(100, Ordering::Relaxed);
+        device
+            .run_sd_file_and_wait(
+                "/sd/job.gcode",
+                Duration::from_secs(5),
+                Some(&progress),
+                None,
+            )
+            .unwrap();
+        assert_eq!(fake.lines(), vec!["$SD/Run=/sd/job.gcode".to_owned()]);
+        assert_eq!(progress.lines_sent.load(Ordering::Relaxed), 100);
+        assert_eq!(device.state(), DeviceState::Ready);
+        assert!(!device.sd_job_active, "结束后放开顺序信道");
+    }
+
+    #[test]
+    fn run_sd_file_reports_firmware_refusal_and_honours_cancel() {
+        // 文件不存在等：固件立即回 error（不是推迟应答），按失败报告
+        let fake = FakeGrbl::new(
+            ["[MSG:ERR: /sd/missing.gcode not found]", "error:60"].map(str::to_owned),
+        );
+        let mut device = DeviceConnection::new(fake);
+        device.state = DeviceState::Ready;
+        let error = device
+            .run_sd_file_and_wait("/sd/missing.gcode", Duration::from_secs(2), None, None)
+            .unwrap_err();
+        assert!(error.contains("error:60"), "{error}");
+
+        // 作业进行中取消：走 ! → ? → 0x18 停机序列，不再卡在等推迟的 ok
+        let fake = FakeGrbl::new(["<Run|MPos:1,1,0|SD:10.00,/sd/job.gcode>".to_owned()]);
+        let mut device = DeviceConnection::new(fake.clone());
+        device.state = DeviceState::Ready;
+        let cancel = CancellationToken::default();
+        let progress = Arc::new(JobProgress::default());
+        progress.total_lines.store(100, Ordering::Relaxed);
+        cancel.cancel();
+        let error = device
+            .wait_sd_job(Duration::from_secs(2), Some(&progress), Some(&cancel), true)
+            .unwrap_err();
+        assert!(error.contains("用户取消"), "{error}");
+        assert!(fake.realtime().contains(&0x18), "取消要发出软复位");
+    }
+
     #[test]
     fn diagnose_device_message_translates_fluidnc_alarms_and_errors() {
         let alarm11 = diagnose_device_message("ALARM:11").unwrap();
@@ -3449,7 +3985,7 @@ control:
             GRBL_CLASSIC_RX_WINDOW
         );
 
-        // 报 Bf: 但尚未观测：仍按保守初始值；预检 ? 观测到空闲 Bf:15,1200 后放大到硬上限 1024
+        // 报 Bf: 但尚未观测：仍按保守初始值；预检 ? 观测到空闲 Bf:15,1200 后放大到硬上限（1016）
         let fake = FakeGrbl::new(
             [
                 "$10=3",
@@ -3838,7 +4374,8 @@ control:
 
     #[test]
     fn fluidnc_large_reported_rx_capacity_is_used_and_not_shrunk_by_mid_stream_free() {
-        // FluidNC Telnet 空闲报 Bf:15,1200：窗口应放大到 1024 上限，且发送中 Bf 剩余值变小不能把窗口压回 255。
+        // FluidNC Telnet 空闲报 Bf:15,1200：窗口应放大到硬上限（1016，低于固件 1020 字节行队列），
+        // 且发送中 Bf 剩余值变小不能把窗口压回 255。
         for preflight in [true, false] {
             let sim = SimRx::new(1200, 1200, MAX_RX_WINDOW, 4);
             let mut device = sim_device(&sim, true);
@@ -3859,6 +4396,11 @@ control:
             assert!(
                 sim.peak() <= MAX_RX_WINDOW,
                 "峰值 {} 超过窗口上限",
+                sim.peak()
+            );
+            assert!(
+                sim.peak() < FLUIDNC_LINE_QUEUE_LIMIT,
+                "峰值 {} 达到 FluidNC 行队列上限，固件会整行丢弃",
                 sim.peak()
             );
             // 后半程（已收到多次发送中 Bf 报告之后）仍保持大窗口
@@ -3955,5 +4497,121 @@ control:
         let lines = fake.lines();
         assert!(!lines.iter().any(|l| l == "M5"), "{lines:?}");
         assert_eq!(lines, ["$$", "$RI=200", "G4 P0", "$RI=0"]);
+    }
+}
+
+#[cfg(test)]
+mod discovery_identity_tests {
+    use super::*;
+
+    fn fake(lines: &[&str]) -> FakeGrbl {
+        FakeGrbl::new(lines.iter().map(|line| (*line).to_owned()))
+    }
+
+    /// 2026-11-09：局域网扫描只认按 GRBL / FluidNC 回应的设备；只发只读的 `?` 与 `$I`。
+    #[test]
+    fn identify_grbl_accepts_only_grbl_replies_and_sends_read_only_queries() {
+        let fluidnc = fake(&[
+            "<Idle|MPos:0.000,0.000,0.000|FS:0,0>",
+            "[VER:4.1 FluidNC v4.1.1 (esp32-wifi) :yisu",
+            "[OPT:PHS",
+            "[CLUSTER:16",
+            "[MSG:Machine: Yisu V1.0]",
+            "[MSG:Mode=STA:SSID=lab:Status=Connected:IP=192.0.2.20:MAC=00-00-00-00-00-00]",
+            "ok",
+        ]);
+        let identity =
+            identify_grbl(&fluidnc, Duration::from_millis(200)).expect("FluidNC 应被识别");
+        assert_eq!(identity.firmware.as_deref(), Some("FluidNC v4.1.1"));
+        assert_eq!(identity.state.as_deref(), Some("Idle"));
+        assert_eq!(identity.machine.as_deref(), Some("Yisu V1.0"));
+        assert_eq!(
+            firmware_from_line("[VER:3.7.8 FluidNC v3.7.8:]").as_deref(),
+            Some("FluidNC v3.7.8")
+        );
+        assert_eq!(
+            firmware_from_line("Grbl 4.1 [FluidNC v4.1.1 (esp32-wifi) '$' for help]").as_deref(),
+            Some("FluidNC v4.1.1"),
+            "启动横幅里的 FluidNC 版本"
+        );
+        assert_eq!(fluidnc.realtime(), vec![b'?'], "只发实时状态查询");
+        assert_eq!(
+            fluidnc.lines(),
+            vec!["$I".to_owned()],
+            "只发读固件信息，不发任何运动或出光命令"
+        );
+
+        let grbl = fake(&["Grbl 1.1h ['$' for help]", "<Alarm|MPos:0,0,0|FS:0,0>"]);
+        let identity = identify_grbl(&grbl, Duration::from_millis(200)).unwrap();
+        assert_eq!(identity.firmware.as_deref(), Some("Grbl 1.1h"));
+        assert_eq!(identity.state.as_deref(), Some("Alarm"));
+        let classic = fake(&["[VER:1.1h.20190825:]", "ok"]);
+        assert_eq!(
+            identify_grbl(&classic, Duration::from_millis(200))
+                .unwrap()
+                .firmware
+                .as_deref(),
+            Some("Grbl 1.1h")
+        );
+
+        // 回了别的协议的横幅：立即判定，不等时限
+        let started = Instant::now();
+        assert!(
+            identify_grbl(
+                &fake(&["login: ", "<Idle|MPos:0,0,0>"]),
+                Duration::from_secs(3)
+            )
+            .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            started.elapsed()
+        );
+        for other in [
+            vec!["HTTP/1.1 400 Bad Request"],
+            vec!["SSH-2.0-OpenSSH_9.6"],
+            vec!["ok"],
+            vec![],
+        ] {
+            assert!(
+                identify_grbl(&fake(&other), Duration::from_millis(100)).is_none(),
+                "{other:?} 不是雕刻机"
+            );
+        }
+    }
+
+    #[test]
+    fn subnet_scan_lists_other_hosts_and_finds_open_ports() {
+        let hosts = subnet_hosts(std::net::Ipv4Addr::new(192, 168, 1, 37));
+        assert_eq!(hosts.len(), 253);
+        assert!(
+            !hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 37)),
+            "不含本机"
+        );
+        assert_eq!(
+            hosts.first(),
+            Some(&std::net::Ipv4Addr::new(192, 168, 1, 1))
+        );
+        assert_eq!(
+            hosts.last(),
+            Some(&std::net::Ipv4Addr::new(192, 168, 1, 254))
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let open = scan_hosts_port(
+            vec![
+                std::net::Ipv4Addr::LOCALHOST,
+                std::net::Ipv4Addr::new(127, 0, 0, 2),
+            ],
+            port,
+            Duration::from_millis(300),
+        );
+        assert!(open.contains(&std::net::Ipv4Addr::LOCALHOST), "{open:?}");
+        // 只取局域网网卡：都是私有地址、不是回环（代理 TUN 的 198.18.x 等虚拟地址不会出现）
+        for ip in local_lan_ipv4() {
+            assert!(ip.is_private() && !ip.is_loopback(), "{ip}");
+        }
     }
 }
