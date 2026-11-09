@@ -39,3 +39,29 @@ export function writeHideTopPills(hidden, storage = globalThis.localStorage) {
     // 忽略：只影响下次打开时的默认显示状态
   }
 }
+
+/** 左侧导航收起（只留图标）与顶栏精简（只留图标与急停）：界面偏好，默认都不收起（2026-11-09） */
+export const SIDE_COLLAPSED_KEY = "moss_side_collapsed";
+export const TOP_COMPACT_KEY = "moss_top_compact";
+
+function readFlag(key, storage) {
+  try {
+    const value = storage?.getItem(key);
+    return value === "1" || value === "true";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function writeFlag(key, on, storage) {
+  try {
+    storage?.setItem(key, on ? "1" : "0");
+  } catch (_error) {
+    // 忽略：只影响下次打开时的默认状态
+  }
+}
+
+export const readSideCollapsed = (storage = globalThis.localStorage) => readFlag(SIDE_COLLAPSED_KEY, storage);
+export const writeSideCollapsed = (on, storage = globalThis.localStorage) => writeFlag(SIDE_COLLAPSED_KEY, on, storage);
+export const readTopCompact = (storage = globalThis.localStorage) => readFlag(TOP_COMPACT_KEY, storage);
+export const writeTopCompact = (on, storage = globalThis.localStorage) => writeFlag(TOP_COMPACT_KEY, on, storage);

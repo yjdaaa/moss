@@ -1679,6 +1679,7 @@ input[type="radio"] {
   display: grid !important;
   grid-template-columns: var(--ob-side-w) minmax(0, 1fr);
   flex-direction: initial !important;
+  transition: grid-template-columns 0.28s var(--ob-ease);
 }
 .ob-main {
   position: relative;
@@ -1706,10 +1707,12 @@ input[type="radio"] {
   flex-direction: column;
   gap: 2px;
   padding: 18px 12px;
-  background: rgba(9, 9, 11, 0.72);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border-right: 1px solid var(--ob-line);
+  /* 2026-11-09：半透明毛玻璃，透出背后的动态背景 */
+  background: linear-gradient(180deg, rgba(14, 14, 20, 0.5), rgba(9, 9, 11, 0.38));
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.03);
 }
 .ob-logo {
   display: flex;
@@ -1912,10 +1915,78 @@ input[type="radio"] {
   align-items: center;
   gap: 10px 12px;
   padding: 10px 28px;
-  background: rgba(9, 9, 11, 0.62);
-  border-bottom: 1px solid var(--ob-line);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  /* 2026-11-09：半透明毛玻璃，滚动内容从下面透出 */
+  background: rgba(10, 10, 14, 0.4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  transition: padding 0.22s var(--ob-ease);
+}
+.ob-top-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--ob-line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--ob-ink-3);
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s;
+}
+.ob-top-toggle:hover {
+  color: var(--ob-ink);
+  background: rgba(255, 255, 255, 0.08);
+}
+/* 精简顶栏：标题变小、状态胶囊只留图标（悬停看详情），急停按钮保持完整 */
+.ob-top--compact {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+.ob-top--compact .ob-title {
+  font-size: 15px;
+}
+.ob-top--compact .ob-title small {
+  display: none;
+}
+.ob-top--compact .ob-pill {
+  padding: 5px 8px;
+}
+.ob-top--compact .conn-pill > span,
+.ob-top--compact .approval-pill > span:not(.approval-count) {
+  display: none;
+}
+.ob-top--compact .ob-estop {
+  padding: 6px 12px;
+}
+/* 收起的侧栏：只留图标（悬停显示名称）；窄屏侧栏本来就是横排，不受影响 */
+@media (min-width: 901px) {
+  .ob-shell--side-collapsed {
+    --ob-side-w: 72px;
+  }
+  .ob-side.is-collapsed .ob-logo {
+    justify-content: center;
+    padding: 2px 0 18px;
+  }
+  .ob-side.is-collapsed .ob-logo-text,
+  .ob-side.is-collapsed .ob-nav-label,
+  .ob-side.is-collapsed .ob-nav-tag,
+  .ob-side.is-collapsed .ob-nav-item > span {
+    display: none;
+  }
+  .ob-side.is-collapsed .ob-nav-item {
+    justify-content: center;
+    padding: 10px 0;
+  }
+  .ob-side.is-collapsed .ob-nav {
+    margin-top: 10px;
+  }
+}
+@media (max-width: 900px) {
+  .ob-side-toggle {
+    display: none !important;
+  }
 }
 .ob-title {
   margin: 0;

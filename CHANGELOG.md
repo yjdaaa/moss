@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 左侧导航可收起为图标栏、顶栏可精简，两者改为半透明（2026-11-09）
+
+- **现象**：用户希望左侧导航能收起、顶部状态栏也能收起，并且都做成半透明。此前侧栏固定 224px，顶栏与侧栏背景接近不透明。
+- **根因与修复**：侧栏底部新增“收起侧栏”按钮，收起后约 72px，只留图标、名称放到悬停提示；顶栏标题旁新增精简按钮，压矮顶栏、状态胶囊只留图标，急停 0x18 按钮始终完整显示。两项记在本机 `localStorage`（`moss_side_collapsed`、`moss_top_compact`，默认都不收起，读写失败按默认）；窄屏侧栏本来是横排，不显示收起按钮。侧栏与顶栏背景改为约 40%～50% 不透明度的毛玻璃。偏好设置里“隐藏右上角状态胶囊”开关不变。
+- **验证**：新增 `tests/shell-chrome.browser.mjs`（收起 / 精简、悬停名称、急停文字不变、刷新后保持、窄屏隐藏按钮、背景半透明）与 `foldState` 单测；截图人工核对。
+- **关联**：`frontend/src/components/SideNav.jsx`、`frontend/src/components/Navbar.jsx`、`frontend/src/main.jsx`、`frontend/src/foldState.js`（`readSideCollapsed`、`readTopCompact`）、`frontend/src/styles.css`（`.ob-side.is-collapsed`、`.ob-top--compact`）。
+
 ### 语音中心“记录与诊断”同时显示小智、激光雕刻机和 MOSS 软件的事件，每条标明来源（2026-11-09）
 
 - **现象**：用户要求在“记录与诊断”里不光看到小智的信息，激光雕刻机和 MOSS 软件本身的报错也要能看到，并在每条前面标明来源，方便判断是哪里出的错。此前这里只有内置语音服务的事件，且只在内置链路显示；雕刻失败、报警、急停、握手失败与软件更新失败都看不到。

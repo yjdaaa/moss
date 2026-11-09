@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Cpu, Layers, PenTool, Settings, KeyRound, ShieldCheck, AudioLines, Box, Camera } from "lucide-react";
+import { Cpu, Layers, PenTool, Settings, KeyRound, ShieldCheck, AudioLines, Box, Camera, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { readAuthToken } from "../api/client.js";
 import { globalEyeSensorView } from "../voiceState.js";
 import { MossEye } from "./MossEye.jsx";
@@ -30,6 +30,8 @@ export function SideNav({
   approvalCount = 0,
   connectionStatus = null,
   activeJobs = [],
+  collapsed = false,
+  onToggleCollapsed,
 }) {
   const [hasToken, setHasToken] = useState(Boolean(readAuthToken()));
   const eye = globalEyeSensorView({
@@ -78,7 +80,7 @@ export function SideNav({
   }, []);
 
   return (
-    <aside className="ob-side" aria-label="主导航">
+    <aside className={`ob-side${collapsed ? " is-collapsed" : ""}`} aria-label="主导航" data-collapsed={collapsed ? "true" : "false"}>
       <button
         type="button"
         className="ob-logo"
@@ -114,6 +116,7 @@ export function SideNav({
               onClick={() => onNavigate(item.path)}
               className={`ob-nav-item nav-tab${active ? " on active" : ""}`}
               aria-current={active ? "page" : undefined}
+              title={collapsed ? item.label : undefined}
             >
               <Icon size={18} aria-hidden="true" />
               <span>{item.label}</span>
@@ -126,11 +129,24 @@ export function SideNav({
       <div className="ob-side-grow" />
 
       <div className="ob-side-foot">
+        {onToggleCollapsed && (
+          <button
+            type="button"
+            className="ob-nav-item ob-side-toggle"
+            onClick={onToggleCollapsed}
+            id="side-collapse-toggle"
+            aria-expanded={!collapsed}
+            title={collapsed ? "展开侧栏" : "收起侧栏（只留图标）"}
+          >
+            {collapsed ? <PanelLeftOpen size={18} aria-hidden="true" /> : <PanelLeftClose size={18} aria-hidden="true" />}
+            <span>{collapsed ? "展开侧栏" : "收起侧栏"}</span>
+          </button>
+        )}
         <button
           type="button"
           className="ob-nav-item"
           onClick={onSettingsClick}
-          title="系统偏好设置 (关闭行为 / 硬件参数)"
+          title={collapsed ? "偏好设置" : "系统偏好设置 (关闭行为 / 硬件参数)"}
         >
           <Settings size={18} aria-hidden="true" />
           <span>偏好设置</span>

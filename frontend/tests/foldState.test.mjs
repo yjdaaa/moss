@@ -39,3 +39,22 @@ test("顶栏右上角状态胶囊隐藏开关：默认 false（不隐藏），�
   writeHideTopPills(false, storage);
   assert.equal(readHideTopPills(storage), false);
 });
+
+test("侧栏收起与顶栏精简：默认不收起，读写失败时退回默认（2026-11-09）", async () => {
+  const { SIDE_COLLAPSED_KEY, TOP_COMPACT_KEY, readSideCollapsed, writeSideCollapsed, readTopCompact, writeTopCompact } = await import("../src/foldState.js");
+  const data = new Map();
+  const storage = { getItem: (k) => (data.has(k) ? data.get(k) : null), setItem: (k, v) => data.set(k, String(v)) };
+  assert.equal(readSideCollapsed(storage), false);
+  assert.equal(readTopCompact(storage), false);
+  writeSideCollapsed(true, storage);
+  writeTopCompact(true, storage);
+  assert.equal(data.get(SIDE_COLLAPSED_KEY), "1");
+  assert.equal(data.get(TOP_COMPACT_KEY), "1");
+  assert.equal(readSideCollapsed(storage), true);
+  assert.equal(readTopCompact(storage), true);
+  writeSideCollapsed(false, storage);
+  assert.equal(readSideCollapsed(storage), false);
+  const broken = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+  assert.equal(readSideCollapsed(broken), false);
+  assert.doesNotThrow(() => writeTopCompact(true, broken));
+});

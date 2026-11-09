@@ -26,7 +26,15 @@ import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
 import { VoicePage } from "./pages/VoicePage.jsx";
 import { CameraPage } from "./pages/CameraPage.jsx";
 import { isVoiceCenterAvailable, voiceApi } from "./voiceApi.js";
-import { readHideTopPills, writeFoldOpen, writeHideTopPills } from "./foldState.js";
+import {
+  readHideTopPills,
+  readSideCollapsed,
+  readTopCompact,
+  writeFoldOpen,
+  writeHideTopPills,
+  writeSideCollapsed,
+  writeTopCompact,
+} from "./foldState.js";
 import { appUpdateAvailable } from "./appUpdate.js";
 import "./styles.css";
 
@@ -63,6 +71,21 @@ function App() {
     const hidden = Boolean(next);
     setHideTopPills(hidden);
     writeHideTopPills(hidden);
+  }, []);
+  // 2026-11-09：左侧导航可收起为图标栏、顶栏可精简（急停始终完整显示），记在本机
+  const [sideCollapsed, setSideCollapsed] = useState(() => readSideCollapsed());
+  const [topCompact, setTopCompact] = useState(() => readTopCompact());
+  const toggleSideCollapsed = useCallback(() => {
+    setSideCollapsed((prev) => {
+      writeSideCollapsed(!prev);
+      return !prev;
+    });
+  }, []);
+  const toggleTopCompact = useCallback(() => {
+    setTopCompact((prev) => {
+      writeTopCompact(!prev);
+      return !prev;
+    });
   }, []);
   // 退出时是否有 MOSS 启动的语音服务端在运行（决定关闭弹窗是否显示“同时停止语音服务端”）
   const [voiceServerOwned, setVoiceServerOwned] = useState(false);
@@ -272,7 +295,7 @@ function App() {
   };
 
   return (
-    <div className="laser-app-root ob-shell boot-box">
+    <div className={`laser-app-root ob-shell boot-box${sideCollapsed ? " ob-shell--side-collapsed" : ""}`}>
       <CyberBackground />
       <SideNav
         currentPath={currentPath}
@@ -285,6 +308,8 @@ function App() {
         approvalCount={approvalCount}
         connectionStatus={connectionStatus}
         activeJobs={activeJobs}
+        collapsed={sideCollapsed}
+        onToggleCollapsed={toggleSideCollapsed}
       />
       <div className="ob-main">
         <Navbar
@@ -298,6 +323,8 @@ function App() {
           approvalCount={approvalCount}
           onApprovalsClick={openApprovals}
           hideStatusPills={hideTopPills}
+          compact={topCompact}
+          onToggleCompact={toggleTopCompact}
           updateNotice={
             startupUpdate?.has_update && !isRemoteMode() && dismissedUpdateVersion !== startupUpdate.latest_version ? (
               // 新版本提示收进顶栏一个小胶囊（2026-11-07 布局优化），不再单独占一整行

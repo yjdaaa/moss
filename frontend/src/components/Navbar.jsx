@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef } from "react";
-import { Zap, Radio, OctagonAlert, ShieldCheck } from "lucide-react";
+import { Zap, Radio, OctagonAlert, ShieldCheck, ChevronsUp, ChevronsDown } from "lucide-react";
 import { mcpPillState } from "../state/mcpStatus.js";
 import { hardwarePillView } from "../state/hardwareStatus.js";
 
@@ -33,6 +33,8 @@ export function Navbar({
   onApprovalsClick,
   hideStatusPills = false,
   updateNotice = null,
+  compact = false,
+  onToggleCompact,
 }) {
   const page = PAGE_TITLES[currentPath] || PAGE_TITLES["/"];
   const mcpPill = mcpPillState(mcpStatus, voiceStatus);
@@ -54,11 +56,24 @@ export function Navbar({
   }, []);
 
   return (
-    <header className="ob-top" ref={headerRef}>
+    <header className={`ob-top${compact ? " ob-top--compact" : ""}`} ref={headerRef} data-compact={compact ? "true" : "false"}>
       <h1 className="ob-title">
         {page.title}
         <small>{page.sub}</small>
       </h1>
+      {onToggleCompact && (
+        <button
+          type="button"
+          className="ob-top-toggle"
+          onClick={onToggleCompact}
+          id="top-compact-toggle"
+          aria-pressed={compact}
+          title={compact ? "展开顶栏" : "精简顶栏（状态只留图标，急停按钮不变）"}
+          aria-label={compact ? "展开顶栏" : "精简顶栏"}
+        >
+          {compact ? <ChevronsDown size={15} aria-hidden="true" /> : <ChevronsUp size={15} aria-hidden="true" />}
+        </button>
+      )}
       <div className="ob-top-spacer" />
       {updateNotice}
 

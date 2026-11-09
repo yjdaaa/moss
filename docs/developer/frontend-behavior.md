@@ -61,6 +61,7 @@
 | `moss_draw_layout_v2` | 画板 | 创作画板四张卡片（`board` / `draw-material` / `draw-device` / `draw-send`）自由画布位置、宽高与锁定状态 |
 | `moss_close_action` | 全局 | 桌面端关闭行为（`ask` / `tray` / `exit`；存储不可用时按 `ask`，2026-11-05） |
 | `moss_hide_top_pills` | 全局 | 顶栏右上角状态胶囊（硬件 / 小智 / 审批）是否隐藏（`1` 隐藏，`0` 或未设置时默认显示） |
+| `moss_side_collapsed`、`moss_top_compact` | 全局 | 左侧导航收起为图标栏（`#side-collapse-toggle`）、顶栏精简为只留图标（`#top-compact-toggle`，急停保持完整）；`1` 收起，未设置或存储不可用时默认展开（`foldState.js`，2026-11-09 融合 r30） |
 | `moss_yisu_workspace_limits_v1`、`moss_yisu_material_config_v1`、`moss_yisu_hud_collapsed_v1` | 数字孪生 | 翼宿 V1.0 有效工作区范围、材料外框/材料内文字位置配置与 3D 视口浮层收起状态 |
 
 ## 6. 其他必须保留的行为
