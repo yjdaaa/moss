@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { voiceApi } from "../voiceApi.js";
 import { showConfirm } from "../appDialog.js";
-import { WAKE_WORD_PRESETS, wakeWordDraftError } from "../voiceState.js";
+import { WAKE_WORD_PRESETS, screenPackDeviceView, wakeWordDraftError } from "../voiceState.js";
 
 // n61 设备唤醒词（2026-11-06 用户决定：唤醒词改为 MOSS，并能在设置里修改）。
 // 唤醒词由小智设备自己识别；MOSS 生成资源包，逐台确认后让设备重启、自己下载写入资源分区。
@@ -51,9 +51,9 @@ export default function VoiceWakeWordCard() {
     if (!(await showConfirm("移除基础资源包？之后推送的资源包只含唤醒词，设备屏幕的字体和表情会回到固件自带的。", { title: "移除基础资源包", danger: true, confirmText: "移除" }))) return;
     await run(() => voiceApi.wakewordManage({ action: "clear_base", confirmed: true }), "已移除基础资源包");
   };
-  const push = async (device, target) => {
+  const push = async (device, target, forceScreen = false) => {
     const name = device.name || device.device_id;
-    const screen = withScreen && Array.isArray(device.screen_pack_size);
+    const screen = (forceScreen || withScreen) && Array.isArray(device.screen_pack_size);
     const what = (target === "custom" ? `唤醒词“${saved.text}”（拼音 ${saved.command}）` : "官方唤醒词“你好小智”") + (screen ? "和 MOSS 全屏画风" : "");
     const ok = await showConfirm(
       `把${what}推送给设备 ${name}？\n` +
@@ -66,7 +66,12 @@ export default function VoiceWakeWordCard() {
     );
     if (!ok) return;
     await run(() => voiceApi.wakewordManage({ action: "push", device_id: device.device_id, target, confirmed: true, screen_pack: screen }),
-      (next) => `已发送：${name} 正在重启并下载资源包（${((next?.pushed?.size || 0) / 1048576).toFixed(1)} MB${screen ? "，含全屏画风" : ""}）。装好后对它说“${target === "custom" ? saved.text : "你好小智"}”试试。`);
+      (next) => `已发送：${name} 正在重启并下载资源包（${((next?.pushed?.size || 0) / 1048576).toFixed(1)} MB${screen ? "，含全屏画风" : ""}）。下载完这里会显示“已刷全屏画风”，之后上电就是全屏画面；装好后对它说“${target === "custom" ? saved.text : "你好小智"}”试试。`);
+  };
+  // 2026-11-09 一键刷入全屏画风：沿用这台上次推送的唤醒词（没推过按“你好小智”），仍逐台确认
+  const quickPack = (device) => {
+    const target = device.wake_target === "custom" && saved && !dirty ? "custom" : "default";
+    return push(device, target, true);
   };
   const devices = Array.isArray(data?.devices) ? data.devices : [];
   const base = data?.base;
@@ -153,11 +158,16 @@ export default function VoiceWakeWordCard() {
                   <strong>{device.name || device.device_id}</strong>
                   <small>
                     {device.supported ? "支持在线更新唤醒词" : "固件不支持在线更新资源包（需要小智固件 2.0.2 以上、v2 分区表）"}
-                    {device.supported && (device.screen_pack ? " · 已刷全屏画风" : Array.isArray(device.screen_pack_size) ? ` · 彩屏 ${device.screen_pack_size[0]}×${device.screen_pack_size[1]}，可刷全屏画风` : " · 没报彩屏分辨率，只能推唤醒词")}
+                    {device.supported && ` · ${screenPackDeviceView(device).text}`}
                   </small>
                 </span>
                 {device.supported && (
                   <span className="wakeword-device-actions">
+                    {screenPackDeviceView(device).canQuickPack && (
+                      <button className="btn btn-hud-primary" type="button" disabled={busy} data-quick-pack={device.device_id} onClick={() => quickPack(device)}>
+                        一键刷入全屏画风
+                      </button>
+                    )}
                     <button className="btn btn-hud-primary" type="button" disabled={busy || dirty || !saved} onClick={() => push(device, "custom")}>推送“{saved?.text}”</button>
                     <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => push(device, "default")}>恢复“你好小智”</button>
                   </span>

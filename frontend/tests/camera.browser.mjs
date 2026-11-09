@@ -236,6 +236,12 @@ try {
     "true",
     "重新开启自动刷新后不应被旧报错反弹关闭",
   );
+  // 2026-11-09：上一张回来就拍下一张（不再固定 1.6 秒），并显示实际帧率
+  const countAtAuto = await page.evaluate(() => window.__CAM_STATE__.captureCount);
+  const autoStarted = Date.now();
+  await page.waitForFunction((prev) => window.__CAM_STATE__.captureCount >= prev + 3, countAtAuto, { timeout: 5000 });
+  assert.ok(Date.now() - autoStarted < 3000, "连拍三张应在 3 秒内（原先要 4.8 秒）");
+  await page.locator("#camera-live-pill").getByText(/帧\/秒|秒一张/).waitFor({ timeout: 3000 });
   await page.locator("#camera-auto-toggle").click();
 
   // 5. 模拟小智语音触发「拍一下看看」同步展示问答结果，随后点「清空画面」清除

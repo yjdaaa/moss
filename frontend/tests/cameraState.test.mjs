@@ -113,3 +113,16 @@ test("cameraTransformValue 与 cameraFrameSourceView 输出准确", () => {
   assert.deepEqual(cameraFrameSourceView({ source: "preview" }), { label: "桌面抓拍", tone: "ok" });
   assert.deepEqual(cameraFrameSourceView({ source: "voice" }), { label: "语音拍照问答", tone: "info" });
 });
+
+test("连续刷新按到达时间估算帧率，不足两张不显示（2026-11-09）", async () => {
+  const { cameraFpsView, CAMERA_AUTO_GAP_MS, CAMERA_AUTO_INTERVAL_MS, CAMERA_FRAME_POLL_MS } = await import("../src/cameraState.js");
+  assert.equal(cameraFpsView([]), null);
+  assert.equal(cameraFpsView([1000]), null);
+  assert.equal(cameraFpsView([1000, 1000]), null);
+  assert.equal(cameraFpsView([0, 500, 1000, 1500]).text, "约 2.0 帧/秒");
+  assert.equal(cameraFpsView([0, 2500, 5000]).text, "约 2.5 秒一张");
+  // 只看最近 6 张：早先慢的不拖低现在的帧率
+  assert.equal(cameraFpsView([0, 10_000, 10_500, 11_000, 11_500, 12_000, 12_500]).text, "约 2.0 帧/秒");
+  assert.ok(CAMERA_AUTO_INTERVAL_MS < 1600 && CAMERA_FRAME_POLL_MS < 320, "比原先 1.6 秒一张、0.32 秒取一次更勤");
+  assert.ok(CAMERA_AUTO_GAP_MS >= 100, "上一张回来后仍留空档，不叠发");
+});

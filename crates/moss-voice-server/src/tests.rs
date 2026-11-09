@@ -30,6 +30,8 @@ struct FakeRegistry {
     keep_binding: std::sync::atomic::AtomicBool,
     /// 上位机为设备记忆的硬件偏好（n70 测试全屏画风包标记）
     hardware_prefs: Mutex<Option<HardwarePrefs>>,
+    /// 整包下载完资源包的设备（2026-11-09）
+    assets_downloaded: Mutex<Vec<String>>,
 }
 
 impl FakeRegistry {
@@ -70,6 +72,12 @@ impl FakeRegistry {
 impl DeviceRegistry for FakeRegistry {
     fn device_hardware_prefs(&self, _device: &str) -> Option<HardwarePrefs> {
         self.hardware_prefs.lock().unwrap().clone()
+    }
+    fn assets_downloaded(&self, device: &str) {
+        self.assets_downloaded
+            .lock()
+            .unwrap()
+            .push(device.to_owned());
     }
     fn seen(&self, visit: &DeviceVisit) -> Result<DeviceStatus, String> {
         let mut devices = self.devices.lock().unwrap();

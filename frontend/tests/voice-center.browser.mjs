@@ -33,6 +33,15 @@ try {
   // ---------- 有状态的假桌面端 ----------
   const masked = "wss://api.example.test/mcp/?token=***";
   const state = {
+    wakeword: {
+      running: true,
+      word: { text: "你好小智", command: "ni hao xiao zhi", threshold: 0.2 },
+      base: null,
+      devices: [
+        { device_id: "aa:bb:cc:11:22:33", name: "工坊小智", supported: true, screen_pack_size: [320, 240], screen_pack: false, screen_pack_state: "none", wake_target: null },
+        { device_id: "aa:bb:cc:44:55:66", name: "书房小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "installed", wake_target: "default" },
+      ],
+    },
     mode: "official",
     server: { state: "stopped", owned: false },
     settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000, builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
@@ -139,12 +148,16 @@ try {
     },
     voice_agent_status: () => ({ configured: state.agent.settings.enabled, strict_mode: state.agent.strict_mode, providers: state.agent.providers, runs: structuredClone(state.agent.runs), settings: structuredClone(state.agent.settings) }),
     // n67：唤醒词与固件卡挂在主窗口语音中心（回环假数据，不连设备）
-    voice_wakeword_status: () => ({
-      running: true,
-      word: { text: "你好小智", command: "ni hao xiao zhi", threshold: 0.2 },
-      base: null,
-      devices: [],
-    }),
+    // 2026-11-09：画风包状态以设备下载完为准；没刷的彩屏小智显示“一键刷入全屏画风”
+    voice_wakeword_status: () => structuredClone(state.wakeword),
+    voice_wakeword_manage: ({ input }) => {
+      const device = state.wakeword.devices.find((d) => d.device_id === input.device_id);
+      if (input.action === "push" && device) {
+        device.screen_pack_state = "pending_download";
+        device.screen_pack_pending_with_pack = Boolean(input.screen_pack);
+      }
+      return { ...structuredClone(state.wakeword), pushed: { device_id: input.device_id, size: 2_097_152, target: input.target, screen_pack: input.screen_pack } };
+    },
     voice_firmware_status: () => ({ artifacts: [], devices: [], records: [], offer_hours: 24, now: 0 }),
     get_export_settings: () => ({ dir: "", effective_dir: "C:\\moss\\exports", available: true, ask_each_time: false }),
     voice_agent_save: ({ input }) => {
@@ -848,6 +861,16 @@ try {
   const wakeGroup = page.locator("#voice-group-wake-word");
   await wakeGroup.locator("#voice-wakeword-card").waitFor();
   assert.equal(await wakeGroup.locator("#voice-wakeword-text").inputValue(), "你好小智", "唤醒词卡在主窗口就地读取当前唤醒词");
+  // 2026-11-09：没刷的彩屏小智一键刷入全屏画风（仍逐台确认），已刷的不显示按钮
+  const wakeDevices = wakeGroup.locator(".wakeword-device");
+  await wakeDevices.nth(0).getByText(/还没刷全屏画风/).waitFor();
+  await wakeDevices.nth(1).getByText(/已刷全屏画风，上电就是全屏画面/).waitFor();
+  assert.equal(await wakeGroup.locator('[data-quick-pack="aa:bb:cc:44:55:66"]').count(), 0, "已刷的不再显示一键刷入");
+  await wakeGroup.locator('[data-quick-pack="aa:bb:cc:11:22:33"]').click();
+  await confirmDialog("确认推送这一台");
+  assert.deepEqual(last("voice_wakeword_manage").args.input, { action: "push", device_id: "aa:bb:cc:11:22:33", target: "default", confirmed: true, screen_pack: true }, "没推过自定义唤醒词时沿用“你好小智”");
+  await wakeDevices.nth(0).getByText(/已推送，等设备下载全屏画风/).waitFor();
+  assert.equal(await wakeGroup.locator('[data-quick-pack="aa:bb:cc:11:22:33"]').count(), 0, "等下载时不重复推送");
   await shot("voice-devices");
   // 8e. 记住的旧标签 "wake" 重新打开时落到“设备”
   await page.evaluate(() => localStorage.setItem("moss_voice_tab", "wake"));

@@ -6,9 +6,16 @@
  * 2. 自动刷新为串行节拍（上一帧未回传前绝不叠发第二帧），且设备处于拾音/思考/播报时自动让路。
  */
 
-export const CAMERA_AUTO_INTERVAL_MS = 1600;
+// 2026-11-09 用户反馈“一卡一卡的”：官方小智固件只有拍照、没有视频流，连续刷新就是逐张抓拍。
+// 原先固定 1.6 秒一张、0.32 秒取一次图，约 0.6 帧/秒；改为上一张回来后歇一小会儿就拍下一张（仍一次只拍一张），
+// 等图时更勤地取，实际帧率由小智拍照 + 上传的耗时决定。
+export const CAMERA_AUTO_INTERVAL_MS = 450;
+/** 上一张回来后至少歇这么久再拍下一张，给小智留出处理语音与网络的空档。 */
+export const CAMERA_AUTO_GAP_MS = 120;
 export const CAMERA_STATUS_POLL_MS = 4000;
-export const CAMERA_FRAME_POLL_MS = 320;
+export const CAMERA_FRAME_POLL_MS = 150;
+/** 估算帧率时取最近几张的到达时间。 */
+export const CAMERA_FPS_WINDOW = 6;
 
 const SESSION_PHASE_TEXT = {
   idle: "空闲待命",
@@ -164,4 +171,14 @@ export function cameraFrameSourceView(frame) {
     return { label: "语音拍照问答", tone: "info" };
   }
   return { label: "桌面抓拍", tone: "ok" };
+}
+
+/** 按最近几张画面的到达时间（毫秒）估算连续刷新的实际帧率；不足两张时返回 null。 */
+export function cameraFpsView(arrivals) {
+  const list = (Array.isArray(arrivals) ? arrivals : []).filter((t) => Number.isFinite(t)).slice(-CAMERA_FPS_WINDOW);
+  if (list.length < 2) return null;
+  const span = list[list.length - 1] - list[0];
+  if (span <= 0) return null;
+  const fps = ((list.length - 1) * 1000) / span;
+  return { fps, text: fps >= 1 ? `约 ${fps.toFixed(1)} 帧/秒` : `约 ${(1 / fps).toFixed(1)} 秒一张` };
 }

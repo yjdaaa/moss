@@ -5532,6 +5532,25 @@ input:not([type]):focus {
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
   transition: transform 0.18s var(--ob-ease);
 }
+/* 换帧淡入（2026-11-09）：新旧两张叠在同一格，新图淡入后旧图移除 */
+.camera-frame-stack {
+  display: grid;
+  place-items: center;
+  max-width: 100%;
+}
+.camera-frame-stack > .camera-frame-img {
+  grid-area: 1 / 1;
+}
+.camera-frame-img.is-entering {
+  animation: cameraFrameIn 0.18s ease-out;
+}
+@keyframes cameraFrameIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .camera-frame-img.is-entering { animation: none; }
+}
 .camera-placeholder {
   display: flex;
   flex-direction: column;

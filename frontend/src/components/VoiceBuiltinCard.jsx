@@ -818,8 +818,8 @@ export function BuiltinScreenPreview({ builtin }) {
             ) : (
               <span>
                 {builtinDeviceView(onlineColorDevice).title} 还没刷全屏画风，现在只能在屏幕中央半屏试看 5 秒。
-                想铺满整屏一直显示：在“唤醒词”推送时勾选“同时刷入全屏画风”（写一次资源分区并重启，不刷主程序）。
-                <button type="button" className="voice-link-btn" id="voice-bot-pack-goto" onClick={() => gotoVoiceGroup("devices", "wake-word", "voice-wakeword-screen-pack")}>去推送</button>
+                刷入后上电就是全屏画面、不用等 MOSS：在“唤醒词”点“一键刷入全屏画风”并确认一次（写一次资源分区并重启，不刷主程序；下载完会自动标为已刷）。
+                <button type="button" className="voice-link-btn" id="voice-bot-pack-goto" onClick={() => gotoVoiceGroup("devices", "wake-word", "voice-wakeword-screen-pack")}>去一键刷入</button>
               </span>
             )}
           </div>

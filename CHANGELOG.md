@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 全屏画风包以小智整包下载完为准、可一键刷入；摄像头连续刷新提速并淡入换帧（2026-11-09）
+
+- **现象**：用户反馈小智副屏不是全屏、开机仍是官方界面，摄像头连续刷新“一卡一卡的”。查明推送全屏画风后 MOSS 立刻把设备记成“已刷”，设备没来下载或下载中断也照样显示已刷、照样发全屏场景名，固件不认识就停在官方界面；摄像头连续刷新是逐张抓拍（官方固件没有视频流），原先固定约 1.6 秒一张、0.32 秒取一次图，约 0.6 帧/秒。
+- **根因与修复**：推送时只记“等下载”（`screen_pack_pending` / `screen_pack_pending_at`，并记 `wake_target`）；资源包改为 64 KB 分块下发（仍带准确 Content-Length），连接释放时全部分块已交出才回调新增的 `DeviceRegistry::assets_downloaded`，桌面端此时把画风转为已装，中途断开记警告事件。`voice_wakeword_status` 每台新增 `screen_pack_state`（none / pending_download / download_expired / installed）等字段；唤醒词卡对没装好的彩屏小智显示“一键刷入全屏画风”（沿用上次唤醒词，仍逐台确认），副屏预览提示改为“去一键刷入”。画风包装好后上电即显示全屏待命画面，不依赖 MOSS。摄像头改为上一张回来后歇 120 ms 就拍下一张（两次发起至少隔 450 ms，仍串行、对话时让路），等图时 150 ms 取一次，新图解码好再淡入，“连续刷新中”显示实际帧率。契约：`voice_wakeword_status` 新增字段（向后兼容）；设置文件设备偏好新增三个可选字段。
+- **验证**：`n61_wake_word_package_is_pushed_by_url_then_reboot_and_served_once_staged` 加下载完回调与事件断言（Content-Length 仍准确）；新增 `screen_pack_counts_as_installed_only_after_the_device_downloads_it`（桌面端）、设置单测、`screenPackDeviceView` 与 `cameraFpsView` 单测；语音中心与摄像头浏览器用例覆盖一键刷入、等下载状态、连拍三张在 3 秒内与帧率显示。未验证：没有连接真机，实际帧率、下载中断判定与上电全屏显示需在小智上实测；中途断开的判定没有自动化测试（本机回环的套接字缓冲可能一次吞下整包）。
+- **关联**：`crates/moss-voice-server/src/wake_assets.rs`（`DownloadChunks`）、`crates/moss-voice-server/src/lib.rs`（`DeviceRegistry::assets_downloaded`）、`crates/moss-voice/src/settings.rs`（`DeviceHardwarePrefs::confirm_assets_downloaded`、`SCREEN_PACK_NONE`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`DbRegistry`、`wakeword_status`、`wakeword_manage`）、`frontend/src/components/VoiceWakeWordCard.jsx`、`frontend/src/voiceState.js`（`screenPackDeviceView`）、`frontend/src/pages/CameraPage.jsx`（`CameraFrame`）、`frontend/src/cameraState.js`（`cameraFpsView`）。
+
 ### 左侧导航可收起为图标栏、顶栏可精简，两者改为半透明（2026-11-09）
 
 - **现象**：用户希望左侧导航能收起、顶部状态栏也能收起，并且都做成半透明。此前侧栏固定 224px，顶栏与侧栏背景接近不透明。

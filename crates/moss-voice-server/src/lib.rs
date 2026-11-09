@@ -134,6 +134,10 @@ pub trait DeviceRegistry: Send + Sync {
     fn device_hardware_prefs(&self, _device: &str) -> Option<HardwarePrefs> {
         None
     }
+
+    /// 设备把推送的资源包整包下载完（最后一块已交给连接）。宿主据此把“已推送、等下载”的
+    /// 全屏画风标记转为已装（2026-11-09：此前一推送就记为已刷，设备没下载也显示“已刷”）。
+    fn assets_downloaded(&self, _device: &str) {}
 }
 /// A live permission that cannot become valid again after revoke, disconnect or shutdown.
 pub(crate) struct SessionLease {

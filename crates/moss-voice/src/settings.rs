@@ -630,15 +630,40 @@ pub struct DeviceHardwarePrefs {
     /// n70 推送资源包时一并刷入的 MOSS 全屏画风包标记（`moss-screen-1:moss_hud`）；推送不带画风的包时清掉。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_pack: Option<String>,
+    /// 2026-11-09 已推送、等设备整包下载完的资源包：画风标记，或 `none`（这次不带画风）；
+    /// 下载完才转进 `screen_pack`，没下载就不冒充“已刷”。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_pack_pending: Option<String>,
+    /// 上面这次推送的 Unix 秒（下载地址 30 分钟有效，过期界面提示重新推送）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_pack_pending_at: Option<u64>,
+    /// 最近一次推送给这台的唤醒词：`custom`（自定义）或 `default`（你好小智），“一键刷入画风”沿用它
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target: Option<String>,
 }
 
+/// 推送时记下“等下载”的资源包；`marker` 为 `None` 表示这次不带全屏画风。
+pub const SCREEN_PACK_NONE: &str = "none";
+
 impl DeviceHardwarePrefs {
+    /// 设备整包下载完：等下载的画风标记转为已装（不带画风的包会清掉已装标记）。返回是否有变化。
+    pub fn confirm_assets_downloaded(&mut self) -> bool {
+        let Some(pending) = self.screen_pack_pending.take() else {
+            return false;
+        };
+        self.screen_pack_pending_at = None;
+        self.screen_pack = (pending != SCREEN_PACK_NONE).then_some(pending);
+        true
+    }
+
     pub fn is_empty(&self) -> bool {
         self.volume.is_none()
             && self.brightness.is_none()
             && self.theme.is_none()
             && self.talk_mode.is_none()
             && self.screen_pack.is_none()
+            && self.screen_pack_pending.is_none()
+            && self.wake_target.is_none()
     }
 }
 
@@ -2711,6 +2736,33 @@ mod tests {
         let old_file: DeviceHardwarePrefs =
             serde_json::from_value(serde_json::json!({"volume": 40})).unwrap();
         assert_eq!(old_file.screen_pack, None, "旧设置文件没有这个字段");
+        // 2026-11-09：推送后先“等下载”，整包下载完才算已装；不带画风的包下载完清掉已装标记
+        let mut pushed = DeviceHardwarePrefs {
+            screen_pack_pending: Some("moss-screen-1:moss_hud".into()),
+            screen_pack_pending_at: Some(1_790_000_000),
+            ..DeviceHardwarePrefs::default()
+        };
+        assert!(!pushed.is_empty());
+        assert_eq!(pushed.screen_pack, None, "推送了还没下载，不算已刷");
+        assert!(pushed.confirm_assets_downloaded());
+        assert_eq!(
+            pushed.screen_pack.as_deref(),
+            Some("moss-screen-1:moss_hud")
+        );
+        assert_eq!(
+            (
+                pushed.screen_pack_pending.as_deref(),
+                pushed.screen_pack_pending_at
+            ),
+            (None, None)
+        );
+        assert!(
+            !pushed.confirm_assets_downloaded(),
+            "没有等下载的推送时不变"
+        );
+        pushed.screen_pack_pending = Some(SCREEN_PACK_NONE.into());
+        assert!(pushed.confirm_assets_downloaded());
+        assert_eq!(pushed.screen_pack, None, "这次不带画风：装好后回到官方表情");
         assert_eq!(validate_screen_card_style("").unwrap(), "moss_hud");
         assert_eq!(
             validate_screen_card_style("goggle_bot").unwrap(),

@@ -3028,3 +3028,32 @@ export function visionRuntimeText(runtime) {
       return "内置服务启动后会在后台加载本地视觉模型；点“测试模型”会等它加载完再测。";
   }
 }
+
+/**
+ * 设备全屏画风包状态（2026-11-09）：以设备整包下载完为准，推送了没下载不算“已刷”。
+ * `canQuickPack`：彩屏、支持在线更新资源包、还没装好也没在等下载时，显示“一键刷入全屏画风”。
+ */
+export function screenPackDeviceView(device) {
+  const size = Array.isArray(device?.screen_pack_size) ? device.screen_pack_size : null;
+  const state = device?.screen_pack_state || (device?.screen_pack ? "installed" : "none");
+  const withPack = device?.screen_pack_pending_with_pack !== false;
+  let text;
+  let tone = "off";
+  if (state === "pending_download") {
+    text = withPack ? "已推送，等设备下载全屏画风…" : "已推送，等设备下载资源包…";
+    tone = "info";
+  } else if (state === "download_expired") {
+    text = "推送后 30 分钟没下载完：确认设备联网后重新推送";
+    tone = "warn";
+  } else if (state === "installed") {
+    text = "已刷全屏画风，上电就是全屏画面";
+    tone = "ok";
+  } else if (size) {
+    text = `彩屏 ${size[0]}×${size[1]}，还没刷全屏画风`;
+    tone = "warn";
+  } else {
+    text = "没报彩屏分辨率，只能推唤醒词";
+  }
+  const canQuickPack = Boolean(device?.supported && size && state !== "installed" && state !== "pending_download");
+  return { state, text, tone, canQuickPack };
+}

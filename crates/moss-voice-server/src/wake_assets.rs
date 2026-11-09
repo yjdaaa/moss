@@ -511,6 +511,63 @@ impl AssetsStore {
     }
 }
 
+/// 资源包分块下发：连接用完释放时，所有分块都已交给连接才通知宿主“设备下载完了”
+/// （带 Content-Length 时连接发够字节就不再拉流，所以在释放时判断；中途断开时还有分块没交出）。
+struct DownloadChunks {
+    bytes: std::sync::Arc<Vec<u8>>,
+    at: usize,
+    done: Option<(std::sync::Arc<crate::Shared>, String)>,
+}
+
+const DOWNLOAD_CHUNK: usize = 64 * 1024;
+
+impl Iterator for DownloadChunks {
+    type Item = Result<axum::body::Bytes, std::convert::Infallible>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.at >= self.bytes.len() {
+            return None;
+        }
+        let end = (self.at + DOWNLOAD_CHUNK).min(self.bytes.len());
+        let chunk = axum::body::Bytes::copy_from_slice(&self.bytes[self.at..end]);
+        self.at = end;
+        Some(Ok(chunk))
+    }
+}
+
+impl Drop for DownloadChunks {
+    fn drop(&mut self) {
+        let Some((shared, device)) = self.done.take() else {
+            return;
+        };
+        if self.at < self.bytes.len() {
+            shared.state.event(
+                crate::EventRecord::warn(
+                    crate::DiagCategory::Firmware,
+                    format!(
+                        "唤醒词资源包：设备 {device} 下载中断（{} / {} 字节）",
+                        self.at,
+                        self.bytes.len()
+                    ),
+                )
+                .hint("设备网络不稳或中途断电：等它重新连上后在“设备 › 唤醒词”重新推送"),
+            );
+            return;
+        }
+        shared.state.event(
+            crate::EventRecord::info(
+                crate::DiagCategory::Firmware,
+                format!(
+                    "唤醒词资源包：设备 {device} 已下载完 {} 字节",
+                    self.bytes.len()
+                ),
+            )
+            .hint("设备写入资源分区后会自动重启，之后开机就按新资源包显示"),
+        );
+        shared.registry.assets_downloaded(&device);
+    }
+}
+
 pub(crate) fn router(shared: std::sync::Arc<crate::Shared>) -> axum::Router {
     use axum::extract::{ConnectInfo, Path, State};
     use axum::http::{StatusCode, header};
@@ -531,9 +588,20 @@ pub(crate) fn router(shared: std::sync::Arc<crate::Shared>) -> axum::Router {
                         bytes.len()
                     ),
                 ));
+                // 分块下发：最后一块交给连接后再拉一次流时才算下载完，中途断开不会走到这里
+                let total = bytes.len();
+                let chunks = DownloadChunks {
+                    bytes,
+                    at: 0,
+                    done: Some((shared.clone(), device)),
+                };
                 (
-                    [(header::CONTENT_TYPE, "application/octet-stream")],
-                    bytes.as_ref().clone(),
+                    [
+                        (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                        // 固件按 Content-Length 判断分区放不放得下，分块下发也要给准确长度
+                        (header::CONTENT_LENGTH, total.to_string()),
+                    ],
+                    axum::body::Body::from_stream(futures_util::stream::iter(chunks)),
                 )
                     .into_response()
             }

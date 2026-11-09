@@ -1449,6 +1449,16 @@ mod imp {
                 screen_pack: entry.screen_pack,
             })
         }
+
+        /// 2026-11-09：设备整包下载完资源包，才把“等下载”的全屏画风转为已装（重启重连后按它切画面）。
+        fn assets_downloaded(&self, device: &str) {
+            let _ = moss_voice::settings::update_voice(&self.settings_file, |s| {
+                if let Some(entry) = s.builtin_device_prefs.get_mut(device) {
+                    entry.confirm_assets_downloaded();
+                }
+                Ok(())
+            });
+        }
     }
 
     /// 对话中调用 MOSS 工具（NV4）：身份 `CallerContext::Voice`；运动与出光跟随严格模式开关，桌面控制类工具始终拒绝。
@@ -6912,6 +6922,11 @@ mod imp {
                 .map(|s| s.status().sessions)
                 .unwrap_or_default();
             let mut seen = std::collections::BTreeSet::new();
+            let prefs = moss_voice::settings::load(&self.settings_file()).builtin_device_prefs;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             let devices = sessions
                 .iter()
                 .filter(|r| allowed.contains_key(&r.device_id) && seen.insert(r.device_id.clone()))
@@ -6919,11 +6934,30 @@ mod imp {
                     let screen = (r.screen_monochrome != Some(true))
                         .then_some(r.screen_width.zip(r.screen_height))
                         .flatten();
+                    let pref = prefs.get(&r.device_id);
+                    let installed = pref
+                        .and_then(|p| p.screen_pack.as_deref())
+                        .is_some_and(moss_voice_server::screen_pack::marker_installed);
+                    let pending = pref.and_then(|p| p.screen_pack_pending.as_deref());
+                    let pending_at = pref.and_then(|p| p.screen_pack_pending_at).unwrap_or(0);
+                    let expired = pending.is_some()
+                        && now.saturating_sub(pending_at)
+                            > moss_voice_server::wake_assets::STAGED_TTL.as_secs();
+                    // 2026-11-09：画风包状态以“设备整包下载完”为准，推送了没下载不算已刷
+                    let screen_pack_state = match (pending, expired) {
+                        (Some(_), true) => "download_expired",
+                        (Some(_), false) => "pending_download",
+                        (None, _) if installed => "installed",
+                        (None, _) => "none",
+                    };
                     serde_json::json!({
                         "device_id":r.device_id,"name":allowed.get(&r.device_id),
                         "supported":r.device_tools.iter().any(|t|t=="self.assets.set_download_url"),
                         "screen_pack_size":screen.map(|(w,h)|[w,h]),
-                        "screen_pack":r.screen_pack,
+                        "screen_pack":installed,
+                        "screen_pack_state":screen_pack_state,
+                        "screen_pack_pending_with_pack":pending.map(|p| p != moss_voice::settings::SCREEN_PACK_NONE),
+                        "wake_target":pref.and_then(|p| p.wake_target.clone()),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -7061,16 +7095,26 @@ mod imp {
                             .install_wake_assets(device_id, package)
                             .map_err(|e| CenterError::new("wakeword_device_unsupported", 409, e))?;
                     }
-                    // 设备重启装好后按这个标记切换全屏画风；不带画风的包会把画风清掉
+                    // 2026-11-09：先记为“已推送、等下载”，设备整包下载完（`assets_downloaded`）才算已装；
+                    // 不带画风的包下载完会把已装标记清掉。同时记下这次的唤醒词，“一键刷入画风”沿用它。
                     let marker = screen
                         .as_ref()
-                        .map(|(_, style)| moss_voice_server::screen_pack::pack_marker(*style));
+                        .map(|(_, style)| moss_voice_server::screen_pack::pack_marker(*style))
+                        .unwrap_or_else(|| moss_voice::settings::SCREEN_PACK_NONE.to_owned());
+                    let wake_target = input["target"].as_str().map(str::to_owned);
                     moss_voice::settings::update_voice(&self.settings_file(), |s| {
                         let entry = s
                             .builtin_device_prefs
                             .entry(device_id.to_owned())
                             .or_default();
-                        entry.screen_pack = marker.clone();
+                        entry.screen_pack_pending = Some(marker.clone());
+                        entry.screen_pack_pending_at = Some(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        );
+                        entry.wake_target = wake_target.clone();
                         Ok(())
                     })
                     .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
@@ -8210,6 +8254,57 @@ mod imp {
             assert_eq!(
                 host.db.lock().unwrap().get_secret("jev_api_key").unwrap(),
                 None
+            );
+        }
+
+        #[test]
+        fn screen_pack_counts_as_installed_only_after_the_device_downloads_it() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host.clone())).0.unwrap();
+            let registry = DbRegistry {
+                db: host.db.clone(),
+                host: host.clone(),
+                settings_file: builtin.settings_file(),
+            };
+            // 推送后先“等下载”：握手读到的偏好里还没有画风标记，不会按全屏发画面
+            moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
+                let entry = s.builtin_device_prefs.entry("dev-1".into()).or_default();
+                entry.screen_pack_pending = Some("moss-screen-1:moss_hud".into());
+                entry.screen_pack_pending_at = Some(1);
+                entry.wake_target = Some("default".into());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                registry.device_hardware_prefs("dev-1").unwrap().screen_pack,
+                None
+            );
+            registry.assets_downloaded("someone-else");
+            registry.assets_downloaded("dev-1");
+            let prefs = moss_voice::settings::load(&builtin.settings_file()).builtin_device_prefs;
+            let entry = &prefs["dev-1"];
+            assert_eq!(entry.screen_pack.as_deref(), Some("moss-screen-1:moss_hud"));
+            assert_eq!(entry.screen_pack_pending, None);
+            assert_eq!(
+                entry.wake_target.as_deref(),
+                Some("default"),
+                "一键刷入沿用上次的唤醒词"
+            );
+            assert!(
+                !prefs.contains_key("someone-else"),
+                "没推送过的设备不新增记录"
+            );
+            assert_eq!(
+                registry
+                    .device_hardware_prefs("dev-1")
+                    .unwrap()
+                    .screen_pack
+                    .as_deref(),
+                Some("moss-screen-1:moss_hud"),
+                "下载完后重连握手按全屏画风显示"
             );
         }
 

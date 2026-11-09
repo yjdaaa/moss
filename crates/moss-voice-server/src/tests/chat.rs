@@ -3728,6 +3728,10 @@ fn n61_wake_word_package_is_pushed_by_url_then_reboot_and_served_once_staged() {
         reboot["params"]["name"], "self.reboot",
         "先记下载地址，再重启让设备自己下载"
     );
+    assert!(
+        registry.assets_downloaded.lock().unwrap().is_empty(),
+        "只是推送了地址，设备还没下载"
+    );
 
     let resp = reqwest::blocking::get(&url).unwrap();
     assert_eq!(resp.status(), 200);
@@ -3744,6 +3748,20 @@ fn n61_wake_word_package_is_pushed_by_url_then_reboot_and_served_once_staged() {
         (content_len, body.as_ref()),
         (package.len(), package.as_slice()),
         "固件按 Content-Length 判断分区放不放得下"
+    );
+    // 2026-11-09：整包交出后才通知宿主“下载完了”，宿主据此把全屏画风记为已装
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while registry.assets_downloaded.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(registry.assets_downloaded.lock().unwrap()[0], dev_id);
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|e| e.text.contains("已下载完")),
+        "下载完记一条事件"
     );
     let wrong = url
         .replace("/xiaozhi/assets/", "/xiaozhi/assets/0")

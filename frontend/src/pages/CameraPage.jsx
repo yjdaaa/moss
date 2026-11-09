@@ -16,10 +16,13 @@ import { createPollRunner } from "../pollGuard.js";
 import { voiceApi } from "../voiceApi.js";
 import { formatBytes, voiceErrorText } from "../voiceState.js";
 import {
+  CAMERA_AUTO_GAP_MS,
   CAMERA_AUTO_INTERVAL_MS,
+  CAMERA_FPS_WINDOW,
   CAMERA_FRAME_POLL_MS,
   CAMERA_STATUS_POLL_MS,
   cameraDevicesView,
+  cameraFpsView,
   cameraFrameSourceView,
   cameraTransformValue,
   shouldAutoCaptureNext,
@@ -66,6 +69,58 @@ function formatCaptureTime(seconds) {
   });
 }
 
+/**
+ * 画面淡入切换（2026-11-09）：新图先在后台解码好再叠在旧图上淡入，换帧不闪不跳。
+ * 最上面一层带 `#camera-frame-img`；淡入结束后只留这一层。
+ */
+function CameraFrame({ src, alt, transform }) {
+  const [layers, setLayers] = useState(() => (src ? [{ src, key: 0 }] : []));
+  const keyRef = useRef(0);
+  useEffect(() => {
+    if (!src) {
+      setLayers([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const show = () => {
+      if (cancelled) return;
+      setLayers((prev) => {
+        if (prev.length && prev[prev.length - 1].src === src) return prev;
+        keyRef.current += 1;
+        return [...prev.slice(-1), { src, key: keyRef.current }];
+      });
+    };
+    const img = new Image();
+    img.src = src;
+    if (typeof img.decode === "function") img.decode().then(show, show);
+    else show();
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+  if (!layers.length) return null;
+  const front = layers[layers.length - 1];
+  return (
+    <div className="camera-frame-stack">
+      {layers.map((layer) => {
+        const isFront = layer.key === front.key;
+        return (
+          <img
+            key={layer.key}
+            id={isFront ? "camera-frame-img" : undefined}
+            src={layer.src}
+            alt={isFront ? alt : ""}
+            aria-hidden={isFront ? undefined : "true"}
+            className={`camera-frame-img${isFront && layers.length > 1 ? " is-entering" : ""}`}
+            style={transform ? { transform } : undefined}
+            onAnimationEnd={isFront ? () => setLayers((prev) => prev.slice(-1)) : undefined}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 export function CameraPage({ onNavigate }) {
   const [builtinStatus, setBuiltinStatus] = useState(null);
   const [statusError, setStatusError] = useState("");
@@ -77,6 +132,8 @@ export function CameraPage({ onNavigate }) {
   const [actionError, setActionError] = useState("");
   const [startingServer, setStartingServer] = useState(false);
   const [viewPrefs, setViewPrefs] = useState(() => readViewPrefs());
+  const [fpsView, setFpsView] = useState(null);
+  const arrivalsRef = useRef([]);
 
   const mountedRef = useRef(true);
   const selectedDeviceRef = useRef("");
@@ -123,7 +180,15 @@ export function CameraPage({ onNavigate }) {
     setFrameMeta(null);
     setActionError("");
     setAutoRefresh(false);
+    arrivalsRef.current = [];
+    setFpsView(null);
   }, [selectedDeviceId]);
+
+  // 帧率只统计这一段连续刷新
+  useEffect(() => {
+    arrivalsRef.current = [];
+    setFpsView(null);
+  }, [autoRefresh]);
 
   useEffect(() => {
     const pollStatus = createPollRunner(async (isCurrent) => {
@@ -188,6 +253,10 @@ export function CameraPage({ onNavigate }) {
         });
         if (!next?.unchanged) {
           if (next?.frame) {
+            if (frameSeqRef.current !== next.frame.seq) {
+              arrivalsRef.current = [...arrivalsRef.current, Date.now()].slice(-CAMERA_FPS_WINDOW);
+              setFpsView(cameraFpsView(arrivalsRef.current));
+            }
             frameSeqRef.current = next.frame.seq;
             setFrame(next.frame);
           } else {
@@ -271,7 +340,7 @@ export function CameraPage({ onNavigate }) {
   useEffect(() => {
     if (!autoRefresh || !autoGate.allow || capturing) return undefined;
     const elapsed = Date.now() - lastCaptureTriggeredAtRef.current;
-    const waitMs = Math.max(80, CAMERA_AUTO_INTERVAL_MS - elapsed);
+    const waitMs = Math.max(CAMERA_AUTO_GAP_MS, CAMERA_AUTO_INTERVAL_MS - elapsed);
     const timer = setTimeout(() => {
       if (mountedRef.current) {
         void triggerCapture({ silent: true });
@@ -551,12 +620,10 @@ export function CameraPage({ onNavigate }) {
 
           <div className="camera-viewport" id="camera-viewport">
             {frame?.data_url ? (
-              <img
-                id="camera-frame-img"
+              <CameraFrame
                 src={frame.data_url}
                 alt={`${activeDevice?.title || "小智设备"} 摄像头画面`}
-                className="camera-frame-img"
-                style={imgTransform ? { transform: imgTransform } : undefined}
+                transform={imgTransform}
               />
             ) : (
               <div className="camera-placeholder" id="camera-placeholder">
@@ -580,8 +647,12 @@ export function CameraPage({ onNavigate }) {
                 {sourceBadge.label}
               </span>
               {autoRefresh && (
-                <span className="ob-pill ob-pill--ok" id="camera-live-pill">
-                  连续刷新中
+                <span
+                  className="ob-pill ob-pill--ok"
+                  id="camera-live-pill"
+                  title="小智固件只有拍照没有视频流：连续刷新是一张接一张抓拍，帧率取决于小智拍照和上传的速度"
+                >
+                  连续刷新中{fpsView ? ` · ${fpsView.text}` : ""}
                 </span>
               )}
             </div>

@@ -1610,3 +1610,24 @@ test("事件来源：小智 / 激光雕刻 / MOSS 软件标签、按来源筛选
     moss: { total: 1, problems: 1 },
   });
 });
+
+test("全屏画风包状态以设备下载完为准，没装好时可一键刷入（2026-11-09）", async () => {
+  const { screenPackDeviceView } = await import("../src/voiceState.js");
+  const color = { supported: true, screen_pack_size: [320, 240] };
+  assert.deepEqual(
+    [screenPackDeviceView({ ...color, screen_pack_state: "none" })].map((v) => [v.state, v.canQuickPack, v.tone]),
+    [["none", true, "warn"]],
+  );
+  const pending = screenPackDeviceView({ ...color, screen_pack_state: "pending_download", screen_pack_pending_with_pack: true });
+  assert.equal(pending.canQuickPack, false, "等下载时不重复推送");
+  assert.match(pending.text, /等设备下载全屏画风/);
+  const expired = screenPackDeviceView({ ...color, screen_pack_state: "download_expired" });
+  assert.equal(expired.canQuickPack, true);
+  assert.match(expired.text, /30 分钟没下载完/);
+  const installed = screenPackDeviceView({ ...color, screen_pack_state: "installed", screen_pack: true });
+  assert.equal(installed.canQuickPack, false);
+  assert.match(installed.text, /上电就是全屏/);
+  assert.equal(screenPackDeviceView({ supported: true, screen_pack_size: null }).canQuickPack, false, "单色屏只能推唤醒词");
+  assert.equal(screenPackDeviceView({ supported: false, screen_pack_size: [320, 240] }).canQuickPack, false, "固件不支持在线更新");
+  assert.equal(screenPackDeviceView({ ...color, screen_pack: true }).state, "installed", "旧后端只有 screen_pack 布尔值");
+});

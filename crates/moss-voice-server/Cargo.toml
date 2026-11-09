@@ -13,6 +13,8 @@ serde_json = "1"
 # 专用运行时：只在启用内置语音时创建，与 MOSS 现有线程模型隔离（技术书 §4）
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 axum = { version = "0.8", features = ["ws", "multipart"] }
+# 资源包分块下发：最后一块交给连接后才算“设备下载完”（2026-11-09）
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "pcm"] }
 sha2 = "0.10"
