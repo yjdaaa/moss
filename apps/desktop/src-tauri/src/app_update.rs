@@ -733,6 +733,17 @@ pub async fn app_update_install(
     }
     let progress = state.progress.clone();
     let fail = move |progress: &std::sync::Mutex<Progress>, message: String| {
+        // 2026-11-09：更新失败也记进语音中心“记录与诊断”，标为“MOSS 软件”
+        #[cfg(desktop)]
+        crate::voice_builtin::record_moss_event(
+            moss_voice_server::EventRecord::error(
+                moss_voice_server::DiagCategory::Network,
+                format!("软件更新失败：{message}"),
+            )
+            .hint(
+                "检查网络后在“偏好设置 → 软件更新”重试；仍失败可到 GitHub Releases 手动下载安装包",
+            ),
+        );
         if let Ok(mut p) = progress.lock() {
             p.phase = "error";
             p.error = message;

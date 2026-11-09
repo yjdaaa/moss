@@ -1587,3 +1587,26 @@ test("视觉理解看图来源：对话大模型优先、其次本地、否则�
   assert.match(visionRuntimeText({ state: "starting" }), /正在加载/);
   assert.match(visionRuntimeText(null), /后台加载/);
 });
+
+test("事件来源：小智 / 激光雕刻 / MOSS 软件标签、按来源筛选与计数，旧记录按小智处理（2026-11-09）", async () => {
+  const { voiceEventView, filterVoiceEvents, voiceEventSourceCounts } = await import("../src/voiceState.js");
+  const events = [
+    { seq: 4, level: "error", category: "device", source: "laser", text: "加工失败" },
+    { seq: 3, level: "warn", category: "model", source: "moss", text: "本地视觉模型启动失败" },
+    { seq: 2, level: "info", category: "general", source: "xiaozhi", text: "识别完成" },
+    { seq: 1, level: "warn", category: "device", text: "设备断开" },
+  ];
+  assert.equal(voiceEventView(events[0]).sourceLabel, "激光雕刻");
+  assert.equal(voiceEventView(events[1]).sourceLabel, "MOSS 软件");
+  assert.equal(voiceEventView(events[3]).source, "xiaozhi", "旧记录没有 source 按小智处理");
+  assert.equal(voiceEventView({ source: "unknown" }).sourceLabel, "小智");
+  assert.deepEqual(filterVoiceEvents(events, false, "laser").map((e) => e.seq), [4]);
+  assert.deepEqual(filterVoiceEvents(events, false, "xiaozhi").map((e) => e.seq), [2, 1]);
+  assert.deepEqual(filterVoiceEvents(events, true, "xiaozhi").map((e) => e.seq), [1], "来源与只看问题可以组合");
+  assert.deepEqual(filterVoiceEvents(events, true).map((e) => e.seq), [4, 3, 1], "不指定来源时三类都算");
+  assert.deepEqual(voiceEventSourceCounts(events), {
+    xiaozhi: { total: 2, problems: 1 },
+    laser: { total: 1, problems: 1 },
+    moss: { total: 1, problems: 1 },
+  });
+});

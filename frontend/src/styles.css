@@ -3353,6 +3353,14 @@ input:not([type]):focus {
 .voice-private-panel[hidden] { display: none !important; }
 .voice-private-panel { display: grid; gap: 14px; }
 /* 对话体验等组里默认收起的小节（2026-11-08 n73） */
+/* 事件来源标签与筛选（2026-11-09）：小智 / 激光雕刻 / MOSS 软件 */
+.voice-event-sources { display: flex; flex-wrap: wrap; gap: 6px; }
+.voice-chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--ob-line-2); background: transparent; color: var(--ob-ink-2); font-size: 12px; cursor: pointer; }
+.voice-chip.is-active { border-color: var(--ob-accent-2, #8b7bff); color: var(--ob-ink); background: rgba(139, 123, 255, 0.16); }
+.voice-event-source { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 4px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; }
+.voice-event-source--xiaozhi { color: #7dd3fc; background: rgba(125, 211, 252, 0.14); border: 1px solid rgba(125, 211, 252, 0.4); }
+.voice-event-source--laser { color: #fbbf24; background: rgba(251, 191, 36, 0.14); border: 1px solid rgba(251, 191, 36, 0.4); }
+.voice-event-source--moss { color: #c4b5fd; background: rgba(196, 181, 253, 0.14); border: 1px solid rgba(196, 181, 253, 0.4); }
 .voice-more { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--ob-line); border-radius: 10px; background: rgba(255, 255, 255, 0.015); min-width: 0; }
 .voice-more > summary { color: var(--ob-ink); font-size: 13px; font-weight: 600; cursor: pointer; }
 .voice-more[open] > summary { margin-bottom: 10px; }

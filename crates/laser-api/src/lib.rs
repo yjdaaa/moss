@@ -111,6 +111,8 @@ pub struct ApiService {
     /// 系统串口枚举：默认查询本机真实串口；测试注入固定列表，避免结果随插拔的设备变化。
     serial_port_lister: SerialPortLister,
     controller_candidates: ControllerCandidateFinder,
+    /// 激光侧诊断事件出口（桌面端接到语音中心“记录与诊断”）
+    event_sink: SharedLaserEventSink,
     /// 局域网扫描时等每台设备回应的时限（默认 1.5 秒；收齐回应即返回）
     discovery_reply_timeout: std::time::Duration,
     /// 严格模式（`MOSS_FUSION_STRICT`，技术书 §6.2）：开启后 R3 动作需要桌面会话或审批授权。
@@ -186,6 +188,119 @@ fn find_controller_candidates(emit: &(dyn Fn(ControllerCandidate) + Sync)) {
             });
         });
     });
+}
+
+/// 激光侧诊断事件级别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaserEventLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// 激光雕刻机相关的诊断事件（2026-11-09 用户要求）：桌面端接到语音中心“记录与诊断”，
+/// 标为“激光雕刻”，和小智、MOSS 软件的事件放在一起，方便判断是哪里出的错。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaserEvent {
+    pub level: LaserEventLevel,
+    /// 大白话说明（含停在第几行、简短原因）
+    pub text: String,
+    /// 下一步建议
+    pub hint: Option<String>,
+    /// 原始报错（固件回复与 MOSS 的说明）
+    pub detail: Option<String>,
+}
+
+/// 事件出口：没有设置时（独立 moss-host、Android）静默丢弃。
+pub type LaserEventSink = std::sync::Arc<dyn Fn(LaserEvent) + Send + Sync>;
+type SharedLaserEventSink = std::sync::Arc<std::sync::RwLock<Option<LaserEventSink>>>;
+
+/// 取 HTTP 响应正文里的 JSON（取不到时为 Null），用于把失败原因写进诊断事件。
+fn http_response_json(response: &[u8]) -> serde_json::Value {
+    response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .and_then(|pos| serde_json::from_slice(&response[pos + 4..]).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn emit_laser_event(sink: &SharedLaserEventSink, event: LaserEvent) {
+    let sink = sink.read().ok().and_then(|guard| guard.clone());
+    if let Some(sink) = sink {
+        sink(event);
+    }
+}
+
+/// 加工结束的诊断事件：完成（信息）、取消（警告）、失败（错误，带简短原因与停在第几行）。
+fn job_terminal_event(
+    workflow_id: &str,
+    status: &str,
+    send_result: &serde_json::Value,
+) -> LaserEvent {
+    let sent = send_result["lines_sent"].as_u64().unwrap_or(0);
+    let total = send_result["total_lines"].as_u64().unwrap_or(0);
+    let target = send_result["target"].as_str().unwrap_or("");
+    let at = if target.is_empty() {
+        String::new()
+    } else {
+        format!("（{target}）")
+    };
+    match status {
+        "completed" => LaserEvent {
+            level: LaserEventLevel::Info,
+            text: format!("加工完成：{workflow_id}，共 {total} 行{at}"),
+            hint: None,
+            detail: None,
+        },
+        "cancelled" => LaserEvent {
+            level: LaserEventLevel::Warn,
+            text: format!("加工已停止：{workflow_id}，停在第 {sent}/{total} 行{at}"),
+            hint: Some(if send_result["can_resume"].as_bool() == Some(true) {
+                "到设备旁确认机器已停；需要时可在工作台从断点继续".to_owned()
+            } else {
+                "到设备旁确认机器已停、激光已灭".to_owned()
+            }),
+            detail: send_result["error"].as_str().map(str::to_owned),
+        },
+        _ => {
+            let error = send_result["error"].as_str().unwrap_or("加工失败");
+            let short: String = error.chars().take(120).collect();
+            LaserEvent {
+                level: LaserEventLevel::Error,
+                text: format!("加工失败：{workflow_id}，停在第 {sent}/{total} 行{at}：{short}"),
+                hint: Some(
+                    laser_failure_hint(error)
+                        .unwrap_or("看技术细节里固件给的原因，排除后再发送；到设备旁确认机器已停")
+                        .to_owned(),
+                ),
+                detail: Some(error.to_owned()),
+            }
+        }
+    }
+}
+
+/// 按报错内容给出下一步建议（只覆盖常见原因；其余看技术细节里固件自己的说明）。
+pub fn laser_failure_hint(error: &str) -> Option<&'static str> {
+    let has = |needle: &str| error.contains(needle);
+    if has("ALARM:2") || has("软限位") {
+        Some("图形超出了机器行程：检查图形尺寸、工作原点和板材起点，必要时缩小图形")
+    } else if has("ALARM:1") || has("硬限位") {
+        Some("碰到了限位开关：确认图形没有超出行程，解锁（$X）后重新回零再加工")
+    } else if has("ALARM:14") || has("未回零") {
+        Some("机器要求先回零：在工作台点“回零”（$H）后再开始")
+    } else if has("急停") && (has("Pn:") || has("引脚") || has("开关")) {
+        Some("急停开关或故障输入被触发：松开急停、排除故障后再试")
+    } else if has("Door") || has("安全门") || has("门开") {
+        Some("安全门没关好：关门后机器会继续，或重新开始")
+    } else if has("error:120") {
+        Some("别的通道（WebUI 或 SD 卡任务）正在加工：等它结束或先停止它")
+    } else if has("SHA-256") || has("哈希") {
+        Some("机器上的文件和确认过的刀路不一致：重新生成并发送")
+    } else if has("失联") || has("断开") || has("连接") || has("超时") {
+        Some("检查雕刻机电源、网线 / Wi-Fi 或 USB 线，确认 IP / 串口正确后点“握手探测”")
+    } else {
+        None
+    }
 }
 
 /// 传输工厂：默认按连接描述真实打开 TCP/串口；测试可注入 FakeGrbl。
@@ -918,6 +1033,7 @@ impl ApiService {
             extra_allowed_origins: Vec::new(),
             serial_port_lister: std::sync::Arc::new(enumerate_system_serial_ports),
             controller_candidates: std::sync::Arc::new(find_controller_candidates),
+            event_sink: Default::default(),
             discovery_reply_timeout: std::time::Duration::from_millis(1500),
             strict_mode: std::sync::atomic::AtomicBool::new(false),
             approvals: None,
@@ -1039,6 +1155,17 @@ impl ApiService {
     }
 
     /// 替换系统串口枚举（测试用；生产环境使用默认的真实枚举）。
+    /// 设置激光侧诊断事件出口（桌面端在内置语音初始化后调用；运行中可替换）。
+    pub fn set_event_sink(&self, sink: LaserEventSink) {
+        if let Ok(mut slot) = self.event_sink.write() {
+            *slot = Some(sink);
+        }
+    }
+
+    fn emit_event(&self, event: LaserEvent) {
+        emit_laser_event(&self.event_sink, event);
+    }
+
     /// 替换局域网扫描的候选地址来源（测试用本机假设备，不扫真实网络）。
     pub fn with_controller_candidates(mut self, finder: ControllerCandidateFinder) -> Self {
         self.controller_candidates = finder;
@@ -2388,6 +2515,7 @@ impl ApiService {
             _ => self.workflows.clone(),
         };
         let jobs_registry = self.active_jobs.clone();
+        let event_sink = self.event_sink.clone();
         let uncertain_registry = self.uncertain_jobs.clone();
         let wf_id = workflow_id.to_owned();
         let total = lines.len();
@@ -2520,6 +2648,7 @@ impl ApiService {
                 if let Some(hook) = on_terminal {
                     hook(status, &send_result);
                 }
+                emit_laser_event(&event_sink, job_terminal_event(&wf_id, status, &send_result));
                 finalize_workflow_record(store.as_deref(), &workflows, kind, &wf_id, status, send_result);
                 if status == "completed" {
                     if let Ok(mut jobs) = jobs_registry.lock() {
@@ -4716,6 +4845,33 @@ impl ApiService {
             }
             let job_id = object.get("job_id").and_then(serde_json::Value::as_str);
             let res = self.handle_safe_action_for(&args, &ctx, job_id);
+            let action_name = args.action.trim().to_owned();
+            if action_name == "emergency_stop" {
+                self.emit_event(if res.success {
+                    LaserEvent {
+                        level: LaserEventLevel::Warn,
+                        text: format!("已发出急停（0x18）：{}", res.result),
+                        hint: Some(
+                            "0x18 只是软件复位请求：到设备旁确认机器已停、激光已灭".to_owned(),
+                        ),
+                        detail: None,
+                    }
+                } else {
+                    LaserEvent {
+                        level: LaserEventLevel::Error,
+                        text: format!("急停没有发出：{}", res.result),
+                        hint: Some("立刻按设备上的物理急停或断电".to_owned()),
+                        detail: res.detail.clone(),
+                    }
+                });
+            } else if !res.success && action_name != "status" {
+                self.emit_event(LaserEvent {
+                    level: LaserEventLevel::Warn,
+                    text: format!("设备操作 {action_name} 没有完成：{}", res.result),
+                    hint: laser_failure_hint(&res.result).map(str::to_owned),
+                    detail: res.detail.clone(),
+                });
+            }
             let outcome: Result<serde_json::Value, (u16, serde_json::Value)> = if res.success {
                 Ok(serde_json::Value::Null)
             } else {
@@ -4737,6 +4893,34 @@ impl ApiService {
                 Err(error) => return http_json(400, failure(error, None)),
             };
             let (result, verified) = self.probe_connections(&object);
+            let summary = result["summary"].as_str().unwrap_or("").to_owned();
+            if result["connected"].as_bool() == Some(true) {
+                // 握手成功但有配置提醒（off_on_alarm、verbose_errors、$10 等）时记为警告
+                let warned = summary.contains("建议");
+                self.emit_event(LaserEvent {
+                    level: if warned {
+                        LaserEventLevel::Warn
+                    } else {
+                        LaserEventLevel::Info
+                    },
+                    text: format!("握手探测成功：{summary}"),
+                    hint: warned.then(|| "按摘要里的建议改好控制器配置后重启控制器".to_owned()),
+                    detail: None,
+                });
+            } else {
+                self.emit_event(LaserEvent {
+                    level: LaserEventLevel::Warn,
+                    text: format!("连接雕刻机失败：{summary}"),
+                    hint: Some(
+                        laser_failure_hint(&summary)
+                            .unwrap_or(
+                                "确认雕刻机已开机，IP / 端口或串口与波特率填写正确后再点“握手探测”",
+                            )
+                            .to_owned(),
+                    ),
+                    detail: Some(result["attempts"].to_string()),
+                });
+            }
             // n73：工作台（桌面、本机网页、局域网配对）握手成功的连接记下来，语音与接入点默认用它
             if let Some(spec) = verified
                 && matches!(
@@ -4795,6 +4979,20 @@ impl ApiService {
                 } else {
                     Err((400, failure("走边框未完成", None)))
                 };
+            if !response.starts_with(b"HTTP/1.1 200") {
+                let body = http_response_json(&response);
+                let message = body["result"].as_str().unwrap_or("走边框未完成").to_owned();
+                self.emit_event(LaserEvent {
+                    level: LaserEventLevel::Error,
+                    text: format!("走边框没有完成：{message}"),
+                    hint: Some(
+                        laser_failure_hint(&message)
+                            .unwrap_or("到设备旁确认机器状态，排除原因后再走边框")
+                            .to_owned(),
+                    ),
+                    detail: Some(body.to_string()),
+                });
+            }
             self.finish_r3_authority(&framing_authority, &outcome, None);
             return response;
         }
@@ -16070,6 +16268,92 @@ Content-Length: 30
         assert!(
             hint.contains("没找到可能的控制器") || hint.contains("没有找到可用的局域网网卡"),
             "{hint}"
+        );
+    }
+
+    /// 2026-11-09：激光侧事件——加工结束（完成 / 停止 / 失败带原因与行号）、握手失败与急停都会发出，
+    /// 桌面端接到语音中心“记录与诊断”并标为“激光雕刻”。
+    #[test]
+    fn laser_events_cover_job_outcomes_handshake_failure_and_estop() {
+        let done = job_terminal_event(
+            "wf-1",
+            "completed",
+            &serde_json::json!({"lines_sent": 400, "total_lines": 400, "target": "192.0.2.20:23"}),
+        );
+        assert_eq!(done.level, LaserEventLevel::Info);
+        assert_eq!(done.text, "加工完成：wf-1，共 400 行（192.0.2.20:23）");
+        let stopped = job_terminal_event(
+            "wf-2",
+            "cancelled",
+            &serde_json::json!({"lines_sent": 120, "total_lines": 400, "can_resume": true}),
+        );
+        assert_eq!(stopped.level, LaserEventLevel::Warn);
+        assert!(
+            stopped.text.contains("停在第 120/400 行"),
+            "{}",
+            stopped.text
+        );
+        assert!(stopped.hint.unwrap().contains("断点继续"));
+        let failed = job_terminal_event(
+            "wf-3",
+            "failed",
+            &serde_json::json!({"lines_sent": 88, "total_lines": 400, "error": "ALARM:2 (软限位超程（目标运动坐标超出了设置的最大行程，已安全拦截，可执行 $X 解锁）)"}),
+        );
+        assert_eq!(failed.level, LaserEventLevel::Error);
+        assert!(
+            failed.text.contains("停在第 88/400 行") && failed.text.contains("ALARM:2"),
+            "{}",
+            failed.text
+        );
+        assert!(failed.hint.as_deref().unwrap().contains("超出了机器行程"));
+        assert!(failed.detail.unwrap().contains("软限位"));
+        assert!(
+            laser_failure_hint("控制器连续 500ms 无响应，已判定失联")
+                .unwrap()
+                .contains("握手探测")
+        );
+        assert!(laser_failure_hint("一切正常").is_none());
+
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<LaserEvent>::new()));
+        let service = cors_test_service().with_transport_factory(fake_transport_factory(10));
+        let sink_events = events.clone();
+        service.set_event_sink(std::sync::Arc::new(move |event| {
+            sink_events.lock().unwrap().push(event)
+        }));
+        // 握手失败：连一个没人监听的本机端口
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        post_json(
+            &service,
+            "/api/connection/check",
+            &serde_json::json!({"connection_mode": "network", "network_host": "127.0.0.1", "network_telnet_port": closed, "network_timeout": 0.5}),
+        );
+        // 急停
+        post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "emergency_stop", "confirmed": true, "connection_mode": "network", "host": "127.0.0.1", "telnet_port": 2302}),
+        );
+        // 状态查询不记
+        post_json(
+            &service,
+            "/api/safe-action",
+            &serde_json::json!({"action": "status", "connection_mode": "network", "host": "127.0.0.1", "telnet_port": 2302}),
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == LaserEventLevel::Warn && e.text.starts_with("连接雕刻机失败")),
+            "{events:?}"
+        );
+        assert!(events.iter().any(|e| e.text.contains("急停")), "{events:?}");
+        assert!(
+            !events.iter().any(|e| e.text.contains("status")),
+            "状态查询不写事件: {events:?}"
         );
     }
 }

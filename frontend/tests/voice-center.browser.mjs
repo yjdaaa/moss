@@ -50,7 +50,10 @@ try {
       sessions: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", ip: "192.0.2.55", protocol_version: 1, connected_at: 1_790_000_000, state: "idle", level: 0, screen_monochrome: false, screen_width: 320, screen_height: 240, device_tools: ["self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness", "self.screen.set_theme", "self.screen.preview_image", "self.set_press_to_talk"] }],
       // n68：结构化事件（级别 / 分类 / 下一步 / 技术细节）、覆盖计数与降级提示
       events: [
-        { seq: 3, at: 1_790_000_002, at_ms: 1_790_000_002_345, level: "info", category: "general", text: "识别完成：7 字" },
+        // 2026-11-09：激光雕刻机与 MOSS 软件的事件也在这里，带来源
+        { seq: 5, at: 1_790_000_004, at_ms: 1_790_000_004_000, level: "error", category: "device", source: "laser", text: "加工失败：wf-9，停在第 88/400 行：ALARM:2 (软限位超程)", hint: "图形超出了机器行程：检查图形尺寸、工作原点和板材起点，必要时缩小图形" },
+        { seq: 4, at: 1_790_000_003, at_ms: 1_790_000_003_500, level: "warn", category: "model", source: "moss", text: "本地视觉模型（qwen3_vl_2b）启动失败" },
+        { seq: 3, at: 1_790_000_002, at_ms: 1_790_000_002_345, level: "info", category: "general", source: "xiaozhi", text: "识别完成：7 字" },
         { seq: 2, at: 1_790_000_001, at_ms: 1_790_000_001_120, level: "error", category: "auth", text: "对话出错：大模型返回 HTTP 401，密钥无效或没有权限", hint: "密钥填错、过期或被停用了：到服务方控制台复制新密钥重新填写", detail: "服务方原话：Incorrect API key provided" },
         { seq: 1, at: 1_790_000_000, at_ms: 1_790_000_000_010, level: "warn", category: "device", text: "设备 aa:bb:cc:11:22:33 已断开：连接突然中断（最可能是 Wi-Fi 掉线、设备重启或断电）" },
       ],
@@ -739,19 +742,31 @@ try {
   assert.match(await page.locator("#voice-group-approvals").innerText(), /最近 1 条/);
   await openGroup("builtin-events");
   const eventsCard = page.locator("#voice-builtin-events-card");
-  assert.equal(await eventsCard.locator(".voice-event").count(), 3, "全部保留的事件都显示，不再只截 20 条");
+  assert.equal(await eventsCard.locator(".voice-event").count(), 5, "全部保留的事件都显示，不再只截 20 条");
+  // 每条前面标明来源；旧记录没有 source 时按小智显示
+  assert.deepEqual(
+    await eventsCard.locator(".voice-event-source").allInnerTexts(),
+    ["激光雕刻", "MOSS 软件", "小智", "小智", "小智"],
+  );
+  assert.match(await page.locator("#voice-events-source-laser").innerText(), /激光雕刻 1 · 问题 1/);
+  await page.locator("#voice-events-source-laser").click();
+  assert.equal(await eventsCard.locator(".voice-event").count(), 1, "只看激光雕刻");
+  assert.match(await eventsCard.locator(".voice-event").innerText(), /激光雕刻[\s\S]*加工失败：wf-9，停在第 88\/400 行[\s\S]*怎么办：图形超出了机器行程/);
+  await page.locator("#voice-events-source-moss").click();
+  assert.match(await eventsCard.locator(".voice-event").innerText(), /MOSS 软件[\s\S]*本地视觉模型/);
+  await page.locator("#voice-events-source-all").click();
   await eventsCard.getByText("有 12 条较早的日常记录已被覆盖（最多保留 300 条）").waitFor();
   await eventsCard.getByText(/本地音乐目录当前不可用/).waitFor();
-  const errorEvent = eventsCard.locator('.voice-event[data-level="error"]');
+  const errorEvent = eventsCard.locator('.voice-event[data-level="error"][data-source="xiaozhi"]');
   assert.match(await errorEvent.innerText(), /错误[\s\S]*密钥\/权限[\s\S]*怎么办：密钥填错/);
   await errorEvent.getByText("技术细节").click();
   await errorEvent.getByText("服务方原话：Incorrect API key provided").waitFor();
-  assert.match(await eventsCard.locator('.voice-event[data-level="warn"]').innerText(), /怎么办：检查设备供电和 Wi-Fi/, "没有自带建议时用分类的大白话建议");
+  assert.match(await eventsCard.locator('.voice-event[data-level="warn"][data-source="xiaozhi"]').innerText(), /怎么办：检查设备供电和 Wi-Fi/, "没有自带建议时用分类的大白话建议");
   await page.locator("#voice-events-only-problems").check();
-  assert.equal(await eventsCard.locator(".voice-event").count(), 2, "只看错误和警告");
+  assert.equal(await eventsCard.locator(".voice-event").count(), 4, "只看错误和警告（三类来源都算）");
   await page.locator("#voice-events-only-problems").uncheck();
   await page.locator("#voice-diagnostics-export").click();
-  await page.locator("#voice-diagnostics-export-result").getByText(/诊断包已保存：moss-voice-diagnostics-1790000000\.json（3 条事件/).waitFor();
+  await page.locator("#voice-diagnostics-export-result").getByText(/诊断包已保存：moss-voice-diagnostics-1790000000\.json（5 条事件/).waitFor();
   assert.ok(last("voice_diagnostics_export"), "导出走后端命令");
   await openGroup("live-debug-traces");
   assert.match(await page.locator("#voice-turn-timings").innerText(), /第 2 轮 · 没识别出文字，已忽略 · fake-asr · 设备 aa:bb:cc:11:22:33/);

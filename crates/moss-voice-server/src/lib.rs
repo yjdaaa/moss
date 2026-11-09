@@ -66,7 +66,7 @@ pub use ota::{
 };
 pub use preview_push::{StyleSceneGifCatalog, cached_style_scene_gifs};
 pub use state::{
-    DebugToolTrace, DiagCategory, DiagnosticsLog, EventDrops, EventLevel, EventRecord,
+    DebugToolTrace, DiagCategory, DiagSource, DiagnosticsLog, EventDrops, EventLevel, EventRecord,
     MAX_INFO_EVENTS, MAX_PROBLEM_EVENTS, MAX_TIMINGS, ServerEvent, SessionView, ToolTiming,
     TurnDebugTrace, TurnTiming, scrub_debug_text,
 };
@@ -477,9 +477,12 @@ impl VoiceServer {
             job_announcements: jobs::AnnounceLog::default(),
             device_requests: Default::default(),
         });
-        shared.state.event(format!(
-            "内置语音服务已启动：设备连接端口 {ws_port}，OTA 端口 {http_port}"
-        ));
+        shared.state.event(
+            EventRecord::from(format!(
+                "内置语音服务已启动：设备连接端口 {ws_port}，OTA 端口 {http_port}"
+            ))
+            .source(DiagSource::Moss),
+        );
         let ws_app = session::router(shared.clone());
         let http_app = ota::router(shared.clone())
             .merge(vision::router(shared.clone()))
@@ -541,6 +544,7 @@ impl VoiceServer {
                     DiagCategory::Network,
                     "常连模式没能启动，设备照旧用唤醒后连接",
                 )
+                .source(DiagSource::Moss)
                 .hint("端口被占用或被系统拒绝：在设置里换常连端口后重启内置服务")
                 .detail(&error),
             );

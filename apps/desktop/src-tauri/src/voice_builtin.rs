@@ -1039,7 +1039,14 @@ mod imp {
                 Ok(()) => state.server.as_ref().map(|server| server.base_url()),
                 Err(error) => {
                     state.server = None;
-                    state.failure = Some(error);
+                    state.failure = Some(error.clone());
+                    record_moss_event(
+                        EventRecord::error(DiagCategory::Model, "本地视觉模型的推理进程意外退出")
+                            .hint(
+                                "下次看图时会自动重新加载；反复出现时到“本地模型”重新下载视觉模型",
+                            )
+                            .detail(error),
+                    );
                     None
                 }
             }
@@ -1088,6 +1095,14 @@ mod imp {
                 }
                 Err(error) => {
                     state.failure = Some(error.clone());
+                    record_moss_event(
+                        EventRecord::error(
+                            DiagCategory::Model,
+                            format!("本地视觉模型（{}）启动失败", launch.model),
+                        )
+                        .hint("确认模型已完整下载、磁盘与内存够用；看技术细节里推理进程的输出")
+                        .detail(&error),
+                    );
                     Err(error)
                 }
             }
@@ -2296,9 +2311,43 @@ mod imp {
     /// Tauri 托管状态：后端未启动时为空。
     pub struct BuiltinState(pub Option<Arc<BuiltinVoice>>);
 
+    /// 宿主持有的诊断记录本（内置语音初始化时登记），供更新模块、本地模型进程等写“MOSS 软件”事件。
+    static HOST_LOG: std::sync::OnceLock<Arc<moss_voice_server::DiagnosticsLog>> =
+        std::sync::OnceLock::new();
+
+    /// 写一条“MOSS 软件”事件到语音中心“记录与诊断”（2026-11-09）；后端没起来时静默丢弃。
+    pub fn record_moss_event(record: EventRecord) {
+        if let Some(log) = HOST_LOG.get() {
+            log.push_from(moss_voice_server::DiagSource::Moss, record);
+        }
+    }
+
     pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
         BuiltinState(host.map(|host| {
             let diagnostics = moss_voice_server::DiagnosticsLog::new();
+            let _ = HOST_LOG.set(diagnostics.clone());
+            // 2026-11-09：激光雕刻机相关事件也写进同一本记录，标为“激光雕刻”（语音中心“记录与诊断”）
+            {
+                let laser_log = diagnostics.clone();
+                host.api_service
+                    .set_event_sink(Arc::new(move |event: laser_api::LaserEvent| {
+                        let level = match event.level {
+                            laser_api::LaserEventLevel::Info => moss_voice_server::EventLevel::Info,
+                            laser_api::LaserEventLevel::Warn => moss_voice_server::EventLevel::Warn,
+                            laser_api::LaserEventLevel::Error => {
+                                moss_voice_server::EventLevel::Error
+                            }
+                        };
+                        let mut record = EventRecord::new(level, DiagCategory::Device, event.text);
+                        if let Some(hint) = event.hint {
+                            record = record.hint(hint);
+                        }
+                        if let Some(detail) = event.detail {
+                            record = record.detail(detail);
+                        }
+                        laser_log.push_from(moss_voice_server::DiagSource::Laser, record);
+                    }));
+            }
             let setting_path = host.runtime_root.path.join("settings.json");
             if let Err(error) = laser_host::voice_agent::AgentCoordinator::attach(
                 &host.api_service,
@@ -2307,7 +2356,8 @@ mod imp {
                 vec![host.runtime_root.path.clone()],
             ) {
                 eprintln!("[moss-desktop] AgentRun 只读工具不可用：{error}");
-                diagnostics.push(
+                diagnostics.push_from(
+                    moss_voice_server::DiagSource::Moss,
                     EventRecord::warn(
                         DiagCategory::Internal,
                         "本机 Agent 的只读工具没能挂上，语音里暂时用不了 Agent 查询",
@@ -2338,12 +2388,15 @@ mod imp {
             let cleaned = models.clean_leftovers();
             if cleaned > 0 {
                 eprintln!("[moss-desktop] 已清理 {cleaned} 个本地模型下载残留");
-                diagnostics.push(EventRecord::info(
-                    DiagCategory::Model,
-                    format!(
-                        "已清理 {cleaned} 个本地模型下载残留（上次下载中途退出留下的半截文件）"
+                diagnostics.push_from(
+                    moss_voice_server::DiagSource::Moss,
+                    EventRecord::info(
+                        DiagCategory::Model,
+                        format!(
+                            "已清理 {cleaned} 个本地模型下载残留（上次下载中途退出留下的半截文件）"
+                        ),
                     ),
-                ));
+                );
             }
             // 2026-11-07：macOS / Linux 上 MOSS 崩溃或被强制结束后，OneJev 推理进程会被系统收养继续占着内存；
             // 启动时只结束 MOSS 模型目录里 OneJev 权重对应、父进程已不在的那些（Windows 由 Job Object 自动处理）
@@ -2359,7 +2412,8 @@ mod imp {
                     eprintln!(
                         "[moss-desktop] 已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程"
                     );
-                    diagnostics.push(
+                    diagnostics.push_from(
+                        moss_voice_server::DiagSource::Moss,
                         EventRecord::warn(
                             DiagCategory::Model,
                             format!("已结束 {reaped} 个上次异常退出遗留的本地 OneJev 推理进程"),
@@ -2411,7 +2465,8 @@ mod imp {
                 && let Err(error) = db.recover_firmware_downloads(now())
             {
                 eprintln!("[moss-desktop] 固件下载记录恢复失败，固件传输仍禁用");
-                diagnostics.push(
+                diagnostics.push_from(
+                    moss_voice_server::DiagSource::Moss,
                     EventRecord::error(
                         DiagCategory::Firmware,
                         "固件下载记录恢复失败，这次运行不能给设备推送固件",
@@ -2564,10 +2619,10 @@ mod imp {
             .spawn(move || {
                 if start_feedback_laya && let Err(err) = builtin.ensure_laya_running(false) {
                     eprintln!("[moss-desktop] 本地 Laya 决策服务自动启动失败：{err}");
-                    builtin.diagnostics.push(local_jev_failure(
-                        "MOSS 启动时自动拉起本地 Jev 决策服务失败",
-                        &err,
-                    ));
+                    builtin.diagnostics.push_from(
+                        moss_voice_server::DiagSource::Moss,
+                        local_jev_failure("MOSS 启动时自动拉起本地 Jev 决策服务失败", &err),
+                    );
                 }
                 if start_voice && let Err(error) = builtin.start() {
                     eprintln!("[moss-desktop] 内置语音服务自动启动失败：{}", error.message);
@@ -2993,7 +3048,8 @@ mod imp {
                             error.message
                         );
                         eprintln!("[moss-desktop] {warning}");
-                        self.diagnostics.push(
+                        self.diagnostics.push_from(
+                            moss_voice_server::DiagSource::Moss,
                             EventRecord::warn(DiagCategory::Model, warning.clone())
                                 .hint("到“隐私与家居 → 声纹”下载声纹模型，再重启内置服务"),
                         );
@@ -3233,8 +3289,10 @@ mod imp {
         fn start_locked(&self) -> Result<(), CenterError> {
             let result = self.start_locked_inner();
             if let Err(error) = &result {
-                self.diagnostics
-                    .push(start_failure_event("内置语音服务启动失败", error));
+                self.diagnostics.push_from(
+                    moss_voice_server::DiagSource::Moss,
+                    start_failure_event("内置语音服务启动失败", error),
+                );
             } else {
                 // n74：选了本地视觉模型时在后台预加载，设备第一次看图不用等
                 self.sync_local_vision(true);
@@ -3323,7 +3381,8 @@ mod imp {
                     *slot = helper;
                 }
                 if let Some(warning) = &next_music_warning {
-                    self.diagnostics.push(
+                    self.diagnostics.push_from(
+                        moss_voice_server::DiagSource::Moss,
                         EventRecord::warn(DiagCategory::Config, warning.clone())
                             .hint("在“能力 → 本地音乐”里重新选择音乐文件夹"),
                     );
@@ -3342,10 +3401,10 @@ mod imp {
                 && let Err(err) = self.ensure_laya_running(false)
             {
                 eprintln!("[moss-desktop] 本地 Laya 决策服务启动失败：{err}");
-                self.diagnostics.push(local_jev_failure(
-                    "开启内置语音时拉起本地 Jev 决策服务失败",
-                    &err,
-                ));
+                self.diagnostics.push_from(
+                    moss_voice_server::DiagSource::Moss,
+                    local_jev_failure("开启内置语音时拉起本地 Jev 决策服务失败", &err),
+                );
             }
             Ok(())
         }
@@ -3767,10 +3826,13 @@ mod imp {
                     eprintln!(
                         "[moss-desktop] 本地 Jev 决策服务未就绪（不影响其余本地设置保存）：{err}"
                     );
-                    self.diagnostics.push(local_jev_failure(
-                        "保存本地设置后，本地 Jev 决策服务没有就绪（其余设置已保存）",
-                        &err,
-                    ));
+                    self.diagnostics.push_from(
+                        moss_voice_server::DiagSource::Moss,
+                        local_jev_failure(
+                            "保存本地设置后，本地 Jev 决策服务没有就绪（其余设置已保存）",
+                            &err,
+                        ),
+                    );
                 }
             } else if !is_local_laya || !laya_needed {
                 self.stop_laya();
@@ -4836,7 +4898,7 @@ mod imp {
                                     }
                                     if !cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                         eprintln!("[moss-desktop] 本地 OneJev ({id_owned}) 后台启动失败：{err}");
-                                        diagnostics.push(local_jev_failure(&format!("本地 OneJev（{id_owned}）后台启动失败"), &err));
+                                        diagnostics.push_from(moss_voice_server::DiagSource::Moss, local_jev_failure(&format!("本地 OneJev（{id_owned}）后台启动失败"), &err));
                                         if let Ok(mut r) = laya_slot.lock()
                                             && r.generation == start_generation
                                         {
@@ -5137,10 +5199,10 @@ mod imp {
                 LayaAction::Start => {
                     if let Err(err) = self.ensure_laya_running(false) {
                         eprintln!("[moss-desktop] 本地 Jev 决策服务启动失败：{err}");
-                        self.diagnostics.push(local_jev_failure(
-                            "切换 Jev 设置后本地 Jev 决策服务启动失败",
-                            &err,
-                        ));
+                        self.diagnostics.push_from(
+                            moss_voice_server::DiagSource::Moss,
+                            local_jev_failure("切换 Jev 设置后本地 Jev 决策服务启动失败", &err),
+                        );
                     }
                 }
                 LayaAction::Stop => self.stop_laya(),
@@ -7561,6 +7623,47 @@ mod imp {
             dir
         }
 
+        /// 2026-11-09：激光后端的事件写进同一本记录，语音中心事件列表里来源标为“激光雕刻”。
+        #[test]
+        fn laser_events_reach_voice_center_with_laser_source() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host.clone())).0.unwrap();
+            let closed = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let body = serde_json::json!({
+                "connection_mode": "network", "network_host": "127.0.0.1",
+                "network_telnet_port": closed, "network_timeout": 0.5,
+            })
+            .to_string();
+            let request = format!(
+                "POST /api/connection/check HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            host.api_service.handle_http(request.as_bytes());
+            let events = builtin.status()["events"].as_array().unwrap().clone();
+            let laser = events
+                .iter()
+                .find(|event| event["source"] == "laser")
+                .expect("握手失败应写进语音中心事件列表");
+            assert_eq!(laser["level"], "warn");
+            assert_eq!(laser["category"], "device");
+            assert!(
+                laser["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("连接雕刻机失败"),
+                "{laser}"
+            );
+            assert!(laser["hint"].as_str().is_some());
+        }
+
         /// n74：没选本地模型时不启动；模型文件不全时启动失败并记下原因；停用后回到空闲。
         #[test]
         fn local_vision_runtime_reports_missing_launch_and_files() {
@@ -8914,7 +9017,7 @@ mod imp {
 }
 
 #[cfg(desktop)]
-pub use imp::{BuiltinVoice, autostart, init, shutdown};
+pub use imp::{BuiltinVoice, autostart, init, record_moss_event, shutdown};
 
 /// 内置语音状态含设备 IP、会话事件，调试开启时还有原始识别文字与工具参数。
 /// 2026-11-05：只给前端实际调用它的两个窗口——主窗口语音页（`VoiceBuiltinCard`）与打包私密页

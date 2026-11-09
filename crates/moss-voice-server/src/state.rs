@@ -158,6 +158,19 @@ pub enum EventLevel {
     Error,
 }
 
+/// 事件来自哪里（2026-11-09 用户要求：语音中心“记录与诊断”同时显示三类，前面标明来源，方便判断是哪里出的错）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagSource {
+    /// 小智设备与对话链路（连接、识别、大模型、合成、设备请求等）
+    #[default]
+    Xiaozhi,
+    /// 激光雕刻机（握手、加工完成 / 取消 / 失败、报警、急停、走边框）
+    Laser,
+    /// MOSS 软件自身（服务启停、端口、本地模型进程、更新、配置与内部错误）
+    Moss,
+}
+
 /// 一条诊断事件（语音中心“记录与诊断”与诊断包）。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ServerEvent {
@@ -169,6 +182,8 @@ pub struct ServerEvent {
     pub at_ms: u64,
     pub level: EventLevel,
     pub category: DiagCategory,
+    /// 来源：小智 / 激光雕刻 / MOSS 软件
+    pub source: DiagSource,
     /// 大白话说明发生了什么。
     pub text: String,
     /// 大白话的下一步建议。
@@ -184,6 +199,7 @@ pub struct ServerEvent {
 pub struct EventRecord {
     pub level: EventLevel,
     pub category: DiagCategory,
+    pub source: DiagSource,
     pub text: String,
     pub hint: Option<String>,
     pub detail: Option<String>,
@@ -194,6 +210,12 @@ impl EventRecord {
         Self {
             level,
             category,
+            // 程序内部错误一律算 MOSS 软件；其余默认算小智链路，宿主与激光侧写入时显式改来源
+            source: if category == DiagCategory::Internal {
+                DiagSource::Moss
+            } else {
+                DiagSource::Xiaozhi
+            },
             text: text.into(),
             hint: None,
             detail: None,
@@ -207,6 +229,11 @@ impl EventRecord {
     }
     pub fn error(category: DiagCategory, text: impl Into<String>) -> Self {
         Self::new(EventLevel::Error, category, text)
+    }
+    /// 指定来源（小智 / 激光雕刻 / MOSS 软件）。
+    pub fn source(mut self, source: DiagSource) -> Self {
+        self.source = source;
+        self
     }
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         let hint = hint.into();
@@ -228,6 +255,7 @@ impl EventRecord {
         Self {
             level,
             category: error.category,
+            source: DiagSource::Xiaozhi,
             text: format!("{prefix}{}", error.message),
             hint: error.hint.clone(),
             detail: error.detail.clone(),
@@ -316,6 +344,7 @@ impl DiagnosticsLog {
             at_ms,
             level: record.level,
             category: record.category,
+            source: record.source,
             text: record.text,
             hint: record.hint,
             detail: record.detail,
@@ -333,6 +362,11 @@ impl DiagnosticsLog {
                 inner.drops.problems += 1;
             }
         }
+    }
+
+    /// 按指定来源写入（宿主写 MOSS 软件事件、激光侧写激光雕刻事件时用）。
+    pub fn push_from(&self, source: DiagSource, record: impl Into<EventRecord>) {
+        self.push(record.into().source(source));
     }
 
     /// 全部保留的事件，新的在前（两个缓冲按序号合并）。
@@ -886,5 +920,35 @@ mod tests {
         restarted.event("重启后的记录");
         let texts: Vec<_> = restarted.events().into_iter().map(|e| e.text).collect();
         assert_eq!(texts, ["重启后的记录", "第一次运行出错"]);
+    }
+
+    /// 2026-11-09：事件带来源。程序内部错误默认算 MOSS 软件，其余默认算小智；宿主与激光侧写入时指定来源，导出时带上。
+    #[test]
+    fn events_carry_their_source() {
+        let log = DiagnosticsLog::new();
+        log.push(EventRecord::warn(DiagCategory::Device, "设备断开"));
+        log.push(EventRecord::error(DiagCategory::Internal, "数据库锁失败"));
+        log.push_from(
+            DiagSource::Laser,
+            EventRecord::error(DiagCategory::Device, "加工失败：ALARM:2"),
+        );
+        log.push_from(
+            DiagSource::Moss,
+            EventRecord::warn(DiagCategory::Model, "本地视觉模型启动失败"),
+        );
+        let events = log.events();
+        let source_of = |text: &str| events.iter().find(|e| e.text == text).unwrap().source;
+        assert_eq!(source_of("设备断开"), DiagSource::Xiaozhi);
+        assert_eq!(source_of("数据库锁失败"), DiagSource::Moss);
+        assert_eq!(source_of("加工失败：ALARM:2"), DiagSource::Laser);
+        assert_eq!(source_of("本地视觉模型启动失败"), DiagSource::Moss);
+        let json = serde_json::to_value(&events).unwrap();
+        assert!(
+            json.as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["source"] == "laser"),
+            "{json}"
+        );
     }
 }

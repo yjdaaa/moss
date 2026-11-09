@@ -583,8 +583,19 @@ export function formatEventTime(event) {
 }
 
 /** 一条服务事件的显示：级别、分类、时间、说明、下一步（事件自带优先，警告/错误缺省时用分类的通用建议）、技术细节。 */
+/**
+ * 事件来源（2026-11-09 用户要求）：语音中心“记录与诊断”同时显示小智、激光雕刻机与 MOSS 软件的事件，
+ * 每条前面标明来源，方便判断是哪里出的错。旧记录没有 `source` 时按小智处理。
+ */
+export const VOICE_EVENT_SOURCES = {
+  xiaozhi: { label: "小智", tone: "info" },
+  laser: { label: "激光雕刻", tone: "warn" },
+  moss: { label: "MOSS 软件", tone: "ok" },
+};
+
 export function voiceEventView(event) {
   const level = EVENT_LEVELS[event?.level] ? event.level : "info";
+  const source = VOICE_EVENT_SOURCES[event?.source] ? event.source : "xiaozhi";
   const category = VOICE_DIAG_CATEGORIES[event?.category] ? event.category : "general";
   const meta = VOICE_DIAG_CATEGORIES[category];
   const own = typeof event?.hint === "string" ? event.hint.trim() : "";
@@ -593,6 +604,9 @@ export function voiceEventView(event) {
     level,
     levelText: EVENT_LEVELS[level].text,
     tone: EVENT_LEVELS[level].tone,
+    source,
+    sourceLabel: VOICE_EVENT_SOURCES[source].label,
+    sourceTone: VOICE_EVENT_SOURCES[source].tone,
     category,
     categoryLabel: meta.label,
     cause: level === "info" ? "" : meta.cause,
@@ -603,10 +617,26 @@ export function voiceEventView(event) {
   };
 }
 
-/** “只看错误和警告”筛选；不改动原数组顺序（新的在前）。 */
-export function filterVoiceEvents(events, onlyProblems) {
+/** “只看错误和警告”与来源筛选（`source` 为空或 `all` 时不按来源筛）；不改动原数组顺序（新的在前）。 */
+export function filterVoiceEvents(events, onlyProblems, source = "all") {
   const list = Array.isArray(events) ? events : [];
-  return onlyProblems ? list.filter((event) => event?.level === "warn" || event?.level === "error") : list;
+  if (!onlyProblems && (!source || source === "all")) return list;
+  return list.filter((event) => {
+    if (onlyProblems && event?.level !== "warn" && event?.level !== "error") return false;
+    if (source && source !== "all" && (VOICE_EVENT_SOURCES[event?.source] ? event.source : "xiaozhi") !== source) return false;
+    return true;
+  });
+}
+
+/** 各来源的事件条数与错误/警告条数（来源筛选按钮上显示）。 */
+export function voiceEventSourceCounts(events) {
+  const counts = Object.fromEntries(Object.keys(VOICE_EVENT_SOURCES).map((key) => [key, { total: 0, problems: 0 }]));
+  for (const event of Array.isArray(events) ? events : []) {
+    const key = VOICE_EVENT_SOURCES[event?.source] ? event.source : "xiaozhi";
+    counts[key].total += 1;
+    if (event?.level === "warn" || event?.level === "error") counts[key].problems += 1;
+  }
+  return counts;
 }
 
 /** 被覆盖记录的提示（计数为 0 时不提示）；绝不悄悄丢记录。 */

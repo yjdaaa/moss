@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 语音中心“记录与诊断”同时显示小智、激光雕刻机和 MOSS 软件的事件，每条标明来源（2026-11-09）
+
+- **现象**：用户要求在“记录与诊断”里不光看到小智的信息，激光雕刻机和 MOSS 软件本身的报错也要能看到，并在每条前面标明来源，方便判断是哪里出的错。此前这里只有内置语音服务的事件，且只在内置链路显示；雕刻失败、报警、急停、握手失败与软件更新失败都看不到。
+- **根因与修复**：事件新增 `source`（`DiagSource`：`xiaozhi` / `laser` / `moss`，缺省 `xiaozhi`），`internal` 分类与桌面宿主写入的事件记为 `moss`。`laser-api` 新增 `LaserEvent` 与 `ApiService::set_event_sink`，桌面端接到宿主持有的诊断记录本：握手探测成功（带配置建议时为警告）/ 失败、走边框没完成、急停（每次都记）、其他设备操作失败、加工完成 / 已停止 / 失败（停在第几行，按报警给建议，`laser_failure_hint`）。本地视觉模型启动失败 / 意外退出和应用内更新失败经 `record_moss_event` 记为 MOSS 软件。界面每条前加来源标签，新增按来源筛选（带条数与问题数），可与“只看错误和警告”组合，三种语音链路都显示。契约变化：`voice_builtin_status.events[]` 与诊断包每条多一个 `source` 字段（新增字段，向后兼容）；独立 moss-host 与 Android 不设事件出口，行为不变。
+- **验证**：新增 `events_carry_their_source`（moss-voice-server）、`laser_events_cover_job_outcomes_handshake_failure_and_estop`（laser-api：完成 / 停止 / 失败、握手失败、急停）、`laser_events_reach_voice_center_with_laser_source`（桌面端：握手失败经出口进入语音中心并带 `laser`）、`voiceState` 来源单测，语音中心浏览器用例覆盖来源标签、筛选与计数。未验证：没有连接真机，加工、报警与急停事件只在模拟设备上验证。
+- **关联**：`crates/moss-voice-server/src/state.rs`（`DiagSource`、`DiagnosticsLog::push_from`）、`crates/laser-api/src/lib.rs`（`LaserEvent`、`set_event_sink`、`laser_failure_hint`、`job_terminal_event`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`record_moss_event`、`HOST_LOG`）、`apps/desktop/src-tauri/src/app_update.rs`、`frontend/src/voiceState.js`（`VOICE_EVENT_SOURCES`、`voiceEventSourceCounts`）、`frontend/src/components/VoiceBuiltinCard.jsx`（`BuiltinEvents`）。
+
 ### 握手时提醒 FluidNC 激光段没开 off_on_alarm、配置关掉了 verbose_errors（2026-11-09）
 
 - **现象**：FluidNC 的 `Laser.off_on_alarm` 默认关（`Spindle.h`），报警时固件不主动关激光，M3 恒功率下停在原地也可能继续出光；配置里关掉 `verbose_errors` 后，报错不再附原因，上位机表里没有的新错误码只能看到编号。上位机此前都不提示。

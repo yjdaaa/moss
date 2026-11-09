@@ -972,7 +972,8 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
                     </VoiceGroup>
                   ),
                 },
-                { key: "builtin-events", modes: ["builtin"], node: <BuiltinEvents builtin={builtin} /> },
+                // 2026-11-09：激光雕刻机与 MOSS 软件的事件和语音链路无关，三种链路都显示
+                { key: "builtin-events", modes: ["official", "self_hosted", "builtin"], node: <BuiltinEvents builtin={builtin} /> },
                 { key: "debug-traces", modes: ["builtin"], node: <LiveDebugTraces builtin={builtin} /> },
                 {
                   key: "log",
