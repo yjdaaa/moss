@@ -11,6 +11,7 @@ import { CloseConfirmModal } from "./components/CloseConfirmModal.jsx";
 import { SettingsModal } from "./components/SettingsModal.jsx";
 import { CyberBackground } from "./components/CyberBackground.jsx";
 import { AppDialogHost } from "./components/AppDialog.jsx";
+import { ObsidianSelectHost } from "./components/ObsidianSelectHost.jsx";
 import { showAlert, showConfirm } from "./appDialog.js";
 import { getJson, postJson } from "./api/client.js";
 import { backendStartupErrorText, hasDesktopSession, initializeBackendOrigin, isRemoteMode, refreshDesktopSession } from "./authSession.js";
@@ -439,6 +440,8 @@ function App() {
       <AiPreviewCenter />
 
       <JobProgressDock onJobsChange={setActiveJobs} />
+
+      <ObsidianSelectHost />
 
       <AppDialogHost />
     </div>

@@ -1813,32 +1813,32 @@ function BuiltinJevGroup({ builtin }) {
             >
               <ChevronDown size={14} />
             </button>
-            {menuOpen && (
-              <div className="voice-combo-menu" role="listbox" aria-label="Jev 决策可选模型" id="voice-builtin-model-options-jev">
-                <div className="voice-combo-meta">
-                  <span>{remoteModels.detail || `可选 Jev 模型（共 ${mergedOptions.length} 个，也可手填新版本）`}</span>
-                </div>
-                <div className="voice-combo-list">
-                  {mergedOptions.map((opt) => (
-                    <div
-                      key={opt.id}
-                      role="option"
-                      aria-selected={opt.id === form.model}
-                      className={`voice-combo-option mono${opt.id === form.model ? " is-selected" : ""}`}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        update("model", opt.id);
-                        setMenuOpen(false);
-                      }}
-                    >
-                      <span className="voice-combo-id">{opt.id}</span>
-                      {opt.hint && <span className="voice-combo-hint">{opt.hint}</span>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
+          {menuOpen && (
+            <div className="voice-combo-menu" role="listbox" aria-label="Jev 决策可选模型" id="voice-builtin-model-options-jev">
+              <div className="voice-combo-meta">
+                <span>{remoteModels.detail || `可选 Jev 模型（共 ${mergedOptions.length} 个，也可手填新版本）`}</span>
+              </div>
+              <div className="voice-combo-list">
+                {mergedOptions.map((opt) => (
+                  <div
+                    key={opt.id}
+                    role="option"
+                    aria-selected={opt.id === form.model}
+                    className={`voice-combo-option mono${opt.id === form.model ? " is-selected" : ""}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      update("model", opt.id);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <span className="voice-combo-id">{opt.id}</span>
+                    {opt.hint && <span className="voice-combo-hint">{opt.hint}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         {/* n69：语音里用不用 Jev（jev_filter_enabled）只在顶部第 3 栏切换，这里只显示状态；细项在“对话体验” */}
         <div className="voice-wide voice-inline" id="voice-builtin-jev-voice-state">

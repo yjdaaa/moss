@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 优化前端下拉框、模型选择浮层与折叠栏样式（2026-11-10）
+
+- **现象**：用户反馈界面里的下拉框（原生 `<select>` 系统白灰弹框、模型下拉列表与高级折叠栏）外观丑陋；另外「Jev 决策模型」的下拉菜单放在弹性行容器内导致展开时挤在同一行。
+- **根因与修复**：① 新增全局曜石下拉浮层组件 `ObsidianSelectHost`：拦截鼠标点击原生 `<select>` 弹出的系统默认菜单，替换为毛玻璃深色浮层（自动把选项里的 `（说明）` 拆成彩色胶囊标签，当前选中项高亮并带 `✓`），同时保留原生 `<select>` 节点使键盘访问与自动化测试不受影响；② 为全部 `select` / `.select-input` 加上 `appearance: none`、自定义 SVG 箭头与省略号截断；③ 将 `.voice-combo-menu` 改为绝对定位毛玻璃浮层，并修好 `BuiltinJevGroup` 中下拉菜单嵌套在 `.voice-combo-wrap` 内的问题；④ 补齐 `.voice-fold` 并统一折叠栏 `<summary>` 的右侧旋转箭头与展开分隔线。
+- **验证**：前端 `npm run lint`（0 error）、`npm test`（244 项）与 `voice-center.browser.mjs` 浏览器用例通过。
+- **关联**：`frontend/src/components/ObsidianSelectHost.jsx`、`frontend/src/main.jsx`、`frontend/src/components/VoiceBuiltinCard.jsx`、`frontend/src/styles.css`。
+
 ### 新增“Colab T4 专属联动”：支持 Colab CLI 一键安装/登录检测、极速并发自动拉起云端 T4、本机 550W 参考音频自动同步与 `.ipynb` 导出（2026-11-10）
 
 - **现象**：用户希望在 Google Colab 免费档 T4（16GB 显存）上同时跑高速多模态大模型（对话 + 8 个激光工具调用 + 摄像头看图）与《流浪地球》MOSS 550W 原声零样本克隆语音合成，要求在语音中心「本地模型」里用一个默认关闭的开关按需开启、关闭时保持原配置不变；同时要求兼顾后期开源给未安装/未登录 `colab` CLI 的别人使用，并解决 `colab new`/`colab exec` 卡死与冷启动耗时过长的问题。
