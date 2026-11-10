@@ -23,11 +23,11 @@
   color-scheme: dark;
   /* ===== 曜石 Obsidian 令牌（技术书 §9.5.5 C，UI-2 定稿 2026-10-06） ===== */
   --ob-bg: #09090b;
-  --ob-panel: rgba(14, 14, 18, 0.72);
-  --ob-panel-2: rgba(24, 24, 27, 0.66);
-  --ob-raise: #18181b;
-  --ob-raise-2: #1f1f24;
-  --ob-well: #0b0b0e;
+  --ob-panel: rgba(12, 12, 18, 0.42);
+  --ob-panel-2: rgba(20, 20, 28, 0.36);
+  --ob-raise: rgba(255, 255, 255, 0.045);
+  --ob-raise-2: rgba(255, 255, 255, 0.075);
+  --ob-well: rgba(8, 8, 14, 0.36);
   --ob-line: rgba(255, 255, 255, 0.08);
   --ob-line-2: rgba(255, 255, 255, 0.14);
   --ob-line-3: rgba(255, 255, 255, 0.22);
@@ -261,11 +261,11 @@ a:hover {
   position: relative;
   isolation: isolate;
   background: linear-gradient(180deg, var(--ob-panel-2), var(--ob-panel)) !important;
-  backdrop-filter: blur(16px) saturate(130%);
-  -webkit-backdrop-filter: blur(16px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   border: 1px solid var(--ob-line) !important;
   border-radius: var(--ob-radius);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 30px 60px -30px rgba(0, 0, 0, 0.8);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 24px 52px -28px rgba(0, 0, 0, 0.65);
   transition: border-color 0.3s var(--ob-ease);
 }
 .hud-card::before {
@@ -317,14 +317,17 @@ a:hover {
   transition: transform 0.2s var(--ob-ease), box-shadow 0.2s, border-color 0.2s, filter 0.2s, background 0.2s;
   border: 1px solid var(--ob-line-2);
   background: linear-gradient(180deg, var(--ob-raise-2), var(--ob-raise));
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   color: var(--ob-ink);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 6px 16px -8px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 6px 16px -8px rgba(0, 0, 0, 0.55);
   user-select: none;
   position: relative;
   white-space: nowrap;
 }
 .btn:hover {
-  border-color: var(--ob-line-3);
+  border-color: rgba(139, 123, 255, 0.45);
+  background: linear-gradient(180deg, rgba(139, 123, 255, 0.14), rgba(139, 123, 255, 0.06));
   transform: translateY(-1px);
 }
 .btn:active {
@@ -335,13 +338,16 @@ a:hover {
 .secondary-button,
 .ghost-button {
   background: linear-gradient(180deg, var(--ob-raise-2), var(--ob-raise)) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   color: var(--ob-ink) !important;
   border: 1px solid var(--ob-line-2) !important;
 }
 .btn-ghost:hover,
 .secondary-button:hover,
 .ghost-button:hover {
-  border-color: var(--ob-line-3) !important;
+  background: linear-gradient(180deg, rgba(139, 123, 255, 0.14), rgba(139, 123, 255, 0.06)) !important;
+  border-color: rgba(139, 123, 255, 0.45) !important;
   color: #fff !important;
   transform: translateY(-1px);
 }
@@ -1270,8 +1276,10 @@ input[type="radio"] {
    ============================================================ */
 .job-summary-card {
   border: 1px solid var(--line) !important;
-  border-radius: 8px;
-  background: rgba(14, 14, 17, 0.75) !important;
+  border-radius: 10px;
+  background: rgba(14, 14, 22, 0.42) !important;
+  backdrop-filter: blur(12px) saturate(135%);
+  -webkit-backdrop-filter: blur(12px) saturate(135%);
   margin-bottom: 12px;
   padding: 12px 14px;
 }
@@ -1420,8 +1428,10 @@ input[type="radio"] {
 /* 画板右侧素材/路径预览：自适应面板宽度，锁定长宽比，绝不溢出 */
 .preview-box {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(14, 14, 17, 0.75);
+  border-radius: 10px;
+  background: rgba(14, 14, 22, 0.42);
+  backdrop-filter: blur(12px) saturate(135%);
+  -webkit-backdrop-filter: blur(12px) saturate(135%);
   padding: 10px 12px;
   margin-bottom: 12px;
   min-width: 0;
@@ -1588,22 +1598,22 @@ input[type="radio"] {
    底部控制台抽屉 (ConsoleDrawer) - 半透明通透毛玻璃
    ============================================================ */
 .bottom-drawer {
-  background: rgba(11, 11, 14, 0.68);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  background: rgba(11, 11, 18, 0.42);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   border: 1px solid rgba(139, 123, 255, 0.22);
-  border-radius: 8px;
+  border-radius: 10px;
   margin-top: 20px;
   overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
 }
 
 .drawer-nav {
   display: flex;
   align-items: center;
-  background: rgba(19, 19, 22, 0.75);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(18, 18, 26, 0.44);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid rgba(139, 123, 255, 0.15);
   overflow-x: auto;
   user-select: none;
@@ -1634,9 +1644,9 @@ input[type="radio"] {
 }
 
 .console-feed {
-  background: rgba(11, 11, 14, 0.72);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(10, 10, 16, 0.36);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   padding: 12px 16px;
   max-height: 250px;
   min-height: 160px;
@@ -1697,16 +1707,16 @@ input[type="radio"] {
 /* 小智 MCP 状态卡片 */
 .mcp-bridge-panel {
   padding: 16px;
-  background: rgba(11, 11, 14, 0.68);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(10, 10, 16, 0.36);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   min-height: 180px;
 }
 
 .mcp-card {
-  background: rgba(26, 26, 29, 0.7);
+  background: rgba(20, 20, 28, 0.42);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 12px 14px;
 }
 
@@ -1747,9 +1757,9 @@ input[type="radio"] {
 
 /* G-code 实时行视图 */
 .gcode-viewer-container {
-  background: rgba(11, 11, 14, 0.72);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(10, 10, 16, 0.36);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   padding: 10px 14px;
   max-height: 250px;
   min-height: 160px;
@@ -2412,22 +2422,26 @@ button.ob-pill {
 .ob-monitor .job-dispatch-card {
   margin-top: auto;
   background: var(--ob-well);
+  backdrop-filter: blur(14px) saturate(135%);
+  -webkit-backdrop-filter: blur(14px) saturate(135%);
   border: 1px solid var(--ob-line);
   border-radius: 14px;
   box-shadow: none;
 }
 .ob-rail .bottom-drawer {
   margin-top: 0;
-  background: #050506;
+  background: rgba(10, 10, 16, 0.38);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   border: 1px solid var(--ob-line);
   border-radius: var(--ob-radius);
-  box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.8);
+  box-shadow: 0 24px 52px -28px rgba(0, 0, 0, 0.65);
 }
 .ob-rail .drawer-nav {
   flex-wrap: wrap;
   gap: 4px;
   padding: 6px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.025);
   border-bottom: 1px solid var(--ob-line);
 }
 .ob-rail .drawer-tab {
@@ -2441,7 +2455,7 @@ button.ob-pill {
   color: #fff;
 }
 .ob-rail .console-feed {
-  background: #050506;
+  background: rgba(8, 8, 14, 0.32);
 }
 .ob-card .connection-bar > div {
   flex-wrap: wrap;
@@ -2554,6 +2568,8 @@ input:not([type]):focus {
   border: 1px solid var(--ob-line) !important;
   border-radius: var(--ob-radius);
   background: linear-gradient(180deg, var(--ob-panel-2), var(--ob-panel)) !important;
+  backdrop-filter: blur(18px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(140%) !important;
 }
 .ob-draw-page .control-panel > .wb-card-body,
 .ob-draw-page .result-panel > .wb-card-body {
@@ -2662,6 +2678,8 @@ input:not([type]):focus {
   border: 1px solid var(--ob-line);
   border-radius: 14px;
   background: var(--ob-well);
+  backdrop-filter: blur(14px) saturate(135%);
+  -webkit-backdrop-filter: blur(14px) saturate(135%);
 }
 .ob-mtbl {
   max-height: 520px;
@@ -2676,7 +2694,9 @@ input:not([type]):focus {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: linear-gradient(180deg, #1d1d22, #17171b);
+  background: linear-gradient(180deg, rgba(22, 22, 32, 0.72), rgba(16, 16, 24, 0.66));
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   color: #e9e9ef;
   text-align: left;
   font-size: 11px;
@@ -2731,6 +2751,8 @@ input:not([type]):focus {
 .ob-chip {
   border: 1px solid var(--ob-line-2);
   background: var(--ob-well);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   color: var(--ob-ink-2);
   border-radius: 999px;
   padding: 3px 10px;
@@ -2756,17 +2778,19 @@ input:not([type]):focus {
 .mat-modal-backdrop,
 .modal-backdrop,
 .app-dialog-backdrop {
-  background: rgba(0, 0, 0, 0.62) !important;
-  backdrop-filter: blur(10px) !important;
-  -webkit-backdrop-filter: blur(10px) !important;
+  background: rgba(4, 4, 10, 0.52) !important;
+  backdrop-filter: blur(14px) saturate(130%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(130%) !important;
 }
 .mat-modal,
 .send-confirm-dialog,
 .app-dialog {
   border: 1px solid var(--ob-line-2) !important;
   border-radius: 20px !important;
-  background: linear-gradient(180deg, #16161b, #0e0e11) !important;
-  box-shadow: 0 40px 120px -20px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.03) inset !important;
+  background: linear-gradient(180deg, rgba(22, 22, 32, 0.62), rgba(12, 12, 20, 0.54)) !important;
+  backdrop-filter: blur(24px) saturate(150%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(150%) !important;
+  box-shadow: 0 36px 96px -20px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(255, 255, 255, 0.05) inset !important;
 }
 .mat-modal-head,
 .confirm-heading {
@@ -3559,7 +3583,7 @@ input:not([type]):focus {
 .wb-box-4 { font-size: 14px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
 .wb-box-5 { font-size: 12px; color: var(--ink-dim); margin-bottom: 14px; }
 .wb-btn-2.wb-btn-2.wb-btn-2 { padding: 8px 20px; }
-.wb-box-6 { background: rgba(14, 14, 17, 0.7); padding: 14px 16px; border-radius: 8px; border: 1px solid rgba(139, 123, 255, 0.2); margin-bottom: 0; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+.wb-box-6 { background: rgba(14, 14, 22, 0.42); backdrop-filter: blur(12px) saturate(135%); -webkit-backdrop-filter: blur(12px) saturate(135%); padding: 14px 16px; border-radius: 10px; border: 1px solid rgba(139, 123, 255, 0.22); margin-bottom: 0; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); }
 .wb-row-5 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .wb-row-6.wb-row-6 { font-size: 12px; font-weight: 800; color: var(--laser, #8b7bff); letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
 .wb-text-3.wb-text-3 { width: 6px; height: 6px; background: var(--laser); border-radius: 50%; display: inline-block; }
@@ -3687,7 +3711,9 @@ input:not([type]):focus {
   padding: 10px 14px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 10px;
-  background: rgba(16, 16, 22, 0.55);
+  background: rgba(16, 16, 24, 0.36);
+  backdrop-filter: blur(12px) saturate(135%);
+  -webkit-backdrop-filter: blur(12px) saturate(135%);
   min-width: 0;
   transition: border-color 0.18s var(--ob-ease), background-color 0.18s var(--ob-ease);
 }
@@ -3695,7 +3721,7 @@ input:not([type]):focus {
 .voice-more:hover,
 .voice-private-more:hover {
   border-color: rgba(139, 123, 255, 0.32);
-  background: rgba(20, 20, 28, 0.72);
+  background: rgba(20, 20, 30, 0.48);
 }
 .voice-fold > summary,
 .voice-more > summary,
@@ -3910,7 +3936,9 @@ input:not([type]):focus {
   padding: 3px;
   border-radius: 10px;
   border: 1px solid var(--ob-line);
-  background: rgba(14, 14, 18, 0.72);
+  background: rgba(14, 14, 22, 0.42);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
 }
 
 .twin-mode-tab {
@@ -3932,7 +3960,7 @@ input:not([type]):focus {
 }
 .twin-mode-tab:hover {
   border-color: var(--ob-line-2);
-  background: rgba(32, 32, 42, 0.78);
+  background: rgba(255, 255, 255, 0.06);
 }
 .twin-mode-tab.active {
   border-color: rgba(139, 123, 255, 0.65);
@@ -4324,7 +4352,9 @@ input:not([type]):focus {
   flex-direction: column;
   gap: 10px;
   padding: 12px 14px;
-  background: rgba(12, 12, 16, 0.9);
+  background: rgba(12, 12, 20, 0.46);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
 }
 .twin-timeline-bar.is-collapsed {
   padding: 7px 14px;
@@ -4478,7 +4508,9 @@ input:not([type]):focus {
   gap: 2px;
   padding: 8px 10px;
   border-radius: 10px;
-  background: rgba(12, 12, 16, 0.65);
+  background: rgba(12, 12, 20, 0.38);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--ob-line);
 }
 .twin-metric-box span {
@@ -4547,7 +4579,9 @@ input:not([type]):focus {
 .twin-pins-box {
   padding: 8px 10px;
   border-radius: 10px;
-  background: rgba(12, 12, 16, 0.65);
+  background: rgba(12, 12, 20, 0.38);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--ob-line);
 }
 .twin-pin-list {
@@ -4623,8 +4657,11 @@ input:not([type]):focus {
   width: min(360px, calc(100vw - 32px));
   display: flex; flex-direction: column; gap: 8px;
   padding: 10px 12px; border-radius: 12px;
-  border: 1px solid var(--ob-line); background: rgba(18, 18, 22, 0.96);
-  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.85);
+  border: 1px solid var(--ob-line-2);
+  background: rgba(14, 14, 22, 0.56);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.72), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
   font-size: 12px; color: inherit;
 }
 .job-dock-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
