@@ -77,10 +77,17 @@ try {
   assert.equal(await firstItem.locator("span").first().isVisible(), false, "收起后不显示文字");
   assert.equal(await page.locator("#side-collapse-toggle").getAttribute("aria-expanded"), "false");
 
-  // 精简顶栏：状态只留图标，急停按钮文字不变
+  // 精简顶栏：化为右上角悬浮胶囊，释放顶部全宽高度，状态只留图标，急停按钮文字不变，切换按钮固定在右侧不跳位
+  const toggleXBefore = (await page.locator("#top-compact-toggle").boundingBox()).x;
   await page.locator("#top-compact-toggle").click();
   await settle();
   assert.equal(await top.getAttribute("data-compact"), "true");
+  assert.equal(await top.locator(".ob-title").isVisible(), false, "收起后隐藏左侧大标题，释放全宽顶栏");
+  const topBox = await top.boundingBox();
+  assert.ok(topBox.width < 420, `收起后化为右上角紧凑悬浮胶囊，实际宽度 ${topBox.width}`);
+  const toggleXAfter = (await page.locator("#top-compact-toggle").boundingBox()).x;
+  assert.ok(Math.abs(toggleXAfter - toggleXBefore) <= 24, `收起按钮固定在右侧不跳位 (${toggleXBefore} -> ${toggleXAfter})`);
+  assert.equal(await page.evaluate(() => document.documentElement.style.getPropertyValue("--ob-top-h")), "0px");
   assert.equal(await page.locator("#nav-hardware-status span").isVisible(), false, "精简后状态胶囊只留图标");
   assert.equal(await page.locator("#nav-hardware-status svg").isVisible(), true);
   assert.equal((await page.locator("#nav-estop").innerText()).trim(), "急停 0x18", "急停按钮保持完整");

@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 修复材料参数与材料编辑弹窗的排版错位、三档模式切换溢出及校准矩阵数字截断（2026-11-10）
+
+- **现象**：① 材料实验室「2 材料参数」卡片中的三档模式按钮（光栅雕刻 / 轮廓扫描 / 边缘切割）总宽度超出卡片右边界溢出，且选中态被 `.btn-ghost` 覆盖难以分辨；② 从雕刻工作台“调整库内参数”或材料实验室打开的「编辑材料 / 添加材料」弹窗（`MaterialModal`）因缺少 `.mat-field` 与 `.mat-field-row` 样式，标签与输入框行内参差不齐、输入框宽度不足、底部删除与保存按钮挤在一起；③「3 校准矩阵」卡片的区间输入框（如 `2500`）右侧数字被截断成 `250(`，「发送测试」按钮单独掉到第二行。
+- **根因与修复**：① 将「2 材料参数」的 `.lab-row-7` 改为带毛玻璃凹槽底座的三等分分段控制器（`.lab-mode-tab`），主副标题上下居中并加紫光高亮选中态，不再撑破卡片边界；「管理材料」按钮改为靠右对齐；② 补齐 `MaterialModal` 的 `.mat-field`、`.mat-field-row`（两列等分网格）、`.mat-modal-hint` 与 `.mat-form-btn`（删除按钮左置）样式，并为输入框加上 `.text-input`；③ 将校准矩阵 `.lab-row-10` 改为两列网格并隐藏数字微调上下箭头，`.lab-row-11` 改为单行自适应网格（IP 输入框 + 生成矩阵 + 发送测试同行排列），同时美化工作台 `.wb-params` 推荐参数胶囊与自定义输入网格。
+- **验证**：前端 `npm run lint`（0 error）、`npm test`（244 项）、`npm run build` 及 Playwright 页面截图实测核验通过。
+- **关联**：`frontend/src/pages/MaterialLabPage.jsx`、`frontend/src/components/MaterialModal.jsx`、`frontend/src/styles.css`。
+
+### 顶栏收起改为右上角半透明悬浮胶囊，释放顶部全宽空间并固定收起按钮位置（2026-11-10）
+
+- **现象**：原先点击顶栏“精简顶栏”按钮后仅将上下边距从 `10px` 缩至 `5px`，整条全宽顶栏仍占据约 42px 高度，未能真正释放纵向空间；收起按钮紧跟在字号会缩小的标题右侧，点击后按钮向左跳位导致鼠标踏空；三个状态胶囊缩成孤立圆圈显得零碎，且窄屏下被后续 `.ob-top` 规则覆盖失效。
+- **根因与修复**：① 收起态（`.ob-top.ob-top--compact`）改为 `position: fixed; top: 10px; right: 20px` 的右上角半透明毛玻璃悬浮胶囊，隐藏左侧大标题并将 `--ob-top-h` 设为 `0px`，把顶部全宽空间彻底让给画布与内容区；② 将 `#top-compact-toggle` 移至顶栏最右侧（`#nav-estop` 右侧），展开与收起时按钮坐标固定不跳位；③ 新增 `.ob-top-status-cluster` 将硬件、小智、审批三个状态图标在收起态下合入同一紧凑底座，同时保持 `急停 0x18` 按钮完整显示；④ 窄屏规则改为 `.ob-top:not(.ob-top--compact)` 避免覆盖收起态边距。
+- **验证**：`npm run lint`、`npm test`、`npm run build` 与 `tests/shell-chrome.browser.mjs` 浏览器用例通过。
+- **关联**：`frontend/src/components/Navbar.jsx`、`frontend/src/styles.css`（`.ob-top.ob-top--compact`、`.ob-top-status-cluster`）、`frontend/tests/shell-chrome.browser.mjs`。
+
 ### 进入雕刻工作台不再弹出黑色终端窗口，切回工作台不再重复触发自动握手探测（2026-11-10）
 
 - **现象**：Windows 桌面端每次进入或切回“雕刻工作台”都会闪出黑色终端窗口（`powershell.exe`），并且从其他页面切回工作台时会再次自动发起网络/串口握手探测。

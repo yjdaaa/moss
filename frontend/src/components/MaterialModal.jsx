@@ -190,6 +190,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
             <label htmlFor="mat-f-name">材料名称</label>
             <input
               id="mat-f-name"
+              className="text-input"
               type="text"
               placeholder="例如：椴木 / 亚克力"
               value={name}
@@ -200,11 +201,12 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
           </div>
 
           <div className="mat-field">
-            <label htmlFor="mat-f-thick">厚度（mm）</label>
+            <label htmlFor="mat-f-thick">厚度规格（mm，多个厚度用逗号分隔）</label>
             <input
               id="mat-f-thick"
+              className="text-input"
               type="text"
-              placeholder="例如：3, 5（多个厚度用逗号隔开）"
+              placeholder="例如：2, 3, 5"
               value={thicknessStr}
               onChange={(e) => setThicknessStr(e.target.value)}
               autoComplete="off"
@@ -213,9 +215,10 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
 
           <div className="mat-field-row">
             <div className="mat-field">
-              <label htmlFor="mat-f-power">功率（%）</label>
+              <label htmlFor="mat-f-power">推荐功率（%）</label>
               <input
                 id="mat-f-power"
+                className="text-input"
                 type="number"
                 min="1"
                 max="100"
@@ -226,9 +229,10 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
               />
             </div>
             <div className="mat-field">
-              <label htmlFor="mat-f-speed">速度（mm/s）</label>
+              <label htmlFor="mat-f-speed">推荐速度（mm/s）</label>
               <input
                 id="mat-f-speed"
+                className="text-input"
                 type="number"
                 min="1"
                 max="600"
@@ -241,7 +245,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
           </div>
 
           <p className="mat-modal-hint">
-            保存后将原子写入后端材料库（D9 支持多厚度单次提交），用于推荐雕刻与切割加工参数。
+            保存后将同步写入后端材料库（支持多厚度单次提交），用于推荐雕刻与切割加工参数。
           </p>
 
           {error && (

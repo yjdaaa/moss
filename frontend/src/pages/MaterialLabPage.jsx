@@ -499,57 +499,61 @@ export function MaterialLabPage({ onNavigate }) {
         >
           <FoldHeader id="lab-params" title="材料参数" k="PARAMS" n={2} />
           <div className="lab-row-5">
+            <h3 className="lab-heading">
+              <span>{selectedMaterial} · {selectedThickness} mm</span>
+              <small className="lab-heading-tag">{readOnly ? "只读参数" : "参数编辑"}</small>
+            </h3>
             <div className="lab-row-6">
-              <h3 className="lab-heading">
-                {selectedMaterial} · {selectedThickness} mm {readOnly ? "参数" : "参数编辑"}
-              </h3>
-              {!readOnly && (<button
-                className="btn btn-ghost lab-btn-2"
-                onClick={() => {
-                  const curMat = materials[selectedMaterial];
-                  const thicks = curMat?.thicknesses ? Object.keys(curMat.thicknesses) : [selectedThickness];
-                  setMaterialModalData({
-                    name: selectedMaterial,
-                    thicknesses: thicks,
-                    power_percent: Math.round(maxPower / 10),
-                    speed_mms: Math.round(feedRate / 60),
-                  });
-                  setShowMaterialModal(true);
-                }}
-                title="编辑或删除此材料"
-              >
-                <Settings2 size={12} />
-                <span>管理材料</span>
-              </button>)}
+              {editorStatus && (
+                <span
+                  className={`lab-status-pill ${
+                    editorStatus.includes("失败") || editorStatus.includes("异常") ? "is-error" : "is-ok"
+                  }`}
+                >
+                  {editorStatus}
+                </span>
+              )}
+              {!readOnly && (
+                <button
+                  type="button"
+                  className="btn btn-ghost lab-btn-2"
+                  onClick={() => {
+                    const curMat = materials[selectedMaterial];
+                    const thicks = curMat?.thicknesses ? Object.keys(curMat.thicknesses) : [selectedThickness];
+                    setMaterialModalData({
+                      name: selectedMaterial,
+                      thicknesses: thicks,
+                      power_percent: Math.round(maxPower / 10),
+                      speed_mms: Math.round(feedRate / 60),
+                    });
+                    setShowMaterialModal(true);
+                  }}
+                  title="编辑或删除此材料"
+                >
+                  <Settings2 size={12} />
+                  <span>管理材料</span>
+                </button>
+              )}
             </div>
-            {editorStatus && (
-              <span style={{ fontSize: "12px", color: editorStatus.includes("失败") || editorStatus.includes("异常") ? "var(--danger)" : "var(--green, #10b981)" }}>
-                {editorStatus}
-              </span>
-            )}
           </div>
 
           {/* Mode Tabs */}
-          <div className="lab-row-7">
+          <div className="lab-row-7" role="tablist" aria-label="加工模式">
             {[
-              { id: "raster", label: "光栅雕刻 (Raster)" },
-              { id: "outline", label: "轮廓扫描 (Outline)" },
-              { id: "cut", label: "边缘切割 (Cut)" },
+              { id: "raster", label: "光栅雕刻", code: "Raster" },
+              { id: "outline", label: "轮廓扫描", code: "Outline" },
+              { id: "cut", label: "边缘切割", code: "Cut" },
             ].map((m) => (
               <button
+                type="button"
                 key={m.id}
+                role="tab"
+                aria-selected={activeMode === m.id}
                 onClick={() => handleModeChange(m.id)}
-                className={`btn btn-ghost ${activeMode === m.id ? "active" : ""}`}
-                style={{
-                  flex: 1,
-                  fontSize: "12px",
-                  padding: "4px 8px",
-                  background: activeMode === m.id ? "rgba(139, 123, 255,0.15)" : "transparent",
-                  color: activeMode === m.id ? "var(--laser, #8b7bff)" : "var(--ink-dim, #94a3b8)",
-                  border: activeMode === m.id ? "1px solid rgba(139, 123, 255,0.3)" : "1px solid var(--line, #242b35)",
-                }}
+                className={`lab-mode-tab ${activeMode === m.id ? "active" : ""}`}
               >
-                {m.label}
+                <span>{m.label}</span>
+                <small>{m.code}</small>
               </button>
             ))}
           </div>

@@ -43,17 +43,21 @@ export function Navbar({
   const hardware = hardwarePillView(connectionStatus);
   const headerRef = useRef(null);
 
-  // 顶栏实际高度写进 CSS 变量 --ob-top-h，页面里的吸顶元素（如语音中心标签栏）贴在它下面；顶栏换行时也跟着变
+  // 顶栏实际高度写进 CSS 变量 --ob-top-h，页面里的吸顶元素（如语音中心标签栏）贴在它下面；
+  // 收起为右上角悬浮胶囊时不占整行高度（--ob-top-h 设为 0px，释放顶部全宽视野）
   useLayoutEffect(() => {
     const element = headerRef.current;
     if (!element) return undefined;
-    const apply = () => document.documentElement.style.setProperty("--ob-top-h", `${element.offsetHeight}px`);
+    const apply = () => {
+      const h = compact ? 0 : element.offsetHeight;
+      document.documentElement.style.setProperty("--ob-top-h", `${h}px`);
+    };
     apply();
     if (typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(apply);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [compact]);
 
   return (
     <header className={`ob-top${compact ? " ob-top--compact" : ""}`} ref={headerRef} data-compact={compact ? "true" : "false"}>
@@ -61,24 +65,11 @@ export function Navbar({
         {page.title}
         <small>{page.sub}</small>
       </h1>
-      {onToggleCompact && (
-        <button
-          type="button"
-          className="ob-top-toggle"
-          onClick={onToggleCompact}
-          id="top-compact-toggle"
-          aria-pressed={compact}
-          title={compact ? "展开顶栏" : "精简顶栏（状态只留图标，急停按钮不变）"}
-          aria-label={compact ? "展开顶栏" : "精简顶栏"}
-        >
-          {compact ? <ChevronsDown size={15} aria-hidden="true" /> : <ChevronsUp size={15} aria-hidden="true" />}
-        </button>
-      )}
       <div className="ob-top-spacer" />
       {updateNotice}
 
       {!hideStatusPills && (
-        <>
+        <div className="ob-top-status-cluster" role="group" aria-label="系统与硬件状态">
           <button
             type="button"
             onClick={() => onNavigate("/")}
@@ -119,7 +110,7 @@ export function Navbar({
               )}
             </button>
           )}
-        </>
+        </div>
       )}
 
       <button
@@ -132,6 +123,20 @@ export function Navbar({
         <OctagonAlert size={16} aria-hidden="true" />
         <span>急停 0x18</span>
       </button>
+
+      {onToggleCompact && (
+        <button
+          type="button"
+          className="ob-top-toggle"
+          onClick={onToggleCompact}
+          id="top-compact-toggle"
+          aria-pressed={compact}
+          title={compact ? "展开顶栏" : "收起顶栏为右上角悬浮胶囊（释放顶部空间，急停按钮不变）"}
+          aria-label={compact ? "展开顶栏" : "精简顶栏"}
+        >
+          {compact ? <ChevronsDown size={15} aria-hidden="true" /> : <ChevronsUp size={15} aria-hidden="true" />}
+        </button>
+      )}
     </header>
   );
 }
