@@ -673,10 +673,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           className="connection-bar wb-row"
         >
           <div className="wb-row-2">
-            <span className="wb-text">
-              [LINK]
-            </span>
-            <span className="wb-text-2">通信链路:</span>
+            <span className="wb-text-2">连接方式</span>
             <select
               value={connectionMode}
               onChange={(e) => setConnectionMode(e.target.value)}
@@ -745,22 +742,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 onChange={(e) => setNetworkHost(e.target.value)}
                 className="text-input wb-field-2"
               />
-              <span className="wb-text-2">端口:</span>
+              <span className="wb-text-2">端口</span>
               <input
                 type="number"
                 value={telnetPort}
                 onChange={(e) => setTelnetPort(Number(e.target.value))}
                 className="text-input wb-field-3"
               />
-              <button
-                className="btn btn-ghost"
-                onClick={discoverControllers}
-                disabled={discovering}
-                title="查找局域网里的设备（mDNS 广播 + 本网段 23 端口），逐台发送只读的状态查询，只列出按 GRBL / FluidNC 回应的雕刻机"
-              >
-                <RefreshCw size={13} className="wb-icon" />
-                <span>{discovering ? "扫描中…" : "扫描局域网"}</span>
-              </button>
             </div>
           )}
           {connectionMode === "network" && discoveredChoices.length > 1 && (
@@ -788,10 +776,23 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
             </p>
           )}
 
-          <button className="btn btn-ghost wb-btn" onClick={handleTestConnection}>
-            <RefreshCw size={13} className="wb-icon" />
-            <span>握手探测</span>
-          </button>
+          <div className={`wb-link-actions${connectionMode === "network" ? " is-dual" : ""}`}>
+            {connectionMode === "network" && (
+              <button
+                className="btn btn-ghost"
+                onClick={discoverControllers}
+                disabled={discovering}
+                title="查找局域网里的设备（mDNS 广播 + 本网段 23 端口），逐台发送只读的状态查询，只列出按 GRBL / FluidNC 回应的雕刻机"
+              >
+                <RefreshCw size={13} className="wb-icon" />
+                <span>{discovering ? "扫描中…" : "扫描局域网"}</span>
+              </button>
+            )}
+            <button className="btn btn-ghost wb-btn" onClick={handleTestConnection}>
+              <RefreshCw size={13} className="wb-icon" />
+              <span>握手探测</span>
+            </button>
+          </div>
         </div>
         </WbCard>
 

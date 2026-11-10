@@ -649,10 +649,6 @@ export function DrawPage({ onNavigate }) {
           storageKey={DRAW_STORAGE_KEY}
           toolbarStart={
             <>
-              <div className="ob-canvasbar">
-                <h1 className="draw-heading">Excalidraw 激光画板</h1>
-                <p className="draw-note">{status}</p>
-              </div>
               <div className="topbar-actions">
                 <button type="button" className="btn btn-ghost" onClick={() => onNavigate("/")}>
                   <Home size={14} aria-hidden="true" />
@@ -666,6 +662,9 @@ export function DrawPage({ onNavigate }) {
                   <Download size={14} aria-hidden="true" />
                   PNG
                 </button>
+              </div>
+              <div className="ob-canvasbar">
+                <span className="draw-note" role="status">{status}</span>
               </div>
             </>
           }

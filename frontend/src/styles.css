@@ -2179,7 +2179,15 @@ input[type="radio"] {
 .ob-top.ob-top--compact .ob-top-toggle {
   border-radius: 999px;
 }
-/* 收起的侧栏：只留图标（悬停显示名称）；窄屏侧栏本来就是横排，不受影响 */
+/* 顶栏收起为右上角悬浮胶囊时，给页面首行右侧工具栏自动让出右侧宽度，避免悬浮胶囊挡住「锁定布局 / 还原默认布局 / 返回工作台 / 导出库」等按钮 */
+@media (min-width: 901px) {
+  .ob-main:has(> .ob-top--compact) .ob-canvas-tools,
+  .ob-main:has(> .ob-top--compact) .ob-toolbar,
+  .ob-main:has(> .ob-top--compact) .twin-header-bar {
+    padding-right: 268px;
+    transition: padding-right 0.2s var(--ob-ease);
+  }
+}
 @media (min-width: 901px) {
   .ob-shell--side-collapsed {
     --ob-side-w: 72px;
@@ -2610,6 +2618,24 @@ input:not([type]):focus {
   font-size: 12.5px;
   font-weight: 500;
 }
+.ob-draw-page .control-panel label.checkbox-row {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-radius: 9px;
+  background: rgba(139, 123, 255, 0.06);
+  border: 1px solid rgba(139, 123, 255, 0.18);
+  cursor: pointer;
+  user-select: none;
+}
+.ob-draw-page .control-panel label.checkbox-row input[type="checkbox"] {
+  width: auto !important;
+  margin: 0;
+  flex: none;
+}
 .ob-draw-page .action-stack {
   margin-top: 0;
 }
@@ -2629,8 +2655,44 @@ input:not([type]):focus {
 .ob-draw-page .diagnostics {
   border: 1px solid var(--ob-line);
   border-radius: 11px;
-  padding: 9px 12px;
+  padding: 0;
   background: var(--ob-well);
+  overflow: hidden;
+}
+.ob-draw-page .diagnostics-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ob-ink);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.ob-draw-page .diagnostics-title::-webkit-details-marker {
+  display: none;
+}
+.ob-draw-page .diagnostics-title::marker {
+  content: "";
+}
+.ob-draw-page .diagnostics-title svg {
+  color: var(--ob-accent-2, #8b7bff);
+  flex: none;
+}
+.ob-draw-page .diagnostics-title::after {
+  content: "";
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-right: 1.8px solid var(--ob-ink-3);
+  border-bottom: 1.8px solid var(--ob-ink-3);
+  transform: rotate(-45deg);
+  transition: transform 0.2s var(--ob-ease);
+}
+.ob-draw-page .diagnostics[open] .diagnostics-title::after {
+  transform: rotate(45deg);
 }
 .ob-draw-page .link-list a {
   border-radius: 10px;
@@ -3617,12 +3679,14 @@ input:not([type]):focus {
 .wb-row.wb-row.wb-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 18px; background: rgba(0,0,0,0.25); border-bottom: 1px solid var(--line, rgba(140, 175, 255, 0.14)); font-size: 13px; }
 .wb-row-2 { display: flex; align-items: center; gap: 8px; }
 .wb-text { color: var(--laser, #8b7bff); font-family: var(--font-mono); font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-.wb-text-2 { color: var(--ink-dim, #94a3b8); }
-.wb-field { font-weight: 600; }
-.wb-field-2.wb-field-2 { width: 220px; font-family: var(--font-mono); }
-.wb-field-3.wb-field-3 { width: 70px; font-family: var(--font-mono); }
+.wb-text-2 { color: var(--ink-dim, #94a3b8); font-size: 12px; white-space: nowrap; }
+.wb-field { flex: 1; min-width: 0; font-weight: 600; }
+.wb-field-2.wb-field-2 { flex: 1; min-width: 0; width: auto; font-family: var(--font-mono); }
+.wb-field-3.wb-field-3 { width: 66px; font-family: var(--font-mono); text-align: center; }
 .wb-icon { margin-right: 4px; }
-.wb-btn.wb-btn.wb-btn { margin-left: auto; }
+.wb-link-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.wb-link-actions.is-dual { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.wb-btn.wb-btn.wb-btn { width: 100%; margin-left: 0; justify-content: center; }
 .wb-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 0; }
 .wb-grid .hud-tool-card { padding: 10px 4px; }
 /* 卡片较窄时四个选项排成 2×2，图标与文字横排，不再把“矢量文字”挤成两行 */
@@ -4632,6 +4696,40 @@ input:not([type]):focus {
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--ob-line);
+}
+label.twin-metric-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 56px;
+  align-items: center;
+  gap: 5px 6px;
+  padding: 7px 9px;
+}
+label.twin-metric-box > span {
+  min-width: 0;
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+label.twin-metric-box > input.text-input {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 5px !important;
+  font-family: var(--ob-mono);
+  font-size: 11.5px;
+  text-align: right;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+label.twin-metric-box > input.text-input::-webkit-outer-spin-button,
+label.twin-metric-box > input.text-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+label.twin-metric-box > input.twin-range-slider {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 0;
 }
 .twin-metric-box span {
   font-size: 11px;

@@ -4,12 +4,12 @@
 
 ## [Unreleased]
 
-### 修复材料参数与材料编辑弹窗的排版错位、三档模式切换溢出及校准矩阵数字截断（2026-11-10）
+### 修复材料参数与材料编辑弹窗排版、创作画板预览卡错位、工作台通信链路与数字孪生参数卡布局（2026-11-10）
 
-- **现象**：① 材料实验室「2 材料参数」卡片中的三档模式按钮（光栅雕刻 / 轮廓扫描 / 边缘切割）总宽度超出卡片右边界溢出，且选中态被 `.btn-ghost` 覆盖难以分辨；② 从雕刻工作台“调整库内参数”或材料实验室打开的「编辑材料 / 添加材料」弹窗（`MaterialModal`）因缺少 `.mat-field` 与 `.mat-field-row` 样式，标签与输入框行内参差不齐、输入框宽度不足、底部删除与保存按钮挤在一起；③「3 校准矩阵」卡片的区间输入框（如 `2500`）右侧数字被截断成 `250(`，「发送测试」按钮单独掉到第二行。
-- **根因与修复**：① 将「2 材料参数」的 `.lab-row-7` 改为带毛玻璃凹槽底座的三等分分段控制器（`.lab-mode-tab`），主副标题上下居中并加紫光高亮选中态，不再撑破卡片边界；「管理材料」按钮改为靠右对齐；② 补齐 `MaterialModal` 的 `.mat-field`、`.mat-field-row`（两列等分网格）、`.mat-modal-hint` 与 `.mat-form-btn`（删除按钮左置）样式，并为输入框加上 `.text-input`；③ 将校准矩阵 `.lab-row-10` 改为两列网格并隐藏数字微调上下箭头，`.lab-row-11` 改为单行自适应网格（IP 输入框 + 生成矩阵 + 发送测试同行排列），同时美化工作台 `.wb-params` 推荐参数胶囊与自定义输入网格。
-- **验证**：前端 `npm run lint`（0 error）、`npm test`（244 项）、`npm run build` 及 Playwright 页面截图实测核验通过。
-- **关联**：`frontend/src/pages/MaterialLabPage.jsx`、`frontend/src/components/MaterialModal.jsx`、`frontend/src/styles.css`。
+- **现象**：① 材料实验室「2 材料参数」卡片的三档模式按钮超出卡片右边界溢出，选中态被 `.btn-ghost` 覆盖难以分辨；②「编辑材料 / 添加材料」弹窗（`MaterialModal`）因缺少 `.mat-field` 与 `.mat-field-row` 样式，标签与输入框行内参差不齐、底部按钮挤在一起；③「3 校准矩阵」卡片的区间输入框 4 位数字被截断成 `250(`，「发送测试」按钮掉到第二行；④ 顶栏收起为右上角悬浮胶囊后挡住页面第一行右侧的「锁定布局 / 还原默认布局 / 导出库 / 返回工作台」按钮；⑤ 创作画板「3 预览与发送」中“走边框时弱光指示”复选框与文字上下分家，“诊断输出”折叠条图标与文字紧贴无间距；⑥ 雕刻工作台「1 通信链路」IP 占位符被截断、「扫描局域网」单独占半行，数字孪生右侧滑块参数框纵向过高，偏好设置弹窗首项默认展开占满空间。
+- **根因与修复**：① 将「2 材料参数」的 `.lab-row-7` 改为三等分毛玻璃分段控制器（`.lab-mode-tab`），「管理材料」按钮靠右对齐；② 补齐 `MaterialModal` 的 `.mat-field`、`.mat-field-row`（两列等分网格）、`.mat-modal-hint` 与 `.mat-form-btn`（删除按钮左置）样式；③ 校准矩阵 `.lab-row-10` 改为两列网格并隐藏数字微调箭头，`.lab-row-11` 改为单行网格；④ 顶栏收起态（`.ob-main:has(> .ob-top--compact)`）自动为首行工具栏预留右侧内边距，与悬浮胶囊同行并排互不遮挡；⑤ 修复创作画板 `.control-panel label.checkbox-row` 横排对齐与 `.diagnostics-title` 折叠头样式，精简重复标题；⑥ 工作台「1 通信链路」IP 输入框改为自适应填满并将「扫描局域网」与「握手探测」并排为两列，数字孪生 `label.twin-metric-box` 改为“标题+紧凑数字框同行、滑块置底”的双行紧凑布局，偏好设置弹窗将「顶栏右上角状态显示」改为默认收起并移至末尾。
+- **验证**：前端 `npm run lint`（0 error）、`npm test`（244 项）、`npm run build` 及 Playwright 浏览器用例通过。
+- **关联**：`frontend/src/pages/MaterialLabPage.jsx`、`frontend/src/components/MaterialModal.jsx`、`frontend/src/pages/HomePage.jsx`、`frontend/src/pages/DrawPage.jsx`、`frontend/src/components/SettingsModal.jsx`、`frontend/src/styles.css`。
 
 ### 顶栏收起改为右上角半透明悬浮胶囊，释放顶部全宽空间并固定收起按钮位置（2026-11-10）
 

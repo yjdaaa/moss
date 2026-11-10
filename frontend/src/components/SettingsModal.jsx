@@ -351,23 +351,6 @@ export function SettingsModal({
         </div>
 
         <div className="mat-modal-body">
-          {/* 顶栏右上角状态显示 */}
-          <div className="ob-fold settings-box-3" id="settings-top-pills-section">
-            <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" defaultOpen={true} />
-            <div className="settings-box-4">
-              开启后隐藏页面右上角的「硬件」「小智」「审批」三个状态胶囊（未开启时保持原样显示；常驻「急停 0x18」按钮与新审批自动弹窗保持不变）：
-            </div>
-            <label className="settings-label">
-              <input
-                type="checkbox"
-                id="settings-hide-top-pills"
-                checked={hideTopPills}
-                onChange={(e) => handleHideTopPillsChange(e.target.checked)}
-              />
-              <span>隐藏右上角状态胶囊（硬件 / 小智 / 审批）</span>
-            </label>
-          </div>
-
           {/* 手机连接（电脑端：允许连接 / 配对码；手机端：连接电脑） */}
           <PhoneLinkSection />
 
@@ -764,6 +747,23 @@ export function SettingsModal({
                 </div>
               </label>
             </div>
+          </div>
+
+          {/* 顶栏右上角状态显示 */}
+          <div className="ob-fold settings-spacer" id="settings-top-pills-section">
+            <FoldHeader variant="section" id="settings-top-pills" icon={EyeOff} title="顶栏右上角状态显示" defaultOpen={false} />
+            <div className="settings-box-4">
+              开启后隐藏页面右上角的「硬件」「小智」「审批」三个状态胶囊（未开启时保持原样显示；常驻「急停 0x18」按钮与新审批自动弹窗保持不变）：
+            </div>
+            <label className="settings-label">
+              <input
+                type="checkbox"
+                id="settings-hide-top-pills"
+                checked={hideTopPills}
+                onChange={(e) => handleHideTopPillsChange(e.target.checked)}
+              />
+              <span>隐藏右上角状态胶囊（硬件 / 小智 / 审批）</span>
+            </label>
           </div>
 
           <div className="settings-row-7">
