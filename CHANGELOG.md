@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 进入雕刻工作台不再弹出黑色终端窗口，切回工作台不再重复触发自动握手探测（2026-11-10）
+
+- **现象**：Windows 桌面端每次进入或切回“雕刻工作台”都会闪出黑色终端窗口（`powershell.exe`），并且从其他页面切回工作台时会再次自动发起网络/串口握手探测。
+- **根因与修复**：① `crates/laser-api` 的 `enumerate_system_serial_ports()` 在 Windows 下原先通过 `Command::new("powershell")` 执行 `[System.IO.Ports.SerialPort]::GetPortNames()` 枚举串口且未加 `CREATE_NO_WINDOW`（`0x0800_0000`），导致每次工作台挂载请求 `GET /api/ui/serial-ports` 及 `/api/connection/check` 回退探串口时都会弹出终端窗口；现改为直接调用 `laser_device::available_serial_ports()`（基于 `serialport::available_ports()` 进程内读取 Win32 SetupAPI / 注册表，不启动任何外部子进程，也不打开 `\\.\COMn` 句柄干扰已连接控制器）；② 为 `crates/laser-tools` 与 `crates/moss-mcp-client` 中其余 Windows 子进程统一补齐 `CREATE_NO_WINDOW`；③ `HomePage.jsx` 的 600ms 启动静默握手探测增加 `connectionStatus?.checkedAt` 判断，仅在应用启动后尚未探测过时自动执行一次，从其他页面切回工作台时不再重复探测。
+- **验证**：`available_serial_ports_returns_sorted_unique_list_in_process`、`serial_ports_route_reports_enumerated_ports_and_first_as_default`、工作区测试与前端 `npm run lint`、`npm test`、`npm run build` 通过。
+- **关联**：`crates/laser-device/src/lib.rs`（`available_serial_ports`）、`crates/laser-api/src/lib.rs`（`enumerate_system_serial_ports`）、`crates/laser-tools/src/lib.rs`（`hide_console_window`）、`crates/moss-mcp-client/src/client.rs`、`frontend/src/pages/HomePage.jsx`。
+
 ### 全界面半透明磨砂玻璃统一、下拉框与折叠栏美化、「当前语音链路」吸顶防闪与路由按需分包预热（2026-11-10）
 
 - **现象**：用户反馈界面里的下拉框（原生 `<select>` 系统白灰弹框、模型下拉列表与高级折叠栏）外观丑陋；「Jev 决策模型」下拉菜单放在弹性行容器内导致展开时挤在同一行；往下滚动配置本地模型/Colab T4 或 Jev 时，顶部的「当前语音链路」5 栏总控条会滚出屏幕，且语音中心拉到底部时吸顶栏与上方标签栏会触发滚动高度回跳屏闪；雕刻工作台遥测终端、全局弹窗、材料实验室表格、创作画板侧栏、数字孪生控制条与右下角进度胶囊仍为实心深黑底色，挡住底层星云光斑背景；此外首屏 `main.js` 打包体积达 2.56 MB（把创作画板 Excalidraw 与 3D 数字孪生 Three.js 一并打入首屏）。

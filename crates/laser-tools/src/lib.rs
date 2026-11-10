@@ -677,10 +677,20 @@ fn execute_command_with_runner(
     }
 }
 
+fn hide_console_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 pub fn execute_command(args: &CommandExecutionArgs, developer_mode: bool) -> ToolCallResult {
     execute_command_with_runner(args, developer_mode, |cmd| {
         let output = if cfg!(windows) {
-            std::process::Command::new("cmd").args(["/C", cmd]).output()
+            hide_console_window(std::process::Command::new("cmd").args(["/C", cmd])).output()
         } else {
             std::process::Command::new("sh").args(["-c", cmd]).output()
         }
@@ -696,8 +706,7 @@ pub fn execute_command(args: &CommandExecutionArgs, developer_mode: bool) -> Too
 
 fn open_with_system(target: &str) -> Result<(), String> {
     let status = if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", target])
+        hide_console_window(std::process::Command::new("cmd").args(["/C", "start", "", target]))
             .status()
     } else if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(target).status()
@@ -777,9 +786,10 @@ pub fn execute_open_app(args: &OpenAppArgs) -> ToolCallResult {
     let result = match payload {
         Some(payload) => {
             let status = if cfg!(target_os = "windows") {
-                std::process::Command::new("cmd")
-                    .args(["/C", "start", "", &target, payload])
-                    .status()
+                hide_console_window(
+                    std::process::Command::new("cmd").args(["/C", "start", "", &target, payload]),
+                )
+                .status()
             } else if cfg!(target_os = "macos") {
                 std::process::Command::new("open")
                     .args(["-a", &target, payload])
@@ -855,9 +865,12 @@ pub fn execute_shortcut_key(args: &ShortcutKeyExecutionArgs) -> ToolCallResult {
     };
     if cfg!(target_os = "windows") {
         let script = format!("(New-Object -COM WScript.Shell).SendKeys(\"{keys}\")");
-        return match std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .status()
+        return match hide_console_window(std::process::Command::new("powershell").args([
+            "-NoProfile",
+            "-Command",
+            &script,
+        ]))
+        .status()
         {
             Ok(status) if status.success() => {
                 ToolCallResult::ok(format!("快捷键动作已执行: {action}"))

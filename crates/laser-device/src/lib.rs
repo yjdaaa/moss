@@ -851,6 +851,19 @@ pub struct ProbeReport {
     pub summary: String,
 }
 
+/// 进程内枚举系统可用串口名（Windows 直接通过 Win32 SetupAPI / 注册表读取，不拉起外部终端子进程，也不打开串口句柄）。
+pub fn available_serial_ports() -> Vec<String> {
+    let mut ports: Vec<String> = serialport::available_ports()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|info| info.port_name)
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    ports.sort();
+    ports.dedup();
+    ports
+}
+
 /// 打开连接并执行有界握手，返回人类可读的探测报告。
 pub fn probe_device(spec: &ConnectionSpec, timeout: Duration) -> ProbeReport {
     let target = spec.describe();
@@ -4613,5 +4626,21 @@ mod discovery_identity_tests {
         for ip in local_lan_ipv4() {
             assert!(ip.is_private() && !ip.is_loopback(), "{ip}");
         }
+    }
+
+    #[test]
+    fn available_serial_ports_returns_sorted_unique_list_in_process() {
+        let started = Instant::now();
+        let ports = available_serial_ports();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "进程内枚举串口耗时过长: {:?}",
+            started.elapsed()
+        );
+        let mut sorted = ports.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(ports, sorted);
+        assert!(ports.iter().all(|name| !name.trim().is_empty()));
     }
 }

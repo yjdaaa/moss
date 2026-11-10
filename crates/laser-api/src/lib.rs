@@ -6397,55 +6397,20 @@ fn next_workflow_id() -> String {
 /// 终态或发送中的 workflow 不允许再次下发（规格 §8：未确认/已终止任务绝不自动重发）。
 #[cfg(windows)]
 fn enumerate_system_serial_ports() -> Vec<String> {
-    let mut ports = Vec::new();
-    let ps = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[System.IO.Ports.SerialPort]::GetPortNames()",
-        ])
-        .output();
-    if let Ok(output) = ps {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("COM")
-                && trimmed.len() >= 4
-                && !ports.iter().any(|port| port == trimmed)
-            {
-                ports.push(trimmed.to_string());
-            }
-        }
-    }
-    if ports.is_empty() {
-        for n in 1..=32 {
-            let com = format!("\\\\.\\COM{n}");
-            if std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&com)
-                .is_ok()
-            {
-                let name = format!("COM{n}");
-                if !ports.contains(&name) {
-                    ports.push(name);
-                }
-            }
-        }
-    }
-    ports.sort();
-    ports
+    laser_device::available_serial_ports()
 }
 
 #[cfg(not(windows))]
 fn enumerate_system_serial_ports() -> Vec<String> {
-    let mut ports = Vec::new();
+    let mut ports = laser_device::available_serial_ports();
     if let Ok(entries) = std::fs::read_dir("/dev") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with("ttyUSB") || name.starts_with("ttyACM") || name.starts_with("cu.") {
-                ports.push(format!("/dev/{name}"));
+                let full = format!("/dev/{name}");
+                if !ports.contains(&full) {
+                    ports.push(full);
+                }
             }
         }
     }

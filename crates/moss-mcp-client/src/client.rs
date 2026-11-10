@@ -139,6 +139,8 @@ impl Client {
                 TransportConfig::Stdio { command, args, .. } => {
                     let mut command = tokio::process::Command::new(command);
                     command.args(args).env_clear().kill_on_drop(true);
+                    #[cfg(windows)]
+                    command.creation_flags(0x0800_0000);
                     // 不继承模型 API key / token 等任意宿主环境变量。
                     for key in [
                         "PATH",

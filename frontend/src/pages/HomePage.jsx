@@ -147,7 +147,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     loadSerialPorts();
     loadRuntimeConfig();
 
-    // 优化 1: 启动加载完成后自动静默握手一次（若设备开着机直接点亮绿灯，失败不弹窗干扰）
+    // 优化 1: 仅在应用启动后尚未探测过时自动静默握手一次；从其他页面切回工作台时不重复探测
+    if (connectionStatus?.checkedAt) return undefined;
     const timer = setTimeout(() => {
       if ((connectionMode === "network" && networkHost) || (connectionMode === "serial" && serialPort)) {
         performConnectionProbe(true);
