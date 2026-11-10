@@ -22,6 +22,7 @@ export function visibleNavItems(showVoice) {
 export function SideNav({
   currentPath,
   onNavigate,
+  onPreload,
   onAuthClick,
   onSettingsClick,
   showVoice = false,
@@ -114,6 +115,9 @@ export function SideNav({
               key={item.path}
               type="button"
               onClick={() => onNavigate(item.path)}
+              onMouseEnter={() => onPreload?.(item.path)}
+              onFocus={() => onPreload?.(item.path)}
+              onPointerDown={() => onPreload?.(item.path)}
               className={`ob-nav-item nav-tab${active ? " on active" : ""}`}
               aria-current={active ? "page" : undefined}
               title={collapsed ? item.label : undefined}

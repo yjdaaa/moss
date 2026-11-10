@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { Navbar } from "./components/Navbar.jsx";
 import { SideNav } from "./components/SideNav.jsx";
@@ -20,12 +20,7 @@ import { AiPreviewCenter } from "./components/AiPreviewCenter.jsx";
 import { JobProgressDock } from "./components/JobProgressDock.jsx";
 import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
-import { MaterialLabPage } from "./pages/MaterialLabPage.jsx";
-import { DrawPage } from "./pages/DrawPage.jsx";
-import { TwinPage } from "./pages/TwinPage.jsx";
 import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
-import { VoicePage } from "./pages/VoicePage.jsx";
-import { CameraPage } from "./pages/CameraPage.jsx";
 import { isVoiceCenterAvailable, voiceApi } from "./voiceApi.js";
 import {
   readHideTopPills,
@@ -38,6 +33,47 @@ import {
 } from "./foldState.js";
 import { appUpdateAvailable } from "./appUpdate.js";
 import "./styles.css";
+
+const routePromiseCache = new Map();
+function loadRouteModule(path, factory) {
+  if (!routePromiseCache.has(path)) {
+    routePromiseCache.set(
+      path,
+      factory().catch((err) => {
+        routePromiseCache.delete(path);
+        throw err;
+      }),
+    );
+  }
+  return routePromiseCache.get(path);
+}
+
+const ROUTE_LOADERS = {
+  "/material-lab": () =>
+    loadRouteModule("/material-lab", () => import("./pages/MaterialLabPage.jsx").then((m) => ({ default: m.MaterialLabPage }))),
+  "/draw": () =>
+    loadRouteModule("/draw", () => import("./pages/DrawPage.jsx").then((m) => ({ default: m.DrawPage }))),
+  "/twin": () =>
+    loadRouteModule("/twin", () => import("./pages/TwinPage.jsx").then((m) => ({ default: m.TwinPage }))),
+  "/camera": () =>
+    loadRouteModule("/camera", () => import("./pages/CameraPage.jsx").then((m) => ({ default: m.CameraPage }))),
+  "/voice": () =>
+    loadRouteModule("/voice", () => import("./pages/VoicePage.jsx").then((m) => ({ default: m.VoicePage }))),
+};
+
+const MaterialLabPage = lazy(ROUTE_LOADERS["/material-lab"]);
+const DrawPage = lazy(ROUTE_LOADERS["/draw"]);
+const TwinPage = lazy(ROUTE_LOADERS["/twin"]);
+const CameraPage = lazy(ROUTE_LOADERS["/camera"]);
+const VoicePage = lazy(ROUTE_LOADERS["/voice"]);
+
+function preloadRoute(path) {
+  const loader = ROUTE_LOADERS[path];
+  if (loader) {
+    return loader().catch(() => {});
+  }
+  return Promise.resolve();
+}
 
 function pathToRoute(pathname, voiceEnabled) {
   if (pathname.startsWith("/material-lab")) return "/material-lab";
@@ -176,7 +212,9 @@ function App() {
 
   useEffect(() => {
     const handlePopState = () => {
-      setCurrentPath(pathToRoute(window.location.pathname, voiceEnabled));
+      const nextPath = pathToRoute(window.location.pathname, voiceEnabled);
+      void preloadRoute(nextPath);
+      setCurrentPath(nextPath);
     };
     const handleAuthRequired = () => {
       setShowAuthModal(true);
@@ -243,6 +281,14 @@ function App() {
 
   useEffect(() => installCardSpotlight(), []);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (voiceEnabled) void preloadRoute("/voice");
+      void preloadRoute("/material-lab");
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [voiceEnabled]);
+
   // 顶栏急停先读后端全局任务（含执行结果未知的作业），跨页面也可停止原目标；
   // 若后端仅有 unknown 待确认旧记录、停止失败、多任务无法确定或停的是其他设备，同时向当前页面的设备发送 0x18。
   // 2026-11-05：查询与写出都带短时限；后端任务通道 800ms 内没有结果就先让页面按本页目标补发，不再无限等待。
@@ -289,6 +335,7 @@ function App() {
   }, []);
 
   const navigateTo = (path) => {
+    void preloadRoute(path);
     if (window.location.pathname !== path) {
       window.history.pushState({}, "", path);
       setCurrentPath(path);
@@ -301,6 +348,7 @@ function App() {
       <SideNav
         currentPath={currentPath}
         onNavigate={navigateTo}
+        onPreload={preloadRoute}
         onAuthClick={() => setShowAuthModal(true)}
         onSettingsClick={() => setShowSettingsModal(true)}
         showVoice={voiceEnabled}
@@ -364,36 +412,38 @@ function App() {
 
 
         <main className="main-content-viewport" key={currentPath}>
-          {currentPath === "/material-lab" && (
-            <MaterialLabPage onNavigate={navigateTo} />
-          )}
-          {currentPath === "/draw" && (
-            <DrawPage onNavigate={navigateTo} />
-          )}
-          {currentPath === "/twin" && (
-            <TwinPage
-              onNavigate={navigateTo}
-              connectionStatus={connectionStatus}
-              setConnectionStatus={setConnectionStatus}
-            />
-          )}
-          {currentPath === "/camera" && voiceEnabled && (
-            <VoiceErrorBoundary onBack={navigateTo}>
-              <CameraPage onNavigate={navigateTo} />
-            </VoiceErrorBoundary>
-          )}
-          {currentPath === "/voice" && voiceEnabled && (
-            <VoiceErrorBoundary onBack={navigateTo}>
-              <VoicePage mcpStatus={mcpStatus} approvalCount={approvalCount} />
-            </VoiceErrorBoundary>
-          )}
-          {currentPath === "/" && (
-            <HomePage
-              onNavigate={navigateTo}
-              connectionStatus={connectionStatus}
-              setConnectionStatus={setConnectionStatus}
-            />
-          )}
+          <Suspense fallback={<div className="ob-page" aria-busy="true" />}>
+            {currentPath === "/material-lab" && (
+              <MaterialLabPage onNavigate={navigateTo} />
+            )}
+            {currentPath === "/draw" && (
+              <DrawPage onNavigate={navigateTo} />
+            )}
+            {currentPath === "/twin" && (
+              <TwinPage
+                onNavigate={navigateTo}
+                connectionStatus={connectionStatus}
+                setConnectionStatus={setConnectionStatus}
+              />
+            )}
+            {currentPath === "/camera" && voiceEnabled && (
+              <VoiceErrorBoundary onBack={navigateTo}>
+                <CameraPage onNavigate={navigateTo} />
+              </VoiceErrorBoundary>
+            )}
+            {currentPath === "/voice" && voiceEnabled && (
+              <VoiceErrorBoundary onBack={navigateTo}>
+                <VoicePage mcpStatus={mcpStatus} approvalCount={approvalCount} />
+              </VoiceErrorBoundary>
+            )}
+            {currentPath === "/" && (
+              <HomePage
+                onNavigate={navigateTo}
+                connectionStatus={connectionStatus}
+                setConnectionStatus={setConnectionStatus}
+              />
+            )}
+          </Suspense>
         </main>
       </div>
 
@@ -452,6 +502,7 @@ const root = createRoot(document.getElementById("root"));
 initializeBackendOrigin()
   // 桌面会话取不到（浏览器、Android、后端未开启会话）不影响启动
   .then(() => refreshDesktopSession())
+  .then(() => preloadRoute(pathToRoute(window.location.pathname, isVoiceCenterAvailable())))
   .then(() => root.render(<App />))
   .catch((error) => {
     console.error("后端启动失败", error);

@@ -4,12 +4,12 @@
 
 ## [Unreleased]
 
-### 优化前端下拉框、模型选择浮层与折叠栏样式（2026-11-10）
+### 优化前端下拉框、模型选择浮层、折叠栏、「当前语音链路」吸顶防闪与路由按需分包预热（2026-11-10）
 
-- **现象**：用户反馈界面里的下拉框（原生 `<select>` 系统白灰弹框、模型下拉列表与高级折叠栏）外观丑陋；另外「Jev 决策模型」的下拉菜单放在弹性行容器内导致展开时挤在同一行。
-- **根因与修复**：① 新增全局曜石下拉浮层组件 `ObsidianSelectHost`：拦截鼠标点击原生 `<select>` 弹出的系统默认菜单，替换为毛玻璃深色浮层（自动把选项里的 `（说明）` 拆成彩色胶囊标签，当前选中项高亮并带 `✓`），同时保留原生 `<select>` 节点使键盘访问与自动化测试不受影响；② 为全部 `select` / `.select-input` 加上 `appearance: none`、自定义 SVG 箭头与省略号截断；③ 将 `.voice-combo-menu` 改为绝对定位毛玻璃浮层，并修好 `BuiltinJevGroup` 中下拉菜单嵌套在 `.voice-combo-wrap` 内的问题；④ 补齐 `.voice-fold` 并统一折叠栏 `<summary>` 的右侧旋转箭头与展开分隔线。
-- **验证**：前端 `npm run lint`（0 error）、`npm test`（244 项）与 `voice-center.browser.mjs` 浏览器用例通过。
-- **关联**：`frontend/src/components/ObsidianSelectHost.jsx`、`frontend/src/main.jsx`、`frontend/src/components/VoiceBuiltinCard.jsx`、`frontend/src/styles.css`。
+- **现象**：用户反馈界面里的下拉框（原生 `<select>` 系统白灰弹框、模型下拉列表与高级折叠栏）外观丑陋；「Jev 决策模型」下拉菜单放在弹性行容器内导致展开时挤在同一行；往下滚动配置本地模型/Colab T4 或 Jev 时，顶部的「当前语音链路」5 栏总控条会滚出屏幕，且语音中心拉到底部时吸顶栏与上方标签栏若改变高度或叠加多层 `backdrop-filter` 会触发滚动高度回跳屏闪；此外首屏 `main.js` 打包体积达 2.56 MB（把创作画板 Excalidraw 与 3D 数字孪生 Three.js 一并打入首屏）。
+- **根因与修复**：① 新增全局曜石下拉浮层组件 `ObsidianSelectHost`：拦截鼠标点击原生 `<select>` 弹出的系统默认菜单，替换为毛玻璃深色浮层（自动把选项里的 `（说明）` 拆成彩色胶囊标签，当前选中项高亮并带 `✓`），同时保留原生 `<select>` 节点使键盘访问与自动化测试不受影响；② 为全部 `select` / `.select-input` 加上 `appearance: none`、自定义 SVG 箭头与省略号截断；③ 将 `.voice-combo-menu` 改为绝对定位毛玻璃浮层，并修好 `BuiltinJevGroup` 中下拉菜单嵌套在 `.voice-combo-wrap` 内的问题；④ 补齐 `.voice-fold` 并统一折叠栏 `<summary>` 的右侧旋转箭头与展开分隔线；⑤ 给 `.voice-mix-bar` 加上 `position: sticky; top: calc(var(--ob-top-h, 52px) + 54px)` 贴合在 `.voice-pagetabs` 下方，保持固定紧凑高度（不在滚动时隐藏子元素改变 `scrollHeight`），并将 `.voice-pagetabs`、`.voice-mix-bar` 与 `.voice-savebar[data-dirty="true"]` 改为高不透明度曜石底色 + `transform: translateZ(0)` 独立合成层，彻底消除拉到底部时的高度回跳与 WebGL 背景多层毛玻璃合成屏闪；⑥ 在 `main.jsx` 中保留首页 `HomePage` 同步加载，将 `DrawPage`、`TwinPage`、`MaterialLabPage`、`CameraPage`、`VoicePage` 拆为 `React.lazy` 独立分包（首屏 `main.js` 从 2,561.78 kB 降至 471.13 kB，缩减 81.6%），配合侧栏 `SideNav` 悬停/聚焦预加载（`onMouseEnter` / `onFocus` / `onPointerDown` 触发 `preloadRoute`）与首屏空闲后台预热，兼顾启动提速与切换零延迟。
+- **验证**：前端 `npm run lint`（0 error）、`npm test`（244 项）、`npm run build`、`voice-center.browser.mjs` 与 `shell-chrome.browser.mjs` 浏览器用例通过。
+- **关联**：`frontend/src/components/ObsidianSelectHost.jsx`、`frontend/src/main.jsx`（`ROUTE_LOADERS`、`preloadRoute`）、`frontend/src/components/SideNav.jsx`、`frontend/src/components/VoiceBuiltinCard.jsx`、`frontend/src/styles.css`。
 
 ### 新增“Colab T4 专属联动”：支持 Colab CLI 一键安装/登录检测、极速并发自动拉起云端 T4、本机 550W 参考音频自动同步与 `.ipynb` 导出（2026-11-10）
 

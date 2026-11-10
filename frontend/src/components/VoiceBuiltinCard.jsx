@@ -1914,6 +1914,7 @@ export function BuiltinModelGroups({ builtin }) {
   const [mixNote, setMixNote] = useState(null);
   // 测试全部环节：{ running, results: {key: {ok, skipped, running, detail}}, summary }
   const [pipeline, setPipeline] = useState(null);
+
   if (!status || status.error) return <p className="voice-muted">{status?.error || "正在读取内置服务状态…"}</p>;
   const views = MIX_SECTIONS.map((item) => ({ ...item, view: builtinSectionSourceView(item.key, status) }));
   const focusConfigGroup = focusVoiceGroup;
@@ -2116,7 +2117,7 @@ export function BuiltinModelGroups({ builtin }) {
             {mixNote.text}
           </div>
         )}
-        <span className="voice-muted">
+        <span className="voice-muted voice-mix-foot">
           按真实语音链路从左到右排列：拾音判停 → 语音识别 → Jev 前置粗筛（识别后·进大模型前） → 大模型 → 语音合成；直接下拉选完立即生效，这里是切换“用哪个模型、开不开 Jev”的唯一位置。下方卡片只用于填密钥、选模型版本和下载本地模型。
         </span>
       </div>
