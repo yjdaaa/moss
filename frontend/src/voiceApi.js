@@ -90,6 +90,8 @@ export const voiceApi = {
   builtinStatus: () => invokeVoice("voice_builtin_status"),
   // n68：导出语音诊断包（后端生成并脱敏，弹出系统保存框；取消时返回 {saved:false}）
   diagnosticsExport: () => invokeVoice("voice_diagnostics_export"),
+  // n80：导出 Colab T4 专属联动笔记本（.ipynb）
+  colabExportNotebook: () => invokeVoice("voice_colab_export_notebook"),
   builtinStart: () => invokeVoice("voice_builtin_start"),
   builtinStop: () => invokeVoice("voice_builtin_stop"),
   deviceSetStatus: (deviceId, status) => invokeVoice("voice_device_set_status", { deviceId, status }),

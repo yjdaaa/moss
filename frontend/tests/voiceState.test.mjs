@@ -1640,3 +1640,77 @@ test("换了画风后装的是旧画风：提示重刷并可一键重刷（2026-
   assert.match(view.text, /重刷后开机待命画面才会换/);
   assert.equal(screenPackDeviceView({ supported: true, screen_pack_size: [320, 240], screen_pack_state: "none" }).quickLabel, "一键刷入全屏画风");
 });
+
+test("n80 Colab T4 专属联动：默认关闭不改原配置，开启只接管大模型与合成，支持整段粘贴解析", async () => {
+  const {
+    colabSettingsForm,
+    parseColabPaste,
+    colabSettingsError,
+    colabSavePayload,
+    builtinSectionSourceView,
+    pipelineTestPlan,
+  } = await import("../src/voiceState.js");
+
+  const def = colabSettingsForm();
+  assert.equal(def.enabled, false);
+  assert.equal(def.llm_model, "qwen3-vl-8b");
+  assert.equal(def.tts_model, "qwen3-tts");
+  assert.equal(def.tts_voice, "moss");
+  assert.equal(colabSettingsError(def, false), "", "默认关闭时允许地址与密钥为空");
+
+  // 整段复制 Colab 输出块自动拆分地址与密钥
+  const pasted = parseColabPaste(
+    "============================================================\n服务地址：https://demo-t4.trycloudflare.com/v1\nAPI 密钥：moss-secret_1234567890abcdef\n============================================================",
+  );
+  assert.deepEqual(pasted, {
+    url: "https://demo-t4.trycloudflare.com/v1",
+    api_key: "moss-secret_1234567890abcdef",
+  });
+
+  // 开启时校验：未登录 Colab CLI 时要求填写地址与密钥，已登录 Colab CLI 时允许留空由后台自动拉起回填
+  assert.match(colabSettingsError({ ...def, enabled: true }, false, false), /尚未登录 Colab CLI/);
+  assert.equal(colabSettingsError({ ...def, enabled: true }, false, true), "", "已登录 Colab CLI 时允许直接打开开关自动分配 T4");
+  assert.match(colabSettingsError({ ...def, enabled: true, url: "http://bad.example.com/v1" }, true, true), /https:\/\//);
+  assert.match(colabSettingsError({ ...def, enabled: true, url: "https://demo-t4.trycloudflare.com/v1" }, false, false), /密钥/);
+  assert.equal(
+    colabSettingsError({ ...def, enabled: true, url: "https://demo-t4.trycloudflare.com/v1", api_key: "moss-key" }, false, false),
+    "",
+  );
+  assert.equal(colabSavePayload({ ...def, enabled: true, url: " https://demo-t4.trycloudflare.com/v1 ", api_key: " moss-key " }).api_key, "moss-key");
+
+  // 开启并激活时，顶部链路栏的大模型与语音合成显示 Colab 接管，判停 / 识别 / Jev 保持原状；关闭后立即恢复
+  const activeStatus = {
+    local: {
+      helper_found: true,
+      settings: { vad: true, vad_model: "silero_vad", asr: true, asr_model: "x_asr_streaming", tts: true, tts_model: "kokoro" },
+      models: [
+        { id: "silero_vad", kind: "vad", label: "Silero 判停", installed: true },
+        { id: "x_asr_streaming", kind: "asr", label: "X-ASR 流式", installed: true },
+        { id: "kokoro", kind: "tts", label: "Kokoro", installed: true },
+      ],
+      colab: {
+        enabled: true,
+        active: true,
+        url: "https://demo-t4.trycloudflare.com/v1",
+        llm_model: "qwen3-vl-8b",
+        tts_model: "qwen3-tts",
+        tts_voice: "moss",
+        key_configured: true,
+      },
+    },
+  };
+  assert.equal(builtinSectionSourceView("llm", activeStatus).source, "colab");
+  assert.equal(builtinSectionSourceView("tts", activeStatus).source, "colab");
+  assert.equal(builtinSectionSourceView("asr", activeStatus).source, "local", "识别保持原状");
+  assert.equal(builtinSectionSourceView("vad", activeStatus).source, "local", "判停保持原状");
+  const plan = Object.fromEntries(pipelineTestPlan(activeStatus).map((s) => [s.key, s]));
+  assert.deepEqual(plan.llm, { key: "llm", kind: "section", section: "colab", input: { target: "llm" } });
+  assert.deepEqual(plan.tts, { key: "tts", kind: "section", section: "colab", input: { target: "tts" } });
+
+  const offStatus = {
+    ...activeStatus,
+    local: { ...activeStatus.local, colab: { ...activeStatus.local.colab, enabled: false, active: false } },
+  };
+  assert.equal(builtinSectionSourceView("llm", offStatus).source, "cloud", "关闭联动立即恢复原大模型来源");
+  assert.equal(builtinSectionSourceView("tts", offStatus).source, "local", "关闭联动立即恢复原本地合成来源");
+});

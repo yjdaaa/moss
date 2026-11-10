@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-colab-export-notebook"
+description = "Enables the voice_colab_export_notebook command without any pre-configured scope."
+commands.allow = ["voice_colab_export_notebook"]
+
+[[permission]]
+identifier = "deny-voice-colab-export-notebook"
+description = "Denies the voice_colab_export_notebook command without any pre-configured scope."
+commands.deny = ["voice_colab_export_notebook"]

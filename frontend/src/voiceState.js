@@ -2093,7 +2093,26 @@ export function builtinSectionSourceView(section, status) {
     : cloudConfigured
       ? `云端（${entry?.kind === "doubao" ? `豆包 · ${cloudModel}` : cloudModel}）`
       : "云端（未配置）";
+  const colab = status?.local?.colab;
+  const colabActive = Boolean(colab?.active);
   if (section === "llm") {
+    const colabLlmModel = colab?.llm_model || "qwen3-vl-8b";
+    if (colabActive) {
+      return {
+        section,
+        canUseLocal: false,
+        source: "colab",
+        localOn: false,
+        localReady: true,
+        cloudConfigured: true,
+        cloudModel: colabLlmModel,
+        activeText: `Colab T4 联动（${colabLlmModel}）`,
+        selectValue: "colab",
+        options: [{ value: "colab", label: `Colab T4 联动（${colabLlmModel} · 多模态+看图）`, installed: true }],
+        installedLocalModel: null,
+        selectedLocalModel: null,
+      };
+    }
     return {
       section,
       canUseLocal: false,
@@ -2119,6 +2138,24 @@ export function builtinSectionSourceView(section, status) {
     selectedLocalModel && selectedLocalModel.installed
       ? selectedLocalModel
       : kindModels.find((item) => item.installed) || null;
+  if (section === "tts" && colabActive) {
+    const colabTtsModel = colab?.tts_model || "qwen3-tts";
+    const colabVoice = colab?.tts_voice || "moss";
+    return {
+      section,
+      canUseLocal: true,
+      source: "colab",
+      localOn: false,
+      localReady: true,
+      cloudConfigured: true,
+      cloudModel: colabTtsModel,
+      activeText: `Colab T4 联动（${colabTtsModel} · ${colabVoice}）`,
+      selectValue: "colab",
+      options: [{ value: "colab", label: `Colab T4 联动（${colabTtsModel} · 550W 克隆声）`, installed: true }],
+      installedLocalModel,
+      selectedLocalModel,
+    };
+  }
   const localReady = Boolean(localOn && selectedLocalModel?.installed);
   const source = localOn ? "local" : defaultValue;
   const activeText = localOn
@@ -2962,6 +2999,9 @@ export function pipelineTestPlan(status) {
       return { key, kind: "jev", input: { api_key: "", model: view.cloudModel } };
     }
     if (view.source === "local") return localStep(key, cleanLabel, view);
+    if (view.source === "colab") {
+      return { key, kind: "section", section: "colab", input: { target: key } };
+    }
     const entry = status?.models?.[key];
     if (!entry?.configured) {
       return { key, kind: "static", ok: false, detail: `云端${cleanLabel}还没配置：到下方“${cleanLabel}”卡片填写并保存${key === "llm" ? "" : "，或在上方改用本地模型"}` };
@@ -3061,4 +3101,84 @@ export function screenPackDeviceView(device) {
   const canQuickPack = Boolean(device?.supported && size && state !== "installed" && state !== "pending_download");
   const quickLabel = state === "style_outdated" ? "一键重刷全屏画风" : "一键刷入全屏画风";
   return { state, text, tone, canQuickPack, quickLabel };
+}
+
+/**
+ * n80 Colab T4 专属联动表单（默认关闭；开启后只临时接管大模型、摄像头看图与 550W 克隆语音合成，关闭即恢复原配置）。
+ */
+export function colabSettingsForm(colab) {
+  const c = colab || {};
+  return {
+    enabled: Boolean(c.enabled),
+    url: String(c.url || ""),
+    llm_model: String(c.llm_model || "qwen3-vl-8b"),
+    tts_model: String(c.tts_model || "qwen3-tts"),
+    tts_voice: String(c.tts_voice || "moss"),
+    tts_speed: String(c.tts_speed ?? 1),
+    api_key: "",
+  };
+}
+
+/**
+ * 支持把 Colab 单元格 3 打印的整段配置块直接粘贴进地址框，自动拆出隧道地址与 API 密钥。
+ */
+export function parseColabPaste(raw) {
+  const text = String(raw || "");
+  const urlMatch = text.match(/https?:\/\/[a-zA-Z0-9._:-]+(?:\/[^\s"']*)?/);
+  const keyMatch = text.match(/(?:API\s*密钥|API_KEY|密钥)\s*[:：=]\s*([^\s"']+)/i) || text.match(/\b(moss-[A-Za-z0-9_-]{12,})\b/);
+  if (urlMatch && keyMatch && text.includes("\n")) {
+    return {
+      url: urlMatch[0].trim(),
+      api_key: keyMatch[1].trim(),
+    };
+  }
+  return { url: text, api_key: "" };
+}
+
+/** Colab T4 联动表单前端校验：关闭时允许留空；已登录 Colab CLI 时允许留空隧道地址与密钥（开启后由 CLI 自动拉起并回填）。 */
+export function colabSettingsError(form, keyConfigured = false, cliLoggedIn = false) {
+  const f = form || {};
+  const enabled = Boolean(f.enabled);
+  const url = String(f.url || "").trim();
+  const hasKey = Boolean(String(f.api_key || "").trim()) || Boolean(keyConfigured);
+  if (url) {
+    if (/\s|<|>/.test(url)) return "Colab 隧道地址不能包含空格或尖括号占位符";
+    if (!/^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(url)) {
+      return "Colab 隧道地址须以 https:// 开头（如 https://xxx.trycloudflare.com/v1）";
+    }
+  } else if (enabled && !cliLoggedIn) {
+    return "尚未登录 Colab CLI：请先点击「登录 Colab CLI」授权（或手动填写隧道地址与 API 密钥）";
+  }
+  if (enabled && !hasKey && !cliLoggedIn) {
+    return "开启 Colab 联动前请先登录 Colab CLI，或手动填写 API 密钥";
+  }
+  for (const [label, val] of [
+    ["大模型名", f.llm_model],
+    ["合成模型名", f.tts_model],
+    ["合成音色", f.tts_voice],
+  ]) {
+    const s = String(val || "").trim();
+    if (s.length > 120 || /\s/.test(s)) return `Colab ${label}不能包含空格且不超过 120 个字符`;
+  }
+  const speed = Number(f.tts_speed ?? 1);
+  if (!Number.isFinite(speed) || speed < 0.25 || speed > 4.0) {
+    return "Colab 合成语速须在 0.25 ~ 4.0 之间";
+  }
+  return "";
+}
+
+/** 构造提交给 `voice_local_save({ colab })` 的载荷。 */
+export function colabSavePayload(form) {
+  const f = form || {};
+  const payload = {
+    enabled: Boolean(f.enabled),
+    url: String(f.url || "").trim(),
+    llm_model: String(f.llm_model || "qwen3-vl-8b").trim() || "qwen3-vl-8b",
+    tts_model: String(f.tts_model || "qwen3-tts").trim() || "qwen3-tts",
+    tts_voice: String(f.tts_voice || "moss").trim() || "moss",
+    tts_speed: Number(f.tts_speed ?? 1),
+  };
+  const key = String(f.api_key || "").trim();
+  if (key) payload.api_key = key;
+  return payload;
 }

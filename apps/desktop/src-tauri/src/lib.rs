@@ -321,6 +321,7 @@ pub fn run() {
             voice_builtin::voice_builtin_start,
             voice_builtin::voice_builtin_stop,
             voice_builtin::voice_diagnostics_export,
+            voice_builtin::voice_colab_export_notebook,
             voice_builtin::voice_device_set_status,
             voice_builtin::voice_device_rename,
             voice_builtin::voice_device_request,
@@ -776,6 +777,7 @@ mod tests {
                 &[
                     "voice_builtin_start",
                     "voice_builtin_stop",
+                    "voice_colab_export_notebook",
                     "voice_device_set_status",
                     "voice_device_rename",
                     "voice_device_request",

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 新增“Colab T4 专属联动”：支持 Colab CLI 一键安装/登录检测、极速并发自动拉起云端 T4、本机 550W 参考音频自动同步与 `.ipynb` 导出（2026-11-10）
+
+- **现象**：用户希望在 Google Colab 免费档 T4（16GB 显存）上同时跑高速多模态大模型（对话 + 8 个激光工具调用 + 摄像头看图）与《流浪地球》MOSS 550W 原声零样本克隆语音合成，要求在语音中心「本地模型」里用一个默认关闭的开关按需开启、关闭时保持原配置不变；同时要求兼顾后期开源给未安装/未登录 `colab` CLI 的别人使用，并解决 `colab new`/`colab exec` 卡死与冷启动耗时过长的问题。
+- **根因与修复**：① 针对 T4（Turing `sm_75`，无原生 `bfloat16` 与 `FlashAttention-2`）设计双进程单隧道笔记本 `scripts/moss-colab-t4.ipynb` 与后台守护部署脚本 `moss_voice::colab::cli_bootstrap_script`：启用 `HF_HUB_ENABLE_HF_TRANSFER=1` 与 `HF_HUB_DISABLE_IMPLICIT_TOKEN=1`（防止无界面 `colab exec` 卡在 Colab 网页端 `HF_TOKEN` 弹窗查询），三路并发拉取并启动 `llama-server` CUDA（`b12244` Ubuntu CUDA 12.8 预编译包 + `Qwen/Qwen3-VL-8B-Instruct-GGUF` 的 `Qwen3VL-8B-Instruct-Q4_K_M.gguf` 与 `mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf`）+ `Qwen/Qwen3-TTS-12Hz-0.6B-Base`（`float32 + sdpa`，规避 T4 上 `float16` 采样概率溢出；未选自定义音频时自动由 `edge-tts` 生成低沉 550W 男声基准 WAV，并支持按 `/content/moss_ref.wav` 的 `mtime` 热重载声纹特征）+ `cloudflared` 单隧道；② 针对 `google-colab-cli` v0.7.5 实机卡死问题：设置 `COLAB_CLI_REQUEST_TIMEOUT=25`、`COLAB_CLI_RETRY_BACKOFF=2` 防止 `colab new` 默认 120s 超时干等，远端部署改由独立守护进程 `/content/moss_worker.py` 写状态文件 `/content/moss_boot_status.json`，并在 `colab.exe` 因 `jupyter_kernel_client` 非守护 WebSocket 线程残留或断连卡住时由 `kill_colab_pid` 强制回收进程并自动重连轮询；修正参考音频上传子命令为 `colab upload`；③ 面向开源新用户的未安装/未登录完整链路：自动检测 `colab` CLI 与 `~/.config/colab-cli/token.json`（邮箱脱敏显示），支持一键安装 CLI、OAuth 登录、本机 550W 参考音频持久化与 `.ipynb` 导出；④ 开关开启且就绪时只临时接管「大模型 + 摄像头看图 + 550W 克隆语音合成」三项（暂停本机视觉推理进程释放内存，保留已安装本地 TTS 作断网兜底），关闭开关立即恢复原三项配置。
+- **验证**：`moss_voice::colab::tests`、`n80_colab_bridge_defaults_off_and_restores_on_disable`、`voiceState.test.mjs` 单测通过；真实 Google Colab 免费 T4（`moss-t4`）端到端实测通过（12 秒分配 T4，2 分 19 秒完成双模型冷启动并建立 `trycloudflare.com` 隧道，`/healthz`、`/v1/chat/completions` 与 `/v1/audio/speech` 550W 语音合成均返回 200 OK）。
+- **关联**：`crates/moss-voice/src/colab.rs`、`crates/moss-voice/src/settings.rs`（`BuiltinColab`）、`apps/desktop/src-tauri/src/voice_builtin.rs`（`active_colab`、`colab_cli_status`、`handle_colab_cli_action`、`spawn_colab_cli_runner`、`kill_colab_pid`、`colab_test`、`voice_colab_export_notebook`）、`frontend/src/components/VoiceBuiltinCard.jsx`（`ColabBridgeSection`）、`frontend/src/voiceState.js`、`scripts/moss-colab-t4.ipynb`。
+
 ### 换画风后按新画风重刷全屏画风包（2026-11-09）
 
 - **现象**：用户要求更换画风后画风包也要重刷。此前换画风只改在线场景，开机待命画面仍是刷包时的画风，“自动保持全屏画风”也认为已装好、不会重刷。

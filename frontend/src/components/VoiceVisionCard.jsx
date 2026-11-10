@@ -13,6 +13,7 @@ export default function VoiceVisionCard() {
   const [hasKey, setHasKey] = useState(false);
   const [ready, setReady] = useState(false);
   const [dialog, setDialog] = useState({ configured: false, url: "", model: "" });
+  const [colabOverride, setColabOverride] = useState({ active: false, url: "", model: "" });
   const [localModels, setLocalModels] = useState([]);
   const [runtime, setRuntime] = useState(null);
   const [keyChange, setKeyChange] = useState("keep");
@@ -31,6 +32,7 @@ export default function VoiceVisionCard() {
     setHasKey(!!state.key_configured);
     setReady(!!state.ready);
     setDialog(state.dialog_llm || { configured: false, url: "", model: "" });
+    setColabOverride(state.colab_override || { active: false, url: "", model: "" });
     setLocalModels(Array.isArray(state.local_models) ? state.local_models : []);
     setRuntime(state.local_runtime || null);
     setKeyChange("keep");
@@ -100,16 +102,26 @@ export default function VoiceVisionCard() {
     ? "读取失败"
     : !loaded
       ? "读取中…"
-      : !saved.enabled
-        ? "未开启"
-        : savedSource === "dialog"
-          ? `已开启 · 对话模型 ${dialog.model || "未配置"}`
-          : savedSource === "local"
-            ? `已开启 · 本地 ${savedLocalLabel}`
-            : `已开启 · ${saved.model || "未填模型"}`;
+      : colabOverride.active
+        ? `Colab T4 联动接管中 · ${colabOverride.model || "qwen3-vl-8b"}`
+        : !saved.enabled
+          ? "未开启"
+          : savedSource === "dialog"
+            ? `已开启 · 对话模型 ${dialog.model || "未配置"}`
+            : savedSource === "local"
+              ? `已开启 · 本地 ${savedLocalLabel}`
+              : `已开启 · ${saved.model || "未填模型"}`;
   return (
-    <VoiceGroup id="vision" title="视觉理解" label="语音视觉模型" summary={summary} tone={saved.enabled ? "ok" : undefined} dirty={dirty}>
+    <VoiceGroup id="vision" title="视觉理解" label="语音视觉模型" summary={summary} tone={colabOverride.active || saved.enabled ? "ok" : undefined} dirty={dirty}>
       <p className="voice-muted">默认关闭。开启后，已允许的小智设备可以上传图片请模型解释；不会自动打开摄像头，结果也不能控制机器。选云端或对话大模型时图片会发给对应服务商，可能产生费用；选本地视觉模型时图片只在这台电脑上处理。</p>
+      {colabOverride.active && (
+        <div className="voice-hint voice-hint--ok voice-inline" role="status" id="voice-vision-colab-override">
+          <span>当前已开启「本地模型 › Colab T4 专属联动」，摄像头看图临时由 Colab 多模态模型（{colabOverride.model || "qwen3-vl-8b"}）接管；关闭该开关后立即恢复下方的视觉设置。</span>
+          <button type="button" className="voice-link-btn" onClick={() => focusVoiceGroup("local-models", "voice-local-colab-bridge")}>
+            去联动开关
+          </button>
+        </div>
+      )}
       {loadError && <div className="voice-hint voice-hint--bad" role="alert">{loadError}</div>}
       <div className="voice-form-grid">
         <label className="voice-check voice-wide">

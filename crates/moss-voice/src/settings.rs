@@ -6,6 +6,7 @@
 //! 内置语音服务（NV5）的密钥存 SQLite `app_secrets`（名称见 [`builtin_secret_name`]），这里只存地址与模型名。
 
 mod home_transfer;
+pub use crate::colab::BuiltinColab;
 pub use home_transfer::{export_home_template, parse_home_template};
 
 use std::path::{Path, PathBuf};
@@ -1200,6 +1201,9 @@ pub struct VoiceSettings {
     /// 内置语音服务的本地模型开关（NV6）
     #[serde(default, skip_serializing_if = "BuiltinLocal::is_default")]
     pub builtin_local: BuiltinLocal,
+    /// n80 Colab T4 专属联动（默认关闭；开启后只临时接管大模型、摄像头看图与克隆合成，关闭恢复原配置）
+    #[serde(default, skip_serializing_if = "BuiltinColab::is_default")]
+    pub builtin_colab: BuiltinColab,
     /// 每台小智设备的音量/亮度/屏幕主题偏好（重连时自动同步恢复）
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub builtin_device_prefs: std::collections::BTreeMap<String, DeviceHardwarePrefs>,
@@ -1233,6 +1237,7 @@ impl Default for VoiceSettings {
             builtin_person_memory_enabled: false,
             builtin_context: BuiltinContext::default(),
             builtin_local: BuiltinLocal::default(),
+            builtin_colab: BuiltinColab::default(),
             builtin_device_prefs: std::collections::BTreeMap::new(),
         }
     }
@@ -1241,23 +1246,39 @@ impl Default for VoiceSettings {
 impl VoiceSettings {
     /// 某个分区实际是否可用：本地开关打开且模型已安装，或云端已配置（大模型只有云端）。
     pub fn builtin_section_ready(&self, section: Section, models_root: &Path) -> bool {
+        self.builtin_section_ready_with_colab(section, models_root, false)
+    }
+
+    /// 同 [`Self::builtin_section_ready`]，另计入已开启且配好密钥的 Colab T4 联动（接管大模型与合成）。
+    pub fn builtin_section_ready_with_colab(
+        &self,
+        section: Section,
+        models_root: &Path,
+        colab_key_set: bool,
+    ) -> bool {
+        let colab_on = self.builtin_colab.active(colab_key_set);
         let local = |kind| {
             self.builtin_local
                 .selected(kind)
                 .is_some_and(|spec| crate::local_models::installed(models_root, spec))
         };
         match section {
-            Section::Llm => self.builtin_models.llm.is_some(),
+            Section::Llm => colab_on || self.builtin_models.llm.is_some(),
             Section::Asr => local(ModelKind::Asr) || self.builtin_models.asr.is_some(),
-            Section::Tts => local(ModelKind::Tts) || self.builtin_models.tts.is_some(),
+            Section::Tts => colab_on || local(ModelKind::Tts) || self.builtin_models.tts.is_some(),
         }
     }
 
     /// 三个分区都可用时内置服务以对话模式运行。
     pub fn builtin_chat_ready(&self, models_root: &Path) -> bool {
-        Section::ALL
-            .into_iter()
-            .all(|section| self.builtin_section_ready(section, models_root))
+        self.builtin_chat_ready_with_colab(models_root, false)
+    }
+
+    /// 同 [`Self::builtin_chat_ready`]，另计入已开启且配好密钥的 Colab T4 联动。
+    pub fn builtin_chat_ready_with_colab(&self, models_root: &Path, colab_key_set: bool) -> bool {
+        Section::ALL.into_iter().all(|section| {
+            self.builtin_section_ready_with_colab(section, models_root, colab_key_set)
+        })
     }
 
     /// 服务端配置文件 `data/.config.yaml` 的位置（未设置目录时为空）。
@@ -2222,6 +2243,7 @@ mod tests {
                 mirror: Some("https://mirror.test/x".into()),
                 ..BuiltinLocal::default()
             },
+            builtin_colab: BuiltinColab::default(),
             builtin_device_prefs: std::collections::BTreeMap::new(),
         };
         save(&file, &voice).unwrap();

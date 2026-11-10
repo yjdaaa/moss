@@ -1160,6 +1160,30 @@ mod imp {
             use std::hash::{Hash, Hasher};
             let settings =
                 moss_voice::settings::load(&self.host.runtime_root.path.join("settings.json"));
+            // n80：Colab T4 联动开启且密钥就绪时，临时接管摄像头看图（关闭开关即刻恢复下方原视觉配置）
+            if settings.builtin_colab.enabled
+                && let Some(key) = self
+                    .host
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|db| {
+                        db.get_secret(moss_voice::colab::COLAB_SECRET_NAME)
+                            .ok()
+                            .flatten()
+                    })
+                    .filter(|s| !s.trim().is_empty())
+                && settings.builtin_colab.active(true)
+                && let Ok(url) = moss_voice::colab::normalize_colab_url(&settings.builtin_colab.url)
+                && moss_voice_providers::vision::endpoint(&url).is_ok()
+            {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                "colab".hash(&mut hasher);
+                url.hash(&mut hasher);
+                settings.builtin_colab.llm_model.hash(&mut hasher);
+                key.hash(&mut hasher);
+                return Some((url, settings.builtin_colab.llm_model, key, hasher.finish()));
+            }
             let setting = settings.builtin_vision;
             if setting.enabled && !setting.use_dialog_llm && !setting.local_model.is_empty() {
                 // 本地视觉：地址在打开会话时才确定（推理进程按需启动），这里只看是否已选好并下载
@@ -1957,7 +1981,22 @@ mod imp {
         }
     }
 
+    #[derive(Default)]
+    struct ColabCliState {
+        account_hint: String,
+        expires_in: String,
+        whoami_probed: bool,
+        whoami_probing: bool,
+        auth_url: Option<String>,
+        runner_state: String,
+        runner_step: String,
+        runner_error: Option<String>,
+        generation: u64,
+    }
+
     pub struct BuiltinVoice {
+        #[cfg_attr(test, allow(dead_code))]
+        self_weak: std::sync::Weak<BuiltinVoice>,
         host: Arc<laser_host::HostApplication>,
         /// 串行化启停与重启编排，避免加载本地模型/扫描音乐时长时间阻塞 `self.server` 状态轮询。
         lifecycle: Mutex<()>,
@@ -1992,6 +2031,10 @@ mod imp {
         jev_start_lock: Arc<Mutex<()>>,
         /// n74 本地视觉模型运行管理
         local_vision: Arc<LocalVision>,
+        /// n80 Colab CLI 登录检测与后台云端 T4 会话托管
+        colab_cli: Arc<Mutex<ColabCliState>>,
+        #[cfg(test)]
+        colab_cli_installed_for_test: std::sync::atomic::AtomicBool,
         /// 运行中的本地 Jev `/v1/systemone` 决策服务（OneJev `llama-server` 网关或 Laya 子进程，随本地 Jev 开关启停）
         laya: Arc<Mutex<LocalLayaRunner>>,
         /// NV19 长期记忆、资料与恢复摘要；检索与提取默认关闭
@@ -2548,7 +2591,8 @@ mod imp {
                     settings_file: setting_path.clone(),
                 })),
             ));
-            Arc::new(BuiltinVoice {
+            Arc::new_cyclic(|weak| BuiltinVoice {
+                self_weak: weak.clone(),
                 host,
                 memory,
                 speaker,
@@ -2572,6 +2616,9 @@ mod imp {
                 helper: Mutex::new(None),
                 jev_start_lock: Arc::new(Mutex::new(())),
                 local_vision: Arc::new(LocalVision::default()),
+                colab_cli: Arc::new(Mutex::new(ColabCliState::default())),
+                #[cfg(test)]
+                colab_cli_installed_for_test: std::sync::atomic::AtomicBool::new(true),
                 laya: Arc::new(Mutex::new(LocalLayaRunner {
                     active_model: None,
                     starting_model: None,
@@ -2747,6 +2794,1054 @@ mod imp {
                 .map_err(db_failure)
         }
 
+        fn colab_secret(&self) -> Result<Option<String>, CenterError> {
+            let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+            Ok(db
+                .get_secret(moss_voice::colab::COLAB_SECRET_NAME)
+                .map_err(db_failure)?
+                .filter(|s| !s.trim().is_empty()))
+        }
+
+        /// n80：Colab T4 专属联动已开启、地址合法且密钥已保存时返回规范化后的配置与密钥；未开启时零开销返回 `None`。
+        fn active_colab(
+            &self,
+            settings: &moss_voice::VoiceSettings,
+        ) -> Result<Option<(moss_voice::colab::BuiltinColab, String)>, CenterError> {
+            if !settings.builtin_colab.enabled {
+                return Ok(None);
+            }
+            let Some(key) = self.colab_secret()? else {
+                return Ok(None);
+            };
+            if !settings.builtin_colab.active(true) {
+                return Ok(None);
+            }
+            let Ok(url) = moss_voice::colab::normalize_colab_url(&settings.builtin_colab.url)
+            else {
+                return Ok(None);
+            };
+            let mut normalized = settings.builtin_colab.clone();
+            normalized.url = url;
+            Ok(Some((normalized, key)))
+        }
+
+        fn find_colab_cli_binary(&self) -> Option<std::path::PathBuf> {
+            #[cfg(test)]
+            {
+                if self
+                    .colab_cli_installed_for_test
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    Some(std::path::PathBuf::from("colab"))
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(test))]
+            {
+                let bin_name = if cfg!(windows) { "colab.exe" } else { "colab" };
+                if let Some(path_os) = std::env::var_os("PATH") {
+                    for dir in std::env::split_paths(&path_os) {
+                        let cand = dir.join(bin_name);
+                        if cand.is_file() {
+                            return Some(cand);
+                        }
+                    }
+                }
+                let home_opt = std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))
+                    .map(std::path::PathBuf::from);
+                if let Some(ref home) = home_opt {
+                    let local_bin = home.join(".local").join("bin").join(bin_name);
+                    if local_bin.is_file() {
+                        return Some(local_bin);
+                    }
+                    #[cfg(target_os = "macos")]
+                    if let Ok(entries) = std::fs::read_dir(home.join("Library").join("Python")) {
+                        for entry in entries.flatten() {
+                            let cand = entry.path().join("bin").join(bin_name);
+                            if cand.is_file() {
+                                return Some(cand);
+                            }
+                        }
+                    }
+                }
+                if let Some(data) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
+                    let uv_bin = if cfg!(windows) {
+                        data.join("uv")
+                            .join("tools")
+                            .join("google-colab-cli")
+                            .join("Scripts")
+                            .join("colab.exe")
+                    } else {
+                        data.join("uv")
+                            .join("tools")
+                            .join("google-colab-cli")
+                            .join("bin")
+                            .join("colab")
+                    };
+                    if uv_bin.is_file() {
+                        return Some(uv_bin);
+                    }
+                    #[cfg(windows)]
+                    if let Ok(entries) = std::fs::read_dir(data.join("Python")) {
+                        for entry in entries.flatten() {
+                            let cand = entry.path().join("Scripts").join("colab.exe");
+                            if cand.is_file() {
+                                return Some(cand);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+        }
+
+        fn colab_ref_audio_path(&self) -> std::path::PathBuf {
+            self.host
+                .runtime_root
+                .path
+                .join("colab-cli")
+                .join("moss_ref.wav")
+        }
+
+        fn colab_ref_audio_meta_path(&self) -> std::path::PathBuf {
+            self.host
+                .runtime_root
+                .path
+                .join("colab-cli")
+                .join("moss_ref.meta")
+        }
+
+        fn colab_cli_token_path(&self) -> Option<std::path::PathBuf> {
+            #[cfg(test)]
+            {
+                Some(
+                    self.host
+                        .runtime_root
+                        .path
+                        .join("colab-cli")
+                        .join("token.json"),
+                )
+            }
+            #[cfg(not(test))]
+            {
+                std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))
+                    .map(std::path::PathBuf::from)
+                    .map(|h| h.join(".config").join("colab-cli").join("token.json"))
+            }
+        }
+
+        fn colab_token_file_valid(path: &std::path::Path) -> bool {
+            let Ok(raw) = std::fs::read_to_string(path) else {
+                return false;
+            };
+            let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+                return false;
+            };
+            val.get("refresh_token")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+                || val
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+        }
+
+        fn colab_cli_logged_in(&self) -> bool {
+            self.find_colab_cli_binary().is_some()
+                && self
+                    .colab_cli_token_path()
+                    .as_deref()
+                    .is_some_and(Self::colab_token_file_valid)
+        }
+
+        #[cfg(not(test))]
+        fn colab_cli_command(bin: &std::path::Path) -> std::process::Command {
+            let mut cmd = std::process::Command::new(bin);
+            cmd.env("PYTHONUTF8", "1")
+                .env("PYTHONIOENCODING", "utf-8")
+                .env("COLAB_CLI_REQUEST_TIMEOUT", "25")
+                .env("COLAB_CLI_RETRY_BACKOFF", "2")
+                .env("COLAB_CLI_ASSIGN_RETRIES", "5")
+                .arg("--auth=oauth2");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            cmd
+        }
+
+        #[cfg(not(test))]
+        fn kill_colab_pid(pid: u32) {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .creation_flags(0x0800_0000)
+                    .status();
+            }
+            #[cfg(unix)]
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+
+        #[cfg(not(test))]
+        fn open_google_oauth_url(url: &str) {
+            if !url.starts_with("https://accounts.google.com/") {
+                return;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("rundll32")
+                    .args(["url.dll,FileProtocolHandler", url])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .creation_flags(0x0800_0000)
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open")
+                    .arg(url)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(url)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+        }
+
+        fn colab_cli_status(&self) -> Value {
+            let installed = self.find_colab_cli_binary().is_some();
+            let logged_in = self.colab_cli_logged_in();
+            let mut guard = self
+                .colab_cli
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !logged_in {
+                guard.account_hint.clear();
+                guard.expires_in.clear();
+                guard.whoami_probed = false;
+                guard.whoami_probing = false;
+            } else if !guard.whoami_probed && !guard.whoami_probing {
+                #[cfg(test)]
+                {
+                    guard.account_hint = "t***r@gmail.com".into();
+                    guard.expires_in = "59m".into();
+                    guard.whoami_probed = true;
+                }
+                #[cfg(not(test))]
+                if let Some(bin) = self.find_colab_cli_binary() {
+                    guard.whoami_probing = true;
+                    let slot = self.colab_cli.clone();
+                    std::thread::spawn(move || {
+                        let out = Self::colab_cli_command(&bin)
+                            .arg("whoami")
+                            .stdin(std::process::Stdio::null())
+                            .output();
+                        if let Ok(mut st) = slot.lock() {
+                            st.whoami_probing = false;
+                            st.whoami_probed = true;
+                            if let Ok(out) = out
+                                && out.status.success()
+                            {
+                                let text = String::from_utf8_lossy(&out.stdout);
+                                if let Some((masked, exp)) =
+                                    moss_voice::colab::parse_whoami_output(&text)
+                                {
+                                    st.account_hint = masked;
+                                    st.expires_in = exp;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            let runner_state = if guard.runner_state.is_empty() {
+                "idle"
+            } else {
+                guard.runner_state.as_str()
+            };
+            let account_hint = if logged_in {
+                if guard.account_hint.is_empty() {
+                    "已授权账号".to_owned()
+                } else {
+                    guard.account_hint.clone()
+                }
+            } else {
+                String::new()
+            };
+            let ref_audio_path = self.colab_ref_audio_path();
+            let ref_audio_configured = ref_audio_path.is_file();
+            let ref_audio_name = if ref_audio_configured {
+                std::fs::read_to_string(self.colab_ref_audio_meta_path())
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| Some("moss_ref.wav".to_owned()))
+            } else {
+                None
+            };
+            serde_json::json!({
+                "installed": installed,
+                "logged_in": logged_in,
+                "account_hint": account_hint,
+                "expires_in": guard.expires_in,
+                "auth_url": guard.auth_url,
+                "runner_state": runner_state,
+                "runner_step": guard.runner_step,
+                "runner_error": guard.runner_error,
+                "ref_audio_configured": ref_audio_configured,
+                "ref_audio_name": ref_audio_name,
+            })
+        }
+
+        fn handle_colab_cli_action(&self, input: &Value) -> Result<(), CenterError> {
+            let invalid = |message: &str| CenterError::new("voice_settings_invalid", 400, message);
+            let action = input
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            match action {
+                "refresh" => {
+                    #[cfg(not(test))]
+                    if let Some(bin) = self.find_colab_cli_binary()
+                        && self.colab_cli_logged_in()
+                        && let Ok(out) = Self::colab_cli_command(&bin)
+                            .arg("whoami")
+                            .stdin(std::process::Stdio::null())
+                            .output()
+                        && let Ok(mut st) = self.colab_cli.lock()
+                    {
+                        st.whoami_probed = true;
+                        st.whoami_probing = false;
+                        if out.status.success() {
+                            let text = String::from_utf8_lossy(&out.stdout);
+                            if let Some((masked, exp)) =
+                                moss_voice::colab::parse_whoami_output(&text)
+                            {
+                                st.account_hint = masked;
+                                st.expires_in = exp;
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                "install" => {
+                    if self.find_colab_cli_binary().is_some() {
+                        return Ok(());
+                    }
+                    #[cfg(test)]
+                    {
+                        self.colab_cli_installed_for_test
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        if let Ok(mut st) = self.colab_cli.lock() {
+                            st.runner_error = None;
+                            st.runner_step =
+                                "已安装 Colab CLI，请点击「登录 Colab CLI」完成 Google 授权".into();
+                        }
+                        Ok(())
+                    }
+                    #[cfg(not(test))]
+                    {
+                        let mut installed_ok = false;
+                        let uv_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+                        let mut uv_bin: Option<std::path::PathBuf> = None;
+                        if let Some(path_os) = std::env::var_os("PATH") {
+                            for dir in std::env::split_paths(&path_os) {
+                                let cand = dir.join(uv_name);
+                                if cand.is_file() {
+                                    uv_bin = Some(cand);
+                                    break;
+                                }
+                            }
+                        }
+                        if uv_bin.is_none()
+                            && let Some(home) = std::env::var_os("USERPROFILE")
+                                .or_else(|| std::env::var_os("HOME"))
+                                .map(std::path::PathBuf::from)
+                        {
+                            let cand = home.join(".local").join("bin").join(uv_name);
+                            if cand.is_file() {
+                                uv_bin = Some(cand);
+                            }
+                        }
+                        if let Some(uv) = uv_bin {
+                            let mut cmd = std::process::Command::new(uv);
+                            cmd.args(["tool", "install", "google-colab-cli"])
+                                .stdin(std::process::Stdio::null());
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::process::CommandExt;
+                                cmd.creation_flags(0x0800_0000);
+                            }
+                            if let Ok(out) = cmd.output()
+                                && out.status.success()
+                            {
+                                installed_ok = self.find_colab_cli_binary().is_some();
+                            }
+                        }
+                        if !installed_ok {
+                            let py = self.laya_setup.find_python().map_err(|msg| {
+                                CenterError::new(
+                                    "colab_cli_install_failed",
+                                    412,
+                                    format!("自动安装 Colab CLI 需要本机有 uv 或 Python 3.10+：{msg}（你也可以点右上角导出 .ipynb 笔记本去浏览器手动运行）"),
+                                )
+                            })?;
+                            let mut cmd = std::process::Command::new(&py.executable);
+                            cmd.args(["-m", "pip", "install", "--user", "-U", "google-colab-cli"])
+                                .stdin(std::process::Stdio::null());
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::process::CommandExt;
+                                cmd.creation_flags(0x0800_0000);
+                            }
+                            let out = cmd.output().map_err(|e| {
+                                internal(format!("调用 pip 安装 google-colab-cli 失败：{e}"))
+                            })?;
+                            if !out.status.success() || self.find_colab_cli_binary().is_none() {
+                                let err_tail = String::from_utf8_lossy(&out.stderr);
+                                return Err(CenterError::new(
+                                    "colab_cli_install_failed",
+                                    500,
+                                    format!(
+                                        "自动安装 google-colab-cli 未成功：{}（也可在终端手动运行 uv tool install google-colab-cli）",
+                                        err_tail.lines().last().unwrap_or("安装失败")
+                                    ),
+                                ));
+                            }
+                        }
+                        if let Ok(mut st) = self.colab_cli.lock() {
+                            st.runner_error = None;
+                            st.runner_step =
+                                "已安装 Colab CLI，请点击「登录 Colab CLI」完成 Google 授权".into();
+                        }
+                        Ok(())
+                    }
+                }
+                "set_ref_audio" => {
+                    use base64::Engine as _;
+                    let raw_b64 = input
+                        .get("wav_base64")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    if raw_b64.is_empty() {
+                        return Err(invalid("请选择有效的 WAV 参考音频文件"));
+                    }
+                    let clean_b64 = raw_b64
+                        .split_once(";base64,")
+                        .map(|(_, b)| b)
+                        .unwrap_or(raw_b64)
+                        .trim();
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(clean_b64)
+                        .map_err(|_| invalid("参考音频 Base64 解码失败"))?;
+                    moss_voice::colab::validate_ref_wav(&bytes).map_err(|msg| invalid(&msg))?;
+                    let raw_name = input
+                        .get("file_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("moss_ref.wav");
+                    let safe_name: String = std::path::Path::new(raw_name)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("moss_ref.wav")
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(80)
+                        .collect();
+                    let wav_path = self.colab_ref_audio_path();
+                    if let Some(parent) = wav_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| internal(e.to_string()))?;
+                    }
+                    std::fs::write(&wav_path, &bytes)
+                        .map_err(|e| internal(format!("保存参考音频失败：{e}")))?;
+                    let _ = std::fs::write(
+                        self.colab_ref_audio_meta_path(),
+                        if safe_name.is_empty() {
+                            "moss_ref.wav"
+                        } else {
+                            &safe_name
+                        },
+                    );
+                    #[cfg(not(test))]
+                    if let Some(bin) = self.find_colab_cli_binary()
+                        && self.colab_cli_logged_in()
+                    {
+                        let slot = self.colab_cli.clone();
+                        std::thread::spawn(move || {
+                            let out = Self::colab_cli_command(&bin)
+                                .args([
+                                    "upload",
+                                    "-s",
+                                    moss_voice::colab::COLAB_CLI_SESSION_NAME,
+                                    &wav_path.to_string_lossy(),
+                                    "/content/moss_ref.wav",
+                                ])
+                                .stdin(std::process::Stdio::null())
+                                .output();
+                            if let Ok(out) = out
+                                && out.status.success()
+                                && let Ok(mut st) = slot.lock()
+                            {
+                                st.runner_step =
+                                    "已将 550W 参考音频同步到云端 Colab T4（下一句合成即刻生效）"
+                                        .into();
+                            }
+                        });
+                    }
+                    Ok(())
+                }
+                "clear_ref_audio" => {
+                    let _ = std::fs::remove_file(self.colab_ref_audio_path());
+                    let _ = std::fs::remove_file(self.colab_ref_audio_meta_path());
+                    Ok(())
+                }
+                "login_start" => {
+                    let Some(_bin) = self.find_colab_cli_binary() else {
+                        return Err(CenterError::new(
+                            "colab_cli_missing",
+                            412,
+                            "本机尚未安装 Colab CLI，请先在终端执行：uv tool install google-colab-cli",
+                        ));
+                    };
+                    if let Some(token_path) = self.colab_cli_token_path()
+                        && !Self::colab_token_file_valid(&token_path)
+                    {
+                        let _ = std::fs::remove_file(&token_path);
+                    }
+                    #[cfg(test)]
+                    let url = "https://accounts.google.com/o/oauth2/auth?response_type=code&client_id=mock".to_owned();
+                    #[cfg(not(test))]
+                    let url = {
+                        if let Some(token_path) = self.colab_cli_token_path() {
+                            let _ = std::fs::remove_file(&token_path);
+                        }
+                        let out = Self::colab_cli_command(&_bin)
+                            .arg("whoami")
+                            .stdin(std::process::Stdio::null())
+                            .output()
+                            .map_err(|e| internal(format!("启动 Colab CLI 授权失败：{e}")))?;
+                        let combined = format!(
+                            "{}\n{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        );
+                        let extracted = moss_voice::colab::extract_oauth_url(&combined).ok_or_else(|| {
+                            internal("未能从 Colab CLI 获取 Google 授权链接，请确认 google-colab-cli 版本最新")
+                        })?;
+                        Self::open_google_oauth_url(&extracted);
+                        extracted
+                    };
+                    if let Ok(mut st) = self.colab_cli.lock() {
+                        st.auth_url = Some(url);
+                        st.runner_error = None;
+                        st.runner_step =
+                            "已在浏览器打开 Google 授权页，请复制授权码粘贴到下方完成登录".into();
+                    }
+                    Ok(())
+                }
+                "login_complete" => {
+                    let Some(_bin) = self.find_colab_cli_binary() else {
+                        return Err(CenterError::new(
+                            "colab_cli_missing",
+                            412,
+                            "本机尚未安装 Colab CLI，请先在终端执行：uv tool install google-colab-cli",
+                        ));
+                    };
+                    let code = input
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    if code.is_empty()
+                        || code.len() > 512
+                        || code.chars().any(|c| c.is_whitespace() || c.is_control())
+                    {
+                        return Err(invalid("请粘贴有效的 Google 授权码（不能含空格）"));
+                    }
+                    #[cfg(test)]
+                    {
+                        if let Some(path) = self.colab_cli_token_path() {
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            std::fs::write(
+                                &path,
+                                r#"{"token":"mock-access","refresh_token":"mock-refresh"}"#,
+                            )
+                            .map_err(|e| internal(e.to_string()))?;
+                        }
+                        if let Ok(mut st) = self.colab_cli.lock() {
+                            st.auth_url = None;
+                            st.account_hint = "t***r@gmail.com".into();
+                            st.expires_in = "59m".into();
+                            st.whoami_probed = true;
+                            st.runner_error = None;
+                            st.runner_step = "Colab CLI 登录成功".into();
+                        }
+                    }
+                    #[cfg(not(test))]
+                    {
+                        use std::io::Write;
+                        let mut child = Self::colab_cli_command(&_bin)
+                            .arg("whoami")
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .spawn()
+                            .map_err(|e| internal(format!("执行 Colab CLI 登录失败：{e}")))?;
+                        if let Some(mut stdin) = child.stdin.take() {
+                            let _ = stdin.write_all(format!("{code}\n").as_bytes());
+                        }
+                        let out = child
+                            .wait_with_output()
+                            .map_err(|e| internal(format!("等待 Colab CLI 登录结果失败：{e}")))?;
+                        if !self.colab_cli_logged_in() {
+                            let err_txt = String::from_utf8_lossy(&out.stderr);
+                            return Err(invalid(&format!(
+                                "Google 授权码验证未通过，请重新获取授权码再试（{}）",
+                                err_txt.lines().last().unwrap_or("验证失败")
+                            )));
+                        }
+                        let stdout_txt = String::from_utf8_lossy(&out.stdout);
+                        if let Ok(mut st) = self.colab_cli.lock() {
+                            st.auth_url = None;
+                            st.whoami_probed = true;
+                            st.runner_error = None;
+                            st.runner_step = "Colab CLI 登录成功".into();
+                            if let Some((masked, exp)) =
+                                moss_voice::colab::parse_whoami_output(&stdout_txt)
+                            {
+                                st.account_hint = masked;
+                                st.expires_in = exp;
+                            }
+                        }
+                    }
+                    if self.settings().builtin_colab.enabled {
+                        self.spawn_colab_cli_runner();
+                    }
+                    Ok(())
+                }
+                "logout" => {
+                    if let Some(path) = self.colab_cli_token_path() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    if let Ok(mut st) = self.colab_cli.lock() {
+                        st.generation = st.generation.wrapping_add(1);
+                        st.account_hint.clear();
+                        st.expires_in.clear();
+                        st.auth_url = None;
+                        st.whoami_probed = false;
+                        st.whoami_probing = false;
+                        st.runner_state = "idle".into();
+                        st.runner_step = "已退出 Colab CLI 登录".into();
+                        st.runner_error = None;
+                    }
+                    Ok(())
+                }
+                "start_session" => {
+                    if !self.colab_cli_logged_in() {
+                        return Err(invalid(
+                            "尚未登录 Colab CLI：请先点击「登录 Colab CLI」完成授权",
+                        ));
+                    }
+                    let _ = moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                        s.builtin_colab.enabled = true;
+                        Ok(())
+                    });
+                    self.spawn_colab_cli_runner();
+                    Ok(())
+                }
+                "stop_session" => {
+                    if let Ok(mut st) = self.colab_cli.lock() {
+                        st.generation = st.generation.wrapping_add(1);
+                        st.runner_state = "idle".into();
+                        st.runner_step = "正在释放云端 Colab T4 会话...".into();
+                        st.runner_error = None;
+                    }
+                    #[cfg(not(test))]
+                    if let Some(bin) = self.find_colab_cli_binary() {
+                        let slot = self.colab_cli.clone();
+                        std::thread::spawn(move || {
+                            let _ = Self::colab_cli_command(&bin)
+                                .args(["stop", "-s", moss_voice::colab::COLAB_CLI_SESSION_NAME])
+                                .stdin(std::process::Stdio::null())
+                                .output();
+                            if let Ok(mut st) = slot.lock() {
+                                st.runner_step = "云端 Colab T4 会话已释放".into();
+                            }
+                        });
+                    }
+                    #[cfg(test)]
+                    if let Ok(mut st) = self.colab_cli.lock() {
+                        st.runner_step = "云端 Colab T4 会话已释放".into();
+                    }
+                    Ok(())
+                }
+                _ => Err(invalid("未知的 colab_cli 操作")),
+            }
+        }
+
+        fn spawn_colab_cli_runner(&self) {
+            if !self.colab_cli_logged_in() {
+                return;
+            }
+            #[cfg_attr(test, allow(unused_variables))]
+            let generation = {
+                let Ok(mut st) = self.colab_cli.lock() else {
+                    return;
+                };
+                if st.runner_state == "starting" {
+                    return;
+                }
+                st.generation = st.generation.wrapping_add(1);
+                st.runner_state = "starting".into();
+                st.runner_step = "正在通过 Colab CLI 自动拉起云端 T4...".into();
+                st.runner_error = None;
+                st.generation
+            };
+            #[cfg(not(test))]
+            {
+                let Some(bin) = self.find_colab_cli_binary() else {
+                    return;
+                };
+                let Some(voice) = self.self_weak.upgrade() else {
+                    return;
+                };
+                std::thread::Builder::new()
+                    .name("moss-colab-cli-runner".into())
+                    .spawn(move || {
+                        let is_current = |slot: &Mutex<ColabCliState>| -> bool {
+                            slot.lock().is_ok_and(|st| st.generation == generation)
+                        };
+                        let set_step = |slot: &Mutex<ColabCliState>, step: &str| {
+                            if let Ok(mut st) = slot.lock()
+                                && st.generation == generation
+                            {
+                                st.runner_step = step.to_owned();
+                            }
+                        };
+                        let fail = |slot: &Mutex<ColabCliState>, msg: String| {
+                            if let Ok(mut st) = slot.lock()
+                                && st.generation == generation
+                            {
+                                st.runner_state = "error".into();
+                                st.runner_step = "云端 Colab T4 自动拉起失败".into();
+                                st.runner_error = Some(msg.clone());
+                            }
+                            voice.diagnostics.push_from(
+                                moss_voice_server::DiagSource::Moss,
+                                EventRecord::warn(
+                                    DiagCategory::Model,
+                                    format!("Colab CLI 自动拉起云端 T4 失败：{msg}"),
+                                )
+                                .hint("可在“本地模型 → Colab T4 专属联动”查看进度或点“一键拉起云端 T4”重试"),
+                            );
+                        };
+
+                        // 1. 若已有保存的隧道地址且 /healthz 存活，直接复用
+                        let current_settings = voice.settings();
+                        if let Ok(Some((active_cfg, _))) = voice.active_colab(&current_settings) {
+                            let health_url = format!(
+                                "{}/healthz",
+                                active_cfg.url.trim_end_matches('/').trim_end_matches("/v1")
+                            );
+                            let alive = reqwest::blocking::Client::builder()
+                                .timeout(std::time::Duration::from_secs(3))
+                                .build()
+                                .ok()
+                                .and_then(|c| c.get(&health_url).send().ok())
+                                .is_some_and(|r| r.status().is_success());
+                            if alive {
+                                if let Ok(mut st) = voice.colab_cli.lock()
+                                    && st.generation == generation
+                                {
+                                    st.runner_state = "running".into();
+                                    st.runner_step =
+                                        "云端 Colab T4 隧道在线并已接管（Qwen3-VL-8B + 550W 克隆）"
+                                            .into();
+                                    st.runner_error = None;
+                                }
+                                return;
+                            }
+                        }
+
+                        if !is_current(&voice.colab_cli) {
+                            return;
+                        }
+                        let session_name = moss_voice::colab::COLAB_CLI_SESSION_NAME;
+                        set_step(
+                            &voice.colab_cli,
+                            &format!("正在检查 Colab 云端会话 ({session_name})..."),
+                        );
+                        let status_out = Self::colab_cli_command(&bin)
+                            .args(["status", "-s", session_name])
+                            .stdin(std::process::Stdio::null())
+                            .output();
+                        let session_exists = match status_out {
+                            Ok(out) => {
+                                let combined = format!(
+                                    "{}\n{}",
+                                    String::from_utf8_lossy(&out.stdout),
+                                    String::from_utf8_lossy(&out.stderr)
+                                );
+                                out.status.success()
+                                    && !combined.contains("not found")
+                                    && !combined.contains("No active sessions")
+                            }
+                            Err(_) => false,
+                        };
+
+                        if !session_exists {
+                            if !is_current(&voice.colab_cli) {
+                                return;
+                            }
+                            set_step(
+                                &voice.colab_cli,
+                                "正在向 Google 申请免费 T4 显卡 (colab new -s moss-t4 --gpu T4)...",
+                            );
+                            let new_out = Self::colab_cli_command(&bin)
+                                .args(["new", "-s", session_name, "--gpu", "T4"])
+                                .stdin(std::process::Stdio::null())
+                                .output();
+                            match new_out {
+                                Ok(out) if out.status.success() => {}
+                                Ok(out) => {
+                                    let detail = format!(
+                                        "{} {}",
+                                        String::from_utf8_lossy(&out.stderr).trim(),
+                                        String::from_utf8_lossy(&out.stdout).trim()
+                                    );
+                                    fail(
+                                        &voice.colab_cli,
+                                        format!("分配 T4 显卡未通过：{}", detail.trim()),
+                                    );
+                                    return;
+                                }
+                                Err(e) => {
+                                    fail(&voice.colab_cli, format!("调用 colab new 失败：{e}"));
+                                    return;
+                                }
+                            }
+                        }
+
+                        if !is_current(&voice.colab_cli) {
+                            return;
+                        }
+                        let ref_audio = voice.colab_ref_audio_path();
+                        if ref_audio.is_file() {
+                            set_step(
+                                &voice.colab_cli,
+                                "正在将本机保存的 550W 参考音频同步到云端 T4...",
+                            );
+                            let _ = Self::colab_cli_command(&bin)
+                                .args([
+                                    "upload",
+                                    "-s",
+                                    session_name,
+                                    &ref_audio.to_string_lossy(),
+                                    "/content/moss_ref.wav",
+                                ])
+                                .stdin(std::process::Stdio::null())
+                                .output();
+                        }
+
+                        if !is_current(&voice.colab_cli) {
+                            return;
+                        }
+                        let bootstrap_path = voice
+                            .host
+                            .runtime_root
+                            .path
+                            .join("moss_colab_bootstrap.py");
+                        if let Err(e) = std::fs::write(
+                            &bootstrap_path,
+                            moss_voice::colab::cli_bootstrap_script(),
+                        ) {
+                            fail(&voice.colab_cli, format!("写入启动脚本失败：{e}"));
+                            return;
+                        }
+
+                        set_step(
+                            &voice.colab_cli,
+                            "正在云端 T4 极速并发部署 Qwen3-VL-8B 与 550W 克隆服务（约 1.5~2 分钟）...",
+                        );
+
+                        let mut creds_found: Option<(String, String)> = None;
+                        let mut last_combined = String::new();
+                        let mut last_exit_note = String::new();
+
+                        for attempt in 0..4 {
+                            if !is_current(&voice.colab_cli) {
+                                return;
+                            }
+                            if attempt > 0 {
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                            }
+                            let mut child = match Self::colab_cli_command(&bin)
+                                .args([
+                                    "exec",
+                                    "-s",
+                                    session_name,
+                                    "--timeout",
+                                    "1200",
+                                    "-f",
+                                    &bootstrap_path.to_string_lossy(),
+                                ])
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped())
+                                .spawn()
+                            {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    fail(&voice.colab_cli, format!("调用 colab exec 失败：{e}"));
+                                    return;
+                                }
+                            };
+                            let child_pid = child.id();
+
+                            let stderr_handle = child.stderr.take().map(|err_pipe| {
+                                std::thread::spawn(move || {
+                                    use std::io::BufRead;
+                                    let mut buf = String::new();
+                                    let r = std::io::BufReader::new(err_pipe);
+                                    for line in r.lines().map_while(Result::ok) {
+                                        buf.push_str(&line);
+                                        buf.push('\n');
+                                        if line.contains("RuntimeError: Connection was lost.")
+                                            || line.contains("TimeoutError:")
+                                        {
+                                            Self::kill_colab_pid(child_pid);
+                                            break;
+                                        }
+                                    }
+                                    buf
+                                })
+                            });
+
+                            let mut collected_stdout = String::new();
+                            if let Some(out_pipe) = child.stdout.take() {
+                                use std::io::BufRead;
+                                let reader = std::io::BufReader::new(out_pipe);
+                                for line in reader.lines().map_while(Result::ok) {
+                                    if !is_current(&voice.colab_cli) {
+                                        Self::kill_colab_pid(child_pid);
+                                        return;
+                                    }
+                                    if let Some(rest) = line.trim().strip_prefix("[MOSS-COLAB]") {
+                                        let clean = rest.trim();
+                                        if !clean.is_empty() {
+                                            set_step(&voice.colab_cli, clean);
+                                        }
+                                    }
+                                    collected_stdout.push_str(&line);
+                                    collected_stdout.push('\n');
+                                    if moss_voice::colab::extract_tunnel_credentials(&collected_stdout)
+                                        .is_some()
+                                    {
+                                        Self::kill_colab_pid(child_pid);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let status = child.wait();
+                            Self::kill_colab_pid(child_pid);
+                            let stderr_txt = stderr_handle
+                                .and_then(|h| h.join().ok())
+                                .unwrap_or_default();
+                            last_combined = format!("{collected_stdout}\n{stderr_txt}");
+                            last_exit_note = match status {
+                                Ok(s) => format!("exit {}", s.code().unwrap_or(-1)),
+                                Err(e) => e.to_string(),
+                            };
+
+                            if let Some(pair) =
+                                moss_voice::colab::extract_tunnel_credentials(&last_combined)
+                            {
+                                creds_found = Some(pair);
+                                break;
+                            }
+                            if !last_combined.contains("Connection was lost")
+                                && !last_combined.contains("TimeoutError")
+                            {
+                                break;
+                            }
+                        }
+
+                        if let Some((url, token)) = creds_found {
+                            if let Ok(db) = voice.host.db.lock() {
+                                let ops = vec![(
+                                    moss_voice::colab::COLAB_SECRET_NAME.to_owned(),
+                                    Some(token),
+                                )];
+                                let _ = commit_secrets_then_settings(&db, &ops, || {
+                                    moss_voice::settings::update_voice(
+                                        &voice.settings_file(),
+                                        |s| {
+                                            s.builtin_colab.url = url.clone();
+                                            Ok(())
+                                        },
+                                    )
+                                    .map_err(|msg| {
+                                        CenterError::new("voice_settings_write_failed", 500, msg)
+                                    })
+                                });
+                            }
+                            voice.sync_local_vision(true);
+                            let _ = voice.restart_if_running();
+                            if let Ok(mut st) = voice.colab_cli.lock()
+                                && st.generation == generation
+                            {
+                                st.runner_state = "running".into();
+                                st.runner_step =
+                                    "云端 Colab T4 已就绪并自动接管（Qwen3-VL-8B + 550W 克隆）"
+                                        .into();
+                                st.runner_error = None;
+                            }
+                        } else {
+                            let last_line = last_combined
+                                .lines()
+                                .rev()
+                                .find(|l| !l.trim().is_empty())
+                                .unwrap_or("未返回隧道地址");
+                            fail(
+                                &voice.colab_cli,
+                                format!("云端脚本未返回有效隧道（{last_exit_note}）：{last_line}"),
+                            );
+                        }
+                    })
+                    .ok();
+            }
+        }
+
         fn devices(&self) -> Value {
             self.host
                 .db
@@ -2762,8 +3857,9 @@ mod imp {
             &self,
             local: &BuiltinLocal,
             shared_helper: Option<LocalHelper>,
+            colab_tts_override: bool,
         ) -> Option<Arc<dyn Tts>> {
-            if local.tts {
+            if local.tts && !colab_tts_override {
                 return None;
             }
             let exe = helper_path().filter(|path| path.is_file())?;
@@ -2787,6 +3883,7 @@ mod imp {
         fn local_parts(
             &self,
             local: &BuiltinLocal,
+            colab_tts_override: bool,
         ) -> Result<(LocalParts, Option<LocalHelper>), CenterError> {
             let pick = |kind| {
                 local.selected(kind).and_then(|spec| {
@@ -2798,12 +3895,16 @@ mod imp {
             let (vad, asr, tts) = (
                 pick(ModelKind::Vad),
                 pick(ModelKind::Asr),
-                pick(ModelKind::Tts),
+                if colab_tts_override {
+                    None
+                } else {
+                    pick(ModelKind::Tts)
+                },
             );
             if vad.is_none() && asr.is_none() && tts.is_none() {
                 return Ok((
                     LocalParts {
-                        fallback_tts: self.local_fallback_tts(local, None),
+                        fallback_tts: self.local_fallback_tts(local, None, colab_tts_override),
                         ..LocalParts::default()
                     },
                     None,
@@ -2883,25 +3984,43 @@ mod imp {
                     speed: local.tts_speed,
                 });
             } else {
-                parts.fallback_tts = self.local_fallback_tts(local, Some(helper.clone()));
+                parts.fallback_tts =
+                    self.local_fallback_tts(local, Some(helper.clone()), colab_tts_override);
             }
             Ok((parts, Some(helper)))
         }
 
-        /// 三个分区都可用时构造对话（本地识别 / 合成优先于云端）；否则返回 `None`（回声模式）。
+        /// 三个分区都可用时构造对话（本地识别 / 合成优先于云端；开启 Colab T4 联动时临时接管大模型与合成）；否则返回 `None`（回声模式）。
         /// 第二项为合成是否流式（豆包），用于缩短播放启动缓冲。
         fn conversation(
             &self,
             models: &moss_voice::settings::BuiltinModels,
             local: &mut LocalParts,
             experience: &BuiltinLocal,
+            colab: Option<&(moss_voice::colab::BuiltinColab, String)>,
         ) -> Result<Option<(Conversation, bool)>, CenterError> {
-            let Some(llm) = &models.llm else {
-                return Ok(None);
-            };
             let key = |section| self.secret(section).map(Option::unwrap_or_default);
             let invalid = |error: moss_voice_providers::ProviderError| {
                 CenterError::new("builtin_models_invalid", 400, error.to_string())
+            };
+            let (llm_url, llm_key, llm_model, llm_label) = match colab {
+                Some((c, c_key)) => (
+                    c.url.as_str(),
+                    c_key.clone(),
+                    c.llm_model.as_str(),
+                    format!("LLM:colab/{}", c.llm_model),
+                ),
+                None => {
+                    let Some(llm) = &models.llm else {
+                        return Ok(None);
+                    };
+                    (
+                        llm.url.as_str(),
+                        key(Section::Llm)?,
+                        llm.model.as_str(),
+                        format!("LLM:{}", llm.model),
+                    )
+                }
             };
             let hotwords = self.hotwords(experience);
             let mut streaming_asr: Option<Arc<dyn StreamingAsr>> = None;
@@ -2926,30 +4045,52 @@ mod imp {
                 ),
                 (None, None) => return Ok(None),
             };
-            let (tts, streaming_tts): (Arc<dyn Tts>, bool) = match (local.tts.take(), &models.tts) {
-                (Some(local), _) => (Arc::new(local), true),
-                (None, Some(cloud)) if cloud.kind == ProviderKind::Doubao => {
-                    let doubao = DoubaoTts::new(
-                        &cloud.url,
-                        &key(Section::Tts)?,
-                        &cloud.model,
-                        &cloud.voice,
-                        cloud.speed,
-                    );
-                    (Arc::new(doubao.map_err(invalid)?), true)
-                }
-                (None, Some(cloud)) => {
-                    let openai = OpenAiTts::new(
-                        &cloud.url,
-                        &key(Section::Tts)?,
-                        &cloud.model,
-                        &cloud.voice,
-                        cloud.speed,
-                    );
-                    (Arc::new(openai.map_err(invalid)?), false)
-                }
-                (None, None) => return Ok(None),
-            };
+            let (tts, streaming_tts, tts_label): (Arc<dyn Tts>, bool, String) =
+                match (colab, local.tts.take(), &models.tts) {
+                    (Some((c, c_key)), _, _) => {
+                        let openai =
+                            OpenAiTts::new(&c.url, c_key, &c.tts_model, &c.tts_voice, c.tts_speed);
+                        (
+                            Arc::new(openai.map_err(invalid)?),
+                            false,
+                            format!("TTS:colab/{}", c.tts_model),
+                        )
+                    }
+                    (None, Some(local), _) => (
+                        Arc::new(local),
+                        true,
+                        format!("TTS:{}", experience.tts_model.as_str()),
+                    ),
+                    (None, None, Some(cloud)) if cloud.kind == ProviderKind::Doubao => {
+                        let doubao = DoubaoTts::new(
+                            &cloud.url,
+                            &key(Section::Tts)?,
+                            &cloud.model,
+                            &cloud.voice,
+                            cloud.speed,
+                        );
+                        (
+                            Arc::new(doubao.map_err(invalid)?),
+                            true,
+                            format!("TTS:{}", cloud.model),
+                        )
+                    }
+                    (None, None, Some(cloud)) => {
+                        let openai = OpenAiTts::new(
+                            &cloud.url,
+                            &key(Section::Tts)?,
+                            &cloud.model,
+                            &cloud.voice,
+                            cloud.speed,
+                        );
+                        (
+                            Arc::new(openai.map_err(invalid)?),
+                            false,
+                            format!("TTS:{}", cloud.model),
+                        )
+                    }
+                    (None, None, None) => return Ok(None),
+                };
             let mut jev_options = JevFilterOptions {
                 enabled: experience.jev_filter_enabled,
                 unfinished_hold: experience.jev_unfinished_hold,
@@ -2971,7 +4112,7 @@ mod imp {
                 None => self.jev_effective_secret()?.is_some(),
             };
             let mut labels = vec![
-                format!("LLM:{}", llm.model),
+                llm_label,
                 format!(
                     "ASR:{}",
                     if experience.asr {
@@ -2984,23 +4125,12 @@ mod imp {
                             .unwrap_or("unknown")
                     }
                 ),
-                format!(
-                    "TTS:{}",
-                    if experience.tts {
-                        experience.tts_model.as_str()
-                    } else {
-                        models
-                            .tts
-                            .as_ref()
-                            .map(|v| v.model.as_str())
-                            .unwrap_or("unknown")
-                    }
-                ),
+                tts_label,
             ];
             if jev_options.active() && jev_ready {
                 labels.push(format!("Jev:{jev_model}"));
             }
-            let llm = OpenAiLlm::new(&llm.url, &key(Section::Llm)?, &llm.model)
+            let llm = OpenAiLlm::new(llm_url, &llm_key, llm_model)
                 .map_err(invalid)?
                 .with_fast_reply(experience.llm_fast_reply);
 
@@ -3145,6 +4275,8 @@ mod imp {
                     .is_some_and(|value| !value.is_empty())
             };
             let jev_key_configured = key_set("jev_api_key");
+            let colab_key_configured = key_set(moss_voice::colab::COLAB_SECRET_NAME);
+            let colab_active = settings.builtin_colab.active(colab_key_configured);
             let openrouter_llm_key_set = settings.builtin_models.llm.as_ref().is_some_and(|p| {
                 p.kind == ProviderKind::Openai
                     && moss_voice::models::is_openrouter_https_url(&p.url)
@@ -3159,7 +4291,9 @@ mod imp {
             let mode = match &view {
                 Some(view) => serde_json::to_value(view.mode).unwrap_or_default(),
                 None => Value::String(
-                    if settings.builtin_chat_ready(self.models.root()) {
+                    if settings
+                        .builtin_chat_ready_with_colab(self.models.root(), colab_key_configured)
+                    {
                         "chat"
                     } else {
                         "echo"
@@ -3223,6 +4357,17 @@ mod imp {
                 "last_error": self.last_error.lock().ok().and_then(|last| last.clone()),
                 "local": {
                     "settings": settings.builtin_local,
+                    "colab": {
+                        "enabled": settings.builtin_colab.enabled,
+                        "url": settings.builtin_colab.url,
+                        "llm_model": settings.builtin_colab.llm_model,
+                        "tts_model": settings.builtin_colab.tts_model,
+                        "tts_voice": settings.builtin_colab.tts_voice,
+                        "tts_speed": settings.builtin_colab.tts_speed,
+                        "key_configured": colab_key_configured,
+                        "active": colab_active,
+                        "cli": self.colab_cli_status(),
+                    },
                     "jev_key_configured": jev_key_configured || openrouter_llm_key_set || active_local_jev_installed,
                     "default_mirror": local_models::DEFAULT_BASE,
                     "models_dir": self.models.root_for(models_dir_ref).to_string_lossy(),
@@ -3234,8 +4379,9 @@ mod imp {
                     "helper_running": self.helper.lock().ok().and_then(|helper| helper.as_ref().map(LocalHelper::is_alive)).unwrap_or(false),
                     "models": self.models.status(),
                     "ready": {
-                        "asr": settings.builtin_section_ready(Section::Asr, self.models.root()),
-                        "tts": settings.builtin_section_ready(Section::Tts, self.models.root()),
+                        "llm": settings.builtin_section_ready_with_colab(Section::Llm, self.models.root(), colab_key_configured),
+                        "asr": settings.builtin_section_ready_with_colab(Section::Asr, self.models.root(), colab_key_configured),
+                        "tts": settings.builtin_section_ready_with_colab(Section::Tts, self.models.root(), colab_key_configured),
                     },
                 },
                 "sessions": view.as_ref().map(|view| serde_json::to_value(&view.sessions).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
@@ -3363,11 +4509,14 @@ mod imp {
         fn start_locked_inner(&self) -> Result<(), CenterError> {
             if !self.running() {
                 let settings = self.settings();
-                let (mut local, helper) = self.local_parts(&settings.builtin_local)?;
+                let colab = self.active_colab(&settings)?;
+                let (mut local, helper) =
+                    self.local_parts(&settings.builtin_local, colab.is_some())?;
                 let mut conversation = self.conversation(
                     &settings.builtin_models,
                     &mut local,
                     &settings.builtin_local,
+                    colab.as_ref(),
                 )?;
                 // No music scanning while disabled or chat unavailable;换机或拔盘目录不可用时跳过音乐索引，不阻断内置语音主服务启动。
                 let (music, next_music_warning) =
@@ -3550,6 +4699,17 @@ mod imp {
         /// 保存本地模型开关、音色、语速与镜像；运行中则重启服务以生效。
         pub fn local_save(&self, patch: &Value) -> Result<Value, CenterError> {
             let invalid = |message: &str| CenterError::new("voice_settings_invalid", 400, message);
+            if let Some(cli_action) = patch.get("colab_cli") {
+                self.handle_colab_cli_action(cli_action)?;
+                let only_cli = patch
+                    .as_object()
+                    .is_some_and(|obj| obj.keys().all(|k| k == "colab_cli"));
+                if only_cli {
+                    let mut status = self.status();
+                    status["restarted"] = Value::Bool(false);
+                    return Ok(status);
+                }
+            }
             let debug_enable_patch = match patch.get("debug_trace_enabled") {
                 Some(v) => Some(v.as_bool().ok_or_else(|| invalid("调试开关取值不正确"))?),
                 None => None,
@@ -3773,114 +4933,269 @@ mod imp {
                 || custom_personas_patch.is_some()
                 || persona_prompt_patch.is_some()
                 || patch.get("persona_risk_notes").is_some();
+            let colab_raw = patch.get("colab");
+            let mut should_auto_start_colab_cli = false;
+            let mut should_cancel_colab_cli = false;
             let (is_local_laya, laya_needed) = {
-                let _db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
-                let saved = moss_voice::settings::update_voice_with_jev_feedback(
-                    &self.settings_file(),
-                    |settings| {
-                        let local = &mut settings.builtin_local;
-                        for (key, val) in &bool_patches {
-                            match *key {
-                                "asr" => local.asr = *val,
-                                "tts" => local.tts = *val,
-                                "vad" => local.vad = *val,
-                                "read_only_shortcuts" => local.read_only_shortcuts = *val,
-                                "asr_beam_search" => local.asr_beam_search = *val,
-                                "barge_in" => local.barge_in = *val,
-                                "job_done_announce" => local.job_done_announce = *val,
-                                "llm_fast_reply" => local.llm_fast_reply = *val,
-                                "jev_filter_enabled" => local.jev_filter_enabled = *val,
-                                "jev_unfinished_hold" => local.jev_unfinished_hold = *val,
-                                "jev_fast_route" => local.jev_fast_route = *val,
-                                "jev_tool_prune" => local.jev_tool_prune = *val,
-                                "jev_memory_filter" => local.jev_memory_filter = *val,
-                                "asr_homophone_fix" => local.asr_homophone_fix = *val,
-                                "screen_preview_sync" => local.screen_preview_sync = *val,
-                                "persona_risk_notes" => local.persona_risk_notes = *val,
-                                "screen_pack_auto_keep" => local.screen_pack_auto_keep = *val,
-                                _ => {}
+                let db = self.host.db.lock().map_err(|_| internal("数据库锁失败"))?;
+                let current_settings = self.settings();
+                let mut colab_patch: Option<moss_voice::colab::BuiltinColab> = None;
+                let mut colab_secret_changes: Vec<(String, Option<String>)> = Vec::new();
+                if let Some(raw_colab) = colab_raw {
+                    let obj = raw_colab
+                        .as_object()
+                        .ok_or_else(|| invalid("Colab 联动配置须为对象"))?;
+                    let mut next_colab = current_settings.builtin_colab.clone();
+                    if let Some(v) = obj.get("enabled") {
+                        next_colab.enabled = v
+                            .as_bool()
+                            .ok_or_else(|| invalid("Colab 联动开关取值不正确"))?;
+                    }
+                    if let Some(v) = obj.get("url") {
+                        let raw_url = v
+                            .as_str()
+                            .ok_or_else(|| invalid("Colab 隧道地址须为字符串"))?
+                            .trim();
+                        if raw_url.is_empty() {
+                            next_colab.url = String::new();
+                        } else {
+                            next_colab.url = moss_voice::colab::normalize_colab_url(raw_url)
+                                .map_err(|message| invalid(&message))?;
+                        }
+                    } else if next_colab.enabled && !next_colab.url.trim().is_empty() {
+                        next_colab.url = moss_voice::colab::normalize_colab_url(&next_colab.url)
+                            .map_err(|message| invalid(&message))?;
+                    }
+                    if let Some(v) = obj.get("llm_model") {
+                        let raw_m = v
+                            .as_str()
+                            .ok_or_else(|| invalid("Colab 大模型名须为字符串"))?;
+                        next_colab.llm_model = moss_voice::colab::validate_colab_token(
+                            "Colab 大模型名",
+                            raw_m,
+                            moss_voice::colab::DEFAULT_COLAB_LLM_MODEL,
+                        )
+                        .map_err(|message| invalid(&message))?;
+                    }
+                    if let Some(v) = obj.get("tts_model") {
+                        let raw_m = v
+                            .as_str()
+                            .ok_or_else(|| invalid("Colab 合成模型名须为字符串"))?;
+                        next_colab.tts_model = moss_voice::colab::validate_colab_token(
+                            "Colab 合成模型名",
+                            raw_m,
+                            moss_voice::colab::DEFAULT_COLAB_TTS_MODEL,
+                        )
+                        .map_err(|message| invalid(&message))?;
+                    }
+                    if let Some(v) = obj.get("tts_voice") {
+                        let raw_v = v
+                            .as_str()
+                            .ok_or_else(|| invalid("Colab 合成音色须为字符串"))?;
+                        next_colab.tts_voice = moss_voice::colab::validate_colab_token(
+                            "Colab 合成音色",
+                            raw_v,
+                            moss_voice::colab::DEFAULT_COLAB_TTS_VOICE,
+                        )
+                        .map_err(|message| invalid(&message))?;
+                    }
+                    if let Some(v) = obj.get("tts_speed") {
+                        let raw_s = v
+                            .as_f64()
+                            .ok_or_else(|| invalid("Colab 合成语速须为数字"))?;
+                        next_colab.tts_speed = moss_voice::colab::validate_colab_speed(raw_s)
+                            .map_err(|message| invalid(&message))?;
+                    }
+                    let existing_key = db
+                        .get_secret(moss_voice::colab::COLAB_SECRET_NAME)
+                        .map_err(db_failure)?
+                        .is_some_and(|s| !s.trim().is_empty());
+                    let clear_key = obj
+                        .get("clear_key")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let new_key = obj
+                        .get("api_key")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    if let Some(secret) = new_key {
+                        if secret.len() > 8192 || secret.chars().any(char::is_control) {
+                            return Err(invalid("Colab API 密钥格式不正确或过长"));
+                        }
+                        colab_secret_changes.push((
+                            moss_voice::colab::COLAB_SECRET_NAME.to_owned(),
+                            Some(secret.to_owned()),
+                        ));
+                    } else if clear_key {
+                        colab_secret_changes
+                            .push((moss_voice::colab::COLAB_SECRET_NAME.to_owned(), None));
+                    }
+                    let has_key = if new_key.is_some() {
+                        true
+                    } else if clear_key {
+                        false
+                    } else {
+                        existing_key
+                    };
+                    let cli_logged_in = self.colab_cli_logged_in();
+                    if next_colab.enabled {
+                        if next_colab.url.trim().is_empty() || !has_key {
+                            if !cli_logged_in {
+                                return Err(invalid(
+                                    "尚未登录 Colab CLI：请先点击「登录 Colab CLI」完成授权（或手动填写隧道地址与 API 密钥）",
+                                ));
                             }
+                            should_auto_start_colab_cli = true;
+                        } else if cli_logged_in
+                            && (obj.get("auto_start").and_then(Value::as_bool) == Some(true)
+                                || (!cfg!(test) && !current_settings.builtin_colab.enabled))
+                        {
+                            should_auto_start_colab_cli = true;
                         }
-                        if let Some(model) = &jev_model_patch {
-                            local.jev_model = model.clone();
-                        }
-                        if let Some(ms) = barge_in_ms_patch {
-                            local.barge_in_ms = ms;
-                        }
-                        if let Some(words) = &custom_hotwords_patch {
-                            local.custom_hotwords = words.clone();
-                        }
-                        if let Some(rules) = &custom_corrections_patch {
-                            local.custom_asr_corrections = rules.clone();
-                        }
-                        if let Some(roles) = &custom_personas_patch {
-                            local.custom_personas = roles.clone();
-                        }
-                        match &persona_style_patch {
-                            Some(style) => {
-                                local.persona_style =
-                                    moss_voice::settings::validate_active_persona(
-                                        style,
-                                        &local.custom_personas,
-                                    )?;
+                    } else if current_settings.builtin_colab.enabled {
+                        should_cancel_colab_cli = true;
+                    }
+                    colab_patch = Some(next_colab);
+                }
+                let mut saved_pair = (false, false);
+                let write_res = commit_secrets_then_settings(&db, &colab_secret_changes, || {
+                    let saved = moss_voice::settings::update_voice_with_jev_feedback(
+                        &self.settings_file(),
+                        |settings| {
+                            if let Some(next_colab) = &colab_patch {
+                                settings.builtin_colab = next_colab.clone();
                             }
-                            // Deleting the active custom role falls back to the default role.
-                            None => {
-                                if moss_voice::settings::validate_active_persona(
-                                    &local.persona_style,
-                                    &local.custom_personas,
-                                )
-                                .is_err()
-                                {
-                                    local.persona_style =
-                                        moss_voice::settings::DEFAULT_PERSONA_STYLE.into();
+                            let local = &mut settings.builtin_local;
+                            for (key, val) in &bool_patches {
+                                match *key {
+                                    "asr" => local.asr = *val,
+                                    "tts" => local.tts = *val,
+                                    "vad" => local.vad = *val,
+                                    "read_only_shortcuts" => local.read_only_shortcuts = *val,
+                                    "asr_beam_search" => local.asr_beam_search = *val,
+                                    "barge_in" => local.barge_in = *val,
+                                    "job_done_announce" => local.job_done_announce = *val,
+                                    "llm_fast_reply" => local.llm_fast_reply = *val,
+                                    "jev_filter_enabled" => local.jev_filter_enabled = *val,
+                                    "jev_unfinished_hold" => local.jev_unfinished_hold = *val,
+                                    "jev_fast_route" => local.jev_fast_route = *val,
+                                    "jev_tool_prune" => local.jev_tool_prune = *val,
+                                    "jev_memory_filter" => local.jev_memory_filter = *val,
+                                    "asr_homophone_fix" => local.asr_homophone_fix = *val,
+                                    "screen_preview_sync" => local.screen_preview_sync = *val,
+                                    "persona_risk_notes" => local.persona_risk_notes = *val,
+                                    "screen_pack_auto_keep" => local.screen_pack_auto_keep = *val,
+                                    _ => {}
                                 }
                             }
-                        }
-                        if let Some(prompt) = &persona_prompt_patch {
-                            local.persona_prompt = prompt.clone();
-                        }
-                        if let Some(card_style) = &screen_card_style_patch {
-                            local.screen_card_style = card_style.clone();
-                        }
-                        if persona_touched {
-                            // n59: update the running role inside the settings lock, in the same order as
-                            // spoken switches (DesktopPersonaStore), so the two never disagree.
-                            self.persona.configure(persona_config(local));
-                        }
-                        for (key, id) in &model_patches {
-                            match *key {
-                                "vad_model" => local.vad_model = id.clone(),
-                                "asr_model" => local.asr_model = id.clone(),
-                                "tts_model" => local.tts_model = id.clone(),
-                                _ => {}
+                            if let Some(model) = &jev_model_patch {
+                                local.jev_model = model.clone();
                             }
+                            if let Some(ms) = barge_in_ms_patch {
+                                local.barge_in_ms = ms;
+                            }
+                            if let Some(words) = &custom_hotwords_patch {
+                                local.custom_hotwords = words.clone();
+                            }
+                            if let Some(rules) = &custom_corrections_patch {
+                                local.custom_asr_corrections = rules.clone();
+                            }
+                            if let Some(roles) = &custom_personas_patch {
+                                local.custom_personas = roles.clone();
+                            }
+                            match &persona_style_patch {
+                                Some(style) => {
+                                    local.persona_style =
+                                        moss_voice::settings::validate_active_persona(
+                                            style,
+                                            &local.custom_personas,
+                                        )?;
+                                }
+                                // Deleting the active custom role falls back to the default role.
+                                None => {
+                                    if moss_voice::settings::validate_active_persona(
+                                        &local.persona_style,
+                                        &local.custom_personas,
+                                    )
+                                    .is_err()
+                                    {
+                                        local.persona_style =
+                                            moss_voice::settings::DEFAULT_PERSONA_STYLE.into();
+                                    }
+                                }
+                            }
+                            if let Some(prompt) = &persona_prompt_patch {
+                                local.persona_prompt = prompt.clone();
+                            }
+                            if let Some(card_style) = &screen_card_style_patch {
+                                local.screen_card_style = card_style.clone();
+                            }
+                            if persona_touched {
+                                // n59: update the running role inside the settings lock, in the same order as
+                                // spoken switches (DesktopPersonaStore), so the two never disagree.
+                                self.persona.configure(persona_config(local));
+                            }
+                            for (key, id) in &model_patches {
+                                match *key {
+                                    "vad_model" => local.vad_model = id.clone(),
+                                    "asr_model" => local.asr_model = id.clone(),
+                                    "tts_model" => local.tts_model = id.clone(),
+                                    _ => {}
+                                }
+                            }
+                            if let Some(speaker) = tts_speaker_patch {
+                                local.tts_speaker = speaker;
+                            }
+                            if let Some(speed) = tts_speed_patch {
+                                local.tts_speed = speed;
+                            }
+                            if let Some(mirror) = &mirror_patch {
+                                local.mirror = mirror.clone();
+                            }
+                            let is_local =
+                                moss_voice::settings::is_local_jev_model(&local.jev_model);
+                            Ok(((is_local, local.jev_filter_enabled), jev_feedback_patch))
+                        },
+                    );
+                    match saved {
+                        Ok(pair) => {
+                            saved_pair = pair;
+                            Ok(())
                         }
-                        if let Some(speaker) = tts_speaker_patch {
-                            local.tts_speaker = speaker;
-                        }
-                        if let Some(speed) = tts_speed_patch {
-                            local.tts_speed = speed;
-                        }
-                        if let Some(mirror) = &mirror_patch {
-                            local.mirror = mirror.clone();
-                        }
-                        let is_local = moss_voice::settings::is_local_jev_model(&local.jev_model);
-                        Ok(((is_local, local.jev_filter_enabled), jev_feedback_patch))
-                    },
-                );
-                if saved.is_err() && persona_touched {
-                    // A rejected or failed save must leave the running role equal to the file.
-                    self.persona
-                        .configure(persona_config(&self.settings().builtin_local));
+                        Err(message) => Err(CenterError::new(
+                            "voice_settings_write_failed",
+                            500,
+                            message,
+                        )),
+                    }
+                });
+                if let Err(err) = write_res {
+                    if persona_touched {
+                        // A rejected or failed save must leave the running role equal to the file.
+                        self.persona
+                            .configure(persona_config(&self.settings().builtin_local));
+                    }
+                    return Err(err);
                 }
-                let (is_local_jev, filter_on) = saved.map_err(|message| {
-                    CenterError::new("voice_settings_write_failed", 500, message)
-                })?;
+                let (is_local_jev, filter_on) = saved_pair;
                 let jev_feedback_on =
                     moss_voice::settings::jev_feedback_enabled(&self.settings_file());
                 (is_local_jev, filter_on || jev_feedback_on)
             };
+            if colab_raw.is_some() {
+                if should_cancel_colab_cli && let Ok(mut st) = self.colab_cli.lock() {
+                    st.generation = st.generation.wrapping_add(1);
+                    if st.runner_state == "starting" {
+                        st.runner_state = "idle".into();
+                        st.runner_step = "已取消自动拉起云端 Colab T4".into();
+                    }
+                }
+                if should_auto_start_colab_cli {
+                    self.spawn_colab_cli_runner();
+                }
+                self.sync_local_vision(true);
+            }
             if is_local_laya && laya_needed {
                 if touched_jev {
                     self.ensure_laya_running(false)
@@ -4206,6 +5521,158 @@ mod imp {
                 ProviderKind::Doubao => test_doubao(&resolved),
             };
             serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+        }
+
+        /// n80：测试 Colab T4 专属联动（`target = "llm"` / `"tts"` 供顶部“测试全部环节”按环节探测；
+        /// 默认 `"all"` 依次实测大模型工具调用、摄像头看图与 550W 克隆语音合成，并返回试听音频）。
+        pub fn colab_test(&self, input: &Value) -> Result<Value, CenterError> {
+            use moss_voice_providers::vision::VisionProvider as _;
+            let invalid = |message: &str| CenterError::new("model_input_invalid", 400, message);
+            let saved = self.settings().builtin_colab;
+            let raw_url = input
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(saved.url.as_str());
+            let url = moss_voice::colab::normalize_colab_url(raw_url)
+                .map_err(|message| invalid(&message))?;
+            let raw_key = input
+                .get("api_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let api_key = match raw_key {
+                Some(k) => {
+                    if k.len() > 8192 || k.chars().any(char::is_control) {
+                        return Err(invalid("Colab API 密钥格式不正确"));
+                    }
+                    k
+                }
+                None => self
+                    .colab_secret()?
+                    .ok_or_else(|| invalid("请先填写 Colab API 密钥"))?,
+            };
+            let llm_model = moss_voice::colab::validate_colab_token(
+                "Colab 大模型名",
+                input
+                    .get("llm_model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&saved.llm_model),
+                moss_voice::colab::DEFAULT_COLAB_LLM_MODEL,
+            )
+            .map_err(|message| invalid(&message))?;
+            let tts_model = moss_voice::colab::validate_colab_token(
+                "Colab 合成模型名",
+                input
+                    .get("tts_model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&saved.tts_model),
+                moss_voice::colab::DEFAULT_COLAB_TTS_MODEL,
+            )
+            .map_err(|message| invalid(&message))?;
+            let tts_voice = moss_voice::colab::validate_colab_token(
+                "Colab 合成音色",
+                input
+                    .get("tts_voice")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&saved.tts_voice),
+                moss_voice::colab::DEFAULT_COLAB_TTS_VOICE,
+            )
+            .map_err(|message| invalid(&message))?;
+            let tts_speed = match input.get("tts_speed").and_then(Value::as_f64) {
+                Some(v) => moss_voice::colab::validate_colab_speed(v)
+                    .map_err(|message| invalid(&message))?,
+                None => saved.tts_speed,
+            };
+            let target = input
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or("all")
+                .trim();
+            let llm_resolved = moss_voice::models::ResolvedSection {
+                section: Section::Llm,
+                kind: ProviderKind::Openai,
+                url: url.clone(),
+                api_key: api_key.clone(),
+                model: llm_model.clone(),
+                voice: String::new(),
+                speed: 1.0,
+            };
+            let tts_resolved = moss_voice::models::ResolvedSection {
+                section: Section::Tts,
+                kind: ProviderKind::Openai,
+                url: moss_voice::models::tts_full_url(&url),
+                api_key: api_key.clone(),
+                model: tts_model,
+                voice: tts_voice,
+                speed: tts_speed as f64,
+            };
+            if target == "llm" {
+                let res = moss_voice::models::test_section_with(&llm_resolved, None);
+                return serde_json::to_value(res).map_err(|e| internal(e.to_string()));
+            }
+            if target == "tts" {
+                let res = moss_voice::models::test_section_with(&tts_resolved, None);
+                return serde_json::to_value(res).map_err(|e| internal(e.to_string()));
+            }
+            let llm_res = moss_voice::models::test_section_with(&llm_resolved, None);
+            if !llm_res.ok {
+                return Ok(serde_json::json!({
+                    "section": "colab",
+                    "ok": false,
+                    "elapsed_ms": llm_res.elapsed_ms,
+                    "detail": format!("大模型未通过：{}", llm_res.detail),
+                }));
+            }
+            let mut png_buf = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(8, 8)
+                .write_to(&mut png_buf, image::ImageFormat::Png)
+                .map_err(|_| internal("生成内存测试图片失败"))?;
+            let png = png_buf.into_inner();
+            let vision_started = std::time::Instant::now();
+            let vision_ok =
+                moss_voice_providers::vision::OpenAiVision::new(&url, &llm_model, &api_key)
+                    .ok()
+                    .and_then(|provider| {
+                        tauri::async_runtime::block_on(provider.explain(
+                            "请仅用一句话描述此测试图像。",
+                            "image/png",
+                            &png,
+                        ))
+                        .ok()
+                    })
+                    .is_some_and(|text| !text.trim().is_empty());
+            let vision_ms = vision_started.elapsed().as_millis() as u64;
+            if !vision_ok {
+                return Ok(serde_json::json!({
+                    "section": "colab",
+                    "ok": false,
+                    "elapsed_ms": llm_res.elapsed_ms + vision_ms,
+                    "detail": "大模型通过，但视觉看图未通过：请确认 Colab 上启动了带 --mmproj 的 Qwen3-VL 多模态模型",
+                }));
+            }
+            let tts_res = moss_voice::models::test_section_with(&tts_resolved, None);
+            let total_ms = llm_res.elapsed_ms + vision_ms + tts_res.elapsed_ms;
+            if !tts_res.ok {
+                return Ok(serde_json::json!({
+                    "section": "colab",
+                    "ok": false,
+                    "elapsed_ms": total_ms,
+                    "detail": format!("大模型与看图已通过，但 550W 克隆语音合成未通过：{}", tts_res.detail),
+                }));
+            }
+            Ok(serde_json::json!({
+                "section": "colab",
+                "ok": true,
+                "elapsed_ms": total_ms,
+                "detail": format!(
+                    "三项全部通过（大模型工具调用 {} ms · 摄像头看图 {} ms · 550W 克隆合成 {} ms）",
+                    llm_res.elapsed_ms, vision_ms, tts_res.elapsed_ms
+                ),
+                "audio_data_url": tts_res.audio_data_url,
+            }))
         }
 
         /// 读取一个分区服务商支持的全部模型列表：密钥留空时用已保存的密钥（或同基础地址分区的已存密钥）。结果不含密钥。
@@ -5621,9 +7088,15 @@ mod imp {
         /// The configured cloud LLM for NV19 deep search; `None` when not configured.
         fn chat_llm(&self) -> Option<Arc<dyn moss_voice_providers::Llm>> {
             let settings = self.settings();
-            let llm = settings.builtin_models.llm.as_ref()?;
-            let key = self.secret(Section::Llm).ok()?.unwrap_or_default();
-            OpenAiLlm::new(&llm.url, &key, &llm.model)
+            let (url, key, model) = match self.active_colab(&settings).ok().flatten() {
+                Some((colab, key)) => (colab.url, key, colab.llm_model),
+                None => {
+                    let llm = settings.builtin_models.llm.as_ref()?;
+                    let key = self.secret(Section::Llm).ok()?.unwrap_or_default();
+                    (llm.url.clone(), key, llm.model.clone())
+                }
+            };
+            OpenAiLlm::new(&url, &key, &model)
                 .ok()
                 .map(|llm| llm.with_fast_reply(settings.builtin_local.llm_fast_reply))
                 .map(|llm| Arc::new(llm) as Arc<dyn moss_voice_providers::Llm>)
@@ -6341,7 +7814,7 @@ mod imp {
         pub fn vision_status(&self) -> Value {
             use moss_voice_server::vision::VisionFactory;
             let settings = self.settings();
-            let vision = settings.builtin_vision;
+            let vision = &settings.builtin_vision;
             let key_configured = self
                 .host
                 .db
@@ -6372,6 +7845,12 @@ mod imp {
                 local: self.local_vision.clone(),
             }
             .ready();
+            let colab_active = self.active_colab(&settings).ok().flatten().is_some();
+            let colab_override = serde_json::json!({
+                "active": colab_active,
+                "url": if colab_active { settings.builtin_colab.url.clone() } else { String::new() },
+                "model": if colab_active { settings.builtin_colab.llm_model.clone() } else { String::new() },
+            });
             // n74：可选的本地视觉模型及是否已下载（下载在“本地模型”里做）
             let local_models: Vec<Value> = moss_voice::local_models::CATALOG
                 .iter()
@@ -6385,7 +7864,7 @@ mod imp {
                     })
                 })
                 .collect();
-            serde_json::json!({"settings":vision,"key_configured":key_configured,"ready":ready,"dialog_llm":dialog_llm,"local_models":local_models,"local_runtime":self.local_vision.status()})
+            serde_json::json!({"settings":vision,"key_configured":key_configured,"ready":ready,"dialog_llm":dialog_llm,"colab_override":colab_override,"local_models":local_models,"local_runtime":self.local_vision.status()})
         }
 
         pub fn vision_save(&self, input: &Value) -> Result<Value, CenterError> {
@@ -6491,17 +7970,21 @@ mod imp {
         /// 按当前设置配置本地视觉模型：选了已下载的本地模型就记下启动方式（`preload` 时后台加载），
         /// 否则停掉推理进程。服务启动 / 停止、保存视觉设置、删除模型后调用。
         fn sync_local_vision(&self, preload: bool) {
-            let vision = self.settings().builtin_vision;
-            let launch =
-                (vision.enabled && !vision.use_dialog_llm && !vision.local_model.is_empty())
-                    .then(|| self.models.path_if_installed(&vision.local_model))
-                    .flatten()
-                    .map(|dir| LocalVisionLaunch {
-                        root: self.models.root_for(&vision.local_model).to_path_buf(),
-                        model: vision.local_model.clone(),
-                        dir,
-                        mirror: self.settings().builtin_local.mirror,
-                    });
+            let settings = self.settings();
+            let colab_active = self.active_colab(&settings).ok().flatten().is_some();
+            let vision = settings.builtin_vision;
+            let launch = (!colab_active
+                && vision.enabled
+                && !vision.use_dialog_llm
+                && !vision.local_model.is_empty())
+            .then(|| self.models.path_if_installed(&vision.local_model))
+            .flatten()
+            .map(|dir| LocalVisionLaunch {
+                root: self.models.root_for(&vision.local_model).to_path_buf(),
+                model: vision.local_model.clone(),
+                dir,
+                mirror: settings.builtin_local.mirror,
+            });
             self.local_vision.configure(launch);
             if preload && self.running() {
                 self.local_vision.preload();
@@ -6517,8 +8000,11 @@ mod imp {
                 host: self.host.clone(),
                 local: self.local_vision.clone(),
             };
-            let vision_setting = self.settings().builtin_vision;
-            if vision_setting.enabled
+            let settings = self.settings();
+            let colab_active = self.active_colab(&settings).ok().flatten().is_some();
+            let vision_setting = settings.builtin_vision;
+            if !colab_active
+                && vision_setting.enabled
                 && !vision_setting.use_dialog_llm
                 && !vision_setting.local_model.is_empty()
             {
@@ -7971,6 +9457,191 @@ mod imp {
             fake_install(&builtin, "qwen3_vl_2b");
             builtin.model_delete("qwen3_vl_2b").unwrap();
             assert!(builtin.models.path_if_installed("qwen3_vl_2b").is_none());
+        }
+
+        #[test]
+        fn n80_colab_bridge_defaults_off_and_restores_on_disable() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host)).0.unwrap();
+            fake_install(&builtin, "qwen3_vl_2b");
+            builtin
+                .vision_save(&serde_json::json!({
+                    "settings": {"enabled": true, "url": "", "model": "", "local_model": "qwen3_vl_2b"},
+                    "key": {"action": "keep"},
+                }))
+                .unwrap();
+
+            let initial = builtin.status();
+            assert_eq!(initial["local"]["colab"]["enabled"], false);
+            assert_eq!(initial["local"]["colab"]["active"], false);
+            assert_eq!(initial["local"]["colab"]["cli"]["installed"], true);
+            assert_eq!(initial["local"]["colab"]["cli"]["logged_in"], false);
+            assert_eq!(
+                builtin.local_vision.launch().map(|l| l.model),
+                Some("qwen3_vl_2b".to_owned())
+            );
+
+            // 未登录 Colab CLI 且缺少手动地址或密钥时拒绝开启
+            let err = builtin
+                .local_save(&serde_json::json!({
+                    "colab": {"enabled": true, "url": "https://abc-123.trycloudflare.com"}
+                }))
+                .unwrap_err();
+            assert!(
+                err.message.contains("尚未登录 Colab CLI"),
+                "{}",
+                err.message
+            );
+
+            // 模拟新用户未安装 Colab CLI：cli.installed == false -> 执行 install -> cli.installed == true
+            builtin
+                .colab_cli_installed_for_test
+                .store(false, std::sync::atomic::Ordering::Release);
+            let uninstalled = builtin.status();
+            assert_eq!(uninstalled["local"]["colab"]["cli"]["installed"], false);
+            assert_eq!(uninstalled["local"]["colab"]["cli"]["logged_in"], false);
+            let installed_after = builtin
+                .local_save(&serde_json::json!({
+                    "colab_cli": {"action": "install"}
+                }))
+                .unwrap();
+            assert_eq!(installed_after["local"]["colab"]["cli"]["installed"], true);
+            assert_eq!(installed_after["local"]["colab"]["cli"]["logged_in"], false);
+
+            // 本机保存与清除 550W 参考音频（仅存本机，云端启动时自动同步）
+            use base64::Engine as _;
+            let mut fake_wav = b"RIFF\x24\x00\x00\x00WAVEfmt ".to_vec();
+            fake_wav.resize(128, 0);
+            let wav_b64 = base64::engine::general_purpose::STANDARD.encode(&fake_wav);
+            let with_wav = builtin
+                .local_save(&serde_json::json!({
+                    "colab_cli": {
+                        "action": "set_ref_audio",
+                        "file_name": "moss_550w.wav",
+                        "wav_base64": wav_b64
+                    }
+                }))
+                .unwrap();
+            assert_eq!(
+                with_wav["local"]["colab"]["cli"]["ref_audio_configured"],
+                true
+            );
+            assert_eq!(
+                with_wav["local"]["colab"]["cli"]["ref_audio_name"],
+                "moss_550w.wav"
+            );
+            let cleared_wav = builtin
+                .local_save(&serde_json::json!({
+                    "colab_cli": {"action": "clear_ref_audio"}
+                }))
+                .unwrap();
+            assert_eq!(
+                cleared_wav["local"]["colab"]["cli"]["ref_audio_configured"],
+                false
+            );
+
+            // 通过 Colab CLI 登录：login_start -> login_complete 后显示已登录，此时即使不填地址和密钥也允许开启并自动拉起云端 T4
+            let login_started = builtin
+                .local_save(&serde_json::json!({
+                    "colab_cli": {"action": "login_start"}
+                }))
+                .unwrap();
+            assert!(
+                login_started["local"]["colab"]["cli"]["auth_url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("https://accounts.google.com/")
+            );
+            let logged_in_status = builtin
+                .local_save(&serde_json::json!({
+                    "colab_cli": {"action": "login_complete", "code": "mock-valid-auth-code"}
+                }))
+                .unwrap();
+            assert_eq!(logged_in_status["local"]["colab"]["cli"]["logged_in"], true);
+            assert_eq!(
+                logged_in_status["local"]["colab"]["cli"]["account_hint"],
+                "t***r@gmail.com"
+            );
+
+            let auto_on = builtin
+                .local_save(&serde_json::json!({
+                    "colab": {"enabled": true, "url": ""}
+                }))
+                .unwrap();
+            assert_eq!(auto_on["local"]["colab"]["enabled"], true);
+            assert_eq!(
+                auto_on["local"]["colab"]["cli"]["runner_state"], "starting",
+                "已登录 Colab CLI 时开启开关应自动在后台拉起云端 T4"
+            );
+
+            // 退出 Colab CLI 登录后回到未登录状态
+            let logged_out = builtin
+                .local_save(&serde_json::json!({
+                    "colab_cli": {"action": "logout"},
+                    "colab": {"enabled": false}
+                }))
+                .unwrap();
+            assert_eq!(logged_out["local"]["colab"]["cli"]["logged_in"], false);
+
+            // 填入隧道地址与密钥并开启：临时接管大模型、看图与合成，暂停本机视觉推理进程预热
+            let on_status = builtin
+                .local_save(&serde_json::json!({
+                    "colab": {
+                        "enabled": true,
+                        "url": "https://abc-123.trycloudflare.com",
+                        "api_key": "moss-test-colab-secret",
+                        "llm_model": "qwen3-vl-8b",
+                        "tts_model": "qwen3-tts",
+                        "tts_voice": "moss",
+                        "tts_speed": 1.0,
+                    }
+                }))
+                .unwrap();
+            assert_eq!(on_status["local"]["colab"]["enabled"], true);
+            assert_eq!(on_status["local"]["colab"]["active"], true);
+            assert_eq!(on_status["local"]["colab"]["key_configured"], true);
+            assert_eq!(
+                on_status["local"]["colab"]["url"],
+                "https://abc-123.trycloudflare.com/v1"
+            );
+            assert_eq!(on_status["local"]["ready"]["llm"], true);
+            assert_eq!(on_status["local"]["ready"]["tts"], true);
+            assert!(
+                builtin.local_vision.launch().is_none(),
+                "Colab 接管看图期间不保留本机视觉模型启动项"
+            );
+            let v_on = builtin.vision_status();
+            assert_eq!(v_on["ready"], true);
+            assert_eq!(v_on["colab_override"]["active"], true);
+            assert_eq!(v_on["colab_override"]["model"], "qwen3-vl-8b");
+            let raw_settings =
+                std::fs::read_to_string(temp.path().join("settings.json")).unwrap_or_default();
+            assert!(
+                !raw_settings.contains("moss-test-colab-secret"),
+                "Colab 密钥只存 app_secrets，绝不写入 settings.json"
+            );
+
+            // 关闭开关：立即恢复原有的本地视觉与大模型/合成状态，且保留已存的地址与密钥供下次直接开
+            let off_status = builtin
+                .local_save(&serde_json::json!({
+                    "colab": {"enabled": false}
+                }))
+                .unwrap();
+            assert_eq!(off_status["local"]["colab"]["enabled"], false);
+            assert_eq!(off_status["local"]["colab"]["active"], false);
+            assert_eq!(off_status["local"]["colab"]["key_configured"], true);
+            assert_eq!(off_status["local"]["ready"]["llm"], false);
+            assert_eq!(
+                builtin.local_vision.launch().map(|l| l.model),
+                Some("qwen3_vl_2b".to_owned()),
+                "关闭 Colab 联动后立即恢复原有的本地视觉模型"
+            );
+            let v_off = builtin.vision_status();
+            assert_eq!(v_off["colab_override"]["active"], false);
+            assert_eq!(v_off["settings"]["local_model"], "qwen3_vl_2b");
         }
     }
 
@@ -9506,6 +11177,57 @@ pub async fn voice_diagnostics_export(
     result
 }
 
+/// n80：导出 Colab T4 专属联动笔记本（`.ipynb`）。后端生成固定审计过的 JSON，弹出系统“另存为”对话框写入；
+/// 路径与内容都不来自网页，且不含任何本机路径或密钥。
+#[tauri::command]
+pub async fn voice_colab_export_notebook(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
+    #[cfg(desktop)]
+    let result = {
+        let text = moss_voice::colab::notebook_json();
+        let default_name = moss_voice::colab::COLAB_NOTEBOOK_FILENAME.to_owned();
+        let picker = app.clone();
+        let name = default_name.clone();
+        let picked = tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_dialog::DialogExt;
+            picker
+                .dialog()
+                .file()
+                .set_title("保存 Colab T4 笔记本")
+                .set_file_name(&name)
+                .add_filter("Jupyter Notebook", &["ipynb"])
+                .blocking_save_file()
+                .and_then(|path| path.into_path().ok())
+        })
+        .await
+        .map_err(
+            |_| serde_json::json!({"code": "colab_export_failed", "message": "打开保存对话框失败"}),
+        )?;
+        match picked {
+            None => Ok(serde_json::json!({"saved": false})),
+            Some(path) => match std::fs::write(&path, text.as_bytes()) {
+                Ok(()) => Ok(serde_json::json!({
+                    "saved": true,
+                    "file_name": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(default_name),
+                    "bytes": text.len(),
+                })),
+                Err(error) => Err(serde_json::json!({
+                    "code": "colab_export_failed",
+                    "message": "笔记本没能写入所选位置：可能没有写入权限或磁盘已满，换个文件夹再试",
+                    "detail": error.kind().to_string(),
+                })),
+            },
+        }
+    };
+    #[cfg(mobile)]
+    let result = desktop_only((app, window));
+    result
+}
+
 /// 允许（`allowed`）或撤销（`revoked`）设备。允许后设备需重启以重新获取 token。
 #[tauri::command]
 pub async fn voice_device_set_status(
@@ -9562,7 +11284,7 @@ pub async fn voice_device_rename(
     result
 }
 
-/// 测试内置服务的一个模型分区（`llm` / `asr` / `tts`）；密钥留空时用已保存的密钥。
+/// 测试内置服务的一个模型分区（`llm` / `asr` / `tts` / `jev` / `colab`）；密钥留空时用已保存的密钥。
 #[tauri::command]
 pub async fn voice_builtin_models_test(
     app: tauri::AppHandle,
@@ -9576,6 +11298,9 @@ pub async fn voice_builtin_models_test(
     let result = imp::run(app, move |builtin| {
         if section.trim() == "jev" {
             return builtin.jev_test(&input);
+        }
+        if section.trim() == "colab" {
+            return builtin.colab_test(&input);
         }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
         let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {
@@ -10312,7 +12037,7 @@ pub async fn voice_memory_clear(
 
 /// 前端调用的内置语音命令（build.rs 登记与 capability 授权的测试会核对这张表）。
 #[cfg(test)]
-pub const COMMANDS: [&str; 46] = [
+pub const COMMANDS: [&str; 47] = [
     "voice_firmware_status",
     "voice_firmware_import",
     "voice_firmware_manage",
@@ -10348,6 +12073,7 @@ pub const COMMANDS: [&str; 46] = [
     "voice_builtin_start",
     "voice_builtin_stop",
     "voice_diagnostics_export",
+    "voice_colab_export_notebook",
     "voice_device_set_status",
     "voice_device_rename",
     "voice_device_request",

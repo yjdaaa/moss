@@ -38,6 +38,7 @@ fn main() {
         "voice_builtin_stop",
         // n68 导出语音诊断包（与状态读取同权限，命令内固定主窗口）
         "voice_diagnostics_export",
+        "voice_colab_export_notebook",
         "voice_device_set_status",
         "voice_device_rename",
         "voice_device_request",

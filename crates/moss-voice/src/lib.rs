@@ -14,6 +14,7 @@
 
 pub mod builtin;
 pub mod center;
+pub mod colab;
 pub mod config_yaml;
 pub mod health;
 pub mod home_backup_audit;

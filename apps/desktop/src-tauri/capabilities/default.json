@@ -40,6 +40,7 @@
     "allow-voice-builtin-start",
     "allow-voice-builtin-stop",
     "allow-voice-diagnostics-export",
+    "allow-voice-colab-export-notebook",
     "allow-voice-device-set-status",
     "allow-voice-device-rename",
     "allow-voice-device-request",
