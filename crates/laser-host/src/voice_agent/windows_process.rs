@@ -6,7 +6,6 @@
 //! harness (JobRunner in voice_agent.rs). The CLI's own sandbox on Windows still
 //! cannot restrict reads outside the workspace; that residual risk is declared
 //! in engine.rs.
-#![allow(dead_code)]
 
 #[cfg(test)]
 mod tests;
@@ -65,7 +64,15 @@ pub(super) enum Finish {
 pub(super) struct ProcessResult {
     pub finish: Finish,
     pub output: String,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "audited by process-harness unit tests")
+    )]
     pub truncated: bool,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "audited by process-harness unit tests")
+    )]
     pub children_reaped: bool,
 }
 
@@ -174,7 +181,9 @@ impl Job {
 /// Kill-on-close Job 守卫：把一个已经启动的探测进程（`--version` / `--help`）约束进 Job。
 /// 守卫 drop 时关闭 Job 句柄，任何幸存的探测进程树一起结束，不残留孤儿进程。
 /// 绑定失败（例如进程已属于别的 Job）时返回 None，探测仍照常运行，只是不受 Job 约束。
-pub(super) struct ConfineGuard(Option<Job>);
+pub(super) struct ConfineGuard(
+    #[expect(dead_code, reason = "RAII guard keeps Job handle alive until Drop")] Option<Job>,
+);
 pub(super) fn confine_running_process(pid: u32) -> ConfineGuard {
     ConfineGuard(try_confine_running_process(pid))
 }

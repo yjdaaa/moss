@@ -87,7 +87,7 @@ export function savedMessage(label, result) {
 export async function exportFile(blob, filename, label, deps = {}) {
   const win = deps.win ?? globalThis.window;
   const choice = deps.showChoice ?? showChoice;
-  const alert = deps.showAlert ?? showAlert;
+  const notifyAlert = deps.showAlert ?? showAlert;
   const invoke = tauriInvoke(win);
 
   let result;
@@ -116,7 +116,7 @@ export async function exportFile(blob, filename, label, deps = {}) {
   }
 
   if (result.cancelled) {
-    await alert("已取消导出", { title: "导出", tone: "info" });
+    await notifyAlert("已取消导出", { title: "导出", tone: "info" });
     return result;
   }
   if (result.path && invoke) {

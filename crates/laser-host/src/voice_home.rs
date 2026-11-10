@@ -5,7 +5,6 @@
 //! approval transaction, trusted credentials and actual service support.
 //! Tests use synthetic states/services plus a local loopback fake HA server.
 //! No real devices, user tokens, network endpoints, or smart homes are read.
-#![allow(dead_code)]
 
 #[cfg(test)]
 mod approval_mock;
@@ -38,10 +37,12 @@ pub(crate) enum HomeDeny {
     InvalidConfig,
     InvalidSchema,
     UnknownEntity,
+    #[cfg(test)]
     Unauthorized,
     DuplicateAlias,
     ServiceUnavailable,
     InvalidParameters,
+    #[cfg(test)]
     ApprovalRequired,
     Cancelled,
 }
@@ -347,6 +348,7 @@ impl HomeCatalog {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn selected_count(&self) -> usize {
         self.entities.len()
     }
@@ -478,6 +480,7 @@ impl HomeCatalog {
 
 /// Deliberate deny-by-default mock-only executor stub. No POST exists and
 /// user approval, even if confirmed elsewhere, must not bypass NV15-3.
+#[cfg(test)]
 pub(crate) fn execute_without_home_control_approval(
     _plan: &HomeControlPlan,
 ) -> Result<(), HomeDeny> {

@@ -56,29 +56,58 @@ export function SideNav({
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
     if (reduceMotion) return undefined;
 
-    const handlePointerMove = (e) => {
+    let eyeCenter = null;
+    let rafId = 0;
+    let lastX = 0;
+    let lastY = 0;
+
+    const measureEye = () => {
       const rect = el.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      const cx = rect.left + rect.width * 0.5;
-      const cy = rect.top + rect.height * 0.5;
-      const dx = (e.clientX - cx) / Math.max(180, window.innerWidth * 0.35);
-      const dy = (e.clientY - cy) / Math.max(180, window.innerHeight * 0.35);
+      eyeCenter = rect.width && rect.height
+        ? { cx: rect.left + rect.width * 0.5, cy: rect.top + rect.height * 0.5 }
+        : null;
+    };
+
+    const flushGaze = () => {
+      rafId = 0;
+      if (!eyeCenter) measureEye();
+      if (!eyeCenter) return;
+      const dx = (lastX - eyeCenter.cx) / Math.max(180, window.innerWidth * 0.35);
+      const dy = (lastY - eyeCenter.cy) / Math.max(180, window.innerHeight * 0.35);
       const gx = Math.max(-1, Math.min(1, dx));
       const gy = Math.max(-1, Math.min(1, dy));
       el.style.setProperty("--eye-gaze-x", gx.toFixed(3));
       el.style.setProperty("--eye-gaze-y", gy.toFixed(3));
     };
+
+    const handlePointerMove = (e) => {
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (!rafId) rafId = window.requestAnimationFrame(flushGaze);
+    };
     const handlePointerLeave = () => {
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
       el.style.setProperty("--eye-gaze-x", "0");
       el.style.setProperty("--eye-gaze-y", "0");
     };
+    const handleResize = () => {
+      eyeCenter = null;
+    };
+
+    measureEye();
     window.addEventListener("pointermove", handlePointerMove, { passive: true });
+    window.addEventListener("resize", handleResize, { passive: true });
     window.addEventListener("blur", handlePointerLeave);
     return () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
       window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("resize", handleResize);
       window.removeEventListener("blur", handlePointerLeave);
     };
-  }, []);
+  }, [collapsed]);
 
   return (
     <aside className={`ob-side${collapsed ? " is-collapsed" : ""}`} aria-label="主导航" data-collapsed={collapsed ? "true" : "false"}>

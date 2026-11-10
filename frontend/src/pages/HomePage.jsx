@@ -38,23 +38,40 @@ export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl,
   return resolveUrl(`/preview?path=${encodeURIComponent(imageFile)}`);
 }
 
+function readLocal(key, fallback) {
+  try {
+    const val = globalThis.localStorage?.getItem(key);
+    return val ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLocal(key, value) {
+  try {
+    globalThis.localStorage?.setItem(key, String(value));
+  } catch {
+    // 存储受限时仅在当前会话生效
+  }
+}
+
 export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) {
   // Connection state
   const [connectionMode, setConnectionMode] = useState(
-    localStorage.getItem("laser-forge-conn-mode") || "network"
+    () => readLocal("laser-forge-conn-mode", "network") || "network"
   );
   const [serialPort, setSerialPort] = useState(
-    localStorage.getItem("laser-forge-serial-port") || ""
+    () => readLocal("laser-forge-serial-port", "")
   );
   const [baudrate, setBaudrate] = useState(
-    Number(localStorage.getItem("laser-forge-baud") || 115200)
+    () => Number(readLocal("laser-forge-baud", "115200") || 115200)
   );
   const [serialPorts, setSerialPorts] = useState([]);
   const [networkHost, setNetworkHost] = useState(
-    localStorage.getItem("laser-forge-host") || ""
+    () => readLocal("laser-forge-host", "")
   );
   const [telnetPort, setTelnetPort] = useState(
-    Number(localStorage.getItem("laser-forge-telnet-port") || 23)
+    () => Number(readLocal("laser-forge-telnet-port", "23") || 23)
   );
 
   // Active Tool Mode
@@ -62,20 +79,20 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
   // Tool specific inputs
   const [textContent, setTextContent] = useState(
-    localStorage.getItem("laser-forge-text") || "MOSS"
+    () => readLocal("laser-forge-text", "MOSS") || "MOSS"
   );
   const [fontSizeMm, setFontSizeMm] = useState(
-    Number(localStorage.getItem("laser-forge-font-size") || 12)
+    () => Number(readLocal("laser-forge-font-size", "12") || 12)
   );
   const [uploadedFilePath, setUploadedFilePath] = useState("");
 
   // Material and Parameter state
   const [materials, setMaterials] = useState([]);
   const [selectedMaterial, setSelectedMaterial] = useState(
-    localStorage.getItem("laser-forge-mat") || "椴木"
+    () => readLocal("laser-forge-mat", "椴木") || "椴木"
   );
   const [selectedThickness, setSelectedThickness] = useState(
-    localStorage.getItem("laser-forge-thick") || "3"
+    () => readLocal("laser-forge-thick", "3") || "3"
   );
   const [engravingMode, setEngravingMode] = useState("raster"); // raster, outline, cut
   const [powerPercent, setPowerPercent] = useState(50);
@@ -157,17 +174,26 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     return () => clearTimeout(timer);
   }, []);
 
-  // Save to local storage on change
+  // Save to local storage only for keys whose value actually changed
+  const persistedRef = useRef({});
   useEffect(() => {
-    localStorage.setItem("laser-forge-conn-mode", connectionMode);
-    localStorage.setItem("laser-forge-serial-port", serialPort);
-    localStorage.setItem("laser-forge-baud", String(baudrate));
-    localStorage.setItem("laser-forge-host", networkHost);
-    localStorage.setItem("laser-forge-telnet-port", String(telnetPort));
-    localStorage.setItem("laser-forge-mat", selectedMaterial);
-    localStorage.setItem("laser-forge-thick", selectedThickness);
-    localStorage.setItem("laser-forge-text", textContent);
-    localStorage.setItem("laser-forge-font-size", String(fontSizeMm));
+    const entries = [
+      ["laser-forge-conn-mode", connectionMode],
+      ["laser-forge-serial-port", serialPort],
+      ["laser-forge-baud", String(baudrate)],
+      ["laser-forge-host", networkHost],
+      ["laser-forge-telnet-port", String(telnetPort)],
+      ["laser-forge-mat", selectedMaterial],
+      ["laser-forge-thick", selectedThickness],
+      ["laser-forge-text", textContent],
+      ["laser-forge-font-size", String(fontSizeMm)],
+    ];
+    for (const [key, val] of entries) {
+      if (persistedRef.current[key] !== val) {
+        persistedRef.current[key] = val;
+        writeLocal(key, val);
+      }
+    }
   }, [
     connectionMode,
     serialPort,

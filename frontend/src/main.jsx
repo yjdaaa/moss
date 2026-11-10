@@ -224,11 +224,16 @@ function App() {
     window.addEventListener("laser-auth-required", handleAuthRequired);
     window.addEventListener("moss:close-requested", triggerCloseHandling);
 
+    let disposed = false;
     let unlistenTauri = null;
     if (window.__TAURI__?.event?.listen) {
       window.__TAURI__.event.listen("moss:close-requested", triggerCloseHandling)
         .then((unlisten) => {
-          unlistenTauri = unlisten;
+          if (disposed) {
+            unlisten();
+          } else {
+            unlistenTauri = unlisten;
+          }
         })
         .catch((error) => {
           console.error("注册桌面关闭事件失败", error);
@@ -236,6 +241,7 @@ function App() {
     }
 
     return () => {
+      disposed = true;
       window.removeEventListener("popstate", handlePopState);
       window.removeEventListener("laser-auth-required", handleAuthRequired);
       window.removeEventListener("moss:close-requested", triggerCloseHandling);
@@ -271,22 +277,49 @@ function App() {
     });
     void syncMcp();
     const intervalMs = activeVoicePhase ? 240 : 3000;
-    const timer = setInterval(() => void syncMcp(), intervalMs);
+    const timer = setInterval(() => {
+      if (!document.hidden) void syncMcp();
+    }, intervalMs);
+    const handleVisibility = () => {
+      if (!document.hidden) void syncMcp();
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       cancelled = true;
       syncMcp.invalidate();
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [activeVoicePhase]);
 
   useEffect(() => installCardSpotlight(), []);
 
   useEffect(() => {
+    let idleHandle = 0;
+    let heavyTimer = 0;
     const timer = setTimeout(() => {
-      if (voiceEnabled) void preloadRoute("/voice");
+      if (voiceEnabled) {
+        void preloadRoute("/voice");
+        void preloadRoute("/camera");
+      }
       void preloadRoute("/material-lab");
+      const preloadHeavy = () => {
+        void preloadRoute("/twin");
+        void preloadRoute("/draw");
+      };
+      if (typeof window.requestIdleCallback === "function") {
+        idleHandle = window.requestIdleCallback(preloadHeavy, { timeout: 2500 });
+      } else {
+        heavyTimer = window.setTimeout(preloadHeavy, 1400);
+      }
     }, 600);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      if (heavyTimer) clearTimeout(heavyTimer);
+      if (idleHandle && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idleHandle);
+      }
+    };
   }, [voiceEnabled]);
 
   // 顶栏急停先读后端全局任务（含执行结果未知的作业），跨页面也可停止原目标；
@@ -364,6 +397,7 @@ function App() {
         <Navbar
           currentPath={currentPath}
           onNavigate={navigateTo}
+          onMcpClick={() => (voiceEnabled ? navigateTo("/voice") : setShowSettingsModal(true))}
           connectionStatus={connectionStatus}
           mcpStatus={mcpStatus}
           voiceStatus={voiceStatus}
@@ -412,7 +446,16 @@ function App() {
 
 
         <main className="main-content-viewport" key={currentPath}>
-          <Suspense fallback={<div className="ob-page" aria-busy="true" />}>
+          <Suspense
+            fallback={
+              <div className="ob-page ob-route-loading" aria-busy="true">
+                <div className="ob-card ob-route-loading-card">
+                  <span className="ob-route-spinner" aria-hidden="true" />
+                  <span>正在载入工作区…</span>
+                </div>
+              </div>
+            }
+          >
             {currentPath === "/material-lab" && (
               <MaterialLabPage onNavigate={navigateTo} />
             )}

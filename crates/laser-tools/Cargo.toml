@@ -7,7 +7,6 @@ edition = "2024"
 laser-contracts = { path = "../laser-contracts" }
 laser-core = { path = "../laser-core" }
 laser-device = { path = "../laser-device" }
-serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

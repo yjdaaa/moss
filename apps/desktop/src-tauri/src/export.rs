@@ -371,6 +371,7 @@ pub fn reveal_exported_file(path: String) -> Result<(), String> {
 fn open_in_file_manager(path: &Path, select: bool) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let mut cmd = std::process::Command::new("explorer.exe");
+    cmd.creation_flags(0x0800_0000);
     if select {
         // explorer 只认 `/select,"路径"`；整个参数被加引号时（路径含空格）会忽略选择、打开默认目录
         cmd.raw_arg(format!("/select,\"{}\"", path.display()));

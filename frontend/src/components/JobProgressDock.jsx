@@ -70,11 +70,21 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
         const next = jobsView(jobs);
         setError("");
         setViews((previous) => {
+          if (next.length === 0 && previous.length === 0) {
+            return previous;
+          }
           if (next.length === 0 && previous.length > 0) {
             // 任务从运行列表消失：只说“已结束”，不冒充“雕刻成功”
             setLingering(true);
             clearTimeout(lingerTimer.current);
             lingerTimer.current = setTimeout(() => alive.current && setLingering(false), JOB_LINGER_MS);
+            return next;
+          }
+          if (
+            next.length === previous.length &&
+            JSON.stringify(next) === JSON.stringify(previous)
+          ) {
+            return previous;
           }
           return next;
         });
@@ -84,12 +94,20 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
       }
       if (!cancelled) timer = setTimeout(poll, JOB_POLL_MS);
     };
+    const onVisibility = () => {
+      if (!document.hidden && !cancelled) {
+        clearTimeout(timer);
+        void poll();
+      }
+    };
     void poll();
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
       alive.current = false;
       clearTimeout(timer);
       clearTimeout(lingerTimer.current);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 

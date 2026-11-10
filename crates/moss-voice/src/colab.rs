@@ -372,8 +372,11 @@ try:
                     "-m", str(gguf_main),
                     "--mmproj", str(gguf_mmproj),
                     "--alias", "qwen3-vl-8b",
-                    "-ngl", "99",
+                    "-ngl", "all",
+                    "-fa", "auto",
                     "-c", "8192",
+                    "-np", "1",
+                    "--image-max-tokens", "1024",
                     "--jinja",
                     "--host", "127.0.0.1",
                     "--port", "8001",
@@ -428,11 +431,11 @@ try:
         except Exception:
             pass
 
-    gateway_code = """import io, os, pathlib, subprocess, threading
+    gateway_code = """import asyncio, io, os, pathlib, subprocess, threading
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 import numpy as np, soundfile as sf, torch, httpx, uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response, StreamingResponse
 from qwen_tts import Qwen3TTSModel
 
 TOKEN = os.environ["MOSS_COLAB_TOKEN"]
@@ -468,6 +471,7 @@ def ensure_default_ref_wav():
 ensure_default_ref_wav()
 tts_model = Qwen3TTSModel.from_pretrained("Qwen/Qwen3-TTS-12Hz-0.6B-Base", device_map="cuda:0", dtype=torch.float32, attn_implementation="sdpa")
 prompt_lock = threading.Lock()
+tts_lock = asyncio.Lock()
 current_ref_mtime = 0.0
 voice_prompt = None
 
@@ -480,6 +484,23 @@ def get_voice_prompt():
             voice_prompt = tts_model.create_voice_clone_prompt(ref_audio=str(REF_WAV), ref_text=DEFAULT_REF_TEXT, x_vector_only_mode=True)
             current_ref_mtime = mtime
         return voice_prompt
+
+def apply_speed(wav, speed):
+    if abs(speed - 1.0) <= 0.02 or len(wav) < 16:
+        return wav
+    out_len = max(1, int(round(len(wav) / speed)))
+    x_old = np.linspace(0.0, 1.0, num=len(wav), endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=out_len, endpoint=False)
+    return np.interp(x_new, x_old, wav).astype(np.float32)
+
+def synth_wav_bytes(text: str, speed: float) -> bytes:
+    vp = get_voice_prompt()
+    with torch.inference_mode():
+        wavs, sr = tts_model.generate_voice_clone(text=text, language="Auto", voice_clone_prompt=vp)
+    audio = apply_speed(np.asarray(wavs[0], dtype=np.float32), speed)
+    buf = io.BytesIO()
+    sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
+    return buf.getvalue()
 
 get_voice_prompt()
 app = FastAPI()
@@ -504,9 +525,27 @@ async def chat_completions(request: Request, authorization: str = Header(default
     verify_auth(authorization)
     body = await request.json()
     body["model"] = "qwen3-vl-8b"
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        resp = await client.post("http://127.0.0.1:8001/v1/chat/completions", json=body)
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    is_stream = bool(body.get("stream", False))
+    if not is_stream:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post("http://127.0.0.1:8001/v1/chat/completions", json=body)
+            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+    client = httpx.AsyncClient(timeout=120.0)
+    req = client.build_request("POST", "http://127.0.0.1:8001/v1/chat/completions", json=body)
+    resp = await client.send(req, stream=True)
+    if resp.status_code >= 400:
+        err_bytes = await resp.aread()
+        await resp.aclose()
+        await client.aclose()
+        return Response(content=err_bytes, status_code=resp.status_code, media_type="application/json")
+    async def event_gen():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 @app.post("/v1/audio/speech")
 async def audio_speech(request: Request, authorization: str = Header(default=None)):
@@ -515,12 +554,14 @@ async def audio_speech(request: Request, authorization: str = Header(default=Non
     text = (body.get("input") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty input")
-    vp = get_voice_prompt()
-    with torch.inference_mode():
-        wavs, sr = tts_model.generate_voice_clone(text=text, language="Auto", voice_clone_prompt=vp)
-    buf = io.BytesIO()
-    sf.write(buf, wavs[0], sr, format="WAV", subtype="PCM_16")
-    return Response(content=buf.getvalue(), media_type="audio/wav")
+    try:
+        raw_speed = float(body.get("speed", 1.0))
+    except (TypeError, ValueError):
+        raw_speed = 1.0
+    speed = min(4.0, max(0.25, raw_speed))
+    async with tts_lock:
+        wav_bytes = await asyncio.to_thread(synth_wav_bytes, text, speed)
+    return Response(content=wav_bytes, media_type="audio/wav")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
@@ -697,7 +738,22 @@ mod tests {
                 "moss-secret123".to_owned()
             ))
         );
-        assert!(cli_bootstrap_script().is_ascii());
+        let script = cli_bootstrap_script();
+        assert!(script.is_ascii());
+        assert!(
+            script.contains("StreamingResponse") && script.contains("text/event-stream"),
+            "CLI bootstrap gateway must proxy SSE streaming chat completions"
+        );
+        assert!(
+            script.contains("asyncio.to_thread(synth_wav_bytes, text, speed)")
+                && script.contains("tts_lock = asyncio.Lock()"),
+            "CLI bootstrap gateway must serialize GPU TTS off the event loop and honor speed"
+        );
+        assert!(
+            script.contains("\"-np\", \"1\"")
+                && script.contains("\"--image-max-tokens\", \"1024\""),
+            "CLI bootstrap llama-server must bound parallel slots and image tokens on 16GB T4"
+        );
 
         let mut valid_wav = b"RIFF\x24\x00\x00\x00WAVEfmt ".to_vec();
         valid_wav.resize(128, 0);

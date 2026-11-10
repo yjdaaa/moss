@@ -2,6 +2,11 @@
 target/
 dist/
 
+# Workspace 仅使用根目录 Cargo.lock（以及独立工作区 apps/moss-voice-local/Cargo.lock）
+/crates/**/Cargo.lock
+/apps/desktop/src-tauri/Cargo.lock
+/apps/moss-host/Cargo.lock
+
 # Test temporary directories, caches, and spike fixtures
 .tmp-*
 .runtime/

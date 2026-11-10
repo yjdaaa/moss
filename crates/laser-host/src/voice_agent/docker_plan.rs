@@ -3,7 +3,6 @@
 //! No Docker execution is exported to AgentRunner. The plan cannot accept a
 //! user workspace, task, shell fragment, model credential or network name.
 //! It only mounts one temporary synthetic canary in a read-only directory.
-#![allow(dead_code)]
 use getrandom::fill;
 use std::{ffi::OsString, fs, path::Path};
 
@@ -276,9 +275,18 @@ mod tests {
             docker: &'a str,
             name: String,
         }
+        fn docker_cmd(bin: &str) -> Command {
+            let mut cmd = Command::new(bin);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            cmd
+        }
         impl Drop for OwnedContainer<'_> {
             fn drop(&mut self) {
-                let result = Command::new(self.docker)
+                let result = docker_cmd(self.docker)
                     .args([
                         "inspect",
                         "--format",
@@ -290,7 +298,7 @@ mod tests {
                     && result.status.success()
                     && String::from_utf8_lossy(&result.stdout).trim() == self.name
                 {
-                    let _ = Command::new(self.docker)
+                    let _ = docker_cmd(self.docker)
                         .args(["rm", "--force", &self.name])
                         .output();
                 }
@@ -300,7 +308,7 @@ mod tests {
             docker: &docker,
             name: plan.name.clone(),
         };
-        let mut command = Command::new(&docker);
+        let mut command = docker_cmd(&docker);
         command.env_clear();
         for name in [
             "SystemRoot",

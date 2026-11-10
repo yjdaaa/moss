@@ -73,7 +73,12 @@ export function SettingsModal({
   useEffect(() => {
     if (!visible) return;
 
-    const saved = localStorage.getItem("moss_close_action") || "ask";
+    let saved = "ask";
+    try {
+      saved = globalThis.localStorage?.getItem("moss_close_action") || "ask";
+    } catch {
+      // 存储不可用时退回默认“每次询问”
+    }
     setCloseAction(saved);
     setHideTopPills(typeof hideTopPillsProp === "boolean" ? hideTopPillsProp : readHideTopPills());
 
@@ -126,7 +131,11 @@ export function SettingsModal({
 
   const handleActionChange = (action) => {
     setCloseAction(action);
-    localStorage.setItem("moss_close_action", action);
+    try {
+      globalThis.localStorage?.setItem("moss_close_action", action);
+    } catch {
+      // 存储不可用时仅当次会话生效
+    }
   };
 
   const handleHideTopPillsChange = (checked) => {

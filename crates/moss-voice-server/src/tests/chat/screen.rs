@@ -255,20 +255,22 @@ fn screen_pack_device_switches_full_screen_scenes_for_conversation_and_engraving
         }]
     });
     let seen = read_until(&mut device, |v| v["type"] == "tts" && v["state"] == "start");
+    let celebrate_at = seen
+        .iter()
+        .position(|v| v["type"] == "llm" && v["emotion"] == "hud_celebrate")
+        .expect("完工先切全屏庆祝画面");
     assert!(
-        seen.iter()
-            .any(|v| v["type"] == "llm" && v["emotion"] == "hud_celebrate")
-    );
-    assert!(
-        seen.iter()
+        seen[celebrate_at..]
+            .iter()
             .any(|v| v["type"] == "stt" && v["text"] == "[雕刻完成] 共 1000 行")
     );
     assert!(
-        !seen
+        !seen[celebrate_at..]
             .iter()
             .any(|v| v["type"] == "mcp"
                 && v["payload"]["params"]["name"] == "self.screen.preview_image"),
-        "刷了画风包的设备不再推半屏完工徽章"
+        "刷了画风包的设备进入完工阶段后不再推半屏完工徽章: {:?}",
+        &seen[celebrate_at..]
     );
     let during_notice = emotions_until_tts_stop(&mut device);
     assert_eq!(

@@ -20,6 +20,7 @@ import {
   savedConnectionForm,
   strictHintText,
 } from "../aiPreviewState.js";
+import { createPollRunner } from "../pollGuard.js";
 import { SendOverlay } from "./SendOverlay.jsx";
 import { voiceApi } from "../voiceApi.js";
 import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } from "../approvalJobMonitor.js";
@@ -54,12 +55,12 @@ export function AiPreviewCenter() {
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
-    const sync = async () => {
+    const sync = createPollRunner(async (isCurrent) => {
       const [recent, approvals] = await Promise.all([
         postJson("/api/workflow", { action: "recent" }),
         getJson("/v1/approvals?status=pending"),
       ]);
-      if (cancelled || !(recent.ok && recent.data?.success)) return;
+      if (cancelled || !isCurrent() || !(recent.ok && recent.data?.success)) return;
       const workflows = Array.isArray(recent.data.result?.workflows) ? recent.data.result.workflows : [];
       const approvalTargets = new Set(
         (approvals.ok && approvals.data?.success ? approvals.data.result?.approvals || [] : [])
@@ -81,15 +82,30 @@ export function AiPreviewCenter() {
       const list = pendingAiPreviews(workflows, { since: sinceRef.current, dismissed: dismissedRef.current, approvalTargets });
       list.forEach((record) => watchedRef.current.set(record.workflow_id, true));
       setPending((previous) => {
+        if (list.length === 0 && previous.length === 0) return previous;
         if (list.some((record) => !previous.some((item) => item.workflow_id === record.workflow_id))) setHidden(false);
+        if (
+          list.length === previous.length &&
+          list.every((record, idx) => record.workflow_id === previous[idx]?.workflow_id && record.status === previous[idx]?.status)
+        ) {
+          return previous;
+        }
         return list;
       });
-    };
+    });
     void sync();
-    const timer = setInterval(sync, AI_PREVIEW_POLL_MS);
+    const timer = setInterval(() => {
+      if (!document.hidden) void sync();
+    }, AI_PREVIEW_POLL_MS);
+    const onVisibility = () => {
+      if (!document.hidden) void sync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
+      sync.invalidate();
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [enabled]);
 

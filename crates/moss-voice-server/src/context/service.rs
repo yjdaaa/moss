@@ -69,7 +69,6 @@ impl ExtractionRun {
     }
 
     /// Rebuild from stored JSON columns; anything unexpected fails closed.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_json(
         id: &str,
         scope: ScopeKey,

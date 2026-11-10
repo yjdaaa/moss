@@ -44,7 +44,7 @@ pub mod speaker_enrollment;
 mod state;
 pub mod tools;
 pub mod vision;
-pub mod wake_assets; // n61 设备唤醒词资源包：私密窗口逐台确认推送（2026-11-06）
+pub mod wake_assets; // n61 设备唤醒词资源包：本机主窗口逐台确认推送（n67 起取消独立安全窗口）
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;

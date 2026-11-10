@@ -2194,7 +2194,6 @@ impl OneJevGateway {
         Ok(gateway)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn spawn_with_upstream(
         model_id: String,
         accelerator: DetectedAccelerator,

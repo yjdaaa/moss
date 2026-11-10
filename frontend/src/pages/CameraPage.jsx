@@ -133,6 +133,7 @@ export function CameraPage({ onNavigate }) {
   const [startingServer, setStartingServer] = useState(false);
   const [viewPrefs, setViewPrefs] = useState(() => readViewPrefs());
   const [fpsView, setFpsView] = useState(null);
+  const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const arrivalsRef = useRef([]);
 
   const mountedRef = useRef(true);
@@ -145,8 +146,13 @@ export function CameraPage({ onNavigate }) {
 
   useEffect(() => {
     mountedRef.current = true;
+    const onVisibility = () => {
+      setPageVisible(!document.hidden);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       mountedRef.current = false;
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
@@ -191,6 +197,7 @@ export function CameraPage({ onNavigate }) {
   }, [autoRefresh]);
 
   useEffect(() => {
+    if (!pageVisible) return undefined;
     const pollStatus = createPollRunner(async (isCurrent) => {
       try {
         const next = await voiceApi.builtinStatus();
@@ -212,12 +219,12 @@ export function CameraPage({ onNavigate }) {
       pollStatus.invalidate();
       clearInterval(timer);
     };
-  }, []);
+  }, [pageVisible]);
 
   const isWaitingFrame = Boolean(capturing || frameMeta?.pending);
 
   useEffect(() => {
-    if (!selectedDeviceId) {
+    if (!selectedDeviceId || !pageVisible) {
       activeFramePollRef.current = null;
       return undefined;
     }
@@ -283,7 +290,7 @@ export function CameraPage({ onNavigate }) {
       }
       clearInterval(timer);
     };
-  }, [selectedDeviceId, isWaitingFrame, autoRefresh]);
+  }, [selectedDeviceId, isWaitingFrame, autoRefresh, pageVisible]);
 
   const triggerCapture = useCallback(
     async ({ silent = false } = {}) => {
@@ -336,18 +343,18 @@ export function CameraPage({ onNavigate }) {
     [autoRefresh, activeDevice, frameMeta],
   );
 
-  // 串行自动刷新：上一帧完成且满间隔、且小智空闲时才触发下一帧
+  // 串行自动刷新：上一帧完成且满间隔、窗口可见且小智空闲时才触发下一帧（收进系统托盘时自动停拍省电）
   useEffect(() => {
-    if (!autoRefresh || !autoGate.allow || capturing) return undefined;
+    if (!autoRefresh || !pageVisible || !autoGate.allow || capturing) return undefined;
     const elapsed = Date.now() - lastCaptureTriggeredAtRef.current;
     const waitMs = Math.max(CAMERA_AUTO_GAP_MS, CAMERA_AUTO_INTERVAL_MS - elapsed);
     const timer = setTimeout(() => {
-      if (mountedRef.current) {
+      if (mountedRef.current && !document.hidden) {
         void triggerCapture({ silent: true });
       }
     }, waitMs);
     return () => clearTimeout(timer);
-  }, [autoRefresh, autoGate.allow, capturing, frame?.seq, triggerCapture]);
+  }, [autoRefresh, pageVisible, autoGate.allow, capturing, frame?.seq, triggerCapture]);
 
   const handleToggleAuto = useCallback(() => {
     if (autoRefresh) {

@@ -95,7 +95,6 @@ impl RuntimeDb {
     }
 
     /// 新建一台设备的推送；同一设备还没开始下载的旧推送被替换。
-    #[allow(clippy::too_many_arguments)]
     pub fn create_firmware_offer(
         &self,
         delivery_id: &str,

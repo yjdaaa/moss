@@ -24,6 +24,7 @@ const MCP_PILL_CLASS = {
 export function Navbar({
   currentPath,
   onNavigate,
+  onMcpClick = null,
   connectionStatus,
   mcpStatus,
   voiceStatus,
@@ -44,13 +45,19 @@ export function Navbar({
   const headerRef = useRef(null);
 
   // 顶栏实际高度写进 CSS 变量 --ob-top-h，页面里的吸顶元素（如语音中心标签栏）贴在它下面；
-  // 收起为右上角悬浮胶囊时不占整行高度（--ob-top-h 设为 0px，释放顶部全宽视野）
+  // 收起为右上角悬浮胶囊时不占整行高度（--ob-top-h 设为 0px），并将实测胶囊宽度写入 --ob-compact-top-w 供各页首行避让
   useLayoutEffect(() => {
     const element = headerRef.current;
     if (!element) return undefined;
     const apply = () => {
       const h = compact ? 0 : element.offsetHeight;
       document.documentElement.style.setProperty("--ob-top-h", `${h}px`);
+      if (compact) {
+        const w = Math.max(248, Math.ceil(element.offsetWidth + 28));
+        document.documentElement.style.setProperty("--ob-compact-top-w", `${w}px`);
+      } else {
+        document.documentElement.style.removeProperty("--ob-compact-top-w");
+      }
     };
     apply();
     if (typeof ResizeObserver === "undefined") return undefined;
@@ -81,19 +88,37 @@ export function Navbar({
             <span>{hardware.text}</span>
           </button>
 
-          <div
-            className={`ob-pill conn-pill mcp-pill--${mcpPill.key} ${pillClass}`}
-            title={
-              mcpPill.key === "unconfigured"
-                ? "小智 MCP 网关未配置（桌面端在语音中心填写接入点；独立 moss-host 在偏好设置中填写，或设置 MCP_ENDPOINT）"
-                : `小智 MCP 网关：${mcpPill.label}${mcpStatus?.client_info ? ` · ${mcpStatus.client_info}` : ""}${mcpStatus?.endpoint ? ` · ${mcpStatus.endpoint}` : ""}`
-            }
-            id="nav-mcp-status"
-            data-state={mcpPill.key}
-          >
-            <Radio size={13} aria-hidden="true" />
-            <span>{mcpPill.text}</span>
-          </div>
+          {onMcpClick ? (
+            <button
+              type="button"
+              onClick={onMcpClick}
+              className={`ob-pill conn-pill mcp-pill--${mcpPill.key} ${pillClass}`}
+              title={
+                mcpPill.key === "unconfigured"
+                  ? "点击配置小智语音与 MCP 接入点"
+                  : `小智 MCP 网关：${mcpPill.label}${mcpStatus?.client_info ? ` · ${mcpStatus.client_info}` : ""}${mcpStatus?.endpoint ? ` · ${mcpStatus.endpoint}` : ""}（点击查看设置）`
+              }
+              id="nav-mcp-status"
+              data-state={mcpPill.key}
+            >
+              <Radio size={13} aria-hidden="true" />
+              <span>{mcpPill.text}</span>
+            </button>
+          ) : (
+            <div
+              className={`ob-pill conn-pill mcp-pill--${mcpPill.key} ${pillClass}`}
+              title={
+                mcpPill.key === "unconfigured"
+                  ? "小智 MCP 网关未配置（桌面端在语音中心填写接入点；独立 moss-host 在偏好设置中填写，或设置 MCP_ENDPOINT）"
+                  : `小智 MCP 网关：${mcpPill.label}${mcpStatus?.client_info ? ` · ${mcpStatus.client_info}` : ""}${mcpStatus?.endpoint ? ` · ${mcpStatus.endpoint}` : ""}`
+              }
+              id="nav-mcp-status"
+              data-state={mcpPill.key}
+            >
+              <Radio size={13} aria-hidden="true" />
+              <span>{mcpPill.text}</span>
+            </div>
+          )}
 
           {showApprovals && (
             <button

@@ -49,7 +49,7 @@
 
 ### NV19 长期记忆（Tauri 桌面命令，非 HTTP 路由）
 
-只由本机打包的 `voice-private` 窗口调用：权限单独放在 `capabilities/voice-context.json`（`windows:["voice-private"]`，无 `remote`），处理函数开头再执行 `require_voice_private_asset`。主窗口、局域网、手机端都没有这两个命令；移动端返回 `voice_desktop_only`。
+桌面主窗口专用（n26 / n67 起独立安全窗口已取消）：权限在 `capabilities/voice-private-main.json`（`windows:["main"]` + 回环 `remote`），处理函数开头再用 `require_private_settings_window` 固定为本进程回环后端上的主窗口；局域网、其他本机端口、手机端均不可调用，移动端返回 `voice_desktop_only`。
 
 - `voice_context_pick_folder()` → `null`（取消）或 `{directories, files}`。点击后由原生对话框选择文件夹，并在本机为**当前项目**建立资料索引；路径不经前端，也不出现在提示词里。没有当前项目时报 `context_no_project`。
 - `voice_context_manage({input})`，`input.action` 取值：
@@ -65,7 +65,7 @@
 
 ### NV11 内置语音信息插件（Tauri 桌面命令，非 HTTP 路由）
 
-`voice.builtin_plugins` 为不含密钥的配置对象，天气、农历、新闻、联网搜索与RAGFlow五项均默认关闭。秘密保存在SQLite `app_secrets` 的`voice.plugin.weather/search/metaso/rag`；仅packaged `voice-private`窗口通过`capabilities/voice-plugins.json`管理，主窗口/远程origin不能读取或修改。旧配置默认Tavily，`search_provider=tavily|metaso`选择独立host与密钥，失败不换供应商。
+`voice.builtin_plugins` 为不含密钥的配置对象，天气、农历、新闻、联网搜索与RAGFlow五项均默认关闭。秘密保存在SQLite `app_secrets` 的`voice.plugin.weather/search/metaso/rag`；仅经 `capabilities/voice-private-main.json` 授权且通过 `require_private_settings_window` 校验的本机主窗口可管理，局域网或其他远程来源不能读取或修改。旧配置默认Tavily，`search_provider=tavily|metaso`选择独立host与密钥，失败不换供应商。
 
 - `voice_plugins_status()` → `{settings,keys:{weather:boolean,search:boolean,metaso:boolean,rag:boolean}}`；不返回原始key。
 - `voice_plugins_save({input:{settings,keys}})` → 同上。`keys.<kind>` 格式 `{action:"keep"|"set"|"clear",value?:string}`；默认保留，启用需要密钥的插件时须已有或本次新设密钥；配置校验失败时不得使插件生效。新闻源记录 `{id,url,kind?:"rss"|"newsnow",source_id?:string}`，旧记录缺省 `rss`；RSS 只允许 HTTPS，NewsNow 还允许显式填写的本机/LAN HTTP；两者禁止在 URL 中携带 query 或凭据。NewsNow 只访问固定 `/api/s?id=<配置来源ID>`，校验 `status=success/cache`、`id`、`items`，缺字段返回 schema 错误。RAGFlow 数据集 ID 只能由桌面保存，不能从模型输入指定。

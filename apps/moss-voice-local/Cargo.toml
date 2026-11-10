@@ -9,11 +9,19 @@ publish = false
 # 独立工作区：不加入 MOSS 根 workspace，MOSS 的构建与测试不编译 sherpa-onnx
 [workspace]
 
+[workspace.lints.clippy]
+type_complexity = "allow"
+large_enum_variant = "allow"
+result_large_err = "allow"
+
 [dependencies]
 moss-voice-local-proto = { path = "../../crates/moss-voice-local-proto" }
 # 官方 Rust 绑定，默认静态链接；构建时从 GitHub 下载预编译静态库（离线构建可设 SHERPA_ONNX_LIB_DIR）
 sherpa-onnx = "=1.13.8"
 sha2 = "0.10"
+
+[lints]
+workspace = true
 
 [profile.release]
 opt-level = 3

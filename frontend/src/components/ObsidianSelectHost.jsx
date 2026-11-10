@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check } from "lucide-react";
 
 /**
@@ -21,6 +21,26 @@ function parseOptionLabel(rawText) {
   return { title, badge, tone };
 }
 
+function buildSelectOptions(selectEl) {
+  return Array.from(selectEl.options).map((opt, index) => ({
+    index,
+    value: opt.value,
+    label: opt.textContent || opt.label || opt.value,
+    disabled: Boolean(opt.disabled),
+    ...parseOptionLabel(opt.textContent || opt.label || opt.value),
+  }));
+}
+
+function isEligibleSelect(el) {
+  return Boolean(
+    el &&
+      el.tagName === "SELECT" &&
+      !el.disabled &&
+      !el.multiple &&
+      !(el.size && el.size > 1),
+  );
+}
+
 function triggerSelectValue(selectEl, nextValue) {
   if (!selectEl || selectEl.value === nextValue) return;
   const descriptor = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value");
@@ -35,8 +55,9 @@ function triggerSelectValue(selectEl, nextValue) {
 
 /**
  * 全局 `<select>` 曜石浮层增强器：
- * - 拦截鼠标点击原生 `<select>` 弹出的 Windows 系统灰白丑框，替换为曜石毛玻璃浮层菜单；
- * - 原生 `<select>` DOM 节点、id、value、aria-label 完全保留，键盘导航与自动化测试 `selectOption()` 零影响。
+ * - 拦截鼠标与键盘激活原生 `<select>` 弹出的系统灰白框，替换为曜石毛玻璃浮层菜单；
+ * - 自动将当前选中项与方向键高亮项滚入可视区，并在底层选项异步更新时实时同步；
+ * - 原生 `<select>` DOM 节点、id、value、aria-label 完全保留，自动化测试 `selectOption()` 零影响。
  */
 export function ObsidianSelectHost() {
   const [menu, setMenu] = useState(null);
@@ -54,13 +75,7 @@ export function ObsidianSelectHost() {
 
     const openForSelect = (selectEl) => {
       const rect = selectEl.getBoundingClientRect();
-      const options = Array.from(selectEl.options).map((opt, index) => ({
-        index,
-        value: opt.value,
-        label: opt.textContent || opt.label || opt.value,
-        disabled: Boolean(opt.disabled),
-        ...parseOptionLabel(opt.textContent || opt.label || opt.value),
-      }));
+      const options = buildSelectOptions(selectEl);
       const selectedIdx = Math.max(
         0,
         options.findIndex((o) => o.value === selectEl.value),
@@ -102,7 +117,7 @@ export function ObsidianSelectHost() {
         if (activeSelectRef.current) closeMenu();
         return;
       }
-      if (selectEl.disabled || selectEl.multiple || (selectEl.size && selectEl.size > 1)) {
+      if (!isEligibleSelect(selectEl)) {
         return;
       }
       event.preventDefault();
@@ -115,7 +130,20 @@ export function ObsidianSelectHost() {
     };
 
     const handleKeyDown = (event) => {
-      if (!activeSelectRef.current) return;
+      if (!activeSelectRef.current) {
+        const focusedSelect = event.target?.closest?.("select");
+        if (
+          isEligibleSelect(focusedSelect) &&
+          (event.key === " " ||
+            event.key === "Enter" ||
+            event.key === "ArrowDown" ||
+            event.key === "ArrowUp")
+        ) {
+          event.preventDefault();
+          openForSelect(focusedSelect);
+        }
+        return;
+      }
       if (event.key === "Escape" || event.key === "Tab") {
         closeMenu();
         return;
@@ -179,6 +207,52 @@ export function ObsidianSelectHost() {
     };
   }, []);
 
+  // 菜单展开期间若底层 <select> 的选项异步刷新（如串口扫描、模型列表拉取），实时同步浮层列表
+  useEffect(() => {
+    const selectEl = menu?.selectEl;
+    if (!selectEl || typeof MutationObserver === "undefined") return undefined;
+    const observer = new MutationObserver(() => {
+      if (!selectEl.isConnected || selectEl.disabled) {
+        selectEl.removeAttribute("data-ob-open");
+        if (activeSelectRef.current === selectEl) activeSelectRef.current = null;
+        setMenu(null);
+        return;
+      }
+      const options = buildSelectOptions(selectEl);
+      setMenu((prev) => {
+        if (!prev || prev.selectEl !== selectEl) return prev;
+        const selectedIdx = options.findIndex((o) => o.value === selectEl.value);
+        const clampedActive = Math.min(
+          Math.max(0, selectedIdx >= 0 ? selectedIdx : prev.activeIndex),
+          Math.max(0, options.length - 1),
+        );
+        return {
+          ...prev,
+          options,
+          value: selectEl.value,
+          activeIndex: clampedActive,
+        };
+      });
+    });
+    observer.observe(selectEl, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["disabled", "label", "value"],
+    });
+    return () => observer.disconnect();
+  }, [menu?.selectEl]);
+
+  // 展开时与键盘上下移动高亮时，自动将目标选项滚入浮层可视范围
+  const activeSelectEl = menu?.selectEl ?? null;
+  const activeIdx = menu?.activeIndex ?? -1;
+  useLayoutEffect(() => {
+    if (!activeSelectEl || activeIdx < 0 || !popoverRef.current) return;
+    const activeBtn = popoverRef.current.querySelector(`[data-ob-idx="${activeIdx}"]`);
+    activeBtn?.scrollIntoView?.({ block: "nearest" });
+  }, [activeSelectEl, activeIdx]);
+
   if (!menu) return null;
 
   return (
@@ -203,6 +277,7 @@ export function ObsidianSelectHost() {
               key={`${opt.index}-${opt.value}`}
               type="button"
               role="option"
+              data-ob-idx={idx}
               aria-selected={selected}
               disabled={opt.disabled}
               className={`ob-select-option${selected ? " is-selected" : ""}${active ? " is-active" : ""}`}

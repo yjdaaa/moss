@@ -213,12 +213,6 @@
           "markdownDescription": "Enables the open_export_dir command without any pre-configured scope."
         },
         {
-          "description": "Enables the open_voice_private command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-open-voice-private",
-          "markdownDescription": "Enables the open_voice_private command without any pre-configured scope."
-        },
-        {
           "description": "Enables the pick_export_dir command without any pre-configured scope.",
           "type": "string",
           "const": "allow-pick-export-dir",
@@ -655,12 +649,6 @@
           "type": "string",
           "const": "deny-open-export-dir",
           "markdownDescription": "Denies the open_export_dir command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the open_voice_private command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-open-voice-private",
-          "markdownDescription": "Denies the open_voice_private command without any pre-configured scope."
         },
         {
           "description": "Denies the pick_export_dir command without any pre-configured scope.",

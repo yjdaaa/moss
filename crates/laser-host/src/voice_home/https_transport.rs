@@ -1,7 +1,6 @@
 //! NV15 HTTPS transport for approved plans only; never registered directly to
 //! an LLM, public HTTP route or Tauri command. Even a prepared transport
 //! cannot submit without the durable HomeControl approval coordinator.
-#![allow(dead_code)]
 use super::approved::HomeControlTransport;
 use reqwest::{StatusCode, Url, blocking::Client, header};
 use std::{io::Read, time::Duration};

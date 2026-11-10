@@ -2440,11 +2440,10 @@ function ColabBridgeSection({ builtin }) {
         默认关闭，平时不改你现有的云端/本地配置。已登录 Colab CLI 时，直接打开下方开关即可在后台自动分配免费 Colab T4（16GB）、拉起 Qwen3-VL-8B + 550W 克隆声 Qwen3-TTS-0.6B 并回填隧道，临时接管「大模型 + 摄像头看图 + 语音合成」三项，其余设置保持现状；关闭开关立即恢复原三项配置。
       </p>
       <div
-        className={`voice-hint voice-hint--${!cliInstalled ? "warn" : cliLoggedIn ? "ok" : "warn"}`}
+        className={`voice-hint voice-hint--${!cliInstalled ? "warn" : cliLoggedIn ? "ok" : "warn"} voice-colab-cli-bar`}
         id="voice-colab-cli-bar"
-        style={{ display: "flex", flexDirection: "column", gap: 6 }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <div className="voice-colab-cli-head">
           <span id="voice-colab-cli-status">
             <b>Colab CLI 状态：</b>
             {!cliInstalled
@@ -2453,7 +2452,7 @@ function ColabBridgeSection({ builtin }) {
                 ? `已登录 Colab CLI${cli.account_hint ? `（${cli.account_hint}）` : ""} · 开启联动开关即可自动跑云端 T4`
                 : "未登录 Colab CLI（请先点击右侧「登录 Colab CLI」完成 Google 授权，或手动填写隧道地址）"}
           </span>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <div className="voice-colab-cli-actions">
             {!cliInstalled ? (
               <button
                 type="button"
@@ -2520,10 +2519,9 @@ function ColabBridgeSection({ builtin }) {
           </div>
         </div>
         {cliInstalled && !cliLoggedIn && (showAuthInput || cli.auth_url) && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 4 }} id="voice-colab-cli-auth-box">
+          <div className="voice-colab-auth-box" id="voice-colab-cli-auth-box">
             <input
-              className="text-input mono"
-              style={{ flex: "1 1 260px" }}
+              className="text-input mono voice-colab-auth-input"
               value={authCode}
               disabled={Boolean(cliBusy)}
               placeholder="粘贴浏览器 Google 授权后显示的 4/0A... 授权码"
@@ -2561,22 +2559,19 @@ function ColabBridgeSection({ builtin }) {
             </button>
           </div>
         )}
-        <div
-          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 6 }}
-          id="voice-colab-ref-audio-row"
-        >
-          <span style={{ fontSize: 12 }}>
+        <div className="voice-colab-ref-row" id="voice-colab-ref-audio-row">
+          <span className="voice-colab-ref-note">
             <b>550W 原声克隆样本（本机保存，0 显卡负担）：</b>
             {refAudioConfigured
               ? `已选「${refAudioName}」（每次云端 T4 启动自动上传克隆）`
               : "未选自定义音频（默认使用内置低沉男声基准，建议选 3~8 秒干净 MOSS 原声 .wav）"}
           </span>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div className="voice-colab-cli-actions">
             <input
               ref={refAudioInputRef}
               type="file"
               accept=".wav,audio/wav"
-              style={{ display: "none" }}
+              className="sr-only-file"
               onChange={handlePickRefAudio}
               id="voice-colab-ref-audio-input"
             />
@@ -2603,13 +2598,13 @@ function ColabBridgeSection({ builtin }) {
           </div>
         </div>
         {cli.runner_step && (
-          <div className="mono" style={{ fontSize: 12, opacity: 0.9 }} id="voice-colab-cli-runner-step">
+          <div className="mono voice-colab-runner-step" id="voice-colab-cli-runner-step">
             {runnerBusy ? "⏳ " : runnerState === "running" ? "✅ " : ""}
             {cli.runner_step}
           </div>
         )}
         {cli.runner_error && (
-          <div style={{ color: "var(--danger, #ff6b6b)", fontSize: 12 }} role="alert" id="voice-colab-cli-runner-error">
+          <div className="voice-colab-runner-error" role="alert" id="voice-colab-cli-runner-error">
             {cli.runner_error}
           </div>
         )}

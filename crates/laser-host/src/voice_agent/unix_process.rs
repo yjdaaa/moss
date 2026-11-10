@@ -8,7 +8,6 @@
 //! cancellation, revocation, or timeout.
 //! Like Windows Job Objects, process groups bound process-tree lifetime only and
 //! do not restrict filesystem reads or network access outside the CLI's own sandbox.
-#![allow(dead_code)]
 
 #[cfg(test)]
 mod tests;
@@ -43,7 +42,15 @@ pub(super) enum Finish {
 pub(super) struct ProcessResult {
     pub finish: Finish,
     pub output: String,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "audited by process-harness unit tests")
+    )]
     pub truncated: bool,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "audited by process-harness unit tests")
+    )]
     pub children_reaped: bool,
 }
 

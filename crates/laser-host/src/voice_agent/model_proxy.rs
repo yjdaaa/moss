@@ -4,7 +4,6 @@
 //! It is not installed into the production AgentCoordinator. The only admitted
 //! route is a hardcoded synthetic /v1/responses responder for negative tests.
 //! The future egress service requires an independent TLS/SSRF review.
-#![allow(dead_code)]
 
 mod egress;
 mod tls_client;

@@ -323,7 +323,7 @@ pub fn fast_reply_params(base_url: &str, model: &str) -> Option<serde_json::Map<
     thinking_off_params(base_url, model)
 }
 
-fn is_cline_api_url(url: &str) -> bool {
+pub fn is_cline_api_url(url: &str) -> bool {
     reqwest::Url::parse(url.trim())
         .ok()
         .and_then(|parsed| {

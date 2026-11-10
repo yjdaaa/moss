@@ -1992,6 +1992,7 @@ mod imp {
         runner_step: String,
         runner_error: Option<String>,
         generation: u64,
+        active_pid: Option<u32>,
     }
 
     pub struct BuiltinVoice {
@@ -3320,6 +3321,34 @@ mod imp {
                 "clear_ref_audio" => {
                     let _ = std::fs::remove_file(self.colab_ref_audio_path());
                     let _ = std::fs::remove_file(self.colab_ref_audio_meta_path());
+                    #[cfg(not(test))]
+                    if let Some(bin) = self.find_colab_cli_binary()
+                        && self.colab_cli_logged_in()
+                    {
+                        let slot = self.colab_cli.clone();
+                        std::thread::spawn(move || {
+                            let out = Self::colab_cli_command(&bin)
+                                .args([
+                                    "exec",
+                                    "-s",
+                                    moss_voice::colab::COLAB_CLI_SESSION_NAME,
+                                    "--timeout",
+                                    "25",
+                                    "-c",
+                                    "import pathlib; pathlib.Path('/content/moss_ref.wav').unlink(missing_ok=True)",
+                                ])
+                                .stdin(std::process::Stdio::null())
+                                .output();
+                            if let Ok(out) = out
+                                && out.status.success()
+                                && let Ok(mut st) = slot.lock()
+                            {
+                                st.runner_step =
+                                    "已清除云端自定义参考音频，恢复内置低沉男声基准（下一句合成生效）"
+                                        .into();
+                            }
+                        });
+                    }
                     Ok(())
                 }
                 "login_start" => {
@@ -3452,16 +3481,13 @@ mod imp {
                     if let Some(path) = self.colab_cli_token_path() {
                         let _ = std::fs::remove_file(path);
                     }
+                    self.cancel_colab_cli_runner(Some("已退出 Colab CLI 登录"));
                     if let Ok(mut st) = self.colab_cli.lock() {
-                        st.generation = st.generation.wrapping_add(1);
                         st.account_hint.clear();
                         st.expires_in.clear();
                         st.auth_url = None;
                         st.whoami_probed = false;
                         st.whoami_probing = false;
-                        st.runner_state = "idle".into();
-                        st.runner_step = "已退出 Colab CLI 登录".into();
-                        st.runner_error = None;
                     }
                     Ok(())
                 }
@@ -3479,12 +3505,7 @@ mod imp {
                     Ok(())
                 }
                 "stop_session" => {
-                    if let Ok(mut st) = self.colab_cli.lock() {
-                        st.generation = st.generation.wrapping_add(1);
-                        st.runner_state = "idle".into();
-                        st.runner_step = "正在释放云端 Colab T4 会话...".into();
-                        st.runner_error = None;
-                    }
+                    self.cancel_colab_cli_runner(Some("正在释放云端 Colab T4 会话..."));
                     #[cfg(not(test))]
                     if let Some(bin) = self.find_colab_cli_binary() {
                         let slot = self.colab_cli.clone();
@@ -3505,6 +3526,29 @@ mod imp {
                     Ok(())
                 }
                 _ => Err(invalid("未知的 colab_cli 操作")),
+            }
+        }
+
+        fn cancel_colab_cli_runner(&self, step_note: Option<&str>) {
+            #[cfg_attr(test, allow(unused_variables))]
+            let pid_to_kill = if let Ok(mut st) = self.colab_cli.lock() {
+                st.generation = st.generation.wrapping_add(1);
+                if st.runner_state == "starting" || step_note.is_some() {
+                    st.runner_state = "idle".into();
+                }
+                if let Some(note) = step_note {
+                    st.runner_step = note.into();
+                    st.runner_error = None;
+                } else if st.runner_step.contains("正在") {
+                    st.runner_step = "已取消自动拉起云端 Colab T4".into();
+                }
+                st.active_pid.take()
+            } else {
+                None
+            };
+            #[cfg(not(test))]
+            if let Some(pid) = pid_to_kill {
+                Self::kill_colab_pid(pid);
             }
         }
 
@@ -3626,10 +3670,34 @@ mod imp {
                                 &voice.colab_cli,
                                 "正在向 Google 申请免费 T4 显卡 (colab new -s moss-t4 --gpu T4)...",
                             );
-                            let new_out = Self::colab_cli_command(&bin)
+                            let child = Self::colab_cli_command(&bin)
                                 .args(["new", "-s", session_name, "--gpu", "T4"])
                                 .stdin(std::process::Stdio::null())
-                                .output();
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped())
+                                .spawn();
+                            let child = match child {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    fail(&voice.colab_cli, format!("调用 colab new 失败：{e}"));
+                                    return;
+                                }
+                            };
+                            let new_pid = child.id();
+                            if let Ok(mut st) = voice.colab_cli.lock() {
+                                if st.generation != generation {
+                                    drop(st);
+                                    Self::kill_colab_pid(new_pid);
+                                    return;
+                                }
+                                st.active_pid = Some(new_pid);
+                            }
+                            let new_out = child.wait_with_output();
+                            if let Ok(mut st) = voice.colab_cli.lock()
+                                && st.active_pid == Some(new_pid)
+                            {
+                                st.active_pid = None;
+                            }
                             match new_out {
                                 Ok(out) if out.status.success() => {}
                                 Ok(out) => {
@@ -3645,7 +3713,7 @@ mod imp {
                                     return;
                                 }
                                 Err(e) => {
-                                    fail(&voice.colab_cli, format!("调用 colab new 失败：{e}"));
+                                    fail(&voice.colab_cli, format!("等待 colab new 失败：{e}"));
                                     return;
                                 }
                             }
@@ -3726,6 +3794,14 @@ mod imp {
                                 }
                             };
                             let child_pid = child.id();
+                            if let Ok(mut st) = voice.colab_cli.lock() {
+                                if st.generation != generation {
+                                    drop(st);
+                                    Self::kill_colab_pid(child_pid);
+                                    return;
+                                }
+                                st.active_pid = Some(child_pid);
+                            }
 
                             let stderr_handle = child.stderr.take().map(|err_pipe| {
                                 std::thread::spawn(move || {
@@ -3774,6 +3850,11 @@ mod imp {
 
                             let status = child.wait();
                             Self::kill_colab_pid(child_pid);
+                            if let Ok(mut st) = voice.colab_cli.lock()
+                                && st.active_pid == Some(child_pid)
+                            {
+                                st.active_pid = None;
+                            }
                             let stderr_txt = stderr_handle
                                 .and_then(|h| h.join().ok())
                                 .unwrap_or_default();
@@ -3796,8 +3877,15 @@ mod imp {
                             }
                         }
 
+                        if !is_current(&voice.colab_cli) {
+                            return;
+                        }
+
                         if let Some((url, token)) = creds_found {
                             if let Ok(db) = voice.host.db.lock() {
+                                if !is_current(&voice.colab_cli) {
+                                    return;
+                                }
                                 let ops = vec![(
                                     moss_voice::colab::COLAB_SECRET_NAME.to_owned(),
                                     Some(token),
@@ -3814,6 +3902,9 @@ mod imp {
                                         CenterError::new("voice_settings_write_failed", 500, msg)
                                     })
                                 });
+                            }
+                            if !is_current(&voice.colab_cli) {
+                                return;
                             }
                             voice.sync_local_vision(true);
                             let _ = voice.restart_if_running();
@@ -5184,12 +5275,8 @@ mod imp {
                 (is_local_jev, filter_on || jev_feedback_on)
             };
             if colab_raw.is_some() {
-                if should_cancel_colab_cli && let Ok(mut st) = self.colab_cli.lock() {
-                    st.generation = st.generation.wrapping_add(1);
-                    if st.runner_state == "starting" {
-                        st.runner_state = "idle".into();
-                        st.runner_step = "已取消自动拉起云端 Colab T4".into();
-                    }
+                if should_cancel_colab_cli {
+                    self.cancel_colab_cli_runner(None);
                 }
                 if should_auto_start_colab_cli {
                     self.spawn_colab_cli_runner();
@@ -11066,9 +11153,10 @@ mod imp {
             .collect()
     }
 
-    /// MOSS 退出时停止内置语音服务及本地 Jev（OneJev / Laya）子进程（在急停之后调用）。
+    /// MOSS 退出时停止内置语音服务、Colab CLI 后台进程及本地 Jev（OneJev / Laya）子进程（在急停之后调用）。
     pub fn shutdown(app: &tauri::AppHandle) {
         if let Ok(builtin) = builtin(app) {
+            builtin.cancel_colab_cli_runner(None);
             builtin.laya_setup.cancel_and_wait();
             builtin.stop();
             // 等待已被 starting_cancel 中断的后台启动线程完成子进程回收，杜绝退出时残留孤儿 llama-server
@@ -11081,8 +11169,8 @@ mod imp {
 pub use imp::{BuiltinVoice, autostart, init, record_moss_event, shutdown};
 
 /// 内置语音状态含设备 IP、会话事件，调试开启时还有原始识别文字与工具参数。
-/// 2026-11-05：只给前端实际调用它的两个窗口——主窗口语音页（`VoiceBuiltinCard`）与打包私密页
-/// （`voicePrivate.jsx` 轮询运行状态），其他窗口即使拿到 `default` capability（`windows:["*"]`）也读不到。
+/// 2026-11-05（n67 起独立安全窗口已取消）：只给经 `require_status_window` 确认的 MOSS 主窗口，
+/// 其他窗口即使拿到 `default` capability（`windows:["*"]`）也读不到。
 #[tauri::command]
 pub async fn voice_builtin_status(
     app: tauri::AppHandle,
@@ -11484,6 +11572,18 @@ fn doubao_defaults_match_the_provider() {
     assert_eq!(DOUBAO_ASR_RESOURCE, doubao::DEFAULT_ASR_RESOURCE);
     assert_eq!(DOUBAO_TTS_URL, doubao::DEFAULT_TTS_URL);
     assert_eq!(DOUBAO_TTS_RESOURCE, doubao::DEFAULT_TTS_RESOURCE);
+    for sample in [
+        "https://api.cline.bot/api/v1",
+        "https://cline.bot/v1",
+        "https://openrouter.ai/api/v1",
+        "https://evil-cline.bot/v1",
+    ] {
+        assert_eq!(
+            moss_voice::models::is_cline_api_url(sample),
+            moss_voice_providers::openai::is_cline_api_url(sample),
+            "Cline URL 判定须在 moss-voice 与 moss-voice-providers 间保持一致: {sample}"
+        );
+    }
 }
 
 #[tauri::command]

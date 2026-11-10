@@ -30,10 +30,6 @@ export function applyPreviewFingerprintSuccess(state, responseFingerprint) {
   };
 }
 
-export function resetMovedMaterialAcknowledgement(state) {
-  return { ...state, movedMaterialAcknowledged: false };
-}
-
 export function setMovedMaterialAcknowledged(state, acknowledged) {
   return { ...state, movedMaterialAcknowledged: Boolean(acknowledged) };
 }

@@ -1,6 +1,5 @@
 //! NV16 synthetic speaker-vector policy; no microphone, model, storage or
 //! production authorization is connected. All real speaker gates fail closed.
-#![allow(dead_code)]
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},

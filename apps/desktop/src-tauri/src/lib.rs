@@ -523,6 +523,7 @@ mod tests {
             include_str!("../capabilities/voice-vision.json"),
             include_str!("../capabilities/voice-agent.json"),
             include_str!("../capabilities/voice-music.json"),
+            include_str!("../capabilities/voice-mcp.json"),
             include_str!("../capabilities/voice-private-main.json"),
         ]
         .join("\n");
@@ -544,6 +545,7 @@ mod tests {
         .chain(crate::voice::COMMANDS)
         .chain(crate::voice_builtin::COMMANDS)
         .chain(crate::voice_context::COMMANDS)
+        .chain(crate::voice_mcp::COMMANDS)
         {
             assert!(
                 build_rs.contains(&format!("\"{command}\"")),
@@ -653,7 +655,15 @@ mod tests {
                     "voice_wakeword_manage",
                     "voice_home_status",
                     "voice_home_save",
+                    "voice_home_backup_export",
+                    "voice_home_backup_audit",
+                    "voice_home_backup_restore",
                     "voice_home_token_save",
+                    "voice_home_voice_consent",
+                    "voice_home_discover",
+                    "voice_home_approvals",
+                    "voice_home_approval_cancel",
+                    "voice_home_control_consent",
                     "voice_home_approval_approve",
                 ][..],
             ),

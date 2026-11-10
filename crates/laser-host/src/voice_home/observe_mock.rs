@@ -14,6 +14,10 @@ pub(crate) enum ObservationResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MockTransportFailure {
+    #[expect(
+        dead_code,
+        reason = "pre-send transport failure branch reserved for negative tests"
+    )]
     BeforeSend,
     AfterSend,
 }

@@ -69,7 +69,7 @@ fn main() {
         "voice_memory_set_enabled",
         "voice_memory_save",
         "voice_memory_clear",
-        // NV19 长期记忆、资料目录与恢复摘要（仅私有窗口）
+        // NV19 长期记忆、资料目录与恢复摘要（n67 起在经来源校验的本机主窗口操作）
         "voice_context_manage",
         "voice_context_pick_folder",
         "voice_speaker_manage",

@@ -238,7 +238,7 @@ impl TrustedScope {
 pub enum Channel {
     /// Built-in voice session (and its background extraction).
     Voice,
-    /// Packaged private desktop window (`voice-private`); never LAN or the main webview.
+    /// Trusted main desktop window (`window_is_trusted_main`, n67); never LAN or untrusted origins.
     DesktopPrivate,
 }
 

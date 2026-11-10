@@ -13,10 +13,6 @@ fn main() {
         "cargo:rerun-if-changed={}",
         dist.join("index.html").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        dist.join("voice-private.html").display()
-    );
 
     if env::var("PROFILE").as_deref() != Ok("release") {
         return;

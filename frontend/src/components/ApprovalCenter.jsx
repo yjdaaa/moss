@@ -25,6 +25,7 @@ import {
   targetText,
   workflowDetails,
 } from "../approvalState.js";
+import { createPollRunner } from "../pollGuard.js";
 import { SendOverlay } from "./SendOverlay.jsx";
 import { voiceApi } from "../voiceApi.js";
 import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } from "../approvalJobMonitor.js";
@@ -58,23 +59,33 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
-    const sync = async () => {
+    const sync = createPollRunner(async (isCurrent) => {
       const res = await getJson("/v1/approvals?status=pending");
-      if (cancelled || !(res.ok && res.data?.success)) return;
+      if (cancelled || !isCurrent() || !(res.ok && res.data?.success)) return;
       const result = res.data.result || {};
       const list = orderPending(result.approvals).filter((item) => !dismissedRef.current.has(item.approval_id));
       setOffset(clockOffsetSeconds(result.server_time));
       if (typeof result.ttl_seconds === "number") setTtl(result.ttl_seconds);
-      setPending(list);
+      setPending((previous) => {
+        if (list.length === 0 && previous.length === 0) return previous;
+        if (
+          list.length === previous.length &&
+          list.every((item, idx) => item.approval_id === previous[idx]?.approval_id && item.status === previous[idx]?.status)
+        ) {
+          return previous;
+        }
+        return list;
+      });
       onPendingCountChange?.(list.length);
       const fresh = newPendingIds(seenRef.current, list);
       list.forEach((item) => seenRef.current.add(item.approval_id));
       if (fresh.length > 0 && !jobRef.current) onOpenChange?.(true);
-    };
+    });
     void sync();
-    const timer = setInterval(sync, APPROVAL_POLL_MS);
+    const timer = setInterval(() => void sync(), APPROVAL_POLL_MS);
     return () => {
       cancelled = true;
+      sync.invalidate();
       clearInterval(timer);
     };
   }, [enabled, onOpenChange, onPendingCountChange]);

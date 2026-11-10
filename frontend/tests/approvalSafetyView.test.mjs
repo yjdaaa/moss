@@ -6,7 +6,13 @@ import { createServer } from "vite";
 import { applyJobPoll, jobSafetyNotice } from "../src/approvalJobMonitor.js";
 
 test("actual overlay keeps emergency control when polling fails or a backend terminal state is shown", async () => {
-  const server = await createServer({ configFile: false, appType: "custom", server: { middlewareMode: true, hmr: false, watch: null } });
+  const server = await createServer({
+    configFile: false,
+    appType: "custom",
+    logLevel: "silent",
+    optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true, hmr: false, watch: null },
+  });
   try {
     const { SendOverlay } = await server.ssrLoadModule("/src/components/SendOverlay.jsx");
     let job = { id:"wf1", kind:"workflow", status:"sending", progress:null };

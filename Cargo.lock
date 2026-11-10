@@ -2607,7 +2607,6 @@ dependencies = [
  "laser-contracts",
  "laser-core",
  "laser-device",
- "serde",
  "tempfile",
 ]
 

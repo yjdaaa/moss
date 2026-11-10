@@ -88,11 +88,30 @@ try {
   const toggleXAfter = (await page.locator("#top-compact-toggle").boundingBox()).x;
   assert.ok(Math.abs(toggleXAfter - toggleXBefore) <= 24, `收起按钮固定在右侧不跳位 (${toggleXBefore} -> ${toggleXAfter})`);
   assert.equal(await page.evaluate(() => document.documentElement.style.getPropertyValue("--ob-top-h")), "0px");
+  assert.match(await page.evaluate(() => document.documentElement.style.getPropertyValue("--ob-compact-top-w")), /^\d+px$/, "收起后写入实测胶囊避让宽度");
   assert.equal(await page.locator("#nav-hardware-status span").isVisible(), false, "精简后状态胶囊只留图标");
   assert.equal(await page.locator("#nav-hardware-status svg").isVisible(), true);
   assert.equal((await page.locator("#nav-estop").innerText()).trim(), "急停 0x18", "急停按钮保持完整");
   assert.ok(await page.locator("#nav-estop").isVisible());
   if (shotDir) await page.screenshot({ path: path.join(shotDir, "shell-collapsed.png") });
+
+  // 键盘聚焦 <select> 按空格弹出曜石毛玻璃浮层，按 Escape 收起
+  const firstSelect = page.locator("select").first();
+  if (await firstSelect.count()) {
+    await firstSelect.focus();
+    await page.keyboard.press(" ");
+    await page.locator(".ob-select-popover").waitFor({ timeout: 5_000 });
+    await page.keyboard.press("Escape");
+    await page.locator(".ob-select-popover").waitFor({ state: "detached", timeout: 5_000 });
+  }
+
+  // 点击顶栏小智状态胶囊可直达语音中心，再点硬件状态胶囊回到工作台
+  await page.locator("#nav-mcp-status").click();
+  await settle();
+  assert.equal(new URL(page.url()).pathname, "/voice", "点击小智胶囊跳转语音中心");
+  await page.locator("#nav-hardware-status").click();
+  await settle();
+  assert.equal(new URL(page.url()).pathname, "/", "点击硬件胶囊返回工作台");
 
   // 记在本机：刷新后保持
   await page.reload({ waitUntil: "domcontentloaded" });

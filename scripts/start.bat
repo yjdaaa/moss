@@ -1,7 +1,6 @@
 @echo off
-chcp 65001 >nul
 setlocal
-title MOSS 激光创作系统 · 启动器
+title MOSS Laser Control Launcher
 cd /d "%~dp0.."
 
 where pwsh >nul 2>nul
@@ -41,7 +40,11 @@ if /I "%~1"=="-Host" (
     shift
     goto parse_args
 )
-echo [提示] 未知参数: %~1，默认以桌面模式启动。
+if /I "%~1"=="-Help" (
+    echo Usage: scripts\start.bat [-Desktop ^| -Dev ^| -Update ^| -Server ^| -Host]
+    exit /b 0
+)
+echo [WARN] Unknown option "%~1"; defaulting to desktop mode.
 shift
 goto parse_args
 
@@ -51,7 +54,7 @@ set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
     echo.
-    echo [错误] MOSS 启动异常退出 (代码: %EXIT_CODE%)
+    echo [ERROR] MOSS launcher exited with code %EXIT_CODE%.
     echo.
     pause
 )
@@ -63,10 +66,9 @@ $Root = (Resolve-Path (Join-Path (Split-Path -Parent $env:MOSS_START_SCRIPT) "..
 Set-Location -LiteralPath $Root
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "         MOSS 激光创作系统 (Rust 550W 核心)" -ForegroundColor Cyan
+Write-Host "         MOSS Laser Control System (Rust Core)" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 查找可执行程序
 function Find-Exe {
     param([string]$Name)
     $candidates = @(
@@ -81,14 +83,17 @@ function Find-Exe {
     return $null
 }
 
-$DesktopExe = Find-Exe "moss-desktop"
-$HostExe = Find-Exe "moss-host"
-
-if (-not $DesktopExe -and -not $HostExe) {
-    Write-Host "[信息] 未检测到已编译的可执行程序，正在自动执行 Release 构建..." -ForegroundColor Yellow
-    cargo build --release -p moss-desktop -p moss-host
-    $DesktopExe = Find-Exe "moss-desktop"
-    $HostExe = Find-Exe "moss-host"
+function Invoke-HostAndOpenBrowser {
+    param([string]$ExePath)
+    & $ExePath serve 2>&1 | ForEach-Object {
+        $line = $_.ToString()
+        Write-Host $line
+        if ($line -match 'moss-host serving on (?<host>[^:]+):(?<port>[0-9]+)') {
+            $url = "http://$($Matches['host']):$($Matches['port'])/"
+            Write-Host "[URL] $url" -ForegroundColor Cyan
+            Start-Process $url
+        }
+    }
 }
 
 if ($env:MOSS_START_MODE -eq "dev") {
@@ -101,90 +106,76 @@ if ($env:MOSS_START_MODE -eq "update") {
     exit $LASTEXITCODE
 }
 
+$DesktopExe = Find-Exe "moss-desktop"
+$HostExe = Find-Exe "moss-host"
+
+if (-not $DesktopExe -and -not $HostExe) {
+    Write-Host "[INFO] No compiled binary found; building release targets..." -ForegroundColor Yellow
+    cargo build --release -p moss-desktop -p moss-host
+    $DesktopExe = Find-Exe "moss-desktop"
+    $HostExe = Find-Exe "moss-host"
+}
+
 if ($env:MOSS_START_MODE -eq "server") {
     if (-not $HostExe) {
-        Write-Host "[错误] 找不到 moss-host.exe，请先运行 cargo build --release -p moss-host" -ForegroundColor Red
+        Write-Host "[ERROR] moss-host.exe not found; run: cargo build --release -p moss-host" -ForegroundColor Red
         exit 1
     }
-    Write-Host "[启动] 正在以独立后台服务模式启动 MOSS Host..." -ForegroundColor Green
-    function Run-HostAndOpenBrowser {
-        & $HostExe serve 2>&1 | ForEach-Object {
-            $line = $_.ToString()
-            Write-Host $line
-            if ($line -match 'moss-host serving on (?<host>[^:]+):(?<port>[0-9]+)') {
-                $url = "http://$($Matches['host']):$($Matches['port'])/"
-                Write-Host "[地址] $url" -ForegroundColor Cyan
-                Start-Process $url
+    Write-Host "[START] Starting MOSS Host server..." -ForegroundColor Green
+    Invoke-HostAndOpenBrowser -ExePath $HostExe
+} elseif ($DesktopExe) {
+    $ProtoFile = Join-Path $Root "crates\moss-voice-local-proto\src\lib.rs"
+    if (Test-Path -LiteralPath $ProtoFile -PathType Leaf) {
+        $ProtoRaw = Get-Content -LiteralPath $ProtoFile -Raw
+        if ($ProtoRaw -match 'pub\s+const\s+PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;') {
+            $ExpectedProto = [int]$Matches[1]
+            $TargetHelper = Join-Path (Split-Path -Parent $DesktopExe) "moss-voice-local.exe"
+            function Get-HelperProto([string]$PathToCheck) {
+                if (-not (Test-Path -LiteralPath $PathToCheck -PathType Leaf)) { return -1 }
+                try {
+                    $VerText = (& $PathToCheck --version 2>&1) -join ' '
+                    if ($LASTEXITCODE -eq 0 -and $VerText -match '\(protocol\s+(\d+)\b') { return [int]$Matches[1] }
+                } catch {}
+                return -1
             }
-        }
-    }
-    Run-HostAndOpenBrowser
-} else {
-    if ($DesktopExe) {
-        $ProtoFile = Join-Path $Root "crates\moss-voice-local-proto\src\lib.rs"
-        if (Test-Path -LiteralPath $ProtoFile -PathType Leaf) {
-            $ProtoRaw = Get-Content -LiteralPath $ProtoFile -Raw
-            if ($ProtoRaw -match 'pub\s+const\s+PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;') {
-                $ExpectedProto = [int]$Matches[1]
-                $TargetHelper = Join-Path (Split-Path -Parent $DesktopExe) "moss-voice-local.exe"
-                function Get-HelperProto([string]$PathToCheck) {
-                    if (-not (Test-Path -LiteralPath $PathToCheck -PathType Leaf)) { return -1 }
-                    try {
-                        $VerText = (& $PathToCheck --version 2>&1) -join ' '
-                        if ($LASTEXITCODE -eq 0 -and $VerText -match '\(protocol\s+(\d+)\b') { return [int]$Matches[1] }
-                    } catch {}
-                    return -1
+            if ((Get-HelperProto $TargetHelper) -ne $ExpectedProto) {
+                $HelperCandidates = @(
+                    (Join-Path $Root "target\x86_64-pc-windows-msvc\release\moss-voice-local.exe"),
+                    (Join-Path $Root "apps\desktop\src-tauri\binaries\moss-voice-local-x86_64-pc-windows-msvc.exe"),
+                    (Join-Path $Root "target\release\moss-voice-local.exe")
+                )
+                $MatchedHelper = $null
+                foreach ($Cand in $HelperCandidates) {
+                    if ((Get-HelperProto $Cand) -eq $ExpectedProto) { $MatchedHelper = $Cand; break }
                 }
-                if ((Get-HelperProto $TargetHelper) -ne $ExpectedProto) {
-                    $HelperCandidates = @(
-                        (Join-Path $Root "target\x86_64-pc-windows-msvc\release\moss-voice-local.exe"),
-                        (Join-Path $Root "apps\desktop\src-tauri\binaries\moss-voice-local-x86_64-pc-windows-msvc.exe"),
-                        (Join-Path $Root "target\release\moss-voice-local.exe")
-                    )
-                    $MatchedHelper = $null
-                    foreach ($Cand in $HelperCandidates) {
-                        if ((Get-HelperProto $Cand) -eq $ExpectedProto) { $MatchedHelper = $Cand; break }
-                    }
-                    if ($null -eq $MatchedHelper) {
-                        Write-Host "[信息] 本地语音辅助程序版本滞后或缺失，正在编译协议 $ExpectedProto 版本..." -ForegroundColor Yellow
-                        cargo build --release --manifest-path (Join-Path $Root "apps\moss-voice-local\Cargo.toml") --target x86_64-pc-windows-msvc --target-dir (Join-Path $Root "target")
-                        $BuiltHelper = Join-Path $Root "target\x86_64-pc-windows-msvc\release\moss-voice-local.exe"
-                        if ((Get-HelperProto $BuiltHelper) -eq $ExpectedProto) { $MatchedHelper = $BuiltHelper }
-                    }
-                    if ($null -ne $MatchedHelper -and $MatchedHelper -ine $TargetHelper) {
-                        if (Test-Path -LiteralPath $TargetHelper -PathType Leaf) {
-                            try {
-                                $LockStream = [System.IO.File]::Open($TargetHelper, 'Open', 'ReadWrite', 'None')
-                                $LockStream.Close()
-                            } catch {
-                                $Stamp = (Get-Date).ToString('yyyyMMddHHmmss')
-                                Move-Item -LiteralPath $TargetHelper -Destination (Join-Path (Split-Path -Parent $TargetHelper) "moss-voice-local.old-$Stamp.exe") -Force
-                            }
+                if ($null -eq $MatchedHelper) {
+                    Write-Host "[INFO] Building moss-voice-local helper (protocol $ExpectedProto)..." -ForegroundColor Yellow
+                    cargo build --release --manifest-path (Join-Path $Root "apps\moss-voice-local\Cargo.toml") --target x86_64-pc-windows-msvc --target-dir (Join-Path $Root "target")
+                    $BuiltHelper = Join-Path $Root "target\x86_64-pc-windows-msvc\release\moss-voice-local.exe"
+                    if ((Get-HelperProto $BuiltHelper) -eq $ExpectedProto) { $MatchedHelper = $BuiltHelper }
+                }
+                if ($null -ne $MatchedHelper -and $MatchedHelper -ine $TargetHelper) {
+                    if (Test-Path -LiteralPath $TargetHelper -PathType Leaf) {
+                        try {
+                            $LockStream = [System.IO.File]::Open($TargetHelper, 'Open', 'ReadWrite', 'None')
+                            $LockStream.Close()
+                        } catch {
+                            $Stamp = (Get-Date).ToString('yyyyMMddHHmmss')
+                            Move-Item -LiteralPath $TargetHelper -Destination (Join-Path (Split-Path -Parent $TargetHelper) "moss-voice-local.old-$Stamp.exe") -Force
                         }
-                        Copy-Item -LiteralPath $MatchedHelper -Destination $TargetHelper -Force
-                        Write-Host "[同步] 已更新同目录 moss-voice-local.exe (协议 $ExpectedProto)" -ForegroundColor Green
                     }
+                    Copy-Item -LiteralPath $MatchedHelper -Destination $TargetHelper -Force
+                    Write-Host "[SYNC] Updated moss-voice-local.exe (protocol $ExpectedProto)" -ForegroundColor Green
                 }
             }
         }
-        Write-Host "[启动] 正在启动 MOSS 原生桌面创作系统..." -ForegroundColor Green
-        & $DesktopExe
-    } elseif ($HostExe) {
-        Write-Host "[提示] 未检测到桌面图形客户端，自动切换为服务模式..." -ForegroundColor Yellow
-        function Run-HostAndOpenBrowser {
-            & $HostExe serve 2>&1 | ForEach-Object {
-                $line = $_.ToString()
-                Write-Host $line
-                if ($line -match 'moss-host serving on (?<host>[^:]+):(?<port>[0-9]+)') {
-                    $url = "http://$($Matches['host']):$($Matches['port'])/"
-                    Write-Host "[地址] $url" -ForegroundColor Cyan
-                    Start-Process $url
-                }
-            }
-        }
-        Run-HostAndOpenBrowser
-    } else {
-        Write-Host "[错误] 无法找到可执行程序！" -ForegroundColor Red
-        exit 1
     }
+    Write-Host "[START] Launching MOSS Desktop..." -ForegroundColor Green
+    & $DesktopExe
+} elseif ($HostExe) {
+    Write-Host "[INFO] Desktop binary not found; falling back to MOSS Host server..." -ForegroundColor Yellow
+    Invoke-HostAndOpenBrowser -ExePath $HostExe
+} else {
+    Write-Host "[ERROR] Executable not found." -ForegroundColor Red
+    exit 1
 }
