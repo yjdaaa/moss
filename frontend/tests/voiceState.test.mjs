@@ -1714,3 +1714,47 @@ test("n80 Colab T4 专属联动：默认关闭不改原配置，开启只接管�
   assert.equal(builtinSectionSourceView("llm", offStatus).source, "cloud", "关闭联动立即恢复原大模型来源");
   assert.equal(builtinSectionSourceView("tts", offStatus).source, "local", "关闭联动立即恢复原本地合成来源");
 });
+
+test("整链连贯测试视图与麦克风单声道 WAV 打包编码（2026-11-11）", async () => {
+  const { chainTestPipelineView, encodeMonoWavDataUrl } = await import("../src/voiceState.js");
+
+  const wavUrl = encodeMonoWavDataUrl(new Float32Array([0, 0.5, -0.5, 1.5, -1.5]), 16000);
+  assert.ok(wavUrl.startsWith("data:audio/wav;base64,"));
+  const raw = Buffer.from(wavUrl.split(",")[1], "base64");
+  assert.equal(raw.subarray(0, 4).toString("ascii"), "RIFF");
+  assert.equal(raw.subarray(8, 12).toString("ascii"), "WAVE");
+  assert.equal(raw.readUInt32LE(24), 16000, "采样率写入 16000 Hz");
+  assert.equal(raw.readUInt32LE(40), 10, "5 个 16-bit 采样点共 10 字节");
+  assert.equal(raw.readInt16LE(44 + 6), 32767, "超出 +1 峰值自动钳制");
+  assert.equal(raw.readInt16LE(44 + 8), -32768, "低于 -1 峰值自动钳制");
+
+  const okView = chainTestPipelineView({
+    ok: true,
+    total_ms: 1420,
+    seed_source: "内置测试人声：“你好”",
+    input_audio_data_url: "data:audio/wav;base64,AA==",
+    recognized_text: "你好",
+    reply_text: "我在待命。",
+    reply_audio_data_url: "data:audio/wav;base64,BB==",
+    detail: "五步全链路连贯试跑通过（总耗时 1420 ms）",
+    steps: {
+      vad: { ok: true, skipped: false, detail: "内置能量判停：检出语音 240→1200 ms" },
+      asr: { ok: true, skipped: false, detail: "本地 SenseVoice → “你好”（180 ms）" },
+      jev: { ok: true, skipped: true, detail: "已关闭，识别文本直通大模型" },
+      llm: { ok: true, skipped: false, detail: "云端 qwen → “我在待命。”（620 ms）" },
+      tts: { ok: true, skipped: false, detail: "本地 Kokoro → 合成 1.4 秒语音（210 ms）" },
+    },
+  });
+  assert.equal(okView.running, false);
+  assert.equal(okView.mode, "chain");
+  assert.equal(okView.summary.ok, true);
+  assert.equal(okView.results.vad.ok, true);
+  assert.equal(okView.results.jev.skipped, true);
+  assert.equal(okView.chainMeta.recognizedText, "你好");
+  assert.equal(okView.chainMeta.replyText, "我在待命。");
+  assert.equal(okView.chainMeta.replyAudioUrl, "data:audio/wav;base64,BB==");
+
+  const errView = chainTestPipelineView(null, new Error("后台未启动"));
+  assert.equal(errView.summary.ok, false);
+  assert.match(errView.summary.text, /后台未启动/);
+});

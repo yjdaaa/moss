@@ -81,6 +81,13 @@ export function AiPreviewCenter() {
       }
       const list = pendingAiPreviews(workflows, { since: sinceRef.current, dismissed: dismissedRef.current, approvalTargets });
       list.forEach((record) => watchedRef.current.set(record.workflow_id, true));
+      // 同步工作台 / 画板刚刚填写或切换的最新设备连接目标（若机器目标变化则要求重新勾选现场确认）
+      const latestConn = connectionView(savedConnectionForm());
+      setConnection((prev) => {
+        if (prev.ready === latestConn.ready && prev.label === latestConn.label) return prev;
+        if (prev.ready && prev.label !== latestConn.label) setChecked(false);
+        return latestConn;
+      });
       setPending((previous) => {
         if (list.length === 0 && previous.length === 0) return previous;
         if (list.some((record) => !previous.some((item) => item.workflow_id === record.workflow_id))) setHidden(false);
@@ -158,7 +165,16 @@ export function AiPreviewCenter() {
   }, []);
 
   const handleStart = async () => {
-    if (!shown || !canStartAiPreview({ checked, busy, targetReady: connection.ready })) return;
+    const liveConn = connectionView(savedConnectionForm());
+    if (liveConn.label !== connection.label || liveConn.ready !== connection.ready) {
+      setConnection(liveConn);
+      if (!liveConn.ready || liveConn.label !== connection.label) {
+        setChecked(false);
+        setFailure(liveConn.ready ? `目标设备已变更为 ${liveConn.label}，请重新核对并勾选确认后再开刻` : liveConn.label);
+        return;
+      }
+    }
+    if (!shown || !canStartAiPreview({ checked, busy, targetReady: liveConn.ready })) return;
     const record = shown;
     setBusy(true);
     setFailure("");
@@ -166,7 +182,7 @@ export function AiPreviewCenter() {
       action: "confirm_send",
       workflow_id: record.workflow_id,
       confirmed: true,
-      ...connection.payload,
+      ...liveConn.payload,
     });
     setBusy(false);
     if (!(res.ok && res.data?.success)) {
@@ -181,10 +197,14 @@ export function AiPreviewCenter() {
 
   // 先走边框（2026-11-06）：激光头从当前位置沿刀路范围绕一圈再回到起点，默认不出光；会移动机器，先确认
   const handleFraming = async () => {
-    const request = shown ? framingRequest(shown, connection.payload) : null;
+    const liveConn = connectionView(savedConnectionForm());
+    if (liveConn.label !== connection.label || liveConn.ready !== connection.ready) {
+      setConnection(liveConn);
+    }
+    const request = shown ? framingRequest(shown, liveConn.payload) : null;
     if (!request || busy) return;
     const ok = await showConfirm(
-      `激光头会从当前位置出发，沿 ${Math.round((request.max_x - request.min_x) * 10) / 10} × ${Math.round((request.max_y - request.min_y) * 10) / 10} mm 的范围绕一圈再回到原处，不出光。请确认机器周围没有障碍。`,
+      `目标设备：${liveConn.label}\n激光头会从当前位置出发，沿 ${Math.round((request.max_x - request.min_x) * 10) / 10} × ${Math.round((request.max_y - request.min_y) * 10) / 10} mm 的范围绕一圈再回到原处，不出光。请确认机器周围没有障碍。`,
       { title: "先走边框", confirmText: "开始走边框", cancelText: "取消" },
     );
     if (!ok) return;

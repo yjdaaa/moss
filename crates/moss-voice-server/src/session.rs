@@ -104,10 +104,10 @@ async fn upgrade(
         .on_upgrade(move |socket| run(shared, socket, identity))
 }
 
-pub(crate) fn random_id() -> String {
+pub(crate) fn random_id() -> Result<String, getrandom::Error> {
     let mut bytes = [0u8; 8];
-    let _ = getrandom::fill(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    getrandom::fill(&mut bytes)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 async fn send_json(socket: &mut crate::link::Link, message: &ServerMessage) -> bool {
@@ -235,7 +235,16 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         "mcp": device_mcp,
         "aec": device_aec,
     });
-    let session_id = random_id();
+    let Ok(session_id) = random_id() else {
+        shared.state.event(
+            EventRecord::error(
+                DiagCategory::Internal,
+                format!("设备 {device_id} 会话建立失败：操作系统安全随机源不可用"),
+            )
+            .hint("拒绝使用不安全的零会话编号，请重启 MOSS 或操作系统后重试"),
+        );
+        return;
+    };
     let hello = ServerMessage::Hello {
         version,
         transport: "websocket".into(),

@@ -99,12 +99,11 @@ impl RuntimeDb {
     }
 
     pub fn context_memory(&self, id: &str) -> Result<Option<ContextMemoryRow>, SchemaError> {
-        self.connection
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM context_memories WHERE id=?1"),
-                [id],
-                from_row,
-            )
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM context_memories WHERE id=?1"
+        ))?;
+        statement
+            .query_row([id], from_row)
             .optional()
             .map_err(SchemaError::from)
     }
@@ -117,7 +116,7 @@ impl RuntimeDb {
         include_deleted: bool,
         limit: usize,
     ) -> Result<Vec<ContextMemoryRow>, SchemaError> {
-        let mut statement = self.connection.prepare(&format!(
+        let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM context_memories WHERE scope_kind=?1 AND scope_id=?2 AND (?3 OR deleted_at IS NULL) ORDER BY updated_at DESC,id LIMIT ?4"
         ))?;
         let rows = statement.query_map(
@@ -140,11 +139,12 @@ impl RuntimeDb {
         scope_id: &str,
         source_ref: &str,
     ) -> Result<bool, SchemaError> {
-        let found: Option<i64> = self.connection.query_row(
+        let mut statement = self.connection.prepare_cached(
             "SELECT 1 FROM context_memories WHERE scope_kind=?1 AND scope_id=?2 AND source_ref=?3 LIMIT 1",
-            params![scope_kind, scope_id, source_ref],
-            |row| row.get(0),
-        ).optional()?;
+        )?;
+        let found: Option<i64> = statement
+            .query_row(params![scope_kind, scope_id, source_ref], |row| row.get(0))
+            .optional()?;
         Ok(found.is_some())
     }
 
@@ -378,7 +378,7 @@ impl RuntimeDb {
             .map(|c| format!("m.{c}"))
             .collect::<Vec<_>>()
             .join(",");
-        let mut statement = self.connection.prepare(&format!(
+        let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {columns} FROM context_memories_fts f JOIN context_memories m ON m.rowid=f.rowid
              WHERE context_memories_fts MATCH ?4 AND {SEARCHABLE} ORDER BY bm25(context_memories_fts) LIMIT ?5"
         ))?;

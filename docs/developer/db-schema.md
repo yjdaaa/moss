@@ -13,9 +13,9 @@
 3. 旧 JSON 里字段类型不稳定（同一字段有时是字符串有时是数字，见 §8），所以**所有业务记录整条 JSON 以保真为目标存入 `payload` 列，另抽少量字段做索引列**。除 §7 明确规定的路径重映射、旧任务安全终止和字段补记外，其余字段保持原值；所有变换必须进入迁移报告。`payload` 是存储与迁移层面的保真手段，不是业务层的数据模型：`laser-runtime` 在读取入口把 `payload` 反序列化并做宽松类型映射（字符串数字转数值、缺省补齐），产出 `laser-contracts` 中的强类型 struct；转换失败的记录标 `stale` 并给出字段级原因，不静默吞掉。`laser-tools`、`laser-device`、`laser-core` 不得直接持有或解析 `serde_json::Value` 形式的 `payload`。写回时由 struct 序列化生成新的 `payload`，保证工具和接口的对外行为不变；索引列只用于查询和列表。
 4. 时间统一存 Unix 秒浮点（`REAL`），与旧数据一致，不转 ISO。
 5. 数据库内路径存相对于 `RuntimeRoot` 的字符串，正斜杠分隔；导入时先按历史根做重映射，再校验解析后的绝对路径仍位于允许的 `RuntimeRoot` 子目录内（§7）。接口返回路径时只返回文件名（`RuntimeRoot::exposed_path` 支持回环返回相对路径，但当前路由统一只给文件名），任何请求不返回 `RuntimeRoot`/`InstallRoot` 绝对路径。
-6. 每张表都有 `created_at`、`updated_at`。schema v2 为 `workflows`、`text_tasks`、`jobs`、`calibrations` 各配一张通用 `_history` 表（列为 `history_id, record_id, payload, updated_at, replaced_at, reason`，`UNIQUE(record_id, payload)`）；`material_params_history` 与 `material_params` 同列另加 `replaced_at`、`reason`。
-7. 并发模型：单写连接。`laser-runtime` 持有单个 `Mutex<Connection>`（WAL、`busy_timeout`、`synchronous=NORMAL`），所有工具、路由与后台 job worker 全部经 `RuntimeStore` 共享该连接，写天然串行，不引入多连接写；同一时刻只允许一个 host 进程打开本库，启动前必须持有 `<RuntimeRoot>/moss.lock`，锁句柄保持到 host 完全退出。Windows 使用 `LockFileEx`，Rust 可使用 `fs4` 或 `fd-lock`；崩溃后依赖操作系统释放锁，不删除锁文件。启动时发现锁被占用即退出并提示已有实例。后台 job worker 的 G-code 发送循环不访问数据库：取消走进程内 `CancellationToken`，进度只写内存原子值；发送线程只在终态把 `send_result` 写回 workflow 或 calibration 记录的 `payload`。当前没有把进度落到 `jobs` 表的持久化任务（见 §3.4）。
-8. 启动恢复：host 启动时把 `jobs.status='running'` 与 workflow 活动态（如 `sending`）的残留记录标为 `failed`，在 `result`/`detail` 注明 host 在完成前重启；不自动重发，不恢复未重新确认的危险任务（规格 §10）。
+6. 每张表都有 `created_at`、`updated_at`。`material_params_history` 与 `material_params` 同列另加 `replaced_at`、`reason`（早期 v2 预建的 4 张通用 `_history` 表从未使用，已在 schema v18 移除）。
+7. 并发模型：单写连接 + 独立 WAL 只读连接。`laser-runtime` 主写库持有单个 `Mutex<RuntimeDb>`（WAL、5 秒 `busy_timeout`、`synchronous=NORMAL`、`secure_delete=ON`），写天然串行，不引入多连接写；文件库模式下额外由 `RuntimeDb::open_readonly` 打开独立只读连接（`query_only=ON`），通过 `SplitSqliteStore` 与 `ApprovalService` 分流 `workflow` 状态/近期列表、审批列表和材料库读取等高频轮询查询，后台建知识库或批量写入期间不阻塞界面只读刷新。同一时刻只允许一个 host 进程打开本库，启动前必须持有 `<RuntimeRoot>/moss.lock`，锁句柄保持到 host 完全退出。Windows 使用 `LockFileEx`，Rust 可使用 `fs4` 或 `fd-lock`；崩溃后依赖操作系统释放锁，不删除锁文件。启动时发现锁被占用即退出并提示已有实例。后台 job worker 的 G-code 发送循环不访问数据库：取消走进程内 `CancellationToken`，进度只写内存原子值；发送线程只在终态把 `send_result` 写回 workflow 或 calibration 记录的 `payload`。当前没有把进度落到 `jobs` 表的持久化任务（见 §3.4）。
+8. 启动恢复与定额清理：host 启动时 `recover_after_restart` 把 `jobs` 与 workflow / calibration 活动态残留记录（含外层已标 `failed` 但 `payload.status` 仍卡在活动态的记录）统一标为 `failed` 并注明安全终止，同时 `prune_historical_records` 按定额清理超上限历史记录（`audit_log` 2000 条、终态 `approvals` 500 条、非活动 `workflows` 1000 条、非活动 `calibrations` 200 条、`material_params_history` 500 条、`context_extraction_runs` 500 条、已完结 `voice_firmware_delivery` 200 条，以及无 `source_ref` 且已删除满 30 天的空壳记忆墓碑）；退出停机时 `abort_active_records_on_shutdown` 同步更新列与 JSON 状态，并执行 `maintenance_on_shutdown`（`PRAGMA optimize` 与限时 `wal_checkpoint(TRUNCATE)`）。
 
 ## 2. workflow 存法（已确认：方案 A）
 
@@ -32,7 +32,7 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 17（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at`，创建 6 个索引（`workflows(status,updated_at)`、`workflows(source_type)`、`workflows(material,thickness_mm)`、`jobs(updated_at)`、`text_tasks(updated_at)`、`calibrations(updated_at)`）与 4 张通用 `_history` 表；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13）；v16 为 `context_knowledge_roots` 增加按目录独立启停列 `enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))`（§3.17，n50）；v17 为 `context_memories` 增加 `supersedes` / `seen_count` / `last_seen_at`（§3.16），新增段落级索引 `context_knowledge_chunks` 与无正文 FTS5 `context_knowledge_chunks_fts`（§3.17，n57） |
+| version | INTEGER PK | 当前 18（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at` 并创建 6 个基础索引；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13）；v16 为 `context_knowledge_roots` 增加按目录独立启停列 `enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))`（§3.17，n50）；v17 为 `context_memories` 增加 `supersedes` / `seen_count` / `last_seen_at`（§3.16），新增段落级索引 `context_knowledge_chunks` 与无正文 FTS5 `context_knowledge_chunks_fts`（§3.17，n57）；v18 删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），并新增 `workflows(updated_at DESC, workflow_id ASC)`、`approvals(created_at DESC, approval_id DESC)`、`approvals(status, created_at DESC, approval_id DESC)`、`material_aliases(material_name)` 索引 |
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
@@ -66,8 +66,8 @@ Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取
 | updated_at | REAL | `updated_at` | |
 | payload | TEXT | 整条 JSON | 工具读写以此为准 |
 
-索引：`(status, updated_at DESC)`、`(source_type)`、`(material, thickness_mm)`。
-`recent` 动作按 `updated_at DESC` 取。
+索引：`(updated_at DESC, workflow_id ASC)`、`(status, updated_at DESC)`、`(source_type)`、`(material, thickness_mm)`。
+`recent` 动作按 `updated_at DESC, workflow_id ASC` 直接走索引取。
 
 ### 3.3 `text_tasks`（对应 `.runtime/lasergrbl_text_tasks/<id>/task.json`）
 
@@ -194,19 +194,9 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 
 导出到 JSON 时按 §3.6.2 冻结结构重建（顶层 `version` 恒为整数 1、`materials`，材料下 `aliases` 与 `thicknesses`，engrave 下 raster/outline，cut 单层；已对真实 `lasergrbl_materials.json` 核实：5 种材料、`version` 为整数 1、0 个墓碑节点、25 格中 17 格带 source/updated_at/notes、7 格只有 7 个数值键、1 格无 notes）。验收按 规格 §20.1 级别 1：导出结果解析后与导入源 deep-equal，数值按数值比较；对象键序、空白和逐字节文本不作为通过条件。旧文件 `updated_at` 有 int 与 float 混用（25 格中 13 int、5 float），经 REAL 列往返后 `1782816917` 导出为 `1782816917.0`，文本形态不可还原但数值相等。
 
-### 3.7 `ai_state`（对应 `ai_laser_gcode_state/state.json`）
+### 3.7～3.8 已移除的历史表（`ai_state`、`gui_calibration`）
 
-已建表，Rust 版无读写方（对应的 Python 图片引擎已移除）。单行表：`id INTEGER PK CHECK(id=1)`、`payload TEXT`、`updated_at REAL`。含 `recent_material`、`image_search_candidates`。
-
-### 3.8 `gui_calibration`（对应 `lasergrbl_gui_calibration.json`）
-
-已建表，Rust 版无读写方（LaserGRBL GUI 自动化工具已移除）。
-
-| 列 | 类型 |
-|---|---|
-| target | TEXT PK（port / connect / start） |
-| payload | TEXT |
-| saved_at | REAL |
+旧 Python 图片引擎与 LaserGRBL GUI 自动化遗留表，Rust 版无任何读写，已在 schema v18 通过 `DROP TABLE IF EXISTS` 移除。
 
 ### 3.9 `uploads`（对应 `laser_web_uploads/`，现在无 JSON 元数据）
 
@@ -221,20 +211,9 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | mime | TEXT | 按扩展名 |
 | created_at | REAL | 文件名前缀时间戳 |
 
-### 3.10 `auth_pairings`（新增，对应规格 §17）
+### 3.10 已移除的 `auth_pairings` 表（局域网配对实际存 `settings.json`）
 
-已建表，当前无写入方：`laser_api::AuthManager` 把配对码、失败计数、锁定与 token 哈希全部保存在内存 `HashMap`，进程重启后配对失效。下表为原设计。
-
-| 列 | 类型 | 说明 |
-|---|---|---|
-| token_hash | TEXT PK | bearer 解码后的 32 字节随机值 SHA-256 |
-| pairing_id | TEXT UNIQUE | 不透明配对标识，供审计引用，不由 token 推导 |
-| device_name | TEXT | 移动端上报 |
-| created_at / last_seen_at | REAL | |
-| revoked | INTEGER | |
-| revoked_at | REAL | 撤销时间，可空 |
-
-配对码本身只在内存，5 分钟过期，不落库。长期 bearer 有效直到本地管理入口把 `revoked=1`，或 host 身份重置使既有配对全部失效；不保存明文 token，不提供远程延长有效期操作。
+原规格预建表无任何写入方，已在 schema v18 移除；`laser_api::AuthManager` 实际将自定义 6 位配对码与已配对 Bearer Token 的 SHA-256 哈希保存在运行目录 `settings.json`（`lan_static_pin_hash` / `lan_paired_tokens`），临时配对码仅在内存保留 5 分钟。
 
 ### 3.11 `audit_log`（新增，对应规格 §8 安全操作记录）
 
@@ -406,8 +385,8 @@ pub trait RuntimeStore {
 | jobs | 无（仅迁移器；启动恢复批量置 `failed`） | 无 |
 | calibrations | `/api/material-lab/preview` / `send` / `select-cell`、发送线程终态回写 | `/api/material-lab/status` |
 | materials / material_aliases / material_params(_history) | `/api/material-lab/manage`（save/delete/import）、`select-cell` | `/v1/material-lab/bootstrap`、`/api/material-lab/export`、`/api/ui/material-*` |
-| ai_state、gui_calibration、uploads、auth_pairings | 无（`uploads` 仅迁移器） | 无 |
-| audit_log | `laser-api` 审批服务（`ApprovalService`）、`laser-host` 进程内后端（接入点 R4 拒绝） | `RuntimeDb::recent_audit`（测试） |
+| uploads | 无（仅迁移器） | 无 |
+| audit_log | `laser-api` 审批服务（`ApprovalService`）、`laser-host` 进程内后端（接入点 R4 拒绝），实时定额最多保留 2000 条 | `RuntimeDb::recent_audit`（测试） |
 
 ## 7. 迁移流程（`moss-host migrate --from <旧根>`）
 

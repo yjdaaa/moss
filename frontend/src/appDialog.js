@@ -69,14 +69,19 @@ export function isHostMounted() {
  *  - danger: 确认按钮是否使用危险样式
  */
 export function showDialog(options = {}) {
-  const kind = options.kind === "confirm" || options.kind === "choice" ? options.kind : "alert";
+  const kind =
+    options.kind === "confirm" || options.kind === "choice" || options.kind === "prompt"
+      ? options.kind
+      : "alert";
   const parsed = parseLegacyMessage(options.message);
   const tone = normalizeTone(options.tone);
   const title = (options.title || parsed.title || defaultTitle(kind, tone)).trim();
   const message = options.title ? String(options.message ?? "").trim() : parsed.body;
+  const defaultValue = options.defaultValue == null ? "" : String(options.defaultValue);
+  const placeholder = options.placeholder == null ? "" : String(options.placeholder);
 
   if (!hostMounted) {
-    return Promise.resolve(fallbackNative(kind, title, message));
+    return Promise.resolve(fallbackNative(kind, title, message, defaultValue));
   }
 
   return new Promise((resolve) => {
@@ -86,6 +91,8 @@ export function showDialog(options = {}) {
       tone,
       title,
       message,
+      defaultValue,
+      placeholder,
       confirmText: options.confirmText || "确定",
       cancelText: options.cancelText || "取消",
       danger: Boolean(options.danger),
@@ -101,6 +108,10 @@ export function showAlert(message, options = {}) {
 
 export function showConfirm(message, options = {}) {
   return showDialog({ ...options, kind: "confirm", message });
+}
+
+export function showPrompt(message, options = {}) {
+  return showDialog({ ...options, kind: "prompt", message });
 }
 
 /**
@@ -122,7 +133,15 @@ export function resolveDialog(id, value) {
   if (index === -1) return false;
   const [dialog] = queue.splice(index, 1);
   dialog.resolve(
-    dialog.kind === "confirm" ? Boolean(value) : dialog.kind === "choice" ? choiceValue(value) : true,
+    dialog.kind === "confirm"
+      ? Boolean(value)
+      : dialog.kind === "choice"
+        ? choiceValue(value)
+        : dialog.kind === "prompt"
+          ? typeof value === "string"
+            ? value
+            : null
+          : true,
   );
   notify();
   return true;
@@ -132,13 +151,22 @@ export function resolveDialog(id, value) {
 export function resetDialogs() {
   while (queue.length) {
     const dialog = queue.shift();
-    dialog.resolve(dialog.kind === "confirm" ? false : dialog.kind === "choice" ? "dismiss" : true);
+    dialog.resolve(
+      dialog.kind === "confirm"
+        ? false
+        : dialog.kind === "choice"
+          ? "dismiss"
+          : dialog.kind === "prompt"
+            ? null
+            : true,
+    );
   }
   notify();
 }
 
 function defaultTitle(kind, tone) {
   if (kind === "confirm") return "请确认";
+  if (kind === "prompt") return "请输入";
   switch (tone) {
     case "error":
       return "操作失败";
@@ -155,9 +183,20 @@ function defaultTitle(kind, tone) {
  * 原生降级。桌面端 Tauri 的对话框插件把 window.confirm 换成了返回 Promise 的异步函数，
  * 直接当布尔值用会永远判为“确认”（2026-10-15 实机发现）；所以一律 await，出错按取消处理。
  */
-async function fallbackNative(kind, title, message) {
+async function fallbackNative(kind, title, message, defaultValue = "") {
   const text = title && message ? `${title}\n\n${message}` : title || message;
-  if (typeof window === "undefined") return kind === "confirm" ? false : kind === "choice" ? "dismiss" : true;
+  if (typeof window === "undefined") {
+    return kind === "confirm" ? false : kind === "choice" ? "dismiss" : kind === "prompt" ? null : true;
+  }
+  if (kind === "prompt") {
+    if (typeof window.prompt !== "function") return null;
+    try {
+      const val = await window.prompt(text, defaultValue);
+      return typeof val === "string" ? val : null;
+    } catch (_error) {
+      return null;
+    }
+  }
   const ask = async () => {
     if (typeof window.confirm !== "function") return null;
     try {

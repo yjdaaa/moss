@@ -135,12 +135,6 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
     const timer = setInterval(() => setTick((value) => value + 1), 1000);
     return () => clearInterval(timer);
   }, [open, shown, failure]);
-  useEffect(() => {
-    if (!shown || failure || busy || remaining > 0) return;
-    dismissedRef.current.add(shown.approval_id);
-    setPending((list) => list.filter((item) => item.approval_id !== shown.approval_id));
-  }, [remaining, shown, failure, busy]);
-
   const removeShown = useCallback((approvalId) => {
     dismissedRef.current.add(approvalId);
     setFailure(null);
@@ -151,6 +145,11 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
       return next;
     });
   }, [onPendingCountChange]);
+
+  useEffect(() => {
+    if (!shown || failure || busy || remaining > 0) return;
+    removeShown(shown.approval_id);
+  }, [remaining, shown, failure, busy, removeShown]);
 
   const handleApprove = async () => {
     if (!shown || !canApprove({ checked, busy, failed: Boolean(failure), remaining })) return;

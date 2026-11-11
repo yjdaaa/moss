@@ -66,7 +66,15 @@ impl SpeakerEnrollment {
         })
     }
     pub fn status(&self) -> EnrollmentStatus {
-        let mut state = self.state.lock().expect("speaker state");
+        let Ok(mut state) = self.state.lock() else {
+            return EnrollmentStatus {
+                active: false,
+                collected: 0,
+                processing: self.worker.available_permits() == 0,
+                message: "声纹状态不可用",
+                recognition_enabled: false,
+            };
+        };
         if state
             .capture
             .as_ref()
@@ -457,5 +465,21 @@ mod calibration_capture_tests {
         assert_eq!(*backend.tests.lock().unwrap(), vec![("abc".to_owned(), 3)]);
         assert_eq!(*backend.enrolled.lock().unwrap(), 0);
         assert!(!service.status().active);
+    }
+
+    #[test]
+    fn status_recovers_gracefully_when_state_mutex_is_poisoned() {
+        let backend = Arc::new(Recorder::default());
+        let service = SpeakerEnrollment::new(backend);
+        let poisoned = service.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = poisoned.state.lock().unwrap();
+            panic!("simulate panic while holding speaker state lock");
+        }));
+        let status = service.status();
+        assert!(!status.active);
+        assert_eq!(status.collected, 0);
+        assert!(!status.recognition_enabled);
+        assert_eq!(status.message, "声纹状态不可用");
     }
 }

@@ -53,7 +53,7 @@ use std::time::Duration;
 use moss_xiaozhi_proto::TokenSigner;
 use serde::Serialize;
 
-pub use audio::{LocalVadFactory, VadConfig, VadFactory};
+pub use audio::{EnergyVad, LocalVadFactory, Vad, VadConfig, VadEvent, VadFactory};
 pub use conversation::{
     Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome,
 };

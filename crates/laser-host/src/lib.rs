@@ -136,29 +136,13 @@ impl ShutdownCoordinator {
             Self::invoke_handles(&handles);
         }
 
-        // 步骤 2: 任务安全清零落库
+        // 步骤 2: 任务安全清零落库与 WAL 整理收尾
         if let Ok(db_guard) = self.db.lock()
             && let Some(db_arc) = db_guard.as_ref()
             && let Ok(db) = db_arc.lock()
         {
-            let _ = db.connection.execute(
-                "UPDATE jobs SET status='failed', finished_at=unixepoch(),
-                         payload=json_set(payload,'$.result.detail','host 退出中断，任务安全终止')
-                         WHERE status IN ('running', 'pending', 'queued')",
-                [],
-            );
-            let _ = db.connection.execute(
-                "UPDATE workflows SET status='failed', updated_at=unixepoch(),
-                         payload=json_set(payload,'$.detail','host 退出中断，任务安全终止')
-                         WHERE status IN ('sending', 'processing')",
-                [],
-            );
-            let _ = db.connection.execute(
-                "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
-                         payload=json_set(payload,'$.detail','host 退出中断，任务安全终止')
-                         WHERE status IN ('sending', 'processing')",
-                [],
-            );
+            let _ = db.abort_active_records_on_shutdown();
+            db.maintenance_on_shutdown();
         }
 
         let elapsed = start.elapsed();
@@ -842,8 +826,13 @@ impl HostApplication {
         let strict_mode = strict_from_env || voice_mode_is_self_hosted(&runtime_root.path);
         let db = RuntimeDb::open(&runtime_root.database)
             .map_err(|e| format!("数据库打开失败: {e:?}"))?;
-        // 落实 D6 规范：启动时对未完成残留任务执行安全清零，注明"host 重启中断，任务安全终止"
+        // 落实 D6 规范：启动时对未完成残留任务执行安全清零，注明"host 重启中断，任务安全终止"，并定额清理陈旧历史记录
         let _ = db.recover_after_restart();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let _ = db.prune_historical_records(now_secs);
         let db_arc = Arc::new(Mutex::new(db));
 
         let coordinator = global_shutdown_coordinator();

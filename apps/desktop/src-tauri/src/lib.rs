@@ -140,16 +140,50 @@ impl ShutdownState {
     }
 }
 
+/// 桌面与移动端共用主窗口来源守卫：桌面端要求 `main` 标签且精确匹配本进程后端回环来源；
+/// 移动端要求 `main` 标签且为本地打包来源（`tauri.localhost` / `tauri://localhost`）。
+pub(crate) fn require_trusted_app_window(
+    window: &tauri::WebviewWindow,
+    action: &str,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        if window_is_trusted_main(window) {
+            Ok(())
+        } else {
+            Err(format!("{action}只能在 MOSS 主窗口操作"))
+        }
+    }
+    #[cfg(mobile)]
+    {
+        let url = window
+            .url()
+            .map_err(|_| "无法校验当前页面来源".to_owned())?;
+        if app_update::is_trusted_mobile_main(window.label(), &url) {
+            Ok(())
+        } else {
+            Err(format!("{action}只能在 MOSS 手机端主界面操作"))
+        }
+    }
+}
+
 #[tauri::command]
-fn minimize_to_tray(window: tauri::WebviewWindow) {
+fn minimize_to_tray(window: tauri::WebviewWindow) -> Result<(), String> {
+    require_trusted_app_window(&window, "最小化到托盘")?;
     let _ = window.hide();
+    Ok(())
 }
 
 /// 完全退出。`stop_server`：MOSS 启动的语音服务端是否一并停止（默认是，技术书 §9.4.3）。
 /// 顺序不变：先急停（`ShutdownState::request` → `ShutdownCoordinator`），再处理服务端，最后退出。
 #[tauri::command]
-async fn exit_application(app: tauri::AppHandle, stop_server: Option<bool>) -> Result<(), String> {
+async fn exit_application(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    stop_server: Option<bool>,
+) -> Result<(), String> {
     use tauri::Manager;
+    require_trusted_app_window(&window, "退出程序")?;
     app.state::<ShutdownState>().request();
     let stop = stop_server.unwrap_or(true);
     let handle = app.clone();
@@ -772,7 +806,9 @@ mod tests {
             (
                 include_str!("voice.rs"),
                 &[
+                    "voice_status",
                     "voice_save_settings",
+                    "voice_mode_changes",
                     "voice_set_mode",
                     "voice_server_start",
                     "voice_server_stop",
@@ -780,6 +816,8 @@ mod tests {
                     "voice_server_log",
                     "voice_models_test",
                     "voice_models_save",
+                    "voice_detect_python",
+                    "voice_strict_set",
                 ][..],
             ),
             (
@@ -833,10 +871,62 @@ mod tests {
                         < body
                             .find("imp::run")
                             .or(body.find("spawn_blocking"))
+                            .or(body.find("imp::detect_python"))
+                            .or(body.find("if !confirmed"))
                             .unwrap(),
                     "{command} 须先校验来源"
                 );
             }
+        }
+        // 托盘隐藏、退出与全部 7 个导出命令都必须在入口固定受信任主窗口来源
+        let lib_src = include_str!("lib.rs");
+        for (sig, call) in [
+            (
+                "fn minimize_to_tray(",
+                "require_trusted_app_window(&window,",
+            ),
+            (
+                "async fn exit_application(",
+                "require_trusted_app_window(&window,",
+            ),
+        ] {
+            let start = lib_src.find(sig).expect(sig);
+            let body = &lib_src[start..start + lib_src[start..].find("\n}\n").expect(sig)];
+            assert!(body.contains(call), "{sig} 须校验主窗口来源");
+        }
+        let app_guard = lib_src
+            .find("pub(crate) fn require_trusted_app_window(")
+            .expect("require_trusted_app_window");
+        let app_guard_body = &lib_src
+            [app_guard..app_guard + lib_src[app_guard..].find("\n}\n").expect("app_guard_body")];
+        assert!(app_guard_body.contains("window_is_trusted_main(window)"));
+        assert!(
+            app_guard_body.contains("app_update::is_trusted_mobile_main(window.label(), &url)")
+        );
+        let export_src = include_str!("export.rs");
+        for command in [
+            "get_export_settings",
+            "pick_export_dir",
+            "reset_export_dir",
+            "set_export_ask_each_time",
+            "open_export_dir",
+            "reveal_exported_file",
+            "save_export_file",
+        ] {
+            let start = export_src
+                .find(&format!("pub fn {command}("))
+                .or_else(|| export_src.find(&format!("pub async fn {command}(")))
+                .expect(command);
+            let body =
+                &export_src[start..start + export_src[start..].find("\n}\n").expect(command)];
+            let open_brace = body.find("{\n").expect(command);
+            assert!(
+                body[open_brace..]
+                    .trim_start_matches("{\n")
+                    .trim_start()
+                    .starts_with("crate::require_trusted_app_window(&window,"),
+                "{command} 必须在函数首行固定主窗口来源"
+            );
         }
         // 2026-11-05：状态读取含设备 IP 与调试原文，只给主窗口（n67 起独立安全窗口已取消）
         let builtin = include_str!("voice_builtin.rs");

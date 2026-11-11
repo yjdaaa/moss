@@ -219,7 +219,7 @@ pub fn build_calibration_gcode(
             let (x0, y0) = (cell.x_mm, cell.y_mm);
             let (x1, y1) = (x0 + cell.size_mm, y0 + cell.size_mm);
             lines.extend(["M5".into(), format!("G0 X{x0:.3} Y{y0:.3}"), "M4 S0".into()]);
-            if task_type == "cut_contour" {
+            if matches!(task_type, "cut_contour" | "engrave_outline") {
                 lines.extend([
                     format!("G1 X{x1:.3} Y{y0:.3} S{} F{}", cell.power, cell.speed),
                     format!("G1 X{x1:.3} Y{y1:.3} S{} F{}", cell.power, cell.speed),

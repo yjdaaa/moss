@@ -62,9 +62,12 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
     alive.current = true;
     let cancelled = false;
     let timer;
+    let pollGen = 0;
     const poll = async () => {
+      const myGen = ++pollGen;
+      clearTimeout(timer);
       const res = await getJson("/api/jobs/stop-targets");
-      if (cancelled || !alive.current) return;
+      if (cancelled || !alive.current || myGen !== pollGen) return;
       const jobs = res?.data?.result?.jobs;
       if (res?.ok && res?.data?.success && Array.isArray(jobs)) {
         const next = jobsView(jobs);

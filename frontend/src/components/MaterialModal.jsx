@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Layers, Trash2, X } from "lucide-react";
 import { postJson } from "../api/client.js";
 import { showConfirm } from "../appDialog.js";
+import { notifyMaterialsUpdated, thicknessesEqual } from "../materialSelectState.js";
 
 export function parseThicknessList(str) {
   return String(str || "")
@@ -12,6 +13,15 @@ export function parseThicknessList(str) {
     .filter((n) => Number.isFinite(n) && n > 0);
 }
 
+function findExistingCell(existingThicknesses, thickNum, laserMode, engravingMode) {
+  if (!existingThicknesses || typeof existingThicknesses !== "object") return null;
+  const matchedKey = Object.keys(existingThicknesses).find((k) => thicknessesEqual(k, thickNum));
+  if (!matchedKey) return null;
+  const entry = existingThicknesses[matchedKey];
+  if (!entry || typeof entry !== "object") return null;
+  return laserMode === "cut" ? entry.cut || null : entry.engrave?.[engravingMode] || null;
+}
+
 export function buildMaterialSavePayload({
   material,
   thickList,
@@ -19,28 +29,57 @@ export function buildMaterialSavePayload({
   speed,
   laserMode = "engrave",
   engravingMode = "raster",
+  feedRateOverride,
+  passesOverride,
+  existingThicknesses,
+  targetThickness,
+  paramsChanged = true,
+  pruneMissingThicknesses = false,
 }) {
   const normalizedLaserMode = laserMode === "cut" || engravingMode === "cut" ? "cut" : "engrave";
   const normalizedEngravingMode = engravingMode === "outline" ? "outline" : "raster";
   const laserMaxPower = Math.round((Number(power) / 100) * 1000);
-  const feedRate = Math.round(Number(speed) * 60);
-  const cell = {
+  const feedRate = Number.isFinite(Number(feedRateOverride)) && Number(feedRateOverride) > 0
+    ? Math.round(Number(feedRateOverride))
+    : Math.round(Number(speed) * 60);
+  const defaultPasses = Number.isInteger(Number(passesOverride)) && Number(passesOverride) >= 1
+    ? Number(passesOverride)
+    : 1;
+  const baseCell = {
     laser_min_power: 0,
     laser_max_power: laserMaxPower,
     feed_rate: feedRate,
     travel_rate: 3000,
-    threshold: -1,
-    passes: 1,
+    threshold: normalizedLaserMode === "cut" && existingThicknesses ? 128 : -1,
+    passes: defaultPasses,
     pixel_size_mm: 0.1,
   };
   const thicknesses = {};
   for (const th of thickList) {
+    const prev = findExistingCell(existingThicknesses, th, normalizedLaserMode, normalizedEngravingMode);
+    let nextCell;
+    if (prev) {
+      const shouldUpdateThisThick =
+        paramsChanged && (targetThickness == null || thicknessesEqual(th, targetThickness));
+      nextCell = {
+        laser_min_power: prev.laser_min_power ?? 0,
+        laser_max_power: shouldUpdateThisThick ? laserMaxPower : (prev.laser_max_power ?? laserMaxPower),
+        feed_rate: shouldUpdateThisThick ? feedRate : (prev.feed_rate ?? feedRate),
+        travel_rate: prev.travel_rate ?? 3000,
+        threshold: prev.threshold ?? -1,
+        passes: prev.passes ?? defaultPasses,
+        pixel_size_mm: prev.pixel_size_mm ?? 0.1,
+        ...(prev.notes ? { notes: prev.notes } : {}),
+      };
+    } else {
+      nextCell = { ...baseCell };
+    }
     thicknesses[String(th)] =
       normalizedLaserMode === "cut"
-        ? { cut: { ...cell } }
-        : { engrave: { [normalizedEngravingMode]: { ...cell } } };
+        ? { cut: nextCell }
+        : { engrave: { [normalizedEngravingMode]: nextCell } };
   }
-  return {
+  const payload = {
     action: "save",
     material,
     thicknesses,
@@ -53,6 +92,10 @@ export function buildMaterialSavePayload({
     laser_max_power: laserMaxPower,
     feed_rate: feedRate,
   };
+  if (pruneMissingThicknesses) {
+    payload.prune_missing_thicknesses = true;
+  }
+  return payload;
 }
 
 export function buildMaterialDeletePayload(material) {
@@ -109,17 +152,42 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
       return;
     }
 
+    const powerNum = Number(power);
+    const speedNum = Number(speed);
+    if (!Number.isFinite(powerNum) || powerNum <= 0 || powerNum > 100) {
+      setError("推荐功率须在 1 ~ 100% 之间");
+      return;
+    }
+    if (!Number.isFinite(speedNum) || speedNum <= 0 || speedNum > 600) {
+      setError("推荐速度须在 1 ~ 600 mm/s 之间");
+      return;
+    }
+
     setBusy(true);
     setError("");
+
+    const initialPower = Number(initialData?.power_percent || 50);
+    const initialSpeed = Number(initialData?.speed_mms || 100);
+    const paramsChanged = !isEditing || powerNum !== initialPower || speedNum !== initialSpeed;
+    const feedRateOverride =
+      !paramsChanged && Number.isFinite(Number(initialData?.feed_rate))
+        ? Number(initialData.feed_rate)
+        : undefined;
 
     // D9: 原子批量保存所有厚度，单次提交
     const payload = buildMaterialSavePayload({
       material: trimmedName,
       thickList,
-      power,
-      speed,
+      power: powerNum,
+      speed: speedNum,
       laserMode: initialData?.laser_mode,
       engravingMode: initialData?.engraving_mode,
+      feedRateOverride,
+      passesOverride: initialData?.passes,
+      existingThicknesses: isEditing ? initialData?.existing_thicknesses : undefined,
+      targetThickness: isEditing ? initialData?.target_thickness : undefined,
+      paramsChanged,
+      pruneMissingThicknesses: isEditing,
     });
 
     try {
@@ -127,6 +195,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
       setBusy(false);
 
       if (res.ok && res.data?.success) {
+        notifyMaterialsUpdated();
         if (onSaved) onSaved(res.data.result || { name: trimmedName, thicknesses: thickList });
         onClose();
       } else {
@@ -161,6 +230,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
       setBusy(false);
 
       if (res.ok && res.data?.success) {
+        notifyMaterialsUpdated();
         if (onDeleted) onDeleted(trimmedName);
         onClose();
       } else {

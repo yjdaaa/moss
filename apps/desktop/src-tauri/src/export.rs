@@ -249,8 +249,10 @@ fn view(app: &tauri::AppHandle, settings: &ExportSettings) -> ExportSettingsView
 #[tauri::command]
 pub fn get_export_settings(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, ExportState>,
 ) -> Result<ExportSettingsView, String> {
+    crate::require_trusted_app_window(&window, "读取导出设置")?;
     let settings = state
         .settings_file
         .as_deref()
@@ -263,8 +265,10 @@ pub fn get_export_settings(
 #[tauri::command]
 pub async fn pick_export_dir(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, ExportState>,
 ) -> Result<Option<ExportSettingsView>, String> {
+    crate::require_trusted_app_window(&window, "选择导出目录")?;
     let settings_file = state.settings_file.clone();
     tauri::async_runtime::spawn_blocking(move || {
         pick_export_dir_impl(&app, settings_file.as_deref())
@@ -313,8 +317,10 @@ fn pick_export_dir_impl(
 #[tauri::command]
 pub fn reset_export_dir(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, ExportState>,
 ) -> Result<ExportSettingsView, String> {
+    crate::require_trusted_app_window(&window, "重置导出目录")?;
     let file = settings_file(&state)?;
     let updated = ExportSettings {
         dir: None,
@@ -327,9 +333,11 @@ pub fn reset_export_dir(
 #[tauri::command]
 pub fn set_export_ask_each_time(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, ExportState>,
     enabled: bool,
 ) -> Result<ExportSettingsView, String> {
+    crate::require_trusted_app_window(&window, "修改导出设置")?;
     let file = settings_file(&state)?;
     let updated = ExportSettings {
         ask_each_time: enabled && cfg!(desktop),
@@ -343,8 +351,10 @@ pub fn set_export_ask_each_time(
 #[tauri::command]
 pub fn open_export_dir(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, ExportState>,
 ) -> Result<(), String> {
+    crate::require_trusted_app_window(&window, "打开导出目录")?;
     let settings = state
         .settings_file
         .as_deref()
@@ -359,7 +369,8 @@ pub fn open_export_dir(
 
 /// 在文件管理器中定位刚导出的文件（只接受已存在的文件）
 #[tauri::command]
-pub fn reveal_exported_file(path: String) -> Result<(), String> {
+pub fn reveal_exported_file(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
+    crate::require_trusted_app_window(&window, "定位导出文件")?;
     let path = PathBuf::from(path);
     if !path.is_absolute() || !path.is_file() {
         return Err("文件不存在".into());
@@ -418,11 +429,13 @@ fn open_in_file_manager(_path: &Path, _select: bool) -> Result<(), String> {
 #[tauri::command]
 pub async fn save_export_file(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, ExportState>,
     filename: String,
     bytes: Vec<u8>,
     fallback_default: Option<bool>,
 ) -> Result<Option<String>, String> {
+    crate::require_trusted_app_window(&window, "导出文件")?;
     let name = sanitize_export_name(&filename)?;
     if bytes.len() > EXPORT_MAX_BYTES {
         return Err("导出文件超过 50MB，已取消".into());

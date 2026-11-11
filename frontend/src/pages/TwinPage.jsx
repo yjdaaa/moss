@@ -545,23 +545,31 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     const reader = new FileReader();
     reader.onload = () => {
       const content = String(reader.result || "");
-      if (content.trim()) {
-        // 作废仍在途的任务刀路请求，避免其晚到后覆盖本地文件
-        workflowLoadSeqRef.current += 1;
-        setLoadingWorkflow(false);
-        setActiveWorkflow(null);
-        setSelectedWorkflowId("");
-        setGcodeText(content);
-        setGcodeSourceLabel(`本地文件 · ${file.name}`);
-        updateMaterialConfig({
-          autoSize: true,
-          textOffsetX: 0,
-          textOffsetY: 0,
+      if (!content.trim()) {
+        void showAlert(`文件「${file.name}」内容为空，无法用于三维刀路推演。`, {
+          title: "刀路文件为空",
+          tone: "warning",
         });
-        setSimProgress(0);
-        setSimPlaying(true);
-        setDriveMode("sim");
+        return;
       }
+      // 作废仍在途的任务刀路请求，避免其晚到后覆盖本地文件
+      workflowLoadSeqRef.current += 1;
+      setLoadingWorkflow(false);
+      setActiveWorkflow(null);
+      setSelectedWorkflowId("");
+      setGcodeText(content);
+      setGcodeSourceLabel(`本地文件 · ${file.name}`);
+      updateMaterialConfig({
+        autoSize: true,
+        textOffsetX: 0,
+        textOffsetY: 0,
+      });
+      setSimProgress(0);
+      setSimPlaying(true);
+      setDriveMode("sim");
+    };
+    reader.onerror = () => {
+      void showAlert("读取本地 G-code 文件失败", { title: "导入失败", tone: "error" });
     };
     reader.readAsText(file);
     e.target.value = "";

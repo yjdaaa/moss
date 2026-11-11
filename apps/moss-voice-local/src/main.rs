@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -625,13 +625,15 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
     }
 }
 
+const WORKER_QUEUE_CAPACITY: usize = 64;
+
 fn spawn_worker(
     name: &str,
     worker: fn(Receiver<Job>, Out, Arc<Loaded>),
     out: &Out,
     loaded: &Arc<Loaded>,
-) -> Sender<Job> {
-    let (sender, receiver) = channel();
+) -> SyncSender<Job> {
+    let (sender, receiver) = sync_channel::<Job>(WORKER_QUEUE_CAPACITY);
     let (out, loaded) = (out.clone(), loaded.clone());
     thread::Builder::new()
         .name(name.into())
@@ -844,8 +846,10 @@ fn main() {
                 unreachable!("speaker routed independently")
             }
         };
-        if target.send((id, op, payload)).is_err() {
-            error(&out, id, "工作线程已退出");
+        match target.try_send((id, op, payload)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => error(&out, id, "工作队列已满"),
+            Err(TrySendError::Disconnected(_)) => error(&out, id, "工作线程已退出"),
         }
     }
 }
@@ -923,5 +927,40 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn worker_queue_is_bounded_and_rejects_overflow_without_blocking() {
+        let out: Out = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
+        let loaded = Arc::new(Loaded::default());
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let (picked_tx, picked_rx) = sync_channel::<()>(1);
+        let (tx, rx) = sync_channel::<Job>(WORKER_QUEUE_CAPACITY);
+        let gate_worker = gate.clone();
+        let handle = thread::spawn(move || {
+            let _first = rx.recv().unwrap();
+            picked_tx.send(()).unwrap();
+            gate_worker.wait();
+        });
+        // First item is consumed by the blocked worker; next WORKER_QUEUE_CAPACITY items fill the queue.
+        tx.try_send((1, Op::Hello, Vec::new())).unwrap();
+        picked_rx.recv().unwrap();
+        let mut accepted = 0;
+        for id in 2..=(WORKER_QUEUE_CAPACITY as u64 + 10) {
+            if tx.try_send((id, Op::Hello, Vec::new())).is_ok() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(
+            accepted, WORKER_QUEUE_CAPACITY,
+            "bounded queue must accept exact WORKER_QUEUE_CAPACITY={WORKER_QUEUE_CAPACITY}"
+        );
+        assert!(matches!(
+            tx.try_send((9999, Op::Hello, Vec::new())),
+            Err(TrySendError::Full(_))
+        ));
+        gate.wait();
+        handle.join().unwrap();
+        let _ = (out, loaded);
     }
 }

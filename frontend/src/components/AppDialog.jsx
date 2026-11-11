@@ -15,21 +15,42 @@ const TONE_META = {
  */
 export function AppDialogHost() {
   const [dialog, setDialog] = useState(null);
+  const [promptText, setPromptText] = useState("");
+  const promptTextRef = useRef("");
   const confirmRef = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => subscribe(setDialog), []);
 
   useEffect(() => {
     if (!dialog) return undefined;
-    const timer = window.setTimeout(() => confirmRef.current?.focus(), 30);
+    const initialText = dialog.kind === "prompt" ? String(dialog.defaultValue ?? "") : "";
+    setPromptText(initialText);
+    promptTextRef.current = initialText;
+    const timer = window.setTimeout(() => {
+      if (dialog.kind === "prompt") {
+        inputRef.current?.focus();
+        inputRef.current?.select?.();
+      } else {
+        confirmRef.current?.focus();
+      }
+    }, 30);
     const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape") {
         e.preventDefault();
-        // Esc 等同关闭：confirm 视为取消；choice 返回 "dismiss"
+        // Esc 等同关闭：confirm 视为取消；choice 返回 "dismiss"；prompt 返回 null
         resolveDialog(dialog.id, null);
       } else if (e.key === "Enter") {
+        const action = e.target?.closest?.("[data-dialog-action]")?.getAttribute("data-dialog-action");
         e.preventDefault();
-        resolveDialog(dialog.id, true);
+        if (action === "dismiss") {
+          resolveDialog(dialog.id, null);
+        } else if (action === "cancel") {
+          resolveDialog(dialog.id, dialog.kind === "prompt" ? null : false);
+        } else {
+          resolveDialog(dialog.id, dialog.kind === "prompt" ? promptTextRef.current : true);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -43,7 +64,8 @@ export function AppDialogHost() {
 
   const meta = TONE_META[dialog.tone] || TONE_META.info;
   const { Icon } = meta;
-  const isConfirm = dialog.kind === "confirm" || dialog.kind === "choice";
+  const isPrompt = dialog.kind === "prompt";
+  const isConfirm = dialog.kind === "confirm" || dialog.kind === "choice" || isPrompt;
   const confirmClass = dialog.danger
     ? "btn btn-danger"
     : dialog.tone === "error"
@@ -70,6 +92,7 @@ export function AppDialogHost() {
           <button
             type="button"
             className="mat-modal-close"
+            data-dialog-action="dismiss"
             onClick={() => resolveDialog(dialog.id, null)}
             title={isConfirm ? "取消" : "关闭"}
           >
@@ -79,6 +102,20 @@ export function AppDialogHost() {
 
         <div className="mat-modal-body app-dialog-body">
           <p className="app-dialog-message">{dialog.message}</p>
+          {isPrompt && (
+            <input
+              ref={inputRef}
+              type="text"
+              className="text-input mono"
+              value={promptText}
+              placeholder={dialog.placeholder || ""}
+              onChange={(e) => {
+                setPromptText(e.target.value);
+                promptTextRef.current = e.target.value;
+              }}
+              data-testid="app-dialog-input"
+            />
+          )}
         </div>
 
         <div className="mat-modal-foot app-dialog-foot">
@@ -86,7 +123,8 @@ export function AppDialogHost() {
             <button
               type="button"
               className="btn btn-ghost"
-              onClick={() => resolveDialog(dialog.id, false)}
+              data-dialog-action="cancel"
+              onClick={() => resolveDialog(dialog.id, isPrompt ? null : false)}
             >
               {dialog.cancelText}
             </button>
@@ -95,7 +133,8 @@ export function AppDialogHost() {
             ref={confirmRef}
             type="button"
             className={confirmClass}
-            onClick={() => resolveDialog(dialog.id, true)}
+            data-dialog-action="confirm"
+            onClick={() => resolveDialog(dialog.id, isPrompt ? promptText : true)}
           >
             {dialog.confirmText}
           </button>

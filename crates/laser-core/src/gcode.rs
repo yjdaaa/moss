@@ -234,69 +234,81 @@ pub fn write_raster(
         end_y_mm: f64,
     }
 
-    let machine_segs: Vec<MachineSegment> = if plan.selected_axis == "vertical" {
-        let mut segs: Vec<MachineSegment> = segments
-            .iter()
-            .map(|seg| {
+    let is_vertical = plan.selected_axis == "vertical";
+    let mut machine_segs: Vec<MachineSegment> = segments
+        .iter()
+        .map(|seg| {
+            if is_vertical {
                 let start_x_mm = seg.line as f64 * options.pixel_size_mm;
                 let orig_y = seg.start as f64 * options.pixel_size_mm;
                 let orig_end_y = seg.end as f64 * options.pixel_size_mm;
-                let y_mm = (height_mm - orig_end_y).max(0.0);
-                let end_y_mm = (height_mm - orig_y).max(0.0);
                 MachineSegment {
                     start_x_mm,
                     end_x_mm: start_x_mm,
-                    y_mm,
-                    end_y_mm,
+                    y_mm: (height_mm - orig_end_y).max(0.0),
+                    end_y_mm: (height_mm - orig_y).max(0.0),
                 }
-            })
-            .collect();
-        segs.sort_by(|a, b| {
-            a.start_x_mm
-                .partial_cmp(&b.start_x_mm)
-                .unwrap()
-                .then_with(|| a.y_mm.partial_cmp(&b.y_mm).unwrap())
-                .then_with(|| a.end_y_mm.partial_cmp(&b.end_y_mm).unwrap())
-        });
-        segs
-    } else {
-        let mut segs: Vec<MachineSegment> = segments
-            .iter()
-            .map(|seg| {
+            } else {
                 let orig_y = seg.line as f64 * options.pixel_size_mm;
                 let y_mm = (height_mm - options.pixel_size_mm - orig_y).max(0.0);
-                let start_x_mm = seg.start as f64 * options.pixel_size_mm;
-                let end_x_mm = seg.end as f64 * options.pixel_size_mm;
                 MachineSegment {
-                    start_x_mm,
-                    end_x_mm,
+                    start_x_mm: seg.start as f64 * options.pixel_size_mm,
+                    end_x_mm: seg.end as f64 * options.pixel_size_mm,
                     y_mm,
                     end_y_mm: y_mm,
                 }
-            })
-            .collect();
-        segs.sort_by(|a, b| {
-            a.y_mm
-                .partial_cmp(&b.y_mm)
-                .unwrap()
-                .then_with(|| a.start_x_mm.partial_cmp(&b.start_x_mm).unwrap())
-                .then_with(|| a.end_x_mm.partial_cmp(&b.end_x_mm).unwrap())
+            }
+        })
+        .collect();
+    if is_vertical {
+        machine_segs.sort_by(|a, b| {
+            a.start_x_mm
+                .total_cmp(&b.start_x_mm)
+                .then_with(|| a.y_mm.total_cmp(&b.y_mm))
+                .then_with(|| a.end_y_mm.total_cmp(&b.end_y_mm))
         });
-        segs
-    };
+    } else {
+        machine_segs.sort_by(|a, b| {
+            a.y_mm
+                .total_cmp(&b.y_mm)
+                .then_with(|| a.start_x_mm.total_cmp(&b.start_x_mm))
+                .then_with(|| a.end_x_mm.total_cmp(&b.end_x_mm))
+        });
+    }
 
     let mut current_feed: Option<i32> = None;
+    let mut next_feed_suffix = |feed_rate: i32| -> String {
+        if current_feed != Some(feed_rate) {
+            current_feed = Some(feed_rate);
+            format!(" F{feed_rate}")
+        } else {
+            String::new()
+        }
+    };
+    let sweep_axis = if is_vertical { 'Y' } else { 'X' };
+    let max_sweep_mm = if is_vertical {
+        options.work_area_height_mm
+    } else {
+        options.work_area_width_mm
+    };
+    let format_rapid = |fixed_coord: f64, sweep_coord: f64| -> String {
+        if is_vertical {
+            format!("G0 X{fixed_coord:.3} Y{sweep_coord:.3}")
+        } else {
+            format!("G0 X{sweep_coord:.3} Y{fixed_coord:.3}")
+        }
+    };
 
     if plan.output_strategy == "scanline" {
         let mut groups: Vec<Vec<MachineSegment>> = Vec::new();
         for seg in machine_segs {
-            let key = if plan.selected_axis == "vertical" {
+            let key = if is_vertical {
                 seg.start_x_mm
             } else {
                 seg.y_mm
             };
             if let Some(last_group) = groups.last_mut() {
-                let last_key = if plan.selected_axis == "vertical" {
+                let last_key = if is_vertical {
                     last_group[0].start_x_mm
                 } else {
                     last_group[0].y_mm
@@ -314,154 +326,88 @@ pub fn write_raster(
                 continue;
             }
             let reverse = options.snake_scan && line_index % 2 == 1;
-
-            if plan.selected_axis == "vertical" {
-                let x_coord = line_segs[0].start_x_mm;
-                let mut shifted_runs: Vec<(f64, f64)> = line_segs
-                    .iter()
-                    .map(|seg| {
+            let fixed_coord = if is_vertical {
+                line_segs[0].start_x_mm
+            } else {
+                line_segs[0].y_mm
+            };
+            let mut shifted_runs: Vec<(f64, f64)> = line_segs
+                .iter()
+                .map(|seg| {
+                    if is_vertical {
                         (
                             seg.y_mm + options.overscan_mm,
                             seg.end_y_mm + options.overscan_mm,
                         )
-                    })
-                    .collect();
-                shifted_runs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-                let min_start = shifted_runs
-                    .iter()
-                    .map(|(s, _)| *s)
-                    .fold(f64::INFINITY, f64::min);
-                let max_end = shifted_runs
-                    .iter()
-                    .map(|(_, e)| *e)
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let scan_start = (min_start - options.overscan_mm).max(0.0);
-                let scan_end = (max_end + options.overscan_mm).min(options.work_area_height_mm);
-
-                if reverse {
-                    lines.push(format!("G0 X{x_coord:.3} Y{scan_end:.3}"));
-                    for (start_y, end_y) in shifted_runs.into_iter().rev() {
-                        let f_part = if current_feed != Some(options.feed_rate) {
-                            current_feed = Some(options.feed_rate);
-                            format!(" F{}", options.feed_rate)
-                        } else {
-                            String::new()
-                        };
-                        lines.push(format!("G1 Y{end_y:.3} S0{f_part}"));
-                        lines.push(format!("G1 Y{start_y:.3} S{}", options.power));
-                    }
-                    lines.push(format!("G1 Y{scan_start:.3} S0"));
-                } else {
-                    lines.push(format!("G0 X{x_coord:.3} Y{scan_start:.3}"));
-                    for (start_y, end_y) in shifted_runs {
-                        let f_part = if current_feed != Some(options.feed_rate) {
-                            current_feed = Some(options.feed_rate);
-                            format!(" F{}", options.feed_rate)
-                        } else {
-                            String::new()
-                        };
-                        lines.push(format!("G1 Y{start_y:.3} S0{f_part}"));
-                        lines.push(format!("G1 Y{end_y:.3} S{}", options.power));
-                    }
-                    lines.push(format!("G1 Y{scan_end:.3} S0"));
-                }
-            } else {
-                let y_coord = line_segs[0].y_mm;
-                let mut shifted_runs: Vec<(f64, f64)> = line_segs
-                    .iter()
-                    .map(|seg| {
+                    } else {
                         (
                             seg.start_x_mm + options.overscan_mm,
                             seg.end_x_mm + options.overscan_mm,
                         )
-                    })
-                    .collect();
-                shifted_runs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-                let min_start = shifted_runs
-                    .iter()
-                    .map(|(s, _)| *s)
-                    .fold(f64::INFINITY, f64::min);
-                let max_end = shifted_runs
-                    .iter()
-                    .map(|(_, e)| *e)
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let scan_start = (min_start - options.overscan_mm).max(0.0);
-                let scan_end = (max_end + options.overscan_mm).min(options.work_area_width_mm);
-
-                if reverse {
-                    lines.push(format!("G0 X{scan_end:.3} Y{y_coord:.3}"));
-                    for (start_x, end_x) in shifted_runs.into_iter().rev() {
-                        let f_part = if current_feed != Some(options.feed_rate) {
-                            current_feed = Some(options.feed_rate);
-                            format!(" F{}", options.feed_rate)
-                        } else {
-                            String::new()
-                        };
-                        lines.push(format!("G1 X{end_x:.3} S0{f_part}"));
-                        lines.push(format!("G1 X{start_x:.3} S{}", options.power));
                     }
-                    lines.push(format!("G1 X{scan_start:.3} S0"));
-                } else {
-                    lines.push(format!("G0 X{scan_start:.3} Y{y_coord:.3}"));
-                    for (start_x, end_x) in shifted_runs {
-                        let f_part = if current_feed != Some(options.feed_rate) {
-                            current_feed = Some(options.feed_rate);
-                            format!(" F{}", options.feed_rate)
-                        } else {
-                            String::new()
-                        };
-                        lines.push(format!("G1 X{start_x:.3} S0{f_part}"));
-                        lines.push(format!("G1 X{end_x:.3} S{}", options.power));
-                    }
-                    lines.push(format!("G1 X{scan_end:.3} S0"));
+                })
+                .collect();
+            shifted_runs.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+            let min_start = shifted_runs
+                .iter()
+                .map(|(s, _)| *s)
+                .fold(f64::INFINITY, f64::min);
+            let max_end = shifted_runs
+                .iter()
+                .map(|(_, e)| *e)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let scan_start = (min_start - options.overscan_mm).max(0.0);
+            let scan_end = (max_end + options.overscan_mm).min(max_sweep_mm);
+
+            if reverse {
+                lines.push(format_rapid(fixed_coord, scan_end));
+                for (start_pos, end_pos) in shifted_runs.into_iter().rev() {
+                    let f_part = next_feed_suffix(options.feed_rate);
+                    lines.push(format!("G1 {sweep_axis}{end_pos:.3} S0{f_part}"));
+                    lines.push(format!("G1 {sweep_axis}{start_pos:.3} S{}", options.power));
                 }
+                lines.push(format!("G1 {sweep_axis}{scan_start:.3} S0"));
+            } else {
+                lines.push(format_rapid(fixed_coord, scan_start));
+                for (start_pos, end_pos) in shifted_runs {
+                    let f_part = next_feed_suffix(options.feed_rate);
+                    lines.push(format!("G1 {sweep_axis}{start_pos:.3} S0{f_part}"));
+                    lines.push(format!("G1 {sweep_axis}{end_pos:.3} S{}", options.power));
+                }
+                lines.push(format!("G1 {sweep_axis}{scan_end:.3} S0"));
             }
         }
     } else {
         for seg in segments {
-            if plan.selected_axis == "vertical" {
+            let (fixed_coord, start_pos, end_pos) = if is_vertical {
                 let x_coord = seg.line as f64 * options.pixel_size_mm;
                 let orig_y = seg.start as f64 * options.pixel_size_mm;
                 let orig_end_y = seg.end as f64 * options.pixel_size_mm;
                 let machine_y = (height_mm - orig_end_y).max(0.0);
                 let machine_end_y = (height_mm - orig_y).max(0.0);
-
-                let start_y = machine_y + options.overscan_mm;
-                let end_y = machine_end_y + options.overscan_mm;
-                let overscan_start = (start_y - options.overscan_mm).max(0.0);
-                let overscan_end = (end_y + options.overscan_mm).min(options.work_area_height_mm);
-
-                lines.push(format!("G0 X{x_coord:.3} Y{overscan_start:.3}"));
-                let f_part = if current_feed != Some(options.feed_rate) {
-                    current_feed = Some(options.feed_rate);
-                    format!(" F{}", options.feed_rate)
-                } else {
-                    String::new()
-                };
-                lines.push(format!("G1 Y{start_y:.3} S0{f_part}"));
-                lines.push(format!("G1 Y{end_y:.3} S{}", options.power));
-                lines.push(format!("G1 Y{overscan_end:.3} S0"));
+                (
+                    x_coord,
+                    machine_y + options.overscan_mm,
+                    machine_end_y + options.overscan_mm,
+                )
             } else {
                 let orig_y = seg.line as f64 * options.pixel_size_mm;
                 let y_coord = (height_mm - options.pixel_size_mm - orig_y).max(0.0);
-                let start_x = seg.start as f64 * options.pixel_size_mm + options.overscan_mm;
-                let end_x = seg.end as f64 * options.pixel_size_mm + options.overscan_mm;
-                let overscan_start = (start_x - options.overscan_mm).max(0.0);
-                let overscan_end = (end_x + options.overscan_mm).min(options.work_area_width_mm);
+                (
+                    y_coord,
+                    seg.start as f64 * options.pixel_size_mm + options.overscan_mm,
+                    seg.end as f64 * options.pixel_size_mm + options.overscan_mm,
+                )
+            };
+            let overscan_start = (start_pos - options.overscan_mm).max(0.0);
+            let overscan_end = (end_pos + options.overscan_mm).min(max_sweep_mm);
 
-                lines.push(format!("G0 X{overscan_start:.3} Y{y_coord:.3}"));
-                let f_part = if current_feed != Some(options.feed_rate) {
-                    current_feed = Some(options.feed_rate);
-                    format!(" F{}", options.feed_rate)
-                } else {
-                    String::new()
-                };
-                lines.push(format!("G1 X{start_x:.3} S0{f_part}"));
-                lines.push(format!("G1 X{end_x:.3} S{}", options.power));
-                lines.push(format!("G1 X{overscan_end:.3} S0"));
-            }
+            lines.push(format_rapid(fixed_coord, overscan_start));
+            let f_part = next_feed_suffix(options.feed_rate);
+            lines.push(format!("G1 {sweep_axis}{start_pos:.3} S0{f_part}"));
+            lines.push(format!("G1 {sweep_axis}{end_pos:.3} S{}", options.power));
+            lines.push(format!("G1 {sweep_axis}{overscan_end:.3} S0"));
         }
     }
 
@@ -1449,5 +1395,32 @@ M5
         let paths_gcode = generate_paths_framing_gcode(&paths, 100.0, 1200, 0).unwrap();
         assert!(paths_gcode.contains("G1 X30.000"));
         assert!(!paths_gcode.contains("M4 S"));
+    }
+
+    #[test]
+    fn write_raster_vertical_and_nan_options_never_panic() {
+        let bitmap = vec![vec![0, 255], vec![0, 0], vec![0, 255], vec![255, 0]];
+        let mut plan = crate::raster::raster_plan(&bitmap, "scanline").unwrap();
+        plan.selected_axis = "vertical";
+        let mut options = RasterWriterOptions {
+            pixel_size_mm: 0.5,
+            overscan_mm: 1.0,
+            work_area_width_mm: 100.0,
+            work_area_height_mm: 100.0,
+            power: 600,
+            feed_rate: 1800,
+            laser_mode: "M4",
+            snake_scan: true,
+            material: None,
+            safety_note: None,
+            power_scale: Some(1000),
+        };
+        let gcode = write_raster(&plan, 2, 4, &options).unwrap();
+        assert!(gcode.contains("G0 X0.000 Y"), "{gcode}");
+        assert!(gcode.contains("G1 Y1.500 S0 F1800"), "{gcode}");
+        assert!(gcode.contains("G0 X0.500 Y"), "{gcode}");
+
+        options.overscan_mm = f64::NAN;
+        assert!(write_raster(&plan, 2, 4, &options).is_err());
     }
 }

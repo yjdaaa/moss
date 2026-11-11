@@ -331,6 +331,13 @@ export function SettingsModal({
   };
 
   const handleTestJev = async () => {
+    if (jevApiKeyInput.trim()) {
+      showAlert("检测到输入框中有尚未保存的新密钥，请先点击「保存 Jev 设置」后再测试连接。", {
+        title: "请先保存设置",
+        tone: "warning",
+      });
+      return;
+    }
     setTestingJev(true);
     try {
       const res = await postJson("/api/jev/test");

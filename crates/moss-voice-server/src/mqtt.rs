@@ -164,7 +164,16 @@ async fn handle(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr, hub: A
         );
         return;
     }
-    let session_id = crate::session::random_id();
+    let Ok(session_id) = crate::session::random_id() else {
+        let _ = writer.write_all(&codec::connack(3)).await;
+        reject_event(
+            &shared,
+            peer,
+            format!("设备 {device_id} 会话建立失败：操作系统安全随机源不可用"),
+            "重启 MOSS 或操作系统后重试",
+        );
+        return;
+    };
     let (registry, d, c, s) = (
         shared.registry.clone(),
         device_id.clone(),
@@ -338,7 +347,22 @@ async fn read_loop(mut ctx: ReaderCtx) {
 /// 设备唤醒后申请语音通道：新开 UDP 通道（旧的作废），回 UDP 地址与本轮随机密钥。
 fn on_hello(ctx: &ReaderCtx, text: &str) {
     let hello: Value = serde_json::from_str(text).unwrap_or_default();
-    let channel = ctx.hub.open(ctx.device_ip, ctx.incoming.clone());
+    let channel = match ctx.hub.open(ctx.device_ip, ctx.incoming.clone()) {
+        Ok(channel) => channel,
+        Err(reason) => {
+            if let Some(previous) = ctx.audio.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                ctx.hub.close(&previous);
+            }
+            ctx.shared.state.event(
+                EventRecord::error(
+                    DiagCategory::Audio,
+                    format!("设备 {} 打开 UDP 语音通道失败：{reason}", ctx.device_id),
+                )
+                .hint("拒绝下发全零或重复密钥；请重试唤醒或重启 MOSS"),
+            );
+            return;
+        }
+    };
     let previous = ctx
         .audio
         .lock()

@@ -19,6 +19,15 @@ const parseLines = (text) => text.split(/\r?\n/).map((line) => line.trim()).filt
   return { id: "", url: "", kind: "rss", source_id: "" };
 });
 
+const parseOptionalNumber = (raw, label) => {
+  if (raw === null || raw === undefined) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num)) throw new Error(`${label}必须是有效数字`);
+  return num;
+};
+
 export default function VoicePluginsCard() {
   const [config, setConfig] = useState(INITIAL);
   const [selectedService, setSelectedService] = useState("lunar");
@@ -58,8 +67,12 @@ export default function VoicePluginsCard() {
     try {
       const nextSources = parseLines(sources);
       if (sources.trim() && nextSources.some((row) => !row.id || !row.url || (row.kind === "newsnow" && !row.source_id))) throw new Error("RSS：编号|HTTPS地址；NewsNow：编号|newsnow|服务地址|来源ID，每行一个");
+      const utcOffset = parseOptionalNumber(config.lunar_utc_offset_minutes, "时区 UTC 偏移");
       const next = {
         ...config,
+        lunar_utc_offset_minutes: utcOffset === null ? 480 : Math.trunc(utcOffset),
+        weather_latitude: parseOptionalNumber(config.weather_latitude, "默认纬度"),
+        weather_longitude: parseOptionalNumber(config.weather_longitude, "默认经度"),
         news_sources: nextSources,
         rag_dataset_ids: datasets.split(/[\n,]/).map((id) => id.trim()).filter(Boolean),
       };
@@ -75,8 +88,14 @@ export default function VoicePluginsCard() {
   const field = (name, label, placeholder = "", type = "text") => (
     <label className="voice-form-group" key={name}>
       <span>{label}</span>
-      <input type={type} placeholder={placeholder} disabled={saving}
-        value={config[name] ?? ""} onChange={(e) => set(name, type === "number" ? (e.target.value ? Number(e.target.value) : null) : e.target.value)} />
+      <input
+        type={type === "number" ? "text" : type}
+        inputMode={type === "number" ? "decimal" : undefined}
+        placeholder={placeholder}
+        disabled={saving}
+        value={config[name] ?? ""}
+        onChange={(e) => set(name, e.target.value)}
+      />
     </label>
   );
   const toggle = (name, label) => (

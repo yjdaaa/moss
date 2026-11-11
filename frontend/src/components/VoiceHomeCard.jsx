@@ -5,17 +5,29 @@ import { showConfirm } from "../appDialog.js";
 // NV15 stores inert settings and a separate local token, never connecting to
 // HA or issuing control requests before the dedicated production gate.
 const EMPTY = { enabled: false, base_url: "", entities: [] };
+const parseMediaLines = (raw) => String(raw ?? "")
+  .split(/\r?\n/)
+  .filter((s) => s.trim())
+  .map((s) => {
+    const [id, media_type] = s.split("|");
+    return { id: id?.trim() || "", media_type: media_type?.trim() || "" };
+  });
+
 const asForm = (settings) => ({
   ...EMPTY,
   ...(settings || {}),
   enabled: false,
-  entities: Array.isArray(settings?.entities) ? settings.entities.map((entry) => ({
-    entity_id: String(entry.entity_id || ""),
-    alias: String(entry.alias || ""),
-    enabled: !!entry.enabled,
-    policy: "ask",
-    media: Array.isArray(entry.media) ? entry.media : [],
-  })) : [],
+  entities: Array.isArray(settings?.entities) ? settings.entities.map((entry) => {
+    const media = Array.isArray(entry.media) ? entry.media : [];
+    return {
+      entity_id: String(entry.entity_id || ""),
+      alias: String(entry.alias || ""),
+      enabled: !!entry.enabled,
+      policy: "ask",
+      media,
+      media_text: media.map((m) => `${m.id}|${m.media_type}`).join("\n"),
+    };
+  }) : [],
 });
 
 export default function VoiceHomeCard() {
@@ -348,10 +360,14 @@ export default function VoiceHomeCard() {
           </label>
           {entity.entity_id.startsWith("media_player.") && <label>
             <span>本地音乐白名单，每行 library_ID|music 或 library_ID|playlist</span>
-            <textarea value={(entity.media || []).map((m) => `${m.id}|${m.media_type}`).join("\n")} disabled={!loaded || busy}
-              onChange={(event) => update(index, {media:event.target.value.split(/\r?\n/).filter((s) => s.trim()).map((s) => {
-                const [id,media_type]=s.split("|");return {id:id?.trim() || "",media_type:media_type?.trim() || ""};
-              })})} />
+            <textarea
+              value={entity.media_text ?? (entity.media || []).map((m) => `${m.id}|${m.media_type}`).join("\n")}
+              disabled={!loaded || busy}
+              onChange={(event) => {
+                const raw = event.target.value;
+                update(index, { media_text: raw, media: parseMediaLines(raw) });
+              }}
+            />
           </label>}
           <button type="button" disabled={!loaded || busy}
             onClick={() => remove(index)}>移除该项</button>

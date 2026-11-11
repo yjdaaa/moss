@@ -3182,3 +3182,90 @@ export function colabSavePayload(form) {
   if (key) payload.api_key = key;
   return payload;
 }
+
+/**
+ * 将单声道浮点音频样本（`-1..1`）在前端内存打包为标准 16-bit PCM WAV DataURL，
+ * 供「录真话测」跨 WebView2 / WebKit 无编解码依赖直接发给后端 `chain_test`。
+ */
+export function encodeMonoWavDataUrl(floatSamples, sampleRate = 16000) {
+  const rate = Math.max(8000, Math.min(96000, Math.trunc(Number(sampleRate) || 16000)));
+  const len = Array.isArray(floatSamples) || ArrayBuffer.isView(floatSamples) ? floatSamples.length : 0;
+  const dataBytes = len * 2;
+  const buf = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buf);
+  const writeAscii = (offset, str) => {
+    for (let i = 0; i < str.length; i += 1) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, "data");
+  view.setUint32(40, dataBytes, true);
+  for (let i = 0; i < len; i += 1) {
+    const clamped = Math.max(-1, Math.min(1, Number(floatSamples[i]) || 0));
+    view.setInt16(44 + i * 2, clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767), true);
+  }
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  const b64 = typeof globalThis.btoa === "function"
+    ? globalThis.btoa(binary)
+    : Buffer.from(bytes).toString("base64");
+  return `data:audio/wav;base64,${b64}`;
+}
+
+/**
+ * 把后端 `voice_builtin_models_test("chain", ...)` 的整链连贯测试返回转换为顶部 5 栏结果视图与接力摘要。
+ */
+export function chainTestPipelineView(result, error, errorText = (e) => String(e?.message || e || "连贯测试失败")) {
+  if (error) {
+    const msg = errorText(error);
+    return {
+      running: false,
+      mode: "chain",
+      results: {},
+      summary: { ok: false, text: `连贯试跑失败：${msg}` },
+      chainMeta: null,
+    };
+  }
+  const rawSteps = result?.steps && typeof result.steps === "object" ? result.steps : {};
+  const results = {};
+  for (const { key } of MIX_SECTIONS) {
+    const s = rawSteps[key];
+    if (!s || typeof s !== "object") continue;
+    results[key] = {
+      ok: Boolean(s.ok),
+      skipped: Boolean(s.skipped),
+      detail: String(s.detail || (s.ok ? "通过" : "未通过")),
+    };
+  }
+  const ok = Boolean(result?.ok);
+  const summaryText = String(result?.detail || "").trim()
+    || (ok ? "五步全链路连贯试跑通过" : "连贯试跑未全部通过，请查看上方红叉环节");
+  return {
+    running: false,
+    mode: "chain",
+    results,
+    summary: { ok, text: summaryText },
+    chainMeta: {
+      ok,
+      totalMs: Number(result?.total_ms) || 0,
+      seedSource: String(result?.seed_source || ""),
+      inputAudioUrl: result?.input_audio_data_url || null,
+      recognizedText: result?.recognized_text || "",
+      replyText: result?.reply_text || "",
+      replyAudioUrl: result?.reply_audio_data_url || null,
+    },
+  };
+}

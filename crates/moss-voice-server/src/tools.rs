@@ -62,7 +62,7 @@ impl HostTools {
         Self { host }
     }
 
-    fn specs(&self) -> Vec<ToolSpec> {
+    pub fn specs(&self) -> Vec<ToolSpec> {
         self.host.list()["tools"]
             .as_array()
             .map(|tools| {

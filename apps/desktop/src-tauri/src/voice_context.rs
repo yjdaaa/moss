@@ -618,8 +618,24 @@ pub(crate) mod host {
         }
     }
 
-    /// Read-only SELECTs over approvals / jobs / AgentRun records (NV19-07 mapping).
+    /// Read-only SELECTs over approvals / workflows & calibrations (with jobs fallback) / AgentRun records (NV19-07 mapping).
     struct DbResumeFacts(Arc<Trust>);
+
+    pub(crate) fn query_job_ref_state(
+        db: &RuntimeDb,
+        id: &str,
+    ) -> Option<(String, Option<String>)> {
+        let row = |sql: &str| -> Option<(String, Option<String>)> {
+            db.connection
+                .query_row(sql, [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .ok()
+        };
+        row("SELECT status, json_extract(payload,'$.send_result.phase') FROM workflows WHERE workflow_id=?1")
+            .or_else(|| {
+                row("SELECT status, json_extract(payload,'$.send_result.phase') FROM calibrations WHERE calibration_id=?1")
+            })
+            .or_else(|| row("SELECT status, NULL FROM jobs WHERE job_id=?1"))
+    }
 
     impl ResumeFacts for DbResumeFacts {
         fn state(&self, reference: &Reference) -> RefState {
@@ -635,7 +651,7 @@ pub(crate) mod host {
                 RefKind::Approval => row(
                     "SELECT status, json_extract(outcome,'$.phase') FROM approvals WHERE approval_id=?1",
                 ),
-                RefKind::Job => row("SELECT status, NULL FROM jobs WHERE job_id=?1"),
+                RefKind::Job => query_job_ref_state(&db, &reference.id),
                 RefKind::AgentRun => row("SELECT status, NULL FROM voice_agent_runs WHERE id=?1"),
                 RefKind::Test => return RefState::Unverifiable,
             };
@@ -653,7 +669,12 @@ pub(crate) mod host {
                 (_, "failed" | "timed_out", _) => RefState::Failed,
                 (_, "cancelled", _) => RefState::Stopped,
                 (_, "result_unknown", _) => RefState::ResultUnknown,
-                (_, "running" | "pending" | "queued", _) => RefState::InProgress,
+                (
+                    _,
+                    "running" | "pending" | "queued" | "sending" | "processing" | "preview_ready"
+                    | "prepared",
+                    _,
+                ) => RefState::InProgress,
                 _ => RefState::Unverifiable,
             }
         }
@@ -1685,3 +1706,28 @@ fn desktop_only<T>(_: T) -> CmdResult {
 /// Commands the private page calls (build.rs registration and capability tests check this).
 #[cfg(test)]
 pub const COMMANDS: [&str; 2] = ["voice_context_manage", "voice_context_pick_folder"];
+
+#[cfg(all(test, desktop))]
+mod job_facts_tests {
+    #[test]
+    fn query_job_ref_state_reads_workflows_and_calibrations_before_legacy_jobs() {
+        let db = laser_runtime::RuntimeDb::open_memory().unwrap();
+        db.connection
+            .execute_batch(
+                "INSERT INTO workflows(workflow_id,status,created_at,updated_at,payload) VALUES
+                   ('wf-real','sending',1,1,'{\"workflow_id\":\"wf-real\",\"status\":\"sending\",\"send_result\":{\"phase\":\"streaming\"}}');
+                 INSERT INTO calibrations(calibration_id,status,created_at,updated_at,payload) VALUES
+                   ('cal-real','completed',1,1,'{\"calibration_id\":\"cal-real\",\"status\":\"completed\"}');",
+            )
+            .unwrap();
+        assert_eq!(
+            super::host::query_job_ref_state(&db, "wf-real"),
+            Some(("sending".to_owned(), Some("streaming".to_owned())))
+        );
+        assert_eq!(
+            super::host::query_job_ref_state(&db, "cal-real"),
+            Some(("completed".to_owned(), None))
+        );
+        assert_eq!(super::host::query_job_ref_state(&db, "missing"), None);
+    }
+}

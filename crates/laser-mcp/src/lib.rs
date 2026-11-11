@@ -436,6 +436,83 @@ fn with_connection_fields(
     body
 }
 
+/// 经 `HostBackend` 调用 `/api/connection/check`，复用 `ApiService` 的活动作业忙碌保护与 `target_open_locks`，
+/// 避免在加工中另开串口/Telnet 下发 `$$` 打断或重启控制器。
+fn probe_connection_via_backend(
+    tool: &str,
+    arguments: &serde_json::Value,
+    backend: &dyn HostBackend,
+) -> laser_contracts::ToolCallResult {
+    let mut body = with_connection_fields(arguments, serde_json::Map::new());
+    if !body.contains_key("connection_mode") {
+        match tool {
+            "laser_grbl_tool" => {
+                body.insert("connection_mode".into(), serde_json::json!("serial"));
+            }
+            "laser_network_grbl_tool" => {
+                body.insert("connection_mode".into(), serde_json::json!("network"));
+            }
+            _ => {}
+        }
+    }
+    if body.contains_key("connection_mode") {
+        body.insert("auto_fallback".into(), serde_json::json!(false));
+    }
+    if let Some(timeout) = arguments.get("timeout").filter(|v| !v.is_null()) {
+        body.insert("network_timeout".into(), timeout.clone());
+    }
+    let response = backend.request(
+        "POST",
+        "/api/connection/check",
+        &serde_json::Value::Object(body),
+    );
+    let (status, resp) = match response {
+        Ok((status, resp))
+            if status < 400
+                && resp
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true) =>
+        {
+            (status, resp)
+        }
+        other => return backend_result(tool, other),
+    };
+    let _ = status;
+    let result = &resp["result"];
+    let required_mode = match tool {
+        "laser_grbl_tool" => Some("serial"),
+        "laser_network_grbl_tool" => Some("network"),
+        _ => None,
+    };
+    let connected = match required_mode {
+        Some("serial") => result["serial_connected"].as_bool().unwrap_or(false),
+        Some("network") => result["network_connected"].as_bool().unwrap_or(false),
+        _ => result["connected"].as_bool().unwrap_or(false),
+    };
+    let mode_summary = required_mode.and_then(|mode| {
+        result["attempts"].as_array().and_then(|arr| {
+            arr.iter()
+                .find(|entry| entry["mode"].as_str() == Some(mode))
+                .and_then(|entry| entry["summary"].as_str())
+                .filter(|s| !s.is_empty())
+        })
+    });
+    let summary = mode_summary
+        .or_else(|| result["summary"].as_str().filter(|s| !s.is_empty()))
+        .unwrap_or(if connected {
+            "设备已连通"
+        } else {
+            "设备未连通"
+        })
+        .to_owned();
+    laser_contracts::ToolCallResult::with_detail(
+        connected,
+        summary,
+        serde_json::to_string_pretty(&resp).unwrap_or_default(),
+    )
+}
+
 /// 严格模式下接入点实际列出的工具：去掉永不对语音开放的 R4 工具（技术书 §6.1）。
 pub fn tools_list_for(developer_mode: bool, strict: bool) -> serde_json::Value {
     tools_list_profile(developer_mode, strict, true)
@@ -626,8 +703,12 @@ fn dispatch_allowed(
         };
     match name {
         "check_laser_connection_tool" => {
-            let args = serde_json::from_value(arguments.clone()).unwrap_or_default();
-            laser_tools::execute_check_laser_connection(&args)
+            if let Some(b) = backend {
+                probe_connection_via_backend(name, arguments, b)
+            } else {
+                let args = serde_json::from_value(arguments.clone()).unwrap_or_default();
+                laser_tools::execute_check_laser_connection(&args)
+            }
         }
         "laser_safe_action_tool" => {
             if let Some(b) = backend {
@@ -1037,8 +1118,12 @@ fn dispatch_allowed(
                 .to_ascii_lowercase();
             match action.as_str() {
                 "status" | "check" | "probe" => {
-                    let args = serde_json::from_value(arguments.clone()).unwrap_or_default();
-                    laser_tools::execute_check_laser_connection(&args)
+                    if let Some(b) = backend {
+                        probe_connection_via_backend(name, arguments, b)
+                    } else {
+                        let args = serde_json::from_value(arguments.clone()).unwrap_or_default();
+                        laser_tools::execute_check_laser_connection(&args)
+                    }
                 }
                 "cancel" | "stop" => {
                     let Some(job_id) = arg_str(arguments, "job_id") else {
@@ -2786,5 +2871,76 @@ mod tests {
             calls.iter().all(|call| call.1 == "/api/text-task/generate"),
             "{calls:?}"
         );
+    }
+
+    #[test]
+    fn connection_probe_tools_route_through_backend_busy_protection() {
+        let busy_ok = (
+            200,
+            serde_json::json!({
+                "success": true,
+                "result": {
+                    "connected": true,
+                    "serial_connected": true,
+                    "network_connected": false,
+                    "attempts": [{"mode": "serial", "target": "COM3@115200", "connected": true, "laser_mode_ok": true, "summary": "设备正在执行任务 wf-busy"}],
+                    "summary": "设备正在执行任务 wf-busy"
+                }
+            }),
+        );
+        let offline = (
+            200,
+            serde_json::json!({
+                "success": true,
+                "result": {
+                    "connected": false,
+                    "serial_connected": false,
+                    "network_connected": false,
+                    "attempts": [{"mode": "network", "target": "10.0.0.9:23", "connected": false, "laser_mode_ok": false, "summary": "网络 连接失败: timeout"}],
+                    "summary": "网络 连接失败: timeout"
+                }
+            }),
+        );
+        let backend = FakeBackend::new(vec![busy_ok.clone(), busy_ok, offline]);
+
+        let r1 = dispatch_tool_call_with(
+            "check_laser_connection_tool",
+            &serde_json::json!({"port": "COM3", "timeout": 1.5}),
+            false,
+            Some(&backend),
+        );
+        assert!(r1.success, "{r1:?}");
+        assert!(r1.result.contains("wf-busy"), "{}", r1.result);
+
+        let r2 = dispatch_tool_call_with(
+            "laser_grbl_tool",
+            &serde_json::json!({"action": "status", "port": "COM3"}),
+            false,
+            Some(&backend),
+        );
+        assert!(r2.success, "{r2:?}");
+        assert!(r2.result.contains("wf-busy"), "{}", r2.result);
+
+        let r3 = dispatch_tool_call_with(
+            "laser_network_grbl_tool",
+            &serde_json::json!({"action": "probe", "host": "10.0.0.9"}),
+            false,
+            Some(&backend),
+        );
+        assert!(
+            !r3.success,
+            "disconnected probe must report success=false: {r3:?}"
+        );
+        assert!(r3.result.contains("连接失败"), "{}", r3.result);
+
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|c| c.1 == "/api/connection/check"));
+        assert_eq!(calls[0].2["network_timeout"], 1.5);
+        assert_eq!(calls[0].2["auto_fallback"], false);
+        assert_eq!(calls[1].2["connection_mode"], "serial");
+        assert_eq!(calls[1].2["auto_fallback"], false);
+        assert_eq!(calls[2].2["connection_mode"], "network");
+        assert_eq!(calls[2].2["auto_fallback"], false);
     }
 }

@@ -1892,12 +1892,14 @@ export function TwinStage3D({
     const ctx = sceneRef.current;
     if (!ctx) return;
 
-    const localX = (Number(pose?.x) || 0) * toolpathScaleX;
-    const localY = (Number(pose?.y) || 0) * toolpathScaleY;
+    // 实机遥测回传的 MPos/WPos 已是机台真实物理坐标，不再二次乘虚拟缩放或叠加虚拟木牌偏置；
+    // 离线推演与纯断点行号映射才是相对木牌左下角的刀路局部坐标。
+    const isDirectHardwareCoord = Boolean(pose?.isLiveHardware && String(pose?.sourceLabel || "").includes("坐标"));
+    const localX = isDirectHardwareCoord ? (Number(pose?.x) || 0) : (Number(pose?.x) || 0) * toolpathScaleX;
+    const localY = isDirectHardwareCoord ? (Number(pose?.y) || 0) : (Number(pose?.y) || 0) * toolpathScaleY;
     const pz = Number(pose?.z) || 0;
-    // 激光头与刀路叠加材料起点 (offsetX, offsetY) 与材料内雕刻位置偏置 (textOffsetX, textOffsetY)
-    const px = clampCoord(localX + toolpathOffsetX, -10, xMax + 10);
-    const py = clampCoord(localY + toolpathOffsetY, -10, yMax + 10);
+    const px = clampCoord(isDirectHardwareCoord ? localX : localX + toolpathOffsetX, -10, xMax + 10);
+    const py = clampCoord(isDirectHardwareCoord ? localY : localY + toolpathOffsetY, -10, yMax + 10);
     const laserOn = Boolean(pose?.laserOn);
     const powerRatio = Math.min(1, Math.max(0, Number(pose?.powerRatio) || 0));
     ctx.laserOn = laserOn;

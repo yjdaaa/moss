@@ -95,13 +95,13 @@ impl RuntimeStore for MemoryStore {
         Ok(self
             .records
             .lock()
-            .expect("memory store lock")
+            .map_err(|_| SchemaError::Busy)?
             .get(&(kind, id.to_owned()))
             .cloned())
     }
 
     fn put(&self, record: &StoredRecord) -> Result<(), SchemaError> {
-        let mut records = self.records.lock().expect("memory store lock");
+        let mut records = self.records.lock().map_err(|_| SchemaError::Busy)?;
         let mut record = record.clone();
         if record.kind == RecordKind::Workflow
             && let Some(history) = records
@@ -122,7 +122,7 @@ impl RuntimeStore for MemoryStore {
         status: &str,
         now: f64,
     ) -> Result<bool, SchemaError> {
-        let mut records = self.records.lock().expect("memory store lock");
+        let mut records = self.records.lock().map_err(|_| SchemaError::Busy)?;
         let Some(record) = records.get_mut(&(kind, id.to_owned())) else {
             return Ok(false);
         };
@@ -142,7 +142,7 @@ impl RuntimeStore for MemoryStore {
         let mut records: Vec<_> = self
             .records
             .lock()
-            .expect("memory store lock")
+            .map_err(|_| SchemaError::Busy)?
             .values()
             .filter(|record| record.kind == kind)
             .cloned()
@@ -230,16 +230,17 @@ impl RuntimeStore for SqliteStore<'_> {
         Ok(true)
     }
     fn get(&self, kind: RecordKind, id: &str) -> Result<Option<StoredRecord>, SchemaError> {
+        use rusqlite::OptionalExtension;
         let (table, key) = Self::table(kind);
-        let payload = self.db.read_payload(table, key, id)?;
-        let Some(payload) = payload else {
+        let sql = format!("SELECT payload, status FROM {table} WHERE {key}=?1");
+        let mut statement = self.db.connection.prepare_cached(&sql)?;
+        let row: Option<(String, Option<String>)> = statement
+            .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        let Some((raw_payload, status)) = row else {
             return Ok(None);
         };
-        let status: Option<String> = self.db.connection.query_row(
-            &format!("SELECT status FROM {table} WHERE {key}=?1"),
-            [id],
-            |row| row.get(0),
-        )?;
+        let payload: Value = serde_json::from_str(&raw_payload)?;
         Ok(Some(StoredRecord {
             kind,
             id: id.to_owned(),
@@ -260,13 +261,12 @@ impl RuntimeStore for SqliteStore<'_> {
         now: f64,
     ) -> Result<bool, SchemaError> {
         let (table, key) = Self::table(kind);
-        let changed = self.db.connection.execute(
-            &format!(
-                "UPDATE {table} SET status=?1, updated_at=?2,
-                payload=json_set(payload,'$.status',?1,'$.updated_at',?2) WHERE {key}=?3"
-            ),
-            rusqlite::params![status, now, id],
-        )?;
+        let sql = format!(
+            "UPDATE {table} SET status=?1, updated_at=?2,
+            payload=json_set(payload,'$.status',?1,'$.updated_at',?2) WHERE {key}=?3"
+        );
+        let mut statement = self.db.connection.prepare_cached(&sql)?;
+        let changed = statement.execute(rusqlite::params![status, now, id])?;
         Ok(changed == 1)
     }
 
@@ -280,7 +280,7 @@ impl RuntimeStore for SqliteStore<'_> {
             "SELECT {key}, payload, status FROM {table}
             ORDER BY updated_at DESC, {key} ASC LIMIT ?1"
         );
-        let mut statement = self.db.connection.prepare(&sql)?;
+        let mut statement = self.db.connection.prepare_cached(&sql)?;
         let rows = statement.query_map([limit as i64], |row| {
             let id: String = row.get(0)?;
             let payload: String = row.get(1)?;
@@ -299,6 +299,80 @@ impl RuntimeStore for SqliteStore<'_> {
             });
         }
         Ok(records)
+    }
+}
+
+/// 读写分离 SQLite 存储：写操作走主连接锁，纯只读操作（`get`、`list_recent`）优先走独立 WAL 只读连接，
+/// 避免后台重建知识库或批量写入期间阻塞前端高频状态轮询；内存库自动回退到主连接。
+pub struct SplitSqliteStore {
+    write_db: std::sync::Arc<std::sync::Mutex<RuntimeDb>>,
+    read_db: Option<std::sync::Arc<std::sync::Mutex<RuntimeDb>>>,
+}
+
+impl SplitSqliteStore {
+    pub fn new(
+        write_db: std::sync::Arc<std::sync::Mutex<RuntimeDb>>,
+        read_db: Option<std::sync::Arc<std::sync::Mutex<RuntimeDb>>>,
+    ) -> Self {
+        Self { write_db, read_db }
+    }
+
+    fn lock_read(&self) -> Result<std::sync::MutexGuard<'_, RuntimeDb>, SchemaError> {
+        match self.read_db.as_ref() {
+            Some(read) => read.lock().map_err(|_| SchemaError::Busy),
+            None => self.write_db.lock().map_err(|_| SchemaError::Busy),
+        }
+    }
+
+    fn lock_write(&self) -> Result<std::sync::MutexGuard<'_, RuntimeDb>, SchemaError> {
+        self.write_db.lock().map_err(|_| SchemaError::Busy)
+    }
+}
+
+impl RuntimeStore for SplitSqliteStore {
+    fn adopt_feedback(
+        &self,
+        workflow_id: &str,
+        feedback: &Value,
+        preview: &StoredRecord,
+    ) -> Result<bool, SchemaError> {
+        let db = self.lock_write()?;
+        SqliteStore::new(&db).adopt_feedback(workflow_id, feedback, preview)
+    }
+
+    fn save_feedback(&self, workflow_id: &str, feedback: &Value) -> Result<bool, SchemaError> {
+        let db = self.lock_write()?;
+        SqliteStore::new(&db).save_feedback(workflow_id, feedback)
+    }
+
+    fn get(&self, kind: RecordKind, id: &str) -> Result<Option<StoredRecord>, SchemaError> {
+        let db = self.lock_read()?;
+        SqliteStore::new(&db).get(kind, id)
+    }
+
+    fn put(&self, record: &StoredRecord) -> Result<(), SchemaError> {
+        let db = self.lock_write()?;
+        SqliteStore::new(&db).put(record)
+    }
+
+    fn set_status(
+        &self,
+        kind: RecordKind,
+        id: &str,
+        status: &str,
+        now: f64,
+    ) -> Result<bool, SchemaError> {
+        let db = self.lock_write()?;
+        SqliteStore::new(&db).set_status(kind, id, status, now)
+    }
+
+    fn list_recent(
+        &self,
+        kind: RecordKind,
+        limit: usize,
+    ) -> Result<Vec<StoredRecord>, SchemaError> {
+        let db = self.lock_read()?;
+        SqliteStore::new(&db).list_recent(kind, limit)
     }
 }
 
@@ -347,7 +421,7 @@ impl RuntimeStore for std::sync::Mutex<RuntimeDb> {
     }
 }
 
-fn feedback_adoptable(payload: &Value, feedback: &Value) -> bool {
+pub fn feedback_adoptable(payload: &Value, feedback: &Value) -> bool {
     payload["stale"] != true
         && !matches!(
             payload["status"].as_str(),
@@ -363,7 +437,7 @@ fn feedback_adoptable(payload: &Value, feedback: &Value) -> bool {
             })
 }
 
-fn merge_feedback(payload: &mut Value, feedback: &Value) {
+pub fn merge_feedback(payload: &mut Value, feedback: &Value) {
     if !payload["feedback_history"].is_array() {
         payload["feedback_history"] = serde_json::json!([]);
     }
@@ -709,10 +783,12 @@ pub(crate) fn put_record(
              ELSE excluded.payload END".to_owned()
         } else { format!("{c}=excluded.{c}") }
     }).collect::<Vec<_>>().join(",");
-    connection.execute(
-        &format!("INSERT INTO {table}({}) VALUES({placeholders}) ON CONFLICT({key}) DO UPDATE SET {updates}", columns.join(",")),
-        rusqlite::params_from_iter(values),
-    )?;
+    let sql = format!(
+        "INSERT INTO {table}({}) VALUES({placeholders}) ON CONFLICT({key}) DO UPDATE SET {updates}",
+        columns.join(",")
+    );
+    let mut stmt = connection.prepare_cached(&sql)?;
+    stmt.execute(rusqlite::params_from_iter(values))?;
     Ok(())
 }
 
@@ -1019,5 +1095,34 @@ mod tests {
         let bad_res = decode_workflow(&bad_payload);
         assert!(bad_res.is_err());
         assert!(bad_res.unwrap_err().0); // stale is true
+    }
+
+    #[test]
+    fn memory_store_returns_busy_instead_of_panicking_when_poisoned() {
+        let store = std::sync::Arc::new(MemoryStore::new());
+        let poisoned = store.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = poisoned.records.lock().unwrap();
+            panic!("poison memory store");
+        }));
+        let dummy = StoredRecord {
+            kind: RecordKind::Workflow,
+            id: "wf-1".into(),
+            status: Some("preview_ready".into()),
+            payload: serde_json::json!({"workflow_id": "wf-1"}),
+        };
+        assert!(matches!(
+            store.get(RecordKind::Workflow, "wf-1"),
+            Err(SchemaError::Busy)
+        ));
+        assert!(matches!(store.put(&dummy), Err(SchemaError::Busy)));
+        assert!(matches!(
+            store.set_status(RecordKind::Workflow, "wf-1", "cancelled", 1.0),
+            Err(SchemaError::Busy)
+        ));
+        assert!(matches!(
+            store.list_recent(RecordKind::Workflow, 10),
+            Err(SchemaError::Busy)
+        ));
     }
 }

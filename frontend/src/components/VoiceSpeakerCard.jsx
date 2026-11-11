@@ -14,8 +14,21 @@ export default function VoiceSpeakerCard() {
     void poll();const timer=setInterval(poll,2000);return()=>{live=false;clearInterval(timer);};
   },[]);
   const act=async(input)=>{if(mutating.current)return false;mutating.current=true;epoch.current++;setBusy(true);try{setData(await voiceApi.speakerManage(input));setError("");return true;}catch(e){setError(e.message);return false;}finally{epoch.current++;mutating.current=false;setBusy(false);}};
+  useEffect(() => {
+    if (!session || !Array.isArray(data?.sessions)) return;
+    if (data.sessions.some((row) => JSON.stringify([row.device_id, row.session_id]) === session)) return;
+    let prevDeviceId = "";
+    try {
+      prevDeviceId = JSON.parse(session)?.[0] || "";
+    } catch {
+      prevDeviceId = "";
+    }
+    const reconnected = prevDeviceId ? data.sessions.find((row) => row.device_id === prevDeviceId) : null;
+    setSession(reconnected ? JSON.stringify([reconnected.device_id, reconnected.session_id]) : "");
+  }, [data?.sessions, session]);
   const calibration=speakerCalibrationView(data);
   const selectedSession=()=>data?.sessions?.find(row=>JSON.stringify([row.device_id,row.session_id])===session);
+  const activeTarget=selectedSession();
   const beginTest=async(row)=>{
     const target=selectedSession();if(!target)return;
     if(!await showConfirm(`接下来90秒内，请“${row.name}”对这台设备再说三段2～10秒的测试句（换不同的话）。只生成测试向量用于计算阈值，不保存原始音频，算完即丢弃。`,{title:"录测试音",confirmText:"开始录"}))return;
@@ -48,7 +61,7 @@ export default function VoiceSpeakerCard() {
       <option value="">选择当前会话</option>{data?.sessions?.map(row=><option key={JSON.stringify([row.device_id,row.session_id])} value={JSON.stringify([row.device_id,row.session_id])}>{row.device_id}</option>)}
     </select></label>
     </div>
-    <button type="button" className="btn btn-ghost" disabled={busy||!session||!name.trim()||data?.enrollment?.active} onClick={begin}>开始三段登记</button>
+    <button type="button" className="btn btn-ghost" disabled={busy||!activeTarget||!name.trim()||data?.enrollment?.active} onClick={begin}>开始三段登记</button>
     <p role="status">{data?.enrollment?.message||"正在加载"} · {data?.enrollment?.collected||0}/3{data?.enrollment?.processing?" · 计算中":""}</p>
     {data?.enrollment?.active&&<button type="button" className="btn btn-ghost" disabled={busy} onClick={()=>act({action:"cancel"})}>取消并丢弃片段</button>}
     <div className="voice-form-group" id="voice-speaker-calibration">
@@ -64,7 +77,7 @@ export default function VoiceSpeakerCard() {
     {data?.speakers?.map(row=><div className="voice-form-group" key={row.id}>
       <h3>{row.name} · {row.dimension}维</h3>
       <p className="voice-muted">标定测试音 {calibration.counts[row.id]||0}/3</p>
-      <button type="button" className="btn btn-ghost" disabled={busy||!session||data?.enrollment?.active} onClick={()=>beginTest(row)}>录测试音</button>
+      <button type="button" className="btn btn-ghost" disabled={busy||!activeTarget||data?.enrollment?.active} onClick={()=>beginTest(row)}>录测试音</button>
       <label className="voice-person-summary">个人摘要 <textarea className="text-input" rows={3} maxLength={1500} value={drafts[row.id]?.text??row.memory_summary??""} disabled={busy} onChange={e=>setDrafts(old=>({...old,[row.id]:{text:e.target.value,revision:old[row.id]?.revision??row.memory_revision}}))}/></label>
       {drafts[row.id]&&drafts[row.id].revision!==row.memory_revision&&<p role="status">个人摘要已被其他操作更新。你的草稿仍保留；请核对后重新编辑。</p>}
       {drafts[row.id]&&<button className="btn btn-ghost" type="button" disabled={busy} onClick={()=>setDrafts(old=>{const next={...old};delete next[row.id];return next;})}>丢弃草稿并加载最新摘要</button>}

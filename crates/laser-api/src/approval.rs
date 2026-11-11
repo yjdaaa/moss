@@ -127,6 +127,7 @@ fn system_clock() -> ApprovalClock {
 
 pub struct ApprovalService {
     db: Arc<Mutex<RuntimeDb>>,
+    read_db: Option<Arc<Mutex<RuntimeDb>>>,
     ttl_seconds: u64,
     clock: ApprovalClock,
 }
@@ -202,11 +203,22 @@ impl ApprovalService {
     /// 有效期取 `MOSS_APPROVAL_TTL_SECONDS`（30..600，默认 120）。
     pub fn new(db: Arc<Mutex<RuntimeDb>>) -> Self {
         let raw = std::env::var("MOSS_APPROVAL_TTL_SECONDS").ok();
+        let read_db = db
+            .lock()
+            .ok()
+            .and_then(|guard| guard.open_readonly().ok().flatten())
+            .map(|ro| Arc::new(Mutex::new(ro)));
         Self {
             db,
+            read_db,
             ttl_seconds: approval_ttl_seconds(raw.as_deref()),
             clock: system_clock(),
         }
+    }
+
+    pub fn with_read_db(mut self, read_db: Option<Arc<Mutex<RuntimeDb>>>) -> Self {
+        self.read_db = read_db;
+        self
     }
 
     pub fn with_ttl_seconds(mut self, seconds: u64) -> Self {
@@ -231,6 +243,15 @@ impl ApprovalService {
         self.db
             .lock()
             .map_err(|_| ApprovalError::Unavailable("数据库锁已损坏".into()))
+    }
+
+    fn lock_read(&self) -> Result<std::sync::MutexGuard<'_, RuntimeDb>, ApprovalError> {
+        match self.read_db.as_ref() {
+            Some(read) => read
+                .lock()
+                .map_err(|_| ApprovalError::Unavailable("只读数据库锁已损坏".into())),
+            None => self.lock(),
+        }
     }
 
     /// 写一条与审批生命周期无关的审计（R4 拒绝、严格模式拦截等）。调用方决定失败后的处理。
@@ -315,14 +336,7 @@ impl ApprovalService {
         let now = self.now();
         let db = self.lock()?;
         let mut changed = self.expire_with_audit(&db, now, true)?;
-        for record in db.list_approvals(Some(ApprovalStatus::Executed), usize::MAX >> 1)? {
-            let running = record
-                .outcome
-                .as_ref()
-                .is_some_and(|outcome| outcome.phase == Some(ApprovalPhase::Running));
-            if !running {
-                continue;
-            }
+        for record in db.list_running_executed_approvals()? {
             let outcome = ApprovalOutcome {
                 success: false,
                 message: if record.kind == ApprovalKind::AgentRun {
@@ -590,10 +604,19 @@ impl ApprovalService {
         Ok(record)
     }
 
-    /// 读取审批；已到期的先标为 expired 再返回。
+    /// 读取审批；未到期时仅走只读连接，已到期的才升级写锁标为 expired 再返回。
     pub fn get(&self, approval_id: &str) -> Result<ApprovalRecord, ApprovalError> {
-        let db = self.lock()?;
         let now = self.now();
+        {
+            let read_db = self.lock_read()?;
+            let record = read_db
+                .get_approval(approval_id)?
+                .ok_or(ApprovalError::NotFound)?;
+            if !record.is_expired_at(now) {
+                return Ok(record);
+            }
+        }
+        let db = self.lock()?;
         let record = db
             .get_approval(approval_id)?
             .ok_or(ApprovalError::NotFound)?;
@@ -604,14 +627,21 @@ impl ApprovalService {
         Ok(record)
     }
 
-    /// 列出审批（先处理到期），新的在前。
+    /// 列出审批（先检查是否有到期项；无到期项时纯走只读连接，不抢主写锁），新的在前。
     pub fn list(
         &self,
         status: Option<ApprovalStatus>,
         limit: usize,
     ) -> Result<Vec<ApprovalRecord>, ApprovalError> {
+        let now = self.now();
+        {
+            let read_db = self.lock_read()?;
+            if read_db.approvals_due_for_expiry(now, false)?.is_empty() {
+                return Ok(read_db.list_approvals(status, limit)?);
+            }
+        }
         let db = self.lock()?;
-        self.expire_with_audit(&db, self.now(), false)?;
+        self.expire_with_audit(&db, now, false)?;
         Ok(db.list_approvals(status, limit)?)
     }
 

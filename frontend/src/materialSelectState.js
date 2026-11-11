@@ -5,6 +5,21 @@
 
 export const CUSTOM_OPTION_VALUE = "__custom__";
 export const CUSTOM_OPTION_LABEL = "自定义…";
+export const MATERIAL_LIBRARY_CHANNEL = "laser-material-library-v1";
+
+export function notifyMaterialsUpdated(ChannelImpl = globalThis.BroadcastChannel) {
+  try {
+    if (typeof ChannelImpl === "function") {
+      const channel = new ChannelImpl(MATERIAL_LIBRARY_CHANNEL);
+      channel.postMessage({ type: "materials-updated", at: Date.now() });
+      channel.close?.();
+      return true;
+    }
+  } catch {
+    // BroadcastChannel 不可用时静默降级
+  }
+  return false;
+}
 
 export function extractUiMaterialOptions(httpJson) {
   if (!httpJson || httpJson.success !== true || !httpJson.result) {

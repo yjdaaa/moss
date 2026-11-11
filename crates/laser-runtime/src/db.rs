@@ -113,7 +113,18 @@ impl ApprovalRow {
 /// v16：资料目录单独启用 / 停用（`context_knowledge_roots.enabled`）。
 /// v17：NV19 记忆取代链与复现计数（`context_memories.supersedes/seen_count/last_seen_at`），
 /// 资料段落级索引（`context_knowledge_chunks` + 无正文 FTS5 `context_knowledge_chunks_fts`）。
-pub const SCHEMA_VERSION: i64 = 17;
+/// v18：删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），
+/// 补齐 `workflows`、`approvals`、`material_aliases` 高频查询索引。
+pub const SCHEMA_VERSION: i64 = 18;
+
+const AUDIT_LOG_MAX_ROWS: i64 = 2000;
+const APPROVALS_TERMINAL_MAX_ROWS: i64 = 500;
+const WORKFLOWS_INACTIVE_MAX_ROWS: i64 = 1000;
+const CALIBRATIONS_INACTIVE_MAX_ROWS: i64 = 200;
+const MATERIAL_HISTORY_MAX_ROWS: i64 = 500;
+const EXTRACTION_RUNS_MAX_ROWS: i64 = 500;
+const FIRMWARE_DELIVERY_FINISHED_MAX_ROWS: i64 = 200;
+const CONTEXT_TOMBSTONE_RETENTION_SECS: f64 = 30.0 * 86_400.0;
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -329,18 +340,23 @@ impl From<serde_json::Error> for SchemaError {
 
 pub struct RuntimeDb {
     pub connection: Connection,
+    path: Option<std::path::PathBuf>,
 }
 
 impl RuntimeDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SchemaError> {
-        let connection = Connection::open(path)?;
+        let db_path = path.as_ref().to_path_buf();
+        let connection = Connection::open(&db_path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         // Attempt to wipe superseded credentials from freed SQLite cells.
         // Backups and historical WAL copies require separate secure handling.
         connection.pragma_update(None, "secure_delete", "ON")?;
-        let db = Self { connection };
+        let db = Self {
+            connection,
+            path: Some(db_path),
+        };
         db.migrate()?;
         db.migrate_legacy_home_token(chrono::Utc::now().timestamp_millis() as f64 / 1000.0)?;
         Ok(db)
@@ -349,9 +365,30 @@ impl RuntimeDb {
     pub fn open_memory() -> Result<Self, SchemaError> {
         let connection = Connection::open_in_memory()?;
         connection.pragma_update(None, "secure_delete", "ON")?;
-        let db = Self { connection };
+        let db = Self {
+            connection,
+            path: None,
+        };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// 打开指向同一 WAL 数据库文件的独立只读连接（内存库返回 `Ok(None)`），
+    /// 供高频轮询查询分流，避免后台大事务写入时阻塞前端只读状态刷新。
+    pub fn open_readonly(&self) -> Result<Option<Self>, SchemaError> {
+        let Some(ref db_path) = self.path else {
+            return Ok(None);
+        };
+        let connection = Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        Ok(Some(Self {
+            connection,
+            path: Some(db_path.clone()),
+        }))
     }
 
     pub fn migrate(&self) -> Result<(), SchemaError> {
@@ -403,10 +440,7 @@ impl RuntimeDb {
                source TEXT, updated_at REAL, notes TEXT, extra TEXT NOT NULL DEFAULT '{}',
                replaced_at REAL NOT NULL, reason TEXT NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS ai_state(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, updated_at REAL NOT NULL);
-             CREATE TABLE IF NOT EXISTS gui_calibration(target TEXT PRIMARY KEY, payload TEXT NOT NULL, saved_at REAL NOT NULL);
              CREATE TABLE IF NOT EXISTS uploads(upload_id TEXT PRIMARY KEY, path TEXT NOT NULL, sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL, mime TEXT, created_at REAL NOT NULL);
-             CREATE TABLE IF NOT EXISTS auth_pairings(token_hash TEXT PRIMARY KEY, pairing_id TEXT UNIQUE NOT NULL, device_name TEXT, created_at REAL NOT NULL, last_seen_at REAL, revoked INTEGER NOT NULL DEFAULT 0, revoked_at REAL);
              CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY, at REAL NOT NULL, client TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL, detail TEXT NOT NULL);"
         )?;
         let current: Option<i64> =
@@ -424,23 +458,13 @@ impl RuntimeDb {
             tx.execute_batch(
                 "ALTER TABLE jobs ADD COLUMN updated_at REAL NOT NULL DEFAULT 0;
                  UPDATE jobs SET updated_at=COALESCE(finished_at,started_at,created_at);
-                 CREATE INDEX workflows_status_updated ON workflows(status,updated_at DESC);
-                 CREATE INDEX workflows_source ON workflows(source_type);
-                 CREATE INDEX workflows_material ON workflows(material,thickness_mm);
-                 CREATE INDEX jobs_updated ON jobs(updated_at DESC);
-                 CREATE INDEX text_tasks_updated ON text_tasks(updated_at DESC);
-                 CREATE INDEX calibrations_updated ON calibrations(updated_at DESC);",
+                 CREATE INDEX IF NOT EXISTS workflows_status_updated ON workflows(status,updated_at DESC);
+                 CREATE INDEX IF NOT EXISTS workflows_source ON workflows(source_type);
+                 CREATE INDEX IF NOT EXISTS workflows_material ON workflows(material,thickness_mm);
+                 CREATE INDEX IF NOT EXISTS jobs_updated ON jobs(updated_at DESC);
+                 CREATE INDEX IF NOT EXISTS text_tasks_updated ON text_tasks(updated_at DESC);
+                 CREATE INDEX IF NOT EXISTS calibrations_updated ON calibrations(updated_at DESC);",
             )?;
-            for table in ["workflows", "text_tasks", "jobs", "calibrations"] {
-                tx.execute_batch(&format!(
-                    "CREATE TABLE {table}_history(
-                       history_id INTEGER PRIMARY KEY, record_id TEXT NOT NULL,
-                       payload TEXT NOT NULL, updated_at REAL NOT NULL,
-                       replaced_at REAL NOT NULL, reason TEXT NOT NULL,
-                       UNIQUE(record_id,payload)
-                     );"
-                ))?;
-            }
             tx.execute(
                 "INSERT INTO schema_version(version,applied_at) VALUES(2,unixepoch())",
                 [],
@@ -834,6 +858,23 @@ impl RuntimeDb {
                  INSERT INTO schema_version(version,applied_at) VALUES(17,unixepoch());"
             )?;
         }
+        if current.unwrap_or(0) < 18 {
+            // 2026-11-11：清理日常完全不读写的 7 张历史废弃表，并补齐高频轮询与按材料查询索引。
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS ai_state;
+                 DROP TABLE IF EXISTS gui_calibration;
+                 DROP TABLE IF EXISTS auth_pairings;
+                 DROP TABLE IF EXISTS workflows_history;
+                 DROP TABLE IF EXISTS text_tasks_history;
+                 DROP TABLE IF EXISTS jobs_history;
+                 DROP TABLE IF EXISTS calibrations_history;
+                 CREATE INDEX IF NOT EXISTS workflows_updated ON workflows(updated_at DESC, workflow_id ASC);
+                 CREATE INDEX IF NOT EXISTS approvals_created ON approvals(created_at DESC, approval_id DESC);
+                 CREATE INDEX IF NOT EXISTS approvals_status_created ON approvals(status, created_at DESC, approval_id DESC);
+                 CREATE INDEX IF NOT EXISTS material_aliases_material ON material_aliases(material_name);
+                 INSERT INTO schema_version(version,applied_at) VALUES(18,unixepoch());"
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1172,26 +1213,34 @@ impl RuntimeDb {
     }
 
     /// 追加一条审计记录（技术书 §7.3）。`detail` 由 `AuditDetail` 序列化，不拼裸 JSON。
-    /// 返回新行 id。调用方决定失败后的处理：R2 停止类动作不因审计失败而阻断，R3 阻断。
+    /// 返回新行 id，并按 `AUDIT_LOG_MAX_ROWS` 定额淘汰最早的旧记录，防止长期运行膨胀。
+    /// 调用方决定失败后的处理：R2 停止类动作不因审计失败而阻断，R3 阻断。
     pub fn append_audit(&self, entry: &AuditEntry) -> Result<i64, SchemaError> {
         let detail = serde_json::to_string(&entry.detail)?;
-        self.connection.execute(
+        let mut stmt = self.connection.prepare_cached(
             "INSERT INTO audit_log(at, client, action, target, result, detail) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                entry.at,
-                entry.client,
-                entry.action.as_str(),
-                entry.target,
-                entry.result.as_str(),
-                detail
-            ],
         )?;
-        Ok(self.connection.last_insert_rowid())
+        stmt.execute(params![
+            entry.at,
+            entry.client,
+            entry.action.as_str(),
+            entry.target,
+            entry.result.as_str(),
+            detail
+        ])?;
+        let new_id = self.connection.last_insert_rowid();
+        if new_id > AUDIT_LOG_MAX_ROWS {
+            let mut prune = self
+                .connection
+                .prepare_cached("DELETE FROM audit_log WHERE id <= ?1")?;
+            let _ = prune.execute(params![new_id - AUDIT_LOG_MAX_ROWS]);
+        }
+        Ok(new_id)
     }
 
     /// 最近的审计记录，新的在前。
     pub fn recent_audit(&self, limit: usize) -> Result<Vec<AuditEntry>, SchemaError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT at, client, action, target, result, detail FROM audit_log ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit as i64], |r| {
@@ -1270,13 +1319,11 @@ impl RuntimeDb {
 
     /// 按 ID 读取审批（含本地保存的连接参数）。
     pub fn get_approval(&self, approval_id: &str) -> Result<Option<ApprovalRecord>, SchemaError> {
-        let row = self
-            .connection
-            .query_row(
-                &format!("SELECT {APPROVAL_COLUMNS} FROM approvals WHERE approval_id=?1"),
-                params![approval_id],
-                ApprovalRow::read,
-            )
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {APPROVAL_COLUMNS} FROM approvals WHERE approval_id=?1"
+        ))?;
+        let row = statement
+            .query_row(params![approval_id], ApprovalRow::read)
             .optional()?;
         row.map(ApprovalRow::into_record).transpose()
     }
@@ -1287,15 +1334,11 @@ impl RuntimeDb {
         source: ApprovalSource,
         request_id: &str,
     ) -> Result<Option<ApprovalRecord>, SchemaError> {
-        let row = self
-            .connection
-            .query_row(
-                &format!(
-                    "SELECT {APPROVAL_COLUMNS} FROM approvals WHERE source=?1 AND request_id=?2"
-                ),
-                params![source.as_str(), request_id],
-                ApprovalRow::read,
-            )
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {APPROVAL_COLUMNS} FROM approvals WHERE source=?1 AND request_id=?2"
+        ))?;
+        let row = statement
+            .query_row(params![source.as_str(), request_id], ApprovalRow::read)
             .optional()?;
         row.map(ApprovalRow::into_record).transpose()
     }
@@ -1306,7 +1349,7 @@ impl RuntimeDb {
         status: Option<ApprovalStatus>,
         limit: usize,
     ) -> Result<Vec<ApprovalRecord>, SchemaError> {
-        let mut statement = self.connection.prepare(&format!(
+        let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {APPROVAL_COLUMNS} FROM approvals \
              WHERE (?1 IS NULL OR status=?1) ORDER BY created_at DESC, approval_id DESC LIMIT ?2"
         ))?;
@@ -1314,6 +1357,21 @@ impl RuntimeDb {
             params![status.map(ApprovalStatus::as_str), limit as i64],
             ApprovalRow::read,
         )?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?.into_record()?);
+        }
+        Ok(records)
+    }
+
+    /// 启动恢复专用：只筛出已消费但执行阶段仍停留在 `running` 的中断审批，避免全表搬进内存。
+    pub fn list_running_executed_approvals(&self) -> Result<Vec<ApprovalRecord>, SchemaError> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {APPROVAL_COLUMNS} FROM approvals \
+             WHERE status='executed' AND json_extract(outcome, '$.phase')='running' \
+             ORDER BY created_at ASC, approval_id ASC"
+        ))?;
+        let rows = statement.query_map([], ApprovalRow::read)?;
         let mut records = Vec::new();
         for row in rows {
             records.push(row?.into_record()?);
@@ -1391,7 +1449,7 @@ impl RuntimeDb {
         now: f64,
         all_open: bool,
     ) -> Result<Vec<ApprovalRecord>, SchemaError> {
-        let mut statement = self.connection.prepare(&format!(
+        let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {APPROVAL_COLUMNS} FROM approvals \
              WHERE status IN ('pending','approved') AND (?2 OR expires_at <= ?1) ORDER BY created_at"
         ))?;
@@ -1757,30 +1815,28 @@ impl RuntimeDb {
     }
 
     pub fn get_secret(&self, name: &str) -> Result<Option<String>, SchemaError> {
-        self.connection
-            .query_row(
-                "SELECT value FROM app_secrets WHERE name=?1",
-                [name],
-                |row| row.get(0),
-            )
+        let mut stmt = self
+            .connection
+            .prepare_cached("SELECT value FROM app_secrets WHERE name=?1")?;
+        stmt.query_row([name], |row| row.get(0))
             .optional()
             .map_err(SchemaError::from)
     }
 
     pub fn set_secret(&self, name: &str, value: &str, now: f64) -> Result<(), SchemaError> {
-        self.connection.execute(
+        let mut stmt = self.connection.prepare_cached(
             "INSERT INTO app_secrets(name,value,updated_at) VALUES(?1,?2,?3)
              ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            params![name, value, now],
         )?;
+        stmt.execute(params![name, value, now])?;
         Ok(())
     }
 
     pub fn delete_secret(&self, name: &str) -> Result<bool, SchemaError> {
-        Ok(self
+        let mut stmt = self
             .connection
-            .execute("DELETE FROM app_secrets WHERE name=?1", [name])?
-            > 0)
+            .prepare_cached("DELETE FROM app_secrets WHERE name=?1")?;
+        Ok(stmt.execute([name])? > 0)
     }
 
     /// 在一个事务内写入（`Some`）或删除（`None`）多项密钥，任一项失败整批不生效。
@@ -1875,26 +1931,138 @@ impl RuntimeDb {
     pub fn recover_after_restart(&self) -> Result<usize, SchemaError> {
         let count = self.connection.execute(
             "UPDATE jobs SET status='failed', finished_at=unixepoch(),
-             payload=json_set(payload,'$.result.detail','host 重启中断，任务安全终止')
-             WHERE status IN ('running', 'pending', 'queued')",
+             payload=json_set(payload,'$.status','failed','$.result.detail','host 重启中断，任务安全终止')
+             WHERE status IN ('running', 'pending', 'queued')
+                OR (status='failed' AND json_extract(payload,'$.status') IN ('running', 'pending', 'queued'))",
             [],
         )?;
-        // 记录正文里的 status 与列保持一致：状态查询返回的是正文（2026-10-06 修复：此前只改列，
-        // 重启后查询仍显示“发送中”）
+        // 记录正文里的 status 与列保持一致：状态查询返回的是正文（同时修补旧版退出路径曾漏改 $.status 的记录）
         self.connection.execute(
             "UPDATE workflows SET status='failed', updated_at=unixepoch(),
              payload=json_set(payload,'$.status','failed','$.detail','host 重启中断，任务安全终止')
-             WHERE status IN ('sending', 'processing')",
+             WHERE status IN ('sending', 'processing')
+                OR (status='failed' AND json_extract(payload,'$.status') IN ('sending', 'processing'))",
             [],
         )?;
         // 标定矩阵与 workflow 走同一条发送链路，发送中被中断同样记为失败、结果未知，不自动重发
         self.connection.execute(
             "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
              payload=json_set(payload,'$.status','failed','$.detail','host 重启中断，任务安全终止')
-             WHERE status IN ('sending', 'processing')",
+             WHERE status IN ('sending', 'processing')
+                OR (status='failed' AND json_extract(payload,'$.status') IN ('sending', 'processing'))",
             [],
         )?;
         Ok(count)
+    }
+
+    /// 进程退出停机落库：外层 `status` 列与 JSON 正文的 `$.status` 同步改为 `failed`，避免内外状态分裂。
+    pub fn abort_active_records_on_shutdown(&self) -> Result<(), SchemaError> {
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE jobs SET status='failed', finished_at=unixepoch(),
+             payload=json_set(payload,'$.status','failed','$.result.detail','host 退出中断，任务安全终止')
+             WHERE status IN ('running', 'pending', 'queued')",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE workflows SET status='failed', updated_at=unixepoch(),
+             payload=json_set(payload,'$.status','failed','$.detail','host 退出中断，任务安全终止')
+             WHERE status IN ('sending', 'processing')",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
+             payload=json_set(payload,'$.status','failed','$.detail','host 退出中断，任务安全终止')
+             WHERE status IN ('sending', 'processing')",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 启动时定额清理超额陈旧历史记录，不触碰任何进行中任务、待处理审批、正常记忆或防重导入标记。
+    pub fn prune_historical_records(&self, now: f64) -> Result<usize, SchemaError> {
+        if !now.is_finite() {
+            return Ok(0);
+        }
+        let tx = self.connection.unchecked_transaction()?;
+        let mut removed = 0usize;
+        removed += tx.execute(
+            "DELETE FROM audit_log WHERE id NOT IN (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?1)",
+            params![AUDIT_LOG_MAX_ROWS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM approvals
+             WHERE status IN ('rejected','expired','executed','failed')
+               AND COALESCE(json_extract(outcome,'$.phase'), '') <> 'running'
+               AND approval_id NOT IN (
+                   SELECT approval_id FROM approvals
+                   WHERE status IN ('rejected','expired','executed','failed')
+                     AND COALESCE(json_extract(outcome,'$.phase'), '') <> 'running'
+                   ORDER BY created_at DESC, approval_id DESC LIMIT ?1
+               )",
+            params![APPROVALS_TERMINAL_MAX_ROWS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM workflows
+             WHERE status NOT IN ('sending','processing','running','preparing')
+               AND workflow_id NOT IN (
+                   SELECT workflow_id FROM workflows
+                   WHERE status NOT IN ('sending','processing','running','preparing')
+                   ORDER BY updated_at DESC, workflow_id ASC LIMIT ?1
+               )",
+            params![WORKFLOWS_INACTIVE_MAX_ROWS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM calibrations
+             WHERE status NOT IN ('sending','processing','running','preparing')
+               AND calibration_id NOT IN (
+                   SELECT calibration_id FROM calibrations
+                   WHERE status NOT IN ('sending','processing','running','preparing')
+                   ORDER BY updated_at DESC, calibration_id ASC LIMIT ?1
+               )",
+            params![CALIBRATIONS_INACTIVE_MAX_ROWS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM material_params_history
+             WHERE rowid NOT IN (SELECT rowid FROM material_params_history ORDER BY rowid DESC LIMIT ?1)",
+            params![MATERIAL_HISTORY_MAX_ROWS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM context_memories
+             WHERE deleted_at IS NOT NULL AND source_ref IS NULL AND deleted_at < ?1",
+            params![now - CONTEXT_TOMBSTONE_RETENTION_SECS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM context_extraction_runs
+             WHERE id NOT IN (SELECT id FROM context_extraction_runs ORDER BY started_at DESC, id DESC LIMIT ?1)",
+            params![EXTRACTION_RUNS_MAX_ROWS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM voice_firmware_delivery
+             WHERE token IS NULL AND download_status <> 'downloading'
+               AND delivery_id NOT IN (
+                   SELECT delivery_id FROM voice_firmware_delivery
+                   WHERE token IS NULL AND download_status <> 'downloading'
+                   ORDER BY updated_at DESC, delivery_id DESC LIMIT ?1
+               )",
+            params![FIRMWARE_DELIVERY_FINISHED_MAX_ROWS],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// 退出前执行统计优化与限时 WAL 截断归并，避免阻塞停机路径的同时收回 `.sqlite-wal` 体积。
+    pub fn maintenance_on_shutdown(&self) {
+        let _ = self
+            .connection
+            .busy_timeout(std::time::Duration::from_millis(100));
+        let _ = self
+            .connection
+            .execute_batch("PRAGMA optimize; PRAGMA wal_checkpoint(TRUNCATE);");
+        let _ = self
+            .connection
+            .busy_timeout(std::time::Duration::from_secs(5));
     }
 
     pub fn export_material_library(&self) -> Result<MaterialLibrary, SchemaError> {
@@ -1903,52 +2071,75 @@ impl RuntimeDb {
             power_scale: 1000,
             materials: std::collections::BTreeMap::new(),
         };
-        let mut materials = self
-            .connection
-            .prepare("SELECT name FROM materials ORDER BY rowid")?;
-        let names = materials
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let names = {
+            let mut stmt = self
+                .connection
+                .prepare_cached("SELECT name FROM materials ORDER BY rowid")?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
         for name in names {
-            let aliases = {
-                let mut statement = self.connection.prepare(
-                    "SELECT alias FROM material_aliases WHERE material_name=?1 ORDER BY rowid",
-                )?;
-                statement
-                    .query_map([&name], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            let mut thicknesses = std::collections::BTreeMap::new();
-            let mut cells = self.connection.prepare(
-                "SELECT thickness_key, laser_mode, engraving_mode, laser_min_power,
+            library.materials.insert(
+                name,
+                MaterialEntry {
+                    aliases: Vec::new(),
+                    thicknesses: std::collections::BTreeMap::new(),
+                },
+            );
+        }
+        if library.materials.is_empty() {
+            return Ok(library);
+        }
+        {
+            let mut stmt = self.connection.prepare_cached(
+                "SELECT material_name, alias FROM material_aliases ORDER BY rowid",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (material_name, alias) = row?;
+                if let Some(entry) = library.materials.get_mut(&material_name) {
+                    entry.aliases.push(alias);
+                }
+            }
+        }
+        {
+            let mut stmt = self.connection.prepare_cached(
+                "SELECT material_name, thickness_key, laser_mode, engraving_mode, laser_min_power,
                  laser_max_power, feed_rate, travel_rate, threshold, passes, pixel_size_mm,
                  source, updated_at, notes, extra
-                 FROM material_params WHERE material_name=?1 ORDER BY id",
+                 FROM material_params ORDER BY id",
             )?;
-            let rows = cells.query_map([&name], |row| {
+            let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                     ParamCell {
-                        laser_min_power: row.get(3)?,
-                        laser_max_power: row.get(4)?,
-                        feed_rate: row.get(5)?,
-                        travel_rate: row.get(6)?,
-                        threshold: row.get(7)?,
-                        passes: row.get(8)?,
-                        pixel_size_mm: row.get(9)?,
+                        laser_min_power: row.get(4)?,
+                        laser_max_power: row.get(5)?,
+                        feed_rate: row.get(6)?,
+                        travel_rate: row.get(7)?,
+                        threshold: row.get(8)?,
+                        passes: row.get(9)?,
+                        pixel_size_mm: row.get(10)?,
                         power_scale: Some(1000),
-                        source: row.get(10)?,
-                        updated_at: row.get(11)?,
-                        notes: row.get(12)?,
-                        extra: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+                        source: row.get(11)?,
+                        updated_at: row.get(12)?,
+                        notes: row.get(13)?,
+                        extra: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
                     },
                 ))
             })?;
             for row in rows {
-                let (thickness, mode, engraving, cell) = row?;
-                let entry = thicknesses
+                let (material_name, thickness, mode, engraving, cell) = row?;
+                let Some(mat_entry) = library.materials.get_mut(&material_name) else {
+                    continue;
+                };
+                let entry = mat_entry
+                    .thicknesses
                     .entry(thickness)
                     .or_insert_with(ThicknessEntry::default);
                 if mode == "cut" {
@@ -1962,13 +2153,6 @@ impl RuntimeDb {
                     }
                 }
             }
-            library.materials.insert(
-                name,
-                MaterialEntry {
-                    aliases,
-                    thicknesses,
-                },
-            );
         }
         Ok(library)
     }
@@ -2013,20 +2197,24 @@ impl RuntimeDb {
             )?;
         }
         for (name, mat_val) in materials {
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT OR IGNORE INTO materials(name, created_at, updated_at) VALUES(?1, ?2, ?2)",
-                params![name, now],
-            )?;
+            )?
+            .execute(params![name, now])?;
 
             if let Some(aliases) = mat_val.get("aliases").and_then(Value::as_array) {
+                if policy == MaterialConflictPolicy::Overwrite {
+                    tx.prepare_cached("DELETE FROM material_aliases WHERE material_name=?1")?
+                        .execute(params![name])?;
+                }
+                let mut ins_alias = tx.prepare_cached(
+                    "INSERT OR IGNORE INTO material_aliases(alias, material_name) VALUES(?1, ?2)",
+                )?;
                 for alias in aliases {
                     if let Some(alias_str) = alias.as_str() {
                         let trimmed = alias_str.trim();
                         if !trimmed.is_empty() {
-                            tx.execute(
-                                "INSERT OR IGNORE INTO material_aliases(alias, material_name) VALUES(?1, ?2)",
-                                params![trimmed, name],
-                            )?;
+                            ins_alias.execute(params![trimmed, name])?;
                         }
                     }
                 }
@@ -2157,9 +2345,11 @@ impl RuntimeDb {
         counts: &mut MaterialImportCounts,
     ) -> Result<(), SchemaError> {
         let existing: Option<(i64, i32, i32, i32, i32, i32, i32, f64, Option<String>, Option<String>)> = tx
-            .query_row(
+            .prepare_cached(
                 "SELECT id, laser_min_power, laser_max_power, feed_rate, travel_rate, threshold, passes, pixel_size_mm, source, notes
                  FROM material_params WHERE material_name=?1 AND thickness_key=?2 AND laser_mode=?3 AND engraving_mode=?4",
+            )?
+            .query_row(
                 params![material, thickness, mode, engraving],
                 |row| {
                     Ok((
@@ -2173,34 +2363,32 @@ impl RuntimeDb {
         match existing {
             None => {
                 let extra_json = serde_json::to_string(&cell.extra).unwrap_or_else(|_| "{}".into());
-                tx.execute(
+                tx.prepare_cached(
                     "INSERT INTO material_params(
                         material_name, thickness_key, laser_mode, engraving_mode,
                         laser_min_power, laser_max_power, feed_rate, travel_rate,
                         threshold, passes, pixel_size_mm, source, updated_at, notes, extra
                      ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                    params![
-                        material,
-                        thickness,
-                        mode,
-                        engraving,
-                        cell.laser_min_power,
-                        cell.laser_max_power,
-                        cell.feed_rate,
-                        cell.travel_rate,
-                        cell.threshold,
-                        cell.passes,
-                        cell.pixel_size_mm,
-                        cell.source,
-                        cell.updated_at.or(Some(now)),
-                        cell.notes,
-                        extra_json
-                    ],
-                )?;
-                tx.execute(
-                    "UPDATE materials SET updated_at=?2 WHERE name=?1",
-                    params![material, now],
-                )?;
+                )?
+                .execute(params![
+                    material,
+                    thickness,
+                    mode,
+                    engraving,
+                    cell.laser_min_power,
+                    cell.laser_max_power,
+                    cell.feed_rate,
+                    cell.travel_rate,
+                    cell.threshold,
+                    cell.passes,
+                    cell.pixel_size_mm,
+                    cell.source,
+                    cell.updated_at.or(Some(now)),
+                    cell.notes,
+                    extra_json
+                ])?;
+                tx.prepare_cached("UPDATE materials SET updated_at=?2 WHERE name=?1")?
+                    .execute(params![material, now])?;
                 counts.added += 1;
             }
             Some((id, min_p, max_p, feed, travel, thresh, passes, px_size, src, nts)) => {
@@ -2273,10 +2461,8 @@ impl RuntimeDb {
             return Ok(None);
         }
         let sql = format!("SELECT payload FROM {table} WHERE {id_column}=?1");
-        let raw: Option<String> = self
-            .connection
-            .query_row(&sql, [id], |r| r.get(0))
-            .optional()?;
+        let mut stmt = self.connection.prepare_cached(&sql)?;
+        let raw: Option<String> = stmt.query_row([id], |r| r.get(0)).optional()?;
         raw.map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(SchemaError::from)

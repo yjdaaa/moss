@@ -271,8 +271,8 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | filename | string | 是 | 去路径与 `<>:"/\|?*` 及控制字符；后缀限 `.png .jpg .jpeg .bmp .gif .webp .gcode .nc`（**无 .json**） |
 | content_base64 | string | 是 | 允许 `data:…;base64,` 前缀；严格 base64 |
 
-成功 `result`：`{file_path, filename, size, suffix, preview_url}`，`file_path` 与 `filename` 都是保存后的文件名。保存名 `{unix 秒}_{sha1 前 10}_{stem 前 32}{suffix}` 到运行目录 `uploads/`；不登记数据库。
-失败 400：`不支持上传该文件类型`（detail `{filename, allowed}`）、`上传内容为空`、`上传内容不是合法 base64`、`上传文件为空`。不做图片魔数校验。
+成功 `result`：`{file_path, filename, size, suffix, preview_url}`，`file_path` 与 `filename` 都是保存后的文件名。保存名 `{unix 秒}_{sha1 前 10}_{stem 前 32}{suffix}` 到运行目录 `uploads/`；不登记数据库。HTTP 请求体与原始解码文件上限均为 20 MiB（前端对 >14 MiB 文件提前提示，避免 Base64 膨胀后触发请求体上限）。
+失败 400：`不支持上传该文件类型`（detail `{filename, allowed}`）、`上传内容为空`、`上传内容不是合法 base64`、`上传文件为空`、`上传文件超出 20MB 限制`。不做图片魔数校验。
 
 ### 3.2 `/api/draw/preview`
 
@@ -389,9 +389,9 @@ Rust 实现：只生成不出光。区间字段缺省或为 -1 时以材料推�
 |---|---|
 | calibration_id | 必填 |
 | confirmed | **必须为 true**，否则 400 `发送测试矩阵需要 confirmed=true` |
-| network_host | 空且无默认 host → 400 `请填写设备 host/IP` |
-| network_transport | `telnet` |
-| network_http_port、network_telnet_port、network_timeout | 设置默认 |
+| connection_mode | `network`（默认）或 `serial` |
+| serial 时 | `port \| serial_port`（空 → 400 `请选择或填写串口号`）、`baudrate` |
+| network 时 | `network_host`（空且无默认 host → 400 `请填写设备 host/IP`）、`network_http_port`、`network_telnet_port`、`network_timeout`；`network_transport` 固定 `telnet` |
 | wait_for_response、run_in_background | true |
 
 Rust 实现：与 `/api/workflow confirm_send` 同一套门禁——记录不存在 404 `calibration_missing`；`sending/completed/failed/cancelled` 状态 400 `calibration_not_sendable`；物理刀路 SHA-256 重算不一致 400 `send_gate_rejected`；设备不可达/握手失败 400 `device_unreachable`/`device_not_ready`；同一设备已有在途作业 409 `device_busy`。通过后由 JobWorker 后台逐行下发，响应 `status=sending` 与 `send_result{running,total_lines,lines_sent,target}`，终态由发送线程写回记录。`POST /api/material-lab/status {calibration_id}` 返回带实时进度的记录，供前端轮询；缺 id 400 `calibration_id 不能为空`，不存在 404 `未找到标定矩阵`。
@@ -409,13 +409,13 @@ Rust 实现：`cell_number` 必须在 1..cell_count；缺省的 material/thickne
 | action | 字段 | 结果 |
 |---|---|---|
 | export | 无 | 工具透传；`version` 恒为整数 1，`materials` 含内置预设（db-schema.md §3.6.1、§3.6.2） |
-| import | `library_json \| params_json`、`import_mode` 默认 `merge` | 工具 result + `materials` 全量快照 + `backup_path`。`version` 校验严格：只接受 JSON 数值 `1`/`1.0`，`"1"` 或其他值一律 400 `导入材料库格式不支持：需要 version=1 的 JSON 对象`。`backup_path` 只返回文件名 |
-| delete | `material` 必填、`thickness_mm` float、`laser_mode` 默认 engrave、`engraving_mode` 默认 raster、`confirmed` **必须 true** 否则 400 `删除当前参数需要 confirmed=true` | 工具 result + `materials` |
-| save | delete 的字段 + `laser_min_power` 0、`laser_max_power` 800、`feed_rate` 1200、`travel_rate` 设置默认、`pixel_size_mm` 0.1、`threshold` -1、`passes` 1（数值字段在入库边界统一转为数字，无法转换返回 400）、`aliases`（数组或中英文逗号分隔）、`notes`、`source` 默认 manual、`machine_profile_id` 默认 `yisu-v1-100x100`、`confidence`、`evidence`（对象转 JSON）、`version_mode` 默认 update。**原子批量扩展（D9 已拍板）**：除单厚度参数外，允许传入 `thicknesses` 对象/列表进行多厚度一次性原子保存，后端在单个数据库事务内完成全部更新，失败整体回滚；禁止前端通过循环发送 N 次 HTTP 请求进行多厚度保存 | 工具 result + `materials` |
+| import | `library_json \| params_json`（支持直接库对象或 `{library}` 导出包装）、`import_mode`（`replace` 默认 / `merge` 合并保留现有其他材料） | 工具 result + `materials` 全量快照 + `backup_path` + `import_mode`。`version` 校验严格：只接受 JSON 数值 `1`/`1.0`；入库前对材料名与别名执行 `validate_material_safety`、校验厚度 >0 与 `ParamCell::validate(1000, 100)`，并将非 1000 `power_scale`（如 255）等比折算归一为 1000 标尺。`backup_path` 只返回文件名 |
+| delete | `material` 必填、`thickness_mm` float（数值等价匹配 `"2"` / `"2.0"`；缺省或 `0` 删除整材料）、`laser_mode` 默认 engrave、`engraving_mode` 默认 raster、`confirmed` **必须 true** 否则 400 `删除当前参数需要 confirmed=true` | 工具 result + `materials` |
+| save | delete 的字段 + `laser_min_power` 0、`laser_max_power` 800、`feed_rate` 1200、`travel_rate` 设置默认、`pixel_size_mm` 0.1、`threshold` -1、`passes` 1（数值字段在入库边界统一转为数字，无法转换或越界返回 400；材料名与别名均经 `validate_material_safety` 校验）、`aliases`（数组或中英文逗号分隔，Overwrite 时同步清理已移除旧别名）、`notes`、`source` 默认 manual、`prune_missing_thicknesses`（可选布尔，编辑多厚度规格对象时同步删除未在本次列表中的旧厚度）。**原子批量扩展（D9 已拍板）**：除单厚度参数外，允许传入 `thicknesses` 对象/列表进行多厚度一次性原子保存，后端在单个数据库事务内完成全部更新，失败整体回滚；禁止前端通过循环发送 N 次 HTTP 请求进行多厚度保存 | 工具 result + `materials` |
 
 ### 3.11 `/api/material-lab/recent`
 
-GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflow 按 `updated_at` 倒序取第一个含完整参数键的记录。
+GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflow 按 `updated_at` 倒序取第一个含有效参数的记录：优先提取 `artifacts.actual_params`（含 `manual_params` 临时自定义参数并归一到 1000 标尺）与 `text_fill`/`mode` 对应的雕刻策略，无 `actual_params` 时回退查材料库推荐参数。
 成功 `result`：`{workflow_id, material, thickness_mm, laser_mode, engraving_mode, params}`。
 失败 400：`最近的激光 workflow 中没有可保存的完整材料参数`。
 
@@ -435,7 +435,7 @@ GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflo
 
 Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `typesafe/jev-1.13`，固定 `POST https://openrouter.ai/api/alpha/decisions`，Bearer 认证；请求含 `model`、`state`、`questions.feedback_type.{type:"choice",instructions,criteria}`，响应读取 `answers.feedback_type.{type,choice,confidence}`。不使用 Chat Completions 或 TypeSafe 直连接口，不跟随重定向，超时 5 秒，响应上限 64 KiB。协议依据 OpenRouter 官方 `openapi.json`（2026-09-22 核对）。
 
-`GET /api/jev/status` 返回 `enabled`、固定 `endpoint`、`model`、`provider`、`configured` 和 `masked_key`，不返回完整 Key。`POST /api/jev/reveal` 返回完整 Key（无 Key 为 404；桌面会话启用时要求 `X-Moss-Desktop-Session`，非桌面回环进程与局域网均拒绝）。`POST /api/jev/test` 使用已保存的 OpenRouter Key 测试 Decisions 契约，不连接设备。旧 TypeSafe Key 不能用于 OpenRouter，升级后需在设置中替换为 OpenRouter Key。`POST /api/feedback` 支持读取 `voice.builtin_local.jev_model`（含本地 Laya 或指定 OpenRouter 模型），并在未单独保存 `jev_api_key` 且内置语音大模型配置为 `https://openrouter.ai` 时安全复用 `voice.llm.main` 密钥。
+`GET /api/jev/status` 返回 `enabled`、固定 `endpoint`、`model`、`provider`、`configured` 和 `masked_key`（仅在受信任操作者会话下返回脱敏掩码，非桌面或局域网会话下 `masked_key` 为空串），不返回完整 Key。`POST /api/jev/reveal` 返回完整 Key，`POST /api/jev/test` 使用已保存的 OpenRouter Key 测试 Decisions 契约（不连接设备）；两者无 Key 均为 404，且在桌面会话启用时统一要求 `X-Moss-Desktop-Session`，非桌面回环进程、语音/MCP 桥与局域网均以 403 `desktop_session_required` / `lan_read_only` 拒绝。旧 TypeSafe Key 不能用于 OpenRouter，升级后需在设置中替换为 OpenRouter Key。`POST /api/feedback` 支持读取 `voice.builtin_local.jev_model`（含本地 Laya 或指定 OpenRouter 模型），并在未单独保存 `jev_api_key` 且内置语音大模型配置为 `https://openrouter.ai` 时安全复用 `voice.llm.main` 密钥。
 
 `POST /api/feedback`（兼容别名 `/api/jev/feedback`）接收 `{workflow_id|task_id, feedback_text}`。必须关联已有 workflow，反馈长度为 1..2000 字符。原参数读取 `artifacts.actual_params`；无此快照的旧任务或上传 G-code 必须显式提供 `laser_max_power`、`feed_rate`、`passes`、`power_scale`，只提供建议，不能自动采用。参数须为有限数字：`0<power<=power_scale`、标尺 1..100000、速度 100..6000 mm/min、次数为 1..5 整数。新生成预览使用 1000 标尺，反馈参数中的功率、速度须为整数；超限或缺失返回 400，显式参数与实际快照冲突返回 409，不猜默认参数。
 

@@ -105,15 +105,15 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 ## 6. 存储与运行目录
 
 - 运行目录由 `RuntimeRoot::resolve` 决定：显式参数 → 可执行文件同级 `.runtime/` → 系统用户数据目录（Windows `%APPDATA%\moss`、macOS `~/Library/Application Support/moss`、Linux `$XDG_DATA_HOME/moss` 或 `~/.local/share/moss`）→ 当前目录 `.runtime/`。宿主与桌面端都传 `(None, None)`，因此各桌面平台均写入当前用户数据目录；程序目录只放程序文件，安装与卸载规则见 [安装包与卸载规范](packaging-install.md)。目录内有 `uploads/`、`previews/`、`generated_assets/`、`moss.sqlite`、`settings.json`、`moss.lock`（`fs4` 独占锁，第二个实例初始化失败）。
-- SQLite 打开时启用 WAL、5 秒 `busy_timeout`、`synchronous=NORMAL`，并执行 schema 迁移（当前版本 6，`laser_runtime::SCHEMA_VERSION`）。启动时 `recover_after_restart` 把残留的 `running/pending/queued` job 与 `sending/processing` 的 workflow、标定矩阵标为 `failed`（列与记录正文同时更新）；随后审批服务处理遗留审批（§4a）。
-- `RuntimeStore` 只有 `get` / `put` / `set_status` / `list_recent` 四个方法，作用于 `Workflow`、`TextTask`、`Job`、`Calibration` 四种记录；材料库通过 `RuntimeDb::import_material_json` / `export_material_library` 读写。运行时实际写入的记录类型是 workflow 与 calibration；`approvals` 与 `audit_log` 由审批服务写入；`jobs`、`auth_pairings`、`ai_state`、`gui_calibration` 表已建但当前没有运行时写入方，`uploads` 与 `jobs` 只由迁移器写入。表结构见 [数据库结构](db-schema.md)。
+- SQLite 打开时启用 WAL、5 秒 `busy_timeout`、`synchronous=NORMAL`、`secure_delete=ON`，并执行 schema 迁移（当前版本 18，`laser_runtime::SCHEMA_VERSION`）；文件库下另由 `RuntimeDb::open_readonly` 打开独立只读连接分流高频轮询。启动时 `recover_after_restart` 把残留活动态记录标为 `failed`（列与记录正文同时更新），`prune_historical_records` 定额清理超上限旧记录；随后审批服务处理遗留审批（§4a）。退出时 `abort_active_records_on_shutdown` 同步更新列与正文状态，并执行 `PRAGMA optimize` 与限时 WAL 截断归并。
+- `RuntimeStore` 作用于 `Workflow`、`TextTask`、`Job`、`Calibration` 四种记录（生产环境经 `SplitSqliteStore` 读写分流）；材料库通过 `RuntimeDb::import_material_json` / `export_material_library`（固定 3 次预编译查询）读写。运行时实际写入的记录类型是 workflow 与 calibration；`approvals` 与 `audit_log` 由审批服务写入；`uploads`、`jobs`、`text_tasks` 只由迁移器写入（7 张从未使用过的旧表 `ai_state`、`gui_calibration`、`auth_pairings` 及 4 张通用 `_history` 已在 schema v18 删除）。表结构见 [数据库结构](db-schema.md)。
 - 材料库：`LASER_MATERIAL_PARAMS_FILE` 未设置时使用 `builtin_material_library`，保存操作写入 SQLite；设置后另写该 JSON 文件并生成 `.bak` 备份。
 
 ## 7. 易误解的实现事实
 
 以下各项与早期规划或常见假设不同，以本节为准：
 
-- 仓库根目录现在有 `Cargo.toml` 并声明统一 workspace，成员包括 `apps/moss-host`、`apps/desktop/src-tauri` 与 `crates/*`；根级 `Cargo.lock` 和 `target/` 承载 workspace 的统一测试与构建。`apps/desktop/src-tauri` 仍保留 Tauri 子工程所需的本地锁文件与生成目录。`AGENTS.md`、`README.md`、CI 与 `scripts/start.bat` 中的 `cargo test --workspace`、`cargo build -p …` 均以根 workspace 清单为准。
+- 仓库根目录现在有 `Cargo.toml` 并声明统一 workspace，成员包括 `apps/moss-host`、`apps/desktop/src-tauri` 与 `crates/*`；根级 `Cargo.lock` 和 `target/` 承载 workspace 的统一测试与构建（仅独立 GPL 工作区 `apps/moss-voice-local` 保留独立 `Cargo.lock`，其余子目录不再保留陈旧锁文件；`apps/desktop/src-tauri` 保留 `gen/android` 等 Tauri 子工程生成骨架）。`AGENTS.md`、`README.md`、CI 与 `scripts/start.bat` 中的 `cargo test --workspace`、`cargo build -p …` 均以根 workspace 清单为准。
 - 没有 tokio、axum、tower、clap、tracing、uuid、ab_glyph 或 rmcp；HTTP 服务与 MCP 桥为同步实现。`laser-api` 的 Jev/OpenRouter 反馈客户端使用阻塞式 `reqwest`，判断结果只用于建议，失败时回退本地规则，不直接控制设备；前端 E2E 使用 Playwright。
 - `/v1/events` 不是持续事件流；没有 WebSocket 服务端。
 - `laser-api` 直接依赖 `rusqlite`（规格要求禁止）。

@@ -111,11 +111,13 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
-fn random16() -> [u8; 16] {
+fn random16() -> Result<[u8; 16], &'static str> {
     let mut bytes = [0u8; 16];
-    let _ = getrandom::fill(&mut bytes);
-    bytes
+    getrandom::fill(&mut bytes).map_err(|_| "操作系统安全随机源不可用")?;
+    Ok(bytes)
 }
+
+const MAX_SSRC_ATTEMPTS: usize = 64;
 
 /// MOSS 唯一的 UDP 语音端口：按 ssrc 把设备上行分给各自的会话，并发送下行。
 pub(crate) struct UdpHub {
@@ -136,10 +138,27 @@ impl UdpHub {
     }
 
     /// 新建一个通道（随机密钥与 nonce，ssrc 不与现有通道重复）。
-    pub fn open(&self, device_ip: IpAddr, incoming: UnboundedSender<LinkEvent>) -> Arc<UdpChannel> {
+    pub fn open(
+        &self,
+        device_ip: IpAddr,
+        incoming: UnboundedSender<LinkEvent>,
+    ) -> Result<Arc<UdpChannel>, &'static str> {
+        self.open_with_rng(device_ip, incoming, random16)
+    }
+
+    fn open_with_rng(
+        &self,
+        device_ip: IpAddr,
+        incoming: UnboundedSender<LinkEvent>,
+        mut rng: impl FnMut() -> Result<[u8; 16], &'static str>,
+    ) -> Result<Arc<UdpChannel>, &'static str> {
+        let key = rng()?;
+        if key == [0u8; 16] {
+            return Err("拒绝使用全零 UDP 语音密钥");
+        }
         let mut channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
-        loop {
-            let mut nonce = random16();
+        for _ in 0..MAX_SSRC_ATTEMPTS {
+            let mut nonce = rng()?;
             nonce[0] = 0x01;
             nonce[1] = 0x00;
             for byte in &mut nonce[2..4] {
@@ -149,11 +168,11 @@ impl UdpHub {
                 *byte = 0;
             }
             let ssrc = [nonce[4], nonce[5], nonce[6], nonce[7]];
-            if channels.contains_key(&ssrc) {
+            if ssrc == [0, 0, 0, 0] || channels.contains_key(&ssrc) {
                 continue;
             }
             let channel = Arc::new(UdpChannel {
-                key: random16(),
+                key,
                 nonce,
                 device_ip,
                 opened: Instant::now(),
@@ -166,8 +185,9 @@ impl UdpHub {
                 incoming,
             });
             channels.insert(ssrc, channel.clone());
-            return channel;
+            return Ok(channel);
         }
+        Err("无法分配唯一 UDP 语音通道（随机源异常或碰撞过多）")
     }
 
     pub fn close(&self, channel: &UdpChannel) {
@@ -305,7 +325,7 @@ mod tests {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(hub.clone().run(stop_rx));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let channel = hub.open("127.0.0.1".parse().unwrap(), tx);
+        let channel = hub.open("127.0.0.1".parse().unwrap(), tx).unwrap();
         hub.send(&channel, b"greet-1").await;
         hub.send(&channel, b"greet-2").await;
 
@@ -367,5 +387,45 @@ mod tests {
         let mut wrong_type = packet;
         wrong_type[0] = 2;
         assert_eq!(parse_header(&wrong_type), None);
+    }
+
+    #[tokio::test]
+    async fn open_rejects_rng_failure_and_bounds_ssrc_collisions() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let hub = UdpHub::new(server);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            hub.open_with_rng(ip, tx1, || Err("rng down")).is_err(),
+            "CSPRNG 失败时必须拒绝分配通道，严禁下发全零密钥"
+        );
+
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            hub.open_with_rng(ip, tx2, || Ok([0u8; 16])).is_err(),
+            "全零密钥必须拒绝"
+        );
+
+        let mut call_idx = 0usize;
+        let (tx2b, _rx2b) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            hub.open_with_rng(ip, tx2b, || {
+                call_idx += 1;
+                Ok(if call_idx == 1 { [0x11; 16] } else { [0u8; 16] })
+            })
+            .is_err(),
+            "全零 ssrc 必须拒绝，不在锁内死循环"
+        );
+
+        let (tx3, _rx3) = tokio::sync::mpsc::unbounded_channel();
+        let first = hub.open_with_rng(ip, tx3, || Ok([0x42; 16])).unwrap();
+        assert_eq!(first.ssrc(), [0x42, 0x42, 0x42, 0x42]);
+
+        let (tx4, _rx4) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            hub.open_with_rng(ip, tx4, || Ok([0x42; 16])).is_err(),
+            "重复 ssrc 超过上限后必须有界返回错误并释放锁"
+        );
     }
 }

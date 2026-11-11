@@ -29,7 +29,11 @@ apps/desktop/src-tauri/binaries/
 apps/moss-voice-local/native-license-evidence/
 apps/moss-voice-local/rust-license-evidence/
 
-# 本机工具状态与生成的可视化（含本机路径）；已跟踪的 .birdview 文件不受影响
+# 本机工具状态与生成的可视化（含本机路径）；显式放行仓库保留的 4 份架构快照
 .agents/skills/.skill-learning/
 .birdview/*
+!/.birdview/architecture.json
+!/.birdview/constraints.reviewed.json
+!/.birdview/project.html
+!/.birdview/project.sources.html
 frontend/ui-prototype-*.html

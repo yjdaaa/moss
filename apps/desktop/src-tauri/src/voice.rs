@@ -393,11 +393,13 @@ mod imp {
 pub use imp::{init, owns_running_server, shutdown};
 
 #[tauri::command]
-pub async fn voice_status(app: tauri::AppHandle) -> CmdResult {
+pub async fn voice_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, |center| Ok(center.status())).await;
     #[cfg(mobile)]
-    let result = desktop_only(app);
+    let result = desktop_only((app, window));
     result
 }
 
@@ -419,7 +421,13 @@ pub async fn voice_save_settings(
 
 /// 切换前列出将改动的项（确认框内容）。
 #[tauri::command]
-pub async fn voice_mode_changes(app: tauri::AppHandle, mode: String) -> CmdResult {
+pub async fn voice_mode_changes(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    mode: String,
+) -> CmdResult {
+    #[cfg(desktop)]
+    require_main_window(&window)?;
     #[cfg(desktop)]
     let result = imp::run(app, move |center| {
         let changes = center.mode_changes(imp::parse_mode(&mode)?)?;
@@ -427,7 +435,7 @@ pub async fn voice_mode_changes(app: tauri::AppHandle, mode: String) -> CmdResul
     })
     .await;
     #[cfg(mobile)]
-    let result = desktop_only((app, mode));
+    let result = desktop_only((app, window, mode));
     result
 }
 

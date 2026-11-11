@@ -210,24 +210,49 @@ impl RuntimeDb {
             "DELETE FROM context_knowledge_dirs WHERE root_id=?1",
             [root_id],
         )?;
-        for dir in dirs {
-            tx.execute(
+        {
+            let mut ins_dir = tx.prepare_cached(
                 "INSERT INTO context_knowledge_dirs(id,root_id,rel_dir,l0,l1,file_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![dir.id, dir.root_id, dir.rel_dir, dir.l0, dir.l1, dir.file_count],
             )?;
-        }
-        for file in files {
-            tx.execute(
+            for dir in dirs {
+                ins_dir.execute(params![
+                    dir.id,
+                    dir.root_id,
+                    dir.rel_dir,
+                    dir.l0,
+                    dir.l1,
+                    dir.file_count
+                ])?;
+            }
+            let mut ins_file = tx.prepare_cached(
                 "INSERT INTO context_knowledge_files(id,root_id,dir_id,rel_path,sha256,size,mtime) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![file.id, file.root_id, file.dir_id, file.rel_path, file.sha256, file.size, file.mtime],
             )?;
-        }
-        for chunk in chunks {
-            tx.execute(
+            for file in files {
+                ins_file.execute(params![
+                    file.id,
+                    file.root_id,
+                    file.dir_id,
+                    file.rel_path,
+                    file.sha256,
+                    file.size,
+                    file.mtime
+                ])?;
+            }
+            let mut ins_chunk = tx.prepare_cached(
                 "INSERT INTO context_knowledge_chunks(root_id,dir_id,file_id,ord) VALUES(?1,?2,?3,?4)",
-                params![root_id, dir_of[chunk.file_id.as_str()], chunk.file_id, chunk.ord],
             )?;
-            tx.execute("INSERT INTO context_knowledge_chunks_fts(rowid,text) VALUES(last_insert_rowid(),?1)", [&chunk.text])?;
+            let mut ins_fts = tx.prepare_cached(
+                "INSERT INTO context_knowledge_chunks_fts(rowid,text) VALUES(last_insert_rowid(),?1)",
+            )?;
+            for chunk in chunks {
+                ins_chunk.execute(params![
+                    root_id,
+                    dir_of[chunk.file_id.as_str()],
+                    chunk.file_id,
+                    chunk.ord
+                ])?;
+                ins_fts.execute([&chunk.text])?;
+            }
         }
         tx.commit()?;
         Ok(true)
@@ -305,7 +330,7 @@ impl RuntimeDb {
                 .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
                 .collect::<Vec<_>>()
                 .join(" OR ");
-            let mut statement = self.connection.prepare(&format!(
+            let mut statement = self.connection.prepare_cached(&format!(
                 "SELECT {DIR_COLUMNS} FROM context_knowledge_fts f JOIN context_knowledge_dirs d ON d.rowid=f.rowid
                  JOIN context_knowledge_roots r ON r.id=d.root_id
                  WHERE context_knowledge_fts MATCH ?3 AND r.scope_kind=?1 AND r.scope_id=?2 AND r.enabled=1 ORDER BY bm25(context_knowledge_fts) LIMIT ?4"
@@ -386,7 +411,7 @@ impl RuntimeDb {
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" OR ");
-        let mut statement = self.connection.prepare(&format!(
+        let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {DIR_COLUMNS}, c.file_id, c.ord FROM context_knowledge_chunks_fts f
              JOIN context_knowledge_chunks c ON c.id=f.rowid
              JOIN context_knowledge_dirs d ON d.id=c.dir_id

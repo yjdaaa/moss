@@ -26,7 +26,9 @@ pub use migration::{
     sha256_file,
 };
 pub use root::{RuntimeRoot, RuntimeRootError};
-pub use store::{MemoryStore, RecordKind, RuntimeStore, SqliteStore, StoredRecord};
+pub use store::{
+    MemoryStore, RecordKind, RuntimeStore, SplitSqliteStore, SqliteStore, StoredRecord,
+};
 
 pub fn packaging_sqlite_probe() -> rusqlite::Result<i64> {
     let connection = rusqlite::Connection::open_in_memory()?;
@@ -629,5 +631,214 @@ mod tests {
             })
             .unwrap();
         assert_eq!(action, "approval_created");
+    }
+
+    #[test]
+    fn schema_v18_drops_dead_tables_and_indexes_hot_poll_queries() {
+        let db = RuntimeDb::open_memory().unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        // 模拟从旧版升级：塞入 7 张废弃表并回退到 v17，重跑迁移后它们必须被清掉
+        db.connection
+            .execute_batch(
+                "CREATE TABLE ai_state(id INTEGER PRIMARY KEY);
+                 CREATE TABLE gui_calibration(target TEXT PRIMARY KEY);
+                 CREATE TABLE auth_pairings(token_hash TEXT PRIMARY KEY);
+                 CREATE TABLE workflows_history(history_id INTEGER PRIMARY KEY);
+                 CREATE TABLE text_tasks_history(history_id INTEGER PRIMARY KEY);
+                 CREATE TABLE jobs_history(history_id INTEGER PRIMARY KEY);
+                 CREATE TABLE calibrations_history(history_id INTEGER PRIMARY KEY);
+                 DELETE FROM schema_version WHERE version>=18;",
+            )
+            .unwrap();
+        assert_eq!(db.schema_version().unwrap(), 17);
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+
+        for dead in [
+            "ai_state",
+            "gui_calibration",
+            "auth_pairings",
+            "workflows_history",
+            "text_tasks_history",
+            "jobs_history",
+            "calibrations_history",
+        ] {
+            let exists: i64 = db
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [dead],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 0, "废弃表 {dead} 应在 v18 被删除");
+        }
+
+        let explain = |sql: &str| -> String {
+            db.connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join(" | ")
+        };
+        let wf_plan = explain(
+            "SELECT workflow_id, payload, status FROM workflows ORDER BY updated_at DESC, workflow_id ASC LIMIT 50",
+        );
+        assert!(
+            wf_plan.contains("workflows_updated"),
+            "workflow recent 应命中 workflows_updated 索引，实际: {wf_plan}"
+        );
+        assert!(
+            !wf_plan.contains("TEMP B-TREE"),
+            "workflow recent 不得产生临时排序，实际: {wf_plan}"
+        );
+
+        let apr_all_plan = explain(
+            "SELECT approval_id FROM approvals ORDER BY created_at DESC, approval_id DESC LIMIT 50",
+        );
+        assert!(
+            apr_all_plan.contains("approvals_created"),
+            "approvals 列表应命中 approvals_created 索引，实际: {apr_all_plan}"
+        );
+        let apr_status_plan = explain(
+            "SELECT approval_id FROM approvals WHERE status='pending' ORDER BY created_at DESC, approval_id DESC LIMIT 50",
+        );
+        assert!(
+            apr_status_plan.contains("approvals_status_created"),
+            "按状态查 approvals 应命中 approvals_status_created 索引，实际: {apr_status_plan}"
+        );
+    }
+
+    #[test]
+    fn shutdown_updates_payload_status_and_startup_heals_legacy_split_records() {
+        let db = RuntimeDb::open_memory().unwrap();
+        db.connection
+            .execute_batch(
+                "INSERT INTO workflows(workflow_id,status,created_at,updated_at,payload) VALUES
+                   ('wf-active','sending',1,1,'{\"workflow_id\":\"wf-active\",\"status\":\"sending\"}'),
+                   ('wf-split','failed',1,1,'{\"workflow_id\":\"wf-split\",\"status\":\"sending\"}');
+                 INSERT INTO calibrations(calibration_id,status,created_at,updated_at,payload) VALUES
+                   ('cal-active','processing',1,1,'{\"calibration_id\":\"cal-active\",\"status\":\"processing\"}');",
+            )
+            .unwrap();
+
+        db.abort_active_records_on_shutdown().unwrap();
+        let wf_active = db
+            .read_payload("workflows", "workflow_id", "wf-active")
+            .unwrap()
+            .unwrap();
+        assert_eq!(wf_active["status"], "failed");
+        assert_eq!(wf_active["detail"], "host 退出中断，任务安全终止");
+
+        let cal_active = db
+            .read_payload("calibrations", "calibration_id", "cal-active")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cal_active["status"], "failed");
+
+        // 旧版遗留的“外层已是 failed、内层 payload 仍卡在 sending”的脏记录，启动恢复能自动修好
+        db.recover_after_restart().unwrap();
+        let wf_split = db
+            .read_payload("workflows", "workflow_id", "wf-split")
+            .unwrap()
+            .unwrap();
+        assert_eq!(wf_split["status"], "failed");
+    }
+
+    #[test]
+    fn wal_readonly_split_store_reads_while_write_tx_is_open_and_checkpoints_cleanly() {
+        use std::sync::{Arc, Mutex};
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("moss.sqlite");
+        let write_db = RuntimeDb::open(&db_path).unwrap();
+        SqliteStore::new(&write_db)
+            .put(&StoredRecord {
+                kind: RecordKind::Workflow,
+                id: "wf-1".into(),
+                status: Some("preview_ready".into()),
+                payload: serde_json::json!({"workflow_id":"wf-1","status":"preview_ready","updated_at":10.0}),
+            })
+            .unwrap();
+        let read_db = write_db
+            .open_readonly()
+            .unwrap()
+            .expect("file db opens readonly");
+        let write_arc = Arc::new(Mutex::new(write_db));
+        let read_arc = Arc::new(Mutex::new(read_db));
+        let store = SplitSqliteStore::new(write_arc.clone(), Some(read_arc));
+
+        // 模拟后台线程一直占着写锁并开启了未提交的 SQLite 写事务
+        let write_guard = write_arc.lock().unwrap();
+        write_guard
+            .connection
+            .execute_batch(
+                "BEGIN IMMEDIATE; INSERT INTO app_secrets(name,value,updated_at) VALUES('k','v',1.0);",
+            )
+            .unwrap();
+
+        // 只读轮询完全不等待 write_arc 锁，也不被未提交写事务阻塞，直接读到最新已提交快照
+        let recent = store.list_recent(RecordKind::Workflow, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, "wf-1");
+        let single = store.get(RecordKind::Workflow, "wf-1").unwrap().unwrap();
+        assert_eq!(single.status.as_deref(), Some("preview_ready"));
+
+        write_guard.connection.execute_batch("COMMIT;").unwrap();
+        write_guard.maintenance_on_shutdown();
+        let wal_path = temp.path().join("moss.sqlite-wal");
+        if wal_path.exists() {
+            assert_eq!(
+                std::fs::metadata(&wal_path).unwrap().len(),
+                0,
+                "正常退出维护后 WAL 文件应被截断归零"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_cap_and_startup_pruning_bound_growth_while_preserving_active_rows() {
+        use laser_contracts::{AuditAction, AuditDetail, AuditEntry, AuditResult};
+        let db = RuntimeDb::open_memory().unwrap();
+        for idx in 0..2005 {
+            db.append_audit(&AuditEntry {
+                at: idx as f64,
+                client: "desktop".into(),
+                action: AuditAction::ApprovalCreated,
+                target: "wf".into(),
+                result: AuditResult::Ok,
+                detail: AuditDetail::default(),
+            })
+            .unwrap();
+        }
+        let audit_count: i64 = db
+            .connection
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 2000, "append_audit 应实时限制最多保留 2000 条");
+
+        // 插入一条无 source_ref 的陈旧墓碑（40 天前）、一条带 source_ref 的防重导入墓碑（40 天前）和一条正常记忆
+        db.connection
+            .execute_batch(
+                "INSERT INTO context_memories(id,scope_kind,scope_id,category,content,verification,source_kind,source_ref,revision,created_at,updated_at,deleted_at,seen_count)
+                 VALUES
+                   ('ctx-old-empty','device','d1','preference','','candidate','user_edit',NULL,2,10.0,100.0,100.0,1),
+                   ('ctx-keep-ref','device','d1','preference','','candidate','legacy_nv10_import','nv10:d1',2,10.0,100.0,100.0,1),
+                   ('ctx-live','device','d1','preference','保留正常记忆','confirmed','user_edit',NULL,1,10.0,10.0,NULL,1);",
+            )
+            .unwrap();
+
+        let removed = db
+            .prune_historical_records(40.0 * 86_400.0 + 200.0)
+            .unwrap();
+        assert!(removed >= 1);
+        assert!(db.context_memory("ctx-old-empty").unwrap().is_none());
+        assert!(
+            db.context_source_seen("device", "d1", "nv10:d1").unwrap(),
+            "带 source_ref 的防重导入墓碑不得被清理"
+        );
+        assert!(db.context_memory("ctx-live").unwrap().is_some());
     }
 }

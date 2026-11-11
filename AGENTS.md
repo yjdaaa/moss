@@ -18,6 +18,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 - 先读待改文件、直接依赖、相关测试和对应文档；不扫描无关目录。
 - 复用现有接口、注册方式、命名和错误处理，不为整齐新增抽象。
 - 未经明确授权，不提交、推送、重置或覆盖他人改动。
+- **多会话并行避让**：开工与写共享文件前查 `git status --short` 及运行中的 `cargo` / `node` 进程。存在其他会话未提交改动时：① 避开对方正在改的业务文件，范围重叠先向用户确认；② 写 `CHANGELOG.md`、`frontend/src/styles.css`、`docs/developer/*.md` 等共享汇合文件前，当场重读目标邻近行并只做最小局部编辑，不用整文件覆写；③ 并行期间只对本会话改过的 `.rs` 跑 `rustfmt`（不跑 `cargo fmt --all` 以免改乱对方未完代码）；④ 跑 `npm run build`、`npm run test:e2e`（占 `frontend/dist` 与 9666 端口）、`quick-update-desktop.ps1` 或缓存清理前，先确认无其他会话的构建/测试进程占锁，有则等待锁空后再执行。
 - 提交信息格式 `<类型>: <中文结论>`，类型取 `feat`、`fix`、`refactor`、`docs`、`test`、`build`、`chore`；破坏性变更在类型后加 `!`。
 - 不写入真实设备地址、凭据、令牌、串口号或本机绝对路径；文档用 `<device-ip>`、`<token>`、`<path>` 占位。
 

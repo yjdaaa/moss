@@ -84,10 +84,11 @@ function CameraFrame({ src, alt, transform }) {
     let cancelled = false;
     const show = () => {
       if (cancelled) return;
+      const reducedMotion = Boolean(globalThis.window?.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
       setLayers((prev) => {
         if (prev.length && prev[prev.length - 1].src === src) return prev;
         keyRef.current += 1;
-        return [...prev.slice(-1), { src, key: keyRef.current }];
+        return reducedMotion ? [{ src, key: keyRef.current }] : [...prev.slice(-1), { src, key: keyRef.current }];
       });
     };
     const img = new Image();
