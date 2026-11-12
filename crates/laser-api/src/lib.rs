@@ -3030,6 +3030,15 @@ impl ApiService {
         if calibration_id.is_empty() {
             return Err((400, failure("calibration_id 不能为空", None)));
         }
+        if object.contains_key("start_from_line") {
+            return Err((
+                400,
+                failure(
+                    "标定矩阵发送不接受 start_from_line",
+                    Some(serde_json::json!({"error_code": "resume_line_not_allowed"})),
+                ),
+            ));
+        }
         if !parse_bool(object.get("confirmed"), false) {
             return Err((400, failure("发送测试矩阵需要 confirmed=true", None)));
         }
@@ -3062,7 +3071,8 @@ impl ApiService {
                 return Err((400, failure("请选择或填写串口号", None)));
             }
         }
-        let mut record = self.load_calibration(&calibration_id).ok_or_else(|| {
+        let cancel_epoch_before = current_cancel_epoch(&self.launching_workflows, &calibration_id);
+        let record = self.load_calibration(&calibration_id).ok_or_else(|| {
             (
                 404,
                 failure(
@@ -3082,6 +3092,51 @@ impl ApiService {
         }
         let current_status = record.get("status").and_then(|v| v.as_str());
         if let Some(reason) = workflow_send_blocked_reason(current_status) {
+            return Err((
+                400,
+                failure(
+                    reason,
+                    Some(serde_json::json!({"error_code": "calibration_not_sendable"})),
+                ),
+            ));
+        }
+        let _launch_guard = match reserve_workflow_launch(
+            &self.active_jobs,
+            &self.launching_workflows,
+            &calibration_id,
+            Some(cancel_epoch_before),
+        ) {
+            Ok(guard) => guard,
+            Err(ReserveLaunchError::Busy) => {
+                return Err((
+                    409,
+                    failure(
+                        "该标定矩阵正在启动或发送中，禁止重复操作",
+                        Some(serde_json::json!({"error_code": "device_busy"})),
+                    ),
+                ));
+            }
+            Err(ReserveLaunchError::Cancelled) => {
+                return Err((
+                    409,
+                    failure(
+                        "标定任务已被取消，未开始发送",
+                        Some(serde_json::json!({"error_code": "calibration_cancelled"})),
+                    ),
+                ));
+            }
+        };
+        let mut record = self.load_calibration(&calibration_id).ok_or_else(|| {
+            (
+                404,
+                failure(
+                    "未找到标定矩阵，请先生成",
+                    Some(serde_json::json!({"error_code": "calibration_missing"})),
+                ),
+            )
+        })?;
+        let fresh_status = record.get("status").and_then(|v| v.as_str());
+        if let Some(reason) = workflow_send_blocked_reason(fresh_status) {
             return Err((
                 400,
                 failure(
@@ -3111,7 +3166,6 @@ impl ApiService {
             )
         })?;
         let gcode_path = preflight.gcode_path.clone().unwrap_or_default();
-        let cancel_epoch_before = current_cancel_epoch(&self.launching_workflows, &calibration_id);
         let snapshot_before_launch = record.clone();
         let send_result = self.launch_send_job_for(
             laser_runtime::RecordKind::Calibration,
@@ -6951,12 +7005,12 @@ fn overlay_live_progress(payload: &mut serde_json::Value, jobs: &ActiveJobs, wor
     }
 }
 
-/// 取消：置令牌（worker 在下一行前执行 ! → ? → 0x18），并立即通过实时信道写 `!` 进给保持。
-fn signal_job_cancel(
+/// 仅在内存中推进取消世代并置位取消令牌（零硬件/磁盘 I/O，可安全在 `record_transition_guard` 内执行）。
+fn mark_job_cancelled_in_memory(
     jobs: &ActiveJobs,
     reservations: &LaunchReservations,
     workflow_id: &str,
-) -> bool {
+) -> (bool, Option<std::sync::Arc<ActiveJob>>) {
     let job = match jobs.lock() {
         Ok(guard) => guard.get(workflow_id).cloned(),
         Err(_) => None,
@@ -6975,14 +7029,19 @@ fn signal_job_cancel(
             signalled = true;
         }
     }
-    if let Some(job) = job {
+    if let Some(ref job) = job {
         job.cancel.cancel();
+        signalled = true;
+    }
+    (signalled, job)
+}
+
+fn flush_cancel_feed_hold(job: Option<std::sync::Arc<ActiveJob>>) {
+    if let Some(job) = job {
         let _ = job
             .transport
             .write_realtime(laser_device::RealtimeCommand::FeedHold);
-        signalled = true;
     }
-    signalled
 }
 
 /// 发送线程启动后将 `sending` 状态落库；无论是读取还是写回失败，都立即请求停止刚启动的发送并返回 500，
@@ -6999,7 +7058,7 @@ fn persist_launched_sending_record(
     jobs: &ActiveJobs,
     reservations: &LaunchReservations,
 ) -> Result<(), (u16, serde_json::Value)> {
-    let _transition = record_transition_guard();
+    let transition = record_transition_guard();
     if current_cancel_epoch(reservations, record_id) != cancel_epoch_before {
         return Ok(());
     }
@@ -7007,19 +7066,7 @@ fn persist_launched_sending_record(
         laser_runtime::RecordKind::Calibration => ("标定矩阵", "calibration_persist_failed"),
         _ => ("workflow", "workflow_persist_failed"),
     };
-    let abort_with = |reason: String| -> (u16, serde_json::Value) {
-        let _ = signal_job_cancel(jobs, reservations, record_id);
-        (
-            500,
-            failure(
-                format!(
-                    "保存 {label} 状态失败（{reason}），已请求停止刚启动的发送，请到设备旁确认"
-                ),
-                Some(serde_json::json!({"error_code": error_code})),
-            ),
-        )
-    };
-    match store.get(kind, record_id) {
+    let abort_reason = match store.get(kind, record_id) {
         Ok(Some(mut latest)) => {
             if &latest.payload == snapshot_before_launch {
                 latest.status = Some("sending".into());
@@ -7027,27 +7074,26 @@ fn persist_launched_sending_record(
             } else if let Some(map) = latest.payload.as_object_mut() {
                 freeze_confirmation_snapshot(map, gcode_file, gcode_sha);
             }
-            if let Err(error) = store.put(&latest) {
-                return Err(abort_with(format!("{error:?}")));
+            match store.put(&latest) {
+                Ok(()) => return Ok(()),
+                Err(error) => format!("{error:?}"),
             }
-            Ok(())
         }
-        Ok(None) => Err(abort_with("记录不存在".into())),
-        Err(error) => Err(abort_with(format!("{error:?}"))),
-    }
-}
-
-/// 只读探测是否仍有活动发送或启动预约；锁中毒时按“活动”处理，绝不因探测失败拦下取消。
-fn job_is_active(jobs: &ActiveJobs, reservations: &LaunchReservations, workflow_id: &str) -> bool {
-    let in_jobs = jobs
-        .lock()
-        .map(|guard| guard.contains_key(workflow_id))
-        .unwrap_or(true);
-    let reserved = reservations
-        .lock()
-        .map(|state| state.active.contains_key(workflow_id))
-        .unwrap_or(true);
-    in_jobs || reserved
+        Ok(None) => "记录不存在".into(),
+        Err(error) => format!("{error:?}"),
+    };
+    let (_, job_to_hold) = mark_job_cancelled_in_memory(jobs, reservations, record_id);
+    drop(transition);
+    flush_cancel_feed_hold(job_to_hold);
+    Err((
+        500,
+        failure(
+            format!(
+                "保存 {label} 状态失败（{abort_reason}），已请求停止刚启动的发送，请到设备旁确认"
+            ),
+            Some(serde_json::json!({"error_code": error_code})),
+        ),
+    ))
 }
 
 /// 已全量完成且无活动发送的任务不可再取消：`completed` 是设备逐行确认后的历史记录，
@@ -7226,39 +7272,38 @@ fn handle_workflow_store_request(
             let Some(workflow_id) = requested_id else {
                 return http_json(400, failure("workflow_id 不能为空", None));
             };
-            if !job_is_active(jobs, reservations, &workflow_id) {
-                let stored = [
-                    laser_runtime::RecordKind::Workflow,
-                    laser_runtime::RecordKind::Calibration,
-                ]
-                .into_iter()
-                .find_map(|kind| store.get(kind, &workflow_id).ok().flatten());
-                let completed = stored.is_some_and(|stored| {
-                    stored
-                        .status
-                        .as_deref()
-                        .or_else(|| stored.payload.get("status").and_then(|v| v.as_str()))
-                        == Some("completed")
-                });
-                if completed {
-                    return cancel_completed_rejected();
-                }
+            let transition = record_transition_guard();
+            // 发送线程在 G4 P0 同步 ACK + Idle 双确认后持同一把 transition 锁写入 completed；
+            // 只要记录已是 completed（即便 active_jobs 移除尚未执行完），绝不将其篡改为 cancelled。
+            let existing = [
+                laser_runtime::RecordKind::Workflow,
+                laser_runtime::RecordKind::Calibration,
+            ]
+            .into_iter()
+            .find_map(|kind| store.get(kind, &workflow_id).ok().flatten());
+            if existing.as_ref().is_some_and(|stored| {
+                stored
+                    .status
+                    .as_deref()
+                    .or_else(|| stored.payload.get("status").and_then(|v| v.as_str()))
+                    == Some("completed")
+            }) {
+                return cancel_completed_rejected();
             }
+            // 安全铁律：一旦确认非 completed，无论后续落库是否报错都必须先置位取消令牌并在锁外发 FeedHold 停机。
+            let (signalled, job_to_hold) =
+                mark_job_cancelled_in_memory(jobs, reservations, &workflow_id);
             let now = unix_seconds() as f64;
-            let store_outcome = store.set_status(
+            let response = match store.set_status(
                 laser_runtime::RecordKind::Workflow,
                 &workflow_id,
                 "cancelled",
                 now,
-            );
-            match store_outcome {
-                Ok(true) => {
-                    let _ = signal_job_cancel(jobs, reservations, &workflow_id);
-                    match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
-                        Ok(Some(stored)) => http_json(200, success(stored.payload)),
-                        _ => http_json(500, failure("读取 workflow 失败", None)),
-                    }
-                }
+            ) {
+                Ok(true) => match store.get(laser_runtime::RecordKind::Workflow, &workflow_id) {
+                    Ok(Some(stored)) => http_json(200, success(stored.payload)),
+                    _ => http_json(500, failure("读取 workflow 失败", None)),
+                },
                 Ok(false) => match store.set_status(
                     laser_runtime::RecordKind::Calibration,
                     &workflow_id,
@@ -7266,14 +7311,13 @@ fn handle_workflow_store_request(
                     now,
                 ) {
                     Ok(true) => {
-                        let _ = signal_job_cancel(jobs, reservations, &workflow_id);
                         match store.get(laser_runtime::RecordKind::Calibration, &workflow_id) {
                             Ok(Some(stored)) => http_json(200, success(stored.payload)),
                             _ => http_json(500, failure("读取标定任务失败", None)),
                         }
                     }
                     Ok(false) => {
-                        if signal_job_cancel(jobs, reservations, &workflow_id) {
+                        if signalled {
                             http_json(
                                 200,
                                 success(serde_json::json!({
@@ -7288,7 +7332,10 @@ fn handle_workflow_store_request(
                     Err(_) => http_json(500, failure("取消 workflow 失败", None)),
                 },
                 Err(_) => http_json(500, failure("取消 workflow 失败", None)),
-            }
+            };
+            drop(transition);
+            flush_cancel_feed_hold(job_to_hold);
+            response
         }
         "resume" => {
             let Some(workflow_id) = requested_id else {
@@ -8310,7 +8357,24 @@ fn handle_material_manage(
                     }
                 }
                 for (k, v) in parsed_thicknesses {
-                    let target_thick = entry.thicknesses.entry(k).or_default();
+                    let canonical_k = if entry.thicknesses.contains_key(&k) {
+                        k
+                    } else if let Ok(nv) = k.trim().parse::<f64>() {
+                        entry
+                            .thicknesses
+                            .keys()
+                            .find(|existing_k| {
+                                existing_k
+                                    .trim()
+                                    .parse::<f64>()
+                                    .is_ok_and(|ev| (ev - nv).abs() <= 1e-9)
+                            })
+                            .cloned()
+                            .unwrap_or(k)
+                    } else {
+                        k
+                    };
+                    let target_thick = entry.thicknesses.entry(canonical_k).or_default();
                     if let Some(cut) = v.cut {
                         target_thick.cut = Some(cut);
                     }
@@ -16940,5 +17004,267 @@ Content-Length: 30
             "auto_fallback=false 不得额外探测串口: {no_fallback}"
         );
         assert_eq!(attempts[0]["mode"], "network");
+    }
+
+    #[test]
+    fn material_lab_send_reserves_launch_exclusively_and_cancel_never_overwrites_completed_while_active()
+     {
+        use laser_runtime::RuntimeStore as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // 1. 并发点击同一 calibration_id 发送：慢打开窗口内第二个请求被预约门禁以 409 device_busy 拒绝，传输只打开 1 次
+        let temp = tempfile::tempdir().unwrap();
+        let gen_dir = temp.path().join("generated");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        let open_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let open_calls_for_factory = open_calls.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let entered_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let slow_factory: TransportFactory = std::sync::Arc::new(move |_spec| {
+            open_calls_for_factory.fetch_add(1, Ordering::SeqCst);
+            if let Some(tx) = entered_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = release_rx.lock().unwrap().take() {
+                let _ = rx.recv_timeout(std::time::Duration::from_secs(3));
+            }
+            Err("mock_unreachable".into())
+        });
+
+        let service = std::sync::Arc::new(
+            ApiService::new(
+                test_loopback_settings(),
+                laser_contracts::builtin_material_library(),
+            )
+            .with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()))
+            .with_generated_root(gen_dir.clone())
+            .with_preview_roots(vec![gen_dir.clone()])
+            .with_transport_factory(slow_factory),
+        );
+
+        let preview = post_json(
+            &service,
+            "/api/material-lab/preview",
+            &serde_json::json!({
+                "material": "椴木",
+                "thickness_mm": 3.0,
+                "mode": "raster",
+                "powers": [20, 40],
+                "speeds": [600, 1200]
+            }),
+        );
+        assert_eq!(preview["success"], true, "{preview}");
+        let cal_id = preview["result"]["calibration_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let rejected_resume = post_json(
+            &service,
+            "/api/material-lab/send",
+            &serde_json::json!({
+                "calibration_id": cal_id,
+                "confirmed": true,
+                "connection_mode": "network",
+                "network_host": "127.0.0.1",
+                "start_from_line": 5
+            }),
+        );
+        assert_eq!(
+            rejected_resume["detail"]["error_code"], "resume_line_not_allowed",
+            "{rejected_resume}"
+        );
+
+        let svc_first = service.clone();
+        let cal_first = cal_id.clone();
+        let first_handle = std::thread::spawn(move || {
+            post_json(
+                &svc_first,
+                "/api/material-lab/send",
+                &serde_json::json!({
+                    "calibration_id": cal_first,
+                    "confirmed": true,
+                    "connection_mode": "network",
+                    "network_host": "127.0.0.1"
+                }),
+            )
+        });
+
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("首个标定发送应进入传输打开阶段");
+
+        let second_body = serde_json::json!({
+            "calibration_id": cal_id,
+            "confirmed": true,
+            "connection_mode": "network",
+            "network_host": "127.0.0.1"
+        })
+        .to_string();
+        let second_raw = service.handle_http(
+            format!(
+                "POST /api/material-lab/send HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                second_body.len(),
+                second_body
+            )
+            .as_bytes(),
+        );
+        assert!(
+            String::from_utf8_lossy(&second_raw).starts_with("HTTP/1.1 409"),
+            "{}",
+            String::from_utf8_lossy(&second_raw)
+        );
+        let second_resp = parse_json_response(&second_raw);
+        assert_eq!(second_resp["detail"]["error_code"], "device_busy");
+
+        let _ = release_tx.send(());
+        let _ = first_handle.join().unwrap();
+        assert_eq!(
+            open_calls.load(Ordering::SeqCst),
+            1,
+            "并发请求不得穿透预约表重复打开设备传输"
+        );
+
+        // 2. 发送线程已把 workflow 落库为 completed、但尚未从 active_jobs 移除时，cancel 必须拒绝篡改 completed
+        let store = std::sync::Arc::new(laser_runtime::MemoryStore::new());
+        store
+            .put(&laser_runtime::StoredRecord {
+                kind: laser_runtime::RecordKind::Workflow,
+                id: "wf-done-race".into(),
+                status: Some("completed".into()),
+                payload: serde_json::json!({
+                    "workflow_id": "wf-done-race",
+                    "status": "completed",
+                    "send_result": { "success": true, "running": false, "phase": "completed" }
+                }),
+            })
+            .unwrap();
+        let fake_transport: std::sync::Arc<dyn laser_device::DeviceTransport> =
+            std::sync::Arc::new(laser_device::FakeGrbl::new(std::iter::empty::<String>()));
+        let dummy_job = std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-done-race".into(),
+            mode: "network",
+            target: "127.0.0.1:23".into(),
+            progress: std::sync::Arc::new(laser_device::JobProgress::default()),
+            cancel: laser_device::CancellationToken::default(),
+            transport: fake_transport,
+            started_at: std::time::Instant::now(),
+        });
+        let jobs: ActiveJobs = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::from([("wf-done-race".to_owned(), dummy_job)]),
+        ));
+        let reservations: LaunchReservations =
+            std::sync::Arc::new(std::sync::Mutex::new(LaunchReservationState::default()));
+        let cancel_bytes = handle_workflow_store_request(
+            store.as_ref(),
+            "/api/workflow",
+            serde_json::json!({ "action": "cancel", "workflow_id": "wf-done-race" })
+                .as_object()
+                .unwrap(),
+            &[],
+            &jobs,
+            &reservations,
+            &|_, _, _, _| unreachable!(),
+        );
+        let cancel_str = String::from_utf8_lossy(&cancel_bytes);
+        assert!(
+            cancel_str.starts_with("HTTP/1.1 400"),
+            "已落库 completed 的任务即使尚未从 active_jobs 移除也须拒绝取消: {cancel_str}"
+        );
+        assert!(cancel_str.contains("workflow_completed"), "{cancel_str}");
+        let after = store
+            .get(laser_runtime::RecordKind::Workflow, "wf-done-race")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status.as_deref(), Some("completed"));
+        assert_eq!(after.payload["status"], "completed");
+
+        // 3. 存储落库报错时 cancel 仍必须无条件停止活动任务并写出 FeedHold（停止动作永不依赖落盘）
+        struct SetStatusFailStore;
+        impl laser_runtime::RuntimeStore for SetStatusFailStore {
+            fn get(
+                &self,
+                _kind: laser_runtime::RecordKind,
+                _id: &str,
+            ) -> Result<Option<laser_runtime::StoredRecord>, laser_runtime::SchemaError>
+            {
+                Err(laser_runtime::SchemaError::Busy)
+            }
+            fn put(
+                &self,
+                _record: &laser_runtime::StoredRecord,
+            ) -> Result<(), laser_runtime::SchemaError> {
+                Err(laser_runtime::SchemaError::Busy)
+            }
+            fn set_status(
+                &self,
+                _kind: laser_runtime::RecordKind,
+                _id: &str,
+                _status: &str,
+                _now: f64,
+            ) -> Result<bool, laser_runtime::SchemaError> {
+                Err(laser_runtime::SchemaError::Busy)
+            }
+            fn list_recent(
+                &self,
+                _kind: laser_runtime::RecordKind,
+                _limit: usize,
+            ) -> Result<Vec<laser_runtime::StoredRecord>, laser_runtime::SchemaError> {
+                Err(laser_runtime::SchemaError::Busy)
+            }
+            fn save_feedback(
+                &self,
+                _workflow_id: &str,
+                _feedback: &serde_json::Value,
+            ) -> Result<bool, laser_runtime::SchemaError> {
+                Err(laser_runtime::SchemaError::Busy)
+            }
+            fn adopt_feedback(
+                &self,
+                _workflow_id: &str,
+                _feedback: &serde_json::Value,
+                _preview: &laser_runtime::StoredRecord,
+            ) -> Result<bool, laser_runtime::SchemaError> {
+                Err(laser_runtime::SchemaError::Busy)
+            }
+        }
+        let grbl = std::sync::Arc::new(laser_device::FakeGrbl::new(std::iter::empty::<String>()));
+        let active_cancel = laser_device::CancellationToken::default();
+        let err_job = std::sync::Arc::new(ActiveJob {
+            workflow_id: "wf-store-err".into(),
+            mode: "network",
+            target: "127.0.0.1:23".into(),
+            progress: std::sync::Arc::new(laser_device::JobProgress::default()),
+            cancel: active_cancel.clone(),
+            transport: grbl.clone(),
+            started_at: std::time::Instant::now(),
+        });
+        let err_jobs: ActiveJobs = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::from([("wf-store-err".to_owned(), err_job)]),
+        ));
+        let err_reservations: LaunchReservations =
+            std::sync::Arc::new(std::sync::Mutex::new(LaunchReservationState::default()));
+        let err_bytes = handle_workflow_store_request(
+            &SetStatusFailStore,
+            "/api/workflow",
+            serde_json::json!({ "action": "cancel", "workflow_id": "wf-store-err" })
+                .as_object()
+                .unwrap(),
+            &[],
+            &err_jobs,
+            &err_reservations,
+            &|_, _, _, _| unreachable!(),
+        );
+        assert!(String::from_utf8_lossy(&err_bytes).starts_with("HTTP/1.1 500"));
+        assert!(
+            active_cancel.is_cancelled(),
+            "存储报错时仍必须置位活动任务取消令牌"
+        );
+        assert!(
+            grbl.realtime().contains(&b'!'),
+            "存储报错时仍必须向硬件写出实时 FeedHold (!)"
+        );
     }
 }

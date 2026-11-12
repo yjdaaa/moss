@@ -400,21 +400,32 @@ pub fn bytes_to_pcm(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
-/// 本地流式合成按停顿分段；短片段合并，长片段有界，保留标点和数字小数点。
+/// 本地流式合成按停顿分段：首段在首个满 10 字的逗号/句末处切出以降低首包延迟；
+/// 后续分句优先在句末标点或较长分句（≥22 字）处切分，保护千分位数字与词组连贯韵律，避免每 8 字切碎导致机械跳调。
 pub fn synthesis_segments(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut length = 0;
-    for ch in text.chars() {
+    for (i, &ch) in chars.iter().enumerate() {
         current.push(ch);
         length += 1;
-        if length >= 40
-            || (length >= 8
-                && matches!(
-                    ch,
-                    '，' | ',' | '。' | '！' | '？' | '；' | ';' | '!' | '?' | '\n'
-                ))
-        {
+        let numeric_comma = ch == ','
+            && i > 0
+            && chars[i - 1].is_ascii_digit()
+            && chars.get(i + 1).is_some_and(|next| next.is_ascii_digit());
+        let is_sentence_end = matches!(ch, '。' | '！' | '？' | '；' | ';' | '!' | '?' | '\n');
+        let is_comma = matches!(ch, '，' | ',') && !numeric_comma;
+        let is_soft_pause = matches!(ch, '、' | '：' | ':' | ' ');
+        let min_comma_len = if segments.is_empty() { 10 } else { 22 };
+        let should_cut = (length >= 8 && is_sentence_end)
+            || (length >= min_comma_len && is_comma)
+            || (length >= 45 && is_soft_pause)
+            || (length >= 72
+                && !chars
+                    .get(i + 1)
+                    .is_some_and(|next| next.is_ascii_alphanumeric()));
+        if should_cut {
             if !current.trim().is_empty() {
                 segments.push(std::mem::take(&mut current));
             } else {
@@ -559,6 +570,13 @@ mod tests {
         assert!(segments.len() >= 2);
         assert_eq!(segments.concat(), text);
         assert!(segments.iter().any(|s| s.contains("0.5")));
+        let num_text = "当前雕刻速度为 1,200 毫米每分钟，功率已设好，随时可以开始。";
+        let num_segments = synthesis_segments(num_text);
+        assert_eq!(num_segments.concat(), num_text);
+        assert!(
+            num_segments.iter().any(|s| s.contains("1,200")),
+            "千分位数字不得被逗号切碎"
+        );
         let words = vec!["椴木".into(), "MOSS".into(), "未知".into(), "椴\0木".into()];
         assert_eq!(cjk_hotwords(&words, "椴 1\n木 2\n"), "椴 木".as_bytes());
         let request: Request =

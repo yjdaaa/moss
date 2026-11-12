@@ -445,7 +445,7 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 
 `POST /api/feedback/accept` 接收 `{workflow_id,feedback_id,confirmed:true}`，生成独立 `preview_ready` workflow，返回更新后的反馈记录及 `adopted_workflow_id`。成功保存新预览后才记采用参数，重复请求返回已采用记录。不会改原文件、直接修改材料库或发送硬件。新文件实际使用建议的功率、速度和次数，并重新冻结 SHA；发送仍须对新 workflow 独立 `confirm_send` 和全部既有门禁。过期或加工中的任务返回 409。MCP 采用通过现有 `regenerate_text_laser_task_tool(task_id,feedback_id,confirmed=true)`，不新增工具。
 
-新 workflow 与原反馈的采用状态在同一 SQLite 事务（内存模式同一把锁）提交；失败不会留下可查询的孤立任务。普通 workflow 状态写回保留数据库中现有反馈历史，避免旧快照覆盖历史。新任务另有 `feedback_origin`，界面切换后仍可显示本次来源反馈。`feedback_params` 是内部生成参数，公开 text/draw/workflow 请求不能直接传入，必须走采用接口。画板当前实际生成策略仍是光栅，摘要按实际文件显示，不把输入的 outline/cut 标签当成已实现的生成策略。
+新 workflow 与原反馈的采用状态在同一 SQLite 事务（内存模式同一把锁）提交；失败不会留下可查询的孤立任务。普通 workflow 状态写回保留数据库中现有反馈历史，避免旧快照覆盖历史。新任务另有 `feedback_origin`，界面切换后仍可显示本次来源反馈。`feedback_params` 是内部生成参数，公开 text/draw/workflow 请求不能直接传入，必须走采用接口。画板当前支持光栅（`raster`）与轮廓描边（`outline`）两种实际生成策略，摘要按实际生成的刀路策略显示，不把未独立实现的 `cut` 标签当成矢量切割策略。
 
 ### 3.15 `/api/settings` 与 `/api/system/check-update`
 

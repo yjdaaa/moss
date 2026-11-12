@@ -13,10 +13,130 @@ const MAX_CHARS: usize = 180;
 const MAX_WAIT: Duration = Duration::from_secs(6);
 
 fn is_pause(c: char) -> bool {
-    matches!(
-        c,
-        '，' | ',' | '、' | '；' | ';' | '：' | ':' | '…' | '~' | '～'
-    ) || is_end(c)
+    matches!(c, '，' | ',' | '；' | ';' | '：' | ':' | '…') || is_end(c)
+}
+
+fn is_cjk(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+}
+
+/// 将 Markdown 行内链接 `[文字](url)` 还原为纯 `文字`。
+fn strip_markdown_links(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        if let Some(close) = after_open.find("](") {
+            let label = &after_open[..close];
+            let after_mid = &after_open[close + 2..];
+            if let Some(end_paren) = after_mid.find(')') {
+                out.push_str(label);
+                rest = &after_mid[end_paren + 1..];
+                continue;
+            }
+        }
+        out.push('[');
+        rest = after_open;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 将中文语境下的加工参数符号（范围 `~`、乘号 `×`、速度/尺寸单位 `mm/min`、`mm/s`、`mm`、`cm`）转成顺畅口语。
+fn normalize_spoken_terms(input: &str) -> String {
+    if !input.chars().any(is_cjk) {
+        return input.to_owned();
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(input.len() + 16);
+    let mut i = 0;
+    while i < len {
+        let c = chars[i];
+        // 数字范围：40~60% / 3～5 -> 40到60% / 3到5
+        if matches!(c, '~' | '～') {
+            let prev_ok = i > 0 && (chars[i - 1].is_ascii_digit() || chars[i - 1] == '%');
+            let next_ok = i + 1 < len && chars[i + 1].is_ascii_digit();
+            if prev_ok && next_ok {
+                out.push('到');
+                i += 1;
+                continue;
+            }
+        }
+        // 尺寸乘号：100×80 -> 100乘80
+        if c == '×'
+            && i > 0
+            && i + 1 < len
+            && chars[i - 1].is_ascii_digit()
+            && chars[i + 1].is_ascii_digit()
+        {
+            out.push('乘');
+            i += 1;
+            continue;
+        }
+        // 紧跟在数字或空格后的单位：mm/min、mm/s、mm、cm
+        let prev_is_num = i > 0
+            && (chars[i - 1].is_ascii_digit()
+                || (chars[i - 1] == ' ' && i >= 2 && chars[i - 2].is_ascii_digit()));
+        if prev_is_num
+            && (c == 'm' || c == 'M')
+            && i + 1 < len
+            && (chars[i + 1] == 'm' || chars[i + 1] == 'M')
+        {
+            let tail: String = chars[i + 2..].iter().take(5).collect();
+            let tail_lower = tail.to_ascii_lowercase();
+            if tail_lower.starts_with("/min")
+                && chars.get(i + 6).is_none_or(|ch| !ch.is_ascii_alphabetic())
+            {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push_str("毫米每分钟");
+                i += 6;
+                continue;
+            }
+            if tail_lower.starts_with("/s")
+                && chars.get(i + 4).is_none_or(|ch| !ch.is_ascii_alphabetic())
+            {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push_str("毫米每秒");
+                i += 4;
+                continue;
+            }
+            if chars
+                .get(i + 2)
+                .is_none_or(|ch| !ch.is_ascii_alphabetic() && *ch != '/')
+            {
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push_str("毫米");
+                i += 2;
+                continue;
+            }
+        }
+        if prev_is_num
+            && (c == 'c' || c == 'C')
+            && i + 1 < len
+            && (chars[i + 1] == 'm' || chars[i + 1] == 'M')
+            && chars
+                .get(i + 2)
+                .is_none_or(|ch| !ch.is_ascii_alphabetic() && *ch != '/')
+        {
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push_str("厘米");
+            i += 2;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 fn is_end(c: char) -> bool {
@@ -55,7 +175,7 @@ pub fn emotion_of(text: &str) -> Option<&'static str> {
         })
 }
 
-/// 清洗为可朗读的文字：去掉 Markdown 标记（加粗、代码、标题、列表、引用）与表情，合并空白。
+/// 清洗为可朗读的文字：去掉 Markdown 标记（加粗、代码、标题、列表、引用、行内链接）与表情，并将中文加工参数符号转为口语表达。
 pub fn clean_for_speech(text: &str) -> String {
     let mut lines = Vec::new();
     for line in text.lines() {
@@ -67,12 +187,14 @@ pub fn clean_for_speech(text: &str) -> String {
                 line = rest;
             }
         }
-        let cleaned: String = line
+        let without_links = strip_markdown_links(line);
+        let cleaned: String = without_links
             .replace("**", "")
             .replace("__", "")
             .chars()
-            .filter(|c| *c != '`' && !is_emoji(*c))
+            .filter(|c| *c != '`' && *c != '*' && !is_emoji(*c))
             .collect();
+        let cleaned = normalize_spoken_terms(&cleaned);
         let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
         if !cleaned.is_empty() {
             lines.push(cleaned);
@@ -80,7 +202,7 @@ pub fn clean_for_speech(text: &str) -> String {
     }
     lines
         .join("，")
-        .trim_start_matches(|c: char| is_pause(c) || c.is_whitespace())
+        .trim_start_matches(|c: char| is_pause(c) || c == '、' || c.is_whitespace())
         .to_owned()
 }
 
@@ -182,10 +304,20 @@ impl Segmenter {
             };
             let min_chars = if self.sent_any {
                 self.min_next_chars
+            } else if matches!(c, '：' | ':') {
+                // 避免“提示：”“警告：”这类 2 字前缀被单独切成碎句导致合成语调脱节
+                self.min_first_chars.max(5)
             } else {
                 self.min_first_chars
             };
             if boundary {
+                // 保护数字千分位（1,200）与时间（14:30）：紧跟在数字后的半角逗号/冒号若后续是数字或尚未收齐则不切
+                if matches!(c, ',' | ':')
+                    && self.buffer[..at].ends_with(|ch: char| ch.is_ascii_digit())
+                    && chars.peek().is_none_or(|(_, next)| next.is_ascii_digit())
+                {
+                    continue;
+                }
                 // 有足够可读内容才切（避免开头的孤立标点或句中 1 字碎句单独发起一次 TTS 请求；换行符保持分行）
                 let count = speakable_char_count(&self.buffer[..end]);
                 if count >= min_chars
@@ -218,7 +350,21 @@ impl Segmenter {
         self.buffer
             .char_indices()
             .rev()
-            .find(|(_, c)| is_pause(*c))
+            .find(|&(at, c)| {
+                if !is_pause(c) {
+                    return false;
+                }
+                if matches!(c, ',' | ':')
+                    && self.buffer[..at].ends_with(|ch: char| ch.is_ascii_digit())
+                    && self.buffer[at + c.len_utf8()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| next.is_ascii_digit())
+                {
+                    return false;
+                }
+                true
+            })
             .map(|(at, c)| at + c.len_utf8())
     }
 }
@@ -343,5 +489,27 @@ mod tests {
         );
         assert_eq!(custom.push("尾句", now), Vec::<String>::new());
         assert_eq!(custom.finish().as_deref(), Some("尾句"));
+    }
+
+    #[test]
+    fn ranges_lists_colons_and_laser_units_stay_fluent() {
+        // 1. 提示前缀、顿号并列词、数值范围与时间不被首句逗号切碎
+        let out = run(&[
+            "提示：",
+            "请确认材料、厚度与功率在 40~60% 之间，",
+            "速度 1,200mm/min，木牌尺寸 100×80mm，厚度 3mm，当前时间 14:30。",
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                "提示：请确认材料、厚度与功率在 40到60% 之间，",
+                "速度 1,200毫米每分钟，木牌尺寸 100乘80毫米，厚度 3毫米，当前时间 14:30。"
+            ]
+        );
+        // 2. Markdown 链接与斜体星号被清洗，保留可读正文
+        assert_eq!(
+            clean_for_speech("查看 [材料库说明](https://example.com/docs) 中的 *3cm* 焦距。"),
+            "查看 材料库说明 中的 3厘米 焦距。"
+        );
     }
 }

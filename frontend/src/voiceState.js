@@ -1266,11 +1266,21 @@ export function localSettingsForm(settings) {
   };
 }
 
-/** 改选某类模型；改选多音色合成模型时音色编号换成该模型的默认音色。 */
+/** 改选某类模型；改选多音色合成模型或原音色落在非中文区间时，音色编号自动换成该模型的默认中文音色。 */
 export function selectLocalModel(form, models, kind, id) {
   const next = { ...form, [`${kind}_model`]: id };
   const model = (Array.isArray(models) ? models : []).find((item) => item.id === id);
-  if (kind === "tts" && id !== form.tts_model && model?.voices) next.tts_speaker = String(model.voices.default);
+  if (kind === "tts") {
+    const spk = Number(form?.tts_speaker);
+    const outOfChineseRange =
+      (id === "kokoro" && !(Number.isInteger(spk) && spk >= 45 && spk <= 52)) ||
+      (id === "kokoro_v11" && !(Number.isInteger(spk) && spk >= 3 && spk <= 102));
+    if ((id !== form.tts_model || outOfChineseRange) && model?.voices) {
+      next.tts_speaker = String(model.voices.default);
+    } else if (outOfChineseRange) {
+      next.tts_speaker = id === "kokoro" ? "50" : id === "kokoro_v11" ? "3" : "0";
+    }
+  }
   return next;
 }
 

@@ -1088,9 +1088,11 @@ mod resume_sqlite {
             match (reference.kind, status.as_str(), phase.as_deref()) {
                 (RefKind::Approval, "pending" | "approved", _) => RefState::InProgress,
                 (RefKind::Approval, "expired" | "rejected" | "cancelled", _) => RefState::Revoked,
-                (RefKind::Approval, "executed", Some("unknown")) => RefState::ResultUnknown,
-                (RefKind::Approval, "executed", Some("failed")) => RefState::Failed,
-                (RefKind::Approval, "executed", Some("cancelled")) => RefState::Stopped,
+                (RefKind::Approval, "executed", Some("running")) => RefState::InProgress,
+                (RefKind::Approval, "executed" | "failed", Some("unknown" | "result_unknown"))
+                | (RefKind::Approval, "failed", Some("running")) => RefState::ResultUnknown,
+                (RefKind::Approval, "executed" | "failed", Some("cancelled")) => RefState::Stopped,
+                (RefKind::Approval, "executed" | "failed", Some("failed")) => RefState::Failed,
                 (RefKind::Approval, "executed", _) => RefState::Done,
                 (_, "completed", _) => RefState::Done,
                 (_, "failed" | "timed_out", _) => RefState::Failed,

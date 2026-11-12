@@ -309,6 +309,12 @@
           "markdownDescription": "Enables the voice_builtin_stop command without any pre-configured scope."
         },
         {
+          "description": "Enables the voice_colab_export_notebook command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voice-colab-export-notebook",
+          "markdownDescription": "Enables the voice_colab_export_notebook command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voice_context_manage command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voice-context-manage",
@@ -787,6 +793,12 @@
           "type": "string",
           "const": "deny-voice-builtin-stop",
           "markdownDescription": "Denies the voice_builtin_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voice_colab_export_notebook command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voice-colab-export-notebook",
+          "markdownDescription": "Denies the voice_colab_export_notebook command without any pre-configured scope."
         },
         {
           "description": "Denies the voice_context_manage command without any pre-configured scope.",

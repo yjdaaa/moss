@@ -732,12 +732,16 @@ mod tests {
             .unwrap();
         assert_eq!(wf_active["status"], "failed");
         assert_eq!(wf_active["detail"], "host 退出中断，任务安全终止");
+        assert_eq!(wf_active["send_result"]["running"], false);
+        assert_eq!(wf_active["send_result"]["phase"], "result_unknown");
 
         let cal_active = db
             .read_payload("calibrations", "calibration_id", "cal-active")
             .unwrap()
             .unwrap();
         assert_eq!(cal_active["status"], "failed");
+        assert_eq!(cal_active["send_result"]["running"], false);
+        assert_eq!(cal_active["send_result"]["phase"], "result_unknown");
 
         // 旧版遗留的“外层已是 failed、内层 payload 仍卡在 sending”的脏记录，启动恢复能自动修好
         db.recover_after_restart().unwrap();
@@ -746,6 +750,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(wf_split["status"], "failed");
+        assert_eq!(wf_split["send_result"]["running"], false);
+        assert_eq!(wf_split["send_result"]["phase"], "result_unknown");
     }
 
     #[test]

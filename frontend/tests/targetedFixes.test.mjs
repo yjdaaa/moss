@@ -232,8 +232,53 @@ test("VoiceAgentCard 5 秒轮询保脏、VoicePage 链路提示、HomePage 预�
     assert.deepEqual(Object.keys(preserved.thicknesses), ["2", "6"]);
     assert.equal(preserved.thicknesses["2"].cut.laser_max_power, 720, "未改功率速度时保留 2mm 原有精细功率");
     assert.equal(preserved.thicknesses["2"].cut.passes, 3, "保留原有遍数");
+    assert.equal(preserved.thicknesses["2"].cut.threshold, 128, "保留原有阈值");
     assert.equal(preserved.thicknesses["2"].cut.notes, "精切三遍", "保留原有备注");
     assert.equal(preserved.thicknesses["6"].cut.laser_max_power, 500, "新增 6mm 厚度使用弹窗参数");
+    assert.equal(preserved.thicknesses["6"].cut.threshold, -1, "新增切割厚度默认 threshold 为 -1");
+
+    // 调整单个厚度功率速度时：仅更新 targetThickness，其余既有厚度独立精细参数完整保留
+    const singleThickEdited = buildMaterialSavePayload({
+      material: "胡桃木",
+      thickList: [2, 4],
+      power: 60,
+      speed: 15,
+      laserMode: "cut",
+      engravingMode: "cut",
+      existingThicknesses: {
+        "2": { cut: { laser_min_power: 15, laser_max_power: 720, feed_rate: 410, travel_rate: 2800, threshold: 128, passes: 3, pixel_size_mm: 0.08, notes: "精切三遍" } },
+        "4": { cut: { laser_min_power: 0, laser_max_power: 850, feed_rate: 300, travel_rate: 3000, threshold: -1, passes: 2, pixel_size_mm: 0.1, notes: "厚板慢切" } },
+      },
+      targetThickness: "2",
+      paramsChanged: true,
+      pruneMissingThicknesses: true,
+    });
+    assert.equal(singleThickEdited.thicknesses["2"].cut.laser_max_power, 600, "目标厚度应用新功率");
+    assert.equal(singleThickEdited.thicknesses["2"].cut.feed_rate, 900, "目标厚度应用新速度");
+    assert.equal(singleThickEdited.thicknesses["2"].cut.passes, 3, "目标厚度保留遍数");
+    assert.equal(singleThickEdited.thicknesses["4"].cut.laser_max_power, 850, "非目标厚度保留原功率");
+    assert.equal(singleThickEdited.thicknesses["4"].cut.feed_rate, 300, "非目标厚度保留原速度");
+    assert.equal(singleThickEdited.thicknesses["4"].cut.passes, 2, "非目标厚度保留原遍数");
+    assert.equal(singleThickEdited.thicknesses["4"].cut.notes, "厚板慢切", "非目标厚度保留原备注");
+
+    const partialModeAndCanonicalKey = buildMaterialSavePayload({
+      material: "胡桃木",
+      thickList: [2, 4, 6],
+      power: 60,
+      speed: 15,
+      laserMode: "cut",
+      passesOverride: 3,
+      existingThicknesses: {
+        "2": { cut: { laser_min_power: 0, laser_max_power: 700, feed_rate: 480, travel_rate: 3000, threshold: -1, passes: 2, pixel_size_mm: 0.1 } },
+        "4.0": { engrave: { raster: { laser_min_power: 0, laser_max_power: 350, feed_rate: 1800, travel_rate: 3000, threshold: -1, passes: 1, pixel_size_mm: 0.1 } } },
+      },
+      targetThickness: "2",
+      paramsChanged: true,
+      pruneMissingThicknesses: true,
+    });
+    assert.deepEqual(partialModeAndCanonicalKey.thicknesses["4.0"], {}, "仅存了光栅的非目标厚度 4.0 不得被捏造 cut 参数，且保留原键名防重复");
+    assert.equal(partialModeAndCanonicalKey.thicknesses["4"], undefined, "不得额外生成数值重复的 '4' 键");
+    assert.equal(partialModeAndCanonicalKey.thicknesses["6"].cut.laser_max_power, 600, "新增厚度 6 正常写入新参数");
   } finally {
     await server.close();
   }
@@ -304,4 +349,21 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
 
   const twinStage = readFileSync(path.join(srcRoot, "components/TwinStage3D.jsx"), "utf8");
   assert.match(twinStage, /isDirectHardwareCoord/, "实机遥测 MPos/WPos 坐标不得二次叠加虚拟木牌偏置与缩放");
+
+  const home = readFileSync(path.join(srcRoot, "pages/HomePage.jsx"), "utf8");
+  const editMatBlock = home.slice(home.indexOf("加工材质与物理参数联动"), home.indexOf("调整库内参数") + 50);
+  assert.match(editMatBlock, /\/api\/material-lab\/export/, "工作台调整库内参数须拉取完整各厚度参数传入 existing_thicknesses");
+  assert.match(editMatBlock, /existing_thicknesses:\s*existingThicknesses/);
+
+  const matModal = readFileSync(path.join(srcRoot, "components/MaterialModal.jsx"), "utf8");
+  assert.match(matModal, /if \(isEditing && !resolvedExistingThicknesses\)/, "MaterialModal 编辑缺省 existing_thicknesses 时须兜底拉取防覆盖");
+
+  const matLab = readFileSync(path.join(srcRoot, "pages/MaterialLabPage.jsx"), "utf8");
+  assert.match(matLab, /<option value="__custom__">✎ 手动输入串口…<\/option>/, "材料实验室串口下拉须支持手动输入串口号");
+
+  const builtinCard = readFileSync(path.join(srcRoot, "components/VoiceBuiltinCard.jsx"), "utf8");
+  assert.match(builtinCard, /if \(micOpeningRef\.current\)/, "录真话测在系统授权弹窗期间须防双击重入");
+  assert.match(builtinCard, /ctx\.state === "suspended"[\s\S]{0,80}ctx\.resume\(\)/, "新建 AudioContext 处于挂起态时须调用 resume()");
+  assert.match(builtinCard, /stopMicSession\(true\)/, "切换模型来源与卸载时须中止在途录音与麦克风授权");
+  assert.match(builtinCard, /disabled=\{Boolean\(busy \|\| mixBusy \|\| pipeline\?\.running \|\| recordingChain \|\| openingMic\)\}/, "试跑与录音期间须禁用整栏模型切换下拉框");
 });

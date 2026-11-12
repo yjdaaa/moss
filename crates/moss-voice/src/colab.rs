@@ -440,9 +440,11 @@ from qwen_tts import Qwen3TTSModel
 
 TOKEN = os.environ["MOSS_COLAB_TOKEN"]
 REF_WAV = pathlib.Path("/content/moss_ref.wav")
-DEFAULT_REF_TEXT = "\\u8ba9\\u4eba\\u7c7b\\u6c38\\u8fdc\\u4fdd\\u6301\\u7406\\u667a\\uff0c\\u786e\\u5b9e\\u662f\\u4e00\\u79cd\\u5962\\u6c42\\u3002MOSS 550W online."
+DEFAULT_REF_TEXT = "\\u8ba9\\u4eba\\u7c7b\\u6c38\\u8fdc\\u4fdd\\u6301\\u7406\\u667a\\uff0c\\u786e\\u5b9e\\u662f\\u4e00\\u79cd\\u5962\\u6c42\\u3002\\u9886\\u822a\\u5458\\u7a7a\\u95f4\\u7ad9\\u4e3b\\u63a7\\u7cfb\\u7edf\\u5df2\\u5c31\\u7eea\\u3002"
+default_ref_mtime = 0.0
 
 def ensure_default_ref_wav():
+    global default_ref_mtime
     if REF_WAV.exists() and REF_WAV.stat().st_size > 1000:
         return
     try:
@@ -450,8 +452,8 @@ def ensure_default_ref_wav():
         subprocess.run([
             "edge-tts",
             "--voice", "zh-CN-YunjianNeural",
-            "--pitch=-15Hz",
-            "--rate=-10%",
+            "--pitch=-4Hz",
+            "--rate=-5%",
             "--text", DEFAULT_REF_TEXT,
             "--write-media", mp3_tmp
         ], check=True, timeout=15)
@@ -459,14 +461,16 @@ def ensure_default_ref_wav():
             "ffmpeg", "-y", "-i", mp3_tmp, "-ar", "24000", "-ac", "1", str(REF_WAV)
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         if REF_WAV.exists() and REF_WAV.stat().st_size > 1000:
+            default_ref_mtime = REF_WAV.stat().st_mtime
             return
     except Exception:
         pass
     sr = 24000
     t = np.linspace(0, 3.2, int(sr * 3.2), endpoint=False)
     env = np.minimum(1.0, np.minimum(t / 0.15, (3.2 - t) / 0.25))
-    sig = (0.45 * np.sin(2 * np.pi * 92.0 * t) + 0.25 * np.sin(2 * np.pi * 184.0 * t) + 0.12 * np.sin(2 * np.pi * 276.0 * t)) * env * 0.35
+    sig = (0.45 * np.sin(2 * np.pi * 110.0 * t) + 0.25 * np.sin(2 * np.pi * 220.0 * t) + 0.12 * np.sin(2 * np.pi * 330.0 * t)) * env * 0.35
     sf.write(str(REF_WAV), sig.astype(np.float32), sr, subtype="PCM_16")
+    default_ref_mtime = REF_WAV.stat().st_mtime if REF_WAV.exists() else 0.0
 
 ensure_default_ref_wav()
 tts_model = Qwen3TTSModel.from_pretrained("Qwen/Qwen3-TTS-12Hz-0.6B-Base", device_map="cuda:0", dtype=torch.float32, attn_implementation="sdpa")
@@ -481,23 +485,64 @@ def get_voice_prompt():
         ensure_default_ref_wav()
         mtime = REF_WAV.stat().st_mtime if REF_WAV.exists() else 0.0
         if voice_prompt is None or mtime != current_ref_mtime:
-            voice_prompt = tts_model.create_voice_clone_prompt(ref_audio=str(REF_WAV), ref_text=DEFAULT_REF_TEXT, x_vector_only_mode=True)
+            use_icl = abs(mtime - default_ref_mtime) < 1e-3 and default_ref_mtime > 0.0
+            try:
+                voice_prompt = tts_model.create_voice_clone_prompt(
+                    ref_audio=str(REF_WAV),
+                    ref_text=DEFAULT_REF_TEXT,
+                    x_vector_only_mode=not use_icl,
+                )
+            except Exception:
+                voice_prompt = tts_model.create_voice_clone_prompt(
+                    ref_audio=str(REF_WAV),
+                    ref_text=DEFAULT_REF_TEXT,
+                    x_vector_only_mode=True,
+                )
             current_ref_mtime = mtime
         return voice_prompt
 
-def apply_speed(wav, speed):
-    if abs(speed - 1.0) <= 0.02 or len(wav) < 16:
+def apply_speed(wav, speed, sr=24000):
+    if abs(speed - 1.0) <= 0.02 or len(wav) < 1024:
         return wav
-    out_len = max(1, int(round(len(wav) / speed)))
-    x_old = np.linspace(0.0, 1.0, num=len(wav), endpoint=False)
-    x_new = np.linspace(0.0, 1.0, num=out_len, endpoint=False)
-    return np.interp(x_new, x_old, wav).astype(np.float32)
+    win = max(256, int(sr * 0.025) // 2 * 2)
+    hop_s = win // 2
+    hop_a = max(1, int(round(hop_s * speed)))
+    search = max(1, int(sr * 0.006))
+    window = np.hanning(win).astype(np.float32)
+    out_len = max(win, int(round(len(wav) / speed)) + win)
+    out = np.zeros(out_len, dtype=np.float32)
+    norm = np.zeros(out_len, dtype=np.float32)
+    in_pos = 0
+    out_pos = 0
+    while in_pos + win <= len(wav) and out_pos + win <= out_len:
+        best_off = 0
+        if out_pos > 0 and in_pos >= search and in_pos + win + search <= len(wav):
+            target = out[out_pos:out_pos + hop_s]
+            if float(np.dot(target, target)) > 1e-6:
+                best_corr = -1e30
+                for off in range(-search, search + 1, 2):
+                    cand = wav[in_pos + off:in_pos + off + hop_s]
+                    c = float(np.dot(target, cand))
+                    if c > best_corr:
+                        best_corr = c
+                        best_off = off
+        seg = wav[in_pos + best_off:in_pos + best_off + win]
+        out[out_pos:out_pos + win] += seg * window
+        norm[out_pos:out_pos + win] += window
+        out_pos += hop_s
+        in_pos += hop_a
+    valid = min(out_len, max(1, out_pos + hop_s))
+    out = out[:valid]
+    norm = norm[:valid]
+    mask = norm > 1e-4
+    out[mask] /= norm[mask]
+    return out.astype(np.float32)
 
 def synth_wav_bytes(text: str, speed: float) -> bytes:
     vp = get_voice_prompt()
     with torch.inference_mode():
-        wavs, sr = tts_model.generate_voice_clone(text=text, language="Auto", voice_clone_prompt=vp)
-    audio = apply_speed(np.asarray(wavs[0], dtype=np.float32), speed)
+        wavs, sr = tts_model.generate_voice_clone(text=text, language="Chinese", voice_clone_prompt=vp)
+    audio = apply_speed(np.asarray(wavs[0], dtype=np.float32), speed, sr)
     buf = io.BytesIO()
     sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
     return buf.getvalue()

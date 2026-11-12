@@ -438,6 +438,14 @@ mod imp {
                 vec!["kokoro"],
                 "用户所选未安装时自动顺延本机已安装的另一个模型"
             );
+            assert_eq!(
+                only_kokoro[0].preferred_speaker, 50,
+                "跨模型顺延到 Kokoro v1.0 时须使用其默认中文音色 50，避免把 0/3 号英文音色带入导致洋腔读中文"
+            );
+            let v11_to_v10 = ordered_local_tts_candidates("kokoro_v11", 3, |id| {
+                (id == "kokoro").then(|| PathBuf::from("/models/kokoro"))
+            });
+            assert_eq!(v11_to_v10[0].preferred_speaker, 50);
         }
     }
 
@@ -1993,6 +2001,9 @@ mod imp {
         runner_error: Option<String>,
         generation: u64,
         active_pid: Option<u32>,
+        ref_sync_gen: u64,
+        synced_ref_gen: u64,
+        ref_sync_pid: Option<u32>,
     }
 
     pub struct BuiltinVoice {
@@ -2028,12 +2039,18 @@ mod imp {
         laya_root_for_test: Mutex<Option<std::path::PathBuf>>,
         /// 运行中的本地模型辅助程序（随内置服务启停）
         helper: Mutex<Option<LocalHelper>>,
+        /// 运行中 `helper` 已加载的本地模型规格快照（配置一致时供全链连贯试跑直接复用，免去另起子进程重载模型）
+        running_local: Mutex<Option<RunningLocalSpec>>,
+        /// 全链路连贯试跑单飞互斥（拒绝并发重入）
+        chain_test_lock: Mutex<()>,
         /// 串行化本地 Jev 决策服务（OneJev / Laya）启动与模型切换，不阻塞 `stop_laya`
         jev_start_lock: Arc<Mutex<()>>,
         /// n74 本地视觉模型运行管理
         local_vision: Arc<LocalVision>,
         /// n80 Colab CLI 登录检测与后台云端 T4 会话托管
         colab_cli: Arc<Mutex<ColabCliState>>,
+        /// 串行化本机 `moss_ref.wav` 原子落盘/删除与 `ref_sync_gen` 推进（锁序恒为 `colab_ref_io -> colab_cli`）
+        colab_ref_io: Mutex<()>,
         #[cfg(test)]
         colab_cli_installed_for_test: std::sync::atomic::AtomicBool,
         /// 运行中的本地 Jev `/v1/systemone` 决策服务（OneJev `llama-server` 网关或 Laya 子进程，随本地 Jev 开关启停）
@@ -2042,6 +2059,17 @@ mod imp {
         context: Arc<crate::voice_context::host::ContextHost>,
         /// n59 当前说话角色（全部设备共用；语音与界面切换都即时生效，不重启服务）
         persona: Arc<PersonaSwitch>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RunningLocalSpec {
+        vad: Option<(&'static str, std::path::PathBuf)>,
+        asr: Option<(&'static str, std::path::PathBuf, bool, Vec<String>)>,
+        tts: Option<(
+            &'static str,
+            std::path::PathBuf,
+            moss_voice_providers::local::TtsInfo,
+        )>,
     }
 
     /// 本次启动用到的本地模型。
@@ -2066,6 +2094,7 @@ mod imp {
     }
 
     /// 按「用户指定模型优先 → 其余已安装本地 TTS 模型顺延」顺序生成候选列表。
+    /// 顺延到非用户所选的另一款模型（或音色编号落在 Kokoro 英文音色区）时，回退为该候选模型自带的默认中文音色。
     fn ordered_local_tts_candidates(
         preferred_id: &str,
         preferred_speaker: i32,
@@ -2073,25 +2102,34 @@ mod imp {
     ) -> Vec<LocalFallbackCandidate> {
         let mut candidates = Vec::new();
         let to_candidate = |spec: &'static moss_voice::local_models::ModelSpec,
-                            dir: std::path::PathBuf| {
+                            dir: std::path::PathBuf,
+                            is_preferred_model: bool| {
             let engine = if spec.engine == Engine::Matcha {
                 TtsEngine::Matcha
             } else {
                 TtsEngine::Kokoro
             };
             let default_speaker = spec.voices.map(|v| v.default).unwrap_or(0);
+            let candidate_speaker = if !is_preferred_model
+                || (spec.id == "kokoro" && !(45..=52).contains(&preferred_speaker))
+                || (spec.id == "kokoro_v11" && !(3..=102).contains(&preferred_speaker))
+            {
+                default_speaker
+            } else {
+                preferred_speaker
+            };
             LocalFallbackCandidate {
                 id: spec.id,
                 dir,
                 engine,
-                preferred_speaker,
+                preferred_speaker: candidate_speaker,
                 default_speaker,
             }
         };
         if let Some(spec) = moss_voice::local_models::spec_of(preferred_id, ModelKind::Tts)
             && let Some(dir) = path_if_installed(spec.id)
         {
-            candidates.push(to_candidate(spec, dir));
+            candidates.push(to_candidate(spec, dir, true));
         }
         for spec in moss_voice::local_models::CATALOG
             .iter()
@@ -2101,7 +2139,7 @@ mod imp {
                 continue;
             }
             if let Some(dir) = path_if_installed(spec.id) {
-                candidates.push(to_candidate(spec, dir));
+                candidates.push(to_candidate(spec, dir, false));
             }
         }
         candidates
@@ -2615,9 +2653,12 @@ mod imp {
                 #[cfg(test)]
                 laya_root_for_test: Mutex::new(None),
                 helper: Mutex::new(None),
+                running_local: Mutex::new(None),
+                chain_test_lock: Mutex::new(()),
                 jev_start_lock: Arc::new(Mutex::new(())),
                 local_vision: Arc::new(LocalVision::default()),
                 colab_cli: Arc::new(Mutex::new(ColabCliState::default())),
+                colab_ref_io: Mutex::new(()),
                 #[cfg(test)]
                 colab_cli_installed_for_test: std::sync::atomic::AtomicBool::new(true),
                 laya: Arc::new(Mutex::new(LocalLayaRunner {
@@ -3276,131 +3317,229 @@ mod imp {
                         .take(80)
                         .collect();
                     let wav_path = self.colab_ref_audio_path();
-                    if let Some(parent) = wav_path.parent() {
-                        std::fs::create_dir_all(parent).map_err(|e| internal(e.to_string()))?;
-                    }
-                    std::fs::write(&wav_path, &bytes)
-                        .map_err(|e| internal(format!("保存参考音频失败：{e}")))?;
-                    let _ = std::fs::write(
-                        self.colab_ref_audio_meta_path(),
-                        if safe_name.is_empty() {
-                            "moss_ref.wav"
-                        } else {
-                            &safe_name
-                        },
-                    );
-                    #[cfg(not(test))]
-                    if let Some(bin) = self.find_colab_cli_binary()
-                        && self.colab_cli_logged_in()
-                    {
-                        let upload_gen = self
-                            .colab_cli
+                    let (runner_gen, ref_sync_gen, can_sync_now) = {
+                        let _io_guard = self
+                            .colab_ref_io
                             .lock()
-                            .ok()
-                            .filter(|st| st.runner_state != "starting" && st.active_pid.is_none())
-                            .map(|st| st.generation);
-                        if let Some(upload_gen) = upload_gen {
-                            let slot = self.colab_cli.clone();
-                            let diag = self.diagnostics.clone();
-                            std::thread::spawn(move || {
-                                let mut upload_cmd = Self::colab_cli_command(&bin);
-                                upload_cmd.args([
-                                    "upload",
-                                    "-s",
-                                    moss_voice::colab::COLAB_CLI_SESSION_NAME,
-                                    &wav_path.to_string_lossy(),
-                                    "/content/moss_ref.wav",
-                                ]);
-                                match Self::run_tracked_colab_output(
-                                    &slot,
-                                    upload_gen,
-                                    &mut upload_cmd,
-                                ) {
-                                    Ok(Some(out)) if out.status.success() => {
-                                        if let Ok(mut st) = slot.lock()
-                                            && st.generation == upload_gen
-                                        {
-                                            st.runner_error = None;
-                                            st.runner_step =
-                                                "已将 550W 参考音频同步到云端 Colab T4（下一句合成即刻生效）"
-                                                    .into();
-                                        }
-                                    }
-                                    Ok(Some(out)) => {
-                                        let detail = format!(
-                                            "{} {}",
-                                            String::from_utf8_lossy(&out.stderr).trim(),
-                                            String::from_utf8_lossy(&out.stdout).trim()
-                                        );
-                                        let trimmed = detail.trim();
-                                        if !trimmed.contains("not found")
-                                            && !trimmed.contains("No active sessions")
-                                        {
-                                            if let Ok(mut st) = slot.lock()
-                                                && st.generation == upload_gen
-                                            {
-                                                st.runner_error = Some(format!(
-                                                    "参考音频已保存在本机，但同步到当前云端会话失败：{trimmed}"
-                                                ));
-                                            }
-                                            diag.push_from(
-                                                moss_voice_server::DiagSource::Moss,
-                                                EventRecord::warn(
-                                                    DiagCategory::Model,
-                                                    format!(
-                                                        "同步 550W 参考音频到 Colab 失败：{trimmed}"
-                                                    ),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        if let Ok(mut st) = slot.lock()
-                                            && st.generation == upload_gen
-                                        {
-                                            st.runner_error = Some(format!(
-                                                "参考音频已保存在本机，但调用 colab upload 失败：{e}"
-                                            ));
-                                        }
-                                    }
-                                }
-                            });
+                            .map_err(|_| internal("Colab 参考音频锁不可用"))?;
+                        if let Some(parent) = wav_path.parent() {
+                            std::fs::create_dir_all(parent).map_err(|e| internal(e.to_string()))?;
                         }
-                    }
-                    Ok(())
-                }
-                "clear_ref_audio" => {
-                    let _ = std::fs::remove_file(self.colab_ref_audio_path());
-                    let _ = std::fs::remove_file(self.colab_ref_audio_meta_path());
+                        let tmp_path = wav_path.with_extension("wav.tmp");
+                        std::fs::write(&tmp_path, &bytes)
+                            .map_err(|e| internal(format!("保存参考音频失败：{e}")))?;
+                        std::fs::rename(&tmp_path, &wav_path).map_err(|e| {
+                            let _ = std::fs::remove_file(&tmp_path);
+                            internal(format!("替换参考音频失败：{e}"))
+                        })?;
+                        let _ = std::fs::write(
+                            self.colab_ref_audio_meta_path(),
+                            if safe_name.is_empty() {
+                                "moss_ref.wav"
+                            } else {
+                                &safe_name
+                            },
+                        );
+                        self.bump_colab_ref_sync()
+                    };
                     #[cfg(not(test))]
-                    if let Some(bin) = self.find_colab_cli_binary()
+                    if can_sync_now
+                        && let Some(bin) = self.find_colab_cli_binary()
                         && self.colab_cli_logged_in()
                     {
                         let slot = self.colab_cli.clone();
+                        let diag = self.diagnostics.clone();
                         std::thread::spawn(move || {
-                            let out = Self::colab_cli_command(&bin)
-                                .args([
-                                    "exec",
-                                    "-s",
-                                    moss_voice::colab::COLAB_CLI_SESSION_NAME,
-                                    "--timeout",
-                                    "25",
-                                    "-c",
-                                    "import pathlib; pathlib.Path('/content/moss_ref.wav').unlink(missing_ok=True)",
-                                ])
-                                .stdin(std::process::Stdio::null())
-                                .output();
-                            if let Ok(out) = out
-                                && out.status.success()
-                                && let Ok(mut st) = slot.lock()
-                            {
-                                st.runner_step =
-                                    "已清除云端自定义参考音频，恢复内置低沉男声基准（下一句合成生效）"
-                                        .into();
+                            let mut upload_cmd = Self::colab_cli_command(&bin);
+                            upload_cmd.args([
+                                "upload",
+                                "-s",
+                                moss_voice::colab::COLAB_CLI_SESSION_NAME,
+                                &wav_path.to_string_lossy(),
+                                "/content/moss_ref.wav",
+                            ]);
+                            match Self::run_tracked_colab_ref_sync(
+                                &slot,
+                                runner_gen,
+                                ref_sync_gen,
+                                &mut upload_cmd,
+                            ) {
+                                Ok(Some(out)) if out.status.success() => {
+                                    if let Ok(mut st) = slot.lock()
+                                        && st.generation == runner_gen
+                                        && st.ref_sync_gen == ref_sync_gen
+                                    {
+                                        st.synced_ref_gen = ref_sync_gen;
+                                        st.runner_error = None;
+                                        st.runner_step =
+                                            "已将 550W 参考音频同步到云端 Colab T4（下一句合成即刻生效）"
+                                                .into();
+                                    }
+                                }
+                                Ok(Some(out)) => {
+                                    let detail = format!(
+                                        "{} {}",
+                                        String::from_utf8_lossy(&out.stderr).trim(),
+                                        String::from_utf8_lossy(&out.stdout).trim()
+                                    );
+                                    let trimmed = detail.trim();
+                                    if !trimmed.contains("not found")
+                                        && !trimmed.contains("No active sessions")
+                                    {
+                                        if let Ok(mut st) = slot.lock()
+                                            && st.generation == runner_gen
+                                            && st.ref_sync_gen == ref_sync_gen
+                                        {
+                                            st.runner_error = Some(format!(
+                                                "参考音频已保存在本机，但同步到当前云端会话失败：{trimmed}"
+                                            ));
+                                        }
+                                        diag.push_from(
+                                            moss_voice_server::DiagSource::Moss,
+                                            EventRecord::warn(
+                                                DiagCategory::Model,
+                                                format!(
+                                                    "同步 550W 参考音频到 Colab 失败：{trimmed}"
+                                                ),
+                                            ),
+                                        );
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if let Ok(mut st) = slot.lock()
+                                        && st.generation == runner_gen
+                                        && st.ref_sync_gen == ref_sync_gen
+                                    {
+                                        st.runner_error = Some(format!(
+                                            "参考音频已保存在本机，但调用 colab upload 失败：{e}"
+                                        ));
+                                    }
+                                    diag.push_from(
+                                        moss_voice_server::DiagSource::Moss,
+                                        EventRecord::warn(
+                                            DiagCategory::Model,
+                                            format!(
+                                                "调用 colab upload 同步 550W 参考音频失败：{e}"
+                                            ),
+                                        ),
+                                    );
+                                }
                             }
                         });
                     }
+                    #[cfg(test)]
+                    let _ = (runner_gen, ref_sync_gen, can_sync_now);
+                    Ok(())
+                }
+                "clear_ref_audio" => {
+                    let (runner_gen, ref_sync_gen, can_sync_now) = {
+                        let _io_guard = self
+                            .colab_ref_io
+                            .lock()
+                            .map_err(|_| internal("Colab 参考音频锁不可用"))?;
+                        for target in [
+                            self.colab_ref_audio_path(),
+                            self.colab_ref_audio_meta_path(),
+                        ] {
+                            if let Err(err) = std::fs::remove_file(&target)
+                                && err.kind() != std::io::ErrorKind::NotFound
+                            {
+                                return Err(CenterError::new(
+                                    "colab_ref_clear_failed",
+                                    500,
+                                    format!("清除本地参考音频失败：{err}"),
+                                ));
+                            }
+                        }
+                        self.bump_colab_ref_sync()
+                    };
+                    #[cfg(not(test))]
+                    if can_sync_now
+                        && let Some(bin) = self.find_colab_cli_binary()
+                        && self.colab_cli_logged_in()
+                    {
+                        let slot = self.colab_cli.clone();
+                        let diag = self.diagnostics.clone();
+                        std::thread::spawn(move || {
+                            let mut clear_cmd = Self::colab_cli_command(&bin);
+                            clear_cmd.args([
+                                "exec",
+                                "-s",
+                                moss_voice::colab::COLAB_CLI_SESSION_NAME,
+                                "--timeout",
+                                "25",
+                                "-c",
+                                "import pathlib; pathlib.Path('/content/moss_ref.wav').unlink(missing_ok=True)",
+                            ]);
+                            match Self::run_tracked_colab_ref_sync(
+                                &slot,
+                                runner_gen,
+                                ref_sync_gen,
+                                &mut clear_cmd,
+                            ) {
+                                Ok(Some(out)) if out.status.success() => {
+                                    if let Ok(mut st) = slot.lock()
+                                        && st.generation == runner_gen
+                                        && st.ref_sync_gen == ref_sync_gen
+                                    {
+                                        st.synced_ref_gen = ref_sync_gen;
+                                        st.runner_error = None;
+                                        st.runner_step =
+                                            "已清除云端自定义参考音频，恢复内置低沉男声基准（下一句合成生效）"
+                                                .into();
+                                    }
+                                }
+                                Ok(Some(out)) => {
+                                    let detail = format!(
+                                        "{} {}",
+                                        String::from_utf8_lossy(&out.stderr).trim(),
+                                        String::from_utf8_lossy(&out.stdout).trim()
+                                    );
+                                    let trimmed = detail.trim();
+                                    if !trimmed.contains("not found")
+                                        && !trimmed.contains("No active sessions")
+                                    {
+                                        if let Ok(mut st) = slot.lock()
+                                            && st.generation == runner_gen
+                                            && st.ref_sync_gen == ref_sync_gen
+                                        {
+                                            st.runner_error = Some(format!(
+                                                "本地参考音频已清除，但清除当前云端会话副本失败：{trimmed}"
+                                            ));
+                                        }
+                                        diag.push_from(
+                                            moss_voice_server::DiagSource::Moss,
+                                            EventRecord::warn(
+                                                DiagCategory::Model,
+                                                format!("清除 Colab 550W 参考音频失败：{trimmed}"),
+                                            ),
+                                        );
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if let Ok(mut st) = slot.lock()
+                                        && st.generation == runner_gen
+                                        && st.ref_sync_gen == ref_sync_gen
+                                    {
+                                        st.runner_error = Some(format!(
+                                            "本地参考音频已清除，但调用 colab exec 失败：{e}"
+                                        ));
+                                    }
+                                    diag.push_from(
+                                        moss_voice_server::DiagSource::Moss,
+                                        EventRecord::warn(
+                                            DiagCategory::Model,
+                                            format!("调用 colab exec 清除 550W 参考音频失败：{e}"),
+                                        ),
+                                    );
+                                }
+                            }
+                        });
+                    }
+                    #[cfg(test)]
+                    let _ = (runner_gen, ref_sync_gen, can_sync_now);
                     Ok(())
                 }
                 "login_start" => {
@@ -3611,6 +3750,7 @@ mod imp {
                                 if let Ok(mut st) = self.colab_cli.lock()
                                     && st.generation == stop_gen
                                 {
+                                    st.synced_ref_gen = st.ref_sync_gen;
                                     st.runner_state = "idle".into();
                                     st.runner_step = "云端 Colab T4 会话已释放".into();
                                     st.runner_error = None;
@@ -3675,9 +3815,70 @@ mod imp {
             out.map(Some).map_err(|e| e.to_string())
         }
 
+        /// 推进参考音频云端同步世代并终止旧的在途同步子进程，返回 `(runner_gen, ref_sync_gen, can_sync_now)`。
+        fn bump_colab_ref_sync(&self) -> (u64, u64, bool) {
+            let (runner_gen, ref_sync_gen, can_sync_now, pid_to_kill) =
+                if let Ok(mut st) = self.colab_cli.lock() {
+                    st.ref_sync_gen = st.ref_sync_gen.wrapping_add(1);
+                    (
+                        st.generation,
+                        st.ref_sync_gen,
+                        st.runner_state != "starting",
+                        st.ref_sync_pid.take(),
+                    )
+                } else {
+                    (0, 0, false, None)
+                };
+            if let Some(pid) = pid_to_kill {
+                Self::kill_colab_pid(pid);
+            }
+            (runner_gen, ref_sync_gen, can_sync_now)
+        }
+
+        #[cfg_attr(test, allow(dead_code))]
+        fn run_tracked_colab_ref_sync(
+            slot: &Mutex<ColabCliState>,
+            runner_gen: u64,
+            ref_sync_gen: u64,
+            cmd: &mut std::process::Command,
+        ) -> Result<Option<std::process::Output>, String> {
+            let mut child = cmd
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            let pid = child.id();
+            if let Ok(mut st) = slot.lock() {
+                if st.generation != runner_gen || st.ref_sync_gen != ref_sync_gen {
+                    drop(st);
+                    Self::kill_colab_pid(pid);
+                    let _ = child.wait();
+                    return Ok(None);
+                }
+                st.ref_sync_pid = Some(pid);
+            }
+            let out = child.wait_with_output();
+            let still_current = if let Ok(mut st) = slot.lock() {
+                if st.ref_sync_pid == Some(pid) {
+                    st.ref_sync_pid = None;
+                }
+                st.generation == runner_gen && st.ref_sync_gen == ref_sync_gen
+            } else {
+                false
+            };
+            if !still_current {
+                return Ok(None);
+            }
+            out.map(Some).map_err(|e| e.to_string())
+        }
+
         fn cancel_colab_cli_runner(&self, step_note: Option<&str>) {
-            let pid_to_kill = if let Ok(mut st) = self.colab_cli.lock() {
+            let (pid_to_kill, ref_pid_to_kill) = if let Ok(mut st) = self.colab_cli.lock() {
                 st.generation = st.generation.wrapping_add(1);
+                if st.ref_sync_pid.is_some() {
+                    st.ref_sync_gen = st.ref_sync_gen.wrapping_add(1);
+                }
                 if st.runner_state == "starting" || step_note.is_some() {
                     st.runner_state = "idle".into();
                 }
@@ -3687,12 +3888,26 @@ mod imp {
                 } else if st.runner_step.contains("正在") {
                     st.runner_step = "已取消自动拉起云端 Colab T4".into();
                 }
-                st.active_pid.take()
+                (st.active_pid.take(), st.ref_sync_pid.take())
             } else {
-                None
+                (None, None)
             };
             if let Some(pid) = pid_to_kill {
                 Self::kill_colab_pid(pid);
+            }
+            if let Some(pid) = ref_pid_to_kill {
+                Self::kill_colab_pid(pid);
+            }
+        }
+
+        fn abort_colab_starting(slot: &Mutex<ColabCliState>, generation: u64, reason: String) {
+            if let Ok(mut st) = slot.lock()
+                && st.generation == generation
+                && st.runner_state == "starting"
+            {
+                st.runner_state = "error".into();
+                st.runner_step = reason.clone();
+                st.runner_error = Some(reason);
             }
         }
 
@@ -3701,7 +3916,7 @@ mod imp {
                 return;
             }
             #[cfg_attr(test, allow(unused_variables))]
-            let generation = {
+            let (generation, active_pid_to_kill, ref_pid_to_kill) = {
                 let Ok(mut st) = self.colab_cli.lock() else {
                     return;
                 };
@@ -3712,17 +3927,33 @@ mod imp {
                 st.runner_state = "starting".into();
                 st.runner_step = "正在通过 Colab CLI 自动拉起云端 T4...".into();
                 st.runner_error = None;
-                st.generation
+                (st.generation, st.active_pid.take(), st.ref_sync_pid.take())
             };
+            if let Some(pid) = active_pid_to_kill {
+                Self::kill_colab_pid(pid);
+            }
+            if let Some(pid) = ref_pid_to_kill {
+                Self::kill_colab_pid(pid);
+            }
             #[cfg(not(test))]
             {
                 let Some(bin) = self.find_colab_cli_binary() else {
+                    Self::abort_colab_starting(
+                        &self.colab_cli,
+                        generation,
+                        "未找到 Colab CLI 可执行文件，请先安装 google-colab-cli".into(),
+                    );
                     return;
                 };
                 let Some(voice) = self.self_weak.upgrade() else {
+                    Self::abort_colab_starting(
+                        &self.colab_cli,
+                        generation,
+                        "内置语音服务尚未完成初始化".into(),
+                    );
                     return;
                 };
-                std::thread::Builder::new()
+                if let Err(err) = std::thread::Builder::new()
                     .name("moss-colab-cli-runner".into())
                     .spawn(move || {
                         let is_current = |slot: &Mutex<ColabCliState>| -> bool {
@@ -3753,6 +3984,173 @@ mod imp {
                             );
                         };
 
+                        let session_name = moss_voice::colab::COLAB_CLI_SESSION_NAME;
+                        let ref_audio = voice.colab_ref_audio_path();
+                        let reconcile_ref_audio = |was_uploaded: &mut bool,
+                                                   unlink_only: bool,
+                                                   final_running_step: Option<&str>|
+                         -> Option<String> {
+                            let mut attempted_gen: Option<u64> = None;
+                            let mut last_sync_warn: Option<String> = None;
+                            loop {
+                                let (pending_gen, disk_has_ref) = {
+                                    let Ok(_io_guard) = voice.colab_ref_io.lock() else {
+                                        return last_sync_warn;
+                                    };
+                                    let has_ref = ref_audio.is_file();
+                                    let Ok(mut st) = voice.colab_cli.lock() else {
+                                        return last_sync_warn;
+                                    };
+                                    if st.generation != generation {
+                                        return last_sync_warn;
+                                    }
+                                    if st.ref_sync_gen == st.synced_ref_gen
+                                        || attempted_gen == Some(st.ref_sync_gen)
+                                    {
+                                        if let Some(step) = final_running_step {
+                                            st.runner_state = "running".into();
+                                            st.runner_step = step.into();
+                                            st.runner_error = last_sync_warn.clone();
+                                        }
+                                        return last_sync_warn;
+                                    }
+                                    (st.ref_sync_gen, has_ref)
+                                };
+                                attempted_gen = Some(pending_gen);
+                                if !unlink_only && disk_has_ref {
+                                    let mut cmd = Self::colab_cli_command(&bin);
+                                    cmd.args([
+                                        "upload",
+                                        "-s",
+                                        session_name,
+                                        &ref_audio.to_string_lossy(),
+                                        "/content/moss_ref.wav",
+                                    ]);
+                                    match Self::run_tracked_colab_output(
+                                        &voice.colab_cli,
+                                        generation,
+                                        &mut cmd,
+                                    ) {
+                                        Ok(Some(out)) if out.status.success() => {
+                                            *was_uploaded = true;
+                                            last_sync_warn = None;
+                                            if let Ok(mut st) = voice.colab_cli.lock()
+                                                && st.generation == generation
+                                            {
+                                                st.synced_ref_gen = pending_gen;
+                                            }
+                                        }
+                                        Ok(Some(out)) => {
+                                            let detail = format!(
+                                                "{} {}",
+                                                String::from_utf8_lossy(&out.stderr).trim(),
+                                                String::from_utf8_lossy(&out.stdout).trim()
+                                            );
+                                            let trimmed = detail.trim();
+                                            let warn_msg = format!(
+                                                "参考音频已保存在本机，但同步到当前云端会话失败：{trimmed}"
+                                            );
+                                            last_sync_warn = Some(warn_msg);
+                                            voice.diagnostics.push_from(
+                                                moss_voice_server::DiagSource::Moss,
+                                                EventRecord::warn(
+                                                    DiagCategory::Model,
+                                                    format!(
+                                                        "同步 550W 参考音频到 Colab 失败：{trimmed}"
+                                                    ),
+                                                ),
+                                            );
+                                        }
+                                        Ok(None) => return last_sync_warn,
+                                        Err(e) => {
+                                            let warn_msg = format!(
+                                                "参考音频已保存在本机，但调用 colab upload 失败：{e}"
+                                            );
+                                            last_sync_warn = Some(warn_msg);
+                                            voice.diagnostics.push_from(
+                                                moss_voice_server::DiagSource::Moss,
+                                                EventRecord::warn(
+                                                    DiagCategory::Model,
+                                                    format!(
+                                                        "调用 colab upload 同步 550W 参考音频失败：{e}"
+                                                    ),
+                                                ),
+                                            );
+                                        }
+                                    }
+                                } else if !disk_has_ref && (*was_uploaded || !unlink_only) {
+                                    let mut cmd = Self::colab_cli_command(&bin);
+                                    cmd.args([
+                                        "exec",
+                                        "-s",
+                                        session_name,
+                                        "--timeout",
+                                        "25",
+                                        "-c",
+                                        "import pathlib; pathlib.Path('/content/moss_ref.wav').unlink(missing_ok=True)",
+                                    ]);
+                                    match Self::run_tracked_colab_output(
+                                        &voice.colab_cli,
+                                        generation,
+                                        &mut cmd,
+                                    ) {
+                                        Ok(Some(out)) if out.status.success() => {
+                                            *was_uploaded = false;
+                                            last_sync_warn = None;
+                                            if let Ok(mut st) = voice.colab_cli.lock()
+                                                && st.generation == generation
+                                            {
+                                                st.synced_ref_gen = pending_gen;
+                                            }
+                                        }
+                                        Ok(Some(out)) => {
+                                            let detail = format!(
+                                                "{} {}",
+                                                String::from_utf8_lossy(&out.stderr).trim(),
+                                                String::from_utf8_lossy(&out.stdout).trim()
+                                            );
+                                            let trimmed = detail.trim();
+                                            if trimmed.contains("not found")
+                                                || trimmed.contains("No active sessions")
+                                            {
+                                                *was_uploaded = false;
+                                            } else {
+                                                let warn_msg = format!(
+                                                    "本地参考音频已清除，但清除当前云端会话副本失败：{trimmed}"
+                                                );
+                                                last_sync_warn = Some(warn_msg);
+                                                voice.diagnostics.push_from(
+                                                    moss_voice_server::DiagSource::Moss,
+                                                    EventRecord::warn(
+                                                        DiagCategory::Model,
+                                                        format!(
+                                                            "清除 Colab 550W 参考音频失败：{trimmed}"
+                                                        ),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        Ok(None) => return last_sync_warn,
+                                        Err(e) => {
+                                            let warn_msg = format!(
+                                                "本地参考音频已清除，但调用 colab exec 失败：{e}"
+                                            );
+                                            last_sync_warn = Some(warn_msg);
+                                            voice.diagnostics.push_from(
+                                                moss_voice_server::DiagSource::Moss,
+                                                EventRecord::warn(
+                                                    DiagCategory::Model,
+                                                    format!(
+                                                        "调用 colab exec 清除 550W 参考音频失败：{e}"
+                                                    ),
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        };
+
                         // 1. 若已有保存的隧道地址且 /healthz 存活，直接复用
                         let current_settings = voice.settings();
                         if let Ok(Some((active_cfg, _))) = voice.active_colab(&current_settings) {
@@ -3767,15 +4165,12 @@ mod imp {
                                 .and_then(|c| c.get(&health_url).send().ok())
                                 .is_some_and(|r| r.status().is_success());
                             if alive {
-                                if let Ok(mut st) = voice.colab_cli.lock()
-                                    && st.generation == generation
-                                {
-                                    st.runner_state = "running".into();
-                                    st.runner_step =
-                                        "云端 Colab T4 隧道在线并已接管（Qwen3-VL-8B + 550W 克隆）"
-                                            .into();
-                                    st.runner_error = None;
-                                }
+                                let mut reused_uploaded = false;
+                                let _ = reconcile_ref_audio(
+                                    &mut reused_uploaded,
+                                    false,
+                                    Some("云端 Colab T4 隧道在线并已接管（Qwen3-VL-8B + 550W 克隆）"),
+                                );
                                 return;
                             }
                         }
@@ -3783,7 +4178,6 @@ mod imp {
                         if !is_current(&voice.colab_cli) {
                             return;
                         }
-                        let session_name = moss_voice::colab::COLAB_CLI_SESSION_NAME;
                         set_step(
                             &voice.colab_cli,
                             &format!("正在检查 Colab 云端会话 ({session_name})..."),
@@ -3848,8 +4242,19 @@ mod imp {
                         if !is_current(&voice.colab_cli) {
                             return;
                         }
-                        let ref_audio = voice.colab_ref_audio_path();
-                        if ref_audio.is_file() {
+                        let (upload_ref_gen, initial_disk_has_ref) = {
+                            let _io_guard = voice.colab_ref_io.lock().ok();
+                            let has_ref = ref_audio.is_file();
+                            let cur_gen = voice
+                                .colab_cli
+                                .lock()
+                                .ok()
+                                .map(|st| st.ref_sync_gen)
+                                .unwrap_or(0);
+                            (cur_gen, has_ref)
+                        };
+                        let mut uploaded_ref = false;
+                        if initial_disk_has_ref {
                             set_step(
                                 &voice.colab_cli,
                                 "正在将本机保存的 550W 参考音频同步到云端 T4...",
@@ -3867,7 +4272,14 @@ mod imp {
                                 generation,
                                 &mut upload_cmd,
                             ) {
-                                Ok(Some(out)) if out.status.success() => {}
+                                Ok(Some(out)) if out.status.success() => {
+                                    uploaded_ref = true;
+                                    if let Ok(mut st) = voice.colab_cli.lock()
+                                        && st.generation == generation
+                                    {
+                                        st.synced_ref_gen = upload_ref_gen;
+                                    }
+                                }
                                 Ok(Some(out)) => {
                                     let detail = format!(
                                         "{} {}",
@@ -3890,6 +4302,20 @@ mod imp {
                                 }
                             }
                         }
+                        let _ = reconcile_ref_audio(&mut uploaded_ref, false, None);
+
+                        let fail_after_upload = |was_uploaded: &mut bool, msg: String| {
+                            let full_msg = if *was_uploaded {
+                                if let Some(warn) = reconcile_ref_audio(was_uploaded, true, None) {
+                                    format!("{msg}（另：{warn}）")
+                                } else {
+                                    msg
+                                }
+                            } else {
+                                msg
+                            };
+                            fail(&voice.colab_cli, full_msg);
+                        };
 
                         if !is_current(&voice.colab_cli) {
                             return;
@@ -3903,7 +4329,10 @@ mod imp {
                             &bootstrap_path,
                             moss_voice::colab::cli_bootstrap_script(),
                         ) {
-                            fail(&voice.colab_cli, format!("写入启动脚本失败：{e}"));
+                            fail_after_upload(
+                                &mut uploaded_ref,
+                                format!("写入启动脚本失败：{e}"),
+                            );
                             return;
                         }
 
@@ -3940,7 +4369,10 @@ mod imp {
                             {
                                 Ok(c) => c,
                                 Err(e) => {
-                                    fail(&voice.colab_cli, format!("调用 colab exec 失败：{e}"));
+                                    fail_after_upload(
+                                        &mut uploaded_ref,
+                                        format!("调用 colab exec 失败：{e}"),
+                                    );
                                     return;
                                 }
                             };
@@ -4036,7 +4468,10 @@ mod imp {
 
                         if let Some((url, token)) = creds_found {
                             let Ok(db) = voice.host.db.lock() else {
-                                fail(&voice.colab_cli, "数据库繁忙，无法保存 Colab 隧道凭据".into());
+                                fail_after_upload(
+                                    &mut uploaded_ref,
+                                    "数据库繁忙，无法保存 Colab 隧道凭据".into(),
+                                );
                                 return;
                             };
                             if !is_current(&voice.colab_cli) {
@@ -4059,8 +4494,8 @@ mod imp {
                                 })
                             }) {
                                 drop(db);
-                                fail(
-                                    &voice.colab_cli,
+                                fail_after_upload(
+                                    &mut uploaded_ref,
                                     format!("保存 Colab 隧道凭据失败：{}", err.message),
                                 );
                                 return;
@@ -4071,34 +4506,36 @@ mod imp {
                             }
                             voice.sync_local_vision(true);
                             if let Err(err) = voice.restart_if_running() {
-                                fail(
-                                    &voice.colab_cli,
+                                fail_after_upload(
+                                    &mut uploaded_ref,
                                     format!("已写入 Colab 隧道但重启内置语音服务失败：{}", err.message),
                                 );
                                 return;
                             }
-                            if let Ok(mut st) = voice.colab_cli.lock()
-                                && st.generation == generation
-                            {
-                                st.runner_state = "running".into();
-                                st.runner_step =
-                                    "云端 Colab T4 已就绪并自动接管（Qwen3-VL-8B + 550W 克隆）"
-                                        .into();
-                                st.runner_error = None;
-                            }
+                            let _ = reconcile_ref_audio(
+                                &mut uploaded_ref,
+                                false,
+                                Some("云端 Colab T4 已就绪并自动接管（Qwen3-VL-8B + 550W 克隆）"),
+                            );
                         } else {
                             let last_line = last_combined
                                 .lines()
                                 .rev()
                                 .find(|l| !l.trim().is_empty())
                                 .unwrap_or("未返回隧道地址");
-                            fail(
-                                &voice.colab_cli,
+                            fail_after_upload(
+                                &mut uploaded_ref,
                                 format!("云端脚本未返回有效隧道（{last_exit_note}）：{last_line}"),
                             );
                         }
                     })
-                    .ok();
+                {
+                    Self::abort_colab_starting(
+                        &self.colab_cli,
+                        generation,
+                        format!("无法启动 Colab 后台线程：{err}"),
+                    );
+                }
             }
         }
 
@@ -4144,7 +4581,7 @@ mod imp {
             &self,
             local: &BuiltinLocal,
             colab_tts_override: bool,
-        ) -> Result<(LocalParts, Option<LocalHelper>), CenterError> {
+        ) -> Result<(LocalParts, Option<(LocalHelper, RunningLocalSpec)>), CenterError> {
             let pick = |kind| {
                 local.selected(kind).and_then(|spec| {
                     self.models
@@ -4174,6 +4611,11 @@ mod imp {
             let helper =
                 LocalHelper::spawn(&exe).map_err(|error| start_error(error.to_string()))?;
             let mut parts = LocalParts::default();
+            let mut running_spec = RunningLocalSpec {
+                vad: None,
+                asr: None,
+                tts: None,
+            };
             if let Some((spec, model)) = vad {
                 let engine = if spec.engine == Engine::TenVad {
                     VadEngine::Ten
@@ -4185,6 +4627,7 @@ mod imp {
                     .map_err(|error| {
                         start_error(format!("本地判停（{}）：{}", spec.label, error))
                     })?;
+                running_spec.vad = Some((spec.id, model));
                 parts.vad = Some(Arc::new(LocalVadFactory {
                     helper: helper.clone(),
                 }));
@@ -4195,18 +4638,20 @@ mod imp {
                 } else {
                     AsrEngine::SenseVoice
                 };
+                let hotwords = self.hotwords(local);
                 helper
                     .load_asr_with_options(
                         &dir,
                         engine,
                         moss_voice_providers::local::AsrDecodeOptions {
                             beam_search: local.asr_beam_search,
-                            hotwords: self.hotwords(local),
+                            hotwords: hotwords.clone(),
                         },
                     )
                     .map_err(|error| {
                         start_error(format!("本地识别（{}）：{}", spec.label, error))
                     })?;
+                running_spec.asr = Some((spec.id, dir, local.asr_beam_search, hotwords));
                 parts.asr = Some(LocalAsr {
                     helper: helper.clone(),
                 });
@@ -4225,6 +4670,7 @@ mod imp {
                 let info = helper.load_tts(&dir, engine).map_err(|error| {
                     start_error(format!("本地合成（{}）：{}", spec.label, error))
                 })?;
+                running_spec.tts = Some((spec.id, dir, info));
                 // 单音色模型忽略音色编号
                 let speaker = if info.speakers > 1 {
                     if local.tts_speaker < 0 || local.tts_speaker as u32 >= info.speakers {
@@ -4247,7 +4693,130 @@ mod imp {
                 parts.fallback_tts =
                     self.local_fallback_tts(local, Some(helper.clone()), colab_tts_override);
             }
-            Ok((parts, Some(helper)))
+            Ok((parts, Some((helper, running_spec))))
+        }
+
+        /// 全链连贯试跑：当内置服务已运行且已加载同款本地模型时直接复用现有 `LocalHelper`（零重载），否则按需启动临时子进程。
+        fn local_parts_for_chain_test(
+            &self,
+            local: &BuiltinLocal,
+            colab_tts_override: bool,
+        ) -> Result<(LocalParts, Option<LocalHelper>), CenterError> {
+            let pick = |kind| {
+                local.selected(kind).and_then(|spec| {
+                    self.models
+                        .path_if_installed(spec.id)
+                        .map(|path| (spec, path))
+                })
+            };
+            let (vad, asr, tts) = (
+                pick(ModelKind::Vad),
+                pick(ModelKind::Asr),
+                if colab_tts_override {
+                    None
+                } else {
+                    pick(ModelKind::Tts)
+                },
+            );
+            if vad.is_none() && asr.is_none() && tts.is_none() {
+                return Ok((
+                    LocalParts {
+                        fallback_tts: self.local_fallback_tts(local, None, colab_tts_override),
+                        ..LocalParts::default()
+                    },
+                    None,
+                ));
+            }
+            let hotwords = self.hotwords(local);
+            let reusable = {
+                let helper_guard = self.helper.lock().ok();
+                let spec_guard = self.running_local.lock().ok();
+                if let (Some(Some(helper)), Some(Some(running_spec))) =
+                    (helper_guard.as_deref(), spec_guard.as_deref())
+                    && helper.is_alive()
+                {
+                    let vad_matches = match &vad {
+                        Some((spec, path)) => {
+                            running_spec.vad.as_ref() == Some(&(spec.id, path.clone()))
+                        }
+                        None => true,
+                    };
+                    let asr_matches = match &asr {
+                        Some((spec, dir)) => {
+                            running_spec.asr.as_ref()
+                                == Some(&(
+                                    spec.id,
+                                    dir.clone(),
+                                    local.asr_beam_search,
+                                    hotwords.clone(),
+                                ))
+                        }
+                        None => true,
+                    };
+                    let tts_info = match &tts {
+                        Some((spec, dir)) => running_spec
+                            .tts
+                            .as_ref()
+                            .filter(|(id, loaded_dir, _)| *id == spec.id && loaded_dir == dir)
+                            .map(|(_, _, info)| Some(*info)),
+                        None => Some(None),
+                    };
+                    if vad_matches
+                        && asr_matches
+                        && let Some(tts_info) = tts_info
+                    {
+                        Some((helper.clone(), tts_info))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some((helper, tts_info)) = reusable {
+                let mut parts = LocalParts::default();
+                if vad.is_some() {
+                    parts.vad = Some(Arc::new(LocalVadFactory {
+                        helper: helper.clone(),
+                    }));
+                }
+                if let Some((spec, _)) = asr {
+                    parts.asr = Some(LocalAsr {
+                        helper: helper.clone(),
+                    });
+                    if spec.engine == Engine::StreamingTransducer {
+                        parts.streaming_asr = Some(Arc::new(LocalStreamingAsr {
+                            helper: helper.clone(),
+                        }));
+                    }
+                }
+                if let (Some((spec, _)), Some(info)) = (tts, tts_info) {
+                    let speaker = if info.speakers > 1 {
+                        if local.tts_speaker < 0 || local.tts_speaker as u32 >= info.speakers {
+                            return Err(start_error(format!(
+                                "{} 的音色编号须在 0 ~ {} 之间",
+                                spec.label,
+                                info.speakers - 1
+                            )));
+                        }
+                        local.tts_speaker
+                    } else {
+                        0
+                    };
+                    parts.tts = Some(LocalTts {
+                        helper: helper.clone(),
+                        speaker,
+                        speed: local.tts_speed,
+                    });
+                } else {
+                    // 兜底合成不向常驻运行中的 helper 发 LoadTts（避免覆盖线上兜底槽位或永久滞留 ONNX 会话）；
+                    // 主云端 TTS 可用时惰性不拉起任何进程，真触发兜底时单独拉起临时 helper 并在试跑结束后自动回收。
+                    parts.fallback_tts = self.local_fallback_tts(local, None, colab_tts_override);
+                }
+                return Ok((parts, None));
+            }
+            let (parts, spawned) = self.local_parts(local, colab_tts_override)?;
+            Ok((parts, spawned.map(|(h, _)| h)))
         }
 
         /// 三个分区都可用时构造对话（本地识别 / 合成优先于云端；开启 Colab T4 联动时临时接管大模型与合成）；否则返回 `None`（回声模式）。
@@ -4770,7 +5339,7 @@ mod imp {
             if !self.running() {
                 let settings = self.settings();
                 let colab = self.active_colab(&settings)?;
-                let (mut local, helper) =
+                let (mut local, helper_and_spec) =
                     self.local_parts(&settings.builtin_local, colab.is_some())?;
                 let mut conversation = self.conversation(
                     &settings.builtin_models,
@@ -4846,8 +5415,15 @@ mod imp {
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     *guard = Some(server);
                 }
+                let (helper, running_spec) = match helper_and_spec {
+                    Some((h, spec)) => (Some(h), Some(spec)),
+                    None => (None, None),
+                };
                 if let Ok(mut slot) = self.helper.lock() {
                     *slot = helper;
+                }
+                if let Ok(mut slot) = self.running_local.lock() {
+                    *slot = running_spec;
                 }
                 if let Some(warning) = &next_music_warning {
                     self.diagnostics.push_from(
@@ -4907,6 +5483,9 @@ mod imp {
                 laser_host::set_voice_pulse(None, 0);
             }
             // 结束辅助程序（最后一个句柄丢弃时结束进程）
+            if let Ok(mut slot) = self.running_local.lock() {
+                *slot = None;
+            }
             if let Ok(mut helper) = self.helper.lock() {
                 *helper = None;
             }
@@ -5400,7 +5979,17 @@ mod imp {
                                 match *key {
                                     "vad_model" => local.vad_model = id.clone(),
                                     "asr_model" => local.asr_model = id.clone(),
-                                    "tts_model" => local.tts_model = id.clone(),
+                                    "tts_model" => {
+                                        if local.tts_model != *id
+                                            && tts_speaker_patch.is_none()
+                                            && let Some(spec) =
+                                                local_models::spec_of(id, ModelKind::Tts)
+                                        {
+                                            local.tts_speaker =
+                                                spec.voices.map(|v| v.default).unwrap_or(0);
+                                        }
+                                        local.tts_model = id.clone();
+                                    }
                                     _ => {}
                                 }
                             }
@@ -5941,6 +6530,14 @@ mod imp {
             use base64::Engine as _;
             use moss_voice_providers::{ChatMessage, Llm as _};
 
+            let Ok(_single_flight) = self.chain_test_lock.try_lock() else {
+                return Err(CenterError::new(
+                    "chain_test_busy",
+                    409,
+                    "全链路连贯试跑正在进行中，请等待当前试跑完成",
+                ));
+            };
+
             const STEP_KEYS: [&str; 5] = ["vad", "asr", "jev", "llm", "tts"];
             const DEFAULT_PROMPT: &str = "你好，汇报一下当前待命状态。";
             const MAX_AUDIO_BASE64_LEN: usize = 6 * 1024 * 1024;
@@ -5999,9 +6596,9 @@ mod imp {
             let models = &settings.builtin_models;
             let colab = self.active_colab(&settings)?;
 
-            // 按当前选用开关真实启动隔离的 LocalHelper 并加载已安装的本地模型；函数结束即自动回收子进程
+            // 内置服务已运行且加载了同款本地模型时直接复用，否则按需启动隔离的临时 LocalHelper（结束即自动回收）
             let (mut local_parts, _helper_guard) = match self
-                .local_parts(experience, colab.is_some())
+                .local_parts_for_chain_test(experience, colab.is_some())
             {
                 Ok(pair) => pair,
                 Err(err) => {
@@ -12466,6 +13063,54 @@ mod imp {
                 assert_eq!(out["steps"][step]["ok"], true, "step {step} failed: {out}");
             }
             assert_eq!(out["steps"]["jev"]["skipped"], true);
+
+            // 3. 单飞互斥锁生效：占住 chain_test_lock 期间再次调用立即返回 409 chain_test_busy
+            {
+                let _held = builtin.chain_test_lock.lock().unwrap();
+                let busy_err = builtin.chain_test(&serde_json::json!({})).unwrap_err();
+                assert_eq!(busy_err.code, "chain_test_busy");
+                assert_eq!(busy_err.status, 409);
+            }
+
+            // 4. Colab CLI 边角回归：abort_colab_starting 将挂起的 starting 复位为 error，clear_ref_audio 不静默吞掉非 NotFound 错误
+            {
+                {
+                    let mut st = builtin.colab_cli.lock().unwrap();
+                    st.generation = 7;
+                    st.runner_state = "starting".into();
+                    st.runner_step = "正在通过 Colab CLI 自动拉起云端 T4...".into();
+                }
+                BuiltinVoice::abort_colab_starting(
+                    &builtin.colab_cli,
+                    7,
+                    "未找到 Colab CLI 可执行文件".into(),
+                );
+                let st = builtin.colab_cli.lock().unwrap();
+                assert_eq!(st.runner_state, "error");
+                assert!(
+                    st.runner_error
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("Colab CLI")
+                );
+            }
+            {
+                let ref_wav = builtin.colab_ref_audio_path();
+                std::fs::create_dir_all(&ref_wav).unwrap();
+                let gen_before = builtin.colab_cli.lock().unwrap().ref_sync_gen;
+                let err = builtin
+                    .handle_colab_cli_action(&serde_json::json!({ "action": "clear_ref_audio" }))
+                    .unwrap_err();
+                assert_eq!(err.code, "colab_ref_clear_failed");
+                assert_eq!(builtin.colab_cli.lock().unwrap().ref_sync_gen, gen_before);
+                std::fs::remove_dir_all(&ref_wav).unwrap();
+                builtin
+                    .handle_colab_cli_action(&serde_json::json!({ "action": "clear_ref_audio" }))
+                    .unwrap();
+                let st = builtin.colab_cli.lock().unwrap();
+                assert_eq!(st.ref_sync_gen, gen_before + 1);
+                assert_eq!(st.synced_ref_gen, 0);
+            }
         }
     }
 

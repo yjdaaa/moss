@@ -627,14 +627,66 @@ pub(crate) mod host {
     ) -> Option<(String, Option<String>)> {
         let row = |sql: &str| -> Option<(String, Option<String>)> {
             db.connection
-                .query_row(sql, [id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .query_row(sql, [id], |r| {
+                    let status: String = r.get(0)?;
+                    let phase: Option<String> = r.get(1)?;
+                    let detail: Option<String> = r.get(2)?;
+                    let running: Option<i64> = r.get(3).ok().flatten();
+                    let effective_phase = phase.or_else(|| {
+                        let interrupted = detail
+                            .as_deref()
+                            .is_some_and(|d| d.contains("重启中断") || d.contains("退出中断"))
+                            || running == Some(1);
+                        (status == "failed" && interrupted).then(|| "result_unknown".to_owned())
+                    });
+                    Ok((status, effective_phase))
+                })
                 .ok()
         };
-        row("SELECT status, json_extract(payload,'$.send_result.phase') FROM workflows WHERE workflow_id=?1")
-            .or_else(|| {
-                row("SELECT status, json_extract(payload,'$.send_result.phase') FROM calibrations WHERE calibration_id=?1")
-            })
-            .or_else(|| row("SELECT status, NULL FROM jobs WHERE job_id=?1"))
+        row(
+            "SELECT status, json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.detail'), json_extract(payload,'$.send_result.running') FROM workflows WHERE workflow_id=?1",
+        )
+        .or_else(|| {
+            row(
+                "SELECT status, json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.detail'), json_extract(payload,'$.send_result.running') FROM calibrations WHERE calibration_id=?1",
+            )
+        })
+        .or_else(|| {
+            row(
+                "SELECT status, COALESCE(json_extract(payload,'$.send_result.phase'), json_extract(payload,'$.result.phase')), COALESCE(json_extract(payload,'$.detail'), json_extract(payload,'$.result.detail')), NULL FROM jobs WHERE job_id=?1",
+            )
+        })
+    }
+
+    pub(crate) fn map_ref_state(kind: RefKind, status: &str, phase: Option<&str>) -> RefState {
+        match (kind, status, phase) {
+            (RefKind::Approval, "pending" | "approved", _) => RefState::InProgress,
+            (RefKind::Approval, "expired" | "rejected" | "cancelled", _) => RefState::Revoked,
+            (RefKind::Approval, "executed", Some("running")) => RefState::InProgress,
+            (RefKind::Approval, "executed" | "failed", Some("unknown" | "result_unknown"))
+            | (RefKind::Approval, "failed", Some("running")) => RefState::ResultUnknown,
+            (RefKind::Approval, "executed" | "failed", Some("cancelled")) => RefState::Stopped,
+            (RefKind::Approval, "executed" | "failed", Some("failed")) => RefState::Failed,
+            (RefKind::Approval, "executed", _) => RefState::Done,
+            (_, "completed", _) => RefState::Done,
+            (
+                RefKind::Job,
+                "failed",
+                Some(
+                    "unknown" | "result_unknown" | "streaming" | "awaiting_completion" | "running",
+                ),
+            ) => RefState::ResultUnknown,
+            (_, "failed" | "timed_out", _) => RefState::Failed,
+            (_, "cancelled", _) => RefState::Stopped,
+            (_, "result_unknown", _) => RefState::ResultUnknown,
+            (
+                _,
+                "running" | "pending" | "queued" | "sending" | "processing" | "preview_ready"
+                | "prepared",
+                _,
+            ) => RefState::InProgress,
+            _ => RefState::Unverifiable,
+        }
     }
 
     impl ResumeFacts for DbResumeFacts {
@@ -658,25 +710,7 @@ pub(crate) mod host {
             let Some((status, phase)) = found else {
                 return RefState::Missing;
             };
-            match (reference.kind, status.as_str(), phase.as_deref()) {
-                (RefKind::Approval, "pending" | "approved", _) => RefState::InProgress,
-                (RefKind::Approval, "expired" | "rejected" | "cancelled", _) => RefState::Revoked,
-                (RefKind::Approval, "executed", Some("unknown")) => RefState::ResultUnknown,
-                (RefKind::Approval, "executed", Some("failed")) => RefState::Failed,
-                (RefKind::Approval, "executed", Some("cancelled")) => RefState::Stopped,
-                (RefKind::Approval, "executed", _) => RefState::Done,
-                (_, "completed", _) => RefState::Done,
-                (_, "failed" | "timed_out", _) => RefState::Failed,
-                (_, "cancelled", _) => RefState::Stopped,
-                (_, "result_unknown", _) => RefState::ResultUnknown,
-                (
-                    _,
-                    "running" | "pending" | "queued" | "sending" | "processing" | "preview_ready"
-                    | "prepared",
-                    _,
-                ) => RefState::InProgress,
-                _ => RefState::Unverifiable,
-            }
+            map_ref_state(reference.kind, status.as_str(), phase.as_deref())
         }
     }
 
@@ -1729,5 +1763,63 @@ mod job_facts_tests {
             Some(("completed".to_owned(), None))
         );
         assert_eq!(super::host::query_job_ref_state(&db, "missing"), None);
+
+        // 退出中断与重启恢复后的在途发送任务必须映射为 ResultUnknown（而非普通 Failed）
+        db.abort_active_records_on_shutdown().unwrap();
+        let (wf_status, wf_phase) = super::host::query_job_ref_state(&db, "wf-real").unwrap();
+        assert_eq!(wf_status, "failed");
+        assert_eq!(wf_phase.as_deref(), Some("result_unknown"));
+        assert_eq!(
+            super::host::map_ref_state(
+                moss_voice_server::context::resume::RefKind::Job,
+                &wf_status,
+                wf_phase.as_deref(),
+            ),
+            moss_voice_server::context::resume::RefState::ResultUnknown
+        );
+
+        // 普通预检或设备报错失败（不含中断未知阶段）仍映射为 Failed
+        db.connection
+            .execute(
+                "INSERT INTO workflows(workflow_id,status,created_at,updated_at,payload) VALUES
+                   ('wf-err','failed',1,1,'{\"workflow_id\":\"wf-err\",\"status\":\"failed\",\"send_result\":{\"success\":false,\"running\":false,\"error\":\"device_unreachable\"}}')",
+                [],
+            )
+            .unwrap();
+        let (err_status, err_phase) = super::host::query_job_ref_state(&db, "wf-err").unwrap();
+        assert_eq!(
+            super::host::map_ref_state(
+                moss_voice_server::context::resume::RefKind::Job,
+                &err_status,
+                err_phase.as_deref(),
+            ),
+            moss_voice_server::context::resume::RefState::Failed
+        );
+
+        // 审批真实状态机对齐：执行中 executed+running -> InProgress，重启中断 failed+unknown -> ResultUnknown，取消结算 failed+cancelled -> Stopped
+        assert_eq!(
+            super::host::map_ref_state(
+                moss_voice_server::context::resume::RefKind::Approval,
+                "executed",
+                Some("running"),
+            ),
+            moss_voice_server::context::resume::RefState::InProgress
+        );
+        assert_eq!(
+            super::host::map_ref_state(
+                moss_voice_server::context::resume::RefKind::Approval,
+                "failed",
+                Some("unknown"),
+            ),
+            moss_voice_server::context::resume::RefState::ResultUnknown
+        );
+        assert_eq!(
+            super::host::map_ref_state(
+                moss_voice_server::context::resume::RefKind::Approval,
+                "failed",
+                Some("cancelled"),
+            ),
+            moss_voice_server::context::resume::RefState::Stopped
+        );
     }
 }

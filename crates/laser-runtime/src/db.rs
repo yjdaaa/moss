@@ -1931,15 +1931,26 @@ impl RuntimeDb {
     pub fn recover_after_restart(&self) -> Result<usize, SchemaError> {
         let count = self.connection.execute(
             "UPDATE jobs SET status='failed', finished_at=unixepoch(),
-             payload=json_set(payload,'$.status','failed','$.result.detail','host 重启中断，任务安全终止')
+             payload=json_set(
+               CASE WHEN json_type(payload,'$.result')='object' THEN payload ELSE json_set(payload,'$.result',json('{}')) END,
+               '$.status','failed',
+               '$.result.detail','host 重启中断，任务安全终止',
+               '$.result.phase','result_unknown'
+             )
              WHERE status IN ('running', 'pending', 'queued')
                 OR (status='failed' AND json_extract(payload,'$.status') IN ('running', 'pending', 'queued'))",
             [],
         )?;
-        // 记录正文里的 status 与列保持一致：状态查询返回的是正文（同时修补旧版退出路径曾漏改 $.status 的记录）
+        // 记录正文里的 status 与列保持一致：状态查询返回的是正文（同时修补旧版退出路径曾漏改 $.status 的记录，并标记 send_result.phase='result_unknown'）
         self.connection.execute(
             "UPDATE workflows SET status='failed', updated_at=unixepoch(),
-             payload=json_set(payload,'$.status','failed','$.detail','host 重启中断，任务安全终止')
+             payload=json_set(
+               CASE WHEN json_type(payload,'$.send_result')='object' THEN payload ELSE json_set(payload,'$.send_result',json('{}')) END,
+               '$.status','failed',
+               '$.detail','host 重启中断，任务安全终止',
+               '$.send_result.running',json('false'),
+               '$.send_result.phase','result_unknown'
+             )
              WHERE status IN ('sending', 'processing')
                 OR (status='failed' AND json_extract(payload,'$.status') IN ('sending', 'processing'))",
             [],
@@ -1947,7 +1958,13 @@ impl RuntimeDb {
         // 标定矩阵与 workflow 走同一条发送链路，发送中被中断同样记为失败、结果未知，不自动重发
         self.connection.execute(
             "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
-             payload=json_set(payload,'$.status','failed','$.detail','host 重启中断，任务安全终止')
+             payload=json_set(
+               CASE WHEN json_type(payload,'$.send_result')='object' THEN payload ELSE json_set(payload,'$.send_result',json('{}')) END,
+               '$.status','failed',
+               '$.detail','host 重启中断，任务安全终止',
+               '$.send_result.running',json('false'),
+               '$.send_result.phase','result_unknown'
+             )
              WHERE status IN ('sending', 'processing')
                 OR (status='failed' AND json_extract(payload,'$.status') IN ('sending', 'processing'))",
             [],
@@ -1955,24 +1972,41 @@ impl RuntimeDb {
         Ok(count)
     }
 
-    /// 进程退出停机落库：外层 `status` 列与 JSON 正文的 `$.status` 同步改为 `failed`，避免内外状态分裂。
+    /// 进程退出停机落库：外层 `status` 列与 JSON 正文的 `$.status` 同步改为 `failed`，并写入 `result_unknown` 阶段标记，避免内外状态分裂或被误判为普通失败。
     pub fn abort_active_records_on_shutdown(&self) -> Result<(), SchemaError> {
         let tx = self.connection.unchecked_transaction()?;
         tx.execute(
             "UPDATE jobs SET status='failed', finished_at=unixepoch(),
-             payload=json_set(payload,'$.status','failed','$.result.detail','host 退出中断，任务安全终止')
+             payload=json_set(
+               CASE WHEN json_type(payload,'$.result')='object' THEN payload ELSE json_set(payload,'$.result',json('{}')) END,
+               '$.status','failed',
+               '$.result.detail','host 退出中断，任务安全终止',
+               '$.result.phase','result_unknown'
+             )
              WHERE status IN ('running', 'pending', 'queued')",
             [],
         )?;
         tx.execute(
             "UPDATE workflows SET status='failed', updated_at=unixepoch(),
-             payload=json_set(payload,'$.status','failed','$.detail','host 退出中断，任务安全终止')
+             payload=json_set(
+               CASE WHEN json_type(payload,'$.send_result')='object' THEN payload ELSE json_set(payload,'$.send_result',json('{}')) END,
+               '$.status','failed',
+               '$.detail','host 退出中断，任务安全终止',
+               '$.send_result.running',json('false'),
+               '$.send_result.phase','result_unknown'
+             )
              WHERE status IN ('sending', 'processing')",
             [],
         )?;
         tx.execute(
             "UPDATE calibrations SET status='failed', updated_at=unixepoch(),
-             payload=json_set(payload,'$.status','failed','$.detail','host 退出中断，任务安全终止')
+             payload=json_set(
+               CASE WHEN json_type(payload,'$.send_result')='object' THEN payload ELSE json_set(payload,'$.send_result',json('{}')) END,
+               '$.status','failed',
+               '$.detail','host 退出中断，任务安全终止',
+               '$.send_result.running',json('false'),
+               '$.send_result.phase','result_unknown'
+             )
              WHERE status IN ('sending', 'processing')",
             [],
         )?;

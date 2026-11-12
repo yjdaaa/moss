@@ -17,7 +17,8 @@ import {
 import { apiFetch, getJson, postJson } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
 import { MaterialModal } from "../components/MaterialModal.jsx";
-import { showAlert, showChoice, showConfirm } from "../appDialog.js";
+import { showAlert, showChoice, showConfirm, showPrompt } from "../appDialog.js";
+import { defaultSerialPortHint } from "../platform.js";
 import { exportFile, savedMessage } from "../saveFile.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import { estopTargetArgs } from "../globalEstop.js";
@@ -1146,9 +1147,29 @@ export function MaterialLabPage({ onNavigate }) {
               <div className="lab-conn-target">
                 <select
                   value={serialPort}
-                  onChange={(e) => {
-                    setSerialPort(e.target.value);
-                    writeLocalSafe("laser-forge-serial-port", e.target.value);
+                  onChange={async (e) => {
+                    const selectEl = e.target;
+                    const chosen = selectEl.value;
+                    if (chosen === "__custom__") {
+                      selectEl.value = serialPort || "";
+                      const serialHint = defaultSerialPortHint();
+                      const custom = await showPrompt(serialHint.prompt, {
+                        title: "手动输入串口号",
+                        defaultValue: serialPort || serialHint.fallback,
+                        placeholder: serialHint.fallback,
+                      });
+                      if (custom && custom.trim()) {
+                        const p = custom.trim();
+                        if (!serialPorts.includes(p)) {
+                          setSerialPorts((prev) => [...prev, p]);
+                        }
+                        setSerialPort(p);
+                        writeLocalSafe("laser-forge-serial-port", p);
+                      }
+                    } else {
+                      setSerialPort(chosen);
+                      writeLocalSafe("laser-forge-serial-port", chosen);
+                    }
                   }}
                   className="select-input lab-field-5"
                   aria-label="选择串口"
@@ -1162,6 +1183,7 @@ export function MaterialLabPage({ onNavigate }) {
                   {serialPorts.map((p) => (
                     <option key={p} value={p}>{p}</option>
                   ))}
+                  <option value="__custom__">✎ 手动输入串口…</option>
                 </select>
                 <select
                   value={baudrate}

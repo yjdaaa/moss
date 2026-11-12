@@ -1420,17 +1420,41 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                 {!isRemoteMode() && (
                   <button
                     className="btn btn-ghost wb-btn-3"
-                    onClick={() => {
+                    onClick={async () => {
                       const recMode = materialRecommendationModes({ activeTool, textStyle });
+                      let existingThicknesses;
+                      let fullThickList = availableThicknesses;
+                      try {
+                        const exportRes = await getJson("/api/material-lab/export");
+                        const mats = exportRes.data?.result?.library?.materials;
+                        if (!exportRes.ok || !exportRes.data?.success || !mats || typeof mats !== "object") {
+                          showAlert("读取材料库完整规格失败，请稍后重试", { title: "读取失败", tone: "warning" });
+                          return;
+                        }
+                        const matEntry = mats[selectedMaterial];
+                        if (matEntry?.thicknesses && typeof matEntry.thicknesses === "object") {
+                          existingThicknesses = matEntry.thicknesses;
+                          const keys = Object.keys(matEntry.thicknesses);
+                          if (keys.length > 0) {
+                            fullThickList = keys;
+                          }
+                        } else {
+                          existingThicknesses = {};
+                        }
+                      } catch (err) {
+                        showAlert(`读取材料库异常：${err.message}`, { title: "读取失败", tone: "warning" });
+                        return;
+                      }
                       setMaterialModalData({
                         name: selectedMaterial,
-                        thicknesses: availableThicknesses,
+                        thicknesses: fullThickList,
                         power_percent: powerPercent,
                         speed_mms: speedMms,
                         feed_rate: recommendedFeedRate,
                         passes: recommendedPasses,
                         laser_mode: recMode.laserMode,
                         engraving_mode: recMode.engravingMode || "cut",
+                        existing_thicknesses: existingThicknesses,
                         target_thickness: selectedThickness,
                       });
                       setShowMaterialModal(true);

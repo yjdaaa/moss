@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Layers, Trash2, X } from "lucide-react";
-import { postJson } from "../api/client.js";
+import { getJson, postJson } from "../api/client.js";
 import { showConfirm } from "../appDialog.js";
 import { notifyMaterialsUpdated, thicknessesEqual } from "../materialSelectState.js";
 
@@ -13,13 +13,20 @@ export function parseThicknessList(str) {
     .filter((n) => Number.isFinite(n) && n > 0);
 }
 
-function findExistingCell(existingThicknesses, thickNum, laserMode, engravingMode) {
-  if (!existingThicknesses || typeof existingThicknesses !== "object") return null;
-  const matchedKey = Object.keys(existingThicknesses).find((k) => thicknessesEqual(k, thickNum));
-  if (!matchedKey) return null;
+function findExistingThickness(existingThicknesses, thickNum, laserMode, engravingMode) {
+  if (!existingThicknesses || typeof existingThicknesses !== "object") {
+    return { matchedKey: null, cell: null };
+  }
+  const matchedKey = Object.keys(existingThicknesses).find((k) => thicknessesEqual(k, thickNum)) ?? null;
+  if (!matchedKey) {
+    return { matchedKey: null, cell: null };
+  }
   const entry = existingThicknesses[matchedKey];
-  if (!entry || typeof entry !== "object") return null;
-  return laserMode === "cut" ? entry.cut || null : entry.engrave?.[engravingMode] || null;
+  if (!entry || typeof entry !== "object") {
+    return { matchedKey, cell: null };
+  }
+  const cell = laserMode === "cut" ? entry.cut || null : entry.engrave?.[engravingMode] || null;
+  return { matchedKey, cell };
 }
 
 export function buildMaterialSavePayload({
@@ -50,18 +57,24 @@ export function buildMaterialSavePayload({
     laser_max_power: laserMaxPower,
     feed_rate: feedRate,
     travel_rate: 3000,
-    threshold: normalizedLaserMode === "cut" && existingThicknesses ? 128 : -1,
+    threshold: -1,
     passes: defaultPasses,
     pixel_size_mm: 0.1,
   };
   const thicknesses = {};
   for (const th of thickList) {
-    const prev = findExistingCell(existingThicknesses, th, normalizedLaserMode, normalizedEngravingMode);
-    let nextCell;
+    const { matchedKey, cell: prev } = findExistingThickness(
+      existingThicknesses,
+      th,
+      normalizedLaserMode,
+      normalizedEngravingMode,
+    );
+    const outKey = matchedKey ?? String(th);
+    const isTarget = targetThickness == null || thicknessesEqual(th, targetThickness);
     if (prev) {
-      const shouldUpdateThisThick =
-        paramsChanged && (targetThickness == null || thicknessesEqual(th, targetThickness));
-      nextCell = {
+      const shouldUpdateThisThick = paramsChanged && isTarget;
+      const nextCell = {
+        ...prev,
         laser_min_power: prev.laser_min_power ?? 0,
         laser_max_power: shouldUpdateThisThick ? laserMaxPower : (prev.laser_max_power ?? laserMaxPower),
         feed_rate: shouldUpdateThisThick ? feedRate : (prev.feed_rate ?? feedRate),
@@ -69,15 +82,21 @@ export function buildMaterialSavePayload({
         threshold: prev.threshold ?? -1,
         passes: prev.passes ?? defaultPasses,
         pixel_size_mm: prev.pixel_size_mm ?? 0.1,
-        ...(prev.notes ? { notes: prev.notes } : {}),
       };
+      thicknesses[outKey] =
+        normalizedLaserMode === "cut"
+          ? { cut: nextCell }
+          : { engrave: { [normalizedEngravingMode]: nextCell } };
+    } else if (matchedKey && (!paramsChanged || !isTarget)) {
+      // 该厚度原本存在于材料库但未配置当前模式：传空对象防止被 prune 误删，同时绝不捏造未存模式的参数
+      thicknesses[outKey] = {};
     } else {
-      nextCell = { ...baseCell };
+      const nextCell = { ...baseCell };
+      thicknesses[outKey] =
+        normalizedLaserMode === "cut"
+          ? { cut: nextCell }
+          : { engrave: { [normalizedEngravingMode]: nextCell } };
     }
-    thicknesses[String(th)] =
-      normalizedLaserMode === "cut"
-        ? { cut: nextCell }
-        : { engrave: { [normalizedEngravingMode]: nextCell } };
   }
   const payload = {
     action: "save",
@@ -174,6 +193,24 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
         ? Number(initialData.feed_rate)
         : undefined;
 
+    let resolvedExistingThicknesses = isEditing ? initialData?.existing_thicknesses : undefined;
+    if (isEditing && !resolvedExistingThicknesses) {
+      try {
+        const exportRes = await getJson("/api/material-lab/export");
+        const mats = exportRes.data?.result?.library?.materials;
+        if (!exportRes.ok || !exportRes.data?.success || !mats || typeof mats !== "object") {
+          setBusy(false);
+          setError("读取库内各厚度既有参数失败，已中止保存以免覆盖其他厚度");
+          return;
+        }
+        resolvedExistingThicknesses = mats[trimmedName]?.thicknesses || {};
+      } catch (e) {
+        setBusy(false);
+        setError(`读取库内参数异常，已中止保存: ${e.message}`);
+        return;
+      }
+    }
+
     // D9: 原子批量保存所有厚度，单次提交
     const payload = buildMaterialSavePayload({
       material: trimmedName,
@@ -184,10 +221,10 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
       engravingMode: initialData?.engraving_mode,
       feedRateOverride,
       passesOverride: initialData?.passes,
-      existingThicknesses: isEditing ? initialData?.existing_thicknesses : undefined,
+      existingThicknesses: resolvedExistingThicknesses,
       targetThickness: isEditing ? initialData?.target_thickness : undefined,
       paramsChanged,
-      pruneMissingThicknesses: isEditing,
+      pruneMissingThicknesses: isEditing && Boolean(initialData?.existing_thicknesses),
     });
 
     try {

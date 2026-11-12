@@ -36,6 +36,10 @@ pub const BOUNDARY_FADE_MS: u32 = 12;
 pub const TRAILING_SILENCE_TRIGGER_MS: u32 = 120;
 /// 句尾裁剪后保留的自然气口静音时长（毫秒）。
 pub const TRAILING_SILENCE_KEEP_MS: u32 = 60;
+/// 流式分句合成时触发静音裁剪的阈值（毫秒）：保留句中逗号的自然停顿（≤220ms 不裁），仅裁掉模型尾部的超长死寂。
+pub const CLAUSE_SILENCE_TRIGGER_MS: u32 = 220;
+/// 流式分句合成裁剪后保留的自然换气停顿时长（毫秒），避免两句贴死导致抢拍吞字。
+pub const CLAUSE_SILENCE_KEEP_MS: u32 = 140;
 const SILENCE_SAMPLE_THRESHOLD: i16 = 24;
 
 /// 对 PCM 头部 `fade_ms` 毫秒做线性淡入（0 -> 1），消除句首突变爆音。

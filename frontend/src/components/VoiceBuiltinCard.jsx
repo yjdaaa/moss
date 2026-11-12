@@ -1917,9 +1917,12 @@ export function BuiltinModelGroups({ builtin }) {
   // 测试全部环节 / 连贯试跑：{ running, mode?, results: {key: {ok, skipped, running, detail}}, summary, chainMeta? }
   const [pipeline, setPipeline] = useState(null);
   const [recordingChain, setRecordingChain] = useState(false);
+  const [openingMic, setOpeningMic] = useState(false);
   const [playingSlot, setPlayingSlot] = useState(""); // "" | "input" | "reply"
   const chainAudioRef = useRef(null);
   const recSessionRef = useRef(null);
+  const micOpeningRef = useRef(false);
+  const micEpochRef = useRef(0);
   const mountedRef = useRef(true);
 
   const stopChainAudio = useCallback(() => {
@@ -1935,10 +1938,16 @@ export function BuiltinModelGroups({ builtin }) {
     if (mountedRef.current) setPlayingSlot("");
   }, []);
 
-  const stopMicSession = useCallback(() => {
+  const stopMicSession = useCallback((abortPending = false) => {
+    if (abortPending) {
+      micEpochRef.current += 1;
+      micOpeningRef.current = false;
+      if (mountedRef.current) setOpeningMic(false);
+    }
     const active = recSessionRef.current;
     if (!active) return null;
     recSessionRef.current = null;
+    if (abortPending) active.aborted = true;
     clearTimeout(active.timer);
     try {
       active.processor?.disconnect?.();
@@ -1961,7 +1970,7 @@ export function BuiltinModelGroups({ builtin }) {
     return () => {
       mountedRef.current = false;
       stopChainAudio();
-      stopMicSession();
+      stopMicSession(true);
     };
   }, [stopChainAudio, stopMicSession]);
 
@@ -2062,18 +2071,44 @@ export function BuiltinModelGroups({ builtin }) {
       if (done) void done.finish();
       return;
     }
+    if (micOpeningRef.current) {
+      return;
+    }
     if (!globalThis.navigator?.mediaDevices?.getUserMedia) {
       setMixNote({ ok: false, text: "当前环境不支持麦克风录音，可直接点击「连贯试跑」使用内置测试语音跑完全链路。" });
       return;
     }
     stopChainAudio();
     setMixNote(null);
+    const myEpoch = ++micEpochRef.current;
+    micOpeningRef.current = true;
+    setOpeningMic(true);
+    let pendingStream = null;
+    let pendingCtx = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
       });
+      pendingStream = stream;
+      if (!mountedRef.current || micEpochRef.current !== myEpoch) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       const AudioCtx = globalThis.AudioContext || globalThis.webkitAudioContext;
       const ctx = new AudioCtx();
+      pendingCtx = ctx;
+      if (ctx.state === "suspended" && typeof ctx.resume === "function") {
+        await ctx.resume();
+      }
+      if (!mountedRef.current || micEpochRef.current !== myEpoch) {
+        stream.getTracks().forEach((t) => t.stop());
+        try {
+          void ctx.close?.();
+        } catch {
+          // ignore
+        }
+        return;
+      }
       const sampleRate = ctx.sampleRate || 16000;
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
@@ -2087,8 +2122,9 @@ export function BuiltinModelGroups({ builtin }) {
       source.connect(processor);
       processor.connect(ctx.destination);
 
+      const sessionObj = { stream, ctx, source, processor, timer: null, finish: null, aborted: false };
       const finish = async () => {
-        if (finished) return;
+        if (finished || sessionObj.aborted) return;
         finished = true;
         stopMicSession();
         const totalLen = chunks.reduce((sum, arr) => sum + arr.length, 0);
@@ -2108,21 +2144,42 @@ export function BuiltinModelGroups({ builtin }) {
         await runChainTest({ audio_wav_base64: wavDataUrl });
       };
 
-      const timer = setTimeout(() => { void finish(); }, 3500);
-      recSessionRef.current = { stream, ctx, source, processor, timer, finish };
+      sessionObj.finish = finish;
+      sessionObj.timer = setTimeout(() => { void finish(); }, 3500);
+      recSessionRef.current = sessionObj;
+      pendingStream = null;
+      pendingCtx = null;
       setRecordingChain(true);
     } catch (error) {
-      stopMicSession();
-      setMixNote({
-        ok: false,
-        text: `无法打开电脑麦克风（${error?.message || "未授予麦克风权限"}）；可直接点击「连贯试跑」使用内置测试人声测试全链。`,
-      });
+      pendingStream?.getTracks?.().forEach((t) => t.stop());
+      try {
+        void pendingCtx?.close?.();
+      } catch {
+        // ignore
+      }
+      if (micEpochRef.current === myEpoch) {
+        stopMicSession();
+        if (mountedRef.current) {
+          setMixNote({
+            ok: false,
+            text: `无法打开电脑麦克风（${error?.message || "未授予麦克风权限"}）；可直接点击「连贯试跑」使用内置测试人声测试全链。`,
+          });
+        }
+      }
+    } finally {
+      if (micEpochRef.current === myEpoch) {
+        micOpeningRef.current = false;
+        if (mountedRef.current) {
+          setOpeningMic(false);
+        }
+      }
     }
   };
 
   const handleSelectSource = async (section, label, nextValue) => {
-    // 换了模型，上一次的测试结果不再代表当前链路
+    // 换了模型，中止在途试听/录音并清空上一次测试结果
     stopChainAudio();
+    stopMicSession(true);
     setPipeline(null);
     if (section === "llm") {
       focusConfigGroup("builtin-model-llm", "voice-group-builtin-model-llm");
@@ -2225,7 +2282,7 @@ export function BuiltinModelGroups({ builtin }) {
               className="btn btn-ghost"
               id="voice-builtin-test-all"
               onClick={runPipelineTest}
-              disabled={Boolean(busy || mixBusy || pipeline?.running || recordingChain)}
+              disabled={Boolean(busy || mixBusy || pipeline?.running || recordingChain || openingMic)}
               title="并发探测每个环节：云端模型独立请求一次，本地模型检查是否已下载就绪"
             >
               <FlaskConical size={13} /> {pipeline?.running && pipeline?.mode !== "chain" ? "测试中…" : "测试全部环节"}
@@ -2235,7 +2292,7 @@ export function BuiltinModelGroups({ builtin }) {
               className="btn btn-ghost"
               id="voice-builtin-test-chain"
               onClick={() => void runChainTest({})}
-              disabled={Boolean(busy || mixBusy || pipeline?.running || recordingChain)}
+              disabled={Boolean(busy || mixBusy || pipeline?.running || recordingChain || openingMic)}
               title="整链连贯试跑：内置测试录音 → 1.判停 → 2.语音识别（本地模型也真实推理） → 3.Jev粗筛 → 4.大模型回复 → 5.语音合成并可试听"
             >
               <Sparkles size={13} /> {pipeline?.running && pipeline?.mode === "chain" ? "连贯试跑中…" : "连贯试跑"}
@@ -2245,11 +2302,11 @@ export function BuiltinModelGroups({ builtin }) {
               className={`btn ${recordingChain ? "btn-hud-fire" : "btn-ghost"}`}
               id="voice-builtin-record-chain"
               onClick={() => void toggleRecordChainTest()}
-              disabled={Boolean((busy && !recordingChain) || mixBusy || pipeline?.running)}
+              disabled={Boolean((busy && !recordingChain) || mixBusy || pipeline?.running || openingMic)}
               title="用电脑麦克风录一句真话（最长 3.5 秒，再点立即结束），从 1.判停 到 5.语音合成 真实跑通全链路"
             >
               {recordingChain ? <Square size={12} /> : <Mic size={13} />}
-              {recordingChain ? "说完点此送测…" : "录真话测"}
+              {recordingChain ? "说完点此送测…" : openingMic ? "请求麦克风…" : "录真话测"}
             </button>
           </div>
         </div>
@@ -2275,7 +2332,7 @@ export function BuiltinModelGroups({ builtin }) {
               <select
                 className="text-input"
                 value={view.selectValue}
-                disabled={Boolean(busy || mixBusy)}
+                disabled={Boolean(busy || mixBusy || pipeline?.running || recordingChain || openingMic)}
                 onChange={(e) => handleSelectSource(key, label, e.target.value)}
                 id={`voice-builtin-mix-select-${key}`}
                 aria-label={`${label}当前使用模型`}

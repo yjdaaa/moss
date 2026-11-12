@@ -1119,8 +1119,8 @@ impl Turn {
             crate::audio::trim_trailing_silence_i16(
                 &mut pcm.samples,
                 sample_rate,
-                crate::audio::TRAILING_SILENCE_KEEP_MS,
-                crate::audio::TRAILING_SILENCE_TRIGGER_MS,
+                crate::audio::CLAUSE_SILENCE_KEEP_MS,
+                crate::audio::CLAUSE_SILENCE_TRIGGER_MS,
             );
             if pcm.samples.is_empty() {
                 continue;

@@ -763,6 +763,11 @@ pub(super) fn add_draw_view(workflow: &mut Value) {
     let seconds = artifacts["time_estimate"]["estimated_seconds"]
         .as_f64()
         .unwrap_or(0.0);
+    let actual_mode = if artifacts["mode"].as_str() == Some("outline") {
+        "outline"
+    } else {
+        "raster"
+    };
     let view = json!({
         "job_summary": {
             "material": artifacts["material"], "requested_thickness_mm": artifacts["thickness_mm"],
@@ -770,7 +775,7 @@ pub(super) fn add_draw_view(workflow: &mut Value) {
             "power": artifacts["actual_params"]["laser_max_power"],
             "speed": artifacts["actual_params"]["feed_rate"], "passes": artifacts["actual_params"]["passes"],
             "estimated_display": format!("{seconds:.1} 秒"), "can_send": true,
-            "mode": "raster", "task_type": "engrave"
+            "mode": actual_mode, "task_type": "engrave"
         },
         "content_fingerprint": artifacts["fingerprint"], "uploaded_image_file": image,
         "scene_file": artifacts["scene_file"]
