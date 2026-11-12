@@ -166,7 +166,9 @@ export function drawGenerationSignature(form, custom = {}) {
     simplify: mode === "outline" ? String(form?.vector_simplify_factor ?? "3").trim() : "",
     manual: custom?.enabled
       ? `${String(custom.power ?? "").trim()}/${String(custom.feed ?? "").trim()}/${String(custom.passes ?? "").trim()}`
-      : "preset",
+      : custom?.presetParams
+        ? `preset:${custom.presetParams}`
+        : "preset",
   });
 }
 

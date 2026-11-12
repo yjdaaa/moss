@@ -2059,6 +2059,18 @@ mod imp {
         context: Arc<crate::voice_context::host::ContextHost>,
         /// n59 当前说话角色（全部设备共用；语音与界面切换都即时生效，不重启服务）
         persona: Arc<PersonaSwitch>,
+        /// 轻量轮询（`lite = true`）复用的磁盘/网卡环境探测短缓存，避免 2s 轮询反复扫盘与序列化大 GIF
+        status_probe_cache: Mutex<Option<StatusProbeCache>>,
+    }
+
+    #[derive(Clone)]
+    struct StatusProbeCache {
+        captured_at: std::time::Instant,
+        onejev_probe_id: &'static str,
+        onejev_env: Value,
+        laya_env: Value,
+        local_ip: Option<String>,
+        helper_found: bool,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2674,6 +2686,7 @@ mod imp {
                 })),
                 context,
                 persona,
+                status_probe_cache: Mutex::new(None),
             })
         }))
     }
@@ -5088,6 +5101,10 @@ mod imp {
         }
 
         pub fn status(&self) -> Value {
+            self.status_with_options(false)
+        }
+
+        pub fn status_with_options(&self, lite: bool) -> Value {
             let guard = self
                 .server
                 .lock()
@@ -5156,10 +5173,49 @@ mod imp {
                     .find(|id| self.models.path_if_installed(id).is_some())
                 })
                 .unwrap_or(moss_voice::settings::LOCAL_ONEJEV_0_8B_MODEL);
-            let onejev_env =
-                moss_voice::onejev::detect_onejev_env(self.models.root_for(onejev_probe_id), false);
-            let laya_env = Self::detect_laya_env_with_probe(false);
-            serde_json::json!({
+            let cached_probes = if lite {
+                self.status_probe_cache
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.clone())
+                    .filter(|entry| {
+                        entry.onejev_probe_id == onejev_probe_id
+                            && entry.captured_at.elapsed() < std::time::Duration::from_secs(4)
+                    })
+            } else {
+                None
+            };
+            let (onejev_env, laya_env, detected_ip, helper_found) =
+                if let Some(entry) = cached_probes {
+                    (
+                        entry.onejev_env,
+                        entry.laya_env,
+                        entry.local_ip,
+                        entry.helper_found,
+                    )
+                } else {
+                    let onejev_env = serde_json::to_value(moss_voice::onejev::detect_onejev_env(
+                        self.models.root_for(onejev_probe_id),
+                        false,
+                    ))
+                    .unwrap_or(Value::Null);
+                    let laya_env = serde_json::to_value(Self::detect_laya_env_with_probe(false))
+                        .unwrap_or(Value::Null);
+                    let detected_ip = local_ip();
+                    let helper_found = helper_path().is_some_and(|path| path.is_file());
+                    if let Ok(mut slot) = self.status_probe_cache.lock() {
+                        *slot = Some(StatusProbeCache {
+                            captured_at: std::time::Instant::now(),
+                            onejev_probe_id,
+                            onejev_env: onejev_env.clone(),
+                            laya_env: laya_env.clone(),
+                            local_ip: detected_ip.clone(),
+                            helper_found,
+                        });
+                    }
+                    (onejev_env, laya_env, detected_ip, helper_found)
+                };
+            let mut root = serde_json::json!({
                 "running": view.is_some(),
                 "mode": mode,
                 "link_mode": settings.mode.as_str(),
@@ -5168,7 +5224,7 @@ mod imp {
                 "mqtt_port": view.as_ref().and_then(|v| v.mqtt_port),
                 "udp_port": view.as_ref().and_then(|v| v.udp_port),
                 "ota_url": format!("http://{}:{http_port}/xiaozhi/ota/", moss_voice_server::MDNS_HOST_LABEL),
-                "ota_ip_url": local_ip().map(|ip| format!("http://{ip}:{http_port}/xiaozhi/ota/")),
+                "ota_ip_url": detected_ip.map(|ip| format!("http://{ip}:{http_port}/xiaozhi/ota/")),
                 "models": models,
                 "jev": {
                     "endpoint": if is_local_jev {
@@ -5204,7 +5260,7 @@ mod imp {
                     "jev_runtime": self.local_jev_runtime_status(&settings, jev_feedback_enabled),
                     "laya_env": laya_env,
                     "laya_setup": self.laya_setup.status(),
-                    "helper_found": helper_path().is_some_and(|path| path.is_file()),
+                    "helper_found": helper_found,
                     "helper_running": self.helper.lock().ok().and_then(|helper| helper.as_ref().map(LocalHelper::is_alive)).unwrap_or(false),
                     "models": self.models.status(),
                     "ready": {
@@ -5222,11 +5278,22 @@ mod imp {
                 "debug_enabled": view.as_ref().map(|v| v.debug_enabled).unwrap_or_else(|| self.debug_trace_enabled.load(std::sync::atomic::Ordering::Acquire)),
                 "debug_traces": view.as_ref().map(|v| serde_json::to_value(&v.debug_traces).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
                 "device_prefs": settings.builtin_device_prefs,
-                "goggle_bot_gifs": moss_voice_server::cached_goggle_bot_gifs(),
-                "screen_style_gifs": moss_voice_server::cached_style_scene_gifs(),
                 "memory_enabled": self.memory.enabled(),
                 "devices": self.devices(),
-            })
+            });
+            if !lite && let Some(map) = root.as_object_mut() {
+                map.insert(
+                    "goggle_bot_gifs".into(),
+                    serde_json::to_value(moss_voice_server::cached_goggle_bot_gifs())
+                        .unwrap_or(Value::Null),
+                );
+                map.insert(
+                    "screen_style_gifs".into(),
+                    serde_json::to_value(moss_voice_server::cached_style_scene_gifs())
+                        .unwrap_or(Value::Null),
+                );
+            }
+            root
         }
 
         /// 启动（或重启）失败都写进诊断记录，界面上的报错弹窗关掉后仍能查到原因。
@@ -13221,13 +13288,17 @@ pub use imp::{BuiltinVoice, autostart, init, record_moss_event, shutdown};
 pub async fn voice_builtin_status(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
+    lite: Option<bool>,
 ) -> CmdResult {
     #[cfg(desktop)]
     require_status_window(&window)?;
     #[cfg(desktop)]
-    let result = imp::run(app, |builtin| Ok(builtin.status())).await;
+    let result = imp::run(app, move |builtin| {
+        Ok(builtin.status_with_options(lite.unwrap_or(false)))
+    })
+    .await;
     #[cfg(mobile)]
-    let result = desktop_only((app, window));
+    let result = desktop_only((app, window, lite));
     result
 }
 

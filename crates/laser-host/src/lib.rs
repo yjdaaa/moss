@@ -833,6 +833,13 @@ impl HostApplication {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let _ = db.prune_historical_records(now_secs);
+        let _ = db.prune_orphan_generated_files(
+            &[
+                runtime_root.generated_assets.as_path(),
+                runtime_root.previews.as_path(),
+            ],
+            now_secs,
+        );
         let db_arc = Arc::new(Mutex::new(db));
 
         let coordinator = global_shutdown_coordinator();

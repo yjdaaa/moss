@@ -1,13 +1,31 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertCircle, X } from "lucide-react";
 import { trayActionCopy } from "../platform.js";
+import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
 export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunning = false }) {
   const [selectedAction, setSelectedAction] = useState("tray");
   const [remember, setRemember] = useState(false);
   // 技术书 §9.4.3：完全退出时询问是否同时停止 MOSS 启动的语音服务端，默认“是”
   const [stopServer, setStopServer] = useState(true);
+  const backdropRef = useRef(null);
+  const backdropPressRef = useRef(false);
   const trayCopy = trayActionCopy();
+
+  useEffect(() => {
+    if (!visible) return undefined;
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        if (!isTopmostModalBackdrop(backdropRef.current)) return;
+        e.preventDefault();
+        onClose?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, onClose]);
 
   if (!visible) return null;
 
@@ -15,15 +33,30 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
     onConfirm(selectedAction, remember, stopServer);
   };
 
-  return (
-    <div className="mat-modal-backdrop close-confirm-box">
-      <div className="mat-modal close-confirm-box-2" role="dialog">
+  const content = (
+    <div
+      ref={backdropRef}
+      className="mat-modal-backdrop close-confirm-box"
+      onMouseDown={(e) => {
+        backdropPressRef.current = e.button === 0 && e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) backdropPressRef.current = false;
+      }}
+      onClick={(e) => {
+        if (backdropPressRef.current && e.target === e.currentTarget) {
+          onClose?.();
+        }
+        backdropPressRef.current = false;
+      }}
+    >
+      <div className="mat-modal close-confirm-box-2" role="dialog" aria-modal="true" aria-labelledby="close-confirm-title">
         <div className="mat-modal-head">
-          <h3 className="close-confirm-heading">
+          <h3 id="close-confirm-title" className="close-confirm-heading">
             <AlertCircle size={18} className="close-confirm-icon" />
             <span>关闭主窗口</span>
           </h3>
-          <button className="mat-modal-close" onClick={onClose} title="取消">
+          <button type="button" className="mat-modal-close" onClick={onClose} title="取消" aria-label="取消">
             <X size={16} />
           </button>
         </div>
@@ -117,10 +150,11 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
         </div>
 
         <div className="mat-modal-foot">
-          <button className="btn btn-ghost" onClick={onClose}>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
             取消
           </button>
           <button
+            type="button"
             className={`btn ${selectedAction === "exit" ? "btn-danger" : "btn-primary"}`}
             onClick={handleConfirm}
           >
@@ -130,4 +164,7 @@ export function CloseConfirmModal({ visible, onClose, onConfirm, voiceServerRunn
       </div>
     </div>
   );
+  return typeof document !== "undefined" && document.body
+    ? createPortal(content, document.body)
+    : content;
 }

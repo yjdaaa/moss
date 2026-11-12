@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Settings, X, ShieldAlert, Monitor, Network, Link2, CheckCircle2, AlertCircle, Eye, EyeOff, Trash2, RefreshCw } from "lucide-react";
 import { getJson, postJson } from "../api/client.js";
 import { showAlert, showConfirm } from "../appDialog.js";
+import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
 import { FoldHeader } from "./FoldHeader.jsx";
 import { ExportSettingsSection } from "./ExportSettingsSection.jsx";
@@ -125,9 +127,33 @@ export function SettingsModal({
     return () => clearInterval(timer);
   }, [installProgress?.phase]);
 
-  if (!visible) return null;
-
   const activeUpdateProgress = appUpdateScopeProgress(installProgress, updateReport?.latest_version);
+  const modalBusy =
+    savingPort ||
+    savingMcpEndpoint ||
+    savingJev ||
+    testingJev ||
+    checkingUpdate ||
+    appUpdateBusy(activeUpdateProgress);
+  const backdropRef = useRef(null);
+  const backdropPressRef = useRef(false);
+
+  useEffect(() => {
+    if (!visible) return undefined;
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        if (!isTopmostModalBackdrop(backdropRef.current)) return;
+        e.preventDefault();
+        if (modalBusy) return;
+        onClose?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [visible, modalBusy, onClose]);
+
+  if (!visible) return null;
 
   const handleActionChange = (action) => {
     setCloseAction(action);
@@ -353,15 +379,35 @@ export function SettingsModal({
     }
   };
 
-  return (
-    <div className="mat-modal-backdrop settings-box">
-      <div className="mat-modal settings-modal settings-box-2" role="dialog" aria-modal="true">
+  const content = (
+    <div
+      ref={backdropRef}
+      className="mat-modal-backdrop settings-box"
+      onMouseDown={(e) => {
+        backdropPressRef.current = e.button === 0 && e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) backdropPressRef.current = false;
+      }}
+      onClick={(e) => {
+        if (backdropPressRef.current && e.target === e.currentTarget && !modalBusy) {
+          onClose?.();
+        }
+        backdropPressRef.current = false;
+      }}
+    >
+      <div
+        className="mat-modal settings-modal settings-box-2"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-modal-title"
+      >
         <div className="mat-modal-head">
-          <h3 className="settings-heading">
+          <h3 id="settings-modal-title" className="settings-heading">
             <Settings size={18} className="settings-icon" />
             <span>系统偏好设置</span>
           </h3>
-          <button className="mat-modal-close" onClick={onClose} title="关闭">
+          <button type="button" className="mat-modal-close" onClick={onClose} title="关闭" aria-label="关闭" disabled={modalBusy}>
             <X size={16} />
           </button>
         </div>
@@ -791,11 +837,14 @@ export function SettingsModal({
         </div>
 
         <div className="mat-modal-foot">
-          <button className="btn btn-hud-primary settings-btn-6" onClick={onClose}>
+          <button type="button" className="btn btn-hud-primary settings-btn-6" onClick={onClose} disabled={modalBusy}>
             完成设置
           </button>
         </div>
       </div>
     </div>
   );
+  return typeof document !== "undefined" && document.body
+    ? createPortal(content, document.body)
+    : content;
 }

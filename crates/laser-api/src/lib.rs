@@ -78,9 +78,21 @@ pub mod external_tools;
 mod feedback;
 mod voice_authority;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../../frontend/dist/"]
 pub struct FrontendFixture;
+
+/// 移动端窗口直接加载 Tauri 资源协议内嵌包且不对外提供局域网 Web 页面，跳过重复内嵌 `frontend/dist`。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub struct FrontendFixture;
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+impl FrontendFixture {
+    pub fn get(_file_path: &str) -> Option<rust_embed::EmbeddedFile> {
+        None
+    }
+}
 
 pub struct ApiService {
     settings: laser_runtime::LaserSettings,
@@ -2358,19 +2370,42 @@ impl ApiService {
                     ),
                 )
             })?;
+        let start_from_line = object
+            .get("start_from_line")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        if start_from_line > 0 && is_offline_sd {
+            return Err((
+                400,
+                failure(
+                    "SD 脱机作业由控制器整文件执行，不支持按行断点续雕，请重新发起确认发送",
+                    Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                ),
+            ));
+        }
+
         // FluidNC：读取 $CD 配置以感知自动宏 / 急停引脚 / planner；旧 GRBL 静默跳过
         device.load_features(std::time::Duration::from_secs(3));
-        let device_scale = device
-            .verify_job_ready_adaptive(std::time::Duration::from_secs(3))
-            .map_err(|e| {
-                (
-                    400,
-                    failure(
-                        format!("加工前检查未通过 ({target}): {e}"),
-                        Some(serde_json::json!({"error_code": "device_preflight_failed"})),
-                    ),
-                )
-            })?;
+        let preflight_res = if start_from_line > 0 {
+            device.verify_job_ready_for_resume(std::time::Duration::from_secs(3))
+        } else {
+            device.verify_job_ready_adaptive(std::time::Duration::from_secs(3))
+        };
+        let device_scale = preflight_res.map_err(|e| {
+            (
+                400,
+                failure(
+                    format!("加工前检查未通过 ({target}): {e}"),
+                    Some(serde_json::json!({"error_code": "device_preflight_failed"})),
+                ),
+            )
+        })?;
+        let current_mpos = device.last_mpos;
+        let origin_mpos = if start_from_line == 0 {
+            current_mpos
+        } else {
+            parse_mpos_value(object.get("_origin_mpos"))
+        };
         let scale_factor = device_scale / 1000.0;
         let text = std::fs::read_to_string(&gcode_path)
             .map_err(|e| (500, failure(format!("读取 G-code 文件失败: {e}"), None)))?;
@@ -2396,11 +2431,6 @@ impl ApiService {
                 ),
             ));
         }
-
-        let start_from_line = object
-            .get("start_from_line")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
 
         let prepared = laser_device::prepare_gcode_lines(&text).map_err(|e| {
             (
@@ -2594,10 +2624,32 @@ impl ApiService {
                     let mut worker = laser_device::JobWorker::with_progress(device, cancel.clone(), progress.clone())
                         .with_scale_factor(scale_factor);
                     if start_from_line > 0 {
-                        // 断点续雕：下发 $X 解除可能存在的急停 Alarm 锁定，并只下发剩余未完成代码
-                        let _ = worker.device.send_line_wait_ack("$X");
-                        let remaining = lines[start_from_line..].to_vec();
-                        worker.send_lines(remaining)
+                        // 断点续雕：先同步下发从前缀刀路重建的模态头（G21/G90/G92 偏移/无光定位 G0/进给率 F/M4 S0），
+                        // 避免 0x18 软复位清空模态后首条 G1 报 error:22、丢 M4 不出光或丢 G92 偏移撞错位；不计入刀路进度行。
+                        let plan = build_resume_plan(
+                            &lines[..start_from_line],
+                            origin_mpos,
+                            current_mpos,
+                        );
+                        let mut preamble_res = Ok(());
+                        for cmd in plan.preamble {
+                            if let Err(e) = worker
+                                .device
+                                .send_line_wait_ack_cancellable(&cmd, Some(&cancel))
+                            {
+                                preamble_res = Err(format!("断点续雕恢复模态指令 `{cmd}` 失败: {e}"));
+                                break;
+                            }
+                        }
+                        preamble_res.and_then(|()| {
+                            let mut remaining = lines[start_from_line..].to_vec();
+                            apply_modal_spindle_to_remaining(
+                                &mut remaining,
+                                plan.modal_spindle_s,
+                                plan.resume_in_cut_motion,
+                            );
+                            worker.send_lines(remaining)
+                        })
                     } else {
                         worker.send_lines(lines)
                     }
@@ -2608,7 +2660,7 @@ impl ApiService {
                 let elapsed_ms = job.started_at.elapsed().as_millis() as u64;
                 let target = target_for_thread;
                 let cancelled_result = || {
-                    let can_resume = sent > 0 && sent < total;
+                    let can_resume = !is_offline_sd && sent > 0 && sent < total;
                     serde_json::json!({
                         "success": false,
                         "running": false,
@@ -2646,6 +2698,11 @@ impl ApiService {
                         )
                     }
                 };
+                if let (Some((mx, my, mz)), Some(map)) = (origin_mpos, send_result.as_object_mut())
+                    && status != "completed"
+                {
+                    map.insert("origin_mpos".into(), serde_json::json!([mx, my, mz]));
+                }
                 if let (Some(raw), Some(map)) = (last_status_report, send_result.as_object_mut()) {
                     map.insert("last_status_report".into(), serde_json::json!(raw));
                 }
@@ -3883,15 +3940,35 @@ impl ApiService {
                 .spawn(move || {
                     let _permit = permit;
                     let source = peer.ip().to_string();
-                    if let Ok(request) = read_http_request(&mut stream)
-                        && !request.is_empty()
-                    {
-                        let response =
-                            missing_host_rejection(&request, loopback).unwrap_or_else(|| {
+                    let mut carry = Vec::with_capacity(4096);
+                    let mut served = 0usize;
+                    loop {
+                        let idle_timeout = if served == 0 {
+                            std::time::Duration::from_secs(10)
+                        } else {
+                            std::time::Duration::from_secs(5)
+                        };
+                        let Ok(request) =
+                            read_http_request_buffered(&mut stream, &mut carry, idle_timeout)
+                        else {
+                            break;
+                        };
+                        if request.is_empty() {
+                            break;
+                        }
+                        served += 1;
+                        let keep_alive = request_allows_keep_alive(&request, loopback, served);
+                        let raw_response = missing_host_rejection(&request, loopback)
+                            .unwrap_or_else(|| {
                                 service.handle_http_from(&request, loopback, &source, None)
                             });
-                        let _ = stream.write_all(&response);
-                        let _ = stream.flush();
+                        let (response, kept) = apply_response_keep_alive(raw_response, keep_alive);
+                        if stream.write_all(&response).is_err() || stream.flush().is_err() {
+                            break;
+                        }
+                        if !kept {
+                            break;
+                        }
                     }
                 });
         }
@@ -3961,34 +4038,77 @@ fn missing_host_rejection(request: &[u8], loopback: bool) -> Option<Vec<u8>> {
     ))
 }
 
+#[cfg(test)]
 fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut carry = Vec::with_capacity(4096);
+    read_http_request_buffered(stream, &mut carry, std::time::Duration::from_secs(10))
+}
+
+const HTTP_KEEP_ALIVE_MAX_REQUESTS: usize = 64;
+
+fn request_allows_keep_alive(request: &[u8], loopback: bool, served_count: usize) -> bool {
+    if !loopback || served_count >= HTTP_KEEP_ALIVE_MAX_REQUESTS {
+        return false;
+    }
+    let head = request_head(request);
+    let Some(first_line) = head.lines().next() else {
+        return false;
+    };
+    if !first_line.contains("HTTP/1.1") {
+        return false;
+    }
+    if header_value(&head, "transfer-encoding").is_some() {
+        return false;
+    }
+    if let Some(conn) = header_value(&head, "connection")
+        && conn
+            .split(',')
+            .any(|token| token.trim().eq_ignore_ascii_case("close"))
+    {
+        return false;
+    }
+    true
+}
+
+fn apply_response_keep_alive(response: Vec<u8>, want_keep_alive: bool) -> (Vec<u8>, bool) {
+    if !want_keep_alive {
+        return (response, false);
+    }
+    let Some(head_end) = response.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return (response, false);
+    };
+    let needle = b"\r\nConnection: close\r\n";
+    let Some(pos) = response[..head_end + 2]
+        .windows(needle.len())
+        .position(|w| w == needle)
+    else {
+        return (response, false);
+    };
+    let replacement = b"\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5, max=64\r\n";
+    let mut out = Vec::with_capacity(response.len() + replacement.len() - needle.len());
+    out.extend_from_slice(&response[..pos]);
+    out.extend_from_slice(replacement);
+    out.extend_from_slice(&response[pos + needle.len()..]);
+    (out, true)
+}
+
+fn read_http_request_buffered(
+    stream: &mut std::net::TcpStream,
+    buffer: &mut Vec<u8>,
+    idle_timeout: std::time::Duration,
+) -> std::io::Result<Vec<u8>> {
     const PER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const TOTAL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-    let started = std::time::Instant::now();
-    let _ = stream.set_read_timeout(Some(PER_READ_TIMEOUT));
-    let mut buffer = Vec::with_capacity(4096);
-    let mut chunk = [0u8; 4096];
-    let mut content_length: Option<usize> = None;
-    let mut header_end: Option<usize> = None;
     const MAX_HEADER_SIZE: usize = 64 * 1024;
     const MAX_BODY_SIZE: usize = 20 * 1024 * 1024;
 
-    loop {
-        let elapsed = started.elapsed();
-        if elapsed >= TOTAL_DEADLINE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "HTTP 请求读取总耗时超出 30 秒限制",
-            ));
-        }
-        let remaining = TOTAL_DEADLINE.saturating_sub(elapsed).min(PER_READ_TIMEOUT);
-        let _ = stream.set_read_timeout(Some(remaining.max(std::time::Duration::from_millis(1))));
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..n]);
+    let mut started: Option<std::time::Instant> =
+        (!buffer.is_empty()).then(std::time::Instant::now);
+    let mut chunk = [0u8; 4096];
+    let mut content_length: Option<usize> = None;
+    let mut header_end: Option<usize> = None;
 
+    loop {
         if header_end.is_none() {
             if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
                 header_end = Some(pos + 4);
@@ -4018,11 +4138,39 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
             }
             let needed = end + body_len;
             if buffer.len() >= needed {
-                break;
+                let rest = buffer.split_off(needed);
+                let request = std::mem::replace(buffer, rest);
+                return Ok(request);
             }
         }
+
+        let timeout = if let Some(t0) = started {
+            let elapsed = t0.elapsed();
+            if elapsed >= TOTAL_DEADLINE {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP 请求读取总耗时超出 30 秒限制",
+                ));
+            }
+            TOTAL_DEADLINE
+                .saturating_sub(elapsed)
+                .min(PER_READ_TIMEOUT)
+                .max(std::time::Duration::from_millis(1))
+        } else {
+            idle_timeout.max(std::time::Duration::from_millis(1))
+        };
+
+        let _ = stream.set_read_timeout(Some(timeout));
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            let drained = std::mem::take(buffer);
+            return Ok(drained);
+        }
+        if started.is_none() {
+            started = Some(std::time::Instant::now());
+        }
+        buffer.extend_from_slice(&chunk[..n]);
     }
-    Ok(buffer)
 }
 
 impl ApiService {
@@ -4925,6 +5073,8 @@ impl ApiService {
             // 新预览记下发起方（服务端按调用身份填写，客户端自带的值一律丢弃）；
             // 桌面端据此把 AI（语音 / 小智 / 网关）生成的任务弹出预览窗（2026-11-06）
             object.remove("_origin");
+            object.remove("_origin_mpos");
+            object.remove("_artifacts");
             let creates_preview = route == "/api/text-task/generate"
                 || (route == "/api/workflow"
                     && matches!(
@@ -5695,6 +5845,7 @@ fn generate_text_artifacts(
         object,
         recommendation.params.laser_max_power as f64,
         recommendation.params.feed_rate as f64,
+        recommendation.params.passes.clamp(1, 5) as u32,
     )?;
     // 排版与起点（2026-11-06）：width_mm / height_mm 为木牌尺寸；没指定字号时自动取能放下的最大字号；
     // 默认激光头对准木牌（图案）中心（用户决定）
@@ -5919,7 +6070,11 @@ fn generate_draw_artifacts(
         .as_ref()
         .map(|r| r.params.feed_rate)
         .unwrap_or(1500);
-    let params = feedback::generation_params(object, power as f64, feed_rate as f64)?;
+    let rec_passes = recommendation
+        .as_ref()
+        .map(|r| r.params.passes.clamp(1, 5) as u32)
+        .unwrap_or(1);
+    let params = feedback::generation_params(object, power as f64, feed_rate as f64, rec_passes)?;
     let power = params.power as i32;
     let feed_rate = params.feed as i32;
 
@@ -6102,6 +6257,25 @@ fn generate_draw_artifacts(
         );
     }
     res_map.insert("mode".into(), serde_json::Value::String(mode.to_string()));
+    res_map.insert("origin".into(), serde_json::json!("lower_left"));
+    res_map.insert(
+        "origin_note".into(),
+        serde_json::json!("开刻前把激光头移到图案左下角"),
+    );
+    let frame_max_x = if mode == "outline" {
+        width_mm
+    } else {
+        width_mm + 2.0 * IMAGE_OVERSCAN_MM
+    };
+    res_map.insert(
+        "frame_mm".into(),
+        serde_json::json!({
+            "min_x": 0.0,
+            "max_x": frame_max_x,
+            "min_y": 0.0,
+            "max_y": height_mm,
+        }),
+    );
     res_map.insert(
         "time_estimate".into(),
         serde_json::json!({
@@ -6317,7 +6491,12 @@ fn generate_image_or_gcode_artifacts(
             .map(|r| r.params.pixel_size_mm)
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(0.1);
-        let params = feedback::generation_params(object, power as f64, feed_rate as f64)?;
+        let rec_passes = recommendation
+            .as_ref()
+            .map(|r| r.params.passes.clamp(1, 5) as u32)
+            .unwrap_or(1);
+        let params =
+            feedback::generation_params(object, power as f64, feed_rate as f64, rec_passes)?;
         let power = params.power as i32;
         let feed_rate = params.feed as i32;
 
@@ -7096,6 +7275,336 @@ fn persist_launched_sending_record(
     ))
 }
 
+struct ResumePlan {
+    preamble: Vec<String>,
+    modal_spindle_s: Option<f64>,
+    resume_in_cut_motion: bool,
+}
+
+fn parse_mpos_value(val: Option<&serde_json::Value>) -> Option<(f64, f64, f64)> {
+    let arr = val?.as_array()?;
+    if arr.len() < 2 {
+        return None;
+    }
+    let x = arr.first()?.as_f64()?;
+    let y = arr.get(1)?.as_f64()?;
+    let z = arr.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    (x.is_finite() && y.is_finite() && z.is_finite()).then_some((x, y, z))
+}
+
+fn parse_gcode_words(line: &str) -> Vec<(char, f64)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('$') || trimmed.starts_with(';') {
+        return Vec::new();
+    }
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    let mut words = Vec::new();
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b.is_ascii_alphabetic() {
+            let letter = (b as char).to_ascii_uppercase();
+            i += 1;
+            while i < bytes.len() && bytes[i] == b' ' {
+                i += 1;
+            }
+            let start = i;
+            if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                i += 1;
+            }
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+            if i > start
+                && let Ok(num_str) = std::str::from_utf8(&bytes[start..i])
+                && let Ok(val) = num_str.parse::<f64>()
+                && val.is_finite()
+            {
+                words.push((letter, val));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    words
+}
+
+/// 从断点前已确认行 `prefix` 重建 `0x18` 软复位丢失的控制器模态头与精确 `G92` 偏移。
+/// 所有预热恢复行均使用 `S0`（零功率），绝不在静止或快速归位期间出光。
+fn build_resume_plan(
+    prefix: &[String],
+    origin_mpos: Option<(f64, f64, f64)>,
+    current_mpos: Option<(f64, f64, f64)>,
+) -> ResumePlan {
+    let mut units: Option<&'static str> = None;
+    let mut plane: Option<&'static str> = None;
+    let mut wcs: Option<&'static str> = None;
+    let mut feed_mode: Option<&'static str> = None;
+    let mut distance_mode: &'static str = "G90";
+    let mut motion_mode: &'static str = "G0";
+    let mut spindle_mode: &'static str = "M5";
+    let mut feed_rate: Option<f64> = None;
+    let mut last_s: f64 = 0.0;
+
+    let mut phys_x: f64 = 0.0;
+    let mut phys_y: f64 = 0.0;
+    let mut work_x: f64 = 0.0;
+    let mut work_y: f64 = 0.0;
+    let mut offset_x: f64 = 0.0;
+    let mut offset_y: f64 = 0.0;
+    let mut has_g92_x = false;
+    let mut has_g92_y = false;
+    let mut known_work_x = false;
+    let mut known_work_y = false;
+
+    for line in prefix {
+        let words = parse_gcode_words(line);
+        if words.is_empty() {
+            continue;
+        }
+        let mut is_g92 = false;
+        let mut is_g92_reset = false;
+        let mut non_modal_no_track = false;
+        let mut x_word: Option<f64> = None;
+        let mut y_word: Option<f64> = None;
+
+        for &(letter, val) in &words {
+            match letter {
+                'G' => {
+                    if (val - 92.1).abs() < 1e-4 || (val - 92.2).abs() < 1e-4 {
+                        is_g92_reset = true;
+                    } else if (val - 92.0).abs() < 1e-4 {
+                        is_g92 = true;
+                    } else {
+                        let code = val.round() as i32;
+                        if (val - f64::from(code)).abs() < 1e-4 {
+                            match code {
+                                0 => motion_mode = "G0",
+                                1 => motion_mode = "G1",
+                                2 => motion_mode = "G2",
+                                3 => motion_mode = "G3",
+                                4 | 10 | 28 | 30 | 53 => non_modal_no_track = true,
+                                17 => plane = Some("G17"),
+                                18 => plane = Some("G18"),
+                                19 => plane = Some("G19"),
+                                20 => units = Some("G20"),
+                                21 => units = Some("G21"),
+                                54 => wcs = Some("G54"),
+                                55 => wcs = Some("G55"),
+                                56 => wcs = Some("G56"),
+                                57 => wcs = Some("G57"),
+                                58 => wcs = Some("G58"),
+                                59 => wcs = Some("G59"),
+                                90 => distance_mode = "G90",
+                                91 => distance_mode = "G91",
+                                93 => feed_mode = Some("G93"),
+                                94 => feed_mode = Some("G94"),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                'M' => match val.round() as i32 {
+                    3 => spindle_mode = "M3",
+                    4 => spindle_mode = "M4",
+                    5 => {
+                        spindle_mode = "M5";
+                        last_s = 0.0;
+                    }
+                    _ => {}
+                },
+                'F' if val > 0.0 => feed_rate = Some(val),
+                'S' if val >= 0.0 => last_s = val,
+                'X' => x_word = Some(val),
+                'Y' => y_word = Some(val),
+                _ => {}
+            }
+        }
+
+        if is_g92_reset {
+            has_g92_x = false;
+            has_g92_y = false;
+            offset_x = 0.0;
+            offset_y = 0.0;
+            work_x = phys_x;
+            work_y = phys_y;
+        } else if is_g92 {
+            if let Some(gx) = x_word {
+                has_g92_x = true;
+                known_work_x = true;
+                work_x = gx;
+                offset_x = gx - phys_x;
+            }
+            if let Some(gy) = y_word {
+                has_g92_y = true;
+                known_work_y = true;
+                work_y = gy;
+                offset_y = gy - phys_y;
+            }
+        } else if !non_modal_no_track {
+            if let Some(tx) = x_word {
+                if distance_mode == "G90" {
+                    let dx = tx - work_x;
+                    phys_x += dx;
+                    work_x = tx;
+                    known_work_x = true;
+                } else {
+                    phys_x += tx;
+                    work_x += tx;
+                }
+            }
+            if let Some(ty) = y_word {
+                if distance_mode == "G90" {
+                    let dy = ty - work_y;
+                    phys_y += dy;
+                    work_y = ty;
+                    known_work_y = true;
+                } else {
+                    phys_y += ty;
+                    work_y += ty;
+                }
+            }
+        }
+    }
+
+    let mut preamble = vec!["M5 S0".to_owned()];
+    if let Some(u) = units {
+        preamble.push(u.to_owned());
+    }
+    if let Some(p) = plane {
+        preamble.push(p.to_owned());
+    }
+    if let Some(w) = wcs {
+        preamble.push(w.to_owned());
+    }
+    if let Some(fm) = feed_mode {
+        preamble.push(fm.to_owned());
+    }
+    preamble.push("G90".to_owned());
+
+    if has_g92_x || has_g92_y {
+        let (cur_wx, cur_wy) = match (origin_mpos, current_mpos) {
+            (Some((ox, oy, _)), Some((cx, cy, _))) if units != Some("G20") => {
+                (offset_x + (cx - ox), offset_y + (cy - oy))
+            }
+            _ => (work_x, work_y),
+        };
+        let mut g92 = String::from("G92");
+        if has_g92_x {
+            g92.push_str(&format!(" X{cur_wx:.3}"));
+        }
+        if has_g92_y {
+            g92.push_str(&format!(" Y{cur_wy:.3}"));
+        }
+        preamble.push(g92);
+    }
+
+    if known_work_x || known_work_y {
+        let mut g0 = String::from("G0");
+        if known_work_x {
+            g0.push_str(&format!(" X{work_x:.3}"));
+        }
+        if known_work_y {
+            g0.push_str(&format!(" Y{work_y:.3}"));
+        }
+        preamble.push(g0);
+    }
+    if (!known_work_x || !known_work_y)
+        && units != Some("G20")
+        && let (Some((ox, oy, _)), Some((cx, cy, _))) = (origin_mpos, current_mpos)
+    {
+        let dx = (ox + phys_x) - cx;
+        let dy = (oy + phys_y) - cy;
+        let need_x = !known_work_x && dx.abs() > 1e-4;
+        let need_y = !known_work_y && dy.abs() > 1e-4;
+        if need_x || need_y {
+            let mut rel_g0 = String::from("G0");
+            if need_x {
+                rel_g0.push_str(&format!(" X{dx:.3}"));
+            }
+            if need_y {
+                rel_g0.push_str(&format!(" Y{dy:.3}"));
+            }
+            preamble.push("G91".to_owned());
+            preamble.push(rel_g0);
+            preamble.push("G90".to_owned());
+        }
+    }
+
+    if let Some(f) = feed_rate {
+        preamble.push(format!("G1 F{f:.3} S0"));
+        if motion_mode == "G0" {
+            preamble.push("G0".to_owned());
+        }
+    } else if motion_mode != "G0" {
+        preamble.push("G1 S0".to_owned());
+    }
+
+    if spindle_mode != "M5" {
+        preamble.push(format!("{spindle_mode} S0"));
+    }
+    if distance_mode == "G91" {
+        preamble.push("G91".to_owned());
+    }
+
+    let modal_spindle_s = (spindle_mode != "M5" && last_s > 0.0).then_some(last_s);
+    ResumePlan {
+        preamble,
+        modal_spindle_s,
+        resume_in_cut_motion: motion_mode != "G0",
+    }
+}
+
+/// 当断点前处于 M3/M4 且有非零模态 `S`，而续雕起始切割行依赖模态 `S`（未显式写 `S`）时，
+/// 在首条切割运动行补上模态 `S`，既不增加行数也不在静止期出光。
+fn apply_modal_spindle_to_remaining(
+    remaining: &mut [String],
+    modal_s: Option<f64>,
+    mut in_cut_motion: bool,
+) {
+    let Some(s_val) = modal_s else {
+        return;
+    };
+    for line in remaining.iter_mut() {
+        let words = parse_gcode_words(line);
+        if words.is_empty() {
+            continue;
+        }
+        let mut has_s = false;
+        let mut has_m5 = false;
+        let mut has_xy = false;
+        for &(letter, val) in &words {
+            match letter {
+                'S' => has_s = true,
+                'M' if val.round() as i32 == 5 => has_m5 = true,
+                'G' => match val.round() as i32 {
+                    0 if (val - 0.0).abs() < 1e-4 => in_cut_motion = false,
+                    1..=3 if (val - val.round()).abs() < 1e-4 => in_cut_motion = true,
+                    _ => {}
+                },
+                'X' | 'Y' => has_xy = true,
+                _ => {}
+            }
+        }
+        if has_m5 || has_s {
+            break;
+        }
+        if in_cut_motion && has_xy {
+            let formatted_s = if (s_val - s_val.round()).abs() < 1e-6 {
+                format!("{}", s_val.round() as i64)
+            } else {
+                format!("{s_val:.3}")
+            };
+            line.push_str(&format!(" S{formatted_s}"));
+            break;
+        }
+    }
+}
+
 /// 已全量完成且无活动发送的任务不可再取消：`completed` 是设备逐行确认后的历史记录，
 /// 改写成 `cancelled` 会抹掉事实，此时取消也不会向设备发出任何字节。
 fn cancel_completed_rejected() -> Vec<u8> {
@@ -7398,6 +7907,18 @@ fn handle_workflow_store_request(
                 .get("send_result")
                 .cloned()
                 .unwrap_or_default();
+            if send_result.get("mode").and_then(|v| v.as_str()) == Some("sd_offline")
+                || send_result.get("can_resume").and_then(|v| v.as_bool()) == Some(false)
+                || object.get("offline_sd").and_then(|v| v.as_bool()) == Some(true)
+            {
+                return http_json(
+                    400,
+                    failure(
+                        "该任务不支持按行断点续雕（如 SD 脱机整文件作业或未产生可恢复断点），请重新发起确认发送",
+                        Some(serde_json::json!({"error_code": "workflow_not_resumable"})),
+                    ),
+                );
+            }
             let lines_sent = send_result
                 .get("lines_sent")
                 .and_then(|v| v.as_u64())
@@ -7488,6 +8009,15 @@ fn handle_workflow_store_request(
             }
             let gcode_path = preflight.gcode_path.clone().unwrap_or_default();
             let mut resume_object = object.clone();
+            resume_object.remove("_origin_mpos");
+            if let Some(origin_mpos) = stored
+                .payload
+                .get("send_result")
+                .and_then(|sr| sr.get("origin_mpos"))
+                .cloned()
+            {
+                resume_object.insert("_origin_mpos".into(), origin_mpos);
+            }
             resume_object.insert("start_from_line".into(), serde_json::json!(lines_sent));
             let snapshot_before_launch = stored.payload.clone();
             let send_result = match launch(&workflow_id, gcode_path, &gcode_sha, &resume_object) {
@@ -17266,5 +17796,255 @@ Content-Length: 30
             grbl.realtime().contains(&b'!'),
             "存储报错时仍必须向硬件写出实时 FeedHold (!)"
         );
+    }
+
+    #[test]
+    fn serve_reuses_loopback_keep_alive_connection_across_requests() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let service = std::sync::Arc::new(ApiService::new(
+            laser_runtime::LaserSettings {
+                default_connection_mode: "network".into(),
+                engraving_mode: "raster".into(),
+                web_host: "127.0.0.1".into(),
+                web_port: 0,
+                material_params_file: None,
+            },
+            laser_contracts::builtin_material_library(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let _ = ApiService::serve(listener, service);
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+
+        // 同一 TCP 连接连续管线化发送 2 个 Keep-Alive 请求 + 1 个显式 close 请求
+        let pipelined = concat!(
+            "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /v1/capabilities HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        );
+        client.write_all(pipelined.as_bytes()).unwrap();
+
+        let mut raw = Vec::new();
+        client.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8(raw).unwrap();
+        assert_eq!(
+            text.matches("HTTP/1.1 200 OK").count(),
+            3,
+            "同一回环连接应连续返回 3 个 200 响应: {text}"
+        );
+        assert_eq!(
+            text.matches("Connection: keep-alive").count(),
+            2,
+            "前两个请求应保持 keep-alive"
+        );
+        assert_eq!(
+            text.matches("Connection: close").count(),
+            1,
+            "带 Connection: close 的末个请求应正常关闭连接"
+        );
+    }
+
+    #[test]
+    fn resume_reconstructs_g92_offset_modals_and_rejects_sd_offline() {
+        let prefix = vec![
+            "G21".to_owned(),
+            "G90".to_owned(),
+            "M5".to_owned(),
+            "G92 X-15.000 Y-5.000".to_owned(),
+            "M4 S0".to_owned(),
+            "G0 X-15.000 Y-5.000 F3000".to_owned(),
+            "G1 X15.000 Y-5.000 F1200 S450".to_owned(),
+        ];
+        // 开工时 MPos=(100,50,0) 处执行了 G92 X-15 Y-5；急停减速后停在 MPos=(132,53,0)，0x18 清空了 G92/F/M4
+        let plan = build_resume_plan(&prefix, Some((100.0, 50.0, 0.0)), Some((132.0, 53.0, 0.0)));
+        assert_eq!(plan.preamble[0], "M5 S0");
+        assert!(
+            plan.preamble.contains(&"G92 X17.000 Y-2.000".to_owned()),
+            "必须根据 origin_mpos 与 current_mpos 精确还原 G92 偏移: {:?}",
+            plan.preamble
+        );
+        assert!(
+            plan.preamble.contains(&"G0 X15.000 Y-5.000".to_owned()),
+            "必须在激光关闭态快速回到断点期望坐标: {:?}",
+            plan.preamble
+        );
+        assert!(
+            plan.preamble.contains(&"G1 F1200.000 S0".to_owned()),
+            "必须恢复切割进给率 F1200 以避免 error:22: {:?}",
+            plan.preamble
+        );
+        assert!(
+            plan.preamble.contains(&"M4 S0".to_owned()),
+            "必须以零功率恢复 M4 动态激光模式: {:?}",
+            plan.preamble
+        );
+
+        let mut remaining = vec![
+            "G1 X15.000 Y5.000".to_owned(),
+            "G1 X-15.000 Y5.000 S300".to_owned(),
+        ];
+        apply_modal_spindle_to_remaining(
+            &mut remaining,
+            plan.modal_spindle_s,
+            plan.resume_in_cut_motion,
+        );
+        assert_eq!(remaining[0], "G1 X15.000 Y5.000 S450");
+        assert_eq!(remaining[1], "G1 X-15.000 Y5.000 S300");
+
+        // 纯 G91 增量刀路（无 G90/G92）：急停减速滑行后必须按物理位移差 G91 G0 纠偏再恢复 G91 模态
+        let g91_prefix = vec![
+            "G21".to_owned(),
+            "G91".to_owned(),
+            "M4 S0".to_owned(),
+            "G1 X10.000 Y5.000 F1200 S500".to_owned(),
+        ];
+        let g91_plan = build_resume_plan(
+            &g91_prefix,
+            Some((100.0, 200.0, 0.0)),
+            Some((112.5, 204.0, 0.0)),
+        );
+        assert!(
+            g91_plan.preamble.contains(&"G0 X-2.500 Y1.000".to_owned()),
+            "纯 G91 刀路应根据 MPos 物理差输出增量预定位: {:?}",
+            g91_plan.preamble
+        );
+        assert_eq!(g91_plan.preamble.last().map(String::as_str), Some("G91"));
+
+        // SD 脱机作业记录必须拒绝按行断点续雕
+        let temp = tempfile::tempdir().unwrap();
+        let service = ApiService::new(
+            test_loopback_settings(),
+            laser_contracts::builtin_material_library(),
+        )
+        .with_generated_root(temp.path().to_path_buf())
+        .with_preview_roots(vec![temp.path().to_path_buf()]);
+        service.workflows.lock().unwrap().insert(
+            "wf-sd-no-resume".into(),
+            serde_json::json!({
+                "workflow_id": "wf-sd-no-resume",
+                "status": "cancelled",
+                "send_result": {
+                    "mode": "sd_offline",
+                    "can_resume": false,
+                    "lines_sent": 10,
+                    "total_lines": 50
+                }
+            }),
+        );
+        let rejected = post_json(
+            &service,
+            "/api/workflow",
+            &serde_json::json!({
+                "action": "resume",
+                "workflow_id": "wf-sd-no-resume",
+                "confirmed": true
+            }),
+        );
+        assert_eq!(rejected["success"], false);
+        assert_eq!(rejected["detail"]["error_code"], "workflow_not_resumable");
+    }
+
+    #[test]
+    fn material_preset_multipass_and_draw_framing_bounds_are_emitted() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut lib = laser_contracts::builtin_material_library();
+        lib.materials
+            .get_mut("椴木")
+            .unwrap()
+            .thicknesses
+            .get_mut("3")
+            .unwrap()
+            .engrave
+            .as_mut()
+            .unwrap()
+            .outline
+            .as_mut()
+            .unwrap()
+            .passes = 3;
+        let service = ApiService::new(test_loopback_settings(), lib)
+            .with_generated_root(temp.path().to_path_buf())
+            .with_preview_roots(vec![temp.path().to_path_buf()]);
+
+        let font = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/geometry.ttf"
+        );
+        let text_res = post_json(
+            &service,
+            "/api/text-task/generate",
+            &serde_json::json!({
+                "text": "A",
+                "font_path": font,
+                "fill": "outline",
+                "material": "椴木",
+                "thickness_mm": 3
+            }),
+        );
+        assert_eq!(text_res["success"], true, "{text_res}");
+        assert_eq!(
+            text_res["result"]["artifacts"]["actual_params"]["passes"],
+            3
+        );
+        let gcode_name = text_res["result"]["artifacts"]["gcode_file"]
+            .as_str()
+            .unwrap();
+        let gcode_text = std::fs::read_to_string(temp.path().join(gcode_name)).unwrap();
+        assert_eq!(
+            gcode_text.matches("; Generated by laser-core").count(),
+            3,
+            "材料预设 passes=3 必须生成 3 遍刀路: {gcode_text}"
+        );
+        assert!(
+            gcode_text.contains("M5\nG90\nG0 X2.500 Y3.500\n"),
+            "多遍刀路换遍回程必须回到 G92 中心原点: {gcode_text}"
+        );
+
+        // 画板预览必须输出 frame_mm 以支持红光走边框
+        let img = image::RgbaImage::from_fn(36, 24, |x, y| {
+            if (6..30).contains(&x) && (6..18).contains(&y) {
+                image::Rgba([0, 0, 0, 255])
+            } else {
+                image::Rgba([255, 255, 255, 255])
+            }
+        });
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        use base64::Engine as _;
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png_bytes)
+        );
+        let draw_res = post_json(
+            &service,
+            "/api/draw/preview",
+            &serde_json::json!({
+                "image_data_url": data_url,
+                "mode": "outline",
+                "width_mm": 30.0,
+                "height_mm": 20.0,
+                "material": "椴木",
+                "thickness_mm": 3
+            }),
+        );
+        assert_eq!(draw_res["success"], true, "{draw_res}");
+        assert_eq!(
+            draw_res["result"]["artifacts"]["actual_params"]["passes"],
+            3
+        );
+        assert_eq!(draw_res["result"]["artifacts"]["frame_mm"]["max_x"], 30.0);
+        assert_eq!(draw_res["result"]["artifacts"]["frame_mm"]["max_y"], 20.0);
     }
 }

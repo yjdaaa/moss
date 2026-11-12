@@ -846,5 +846,44 @@ mod tests {
             "带 source_ref 的防重导入墓碑不得被清理"
         );
         assert!(db.context_memory("ctx-live").unwrap().is_some());
+
+        // 验证孤儿自动生成产物清理：保留仍在库中引用的文件与近期文件，只回收 7 天前已无引用的自动生成文件
+        let temp = tempfile::tempdir().unwrap();
+        let gen_dir = temp.path().join("generated_assets");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        let kept_by_ref = gen_dir.join("text-keep-ref.gcode");
+        let kept_recent = gen_dir.join("text-keep-recent.png");
+        let orphan_old = gen_dir.join("draw-orphan-old.gcode");
+        let non_artifact = gen_dir.join("notes.txt");
+        for p in [&kept_by_ref, &kept_recent, &orphan_old, &non_artifact] {
+            std::fs::write(p, b"G0 X0 Y0\n").unwrap();
+        }
+        db.connection
+            .execute(
+                "INSERT INTO workflows(workflow_id,status,gcode_path,created_at,updated_at,payload)
+                 VALUES('wf-ref','completed','generated_assets/text-keep-ref.gcode',10.0,10.0,'{\"image_file\":\"kept.png\"}')",
+                [],
+            )
+            .unwrap();
+        let now_file_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        // 模拟 now 在当前真实 mtime 的 8 天后：kept_by_ref 因在库中引用保留，orphan_old 被回收，notes.txt 非生成后缀保留
+        let fake_future_now = now_file_secs + 8.0 * 86_400.0;
+        let _ = db
+            .prune_orphan_generated_files(&[gen_dir.as_path()], now_file_secs + 3600.0)
+            .unwrap();
+        assert!(orphan_old.exists(), "未满 7 天宽限期的文件不得清理");
+        let cleaned = db
+            .prune_orphan_generated_files(&[gen_dir.as_path()], fake_future_now)
+            .unwrap();
+        assert_eq!(
+            cleaned, 2,
+            "应只回收 2 个超期无引用生成产物 (kept_recent + orphan_old)"
+        );
+        assert!(kept_by_ref.exists(), "仍在 workflows 引用的文件必须保留");
+        assert!(!orphan_old.exists(), "超期无引用的孤儿 .gcode 应被回收");
+        assert!(non_artifact.exists(), "非生成产物后缀文件不得误删");
     }
 }

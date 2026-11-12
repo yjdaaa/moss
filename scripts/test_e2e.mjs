@@ -213,9 +213,14 @@ async function main() {
     TEST_GRBL_PORT: String(grblPort),
   };
 
+  const apiOnly = process.argv.includes("--api-only") || process.env.MOSS_E2E_API_ONLY === "1";
+  const suiteFiles = apiOnly
+    ? ["frontend/tests/e2e/api.test.mjs"]
+    : ["frontend/tests/e2e/api.test.mjs", "frontend/tests/e2e/workbench.ui.test.mjs"];
+
   const testProc = spawn(
     process.execPath,
-    ["--test", "--test-concurrency=1", "frontend/tests/e2e/api.test.mjs", "frontend/tests/e2e/workbench.ui.test.mjs"],
+    ["--test", "--test-concurrency=1", ...suiteFiles],
     {
       cwd: ROOT_DIR,
       env: testEnv,

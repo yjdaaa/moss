@@ -530,12 +530,22 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
     refreshLog();
     refreshApprovals();
     const timer = setInterval(() => {
-      refresh();
-      refreshApprovals();
+      if (!document.hidden) {
+        refresh();
+        refreshApprovals();
+      }
     }, VOICE_POLL_MS);
+    const onVisibility = () => {
+      if (!document.hidden) {
+        refresh();
+        refreshApprovals();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       mounted.current = false;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [refresh, refreshLog, refreshApprovals]);
 

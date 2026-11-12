@@ -37,7 +37,7 @@ const SOURCE_SHORT = { mcp_bridge: "小智", lan: "局域网设备", gateway: "�
  * 只在桌面端（有桌面会话）工作；浏览器与 Android 不轮询、不显示。
  * 批准后加工任务进入发送覆盖层（STAGE_MAP 四步不变），全程可“取消后续发送”与“急停 0x18”。
  */
-export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
+export function ApprovalCenter({ open, onOpenChange, onPendingCountChange, onPendingTargetsChange = null }) {
   const [pending, setPending] = useState([]);
   const [offset, setOffset] = useState(0);
   const [ttl, setTtl] = useState(120);
@@ -51,6 +51,7 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
   const [job, setJob] = useState(null);
   const seenRef = useRef(new Set());
   const dismissedRef = useRef(new Set());
+  const targetsSigRef = useRef(null);
   const jobRef = useRef(null);
   jobRef.current = job;
   const enabled = hasDesktopSession();
@@ -63,8 +64,18 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
       const res = await getJson("/v1/approvals?status=pending");
       if (cancelled || !isCurrent() || !(res.ok && res.data?.success)) return;
       const result = res.data.result || {};
-      const list = orderPending(result.approvals).filter((item) => !dismissedRef.current.has(item.approval_id));
-      setOffset(clockOffsetSeconds(result.server_time));
+      const rawApprovals = Array.isArray(result.approvals) ? result.approvals : [];
+      if (typeof onPendingTargetsChange === "function") {
+        const targets = rawApprovals.map((item) => item?.target_record).filter(Boolean);
+        const nextSig = targets.join("\n");
+        if (nextSig !== targetsSigRef.current) {
+          targetsSigRef.current = nextSig;
+          onPendingTargetsChange(targets);
+        }
+      }
+      const list = orderPending(rawApprovals).filter((item) => !dismissedRef.current.has(item.approval_id));
+      const nextOffset = clockOffsetSeconds(result.server_time);
+      setOffset((prev) => (Math.abs(nextOffset - prev) >= 1 ? nextOffset : prev));
       if (typeof result.ttl_seconds === "number") setTtl(result.ttl_seconds);
       setPending((previous) => {
         if (list.length === 0 && previous.length === 0) return previous;
@@ -82,13 +93,20 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
       if (fresh.length > 0 && !jobRef.current) onOpenChange?.(true);
     });
     void sync();
-    const timer = setInterval(() => void sync(), APPROVAL_POLL_MS);
+    const timer = setInterval(() => {
+      if (!document.hidden) void sync();
+    }, APPROVAL_POLL_MS);
+    const onVisibility = () => {
+      if (!document.hidden) void sync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
       sync.invalidate();
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [enabled, onOpenChange, onPendingCountChange]);
+  }, [enabled, onOpenChange, onPendingCountChange, onPendingTargetsChange]);
 
   // 选择当前显示的请求：失败原因显示期间保持不变
   useEffect(() => {
@@ -142,9 +160,14 @@ export function ApprovalCenter({ open, onOpenChange, onPendingCountChange }) {
     setPending((list) => {
       const next = list.filter((item) => item.approval_id !== approvalId);
       onPendingCountChange?.(next.length);
+      if (typeof onPendingTargetsChange === "function") {
+        const targets = next.map((item) => item?.target_record).filter(Boolean);
+        targetsSigRef.current = targets.join("\n");
+        onPendingTargetsChange(targets);
+      }
       return next;
     });
-  }, [onPendingCountChange]);
+  }, [onPendingCountChange, onPendingTargetsChange]);
 
   useEffect(() => {
     if (!shown || failure || busy || remaining > 0) return;

@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Layers, Trash2, X } from "lucide-react";
 import { getJson, postJson } from "../api/client.js";
 import { showConfirm } from "../appDialog.js";
 import { notifyMaterialsUpdated, thicknessesEqual } from "../materialSelectState.js";
+import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
 export function parseThicknessList(str) {
   return String(str || "")
@@ -139,6 +141,22 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
   const [speed, setSpeed] = useState(100);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const backdropRef = useRef(null);
+  const backdropPressRef = useRef(false);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        if (!isTopmostModalBackdrop(backdropRef.current)) return;
+        e.preventDefault();
+        if (busy) return;
+        onClose?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
 
   useEffect(() => {
     if (initialData) {
@@ -279,15 +297,31 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
     }
   };
 
-  return (
-    <div className="mat-modal-backdrop" id="mat-modal">
-      <div className="mat-modal" role="dialog" aria-modal="true">
+  const content = (
+    <div
+      ref={backdropRef}
+      className="mat-modal-backdrop"
+      id="mat-modal"
+      onMouseDown={(e) => {
+        backdropPressRef.current = e.button === 0 && e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) backdropPressRef.current = false;
+      }}
+      onClick={(e) => {
+        if (backdropPressRef.current && e.target === e.currentTarget && !busy) {
+          onClose?.();
+        }
+        backdropPressRef.current = false;
+      }}
+    >
+      <div className="mat-modal" role="dialog" aria-modal="true" aria-labelledby="mat-modal-title">
         <div className="mat-modal-head">
           <h3 id="mat-modal-title">
             <Layers size={18} className="mat-form-icon" />
             <span>{isEditing ? "编辑材料" : "添加材料"}</span>
           </h3>
-          <button className="mat-modal-close" onClick={onClose} title="关闭">
+          <button type="button" className="mat-modal-close" onClick={onClose} title="关闭" aria-label="关闭" disabled={busy}>
             <X size={16} />
           </button>
         </div>
@@ -365,6 +399,7 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
         <div className="mat-modal-foot">
           {isEditing && (
             <button
+              type="button"
               className="btn btn-ghost mat-del-btn mat-form-btn"
               onClick={handleDelete}
               disabled={busy}
@@ -373,14 +408,17 @@ function MaterialModalDialog({ initialData, onClose, onSaved, onDeleted }) {
               删除材料
             </button>
           )}
-          <button className="btn btn-ghost" onClick={onClose} disabled={busy}>
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
             取消
           </button>
-          <button className="btn btn-primary" onClick={handleSave} disabled={busy}>
+          <button type="button" className="btn btn-primary" onClick={handleSave} disabled={busy}>
             {busy ? "保存中..." : isEditing ? "保存修改" : "确认添加"}
           </button>
         </div>
       </div>
     </div>
   );
+  return typeof document !== "undefined" && document.body
+    ? createPortal(content, document.body)
+    : content;
 }

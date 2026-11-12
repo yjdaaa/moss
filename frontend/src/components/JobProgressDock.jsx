@@ -95,7 +95,7 @@ export function JobProgressDock({ onJobsChange = null } = {}) {
         // 读取失败时明确说数据可能过期，不把上一次的百分比当成还在跑
         setError("读取任务进度失败，下面的进度可能已过期");
       }
-      if (!cancelled) timer = setTimeout(poll, JOB_POLL_MS);
+      if (!cancelled && !document.hidden) timer = setTimeout(poll, JOB_POLL_MS);
     };
     const onVisibility = () => {
       if (!document.hidden && !cancelled) {

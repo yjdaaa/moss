@@ -218,6 +218,7 @@ export function DrawPage({ onNavigate }) {
     power: customPower,
     feed: customFeed,
     passes: customPasses,
+    presetParams: hasRec ? `${recPowerPct}/${recFeedMpm}/${recPasses}` : "",
   });
   const previewStale = Boolean(workflowId) && isDrawPreviewStale(previewSnap, {
     sceneRev,
@@ -492,7 +493,11 @@ export function DrawPage({ onNavigate }) {
             setStatus(
               sr.phase === "awaiting_completion"
                 ? `刀路已传输 100%，等待机器执行停稳…`
-                : `正在雕刻下发：${pct}%（${pollState.progress.sent} / ${pollState.progress.total} 行）`,
+                : sr.mode === "sd_offline"
+                  ? pct === 0
+                    ? "正在上传并校验 SD 脱机文件哈希…"
+                    : `正在 SD 脱机加工：${pct}%（${pollState.progress.sent} / ${pollState.progress.total} 行）`
+                  : `正在雕刻下发：${pct}%（${pollState.progress.sent} / ${pollState.progress.total} 行）`,
             );
           }
         }
@@ -695,10 +700,8 @@ export function DrawPage({ onNavigate }) {
         applyConfirmSendResponse(current, res.ok ? data : { ...data, success: false }, safeBrowserStorage()),
       );
       if (res.ok && data.success) {
-        setStatus(data.result?.speech || (offlineSd ? "已启动 SD 脱机加工" : "已开始雕刻下发，正在同步进度..."));
-        if (!offlineSd) {
-          startDrawJobPolling(workflowId);
-        }
+        setStatus(data.result?.speech || (offlineSd ? "已启动 SD 脱机加工，正在同步进度..." : "已开始雕刻下发，正在同步进度..."));
+        startDrawJobPolling(workflowId);
       } else {
         setStatus((typeof data.result === "string" && data.result) || "发送被拒绝");
       }

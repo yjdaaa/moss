@@ -105,6 +105,14 @@ body,
   padding: 0;
 }
 
+/* 吸顶顶栏（.ob-top）动态写入 --ob-top-h；根滚动口预留顶部安全间距，防止焦点跳转与自动滚入视口时按钮被顶栏盖住 */
+html {
+  scroll-padding-top: calc(var(--ob-top-h, 64px) + 12px);
+}
+html:has(.ob-top--compact) {
+  scroll-padding-top: 56px;
+}
+
 body {
   background: var(--bg-0);
   color: var(--ink);
@@ -219,7 +227,6 @@ a:hover {
    ============================================================ */
 .laser-app-root {
   position: relative;
-  z-index: 1;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -918,12 +925,22 @@ input[type="radio"] {
 .mat-modal,
 .send-confirm-dialog {
   width: min(460px, 100%);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
   border: 1px solid rgba(139, 123, 255, 0.35) !important;
   border-radius: 12px;
   background: rgba(20, 20, 23, 0.96) !important;
   backdrop-filter: blur(24px);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.9), 0 0 35px rgba(139, 123, 255, 0.15) !important;
   overflow: hidden;
+}
+
+.send-confirm-dialog {
+  display: block;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .settings-modal {
@@ -934,6 +951,7 @@ input[type="radio"] {
 
 .mat-modal-head,
 .confirm-heading {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -944,6 +962,13 @@ input[type="radio"] {
 
 .mat-modal-body {
   padding: 20px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.mat-modal-foot {
+  flex-shrink: 0;
 }
 
 .settings-modal .mat-modal-body {
@@ -2238,6 +2263,11 @@ input[type="radio"] {
   letter-spacing: 2px;
   -webkit-text-fill-color: var(--ob-ink-3);
 }
+@media (max-width: 1120px) {
+  .ob-title small {
+    display: none;
+  }
+}
 .ob-top-spacer {
   flex: 1;
 }
@@ -2875,6 +2905,9 @@ input:not([type]):focus {
   backdrop-filter: blur(14px) saturate(130%) !important;
   -webkit-backdrop-filter: blur(14px) saturate(130%) !important;
 }
+.app-dialog-backdrop {
+  z-index: 150;
+}
 .mat-modal,
 .send-confirm-dialog,
 .app-dialog {
@@ -3489,14 +3522,14 @@ input:not([type]):focus {
    ============================================================ */
 
 /* ---- 应用对话框 AppDialog（UI-02：原组件内联样式迁移，2026-10-13） ---- */
-.app-dialog-ext-box { z-index: 140; }
+.app-dialog-ext-box { z-index: 150; }
 
 /* ---- 审批中心 ApprovalCenter（UI-02：原组件内联样式迁移，2026-10-13） ---- */
 .approval-center-box { z-index: 125; }
 .approval-center-code.approval-center-code { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
 
 /* ---- 配对认证 AuthModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
-.auth-box { z-index: 100; }
+.auth-box { z-index: 132; }
 .auth-box-2 { max-width: 380px; }
 .auth-heading.auth-heading { display: flex; align-items: center; gap: 6px; }
 .auth-note.auth-note { font-size: 13px; color: var(--ink-dim, #94a3b8); margin-top: 0; }
@@ -3506,7 +3539,7 @@ input:not([type]):focus {
 .auth-btn.auth-btn.auth-btn { background: transparent; border: none; color: #ef4444; cursor: pointer; font-size: 11px; text-decoration: underline; }
 
 /* ---- 关闭确认 CloseConfirmModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
-.close-confirm-box { z-index: 120; }
+.close-confirm-box { z-index: 140; }
 .close-confirm-box-2 { max-width: 420px; }
 .close-confirm-heading.close-confirm-heading { display: flex; align-items: center; gap: 8px; margin: 0; }
 .close-confirm-icon.close-confirm-icon.close-confirm-icon { color: var(--laser, #8b7bff); }
@@ -3551,6 +3584,7 @@ input:not([type]):focus {
 .export-settings-label.export-settings-label.export-settings-label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 
 /* ---- 材料编辑 MaterialModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
+#mat-modal { z-index: 110; }
 .mat-form-icon { margin-right: 6px; vertical-align: middle; color: var(--ob-accent-2, #8b7bff); }
 .mat-form-box { display: block; color: var(--danger); margin-top: 4px; padding: 8px 12px; border-radius: 8px; background: rgba(255, 59, 92, 0.12); border: 1px solid rgba(255, 59, 92, 0.3); font-size: 12px; }
 .mat-form-btn.mat-form-btn.mat-form-btn { color: var(--ob-red-2, #ff6b84) !important; border-color: rgba(255, 59, 92, 0.28) !important; margin-right: auto; }
@@ -3612,7 +3646,7 @@ input:not([type]):focus {
 .send-overlay-btn.send-overlay-btn.send-overlay-btn { border-color: var(--line); }
 
 /* ---- 偏好设置 SettingsModal（UI-02：原组件内联样式迁移，2026-10-13） ---- */
-.settings-box { z-index: 110; }
+.settings-box { z-index: 115; }
 .settings-box-2 { max-width: 480px; }
 .settings-heading.settings-heading { display: flex; align-items: center; gap: 8px; margin: 0; }
 .settings-icon.settings-icon.settings-icon { color: var(--laser, #8b7bff); }
@@ -5732,11 +5766,12 @@ label.twin-metric-box > input.twin-range-slider {
 /* 应用内更新进度与顶栏提示条（2026-11-07） */
 .app-update-banner {
   display: inline-flex; align-items: center; gap: 6px;
+  min-width: 0; max-width: 100%;
   padding: 3px 4px 3px 12px; border-radius: 999px;
   border: 1px solid rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.1);
   font-size: 12px; color: var(--ob-ink); white-space: nowrap;
 }
-.app-update-banner-text { min-width: 0; }
+.app-update-banner-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .app-update-banner-text strong { color: var(--gold); font-weight: 600; }
 .app-update-banner-btn {
   padding: 3px 10px; min-height: 24px; border-radius: 999px; border: 0;

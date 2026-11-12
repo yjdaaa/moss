@@ -32,7 +32,7 @@ import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } fro
  * 严格模式下 AI 口头确认只会生成审批，此时由全局审批卡处理，本窗口不重复弹出。
  * 只在桌面端（有桌面会话）工作。
  */
-export function AiPreviewCenter() {
+export function AiPreviewCenter({ pendingApprovalTargets = null } = {}) {
   const [pending, setPending] = useState([]);
   const [shown, setShown] = useState(null);
   const [hidden, setHidden] = useState(false);
@@ -47,26 +47,55 @@ export function AiPreviewCenter() {
   const dismissedRef = useRef(new Set());
   const watchedRef = useRef(new Map());
   const sinceRef = useRef(Math.floor(Date.now() / 1000) - AI_PREVIEW_LOOKBACK_SECONDS);
+  const externalTargetsRef = useRef(pendingApprovalTargets);
+  externalTargetsRef.current = pendingApprovalTargets;
   const jobRef = useRef(null);
   jobRef.current = job;
   const enabled = hasDesktopSession();
+
+  // 一旦 ApprovalCenter 同步到新的严格模式待批目标，立即从本窗口移交，杜绝双弹窗重叠
+  useEffect(() => {
+    if (!Array.isArray(pendingApprovalTargets) || pendingApprovalTargets.length === 0) return;
+    const targetSet = new Set(pendingApprovalTargets);
+    targetSet.forEach((id) => watchedRef.current.delete(id));
+    setPending((previous) => {
+      if (!previous.some((item) => targetSet.has(item.workflow_id))) return previous;
+      return previous.filter((item) => !targetSet.has(item.workflow_id));
+    });
+  }, [pendingApprovalTargets]);
 
   // 轮询最近任务：新的 AI 预览弹出；已弹出的任务被 AI 口头确认发送后转为发送进度
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
     const sync = createPollRunner(async (isCurrent) => {
-      const [recent, approvals] = await Promise.all([
+      const sharedTargets = externalTargetsRef.current;
+      const [recent, initialApprovals] = await Promise.all([
         postJson("/api/workflow", { action: "recent" }),
-        getJson("/v1/approvals?status=pending"),
+        Array.isArray(sharedTargets) ? Promise.resolve(null) : getJson("/v1/approvals?status=pending"),
       ]);
       if (cancelled || !isCurrent() || !(recent.ok && recent.data?.success)) return;
       const workflows = Array.isArray(recent.data.result?.workflows) ? recent.data.result.workflows : [];
-      const approvalTargets = new Set(
-        (approvals.ok && approvals.data?.success ? approvals.data.result?.approvals || [] : [])
-          .map((item) => item?.target_record)
-          .filter(Boolean),
-      );
+      let approvals = initialApprovals;
+      if (!approvals && Array.isArray(externalTargetsRef.current)) {
+        const provisional = new Set(externalTargetsRef.current);
+        const candidates = pendingAiPreviews(workflows, {
+          since: sinceRef.current,
+          dismissed: dismissedRef.current,
+          approvalTargets: provisional,
+        });
+        if (candidates.some((record) => !watchedRef.current.has(record.workflow_id))) {
+          approvals = await getJson("/v1/approvals?status=pending");
+          if (cancelled || !isCurrent()) return;
+        }
+      }
+      const approvalTargets = approvals
+        ? new Set(
+            (approvals.ok && approvals.data?.success ? approvals.data.result?.approvals || [] : [])
+              .map((item) => item?.target_record)
+              .filter(Boolean),
+          )
+        : new Set(Array.isArray(externalTargetsRef.current) ? externalTargetsRef.current : []);
       // 进入严格模式审批的任务交给审批卡（含之后的发送进度），本窗口不再跟踪，避免两个进度窗
       approvalTargets.forEach((id) => watchedRef.current.delete(id));
       for (const record of workflows) {

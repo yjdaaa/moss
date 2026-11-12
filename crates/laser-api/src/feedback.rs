@@ -60,6 +60,7 @@ pub(super) fn generation_params(
     object: &Map<String, Value>,
     power: f64,
     feed: f64,
+    recommended_passes: u32,
 ) -> Result<Params, String> {
     let mut params = match object.get("feedback_params") {
         Some(value) => {
@@ -72,7 +73,7 @@ pub(super) fn generation_params(
         None => Params {
             power,
             feed,
-            passes: 1,
+            passes: recommended_passes.clamp(1, 5),
             scale: 1000.0,
         },
     };
@@ -127,15 +128,35 @@ fn apply_manual_params(params: &mut Params, value: &Value) -> Result<(), String>
     Ok(())
 }
 
+fn parse_g92_xy(line: &str) -> Option<(f64, f64)> {
+    let rest = line.trim().strip_prefix("G92 ")?;
+    let mut x = None;
+    let mut y = None;
+    for token in rest.split_whitespace() {
+        if let Some(v) = token.strip_prefix('X').or_else(|| token.strip_prefix('x')) {
+            x = v.parse::<f64>().ok();
+        } else if let Some(v) = token.strip_prefix('Y').or_else(|| token.strip_prefix('y')) {
+            y = v.parse::<f64>().ok();
+        }
+    }
+    Some((x.unwrap_or(0.0), y.unwrap_or(0.0)))
+}
+
 /// Only for our absolute-coordinate generated programs, never for uploaded G-code.
 pub(super) fn repeat_generated(program: &str, passes: u32) -> String {
-    if passes == 1 {
+    if passes <= 1 {
         return program.to_owned();
     }
+    let origin = program.lines().find_map(parse_g92_xy).unwrap_or((0.0, 0.0));
+    let return_to_origin = if origin.0.abs() < 1e-6 && origin.1.abs() < 1e-6 {
+        "M5\nG90\nG0 X0 Y0\n".to_owned()
+    } else {
+        format!("M5\nG90\nG0 X{:.3} Y{:.3}\n", origin.0, origin.1)
+    };
     let mut result = String::new();
     for pass in 0..passes {
         if pass > 0 {
-            result.push_str("M5\nG90\nG0 X0 Y0\n");
+            result.push_str(&return_to_origin);
         }
         for line in program.lines() {
             if line.trim() == "M2" || (pass > 0 && line.trim().starts_with("G92 ")) {
@@ -653,14 +674,14 @@ impl ApiService {
         let mut input = workflow["input"].as_object().cloned().unwrap_or_default();
         input.remove("workflow_id");
         input.remove("_artifacts");
+        input.remove("manual_params");
         input.insert("feedback_params".into(), params.json());
         let effective_library = self.effective_material_library()?;
         let artifacts = match workflow["source_type"].as_str() {
             Some("text") => {
                 generate_text_artifacts(&input, self.generated_root.as_deref(), &effective_library)?
             }
-            Some("draw" | "image") => {
-                // 图片任务的预览是抖动后的黑白网格，优先用另存的原图重新处理
+            Some("draw") => {
                 let file = workflow["artifacts"]["source_image_file"]
                     .as_str()
                     .or_else(|| workflow["artifacts"]["image_file"].as_str())
@@ -682,6 +703,39 @@ impl ApiService {
                     }
                 }
                 generate_draw_artifacts(&input, Some(root), &effective_library)?
+            }
+            Some("image") => {
+                // 图片任务的预览是抖动后的黑白网格，优先用另存的原图按原抖动/阈值与像素间距重新处理
+                let file = workflow["artifacts"]["source_image_file"]
+                    .as_str()
+                    .or_else(|| input.get("image_file").and_then(Value::as_str))
+                    .or_else(|| workflow["artifacts"]["image_file"].as_str())
+                    .ok_or("任务素材缺失")?
+                    .to_owned();
+                input.insert("source_type".into(), json!("image"));
+                input.insert("image_file".into(), json!(file));
+                for key in ["material", "thickness_mm"] {
+                    if !input.contains_key(key) {
+                        input.insert(key.into(), workflow["artifacts"][key].clone());
+                    }
+                }
+                let mut roots = self.preview_roots.clone();
+                for extra in [self.generated_root.as_ref(), self.upload_root.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !roots.contains(extra) {
+                        roots.push(extra.clone());
+                    }
+                }
+                generate_image_or_gcode_artifacts(
+                    &input,
+                    self.upload_root.as_deref(),
+                    self.generated_root.as_deref(),
+                    &roots,
+                    &effective_library,
+                )?
+                .ok_or_else(|| "图片预览生成失败".to_owned())?
             }
             _ => return Err("已有 G-code 不能自动改写，请重新生成素材任务".into()),
         };
@@ -803,22 +857,30 @@ mod tests {
             map.insert("manual_params".into(), manual);
             map
         };
-        let base = generation_params(&Map::new(), 600.0, 1200.0).unwrap();
+        let base = generation_params(&Map::new(), 600.0, 1200.0, 1).unwrap();
         assert_eq!((base.power, base.feed, base.passes), (600.0, 1200.0, 1));
+        let preset_multi = generation_params(&Map::new(), 600.0, 1200.0, 3).unwrap();
+        assert_eq!(
+            (preset_multi.power, preset_multi.feed, preset_multi.passes),
+            (600.0, 1200.0, 3)
+        );
         let all = generation_params(
             &object(json!({"power_percent": 60, "feed_rate": 1500, "passes": 2})),
             600.0,
             1200.0,
+            3,
         )
         .unwrap();
         assert_eq!((all.power, all.feed, all.passes), (600.0, 1500.0, 2));
         let only_power =
-            generation_params(&object(json!({"power_percent": 35})), 600.0, 1200.0).unwrap();
+            generation_params(&object(json!({"power_percent": 35})), 600.0, 1200.0, 3).unwrap();
         assert_eq!(
             (only_power.power, only_power.feed, only_power.passes),
-            (350.0, 1200.0, 1)
+            (350.0, 1200.0, 3)
         );
-        assert!(generation_params(&object(json!({"power_percent": null})), 600.0, 1200.0).is_ok());
+        assert!(
+            generation_params(&object(json!({"power_percent": null})), 600.0, 1200.0, 1).is_ok()
+        );
         for bad in [
             json!({"power_percent": 0}),
             json!({"power_percent": 120}),
@@ -831,7 +893,7 @@ mod tests {
             json!("60%"),
         ] {
             assert!(
-                generation_params(&object(bad.clone()), 600.0, 1200.0).is_err(),
+                generation_params(&object(bad.clone()), 600.0, 1200.0, 1).is_err(),
                 "{bad}"
             );
         }
@@ -1212,7 +1274,37 @@ mod tests {
                 regenerated["artifacts"]["gcode_file"],
                 workflow["artifacts"]["gcode_file"]
             );
+            if workflow["source_type"] == "image" {
+                let regen_src = regenerated["artifacts"]["source_image_file"]
+                    .as_str()
+                    .unwrap_or("");
+                assert!(
+                    regen_src.ends_with("-source.png"),
+                    "图片采纳重生成必须走图片管线并生成原图快照 source_image_file: {regen_src}"
+                );
+                assert_eq!(
+                    regenerated["artifacts"]["dithering"], workflow["artifacts"]["dithering"],
+                    "图片采纳重生成必须保留抖动开关"
+                );
+                assert_eq!(
+                    regenerated["artifacts"]["frame_mm"], workflow["artifacts"]["frame_mm"],
+                    "图片采纳重生成必须保留走边框范围"
+                );
+            }
         }
+
+        // repeat_generated 必须回到 G92 声明的工作原点（例如中心原点 G92 X-15.000 Y-5.000），不能硬回 X0 Y0
+        let centered = "G21\nG90\nM5\nG92 X-15.000 Y-5.000\nG0 X-15.000 Y-5.000 F3000\nG1 X15.000 Y-5.000 F1200 S400\nM5\nM2\n";
+        let repeated = repeat_generated(centered, 2);
+        assert!(
+            repeated.contains("M5\nG90\nG0 X-15.000 Y-5.000\nG21\n"),
+            "多遍雕刻回程必须回到 G92 中心原点而非 X0 Y0: {repeated}"
+        );
+        assert_eq!(
+            repeated.matches("G92 ").count(),
+            1,
+            "仅第一遍保留 G92 原点设置"
+        );
     }
 
     #[test]
@@ -1271,7 +1363,9 @@ mod tests {
             .unwrap()
             .set_secret("voice.llm.main", "sk-or-test-fallback", 1.0)
             .unwrap();
-        let (status, preview) = post(&svc, "/api/draw/preview", draw_input());
+        let mut manual_draw = draw_input();
+        manual_draw["manual_params"] = json!({"power_percent": 50, "feed_rate": 1000, "passes": 1});
+        let (status, preview) = post(&svc, "/api/draw/preview", manual_draw);
         assert_eq!(status, 200);
         let wf_id = preview["result"]["workflow_id"].as_str().unwrap();
         let (status, fb) = post(
@@ -1281,6 +1375,29 @@ mod tests {
         );
         assert_eq!(status, 200);
         assert_eq!(fb["result"]["feedback_type"], "too_dark");
+        let fb_id = fb["result"]["feedback_id"].as_str().unwrap();
+        let suggested = fb["result"]["suggested_params"].clone();
+        let (status, accepted) = post(
+            &svc,
+            "/api/feedback/accept",
+            json!({"workflow_id": wf_id, "feedback_id": fb_id, "confirmed": true}),
+        );
+        assert_eq!(status, 200, "{accepted}");
+        let new_wf_id = accepted["result"]["adopted_workflow_id"].as_str().unwrap();
+        let (_, new_wf) = post(
+            &svc,
+            "/api/workflow",
+            json!({"action": "status", "workflow_id": new_wf_id}),
+        );
+        assert_eq!(
+            new_wf["result"]["artifacts"]["actual_params"]["laser_max_power"],
+            suggested["laser_max_power"],
+            "采用反馈建议后新刀路不得被原任务的 manual_params 覆盖: {new_wf}"
+        );
+        assert_eq!(
+            new_wf["result"]["artifacts"]["actual_params"]["feed_rate"],
+            suggested["feed_rate"]
+        );
         assert_eq!(
             local_jev_upstream_model("laya_multilingual"),
             Some("multilingual")

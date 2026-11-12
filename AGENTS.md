@@ -85,5 +85,5 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 ## 构建缓存清理
 
-- **3 天自动清理历史编译缓存（必须）**：每次构建／验证收尾或日常维护时，必须执行 `cargo sweep --time 3` 或运行 `powershell -File scripts/clean-build-cache.ps1`（脚本已内置 `cargo sweep --time 3`，可先加 `-WhatIf` 预览），自动清理超过 3 天未使用的历史编译缓存。`Cargo.toml` 的 `[profile.dev]` 保持 `debug = "line-tables-only"` 以精简 `.pdb` 体积。
+- **3 天自动清理历史编译缓存（必须）**：每次构建／验证收尾或日常维护时，必须执行 `cargo sweep --time 3` 或运行 `powershell -File scripts/clean-build-cache.ps1`（macOS / Linux 运行 `bash scripts/clean-build-cache.sh`，均可加 `-WhatIf` / `--dry-run` 预览），自动清理超过 3 天未使用的历史编译缓存。`Cargo.toml` 的 `[profile.dev]` 保持 `debug = "line-tables-only"` 以精简 `.pdb` 体积。
 - `scripts/clean-build-cache.ps1` 会一并清理超过 3 天的编译产物、`incremental`、`target/tmp`、`codex-*`、子目录误生成的 `target/`，以及 `deps` 里本仓库 crate 的旧哈希产物；保留近 3 天活跃的第三方依赖、交付产物、`node_modules`、源码和 `.runtime/`。

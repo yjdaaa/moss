@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Check } from "lucide-react";
 
 /**
@@ -144,7 +145,13 @@ export function ObsidianSelectHost() {
         }
         return;
       }
-      if (event.key === "Escape" || event.key === "Tab") {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMenu();
+        return;
+      }
+      if (event.key === "Tab") {
         closeMenu();
         return;
       }
@@ -255,7 +262,7 @@ export function ObsidianSelectHost() {
 
   if (!menu) return null;
 
-  return (
+  const popover = (
     <div
       ref={popoverRef}
       className="ob-select-popover"
@@ -313,4 +320,7 @@ export function ObsidianSelectHost() {
       </div>
     </div>
   );
+  return typeof document !== "undefined" && document.body
+    ? createPortal(popover, document.body)
+    : popover;
 }

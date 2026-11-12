@@ -149,6 +149,7 @@ export function SideNav({
               onPointerDown={() => onPreload?.(item.path)}
               className={`ob-nav-item nav-tab${active ? " on active" : ""}`}
               aria-current={active ? "page" : undefined}
+              aria-label={collapsed ? item.label : undefined}
               title={collapsed ? item.label : undefined}
             >
               <Icon size={18} aria-hidden="true" />
@@ -169,6 +170,7 @@ export function SideNav({
             onClick={onToggleCollapsed}
             id="side-collapse-toggle"
             aria-expanded={!collapsed}
+            aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
             title={collapsed ? "展开侧栏" : "收起侧栏（只留图标）"}
           >
             {collapsed ? <PanelLeftOpen size={18} aria-hidden="true" /> : <PanelLeftClose size={18} aria-hidden="true" />}
@@ -179,6 +181,7 @@ export function SideNav({
           type="button"
           className="ob-nav-item"
           onClick={onSettingsClick}
+          aria-label={collapsed ? "偏好设置" : undefined}
           title={collapsed ? "偏好设置" : "系统偏好设置 (关闭行为 / 硬件参数)"}
         >
           <Settings size={18} aria-hidden="true" />
@@ -189,6 +192,7 @@ export function SideNav({
             type="button"
             className={`ob-nav-item${hasToken ? " ob-nav-item--ok" : ""}`}
             onClick={onAuthClick}
+            aria-label={collapsed ? (hasToken ? "授权已通" : "配对认证") : undefined}
             title={hasToken ? "已完成局域网配对" : "输入配对码以授权移动端/局域网"}
           >
             {hasToken ? <ShieldCheck size={18} aria-hidden="true" /> : <KeyRound size={18} aria-hidden="true" />}

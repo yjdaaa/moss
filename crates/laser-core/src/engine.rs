@@ -206,6 +206,10 @@ fn scanline_spans(paths: &Paths, y: f64) -> Vec<(f64, f64)> {
     spans
 }
 
+fn cols_width_mm(width: f64, pixel: f64) -> f64 {
+    (((width / pixel).ceil() as usize).max(1) as f64) * pixel
+}
+
 /// 字形转黑白位图（0 = 出光），行 0 在上。
 fn rasterize(paths: &Paths, width: f64, height: f64, pixel: f64) -> Vec<Vec<u8>> {
     let cols = ((width / pixel).ceil() as usize).max(1);
@@ -284,28 +288,47 @@ impl TextTaskEngine {
         };
         let board_w = positive(spec.board_width_mm, "木牌宽度")?;
         let board_h = positive(spec.board_height_mm, "木牌高度")?;
-        let avail = |board: Option<f64>| board.map(|b| b - 2.0 * spec.margin_mm);
-        let (avail_w, avail_h) = (avail(board_w), avail(board_h));
+        let margin_x = if spec.fill == TextFill::Fill {
+            spec.margin_mm.max(spec.overscan_mm)
+        } else {
+            spec.margin_mm
+        };
+        let avail_w = board_w.map(|b| b - 2.0 * margin_x);
+        let avail_h = board_h.map(|b| b - 2.0 * spec.margin_mm);
         if avail_w.is_some_and(|v| v <= 0.0) || avail_h.is_some_and(|v| v <= 0.0) {
             return Err("木牌尺寸小于两侧留边，放不下任何文字".into());
         }
 
         let mut size = spec.font_size_mm;
         let (mut paths, mut width, mut height, mut glyphs) = layout(&data, spec, size)?;
+        let effective_w = |w: f64| {
+            if spec.fill == TextFill::Fill {
+                cols_width_mm(w, spec.pixel_size_mm)
+            } else {
+                w
+            }
+        };
         let fits = |w: f64, h: f64| {
-            avail_w.is_none_or(|a| w <= a + 1e-6) && avail_h.is_none_or(|a| h <= a + 1e-6)
+            avail_w.is_none_or(|a| effective_w(w) <= a + 1e-6)
+                && avail_h.is_none_or(|a| h <= a + 1e-6)
         };
         if board_w.is_some() || board_h.is_some() {
             if spec.auto_size {
                 // 字号与笔画尺寸近似成正比，字距是固定 mm，迭代几次收敛到能放下的最大字号
-                for _ in 0..4 {
-                    let ratio_w = avail_w.map_or(f64::INFINITY, |a| a / width);
+                for _ in 0..5 {
+                    let cur_w = effective_w(width);
+                    let ratio_w = avail_w.map_or(f64::INFINITY, |a| a / cur_w);
                     let ratio_h = avail_h.map_or(f64::INFINITY, |a| a / height);
                     let ratio = ratio_w.min(ratio_h);
                     if fits(width, height) && ratio < 1.001 {
                         break;
                     }
-                    size *= ratio * 0.999;
+                    let step = if !fits(width, height) && ratio >= 0.998 {
+                        0.995
+                    } else {
+                        ratio * 0.999
+                    };
+                    size *= step;
                     if size < MIN_FONT_SIZE_MM {
                         return Err(format!(
                             "文字太长，放进这块木牌后字高不到 {MIN_FONT_SIZE_MM} mm，请减少字数或分行"
@@ -319,7 +342,7 @@ impl TextTaskEngine {
                     "按 {size:.1} mm 字号文字约 {width:.1} × {height:.1} mm，放不进 {} × {} mm 的木牌（四周各留 {:.1} mm）；请减小字号，或不指定字号让 MOSS 自动适配",
                     board_w.map_or("—".to_owned(), |v| format!("{v:.0}")),
                     board_h.map_or("—".to_owned(), |v| format!("{v:.0}")),
-                    spec.margin_mm
+                    margin_x
                 ));
             }
         }
@@ -332,11 +355,29 @@ impl TextTaskEngine {
                 -board_h.map_or(0.0, |b| (b - height) / 2.0),
             ),
         };
-        let frame = HeadRelativeBox {
-            min_x: -start_x,
-            max_x: width - start_x,
-            min_y: -start_y,
-            max_y: height - start_y,
+        let grid_w = cols_width_mm(width, spec.pixel_size_mm);
+        let raster_start_x = match spec.origin {
+            TextOrigin::Center => start_x + spec.overscan_mm,
+            TextOrigin::LowerLeft => match board_w {
+                None => 0.0,
+                Some(b) => (spec.overscan_mm - (b - grid_w) / 2.0).min(0.0),
+            },
+        };
+        let frame = if spec.fill == TextFill::Fill {
+            let sweep_w = grid_w + 2.0 * spec.overscan_mm;
+            HeadRelativeBox {
+                min_x: -raster_start_x,
+                max_x: sweep_w - raster_start_x,
+                min_y: -start_y,
+                max_y: height - start_y,
+            }
+        } else {
+            HeadRelativeBox {
+                min_x: -start_x,
+                max_x: width - start_x,
+                min_y: -start_y,
+                max_y: height - start_y,
+            }
         };
 
         let optimized = path_opt::optimize_with_threshold(&paths, width.max(height).max(1.0))
@@ -397,9 +438,9 @@ impl TextTaskEngine {
                 let gray = GrayImage::from_fn(cols as u32, rows as u32, |x, y| {
                     Luma([bitmap[y as usize][x as usize]])
                 });
-                // 栅格写出器把图案右移一个过扫描距离
+                // 栅格写出器把图案右移一个过扫描距离；左下角起点与图片任务一致，不向负 X 回退过扫描
                 (
-                    place_at_head(&written, start_x + spec.overscan_mm, start_y)?,
+                    place_at_head(&written, raster_start_x, start_y)?,
                     image::DynamicImage::ImageLuma8(gray).to_rgba8(),
                 )
             }
@@ -587,6 +628,44 @@ mod tests {
         let e = extents(&filled.gcode);
         assert!(((e.min_x + e.max_x) / 2.0).abs() < 0.2, "{e:?}");
         assert!(filled.width_mm == outline.width_mm);
+
+        // 左下角起点下扫描填充不得往负 X 越界（回零机器在 (0,0) 触发软限位），且走边框覆盖两侧过扫描行程
+        let filled_ll = TextTaskEngine::generate(&TextTaskSpec {
+            fill: TextFill::Fill,
+            origin: TextOrigin::LowerLeft,
+            ..spec("AB")
+        })
+        .unwrap();
+        let e_ll = extents(&filled_ll.gcode);
+        assert!(e_ll.min_x >= -1e-6 && e_ll.min_y >= -1e-6, "{e_ll:?}");
+        assert!(filled_ll.gcode.contains("G92 X0.000 Y0.000 Z0"));
+        assert_eq!(filled_ll.frame.min_x, 0.0);
+        assert!(
+            (filled_ll.frame.max_x - e_ll.max_x).abs() < 0.2,
+            "frame={:?}, extents={e_ll:?}",
+            filled_ll.frame
+        );
+
+        // 木牌 margin_mm=0 且自动适配字号时，扫描填充两侧仍须预留 overscan_mm，既不负向越界也不越过木牌右边缘
+        let filled_board = TextTaskEngine::generate(&TextTaskSpec {
+            fill: TextFill::Fill,
+            origin: TextOrigin::LowerLeft,
+            board_width_mm: Some(50.0),
+            board_height_mm: Some(30.0),
+            margin_mm: 0.0,
+            auto_size: true,
+            ..spec("ABAB")
+        })
+        .unwrap();
+        let e_board = extents(&filled_board.gcode);
+        assert!(
+            e_board.min_x >= -1e-6 && e_board.max_x <= 50.0 + 1e-6,
+            "木牌 [0, 50] 边界内应包含全部过扫描行程: {e_board:?}"
+        );
+        assert!(
+            ((e_board.min_x + e_board.max_x) / 2.0 - 25.0).abs() < 0.2,
+            "扫描中心应对齐木牌中点 25mm: {e_board:?}"
+        );
     }
 
     #[test]

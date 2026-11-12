@@ -379,6 +379,10 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
 
     const tick = (now) => {
       if (stopped) return;
+      if (document.hidden) {
+        lastTime = now;
+        return;
+      }
       // 推演画面约 30 fps（2026-11-08）：每帧都会重新渲染整页并重画 3D，60 fps 时 CPU 约 70%；
       // 进度按真实经过时间累计，总时长仍与 G-code 推算一致
       if (now - lastTime < SIM_FRAME_MS) {
@@ -402,10 +406,19 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
       }
     };
 
+    const onVisibility = () => {
+      if (!stopped && !document.hidden) {
+        lastTime = performance.now();
+        cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     rafId = requestAnimationFrame(tick);
     return () => {
       stopped = true;
       cancelAnimationFrame(rafId);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [simPlaying, simLoop, driveMode, toolpath.estimatedSeconds]);
 
@@ -416,14 +429,18 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     }
     let cancelled = false;
     let timer = null;
+    let pollGen = 0;
 
     const pollWorkflow = async () => {
+      const myGen = ++pollGen;
+      clearTimeout(timer);
       try {
         const res = await postJson("/api/workflow", {
           action: "status",
           workflow_id: selectedWorkflowId,
         });
-        if (!cancelled && res.ok && res.data?.success) {
+        if (cancelled || myGen !== pollGen) return;
+        if (res.ok && res.data?.success) {
           const wf = res.data.result;
           setJobStatus(wf.status || "preview_ready");
           if (wf.send_result) {
@@ -441,17 +458,27 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
           }
         }
       } catch (_e) {
+        if (cancelled || myGen !== pollGen) return;
         // 保持上次已知状态
       }
-      if (!cancelled) {
+      if (!cancelled && myGen === pollGen && !document.hidden) {
+        clearTimeout(timer);
         timer = setTimeout(pollWorkflow, 1000);
       }
     };
 
+    const onVisibility = () => {
+      if (!cancelled && !document.hidden) {
+        void pollWorkflow();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     void pollWorkflow();
     return () => {
       cancelled = true;
+      pollGen += 1;
       if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [driveMode, isJobRunning, selectedWorkflowId]);
 
@@ -524,17 +551,29 @@ export function TwinPage({ onNavigate, connectionStatus, setConnectionStatus }) 
     if (!pollingTelemetry) return undefined;
     let cancelled = false;
     let timer = null;
+    let pollGen = 0;
 
     const loop = async () => {
+      const myGen = ++pollGen;
+      clearTimeout(timer);
       await sampleControllerStatus(true);
-      if (!cancelled) {
+      if (!cancelled && myGen === pollGen && !document.hidden) {
+        clearTimeout(timer);
         timer = setTimeout(loop, 2000);
       }
     };
+    const onVisibility = () => {
+      if (!cancelled && !document.hidden) {
+        void loop();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     void loop();
     return () => {
       cancelled = true;
+      pollGen += 1;
       if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [pollingTelemetry, sampleControllerStatus]);
 

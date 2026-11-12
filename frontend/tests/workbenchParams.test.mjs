@@ -92,6 +92,12 @@ test("左侧输入或参数修改后，预览签名立即判定为已过期以�
     true,
     "开自定义参数变过期",
   );
+  const sigPreset = workbenchInputSignature({ ...base, presetParams: "42/1800/1" });
+  assert.equal(
+    isWorkbenchPreviewStale(sigPreset, workbenchInputSignature({ ...base, presetParams: "42/1800/3" })),
+    true,
+    "修改材料库预设功率/速度/遍数后旧预览立即判定为过期",
+  );
 });
 
 test("开刻二次确认与相同刀路 SHA-256 重发防烧穿提醒、状态大白话文案", () => {

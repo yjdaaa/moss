@@ -2086,6 +2086,124 @@ impl RuntimeDb {
         Ok(removed)
     }
 
+    /// 启动时回收 `generated_assets/` 与 `previews/` 中已被历史定额清理淘汰且超过 7 天无人引用的自动生成产物。
+    /// 绝不触碰 `uploads/` 用户上传目录、符号链接、7 天内新文件或仍在任何表记录中出现过文件名的产物。
+    pub fn prune_orphan_generated_files(
+        &self,
+        generated_dirs: &[&Path],
+        now: f64,
+    ) -> Result<usize, SchemaError> {
+        const ORPHAN_GENERATED_MIN_AGE_SECS: f64 = 7.0 * 86_400.0;
+        if !now.is_finite() || now <= ORPHAN_GENERATED_MIN_AGE_SECS {
+            return Ok(0);
+        }
+        let cutoff = now - ORPHAN_GENERATED_MIN_AGE_SECS;
+        let mut referenced = std::collections::HashSet::new();
+
+        fn record_str_ref(raw: &str, set: &mut std::collections::HashSet<String>) {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.len() > 1024 {
+                return;
+            }
+            if let Some(base) = trimmed.rsplit(['/', '\\']).next()
+                && !base.is_empty()
+            {
+                set.insert(base.to_owned());
+            }
+        }
+
+        fn collect_json_refs(val: &Value, set: &mut std::collections::HashSet<String>) {
+            match val {
+                Value::String(s) => record_str_ref(s, set),
+                Value::Array(items) => {
+                    for item in items {
+                        collect_json_refs(item, set);
+                    }
+                }
+                Value::Object(map) => {
+                    for v in map.values() {
+                        collect_json_refs(v, set);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for sql in [
+            "SELECT gcode_path, payload FROM workflows",
+            "SELECT gcode_path, payload FROM calibrations",
+            "SELECT task_dir, payload FROM text_tasks",
+            "SELECT gcode_path, payload FROM jobs",
+        ] {
+            let mut stmt = self.connection.prepare(sql)?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                if let Some(path) = row.get::<_, Option<String>>(0)? {
+                    record_str_ref(&path, &mut referenced);
+                }
+                let payload: String = row.get(1)?;
+                if let Ok(parsed) = serde_json::from_str::<Value>(&payload) {
+                    collect_json_refs(&parsed, &mut referenced);
+                } else {
+                    record_str_ref(&payload, &mut referenced);
+                }
+            }
+        }
+        {
+            let mut stmt = self.connection.prepare("SELECT path FROM uploads")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                record_str_ref(&path, &mut referenced);
+            }
+        }
+
+        fn is_generated_artifact_name(name: &str) -> bool {
+            if name.starts_with('.') {
+                return false;
+            }
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".gcode")
+                || lower.ends_with(".png")
+                || lower.ends_with(".jpg")
+                || lower.ends_with(".jpeg")
+                || lower.ends_with(".svg")
+                || lower.ends_with(".scene.json")
+        }
+
+        let mut removed = 0usize;
+        for dir in generated_dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+                    continue;
+                }
+                let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !is_generated_artifact_name(file_name) || referenced.contains(file_name) {
+                    continue;
+                }
+                let Ok(modified) = meta.modified() else {
+                    continue;
+                };
+                let Ok(mtime_dur) = modified.duration_since(std::time::UNIX_EPOCH) else {
+                    continue;
+                };
+                if mtime_dur.as_secs_f64() < cutoff && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     /// 退出前执行统计优化与限时 WAL 截断归并，避免阻塞停机路径的同时收回 `.sqlite-wal` 体积。
     pub fn maintenance_on_shutdown(&self) {
         let _ = self

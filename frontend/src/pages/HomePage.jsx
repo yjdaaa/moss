@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Cpu,
   Download,
@@ -77,7 +77,7 @@ function writeLocal(key, value) {
   }
 }
 
-export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) {
+export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mcpStatus: externalMcpStatus = null }) {
   // Connection state
   const [connectionMode, setConnectionMode] = useState(
     () => readLocal("laser-forge-conn-mode", "network") || "network"
@@ -175,6 +175,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
     customPower,
     customFeed,
     customPasses,
+    presetParams: hasRecommendation ? `${powerPercent}/${recommendedFeedRate}/${recommendedPasses}` : "",
   });
   const previewStale = Boolean(currentWorkflow?.workflow_id) && isWorkbenchPreviewStale(previewSignature, currentSignature);
 
@@ -218,7 +219,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
   // Logs & Telemetry（正序追加：从上往下滚动，最新日志位于最底部）
   const [logs, setLogs] = useState([]);
   const [gcodeText, setGcodeText] = useState("");
+  const gcodeLineCount = useMemo(() => (gcodeText ? gcodeText.split("\n").length : 0), [gcodeText]);
   const [mcpStatus, setMcpStatus] = useState(null);
+  const effectiveMcpStatus = externalMcpStatus || mcpStatus;
   const lastLoggedPctRef = useRef(-1);
 
   const addLog = (tag, message, level = "info") => {
@@ -365,10 +368,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         setNetworkHost(conn.network.default_host);
       }
     }
-    // 读取系统信息中的真实小智 MCP 状态
-    const sysRes = await getJson("/api/system/info");
-    if (sysRes.ok && sysRes.data?.success && sysRes.data?.result?.mcp) {
-      setMcpStatus(sysRes.data.result.mcp);
+    if (!externalMcpStatus) {
+      // 读取系统信息中的真实小智 MCP 状态（外层 App 已同步时直接复用，省一次重复请求）
+      const sysRes = await getJson("/api/system/info");
+      if (sysRes.ok && sysRes.data?.success && sysRes.data?.result?.mcp) {
+        setMcpStatus(sysRes.data.result.mcp);
+      }
     }
   };
 
@@ -843,7 +848,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
           writeLocal("laser-forge-last-sent-sha256", prompt.sha256);
         }
         const sr = res.data.result?.send_result || {};
-        const total = sr.total_lines || (gcodeText ? gcodeText.split("\n").length : 0);
+        const total = sr.total_lines || gcodeLineCount;
         setSendProgress({ sent: 0, total, target: sr.target || "" });
         addLog("STREAM", `进度同步: 0% (0 / ${total} 行)`, "info");
         setOverlayStatus("running");
@@ -1630,8 +1635,8 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
                       ? `${sendProgress.total.toLocaleString()} 行`
                       : currentWorkflow?.artifacts?.total_lines
                       ? `${currentWorkflow.artifacts.total_lines.toLocaleString()} 行`
-                      : gcodeText
-                      ? `${gcodeText.split("\n").length.toLocaleString()} 行`
+                      : gcodeLineCount > 0
+                      ? `${gcodeLineCount.toLocaleString()} 行`
                       : "—"}
                   </span>
                 </div>
@@ -1876,7 +1881,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus }) 
         }}
         currentLine={sendProgress?.sent || 0}
         totalLines={sendProgress?.total || 0}
-        mcpStatus={mcpStatus}
+        mcpStatus={effectiveMcpStatus}
       />
 
       {pollSafetyNotice && <p role="alert" className="send-desc">{pollSafetyNotice}</p>}

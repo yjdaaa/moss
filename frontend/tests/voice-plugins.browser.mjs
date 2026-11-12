@@ -11,7 +11,7 @@ const server=await createServer({cacheDir:path.join(os.tmpdir(),'moss-nv11-rende
   res.end(await vite.transformIndexHtml('/__nv11_fixture.html','<html><meta charset="utf-8"><div id="root"></div><script type="module">import React from "react";import {createRoot} from "react-dom/client";import Card from "/src/components/VoicePluginsCard.jsx";import "/src/styles.css";createRoot(document.getElementById("root")).render(React.createElement(Card));</script></html>'));
 });}}]});
 await server.listen();
-const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+const browser=await chromium.launch({headless:true,channel:process.env.PLAYWRIGHT_CHANNEL||(process.platform==='win32'?'msedge':undefined)});
 try {
   const page=await browser.newPage({viewport:{width:1100,height:900}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.addInitScript(()=>{

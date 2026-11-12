@@ -9,6 +9,7 @@ import {
   Save,
   Grid,
   Send,
+  Square,
   Settings2,
   Trash2,
   RefreshCw,
@@ -192,9 +193,14 @@ export function MaterialLabPage({ onNavigate }) {
     };
   }, [loadBootstrap, loadSerialPorts]);
 
-  // 顶栏常驻急停兜底：在途发送先按 calibration_id 停，若刚发完最后一行仍在缓冲执行则按本页设备目标补发 0x18
-  const isMatrixRunning = matrixSendState?.status === "sending" || matrixSendState?.status === "running";
-  usePageEmergencyStop(
+  // 顶栏常驻急停与本页「停止测试」共用：在途发送先按 calibration_id 停，若刚发完最后一行仍在缓冲执行则按本页设备目标补发 0x18；
+  // 不提前终止状态轮询、不伪造 cancelled，等后端落定真实终态后再解锁按钮
+  const isMatrixRunning =
+    matrixSendState?.status === "pending"
+    || matrixSendState?.status === "preparing"
+    || matrixSendState?.status === "sending"
+    || matrixSendState?.status === "running";
+  const handleStopMatrix = usePageEmergencyStop(
     () => ({
       jobId: isMatrixRunning ? matrixId : "",
       target: estopTargetArgs({
@@ -206,8 +212,6 @@ export function MaterialLabPage({ onNavigate }) {
       }),
     }),
     (outcome) => {
-      matrixPollRef.current?.();
-      matrixPollRef.current = null;
       const msg = outcome.kind === "sent"
         ? `${outcome.message || "急停 0x18 已发送"}。软件急停不代表物理停机，请现场核实机器状态；必要时按实体急停。`
         : `${outcome.message || "急停发送失败"}。请立即按控制器实体急停按钮！`;
@@ -1238,7 +1242,7 @@ export function MaterialLabPage({ onNavigate }) {
           </div>
 
           <div className="lab-action-bar">
-            <button type="button" className="btn btn-ghost" onClick={handleGenerateMatrix} disabled={matrixBusy || !selectedMaterial}>
+            <button type="button" className="btn btn-ghost" onClick={handleGenerateMatrix} disabled={matrixBusy || isMatrixRunning || !selectedMaterial}>
               <Grid size={13} className="lab-icon" />
               {matrixId && matrixStale ? "重新生成矩阵" : "生成矩阵"}
             </button>
@@ -1247,7 +1251,7 @@ export function MaterialLabPage({ onNavigate }) {
                 type="button"
                 className="btn btn-ghost"
                 onClick={handleExportMatrixGcode}
-                disabled={matrixBusy}
+                disabled={matrixBusy || isMatrixRunning}
                 title="导出标定矩阵 G-code（可在数字孪生页离线仿真预览）"
               >
                 <Download size={13} className="lab-icon" />
@@ -1258,11 +1262,21 @@ export function MaterialLabPage({ onNavigate }) {
               type="button"
               className="btn btn-primary"
               onClick={handleSendMatrix}
-              disabled={matrixBusy || !matrixId || matrixStale}
+              disabled={matrixBusy || isMatrixRunning || !matrixId || matrixStale}
             >
               <Send size={13} className="lab-icon" />
-              发送测试
+              {isMatrixRunning ? "正在下发测试…" : "发送测试"}
             </button>
+            {isMatrixRunning && (
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={handleStopMatrix}
+              >
+                <Square size={13} className="lab-icon" />
+                停止测试
+              </button>
+            )}
           </div>
 
           {matrixStale && (

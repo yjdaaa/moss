@@ -133,11 +133,31 @@ export function useBuiltinStatus() {
   const [busy, setBusy] = useState("");
   const mounted = useRef(true);
   const versionRef = useRef(0);
+  const staticGifsRef = useRef({ goggle_bot_gifs: null, screen_style_gifs: null });
+
+  const mergeStaticGifs = useCallback((next) => {
+    if (!next || typeof next !== "object") return next;
+    if (next.goggle_bot_gifs) staticGifsRef.current.goggle_bot_gifs = next.goggle_bot_gifs;
+    if (next.screen_style_gifs) staticGifsRef.current.screen_style_gifs = next.screen_style_gifs;
+    const needBot = !next.goggle_bot_gifs && Boolean(staticGifsRef.current.goggle_bot_gifs);
+    const needStyle = !next.screen_style_gifs && Boolean(staticGifsRef.current.screen_style_gifs);
+    if (needBot || needStyle) {
+      return {
+        ...next,
+        ...(needBot ? { goggle_bot_gifs: staticGifsRef.current.goggle_bot_gifs } : {}),
+        ...(needStyle ? { screen_style_gifs: staticGifsRef.current.screen_style_gifs } : {}),
+      };
+    }
+    return next;
+  }, []);
 
   const setStatus = useCallback((next) => {
     versionRef.current += 1;
-    rawSetStatus(next);
-  }, []);
+    rawSetStatus((prev) => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      return mergeStaticGifs(resolved);
+    });
+  }, [mergeStaticGifs]);
 
   // 2026-11-05：对话进行中按 140ms 轮询；上一次请求未返回时跳过本节拍，卸载后与动作改写状态后丢弃旧响应
   const pollRef = useRef(null);
@@ -146,8 +166,15 @@ export function useBuiltinStatus() {
       const ver = versionRef.current;
       const fresh = () => mounted.current && isCurrent() && versionRef.current === ver;
       try {
-        const next = await voiceApi.builtinStatus();
-        if (fresh()) rawSetStatus(next);
+        const useLite = Boolean(
+          staticGifsRef.current.goggle_bot_gifs && staticGifsRef.current.screen_style_gifs,
+        );
+        const next = await voiceApi.builtinStatus(useLite ? { lite: true } : undefined);
+        if (!useLite && next && !next.error) {
+          if (next.goggle_bot_gifs) staticGifsRef.current.goggle_bot_gifs = next.goggle_bot_gifs;
+          if (next.screen_style_gifs) staticGifsRef.current.screen_style_gifs = next.screen_style_gifs;
+        }
+        if (fresh()) rawSetStatus(mergeStaticGifs(next));
       } catch (error) {
         // 读过一次后保留上次状态，只标出刷新失败；不卸载各分组，避免丢失未保存的填写
         if (fresh()) {
@@ -175,8 +202,17 @@ export function useBuiltinStatus() {
 
   useEffect(() => {
     const intervalMs = activeTurn ? 140 : VOICE_POLL_MS;
-    const timer = setInterval(() => void refresh(), intervalMs);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, intervalMs);
+    const onVisibility = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [activeTurn, refresh]);
   const act = useCallback(async (label, action) => {
     setBusy(label);

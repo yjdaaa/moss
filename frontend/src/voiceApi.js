@@ -86,8 +86,8 @@ export const voiceApi = {
   memorySetEnabled: (enabled) => invokeVoice("voice_memory_set_enabled", { enabled }),
   memorySave: (deviceId, expectedRevision, summary) => invokeVoice("voice_memory_save", { deviceId, expectedRevision, summary }),
   memoryClear: (deviceId, expectedRevision) => invokeVoice("voice_memory_clear", { deviceId, expectedRevision }),
-  // 内置语音服务（内置语音技术书 NV1）
-  builtinStatus: () => invokeVoice("voice_builtin_status"),
+  // 内置语音服务（内置语音技术书 NV1；lite=true 时跳过大体积静态 GIF 并复用环境探测短缓存）
+  builtinStatus: (opts) => invokeVoice("voice_builtin_status", opts?.lite ? { lite: true } : undefined),
   // n68：导出语音诊断包（后端生成并脱敏，弹出系统保存框；取消时返回 {saved:false}）
   diagnosticsExport: () => invokeVoice("voice_diagnostics_export"),
   // n80：导出 Colab T4 专属联动笔记本（.ipynb）

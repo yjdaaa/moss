@@ -140,6 +140,7 @@ export function workbenchInputSignature({
   customPower = "",
   customFeed = "",
   customPasses = "",
+  presetParams = "",
 } = {}) {
   const base = {
     tool: activeTool,
@@ -148,7 +149,9 @@ export function workbenchInputSignature({
     manual:
       activeTool !== "gcode" && Boolean(customParams)
         ? `${String(customPower).trim()}/${String(customFeed).trim()}/${String(customPasses).trim()}`
-        : "preset",
+        : activeTool !== "gcode" && presetParams
+          ? `preset:${presetParams}`
+          : "preset",
   };
   if (activeTool === "text") {
     return JSON.stringify({

@@ -67,7 +67,7 @@
 - 小智接入点的工具分级在 `laser_contracts::tool_risk`（R0 只读、R1 生成、R2 降低风险、R3 运动或出光、R4 永不开放）。严格模式下接入点对 R4 与未分级工具返回 `tool_not_allowed`，R3 交给执行层生成审批；新增 MCP 工具时必须同时补分级，否则 `laser-mcp` 测试失败。
 - 严格模式下桌面端通过 `get_desktop_session` 携带 `X-Moss-Desktop-Session` 放行；不带桌面会话头的普通本机回环请求返回 403 `strict_mode_blocked`。
 - `audit_log` 自 2026-10-06（P1-08）起由审批服务与接入点写入：审批创建 / 批准 / 拒绝 / 过期 / 执行 / 失败、模型自填 `confirmed` 被删除、R4 拒绝、严格模式拦截。创建、批准、执行三步与审计在同一事务中，审计写不进去就拒绝（R3 不放行，状态不变）；拒绝、过期、失败与停止类动作不依赖审计。
-- `jobs`、`auth_pairings` 表已建但运行时无写入方；进度只在内存中的作业注册表与 workflow / calibration 记录的 `send_result` 里。
+- `jobs` 表已建但运行时无写入方（`auth_pairings` 等 7 张废弃表已在 schema v18 删除）；进度只在内存中的作业注册表与 workflow / calibration 记录的 `send_result` 里。
 - S1-09 Android 实际来源（`http://tauri.localhost`）必须经安装设备核验，不得用 APK 构建通过冒充实机来源验收。
 
 ### 4.1 语音授权与停止修补（2026-10-10）

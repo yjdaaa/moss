@@ -19,9 +19,14 @@ export function ConsoleDrawer({
   mcpStatus = null,
 }) {
   const [activeTab, setActiveTab] = useState("console"); // console | mcp | gcode
+  const [gcodeScrollTop, setGcodeScrollTop] = useState(0);
   const consoleFeedRef = useRef(null);
   const gcodeViewerRef = useRef(null);
   const isAutoScrollRef = useRef(true);
+
+  const GCODE_ROW_HEIGHT = 22;
+  const GCODE_OVERSCAN = 20;
+  const GCODE_VIEWPORT_ROWS = 24;
 
   // 真实 MCP 状态判断：只有桥当前连上接入点才算在线（configured 只表示填了地址）
   const isMcpConfigured = Boolean(mcpStatus?.configured);
@@ -34,6 +39,13 @@ export function ConsoleDrawer({
     return gcodeText.split("\n");
   }, [gcodeText]);
 
+  useEffect(() => {
+    setGcodeScrollTop(0);
+    if (gcodeViewerRef.current) {
+      gcodeViewerRef.current.scrollTop = 0;
+    }
+  }, [gcodeText]);
+
   // 控制台自动吸底
   useEffect(() => {
     if (activeTab === "console" && consoleFeedRef.current && isAutoScrollRef.current) {
@@ -41,17 +53,29 @@ export function ConsoleDrawer({
     }
   }, [logs, activeTab]);
 
-  // G-code 实时行高亮滚动跟随
+  // G-code 实时行高亮滚动跟随；切回 G 码标签页且未在跟随时恢复上次手动滚动偏移，避免新挂载容器 scrollTop=0 与虚拟窗口错位
   useEffect(() => {
-    if (activeTab === "gcode" && gcodeViewerRef.current && currentLine > 0) {
-      const lineHeight = 22; // 每行高度约 22px
-      const targetScrollTop = Math.max(0, (currentLine - 5) * lineHeight);
+    if (activeTab !== "gcode" || !gcodeViewerRef.current) return;
+    if (currentLine > 0) {
+      const targetScrollTop = Math.max(0, (currentLine - 5) * GCODE_ROW_HEIGHT);
+      setGcodeScrollTop(targetScrollTop);
       gcodeViewerRef.current.scrollTo({
         top: targetScrollTop,
         behavior: "smooth",
       });
+    } else if (gcodeViewerRef.current.scrollTop !== gcodeScrollTop) {
+      gcodeViewerRef.current.scrollTop = gcodeScrollTop;
     }
-  }, [currentLine, activeTab]);
+  }, [currentLine, activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const gcodeStartIdx = Math.max(
+    0,
+    Math.min(gcodeLines.length, Math.floor(gcodeScrollTop / GCODE_ROW_HEIGHT) - GCODE_OVERSCAN),
+  );
+  const gcodeEndIdx = Math.min(
+    gcodeLines.length,
+    gcodeStartIdx + GCODE_VIEWPORT_ROWS + GCODE_OVERSCAN * 2,
+  );
 
   // 格式化 Tag 色彩类
   const getTagClass = (tag = "") => {
@@ -289,16 +313,24 @@ export function ConsoleDrawer({
         </div>
       )}
 
-      {/* Tab 3: G-CODE 实时行视图 */}
+      {/* Tab 3: G-CODE 实时行视图（虚拟滚动，10 万行光栅刀路只挂载可视区行） */}
       {activeTab === "gcode" && (
-        <div className="gcode-viewer-container" ref={gcodeViewerRef}>
+        <div
+          className="gcode-viewer-container"
+          ref={gcodeViewerRef}
+          onScroll={(e) => setGcodeScrollTop(e.currentTarget.scrollTop)}
+        >
           {gcodeLines.length === 0 ? (
             <div className="console-empty">
               &gt; 暂无 G-code 刀路数据 · 请在左侧配置参数后点击【计算加工轨迹】
             </div>
           ) : (
             <div className="gcode-lines-list">
-              {gcodeLines.map((lineText, idx) => {
+              {gcodeStartIdx > 0 && (
+                <div style={{ height: gcodeStartIdx * GCODE_ROW_HEIGHT }} aria-hidden="true" />
+              )}
+              {gcodeLines.slice(gcodeStartIdx, gcodeEndIdx).map((lineText, offset) => {
+                const idx = gcodeStartIdx + offset;
                 const lineNum = idx + 1;
                 const isCurrent = lineNum === currentLine;
                 const isPassed = lineNum < currentLine;
@@ -314,6 +346,9 @@ export function ConsoleDrawer({
                   </div>
                 );
               })}
+              {gcodeEndIdx < gcodeLines.length && (
+                <div style={{ height: (gcodeLines.length - gcodeEndIdx) * GCODE_ROW_HEIGHT }} aria-hidden="true" />
+              )}
             </div>
           )}
         </div>

@@ -1,16 +1,50 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { mkdir } from "node:fs/promises";
+import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
 const { chromium } = process.env.PLAYWRIGHT_MODULE
   ? await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href)
   : require("playwright");
-const base = process.env.FEEDBACK_TEST_URL || "http://127.0.0.1:5177";
+const root = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+let vite = null;
+let base = process.env.FEEDBACK_TEST_URL;
+if (!base) {
+  vite = await createServer({
+    root,
+    optimizeDeps: { entries: [], include: ["react", "react-dom/client"] },
+    server: { host: "127.0.0.1", port: 0, strictPort: false },
+    logLevel: "error",
+    plugins: [{
+      name: "feedback-fixture",
+      configureServer(server) {
+        server.middlewares.use(async (req, res, next) => {
+          if (req.url !== "/feedback-test") { next(); return; }
+          res.setHeader("Content-Type", "text/html");
+          res.end(await server.transformIndexHtml("/feedback-test", `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div id="root"></div><script type="module">
+            import React from "react";
+            import { createRoot } from "react-dom/client";
+            import { FeedbackPanel } from "/src/components/FeedbackPanel.jsx";
+            import "/src/styles.css";
+            createRoot(document.getElementById("root")).render(React.createElement("main", { style: { maxWidth: 640, padding: 16, margin: "auto" } },
+              React.createElement(FeedbackPanel, { workflowId: "wf-test", onAdopt: (workflow) => { window.adopted = workflow; } })));
+          </script></body></html>`));
+        });
+      },
+    }],
+  });
+  await vite.listen();
+  base = vite.resolvedUrls?.local?.[0]?.replace(/\/$/, "");
+}
 const output = process.env.FEEDBACK_SCREENSHOT_DIR;
 if (output) await mkdir(output, { recursive: true });
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  channel: process.env.PLAYWRIGHT_CHANNEL || (process.platform === "win32" ? "msedge" : undefined),
+});
 try {
   for (const width of [1280, 390]) {
     const page = await browser.newPage({ viewport: { width, height: 900 } });
@@ -21,15 +55,17 @@ try {
     page.on("pageerror", (error) => { errors.push(error.message); console.error(error.message); });
     page.on("requestfailed", (request) => console.error(request.url(), request.failure()?.errorText));
     page.on("dialog", (dialog) => dialog.accept());
-    await page.route("**/feedback-test", (route) => route.fulfill({
-      contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/src/styles.css"></head><body><div id="root"></div><script type="module">
-        const React = (await import("/node_modules/.vite/deps/react.js")).default;
-        const {createRoot} = (await import("/node_modules/.vite/deps/react-dom_client.js")).default;
-        const {FeedbackPanel} = await import("/src/components/FeedbackPanel.jsx");
-        createRoot(document.getElementById("root")).render(React.createElement("main", {style:{maxWidth:640,padding:16,margin:"auto"}},
-          React.createElement(FeedbackPanel,{workflowId:"wf-test",onAdopt:(workflow)=>{window.adopted=workflow;}})));
-      </script></body></html>`,
-    }));
+    if (process.env.FEEDBACK_TEST_URL) {
+      await page.route("**/feedback-test", (route) => route.fulfill({
+        contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/src/styles.css"></head><body><div id="root"></div><script type="module">
+          const React = (await import("/node_modules/.vite/deps/react.js")).default;
+          const {createRoot} = (await import("/node_modules/.vite/deps/react-dom_client.js")).default;
+          const {FeedbackPanel} = await import("/src/components/FeedbackPanel.jsx");
+          createRoot(document.getElementById("root")).render(React.createElement("main", {style:{maxWidth:640,padding:16,margin:"auto"}},
+            React.createElement(FeedbackPanel,{workflowId:"wf-test",onAdopt:(workflow)=>{window.adopted=workflow;}})));
+        </script></body></html>`,
+      }));
+    }
     await page.route((url) => url.pathname.startsWith("/api/"), (route) => {
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
@@ -77,4 +113,5 @@ try {
   }
 } finally {
   await browser.close();
+  if (vite) await vite.close();
 }

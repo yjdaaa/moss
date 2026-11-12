@@ -633,6 +633,10 @@ pub struct StatusReport {
     pub rx_buffer_free: Option<usize>,
     /// `Bf:` 第一个数：规划器剩余块数
     pub planner_free: Option<usize>,
+    /// `MPos:x,y,z` 机床坐标（mm）
+    pub mpos: Option<(f64, f64, f64)>,
+    /// `WPos:x,y,z` 工件坐标（mm）
+    pub wpos: Option<(f64, f64, f64)>,
     pub raw: String,
 }
 
@@ -660,6 +664,17 @@ impl StatusReport {
     }
 }
 
+fn parse_xyz_triplet(raw: &str) -> Option<(f64, f64, f64)> {
+    let mut parts = raw.split(',');
+    let x = parts.next()?.trim().parse::<f64>().ok()?;
+    let y = parts.next()?.trim().parse::<f64>().ok()?;
+    let z = parts
+        .next()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0);
+    (x.is_finite() && y.is_finite() && z.is_finite()).then_some((x, y, z))
+}
+
 /// 解析 `<State|MPos:..|Bf:15,1200|Pn:XE|SD:12.50,/sd/a.nc>`；非状态报告返回 `None`。
 pub fn parse_status_report(line: &str) -> Option<StatusReport> {
     let inner = line.trim().strip_prefix('<')?.strip_suffix('>')?;
@@ -682,11 +697,17 @@ pub fn parse_status_report(line: &str) -> Option<StatusReport> {
         sd: None,
         rx_buffer_free: None,
         planner_free: None,
+        mpos: None,
+        wpos: None,
         raw: line.trim().to_string(),
     };
     for field in fields {
         if let Some(pins) = field.strip_prefix("Pn:") {
             report.pins = pins.trim().to_string();
+        } else if let Some(mpos) = field.strip_prefix("MPos:") {
+            report.mpos = parse_xyz_triplet(mpos);
+        } else if let Some(wpos) = field.strip_prefix("WPos:") {
+            report.wpos = parse_xyz_triplet(wpos);
         } else if let Some(bf) = field.strip_prefix("Bf:") {
             let mut parts = bf.split(',');
             report.planner_free = parts.next().and_then(|v| v.trim().parse().ok());
@@ -1096,6 +1117,8 @@ pub struct DeviceConnection<T: DeviceTransport> {
     /// 机器 X/Y 行程：握手 `$$` 的 `$130/$131`，FluidNC `$CD` 的 `max_travel_mm` 优先。
     /// 发送前用来复核任务范围（2026-11-06）；都没有时为空，调用方跳过该项检查。
     pub travel_limits: MachineLimits,
+    /// 最近一次状态报告里的机床坐标 `MPos`（用于断点续雕在 `0x18` 复位后精确重建 `G92` 偏移）。
+    pub last_mpos: Option<(f64, f64, f64)>,
 }
 
 impl<T: DeviceTransport> DeviceConnection<T> {
@@ -1113,6 +1136,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             progress_sink: None,
             rx_capacity_observed: None,
             travel_limits: MachineLimits::default(),
+            last_mpos: None,
         }
     }
 
@@ -1194,17 +1218,28 @@ impl<T: DeviceTransport> DeviceConnection<T> {
 
     /// 有界握手：消费完整 `$$` 响应直到终止 `ok`，避免旧 ACK 被下一条命令使用。
     /// 读超时视为"设备沉默"继续等待；EOF 视为断开。返回收到的设置行。
+    ///
+    /// USB 串口打开 ESP32 / Arduino 控制器时 DTR/RTS 电平跳变可能触发板卡软重启（约 0.8~1.5s 后才吐出
+    /// `Grbl ...` 启动横幅，此前发出的首条 `$$` 会被引导程序丢弃）；而 FluidNC Telnet 建连也会先发欢迎横幅但
+    /// 不会丢弃首条 `$$`（紧接着就会吐出 `$` 设置行）。因此：
+    /// - 尚未收到 `$` 设置行时遇到欢迎/复位横幅只记标记，不立刻盲发第二条 `$$`（避免双份响应错位污染后续 ACK），
+    ///   仅当横幅之后读超时仍未收到任何 `$` 设置行时才补发一次 `$$`；
+    /// - 若已在输出 `$` 设置行中途收到复位横幅，则清空半截状态并补发一次 `$$`；
+    /// - 只有真正收到了 `$` 设置行但 `$32!=1` 时才报激光模式门禁错误。
     pub fn handshake_with_deadline(&mut self, deadline: Duration) -> Result<Vec<String>, String> {
         self.state = DeviceState::Disconnected;
         self.max_spindle_speed = None;
         self.report_status_mask = None;
         self.rx_capacity_observed = None;
         self.travel_limits = MachineLimits::default();
+        self.last_mpos = None;
         self.transport.write_line("$$")?;
         let start = Instant::now();
         let mut laser_mode = None;
         let mut settings = Vec::new();
-        let mut got_any = false;
+        let mut got_settings = false;
+        let mut saw_reset_banner = false;
+        let mut retried_after_boot = false;
         let mut terminated = false;
         loop {
             if start.elapsed() > deadline {
@@ -1213,11 +1248,24 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             match self.transport.read_line() {
                 Ok(Some(line)) => {
                     self.last_response_at = Instant::now();
-                    got_any = true;
                     if self.note_line(&line) {
                         continue;
                     }
+                    if is_reset_banner(&line) {
+                        saw_reset_banner = true;
+                        if got_settings && !retried_after_boot {
+                            retried_after_boot = true;
+                            laser_mode = None;
+                            settings.clear();
+                            got_settings = false;
+                            self.max_spindle_speed = None;
+                            self.report_status_mask = None;
+                            self.transport.write_line("$$")?;
+                        }
+                        continue;
+                    }
                     if line.starts_with('$') {
+                        got_settings = true;
                         settings.push(line.clone());
                     }
                     if let Some(value) = line.strip_prefix("$32=") {
@@ -1234,8 +1282,11 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                         self.report_status_mask = value.trim().parse::<u32>().ok();
                     }
                     if line.eq_ignore_ascii_case("ok") {
-                        terminated = true;
-                        break;
+                        if got_settings {
+                            terminated = true;
+                            break;
+                        }
+                        continue;
                     }
                     if line.starts_with("error:") || line.starts_with("ALARM:") {
                         self.state = DeviceState::Alarm;
@@ -1243,11 +1294,17 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => continue,
+                Err(_) => {
+                    if saw_reset_banner && !got_settings && !retried_after_boot {
+                        retried_after_boot = true;
+                        self.transport.write_line("$$")?;
+                    }
+                    continue;
+                }
             }
         }
         if laser_mode != Some(true) {
-            if got_any {
+            if got_settings {
                 self.state = DeviceState::Alarm;
                 return Err(
                     "$32=1 固件激光模式门禁未通过，控制器已进入 Alarm 态，拒绝发送".to_string(),
@@ -1255,7 +1312,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
             }
             self.state = DeviceState::Disconnected;
             return Err(format!(
-                "{}ms 内未收到 GRBL 固件设置响应（若机器正在执行 SD 脱机作业，固件会丢弃其他通道的顺序指令，请先急停）",
+                "{}ms 内未收到 GRBL 固件设置响应（若机器刚上电重启请稍候重试；若正在执行 SD 脱机作业，固件会丢弃顺序指令，请先急停）",
                 deadline.as_millis()
             ));
         }
@@ -1393,6 +1450,27 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         Ok(scale)
     }
 
+    /// 断点续雕预检：先做标准空闲检查；若上次急停 `0x18` 让控制器停在无阻断引脚的 `<Alarm>` 锁定态，
+    /// 按用户确认的续雕动作先执行 `$X` 解锁（含等待 `after_unlock` 宏回到 Idle）再复核空闲与坐标。
+    pub fn verify_job_ready_for_resume(&mut self, timeout: Duration) -> Result<f64, String> {
+        let scale = self
+            .max_spindle_speed
+            .ok_or_else(|| "固件未报告有效的 $30 功率标尺（缺少 $30 或非正数）".to_string())?;
+        match self.require_idle(timeout, None) {
+            Ok(()) => {
+                // 已在 Idle 时发送 $X 为固件级空操作（立即回 ok），保持续雕契约一致
+                self.send_line_wait_ack("$X")?;
+                Ok(scale)
+            }
+            Err(err) if err.starts_with("控制器尚未安全就绪：") => {
+                self.unlock()?;
+                self.require_idle(timeout, None)?;
+                Ok(scale)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// 发送 $CD 读取 FluidNC 的 YAML 配置文件并解析出机械行程与外设引脚
     pub fn fetch_fluidnc_config(
         &mut self,
@@ -1452,6 +1530,9 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         }
         if let Some(report) = parse_status_report(line) {
             self.sd_job_active = report.has_sd_job();
+            if let Some(mpos) = report.mpos {
+                self.last_mpos = Some(mpos);
+            }
             if let Some(prog) = &self.progress_sink {
                 prog.record_status_report(&report.raw);
             }
@@ -1553,17 +1634,27 @@ impl<T: DeviceTransport> DeviceConnection<T> {
     /// 发送文件全部内容后，等待控制器清空规划器缓冲区并恢复 Idle 状态。
     /// Run / Jog / Home（含解锁、回零后的自动宏）持续等待；Hold / Door 也等待（用户可能恢复），
     /// Alarm / Sleep / Check 立即失败；支持取消与超时。
+    /// 当控制器仍在执行长距离慢速切割（`<Run|...>` 的坐标或规划器块数持续变化）时，刷新无进展计时器，
+    /// 避免 16~32 段慢切耗尽规划器缓冲超过 30 秒时被误判失联强行停机（硬上限 30 分钟兜底）。
     pub fn wait_until_idle(
         &mut self,
         timeout: Duration,
         cancel: Option<&CancellationToken>,
     ) -> Result<(), String> {
+        const MAX_ACTIVE_DRAIN: Duration = Duration::from_secs(1800);
         let start = Instant::now();
+        let mut last_activity_at = start;
+        let mut last_motion_sig: Option<(
+            Option<(i64, i64, i64)>,
+            Option<(i64, i64, i64)>,
+            Option<usize>,
+        )> = None;
+        let hard_cap = timeout.max(MAX_ACTIVE_DRAIN);
         let mut last_poll = Instant::now();
         let interval = self.poll_interval(Duration::from_millis(200));
         self.transport
             .write_realtime(RealtimeCommand::StatusQuery)?;
-        while start.elapsed() < timeout {
+        while last_activity_at.elapsed() < timeout && start.elapsed() < hard_cap {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
                 return Err("用户取消，停止等待控制器".into());
             }
@@ -1585,6 +1676,25 @@ impl<T: DeviceTransport> DeviceConnection<T> {
                             return Ok(());
                         }
                         MachineActivity::Idle | MachineActivity::Busy => {
+                            let quantize = |p: (f64, f64, f64)| {
+                                (
+                                    (p.0 * 1000.0).round() as i64,
+                                    (p.1 * 1000.0).round() as i64,
+                                    (p.2 * 1000.0).round() as i64,
+                                )
+                            };
+                            let sig = (
+                                report.mpos.map(quantize),
+                                report.wpos.map(quantize),
+                                report.planner_free,
+                            );
+                            if (sig.0.is_some() || sig.1.is_some() || sig.2.is_some())
+                                && let Some(prev) = last_motion_sig
+                                && prev != sig
+                            {
+                                last_activity_at = Instant::now();
+                            }
+                            last_motion_sig = Some(sig);
                             std::thread::sleep(Duration::from_millis(10));
                             continue;
                         }
@@ -1862,7 +1972,7 @@ impl<T: DeviceTransport> DeviceConnection<T> {
         self.send_line_wait_ack_cancellable(line, None)
     }
 
-    fn send_line_wait_ack_cancellable(
+    pub fn send_line_wait_ack_cancellable(
         &mut self,
         line: &str,
         cancel: Option<&CancellationToken>,
@@ -4642,5 +4752,141 @@ mod discovery_identity_tests {
         sorted.dedup();
         assert_eq!(ports, sorted);
         assert!(ports.iter().all(|name| !name.trim().is_empty()));
+    }
+
+    #[test]
+    fn handshake_recovers_after_boot_banner_without_duplicating_welcome_banner_ack() {
+        // 1. FluidNC Telnet / 已就绪串口先吐欢迎横幅但未丢首条 $$：绝不能盲补第二条 $$ 污染后续 ACK
+        let welcome = FakeGrbl::new(
+            [
+                "Grbl 3.7 [FluidNC v3.7.12 '$' for help]",
+                "$30=1000",
+                "$32=1",
+                "$130=100",
+                "ok",
+                "axes:",
+                "  x:",
+                "    max_travel_mm: 220",
+                "ok",
+            ]
+            .map(str::to_owned),
+        );
+        let mut welcome_dev = DeviceConnection::new(welcome.clone());
+        let settings = welcome_dev
+            .handshake_with_deadline(Duration::from_secs(1))
+            .expect("带欢迎横幅的正常握手应一次通过");
+        assert_eq!(settings.len(), 3);
+        assert_eq!(welcome.lines(), vec!["$$".to_owned()]);
+        assert!(welcome_dev.load_features(Duration::from_secs(1)));
+        assert_eq!(welcome_dev.travel_limits.x_travel_mm, Some(220.0));
+
+        // 2. USB 串口 DTR/RTS 软重启：引导期超时丢弃首条 $$，吐出启动横幅后沉默超时，此时补发一次 $$ 成功握手
+        struct DtrRebootGrbl {
+            writes: Mutex<Vec<String>>,
+            reads: std::sync::atomic::AtomicUsize,
+        }
+        impl DeviceTransport for DtrRebootGrbl {
+            fn write_line(&self, line: &str) -> Result<(), String> {
+                self.writes.lock().unwrap().push(line.to_owned());
+                Ok(())
+            }
+            fn write_realtime(&self, _cmd: RealtimeCommand) -> Result<(), String> {
+                Ok(())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                match self.reads.fetch_add(1, Ordering::Relaxed) {
+                    // 引导期（例如 >1.0s）连续读超时，不得提前耗掉重试机会
+                    0 | 1 => Err("timed out".into()),
+                    // 板卡重启完成吐出横幅（首条 $$ 已被引导程序丢弃）
+                    2 => Ok(Some("Grbl 1.1h ['$' for help]".into())),
+                    // 横幅后无设置返回（读超时），触发补发一次 $$
+                    3 => Err("timed out".into()),
+                    4 => Ok(Some("$30=1000".into())),
+                    5 => Ok(Some("$32=1".into())),
+                    6 => Ok(Some("$130=100".into())),
+                    7 => Ok(Some("ok".into())),
+                    _ => Ok(None),
+                }
+            }
+        }
+        let dtr = DtrRebootGrbl {
+            writes: Mutex::new(Vec::new()),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let mut device = DeviceConnection::new(dtr);
+        let settings = device
+            .handshake_with_deadline(Duration::from_secs(2))
+            .expect("DTR 重启横幅后沉默超时应补发一次 $$ 完成握手");
+        assert_eq!(settings.len(), 3);
+        assert_eq!(
+            *device.transport.writes.lock().unwrap(),
+            vec!["$$".to_owned(), "$$".to_owned()]
+        );
+
+        // 3. 仅输出了启动横幅而未返回任何 $ 设置行时，不得谎报 $32=1 门禁未通过
+        let banner_only = FakeGrbl::new(["Grbl 1.1h ['$' for help]"].map(str::to_owned));
+        let mut dev2 = DeviceConnection::new(banner_only);
+        let err = dev2
+            .handshake_with_deadline(Duration::from_millis(200))
+            .unwrap_err();
+        assert!(!err.contains("$32=1"), "不应误报 $32=1：{err}");
+        assert!(err.contains("未收到 GRBL 固件设置响应"), "{err}");
+    }
+
+    #[test]
+    fn wait_until_idle_extends_deadline_while_axes_actively_progress() {
+        struct SlowDrainGrbl {
+            step: std::sync::atomic::AtomicUsize,
+        }
+        impl DeviceTransport for SlowDrainGrbl {
+            fn write_line(&self, _line: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn write_realtime(&self, _cmd: RealtimeCommand) -> Result<(), String> {
+                Ok(())
+            }
+            fn read_line(&self) -> Result<Option<String>, String> {
+                let idx = self.step.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(35));
+                if idx < 6 {
+                    Ok(Some(format!("<Run|MPos:{idx}.500,0.000,0.000>")))
+                } else {
+                    Ok(Some("<Idle|MPos:6.000,0.000,0.000>".into()))
+                }
+            }
+        }
+        let mut device = DeviceConnection::new(SlowDrainGrbl {
+            step: std::sync::atomic::AtomicUsize::new(0),
+        });
+        device.state = DeviceState::Ready;
+        // 单段无进展超时仅 90ms，但总耗时约 245ms：因 MPos 每帧都在前进，不应中途误超时
+        device
+            .wait_until_idle(Duration::from_millis(90), None)
+            .expect("轴坐标持续前进时不应在无进展时限处误判超时");
+        assert_eq!(device.last_mpos, Some((6.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn verify_job_ready_for_resume_unlocks_alarm_and_records_mpos() {
+        let fake = FakeGrbl::new(
+            [
+                "$30=1000",
+                "$32=1",
+                "ok", // handshake
+                "<Alarm|MPos:42.500,18.250,0.000>",
+                "ok", // $X ack
+                "<Idle|MPos:42.500,18.250,0.000>",
+                "<Idle|MPos:42.500,18.250,0.000>",
+            ]
+            .map(str::to_owned),
+        );
+        let mut device = DeviceConnection::new(fake.clone());
+        device.handshake().unwrap();
+        let scale = device
+            .verify_job_ready_for_resume(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(scale, 1000.0);
+        assert_eq!(device.last_mpos, Some((42.5, 18.25, 0.0)));
+        assert_eq!(fake.lines(), vec!["$$".to_owned(), "$X".to_owned()]);
     }
 }

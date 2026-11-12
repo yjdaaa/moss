@@ -24,6 +24,7 @@ jobs:
           npm ci
           npm run lint
           npm test
+          node --test ../scripts/tests/*.test.mjs
           npm run build
       - name: Upload frontend assets
         uses: actions/upload-artifact@v4
@@ -52,7 +53,13 @@ jobs:
           cargo fmt --all -- --check
           (cd apps/moss-voice-local && cargo fmt --all -- --check)
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          (cd apps/moss-voice-local && cargo clippy --all-targets -- -D warnings)
+      - name: Run macOS Workspace & Helper Tests
+        run: |
+          cargo test --workspace
+          (cd apps/moss-voice-local && cargo test)
 
   # 2. Rust Workspace 核心检查与 Windows 桌面构建
   windows-desktop:
@@ -60,6 +67,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - name: Download frontend dist
         uses: actions/download-artifact@v4
         with:
@@ -68,11 +78,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Windows Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run Workspace Tests
         run: cargo test --workspace
       - name: Build Release moss-desktop & moss-host
-        run: cargo build --release -p moss-desktop -p moss-host
+        run: |
+          cargo build --release -p moss-host
+          cargo build --release -p moss-desktop --features tauri/custom-protocol
+      - name: Run Loopback FakeGrbl API E2E
+        run: node scripts/test_e2e.mjs --api-only
       - name: Upload Windows Executables
         uses: actions/upload-artifact@v4
         with:

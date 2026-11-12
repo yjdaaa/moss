@@ -1,7 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { KeyRound, X } from "lucide-react";
 import { storeAuthToken, clearAuthToken, readAuthToken, isRemoteMode } from "../authSession.js";
 import { postJson } from "../api/client.js";
+import { isTopmostModalBackdrop } from "./AppDialog.jsx";
 
 // 关闭时整个对话框卸载，下次打开输入框与报错从空白开始；Hooks 放在内层组件，保证每次渲染调用顺序一致
 export function AuthModal({ visible, ...props }) {
@@ -12,7 +14,23 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const backdropRef = useRef(null);
+  const backdropPressRef = useRef(false);
   const currentToken = readAuthToken();
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        if (!isTopmostModalBackdrop(backdropRef.current)) return;
+        e.preventDefault();
+        if (busy) return;
+        onClose?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
 
   const handlePair = async () => {
     const trimmed = code.trim();
@@ -55,15 +73,30 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
     if (onAuthenticated) onAuthenticated("");
   };
 
-  return (
-    <div className="mat-modal-backdrop auth-box">
-      <div className="mat-modal auth-box-2" role="dialog">
+  const content = (
+    <div
+      ref={backdropRef}
+      className="mat-modal-backdrop auth-box"
+      onMouseDown={(e) => {
+        backdropPressRef.current = e.button === 0 && e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) backdropPressRef.current = false;
+      }}
+      onClick={(e) => {
+        if (backdropPressRef.current && e.target === e.currentTarget && !busy) {
+          onClose?.();
+        }
+        backdropPressRef.current = false;
+      }}
+    >
+      <div className="mat-modal auth-box-2" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
         <div className="mat-modal-head">
-          <h3 className="auth-heading">
+          <h3 id="auth-modal-title" className="auth-heading">
             <KeyRound size={18} />
             <span>局域网访问配对认证</span>
           </h3>
-          <button className="mat-modal-close" onClick={onClose} title="关闭">
+          <button type="button" className="mat-modal-close" onClick={onClose} title="关闭" aria-label="关闭" disabled={busy}>
             <X size={16} />
           </button>
         </div>
@@ -82,6 +115,13 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
               placeholder="例如：123456"
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+              onKeyDown={(e) => {
+                if (e.isComposing || e.keyCode === 229) return;
+                if (e.key === "Enter" && !busy && code.trim().length === 6) {
+                  e.preventDefault();
+                  void handlePair();
+                }
+              }}
               className="auth-field"
               autoComplete="off"
             />
@@ -97,6 +137,7 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
             <div className="auth-row">
               <span>当前会话已持有有效 Token</span>
               <button
+                type="button"
                 onClick={handleClearToken}
                 className="auth-btn"
               >
@@ -107,14 +148,17 @@ function AuthModalDialog({ onClose, onAuthenticated }) {
         </div>
 
         <div className="mat-modal-foot">
-          <button className="btn btn-ghost" onClick={onClose} disabled={busy}>
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
             取消
           </button>
-          <button className="btn btn-primary" onClick={handlePair} disabled={busy || code.length !== 6}>
+          <button type="button" className="btn btn-primary" onClick={handlePair} disabled={busy || code.length !== 6}>
             {busy ? "验证中..." : "提交配对"}
           </button>
         </div>
       </div>
     </div>
   );
+  return typeof document !== "undefined" && document.body
+    ? createPortal(content, document.body)
+    : content;
 }

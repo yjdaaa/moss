@@ -129,6 +129,7 @@ function App() {
   // 全局审批卡（技术书 §9.5.2）：只在桌面端（有桌面会话）显示
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [approvalCount, setApprovalCount] = useState(0);
+  const [pendingApprovalTargets, setPendingApprovalTargets] = useState(null);
   const approvalsEnabled = hasDesktopSession();
   const openApprovals = useCallback(() => {
     if (approvalCount > 0) {
@@ -259,8 +260,10 @@ function App() {
       const res = await getJson("/api/system/info");
       if (!cancelled && isCurrent() && res.ok && res.data?.success && res.data?.result?.mcp) {
         const result = res.data.result;
-        setMcpStatus(result.mcp);
-        setVoiceStatus(result.voice ?? null);
+        const nextMcp = result.mcp;
+        const nextVoice = result.voice ?? null;
+        setMcpStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextMcp) ? prev : nextMcp));
+        setVoiceStatus((prev) => (JSON.stringify(prev) === JSON.stringify(nextVoice) ? prev : nextVoice));
         if (!autoUpdateCheckedRef.current) {
           autoUpdateCheckedRef.current = true;
           if (result.auto_check_update && !isRemoteMode()) {
@@ -295,30 +298,16 @@ function App() {
   useEffect(() => installCardSpotlight(), []);
 
   useEffect(() => {
-    let idleHandle = 0;
-    let heavyTimer = 0;
+    // 仅在空闲时预热轻量页面；重型三维引擎（/twin）与 Excalidraw 画板（/draw）改为侧栏悬停或实际切换时按需加载
     const timer = setTimeout(() => {
       if (voiceEnabled) {
         void preloadRoute("/voice");
         void preloadRoute("/camera");
       }
       void preloadRoute("/material-lab");
-      const preloadHeavy = () => {
-        void preloadRoute("/twin");
-        void preloadRoute("/draw");
-      };
-      if (typeof window.requestIdleCallback === "function") {
-        idleHandle = window.requestIdleCallback(preloadHeavy, { timeout: 2500 });
-      } else {
-        heavyTimer = window.setTimeout(preloadHeavy, 1400);
-      }
-    }, 600);
+    }, 800);
     return () => {
       clearTimeout(timer);
-      if (heavyTimer) clearTimeout(heavyTimer);
-      if (idleHandle && typeof window.cancelIdleCallback === "function") {
-        window.cancelIdleCallback(idleHandle);
-      }
     };
   }, [voiceEnabled]);
 
@@ -484,6 +473,7 @@ function App() {
                 onNavigate={navigateTo}
                 connectionStatus={connectionStatus}
                 setConnectionStatus={setConnectionStatus}
+                mcpStatus={mcpStatus}
               />
             )}
           </Suspense>
@@ -528,9 +518,10 @@ function App() {
         open={approvalOpen}
         onOpenChange={setApprovalOpen}
         onPendingCountChange={setApprovalCount}
+        onPendingTargetsChange={setPendingApprovalTargets}
       />
 
-      <AiPreviewCenter />
+      <AiPreviewCenter pendingApprovalTargets={pendingApprovalTargets} />
 
       <JobProgressDock onJobsChange={setActiveJobs} />
 
