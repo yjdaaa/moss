@@ -304,3 +304,45 @@ fn device_without_screen_pack_keeps_official_emotions() {
     );
     assert!(!rig.server.status().sessions[0].screen_pack);
 }
+
+#[test]
+fn basic_font_device_receives_glyph_push_on_stt_and_tts_sentences() {
+    let rig = rig(false);
+    *rig.registry.hardware_prefs.lock().unwrap() = Some(HardwarePrefs {
+        // 旧版无字库画风包标记：在线期间仍保持全屏画风动图，同时靠 glyph_push 实时补齐汉字
+        screen_pack: Some("moss-screen-1:moss_hud".into()),
+        ..HardwarePrefs::default()
+    });
+    let mut device = color_device(&rig);
+    send_json(
+        &mut device,
+        r#"{"type":"hello","version":1,"features":{"mcp":true,"glyph_push":true},"text_font":{"bundle":"noto-v1","charset":"basic","size":20,"bpp":4}}"#,
+    );
+    speak_manual(&mut device, 1, 260);
+    let seen = read_until(&mut device, |v| v["type"] == "tts" && v["state"] == "stop");
+    let stt = seen
+        .iter()
+        .find(|v| v["type"] == "stt")
+        .expect("收到 stt 消息");
+    assert_eq!(stt["text"], "开始吧");
+    assert_eq!(stt["glyph_push"]["v"], 1);
+    assert_eq!(stt["glyph_push"]["bundle"], "noto-v1");
+    assert!(
+        !stt["glyph_push"]["glyphs"].as_array().unwrap().is_empty(),
+        "stt 应附带缺失汉字点阵"
+    );
+
+    let sentences: Vec<_> = seen
+        .iter()
+        .filter(|v| v["type"] == "tts" && v["state"] == "sentence_start")
+        .collect();
+    assert!(!sentences.is_empty());
+    assert!(
+        sentences.iter().any(|s| {
+            s["glyph_push"]["glyphs"]
+                .as_array()
+                .is_some_and(|g| !g.is_empty())
+        }),
+        "sentence_start 应附带缺失汉字点阵: {sentences:?}"
+    );
+}

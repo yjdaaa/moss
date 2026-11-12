@@ -22,6 +22,7 @@ pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod conversation;
 pub mod fast;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
+pub mod glyph_font; // n81 小智设备屏幕中文字库与 glyph_push v1 动态字模补齐（2026-11-12）
 pub mod goggle_bot;
 pub mod home_tools;
 pub mod jev;
@@ -138,6 +139,9 @@ pub trait DeviceRegistry: Send + Sync {
     /// 设备把推送的资源包整包下载完（最后一块已交给连接）。宿主据此把“已推送、等下载”的
     /// 全屏画风标记转为已装（2026-11-09：此前一推送就记为已刷，设备没下载也显示“已刷”）。
     fn assets_downloaded(&self, _device: &str) {}
+
+    /// n81 记录一轮已脱敏的语音对话（说了什么、调了什么工具、回了什么），由宿主持久化到本机数据库。
+    fn record_chat_turn(&self, _trace: &TurnDebugTrace) {}
 }
 /// A live permission that cannot become valid again after revoke, disconnect or shutdown.
 pub(crate) struct SessionLease {
@@ -692,6 +696,27 @@ impl VoiceServer {
             .find(|s| s.device_id == device_id)
             .filter(|s| s.screen_monochrome != Some(true))
             .and_then(|s| s.screen_width.zip(s.screen_height))
+    }
+
+    /// n81 返回在线设备已知的屏幕与字体规格 `(preferred_font, screen_size, monochrome)`，供推送资源包选内置字库。
+    pub fn device_font_context(
+        &self,
+        device_id: &str,
+    ) -> (Option<(u32, u8)>, Option<(u32, u32)>, bool) {
+        let Some(s) = self
+            .shared
+            .state
+            .sessions()
+            .into_iter()
+            .find(|s| s.device_id == device_id)
+        else {
+            return (None, None, false);
+        };
+        (
+            s.text_font_size.zip(s.text_font_bpp),
+            s.screen_width.zip(s.screen_height),
+            s.screen_monochrome == Some(true),
+        )
     }
 
     /// 桌面端「摄像头」标签页向指定在线设备发起一次抓拍：签发 15 秒一次性票据并触发 `self.camera.take_photo`。

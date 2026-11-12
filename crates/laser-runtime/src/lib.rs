@@ -13,8 +13,9 @@ pub use agent_store::AgentRunRecord;
 pub use config::LaserSettings;
 pub use context_store::{ContextExtractionRunRow, ContextMemoryPatch, ContextMemoryRow};
 pub use db::{
-    MaterialConflictPolicy, RuntimeDb, SCHEMA_VERSION, SchemaError, VOICE_DEVICE_ALLOWED,
-    VOICE_DEVICE_PENDING, VOICE_DEVICE_REVOKED, VoiceDeviceRecord, VoiceMemoryRecord,
+    MaterialConflictPolicy, RuntimeDb, SCHEMA_VERSION, SchemaError, VOICE_CHAT_LOGS_MAX_ROWS,
+    VOICE_DEVICE_ALLOWED, VOICE_DEVICE_PENDING, VOICE_DEVICE_REVOKED, VoiceChatLogRecord,
+    VoiceDeviceRecord, VoiceMemoryRecord,
 };
 pub use firmware_store::{FirmwareArtifactRow, FirmwareOfferRow};
 pub use knowledge_store::{

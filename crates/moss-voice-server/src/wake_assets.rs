@@ -326,7 +326,7 @@ pub fn build_package(base: Option<&[u8]>, target: &WakeTarget) -> Result<Vec<u8>
     build_package_with_screen(base, target, None)
 }
 
-/// n70 全屏画风：随唤醒词一起写进资源包的表情动图、皮肤背景（见 `screen_pack`）。
+/// n70 全屏画风：随唤醒词一起写进资源包的表情动图、皮肤背景与默认中文字库（见 `screen_pack`）。
 #[derive(Debug, Clone, Default)]
 pub struct ScreenExtras {
     /// 要写入的文件（表情 GIF、背景 RGB565 图）
@@ -335,13 +335,42 @@ pub struct ScreenExtras {
     pub emoji_collection: Vec<Value>,
     /// `index.json` 的 `skin`（整体替换基础包里的）
     pub skin: Option<Value>,
+    /// n81 基础包缺失 `text_font` 时自动补入的 `noto-v1` `common` 中文字库规格
+    pub fallback_font: Option<crate::glyph_font::FontProfile>,
 }
 
-/// 生成资源包，可选附带 n70 全屏画风。基础包的字体与其余表情保留，同名表情被画风覆盖。
+/// 生成资源包，可选附带 n70 全屏画风。基础包的字体与其余表情保留，未导入基础包时自动补入匹配屏幕规格的中文字库。
 pub fn build_package_with_screen(
     base: Option<&[u8]>,
     target: &WakeTarget,
     screen: Option<&ScreenExtras>,
+) -> Result<Vec<u8>, String> {
+    build_package_with_screen_and_font(base, target, screen, screen.and_then(|s| s.fallback_font))
+}
+
+/// 生成资源包，支持显式指定基础包缺失 `text_font` 时的兜底中文字库（供只刷唤醒词不刷画风时同样保留中文字库）。
+pub fn build_package_with_screen_and_font(
+    base: Option<&[u8]>,
+    target: &WakeTarget,
+    screen: Option<&ScreenExtras>,
+    fallback_font: Option<crate::glyph_font::FontProfile>,
+) -> Result<Vec<u8>, String> {
+    match try_build_package(base, target, screen, fallback_font) {
+        Err(ref err)
+            if fallback_font.is_some_and(|p| p.size == 30) && err.contains("超过设备资源分区") =>
+        {
+            // 超大屏若 30_4 + MultiNet6 超过 8 MB，自动回退 20_4 保证装得下且不丢汉字
+            try_build_package(base, target, screen, Some(crate::glyph_font::PROFILES[2]))
+        }
+        other => other,
+    }
+}
+
+fn try_build_package(
+    base: Option<&[u8]>,
+    target: &WakeTarget,
+    screen: Option<&ScreenExtras>,
+    fallback_font: Option<crate::glyph_font::FontProfile>,
 ) -> Result<Vec<u8>, String> {
     let (mut entries, mut index) = match base {
         Some(bytes) => {
@@ -424,6 +453,18 @@ pub fn build_package_with_screen(
             index.insert("skin".into(), skin.clone());
         }
         entries.extend(screen.entries.iter().cloned());
+    }
+    let has_text_font = index
+        .get("text_font")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if !has_text_font && let Some(profile) = fallback_font {
+        let (font_entry, font_name, font_meta) =
+            crate::glyph_font::pack_font_entry_and_meta(profile);
+        entries.retain(|e| e.name != font_name);
+        entries.push(font_entry);
+        index.insert("text_font".into(), Value::String(font_name));
+        index.insert("text_font_meta".into(), font_meta);
     }
     let index = serde_json::to_vec(&Value::Object(index)).map_err(|_| "生成 index.json 失败")?;
     entries.push(AssetEntry {

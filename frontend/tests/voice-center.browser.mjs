@@ -49,8 +49,23 @@ try {
     builtin: {
       running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003, ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
       models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }], helper_found: true },
-      debug_enabled: false,
-      debug_traces: [],
+      debug_enabled: true,
+      debug_traces: [
+        {
+          id: 1,
+          at_ms: 1_790_000_100_000,
+          device_id: "aa:bb:cc:11:22:33",
+          session_id: "s-dev1",
+          turn: 1,
+          at: 1_790_000_100,
+          raw_asr: "帮我切段木书签",
+          corrected_asr: "帮我切椴木书签",
+          tools: [{ name: "generate_text_laser_task_tool", arguments: "{\"material\":\"椴木\"}", result: "预览已生成" }],
+          reply: "已准备 3 毫米椴木预览，确认开始吗？",
+          spoken: "已准备 3 毫米椴木预览，",
+          outcome: "interrupted",
+        },
+      ],
       device_prefs: {},
       goggle_bot_gifs: ["idle", "engrave", "approval", "music", "celebrate"].map((id) => ({ id, label: id, data_url: `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${id}-bot` })),
       screen_style_gifs: {
@@ -201,18 +216,52 @@ try {
       state.server = { state: "stopped", owned: false };
       return voiceStatus();
     },
-    voice_builtin_models_test: ({ section }) => ({
-      ok: true,
-      elapsed_ms: 180,
-      detail: "合成测试响应",
-      ...(section === "tts" ? { audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" } : {}),
-    }),
-    voice_builtin_models_list: () => ({
-      ok: true,
-      elapsed_ms: 85,
-      models: ["Qwen/Qwen2.5-7B-Instruct", "FunAudioLLM/SenseVoiceSmall", "MOSS/TTS-1"],
-      detail: "已读取 3 个模型",
-    }),
+    voice_builtin_models_test: ({ section, input }) => (
+      section === "local_tts"
+        ? {
+            section: "local_tts",
+            ok: true,
+            from_cache: true,
+            elapsed_ms: 1,
+            model_id: input?.model_id || "kokoro",
+            speaker: input?.speaker ?? 45,
+            sample_text: "你好，我是 MOSS 语音助手，激光雕刻工作台已就绪。",
+            audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=",
+          }
+        : {
+            ok: true,
+            elapsed_ms: 180,
+            detail: "合成测试响应",
+            ...(section === "tts" ? { audio_data_url: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" } : {}),
+          }
+    ),
+    voice_builtin_models_list: ({ section, input }) => (
+      section === "local_tts"
+        ? {
+            model_id: input?.model_id || "kokoro",
+            label: "Kokoro 合成 v1.0（中英，多音色）",
+            note: "音质自然，8 个中文音色；体积大。",
+            installed: true,
+            caching: false,
+            cached_count: 2,
+            total_count: 2,
+            default_speaker: 50,
+            languages: [
+              { code: "zh", label: "中文普通话（中英混读）", count: 1, sample_text: "你好，我是 MOSS 语音助手。", recommended: true },
+              { code: "en-US", label: "美式英语 (en-US)", count: 1, sample_text: "Hello, I am MOSS.", recommended: false },
+            ],
+            speakers: [
+              { id: 45, code: "zf_xiaobei", name: "晓北", gender: "female", gender_label: "女声", lang: "zh", lang_label: "中文普通话（中英混读）", sample_text: "你好，我是 MOSS 语音助手。", recommended_for_zh: true, cached: true },
+              { id: 3, code: "af_heart", name: "Heart", gender: "female", gender_label: "女声", lang: "en-US", lang_label: "美式英语 (en-US)", sample_text: "Hello, I am MOSS.", recommended_for_zh: false, cached: true },
+            ],
+          }
+        : {
+            ok: true,
+            elapsed_ms: 85,
+            models: ["Qwen/Qwen2.5-7B-Instruct", "FunAudioLLM/SenseVoiceSmall", "MOSS/TTS-1"],
+            detail: "已读取 3 个模型",
+          }
+    ),
     voice_builtin_models_save: ({ input, clear }) => {
       if (Array.isArray(clear) && clear.includes("jev")) {
         state.builtin.jev = { ...state.builtin.jev, key_set: false, voice_enabled: false, feedback_enabled: false, model: "typesafe/jev-1.14" };
@@ -246,24 +295,14 @@ try {
         }
         if (settings.jev_model) state.builtin.jev.model = settings.jev_model;
       }
-      if (Object.prototype.hasOwnProperty.call(settings, "debug_trace_enabled")) {
-        state.builtin.debug_enabled = Boolean(settings.debug_trace_enabled);
-        if (state.builtin.debug_enabled) {
-          state.builtin.debug_traces = [
-            {
-              session_id: "s-dev1",
-              turn: 1,
-              at: 1_790_000_100,
-              raw_asr: "帮我切段木书签",
-              corrected_asr: "帮我切椴木书签",
-              tools: [{ name: "generate_text_laser_task_tool", arguments: "{\"material\":\"椴木\"}", result: "预览已生成" }],
-              reply: "已准备 3 毫米椴木预览，确认开始吗？",
-              outcome: "done",
-            },
-          ];
-        } else {
-          state.builtin.debug_traces = [];
-        }
+      if (
+        Object.prototype.hasOwnProperty.call(settings, "chat_log_enabled") ||
+        Object.prototype.hasOwnProperty.call(settings, "debug_trace_enabled")
+      ) {
+        const nextFlag = Object.prototype.hasOwnProperty.call(settings, "chat_log_enabled")
+          ? settings.chat_log_enabled
+          : settings.debug_trace_enabled;
+        state.builtin.debug_enabled = Boolean(nextFlag);
       }
       if (settings.clear_debug_traces) state.builtin.debug_traces = [];
       return { ...structuredClone(state.builtin), restarted: false };
@@ -667,6 +706,21 @@ try {
   assert.equal(await page.locator("#voice-vision-local-model").count(), 0, "切到对话大模型后不再显示本地模型");
   await page.locator("#voice-vision-source").selectOption("local");
 
+  // 6g. 点击合成模型包名称弹出语言包与本机缓存音色试听弹窗，支持筛选、播放缓存试听、一键选用音色且不误带未保存的 tts_speed 草稿，按 Escape 关闭
+  await page.locator("#voice-local-tts-open-kokoro").click();
+  const ttsModal = page.locator("#voice-local-tts-modal");
+  await ttsModal.waitFor();
+  await ttsModal.getByText(/本机试听已全部自动缓存/).waitFor();
+  await ttsModal.locator("#voice-local-tts-lang-zh").waitFor();
+  await ttsModal.locator("#voice-local-tts-play-45").click();
+  assert.deepEqual(last("voice_builtin_models_test").args, { section: "local_tts", input: { model_id: "kokoro", speaker: 45 } });
+  await ttsModal.locator("#voice-local-tts-apply-45").click();
+  await ttsModal.locator("#voice-local-tts-action-notice").filter({ hasText: "已选用 #45 晓北" }).waitFor();
+  assert.deepEqual(last("voice_local_save").args, { settings: { tts: true, tts_model: "kokoro", tts_speaker: 45 } }, "一键选用音色不附带未保存的 tts_speed 草稿");
+  assert.equal(state.builtin.local.settings.tts_speed ?? 1, 1, "未保存的语速草稿仍未被误提交");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !document.querySelector("#voice-local-tts-modal"));
+
   await page.locator("#voice-group-experience").scrollIntoViewIfNeeded();
   await shot("voice-builtin");
 
@@ -785,18 +839,22 @@ try {
   await openGroup("live-debug-traces");
   assert.match(await page.locator("#voice-turn-timings").innerText(), /第 2 轮 · 没识别出文字，已忽略 · fake-asr · 设备 aa:bb:cc:11:22:33/);
   assert.equal(await page.locator("#voice-live-debug").getByText(/0ms|100% 生效/).count(), 0, "不再出现未测量的 0ms / 100% 说法");
-  // 8b. n51：记录与诊断 -> 仅内存实时对话排障镜（默认关闭，开启后展示原话与 0ms 纠偏并可一键追加纠偏规则）
+  // 8b. n51 / n81：记录与诊断 -> 持久化对话记录与排障（默认开启、重启保留，支持关键词筛选、划词追加纠偏与确认清空）
   await openGroup("live-debug-traces");
-  assert.equal(await page.locator("#voice-debug-trace-switch").isChecked(), false, "实时对话调试默认关闭");
-  await page.locator("#voice-debug-trace-switch").check();
+  assert.equal(await page.locator("#voice-debug-trace-switch").isChecked(), true, "语音对话记录默认开启");
   await page.locator("#voice-live-debug").getByText("帮我切椴木书签").waitFor();
+  await page.locator("#voice-live-debug").getByText("屏幕已播：").waitFor();
+  await page.locator("#voice-chat-log-search").fill("不存在的关键词");
+  await page.locator("#voice-live-debug").getByText(/没有找到包含/).waitFor();
+  await page.locator("#voice-chat-log-search").fill("");
   await page.locator("#voice-live-debug").getByRole("button", { name: "纠偏此句" }).click();
   await page.locator("#voice-debug-right-word").fill("帮我切东北椴木书签");
   await page.locator("#voice-debug-add-correction").click();
   await page.locator("#voice-live-debug").getByText(/已添加同音纠偏/).waitFor();
   assert.ok(state.builtin.local.settings.custom_asr_corrections.includes("帮我切段木书签=帮我切东北椴木书签"));
   await page.locator("#voice-debug-trace-switch").uncheck();
-  assert.equal(state.builtin.debug_traces.length, 0, "关闭开关立即清空内存排障记录");
+  assert.equal(state.builtin.debug_enabled, false, "关闭开关暂停记录新对话");
+  assert.equal(state.builtin.debug_traces.length, 1, "关闭开关不误删已落盘历史记录");
 
   // 8c. n51 + n52（n69 起在“设备”标签）：在线小智硬件快捷控制（320×240 彩屏识别、一键静音记忆 0%、投送雕刻预览、一键切换长按说话抗噪模式）
   await tab("服务").click();

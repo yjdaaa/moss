@@ -243,6 +243,7 @@ async fn handle(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr, hub: A
             transport: "mqtt",
             lease,
             hello: None,
+            text_font_cap: None,
         },
     )
     .await;
@@ -398,6 +399,8 @@ fn on_hello(ctx: &ReaderCtx, text: &str) {
         "audio": hello["audio_params"],
         "mcp": hello["features"]["mcp"].as_bool().unwrap_or(true),
         "aec": hello["features"]["aec"].as_bool().unwrap_or(false),
+        "glyph_push": hello["features"]["glyph_push"].as_bool().unwrap_or(false),
+        "text_font": hello.get("text_font").cloned().unwrap_or(Value::Null),
     })
     .to_string();
     let (registry, device) = (ctx.shared.registry.clone(), ctx.device_id.clone());

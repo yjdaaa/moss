@@ -1365,12 +1365,12 @@ impl Turn {
                     ms: began.elapsed().as_millis() as u64,
                 });
                 let out_preview = match &outcome {
-                    ToolOutcome::Reply(s) | ToolOutcome::Speak(s) => s.chars().take(240).collect(),
+                    ToolOutcome::Reply(s) | ToolOutcome::Speak(s) => s.chars().take(1200).collect(),
                     ToolOutcome::PlayMusic { title, .. } => format!("播放本地音乐：{title}"),
                 };
                 let _ = events.send(TurnEvent::ToolDebug {
                     name: call.function.name.clone(),
-                    arguments: call.function.arguments.chars().take(240).collect(),
+                    arguments: call.function.arguments.chars().take(1200).collect(),
                     result: out_preview,
                 });
                 (index, call.id, outcome)

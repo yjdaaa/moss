@@ -108,6 +108,9 @@ export const voiceApi = {
   localDownload: (id) => invokeVoice("voice_local_model_download", { id }),
   localCancel: (id) => invokeVoice("voice_local_model_cancel", { id }),
   localDelete: (id) => invokeVoice("voice_local_model_delete", { id }),
+  // 本地合成模型支持的语言包、全部音色列表及本机缓存试听
+  localTtsVoices: (modelId) => invokeVoice("voice_builtin_models_list", { section: "local_tts", input: { model_id: modelId } }),
+  localTtsPreview: (modelId, speaker) => invokeVoice("voice_builtin_models_test", { section: "local_tts", input: { model_id: modelId, speaker } }),
   // 2026-11-07：自动准备 Laya 的 Python 运行环境（action: start / cancel），进度在 builtinStatus().local.laya_setup
   localLayaSetup: (action) => invokeVoice("voice_local_laya_setup", { action }),
   // 自建服务端向导：自动探测本机 Python 3 解释器路径（只查文件，不执行程序）

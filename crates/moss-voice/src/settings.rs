@@ -735,6 +735,9 @@ pub struct BuiltinLocal {
     pub screen_pack_auto_keep: bool,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,
+    /// n81 保存语音对话记录（说了什么、调了什么工具、回了什么，落盘到本机 `voice_chat_logs` 最多 500 条；2026-11-12 用户决定默认开）
+    #[serde(default = "default_on")]
+    pub chat_log_enabled: bool,
     /// 快速回答（默认开，2026-11-08 n73）：对认识的服务商请求关闭大模型思考，语音每轮少等数秒；
     /// 复述确认、审批与急停由代码把关，不依赖模型推理
     #[serde(default = "default_on")]
@@ -800,6 +803,7 @@ impl Default for BuiltinLocal {
             screen_card_style: default_screen_card_style(),
             screen_pack_auto_keep: false,
             job_done_announce: true,
+            chat_log_enabled: true,
             llm_fast_reply: true,
             jev_filter_enabled: false,
             jev_model: default_jev_model(),

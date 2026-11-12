@@ -44,6 +44,7 @@ test("吸顶栏滚动避让与通用模态框视口限高样式契约", () => {
   );
   assert.match(css, /#mat-modal\s*\{\s*z-index:\s*110;\s*\}/, "材料模态框层级应为 110");
   assert.match(css, /\.settings-box\s*\{\s*z-index:\s*115;\s*\}/, "偏好设置层级应为 115，低于安全审批中心 (125)");
+  assert.match(css, /\.tts-voices-backdrop\s*\{\s*z-index:\s*115;\s*\}/, "本地合成音色弹窗层级应与设置弹窗对齐为 115");
   assert.match(css, /\.auth-box\s*\{\s*z-index:\s*132;\s*\}/, "局域网配对框层级应高于设置/材料/审批框");
   assert.match(css, /\.close-confirm-box\s*\{\s*z-index:\s*140;\s*\}/, "关闭窗口确认框层级应高于普通业务弹窗");
   assert.match(
@@ -64,6 +65,7 @@ test("模态框统一 Portal 逃逸层叠上下文、顶层栈 Esc 关闭及拖�
     "components/MaterialModal.jsx",
     "components/AuthModal.jsx",
     "components/CloseConfirmModal.jsx",
+    "components/LocalTtsVoicesModal.jsx",
   ]) {
     const src = fs.readFileSync(path.join(SRC_DIR, rel), "utf8");
     assert.match(src, /createPortal\(content,\s*document\.body\)/, `${rel} 须通过 createPortal 挂载到 document.body，逃逸 .main-content-viewport 层叠上下文`);
@@ -121,6 +123,7 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
     const { AuthModal } = await server.ssrLoadModule("/src/components/AuthModal.jsx");
     const { CloseConfirmModal } = await server.ssrLoadModule("/src/components/CloseConfirmModal.jsx");
     const { SettingsModal } = await server.ssrLoadModule("/src/components/SettingsModal.jsx");
+    const { LocalTtsVoicesModal } = await server.ssrLoadModule("/src/components/LocalTtsVoicesModal.jsx");
 
     // 验证多层模态叠加时仅最顶层遮罩命中 isTopmostModalBackdrop
     const matBackdrop = { z: "110", inObMain: false, closest: () => null };
@@ -161,6 +164,16 @@ test("模态框在无 document 的 SSR 静态渲染环境下安全回退且 isTo
       React.createElement(SettingsModal, { visible: true, onClose: () => {} }),
     );
     assert.match(settingsHtml, /系统偏好设置/);
+
+    const ttsVoicesHtml = renderToStaticMarkup(
+      React.createElement(LocalTtsVoicesModal, {
+        visible: true,
+        modelId: "kokoro",
+        modelLabel: "Kokoro 合成 v1.0（中英，多音色）",
+        onClose: () => {},
+      }),
+    );
+    assert.match(ttsVoicesHtml, /Kokoro 合成 v1\.0/);
   } finally {
     await server.close();
   }

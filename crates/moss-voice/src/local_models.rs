@@ -642,6 +642,8 @@ struct Task {
     generation: u64,
 }
 
+type InstallHook = Arc<dyn Fn(&'static str) + Send + Sync>;
+
 pub struct ModelManager {
     root: PathBuf,
     overrides: HashMap<&'static str, PathBuf>,
@@ -649,6 +651,8 @@ pub struct ModelManager {
     generation: std::sync::atomic::AtomicU64,
     /// 安装最后一步（改名就位）与删除互斥：删除先拿到锁则安装看到取消标志放弃，安装先完成则删除随后删掉（2026-11-07）
     install_lock: Arc<Mutex<()>>,
+    /// 模型下载校验并安装就位后的异步通知钩子（用于触发本地 TTS 试听音频后台预缓存）
+    on_installed: Arc<Mutex<Option<InstallHook>>>,
 }
 
 impl ModelManager {
@@ -660,6 +664,13 @@ impl ModelManager {
             tasks: Arc::default(),
             generation: std::sync::atomic::AtomicU64::new(1),
             install_lock: Arc::default(),
+            on_installed: Arc::default(),
+        }
+    }
+
+    pub fn set_on_installed(&self, hook: impl Fn(&'static str) + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.on_installed.lock() {
+            *slot = Some(Arc::new(hook));
         }
     }
 
@@ -830,6 +841,7 @@ impl ModelManager {
         let root = self.root_for(spec.id).to_path_buf();
         let tasks = self.tasks.clone();
         let install_lock = self.install_lock.clone();
+        let on_installed = self.on_installed.clone();
         std::thread::Builder::new()
             .name(format!("model-download-{}", spec.id))
             .spawn(move || {
@@ -851,6 +863,7 @@ impl ModelManager {
                     &install_lock,
                     &report,
                 );
+                let mut notify_installed = false;
                 if let Ok(mut tasks) = tasks.lock()
                     && let Some(task) = tasks.get(spec.id)
                     && task.generation == generation
@@ -859,6 +872,7 @@ impl ModelManager {
                         // 安装完成：去掉任务，状态由“已安装”体现
                         Ok(()) => {
                             tasks.remove(spec.id);
+                            notify_installed = true;
                         }
                         Err(message) if !cancel.load(Ordering::SeqCst) => {
                             if let Some(task) = tasks.get_mut(spec.id) {
@@ -867,6 +881,12 @@ impl ModelManager {
                         }
                         Err(_) => {}
                     }
+                }
+                if notify_installed
+                    && let Ok(slot) = on_installed.lock()
+                    && let Some(hook) = slot.clone()
+                {
+                    hook(spec.id);
                 }
             })
             .map_err(|error| format!("创建下载线程失败：{error}"))?;
@@ -901,6 +921,9 @@ impl ModelManager {
                 tasks.remove(spec.id);
             }
             remove_installed(&root, spec)?;
+        }
+        if spec.kind == ModelKind::Tts {
+            crate::tts_voices::remove_model_previews(&root, spec.id);
         }
         if spec.engine.uses_llama_runtime() && !self.onejev_still_needed(&root) {
             crate::onejev::remove_managed_runtime(&root)?;

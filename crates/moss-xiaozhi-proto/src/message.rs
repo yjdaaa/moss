@@ -67,8 +67,41 @@ pub struct Features {
     pub aec: bool,
     #[serde(default)]
     pub mcp: bool,
+    #[serde(default)]
+    pub glyph_push: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// 设备实际安装的文字字库描述（`glyph_push` 扩展 v1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextFontCapability {
+    pub bundle: String,
+    pub charset: String,
+    pub size: u32,
+    pub bpp: u8,
+}
+
+/// 单个动态补齐字符的 LVGL 位图与度量（`glyph_push` 扩展 v1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlyphItem {
+    pub codepoint: u32,
+    pub adv_w: u32,
+    pub box_w: u16,
+    pub box_h: u16,
+    pub ofs_x: i16,
+    pub ofs_y: i16,
+    pub bitmap: String,
+}
+
+/// 随 `stt` / `tts(sentence_start)` 下发的缺失字模负载（`glyph_push` 扩展 v1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlyphPushPayload {
+    pub v: u8,
+    pub bundle: String,
+    pub size: u32,
+    pub bpp: u8,
+    pub glyphs: Vec<GlyphItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +122,7 @@ pub enum ClientMessage {
         transport: String,
         audio_params: AudioParams,
         features: Features,
+        text_font: Option<TextFontCapability>,
     },
     Listen {
         state: ListenState,
@@ -147,6 +181,10 @@ impl ClientMessage {
                     .transpose()
                     .map_err(|_| "hello 的 features 不合法".to_owned())?
                     .unwrap_or_default(),
+                text_font: value
+                    .get("text_font")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok()),
             },
             "listen" => {
                 let state = match value.get("state").and_then(Value::as_str) {
@@ -197,6 +235,8 @@ pub enum ServerMessage {
     Stt {
         session_id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        glyph_push: Option<GlyphPushPayload>,
     },
     /// 合成状态；`sentence_start` 带文字，设备显示为助手说的话
     Tts {
@@ -204,6 +244,8 @@ pub enum ServerMessage {
         state: TtsState,
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        glyph_push: Option<GlyphPushPayload>,
     },
     /// 表情
     Llm {
@@ -245,12 +287,35 @@ mod tests {
                 transport,
                 audio_params,
                 features,
+                text_font,
             } => {
                 assert_eq!(version, 1);
                 assert_eq!(transport, "websocket");
                 assert_eq!(audio_params, AudioParams::opus(16_000, 60));
                 assert!(features.mcp);
                 assert!(!features.aec);
+                assert!(!features.glyph_push);
+                assert!(text_font.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        let v25 = r#"{"type":"hello","version":3,"features":{"mcp":true,"glyph_push":true},"text_font":{"bundle":"noto-v1","charset":"basic","size":20,"bpp":4}}"#;
+        match ClientMessage::parse(v25).unwrap() {
+            ClientMessage::Hello {
+                features,
+                text_font,
+                ..
+            } => {
+                assert!(features.glyph_push);
+                assert_eq!(
+                    text_font,
+                    Some(TextFontCapability {
+                        bundle: "noto-v1".into(),
+                        charset: "basic".into(),
+                        size: 20,
+                        bpp: 4,
+                    })
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -317,14 +382,17 @@ mod tests {
             session_id: "abc".into(),
             state: TtsState::SentenceStart,
             text: Some("你好".into()),
+            glyph_push: None,
         };
         let value: Value = serde_json::from_str(&tts.to_text()).unwrap();
         assert_eq!(value["state"], "sentence_start");
         assert_eq!(value["text"], "你好");
+        assert!(value.get("glyph_push").is_none());
         let stop = ServerMessage::Tts {
             session_id: "abc".into(),
             state: TtsState::Stop,
             text: None,
+            glyph_push: None,
         };
         assert!(!stop.to_text().contains("text"));
         let alert = ServerMessage::Alert {

@@ -1491,6 +1491,30 @@ mod imp {
                 Ok(())
             });
         }
+
+        /// n81：将已脱敏的语音对话轮次持久化写入本机 SQLite `voice_chat_logs`（上限 500 条）。
+        fn record_chat_turn(&self, trace: &moss_voice_server::TurnDebugTrace) {
+            let tools_json =
+                serde_json::to_string(&trace.tools).unwrap_or_else(|_| "[]".to_owned());
+            let record = laser_runtime::VoiceChatLogRecord {
+                id: 0,
+                at_ms: i64::try_from(trace.at_ms).unwrap_or(i64::MAX),
+                device_id: trace.device_id.clone(),
+                session_id: trace.session_id.clone(),
+                turn: i64::try_from(trace.turn).unwrap_or(i64::MAX),
+                raw_asr: trace.raw_asr.clone(),
+                corrected_asr: trace.corrected_asr.clone(),
+                reply: trace.reply.clone(),
+                spoken: trace.spoken.clone(),
+                tools_json,
+                outcome: trace.outcome.clone(),
+                truncated: trace.truncated,
+                tools_dropped: i64::try_from(trace.tools_dropped).unwrap_or(0),
+            };
+            if let Ok(db) = self.db.lock() {
+                let _ = db.append_voice_chat_log(&record);
+            }
+        }
     }
 
     /// 对话中调用 MOSS 工具（NV4）：身份 `CallerContext::Voice`；运动与出光跟随严格模式开关，桌面控制类工具始终拒绝。
@@ -2061,6 +2085,15 @@ mod imp {
         persona: Arc<PersonaSwitch>,
         /// 轻量轮询（`lite = true`）复用的磁盘/网卡环境探测短缓存，避免 2s 轮询反复扫盘与序列化大 GIF
         status_probe_cache: Mutex<Option<StatusProbeCache>>,
+        /// 本地合成模型各音色试听语音的后台自动缓存队列（下载完自动预热，独立临时进程合成完毕即退出）
+        tts_preview_warmer: Mutex<TtsPreviewWarmState>,
+    }
+
+    #[derive(Default)]
+    struct TtsPreviewWarmState {
+        queue: std::collections::VecDeque<&'static str>,
+        active: Option<&'static str>,
+        worker_running: bool,
     }
 
     #[derive(Clone)]
@@ -2636,13 +2669,15 @@ mod imp {
                 setting_path.clone(),
                 calibrated_speakers,
             );
+            let initial_local = moss_voice::settings::load(&setting_path).builtin_local;
+            let initial_chat_log = initial_local.chat_log_enabled;
             let persona = Arc::new(PersonaSwitch::new(
-                persona_config(&moss_voice::settings::load(&setting_path).builtin_local),
+                persona_config(&initial_local),
                 Some(Arc::new(DesktopPersonaStore {
                     settings_file: setting_path.clone(),
                 })),
             ));
-            Arc::new_cyclic(|weak| BuiltinVoice {
+            let builtin = Arc::new_cyclic(|weak| BuiltinVoice {
                 self_weak: weak.clone(),
                 host,
                 memory,
@@ -2653,7 +2688,7 @@ mod imp {
                 home_control,
                 lifecycle: Mutex::new(()),
                 server: Arc::new(Mutex::new(None)),
-                debug_trace_enabled: std::sync::atomic::AtomicBool::new(false),
+                debug_trace_enabled: std::sync::atomic::AtomicBool::new(initial_chat_log),
                 last_error: Mutex::new(None),
                 diagnostics,
                 music_warning: Mutex::new(None),
@@ -2687,7 +2722,15 @@ mod imp {
                 context,
                 persona,
                 status_probe_cache: Mutex::new(None),
-            })
+                tts_preview_warmer: Mutex::new(TtsPreviewWarmState::default()),
+            });
+            let weak_for_tts_cache = Arc::downgrade(&builtin);
+            builtin.models.set_on_installed(move |installed_id| {
+                if let Some(target) = weak_for_tts_cache.upgrade() {
+                    target.schedule_tts_preview_warmup(installed_id);
+                }
+            });
+            builtin
         }))
     }
 
@@ -2701,7 +2744,7 @@ mod imp {
         "本地模型安装与运行状态、Jev 决策服务状态",
         "全部保留的服务事件（日常记录最多 300 条、错误与警告最多 200 条）及被覆盖条数",
         "最近 50 轮对话各阶段耗时（含会话号与设备编号）",
-        "排障开关打开时最近 10 轮的识别原话、工具参数与回复（关闭时为空）",
+        "对话记录开关打开时最近 20 轮的识别原话、工具参数与回复（关闭时为空）",
         "在线会话与已登记设备（设备编号、名称、型号、固件版本、授权状态；IP 换成 <ip>）",
         "最近 50 条审批记录及执行结果说明与错误码",
         "最近一次启动失败原因与当前降级提示",
@@ -2769,6 +2812,22 @@ mod imp {
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     builtin.screen_pack_auto_tick(now);
+                }
+            });
+        // 已安装但尚未补齐试听缓存的本地 TTS 模型，启动 2 秒后在后台静默预热缓存（不抢首屏 CPU）
+        let weak_for_tts_warm = Arc::downgrade(&builtin);
+        let _ = std::thread::Builder::new()
+            .name("voice-tts-preview-boot-check".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let Some(builtin) = weak_for_tts_warm.upgrade() else {
+                    return;
+                };
+                for spec in local_models::CATALOG
+                    .iter()
+                    .filter(|s| s.kind == ModelKind::Tts)
+                {
+                    builtin.schedule_tts_preview_warmup(spec.id);
                 }
             });
         let start_voice = builtin.settings().mode == VoiceMode::Builtin;
@@ -5275,8 +5334,8 @@ mod imp {
                 "events_dropped": self.diagnostics.drops(),
                 "timings": self.diagnostics.timings(),
                 "warnings": self.warnings(),
-                "debug_enabled": view.as_ref().map(|v| v.debug_enabled).unwrap_or_else(|| self.debug_trace_enabled.load(std::sync::atomic::Ordering::Acquire)),
-                "debug_traces": view.as_ref().map(|v| serde_json::to_value(&v.debug_traces).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
+                "debug_enabled": settings.builtin_local.chat_log_enabled,
+                "debug_traces": self.persisted_chat_traces(view.as_ref()),
                 "device_prefs": settings.builtin_device_prefs,
                 "memory_enabled": self.memory.enabled(),
                 "devices": self.devices(),
@@ -5294,6 +5353,44 @@ mod imp {
                 );
             }
             root
+        }
+
+        /// n81 读取持久化的语音对话记录（上限 200 条供界面查阅与搜索；数据库暂不可读时回退内存缓存）。
+        fn persisted_chat_traces(
+            &self,
+            view: Option<&moss_voice_server::ServerStatusView>,
+        ) -> Value {
+            if let Ok(db) = self.host.db.lock()
+                && let Ok(rows) = db.list_voice_chat_logs(200)
+            {
+                let items: Vec<Value> = rows
+                    .into_iter()
+                    .map(|r| {
+                        let tools: Vec<moss_voice_server::DebugToolTrace> =
+                            serde_json::from_str(&r.tools_json).unwrap_or_default();
+                        let at_ms = u64::try_from(r.at_ms.max(0)).unwrap_or(0);
+                        serde_json::json!({
+                            "id": r.id,
+                            "at_ms": at_ms,
+                            "at": at_ms / 1000,
+                            "device_id": r.device_id,
+                            "session_id": r.session_id,
+                            "turn": u64::try_from(r.turn.max(0)).unwrap_or(0),
+                            "raw_asr": r.raw_asr,
+                            "corrected_asr": r.corrected_asr,
+                            "tools": tools,
+                            "reply": r.reply,
+                            "spoken": r.spoken,
+                            "outcome": r.outcome,
+                            "truncated": r.truncated,
+                            "tools_dropped": usize::try_from(r.tools_dropped.max(0)).unwrap_or(0),
+                        })
+                    })
+                    .collect();
+                return Value::Array(items);
+            }
+            view.map(|v| serde_json::to_value(&v.debug_traces).unwrap_or_default())
+                .unwrap_or_else(|| Value::Array(Vec::new()))
         }
 
         /// 启动（或重启）失败都写进诊断记录，界面上的报错弹窗关掉后仍能查到原因。
@@ -5373,7 +5470,14 @@ mod imp {
                 "events_dropped": status["events_dropped"],
                 "timings": status["timings"],
                 "debug_enabled": status["debug_enabled"],
-                "debug_traces": status["debug_traces"],
+                "debug_traces": if status["debug_enabled"].as_bool() == Some(true) {
+                    status["debug_traces"]
+                        .as_array()
+                        .map(|items| Value::Array(items.iter().take(20).cloned().collect()))
+                        .unwrap_or_else(|| Value::Array(Vec::new()))
+                } else {
+                    Value::Array(Vec::new())
+                },
                 "sessions": status["sessions"],
                 "devices": devices,
                 "approvals": {
@@ -5470,10 +5574,10 @@ mod imp {
                 });
                 let server = VoiceServer::start(config, registry)
                     .map_err(|message| CenterError::new("builtin_start_failed", 409, message))?;
-                server.set_debug_enabled(
-                    self.debug_trace_enabled
-                        .load(std::sync::atomic::Ordering::Acquire),
-                );
+                let chat_log_on = settings.builtin_local.chat_log_enabled;
+                self.debug_trace_enabled
+                    .store(chat_log_on, std::sync::atomic::Ordering::Release);
+                server.set_debug_enabled(chat_log_on);
                 server.prewarm_speech_cache();
                 {
                     let mut guard = self
@@ -5616,21 +5720,37 @@ mod imp {
                     return Ok(status);
                 }
             }
-            let debug_enable_patch = match patch.get("debug_trace_enabled") {
-                Some(v) => Some(v.as_bool().ok_or_else(|| invalid("调试开关取值不正确"))?),
+            let debug_enable_patch = match patch
+                .get("chat_log_enabled")
+                .or_else(|| patch.get("debug_trace_enabled"))
+            {
+                Some(v) => Some(
+                    v.as_bool()
+                        .ok_or_else(|| invalid("对话记录开关取值不正确"))?,
+                ),
                 None => None,
             };
             let clear_debug_patch = match patch.get("clear_debug_traces") {
                 Some(v) => Some(
                     v.as_bool()
-                        .ok_or_else(|| invalid("清空调试记录取值不正确"))?,
+                        .ok_or_else(|| invalid("清空对话记录取值不正确"))?,
                 ),
                 None => None,
             };
             if debug_enable_patch.is_some() || clear_debug_patch.is_some() {
                 if let Some(enabled) = debug_enable_patch {
+                    moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                        s.builtin_local.chat_log_enabled = enabled;
+                        Ok(())
+                    })
+                    .map_err(|msg| CenterError::new("voice_settings_write_failed", 500, msg))?;
                     self.debug_trace_enabled
                         .store(enabled, std::sync::atomic::Ordering::Release);
+                }
+                if clear_debug_patch == Some(true)
+                    && let Ok(db) = self.host.db.lock()
+                {
+                    let _ = db.clear_voice_chat_logs();
                 }
                 if let Ok(guard) = self.server.lock()
                     && let Some(server) = guard.as_ref()
@@ -5643,8 +5763,12 @@ mod imp {
                     }
                 }
                 let only_debug = patch.as_object().is_some_and(|obj| {
-                    obj.keys()
-                        .all(|k| k == "debug_trace_enabled" || k == "clear_debug_traces")
+                    obj.keys().all(|k| {
+                        matches!(
+                            k.as_str(),
+                            "debug_trace_enabled" | "chat_log_enabled" | "clear_debug_traces"
+                        )
+                    })
                 });
                 if only_debug {
                     let mut status = self.status();
@@ -6154,6 +6278,7 @@ mod imp {
                             k.as_str(),
                             "screen_card_style"
                                 | "debug_trace_enabled"
+                                | "chat_log_enabled"
                                 | "clear_debug_traces"
                                 | "persona_style"
                                 | "persona_prompt"
@@ -7650,6 +7775,324 @@ mod imp {
                 .map_err(|message| CenterError::new("model_input_invalid", 400, message))?;
             let result = moss_voice::models::list_models(&resolved);
             serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+        }
+
+        fn is_tts_preview_warming(&self, model_id: &str) -> bool {
+            self.tts_preview_warmer
+                .lock()
+                .map(|st| st.active == Some(model_id) || st.queue.iter().any(|id| *id == model_id))
+                .unwrap_or(false)
+        }
+
+        /// 将已安装且仍有未缓存音色的本地 TTS 模型加入后台试听缓存预热队列。
+        pub fn schedule_tts_preview_warmup(&self, model_id: &str) {
+            if cfg!(test) {
+                return;
+            }
+            let Some(spec) = local_models::spec_of(model_id, ModelKind::Tts) else {
+                return;
+            };
+            if self.models.path_if_installed(spec.id).is_none() {
+                return;
+            }
+            if !helper_path().is_some_and(|p| p.is_file()) {
+                return;
+            }
+            let root = self.models.root_for(spec.id);
+            let missing_any = moss_voice::tts_voices::tts_warmup_plan(spec.id)
+                .iter()
+                .any(|s| !moss_voice::tts_voices::has_cached_preview(root, spec.id, s.id));
+            if !missing_any {
+                return;
+            }
+            let spawn_worker = {
+                let Ok(mut st) = self.tts_preview_warmer.lock() else {
+                    return;
+                };
+                if st.active != Some(spec.id) && !st.queue.contains(&spec.id) {
+                    st.queue.push_back(spec.id);
+                }
+                if st.worker_running {
+                    false
+                } else {
+                    st.worker_running = true;
+                    true
+                }
+            };
+            if spawn_worker {
+                let weak = self.self_weak.clone();
+                let _ = std::thread::Builder::new()
+                    .name("voice-tts-preview-warmer".into())
+                    .spawn(move || Self::run_tts_preview_warmer_loop(weak));
+            }
+        }
+
+        fn run_tts_preview_warmer_loop(weak: std::sync::Weak<Self>) {
+            loop {
+                let Some(builtin) = weak.upgrade() else {
+                    return;
+                };
+                let next_id = {
+                    let Ok(mut st) = builtin.tts_preview_warmer.lock() else {
+                        return;
+                    };
+                    match st.queue.pop_front() {
+                        Some(id) => {
+                            st.active = Some(id);
+                            id
+                        }
+                        None => {
+                            st.active = None;
+                            st.worker_running = false;
+                            return;
+                        }
+                    }
+                };
+                drop(builtin);
+                Self::warm_single_tts_model(&weak, next_id);
+                if let Some(builtin) = weak.upgrade()
+                    && let Ok(mut st) = builtin.tts_preview_warmer.lock()
+                    && st.active == Some(next_id)
+                {
+                    st.active = None;
+                }
+            }
+        }
+
+        fn warm_single_tts_model(weak: &std::sync::Weak<Self>, model_id: &'static str) {
+            let Some(spec) = local_models::spec_of(model_id, ModelKind::Tts) else {
+                return;
+            };
+            let (dir, root, exe) = {
+                let Some(builtin) = weak.upgrade() else {
+                    return;
+                };
+                let Some(dir) = builtin.models.path_if_installed(spec.id) else {
+                    return;
+                };
+                let root = builtin.models.root_for(spec.id).to_path_buf();
+                let Some(exe) = helper_path().filter(|p| p.is_file()) else {
+                    return;
+                };
+                (dir, root, exe)
+            };
+            let plan: Vec<_> = moss_voice::tts_voices::tts_warmup_plan(spec.id)
+                .into_iter()
+                .filter(|s| !moss_voice::tts_voices::has_cached_preview(&root, spec.id, s.id))
+                .collect();
+            if plan.is_empty() {
+                return;
+            }
+            let engine = if spec.engine == Engine::Matcha {
+                TtsEngine::Matcha
+            } else {
+                TtsEngine::Kokoro
+            };
+            let Ok(helper) = LocalHelper::spawn(&exe) else {
+                return;
+            };
+            if helper.load_tts(&dir, engine).is_err() {
+                return;
+            }
+            for item in plan {
+                let still_installed = weak
+                    .upgrade()
+                    .is_some_and(|b| b.models.path_if_installed(spec.id).is_some());
+                if !still_installed {
+                    moss_voice::tts_voices::remove_model_previews(&root, spec.id);
+                    return;
+                }
+                if moss_voice::tts_voices::has_cached_preview(&root, spec.id, item.id) {
+                    continue;
+                }
+                let Ok(pcm) = helper.synthesize_blocking(item.sample_text, item.id, 1.0) else {
+                    continue;
+                };
+                if pcm.samples.is_empty() || pcm.sample_rate == 0 {
+                    continue;
+                }
+                let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
+                let still_installed_after = weak
+                    .upgrade()
+                    .is_some_and(|b| b.models.path_if_installed(spec.id).is_some());
+                if !still_installed_after {
+                    moss_voice::tts_voices::remove_model_previews(&root, spec.id);
+                    return;
+                }
+                let _ = moss_voice::tts_voices::write_cached_preview_atomic(
+                    &root, spec.id, item.id, &wav,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+
+        /// 查询本地合成模型支持的语言包、全部音色及本机试听缓存状态。
+        pub fn local_tts_voices_list(&self, input: &Value) -> Result<Value, CenterError> {
+            let model_id = input
+                .get("model_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    CenterError::new("model_input_invalid", 400, "缺少本地合成模型编号")
+                })?;
+            let catalog = moss_voice::tts_voices::tts_voice_catalog(model_id).ok_or_else(|| {
+                CenterError::new("model_input_invalid", 400, "不支持的本地合成模型")
+            })?;
+            let installed = self.models.path_if_installed(catalog.model_id).is_some();
+            let root = self.models.root_for(catalog.model_id);
+            let mut cached_count = 0usize;
+            let speakers: Vec<Value> = catalog
+                .speakers
+                .iter()
+                .map(|s| {
+                    let cached = installed
+                        && moss_voice::tts_voices::has_cached_preview(root, catalog.model_id, s.id);
+                    if cached {
+                        cached_count += 1;
+                    }
+                    serde_json::json!({
+                        "id": s.id,
+                        "code": s.code,
+                        "name": s.name,
+                        "gender": s.gender,
+                        "gender_label": s.gender_label,
+                        "lang": s.lang,
+                        "lang_label": s.lang_label,
+                        "sample_text": s.sample_text,
+                        "recommended_for_zh": s.recommended_for_zh,
+                        "cached": cached,
+                    })
+                })
+                .collect();
+            let total_count = speakers.len();
+            if installed && cached_count < total_count {
+                self.schedule_tts_preview_warmup(catalog.model_id);
+            }
+            let caching = installed
+                && cached_count < total_count
+                && self.is_tts_preview_warming(catalog.model_id);
+            Ok(serde_json::json!({
+                "model_id": catalog.model_id,
+                "label": catalog.label,
+                "note": catalog.note,
+                "installed": installed,
+                "caching": caching,
+                "cached_count": cached_count,
+                "total_count": total_count,
+                "default_speaker": catalog.default_speaker,
+                "languages": catalog.languages,
+                "speakers": speakers,
+            }))
+        }
+
+        /// 试听指定本地合成模型的单个音色：优先直接秒读本机 WAV 缓存；尚未缓存时当场合成并落盘缓存。
+        pub fn local_tts_preview(&self, input: &Value) -> Result<Value, CenterError> {
+            let started = std::time::Instant::now();
+            let model_id = input
+                .get("model_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    CenterError::new("model_input_invalid", 400, "缺少本地合成模型编号")
+                })?;
+            let speaker = input
+                .get("speaker")
+                .and_then(Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| {
+                    CenterError::new("model_input_invalid", 400, "缺少有效的音色编号")
+                })?;
+            let spec = local_models::spec_of(model_id, ModelKind::Tts).ok_or_else(|| {
+                CenterError::new("model_input_invalid", 400, "不支持的本地合成模型")
+            })?;
+            let meta =
+                moss_voice::tts_voices::tts_speaker_meta(spec.id, speaker).ok_or_else(|| {
+                    CenterError::new("model_input_invalid", 400, "音色编号超出该模型支持范围")
+                })?;
+            let root = self.models.root_for(spec.id);
+            if let Some(wav) = moss_voice::tts_voices::read_cached_preview(root, spec.id, speaker) {
+                let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
+                return Ok(serde_json::json!({
+                    "section": "local_tts",
+                    "ok": true,
+                    "from_cache": true,
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "model_id": spec.id,
+                    "speaker": speaker,
+                    "sample_text": meta.sample_text,
+                    "audio_data_url": data_url,
+                }));
+            }
+            let Some(dir) = self.models.path_if_installed(spec.id) else {
+                return Err(CenterError::new(
+                    "local_tts_not_installed",
+                    409,
+                    "请先下载该语音合成模型，下载完成后会自动缓存本机试听语音",
+                ));
+            };
+            // 若当前常驻 LocalHelper 恰好已加载同款合成模型，直接借用免重载；否则拉起短生命周期辅助进程
+            let reusable_helper = {
+                let h_guard = self.helper.lock().ok();
+                let r_guard = self.running_local.lock().ok();
+                if let (Some(Some(h)), Some(Some(r))) = (h_guard.as_deref(), r_guard.as_deref())
+                    && h.is_alive()
+                    && r.tts.as_ref().is_some_and(|(loaded_id, loaded_dir, _)| {
+                        *loaded_id == spec.id && loaded_dir == &dir
+                    })
+                {
+                    Some(h.clone())
+                } else {
+                    None
+                }
+            };
+            let pcm = if let Some(helper) = reusable_helper {
+                helper
+                    .synthesize_blocking(meta.sample_text, speaker, 1.0)
+                    .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
+            } else {
+                let exe = helper_path().filter(|p| p.is_file()).ok_or_else(|| {
+                    CenterError::new(
+                        "local_helper_missing",
+                        409,
+                        "未找到本地模型辅助程序 moss-voice-local",
+                    )
+                })?;
+                let engine = if spec.engine == Engine::Matcha {
+                    TtsEngine::Matcha
+                } else {
+                    TtsEngine::Kokoro
+                };
+                let helper = LocalHelper::spawn(&exe).map_err(|e| {
+                    CenterError::new("local_helper_failed", 500, format!("启动辅助程序失败：{e}"))
+                })?;
+                helper.load_tts(&dir, engine).map_err(|e| {
+                    CenterError::new(
+                        "local_tts_load_failed",
+                        500,
+                        format!("加载合成模型失败：{e}"),
+                    )
+                })?;
+                helper
+                    .synthesize_blocking(meta.sample_text, speaker, 1.0)
+                    .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
+            };
+            let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
+            let _ =
+                moss_voice::tts_voices::write_cached_preview_atomic(root, spec.id, speaker, &wav);
+            self.schedule_tts_preview_warmup(spec.id);
+            let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
+            Ok(serde_json::json!({
+                "section": "local_tts",
+                "ok": true,
+                "from_cache": false,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "model_id": spec.id,
+                "speaker": speaker,
+                "sample_text": meta.sample_text,
+                "audio_data_url": data_url,
+            }))
         }
 
         /// 保存模型设置（地址等写 settings.json，密钥写 app_secrets）；运行中则重启服务以生效。
@@ -10464,11 +10907,15 @@ mod imp {
                     // 2026-11-09：画风包状态以“设备整包下载完”为准，推送了没下载不算已刷；
                     // 装的是别的画风时为 style_outdated（开机待命画面还是旧画风，要重刷）
                     let installed_marker = pref.and_then(|p| p.screen_pack.as_deref());
+                    let legacy_pack = installed_marker
+                        .is_some_and(moss_voice_server::screen_pack::marker_supports_scenes)
+                        && !installed;
                     let screen_pack_state = match (pending, expired) {
                         (Some(_), true) => "download_expired",
                         (Some(_), false) => "pending_download",
                         (None, _) if installed_marker == Some(current_marker.as_str()) => "installed",
                         (None, _) if installed => "style_outdated",
+                        (None, _) if legacy_pack => "font_outdated",
                         (None, _) => "none",
                     };
                     serde_json::json!({
@@ -10609,34 +11056,67 @@ mod imp {
                 "custom" => WakeTarget::Custom(self.wakeword_word()),
                 _ => WakeTarget::Default,
             };
-            let device_ok = self
+            let Some(dev_row) = self
                 .host
                 .db
                 .lock()
                 .map_err(|_| internal("数据库锁失败"))?
                 .voice_device(device_id)
                 .map_err(|_| internal("读取设备失败"))?
-                .is_some_and(|d| d.is_allowed());
-            if !device_ok {
+                .filter(|d| d.is_allowed())
+            else {
                 return Err(CenterError::new(
                     "wakeword_device_invalid",
                     409,
                     "只能推送给已允许的设备",
                 ));
-            }
+            };
+            let snap_font = dev_row
+                .hello_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .and_then(|v| {
+                    let size = u32::try_from(v["text_font"]["size"].as_u64()?).ok()?;
+                    let bpp = u8::try_from(v["text_font"]["bpp"].as_u64()?).ok()?;
+                    Some((size, bpp))
+                });
+            let (snap_screen, snap_mono) = dev_row
+                .info_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .map(|v| {
+                    let w = v["display"]["width"]
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok());
+                    let h = v["display"]["height"]
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok());
+                    let mono = v["display"]["monochrome"].as_bool().unwrap_or(false);
+                    (w.zip(h), mono)
+                })
+                .unwrap_or((None, false));
+            let (live_font, live_screen, live_mono, pack_size, style) = {
+                let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
+                let server = server.as_ref().ok_or_else(|| {
+                    CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
+                })?;
+                let (lf, ls, lm) = server.device_font_context(device_id);
+                (
+                    lf,
+                    ls,
+                    lm,
+                    server.screen_pack_size(device_id),
+                    server.screen_card_style(),
+                )
+            };
+            let fallback_font = moss_voice_server::glyph_font::select_pack_font(
+                live_font.or(snap_font),
+                live_screen.or(snap_screen),
+                live_mono || snap_mono,
+            );
             // n70 全屏画风：按这台设备的屏幕分辨率和当前画风生成，随唤醒词一起写进资源分区
             let screen = if with_screen {
-                let (size, style) = {
-                    let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
-                    let server = server.as_ref().ok_or_else(|| {
-                        CenterError::new("voice_builtin_stopped", 409, "内置语音服务未运行")
-                    })?;
-                    (
-                        server.screen_pack_size(device_id),
-                        server.screen_card_style(),
-                    )
-                };
-                let size = size.ok_or_else(|| {
+                let size = pack_size.ok_or_else(|| {
                             CenterError::new(
                                 "screen_pack_unsupported",
                                 409,
@@ -10649,10 +11129,11 @@ mod imp {
             } else {
                 None
             };
-            let package = moss_voice_server::wake_assets::build_package_with_screen(
+            let package = moss_voice_server::wake_assets::build_package_with_screen_and_font(
                 self.wakeword_base().as_deref(),
                 &target,
                 screen.as_ref().map(|(extras, _)| extras),
+                Some(fallback_font),
             )
             .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
             let size = package.len();
@@ -12120,7 +12601,7 @@ mod imp {
         fn screen_pack_auto_keep_is_opt_in_and_only_retries_once_a_day() {
             use moss_voice::settings::DeviceHardwarePrefs;
             const NOW: u64 = 1_790_000_000;
-            const HUD: &str = "moss-screen-1:moss_hud";
+            const HUD: &str = "moss-screen-2:moss_hud";
             // 判定：没记录 / 没装 → 推；已装 → 不推；等下载未过期 → 不推；过期 → 推；一天内自动推过 → 不推
             assert!(screen_pack_auto_due(None, HUD, NOW));
             assert!(screen_pack_auto_due(
@@ -12129,16 +12610,16 @@ mod imp {
                 NOW
             ));
             let installed = DeviceHardwarePrefs {
-                screen_pack: Some("moss-screen-1:moss_hud".into()),
+                screen_pack: Some("moss-screen-2:moss_hud".into()),
                 ..DeviceHardwarePrefs::default()
             };
             assert!(!screen_pack_auto_due(Some(&installed), HUD, NOW));
             let old_version = DeviceHardwarePrefs {
-                screen_pack: Some("moss-screen-0:moss_hud".into()),
+                screen_pack: Some("moss-screen-1:moss_hud".into()),
                 ..DeviceHardwarePrefs::default()
             };
             let other_style = DeviceHardwarePrefs {
-                screen_pack: Some("moss-screen-1:goggle_bot".into()),
+                screen_pack: Some("moss-screen-2:goggle_bot".into()),
                 ..DeviceHardwarePrefs::default()
             };
             assert!(
@@ -12147,10 +12628,10 @@ mod imp {
             );
             assert!(
                 screen_pack_auto_due(Some(&old_version), HUD, NOW),
-                "包版本过旧要重刷"
+                "旧无字库版 moss-screen-1 要自动升级重刷补回中文字库"
             );
             let pending = DeviceHardwarePrefs {
-                screen_pack_pending: Some("moss-screen-1:moss_hud".into()),
+                screen_pack_pending: Some("moss-screen-2:moss_hud".into()),
                 screen_pack_pending_at: Some(NOW - 60),
                 ..DeviceHardwarePrefs::default()
             };
@@ -12219,13 +12700,78 @@ mod imp {
             );
             assert_eq!(
                 current_screen_pack_marker(&settings),
-                "moss-screen-1:goggle_bot"
+                "moss-screen-2:goggle_bot"
             );
             assert!(screen_pack_auto_due(
                 settings.builtin_device_prefs.get("dev-1"),
                 &current_screen_pack_marker(&settings),
                 NOW
             ));
+        }
+
+        #[test]
+        fn chat_logs_are_on_by_default_persist_across_restarts_and_clear_on_demand() {
+            use moss_voice_server::DeviceRegistry;
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host.clone())).0.unwrap();
+            let initial = builtin.status();
+            assert_eq!(initial["debug_enabled"], true, "默认开启对话记录");
+            assert_eq!(initial["debug_traces"].as_array().unwrap().len(), 0);
+
+            let registry = DbRegistry {
+                db: host.db.clone(),
+                host: host.clone(),
+                settings_file: builtin.settings_file(),
+            };
+            registry.record_chat_turn(&moss_voice_server::TurnDebugTrace {
+                id: 0,
+                at_ms: 1_790_000_123,
+                device_id: "dev-chat".into(),
+                session_id: "s-chat".into(),
+                turn: 1,
+                at: 1_790_000,
+                raw_asr: "今天天气怎么样".into(),
+                corrected_asr: "今天天气怎么样".into(),
+                tools: vec![moss_voice_server::DebugToolTrace {
+                    name: "get_weather".into(),
+                    arguments: "{}".into(),
+                    result: "晴，22度".into(),
+                }],
+                reply: "今天天气晴朗，气温22度，非常适合出门。".into(),
+                spoken: "今天天气晴朗，".into(),
+                outcome: "interrupted".into(),
+                truncated: false,
+                tools_dropped: 0,
+            });
+
+            // 模拟重启 BuiltinVoice 实例：历史记录仍在
+            let restarted = init(Some(host)).0.unwrap();
+            let after = restarted.status();
+            let traces = after["debug_traces"].as_array().unwrap();
+            assert_eq!(traces.len(), 1);
+            assert_eq!(traces[0]["device_id"], "dev-chat");
+            assert_eq!(traces[0]["raw_asr"], "今天天气怎么样");
+            assert_eq!(traces[0]["reply"], "今天天气晴朗，气温22度，非常适合出门。");
+            assert_eq!(traces[0]["spoken"], "今天天气晴朗，");
+            assert_eq!(traces[0]["outcome"], "interrupted");
+
+            // 关掉开关：停录且导出诊断包不含历史对话，但本机数据库里的旧记录不被误删
+            let toggled = restarted
+                .local_save(&serde_json::json!({"chat_log_enabled": false}))
+                .unwrap();
+            assert_eq!(toggled["debug_enabled"], false);
+            assert_eq!(toggled["debug_traces"].as_array().unwrap().len(), 1);
+            let bundle = restarted.diagnostics_bundle();
+            assert_eq!(bundle["debug_traces"].as_array().unwrap().len(), 0);
+
+            // 显式清空：本机记录清零
+            let cleared = restarted
+                .local_save(&serde_json::json!({"clear_debug_traces": true}))
+                .unwrap();
+            assert_eq!(cleared["debug_traces"].as_array().unwrap().len(), 0);
         }
 
         #[test]
@@ -13179,6 +13725,80 @@ mod imp {
                 assert_eq!(st.synced_ref_gen, 0);
             }
         }
+
+        #[test]
+        fn local_tts_voices_list_and_preview_serve_cached_wav_and_clean_on_delete() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host)).0.unwrap();
+
+            // 1. 未安装时仍可读取完整语言包与全部音色清单，但试听返回 409 提示先下载
+            let list_uninstalled = builtin
+                .local_tts_voices_list(&serde_json::json!({ "model_id": "kokoro" }))
+                .unwrap();
+            assert_eq!(list_uninstalled["installed"], false);
+            assert_eq!(list_uninstalled["total_count"], 54);
+            assert_eq!(list_uninstalled["cached_count"], 0);
+            assert_eq!(list_uninstalled["languages"][0]["code"], "zh");
+            let err = builtin
+                .local_tts_preview(&serde_json::json!({ "model_id": "kokoro", "speaker": 45 }))
+                .unwrap_err();
+            assert_eq!(err.code, "local_tts_not_installed");
+
+            // 2. 模拟模型目录已安装并写入一条本机缓存 WAV：列表显示 cached=true，试听直接秒读缓存返回 data URL
+            let kokoro_spec = local_models::spec_of("kokoro", ModelKind::Tts).unwrap();
+            let kokoro_dir = local_models::install_path(builtin.models.root(), kokoro_spec);
+            std::fs::create_dir_all(kokoro_dir.join("espeak-ng-data")).unwrap();
+            std::fs::create_dir_all(kokoro_dir.join("dict")).unwrap();
+            for req in [
+                "model.onnx",
+                "voices.bin",
+                "tokens.txt",
+                "lexicon-zh.txt",
+                "lexicon-us-en.txt",
+            ] {
+                std::fs::write(kokoro_dir.join(req), b"stub").unwrap();
+            }
+            let samples = vec![0i16; 2400];
+            let wav = moss_voice_providers::wav::encode_wav(&samples, 24_000);
+            moss_voice::tts_voices::write_cached_preview_atomic(
+                builtin.models.root(),
+                "kokoro",
+                45,
+                &wav,
+            )
+            .unwrap();
+
+            let list_installed = builtin
+                .local_tts_voices_list(&serde_json::json!({ "model_id": "kokoro" }))
+                .unwrap();
+            assert_eq!(list_installed["installed"], true);
+            assert_eq!(list_installed["cached_count"], 1);
+            assert_eq!(list_installed["speakers"][0]["id"], 45);
+            assert_eq!(list_installed["speakers"][0]["cached"], true);
+
+            let preview = builtin
+                .local_tts_preview(&serde_json::json!({ "model_id": "kokoro", "speaker": 45 }))
+                .unwrap();
+            assert_eq!(preview["ok"], true);
+            assert_eq!(preview["from_cache"], true);
+            assert!(
+                preview["audio_data_url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("data:audio/wav;base64,")
+            );
+
+            // 3. 删除模型时同步清空对应的 .tts-previews/kokoro 本地试听缓存
+            builtin.model_delete("kokoro").unwrap();
+            assert!(!moss_voice::tts_voices::has_cached_preview(
+                builtin.models.root(),
+                "kokoro",
+                45
+            ));
+        }
     }
 
     /// 测试豆包识别或合成（NV7）：识别送 1 秒低音量正弦音，合成一句短话。结果与错误都不含密钥。
@@ -13510,6 +14130,9 @@ pub async fn voice_builtin_models_test(
         if section.trim() == "chain" {
             return builtin.chain_test(&input);
         }
+        if section.trim() == "local_tts" {
+            return builtin.local_tts_preview(&input);
+        }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
         let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {
             moss_voice::CenterError::new("model_input_invalid", 400, "模型配置格式不正确")
@@ -13536,6 +14159,9 @@ pub async fn voice_builtin_models_list(
     let result = imp::run(app, move |builtin| {
         if section.trim() == "jev" {
             return builtin.jev_models_list(&input);
+        }
+        if section.trim() == "local_tts" {
+            return builtin.local_tts_voices_list(&input);
         }
         let section = imp::parse_sections(std::slice::from_ref(&section))?[0];
         let input: moss_voice::SectionInput = serde_json::from_value(input).map_err(|_| {

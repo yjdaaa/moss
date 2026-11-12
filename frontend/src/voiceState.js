@@ -3102,6 +3102,10 @@ export function screenPackDeviceView(device) {
     // 2026-11-09 用户决定：换了画风要重刷，开机待命画面才跟着换
     text = "装的是换画风之前的全屏画风：重刷后开机待命画面才会换";
     tone = "warn";
+  } else if (state === "font_outdated") {
+    // 2026-11-12 n81：旧版 moss-screen-1 未含常用中文字库，重刷 moss-screen-2 补齐屏幕中文字体
+    text = "装的是旧版画风包（缺常用中文字库）：重刷后补齐屏幕中文字体";
+    tone = "warn";
   } else if (size) {
     text = `彩屏 ${size[0]}×${size[1]}，还没刷全屏画风`;
     tone = "warn";
@@ -3109,7 +3113,11 @@ export function screenPackDeviceView(device) {
     text = "没报彩屏分辨率，只能推唤醒词";
   }
   const canQuickPack = Boolean(device?.supported && size && state !== "installed" && state !== "pending_download");
-  const quickLabel = state === "style_outdated" ? "一键重刷全屏画风" : "一键刷入全屏画风";
+  const quickLabel = state === "font_outdated"
+    ? "一键补齐中文字库"
+    : state === "style_outdated"
+      ? "一键重刷全屏画风"
+      : "一键刷入全屏画风";
   return { state, text, tone, canQuickPack, quickLabel };
 }
 

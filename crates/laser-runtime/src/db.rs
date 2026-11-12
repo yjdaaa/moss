@@ -115,7 +115,8 @@ impl ApprovalRow {
 /// 资料段落级索引（`context_knowledge_chunks` + 无正文 FTS5 `context_knowledge_chunks_fts`）。
 /// v18：删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），
 /// 补齐 `workflows`、`approvals`、`material_aliases` 高频查询索引。
-pub const SCHEMA_VERSION: i64 = 18;
+/// v19（2026-11-12 n81）：新增有界语音对话记录表 `voice_chat_logs`（说了什么、工具调用、回了什么，上限 500 条）。
+pub const SCHEMA_VERSION: i64 = 19;
 
 const AUDIT_LOG_MAX_ROWS: i64 = 2000;
 const APPROVALS_TERMINAL_MAX_ROWS: i64 = 500;
@@ -124,7 +125,26 @@ const CALIBRATIONS_INACTIVE_MAX_ROWS: i64 = 200;
 const MATERIAL_HISTORY_MAX_ROWS: i64 = 500;
 const EXTRACTION_RUNS_MAX_ROWS: i64 = 500;
 const FIRMWARE_DELIVERY_FINISHED_MAX_ROWS: i64 = 200;
+pub const VOICE_CHAT_LOGS_MAX_ROWS: i64 = 500;
 const CONTEXT_TOMBSTONE_RETENTION_SECS: f64 = 30.0 * 86_400.0;
+
+/// n81 本机持久化的语音对话记录（单轮识别原话、纠偏文本、工具调用 JSON、完整回复与实际已播句子）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceChatLogRecord {
+    pub id: i64,
+    pub at_ms: i64,
+    pub device_id: String,
+    pub session_id: String,
+    pub turn: i64,
+    pub raw_asr: String,
+    pub corrected_asr: String,
+    pub reply: String,
+    pub spoken: String,
+    pub tools_json: String,
+    pub outcome: String,
+    pub truncated: bool,
+    pub tools_dropped: i64,
+}
 
 /// NV10 语音记忆摘要；仅受用户开启开关后由上层服务读写，不含原始语音。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -875,6 +895,30 @@ impl RuntimeDb {
                  INSERT INTO schema_version(version,applied_at) VALUES(18,unixepoch());"
             )?;
         }
+        if current.unwrap_or(0) < 19 {
+            // 2026-11-12（技术书 n81）：持久化有界语音对话记录（说了什么、调了什么工具、回了什么，方便随时排障）。
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS voice_chat_logs(
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   at_ms INTEGER NOT NULL,
+                   device_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL,
+                   turn INTEGER NOT NULL,
+                   raw_asr TEXT NOT NULL,
+                   corrected_asr TEXT NOT NULL,
+                   reply TEXT NOT NULL,
+                   spoken TEXT NOT NULL DEFAULT '',
+                   tools_json TEXT NOT NULL DEFAULT '[]',
+                   outcome TEXT NOT NULL,
+                   truncated INTEGER NOT NULL DEFAULT 0 CHECK(truncated IN (0, 1)),
+                   tools_dropped INTEGER NOT NULL DEFAULT 0,
+                   created_at REAL NOT NULL,
+                   updated_at REAL NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS voice_chat_logs_at ON voice_chat_logs(at_ms DESC, id DESC);
+                 INSERT INTO schema_version(version,applied_at) VALUES(19,unixepoch());"
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1210,6 +1254,79 @@ impl RuntimeDb {
             return Ok(None);
         }
         self.voice_memory(device_id)
+    }
+
+    /// n81 追加一条已脱敏的语音对话记录，并定额保留最近 `VOICE_CHAT_LOGS_MAX_ROWS` 条。
+    pub fn append_voice_chat_log(&self, entry: &VoiceChatLogRecord) -> Result<i64, SchemaError> {
+        let now = (entry.at_ms as f64) / 1000.0;
+        self.connection.execute(
+            "INSERT INTO voice_chat_logs(
+               at_ms, device_id, session_id, turn, raw_asr, corrected_asr, reply, spoken,
+               tools_json, outcome, truncated, tools_dropped, created_at, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+            params![
+                entry.at_ms,
+                entry.device_id,
+                entry.session_id,
+                entry.turn,
+                entry.raw_asr,
+                entry.corrected_asr,
+                entry.reply,
+                entry.spoken,
+                entry.tools_json,
+                entry.outcome,
+                i64::from(entry.truncated),
+                entry.tools_dropped,
+                now,
+            ],
+        )?;
+        let id = self.connection.last_insert_rowid();
+        let _ = self.connection.execute(
+            "DELETE FROM voice_chat_logs
+             WHERE id NOT IN (SELECT id FROM voice_chat_logs ORDER BY at_ms DESC, id DESC LIMIT ?1)",
+            params![VOICE_CHAT_LOGS_MAX_ROWS],
+        );
+        Ok(id)
+    }
+
+    /// n81 按时间倒序读取最近的语音对话记录（只给受信任主窗口显示）。
+    pub fn list_voice_chat_logs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VoiceChatLogRecord>, SchemaError> {
+        let bounded = (limit.clamp(1, VOICE_CHAT_LOGS_MAX_ROWS as usize)) as i64;
+        let mut stmt = self.connection.prepare(
+            "SELECT id, at_ms, device_id, session_id, turn, raw_asr, corrected_asr, reply, spoken,
+                    tools_json, outcome, truncated, tools_dropped
+             FROM voice_chat_logs
+             ORDER BY at_ms DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![bounded], |row| {
+            Ok(VoiceChatLogRecord {
+                id: row.get(0)?,
+                at_ms: row.get(1)?,
+                device_id: row.get(2)?,
+                session_id: row.get(3)?,
+                turn: row.get(4)?,
+                raw_asr: row.get(5)?,
+                corrected_asr: row.get(6)?,
+                reply: row.get(7)?,
+                spoken: row.get(8)?,
+                tools_json: row.get(9)?,
+                outcome: row.get(10)?,
+                truncated: row.get::<_, i64>(11)? != 0,
+                tools_dropped: row.get(12)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// n81 清空全部语音对话记录。
+    pub fn clear_voice_chat_logs(&self) -> Result<usize, SchemaError> {
+        self.connection
+            .execute("DELETE FROM voice_chat_logs", [])
+            .map_err(Into::into)
     }
 
     /// 追加一条审计记录（技术书 §7.3）。`detail` 由 `AuditDetail` 序列化，不拼裸 JSON。
@@ -2081,6 +2198,11 @@ impl RuntimeDb {
                    ORDER BY updated_at DESC, delivery_id DESC LIMIT ?1
                )",
             params![FIRMWARE_DELIVERY_FINISHED_MAX_ROWS],
+        )?;
+        removed += tx.execute(
+            "DELETE FROM voice_chat_logs
+             WHERE id NOT IN (SELECT id FROM voice_chat_logs ORDER BY at_ms DESC, id DESC LIMIT ?1)",
+            params![VOICE_CHAT_LOGS_MAX_ROWS],
         )?;
         tx.commit()?;
         Ok(removed)

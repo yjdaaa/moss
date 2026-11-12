@@ -25,8 +25,8 @@ use crate::goggle_bot::{BotPose, ScreenCardStyle, base64_encode, draw_goggle_bot
 use crate::preview_push::{draw_moss_optical_eye, draw_text_5x7, put_px, text_width_px};
 use crate::wake_assets::{AssetEntry, ScreenExtras};
 
-/// 画风包版本，记在设备偏好 `screen_pack` 里（`moss-screen-1:moss_hud`）。
-pub const PACK_VERSION: &str = "moss-screen-1";
+/// 画风包版本，记在设备偏好 `screen_pack` 里（`moss-screen-2:moss_hud`，n81 起内置 `noto-v1` 中文字库）。
+pub const PACK_VERSION: &str = "moss-screen-2";
 /// 每个场景的帧数与帧间隔（毫秒）。
 pub const FRAMES: u8 = 4;
 const FRAME_MS: u32 = 300;
@@ -90,12 +90,20 @@ pub fn pack_marker(style: ScreenCardStyle) -> String {
     format!("{PACK_VERSION}:{}", style.as_str())
 }
 
-/// 设备偏好里的标记是否表示已装好本版画风包。
+/// 设备偏好里的标记是否表示已装好本版画风包（含完整中文字库）。
 pub fn marker_installed(marker: &str) -> bool {
     marker
         .split(':')
         .next()
         .is_some_and(|version| version == PACK_VERSION)
+}
+
+/// 设备偏好里的标记是否已装有 MOSS 全屏场景动图（含旧版 `moss-screen-1`，在线等待补刷期间仍发全屏场景名）。
+pub fn marker_supports_scenes(marker: &str) -> bool {
+    marker
+        .split(':')
+        .next()
+        .is_some_and(|version| matches!(version, "moss-screen-1" | PACK_VERSION))
 }
 
 /// 标准表情名在包里指向哪个场景（固件待命固定 `neutral` → 待命画面）。
@@ -802,6 +810,11 @@ pub fn build_screen_extras(
     let theme =
         json!({ "text_color": text, "background_color": bg, "background_image": BACKDROP_FILE });
     extras.skin = Some(json!({ "light": theme.clone(), "dark": theme }));
+    extras.fallback_font = Some(crate::glyph_font::select_pack_font(
+        None,
+        Some(screen),
+        false,
+    ));
     Ok(extras)
 }
 

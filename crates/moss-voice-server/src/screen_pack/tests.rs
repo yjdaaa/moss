@@ -178,8 +178,32 @@ fn speaking_emotions_map_to_scenes_and_markers_parse() {
         "hud_listen"
     );
     assert!(marker_installed(&pack_marker(ScreenCardStyle::GoggleBot)));
+    assert!(!marker_installed("moss-screen-1:moss_hud"));
+    assert!(marker_supports_scenes("moss-screen-1:moss_hud"));
+    assert!(marker_supports_scenes(&pack_marker(
+        ScreenCardStyle::MossHud
+    )));
     assert!(!marker_installed("moss-screen-0:moss_hud"));
     assert!(!marker_installed(""));
+}
+
+#[test]
+fn package_without_base_embeds_common_chinese_font_and_glyph_meta() {
+    let extras = build_screen_extras(ScreenCardStyle::GoggleBot, (320, 240)).unwrap();
+    let package =
+        build_package_with_screen(None, &WakeTarget::Default, Some(&extras)).expect("能打包");
+    assert!(package.len() <= ASSETS_MAX_BYTES);
+    let (entries, index) = index_of(&package);
+    assert_eq!(index["text_font"], "font_noto_sans_common_20_4.bin");
+    assert_eq!(index["text_font_meta"]["bundle"], "noto-v1");
+    assert_eq!(index["text_font_meta"]["charset"], "common");
+    assert_eq!(index["text_font_meta"]["size"], 20);
+    assert_eq!(index["text_font_meta"]["bpp"], 4);
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.name == "font_noto_sans_common_20_4.bin")
+    );
 }
 
 #[test]

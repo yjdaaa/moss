@@ -15,6 +15,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 
 ## 工作方式
 
+- You are the owner and long-term maintainer of this codebase, and its design is up to you.
 - 先读待改文件、直接依赖、相关测试和对应文档；不扫描无关目录。
 - 复用现有接口、注册方式、命名和错误处理，不为整齐新增抽象。
 - 未经明确授权，不提交、推送、重置或覆盖他人改动。

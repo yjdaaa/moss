@@ -4,6 +4,7 @@ import { showAlert, showConfirm } from "../appDialog.js";
 import { voiceApi } from "../voiceApi.js";
 import { createPollRunner } from "../pollGuard.js";
 import { SaveBar, VoiceGroup, focusVoiceGroup, gotoVoiceGroup } from "./VoiceLayout.jsx";
+import { LocalTtsVoicesModal } from "./LocalTtsVoicesModal.jsx";
 import VoiceMemoryCard from "./VoiceMemoryCard.jsx";
 import VoicePluginsCard from "./VoicePluginsCard.jsx";
 import VoiceSpeakerCard from "./VoiceSpeakerCard.jsx";
@@ -3096,6 +3097,29 @@ export function LocalModelsGroup({ builtin }) {
   const layaSetup = layaSetupView(local.laya_setup, local.laya_env);
   const jevRuntime = localJevRuntimeView(local.jev_runtime);
   const layaSetupLocked = modelLocked("laya-setup");
+  const [ttsVoicesModalModel, setTtsVoicesModalModel] = useState(null);
+  const applyVoiceFromModal = async (targetModelId, speakerId, speakerItem) => {
+    builtin.setBusy("local-save-本地合成音色");
+    try {
+      const next = await voiceApi.localSave({
+        tts: true,
+        tts_model: targetModelId,
+        tts_speaker: Number(speakerId),
+      });
+      builtin.setStatus(next);
+      setDraft((prev) => ({
+        ...prev,
+        tts: true,
+        tts_model: targetModelId,
+        tts_speaker: String(speakerId),
+      }));
+      const text = `已选用 #${speakerId} ${speakerItem?.name || ""}（${speakerItem?.gender_label || ""}）· ${restartEffect(next)}`;
+      setResult({ ok: true, text });
+      return text;
+    } finally {
+      builtin.setBusy("");
+    }
+  };
   const pickFallbackTts = async (model) => {
     const nextDraft = selectLocalModel(form, models, "tts", model.id);
     setDraft(nextDraft);
@@ -3165,7 +3189,22 @@ export function LocalModelsGroup({ builtin }) {
                         <tr key={model.id} className={chosen ? "on" : ""}>
                           <td className="voice-model-cell">
                             <div className="voice-model-name">
-                              <b>{model.label}</b>
+                              {item.kind === "tts" ? (
+                                <button
+                                  type="button"
+                                  className="voice-tts-model-trigger"
+                                  onClick={() => setTtsVoicesModalModel(model)}
+                                  title="点击查看支持的语言包、全部音色并试听本机缓存语音"
+                                  id={`voice-local-tts-open-${model.id}`}
+                                >
+                                  <b>{model.label}</b>
+                                  <span className="voice-tts-trigger-chip">
+                                    <Volume2 size={12} /> 语言包与试听
+                                  </span>
+                                </button>
+                              ) : (
+                                <b>{model.label}</b>
+                              )}
                               {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
                               {isFallback && <span className="ob-pill ob-pill--info voice-tag">当前兜底</span>}
                               {model.streaming && <span className="ob-pill ob-pill--info voice-tag">边说边识别</span>}
@@ -3425,12 +3464,38 @@ export function LocalModelsGroup({ builtin }) {
         <div className="voice-form-grid">
           {voices ? (
             <label>
-              <span>本地合成音色编号（{voices.hint}；默认 {voices.default}）</span>
+              <span className="voice-label-with-link">
+                <span>本地合成音色编号（{voices.hint}；默认 {voices.default}）</span>
+                <button
+                  type="button"
+                  className="voice-link-btn"
+                  onClick={() => {
+                    const target = models.find((m) => m.kind === "tts" && m.id === form.tts_model) || models.find((m) => m.kind === "tts");
+                    if (target) setTtsVoicesModalModel(target);
+                  }}
+                  id="voice-local-speaker-browse"
+                >
+                  试听选音色
+                </button>
+              </span>
               <input className="text-input mono" inputMode="numeric" value={form.tts_speaker} onChange={(e) => update("tts_speaker", e.target.value)} id="voice-local-speaker" />
             </label>
           ) : (
             <label>
-              <span>本地合成音色</span>
+              <span className="voice-label-with-link">
+                <span>本地合成音色</span>
+                <button
+                  type="button"
+                  className="voice-link-btn"
+                  onClick={() => {
+                    const target = models.find((m) => m.kind === "tts" && m.id === form.tts_model) || models.find((m) => m.kind === "tts");
+                    if (target) setTtsVoicesModalModel(target);
+                  }}
+                  id="voice-local-speaker-browse"
+                >
+                  查看语言包与试听
+                </button>
+              </span>
               <span className="voice-muted">所选合成模型只有一个音色</span>
             </label>
           )}
@@ -3445,6 +3510,17 @@ export function LocalModelsGroup({ builtin }) {
         </div>
         {dirty && error && <div className="voice-hint voice-hint--bad">{error}</div>}
         <SaveBar id="voice-local-save" target="本地模型设置" dirty={dirty} busy={Boolean(busy)} saving={busy === "local-save-本地模型设置"} blocked={error ? "请先改正上面的错误" : ""} result={result} onSave={() => group.save("本地模型设置")} />
+        <LocalTtsVoicesModal
+          visible={Boolean(ttsVoicesModalModel)}
+          modelId={ttsVoicesModalModel?.id || ""}
+          modelLabel={ttsVoicesModalModel?.label || ""}
+          currentTtsOn={Boolean(baseline.tts)}
+          currentModelId={baseline.tts_model || ""}
+          currentSpeaker={baseline.tts_speaker ?? null}
+          onApplyVoice={applyVoiceFromModal}
+          onDownloadModel={(targetId) => modelAct(targetId, "下载模型", () => voiceApi.localDownload(targetId))}
+          onClose={() => setTtsVoicesModalModel(null)}
+        />
       </div>
     </VoiceGroup>
   );
@@ -3712,18 +3788,46 @@ export function ExperienceGroup({ builtin }) {
   );
 }
 
-/** 默认关闭、仅存本机内存（关闭或重启即清）的实时对话识别与工具调用排障面板，支持划词一键加入纠错或热词。 */
+/** 默认开启并落盘保存（本机 SQLite 最多保留 500 条）的语音对话记录与排障面板，支持搜索过滤与划词纠偏。 */
 export function LiveDebugTraces({ builtin }) {
   const status = builtin?.status;
   // 保存期间先显示目标状态，避免受控复选框在后端返回前弹回；保存结束（成功或失败）后回到后端真实值。
   const [pendingEnabled, setPendingEnabled] = useState(null);
-  const enabled = pendingEnabled ?? Boolean(status?.debug_enabled);
+  const enabled = pendingEnabled ?? Boolean(status?.debug_enabled ?? status?.local?.settings?.chat_log_enabled ?? true);
   const traces = Array.isArray(status?.debug_traces) ? status.debug_traces : [];
+  const devices = Array.isArray(status?.devices) ? status.devices : [];
   const timingItems = voiceTimingReport(status?.timings);
+  const [query, setQuery] = useState("");
   const [selectedWord, setSelectedWord] = useState("");
   const [rightWord, setRightWord] = useState("");
   const [feedback, setFeedback] = useState("");
   const [saving, setSaving] = useState(false);
+
+  const deviceLabel = (deviceId) => {
+    if (!deviceId) return "";
+    const found = devices.find((d) => d.device_id === deviceId);
+    const name = String(found?.name || "").trim();
+    return name ? `${name} (${deviceId})` : deviceId;
+  };
+
+  const trimmedQuery = query.trim().toLowerCase();
+  const filteredTraces = trimmedQuery
+    ? traces.filter((t) => {
+        const hay = [
+          t.raw_asr,
+          t.corrected_asr,
+          t.reply,
+          t.spoken,
+          t.device_id,
+          deviceLabel(t.device_id),
+          ...(Array.isArray(t.tools) ? t.tools.map((x) => `${x.name} ${x.arguments} ${x.result}`) : []),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return hay.includes(trimmedQuery);
+      })
+    : traces;
 
   const copyTimings = async () => {
     try {
@@ -3735,7 +3839,7 @@ export function LiveDebugTraces({ builtin }) {
   };
 
   const summaryParts = [
-    enabled ? `排障已开 (${traces.length} 轮)` : "排障默认关",
+    enabled ? `记录已开 (${traces.length} 条)` : `已暂停记录 (${traces.length} 条历史)`,
     timingItems.length ? `耗时 ${timingItems.length} 轮` : "",
   ].filter(Boolean);
 
@@ -3744,14 +3848,14 @@ export function LiveDebugTraces({ builtin }) {
     setPendingEnabled(checked);
     setFeedback("");
     try {
-      const next = await voiceApi.localSave({ debug_trace_enabled: checked });
+      const next = await voiceApi.localSave({ chat_log_enabled: checked, debug_trace_enabled: checked });
       if (next && builtin?.setStatus) builtin.setStatus(next);
       if (!checked) {
         setSelectedWord("");
         setRightWord("");
       }
     } catch (error) {
-      await showAlert(voiceErrorText(error), { title: "切换调试流失败", tone: "error" });
+      await showAlert(voiceErrorText(error), { title: "切换对话记录开关失败", tone: "error" });
     } finally {
       setPendingEnabled(null);
       setSaving(false);
@@ -3759,6 +3863,12 @@ export function LiveDebugTraces({ builtin }) {
   };
 
   const clearDebug = async () => {
+    const ok = await showConfirm("确定清空本机保存的全部语音对话记录吗？清空后无法恢复。", {
+      title: "清空对话记录",
+      confirmText: "清空",
+      tone: "danger",
+    });
+    if (!ok) return;
     setSaving(true);
     try {
       const next = await voiceApi.localSave({ clear_debug_traces: true });
@@ -3827,7 +3937,7 @@ export function LiveDebugTraces({ builtin }) {
   return (
     <VoiceGroup
       id="live-debug-traces"
-      title="对话排障与耗时（仅内存）"
+      title="对话记录与排障"
       summary={summaryParts.join(" · ")}
     >
       <div className="voice-stack" id="voice-live-debug">
@@ -3840,9 +3950,9 @@ export function LiveDebugTraces({ builtin }) {
               onChange={(e) => toggleDebug(e.target.checked)}
               id="voice-debug-trace-switch"
             />
-            <span>开启实时识别与工具调用调试（仅存本机内存最多 10 轮，关闭开关或退出 MOSS 立即清空，不断连设备）</span>
+            <span>保存语音对话记录（记录你说的话、工具调用与 MOSS 回复，本机最多保留最近 500 条，重启不丢失）</span>
           </label>
-          {enabled && traces.length > 0 && (
+          {traces.length > 0 && (
             <button
               type="button"
               className="btn btn-ghost"
@@ -3850,7 +3960,7 @@ export function LiveDebugTraces({ builtin }) {
               onClick={clearDebug}
               id="voice-debug-trace-clear"
             >
-              清空调试记录
+              清空对话记录
             </button>
           )}
           {timingItems.length > 0 && (
@@ -3864,8 +3974,29 @@ export function LiveDebugTraces({ builtin }) {
             </button>
           )}
         </div>
+        {traces.length > 0 && (
+          <div className="voice-actions">
+            <input
+              className="text-input"
+              type="search"
+              placeholder="搜索原话、回复内容、工具名或设备…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              id="voice-chat-log-search"
+              style={{ maxWidth: 360 }}
+            />
+            {trimmedQuery && (
+              <span className="voice-muted">
+                匹配 {filteredTraces.length} / {traces.length} 条
+              </span>
+            )}
+          </div>
+        )}
+        {!enabled && (
+          <p className="voice-muted">当前已暂停记录新的语音对话；下方仍可查看之前已保存的历史记录。</p>
+        )}
         {feedback && <div className="voice-ok">{feedback}</div>}
-        {enabled && selectedWord && (
+        {selectedWord && (
           <div className="voice-debug-selection-bar" id="voice-debug-selection-bar">
             <span>已选中识别词：<b className="mono">{selectedWord}</b></span>
             <input
@@ -3901,21 +4032,23 @@ export function LiveDebugTraces({ builtin }) {
             <span className="voice-muted voice-debug-note">这里只是顺手加一条；纠偏表和热词的完整列表在“模型 › 对话体验”里查看、修改和删除。</span>
           </div>
         )}
-        {!enabled ? (
-          <p className="voice-muted">当前处于隐私静默状态，不留存任何语音识别文字。遇到“小智听错耗材名”或“不确定调了什么工具参数”时打开上方开关即可实时查看。</p>
-        ) : traces.length === 0 ? (
-          <p className="voice-muted">已开启内存调试——请唤醒小智说一句话，识别原话、纠偏结果与工具参数会实时显示在这里（鼠标划选听错的词可一键加入纠偏表）。</p>
+        {traces.length === 0 ? (
+          <p className="voice-muted">暂无语音对话记录——唤醒小智说一句话后，你说的话、工具调用与 MOSS 的回复会自动保存在这里（鼠标划选听错的词可一键加入纠偏表）。</p>
+        ) : filteredTraces.length === 0 ? (
+          <p className="voice-muted">没有找到包含“{query.trim()}”的对话记录。</p>
         ) : (
-          traces.map((trace, idx) => {
+          filteredTraces.map((trace, idx) => {
             const correctedChanged = trace.corrected_asr && trace.corrected_asr !== trace.raw_asr;
+            const spokenDiffers = trace.spoken && trace.reply && trace.spoken !== trace.reply;
             return (
-              <div className="voice-debug-card" key={`${trace.session_id}-${trace.turn}-${idx}`}>
+              <div className="voice-debug-card" key={trace.id ? `log-${trace.id}` : `${trace.session_id}-${trace.turn}-${idx}`}>
                 <div className="voice-debug-head">
                   <b>第 {trace.turn} 轮</b>
                   <span className="voice-muted mono">{formatTime(trace.at)}</span>
+                  {trace.device_id && <span className="voice-muted">{deviceLabel(trace.device_id)}</span>}
                   <span className={`ob-pill ob-pill--${voiceOutcomeLabel(trace.outcome).tone}`}>{voiceOutcomeLabel(trace.outcome).text}</span>
                   {trace.truncated && (
-                    <span className="ob-pill ob-pill--warn" title="文字超过 240 字只留前 240 字，工具调用超过 8 个只留前 8 个">
+                    <span className="ob-pill ob-pill--warn" title="超长文本或过多工具调用已按上限裁剪">
                       已截断{trace.tools_dropped ? `（另有 ${trace.tools_dropped} 个工具调用未保留）` : ""}
                     </span>
                   )}
@@ -3955,8 +4088,14 @@ export function LiveDebugTraces({ builtin }) {
                 )}
                 {trace.reply && (
                   <div className="voice-debug-line">
-                    <span className="voice-muted">播报回复：</span>
+                    <span className="voice-muted">MOSS 回复：</span>
                     <span>{trace.reply}</span>
+                  </div>
+                )}
+                {spokenDiffers && (
+                  <div className="voice-debug-line">
+                    <span className="voice-muted">屏幕已播：</span>
+                    <span>{trace.spoken}</span>
                   </div>
                 )}
               </div>

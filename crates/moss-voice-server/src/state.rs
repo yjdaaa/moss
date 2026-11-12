@@ -17,20 +17,27 @@ pub const MAX_INFO_EVENTS: usize = 300;
 pub const MAX_PROBLEM_EVENTS: usize = 200;
 /// 对话耗时最多保留轮数。
 pub const MAX_TIMINGS: usize = 50;
-const MAX_DEBUG_TRACES: usize = 10;
-const MAX_DEBUG_TEXT_CHARS: usize = 240;
-const MAX_DEBUG_TOOLS: usize = 8;
+const MAX_DEBUG_TRACES: usize = 100;
+const MAX_DEBUG_TEXT_CHARS: usize = 2000;
+const MAX_DEBUG_TOOLS: usize = 16;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DebugToolTrace {
     pub name: String,
     pub arguments: String,
     pub result: String,
 }
 
-/// 默认关闭、仅驻留内存（最多 10 轮，关闭或重启立即清空）的排障流；绝不落盘。
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// 已脱敏的语音对话记录（说了什么、调了什么工具、回了什么）。
+/// 桌面端默认开启并持久化到 SQLite `voice_chat_logs`，内存同时缓存最近 100 轮；关闭开关立即停写并清内存。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TurnDebugTrace {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub at_ms: u64,
+    #[serde(default)]
+    pub device_id: String,
     pub session_id: String,
     pub turn: u64,
     pub at: u64,
@@ -38,11 +45,14 @@ pub struct TurnDebugTrace {
     pub corrected_asr: String,
     pub tools: Vec<DebugToolTrace>,
     pub reply: String,
+    /// 实际已下发 `sentence_start` 到设备屏幕播报的句子文本（被打断时可能短于 `reply`）。
+    #[serde(default)]
+    pub spoken: String,
     pub outcome: String,
-    /// 有文字被截到 240 字、或工具调用超过 8 个只留前 8 个时为真（界面显示“已截断”）。
+    /// 有文字被截到上限、或工具调用超过上限只留前若干个时为真（界面显示“已截断”）。
     #[serde(default)]
     pub truncated: bool,
-    /// 超过 8 个而没有保留的工具调用数。
+    /// 超过上限而没有保留的工具调用数。
     #[serde(default)]
     pub tools_dropped: usize,
 }
@@ -146,6 +156,11 @@ pub struct SessionView {
     /// n71 连接方式：`websocket`（唤醒时才连）/ `mqtt`（常连模式）。
     #[serde(default)]
     pub transport: String,
+    /// n81 设备在 `hello` 中上报的文字字库字号与位深（供推送资源包选匹配的内置中文字库）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_font_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_font_bpp: Option<u8>,
 }
 
 /// 事件级别。
@@ -442,9 +457,9 @@ impl LiveState {
         }
     }
 
-    pub fn finish_debug_trace(&self, mut trace: TurnDebugTrace) {
+    pub fn finish_debug_trace(&self, mut trace: TurnDebugTrace) -> Option<TurnDebugTrace> {
         if !self.debug_enabled() {
-            return;
+            return None;
         }
         let mut truncated = false;
         let mut scrub = |text: &str| {
@@ -452,9 +467,14 @@ impl LiveState {
             truncated |= cut;
             out
         };
+        if trace.at_ms == 0 {
+            trace.at_ms = trace.at.saturating_mul(1000);
+        }
+        trace.device_id = trace.device_id.chars().take(64).collect();
         trace.raw_asr = scrub(&trace.raw_asr);
         trace.corrected_asr = scrub(&trace.corrected_asr);
         trace.reply = scrub(&trace.reply);
+        trace.spoken = scrub(&trace.spoken);
         let total_tools = trace.tools.len();
         trace.tools = trace
             .tools
@@ -471,13 +491,14 @@ impl LiveState {
         if let Ok(mut traces) = self.debug_traces.lock() {
             if !self.debug_enabled() {
                 traces.clear();
-                return;
+                return None;
             }
-            traces.push_back(trace);
+            traces.push_back(trace.clone());
             while traces.len() > MAX_DEBUG_TRACES {
                 traces.pop_front();
             }
         }
+        Some(trace)
     }
 
     pub fn debug_traces(&self) -> Vec<TurnDebugTrace> {
@@ -583,6 +604,15 @@ impl LiveState {
             && let Some(view) = sessions.get_mut(session_id)
         {
             view.screen_pack = installed;
+        }
+    }
+
+    pub fn set_text_font_spec(&self, session_id: &str, size: Option<u32>, bpp: Option<u8>) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(view) = sessions.get_mut(session_id)
+        {
+            view.text_font_size = size;
+            view.text_font_bpp = bpp;
         }
     }
 
@@ -723,6 +753,8 @@ mod tests {
             screen_height: None,
             screen_pack: false,
             transport: "websocket".into(),
+            text_font_size: None,
+            text_font_bpp: None,
         });
         assert_eq!(state.aggregate_pulse(), (Some("idle".into()), 0));
         state.set_state("s1", "listening");
@@ -767,6 +799,8 @@ mod tests {
             screen_height: None,
             screen_pack: false,
             transport: "websocket".into(),
+            text_font_size: None,
+            text_font_bpp: None,
         });
         state.set_level("s1", 10);
         assert_eq!(
@@ -791,6 +825,9 @@ mod tests {
         let state = LiveState::default();
         assert!(!state.debug_enabled());
         let sample = |turn: u64| TurnDebugTrace {
+            id: 0,
+            at_ms: (100 + turn) * 1000,
+            device_id: "dev-1".into(),
             session_id: "s1".into(),
             turn,
             at: 100 + turn,
@@ -802,23 +839,24 @@ mod tests {
                 result: "ok sk-secret999".into(),
             }],
             reply: "已生成预览。".into(),
+            spoken: "已生成预览。".into(),
             outcome: "done".into(),
             truncated: false,
             tools_dropped: 0,
         };
-        state.finish_debug_trace(sample(1));
+        assert!(state.finish_debug_trace(sample(1)).is_none());
         assert!(
             state.debug_traces().is_empty(),
             "默认关闭时绝不留存任何对话文本"
         );
 
         state.set_debug_enabled(true);
-        for t in 1..=12 {
-            state.finish_debug_trace(sample(t));
+        for t in 1..=(MAX_DEBUG_TRACES as u64 + 2) {
+            assert!(state.finish_debug_trace(sample(t)).is_some());
         }
         let traces = state.debug_traces();
-        assert_eq!(traces.len(), 10);
-        assert_eq!(traces[0].turn, 12);
+        assert_eq!(traces.len(), MAX_DEBUG_TRACES);
+        assert_eq!(traces[0].turn, MAX_DEBUG_TRACES as u64 + 2);
         assert!(traces[0].raw_asr.contains("[REDACTED]") && !traces[0].raw_asr.contains("abc123"));
         assert!(
             traces[0].tools[0].result.contains("[REDACTED]")
@@ -827,9 +865,9 @@ mod tests {
 
         assert!(!traces[0].truncated, "短文本不标截断");
 
-        let mut long = sample(13);
-        long.reply = "很长".repeat(200);
-        long.tools = (0..11)
+        let mut long = sample(999);
+        long.reply = "很长".repeat(MAX_DEBUG_TEXT_CHARS);
+        long.tools = (0..(MAX_DEBUG_TOOLS + 3))
             .map(|i| DebugToolTrace {
                 name: format!("tool_{i}"),
                 arguments: "{}".into(),
@@ -838,13 +876,10 @@ mod tests {
             .collect();
         state.finish_debug_trace(long);
         let trace = &state.debug_traces()[0];
-        assert!(
-            trace.truncated,
-            "回复超过 240 字、工具超过 8 个都要标“已截断”"
-        );
-        assert_eq!(trace.tools.len(), 8);
+        assert!(trace.truncated, "回复超过上限、工具超过上限都要标“已截断”");
+        assert_eq!(trace.tools.len(), MAX_DEBUG_TOOLS);
         assert_eq!(trace.tools_dropped, 3);
-        assert_eq!(trace.reply.chars().count(), 240);
+        assert_eq!(trace.reply.chars().count(), MAX_DEBUG_TEXT_CHARS);
 
         state.set_debug_enabled(false);
         assert!(state.debug_traces().is_empty(), "关闭开关立即清空内存缓存");

@@ -24,7 +24,8 @@ use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use moss_xiaozhi_proto::{
-    AudioParams, ClientMessage, ListenState, ServerMessage, TtsState, decode_frame, encode_frame,
+    AudioParams, ClientMessage, ListenState, ServerMessage, TextFontCapability, TtsState,
+    decode_frame, encode_frame,
 };
 use tokio::time::Instant;
 
@@ -124,8 +125,10 @@ async fn send_json_ws(socket: &mut WebSocket, message: &ServerMessage) -> bool {
         .is_ok()
 }
 
-/// 等设备 hello，返回其声明的协议版本、上行音频参数与是否支持设备 MCP。
-async fn wait_hello(socket: &mut WebSocket) -> Option<(u32, AudioParams, bool, bool)> {
+/// 等设备 hello，返回其声明的协议版本、上行音频参数、是否支持设备 MCP / AEC 与字库能力。
+async fn wait_hello(
+    socket: &mut WebSocket,
+) -> Option<(u32, AudioParams, bool, bool, Option<TextFontCapability>)> {
     let deadline = Instant::now() + HELLO_TIMEOUT;
     loop {
         let message = tokio::time::timeout_at(deadline, socket.recv())
@@ -138,10 +141,12 @@ async fn wait_hello(socket: &mut WebSocket) -> Option<(u32, AudioParams, bool, b
                     version,
                     audio_params,
                     features,
+                    text_font,
                     ..
                 }) = ClientMessage::parse(text.as_str())
                 {
-                    return Some((version, audio_params, features.mcp, features.aec));
+                    let font_cap = features.glyph_push.then_some(text_font).flatten();
+                    return Some((version, audio_params, features.mcp, features.aec, font_cap));
                 }
             }
             Message::Close(_) => return None,
@@ -202,7 +207,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
                     .verify(token, &client_id, &device_id, unix_now())
             })
             .unwrap_or(false);
-    let Some((hello_version, uplink, device_mcp, device_aec)) = wait_hello(&mut socket).await
+    let Some((hello_version, uplink, device_mcp, device_aec, text_font_cap)) =
+        wait_hello(&mut socket).await
     else {
         shared.state.event(
             EventRecord::warn(
@@ -234,6 +240,8 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
         },
         "mcp": device_mcp,
         "aec": device_aec,
+        "glyph_push": text_font_cap.is_some(),
+        "text_font": text_font_cap,
     });
     let Ok(session_id) = random_id() else {
         shared.state.event(
@@ -352,6 +360,7 @@ async fn run(shared: Arc<Shared>, mut socket: WebSocket, identity: Identity) {
             transport: "websocket",
             lease,
             hello: Some(hello),
+            text_font_cap,
         },
     )
     .await;
@@ -373,6 +382,8 @@ pub(crate) struct SessionStart {
     pub lease: crate::SessionLease,
     /// WebSocket：登记好会话后回给设备的 hello；常连模式在设备唤醒时由连接层回 hello
     pub hello: Option<ServerMessage>,
+    /// n81 设备在 `hello` 中声明的字库与 `glyph_push` 能力
+    pub text_font_cap: Option<TextFontCapability>,
 }
 
 /// 已授权设备的会话：登记、运行到断开，再做收尾（记忆摘要、清理登记）。
@@ -394,6 +405,7 @@ pub(crate) async fn serve_session(
         transport,
         lease,
         hello,
+        text_font_cap,
     } = start;
     let mqtt = socket.is_mqtt();
     // 已授权的设备先建好会话（音频编解码器）并登记，再回 hello：设备收到 hello 时语音中心已能看到它
@@ -408,6 +420,9 @@ pub(crate) async fn serve_session(
     ) {
         Ok(mut session) => {
             session.mqtt = mqtt;
+            let init_font_size = text_font_cap.as_ref().map(|f| f.size);
+            let init_font_bpp = text_font_cap.as_ref().map(|f| f.bpp);
+            session.text_font_cap = text_font_cap;
             if device_mcp {
                 session.device_mcp = Some(DeviceMcp::new());
                 session.vision_host = vision_host;
@@ -433,6 +448,8 @@ pub(crate) async fn serve_session(
                 screen_height: None,
                 screen_pack: false,
                 transport: transport.into(),
+                text_font_size: init_font_size,
+                text_font_bpp: init_font_bpp,
             });
             shared
                 .registry
@@ -1030,6 +1047,8 @@ struct Session<'a> {
     mqtt: bool,
     /// n71 常连模式下这一轮对话要结束（说完再见、用户说退出、空闲到期）：在会话循环里关语音通道
     pending_goodbye: Option<String>,
+    /// n81 设备在 `hello` 中声明的字库与 `glyph_push` 能力
+    text_font_cap: Option<TextFontCapability>,
     /// 加工结束播报：只读观察最近任务，发现“发送中 → 终态”时在空闲时播报一次。
     jobs: crate::jobs::JobWatcher,
     next_job_poll: Instant,
@@ -1057,8 +1076,9 @@ impl<'a> Session<'a> {
                 turn.recording_offset
                     .saturating_add(turn.started.elapsed().as_millis() as u64),
             );
+            let at_ms = crate::unix_now_ms();
             timing.outcome = outcome.into();
-            timing.at_ms = crate::unix_now_ms();
+            timing.at_ms = at_ms;
             let turn_no = timing.turn;
             self.shared.state.finish_timing(timing);
             if turn.kind == TurnKind::Answer
@@ -1069,23 +1089,43 @@ impl<'a> Session<'a> {
                     .debug_corrected_asr
                     .take()
                     .unwrap_or_else(|| raw_asr.clone());
-                let reply = if !turn.spoken.is_empty() {
-                    turn.spoken.join("")
+                let spoken = turn.spoken.join("");
+                let full_reply = turn
+                    .pending_messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == moss_voice_providers::Role::Assistant)
+                    .and_then(|m| m.content.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let reply = if let Some(full) = full_reply {
+                    full
+                } else if !spoken.is_empty() {
+                    spoken.clone()
                 } else {
                     turn.debug_text_reply.join("")
                 };
-                self.shared.state.finish_debug_trace(crate::TurnDebugTrace {
-                    session_id: self.session_id.into(),
-                    turn: turn_no,
-                    at: crate::unix_now(),
-                    raw_asr,
-                    corrected_asr,
-                    tools: std::mem::take(&mut turn.debug_tools),
-                    reply,
-                    outcome: outcome.into(),
-                    truncated: false,
-                    tools_dropped: 0,
-                });
+                if let Some(scrubbed) =
+                    self.shared.state.finish_debug_trace(crate::TurnDebugTrace {
+                        id: 0,
+                        at_ms,
+                        device_id: self.device_id.into(),
+                        session_id: self.session_id.into(),
+                        turn: turn_no,
+                        at: at_ms / 1000,
+                        raw_asr,
+                        corrected_asr,
+                        tools: std::mem::take(&mut turn.debug_tools),
+                        reply,
+                        spoken,
+                        outcome: outcome.into(),
+                        truncated: false,
+                        tools_dropped: 0,
+                    })
+                {
+                    self.shared.registry.record_chat_turn(&scrubbed);
+                }
             }
         }
     }
@@ -1173,6 +1213,7 @@ impl<'a> Session<'a> {
             turn_scene: None,
             mqtt: false,
             pending_goodbye: None,
+            text_font_cap: None,
             jobs: crate::jobs::JobWatcher::new(),
             next_job_poll: Instant::now() + shared.config.job_poll_interval,
         })
@@ -1196,6 +1237,19 @@ impl<'a> Session<'a> {
         self.shared.state.event(record);
     }
 
+    async fn send_stt(&mut self, socket: &mut crate::link::Link, text: String) -> bool {
+        let glyph_push = crate::glyph_font::glyph_push_for_text(self.text_font_cap.as_ref(), &text);
+        send_json(
+            socket,
+            &ServerMessage::Stt {
+                session_id: self.session_id.into(),
+                text,
+                glyph_push,
+            },
+        )
+        .await
+    }
+
     async fn tts(
         &mut self,
         socket: &mut crate::link::Link,
@@ -1203,10 +1257,17 @@ impl<'a> Session<'a> {
         text: Option<String>,
     ) -> Result<(), String> {
         let starting = matches!(state, TtsState::Start);
+        let glyph_push = match (&state, text.as_deref()) {
+            (TtsState::SentenceStart, Some(s)) => {
+                crate::glyph_font::glyph_push_for_text(self.text_font_cap.as_ref(), s)
+            }
+            _ => None,
+        };
         let message = ServerMessage::Tts {
             session_id: self.session_id.into(),
             state,
             text,
+            glyph_push,
         };
         if !send_json(socket, &message).await {
             return Err("发送失败".into());
@@ -1357,15 +1418,7 @@ impl<'a> Session<'a> {
         socket: &mut crate::link::Link,
         text: String,
     ) -> Result<(), String> {
-        if send_json(
-            socket,
-            &ServerMessage::Stt {
-                session_id: self.session_id.into(),
-                text,
-            },
-        )
-        .await
-        {
+        if self.send_stt(socket, text).await {
             Ok(())
         } else {
             Err("发送失败".into())
@@ -1991,11 +2044,7 @@ impl<'a> Session<'a> {
         } else {
             format!("回声测试：约 {seconds:.1} 秒")
         };
-        let stt = ServerMessage::Stt {
-            session_id: self.session_id.into(),
-            text,
-        };
-        if !send_json(socket, &stt).await {
+        if !self.send_stt(socket, text).await {
             return Err("发送失败".into());
         }
         self.tts(socket, TtsState::Start, None).await?;
@@ -2142,14 +2191,7 @@ impl<'a> Session<'a> {
                 )
                 .await?;
                 let short_title: String = title.chars().take(48).collect();
-                let _ = send_json(
-                    socket,
-                    &ServerMessage::Stt {
-                        session_id: self.session_id.into(),
-                        text: format!("[音乐] {short_title}"),
-                    },
-                )
-                .await;
+                let _ = self.send_stt(socket, format!("[音乐] {short_title}")).await;
             }
         }
         Ok(())
@@ -2236,7 +2278,7 @@ impl<'a> Session<'a> {
             } => {
                 if self.shared.state.debug_enabled()
                     && let Some(turn) = self.turn.as_mut()
-                    && turn.debug_tools.len() < 8
+                    && turn.debug_tools.len() < 16
                 {
                     turn.debug_tools.push(crate::DebugToolTrace {
                         name,
@@ -2264,15 +2306,7 @@ impl<'a> Session<'a> {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.user = Some(text.clone());
                 }
-                if !send_json(
-                    socket,
-                    &ServerMessage::Stt {
-                        session_id: self.session_id.into(),
-                        text,
-                    },
-                )
-                .await
-                {
+                if !self.send_stt(socket, text).await {
                     return Err("发送失败".into());
                 }
                 // n70 听完开始想：全屏画风切到“思考”
@@ -2330,6 +2364,10 @@ impl<'a> Session<'a> {
                 }
             }
             TurnEvent::PlayMusic { track_id, title } => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.debug_text_reply
+                        .push(format!("[播放本地音乐] {title}"));
+                }
                 self.start_music(socket, track_id, title).await?;
             }
             TurnEvent::Speech { text, pcm } => {
@@ -2679,14 +2717,10 @@ impl<'a> Session<'a> {
                 )
                 .await?;
             }
-            if let Some(card) = self.pending_oled_preview.take() {
-                let msg = ServerMessage::Stt {
-                    session_id: self.session_id.into(),
-                    text: format!("[预览] {card}"),
-                };
-                if !send_json(socket, &msg).await {
-                    return Err("发送失败".into());
-                }
+            if let Some(card) = self.pending_oled_preview.take()
+                && !self.send_stt(socket, format!("[预览] {card}")).await
+            {
+                return Err("发送失败".into());
             }
         }
         Ok(())
@@ -2982,7 +3016,7 @@ impl<'a> Session<'a> {
                             self.screen_pack = prefs
                                 .screen_pack
                                 .as_deref()
-                                .is_some_and(crate::screen_pack::marker_installed);
+                                .is_some_and(crate::screen_pack::marker_supports_scenes);
                             self.shared
                                 .state
                                 .set_screen_pack(self.session_id, self.screen_pack);
@@ -3600,14 +3634,8 @@ impl<'a> Session<'a> {
                     if !clean_card.is_empty() {
                         if self.busy() {
                             self.pending_oled_preview = Some(clean_card);
-                        } else {
-                            let msg = ServerMessage::Stt {
-                                session_id: self.session_id.into(),
-                                text: format!("[预览] {clean_card}"),
-                            };
-                            if !send_json(socket, &msg).await {
-                                return Err("发送失败".into());
-                            }
+                        } else if !self.send_stt(socket, format!("[预览] {clean_card}")).await {
+                            return Err("发送失败".into());
                         }
                     }
                     return Ok(());
@@ -3625,11 +3653,7 @@ impl<'a> Session<'a> {
                     Ok(())
                 } else if matches!(self.phase, Phase::Listening(_)) {
                     self.event("向小智 OLED 屏幕静默刷新雕刻预览参数字幕");
-                    let msg = ServerMessage::Stt {
-                        session_id: self.session_id.into(),
-                        text: format!("[预览] {card}"),
-                    };
-                    if send_json(socket, &msg).await {
+                    if self.send_stt(socket, format!("[预览] {card}")).await {
                         Ok(())
                     } else {
                         Err("发送失败".into())
@@ -3769,6 +3793,19 @@ impl<'a> Session<'a> {
             }
             Ok(ClientMessage::Goodbye) => return Err("设备结束会话".into()),
             Ok(ClientMessage::Mcp { payload }) => self.on_device_mcp(socket, payload).await?,
+            Ok(ClientMessage::Hello {
+                features,
+                text_font,
+                ..
+            }) => {
+                let cap = features.glyph_push.then_some(text_font).flatten();
+                self.shared.state.set_text_font_spec(
+                    self.session_id,
+                    cap.as_ref().map(|f| f.size),
+                    cap.as_ref().map(|f| f.bpp),
+                );
+                self.text_font_cap = cap;
+            }
             Ok(_) => {}
             Err(error) => self.event(
                 EventRecord::warn(
@@ -4222,14 +4259,9 @@ impl<'a> Session<'a> {
                     if first_for_approval {
                         self.last_approval_summary = Some(pending.summary.clone());
                         self.event("向小智彩屏推送待电脑审批警戒卡");
-                        let _ = send_json(
-                            socket,
-                            &ServerMessage::Stt {
-                                session_id: self.session_id.into(),
-                                text: format!("[待电脑批准] {}", pending.summary),
-                            },
-                        )
-                        .await;
+                        let _ = self
+                            .send_stt(socket, format!("[待电脑批准] {}", pending.summary))
+                            .await;
                     }
                 }
             } else if is_mono_oled && first_for_approval {

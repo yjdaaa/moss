@@ -1638,6 +1638,10 @@ test("换了画风后装的是旧画风：提示重刷并可一键重刷（2026-
   assert.equal(view.canQuickPack, true);
   assert.equal(view.quickLabel, "一键重刷全屏画风");
   assert.match(view.text, /重刷后开机待命画面才会换/);
+  const fontOutdated = screenPackDeviceView({ supported: true, screen_pack_size: [320, 240], screen_pack: false, screen_pack_state: "font_outdated" });
+  assert.equal(fontOutdated.canQuickPack, true);
+  assert.equal(fontOutdated.quickLabel, "一键补齐中文字库");
+  assert.match(fontOutdated.text, /缺常用中文字库/);
   assert.equal(screenPackDeviceView({ supported: true, screen_pack_size: [320, 240], screen_pack_state: "none" }).quickLabel, "一键刷入全屏画风");
 });
 

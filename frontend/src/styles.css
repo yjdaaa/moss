@@ -6401,3 +6401,191 @@ button.conn-pill:hover {
   gap: 6px;
   margin-left: auto;
 }
+
+/* ---- 本地合成模型语言包与音色试听弹窗（2026-11-12） ---- */
+.tts-voices-backdrop {
+  z-index: 115;
+}
+.tts-voices-modal {
+  width: min(860px, calc(100vw - 32px));
+}
+.tts-voices-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tts-voices-lead {
+  margin: 0;
+}
+.voice-tts-model-trigger {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  text-align: left;
+  transition: color 0.15s ease;
+}
+.voice-tts-model-trigger:hover b {
+  color: var(--ob-accent, #a78bfa);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.voice-tts-trigger-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ob-accent, #c4b5fd);
+  background: rgba(139, 92, 246, 0.14);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+}
+.voice-tts-model-trigger:hover .voice-tts-trigger-chip {
+  background: rgba(139, 92, 246, 0.24);
+  border-color: rgba(139, 92, 246, 0.55);
+}
+.voice-label-with-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tts-cache-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tts-cache-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tts-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ob-fg-2, #cbd5e1);
+  margin-bottom: 6px;
+}
+.tts-lang-pack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.tts-lang-card {
+  appearance: none;
+  text-align: left;
+  cursor: pointer;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--ob-line-2, rgba(255, 255, 255, 0.1));
+  color: inherit;
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.tts-lang-card:hover {
+  border-color: rgba(139, 92, 246, 0.45);
+  background: rgba(139, 92, 246, 0.06);
+}
+.tts-lang-card.is-active {
+  border-color: rgba(139, 92, 246, 0.75);
+  background: rgba(139, 92, 246, 0.14);
+}
+.tts-lang-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.tts-lang-sample {
+  font-size: 11px;
+  color: var(--ob-fg-3, #94a3b8);
+}
+.tts-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tts-filter-pills {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tts-filter-pills .btn.is-selected {
+  border-color: rgba(139, 92, 246, 0.7);
+  background: rgba(139, 92, 246, 0.18);
+  color: #f8fafc;
+}
+.tts-search-input {
+  flex: 1 1 220px;
+  max-width: 300px;
+}
+.tts-speaker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tts-speaker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--ob-line-2, rgba(255, 255, 255, 0.08));
+}
+.tts-speaker-row.is-current {
+  border-color: rgba(34, 197, 94, 0.45);
+  background: rgba(34, 197, 94, 0.06);
+}
+.tts-speaker-row.is-playing {
+  border-color: rgba(139, 92, 246, 0.65);
+  background: rgba(139, 92, 246, 0.1);
+}
+.tts-speaker-main {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.tts-speaker-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+}
+.tts-speaker-id {
+  color: var(--ob-accent, #c4b5fd);
+  font-weight: 600;
+}
+.tts-speaker-code {
+  font-size: 11.5px;
+}
+.tts-speaker-sample {
+  margin-top: 2px;
+}
+.tts-speaker-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

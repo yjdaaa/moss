@@ -15,6 +15,9 @@ pub mod ota;
 pub mod token;
 
 pub use frame::{DecodedFrame, FrameError, decode_frame, encode_frame};
-pub use message::{AudioParams, ClientMessage, Features, ListenState, ServerMessage, TtsState};
+pub use message::{
+    AudioParams, ClientMessage, Features, GlyphItem, GlyphPushPayload, ListenState, ServerMessage,
+    TextFontCapability, TtsState,
+};
 pub use ota::{FirmwareOffer, OtaInfo, OtaReply, is_newer_version};
 pub use token::TokenSigner;

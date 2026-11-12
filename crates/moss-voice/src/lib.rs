@@ -28,6 +28,7 @@ pub mod onejev;
 pub mod redact;
 pub mod settings;
 pub mod supervisor;
+pub mod tts_voices;
 
 pub use center::{CenterError, HostHooks, MAX_EXTRA_ENDPOINTS, VoiceCenter};
 pub use logfile::RotatingLog;

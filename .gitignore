@@ -12,6 +12,7 @@ dist/
 .runtime/
 crates/laser-api/fixture/payload.bin
 *.bin
+!/crates/moss-voice-server/assets/xiaozhi-fonts/*.bin
 
 # Environment and local configurations
 .env
