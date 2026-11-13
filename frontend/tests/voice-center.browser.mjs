@@ -41,6 +41,7 @@ try {
         { device_id: "aa:bb:cc:11:22:33", name: "工坊小智", supported: true, screen_pack_size: [320, 240], screen_pack: false, screen_pack_state: "none", wake_target: null },
         { device_id: "aa:bb:cc:44:55:66", name: "书房小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "installed", wake_target: "default" },
         { device_id: "aa:bb:cc:77:88:99", name: "客厅小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "style_outdated", screen_pack_style: "goggle_bot", wake_target: "default" },
+        { device_id: "aa:bb:cc:aa:bb:cc", name: "工作台小智", supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "assets_outdated", screen_pack_style: "moss_hud", wake_target: "default" },
       ],
     },
     mode: "official",
@@ -48,7 +49,7 @@ try {
     settings: { server_dir: "", python: "", args: ["app.py"], server_port: 8000, builtin_ws_port: 8000, builtin_http_port: 8003, official_mcp_endpoint: masked, official_mcp_endpoint_set: true },
     builtin: {
       running: false, mode: "echo", link_mode: "official", ws_port: 8000, http_port: 8003, ota_url: "http://192.0.2.10:8003/xiaozhi/ota/",
-      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }], helper_found: true },
+      models: {}, jev: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.14", key_set: false, openrouter_llm_key_set: false, voice_enabled: false, feedback_enabled: false }, local: { settings: {}, jev_key_configured: false, onejev_env: { ready: true, installed: true, binary_found: true, accelerator: "metal", accelerator_label: "Apple Metal GPU 加速", summary: "OneJev 原生推理引擎已就绪（Apple Metal GPU 加速 · 免装 Python）" }, jev_runtime: { model: "onejev_1_6_4b", state: "failed", accelerator: null, error: "OneJev 模型加载超时", notice: null }, laya_env: { ready: true, python_found: true, laya_serve_found: true, accelerator: "mps", cuda_found: false, mps_found: true, summary: "运行环境检测通过（Python + laya[serve] + Apple Metal MPS 加速已就绪），可直接下载并启用。" }, models: [{ id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true }, { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: true, voices: { default: 50, max: 53, hint: "45-48" } }, { id: "onejev_1_6_0_8b", kind: "jev", label: "OneJev 1.6 0.8B（轻量极速，推荐）", size: 1369128576, note: "Qwen3.5-0.8B 全参微调", installed: true }, { id: "onejev_1_6_4b", kind: "jev", label: "OneJev 1.6 4B（均衡主力）", size: 3328881152, note: "Qwen3.5-4B 全参微调", installed: true }, { id: "onejev_1_6_9b", kind: "jev", label: "OneJev 1.6 9B（高阶旗舰）", size: 6599787584, note: "Qwen3.5-9B 全参微调", installed: false }, { id: "laya_multilingual", kind: "jev", label: "Laya 决策模型（322M 多语种）", size: 1291563689, note: "mDeBERTa + RL", installed: true }, { id: "xiaozhi_noto_v1_full", kind: "font", label: "小智屏幕全量补字库（noto-v1-full · 48,662 字）", size: 17411352, note: "官方三层字库第 3 层（简/繁/日/韩/泰/阿 7 分片 × 4 档字号）。", installed: true }], helper_found: true },
       debug_enabled: true,
       debug_traces: [
         {
@@ -618,6 +619,8 @@ try {
   assert.equal(await page.locator("#voice-panel-features #voice-group-vision").count(), 0, "视觉理解从扩展移到模型标签");
   // 6. 本地模型与对话体验分开保存：保存体验时不带上本地模型未保存的改动
   await openGroup("local-models");
+  assert.match(await page.locator("#voice-local-group-font").innerText(), /48,662 字/, "n83：本地模型区展示小智屏幕全量补字库");
+  assert.equal(await page.locator("#voice-local-delete-xiaozhi_noto_v1_full").count(), 1, "已装补字库可按需删除");
   await openGroup("experience");
   assert.equal(await page.locator("#voice-screen-card-style").count(), 0, "n69：对话体验里不再有画风下拉（只在设备 › 副屏预览切换）");
   assert.equal(await page.locator("#voice-jev-filter-enabled").count(), 0, "n69：对话体验里不再有 Jev 开关勾选框");
@@ -927,6 +930,7 @@ try {
   await autoKeep.click();
   await page.waitForFunction(() => document.querySelector("#voice-screen-pack-auto-keep")?.checked === false);
   assert.deepEqual(last("voice_local_save").args, { settings: { screen_pack_auto_keep: false } }, "关闭不用确认");
+  await botCard.locator("#voice-screen-full-font-tip").getByText(/三层字库已齐备.*48,662 字/).waitFor();
   // 8d. n67 / n69：唤醒词卡在“设备”标签就地显示（原“唤醒词与音量”标签已并入）
   const wakeGroup = page.locator("#voice-group-wake-word");
   await wakeGroup.locator("#voice-wakeword-card").waitFor();
@@ -938,6 +942,8 @@ try {
   assert.equal(await wakeGroup.locator('[data-quick-pack="aa:bb:cc:44:55:66"]').count(), 0, "已刷的不再显示一键刷入");
   await wakeDevices.nth(2).getByText(/重刷后开机待命画面才会换/).waitFor();
   assert.equal((await wakeGroup.locator('[data-quick-pack="aa:bb:cc:77:88:99"]').innerText()).trim(), "一键重刷全屏画风", "换了画风要重刷");
+  await wakeDevices.nth(3).getByText(/底包或字库与设备当前不一致/).waitFor();
+  assert.equal((await wakeGroup.locator('[data-quick-pack="aa:bb:cc:aa:bb:cc"]').innerText()).trim(), "一键更新画风字库", "底包或字库指纹变化可一键更新");
   await wakeGroup.locator('[data-quick-pack="aa:bb:cc:11:22:33"]').click();
   await confirmDialog("确认推送这一台");
   assert.deepEqual(last("voice_wakeword_manage").args.input, { action: "push", device_id: "aa:bb:cc:11:22:33", target: "default", confirmed: true, screen_pack: true }, "没推过自定义唤醒词时沿用“你好小智”");

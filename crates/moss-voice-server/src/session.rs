@@ -409,7 +409,7 @@ pub(crate) async fn serve_session(
     } = start;
     let mqtt = socket.is_mqtt();
     // 已授权的设备先建好会话（音频编解码器）并登记，再回 hello：设备收到 hello 时语音中心已能看到它
-    let mut session = match Session::new(
+    let (mut session, mut requests_rx) = match Session::new(
         &shared,
         &session_id,
         &device_id,
@@ -429,6 +429,17 @@ pub(crate) async fn serve_session(
                 if session.conversation.is_some() {
                     session.vision_token = vision_token;
                 }
+            }
+            let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
+            if let Ok(mut map) = shared.device_requests.lock() {
+                map.insert(
+                    device_id.clone(),
+                    crate::DeviceRequestHandle {
+                        session_id: session_id.clone(),
+                        supports_mcp: session.device_mcp.is_some(),
+                        sender: requests_tx,
+                    },
+                );
             }
             shared.state.open(SessionView {
                 session_id: session_id.clone(),
@@ -451,11 +462,6 @@ pub(crate) async fn serve_session(
                 text_font_size: init_font_size,
                 text_font_bpp: init_font_bpp,
             });
-            shared
-                .registry
-                .sessions_changed(shared.state.sessions().len());
-            let (phase, level) = shared.state.aggregate_pulse();
-            shared.registry.pulse_changed(phase.as_deref(), level);
             shared.state.event(if mqtt {
                 format!("设备 {device_id} 已常连在线（MQTT，唤醒后语音走加密 UDP）")
             } else {
@@ -464,7 +470,7 @@ pub(crate) async fn serve_session(
                     shared.config.downlink_sample_rate
                 )
             });
-            session
+            (session, requests_rx)
         }
         Err(error) => {
             shared.state.event(
@@ -479,17 +485,11 @@ pub(crate) async fn serve_session(
             return;
         }
     };
-    let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
-    if let Ok(mut map) = shared.device_requests.lock() {
-        map.insert(
-            device_id.clone(),
-            crate::DeviceRequestHandle {
-                session_id: session_id.clone(),
-                supports_mcp: session.device_mcp.is_some(),
-                sender: requests_tx,
-            },
-        );
-    }
+    shared
+        .registry
+        .sessions_changed(shared.active_device_sessions().len());
+    let (phase, level) = shared.active_aggregate_pulse();
+    shared.registry.pulse_changed(phase.as_deref(), level);
     if let Some(hello) = hello
         && !send_json(&mut socket, &hello).await
     {
@@ -503,8 +503,8 @@ pub(crate) async fn serve_session(
         shared.state.close(&session_id);
         shared
             .registry
-            .sessions_changed(shared.state.sessions().len());
-        let (phase, level) = shared.state.aggregate_pulse();
+            .sessions_changed(shared.active_device_sessions().len());
+        let (phase, level) = shared.active_aggregate_pulse();
         shared.registry.pulse_changed(phase.as_deref(), level);
         return;
     }
@@ -547,8 +547,8 @@ pub(crate) async fn serve_session(
     shared.state.close(&session_id);
     shared
         .registry
-        .sessions_changed(shared.state.sessions().len());
-    let (phase, level) = shared.state.aggregate_pulse();
+        .sessions_changed(shared.active_device_sessions().len());
+    let (phase, level) = shared.active_aggregate_pulse();
     shared.registry.pulse_changed(phase.as_deref(), level);
     shared.state.event(disconnect_event(&device_id, &reason));
     let _ = socket.send(Message::Close(None)).await;
@@ -1220,7 +1220,7 @@ impl<'a> Session<'a> {
     }
 
     fn sync_pulse(&self) {
-        let (phase, level) = self.shared.state.aggregate_pulse();
+        let (phase, level) = self.shared.active_aggregate_pulse();
         self.shared.registry.pulse_changed(phase.as_deref(), level);
     }
 
@@ -1238,7 +1238,10 @@ impl<'a> Session<'a> {
     }
 
     async fn send_stt(&mut self, socket: &mut crate::link::Link, text: String) -> bool {
-        let glyph_push = crate::glyph_font::glyph_push_for_text(self.text_font_cap.as_ref(), &text);
+        let glyph_push = self
+            .shared
+            .glyph_fonts
+            .glyph_push_for_text(self.text_font_cap.as_ref(), &text);
         send_json(
             socket,
             &ServerMessage::Stt {
@@ -1258,9 +1261,10 @@ impl<'a> Session<'a> {
     ) -> Result<(), String> {
         let starting = matches!(state, TtsState::Start);
         let glyph_push = match (&state, text.as_deref()) {
-            (TtsState::SentenceStart, Some(s)) => {
-                crate::glyph_font::glyph_push_for_text(self.text_font_cap.as_ref(), s)
-            }
+            (TtsState::SentenceStart, Some(s)) => self
+                .shared
+                .glyph_fonts
+                .glyph_push_for_text(self.text_font_cap.as_ref(), s),
             _ => None,
         };
         let message = ServerMessage::Tts {
@@ -1338,6 +1342,7 @@ impl<'a> Session<'a> {
         if let Some(worker) = self.vad_worker.as_mut() {
             worker.reset();
         }
+        self.playback_started = None;
         self.phase = Phase::Idle;
         self.set_state("idle");
         socket.end_audio(self.session_id, notify);
@@ -2055,6 +2060,7 @@ impl<'a> Session<'a> {
         let mut resampler =
             Resampler::new(self.uplink_rate, self.shared.config.downlink_sample_rate);
         self.pump.begin();
+        self.playback_started = None;
         self.pump
             .push_marked(&resampler.process(&pcm), "（回声）".into());
         self.pump.finish();
@@ -2381,6 +2387,7 @@ impl<'a> Session<'a> {
                     self.event(format!("首句延迟：{latency} ms（说完到首句音频就绪）"));
                 }
                 if first {
+                    self.playback_started = None;
                     self.pump.begin();
                     self.tts(socket, TtsState::Start, None).await?;
                     self.phase = Phase::Speaking {
@@ -2396,6 +2403,12 @@ impl<'a> Session<'a> {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.resampler = Some(resampler);
                 }
+                if self.playback_started.is_none()
+                    && self.pump.ready_to_start()
+                    && let Phase::Speaking { next, .. } = &mut self.phase
+                {
+                    *next = Instant::now();
+                }
             }
             TurnEvent::SpeechMore(pcm) => {
                 let downlink = self.shared.config.downlink_sample_rate;
@@ -2410,6 +2423,23 @@ impl<'a> Session<'a> {
                     .get_or_insert_with(|| Resampler::new(pcm.sample_rate, downlink));
                 let samples = resampler.process(&pcm.samples);
                 self.pump.push(&samples);
+                if self.playback_started.is_none()
+                    && self.pump.ready_to_start()
+                    && let Phase::Speaking { next, .. } = &mut self.phase
+                {
+                    *next = Instant::now();
+                }
+            }
+            TurnEvent::SentenceEnd => {
+                if self.turn.as_ref().is_some_and(|t| t.audio_started) {
+                    self.pump.mark_sentence_end();
+                    if self.playback_started.is_none()
+                        && self.pump.ready_to_start()
+                        && let Phase::Speaking { next, .. } = &mut self.phase
+                    {
+                        *next = Instant::now();
+                    }
+                }
             }
             TurnEvent::Failed(error) => self.event(EventRecord::from_provider(
                 EventLevel::Error,
@@ -2432,8 +2462,14 @@ impl<'a> Session<'a> {
                 turn.close = close;
                 turn.pending_messages = messages;
                 if turn.audio_started {
-                    // 播完剩余音频后由 tick 收尾
+                    // 播完剩余音频后由 tick 收尾；若此前仍在等待启动缓冲则立即唤醒首帧
                     self.pump.finish();
+                    if self.playback_started.is_none()
+                        && self.pump.ready_to_start()
+                        && let Phase::Speaking { next, .. } = &mut self.phase
+                    {
+                        *next = Instant::now();
+                    }
                 } else {
                     return self.end_turn(false).await;
                 }
@@ -2485,6 +2521,7 @@ impl<'a> Session<'a> {
                 );
             }
         }
+        self.playback_started = None;
         self.phase = Phase::Idle;
         self.set_state("idle");
         self.last_activity = Instant::now();
@@ -2612,6 +2649,8 @@ impl<'a> Session<'a> {
                 _ => {}
             }
         }
+        let was_started = self.playback_started.is_some();
+        let mut sent_any = false;
         loop {
             match self.pump.next_frame()? {
                 PumpTick::Frame { data, marks } => {
@@ -2633,6 +2672,7 @@ impl<'a> Session<'a> {
                         }
                     }
                     self.send_frame(socket, &data).await?;
+                    sent_any = true;
                     self.set_level(self.pump.last_level());
                     if self.playback_started.is_none() {
                         self.playback_started = Some(Instant::now());
@@ -2647,7 +2687,7 @@ impl<'a> Session<'a> {
                         );
                     }
                     if let Phase::Speaking { burst, .. } = &mut self.phase {
-                        if *burst > 1 {
+                        if *burst > 1 && self.pump.has_frame_for_burst() {
                             *burst -= 1;
                             continue;
                         }
@@ -2676,7 +2716,23 @@ impl<'a> Session<'a> {
             }
         }
         if let Phase::Speaking { next, .. } = &mut self.phase {
-            *next += Duration::from_millis(FRAME_MS);
+            let step = Duration::from_millis(FRAME_MS);
+            if !sent_any {
+                // 尚在等待启动缓冲（PumpTick::Waiting）：不空跑播放时钟，等 SpeechMore/Done 唤醒或下一拍重检
+                *next = Instant::now() + step;
+            } else if !was_started {
+                // 首轮预缓冲突发（含 tts:start、全屏表情与首句 glyph_push 字模发送）刚完成，以此刻为基准对齐后续节拍
+                *next = Instant::now() + step;
+            } else {
+                *next += step;
+                // 若 Wi-Fi 抖动或句首字模发送短暂阻塞超过 2 拍（120ms），夹紧追赶上限避免瞬间连发冲垮设备端解码队列
+                let min_next = Instant::now()
+                    .checked_sub(step * 2)
+                    .unwrap_or_else(Instant::now);
+                if *next < min_next {
+                    *next = min_next;
+                }
+            }
         }
         Ok(())
     }
@@ -2699,6 +2755,7 @@ impl<'a> Session<'a> {
                 stats.frames, stats.underruns
             ));
         }
+        self.playback_started = None;
         self.phase = Phase::Idle;
         self.set_state("idle");
         self.last_activity = Instant::now();

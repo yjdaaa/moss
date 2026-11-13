@@ -73,6 +73,15 @@ impl DeviceRegistry for FakeRegistry {
     fn device_hardware_prefs(&self, _device: &str) -> Option<HardwarePrefs> {
         self.hardware_prefs.lock().unwrap().clone()
     }
+    fn device_text_font(&self, device: &str) -> Option<TextFontCapability> {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(d, kind, _)| d == device && kind == SNAPSHOT_HELLO)
+            .and_then(|(_, _, json)| glyph_font::text_font_from_hello_snapshot(json))
+    }
     fn assets_downloaded(&self, device: &str) {
         self.assets_downloaded
             .lock()
@@ -1056,4 +1065,105 @@ fn server_stops_cleanly_from_async_task() {
     outer
         .block_on(outer.spawn(async move { server.stop() }))
         .expect("在异步任务里停止语音服务不应 panic");
+}
+
+#[test]
+fn n84_active_session_ignores_stale_half_open_pre_reboot_session() {
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            ..ServerConfig::default()
+        },
+        Arc::new(FakeRegistry::default()),
+    )
+    .unwrap();
+    // 模拟设备重启重连后：字典序更小的旧半开连接 "0000_stale" 尚未超时，
+    // 新连接 "ffff_active" 已登记到 device_requests 并上报最新屏幕与字库规格
+    server.shared.state.open(SessionView {
+        session_id: "0000_stale".into(),
+        device_id: DEVICE.into(),
+        ip: "127.0.0.1".into(),
+        protocol_version: 1,
+        connected_at: 100,
+        state: "speaking".into(),
+        level: 85,
+        emotion: String::new(),
+        active_tool: None,
+        utterance_chars: 0,
+        spoken_sentences: 0,
+        device_tools: vec![],
+        screen_monochrome: Some(true),
+        screen_width: Some(128),
+        screen_height: Some(64),
+        screen_pack: false,
+        transport: "mqtt".into(),
+        text_font_size: Some(14),
+        text_font_bpp: Some(1),
+    });
+    server.shared.state.open(SessionView {
+        session_id: "ffff_active".into(),
+        device_id: DEVICE.into(),
+        ip: "127.0.0.1".into(),
+        protocol_version: 1,
+        connected_at: 105,
+        state: "idle".into(),
+        level: 0,
+        emotion: String::new(),
+        active_tool: None,
+        utterance_chars: 0,
+        spoken_sentences: 0,
+        device_tools: vec!["self.assets.set_download_url".into()],
+        screen_monochrome: Some(false),
+        screen_width: Some(320),
+        screen_height: Some(240),
+        screen_pack: true,
+        transport: "mqtt".into(),
+        text_font_size: Some(20),
+        text_font_bpp: Some(4),
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    server.shared.device_requests.lock().unwrap().insert(
+        DEVICE.into(),
+        DeviceRequestHandle {
+            session_id: "ffff_active".into(),
+            supports_mcp: true,
+            sender: tx,
+        },
+    );
+
+    let active = server.active_device_sessions();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].session_id, "ffff_active");
+    assert_eq!(server.screen_pack_size(DEVICE), Some((320, 240)));
+    assert_eq!(
+        server.device_font_context(DEVICE),
+        (Some((20, 4)), Some((320, 240)), false)
+    );
+    assert_eq!(
+        server.shared.state.session_screen_size(DEVICE),
+        Some((320, 240))
+    );
+    assert!(
+        !server.has_busy_voice_session(),
+        "重启前残留半开 speaking 连接不得误判当前设备仍在忙"
+    );
+    assert_eq!(
+        server.shared.active_aggregate_pulse(),
+        (Some("idle".into()), 0),
+        "聚合脉冲应取当前活跃会话而非半开死连接"
+    );
+
+    // 新连接正常断开后，仍未超时的旧半开僵尸连接不得“复活”回活跃会话或卡住顶栏脉冲
+    server.shared.device_requests.lock().unwrap().remove(DEVICE);
+    server.shared.state.close("ffff_active");
+    assert!(
+        server.active_device_sessions().is_empty(),
+        "新会话正常关闭后，旧半开僵尸连接不得复活进 active_device_sessions"
+    );
+    assert!(server.shared.active_session(DEVICE).is_none());
+    assert!(!server.has_busy_voice_session());
+    assert_eq!(server.shared.active_aggregate_pulse(), (None, 0));
+    server.stop();
 }

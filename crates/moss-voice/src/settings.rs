@@ -846,7 +846,7 @@ impl BuiltinLocal {
                     canonical.unwrap_or(self.jev_model.as_str()),
                 )
             }
-            ModelKind::Speaker | ModelKind::Vision => return None,
+            ModelKind::Speaker | ModelKind::Vision | ModelKind::Font => return None,
         };
         enabled
             .then(|| crate::local_models::spec_of(id, kind))

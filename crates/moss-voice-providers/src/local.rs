@@ -226,6 +226,20 @@ impl LocalHelper {
         self.inner.alive.load(Ordering::SeqCst)
     }
 
+    /// 立即结束辅助程序子进程并等待句柄释放（用于卸载本地模型前释放文件锁）。
+    pub fn terminate(&self) {
+        self.inner.alive.store(false, Ordering::SeqCst);
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            pending.clear();
+        }
+        if let Ok(mut slot) = self.inner.child.lock()
+            && let Some(mut child) = slot.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
     fn enqueue(&self, id: u64, op: Op, payload: &[u8]) -> Result<(), ProviderError> {
         if !self.is_alive() {
             return Err(dead());

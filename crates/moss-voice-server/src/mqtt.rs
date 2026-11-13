@@ -180,12 +180,21 @@ async fn handle(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr, hub: A
         client_id.clone(),
         session_id.clone(),
     );
-    let lease = match tokio::task::spawn_blocking(move || registry.open_session(&d, &c, &s)).await {
-        Ok(Ok(allowed)) => crate::SessionLease {
-            allowed,
-            registry: shared.registry.clone(),
-            session: session_id.clone(),
-        },
+    let opened = tokio::task::spawn_blocking(move || {
+        let allowed = registry.open_session(&d, &c, &s)?;
+        let text_font = registry.device_text_font(&d);
+        Ok::<_, String>((allowed, text_font))
+    })
+    .await;
+    let (lease, text_font_cap) = match opened {
+        Ok(Ok((allowed, text_font))) => (
+            crate::SessionLease {
+                allowed,
+                registry: shared.registry.clone(),
+                session: session_id.clone(),
+            },
+            text_font,
+        ),
         _ => {
             let _ = writer.write_all(&codec::connack(5)).await;
             return;
@@ -243,7 +252,7 @@ async fn handle(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr, hub: A
             transport: "mqtt",
             lease,
             hello: None,
-            text_font_cap: None,
+            text_font_cap,
         },
     )
     .await;

@@ -37,6 +37,9 @@ pub const DEFAULT_QWEN3_VL_2B_BASE: &str =
     "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main";
 pub const DEFAULT_QWEN3_VL_4B_BASE: &str =
     "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main";
+/// 小智官方服务端全量动态补字分片包（`78/xiaozhi-fonts` `noto-v1-full`，SIL OFL 1.1；2026-11-12 n83）
+pub const DEFAULT_XIAOZHI_FONTS_BASE: &str = "https://files.xiaozhi.me/assets/fonts";
+pub const XIAOZHI_NOTO_V1_FULL_ID: &str = "xiaozhi_noto_v1_full";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Archive {
@@ -44,6 +47,11 @@ pub enum Archive {
     File,
     /// tar.bz2，解出顶层目录 `models/<dir>`
     TarBz2 { dir: &'static str },
+    /// tar.gz，解压到 `models/<dir>`（支持无外层包裹目录的平铺归档，如 `noto-v1-full.tar.gz`）
+    TarGz {
+        dir: &'static str,
+        base_url: &'static str,
+    },
     /// 多文件模型目录，逐个文件校验 SHA-256 后组装为 `models/<dir>`
     Directory {
         dir: &'static str,
@@ -62,6 +70,8 @@ pub enum ModelKind {
     Speaker,
     /// 本地视觉理解（看图回答，n74）
     Vision,
+    /// 小智屏幕全量动态补字分片包（服务端按需抠字下发，n83）
+    Font,
 }
 
 /// 辅助程序加载模型的方式（与 `moss-voice-local-proto` 的引擎及本地 Laya 决策服务对应）。
@@ -81,6 +91,8 @@ pub enum Engine {
     CampPlus,
     /// llama.cpp `llama-server` + 视觉投影（mmproj），提供 OpenAI 兼容 `/v1/chat/completions`（n74）
     LlamaVision,
+    /// LVGL CBIN 字形分片包（由 `moss-voice-server` 按需解析下发，不进推理子进程，n83）
+    XiaozhiFont,
 }
 
 impl Engine {
@@ -225,6 +237,38 @@ const QWEN3_VL_4B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
     size: 453_974_304,
 }];
 
+const XIAOZHI_NOTO_V1_FULL_FILES: [&str; 29] = [
+    "manifest.json",
+    "14_1/latin.cbin",
+    "14_1/cjk_sc.cbin",
+    "14_1/cjk_tc.cbin",
+    "14_1/cjk_jp.cbin",
+    "14_1/cjk_kr.cbin",
+    "14_1/thai.cbin",
+    "14_1/arabic.cbin",
+    "16_4/latin.cbin",
+    "16_4/cjk_sc.cbin",
+    "16_4/cjk_tc.cbin",
+    "16_4/cjk_jp.cbin",
+    "16_4/cjk_kr.cbin",
+    "16_4/thai.cbin",
+    "16_4/arabic.cbin",
+    "20_4/latin.cbin",
+    "20_4/cjk_sc.cbin",
+    "20_4/cjk_tc.cbin",
+    "20_4/cjk_jp.cbin",
+    "20_4/cjk_kr.cbin",
+    "20_4/thai.cbin",
+    "20_4/arabic.cbin",
+    "30_4/latin.cbin",
+    "30_4/cjk_sc.cbin",
+    "30_4/cjk_tc.cbin",
+    "30_4/cjk_jp.cbin",
+    "30_4/cjk_kr.cbin",
+    "30_4/thai.cbin",
+    "30_4/arabic.cbin",
+];
+
 /// 本地视觉模型的主权重与视觉投影文件名（`local_vision` 启动 llama-server 用）。
 pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
     match id {
@@ -236,7 +280,7 @@ pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
 
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 15] = [
+pub const CATALOG: [ModelSpec; 16] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker,
@@ -516,6 +560,23 @@ pub const CATALOG: [ModelSpec; 15] = [
         extras: &QWEN3_VL_4B_EXTRAS,
         voices: None,
     },
+    ModelSpec {
+        id: XIAOZHI_NOTO_V1_FULL_ID,
+        kind: ModelKind::Font,
+        engine: Engine::XiaozhiFont,
+        label: "小智全量补字库（Noto v1 · 48,662 字）",
+        note: "SIL OFL 1.1；小智官方服务端同款简繁日韩泰阿 7 分片点阵字库。连上已装日常字库的小智遇到生僻字（如“椴”“𠮷”）、繁体字或多语种字幕时，按句抠出缺失字模顺路下发。",
+        path: "noto-v1-full.tar.gz",
+        sha256: "1fd0097a449856a34476cb4c8653f9bea276c632b231c4d6ba10eb91b238cdc3",
+        size: 17_411_352,
+        archive: Archive::TarGz {
+            dir: "noto_v1_full",
+            base_url: DEFAULT_XIAOZHI_FONTS_BASE,
+        },
+        required: &XIAOZHI_NOTO_V1_FULL_FILES,
+        extras: &[],
+        voices: None,
+    },
 ];
 
 pub fn spec(id: &str) -> Option<&'static ModelSpec> {
@@ -539,7 +600,9 @@ fn file_name(spec: &ModelSpec) -> &'static str {
 pub fn install_path(root: &Path, spec: &ModelSpec) -> PathBuf {
     match spec.archive {
         Archive::File => root.join(file_name(spec)),
-        Archive::TarBz2 { dir } | Archive::Directory { dir, .. } => root.join(dir),
+        Archive::TarBz2 { dir } | Archive::TarGz { dir, .. } | Archive::Directory { dir, .. } => {
+            root.join(dir)
+        }
     }
 }
 
@@ -578,6 +641,15 @@ pub fn installed(root: &Path, spec: &ModelSpec) -> bool {
             .unwrap_or(false),
         Archive::TarBz2 { .. } => {
             path.is_dir() && spec.required.iter().all(|item| path.join(item).exists())
+        }
+        Archive::TarGz { .. } => {
+            path.is_dir()
+                && spec.required.iter().all(|item| {
+                    path.join(item)
+                        .metadata()
+                        .map(|m| m.is_file() && m.len() > 0)
+                        .unwrap_or(false)
+                })
         }
         Archive::Directory { .. } => {
             path.is_dir()
@@ -1002,6 +1074,20 @@ fn resolve_download_bases(spec: &ModelSpec, trimmed_base: &str) -> Vec<String> {
                 vec![trimmed_base.to_owned()]
             }
         }
+        Archive::TarGz { base_url, .. } => {
+            if trimmed_base == DEFAULT_BASE
+                || trimmed_base == base_url
+                || trimmed_base.contains("k2-fsa/sherpa-onnx")
+                || trimmed_base.contains("hf-mirror")
+                || trimmed_base.contains("huggingface")
+            {
+                vec![base_url.to_owned()]
+            } else if is_loopback_test_base(trimmed_base) {
+                vec![trimmed_base.to_owned()]
+            } else {
+                vec![trimmed_base.to_owned(), base_url.to_owned()]
+            }
+        }
         _ => vec![trimmed_base.to_owned()],
     }
 }
@@ -1337,6 +1423,65 @@ fn install(
             let _ = fs::remove_dir_all(&extract);
             result
         }
+        Archive::TarGz { dir, .. } => {
+            let extract = root.join(format!(".extract-{}-{generation}", spec.id));
+            let _ = fs::remove_dir_all(&extract);
+            let unpacked = extract.join(dir);
+            fs::create_dir_all(&unpacked).map_err(|error| format!("创建解压目录失败：{error}"))?;
+            let result = (|| {
+                let file =
+                    fs::File::open(part).map_err(|error| format!("读取压缩包失败：{error}"))?;
+                let mut archive =
+                    tar::Archive::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)));
+                let entries = archive.entries().map_err(|_| "压缩包无法读取".to_owned())?;
+                for entry in entries {
+                    if cancel.load(Ordering::SeqCst) {
+                        return Err("已取消".to_owned());
+                    }
+                    let mut entry = entry.map_err(|_| "压缩包已损坏".to_owned())?;
+                    let path = entry
+                        .path()
+                        .map_err(|_| "压缩包路径无效".to_owned())?
+                        .into_owned();
+                    if !safe_relative(&path) {
+                        return Err(format!("压缩包含不安全的路径：{}", path.display()));
+                    }
+                    let kind = entry.header().entry_type();
+                    if !(kind.is_file() || kind.is_dir()) {
+                        continue;
+                    }
+                    if kind.is_dir()
+                        && !path
+                            .components()
+                            .any(|component| matches!(component, Component::Normal(_)))
+                    {
+                        continue;
+                    }
+                    if !entry
+                        .unpack_in(&unpacked)
+                        .map_err(|error| format!("解压失败：{error}"))?
+                    {
+                        return Err(format!("压缩包含不安全的路径：{}", path.display()));
+                    }
+                }
+                for (extra, file) in spec.extras.iter().zip(extras) {
+                    fs::rename(file, unpacked.join(base_name(extra.path)))
+                        .map_err(|error| format!("安装失败：{error}"))?;
+                }
+                if let Some(missing) = spec.required.iter().find(|item| {
+                    !unpacked
+                        .join(item)
+                        .metadata()
+                        .map(|m| m.is_file() && m.len() > 0)
+                        .unwrap_or(false)
+                }) {
+                    return Err(format!("压缩包缺少 {missing}"));
+                }
+                place(install_lock, cancel, &unpacked, &target, true)
+            })();
+            let _ = fs::remove_dir_all(&extract);
+            result
+        }
         Archive::Directory { dir, .. } => {
             let extract = root.join(format!(".extract-{}-{generation}", spec.id));
             let _ = fs::remove_dir_all(&extract);
@@ -1570,7 +1715,9 @@ mod tests {
 
     fn base_name_dir(spec: &ModelSpec) -> &'static str {
         match spec.archive {
-            Archive::TarBz2 { dir } | Archive::Directory { dir, .. } => dir,
+            Archive::TarBz2 { dir }
+            | Archive::TarGz { dir, .. }
+            | Archive::Directory { dir, .. } => dir,
             Archive::File => base_name(spec.path),
         }
     }
@@ -1805,7 +1952,7 @@ mod tests {
             // 附加文件只用于压缩包或多文件目录模型，且安装检查包含它
             for extra in spec.extras {
                 match spec.archive {
-                    Archive::TarBz2 { .. } => assert!(
+                    Archive::TarBz2 { .. } | Archive::TarGz { .. } => assert!(
                         spec.required.contains(&base_name(extra.path)),
                         "{}",
                         spec.id
@@ -1828,6 +1975,7 @@ mod tests {
                 Engine::Laya | Engine::OneJev => ModelKind::Jev,
                 Engine::CampPlus => ModelKind::Speaker,
                 Engine::LlamaVision => ModelKind::Vision,
+                Engine::XiaozhiFont => ModelKind::Font,
             };
             assert_eq!(spec.kind, kind, "{} 的引擎与类别一致", spec.id);
         }
@@ -2022,6 +2170,106 @@ mod local_vision_catalog_tests {
         assert_eq!(
             spec("qwen3_vl_2b").unwrap().download_size(),
             1_107_409_952 + 445_053_216
+        );
+    }
+
+    #[test]
+    fn tar_gz_flat_font_bundle_handles_dot_root_and_resolves_cdn_urls() {
+        let font = spec_of(XIAOZHI_NOTO_V1_FULL_ID, ModelKind::Font).unwrap();
+        assert_eq!(font.engine, Engine::XiaozhiFont);
+        assert!(!font.engine.uses_llama_runtime());
+        assert_eq!(
+            resolve_download_bases(font, DEFAULT_BASE),
+            vec![DEFAULT_XIAOZHI_FONTS_BASE.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(
+                font,
+                "https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download"
+            ),
+            vec![DEFAULT_XIAOZHI_FONTS_BASE.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(font, "https://hf-mirror.com"),
+            vec![DEFAULT_XIAOZHI_FONTS_BASE.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(font, "http://127.0.0.1:19999/fonts"),
+            vec!["http://127.0.0.1:19999/fonts".to_owned()]
+        );
+
+        // 模拟官方 noto-v1-full.tar.gz 的 `./` 根目录与平铺子路径结构
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let append_entry = |builder: &mut tar::Builder<flate2::write::GzEncoder<Vec<u8>>>,
+                            name: &str,
+                            entry_type: tar::EntryType,
+                            body: &[u8]| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(if entry_type == tar::EntryType::Directory {
+                0o755
+            } else {
+                0o644
+            });
+            header.set_entry_type(entry_type);
+            header.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_cksum();
+            builder.append(&header, body).unwrap();
+        };
+        append_entry(&mut builder, "./", tar::EntryType::Directory, b"");
+        append_entry(&mut builder, "./20_4/", tar::EntryType::Directory, b"");
+        append_entry(
+            &mut builder,
+            "./manifest.json",
+            tar::EntryType::Regular,
+            br#"{"version":1,"bundle_id":"noto-v1"}"#,
+        );
+        append_entry(
+            &mut builder,
+            "./20_4/cjk_sc.cbin",
+            tar::EntryType::Regular,
+            b"cbin-bytes",
+        );
+        let bytes = builder.into_inner().unwrap().finish().unwrap();
+        let sha_hex: &'static str = Box::leak(hex(&Sha256::digest(&bytes)).into_boxed_str());
+        let custom_spec = ModelSpec {
+            id: "test",
+            kind: ModelKind::Font,
+            engine: Engine::XiaozhiFont,
+            label: "测试字库",
+            note: "test",
+            path: "noto-v1-full.tar.gz",
+            sha256: sha_hex,
+            size: bytes.len() as u64,
+            archive: Archive::TarGz {
+                dir: "noto_v1_full",
+                base_url: DEFAULT_XIAOZHI_FONTS_BASE,
+            },
+            required: &["manifest.json", "20_4/cjk_sc.cbin"],
+            extras: &[],
+            voices: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("models");
+        let manager = ModelManager::new(root.clone());
+        let (url, _) = crate::models::fake_http::serve_once("HTTP/1.1 200 OK", "", bytes);
+        manager.download_spec(custom_spec, &url).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while manager
+            .tasks
+            .lock()
+            .unwrap()
+            .get("test")
+            .is_some_and(|t| ModelManager::busy(&t.progress))
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(installed(&root, &custom_spec));
+        assert_eq!(
+            fs::read(root.join("noto_v1_full/20_4/cjk_sc.cbin")).unwrap(),
+            b"cbin-bytes"
         );
     }
 }

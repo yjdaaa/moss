@@ -757,14 +757,16 @@ export function BuiltinScreenPreview({ builtin }) {
   const onlinePackReady = Boolean(onlineColorDevice) && sessions.some((s) => s.device_id === onlineColorDevice.device_id && s.screen_pack === true);
   const autoKeep = status.local?.settings?.screen_pack_auto_keep === true;
   const alwaysOnline = status.mqtt_port != null;
+  const fullFontModel = (Array.isArray(status.local?.models) ? status.local.models : []).find((m) => m.kind === "font") || null;
+  const fullFontView = fullFontModel ? localModelView(fullFontModel) : null;
 
   // 2026-11-09 用户决定：自动保持全屏画风（默认关）。开启时确认一次，之后 MOSS 自动给没装好的彩屏小智推送画风包
   const toggleAutoKeep = async (on) => {
     if (on) {
       const ok = await showConfirm(
-        "开启后，MOSS 每次打开、每台彩屏小智连上来时会自动检查：还没装全屏画风（或画风包版本过旧）的，就在它空闲时自动推送，不再逐次询问。\n" +
+        "开启后，MOSS 每次打开、每台彩屏小智连上来时会按「版本前缀 + 内容指纹」自动检查：还没装全屏画风，或换了画风、基础底包、字库有更新的，就在它空闲时自动推送，不再逐次询问。\n" +
           "推送会让小智重启一次，开机后自己下载并写入资源分区（不刷主程序），沿用它原来的唤醒词；期间不要断电。\n" +
-          "加工中、有待批准请求、小智正在对话时不推；同一台一天最多自动推一次，结果记在“记录与诊断”。装好以后上电就是全屏画面，不再推送。\n" +
+          "加工中、有待批准请求、小智正在对话时不推；同一台一天最多自动推一次（主动换画风或导入/移除底包会立即放行），结果记在“记录与诊断”。装好以后上电就是全屏画面，指纹一致不再推送。\n" +
           "只支持 ESP32-S3、16 MB 闪存、小智固件 2.0.2 以上的彩屏设备。随时可以关掉。",
         { title: "开启自动保持全屏画风？", tone: "warning", danger: true, confirmText: "开启并允许自动推送" },
       );
@@ -889,13 +891,33 @@ export function BuiltinScreenPreview({ builtin }) {
             <input type="checkbox" id="voice-screen-pack-auto-keep" checked={autoKeep} disabled={busy} onChange={(e) => toggleAutoKeep(e.target.checked)} />
             <span>
               自动保持全屏画风
-              <small>打开 MOSS 就自动给还没装好的彩屏小智刷入全屏画风，装好后上电就是全屏画面（开启时确认一次，之后不再逐次询问）</small>
+              <small>按版本前缀 + 内容指纹自动检查：新接入、换画风、换底包或字库更新时，空闲自动同步到彩屏小智（开启时确认一次）</small>
             </span>
           </label>
           {autoKeep && !alwaysOnline && (
             <p className="voice-muted" id="voice-screen-pack-auto-mqtt-tip">
               建议同时打开“服务 › 常连模式（实验）”：小智开机就连上 MOSS，不用先唤醒，打开 MOSS 后马上就能检查补刷。
               <button type="button" className="voice-link-btn" onClick={() => gotoVoiceGroup("service", "settings-builtinMqtt")}>去打开</button>
+            </p>
+          )}
+          {fullFontModel && fullFontView && (
+            <p className="voice-muted" id="voice-screen-full-font-tip">
+              {fullFontModel.installed
+                ? "三层字库已齐备：日常 6,845 字随资源包内置，生僻字、繁体与日韩泰阿共 48,662 字由服务端按句动态补齐。"
+                : fullFontView.canCancel
+                  ? `正在后台准备小智全量补字库（${fullFontView.text}），完成后生僻字与多语种字幕自动热生效。`
+                  : "小智全量补字库尚未就绪（当前由内置 6,845 日常字库兜底）："}
+              {fullFontView.canDownload && (
+                <button
+                  type="button"
+                  className="voice-link-btn"
+                  disabled={Boolean(busy)}
+                  id="voice-screen-full-font-download"
+                  onClick={() => act("下载小智全量补字库", () => voiceApi.localDownload(fullFontModel.id))}
+                >
+                  立即下载（{formatBytes(fullFontModel.size)}）
+                </button>
+              )}
             </p>
           )}
         </div>
@@ -3457,6 +3479,58 @@ export function LocalModelsGroup({ builtin }) {
                 {view.canDownload && <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "下载声纹模型", () => voiceApi.localDownload(model.id))}>下载声纹模型</button>}
                 {view.canCancel && <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => modelAct(model.id, "取消声纹下载", () => voiceApi.localCancel(model.id))}>取消下载</button>}
                 {view.canDelete && <button type="button" className="btn btn-ghost" disabled={modelLocked(model.id)} onClick={() => remove(model)}>删除模型</button>}
+              </span>
+            </div>
+          );
+        })}
+        {models.filter((model) => model.kind === "font").map((model) => {
+          const view = localModelView(model);
+          return (
+            <div className="voice-local-group" key={model.id} id="voice-local-group-font">
+              <b>{model.label}</b>
+              <p className="voice-muted">
+                {model.note} {formatBytes(model.size)} · {view.text}
+                {view.detail ? ` · ${view.detail}` : ""}
+              </p>
+              {view.percent !== null && (
+                <div className="voice-progress" aria-hidden="true">
+                  <span style={{ width: `${view.percent}%` }} />
+                </div>
+              )}
+              <span className="voice-actions">
+                {view.canDownload && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={modelLocked(model.id)}
+                    id={`voice-local-download-${model.id}`}
+                    onClick={() => modelAct(model.id, "下载全量补字库", () => voiceApi.localDownload(model.id))}
+                  >
+                    <Download size={13} /> 下载补字库
+                  </button>
+                )}
+                {view.canCancel && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={modelLocked(model.id)}
+                    id={`voice-local-cancel-${model.id}`}
+                    onClick={() => modelAct(model.id, "取消补字库下载", () => voiceApi.localCancel(model.id))}
+                  >
+                    <X size={13} /> 取消下载
+                  </button>
+                )}
+                {view.canDelete && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={modelLocked(model.id)}
+                    id={`voice-local-delete-${model.id}`}
+                    onClick={() => remove(model)}
+                  >
+                    <Trash2 size={13} /> 删除补字库
+                  </button>
+                )}
               </span>
             </div>
           );

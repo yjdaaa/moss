@@ -346,3 +346,94 @@ fn basic_font_device_receives_glyph_push_on_stt_and_tts_sentences() {
         "sentence_start 应附带缺失汉字点阵: {sentences:?}"
     );
 }
+
+#[test]
+fn common_font_device_hot_loads_full_bundle_for_rare_and_multilingual_glyphs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let full_dir = tmp.path().join("noto_v1_full");
+
+    let tools = Arc::new(ScreenTools {
+        payload: Arc::new(Mutex::new(serde_json::json!({ "workflows": [] }))),
+        preview_reads: Arc::new(Mutex::new(Vec::new())),
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&[
+            "好的，𠮷野家桜激光雕刻椴木准备开始。",
+        ])])),
+        ..Default::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("雕刻椴木".to_owned())])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        tools,
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            playback_start_ms: 80,
+            job_poll_interval: Duration::from_millis(60),
+            full_font_dir: Some(full_dir.clone()),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    // 服务启动后才把 noto_v1_full 下载解压就位：验证无需重启服务直接热生效
+    crate::glyph_font::tests::write_synthetic_full_bundle(&full_dir);
+
+    let mut device = allowed_device_with(&server, &registry, 1, true);
+    let init = read_mcp(&mut device);
+    reply_mcp(
+        &mut device,
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(read_mcp(&mut device)["method"], "notifications/initialized");
+    let list = read_mcp(&mut device);
+    reply_mcp(&mut device, &list["id"], serde_json::json!({"tools": []}));
+
+    send_json(
+        &mut device,
+        r#"{"type":"hello","version":3,"features":{"mcp":true,"glyph_push":true},"text_font":{"bundle":"noto-v1","charset":"common","size":20,"bpp":4}}"#,
+    );
+    speak_manual(&mut device, 1, 260);
+    let seen = read_until(&mut device, |v| v["type"] == "tts" && v["state"] == "stop");
+
+    let stt = seen.iter().find(|v| v["type"] == "stt").expect("收到 stt");
+    assert_eq!(stt["text"], "雕刻椴木");
+    let stt_cps: Vec<u32> = stt["glyph_push"]["glyphs"]
+        .as_array()
+        .expect("common 设备缺‘椴’应随 stt 补发")
+        .iter()
+        .map(|g| g["codepoint"].as_u64().unwrap() as u32)
+        .collect();
+    assert_eq!(
+        stt_cps,
+        vec!['椴' as u32],
+        "common 已含‘雕刻木’，只补发缺字‘椴’"
+    );
+
+    let tts_cps: Vec<u32> = seen
+        .iter()
+        .filter(|v| v["type"] == "tts" && v["state"] == "sentence_start")
+        .filter_map(|v| v["glyph_push"]["glyphs"].as_array())
+        .flatten()
+        .map(|g| g["codepoint"].as_u64().unwrap() as u32)
+        .collect();
+    assert!(tts_cps.contains(&('𠮷' as u32)));
+    assert!(tts_cps.contains(&('桜' as u32)));
+    assert!(tts_cps.contains(&('椴' as u32)));
+    assert!(!tts_cps.contains(&('雕' as u32)));
+}

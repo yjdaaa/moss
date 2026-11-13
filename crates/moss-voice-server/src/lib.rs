@@ -51,6 +51,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use moss_xiaozhi_proto::TextFontCapability;
 use moss_xiaozhi_proto::TokenSigner;
 use serde::Serialize;
 
@@ -136,6 +137,11 @@ pub trait DeviceRegistry: Send + Sync {
         None
     }
 
+    /// 读取设备最近一次 `hello` 握手快照中已确认支持 `glyph_push` 的字库规格（常连模式开机尚未唤醒前恢复动态补字）。
+    fn device_text_font(&self, _device: &str) -> Option<TextFontCapability> {
+        None
+    }
+
     /// 设备把推送的资源包整包下载完（最后一块已交给连接）。宿主据此把“已推送、等下载”的
     /// 全屏画风标记转为已装（2026-11-09：此前一推送就记为已刷，设备没下载也显示“已刷”）。
     fn assets_downloaded(&self, _device: &str) {}
@@ -213,6 +219,8 @@ pub struct ServerConfig {
     pub diagnostics: Arc<DiagnosticsLog>,
     /// n71 常连模式（MQTT + UDP）：`None` 为关（默认），设备照旧用 WebSocket。
     pub mqtt: Option<MqttConfig>,
+    /// n83 小智官方服务端全量动态补字分片目录（`models/noto_v1_full`）；`None` 或尚未下载完成时对 `basic` 设备回退内置 `common` 字库，下载就位后热生效。
+    pub full_font_dir: Option<std::path::PathBuf>,
 }
 
 /// n71 常连模式的两个端口。MQTT 端口不能用 8883：官方固件见到 8883 会改走 TLS。
@@ -248,13 +256,14 @@ impl Default for ServerConfig {
             barge_in_ms: 400,
             vad_factory: None,
             downlink_sample_rate: 24_000,
-            playback_start_ms: 600,
+            playback_start_ms: 300,
             idle_timeout: Duration::from_secs(120),
             protocol_version: 1,
             job_poll_interval: jobs::DEFAULT_POLL_INTERVAL,
             preview_hold_interval: Duration::from_secs(4),
             preview_hold_duration: Duration::from_secs(24),
             mqtt: None,
+            full_font_dir: None,
             screen_card_style: ScreenCardStyle::MossHud,
             diagnostics: DiagnosticsLog::new(),
         }
@@ -342,6 +351,8 @@ pub(crate) struct Shared {
     pub preview_store: Arc<preview_push::PreviewStore>,
     /// n61：待设备下载的唤醒词资源包（只在内存里，30 分钟过期）
     pub assets_store: wake_assets::AssetsStore,
+    /// n83：小智三层字库服务端 `glyph_push` 协调器（支持 `noto-v1-full` 热加载与内置 `common` 离线兜底）
+    pub glyph_fonts: glyph_font::GlyphFontService,
     pub screen_card_style: std::sync::Mutex<ScreenCardStyle>,
     pub ws_port: u16,
     /// n71 常连模式实际监听的 MQTT / UDP 端口；没开或端口开不了为 `None`（OTA 不下发 MQTT）
@@ -363,6 +374,40 @@ impl Shared {
             .lock()
             .map(|g| *g)
             .unwrap_or(ScreenCardStyle::MossHud)
+    }
+
+    /// 取指定设备当前活跃会话（严格匹配 `device_requests` 当前登记的 `session_id`），
+    /// 避免设备重启断网后旧半开连接阴影覆盖新连接，或在新连接正常断开后“复活”旧半开僵尸连接。
+    pub(crate) fn active_session(&self, device_id: &str) -> Option<state::SessionView> {
+        let sid = self
+            .device_requests
+            .lock()
+            .ok()
+            .and_then(|map| map.get(device_id).map(|h| h.session_id.clone()))?;
+        self.state
+            .session_by_id(&sid)
+            .filter(|s| s.device_id == device_id)
+    }
+
+    /// 每台在线设备只保留一条当前活跃会话（规则与 [`Self::active_session`] 一致，按 `device_id` 升序）。
+    pub(crate) fn active_device_sessions(&self) -> Vec<state::SessionView> {
+        let mut handles: Vec<(String, String)> = self
+            .device_requests
+            .lock()
+            .map(|map| {
+                map.iter()
+                    .map(|(dev, h)| (dev.clone(), h.session_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        handles.sort_by(|a, b| a.0.cmp(&b.0));
+        self.state.sessions_for_handles(&handles)
+    }
+
+    /// 按每台设备的当前活跃会话聚合主状态与音量（避免重启残留的半开旧连接卡死顶栏脉冲）。
+    pub(crate) fn active_aggregate_pulse(&self) -> (Option<String>, u8) {
+        let active = self.active_device_sessions();
+        state::LiveState::aggregate_pulse_of(active.iter())
     }
 }
 
@@ -477,6 +522,7 @@ impl VoiceServer {
             camera_preview: Arc::new(vision::CameraPreviewStore::default()),
             preview_store: Arc::new(preview_push::PreviewStore::default()),
             assets_store: wake_assets::AssetsStore::default(),
+            glyph_fonts: glyph_font::GlyphFontService::new(config.full_font_dir.clone()),
             screen_card_style: std::sync::Mutex::new(config.screen_card_style),
             signer: TokenSigner::new(secret),
             registry,
@@ -629,6 +675,19 @@ impl VoiceServer {
         }
     }
 
+    /// 轻量查询当前是否有设备正处于活跃语音交互（正在说话拾音 `level > 0`、思考推理或语音播报）。
+    /// 不拷贝事件日志与对话追踪记录，供后台预热线程低开销让出 CPU。
+    pub fn has_busy_voice_session(&self) -> bool {
+        if self.runtime.is_none() {
+            return false;
+        }
+        self.shared.active_device_sessions().iter().any(|r| {
+            r.state == "thinking"
+                || r.state == "speaking"
+                || (r.state == "listening" && r.level > 0)
+        })
+    }
+
     /// 向一台已连接的设备发起即时请求（刷新设备信息 / 重启设备）。
     ///
     /// 设备不在线、未声明设备端 MCP 或会话刚断开时同步返回错误；请求入队后异步发往设备，
@@ -667,16 +726,20 @@ impl VoiceServer {
         Ok(())
     }
 
+    /// 每台在线设备的当前活跃会话（避免重启残留的半开旧连接遮蔽新连接状态）。
+    pub fn active_device_sessions(&self) -> Vec<SessionView> {
+        self.shared.active_device_sessions()
+    }
+
     /// n61：暂存唤醒词资源包并让这台在线设备去下载（设备随后重启、自己写入资源分区）。
     ///
-    /// 只在设备当前会话上报了 user-only 工具 `self.assets.set_download_url` 时发送；
+    /// 只在设备当前活跃会话上报了 user-only 工具 `self.assets.set_download_url` 时发送；
     /// 调用方（私密窗口）负责逐台明确确认。
     pub fn install_wake_assets(&self, device_id: &str, package: Vec<u8>) -> Result<(), String> {
-        let supported = self.shared.state.sessions().iter().any(|s| {
-            s.device_id == device_id
-                && s.device_tools
-                    .iter()
-                    .any(|t| t == "self.assets.set_download_url")
+        let supported = self.shared.active_session(device_id).is_some_and(|s| {
+            s.device_tools
+                .iter()
+                .any(|t| t == "self.assets.set_download_url")
         });
         if !supported {
             return Err(format!(
@@ -690,10 +753,7 @@ impl VoiceServer {
     /// n70 能刷全屏画风包的在线设备返回其屏幕宽高：彩屏（`self.screen.get_info` 没报单色）且报了分辨率。
     pub fn screen_pack_size(&self, device_id: &str) -> Option<(u32, u32)> {
         self.shared
-            .state
-            .sessions()
-            .into_iter()
-            .find(|s| s.device_id == device_id)
+            .active_session(device_id)
             .filter(|s| s.screen_monochrome != Some(true))
             .and_then(|s| s.screen_width.zip(s.screen_height))
     }
@@ -703,13 +763,7 @@ impl VoiceServer {
         &self,
         device_id: &str,
     ) -> (Option<(u32, u8)>, Option<(u32, u32)>, bool) {
-        let Some(s) = self
-            .shared
-            .state
-            .sessions()
-            .into_iter()
-            .find(|s| s.device_id == device_id)
-        else {
+        let Some(s) = self.shared.active_session(device_id) else {
             return (None, None, false);
         };
         (
@@ -724,12 +778,7 @@ impl VoiceServer {
         if self.runtime.is_none() {
             return Err("内置语音服务未运行".into());
         }
-        if let Some(session) = self
-            .shared
-            .state
-            .sessions()
-            .into_iter()
-            .find(|s| s.device_id == device_id)
+        if let Some(session) = self.shared.active_session(device_id)
             && !session.device_tools.is_empty()
             && !session
                 .device_tools
@@ -756,12 +805,7 @@ impl VoiceServer {
 
     /// 读取指定设备的最新摄像头内存帧与在线会话状态；`after_seq` 命中时只返回 `unchanged: true`，不重复拷贝图片字节。
     pub fn camera_frame_view(&self, device_id: &str, after_seq: Option<u64>) -> serde_json::Value {
-        let session = self
-            .shared
-            .state
-            .sessions()
-            .into_iter()
-            .find(|s| s.device_id == device_id);
+        let session = self.shared.active_session(device_id);
         let online = session.is_some();
         let session_state = session.as_ref().map(|s| s.state.clone());
         let has_camera_tool = session.as_ref().and_then(|s| {
@@ -828,19 +872,17 @@ impl VoiceServer {
             ScreenCardStyle::MossHud => format!("MOSS太空舱 · {}", pose.moss_hud_label_zh()),
             ScreenCardStyle::GoggleBot => format!("小MOSS护目镜机器人 · {}", pose.label_zh()),
         };
-        let sessions = self.shared.state.sessions();
+        let sessions = self.shared.active_device_sessions();
         // n70 已刷全屏画风包的设备直接切全屏场景；没刷的照旧推半屏试看卡
         let request_for = |device_id: &str| -> Result<DeviceRequest, String> {
-            if sessions
-                .iter()
-                .any(|s| s.device_id == device_id && s.screen_pack)
-            {
+            let active = sessions.iter().find(|s| s.device_id == device_id);
+            if active.is_some_and(|s| s.screen_pack) {
                 return Ok(DeviceRequest::ShowScene {
                     scene: pose,
                     style: active_style,
                 });
             }
-            let screen_size = self.shared.state.session_screen_size(device_id);
+            let screen_size = active.and_then(|s| s.screen_width.zip(s.screen_height));
             let (cw, ch) = preview_push::optimal_canvas_for_screen(screen_size);
             let png = preview_push::make_scene_showcase_png(pose, active_style, 1, cw, ch)?;
             Ok(DeviceRequest::PreviewScreen {
@@ -905,7 +947,10 @@ impl VoiceServer {
             let Some(bytes) = source_bytes.filter(|b| !b.is_empty()) else {
                 return Ok(None);
             };
-            let screen_size = self.shared.state.session_screen_size(device_id);
+            let screen_size = self
+                .shared
+                .active_session(device_id)
+                .and_then(|s| s.screen_width.zip(s.screen_height));
             let (cw, ch) = preview_push::optimal_canvas_for_screen(screen_size);
             if let Some(tok) = staged_by_canvas.get(&(cw, ch)) {
                 return Ok(Some(tok.clone()));
@@ -934,8 +979,7 @@ impl VoiceServer {
         }
         let online_devices: Vec<String> = self
             .shared
-            .state
-            .sessions()
+            .active_device_sessions()
             .into_iter()
             .map(|s| s.device_id)
             .collect();

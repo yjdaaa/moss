@@ -763,6 +763,8 @@ pub enum TurnEvent {
     },
     /// 同一句话后续到达的音频（流式合成）
     SpeechMore(Pcm),
+    /// 当前这句话的音频分块已全部推入（供节奏泵在句间欠载时立即冲刷句尾残帧，而句中流式半帧不冲刷）
+    SentenceEnd,
     /// 只有受信工具能产生此事件，模型参数永远不成为文件路径。
     PlayMusic {
         track_id: String,
@@ -1033,6 +1035,7 @@ impl Turn {
                     text: text.to_owned(),
                     pcm,
                 });
+                self.send(TurnEvent::SentenceEnd);
                 true
             }
             Err(error) => {
@@ -1081,6 +1084,9 @@ impl Turn {
         let mut pending_text = Some(current.text);
         let mut held_tail: Vec<i16> = Vec::new();
         let mut sample_rate: u32 = 0;
+        let mut head_faded = false;
+        let mut saw_active = false;
+        let mut emitted_trailing_silent: usize = 0;
 
         loop {
             let can_prefetch = sentence_rx.is_some()
@@ -1109,46 +1115,70 @@ impl Turn {
                 current.chunks_rx.recv().await
             };
 
-            let Some(mut pcm) = maybe_pcm else {
+            let Some(pcm) = maybe_pcm else {
                 break;
             };
-            if pcm.samples.is_empty() {
+            if pcm.samples.is_empty() || pcm.sample_rate == 0 {
                 continue;
-            }
+            };
             sample_rate = pcm.sample_rate;
-            crate::audio::trim_trailing_silence_i16(
-                &mut pcm.samples,
-                sample_rate,
-                crate::audio::CLAUSE_SILENCE_KEEP_MS,
-                crate::audio::CLAUSE_SILENCE_TRIGGER_MS,
-            );
-            if pcm.samples.is_empty() {
-                continue;
-            }
-            if pending_text.is_some() && held_tail.is_empty() {
-                crate::audio::fade_head_i16(
-                    &mut pcm.samples,
-                    sample_rate,
-                    crate::audio::BOUNDARY_FADE_MS,
-                );
-            }
-            let hold_samples = ((u64::from(sample_rate)
+            let fade_samples = ((u64::from(sample_rate)
                 * u64::from(crate::audio::BOUNDARY_FADE_MS))
                 / 1000) as usize;
-            if hold_samples > 1 {
-                let mut combined = if held_tail.is_empty() {
-                    pcm.samples
-                } else {
-                    let mut buf = std::mem::take(&mut held_tail);
-                    buf.extend_from_slice(&pcm.samples);
-                    buf
-                };
+            let keep_samples = ((u64::from(sample_rate)
+                * u64::from(crate::audio::CLAUSE_SILENCE_KEEP_MS))
+                / 1000) as usize;
+            let max_silence_hold = ((u64::from(sample_rate)
+                * u64::from(crate::audio::MAX_STREAM_SILENCE_HOLD_MS))
+                / 1000) as usize;
+            let mut combined = if held_tail.is_empty() {
+                pcm.samples
+            } else {
+                let mut buf = std::mem::take(&mut held_tail);
+                buf.extend_from_slice(&pcm.samples);
+                buf
+            };
+            let trailing_silent = crate::audio::trailing_silence_samples(&combined);
+            // 全部有声采样及累计至多 128ms（CLAUSE_SILENCE_KEEP_MS - 12ms）自然气口立即放行，不卡住有声字尾；
+            // 仅暂存 12ms 淡出尾窗与超出 keep_samples 的多余静音（已收口整句流不限长度，实时流式上限 1000ms），
+            // 在整句真正结束时一次性裁掉句尾超长死寂。
+            let total_trailing_silent = if trailing_silent < combined.len() {
+                trailing_silent
+            } else if saw_active {
+                emitted_trailing_silent.saturating_add(combined.len())
+            } else {
+                0
+            };
+            let excess_silent = total_trailing_silent.saturating_sub(keep_samples);
+            let capped_excess = if current.chunks_rx.is_closed() && current.chunks_rx.is_empty() {
+                excess_silent
+            } else {
+                excess_silent.min(max_silence_hold)
+            };
+            let hold_samples = fade_samples.saturating_add(capped_excess);
+            if hold_samples > 0 {
                 if combined.len() <= hold_samples {
                     held_tail = combined;
                     continue;
                 }
+                if !head_faded {
+                    crate::audio::fade_head_i16(
+                        &mut combined,
+                        sample_rate,
+                        crate::audio::BOUNDARY_FADE_MS,
+                    );
+                    head_faded = true;
+                }
                 let split_at = combined.len() - hold_samples;
                 held_tail = combined.split_off(split_at);
+                let emitted_tail_silent = crate::audio::trailing_silence_samples(&combined);
+                if emitted_tail_silent < combined.len() {
+                    saw_active = true;
+                    emitted_trailing_silent = emitted_tail_silent;
+                } else if saw_active {
+                    emitted_trailing_silent =
+                        emitted_trailing_silent.saturating_add(combined.len());
+                }
                 let emit_pcm = Pcm {
                     samples: combined,
                     sample_rate,
@@ -1164,42 +1194,91 @@ impl Turn {
                     None => self.send(TurnEvent::SpeechMore(emit_pcm)),
                 }
             } else {
+                if !head_faded {
+                    crate::audio::fade_head_i16(
+                        &mut combined,
+                        sample_rate,
+                        crate::audio::BOUNDARY_FADE_MS,
+                    );
+                    head_faded = true;
+                }
+                let emitted_tail_silent = crate::audio::trailing_silence_samples(&combined);
+                if emitted_tail_silent < combined.len() {
+                    saw_active = true;
+                    emitted_trailing_silent = emitted_tail_silent;
+                } else if saw_active {
+                    emitted_trailing_silent =
+                        emitted_trailing_silent.saturating_add(combined.len());
+                }
+                let emit_pcm = Pcm {
+                    samples: combined,
+                    sample_rate,
+                };
                 match pending_text.take() {
                     Some(text) => {
                         self.timing("first_synthesis_ready");
-                        self.send(TurnEvent::Speech { text, pcm });
+                        self.send(TurnEvent::Speech {
+                            text,
+                            pcm: emit_pcm,
+                        });
                     }
-                    None => self.send(TurnEvent::SpeechMore(pcm)),
+                    None => self.send(TurnEvent::SpeechMore(emit_pcm)),
                 }
             }
         }
 
         if !held_tail.is_empty() && sample_rate > 0 {
-            if pending_text.is_some() {
-                crate::audio::fade_head_i16(
+            let tail_silent = crate::audio::trailing_silence_samples(&held_tail);
+            if tail_silent < held_tail.len() {
+                crate::audio::trim_trailing_silence_i16(
+                    &mut held_tail,
+                    sample_rate,
+                    crate::audio::CLAUSE_SILENCE_KEEP_MS,
+                    crate::audio::CLAUSE_SILENCE_TRIGGER_MS,
+                );
+            } else if saw_active {
+                let trigger_samples = ((u64::from(sample_rate)
+                    * u64::from(crate::audio::CLAUSE_SILENCE_TRIGGER_MS))
+                    / 1000) as usize;
+                let keep_samples = ((u64::from(sample_rate)
+                    * u64::from(crate::audio::CLAUSE_SILENCE_KEEP_MS))
+                    / 1000) as usize;
+                let fade_samples = ((u64::from(sample_rate)
+                    * u64::from(crate::audio::BOUNDARY_FADE_MS))
+                    / 1000) as usize;
+                if emitted_trailing_silent.saturating_add(held_tail.len()) > trigger_samples {
+                    let remain_keep = keep_samples.saturating_sub(emitted_trailing_silent);
+                    let target_len = remain_keep.max(fade_samples).min(held_tail.len());
+                    held_tail.truncate(target_len);
+                }
+            }
+            if !held_tail.is_empty() {
+                if !head_faded {
+                    crate::audio::fade_head_i16(
+                        &mut held_tail,
+                        sample_rate,
+                        crate::audio::BOUNDARY_FADE_MS,
+                    );
+                }
+                crate::audio::fade_tail_i16(
                     &mut held_tail,
                     sample_rate,
                     crate::audio::BOUNDARY_FADE_MS,
                 );
-            }
-            crate::audio::fade_tail_i16(
-                &mut held_tail,
-                sample_rate,
-                crate::audio::BOUNDARY_FADE_MS,
-            );
-            let tail_pcm = Pcm {
-                samples: held_tail,
-                sample_rate,
-            };
-            match pending_text.take() {
-                Some(text) => {
-                    self.timing("first_synthesis_ready");
-                    self.send(TurnEvent::Speech {
-                        text,
-                        pcm: tail_pcm,
-                    });
+                let tail_pcm = Pcm {
+                    samples: held_tail,
+                    sample_rate,
+                };
+                match pending_text.take() {
+                    Some(text) => {
+                        self.timing("first_synthesis_ready");
+                        self.send(TurnEvent::Speech {
+                            text,
+                            pcm: tail_pcm,
+                        });
+                    }
+                    None => self.send(TurnEvent::SpeechMore(tail_pcm)),
                 }
-                None => self.send(TurnEvent::SpeechMore(tail_pcm)),
             }
         }
 
@@ -1226,7 +1305,11 @@ impl Turn {
             }
             self.send(TurnEvent::Failed(error));
         }
-        pending_text.is_none()
+        let emitted = pending_text.is_none();
+        if emitted {
+            self.send(TurnEvent::SentenceEnd);
+        }
+        emitted
     }
 
     async fn speak(&self, text: String) -> bool {

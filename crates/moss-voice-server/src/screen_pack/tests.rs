@@ -218,3 +218,111 @@ fn other_screen_sizes_scale_with_the_screen() {
     let decoded = image::load_from_memory(gif).unwrap().to_rgb8();
     assert_eq!(decoded.dimensions(), (240, 240));
 }
+
+#[test]
+fn n84_pack_marker_combines_version_prefix_and_content_fingerprint() {
+    use crate::glyph_font::PROFILES;
+    use crate::wake_assets::fingerprint_base_pack;
+
+    let hud = pack_marker(ScreenCardStyle::MossHud);
+    let parsed = parse_pack_marker(&hud).expect("三段式标记可解析");
+    assert_eq!(parsed.version, PACK_VERSION);
+    assert_eq!(parsed.style, "moss_hud");
+    assert_eq!(parsed.fingerprint.map(str::len), Some(16));
+    assert!(parse_pack_marker("moss-screen-2:moss_hud").is_some());
+    assert!(parse_pack_marker("moss-screen-2:moss_hud:not_16_hex").is_none());
+    assert!(parse_pack_marker("moss-screen-2:moss_hud:0123456789abcdef:extra").is_none());
+    assert!(parse_pack_marker("none").is_none());
+
+    assert_eq!(
+        compare_pack_marker(Some(&hud), &hud),
+        PackMatchState::Installed
+    );
+    assert_eq!(
+        compare_pack_marker(Some("moss-screen-2:moss_hud"), &hud),
+        PackMatchState::AssetsOutdated,
+        "旧两段式无指纹标记归为资源待同步，重刷后补齐内容指纹"
+    );
+    let bot = pack_marker(ScreenCardStyle::GoggleBot);
+    assert_eq!(
+        compare_pack_marker(Some(&bot), &hud),
+        PackMatchState::StyleOutdated
+    );
+    assert_eq!(
+        compare_pack_marker(Some("moss-screen-1:moss_hud"), &hud),
+        PackMatchState::FontOutdated
+    );
+    assert_eq!(compare_pack_marker(None, &hud), PackMatchState::None);
+    assert_eq!(
+        compare_pack_marker(Some("moss-screen-0:moss_hud"), &hud),
+        PackMatchState::None
+    );
+    assert!(marker_supports_scenes("moss-screen-2:moss_hud"));
+    assert!(marker_supports_scenes(&hud));
+    assert!(marker_installed("moss-screen-2:moss_hud"));
+    assert!(marker_installed(&hud));
+
+    // 底包、字库档位、屏幕分辨率任一变化都必须生成新的内容指纹
+    let no_base = fingerprint_base_pack(None);
+    let diff_font = pack_marker_for(
+        ScreenCardStyle::MossHud,
+        (320, 240),
+        Some(PROFILES[1]),
+        no_base,
+    )
+    .unwrap();
+    assert_ne!(diff_font, hud, "字库档位变化必须刷新指纹");
+    assert_eq!(
+        compare_pack_marker(Some(&diff_font), &hud),
+        PackMatchState::AssetsOutdated
+    );
+
+    let diff_screen = pack_marker_for(
+        ScreenCardStyle::MossHud,
+        (240, 240),
+        Some(PROFILES[2]),
+        no_base,
+    )
+    .unwrap();
+    assert_ne!(diff_screen, hud, "屏幕分辨率变化必须刷新指纹");
+
+    let base_with_font = pack_assets(&[
+        AssetEntry {
+            name: "custom_font.bin".into(),
+            data: vec![9, 8, 7, 6],
+            width: 0,
+            height: 0,
+        },
+        AssetEntry {
+            name: "index.json".into(),
+            data: serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "text_font": "custom_font.bin"
+            }))
+            .unwrap(),
+            width: 0,
+            height: 0,
+        },
+    ])
+    .unwrap();
+    let fp_with_font = fingerprint_base_pack(Some(&base_with_font));
+    let marker_base_20 = pack_marker_for(
+        ScreenCardStyle::MossHud,
+        (320, 240),
+        Some(PROFILES[2]),
+        fp_with_font,
+    )
+    .unwrap();
+    let marker_base_30 = pack_marker_for(
+        ScreenCardStyle::MossHud,
+        (320, 240),
+        Some(PROFILES[3]),
+        fp_with_font,
+    )
+    .unwrap();
+    assert_ne!(marker_base_20, hud, "导入底包后指纹必须改变");
+    assert_eq!(
+        marker_base_20, marker_base_30,
+        "底包自带 text_font 时忽略兜底字库档位，防止设备重启汇报新字号导致指纹漂移"
+    );
+}

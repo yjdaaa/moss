@@ -284,6 +284,10 @@ test("2026-11-07: OneJev 推理引擎准备进度、Laya 运行环境自动准�
   assert.match(localModelDeleteText(models[2], models, { laya_env: { managed: true } }), /Python 运行环境/);
   assert.doesNotMatch(localModelDeleteText(models[2], models, { laya_env: { managed: false } }), /Python 运行环境/);
   assert.equal(localModelDeleteText({ id: "kokoro", kind: "tts", label: "Kokoro" }, models, {}), "删除本地模型“Kokoro”？需要时可以重新下载。");
+  assert.match(
+    localModelDeleteText({ id: "xiaozhi_noto_v1_full", kind: "font", label: "小智全量补字库" }, models, {}),
+    /生僻字.*6,845/,
+  );
 });
 
 test("NV6: 本地模型状态、设置表单与校验", () => {
@@ -1642,6 +1646,11 @@ test("换了画风后装的是旧画风：提示重刷并可一键重刷（2026-
   assert.equal(fontOutdated.canQuickPack, true);
   assert.equal(fontOutdated.quickLabel, "一键补齐中文字库");
   assert.match(fontOutdated.text, /缺常用中文字库/);
+  const assetsOutdated = screenPackDeviceView({ supported: true, screen_pack_size: [320, 240], screen_pack: true, screen_pack_state: "assets_outdated" });
+  assert.equal(assetsOutdated.canQuickPack, true);
+  assert.equal(assetsOutdated.tone, "warn");
+  assert.equal(assetsOutdated.quickLabel, "一键更新画风字库");
+  assert.match(assetsOutdated.text, /底包或字库与设备当前不一致/);
   assert.equal(screenPackDeviceView({ supported: true, screen_pack_size: [320, 240], screen_pack_state: "none" }).quickLabel, "一键刷入全屏画风");
 });
 

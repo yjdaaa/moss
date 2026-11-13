@@ -105,6 +105,7 @@ pub fn parse_assets(bytes: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
     }
     let mut seen = BTreeSet::new();
     let mut entries = Vec::with_capacity(count);
+    let mut total_bytes = 0usize;
     for i in 0..count {
         let row = i * (NAME_LEN + 12);
         let name = fixed_name(&body[row..row + NAME_LEN]).ok_or("资源包里有无效的文件名")?;
@@ -120,6 +121,10 @@ pub fn parse_assets(bytes: &[u8]) -> Result<Vec<AssetEntry>, &'static str> {
         if end > body.len() || body[start] != 0x5A || body[start + 1] != 0x5A {
             return Err("资源包里的文件数据损坏");
         }
+        total_bytes = total_bytes
+            .checked_add(size)
+            .filter(|&sum| sum <= ASSETS_MAX_BYTES)
+            .ok_or("资源包里的文件数据损坏")?;
         if !seen.insert(name.clone()) {
             return Err("资源包里有重名文件");
         }
@@ -339,6 +344,120 @@ pub struct ScreenExtras {
     pub fallback_font: Option<crate::glyph_font::FontProfile>,
 }
 
+/// 基础资源包（`base-assets.bin`）剥离唤醒模型后的视觉与字体指纹（n84）。
+///
+/// 只对保留进最终资源包的非唤醒文件（自定义字体、额外表情、背景等）与去除了唤醒词字段的 `index.json`
+/// 取确定性 SHA-256，因此导入、替换或移除底包都会自动刷新指纹，而仅调整唤醒词不会误标画风/字库过期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BasePackFingerprint {
+    pub has_text_font: bool,
+    pub digest: [u8; 32],
+}
+
+pub(crate) fn hash_canonical_json(hasher: &mut sha2::Sha256, value: &Value) {
+    use sha2::Digest;
+    match value {
+        Value::Null => hasher.update(b"N"),
+        Value::Bool(true) => hasher.update(b"T"),
+        Value::Bool(false) => hasher.update(b"F"),
+        Value::Number(n) => {
+            hasher.update(b"#");
+            let s = n.to_string();
+            hasher.update((s.len() as u64).to_le_bytes());
+            hasher.update(s.as_bytes());
+        }
+        Value::String(s) => {
+            hasher.update(b"$");
+            hasher.update((s.len() as u64).to_le_bytes());
+            hasher.update(s.as_bytes());
+        }
+        Value::Array(items) => {
+            hasher.update(b"[");
+            hasher.update((items.len() as u64).to_le_bytes());
+            for item in items {
+                hash_canonical_json(hasher, item);
+            }
+            hasher.update(b"]");
+        }
+        Value::Object(map) => {
+            hasher.update(b"{");
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            hasher.update((keys.len() as u64).to_le_bytes());
+            for k in keys {
+                hasher.update((k.len() as u64).to_le_bytes());
+                hasher.update(k.as_bytes());
+                hash_canonical_json(hasher, &map[k]);
+            }
+            hasher.update(b"}");
+        }
+    }
+}
+
+/// 计算基础资源包的视觉与字体确定性指纹。
+pub fn fingerprint_base_pack(base: Option<&[u8]>) -> BasePackFingerprint {
+    use sha2::{Digest, Sha256};
+    let Some(bytes) = base else {
+        let mut h = Sha256::new();
+        h.update(b"moss-base-pack:v1:none\0");
+        return BasePackFingerprint {
+            has_text_font: false,
+            digest: h.finalize().into(),
+        };
+    };
+    let parsed = parse_assets(bytes).ok().and_then(|entries| {
+        let raw = entries.iter().find(|e| e.name == INDEX_FILE)?;
+        let Value::Object(mut index) = serde_json::from_slice::<Value>(&raw.data).ok()? else {
+            return None;
+        };
+        let old_models = index
+            .get("srmodels")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let has_text_font = index
+            .get("text_font")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        index.remove("srmodels");
+        index.remove("multinet_model");
+        let mut kept: Vec<&AssetEntry> = entries
+            .iter()
+            .filter(|e| {
+                e.name != INDEX_FILE
+                    && e.name != SRMODELS_FILE
+                    && Some(&e.name) != old_models.as_ref()
+            })
+            .collect();
+        kept.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut h = Sha256::new();
+        h.update(b"moss-base-pack:v1:parsed\0");
+        hash_canonical_json(&mut h, &Value::Object(index));
+        h.update((kept.len() as u64).to_le_bytes());
+        for e in kept {
+            h.update((e.name.len() as u64).to_le_bytes());
+            h.update(e.name.as_bytes());
+            h.update(e.width.to_le_bytes());
+            h.update(e.height.to_le_bytes());
+            h.update((e.data.len() as u64).to_le_bytes());
+            h.update(&e.data);
+        }
+        Some(BasePackFingerprint {
+            has_text_font,
+            digest: h.finalize().into(),
+        })
+    });
+    parsed.unwrap_or_else(|| {
+        let mut h = Sha256::new();
+        h.update(b"moss-base-pack:v1:raw\0");
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+        BasePackFingerprint {
+            has_text_font: false,
+            digest: h.finalize().into(),
+        }
+    })
+}
+
 /// 生成资源包，可选附带 n70 全屏画风。基础包的字体与其余表情保留，未导入基础包时自动补入匹配屏幕规格的中文字库。
 pub fn build_package_with_screen(
     base: Option<&[u8]>,
@@ -355,6 +474,17 @@ pub fn build_package_with_screen_and_font(
     screen: Option<&ScreenExtras>,
     fallback_font: Option<crate::glyph_font::FontProfile>,
 ) -> Result<Vec<u8>, String> {
+    build_package_with_screen_and_font_info(base, target, screen, fallback_font)
+        .map(|(package, _)| package)
+}
+
+/// 生成资源包并返回实际打入的兜底中文字库档位（基础包自带 `text_font` 时返回 `None`，超大屏回退 20_4 时返回回退后的档位）。
+pub fn build_package_with_screen_and_font_info(
+    base: Option<&[u8]>,
+    target: &WakeTarget,
+    screen: Option<&ScreenExtras>,
+    fallback_font: Option<crate::glyph_font::FontProfile>,
+) -> Result<(Vec<u8>, Option<crate::glyph_font::FontProfile>), String> {
     match try_build_package(base, target, screen, fallback_font) {
         Err(ref err)
             if fallback_font.is_some_and(|p| p.size == 30) && err.contains("超过设备资源分区") =>
@@ -371,7 +501,7 @@ fn try_build_package(
     target: &WakeTarget,
     screen: Option<&ScreenExtras>,
     fallback_font: Option<crate::glyph_font::FontProfile>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Option<crate::glyph_font::FontProfile>), String> {
     let (mut entries, mut index) = match base {
         Some(bytes) => {
             let entries = parse_assets(bytes).map_err(str::to_owned)?;
@@ -458,14 +588,21 @@ fn try_build_package(
         .get("text_font")
         .and_then(Value::as_str)
         .is_some_and(|s| !s.trim().is_empty());
-    if !has_text_font && let Some(profile) = fallback_font {
-        let (font_entry, font_name, font_meta) =
-            crate::glyph_font::pack_font_entry_and_meta(profile);
-        entries.retain(|e| e.name != font_name);
-        entries.push(font_entry);
-        index.insert("text_font".into(), Value::String(font_name));
-        index.insert("text_font_meta".into(), font_meta);
-    }
+    let used_fallback_font = if !has_text_font {
+        if let Some(profile) = fallback_font {
+            let (font_entry, font_name, font_meta) =
+                crate::glyph_font::pack_font_entry_and_meta(profile);
+            entries.retain(|e| e.name != font_name);
+            entries.push(font_entry);
+            index.insert("text_font".into(), Value::String(font_name));
+            index.insert("text_font_meta".into(), font_meta);
+            Some(profile)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let index = serde_json::to_vec(&Value::Object(index)).map_err(|_| "生成 index.json 失败")?;
     entries.push(AssetEntry {
         name: INDEX_FILE.into(),
@@ -480,7 +617,7 @@ fn try_build_package(
             package.len() as f64 / 1048576.0
         ));
     }
-    Ok(package)
+    Ok((package, used_fallback_font))
 }
 
 /// 基础资源包里能看到的摘要（给界面显示）。

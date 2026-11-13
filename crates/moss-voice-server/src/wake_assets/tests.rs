@@ -306,3 +306,79 @@ fn n61_staged_package_is_one_device_one_token_and_expires() {
         .expires = Instant::now() - Duration::from_secs(1);
     assert!(store.fetch(&second).is_none(), "过期后不再给");
 }
+
+#[test]
+fn n84_base_pack_fingerprint_detects_font_and_asset_changes_while_ignoring_wake_word() {
+    let none_fp = fingerprint_base_pack(None);
+    assert!(!none_fp.has_text_font);
+
+    let base_v1 = pack_assets(&[
+        entry("font.bin", &[1, 2, 3]),
+        entry("srmodels.bin", &[9, 9]),
+        entry(
+            "index.json",
+            r#"{"version":1,"text_font":"font.bin","srmodels":"srmodels.bin","multinet_model":{"commands":[{"text":"旧词"}]}}"#
+                .as_bytes(),
+        ),
+    ])
+    .unwrap();
+    let fp_v1 = fingerprint_base_pack(Some(&base_v1));
+    assert!(fp_v1.has_text_font);
+    assert_ne!(fp_v1.digest, none_fp.digest);
+
+    // 仅唤醒模型或 multinet_model 不同、字体与其余资源一致时，视觉/字库指纹不变
+    let base_same_visual = pack_assets(&[
+        entry("font.bin", &[1, 2, 3]),
+        entry("srmodels.bin", &[7, 7, 7, 7]),
+        entry(
+            "index.json",
+            br#"{"srmodels":"srmodels.bin","text_font":"font.bin","version":1}"#,
+        ),
+    ])
+    .unwrap();
+    assert_eq!(fingerprint_base_pack(Some(&base_same_visual)), fp_v1);
+
+    // 字体字节或额外表情变化时，指纹立即改变
+    let base_font_modified = pack_assets(&[
+        entry("font.bin", &[1, 2, 4]),
+        entry(
+            "index.json",
+            br#"{"version":1,"text_font":"font.bin","srmodels":"srmodels.bin"}"#,
+        ),
+    ])
+    .unwrap();
+    assert_ne!(
+        fingerprint_base_pack(Some(&base_font_modified)).digest,
+        fp_v1.digest
+    );
+}
+
+#[test]
+fn parse_assets_rejects_overlapping_entries_exceeding_cumulative_limit() {
+    let payload = vec![0xABu8; 2 * 1024 * 1024];
+    let count = 5usize; // 5 * 2 MiB = 10 MiB > ASSETS_MAX_BYTES (8 MiB)，但整包仅约 2 MiB
+    let row_len = 32 + 12;
+    let table_len = count * row_len;
+    let mut body = vec![0u8; table_len + 2 + payload.len()];
+    for i in 0..count {
+        let row = i * row_len;
+        let name = format!("dup_{i}.bin");
+        body[row..row + name.len()].copy_from_slice(name.as_bytes());
+        body[row + 32..row + 36].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        body[row + 36..row + 40].copy_from_slice(&0u32.to_le_bytes());
+    }
+    body[table_len] = 0x5A;
+    body[table_len + 1] = 0x5A;
+    body[table_len + 2..].copy_from_slice(&payload);
+
+    let sum = super::checksum(&body);
+    let mut raw = Vec::with_capacity(12 + body.len());
+    raw.extend_from_slice(&(count as u32).to_le_bytes());
+    raw.extend_from_slice(&sum.to_le_bytes());
+    raw.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    raw.extend_from_slice(&body);
+
+    assert!(raw.len() < ASSETS_MAX_BYTES);
+    let err = parse_assets(&raw).expect_err("重叠目录项累计超过 8 MB 时应拒绝放大分配");
+    assert_eq!(err, "资源包里的文件数据损坏");
+}

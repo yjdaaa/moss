@@ -25,7 +25,7 @@ use crate::goggle_bot::{BotPose, ScreenCardStyle, base64_encode, draw_goggle_bot
 use crate::preview_push::{draw_moss_optical_eye, draw_text_5x7, put_px, text_width_px};
 use crate::wake_assets::{AssetEntry, ScreenExtras};
 
-/// 画风包版本，记在设备偏好 `screen_pack` 里（`moss-screen-2:moss_hud`，n81 起内置 `noto-v1` 中文字库）。
+/// 画风包版本前缀，记在设备偏好 `screen_pack` 里（`moss-screen-2:<style>:<16hex>`，n81 起内置 `noto-v1` 中文字库，n84 起附带内容指纹）。
 pub const PACK_VERSION: &str = "moss-screen-2";
 /// 每个场景的帧数与帧间隔（毫秒）。
 pub const FRAMES: u8 = 4;
@@ -85,25 +85,198 @@ pub fn emotion_name(style: ScreenCardStyle, scene: BotPose) -> String {
     format!("{}_{}", style_prefix(style), scene.slug())
 }
 
-/// 设备偏好里记录的画风包标记。
-pub fn pack_marker(style: ScreenCardStyle) -> String {
-    format!("{PACK_VERSION}:{}", style.as_str())
+/// 解析后的设备画风包标记（兼容旧版 `version:style` 与新版 `version:style:16hex`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedPackMarker<'a> {
+    pub version: &'a str,
+    pub style: &'a str,
+    pub fingerprint: Option<&'a str>,
 }
 
-/// 设备偏好里的标记是否表示已装好本版画风包（含完整中文字库）。
+/// 设备已装画风包标记与当前期望标记的比对结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackMatchState {
+    /// 未安装或无法识别的标记。
+    None,
+    /// 旧无字库版（`moss-screen-1`），需重刷补齐中文字库。
+    FontOutdated,
+    /// 当前大版本，但开机画风与当前设置不一致。
+    StyleOutdated,
+    /// 当前大版本且画风一致，但未带指纹或指纹不一致（底包、字库、屏幕规格或画面资源有更新）。
+    AssetsOutdated,
+    /// 版本前缀、画风与内容指纹完全一致。
+    Installed,
+}
+
+pub fn parse_pack_marker(marker: &str) -> Option<ParsedPackMarker<'_>> {
+    let mut parts = marker.trim().split(':');
+    let version = parts.next()?.trim();
+    let style = parts.next()?.trim();
+    if version.is_empty() || style.is_empty() {
+        return None;
+    }
+    let fingerprint = match parts.next() {
+        None => None,
+        Some(fp)
+            if fp.len() == 16 && fp.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+        {
+            Some(fp)
+        }
+        Some(_) => return None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(ParsedPackMarker {
+        version,
+        style,
+        fingerprint,
+    })
+}
+
+/// 计算画风全屏动图、整屏背景、表情映射与皮肤配色的 SHA-256 摘要（按画风 + 半分辨率画布缓存）。
+pub fn extras_digest(style: ScreenCardStyle, screen: (u32, u32)) -> Result<[u8; 32], String> {
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    type Key = (&'static str, (u32, u32));
+    static CACHE: OnceLock<Mutex<HashMap<Key, [u8; 32]>>> = OnceLock::new();
+    let logical = logical_size(screen);
+    let key = (style.as_str(), logical);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(hit) = guard.get(&key)
+    {
+        return Ok(*hit);
+    }
+    let extras = build_screen_extras(style, (logical.0 * 2, logical.1 * 2))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"moss-screen-extras:v1\0");
+    hasher.update(PACK_VERSION.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(style.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(logical.0.to_le_bytes());
+    hasher.update(logical.1.to_le_bytes());
+    let mut sorted: Vec<&AssetEntry> = extras.entries.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    hasher.update((sorted.len() as u32).to_le_bytes());
+    for entry in sorted {
+        hasher.update((entry.name.len() as u32).to_le_bytes());
+        hasher.update(entry.name.as_bytes());
+        hasher.update(entry.width.to_le_bytes());
+        hasher.update(entry.height.to_le_bytes());
+        hasher.update((entry.data.len() as u64).to_le_bytes());
+        hasher.update(&entry.data);
+    }
+    hasher.update(b"emoji:");
+    crate::wake_assets::hash_canonical_json(
+        &mut hasher,
+        &serde_json::Value::Array(extras.emoji_collection),
+    );
+    hasher.update(b"skin:");
+    if let Some(skin) = &extras.skin {
+        crate::wake_assets::hash_canonical_json(&mut hasher, skin);
+    } else {
+        hasher.update(b"none;");
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 32 {
+            guard.clear();
+        }
+        guard.insert(key, digest);
+    }
+    Ok(digest)
+}
+
+/// 计算画风/字库资源包 16 位十六进制内容指纹（覆盖全屏动图、背景、基础底包非唤醒词资源与实际字库）。
+pub fn pack_fingerprint(
+    style: ScreenCardStyle,
+    screen: (u32, u32),
+    fallback_font: Option<crate::glyph_font::FontProfile>,
+    base_fp: crate::wake_assets::BasePackFingerprint,
+) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let extras = extras_digest(style, screen)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"moss-screen-pack-fp:v1\0");
+    hasher.update(extras);
+    hasher.update(base_fp.digest);
+    if base_fp.has_text_font {
+        // 基础包自带 text_font 时打包不塞入兜底字库，重启后即使设备汇报新字号也不漂移指纹
+        hasher.update(b"font:from_base\0");
+    } else if let Some(profile) = fallback_font {
+        hasher.update(b"font:fallback:");
+        hasher.update(crate::glyph_font::font_profile_digest(profile));
+    } else {
+        hasher.update(b"font:none\0");
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut hex = String::with_capacity(16);
+    for byte in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
+/// 按设备屏幕规格、兜底字库与基础底包指纹生成完整标记（`moss-screen-2:<style>:<16hex>`）。
+pub fn pack_marker_for(
+    style: ScreenCardStyle,
+    screen: (u32, u32),
+    fallback_font: Option<crate::glyph_font::FontProfile>,
+    base_fp: crate::wake_assets::BasePackFingerprint,
+) -> Result<String, String> {
+    let fp = pack_fingerprint(style, screen, fallback_font, base_fp)?;
+    Ok(format!("{PACK_VERSION}:{}:{fp}", style.as_str()))
+}
+
+/// 默认规格（`320×240` + 内置 `20_4` 常用字库 + 无导入底包）的画风包标记。
+pub fn pack_marker(style: ScreenCardStyle) -> String {
+    pack_marker_for(
+        style,
+        (320, 240),
+        Some(crate::glyph_font::PROFILES[2]),
+        crate::wake_assets::fingerprint_base_pack(None),
+    )
+    .unwrap_or_else(|_| format!("{PACK_VERSION}:{}", style.as_str()))
+}
+
+/// 比对设备已装标记与当前期望标记，区分完全一致、换画风、底包/字库有更新与旧无字库版。
+pub fn compare_pack_marker(installed: Option<&str>, expected_marker: &str) -> PackMatchState {
+    let Some(inst) = installed.and_then(parse_pack_marker) else {
+        return PackMatchState::None;
+    };
+    if inst.version == "moss-screen-1" {
+        return PackMatchState::FontOutdated;
+    }
+    if inst.version != PACK_VERSION {
+        return PackMatchState::None;
+    }
+    let Some(exp) = parse_pack_marker(expected_marker) else {
+        return PackMatchState::AssetsOutdated;
+    };
+    if inst.style != exp.style {
+        return PackMatchState::StyleOutdated;
+    }
+    if inst.fingerprint.is_some() && inst.fingerprint == exp.fingerprint {
+        PackMatchState::Installed
+    } else {
+        PackMatchState::AssetsOutdated
+    }
+}
+
+/// 设备偏好里的标记是否表示已装有本版画风包（`moss-screen-2`，含旧无指纹两段式标记与三段式指纹标记）。
 pub fn marker_installed(marker: &str) -> bool {
-    marker
-        .split(':')
-        .next()
-        .is_some_and(|version| version == PACK_VERSION)
+    parse_pack_marker(marker).is_some_and(|p| p.version == PACK_VERSION)
 }
 
 /// 设备偏好里的标记是否已装有 MOSS 全屏场景动图（含旧版 `moss-screen-1`，在线等待补刷期间仍发全屏场景名）。
 pub fn marker_supports_scenes(marker: &str) -> bool {
-    marker
-        .split(':')
-        .next()
-        .is_some_and(|version| matches!(version, "moss-screen-1" | PACK_VERSION))
+    parse_pack_marker(marker).is_some_and(|p| matches!(p.version, "moss-screen-1" | PACK_VERSION))
 }
 
 /// 标准表情名在包里指向哪个场景（固件待命固定 `neutral` → 待命画面）。

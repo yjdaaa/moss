@@ -689,8 +689,7 @@ fn answer_is_spoken_sentence_by_sentence_with_synced_text_and_history() {
         vec![
             "听:今天天气怎么样",
             "tts:start",
-            "句:你好，",
-            "句:我是 MOSS。",
+            "句:你好，我是 MOSS。",
             "句:很高兴见到你。",
             "tts:stop"
         ]
@@ -717,17 +716,17 @@ fn answer_is_spoken_sentence_by_sentence_with_synced_text_and_history() {
             "{pair:?}"
         );
     }
-    // 3 句各 300 ms → 24 kHz 下 15 帧
+    // 2 句合并后各 300 ms → 24 kHz 下 10 帧
     assert_eq!(
         items
             .iter()
             .filter(|item| matches!(item, Item::Frame))
             .count(),
-        15
+        10
     );
     assert_eq!(
         *fakes.tts.said.lock().unwrap(),
-        vec!["你好，", "我是 MOSS。", "很高兴见到你。"]
+        vec!["你好，我是 MOSS。", "很高兴见到你。"]
     );
     // 1000 ms 在设备端编成 17 个 60 ms 帧（最后一帧补零），识别收到全部 17 × 960 个样本
     assert_eq!(
@@ -3039,9 +3038,9 @@ fn second_sentence_tts_prefetches_concurrently_while_first_sentence_is_streaming
         events: Mutex::new(Vec::new()),
     });
     let llm = Arc::new(FakeLlm {
-        // 包含 1 字碎句 "嗯。"，应自动与第三段合并为 "嗯。设备状态一切正常。"
+        // 首句满 6 字切出保证连续缓冲；后续 1 字碎句 "嗯。" 自动与下一段合并为 "嗯。设备状态一切正常。"
         rounds: Mutex::new(VecDeque::from([say(&[
-            "好的，",
+            "收到，正在检查，",
             "嗯。",
             "设备状态一切正常。",
         ])])),
@@ -3080,7 +3079,7 @@ fn second_sentence_tts_prefetches_concurrently_while_first_sentence_is_streaming
         vec![
             "听:检查状态",
             "tts:start",
-            "句:好的，",
+            "句:收到，正在检查，",
             "句:嗯。设备状态一切正常。",
             "tts:stop",
         ]
@@ -3092,7 +3091,7 @@ fn second_sentence_tts_prefetches_concurrently_while_first_sentence_is_streaming
         .expect("第二句应启动 TTS");
     let end_first = log
         .iter()
-        .position(|e| e == "end:好的，")
+        .position(|e| e == "end:收到，正在检查，")
         .expect("第一句应完成 TTS");
     assert!(
         start_second < end_first,
@@ -3391,10 +3390,8 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     assert_eq!(
         spoken3,
         vec![
-            "好的，".to_owned(),
-            "我帮您查一下。".to_owned(),
-            "查到了，".to_owned(),
-            "明天也是晴天。".to_owned()
+            "好的，我帮您查一下。".to_owned(),
+            "查到了，明天也是晴天。".to_owned()
         ]
     );
 }
@@ -4471,4 +4468,106 @@ fn zero_flash_cards_approval_alert_terminal_badge_music_deck_style_switch_and_go
     );
     let pose_stt = read_json(&mut szpi);
     assert_eq!(pose_stt["text"], "[预览] 小MOSS护目镜机器人 · 戴护目镜雕刻");
+}
+
+#[tokio::test]
+async fn streaming_tts_preserves_mid_sentence_pause_and_trims_only_true_sentence_tail() {
+    use crate::audio::test_signal::{silence, tone};
+    use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
+
+    struct ChunkedPauseTts;
+    impl Tts for ChunkedPauseTts {
+        fn synthesize<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Pcm, ProviderError>> {
+            Box::pin(async {
+                Ok(Pcm {
+                    samples: tone(DOWN, 440.0, 100, 6000.0),
+                    sample_rate: DOWN,
+                })
+            })
+        }
+
+        fn synthesize_stream<'a>(
+            &'a self,
+            _text: &'a str,
+            chunks: tokio::sync::mpsc::UnboundedSender<Pcm>,
+        ) -> BoxFuture<'a, Result<(), ProviderError>> {
+            Box::pin(async move {
+                // 分块 1：100ms 语音 + 300ms 句中停顿（旧代码会在此误触发句尾裁静音把 300ms 砍成 140ms）
+                let mut c1 = tone(DOWN, 440.0, 100, 6000.0);
+                c1.extend(silence(DOWN, 300));
+                let _ = chunks.send(Pcm {
+                    samples: c1,
+                    sample_rate: DOWN,
+                });
+                // 分块 2：100ms 后续语音 + 180ms 句尾静音（与分块 3 拼成 360ms 句尾死寂）
+                let mut c2 = tone(DOWN, 440.0, 100, 6000.0);
+                c2.extend(silence(DOWN, 180));
+                let _ = chunks.send(Pcm {
+                    samples: c2,
+                    sample_rate: DOWN,
+                });
+                // 分块 3..=11：9 个 80ms 细碎纯静音包（与分块 2 合计 900ms > 512ms 超长句尾死寂，验证跨多包累计不漏放）
+                for _ in 0..9 {
+                    let _ = chunks.send(Pcm {
+                        samples: silence(DOWN, 80),
+                        sample_rate: DOWN,
+                    });
+                }
+                Ok(())
+            })
+        }
+    }
+
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["这是一句带停顿的话。"])])),
+        ..FakeLlm::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("测试流式停顿".into())])),
+        ..Default::default()
+    });
+    let conversation = Arc::new(Conversation::new(
+        asr,
+        llm,
+        Arc::new(ChunkedPauseTts),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    ));
+    let ctx = crate::ToolContext {
+        device_id: "dev-pause".into(),
+        session_id: "sess-pause".into(),
+    };
+    let (handle, mut rx) = spawn_turn(
+        conversation,
+        ctx,
+        TurnInput::Utterance {
+            pcm: vec![0; 960],
+            sample_rate: UP,
+            stream: None,
+        },
+        vec![],
+        None,
+    );
+    let mut total_samples = 0usize;
+    let mut sentence_ends = 0usize;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            TurnEvent::Speech { pcm, .. } | TurnEvent::SpeechMore(pcm) => {
+                total_samples += pcm.samples.len();
+            }
+            TurnEvent::SentenceEnd => sentence_ends += 1,
+            _ => {}
+        }
+    }
+    handle.await.unwrap();
+    assert_eq!(
+        sentence_ends, 1,
+        "句子结束应发出 SentenceEnd 供节奏泵冲刷句尾残帧"
+    );
+    // 期望总长：100ms 语音 + 300ms 句中停顿（完整保留！）+ 100ms 语音 + 140ms 裁剪后句尾气口 = 640ms（15360 样本）
+    let expected_ms = (total_samples * 1000) / DOWN as usize;
+    assert!(
+        (630..=650).contains(&expected_ms),
+        "句中 300ms 停顿必须完整保留且句尾 900ms 跨块死寂裁剪至 140ms（期望约 640ms，实际 {expected_ms}ms / {total_samples} 样本）"
+    );
 }

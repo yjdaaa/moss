@@ -48,7 +48,7 @@ export default function VoiceWakeWordCard() {
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
   const clearBase = async () => {
-    if (!(await showConfirm("移除基础资源包？之后推送的资源包只含唤醒词，设备屏幕的字体和表情会回到固件自带的。", { title: "移除基础资源包", danger: true, confirmText: "移除" }))) return;
+    if (!(await showConfirm("移除基础资源包？之后推送时将改用 MOSS 内置 6,845 常用中文字库（勾选全屏画风时含全屏场景，不勾时回到官方默认表情），已刷设备的资源指纹会自动标记为待更新。", { title: "移除基础资源包", danger: true, confirmText: "移除" }))) return;
     await run(() => voiceApi.wakewordManage({ action: "clear_base", confirmed: true }), "已移除基础资源包");
   };
   const push = async (device, target, forceScreen = false) => {
@@ -59,7 +59,7 @@ export default function VoiceWakeWordCard() {
       `把${what}推送给设备 ${name}？\n` +
       (screen ? `全屏画风按这台的屏幕 ${device.screen_pack_size[0]}×${device.screen_pack_size[1]} 和当前画风生成：对话、雕刻、审批、听歌画面铺满整屏一直显示；顶部“聆听中”等状态字由固件显示，改不了。\n` : (device.screen_pack ? "这次不带全屏画风：装好后屏幕回到官方表情。\n" : "")) +
       "设备会立即重启，开机后自己下载资源包并写入闪存的资源分区，屏幕会显示下载进度，期间不要断电。" +
-      (data?.base ? "会保留基础资源包里的字体、表情和背景。" : "没有导入基础资源包：设备屏幕的字体和表情会回到固件自带的。") +
+      (data?.base ? "会保留基础资源包里的字体、表情和背景。" : "未导入基础资源包：会自动附带 MOSS 内置 6,845 常用中文字库。") +
       "\n只支持 ESP32-S3、16 MB 闪存、小智固件 2.0.2 以上（v2 分区表）的设备；不满足时设备会拒收，原有内容不变。" +
       "下载中途断电会让资源分区失效（字体和唤醒词暂时缺失），设备连上后重新推送一次即可恢复。下载地址 30 分钟内有效。",
       { title: "推送唤醒词？", tone: "warning", danger: true, confirmText: "确认推送这一台" },
@@ -181,9 +181,9 @@ export default function VoiceWakeWordCard() {
       <details className="wakeword-advanced">
         <summary>高级：基础资源包（可选）{base ? " · 已导入" : ""}</summary>
         {base ? (
-          <p>已导入：{base.files} 个文件，{(base.size / 1048576).toFixed(1)} MB{base.text_font ? ` · 字体 ${base.text_font}` : ""}{base.emoji_count ? ` · ${base.emoji_count} 个表情` : ""}{base.wake_word ? ` · 原唤醒词 ${base.wake_word}` : ""}。推送时保留这些，只换唤醒词。</p>
+          <p>已导入：{base.files} 个文件，{(base.size / 1048576).toFixed(1)} MB{base.text_font ? ` · 字体 ${base.text_font}` : ""}{base.emoji_count ? ` · ${base.emoji_count} 个表情` : ""}{base.wake_word ? ` · 原唤醒词 ${base.wake_word}` : ""}。推送时保留这些，只换唤醒词；换包或移除后 MOSS 会按内容指纹自动识别待同步设备。</p>
         ) : (
-          <p>未导入时，推送的资源包只含唤醒词，设备屏幕的字体和表情会回到固件自带的。想保留自定义字体、表情或背景，可以先用小智官方网页生成器（xiaozhi-assets-generator）导出 assets.bin 再导入。</p>
+          <p>未导入时，推送会自动附带 MOSS 内置 6,845 常用中文字库（勾选全屏画风时含全屏场景，不勾时用官方默认表情）。想换自定义字体、表情或背景，可先用小智官方网页生成器（xiaozhi-assets-generator）导出 assets.bin 再导入，导入后会自动按内容指纹提示更新。</p>
         )}
         <div className="wakeword-actions">
           <button className="btn btn-ghost" type="button" disabled={busy} onClick={importBase}>导入资源包…</button>

@@ -399,3 +399,111 @@ fn mqtt_port_8883_is_refused_and_websocket_keeps_working() {
             .any(|e| e.text.contains("常连模式没能启动"))
     );
 }
+
+#[test]
+fn mqtt_standby_restores_saved_text_font_snapshot_for_glyph_push_before_wake() {
+    let registry = Arc::new(FakeRegistry::default());
+    registry.set(DEVICE, DeviceStatus::Allowed);
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        Arc::new(FakeTts::default()),
+        Arc::new(NoTools),
+        ConversationSettings::default(),
+    );
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            mqtt: Some(crate::MqttConfig {
+                port: 0,
+                udp_port: 0,
+            }),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let ports = server.mqtt_ports().expect("常连模式已开启");
+    let (_, body) = ota(&server, Some(DEVICE));
+    let token = body["mqtt"]["password"].as_str().unwrap().to_owned();
+
+    // 第 1 次连接并唤醒：上报支持 glyph_push 与 basic 字库，写入 SNAPSHOT_HELLO
+    let (mut dev1, accepted) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted, 0);
+    let init = dev1.read_mcp();
+    dev1.reply_mcp(
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(dev1.read_mcp()["method"], "notifications/initialized");
+    let list = dev1.read_mcp();
+    dev1.reply_mcp(&list["id"], serde_json::json!({"tools": []}));
+    dev1.publish(&serde_json::json!({
+        "type": "hello",
+        "version": 3,
+        "transport": "udp",
+        "features": { "mcp": true, "glyph_push": true },
+        "text_font": { "bundle": "noto-v1", "charset": "basic", "size": 20, "bpp": 4 },
+        "audio_params": { "format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60 }
+    }));
+    loop {
+        if dev1.read_json()["type"] == "hello" {
+            break;
+        }
+    }
+    wait_until("hello 快照已落库", || {
+        !registry.snapshots(crate::SNAPSHOT_HELLO).is_empty()
+    });
+    drop(dev1);
+    wait_until("旧常连下线", || server.status().sessions.is_empty());
+
+    // 第 2 次重连模拟设备上电常连待命（未唤醒、未发 hello）
+    let (mut dev2, accepted2) = MqttDevice::connect(ports.port, CLIENT, DEVICE, &token);
+    assert_eq!(accepted2, 0);
+    let init2 = dev2.read_mcp();
+    dev2.reply_mcp(
+        &init2["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(dev2.read_mcp()["method"], "notifications/initialized");
+    let list2 = dev2.read_mcp();
+    dev2.reply_mcp(
+        &list2["id"],
+        serde_json::json!({"tools": [
+            {"name": "self.screen.preview_image", "description": "预览图", "inputSchema": {"type": "object"}}
+        ]}),
+    );
+    wait_until("重连常连会话已恢复字库规格", || {
+        server.active_device_sessions().iter().any(|s| {
+            s.device_id == DEVICE && s.text_font_size == Some(20) && !s.device_tools.is_empty()
+        })
+    });
+
+    // 未唤醒直接主动推彩屏预览字幕：应根据恢复的字库规格下发 glyph_push 位图
+    server
+        .device_request(
+            DEVICE,
+            crate::DeviceRequest::PreviewScreen {
+                token: Some("tok-preview".into()),
+                summary: "激光雕刻参数正常".into(),
+            },
+        )
+        .unwrap();
+    let stt = loop {
+        let msg = dev2.read_json();
+        if msg["type"] == "stt" {
+            break msg;
+        }
+    };
+    assert!(stt["text"].as_str().unwrap_or("").contains("雕刻"), "{stt}");
+    assert!(
+        stt["glyph_push"]["glyphs"]
+            .as_array()
+            .is_some_and(|g| !g.is_empty()),
+        "常连开机未唤醒前主动推屏也应携带 glyph_push 点阵: {stt}"
+    );
+}

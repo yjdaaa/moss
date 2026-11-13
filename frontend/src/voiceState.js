@@ -1211,6 +1211,8 @@ export function localModelDeleteText(model, models, local) {
       (item) => item.kind === "jev" && item.id !== "laya_multilingual" && item.id !== model.id && (item.installed || LOCAL_BUSY_STATES.has(item.progress?.state)),
     );
     if (!otherOneJev) extra = "这是最后一档 OneJev，会同时删除 MOSS 下载的推理引擎 llama-server。";
+  } else if (model?.kind === "font") {
+    extra = "删除后已装日常字库的小智遇到生僻字、繁体字或日韩泰阿文字将不再动态补字（基础界面仍由内置 6,845 字常用字库兜底）。";
   }
   return `删除本地模型“${label}”？${extra}需要时可以重新下载。`;
 }
@@ -3102,6 +3104,10 @@ export function screenPackDeviceView(device) {
     // 2026-11-09 用户决定：换了画风要重刷，开机待命画面才跟着换
     text = "装的是换画风之前的全屏画风：重刷后开机待命画面才会换";
     tone = "warn";
+  } else if (state === "assets_outdated") {
+    // 2026-11-13 n84：版本前缀 + 内容指纹对比发现基础底包、字库档位或画面资源与设备当前不一致
+    text = "画风或字库资源有更新（底包或字库与设备当前不一致）：重刷后同步到设备";
+    tone = "warn";
   } else if (state === "font_outdated") {
     // 2026-11-12 n81：旧版 moss-screen-1 未含常用中文字库，重刷 moss-screen-2 补齐屏幕中文字体
     text = "装的是旧版画风包（缺常用中文字库）：重刷后补齐屏幕中文字体";
@@ -3115,9 +3121,11 @@ export function screenPackDeviceView(device) {
   const canQuickPack = Boolean(device?.supported && size && state !== "installed" && state !== "pending_download");
   const quickLabel = state === "font_outdated"
     ? "一键补齐中文字库"
-    : state === "style_outdated"
-      ? "一键重刷全屏画风"
-      : "一键刷入全屏画风";
+    : state === "assets_outdated"
+      ? "一键更新画风字库"
+      : state === "style_outdated"
+        ? "一键重刷全屏画风"
+        : "一键刷入全屏画风";
   return { state, text, tone, canQuickPack, quickLabel };
 }
 

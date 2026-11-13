@@ -1,8 +1,8 @@
 //! 大模型输出 → 合成用的句子。
 //!
-//! 规则合并 xiaozhi-esp32-server（`7a260ee`，首句遇逗号即切，降低首包延迟）与海门
-//! `src/xiaozhi_asr_llm_tts.rs`（`513d9e6`，清洗 Markdown，超过 180 字或 6 秒强制送出）：
-//! - 第一句遇到任何停顿标点（含逗号）就切；之后只在句末标点处切；
+//! 规则兼顾首响延迟、播放连续性与自然韵律（合并 xiaozhi-esp32-server `7a260ee` 与海门 `513d9e6` 并消除碎句断流）：
+//! - 首句在停顿标点（逗号、分号、冒号等）满 6 个可读字才切，避免“好的，”“收到，”等 2 字碎句播完即断流；句末标点满 2 字即切（流结束时任意长度兜底冲刷）；
+//! - 后续句子在句末标点（满 2 字）切分，长复合句满 18 个可读字遇到逗号/分号/冒号也按自然气口切分，避免死等句号拖成大段空白；
 //! - 英文句点只在后面跟空白时算句末（避免把 `3.5` 切开）；
 //! - 累计超过 180 字，或从这一句第一个字算起超过 6 秒，在最后一个标点处（没有就整段）强制送出；
 //! - 送出前清洗 Markdown 与表情，没有可读内容的片段丢弃。
@@ -11,9 +11,21 @@ use std::time::{Duration, Instant};
 
 const MAX_CHARS: usize = 180;
 const MAX_WAIT: Duration = Duration::from_secs(6);
+/// 首句在逗号等非句末停顿处切分的默认最小可读字数（约 1.3~1.6 秒音频，足以掩盖下一句预取耗时）。
+pub const DEFAULT_FIRST_PAUSE_MIN_CHARS: usize = 6;
+/// 首句在句末标点（。！？）切分的默认最小可读字数。
+const DEFAULT_FIRST_END_MIN_CHARS: usize = 2;
+/// 后续句子在句末标点切分的默认最小可读字数（合并“嗯。”“对！”等单字感叹）。
+pub const DEFAULT_NEXT_END_MIN_CHARS: usize = 2;
+/// 后续长复合句在逗号/分号/冒号处按气口切分的默认最小可读字数（约 3.8 秒语音，自然换气不拖沓）。
+pub const DEFAULT_CLAUSE_SPLIT_CHARS: usize = 18;
 
 fn is_pause(c: char) -> bool {
-    matches!(c, '，' | ',' | '；' | ';' | '：' | ':' | '…') || is_end(c)
+    is_clause_pause(c) || c == '…' || is_end(c)
+}
+
+fn is_clause_pause(c: char) -> bool {
+    matches!(c, '，' | ',' | '；' | ';' | '：' | ':')
 }
 
 fn is_cjk(c: char) -> bool {
@@ -216,13 +228,15 @@ pub fn speakable_char_count(text: &str) -> usize {
     text.chars().filter(|c| c.is_alphanumeric()).count()
 }
 
-/// 流式切句器（含极短碎句合并 TTS Coalesce）。
+/// 流式切句器（含极短碎句防抖合并与长复合句气口切分）。
 pub struct Segmenter {
     buffer: String,
     sent_any: bool,
     since: Option<Instant>,
     min_first_chars: usize,
+    min_first_end_chars: usize,
     min_next_chars: usize,
+    clause_split_chars: usize,
 }
 
 impl Default for Segmenter {
@@ -231,8 +245,10 @@ impl Default for Segmenter {
             buffer: String::new(),
             sent_any: false,
             since: None,
-            min_first_chars: 1,
-            min_next_chars: 2,
+            min_first_chars: DEFAULT_FIRST_PAUSE_MIN_CHARS,
+            min_first_end_chars: DEFAULT_FIRST_END_MIN_CHARS,
+            min_next_chars: DEFAULT_NEXT_END_MIN_CHARS,
+            clause_split_chars: DEFAULT_CLAUSE_SPLIT_CHARS,
         }
     }
 }
@@ -244,8 +260,16 @@ impl Segmenter {
 
     /// 自定义首句与后续句子的最小可读字符合并阈值（不足阈值时暂存与后句合并，流结束 `finish` 时兜底冲刷）。
     pub fn with_min_chars(mut self, first_min: usize, next_min: usize) -> Self {
-        self.min_first_chars = first_min.max(1);
+        let first = first_min.max(1);
+        self.min_first_chars = first;
+        self.min_first_end_chars = first.min(DEFAULT_FIRST_END_MIN_CHARS);
         self.min_next_chars = next_min.max(1);
+        self
+    }
+
+    /// 自定义后续长复合句在逗号/分号/冒号处按气口切分的最小可读字符阈值。
+    pub fn with_clause_chars(mut self, clause_min: usize) -> Self {
+        self.clause_split_chars = clause_min.max(1);
         self
     }
 
@@ -297,18 +321,25 @@ impl Segmenter {
         let mut chars = self.buffer.char_indices().peekable();
         while let Some((at, c)) = chars.next() {
             let end = at + c.len_utf8();
-            let boundary = if self.sent_any {
-                is_end(c)
+            let (boundary, min_chars) = if self.sent_any {
+                if is_end(c) {
+                    (true, self.min_next_chars)
+                } else if is_clause_pause(c) {
+                    (true, self.clause_split_chars.max(self.min_next_chars))
+                } else {
+                    (false, self.min_next_chars)
+                }
+            } else if is_end(c) {
+                (true, self.min_first_end_chars)
+            } else if is_pause(c) {
+                let first_pause_min = if matches!(c, '：' | ':') {
+                    self.min_first_chars.max(6)
+                } else {
+                    self.min_first_chars
+                };
+                (true, first_pause_min)
             } else {
-                is_pause(c)
-            };
-            let min_chars = if self.sent_any {
-                self.min_next_chars
-            } else if matches!(c, '：' | ':') {
-                // 避免“提示：”“警告：”这类 2 字前缀被单独切成碎句导致合成语调脱节
-                self.min_first_chars.max(5)
-            } else {
-                self.min_first_chars
+                (false, self.min_first_chars)
             };
             if boundary {
                 // 保护数字千分位（1,200）与时间（14:30）：紧跟在数字后的半角逗号/冒号若后续是数字或尚未收齐则不切
@@ -318,7 +349,7 @@ impl Segmenter {
                 {
                     continue;
                 }
-                // 有足够可读内容才切（避免开头的孤立标点或句中 1 字碎句单独发起一次 TTS 请求；换行符保持分行）
+                // 有足够可读内容才切（避免开头的孤立标点或句首/句中 1~2 字碎句单独发起 TTS 导致播完断流；换行符保持分行）
                 let count = speakable_char_count(&self.buffer[..end]);
                 if count >= min_chars
                     || (c == '\n' && count >= 1)
@@ -332,10 +363,15 @@ impl Segmenter {
                 continue;
             }
             if c == '.' {
+                let period_min = if self.sent_any {
+                    self.min_next_chars
+                } else {
+                    self.min_first_end_chars
+                };
                 match chars.peek() {
                     Some((_, next))
                         if next.is_whitespace()
-                            && speakable_char_count(&self.buffer[..end]) >= min_chars =>
+                            && speakable_char_count(&self.buffer[..end]) >= period_min =>
                     {
                         return Some(end);
                     }
@@ -385,7 +421,8 @@ mod tests {
     }
 
     #[test]
-    fn first_sentence_cuts_at_comma_then_at_sentence_end() {
+    fn first_sentence_coalesces_short_interjection_and_cuts_at_substantial_clause() {
+        // 首句“好的，”仅 2 字，不再单独切出导致 180ms 播完断流，而是合并至满 6 字的自然停顿“好的，我来帮你看看，”
         let out = run(&[
             "好的",
             "，我来",
@@ -396,10 +433,26 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                "好的，",
-                "我来帮你看看，激光机现在空闲。",
+                "好的，我来帮你看看，",
+                "激光机现在空闲。",
                 "温度正常！",
                 "还有别的吗"
+            ]
+        );
+    }
+
+    #[test]
+    fn subsequent_long_compound_sentence_splits_at_clause_pause_without_waiting_for_period() {
+        let out = run(&[
+            "收到，激光雕刻机目前处于空闲状态，",
+            "工作台已经完成归零并且排风系统运转正常，随时可以开始下一步雕刻任务。",
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                "收到，激光雕刻机目前处于空闲状态，",
+                "工作台已经完成归零并且排风系统运转正常，",
+                "随时可以开始下一步雕刻任务。"
             ]
         );
     }
@@ -424,7 +477,7 @@ mod tests {
     #[test]
     fn long_text_is_forced_out() {
         let long = "很".repeat(200);
-        let mut segmenter = Segmenter::new();
+        let mut segmenter = Segmenter::new().with_min_chars(1, 2);
         let now = Instant::now();
         assert_eq!(segmenter.push("好，", now), vec!["好，"]);
         let out = segmenter.push(&format!("一二三，{long}"), now);
@@ -437,7 +490,7 @@ mod tests {
 
     #[test]
     fn slow_stream_is_forced_out_after_six_seconds() {
-        let mut segmenter = Segmenter::new();
+        let mut segmenter = Segmenter::new().with_min_chars(1, 2);
         let start = Instant::now();
         assert_eq!(segmenter.push("嗯，", start), vec!["嗯，"]);
         assert!(segmenter.push("让我想一想这个问题", start).is_empty());
@@ -457,9 +510,9 @@ mod tests {
 
     #[test]
     fn short_mid_stream_fragments_coalesce_with_following_clause() {
-        // 首句“好的，”立即切出保证首字延迟；后续仅有 1 个可读字的碎句（“嗯。”、“对！”）自动与下一句合并，避免浪费一次 TTS 往返
+        // 首句满 6 字切出保证连续缓冲；后续仅有 1 个可读字的碎句（“嗯。”、“对！”）自动与下一句合并，避免浪费一次 TTS 往返
         let out = run(&[
-            "好的，",
+            "好的，马上检查，",
             "嗯。",
             "激光机目前处于空闲状态。",
             "对！",
@@ -468,7 +521,7 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                "好的，",
+                "好的，马上检查，",
                 "嗯。激光机目前处于空闲状态。",
                 "对！随时可以开始。"
             ]
@@ -493,7 +546,7 @@ mod tests {
 
     #[test]
     fn ranges_lists_colons_and_laser_units_stay_fluent() {
-        // 1. 提示前缀、顿号并列词、数值范围与时间不被首句逗号切碎
+        // 1. 提示前缀、顿号并列词、数值范围与时间不被首句逗号切碎；超长参数串在满 22 字的自然逗号处分段避免长句死等
         let out = run(&[
             "提示：",
             "请确认材料、厚度与功率在 40~60% 之间，",
@@ -503,7 +556,8 @@ mod tests {
             out,
             vec![
                 "提示：请确认材料、厚度与功率在 40到60% 之间，",
-                "速度 1,200毫米每分钟，木牌尺寸 100乘80毫米，厚度 3毫米，当前时间 14:30。"
+                "速度 1,200毫米每分钟，木牌尺寸 100乘80毫米，",
+                "厚度 3毫米，当前时间 14:30。"
             ]
         );
         // 2. Markdown 链接与斜体星号被清洗，保留可读正文

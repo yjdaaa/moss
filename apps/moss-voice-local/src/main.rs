@@ -63,11 +63,74 @@ fn to_f32(pcm: &[i16]) -> Vec<f32> {
     pcm.iter().map(|&sample| sample as f32 / 32768.0).collect()
 }
 
+/// 浮点波形转 16-bit PCM（带 C1 连续平滑拐点限幅，避免神经声码器重音超调 >1.0 时硬削波产生高音量破音）。
 fn to_i16(samples: &[f32]) -> Vec<i16> {
+    const KNEE: f32 = 0.62;
+    const HEADROOM: f32 = 0.22;
     samples
         .iter()
-        .map(|&sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+        .map(|&sample| {
+            if !sample.is_finite() {
+                return 0;
+            }
+            let mag = sample.abs();
+            let shaped = if mag <= KNEE {
+                mag
+            } else {
+                let excess = mag - KNEE;
+                KNEE + (HEADROOM * excess) / (excess + HEADROOM)
+            };
+            let signed = sample.signum() * shaped;
+            (signed * 32767.0).round().clamp(-32768.0, 32767.0) as i16
+        })
         .collect()
+}
+
+/// 平滑本地流式子分段拼接边缘：非末段裁除模型尾部超长死寂（>200ms 裁至 80ms 自然换气）并做 6ms 淡出，
+/// 非首段做 6ms 淡入，消除同一句内多个 `AudioChunk` 独立合成时的直流跳变咔哒声。
+fn smooth_stream_subsegment(
+    samples: &mut Vec<i16>,
+    sample_rate: u32,
+    is_first: bool,
+    is_last: bool,
+) {
+    if samples.is_empty() || sample_rate == 0 {
+        return;
+    }
+    const SILENCE_THRESHOLD: i16 = 24;
+    const SUBSEG_FADE_MS: u64 = 6;
+    const SUBSEG_SILENCE_TRIGGER_MS: u64 = 200;
+    const SUBSEG_SILENCE_KEEP_MS: u64 = 80;
+    if !is_last
+        && let Some(last_active) = samples
+            .iter()
+            .rposition(|&s| s.saturating_abs() > SILENCE_THRESHOLD)
+    {
+        let trailing_silent = samples.len() - (last_active + 1);
+        let trigger = ((u64::from(sample_rate) * SUBSEG_SILENCE_TRIGGER_MS) / 1000) as usize;
+        let keep = ((u64::from(sample_rate) * SUBSEG_SILENCE_KEEP_MS) / 1000) as usize;
+        if trailing_silent > trigger && keep < trailing_silent {
+            samples.truncate(last_active + 1 + keep);
+        }
+    }
+    let fade_len = ((u64::from(sample_rate) * SUBSEG_FADE_MS) / 1000) as usize;
+    let n = fade_len.min(samples.len());
+    if n <= 1 {
+        return;
+    }
+    let denom = n as i64;
+    if !is_first {
+        for (i, sample) in samples[..n].iter_mut().enumerate() {
+            *sample = ((i64::from(*sample) * (i as i64)) / denom) as i16;
+        }
+    }
+    if !is_last {
+        let start = samples.len() - n;
+        for (i, sample) in samples[start..].iter_mut().enumerate() {
+            let remain = (n - 1 - i) as i64;
+            *sample = ((i64::from(*sample) * remain) / denom) as i16;
+        }
+    }
 }
 
 /// Windows 上 `std::fs::canonicalize` 会返回 `\\?\C:\...` 或 `\\?\UNC\...` 逐字路径前缀。
@@ -595,20 +658,32 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     ..Default::default()
                 };
                 let mut failed = false;
-                for segment in moss_voice_local_proto::synthesis_segments(&text) {
+                let segments = moss_voice_local_proto::synthesis_segments(&text);
+                let total = segments.len();
+                for (idx, segment) in segments.into_iter().enumerate() {
                     match tts.generate_with_config(
                         &segment,
                         &config,
                         None::<fn(&[f32], f32) -> bool>,
                     ) {
-                        Some(audio) => send(
-                            &out,
-                            id,
-                            Reply::AudioChunk {
-                                sample_rate: audio.sample_rate().max(0) as u32,
-                            },
-                            &pcm_to_bytes(&to_i16(audio.samples())),
-                        ),
+                        Some(audio) => {
+                            let sample_rate = audio.sample_rate().max(0) as u32;
+                            let mut pcm = to_i16(audio.samples());
+                            if total > 1 {
+                                smooth_stream_subsegment(
+                                    &mut pcm,
+                                    sample_rate,
+                                    idx == 0,
+                                    idx + 1 == total,
+                                );
+                            }
+                            send(
+                                &out,
+                                id,
+                                Reply::AudioChunk { sample_rate },
+                                &pcm_to_bytes(&pcm),
+                            );
+                        }
                         None => {
                             error(&out, id, "分段合成失败");
                             failed = true;
@@ -962,5 +1037,36 @@ mod tests {
         gate.wait();
         handle.join().unwrap();
         let _ = (out, loaded);
+    }
+
+    #[test]
+    fn to_i16_soft_knee_and_subsegment_smoothing_avoid_clipping_and_seam_clicks() {
+        let pcm = to_i16(&[0.0, 0.5, -0.5, 0.8, 1.0, 1.35, -1.35, f32::NAN]);
+        assert_eq!(pcm[0], 0);
+        assert_eq!(pcm[1], 16_384);
+        assert_eq!(pcm[2], -16_384);
+        assert!(
+            pcm[3] < pcm[4] && pcm[4] < pcm[5],
+            "超幅峰值平滑单调无平顶削波: {pcm:?}"
+        );
+        assert!(pcm[5] < 28_000 && pcm[6] > -28_000, "预留峰值余量: {pcm:?}");
+        assert_eq!(pcm[7], 0);
+
+        let rate = 24_000;
+        let mut seg1 = vec![6000i16; 2400];
+        seg1.extend(vec![0i16; 7200]); // 300ms 尾部死寂
+        smooth_stream_subsegment(&mut seg1, rate, true, false);
+        assert_eq!(seg1[0], 6000, "首段起点由上层统一淡入，子分段内不重复衰减");
+        assert!(
+            seg1.len() <= 2400 + 1950,
+            "非末段超长静音被裁至约 80ms: {}",
+            seg1.len()
+        );
+        assert_eq!(*seg1.last().unwrap(), 0, "非末段结尾平滑归零");
+
+        let mut seg2 = vec![-5000i16; 2400];
+        smooth_stream_subsegment(&mut seg2, rate, false, true);
+        assert_eq!(seg2[0], 0, "非首段开头平滑淡入消除直流跳变");
+        assert_eq!(*seg2.last().unwrap(), -5000, "末段结尾交由上层统一收尾");
     }
 }

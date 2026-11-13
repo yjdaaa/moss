@@ -636,31 +636,57 @@ impl LiveState {
         }
     }
 
+    pub(crate) fn session_by_id(&self, session_id: &str) -> Option<SessionView> {
+        self.sessions.lock().ok()?.get(session_id).cloned()
+    }
+
+    pub(crate) fn sessions_for_handles(&self, handles: &[(String, String)]) -> Vec<SessionView> {
+        let Ok(sessions) = self.sessions.lock() else {
+            return Vec::new();
+        };
+        handles
+            .iter()
+            .filter_map(|(dev, sid)| sessions.get(sid).filter(|s| &s.device_id == dev).cloned())
+            .collect()
+    }
+
+    #[cfg(test)]
     pub fn session_screen_size(&self, device_id: &str) -> Option<(u32, u32)> {
         let sessions = self.sessions.lock().ok()?;
         sessions
             .values()
-            .find(|s| s.device_id == device_id)
+            .filter(|s| s.device_id == device_id)
+            .max_by(|a, b| {
+                a.connected_at
+                    .cmp(&b.connected_at)
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            })
             .and_then(|s| s.screen_width.zip(s.screen_height))
     }
     /// 选出当前优先级最高的主会话（`speaking` > `thinking` > `listening` > `idle`，同优先级取较大 `level`），
     /// 并返回该同一会话的 `(state, level)`，避免跨设备拼接出“A 会话的 state + B 会话的 level”。
+    #[cfg(test)]
     pub fn aggregate_pulse(&self) -> (Option<String>, u8) {
         let Ok(sessions) = self.sessions.lock() else {
             return (None, 0);
         };
-        if sessions.is_empty() {
-            return (None, 0);
-        }
+        Self::aggregate_pulse_of(sessions.values())
+    }
+
+    pub(crate) fn aggregate_pulse_of<'a>(
+        views: impl IntoIterator<Item = &'a SessionView>,
+    ) -> (Option<String>, u8) {
         let rank = |state: &str| match state {
             "speaking" => 4u8,
             "thinking" => 3u8,
             "listening" => 2u8,
             _ => 1u8,
         };
+        let mut any = false;
         let mut best_state = "idle";
         let mut best_key = (0u8, 0u8);
-        for view in sessions.values() {
+        for view in views {
+            any = true;
             let r = rank(&view.state);
             let effective_level = if matches!(r, 2 | 4) {
                 view.level.min(100)
@@ -677,6 +703,9 @@ impl LiveState {
                     _ => "idle",
                 };
             }
+        }
+        if !any {
+            return (None, 0);
         }
         (Some(best_state.to_owned()), best_key.1)
     }

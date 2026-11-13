@@ -32,6 +32,8 @@ pub fn pcm_rms_level(samples: &[i16]) -> u8 {
 
 /// 分句 TTS 拼接首尾线性淡入淡出时长（毫秒），消除分句直流跳变爆音（Click/Pop）。
 pub const BOUNDARY_FADE_MS: u32 = 12;
+/// 播放泵句间欠载（underrun）补零与恢复时的微淡入淡出时长（毫秒），避免残帧与静音帧硬切换咔哒声。
+pub const UNDERRUN_FADE_MS: u32 = 5;
 /// 触发句尾冗余静音裁剪的阈值（毫秒）：句尾连续静音超过此值时裁剪至 `TRAILING_SILENCE_KEEP_MS`。
 pub const TRAILING_SILENCE_TRIGGER_MS: u32 = 120;
 /// 句尾裁剪后保留的自然气口静音时长（毫秒）。
@@ -40,7 +42,13 @@ pub const TRAILING_SILENCE_KEEP_MS: u32 = 60;
 pub const CLAUSE_SILENCE_TRIGGER_MS: u32 = 220;
 /// 流式分句合成裁剪后保留的自然换气停顿时长（毫秒），避免两句贴死导致抢拍吞字。
 pub const CLAUSE_SILENCE_KEEP_MS: u32 = 140;
+/// 流式分句缓冲对超出 `CLAUSE_SILENCE_KEEP_MS` 的尾部静音最大暂存观察时长（毫秒）：仅在整句结束时裁剪句尾死寂，不误剪流式分块中间的自然停顿。
+pub const MAX_STREAM_SILENCE_HOLD_MS: u32 = 1000;
 const SILENCE_SAMPLE_THRESHOLD: i16 = 24;
+/// 下行软限幅拐点（约 -4.3 dBFS）：低于此幅值的正常语音 1:1 无损直通，不损失中小音量响度。
+const SOFT_LIMIT_KNEE_I16: i32 = 20_000;
+/// 拐点之上的渐近余量（满幅 ±32767 平滑压缩至约 ±24307 ≈ -2.6 dBFS），为有损 Opus 解码超调与设备 100% 音量功放预留余量。
+const SOFT_LIMIT_HEADROOM_I16: i32 = 6_500;
 
 /// 对 PCM 头部 `fade_ms` 毫秒做线性淡入（0 -> 1），消除句首突变爆音。
 pub fn fade_head_i16(samples: &mut [i16], sample_rate: u32, fade_ms: u32) {
@@ -97,6 +105,33 @@ pub fn trim_trailing_silence_i16(
     let keep_samples = ((u64::from(sample_rate) * u64::from(keep_ms)) / 1000) as usize;
     if trailing_silent > trigger_samples && keep_samples < trailing_silent {
         samples.truncate(last_active + 1 + keep_samples);
+    }
+}
+
+/// 统计切片尾部的连续静音样本数（全静音切片返回总长度，尾样本有声返回 0）。
+pub fn trailing_silence_samples(samples: &[i16]) -> usize {
+    match samples
+        .iter()
+        .rposition(|&s| s.saturating_abs() > SILENCE_SAMPLE_THRESHOLD)
+    {
+        Some(last_active) => samples.len() - (last_active + 1),
+        None => samples.len(),
+    }
+}
+
+/// 对下行 PCM 施加平滑拐点软限幅（`<= ±20000` 逐位无损直通，超幅峰值平滑收敛至约 `-2.6 dBFS`），
+/// 消除有损 Opus 重构超调与小智设备 100% 满音量下的削波破音。
+pub fn soft_limit_i16(samples: &mut [i16]) {
+    for sample in samples {
+        let raw = i32::from(*sample);
+        let mag = raw.abs();
+        if mag <= SOFT_LIMIT_KNEE_I16 {
+            continue;
+        }
+        let excess = mag - SOFT_LIMIT_KNEE_I16;
+        let compressed = SOFT_LIMIT_KNEE_I16
+            + (SOFT_LIMIT_HEADROOM_I16 * excess) / (excess + SOFT_LIMIT_HEADROOM_I16);
+        *sample = if raw < 0 { -compressed } else { compressed } as i16;
     }
 }
 /// 测试用的合成信号（音调、静音、确定性的伪随机噪声）。
@@ -185,5 +220,27 @@ mod boundary_tests {
             "裁剪后长度应约为 260ms，实际 {} 样本",
             padded.len()
         );
+    }
+
+    #[test]
+    fn soft_limit_preserves_normal_speech_and_smoothly_caps_full_scale_peaks() {
+        let mut samples = vec![
+            0i16, 8_000, -19_999, 20_000, -20_000, 26_500, 32_767, -32_768,
+        ];
+        soft_limit_i16(&mut samples);
+        assert_eq!(&samples[..5], &[0, 8_000, -19_999, 20_000, -20_000]);
+        assert!(
+            samples[5] > 20_000 && samples[5] < samples[6],
+            "超拐点区间保持严格单调无平顶削波: {:?}",
+            &samples[5..]
+        );
+        assert!(
+            samples[6] <= 24_500 && samples[7] >= -24_500,
+            "满幅峰值收敛至约 -2.6 dBFS 留足 Opus 重构余量: {:?}",
+            &samples[6..]
+        );
+        assert_eq!(trailing_silence_samples(&[100, 0, -12, 24]), 3);
+        assert_eq!(trailing_silence_samples(&[0, -10, 5]), 3);
+        assert_eq!(trailing_silence_samples(&[0, 500]), 0);
     }
 }

@@ -105,7 +105,7 @@ mod imp {
     use super::CmdResult;
 
     const TOKEN_SECRET_NAME: &str = "voice.device_token_secret";
-    /// 流式合成时播放前攒的音频（批量合成沿用默认 600 ms）
+    /// 流式合成与批量合成播放前攒的音频（3 帧预缓冲 + 2 帧服务端余量 = 300 ms，避免首轮连发后立即欠载）
     const STREAMING_PLAYBACK_START_MS: u32 = 300;
 
     fn now() -> f64 {
@@ -1482,6 +1482,13 @@ mod imp {
             })
         }
 
+        fn device_text_font(&self, device: &str) -> Option<moss_voice_server::TextFontCapability> {
+            let db = self.db.lock().ok()?;
+            let row = db.voice_device(device).ok()??;
+            let hello = row.hello_json.as_deref()?;
+            moss_voice_server::glyph_font::text_font_from_hello_snapshot(hello)
+        }
+
         /// 2026-11-09：设备整包下载完资源包，才把“等下载”的全屏画风转为已装（重启重连后按它切画面）。
         fn assets_downloaded(&self, device: &str) {
             let _ = moss_voice::settings::update_voice(&self.settings_file, |s| {
@@ -2086,14 +2093,134 @@ mod imp {
         /// 轻量轮询（`lite = true`）复用的磁盘/网卡环境探测短缓存，避免 2s 轮询反复扫盘与序列化大 GIF
         status_probe_cache: Mutex<Option<StatusProbeCache>>,
         /// 本地合成模型各音色试听语音的后台自动缓存队列（下载完自动预热，独立临时进程合成完毕即退出）
-        tts_preview_warmer: Mutex<TtsPreviewWarmState>,
+        tts_preview_warmer: (Mutex<TtsPreviewWarmState>, std::sync::Condvar),
+        /// n84 `base-assets.bin` 内容指纹缓存（按文件字节数 + 修改时间校验；导入/移除时主动刷新，免去轮询重复读盘哈希）
+        wakeword_base_fp_cache: Mutex<Option<BasePackFpCache>>,
     }
+
+    type BasePackFpCache = (
+        Option<(u64, Option<std::time::SystemTime>)>,
+        moss_voice_server::wake_assets::BasePackFingerprint,
+    );
 
     #[derive(Default)]
     struct TtsPreviewWarmState {
         queue: std::collections::VecDeque<&'static str>,
         active: Option<&'static str>,
+        cancelled: std::collections::BTreeSet<&'static str>,
+        deleting: std::collections::BTreeSet<&'static str>,
+        shutting_down: bool,
+        active_helper: Option<LocalHelper>,
+        in_flight_previews: Vec<(u64, &'static str, Option<LocalHelper>, bool)>,
+        next_preview_seq: u64,
         worker_running: bool,
+    }
+
+    impl TtsPreviewWarmState {
+        fn is_blocked(&self, model_id: &str) -> bool {
+            self.shutting_down
+                || self.cancelled.contains(model_id)
+                || self.deleting.contains(model_id)
+        }
+    }
+
+    struct TtsModelDeleteGuard<'a> {
+        builtin: &'a BuiltinVoice,
+        model_id: Option<&'static str>,
+    }
+
+    impl Drop for TtsModelDeleteGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(id) = self.model_id {
+                let (lock, cv) = &self.builtin.tts_preview_warmer;
+                if let Ok(mut st) = lock.lock() {
+                    st.deleting.remove(id);
+                    if st.active != Some(id) {
+                        st.cancelled.remove(id);
+                    }
+                    cv.notify_all();
+                }
+            }
+        }
+    }
+
+    struct TtsInFlightPreviewGuard<'a> {
+        builtin: &'a BuiltinVoice,
+        seq: u64,
+        model_id: &'static str,
+    }
+
+    impl TtsInFlightPreviewGuard<'_> {
+        fn is_cancelled(&self) -> bool {
+            let Ok(st) = self.builtin.tts_preview_warmer.0.lock() else {
+                return true;
+            };
+            st.is_blocked(self.model_id)
+                || st
+                    .in_flight_previews
+                    .iter()
+                    .find(|(seq, _, _, _)| *seq == self.seq)
+                    .is_none_or(|(_, _, _, cancelled)| *cancelled)
+        }
+
+        fn attach_helper(&self, helper: LocalHelper) -> Result<(), CenterError> {
+            let blocked = {
+                let Ok(mut st) = self.builtin.tts_preview_warmer.0.lock() else {
+                    helper.terminate();
+                    return Err(CenterError::new(
+                        "local_tts_not_installed",
+                        409,
+                        "该语音合成模型正在卸载或宿主正在关闭",
+                    ));
+                };
+                let entry_cancelled = st
+                    .in_flight_previews
+                    .iter()
+                    .find(|(seq, _, _, _)| *seq == self.seq)
+                    .is_none_or(|(_, _, _, cancelled)| *cancelled);
+                if st.is_blocked(self.model_id) || entry_cancelled {
+                    true
+                } else {
+                    if let Some((_, _, slot, _)) = st
+                        .in_flight_previews
+                        .iter_mut()
+                        .find(|(seq, _, _, _)| *seq == self.seq)
+                    {
+                        *slot = Some(helper.clone());
+                    }
+                    false
+                }
+            };
+            if blocked {
+                helper.terminate();
+                return Err(CenterError::new(
+                    "local_tts_not_installed",
+                    409,
+                    "该语音合成模型正在卸载或宿主正在关闭",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for TtsInFlightPreviewGuard<'_> {
+        fn drop(&mut self) {
+            let (lock, cv) = &self.builtin.tts_preview_warmer;
+            let helper = lock.lock().ok().and_then(|mut st| {
+                st.in_flight_previews
+                    .iter_mut()
+                    .find(|(seq, _, _, _)| *seq == self.seq)
+                    .and_then(|(_, _, slot, _)| slot.take())
+            });
+            if let Some(h) = helper {
+                h.terminate();
+            }
+            if let Ok(mut st) = lock.lock() {
+                st.in_flight_previews
+                    .retain(|(seq, _, _, _)| *seq != self.seq);
+                cv.notify_all();
+            }
+        }
     }
 
     #[derive(Clone)]
@@ -2452,18 +2579,22 @@ mod imp {
     static HOST_LOG: std::sync::OnceLock<Arc<moss_voice_server::DiagnosticsLog>> =
         std::sync::OnceLock::new();
 
-    /// 自动保持全屏画风：这台该不该自动推送——没装好（含包版本过旧）、没有在等下载、一天内没自动推过。
-    /// `current` 为按当前画风应装的标记（[`current_screen_pack_marker`]）：画风换了也要重刷，开机待命画面才跟着换。
+    /// 自动保持全屏画风：这台该不该自动推送——没装好（含版本过旧、换画风、底包或字库有更新）、没有在等下载、一天内没自动推过。
+    /// `expected_marker` 为按该设备屏幕规格、字库与当前底包计算的完整指纹标记（`moss-screen-2:<style>:<16hex>`）。
     fn screen_pack_auto_due(
         pref: Option<&moss_voice::settings::DeviceHardwarePrefs>,
-        current: &str,
+        expected_marker: &str,
         now: u64,
     ) -> bool {
         const DAY: u64 = 24 * 60 * 60;
         let Some(pref) = pref else {
             return true;
         };
-        if pref.screen_pack.as_deref() == Some(current) {
+        if moss_voice_server::screen_pack::compare_pack_marker(
+            pref.screen_pack.as_deref(),
+            expected_marker,
+        ) == moss_voice_server::screen_pack::PackMatchState::Installed
+        {
             return false;
         }
         if pref.screen_pack_pending.is_some()
@@ -2476,7 +2607,85 @@ mod imp {
             .is_none_or(|at| now.saturating_sub(at) >= DAY)
     }
 
-    /// 按当前选的画风应装的画风包标记（`moss-screen-1:moss_hud`）。
+    fn snapshot_font_and_screen(
+        dev_row: Option<&laser_runtime::VoiceDeviceRecord>,
+    ) -> (Option<(u32, u8)>, Option<(u32, u32)>, bool) {
+        let Some(dev_row) = dev_row else {
+            return (None, None, false);
+        };
+        let snap_font = dev_row
+            .hello_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| {
+                let size = u32::try_from(v["text_font"]["size"].as_u64()?).ok()?;
+                let bpp = u8::try_from(v["text_font"]["bpp"].as_u64()?).ok()?;
+                Some((size, bpp))
+            });
+        let (snap_screen, snap_mono) = dev_row
+            .info_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .map(|v| {
+                let w = v["display"]["width"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok());
+                let h = v["display"]["height"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok());
+                let mono = v["display"]["monochrome"].as_bool().unwrap_or(false);
+                (w.zip(h), mono)
+            })
+            .unwrap_or((None, false));
+        (snap_font, snap_screen, snap_mono)
+    }
+
+    /// 统一计算某台设备当前期望的画风/字库资源包标记（`wakeword_status` 与 `screen_pack_auto_tick` 共用）。
+    fn expected_device_screen_pack_marker(
+        style: moss_voice_server::ScreenCardStyle,
+        live_font: Option<(u32, u8)>,
+        live_screen: Option<(u32, u32)>,
+        live_mono: bool,
+        dev_row: Option<&laser_runtime::VoiceDeviceRecord>,
+        base_fp: moss_voice_server::wake_assets::BasePackFingerprint,
+        installed_marker: Option<&str>,
+    ) -> String {
+        let (snap_font, snap_screen, snap_mono) = snapshot_font_and_screen(dev_row);
+        let preferred_font = live_font.or(snap_font);
+        let eff_screen = live_screen.or(snap_screen);
+        let eff_mono = live_mono || snap_mono;
+        let pack_screen = eff_screen.unwrap_or((320, 240));
+        let fallback_font =
+            moss_voice_server::glyph_font::select_pack_font(preferred_font, eff_screen, eff_mono);
+        let primary = moss_voice_server::screen_pack::pack_marker_for(
+            style,
+            pack_screen,
+            Some(fallback_font),
+            base_fp,
+        )
+        .unwrap_or_else(|_| moss_voice_server::screen_pack::pack_marker(style));
+        // 兼容超大屏打包因 30_4 超过 8 MB 分区自动回退到 20_4 的情形（含早期固件不报 hello.text_font、
+        // 常连模式重启后尚未唤醒导致 hello_json 快照仍留 30_4、或固件上报非标准字号）：
+        // 若已装标记与当前画风 + 屏幕尺寸 + 底包 + 20_4 指纹精确吻合，则视为最新，避免重启后误判过期循环重刷
+        if fallback_font.size == 30
+            && !base_fp.has_text_font
+            && let Some(inst) = installed_marker
+            && inst != primary
+            && let Ok(fallback_20) = moss_voice_server::screen_pack::pack_marker_for(
+                style,
+                pack_screen,
+                Some(moss_voice_server::glyph_font::PROFILES[2]),
+                base_fp,
+            )
+            && inst == fallback_20
+        {
+            return fallback_20;
+        }
+        primary
+    }
+
+    /// 默认规格（`320×240` + `20_4` + 无底包）下当前画风应装的标记（供单元测试直接断言）。
+    #[cfg(test)]
     fn current_screen_pack_marker(settings: &moss_voice::VoiceSettings) -> String {
         moss_voice_server::screen_pack::pack_marker(
             moss_voice_server::ScreenCardStyle::from_setting(
@@ -2722,12 +2931,25 @@ mod imp {
                 context,
                 persona,
                 status_probe_cache: Mutex::new(None),
-                tts_preview_warmer: Mutex::new(TtsPreviewWarmState::default()),
+                tts_preview_warmer: (
+                    Mutex::new(TtsPreviewWarmState::default()),
+                    std::sync::Condvar::new(),
+                ),
+                wakeword_base_fp_cache: Mutex::new(None),
             });
             let weak_for_tts_cache = Arc::downgrade(&builtin);
             builtin.models.set_on_installed(move |installed_id| {
                 if let Some(target) = weak_for_tts_cache.upgrade() {
-                    target.schedule_tts_preview_warmup(installed_id);
+                    if installed_id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
+                        target.diagnostics.push_from(
+                            moss_voice_server::DiagSource::Moss,
+                            EventRecord::from(
+                                "小智全量补字库（Noto v1 · 48,662 字）已就绪，生僻字与多语种动态补字已热生效",
+                            ),
+                        );
+                    } else {
+                        target.schedule_tts_preview_warmup(installed_id);
+                    }
                 }
             });
             builtin
@@ -2896,6 +3118,54 @@ mod imp {
         }
         fn settings_file(&self) -> std::path::PathBuf {
             self.host.runtime_root.path.join("settings.json")
+        }
+
+        fn full_font_dir(&self) -> std::path::PathBuf {
+            let spec = local_models::spec(local_models::XIAOZHI_NOTO_V1_FULL_ID)
+                .expect("xiaozhi_noto_v1_full spec");
+            local_models::install_path(
+                self.models.root_for(local_models::XIAOZHI_NOTO_V1_FULL_ID),
+                spec,
+            )
+        }
+
+        fn full_font_dismissed_marker(&self) -> std::path::PathBuf {
+            self.models
+                .root_for(local_models::XIAOZHI_NOTO_V1_FULL_ID)
+                .join(".noto_v1_full_dismissed")
+        }
+
+        fn mark_full_font_dismissed(&self) {
+            let marker = self.full_font_dismissed_marker();
+            if let Some(parent) = marker.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(marker, b"1");
+        }
+
+        fn clear_full_font_dismissed(&self) {
+            let _ = std::fs::remove_file(self.full_font_dismissed_marker());
+        }
+
+        /// n83：内置语音服务启动后，若小智官方全量补字库（`noto-v1-full`，16.6 MB）尚未安装且用户未手动取消/删除，
+        /// 自动在后台校验下载并解压；未下完或断网时完全不阻塞服务启动，下载就位后热生效。
+        #[cfg_attr(test, allow(dead_code))]
+        fn ensure_full_font_ready_with_base(&self, base_override: Option<&str>) -> bool {
+            if self
+                .models
+                .path_if_installed(local_models::XIAOZHI_NOTO_V1_FULL_ID)
+                .is_some()
+                || self.full_font_dismissed_marker().exists()
+            {
+                return false;
+            }
+            let mirror = self.settings().builtin_local.mirror;
+            let base = base_override
+                .or(mirror.as_deref())
+                .unwrap_or(local_models::DEFAULT_XIAOZHI_FONTS_BASE);
+            self.models
+                .download(local_models::XIAOZHI_NOTO_V1_FULL_ID, base)
+                .is_ok()
         }
 
         fn settings(&self) -> moss_voice::VoiceSettings {
@@ -5168,7 +5438,10 @@ mod imp {
                 .server
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let view = guard.as_ref().map(VoiceServer::status);
+            let (view, active_sessions) = match guard.as_ref() {
+                Some(server) => (Some(server.status()), server.active_device_sessions()),
+                None => (None, Vec::new()),
+            };
             drop(guard);
             let db = self.host.db.lock().ok();
             let settings = self.settings();
@@ -5328,7 +5601,11 @@ mod imp {
                         "tts": settings.builtin_section_ready_with_colab(Section::Tts, self.models.root(), colab_key_configured),
                     },
                 },
-                "sessions": view.as_ref().map(|view| serde_json::to_value(&view.sessions).unwrap_or_default()).unwrap_or_else(|| Value::Array(Vec::new())),
+                "sessions": if view.is_some() {
+                    serde_json::to_value(&active_sessions).unwrap_or_else(|_| Value::Array(Vec::new()))
+                } else {
+                    Value::Array(Vec::new())
+                },
                 // n68：事件与耗时来自桌面端持有的诊断记录本，服务停止后仍可查看
                 "events": self.diagnostics.events(),
                 "events_dropped": self.diagnostics.drops(),
@@ -5502,6 +5779,11 @@ mod imp {
             } else {
                 // n74：选了本地视觉模型时在后台预加载，设备第一次看图不用等
                 self.sync_local_vision(true);
+                // n83：自动在后台补齐小智服务端全量字库包（单测环境不发起真实外网请求）
+                #[cfg(not(test))]
+                {
+                    let _ = self.ensure_full_font_ready_with_base(None);
+                }
             }
             result
         }
@@ -5565,6 +5847,7 @@ mod imp {
                             port: settings.builtin_mqtt_port,
                             udp_port: settings.builtin_udp_port,
                         }),
+                    full_font_dir: Some(self.full_font_dir()),
                     ..defaults
                 };
                 let registry = Arc::new(DbRegistry {
@@ -6256,12 +6539,7 @@ mod imp {
             if let Some(card_style) = &screen_card_style_patch
                 && *card_style != old_card_style
             {
-                let _ = moss_voice::settings::update_voice(&self.settings_file(), |s| {
-                    for entry in s.builtin_device_prefs.values_mut() {
-                        entry.screen_pack_auto_at = None;
-                    }
-                    Ok(())
-                });
+                self.reset_screen_pack_auto_throttle();
             }
             if let Some(card_style) = &screen_card_style_patch
                 && let Ok(guard) = self.server.lock()
@@ -6314,9 +6592,17 @@ mod imp {
                 }
                 checked_env = Some(env_info);
             }
+            if id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
+                self.clear_full_font_dismissed();
+            }
             let mirror = self.settings().builtin_local.mirror;
+            let default_base = if id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
+                local_models::DEFAULT_XIAOZHI_FONTS_BASE
+            } else {
+                local_models::DEFAULT_BASE
+            };
             self.models
-                .download(id, mirror.as_deref().unwrap_or(local_models::DEFAULT_BASE))
+                .download(id, mirror.as_deref().unwrap_or(default_base))
                 .map_err(|message| CenterError::new("local_model_download_failed", 409, message))?;
             let mut status = self.status();
             if let Some(env_info) = checked_env {
@@ -6326,6 +6612,9 @@ mod imp {
         }
 
         pub fn model_cancel(&self, id: &str) -> Value {
+            if id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
+                self.mark_full_font_dismissed();
+            }
             self.models.cancel(id);
             self.status()
         }
@@ -6353,6 +6642,8 @@ mod imp {
                     "声纹模型已加载，请先停止内置服务",
                 ));
             }
+            let used_by_helper = id != local_models::XIAOZHI_NOTO_V1_FULL_ID
+                && local_models::spec_of(id, ModelKind::Vision).is_none();
             if moss_voice::settings::is_local_jev_model(id) {
                 let configured_id = moss_voice::settings::canonical_local_jev_model(
                     &self.settings().builtin_local.jev_model,
@@ -6375,7 +6666,8 @@ mod imp {
                 {
                     r.cancelling_model = None;
                 }
-            } else if self.running()
+            } else if used_by_helper
+                && self.running()
                 && self
                     .helper
                     .lock()
@@ -6388,9 +6680,14 @@ mod imp {
                     "内置服务正在使用本地模型，请先停止内置服务再删除",
                 ));
             }
+            // n82：删本地合成模型期间由 RAII 守卫全程置 deleting 抑制并发轮询复入队，并主动结束预热/试听子进程等文件锁释放后再删目录
+            let _tts_delete_guard = self.begin_tts_model_delete(id);
             self.models
                 .delete(id)
                 .map_err(|message| CenterError::new("local_model_delete_failed", 500, message))?;
+            if id == local_models::XIAOZHI_NOTO_V1_FULL_ID {
+                self.mark_full_font_dismissed();
+            }
             if id == moss_voice::settings::LOCAL_LAYA_JEV_MODEL {
                 // 2026-11-07：连同 MOSS 自动创建的 Python 虚拟环境一起删（用户自建、未带标记的环境不动）
                 self.laya_setup.cancel_and_wait();
@@ -7779,9 +8076,155 @@ mod imp {
 
         fn is_tts_preview_warming(&self, model_id: &str) -> bool {
             self.tts_preview_warmer
+                .0
                 .lock()
-                .map(|st| st.active == Some(model_id) || st.queue.iter().any(|id| *id == model_id))
+                .map(|st| {
+                    !st.is_blocked(model_id)
+                        && (st.active == Some(model_id)
+                            || st.queue.iter().any(|id| *id == model_id))
+                })
                 .unwrap_or(false)
+        }
+
+        fn is_tts_warmup_blocked(&self, model_id: &str) -> bool {
+            self.tts_preview_warmer
+                .0
+                .lock()
+                .map(|st| st.is_blocked(model_id))
+                .unwrap_or(true)
+        }
+
+        fn is_tts_warmup_cancelled(weak: &std::sync::Weak<Self>, model_id: &str) -> bool {
+            let Some(builtin) = weak.upgrade() else {
+                return true;
+            };
+            builtin.is_tts_warmup_blocked(model_id)
+        }
+
+        /// 卸载本地合成模型期间持有的门禁守卫：构造时置 `deleting`、终止活跃预热与单条试听 `LocalHelper` 并等待全部句柄释放，析构时恢复。
+        fn begin_tts_model_delete(&self, model_id: &str) -> TtsModelDeleteGuard<'_> {
+            let Some(spec) = local_models::spec_of(model_id, ModelKind::Tts) else {
+                return TtsModelDeleteGuard {
+                    builtin: self,
+                    model_id: None,
+                };
+            };
+            let (lock, cv) = &self.tts_preview_warmer;
+            let helpers = {
+                let Ok(mut st) = lock.lock() else {
+                    return TtsModelDeleteGuard {
+                        builtin: self,
+                        model_id: None,
+                    };
+                };
+                st.deleting.insert(spec.id);
+                st.queue.retain(|&queued| queued != spec.id);
+                let mut to_terminate = Vec::new();
+                if st.active == Some(spec.id) {
+                    st.cancelled.insert(spec.id);
+                    if let Some(helper) = st.active_helper.take() {
+                        to_terminate.push(helper);
+                    }
+                }
+                for (_, in_flight_id, helper_slot, entry_cancelled) in &mut st.in_flight_previews {
+                    if *in_flight_id == spec.id {
+                        *entry_cancelled = true;
+                        if let Some(helper) = helper_slot.take() {
+                            to_terminate.push(helper);
+                        }
+                    }
+                }
+                cv.notify_all();
+                to_terminate
+            };
+            for helper in helpers {
+                helper.terminate();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(11);
+            if let Ok(mut st) = lock.lock() {
+                while st.active == Some(spec.id)
+                    || st
+                        .in_flight_previews
+                        .iter()
+                        .any(|(_, id, _, _)| *id == spec.id)
+                {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let Ok((next, _)) = cv.wait_timeout(st, deadline - now) else {
+                        break;
+                    };
+                    st = next;
+                }
+            }
+            TtsModelDeleteGuard {
+                builtin: self,
+                model_id: Some(spec.id),
+            }
+        }
+
+        fn stop_all_tts_preview_warmups(&self) {
+            let (lock, cv) = &self.tts_preview_warmer;
+            let helpers = {
+                let Ok(mut st) = lock.lock() else {
+                    return;
+                };
+                st.shutting_down = true;
+                st.queue.clear();
+                let mut to_terminate = Vec::new();
+                if let Some(active) = st.active {
+                    st.cancelled.insert(active);
+                }
+                if let Some(helper) = st.active_helper.take() {
+                    to_terminate.push(helper);
+                }
+                for (_, _, helper_slot, entry_cancelled) in &mut st.in_flight_previews {
+                    *entry_cancelled = true;
+                    if let Some(helper) = helper_slot.take() {
+                        to_terminate.push(helper);
+                    }
+                }
+                cv.notify_all();
+                to_terminate
+            };
+            for helper in helpers {
+                helper.terminate();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(11);
+            if let Ok(mut st) = lock.lock() {
+                while st.active.is_some() || !st.in_flight_previews.is_empty() || st.worker_running
+                {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let Ok((next, _)) = cv.wait_timeout(st, deadline - now) else {
+                        break;
+                    };
+                    st = next;
+                }
+            }
+        }
+
+        /// 返回 `(是否入队, 是否需新拉起后台预热线程)`；正在卸载、取消收尾或宿主关闭期间一律拒绝重入队且绝不清除 `cancelled`。
+        fn enqueue_tts_preview_warmup_state(&self, model_id: &'static str) -> (bool, bool) {
+            let Ok(mut st) = self.tts_preview_warmer.0.lock() else {
+                return (false, false);
+            };
+            if st.is_blocked(model_id) {
+                return (false, false);
+            }
+            if st.active != Some(model_id) && !st.queue.contains(&model_id) {
+                st.queue.push_back(model_id);
+            }
+            let spawn_worker = if st.worker_running {
+                false
+            } else {
+                st.worker_running = true;
+                true
+            };
+            (true, spawn_worker)
         }
 
         /// 将已安装且仍有未缓存音色的本地 TTS 模型加入后台试听缓存预热队列。
@@ -7792,6 +8235,9 @@ mod imp {
             let Some(spec) = local_models::spec_of(model_id, ModelKind::Tts) else {
                 return;
             };
+            if self.is_tts_warmup_blocked(spec.id) {
+                return;
+            }
             if self.models.path_if_installed(spec.id).is_none() {
                 return;
             }
@@ -7805,20 +8251,7 @@ mod imp {
             if !missing_any {
                 return;
             }
-            let spawn_worker = {
-                let Ok(mut st) = self.tts_preview_warmer.lock() else {
-                    return;
-                };
-                if st.active != Some(spec.id) && !st.queue.contains(&spec.id) {
-                    st.queue.push_back(spec.id);
-                }
-                if st.worker_running {
-                    false
-                } else {
-                    st.worker_running = true;
-                    true
-                }
-            };
+            let (_, spawn_worker) = self.enqueue_tts_preview_warmup_state(spec.id);
             if spawn_worker {
                 let weak = self.self_weak.clone();
                 let _ = std::thread::Builder::new()
@@ -7833,33 +8266,104 @@ mod imp {
                     return;
                 };
                 let next_id = {
-                    let Ok(mut st) = builtin.tts_preview_warmer.lock() else {
+                    let (lock, cv) = &builtin.tts_preview_warmer;
+                    let Ok(mut st) = lock.lock() else {
                         return;
                     };
-                    match st.queue.pop_front() {
-                        Some(id) => {
-                            st.active = Some(id);
-                            id
+                    if st.shutting_down {
+                        st.queue.clear();
+                        st.active = None;
+                        st.active_helper = None;
+                        st.worker_running = false;
+                        cv.notify_all();
+                        return;
+                    }
+                    let mut chosen = None;
+                    while let Some(id) = st.queue.pop_front() {
+                        if st.deleting.contains(id) {
+                            continue;
                         }
+                        st.cancelled.remove(id);
+                        st.active = Some(id);
+                        st.active_helper = None;
+                        chosen = Some(id);
+                        break;
+                    }
+                    match chosen {
+                        Some(id) => id,
                         None => {
                             st.active = None;
+                            st.active_helper = None;
                             st.worker_running = false;
+                            cv.notify_all();
                             return;
                         }
                     }
                 };
                 drop(builtin);
                 Self::warm_single_tts_model(&weak, next_id);
-                if let Some(builtin) = weak.upgrade()
-                    && let Ok(mut st) = builtin.tts_preview_warmer.lock()
-                    && st.active == Some(next_id)
-                {
-                    st.active = None;
+                if let Some(builtin) = weak.upgrade() {
+                    let (lock, cv) = &builtin.tts_preview_warmer;
+                    let leftover = lock.lock().ok().and_then(|mut st| st.active_helper.take());
+                    if let Some(helper) = leftover {
+                        helper.terminate();
+                    }
+                    if let Ok(mut st) = lock.lock() {
+                        if st.active == Some(next_id) {
+                            st.active = None;
+                        }
+                        st.cancelled.remove(next_id);
+                        cv.notify_all();
+                    }
+                }
+            }
+        }
+
+        /// 等待当前活跃语音对话（说话拾音 `level > 0`、思考推理或播报）空闲后再占用后台 CPU；
+        /// 若宿主退出、收到卸载取消通知或目标模型被卸载则立即返回 `false` 以便释放 `LocalHelper` 文件句柄。
+        fn wait_until_voice_idle_or_uninstalled(
+            weak: &std::sync::Weak<Self>,
+            model_id: &str,
+        ) -> bool {
+            loop {
+                let Some(builtin) = weak.upgrade() else {
+                    return false;
+                };
+                if builtin.models.path_if_installed(model_id).is_none() {
+                    return false;
+                }
+                if builtin.is_tts_warmup_blocked(model_id) {
+                    return false;
+                }
+                let busy = builtin
+                    .server
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|s| s.has_busy_voice_session()))
+                    .unwrap_or(false);
+                if !busy {
+                    return true;
+                }
+                let (lock, cv) = &builtin.tts_preview_warmer;
+                if let Ok(st) = lock.lock() {
+                    if st.is_blocked(model_id) {
+                        return false;
+                    }
+                    let _ = cv.wait_timeout(st, std::time::Duration::from_millis(250));
+                } else {
+                    return false;
                 }
             }
         }
 
         fn warm_single_tts_model(weak: &std::sync::Weak<Self>, model_id: &'static str) {
+            struct TerminateOnDrop(LocalHelper);
+            impl Drop for TerminateOnDrop {
+                fn drop(&mut self) {
+                    self.0.terminate();
+                }
+            }
+
             let Some(spec) = local_models::spec_of(model_id, ModelKind::Tts) else {
                 return;
             };
@@ -7883,6 +8387,16 @@ mod imp {
             if plan.is_empty() {
                 return;
             }
+            // 拉起子进程并加载数百 MB ONNX 权重前同样避开活跃对话，模型若被卸载立即清理退出
+            if !Self::wait_until_voice_idle_or_uninstalled(weak, spec.id) {
+                if weak
+                    .upgrade()
+                    .is_some_and(|b| b.models.path_if_installed(spec.id).is_none())
+                {
+                    moss_voice::tts_voices::remove_model_previews(&root, spec.id);
+                }
+                return;
+            }
             let engine = if spec.engine == Engine::Matcha {
                 TtsEngine::Matcha
             } else {
@@ -7891,32 +8405,61 @@ mod imp {
             let Ok(helper) = LocalHelper::spawn(&exe) else {
                 return;
             };
+            let helper_guard = TerminateOnDrop(helper.clone());
+            let cancelled_on_spawn = if let Some(builtin) = weak.upgrade() {
+                if let Ok(mut st) = builtin.tts_preview_warmer.0.lock() {
+                    if st.is_blocked(spec.id) {
+                        true
+                    } else {
+                        st.active_helper = Some(helper.clone());
+                        false
+                    }
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
+            if cancelled_on_spawn {
+                drop(helper_guard);
+                return;
+            }
             if helper.load_tts(&dir, engine).is_err() {
                 return;
             }
             for item in plan {
-                let still_installed = weak
-                    .upgrade()
-                    .is_some_and(|b| b.models.path_if_installed(spec.id).is_some());
-                if !still_installed {
-                    moss_voice::tts_voices::remove_model_previews(&root, spec.id);
+                if !Self::wait_until_voice_idle_or_uninstalled(weak, spec.id) {
+                    if weak
+                        .upgrade()
+                        .is_some_and(|b| b.models.path_if_installed(spec.id).is_none())
+                    {
+                        moss_voice::tts_voices::remove_model_previews(&root, spec.id);
+                    }
                     return;
                 }
                 if moss_voice::tts_voices::has_cached_preview(&root, spec.id, item.id) {
                     continue;
                 }
                 let Ok(pcm) = helper.synthesize_blocking(item.sample_text, item.id, 1.0) else {
+                    if Self::is_tts_warmup_cancelled(weak, spec.id) {
+                        return;
+                    }
                     continue;
                 };
                 if pcm.samples.is_empty() || pcm.sample_rate == 0 {
                     continue;
                 }
+                if Self::is_tts_warmup_cancelled(weak, spec.id) {
+                    return;
+                }
                 let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
                 let still_installed_after = weak
                     .upgrade()
                     .is_some_and(|b| b.models.path_if_installed(spec.id).is_some());
-                if !still_installed_after {
-                    moss_voice::tts_voices::remove_model_previews(&root, spec.id);
+                if !still_installed_after || Self::is_tts_warmup_cancelled(weak, spec.id) {
+                    if !still_installed_after {
+                        moss_voice::tts_voices::remove_model_previews(&root, spec.id);
+                    }
                     return;
                 }
                 let _ = moss_voice::tts_voices::write_cached_preview_atomic(
@@ -7986,6 +8529,32 @@ mod imp {
             }))
         }
 
+        fn enter_in_flight_tts_preview(
+            &self,
+            model_id: &'static str,
+        ) -> Result<TtsInFlightPreviewGuard<'_>, CenterError> {
+            let mut st = self
+                .tts_preview_warmer
+                .0
+                .lock()
+                .map_err(|_| internal("试听门禁锁异常"))?;
+            if st.is_blocked(model_id) {
+                return Err(CenterError::new(
+                    "local_tts_not_installed",
+                    409,
+                    "该语音合成模型正在卸载或宿主正在关闭",
+                ));
+            }
+            let seq = st.next_preview_seq;
+            st.next_preview_seq = st.next_preview_seq.wrapping_add(1);
+            st.in_flight_previews.push((seq, model_id, None, false));
+            Ok(TtsInFlightPreviewGuard {
+                builtin: self,
+                seq,
+                model_id,
+            })
+        }
+
         /// 试听指定本地合成模型的单个音色：优先直接秒读本机 WAV 缓存；尚未缓存时当场合成并落盘缓存。
         pub fn local_tts_preview(&self, input: &Value) -> Result<Value, CenterError> {
             let started = std::time::Instant::now();
@@ -8011,6 +8580,13 @@ mod imp {
                 moss_voice::tts_voices::tts_speaker_meta(spec.id, speaker).ok_or_else(|| {
                     CenterError::new("model_input_invalid", 400, "音色编号超出该模型支持范围")
                 })?;
+            if self.is_tts_warmup_blocked(spec.id) {
+                return Err(CenterError::new(
+                    "local_tts_not_installed",
+                    409,
+                    "该语音合成模型正在卸载或宿主正在关闭",
+                ));
+            }
             let root = self.models.root_for(spec.id);
             if let Some(wav) = moss_voice::tts_voices::read_cached_preview(root, spec.id, speaker) {
                 let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
@@ -8025,6 +8601,7 @@ mod imp {
                     "audio_data_url": data_url,
                 }));
             }
+            let preview_guard = self.enter_in_flight_tts_preview(spec.id)?;
             let Some(dir) = self.models.path_if_installed(spec.id) else {
                 return Err(CenterError::new(
                     "local_tts_not_installed",
@@ -8067,6 +8644,7 @@ mod imp {
                 let helper = LocalHelper::spawn(&exe).map_err(|e| {
                     CenterError::new("local_helper_failed", 500, format!("启动辅助程序失败：{e}"))
                 })?;
+                preview_guard.attach_helper(helper.clone())?;
                 helper.load_tts(&dir, engine).map_err(|e| {
                     CenterError::new(
                         "local_tts_load_failed",
@@ -8079,8 +8657,12 @@ mod imp {
                     .map_err(|e| CenterError::new("local_tts_synth_failed", 500, e.to_string()))?
             };
             let wav = moss_voice_providers::wav::encode_wav(&pcm.samples, pcm.sample_rate);
-            let _ =
-                moss_voice::tts_voices::write_cached_preview_atomic(root, spec.id, speaker, &wav);
+            if !preview_guard.is_cancelled() && self.models.path_if_installed(spec.id).is_some() {
+                let _ = moss_voice::tts_voices::write_cached_preview_atomic(
+                    root, spec.id, speaker, &wav,
+                );
+            }
+            drop(preview_guard);
             self.schedule_tts_preview_warmup(spec.id);
             let data_url = moss_voice::models::audio_data_url(&wav, "audio/wav");
             Ok(serde_json::json!({
@@ -10843,6 +11425,40 @@ mod imp {
             std::fs::read(self.wakeword_dir().join("base-assets.bin")).ok()
         }
 
+        fn base_pack_fingerprint(&self) -> moss_voice_server::wake_assets::BasePackFingerprint {
+            let path = self.wakeword_dir().join("base-assets.bin");
+            let stamp = std::fs::metadata(&path)
+                .ok()
+                .map(|m| (m.len(), m.modified().ok()));
+            if let Ok(guard) = self.wakeword_base_fp_cache.lock()
+                && let Some((cached_stamp, fp)) = *guard
+                && cached_stamp == stamp
+            {
+                return fp;
+            }
+            let (bytes, cacheable) = match stamp {
+                Some(_) => match std::fs::read(&path) {
+                    Ok(raw) => (Some(raw), true),
+                    Err(_) => (None, false),
+                },
+                None => (None, true),
+            };
+            let fp = moss_voice_server::wake_assets::fingerprint_base_pack(bytes.as_deref());
+            if let Ok(mut guard) = self.wakeword_base_fp_cache.lock() {
+                *guard = cacheable.then_some((stamp, fp));
+            }
+            fp
+        }
+
+        fn reset_screen_pack_auto_throttle(&self) {
+            let _ = moss_voice::settings::update_voice(&self.settings_file(), |s| {
+                for entry in s.builtin_device_prefs.values_mut() {
+                    entry.screen_pack_auto_at = None;
+                }
+                Ok(())
+            });
+        }
+
         fn wakeword_write(&self, name: &str, bytes: &[u8]) -> Result<(), CenterError> {
             let dir = self.wakeword_dir();
             std::fs::create_dir_all(&dir)
@@ -10862,7 +11478,8 @@ mod imp {
             let base = self
                 .wakeword_base()
                 .and_then(|b| moss_voice_server::wake_assets::describe_base(&b).ok());
-            let allowed: std::collections::HashMap<String, String> = self
+            let base_fp = self.base_pack_fingerprint();
+            let allowed: std::collections::HashMap<String, laser_runtime::VoiceDeviceRecord> = self
                 .host
                 .db
                 .lock()
@@ -10871,18 +11488,19 @@ mod imp {
                 .map_err(|_| internal("读取设备失败"))?
                 .into_iter()
                 .filter(|d| d.is_allowed())
-                .map(|d| (d.device_id, d.name))
+                .map(|d| (d.device_id.clone(), d))
                 .collect();
             let sessions = self
                 .server
                 .lock()
                 .map_err(|_| internal("语音服务锁失败"))?
                 .as_ref()
-                .map(|s| s.status().sessions)
+                .map(|s| s.active_device_sessions())
                 .unwrap_or_default();
-            let mut seen = std::collections::BTreeSet::new();
             let settings = moss_voice::settings::load(&self.settings_file());
-            let current_marker = current_screen_pack_marker(&settings);
+            let style = moss_voice_server::ScreenCardStyle::from_setting(
+                &settings.builtin_local.screen_card_style,
+            );
             let prefs = settings.builtin_device_prefs;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -10890,41 +11508,65 @@ mod imp {
                 .unwrap_or(0);
             let devices = sessions
                 .iter()
-                .filter(|r| allowed.contains_key(&r.device_id) && seen.insert(r.device_id.clone()))
+                .filter(|r| allowed.contains_key(&r.device_id))
                 .map(|r| {
+                    let dev_row = allowed.get(&r.device_id);
                     let screen = (r.screen_monochrome != Some(true))
                         .then_some(r.screen_width.zip(r.screen_height))
                         .flatten();
                     let pref = prefs.get(&r.device_id);
-                    let installed = pref
-                        .and_then(|p| p.screen_pack.as_deref())
+                    let installed_marker = pref.and_then(|p| p.screen_pack.as_deref());
+                    let expected_marker = expected_device_screen_pack_marker(
+                        style,
+                        r.text_font_size.zip(r.text_font_bpp),
+                        r.screen_width.zip(r.screen_height),
+                        r.screen_monochrome == Some(true),
+                        dev_row,
+                        base_fp,
+                        installed_marker,
+                    );
+                    let match_state = moss_voice_server::screen_pack::compare_pack_marker(
+                        installed_marker,
+                        &expected_marker,
+                    );
+                    let installed = installed_marker
                         .is_some_and(moss_voice_server::screen_pack::marker_installed);
                     let pending = pref.and_then(|p| p.screen_pack_pending.as_deref());
                     let pending_at = pref.and_then(|p| p.screen_pack_pending_at).unwrap_or(0);
                     let expired = pending.is_some()
                         && now.saturating_sub(pending_at)
                             > moss_voice_server::wake_assets::STAGED_TTL.as_secs();
-                    // 2026-11-09：画风包状态以“设备整包下载完”为准，推送了没下载不算已刷；
-                    // 装的是别的画风时为 style_outdated（开机待命画面还是旧画风，要重刷）
-                    let installed_marker = pref.and_then(|p| p.screen_pack.as_deref());
-                    let legacy_pack = installed_marker
-                        .is_some_and(moss_voice_server::screen_pack::marker_supports_scenes)
-                        && !installed;
+                    // 2026-11-09 / n84：画风包状态以“设备整包下载完”为准，按版本前缀 + 内容指纹细分为
+                    // installed / style_outdated / assets_outdated / font_outdated / none
                     let screen_pack_state = match (pending, expired) {
                         (Some(_), true) => "download_expired",
                         (Some(_), false) => "pending_download",
-                        (None, _) if installed_marker == Some(current_marker.as_str()) => "installed",
-                        (None, _) if installed => "style_outdated",
-                        (None, _) if legacy_pack => "font_outdated",
-                        (None, _) => "none",
+                        (None, _) => match match_state {
+                            moss_voice_server::screen_pack::PackMatchState::Installed => {
+                                "installed"
+                            }
+                            moss_voice_server::screen_pack::PackMatchState::StyleOutdated => {
+                                "style_outdated"
+                            }
+                            moss_voice_server::screen_pack::PackMatchState::AssetsOutdated => {
+                                "assets_outdated"
+                            }
+                            moss_voice_server::screen_pack::PackMatchState::FontOutdated => {
+                                "font_outdated"
+                            }
+                            moss_voice_server::screen_pack::PackMatchState::None => "none",
+                        },
                     };
                     serde_json::json!({
-                        "device_id":r.device_id,"name":allowed.get(&r.device_id),
+                        "device_id":r.device_id,"name":dev_row.map(|d| &d.name),
                         "supported":r.device_tools.iter().any(|t|t=="self.assets.set_download_url"),
                         "screen_pack_size":screen.map(|(w,h)|[w,h]),
                         "screen_pack":installed,
                         "screen_pack_state":screen_pack_state,
-                        "screen_pack_style":installed_marker.filter(|_| installed).and_then(|m| m.split(':').nth(1)),
+                        "screen_pack_style":installed_marker
+                            .filter(|_| installed)
+                            .and_then(moss_voice_server::screen_pack::parse_pack_marker)
+                            .map(|p| p.style),
                         "screen_pack_pending_with_pack":pending.map(|p| p != moss_voice::settings::SCREEN_PACK_NONE),
                         "wake_target":pref.and_then(|p| p.wake_target.clone()),
                     })
@@ -10939,7 +11581,9 @@ mod imp {
 
         /// 导入基础资源包（官方网页生成器导出的 assets.bin）：推送时保留它的字体、表情和背景，只换唤醒词。
         pub fn wakeword_import_base(&self, path: &std::path::Path) -> Result<Value, CenterError> {
-            use moss_voice_server::wake_assets::{ASSETS_MAX_BYTES, describe_base};
+            use moss_voice_server::wake_assets::{
+                ASSETS_MAX_BYTES, describe_base, fingerprint_base_pack,
+            };
             let invalid = |message: &str| CenterError::new("wakeword_invalid", 400, message);
             let meta = std::fs::metadata(path).map_err(|_| invalid("无法读取所选文件"))?;
             if !meta.is_file() || meta.len() as usize > ASSETS_MAX_BYTES {
@@ -10947,13 +11591,24 @@ mod imp {
             }
             let bytes = std::fs::read(path).map_err(|_| invalid("无法读取所选文件"))?;
             let summary = describe_base(&bytes).map_err(|e| invalid(&e))?;
+            let old_fp = self.base_pack_fingerprint();
+            let new_fp = fingerprint_base_pack(Some(&bytes));
             self.wakeword_write("base-assets.bin", &bytes)?;
+            let stamp = std::fs::metadata(self.wakeword_dir().join("base-assets.bin"))
+                .ok()
+                .map(|m| (m.len(), m.modified().ok()));
+            if let Ok(mut guard) = self.wakeword_base_fp_cache.lock() {
+                *guard = Some((stamp, new_fp));
+            }
+            if new_fp != old_fp {
+                self.reset_screen_pack_auto_throttle();
+            }
             Ok(summary)
         }
 
         /// 保存唤醒词 / 移除基础资源包 / 逐台确认推送（自定义唤醒词或恢复“你好小智”）。
         /// 自动保持全屏画风（2026-11-09 用户决定，开关默认关）：开着时，挑一台空闲、彩屏、支持在线更新资源包、
-        /// 还没装好画风包（或包版本过旧）的在线小智自动推送，沿用它上次的唤醒词。加工中、有待批准请求时不推；
+        /// 还没装好画风包（或版本/画风/底包/字库与期望不一致）的在线小智自动推送，沿用它上次的唤醒词。加工中、有待批准请求时不推；
         /// 每台一天最多自动推一次（失败也不反复重试），结果写进“记录与诊断”（来源 MOSS 软件）。返回推送了哪台。
         fn screen_pack_auto_tick(&self, now: u64) -> Option<String> {
             let settings = self.settings();
@@ -10974,8 +11629,8 @@ mod imp {
                 .lock()
                 .ok()?
                 .as_ref()
-                .map(|server| server.status().sessions)?;
-            let allowed: std::collections::HashMap<String, String> = self
+                .map(VoiceServer::active_device_sessions)?;
+            let allowed: std::collections::HashMap<String, laser_runtime::VoiceDeviceRecord> = self
                 .host
                 .db
                 .lock()
@@ -10984,28 +11639,44 @@ mod imp {
                 .ok()?
                 .into_iter()
                 .filter(|d| d.is_allowed())
-                .map(|d| (d.device_id, d.name))
+                .map(|d| (d.device_id.clone(), d))
                 .collect();
-            let current_marker = current_screen_pack_marker(&settings);
+            let style = moss_voice_server::ScreenCardStyle::from_setting(
+                &settings.builtin_local.screen_card_style,
+            );
+            let base_fp = self.base_pack_fingerprint();
             let candidate = sessions.into_iter().find(|r| {
-                allowed.contains_key(&r.device_id)
-                    && r.state == "idle"
-                    && r.device_tools
+                let Some(dev_row) = allowed.get(&r.device_id) else {
+                    return false;
+                };
+                if r.state != "idle"
+                    || !r
+                        .device_tools
                         .iter()
                         .any(|t| t == "self.assets.set_download_url")
-                    && r.screen_monochrome != Some(true)
-                    && r.screen_width.is_some()
-                    && screen_pack_auto_due(
-                        settings.builtin_device_prefs.get(&r.device_id),
-                        &current_marker,
-                        now,
-                    )
+                    || r.screen_monochrome == Some(true)
+                    || r.screen_width.zip(r.screen_height).is_none()
+                {
+                    return false;
+                }
+                let pref = settings.builtin_device_prefs.get(&r.device_id);
+                let expected_marker = expected_device_screen_pack_marker(
+                    style,
+                    r.text_font_size.zip(r.text_font_bpp),
+                    r.screen_width.zip(r.screen_height),
+                    false,
+                    Some(dev_row),
+                    base_fp,
+                    pref.and_then(|p| p.screen_pack.as_deref()),
+                );
+                screen_pack_auto_due(pref, &expected_marker, now)
             })?;
             let device_id = candidate.device_id;
             let name = allowed
                 .get(&device_id)
+                .map(|d| d.name.as_str())
                 .filter(|name| !name.trim().is_empty())
-                .cloned()
+                .map(str::to_owned)
                 .unwrap_or_else(|| device_id.clone());
             let target = match settings
                 .builtin_device_prefs
@@ -11071,30 +11742,7 @@ mod imp {
                     "只能推送给已允许的设备",
                 ));
             };
-            let snap_font = dev_row
-                .hello_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .and_then(|v| {
-                    let size = u32::try_from(v["text_font"]["size"].as_u64()?).ok()?;
-                    let bpp = u8::try_from(v["text_font"]["bpp"].as_u64()?).ok()?;
-                    Some((size, bpp))
-                });
-            let (snap_screen, snap_mono) = dev_row
-                .info_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .map(|v| {
-                    let w = v["display"]["width"]
-                        .as_u64()
-                        .and_then(|n| u32::try_from(n).ok());
-                    let h = v["display"]["height"]
-                        .as_u64()
-                        .and_then(|n| u32::try_from(n).ok());
-                    let mono = v["display"]["monochrome"].as_bool().unwrap_or(false);
-                    (w.zip(h), mono)
-                })
-                .unwrap_or((None, false));
+            let (snap_font, snap_screen, snap_mono) = snapshot_font_and_screen(Some(&dev_row));
             let (live_font, live_screen, live_mono, pack_size, style) = {
                 let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
                 let server = server.as_ref().ok_or_else(|| {
@@ -11117,25 +11765,42 @@ mod imp {
             // n70 全屏画风：按这台设备的屏幕分辨率和当前画风生成，随唤醒词一起写进资源分区
             let screen = if with_screen {
                 let size = pack_size.ok_or_else(|| {
-                            CenterError::new(
-                                "screen_pack_unsupported",
-                                409,
-                                "这台设备没有上报彩屏分辨率（或是单色屏），不能刷全屏画风；可以取消勾选只推唤醒词",
-                            )
-                        })?;
+                    CenterError::new(
+                        "screen_pack_unsupported",
+                        409,
+                        "这台设备没有上报彩屏分辨率（或是单色屏），不能刷全屏画风；可以取消勾选只推唤醒词",
+                    )
+                })?;
                 let extras = moss_voice_server::screen_pack::build_screen_extras(style, size)
                     .map_err(internal)?;
-                Some((extras, style))
+                Some((extras, style, size))
             } else {
                 None
             };
-            let package = moss_voice_server::wake_assets::build_package_with_screen_and_font(
-                self.wakeword_base().as_deref(),
-                &target,
-                screen.as_ref().map(|(extras, _)| extras),
-                Some(fallback_font),
-            )
-            .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
+            let base_bytes = self.wakeword_base();
+            let (package, used_fallback_font) =
+                moss_voice_server::wake_assets::build_package_with_screen_and_font_info(
+                    base_bytes.as_deref(),
+                    &target,
+                    screen.as_ref().map(|(extras, _, _)| extras),
+                    Some(fallback_font),
+                )
+                .map_err(|e| CenterError::new("wakeword_invalid", 400, e))?;
+            // 2026-11-09 / n84：先记为“已推送、等下载”，标记附带实际打包字库与底包内容指纹；
+            // 设备整包下载完（`assets_downloaded`）才算已装，不带画风的包下载完清掉已装标记。
+            let marker = if let Some((_, style, screen_size)) = &screen {
+                let base_fp =
+                    moss_voice_server::wake_assets::fingerprint_base_pack(base_bytes.as_deref());
+                moss_voice_server::screen_pack::pack_marker_for(
+                    *style,
+                    *screen_size,
+                    used_fallback_font,
+                    base_fp,
+                )
+                .map_err(internal)?
+            } else {
+                moss_voice::settings::SCREEN_PACK_NONE.to_owned()
+            };
             let size = package.len();
             {
                 let server = self.server.lock().map_err(|_| internal("语音服务锁失败"))?;
@@ -11146,12 +11811,6 @@ mod imp {
                     .install_wake_assets(device_id, package)
                     .map_err(|e| CenterError::new("wakeword_device_unsupported", 409, e))?;
             }
-            // 2026-11-09：先记为“已推送、等下载”，设备整包下载完（`assets_downloaded`）才算已装；
-            // 不带画风的包下载完会把已装标记清掉。同时记下这次的唤醒词，“一键刷入画风”沿用它。
-            let marker = screen
-                .as_ref()
-                .map(|(_, style)| moss_voice_server::screen_pack::pack_marker(*style))
-                .unwrap_or_else(|| moss_voice::settings::SCREEN_PACK_NONE.to_owned());
             let wake_target = Some(target_name.to_owned());
             moss_voice::settings::update_voice(&self.settings_file(), |s| {
                 let entry = s
@@ -11205,10 +11864,18 @@ mod imp {
                     if input["confirmed"].as_bool() != Some(true) {
                         return Err(invalid());
                     }
+                    let old_fp = self.base_pack_fingerprint();
+                    let none_fp = moss_voice_server::wake_assets::fingerprint_base_pack(None);
                     match std::fs::remove_file(self.wakeword_dir().join("base-assets.bin")) {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                         Err(e) => return Err(internal(format!("移除基础资源包失败：{e}"))),
+                    }
+                    if let Ok(mut guard) = self.wakeword_base_fp_cache.lock() {
+                        *guard = Some((None, none_fp));
+                    }
+                    if old_fp != none_fp {
+                        self.reset_screen_pack_auto_throttle();
                     }
                 }
                 "push" => {
@@ -11274,10 +11941,8 @@ mod imp {
                         .map_err(|_| internal("语音服务锁失败"))?
                         .as_ref()
                         .is_some_and(|s| {
-                            let status = s.status();
-                            status.mode == ServerMode::Chat
-                                && status
-                                    .sessions
+                            s.status().mode == ServerMode::Chat
+                                && s.active_device_sessions()
                                     .iter()
                                     .any(|r| r.device_id == device && r.session_id == session)
                         });
@@ -11345,10 +12010,8 @@ mod imp {
                         .map_err(|_| internal("语音服务锁失败"))?
                         .as_ref()
                         .is_some_and(|s| {
-                            let status = s.status();
-                            status.mode == ServerMode::Chat
-                                && status
-                                    .sessions
+                            s.status().mode == ServerMode::Chat
+                                && s.active_device_sessions()
                                     .iter()
                                     .any(|r| r.device_id == device && r.session_id == session)
                         });
@@ -11595,7 +12258,7 @@ mod imp {
                 .lock()
                 .map_err(|_| internal("语音服务锁失败"))?
                 .as_ref()
-                .map(|s| s.status().sessions)
+                .map(|s| s.active_device_sessions())
                 .unwrap_or_default()
                 .into_iter()
                 .map(|r| serde_json::json!({"device_id":r.device_id,"session_id":r.session_id}))
@@ -12129,6 +12792,68 @@ mod imp {
             );
             assert!(builtin.colab_cli.lock().unwrap().active_pid.is_none());
         }
+
+        #[test]
+        fn n83_full_font_pack_dismissal_and_delete_while_running() {
+            let temp = tempfile::tempdir().unwrap();
+            let host = Arc::new(
+                laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap(),
+            );
+            let builtin = init(Some(host)).0.unwrap();
+            let font_id = moss_voice::local_models::XIAOZHI_NOTO_V1_FULL_ID;
+            let spec = moss_voice::local_models::spec(font_id).unwrap();
+            assert_eq!(
+                builtin.full_font_dir(),
+                builtin.models.root_for(font_id).join("noto_v1_full")
+            );
+
+            // 模拟本地已安装全部必需文件：不发起自动下载
+            let font_dir = builtin.full_font_dir();
+            for rel in spec.required {
+                let p = font_dir.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"stub").unwrap();
+            }
+            assert!(builtin.models.path_if_installed(font_id).is_some());
+            assert!(
+                !builtin.ensure_full_font_ready_with_base(Some("http://127.0.0.1:1")),
+                "已安装时不重复触发后台下载"
+            );
+
+            // 用户手动删除后写入忽略标记：不会在重启后背着用户自动重下
+            builtin.model_delete(font_id).unwrap();
+            assert!(builtin.models.path_if_installed(font_id).is_none());
+            assert!(builtin.full_font_dismissed_marker().exists());
+            assert!(
+                !builtin.ensure_full_font_ready_with_base(Some("http://127.0.0.1:1")),
+                "用户手动删除后尊重选择，不再自动重下"
+            );
+
+            // 用户主动在界面点“下载”时清除忽略标记（对接本机假 HTTP 服务，不访问真实外网）
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mock_base = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    use std::io::Write;
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            });
+            builtin
+                .local_save(&serde_json::json!({ "mirror": mock_base }))
+                .unwrap();
+            builtin.model_download(font_id).unwrap();
+            assert!(
+                !builtin.full_font_dismissed_marker().exists(),
+                "手动点击下载应清除忽略标记"
+            );
+            builtin.model_cancel(font_id);
+            assert!(
+                builtin.full_font_dismissed_marker().exists(),
+                "手动取消下载同样写入忽略标记"
+            );
+        }
     }
 
     #[cfg(test)]
@@ -12600,59 +13325,77 @@ mod imp {
         #[test]
         fn screen_pack_auto_keep_is_opt_in_and_only_retries_once_a_day() {
             use moss_voice::settings::DeviceHardwarePrefs;
+            use moss_voice_server::ScreenCardStyle;
             const NOW: u64 = 1_790_000_000;
-            const HUD: &str = "moss-screen-2:moss_hud";
-            // 判定：没记录 / 没装 → 推；已装 → 不推；等下载未过期 → 不推；过期 → 推；一天内自动推过 → 不推
-            assert!(screen_pack_auto_due(None, HUD, NOW));
+            let hud = moss_voice_server::screen_pack::pack_marker(ScreenCardStyle::MossHud);
+            let bot = moss_voice_server::screen_pack::pack_marker(ScreenCardStyle::GoggleBot);
+            // 判定：没记录 / 没装 → 推；版本+画风+指纹完全一致 → 不推；无指纹旧两段式或指纹不符 → 推；等下载未过期 → 不推；过期 → 推；一天内自动推过 → 不推
+            assert!(screen_pack_auto_due(None, &hud, NOW));
             assert!(screen_pack_auto_due(
                 Some(&DeviceHardwarePrefs::default()),
-                HUD,
+                &hud,
                 NOW
             ));
             let installed = DeviceHardwarePrefs {
+                screen_pack: Some(hud.clone()),
+                ..DeviceHardwarePrefs::default()
+            };
+            assert!(!screen_pack_auto_due(Some(&installed), &hud, NOW));
+            let legacy_unfingerprinted = DeviceHardwarePrefs {
                 screen_pack: Some("moss-screen-2:moss_hud".into()),
                 ..DeviceHardwarePrefs::default()
             };
-            assert!(!screen_pack_auto_due(Some(&installed), HUD, NOW));
+            assert!(
+                screen_pack_auto_due(Some(&legacy_unfingerprinted), &hud, NOW),
+                "旧两段式无指纹标记要自动同步重刷补齐指纹"
+            );
+            let stale_fp = DeviceHardwarePrefs {
+                screen_pack: Some("moss-screen-2:moss_hud:0000000000000000".into()),
+                ..DeviceHardwarePrefs::default()
+            };
+            assert!(
+                screen_pack_auto_due(Some(&stale_fp), &hud, NOW),
+                "底包或字库指纹变化后要自动更新"
+            );
             let old_version = DeviceHardwarePrefs {
                 screen_pack: Some("moss-screen-1:moss_hud".into()),
                 ..DeviceHardwarePrefs::default()
             };
             let other_style = DeviceHardwarePrefs {
-                screen_pack: Some("moss-screen-2:goggle_bot".into()),
+                screen_pack: Some(bot.clone()),
                 ..DeviceHardwarePrefs::default()
             };
             assert!(
-                screen_pack_auto_due(Some(&other_style), HUD, NOW),
+                screen_pack_auto_due(Some(&other_style), &hud, NOW),
                 "换了画风要重刷，开机待命画面才跟着换"
             );
             assert!(
-                screen_pack_auto_due(Some(&old_version), HUD, NOW),
+                screen_pack_auto_due(Some(&old_version), &hud, NOW),
                 "旧无字库版 moss-screen-1 要自动升级重刷补回中文字库"
             );
             let pending = DeviceHardwarePrefs {
-                screen_pack_pending: Some("moss-screen-2:moss_hud".into()),
+                screen_pack_pending: Some(hud.clone()),
                 screen_pack_pending_at: Some(NOW - 60),
                 ..DeviceHardwarePrefs::default()
             };
             assert!(
-                !screen_pack_auto_due(Some(&pending), HUD, NOW),
+                !screen_pack_auto_due(Some(&pending), &hud, NOW),
                 "等下载时不重复推"
             );
             let expired = DeviceHardwarePrefs {
                 screen_pack_pending_at: Some(NOW - 31 * 60),
                 ..pending.clone()
             };
-            assert!(screen_pack_auto_due(Some(&expired), HUD, NOW));
+            assert!(screen_pack_auto_due(Some(&expired), &hud, NOW));
             let tried = DeviceHardwarePrefs {
                 screen_pack_auto_at: Some(NOW - 3600),
                 ..DeviceHardwarePrefs::default()
             };
             assert!(
-                !screen_pack_auto_due(Some(&tried), HUD, NOW),
+                !screen_pack_auto_due(Some(&tried), &hud, NOW),
                 "失败也不在一天内反复重启设备"
             );
-            assert!(screen_pack_auto_due(Some(&tried), HUD, NOW + 24 * 3600));
+            assert!(screen_pack_auto_due(Some(&tried), &hud, NOW + 24 * 3600));
 
             // 开关默认关；关着或服务没运行时什么也不推
             let temp = tempfile::tempdir().unwrap();
@@ -12676,7 +13419,7 @@ mod imp {
             // 换画风：清掉“一天内已自动推过”，开着自动保持时马上按新画风重刷；状态里旧画风标为 style_outdated
             moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
                 let entry = s.builtin_device_prefs.entry("dev-1".into()).or_default();
-                entry.screen_pack = Some(HUD.into());
+                entry.screen_pack = Some(hud.clone());
                 entry.screen_pack_auto_at = Some(NOW);
                 Ok(())
             })
@@ -12698,15 +13441,180 @@ mod imp {
                 settings.builtin_device_prefs["dev-1"].screen_pack_auto_at,
                 None
             );
-            assert_eq!(
-                current_screen_pack_marker(&settings),
-                "moss-screen-2:goggle_bot"
-            );
+            assert_eq!(current_screen_pack_marker(&settings), bot);
             assert!(screen_pack_auto_due(
                 settings.builtin_device_prefs.get("dev-1"),
                 &current_screen_pack_marker(&settings),
                 NOW
             ));
+
+            // n84：导入 / 移除基础资源包会立即刷新指纹并清掉 24 小时自动节流；重复导入同一份底包不清节流
+            let base_file = temp.path().join("custom-base.bin");
+            let base_bytes = moss_voice_server::wake_assets::pack_assets(&[
+                moss_voice_server::wake_assets::AssetEntry {
+                    name: "font.bin".into(),
+                    data: vec![1, 2, 3, 4],
+                    width: 0,
+                    height: 0,
+                },
+                moss_voice_server::wake_assets::AssetEntry {
+                    name: "index.json".into(),
+                    data: br#"{"version":1,"text_font":"font.bin"}"#.to_vec(),
+                    width: 0,
+                    height: 0,
+                },
+            ])
+            .unwrap();
+            std::fs::write(&base_file, &base_bytes).unwrap();
+            moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
+                let entry = s.builtin_device_prefs.entry("dev-1".into()).or_default();
+                entry.screen_pack = Some(bot.clone());
+                entry.screen_pack_auto_at = Some(NOW);
+                Ok(())
+            })
+            .unwrap();
+            builtin.wakeword_import_base(&base_file).unwrap();
+            let after_import = moss_voice::settings::load(&builtin.settings_file());
+            assert_eq!(
+                after_import.builtin_device_prefs["dev-1"].screen_pack_auto_at, None,
+                "导入新底包后清掉自动节流"
+            );
+            let expected_with_base = expected_device_screen_pack_marker(
+                ScreenCardStyle::GoggleBot,
+                Some((20, 4)),
+                Some((320, 240)),
+                false,
+                None,
+                builtin.base_pack_fingerprint(),
+                Some(&bot),
+            );
+            assert_ne!(expected_with_base, bot, "导入底包后期望标记指纹已更新");
+            assert_eq!(
+                moss_voice_server::screen_pack::compare_pack_marker(
+                    Some(&bot),
+                    &expected_with_base
+                ),
+                moss_voice_server::screen_pack::PackMatchState::AssetsOutdated
+            );
+
+            // 重复导入内容完全一致的底包：不清空自动节流
+            moss_voice::settings::update_voice(&builtin.settings_file(), |s| {
+                s.builtin_device_prefs
+                    .get_mut("dev-1")
+                    .unwrap()
+                    .screen_pack_auto_at = Some(NOW);
+                Ok(())
+            })
+            .unwrap();
+            builtin.wakeword_import_base(&base_file).unwrap();
+            assert_eq!(
+                moss_voice::settings::load(&builtin.settings_file()).builtin_device_prefs["dev-1"]
+                    .screen_pack_auto_at,
+                Some(NOW),
+                "重复导入相同底包不清节流"
+            );
+
+            // 移除底包：恢复无底包指纹并清掉自动节流
+            builtin
+                .wakeword_manage(&serde_json::json!({"action": "clear_base", "confirmed": true}))
+                .unwrap();
+            assert_eq!(
+                moss_voice::settings::load(&builtin.settings_file()).builtin_device_prefs["dev-1"]
+                    .screen_pack_auto_at,
+                None,
+                "移除底包后清掉自动节流"
+            );
+            let expected_after_clear = expected_device_screen_pack_marker(
+                ScreenCardStyle::GoggleBot,
+                Some((20, 4)),
+                Some((320, 240)),
+                false,
+                None,
+                builtin.base_pack_fingerprint(),
+                Some(&bot),
+            );
+            assert_eq!(expected_after_clear, bot);
+
+            // 超大屏（800×480）因 8 MB 分区限制回退装入 20_4 字库后，常连模式重启重连尚未发 hello
+            // （hello_json 快照仍留刷前 30_4，或固件报非标准 24_4）：已装 20_4 指纹仍应判为最新，底包变了立即判过期
+            {
+                let db = builtin.host.db.lock().unwrap();
+                db.voice_device_seen("dev-800", "cli-800", "board", "2.0.4", "192.0.2.8", 1.0)
+                    .unwrap();
+                db.voice_device_snapshot(
+                    "dev-800",
+                    "hello",
+                    r#"{"text_font":{"size":30,"bpp":4}}"#,
+                    2.0,
+                )
+                .unwrap();
+            }
+            let dev_800 = builtin
+                .host
+                .db
+                .lock()
+                .unwrap()
+                .voice_device("dev-800")
+                .unwrap();
+            let none_fp = builtin.base_pack_fingerprint();
+            let fallback_800_20 = moss_voice_server::screen_pack::pack_marker_for(
+                ScreenCardStyle::GoggleBot,
+                (800, 480),
+                Some(moss_voice_server::glyph_font::PROFILES[2]),
+                none_fp,
+            )
+            .unwrap();
+            assert_eq!(
+                expected_device_screen_pack_marker(
+                    ScreenCardStyle::GoggleBot,
+                    None,
+                    Some((800, 480)),
+                    false,
+                    dev_800.as_ref(),
+                    none_fp,
+                    Some(&fallback_800_20),
+                ),
+                fallback_800_20,
+                "常连重连未发 hello、快照仍为 30_4 时，已装 20_4 回退包应视为最新"
+            );
+            assert_eq!(
+                expected_device_screen_pack_marker(
+                    ScreenCardStyle::GoggleBot,
+                    Some((24, 4)),
+                    Some((800, 480)),
+                    false,
+                    dev_800.as_ref(),
+                    none_fp,
+                    Some(&fallback_800_20),
+                ),
+                fallback_800_20,
+                "超大屏上报非标准字号时，已装 20_4 回退包同样视为最新"
+            );
+            let custom_fp =
+                moss_voice_server::wake_assets::fingerprint_base_pack(Some(&base_bytes));
+            assert_ne!(
+                expected_device_screen_pack_marker(
+                    ScreenCardStyle::GoggleBot,
+                    None,
+                    Some((800, 480)),
+                    false,
+                    dev_800.as_ref(),
+                    custom_fp,
+                    Some(&fallback_800_20),
+                ),
+                fallback_800_20,
+                "底包变更后 20_4 回退包必须立即判为过期"
+            );
+
+            // base-assets.bin 存在但暂不可读（这里用同名目录模拟 metadata 成功、fs::read 失败）：不得把空指纹写进缓存
+            let bad_base = builtin.wakeword_dir().join("base-assets.bin");
+            std::fs::create_dir_all(&bad_base).unwrap();
+            assert_eq!(builtin.base_pack_fingerprint(), none_fp);
+            assert!(
+                builtin.wakeword_base_fp_cache.lock().unwrap().is_none(),
+                "读取失败时不得污染底包指纹缓存"
+            );
+            std::fs::remove_dir_all(&bad_base).unwrap();
         }
 
         #[test]
@@ -13791,13 +14699,111 @@ mod imp {
                     .starts_with("data:audio/wav;base64,")
             );
 
-            // 3. 删除模型时同步清空对应的 .tts-previews/kokoro 本地试听缓存
+            // 3. 删除模型时：即使后台正在用临时 LocalHelper 预热该模型，也会主动终止子进程、等待工作线程退出再删目录与缓存
+            let (reader_tx, reader_rx) = std::sync::mpsc::sync_channel::<u8>(1);
+            struct BlockingPipe(std::sync::mpsc::Receiver<u8>);
+            impl std::io::Read for BlockingPipe {
+                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                    match self.0.recv() {
+                        Ok(b) => {
+                            buf[0] = b;
+                            Ok(1)
+                        }
+                        Err(_) => Ok(0),
+                    }
+                }
+            }
+            let (preview_tx, preview_rx) = std::sync::mpsc::sync_channel::<u8>(1);
+            let fake_helper = LocalHelper::from_streams(
+                Box::new(BlockingPipe(reader_rx)),
+                Box::new(std::io::sink()),
+            );
+            let fake_in_flight_helper = LocalHelper::from_streams(
+                Box::new(BlockingPipe(preview_rx)),
+                Box::new(std::io::sink()),
+            );
+            assert!(fake_helper.is_alive());
+            assert!(fake_in_flight_helper.is_alive());
+            {
+                let mut st = builtin.tts_preview_warmer.0.lock().unwrap();
+                st.active = Some("kokoro");
+                st.active_helper = Some(fake_helper.clone());
+                st.in_flight_previews.push((
+                    1,
+                    "kokoro",
+                    Some(fake_in_flight_helper.clone()),
+                    false,
+                ));
+                st.queue.push_back("kokoro");
+                st.queue.push_back("matcha_zh_en");
+            }
+            let builtin_for_worker = builtin.clone();
+            let worker = std::thread::spawn(move || {
+                let (lock, cv) = &builtin_for_worker.tts_preview_warmer;
+                {
+                    let mut st = lock.lock().unwrap();
+                    while !st.cancelled.contains("kokoro") {
+                        st = cv.wait(st).unwrap();
+                    }
+                    assert!(
+                        st.deleting.contains("kokoro"),
+                        "卸载期间应持有 deleting 门禁"
+                    );
+                    assert_eq!(
+                        st.in_flight_previews
+                            .iter()
+                            .find(|(seq, _, _, _)| *seq == 1)
+                            .map(|(_, _, _, c)| *c),
+                        Some(true),
+                        "卸载期间应将并发试听条目标记为已取消"
+                    );
+                }
+                // 模拟弹窗 1.5s 轮询在卸载中途并发调用入队：必须被 deleting 门禁拦截且不得抹掉 cancelled
+                assert_eq!(
+                    builtin_for_worker.enqueue_tts_preview_warmup_state("kokoro"),
+                    (false, false)
+                );
+                let mut st = lock.lock().unwrap();
+                assert!(st.cancelled.contains("kokoro"));
+                st.active = None;
+                st.in_flight_previews.retain(|(seq, _, _, _)| *seq != 1);
+                st.cancelled.remove("kokoro");
+                cv.notify_all();
+            });
+
             builtin.model_delete("kokoro").unwrap();
+            worker.join().unwrap();
+            drop(reader_tx);
+            drop(preview_tx);
+            assert!(
+                !fake_helper.is_alive(),
+                "卸载模型时应立即终止活跃预热 LocalHelper"
+            );
+            assert!(
+                !fake_in_flight_helper.is_alive(),
+                "卸载模型时应同步终止并发试听 LocalHelper"
+            );
+            {
+                let st = builtin.tts_preview_warmer.0.lock().unwrap();
+                assert_eq!(st.active, None);
+                assert!(!st.deleting.contains("kokoro"));
+                assert_eq!(
+                    st.queue.iter().copied().collect::<Vec<_>>(),
+                    vec!["matcha_zh_en"]
+                );
+            }
             assert!(!moss_voice::tts_voices::has_cached_preview(
                 builtin.models.root(),
                 "kokoro",
                 45
             ));
+
+            // 4. 宿主退出门禁置位后，禁止任何迟到轮询重新入队或拉起后台预热线程
+            builtin.stop_all_tts_preview_warmups();
+            assert_eq!(
+                builtin.enqueue_tts_preview_warmup_state("matcha_zh_en"),
+                (false, false)
+            );
         }
     }
 
@@ -13891,6 +14897,7 @@ mod imp {
         if let Ok(builtin) = builtin(app) {
             builtin.cancel_colab_cli_runner(None);
             builtin.laya_setup.cancel_and_wait();
+            builtin.stop_all_tts_preview_warmups();
             builtin.stop();
             // 等待已被 starting_cancel 中断的后台启动线程完成子进程回收，杜绝退出时残留孤儿 llama-server
             builtin.stop_laya_and_wait();
