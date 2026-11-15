@@ -7,7 +7,7 @@
 //! - 回声模式：把设备说的话原样播回，用于验证连接、音频帧格式与播放节奏。
 //!
 //! NV2 内容（[`audio`]）：上行 Opus 解码、自动拾音模式的语音活动检测（静音 200 ms 判停）、
-//! 下行重采样与 Opus 编码、播放节奏泵（预缓冲、绝对时钟、供不上时补静音）、设备打断。
+//! 下行重采样与 Opus 编码、播放节奏泵（起播保护间隔、按设备端缓冲余量发送、供不上时不发帧）、设备打断。
 //! 回声模式改为“解码 → 判停 → 重采样到 24 kHz → 重新编码”播回，覆盖整条音频链路。
 //!
 //! NV3 内容（[`conversation`]）：对话模式——OpenAI 兼容识别 / 大模型（流式 + 工具调用）/ 合成（提供方见
@@ -58,6 +58,7 @@ use serde::Serialize;
 pub use audio::{EnergyVad, LocalVadFactory, Vad, VadConfig, VadEvent, VadFactory};
 pub use conversation::{
     Conversation, ConversationSettings, NoTools, ToolContext, ToolExecutor, ToolOutcome,
+    TurnEndPredictor,
 };
 pub use goggle_bot::{BotPose, GoggleBotGifItem, ScreenCardStyle, cached_goggle_bot_gifs};
 pub use jev::{

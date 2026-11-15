@@ -12,6 +12,10 @@ pub trait AgentRuns: Send + Sync {
     fn current_digest(&self, record: &ApprovalRecord) -> Result<String, ApprovalError>;
     fn execute(&self, record: &ApprovalRecord) -> (u16, Value);
     fn status(&self) -> Value;
+    /// 只读 Agent 运行活跃度摘要（仅返回运行号/提供方/状态/耗时/静默秒数/输出行数；绝不返回原文）。
+    fn voice_digest(&self) -> Value {
+        Value::Null
+    }
     /// 停止正在运行的任务；没有这个任务时返回 false。
     fn stop(&self, _run_id: &str) -> bool {
         false
@@ -36,6 +40,13 @@ impl crate::ApiService {
             .unwrap_or_else(
                 || json!({"enabled":false,"providers":[],"reason":"agent_sandbox_unavailable"}),
             )
+    }
+    pub fn agent_voice_digest(&self) -> Option<Value> {
+        let value = self.agent_runs.get()?.voice_digest();
+        value
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+            .then_some(value)
     }
     pub fn call_agent_tool(
         &self,

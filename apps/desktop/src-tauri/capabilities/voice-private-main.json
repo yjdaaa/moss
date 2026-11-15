@@ -37,6 +37,7 @@
     "allow-voice-firmware-manage",
     "allow-voice-wakeword-status",
     "allow-voice-wakeword-import-base",
-    "allow-voice-wakeword-manage"
+    "allow-voice-wakeword-manage",
+    "allow-voice-usb-provision"
   ]
 }

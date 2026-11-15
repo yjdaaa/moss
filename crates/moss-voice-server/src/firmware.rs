@@ -2,8 +2,12 @@
 //!
 //! 用户在私密窗口导入自己编译的 ESP32 应用固件（`.bin`），选一台已允许的设备确认推送后，
 //! 设备下次请求 OTA 时会拿到 `firmware{version, url}`；标准 xiaozhi 固件发现版本更新时自行下载并刷写。
-//! 下载地址带一次推送专用的随机令牌、只对这台设备有效、到期失效；只有设备之后上报的版本等于推送版本，
-//! 才记为“已升级”。下载完成本身不代表刷写成功。
+//! 下载地址带一次推送专用的随机令牌、只对这台设备有效、到期失效。下载完成本身不代表刷写成功。
+//!
+//! 要不要下发、算不算已升级，优先按内容比（2026-11-13 n87）：固件 `.bin` 的应用描述里带 ELF 哈希，
+//! 设备请求 OTA 时也上报自己的 ELF 哈希。两边都有时——相同即“设备上已经是这一份”；不同且版本号更新则照常下发；
+//! 不同但版本号相同或更旧（同版本号重新编译、降级）则带 `force: 1` 下发，且每次用户确认只强制一次。
+//! 任一边没有 ELF 哈希（旧固件）时退回只比版本号。
 
 use std::sync::Arc;
 
@@ -22,12 +26,73 @@ const FIRMWARE_MIN_BYTES: usize = 1024;
 
 /// 宿主（桌面端）提供的推送记录与固件文件。
 pub trait FirmwareHost: Send + Sync {
-    /// 这台设备当前是否有待下载的推送：返回 (固件版本, 下载令牌)。只对已允许的设备调用。
-    fn offer(&self, device_id: &str, current_version: &str) -> Option<(String, String)>;
+    /// 这台设备当前是否有待下载的推送。只对已允许的设备调用。
+    fn offer(&self, device_id: &str, current: &DeviceFirmware<'_>) -> Option<FirmwarePush>;
     /// 按令牌取固件内容（宿主负责核对 SHA-256、到期与设备）；同时记下“已开始下载”。
     fn fetch(&self, token: &str, peer: &str) -> Option<Vec<u8>>;
-    /// 设备请求 OTA 时上报的当前版本；等于推送版本时记为已升级。
-    fn reported(&self, device_id: &str, version: &str);
+    /// 设备请求 OTA 时上报的当前固件；与推送的是同一份时记为已升级。
+    fn reported(&self, device_id: &str, current: &DeviceFirmware<'_>);
+}
+
+/// 设备请求 OTA 时上报的当前固件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceFirmware<'a> {
+    pub version: &'a str,
+    /// ELF 哈希（64 位小写十六进制）；旧固件不上报
+    pub elf_sha256: Option<&'a str>,
+}
+
+/// 要下发给设备的一次推送。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirmwarePush {
+    pub version: String,
+    pub token: String,
+    /// 回复里带 `force: 1`（固件不比版本号直接安装）
+    pub force: bool,
+}
+
+/// 一次推送对这台设备该怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushDecision {
+    /// 下发；`force` 为真时带 `force: 1`
+    Send { force: bool },
+    /// 设备上跑的已经是这一份（按 ELF 哈希，或两边都没有哈希时按版本号）
+    AlreadyRunning,
+    /// 不下发（不比设备新，或无法比较）
+    Skip,
+}
+
+/// 推送的固件（版本、ELF 哈希）对上报了 `current` 的设备该怎么办。
+/// `never_downloaded` 为假（这次推送已经开始下载过）时不再强制：防止刷写失败或哈希对不上时反复重刷。
+pub fn decide_push(
+    push_version: &str,
+    push_elf: Option<&str>,
+    current: &DeviceFirmware<'_>,
+    never_downloaded: bool,
+) -> PushDecision {
+    let newer = is_newer(push_version, current.version);
+    match (push_elf, current.elf_sha256) {
+        (Some(push), Some(device)) if push.eq_ignore_ascii_case(device) => {
+            PushDecision::AlreadyRunning
+        }
+        (Some(_), Some(_)) if newer => PushDecision::Send { force: false },
+        (Some(_), Some(_))
+            if never_downloaded
+                && version_parts(push_version).is_some()
+                && version_parts(current.version).is_some() =>
+        {
+            PushDecision::Send { force: true }
+        }
+        (Some(_), Some(_)) => PushDecision::Skip,
+        _ if newer => PushDecision::Send { force: false },
+        _ if !never_downloaded
+            && version_parts(push_version).is_some()
+            && version_parts(push_version) == version_parts(current.version) =>
+        {
+            PushDecision::AlreadyRunning
+        }
+        _ => PushDecision::Skip,
+    }
 }
 
 /// 从 ESP-IDF 应用镜像头读出的信息。
@@ -35,6 +100,18 @@ pub trait FirmwareHost: Send + Sync {
 pub struct AppImage {
     pub version: String,
     pub project: String,
+    /// 应用描述里的 ELF 哈希（构建时写入；没写或全零时为空）
+    pub elf_sha256: Option<String>,
+}
+
+/// 读固件 `.bin` 开头的应用描述里的 ELF 哈希（`esp_app_desc_t.app_elf_sha256`，文件偏移 176..208）。
+/// 只需要文件的前 208 字节。
+pub fn image_elf_sha256(head: &[u8]) -> Option<String> {
+    let bytes = head.get(176..208)?;
+    if head.first() != Some(&0xE9) || bytes.iter().all(|b| *b == 0) {
+        return None;
+    }
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn c_string(bytes: &[u8]) -> Option<String> {
@@ -44,7 +121,7 @@ fn c_string(bytes: &[u8]) -> Option<String> {
 }
 
 /// 校验是 ESP32 应用固件并读出版本与项目名：镜像头魔数 `0xE9`，`esp_app_desc_t`
-/// 位于偏移 32（魔数 `0xABCD5432`，版本 48..80，项目名 80..112）。不是应用固件（如整片烧录包、
+/// 位于偏移 32（魔数 `0xABCD5432`，版本 48..80，项目名 80..112，ELF 哈希 176..208）。不是应用固件（如整片烧录包、
 /// 引导程序、分区表）一律拒绝。
 pub fn parse_app_image(bytes: &[u8]) -> Result<AppImage, &'static str> {
     if bytes.len() < FIRMWARE_MIN_BYTES {
@@ -67,7 +144,11 @@ pub fn parse_app_image(bytes: &[u8]) -> Result<AppImage, &'static str> {
     if version_parts(&version).is_none() {
         return Err("固件版本号须为 1.2.3 这样的数字版本，设备才能判断是否更新");
     }
-    Ok(AppImage { version, project })
+    Ok(AppImage {
+        version,
+        project,
+        elf_sha256: image_elf_sha256(bytes),
+    })
 }
 
 /// 数字版本（最多 5 段），用于和设备当前版本比较。
@@ -174,9 +255,18 @@ mod tests {
             parse_app_image(&image("1.8.2", "xiaozhi")).unwrap(),
             AppImage {
                 version: "1.8.2".into(),
-                project: "xiaozhi".into()
+                project: "xiaozhi".into(),
+                elf_sha256: None,
             }
         );
+        let mut hashed = image("1.8.2", "xiaozhi");
+        hashed[176..208].copy_from_slice(&[0xAB; 32]);
+        assert_eq!(
+            parse_app_image(&hashed).unwrap().elf_sha256,
+            Some("ab".repeat(32))
+        );
+        assert_eq!(image_elf_sha256(&hashed[..208]), Some("ab".repeat(32)));
+        assert_eq!(image_elf_sha256(&hashed[..100]), None, "头不够长读不出");
         let mut merged = image("1.8.2", "xiaozhi");
         merged[0] = 0xFF;
         assert!(
@@ -191,6 +281,62 @@ mod tests {
             "非数字版本设备无法比较"
         );
         assert!(parse_app_image(&[0xE9; 100]).is_err(), "太小");
+    }
+
+    #[test]
+    fn push_decision_prefers_content_over_version_and_forces_only_once() {
+        use PushDecision::*;
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let device = |version: &'static str, elf: Option<&'static str>| DeviceFirmware {
+            version,
+            elf_sha256: elf,
+        };
+        let (a_ref, b_ref): (&'static str, &'static str) = (a.clone().leak(), b.clone().leak());
+        // 两边都有 ELF 哈希：相同就是同一份，哪怕版本号写得不一样
+        assert_eq!(
+            decide_push("1.9.0", Some(&a), &device("1.8.0", Some(a_ref)), true),
+            AlreadyRunning
+        );
+        // 内容不同、版本号更新：照常下发
+        assert_eq!(
+            decide_push("1.9.0", Some(&a), &device("1.8.0", Some(b_ref)), true),
+            Send { force: false }
+        );
+        // 内容不同、版本号相同（重新编译）或更旧（降级）：强制下发，但这次推送只强制一次
+        for current in ["1.9.0", "2.0.0"] {
+            assert_eq!(
+                decide_push("1.9.0", Some(&a), &device(current, Some(b_ref)), true),
+                Send { force: true },
+                "{current}"
+            );
+            assert_eq!(
+                decide_push("1.9.0", Some(&a), &device(current, Some(b_ref)), false),
+                Skip,
+                "已经下载过一次就不再强制：{current}"
+            );
+        }
+        // 任一边没有 ELF 哈希（旧固件）：退回只比版本号
+        assert_eq!(
+            decide_push("1.9.0", Some(&a), &device("1.8.0", None), true),
+            Send { force: false }
+        );
+        assert_eq!(
+            decide_push("1.9.0", Some(&a), &device("1.9.0", None), true),
+            Skip,
+            "旧固件未下载过时不能仅凭版本号相同算已升级"
+        );
+        assert_eq!(
+            decide_push("1.9.0", Some(&a), &device("1.9.0", None), false),
+            AlreadyRunning
+        );
+        assert_eq!(
+            decide_push("1.9.0", None, &device("2.0.0", Some(b_ref)), true),
+            Skip
+        );
+        assert_eq!(
+            decide_push("1.9.0", Some(&a), &device("unknown", None), true),
+            Skip
+        );
     }
 
     #[test]

@@ -146,6 +146,46 @@ pub(crate) mod test_signal {
             .collect()
     }
 
+    /// 确定性的“类语音”信号：基频在 100–200 Hz 起伏的声门脉冲串，经 700 / 1220 / 2600 Hz 三个共振峰，
+    /// 每秒 4 个音节的包络，峰值 12000。能让 Opus 走语音（SILK / 混合）编码路径，纯音调走不到。
+    /// 编解码兼容性夹具 `testdata/vowel16k_libopus_voip.pkts` 由同一算法生成。
+    pub fn vowel(rate: u32, ms: u32) -> Vec<i16> {
+        let count = rate as usize * ms as usize / 1000;
+        let rate_f = f64::from(rate);
+        let mut coefs = Vec::new();
+        for (f, bw) in [(700.0, 110.0), (1220.0, 120.0), (2600.0, 160.0)] {
+            let r = (-std::f64::consts::PI * bw / rate_f).exp();
+            let theta = std::f64::consts::TAU * f / rate_f;
+            coefs.push((2.0 * r * theta.cos(), -r * r));
+        }
+        let mut state = vec![[0.0f64; 2]; coefs.len()];
+        let mut phase = 0.0;
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let t = i as f64 / rate_f;
+            phase += (150.0 + 50.0 * (std::f64::consts::TAU * 1.3 * t).sin()) / rate_f;
+            let mut y = if phase >= 1.0 {
+                phase -= 1.0;
+                1.0
+            } else {
+                0.0
+            };
+            for (k, (a1, a2)) in coefs.iter().enumerate() {
+                let v = y + a1 * state[k][0] + a2 * state[k][1];
+                state[k][1] = state[k][0];
+                state[k][0] = v;
+                y = v;
+            }
+            let envelope = (std::f64::consts::PI * ((t * 4.0) % 1.0))
+                .sin()
+                .max(0.0)
+                .powf(0.6);
+            out.push(y * envelope);
+        }
+        let peak = out.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-9);
+        out.iter().map(|v| (v / peak * 12000.0) as i16).collect()
+    }
+
     pub fn silence(rate: u32, ms: u32) -> Vec<i16> {
         vec![0; rate as usize * ms as usize / 1000]
     }

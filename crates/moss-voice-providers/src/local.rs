@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,6 +52,59 @@ struct Inner {
     next_stream: AtomicU64,
     alive: AtomicBool,
     child: Mutex<Option<Child>>,
+    pacing: Mutex<Pacing>,
+}
+
+/// 本地合成的节奏估计：这台机器合成有多快、已经交出去的语音大概还能播多久。
+/// 据此决定下一句的第一段可以多长——能整句合成就不切碎（切碎的每一小段都会重新起调，听着像机器）。
+#[derive(Debug, Clone, Copy)]
+struct Pacing {
+    /// 实时率的滑动估计（合成 1 秒语音要算多少秒）
+    rtf: f64,
+    /// 已交出去的语音按实时播放会播到什么时候
+    play_until: Option<std::time::Instant>,
+    /// 正在合成或排队的流式请求数（排队等待的时间不能算进实时率）
+    in_flight: usize,
+}
+
+impl Default for Pacing {
+    fn default() -> Self {
+        Self {
+            // 没量过之前按偏慢的机器算，宁可先切碎
+            rtf: 0.7,
+            play_until: None,
+            in_flight: 0,
+        }
+    }
+}
+
+impl Pacing {
+    /// 新的一句第一段最多多少字（0 = 用最保守的阶梯）。
+    /// 允许的合成耗时 = 前面的存货还能播多久 + 可接受的开口等待；按每秒约 4.5 个字换算，留两成余量。
+    fn first_max_chars(&self, now: std::time::Instant) -> u32 {
+        const ACCEPTABLE_WAIT: f64 = 0.5;
+        let lead = self.play_until.map_or(0.0, |until| {
+            until.saturating_duration_since(now).as_secs_f64()
+        });
+        let chars = (lead + ACCEPTABLE_WAIT) / self.rtf.max(0.02) * 4.5 * 0.8;
+        if chars < 14.0 {
+            0
+        } else {
+            chars.min(200.0) as u32
+        }
+    }
+
+    /// 一段语音合成完：`compute` 为这一段的纯合成耗时（没有排队时才有），`audio` 为它的时长。
+    fn delivered(&mut self, now: std::time::Instant, compute: Option<Duration>, audio: f64) {
+        if let Some(compute) = compute
+            && audio >= 0.3
+        {
+            let sample = (compute.as_secs_f64() / audio).clamp(0.01, 3.0);
+            self.rtf = self.rtf * 0.6 + sample * 0.4;
+        }
+        let begin = self.play_until.filter(|until| *until > now).unwrap_or(now);
+        self.play_until = Some(begin + Duration::from_secs_f64(audio));
+    }
 }
 
 impl Inner {
@@ -110,11 +163,83 @@ impl SpeakerHelper {
     }
 }
 
+const TURN_CONSECUTIVE_TIMEOUT_CAP: usize = 4;
+
+/// 尾音语义判停专用进程，不暴露共享的 ASR/TTS/VAD 句柄。
+/// 单次超时只放弃当次推理（退回静音计时）而不杀死进程；连续达到上限才自行结束，避免判停偶发变慢连累主 helper。
+#[derive(Clone)]
+pub struct TurnHelper {
+    helper: LocalHelper,
+    model: Option<PathBuf>,
+    consecutive_timeouts: Arc<AtomicUsize>,
+}
+
+impl TurnHelper {
+    pub fn spawn(exe: &Path, model_file: Option<&Path>) -> Result<Self, ProviderError> {
+        let helper = LocalHelper::spawn(exe)?;
+        helper.load_smart_turn(model_file)?;
+        Ok(Self::from_loaded_helper(helper, model_file))
+    }
+
+    pub fn from_loaded_helper(helper: LocalHelper, model_file: Option<&Path>) -> Self {
+        Self {
+            helper,
+            model: model_file.map(Path::to_path_buf),
+            consecutive_timeouts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn model_path(&self) -> Option<&Path> {
+        self.model.as_deref()
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.helper.is_alive()
+    }
+
+    pub fn terminate(&self) {
+        self.helper.terminate();
+    }
+
+    pub fn predict_blocking(
+        &self,
+        sample_rate: u32,
+        pcm: &[i16],
+        timeout: Duration,
+    ) -> Result<(bool, f32), ProviderError> {
+        match self
+            .helper
+            .predict_smart_turn_soft(sample_rate, pcm, timeout)
+        {
+            Ok(result) => {
+                self.consecutive_timeouts.store(0, Ordering::SeqCst);
+                Ok(result)
+            }
+            Err(failure) if failure.timed_out => {
+                let streak = self.consecutive_timeouts.fetch_add(1, Ordering::SeqCst) + 1;
+                if streak >= TURN_CONSECUTIVE_TIMEOUT_CAP {
+                    self.helper.terminate();
+                }
+                Err(failure.error)
+            }
+            Err(failure) => {
+                self.consecutive_timeouts.store(0, Ordering::SeqCst);
+                Err(failure.error)
+            }
+        }
+    }
+}
+
 /// 辅助程序加载的合成模型信息。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TtsInfo {
     pub sample_rate: u32,
     pub speakers: u32,
+}
+
+struct CallFailure {
+    error: ProviderError,
+    timed_out: bool,
 }
 
 fn dead() -> ProviderError {
@@ -172,6 +297,7 @@ impl LocalHelper {
             next_stream: AtomicU64::new(1),
             alive: AtomicBool::new(true),
             child: Mutex::new(None),
+            pacing: Mutex::new(Pacing::default()),
         });
         let weak_writer = Arc::downgrade(&inner);
         let _ = std::thread::Builder::new()
@@ -267,32 +393,63 @@ impl LocalHelper {
         payload: &[u8],
         timeout: Duration,
     ) -> Result<(Reply, Vec<u8>), ProviderError> {
+        self.call_with_policy(op, payload, timeout, true)
+            .map_err(|failure| failure.error)
+    }
+
+    fn call_with_policy(
+        &self,
+        op: Op,
+        payload: &[u8],
+        timeout: Duration,
+        invalidate_on_timeout: bool,
+    ) -> Result<(Reply, Vec<u8>), CallFailure> {
         if !self.is_alive() {
-            return Err(dead());
+            return Err(CallFailure {
+                error: dead(),
+                timed_out: false,
+            });
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = channel();
         self.inner
             .pending
             .lock()
-            .map_err(|_| dead())?
+            .map_err(|_| CallFailure {
+                error: dead(),
+                timed_out: false,
+            })?
             .insert(id, sender);
         let deadline = std::time::Instant::now() + timeout;
         if let Err(error) = self.enqueue(id, op, payload) {
             self.forget(id);
-            return Err(error);
+            return Err(CallFailure {
+                error,
+                timed_out: false,
+            });
         }
         let result =
             receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         match result {
-            Ok((Reply::Error { message }, _)) => Err(ProviderError::new(message)),
+            Ok((Reply::Error { message }, _)) => Err(CallFailure {
+                error: ProviderError::new(message),
+                timed_out: false,
+            }),
             Ok(reply) => Ok(reply),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 self.forget(id);
-                self.inner.invalidate();
-                Err(ProviderError::new("本地模型处理或管道写入超时"))
+                if invalidate_on_timeout {
+                    self.inner.invalidate();
+                }
+                Err(CallFailure {
+                    error: ProviderError::new("本地模型处理或管道写入超时"),
+                    timed_out: true,
+                })
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(dead()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CallFailure {
+                error: dead(),
+                timed_out: false,
+            }),
         }
     }
     fn forget(&self, id: u64) {
@@ -366,6 +523,56 @@ impl LocalHelper {
             sample_rate: sample_rate.unwrap_or(24_000),
             speakers: speakers.unwrap_or(0),
         })
+    }
+
+    pub fn load_denoiser(&self, model_file: Option<&Path>) -> Result<(), ProviderError> {
+        let op = Op::LoadDenoiser {
+            model: model_file
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+        Self::expect_loaded(self.call(op, &[], LOAD_TIMEOUT)?.0).map(|_| ())
+    }
+
+    pub fn load_smart_turn(&self, model_file: Option<&Path>) -> Result<(), ProviderError> {
+        let op = Op::LoadSmartTurn {
+            model: model_file
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+        Self::expect_loaded(self.call(op, &[], LOAD_TIMEOUT)?.0).map(|_| ())
+    }
+
+    pub fn predict_smart_turn(
+        &self,
+        sample_rate: u32,
+        pcm: &[i16],
+        timeout: Duration,
+    ) -> Result<(bool, f32), ProviderError> {
+        self.predict_smart_turn_soft(sample_rate, pcm, timeout)
+            .map_err(|failure| failure.error)
+    }
+
+    fn predict_smart_turn_soft(
+        &self,
+        sample_rate: u32,
+        pcm: &[i16],
+        timeout: Duration,
+    ) -> Result<(bool, f32), CallFailure> {
+        let op = Op::SmartTurnPredict { sample_rate };
+        match self
+            .call_with_policy(op, &pcm_to_bytes(pcm), timeout, false)?
+            .0
+        {
+            Reply::SmartTurn {
+                probability,
+                complete,
+            } => Ok((complete, probability)),
+            _ => Err(CallFailure {
+                error: ProviderError::new("尾音语义判停返回了意外的结果"),
+                timed_out: false,
+            }),
+        }
     }
 
     fn load_speaker(&self, models_root: &Path) -> Result<(), ProviderError> {
@@ -487,18 +694,39 @@ impl LocalHelper {
             .lock()
             .map_err(|_| dead())?
             .insert(id, sender);
+        let requested = std::time::Instant::now();
+        // 排在别的请求后面时，等待时间不是这台机器的合成速度
+        let (first_max_chars, queued) = match self.inner.pacing.lock() {
+            Ok(mut pacing) => {
+                let queued = pacing.in_flight > 0;
+                pacing.in_flight += 1;
+                (pacing.first_max_chars(requested), queued)
+            }
+            Err(_) => (0, true),
+        };
         let op = Op::SynthesizeStream {
             text,
             speaker,
             speed,
+            first_max_chars,
         };
         if let Err(error) = self.enqueue(id, op, &[]) {
             self.forget(id);
+            self.finish_stream(false);
             return Err(error);
         }
+        let mut last_chunk = (!queued).then_some(requested);
         let deadline = std::time::Instant::now() + SYNTHESIZE_TIMEOUT;
+        // 接收方没了（对话被打断或合并重来）：让辅助程序放弃这一句，别占着合成线程挡住新回答
+        let mut abandoned = false;
+        let mut abandon = |helper: &Self| {
+            abandoned = true;
+            let cancel_id = helper.inner.next_id.fetch_add(1, Ordering::SeqCst);
+            let _ = helper.enqueue(cancel_id, Op::Cancel { target: id }, &[]);
+        };
         let result = loop {
             if chunks.is_closed() {
+                abandon(self);
                 break Ok(());
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -510,6 +738,15 @@ impl LocalHelper {
                 Ok((Reply::AudioChunk { sample_rate }, payload))
                     if sample_rate > 0 && payload.len() % 2 == 0 =>
                 {
+                    let now = std::time::Instant::now();
+                    if let Ok(mut pacing) = self.inner.pacing.lock() {
+                        pacing.delivered(
+                            now,
+                            last_chunk.map(|since| now.saturating_duration_since(since)),
+                            payload.len() as f64 / 2.0 / f64::from(sample_rate),
+                        );
+                    }
+                    last_chunk = Some(now);
                     if chunks
                         .send(Pcm {
                             sample_rate,
@@ -517,6 +754,7 @@ impl LocalHelper {
                         })
                         .is_err()
                     {
+                        abandon(self);
                         break Ok(());
                     }
                 }
@@ -528,7 +766,18 @@ impl LocalHelper {
             }
         };
         self.forget(id);
+        self.finish_stream(abandoned);
         result
+    }
+
+    /// 一次流式合成结束。被放弃时（对话被打断）交出去的语音已作废：下一句从“没有存货”算起。
+    fn finish_stream(&self, abandoned: bool) {
+        if let Ok(mut pacing) = self.inner.pacing.lock() {
+            pacing.in_flight = pacing.in_flight.saturating_sub(1);
+            if abandoned {
+                pacing.play_until = None;
+            }
+        }
     }
 
     /// 新的流式识别流编号。
@@ -595,7 +844,7 @@ impl LocalHelper {
     }
 }
 
-/// 本地识别（整段：SenseVoice；流式模型也可整段识别，用作流式失败时的退路）。
+/// 本地整段识别（SenseVoice / 流式模型均可整段识别，用作流式会话失败或单测直调时的退路）。
 pub struct LocalAsr {
     pub helper: LocalHelper,
 }
@@ -616,7 +865,8 @@ impl Asr for LocalAsr {
     }
 }
 
-/// 本地流式识别（流式 Zipformer）：用户开始说话即打开一路，边说边送入并解码，说完只剩最后一小段。
+/// 本地流式识别（流式 Zipformer 逐块解码；SenseVoice 在说话期间按约 0.5 秒周期增量重认已录片段）：
+/// 用户开始说话即打开一路，边说边送入并吐出中间结果，说完立即取最终文字。
 pub struct LocalStreamingAsr {
     pub helper: LocalHelper,
 }

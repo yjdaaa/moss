@@ -1072,7 +1072,10 @@ fn multipart_body(boundary: &str, model: &str, wav: &[u8]) -> Vec<u8> {
     );
     body.extend_from_slice(wav);
     body.extend_from_slice(
-        format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{boundary}--\r\n").as_bytes(),
+        format!(
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nzh\r\n--{boundary}--\r\n"
+        )
+        .as_bytes(),
     );
     body
 }
@@ -2113,7 +2116,11 @@ mod tests {
         assert!(received.head.contains("multipart/form-data; boundary="));
         let text = String::from_utf8_lossy(&received.body);
         assert!(
-            text.contains("name=\"model\"") && text.contains("whisper-1") && text.contains("RIFF")
+            text.contains("name=\"model\"")
+                && text.contains("whisper-1")
+                && text.contains("name=\"language\"")
+                && text.contains("\r\n\r\nzh\r\n")
+                && text.contains("RIFF")
         );
 
         let (base, rx) = serve_once(

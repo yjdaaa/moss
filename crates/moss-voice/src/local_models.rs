@@ -37,6 +37,17 @@ pub const DEFAULT_QWEN3_VL_2B_BASE: &str =
     "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF/resolve/main";
 pub const DEFAULT_QWEN3_VL_4B_BASE: &str =
     "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main";
+/// 本地语音合成 Qwen3-TTS 0.6B CustomVoice GGUF（Apache-2.0；speech.cpp 原生推理，n87）
+pub const DEFAULT_QWEN3_TTS_0_6B_BASE: &str =
+    "https://huggingface.co/sakasegawa/Qwen3-TTS-12Hz-0.6B-CustomVoice-GGUF/resolve/main";
+/// 新一代本地视觉模型 Qwen3.5（Unsloth GGUF，Apache-2.0；n87），与 OneJev 共用 llama.cpp 推理引擎
+pub const DEFAULT_QWEN3_5_2B_BASE: &str =
+    "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main";
+pub const DEFAULT_QWEN3_5_4B_BASE: &str =
+    "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main";
+/// 尾音语义判停 Smart Turn v3.2（BSD-2-Clause；pipecat-ai 官方 ONNX，n87）
+pub const DEFAULT_SMART_TURN_V3_BASE: &str =
+    "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main";
 /// 小智官方服务端全量动态补字分片包（`78/xiaozhi-fonts` `noto-v1-full`，SIL OFL 1.1；2026-11-12 n83）
 pub const DEFAULT_XIAOZHI_FONTS_BASE: &str = "https://files.xiaozhi.me/assets/fonts";
 pub const XIAOZHI_NOTO_V1_FULL_ID: &str = "xiaozhi_noto_v1_full";
@@ -59,7 +70,7 @@ pub enum Archive {
     },
 }
 
-/// 模型类别：判停、识别、合成、Jev 决策各选一个。
+/// 模型类别：判停、降噪、尾音判停、识别、合成、Jev 决策等各自选用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelKind {
@@ -72,9 +83,13 @@ pub enum ModelKind {
     Vision,
     /// 小智屏幕全量动态补字分片包（服务端按需抠字下发，n83）
     Font,
+    /// 前端语音降噪（GTCRN，n87）
+    Denoise,
+    /// 尾音语义判停（Smart Turn v3.2，n87）
+    Turn,
 }
 
-/// 辅助程序加载模型的方式（与 `moss-voice-local-proto` 的引擎及本地 Laya 决策服务对应）。
+/// 辅助程序加载模型的方式（与 `moss-voice-local-proto` 的引擎及本地决策/合成服务对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Engine {
@@ -84,8 +99,16 @@ pub enum Engine {
     SenseVoice,
     /// 流式识别：边说边识别
     StreamingTransducer,
+    /// Qwen3-ASR 0.6B（中英方言高精度识别，n87）
+    Qwen3Asr,
+    /// FireRedASR2-CTC（中英轻量高精度，n87）
+    FireRedAsr2Ctc,
     Kokoro,
     Matcha,
+    /// ZipVoice Distill 4 步流匹配合成（n87）
+    ZipVoice,
+    /// Qwen3-TTS 0.6B CustomVoice，由 `speech.cpp` 独立 worker 运行（n87）
+    SpeechCppTts,
     Laya,
     OneJev,
     CampPlus,
@@ -93,12 +116,21 @@ pub enum Engine {
     LlamaVision,
     /// LVGL CBIN 字形分片包（由 `moss-voice-server` 按需解析下发，不进推理子进程，n83）
     XiaozhiFont,
+    /// GTCRN 轻量神经网络降噪（n87）
+    Gtcrn,
+    /// Smart Turn v3.2 尾音语义判停（n87）
+    SmartTurn,
 }
 
 impl Engine {
     /// 是否运行在 MOSS 自动下载的 llama.cpp 推理引擎上（OneJev 与本地视觉模型共用一份）。
     pub fn uses_llama_runtime(self) -> bool {
         matches!(self, Engine::OneJev | Engine::LlamaVision)
+    }
+
+    /// 是否运行在 MOSS 自动下载的 `speech.cpp` 推理引擎上（Qwen3-TTS 使用）。
+    pub fn uses_speech_runtime(self) -> bool {
+        matches!(self, Engine::SpeechCppTts)
     }
 }
 
@@ -236,6 +268,18 @@ const QWEN3_VL_4B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
     sha256: "30ba2c7dd3127a4561b6cba9d13d0f711c91bdb38742e2f56d73c8cb596bd06d",
     size: 453_974_304,
 }];
+const QWEN3_5_2B_FILES: [&str; 2] = ["Qwen3.5-2B-Q4_K_M.gguf", "mmproj-F16.gguf"];
+const QWEN3_5_2B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
+    path: "mmproj-F16.gguf",
+    sha256: "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7",
+    size: 668_227_264,
+}];
+const QWEN3_5_4B_FILES: [&str; 2] = ["Qwen3.5-4B-Q4_K_M.gguf", "mmproj-F16.gguf"];
+const QWEN3_5_4B_EXTRAS: [ExtraFile; 1] = [ExtraFile {
+    path: "mmproj-F16.gguf",
+    sha256: "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+    size: 672_423_616,
+}];
 
 const XIAOZHI_NOTO_V1_FULL_FILES: [&str; 29] = [
     "manifest.json",
@@ -274,13 +318,15 @@ pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
     match id {
         "qwen3_vl_2b" => Some((QWEN3_VL_2B_FILES[0], QWEN3_VL_2B_FILES[1])),
         "qwen3_vl_4b" => Some((QWEN3_VL_4B_FILES[0], QWEN3_VL_4B_FILES[1])),
+        "qwen3_5_2b" => Some((QWEN3_5_2B_FILES[0], QWEN3_5_2B_FILES[1])),
+        "qwen3_5_4b" => Some((QWEN3_5_4B_FILES[0], QWEN3_5_4B_FILES[1])),
         _ => None,
     }
 }
 
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 16] = [
+pub const CATALOG: [ModelSpec; 24] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker,
@@ -327,8 +373,8 @@ pub const CATALOG: [ModelSpec; 16] = [
         id: "sense_voice",
         kind: ModelKind::Asr,
         engine: Engine::SenseVoice,
-        label: "SenseVoice 识别 2024 版（中英粤日韩）",
-        note: "说完后整段识别，一句约 0.1 秒，带标点；支持中、英、粤、日、韩。",
+        label: "SenseVoice 识别 2024 版（中英）",
+        note: "说话期间约每半秒增量重认一次，说完收尾约 0.1 秒，带标点；固定中文模式（可夹杂英文单词，避免短句误判粤/日/韩）。",
         path: "asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
         sha256: "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
         size: 163_002_883,
@@ -343,8 +389,8 @@ pub const CATALOG: [ModelSpec; 16] = [
         id: "sense_voice_2025",
         kind: ModelKind::Asr,
         engine: Engine::SenseVoice,
-        label: "SenseVoice 识别 2025 版（中英粤日韩）",
-        note: "2024 版的官方更新版，用法相同，一句约 0.15 秒；本机实测输出不带标点（不影响对话）。",
+        label: "SenseVoice 识别 2025 粤语增强版（不带标点）",
+        note: "不是 2024 版的升级：在 2024 版上用 2.18 万小时粤语数据微调而成（ASLP-lab WSYue-ASR），粤语更准，输出不带标点。说普通话请用 2024 版；同样支持说话期间约每半秒增量重认，说完收尾约 0.15 秒。",
         path: "asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2",
         sha256: "7305f7905bfcf77fa0b39388a313f3da35c68d971661a65475b56fb2162c8e63",
         size: 165_783_878,
@@ -383,8 +429,9 @@ pub const CATALOG: [ModelSpec; 16] = [
         label: "Kokoro 合成 v1.0（中英，多音色）",
         note: "音质自然，8 个中文音色；体积大，本机合成 1 秒语音约需 0.5 秒。",
         path: "tts-models/kokoro-multi-lang-v1_0.tar.bz2",
-        sha256: "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298",
-        size: 349_906_910,
+        // 2026-10-26 官方以原文件名重新上传（内容目录不变），2026-11-14 实际下载核对
+        sha256: "60703707bc05ccd48d60e1eb723f38b07d6e474795a0b6a588d7220400e0f7a4",
+        size: 349_886_476,
         archive: Archive::TarBz2 {
             dir: "kokoro-multi-lang-v1_0",
         },
@@ -411,8 +458,9 @@ pub const CATALOG: [ModelSpec; 16] = [
         label: "Kokoro 合成 v1.1 int8（中英，100 个中文音色）",
         note: "中文音色最多，体积不到 v1.0 的一半；但本机合成偏慢（1 秒语音约需 1 秒），慢电脑上等待明显。",
         path: "tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
-        sha256: "a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6",
-        size: 147_031_220,
+        // 2026-10-26 官方以原文件名重新上传（内容目录不变），2026-11-14 实际下载核对
+        sha256: "259c9c8bc906d6078e4e0570421885dabb68b539c2f970fcbb890a58eeaf3e9c",
+        size: 147_052_523,
         archive: Archive::TarBz2 {
             dir: "kokoro-int8-multi-lang-v1_1",
         },
@@ -574,6 +622,162 @@ pub const CATALOG: [ModelSpec; 16] = [
             base_url: DEFAULT_XIAOZHI_FONTS_BASE,
         },
         required: &XIAOZHI_NOTO_V1_FULL_FILES,
+        extras: &[],
+        voices: None,
+    },
+    ModelSpec {
+        id: "qwen3_tts_0_6b",
+        kind: ModelKind::Tts,
+        engine: Engine::SpeechCppTts,
+        label: "Qwen3-TTS 0.6B CustomVoice（高自然度中文）",
+        note: "Apache-2.0（Q8_0，约 1.2 GB）；开源中文自然度与韵律接近豆包，支持 9 个原生音色；由 speech.cpp 原生离线加速运行（Mac Metal / Win Vulkan，固定原生语速），免装 Python。",
+        path: "Qwen3-TTS-12Hz-0.6B-CustomVoice-Q8_0.gguf",
+        sha256: "f606ea3981aa42762b16db9a94826d2d560eb60f0b102001618f40d5a2f78cc6",
+        size: 1_213_534_464,
+        archive: Archive::Directory {
+            dir: "qwen3-tts-0.6b-customvoice",
+            base_url: DEFAULT_QWEN3_TTS_0_6B_BASE,
+        },
+        required: &["Qwen3-TTS-12Hz-0.6B-CustomVoice-Q8_0.gguf"],
+        extras: &[],
+        voices: Some(Voices {
+            default: 0,
+            max: 8,
+            hint: "0 Vivian 女声（默认），1 Serena 女声，2 Uncle_Fu 老傅男声，3 Dylan 北京男声，4 Eric 四川男声；5 Ryan / 6 Aiden 英文男声；7 Ono_Anna 日语女声；8 Sohee 韩语女声",
+        }),
+    },
+    ModelSpec {
+        id: "zipvoice_distill",
+        kind: ModelKind::Tts,
+        engine: Engine::ZipVoice,
+        label: "ZipVoice Distill（中英 4 步极速合成）",
+        note: "权重 CC-BY-NC-4.0 仅限非商用 / 代码 Apache-2.0（约 163 MB 含 Vocos 声码器）；4 步流匹配采样，中文节奏与重音清晰自然，支持标准/柔和两套女声预设参考音。",
+        path: "tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2",
+        sha256: "77219c8b40f4ee8d73a7f902305ff6c1128ef9b54461c41b4ca6ed890b6c2803",
+        size: 109_162_785,
+        archive: Archive::TarBz2 {
+            dir: "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia",
+        },
+        required: &[
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "tokens.txt",
+            "lexicon.txt",
+            "espeak-ng-data",
+            "vocos_24khz.onnx",
+            "test_wavs/news-female.wav",
+            "test_wavs/news-female-2.wav",
+        ],
+        extras: &[ExtraFile {
+            path: "vocoder-models/vocos_24khz.onnx",
+            sha256: "bcb3b970e384161c4d634f0bb9e999ff1c471b34c9bc0b1049a5014065ed3cc0",
+            size: 54_157_409,
+        }],
+        voices: Some(Voices {
+            default: 0,
+            max: 1,
+            hint: "0 标准新闻女声（默认），1 柔和新闻女声",
+        }),
+    },
+    ModelSpec {
+        id: "qwen3_asr_0_6b",
+        kind: ModelKind::Asr,
+        engine: Engine::Qwen3Asr,
+        label: "Qwen3-ASR 0.6B（中英方言高精度识别）",
+        note: "Apache-2.0（int8，约 879 MB）；中文普通话、中英混读、常见方言及激光工坊术语识别率显著高于 SenseVoice，说话期间每半秒增量出字。",
+        path: "asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2",
+        sha256: "393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96",
+        size: 878_702_423,
+        archive: Archive::TarBz2 {
+            dir: "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25",
+        },
+        required: &[
+            "conv_frontend.onnx",
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "tokenizer",
+        ],
+        extras: &[],
+        voices: None,
+    },
+    ModelSpec {
+        id: "firered_asr2_ctc",
+        kind: ModelKind::Asr,
+        engine: Engine::FireRedAsr2Ctc,
+        label: "FireRedASR2-CTC（中英轻量高精度）",
+        note: "Apache-2.0（int8，约 521 MB）；小红书开源新一代非自回归模型，中英精度高于 SenseVoice 且体积比 Qwen3-ASR 更轻，说话期间每半秒增量出字。",
+        path: "asr-models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2",
+        sha256: "1da8b737ecc5e29f36759a4460c754863e7c919a4ba325aea187331fbfc83274",
+        size: 520_516_278,
+        archive: Archive::TarBz2 {
+            dir: "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25",
+        },
+        required: &["model.int8.onnx", "tokens.txt"],
+        extras: &[],
+        voices: None,
+    },
+    ModelSpec {
+        id: "qwen3_5_2b",
+        kind: ModelKind::Vision,
+        engine: Engine::LlamaVision,
+        label: "Qwen3.5 · 2B 本地视觉（新一代，约 1.9 GB）",
+        note: "Apache-2.0；Unsloth Q4_K_M + mmproj-F16，断网看图、认材料与铭牌读字比 Qwen3-VL 同档更准；与 OneJev 共用 llama.cpp 推理引擎。",
+        path: "Qwen3.5-2B-Q4_K_M.gguf",
+        sha256: "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+        size: 1_280_835_840,
+        archive: Archive::Directory {
+            dir: "qwen3.5-2b-q4_k_m",
+            base_url: DEFAULT_QWEN3_5_2B_BASE,
+        },
+        required: &QWEN3_5_2B_FILES,
+        extras: &QWEN3_5_2B_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
+        id: "qwen3_5_4b",
+        kind: ModelKind::Vision,
+        engine: Engine::LlamaVision,
+        label: "Qwen3.5 · 4B 本地视觉（新一代高精度，约 3.4 GB）",
+        note: "Apache-2.0；Unsloth Q4_K_M + mmproj-F16，复杂工件排版、模糊标签与中英文细节识别更稳；适合 16 GB+ 内存或独显。",
+        path: "Qwen3.5-4B-Q4_K_M.gguf",
+        sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        size: 2_740_937_888,
+        archive: Archive::Directory {
+            dir: "qwen3.5-4b-q4_k_m",
+            base_url: DEFAULT_QWEN3_5_4B_BASE,
+        },
+        required: &QWEN3_5_4B_FILES,
+        extras: &QWEN3_5_4B_EXTRAS,
+        voices: None,
+    },
+    ModelSpec {
+        id: "gtcrn_simple",
+        kind: ModelKind::Denoise,
+        engine: Engine::Gtcrn,
+        label: "GTCRN 实时前端语音降噪（0.5 MB）",
+        note: "超轻量流式神经降噪（16 kHz / CPU 几乎零耗时），有效压制激光机风扇、抽风泵与车间环境底噪（默认关闭，需手动开启）。",
+        path: "speech-enhancement-models/gtcrn_simple.onnx",
+        sha256: "e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534",
+        size: 535_638,
+        archive: Archive::File,
+        required: &[],
+        extras: &[],
+        voices: None,
+    },
+    ModelSpec {
+        id: "smart_turn_v3",
+        kind: ModelKind::Turn,
+        engine: Engine::SmartTurn,
+        label: "Smart Turn v3.2 尾音语义判停（8.7 MB）",
+        note: "BSD-2-Clause（int8 CPU，约 8.7 MB）；结合语音停顿声学韵律区分“只是想一想”与真说完，未说完自动延长等待避免抢话；停止指令仍 0 延迟（默认关闭）。",
+        path: "smart-turn-v3.2-cpu.onnx",
+        sha256: "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f",
+        size: 8_679_182,
+        archive: Archive::Directory {
+            dir: "smart-turn-v3",
+            base_url: DEFAULT_SMART_TURN_V3_BASE,
+        },
+        required: &["smart-turn-v3.2-cpu.onnx"],
         extras: &[],
         voices: None,
     },
@@ -785,7 +989,13 @@ impl ModelManager {
                     label: spec.label,
                     note: spec.note,
                     size: spec.download_size(),
-                    streaming: spec.engine == Engine::StreamingTransducer,
+                    streaming: matches!(
+                        spec.engine,
+                        Engine::StreamingTransducer
+                            | Engine::SenseVoice
+                            | Engine::Qwen3Asr
+                            | Engine::FireRedAsr2Ctc
+                    ),
                     voices: spec.voices,
                     installed: installed(root, spec),
                     progress: tasks.get(spec.id).map(|task| task.progress.clone()),
@@ -856,21 +1066,29 @@ impl ModelManager {
         removed
     }
 
-    /// 同一目录下是否还有已安装或正在下载的 OneJev（决定能否删掉共用的推理引擎）。
-    fn onejev_still_needed(&self, root: &Path) -> bool {
+    /// 同一目录下是否还有已安装或正在下载且需要 llama.cpp / speech.cpp 运行时的模型。
+    fn runtime_still_needed(&self, root: &Path, uses_runtime: impl Fn(Engine) -> bool) -> bool {
         let tasks = self
             .tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         CATALOG
             .iter()
-            .filter(|spec| spec.engine.uses_llama_runtime() && self.root_for(spec.id) == root)
+            .filter(|spec| uses_runtime(spec.engine) && self.root_for(spec.id) == root)
             .any(|spec| {
                 installed(root, spec)
                     || tasks
                         .get(spec.id)
                         .is_some_and(|task| Self::busy(&task.progress))
             })
+    }
+
+    fn onejev_still_needed(&self, root: &Path) -> bool {
+        self.runtime_still_needed(root, Engine::uses_llama_runtime)
+    }
+
+    fn speech_still_needed(&self, root: &Path) -> bool {
+        self.runtime_still_needed(root, Engine::uses_speech_runtime)
     }
 
     /// 开始下载（后台线程）。`base` 为发布地址或镜像。
@@ -999,6 +1217,9 @@ impl ModelManager {
         }
         if spec.engine.uses_llama_runtime() && !self.onejev_still_needed(&root) {
             crate::onejev::remove_managed_runtime(&root)?;
+        }
+        if spec.engine.uses_speech_runtime() && !self.speech_still_needed(&root) {
+            crate::speech_cpp::remove_managed_runtime(&root)?;
         }
         Ok(())
     }
@@ -1134,19 +1355,30 @@ fn run_download(
         .collect();
     let total = spec.download_size();
     let result = (|| {
-        if spec.engine.uses_llama_runtime() && !bases.iter().any(|b| is_loopback_test_base(b)) {
-            crate::onejev::ensure_llama_runtime(
-                root,
-                bases.first().map(String::as_str),
-                cancel,
-                &|progress| match progress {
-                    crate::onejev::RuntimeProgress::Waiting => report(Progress::WaitingRuntime),
-                    crate::onejev::RuntimeProgress::Downloading { done, total } => {
-                        report(Progress::PreparingRuntime { done, total })
-                    }
-                },
-            )?;
-            report(Progress::Downloading { done: 0, total });
+        let report_runtime = |progress: crate::onejev::RuntimeProgress| match progress {
+            crate::onejev::RuntimeProgress::Waiting => report(Progress::WaitingRuntime),
+            crate::onejev::RuntimeProgress::Downloading { done, total } => {
+                report(Progress::PreparingRuntime { done, total })
+            }
+        };
+        if !bases.iter().any(|b| is_loopback_test_base(b)) {
+            if spec.engine.uses_llama_runtime() {
+                crate::onejev::ensure_llama_runtime(
+                    root,
+                    bases.first().map(String::as_str),
+                    cancel,
+                    &report_runtime,
+                )?;
+                report(Progress::Downloading { done: 0, total });
+            } else if spec.engine.uses_speech_runtime() {
+                crate::speech_cpp::ensure_speech_runtime(
+                    root,
+                    bases.first().map(String::as_str),
+                    cancel,
+                    &report_runtime,
+                )?;
+                report(Progress::Downloading { done: 0, total });
+            }
         }
         let mut offset = 0;
         for (item, part) in items.iter().zip(&parts) {
@@ -1970,12 +2202,19 @@ mod tests {
             }
             let kind = match spec.engine {
                 Engine::SileroVad | Engine::TenVad => ModelKind::Vad,
-                Engine::SenseVoice | Engine::StreamingTransducer => ModelKind::Asr,
-                Engine::Kokoro | Engine::Matcha => ModelKind::Tts,
+                Engine::SenseVoice
+                | Engine::StreamingTransducer
+                | Engine::Qwen3Asr
+                | Engine::FireRedAsr2Ctc => ModelKind::Asr,
+                Engine::Kokoro | Engine::Matcha | Engine::ZipVoice | Engine::SpeechCppTts => {
+                    ModelKind::Tts
+                }
                 Engine::Laya | Engine::OneJev => ModelKind::Jev,
                 Engine::CampPlus => ModelKind::Speaker,
                 Engine::LlamaVision => ModelKind::Vision,
                 Engine::XiaozhiFont => ModelKind::Font,
+                Engine::Gtcrn => ModelKind::Denoise,
+                Engine::SmartTurn => ModelKind::Turn,
             };
             assert_eq!(spec.kind, kind, "{} 的引擎与类别一致", spec.id);
         }
@@ -2271,5 +2510,40 @@ mod local_vision_catalog_tests {
             fs::read(root.join("noto_v1_full/20_4/cjk_sc.cbin")).unwrap(),
             b"cbin-bytes"
         );
+    }
+
+    #[test]
+    fn n87_models_have_expected_kinds_runtimes_and_files() {
+        for id in ["qwen3_5_2b", "qwen3_5_4b"] {
+            let spec = spec_of(id, ModelKind::Vision).expect(id);
+            assert!(spec.engine.uses_llama_runtime());
+            let (gguf, mmproj) = vision_model_files(id).unwrap();
+            assert_eq!(gguf, spec.path);
+            assert_eq!(spec.required, &[gguf, mmproj]);
+        }
+
+        let qwen_tts = spec_of("qwen3_tts_0_6b", ModelKind::Tts).unwrap();
+        assert_eq!(qwen_tts.engine, Engine::SpeechCppTts);
+        assert!(qwen_tts.engine.uses_speech_runtime());
+        assert!(!qwen_tts.engine.uses_llama_runtime());
+        assert_eq!(qwen_tts.voices.unwrap().max, 8);
+
+        let zipvoice = spec_of("zipvoice_distill", ModelKind::Tts).unwrap();
+        assert_eq!(zipvoice.engine, Engine::ZipVoice);
+        assert_eq!(zipvoice.voices.unwrap().max, 1);
+        assert_eq!(zipvoice.download_size(), 109_162_785 + 54_157_409);
+
+        let qwen_asr = spec_of("qwen3_asr_0_6b", ModelKind::Asr).unwrap();
+        assert_eq!(qwen_asr.engine, Engine::Qwen3Asr);
+        let firered = spec_of("firered_asr2_ctc", ModelKind::Asr).unwrap();
+        assert_eq!(firered.engine, Engine::FireRedAsr2Ctc);
+
+        let gtcrn = spec_of("gtcrn_simple", ModelKind::Denoise).unwrap();
+        assert_eq!(gtcrn.engine, Engine::Gtcrn);
+        assert_eq!(gtcrn.archive, Archive::File);
+
+        let turn = spec_of("smart_turn_v3", ModelKind::Turn).unwrap();
+        assert_eq!(turn.engine, Engine::SmartTurn);
+        assert_eq!(turn.required, &["smart-turn-v3.2-cpu.onnx"]);
     }
 }

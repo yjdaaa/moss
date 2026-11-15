@@ -211,6 +211,9 @@ pub struct ContextService {
 
 /// Always-on profile lines per voice turn (see `style_preferences`).
 pub const PROFILE_LIMIT: usize = 3;
+/// 每轮都带上的“用户档案”（见 `pinned_facts`）：最多条数与总字数。
+pub const PINNED_LIMIT: usize = 12;
+pub const PINNED_CHARS: usize = 600;
 
 fn new_id() -> Result<String, ServiceError> {
     let mut bytes = [0u8; 16];
@@ -465,6 +468,9 @@ impl ContextService {
         let _gate = self.lock()?;
         let record = self.managed(access, id, expected_revision)?;
         transition(record.verification, to, evidence)?;
+        if to == Verification::Confirmed {
+            check_content(&record.content)?;
+        }
         let supersedes = record.supersedes.clone();
         let (scope, category) = (record.scope.clone(), record.category);
         let patch = MemoryPatch {
@@ -575,6 +581,46 @@ impl ContextService {
                 .is_none_or(|slot| slots.insert(slot))
         });
         rows.truncate(PROFILE_LIMIT);
+        rows
+    }
+
+    /// 用户档案：用户在界面里亲手写下（`UserEdit`）并且已确认的偏好与设备事实，每轮都带上，
+    /// 不需要这一句话里碰巧有字面重合才想得起来。新的在前，受 `PINNED_LIMIT` / `PINNED_CHARS` 限制；
+    /// `skip` 里的（已在常驻画像里）不重复。对话里自动提取的候选不算——只有用户自己写的才常驻。
+    pub fn pinned_facts(
+        &self,
+        access: &AccessContext,
+        device: Option<&Applicability>,
+        now: f64,
+        skip: &[String],
+    ) -> Vec<ContextMemory> {
+        let superseded = self.superseded_ids(access, now);
+        let device_match = device.map(|d| (d.device_model(), d.firmware()));
+        let mut rows: Vec<ContextMemory> = [ScopeKind::Person, ScopeKind::Device]
+            .into_iter()
+            .filter_map(|kind| access.scope_of(kind))
+            .filter_map(|scope| self.list(access, scope.key(), now).ok())
+            .flatten()
+            .filter(|r| {
+                r.source.kind() == SourceKind::UserEdit
+                    && matches!(r.category, Category::Preference | Category::DeviceFact)
+                    && r.usable_as_fact(access, now, device_match)
+                    && !superseded.contains(&r.id)
+                    && !skip.contains(&r.id)
+            })
+            .collect();
+        rows.sort_by(|a, b| b.updated_at.total_cmp(&a.updated_at));
+        rows.dedup_by(|a, b| a.id == b.id);
+        let mut budget = PINNED_CHARS;
+        rows.retain(|r| {
+            let length = r.content.chars().count();
+            let fits = length <= budget;
+            if fits {
+                budget -= length;
+            }
+            fits
+        });
+        rows.truncate(PINNED_LIMIT);
         rows
     }
 

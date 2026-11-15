@@ -487,6 +487,36 @@ mod tests {
         assert_eq!(list[0].device_id, "cc:dd", "最近来访的在前");
     }
 
+    /// USB 物理配网：重绑空/旧 Client-Id、保留已记录的真实板型与固件版本。
+    #[test]
+    fn bind_usb_voice_device_rebinds_client_and_preserves_board_model() {
+        let db = RuntimeDb::open_memory().unwrap();
+        db.voice_device_seen(
+            "10:20:30:40:50:60",
+            "",
+            "bread-compact-wifi-lcd",
+            "2.2.4",
+            "192.0.2.5",
+            10.0,
+        )
+        .unwrap();
+        let rebound = db
+            .bind_usb_voice_device("10:20:30:40:50:60", "uuid-usb-1", "esp32s3", 20.0)
+            .unwrap();
+        assert_eq!(rebound.client_id, "uuid-usb-1");
+        assert_eq!(rebound.status, VOICE_DEVICE_ALLOWED);
+        assert_eq!(rebound.model, "bread-compact-wifi-lcd");
+        assert_eq!(rebound.firmware_version, "2.2.4");
+        assert_eq!(rebound.decided_at, Some(20.0));
+
+        // 同 Client-Id 二次 USB 改 Wi-Fi 不刷新 decided_at（保留 NV19 授权代次）
+        let updated = db
+            .bind_usb_voice_device("10:20:30:40:50:60", "uuid-usb-1", "esp32s3", 30.0)
+            .unwrap();
+        assert_eq!(updated.decided_at, Some(20.0));
+        assert_eq!(updated.model, "bread-compact-wifi-lcd");
+    }
+
     /// v5：已是 v4 的库升级后 approvals 增加 request 列，旧行的 request 为空、仍能读出。
     #[test]
     fn schema_v5_adds_request_column_to_v4_database() {

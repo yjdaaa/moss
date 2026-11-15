@@ -1650,6 +1650,83 @@ impl RuntimeDb {
         Ok(record)
     }
 
+    /// 物理 USB 配网后按芯片 MAC 重绑 `client_id` 并设为已允许，同时保留原本已知的板型（仅在空 `model` 时填芯片名）。
+    pub fn bind_usb_voice_device(
+        &self,
+        device_id: &str,
+        client_id: &str,
+        fallback_model: &str,
+        now: f64,
+    ) -> Result<VoiceDeviceRecord, SchemaError> {
+        if device_id.trim().is_empty() || client_id.trim().is_empty() {
+            return Err(SchemaError::InvalidRecord(
+                "设备 MAC 与 Client-Id 不能为空".into(),
+            ));
+        }
+        let tx = self.connection.unchecked_transaction()?;
+        let existing = tx
+            .query_row(
+                &format!("SELECT {VOICE_DEVICE_COLUMNS} FROM voice_devices WHERE device_id=?1"),
+                [device_id],
+                voice_device_from_row,
+            )
+            .optional()?;
+        match existing {
+            None => {
+                tx.execute(
+                    "INSERT INTO voice_devices(device_id, client_id, status, model, firmware_version, last_ip, first_seen, last_seen, decided_at)
+                     VALUES(?1, ?2, ?3, ?4, '', '', ?5, ?5, ?5)",
+                    params![
+                        device_id,
+                        client_id,
+                        VOICE_DEVICE_ALLOWED,
+                        fallback_model,
+                        now
+                    ],
+                )?;
+            }
+            Some(record) => {
+                let rebinding = record.client_id != client_id;
+                let next_model = if record.model.trim().is_empty() {
+                    fallback_model.to_owned()
+                } else {
+                    record.model
+                };
+                let decided_at = if record.status == VOICE_DEVICE_ALLOWED && !rebinding {
+                    record.decided_at.unwrap_or(now)
+                } else {
+                    now
+                };
+                tx.execute(
+                    "UPDATE voice_devices SET client_id=?2, status=?3, model=?4, last_seen=?5, decided_at=?6
+                     WHERE device_id=?1",
+                    params![
+                        device_id,
+                        client_id,
+                        VOICE_DEVICE_ALLOWED,
+                        next_model,
+                        now,
+                        decided_at
+                    ],
+                )?;
+                if rebinding {
+                    tx.execute(
+                        "UPDATE approvals SET status='expired', updated_at=?2
+                         WHERE source='voice' AND session_id=?1 AND status IN ('pending','approved')",
+                        params![device_id, now],
+                    )?;
+                }
+            }
+        }
+        let record = tx.query_row(
+            &format!("SELECT {VOICE_DEVICE_COLUMNS} FROM voice_devices WHERE device_id=?1"),
+            [device_id],
+            voice_device_from_row,
+        )?;
+        tx.commit()?;
+        Ok(record)
+    }
+
     /// 记录设备快照（schema 14）。未知种类或超长 JSON 返回 `false`，不写库也不报错。
     pub fn voice_device_snapshot(
         &self,

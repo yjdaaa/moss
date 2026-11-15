@@ -17,6 +17,7 @@ mod guide;
 mod mqtt;
 mod music;
 mod person;
+mod playback;
 mod screen;
 
 #[derive(Default)]
@@ -742,7 +743,10 @@ fn answer_is_spoken_sentence_by_sentence_with_synced_text_and_history() {
     );
     let seen = fakes.llm.seen.lock().unwrap();
     let (second, tools) = &seen[1];
-    assert_eq!(*tools, 1, "工具定义随请求发送");
+    assert_eq!(
+        *tools, 2,
+        "工具定义随请求发送（含宿主保留的 end_conversation）"
+    );
     let roles: Vec<Role> = second.iter().map(|message| message.role).collect();
     assert_eq!(
         roles,
@@ -828,9 +832,10 @@ fn endless_tool_calls_stop_after_five_rounds() {
     let mut device = chat_device(&server, &registry, 1);
     speak_manual(&mut device, 1, 600);
     let spoken = texts(&collect_items(&mut device));
+    // 超过设备一行的句子按屏宽分段显示，拼起来是原句
     assert_eq!(
-        spoken[2],
-        format!("句:{}", ConversationSettings::default().error_reply)
+        spoken[2..4].concat().replace("句:", ""),
+        ConversationSettings::default().error_reply
     );
     assert_eq!(
         fakes.llm.seen.lock().unwrap().len(),
@@ -860,14 +865,15 @@ fn model_errors_and_failed_sentences_are_handled() {
         start_chat(llm, &["你好", "再试一次"], Duration::from_secs(120));
     let mut device = chat_device(&server, &registry, 1);
     speak_manual(&mut device, 1, 600);
-    let reply = ConversationSettings::default().error_reply;
+    // 错误提示超过设备一行（320 px、20 px 字号约 14 个汉字），字幕在标点处分成两段随音频先后显示
     assert_eq!(
         texts(&collect_items(&mut device)),
         vec![
-            "听:你好".to_owned(),
-            "tts:start".into(),
-            format!("句:{reply}"),
-            "tts:stop".into()
+            "听:你好",
+            "tts:start",
+            "句:抱歉，我这边出了点问题，",
+            "句:请稍后再试",
+            "tts:stop"
         ]
     );
     assert!(
@@ -890,6 +896,98 @@ fn model_errors_and_failed_sentences_are_handled() {
             "tts:stop"
         ]
     );
+}
+
+/// 退出词前后带称呼或语气词也算整句退出；否定句、带其他内容的话留给大模型。
+#[test]
+fn exit_phrases_tolerate_address_and_particles_but_not_other_content() {
+    for (heard, exits) in [
+        ("退下吧。", true),
+        ("小智，退下", true),
+        ("好了你退下吧", true),
+        ("那你先去休息吧", true),
+        ("没事了", true),
+        ("不要退下", false),
+        ("退出登录", false),
+        ("帮我退下刀头", false),
+    ] {
+        let (server, registry, fakes) =
+            start_chat(FakeLlm::default(), &[heard], Duration::from_secs(120));
+        let mut device = chat_device(&server, &registry, 1);
+        speak_manual(&mut device, 1, 600);
+        let _ = collect_items(&mut device);
+        assert_eq!(fakes.llm.seen.lock().unwrap().is_empty(), exits, "{heard}");
+        if exits {
+            expect_closed(&mut device);
+        }
+    }
+}
+
+/// 没命中退出词时，大模型调用宿主保留的 end_conversation：说完告别语后结束对话，同轮其他工具不执行。
+#[test]
+fn model_can_end_the_conversation_with_the_reserved_tool() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([Round::Reply {
+            deltas: Vec::new(),
+            calls: vec![
+                ToolCall::new(
+                    "call-exit",
+                    "end_conversation",
+                    r#"{"farewell":"好的，您忙"}"#,
+                ),
+                ToolCall::new("call-other", "announce", "{}"),
+            ],
+            delay_ms: 0,
+        }])),
+        ..FakeLlm::default()
+    };
+    let (server, registry, fakes) = start_chat(llm, &["我先去忙别的了"], Duration::from_secs(120));
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 600);
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec![
+            "听:我先去忙别的了",
+            "tts:start",
+            "句:好的，您忙",
+            "tts:stop"
+        ]
+    );
+    expect_closed(&mut device);
+    assert_eq!(fakes.llm.seen.lock().unwrap().len(), 1, "不再回问大模型");
+    assert!(
+        fakes.tools.calls.lock().unwrap().is_empty(),
+        "同轮其他工具不执行"
+    );
+    drop(server);
+}
+
+/// 官方固件收到 tts start 后要经主任务调度才切到说话状态，此前到达的音频帧会被丢弃：
+/// 首帧音频不得早于保护间隔。
+#[test]
+fn first_audio_frame_waits_for_the_device_to_enter_speaking() {
+    let (server, registry, _fakes) =
+        start_chat(FakeLlm::default(), &["你好"], Duration::from_secs(120));
+    let mut device = chat_device(&server, &registry, 1);
+    speak_manual(&mut device, 1, 600);
+    let mut started = None;
+    let gap = loop {
+        match device.read().unwrap() {
+            Message::Text(text) => {
+                let value: Value = serde_json::from_str(text.as_str()).unwrap();
+                if value["type"] == "tts" && value["state"] == "start" {
+                    started = Some(Instant::now());
+                }
+            }
+            Message::Binary(_) => break started.expect("音频帧先于 tts start").elapsed(),
+            _ => {}
+        }
+    };
+    assert!(
+        gap >= Duration::from_millis(150),
+        "首帧距 tts start 仅 {gap:?}"
+    );
+    drop(server);
 }
 
 #[test]
@@ -988,6 +1086,251 @@ fn abort_cancels_turn_and_keeps_partial_history() {
             .starts_with("第一句。"),
         "已播的句子记入历史"
     );
+}
+
+/// 话说一半停顿被判停后，在小智开口前接着说（官方服务端思考期间照常收音）：
+/// 放弃还没开口的回答，前半句与后半句拼成一段重新识别，前半句不单独进历史。
+#[test]
+fn speaking_on_while_thinking_merges_both_halves_into_one_turn() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            Round::Reply {
+                deltas: vec!["只听到半句的回答。"],
+                calls: Vec::new(),
+                delay_ms: 3000,
+            },
+            say(&["完整的回答。"]),
+        ])),
+        ..FakeLlm::default()
+    };
+    let (server, registry, fakes) = start_chat(
+        llm,
+        &["帮我把功率", "帮我把功率调到八十"],
+        Duration::from_secs(120),
+    );
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut first = tone(UP, 300.0, 600, 8000.0);
+    first.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&first));
+    assert_eq!(read_json(&mut device)["text"], "帮我把功率");
+    // 大模型还在想：设备仍在聆听状态并继续上传，用户接着把话说完
+    let mut second = tone(UP, 300.0, 600, 8000.0);
+    second.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&second));
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec![
+            "听:帮我把功率调到八十",
+            "tts:start",
+            "句:完整的回答。",
+            "tts:stop"
+        ]
+    );
+    let heard = fakes.asr.heard.lock().unwrap().clone();
+    assert_eq!(heard.len(), 2);
+    assert!(
+        heard[1] > heard[0] + UP as usize / 2,
+        "第二次识别的是前半句 + 后半句：{heard:?}"
+    );
+    let seen = fakes.llm.seen.lock().unwrap();
+    let users: Vec<_> = seen
+        .last()
+        .unwrap()
+        .0
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .filter_map(|message| message.content.clone())
+        .collect();
+    assert_eq!(users, vec!["帮我把功率调到八十"], "前半句不单独进历史");
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|event| event.text.starts_with("思考中用户接着说"))
+    );
+}
+
+/// 抢跑：静音 250 ms 就开始识别与请求大模型，但这句话明显没说完时先扣住——不开口、不执行工具；
+/// 用户接着说完，合并重来，被放弃的那一轮里大模型发起的工具调用一次都没执行。
+#[test]
+fn unfinished_sentence_is_held_and_its_tool_call_never_runs_when_the_user_continues() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([call("get_time"), say(&["调好了。"])])),
+        ..FakeLlm::default()
+    };
+    let (server, registry, fakes) = start_chat(
+        llm,
+        &["帮我把功率调到", "帮我把功率调到八十"],
+        Duration::from_secs(120),
+    );
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut half = tone(UP, 300.0, 600, 8000.0);
+    half.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&half));
+    assert_eq!(read_json(&mut device)["text"], "帮我把功率调到");
+    // 大模型瞬间就要调工具，但这句话停在“调到”上：闸门没放行
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(fakes.tools.calls.lock().unwrap().is_empty());
+    send_audio(&mut device, 1, &uplink(&half));
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec![
+            "听:帮我把功率调到八十",
+            "tts:start",
+            "句:调好了。",
+            "tts:stop"
+        ]
+    );
+    assert!(
+        fakes.tools.calls.lock().unwrap().is_empty(),
+        "被放弃那一轮的工具调用没有执行"
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|event| event.text.contains("像是还没说完"))
+    );
+}
+
+/// 抢跑扣住时大模型调用了保留工具 `end_conversation`：在闸门放行前不能发告别语音或结束会话；
+/// 用户紧接着说完后，被放弃那一轮的 `end_conversation` 不会生效。
+#[test]
+fn held_turn_gates_end_conversation_until_release() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            call("end_conversation"),
+            say(&["灯已关。"]),
+        ])),
+        ..FakeLlm::default()
+    };
+    let (server, registry, fakes) = start_chat(
+        llm,
+        &["不用了帮我把", "不用了帮我把灯关掉", "现在几点"],
+        Duration::from_secs(120),
+    );
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut half = tone(UP, 300.0, 600, 8000.0);
+    half.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&half));
+    assert_eq!(read_json(&mut device)["text"], "不用了帮我把");
+    // 大模型立刻返回了 end_conversation，但句子停在“把”上：闸门未放行前绝不合成告别语也不关会话
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        fakes.tts.said.lock().unwrap().is_empty(),
+        "未放行前不能由 end_conversation 触发告别语合成"
+    );
+    send_audio(&mut device, 1, &uplink(&half));
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec![
+            "听:不用了帮我把灯关掉",
+            "tts:start",
+            "句:灯已关。",
+            "tts:stop"
+        ]
+    );
+    assert_eq!(fakes.tts.said.lock().unwrap().as_slice(), ["灯已关。"]);
+    // 会话没有被上一轮作废的 end_conversation 关闭，还能继续下一轮对话
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut next = tone(UP, 300.0, 600, 8000.0);
+    next.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&next));
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec!["听:现在几点", "tts:start", "句:好的。", "tts:stop"]
+    );
+}
+
+/// 明显没说完但用户确实不说了：到点照常回应，工具只执行一次；明显说完的句子不额外等待。
+#[test]
+fn held_turn_is_released_on_time_and_complete_sentences_are_not_held() {
+    for (heard, min_ms, max_ms) in [("帮我把功率调到", 900, 2500), ("现在几点了", 0, 700)]
+    {
+        let llm = FakeLlm {
+            rounds: Mutex::new(VecDeque::from([call("get_time"), say(&["十二点。"])])),
+            ..FakeLlm::default()
+        };
+        let (server, registry, fakes) = start_chat(llm, &[heard], Duration::from_secs(120));
+        let mut device = chat_device(&server, &registry, 1);
+        send_json(
+            &mut device,
+            r#"{"type":"listen","state":"start","mode":"auto"}"#,
+        );
+        let mut pcm = tone(UP, 300.0, 600, 8000.0);
+        pcm.extend(silence(UP, 600));
+        send_audio(&mut device, 1, &uplink(&pcm));
+        assert_eq!(read_json(&mut device)["text"], heard);
+        let heard_at = Instant::now();
+        loop {
+            if let Message::Text(text) = device.read().unwrap()
+                && text.as_str().contains("\"start\"")
+                && text.as_str().contains("\"tts\"")
+            {
+                break;
+            }
+        }
+        let waited = heard_at.elapsed().as_millis();
+        assert!(
+            (min_ms..=max_ms).contains(&waited),
+            "{heard}：识别完到开口 {waited} ms"
+        );
+        let _ = collect_items(&mut device);
+        assert_eq!(fakes.tools.calls.lock().unwrap().len(), 1, "{heard}");
+        drop(server);
+    }
+}
+
+/// 这一轮已经开始执行工具时，用户接着说话不会让整轮重来（工具可能有副作用）。
+#[test]
+fn speaking_on_while_a_tool_is_running_does_not_restart_the_turn() {
+    let llm = FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            call("get_time"),
+            Round::Reply {
+                deltas: vec!["现在十二点。"],
+                calls: Vec::new(),
+                delay_ms: 1500,
+            },
+        ])),
+        ..FakeLlm::default()
+    };
+    let (server, registry, fakes) = start_chat(llm, &["几点了"], Duration::from_secs(120));
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut first = tone(UP, 300.0, 600, 8000.0);
+    first.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&first));
+    assert_eq!(read_json(&mut device)["text"], "几点了");
+    std::thread::sleep(Duration::from_millis(300));
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 600, 8000.0)));
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec!["tts:start", "句:现在十二点。", "tts:stop"]
+    );
+    assert_eq!(fakes.asr.heard.lock().unwrap().len(), 1, "没有重新识别");
+    assert_eq!(fakes.tools.calls.lock().unwrap().len(), 1, "工具只执行一次");
+    drop(server);
 }
 
 #[test]
@@ -1380,7 +1723,10 @@ fn device_mcp_tools_are_listed_and_relayed() {
     );
 
     let seen = fakes.llm.seen.lock().unwrap();
-    assert_eq!(seen[0].1, 3, "模型看到 MOSS 工具 1 个 + 设备工具 2 个");
+    assert_eq!(
+        seen[0].1, 4,
+        "模型看到 MOSS 工具 1 个 + 设备工具 2 个 + 宿主保留的 end_conversation"
+    );
     let result = seen[1].0.last().unwrap();
     assert_eq!(
         (result.role, result.content.as_deref()),
@@ -1598,7 +1944,7 @@ fn failed_streaming_recognition_falls_back_to_whole_utterance() {
     );
 }
 
-/// NV7：流式合成的第一段一到就开始播放（不等整句合成完），句子文字只发一次，分段之间连续不补静音。
+/// NV7：流式合成的第一段一到就开始播放（不等整句合成完），句子文字只发一次，分段之间连续不中断。
 #[test]
 fn streamed_synthesis_starts_playing_before_the_sentence_is_finished() {
     let tts = Arc::new(ChunkedTts {
@@ -1639,7 +1985,7 @@ fn streamed_synthesis_starts_playing_before_the_sentence_is_finished() {
         first_frame.unwrap() < finished,
         "第一帧在整句合成完之前发出"
     );
-    // 4 段 × 240 ms = 960 ms → 16 帧；合成快于实时，不应补静音
+    // 4 段 × 240 ms = 960 ms → 16 帧；合成快于实时，不应出现供流中断
     assert_eq!(
         items
             .iter()
@@ -1652,7 +1998,7 @@ fn streamed_synthesis_starts_playing_before_the_sentence_is_finished() {
             .status()
             .events
             .iter()
-            .any(|event| event.text.contains("补静音 0 帧")),
+            .any(|event| event.text.contains("供流中断 0 次")),
         "{:?}",
         server.status().events
     );
@@ -1753,7 +2099,10 @@ fn run_local_end_to_end(combo: LocalCombo) {
         println!("  事件：{}", event.text);
     }
     assert!(
-        spoken[0].starts_with("听:") && spoken[0].contains("激光"),
+        spoken[0].starts_with("听:")
+            && spoken
+                .iter()
+                .any(|line| line.starts_with("听:") && line.contains("激光")),
         "{spoken:?}"
     );
     assert!(spoken.contains(&"句:激光机现在空闲。".to_owned()));
@@ -2201,6 +2550,118 @@ fn finished_job_is_announced_to_an_idle_online_device() {
     );
 }
 
+#[test]
+fn concurrent_finished_job_and_agent_notices_are_queued_and_delivered_without_dropping() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct ConcurrentTools {
+        polls: AtomicUsize,
+    }
+    impl ToolExecutor for ConcurrentTools {
+        fn tools(&self) -> Vec<ToolSpec> {
+            vec![]
+        }
+        fn call<'a>(
+            &'a self,
+            _: &'a ToolContext,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, ToolOutcome> {
+            Box::pin(async { panic!("播报只走只读通道") })
+        }
+        fn recent_workflows<'a>(&'a self, _: &'a ToolContext) -> BoxFuture<'a, Option<Value>> {
+            Box::pin(async move {
+                let first = self.polls.fetch_add(1, Ordering::SeqCst) == 0;
+                if first {
+                    Some(serde_json::json!({
+                        "workflows": [{
+                            "workflow_id": "wf-concurrent",
+                            "status": "sending",
+                            "send_result": {"lines_sent": 10, "total_lines": 100}
+                        }],
+                        "agent_runs": [{
+                            "id": "agentrun-live-1",
+                            "provider": "codex",
+                            "status": "running",
+                            "elapsed_secs": 5,
+                            "silent_secs": 0,
+                            "output_lines": 1
+                        }]
+                    }))
+                } else {
+                    Some(serde_json::json!({
+                        "workflows": [{
+                            "workflow_id": "wf-concurrent",
+                            "status": "completed",
+                            "send_result": {"lines_sent": 100, "total_lines": 100}
+                        }],
+                        "agent_runs": [
+                            {
+                                "id": "agentrun-live-1",
+                                "provider": "codex",
+                                "status": "completed",
+                                "elapsed_secs": 12,
+                                "silent_secs": 0,
+                                "output_lines": 12
+                            },
+                            {
+                                "id": "agentrun-fast-2",
+                                "provider": "claude_code",
+                                "status": "completed",
+                                "elapsed_secs": 2,
+                                "silent_secs": 0,
+                                "output_lines": 4
+                            }
+                        ]
+                    }))
+                }
+            })
+        }
+    }
+
+    let tts = Arc::new(FakeTts::default());
+    let conversation = Arc::new(Conversation::new(
+        Arc::new(FakeAsr::default()),
+        Arc::new(FakeLlm::default()),
+        tts.clone(),
+        Arc::new(ConcurrentTools {
+            polls: AtomicUsize::new(0),
+        }),
+        ConversationSettings::default(),
+    ));
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(conversation),
+            job_poll_interval: Duration::from_millis(30),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    for _ in 0..3 {
+        let _ = collect_playback(&mut device, 1);
+    }
+    let said = tts.said.lock().unwrap().clone();
+    assert!(
+        said.iter().any(|text| text.contains("雕刻任务已完成")),
+        "missing workflow completion: {said:?}"
+    );
+    assert!(
+        said.iter().any(|text| text.contains("Codex 任务已完成")),
+        "missing live->completed agent notice: {said:?}"
+    );
+    assert!(
+        said.iter()
+            .any(|text| text.contains("Claude Code 任务已完成")),
+        "missing short-lived post-baseline agent notice: {said:?}"
+    );
+}
+
 #[tokio::test]
 async fn jev_filter_routes_colloquial_status_without_llm_and_prunes_unrelated_tools_for_chat() {
     use crate::conversation::{TurnEvent, TurnInput, spawn_turn};
@@ -2374,7 +2835,10 @@ async fn jev_filter_routes_colloquial_status_without_llm_and_prunes_unrelated_to
     h2.await.unwrap();
     let seen = llm.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].1, 0, "闲聊轮次应挂载 0 个工具给主大模型");
+    assert_eq!(
+        seen[0].1, 1,
+        "闲聊轮次只给主大模型挂宿主保留的 end_conversation，业务工具为 0"
+    );
 }
 
 #[test]
@@ -2484,7 +2948,7 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
     // 第 1 段：说 300ms（半截话“把激光功率调到”）+ 停顿 260ms 触发首次 VAD SpeechEnd
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
     std::thread::sleep(Duration::from_millis(40));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
     let wait_deadline = Instant::now() + Duration::from_millis(2500);
     while !server
         .status()
@@ -2498,7 +2962,7 @@ fn jev_unfinished_hold_waits_for_speaker_continuation_instead_of_cutting_in_earl
 
     // 第 2 段：在 1.2s 宽限窗内继续说 300ms（“四百”）+ 停顿 260ms 结束整句
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
 
     let (texts, _, _) = collect_playback(&mut device, 1);
     let stt = texts
@@ -2661,10 +3125,10 @@ fn jev_unfinished_hold_with_async_vad_worker_and_rapid_interims_keeps_continuati
     // 第 1 段语音 + 260ms 停顿，紧接着不等 35ms Jev 返回就送入第 2 段开头，验证 VadWorker 在途帧绝不被清空
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
     std::thread::sleep(Duration::from_millis(80));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
     std::thread::sleep(Duration::from_millis(10));
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
 
     let (texts, _, _) = collect_playback(&mut device, 1);
     let stt = texts
@@ -2763,7 +3227,7 @@ fn abort_and_ping_during_inflight_jev_hold_check_respond_without_blocking_and_ca
     );
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
     std::thread::sleep(Duration::from_millis(30));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
 
     // Jev 280ms 续听检查仍在途：此时发 ping 必须零阻塞立即收到 pong（远早于 280ms）
     let ping_at = Instant::now();
@@ -2963,11 +3427,11 @@ fn slow_vad_negative_jev_and_concurrent_job_done_preserve_queued_continuation_an
 
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 300, 8000.0)));
     std::thread::sleep(Duration::from_millis(50));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
     std::thread::sleep(Duration::from_millis(10));
     // 第 2 段音频在 Jev 35ms 返回 false 之前已经送入慢速 VadWorker（每帧 12ms，尚未吐出 SpeechStart）
     send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 320, 8000.0)));
-    send_audio(&mut device, 1, &uplink(&silence(UP, 260)));
+    send_audio(&mut device, 1, &uplink(&silence(UP, 460)));
 
     // 第 1 次播报必须是完整拼接后的用户回答（不能被 worker.reset 截断，也不能被任务播报抢断）
     let (turn_texts, _, _) = collect_playback(&mut device, 1);
@@ -3240,7 +3704,15 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
         ) -> BoxFuture<'a, ToolOutcome> {
             Box::pin(async move {
                 match name {
-                    "web_search" => ToolOutcome::Reply("今日晴，25度".into()),
+                    "web_search" => {
+                        // 比垫音起说延迟慢：工具迟迟不回才说垫音
+                        tokio::time::sleep(
+                            crate::conversation::SLOW_TOOL_FILLER_DELAY
+                                + Duration::from_millis(200),
+                        )
+                        .await;
+                        ToolOutcome::Reply("今日晴，25度".into())
+                    }
                     "laser_workflow_tool" => {
                         ToolOutcome::Speak(crate::tools::APPROVAL_SPEECH.into())
                     }
@@ -3253,7 +3725,7 @@ async fn prewarm_speech_cache_and_slow_tool_filler_respect_safety_boundaries() {
     let tts = Arc::new(FakeTts::default());
     let llm = Arc::new(FakeLlm {
         rounds: Mutex::new(VecDeque::from([
-            // 第 1 轮对话：模型不先说话，直接调慢工具 web_search -> 应自动播预缓存的 SLOW_QUERY_FILLER
+            // 第 1 轮对话：模型不先说话，直接调慢工具 web_search，且工具超过 1 秒没返回 -> 播预缓存的 SLOW_QUERY_FILLER
             call("web_search"),
             say(&["今天天气晴朗，25度。"]),
             // 第 2 轮对话：模型调 R3 审批工具 -> 直接播预缓存的 APPROVAL_SPEECH，不走模型二轮
@@ -3595,12 +4067,12 @@ fn user_only_device_tools_are_hidden_from_llm_but_usable_by_host_and_preview_pus
         }),
     );
 
-    // 1. 对话中大模型只能看到非 user_only 工具（MOSS 1 个 + 设备模型可见工具 2 个 = 3 个）
+    // 1. 对话中大模型只能看到非 user_only 工具（MOSS 1 个 + 设备模型可见工具 2 个 + 宿主保留的 end_conversation = 4 个）
     speak_manual(&mut device, 1, 600);
     let _ = collect_items(&mut device);
     {
         let seen = fakes.llm.seen.lock().unwrap();
-        assert_eq!(seen[0].1, 3, "user_only 工具严禁暴露给大模型");
+        assert_eq!(seen[0].1, 4, "user_only 工具严禁暴露给大模型");
     }
     let session_tools = &server.status().sessions[0].device_tools;
     assert!(
@@ -3692,8 +4164,8 @@ fn n61_wake_word_package_is_pushed_by_url_then_reboot_and_served_once_staged() {
     let _ = collect_items(&mut device);
     assert_eq!(
         fakes.llm.seen.lock().unwrap()[0].1,
-        2,
-        "资源包工具是 user-only，模型看不到也调不了"
+        3,
+        "资源包工具是 user-only，模型看不到也调不了（余下含宿主保留的 end_conversation）"
     );
 
     let dev_id = server.status().sessions[0].device_id.clone();
@@ -4569,5 +5041,552 @@ async fn streaming_tts_preserves_mid_sentence_pause_and_trims_only_true_sentence
     assert!(
         (630..=650).contains(&expected_ms),
         "句中 300ms 停顿必须完整保留且句尾 900ms 跨块死寂裁剪至 140ms（期望约 640ms，实际 {expected_ms}ms / {total_samples} 样本）"
+    );
+}
+
+#[test]
+fn interim_subtitle_pushes_to_screen_every_half_second_while_speaking_and_skips_unchanged_final_stt()
+ {
+    use crate::audio::{EnergyVad, Vad, VadConfig, VadEvent, VadFactory};
+
+    // 严格复刻 OfflineAsrBuffer：未出非空文字前按 5120 步长试认（前导静音空串不退化步长），出字后切 8000 步长
+    struct PeriodicOfflineLikeAsr {
+        turn: std::sync::atomic::AtomicUsize,
+    }
+    impl StreamingAsr for PeriodicOfflineLikeAsr {
+        fn start(&self) -> AsrStream {
+            let turn_idx = self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
+            let handle = tokio::spawn(async move {
+                let mut pending = 0usize;
+                let mut voiced = 0usize;
+                let mut has_nonempty = false;
+                let mut step = 0u8;
+                while let Some(chunk) = rx.recv().await {
+                    for sub in chunk.chunks(320) {
+                        if sub.iter().any(|&s| s.unsigned_abs() > 800) {
+                            voiced += sub.len();
+                        }
+                    }
+                    pending += chunk.len();
+                    let threshold = if has_nonempty { 8_000 } else { 5_120 };
+                    if pending < threshold {
+                        continue;
+                    }
+                    pending = 0;
+                    if voiced < 5_120 {
+                        // 模拟静音 preroll + 60ms 辅音头不足以认出文字（返回空串），不消耗 5120 首认步长
+                        continue;
+                    }
+                    has_nonempty = true;
+                    step += 1;
+                    match (turn_idx, step) {
+                        (0, 1) => {
+                            interim_tx.send_replace("你好摩斯".into());
+                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            // 400ms 冷却窗内紧跟跳字：不应连续刷两次屏幕
+                            interim_tx.send_replace("你好摩斯早".into());
+                        }
+                        (0, _) => {
+                            interim_tx.send_replace("你好摩斯助手".into());
+                        }
+                        (1, _) => {
+                            interim_tx.send_replace("查看当前功率".into());
+                        }
+                        (2, _) => {
+                            interim_tx.send_replace("自动拾音首屏".into());
+                        }
+                        _ => {
+                            interim_tx.send_replace("延迟判停首屏".into());
+                        }
+                    }
+                }
+                let final_text = match turn_idx {
+                    0 => "你好摩斯助手！",
+                    1 => "查看当前功率",
+                    2 => "自动拾音首屏完成",
+                    _ => "延迟判停首屏完成",
+                };
+                let _ = done_tx.send(Ok(final_text.into()));
+            });
+            AsrStream::new(tx, done_rx, handle).with_interim(interim_rx)
+        }
+    }
+
+    let asr = Arc::new(PeriodicOfflineLikeAsr {
+        turn: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let conversation = Arc::new(
+        Conversation::new(
+            Arc::new(FakeAsr::default()),
+            Arc::new(FakeLlm::default()),
+            Arc::new(FakeTts::default()),
+            Arc::new(FakeTools::default()),
+            ConversationSettings {
+                asr_corrections: vec![("摩斯".into(), "MOSS".into())],
+                ..ConversationSettings::default()
+            },
+        )
+        .with_streaming_asr(asr.clone()),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(conversation.clone()),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    // 第 1 轮（手动模式）：满 320ms（360ms 音频）首次重认即上屏，400ms 内二次跳字被节流，
+    // 约 460ms 后（模拟第二次推理略快于第一次的轻微抖动）新增满 500ms 音频正常触发第二次刷屏不吞拍
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"manual"}"#,
+    );
+    std::thread::sleep(Duration::from_millis(320));
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 360, 8000.0)));
+
+    let first_live = read_json(&mut device);
+    assert_eq!(first_live["type"], "stt");
+    assert_eq!(
+        first_live["text"], "你好MOSS",
+        "满 320ms 首轮重认应在说话未结束前立即上屏（不被 500ms 门槛误丢）"
+    );
+
+    // 用 ping 验证 40ms 后的紧跟跳字在 400ms 冷却窗内未刷屏
+    std::thread::sleep(Duration::from_millis(70));
+    send_json(&mut device, r#"{"type":"ping"}"#);
+    let pong = read_json(&mut device);
+    assert_eq!(
+        pong["type"], "pong",
+        "冷却窗内不应抢发第二条中间 stt: {pong:?}"
+    );
+
+    // 再等 390ms（总间隔约 460ms < 500ms，验证推理轻微加速抖动不会吞掉 500ms 步长的第二次重认）
+    std::thread::sleep(Duration::from_millis(390));
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 540, 8000.0)));
+    let second_live = read_json(&mut device);
+    assert_eq!(second_live["type"], "stt");
+    assert_eq!(
+        second_live["text"], "你好MOSS助手",
+        "500ms 音频步长在 460ms 墙钟到达时不应被冷却窗误吞"
+    );
+
+    send_json(&mut device, r#"{"type":"listen","state":"stop"}"#);
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec!["听:你好MOSS助手！", "tts:start", "句:好的。", "tts:stop"]
+    );
+
+    // 第 2 轮：最终定稿与已上屏的实时字幕完全一致时，不再重复下发同一条 stt
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"manual"}"#,
+    );
+    std::thread::sleep(Duration::from_millis(320));
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 360, 8000.0)));
+    let live_same = read_json(&mut device);
+    assert_eq!(live_same["type"], "stt");
+    assert_eq!(live_same["text"], "查看当前功率");
+
+    send_json(&mut device, r#"{"type":"listen","state":"stop"}"#);
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec!["tts:start", "句:好的。", "tts:stop"],
+        "最终文字与已显示的实时字幕一致时不应重复刷屏重置跑马灯"
+    );
+
+    // 第 3 轮（自动拾音 + EnergyVad）：420ms 房间静音 preroll 后开口，
+    // 首帧 60ms 起音虽使 head >= 5120 但因空串不退化步长，再说 360ms（< 500ms）即出首屏字幕
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    send_audio(&mut device, 1, &uplink(&silence(UP, 420)));
+    for _ in 0..7 {
+        std::thread::sleep(Duration::from_millis(55));
+        send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 60, 8000.0)));
+    }
+    let auto_live = read_json(&mut device);
+    assert_eq!(auto_live["type"], "stt");
+    assert_eq!(
+        auto_live["text"], "自动拾音首屏",
+        "自动拾音前导静音空串不应吞掉 320ms 首认窗口"
+    );
+    send_audio(&mut device, 1, &uplink(&silence(UP, 500)));
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec!["听:自动拾音首屏完成", "tts:start", "句:好的。", "tts:stop"]
+    );
+
+    // 第 4 轮（模拟本地 Silero / TEN-VAD 攒满 360ms 人声才报 SpeechStart）：
+    // trailing_voiced_samples 从 preroll 尾部识别真实起音跨度回推 speech_began_at，head 首轮重认即上屏
+    struct DelayedStartVad {
+        inner: EnergyVad,
+        voiced_samples: usize,
+        started: bool,
+    }
+    impl Vad for DelayedStartVad {
+        fn accept(&mut self, pcm: &[i16]) -> Vec<VadEvent> {
+            let mut out = Vec::new();
+            let raw = self.inner.accept(pcm);
+            if self.inner.in_speech() {
+                self.voiced_samples += pcm.len();
+            } else {
+                self.voiced_samples = 0;
+            }
+            for ev in raw {
+                match ev {
+                    VadEvent::SpeechStart => {}
+                    VadEvent::SpeechEnd => {
+                        if self.started {
+                            self.started = false;
+                            out.push(VadEvent::SpeechEnd);
+                        }
+                    }
+                }
+            }
+            if !self.started && self.voiced_samples >= 5_760 {
+                self.started = true;
+                out.push(VadEvent::SpeechStart);
+            }
+            out
+        }
+        fn reset(&mut self) {
+            self.voiced_samples = 0;
+            self.started = false;
+            self.inner.reset();
+        }
+        fn in_speech(&self) -> bool {
+            self.started
+        }
+    }
+    struct DelayedStartVadFactory;
+    impl VadFactory for DelayedStartVadFactory {
+        fn create(&self, sample_rate: u32, config: &VadConfig) -> Option<Box<dyn Vad>> {
+            Some(Box::new(DelayedStartVad {
+                inner: EnergyVad::new(sample_rate, config.clone()),
+                voiced_samples: 0,
+                started: false,
+            }))
+        }
+    }
+
+    let delayed_registry = Arc::new(FakeRegistry::default());
+    let delayed_server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(conversation),
+            vad_factory: Some(Arc::new(DelayedStartVadFactory)),
+            ..ServerConfig::default()
+        },
+        delayed_registry.clone(),
+    )
+    .unwrap();
+    let mut delayed_dev = chat_device(&delayed_server, &delayed_registry, 1);
+    send_json(
+        &mut delayed_dev,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    send_audio(&mut delayed_dev, 1, &uplink(&silence(UP, 420)));
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(55));
+        send_audio(&mut delayed_dev, 1, &uplink(&tone(UP, 300.0, 60, 8000.0)));
+    }
+    let delayed_live = read_json(&mut delayed_dev);
+    assert_eq!(delayed_live["type"], "stt");
+    assert_eq!(
+        delayed_live["text"], "延迟判停首屏",
+        "本地 VAD 晚报 SpeechStart 时应按 preroll 尾部真实人声跨度回推起音时刻并立即上屏"
+    );
+    send_audio(&mut delayed_dev, 1, &uplink(&silence(UP, 500)));
+    assert_eq!(
+        texts(&collect_items(&mut delayed_dev)),
+        vec!["听:延迟判停首屏完成", "tts:start", "句:好的。", "tts:stop"]
+    );
+}
+
+#[test]
+fn homophone_corrected_interim_stop_triggers_fast_stop_before_listen_stop() {
+    struct HomophoneStopInterimAsr;
+    impl StreamingAsr for HomophoneStopInterimAsr {
+        fn start(&self) -> AsrStream {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (interim_tx, interim_rx) = tokio::sync::watch::channel(String::new());
+            let handle = tokio::spawn(async move {
+                if rx.recv().await.is_some() {
+                    interim_tx.send_replace("急廷".into());
+                }
+                while rx.recv().await.is_some() {}
+                let _ = done_tx.send(Ok("急廷".into()));
+            });
+            AsrStream::new(tx, done_rx, handle).with_interim(interim_rx)
+        }
+    }
+
+    let tools = Arc::new(FastTools {
+        fail: true,
+        ..Default::default()
+    });
+    let llm = Arc::new(FakeLlm::default());
+    let conversation = Conversation::new(
+        Arc::new(FakeAsr::default()),
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        tools.clone(),
+        ConversationSettings {
+            asr_corrections: vec![("急廷".into(), "急停".into())],
+            ..ConversationSettings::default()
+        },
+    )
+    .with_streaming_asr(Arc::new(HomophoneStopInterimAsr));
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            barge_in: true,
+            barge_in_ms: 300,
+            conversation: Some(Arc::new(conversation)),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    // 开启 realtime 自然插话，模拟用户喊“急廷——啊！”（前半段触发 FastStop 后，嘴里尾音继续上行 480ms）
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"realtime"}"#,
+    );
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 360, 8000.0)));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while tools.calls.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        tools.calls.lock().unwrap().len(),
+        1,
+        "同音纠错后的急停词在说话未结束前必须立即触发急停"
+    );
+    // 继续送入 480ms 大音量尾音：不得通过自然插话把正在执行的 FastStop 自杀打断或吞掉失败安全播报
+    send_audio(&mut device, 1, &uplink(&tone(UP, 300.0, 480, 9000.0)));
+    let items = collect_items(&mut device);
+    let spoken = texts(&items);
+    assert!(spoken.contains(&"听:急停".to_owned()), "{spoken:?}");
+    assert!(
+        spoken.iter().any(|line| line.contains("发送失败")),
+        "尾音不得打断或吞掉急停失败安全告警播报：{spoken:?}"
+    );
+    assert_eq!(tools.calls.lock().unwrap().len(), 1);
+    assert!(
+        llm.seen.lock().unwrap().is_empty(),
+        "尾音不得被当成新一轮送给大模型"
+    );
+}
+
+#[test]
+fn smart_turn_low_probability_holds_turn_gate_and_caps_audio_to_8_seconds() {
+    use crate::conversation::TurnEndPredictor;
+
+    struct FakeTurnPredictor {
+        seen: Mutex<Vec<(usize, u32)>>,
+        prob: f32,
+    }
+    impl TurnEndPredictor for FakeTurnPredictor {
+        fn predict_turn_end<'a>(
+            &'a self,
+            pcm: &'a [i16],
+            sample_rate: u32,
+        ) -> BoxFuture<'a, Option<f32>> {
+            Box::pin(async move {
+                self.seen.lock().unwrap().push((pcm.len(), sample_rate));
+                Some(self.prob)
+            })
+        }
+    }
+
+    let predictor = Arc::new(FakeTurnPredictor {
+        seen: Mutex::new(Vec::new()),
+        prob: 0.15,
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([call("get_time"), say(&["十二点。"])])),
+        ..FakeLlm::default()
+    });
+    let tools = Arc::new(FakeTools::default());
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("好了".to_owned())])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        tools.clone(),
+        ConversationSettings::default(),
+    )
+    .with_turn_predictor(predictor.clone());
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    // 送入 8.5 秒语音 + 600ms 静音，验证传给 Smart Turn 的音频裁剪至不超过 8 秒
+    let mut audio = tone(UP, 300.0, 8_500, 8000.0);
+    audio.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&audio));
+    assert_eq!(read_json(&mut device)["text"], "好了");
+    // 语义判停概率 0.15 将等待拉长到 1250ms（超过 250ms 基础静音后还要等 1000ms）：
+    // 350ms 内大模型发起的 get_time 工具调用必须仍被 TurnGate 扣住
+    std::thread::sleep(Duration::from_millis(350));
+    assert!(
+        tools.calls.lock().unwrap().is_empty(),
+        "低说完概率下工具调用在 TurnGate 放行前不得执行"
+    );
+    let items = collect_items(&mut device);
+    assert_eq!(texts(&items), vec!["tts:start", "句:十二点。", "tts:stop"]);
+    assert_eq!(tools.calls.lock().unwrap().len(), 1);
+    let seen = predictor.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, UP);
+    assert!(
+        seen[0].0 <= UP as usize * 8,
+        "传入 Smart Turn 的音频应裁剪至最多 8 秒: {}",
+        seen[0].0
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|event| event.text.contains("这句话像是还没说完")),
+        "应记录延长等待事件"
+    );
+}
+
+#[test]
+fn smart_turn_slow_predictor_never_delays_stop_fast_path() {
+    use crate::conversation::TurnEndPredictor;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SlowTurnPredictor {
+        finished: AtomicBool,
+    }
+    impl TurnEndPredictor for SlowTurnPredictor {
+        fn predict_turn_end<'a>(&'a self, _: &'a [i16], _: u32) -> BoxFuture<'a, Option<f32>> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                self.finished.store(true, Ordering::SeqCst);
+                Some(0.05)
+            })
+        }
+    }
+
+    struct TimedStopAsr {
+        asr_done_at: Arc<Mutex<Option<std::time::Instant>>>,
+    }
+    impl Asr for TimedStopAsr {
+        fn transcribe<'a>(
+            &'a self,
+            _: &'a [i16],
+            _: u32,
+        ) -> BoxFuture<'a, Result<String, ProviderError>> {
+            Box::pin(async move {
+                *self.asr_done_at.lock().unwrap() = Some(std::time::Instant::now());
+                Ok("急停".to_owned())
+            })
+        }
+    }
+
+    let predictor = Arc::new(SlowTurnPredictor {
+        finished: AtomicBool::new(false),
+    });
+    let asr_done_at = Arc::new(Mutex::new(None));
+    let tools = Arc::new(FastTools::default());
+    let llm = Arc::new(FakeLlm::default());
+    let conversation = Conversation::new(
+        Arc::new(TimedStopAsr {
+            asr_done_at: asr_done_at.clone(),
+        }),
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        tools.clone(),
+        ConversationSettings::default(),
+    )
+    .with_turn_predictor(predictor.clone());
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut audio = tone(UP, 300.0, 500, 8000.0);
+    audio.extend(silence(UP, 600));
+    send_audio(&mut device, 1, &uplink(&audio));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while tools.calls.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let tool_ran_at = std::time::Instant::now();
+    let asr_at = asr_done_at.lock().unwrap().expect("ASR 应已运行");
+    let after_asr_ms = tool_ran_at.duration_since(asr_at).as_millis();
+    let items = collect_items(&mut device);
+    assert!(texts(&items).contains(&"听:急停".to_owned()), "{items:?}");
+    assert_eq!(tools.calls.lock().unwrap().len(), 1);
+    assert_eq!(tools.calls.lock().unwrap()[0].0, "laser_safe_action_tool");
+    assert!(
+        llm.seen.lock().unwrap().is_empty(),
+        "急停快路径不应请求大模型"
+    );
+    assert!(
+        !predictor.finished.load(Ordering::SeqCst),
+        "急停命中后应立即中止慢速尾音判停任务，不得等其 2 秒完成"
+    );
+    assert!(
+        after_asr_ms < 500,
+        "急停快路径不应被尾音判停超时或额外等待阻塞（耗时 {after_asr_ms} ms）"
     );
 }

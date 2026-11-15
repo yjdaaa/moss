@@ -20,8 +20,10 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3", "fla
 sha2 = "0.10"
 getrandom = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Opus 编解码：纯 Rust 后端 mousiki，不需要 CMake（NV0 实测，技术书 §11.3）
-opus2 = { version = "0.4", default-features = false, features = ["backend-mousiki"] }
+# Opus 编解码：官方参考实现 libopus（随源码编译，需要 CMake 与 C 编译器）。
+# 2026-11-14 n94：原纯 Rust 后端 mousiki 0.2.1 的语音（SILK / 混合）模式与 libopus 不兼容——
+# 它编出的下行被设备（libopus 解码）放大到 2–10 倍并削顶，设备上行它又解码不对，详见技术书 n94。
+opus2 = { version = "0.4", default-features = false, features = ["backend-libopus", "static", "bundled"] }
 # n71 常连模式：小智 MQTT + UDP 语音通道的 AES-128-CTR（与官方固件 mbedTLS/PSA CTR 一致）
 aes = "0.8"
 ctr = "0.9"

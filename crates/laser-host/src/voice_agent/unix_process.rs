@@ -200,7 +200,11 @@ impl Output {
     }
 }
 
-fn drain<R: Read>(mut input: R, collector: Arc<Mutex<Output>>) -> io::Result<()> {
+fn drain<R: Read>(
+    mut input: R,
+    collector: Arc<Mutex<Output>>,
+    progress: Option<Arc<super::AgentLiveProgress>>,
+) -> io::Result<()> {
     let mut buffer = [0u8; 8192];
     let mut line = Vec::with_capacity(4096);
     let mut too_long = false;
@@ -209,8 +213,10 @@ fn drain<R: Read>(mut input: R, collector: Arc<Mutex<Output>>) -> io::Result<()>
         if n == 0 {
             break;
         }
+        let mut chunk_lines = 0u64;
         for &byte in &buffer[..n] {
             if byte == b'\n' {
+                chunk_lines += 1;
                 let mut out = collector.lock().unwrap_or_else(|e| e.into_inner());
                 out.add_line(&line, too_long);
                 line.clear();
@@ -221,16 +227,29 @@ fn drain<R: Read>(mut input: R, collector: Arc<Mutex<Output>>) -> io::Result<()>
                 too_long = true;
             }
         }
+        if let Some(progress) = &progress {
+            progress.record_chunk(chunk_lines);
+        }
     }
     if !line.is_empty() || too_long {
         collector
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .add_line(&line, too_long);
+        if let Some(progress) = &progress {
+            progress.record_chunk(1);
+        }
     }
     Ok(())
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "entry point without progress retained for process-harness tests"
+    )
+)]
 pub(super) fn run_fixture_process(
     executable: &Path,
     args: &[String],
@@ -240,6 +259,22 @@ pub(super) fn run_fixture_process(
     alive: &dyn Fn() -> bool,
     cancel: &AtomicBool,
     timeout: Duration,
+) -> Result<ProcessResult, ProcessFailure> {
+    run_fixture_process_with_progress(
+        executable, args, cwd, env, stdin, alive, cancel, timeout, None,
+    )
+}
+
+pub(super) fn run_fixture_process_with_progress(
+    executable: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    stdin: &[u8],
+    alive: &dyn Fn() -> bool,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    progress: Option<Arc<super::AgentLiveProgress>>,
 ) -> Result<ProcessResult, ProcessFailure> {
     if !executable.is_absolute()
         || !executable.is_file()
@@ -299,8 +334,10 @@ pub(super) fn run_fixture_process(
     let collector = Arc::new(Mutex::new(Output::default()));
     let out = Arc::clone(&collector);
     let err = Arc::clone(&collector);
-    let stdout = thread::spawn(move || drain(child_stdout, out));
-    let stderr = thread::spawn(move || drain(child_stderr, err));
+    let out_progress = progress.clone();
+    let err_progress = progress;
+    let stdout = thread::spawn(move || drain(child_stdout, out, out_progress));
+    let stderr = thread::spawn(move || drain(child_stderr, err, err_progress));
     let input = stdin.to_vec();
     let writer = thread::spawn(move || child_stdin.write_all(&input));
 

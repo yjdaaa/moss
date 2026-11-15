@@ -79,6 +79,7 @@ fn main() {
         "voice_wakeword_status",
         "voice_wakeword_import_base",
         "voice_wakeword_manage",
+        "voice_usb_provision",
         // 内置语音服务的模型配置（NV5）
         "voice_builtin_models_test",
         "voice_builtin_models_list",

@@ -1,6 +1,6 @@
 # moss-voice-local
 
-MOSS 内置语音服务的本地模型辅助程序（内置语音技术书 §11.2，NV6；可选模型见 §13.10）：判停（Silero / TEN-VAD）、识别（SenseVoice 整段 / X-ASR 流式）、合成（Kokoro / Matcha）。
+MOSS 内置语音服务的本地模型辅助程序（内置语音技术书 §11.2，NV6；可选模型见 §13.10）：判停（Silero / TEN-VAD）、识别（SenseVoice / Qwen3-ASR / FireRedASR2-CTC 周期增量重认 + 整段 / X-ASR 原生流式）、合成（Kokoro / Matcha / ZipVoice）、前端降噪（GTCRN）及尾音语义判停（SmartTurn v3）。
 
 ## 许可证
 
@@ -24,10 +24,10 @@ cargo build --release --manifest-path apps/moss-voice-local/Cargo.toml --target-
 
 ## 协议
 
-由 MOSS 启动，经标准输入输出按 `moss-voice-local-proto` 的帧格式（长度前缀的 JSON 头，协议 4）通信；音频负载为16位PCM，声纹向量为192维 f32le。标准输入关闭即退出。判停、识别、合成、声纹在独立线程；宿主声纹另启独立进程，避免声纹超时终止其他语音。`moss-voice-local --version` 打印版本与协议号。协议4必须与本轮 MOSS 一起升级，旧辅助程序会被握手拒绝。
+由 MOSS 启动，经标准输入输出按 `moss-voice-local-proto` 的帧格式（长度前缀的 JSON 头，协议 6）通信；音频负载为16位PCM，声纹向量为192维 f32le。标准输入关闭即退出。判停、识别、合成、降噪/尾音判停、声纹在独立线程（识别与合成推理线程数为逻辑核数的一半，限制在 2–6，可通过 `MOSS_VOICE_THREADS` 覆盖）；宿主声纹另启独立进程，避免声纹超时终止其他语音。`moss-voice-local --version` 打印版本与协议号。协议 6 必须与本轮 MOSS 一起升级，旧辅助程序会被握手拒绝。
 
 **NV8a 升级要求**：本次协议从 2 升为 3，必须按上方命令重建辅助程序，并与新的 MOSS 一起更新；旧辅助程序会被版本握手拒绝，不能沿用。协议 3 增加识别解码选项 / 热词、中间识别文字和 `synthesize_stream` 分段音频响应。X-ASR 可使用 `modified_beam_search`；热词仅采用模型词表能表达的短语，SenseVoice 不支持这一热词通路。分段合成在每个分段生成后返回音频，不宣称是声学模型内部逐采样流式推理。
 
-取消某轮后，宿主丢弃该轮响应；辅助程序正在执行的单次同步推理可能仍会完成，不能把它解释为已抢占底层推理线程。
+取消某轮（协议 5 `Op::Cancel`）后，排队中的分段合成请求直接跳过不再启动；正在执行的单分段同步推理会在当前分段结束后停下（不做底层段内强抢占），宿主同步丢弃该轮剩余响应。
 
 模型由 MOSS 语音中心下载到运行目录 `models/` 并校验 SHA-256，本程序只按 MOSS 给出的路径加载。

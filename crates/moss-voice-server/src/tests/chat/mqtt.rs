@@ -332,6 +332,15 @@ fn mqtt_device_stays_online_without_wake_and_talks_over_encrypted_udp() {
     };
     assert_eq!(goodbye["session_id"], session_id.as_str());
     assert_eq!(server.status().sessions.len(), 1, "这一轮对话结束后仍在线");
+    // 设备在收到 goodbye 前按固件逻辑（tts stop 后自动回聆听）发出的 listen start 迟到：
+    // 不能把已结束的对话拉回聆听
+    device.publish(&serde_json::json!({"session_id": session_id, "type": "listen", "state": "start", "mode": "auto"}));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        server.status().sessions[0].state,
+        "idle",
+        "goodbye 之后迟到的 listen start 被忽略"
+    );
     assert!(
         server
             .status()

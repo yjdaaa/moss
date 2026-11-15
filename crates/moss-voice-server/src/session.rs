@@ -7,7 +7,8 @@
 //! - 上行 Opus 解码为 PCM；自动拾音模式由 VAD 判断说完（静音 200 ms），手动模式以 `listen stop` 为准；
 //! - 一段话结束后交给应答：回声模式重采样后播回；对话模式（NV3）交给对话任务（识别 → 大模型 → 逐句合成），
 //!   每句音频带文字标记推入节奏泵，播到这句时发 `sentence_start`；
-//! - 下行经 [`PlaybackPump`] 编码，先连发 3 帧预缓冲，之后按绝对时钟每 60 ms 发 1 帧，供不上时补静音帧
+//! - 下行经 [`PlaybackPump`] 编码：`tts start` 后先留出保护间隔等设备切到说话状态，再按“设备端缓冲余量”发送
+//!   （余量不足就连发补到目标，之后按绝对时间轴每 60 ms 一帧）；供不上时不发帧，由设备缓冲吸收
 //!   （节奏参考海门 `ws.rs`，`513d9e6`，MIT）；
 //! - 播放期间收到 `abort` 或新的 `listen start` 立即停止（打断）；
 //! - 配置了流式识别（NV7）时，自动模式在 VAD 确认开始说话、手动模式在 `listen start` 时就建立识别连接，
@@ -39,8 +40,8 @@ use crate::audio::{
     supported_rate,
 };
 use crate::conversation::{
-    Conversation, DeviceCall, DeviceTools, ToolContext, TurnEvent, TurnInput, append_history,
-    spawn_turn_with_person_hint,
+    Conversation, DeviceCall, DeviceTools, ToolContext, TurnEvent, TurnGate, TurnInput,
+    append_history, spawn_turn_gated,
 };
 use crate::music::playback::{MusicController, MusicProgress};
 use crate::state::{DiagCategory, EventLevel, EventRecord, SessionView};
@@ -49,7 +50,21 @@ use crate::{DeviceStatus, DeviceVisit, ServerMode, Shared, unix_now};
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_MS: u64 = 60;
 /// 开始播放时先连发的帧数（设备端抖动缓冲）
-const PREBUFFER_FRAMES: usize = 3;
+/// 设备端缓冲余量目标（帧）：余量低于它且有音频时连发补足。官方固件解码队列上限 20 帧，
+/// 超出即丢，这里留足余地；官方服务端为 3 帧，多出的 2 帧用来吸收 Wi-Fi 与流式合成的抖动。
+const LEAD_FRAMES: u32 = 5;
+/// `tts start` 到首帧音频的保护间隔：官方固件收到 start 后要经主任务调度才切到说话状态并清空解码器，
+/// 此前到达的音频帧会被丢弃（首字被吞、设备端缓冲余量归零）。
+const TTS_START_GUARD: Duration = Duration::from_millis(180);
+/// 上游供不上或还在攒启动缓冲时的重检间隔
+const STARVED_POLL: Duration = Duration::from_millis(20);
+/// 判停器的静音时长：到这里就把这段话交给识别与大模型抢跑（须与 `VadConfig` / `VadParams` 默认值一致）
+const BASE_SILENCE_MS: u64 = 250;
+/// 抢跑等待到点时用户还在出声，最多再顺延这么久
+const MAX_HOLD_EXTENSION: Duration = Duration::from_millis(1500);
+/// 最后一帧发出后，在预计设备播完的时刻之上再等的余量，之后才发 `tts stop`
+/// （常连模式下 stop 走 MQTT、音频走 UDP，不保证先后；官方服务端同样等队列播完再多等 2 帧）
+const DRAIN_MARGIN: Duration = Duration::from_millis(120);
 /// 一段话最长 30 秒，超过即按说完处理
 const MAX_UTTERANCE_MS: usize = 30_000;
 /// 自动模式下保留语音开始前 1 秒，避免吞掉开头的字：本地判停确认“开始说话”实测要晚 0.4–0.9 秒
@@ -541,6 +556,8 @@ pub(crate) async fn serve_session(
     }
     session.finish_timing("disconnected");
     session.last_verified_person = None;
+    session.carried_photo = None;
+    session.paused = None;
     session.turn = None;
     session.pump.clear();
     drop(lease);
@@ -585,17 +602,63 @@ enum Phase {
     Listening(Listening),
     /// 对话模式：一段话已交给对话任务，还没有可播放的音频
     Thinking,
-    /// 播放中：`next` 为下一拍的计划时间，`burst` 为开头还要连发的预缓冲帧数
+    /// 播放中：`next` 为下一次发送检查的时间，`not_before` 为 `tts start` 保护间隔的结束时刻；
+    /// `anchor + sent × 60 ms` 是设备按实时播放把已发音频播完的时刻，减去当前时间即设备端缓冲余量
     Speaking {
         next: Instant,
-        burst: usize,
+        not_before: Instant,
+        anchor: Instant,
+        sent: u32,
+        /// 上游已播完：到这个时刻（预计设备播完 + 余量）再发 `tts stop`
+        stop_at: Option<Instant>,
     },
+}
+
+impl Phase {
+    /// 刚发出 `tts start`：首帧不早于保护间隔结束。
+    fn speaking_after_tts_start() -> Self {
+        let not_before = Instant::now() + TTS_START_GUARD;
+        Phase::Speaking {
+            next: not_before,
+            not_before,
+            anchor: not_before,
+            sent: 0,
+            stop_at: None,
+        }
+    }
+
+    /// 暂停后接着说：设备一直在说话状态，不需要保护间隔；时间轴从此刻重新对齐。
+    fn speaking_resumed() -> Self {
+        let now = Instant::now();
+        Phase::Speaking {
+            next: now,
+            not_before: now,
+            anchor: now,
+            sent: 0,
+            stop_at: None,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Phase::Idle => "idle",
+            Phase::Listening(_) => "listening",
+            Phase::Thinking => "thinking",
+            Phase::Speaking { .. } => "speaking",
+        }
+    }
 }
 
 struct Listening {
     manual: bool,
     /// 自动模式下 VAD 已确认开始说话
     speaking: bool,
+    /// 本轮确认开始说话的时刻（手动模式为进入拾音时刻，自动模式按尾部有效起音跨度回推）
+    speech_began_at: Option<Instant>,
+    /// 本轮已累计的有效说话采样数（不含自动模式起音前的纯静音 preroll）
+    voiced_samples: usize,
+    /// 最近一次向小智屏幕推送实时中间识别字幕的时刻
+    last_interim_stt_at: Option<Instant>,
     utterance: Vec<i16>,
     preroll: VecDeque<i16>,
     /// 进行中的流式识别（NV7）与上行 → 16 kHz 的重采样（上行已是 16 kHz 时为空）
@@ -651,6 +714,57 @@ const _: () =
     assert!(UNFINISHED_HOLD_WINDOW.as_millis() >= crate::jev::MAX_HOLD_TIMEOUT.as_millis() + 300);
 /// 流式中间结果停顿防抖预热阈值：连续流利说话时 0 请求，停顿满 120ms 才预热 1 次。
 const INTERIM_PREWARM_DEBOUNCE: Duration = Duration::from_millis(120);
+/// 说话期间首次向小智屏幕推送实时识别字幕的最短开口墙钟门槛（对齐离线 SenseVoice 320ms 首认节拍，留 20ms 余量）。
+const INTERIM_STT_FIRST_ELAPSED: Duration = Duration::from_millis(300);
+/// 说话期间两次向小智屏幕推送实时字幕的最小冷却间隔（比离线 500ms 采样步长留出 100ms 推理/网络抖动余量，防吞拍）。
+const INTERIM_STT_COOLDOWN: Duration = Duration::from_millis(400);
+/// 说话有效音频至少累计满 320ms（对齐 OFFLINE_INTERIM_FIRST_SAMPLES）后才向屏幕推中间字幕，避免极短气音或瞬发短帧抢先刷屏。
+const INTERIM_STT_MIN_AUDIO_MS: usize = 320;
+/// 从 `preroll + 当前帧` 末尾往前扫描 20 ms 窗口，测算首次 `SpeechStart` 时已包含的实际有效语音采样数
+///（排除起音前的安静底噪，兼容确认较晚的本地 Silero / TEN-VAD 与能量判停，容忍词内 <=80 ms 塞音闭塞间隙）。
+fn trailing_voiced_samples(
+    samples: &[i16],
+    sample_rate: u32,
+    vad: &crate::audio::VadConfig,
+) -> usize {
+    let win = (sample_rate as usize * 20 / 1000).max(1);
+    if samples.len() < win {
+        return samples.len();
+    }
+    let mut rms_windows = Vec::with_capacity(samples.len() / win);
+    let mut end = samples.len();
+    while end >= win {
+        let slice = &samples[end - win..end];
+        let sum_sq: f64 = slice.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        rms_windows.push((sum_sq / slice.len() as f64).sqrt());
+        end -= win;
+    }
+    let Some(noise_floor) = rms_windows
+        .iter()
+        .copied()
+        .filter(|&r| r < vad.start_rms)
+        .reduce(f64::min)
+    else {
+        return samples.len();
+    };
+    let threshold = (noise_floor * vad.keep_over_noise)
+        .max(vad.keep_rms * 0.5)
+        .min(vad.start_rms);
+    let mut last_voiced_idx: Option<usize> = None;
+    let mut quiet_run = 0usize;
+    for (idx, &r) in rms_windows.iter().enumerate() {
+        if r >= threshold {
+            last_voiced_idx = Some(idx);
+            quiet_run = 0;
+        } else {
+            quiet_run += 1;
+            if quiet_run > 4 {
+                break;
+            }
+        }
+    }
+    last_voiced_idx.map_or(0, |idx| ((idx + 1) * win).min(samples.len()))
+}
 
 /// 一段话结束的原因。
 #[derive(Clone, Copy)]
@@ -707,6 +821,8 @@ struct ActiveTurn {
     pending_photo: Option<ChatMessage>,
     /// 识别出的用户原话（打断时记入历史）
     user: Option<String>,
+    /// 尾音语义判停预测的说完概率（`0.0..=1.0`）
+    smart_turn_prob: Option<f32>,
     /// 已向设备发出 sentence_start 的句子（不是仅合成或排队的句子）。
     spoken: Vec<String>,
     debug_raw_asr: Option<String>,
@@ -722,6 +838,21 @@ struct ActiveTurn {
     close: bool,
     /// 唤醒回应期间设备发来的 `listen start`：回应播完后按这个模式开始拾音
     listen_after: Option<bool>,
+    /// 这一轮已开始执行工具（之后不再因用户接着说话而整轮重来）
+    tools_started: bool,
+    /// 与对话任务共享的工具执行闩（没有闸门的轮次为空）
+    tool_latch: Option<std::sync::Arc<crate::conversation::ToolLatch>>,
+    /// 这一轮是抢跑开始的（识别出文字后要按句子是否说完决定还要等多久才开口）
+    speculative: bool,
+    /// 流式中间结果触发的急停快路径轮次：禁止被用户同一句话的后续尾音通过自然插话自杀打断
+    fast_stop: bool,
+    /// 抢跑闸门的发送端：置 `true` 前对话任务不执行大模型发起的工具调用
+    release: Option<tokio::sync::watch::Sender<bool>>,
+    /// 放行时交给对话任务的最新历史（见 [`TurnGate::fresh_history`]）
+    fresh_history: std::sync::Arc<std::sync::Mutex<Option<Vec<ChatMessage>>>>,
+    /// 抢跑中：到这个时刻（且用户没在出声）才认定这句话说完、开始处理对话任务的输出；
+    /// 第二项是最晚放行时刻。期间任务照常识别、请求大模型、合成，但不开口、不执行工具。
+    hold: Option<(Instant, Instant)>,
 }
 
 impl Drop for ActiveTurn {
@@ -931,7 +1062,7 @@ pub(crate) fn device_result_text(payload: &Value) -> String {
     }
 }
 
-/// 监听流式 ASR 完整中间假设。仅整句匹配停止词可越过最终识别结果。
+/// 监听流式 ASR 中间识别文字（用于说话期屏幕实时字幕、整句急停快路由与未说完预热）；仅整句匹配停止词可越过最终识别结果。
 async fn next_listening_interim(phase: &mut Phase) -> String {
     match phase {
         Phase::Listening(listening) => match listening.stream.as_mut() {
@@ -964,9 +1095,17 @@ async fn next_device_call(device: &mut Option<DeviceMcp>) -> Option<DeviceCall> 
 }
 
 /// 等对话任务的下一个事件；没有进行中的对话时永远等待（用于 `select!`）。
+/// 一帧 PCM 的均方根幅度（满幅 32767）。
+fn frame_rms(pcm: &[i16]) -> f64 {
+    if pcm.is_empty() {
+        return 0.0;
+    }
+    (pcm.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / pcm.len() as f64).sqrt()
+}
+
 async fn next_turn_event(turn: &mut Option<ActiveTurn>) -> Option<TurnEvent> {
     match turn {
-        Some(turn) if !turn.done => turn.events.recv().await,
+        Some(turn) if !turn.done && turn.hold.is_none() => turn.events.recv().await,
         _ => std::future::pending().await,
     }
 }
@@ -1012,9 +1151,23 @@ struct Session<'a> {
     playback_started: Option<Instant>,
     /// 兼容收到 tts stop 后再次发 listen start 的固件，不能清掉已补送的开头。
     barge_resumed: bool,
+    /// 说话中听到插话而暂停的那一轮：等插话识别出来再决定——真有话就打断它，只是附和或没听清就接着说
+    paused: Option<ActiveTurn>,
+    /// 思考期间“用户接着说”的检测器（比播放中的插话检测灵敏）
+    follow: crate::barge::BargeIn,
+    /// 下一轮由静音判停触发（不是设备 listen stop）：可以抢跑
+    gate_next_turn: bool,
+    /// 思考期间最近一次听到明显人声的时刻
+    last_loud: Option<Instant>,
+    /// 自动拾音时交给当前这一轮的那段录音：思考期间用户接着说话时，与后半句拼成完整的一段重新识别
+    last_utterance: Option<Vec<i16>>,
+    /// 已提示过“屏幕显示不出”的字：同一个字每次连接只提示一次
+    glyph_gaps_reported: std::collections::BTreeSet<char>,
     conversation: Option<Arc<Conversation>>,
     history: Vec<ChatMessage>,
     turn: Option<ActiveTurn>,
+    /// 个人模式下尚未提交到任何说话人历史的视觉照片上下文（被 Ignored / 暂停切回 / 思考合并 / 打断且未识别出原话时暂存到下一轮）
+    carried_photo: Option<ChatMessage>,
     last_verified_person: Option<VerifiedPersonHint>,
     vision_host: Option<String>,
     vision_token: Option<String>,
@@ -1049,9 +1202,14 @@ struct Session<'a> {
     pending_goodbye: Option<String>,
     /// n81 设备在 `hello` 中声明的字库与 `glyph_push` 能力
     text_font_cap: Option<TextFontCapability>,
+    /// 当前小智屏幕底栏最近一次发出的 `stt` 文本（最终识别文字未变化时免重复下发，避免重置固件跑马灯滚动）
+    last_screen_stt: Option<String>,
     /// 加工结束播报：只读观察最近任务，发现“发送中 → 终态”时在空闲时播报一次。
     jobs: crate::jobs::JobWatcher,
     next_job_poll: Instant,
+    /// 同拍内可能同时结束多个加工/Agent 任务：一次空闲拍只播 1 条，其余暂存于此（上限 16）等下一拍轮到再播，防并发通知被吞。
+    pending_finished: std::collections::VecDeque<crate::jobs::FinishedJob>,
+    pending_agent_notices: std::collections::VecDeque<crate::jobs::AgentRunNotice>,
 }
 
 /// n70 完工 / 急停全屏画面停留多久（雕刻时的刀路卡最多再挡 5 秒，固件计时到了才露出底下的完工画面）。
@@ -1189,12 +1347,19 @@ impl<'a> Session<'a> {
             ),
             playback_started: None,
             barge_resumed: false,
+            follow: crate::barge::BargeIn::follow_up(uplink_rate, &shared.config.vad),
+            gate_next_turn: false,
+            paused: None,
+            last_loud: None,
+            last_utterance: None,
+            glyph_gaps_reported: Default::default(),
             conversation: match shared.config.mode {
                 ServerMode::Echo => None,
                 ServerMode::Chat => shared.config.conversation.clone(),
             },
             history: Vec::new(),
             turn: None,
+            carried_photo: None,
             last_verified_person: None,
             vision_host: None,
             vision_token: None,
@@ -1214,8 +1379,11 @@ impl<'a> Session<'a> {
             mqtt: false,
             pending_goodbye: None,
             text_font_cap: None,
+            last_screen_stt: None,
             jobs: crate::jobs::JobWatcher::new(),
             next_job_poll: Instant::now() + shared.config.job_poll_interval,
+            pending_finished: std::collections::VecDeque::new(),
+            pending_agent_notices: std::collections::VecDeque::new(),
         })
     }
 
@@ -1237,20 +1405,97 @@ impl<'a> Session<'a> {
         self.shared.state.event(record);
     }
 
+    fn stash_uncommitted_photo(&mut self, turn: &mut ActiveTurn) {
+        if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+            self.carried_photo = None;
+            return;
+        }
+        if let Some(photo) = turn.pending_photo.take() {
+            self.carried_photo.get_or_insert(photo);
+        }
+    }
+
+    /// 暂停中的回答确定被打断并作废后，把更新后的历史（或尚未提交给任何说话人的视觉照片）交给等放行的插话轮。
+    fn sync_fresh_history_after_abandon_paused(&mut self) {
+        let Some(conversation) = &self.conversation else {
+            return;
+        };
+        if conversation.personal_context.is_none() {
+            if let Some(turn) = self.turn.as_ref()
+                && let Ok(mut slot) = turn.fresh_history.lock()
+            {
+                *slot = Some(self.history.clone());
+            }
+            return;
+        }
+        if let Some(turn) = self.turn.as_mut()
+            && turn.kind == TurnKind::Answer
+        {
+            if turn.pending_photo.is_some() {
+                self.carried_photo = None;
+            } else if !turn.fast_stop
+                && let Some(photo) = self.carried_photo.take()
+            {
+                if let Ok(mut slot) = turn.fresh_history.lock() {
+                    *slot = Some(vec![photo.clone()]);
+                }
+                turn.pending_photo = Some(photo);
+            }
+        }
+    }
+
+    /// 字幕里有设备显示不出、MOSS 也补不上的字时记一条诊断（只记字数，不把原话/回复字符写入公共诊断事件，防泄露用户文本）。
+    fn report_glyph_gaps(&mut self, text: &str) {
+        let fresh: Vec<char> = self
+            .shared
+            .glyph_fonts
+            .undisplayable_chars(self.text_font_cap.as_ref(), text)
+            .into_iter()
+            .filter(|ch| self.glyph_gaps_reported.insert(*ch))
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let count = fresh.len();
+        let record = if self
+            .shared
+            .glyph_fonts
+            .full_pack_ready(self.text_font_cap.as_ref())
+        {
+            EventRecord::warn(
+                DiagCategory::Device,
+                format!("小智屏幕字幕缺字：有 {count} 个生僻字符不在设备字库与全量补字库里，这些字不会显示"),
+            )
+            .hint("可能是表情符号或超大字符集罕见字，小智屏幕字库暂未收录")
+        } else {
+            EventRecord::warn(
+                DiagCategory::Device,
+                format!("小智屏幕字幕缺字：有 {count} 个生僻字不在设备字库里，全量补字库也没就位，这些字不会显示"),
+            )
+            .hint("在语音中心下载全量补字库后，生僻字会随字幕自动补给设备")
+        };
+        self.event(record);
+    }
+
     async fn send_stt(&mut self, socket: &mut crate::link::Link, text: String) -> bool {
+        self.report_glyph_gaps(&text);
         let glyph_push = self
             .shared
             .glyph_fonts
             .glyph_push_for_text(self.text_font_cap.as_ref(), &text);
-        send_json(
+        let sent = send_json(
             socket,
             &ServerMessage::Stt {
                 session_id: self.session_id.into(),
-                text,
+                text: text.clone(),
                 glyph_push,
             },
         )
-        .await
+        .await;
+        if sent {
+            self.last_screen_stt = Some(text);
+        }
+        sent
     }
 
     async fn tts(
@@ -1260,6 +1505,10 @@ impl<'a> Session<'a> {
         text: Option<String>,
     ) -> Result<(), String> {
         let starting = matches!(state, TtsState::Start);
+        if let (TtsState::SentenceStart, Some(s)) = (&state, text.as_deref()) {
+            self.last_screen_stt = None;
+            self.report_glyph_gaps(s);
+        }
         let glyph_push = match (&state, text.as_deref()) {
             (TtsState::SentenceStart, Some(s)) => self
                 .shared
@@ -1336,6 +1585,8 @@ impl<'a> Session<'a> {
             music.cancel(&mut self.pump);
         }
         self.turn = None;
+        self.paused = None;
+        self.carried_photo = None;
         self.pump.clear();
         self.hold_check = None;
         self.pending_listen_stop = false;
@@ -1354,6 +1605,23 @@ impl<'a> Session<'a> {
         self.finish_timing("disconnected");
         self.event(format!("这一轮对话结束（{reason}），设备保持常连在线"));
         Ok(())
+    }
+
+    /// 设备字幕一行的宽度（半角字符记 1，其余记 2）：屏宽减两侧留白后除以字号，再留一个字的余量。
+    /// 没拿到屏幕信息时按官方最常见的 320 px 宽、20 px 字号算。
+    fn subtitle_units(&self) -> usize {
+        let width = self
+            .device_mcp
+            .as_ref()
+            .and_then(|d| d.screen_size)
+            .map_or(320, |(w, _)| w);
+        let size = self
+            .text_font_cap
+            .as_ref()
+            .map_or(20, |cap| cap.size)
+            .clamp(12, 40);
+        let chars = (width.saturating_sub(16) / size).saturating_sub(1);
+        (chars as usize * 2).clamp(16, 48)
     }
 
     /// n70 这台设备是否按全屏画风包显示（单色屏不算）。
@@ -1535,12 +1803,16 @@ impl<'a> Session<'a> {
         }
         self.pending_listen_stop = false;
         self.hold_check = None;
+        self.last_screen_stt = None;
         self.listen_manual = manual;
         // 手动模式按住即说：马上建立识别连接；自动模式等 VAD 确认开始说话（避免为环境声建连接）
         let stream = if manual { self.open_stream() } else { None };
         self.phase = Phase::Listening(Listening {
             manual,
             speaking: false,
+            speech_began_at: manual.then(Instant::now),
+            voiced_samples: 0,
+            last_interim_stt_at: None,
             utterance: Vec::new(),
             preroll: VecDeque::new(),
             stream,
@@ -1561,6 +1833,7 @@ impl<'a> Session<'a> {
     ) -> Option<(Vec<i16>, UtteranceEnd)> {
         let max = self.samples(MAX_UTTERANCE_MS);
         let preroll_max = self.samples(PREROLL_MS);
+        let min_speech_samples = self.samples(self.shared.config.vad.min_speech_ms as usize);
         let Phase::Listening(listening) = &mut self.phase else {
             return None;
         };
@@ -1568,6 +1841,7 @@ impl<'a> Session<'a> {
         let mut began = false;
         if listening.manual {
             listening.utterance.extend_from_slice(pcm);
+            listening.voiced_samples = listening.utterance.len();
             listening.feed(pcm);
             self.last_activity = Instant::now();
         } else {
@@ -1612,20 +1886,37 @@ impl<'a> Session<'a> {
                 listening.hold_deadline = None;
                 listening.finalize_after_vad_seq = None;
                 if listening.utterance.is_empty() {
-                    listening.utterance = listening.preroll.drain(..).collect();
+                    let mut merged: Vec<i16> = listening.preroll.drain(..).collect();
+                    merged.extend_from_slice(pcm);
+                    let voiced_span =
+                        trailing_voiced_samples(&merged, self.uplink_rate, &self.shared.config.vad)
+                            .max(min_speech_samples.min(merged.len()))
+                            .min(merged.len());
+                    let voiced_ms = voiced_span as u64 * 1000 / u64::from(self.uplink_rate.max(1));
+                    let approx_began = Instant::now()
+                        .checked_sub(Duration::from_millis(voiced_ms))
+                        .map_or(self.recording_started, |t| t.max(self.recording_started));
+                    listening.speech_began_at = Some(approx_began);
+                    listening.voiced_samples = voiced_span;
+                    listening.utterance = merged;
                     began = true;
                 } else {
                     // 半截话续听后再次开口：将中间短暂过渡音频无缝拼入同一段 utterance 与流式识别
                     let bridge: Vec<i16> = listening.preroll.drain(..).collect();
+                    listening.voiced_samples = listening
+                        .voiced_samples
+                        .saturating_add(bridge.len())
+                        .saturating_add(pcm.len());
                     listening.feed(&bridge);
                     listening.utterance.extend_from_slice(&bridge);
-                }
-            }
-            if listening.speaking {
-                listening.utterance.extend_from_slice(pcm);
-                if !began {
+                    listening.utterance.extend_from_slice(pcm);
                     listening.feed(pcm);
                 }
+                self.last_activity = Instant::now();
+            } else if listening.speaking {
+                listening.utterance.extend_from_slice(pcm);
+                listening.voiced_samples = listening.voiced_samples.saturating_add(pcm.len());
+                listening.feed(pcm);
                 self.last_activity = Instant::now();
             } else {
                 listening.preroll.extend(pcm.iter().copied());
@@ -1661,16 +1952,24 @@ impl<'a> Session<'a> {
         None
     }
 
-    /// NV8a-1：完整中间识别已是停止词时立刻发起一次急停轮次；
-    /// 普通句子若开启了 Jev 筛选，则按 120ms 防抖在后台预热未说完/路由/工具缓存（连续跳字不风暴）。
-    fn on_interim(&mut self, interim: String) {
+    /// NV8a-1 / n87：中间识别经同音纠错后整句命中停止词时立刻发起急停轮次；
+    /// 说话满约半秒后按 500ms 节流把实时识别文字推上小智屏幕；开启 Jev 时按 120ms 防抖预热未说完判定。
+    async fn on_interim(
+        &mut self,
+        socket: &mut crate::link::Link,
+        interim: String,
+    ) -> Result<(), String> {
         let Some(conversation) = self.conversation.clone() else {
-            return;
+            return Ok(());
         };
         if !matches!(self.phase, Phase::Listening(_)) {
-            return;
+            return Ok(());
         }
-        if crate::fast::is_stop(&interim) {
+        let corrected = crate::conversation::apply_asr_corrections(
+            &interim,
+            &conversation.settings.asr_corrections,
+        );
+        if crate::fast::is_stop(&corrected) {
             self.pending_listen_stop = false;
             self.hold_check = None;
             if let Some(worker) = self.vad_worker.as_mut() {
@@ -1681,10 +1980,10 @@ impl<'a> Session<'a> {
             self.phase = Phase::Idle;
             self.event(format!(
                 "流式中间结果整句命中急停词（{}）：立即请求急停",
-                crate::fast::normalized(&interim)
+                crate::fast::normalized(&corrected)
             ));
             self.start_turn(TurnInput::FastStop { text: interim }, TurnKind::Answer);
-            return;
+            return Ok(());
         }
         let device_specs: Vec<_> = self
             .device_mcp
@@ -1699,35 +1998,63 @@ impl<'a> Session<'a> {
                     .collect()
             })
             .unwrap_or_default();
-        let Phase::Listening(listening) = &mut self.phase else {
-            return;
-        };
-        if listening.last_interim == interim {
-            return;
-        }
-        listening.last_interim = interim.clone();
-        if let Some(prev) = listening.prewarm_task.take() {
-            prev.abort();
-        }
-        if let Some(jev) = conversation
-            .jev_filter
-            .clone()
-            .filter(|f| f.options().enabled && f.options().unfinished_hold)
-            && crate::fast::normalized(&interim).chars().count() >= 2
+        let min_audio_samples = self.samples(INTERIM_STT_MIN_AUDIO_MS);
+        let can_push_screen_stt = self.paused.is_none() && self.hold_check.is_none();
+        let mut push_screen_stt = false;
         {
-            let history = Self::jev_prewarm_history(
-                &self.shared.vision_photos,
-                self.device_id,
-                &self.history,
-                &conversation,
-            );
-            listening.prewarm_task = Some(tokio::spawn(async move {
-                tokio::time::sleep(INTERIM_PREWARM_DEBOUNCE).await;
-                let mut tools = conversation.tools.tools();
-                tools.extend(device_specs);
-                let _ = jev.should_hold_unfinished(&interim, &history, &tools).await;
-            }));
+            let Phase::Listening(listening) = &mut self.phase else {
+                return Ok(());
+            };
+            if listening.last_interim != corrected {
+                listening.last_interim.clone_from(&corrected);
+                if let Some(prev) = listening.prewarm_task.take() {
+                    prev.abort();
+                }
+                if let Some(jev) = conversation
+                    .jev_filter
+                    .clone()
+                    .filter(|f| f.options().enabled && f.options().unfinished_hold)
+                    && crate::fast::normalized(&corrected).chars().count() >= 2
+                {
+                    let history = Self::jev_prewarm_history(
+                        &self.shared.vision_photos,
+                        self.device_id,
+                        &self.history,
+                        &conversation,
+                    );
+                    let prewarm_text = corrected.clone();
+                    listening.prewarm_task = Some(tokio::spawn(async move {
+                        tokio::time::sleep(INTERIM_PREWARM_DEBOUNCE).await;
+                        let mut tools = conversation.tools.tools();
+                        tools.extend(device_specs);
+                        let _ = jev
+                            .should_hold_unfinished(&prewarm_text, &history, &tools)
+                            .await;
+                    }));
+                }
+            }
+            let now = Instant::now();
+            if can_push_screen_stt
+                && listening.voiced_samples >= min_audio_samples
+                && listening
+                    .speech_began_at
+                    .is_some_and(|at| now.duration_since(at) >= INTERIM_STT_FIRST_ELAPSED)
+                && listening
+                    .last_interim_stt_at
+                    .is_none_or(|at| now.duration_since(at) >= INTERIM_STT_COOLDOWN)
+                && moss_voice_providers::text::speakable(&corrected)
+                && !crate::fast::is_noise_filler(&corrected)
+                && crate::fast::normalized(&corrected).chars().count() >= 2
+                && self.last_screen_stt.as_deref() != Some(corrected.as_str())
+            {
+                listening.last_interim_stt_at = Some(now);
+                push_screen_stt = true;
+            }
         }
+        if push_screen_stt && !self.send_stt(socket, corrected).await {
+            return Err("发送失败".into());
+        }
+        Ok(())
     }
 
     fn jev_prewarm_history(
@@ -1787,6 +2114,12 @@ impl<'a> Session<'a> {
                     .stream
                     .as_ref()
                     .and_then(|(s, _)| s.latest_interim())
+                    .map(|raw| {
+                        crate::conversation::apply_asr_corrections(
+                            &raw,
+                            &conversation.settings.asr_corrections,
+                        )
+                    })
                     .unwrap_or_else(|| listening.last_interim.clone());
                 listening.last_interim = latest.clone();
                 if !latest.is_empty() {
@@ -1910,6 +2243,7 @@ impl<'a> Session<'a> {
         {
             enrollment.submit(self.device_id, self.session_id, &pcm, sample_rate);
         }
+        self.gate_next_turn = matches!(end, UtteranceEnd::Silence) && !self.listen_manual;
         self.start_turn(
             TurnInput::Utterance {
                 pcm,
@@ -1933,17 +2267,51 @@ impl<'a> Session<'a> {
             self.music_hud = None;
         }
         self.barge.reset();
+        self.follow.reset();
+        self.last_loud = None;
         self.playback_started = None;
         self.barge_resumed = false;
+        // 对暂停中的回答的插话：先只做识别，确认不是附和后才请求大模型
+        let hold_llm = self.paused.is_some();
+        let silence_ended = std::mem::take(&mut self.gate_next_turn);
+        let gated = (silence_ended || hold_llm)
+            && kind == TurnKind::Answer
+            && matches!(input, TurnInput::Utterance { .. });
+        let fresh_history = std::sync::Arc::new(std::sync::Mutex::new(None));
+        // 回答轮次都带闸门：抢跑轮次起始关闭；其余起始放行——插话暂停时会话能把它关上，
+        // 让被暂停的回答在下一批工具调用前停住
+        let gated_answer = kind == TurnKind::Answer && matches!(input, TurnInput::Utterance { .. });
+        let tool_latch = std::sync::Arc::new(crate::conversation::ToolLatch::default());
+        let (release, gate) = if gated_answer {
+            let (tx, rx) = tokio::sync::watch::channel(!gated);
+            (
+                Some(tx),
+                Some(TurnGate {
+                    release: rx,
+                    tool_latch: tool_latch.clone(),
+                    speculative: gated,
+                    hold_llm: gated && hold_llm,
+                    fresh_history: fresh_history.clone(),
+                }),
+            )
+        } else {
+            (None, None)
+        };
+        let tool_latch = gated_answer.then_some(tool_latch);
+        self.last_utterance = match &input {
+            TurnInput::Utterance { pcm, .. } if silence_ended => Some(pcm.clone()),
+            _ => None,
+        };
         self.turn_number += 1;
         let recording_offset = if kind == TurnKind::Answer {
             self.recording_started.elapsed().as_millis() as u64
         } else {
             0
         };
+        let is_fast_stop = matches!(&input, TurnInput::FastStop { .. });
         let timing = if kind == TurnKind::Answer {
             let mut stages = std::mem::take(&mut self.recording_marks);
-            let end = if matches!(&input, TurnInput::FastStop { .. }) {
+            let end = if is_fast_stop {
                 "interim_stop"
             } else {
                 "utterance_end"
@@ -1971,14 +2339,25 @@ impl<'a> Session<'a> {
         let mut pending_photo = None;
         let history = if kind == TurnKind::Answer {
             if conversation.personal_context.is_some() {
-                if let Some(photo) = self.shared.vision_photos.take(self.device_id) {
-                    let msg = photo.into_message();
-                    pending_photo = Some(msg.clone());
-                    vec![msg]
-                } else {
+                if is_fast_stop {
                     Vec::new()
+                } else {
+                    let photo_msg =
+                        if let Some(photo) = self.shared.vision_photos.take(self.device_id) {
+                            self.carried_photo = None;
+                            Some(photo.into_message())
+                        } else {
+                            self.carried_photo.take()
+                        };
+                    if let Some(msg) = photo_msg {
+                        pending_photo = Some(msg.clone());
+                        vec![msg]
+                    } else {
+                        Vec::new()
+                    }
                 }
             } else {
+                self.carried_photo = None;
                 if let Some(photo) = self.shared.vision_photos.take(self.device_id) {
                     self.history.push(photo.into_message());
                     append_history(
@@ -2012,9 +2391,16 @@ impl<'a> Session<'a> {
             None
         };
         let device = self.device_mcp.as_ref().and_then(DeviceMcp::tool_set);
-        let (handle, events) =
-            spawn_turn_with_person_hint(conversation, context, input, history, device, person_hint);
-        self.turn = Some(ActiveTurn {
+        let (handle, events) = spawn_turn_gated(
+            conversation,
+            context,
+            input,
+            history,
+            device,
+            person_hint,
+            gate,
+        );
+        if let Some(mut replaced) = self.turn.replace(ActiveTurn {
             person_scope: None,
             person_verified: false,
             pending_photo,
@@ -2025,6 +2411,7 @@ impl<'a> Session<'a> {
             handle,
             events,
             user: None,
+            smart_turn_prob: None,
             spoken: Vec::new(),
             debug_raw_asr: None,
             debug_corrected_asr: None,
@@ -2036,7 +2423,17 @@ impl<'a> Session<'a> {
             done: false,
             close: false,
             listen_after: None,
-        });
+            tools_started: false,
+            tool_latch,
+            speculative: gated,
+            fast_stop: is_fast_stop,
+            release,
+            fresh_history,
+            hold: None,
+        }) && !replaced.close
+        {
+            self.stash_uncommitted_photo(&mut replaced);
+        }
         self.phase = Phase::Thinking;
         self.set_state("thinking");
     }
@@ -2064,10 +2461,7 @@ impl<'a> Session<'a> {
         self.pump
             .push_marked(&resampler.process(&pcm), "（回声）".into());
         self.pump.finish();
-        self.phase = Phase::Speaking {
-            next: Instant::now(),
-            burst: PREBUFFER_FRAMES,
-        };
+        self.phase = Phase::speaking_after_tts_start();
         self.set_state("speaking");
         Ok(())
     }
@@ -2125,10 +2519,7 @@ impl<'a> Session<'a> {
             return Ok(());
         }
         self.tts(socket, TtsState::Start, None).await?;
-        self.phase = Phase::Speaking {
-            next: Instant::now(),
-            burst: PREBUFFER_FRAMES,
-        };
+        self.phase = Phase::speaking_after_tts_start();
         self.set_state("speaking");
         // Title is bounded by the filesystem scanner; no absolute path/URL.
         self.event(format!("开始播放本地歌曲：{title}"));
@@ -2211,6 +2602,48 @@ impl<'a> Session<'a> {
         if self.turn.is_none() {
             return Ok(());
         }
+        if self.paused.is_some() {
+            // 插话那一轮的第一个结论决定被暂停的回答的去留
+            match &event {
+                Some(TurnEvent::Heard(text)) if self.is_backchannel_now(text) => {
+                    self.resume_paused("只是附和");
+                    return Ok(());
+                }
+                Some(TurnEvent::Ignored) | None => {
+                    self.resume_paused("没听出内容");
+                    return Ok(());
+                }
+                Some(TurnEvent::Failed(error)) => {
+                    self.event(EventRecord::from_provider(
+                        EventLevel::Warn,
+                        "插话识别出错，继续原回答：",
+                        error,
+                    ));
+                    self.resume_paused("识别失败");
+                    return Ok(());
+                }
+                Some(
+                    TurnEvent::RawHeard { .. }
+                    | TurnEvent::SmartTurnProb(_)
+                    | TurnEvent::Timing { .. }
+                    | TurnEvent::PersonResolved { .. }
+                    | TurnEvent::Warning(_),
+                ) => {}
+                Some(TurnEvent::Heard(text)) => {
+                    let chars = text.chars().count();
+                    self.abandon_paused(socket, "自然插话").await?;
+                    // 被打断的回答刚记入历史：把最新历史或尚未提交给任何人的照片交给等放行的这一轮
+                    self.sync_fresh_history_after_abandon_paused();
+                    // 某些固件在 tts stop 后再发一次 listen start：不能把刚开始的这一轮打断
+                    self.barge_resumed = true;
+                    self.event(format!("自然插话：识别出 {chars} 字，打断原回答"));
+                }
+                Some(_) => {
+                    self.abandon_paused(socket, "自然插话").await?;
+                    self.sync_fresh_history_after_abandon_paused();
+                }
+            }
+        }
         // 任务意外结束（没有发 Done）按“结束、无新消息”处理
         match event.unwrap_or(TurnEvent::Done {
             messages: Vec::new(),
@@ -2243,6 +2676,11 @@ impl<'a> Session<'a> {
                     turn.person_verified = verified;
                 }
             }
+            TurnEvent::ToolsStarted => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.tools_started = true;
+                }
+            }
             TurnEvent::Closing => {
                 if let Some(turn) = self.turn.as_mut() {
                     turn.close = true;
@@ -2269,6 +2707,11 @@ impl<'a> Session<'a> {
                 {
                     // 只保留注册名称，不保存参数或工具结果。
                     timing.tools.push(crate::ToolTiming { name, ms });
+                }
+            }
+            TurnEvent::SmartTurnProb(prob) => {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.smart_turn_prob = Some(prob);
                 }
             }
             TurnEvent::RawHeard { raw, corrected } => {
@@ -2309,10 +2752,31 @@ impl<'a> Session<'a> {
                     .state
                     .set_utterance_chars(self.session_id, u32::try_from(chars).unwrap_or(u32::MAX));
                 self.event(format!("识别完成：{chars} 字"));
+                let mut held_ms = None;
                 if let Some(turn) = self.turn.as_mut() {
                     turn.user = Some(text.clone());
+                    if turn.speculative && turn.hold.is_none() {
+                        // 抢跑：任务在静音 BASE_SILENCE_MS 时就开始了；结合句尾词与尾音语义概率决定还要等多久才开口
+                        let wait =
+                            crate::fast::endpoint_wait_ms_with_prosody(&text, turn.smart_turn_prob)
+                                .saturating_sub(BASE_SILENCE_MS);
+                        let until = turn.started + Duration::from_millis(wait);
+                        if until > Instant::now() {
+                            turn.hold = Some((until, until + MAX_HOLD_EXTENSION));
+                            held_ms = Some(wait);
+                        }
+                    }
                 }
-                if !self.send_stt(socket, text).await {
+                match held_ms {
+                    Some(ms) if ms >= 500 => self.event(format!(
+                        "这句话像是还没说完，多等 {ms} ms 再回应（期间接着说会合并）"
+                    )),
+                    Some(_) => {}
+                    None => self.release_turn(),
+                }
+                if self.last_screen_stt.take().as_deref() != Some(text.as_str())
+                    && !self.send_stt(socket, text).await
+                {
                     return Err("发送失败".into());
                 }
                 // n70 听完开始想：全屏画风切到“思考”
@@ -2323,7 +2787,10 @@ impl<'a> Session<'a> {
             }
             TurnEvent::Ignored => {
                 self.finish_timing("ignored");
-                self.turn = None;
+                if let Some(mut turn) = self.turn.take() {
+                    self.stash_uncommitted_photo(&mut turn);
+                }
+                self.last_screen_stt = None;
                 self.event("没有识别出文字，继续拾音");
                 if self.listen_manual {
                     self.phase = Phase::Idle;
@@ -2390,16 +2857,32 @@ impl<'a> Session<'a> {
                     self.playback_started = None;
                     self.pump.begin();
                     self.tts(socket, TtsState::Start, None).await?;
-                    self.phase = Phase::Speaking {
-                        next: Instant::now(),
-                        burst: PREBUFFER_FRAMES,
-                    };
+                    self.phase = Phase::speaking_after_tts_start();
                     self.set_state("speaking");
                 }
-                let mut resampler =
-                    Resampler::new(pcm.sample_rate, self.shared.config.downlink_sample_rate);
-                self.pump
-                    .push_marked(&resampler.process(&pcm.samples), text);
+                let downlink = self.shared.config.downlink_sample_rate;
+                let mut resampler = Resampler::new(pcm.sample_rate, downlink);
+                let samples = resampler.process(&pcm.samples);
+                let segments =
+                    moss_voice_providers::text::subtitle_segments(&text, self.subtitle_units());
+                if segments.len() > 1 {
+                    // 流式合成此刻只有首段音频：整句时长取“已到音频”与“按约 5.5 字/秒估算”的较大者，
+                    // 各段按字数比例落在时间轴上（宁可略早，不要晚）
+                    let chars = text.chars().count().max(1) as u64;
+                    let total = (samples.len() as u64).max(chars * u64::from(downlink) * 2 / 11);
+                    let mut before = 0u64;
+                    let marks = segments
+                        .into_iter()
+                        .map(|segment| {
+                            let at = total * before / chars;
+                            before += segment.chars().count() as u64;
+                            (at, segment)
+                        })
+                        .collect();
+                    self.pump.push_segmented(&samples, marks);
+                } else {
+                    self.pump.push_marked(&samples, text);
+                }
                 if let Some(turn) = self.turn.as_mut() {
                     turn.resampler = Some(resampler);
                 }
@@ -2452,7 +2935,12 @@ impl<'a> Session<'a> {
             TurnEvent::Done { messages, close } => {
                 if self.music.as_ref().is_some_and(|music| music.active()) {
                     self.finish_timing("music_started");
-                    self.turn = None;
+                    if let Some(mut turn) = self.turn.take()
+                        && !close
+                        && !turn.close
+                    {
+                        self.stash_uncommitted_photo(&mut turn);
+                    }
                     return Ok(());
                 }
                 let Some(turn) = self.turn.as_mut() else {
@@ -2504,12 +2992,19 @@ impl<'a> Session<'a> {
                         conversation.llm.clone(),
                     );
                 }
-                personal.commit(
+                let photo_in_messages = turn
+                    .pending_photo
+                    .as_ref()
+                    .is_none_or(|photo| messages.contains(photo));
+                let committed = personal.commit(
                     &turn_ctx,
                     commit_scope,
                     messages,
                     conversation.settings.history_budget,
                 );
+                if !(committed && photo_in_messages) && !turn.close {
+                    self.stash_uncommitted_photo(&mut turn);
+                }
             } else {
                 if let Some(extraction) = &conversation.context_extraction {
                     extraction.turn_completed(&turn_ctx, None, &messages, conversation.llm.clone());
@@ -2527,8 +3022,8 @@ impl<'a> Session<'a> {
         self.last_activity = Instant::now();
         if turn.close {
             if played {
-                // 给设备时间播完已发出的帧
-                tokio::time::sleep(Duration::from_millis(600)).await;
+                // tick 已等到预计播完才发 tts stop，这里只留设备本地播放队列的排空余量
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
             let reason = match turn.kind {
                 TurnKind::Goodbye => format!(
@@ -2554,8 +3049,101 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    /// 认定用户这句话说完了：放行对话任务的工具调用，并开始处理它的输出。
+    fn release_turn(&mut self) {
+        if let Some(turn) = self.turn.as_mut() {
+            turn.hold = None;
+            turn.speculative = false;
+            if let Some(release) = &turn.release {
+                let _ = release.send(true);
+            }
+        }
+    }
+
+    /// 抢跑等待到点：用户此刻没在出声（或已到最晚时刻）就放行，否则稍后再看。
+    fn check_release(&mut self) {
+        let now = Instant::now();
+        let Some((until, latest)) = self.turn.as_ref().and_then(|turn| turn.hold) else {
+            return;
+        };
+        if now < until {
+            return;
+        }
+        let speaking = self
+            .last_loud
+            .is_some_and(|at| now.duration_since(at) < Duration::from_millis(250));
+        if speaking && now < latest {
+            if let Some(turn) = self.turn.as_mut() {
+                turn.hold = Some((now + Duration::from_millis(80), latest));
+            }
+            return;
+        }
+        self.release_turn();
+    }
+
+    /// 插话识别出来的只是附和（且原回答还剩不少没说）：不打断。
+    /// 原回答已经说到最后一秒时，“好的”“是的”更可能是在回答它的提问，按正常的一句话处理。
+    fn is_backchannel_now(&self, text: &str) -> bool {
+        crate::fast::is_backchannel(text)
+            && !(self.paused.as_ref().is_some_and(|turn| turn.done)
+                && self.pump.buffered_samples() < self.shared.config.downlink_sample_rate as usize)
+    }
+
+    /// 被暂停的回答接着说（插话只是附和，或没听出内容）。
+    fn resume_paused(&mut self, why: &str) {
+        let Some(paused) = self.paused.take() else {
+            return;
+        };
+        self.finish_timing("ignored");
+        if let Some(mut abandoned) = self.turn.replace(paused) {
+            self.stash_uncommitted_photo(&mut abandoned);
+        }
+        self.hold_check = None;
+        self.pending_listen_stop = false;
+        if let Some(worker) = self.vad_worker.as_mut() {
+            worker.reset();
+        }
+        self.barge.reset();
+        self.playback_started = None;
+        if let Some(release) = self.turn.as_ref().and_then(|turn| turn.release.as_ref()) {
+            let _ = release.send(true);
+        }
+        self.phase = Phase::speaking_resumed();
+        self.set_state("speaking");
+        self.event(format!("插话{why}，接着说"));
+    }
+
+    /// 被暂停的回答确定作废：按打断处理（发 tts stop、丢弃未播音频、已播的句子记入历史），
+    /// 当前这一轮与阶段保持不变。
+    async fn abandon_paused(
+        &mut self,
+        socket: &mut crate::link::Link,
+        reason: &str,
+    ) -> Result<(), String> {
+        let Some(paused) = self.paused.take() else {
+            return Ok(());
+        };
+        let current = self.turn.replace(paused);
+        let phase = std::mem::replace(&mut self.phase, Phase::speaking_resumed());
+        let result = self.interrupt_current(socket, reason).await;
+        self.turn = current;
+        self.phase = phase;
+        self.set_state(self.phase.label());
+        result
+    }
+
     /// 打断：中止对话任务、丢弃未播音频；已识别的原话与已播的句子记入历史。
     async fn interrupt(
+        &mut self,
+        socket: &mut crate::link::Link,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.barge_resumed = false;
+        self.abandon_paused(socket, reason).await?;
+        self.interrupt_current(socket, reason).await
+    }
+
+    async fn interrupt_current(
         &mut self,
         socket: &mut crate::link::Link,
         reason: &str,
@@ -2566,6 +3154,7 @@ impl<'a> Session<'a> {
         self.one_shot_badge_url = None;
         self.music_hud = None;
         if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
+            self.carried_photo = None;
         } else if let Some(personal) = self
             .conversation
             .as_ref()
@@ -2588,36 +3177,44 @@ impl<'a> Session<'a> {
         {
             music.cancel(&mut self.pump);
         }
-        if let Some(mut turn) = self.turn.take()
-            && turn.kind == TurnKind::Answer
-            && let Some(user) = turn.user.clone()
-            && let Some(conversation) = &self.conversation
-        {
-            let mut messages = Vec::with_capacity(3);
-            if let Some(photo) = turn.pending_photo.take() {
-                messages.push(photo);
-            }
-            messages.push(ChatMessage::user(user));
-            if !turn.spoken.is_empty() {
-                messages.push(ChatMessage::assistant(turn.spoken.join("")));
-            }
-            if let Some(personal) = &conversation.personal_context {
-                let commit_scope = turn.person_scope.as_ref().filter(|_| turn.person_verified);
-                personal.commit(
-                    &ToolContext {
-                        device_id: self.device_id.into(),
-                        session_id: self.session_id.into(),
-                    },
-                    commit_scope,
-                    messages,
-                    conversation.settings.history_budget,
-                );
-            } else {
-                append_history(
-                    &mut self.history,
-                    messages,
-                    conversation.settings.history_budget,
-                );
+        if let Some(mut turn) = self.turn.take() {
+            if turn.kind == TurnKind::Answer
+                && let Some(user) = turn.user.clone()
+                && let Some(conversation) = &self.conversation
+            {
+                let mut messages = Vec::with_capacity(3);
+                if let Some(photo) = &turn.pending_photo {
+                    messages.push(photo.clone());
+                }
+                messages.push(ChatMessage::user(user));
+                if !turn.spoken.is_empty() {
+                    messages.push(ChatMessage::assistant(turn.spoken.join("")));
+                }
+                if let Some(personal) = &conversation.personal_context {
+                    let commit_scope = turn.person_scope.as_ref().filter(|_| turn.person_verified);
+                    let committed = personal.commit(
+                        &ToolContext {
+                            device_id: self.device_id.into(),
+                            session_id: self.session_id.into(),
+                        },
+                        commit_scope,
+                        messages,
+                        conversation.settings.history_budget,
+                    );
+                    if committed {
+                        turn.pending_photo = None;
+                    } else if !turn.close {
+                        self.stash_uncommitted_photo(&mut turn);
+                    }
+                } else {
+                    append_history(
+                        &mut self.history,
+                        messages,
+                        conversation.settings.history_budget,
+                    );
+                }
+            } else if !turn.close {
+                self.stash_uncommitted_photo(&mut turn);
             }
         }
         match self.phase {
@@ -2649,13 +3246,32 @@ impl<'a> Session<'a> {
                 _ => {}
             }
         }
-        let was_started = self.playback_started.is_some();
-        let mut sent_any = false;
+        let step = Duration::from_millis(FRAME_MS);
+        if let Phase::Speaking {
+            next, not_before, ..
+        } = &mut self.phase
+            && Instant::now() < *not_before
+        {
+            // 设备还没切到说话状态：此刻发出的帧会被固件丢弃
+            *next = *not_before;
+            return Ok(());
+        }
         loop {
+            let now = Instant::now();
+            if let Phase::Speaking { anchor, sent, .. } = &mut self.phase {
+                let played_until = *anchor + step * *sent;
+                if played_until <= now {
+                    // 设备端已播空（刚起播，或上游中断久于余量）：时间轴从此刻重新对齐
+                    *anchor = now;
+                    *sent = 0;
+                } else if played_until - now > step * (LEAD_FRAMES - 1) {
+                    break;
+                }
+            }
             match self.pump.next_frame()? {
                 PumpTick::Frame { data, marks } => {
                     // Check permission immediately before every outgoing frame,
-                    // including any initial prebuffer burst.
+                    // including any catch-up burst.
                     if !self.permission.load(std::sync::atomic::Ordering::Acquire) {
                         self.last_verified_person = None;
                         if let Some(music) = self.music.as_mut() {
@@ -2672,7 +3288,6 @@ impl<'a> Session<'a> {
                         }
                     }
                     self.send_frame(socket, &data).await?;
-                    sent_any = true;
                     self.set_level(self.pump.last_level());
                     if self.playback_started.is_none() {
                         self.playback_started = Some(Instant::now());
@@ -2686,17 +3301,34 @@ impl<'a> Session<'a> {
                                 .saturating_add(turn.started.elapsed().as_millis() as u64),
                         );
                     }
-                    if let Phase::Speaking { burst, .. } = &mut self.phase {
-                        if *burst > 1 && self.pump.has_frame_for_burst() {
-                            *burst -= 1;
-                            continue;
-                        }
-                        *burst = 0;
+                    if let Phase::Speaking { sent, .. } = &mut self.phase {
+                        *sent += 1;
                     }
-                    break;
                 }
-                PumpTick::Waiting => break,
+                PumpTick::Waiting => {
+                    // 还在攒启动缓冲或上游暂时供不上：不发帧，稍后重检（SpeechMore/Done 也会唤醒）
+                    if let Phase::Speaking { next, .. } = &mut self.phase {
+                        *next = Instant::now() + STARVED_POLL;
+                    }
+                    return Ok(());
+                }
                 PumpTick::Done => {
+                    // 等设备把已发出的帧播完再发 tts stop，避免尾字被吞
+                    if let Phase::Speaking {
+                        next,
+                        anchor,
+                        sent,
+                        stop_at,
+                        ..
+                    } = &mut self.phase
+                        && self.playback_started.is_some()
+                    {
+                        let at = *stop_at.get_or_insert(*anchor + step * *sent + DRAIN_MARGIN);
+                        if Instant::now() < at {
+                            *next = at;
+                            return Ok(());
+                        }
+                    }
                     if was_music {
                         self.music_hud = None;
                         if let Some(music) = self.music.as_mut() {
@@ -2715,24 +3347,12 @@ impl<'a> Session<'a> {
                 }
             }
         }
-        if let Phase::Speaking { next, .. } = &mut self.phase {
-            let step = Duration::from_millis(FRAME_MS);
-            if !sent_any {
-                // 尚在等待启动缓冲（PumpTick::Waiting）：不空跑播放时钟，等 SpeechMore/Done 唤醒或下一拍重检
-                *next = Instant::now() + step;
-            } else if !was_started {
-                // 首轮预缓冲突发（含 tts:start、全屏表情与首句 glyph_push 字模发送）刚完成，以此刻为基准对齐后续节拍
-                *next = Instant::now() + step;
-            } else {
-                *next += step;
-                // 若 Wi-Fi 抖动或句首字模发送短暂阻塞超过 2 拍（120ms），夹紧追赶上限避免瞬间连发冲垮设备端解码队列
-                let min_next = Instant::now()
-                    .checked_sub(step * 2)
-                    .unwrap_or_else(Instant::now);
-                if *next < min_next {
-                    *next = min_next;
-                }
-            }
+        if let Phase::Speaking {
+            next, anchor, sent, ..
+        } = &mut self.phase
+        {
+            // 余量降到目标以下的时刻再发下一帧：稳态即绝对时间轴上每 60 ms 一帧，不随每拍调度误差漂移
+            *next = *anchor + step * sent.saturating_sub(LEAD_FRAMES - 1);
         }
         Ok(())
     }
@@ -2751,7 +3371,7 @@ impl<'a> Session<'a> {
             self.event(format!("播放被打断（{reason}）：已播 {} 帧", stats.frames));
         } else {
             self.event(format!(
-                "播放完成：{} 帧，补静音 {} 帧",
+                "播放完成：{} 帧，供流中断 {} 次",
                 stats.frames, stats.underruns
             ));
         }
@@ -2792,10 +3412,29 @@ impl<'a> Session<'a> {
         let may_interrupt = self.shared.config.barge_in
             && self.listen_realtime
             && matches!(self.phase, Phase::Thinking | Phase::Speaking { .. })
+            && !self.turn.as_ref().is_some_and(|turn| turn.fast_stop)
             && (self.turn.as_ref().is_some_and(|turn| {
                 matches!(turn.kind, TurnKind::Answer | TurnKind::Notice) && !turn.close
             }) || self.music.as_ref().is_some_and(|music| music.active()));
-        if !listening && !may_interrupt {
+        // 官方服务端在“思考”期间照常收音，新的话会取代还没开口的旧回答。自动 / 实时拾音下设备此时
+        // 仍在上传（收到 tts start 才停），这里同样继续听：话说一半停顿被判停后接着说的后半句不再丢。
+        // 还没开播所以没有回声问题，不依赖“自然插话”开关；已开始执行工具的轮次除外。
+        let may_follow_up = matches!(self.phase, Phase::Thinking)
+            && !self.listen_manual
+            && self.paused.is_none()
+            && self.last_utterance.is_some()
+            && self.turn.as_ref().is_some_and(|turn| {
+                turn.kind == TurnKind::Answer
+                    && !turn.close
+                    && !turn.fast_stop
+                    && !turn.audio_started
+                    && !turn.tools_started
+                    && !turn
+                        .tool_latch
+                        .as_ref()
+                        .is_some_and(|latch| latch.tools_started())
+            });
+        if !listening && !may_interrupt && !may_follow_up {
             return Ok(());
         }
         let decoded = decode_frame(self.version, data).map_err(|error| error.to_string());
@@ -2816,36 +3455,116 @@ impl<'a> Session<'a> {
                 && self
                     .playback_started
                     .is_none_or(|at| at.elapsed() < Duration::from_millis(300));
-            let Some(head) = self.barge.accept(&pcm, guarded) else {
+            let detected = if may_follow_up {
+                if frame_rms(&pcm) >= self.shared.config.vad.start_rms {
+                    self.last_loud = Some(Instant::now());
+                }
+                self.follow.accept(&pcm, false)
+            } else {
+                self.barge.accept(&pcm, guarded)
+            };
+            let Some(head) = detected else {
                 return Ok(());
             };
             let elapsed = self.playback_started.map(|at| at.elapsed().as_millis());
             let thinking = matches!(self.phase, Phase::Thinking);
-            self.interrupt(socket, "自然插话").await?;
-            if thinking {
-                self.tts(socket, TtsState::Stop, None).await?;
+            // 思考中接着说：前半句不单独记入历史，与后半句拼成一段重新识别
+            // 作废前先抢工具执行闩：任务刚好已经开始执行工具时不能重来（否则同一个工具会执行两遍），
+            // 这段话按普通的后续语音处理
+            let abandoned = may_follow_up
+                && self
+                    .turn
+                    .as_ref()
+                    .and_then(|turn| turn.tool_latch.as_ref())
+                    .is_none_or(|latch| latch.try_abandon());
+            if may_follow_up && !abandoned {
+                return Ok(());
+            }
+            let earlier = if abandoned {
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.user = None;
+                }
+                self.last_utterance.take()
+            } else {
+                None
+            };
+            let follow_up = earlier.is_some();
+            // 回答正在播：先暂停，等插话识别出来再定——真有话才打断，一声“嗯”或噪声就接着说
+            let pause = !follow_up
+                && matches!(self.phase, Phase::Speaking { .. })
+                && self.paused.is_none()
+                && !self.music.as_ref().is_some_and(|music| music.active())
+                && self.turn.is_some();
+            if pause {
+                self.paused = self.turn.take();
+                // 关上被暂停回答的闸门：插话识别出来之前它不能再发起新的工具调用
+                if let Some(release) = self.paused.as_ref().and_then(|turn| turn.release.as_ref()) {
+                    let _ = release.send(false);
+                }
+                self.pump.pause();
+                self.playback_started = None;
+            } else {
+                self.interrupt(
+                    socket,
+                    if follow_up {
+                        "思考中用户接着说"
+                    } else {
+                        "自然插话"
+                    },
+                )
+                .await?;
+                if thinking && !follow_up {
+                    self.tts(socket, TtsState::Stop, None).await?;
+                }
             }
             self.start_listening(false);
-            self.barge_resumed = true;
+            // 暂停与思考中接着说都没有发 tts stop，设备不会重发 listen start
+            self.barge_resumed = !follow_up && !pause;
+            // 判停器只需要后半句的开头来进入“说话中”；交给识别的是前半句 + 后半句
+            let vad_head = head.clone();
+            let head = match earlier {
+                Some(mut earlier) => {
+                    earlier.extend_from_slice(&head);
+                    earlier
+                }
+                None => head,
+            };
             // 补送一次完整开头，并让普通判停器获得同样的语音状态。
             let head_ms = head.len() as u64 * 1000 / u64::from(self.uplink_rate);
             self.recording_started = Instant::now() - Duration::from_millis(head_ms);
             self.recording_marks.insert("barge_in".into(), head_ms);
             if let Some(worker) = self.vad_worker.as_mut() {
-                worker.submit(head.clone(), true)?;
+                worker.submit(vad_head, true)?;
             } else {
-                let _ = self.vad.accept(&head);
+                let _ = self.vad.accept(&vad_head);
             }
             let stream = self.open_stream();
             let head_level = crate::audio::pcm_rms_level(&head);
             if let Phase::Listening(recording) = &mut self.phase {
                 recording.speaking = true;
+                recording.speech_began_at = Some(self.recording_started);
+                recording.voiced_samples = head.len();
                 recording.stream = stream;
                 recording.feed(&head);
                 recording.utterance = head;
             }
             self.set_level(head_level);
             self.last_activity = Instant::now();
+            if follow_up {
+                self.event(format!(
+                    "思考中用户接着说：放弃还没开口的回答，与前半句合并重新识别（已有 {head_ms} ms）"
+                ));
+                return Ok(());
+            }
+            if pause {
+                self.event(format!(
+                    "听到插话，先暂停播放等识别结果（距开播 {}，保留开头 {head_ms} ms）",
+                    elapsed
+                        .map(|ms| format!("{ms} ms"))
+                        .unwrap_or_else(|| "尚未开播".into())
+                ));
+                return Ok(());
+            }
             self.event(format!(
                 "自然插话：连续语音至少 {} ms，距开播 {}，保留开头 {head_ms} ms",
                 self.shared.config.barge_in_ms,
@@ -3750,7 +4469,9 @@ impl<'a> Session<'a> {
     }
 
     fn busy(&self) -> bool {
-        self.turn.is_some() || matches!(self.phase, Phase::Speaking { .. } | Phase::Thinking)
+        self.turn.is_some()
+            || self.paused.is_some()
+            || matches!(self.phase, Phase::Speaking { .. } | Phase::Thinking)
     }
 
     async fn on_text(&mut self, socket: &mut crate::link::Link, text: &str) -> Result<(), String> {
@@ -3761,20 +4482,28 @@ impl<'a> Session<'a> {
                 mode,
                 ..
             }) => {
+                if self.mqtt && !socket.audio_open() {
+                    // 常连模式：这一轮已结束（goodbye 已发）。设备在收到 goodbye 前按固件逻辑
+                    // 发出的 listen start 迟到了——不能再进聆听，更不能把“聆听”画面推回已待命的屏幕
+                    return Ok(());
+                }
                 let manual = mode.as_deref() == Some("manual");
                 let realtime = mode.as_deref() == Some("realtime");
                 if manual {
                     self.preview_hold = None;
                 }
                 self.record_listen_mode(manual, realtime);
+                // 插话后某些固件会补发一次 listen start：只在还没开口（聆听 / 思考）时吞掉这一次；
+                // 新回答已经在播时的 listen start 是用户主动按键或唤醒，必须照常打断
                 if realtime
                     && self.listen_realtime
                     && self.barge_resumed
-                    && matches!(self.phase, Phase::Listening(_))
+                    && matches!(self.phase, Phase::Listening(_) | Phase::Thinking)
                 {
                     self.barge_resumed = false;
                     return Ok(());
                 }
+                self.barge_resumed = false;
                 self.listen_realtime = realtime;
                 // 唤醒后设备紧接着发 listen start：不打断唤醒回应，播完再拾音
                 if let Some(turn) = self.turn.as_mut()
@@ -3825,9 +4554,11 @@ impl<'a> Session<'a> {
                 self.pending_oled_preview = None;
                 self.one_shot_badge_url = None;
                 self.music_hud = None;
-                if self.busy() {
+                let was_busy = self.busy();
+                if was_busy {
                     self.interrupt(socket, &reason).await?;
-                } else if matches!(self.phase, Phase::Listening(_)) {
+                }
+                if matches!(self.phase, Phase::Listening(_)) {
                     self.pending_listen_stop = false;
                     self.hold_check = None;
                     if let Some(worker) = self.vad_worker.as_mut() {
@@ -3835,7 +4566,9 @@ impl<'a> Session<'a> {
                     }
                     self.phase = Phase::Idle;
                     self.set_state("idle");
-                    self.event(format!("拾音已取消（{reason}）"));
+                    if !was_busy {
+                        self.event(format!("拾音已取消（{reason}）"));
+                    }
                 }
             }
             Ok(ClientMessage::Ping) => {
@@ -3877,7 +4610,10 @@ impl<'a> Session<'a> {
     }
 
     /// 空闲到期：对话模式先说再见（说完断开），回声模式直接断开。
-    fn on_idle(&mut self) -> Result<(), String> {
+    async fn on_idle(&mut self, socket: &mut crate::link::Link) -> Result<(), String> {
+        if self.paused.is_some() {
+            self.abandon_paused(socket, "空闲超时").await?;
+        }
         let idle = self.shared.config.idle_timeout.as_secs();
         let goodbye = self
             .conversation
@@ -4050,6 +4786,8 @@ impl<'a> Session<'a> {
         let want_announce = conversation.settings.announce_job_done;
         let want_hud = conversation.settings.screen_preview_sync;
         if !want_announce && !want_hud {
+            self.pending_finished.clear();
+            self.pending_agent_notices.clear();
             return Ok(());
         }
         // 若用户正在说话或处于非实时拾音占线态，延后轮询以免丢失终态边沿或干扰拾音
@@ -4062,8 +4800,22 @@ impl<'a> Session<'a> {
         };
         let snap = self
             .jobs
-            .poll_full(conversation.tools.as_ref(), &context)
+            .poll_full_with(conversation.tools.as_ref(), &context, want_announce)
             .await;
+        for job in snap.finished {
+            enqueue_bounded_notice(&mut self.pending_finished, job, |a, b| {
+                a.workflow_id == b.workflow_id
+            });
+        }
+        if want_announce {
+            for notice in snap.agent_notices {
+                enqueue_bounded_notice(&mut self.pending_agent_notices, notice, |a, b| {
+                    a.claim_key == b.claim_key
+                });
+            }
+        } else {
+            self.pending_agent_notices.clear();
+        }
         let can_color_hud = self.device_mcp.as_ref().is_some_and(|d| {
             d.has_tool("self.screen.preview_image") && d.screen_monochrome != Some(true)
         });
@@ -4072,91 +4824,130 @@ impl<'a> Session<'a> {
             .as_ref()
             .is_some_and(|d| d.screen_monochrome == Some(true));
 
-        if !snap.finished.is_empty() {
-            for job in snap.finished {
-                if want_announce {
-                    if !self.shared.job_announcements.claim(&job.workflow_id) {
-                        continue;
-                    }
-                    self.preview_hold = None;
-                    self.last_hud_workflow = None;
-                    self.last_approval_summary = None;
-                    self.engrave_preview = None;
-                    if want_hud && self.pack_active() {
-                        self.show_finished_scene(socket, &job).await?;
-                    } else if want_hud
-                        && can_color_hud
-                        && let Some(badge_url) = self.stage_terminal_badge_url(&job)
-                    {
-                        self.one_shot_badge_url = Some(badge_url.clone());
-                        self.send_quiet_device_call(
-                            socket,
-                            "self.screen.preview_image",
-                            json!({ "url": badge_url }),
-                        )
-                        .await?;
-                    }
-                    if self.mqtt && !socket.audio_open() {
-                        // n71 常连模式没在对话：没有语音通道可播，改发提示（屏幕显示结果并响一声提示音）
-                        let completed = job.status == "completed";
-                        let emotion = if self.pack_active() {
-                            crate::screen_pack::emotion_name(
-                                self.shared.card_style(),
-                                if completed {
-                                    crate::BotPose::CelebrateDone
-                                } else {
-                                    crate::BotPose::HaltedShield
-                                },
-                            )
-                        } else if completed {
-                            "happy".into()
-                        } else {
-                            "sad".into()
-                        };
-                        let alert = ServerMessage::Alert {
-                            status: if completed {
-                                "雕刻完成"
-                            } else {
-                                "雕刻已停止"
-                            }
-                            .into(),
-                            message: job.speech(),
-                            emotion,
-                        };
-                        if !send_json(socket, &alert).await {
-                            return Err("发送失败".into());
-                        }
-                        self.event("加工任务已结束：设备没在对话，已在屏幕上提示结果");
-                        return Ok(());
-                    }
-                    self.event("加工任务已结束，播报结果");
-                    self.start_turn(
-                        TurnInput::Say {
-                            text: job.speech(),
-                            close: false,
-                        },
-                        TurnKind::Notice,
-                    );
-                    return Ok(());
-                } else if want_hud && self.pack_active() {
-                    self.preview_hold = None;
-                    self.last_hud_workflow = None;
-                    self.engrave_preview = None;
+        while let Some(job) = self.pending_finished.pop_front() {
+            if want_announce {
+                if !self.shared.job_announcements.claim(&job.workflow_id) {
+                    continue;
+                }
+                self.preview_hold = None;
+                self.last_hud_workflow = None;
+                self.last_approval_summary = None;
+                self.engrave_preview = None;
+                if want_hud && self.pack_active() {
                     self.show_finished_scene(socket, &job).await?;
-                    return Ok(());
-                } else if want_hud && can_color_hud {
-                    self.preview_hold = None;
-                    self.last_hud_workflow = None;
-                    if let Some(badge_url) = self.stage_terminal_badge_url(&job) {
-                        self.send_quiet_device_call(
-                            socket,
-                            "self.screen.preview_image",
-                            json!({ "url": badge_url }),
+                } else if want_hud
+                    && can_color_hud
+                    && let Some(badge_url) = self.stage_terminal_badge_url(&job)
+                {
+                    self.one_shot_badge_url = Some(badge_url.clone());
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.screen.preview_image",
+                        json!({ "url": badge_url }),
+                    )
+                    .await?;
+                }
+                if self.mqtt && !socket.audio_open() {
+                    // n71 常连模式没在对话：没有语音通道可播，改发提示（屏幕显示结果并响一声提示音）
+                    let completed = job.status == "completed";
+                    let emotion = if self.pack_active() {
+                        crate::screen_pack::emotion_name(
+                            self.shared.card_style(),
+                            if completed {
+                                crate::BotPose::CelebrateDone
+                            } else {
+                                crate::BotPose::HaltedShield
+                            },
                         )
-                        .await?;
+                    } else if completed {
+                        "happy".into()
+                    } else {
+                        "sad".into()
+                    };
+                    let alert = ServerMessage::Alert {
+                        status: if completed {
+                            "雕刻完成"
+                        } else {
+                            "雕刻已停止"
+                        }
+                        .into(),
+                        message: job.speech(),
+                        emotion,
+                    };
+                    if !send_json(socket, &alert).await {
+                        return Err("发送失败".into());
                     }
+                    self.event("加工任务已结束：设备没在对话，已在屏幕上提示结果");
                     return Ok(());
                 }
+                self.event("加工任务已结束，播报结果");
+                self.start_turn(
+                    TurnInput::Say {
+                        text: job.speech(),
+                        close: false,
+                    },
+                    TurnKind::Notice,
+                );
+                return Ok(());
+            } else if want_hud && self.pack_active() {
+                self.preview_hold = None;
+                self.last_hud_workflow = None;
+                self.engrave_preview = None;
+                self.show_finished_scene(socket, &job).await?;
+                return Ok(());
+            } else if want_hud && can_color_hud {
+                self.preview_hold = None;
+                self.last_hud_workflow = None;
+                if let Some(badge_url) = self.stage_terminal_badge_url(&job) {
+                    self.send_quiet_device_call(
+                        socket,
+                        "self.screen.preview_image",
+                        json!({ "url": badge_url }),
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+        }
+
+        if want_announce {
+            while let Some(notice) = self.pending_agent_notices.pop_front() {
+                if !self.shared.job_announcements.claim(&notice.claim_key) {
+                    continue;
+                }
+                if self.mqtt && !socket.audio_open() {
+                    let (status, emotion, pose) = match notice.status.as_str() {
+                        "completed" => ("Agent 完成", "happy", crate::BotPose::CelebrateDone),
+                        "failed" => ("Agent 失败", "sad", crate::BotPose::HaltedShield),
+                        "cancelled" => ("Agent 已停止", "neutral", crate::BotPose::HaltedShield),
+                        "stalled" => ("Agent 暂停输出", "thinking", crate::BotPose::Thinking),
+                        _ => ("Agent 执行中", "thinking", crate::BotPose::Thinking),
+                    };
+                    let emotion = if self.pack_active() {
+                        crate::screen_pack::emotion_name(self.shared.card_style(), pose)
+                    } else {
+                        emotion.into()
+                    };
+                    let alert = ServerMessage::Alert {
+                        status: status.into(),
+                        message: notice.speech,
+                        emotion,
+                    };
+                    if !send_json(socket, &alert).await {
+                        return Err("发送失败".into());
+                    }
+                    self.event("Agent 任务巡检：设备未开启语音通道，已发屏幕提示");
+                    return Ok(());
+                }
+                self.event("Agent 任务巡检，语音播报进度");
+                self.start_turn(
+                    TurnInput::Say {
+                        text: notice.speech,
+                        close: false,
+                    },
+                    TurnKind::Notice,
+                );
+                return Ok(());
             }
         }
 
@@ -4385,9 +5176,13 @@ impl<'a> Session<'a> {
             let deadline = match &self.phase {
                 Phase::Speaking { next, .. } => *next,
                 // 对话任务有自己的超时（识别 / 合成 30 秒，大模型 120 秒），等待期间不算空闲
-                Phase::Thinking => Instant::now() + Duration::from_secs(3600),
+                Phase::Thinking => self
+                    .turn
+                    .as_ref()
+                    .and_then(|turn| turn.hold)
+                    .map_or_else(|| Instant::now() + Duration::from_secs(3600), |(at, _)| at),
                 // n71 常连模式没在对话（语音通道关着）时不算空闲，设备一直在线
-                _ if !socket.audio_open() && self.turn.is_none() => {
+                _ if !socket.audio_open() && self.turn.is_none() && self.paused.is_none() => {
                     Instant::now() + Duration::from_secs(3600)
                 }
                 _ => self.last_activity + idle_timeout,
@@ -4412,7 +5207,7 @@ impl<'a> Session<'a> {
                     }
                 } => self.on_vad_result(socket, frame).await,
                 event = next_turn_event(&mut self.turn) => self.on_turn_event(socket, event).await,
-                interim = next_listening_interim(&mut self.phase) => { self.on_interim(interim); Ok(()) },
+                interim = next_listening_interim(&mut self.phase) => self.on_interim(socket, interim).await,
                 incoming = socket.recv() => match incoming {
                     Some(Ok(Message::Binary(data))) => self.on_binary(socket, &data).await,
                     Some(Ok(Message::Text(text))) => self.on_text(socket, text.as_str()).await,
@@ -4456,8 +5251,11 @@ impl<'a> Session<'a> {
                 _ = tokio::time::sleep_until(deadline) => {
                     match self.phase {
                         Phase::Speaking { .. } => self.tick(socket).await,
-                        Phase::Thinking => Ok(()),
-                        _ => self.on_idle(),
+                        Phase::Thinking => {
+                            self.check_release();
+                            Ok(())
+                        }
+                        _ => self.on_idle(socket).await,
                     }
                 }
                 _ = tokio::time::sleep_until(job_deadline) => self.poll_jobs(socket).await,
@@ -4473,6 +5271,20 @@ impl<'a> Session<'a> {
             }
         }
     }
+}
+
+fn enqueue_bounded_notice<T>(
+    queue: &mut std::collections::VecDeque<T>,
+    item: T,
+    mut same: impl FnMut(&T, &T) -> bool,
+) {
+    if queue.iter().any(|queued| same(queued, &item)) {
+        return;
+    }
+    if queue.len() >= 16 {
+        queue.pop_front();
+    }
+    queue.push_back(item);
 }
 
 #[cfg(test)]
@@ -4536,5 +5348,18 @@ mod device_mcp_pending_tests {
             !device.pending.contains_key(&first.unwrap()),
             "超出上限时丢弃最早的请求"
         );
+    }
+
+    #[test]
+    fn enqueue_bounded_notice_dedups_and_caps_at_sixteen() {
+        let mut q = std::collections::VecDeque::new();
+        for idx in 0..20 {
+            enqueue_bounded_notice(&mut q, idx, |a, b| a == b);
+        }
+        // 重复插入不会顶掉队头
+        enqueue_bounded_notice(&mut q, 19, |a, b| a == b);
+        assert_eq!(q.len(), 16);
+        assert_eq!(q.front().copied(), Some(4));
+        assert_eq!(q.back().copied(), Some(19));
     }
 }

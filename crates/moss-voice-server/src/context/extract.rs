@@ -25,9 +25,11 @@ const KNOWN_CHARS: usize = 120;
 pub const ROLLING_TURN_WINDOW: usize = 8;
 /// Unreviewed candidates fade out instead of piling up.
 pub const CANDIDATE_TTL_SECONDS: f64 = 90.0 * 24.0 * 3600.0;
+const MIN_QUOTE_CHARS: usize = 4;
 const PROMPT: &str = "从已结束的对话中提取值得长期记住的稳定信息，最多 8 条，作为待用户确认的候选。\
-只输出 JSON：{\"operations\":[{\"op\":\"add\",\"category\":\"preference|task_context|troubleshooting_experience\",\"content\":\"一句中文\",\"same_as\":编号（可选）,\"replaces\":编号（可选）}]}。\
+只输出 JSON：{\"operations\":[{\"op\":\"add\",\"category\":\"preference|task_context|troubleshooting_experience\",\"content\":\"一句中文\",\"quote\":\"本次对话中用户原话里的连续原句\",\"same_as\":编号（可选）,\"replaces\":编号（可选）}]}。\
 preference 是用户的偏好或习惯；task_context 是项目决策或待办；troubleshooting_experience 是设备故障现象与排查结论。\
+每条 add 都必须带 \"quote\"，原封不动摘自“用户：”说过的话（至少 4 个字）；助手单方面说过或推测的内容不得提取。\
 如果提供了“已有记忆”：意思已被其中第 n 条表达的信息不要重复提取，或在该条写 \"same_as\":n；\
 只有新信息与第 n 条不可能同时成立、且对话明确表示旧情况已改变时，照常 add 并写 \"replaces\":n；仅是补充或新的事件不算替代。\
 不得提取：密码、密钥、网址、审批、G-code、设备参数、材料参数、校准结果、工具调用内容。\
@@ -269,6 +271,42 @@ fn same_text(a: &str, b: &str) -> bool {
     super::retrieve::significant(a) == super::retrieve::significant(b)
 }
 
+/// Normalize quote / utterance text for verbatim matching (strip punctuation & spaces, lowercase ASCII).
+fn significant_quote(text: &str) -> String {
+    super::retrieve::significant(text).into_iter().collect()
+}
+
+/// Extract normalized user-only non-sensitive utterances from session history.
+/// Assistant messages, tool calls/results, and private/sensitive lines are excluded so
+/// ungrounded model claims or assistant-only suggestions can never pass quote verification.
+fn user_quote_corpus(history: &[ChatMessage]) -> Vec<String> {
+    history
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.images.is_empty()
+                && m.tool_calls.is_empty()
+                && m.tool_call_id.is_none()
+        })
+        .filter_map(|m| m.content.as_deref().map(str::trim))
+        .filter(|content| !content.is_empty() && !crate::memory::private_content(content))
+        .map(significant_quote)
+        .filter(|normalized| !normalized.is_empty())
+        .collect()
+}
+
+fn quote_matches_user(quote: Option<&str>, user_quotes: &[String]) -> bool {
+    let Some(norm) = quote.map(significant_quote) else {
+        return false;
+    };
+    if norm.chars().count() < MIN_QUOTE_CHARS {
+        return false;
+    }
+    user_quotes
+        .iter()
+        .any(|utterance| utterance.contains(&norm))
+}
+
 /// An existing record shown to the extractor under a short number (its id never leaves the host).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Known {
@@ -313,7 +351,12 @@ fn extraction_input(known: &[Known], dialog: &str) -> String {
 /// points at a known record of the same category: `same_as` then drops the add as
 /// `duplicate_existing` (and counts the known record again), `replaces` links the new
 /// candidate to the record it would replace. Any other number is ignored.
-fn parse_operations(text: &str, known: &[Known]) -> Result<Parsed, &'static str> {
+/// Every `add` must also include a verbatim `quote` (>= 4 significant chars) present in `user_quotes`.
+fn parse_operations(
+    text: &str,
+    known: &[Known],
+    user_quotes: &[String],
+) -> Result<Parsed, &'static str> {
     let body = text
         .trim()
         .trim_start_matches("```json")
@@ -350,6 +393,7 @@ fn parse_operations(text: &str, known: &[Known]) -> Result<Parsed, &'static str>
             .get("content")
             .and_then(|v| v.as_str())
             .map(str::trim);
+        let quote = operation.get("quote").and_then(|v| v.as_str());
         let pick = |field: &str| {
             let item = operation
                 .get(field)
@@ -358,6 +402,11 @@ fn parse_operations(text: &str, known: &[Known]) -> Result<Parsed, &'static str>
             (Some(item.category) == category).then(|| item.id.clone())
         };
         match (category, content) {
+            (Some(_), Some(content))
+                if !content.is_empty() && !quote_matches_user(quote, user_quotes) =>
+            {
+                skipped.push(skip(op, "unverified_quote"));
+            }
             (Some(_), Some(content)) if !content.is_empty() && pick("same_as").is_some() => {
                 again.extend(pick("same_as"));
                 skipped.push(skip(op, "duplicate_existing"));
@@ -644,7 +693,8 @@ impl ContextExtractor {
             None => device_key.id().to_owned(),
         };
         let dialog = bounded_dialog(history);
-        if dialog.is_empty() || !history.iter().any(|m| m.role == Role::User) {
+        let user_quotes = user_quote_corpus(history);
+        if dialog.is_empty() || user_quotes.is_empty() {
             return None;
         }
         let pending = self.pending.clone().try_acquire_owned().ok()?;
@@ -708,7 +758,7 @@ impl ContextExtractor {
                 reverted_at: None,
             };
             let proposals = if reply.tool_calls.is_empty() {
-                parse_operations(&reply.text, &known)
+                parse_operations(&reply.text, &known, &user_quotes)
             } else {
                 Err("tool_calls_rejected")
             };
@@ -922,7 +972,12 @@ impl ContextExtraction {
         let user_text = messages
             .iter()
             .rev()
-            .find(|m| m.role == Role::User && m.tool_call_id.is_none())
+            .find(|m| {
+                m.role == Role::User
+                    && m.images.is_empty()
+                    && m.tool_calls.is_empty()
+                    && m.tool_call_id.is_none()
+            })
             .and_then(|m| m.content.as_deref())
             .unwrap_or("")
             .trim();

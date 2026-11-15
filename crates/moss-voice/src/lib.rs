@@ -27,6 +27,7 @@ pub mod models;
 pub mod onejev;
 pub mod redact;
 pub mod settings;
+pub mod speech_cpp;
 pub mod supervisor;
 pub mod tts_voices;
 

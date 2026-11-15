@@ -36,6 +36,168 @@ pub fn is_noise_filler(text: &str) -> bool {
     )
 }
 
+/// 附和（backchannel）：对方说话时随口应的一声，不是要抢话。只收不承担确认 / 控制语义的说法——
+/// “确认”“开始”“停”“好的开始”之类一律不算，必须照常处理。
+pub fn is_backchannel(text: &str) -> bool {
+    matches!(
+        normalized(text).as_str(),
+        "嗯" | "嗯嗯"
+            | "嗯嗯嗯"
+            | "哦"
+            | "哦哦"
+            | "噢"
+            | "啊"
+            | "哎"
+            | "呃"
+            | "额"
+            | "对"
+            | "对对"
+            | "对对对"
+            | "对的"
+            | "是"
+            | "是的"
+            | "是啊"
+            | "好"
+            | "好的"
+            | "好好"
+            | "行"
+            | "嗯好"
+            | "嗯对"
+            | "没错"
+            | "明白"
+            | "明白了"
+            | "知道了"
+            | "这样啊"
+            | "原来如此"
+            | "哈哈"
+            | "哈哈哈"
+            | "呵呵"
+    )
+}
+
+/// 这句话听起来说完了没有（决定判停后还要等多久才开口，见 [`endpoint_wait_ms`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completeness {
+    /// 明显说完了：停止 / 退出类整句、疑问句、以句末语气词收尾
+    Complete,
+    /// 看不出来
+    Unknown,
+    /// 明显没说完：停在连词、介词、“把”“调到”这类后面必须接内容的词上
+    Unfinished,
+}
+
+/// 按识别出的文字判断一句话是否说完。只看结尾的词，不做语义理解；拿不准一律 `Unknown`。
+/// 识别结果自带的句号不可靠（整段识别会给半句话也加句号），所以先去掉标点再看结尾。
+pub fn completeness(text: &str) -> Completeness {
+    // 后面必须接内容的结尾（长的在前）
+    const OPEN_ENDS: &[&str] = &[
+        "也就是说",
+        "换句话说",
+        "因为",
+        "所以",
+        "但是",
+        "可是",
+        "不过",
+        "然后",
+        "接着",
+        "就是",
+        "比如",
+        "例如",
+        "如果",
+        "要是",
+        "假如",
+        "虽然",
+        "而且",
+        "并且",
+        "以及",
+        "还有",
+        "或者",
+        "还是",
+        "那个",
+        "帮我把",
+        "调到",
+        "调成",
+        "设为",
+        "设成",
+        "改成",
+        "换成",
+        "变成",
+        "等于",
+        "大概",
+        "大约",
+        "差不多",
+        // 单字只收思考气音：“和 / 在 / 给 / 比 / 向 / 额”等单字结尾分不清是介词还是词的一部分
+        //（“暖和”“我在”“交给你”“对比”“方向”“余额”），按没说完处理会让完整的话多等约 0.9 秒
+        "嗯",
+        "呃",
+    ];
+    // 以“的”收尾的应答（不是“红色的……”那种没说完的定语）
+    const CLOSED_DE: &[&str] = &[
+        "是的",
+        "好的",
+        "对的",
+        "行的",
+        "可以的",
+        "真的",
+        "别的",
+        "一样的",
+    ];
+    const CLOSED_ENDS: &[&str] = &[
+        "吗", "呢", "吧", "了", "啊", "呀", "嘛", "啦", "哦", "呗", "么",
+    ];
+    let core = normalized(text);
+    if core.is_empty() {
+        return Completeness::Unknown;
+    }
+    if is_stop(text) {
+        return Completeness::Complete;
+    }
+    let chars = core.chars().count();
+    if let Some(open) = OPEN_ENDS.iter().find(|end| core.ends_with(**end)) {
+        // 整句只有一个单字时多半是在回答（“给”“在”），不算没说完；思考气音除外
+        let open_chars = open.chars().count();
+        if chars > open_chars || open_chars >= 2 || matches!(*open, "嗯" | "呃") {
+            return Completeness::Unfinished;
+        }
+    }
+    if core.ends_with('的') && chars >= 5 && !CLOSED_DE.iter().any(|end| core.ends_with(end)) {
+        return Completeness::Unfinished;
+    }
+    let question = text.trim_end().ends_with(['？', '?']);
+    if question || CLOSED_ENDS.iter().any(|end| core.ends_with(end)) {
+        return Completeness::Complete;
+    }
+    Completeness::Unknown
+}
+
+/// 从用户停止出声算起，等多久才认定这句话说完（毫秒）。
+/// 说完了就马上回应；拿不准按原先的 400 ms；明显没说完多等一会儿，不抢话。
+pub fn endpoint_wait_ms(text: &str) -> u64 {
+    match completeness(text) {
+        Completeness::Complete => 250,
+        Completeness::Unknown => 400,
+        Completeness::Unfinished => 1300,
+    }
+}
+
+/// 结合 Smart Turn v3 尾音语义判停概率调整停顿等待时长；停止指令永远 0 ms 放行。
+pub fn endpoint_wait_ms_with_prosody(text: &str, smart_turn_prob: Option<f32>) -> u64 {
+    if is_stop(text) {
+        return 0;
+    }
+    let base = endpoint_wait_ms(text);
+    let Some(prob) = smart_turn_prob.filter(|p| p.is_finite()) else {
+        return base;
+    };
+    if prob < 0.5 {
+        base.max(1250)
+    } else if prob >= 0.80 && completeness(text) == Completeness::Unknown {
+        250
+    } else {
+        base
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadIntent {
     Status,
@@ -171,6 +333,58 @@ pub fn body(result: &crate::tools::ToolHostResult) -> Value {
 mod tests {
     use super::*;
     #[test]
+    fn backchannels_never_include_confirm_or_control_words() {
+        for text in ["嗯。", "对对对", "好的", "哈哈哈", "知道了"] {
+            assert!(is_backchannel(text), "{text}");
+        }
+        for text in [
+            "确认",
+            "开始",
+            "停",
+            "好的开始",
+            "可以",
+            "不对",
+            "换一个",
+            "等一下",
+        ] {
+            assert!(!is_backchannel(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn completeness_only_trusts_clear_endings() {
+        use Completeness::*;
+        for (text, expected) in [
+            ("停", Complete),
+            ("现在几点了？", Complete),
+            ("帮我看看机器连上了吗", Complete),
+            ("好了", Complete),
+            ("开始", Unknown),
+            ("确认", Unknown),
+            ("是的", Unknown),
+            ("好的。", Unknown),
+            ("给", Unknown),
+            ("椴木三毫米。", Unknown),
+            ("帮我把功率调到", Unfinished),
+            ("我想刻一个圆形然后", Unfinished),
+            ("把那个红色的。", Unfinished),
+            ("功率八十，速度大概", Unfinished),
+            ("嗯", Unfinished),
+            // 以“在 / 和 / 额 / 比 / 向 / 给”结尾的完整说法不能被当成没说完
+            ("我在", Unknown),
+            ("今天挺暖和", Unknown),
+            ("查一下余额", Unknown),
+            ("帮我对比", Unknown),
+            ("调一下方向", Unknown),
+            ("交给你", Unknown),
+            ("", Unknown),
+        ] {
+            assert_eq!(completeness(text), expected, "{text}");
+        }
+        assert!(endpoint_wait_ms("好了") < endpoint_wait_ms("开始"));
+        assert!(endpoint_wait_ms("开始") < endpoint_wait_ms("帮我把"));
+    }
+    #[test]
     fn stops_are_whole_phrases_and_negations_are_not_stops() {
         for text in ["停！", "急停", "停止吧", "关掉激光"] {
             assert!(is_stop(text), "{text}");
@@ -224,5 +438,29 @@ mod tests {
         ] {
             assert!(!is_noise_filler(word), "{word} must not be swallowed");
         }
+    }
+
+    #[test]
+    fn prosody_wait_extends_unfinished_and_never_delays_stops() {
+        for stop in ["急停", "停一下", "快停"] {
+            assert_eq!(endpoint_wait_ms_with_prosody(stop, None), 0);
+            assert_eq!(endpoint_wait_ms_with_prosody(stop, Some(0.05)), 0);
+            assert_eq!(endpoint_wait_ms_with_prosody(stop, Some(0.95)), 0);
+        }
+        assert_eq!(endpoint_wait_ms_with_prosody("好了", Some(0.20)), 1250);
+        assert_eq!(endpoint_wait_ms_with_prosody("二十瓦", Some(0.20)), 1250);
+        assert_eq!(endpoint_wait_ms_with_prosody("帮我把", Some(0.20)), 1300);
+
+        assert_eq!(endpoint_wait_ms_with_prosody("二十瓦", Some(0.90)), 250);
+        assert_eq!(endpoint_wait_ms_with_prosody("帮我把", Some(0.90)), 1300);
+
+        assert_eq!(
+            endpoint_wait_ms_with_prosody("二十瓦", None),
+            endpoint_wait_ms("二十瓦")
+        );
+        assert_eq!(
+            endpoint_wait_ms_with_prosody("二十瓦", Some(f32::NAN)),
+            endpoint_wait_ms("二十瓦")
+        );
     }
 }

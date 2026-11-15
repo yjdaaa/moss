@@ -303,10 +303,18 @@ async fn ota_post(
     let firmware = match (&shared.config.firmware, bound) {
         (Some(host), true) => {
             let host = host.clone();
-            let (device, version) = (info.device_id.clone(), info.version.clone());
+            let (device, version, elf) = (
+                info.device_id.clone(),
+                info.version.clone(),
+                info.elf_sha256.clone(),
+            );
             tokio::task::spawn_blocking(move || {
-                host.reported(&device, &version);
-                host.offer(&device, &version)
+                let current = crate::firmware::DeviceFirmware {
+                    version: &version,
+                    elf_sha256: elf.as_deref(),
+                };
+                host.reported(&device, &current);
+                host.offer(&device, &current)
             })
             .await
             .ok()
@@ -314,12 +322,18 @@ async fn ota_post(
         }
         _ => None,
     };
-    if let Some((version, _)) = &firmware {
+    if let Some(push) = &firmware {
         shared.state.event(crate::EventRecord::info(
             crate::DiagCategory::Firmware,
             format!(
-                "OTA：向设备 {} 下发固件 {version}（用户已确认推送）",
-                info.device_id
+                "OTA：向设备 {} 下发固件 {}（用户已确认推送{}）",
+                info.device_id,
+                push.version,
+                if push.force {
+                    "；内容与设备当前固件不同但版本号不更新，按强制安装下发"
+                } else {
+                    ""
+                }
             ),
         ));
     }
@@ -353,12 +367,13 @@ async fn ota_post(
                 publish_topic: crate::mqtt::PUBLISH_TOPIC.into(),
                 keepalive: u32::from(crate::mqtt::KEEPALIVE_SECS),
             }),
-        firmware: firmware.map(|(version, token)| FirmwareOffer {
-            version,
+        firmware: firmware.map(|push| FirmwareOffer {
+            version: push.version,
             url: format!(
-                "http://{host}:{}/xiaozhi/firmware/{token}.bin",
-                shared.http_port
+                "http://{host}:{}/xiaozhi/firmware/{}.bin",
+                shared.http_port, push.token
             ),
+            force: push.force,
         }),
     };
     axum::Json(reply.to_json()).into_response()

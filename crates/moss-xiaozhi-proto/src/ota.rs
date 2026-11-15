@@ -22,6 +22,9 @@ pub struct OtaInfo {
     pub version: String,
     /// 设备上报的名称（`board.name`，可能为空）
     pub board_name: String,
+    /// 当前固件的 ELF 哈希（`application.elf_sha256`，64 位小写十六进制）；旧固件不上报或全零时为空。
+    /// 同一个值写在固件 `.bin` 的应用描述里，可据此判断设备上跑的是不是某一份固件。
+    pub elf_sha256: Option<String>,
 }
 
 fn clean(value: Option<String>) -> Option<String> {
@@ -63,12 +66,22 @@ impl OtaInfo {
                 .map(str::to_owned),
         )
         .unwrap_or_default();
+        let elf_sha256 = json
+            .pointer("/application/elf_sha256")
+            .and_then(Value::as_str)
+            .map(|text| text.trim().to_ascii_lowercase())
+            .filter(|text| {
+                text.len() == 64
+                    && text.bytes().all(|b| b.is_ascii_hexdigit())
+                    && text.bytes().any(|b| b != b'0')
+            });
         Ok(Self {
             device_id,
             client_id,
             model,
             version,
             board_name,
+            elf_sha256,
         })
     }
 }
@@ -78,6 +91,8 @@ impl OtaInfo {
 pub struct FirmwareOffer {
     pub version: String,
     pub url: String,
+    /// 为真时回复带 `force: 1`：固件不比版本号直接安装（同版本号重新编译、降级）
+    pub force: bool,
 }
 
 /// n71 常连模式：OTA 回复里的 `mqtt` 段。固件见到它就改用 MQTT + UDP（优先于 `websocket`），
@@ -113,6 +128,9 @@ pub struct OtaReply {
 impl OtaReply {
     pub fn to_json(&self) -> Value {
         let firmware = match &self.firmware {
+            Some(offer) if offer.force => {
+                serde_json::json!({"version": offer.version, "url": offer.url, "force": 1})
+            }
             Some(offer) => serde_json::json!({"version": offer.version, "url": offer.url}),
             None => serde_json::json!({"version": self.current_version, "url": ""}),
         };
@@ -196,6 +214,21 @@ mod tests {
         assert_eq!(info.model, "lichuang-dev");
         assert_eq!(info.version, "1.9.2");
         assert_eq!(info.board_name, "立创实战派");
+        assert_eq!(info.elf_sha256, None, "旧固件不上报 ELF 哈希");
+        // 新固件上报 ELF 哈希：统一成小写；全零（构建时没写入）与格式不对的都当作没有
+        for (reported, expected) in [
+            ("AB".repeat(32), Some("ab".repeat(32))),
+            ("0".repeat(64), None),
+            ("abc".to_owned(), None),
+            ("zz".repeat(32), None),
+        ] {
+            let body =
+                format!(r#"{{"application":{{"version":"1.9.2","elf_sha256":"{reported}"}}}}"#);
+            let info =
+                OtaInfo::from_request(headers(&[("device-id", "d"), ("client-id", "c")]), &body)
+                    .unwrap();
+            assert_eq!(info.elf_sha256, expected, "{reported}");
+        }
         let info =
             OtaInfo::from_request(headers(&[("device-id", "d"), ("client-id", "c")]), "").unwrap();
         assert_eq!(info.model, "default");

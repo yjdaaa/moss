@@ -583,6 +583,11 @@ pub fn voice_recent_workflows(
     {
         root.insert("pending_approval".into(), pending);
     }
+    if let Some(agent_runs) = api.agent_voice_digest()
+        && let Some(root) = result.as_object_mut()
+    {
+        root.insert("agent_runs".into(), agent_runs);
+    }
     Some(result)
 }
 

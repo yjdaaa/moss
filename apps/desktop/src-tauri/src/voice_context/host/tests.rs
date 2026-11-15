@@ -564,18 +564,43 @@ fn nv19_personal_mode_isolates_device_preferences_while_keeping_hardware_facts()
         .build()
         .unwrap();
 
-    // 1. 未知说话人（person = None）：绝不回退设备范围 Preference，但硬件 DeviceFact / TroubleshootingExperience 仍可读
+    // 1. 未知说话人（person = None）：绝不回退设备范围 Preference，但匹配当前机型的硬件 DeviceFact / TroubleshootingExperience 仍可读
     let (unknown_access, unknown_dev) = retrieval.access.access(&ctx, None).unwrap();
     assert!(unknown_access.personal_mode());
+    let other_dev = Some(Applicability::new("OTHER-LASER", Some("9.9.9")).unwrap());
     assert!(
         runtime
             .block_on(retrieval.retriever.prompt_for(
                 unknown_access.clone(),
                 "回答一律用什么语言",
-                unknown_dev.clone()
+                other_dev
             ))
             .is_none(),
-        "未知说话人绝不能读到设备范围共享偏好"
+        "不匹配机型且无个人偏好时不应返回任何偏好或硬件事实"
+    );
+    assert!(
+        runtime
+            .block_on(retrieval.retriever.prompt_for(
+                unknown_access.clone(),
+                "回答一律用什么语言",
+                None
+            ))
+            .is_none(),
+        "未知机型且无个人偏好时绝不能读到设备范围共享偏好"
+    );
+    let unknown_pref_query = runtime
+        .block_on(retrieval.retriever.prompt_for(
+            unknown_access.clone(),
+            "回答一律用什么语言",
+            unknown_dev.clone(),
+        ))
+        .expect("匹配当前机型时可携带设备固定硬件事实档案");
+    assert!(
+        unknown_pref_query.contains("【用户档案")
+            && unknown_pref_query.contains("五百五十瓦蓝光头")
+            && !unknown_pref_query.contains("用英文")
+            && !unknown_pref_query.contains("中文毫米"),
+        "未知说话人绝不能读到设备范围共享偏好或他人偏好：{unknown_pref_query}"
     );
     let fact_block = runtime
         .block_on(retrieval.retriever.prompt_for(
@@ -623,16 +648,21 @@ fn nv19_personal_mode_isolates_device_preferences_while_keeping_hardware_facts()
         .unwrap();
     assert!(alice_fact.contains("五百五十瓦蓝光头"));
 
-    // 3. 另一位说话人 Bob：既看不到 Alice 的偏好，也看不到设备范围旧共享偏好
+    // 3. 另一位说话人 Bob：既看不到 Alice 的偏好，也看不到设备范围旧共享偏好，只保留匹配当前机型的硬件事实
     let (bob_access, bob_dev) = retrieval.access.access(&ctx, Some(&bob)).unwrap();
+    let bob_block = runtime
+        .block_on(
+            retrieval
+                .retriever
+                .prompt_for(bob_access, "回答一律用什么", bob_dev),
+        )
+        .expect("匹配当前机型时保留设备硬件事实");
     assert!(
-        runtime
-            .block_on(
-                retrieval
-                    .retriever
-                    .prompt_for(bob_access, "回答一律用什么", bob_dev)
-            )
-            .is_none()
+        bob_block.contains("【用户档案")
+            && bob_block.contains("五百五十瓦蓝光头")
+            && !bob_block.contains("中文毫米")
+            && !bob_block.contains("用英文"),
+        "{bob_block}"
     );
 
     // 4. 换机未装声纹模型/标定列表为空但开关仍开时：依然保持个人隔离，不回退设备偏好
@@ -641,13 +671,18 @@ fn nv19_personal_mode_isolates_device_preferences_while_keeping_hardware_facts()
     assert!(
         degraded_access.personal_mode() && degraded_access.scope_of(ScopeKind::Person).is_none()
     );
+    let degraded_block = runtime
+        .block_on(retrieval.retriever.prompt_for(
+            degraded_access,
+            "回答一律用什么语言",
+            degraded_dev,
+        ))
+        .expect("降级模式下匹配当前机型仍保留设备硬件事实");
     assert!(
-        runtime
-            .block_on(retrieval.retriever.prompt_for(
-                degraded_access,
-                "回答一律用什么语言",
-                degraded_dev
-            ))
-            .is_none()
+        degraded_block.contains("【用户档案")
+            && degraded_block.contains("五百五十瓦蓝光头")
+            && !degraded_block.contains("中文毫米")
+            && !degraded_block.contains("用英文"),
+        "{degraded_block}"
     );
 }

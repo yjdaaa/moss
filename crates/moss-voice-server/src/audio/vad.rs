@@ -180,7 +180,9 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            min_silence_ms: 200,
+            // 2026-11-13 n86：静音 250 ms 先交给识别与大模型抢跑；真正开口前还要等多久由会话按
+            // 这句话像不像说完来定（`fast::endpoint_wait_ms`），期间用户接着说则合并重来
+            min_silence_ms: 250,
             min_speech_ms: 60,
             start_rms: 500.0,
             keep_rms: 250.0,
@@ -190,7 +192,7 @@ impl Default for VadConfig {
     }
 }
 
-/// 检测窗口 20 ms：比设备 60 ms 帧更细，200 ms 静音判停的误差不超过一个窗口。
+/// 检测窗口 20 ms：比设备 60 ms 帧更细，静音判停的误差不超过一个窗口。
 const WINDOW_MS: u32 = 20;
 const INITIAL_NOISE: f64 = 100.0;
 
@@ -324,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn speech_then_200ms_silence_ends_utterance() {
+    fn speech_then_250ms_silence_ends_utterance() {
         let mut vad = EnergyVad::new(RATE, VadConfig::default());
         let mut pcm = silence(RATE, 300);
         pcm.extend(tone(RATE, 220.0, 900, 6000.0));
@@ -334,8 +336,8 @@ mod tests {
         assert_eq!(events[0].0, VadEvent::SpeechStart);
         assert!((360..=480).contains(&events[0].1), "开始时刻 {events:?}");
         assert_eq!(events[1].0, VadEvent::SpeechEnd);
-        // 说话在 1200 ms 结束，200 ms 静音后判停；以 60 ms 帧送入，最迟在下一帧边界报告
-        assert!((1380..=1500).contains(&events[1].1), "结束时刻 {events:?}");
+        // 说话在 1200 ms 结束，250 ms 静音后判停；以 60 ms 帧送入，最迟在下一帧边界报告
+        assert!((1440..=1560).contains(&events[1].1), "结束时刻 {events:?}");
         assert!(!vad.in_speech());
     }
 

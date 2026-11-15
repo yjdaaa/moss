@@ -16,6 +16,7 @@ pub mod history;
 pub mod local;
 pub mod openai;
 pub mod resample;
+pub mod speech_cpp;
 pub mod text;
 pub mod vision;
 pub mod wav;

@@ -145,7 +145,7 @@ fn llama_binary_name() -> &'static str {
     }
 }
 
-fn windows_vulkan_loader_present() -> bool {
+pub(crate) fn windows_vulkan_loader_present() -> bool {
     #[cfg(windows)]
     {
         let sys_root = std::env::var_os("SystemRoot")
@@ -159,7 +159,7 @@ fn windows_vulkan_loader_present() -> bool {
     }
 }
 
-fn linux_vulkan_loader_present() -> bool {
+pub(crate) fn linux_vulkan_loader_present() -> bool {
     #[cfg(target_os = "linux")]
     {
         [
@@ -569,12 +569,13 @@ pub enum RuntimeProgress {
     Downloading { done: u64, total: u64 },
 }
 
-/// 等待推理引擎安装锁；等待期间可取消（2026-11-07：多档 OneJev 同时下载时后点的不再卡死在 0%）。
-fn lock_runtime_install(
+/// 等待指定互斥锁；等待期间可取消（避免多路下载共用推理引擎时卡死在 0%）。
+pub(crate) fn lock_mutex_with_wait<'a>(
+    slot: &'a OnceLock<Mutex<()>>,
     cancel: &AtomicBool,
     progress: &dyn Fn(RuntimeProgress),
-) -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    let lock = RUNTIME_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+) -> Result<std::sync::MutexGuard<'a, ()>, String> {
+    let lock = slot.get_or_init(|| Mutex::new(()));
     let mut reported = false;
     loop {
         match lock.try_lock() {
@@ -592,6 +593,14 @@ fn lock_runtime_install(
             }
         }
     }
+}
+
+/// 等待推理引擎安装锁；等待期间可取消（2026-11-07：多档 OneJev 同时下载时后点的不再卡死在 0%）。
+fn lock_runtime_install(
+    cancel: &AtomicBool,
+    progress: &dyn Fn(RuntimeProgress),
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    lock_mutex_with_wait(&RUNTIME_INSTALL_LOCK, cancel, progress)
 }
 
 /// 删除 MOSS 自动下载的推理引擎（`<models>/.runtime/llama-*`）；用户自己放的 `<models>/llama` 不动。
@@ -780,13 +789,72 @@ fn extract_tar_gz(archive_file: &Path, dest: &Path, cancel: &AtomicBool) -> Resu
     Ok(())
 }
 
-/// 轻量纯 Rust ZIP 解压（仅接受相对安全路径、Stored(0) 与 Deflate(8) 普通文件/目录，拒绝符号链接与路径穿越）。
+/// 轻量纯 Rust ZIP 解压（仅接受相对安全路径、Stored(0) 与 Deflate(8) 普通文件/目录，拒绝路径穿越）。
 fn extract_zip(archive_file: &Path, dest: &Path, cancel: &AtomicBool) -> Result<(), String> {
-    let bytes = fs::read(archive_file).map_err(|e| format!("读取 zip 失败：{e}"))?;
-    extract_zip_bytes(&bytes, dest, cancel)
+    extract_zip_with_symlinks(archive_file, dest, cancel, false)
 }
 
+pub(crate) fn extract_zip_with_symlinks(
+    archive_file: &Path,
+    dest: &Path,
+    cancel: &AtomicBool,
+    preserve_symlinks: bool,
+) -> Result<(), String> {
+    let bytes = fs::read(archive_file).map_err(|e| format!("读取 zip 失败：{e}"))?;
+    extract_zip_bytes_with_options(&bytes, dest, cancel, preserve_symlinks)
+}
+
+#[cfg(test)]
 fn extract_zip_bytes(bytes: &[u8], dest: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    extract_zip_bytes_with_options(bytes, dest, cancel, false)
+}
+
+fn write_zip_payload<W: Write>(
+    bytes: &[u8],
+    local_offset: usize,
+    method: u16,
+    comp_size: usize,
+    uncomp_size: usize,
+    out: &mut W,
+) -> Result<(), String> {
+    if local_offset + 30 > bytes.len() || &bytes[local_offset..local_offset + 4] != b"PK\x03\x04" {
+        return Err("zip 本地文件头损坏".into());
+    }
+    let l_fn_len =
+        u16::from_le_bytes([bytes[local_offset + 26], bytes[local_offset + 27]]) as usize;
+    let l_ex_len =
+        u16::from_le_bytes([bytes[local_offset + 28], bytes[local_offset + 29]]) as usize;
+    let data_start = local_offset + 30 + l_fn_len + l_ex_len;
+    let data_end = data_start.saturating_add(comp_size);
+    if data_end > bytes.len() {
+        return Err("zip 压缩数据越界".into());
+    }
+    let slice = &bytes[data_start..data_end];
+    let written = match method {
+        0 => {
+            out.write_all(slice)
+                .map_err(|e| format!("写入文件失败：{e}"))?;
+            slice.len()
+        }
+        8 => {
+            let mut decoder = flate2::read::DeflateDecoder::new(Cursor::new(slice));
+            std::io::copy(&mut decoder, out).map_err(|e| format!("解压 deflate 数据失败：{e}"))?
+                as usize
+        }
+        other => return Err(format!("不支持的 zip 压缩算法：{other}")),
+    };
+    if written != uncomp_size {
+        return Err(format!("zip 解压大小不匹配（{written} != {uncomp_size}）"));
+    }
+    Ok(())
+}
+
+pub(crate) fn extract_zip_bytes_with_options(
+    bytes: &[u8],
+    dest: &Path,
+    cancel: &AtomicBool,
+    preserve_symlinks: bool,
+) -> Result<(), String> {
     if bytes.len() < 22 {
         return Err("zip 文件过短".into());
     }
@@ -863,53 +931,65 @@ fn extract_zip_bytes(bytes: &[u8], dest: &Path, cancel: &AtomicBool) -> Result<(
         if !safe_relative(rel) {
             return Err(format!("zip 包含不安全路径：{raw_name}"));
         }
-        // Unix mode bits in upper 16 bits of external attributes: skip symlinks (0o120000)
+        // Unix mode bits in upper 16 bits of external attributes
         let unix_mode = (ext_attr >> 16) & 0o170000;
+        let out_path = dest.join(rel);
         if unix_mode == 0o120000 {
+            if !preserve_symlinks {
+                continue;
+            }
+            if uncomp_size == 0 || uncomp_size > 1024 {
+                return Err(format!("zip 符号链接长度异常：{raw_name}"));
+            }
+            let mut raw_target = Vec::with_capacity(uncomp_size);
+            write_zip_payload(
+                bytes,
+                local_offset,
+                method,
+                comp_size,
+                uncomp_size,
+                &mut raw_target,
+            )?;
+            #[cfg(unix)]
+            {
+                let target_str = std::str::from_utf8(&raw_target)
+                    .map_err(|_| format!("zip 符号链接目标编码无效：{raw_name}"))?;
+                let target_path = Path::new(target_str);
+                if !safe_intra_dir_symlink_target(target_path) {
+                    return Err(format!(
+                        "zip 包含不安全符号链接：{raw_name} -> {target_str}"
+                    ));
+                }
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+                }
+                let _ = fs::remove_file(&out_path);
+                std::os::unix::fs::symlink(target_path, &out_path)
+                    .map_err(|e| format!("创建动态库符号链接失败：{e}"))?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (raw_target, out_path);
+            }
             continue;
         }
-        let out_path = dest.join(rel);
         if is_dir {
             fs::create_dir_all(&out_path).map_err(|e| format!("创建目录失败：{e}"))?;
             continue;
         }
-        if local_offset + 30 > bytes.len()
-            || &bytes[local_offset..local_offset + 4] != b"PK\x03\x04"
-        {
-            return Err("zip 本地文件头损坏".into());
-        }
-        let l_fn_len =
-            u16::from_le_bytes([bytes[local_offset + 26], bytes[local_offset + 27]]) as usize;
-        let l_ex_len =
-            u16::from_le_bytes([bytes[local_offset + 28], bytes[local_offset + 29]]) as usize;
-        let data_start = local_offset + 30 + l_fn_len + l_ex_len;
-        let data_end = data_start.saturating_add(comp_size);
-        if data_end > bytes.len() {
-            return Err("zip 压缩数据越界".into());
-        }
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败：{e}"))?;
         }
-        let slice = &bytes[data_start..data_end];
         let mut out_file =
             fs::File::create(&out_path).map_err(|e| format!("写入解压文件失败：{e}"))?;
-        let written = match method {
-            0 => {
-                out_file
-                    .write_all(slice)
-                    .map_err(|e| format!("写入文件失败：{e}"))?;
-                slice.len()
-            }
-            8 => {
-                let mut decoder = flate2::read::DeflateDecoder::new(Cursor::new(slice));
-                std::io::copy(&mut decoder, &mut out_file)
-                    .map_err(|e| format!("解压 deflate 数据失败：{e}"))? as usize
-            }
-            other => return Err(format!("不支持的 zip 压缩算法：{other}")),
-        };
-        if written != uncomp_size {
-            return Err(format!("zip 解压大小不匹配（{written} != {uncomp_size}）"));
-        }
+        write_zip_payload(
+            bytes,
+            local_offset,
+            method,
+            comp_size,
+            uncomp_size,
+            &mut out_file,
+        )?;
     }
     Ok(())
 }

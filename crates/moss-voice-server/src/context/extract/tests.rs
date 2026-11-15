@@ -94,7 +94,9 @@ fn owner() -> AccessContext {
 
 fn history() -> Vec<ChatMessage> {
     vec![
-        ChatMessage::user("以后回答先说预计时长"),
+        ChatMessage::user(
+            "以后回答先说预计时长，我喜欢简短回答；本周先完成椴木样品；边缘发黑时降低功率后改善",
+        ),
         ChatMessage::assistant("好的"),
         ChatMessage::user("我的密码是 hunter2"),
     ]
@@ -106,14 +108,14 @@ fn machine() -> Option<Applicability> {
 
 const FULL: &str = r#"```json
 {"operations":[
- {"op":"add","category":"preference","content":"回答先说预计时长"},
- {"op":"add","category":"task_context","content":"本周先完成椴木样品"},
- {"op":"add","category":"troubleshooting_experience","content":"边缘发黑时降低功率后改善"},
- {"op":"add","category":"device_fact","content":"主板是 ESP32"},
- {"op":"add","category":"preference","content":"我的 api_key 是 x"},
+ {"op":"add","category":"preference","content":"回答先说预计时长","quote":"以后回答先说预计时长"},
+ {"op":"add","category":"task_context","content":"本周先完成椴木样品","quote":"本周先完成椴木样品"},
+ {"op":"add","category":"troubleshooting_experience","content":"边缘发黑时降低功率后改善","quote":"边缘发黑时降低功率后改善"},
+ {"op":"add","category":"device_fact","content":"主板是 ESP32","quote":"以后回答先说预计时长"},
+ {"op":"add","category":"preference","content":"我的 api_key 是 x","quote":"以后回答先说预计时长"},
  {"op":"update","id":"ctx-1","content":"改掉"},
  {"op":"add","category":"skill","content":"安装插件"},
- {"op":"add","category":"preference","content":"回答先说预计时长"}
+ {"op":"add","category":"preference","content":"回答先说预计时长","quote":"以后回答先说预计时长"}
 ]}
 ```"#;
 
@@ -454,7 +456,7 @@ async fn nv19_calibrated_speaker_preferences_go_to_the_person_scope() {
             None,
             &history(),
             FakeLlm::new(
-                r#"{"operations":[{"op":"add","category":"preference","content":"喜欢简短回答"}]}"#,
+                r#"{"operations":[{"op":"add","category":"preference","content":"喜欢简短回答","quote":"我喜欢简短回答"}]}"#,
             ),
         )
         .unwrap()
@@ -481,8 +483,8 @@ async fn nv19_personal_mode_unknown_speaker_never_falls_back_preference_to_devic
             &history(),
             FakeLlm::new(
                 r#"{"operations":[
-                    {"op":"add","category":"preference","content":"回答先说预计时长"},
-                    {"op":"add","category":"troubleshooting_experience","content":"边缘发黑时降低功率后改善"}
+                    {"op":"add","category":"preference","content":"回答先说预计时长","quote":"以后回答先说预计时长"},
+                    {"op":"add","category":"troubleshooting_experience","content":"边缘发黑时降低功率后改善","quote":"边缘发黑时降低功率后改善"}
                 ]}"#,
             ),
         )
@@ -509,11 +511,13 @@ async fn nv19_personal_mode_unknown_speaker_never_falls_back_preference_to_devic
 
 #[test]
 fn nv19_operation_parser_limits_count_and_sanitizes_op_names() {
+    let quotes = vec![significant_quote("以后回答简短一点")];
     let many = format!(
         "{{\"operations\":[{}]}}",
-        [r#"{"op":"add","category":"preference","content":"a"}"#; 10].join(",")
+        [r#"{"op":"add","category":"preference","content":"a","quote":"以后回答简短一点"}"#; 10]
+            .join(",")
     );
-    let Parsed { adds, skipped, .. } = parse_operations(&many, &[]).unwrap();
+    let Parsed { adds, skipped, .. } = parse_operations(&many, &[], &quotes).unwrap();
     assert_eq!(adds.len(), MAX_OPERATIONS);
     assert_eq!(
         skipped
@@ -523,13 +527,14 @@ fn nv19_operation_parser_limits_count_and_sanitizes_op_names() {
         2
     );
     assert_eq!(
-        parse_operations("{\"ops\":[]}", &[]).unwrap_err(),
+        parse_operations("{\"ops\":[]}", &[], &quotes).unwrap_err(),
         "invalid_output"
     );
     assert_eq!(
         parse_operations(
             r#"{"operations":[{"op":"add","category":"preference"}]}"#,
-            &[]
+            &[],
+            &quotes
         )
         .unwrap()
         .skipped[0]
@@ -537,7 +542,7 @@ fn nv19_operation_parser_limits_count_and_sanitizes_op_names() {
         "content_missing"
     );
     assert_eq!(skip("rm -rf /", "x").op, "unknown");
-    let ops = parse_operations(r#"{"operations":[{"op":"delete","id":"ctx-2"},{"op":"Drop Table"},{"op":"invalidate","id":"ctx-3"}]}"#, &[]).unwrap().skipped;
+    let ops = parse_operations(r#"{"operations":[{"op":"delete","id":"ctx-2"},{"op":"Drop Table"},{"op":"invalidate","id":"ctx-3"}]}"#, &[], &quotes).unwrap().skipped;
     let reasons: Vec<_> = ops
         .iter()
         .map(|s| (s.op.as_str(), s.reason.as_str()))
@@ -552,7 +557,7 @@ fn nv19_operation_parser_limits_count_and_sanitizes_op_names() {
         "模型不能修改或删除记忆"
     );
     assert_eq!(
-        parse_operations("{\"operations\":[]}", &[])
+        parse_operations("{\"operations\":[]}", &[], &quotes)
             .unwrap()
             .adds
             .len(),
@@ -725,7 +730,7 @@ async fn nv19_rolling_eight_turn_window_compacts_mid_session_without_waiting_for
     let access =
         AccessContext::voice(TrustedScope::device_grant("dev-a", 1).unwrap(), None, None).unwrap();
     let llm = FakeLlm::new(
-        r#"{"operations":[{"op":"add","category":"preference","content":"加工前习惯先检查排烟风扇"}]}"#,
+        r#"{"operations":[{"op":"add","category":"preference","content":"加工前习惯先检查排烟风扇","quote":"讨论排烟风扇风量调节"}]}"#,
     );
 
     for idx in 0..ROLLING_TURN_WINDOW {
@@ -798,16 +803,16 @@ async fn nv19_extraction_sees_relevant_known_records_and_drops_duplicates() {
 
     let llm = FakeLlm::new(
         r#"{"operations":[
- {"op":"add","category":"preference","content":"回答要先说预计时长","same_as":0},
- {"op":"add","category":"preference","content":"回答先说预计时长！"},
- {"op":"add","category":"task_context","content":"本周先完成椴木样品","same_as":0},
- {"op":"add","category":"preference","content":"加工完提醒清理镜片","same_as":99}
+ {"op":"add","category":"preference","content":"回答要先说预计时长","same_as":0,"quote":"以后回答先说预计时长"},
+ {"op":"add","category":"preference","content":"回答先说预计时长！","quote":"以后回答先说预计时长"},
+ {"op":"add","category":"task_context","content":"本周先完成椴木样品","same_as":0,"quote":"本周先完成椴木样品"},
+ {"op":"add","category":"preference","content":"加工完提醒清理镜片","same_as":99,"quote":"每次干完活提醒清理镜片"}
 ]}"#,
     );
     let dialog = [
         ChatMessage::user("以后回答先说预计时长"),
         ChatMessage::assistant("好的"),
-        ChatMessage::user("边缘发黑怎么办"),
+        ChatMessage::user("本周先完成椴木样品，边缘发黑怎么办，每次干完活提醒清理镜片"),
     ];
     extractor
         .spawn(voice(true), machine(), &dialog, llm.clone())
@@ -885,12 +890,12 @@ async fn nv19_replacement_links_old_record_and_confirming_it_retires_the_old_one
         .unwrap();
     let llm = FakeLlm::new(
         r#"{"operations":[
- {"op":"add","category":"preference","content":"现在常切亚克力，不再切椴木板","replaces":0},
- {"op":"add","category":"task_context","content":"椴木板样品本周停做","replaces":0}
+ {"op":"add","category":"preference","content":"现在常切亚克力，不再切椴木板","replaces":0,"quote":"现在改成亚克力了"},
+ {"op":"add","category":"task_context","content":"椴木板样品本周停做","replaces":0,"quote":"不再切椴木板，本周先停做"}
 ]}"#,
     );
     let dialog = [
-        ChatMessage::user("我常切椴木板，但是现在改成亚克力了"),
+        ChatMessage::user("我常切椴木板，但是现在改成亚克力了，不再切椴木板，本周先停做"),
         ChatMessage::assistant("好的"),
     ];
     extractor
@@ -942,7 +947,7 @@ async fn nv19_replacement_links_old_record_and_confirming_it_retires_the_old_one
 async fn nv19_facts_proposed_again_are_counted_and_keep_candidates_alive() {
     let (store, _service, extractor) = setup();
     let first = FakeLlm::new(
-        r#"{"operations":[{"op":"add","category":"preference","content":"回答先说预计时长"}]}"#,
+        r#"{"operations":[{"op":"add","category":"preference","content":"回答先说预计时长","quote":"以后回答先说预计时长"}]}"#,
     );
     let dialog = [
         ChatMessage::user("以后回答先说预计时长"),
@@ -965,7 +970,7 @@ async fn nv19_facts_proposed_again_are_counted_and_keep_candidates_alive() {
         .unwrap()
         .expires_at = Some(created.created_at + 10.0);
     let again = FakeLlm::new(
-        r#"{"operations":[{"op":"add","category":"preference","content":"回答要先说预计时长","same_as":0}]}"#,
+        r#"{"operations":[{"op":"add","category":"preference","content":"回答要先说预计时长","same_as":0,"quote":"以后回答先说预计时长"}]}"#,
     );
     extractor
         .spawn(voice(true), machine(), &dialog, again)
@@ -989,7 +994,7 @@ async fn nv19_facts_proposed_again_are_counted_and_keep_candidates_alive() {
     );
 
     let punctuation = FakeLlm::new(
-        r#"{"operations":[{"op":"add","category":"preference","content":"回答先说预计时长！"}]}"#,
+        r#"{"operations":[{"op":"add","category":"preference","content":"回答先说预计时长！","quote":"以后回答先说预计时长"}]}"#,
     );
     extractor
         .spawn(voice(true), machine(), &dialog, punctuation)
@@ -1002,4 +1007,50 @@ async fn nv19_facts_proposed_again_are_counted_and_keep_candidates_alive() {
         "只差标点的重复也计数"
     );
     assert_eq!(rows(&store).len(), 1);
+}
+
+#[tokio::test]
+async fn nv19_extraction_rejects_missing_fabricated_or_assistant_only_quotes() {
+    let (store, _, extractor) = setup();
+    let dialog = [
+        ChatMessage::user("我平时只用 3 毫米，椴木板！"),
+        ChatMessage::assistant("好的，我以后默认用 500 毫米每秒帮你切亚克力"),
+        ChatMessage::photo(
+            "（用户刚用摄像头拍了照片，问的是：板子能用吗。当时的解释：左边有明显疤结建议避开）",
+            "data:image/png;base64,iVBORw0KGgo=",
+        ),
+        ChatMessage::user("记得先开排烟风机的！"),
+    ];
+    let llm = FakeLlm::new(
+        r#"{"operations":[
+ {"op":"add","category":"preference","content":"未引原话的脑补偏好"},
+ {"op":"add","category":"preference","content":"太短的引用不算数","quote":"椴木"},
+ {"op":"add","category":"preference","content":"默认速度五百毫米每秒","quote":"默认用 500 毫米每秒帮你切亚克力"},
+ {"op":"add","category":"preference","content":"视觉照片解释里编进来的话","quote":"左边有明显疤结建议避开"},
+ {"op":"add","category":"preference","content":"改词脑补的内容","quote":"我平时只用5毫米亚克力"},
+ {"op":"add","category":"preference","content":"用户真说过的厚度习惯（容忍标点空格差异）","quote":"平时只用3毫米椴木板"}
+]}"#,
+    );
+    extractor
+        .spawn(voice(true), machine(), &dialog, llm)
+        .unwrap()
+        .await
+        .unwrap();
+
+    let added = rows(&store);
+    assert_eq!(added.len(), 1, "只有真正出自用户原话的那 1 条能通过核对");
+    assert!(added[0].content.contains("用户真说过的厚度习惯"));
+
+    let run = &store
+        .list_runs(&ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(), 10)
+        .unwrap()[0];
+    assert_eq!(run.adds.len(), 1);
+    assert_eq!(
+        run.skipped
+            .iter()
+            .filter(|s| s.reason == "unverified_quote")
+            .count(),
+        5,
+        "缺 quote、过短、仅助手说过、多模态照片解释、篡改脑补这 5 条必须全被拦在 unverified_quote"
+    );
 }

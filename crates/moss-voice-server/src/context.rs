@@ -590,10 +590,118 @@ fn check_content(content: &str) -> Result<(), ContextError> {
     {
         return Err(ContextError::ContentInvalid);
     }
-    if private_content(content) || looks_like_machine_data(content) {
+    if private_content(content) || looks_like_machine_data(content) || weakens_safety(content) {
         return Err(ContextError::ContentSensitive);
     }
     Ok(())
+}
+
+/// 记忆会在之后每一轮进入提示词：要求“以后不用确认 / 自动批准 / 直接开始加工”这类话不能存成记忆，
+/// 否则等于让用户的一句随口话（或被诱导说出的话）长期对抗“运动、出光前必须确认”的规则。
+/// 代码里的审批门禁才是真正的防线，这里只是不让提示词层面先松动。
+pub(crate) fn weakens_safety(content: &str) -> bool {
+    const PHRASES: &[&str] = &[
+        "不用确认",
+        "不要确认",
+        "不必确认",
+        "无需确认",
+        "无须确认",
+        "免确认",
+        "跳过确认",
+        "省略确认",
+        "别让我确认",
+        "别总让我确认",
+        "不要让我确认",
+        "不用让我确认",
+        "不用再确认",
+        "不要再确认",
+        "自动确认",
+        "默认确认",
+        "视为确认",
+        "视为同意",
+        "默认同意",
+        "不用审批",
+        "不要审批",
+        "跳过审批",
+        "免审批",
+        "自动审批",
+        "不用批准",
+        "自动批准",
+        "默认批准",
+        "默认授权",
+        "免授权",
+        "不用授权",
+        "不要授权",
+        "跳过授权",
+        "视为已授权",
+        "视为已批准",
+        "自动授权",
+        "不用问我",
+        "不要问我",
+        "别问我",
+        "不用询问",
+        "直接开始加工",
+        "直接开始雕刻",
+        "直接开始切割",
+        "直接出光",
+        "直接发送",
+        "直接执行",
+    ];
+    let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    PHRASES.iter().any(|phrase| compact.contains(phrase)) || negated_safety_step(&compact)
+}
+
+/// 固定短语之外的常见说法：“不需要确认”“不用每次都确认”“以后别再问我”“直接开工”。
+/// 确认 / 审批 / 批准 / 授权 / 询问 / 问我 前面 6 个字以内出现否定或自动化的说法即视为削弱；
+/// “别忘了确认”“提醒我确认”这类是在加强，不算。“直接”紧跟开始 / 开工 / 加工 / 出光 / 发送 等也算。
+fn negated_safety_step(compact: &str) -> bool {
+    const STEPS: &[&str] = &["确认", "审批", "批准", "授权", "询问", "问我"];
+    const NEGATIONS: &[&str] = &[
+        "不用",
+        "不要",
+        "不必",
+        "无需",
+        "无须",
+        "不需要",
+        "不需",
+        "免",
+        "跳过",
+        "省略",
+        "省掉",
+        "别",
+        "不再",
+        "自动",
+        "默认",
+        "视为",
+    ];
+    const STRENGTHEN: &[&str] = &["忘", "记得", "提醒", "一定", "务必", "必须", "先"];
+    const DIRECT_ACTIONS: &[&str] = &[
+        "开始", "开工", "开刻", "开干", "加工", "雕刻", "切割", "出光", "发送", "执行", "运行",
+    ];
+    let chars: Vec<char> = compact.chars().collect();
+    let text_at = |start: usize, end: usize| chars[start..end].iter().collect::<String>();
+    for (index, _) in chars.iter().enumerate() {
+        for step in STEPS {
+            let len = step.chars().count();
+            if index + len > chars.len() || text_at(index, index + len) != *step {
+                continue;
+            }
+            let window = text_at(index.saturating_sub(6), index);
+            if NEGATIONS.iter().any(|n| window.contains(n))
+                && !STRENGTHEN.iter().any(|w| window.contains(w))
+            {
+                return true;
+            }
+        }
+        if index + 2 <= chars.len() && text_at(index, index + 2) == "直接" {
+            let after = text_at(index + 2, (index + 5).min(chars.len()));
+            // 允许中间夹一个字（“直接就开始”）
+            if DIRECT_ACTIONS.iter().any(|action| after.contains(action)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// A record about to be created. `validate` enforces every NV19-01 contract at once.
@@ -749,6 +857,9 @@ impl ContextMemory {
 
     /// Visible to this request at all (candidates included, labelled as such by the caller).
     pub fn readable(&self, access: &AccessContext, now: f64) -> bool {
+        if access.channel() == Channel::Voice && weakens_safety(&self.content) {
+            return false;
+        }
         if access.personal_mode()
             && self.scope.kind() == ScopeKind::Device
             && self.category == Category::Preference

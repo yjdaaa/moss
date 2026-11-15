@@ -234,7 +234,49 @@ fn lang_sort_rank(lang: &str) -> u8 {
     }
 }
 
-/// 查询指定本地合成模型（`kokoro` / `kokoro_v11` / `matcha_zh_en`）的语言包与全量音色目录。
+const QWEN3_TTS_SPEAKERS: [(&str, &str, &str, &str); 9] = [
+    ("vivian", "Vivian", "female", "zh"),
+    ("serena", "Serena", "female", "zh"),
+    ("uncle_fu", "Uncle_Fu（老傅）", "male", "zh"),
+    ("dylan", "Dylan（北京）", "male", "zh"),
+    ("eric", "Eric（四川）", "male", "zh"),
+    ("ryan", "Ryan", "male", "en-US"),
+    ("aiden", "Aiden", "male", "en-US"),
+    ("ono_anna", "Ono_Anna", "female", "accent"),
+    ("sohee", "Sohee", "female", "accent"),
+];
+
+/// Qwen3-TTS CustomVoice 音色编号对应的 `speech.cpp` 说话人标识。
+pub fn qwen3_tts_voice_slug(speaker: i32) -> &'static str {
+    usize::try_from(speaker)
+        .ok()
+        .and_then(|idx| QWEN3_TTS_SPEAKERS.get(idx))
+        .map(|(slug, _, _, _)| *slug)
+        .unwrap_or("vivian")
+}
+
+fn build_qwen3_tts_speaker(idx: usize) -> TtsSpeakerMeta {
+    let (slug, display, gender, lang) = QWEN3_TTS_SPEAKERS[idx];
+    let (gender_label, lang_label, sample_text, recommended_for_zh) = match (gender, lang) {
+        ("female", "zh") => ("女声", "中文普通话（中英混读）", SAMPLE_ZH, true),
+        ("male", "zh") => ("男声", "中文普通话（中英混读）", SAMPLE_ZH, true),
+        ("male", "en-US") => ("男声", "美式英语 (en-US)", SAMPLE_EN_US, false),
+        _ => ("女声", "多语种扩展声线（日/韩）", SAMPLE_ACCENT, false),
+    };
+    TtsSpeakerMeta {
+        id: idx as i32,
+        code: slug,
+        name: display.to_owned(),
+        gender,
+        gender_label,
+        lang,
+        lang_label,
+        sample_text,
+        recommended_for_zh,
+    }
+}
+
+/// 查询指定本地合成模型（`kokoro` / `kokoro_v11` / `matcha_zh_en` / `qwen3_tts_0_6b` / `zipvoice_distill`）的语言包与全量音色目录。
 pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
     let spec = spec_of(model_id, ModelKind::Tts)?;
     let default_speaker = spec.voices.map(|v| v.default).unwrap_or(0);
@@ -260,6 +302,33 @@ pub fn tts_voice_catalog(model_id: &str) -> Option<TtsModelVoiceCatalog> {
             sample_text: SAMPLE_ZH,
             recommended_for_zh: true,
         }],
+        "qwen3_tts_0_6b" => (0..QWEN3_TTS_SPEAKERS.len())
+            .map(build_qwen3_tts_speaker)
+            .collect(),
+        "zipvoice_distill" => vec![
+            TtsSpeakerMeta {
+                id: 0,
+                code: "news-female",
+                name: "标准新闻女声".to_owned(),
+                gender: "female",
+                gender_label: "女声",
+                lang: "zh",
+                lang_label: "中文普通话（中英混读）",
+                sample_text: SAMPLE_ZH,
+                recommended_for_zh: true,
+            },
+            TtsSpeakerMeta {
+                id: 1,
+                code: "news-female-2",
+                name: "柔和新闻女声".to_owned(),
+                gender: "female",
+                gender_label: "女声",
+                lang: "zh",
+                lang_label: "中文普通话（中英混读）",
+                sample_text: SAMPLE_ZH,
+                recommended_for_zh: true,
+            },
+        ],
         _ => return None,
     };
 

@@ -501,15 +501,18 @@ impl PersonContext {
         scope: Option<&PersonScope>,
         messages: Vec<ChatMessage>,
         budget: usize,
-    ) {
+    ) -> bool {
+        if messages.is_empty() {
+            return false;
+        }
         let Some(scope) = scope else {
-            return;
+            return false;
         };
         let Ok(mut state) = self.state.lock() else {
-            return;
+            return false;
         };
         if !self.resolver.permitted(context) || !self.bound_current(&state, context, scope) {
-            return;
+            return false;
         }
         let key = (
             context.device_id.clone(),
@@ -517,13 +520,14 @@ impl PersonContext {
             scope.clone(),
         );
         if state.histories.len() >= 128 && !state.histories.contains_key(&key) {
-            return;
+            return false;
         }
         crate::conversation::append_history(
             state.histories.entry(key).or_default(),
             messages,
             budget,
         );
+        true
     }
     pub async fn prompt_for(
         self: &Arc<Self>,

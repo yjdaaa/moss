@@ -35,6 +35,11 @@ moss-voice = { path = "../../../crates/moss-voice" }
 moss-voice-server = { path = "../../../crates/moss-voice-server" }
 # 内置语音服务的模型提供方（NV5：对话模式的识别 / 大模型 / 合成）；Android 不编译
 moss-voice-providers = { path = "../../../crates/moss-voice-providers" }
+moss-xiaozhi-proto = { path = "../../../crates/moss-xiaozhi-proto" }
+espflash = { version = "3.3", default-features = false, features = ["serialport"] }
+serialport = { version = "4", default-features = false }
+# USB 配网写入后的回读校验（与 espflash 用同一个 MD5 实现，不新增下载）
+md-5 = "0.10"
 laser-contracts = { path = "../../../crates/laser-contracts" }
 laser-api = { path = "../../../crates/laser-api" }
 laser-runtime = { path = "../../../crates/laser-runtime" }

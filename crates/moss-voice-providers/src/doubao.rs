@@ -487,14 +487,18 @@ impl Asr for DoubaoAsr {
 
 // ---------------------------------------------------------------- 合成
 
+/// 空闲连接池上限：与对话层的合成并发数（当前句 + 预取句）一致。
+const IDLE_CONNECTIONS: usize = 2;
+
 /// 豆包双向流式语音合成。
 pub struct DoubaoTts {
     config: DoubaoConfig,
     speaker: String,
     /// 语速：-50（0.5 倍）~ 100（2 倍），0 为正常
     speech_rate: i32,
-    /// 上一句用完的连接，留给下一句复用
-    idle: Mutex<Option<Ws>>,
+    /// 用完的连接，留给后面的句子复用。对话层同时合成“当前句 + 预取的下一句”，所以留两条：
+    /// 只留一条时预取的那句每次都要重新建连（TLS + 握手），短句之间会露出空隙。
+    idle: Mutex<Vec<Ws>>,
 }
 
 /// 合成失败：`sent` 表示失败前是否已经送出过音频（送出过就不能重试，否则会重复播放）。
@@ -523,7 +527,7 @@ impl DoubaoTts {
             config: DoubaoConfig::new(url, api_key, resource_id, DEFAULT_TTS_URL)?,
             speaker: speaker.to_owned(),
             speech_rate: speech_rate(speed),
-            idle: Mutex::new(None),
+            idle: Mutex::new(Vec::new()),
         })
     }
 
@@ -655,7 +659,7 @@ impl DoubaoTts {
     }
 
     async fn speak(&self, text: &str, chunks: &UnboundedSender<Pcm>) -> Result<(), ProviderError> {
-        let reused = self.idle.lock().ok().and_then(|mut idle| idle.take());
+        let reused = self.idle.lock().ok().and_then(|mut idle| idle.pop());
         let (ws, was_reused) = match reused {
             Some(ws) => (ws, true),
             None => (self.open().await?, false),
@@ -672,9 +676,9 @@ impl DoubaoTts {
             Err(failure) => return Err(failure.error),
         };
         if let Ok(mut idle) = self.idle.lock()
-            && idle.is_none()
+            && idle.len() < IDLE_CONNECTIONS
         {
-            *idle = Some(ws);
+            idle.push(ws);
         }
         Ok(())
     }

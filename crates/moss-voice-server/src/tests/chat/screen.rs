@@ -437,3 +437,82 @@ fn common_font_device_hot_loads_full_bundle_for_rare_and_multilingual_glyphs() {
     assert!(tts_cps.contains(&('椴' as u32)));
     assert!(!tts_cps.contains(&('雕' as u32)));
 }
+
+#[test]
+fn glyph_gap_diagnostic_reports_count_without_leaking_user_or_reply_characters() {
+    let tools = Arc::new(ScreenTools {
+        payload: Arc::new(Mutex::new(serde_json::json!({ "workflows": [] }))),
+        preview_reads: Arc::new(Mutex::new(Vec::new())),
+    });
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([say(&["回复含生僻字：𠮷。"])])),
+        ..Default::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([Ok("雕椴镭".to_owned())])),
+        ..Default::default()
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm,
+        Arc::new(FakeTts::default()),
+        tools,
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            playback_start_ms: 80,
+            job_poll_interval: Duration::from_millis(60),
+            ..ServerConfig::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+
+    let mut device = allowed_device_with(&server, &registry, 1, true);
+    let init = read_mcp(&mut device);
+    reply_mcp(
+        &mut device,
+        &init["id"],
+        serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}),
+    );
+    assert_eq!(read_mcp(&mut device)["method"], "notifications/initialized");
+    let list = read_mcp(&mut device);
+    reply_mcp(&mut device, &list["id"], serde_json::json!({"tools": []}));
+
+    send_json(
+        &mut device,
+        r#"{"type":"hello","version":3,"features":{"mcp":true,"glyph_push":true},"text_font":{"bundle":"noto-v1","charset":"common","size":20,"bpp":4}}"#,
+    );
+    speak_manual(&mut device, 1, 260);
+    let _ = read_until(&mut device, |v| v["type"] == "tts" && v["state"] == "stop");
+
+    let events = server.status().events;
+    let gap_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.text.contains("字幕缺字"))
+        .collect();
+    assert!(
+        gap_events.len() >= 2,
+        "STT 与 TTS 缺字应记录诊断事件: {gap_events:?}"
+    );
+    for event in &gap_events {
+        assert!(
+            event.text.contains("有 ") && event.text.contains(" 个"),
+            "缺字事件只报告数量: {event:?}"
+        );
+        for secret in ["椴", "镭", "𠮷", "😀", "“", "”"] {
+            assert!(
+                !event.text.contains(secret)
+                    && event.detail.as_deref().is_none_or(|d| !d.contains(secret)),
+                "公共诊断事件禁止包含用户原话或回复具体字符 `{secret}`: {event:?}"
+            );
+        }
+    }
+}

@@ -1,6 +1,8 @@
 //! Opus 编解码（单声道，16 位 PCM）。
 //!
-//! 后端为 opus2 的纯 Rust 实现 mousiki（NV0 实测与 libopus 同一套 API，见技术书 §11.3），不需要 CMake。
+//! 后端为官方参考实现 libopus（opus2 `backend-libopus` + `bundled`，构建需要 CMake）。小智固件用的也是 libopus，
+//! 两端必须逐位兼容：原用的纯 Rust 实现 mousiki 0.2.1 在语音模式下不兼容（技术书 n94），
+//! 本模块的 `*_matches_reference_libopus` 测试用参考 libopus 编出的包把关。
 //! 设备上行 16 kHz、下行 24 kHz，均为 60 ms 帧（技术书 §2.1）。
 
 use opus2::{Application, Channels, Decoder, Encoder};
@@ -94,7 +96,7 @@ impl OpusEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::test_signal::{rms, tone};
+    use crate::audio::test_signal::{rms, tone, vowel};
 
     #[test]
     fn round_trip_keeps_length_and_level() {
@@ -114,6 +116,73 @@ mod tests {
             let ratio = rms(&output[skip..]) / rms(&input[skip..]);
             assert!((0.7..1.3).contains(&ratio), "{rate} Hz 音量比 {ratio}");
         }
+    }
+
+    /// 设备上行由固件里的 libopus 编码（语音模式）。夹具是参考 libopus 1.5 以 16 kHz / 60 ms / VOIP
+    /// 编出的一段合成元音（与 `test_signal::vowel` 同一算法）；解码结果必须与原信号同响度、能对上波形。
+    /// 不兼容的解码器（如 mousiki 0.2.1）在这里得到约 3 倍响度、单帧最高 13 倍并削顶。
+    #[test]
+    fn uplink_decoding_matches_reference_libopus() {
+        let bytes = include_bytes!("testdata/vowel16k_libopus_voip.pkts");
+        let mut decoder = OpusDecoder::new(16_000).unwrap();
+        let mut output = Vec::new();
+        let mut rest = &bytes[..];
+        while rest.len() >= 4 {
+            let length = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+            output.extend(decoder.decode(&rest[4..4 + length]).unwrap());
+            rest = &rest[4 + length..];
+        }
+        let input = vowel(16_000, 2400);
+        assert_eq!(output.len(), input.len().div_ceil(960) * 960);
+        assert_level_and_shape(&input, &output, "上行");
+    }
+
+    /// 设备用 libopus 解码下行：我们编出的包经（已被上一项证明符合参考实现的）解码器还原后，
+    /// 响度必须和原声一致、不能削顶。合成元音会走 Opus 的语音编码路径（纯音调走不到）。
+    #[test]
+    fn downlink_encoding_matches_reference_libopus() {
+        let input = vowel(24_000, 2400);
+        let mut encoder = OpusEncoder::new(24_000, 60).unwrap();
+        let mut decoder = OpusDecoder::new(24_000).unwrap();
+        let mut output = Vec::new();
+        for chunk in input.chunks(encoder.frame()) {
+            output.extend(decoder.decode(&encoder.encode(chunk).unwrap()).unwrap());
+        }
+        assert_level_and_shape(&input, &output, "下行");
+    }
+
+    /// 响度比在 0.8–1.25、逐帧响度比不超过 1.6、不削顶，并且对齐后波形能对上（信噪比 ≥ 8 dB）。
+    fn assert_level_and_shape(input: &[i16], output: &[i16], label: &str) {
+        let ratio = rms(output) / rms(input);
+        assert!((0.8..1.25).contains(&ratio), "{label} 整体响度比 {ratio}");
+        let clipped = output.iter().filter(|s| s.unsigned_abs() >= 32_700).count();
+        assert_eq!(clipped, 0, "{label} 削顶样本 {clipped}");
+        let frame = input.len() / 40;
+        let mut worst: f64 = 0.0;
+        for (a, b) in input.chunks(frame).zip(output.chunks(frame)) {
+            if rms(a) > 1500.0 {
+                worst = worst.max(rms(b) / rms(a));
+            }
+        }
+        assert!(worst < 1.6, "{label} 单帧响度比最高 {worst}");
+        // 编解码有固定延迟：在 0–20 ms 内找最佳对齐
+        let middle = &input[input.len() / 4..input.len() * 3 / 4];
+        let start = input.len() / 4;
+        let snr = (0..input.len() / 50)
+            .map(|lag| {
+                let error: f64 = middle
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &x)| {
+                        let y = output.get(start + i + lag).copied().unwrap_or(0);
+                        (f64::from(x) - f64::from(y)).powi(2)
+                    })
+                    .sum();
+                let signal: f64 = middle.iter().map(|&x| f64::from(x).powi(2)).sum();
+                10.0 * (signal / error.max(1.0)).log10()
+            })
+            .fold(f64::MIN, f64::max);
+        assert!(snr >= 8.0, "{label} 对齐后信噪比 {snr:.1} dB");
     }
 
     #[test]

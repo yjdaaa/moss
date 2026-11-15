@@ -10,6 +10,9 @@
 //! 并增加流式识别（`asr_open` / `asr_feed` / `asr_finish` / `asr_close`）。
 //! 协议 3（NV8a）：识别解码选项与热词；流式中间文字；分段合成 `synthesize_stream` / `audio_chunk` / `done`。
 //! 协议 4（NV16）：固定 CampPlus 模型和独立声纹请求；embedding 负载为 f32le，附模型、维度、采样率和代次。
+//! 协议 5（n89）：新增请求取消 `Op::Cancel`，流式合成中途放弃时通知辅助程序停止排队与后续分段。
+//! 协议 6（n93）：新增 `AsrEngine::Qwen3Asr` / `AsrEngine::FireRedAsr2Ctc`、`TtsEngine::ZipVoice`、
+//! `GTCRN` 前端语音降噪（`Op::LoadDenoiser`）及 `SmartTurn v3` 尾音语义判停（`Op::LoadSmartTurn` / `Op::SmartTurnPredict`）。
 //! 辅助程序与桌面程序须一起升级，旧协议在握手时拒绝。
 
 use std::io::{self, Read, Write};
@@ -17,7 +20,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// 协议版本：辅助程序与 MOSS 不一致时拒绝使用。
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// NV16 fixed official CampPlus ONNX, acquired and hashed on 2026-10-11.
 /// ModelScope iic/speech_campplus_sv_zh-cn_16k-common v1.0.0: Apache-2.0.
@@ -69,7 +72,8 @@ pub const MAX_HEADER: u32 = 64 * 1024;
 /// 单帧负载上限：60 秒 48 kHz 16 位音频
 pub const MAX_PAYLOAD: u32 = 60 * 48_000 * 2;
 
-/// Silero VAD 参数（xiaozhi-esp32-server 的语义：阈值 0.5，静音 200 ms 判停）。
+/// Silero VAD 参数（xiaozhi-esp32-server 的语义：阈值 0.5）。静音 250 ms 即交给识别与大模型抢跑，
+/// 开口前的实际等待由会话按句子是否说完决定（2026-11-13 n86）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VadParams {
     pub threshold: f32,
@@ -81,7 +85,7 @@ impl Default for VadParams {
     fn default() -> Self {
         Self {
             threshold: 0.5,
-            min_silence_ms: 200,
+            min_silence_ms: 250,
             min_speech_ms: 250,
         }
     }
@@ -101,16 +105,23 @@ pub enum VadEngine {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AsrEngine {
-    /// SenseVoice：整段识别（`model.int8.onnx`、`tokens.txt`）
+    /// SenseVoice：离线整段模型，流式会话中按约 0.5 秒周期增量重认已录片段（`model.int8.onnx`、`tokens.txt`）
     #[default]
     SenseVoice,
-    /// 流式 Zipformer Transducer（`encoder*.onnx`、`decoder*.onnx`、`joiner*.onnx`、`tokens.txt`）：支持流式识别
+    /// 流式 Zipformer Transducer（`encoder*.onnx`、`decoder*.onnx`、`joiner*.onnx`、`tokens.txt`）：原生逐块流式识别
     StreamingTransducer,
+    /// Qwen3-ASR 0.6B（`conv_frontend.onnx`、`encoder.int8.onnx`、`decoder.int8.onnx`、`tokenizer/`）
+    Qwen3Asr,
+    /// FireRedASR2-CTC 中文/中英多方言流式切片识别（`model.int8.onnx`、`tokens.txt`）
+    FireRedAsr2Ctc,
 }
 
 impl AsrEngine {
     pub fn streaming(self) -> bool {
-        matches!(self, Self::StreamingTransducer)
+        matches!(
+            self,
+            Self::SenseVoice | Self::StreamingTransducer | Self::Qwen3Asr | Self::FireRedAsr2Ctc
+        )
     }
 }
 
@@ -171,6 +182,8 @@ pub enum TtsEngine {
     Kokoro,
     /// Matcha（声学模型 + `vocos` 声码器）
     Matcha,
+    /// ZipVoice-Distill 零样本克隆（`encoder` + `decoder` + `vocos_24khz`）
+    ZipVoice,
 }
 
 impl VadParams {
@@ -224,6 +237,14 @@ pub enum Op {
         #[serde(default)]
         engine: TtsEngine,
     },
+    /// 加载前端语音降噪模型（GTCRN ONNX；空路径表示卸载）
+    LoadDenoiser {
+        model: String,
+    },
+    /// 加载尾音语义判停模型（SmartTurn v3.2 ONNX 目录或文件；空路径表示卸载）
+    LoadSmartTurn {
+        model: String,
+    },
     /// 打开一路判停流（每个设备会话一路），只支持 16 kHz
     VadOpen {
         stream: u64,
@@ -266,6 +287,21 @@ pub enum Op {
         text: String,
         speaker: i32,
         speed: f32,
+        /// 这一句第一段最多可以有多长（字）；0 表示按最保守的阶梯。由调用方按“已经排在播放队列里的
+        /// 语音还能撑多久”和这台机器的合成速度算出：机器快、前面还有存货时整句合成（语调连贯），
+        /// 机器慢或刚开口时才切小段（尽快出声、不断流）。
+        #[serde(default)]
+        first_max_chars: u32,
+    },
+    /// 放弃编号为 `target` 的合成请求（协议 5）：还在排队的不再合成，正在合成的尽快停下。
+    /// 对话被打断或合并重来时，作废的句子不再占着合成线程，新回答的第一句不用排在它们后面。
+    /// 本请求自身不回复；被放弃的请求以 Error 结束。
+    Cancel {
+        target: u64,
+    },
+    /// 预测尾音语义是否说完（协议 6：负载为 i16le 单声道 PCM）
+    SmartTurnPredict {
+        sample_rate: u32,
     },
 }
 
@@ -292,6 +328,10 @@ pub enum Reply {
         vad: bool,
         asr: bool,
         tts: bool,
+        #[serde(default)]
+        denoiser: bool,
+        #[serde(default)]
+        smart_turn: bool,
     },
     Loaded {
         sample_rate: Option<u32>,
@@ -308,6 +348,10 @@ pub enum Reply {
         dimension: u32,
         utterance_generation: u64,
         format: String,
+    },
+    SmartTurn {
+        probability: f32,
+        complete: bool,
     },
     Done,
     VadEvents {
@@ -403,7 +447,22 @@ pub fn bytes_to_pcm(bytes: &[u8]) -> Vec<i16> {
 /// 本地流式合成按停顿分段：首段在首个满 10 字的逗号/句末处切出以降低首包延迟；
 /// 后续分句优先在句末标点或较长分句（≥22 字）处切分，保护千分位数字与词组连贯韵律，避免每 8 字切碎导致机械跳调。
 pub fn synthesis_segments(text: &str) -> Vec<String> {
+    synthesis_segments_from(text, 0)
+}
+
+/// 同 [`synthesis_segments`]，但第一段的长度上限至少放宽到 `first_max_chars`（之后仍逐段放大 1.5 倍）。
+/// 上限越大切得越少；足够大时只在句号处分段，一句话整句合成。
+pub fn synthesis_segments_from(text: &str, first_max_chars: u32) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
+    let widen = |index: usize, (floor, cap): (usize, usize)| -> (usize, usize) {
+        let wanted = (first_max_chars as f64 * 1.5f64.powi(index as i32)).min(72.0) as usize;
+        if wanted <= cap {
+            (floor, cap)
+        } else {
+            // 逗号处够长就切的下限跟着上限走，不然上限放宽了还是会在第一个逗号切开
+            (floor.max(wanted * 3 / 5), wanted)
+        }
+    };
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut length = 0;
@@ -417,9 +476,35 @@ pub fn synthesis_segments(text: &str) -> Vec<String> {
         let is_sentence_end = matches!(ch, '。' | '！' | '？' | '；' | ';' | '!' | '?' | '\n');
         let is_comma = matches!(ch, '，' | ',') && !numeric_comma;
         let is_soft_pause = matches!(ch, '、' | '：' | ':' | ' ');
-        let min_comma_len = if segments.is_empty() { 10 } else { 22 };
+        // 分段长度逐段放大而不是一步到位：本地合成 1 秒语音要算 0.5–0.8 秒，下一段必须在上一段
+        // 播完之前算完才不会断。第一段短（尽快出声），之后每段约为前一段的 1.5 倍；
+        // 原先第二段直接 22 字起，慢机器上第一段播完时它还没算完，中间会空一截。
+        // （逗号处够长就切的下限，这一段的长度上限）
+        let index = segments.len();
+        let (min_comma_len, max_len) = widen(
+            index,
+            match index {
+                0 => (8, 14),
+                1 => (12, 20),
+                2 => (18, 30),
+                _ => (22, 45),
+            },
+        );
+        // 这个逗号后面那个分句的长度：不在这里切的话，这一段会不会超过上限
+        let next_clause = || {
+            chars[i + 1..]
+                .iter()
+                .position(|c| {
+                    matches!(
+                        c,
+                        '，' | ',' | '。' | '！' | '？' | '；' | ';' | '!' | '?' | '\n'
+                    )
+                })
+                .map_or(chars.len() - i - 1, |at| at + 1)
+        };
         let should_cut = (length >= 8 && is_sentence_end)
-            || (length >= min_comma_len && is_comma)
+            || (is_comma
+                && (length >= min_comma_len || (length >= 5 && length + next_clause() > max_len)))
             || (length >= 45 && is_soft_pause)
             || (length >= 72
                 && !chars
@@ -555,12 +640,102 @@ mod tests {
                 ..
             }
         ));
-        assert!(AsrEngine::StreamingTransducer.streaming() && !AsrEngine::SenseVoice.streaming());
+        assert!(
+            AsrEngine::StreamingTransducer.streaming()
+                && AsrEngine::SenseVoice.streaming()
+                && AsrEngine::Qwen3Asr.streaming()
+                && AsrEngine::FireRedAsr2Ctc.streaming()
+        );
         assert_eq!(
             VadParams::for_engine(VadEngine::Silero),
             VadParams::default()
         );
         assert_eq!(VadParams::for_engine(VadEngine::Ten).min_speech_ms, 100);
+        // 协议 6 新增变体往返验证
+        assert_eq!(PROTOCOL_VERSION, 6);
+        let qwen_asr: Request = serde_json::from_value(serde_json::json!({
+            "id": 5,
+            "op": "load_asr",
+            "dir": "qwen3",
+            "engine": "qwen3_asr"
+        }))
+        .unwrap();
+        assert!(matches!(
+            qwen_asr.op,
+            Op::LoadAsr {
+                engine: AsrEngine::Qwen3Asr,
+                ..
+            }
+        ));
+        let zipvoice: Request = serde_json::from_value(serde_json::json!({
+            "id": 6,
+            "op": "load_tts",
+            "dir": "zip",
+            "engine": "zip_voice"
+        }))
+        .unwrap();
+        assert!(matches!(
+            zipvoice.op,
+            Op::LoadTts {
+                engine: TtsEngine::ZipVoice,
+                ..
+            }
+        ));
+        for req in [
+            Request {
+                id: 7,
+                op: Op::LoadDenoiser {
+                    model: "gtcrn.onnx".into(),
+                },
+            },
+            Request {
+                id: 8,
+                op: Op::LoadSmartTurn {
+                    model: "smart-turn".into(),
+                },
+            },
+            Request {
+                id: 9,
+                op: Op::SmartTurnPredict {
+                    sample_rate: 16_000,
+                },
+            },
+        ] {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &req, &[]).unwrap();
+            let (back, _): (Request, Vec<u8>) = read_frame(&mut buf.as_slice()).unwrap().unwrap();
+            assert_eq!(back, req);
+        }
+        let hello: Response = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "kind": "hello",
+            "protocol": 6,
+            "version": "0.3.7",
+            "vad": true,
+            "asr": false,
+            "tts": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            hello.reply,
+            Reply::Hello {
+                denoiser: false,
+                smart_turn: false,
+                ..
+            }
+        ));
+        let st = Response {
+            id: 9,
+            reply: Reply::SmartTurn {
+                probability: 0.25,
+                complete: false,
+            },
+        };
+        let mut st_buf = Vec::new();
+        write_frame(&mut st_buf, &st, &[]).unwrap();
+        let (st_back, _): (Response, Vec<u8>) =
+            read_frame(&mut st_buf.as_slice()).unwrap().unwrap();
+        assert_eq!(st_back, st);
     }
 
     #[test]
@@ -570,6 +745,23 @@ mod tests {
         assert!(segments.len() >= 2);
         assert_eq!(segments.concat(), text);
         assert!(segments.iter().any(|s| s.contains("0.5")));
+        // 逗号处的分段逐段变长：第一段尽快出声，后面的段不会比前一段长太多
+        let long = "先把材料放平整，再把防护盖轻轻关好，然后在电脑上确认一下功率和速度这两个参数，没有问题的话就可以按下开始键让机器动起来了。";
+        let pieces = synthesis_segments(long);
+        assert_eq!(pieces.concat(), long);
+        let lengths: Vec<usize> = pieces.iter().map(|s| s.chars().count()).collect();
+        assert_eq!(lengths[0], 8, "{pieces:?}");
+        assert!(lengths[1] <= 16, "第二段不能一下子变得很长：{pieces:?}");
+        assert!(pieces.len() >= 4, "{pieces:?}");
+        // 机器快或前面还有存货：上限放宽后少切甚至不切，一句话的语调保持连贯
+        assert_eq!(synthesis_segments_from(long, 72), vec![long.to_owned()]);
+        let relaxed = synthesis_segments_from(long, 30);
+        assert_eq!(relaxed.concat(), long);
+        assert!(
+            relaxed.len() < pieces.len() && relaxed[0].chars().count() > 14,
+            "{relaxed:?}"
+        );
+        assert_eq!(synthesis_segments_from(long, 0), pieces);
         let num_text = "当前雕刻速度为 1,200 毫米每分钟，功率已设好，随时可以开始。";
         let num_segments = synthesis_segments(num_text);
         assert_eq!(num_segments.concat(), num_text);

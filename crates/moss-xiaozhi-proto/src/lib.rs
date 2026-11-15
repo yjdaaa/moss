@@ -11,6 +11,7 @@
 
 pub mod frame;
 pub mod message;
+pub mod nvs;
 pub mod ota;
 pub mod token;
 

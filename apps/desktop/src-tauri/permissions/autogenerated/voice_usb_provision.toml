@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-usb-provision"
+description = "Enables the voice_usb_provision command without any pre-configured scope."
+commands.allow = ["voice_usb_provision"]
+
+[[permission]]
+identifier = "deny-voice-usb-provision"
+description = "Denies the voice_usb_provision command without any pre-configured scope."
+commands.deny = ["voice_usb_provision"]

@@ -23,6 +23,22 @@ impl BargeIn {
         }
     }
 
+    /// 思考期间“用户接着说”的检测：此时没有播放、不存在回声，按普通判停器的灵敏度、
+    /// 连续 160 ms 人声即确认，尽快发现用户还没说完。
+    pub fn follow_up(rate: u32, base: &VadConfig) -> Self {
+        Self {
+            vad: EnergyVad::new(
+                rate,
+                VadConfig {
+                    min_speech_ms: 160,
+                    ..base.clone()
+                },
+            ),
+            preroll: VecDeque::new(),
+            max_samples: rate as usize,
+        }
+    }
+
     pub fn reset(&mut self) {
         self.vad.reset();
         self.preroll.clear();

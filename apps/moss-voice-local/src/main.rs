@@ -2,10 +2,13 @@
 //! MOSS 本地模型辅助程序 `moss-voice-local`（内置语音技术书 §11.2，NV6；可选模型见 §13.7）。
 //!
 //! 由 MOSS 启动，经标准输入输出按 `moss-voice-local-proto` 的帧协议通信；标准输入关闭即退出。
-//! 判停（Silero / TEN-VAD）、识别（SenseVoice / 流式 Zipformer）、合成（Kokoro / Matcha）各在自己的线程里
+//! 判停（Silero / TEN-VAD）、识别（SenseVoice / 流式 Zipformer / Qwen3-ASR / FireRedASR2-CTC）、
+//! 合成（Kokoro / Matcha / ZipVoice）及辅助降噪/尾音判停（GTCRN / SmartTurn）各在自己的线程里
 //! 加载与运行，一个较慢的合成不会拖住判停。模型对象在各自线程内创建，不跨线程共享。
 //!
 //! 本程序静态链接 sherpa-onnx（Apache-2.0），其中包含 espeak-ng（GPL-3.0），因此以 GPL-3.0-or-later 发布。
+
+mod smart_turn;
 
 use moss_voice_local_proto::{
     SPEAKER_DIMENSION, SPEAKER_MODEL_BYTES, SPEAKER_MODEL_FILE, SPEAKER_MODEL_ID,
@@ -13,6 +16,7 @@ use moss_voice_local_proto::{
 };
 use sha2::{Digest, Sha256};
 use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::path::Path;
@@ -26,11 +30,14 @@ use moss_voice_local_proto::{
     VadParams, bytes_to_pcm, pcm_to_bytes, read_frame, write_frame,
 };
 use sherpa_onnx::{
-    GenerationConfig, OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig,
-    OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig, OfflineTtsMatchaModelConfig,
-    OfflineTtsModelConfig, OnlineRecognizer, OnlineRecognizerConfig, OnlineStream,
-    OnlineTransducerModelConfig, SileroVadModelConfig, TenVadModelConfig, VadModelConfig,
-    VoiceActivityDetector,
+    GenerationConfig, OfflineFireRedAsrCtcModelConfig, OfflineQwen3ASRModelConfig,
+    OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig,
+    OfflineSpeechDenoiser, OfflineSpeechDenoiserConfig, OfflineSpeechDenoiserGtcrnModelConfig,
+    OfflineSpeechDenoiserModelConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
+    OfflineTtsMatchaModelConfig, OfflineTtsModelConfig, OfflineTtsZipvoiceModelConfig,
+    OnlineRecognizer, OnlineRecognizerConfig, OnlineSpeechDenoiser, OnlineSpeechDenoiserConfig,
+    OnlineStream, OnlineTransducerModelConfig, SileroVadModelConfig, TenVadModelConfig,
+    VadModelConfig, VoiceActivityDetector, Wave,
 };
 
 type Out = Arc<Mutex<BufWriter<io::Stdout>>>;
@@ -198,10 +205,164 @@ fn rule_fsts(dir: &Path) -> Option<String> {
 }
 
 #[derive(Default)]
+struct DenoiserSlot {
+    generation: u64,
+    model_path: Option<String>,
+}
+
+#[derive(Default)]
 struct Loaded {
     vad: AtomicBool,
     asr: AtomicBool,
     tts: AtomicBool,
+    denoiser: AtomicBool,
+    smart_turn: AtomicBool,
+    denoiser_slot: Mutex<DenoiserSlot>,
+    synth: SynthCancel,
+}
+
+fn denoiser_model_config(model_path: &str) -> OfflineSpeechDenoiserModelConfig {
+    OfflineSpeechDenoiserModelConfig {
+        gtcrn: OfflineSpeechDenoiserGtcrnModelConfig {
+            model: Some(model_path.to_owned()),
+        },
+        num_threads: 1,
+        debug: false,
+        provider: Some("cpu".into()),
+        ..Default::default()
+    }
+}
+
+fn create_online_denoiser(model_path: &str) -> Option<OnlineSpeechDenoiser> {
+    OnlineSpeechDenoiser::create(&OnlineSpeechDenoiserConfig {
+        model: denoiser_model_config(model_path),
+    })
+}
+
+fn create_offline_denoiser(model_path: &str) -> Option<OfflineSpeechDenoiser> {
+    OfflineSpeechDenoiser::create(&OfflineSpeechDenoiserConfig {
+        model: denoiser_model_config(model_path),
+    })
+}
+
+fn current_denoiser_spec(loaded: &Loaded) -> (u64, Option<String>) {
+    loaded
+        .denoiser_slot
+        .lock()
+        .map(|slot| (slot.generation, slot.model_path.clone()))
+        .unwrap_or((0, None))
+}
+
+fn denoise_online_chunk<'a>(
+    stream_denoiser: &mut Option<(u64, OnlineSpeechDenoiser)>,
+    loaded: &Loaded,
+    samples: &'a [f32],
+) -> Cow<'a, [f32]> {
+    let (generation, model_path) = current_denoiser_spec(loaded);
+    let needs_sync = match (stream_denoiser.as_ref(), model_path.as_ref()) {
+        (Some((g, _)), Some(_)) => *g != generation,
+        (None, Some(_)) | (Some(_), None) => true,
+        (None, None) => false,
+    };
+    if needs_sync {
+        *stream_denoiser = model_path
+            .as_deref()
+            .and_then(create_online_denoiser)
+            .map(|d| (generation, d));
+    }
+    if let Some((_, denoiser)) = stream_denoiser.as_ref() {
+        Cow::Owned(denoiser.run(samples, 16_000).samples)
+    } else {
+        Cow::Borrowed(samples)
+    }
+}
+
+fn flush_online_denoiser(stream_denoiser: &mut Option<(u64, OnlineSpeechDenoiser)>) -> Vec<f32> {
+    match stream_denoiser.take() {
+        Some((_, denoiser)) => denoiser.flush().samples,
+        None => Vec::new(),
+    }
+}
+
+/// 合成请求的取消状态：主线程收到 `Cancel` 时登记，合成线程开工前与合成过程中查看。
+#[derive(Default)]
+struct SynthCancel {
+    /// （正在合成的请求编号，0 为空闲；已被取消但还在排队的请求编号）
+    state: Mutex<(u64, std::collections::HashSet<u64>)>,
+    /// 正在合成的那个请求被取消
+    stop: Arc<AtomicBool>,
+}
+
+impl SynthCancel {
+    /// 合成线程取到一个请求：已被取消则返回 `false`（不合成）。
+    fn begin(&self, id: u64) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return true;
+        };
+        if state.1.remove(&id) {
+            return false;
+        }
+        state.0 = id;
+        self.stop.store(false, Ordering::SeqCst);
+        true
+    }
+
+    fn end(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.0 = 0;
+        }
+    }
+
+    fn cancel(&self, target: u64) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.0 == target {
+            self.stop.store(true, Ordering::SeqCst);
+        } else {
+            // 目标可能已经合成完（登记不会再被取走）：封顶，不让集合无限增长
+            if state.1.len() >= 1024 {
+                state.1.clear();
+            }
+            state.1.insert(target);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// 传给 sherpa 的进度回调：返回 `false` 即中止当前合成。
+    fn keep_going(&self) -> impl FnMut(&[f32], f32) -> bool + 'static {
+        let stop = self.stop.clone();
+        move |_, _| !stop.load(Ordering::SeqCst)
+    }
+}
+
+/// 模型自己生成的停顿（200 ms 以上的静音）保留多少。实测 Kokoro v1.1：sherpa 默认的 0.2 把逗号和句号
+/// 都压到约 200 ms，分不出层次、听着不喘气；不压（1.0）时逗号 0.5–1 秒、句号约 1 秒，又太拖。
+/// 取 0.35：逗号约 190–360 ms，句号约 350 ms，句尾约 210–260 ms。
+const TTS_SILENCE_SCALE: f32 = 0.35;
+
+/// Kokoro 在一段话很长时会越说越赶（官方 v1.1-zh 示例脚本用按长度放慢来缓解）：
+/// 28 字以内不变，之后每多一个字放慢 0.6%，最多放慢到 0.82 倍。
+fn long_segment_speed(chars: usize) -> f32 {
+    (1.0 - chars.saturating_sub(28) as f32 * 0.006).max(0.82)
+}
+
+/// 推理线程数：默认取逻辑核数的一半，限制在 2–6。实测 Kokoro v1.1 int8（12 逻辑核 Mac）
+/// 2 / 4 / 6 线程的实时率为 0.78 / 0.61 / 0.54；再多收益很小，还会和界面抢核。
+/// 环境变量 `MOSS_VOICE_THREADS`（1–16）可覆盖，用于在具体机器上调优。
+fn inference_threads() -> i32 {
+    if let Some(value) = std::env::var("MOSS_VOICE_THREADS")
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok())
+        .filter(|value| (1..=16).contains(value))
+    {
+        return value;
+    }
+    let cores = thread::available_parallelism().map_or(4, |n| n.get());
+    (cores / 2).clamp(2, 6) as i32
 }
 
 // ---------------------------------------------------------------- 判停
@@ -209,6 +370,7 @@ struct Loaded {
 struct VadStream {
     detector: VoiceActivityDetector,
     in_speech: bool,
+    denoiser: Option<(u64, OnlineSpeechDenoiser)>,
 }
 
 fn vad_config(engine: VadEngine, model: &str, params: &VadParams) -> VadModelConfig {
@@ -289,11 +451,17 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 .and_then(|config| VoiceActivityDetector::create(config, 30.0))
             {
                 Some(detector) => {
+                    let (generation, model_path) = current_denoiser_spec(&loaded);
+                    let denoiser = model_path
+                        .as_deref()
+                        .and_then(create_online_denoiser)
+                        .map(|d| (generation, d));
                     streams.insert(
                         stream,
                         VadStream {
                             detector,
                             in_speech: false,
+                            denoiser,
                         },
                     );
                     send(&out, id, Reply::Done, &[]);
@@ -305,9 +473,9 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     error(&out, id, "判停流不存在");
                     continue;
                 };
-                state
-                    .detector
-                    .accept_waveform(&to_f32(&bytes_to_pcm(&payload)));
+                let raw = to_f32(&bytes_to_pcm(&payload));
+                let denoised = denoise_online_chunk(&mut state.denoiser, &loaded, &raw);
+                state.detector.accept_waveform(&denoised);
                 let mut events = Vec::new();
                 // 已完成的语音段：之前没报过开始的先补开始
                 while state.detector.front().is_some() {
@@ -360,12 +528,13 @@ fn load_recognizer(
             let mut config = OfflineRecognizerConfig::default();
             config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
                 model: Some(require(&dir.join("model.int8.onnx"))?),
-                language: Some("auto".into()),
+                // 固定中文：auto 会把短句误判成粤语 / 日语 / 英语；中文模式下夹杂的英文单词仍能识别
+                language: Some("zh".into()),
                 use_itn: true,
             };
             config.model_config.tokens = Some(require(&dir.join("tokens.txt"))?);
             config.model_config.provider = Some("cpu".into());
-            config.model_config.num_threads = 2;
+            config.model_config.num_threads = inference_threads();
             config.model_config.debug = false;
             OfflineRecognizer::create(&config)
                 .map(Recognizer::Offline)
@@ -380,7 +549,7 @@ fn load_recognizer(
             };
             config.model_config.tokens = Some(require(&dir.join("tokens.txt"))?);
             config.model_config.provider = Some("cpu".into());
-            config.model_config.num_threads = 2;
+            config.model_config.num_threads = inference_threads();
             config.model_config.debug = false;
             config.decoding_method = Some(
                 if options.beam_search {
@@ -404,6 +573,37 @@ fn load_recognizer(
             OnlineRecognizer::create(&config)
                 .map(Recognizer::Online)
                 .ok_or_else(|| "流式识别模型加载失败".to_owned())
+        }
+        AsrEngine::Qwen3Asr => {
+            let mut config = OfflineRecognizerConfig::default();
+            config.model_config.qwen3_asr = OfflineQwen3ASRModelConfig {
+                conv_frontend: Some(require(&dir.join("conv_frontend.onnx"))?),
+                encoder: Some(first_of(dir, &["encoder.int8.onnx", "encoder.onnx"])?),
+                decoder: Some(first_of(dir, &["decoder.int8.onnx", "decoder.onnx"])?),
+                tokenizer: Some(require(&dir.join("tokenizer"))?),
+                hotwords: (!options.hotwords.is_empty()).then(|| options.hotwords.join(",")),
+                ..Default::default()
+            };
+            config.model_config.tokens = Some(String::new());
+            config.model_config.provider = Some("cpu".into());
+            config.model_config.num_threads = inference_threads();
+            config.model_config.debug = false;
+            OfflineRecognizer::create(&config)
+                .map(Recognizer::Offline)
+                .ok_or_else(|| "Qwen3-ASR 模型加载失败".to_owned())
+        }
+        AsrEngine::FireRedAsr2Ctc => {
+            let mut config = OfflineRecognizerConfig::default();
+            config.model_config.fire_red_asr_ctc = OfflineFireRedAsrCtcModelConfig {
+                model: Some(first_of(dir, &["model.int8.onnx", "model.onnx"])?),
+            };
+            config.model_config.tokens = Some(require(&dir.join("tokens.txt"))?);
+            config.model_config.provider = Some("cpu".into());
+            config.model_config.num_threads = inference_threads();
+            config.model_config.debug = false;
+            OfflineRecognizer::create(&config)
+                .map(Recognizer::Offline)
+                .ok_or_else(|| "FireRedASR2-CTC 模型加载失败".to_owned())
         }
     }
 }
@@ -429,9 +629,154 @@ fn finish_online(recognizer: &OnlineRecognizer, stream: &OnlineStream) -> String
         .unwrap_or_default()
 }
 
+/// 离线识别一次整段采样并取裁剪后的文字。
+fn decode_offline(recognizer: &OfflineRecognizer, sample_rate: i32, samples: &[f32]) -> String {
+    let stream = recognizer.create_stream();
+    stream.accept_waveform(sample_rate, samples);
+    recognizer.decode(&stream);
+    stream
+        .get_result()
+        .map(|result| result.text.trim().to_owned())
+        .unwrap_or_default()
+}
+
+const OFFLINE_ASR_SAMPLE_RATE: i32 = 16_000;
+/// 离线模型流式会话首次触发试认的最短采样数（320 ms @ 16 kHz，兼顾单字“停”/“急停”）。
+const OFFLINE_INTERIM_FIRST_SAMPLES: usize = 16_000 * 8 / 25;
+/// 离线模型流式会话后续周期重认步长（500 ms @ 16 kHz，说话期间约每半秒重认一次已录片段）。
+const OFFLINE_INTERIM_STEP_SAMPLES: usize = 16_000 / 2;
+/// 单路离线流式缓冲滑窗上限（30 秒 @ 16 kHz），限制内存与单次重认耗时。
+const OFFLINE_STREAM_MAX_SAMPLES: usize = 16_000 * 30;
+/// 同时打开的识别流上限，防止异常未关闭流无限累积。
+const MAX_ACTIVE_ASR_STREAMS: usize = 64;
+
+/// 离线模型（SenseVoice）的伪流式增量重认缓冲：
+/// 说话期间按约 0.5 秒步长重认当前滑窗，不足步长时快速返回 `None`（对应 `Reply::Done`）。
+#[derive(Default)]
+struct OfflineAsrBuffer {
+    samples: Vec<f32>,
+    pending_samples: usize,
+    /// 已至少产出过一次非空识别文字：此后切入 500ms 稳态重认步长。
+    /// 自动拾音起音前若带静音 preroll（如 1s 静音 + 60ms 辅音头）导致首轮试认出空串，
+    /// 保持 320ms 首认步长不退化为 500ms，确保真实开口后约 320ms 即出首屏字或命中急停。
+    has_nonempty_decode: bool,
+    /// `last_text` 是否已对应当前完整 `samples`（无新增尾音时 `AsrFinish` 直接复用）。
+    has_clean_decode: bool,
+    last_text: String,
+}
+
+impl OfflineAsrBuffer {
+    fn feed_with(
+        &mut self,
+        incoming: &[f32],
+        mut decode: impl FnMut(&[f32]) -> String,
+    ) -> Option<String> {
+        if !incoming.is_empty() {
+            self.samples.extend_from_slice(incoming);
+            if self.samples.len() > OFFLINE_STREAM_MAX_SAMPLES {
+                let drop_count = self.samples.len() - OFFLINE_STREAM_MAX_SAMPLES;
+                self.samples.drain(..drop_count);
+            }
+            self.pending_samples = self.pending_samples.saturating_add(incoming.len());
+            self.has_clean_decode = false;
+        }
+        let step = if self.has_nonempty_decode {
+            OFFLINE_INTERIM_STEP_SAMPLES
+        } else {
+            OFFLINE_INTERIM_FIRST_SAMPLES
+        };
+        if self.pending_samples < step {
+            return None;
+        }
+        let text = decode(&self.samples);
+        if !text.trim().is_empty() {
+            self.has_nonempty_decode = true;
+        }
+        self.last_text.clone_from(&text);
+        self.pending_samples = 0;
+        self.has_clean_decode = true;
+        Some(text)
+    }
+
+    fn push_tail(&mut self, tail: &[f32]) {
+        if tail.is_empty() {
+            return;
+        }
+        self.samples.extend_from_slice(tail);
+        if self.samples.len() > OFFLINE_STREAM_MAX_SAMPLES {
+            let drop_count = self.samples.len() - OFFLINE_STREAM_MAX_SAMPLES;
+            self.samples.drain(..drop_count);
+        }
+        self.pending_samples = self.pending_samples.saturating_add(tail.len());
+        self.has_clean_decode = false;
+    }
+
+    fn finish_with(self, mut decode: impl FnMut(&[f32]) -> String) -> String {
+        if self.samples.is_empty() {
+            return String::new();
+        }
+        if self.has_clean_decode && self.pending_samples == 0 {
+            return self.last_text;
+        }
+        decode(&self.samples)
+    }
+}
+
+enum ActiveAsrStreamKind {
+    Online(OnlineStream),
+    Offline(OfflineAsrBuffer),
+}
+
+struct ActiveAsrStream {
+    kind: ActiveAsrStreamKind,
+    denoiser: Option<(u64, OnlineSpeechDenoiser)>,
+}
+
+fn insert_asr_stream(streams: &mut HashMap<u64, ActiveAsrStream>, id: u64, entry: ActiveAsrStream) {
+    if streams.len() >= MAX_ACTIVE_ASR_STREAMS
+        && !streams.contains_key(&id)
+        && let Some(&oldest) = streams.keys().min()
+    {
+        streams.remove(&oldest);
+    }
+    streams.insert(id, entry);
+}
+
+fn denoise_offline_pcm<'a>(
+    offline_denoiser: &mut Option<(u64, OfflineSpeechDenoiser)>,
+    loaded: &Loaded,
+    samples: &'a [f32],
+    sample_rate: u32,
+) -> (Cow<'a, [f32]>, i32) {
+    let (generation, model_path) = current_denoiser_spec(loaded);
+    let needs_sync = match (offline_denoiser.as_ref(), model_path.as_ref()) {
+        (Some((g, _)), Some(_)) => *g != generation,
+        (None, Some(_)) | (Some(_), None) => true,
+        (None, None) => false,
+    };
+    if needs_sync {
+        *offline_denoiser = model_path
+            .as_deref()
+            .and_then(create_offline_denoiser)
+            .map(|d| (generation, d));
+    }
+    if let Some((_, denoiser)) = offline_denoiser.as_ref() {
+        let out = denoiser.run(samples, sample_rate as i32);
+        let rate = if out.sample_rate > 0 {
+            out.sample_rate
+        } else {
+            OFFLINE_ASR_SAMPLE_RATE
+        };
+        (Cow::Owned(out.samples), rate)
+    } else {
+        (Cow::Borrowed(samples), sample_rate as i32)
+    }
+}
+
 fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
     let mut recognizer: Option<Recognizer> = None;
-    let mut streams: HashMap<u64, OnlineStream> = HashMap::new();
+    let mut streams: HashMap<u64, ActiveAsrStream> = HashMap::new();
+    let mut offline_denoiser: Option<(u64, OfflineSpeechDenoiser)> = None;
     for (id, op, payload) in jobs {
         match op {
             Op::LoadAsr {
@@ -459,52 +804,111 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 }
             }
             Op::Transcribe { sample_rate } => {
-                let samples = to_f32(&bytes_to_pcm(&payload));
+                let raw = to_f32(&bytes_to_pcm(&payload));
+                let (samples, rate) =
+                    denoise_offline_pcm(&mut offline_denoiser, &loaded, &raw, sample_rate);
                 let text = match recognizer.as_ref() {
                     None => {
                         error(&out, id, "识别模型未加载");
                         continue;
                     }
                     Some(Recognizer::Offline(recognizer)) => {
-                        let stream = recognizer.create_stream();
-                        stream.accept_waveform(sample_rate as i32, &samples);
-                        recognizer.decode(&stream);
-                        stream
-                            .get_result()
-                            .map(|result| result.text.trim().to_owned())
-                            .unwrap_or_default()
+                        decode_offline(recognizer, rate, &samples)
                     }
                     Some(Recognizer::Online(recognizer)) => {
                         let stream = recognizer.create_stream();
-                        stream.accept_waveform(sample_rate as i32, &samples);
+                        stream.accept_waveform(rate, &samples);
                         finish_online(recognizer, &stream)
                     }
                 };
                 send(&out, id, Reply::Text { text }, &[]);
             }
-            Op::AsrOpen { stream } => match recognizer.as_ref() {
-                Some(Recognizer::Online(recognizer)) => {
-                    streams.insert(stream, recognizer.create_stream());
-                    send(&out, id, Reply::Done, &[]);
-                }
-                Some(Recognizer::Offline(_)) => error(&out, id, "当前识别模型不支持流式识别"),
-                None => error(&out, id, "识别模型未加载"),
-            },
-            Op::AsrFeed { stream } => match (recognizer.as_ref(), streams.get(&stream)) {
-                (Some(Recognizer::Online(recognizer)), Some(online)) => {
-                    online.accept_waveform(16_000, &to_f32(&bytes_to_pcm(&payload)));
-                    decode_ready(recognizer, online);
+            Op::AsrOpen { stream } => {
+                let kind = match recognizer.as_ref() {
+                    Some(Recognizer::Online(recognizer)) => {
+                        ActiveAsrStreamKind::Online(recognizer.create_stream())
+                    }
+                    Some(Recognizer::Offline(_)) => {
+                        ActiveAsrStreamKind::Offline(OfflineAsrBuffer::default())
+                    }
+                    None => {
+                        error(&out, id, "识别模型未加载");
+                        continue;
+                    }
+                };
+                let (generation, model_path) = current_denoiser_spec(&loaded);
+                let denoiser = model_path
+                    .as_deref()
+                    .and_then(create_online_denoiser)
+                    .map(|d| (generation, d));
+                insert_asr_stream(&mut streams, stream, ActiveAsrStream { kind, denoiser });
+                send(&out, id, Reply::Done, &[]);
+            }
+            Op::AsrFeed { stream } => match (recognizer.as_ref(), streams.get_mut(&stream)) {
+                (
+                    Some(Recognizer::Online(recognizer)),
+                    Some(ActiveAsrStream {
+                        kind: ActiveAsrStreamKind::Online(online),
+                        denoiser,
+                    }),
+                ) => {
+                    let raw = to_f32(&bytes_to_pcm(&payload));
+                    let denoised = denoise_online_chunk(denoiser, &loaded, &raw);
+                    if !denoised.is_empty() {
+                        online.accept_waveform(OFFLINE_ASR_SAMPLE_RATE, &denoised);
+                        decode_ready(recognizer, online);
+                    }
                     let text = recognizer
                         .get_result(online)
                         .map(|result| result.text.trim().to_owned())
                         .unwrap_or_default();
                     send(&out, id, Reply::Text { text }, &[]);
                 }
+                (
+                    Some(Recognizer::Offline(recognizer)),
+                    Some(ActiveAsrStream {
+                        kind: ActiveAsrStreamKind::Offline(buffer),
+                        denoiser,
+                    }),
+                ) => {
+                    let raw = to_f32(&bytes_to_pcm(&payload));
+                    let denoised = denoise_online_chunk(denoiser, &loaded, &raw);
+                    match buffer.feed_with(&denoised, |samples| {
+                        decode_offline(recognizer, OFFLINE_ASR_SAMPLE_RATE, samples)
+                    }) {
+                        Some(text) => send(&out, id, Reply::Text { text }, &[]),
+                        None => send(&out, id, Reply::Done, &[]),
+                    }
+                }
                 _ => error(&out, id, "识别流不存在"),
             },
             Op::AsrFinish { stream } => match (recognizer.as_ref(), streams.remove(&stream)) {
-                (Some(Recognizer::Online(recognizer)), Some(online)) => {
+                (
+                    Some(Recognizer::Online(recognizer)),
+                    Some(ActiveAsrStream {
+                        kind: ActiveAsrStreamKind::Online(online),
+                        mut denoiser,
+                    }),
+                ) => {
+                    let flushed = flush_online_denoiser(&mut denoiser);
+                    if !flushed.is_empty() {
+                        online.accept_waveform(OFFLINE_ASR_SAMPLE_RATE, &flushed);
+                    }
                     let text = finish_online(recognizer, &online);
+                    send(&out, id, Reply::Text { text }, &[]);
+                }
+                (
+                    Some(Recognizer::Offline(recognizer)),
+                    Some(ActiveAsrStream {
+                        kind: ActiveAsrStreamKind::Offline(mut buffer),
+                        mut denoiser,
+                    }),
+                ) => {
+                    let flushed = flush_online_denoiser(&mut denoiser);
+                    buffer.push_tail(&flushed);
+                    let text = buffer.finish_with(|samples| {
+                        decode_offline(recognizer, OFFLINE_ASR_SAMPLE_RATE, samples)
+                    });
                     send(&out, id, Reply::Text { text }, &[]);
                 }
                 _ => error(&out, id, "识别流不存在"),
@@ -519,6 +923,82 @@ fn asr_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
 }
 
 // ---------------------------------------------------------------- 合成
+
+#[derive(Clone)]
+struct ZipVoiceRef {
+    samples: Vec<f32>,
+    sample_rate: i32,
+    prompt_text: String,
+}
+
+struct TtsRuntime {
+    tts: OfflineTts,
+    speakers: i32,
+    kokoro: bool,
+    zipvoice_refs: Option<Vec<ZipVoiceRef>>,
+}
+
+fn load_zipvoice_refs(dir: &Path) -> Result<Vec<ZipVoiceRef>, String> {
+    const SPECS: &[(&str, &str)] = &[
+        (
+            "test_wavs/news-female.wav",
+            "各位村民, 大家新年好! 近期, 湖北省武汉市等多个地区",
+        ),
+        (
+            "test_wavs/news-female-2.wav",
+            "本台消息, 中共中央国务院, 近日印发关于构建数据基础制度, 更好发挥数据要素作用的意见.",
+        ),
+    ];
+    let mut out = Vec::with_capacity(SPECS.len());
+    for &(rel_path, prompt_text) in SPECS {
+        let wav_path = require(&dir.join(rel_path))?;
+        let wave = Wave::read(&wav_path).ok_or_else(|| format!("参考音频读取失败：{rel_path}"))?;
+        let samples = wave.samples().to_vec();
+        let sample_rate = wave.sample_rate();
+        if samples.is_empty() || sample_rate <= 0 {
+            return Err(format!("参考音频内容无效：{rel_path}"));
+        }
+        out.push(ZipVoiceRef {
+            samples,
+            sample_rate,
+            prompt_text: prompt_text.to_owned(),
+        });
+    }
+    Ok(out)
+}
+
+fn build_tts_gen_config(runtime: &TtsRuntime, speaker: i32, speed: f32) -> GenerationConfig {
+    let clamped_speed = speed.clamp(0.25, 4.0);
+    if let Some(refs) = runtime.zipvoice_refs.as_deref() {
+        let idx = (speaker.max(0) as usize).min(refs.len() - 1);
+        let ref_voice = &refs[idx];
+        return GenerationConfig {
+            silence_scale: TTS_SILENCE_SCALE,
+            speed: clamped_speed,
+            sid: 0,
+            reference_audio: Some(ref_voice.samples.clone()),
+            reference_sample_rate: ref_voice.sample_rate,
+            reference_text: Some(ref_voice.prompt_text.clone()),
+            num_steps: 4,
+            extra: Some(HashMap::from([(
+                "min_char_in_sentence".to_owned(),
+                serde_json::json!(10),
+            )])),
+        };
+    }
+    // 单音色模型忽略音色编号
+    let sid = if runtime.speakers > 1 {
+        speaker.clamp(0, runtime.speakers - 1)
+    } else {
+        0
+    };
+    GenerationConfig {
+        sid,
+        speed: clamped_speed,
+        silence_scale: TTS_SILENCE_SCALE,
+        ..Default::default()
+    }
+}
 
 fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String> {
     let model = match engine {
@@ -539,7 +1019,7 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
                     length_scale: 1.0,
                     ..Default::default()
                 },
-                num_threads: 2,
+                num_threads: inference_threads(),
                 debug: false,
                 ..Default::default()
             }
@@ -560,7 +1040,24 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
                     .then(|| native_path_string(&dir.join("dict"))),
                 ..Default::default()
             },
-            num_threads: 2,
+            num_threads: inference_threads(),
+            debug: false,
+            ..Default::default()
+        },
+        TtsEngine::ZipVoice => OfflineTtsModelConfig {
+            zipvoice: OfflineTtsZipvoiceModelConfig {
+                tokens: Some(require(&dir.join("tokens.txt"))?),
+                encoder: Some(first_of(dir, &["encoder.int8.onnx", "encoder.onnx"])?),
+                decoder: Some(first_of(dir, &["decoder.int8.onnx", "decoder.onnx"])?),
+                vocoder: Some(first_of(dir, &["vocos_24khz.onnx", "vocoder.onnx"])?),
+                data_dir: Some(require(&dir.join("espeak-ng-data"))?),
+                lexicon: Some(require(&dir.join("lexicon.txt"))?),
+                feat_scale: 0.1,
+                t_shift: 0.5,
+                target_rms: 0.1,
+                guidance_scale: 1.0,
+            },
+            num_threads: inference_threads(),
             debug: false,
             ..Default::default()
         },
@@ -573,29 +1070,56 @@ fn tts_config(dir: &Path, engine: TtsEngine) -> Result<OfflineTtsConfig, String>
 }
 
 fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
-    let mut tts: Option<(OfflineTts, i32)> = None;
+    let mut runtime: Option<TtsRuntime> = None;
     for (id, op, _) in jobs {
         match op {
             Op::LoadTts { dir, engine } => {
-                let created = tts_config(Path::new(&dir), engine).and_then(|config| {
+                let dir_path = Path::new(&dir);
+                let created = (|| -> Result<TtsRuntime, String> {
+                    let config = tts_config(dir_path, engine)?;
+                    let zipvoice_refs = if matches!(engine, TtsEngine::ZipVoice) {
+                        Some(load_zipvoice_refs(dir_path)?)
+                    } else {
+                        None
+                    };
                     let name = match engine {
                         TtsEngine::Kokoro => "Kokoro",
                         TtsEngine::Matcha => "Matcha",
+                        TtsEngine::ZipVoice => "ZipVoice",
                     };
-                    OfflineTts::create(&config).ok_or_else(|| format!("{name} 模型加载失败"))
-                });
+                    let created = OfflineTts::create(&config)
+                        .ok_or_else(|| format!("{name} 模型加载失败"))?;
+                    let speakers = created.num_speakers().max(0);
+                    Ok(TtsRuntime {
+                        tts: created,
+                        speakers,
+                        kokoro: matches!(engine, TtsEngine::Kokoro),
+                        zipvoice_refs,
+                    })
+                })();
                 match created {
-                    Ok(created) => {
-                        let sample_rate = created.sample_rate().max(0) as u32;
-                        let speakers = created.num_speakers().max(0);
-                        tts = Some((created, speakers));
+                    Ok(rt) => {
+                        let sample_rate = rt.tts.sample_rate().max(0) as u32;
+                        let speakers = rt
+                            .zipvoice_refs
+                            .as_ref()
+                            .map_or(rt.speakers.max(0) as u32, |refs| refs.len() as u32);
+                        // 预热：第一次推理要做图优化与内存分配，明显慢于之后；放在加载阶段做掉，
+                        // 不让它落在用户听到的第一句话上
+                        let warmup_cfg = build_tts_gen_config(&rt, 0, 1.0);
+                        let _ = rt.tts.generate_with_config(
+                            "好的。",
+                            &warmup_cfg,
+                            None::<fn(&[f32], f32) -> bool>,
+                        );
+                        runtime = Some(rt);
                         loaded.tts.store(true, Ordering::SeqCst);
                         send(
                             &out,
                             id,
                             Reply::Loaded {
                                 sample_rate: Some(sample_rate),
-                                speakers: Some(speakers as u32),
+                                speakers: Some(speakers),
                             },
                             &[],
                         );
@@ -608,22 +1132,22 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 speaker,
                 speed,
             } => {
-                let Some((tts, speakers)) = tts.as_ref() else {
+                let Some(rt) = runtime.as_ref() else {
                     error(&out, id, "合成模型未加载");
                     continue;
                 };
-                // 单音色模型忽略音色编号
-                let sid = if *speakers > 1 {
-                    speaker.clamp(0, speakers - 1)
-                } else {
-                    0
-                };
-                let config = GenerationConfig {
-                    sid,
-                    speed: speed.clamp(0.25, 4.0),
-                    ..Default::default()
-                };
-                match tts.generate_with_config(&text, &config, None::<fn(&[f32], f32) -> bool>) {
+                let config = build_tts_gen_config(rt, speaker, speed);
+                if !loaded.synth.begin(id) {
+                    error(&out, id, "合成已取消");
+                    continue;
+                }
+                let generated =
+                    rt.tts
+                        .generate_with_config(&text, &config, Some(loaded.synth.keep_going()));
+                let cancelled = loaded.synth.stopped();
+                loaded.synth.end();
+                match generated {
+                    _ if cancelled => error(&out, id, "合成已取消"),
                     Some(audio) => {
                         let pcm = to_i16(audio.samples());
                         send(
@@ -642,30 +1166,37 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 text,
                 speaker,
                 speed,
+                first_max_chars,
             } => {
-                let Some((tts, speakers)) = tts.as_ref() else {
+                let Some(rt) = runtime.as_ref() else {
                     error(&out, id, "合成模型未加载");
                     continue;
                 };
-                let sid = if *speakers > 1 {
-                    speaker.clamp(0, speakers - 1)
-                } else {
-                    0
-                };
-                let config = GenerationConfig {
-                    sid,
-                    speed: speed.clamp(0.25, 4.0),
-                    ..Default::default()
-                };
+                let config = build_tts_gen_config(rt, speaker, speed);
+                if !loaded.synth.begin(id) {
+                    error(&out, id, "合成已取消");
+                    continue;
+                }
                 let mut failed = false;
-                let segments = moss_voice_local_proto::synthesis_segments(&text);
+                let segments =
+                    moss_voice_local_proto::synthesis_segments_from(&text, first_max_chars);
                 let total = segments.len();
                 for (idx, segment) in segments.into_iter().enumerate() {
-                    match tts.generate_with_config(
+                    let mut config = config.clone();
+                    if rt.kokoro {
+                        config.speed *= long_segment_speed(segment.chars().count());
+                    }
+                    let generated = rt.tts.generate_with_config(
                         &segment,
                         &config,
-                        None::<fn(&[f32], f32) -> bool>,
-                    ) {
+                        Some(loaded.synth.keep_going()),
+                    );
+                    if loaded.synth.stopped() {
+                        error(&out, id, "合成已取消");
+                        failed = true;
+                        break;
+                    }
+                    match generated {
                         Some(audio) => {
                             let sample_rate = audio.sample_rate().max(0) as u32;
                             let mut pcm = to_i16(audio.samples());
@@ -691,11 +1222,136 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                         }
                     }
                 }
+                loaded.synth.end();
                 if !failed {
                     send(&out, id, Reply::Done, &[]);
                 }
             }
             _ => error(&out, id, "合成线程收到不支持的请求"),
+        }
+    }
+}
+
+fn aux_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
+    let mut smart_turn: Option<smart_turn::SmartTurnModel> = None;
+    for (id, op, payload) in jobs {
+        match op {
+            Op::LoadDenoiser { model } => {
+                let trimmed = model.trim();
+                if trimmed.is_empty() {
+                    if let Ok(mut slot) = loaded.denoiser_slot.lock() {
+                        slot.generation = slot.generation.wrapping_add(1);
+                        slot.model_path = None;
+                    }
+                    loaded.denoiser.store(false, Ordering::SeqCst);
+                    send(
+                        &out,
+                        id,
+                        Reply::Loaded {
+                            sample_rate: None,
+                            speakers: None,
+                        },
+                        &[],
+                    );
+                    continue;
+                }
+                let candidate = Path::new(trimmed);
+                let resolved = if candidate.is_dir() {
+                    require(&candidate.join("gtcrn_simple.onnx"))
+                } else {
+                    require(candidate)
+                };
+                match resolved.and_then(|clean_path| {
+                    let online = create_online_denoiser(&clean_path)
+                        .ok_or_else(|| "GTCRN 在线降噪模型加载失败".to_owned())?;
+                    if online.sample_rate() != 16_000 {
+                        return Err(format!(
+                            "降噪模型采样率不受支持：{} Hz",
+                            online.sample_rate()
+                        ));
+                    }
+                    let _offline = create_offline_denoiser(&clean_path)
+                        .ok_or_else(|| "GTCRN 离线降噪模型加载失败".to_owned())?;
+                    Ok(clean_path)
+                }) {
+                    Ok(clean_path) => {
+                        if let Ok(mut slot) = loaded.denoiser_slot.lock() {
+                            slot.generation = slot.generation.wrapping_add(1);
+                            slot.model_path = Some(clean_path);
+                        }
+                        loaded.denoiser.store(true, Ordering::SeqCst);
+                        send(
+                            &out,
+                            id,
+                            Reply::Loaded {
+                                sample_rate: Some(16_000),
+                                speakers: None,
+                            },
+                            &[],
+                        );
+                    }
+                    Err(message) => error(&out, id, message),
+                }
+            }
+            Op::LoadSmartTurn { model } => {
+                let trimmed = model.trim();
+                if trimmed.is_empty() {
+                    smart_turn = None;
+                    loaded.smart_turn.store(false, Ordering::SeqCst);
+                    send(
+                        &out,
+                        id,
+                        Reply::Loaded {
+                            sample_rate: None,
+                            speakers: None,
+                        },
+                        &[],
+                    );
+                    continue;
+                }
+                match smart_turn::SmartTurnModel::load(Path::new(trimmed)) {
+                    Ok(model) => {
+                        smart_turn = Some(model);
+                        loaded.smart_turn.store(true, Ordering::SeqCst);
+                        send(
+                            &out,
+                            id,
+                            Reply::Loaded {
+                                sample_rate: Some(16_000),
+                                speakers: None,
+                            },
+                            &[],
+                        );
+                    }
+                    Err(message) => error(&out, id, message),
+                }
+            }
+            Op::SmartTurnPredict { sample_rate } => {
+                let Some(model) = smart_turn.as_ref() else {
+                    error(&out, id, "尾音判停模型未加载");
+                    continue;
+                };
+                if !payload.len().is_multiple_of(2) {
+                    error(&out, id, "尾音判停音频字节长度无效");
+                    continue;
+                }
+                let pcm = bytes_to_pcm(&payload);
+                match model.predict(&pcm, sample_rate) {
+                    Ok((probability, complete)) => {
+                        send(
+                            &out,
+                            id,
+                            Reply::SmartTurn {
+                                probability,
+                                complete,
+                            },
+                            &[],
+                        );
+                    }
+                    Err(message) => error(&out, id, message),
+                }
+            }
+            _ => error(&out, id, "辅助线程收到不支持的请求"),
         }
     }
 }
@@ -873,6 +1529,7 @@ fn main() {
     let vad = spawn_worker("vad", vad_worker, &out, &loaded);
     let asr = spawn_worker("asr", asr_worker, &out, &loaded);
     let tts = spawn_worker("tts", tts_worker, &out, &loaded);
+    let aux = spawn_worker("aux", aux_worker, &out, &loaded);
     let (speaker, speaker_jobs) = std::sync::mpsc::sync_channel::<Job>(2);
     let speaker_out = out.clone();
     thread::Builder::new()
@@ -896,6 +1553,11 @@ fn main() {
             continue;
         }
         let target = match &op {
+            Op::Cancel { target } => {
+                // 不进合成队列（队列里排在作废请求后面就没有意义了），也不回复
+                loaded.synth.cancel(*target);
+                continue;
+            }
             Op::Hello => {
                 let reply = Reply::Hello {
                     protocol: PROTOCOL_VERSION,
@@ -903,6 +1565,8 @@ fn main() {
                     vad: loaded.vad.load(Ordering::SeqCst),
                     asr: loaded.asr.load(Ordering::SeqCst),
                     tts: loaded.tts.load(Ordering::SeqCst),
+                    denoiser: loaded.denoiser.load(Ordering::SeqCst),
+                    smart_turn: loaded.smart_turn.load(Ordering::SeqCst),
                 };
                 send(&out, id, reply, &[]);
                 continue;
@@ -917,6 +1581,9 @@ fn main() {
             | Op::AsrFinish { .. }
             | Op::AsrClose { .. } => &asr,
             Op::LoadTts { .. } | Op::Synthesize { .. } | Op::SynthesizeStream { .. } => &tts,
+            Op::LoadDenoiser { .. } | Op::LoadSmartTurn { .. } | Op::SmartTurnPredict { .. } => {
+                &aux
+            }
             Op::LoadSpeaker { .. } | Op::SpeakerEmbed { .. } => {
                 unreachable!("speaker routed independently")
             }
@@ -1005,6 +1672,45 @@ mod tests {
     }
 
     #[test]
+    fn synth_cancel_skips_queued_requests_and_stops_the_running_one() {
+        let cancel = SynthCancel::default();
+        // 还在排队就被取消：取到时直接跳过，登记随即清除
+        cancel.cancel(7);
+        assert!(!cancel.begin(7));
+        assert!(cancel.begin(7), "登记只作用一次");
+        cancel.end();
+        // 正在合成时被取消：回调返回 false 让 sherpa 停下
+        assert!(cancel.begin(8));
+        let mut keep_going = cancel.keep_going();
+        assert!(keep_going(&[], 0.5));
+        cancel.cancel(8);
+        assert!(!keep_going(&[], 0.6));
+        assert!(cancel.stopped());
+        cancel.end();
+        // 下一个请求不受上一个的取消影响
+        assert!(cancel.begin(9));
+        assert!(!cancel.stopped());
+        // 取消别的编号不影响正在合成的这个
+        cancel.cancel(10);
+        assert!(!cancel.stopped());
+        cancel.end();
+        assert!(!cancel.begin(10));
+    }
+
+    #[test]
+    fn long_segments_are_slowed_down_gradually() {
+        assert_eq!(long_segment_speed(10), 1.0);
+        assert_eq!(long_segment_speed(28), 1.0);
+        assert!((long_segment_speed(45) - 0.898).abs() < 0.001);
+        assert_eq!(long_segment_speed(200), 0.82);
+    }
+
+    #[test]
+    fn inference_threads_stay_in_a_sane_range() {
+        assert!((1..=16).contains(&inference_threads()));
+    }
+
+    #[test]
     fn worker_queue_is_bounded_and_rejects_overflow_without_blocking() {
         let out: Out = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
         let loaded = Arc::new(Loaded::default());
@@ -1068,5 +1774,184 @@ mod tests {
         smooth_stream_subsegment(&mut seg2, rate, false, true);
         assert_eq!(seg2[0], 0, "非首段开头平滑淡入消除直流跳变");
         assert_eq!(*seg2.last().unwrap(), -5000, "末段结尾交由上层统一收尾");
+    }
+
+    #[test]
+    fn offline_asr_buffer_redecodes_every_half_second_caps_window_and_reuses_clean_finish() {
+        let mut decodes: Vec<usize> = Vec::new();
+        let mut buf = OfflineAsrBuffer::default();
+
+        // 不足 320ms（5120 采样）时不触发试认
+        for _ in 0..5 {
+            let out = buf.feed_with(&vec![0.1; 960], |s| {
+                decodes.push(s.len());
+                format!("len={}", s.len())
+            });
+            assert_eq!(out, None);
+        }
+        assert!(decodes.is_empty());
+
+        // 满 320ms 首次触发试认（兼顾短急停词“停”/“急停”）
+        let first = buf.feed_with(&vec![0.1; 960], |s| {
+            decodes.push(s.len());
+            format!("len={}", s.len())
+        });
+        assert_eq!(first.as_deref(), Some("len=5760"));
+        assert_eq!(decodes, vec![5760]);
+
+        // 未再攒够 500ms（8000 采样）前返回 None，不重复消耗 CPU
+        for _ in 0..8 {
+            let out = buf.feed_with(&vec![0.1; 960], |s| {
+                decodes.push(s.len());
+                format!("len={}", s.len())
+            });
+            assert_eq!(out, None);
+        }
+        assert_eq!(decodes.len(), 1);
+
+        // 累计新增满 8000 采样（9 * 960 = 8640 >= 8000）触发第二次重认
+        let second = buf.feed_with(&vec![0.1; 960], |s| {
+            decodes.push(s.len());
+            format!("len={}", s.len())
+        });
+        assert_eq!(second.as_deref(), Some("len=14400"));
+        assert_eq!(decodes, vec![5760, 14400]);
+
+        // 刚重认完且无新增采样时，finish 直接复用上次文字，0 次额外重认
+        let exact_final = buf.finish_with(|s| {
+            decodes.push(s.len());
+            format!("final={}", s.len())
+        });
+        assert_eq!(exact_final, "len=14400");
+        assert_eq!(decodes, vec![5760, 14400]);
+
+        // 有新增尾音（不足 500ms）时，finish 补跑一次完整收尾识别，绝不漏字
+        let mut tail_buf = OfflineAsrBuffer::default();
+        let _ = tail_buf.feed_with(&vec![0.2; OFFLINE_INTERIM_FIRST_SAMPLES], |_| {
+            "前半句".into()
+        });
+        assert_eq!(
+            tail_buf.feed_with(&vec![0.2; 1600], |_| "不应提前触发".into()),
+            None
+        );
+        let mut final_called = 0usize;
+        let full_text = tail_buf.finish_with(|s| {
+            final_called = s.len();
+            "前半句尾音".into()
+        });
+        assert_eq!(full_text, "前半句尾音");
+        assert_eq!(final_called, OFFLINE_INTERIM_FIRST_SAMPLES + 1600);
+
+        // 超过 30 秒滑窗上限时自动裁旧保新，且满窗后每半秒仍正常继续重认
+        let mut long_buf = OfflineAsrBuffer::default();
+        let _ = long_buf.feed_with(&vec![0.3; OFFLINE_STREAM_MAX_SAMPLES + 3200], |s| {
+            assert_eq!(s.len(), OFFLINE_STREAM_MAX_SAMPLES);
+            "满窗首认".into()
+        });
+        assert_eq!(
+            long_buf.feed_with(&vec![0.4; 4000], |_| "未满半秒".into()),
+            None
+        );
+        let after_cap = long_buf.feed_with(&vec![0.5; 4000], |s| {
+            assert_eq!(s.len(), OFFLINE_STREAM_MAX_SAMPLES);
+            assert!((s.last().copied().unwrap_or_default() - 0.5).abs() < 1e-6);
+            "满窗续认".into()
+        });
+        assert_eq!(after_cap.as_deref(), Some("满窗续认"));
+
+        // 自动拾音 1s 静音 preroll + 60ms 起音首轮认出空串时，不消耗 320ms 首认步长；
+        // 且若刚认出空串即无新增采样收尾，finish 同样零额外重认复用空串
+        let mut preroll_buf = OfflineAsrBuffer::default();
+        assert_eq!(
+            preroll_buf.feed_with(&vec![0.0; 16_000], |_| String::new()),
+            Some(String::new())
+        );
+        assert_eq!(
+            preroll_buf.feed_with(&vec![0.2; 3_840], |_| "不足320ms".into()),
+            None
+        );
+        assert_eq!(
+            preroll_buf.feed_with(&vec![0.2; 1_920], |_| "急停".into()),
+            Some("急停".into()),
+            "前导静音空串不应退化为 8000 步长，新增满 5120 采样（360ms）应立即触发重认"
+        );
+        assert_eq!(
+            preroll_buf.feed_with(&vec![0.2; 5_760], |_| "已非空后须满8000".into()),
+            None
+        );
+
+        let mut silent_clean = OfflineAsrBuffer::default();
+        assert_eq!(
+            silent_clean.feed_with(&vec![0.0; OFFLINE_INTERIM_FIRST_SAMPLES], |_| String::new()),
+            Some(String::new())
+        );
+        assert_eq!(
+            silent_clean.finish_with(|_| panic!("clean empty decode must not re-run on finish")),
+            ""
+        );
+
+        // 空缓冲直接返回空串
+        assert_eq!(
+            OfflineAsrBuffer::default().finish_with(|_| panic!("empty buffer must not decode")),
+            ""
+        );
+
+        // 降噪 flush 尾音注入后不得复用旧的 clean_decode
+        let mut flushed_buf = OfflineAsrBuffer::default();
+        assert_eq!(
+            flushed_buf.feed_with(&vec![0.1; OFFLINE_INTERIM_FIRST_SAMPLES], |_| {
+                "之前".into()
+            }),
+            Some("之前".into())
+        );
+        flushed_buf.push_tail(&[0.2; 128]);
+        let after_tail = flushed_buf.finish_with(|s| format!("len={}", s.len()));
+        assert_eq!(
+            after_tail,
+            format!("len={}", OFFLINE_INTERIM_FIRST_SAMPLES + 128)
+        );
+    }
+
+    #[test]
+    fn zipvoice_tts_config_requires_vocoder_and_populates_paths() {
+        let unique = format!(
+            "moss-voice-local-zipvoice-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(dir.join("espeak-ng-data")).unwrap();
+        for file in [
+            "tokens.txt",
+            "lexicon.txt",
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+        ] {
+            std::fs::write(dir.join(file), b"stub").unwrap();
+        }
+        // 缺 vocos_24khz.onnx 时报错
+        assert!(tts_config(&dir, TtsEngine::ZipVoice).is_err());
+
+        std::fs::write(dir.join("vocos_24khz.onnx"), b"stub").unwrap();
+        let cfg = tts_config(&dir, TtsEngine::ZipVoice).unwrap();
+        let zv = &cfg.model.zipvoice;
+        assert!(
+            zv.tokens
+                .as_deref()
+                .is_some_and(|p| p.ends_with("tokens.txt"))
+        );
+        assert!(
+            zv.vocoder
+                .as_deref()
+                .is_some_and(|p| p.ends_with("vocos_24khz.onnx"))
+        );
+        assert!((zv.feat_scale - 0.1).abs() < 1e-6);
+        assert!((zv.t_shift - 0.5).abs() < 1e-6);
+        assert!((zv.guidance_scale - 1.0).abs() < 1e-6);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

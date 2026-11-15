@@ -90,7 +90,7 @@ impl LocalVisionServer {
         }
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let deadline = Instant::now()
-            + if model_id == "qwen3_vl_4b" {
+            + if matches!(model_id, "qwen3_vl_4b" | "qwen3_5_4b") {
                 Duration::from_secs(90)
             } else {
                 Duration::from_secs(60)

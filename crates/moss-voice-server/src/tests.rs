@@ -666,7 +666,7 @@ fn manual_mode_echo_is_decoded_resampled_and_paced() {
     assert!(
         events
             .iter()
-            .any(|event| event.text.contains("播放完成：20 帧，补静音 0 帧")),
+            .any(|event| event.text.contains("播放完成：20 帧，供流中断 0 次")),
         "{events:?}"
     );
 }
@@ -675,7 +675,7 @@ fn manual_mode_echo_is_decoded_resampled_and_paced() {
 fn auto_mode_vad_ends_utterance_on_silence_with_v2_frames() {
     let (server, registry) = start();
     let mut device = allowed_device(&server, &registry, 2);
-    // 自动模式：设备不发 stop，持续上传；说话后静音 200 ms 判停并回放
+    // 自动模式：设备不发 stop，持续上传；说话后静音 250 ms 判停并回放
     send_json(
         &mut device,
         r#"{"type":"listen","state":"start","mode":"auto"}"#,
@@ -685,9 +685,9 @@ fn auto_mode_vad_ends_utterance_on_silence_with_v2_frames() {
     pcm.extend(silence(UP, 900));
     send_audio(&mut device, 2, &uplink(&pcm));
     let (texts, frames, _) = collect_playback(&mut device, 2);
-    // 语音前保留 1000 ms（前面的 1500 ms 静音只留最后 1000 ms）+ 900 ms 语音 + 约 200–300 ms 判停静音
+    // 语音前保留 1000 ms（前面的 1500 ms 静音只留最后 1000 ms）+ 900 ms 语音 + 约 250–350 ms 判停静音
     let seconds = stt_seconds(&texts);
-    assert!((1.95..=2.35).contains(&seconds), "{:?}", texts[0]);
+    assert!((2.0..=2.4).contains(&seconds), "{:?}", texts[0]);
     let played = downlink(&frames);
     assert!(rms(&played) > 2000.0, "回放有声音");
     assert!(
@@ -856,19 +856,28 @@ fn firmware_offer_is_sent_only_to_allowed_device_and_download_uses_token() {
         fetched: std::sync::Mutex<Vec<String>>,
     }
     impl crate::firmware::FirmwareHost for FakeFirmware {
-        fn offer(&self, device: &str, current: &str) -> Option<(String, String)> {
-            (device == DEVICE && crate::firmware::is_newer("1.9.3", current))
-                .then(|| ("1.9.3".into(), "a".repeat(32)))
+        fn offer(
+            &self,
+            device: &str,
+            current: &crate::firmware::DeviceFirmware<'_>,
+        ) -> Option<crate::firmware::FirmwarePush> {
+            (device == DEVICE && crate::firmware::is_newer("1.9.3", current.version)).then(|| {
+                crate::firmware::FirmwarePush {
+                    version: "1.9.3".into(),
+                    token: "a".repeat(32),
+                    force: false,
+                }
+            })
         }
         fn fetch(&self, token: &str, peer: &str) -> Option<Vec<u8>> {
             self.fetched.lock().unwrap().push(peer.into());
             (token == "a".repeat(32)).then(|| vec![0xE9; 2048])
         }
-        fn reported(&self, device: &str, version: &str) {
+        fn reported(&self, device: &str, current: &crate::firmware::DeviceFirmware<'_>) {
             self.reported
                 .lock()
                 .unwrap()
-                .push((device.into(), version.into()));
+                .push((device.into(), current.version.into()));
         }
     }
     let host = Arc::new(FakeFirmware {

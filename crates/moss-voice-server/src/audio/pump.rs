@@ -2,7 +2,8 @@
 //!
 //! 思路取海门 `crates/haimen-xiaozhi/src/ws.rs` 与 `src/xiaozhi_asr_llm_tts.rs` 的连续性泵（`513d9e6`，MIT），按 MOSS 结构重写并消除句尾残帧冻结跳变：
 //! - 启动前先攒够 `start_ms` 的音频（或上游已结束），避免合成刚开始时供不上；
-//! - 句尾结束（`mark_sentence_end`）而下一句尚未合成就绪时，先把队列里的句尾残帧平滑补零播完再发静音保活，不把残帧冻在队列里吞尾字；句中流式分块或音乐解码短暂欠载时则保留未满一帧的半个音节，避免字中插零切碎音节；
+//! - 句尾结束（`mark_sentence_end`）而下一句尚未合成就绪时，先把队列里的句尾残帧平滑补零播完，不把残帧冻在队列里吞尾字；句中流式分块或音乐解码短暂欠载时则保留未满一帧的半个音节，避免字中插零切碎音节；
+//! - 播放中上游供不上时不发帧（[`PumpTick::Waiting`]），与官方服务端一致由设备端缓冲吸收短暂缺口，不插静音帧把抖动钉成听得见的停顿；
 //! - 编码前施加软限幅余量，避免满幅音频经 Opus 有损重构后在设备 100% 音量下削波破音；
 //! - 只用一个编码器，句与句之间不重建；
 //! - 打断时 [`clear`](PlaybackPump::clear) 立即丢弃未播内容；
@@ -19,7 +20,7 @@ use super::codec::OpusEncoder;
 pub enum PumpTick {
     /// 发送这一帧；`marks` 为从这一帧开始播放的句子文字（先发文字再发这一帧）
     Frame { data: Vec<u8>, marks: Vec<String> },
-    /// 还在攒启动缓冲，这一拍不发
+    /// 还在攒启动缓冲，或播放中上游暂时供不上：这一拍不发
     Waiting,
     /// 上游已结束且全部发完
     Done,
@@ -29,7 +30,7 @@ pub enum PumpTick {
 pub struct PumpStats {
     /// 已发送的有内容的帧
     pub frames: u64,
-    /// 播放中因上游供不上而补的静音帧
+    /// 播放中上游供不上的次数（每次中断只记一次，期间不发帧）
     pub underruns: u64,
 }
 
@@ -46,6 +47,7 @@ pub struct PlaybackPump {
     finished: bool,
     sentence_ended: bool,
     fade_in_on_resume: bool,
+    starved: bool,
     stats: PumpStats,
     last_level: u8,
 }
@@ -64,6 +66,7 @@ impl PlaybackPump {
             finished: false,
             sentence_ended: false,
             fade_in_on_resume: false,
+            starved: false,
             stats: PumpStats::default(),
             last_level: 0,
         }
@@ -79,6 +82,7 @@ impl PlaybackPump {
         self.finished = false;
         self.sentence_ended = false;
         self.fade_in_on_resume = false;
+        self.starved = false;
         self.stats = PumpStats::default();
         self.last_level = 0;
     }
@@ -102,15 +106,39 @@ impl PlaybackPump {
         }
     }
 
+    /// 推入一句话，字幕分成几段：每段文字在这句音频的 `offset`（样本，按语速估算，须不减）处随帧返回。
+    /// 估算超出实际音频长度的段在句子收尾时收回到句末，不会拖到下一句里才显示。
+    pub fn push_segmented(&mut self, pcm: &[i16], marks: Vec<(u64, String)>) {
+        if !self.finished {
+            self.sentence_ended = false;
+            let base = self.pushed;
+            self.marks.extend(
+                marks
+                    .into_iter()
+                    .map(|(offset, mark)| (base + offset, mark)),
+            );
+            self.push(pcm);
+        }
+    }
+
+    fn clamp_marks(&mut self) {
+        let pushed = self.pushed;
+        for (at, _) in self.marks.iter_mut() {
+            *at = (*at).min(pushed);
+        }
+    }
+
     /// 标记当前这句话的音频已全部推入（句尾残帧若遇句间欠载可立即冲刷播完，而句中流式分块半帧不冲刷）。
     pub fn mark_sentence_end(&mut self) {
         if !self.finished {
             self.sentence_ended = true;
+            self.clamp_marks();
         }
     }
 
     /// 上游不会再有数据。
     pub fn finish(&mut self) {
+        self.clamp_marks();
         self.finished = true;
     }
 
@@ -122,8 +150,14 @@ impl PlaybackPump {
         self.finished = true;
         self.sentence_ended = false;
         self.fade_in_on_resume = false;
+        self.starved = false;
         self.encoder.reset();
         self.last_level = 0;
+    }
+
+    /// 暂停（听到插话，等识别结果决定打断还是接着说）：未播内容原样保留，恢复时做微淡入。
+    pub fn pause(&mut self) {
+        self.fade_in_on_resume = true;
     }
 
     /// 尚未正式起播时，当前缓冲是否已满足启动阈值（供会话层在分块或首句收尾到达瞬间立即唤醒首帧，零等待）。
@@ -133,13 +167,6 @@ impl PlaybackPump {
             && (self.pending.len() >= self.start_samples.max(self.encoder.frame())
                 || self.finished
                 || (!self.pending.is_empty() && self.sentence_ended))
-    }
-
-    /// 起播突发（burst）阶段是否还有完整数据帧或已收尾的句尾残帧可立即连发（避免配置极小缓冲时在 t=0 硬造欠载静音）。
-    pub fn has_frame_for_burst(&self) -> bool {
-        self.pending.len() >= self.encoder.frame()
-            || (!self.pending.is_empty() && (self.finished || self.sentence_ended))
-            || (self.finished && !self.marks.is_empty())
     }
 
     /// 最近一次送出的 60 ms 音频帧归一化音量（0..=100）；静音或结束时为 0。
@@ -176,6 +203,7 @@ impl PlaybackPump {
         {
             let take = frame.min(self.pending.len());
             let mut block: Vec<i16> = self.pending.drain(..take).collect();
+            self.starved = false;
             if self.pending.is_empty() {
                 self.sentence_ended = false;
             }
@@ -217,14 +245,14 @@ impl PlaybackPump {
             self.last_level = 0;
             return Ok(PumpTick::Done);
         }
-        // 播放中上游暂时供不上（句间已排空，或句中流式分块尚差半帧）：发纯静音帧保活，恢复供流时做微淡入平滑衔接
-        self.stats.underruns += 1;
+        // 播放中上游暂时供不上（句间已排空，或句中流式分块尚差半帧）：这一拍不发，恢复供流时做微淡入平滑衔接
+        if !self.starved {
+            self.starved = true;
+            self.stats.underruns += 1;
+        }
         self.last_level = 0;
         self.fade_in_on_resume = true;
-        self.encoder.encode(&[]).map(|data| PumpTick::Frame {
-            data,
-            marks: Vec::new(),
-        })
+        Ok(PumpTick::Waiting)
     }
 }
 
@@ -281,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn waits_for_start_buffer_then_flushes_tail_and_fills_underruns_with_silence() {
+    fn waits_for_start_buffer_then_flushes_tail_and_sends_nothing_while_starved() {
         let mut pump = pump(300);
         pump.begin();
         pump.push(&tone(RATE, 440.0, 120, 8000.0));
@@ -298,8 +326,13 @@ mod tests {
             assert!(matches!(pump.next_frame().unwrap(), PumpTick::Frame { .. }));
         }
         assert_eq!(pump.buffered_samples(), 480);
-        assert!(matches!(pump.next_frame().unwrap(), PumpTick::Frame { .. }));
-        assert_eq!(pump.stats().underruns, 1, "句中欠载计入补静音并保留半帧");
+        assert_eq!(pump.next_frame().unwrap(), PumpTick::Waiting);
+        assert_eq!(pump.next_frame().unwrap(), PumpTick::Waiting);
+        assert_eq!(
+            pump.stats().underruns,
+            1,
+            "句中欠载不发帧、保留半帧，一次中断只记一次"
+        );
         assert_eq!(pump.buffered_samples(), 480);
         // 标记当前句结束后，20 ms 句尾残帧立即平滑微淡出补零播完，不冻在队列里吞尾字
         pump.mark_sentence_end();
@@ -310,10 +343,11 @@ mod tests {
             "句尾残帧已平滑排空，不粘连到下一句开头"
         );
         assert_eq!(pump.stats().underruns, 1);
-        // 队列已空但下一句仍未到：补纯静音保活帧
-        assert!(
-            matches!(pump.next_frame().unwrap(), PumpTick::Frame { .. }),
-            "供不上时补静音而不是停"
+        // 队列已空但下一句仍未到：不发帧，由设备端缓冲吸收
+        assert_eq!(
+            pump.next_frame().unwrap(),
+            PumpTick::Waiting,
+            "供不上时不插静音帧"
         );
         assert_eq!(pump.stats().underruns, 2);
         pump.push(&tone(RATE, 440.0, 60, 8000.0));
@@ -363,6 +397,41 @@ mod tests {
             PumpTick::Frame { marks, .. } => assert!(marks.is_empty(), "打断后旧句子的标记被清掉"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn segmented_marks_follow_the_audio_and_never_leak_into_the_next_sentence() {
+        let mut pump = pump(0);
+        pump.begin();
+        // 一句 180 ms（3 帧），字幕三段：第 0、60 ms 处各一段，第三段估算在 600 ms（超出实际音频）
+        pump.push_segmented(
+            &tone(RATE, 440.0, 180, 8000.0),
+            vec![
+                (0, "甲".into()),
+                (FRAME as u64, "乙".into()),
+                (10 * FRAME as u64, "丙".into()),
+            ],
+        );
+        pump.mark_sentence_end();
+        pump.push_marked(&tone(RATE, 440.0, 60, 8000.0), "下一句".into());
+        pump.finish();
+        let mut seen = Vec::new();
+        loop {
+            match pump.next_frame().unwrap() {
+                PumpTick::Frame { marks, .. } => seen.push(marks),
+                PumpTick::Done => break,
+                PumpTick::Waiting => unreachable!(),
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                vec!["甲".to_owned()],
+                vec!["乙".to_owned()],
+                vec![],
+                vec!["丙".to_owned(), "下一句".to_owned()],
+            ]
+        );
     }
 
     #[test]

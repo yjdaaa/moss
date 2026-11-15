@@ -60,12 +60,35 @@ fn normalize_spoken_terms(input: &str) -> String {
     if !input.chars().any(is_cjk) {
         return input.to_owned();
     }
-    let chars: Vec<char> = input.chars().collect();
+    let chars: Vec<char> = speakable_numbers(&input.chars().collect::<Vec<_>>());
     let len = chars.len();
     let mut out = String::with_capacity(input.len() + 16);
     let mut i = 0;
     while i < len {
         let c = chars[i];
+        // 百分号：80% / 40到60% -> 百分之80 / 百分之40到60（合成模型遇到 % 会按英文念或直接跳过）
+        if matches!(c, '%' | '％') {
+            let run: Vec<char> = out
+                .chars()
+                .rev()
+                .take_while(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '到'))
+                .collect();
+            // 这串“数字 / 小数点 / 到”必须以数字开头（“调到80%”里的“到”不属于它）
+            let digits = run
+                .iter()
+                .rposition(char::is_ascii_digit)
+                .map_or(0, |last| last + 1);
+            if digits > 0 {
+                let at = out
+                    .char_indices()
+                    .rev()
+                    .nth(digits - 1)
+                    .map_or(0, |(index, _)| index);
+                out.insert_str(at, "百分之");
+                i += 1;
+                continue;
+            }
+        }
         // 数字范围：40~60% / 3～5 -> 40到60% / 3到5
         if matches!(c, '~' | '～') {
             let prev_ok = i > 0 && (chars[i - 1].is_ascii_digit() || chars[i - 1] == '%');
@@ -151,12 +174,113 @@ fn normalize_spoken_terms(input: &str) -> String {
     out
 }
 
+/// 数字里只为了给人看的符号换成念得出来的写法：
+/// - 千分位 `1,200` → `1200`（合成模型会把逗号当成停顿，念成“一，二百”）；
+/// - 时间 `14:30` → `14点30`、`9:00` → `9点`（冒号同样会被当成停顿）。
+///   只认“1–2 位数字 : 2 位数字”且是合法时刻的写法，`16:9`、`1:2` 这类比例不动。
+fn speakable_numbers(chars: &[char]) -> Vec<char> {
+    let digit = |index: usize| chars.get(index).is_some_and(char::is_ascii_digit);
+    let mut out = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == ','
+            && i > 0
+            && digit(i - 1)
+            && digit(i + 1)
+            && digit(i + 2)
+            && digit(i + 3)
+            && !digit(i + 4)
+        {
+            i += 1;
+            continue;
+        }
+        if matches!(c, ':' | '：')
+            && i > 0
+            && digit(i - 1)
+            && digit(i + 1)
+            && digit(i + 2)
+            && !digit(i + 3)
+        {
+            let hour_start = if i >= 2 && digit(i - 2) { i - 2 } else { i - 1 };
+            let standalone = hour_start == 0 || !digit(hour_start - 1);
+            let hour: u32 = chars[hour_start..i]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .unwrap_or(99);
+            let minute: u32 = chars[i + 1..i + 3]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .unwrap_or(99);
+            if standalone && hour <= 24 && minute < 60 {
+                out.push('点');
+                if minute == 0 {
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn is_end(c: char) -> bool {
     matches!(c, '。' | '！' | '？' | '!' | '?' | '\n')
 }
 
 fn is_emoji(c: char) -> bool {
     matches!(c as u32, 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0F | 0x200D | 0x2B50 | 0x2B55)
+}
+
+/// 把一句话切成设备字幕一行放得下的几段（拼回去与原文逐字相同）。
+///
+/// 官方固件底部字幕默认是单行跑马灯：超过一行的句子要等 1 秒才开始以约 3 字/秒滚动，下一句一到又从头来，
+/// 句子后半截根本露不出来。`max_units` 为一行的宽度（半角字符记 1，其余记 2）；优先在标点或空格处断开
+/// （断点不早于行宽的四成），标点不落在段首。
+pub fn subtitle_segments(text: &str, max_units: usize) -> Vec<String> {
+    let unit = |c: char| if c.is_ascii() { 1 } else { 2 };
+    let total: usize = text.chars().map(unit).sum();
+    if total <= max_units || max_units < 4 {
+        return vec![text.to_owned()];
+    }
+    let limit = max_units;
+    let hangs =
+        |c: char| is_pause(c) || matches!(c, '、' | '”' | '’' | '）' | ')' | '》' | '」' | ' ');
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut width = 0;
+    // 当前段里最近一个可断点：（字节长度, 到此为止的宽度）
+    let mut last_break: Option<(usize, usize)> = None;
+    for c in text.chars() {
+        if width + unit(c) > limit && !current.is_empty() && !hangs(c) {
+            match last_break.take() {
+                Some((at, upto)) if upto * 5 >= width * 2 => {
+                    let rest = current.split_off(at);
+                    out.push(std::mem::replace(&mut current, rest));
+                    width -= upto;
+                }
+                _ => {
+                    out.push(std::mem::take(&mut current));
+                    width = 0;
+                }
+            }
+        }
+        current.push(c);
+        width += unit(c);
+        if hangs(c) {
+            last_break = Some((current.len(), width));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 /// 首个表情对应的设备表情名（固件支持的名称）。
@@ -407,6 +531,46 @@ impl Segmenter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subtitle_segments_fit_one_line_and_rejoin_to_the_original() {
+        assert_eq!(
+            subtitle_segments("好的，马上开始。", 28),
+            vec!["好的，马上开始。"]
+        );
+        let text = "椴木三毫米建议用百分之八十功率，速度每分钟六百毫米，分两遍切透，记得打开吹气。";
+        let segments = subtitle_segments(text, 28);
+        assert_eq!(segments.len(), 3, "{segments:?}");
+        assert_eq!(segments.concat(), text);
+        for segment in &segments {
+            let width: usize = segment
+                .chars()
+                .map(|c| if c.is_ascii() { 1 } else { 2 })
+                .sum();
+            // 悬挂标点允许多出一个字
+            assert!(width <= 30, "{segment}");
+            assert!(!segment.starts_with(['，', '。', '、']), "{segment}");
+        }
+        // 优先在标点处断开
+        assert_eq!(
+            subtitle_segments("先把材料放平，再关上防护盖，然后按开始键。", 28),
+            vec!["先把材料放平，再关上防护盖，", "然后按开始键。"]
+        );
+        // 没有标点时按宽度硬切
+        let plain = "一二三四五六七八九十一二三四五六七八九十";
+        let segments = subtitle_segments(plain, 28);
+        assert_eq!(segments.concat(), plain);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|s| s.chars().count())
+                .collect::<Vec<_>>(),
+            vec![14, 6]
+        );
+        // 英文在空格处断开
+        let english = "Laser power is set to eighty percent now";
+        assert_eq!(subtitle_segments(english, 28).concat(), english);
+    }
+
     use super::*;
 
     fn run(deltas: &[&str]) -> Vec<String> {
@@ -555,11 +719,17 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                "提示：请确认材料、厚度与功率在 40到60% 之间，",
-                "速度 1,200毫米每分钟，木牌尺寸 100乘80毫米，",
-                "厚度 3毫米，当前时间 14:30。"
+                "提示：请确认材料、厚度与功率在 百分之40到60 之间，",
+                "速度 1200毫米每分钟，木牌尺寸 100乘80毫米，",
+                "厚度 3毫米，当前时间 14点30。"
             ]
         );
+        // 百分号、千分位、时间写成念得出来的样子；比例与非时刻的冒号不动
+        assert_eq!(
+            clean_for_speech("功率调到80%，大概9:00开始，画面比例16:9，一共12,000步。"),
+            "功率调到百分之80，大概9点开始，画面比例16:9，一共12000步。"
+        );
+        assert_eq!(clean_for_speech("进度 99.5% 了"), "进度 百分之99.5 了");
         // 2. Markdown 链接与斜体星号被清洗，保留可读正文
         assert_eq!(
             clean_for_speech("查看 [材料库说明](https://example.com/docs) 中的 *3cm* 焦距。"),

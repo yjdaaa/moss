@@ -7,7 +7,7 @@
 //! 只读存储、不碰设备、不发起任何动作。只在“上一次看见它还在发送、这一次已经是终态”时播报，
 //! 所以刚连上就会看到的历史终态任务不会被念出来；第一次轮询只记基线。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use crate::conversation::{ToolContext, ToolExecutor};
@@ -114,11 +114,64 @@ impl PendingApprovalNotice {
     }
 }
 
+/// 本机 CLI Agent 长任务巡检与完工主动播报（只使用固定话术模板 + 数字/状态，绝不念原始 CLI 输出，防注入与噪声）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunNotice {
+    pub claim_key: String,
+    pub status: String,
+    pub speech: String,
+}
+
+const AGENT_PROGRESS_INTERVAL_SECS: u64 = 60;
+const AGENT_MAX_PROGRESS_NOTICES: u8 = 3;
+const AGENT_STALL_THRESHOLD_SECS: u64 = 90;
+const AGENT_STALL_RESET_SILENT_SECS: u64 = 30;
+const AGENT_MAX_STALL_NOTICES: u8 = 2;
+
+#[derive(Debug, Clone, Default)]
+struct TrackedAgent {
+    status: String,
+    progress_stage: u8,
+    stall_notified: bool,
+    stall_count: u8,
+}
+
+fn agent_provider_label(provider: &str) -> &'static str {
+    match provider {
+        "claude_code" => "Claude Code",
+        "codex" => "Codex",
+        _ => "Agent",
+    }
+}
+
+fn agent_terminal_notice(
+    id: &str,
+    provider: &str,
+    status: &str,
+    output_lines: u64,
+) -> AgentRunNotice {
+    let speech = match status {
+        "completed" if output_lines > 0 => format!(
+            "本机 {provider} 任务已完成，共输出 {output_lines} 行，结果已存到电脑语音中心。"
+        ),
+        "completed" => format!("本机 {provider} 任务已完成，结果已存到电脑语音中心。"),
+        "cancelled" => format!("本机 {provider} 任务已停止。"),
+        "failed" => format!("本机 {provider} 任务执行失败，请到电脑语音中心查看。"),
+        _ => format!("本机 {provider} 任务已结束，请到电脑语音中心查看。"),
+    };
+    AgentRunNotice {
+        claim_key: format!("agent:{id}:done:{status}"),
+        status: status.to_owned(),
+        speech,
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PollFullSnapshot {
     pub active_job: Option<ActiveJobProgress>,
     pub pending_approval: Option<PendingApprovalNotice>,
     pub finished: Vec<FinishedJob>,
+    pub agent_notices: Vec<AgentRunNotice>,
 }
 
 fn extract_pending_approval(body: &serde_json::Value) -> Option<PendingApprovalNotice> {
@@ -223,11 +276,14 @@ fn extract_active_progress(item: &serde_json::Value, wf_id: &str) -> ActiveJobPr
     }
 }
 
-/// 每个会话一份：记住上一次看到的任务状态，用来发现“发送中 → 终态”的转变，并提取当前正在发送的实时进度。
+/// 每个会话一份：记住上一次看到的任务状态，用来发现“发送中 → 终态”的转变，并提取当前正在发送的实时进度与 Agent 巡检提醒。
 #[derive(Default)]
 pub struct JobWatcher {
     seen: HashMap<String, String>,
     baseline: bool,
+    agent_seen: HashMap<String, TrackedAgent>,
+    agent_order: VecDeque<String>,
+    agent_baseline: bool,
 }
 
 impl JobWatcher {
@@ -235,21 +291,153 @@ impl JobWatcher {
         Self::default()
     }
 
-    /// 只读查询最近任务与待电脑审批状态：返回完整快照。
-    pub async fn poll_full(
+    fn poll_agent_runs(&mut self, body: &serde_json::Value) -> Vec<AgentRunNotice> {
+        let Some(items) = body.get("agent_runs").and_then(|v| v.as_array()) else {
+            if !self.agent_baseline {
+                self.agent_baseline = true;
+            }
+            return Vec::new();
+        };
+        let mut notices = Vec::new();
+        let mut live_ids = HashSet::with_capacity(items.len());
+        for item in items {
+            let Some(id) = item["id"].as_str().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            live_ids.insert(id.to_owned());
+            let status = item["status"].as_str().unwrap_or("");
+            let provider = agent_provider_label(item["provider"].as_str().unwrap_or(""));
+            let elapsed_secs = item["elapsed_secs"].as_u64().unwrap_or(0);
+            let silent_secs = item["silent_secs"].as_u64().unwrap_or(0);
+            let output_lines = item["output_lines"].as_u64().unwrap_or(0);
+
+            if !self.agent_baseline {
+                if !self.agent_seen.contains_key(id) {
+                    self.agent_order.push_back(id.to_owned());
+                }
+                self.agent_seen.insert(
+                    id.to_owned(),
+                    TrackedAgent {
+                        status: status.to_owned(),
+                        progress_stage: 0,
+                        stall_notified: false,
+                        stall_count: 0,
+                    },
+                );
+                continue;
+            }
+
+            let is_new = !self.agent_seen.contains_key(id);
+            if is_new {
+                self.agent_order.push_back(id.to_owned());
+            }
+            let entry = self
+                .agent_seen
+                .entry(id.to_owned())
+                .or_insert_with(|| TrackedAgent {
+                    status: status.to_owned(),
+                    ..Default::default()
+                });
+            let was_running = !is_new && entry.status == "running";
+            entry.status = status.to_owned();
+
+            if (was_running && status != "running")
+                || (is_new && matches!(status, "completed" | "failed" | "cancelled"))
+            {
+                notices.push(agent_terminal_notice(id, provider, status, output_lines));
+                continue;
+            }
+
+            if status != "running" {
+                continue;
+            }
+
+            if silent_secs < AGENT_STALL_RESET_SILENT_SECS {
+                entry.stall_notified = false;
+            }
+            if silent_secs >= AGENT_STALL_THRESHOLD_SECS
+                && !entry.stall_notified
+                && entry.stall_count < AGENT_MAX_STALL_NOTICES
+            {
+                entry.stall_notified = true;
+                entry.stall_count += 1;
+                let speech = if silent_secs >= 120 {
+                    let mins = silent_secs / 60;
+                    format!(
+                        "本机 {provider} 已经 {mins} 分钟没有新输出，仍在后台运行，可到电脑语音中心查看。"
+                    )
+                } else {
+                    format!(
+                        "本机 {provider} 已经超过一分半没有新输出，仍在后台运行，可到电脑语音中心查看。"
+                    )
+                };
+                notices.push(AgentRunNotice {
+                    claim_key: format!("agent:{id}:stall:{}", entry.stall_count),
+                    status: "stalled".to_owned(),
+                    speech,
+                });
+                continue;
+            }
+
+            if silent_secs < AGENT_STALL_THRESHOLD_SECS
+                && elapsed_secs >= AGENT_PROGRESS_INTERVAL_SECS
+            {
+                let stage = u8::try_from(elapsed_secs / AGENT_PROGRESS_INTERVAL_SECS)
+                    .unwrap_or(AGENT_MAX_PROGRESS_NOTICES)
+                    .min(AGENT_MAX_PROGRESS_NOTICES);
+                if stage > entry.progress_stage {
+                    entry.progress_stage = stage;
+                    notices.push(AgentRunNotice {
+                        claim_key: format!("agent:{id}:prog:{stage}"),
+                        status: "running".to_owned(),
+                        speech: format!(
+                            "本机 {provider} 还在执行，已运行 {stage} 分钟，已输出 {output_lines} 行。"
+                        ),
+                    });
+                }
+            }
+        }
+        if !self.agent_baseline {
+            self.agent_baseline = true;
+            return Vec::new();
+        }
+        while self.agent_seen.len() > MAX_TRACKED {
+            let Some(pos) = self
+                .agent_order
+                .iter()
+                .position(|tracked_id| !live_ids.contains(tracked_id))
+            else {
+                break;
+            };
+            if let Some(evicted) = self.agent_order.remove(pos) {
+                self.agent_seen.remove(&evicted);
+            }
+        }
+        notices
+    }
+
+    /// 只读查询最近任务与待电脑审批状态：返回完整快照，可按设置决定是否巡检 Agent 运行态。
+    pub async fn poll_full_with(
         &mut self,
         tools: &dyn ToolExecutor,
         context: &ToolContext,
+        poll_agents: bool,
     ) -> PollFullSnapshot {
         let Some(body) = tools.recent_workflows(context).await else {
             return PollFullSnapshot::default();
         };
         let pending_approval = extract_pending_approval(&body);
+        let agent_notices = if poll_agents {
+            self.poll_agent_runs(&body)
+        } else {
+            Vec::new()
+        };
         let Some(items) = body["workflows"].as_array() else {
             return PollFullSnapshot {
                 active_job: None,
                 pending_approval,
                 finished: Vec::new(),
+                agent_notices,
             };
         };
         let mut active: Option<ActiveJobProgress> = None;
@@ -281,6 +469,7 @@ impl JobWatcher {
                 active_job: active,
                 pending_approval,
                 finished: Vec::new(),
+                agent_notices,
             };
         }
         if self.seen.len() > MAX_TRACKED {
@@ -291,7 +480,17 @@ impl JobWatcher {
             active_job: active,
             pending_approval,
             finished,
+            agent_notices,
         }
+    }
+
+    /// 只读查询最近任务与待电脑审批状态：默认包含 Agent 巡检。
+    pub async fn poll_full(
+        &mut self,
+        tools: &dyn ToolExecutor,
+        context: &ToolContext,
+    ) -> PollFullSnapshot {
+        self.poll_full_with(tools, context, true).await
     }
 
     /// 只读查询最近任务：返回 `(当前活跃发送中进度, 本拍刚结束的任务列表)`。
@@ -519,5 +718,197 @@ mod tests {
         assert_eq!(active.feed_rate, Some(1200));
         assert_eq!(active.eta_seconds, Some(30));
         assert!(active.subtitle().contains("25%") && active.subtitle().contains("S600 F1200"));
+    }
+
+    #[tokio::test]
+    async fn agent_run_heartbeat_stall_and_completion_announce_with_fixed_templates() {
+        let host = FakeHost::new(json!([]));
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-old", "provider": "codex", "status": "completed", "elapsed_secs": 12, "silent_secs": 0, "output_lines": 5}
+            ]
+        });
+        let mut watcher = JobWatcher::new();
+        let log = AnnounceLog::default();
+
+        // First poll sets baseline and must stay silent on historical finished agent runs.
+        assert!(
+            watcher
+                .poll_full(&host, &context())
+                .await
+                .agent_notices
+                .is_empty()
+        );
+
+        // New running task appears at 20s: below 60s threshold -> silent.
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-live", "provider": "codex", "status": "running", "elapsed_secs": 20, "silent_secs": 2, "output_lines": 10}
+            ]
+        });
+        assert!(
+            watcher
+                .poll_full(&host, &context())
+                .await
+                .agent_notices
+                .is_empty()
+        );
+
+        // At 62s active: emits 1-minute heartbeat once.
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-live", "provider": "codex", "status": "running", "elapsed_secs": 62, "silent_secs": 1, "output_lines": 42}
+            ]
+        });
+        let s1 = watcher.poll_full(&host, &context()).await.agent_notices;
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s1[0].claim_key, "agent:agentrun-live:prog:1");
+        assert_eq!(
+            s1[0].speech,
+            "本机 Codex 还在执行，已运行 1 分钟，已输出 42 行。"
+        );
+        assert!(log.claim(&s1[0].claim_key));
+        assert!(!log.claim(&s1[0].claim_key), "同一进展只能有一台设备播");
+
+        // Same stage must not repeat.
+        assert!(
+            watcher
+                .poll_full(&host, &context())
+                .await
+                .agent_notices
+                .is_empty()
+        );
+
+        // At 115s with 95s silent: emits stall warning once.
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-live", "provider": "codex", "status": "running", "elapsed_secs": 115, "silent_secs": 95, "output_lines": 42}
+            ]
+        });
+        let stall = watcher.poll_full(&host, &context()).await.agent_notices;
+        assert_eq!(stall.len(), 1);
+        assert_eq!(stall[0].claim_key, "agent:agentrun-live:stall:1");
+        assert!(stall[0].speech.contains("一分半没有新输出"));
+        assert!(
+            watcher
+                .poll_full(&host, &context())
+                .await
+                .agent_notices
+                .is_empty(),
+            "同一静默段不重复刷屏"
+        );
+
+        // Output resumes at 125s -> resets stall latch & emits 2-minute progress.
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-live", "provider": "codex", "status": "running", "elapsed_secs": 125, "silent_secs": 2, "output_lines": 80}
+            ]
+        });
+        let s2 = watcher.poll_full(&host, &context()).await.agent_notices;
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2[0].claim_key, "agent:agentrun-live:prog:2");
+
+        // Running -> completed emits completion summary with final line count.
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-live", "provider": "codex", "status": "completed", "elapsed_secs": 135, "silent_secs": 0, "output_lines": 91}
+            ]
+        });
+        let done = watcher.poll_full(&host, &context()).await.agent_notices;
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].claim_key, "agent:agentrun-live:done:completed");
+        assert_eq!(
+            done[0].speech,
+            "本机 Codex 任务已完成，共输出 91 行，结果已存到电脑语音中心。"
+        );
+
+        // Short-lived post-baseline run appearing already failed/completed (e.g. finished in < 4s) is still announced once.
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-live", "provider": "codex", "status": "completed", "elapsed_secs": 135, "silent_secs": 0, "output_lines": 91},
+                {"id": "agentrun-quick", "provider": "claude_code", "status": "failed", "elapsed_secs": 2, "silent_secs": 0, "output_lines": 3}
+            ]
+        });
+        let quick = watcher.poll_full(&host, &context()).await.agent_notices;
+        assert_eq!(quick.len(), 1);
+        assert_eq!(quick[0].claim_key, "agent:agentrun-quick:done:failed");
+        assert!(
+            watcher
+                .poll_full(&host, &context())
+                .await
+                .agent_notices
+                .is_empty()
+        );
+
+        // poll_agents = false skips agent_runs baseline/notifications without disturbing workflow polling.
+        let mut quiet = JobWatcher::new();
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-old", "provider": "codex", "status": "completed", "elapsed_secs": 20, "silent_secs": 0, "output_lines": 5}
+            ]
+        });
+        assert!(
+            quiet
+                .poll_full_with(&host, &context(), false)
+                .await
+                .agent_notices
+                .is_empty()
+        );
+        // Enabling agent polling now treats current state as baseline rather than speaking old runs.
+        assert!(
+            quiet
+                .poll_full_with(&host, &context(), true)
+                .await
+                .agent_notices
+                .is_empty()
+        );
+
+        // Exceeding MAX_TRACKED prunes absent entries while keeping baseline true and active runs tracked.
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-stay", "provider": "codex", "status": "running", "elapsed_secs": 10, "silent_secs": 0, "output_lines": 1}
+            ]
+        });
+        assert!(
+            quiet
+                .poll_full(&host, &context())
+                .await
+                .agent_notices
+                .is_empty()
+        );
+        for idx in 0..35 {
+            *host.body.lock().unwrap() = json!({
+                "workflows": [],
+                "agent_runs": [
+                    {"id": "agentrun-stay", "provider": "codex", "status": "running", "elapsed_secs": 15, "silent_secs": 0, "output_lines": 2},
+                    {"id": format!("agentrun-flood-{idx}"), "provider": "codex", "status": "running", "elapsed_secs": 1, "silent_secs": 0, "output_lines": 1}
+                ]
+            });
+            let _ = quiet.poll_full(&host, &context()).await;
+        }
+        assert!(quiet.agent_baseline);
+        assert!(quiet.agent_seen.contains_key("agentrun-stay"));
+        assert!(quiet.agent_seen.len() <= MAX_TRACKED);
+        *host.body.lock().unwrap() = json!({
+            "workflows": [],
+            "agent_runs": [
+                {"id": "agentrun-stay", "provider": "codex", "status": "completed", "elapsed_secs": 30, "silent_secs": 0, "output_lines": 12}
+            ]
+        });
+        let stayed_done = quiet.poll_full(&host, &context()).await.agent_notices;
+        assert_eq!(stayed_done.len(), 1);
+        assert_eq!(
+            stayed_done[0].claim_key,
+            "agent:agentrun-stay:done:completed"
+        );
     }
 }

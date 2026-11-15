@@ -3,6 +3,7 @@ use crate::person_context::{
     PersonContext,
     tests::{Resolver, Store},
 };
+use crate::vision::Photo;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 struct DeviceMemory {
     reads: AtomicUsize,
@@ -216,9 +217,9 @@ fn personal_context_bridges_vision_photos_per_speaker_and_runs_nv19_extraction_o
             say(&["好的乙。"]),
             say(&["图案左边是圆角。"]),
         ])),
-        // 会话断开后的后台摘要与 NV19 提取统一返回一条合法候选 JSON
+        // 会话断开后的后台摘要与 NV19 提取统一返回带原话引用的候选 JSON（a、b 各只命中自己说过的话）
         repeat: Some(say(&[
-            r#"{"operations":[{"op":"add","category":"preference","content":"回答保持精炼直接"}]}"#,
+            r#"{"operations":[{"op":"add","category":"preference","content":"回答保持精炼直接","quote":"我喜欢精炼直接的回答"},{"op":"add","category":"preference","content":"日常闲聊记录","quote":"我是乙，随便聊聊"}]}"#,
         ])),
         seen: Mutex::default(),
     });
@@ -428,6 +429,340 @@ fn short_and_overlong_utterances_fail_closed_without_leaking_or_wiping_verified_
             && !alice_resumed.contains("刚才说的厚度是多少")
             && !alice_resumed.contains("超过十秒的陌生人"),
         "第 5 轮说话人 a 重新验声后应完整恢复本人历史且未混入未知轮次，实际：\n{alice_resumed}"
+    );
+}
+
+#[test]
+fn personal_mode_preserves_uncommitted_vision_photo_after_ignored_turn_until_real_speaker_commits()
+{
+    let resolver = Resolver::new(&[Some("a"), Some("b")]);
+    let personal = PersonContext::new(resolver, Store::seeded());
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            say(&["这是刚拍好的椴木板。"]),
+            say(&["好的乙。"]),
+        ])),
+        repeat: None,
+        seen: Mutex::default(),
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok(String::new()),
+            Ok("帮我看看刚刚拍的木板".into()),
+            Ok("我是乙".into()),
+        ])),
+        heard: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    )
+    .with_personal_context(personal);
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    server.shared.vision_photos.put(
+        DEVICE,
+        Photo {
+            question: "这张木板纹理如何".into(),
+            text: "一块干净的椴木板".into(),
+            data_url: "data:image/png;base64,iVBORw0KGgo=".into(),
+        },
+    );
+
+    // 第 1 轮 ASR 返回空（TurnEvent::Ignored），未提交且未交给大模型：照片不能丢失
+    speak_manual(&mut device, 1, 260);
+    let ignored_deadline = Instant::now() + Duration::from_secs(3);
+    while !server
+        .status()
+        .events
+        .iter()
+        .any(|e| e.text.contains("没有识别出文字"))
+    {
+        assert!(
+            Instant::now() < ignored_deadline,
+            "第 1 轮空识别应记录“没有识别出文字”事件"
+        );
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    // 第 2 轮（说话人 a >= 2s）：必须继承上一轮尚未提交的视觉照片
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+    // 第 3 轮（说话人 b >= 2s）：照片已提交进说话人 a，严禁再带给 b
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+
+    let seen = llm.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let flatten = |idx: usize| -> String {
+        seen[idx]
+            .0
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        flatten(0).contains("这张木板纹理如何"),
+        "空识别 Ignored 之后的第 2 轮必须仍看得到未提交照片"
+    );
+    assert!(
+        !flatten(1).contains("这张木板纹理如何"),
+        "照片已在第 2 轮提交给说话人 a，第 3 轮说话人 b 严禁看到"
+    );
+}
+
+fn write_test_wav(dir: &std::path::Path, seconds: u32) {
+    let rate = 24_000u32;
+    let frames = rate * seconds;
+    let mut file = std::fs::File::create(dir.join("测试音乐.wav")).unwrap();
+    let mut header = Vec::new();
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+    header.extend_from_slice(b"WAVEfmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&rate.to_le_bytes());
+    header.extend_from_slice(&(rate * 2).to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&(frames * 2).to_le_bytes());
+    std::io::Write::write_all(&mut file, &header).unwrap();
+    let pcm = vec![2000i16; frames as usize];
+    for sample in pcm {
+        std::io::Write::write_all(&mut file, &sample.to_le_bytes()).unwrap();
+    }
+}
+
+#[test]
+fn personal_mode_preserves_uncommitted_photo_across_asr_failure_music_and_unverified_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    write_test_wav(dir.path(), 1);
+    let music_index = Arc::new(crate::music::MusicIndex::scan(dir.path()).unwrap());
+    let tools = Arc::new(crate::music::MusicTools::new(
+        Arc::new(FakeTools::default()),
+        music_index.clone(),
+    ));
+    let resolver = Resolver::new(&[Some("a"), Some("a"), Some("b")]);
+    let personal = PersonContext::new(resolver, Store::seeded());
+    let llm = Arc::new(FakeLlm {
+        rounds: Mutex::new(VecDeque::from([
+            Round::Reply {
+                deltas: vec![],
+                calls: vec![ToolCall::new(
+                    "music-call-1",
+                    "play_music",
+                    r#"{"query":"测试音乐"}"#,
+                )],
+                delay_ms: 0,
+            },
+            say(&["短句收到。"]),
+            say(&["甲的问题我看到了。"]),
+            say(&["乙的问题收到。"]),
+        ])),
+        ..Default::default()
+    });
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Err(ProviderError::new("识别超时")),
+            Ok("播放测试音乐".into()),
+            Ok("在吗".into()),
+            Ok("看看木板".into()),
+            Ok("今天天气".into()),
+        ])),
+        heard: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        tools,
+        ConversationSettings::default(),
+    )
+    .with_personal_context(personal);
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            music: Some(music_index),
+            playback_start_ms: 100,
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    server.shared.vision_photos.put(
+        DEVICE,
+        Photo {
+            question: "这张木板纹理如何".into(),
+            text: "一块干净的椴木板".into(),
+            data_url: "data:image/png;base64,iVBORw0KGgo=".into(),
+        },
+    );
+
+    // 第 1 轮：ASR 报错（TurnEvent::Failed -> 固定报错播报 + Done{messages:[]}），照片不得丢失
+    speak_manual(&mut device, 1, 260);
+    let _ = collect_items(&mut device);
+
+    // 第 2 轮：PlayMusic 接管并在 music.active() 时收到 Done{messages:[]}，照片不得丢失
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+
+    // 第 3 轮：<2s 短句未核验身份（commit_scope = None），end_turn 未提交给任何说话人，照片继续保留
+    speak_manual(&mut device, 1, 260);
+    let _ = collect_items(&mut device);
+
+    // 第 4 轮：说话人 a >= 2s 正常回答并提交，必须看到未提交照片
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+
+    // 第 5 轮：说话人 b >= 2s，照片已提交进 a，严禁泄露给 b
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+
+    let seen = llm.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    let flatten = |idx: usize| -> String {
+        seen[idx]
+            .0
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        flatten(1).contains("这张木板纹理如何"),
+        "ASR 报错与 PlayMusic 接管之后，第 3 轮短句仍应带着未提交照片"
+    );
+    assert!(
+        flatten(2).contains("甲喜欢茶") && flatten(2).contains("这张木板纹理如何"),
+        "未核验短句第 3 轮未提交历史后，第 4 轮已核验说话人 a 必须仍看到该照片"
+    );
+    assert!(
+        flatten(3).contains("乙喜欢咖啡") && !flatten(3).contains("这张木板纹理如何"),
+        "照片已在第 4 轮提交给说话人 a，第 5 轮说话人 b 严禁看到"
+    );
+}
+
+#[test]
+fn personal_mode_preserves_uncommitted_photo_on_abort_before_person_resolved() {
+    let resolver = Arc::new(Resolver {
+        allowed: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+        delay: Duration::from_millis(500),
+        replies: Mutex::new(VecDeque::from([Some("a".into()), Some("b".into())])),
+    });
+    let personal = PersonContext::new(resolver, Store::seeded());
+    let llm = Arc::new(FakeLlm::default());
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(VecDeque::from([
+            Ok("先停一下别查".into()),
+            Ok("现在看刚才的照片".into()),
+            Ok("换个人问".into()),
+        ])),
+        heard: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm.clone(),
+        Arc::new(FakeTts::default()),
+        Arc::new(FakeTools::default()),
+        ConversationSettings::default(),
+    )
+    .with_personal_context(personal);
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    let mut device = chat_device(&server, &registry, 1);
+
+    server.shared.vision_photos.put(
+        DEVICE,
+        Photo {
+            question: "这张木板纹理如何".into(),
+            text: "一块干净的椴木板".into(),
+            data_url: "data:image/png;base64,iVBORw0KGgo=".into(),
+        },
+    );
+
+    // 第 1 轮：刚收到 Heard（stt 已下发，turn.user = Some(...)）且慢声纹仍在 500ms 等待期间立刻 abort
+    speak_manual(&mut device, 1, 2100);
+    let stt_msg = read_json(&mut device);
+    assert_eq!(stt_msg["type"], "stt");
+    send_json(&mut device, r#"{"type":"abort","reason":"user_cancel"}"#);
+    let abort_deadline = Instant::now() + Duration::from_secs(3);
+    while !server
+        .status()
+        .events
+        .iter()
+        .any(|e| e.text.contains("对话被打断"))
+    {
+        assert!(Instant::now() < abort_deadline, "应记录对话被打断事件");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        llm.seen.lock().unwrap().is_empty(),
+        "声纹未完成前被打断，第 1 轮不应请求大模型"
+    );
+    // 短暂让出调度确保已 abort 的第 1 轮声纹任务 Drop 释放单设备锁（不需要等满 500ms）
+    std::thread::sleep(Duration::from_millis(30));
+
+    // 第 2 轮：说话人 a >= 2s 正常提交，必须继承被打断轮尚未提交的视觉照片
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+    // 第 3 轮：说话人 b >= 2s，严禁看到已提交给 a 的照片
+    speak_manual(&mut device, 1, 2100);
+    let _ = collect_items(&mut device);
+
+    let seen = llm.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let flatten = |idx: usize| -> String {
+        seen[idx]
+            .0
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        flatten(0).contains("甲喜欢茶") && flatten(0).contains("这张木板纹理如何"),
+        "Heard 后、PersonResolved 前被打断，第 2 轮说话人 a 必须继承未提交照片"
+    );
+    assert!(
+        flatten(1).contains("乙喜欢咖啡") && !flatten(1).contains("这张木板纹理如何"),
+        "照片已在第 2 轮提交给说话人 a，第 3 轮说话人 b 严禁看到"
     );
 }
 #[tokio::test]

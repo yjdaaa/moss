@@ -420,6 +420,54 @@ fn nv19_task_context_decays_but_preferences_and_repeated_facts_do_not_lose_rank(
     );
 }
 
+#[tokio::test]
+async fn nv19_profile_includes_applicability_and_loads_on_stopword_questions() {
+    let store = Arc::new(FakeStore::default());
+    let service = ContextService::new(store);
+    add(
+        &service,
+        (ScopeKind::Device, "dev-a"),
+        Category::Preference,
+        "以后叫我王工",
+        Verification::Confirmed,
+        None,
+    );
+    add(
+        &service,
+        (ScopeKind::Device, "dev-a"),
+        Category::DeviceFact,
+        "光斑大小 0.08 毫米",
+        Verification::Confirmed,
+        Some(machine("1.2.0")),
+    );
+    add(
+        &service,
+        (ScopeKind::Device, "dev-a"),
+        Category::DeviceFact,
+        "旧固件标定参数",
+        Verification::Confirmed,
+        Some(machine("0.9.0")),
+    );
+
+    let retriever = ContextRetriever::new(service);
+    retriever.set_enabled(true);
+    assert!(fast_query("你叫我什么？").is_none());
+    let block = retriever
+        .prompt_for(voice("dev-a"), "你叫我什么？", Some(machine("1.2.0")))
+        .await
+        .expect("无实词的非闲聊问句也应带上常驻用户档案");
+    assert!(block.contains("【用户档案："), "{block}");
+    assert!(block.contains("以后叫我王工"), "{block}");
+    assert!(
+        block.contains("[设备事实·已确认·用户填写·MOSS-550W 1.2.0] 光斑大小 0.08 毫米"),
+        "用户档案应附带设备适用范围：{block}"
+    );
+    assert!(
+        !block.contains("旧固件标定参数"),
+        "不匹配固件的硬件事实绝不混入：{block}"
+    );
+}
+
 #[test]
 fn nv19_live_replacement_hides_the_old_record_from_voice_search_and_profile() {
     let store = Arc::new(FakeStore::default());
@@ -496,4 +544,132 @@ fn nv19_live_replacement_hides_the_old_record_from_voice_search_and_profile() {
         5,
         "私有窗口仍能看到两条，等用户决定"
     );
+}
+
+/// 用户档案：用户亲手写下并确认的偏好与设备事实每轮都带，不靠这句话里碰巧有字面重合；
+/// 对话里自动提取的候选、其他类别的记录不常驻。档案单独成块，不挤占检索结果的名额。
+#[test]
+fn user_written_facts_are_pinned_every_turn_without_crowding_out_hits() {
+    let store = Arc::new(FakeStore::default());
+    let service = ContextService::new(store.clone());
+    for content in ["以后叫我王工", "回答尽量简短", "我常切椴木板"] {
+        add(
+            &service,
+            (ScopeKind::Device, "dev-a"),
+            Category::Preference,
+            content,
+            Verification::Confirmed,
+            None,
+        );
+    }
+    add(
+        &service,
+        (ScopeKind::Device, "dev-a"),
+        Category::DeviceFact,
+        "工坊里是一台四十瓦的二极管激光机",
+        Verification::Confirmed,
+        Some(machine("1.2.0")),
+    );
+    add(
+        &service,
+        (ScopeKind::Device, "dev-a"),
+        Category::Preference,
+        "周末才有空做木工",
+        Verification::Confirmed,
+        None,
+    );
+    add(
+        &service,
+        (ScopeKind::Device, "dev-a"),
+        Category::Preference,
+        "可能喜欢深色木料",
+        Verification::Candidate,
+        None,
+    );
+    let trouble = add(
+        &service,
+        (ScopeKind::Device, "dev-a"),
+        Category::TroubleshootingExperience,
+        "亚克力切不透时放慢速度",
+        Verification::Confirmed,
+        Some(machine("1.2.0")),
+    );
+    let access = voice("dev-a");
+    let style = service.style_preferences(&access, NOW);
+    assert_eq!(style.len(), 3);
+    let shown: Vec<String> = style.iter().map(|row| row.id.clone()).collect();
+    let pinned = service.pinned_facts(&access, Some(&machine("1.2.0")), NOW, &shown);
+    let texts: Vec<&str> = pinned.iter().map(|row| row.content.as_str()).collect();
+    assert!(
+        texts.contains(&"工坊里是一台四十瓦的二极管激光机") && texts.contains(&"周末才有空做木工"),
+        "{texts:?}"
+    );
+    assert!(
+        !texts.contains(&"可能喜欢深色木料") && !texts.contains(&"亚克力切不透时放慢速度"),
+        "候选与故障经验不常驻：{texts:?}"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| style.iter().any(|row| row.content == *text)),
+        "不与常驻画像重复"
+    );
+
+    // 档案已有 5 条时，检索命中仍然能显示
+    let mut always = style;
+    always.extend(pinned);
+    let rendered = RetrievedCandidates {
+        always_preferences: always,
+        memory_hits: vec![(trouble, 5)],
+        documents_block: None,
+    }
+    .render(None)
+    .unwrap();
+    assert!(rendered.contains("【用户档案"), "{rendered}");
+    assert!(rendered.contains("四十瓦的二极管激光机"), "{rendered}");
+    assert!(
+        rendered.contains("【长期记忆检索结果") && rendered.contains("亚克力切不透时放慢速度"),
+        "检索命中不被档案挤掉：{rendered}"
+    );
+}
+
+/// 想把“以后不用确认 / 自动批准 / 直接开始加工”存成记忆的一律拒绝；正常提到确认的习惯不受影响。
+#[test]
+fn memories_that_would_weaken_confirmation_rules_are_refused() {
+    let service = ContextService::new(Arc::new(FakeStore::default()));
+    let draft = |content: &str| MemoryDraft {
+        scope: ScopeKey::new(ScopeKind::Device, "dev-a").unwrap(),
+        category: Category::Preference,
+        content: content.into(),
+        verification: Verification::Confirmed,
+        source: Source::new(SourceKind::UserEdit, None).unwrap(),
+        applicability: None,
+        expires_at: None,
+    };
+    for content in [
+        "以后别总让我确认",
+        "加工的时候不用 确认，直接开始加工",
+        "我说开始就自动批准",
+        "以后默认同意所有请求",
+        "以后不需要确认，直接开工",
+        "不用每次都确认",
+        "以后别再问我了",
+        "说完直接就开始切",
+    ] {
+        assert!(
+            service.create(&owner(), draft(content), NOW).is_err(),
+            "{content}"
+        );
+    }
+    for content in [
+        "开始之前先提醒我确认焦距",
+        "我习惯先走一遍边框再确认开始",
+        "别忘了确认材料厚度",
+        "直接告诉我结论就行",
+    ] {
+        assert!(
+            service.create(&owner(), draft(content), NOW).is_ok(),
+            "{content}"
+        );
+    }
 }

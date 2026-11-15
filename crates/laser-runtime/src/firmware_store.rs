@@ -197,6 +197,22 @@ impl RuntimeDb {
             params![delivery_id, now],
         )? == 1)
     }
+
+    /// 检查是否存在尚未撤销且未过期的激活态 `downloading` 固件下载任务，避免已取消或过期记录长期误锁 USB 配网。
+    pub fn has_active_firmware_download(&self, now: f64) -> Result<bool, SchemaError> {
+        let active: i64 = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM voice_firmware_delivery
+                WHERE device_report_status='not_reported'
+                  AND download_status='downloading'
+                  AND token IS NOT NULL
+                  AND expires_at > ?1
+            )",
+            params![now],
+            |row| row.get(0),
+        )?;
+        Ok(active != 0)
+    }
 }
 
 #[cfg(test)]
@@ -288,12 +304,45 @@ mod tests {
             db.update_firmware_download_if_revision("r", 0, "downloading", 5.0)
                 .unwrap()
         );
+        assert!(db.has_active_firmware_download(5.0).unwrap());
         assert!(db.cancel_firmware_offer("r", 6.0).unwrap());
+        assert!(!db.has_active_firmware_download(7.0).unwrap());
         assert_eq!(db.active_firmware_offer("dev", 7.0).unwrap(), None);
         assert_eq!(
             db.list_firmware_deliveries().unwrap()[0].download_status,
             "downloading",
             "已开始下载的记录保留"
+        );
+    }
+
+    #[test]
+    fn has_active_firmware_download_ignores_pending_cancelled_and_expired_rows() {
+        let db = RuntimeDb::open_memory().unwrap();
+        assert!(!db.has_active_firmware_download(10.0).unwrap());
+
+        let sha = "d".repeat(64);
+        db.add_firmware_artifact(&sha, "2.1", "", 2048, 1.0)
+            .unwrap();
+        db.create_firmware_offer("pend", "dev1", &sha, "2.1", &"a".repeat(32), 100.0, 1.0)
+            .unwrap();
+        assert!(
+            !db.has_active_firmware_download(10.0).unwrap(),
+            "尚未开始下载的 pending 任务不应阻断 USB 配网"
+        );
+
+        assert!(
+            db.update_firmware_download_if_revision("pend", 0, "downloading", 5.0)
+                .unwrap()
+        );
+        assert!(db.has_active_firmware_download(99.0).unwrap());
+        assert!(
+            !db.has_active_firmware_download(100.0).unwrap(),
+            "到达过期时间时不再视为活跃下载"
+        );
+        assert!(db.cancel_firmware_offer("pend", 12.0).unwrap());
+        assert!(
+            !db.has_active_firmware_download(12.0).unwrap(),
+            "撤销 token=NULL 后即便 download_status 仍为 downloading 也不得阻塞"
         );
     }
 }

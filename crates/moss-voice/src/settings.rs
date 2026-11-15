@@ -135,6 +135,12 @@ fn default_asr_model() -> String {
 fn default_tts_model() -> String {
     "kokoro".into()
 }
+fn default_denoise_model() -> String {
+    "gtcrn_simple".into()
+}
+fn default_turn_model() -> String {
+    "smart_turn_v3".into()
+}
 fn default_on() -> bool {
     true
 }
@@ -775,6 +781,16 @@ pub struct BuiltinLocal {
     pub asr_model: String,
     #[serde(default = "default_tts_model")]
     pub tts_model: String,
+    /// 前端语音降噪开关（GTCRN，默认关闭，开启后在 VAD/识别前实时滤波，n87）
+    #[serde(default)]
+    pub denoise: bool,
+    #[serde(default = "default_denoise_model")]
+    pub denoise_model: String,
+    /// 尾音语义判停开关（Smart Turn v3.2，默认关闭，开启后在声学静音后辅助判断是否说完，n87）
+    #[serde(default)]
+    pub turn: bool,
+    #[serde(default = "default_turn_model")]
+    pub turn_model: String,
     /// 合成音色编号（多音色模型；单音色模型忽略）
     #[serde(default = "default_speaker")]
     pub tts_speaker: i32,
@@ -817,6 +833,10 @@ impl Default for BuiltinLocal {
             vad_model: default_vad_model(),
             asr_model: default_asr_model(),
             tts_model: default_tts_model(),
+            denoise: false,
+            denoise_model: default_denoise_model(),
+            turn: false,
+            turn_model: default_turn_model(),
             tts_speaker: default_speaker(),
             tts_speed: default_speed(),
             mirror: None,
@@ -826,7 +846,7 @@ impl Default for BuiltinLocal {
 
 impl BuiltinLocal {
     pub fn any(&self) -> bool {
-        self.asr || self.tts || self.vad
+        self.asr || self.tts || self.vad || self.denoise || self.turn
     }
 
     pub fn is_default(&self) -> bool {
@@ -839,6 +859,8 @@ impl BuiltinLocal {
             ModelKind::Vad => (self.vad, self.vad_model.as_str()),
             ModelKind::Asr => (self.asr, self.asr_model.as_str()),
             ModelKind::Tts => (self.tts, self.tts_model.as_str()),
+            ModelKind::Denoise => (self.denoise, self.denoise_model.as_str()),
+            ModelKind::Turn => (self.turn, self.turn_model.as_str()),
             ModelKind::Jev => {
                 let canonical = canonical_local_jev_model(&self.jev_model);
                 (
@@ -2469,6 +2491,32 @@ mod tests {
         assert!(!voice.builtin_section_ready(Section::Tts, &models));
         voice.builtin_models.tts = Some(cloud("https://tts.test/v1/audio/speech"));
         assert!(voice.builtin_chat_ready(&models), "合成走云端");
+    }
+
+    #[test]
+    fn denoise_and_turn_settings_default_off_and_select_expected_models() {
+        let old: BuiltinLocal = serde_json::from_str("{}").unwrap();
+        assert!(!old.denoise);
+        assert!(!old.turn);
+        assert_eq!(old.denoise_model, "gtcrn_simple");
+        assert_eq!(old.turn_model, "smart_turn_v3");
+        assert!(old.selected(ModelKind::Denoise).is_none());
+        assert!(old.selected(ModelKind::Turn).is_none());
+
+        let enabled = BuiltinLocal {
+            denoise: true,
+            turn: true,
+            ..Default::default()
+        };
+        assert!(enabled.any());
+        assert_eq!(
+            enabled.selected(ModelKind::Denoise).map(|s| s.id),
+            Some("gtcrn_simple")
+        );
+        assert_eq!(
+            enabled.selected(ModelKind::Turn).map(|s| s.id),
+            Some("smart_turn_v3")
+        );
     }
 
     #[test]

@@ -546,6 +546,7 @@ name = "moss-voice-local"
 version = "0.3.7"
 dependencies = [
  "moss-voice-local-proto",
+ "serde_json",
  "sha2",
  "sherpa-onnx",
 ]

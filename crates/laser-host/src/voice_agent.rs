@@ -20,8 +20,51 @@ mod model_proxy;
 // Digest-pinned, synthetic-only Docker invocation plan; not production runner.
 #[cfg(test)]
 mod docker_plan;
-mod engine;
+pub mod engine;
 pub use engine::{AgentCoordinator, AgentRunner, CapabilitySnapshot};
+
+/// 运行中 CLI Agent 的只读活跃度计数（仅统计秒数与累计输出行数，绝不存原始 stdout/stderr 文本）。
+pub struct AgentLiveProgress {
+    started_at: std::time::Instant,
+    last_output_ms: std::sync::atomic::AtomicU64,
+    output_lines: std::sync::atomic::AtomicU64,
+}
+impl AgentLiveProgress {
+    pub fn new() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            last_output_ms: std::sync::atomic::AtomicU64::new(0),
+            output_lines: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    pub fn record_chunk(&self, new_lines: u64) {
+        let now_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_output_ms
+            .store(now_ms, std::sync::atomic::Ordering::Release);
+        if new_lines > 0 {
+            self.output_lines
+                .fetch_add(new_lines, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+    pub fn elapsed_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+    pub fn silent_secs(&self) -> u64 {
+        let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let last_ms = self
+            .last_output_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        elapsed_ms.saturating_sub(last_ms) / 1000
+    }
+    pub fn output_lines(&self) -> u64 {
+        self.output_lines.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+impl Default for AgentLiveProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub const MAX_TASK_CHARS: usize = 4000;
 pub const MAX_OUTPUT_BYTES: usize = 256 * 1024;
@@ -927,8 +970,16 @@ impl engine::AgentRunner for JobRunner {
         plan: &AgentPlan,
         alive: &dyn Fn() -> bool,
     ) -> Result<String, (AgentError, String)> {
+        self.run_with_progress(plan, alive, None)
+    }
+    fn run_with_progress(
+        &self,
+        plan: &AgentPlan,
+        alive: &dyn Fn() -> bool,
+        progress: Option<std::sync::Arc<AgentLiveProgress>>,
+    ) -> Result<String, (AgentError, String)> {
         let never = std::sync::atomic::AtomicBool::new(false);
-        let result = windows_process::run_fixture_process(
+        let result = windows_process::run_fixture_process_with_progress(
             &plan.executable,
             &plan.argv,
             &plan.workspace,
@@ -937,6 +988,7 @@ impl engine::AgentRunner for JobRunner {
             alive,
             &never,
             std::time::Duration::from_secs(MAX_RUN_SECONDS),
+            progress,
         )
         .map_err(|_| (AgentError::RunFailed, String::new()))?;
         let output = final_answer(plan.provider, &result.output);
@@ -959,8 +1011,16 @@ impl engine::AgentRunner for UnixGroupRunner {
         plan: &AgentPlan,
         alive: &dyn Fn() -> bool,
     ) -> Result<String, (AgentError, String)> {
+        self.run_with_progress(plan, alive, None)
+    }
+    fn run_with_progress(
+        &self,
+        plan: &AgentPlan,
+        alive: &dyn Fn() -> bool,
+        progress: Option<std::sync::Arc<AgentLiveProgress>>,
+    ) -> Result<String, (AgentError, String)> {
         let never = std::sync::atomic::AtomicBool::new(false);
-        let result = unix_process::run_fixture_process(
+        let result = unix_process::run_fixture_process_with_progress(
             &plan.executable,
             &plan.argv,
             &plan.workspace,
@@ -969,6 +1029,7 @@ impl engine::AgentRunner for UnixGroupRunner {
             alive,
             &never,
             std::time::Duration::from_secs(MAX_RUN_SECONDS),
+            progress,
         )
         .map_err(|_| (AgentError::RunFailed, String::new()))?;
         let output = final_answer(plan.provider, &result.output);

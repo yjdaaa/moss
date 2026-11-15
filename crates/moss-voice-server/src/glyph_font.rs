@@ -617,6 +617,29 @@ impl FullGlyphProvider {
         Some(arc)
     }
 
+    fn extract_glyph(
+        &self,
+        cap: &TextFontCapability,
+        cp: u32,
+        fallback_basic: Option<&ParsedCbin>,
+    ) -> Option<(GlyphItem, usize)> {
+        self.font_for(cp, cap.size, cap.bpp)
+            .and_then(|font| font.glyph(cp))
+            .or_else(|| fallback_basic.and_then(|font| font.glyph(cp)))
+    }
+
+    fn has_glyph(
+        &self,
+        cap: &TextFontCapability,
+        cp: u32,
+        fallback_basic: Option<&ParsedCbin>,
+    ) -> bool {
+        self.charsets
+            .get(&cap.charset)
+            .is_some_and(|set| set.contains(&cp))
+            || self.extract_glyph(cap, cp, fallback_basic).is_some()
+    }
+
     fn payload_for_text(&self, cap: &TextFontCapability, text: &str) -> Option<GlyphPushPayload> {
         if !self.supports(cap) || text.is_empty() {
             return None;
@@ -634,11 +657,7 @@ impl FullGlyphProvider {
             if cp < 0x20 || device_charset.contains(&cp) || !seen.insert(cp) {
                 continue;
             }
-            let extracted = self
-                .font_for(cp, cap.size, cap.bpp)
-                .and_then(|font| font.glyph(cp))
-                .or_else(|| fallback_basic.and_then(|font| font.glyph(cp)));
-            let Some((item, byte_count)) = extracted else {
+            let Some((item, byte_count)) = self.extract_glyph(cap, cp, fallback_basic) else {
                 continue;
             };
             if glyphs.len() >= MAX_GLYPHS
@@ -745,6 +764,73 @@ impl GlyphFontService {
         }
         glyph_push_for_text(Some(cap), text)
     }
+
+    /// 当前设备字库规格对应的全量分片补字库是否已就位。
+    pub fn full_pack_ready(&self, capability: Option<&TextFontCapability>) -> bool {
+        let Some(cap) = capability else {
+            return false;
+        };
+        self.full_provider()
+            .is_some_and(|provider| provider.supports(cap))
+    }
+
+    /// 这段文字里设备屏幕显示不出、MOSS 这边也补不上的字（去重，按出现顺序）。
+    ///
+    /// 官方固件遇到字库里没有的字时宽度记 0、什么都不画，用户看到的是句子“少了几个字”。
+    /// 全量补字库就位时，仍会检查设备字符集与全量分片字库都未收录的字符（如表情或超大字集罕见字）；
+    /// 没就位时：`common` 设备缺的是内置常用字库以外的字，`basic` 设备缺的是基础字表与内置常用字库都没有的字。
+    /// 设备未声明字库能力时无从判断，返回空。
+    pub fn undisplayable_chars(
+        &self,
+        capability: Option<&TextFontCapability>,
+        text: &str,
+    ) -> Vec<char> {
+        let Some(cap) = capability else {
+            return Vec::new();
+        };
+        if cap.bundle != FONT_BUNDLE_ID || !matches!(cap.charset.as_str(), "basic" | "common") {
+            return Vec::new();
+        }
+        let basic = basic_charset();
+        if text
+            .chars()
+            .all(|ch| (ch as u32) < 0x20 || basic.contains(&(ch as u32)))
+        {
+            return Vec::new();
+        }
+        if let Some(provider) = self.full_provider()
+            && provider.supports(cap)
+        {
+            let fallback_basic = (cap.charset == "basic")
+                .then(|| parsed_font(cap.size, cap.bpp))
+                .flatten();
+            let mut seen = BTreeSet::new();
+            return text
+                .chars()
+                .filter(|ch| {
+                    let cp = *ch as u32;
+                    cp >= 0x20
+                        && !ch.is_whitespace()
+                        && !provider.has_glyph(cap, cp, fallback_basic)
+                        && seen.insert(cp)
+                })
+                .collect();
+        }
+        let Some(font) = parsed_font(cap.size, cap.bpp) else {
+            return Vec::new();
+        };
+        let mut seen = BTreeSet::new();
+        text.chars()
+            .filter(|ch| {
+                let cp = *ch as u32;
+                cp >= 0x20
+                    && !ch.is_whitespace()
+                    && !basic.contains(&cp)
+                    && font.glyph(cp).is_none()
+                    && seen.insert(cp)
+            })
+            .collect()
+    }
 }
 
 /// 内置 `common` 兜底补字：无全量分片包时，仅对 `charset == "basic"` 的设备补齐日常汉字。
@@ -798,6 +884,54 @@ pub(crate) mod tests {
     fn sha256_hex(bytes: &[u8]) -> String {
         let digest = Sha256::digest(bytes);
         digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn undisplayable_chars_lists_only_what_neither_side_can_draw() {
+        let service = GlyphFontService::default();
+        let cap = |charset: &str| TextFontCapability {
+            bundle: FONT_BUNDLE_ID.into(),
+            charset: charset.into(),
+            size: 20,
+            bpp: 4,
+        };
+        // 没有全量补字库：内置常用字库以外的字（如“镭”“椴”）在 common 与 basic 设备上都画不出来
+        let text = "镭雕椴木，开始镭雕";
+        assert!(!service.full_pack_ready(Some(&cap("common"))));
+        assert_eq!(
+            service.undisplayable_chars(Some(&cap("common")), text),
+            vec!['镭', '椴']
+        );
+        assert_eq!(
+            service.undisplayable_chars(Some(&cap("basic")), text),
+            vec!['镭', '椴']
+        );
+        assert!(
+            service
+                .undisplayable_chars(Some(&cap("common")), "开始雕刻")
+                .is_empty()
+        );
+        assert!(service.undisplayable_chars(None, text).is_empty());
+
+        // 全量补字库就位后：分片已收录的生僻字/扩展汉字（“椴”“𠮷”“桜”）不再报缺，但分片和设备字库都没有的字（如 emoji / 超出分片的字）仍会报出
+        let tmp = tempfile::tempdir().unwrap();
+        let full_dir = tmp.path().join("noto_v1_full");
+        write_synthetic_full_bundle(&full_dir);
+        let full_service = GlyphFontService::new(Some(full_dir));
+        assert!(full_service.full_pack_ready(Some(&cap("common"))));
+        assert!(
+            full_service
+                .undisplayable_chars(Some(&cap("common")), "𠮷野家桜激光雕刻椴木")
+                .is_empty()
+        );
+        assert_eq!(
+            full_service.undisplayable_chars(Some(&cap("common")), "椴木龑😀"),
+            vec!['龑', '😀']
+        );
+        assert_eq!(
+            full_service.undisplayable_chars(Some(&cap("basic")), "雕刻椴木龑"),
+            vec!['龑']
+        );
     }
 
     #[test]

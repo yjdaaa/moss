@@ -30,6 +30,9 @@ use tokio::time::Instant;
 /// 默认系统提示（NV4 接入雕刻工具时补充工具使用规则）。
 pub const DEFAULT_SYSTEM_PROMPT: &str = "你是 MOSS，一个运行在用户电脑上的中文语音助手，通过小智设备与用户对话。\
 回答要简短、口语化，一般不超过三句话；不要使用 Markdown、列表和代码块，句子中间不要用表情符号，因为你的回答会被直接朗读出来。\
+像面对面聊天那样说话：开口就直接回答，不要先复述问题或说客套话；句子要短，一句话超过十五个字就用逗号断开；可以自然地带一点“嗯”“好”“这样”之类的口语词，但不要每句都带；数字和单位写成能直接念出来的样子，不用括号、斜杠和英文缩写；要列举几样东西时用逗号连成一句话；一次只问一个问题；\
+内容比较多时先说最要紧的一两句，再问要不要接着听。\
+用户的话是语音识别出来的，可能有同音错字或不完整，按最可能的意思理解，不要纠正用户的用词；确实听不明白就简短地请他再说一遍。\
 可以在整段回答的最开头放一个表情（😊 开心、🤔 思考、😮 惊讶、😢 难过），它只用来切换小智屏幕上的表情、不会被读出来；没有合适的就不放。\
 不知道的事情就直接说不知道，不要编造。\
 需要让激光机运动或出光（开始加工、发送任务、续雕、设定原点、走边框等）时：先复述材料、厚度、内容与功率速度次数，\
@@ -38,6 +41,9 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "你是 MOSS，一个运行在用户电�
 
 /// 不可被任何风格预设或自定义补充提示覆盖的底层语音与硬件安全铁律。
 pub const IMMUTABLE_SAFETY_RULES: &str = "回答要简短、口语化，一般不超过三句话；不要使用 Markdown、列表和代码块，句子中间不要用表情符号，因为你的回答会被直接朗读出来。\
+像面对面聊天那样说话：开口就直接回答，不要先复述问题或说客套话；句子要短，一句话超过十五个字就用逗号断开；可以自然地带一点“嗯”“好”“这样”之类的口语词，但不要每句都带；数字和单位写成能直接念出来的样子，不用括号、斜杠和英文缩写；要列举几样东西时用逗号连成一句话；一次只问一个问题；\
+内容比较多时先说最要紧的一两句，再问要不要接着听。\
+用户的话是语音识别出来的，可能有同音错字或不完整，按最可能的意思理解，不要纠正用户的用词；确实听不明白就简短地请他再说一遍。\
 可以在整段回答的最开头放一个表情（😊 开心、🤔 思考、😮 惊讶、😢 难过），它只用来切换小智屏幕上的表情、不会被读出来；没有合适的就不放。\
 不知道的事情就直接说不知道，不要编造。\
 需要让激光机运动或出光（开始加工、发送任务、续雕、设定原点、走边框等）时：先复述材料、厚度、内容与功率速度次数，\
@@ -209,6 +215,9 @@ pub const SLOW_GENERATE_FILLER: &str = "稍等，正在生成预览。";
 /// n72 只读检查机器连接（串口 / 网络探测要几秒）时的过渡垫音
 pub const SLOW_CHECK_FILLER: &str = "稍等，我看一下机器。";
 
+/// 慢工具垫音的起说延迟：工具在这之内返回就不说垫音（快的时候不说废话，慢的时候不冷场）。
+pub const SLOW_TOOL_FILLER_DELAY: Duration = Duration::from_millis(1000);
+
 /// n72（2026-11-08 用户决定）：激光工具在场时附在每轮系统提示后的用法表，让模型按用户说法选对工具。
 /// 只写工具怎么选，确认与停止规则仍以 [`IMMUTABLE_SAFETY_RULES`] 为准。
 pub const LASER_TOOL_GUIDE: &str = "激光工具怎么选：\
@@ -338,10 +347,21 @@ impl Default for ConversationSettings {
         Self {
             system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
             history_budget: 4000,
-            exit_words: ["退出", "再见", "拜拜", "退下", "关闭对话"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            exit_words: [
+                "退出",
+                "再见",
+                "拜拜",
+                "退下",
+                "休息",
+                "去休息",
+                "没事了",
+                "不聊了",
+                "关闭对话",
+                "结束对话",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
             wake_reply: Some("我在".into()),
             goodbye: "好的，再见".into(),
             error_reply: "抱歉，我这边出了点问题，请稍后再试".into(),
@@ -355,6 +375,15 @@ impl Default for ConversationSettings {
             asr_corrections: Vec::new(),
         }
     }
+}
+
+/// n88 尾音语义判停提供方（如本地 Smart Turn v3）：评估截止停顿时刻最后不超过 8 秒音频的说完概率（`0.0..=1.0`）。
+pub trait TurnEndPredictor: Send + Sync {
+    fn predict_turn_end<'a>(
+        &'a self,
+        pcm: &'a [i16],
+        sample_rate: u32,
+    ) -> BoxFuture<'a, Option<f32>>;
 }
 
 /// 对话所需的模型与工具。整个服务共享一份，每台设备的历史在各自的会话里。
@@ -379,6 +408,8 @@ pub struct Conversation {
     pub jev_filter: Option<Arc<crate::jev::VoiceJevFilter>>,
     /// n59 当前说话角色；挂载后每轮用它的提示词代替 `settings.system_prompt`（可被语音或界面热切换）
     pub persona: Option<Arc<crate::persona::PersonaSwitch>>,
+    /// n88 尾音语义判停预测器；默认为空，开启后用于辅助评估用户停顿时是否意犹未尽。
+    pub turn_predictor: Option<Arc<dyn TurnEndPredictor>>,
     /// 固定话术（唤醒回应、再见）的合成结果缓存
     cache: Mutex<Vec<(String, Pcm)>>,
 }
@@ -414,8 +445,15 @@ impl Conversation {
             context_extraction: None,
             jev_filter: None,
             persona: None,
+            turn_predictor: None,
             cache: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 挂载 n88 尾音语义判停预测器（Smart Turn v3 等）。
+    pub fn with_turn_predictor(mut self, predictor: Arc<dyn TurnEndPredictor>) -> Self {
+        self.turn_predictor = Some(predictor);
+        self
     }
 
     /// 挂载 n59 说话角色：提示词随语音或界面切换即时更新。
@@ -481,15 +519,58 @@ impl Conversation {
         self.fallback_tts = Some(fallback_tts);
         self
     }
+    /// 整句退出意图：去掉称呼、起头词与句尾语气词后须与退出词完全相等
+    /// （“小智退下吧”“好了你退下”算，“不要退下”“退出登录”不算，留给正常对话）。
     fn is_exit(&self, text: &str) -> bool {
-        let normalized: String = text.chars().filter(|c| c.is_alphanumeric()).collect();
-        !normalized.is_empty()
-            && self.settings.exit_words.iter().any(|word| {
-                word.chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect::<String>()
-                    == normalized
-            })
+        const PREFIXES: &[&str] = &[
+            "你好小智",
+            "小智同学",
+            "小智",
+            "好了",
+            "好的",
+            "好吧",
+            "行了",
+            "可以了",
+            "那就",
+            "那你",
+            "那",
+            "你可以",
+            "你先",
+            "你就",
+            "你",
+            "先",
+        ];
+        const SUFFIXES: &[&str] = &["去吧", "吧", "了", "啊", "啦", "呀", "哦", "咯"];
+        let normalized = crate::fast::normalized(text);
+        let mut core = normalized.as_str();
+        let matches = |core: &str| {
+            !core.is_empty()
+                && self
+                    .settings
+                    .exit_words
+                    .iter()
+                    .any(|word| crate::fast::normalized(word) == core)
+        };
+        if matches(core) {
+            return true;
+        }
+        for _ in 0..3 {
+            if let Some(rest) = PREFIXES.iter().find_map(|p| core.strip_prefix(p)) {
+                core = rest;
+                if matches(core) {
+                    return true;
+                }
+            }
+        }
+        for _ in 0..2 {
+            if let Some(rest) = SUFFIXES.iter().find_map(|p| core.strip_suffix(p)) {
+                core = rest;
+                if matches(core) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     async fn cached_speech(&self, text: &str) -> Result<Pcm, ProviderError> {
@@ -730,6 +811,8 @@ pub enum TurnEvent {
     },
     /// 退出词已经确认，合成再见之前就关闭插话检测。
     Closing,
+    /// 这一轮开始执行工具：此后用户接着说话不再整轮重来（工具可能有副作用，不能执行两遍）
+    ToolsStarted,
     Timing {
         stage: &'static str,
         ms: u64,
@@ -741,6 +824,8 @@ pub enum TurnEvent {
     TextReply(String),
     /// 识别结果（会话发 `stt`）
     Heard(String),
+    /// 尾音语义判停模型给出的说完概率（`0.0..=1.0`）
+    SmartTurnProb(f32),
     /// 原始识别结果与 0ms 同音纠偏后的文本（供默认关闭的仅内存排障流使用）
     RawHeard {
         raw: String,
@@ -789,9 +874,20 @@ struct Turn {
     events: UnboundedSender<TurnEvent>,
     device: Option<DeviceTools>,
     _session_person_hint: Option<crate::person_context::PersonScope>,
+    /// 抢跑闸门；没有闸门（`None`）时不等待。
+    gate: Option<TurnGate>,
 }
 
 impl Turn {
+    async fn wait_release(&self) {
+        if let Some(mut release) = self.gate.as_ref().map(|gate| gate.release.clone())
+            && release.wait_for(|released| *released).await.is_err()
+        {
+            // 会话已放弃这一轮（用户接着说了）：绝不能往下执行工具，等任务被中止
+            std::future::pending::<()>().await;
+        }
+    }
+
     async fn fixed_tool(&self, name: &str, arguments: Value) -> crate::tools::ToolHostResult {
         let began = Instant::now();
         let arguments = arguments.to_string();
@@ -1487,6 +1583,22 @@ impl Turn {
         mut history: Vec<ChatMessage>,
     ) {
         let settings = &self.conversation.settings;
+        let mut smart_turn_task = if self
+            .gate
+            .as_ref()
+            .is_some_and(|g| g.speculative && !g.hold_llm)
+            && !pcm.is_empty()
+            && sample_rate > 0
+            && let Some(predictor) = self.conversation.turn_predictor.clone()
+        {
+            let max_samples = (sample_rate as usize).saturating_mul(8);
+            let tail = pcm[pcm.len().saturating_sub(max_samples)..].to_vec();
+            Some(tokio::spawn(async move {
+                predictor.predict_turn_end(&tail, sample_rate).await
+            }))
+        } else {
+            None
+        };
         let mut identity = self
             .conversation
             .personal_context
@@ -1495,6 +1607,9 @@ impl Turn {
         let text = match self.transcribe(&pcm, sample_rate, stream).await {
             Ok(text) => text,
             Err(error) => {
+                if let Some(task) = smart_turn_task.take() {
+                    task.abort();
+                }
                 self.send(TurnEvent::Failed(error));
                 self.speak_fixed(&settings.error_reply).await;
                 self.send(TurnEvent::Done {
@@ -1508,8 +1623,24 @@ impl Turn {
         let raw_text = text;
         let text = apply_asr_corrections(&raw_text, &settings.asr_corrections);
         if !moss_voice_providers::text::speakable(&text) || crate::fast::is_noise_filler(&text) {
+            if let Some(task) = smart_turn_task.take() {
+                task.abort();
+            }
             self.send(TurnEvent::Ignored);
             return;
+        }
+        if crate::fast::is_stop(&text) || self.conversation.is_exit(&text) {
+            if let Some(task) = smart_turn_task.take() {
+                task.abort();
+            }
+        } else if let Some(mut task) = smart_turn_task.take() {
+            match tokio::time::timeout(Duration::from_millis(250), &mut task).await {
+                Ok(Ok(Some(prob))) if prob.is_finite() => {
+                    self.timing("smart_turn");
+                    self.send(TurnEvent::SmartTurnProb(prob.clamp(0.0, 1.0)));
+                }
+                _ => task.abort(),
+            }
         }
         self.send(TurnEvent::RawHeard {
             raw: raw_text,
@@ -1527,6 +1658,19 @@ impl Turn {
                 close: true,
             });
             return;
+        }
+        if let Some(gate) = self.gate.as_ref().filter(|gate| gate.hold_llm) {
+            // 这一轮是对正在播的回答的插话：会话确认它不是附和之前不请求大模型；
+            // 确认后被打断的回答才进历史，用会话给的最新历史
+            self.wait_release().await;
+            if let Some(fresh) = gate
+                .fresh_history
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+            {
+                history = fresh;
+            }
         }
         // Stop and exit shortcuts above never wait for speaker work. Unknown
         // identity has no personal history or fallback device summary.
@@ -1662,6 +1806,10 @@ impl Turn {
         let first_new = messages.len();
         messages.extend(personal_turn_prefix);
         messages.push(ChatMessage::user(text));
+        // 保留名 end_conversation 始终由宿主自己持有（官方服务端默认加载的 handle_exit_intent 同理）：
+        // 用户换着说法表示聊完了（没命中整句退出词）时由模型调用，说完告别语后结束这一轮对话
+        tools.retain(|spec| spec.name != END_CONVERSATION_TOOL);
+        tools.push(end_conversation_tool());
         let mut emotion_sent = false;
         let mut spoke_any = false;
         let mut filler_spoken = false;
@@ -1700,6 +1848,8 @@ impl Turn {
                 Some(reply.text),
                 reply.tool_calls.clone(),
             ));
+            // 抢跑：这一轮可能在用户话还没说完时就开始了，工具调用与退出工具都可能有副作用，等会话确认说完再执行
+            self.wait_release().await;
             if rounds > settings.max_tool_rounds {
                 // 不执行这一轮的工具；补上结果，保证历史中每个调用都有对应结果
                 for call in &reply.tool_calls {
@@ -1718,6 +1868,32 @@ impl Turn {
                 self.speak_fixed(&settings.error_reply).await;
                 break;
             }
+            if let Some(exit) = reply
+                .tool_calls
+                .iter()
+                .find(|call| call.function.name == END_CONVERSATION_TOOL)
+            {
+                // 同一轮里的其他工具一律不执行（可能有副作用），补上结果保证历史配对
+                for call in &reply.tool_calls {
+                    messages.push(ChatMessage::tool(call.id.clone(), "对话已结束"));
+                }
+                self.send(TurnEvent::Closing);
+                if !spoke_any {
+                    let farewell = serde_json::from_str::<Value>(&exit.function.arguments)
+                        .ok()
+                        .and_then(|args| {
+                            args["farewell"].as_str().map(str::trim).map(str::to_owned)
+                        })
+                        .filter(|text| !text.is_empty() && text.chars().count() <= 40)
+                        .unwrap_or_else(|| settings.goodbye.clone());
+                    self.speak_fixed(&farewell).await;
+                }
+                self.send(TurnEvent::Done {
+                    messages: messages.split_off(first_new),
+                    close: true,
+                });
+                return;
+            }
             // Never mix a music playback request with any other tool in the
             // same model turn; other tools could have side effects.
             if reply
@@ -1735,6 +1911,13 @@ impl Turn {
                 });
                 return;
             }
+            if let Some(gate) = &self.gate
+                && !gate.tool_latch.enter_tools()
+            {
+                // 会话已把这一轮作废、合并到新一轮重来：一个工具都不能执行，等任务被中止
+                std::future::pending::<()>().await;
+            }
+            self.send(TurnEvent::ToolsStarted);
             let mut direct = Vec::new();
             let mut music = None;
             let tool_outcomes = if !spoke_any
@@ -1742,10 +1925,16 @@ impl Turn {
                 && rounds == 1
                 && let Some(filler) = slow_tool_filler(&reply.tool_calls)
             {
-                filler_spoken = true;
-                let (_, outcomes) =
-                    tokio::join!(self.speak_fixed(filler), self.run_tools(&reply.tool_calls),);
-                outcomes
+                let running = self.run_tools(&reply.tool_calls);
+                tokio::pin!(running);
+                match tokio::time::timeout(SLOW_TOOL_FILLER_DELAY, &mut running).await {
+                    Ok(outcomes) => outcomes,
+                    Err(_) => {
+                        filler_spoken = true;
+                        let (_, outcomes) = tokio::join!(self.speak_fixed(filler), running);
+                        outcomes
+                    }
+                }
             } else {
                 self.run_tools(&reply.tool_calls).await
             };
@@ -1786,6 +1975,22 @@ impl Turn {
             messages: messages.split_off(first_new),
             close: false,
         });
+    }
+}
+
+const END_CONVERSATION_TOOL: &str = "end_conversation";
+
+fn end_conversation_tool() -> ToolSpec {
+    ToolSpec {
+        name: END_CONVERSATION_TOOL.into(),
+        description: "结束本次语音对话并让设备回到待命。仅当用户明确表示聊完了、要你退下、去休息、不用了、告别时调用；用户只是说“停”“等一下”或还在提问时不要调用。"
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "farewell": {"type": "string", "description": "一句简短的告别语，不超过 15 个字"}
+            }
+        }),
     }
 }
 
@@ -1842,6 +2047,90 @@ pub fn spawn_turn_with_person_hint(
     tokio::task::JoinHandle<()>,
     tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
 ) {
+    spawn_turn_gated(
+        conversation,
+        context,
+        input,
+        history,
+        device,
+        session_person_hint,
+        None,
+    )
+}
+
+/// 抢跑闸门：会话在确认用户这句话说完之前先让对话任务开跑，用它控制哪些事必须等确认。
+#[derive(Clone)]
+pub struct TurnGate {
+    /// 变为 `true` 即放行；发送端被丢弃表示这一轮已作废，任务原地等待被中止。
+    /// 放行后会话仍可把它置回 `false`（插话时暂停回答）：任务在下一批工具调用前会停下来等
+    pub release: tokio::sync::watch::Receiver<bool>,
+    /// 这一轮“开始执行工具”与“被会话作废重来”只能发生其一（见 [`ToolLatch`]）
+    pub tool_latch: Arc<ToolLatch>,
+    /// 这一轮是在静音判停时抢跑开始的（只有这种轮次才需要语义判停辅助决定还要等多久）
+    pub speculative: bool,
+    /// 为真时连大模型请求也等放行（对正在播的回答的插话：先只做识别）；
+    /// 为假时只有大模型发起的工具调用等放行
+    pub hold_llm: bool,
+    /// `hold_llm` 放行时会话给的最新历史（被打断的回答此时才进历史）
+    pub fresh_history: Arc<Mutex<Option<Vec<ChatMessage>>>>,
+}
+
+/// 一轮对话的工具执行闩：任务开始执行工具与会话把这一轮作废重来（思考中用户接着说）互斥，
+/// 由原子比较交换决出先后——否则会话可能在任务已经发起工具调用的瞬间把它中止，再让合并后的新一轮
+/// 把同一个工具执行第二遍。状态只会从“未定”走向“已开始执行工具”或“已作废”，不会回退。
+#[derive(Debug, Default)]
+pub struct ToolLatch(std::sync::atomic::AtomicU8);
+
+const LATCH_OPEN: u8 = 0;
+const LATCH_TOOLS_STARTED: u8 = 1;
+const LATCH_ABANDONED: u8 = 2;
+
+impl ToolLatch {
+    /// 任务调用工具前：成功（或之前已开始过）返回 `true`；这一轮已被作废返回 `false`。
+    pub fn enter_tools(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        match self.0.compare_exchange(
+            LATCH_OPEN,
+            LATCH_TOOLS_STARTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(state) => state == LATCH_TOOLS_STARTED,
+        }
+    }
+
+    /// 会话要把这一轮作废重来：工具还没开始执行才成功。
+    pub fn try_abandon(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.0
+            .compare_exchange(
+                LATCH_OPEN,
+                LATCH_ABANDONED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn tools_started(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == LATCH_TOOLS_STARTED
+    }
+}
+
+/// 同 [`spawn_turn_with_person_hint`]，另带抢跑闸门。
+pub fn spawn_turn_gated(
+    conversation: Arc<Conversation>,
+    context: ToolContext,
+    input: TurnInput,
+    history: Vec<ChatMessage>,
+    device: Option<DeviceTools>,
+    session_person_hint: Option<crate::person_context::PersonScope>,
+    gate: Option<TurnGate>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
+) {
     let (events, receiver) = unbounded_channel();
     let turn = Turn {
         conversation,
@@ -1849,6 +2138,7 @@ pub fn spawn_turn_with_person_hint(
         events,
         device,
         _session_person_hint: session_person_hint,
+        gate,
         started: Instant::now(),
         measured: Mutex::default(),
     };
@@ -1888,4 +2178,37 @@ pub fn spawn_turn_with_person_hint(
 pub fn append_history(history: &mut Vec<ChatMessage>, messages: Vec<ChatMessage>, budget: usize) {
     history.extend(messages);
     truncate_history(history, budget);
+}
+
+#[cfg(test)]
+mod tool_latch_tests {
+    use super::ToolLatch;
+
+    /// “开始执行工具”与“作废重来”只能有一个成功，且不会回退。
+    #[test]
+    fn tool_start_and_abandon_are_mutually_exclusive() {
+        let latch = ToolLatch::default();
+        assert!(latch.enter_tools());
+        assert!(latch.tools_started());
+        assert!(!latch.try_abandon(), "已开始执行工具就不能再作废重来");
+        assert!(latch.enter_tools(), "同一轮后续的工具轮次照常执行");
+
+        let latch = ToolLatch::default();
+        assert!(latch.try_abandon());
+        assert!(!latch.enter_tools(), "作废之后一个工具都不能执行");
+        assert!(!latch.tools_started());
+
+        // 两边同时抢：恰好一方成功
+        for _ in 0..200 {
+            let latch = std::sync::Arc::new(ToolLatch::default());
+            let other = latch.clone();
+            let task = std::thread::spawn(move || other.enter_tools());
+            let abandoned = latch.try_abandon();
+            let entered = task.join().unwrap();
+            assert!(
+                abandoned != entered,
+                "abandoned={abandoned} entered={entered}"
+            );
+        }
+    }
 }
