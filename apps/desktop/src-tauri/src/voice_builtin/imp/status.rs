@@ -390,6 +390,8 @@ impl BuiltinVoice {
                 "vad_model": settings.builtin_local.vad_model,
                 "denoise": settings.builtin_local.denoise,
                 "denoise_model": settings.builtin_local.denoise_model,
+                "kws": settings.builtin_local.kws,
+                "kws_model": settings.builtin_local.kws_model,
                 "turn": settings.builtin_local.turn,
                 "turn_model": settings.builtin_local.turn_model,
             },

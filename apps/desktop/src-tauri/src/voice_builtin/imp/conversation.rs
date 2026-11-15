@@ -5,6 +5,8 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RunningLocalSpec {
     vad: Option<(&'static str, std::path::PathBuf)>,
+    /// 命令词检测模型目录（随本地判停运行，n101）
+    kws: Option<(&'static str, std::path::PathBuf)>,
     denoise: Option<(&'static str, std::path::PathBuf)>,
     asr: Option<(&'static str, std::path::PathBuf, bool, Vec<String>)>,
     pub(super) tts: Option<(
@@ -33,6 +35,7 @@ pub(super) struct LocalParts {
     pub(super) turn_predictor: Option<Arc<dyn TurnEndPredictor>>,
     pub(super) denoise_active: Option<&'static str>,
     pub(super) turn_active: Option<&'static str>,
+    pub(super) kws_active: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -700,6 +703,12 @@ impl BuiltinVoice {
         } else {
             None
         };
+        // 命令词检测跑在本地判停流上：没开本地判停时不加载
+        let kws = if vad.is_some() {
+            pick(ModelKind::Kws)
+        } else {
+            None
+        };
         let (speech_tts, helper_tts) = match tts {
             Some((spec, dir)) if spec.engine.uses_speech_runtime() => (Some((spec, dir)), None),
             other => (None, other),
@@ -754,6 +763,7 @@ impl BuiltinVoice {
         let helper = LocalHelper::spawn(&exe).map_err(|error| start_error(error.to_string()))?;
         let mut running_spec = RunningLocalSpec {
             vad: None,
+            kws: None,
             denoise: None,
             asr: None,
             tts: None,
@@ -772,6 +782,8 @@ impl BuiltinVoice {
             } else {
                 VadEngine::Silero
             };
+            // 单文件（Silero v4 / TEN）即文件本身；目录包（Silero v6.2）取目录内的模型文件
+            let model = resolve_model_entry_file(&model, spec);
             helper
                 .load_vad(&model, VadParams::for_engine(engine), engine)
                 .map_err(|error| start_error(format!("本地判停（{}）：{}", spec.label, error)))?;
@@ -779,6 +791,13 @@ impl BuiltinVoice {
             parts.vad = Some(Arc::new(LocalVadFactory {
                 helper: helper.clone(),
             }));
+            if let Some((spec, dir)) = kws {
+                helper.load_kws(Some(&dir)).map_err(|error| {
+                    start_error(format!("命令词抗噪（{}）：{}", spec.label, error))
+                })?;
+                running_spec.kws = Some((spec.id, dir));
+                parts.kws_active = Some(spec.id);
+            }
         }
         if let Some((spec, dir)) = asr {
             let engine = helper_asr_engine(spec.engine);
@@ -862,6 +881,11 @@ impl BuiltinVoice {
         } else {
             None
         };
+        let kws = if vad.is_some() {
+            pick(ModelKind::Kws)
+        } else {
+            None
+        };
         if vad.is_none() && asr.is_none() && tts.is_none() && turn.is_none() && denoise.is_none() {
             let mut parts = LocalParts::default();
             self.attach_fallback_tts(&mut parts, local, None, colab_tts_override);
@@ -896,10 +920,16 @@ impl BuiltinVoice {
                 };
                 let vad_matches = match &vad {
                     Some((spec, path)) => {
-                        running_spec.vad.as_ref() == Some(&(spec.id, path.clone()))
+                        running_spec.vad.as_ref()
+                            == Some(&(spec.id, resolve_model_entry_file(path, spec)))
                     }
                     None => true,
                 };
+                let kws_matches = running_spec.kws.as_ref()
+                    == kws
+                        .as_ref()
+                        .map(|(spec, dir)| (spec.id, dir.clone()))
+                        .as_ref();
                 let asr_matches = match &asr {
                     Some((spec, dir)) => {
                         running_spec.asr.as_ref()
@@ -922,6 +952,7 @@ impl BuiltinVoice {
                 };
                 if denoise_matches
                     && vad_matches
+                    && kws_matches
                     && asr_matches
                     && let Some(tts_info) = tts_info
                 {
@@ -941,6 +972,9 @@ impl BuiltinVoice {
             if let Some((helper, tts_info)) = reusable_helper {
                 if let Some((spec, _)) = denoise {
                     parts.denoise_active = Some(spec.id);
+                }
+                if let Some((spec, _)) = kws {
+                    parts.kws_active = Some(spec.id);
                 }
                 if vad.is_some() {
                     parts.vad = Some(Arc::new(LocalVadFactory {
@@ -1193,6 +1227,9 @@ impl BuiltinVoice {
         if jev_options.active() && jev_ready {
             labels.push(format!("Jev:{jev_model}"));
         }
+        if let Some(kws_id) = local.kws_active {
+            labels.push(format!("Kws:{kws_id}"));
+        }
         if let Some(denoise_id) = local.denoise_active {
             labels.push(format!("Denoise:{denoise_id}"));
         }
@@ -1242,6 +1279,8 @@ impl BuiltinVoice {
                 asr_corrections,
                 read_only_shortcuts: experience.read_only_shortcuts,
                 announce_job_done: experience.job_done_announce,
+                ignore_bystanders: experience.ignore_bystanders,
+                command_keywords: local.kws_active.is_some(),
                 screen_preview_sync: experience.screen_preview_sync,
                 model_labels: labels,
                 ..Default::default()

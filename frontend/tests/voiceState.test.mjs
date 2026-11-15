@@ -110,6 +110,7 @@ import {
   builtinJevForm,
   builtinJevSavePayload,
   externalModelSummary,
+  preferencesShowJev,
 } from "../src/voiceState.js";
 
 test("语音中心只在桌面端（有 invoke、有桌面会话、非手机远程模式）可用（A-69）", () => {
@@ -307,9 +308,9 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.equal(localModelView(null).text, "未下载");
   const form = localSettingsForm({ asr: true, tts_speaker: 3, tts_speed: 1.2 });
   assert.deepEqual(form, {
-    asr: true, tts: false, vad: false, denoise: false, turn: false,
-    vad_model: "silero_vad", denoise_model: "gtcrn_simple", turn_model: "smart_turn_v3", asr_model: "sense_voice", tts_model: "kokoro",
-    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: "",
+    asr: true, tts: false, vad: false, denoise: false, kws: false, turn: false,
+    vad_model: "silero_vad", denoise_model: "gtcrn_simple", kws_model: "kws_zipformer_zh", turn_model: "smart_turn_v3", asr_model: "sense_voice", tts_model: "kokoro",
+    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, ignore_bystanders: true, llm_fast_reply: true, custom_hotwords: "",
     asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_risk_notes: false, persona_prompt: "", custom_personas: "[]", screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: "400",
@@ -320,9 +321,9 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.match(localSettingsError({ ...form, tts_speed: "3" }), /0.5/);
   assert.match(localSettingsError({ ...form, mirror: "ftp://x" }), /http/);
   assert.deepEqual(localSettingsPayload({ ...form, mirror: " https://m.test/x " }), {
-    asr: true, tts: false, vad: false, denoise: false, turn: false,
-    vad_model: "silero_vad", denoise_model: "gtcrn_simple", turn_model: "smart_turn_v3", asr_model: "sense_voice", tts_model: "kokoro",
-    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: [],
+    asr: true, tts: false, vad: false, denoise: false, kws: false, turn: false,
+    vad_model: "silero_vad", denoise_model: "gtcrn_simple", kws_model: "kws_zipformer_zh", turn_model: "smart_turn_v3", asr_model: "sense_voice", tts_model: "kokoro",
+    read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, ignore_bystanders: true, llm_fast_reply: true, custom_hotwords: [],
     asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_risk_notes: false, persona_prompt: "", custom_personas: [], screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
     barge_in: false, barge_in_ms: 400,
@@ -363,6 +364,7 @@ test("本地模型可选：分组、改选合成模型换默认音色、按模�
     { id: "silero_vad", kind: "vad" },
     { id: "ten_vad", kind: "vad" },
     { id: "gtcrn_simple", kind: "denoise" },
+    { id: "kws_zipformer_zh", kind: "kws" },
     { id: "smart_turn_v3", kind: "turn" },
     { id: "sense_voice", kind: "asr" },
     { id: "x_asr_streaming", kind: "asr", streaming: true },
@@ -377,12 +379,13 @@ test("本地模型可选：分组、改选合成模型换默认音色、按模�
   assert.deepEqual(groups.map((group) => [group.kind, group.models.map((model) => model.id)]), [
     ["vad", ["silero_vad", "ten_vad"]],
     ["denoise", ["gtcrn_simple"]],
+    ["kws", ["kws_zipformer_zh"]],
     ["turn", ["smart_turn_v3"]],
     ["asr", ["sense_voice", "x_asr_streaming"]],
     ["tts", ["kokoro", "kokoro_v11", "matcha_zh_en", "qwen3_tts_0_6b", "zipvoice_distill"]],
     ["vision", ["qwen3_vl_2b"]],
   ]);
-  assert.deepEqual(localModelGroups(null).map((group) => group.models.length), [0, 0, 0, 0, 0, 0], "判停 / 降噪 / 语义判停 / 识别 / 合成 / 视觉理解六组");
+  assert.deepEqual(localModelGroups(null).map((group) => group.models.length), [0, 0, 0, 0, 0, 0, 0], "判停 / 降噪 / 命令词 / 语义判停 / 识别 / 合成 / 视觉理解七组");
 
   const form = localSettingsForm({ tts: true, tts_speaker: 50 });
   // 识别、判停改选不动音色
@@ -731,7 +734,7 @@ test("内置云端模型：全量模型列表地址推导、自动拉取条件�
 });
 
 test("内置模型自由混搭视图与一键切换云端/本地载荷（云端配置保留备用）", async () => {
-  const { builtinSectionSourceView, builtinSourceSwitchPayload } = await import("../src/voiceState.js");
+  const { builtinSectionSourceView, builtinSourceSwitchPayload, recommendationState } = await import("../src/voiceState.js");
   const status = {
     models: {
       llm: { configured: true, url: "https://llm.test/v1", model: "qwen-max", key_set: true },
@@ -742,6 +745,7 @@ test("内置模型自由混搭视图与一键切换云端/本地载荷（云端�
       settings: { asr: false, tts: false, vad: false, asr_model: "sense_voice", tts_model: "kokoro", tts_speaker: 50, tts_speed: 1 },
       models: [
         { id: "silero_vad", kind: "vad", label: "Silero VAD", installed: true },
+        { id: "silero_vad_v6", kind: "vad", label: "Silero v6.2", installed: false },
         { id: "ten_vad", kind: "vad", label: "TEN-VAD", installed: false },
         { id: "sense_voice", kind: "asr", label: "SenseVoice 2024", installed: false },
         { id: "kokoro", kind: "tts", label: "Kokoro v1.0", installed: false, voices: { default: 50, max: 53 } },
@@ -761,9 +765,22 @@ test("内置模型自由混搭视图与一键切换云端/本地载荷（云端�
     [
       ["energy", "内置能量判停（免下载）", true],
       ["local:silero_vad", "本地 · Silero VAD", true],
+      ["local:silero_vad_v6", "本地 · Silero v6.2 · 推荐（未下载）", false],
       ["local:ten_vad", "本地 · TEN-VAD（未下载）", false],
     ],
   );
+  // “当前语音链路”下拉框下方的推荐：没选推荐时给出可点的推荐项，已选时显示已是推荐，没有推荐项的环节为 null
+  assert.deepEqual(recommendationState("vad", "energy"), {
+    value: "local:silero_vad_v6",
+    chosen: false,
+    name: "Silero v6.2",
+    why: "噪声下不误触发、听得最准",
+  });
+  assert.equal(recommendationState("asr", "local:sense_voice").chosen, true);
+  assert.equal(recommendationState("tts", "local:kokoro_v11").chosen, false);
+  // 五栏都有推荐行（上下对齐）：大模型推荐云端，Jev 只给中性提示
+  assert.equal(recommendationState("llm", "cloud").chosen, true);
+  assert.equal(recommendationState("jev", "off").neutral, true);
   const toLocalVad = builtinSourceSwitchPayload(status, "vad", "local:silero_vad");
   assert.equal(toLocalVad.vad, true);
   assert.equal(toLocalVad.vad_model, "silero_vad");
@@ -779,7 +796,7 @@ test("内置模型自由混搭视图与一键切换云端/本地载荷（云端�
     ttsCloudView.options.map((opt) => [opt.value, opt.label, opt.installed]),
     [
       ["cloud", "云端（MOSS/TTS-1）", true],
-      ["local:kokoro", "本地 · Kokoro v1.0（未下载）", false],
+      ["local:kokoro", "本地 · Kokoro v1.0 · 推荐（未下载）", false],
       ["local:kokoro_v11", "本地 · Kokoro v1.1", true],
     ],
   );
@@ -1840,4 +1857,60 @@ test("pipelineTestPlan 检查 Qwen3-TTS 本地 speech_env 就绪状态（n93）"
     }).map((s) => [s.key, s]),
   );
   assert.equal(ready.tts.ok, true);
+});
+
+test("按场景推荐的整套模型：一次保存、缺什么提示什么、正在用的那套标出来", async () => {
+  const { MODEL_COMBOS, comboMissing, comboPatch, comboActive, comboSummary, LOCAL_KINDS } = await import("../src/voiceState.js");
+  assert.ok(MODEL_COMBOS.length >= 4, "至少给出几种场景");
+  assert.equal(new Set(MODEL_COMBOS.map((combo) => combo.id)).size, MODEL_COMBOS.length);
+  for (const combo of MODEL_COMBOS) {
+    assert.ok(combo.title && combo.fit && combo.result, combo.id);
+    assert.ok(combo.asr && combo.tts, `${combo.id} 一定有本地识别与合成`);
+  }
+  const quiet = MODEL_COMBOS.find((combo) => combo.vad === null);
+  assert.ok(quiet, "有一套用内置能量判停");
+  // 不用本地判停 / 命令词 / 降噪 / 语义判停时显式关掉，不留旧开关
+  assert.deepEqual(comboPatch(quiet), {
+    vad: false,
+    kws: false,
+    denoise: false,
+    turn: false,
+    asr: true,
+    asr_model: quiet.asr,
+    tts: true,
+    tts_model: quiet.tts,
+  });
+  assert.match(comboSummary(quiet), /^能量判停 \+ /);
+  // 整链实测降噪没有提升识别（n99），推荐的组合都不开降噪；带判停模型的组合缺什么按名称列出（清单里没有的也算缺）
+  assert.ok(MODEL_COMBOS.every((combo) => comboPatch(combo).denoise === false));
+  const picked = MODEL_COMBOS.find((combo) => combo.vad);
+  assert.equal(comboPatch(picked).vad_model, picked.vad);
+  const models = [
+    { id: picked.vad, label: "判停包", installed: false },
+    { id: "kws_zipformer_zh", label: "命令词包", installed: true },
+    { id: picked.asr, label: "识别", installed: true },
+    { id: picked.tts, label: "合成", installed: true },
+  ];
+  assert.deepEqual(comboMissing(picked, models), ["判停包"]);
+  assert.equal(comboMissing(picked, []).length, [picked.vad, picked.kws, picked.turn, picked.asr, picked.tts].filter(Boolean).length);
+  // n101：带命令词抗噪的组合一并打开它；不带的组合显式关掉
+  const withKws = MODEL_COMBOS.find((combo) => combo.kws);
+  assert.equal(comboPatch(withKws).kws, true);
+  assert.equal(comboPatch(withKws).kws_model, "kws_zipformer_zh");
+  assert.ok(MODEL_COMBOS.filter((combo) => combo.kws).every((combo) => combo.vad), "命令词抗噪要本地判停");
+  // 保存后的设置与组合一致时算“正在用”；多开了一个降噪就不算
+  const saved = { ...comboPatch(quiet) };
+  assert.equal(comboActive(quiet, saved), true);
+  assert.equal(comboActive(quiet, { ...saved, denoise: true, denoise_model: "gtcrn_simple" }), false);
+  // 组合里用到的模型类别都在本地模型分组里
+  const kinds = new Set(LOCAL_KINDS.map((item) => item.kind));
+  assert.ok(["vad", "denoise", "turn", "asr", "tts"].every((kind) => kinds.has(kind)));
+});
+
+test("偏好设置里的 Jev 加工反馈判断：除内置链路外都显示，链路未读到前不显示", () => {
+  assert.equal(preferencesShowJev({ hasVoiceCenter: false, voiceMode: null }), true, "网页环境没有语音中心，始终显示");
+  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "official" }), true, "官方链路没有“模型”标签，只能在这里配");
+  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "self_hosted" }), true, "自建链路的“模型”标签没有 Jev 卡片");
+  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: "builtin" }), false, "内置链路由“模型 → Jev”统一管理，不重复");
+  assert.equal(preferencesShowJev({ hasVoiceCenter: true, voiceMode: null }), false, "链路未读到时先不显示，避免闪烁");
 });

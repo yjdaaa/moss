@@ -46,6 +46,9 @@ pub struct PlaybackPump {
     started: bool,
     finished: bool,
     sentence_ended: bool,
+    /// 最近推入的那句音频已全部推入（`mark_sentence_end` / `finish` 置位，新句子推入时清除；
+    /// 与 `sentence_ended` 不同，句尾残帧发完后也不复位）
+    last_sentence_closed: bool,
     fade_in_on_resume: bool,
     starved: bool,
     stats: PumpStats,
@@ -65,6 +68,7 @@ impl PlaybackPump {
             started: false,
             finished: false,
             sentence_ended: false,
+            last_sentence_closed: false,
             fade_in_on_resume: false,
             starved: false,
             stats: PumpStats::default(),
@@ -81,6 +85,7 @@ impl PlaybackPump {
         self.started = false;
         self.finished = false;
         self.sentence_ended = false;
+        self.last_sentence_closed = false;
         self.fade_in_on_resume = false;
         self.starved = false;
         self.stats = PumpStats::default();
@@ -101,6 +106,7 @@ impl PlaybackPump {
     pub fn push_marked(&mut self, pcm: &[i16], mark: String) {
         if !self.finished {
             self.sentence_ended = false;
+            self.last_sentence_closed = false;
             self.marks.push_back((self.pushed, mark));
             self.push(pcm);
         }
@@ -111,6 +117,7 @@ impl PlaybackPump {
     pub fn push_segmented(&mut self, pcm: &[i16], marks: Vec<(u64, String)>) {
         if !self.finished {
             self.sentence_ended = false;
+            self.last_sentence_closed = false;
             let base = self.pushed;
             self.marks.extend(
                 marks
@@ -132,6 +139,7 @@ impl PlaybackPump {
     pub fn mark_sentence_end(&mut self) {
         if !self.finished {
             self.sentence_ended = true;
+            self.last_sentence_closed = true;
             self.clamp_marks();
         }
     }
@@ -181,6 +189,25 @@ impl PlaybackPump {
     /// 还有多少样本没播。
     pub fn buffered_samples(&self) -> usize {
         self.pending.len()
+    }
+
+    /// 已推入、还没随帧发出的句子文字（打断时记下“没说出口的”）。
+    pub fn pending_marks(&self) -> Vec<String> {
+        self.marks.iter().map(|(_, mark)| mark.clone()).collect()
+    }
+
+    /// 当前正在播的这句音频是否已全部推入（后面已有下一句、句尾已标记或上游已结束）。
+    pub fn current_sentence_complete(&self) -> bool {
+        self.finished || self.last_sentence_closed || !self.marks.is_empty()
+    }
+
+    /// 当前正在播的这句还有几帧没发出（到下一个句子标记为止；后面没有标记时为全部未发音频）。
+    pub fn frames_before_next_mark(&self) -> u32 {
+        let samples = match self.marks.front() {
+            Some((at, _)) => at.saturating_sub(self.consumed),
+            None => self.pending.len() as u64,
+        };
+        u32::try_from(samples.div_ceil(self.encoder.frame().max(1) as u64)).unwrap_or(u32::MAX)
     }
 
     pub fn next_frame(&mut self) -> Result<PumpTick, String> {

@@ -30,9 +30,10 @@ use moss_voice_local_proto::{
     VadParams, bytes_to_pcm, pcm_to_bytes, read_frame, write_frame,
 };
 use sherpa_onnx::{
-    GenerationConfig, OfflineFireRedAsrCtcModelConfig, OfflineQwen3ASRModelConfig,
-    OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig,
-    OfflineSpeechDenoiser, OfflineSpeechDenoiserConfig, OfflineSpeechDenoiserGtcrnModelConfig,
+    GenerationConfig, KeywordSpotter, KeywordSpotterConfig, OfflineFireRedAsrCtcModelConfig,
+    OfflineQwen3ASRModelConfig, OfflineRecognizer, OfflineRecognizerConfig,
+    OfflineSenseVoiceModelConfig, OfflineSpeechDenoiser, OfflineSpeechDenoiserConfig,
+    OfflineSpeechDenoiserDpdfNetModelConfig, OfflineSpeechDenoiserGtcrnModelConfig,
     OfflineSpeechDenoiserModelConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
     OfflineTtsMatchaModelConfig, OfflineTtsModelConfig, OfflineTtsZipvoiceModelConfig,
     OnlineRecognizer, OnlineRecognizerConfig, OnlineSpeechDenoiser, OnlineSpeechDenoiserConfig,
@@ -217,19 +218,42 @@ struct Loaded {
     tts: AtomicBool,
     denoiser: AtomicBool,
     smart_turn: AtomicBool,
+    kws: AtomicBool,
     denoiser_slot: Mutex<DenoiserSlot>,
     synth: SynthCancel,
 }
 
+/// 降噪模型按文件名区分：`dpdfnet*.onnx` 走 DPDFNet（sherpa-onnx 1.12.30 起支持，16 kHz 版本），其余按 GTCRN。
+fn is_dpdfnet(model_path: &str) -> bool {
+    Path::new(model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("dpdfnet"))
+}
+
 fn denoiser_model_config(model_path: &str) -> OfflineSpeechDenoiserModelConfig {
+    let (gtcrn, dpdfnet) = if is_dpdfnet(model_path) {
+        (
+            OfflineSpeechDenoiserGtcrnModelConfig::default(),
+            OfflineSpeechDenoiserDpdfNetModelConfig {
+                model: Some(model_path.to_owned()),
+                ..Default::default()
+            },
+        )
+    } else {
+        (
+            OfflineSpeechDenoiserGtcrnModelConfig {
+                model: Some(model_path.to_owned()),
+            },
+            OfflineSpeechDenoiserDpdfNetModelConfig::default(),
+        )
+    };
     OfflineSpeechDenoiserModelConfig {
-        gtcrn: OfflineSpeechDenoiserGtcrnModelConfig {
-            model: Some(model_path.to_owned()),
-        },
+        gtcrn,
+        dpdfnet,
         num_threads: 1,
         debug: false,
         provider: Some("cpu".into()),
-        ..Default::default()
     }
 }
 
@@ -371,6 +395,67 @@ struct VadStream {
     detector: VoiceActivityDetector,
     in_speech: bool,
     denoiser: Option<(u64, OnlineSpeechDenoiser)>,
+    /// 命令词检测流（协议 7）：与它所属的检测器同一代，模型重新加载后按需重建
+    kws: Option<(u64, OnlineStream)>,
+}
+
+/// 命令词检测模型（sherpa-onnx 关键词检测 zipformer）：在判停线程里与判停流同步运行。
+struct Spotter {
+    generation: u64,
+    spotter: KeywordSpotter,
+}
+
+fn load_spotter(dir: &str, keywords: &str) -> Result<KeywordSpotter, String> {
+    let dir = require(Path::new(dir))?;
+    let dir = Path::new(&dir);
+    let mut config = KeywordSpotterConfig::default();
+    config.model_config.transducer = OnlineTransducerModelConfig {
+        encoder: Some(first_of(
+            dir,
+            &[
+                "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                "encoder.int8.onnx",
+                "encoder.onnx",
+            ],
+        )?),
+        decoder: Some(first_of(
+            dir,
+            &[
+                "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+                "decoder.onnx",
+            ],
+        )?),
+        joiner: Some(first_of(
+            dir,
+            &[
+                "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                "joiner.int8.onnx",
+                "joiner.onnx",
+            ],
+        )?),
+    };
+    config.model_config.tokens = Some(require(&dir.join("tokens.txt"))?);
+    config.model_config.provider = Some("cpu".into());
+    config.model_config.num_threads = 1;
+    config.model_config.debug = false;
+    config.keywords_buf = Some(keywords.to_owned());
+    KeywordSpotter::create(&config).ok_or_else(|| "命令词检测模型加载失败".to_owned())
+}
+
+/// 把一段 16 kHz 原始音频送进命令词检测流，返回检测到的词（检测到一次就重置，避免同一个词连报）。
+fn spot_keywords(spotter: &KeywordSpotter, stream: &OnlineStream, raw: &[f32]) -> Vec<String> {
+    stream.accept_waveform(16_000, raw);
+    let mut found = Vec::new();
+    while spotter.is_ready(stream) {
+        spotter.decode(stream);
+        if let Some(result) = spotter.get_result(stream)
+            && !result.keyword.is_empty()
+        {
+            found.push(result.keyword);
+            spotter.reset(stream);
+        }
+    }
+    found
 }
 
 fn vad_config(engine: VadEngine, model: &str, params: &VadParams) -> VadModelConfig {
@@ -415,8 +500,50 @@ fn vad_config(engine: VadEngine, model: &str, params: &VadParams) -> VadModelCon
 fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
     let mut config: Option<VadModelConfig> = None;
     let mut streams: HashMap<u64, VadStream> = HashMap::new();
+    let mut spotter: Option<Spotter> = None;
+    let mut spotter_generation = 0u64;
     for (id, op, payload) in jobs {
         match op {
+            Op::LoadKws { dir, keywords } => {
+                // 旧模型建的检测流先全部释放，再换模型
+                for state in streams.values_mut() {
+                    state.kws = None;
+                }
+                spotter = None;
+                loaded.kws.store(false, Ordering::SeqCst);
+                if dir.is_empty() {
+                    send(
+                        &out,
+                        id,
+                        Reply::Loaded {
+                            sample_rate: None,
+                            speakers: None,
+                        },
+                        &[],
+                    );
+                    continue;
+                }
+                match load_spotter(&dir, &keywords) {
+                    Ok(created) => {
+                        spotter_generation += 1;
+                        spotter = Some(Spotter {
+                            generation: spotter_generation,
+                            spotter: created,
+                        });
+                        loaded.kws.store(true, Ordering::SeqCst);
+                        send(
+                            &out,
+                            id,
+                            Reply::Loaded {
+                                sample_rate: Some(16_000),
+                                speakers: None,
+                            },
+                            &[],
+                        );
+                    }
+                    Err(message) => error(&out, id, message),
+                }
+            }
             Op::LoadVad {
                 model,
                 params,
@@ -462,6 +589,7 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                             detector,
                             in_speech: false,
                             denoiser,
+                            kws: None,
                         },
                     );
                     send(&out, id, Reply::Done, &[]);
@@ -474,6 +602,24 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     continue;
                 };
                 let raw = to_f32(&bytes_to_pcm(&payload));
+                // 命令词检测吃原始音频（实测降噪会让短词更难认）；检测流按需建、模型换代后重建
+                let keywords = match spotter.as_ref() {
+                    Some(current) => {
+                        if state
+                            .kws
+                            .as_ref()
+                            .is_none_or(|(generation, _)| *generation != current.generation)
+                        {
+                            state.kws = Some((current.generation, current.spotter.create_stream()));
+                        }
+                        state
+                            .kws
+                            .as_ref()
+                            .map(|(_, kws)| spot_keywords(&current.spotter, kws, &raw))
+                            .unwrap_or_default()
+                    }
+                    None => Vec::new(),
+                };
                 let denoised = denoise_online_chunk(&mut state.denoiser, &loaded, &raw);
                 state.detector.accept_waveform(&denoised);
                 let mut events = Vec::new();
@@ -490,7 +636,7 @@ fn vad_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     state.in_speech = true;
                     events.push(VadEventKind::SpeechStart);
                 }
-                send(&out, id, Reply::VadEvents { events }, &[]);
+                send(&out, id, Reply::VadEvents { events, keywords }, &[]);
             }
             Op::VadClose { stream } => {
                 streams.remove(&stream);
@@ -1167,6 +1313,7 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                 speaker,
                 speed,
                 first_max_chars,
+                short_opener,
             } => {
                 let Some(rt) = runtime.as_ref() else {
                     error(&out, id, "合成模型未加载");
@@ -1178,8 +1325,11 @@ fn tts_worker(jobs: Receiver<Job>, out: Out, loaded: Arc<Loaded>) {
                     continue;
                 }
                 let mut failed = false;
-                let segments =
-                    moss_voice_local_proto::synthesis_segments_from(&text, first_max_chars);
+                let segments = moss_voice_local_proto::synthesis_segments_with(
+                    &text,
+                    first_max_chars,
+                    short_opener,
+                );
                 let total = segments.len();
                 for (idx, segment) in segments.into_iter().enumerate() {
                     let mut config = config.clone();
@@ -1567,13 +1717,16 @@ fn main() {
                     tts: loaded.tts.load(Ordering::SeqCst),
                     denoiser: loaded.denoiser.load(Ordering::SeqCst),
                     smart_turn: loaded.smart_turn.load(Ordering::SeqCst),
+                    kws: loaded.kws.load(Ordering::SeqCst),
                 };
                 send(&out, id, reply, &[]);
                 continue;
             }
-            Op::LoadVad { .. } | Op::VadOpen { .. } | Op::VadFeed { .. } | Op::VadClose { .. } => {
-                &vad
-            }
+            Op::LoadVad { .. }
+            | Op::LoadKws { .. }
+            | Op::VadOpen { .. }
+            | Op::VadFeed { .. }
+            | Op::VadClose { .. } => &vad,
             Op::LoadAsr { .. }
             | Op::Transcribe { .. }
             | Op::AsrOpen { .. }
@@ -1599,6 +1752,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denoiser_engine_follows_model_file_name() {
+        let dpdf = denoiser_model_config("<models>/dpdfnet_baseline.onnx");
+        assert_eq!(
+            dpdf.dpdfnet.model.as_deref(),
+            Some("<models>/dpdfnet_baseline.onnx")
+        );
+        assert!(dpdf.gtcrn.model.is_none());
+        let gtcrn = denoiser_model_config("<models>/gtcrn_simple.onnx");
+        assert_eq!(
+            gtcrn.gtcrn.model.as_deref(),
+            Some("<models>/gtcrn_simple.onnx")
+        );
+        assert!(gtcrn.dpdfnet.model.is_none());
+        // 目录名里出现 dpdfnet 不算，只看文件名
+        assert!(
+            denoiser_model_config("<models>/dpdfnet/gtcrn_simple.onnx")
+                .dpdfnet
+                .model
+                .is_none()
+        );
+    }
 
     #[test]
     fn strip_windows_verbatim_prefix_handles_drive_unc_and_plain_paths() {

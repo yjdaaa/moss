@@ -149,7 +149,15 @@ fn realtime_barge_replays_head_immediately_and_keeps_only_started_sentences() {
             r#"{"type":"listen","state":"start","mode":"realtime"}"#,
         );
         send_audio(&mut device, 1, &uplink(&silence(UP, 500)));
-        assert!(texts(&collect_items(&mut device)).contains(&"听:换话题".into()));
+        // n100 起先让大模型判断是不是对小智说的，识别结果在作废原回答（tts stop）之前就已发给设备
+        let later = texts(&collect_items(&mut device));
+        assert!(
+            previous
+                .iter()
+                .chain(&later)
+                .any(|text| text == "听:换话题"),
+            "{previous:?} {later:?}"
+        );
         if !stream {
             assert!(
                 asr.heard.lock().unwrap()[1] >= 16 * 480,
@@ -159,10 +167,22 @@ fn realtime_barge_replays_head_immediately_and_keeps_only_started_sentences() {
         let seen = llm.seen.lock().unwrap();
         let history = &seen[1].0;
         assert_eq!(history[1].content.as_deref(), Some("讲故事"));
-        assert_eq!(
-            history[2].content.as_deref(),
-            Some("第一句。"),
-            "模型生成已完成但未播内容不能入历史"
+        // 只记实际播出来的部分：这句 1.2 秒，插话时只播了一半；已合成但没播的第二句标为没说出口（n100）
+        let reply = history[2].content.as_deref().unwrap();
+        let (heard, unsaid) = reply.split_once("【被打断，没说出口的：").expect(reply);
+        assert!(heard.starts_with("第一"), "{reply}");
+        assert!(
+            !heard.contains("第二句"),
+            "模型生成已完成但未播内容不能当作已说：{reply}"
+        );
+        assert!(unsaid.contains("未播出的第二句。"), "{reply}");
+        assert!(
+            history[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("被打断约定"),
+            "下一轮提示词说明标记的含义，话题回来时能接上"
         );
         drop(seen);
         assert!(
@@ -542,4 +562,276 @@ fn paused_answer_cannot_start_tools_until_the_barge_in_is_decided() {
         );
         drop(server);
     }
+}
+
+/// 记下每次请求给了大模型哪些工具（检查“不是对我说的”选项只在自动 / 实时拾音时出现）。
+struct NamesLlm {
+    inner: FakeLlm,
+    tools: Mutex<Vec<Vec<String>>>,
+}
+
+impl Llm for NamesLlm {
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        tools: &'a [ToolSpec],
+        deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> BoxFuture<'a, Result<LlmReply, ProviderError>> {
+        self.tools
+            .lock()
+            .unwrap()
+            .push(tools.iter().map(|tool| tool.name.clone()).collect());
+        self.inner.chat(messages, tools, deltas)
+    }
+}
+
+fn start_addressee(
+    barge_in: bool,
+    heard: &[&str],
+    rounds: Vec<Round>,
+) -> (VoiceServer, Arc<FakeRegistry>, Arc<NamesLlm>) {
+    let (server, registry, llm, _) = start_addressee_with_tools(barge_in, heard, rounds);
+    (server, registry, llm)
+}
+
+fn start_addressee_with_tools(
+    barge_in: bool,
+    heard: &[&str],
+    rounds: Vec<Round>,
+) -> (
+    VoiceServer,
+    Arc<FakeRegistry>,
+    Arc<NamesLlm>,
+    Arc<FakeTools>,
+) {
+    let tools = Arc::new(FakeTools::default());
+    let asr = Arc::new(FakeAsr {
+        replies: Mutex::new(heard.iter().map(|text| Ok((*text).to_owned())).collect()),
+        ..Default::default()
+    });
+    let llm = Arc::new(NamesLlm {
+        inner: FakeLlm {
+            rounds: Mutex::new(rounds.into()),
+            ..Default::default()
+        },
+        tools: Mutex::default(),
+    });
+    let conversation = Conversation::new(
+        asr,
+        llm.clone(),
+        Arc::new(LongTts),
+        tools.clone(),
+        ConversationSettings::default(),
+    );
+    let registry = Arc::new(FakeRegistry::default());
+    let server = VoiceServer::start(
+        ServerConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ws_port: 0,
+            http_port: 0,
+            mode: ServerMode::Chat,
+            conversation: Some(Arc::new(conversation)),
+            barge_in,
+            barge_in_ms: 400,
+            ..Default::default()
+        },
+        registry.clone(),
+    )
+    .unwrap();
+    (server, registry, llm, tools)
+}
+
+fn said_anywhere(messages: &[ChatMessage], needle: &str) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains(needle))
+    })
+}
+
+/// n100：小智说着话，用户转头跟旁人说了一句——大模型判断不是对小智说的，被暂停的回答接着说完，
+/// 这句话不进历史；原回答完整记入历史。
+#[test]
+fn speech_to_someone_else_while_speaking_lets_the_paused_answer_carry_on() {
+    let (server, registry, llm) = start_addressee(
+        true,
+        &["讲故事", "老婆把螺丝刀递给我", "现在几点"],
+        vec![
+            say(&["第一句。", "第二句。"]),
+            call("stay_silent"),
+            say(&["三点。"]),
+        ],
+    );
+    let mut device = chat_device(&server, &registry, 1);
+    begin(&mut device, "realtime");
+    first_frame(&mut device);
+    std::thread::sleep(Duration::from_millis(350));
+    let mut aside = tone(UP, 500.0, 480, 8000.0);
+    aside.extend(silence(UP, 500));
+    send_audio(&mut device, 1, &uplink(&aside));
+    let items = texts(&collect_items(&mut device));
+    assert!(
+        items.contains(&"句:第二句。".into()),
+        "原回答接着说完：{items:?}"
+    );
+    assert_eq!(
+        items.iter().filter(|text| *text == "tts:stop").count(),
+        1,
+        "{items:?}"
+    );
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|event| event.text == "插话不是对小智说的，接着说")
+    );
+    assert!(llm.tools.lock().unwrap()[1].contains(&"stay_silent".into()));
+    // 实时模式接着说下一句：历史里有完整的原回答，没有跟旁人说的那句
+    let mut next = tone(UP, 300.0, 480, 8000.0);
+    next.extend(silence(UP, 500));
+    send_audio(&mut device, 1, &uplink(&next));
+    collect_items(&mut device);
+    let seen = llm.inner.seen.lock().unwrap();
+    let history = &seen[2].0;
+    assert!(!said_anywhere(history, "螺丝刀"), "{history:?}");
+    assert!(
+        history
+            .iter()
+            .any(|message| message.content.as_deref() == Some("第一句。第二句。")),
+        "{history:?}"
+    );
+    assert!(!said_anywhere(history, "被打断"));
+}
+
+/// n100：自动拾音下小智说完后旁人说了一句：不回应（不发 tts start），也不进历史；之后对小智说的照常回答。
+#[test]
+fn speech_to_someone_else_after_an_answer_gets_no_reply() {
+    let (server, registry, llm) = start_addressee(
+        false,
+        &["讲故事", "你先去吃饭吧", "现在几点"],
+        vec![say(&["好的。"]), call("stay_silent"), say(&["三点。"])],
+    );
+    let mut device = chat_device(&server, &registry, 1);
+    let listen = r#"{"type":"listen","state":"start","mode":"auto"}"#;
+    let mut speech = tone(UP, 300.0, 600, 8000.0);
+    speech.extend(silence(UP, 700));
+    send_json(&mut device, listen);
+    send_audio(&mut device, 1, &uplink(&speech));
+    collect_items(&mut device);
+    // 固件播完重新拾音：先是旁人的一句，再是对小智说的一句
+    send_json(&mut device, listen);
+    send_audio(&mut device, 1, &uplink(&speech));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while llm.tools.lock().unwrap().len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    send_audio(&mut device, 1, &uplink(&speech));
+    assert_eq!(
+        texts(&collect_items(&mut device)),
+        vec![
+            "听:你先去吃饭吧",
+            "听:现在几点",
+            "tts:start",
+            "句:三点。",
+            "tts:stop"
+        ]
+    );
+    let seen = llm.inner.seen.lock().unwrap();
+    assert!(!said_anywhere(&seen[2].0, "吃饭"));
+    drop(seen);
+    assert!(
+        server
+            .status()
+            .events
+            .iter()
+            .any(|event| event.text.starts_with("这句不是对小智说的"))
+    );
+}
+
+/// 按键说话（manual）一定是对小智说的：不给“不是对我说的”选项。
+#[test]
+fn push_to_talk_never_offers_staying_silent() {
+    let (server, registry, llm) = start_addressee(false, &["讲故事"], vec![say(&["好的。"])]);
+    let mut device = chat_device(&server, &registry, 1);
+    begin(&mut device, "manual");
+    collect_items(&mut device);
+    let tools = llm.tools.lock().unwrap();
+    assert!(!tools[0].contains(&"stay_silent".into()), "{tools:?}");
+    assert!(tools[0].contains(&"end_conversation".into()));
+}
+
+/// 审查修正：`stay_silent` 混在别的工具里（比如大模型同时调了急停）时不当真，别的工具照常执行。
+#[test]
+fn staying_silent_never_swallows_other_tools_in_the_same_batch() {
+    let (server, registry, _, tools) = start_addressee_with_tools(
+        false,
+        &["快把激光关掉"],
+        vec![
+            Round::Reply {
+                deltas: Vec::new(),
+                calls: vec![
+                    ToolCall::new("call-silent", "stay_silent", "{}"),
+                    ToolCall::new("call-stop", "laser_safe_action_tool", "{}"),
+                ],
+                delay_ms: 0,
+            },
+            say(&["已经停了。"]),
+        ],
+    );
+    let mut device = chat_device(&server, &registry, 1);
+    send_json(
+        &mut device,
+        r#"{"type":"listen","state":"start","mode":"auto"}"#,
+    );
+    let mut speech = tone(UP, 300.0, 600, 8000.0);
+    speech.extend(silence(UP, 700));
+    send_audio(&mut device, 1, &uplink(&speech));
+    let items = texts(&collect_items(&mut device));
+    assert!(items.contains(&"句:已经停了。".into()), "{items:?}");
+    let calls = tools.calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|(name, _)| name == "laser_safe_action_tool"),
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|(name, _)| name == "stay_silent"));
+}
+
+/// 审查修正：已经执行过工具后才调 `stay_silent`，当这一轮正常结束（不当成“不是对我说的”丢掉整轮）。
+#[test]
+fn staying_silent_after_a_tool_round_ends_the_turn_normally() {
+    let (server, registry, llm, tools) = start_addressee_with_tools(
+        false,
+        &["现在几点", "好的谢谢"],
+        vec![call("get_time"), call("stay_silent"), say(&["不客气。"])],
+    );
+    let mut device = chat_device(&server, &registry, 1);
+    let listen = r#"{"type":"listen","state":"start","mode":"auto"}"#;
+    let mut speech = tone(UP, 300.0, 600, 8000.0);
+    speech.extend(silence(UP, 700));
+    send_json(&mut device, listen);
+    send_audio(&mut device, 1, &uplink(&speech));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while llm.tools.lock().unwrap().len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !server
+            .status()
+            .events
+            .iter()
+            .any(|event| event.text.starts_with("这句不是对小智说的")),
+        "执行过工具的轮次不能当成没听见"
+    );
+    send_audio(&mut device, 1, &uplink(&speech));
+    collect_items(&mut device);
+    assert_eq!(tools.calls.lock().unwrap().len(), 1);
+    // 这一轮（问题 + 工具调用与结果）照常进了历史
+    let seen = llm.inner.seen.lock().unwrap();
+    assert!(said_anywhere(&seen[2].0, "现在几点"), "{:?}", seen[2].0);
 }

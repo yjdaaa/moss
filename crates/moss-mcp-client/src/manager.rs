@@ -230,6 +230,17 @@ impl Manager {
             })
             .collect()
     }
+    /// 用户设为“允许”（免批准、确认过只读风险）且当前可用的工具别名（n101：语音慢的时候可转后台）。
+    /// 只看用户的设置，不看服务端 annotations。
+    pub fn trusted_read_only_tools(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .flat_map(|view| view.tools)
+            .filter(|tool| tool.blocked_reason.is_none() && tool.permission == Permission::Allow)
+            .map(|tool| tool.name)
+            .collect()
+    }
+
     fn sender(&self, alias: &str) -> Result<(mpsc::Sender<Command>, Arc<AtomicBool>), ClientError> {
         // Enforce the same global budget/collision rules at invocation, not only in the model list.
         if !self.tools().iter().any(|tool| tool.name == alias) {

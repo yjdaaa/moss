@@ -177,7 +177,7 @@ jobs:
           cargo clean --manifest-path apps/moss-voice-local/Cargo.toml --target-dir target 2>$null
           New-Item -ItemType Directory -Path target/release-assets -Force | Out-Null
           $srcZip = (Resolve-Path target/release-assets).Path + "\moss-voice-local-${env:VERSION}-gpl-source.zip"
-          powershell -File scripts/build-nv18-sidecar-safe.ps1 `
+          powershell -File scripts/voice-helper/build-sidecar-installer.ps1 `
             -SkipFrontendBuild `
             -VersionOverride $env:VERSION `
             -EmitGplSourceZip $srcZip

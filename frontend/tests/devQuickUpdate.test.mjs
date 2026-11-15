@@ -108,13 +108,13 @@ test("MOSS_DEV_UI_ORIGIN is restricted to debug builds and loopback Vite ports o
 });
 
 test("Magpie-style cloud parallel release workflow and slimmed sidecar script stay pure ASCII and deduplicate builds", () => {
-  for (const script of ["scripts/release-tag.ps1", "scripts/build-nv18-sidecar-safe.ps1"]) {
+  for (const script of ["scripts/release-tag.ps1", "scripts/voice-helper/build-sidecar-installer.ps1"]) {
     const bytes = readRepo(script);
     const badIndex = bytes.findIndex((byte) => byte > 0x7f);
     assert.equal(badIndex, -1, `${script} contains non-ASCII byte at offset ${badIndex}`);
   }
 
-  const sidecar = readRepoText("scripts/build-nv18-sidecar-safe.ps1");
+  const sidecar = readRepoText("scripts/voice-helper/build-sidecar-installer.ps1");
   assert.match(sidecar, /\[switch\]\$SkipFrontendBuild/);
   assert.match(sidecar, /\[switch\]\$IncludeFullNativeEvidence/);
   assert.match(sidecar, /\[string\]\$VersionOverride/);

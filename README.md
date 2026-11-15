@@ -28,9 +28,9 @@ MOSS unifies G-code toolpath generation, a 3D machine digital twin, an Excalidra
 | Pure-Rust Laser Engine | Generates vector outline, hatch, and raster G-code in `laser-core` without Python runtime dependencies, isolated from physical device I/O. |
 | FluidNC & GRBL Streaming | Extracts controller YAML configuration (`$CD`), streams over dynamic `1024B` Rx buffers via serial or Telnet, and verifies SD-card uploads for offline execution. |
 | Multi-Layer Safety Gates | Recalculates on-disk G-code SHA-256 before firing, routes `0x18` software reset over a dedicated real-time channel, blocks PVC, and requires explicit confirmation for unknown plastics. |
-| Built-in Xiaozhi Voice Hub | Runs an embedded Xiaozhi WebSocket/OTA voice pipeline (`moss-voice-server`) supporting cloud providers and offline local models (`moss-voice-local` for VAD, ASR, TTS, and speaker hints) alongside MCP JSON-RPC 2.0 tool dispatch. |
-| 3D Digital Twin & Drawpad | Integrates the main CNC workbench (`/`), an Excalidraw vector canvas (`/draw`), and a Three.js 3D work-envelope and toolpath preview (`/twin`). |
-| Guarded Local Extensions | Keeps Home Assistant, local `Claude Code` / `Codex` runs, speaker hints, and firmware push disabled by default; when enabled in the private voice window, sensitive actions require per-action desktop approval. |
+| Built-in Xiaozhi Voice Hub | Runs an embedded Xiaozhi WebSocket/OTA voice pipeline (`moss-voice-server`) supporting cloud providers and offline local models (`moss-voice-local` for VAD, ASR, TTS, and speaker hints) alongside MCP JSON-RPC 2.0 tool dispatch, plus one-click USB Wi-Fi provisioning for Xiaozhi devices (`moss-usb-provision`). |
+| 3D Digital Twin & Drawpad | Integrates the main CNC workbench (`/`), an Excalidraw vector canvas (`/draw`), a Three.js 3D work-envelope and toolpath preview (`/twin`), and a material calibration lab (`/material-lab`); the desktop app adds the Voice Center (`/voice`) and Xiaozhi camera snapshots (`/camera`). |
+| Guarded Local Extensions | Keeps Home Assistant, local `Claude Code` / `Codex` runs, speaker hints, and firmware push disabled by default; when enabled in the Voice Center of the main desktop window, sensitive actions require per-action desktop approval. |
 
 ## Architecture
 
@@ -42,7 +42,8 @@ MOSS unifies G-code toolpath generation, a 3D machine digital twin, an Excalidra
                                      v                         v
 +-----------------------------------------------------------------------------------+
 | Tauri 2 Shell (apps/desktop)  OR  Headless CLI Host (apps/moss-host)              |
-|   +-- laser-host (startup orchestration, approvals, guarded local CLI runner)     |
+|   +-- laser-host (startup assembly, MCP bridge, external MCP wiring)              |
+|   +-- moss-agent / moss-home / moss-usb-provision (desktop-only extensions)       |
 +----------------+-----------------------------+--------------------------+---------+
                  |                             |                          |
                  v                             v                          v

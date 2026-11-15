@@ -1,6 +1,6 @@
 # Web API 接口契约（`/api/*` 与 `/v1/*` 路由、文件与静态服务）
 
-状态：2026-09-22 按 `crates/laser-api/src/lib.rs` 现状核对。路由表与字段以代码为准；黄金样本 `tests/golden/api/` 记录的是 Python 版响应，比对规则见 §6。
+状态：2026-09-22 按 `crates/laser-api/src/lib.rs` 现状核对；2026-11-15 按 `routes.rs` / `server.rs` / `approval/desktop.rs` 路由与桌面 `generate_handler!` 命令清单补齐。路由表与字段以代码为准；黄金样本 `tests/golden/api/` 记录的是 Python 版响应，比对规则见 §6。
 历史依据：原稿从 Python 版 `web_server.py` 提取（2026-09-14）。
 用途：前端、MCP 工具转发（`laser_host::InProcessBackend` 直接调用同一 `ApiService::handle_http`）与测试共同遵守的 HTTP 契约。MCP 工具描述和小智提示词的自然语言调整不改变本文约定的字段、状态码和响应结构。
 
@@ -10,6 +10,8 @@
 |---|---|---|---|
 | GET | `/api/health` | 存活检查 | §2 |
 | GET | `/api/system/info` | 端口、MCP 桥状态与遥测；非回环也公开 | §2 |
+| GET | `/api/system/lan-info` | 本机局域网地址、端口与局域网访问状态；仅回环 | §2 |
+| POST | `/api/system/check-update` | 检查 GitHub 发布版更新；仅回环 | §3.15 |
 | GET | `/api/jobs/stop-targets` | 顶栏急停与激光任务进度浮层的后端原始任务目标：`result.jobs` 数组。除 `job_id`、`target`、`state` (`running` / `unknown`) 外，2026-11-02 起运行中的作业还带只读进度字段 `workflow_id`、`phase` (`streaming` / `awaiting_completion`)、`lines_sent`、`total_lines`、`elapsed_ms`、`mode`（取自 `ActiveJob::live_send_result`）。**纯只读**：不开设备连接、不写实时通道；状态未知不代表已停机，多个目标不得随机选择 | §2 |
 | POST | `/api/jobs/acknowledge-stop` | 交互端操作者现场核实机器已停稳后清除指定非空 `job_id` 且 `confirmed:true` 的 `uncertain_jobs` 待确认停止记录（拒绝语音/MCP 桥/审批重放调用方，不支持无编号全量清空，不影响运行中的 `active_jobs`） | §2 |
 | GET | `/api/ui/runtime-config` | 连接默认值与上传后缀 | §2 |
@@ -20,7 +22,7 @@
 | GET | `/api/material-lab/export` | 材料库导出 | §2 |
 | GET / POST | `/api/material-lab/recent` | 最近一条含完整参数的 workflow | §3.11 |
 | GET | `/preview` | 受控文件服务 | §2.1 |
-| GET | `/`、`/draw`、`/material-lab`、`/twin`、`/voice`、`/camera`、`/assets/*` | 嵌入的前端 | §2.2 |
+| GET | `/`、`/draw`、`/draw/*`、`/material-lab`、`/twin`、`/voice`、`/camera`、`/assets/*`、`/vendor/*` | 嵌入的前端 | §2.2 |
 | POST | `/api/upload` | 上传图片或 G-code | §3.1 |
 | POST | `/api/draw/preview` | 画板预览 | §3.2 |
 | POST | `/api/connection/check` | 连接检查与设备能力 | §3.3 |
@@ -30,7 +32,12 @@
 | POST | `/api/material-lab/preview` / `send` / `status` / `select-cell` / `manage` | 材料实验室 | §3.7～3.10 |
 | POST | `/api/device/framing` | 走边框 | §3.12 |
 | POST | `/api/safe-action` | 受控安全动作 | §3.13 |
-| POST | `/api/settings` | 保存监听端口 | §3.14 |
+| POST | `/api/settings` | 保存监听端口等设置 | §3.15 |
+| GET | `/api/jev/status` | Jev 配置状态（Key 只给掩码） | §3.14 |
+| POST | `/api/jev/reveal`、`/api/jev/test` | 取完整 Key、测试 Jev 连接 | §3.14 |
+| POST | `/api/feedback`（别名 `/api/jev/feedback`）、`/api/feedback/accept` | 加工反馈调参、采用建议参数 | §3.14 |
+| GET | `/api/feedback/history` | 某 workflow 的反馈历史 | §3.14 |
+| GET / POST | `/v1/approvals`、`/v1/approvals/{id}/approve`、`/v1/approvals/{id}/reject` | 桌面审批列表与批准 / 拒绝 | §5 |
 | GET | `/v1/capabilities`、`/v1/events`、`/v1/material-lab/bootstrap` | 能力、事件、材料页首屏 | §5 |
 | POST | `/v1/auth/challenge`、`/v1/auth/pair` | 局域网配对 | §5 |
 
@@ -38,7 +45,7 @@
 
 ### NV10 内置语音记忆（Tauri 桌面命令，非 HTTP 路由）
 
-记忆摘要仅供 MOSS 桌面主窗口本地 UI 使用。四个命令列入 `build.rs` 并在 `capabilities/voice-memory.json` 中单独授权给 `main`，**不**继承 `default.json` 的 localhost 远程页面权限，Android 不提供真实实现。`voice.builtin_memory_enabled` 缺省为 `false`。
+记忆摘要仅供 MOSS 桌面主窗口本地 UI 使用。四个命令列入 `build.rs` 并在 `capabilities/voice-private-main.json` 中单独授权给 `main`（n26 起，命令开头再用 `require_private_settings_window` 校验来源），**不**继承 `default.json` 的 localhost 远程页面权限，Android 不提供真实实现。`voice.builtin_memory_enabled` 缺省为 `false`。
 
 - `voice_memory_list()` → `[{device_id,summary,revision,updated_at}]`，只列已有记忆，不返回原始录音与对话。
 - `voice_memory_set_enabled({enabled:boolean})` → `{enabled}`，显式设置开启/关闭；关闭后未完成的后台总结结果不写入。
@@ -88,7 +95,7 @@ AgentRun 是独立 ApprovalKind，和原有 ExternalTool、激光动作分开。
 
 审批摘要绑定 provider、工作目录、executable、CLI 版本、argv/配置版本和任务；批准时按当前设置重新计算，不一致拒绝。审批卡的 agent 节点只展示任务、provider、工作目录名、版本和费用提醒，不返回目录全路径、密钥或内部 request；批准时仍须勾选确认，Agent 的确认文案是“我看过这个任务，同意在本机工作目录里运行 Agent（可能产生模型费用）”，卡片标题为“运行本机 Agent（Claude Code / Codex）”，不是激光机的现场确认文案。ApprovalService.consume_agent_run 是专用事务，验证 voice permit、数据库设备 allowed、摘要、期限和批准状态后单次消费，连同 run 记录和审计原子写入；另一条路径不能把 AgentRun 当普通 ExternalTool 或激光动作执行。
 
-门禁：`prepare` 要求 `ApiService::strict_mode()`（`.env` 的 `MOSS_FUSION_STRICT=1`），未开启返回 `agent_strict_mode_required`，工具列表里也不出现 `agent_codex` / `agent_claude_code`；非 Windows 平台没有验证过的进程树约束，返回 `agent_sandbox_unavailable`。批准后在后台线程运行，进程树受 Windows Job Object 约束，运行中可停止。
+门禁：`prepare` 要求 `ApiService::strict_mode()`（`.env` 的 `MOSS_FUSION_STRICT=1`），未开启返回 `agent_strict_mode_required`，工具列表里也不出现 `agent_codex` / `agent_claude_code`；Windows 与 macOS / Linux（2026-10-25 起）之外的平台没有验证过的进程树约束，返回 `agent_sandbox_unavailable`。批准后在后台线程运行，进程树在 Windows 上受 Job Object 约束、在 macOS / Linux 上受独立进程组约束（见 [安全入口](safety.md) §4.18），运行中可停止。
 
 schema v8 的 voice_agent_runs 最近 50 条记录包含 run id、approval id、提供者、工作目录（桌面状态仅目录名）、摘要指纹、状态、最多 256 KiB 输出、时间和短错误码；启动后 running -> result_unknown，不能自动重新执行。
 
@@ -129,6 +136,17 @@ schema v8 的 voice_agent_runs 最近 50 条记录包含 run id、approval id、
 - `voice_music_save({input:{settings:{enabled:boolean,directory:string}}})` → 设置及 `restarted`、`track_count`；只有 enabled=true 且提供本机目录时建立只读索引；启用状态修改会重启当前内置语音服务、结束旧会话。
 
 模型工具 `play_music({query?:string,random?:boolean})` 只能按歌名或随机二选一选择索引中的曲目。歌名限制为 1..200 字符；精确匹配优先，歧义返回最多5个候选，不自动播放。受控会话收到 `PlayMusic{track_id,title}` 后从受信索引按句柄/size/mtime 重查文件，只在当前有效许可下把 Symphonia 解码的24kHz单声道 PCM 交给已有60ms Opus泵。模型不能指定路径、目录、任意 URL、外部播放器或在同轮同时调用其他工具；歌曲不写入对话历史。切歌、唤醒、abort、自然插话、设备撤销或断线均取消当前源与旧 generation。假小智与合成 WAV 已通过软件测试；真实 MP3/FLAC/Ogg 文件及实体听音未验收。
+
+### 其他桌面 Tauri 命令（非 HTTP 路由，2026-11-15 按 `generate_handler!` 补登）
+
+以下命令已在 `apps/desktop/src-tauri/src/lib.rs` 注册，此前本文未列出；字段以处理函数为准。
+
+- **NV15 家居（Home Assistant）**：`voice_home_status()`、`voice_home_save({input:{settings,expected_revision}})`（只接受这两个键，拒绝令牌与控制字段；版本冲突 409 `home_conflict`）、`voice_home_token_save({input:{action:"set"|"clear",expected_revision,value?}})`、`voice_home_voice_consent({input:{enabled,policy_revision,credential_revision}})`（语音只读授权）、`voice_home_control_consent({input:{enabled,policy_revision,credential_revision,confirmed}})`（语音控制授权）、`voice_home_discover()`、`voice_home_approvals()`、`voice_home_approval_approve({input:{approval_id,digest,confirmed}})`、`voice_home_approval_cancel({input:{approval_id,digest,confirmed:true}})`、`voice_home_backup_export()`、`voice_home_backup_audit()`（原生文件框选单个历史文件，只返回 `{risk,inspected_bytes,safe_to_share:false}`，取消为 `null`）、`voice_home_backup_restore({input:{profile,expected_revision,expected_credential_revision,confirmed:true}})`。字段集合须完全匹配，否则 400（`home_invalid` / `home_token_invalid` / `home_approval_invalid` / `home_backup_invalid`）。全部经 `capabilities/voice-private-main.json` 授权并在开头调用 `require_private_settings_window`；移动端返回仅桌面。门禁与审批语义见 [安全入口](safety.md) §4.10～4.17。
+- **NV16 声纹**：`voice_speaker_manage({input})`，`action` 取 `status` / `cancel` / `begin{device_id,session_id,name,confirmed}` / `delete{id,revision,confirmed}` / `save_memory{id,revision,summary}` / `personal_mode{enabled,confirmed}` / `begin_test{device_id,session_id,id,confirmed}` / `calibrate{confirmed}` / `reset_calibration{confirmed}`，字段集合须完全匹配；授权同上。标定规则见 [安全入口](safety.md) §4.17 与 [声纹登记](../integration/speaker-enrollment.md)。
+- **严格模式开关**：`voice_strict_set({enabled,confirmed})`（`default` capability，开头 `require_main_window`）。未确认 `strict_confirm_required`；后端未启动 `voice_unavailable`；自建链路下关闭 `strict_mode_locked`；写 `.env` 失败 `strict_write_failed`。成功返回 `{enabled, applied, needs_restart, bridge_restarted, env_file, bridge_error?}`，并重启小智 MCP 桥。
+- **Python 探测**：`voice_detect_python()`（主窗口）只检查常见位置的文件是否存在，不执行程序。
+- **导出文件**（`default` capability，开头 `require_trusted_app_window`）：`get_export_settings()` / `pick_export_dir()` / `reset_export_dir()` / `set_export_ask_each_time({enabled})` 返回 `{dir, default_dir, effective_dir, ask_each_time, available, supported}`（`pick_export_dir` 取消为 `null`）；`save_export_file({filename,bytes,fallbackDefault?})` 返回实际保存路径，“每次询问”模式下取消为 `null`；`open_export_dir()`、`reveal_exported_file({path})` 在系统文件管理器中打开。界面行为见 [前端行为](frontend-behavior.md)。
+- **窗口与后端地址**：`get_backend_origin()` 返回本进程后端来源；`minimize_to_tray()` 把受信任窗口隐藏到托盘 / 菜单栏。
 
 ## 1. 通用约定
 
@@ -219,6 +237,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 |---|---|---|---|
 | `/api/health` | 无 | `{"status":"ok"}` | 无 |
 | `/api/system/info` | 无 | `{version, auto_check_update, check_prerelease, actual_port, preferred_port, is_fallback, web_host, mcp:{configured, connected, endpoint(token 脱敏，未配置为空串), client_info, last_request, last_request_time, messages_count, tools_count, protocol_version, recent_events[], endpoints[], core_tool, safety_gate, estop_channel}, voice:{mode, device_sessions, phase, level}}`。`auto_check_update` 未在 `settings.json` 显式配置时默认为 `true`（2026-11-07），`check_prerelease` 默认为 `false`。`configured` 只表示填了接入点地址；`connected` 表示桥当前与接入点保持连接；`client_info`、`last_request`、`recent_events` 无真实数据时为空，`messages_count` 为真实收到的帧数（无则 0），`protocol_version` 为最近一次 `initialize` 握手里 MOSS 实际应答的 MCP 协议版本、还没握手时为空串（2026-11-07 n68，原先写死 `2024-11-05`；控制台显示“未知（尚未握手）”），`core_tool`、`safety_gate`、`estop_channel` 是固定的设计说明、不是检测结果，`tools_count` 为当前开关下实际暴露的工具数（安全 19 / 开发者 20，再减去严格模式不开放的与用户关闭的工具）；`endpoints[]`（NV8）为每个接入点的 `{id, endpoint(脱敏), connected, connections, last_error}`，`id` 为 `primary` 或 `extra-N`，`connected` 为任一接入点已连接。`voice.mode` 为 `official` / `self_hosted` / `builtin`（取自运行目录 `settings.json`）；`device_sessions` 在自建链路下来自接入点健康检查，在内置链路下来自内置语音服务（未运行为 `null`），官方链路为 `null`；`phase`（`idle` / `listening` / `thinking` / `speaking` / `null`）与 `level`（`0..=100` 归一化 RMS 振幅）仅在 `builtin` 链路有会话时由内置语音服务实时写入（不含对话原文或音频样本），其他链路为 `null` / `0` | 无；非回环也免鉴权 |
+| `/api/system/lan-info` | 无 | `{lan_access_saved, lan_access_active, web_host, port, addresses:[本机局域网 IPv4], restart_required, static_pin_set, paired_devices_count}`；`restart_required` 为保存值与当前监听不一致 | 非回环 403 `仅允许在电脑本机查看` |
 | `/api/ui/runtime-config` | 无 | `{connection:{default_mode, preferred_modes:[默认, 另一], serial:{default_port:"", baudrate:115200}, network:{default_host:"", transport:"telnet", http_port:80, telnet_port:23, timeout:5.0}}, upload:{gcode_suffixes:[".gcode",".nc"]}}` | 无 |
 | `/api/ui/serial-ports` | 无 | `{ports:[…], default_port, baudrate}`；只列系统真实识别到的串口 | 无 |
 | `/api/ui/discover-controllers`（**POST**，body `{}`；用 POST 防止跨站页面用无 Origin 的 GET 触发扫描） | 无 | `{controllers:[{ip, telnet_port, hostname, http_port, source: mdns/scan/mdns+scan, firmware, state, machine}], busy:[{ip, telnet_port, workflow_id}], checked, not_controllers, hint}`。2026-11-09 起：mDNS（`_telnet._tcp` / `_http._tcp`，约 1.5 秒）与本机局域网网卡所在 /24 的 23 端口扫描（枚举网卡、跳过回环与代理 / VPN 点对点虚拟网卡）只产生候选，逐台连接后发实时状态查询 `?` 与 `$I`（均只读，不发运动、出光或改设置的命令），回了状态报告、`[VER:…]` 或 GRBL 启动横幅的才列入 `controllers`（`machine` 为 FluidNC `$I` 的 `[MSG:Machine: …]`）；候选一出现就开始确认（mDNS 1 秒窗口内边找边验，回了别的协议立即判定、0.7 秒无回应即放弃），通常约 1 秒返回；正在加工或待确认停机的目标不另开连接，列入 `busy`；连不上或不是 GRBL 的只计入 `not_controllers`。没有结果时 `hint` 写明扫了哪个网段。候选来源可由 `ApiService::with_controller_candidates` 替换（测试不扫真实网络）。 |
@@ -239,7 +258,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 
 ### 2.2 静态服务
 
-`/`、`/draw`、`/draw/*`、`/material-lab` 返回嵌入的 `frontend/dist/index.html`，`/assets/*` 返回同目录静态资源（`rust-embed`，路径经 `safe_asset_path` 过滤）。`/material-lab` 是前端路由，首屏数据来自 §2.3。
+`/`、`/draw`、`/draw/*`、`/material-lab`、`/twin`、`/voice`、`/camera`（`files::is_spa_route`）返回嵌入的 `frontend/dist/index.html`，`/assets/*`、`/vendor/*` 返回同目录静态资源（`rust-embed`，路径经 `safe_asset_path` 过滤）。`/material-lab` 是前端路由，首屏数据来自 §2.3。
 
 ### 2.3 `/material-lab` 初始数据来源（已决定 2026-09-14：新增 `GET /v1/material-lab/bootstrap`）
 
@@ -476,7 +495,7 @@ Jev 是可选的加工反馈判断服务，只接入 OpenRouter。固定模型 `
 | `/v1/approvals/{id}/approve` | POST | `{digest}`：按当前记录重算摘要，与审批卡提交值和创建时的值都一致才批准，随后立即以审批身份重放原请求（使用审批保存的连接参数，走全部现有门禁）。成功 200 `result:{approval, result}`；失败透传执行错误码，`detail.approval` 为最新审批状态 | 桌面会话 |
 | `/v1/approvals/{id}/reject` | POST | `{reason?}` → `result` 为拒绝后的审批 | 桌面会话 |
 
-认证规则（在 §1.6 来源校验之后）：来源为回环地址时所有路由免认证。非回环时，`GET /api/health`、`/v1/capabilities`、`/api/system/info`、页面与静态资源（`/`、`/draw`、`/material-lab`、`/twin`、`/assets/*`、`/vendor/*`）公开，`POST /v1/auth/pair` 免 Bearer，其余数据接口（`/api/*`、`/v1/*`、`/preview`）要求 `Authorization: Bearer <token>`，缺失返回 401 `需要 Bearer 鉴权`，无效返回 401 `Bearer 鉴权失败`。
+认证规则（在 §1.6 来源校验之后）：来源为回环地址时所有路由免认证。非回环时，`GET /api/health`、`/v1/capabilities`、`/api/system/info`、页面与静态资源（`/`、`/draw`、`/draw/*`、`/material-lab`、`/twin`、`/voice`、`/camera`、`/assets/*`、`/vendor/*`）公开，`POST /v1/auth/pair` 免 Bearer，其余数据接口（`/api/*`、`/v1/*`、`/preview`）要求 `Authorization: Bearer <token>`，缺失返回 401 `需要 Bearer 鉴权`，无效返回 401 `Bearer 鉴权失败`。
 
 审批请求编号（2026-10-10）：可信语音 device/session、局域网 pairing_id 或网关 session 构成调用方作用域；新记录 `request_id` 为 `scope-v1:` 哈希。相同作用域和编号仅在执行参数及摘要一致时复用，不一致返回 409 `approval_request_conflict`；超过 128 字符拒绝。旧记录保持可读；旧 McpBridge 没有独立可信身份，不按自报编号复用审批。`voice_session_revoked` 表示旧语音会话不再有调用权，重新允许设备不恢复旧会话和旧审批。
 

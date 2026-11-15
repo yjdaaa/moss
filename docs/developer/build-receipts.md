@@ -2,6 +2,20 @@
 
 阶段收尾或交付时的构建证据：时间、大小、SHA-256 与核对说明。规则见 [`AGENTS.md`](../../AGENTS.md)。新回执追加在最前面；历史条目内嵌的 hash 仍保留在 `CHANGELOG.md` 原条目中。
 
+## macOS 本机 Apple Silicon `0.3.7` 安装包构建（含离线语音辅助程序协议 7，2026-11-15）
+
+用户 2026-11-15 要求“帮我都优化完成吧，然后 git 并推送”：在 macOS 开发机（Apple Silicon，macOS 27.0）上以 `scripts/build-macos-installer.sh`（默认内置 `moss-voice-local` sidecar）构建，基于工作树（提交前，含 n99–n101 语音链路改动；前端已重新构建）。`cargo tauri build` 生成并 ad-hoc 签名 `.app` 成功，但其 `bundle_dmg.sh` 排版 DMG 窗口时 Finder AppleScript 超时（`AppleEvent已超时 (-1712)`，本会话无图形自动化权限），改用 `hdiutil create -volname MOSS -srcfolder MOSS.app -format UDZO` 由同一 `.app` 生成不带拖拽排版的 DMG。
+
+| 本次产物（0.3.7，`aarch64-apple-darwin`） | UTC时间（2026-11-15） | 字节 | SHA-256 |
+| --- | --- | ---: | --- |
+| `MOSS_0.3.7_aarch64.dmg`（`target/aarch64-apple-darwin/release/bundle/dmg-plain/`） | 16:48:04 | 799,967,351 | `f5b2be00c86c6bee00a1d9a1741ceb70ba1523af92d9b3364dcd37537b159273` |
+| `.app` 内 `moss-desktop` | 16:45 | — | `4a950d0b0072397052bbe6d7f9e67a5850dd5915bbcbc99486b62864bbfa11e8` |
+| `.app` 内 `moss-voice-local`（`0.3.7 (protocol 7)`） | 16:45 | — | `43e6f64b49f88a9643c0ebd0801e3df73266b6d7b0d9b56c78857adb1468a8d2` |
+
+核对：`Info.plist` `CFBundleShortVersionString=0.3.7`；`codesign -v` 通过；辅助程序 `--version` 报协议 7。体积说明：`.app` 约 880 MB，其中 762 MB 是 `Resources/licenses/voice-local/native-license-evidence`（本机此前为 GPL 对应源码收集的 ORT / espeak / sherpa 原生源码包，脚本发现该目录即一并打包；云端发布流水线没有这份目录，历史云端 DMG 约 82 MB）。
+
+**未验证**：未安装运行该 DMG（本机正式程序另由快更同步）；未公证；不含 Intel（x86_64）；Windows 安装包（本机无 Windows 目标与工具链）与 Android 安装包（本机无 Android SDK / NDK）未构建，需由 `release.yml` 云端构建；未连接小智设备与激光雕刻机。
+
 ## GitHub 仓库 `v0.3.11` 云端四端并行交付安装包构建（含应用内更新包，2026-11-07）
 
 用户 2026-11-07 决定“这个修改完后吧项目没有提交的全部git一下然后一起推送并release吧”：将 Windows 专属代码 clippy 清理（`3bceaa2`）与窄窗口两栏并排、创作画板设置移到画布下方、语音中心整理（n69）、撤回工作台与摄像头变长的改动及两栏模式恢复拖上下边框（`123e79b`）推送 `main`，手工执行与 `scripts/release-tag.ps1` 相同的干净树检查、`git tag -a v0.3.11 -m "MOSS v0.3.11"` 并推送标签，触发 `.github/workflows/release.yml` Run `42397900977`（同提交主分支 CI Run `42397893052` 同步全绿），全部 6 个作业成功（17:45:49–18:01:43 UTC）并发布 [Release v0.3.11](https://github.com/yjdaaa/moss/releases/tag/v0.3.11)。

@@ -328,6 +328,10 @@ pub struct CombinedTools {
     pub info: Arc<InfoTools>,
 }
 impl ToolExecutor for CombinedTools {
+    fn trusted_read_only(&self, name: &str) -> bool {
+        !InfoTools::is_info(name) && self.original.trusted_read_only(name)
+    }
+
     fn tools(&self) -> Vec<ToolSpec> {
         let mut all = self.original.tools();
         all.retain(|spec| !InfoTools::is_info(&spec.name));

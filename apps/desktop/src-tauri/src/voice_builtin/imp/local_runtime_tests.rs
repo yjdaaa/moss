@@ -967,6 +967,38 @@ fn local_tts_voices_list_and_preview_serve_cached_wav_and_clean_on_delete() {
     );
 }
 
+/// n101：命令词抗噪（默认关、只认命令词类模型）与“旁人说话不接话”（默认开）都能保存并读回。
+#[test]
+fn command_keywords_and_bystander_settings_save_and_persist() {
+    let temp = tempfile::tempdir().unwrap();
+    let host =
+        Arc::new(laser_host::HostApplication::init_with_runtime_dir(Some(temp.path())).unwrap());
+    let builtin = init(Some(host)).0.unwrap();
+    let defaults = &builtin.settings().builtin_local;
+    assert!(!defaults.kws, "命令词抗噪默认关闭");
+    assert_eq!(defaults.kws_model, "kws_zipformer_zh");
+    assert!(defaults.ignore_bystanders, "旁人说话不接话默认开");
+    assert!(
+        builtin
+            .local_save(&serde_json::json!({ "kws_model": "gtcrn_simple" }))
+            .is_err(),
+        "命令词模型只能选命令词类"
+    );
+    let saved = builtin
+        .local_save(&serde_json::json!({
+            "kws": true,
+            "kws_model": "kws_zipformer_zh",
+            "ignore_bystanders": false,
+        }))
+        .unwrap();
+    let local = &saved["local"]["settings"];
+    assert_eq!(local["kws"], true);
+    assert_eq!(local["kws_model"], "kws_zipformer_zh");
+    assert_eq!(local["ignore_bystanders"], false);
+    assert!(builtin.settings().builtin_local.kws);
+    assert!(!builtin.settings().builtin_local.ignore_bystanders);
+}
+
 #[test]
 fn denoise_turn_and_new_models_save_validate_and_persist() {
     let temp = tempfile::tempdir().unwrap();

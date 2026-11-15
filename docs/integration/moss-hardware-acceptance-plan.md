@@ -1,7 +1,7 @@
 # MOSS 实机验证顺序与操作手册
 
 本文是**唯一按“接几台设备”排序的实机验证执行顺序**：从一台电脑开始，逐台加设备，最后才是“电脑 + 小智 + 激光机”三件套一起跑。
-逐项勾选状态仍记在 [融合实施 TODO](moss-fusion-implementation-todo.md)：§2a 是待实机测试清单（HW-01～HW-20），§10 是最终统一真实环境验收（FINAL-01～05）。本文只规定**顺序、前提、操作和判据**，不重复记录进度。
+2026-11-15 用户决定实机验收不再排期，[融合实施 TODO](moss-fusion-implementation-todo.md) 原 §2a（HW-01～HW-21）与 §10（FINAL-01～05）已删除；表中的 HW / FINAL 编号只作条目代号保留。日后要上机时仍按本文的**顺序、前提、操作和判据**执行，结果按 `AGENTS.md` 的结果状态如实记录。
 
 设计依据：内置语音看 [内置语音技术书](moss-native-voice-spec.md) 与 [NV10～NV19 实施细则](moss-native-voice-implementation.md)；外部链路与审批看 [融合技术书](moss-desktop-fusion-technical-spec.md)。规则与结果状态以根目录 [`AGENTS.md`](../../AGENTS.md) 为准。
 
@@ -247,8 +247,8 @@ cargo test -p laser-host manual_real_cli_roundtrip -- --ignored --nocapture
 
 ## 六、与 TODO 清单的对应
 
-* 逐项状态与勾选：[moss-fusion-implementation-todo.md](moss-fusion-implementation-todo.md) §2a（HW 表）、§10（FINAL）。
-* 本文新增的编号：**HW-19**（NV13 Agent 本机 CLI 真实执行）与 **HW-20**（NV17 固件 OTA 推送与升级），已写入 §2a。
+* 逐项状态与勾选：原记在 [moss-fusion-implementation-todo.md](moss-fusion-implementation-todo.md) §2a（HW 表）、§10（FINAL），2026-11-15 随“实机验收不再排期”删除（见本文开头）；日后上机另起任务记录结果。
+* 本文新增的编号：**HW-19**（NV13 Agent 本机 CLI 真实执行）与 **HW-20**（NV17 固件 OTA 推送与升级），当时写入 TODO §2a。
 * 软件侧已覆盖、实机仍需确认的边界：
   * Agent：`agent_codex` / `agent_claude_code` 的审批、单次消费、停止、进程树回收、严格模式门禁都有自动测试；**未经实机确认的是**真实 CLI 版本、真实账号与模型费用、工作目录外的读取边界（Windows 沙箱挡不住，已在界面写明）。
   * 固件：导入校验、SHA-256 核对、逐台推送、到期与取消、下载方地址绑定、中断转未知都有自动测试（含真实回环 HTTP 下载）；**未经实机确认的是**真实板子能否拿到并刷写、刷写后是否上报新版本、断电恢复。

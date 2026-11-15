@@ -62,6 +62,15 @@ impl HostTools {
         Self { host }
     }
 
+    /// 宿主清单里标了 `x-moss-trusted-read-only` 的工具（用户设为“允许”的第三方只读工具，n101）。
+    pub fn trusted_read_only(&self, name: &str) -> bool {
+        self.host.list()["tools"].as_array().is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool["name"].as_str() == Some(name) && tool["x-moss-trusted-read-only"] == true
+            })
+        })
+    }
+
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.host.list()["tools"]
             .as_array()
@@ -175,6 +184,10 @@ impl ToolExecutor for HostTools {
     }
     fn tools(&self) -> Vec<ToolSpec> {
         self.specs()
+    }
+
+    fn trusted_read_only(&self, name: &str) -> bool {
+        HostTools::trusted_read_only(self, name)
     }
 
     fn call<'a>(

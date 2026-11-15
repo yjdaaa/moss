@@ -1,6 +1,6 @@
 # 数据库表结构与旧 JSON 字段映射
 
-状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）
+状态：设计于 2026-09-14；2026-09-22 按 `crates/laser-runtime/src/db.rs` 现状核对并补充 schema v3 的 Jev 密钥表；2026-10-06 补充 schema v4（`approvals`、审计写入）；2026-11-15 按 schema v19 现状补齐声纹、固件推送基础列与语音对话记录表
 代码：`crates/laser-runtime/src/{db,store,root,migration}.rs`
 历史依据：旧 `.runtime/` 数据统计（652 条 workflow、379 个文字任务、65 个 job、22 个校准）来自迁移前的一次性采样
 
@@ -15,7 +15,7 @@
 5. 数据库内路径存相对于 `RuntimeRoot` 的字符串，正斜杠分隔；导入时先按历史根做重映射，再校验解析后的绝对路径仍位于允许的 `RuntimeRoot` 子目录内（§7）。接口返回路径时只返回文件名（`RuntimeRoot::exposed_path` 支持回环返回相对路径，但当前路由统一只给文件名），任何请求不返回 `RuntimeRoot`/`InstallRoot` 绝对路径。
 6. 每张表都有 `created_at`、`updated_at`。`material_params_history` 与 `material_params` 同列另加 `replaced_at`、`reason`（早期 v2 预建的 4 张通用 `_history` 表从未使用，已在 schema v18 移除）。
 7. 并发模型：单写连接 + 独立 WAL 只读连接。`laser-runtime` 主写库持有单个 `Mutex<RuntimeDb>`（WAL、5 秒 `busy_timeout`、`synchronous=NORMAL`、`secure_delete=ON`），写天然串行，不引入多连接写；文件库模式下额外由 `RuntimeDb::open_readonly` 打开独立只读连接（`query_only=ON`），通过 `SplitSqliteStore` 与 `ApprovalService` 分流 `workflow` 状态/近期列表、审批列表和材料库读取等高频轮询查询，后台建知识库或批量写入期间不阻塞界面只读刷新。同一时刻只允许一个 host 进程打开本库，启动前必须持有 `<RuntimeRoot>/moss.lock`，锁句柄保持到 host 完全退出。Windows 使用 `LockFileEx`，Rust 可使用 `fs4` 或 `fd-lock`；崩溃后依赖操作系统释放锁，不删除锁文件。启动时发现锁被占用即退出并提示已有实例。后台 job worker 的 G-code 发送循环不访问数据库：取消走进程内 `CancellationToken`，进度只写内存原子值；发送线程只在终态把 `send_result` 写回 workflow 或 calibration 记录的 `payload`。当前没有把进度落到 `jobs` 表的持久化任务（见 §3.4）。
-8. 启动恢复与定额清理：host 启动时 `recover_after_restart` 把 `jobs` 与 workflow / calibration 活动态残留记录（含外层已标 `failed` 但 `payload.status` 仍卡在活动态的记录）统一标为 `failed` 并注明安全终止，同时 `prune_historical_records` 按定额清理超上限历史记录（`audit_log` 2000 条、终态 `approvals` 500 条、非活动 `workflows` 1000 条、非活动 `calibrations` 200 条、`material_params_history` 500 条、`context_extraction_runs` 500 条、已完结 `voice_firmware_delivery` 200 条，以及无 `source_ref` 且已删除满 30 天的空壳记忆墓碑），随后 `prune_orphan_generated_files` 回收 `generated_assets/` 与 `previews/` 中修改时间超过 7 天且不再被任何数据库记录引用的自动生成孤儿文件（永不触碰用户手动上传目录 `uploads/`）；退出停机时 `abort_active_records_on_shutdown` 同步更新列与 JSON 状态，并执行 `maintenance_on_shutdown`（`PRAGMA optimize` 与限时 `wal_checkpoint(TRUNCATE)`）。
+8. 启动恢复与定额清理：host 启动时 `recover_after_restart` 把 `jobs` 与 workflow / calibration 活动态残留记录（含外层已标 `failed` 但 `payload.status` 仍卡在活动态的记录）统一标为 `failed` 并注明安全终止，同时 `prune_historical_records` 按定额清理超上限历史记录（`audit_log` 2000 条、终态 `approvals` 500 条、非活动 `workflows` 1000 条、非活动 `calibrations` 200 条、`material_params_history` 500 条、`context_extraction_runs` 500 条、已完结 `voice_firmware_delivery` 200 条、`voice_chat_logs` 500 条，以及无 `source_ref` 且已删除满 30 天的空壳记忆墓碑），随后 `prune_orphan_generated_files` 回收 `generated_assets/` 与 `previews/` 中修改时间超过 7 天且不再被任何数据库记录引用的自动生成孤儿文件（永不触碰用户手动上传目录 `uploads/`）；退出停机时 `abort_active_records_on_shutdown` 同步更新列与 JSON 状态，并执行 `maintenance_on_shutdown`（`PRAGMA optimize` 与限时 `wal_checkpoint(TRUNCATE)`）。
 
 ## 2. workflow 存法（已确认：方案 A）
 
@@ -32,20 +32,10 @@
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| version | INTEGER PK | 当前 19（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at` 并创建 6 个基础索引；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory` 与 NV17 `voice_firmware_delivery`；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13）；v16 为 `context_knowledge_roots` 增加按目录独立启停列 `enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))`（§3.17，n50）；v17 为 `context_memories` 增加 `supersedes` / `seen_count` / `last_seen_at`（§3.16），新增段落级索引 `context_knowledge_chunks` 与无正文 FTS5 `context_knowledge_chunks_fts`（§3.17，n57）；v18 删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），并新增 `workflows(updated_at DESC, workflow_id ASC)`、`approvals(created_at DESC, approval_id DESC)`、`approvals(status, created_at DESC, approval_id DESC)`、`material_aliases(material_name)` 索引；v19 新增有界语音对话记录表 `voice_chat_logs` 与索引 `voice_chat_logs_at(at_ms DESC, id DESC)`（n81，实时与启动定额保留最近 500 条） |
+| version | INTEGER PK | 当前 19（代码常量 `laser_runtime::SCHEMA_VERSION`）。v1 建全部表并播种内置材料；v2 为 `jobs` 增加 `updated_at` 并创建 6 个基础索引；v3 新增 `app_secrets` 保存桌面端 Jev API Key；v4 新增 `approvals` 表（§3.12）与索引 `approvals(status,expires_at)`、`audit_log(at)`；v5 为 `approvals` 增加 `request` 列；v6 新增内置语音服务的设备登记表 `voice_devices`（§3.13）；v7 新增按设备保存摘要的 `voice_memory` 表（§3.14，NV10-1）；v8 新增独立的 `voice_agent_runs` 表（§3.15，NV13）；v9 新增 NV16 `voice_speakers`、`voice_person_memory`（§3.19）与 NV17 `voice_firmware_delivery`（§3.18）；v10 新增 NV19 `context_memories` 与 `context_extraction_runs`（§3.16）；v11 新增 FTS5 全文索引 `context_memories_fts` 与三个同步触发器（§3.16）；v12 新增 NV19-05 知识库 `context_knowledge_roots` / `_dirs` / `_files` 与 `context_knowledge_fts`（§3.17）；v13 新增 NV17 固件清单 `voice_firmware_artifacts`（§3.18），并为 `voice_firmware_delivery` 增加 `firmware_version`、`token`（部分唯一索引）与 `expires_at`；v14 为 `voice_devices` 增加设备快照六列 `info_json` / `info_at` / `hello_json` / `hello_at` / `status_json` / `status_at`（§3.13）；v15 为 `voice_devices` 增加实际拾音模式快照 `listen_json` / `listen_at`（§3.13）；v16 为 `context_knowledge_roots` 增加按目录独立启停列 `enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))`（§3.17，n50）；v17 为 `context_memories` 增加 `supersedes` / `seen_count` / `last_seen_at`（§3.16），新增段落级索引 `context_knowledge_chunks` 与无正文 FTS5 `context_knowledge_chunks_fts`（§3.17，n57）；v18 删除 7 张日常无读写废弃表（`ai_state`、`gui_calibration`、`auth_pairings` 及 4 张未用 `*_history`），并新增 `workflows(updated_at DESC, workflow_id ASC)`、`approvals(created_at DESC, approval_id DESC)`、`approvals(status, created_at DESC, approval_id DESC)`、`material_aliases(material_name)` 索引；v19 新增有界语音对话记录表 `voice_chat_logs`（§3.20）与索引 `voice_chat_logs_at(at_ms DESC, id DESC)`（n81，实时与启动定额保留最近 500 条） |
 | applied_at | REAL | |
 
 Schema 迁移由 `laser-runtime` 自管，不引入 `refinery`。启动时读取已应用的最高版本，按版本号顺序执行内置迁移；每个版本在事务中完成，只有全部语句成功后才写入 `schema_version`。迁移失败必须回滚并阻止业务读写，不得把半完成的 schema 当作可用。迁移器需支持内存库测试、重复执行幂等和中断后重试。
-
-### 3.9 `app_secrets`
-
-| 列 | 类型 | 说明 |
-|---|---|---|
-| name | TEXT PK | 密钥名称：`jev_api_key`；`voice.device_token_secret`（内置语音服务签发设备 token 的密钥，首次启动内置服务时随机生成，任何接口都不返回） |
-| value | TEXT | 按用户确认的桌面自用方案保存 API Key 原文；普通状态接口只返回遮罩值 |
-| updated_at | REAL | Unix 秒时间 |
-
-该表只保存应用密钥，不保存普通界面设置。桌面端默认显示遮罩，用户点击眼睛后才调用 `/api/jev/reveal` 请求完整值。
 
 ### 3.2 `workflows`（对应 `.runtime/laser_workflows/*.json`）
 
@@ -224,7 +214,7 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | id | INTEGER PK |
 | at | REAL |
 | client | TEXT（desktop / gateway / mcp / 配对 ID / local，由 `audit_client(&CallerContext)` 得出） |
-| action | TEXT（`AuditAction`：approval_created / approval_approved / approval_rejected / approval_expired / approval_executed / approval_failed / confirmed_field_stripped / r4_denied / strict_mode_blocked） |
+| action | TEXT（`AuditAction`：approval_created / approval_approved / approval_rejected / approval_expired / approval_executed / approval_failed / confirmed_field_stripped / r4_denied / strict_mode_blocked / voice_stop_requested（内置语音急停请求，只表示请求已写入，不证明物理制动），以及 §8.1 的 4 个 external_* 事件） |
 | target | TEXT（workflow_id / job_id / 材料格） |
 | result | TEXT（`AuditResult`：ok / denied / failed） |
 | detail | TEXT（JSON，不含凭据；由 `laser-contracts::AuditDetail` 序列化而来，工具层不拼裸 JSON） |
@@ -237,7 +227,7 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 |---|---|---|
 | approval_id | TEXT PK | `apr_` + 随机 |
 | status | TEXT | pending / approved / rejected / expired / executed / failed |
-| kind | TEXT | workflow_confirm_send / calibration_send / safe_action / framing |
+| kind | TEXT | workflow_confirm_send / calibration_send / safe_action / framing / external_tool（§8.1）/ agent_run（NV13，§3.15）/ home_control（NV15 家居动作） |
 | target_record | TEXT | workflow_id / calibration_id |
 | digest | TEXT | 技术书 §5.4 摘要 |
 | summary | TEXT | 人类可读摘要，不含路径和凭据 |
@@ -298,7 +288,7 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | started_at / finished_at | REAL / REAL NULL | Unix 秒 |
 | error_code | TEXT NULL | 短错误码 |
 
-插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。自 2026-10-15 起真实 CLI 执行器在严格模式且用户开启后可用（见 [安全入口](safety.md) §4.18）；非 Windows 平台仍拒绝运行。
+插入 run 与 consume_agent_run 审批/审计使用同一事务；运行结束只能写一次终态，最近只保留最多 50 条终态记录。启动恢复将运行中标成 result_unknown 且不重跑。自 2026-10-15 起真实 CLI 执行器在严格模式且用户开启后可用（见 [安全入口](safety.md) §4.18）；2026-10-25 起支持 Windows 与 macOS / Linux，其他平台仍拒绝运行（`agent_sandbox_unavailable`）。
 
 ### 3.16 `context_memories` / `context_extraction_runs`（schema v10，NV19-02）
 
@@ -347,11 +337,55 @@ v11（NV19-04）：外部内容 FTS5 虚表 `context_memories_fts(content)`，`t
 | `voice_firmware_artifacts.sha256` | TEXT PK | 固件文件 SHA-256（64 位十六进制，CHECK 长度） |
 | `voice_firmware_artifacts.version` / `project` | TEXT | 从 ESP32 应用镜像头读出的版本（1～32 字符）与项目名（≤32 字符） |
 | `voice_firmware_artifacts.size` / `created_at` | INTEGER / REAL | 字节数（>0）与导入时间 |
+| `voice_firmware_delivery.delivery_id` / `device_id` | TEXT PK / TEXT | v9 建表。推送编号与目标设备；索引 `voice_firmware_device(device_id)` |
+| `voice_firmware_delivery.artifact_sha256` | TEXT | v9。推送固件的 SHA-256（CHECK 长度 64） |
+| `voice_firmware_delivery.download_status` | TEXT DEFAULT 'pending' | v9。pending / downloading / downloaded / unknown；启动时 `recover_firmware_downloads` 把 downloading 改为 unknown，不当作可重试或已安装 |
+| `voice_firmware_delivery.device_report_status` | TEXT DEFAULT 'not_reported' | v9。not_reported / reported |
+| `voice_firmware_delivery.revision` / `updated_at` | INTEGER / REAL | v9。每次状态变化 revision+1 |
 | `voice_firmware_delivery.firmware_version` | TEXT NOT NULL DEFAULT '' | 这次推送的固件版本；设备上报同版本才算升级（旧记录为空串） |
 | `voice_firmware_delivery.token` | TEXT NULL | 一次性下载令牌（32 位十六进制），部分唯一索引 `voice_firmware_token`；取消或上报后置空 |
 | `voice_firmware_delivery.expires_at` | REAL NOT NULL DEFAULT 0 | 推送到期时间；过期的推送不再下发也不再可下载（旧记录为 0，视为已失效） |
 
 `RuntimeDb`（`firmware_store.rs`）：`add_firmware_artifact`（同 SHA-256 重复导入不变）、`list_firmware_artifacts`、`delete_firmware_artifact`（还有有效推送时返回 false 不删除）、`create_firmware_offer`（同一设备尚未开始下载的旧推送被替换；版本必须与已导入固件一致）、`active_firmware_offer`、`firmware_offer_by_token`、`firmware_device_reported`（上报新版本即置为已上报并作废令牌）、`cancel_firmware_offer`（未开始下载的删除，已开始下载的作废令牌并保留记录）。v13 迁移在事务内先查 `pragma_table_info` 再决定是否加列，失败回滚后可以重试。
+
+### 3.19 `voice_speakers` / `voice_person_memory`（schema v9，NV16）
+
+声纹登记与按人摘要。表存在不等于声纹识别已开启；识别结果只作候选身份提示，不授权任何动作（见 [安全入口](safety.md)）。
+
+| 表 | 列 | 说明 |
+|---|---|---|
+| `voice_speakers` | id（PK，1～64 位字母数字 / `-` / `_`）、name（1～64 字，不可重名）、model_id（当前只接受 `campplus_sv_zh_cn_16k_common`）、dimension（CHECK 64～1024，当前固定 192）、embedding（BLOB，3 段录音均值归一化后的 f32 小端向量）、revision（从 1 开始）、created_at | 最多 64 人 |
+| `voice_person_memory` | speaker_id（PK，引用 `voice_speakers(id)` ON DELETE CASCADE）、summary（默认空）、revision（从 0 开始）、updated_at | 登记时同事务插入空摘要 |
+
+`RuntimeDb`（`db.rs`）：`enroll_voice_speaker`、`list_voice_speakers`（不返回向量）、`native_voice_speaker_templates`、`voice_person_summary`、`update_voice_person_summary_if_revision`（revision 相符才改）、`delete_voice_speaker_if_revision`（数据库未开外键，同事务显式删除对应摘要）。
+
+### 3.20 `voice_chat_logs`（schema v19，n81）
+
+有界语音对话记录，方便排障。只存经 `moss_voice_server::scrub_debug_text` 脱敏、按上限截断后的文字，不存录音。
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| id | INTEGER PK AUTOINCREMENT | |
+| at_ms | INTEGER | 毫秒时间；索引 `voice_chat_logs_at(at_ms DESC, id DESC)` |
+| device_id / session_id / turn | TEXT / TEXT / INTEGER | 设备、会话与轮次 |
+| raw_asr / corrected_asr | TEXT | 原始识别与纠错后文字 |
+| reply / spoken | TEXT | 模型回复与实际已下发播报的句子（被打断时可能更短，默认空） |
+| tools_json | TEXT | 工具调用摘要 JSON 数组，默认 `[]` |
+| outcome | TEXT | 本轮结果 |
+| truncated / tools_dropped | INTEGER | 是否截断过（0/1）与超上限未保留的工具调用数 |
+| created_at / updated_at | REAL | Unix 秒 |
+
+`RuntimeDb`：`append_voice_chat_log`（插入后即定额保留最近 `VOICE_CHAT_LOGS_MAX_ROWS` = 500 条）、`list_voice_chat_logs`（倒序，上限 500）、`clear_voice_chat_logs`。
+
+### 3.21 `app_secrets`
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| name | TEXT PK | 密钥名称：`jev_api_key`；`voice.device_token_secret`（内置语音服务签发设备 token 的密钥，首次启动内置服务时随机生成，任何接口都不返回）；内置语音模型 `voice.llm.main` / `voice.asr.main` / `voice.tts.main`（`moss_voice::settings::builtin_secret_name`）、`voice.vision.main`、`voice.colab.main`、信息插件 `voice.plugin.{weather,search,metaso,rag}`、声纹标定 `voice.speaker.calibration`；家居 `voice.homeassistant.token`（及 `token_revision`）与同意凭据 `voice.homeassistant.voice_read_consent` / `voice_control_consent`；第三方 MCP 凭据见 §8.1 |
+| value | TEXT | 按用户确认的桌面自用方案保存 API Key 原文；普通状态接口只返回遮罩值。例外：`voice.homeassistant.token` 只存按当前系统用户加密的信封（Windows `dpapi-user-v1:`、macOS `keychain-user-v1:`，`laser-runtime::home_secret`），读到旧版明文即报错要求安全迁移，其他平台不支持保存 |
+| updated_at | REAL | Unix 秒时间 |
+
+该表只保存应用密钥，不保存普通界面设置。桌面端默认显示遮罩，用户点击眼睛后才调用 `/api/jev/reveal` 请求完整值。
 
 ## 4. 废弃的旧结构
 

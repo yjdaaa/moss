@@ -20,16 +20,16 @@ pub mod audio;
 mod barge;
 pub mod context; // NV19-01 structured long-term context model (not wired yet)
 pub mod conversation;
-pub mod fast;
+mod fast;
 pub mod firmware; // NV17 固件 OTA：逐台确认推送（2026-10-15）
 pub mod glyph_font; // n81 小智设备屏幕中文字库与 glyph_push v1 动态字模补齐（2026-11-12）
-pub mod goggle_bot;
+mod goggle_bot;
 pub mod home_tools;
 pub mod jev;
 pub mod jobs; // 加工结束主动播报（2026-11-02 用户决定）
 mod link; // n71 会话底下的设备连接：WebSocket 或常连模式
 pub mod memory;
-pub mod mqtt; // n71 常连模式：内置精简 MQTT 服务端 + UDP 语音（2026-11-08 用户决定）
+mod mqtt; // n71 常连模式：内置精简 MQTT 服务端 + UDP 语音（2026-11-08 用户决定）
 pub mod music;
 mod ota;
 pub mod person_context;
@@ -43,7 +43,7 @@ mod session;
 mod speaker; // NV16 synthetic-only policy, default disabled
 pub mod speaker_enrollment;
 mod state;
-pub mod tools;
+mod tools;
 pub mod vision;
 pub mod wake_assets; // n61 设备唤醒词资源包：本机主窗口逐台确认推送（n67 起取消独立安全窗口）
 

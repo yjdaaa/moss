@@ -15,7 +15,7 @@ To recreate these test-only files from a pinned cached Ubuntu 22.04
 Docker image, run from the repository root:
 
 ```powershell
-pwsh -NoProfile -File .\scripts\generate-nv14-synthetic-audio-fixtures.ps1
+pwsh -NoProfile -File .\scripts\generate-synthetic-audio-fixtures.ps1
 ```
 
 The generator temporarily uses Ubuntu **GPG-verified** ffmpeg package

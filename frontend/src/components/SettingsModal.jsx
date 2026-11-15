@@ -9,6 +9,8 @@ import { FoldHeader } from "./FoldHeader.jsx";
 import { ExportSettingsSection } from "./ExportSettingsSection.jsx";
 import { PhoneLinkSection } from "./PhoneLinkSection.jsx";
 import { isRemoteMode } from "../authSession.js";
+import { voiceApi } from "../voiceApi.js";
+import { preferencesShowJev } from "../voiceState.js";
 import { readHideTopPills, writeHideTopPills } from "../foldState.js";
 import { trayActionCopy } from "../platform.js";
 import { appUpdateActionLabel, appUpdateAvailable, appUpdateBusy, appUpdateInstall, appUpdateProgressView, appUpdateScopeProgress, appUpdateStatus } from "../appUpdate.js";
@@ -34,6 +36,7 @@ export function SettingsModal({
   );
   const [portInput, setPortInput] = useState("9666");
   const [systemInfo, setSystemInfo] = useState(null);
+  const [voiceMode, setVoiceMode] = useState(null);
   const [saveStatus, setSaveStatus] = useState("");
   const [savingPort, setSavingPort] = useState(false);
   const [mcpEndpointInput, setMcpEndpointInput] = useState("");
@@ -94,15 +97,22 @@ export function SettingsModal({
         setCheckPrerelease(Boolean(info.check_prerelease));
       }
     });
-    if (!onOpenVoice) {
-      getJson("/api/jev/status").then((res) => {
-        if (res.ok && res.data?.success) {
-          const jev = res.data.result || {};
-          setJevEnabled(Boolean(jev.enabled));
-          setJevMaskedKey(jev.masked_key || "");
-        }
-      });
+    // 每次打开都重新读当前语音链路（期间可能切过链路），读到前先不显示 Jev 一栏
+    setVoiceMode(null);
+    if (onOpenVoice) {
+      // 当前语音链路决定 Jev 加工反馈判断在哪配：内置链路在“语音中心 → 模型”，其余在这里
+      voiceApi
+        .status()
+        .then((status) => setVoiceMode(status?.mode || "official"))
+        .catch(() => setVoiceMode("official"));
     }
+    getJson("/api/jev/status").then((res) => {
+      if (res.ok && res.data?.success) {
+        const jev = res.data.result || {};
+        setJevEnabled(Boolean(jev.enabled));
+        setJevMaskedKey(jev.masked_key || "");
+      }
+    });
   }, [visible, hideTopPillsProp, onOpenVoice]);
 
   useEffect(() => {
@@ -127,6 +137,7 @@ export function SettingsModal({
     return () => clearInterval(timer);
   }, [installProgress?.phase]);
 
+  const showJevSettings = preferencesShowJev({ hasVoiceCenter: Boolean(onOpenVoice), voiceMode });
   const activeUpdateProgress = appUpdateScopeProgress(installProgress, updateReport?.latest_version);
   const modalBusy =
     savingPort ||
@@ -517,10 +528,10 @@ export function SettingsModal({
             </div>
           )}
 
-          {/* Jev 判断服务：桌面端已统一收归「语音中心 → 模型」管理，右上角偏好设置不再重复展示；
-              仅在无语音中心的独立 moss-host 网页环境保留兼容配置 */}
-          {!onOpenVoice && (
-          <div className="ob-fold settings-box-3">
+          {/* Jev 判断服务（加工反馈判断）：内置链路由「语音中心 → 模型 → Jev」统一管理，这里不重复；
+              官方与自建链路及无语音中心的网页环境没有别的入口，在这里配置（2026-11-15） */}
+          {showJevSettings && (
+          <div className="ob-fold settings-box-3" id="settings-jev">
             <FoldHeader variant="section" id="settings-jev" icon={Link2} title="OpenRouter · Jev 判断服务" defaultOpen={false} />
             <div className="settings-box-4">
               Jev 只帮助判断“太焦、太浅、切不透”等加工反馈，不直接控制激光机。

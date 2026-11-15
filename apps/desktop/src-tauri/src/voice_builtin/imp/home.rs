@@ -8,7 +8,7 @@ use super::*;
 const HOME_VOICE_GRANT: &str = "voice.homeassistant.voice_read_consent";
 pub(super) struct DesktopHomeHost {
     pub(super) host: Arc<laser_host::HostApplication>,
-    pub(super) control: Arc<laser_host::home_control::HomeControlCoordinator>,
+    pub(super) control: Arc<moss_home::HomeControlCoordinator>,
 }
 impl DesktopHomeHost {
     fn current(&self) -> Option<(moss_voice::settings::BuiltinHomeAssistant, u64, u64, String)> {

@@ -316,7 +316,12 @@ fn tool_result(result: Result<Value, ClientError>) -> ToolCallResult {
 }
 impl ExternalTools for ExternalMcp {
     fn tools(&self) -> Value {
-        json!({"tools":self.manager.tools().into_iter().map(|t|json!({"name":t.name,"description":t.description,"inputSchema":t.parameters})).collect::<Vec<_>>()})
+        // n101：用户设为“允许”的工具标上可信只读，内置语音慢的时候可以转后台查（只看用户设置）
+        let trusted = self.manager.trusted_read_only_tools();
+        json!({"tools":self.manager.tools().into_iter().map(|t|{
+            let read_only = trusted.contains(&t.name);
+            json!({"name":t.name,"description":t.description,"inputSchema":t.parameters,"x-moss-trusted-read-only":read_only})
+        }).collect::<Vec<_>>()})
     }
     fn call(&self, context: &CallerContext, name: &str, arguments: &Value) -> ToolCallResult {
         let Ok(lock) = self.admin.lock() else {

@@ -169,6 +169,17 @@ export function ExperienceGroup({ builtin }) {
         <label className="voice-check voice-wide">
           <input
             type="checkbox"
+            checked={form.ignore_bystanders !== false}
+            onChange={(e) => update("ignore_bystanders", e.target.checked)}
+            id="voice-ignore-bystanders"
+          />
+          <span title="自动 / 实时拾音时，大模型判断一句话明显不是对小智说的（跟旁人说话、打电话、电视声）就不回应；小智说着话被这种话打断时接着说完。按键说话不受影响。偶尔把对小智说的话当成旁人的，可以关掉。">
+            旁人说话不接话（默认开）
+          </span>
+        </label>
+        <label className="voice-check voice-wide">
+          <input
+            type="checkbox"
             checked={form.screen_preview_sync !== false}
             onChange={(e) => update("screen_preview_sync", e.target.checked)}
             id="voice-screen-preview-sync"

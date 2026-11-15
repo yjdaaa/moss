@@ -257,6 +257,7 @@ fn requests_and_replies_are_matched_by_id() {
                 tts: false,
                 denoiser: false,
                 smart_turn: false,
+                kws: false,
             },
             vec![],
         )),
@@ -285,6 +286,7 @@ fn requests_and_replies_are_matched_by_id() {
         Op::VadFeed { .. } => Some((
             Reply::VadEvents {
                 events: vec![VadEventKind::SpeechStart],
+                keywords: Vec::new(),
             },
             vec![],
         )),
@@ -352,6 +354,7 @@ fn protocol_mismatch_is_reported() {
                 tts: false,
                 denoiser: false,
                 smart_turn: false,
+                kws: false,
             },
             vec![],
         ))
@@ -454,6 +457,7 @@ fn speaker_timeout_does_not_invalidate_independent_voice_helper() {
         Op::VadFeed { .. } => Some((
             Reply::VadEvents {
                 events: vec![VadEventKind::SpeechStart],
+                keywords: Vec::new(),
             },
             vec![],
         )),
@@ -481,7 +485,13 @@ fn slow_vad_times_out() {
         if let Op::VadFeed { .. } = request.op {
             std::thread::sleep(Duration::from_millis(900));
         }
-        Some((Reply::VadEvents { events: vec![] }, vec![]))
+        Some((
+            Reply::VadEvents {
+                events: vec![],
+                keywords: Vec::new(),
+            },
+            vec![],
+        ))
     });
     let error = helper.vad_feed(1, &[0; 10]).unwrap_err();
     assert!(error.message.contains("超时"), "{error}");
@@ -1058,6 +1068,30 @@ fn pacing_relaxes_segmentation_only_when_synthesis_can_keep_up() {
     let before = fast.rtf;
     fast.delivered(now, None, 2.0);
     assert_eq!(fast.rtf, before);
+}
+
+/// n101：第一次量到的实时率直接生效（不再要五六轮才从默认的慢机器猜测收敛）；
+/// 短开场白先合成只在快机器、前面没有存货（一轮刚开口）时打开。
+#[test]
+fn the_first_measurement_counts_and_short_openers_need_a_fast_idle_machine() {
+    let now = Instant::now();
+    let mut pacing = Pacing::default();
+    assert!(!pacing.short_opener(now), "没量过：按慢机器处理");
+    // Kokoro v1.0 在本机：2.55 秒语音算 0.545 秒（实时率约 0.21）
+    pacing.delivered(now, Some(Duration::from_millis(545)), 2.55);
+    assert!((0.2..0.23).contains(&pacing.rtf), "{}", pacing.rtf);
+    // 刚交出去的语音还在播：这时说的是下一句，不切开场白
+    assert!(!pacing.short_opener(now));
+    pacing.play_until = None;
+    assert!(
+        pacing.short_opener(now),
+        "快机器、刚开口：允许短开场白先合成"
+    );
+    // 慢机器（实时率 0.8）从不打开
+    let mut slow = Pacing::default();
+    slow.delivered(now, Some(Duration::from_millis(1600)), 2.0);
+    slow.play_until = None;
+    assert!(!slow.short_opener(now));
 }
 
 /// 真实 Kokoro 连续说一整段回答（像对话里那样一句接一句预取）：

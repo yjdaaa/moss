@@ -188,7 +188,7 @@ mod imp {
         speaker_backend: Arc<DesktopSpeakerBackend>,
         personal: Arc<PersonContext>,
         identity: Arc<DesktopIdentity>,
-        home_control: Arc<laser_host::home_control::HomeControlCoordinator>,
+        home_control: Arc<moss_home::HomeControlCoordinator>,
         /// 最近一次自动启动失败的原因（语音链路为内置服务时随 MOSS 启动）
         last_error: Mutex<Option<String>>,
         /// 诊断记录本（2026-11-07 n68）：服务事件、对话耗时与桌面端后台失败（本地模型、Laya、固件记录等），
@@ -261,7 +261,7 @@ mod imp {
         /// NV13 Agent 配置（2026-10-15 起可开启；2026-10-25 支持留空自动读取本机 CLI 与换机自动适配）：
         /// 开启时必须有工作目录，且本机至少有一个手动填写或自动检测到的 CLI；每次运行仍要桌面批准并要求严格模式。
         pub fn agent_save(&self, input: &Value) -> Result<Value, CenterError> {
-            use laser_host::voice_agent::detect_cli;
+            use moss_agent::detect_cli;
             use moss_voice::settings::BuiltinAgents;
             let invalid = |message: &str| CenterError::new("agent_config_invalid", 400, message);
             let raw: BuiltinAgents =
@@ -297,9 +297,9 @@ mod imp {
         mut config: moss_voice::settings::BuiltinAgents,
         previous: &moss_voice::settings::BuiltinAgents,
         sensitive: &[std::path::PathBuf],
-        detect: impl Fn(laser_host::voice_agent::Provider) -> Option<std::path::PathBuf>,
+        detect: impl Fn(moss_agent::Provider) -> Option<std::path::PathBuf>,
     ) -> Result<moss_voice::settings::BuiltinAgents, CenterError> {
-        use laser_host::voice_agent::{Provider, executable, is_foreign_os_path, workspace};
+        use moss_agent::{Provider, executable, is_foreign_os_path, workspace};
         let invalid = |message: &str| CenterError::new("agent_config_invalid", 400, message);
         for text in [
             &config.workspace,

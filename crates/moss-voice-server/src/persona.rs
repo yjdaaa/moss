@@ -427,6 +427,10 @@ pub struct PersonaTools {
 }
 
 impl ToolExecutor for PersonaTools {
+    fn trusted_read_only(&self, name: &str) -> bool {
+        name != PERSONA_TOOL && self.original.trusted_read_only(name)
+    }
+
     fn tools(&self) -> Vec<ToolSpec> {
         let mut specs = self.original.tools();
         specs.retain(|spec| spec.name != PERSONA_TOOL);

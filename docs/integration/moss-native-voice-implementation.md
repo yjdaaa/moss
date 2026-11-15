@@ -197,7 +197,7 @@ Rust 全量 511/511、视觉 provider 4/4、HTTP 假设备 5/5、MCP initialize/
 
 ### 修改位置
 
-- 拟新增 `crates/laser-host/src/voice_agent.rs`：能力探测、审批准备/执行、进程树和有界事件流；不要接到 ExternalMcp 的 ExternalTool 执行者。
+- 拟新增 `crates/moss-agent/src/lib.rs`：能力探测、审批准备/执行、进程树和有界事件流；不要接到 ExternalMcp 的 ExternalTool 执行者。
 - 修改 `laser-contracts/src/approval.rs`、`laser-api/src/approval.rs` 和审批卡，增加种类、request/target_key/digest 的穷尽匹配、请求展示与受信执行分支；RuntimeDb 增加 Agent 记录 CRUD。
 - 修改 `VoiceSettings`、桌面工具组合和命令；拟新增 `frontend/src/components/VoiceAgentCard.jsx`，显示探测结果及最近 50 条记录。
 
@@ -253,7 +253,7 @@ readonly CLI 不保证能隔离任意恶意可执行文件；只允许用户选�
 
 #### 2026-10-11 Windows Job Object 纯软件进程夹具（NV13-3，生产仍锁定）
 
-新增 `crates/laser-host/src/voice_agent/windows_process.rs` 和 `windows_process/tests.rs`。仅在本机临时目录中调用测试二进制，不启动真实 Claude/Codex；生产 AgentCoordinator 仍只使用 DisabledRunner。使用 `CreateProcessW` 挂起创建、`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只继承 stdin/stdout/stderr、先分配 Job 并验证当前许可，再恢复主线程。`KILL_ON_JOB_CLOSE` 与 `ACTIVE_PROCESS_LIMIT(8)` 确保生命周期和数量受控，取消、voice permit 撤销、超时或正常退出均回收整个 Job 并检查进程统计，关闭 Job 句柄可杀掉成员。任务写入标准输入，stdout/stderr 同时排空；单行 64 KiB、合并总量 256 KiB（超出继续排空）、常见敏感关键词行保守遮盖，且环境变量只接受白名单，测试标记仅编译进测试版本。
+新增 `crates/moss-agent/src/windows_process.rs` 和 `windows_process/tests.rs`。仅在本机临时目录中调用测试二进制，不启动真实 Claude/Codex；生产 AgentCoordinator 仍只使用 DisabledRunner。使用 `CreateProcessW` 挂起创建、`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只继承 stdin/stdout/stderr、先分配 Job 并验证当前许可，再恢复主线程。`KILL_ON_JOB_CLOSE` 与 `ACTIVE_PROCESS_LIMIT(8)` 确保生命周期和数量受控，取消、voice permit 撤销、超时或正常退出均回收整个 Job 并检查进程统计，关闭 Job 句柄可杀掉成员。任务写入标准输入，stdout/stderr 同时排空；单行 64 KiB、合并总量 256 KiB（超出继续排空）、常见敏感关键词行保守遮盖，且环境变量只接受白名单，测试标记仅编译进测试版本。
 
 Windows-only Rust 测试 **10/10 通过**：挂起期撤销绝不执行夹具、Job close kill、取消/超时/设备权限撤销、父子回收（额外重复 5 次）、第 9 个进程创建被拒绝、任务 stdin 及 argv 隔离、双管道洪泛/单行与总量截断、异常环境密钥拒绝。没有连接机器或使用用户真实 Codex 登录账号。**Job Object 不能限制文件读取与网络**；之前 Codex 普通只读沙箱可越界读取、连接本机端口，严格 restricted-read 因缺 elevated backend 无法启动，所以生产 `REAL_CLI_SANDBOX_VERIFIED=false`，真实 AgentRun 不开放。
 
@@ -265,20 +265,20 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 #### 2026-10-11 Windows 环境只读诊断与 Docker 无模型隔离验证
 
 - 只读诊断：Windows 25H2、build 26200.9457、`EditionID=CoreCountrySpecific`（家庭中文版），当前终端不是管理员。Hypervisor 已运行、VBS 状态为 2；WMI 显示 `VirtualMachinePlatform` 安装状态 1（已启用），`HypervisorPlatform` 状态 2（禁用）。由于 Hypervisor 已在运行，部分 CPU 虚拟化字段为 False **不能单独用于认定 BIOS 未开启虚拟化**。微软的独立 **Windows Sandbox** 不支持 Home 版，这和 **Codex Elevated Windows sandbox backend** 是两种不同的技术；`codex sandbox setup --help` 显示 `--elevated --current-user`，但本轮未运行安装/提权/ACL 修改，原有 setup marker 的存在不证明严格隔离已成功。
-- 已安装 Docker 29.8.0 Linux 引擎（WSL2），本地已缓存 `ubuntu:22.04`，不需要下载镜像。新增回归脚本 `scripts/test-nv13-container-isolation.ps1`：只用随机的 Windows 临时目录，工作区只读绑定到 `/workspace`，**不挂载其他宿主机文件、Docker socket、MOSS 项目和用户目录**；Docker 参数 `--pull never --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8 --memory 256m --cpus 0.5 --user 65534:65534`。容器退出后只删除本轮创建的容器和临时目录。
+- 已安装 Docker 29.8.0 Linux 引擎（WSL2），本地已缓存 `ubuntu:22.04`，不需要下载镜像。新增回归脚本 `scripts/agent-sandbox/test-container-isolation.ps1`：只用随机的 Windows 临时目录，工作区只读绑定到 `/workspace`，**不挂载其他宿主机文件、Docker socket、MOSS 项目和用户目录**；Docker 参数 `--pull never --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8 --memory 256m --cpus 0.5 --user 65534:65534`。容器退出后只删除本轮创建的容器和临时目录。
 - 首次人工实验及脚本重复执行均 **PASS**：允许读取已挂载的 canary，工作区外未挂载 canary 无法访问，向 `/workspace` 和 `/tmp` 写入均被拒绝，Docker socket 不暴露，默认网络路由不存在，容器无法连接测试程序在 Windows `127.0.0.1` 临时端口（Windows 监听器未接收到连接），cgroup `pids.max=8`，Linux capabilities 为 0，Seccomp 模式为 2，敏感 MOSS/MCP/OpenAI/Anthropic 环境变量未继承。脚本退出 0，宿主机 canary 未改变，测试容器和临时目录清理完毕。
 - **严格边界**：以上只是 Docker/Linux 空镜像的离线隔离夹具，不是针对真实 Codex Linux CLI 和恶意程序的完整安全证明。Windows 原版 `codex.exe` 不能直接作为 Linux 原生 CLI 使用；正式 Agent 还需要独立安装/验证受信 Linux Codex 版本、隔离认证、MCP/插件禁入、可审计的**仅模型 API**受控外联，以及容器退出/取消与审批链联动。当前 `--network none` 不能让 Codex 访问模型。以上准备和系统或账号改动尚未获得授权，**真实生产仍保持 `REAL_CLI_SANDBOX_VERIFIED=false`、`DisabledRunner` 和禁用 UI**。
 #### 2026-10-11 经授权安装官方 Linux Codex 0.162.1（Docker 离线验证，生产仍禁用）
 
-- **官方来源及可复现安装**：从 `github.com/openai/codex` 官方 `rust-v0.162.1` 发布页下载 `codex-x86_64-unknown-linux-musl.tar.gz`，先读取 GitHub API 发布资产 `digest`/size 并与本项目固定值核对，再计算下载包 SHA-256，结果 `86f268d81b898f3e144c5ecff2ad2fda2c5802e042d6195b72538fe0fa125057`，大小 111,350,218 字节。解压的 Linux 二进制 SHA-256 为 `628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1`；不执行网络安装脚本、不复制 Windows `~/.codex`，也不下载新基础镜像。使用 `scripts/build-nv13-linux-codex-test-image.ps1` 基于本地缓存 `ubuntu:22.04`、Docker build `--network none --pull=false` 创建 **专用测试镜像** `moss-nv13-codex-test:0.162.1`，image ID `sha256:baa32539eac9ecca7831bac5848c0ecab8a0a84986c5822a4d371fffa7d435ac`、大小约 526 MB、Linux amd64、默认用户 65534。第一次构建 Dockerfile 版本标签断行而失败，已改用固定 here-string Dockerfile 并重新构建成功；构建临时目录仅清理本次创建的文件，镜像保留。
-- **实际 Linux CLI + 外层容器隔离检查**：`scripts/test-nv13-linux-codex-image.ps1 -Image moss-nv13-codex-test:0.162.1` 运行 **真实二进制** `codex --version`（`codex-cli 0.162.1`）、`codex --help`、`codex exec --help`，均退出 0，不登录、不调用模型（不可写且不存在的 CODEX_HOME 引起非致命 PATH alias 提示）。同一个镜像中的离线 fixture 使用 `--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8 --memory 256m --cpus 0.5 --user 65534:65534`，唯一宿主机挂载是新生成的 `/workspace` 只读 canary；允许工作区 canary 读取，未挂载宿主机兄弟 canary 不可见，`/workspace` 和 `/tmp` 写入拒绝、Docker socket 不可见、没有默认网络路由和 Windows 127.0.0.1 端口连接、pids.max=8、capabilities 为零、Seccomp 模式=2、未继承 MOSS/云密钥环境或账户文件，停止睡眠进程的测试容器后可自动移除。离线脚本完整 PASS，随机临时容器和 canary 清理完毕，保留镜像供将来复测。
+- **官方来源及可复现安装**：从 `github.com/openai/codex` 官方 `rust-v0.162.1` 发布页下载 `codex-x86_64-unknown-linux-musl.tar.gz`，先读取 GitHub API 发布资产 `digest`/size 并与本项目固定值核对，再计算下载包 SHA-256，结果 `86f268d81b898f3e144c5ecff2ad2fda2c5802e042d6195b72538fe0fa125057`，大小 111,350,218 字节。解压的 Linux 二进制 SHA-256 为 `628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1`；不执行网络安装脚本、不复制 Windows `~/.codex`，也不下载新基础镜像。使用 `scripts/agent-sandbox/build-linux-codex-test-image.ps1` 基于本地缓存 `ubuntu:22.04`、Docker build `--network none --pull=false` 创建 **专用测试镜像** `moss-nv13-codex-test:0.162.1`，image ID `sha256:baa32539eac9ecca7831bac5848c0ecab8a0a84986c5822a4d371fffa7d435ac`、大小约 526 MB、Linux amd64、默认用户 65534。第一次构建 Dockerfile 版本标签断行而失败，已改用固定 here-string Dockerfile 并重新构建成功；构建临时目录仅清理本次创建的文件，镜像保留。
+- **实际 Linux CLI + 外层容器隔离检查**：`scripts/agent-sandbox/test-linux-codex-image.ps1 -Image moss-nv13-codex-test:0.162.1` 运行 **真实二进制** `codex --version`（`codex-cli 0.162.1`）、`codex --help`、`codex exec --help`，均退出 0，不登录、不调用模型（不可写且不存在的 CODEX_HOME 引起非致命 PATH alias 提示）。同一个镜像中的离线 fixture 使用 `--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8 --memory 256m --cpus 0.5 --user 65534:65534`，唯一宿主机挂载是新生成的 `/workspace` 只读 canary；允许工作区 canary 读取，未挂载宿主机兄弟 canary 不可见，`/workspace` 和 `/tmp` 写入拒绝、Docker socket 不可见、没有默认网络路由和 Windows 127.0.0.1 端口连接、pids.max=8、capabilities 为零、Seccomp 模式=2、未继承 MOSS/云密钥环境或账户文件，停止睡眠进程的测试容器后可自动移除。离线脚本完整 PASS，随机临时容器和 canary 清理完毕，保留镜像供将来复测。
 - **独立兼容性缺口**：另行以 `codex sandbox -P :read-only ...` 尝试 **Codex 内部二次 Linux 沙箱**：原始不可写 CODEX_HOME 被拒；改用存在的只读 synthetic workspace 后提示 bubblewrap 构造时遇到只读文件系统；进一步只开放**容器内** 16 MiB noexec/nosuid 的临时 `/tmp` tmpfs，仍因当前精简 Ubuntu 镜像中没有系统或随 Codex 分发的 `bwrap` 而失败（exit 101）。没有为测试放宽 Docker Seccomp/capabilities、安装 bwrap 或赋予容器特权。因此目前仅通过 **Docker 外层隔离**，不能声称 Codex 内置 Linux 二次沙箱可用；若后续要求内外双层沙箱，须另行受控安装和复测 bwrap。
 - **未获准/未验证**：没有复制/使用任何真实登录会话、没有发出 Codex 模型 API 调用，也没有给测试容器外网访问、MOSS 项目挂载或激光设备访问权限。Linux CLI 的实际对话任务、MCP/插件禁入、受控 API 出站、独立认证、容器异常退出/宿主机权限策略以及与 NV13 单次审批/取消的生产整合 **均未完成**。无网络容器不能调用模型；生产端继续 `REAL_CLI_SANDBOX_VERIFIED=false` + `DisabledRunner`，桌面仍拒绝启用 Codex。
 #### 2026-10-11 bwrap 安装 / 内层 namespace 阻塞与离线代理链路验证
 
-- 使用 `scripts/build-nv13-codex-bwrap-test-image.ps1`，只在从 SHA 固定 Codex 镜像派生的 Ubuntu 测试镜像内安装 Ubuntu APT GPG 签名 `bubblewrap 0.6.1-1ubuntu0.3`。真实 `unshare --user --map-root-user` 非特权运行返回 `Operation not permitted`；真实 Codex `sandbox -P :read-only` 明确返回 `bwrap: No permissions to create new namespace`。**内层 Linux sandbox 仍 BLOCKED**，禁止提高 Docker 特权、关闭 seccomp、改 Windows 设置；不连接生产执行器。
-- 使用 `scripts/build-nv13-fake-api-gateway-image.ps1`、`scripts/test-nv13-internal-model-gateway.ps1` 运行一个只返回人工固定 HTTP 200 内容的临时代理：Codex 镜像所在客户端只连接 `docker network --internal` 内的假服务，网络无默认外网路由，未连接本轮 Windows 测试监听器；无工作区写权限、宿主机凭据或 Docker socket，测试结束后容器、Docker 网络和 canary 清理。**该测试没有访问真实 OpenAI、没有模型费用/登录，也未验证 TLS、DNS/IP 防绕过、正式代理密钥隔离或跨进程撤销。**
-- 后续受控模型代理、单次审批、外联授权与必须通过的负向测试列在 [`NV13 Codex Docker 安全设计与验收`](nv13-codex-docker-security.md)。Docker 基础隔离与假 HTTP 路径可用不等于“Codex 真实可运行”。
+- 使用 `scripts/agent-sandbox/build-codex-bwrap-test-image.ps1`，只在从 SHA 固定 Codex 镜像派生的 Ubuntu 测试镜像内安装 Ubuntu APT GPG 签名 `bubblewrap 0.6.1-1ubuntu0.3`。真实 `unshare --user --map-root-user` 非特权运行返回 `Operation not permitted`；真实 Codex `sandbox -P :read-only` 明确返回 `bwrap: No permissions to create new namespace`。**内层 Linux sandbox 仍 BLOCKED**，禁止提高 Docker 特权、关闭 seccomp、改 Windows 设置；不连接生产执行器。
+- 使用 `scripts/agent-sandbox/build-fake-api-gateway-image.ps1`、`scripts/agent-sandbox/test-internal-model-gateway.ps1` 运行一个只返回人工固定 HTTP 200 内容的临时代理：Codex 镜像所在客户端只连接 `docker network --internal` 内的假服务，网络无默认外网路由，未连接本轮 Windows 测试监听器；无工作区写权限、宿主机凭据或 Docker socket，测试结束后容器、Docker 网络和 canary 清理。**该测试没有访问真实 OpenAI、没有模型费用/登录，也未验证 TLS、DNS/IP 防绕过、正式代理密钥隔离或跨进程撤销。**
+- 后续受控模型代理、单次审批、外联授权与必须通过的负向测试列在 [`NV13 Codex Docker 安全设计与验收`](agent-sandbox-docker-security.md)。Docker 基础隔离与假 HTTP 路径可用不等于“Codex 真实可运行”。
 
 **NV19 衔接**：仅把 Agent 任务记录作为可检索的只读证据；不重放 `result_unknown` 或已消费审批（[NV19](#nv19)）。
 
@@ -286,8 +286,8 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 用户要求把 Agent 功能做完，选定“用户自己开启 + 每次运行桌面批准 + 只在严格模式运行”，取代 2026-10-11 的“沙箱负向测试通过前不得开启”。现在生效的实现：
 
-- `crates/laser-host/src/voice_agent.rs`：删除 `REAL_CLI_SANDBOX_VERIFIED`；`parse_help` 不再比对固定版本，但必须能识别 CLI 且 `--help` 列出全部安全参数（缺一个就 `agent_capability_missing`）；`build_plan` 用 Codex `exec --sandbox workspace-write` 与 Claude Code `--restricted --permission-mode acceptEdits --tools Read,Glob,Grep,Edit,Write`（不开放 Bash 与网络工具），环境白名单增加 `PATH`/`PATHEXT`/`ComSpec`/`HOMEDRIVE`/`HOMEPATH`（Codex 在沙箱里执行命令需要，仍不含任何 MOSS/MCP 变量）；新增 `probe_cli`（只跑 `--version` / `--help`，15 秒超时，不执行任务）、`final_answer`（从 CLI 的 JSON 行输出取最终回答）与 `production_runner()`（Windows 用 Job Object 执行器，非 Windows 返回 `agent_sandbox_unavailable`）。
-- `crates/laser-host/src/voice_agent/engine.rs`：`prepare` 增加严格模式要求；探测结果按可执行文件大小与修改时间缓存；批准后在后台线程运行，`stop(run_id)` 置停止标志，运行中每秒复核配置 revision；取消、超时、撤销设备授权、关闭严格模式或改配置都会结束进程树并写短错误码。`status()` 返回 `configured` / `enabled` / `strict_mode` / `providers` / `runs`（运行中的带 `stoppable`）。新增错误码 `agent_strict_mode_required`、`agent_run_failed`、`agent_timeout`、`agent_stopped`。
+- `crates/moss-agent/src/lib.rs`：删除 `REAL_CLI_SANDBOX_VERIFIED`；`parse_help` 不再比对固定版本，但必须能识别 CLI 且 `--help` 列出全部安全参数（缺一个就 `agent_capability_missing`）；`build_plan` 用 Codex `exec --sandbox workspace-write` 与 Claude Code `--restricted --permission-mode acceptEdits --tools Read,Glob,Grep,Edit,Write`（不开放 Bash 与网络工具），环境白名单增加 `PATH`/`PATHEXT`/`ComSpec`/`HOMEDRIVE`/`HOMEPATH`（Codex 在沙箱里执行命令需要，仍不含任何 MOSS/MCP 变量）；新增 `probe_cli`（只跑 `--version` / `--help`，15 秒超时，不执行任务）、`final_answer`（从 CLI 的 JSON 行输出取最终回答）与 `production_runner()`（Windows 用 Job Object 执行器，非 Windows 返回 `agent_sandbox_unavailable`）。
+- `crates/moss-agent/src/engine.rs`：`prepare` 增加严格模式要求；探测结果按可执行文件大小与修改时间缓存；批准后在后台线程运行，`stop(run_id)` 置停止标志，运行中每秒复核配置 revision；取消、超时、撤销设备授权、关闭严格模式或改配置都会结束进程树并写短错误码。`status()` 返回 `configured` / `enabled` / `strict_mode` / `providers` / `runs`（运行中的带 `stoppable`）。新增错误码 `agent_strict_mode_required`、`agent_run_failed`、`agent_timeout`、`agent_stopped`。
 - 桌面：`voice_agent_save` 不再把开关强制改回关闭，开启时要求工作目录与至少一个 CLI；新增 `voice_agent_stop`（main 窗口，capability `voice-agent.json` 授权）；`voice_agent_status` 不再返回 `sandbox_verified`。
 - 界面：Agent 卡改为可开启，显示分组摘要、每个 CLI 的可用情况与原因码、运行记录与“停止”按钮；严格模式未开时明确提示去 `.env` 设置 `MOSS_FUSION_STRICT=1`。
 
@@ -295,7 +295,7 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 **2026-10-16 实机发现与修复（HW-19）**：用用户本机已登录的真实 CLI 跑生产 `JobRunner`，任务在 0.4 毫秒内以 `agent_run_failed` 结束、输出为空。根因是 `windows_process::environment_block` 的允许列表比 `build_plan()` / `minimal_env()` 所列环境变量少 4 个键（`PATHEXT`、`ComSpec`、`HOMEDRIVE`、`HOMEPATH`），于是 `run_fixture_process` 一律返回 `InvalidInput`、`JobRunner` 映射为 `agent_run_failed`——真实 CLI 一个都起不来；夹具测试自己构造环境变量，所以全绿也发现不了。修复：允许列表收敛为 `voice_agent::CLI_ENV_KEYS` 单一常量，构建计划、探测、运行三处共用，`CODEX_HOME` 与仅测试用的夹具键单独放行；回归测试 `runner_environment_whitelist_accepts_every_key_the_plan_sets` 断言计划里的每个键都被运行器接受、探测与运行共用同一套变量、`MOSS_API_TOKEN` / `MCP_URL` / `MOSS_DEVICE_TOKEN` 仍被拒绝。
 
-**手动实机探针（默认跳过，与 `NV13_DOCKER_TEST_EXE` 同类 opt-in）**：`crates/laser-host/src/voice_agent.rs` 的 `manual_real_plan` / `manual_real_cli_roundtrip` / `manual_real_cli_stop` 需 `--ignored` 且显式给出 `MOSS_REAL_CLI`、`MOSS_REAL_WORKSPACE`、`MOSS_REAL_TASK`（可选 `MOSS_REAL_PROVIDER=codex|claude_code`，默认 codex）；它们会调用真实账号并修改工作目录，只在人工验收时运行（用法见[实机验证手册](moss-hardware-acceptance-plan.md)阶段 1）。2026-10-16 实测：codex 经生产 runner 跑通 31.4 秒任务并取回回答；8 秒处的停止在 8.03 秒取消且无残留进程。
+**手动实机探针（默认跳过，与 `NV13_DOCKER_TEST_EXE` 同类 opt-in）**：`crates/moss-agent/src/lib.rs` 的 `manual_real_plan` / `manual_real_cli_roundtrip` / `manual_real_cli_stop` 需 `--ignored` 且显式给出 `MOSS_REAL_CLI`、`MOSS_REAL_WORKSPACE`、`MOSS_REAL_TASK`（可选 `MOSS_REAL_PROVIDER=codex|claude_code`，默认 codex）；它们会调用真实账号并修改工作目录，只在人工验收时运行（用法见[实机验证手册](moss-hardware-acceptance-plan.md)阶段 1）。2026-10-16 实测：codex 经生产 runner 跑通 31.4 秒任务并取回回答；8 秒处的停止在 8.03 秒取消且无残留进程。
 
 **2026-10-16 本机环境阻塞（不是 MOSS 侧缺陷，记录备查）**：①本机 `codex-cli 0.162.0-alpha.17.2` 的 `.sandbox-bin` 缺 `codex-code-mode-host.exe`（只有旧版 `codex-command-runner-0.158.0-alpha.2.1.exe`），模型能回答但无法执行工具，改文件失败；②本机 `claude.exe 2.1.300` 返回 403 `oauth_not_allowed_for_organization`（组织已禁用订阅访问），需要 API key 或管理员放行；③运行器输出遮盖按整行匹配 `token` / `password` / `api_key` / `sk-` / `.env` 等词，命中即整行替换为 `[redacted]`，上面那条 403 文本因为含 “API key” 被整行吞掉——失败原因在界面/记录里只能看到 `[redacted]`。遮盖是**保守安全策略**，未按本次测试放宽；是否改成“只在像凭据赋值时遮盖”需要单独决定。
 
@@ -350,7 +350,7 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 ### 2026-10-11 NV14-2 有效音频格式软件补测收尾
 
-- 完全合成的 1 秒 440Hz MP3、FLAC、Ogg Vorbis 已通过 Symphonia → 24kHz mono PCM 格式回归；Ogg Opus（未支持）和截断 FLAC 负向拒绝也通过。测试文件/复现脚本在 `crates/moss-voice-server/tests/fixtures/`、`scripts/generate-nv14-synthetic-audio-fixtures.ps1`，不包含真人录音/个人歌曲，产生脚本使用临时离线 Docker FFmpeg。
+- 完全合成的 1 秒 440Hz MP3、FLAC、Ogg Vorbis 已通过 Symphonia → 24kHz mono PCM 格式回归；Ogg Opus（未支持）和截断 FLAC 负向拒绝也通过。测试文件/复现脚本在 `crates/moss-voice-server/tests/fixtures/`、`scripts/generate-synthetic-audio-fixtures.ps1`，不包含真人录音/个人歌曲，产生脚本使用临时离线 Docker FFmpeg。
 - 最新完整回归：Rust workspace 587/587、前端测试/build、FakeGrbl E2E 32/32、Windows EXE/普通 NSIS 和 Android aarch64 APK release 均 PASS；Android 原生库 SHA-256 与本轮编译一致，详情见 CHANGELOG。NV14-5 小智设备真实听音、长曲、插话时延等仍在 FINAL/unverified；不需要提前要求用户手动测试。
 
 <a id="nv15"></a>
@@ -363,7 +363,7 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 ### 修改位置
 
-- 拟新增 `crates/laser-host/src/voice_home.rs`：HA 客户端、实体策略和 HomeControl 执行者；工具组合接入 hass 三工具。
+- 拟新增 `crates/moss-home/src/voice_home.rs`：HA 客户端、实体策略和 HomeControl 执行者；工具组合接入 hass 三工具。
 - 修改 `laser-contracts/src/approval.rs`、`laser-api/src/approval.rs`、审批卡：家居语义、参数和结果；VoiceSettings 保存 endpoint/实体策略/版本，token 放 `voice.plugin.home_assistant`。
 - 拟新增 `frontend/src/components/VoiceHomeCard.jsx` 与对应桌面命令；不把现有 `laser-device` 的 HA 未接入占位改成无条件成功。
 
@@ -402,15 +402,15 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 ### 2026-10-11 NV15 离线状态/服务同步与审批策略验证
 
-- `crates/laser-host/src/voice_home.rs` (未对生产公开)：只接收可信同步得到的 ≤1MiB states/services JSON 与显式桌面实体选取表，要求实际存在的域与固定服务、别名唯一和实体 allowed；排除所有其他域、未知/未勾选实体、system namespace，并只保留安全展示属性。
-- `voice_home/mock_http.rs` 完全 `cfg(test)`：临时回环假 HA 用固定 GET /api/states/services 返回合成 JSON；重定向、401、HTML、过大、断线、伪造 URL/方法等负向校验，不读取用户真实 HA 配置。
+- `crates/moss-home/src/voice_home.rs` (未对生产公开)：只接收可信同步得到的 ≤1MiB states/services JSON 与显式桌面实体选取表，要求实际存在的域与固定服务、别名唯一和实体 allowed；排除所有其他域、未知/未勾选实体、system namespace，并只保留安全展示属性。
+- `moss-home/src/voice_home/mock_http.rs` 完全 `cfg(test)`：临时回环假 HA 用固定 GET /api/states/services 返回合成 JSON；重定向、401、HTML、过大、断线、伪造 URL/方法等负向校验，不读取用户真实 HA 配置。
 - 控制计划严格映射本技术书 §7 服务表，未允许任意 URL、Shell/模板、POST states、额外参数、缺少温度边界的气候控制、未在本地白名单的媒体 ID；所有返回 `requires_dedicated_approval=true`，**不会发出任何 POST**。
-- `voice_home/approval_mock.rs` 为内存模拟审批，测试 30s TTL、32字节摘要身份 ticket（随机令牌哈希）、一次性消耗、设备身份及 permit、配置/密钥 revision、当前服务重核验；不是实际 ApprovalKind::HomeControl，真实持久审批/凭据托管/UI/状态观测及真实模型工具联动仍未接线。模拟被批准的计划也不会执行。
+- `moss-home/src/voice_home/approval_mock.rs` 为内存模拟审批，测试 30s TTL、32字节摘要身份 ticket（随机令牌哈希）、一次性消耗、设备身份及 permit、配置/密钥 revision、当前服务重核验；不是实际 ApprovalKind::HomeControl，真实持久审批/凭据托管/UI/状态观测及真实模型工具联动仍未接线。模拟被批准的计划也不会执行。
 - Rust `cargo test -p laser-host voice_home --lib` 12/12 PASS，其他回归/构建结果见 CHANGELOG。此阶段为 `partial`，不需要连接任何家庭设备。
 
 ### 2026-10-11 NV15-4 网络回执断线的安全结果处理（仅 mock）
 
-- 已存在 `ApprovalKind::HomeControl` 专用持久审批和 `voice_home/control_mock.rs` 的 fake socket 被用于测试；本轮补强 **一次 POST 之后**不论断线还是响应非预期均返回 `ResultUnknown`，再通过持久化 `ApprovalOutcome.phase=Unknown` 锁定终态，绝不将网络错误当作未执行而自动重发。
+- 已存在 `ApprovalKind::HomeControl` 专用持久审批和 `moss-home/src/voice_home/control_mock.rs` 的 fake socket 被用于测试；本轮补强 **一次 POST 之后**不论断线还是响应非预期均返回 `ResultUnknown`，再通过持久化 `ApprovalOutcome.phase=Unknown` 锁定终态，绝不将网络错误当作未执行而自动重发。
 - 回读最大三次固定 `/api/states/{entity_id}` GET，截止时长 3 秒；只确认当前授权目标实体，不能用 changed states 数组中其他实体代替。授权失效或计划被篡改则零 POST。`cargo test -p laser-host voice_home --lib` 21/21 PASS，无实际家居设备访问；生产 HomeControl 执行器、凭据管理、真实设备仍保持禁用。
 ### 2026-10-11 NV15 白名单实体 ID / 别名歧义防护（离线）
 
@@ -433,7 +433,7 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 - `home_secret.rs` 以 Windows 用户 DPAPI 密封 Home Assistant token，新版本不明文落入 app_secrets；旧版明文在数据库打开时单次事务迁移，同时令旧 HomeControl 审批过期。对过期 WAL、外部备份无法承诺擦除，应提示用户安全销毁旧备份或轮换 token。其他平台 fail-closed。
 - `VoiceHomeCard` 已迁入唯一 `voice-private` 打包窗口，四个 Home Tauri 命令都由 capability + 原生窗口 URL/标签双重限制；远程主窗口不能读写 HA 白名单或 token。增加显式勾选、每 15 秒一次的只读同步，关闭窗口及配置/令牌变更即停止。无任何真实服务 POST。
-- `laser-host::voice_home::approved` 复用已存在的 HomeControl 事务单次消费与记录结果，在发送前校验冻结 path/body、白名单/凭据 revision、live permit；发送后最多观察目标状态三次、未知不重试。`https_transport` 有正式受限 HTTPS GET/POST 数据面接口，但**没有生产工具注册，也未接入真实家居控制执行**。两项是待进一步接入的可复用代码，不等于 NV15-2/3/4 验收完成。
+- `moss-home::voice_home::approved` 复用已存在的 HomeControl 事务单次消费与记录结果，在发送前校验冻结 path/body、白名单/凭据 revision、live permit；发送后最多观察目标状态三次、未知不重试。`https_transport` 有正式受限 HTTPS GET/POST 数据面接口，但**没有生产工具注册，也未接入真实家居控制执行**。两项是待进一步接入的可复用代码，不等于 NV15-2/3/4 验收完成。
 - 当前 Windows/App、FakeGrbl、Rust 验证结果及未完成工作以 CHANGELOG 为准；真实 HA 凭据、DNS 地址切换/服务端 TLS、完整审批 UI、语音 tool 注册和设备动作均未验收。NV15 保持 partial。
 
 ### 2026-10-11 NV15 已审批控制结果观察撤销竞态修复（生产控制仍禁用）
@@ -447,7 +447,7 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 ### 技术框架
 
-本地embedding在GPL helper提取，不链接进MIT主程序。模型已固定CampPlus `campplus_sv_zh_cn_16k_common`（官方模型卡v1.0.0、Apache License2.0），实际28,281,138字节、SHA-256 `f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11`、16kHz/192维，已加入模型清单/下载界面。完整协议与边界见 [登记说明](nv16-speaker-enrollment.md)。身份识别和个人记忆注入仍关闭，合成推理不作为真人标定。
+本地embedding在GPL helper提取，不链接进MIT主程序。模型已固定CampPlus `campplus_sv_zh_cn_16k_common`（官方模型卡v1.0.0、Apache License2.0），实际28,281,138字节、SHA-256 `f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11`、16kHz/192维，已加入模型清单/下载界面。完整协议与边界见 [登记说明](speaker-enrollment.md)。身份识别和个人记忆注入仍关闭，合成推理不作为真人标定。
 
 ### 修改位置
 
@@ -466,7 +466,7 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 ### 数据与接口
 
-已实现 `voice_speakers(id,name,embedding,model_id,dimension,revision,created_at)`及 `voice_person_memory(speaker_id PRIMARY KEY,summary,revision,updated_at)`；embedding固定192维f32编码，核对有限值/维度/模型，内部模板不序列化。个人摘要条件更新，未知者不读取/写入登记者摘要。设备记忆保留，按人模式不回落共享摘要。详细命令、状态机和本轮验证见[NV16登记说明](nv16-speaker-enrollment.md)。
+已实现 `voice_speakers(id,name,embedding,model_id,dimension,revision,created_at)`及 `voice_person_memory(speaker_id PRIMARY KEY,summary,revision,updated_at)`；embedding固定192维f32编码，核对有限值/维度/模型，内部模板不序列化。个人摘要条件更新，未知者不读取/写入登记者摘要。设备记忆保留，按人模式不回落共享摘要。详细命令、状态机和本轮验证见[NV16登记说明](speaker-enrollment.md)。
 
 识别结果 `{speaker_id?:string,score,margin,model_id,utterance_generation}` 只由本地受信路径产生；任何 tool arguments 里的 name/score 均无授权效力。默认声纹关闭、默认仅登记者限制关闭；测试起点 `threshold=0.70,margin=0.05` **只是调试候选，不作为发布阈值**。需实测至少 3 人、每人 20 段同人和 20 段异人对比，覆盖安静/噪声/距离/重放；发布门禁值由标定报告给出。无足够真人数据时，身份提示可标 experimental，加工限制不得宣称已可靠验收。
 
@@ -568,13 +568,13 @@ Windows 进程专项 10/10、父子进程取消回收额外连续 5 次，Rust �
 
 ### 2026-10-11 NV18 最新软件证据（不代表已发布）
 
-- `scripts/build-nv18-sidecar-safe.ps1` 现在以按次独立暂存/动态 Tauri overlay 构建；旧 `build-windows-installer.ps1` 已安全转交到新脚本，原有未提交 `bundle-resources/voice-local` 不会再被递归删除。独立 release EXE、GPL helper 和带 helper NSIS 均有本轮成功回执，真实大小/hash 见 CHANGELOG；新版 `target/nv18-24d485ff5a9f4bfb8e4d7c958dbb6fa6/release-manifest.json` 核对协议3、DB schema8及输入 hash。配置与源暂存路径是构建 ID 唯一的 task-owned 输入，不是必须部署到用户电脑的路径。
-- `scripts/verify-nv18-nsis-in-docker.ps1` 使用任务专属、运行时断网、只读挂载的 Ubuntu 官方 p7zip-full 解析当前 NSIS，**22 个条目包含主程序、语音 helper、COPYING、THIRD_PARTY_NOTICES 和对应源码 main.rs**，证据是独立压缩包列举，不只是 Tauri 配置或文件存在。临时检查镜像和容器清理完成。`WinRAR.exe` 无法得到可靠命令行结果，后续不以该尝试作证据。
+- `scripts/voice-helper/build-sidecar-installer.ps1` 现在以按次独立暂存/动态 Tauri overlay 构建；旧 `build-windows-installer.ps1` 已安全转交到新脚本，原有未提交 `bundle-resources/voice-local` 不会再被递归删除。独立 release EXE、GPL helper 和带 helper NSIS 均有本轮成功回执，真实大小/hash 见 CHANGELOG；新版 `target/nv18-24d485ff5a9f4bfb8e4d7c958dbb6fa6/release-manifest.json` 核对协议3、DB schema8及输入 hash。配置与源暂存路径是构建 ID 唯一的 task-owned 输入，不是必须部署到用户电脑的路径。
+- `scripts/voice-helper/verify-installer-in-docker.ps1` 使用任务专属、运行时断网、只读挂载的 Ubuntu 官方 p7zip-full 解析当前 NSIS，**22 个条目包含主程序、语音 helper、COPYING、THIRD_PARTY_NOTICES 和对应源码 main.rs**，证据是独立压缩包列举，不只是 Tauri 配置或文件存在。临时检查镜像和容器清理完成。`WinRAR.exe` 无法得到可靠命令行结果，后续不以该尝试作证据。
 - **剩余必须验收**：第三方原生依赖完整许可/对应源码（目前 notices 明确 preliminary），完整源码临时重建、Windows 干净机安装/升级/卸载与 sidecar 协议启动、Android 实物及小智音频听音；签名和外部分发另行取得批准。用户尚未授权安装，更未进行设备操作。通用 `target/release` 与本轮带 helper 的 `target/x86_64-pc-windows-msvc/release` 两套构建文件不能混用。
 ### 2026-10-11 NV18 完整软件回归、解包标记校验与对应源码复建
 
 - 专用 sidecar NSIS / 标准 NSIS / Android 全套已成功新建，Rust workspace 609/609、前端构建/单测、FakeGrbl 32/32 均 PASS。新版 NSIS 验证器严格检查全部七类包内文件与敏感文件禁入，helper hash 完全一致；NSIS 内 desktop 只有 3 个 Tauri bundle-type marker 字节与打包前 EXE 不同，在内存中重新 SHA-256 完全匹配，验证器 exit 0。
-- 真实从暂存对应源码重新构建 GPL helper PASS（但 exe 位级 hash 与发布包原 helper 不一致，reproducible builds 未通过）。Cargo metadata 147 个 crates 有许可证字段，但 espeak-ng/native 对应源码和原生许可证清单未审完整；软件构建 ≠ 法律上可外部分发或干净系统安装通过。完整路径/哈希/安全限制请参见 [`NV18 源码/许可证审计`](../developer/nv18-source-license-audit-2026-10-11.md)。
+- 真实从暂存对应源码重新构建 GPL helper PASS（但 exe 位级 hash 与发布包原 helper 不一致，reproducible builds 未通过）。Cargo metadata 147 个 crates 有许可证字段，但 espeak-ng/native 对应源码和原生许可证清单未审完整；软件构建 ≠ 法律上可外部分发或干净系统安装通过。完整路径/哈希/安全限制请参见 [`NV18 源码/许可证审计`](../developer/voice-helper-license-audit.md)。
 ### 修改位置
 
 - 修改 `scripts/build-windows-installer.ps1`、`apps/desktop/src-tauri/tauri.voice-sidecar.conf.json`，必要时安装器 hooks；不直接手改 Tauri 生成结果。

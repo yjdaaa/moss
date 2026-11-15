@@ -346,7 +346,7 @@ try {
           assert.equal(input.port, "/dev/cu.usbmodem14201");
           return {
             device: { chip: "esp32s3", mac_address: "dc:da:0c:11:22:33", flash_size: "16MB" },
-            partition: { label: "nvs", offset: "0x9000", size: 20480 },
+            partition: { label: "nvs", offset: "0x9000", size: 20480, all_labels: ["nvs", "otadata", "phy_init", "ota_0", "ota_1", "assets"], has_xiaozhi_markers: true },
             known_device: null,
             nvs: {
               wifi_slots: [{ slot: 0, ssid: "HomeNet", has_password: true, channel: 6 }],
@@ -363,7 +363,7 @@ try {
           assert.equal(input.expected_mac, "dc:da:0c:11:22:33");
           return {
             device: { chip: "esp32s3", mac_address: "dc:da:0c:11:22:33", flash_size: "16MB" },
-            partition: { label: "nvs", offset: "0x9000", size: 20480 },
+            partition: { label: "nvs", offset: "0x9000", size: 20480, all_labels: ["nvs", "otadata", "phy_init", "ota_0", "ota_1", "assets"], has_xiaozhi_markers: true },
             known_device: { device_id: "dc:da:0c:11:22:33", name: "ESP32-S3", status: "allowed", model: "esp32s3", firmware_version: "usb" },
             nvs: {
               wifi_slots: [
@@ -434,6 +434,10 @@ try {
   await tab("服务").click();
   assert.equal(await page.getByRole("tab", { name: /^模型/ }).count(), 0, "官方链路的模型在小智控制台配置");
   assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "非内置链路不显示隐私与家居标签");
+  // 官方链路没有“模型”标签：加工反馈判断（Jev）只能在右上角偏好设置里配（2026-11-15）
+  await page.getByTitle("系统偏好设置").click();
+  await page.locator(".settings-modal #settings-jev").waitFor();
+  await page.locator(".settings-modal .mat-modal-close").click();
   assert.equal(await page.locator("#voice-moss-twin").getAttribute("data-mode"), "official", "全息孪生舱默认跟随官方链路");
   assert.match(await page.locator("#voice-moss-twin-source").innerText(), /CLOUD MCP TELEMETRY/);
   // 1. 服务：官方链路只显示接入点与地址；其他链路的面板不渲染（不是折叠）
@@ -577,6 +581,13 @@ try {
   assert.equal(last("voice_local_save").args.settings.tts, false, "可随时在顶部下拉框切回云端语音合成");
   // 5d. 顶部五栏按真实语音执行链路排序（拾音判停 -> 语音识别 -> Jev 前置粗筛 -> 大模型 -> 语音合成），且右上角偏好设置不再重复渲染 Jev
   const mixOrder = await page.locator("#voice-builtin-mix-bar .voice-mix-field").evaluateAll((els) => els.map((el) => el.id));
+  // “当前语音链路”五栏的下拉框必须在同一水平线上（推荐行只加在下拉框下方，不能把它顶歪）
+  const mixSelectTops = await page
+    .locator("#voice-builtin-mix-bar .voice-mix-field select")
+    .evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().top)));
+  assert.equal(new Set(mixSelectTops).size, 1, `语音链路下拉框上下不齐：${mixSelectTops.join(",")}`);
+  assert.equal(await page.locator("#voice-builtin-mix-bar .voice-mix-recommend").count(), mixOrder.length, "每一栏都有推荐行");
+  if (process.env.VOICE_QA_DIR) await page.locator("#voice-builtin-mix-bar").screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-mix-bar.png") });
   assert.deepEqual(mixOrder, ["voice-builtin-mix-vad", "voice-builtin-mix-asr", "voice-builtin-mix-jev", "voice-builtin-mix-llm", "voice-builtin-mix-tts"]);
   // 5d-1. 链路栏右上角“测试全部环节”（2026-11-08）：按当前选用逐个测，不通的环节在对应下拉框下方报错。
   // 此时只保存了大模型：判停为内置能量判停（无需测试）、Jev 关闭（跳过）、识别与合成未配置（报错）、大模型真实请求一次
@@ -595,7 +606,8 @@ try {
   assert.equal(pipelineCalls[0].args.input.model, "fake-model");
   await page.getByTitle("系统偏好设置").click();
   await page.locator(".settings-modal").waitFor();
-  assert.equal(await page.locator("#settings-jev").count(), 0, "桌面端右上角系统设置已移除重复的 Jev 配置，仅保留语音中心唯一入口");
+  await page.waitForTimeout(300); // 等偏好设置读完当前链路再断言，避免只测到“未读到前不显示”
+  assert.equal(await page.locator("#settings-jev").count(), 0, "内置链路下 Jev 由“模型 → Jev”统一管理，右上角偏好设置不重复显示");
   await page.locator(".settings-modal .mat-modal-close").click();
   await page.locator("#voice-builtin-mix-select-jev").selectOption("jev:typesafe/jev-1.14");
   await page.locator("#voice-builtin-mix-status").filter({ hasText: "尚未配置 OpenRouter API Key" }).waitFor();
@@ -671,6 +683,13 @@ try {
   await openGroup("local-models");
   assert.match(await page.locator("#voice-local-group-font").innerText(), /48,662 字/, "n83：本地模型区展示小智屏幕全量补字库");
   assert.equal(await page.locator("#voice-local-delete-xiaozhi_noto_v1_full").count(), 1, "已装补字库可按需删除");
+  // 按场景推荐的整套模型：每种场景一行；模型没下全时点“用这套”只提示要下载什么，不保存
+  await page.locator("#voice-model-pairing-guide > summary").click();
+  assert.ok((await page.locator("#voice-model-pairing-guide .voice-combo-row").count()) >= 4, "列出几种场景组合");
+  const savesBeforeCombo = calls.filter((c) => c.command === "voice_local_save").length;
+  await page.locator("#voice-combo-apply-quiet").click();
+  await page.locator('#voice-model-pairing-guide [role="status"]').getByText(/还需要先下载/).waitFor();
+  assert.equal(calls.filter((c) => c.command === "voice_local_save").length, savesBeforeCombo, "缺模型时不保存半套组合");
   await openGroup("experience");
   assert.equal(await page.locator("#voice-screen-card-style").count(), 0, "n69：对话体验里不再有画风下拉（只在设备 › 副屏预览切换）");
   assert.equal(await page.locator("#voice-jev-filter-enabled").count(), 0, "n69：对话体验里不再有 Jev 开关勾选框");
@@ -984,7 +1003,7 @@ try {
   assert.equal(await page.locator("#xiaozhi-usb-confirm-box").count(), 0, "修改表单字段自动撤销待确认状态");
   await page.locator("#xiaozhi-usb-write-wifi").click();
   await page.locator("#xiaozhi-usb-confirm-write").click();
-  await page.locator('#xiaozhi-usb-card [role="status"]').getByText(/已写入 NVS 并重启小智板子/).waitFor();
+  await page.locator('#xiaozhi-usb-card [role="status"]').getByText(/已写入 NVS 并回读校验无误，小智板子正在重启/).waitFor();
   const writeArgs = last("voice_usb_provision").args.input;
   assert.equal(writeArgs.action, "write");
   assert.equal(writeArgs.confirmed, true);

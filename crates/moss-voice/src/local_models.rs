@@ -87,6 +87,8 @@ pub enum ModelKind {
     Denoise,
     /// 尾音语义判停（Smart Turn v3.2，n87）
     Turn,
+    /// 命令词检测（停止 / 退出命令词抗噪，随本地判停运行，n101）
+    Kws,
 }
 
 /// 辅助程序加载模型的方式（与 `moss-voice-local-proto` 的引擎及本地决策/合成服务对应）。
@@ -118,6 +120,10 @@ pub enum Engine {
     XiaozhiFont,
     /// GTCRN 轻量神经网络降噪（n87）
     Gtcrn,
+    /// sherpa-onnx 关键词检测 zipformer（命令词，n101）
+    Kws,
+    /// DPDFNet 因果神经降噪（sherpa-onnx 1.12.30 起支持；辅助程序按文件名 `dpdfnet*` 选用，n99）
+    DpdfNet,
     /// Smart Turn v3.2 尾音语义判停（n87）
     SmartTurn,
 }
@@ -326,7 +332,7 @@ pub fn vision_model_files(id: &str) -> Option<(&'static str, &'static str)> {
 
 /// 内置清单。SHA-256 取自官方发布页对各资产给出的摘要（并与实际下载的文件逐一核对一致）。
 /// 前三项是 NV6 的默认模型，其余为可选模型。
-pub const CATALOG: [ModelSpec; 24] = [
+pub const CATALOG: [ModelSpec; 27] = [
     ModelSpec {
         id: "campplus_sv_zh_cn_16k_common",
         kind: ModelKind::Speaker,
@@ -346,12 +352,29 @@ pub const CATALOG: [ModelSpec; 24] = [
         kind: ModelKind::Vad,
         engine: Engine::SileroVad,
         label: "Silero 判停",
-        note: "老牌判停模型，稳定可靠，不容易被噪声误触发（推荐）。",
+        note: "老版判停模型（v4），敲击声不误触发；持续的风扇、气泵噪声下不如 v6.2 准。",
         path: "asr-models/silero_vad.onnx",
         sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
         size: 643_854,
         archive: Archive::File,
         required: &[],
+        extras: &[],
+        voices: None,
+    },
+    ModelSpec {
+        id: "silero_vad_v6",
+        kind: ModelKind::Vad,
+        engine: Engine::SileroVad,
+        label: "Silero v6.2 判停（2.3 MB）",
+        note: "Silero 新一代（MIT，推荐）。整条链路实测：敲击声、持续机器噪声都不误触发，机器噪声下识别错字比老版少约三成，句中停顿不会被提前截断。",
+        path: "silero_vad.onnx",
+        sha256: "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+        size: 2_327_524,
+        archive: Archive::Directory {
+            dir: "silero-vad-v6.2",
+            base_url: "https://raw.githubusercontent.com/snakers4/silero-vad/v6.2/src/silero_vad/data",
+        },
+        required: &["silero_vad.onnx"],
         extras: &[],
         voices: None,
     },
@@ -755,10 +778,24 @@ pub const CATALOG: [ModelSpec; 24] = [
         kind: ModelKind::Denoise,
         engine: Engine::Gtcrn,
         label: "GTCRN 实时前端语音降噪（0.5 MB）",
-        note: "超轻量流式神经降噪（16 kHz / CPU 几乎零耗时），有效压制激光机风扇、抽风泵与车间环境底噪（默认关闭，需手动开启）。",
+        note: "超轻量流式神经降噪（16 kHz / CPU 几乎零耗时），能压低风扇、抽风泵底噪；整条链路实测对识别准确率没有提升，默认关闭。",
         path: "speech-enhancement-models/gtcrn_simple.onnx",
         sha256: "e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534",
         size: 535_638,
+        archive: Archive::File,
+        required: &[],
+        extras: &[],
+        voices: None,
+    },
+    ModelSpec {
+        id: "dpdfnet_baseline",
+        kind: ModelKind::Denoise,
+        engine: Engine::DpdfNet,
+        label: "DPDFNet 降噪（8.8 MB）",
+        note: "比 GTCRN 更强的实时降噪（Apache-2.0，约 20 ms 延迟），压得更狠；整条链路实测识别错字反而变多、短词易听错，不推荐，仅供在真实噪声下对比试用（默认关闭）。",
+        path: "speech-enhancement-models/dpdfnet_baseline.onnx",
+        sha256: "debaf0e8893479fca91b8b4c1eae8db195aa8980ccc9012f5809fde2b738151a",
+        size: 8_791_035,
         archive: Archive::File,
         required: &[],
         extras: &[],
@@ -778,6 +815,28 @@ pub const CATALOG: [ModelSpec; 24] = [
             base_url: DEFAULT_SMART_TURN_V3_BASE,
         },
         required: &["smart-turn-v3.2-cpu.onnx"],
+        extras: &[],
+        voices: None,
+    },
+    ModelSpec {
+        id: "kws_zipformer_zh",
+        kind: ModelKind::Kws,
+        engine: Engine::Kws,
+        label: "命令词抗噪（3.3 MB 模型，下载包 31 MB）",
+        note: "sherpa-onnx 中文关键词检测（Apache-2.0）：随本地判停一起听“停 / 停下 / 急停 / 暂停 / 退下 / 退一下 / 再见”，噪声大、识别把这几个短词听错时按命令执行；长句仍以识别为准。需要先开本地判停（默认关闭）。",
+        path: "kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2",
+        // 2026-11-15 实际下载核对
+        sha256: "b2f7c89690dc8ce4c6ed6afeab7cd800c36ad1421fb6b6302b4a4b194cf7f35f",
+        size: 32_654_866,
+        archive: Archive::TarBz2 {
+            dir: "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+        },
+        required: &[
+            "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+            "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            "tokens.txt",
+        ],
         extras: &[],
         voices: None,
     },
@@ -1270,6 +1329,19 @@ fn hf_mirror_for(base_url: &str) -> String {
 /// `Archive::Directory`（如 HuggingFace 上的 `OneJev` / `laya_multilingual`）不与 sherpa-onnx GitHub Release 混用路径。
 fn resolve_download_bases(spec: &ModelSpec, trimmed_base: &str) -> Vec<String> {
     match spec.archive {
+        // 不在 HuggingFace 上的目录模型（GitHub raw 上的 Silero v6.2）：HF 镜像对它没用；
+        // 用户配的是 GitHub 加速前缀（如 `https://ghfast.top/https://github.com/...`）就给原地址也套上，再兜底原地址
+        Archive::Directory { base_url, .. } if !base_url.starts_with("https://huggingface.co") => {
+            if is_loopback_test_base(trimmed_base) {
+                return vec![trimmed_base.to_owned()];
+            }
+            let mut bases = Vec::new();
+            if let Some(at) = trimmed_base.find("https://github.com").filter(|&at| at > 0) {
+                bases.push(format!("{}{base_url}", &trimmed_base[..at]));
+            }
+            bases.push(base_url.to_owned());
+            bases
+        }
         Archive::Directory { base_url, .. } => {
             let mirror_url = hf_mirror_for(base_url);
             if trimmed_base == DEFAULT_BASE {
@@ -1760,6 +1832,37 @@ mod tests {
     use super::*;
     use crate::models::fake_http::serve_once;
 
+    #[test]
+    fn github_hosted_directory_models_ignore_huggingface_mirrors() {
+        let silero = spec("silero_vad_v6").unwrap();
+        let Archive::Directory { base_url, .. } = silero.archive else {
+            panic!("silero_vad_v6 是目录模型");
+        };
+        // 默认与 HF 镜像：只有 GitHub raw 原地址（不会落到 Laya 的镜像上）
+        assert_eq!(
+            resolve_download_bases(silero, DEFAULT_BASE),
+            vec![base_url.to_owned()]
+        );
+        assert_eq!(
+            resolve_download_bases(silero, "https://hf-mirror.com"),
+            vec![base_url.to_owned()]
+        );
+        // GitHub 加速前缀：先走加速，再兜底原地址
+        assert_eq!(
+            resolve_download_bases(
+                silero,
+                "https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download"
+            ),
+            vec![
+                format!("https://ghfast.top/{base_url}"),
+                base_url.to_owned()
+            ]
+        );
+        // HuggingFace 上的目录模型仍是“原地址 + HF 国内镜像”
+        let laya = spec("laya_multilingual").unwrap();
+        assert_eq!(resolve_download_bases(laya, DEFAULT_BASE).len(), 2);
+    }
+
     fn tar_bz2(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
         let mut builder = tar::Builder::new(encoder);
@@ -2213,8 +2316,9 @@ mod tests {
                 Engine::CampPlus => ModelKind::Speaker,
                 Engine::LlamaVision => ModelKind::Vision,
                 Engine::XiaozhiFont => ModelKind::Font,
-                Engine::Gtcrn => ModelKind::Denoise,
+                Engine::Gtcrn | Engine::DpdfNet => ModelKind::Denoise,
                 Engine::SmartTurn => ModelKind::Turn,
+                Engine::Kws => ModelKind::Kws,
             };
             assert_eq!(spec.kind, kind, "{} 的引擎与类别一致", spec.id);
         }
@@ -2541,6 +2645,19 @@ mod local_vision_catalog_tests {
         let gtcrn = spec_of("gtcrn_simple", ModelKind::Denoise).unwrap();
         assert_eq!(gtcrn.engine, Engine::Gtcrn);
         assert_eq!(gtcrn.archive, Archive::File);
+        // 辅助程序按文件名 `dpdfnet*` 选 DPDFNet，文件名不能变
+        let dpdf = spec_of("dpdfnet_baseline", ModelKind::Denoise).unwrap();
+        assert_eq!(dpdf.engine, Engine::DpdfNet);
+        assert!(base_name(dpdf.path).starts_with("dpdfnet"));
+
+        // Silero v6.2 固定到发布标签，不跟 master 变动；目录包内是同名模型文件
+        let silero6 = spec_of("silero_vad_v6", ModelKind::Vad).unwrap();
+        assert_eq!(silero6.engine, Engine::SileroVad);
+        assert!(matches!(
+            silero6.archive,
+            Archive::Directory { base_url, .. } if base_url.contains("/silero-vad/v6.2/")
+        ));
+        assert_eq!(silero6.required, &[silero6.path]);
 
         let turn = spec_of("smart_turn_v3", ModelKind::Turn).unwrap();
         assert_eq!(turn.engine, Engine::SmartTurn);

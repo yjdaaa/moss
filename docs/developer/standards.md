@@ -9,11 +9,14 @@
 | `crates/laser-contracts` | 跨 crate 共享的强类型模型与 JSON Schema，无内部依赖 |
 | `crates/laser-core` | 纯算法（字体、光栅、矢量、G-code、材料推荐、参数范围），不做 I/O |
 | `crates/laser-device` | 串口 / Telnet 传输、握手、预检、流控、实时字节、`FakeGrbl` |
-| `crates/laser-runtime` | `.env` 配置、运行目录、SQLite schema、`RuntimeStore`、旧数据迁移 |
+| `crates/laser-runtime` | 激光与语音共用的运行时层：`.env` 配置、运行目录、SQLite schema 与各类存储（Agent / 上下文 / 知识库 / 固件）、`RuntimeStore`、旧数据迁移 |
 | `crates/laser-tools` | `ToolCatalog` 与不依赖宿主的工具实现 |
 | `crates/laser-mcp` | JSON-RPC 服务、工具分发、小智 WebSocket 桥 |
 | `crates/laser-api` | HTTP 路由、workflow 状态机、发送门禁、材料实验室、配对鉴权、嵌入前端 |
-| `crates/laser-host` | 启动组装、退出协调、语音工具与审批接线 |
+| `crates/laser-host` | 启动组装、退出协调、语音工具分发与第三方 MCP 接线 |
+| `crates/moss-agent` | 本机 Agent（NV13）CLI 识别、受限进程运行器与桌面审批桥（仅桌面） |
+| `crates/moss-home` | Home Assistant 家居控制（NV15）策略、审批与 HTTPS 传输（仅桌面） |
+| `crates/moss-usb-provision` | 小智 USB 一键配网：读写 NVS、回读校验与失败恢复、预签设备令牌（仅桌面） |
 | `crates/moss-xiaozhi-proto` | 小智设备协议：消息、音频帧、设备 token、OTA |
 | `crates/moss-voice-server` | 内置语音服务：OTA / WebSocket、设备允许、会话、插件（仅桌面） |
 | `crates/moss-voice-providers` | ASR / LLM / TTS 提供方（OpenAI 兼容、本地模型、豆包流式） |
@@ -23,12 +26,17 @@
 | `apps/moss-host` | 命令行宿主 `serve` / `migrate` |
 | `apps/desktop` | Tauri 2 桌面与 Android 外壳 |
 | `apps/moss-voice-local` | 本地模型 helper（GPL-3.0，独立 Cargo 工作区，不在根 workspace） |
-| `frontend/` | React + Vite；`tests/*.test.mjs` 单测，`tests/e2e/` 端到端 |
+| `frontend/` | React + Vite；`tests/*.test.mjs` 单测，`tests/e2e/` 端到端；`prototypes/` 已定稿的静态设计原型（演示数据，不参与构建） |
 | `tests/golden/` | 黄金样本；`mcp_tools.json` 被 `laser-mcp` 编译期嵌入 |
 | `tests/fixtures/` | 字体（编译期嵌入）与示例图片 |
-| `scripts/` | 启动器、桌面热重载与快速同步、E2E 调度、安装包构建、NV13/16/17/18 验证与许可收集脚本 |
+| `scripts/` | 根目录放日常入口：启动器、桌面热重载与快速同步、缓存清理、E2E 调度、安装包构建、发版、crate 分层检查；另有图标与架构图生成、合成音频夹具生成、上游 xiaozhi-server 配置离线核验等少量开发工具 |
+| `scripts/voice-helper/` | 带语音 helper 的专用安装包构建、包内容核查、原生依赖许可审计与源码收集（NV18） |
+| `scripts/agent-sandbox/` | 本机 Agent 的 Docker 隔离测试镜像与验收脚本（NV13） |
+| `scripts/speaker/` | 声纹标定与 helper 实测（NV16） |
+| `scripts/voice-bench/` | 整条语音链路实测的说话片段生成与结果汇总（配合 `moss-voice-server` 的 `real_local_chain_matrix`） |
+| `scripts/tests/` | 脚本自身的单测，CI 以 `node --test scripts/tests/*.test.mjs` 运行 |
 
-分层与依赖方向见 [架构总览](architecture.md)。只有多个 crate 确实复用时才下沉到 `laser-core` 或 `laser-contracts`。
+分层与依赖方向见 [架构总览](architecture.md) §2，由 `scripts/check-crate-layers.mjs` 把关；新增 crate 先在该脚本的 `LAYERS` 登记层级。脚本与文档按用途命名，任务代号（NVxx）只写在正文里。只有多个 crate 确实复用时才下沉到 `laser-core` 或 `laser-contracts`。
 
 ## 代码约定
 

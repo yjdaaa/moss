@@ -58,25 +58,22 @@ impl Tts for LocalLikeTts {
 }
 
 #[derive(Debug)]
-struct Heard {
+pub(super) struct Heard {
     /// 固件还没切到说话状态就到达、被丢弃的帧
-    dropped: usize,
+    pub(super) dropped: usize,
     /// 解码队列最深时有多少帧
-    max_queue: usize,
+    pub(super) max_queue: usize,
     /// 开播之后喇叭断流的总时长
-    stalled: Duration,
+    pub(super) stalled: Duration,
     /// 最长的一次断流
-    longest_stall: Duration,
+    pub(super) longest_stall: Duration,
     /// `tts start` 到第一帧开始播放
-    first_audio: Duration,
-    frames: usize,
+    pub(super) first_audio: Duration,
+    pub(super) frames: usize,
 }
 
 /// 收到 `tts stop` 为止，按固件规则回放一遍到达时刻。
 fn listen_like_firmware(device: &mut Device) -> Heard {
-    const FRAME: Duration = Duration::from_millis(60);
-    // 固件从收到 start 到切换状态的调度延迟（保守取值）
-    const STATE_SWITCH: Duration = Duration::from_millis(40);
     let mut start = None;
     let mut arrivals = Vec::new();
     loop {
@@ -94,7 +91,14 @@ fn listen_like_firmware(device: &mut Device) -> Heard {
             _ => {}
         }
     }
-    let start = start.expect("tts start");
+    replay_like_firmware(start.expect("tts start"), &arrivals)
+}
+
+/// 按固件规则回放一轮下行音频的到达时刻：`start` 为收到 `tts start` 的时刻。
+pub(super) fn replay_like_firmware(start: Instant, arrivals: &[Instant]) -> Heard {
+    const FRAME: Duration = Duration::from_millis(60);
+    // 固件从收到 start 到切换状态的调度延迟（保守取值）
+    const STATE_SWITCH: Duration = Duration::from_millis(40);
     let mut heard = Heard {
         dropped: 0,
         max_queue: 0,
@@ -105,7 +109,7 @@ fn listen_like_firmware(device: &mut Device) -> Heard {
     };
     // 每一帧开始播放的时刻
     let mut starts: Vec<Instant> = Vec::new();
-    for at in arrivals {
+    for &at in arrivals {
         if at < start + STATE_SWITCH {
             heard.dropped += 1;
             continue;

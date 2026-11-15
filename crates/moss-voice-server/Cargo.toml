@@ -43,6 +43,8 @@ rcgen = "0.13"
 laser-runtime = { path = "../laser-runtime" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 moss-voice-local-proto = { path = "../moss-voice-local-proto" }
+# 链路实测与桌面端用同一份热词 / 内置同音纠错（test only）
+moss-voice = { path = "../moss-voice" }
 tempfile = "3"
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 

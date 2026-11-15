@@ -37,7 +37,7 @@ Do not copy seller-specific runtime values, private serial ports, device IPs, Wi
 
 ## Runtime Configuration Keys
 
-These are the only environment variables the Rust host reads (`laser_runtime::LaserSettings`, `laser_tools::resolve_connection_spec`, `laser_mcp::endpoint_from_env`). Put them in a local `.env`; never commit real values.
+These are the laser-side environment variables the Rust host reads (`laser_runtime::LaserSettings`, `laser_tools::resolve_connection_spec`, `laser_mcp::endpoint_from_env`). Host-wide switches are not listed here: `MOSS_ALLOWED_ORIGINS` and `MOSS_FUSION_STRICT` are described in the [quick start](../user/quick-start.md) and [safety guide](../developer/safety.md); `MOSS_APPROVAL_TTL_SECONDS` sets the desktop-approval lifetime (30–600 s, default 120). Put them in a local `.env`; never commit real values.
 
 | Key | Default | Purpose |
 |---|---:|---|

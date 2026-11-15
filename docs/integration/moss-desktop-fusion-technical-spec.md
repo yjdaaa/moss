@@ -1,6 +1,6 @@
 # MOSS 自建小智语音链路与多项目融合技术书
 
-状态：技术书 r15（2026-10-14），修订记录续至 r22（2026-11-07）。本文是拟实施方案，不代表当前能力：“现有”指已在代码中核实的行为，“拟新增”指未实现的契约。进度只看 [实施 TODO](moss-fusion-implementation-todo.md)；内置语音设计见 [内置语音技术书](moss-native-voice-spec.md)，r11 起它取代本文部分非目标与决定。外部服务端链路实施前须完成 §10 的 P0 前置验证。
+状态：技术书 r15（2026-10-14），修订记录续至 r32（2026-11-15）。本文是拟实施方案，不代表当前能力：“现有”指已在代码中核实的行为，“拟新增”指未实现的契约。进度只看 [实施 TODO](moss-fusion-implementation-todo.md)；内置语音设计见 [内置语音技术书](moss-native-voice-spec.md)，r11 起它取代本文部分非目标与决定。外部服务端链路实施前须完成 §10 的 P0 前置验证。
 
 修订记录：
 
@@ -11,8 +11,8 @@
 | r3 | 用户决定：①自有模型为**云端部署**，同时提供 OpenAI 与 Anthropic 协议（地址 + 密钥），P0-1 由本机硬件评估改为端点能力与延迟验证，xiaozhi-server 侧统一走 OpenAI 协议（§2、D7、§9.1、§10）；②**不允许任意来源访问**：CORS 收紧与来源校验改为默认始终生效，不再依赖严格模式，并拆为可先行交付的独立工作包 S1（D11、§6.5、§10） |
 | r4 | 用户采纳“一个入口，后台多进程”：新增 MOSS **语音中心**（D12、§9.4）——链路模式单选（官方 / 自建，互斥）、xiaozhi-server 由 MOSS 启停（只管自己启动的进程）、模型配置向导（密钥写入服务端配置，MOSS 不保存）、状态与日志；D7 进程管理规则相应放宽；P4 改为语音中心工作包；新增验收 A-60..A-69 |
 | r5 | 通读上游源码（xiaozhi-esp32-server 提交 `87c6df7`，2026-09-29）后修订：①**正式链路改为 MCP 接入点**（D2）——上游 xiaozhi-server 与 MOSS `run_bridge` 都是接入点的 WebSocket 客户端，由独立的 `mcp-endpoint-server` 中继，MOSS 无需写插件；严格模式通过 `CallerContext::McpBridge` 生效；网关 + 插件降为可选增强 P2b（只为审批结果语音播报与会话级审计）；②三个模型独立配置，按上游真实字段写入 `data/.config.yaml`（§9.4.4）；③设备在线状态改用接入点 `health` 接口的 `robot_connections`；④补充 30 秒工具超时、ASR 非流式等约束 |
-| r6 | 新增桌面端前端改造（§9.5）：语音中心页、全局审批卡、顶栏真实状态（修复 `/api/system/info` 编造的 MCP 遥测，独立工作包 S2）、`apiFetch` 携带桌面会话头、整体视觉提亮（UI-1）；原型 `frontend/ui-preview-voice-center.html`；新增验收 A-70..A-79 |
-| r7 | （同日补充：背景选定 WebGL「等离子流体」并已先行接入现有前端 `CyberBackground.jsx`，构建与实机待补验证；其余三种仅作原型备选）视觉提亮 UI-1 升级为**前端整体改版 UI-2**（§9.5.5）：曜石设计 + 流浪地球太空舱背景，原有按钮功能全部保留并附功能对照清单；原型 `frontend/ui-preview-forge-v2.html`。设计仍为草案，用户后续会继续修改 |
+| r6 | 新增桌面端前端改造（§9.5）：语音中心页、全局审批卡、顶栏真实状态（修复 `/api/system/info` 编造的 MCP 遥测，独立工作包 S2）、`apiFetch` 携带桌面会话头、整体视觉提亮（UI-1）；原型 `frontend/prototypes/voice-center.html`；新增验收 A-70..A-79 |
+| r7 | （同日补充：背景选定 WebGL「等离子流体」并已先行接入现有前端 `CyberBackground.jsx`，构建与实机待补验证；其余三种仅作原型备选）视觉提亮 UI-1 升级为**前端整体改版 UI-2**（§9.5.5）：曜石设计 + 流浪地球太空舱背景，原有按钮功能全部保留并附功能对照清单；原型 `frontend/prototypes/forge-v2.html`。设计仍为草案，用户后续会继续修改 |
 | r8 | 新增 §9.6 安装与卸载：Windows NSIS 安装包（自定义安装目录、当前用户/所有用户、快捷方式、覆盖升级）、卸载（默认保留数据，可选删除 `%APPDATA%\moss`）、WebView2、签名、Android APK；详细规范独立成文 `docs/developer/packaging-install.md`。核实并修正旧文档：运行目录在 Windows 上实际是 `%APPDATA%\moss`，不是程序目录旁 `.runtime/`；`.env` 依赖启动目录，安装版需改用界面设置。新增工作包 PKG 与验收 PK-01..PK-11 |
 | r9 | 新增 §9.7 导出目录设置：桌面端可在偏好设置中选择导出文件的保存目录（系统文件夹选择框、恢复默认、打开文件夹、可选“每次导出时询问”）；核实现状为 `save_export_file` 固定写入“下载”文件夹（无则退回“文档”或应用数据目录 `exports`）；目录只能经桌面壳命令修改，`/api/settings` 不接受该字段；目录不可用时报错并让用户选择，不静默改写到别处；Android 与浏览器保持现状。新增工作包 EXP 与验收 A-82..A-88 |
 | r10 | 新增 §9.8 手机连接电脑 MOSS：参照 OctoPrint / Klipper 的“主机为唯一数据源”，手机 App 增加“连接电脑”模式（请求发往电脑，不做双向同步）；电脑偏好设置“手机连接”开关（`settings.json` `lan_access` → 监听 `0.0.0.0`）与配对码；局域网调用方对材料、校准参数与系统设置只读（`lan_read_only`），雕刻机操作不受影响。新增工作包 LINK 与验收 A-89..A-96 |
@@ -36,6 +36,8 @@
 | r28 | 用户决定（2026-11-08，“MOSS 内置工具（所有链路共用）你看看这个激光雕刻里面的所有工具是否需要优化升级的地方，我感觉有些地方不是人性化呢，以及调用工具这些也不是特别行呢”；对评估方案答“按照你倾向的来”）：**给 AI 的工具改为精简清单（三条链路共用），保留“完整工具（高级）”开关**。① 评估结论：内置语音每轮发给模型 16 个工具约 4.7 万字符；“刻字”有 5 个入口、“发送”有 4 个入口；大量参数没有说明，连接参数每个工具重复；说明里残留 Python 版的 `core.laser_execution` 等；`laser_workflow_tool` 的 `action` 没有取值范围，且声称的 `manual_params_confirmed` / `power_percent` 覆盖材料库在 Rust 后端并不存在（文字预览的功率速度只来自材料库或已采用的反馈建议）。② 精简清单（`tests/golden/mcp_tools_compact.json`，`laser_mcp::COMPACT_LASER_TOOLS`）：8 个激光工具——检查连接、安全动作、刻字全流程（`laser_workflow_tool`：preview / confirm_send / status / recent / cancel / resume）、材料参数库、按效果给调参建议、按建议重新生成、测试矩阵、保存最佳格子——用面向用户说法重写说明，每个参数都有中文说明与取值范围，连接参数只留可不填的串口号与 IP，电脑控制类工具照旧附上；内置语音每轮约 7.8k 字符（降约 83%）。重复的生成 / 发送入口与底层 GRBL 收发只在“完整工具（高级）”打开时列出；执行逻辑、风险分级、审批与严格模式门禁全部不变，按名字仍可调用。③ 开关：`voice.mcp_full_tool_list`（默认 false），语音中心“扩展 › MOSS 内置工具”勾选即生效并重连接入点；`HostBackend::full_tool_list`，`ApiService::{full_tool_list, set_full_tool_list}`。④ 修正：确认发送 / 续雕 / 开刻矩阵时没给串口号或 IP，不再擅自补成网络模式（`with_connection_fields`），改由后端按 `.env` 默认连接方式决定。⑤ 急停在执行层要求 `confirmed=true`（不代表要问用户），精简说明写明“说停就带 confirmed=true 立即调用，不要先问”。未解决（另行决定）：MOSS 后端不记得工作台选的连接，语音 / 接入点不给串口号或 IP 时只能用 `.env` 默认值。 |
 | r29 | 用户决定（2026-11-08，“工作台中不是有测试的吗，如果跟激光雕刻机握手成功自动用他就行以及串口也是一样的道理啊”“2.要，然后就是工作台最好也支持自定义调整速度和功率呢”）：**① 记住工作台握手成功的连接**：`/api/connection/check` 由工作台（桌面、本机网页、局域网配对）调用且真实握手成功（`$$` 到 `ok`、`$32=1`）时，`ApiService::remember_verified_connection` 记下串口号与波特率或网络地址与 Telnet 端口，写进 `settings.json` 的 `laser_verified_connection`（重启后仍在，读回时校验形状）；语音、接入点等身份做的检查不记，握手不成功不记。接入点与内置语音调用需要连机器的激光工具时，若调用方没给任何连接参数（串口号、IP、连接方式），`laser_mcp::with_default_connection` 经 `HostBackend::default_connection` 补上这个连接；给了任何一个就完全按调用方的来。补全发生在门禁之前，审批绑定的就是补全后的目标；发送前照旧重新握手、重算 SHA、确认 Idle，机器换了口会安全失败。**② 这一次临时指定的功率 / 速度 / 遍数**：文字、图片、画板预览共用的 `feedback::generation_params` 新增 `manual_params{power_percent 1~100, feed_rate 100~6000 整数, passes 1~5 整数}`，覆盖材料库推荐或已采用的调参建议，只影响这次生成的刀路、不改材料库；未知字段与越界拒绝；任务记录的 `input` 留着它，重新生成沿用。精简清单的 `laser_workflow_tool` preview 与 `regenerate_text_laser_task_tool` 增加 `manual_params`，预览结果告诉模型这次实际参数并注明“这次手动指定 / 材料库推荐”。**③ 工作台**：“材质与参数”卡显示材料库推荐值，新增“这次自定义功率和速度”开关与功率 %、速度 mm/min、遍数输入（`workbenchParams.js`），生成文字 / 图片预览时提交 `manual_params`；上传的 G-code 文件不适用；刀路摘要显示这次实际参数与来源。创作画板暂未加自定义入口。 |
 | r30 | 用户决定（2026-11-09，“你左边标签栏可以做成收起的那种，然后还有就是最好弄成半透明的，顶部的那个状态栏也是”）：**左侧导航可收起、顶栏可精简，两者改为半透明毛玻璃**。① 侧栏底部“收起侧栏”按钮（`#side-collapse-toggle`）把侧栏收成约 72px 图标栏，名称放在悬停提示里，再点展开；② 顶栏标题旁的精简按钮（`#top-compact-toggle`）把顶栏压矮、状态胶囊只留图标（悬停看详情），**急停 0x18 按钮始终完整显示**；③ 两项都记在本机（`moss_side_collapsed`、`moss_top_compact`，默认都不收起），窄屏（≤900px）侧栏本来是横排，不显示收起按钮；④ 侧栏与顶栏背景降到约 40%～50% 不透明度并加强模糊，透出背后的动态背景与滚动内容。偏好设置里原有的“隐藏右上角状态胶囊”开关不变（§9.5.5） |
+| r31 | 用户决定（2026-11-15，“上面全可以删除了”）：**清空实施 TODO 的待办**。外部自建链路（另行部署 xiaozhi-server 与 mcp-endpoint-server）的前置验证与联调（P0-01～04、P0-09、P2a、P2b、P3）、可选项 VO-2 / VO-3 / P5、全部实机验收（HW-01～21、FINAL-01～05）、Windows 代码签名与干净虚拟机验收、NV18 原生依赖许可闭环不再排期；自建链路代码（P4）保留。安全边界不变：运动、出光、刷写等仍逐次取得同意。详见[实施 TODO](moss-fusion-implementation-todo.md) §1。 |
+| r32 | 用户决定（2026-11-15，“直接按照建议修复吧”）：**右上角偏好设置在官方与自建链路下恢复“OpenRouter · Jev 判断服务”一节**。原因：加工反馈判断（`/api/jev`）在桌面端只有内置链路的「模型 → Jev」卡片能配，官方链路没有「模型」标签、自建链路的「模型」标签也没有这张卡片，导致这两种链路下无处填写。现规则：内置链路由「模型 → Jev」统一管理、偏好设置不重复；其余链路与无语音中心的网页环境在偏好设置里配置。实现见 `preferencesShowJev`（`frontend/src/voiceState/settings.js`）。 |
 范围：Windows 桌面宿主（`moss-desktop`）+ 内置语音服务或外部自建小智服务端（xiaozhi-esp32-server）+ 自有云端模型（ASR/LLM/TTS，OpenAI/Anthropic 协议）+ 可选的海门 Agent 与 xiaozhi-client。Android 保持现有行为，只做兼容回归。
 依据：[架构总览](../developer/architecture.md)、[开发者安全入口](../developer/safety.md)、[Web API 契约](../developer/api-contracts.md)、[数据库结构](../developer/db-schema.md)、[小智 GRBL 工具边界](../laser/xiaozhi-grbl-tool-boundary.md)、仓库根 `AGENTS.md`。与代码不一致时以代码为准并回修本文。
 
@@ -594,7 +596,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 ### 9.5 桌面端前端改造（r6）
 
-交互原型：`frontend/ui-preview-voice-center.html`（演示数据，不连后端；含 8 个测试场景 TC-01..TC-08）。原型只表达布局与交互，实施时以本节与 [前端行为契约](../developer/frontend-behavior.md) 为准。
+交互原型：`frontend/prototypes/voice-center.html`（演示数据，不连后端；含 8 个测试场景 TC-01..TC-08）。原型只表达布局与交互，实施时以本节与 [前端行为契约](../developer/frontend-behavior.md) 为准。
 
 #### 9.5.1 新增“语音中心”页 `/voice`（P4-6）
 
@@ -658,9 +660,9 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 #### 9.5.5 前端整体改版（UI-2，取代原 UI-1 视觉提亮；**2026-10-06 定稿并已实施**）
 
-**实施状态**：令牌与基础组件、左侧导航与顶栏（含常驻急停）、雕刻工作台三栏、创作画板、材料库表格、弹窗、可折叠卡片与偏好设置分区、桌面端导出（`save_export_file`）均已实施，用户本机测试与构建通过；视觉基线见 `frontend/tests/visual-baseline/`。需实机的重复发送防呆与顶栏急停见实施清单 §2a（HW-01、HW-02）。Geist 字体待提供字体文件后自托管；组件内联样式迁移为类名作为后续重构。
+**实施状态**：令牌与基础组件、左侧导航与顶栏（含常驻急停）、雕刻工作台三栏、创作画板、材料库表格、弹窗、可折叠卡片与偏好设置分区、桌面端导出（`save_export_file`）均已实施，用户本机测试与构建通过；视觉基线见 `frontend/tests/visual-baseline/`。需实机的重复发送防呆与顶栏急停见[实机验证手册](moss-hardware-acceptance-plan.md)（HW-01、HW-02，2026-11-15 不再排期）。Geist / Geist Mono 字体已自托管（`frontend/public/fonts/`，OFL）；组件内联样式迁移为类名作为后续重构。
 
-原型：`frontend/ui-preview-forge-v2.html`（演示数据，不连后端）。顶部“功能对照清单”列出原前端 83 项按钮与功能（其中 2 项改了位置或显示方式）+ 5 项新增，可逐项“定位”高亮验证。该原型是当前讨论的设计基线，**用户已明确后续还要修改**：实施前以用户最终确认的原型版本为准，本节随原型更新。
+原型：`frontend/prototypes/forge-v2.html`（演示数据，不连后端）。顶部“功能对照清单”列出原前端 83 项按钮与功能（其中 2 项改了位置或显示方式）+ 5 项新增，可逐项“定位”高亮验证。该原型是当前讨论的设计基线，**用户已明确后续还要修改**：实施前以用户最终确认的原型版本为准，本节随原型更新。
 
 **A. 不变的约束**
 
@@ -830,7 +832,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 | 工作包 | 内容 |
 | --- | --- |
-| UI-2a | 用户确认最终原型版本（`frontend/ui-preview-forge-v2.html` 的某一版），冻结视觉规范 |
+| UI-2a | 用户确认最终原型版本（`frontend/prototypes/forge-v2.html` 的某一版），冻结视觉规范 |
 | UI-2b | 令牌与基础组件：`styles.css` 令牌、按钮、输入、分段、卡片、表格、胶囊、弹窗；迁移内联样式 |
 | UI-2c | 外壳：左侧导航、顶栏（含常驻急停、审批按钮占位）、WebGL 等离子流体背景（含 CSS 回退）、字体本地化 |
 | UI-2d | 逐页改版：雕刻工作台 → 创作画板 → 材料实验室；每页完成后按功能对照清单核对 |
@@ -878,7 +880,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 ### P2b 网关与插件（可选增强）
 
-仅在需要以下能力时实施：批准后由小智语音播报执行结果（插件经 `speak_txt` 主动播报）、按会话的审计与幂等、或接入点实测不可用且用户决定采用替代链路。完整技术框架、修改文件、步骤、数据接口、异常安全及测试见 [P2b 实施细则 s1](moss-self-hosted-extension-implementation.md#p2b)。实施时补做 §5 网关接口、`GatewayCallRequest`、`gateway_requests` 表、令牌管理与 A-10..A-13；P2b 不成为 P3/P4 的默认硬前置。
+仅在需要以下能力时实施：批准后由小智语音播报执行结果（插件经 `speak_txt` 主动播报）、按会话的审计与幂等、或接入点实测不可用且用户决定采用替代链路。（P2b / P3 / P5 的实施细则随 2026-11-15“不再排期”决定删除，见 r31。）实施时补做 §5 网关接口、`GatewayCallRequest`、`gateway_requests` 表、令牌管理与 A-10..A-13；P2b 不成为 P3/P4 的默认硬前置。
 
 | 工作包 | 内容 |
 | --- | --- |
@@ -890,7 +892,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 ### P3 切换到自有云端模型
 
-在**外部 xiaozhi-server** 中逐个把 ASR → TTS → LLM 切到自有云端端点（`type: openai`，地址与密钥只写在服务端配置，不进仓库），每换一个回归 A-01..A-14。LLM 需验证函数调用格式稳定性（以当时实际暴露给模型的工具列表测选择与参数准确率），不达标时缩小模型可见工具集，执行层权限不变。逐模块修改位置、YAML 字段、失败回滚、假/真实验收见 [P3 六项实施细则 s1](moss-self-hosted-extension-implementation.md#p3)。
+在**外部 xiaozhi-server** 中逐个把 ASR → TTS → LLM 切到自有云端端点（`type: openai`，地址与密钥只写在服务端配置，不进仓库），每换一个回归 A-01..A-14。LLM 需验证函数调用格式稳定性（以当时实际暴露给模型的工具列表测选择与参数准确率），不达标时缩小模型可见工具集，执行层权限不变。（P3 实施细则随 2026-11-15“不再排期”决定删除，见 r31。）
 
 ### P4 语音中心（设计见 §9.4）
 
@@ -947,7 +949,7 @@ Android 构建不编译进程管理代码（`cfg(not(target_os = "android"))`）
 
 退出条件：A-89..A-96 通过；Rust 测试、前端测试、E2E 通过；三端构建成功。
 
-### P5 可选扩展（未决定实施；[六项实施细则 s1](moss-self-hosted-extension-implementation.md#p5)）
+### P5 可选扩展（2026-11-15 决定不再排期）
 
 - xiaozhi-client 可作为额外 MCP 聚合层，但须先对比已实现 NV9，确认有独立价值；不自动要求启用网关，MOSS 原执行层 R3/R4 规则不变。
 - 海门 Agent 仅可作为工具提供方，不监听设备音频（D1），不得继承激光控制权限；需要核实真实上游协议与沙箱限制后由用户决定是否实施。

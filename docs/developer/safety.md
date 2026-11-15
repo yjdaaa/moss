@@ -29,7 +29,7 @@
 
 顺序与错误码以 `launch_send_job_for` 为准，任一失败都不写入加工指令：
 
-0. **严格模式授权**（`MOSS_FUSION_STRICT=true` 时，技术书 §6.2；默认关闭，关闭时本步不读取任何数据、不改变判定）：**开关在语音中心顶部（n27，n28 修订，2026-10-18）**——点开需二次确认；开启与关闭都立即生效，并把值写入运行目录 `.env` 的 `MOSS_FUSION_STRICT`（保留其他行与注释，原子写）。关闭会同时更新启动快照与运行时值（`set_strict_from_env` + `set_strict_mode`），所以不存在“要重启才生效”的中间态；**自建链路仍强制开启，命令与界面双重拒绝关闭**（`strict_mode_locked`），切换到自建链路时 `moss-voice` 会重新强制开启。唯一检查点 `require_r3_authority`（`crates/laser-api/src/approval.rs`）。桌面会话放行；小智桥接 / 局域网配对 / 网关只创建审批并返回 HTTP 202 `approval_required`，不连接设备；本机回环无凭据返回 403 `strict_mode_blocked`；以审批身份执行时（不论严格模式开关）按当前要素与审批保存的连接重算摘要并单次消费，执行使用审批保存的连接参数。无本地数据库时 503 `approval_unavailable`（失败即拒绝）。同一检查点也接在 `/api/safe-action` 的 R3 动作（`laser_contracts::safe_action_requires_approval`：除查询、急停、软复位、关激光、倍率复位与降低外一律视为 R3）与 `/api/device/framing`。停止类动作永不追加条件。
+0. **严格模式授权**（`MOSS_FUSION_STRICT=true` 时，技术书 §6.2；默认关闭，关闭时本步不读取任何数据、不改变判定）：**开关在语音中心顶部（n27，n28 修订，2026-10-18）**——点开需二次确认；开启与关闭都立即生效，并把值写入运行目录 `.env` 的 `MOSS_FUSION_STRICT`（保留其他行与注释，原子写）。关闭会同时更新启动快照与运行时值（`set_strict_from_env` + `set_strict_mode`），所以不存在“要重启才生效”的中间态；**自建链路仍强制开启，命令与界面双重拒绝关闭**（`strict_mode_locked`），切换到自建链路时 `moss-voice` 会重新强制开启。唯一检查点 `require_r3_authority`（`crates/laser-api/src/approval/strict.rs`）。桌面会话放行；小智桥接 / 局域网配对 / 网关只创建审批并返回 HTTP 202 `approval_required`，不连接设备；本机回环无凭据返回 403 `strict_mode_blocked`；以审批身份执行时（不论严格模式开关）按当前要素与审批保存的连接重算摘要并单次消费，执行使用审批保存的连接参数。无本地数据库时 503 `approval_unavailable`（失败即拒绝）。同一检查点也接在 `/api/safe-action` 的 R3 动作（`laser_contracts::safe_action_requires_approval`：除查询、急停、软复位、关激光、倍率复位与降低外一律视为 R3）与 `/api/device/framing`。停止类动作永不追加条件。
 1. HTTP 层要求 `confirmed=true`，否则 400；`laser-mcp` 在转发前同样检查。
 2. `authorize_send`：记录处于 `pending`；重新读取物理 G-code 文件计算 SHA-256 并与冻结值比对；存在有效 workflow 快照或 calibration SHA。改材料、厚度、文件、策略、参数或连接目标后必须重新预览。
 3. 同一设备已有在途作业：409 `device_busy`。
@@ -60,6 +60,7 @@
 - 画板、图片与文字预览都按机器幅面（默认 100 × 100 mm，请求可覆盖）限制尺寸（2026-11-06 起画板不再使用 400 mm 画布）；发送前另按固件报告的行程复核刀路范围（`job_exceeds_travel`）。生成的文字任务默认以激光头所在位置为木牌（图案）中心（`G92 X<半宽> Y<半高>`），图片任务以激光头位置为图片左下角。
 - 经审批执行的发送在开始前把审批结果记为“发送中”（`phase=running`），发送线程结束时写回完成 / 失败 / 取消；进程在发送中崩溃后，启动恢复把这类审批记为失败、`error_code=result_unknown`，workflow 同时被记为 failed，任何一方都不会自动重发（A-33）。
 - 内置语音（NV4）以 `CallerContext::Voice` 调用工具。运动与出光（R3）**跟随 `MOSS_FUSION_STRICT`**（2026-10-07 用户决定）：开启时只生成审批（来源 `voice`），关闭时与官方接入点相同，模型带 `confirmed=true` 即执行——此时唯一的确认是系统提示要求模型先复述参数、等用户口头确认，没有桌面批准。2026-11-06 起（技术书 r18）AI（语音、小智接入点、网关）生成的每个预览都会在桌面弹出预览窗（`AiPreviewCenter`），用户可在窗内勾选现场确认后“同意开刻”或取消；严格模式开启时只能在界面同意，关闭时口头确认后 AI 仍可 `confirm_send`。文字生成工具的 `confirmed + send_after_generate` 不再顺带发送，只生成预览。R4 与未分级工具（命令执行、打开应用、快捷键、打开网站）**不论开关都拒绝**（`HostBackend::always_deny_r4`），返回 `tool_not_allowed` 并记审计 `voice:<设备>`；工具清单与严格模式下的接入点相同（`laser_host::voice_tools_list`）。停止类动作照常立即执行。
+- 语音抢跑闸门（2026-11-13 n86，规则见 [`AGENTS.md`](../../AGENTS.md)）：`moss-voice-server::conversation` 的 `TurnGate` 允许对话任务在确认用户说完之前先开跑；大模型发起的每批工具调用（含退出工具）执行前都等 `Turn::wait_release` 放行，`hold_llm` 轮次（对正在播的回答插话）连大模型请求也等；会话放弃这一轮时任务原地等待被中止，`ToolLatch` 保证“已开始执行工具”与“作废重来”只发生其一，同一工具不会被执行两遍。新增由大模型触发、有副作用的执行路径必须排在闸门之后；只有整句停止快路径（§4.1）可以不过闸门。
 - 记住的连接（n73，`laser_verified_connection`）只来自工作台身份的真实握手成功；只在调用方没给任何连接参数时补上，补全发生在门禁之前，审批与发送前握手、SHA 重算照旧绑定补全后的目标。不得让语音或接入点自己的检查改写它。
 - 临时参数（n73，`manual_params`）只影响这次生成的刀路，范围与反馈调参相同（功率 1~100%、速度 100~6000 mm/min、遍数 1~5），显示在预览里，发送仍须确认；不得放宽范围或绕过材料安全门禁。
 - 精简 / 完整工具清单（n72，`mcp_full_tool_list`）只改列给 AI 的工具与说明，不改执行、风险分级、审批与严格模式门禁；不在精简清单的工具按名字仍可调用并照常过门禁。改精简说明时不能把需要 `confirmed=true` 的动作写成“不用确认”（急停在执行层要求 `confirmed=true`，只是不需要先问用户）。
@@ -81,7 +82,7 @@
 ### 4.2～4.8 NV13 沙箱边界与离线测试夹具约束（生产规则见 §4.18）
 
 - **进程树隔离边界（Windows Job Object / Unix 独立进程组）**：原版 `codex-cli` 的普通只读模式无法阻止读取工作区外文件或连接本地回环端口；Windows Job Object（`windows_process.rs`）与 Unix/macOS 独立进程组（`unix_process.rs`：`process_group(0)` / `setpgid(0, 0)` + 下发任务 `stdin` 前二次授权复核 + `kill(-pgid, SIGKILL)` + `ESRCH` 回收）仅约束进程树生命周期、时长与输出上限，**不限制用户文件读取、网络或 CLI 自身登录账号**。禁止为绕过限制而自动启用提权沙箱或修改 OS ACL。
-- **Docker 与 `model_proxy` 离线夹具（未接入生产）**：`scripts/test-nv13-container-isolation.ps1`、`voice_agent/docker_plan.rs` 与 `laser-host::voice_agent::model_proxy`（`transport`、`egress`、`tls_client`）仅作离线安全测试夹具，不暴露生产端口、不接入生产 Agent 执行。测试容器必须保持 `--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8`、非 root 与唯一只读合成工作区挂载；严禁加 `--privileged`、`CAP_SYS_ADMIN`、`seccomp=unconfined`，严禁向容器挂载 MOSS 目录、Windows 用户主目录、Docker socket 或真实长期密钥。详见 [`docs/integration/nv13-codex-docker-security.md`](../integration/nv13-codex-docker-security.md)。
+- **Docker 与 `model_proxy` 离线夹具（未接入生产）**：`scripts/agent-sandbox/test-container-isolation.ps1`、`moss-agent/src/docker_plan.rs` 与 `moss-agent::model_proxy`（`transport`、`egress`、`tls_client`）仅作离线安全测试夹具，不暴露生产端口、不接入生产 Agent 执行。测试容器必须保持 `--rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 8`、非 root 与唯一只读合成工作区挂载；严禁加 `--privileged`、`CAP_SYS_ADMIN`、`seccomp=unconfined`，严禁向容器挂载 MOSS 目录、Windows 用户主目录、Docker socket 或真实长期密钥。详见 [`docs/integration/agent-sandbox-docker-security.md`](../integration/agent-sandbox-docker-security.md)。
 
 ### 4.9 NV14 本地音乐选择、播放和撤销隔离（2026-10-11，软件完成 / 设备待验收）
 
@@ -89,14 +90,14 @@
 
 ### 4.10～4.15 NV15 家居控制、备份迁移与日志脱敏安全门禁（生产开启规则见 §4.17）
 
-- **schema 校验与状态裁剪**：`laser-host::voice_home` 校验 HA 状态与服务 schema；未经用户逐实体选择、当前服务不存在、状态 `unknown`/`unavailable`、模型输入篡改增加属性、危险高风险域自动放行策略一律拒绝。对外可用状态仅保留最少的温度/亮度/单位数字，任意 PIN、密码、token 及嵌套属性全部丢弃。
+- **schema 校验与状态裁剪**：`moss-home::voice_home` 校验 HA 状态与服务 schema；未经用户逐实体选择、当前服务不存在、状态 `unknown`/`unavailable`、模型输入篡改增加属性、危险高风险域自动放行策略一律拒绝。对外可用状态仅保留最少的温度/亮度/单位数字，任意 PIN、密码、token 及嵌套属性全部丢弃。
 - **网络出口与单次提交闭环**：只读 GET 与控制 POST 共享 `moss_voice::home_readonly::pinned_client`（DNS/IP 私网检查、一次性固定解析、HTTPS 校验、无代理、不跟随重定向）。HomeControl 将 endpoint、凭据 revision、实体策略 revision、设备许可、动作、目标、参数摘要绑定到专用持久事务审批，要求审计成功才可操作。每个审批消费后**至多一次 POST**；敏感 token/config 改动、取消与唯一 POST 发送边界共享同一 `send_fence` 并用 `BEGIN IMMEDIATE` CAS 串行化，最终状态与审计同事务入库。收到与否不明确、HTTP 错误、提交后撤销，或目标状态回读（最多 3 次只读 GET，总预算 3 秒、单次上限 900ms）期间设备许可被撤销，**即使旧 GET 返回匹配状态也不得写入 `Completed`**，一律持久记为 `result_unknown` 且绝不自动重发。
 - **可移植备份与跨账户系统凭据封存保护**：Windows 用当前用户 DPAPI（`dpapi-user-v1:`），macOS 用当前登录钥匙串随机主密钥（`Security.framework`，`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`）派生的 Encrypt-then-HMAC-SHA256 信封（`keychain-user-v1:`）。仅允许从经来源校验的本机主窗口语音中心（n26/n67，`require_private_settings_window`）导出/导入固定受限 `moss-home-profile-v1` 白名单（仅含不带 origin、媒体库 ID、许可或已启用标志的实体清单），禁止打包 SQLite/WAL/SHM 或迁移原始 `dpapi-user-v1:` / `keychain-user-v1:` 密文（`home_backup_audit` 对两类前缀均标记为不可分享的加密凭据材料）。恢复须二次确认，先原子撤销本机旧 HA token、voice read/control grants 和待审批 HomeControl 并将所有实体置为禁用，重新输入令牌并再次审批后才可运行。遇到其他系统或账户的密文时仅允许受限启动以执行确认撤销迁移（单调版本号原子清除旧密文），任何读取凭据、HA 请求或控制批准均拒绝。已发送的外部控制无法撤回；疑似泄漏须去 HA 服务端轮换/撤销 token。
 - **NV15-1 历史备份审计与日志脱敏**：用户在语音中心“隐私与家居 → 家居”点击按钮后由 Rust 原生文件选择器选择单个本地普通非链接文件（拒绝前端传路径、`..`、reparse 组件、网络路径及 >64MiB），只读分块检查标记，仅输出固定类别/字节数/禁止分享标志，不输出路径或原文。`moss_voice::redact::redact_line` 与 `RotatingLog::tail` 对常见凭据字段和 Bearer/Basic 头做重脱敏，但不替代完整 DLP；不得将旧日志、SQLite/WAL、原始诊断转储或备份判定为可安全分享。
 
 ### 4.12 NV18 语音 sidecar 构建资源安全（2026-10-11）
 
-`build-windows-installer.ps1` 入口已转到独立 `build-nv18-sidecar-safe.ps1`；按次只生成新 GUID 资源目录，禁止递归删除或覆盖用户已有 `bundle-resources/voice-local`。对应 helper/源码/COPYING/初步 notices 已构建进入 NSIS；`verify-nv18-nsis-in-docker.ps1` 以禁网只读非 root Docker 列出真实安装包并验证上述条目，清理自身检查镜像。**还未满足 sherpa-onnx/espeak-ng 及静态依赖的完整许可证/对应源码审计；不得因此对外分发**。安装/升级/卸载、数据迁移和真实 helper 启动均需明确授权的安全环境验收；构建过程不得运行安装器或连接真实硬件。
+`build-windows-installer.ps1` 入口已转到独立 `voice-helper/build-sidecar-installer.ps1`；按次只生成新 GUID 资源目录，禁止递归删除或覆盖用户已有 `bundle-resources/voice-local`。对应 helper/源码/COPYING/初步 notices 已构建进入 NSIS；`voice-helper/verify-installer-in-docker.ps1` 以禁网只读非 root Docker 列出真实安装包并验证上述条目，清理自身检查镜像。**还未满足 sherpa-onnx/espeak-ng 及静态依赖的完整许可证/对应源码审计；不得因此对外分发**。安装/升级/卸载、数据迁移和真实 helper 启动均需明确授权的安全环境验收；构建过程不得运行安装器或连接真实硬件。
 
 ### 4.13 语音中心插件/私人记忆的 Tauri ACL 本地页面隔离（2026-10-11，2026-10-18 n26 更新）
 

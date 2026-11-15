@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use moss_voice_local_proto::{
-    AsrDecodeOptions, AsrEngine, TtsEngine, VadEngine, VadEventKind, VadParams,
+    AsrDecodeOptions, AsrEngine, COMMAND_KEYWORDS, CommandKeyword, TtsEngine, VadEngine,
+    VadEventKind, VadParams, command_keyword_kind, command_keywords_text,
 };
 use moss_voice_local_proto::{
     Op, PROTOCOL_VERSION, Reply, Request, Response, bytes_to_pcm, pcm_to_bytes, read_frame,
@@ -65,6 +66,8 @@ struct Pacing {
     play_until: Option<std::time::Instant>,
     /// 正在合成或排队的流式请求数（排队等待的时间不能算进实时率）
     in_flight: usize,
+    /// 已经量到过实时率（之前用的是偏慢的默认猜测）
+    measured: bool,
 }
 
 impl Default for Pacing {
@@ -74,6 +77,7 @@ impl Default for Pacing {
             rtf: 0.7,
             play_until: None,
             in_flight: 0,
+            measured: false,
         }
     }
 }
@@ -94,13 +98,29 @@ impl Pacing {
         }
     }
 
+    /// 这一句开头能不能把很短的开场白单独先合成（协议 7 `short_opener`）：只在前面没有存货（一轮刚开口）、
+    /// 且这台机器量过的实时率足够低时打开——实测 Kokoro v1.0（实时率约 0.21–0.25，短段因固定开销偏高）
+    /// 合成“好的，”只要 0.16 秒，整句要 0.55 秒；第二段收短到 10 字以内（约 2.2 秒语音），
+    /// 实时率 0.32 时约 0.7 秒算完，与开场白约 0.64 秒的播放时长相当，中间不会明显断开。
+    fn short_opener(&self, now: std::time::Instant) -> bool {
+        const FAST_ENOUGH: f64 = 0.32;
+        let idle = self.play_until.is_none_or(|until| until <= now);
+        idle && self.rtf <= FAST_ENOUGH
+    }
+
     /// 一段语音合成完：`compute` 为这一段的纯合成耗时（没有排队时才有），`audio` 为它的时长。
     fn delivered(&mut self, now: std::time::Instant, compute: Option<Duration>, audio: f64) {
         if let Some(compute) = compute
             && audio >= 0.3
         {
             let sample = (compute.as_secs_f64() / audio).clamp(0.01, 3.0);
-            self.rtf = self.rtf * 0.6 + sample * 0.4;
+            // 第一次量到就直接用（默认值只是猜的，慢慢混合要五六轮才收敛，期间一直按慢机器处理），之后再平滑
+            self.rtf = if self.measured {
+                self.rtf * 0.6 + sample * 0.4
+            } else {
+                sample
+            };
+            self.measured = true;
         }
         let begin = self.play_until.filter(|until| *until > now).unwrap_or(now);
         self.play_until = Some(begin + Duration::from_secs_f64(audio));
@@ -696,19 +716,24 @@ impl LocalHelper {
             .insert(id, sender);
         let requested = std::time::Instant::now();
         // 排在别的请求后面时，等待时间不是这台机器的合成速度
-        let (first_max_chars, queued) = match self.inner.pacing.lock() {
+        let (first_max_chars, short_opener, queued) = match self.inner.pacing.lock() {
             Ok(mut pacing) => {
                 let queued = pacing.in_flight > 0;
                 pacing.in_flight += 1;
-                (pacing.first_max_chars(requested), queued)
+                (
+                    pacing.first_max_chars(requested),
+                    !queued && pacing.short_opener(requested),
+                    queued,
+                )
             }
-            Err(_) => (0, true),
+            Err(_) => (0, false, true),
         };
         let op = Op::SynthesizeStream {
             text,
             speaker,
             speed,
             first_max_chars,
+            short_opener,
         };
         if let Err(error) = self.enqueue(id, op, &[]) {
             self.forget(id);
@@ -828,13 +853,43 @@ impl LocalHelper {
     }
 
     pub fn vad_feed(&self, stream: u64, pcm: &[i16]) -> Result<Vec<VadEventKind>, ProviderError> {
+        self.vad_feed_with_keywords(stream, pcm)
+            .map(|(events, _)| events)
+    }
+
+    /// 同 [`vad_feed`](Self::vad_feed)，另返回这段音频里检测到的命令词（协议 7，未加载命令词模型时为空）。
+    pub fn vad_feed_with_keywords(
+        &self,
+        stream: u64,
+        pcm: &[i16],
+    ) -> Result<(Vec<VadEventKind>, Vec<String>), ProviderError> {
         match self
             .call(Op::VadFeed { stream }, &pcm_to_bytes(pcm), VAD_TIMEOUT)?
             .0
         {
-            Reply::VadEvents { events } => Ok(events),
+            Reply::VadEvents { events, keywords } => Ok((events, keywords)),
             _ => Err(ProviderError::new("本地判停返回了意外的结果")),
         }
+    }
+
+    /// 加载命令词检测模型（协议 7，`None` 卸载）：之后每一路判停流顺带检测停止 / 退出命令词。
+    pub fn load_kws(&self, model_dir: Option<&Path>) -> Result<(), ProviderError> {
+        self.load_kws_with(model_dir, &command_keywords_text())
+    }
+
+    /// 同 [`load_kws`](Self::load_kws)，用给定的命令词表（调参实测用）。
+    pub fn load_kws_with(
+        &self,
+        model_dir: Option<&Path>,
+        keywords: &str,
+    ) -> Result<(), ProviderError> {
+        let op = Op::LoadKws {
+            dir: model_dir
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            keywords: keywords.to_owned(),
+        };
+        Self::expect_loaded(self.call(op, &[], LOAD_TIMEOUT)?.0).map(|_| ())
     }
 
     /// 关闭判停流（尽力而为，不等待结果）。

@@ -1,12 +1,4 @@
-// NV15 restricted mock Home Assistant policy; NOT registered for control.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub mod home_control;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod voice_home;
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub mod voice_agent;
-
+// 本机 Agent（NV13）在 `moss-agent`，家居控制（NV15）在 `moss-home`，由桌面壳直接组装。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod external_mcp;
 

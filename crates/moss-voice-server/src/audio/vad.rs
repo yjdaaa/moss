@@ -11,6 +11,8 @@
 pub enum VadEvent {
     SpeechStart,
     SpeechEnd,
+    /// 命令词检测模型在这段音频里听到了停止 / 退出命令词（协议 7，n101；与判停状态无关）
+    Keyword(moss_voice_providers::local::CommandKeyword),
 }
 
 pub trait Vad: Send {
@@ -84,8 +86,8 @@ impl Vad for LocalVad {
         let Some(stream) = self.stream else {
             return Vec::new();
         };
-        match self.helper.vad_feed(stream, pcm) {
-            Ok(events) => events
+        match self.helper.vad_feed_with_keywords(stream, pcm) {
+            Ok((events, keywords)) => events
                 .into_iter()
                 .map(|event| match event {
                     moss_voice_providers::local::VadEventKind::SpeechStart => {
@@ -97,6 +99,14 @@ impl Vad for LocalVad {
                         VadEvent::SpeechEnd
                     }
                 })
+                .chain(
+                    keywords
+                        .iter()
+                        .filter_map(|label| {
+                            moss_voice_providers::local::command_keyword_kind(label)
+                        })
+                        .map(VadEvent::Keyword),
+                )
                 .collect(),
             Err(error) => {
                 // 本帧起交给能量判停；说话中途切换时能量判停会再报一次“开始”，会话对重复的开始不做处理
@@ -421,7 +431,10 @@ mod tests {
                                 .find(|(at, _)| *at == feeds)
                                 .map(|(_, e)| e.clone())
                                 .unwrap_or_default();
-                            Reply::VadEvents { events }
+                            Reply::VadEvents {
+                                events,
+                                keywords: Vec::new(),
+                            }
                         }
                         _ => Reply::Done,
                     };
@@ -515,5 +528,86 @@ mod tests {
                 "已改用能量判停，重置不再尝试辅助程序"
             );
         }
+    }
+}
+
+/// 内置能量判停在真实语音上的表现（与本地 Silero / TEN 对照用，不在常规测试中运行）：
+/// `MOSS_VAD_CLIPS=<目录，含 meta.json 与 16 kHz s16 片段> cargo test -p moss-voice-server energy_vad_report -- --ignored --nocapture`
+/// 片段为“3 秒纯背景 + 语音（前补 1 秒、后补 1.5 秒）”，已经过设备同款 libopus 上行编解码。
+#[cfg(test)]
+#[test]
+#[ignore]
+fn energy_vad_report() {
+    let dir = std::path::PathBuf::from(std::env::var("MOSS_VAD_CLIPS").expect("MOSS_VAD_CLIPS"));
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
+    for level in [0, 150, 500, 999] {
+        let (mut starts, mut ends, mut splits, mut misses, mut false_noise, mut clips) =
+            (Vec::new(), Vec::new(), 0, 0, 0, 0);
+        for item in meta
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["level"] == level)
+        {
+            clips += 1;
+            let bytes = std::fs::read(dir.join(item["file"].as_str().unwrap())).unwrap();
+            let pcm: Vec<i16> = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| i16::from_le_bytes(*b))
+                .collect();
+            let lead = item["lead_ms"].as_i64().unwrap();
+            let (on, off) = (
+                item["on_ms"].as_i64().unwrap(),
+                item["off_ms"].as_i64().unwrap(),
+            );
+            let mut vad = EnergyVad::new(16_000, VadConfig::default());
+            let mut events = Vec::new();
+            for (index, frame) in pcm.chunks(960).enumerate() {
+                let t = (index as i64 + 1) * 60 - lead;
+                events.extend(vad.accept(frame).into_iter().map(|e| (e, t)));
+            }
+            false_noise += events
+                .iter()
+                .filter(|(e, t)| *e == VadEvent::SpeechStart && *t < 0)
+                .count();
+            let real: Vec<_> = events.iter().filter(|(_, t)| *t >= 0).collect();
+            let first = real
+                .iter()
+                .find(|(e, _)| *e == VadEvent::SpeechStart)
+                .map(|(_, t)| *t);
+            let end_times: Vec<i64> = real
+                .iter()
+                .filter(|(e, _)| *e == VadEvent::SpeechEnd)
+                .map(|(_, t)| *t)
+                .collect();
+            let (Some(first), false) = (first, end_times.is_empty()) else {
+                misses += 1;
+                continue;
+            };
+            starts.push(first - on);
+            let last = end_times
+                .iter()
+                .find(|t| **t >= off)
+                .copied()
+                .unwrap_or(*end_times.last().unwrap());
+            ends.push(last - off);
+            splits += end_times.iter().filter(|t| **t > on && **t < off).count();
+        }
+        let avg = |v: &[i64]| {
+            if v.is_empty() {
+                f64::NAN
+            } else {
+                v.iter().sum::<i64>() as f64 / v.len() as f64
+            }
+        };
+        println!(
+            "能量判停 噪声 {level:>3} | 开口判出 平均晚 {:5.0} ms | 说完判停 平均晚 {:5.0} ms（最晚 {} ms）| 句中误切 {splits} 次 | 漏判 {misses}/{clips} | 纯噪声误触发 {false_noise} 次",
+            avg(&starts),
+            avg(&ends),
+            ends.iter().max().copied().unwrap_or(0)
+        );
     }
 }

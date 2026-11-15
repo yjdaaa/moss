@@ -136,6 +136,11 @@ pub enum ToolOutcome {
 /// 工具执行方。实现须线程安全；单次调用由对话层加 30 秒超时。
 pub trait ToolExecutor: Send + Sync {
     fn tools(&self) -> Vec<ToolSpec>;
+    /// 用户在第三方 MCP 设置里明确设为“允许”（免批准、确认过只读风险）的工具（n101）：
+    /// 这类工具慢的时候可以像联网搜索一样转到后台查。默认不是；不根据服务端自己的 annotations 判断。
+    fn trusted_read_only(&self, _name: &str) -> bool {
+        false
+    }
     fn call<'a>(
         &'a self,
         context: &'a ToolContext,
@@ -214,6 +219,71 @@ pub const SLOW_QUERY_FILLER: &str = "稍等，正在查询。";
 pub const SLOW_GENERATE_FILLER: &str = "稍等，正在生成预览。";
 /// n72 只读检查机器连接（串口 / 网络探测要几秒）时的过渡垫音
 pub const SLOW_CHECK_FILLER: &str = "稍等，我看一下机器。";
+
+/// 命令词纠正只用于这么短的识别结果（n101）：停止 / 退出命令本来就短，长句以识别为准。
+const MAX_COMMAND_FUSION_CHARS: usize = 4;
+/// 识别结果像被听错的命令、命令词结果还没到时最多等这么久（n101）
+const COMMAND_HINT_WAIT: Duration = Duration::from_millis(500);
+
+/// 识别结果像不像被听错的命令词（n101）：没识别出字；或者不超过 4 个字、且和这类命令词有相同的字
+/// （噪声里实测的错法：“跪下 / 会一下 / 不理下 / 看一下”之于“退下 / 退一下”，“待见”之于“再见”，“天下”之于“停下”）；
+/// 停止类再放过“停”的单个同音 / 近音字（“听 / 挺”）。“好的”“挺好”这类说法与命令词没有相同的字，命令词模型误报时也不会被改成命令。
+pub(crate) fn command_hint_fits(
+    kind: moss_voice_providers::local::CommandKeyword,
+    normalized: &str,
+) -> bool {
+    let length = normalized.chars().count();
+    if length == 0 {
+        return true;
+    }
+    if length > MAX_COMMAND_FUSION_CHARS {
+        return false;
+    }
+    // 单个字只放过“停”的同音 / 近音字：“好 / 嗯 / 对”这类单字回答不能被命令词模型误报改成急停
+    if kind == moss_voice_providers::local::CommandKeyword::Stop
+        && length == 1
+        && normalized.chars().all(|c| "听挺亭庭婷廷艇定顶".contains(c))
+    {
+        return true;
+    }
+    moss_voice_providers::local::COMMAND_KEYWORDS
+        .iter()
+        .filter(|(_, _, of)| *of == kind)
+        .any(|(_, label, _)| label.chars().any(|c| normalized.contains(c)))
+}
+
+/// 只读慢查询转到后台时说的话（n100）
+pub const BACKGROUND_QUERY_FILLER: &str = "我在后台查着，查好了告诉你。";
+
+/// 后台查询结果出来、会话主动播报时附在系统提示词后的说明（n100）。
+const BACKGROUND_REPORT_GUIDE: &str = "现在是你主动开口：刚才转到后台查的结果出来了。用一两句口语告诉用户结论；用户这期间如果已经在聊别的，先说一句“刚才查的……有结果了”再说。";
+
+/// 转到后台继续执行的只读慢查询（n100）。丢弃时中止（会话结束、过期）。
+#[derive(Debug)]
+pub struct BackgroundQuery {
+    /// 用户当时问的话
+    pub question: String,
+    pub handle: tokio::task::JoinHandle<Vec<(ToolCall, ToolOutcome)>>,
+}
+
+impl Drop for BackgroundQuery {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// 查询结果整理成给大模型看的文字（每个工具一段，总长有上限）。
+pub fn background_results_text(outcomes: &[(ToolCall, ToolOutcome)]) -> String {
+    let mut text = String::new();
+    for (call, outcome) in outcomes {
+        let content = match outcome {
+            ToolOutcome::Reply(content) | ToolOutcome::Speak(content) => content.as_str(),
+            ToolOutcome::PlayMusic { .. } => continue,
+        };
+        text.push_str(&format!("[{}] {}\n", call.function.name, content));
+    }
+    text.chars().take(2000).collect()
+}
 
 /// 慢工具垫音的起说延迟：工具在这之内返回就不说垫音（快的时候不说废话，慢的时候不冷场）。
 pub const SLOW_TOOL_FILLER_DELAY: Duration = Duration::from_millis(1000);
@@ -333,6 +403,10 @@ pub struct ConversationSettings {
     pub read_only_shortcuts: bool,
     /// 加工结束后在空闲且设备在线时主动播报（2026-11-02 用户决定，语音中心可关）
     pub announce_job_done: bool,
+    /// 旁人说话不接话（n100，默认开，语音中心可关）：给大模型 `stay_silent` 选项
+    pub ignore_bystanders: bool,
+    /// 本地判停流上加载了命令词检测（n101）：识别结果像被听错的命令时，稍等命令词结果
+    pub command_keywords: bool,
     /// 加工发送期间是否将小智屏幕同步为实时加工副屏 HUD（随 `screen_preview_sync` 开关控制）
     pub screen_preview_sync: bool,
     pub model_labels: Vec<String>,
@@ -352,6 +426,8 @@ impl Default for ConversationSettings {
                 "再见",
                 "拜拜",
                 "退下",
+                // SenseVoice 常把短促的“退下”听成“退一下”（2026-11-15 整链实测）；单独说这三个字也是要小智退下
+                "退一下",
                 "休息",
                 "去休息",
                 "没事了",
@@ -369,6 +445,8 @@ impl Default for ConversationSettings {
             tool_timeout: Duration::from_secs(30),
             read_only_shortcuts: true,
             announce_job_done: true,
+            ignore_bystanders: true,
+            command_keywords: false,
             screen_preview_sync: true,
             model_labels: Vec::new(),
             include_local_clock: true,
@@ -642,6 +720,7 @@ impl Conversation {
         push_unique(SLOW_QUERY_FILLER);
         push_unique(SLOW_GENERATE_FILLER);
         push_unique(SLOW_CHECK_FILLER);
+        push_unique(BACKGROUND_QUERY_FILLER);
         phrases
     }
 
@@ -799,11 +878,17 @@ pub enum TurnInput {
     },
     /// 固定话术（唤醒回应、空闲再见）；`close` 为真时说完结束会话
     Say { text: String, close: bool },
+    /// 后台查询结果出来了：由大模型组织成一两句话主动告诉用户（n100）
+    Report { question: String, results: String },
 }
 
 /// 一轮对话送回会话的事件。
 #[derive(Debug)]
 pub enum TurnEvent {
+    /// 只读慢查询转到后台继续执行（这一轮随后结束），结果由会话等空闲时播报（n100）
+    Background(BackgroundQuery),
+    /// 大模型判断这句话不是对小智说的（调用了 `stay_silent`）：不回应，不记入历史（n100）
+    NotForMe,
     /// Trusted Rust-only identity; `verified` is true ONLY when voiceprint matched on this turn's audio.
     PersonResolved {
         scope: Option<crate::person_context::PersonScope>,
@@ -1506,6 +1591,14 @@ impl Turn {
     }
 
     async fn run_tools(&self, calls: &[ToolCall]) -> Vec<(ToolCall, ToolOutcome)> {
+        self.tools_future(calls.to_vec()).await
+    }
+
+    /// 立即开始执行这批工具，返回一个不借用本轮的等待结果的 future（可以交给后台任务继续等）。
+    fn tools_future(
+        &self,
+        calls: Vec<ToolCall>,
+    ) -> impl std::future::Future<Output = Vec<(ToolCall, ToolOutcome)>> + Send + 'static {
         let mut set = tokio::task::JoinSet::new();
         for (index, call) in calls.iter().cloned().enumerate() {
             let tools = self.conversation.tools.clone();
@@ -1555,24 +1648,94 @@ impl Turn {
                 (index, call.id, outcome)
             });
         }
-        let mut outcomes: Vec<Option<ToolOutcome>> = vec![None; calls.len()];
-        while let Some(joined) = set.join_next().await {
-            if let Ok((index, _, outcome)) = joined {
-                outcomes[index] = Some(outcome);
+        async move {
+            let mut outcomes: Vec<Option<ToolOutcome>> = vec![None; calls.len()];
+            while let Some(joined) = set.join_next().await {
+                if let Ok((index, _, outcome)) = joined {
+                    outcomes[index] = Some(outcome);
+                }
+            }
+            // 工具任务 panic 时没有结果：补“执行失败”，保证每个调用都有对应结果（否则模型接口会拒绝下一轮请求）
+            calls
+                .into_iter()
+                .zip(outcomes)
+                .map(|(call, outcome)| {
+                    let outcome = outcome.unwrap_or_else(|| {
+                        ToolOutcome::Reply(format!("工具 {} 执行失败", call.function.name))
+                    });
+                    (call, outcome)
+                })
+                .collect()
+        }
+    }
+
+    /// 命令词模型听到了停止 / 退出命令、通用识别却没认出来（噪声里常把“退下”听成“问一下”、“停”听成别的单字）：
+    /// 识别结果很短（不超过 4 个字，含没识别出字）时按命令词纠正；长句一律以识别为准，不让命令词模型盖过整句话。
+    async fn fuse_command_hint(&self, text: String) -> String {
+        use moss_voice_providers::local::CommandKeyword;
+        let Some(gate) = self.gate.as_ref() else {
+            return text;
+        };
+        if crate::fast::is_stop(&text) || self.conversation.is_exit(&text) {
+            return text;
+        }
+        let normalized = crate::fast::normalized(&text);
+        let read = || gate.command_hint.lock().ok().and_then(|slot| *slot);
+        let mut hint = read();
+        // 命令词模型要在词说完后再听一小段才出结果，常比识别晚到：识别结果像被听错的命令时最多等一会儿
+        // （“好的”这类不像命令的不等，不拖慢正常对话）
+        if hint.is_none()
+            && self.conversation.settings.command_keywords
+            && (command_hint_fits(CommandKeyword::Stop, &normalized)
+                || command_hint_fits(CommandKeyword::Exit, &normalized))
+        {
+            let deadline = std::time::Instant::now() + COMMAND_HINT_WAIT;
+            while hint.is_none() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                hint = read();
             }
         }
-        // 工具任务 panic 时没有结果：补“执行失败”，保证每个调用都有对应结果（否则模型接口会拒绝下一轮请求）
-        calls
-            .iter()
-            .cloned()
-            .zip(outcomes)
-            .map(|(call, outcome)| {
-                let outcome = outcome.unwrap_or_else(|| {
-                    ToolOutcome::Reply(format!("工具 {} 执行失败", call.function.name))
-                });
-                (call, outcome)
-            })
-            .collect()
+        let Some(kind) = hint else {
+            return text;
+        };
+        if !command_hint_fits(kind, &normalized) {
+            return text;
+        }
+        match kind {
+            CommandKeyword::Stop => "停".into(),
+            CommandKeyword::Exit => "退下".into(),
+        }
+    }
+
+    /// 后台查询结果出来后的主动播报：不给工具，只让大模型把结果说成一两句话。
+    async fn report(&self, question: String, results: String, history: Vec<ChatMessage>) {
+        let settings = &self.conversation.settings;
+        let mut system = build_turn_system_prompt(
+            &self.conversation.system_prompt(),
+            settings.include_local_clock,
+            true,
+        );
+        system.push('\n');
+        system.push_str(BACKGROUND_REPORT_GUIDE);
+        let mut messages = vec![ChatMessage::system(system)];
+        messages.extend(compact_stale_tool_results(&history, 2));
+        messages.push(ChatMessage::system(format!(
+            "后台查询完成。用户之前问：{question}\n查询结果：\n{results}"
+        )));
+        let mut emotion_sent = false;
+        let (reply, _) = self.generate(&messages, &[], &mut emotion_sent).await;
+        let messages = match reply {
+            Ok(reply) if !reply.text.trim().is_empty() => vec![ChatMessage::assistant(reply.text)],
+            Ok(_) => Vec::new(),
+            Err(error) => {
+                self.send(TurnEvent::Failed(error));
+                Vec::new()
+            }
+        };
+        self.send(TurnEvent::Done {
+            messages,
+            close: false,
+        });
     }
 
     async fn answer(
@@ -1622,6 +1785,7 @@ impl Turn {
         self.timing("final_asr");
         let raw_text = text;
         let text = apply_asr_corrections(&raw_text, &settings.asr_corrections);
+        let text = self.fuse_command_hint(text).await;
         if !moss_voice_providers::text::speakable(&text) || crate::fast::is_noise_filler(&text) {
             if let Some(task) = smart_turn_task.take() {
                 task.abort();
@@ -1701,6 +1865,17 @@ impl Turn {
             settings.include_local_clock,
             !history.is_empty(),
         );
+        // n100：最近被打断过，说明标记的含义
+        if history.iter().rev().take(8).any(|message| {
+            message.role == moss_voice_providers::Role::Assistant
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains(INTERRUPTED_MARK))
+        }) {
+            system.push('\n');
+            system.push_str(INTERRUPTED_GUIDE);
+        }
         // n72：激光工具在场时附上“说法 → 工具”用法表
         if tools.iter().any(|tool| tool.name == "laser_workflow_tool") {
             system.push('\n');
@@ -1805,11 +1980,15 @@ impl Turn {
         messages.extend(compact_stale_tool_results(&history, 2));
         let first_new = messages.len();
         messages.extend(personal_turn_prefix);
+        let question = text.clone();
         messages.push(ChatMessage::user(text));
         // 保留名 end_conversation 始终由宿主自己持有（官方服务端默认加载的 handle_exit_intent 同理）：
         // 用户换着说法表示聊完了（没命中整句退出词）时由模型调用，说完告别语后结束这一轮对话
-        tools.retain(|spec| spec.name != END_CONVERSATION_TOOL);
+        tools.retain(|spec| spec.name != END_CONVERSATION_TOOL && spec.name != STAY_SILENT_TOOL);
         tools.push(end_conversation_tool());
+        if self.gate.as_ref().is_some_and(|gate| gate.allow_silent) {
+            tools.push(stay_silent_tool());
+        }
         let mut emotion_sent = false;
         let mut spoke_any = false;
         let mut filler_spoken = false;
@@ -1829,7 +2008,7 @@ impl Turn {
             }
             let (reply, spoke) = self.generate(&messages, &tools, &mut emotion_sent).await;
             spoke_any |= spoke;
-            let reply = match reply {
+            let mut reply = match reply {
                 Ok(reply) => reply,
                 Err(error) => {
                     self.send(TurnEvent::Failed(error));
@@ -1867,6 +2046,36 @@ impl Turn {
                 ));
                 self.speak_fixed(&settings.error_reply).await;
                 break;
+            }
+            if reply
+                .tool_calls
+                .iter()
+                .any(|call| call.function.name == STAY_SILENT_TOOL)
+            {
+                // 大模型判断这句不是对小智说的：只有它是这一轮的第一个决定、而且是唯一的调用时才当真——
+                // 还没出声（没说话、没放过渡语）、没执行过工具，会话据此不回应或让暂停的回答接着说。
+                // 混着别的工具（比如急停）时不当真：给它配一个结果，其余工具照常执行；
+                // 已经出过声或执行过工具时，当这一轮正常说完（会话照常发 tts stop、记历史）。
+                if rounds == 1 && !spoke_any && !filler_spoken && reply.tool_calls.len() == 1 {
+                    self.send(TurnEvent::NotForMe);
+                    return;
+                }
+                for call in reply
+                    .tool_calls
+                    .iter()
+                    .filter(|call| call.function.name == STAY_SILENT_TOOL)
+                {
+                    messages.push(ChatMessage::tool(
+                        call.id.clone(),
+                        "未执行：这句话需要正常处理",
+                    ));
+                }
+                reply
+                    .tool_calls
+                    .retain(|call| call.function.name != STAY_SILENT_TOOL);
+                if reply.tool_calls.is_empty() {
+                    break;
+                }
             }
             if let Some(exit) = reply
                 .tool_calls
@@ -1920,7 +2129,48 @@ impl Turn {
             self.send(TurnEvent::ToolsStarted);
             let mut direct = Vec::new();
             let mut music = None;
-            let tool_outcomes = if !spoke_any
+            let background = self.gate.as_ref().is_some_and(|gate| gate.allow_background)
+                && reply.tool_calls.iter().all(|call| {
+                    is_slow_query_call(call)
+                        || (call.function.name.contains("__")
+                            && self
+                                .conversation
+                                .tools
+                                .trusted_read_only(&call.function.name))
+                });
+            let tool_outcomes = if !spoke_any && !filler_spoken && rounds == 1 && background {
+                // 只读慢查询（联网搜索、天气、新闻、知识库）：1 秒内返回就照常回答；
+                // 再慢就交给后台继续查，这一轮先说一句就结束，用户可以接着聊，查好了会话再主动播报（n100）
+                let mut running = BackgroundQuery {
+                    question: question.clone(),
+                    handle: tokio::spawn(self.tools_future(reply.tool_calls.clone())),
+                };
+                match tokio::time::timeout(SLOW_TOOL_FILLER_DELAY, &mut running.handle).await {
+                    Ok(outcomes) => outcomes.unwrap_or_else(|_| {
+                        reply
+                            .tool_calls
+                            .iter()
+                            .cloned()
+                            .map(|call| {
+                                let failed = format!("工具 {} 执行失败", call.function.name);
+                                (call, ToolOutcome::Reply(failed))
+                            })
+                            .collect()
+                    }),
+                    Err(_) => {
+                        self.send(TurnEvent::Background(running));
+                        self.speak_fixed(BACKGROUND_QUERY_FILLER).await;
+                        for call in &reply.tool_calls {
+                            messages.push(ChatMessage::tool(
+                                call.id.clone(),
+                                "已转到后台查询，结果出来后会主动告诉用户",
+                            ));
+                        }
+                        messages.push(ChatMessage::assistant(BACKGROUND_QUERY_FILLER));
+                        break;
+                    }
+                }
+            } else if !spoke_any
                 && !filler_spoken
                 && rounds == 1
                 && let Some(filler) = slow_tool_filler(&reply.tool_calls)
@@ -1978,7 +2228,24 @@ impl Turn {
     }
 }
 
+/// 历史里标记“被打断、没说出口”的前缀（会话打断时写入，见 `session::heard`，n100）。
+pub(crate) const INTERRUPTED_MARK: &str = "【被打断";
+
+/// 历史里出现被打断标记时附在系统提示词后的说明：让大模型知道哪些话用户没听到，话题回来时能接上。
+const INTERRUPTED_GUIDE: &str = "被打断约定：历史里助手话后面的【被打断，没说出口的：……】是你上次被用户打断时还没说出来的内容，用户没有听到。先回应用户新说的话；等新话题说完，或用户问“刚才说到哪了”“你接着说”，再自然地把没说完的接上（换个说法，不重复已经说过的）。回答里不要出现【】标记。";
+
 const END_CONVERSATION_TOOL: &str = "end_conversation";
+/// 保留名：这句话不是对小智说的（旁人说话、打电话、自言自语、电视声），不回应（n100）
+const STAY_SILENT_TOOL: &str = "stay_silent";
+
+fn stay_silent_tool() -> ToolSpec {
+    ToolSpec {
+        name: STAY_SILENT_TOOL.into(),
+        description: "这句话明显不是对你说的时调用，调用后你不出声、不回应：例如用户在跟身边的人说话、在打电话、在自言自语，或者是旁边电视、别人的声音。只要有可能是在问你、叫你做事、回答你的问题，就不要调用，正常回答。调用时不要同时输出任何文字。"
+            .into(),
+        parameters: serde_json::json!({"type": "object", "properties": {}}),
+    }
+}
 
 fn end_conversation_tool() -> ToolSpec {
     ToolSpec {
@@ -2073,6 +2340,14 @@ pub struct TurnGate {
     pub hold_llm: bool,
     /// `hold_llm` 放行时会话给的最新历史（被打断的回答此时才进历史）
     pub fresh_history: Arc<Mutex<Option<Vec<ChatMessage>>>>,
+    /// 自动 / 实时拾音（不是按键说话）：给大模型“这句不是对我说的”的选项（[`STAY_SILENT_TOOL`]，n100）
+    pub allow_silent: bool,
+    /// 会话能接收后台查询结果并主动播报（[`TurnEvent::Background`]，n100）
+    pub allow_background: bool,
+    /// 命令词检测模型在这句话里听到的停止 / 退出命令词（协议 7，n101）：通用识别把它听成了
+    /// 别的短话（如“问一下”“跪下”）时，按命令词纠正。判停流是异步的、这一轮还可能抢跑开始，
+    /// 命令词结果常比“这段话结束”晚一点到，会话收到后补写进来；任务在识别完成后才读
+    pub command_hint: Arc<Mutex<Option<moss_voice_providers::local::CommandKeyword>>>,
 }
 
 /// 一轮对话的工具执行闩：任务开始执行工具与会话把这一轮作废重来（思考中用户接着说）互斥，
@@ -2162,6 +2437,9 @@ pub fn spawn_turn_gated(
                 sample_rate,
                 stream,
             } => turn.answer(pcm, sample_rate, stream, history).await,
+            TurnInput::Report { question, results } => {
+                turn.report(question, results, history).await
+            }
             TurnInput::Say { text, close } => {
                 turn.speak_fixed(&text).await;
                 turn.send(TurnEvent::Done {

@@ -1,0 +1,37 @@
+[package]
+name = "moss-agent"
+version = "0.3.7"
+edition = "2024"
+description = "NV13 本机 Agent（Claude Code / Codex）执行：CLI 识别、受限进程运行器、桌面单次审批桥"
+
+[dependencies]
+laser-contracts = { path = "../laser-contracts" }
+laser-runtime = { path = "../laser-runtime" }
+laser-api = { path = "../laser-api" }
+moss-voice = { path = "../moss-voice" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation", "Win32_Security", "Win32_System_JobObjects",
+    "Win32_System_Threading", "Win32_System_Pipes",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
+laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }
+# 仅离线测试夹具（model_proxy / docker_plan）使用
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+getrandom = "0.3"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tempfile = "3"
+
+[lints]
+workspace = true

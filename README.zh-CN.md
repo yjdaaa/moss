@@ -28,9 +28,9 @@ MOSS 在单一 Rust 工作区内集成了矢量/位图刀路生成、Three.js 3D
 | 纯 Rust 刀路内核 | `laser-core` 独立完成轮廓、填充与位图 G-code 解算及工时估算，无 Python 运行时依赖，且不触碰串口或网络。 |
 | FluidNC 与 GRBL 协同 | 握手自动读取控制器 YAML 配置（`$CD`），支持 `1024B` 动态接收缓冲流控，以及带哈希校验的 SD 卡脱机上传加工。 |
 | 多重物理安全门禁 | 出光前重新读取磁盘 G-code 校验 SHA-256，`0x18` 软复位走独立实时通道不排队，后端自动拦截 PVC 并对未知塑料强制要求确认。 |
-| 内置小智语音中枢 | 原生内置小智 WebSocket / OTA 语音管线（`moss-voice-server`），支持云端模型与离线本地模型（`moss-voice-local` 判停、识别、合成、声纹提示）及 MCP JSON-RPC 2.0 调度。 |
-| 3D 数字孪生与创意画板 | 前端整合主控工作台（`/`）、Excalidraw 手绘矢量画板（`/draw`）与 Three.js 三维机床行程及刀路预览（`/twin`）。 |
-| 默认关闭的受控扩展 | 家居控制、本机 `Claude Code` / `Codex` 执行、声纹提示与固件下发默认全部关闭；在语音私密窗口显式开启后，敏感动作仍须逐次在桌面审批卡确认。 |
+| 内置小智语音中枢 | 原生内置小智 WebSocket / OTA 语音管线（`moss-voice-server`），支持云端模型与离线本地模型（`moss-voice-local` 判停、识别、合成、声纹提示）及 MCP JSON-RPC 2.0 调度，并支持小智设备 USB 一键配网（`moss-usb-provision`）。 |
+| 3D 数字孪生与创意画板 | 前端整合主控工作台（`/`）、Excalidraw 手绘矢量画板（`/draw`）、Three.js 三维机床行程及刀路预览（`/twin`）与材料标定实验室（`/material-lab`）；桌面端另有语音中心（`/voice`）与小智摄像头抓拍（`/camera`）。 |
+| 默认关闭的受控扩展 | 家居控制、本机 `Claude Code` / `Codex` 执行、声纹提示与固件下发默认全部关闭；在桌面主窗口的语音中心显式开启后，敏感动作仍须逐次在桌面审批卡确认。 |
 
 ## 系统架构
 
@@ -42,7 +42,8 @@ MOSS 在单一 Rust 工作区内集成了矢量/位图刀路生成、Three.js 3D
                                      v                         v
 +-----------------------------------------------------------------------------------+
 | Tauri 2 Shell (apps/desktop)  OR  Headless CLI Host (apps/moss-host)              |
-|   +-- laser-host (startup orchestration, approvals, guarded local CLI runner)     |
+|   +-- laser-host (startup assembly, MCP bridge, external MCP wiring)              |
+|   +-- moss-agent / moss-home / moss-usb-provision (desktop-only extensions)       |
 +----------------+-----------------------------+--------------------------+---------+
                  |                             |                          |
                  v                             v                          v
@@ -99,6 +100,7 @@ curl -X POST http://127.0.0.1:9666/api/workflow \
 - **Rust** `1.98+`（`rustup` 稳定版工具链）
 - **Node.js** `20+` 与 `npm`
 - **平台依赖**：Windows 需 WebView2，macOS（`11.0+`）需 Xcode Command Line Tools，构建 Android APK 时需配置 Android SDK / NDK
+- **CMake** `3.x`（桌面构建需要）：内置语音服务从源码编译官方 libopus（`winget install Kitware.CMake` / `brew install cmake`；Windows 上 `scripts/quick-update-desktop.ps1` 会自动识别 Visual Studio C++ 工作负载自带的 CMake）
 
 ```bash
 # 克隆仓库

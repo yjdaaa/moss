@@ -13,6 +13,7 @@ import {
   builtinSourceSwitchPatch,
   isLocalJevModel,
   isLocalOneJevModel,
+  recommendationState,
   voiceErrorText,
 } from "../../voiceState.js";
 import { JEV_GROUP_TITLE, restartEffect } from "./shared.js";
@@ -453,6 +454,36 @@ export function BuiltinModelGroups({ builtin }) {
                   </option>
                 ))}
               </select>
+              {(() => {
+                const rec = recommendationState(key, view.selectValue);
+                if (!rec) return null;
+                if (rec.neutral) {
+                  return (
+                    <span className="voice-muted voice-mix-recommend" id={`voice-builtin-recommend-${key}`}>
+                      {rec.name}（{rec.why}）
+                    </span>
+                  );
+                }
+                return rec.chosen ? (
+                  <span className="voice-muted voice-mix-recommend" id={`voice-builtin-recommend-${key}`}>
+                    ✓ 已是推荐
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="voice-link-btn voice-mix-recommend"
+                    id={`voice-builtin-recommend-${key}`}
+                    disabled={Boolean(busy || mixBusy || pipeline?.running || recordingChain || openingMic)}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleSelectSource(key, label, rec.value);
+                    }}
+                    title={`切换为推荐的 ${rec.name}（${rec.why}）`}
+                  >
+                    推荐：{rec.name}（{rec.why}）
+                  </button>
+                );
+              })()}
               {pipeline?.results?.[key] && (
                 <span
                   className={`voice-mix-test voice-mix-test--${pipeline.results[key].running ? "running" : pipeline.results[key].skipped ? "skip" : pipeline.results[key].ok ? "ok" : "fail"}`}

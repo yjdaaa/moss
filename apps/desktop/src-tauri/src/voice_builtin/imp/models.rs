@@ -135,11 +135,13 @@ impl BuiltinVoice {
             "tts",
             "vad",
             "denoise",
+            "kws",
             "turn",
             "read_only_shortcuts",
             "asr_beam_search",
             "barge_in",
             "job_done_announce",
+            "ignore_bystanders",
             "llm_fast_reply",
             "jev_filter_enabled",
             "jev_unfinished_hold",
@@ -264,6 +266,7 @@ impl BuiltinVoice {
             ("asr_model", ModelKind::Asr),
             ("tts_model", ModelKind::Tts),
             ("denoise_model", ModelKind::Denoise),
+            ("kws_model", ModelKind::Kws),
             ("turn_model", ModelKind::Turn),
         ] {
             if let Some(value) = patch.get(key) {
@@ -456,11 +459,13 @@ impl BuiltinVoice {
                                 "tts" => local.tts = *val,
                                 "vad" => local.vad = *val,
                                 "denoise" => local.denoise = *val,
+                                "kws" => local.kws = *val,
                                 "turn" => local.turn = *val,
                                 "read_only_shortcuts" => local.read_only_shortcuts = *val,
                                 "asr_beam_search" => local.asr_beam_search = *val,
                                 "barge_in" => local.barge_in = *val,
                                 "job_done_announce" => local.job_done_announce = *val,
+                                "ignore_bystanders" => local.ignore_bystanders = *val,
                                 "llm_fast_reply" => local.llm_fast_reply = *val,
                                 "jev_filter_enabled" => local.jev_filter_enabled = *val,
                                 "jev_unfinished_hold" => local.jev_unfinished_hold = *val,
@@ -526,6 +531,7 @@ impl BuiltinVoice {
                                 "vad_model" => local.vad_model = id.clone(),
                                 "asr_model" => local.asr_model = id.clone(),
                                 "denoise_model" => local.denoise_model = id.clone(),
+                                "kws_model" => local.kws_model = id.clone(),
                                 "turn_model" => local.turn_model = id.clone(),
                                 "tts_model" => {
                                     if local.tts_model != *id

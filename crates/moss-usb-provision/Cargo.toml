@@ -1,0 +1,26 @@
+[package]
+name = "moss-usb-provision"
+version = "0.3.7"
+edition = "2024"
+description = "小智硬件 USB 串口一键配网：读写 ESP-IDF NVS、回读校验与失败恢复、预签发设备密钥"
+
+[dependencies]
+laser-runtime = { path = "../laser-runtime" }
+moss-voice = { path = "../moss-voice" }
+moss-voice-providers = { path = "../moss-voice-providers" }
+moss-xiaozhi-proto = { path = "../moss-xiaozhi-proto" }
+espflash = { version = "3.3", default-features = false, features = ["serialport"] }
+serialport = { version = "4", default-features = false }
+# 写入后的回读校验（与 espflash 用同一个 MD5 实现，不新增下载）
+md-5 = "0.10"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# 测试不读写 macOS 真实登录钥匙串（见 laser-runtime 的 test-memory-secret-store）
+laser-runtime = { path = "../laser-runtime", features = ["test-memory-secret-store"] }
+tempfile = "3"
+
+[lints]
+workspace = true

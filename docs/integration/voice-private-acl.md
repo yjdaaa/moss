@@ -1,6 +1,8 @@
 # 语音中心敏感 ACL 与本地安全窗口
 
-状态：2026-10-18，UI-4 入口收敛已实现；仍待本次安装版 WebView2 GUI 点击验收。
+状态：当前实现为 2026-11-07 n67（见下节）：独立安全窗口已取消，敏感语音命令只由 `capabilities/voice-private-main.json` 授权给本进程回环后端上的 `main` 窗口，处理函数开头再调用 `require_private_settings_window`；USB 一键配网 `voice_usb_provision` 同样走这道门。安装版 WebView2 GUI 点击验收未做，2026-11-15 用户决定实机验收不再排期。
+
+n67 之前的记录：
 
 本轮新增 `voice_speaker_manage`（声纹登记、元数据/取消/CAS删除）和 `voice_firmware_status`（只读下载记录），同样只授予 `voice-memory.json` 的 `voice-private` 固定打包窗口；两条命令都复核原始窗口URL，Android拒绝。普通回环页面不能读取姓名、向量或交付记录；声纹向量在所有返回值中均不序列化。固件传输和声纹识别均保持关闭。
 
@@ -13,7 +15,7 @@
 - 界面：唤醒词卡在“设备 → 唤醒词”就地显示，固件卡在“设备 → 固件升级”（n69 起“唤醒词与音量”并入“设备”，“设备与工具”改名“设备”）；全局审批卡的家居控制改为跳到“隐私与家居 → 家居 → 家居审批”。固件与资源包仍只经原生文件框导入，推送前仍逐台确认。
 - 代价：主窗口页面若被注入脚本，也能读取上述设置并发起固件 / 唤醒词推送请求（逐台确认框仍需用户点击）。以下历史小节描述的是 n67 之前的状态。
 
-## 原因
+## 原因（n67 前的历史设计）
 
 MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 `window.navigate(http://127.0.0.1:<实际端口>/)`，解决原先的同源访问问题，
@@ -24,7 +26,7 @@ MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 插件配置/密钥存在状态，绝不能直接在 `default.json` 或
 `remote.urls=["http://127.0.0.1:*"]` 中追加这六个敏感命令。
 
-## 变更及安全边界
+## 变更及安全边界（初版独立窗口方案，n67 已取消）
 
 1. 保留主窗口原有 backend loopback navigation 与黑屏修复，不调整 server CORS 或给后端增加私密 REST API。
 2. 使用非敏感 `open_voice_private` 从主窗口打开新建 `voice-private` WebviewWindow，其实际来源必须是安装包中的 `WebviewUrl::App("voice-private.html")`。非 `main`、非当前后端同源或非打包主页面的调用均拒绝。再次点击复用已有安全窗口，不新建无限多窗口。
@@ -64,12 +66,12 @@ MOSS 桌面主窗口在 `apps/desktop/src-tauri/src/lib.rs` 的 setup 中执行
 
 ## 验证
 
-- Rust `moss-desktop` ACL 检查：通配/远程 `default.json` 中没有敏感权限；`voice-private` 专用 capability 缺省不启用 remote；n26 起另有一份 `main` 专用 capability（回环 remote），敏感函数再校验页面来源——打包私密页或本进程回环后端上的 `main` 窗口，其他 HTTP、伪造端口、路径与 query/fragment 均拒绝；固件三条命令仍只认打包私密页。
-- 前端 `voicePrivacyAcl.test.mjs`：确认四项设置卡已在主语音页就地挂载、`voice-private-main.json` 授权窗口为 `main` 且不含固件权限、私密 capability 未放宽、打包独立入口与 `window.navigate(parsed)` 仍保留。
-- Vite 输出真实 `dist/voice-private.html` 与带哈希的 JS，`dist/index.html` 仍存在；需通过 `npm run build` 复验。
+- Rust `moss-desktop` ACL 检查（`lib.rs` 测试，n67 起）：全部敏感命令（含 `voice_usb_provision` 与 `voice_context.rs` 的两条）处理函数开头调用 `require_private_settings_window(&window)?`，该函数只认 `crate::window_is_trusted_main(window)`，源码中不再有 `is_voice_private_asset`；四张私密卡、固件卡与唤醒词区块都挂在主窗口语音中心。
+- 前端 `voicePrivacyAcl.test.mjs`：确认 `voice-private.html` / `voicePrivate.jsx`、`open_voice_private` 与 `voice-memory/plugins/home/context` 四个 capability 均已删除；`voice-private-main.json` 为 `windows:["main"]`、`remote.urls:["http://127.0.0.1:*"]`、无 `webviews`，权限与敏感命令清单一一对应且 `default.json` 不含其中任何一项；`window.navigate(parsed)` 仍保留。
+- n67 之前的记录：Vite 曾输出独立 `dist/voice-private.html`，固件三条命令曾只认打包私密页，现均已取消。
 - 2026-10-11 原软件回执：桌面 Rust 23/23、Rust workspace 630/630、前端 106/106（新增 3 项 ACL 回归）、FakeGrbl E2E 32/32；Windows release EXE / 普通 NSIS exit 0，Android aarch64 APK exit 0，APK 内原生 `.so` 与本轮编译库 SHA-256 一致。具体文件体积与 SHA-256 见 `CHANGELOG.md` 同日 ACL 修复条目；普通 NSIS 仍非 NV18 专用 sidecar 包。
 - 2026-10-18 UI-4 的本次软件检查与 Windows/Android 交付构建见 [交付构建回执](../developer/build-receipts.md)；浏览器模拟和打包成功均不替代真实私密窗口点击。
-- **最后需要实际 Windows WebView2 GUI 点击验收**：打开当轮新 `target/release/moss-desktop.exe` → 语音中心 → “隐私与家居” → 依次打开四个入口（固件从“服务与设备”打开），确认新窗口中的插件配置与私人记忆列表正常加载或正常为空且没有 `not allowed by ACL`；关闭新窗口，确认主窗口仍显示且没有黑屏。用户无需输入任何真实密钥、保存/清空记忆或连接设备。没有执行这次手动验收之前只标 `software tested / GUI unverified`。
+- **n67 之前计划的 Windows WebView2 GUI 点击验收（未做；独立窗口已取消，2026-11-15 实机验收不再排期）**：打开当轮新 `target/release/moss-desktop.exe` → 语音中心 → “隐私与家居” → 依次打开四个入口（固件从“服务与设备”打开），确认新窗口中的插件配置与私人记忆列表正常加载或正常为空且没有 `not allowed by ACL`；关闭新窗口，确认主窗口仍显示且没有黑屏。用户无需输入任何真实密钥、保存/清空记忆或连接设备。没有执行这次手动验收之前只标 `software tested / GUI unverified`。
 
-关联：`apps/desktop/src-tauri/{build.rs,src/lib.rs,src/voice_builtin.rs,capabilities/{default,voice-memory,voice-plugins}.json}`，
-`frontend/{vite.config.mjs,voice-private.html,src/voicePrivate.jsx,src/voiceApi.js,src/components/VoiceBuiltinCard.jsx,tests/voicePrivacyAcl.test.mjs}`。
+关联（当前）：`apps/desktop/src-tauri/{build.rs,src/lib.rs,src/voice_builtin.rs,src/voice_context.rs,capabilities/{default,voice-private-main}.json}`，
+`frontend/{src/voiceApi.js,src/components/VoiceBuiltinCard.jsx,src/pages/VoicePage.jsx,tests/voicePrivacyAcl.test.mjs}`。

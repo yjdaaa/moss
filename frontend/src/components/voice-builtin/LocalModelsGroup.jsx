@@ -7,8 +7,11 @@ import { LocalTtsVoicesModal } from "../LocalTtsVoicesModal.jsx";
 import {
   LOCAL_MODEL_KEYS,
   canonicalLocalJevModel,
+  comboMissing,
+  comboPatch,
   formatBytes,
   isLocalJevModel,
+  isRecommendedLocalModel,
   localModelGroups,
   localModelSettingsError,
   localModelView,
@@ -90,6 +93,32 @@ export function LocalModelsGroup({ builtin }) {
       builtin.setBusy("");
     }
   };
+  const applyCombo = async (combo) => {
+    const missing = comboMissing(combo, models);
+    if (missing.length) {
+      return { ok: false, text: `“${combo.title}”还需要先下载：${missing.join("、")}（在下方对应的模型包里点“下载”）` };
+    }
+    builtin.setBusy(`local-save-combo-${combo.id}`);
+    try {
+      const patch = comboPatch(combo);
+      const next = await voiceApi.localSave(patch);
+      builtin.setStatus(next);
+      // 只换这套组合涉及的字段（换合成模型时后端会把音色换成新模型的默认音色），
+      // 同组里还没保存的其他修改（语速、下载地址等）原样保留
+      const saved = localSettingsForm(next.local?.settings);
+      setDraft((prev) => {
+        if (!prev) return saved;
+        const merged = { ...prev };
+        for (const key of [...Object.keys(patch), "tts_speaker"]) merged[key] = saved[key];
+        return merged;
+      });
+      return { ok: true, text: `已换成“${combo.title}”这套模型 · ${restartEffect(next)}` };
+    } catch (e) {
+      return { ok: false, text: `切换失败：${voiceErrorText(e)}` };
+    } finally {
+      builtin.setBusy("");
+    }
+  };
   const pickFallbackTts = async (model) => {
     const nextDraft = selectLocalModel(form, models, "tts", model.id);
     setDraft(nextDraft);
@@ -116,7 +145,7 @@ export function LocalModelsGroup({ builtin }) {
         <p className="voice-muted">
           在这里下载或管理断网可用的本地模型包（随 MOSS 自定义安装目录存放{local.models_dir ? `：${local.models_dir}` : ""}），以及调整本地合成音色与语速；当前启用哪个模型请直接在上方顶部下拉框切换。
         </p>
-        <ModelPairingGuide />
+        <ModelPairingGuide settings={baseline} busy={builtin.busy} onApply={applyCombo} />
         <ColabBridgeSection builtin={builtin} />
         {groups.map((item) => {
           const selectedId = form[`${item.kind}_model`];
@@ -129,14 +158,16 @@ export function LocalModelsGroup({ builtin }) {
                 <span className="voice-muted">
                   {item.kind === "vision"
                     ? "下载后到“视觉理解”卡片的“看图用哪个模型”里选“本地视觉模型”"
-                    : item.kind === "denoise" || item.kind === "turn"
+                    : item.kind === "denoise" || item.kind === "turn" || item.kind === "kws"
                       ? activeOn
                         ? selected?.installed
                           ? `已开启：${selected.label}`
                           : `已开启 ${selected?.label || item.title}（未下载，暂不生效）`
                         : item.kind === "denoise"
                           ? "未开启（风扇/气泵环境噪声大时可下载并开启，仅作用于本地判停与本地识别）"
-                          : "未开启（说话中间常停顿思考时可下载并开启，辅助判断话没说完且不延迟急停）"
+                          : item.kind === "kws"
+                            ? "未开启（噪声大时“停”“退下”这类短命令容易被听错，可下载并开启；需要先在顶部选本地判停）"
+                            : "未开启（说话中间常停顿思考时可下载并开启，辅助判断话没说完且不延迟急停）"
                       : activeOn
                         ? selected?.installed
                           ? `当前在顶部已选用：${selected.label}`
@@ -148,7 +179,7 @@ export function LocalModelsGroup({ builtin }) {
                             : "当前在顶部使用：云端模型"}
                 </span>
               </div>
-              {(item.kind === "denoise" || item.kind === "turn") && (
+              {(item.kind === "denoise" || item.kind === "turn" || item.kind === "kws") && (
                 <label className="voice-check">
                   <input
                     type="checkbox"
@@ -159,7 +190,9 @@ export function LocalModelsGroup({ builtin }) {
                   <span>
                     {item.kind === "denoise"
                       ? "启用本地前端降噪（GTCRN，保存后重启内置服务生效）"
-                      : "启用本地语义判停（Smart Turn v3，保存后重启内置服务生效）"}
+                      : item.kind === "kws"
+                        ? "启用命令词抗噪（随本地判停运行，保存后重启内置服务生效）"
+                        : "启用本地语义判停（Smart Turn v3，保存后重启内置服务生效）"}
                   </span>
                 </label>
               )}
@@ -206,6 +239,11 @@ export function LocalModelsGroup({ builtin }) {
                                 </button>
                               ) : (
                                 <b>{model.label}</b>
+                              )}
+                              {isRecommendedLocalModel(item.kind, model.id) && (
+                                <span className="ob-pill ob-pill--ok voice-tag" id={`voice-local-recommended-${model.id}`}>
+                                  推荐
+                                </span>
                               )}
                               {chosen && <span className="ob-pill ob-pill--ok voice-tag">当前选用</span>}
                               {isFallback && <span className="ob-pill ob-pill--info voice-tag">当前兜底</span>}

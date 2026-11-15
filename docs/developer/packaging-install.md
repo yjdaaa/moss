@@ -1,6 +1,6 @@
 # 安装包、安装目录与卸载规范
 
-状态：通用 NSIS 已实施（2026-10-06，见 §2a），用户本机完成当时主程序安装 / 卸载测试；2026-10-10 新增 helper EXE sidecar 配置/脚本接线，源码/许可资源及新安装包验收仍待 NV18（见 §2b）。签名与干净虚拟机验收未做。本文定义安装、升级与卸载行为。与融合方案的关系见 [融合技术书](../integration/moss-desktop-fusion-technical-spec.md) §9.6。
+状态：通用 NSIS 已实施（2026-10-06，见 §2a），用户本机完成当时主程序安装 / 卸载测试；2026-10-10 新增 helper EXE sidecar 配置/脚本接线，源码/许可资源及新安装包验收未完成（见 §2b）。签名、干净虚拟机验收与 NV18 原生依赖许可闭环均未做，2026-11-15 用户决定不再排期（融合技术书 r31、[实施 TODO](../integration/moss-fusion-implementation-todo.md) §1）。本文定义安装、升级与卸载行为。与融合方案的关系见 [融合技术书](../integration/moss-desktop-fusion-technical-spec.md) §9.6。
 
 
 ## 0. 交付产物检查
@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | Windows 主程序 | `target/release/moss-desktop.exe` | `cargo tauri build` |
 | 普通 NSIS（不含 helper） | `target/release/bundle/nsis/MOSS_<版本>_x64-setup.exe` | 同上 |
-| 带 helper 专用 NSIS | `target/x86_64-pc-windows-msvc/release/bundle/nsis/MOSS_<版本>_x64-setup.exe` 及 `target/nv18-<构建ID>/release-manifest.json` | `scripts/build-nv18-sidecar-safe.ps1`（见 §2b、§2c） |
+| 带 helper 专用 NSIS | `target/x86_64-pc-windows-msvc/release/bundle/nsis/MOSS_<版本>_x64-setup.exe` 及 `target/nv18-<构建ID>/release-manifest.json` | `scripts/voice-helper/build-sidecar-installer.ps1`（见 §2b、§2c） |
 | Android APK | `apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/release/` | `cargo tauri android build --target aarch64 --apk` |
 
 普通 NSIS 和专用 NSIS 分别记录，普通包不能代表 helper 安装验收；只改动与 helper 无关时可不重建专用包，但要写明。
@@ -52,7 +52,7 @@
 | PKG-03 安装/卸载钩子 | 已写 `apps/desktop/src-tauri/installer/hooks.nsh`：安装与卸载前用 `nsis_tauri_utils::FindProcess` 检测 `moss-desktop.exe`、`moss-host.exe` 与本地模型辅助程序 `moss-voice-local.exe`（2026-10-13 补），运行中只提示退出并取消。钩子位于 Tauri 模板 `CheckIfAppIsRunning` 之前，后者“询问后强行结束”的流程不会被触发。卸载时复用模板的“删除应用程序数据”复选框（`$DeleteAppDataCheckboxState`，默认不勾选），勾选且非更新模式时删除固定路径 `%APPDATA%\moss`（`APPDATA` 为空则跳过）。依据 Tauri `dev` 分支 `installer.nsi` / `utils.nsh` 核对；以用户本机 tauri-bundler 实际版本打包结果为准 |
 | PKG-04 安装器图片 | 已生成 `installer/header.bmp`（150×57）与 `installer/sidebar.bmp`（164×314），曜石配色 + MOSS 红眼 |
 | PKG-05 文档 | 快速开始“安装与卸载”已改为实际步骤；安装包产物检查见 §0 |
-| PKG-06 签名 / PKG-07 干净虚拟机验收 | 未开始 |
+| PKG-06 签名 / PKG-07 干净虚拟机验收 | 未做；2026-11-15 用户决定不再排期（融合技术书 r31） |
 | 导出目录（技术书 §9.7） | 卸载**永不删除**用户在偏好设置里选的导出目录及其中文件，即使勾选删除应用程序数据；钩子只删固定路径 `%APPDATA%\moss`，`settings.json` 中的 `export` 设置随之删除 |
 
 ## 2b. 内置语音辅助程序（NV18，2026-10-10）
@@ -63,18 +63,18 @@
 | --- | --- |
 | helper EXE 收集 | `scripts/build-windows-installer.ps1` 已独立构建 Windows helper，复制为 `binaries/moss-voice-local-x86_64-pc-windows-msvc.exe`；overlay `tauri.voice-sidecar.conf.json` 已声明 externalBin。配置/脚本存在不证明成品含该文件 |
 | 常规与专用构建 | 常规 `cargo tauri build` 不自动构建/收集独立 GPL helper；带 helper NSIS 必须走专用脚本和 overlay。专用脚本已统一将 helper 输出写入根 `target/<triple>/release`，但原项目要求的 `target/release` 常规发布构建仍独立验收；专用 triple 产物与项目要求的 `target/release/moss-desktop.exe` 常规产物分别记录 |
-| 安装位置与启动 | 成品应将 `moss-voice-local.exe` 放在 `moss-desktop.exe` 同目录，宿主按 current_exe 父目录寻找并做 hello 协议校验；不回退任意 PATH 同名程序。`apps/moss-voice-local/build.rs`（以及独立后端 `apps/moss-host/build.rs`）在 Windows MSVC 下与 `moss-desktop.exe` 一致静态链接 `libvcruntime` / `libcmt`，干净 Windows 新机无需预装 Visual C++ 运行库即可启动；老版 Win10 缺 WebView2 时由 `tauri.conf.json` 的 `embedBootstrapper` 在安装期间自动联网下载补齐。当前协议 6 |
-| 源码与许可 | 脚本已暂存 helper 源码、path 依赖 `moss-voice-local-proto`、Cargo.lock、COPYING 和初版 THIRD_PARTY_NOTICES；overlay 已配置 `bundle.resources` 至 `licenses/voice-local/`。**上游 sherpa-onnx/espeak-ng 等静态依赖的完整分发所需对应源码/许可证和洁净机安装内资源验收尚待完成**，不能把初版 notices 当成合规证明 |
+| 安装位置与启动 | 成品应将 `moss-voice-local.exe` 放在 `moss-desktop.exe` 同目录，宿主按 current_exe 父目录寻找并做 hello 协议校验；不回退任意 PATH 同名程序。`apps/moss-voice-local/build.rs`（以及独立后端 `apps/moss-host/build.rs`）在 Windows MSVC 下与 `moss-desktop.exe` 一致静态链接 `libvcruntime` / `libcmt`，干净 Windows 新机无需预装 Visual C++ 运行库即可启动；老版 Win10 缺 WebView2 时由 `tauri.conf.json` 的 `embedBootstrapper` 在安装期间自动联网下载补齐。当前协议 7 |
+| 源码与许可 | 脚本已暂存 helper 源码、path 依赖 `moss-voice-local-proto`、Cargo.lock、COPYING 和初版 THIRD_PARTY_NOTICES；overlay 已配置 `bundle.resources` 至 `licenses/voice-local/`。**上游 sherpa-onnx/espeak-ng 等静态依赖的完整分发所需对应源码/许可证和洁净机安装内资源验收未完成（2026-11-15 不再排期）**，不能把初版 notices 当成合规证明 |
 | 成品验证 | 脚本新增发布清单生成，但本次构建进程状态丢失时清单尚未产出，不能把新 NSIS 文件出现视为构建通过；须复测同一构建的产物与源码/许可资源。后续补组件版本、协议、schema、大小/hash；解包检查 helper/资源并验证源码构建；经授权在干净系统完成新安装、升级、错误 helper、正常退出和卸载。缺这类证据仍为 partial/unverified |
 
-升级不得把桌面新协议与旧 helper 混装；当前可明确诊断缺 helper 与协议不符，架构错误按进程启动失败呈现，helper 文件 hash 校验及架构专用诊断属于 NV18 待实现/待验收项。数据库升级失败保留原始数据，软件回退先验证旧版支持的 schema 或恢复兼容备份，不能把旧 v4 兼容记录推广到 NV10 以后的所有迁移。卸载默认保留运行数据，用户自选音乐、Agent、外部服务和导出目录仍不属于安装器删除范围。
+升级不得把桌面新协议与旧 helper 混装；当前可明确诊断缺 helper 与协议不符，架构错误按进程启动失败呈现，helper 文件 hash 校验及架构专用诊断未实现（原 NV18-3/4 待办，2026-11-15 不再排期）。数据库升级失败保留原始数据，软件回退先验证旧版支持的 schema 或恢复兼容备份，不能把旧 v4 兼容记录推广到 NV10 以后的所有迁移。卸载默认保留运行数据，用户自选音乐、Agent、外部服务和导出目录仍不属于安装器删除范围。
 
 ## 2c. NV18 专用安装包的软件验证（2026-10-11）
 
-- 旧版构建脚本会删除整个未跟踪 `bundle-resources/voice-local/`，现改为调用 `scripts/build-nv18-sidecar-safe.ps1`。后者为每次构建生成唯一 `nv18-<构建ID>` 暂存目录及资源映射，不覆盖原工作区资源。独立 helper、Tauri 带 sidecar NSIS 及完整版本/大小/hash manifest 已成功生成，详细 SHA 见 CHANGELOG。
-- 通过 `scripts/verify-nv18-nsis-in-docker.ps1` 在无网络、只读的临时 Docker Linux 环境中验证实际 NSIS 的 22 条 archive 目录，明确看见 `moss-voice-local.exe` 与其 COPYING/初步第三方说明/源码。检查脚本不会运行 installer 或连接实际设备；测试专用 Docker image 已清理。
+- 旧版构建脚本会删除整个未跟踪 `bundle-resources/voice-local/`，现改为调用 `scripts/voice-helper/build-sidecar-installer.ps1`。后者为每次构建生成唯一 `nv18-<构建ID>` 暂存目录及资源映射，不覆盖原工作区资源。独立 helper、Tauri 带 sidecar NSIS 及完整版本/大小/hash manifest 已成功生成，详细 SHA 见 CHANGELOG。
+- 通过 `scripts/voice-helper/verify-installer-in-docker.ps1` 在无网络、只读的临时 Docker Linux 环境中验证实际 NSIS 的 22 条 archive 目录，明确看见 `moss-voice-local.exe` 与其 COPYING/初步第三方说明/源码。检查脚本不会运行 installer 或连接实际设备；测试专用 Docker image 已清理。
 - **分发阻塞**：尚未完成完整 sherpa-onnx/espeak-ng native 库许可和对应源码审核、干净系统安装/升级/卸载或 helper 协议启动实测。构建包仅供内部软件验收，不是可以对外分发的最终安装包。真正安装仍需用户授权，用户数据及自选音乐/Agent/导出路径不得由脚本删除。
-完整 NSIS 内存抽取逐字节校验、独立源码复建与 147 个 crate 的许可证元数据盘点，另见 [NV18 源码和许可证审计（2026-10-11）](nv18-source-license-audit-2026-10-11.md)。**注意：嵌入 NSIS 的桌面程序有 Tauri 合法的3字节 `UNK`→`NSS` 标记补丁，不能把打包前与打包后 SHA-256 误记为相同；构建可用不等于 native 依赖许可已全部齐全。**
+完整 NSIS 内存抽取逐字节校验、独立源码复建与 147 个 crate 的许可证元数据盘点，另见 [NV18 源码和许可证审计（2026-10-11）](voice-helper-license-audit.md)。**注意：嵌入 NSIS 的桌面程序有 Tauri 合法的3字节 `UNK`→`NSS` 标记补丁，不能把打包前与打包后 SHA-256 误记为相同；构建可用不等于 native 依赖许可已全部齐全。**
 
 ## 3. 方案
 
@@ -234,5 +234,5 @@
    - `windows-lite`（NSIS 轻量包 + `MOSS_<版本>_windows_x64_portable.exe` 免安装单文件便携版）、`windows-offline-voice`（带 `moss-voice-local.exe` 的瘦身离线语音安装包 + 独立 `moss-voice-local-<版本>-gpl-source.zip`）、`macos-universal`（Apple Silicon + Intel 通用版 `.dmg`）与 `android-apk`（`-Dorg.gradle.daemon=false --ci` 签名 `arm64` APK）在云端 **同时并行构建**；
    - `publish` 汇总全部产物，自动生成 `SHA256SUMS.txt` 与中文变更说明并发布至 GitHub Releases。
    - **应用内更新包（2026-11-07）**：配置了仓库密钥 `TAURI_SIGNING_PRIVATE_KEY`（及密码）时，两个 Windows 安装包、macOS `MOSS_<版本>_macos_universal.app.tar.gz` 与 Android `MOSS_<版本>_android_aarch64.apk` 均以 `--app-version` 生成带版本绑定的 `.sig`；`publish` 在桌面三份签名齐全时写出 `latest.json`（平台键 `windows-x86_64-lite` / `windows-x86_64-offline-voice` / `darwin-aarch64` / `darwin-x86_64`，Android 签名就绪时一并写入 `android-aarch64`）并随 `.app.tar.gz`、`.apk` 一起上传；签名只写进清单，不单独上传。缺桌面签名就跳过清单（流水线提示 notice），普通安装包照常发布。详见 §3.6、§3.8。
-3. **安装包瘦身（`scripts/build-nv18-sidecar-safe.ps1`）**：
+3. **安装包瘦身（`scripts/voice-helper/build-sidecar-installer.ps1`）**：
    - 默认将 `moss-voice-local` 与 `moss-voice-local-proto` 完整源码、许可证及上游哈希清单随包打包，并通过 `-EmitGplSourceZip` 导出独立源码压缩包，不再每次将 759 MB 的上游静态库原始归档重复压入 NSIS `.exe`（安装包体积由 ~702 MB 降至 ~35 MB；如需生成包含全量原始归档的内部审计包可显式传 `-IncludeFullNativeEvidence`）。

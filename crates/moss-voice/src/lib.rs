@@ -13,16 +13,16 @@
 //! 本 crate 不依赖 Tauri，便于单元测试；只由桌面壳在非 Android 平台使用。
 
 pub mod builtin;
-pub mod center;
+mod center;
 pub mod colab;
 pub mod config_yaml;
-pub mod health;
+mod health;
 pub mod home_backup_audit;
 pub mod home_readonly;
 pub mod laya_env;
 pub mod local_models;
 pub mod local_vision;
-pub mod logfile;
+mod logfile;
 pub mod models;
 pub mod onejev;
 pub mod redact;

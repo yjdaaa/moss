@@ -43,7 +43,7 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
                     }));
             }
             let setting_path = host.runtime_root.path.join("settings.json");
-            if let Err(error) = laser_host::voice_agent::AgentCoordinator::attach(
+            if let Err(error) = moss_agent::AgentCoordinator::attach(
                 &host.api_service,
                 host.db.clone(),
                 setting_path.clone(),
@@ -80,7 +80,7 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
             }
             // 2026-11-07：清掉上次中途退出（强关、崩溃、断电）留下的半截下载与解压目录
             let cleaned = models.clean_leftovers();
-            super::usb_provision::sweep_usb_temp_dir(&host.runtime_root.path.join("usb-nvs-tmp"));
+            moss_usb_provision::sweep_usb_temp_dir(&host.runtime_root.path.join("usb-nvs-tmp"));
             if cleaned > 0 {
                 eprintln!("[moss-desktop] 已清理 {cleaned} 个本地模型下载残留");
                 diagnostics.push_from(
@@ -125,7 +125,11 @@ pub fn init(host: Option<Arc<laser_host::HostApplication>>) -> BuiltinState {
             let enabled = moss_voice::settings::load(&host.runtime_root.path.join("settings.json"))
                 .builtin_memory_enabled;
             let _ = memory.configure(enabled, || Ok(()));
-            let home_control = laser_host::home_control::HomeControlCoordinator::attach(&host);
+            let home_control = moss_home::HomeControlCoordinator::attach(
+                &host.api_service,
+                &host.db,
+                host.runtime_root.path.join("settings.json"),
+            );
             let speaker_backend = Arc::new(DesktopSpeakerBackend {
                 db: host.db.clone(),
                 helper: Mutex::new(None),

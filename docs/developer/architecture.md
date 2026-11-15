@@ -8,11 +8,22 @@
 | --- | --- | --- |
 | `moss-desktop` | `apps/desktop/src-tauri` | Tauri 2 外壳。`run()` 先安装 panic 钩子与控制台关闭钩子，再在进程内初始化 `laser_host::HostApplication`，启动 HTTP 服务与 MCP 桥，最后创建窗口。桌面平台带系统托盘；关闭窗口被拦截并通知前端弹出"托盘 / 退出"选择。Android/iOS 通过 `mobile_entry_point` 复用同一份代码，前端资源来自 `frontend/dist` |
 | `moss-host` | `apps/moss-host` | 命令行宿主。`serve` 启动 HTTP 服务与 MCP 桥并阻塞；`migrate --from <旧根>` 迁移旧 Python 版运行数据；无参数时只跑三项启动自检 |
-| 前端 | `frontend/` | React 18 + Vite 6 + Excalidraw 0.18。路由 `/`、`/draw`、`/material-lab`（桌面端另有 `/voice`）由 `main.jsx` 按 `pathname` 前缀切换。生产资源由 `laser-api` 通过 `rust-embed` 嵌入并从 `/`、`/assets/*` 提供；Tauri 内嵌页启动时用 `get_backend_origin` 获取实际回环端口（失败则显示错误），桌面同源页使用当前地址；独立 Vite 开发页仍回退到 `http://127.0.0.1:9666` |
+| 前端 | `frontend/` | React 18 + Vite 6 + Excalidraw 0.18。路由 `/`、`/draw`、`/twin`、`/material-lab`（桌面端另有 `/camera`、`/voice`）由 `main.jsx` 按 `pathname` 前缀切换。生产资源由 `laser-api` 通过 `rust-embed` 嵌入并从 `/`、`/assets/*` 提供；Tauri 内嵌页启动时用 `get_backend_origin` 获取实际回环端口（失败则显示错误），桌面同源页使用当前地址；独立 Vite 开发页仍回退到 `http://127.0.0.1:9666` |
 
 ## 2. crate 分层
 
-依赖只允许向下。`crates/laser-contracts/tests/type_boundary.rs` 随测试运行，禁止 `laser-tools`、`laser-device`、`laser-core` 依赖 `serde_json` 或使用 `Value` 动态访问器，所有跨 crate 数据必须经 `laser-contracts` 的强类型结构。
+依赖只允许向下，激光域与语音域互不依赖，只经边界层的类型或编排层注入的接口往来。`scripts/check-crate-layers.mjs` 直接解析各 `Cargo.toml` 把关（`scripts/tests/crate-layers.test.mjs` 随 CI 运行）；测试依赖可以跨域，但任何依赖都不得指向应用壳。新增 crate 必须先在脚本的 `LAYERS` 登记。
+
+| 层 | crate | 可依赖 |
+| --- | --- | --- |
+| 0 边界与通用库 | `laser-contracts`、`moss-xiaozhi-proto`、`moss-voice-local-proto`、`moss-mcp-client` | 仓库内无 |
+| 1 共享运行时 | `laser-runtime`（运行目录、配置、SQLite 与各类存储、密钥，激光与语音共用） | 第 0 层 |
+| 2 激光域 | `laser-core`、`laser-device`、`laser-tools`、`laser-mcp`、`laser-api` | 第 0、1 层与本域 |
+| 2 语音域 | `moss-voice`、`moss-voice-providers`、`moss-voice-server`、`moss-usb-provision` | 第 0、1 层与本域 |
+| 3 编排与跨域扩展 | `laser-host`（启动组装）；`moss-agent`、`moss-home`（同时用到激光审批与语音设置的扩展，由桌面壳直接组装） | 以下各层；本层之间不互相依赖 |
+| 4 应用壳 | `moss-host`、`moss-desktop`、`moss-voice-local`（独立工作区） | 以下各层；不得被依赖 |
+
+`crates/laser-contracts/tests/type_boundary.rs` 随测试运行，禁止 `laser-tools`、`laser-device`、`laser-core` 依赖 `serde_json` 或使用 `Value` 动态访问器，所有跨 crate 数据必须经 `laser-contracts` 的强类型结构。
 
 ```text
 apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-runtime ──► laser-contracts
@@ -32,7 +43,10 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 | `laser-tools` | MCP 工具目录与不依赖宿主的工具实现：连接检查、安全动作、参数推荐、文字图片、桌面应用与快捷键、开发者命令 | `ToolCatalog`、`execute_check_laser_connection`、`execute_laser_safe_action`、`resolve_connection_spec`、`developer_mode_enabled` |
 | `laser-mcp` | JSON-RPC 2.0 MCP 服务：`initialize` / `ping` / `tools/list` / `tools/call`，工具分发，连接小智控制台的 WebSocket 客户端（`tungstenite` + `rustls`，同步实现） | `tools_list_json`、`dispatch_tool_call_with`、`HostBackend`、`run_bridge`、`endpoint_from_env` |
 | `laser-api` | HTTP 服务与业务编排：所有 `/api/*`、`/v1/*` 路由，workflow 状态机，发送门禁与 `JobWorker` 调度，材料实验室，局域网配对，桌面会话、严格模式与桌面审批（`approval.rs`），前端静态资源 | `ApiService`、`AuthManager`、`abort_all_active_jobs`、`ApprovalService`、`require_r3_authority` |
-| `laser-host` | 组装层：初始化运行目录、配置、数据库、`ApiService`，启动 HTTP 与 MCP 桥，全局退出协调器 | `HostApplication`、`InProcessBackend`、`ShutdownCoordinator`、`install_panic_hook`、`install_console_ctrl_handler` |
+| `laser-host` | 组装层：初始化运行目录、配置、数据库、`ApiService`，启动 HTTP 与 MCP 桥，全局退出协调器，语音工具分发与第三方 MCP 接线（`external_mcp`） | `HostApplication`、`InProcessBackend`、`ShutdownCoordinator`、`voice_tool_call`、`external_mcp::ExternalMcp` |
+| `moss-agent` | 本机 Agent（NV13，Claude Code / Codex）：CLI 识别与参数校验、Windows Job Object / Unix 进程组受限运行器、桌面单次审批桥 | `AgentCoordinator`、`AgentRunner`、`detect_cli`、`Provider` |
+| `moss-home` | 家居控制（NV15，Home Assistant）：实体白名单策略、逐次桌面审批、HTTPS 传输与结果核验；只持宿主弱引用 | `HomeControlCoordinator` |
+| `moss-usb-provision` | 小智 USB 一键配网：串口枚举与激光串口避让、`espflash` 读写 NVS、写后芯片侧 MD5 校验与失败写回、预签设备令牌并登记“已允许”；激光占用、设备密钥由桌面壳传入 | `provision`、`execute_usb_provision_with`、`UsbFlasherSession`、`sweep_usb_temp_dir` |
 
 ## 3. HTTP 服务
 
@@ -55,13 +69,13 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 
 - 开关 `MOSS_FUSION_STRICT`（默认 `false`）。关闭时下述检查一律不生效，行为与之前一致；`MOSS_GATEWAY_ENABLED=true` 而严格模式关闭时宿主拒绝启动。
 - 唯一检查点 `ApiService::require_r3_authority`，接在全部 R3 执行入口：`launch_send_job_for`（workflow / 文字任务 / 标定矩阵发送与断点续雕）、`/api/safe-action` 的 R3 动作、`/api/device/framing`。桌面会话放行；小智桥接 / 局域网 / 网关创建审批并返回 202 `approval_required`；本机回环无凭据返回 403 `strict_mode_blocked`；审批身份按当前要素与保存的连接重算摘要并单次消费，执行使用审批保存的连接参数。
-- `ApprovalService`（`crates/laser-api/src/approval.rs`）管理审批生命周期，数据在 SQLite `approvals` 表（schema v4/v5）；创建、批准、执行与审计在同一事务中，审计写不进去就拒绝。经审批的发送在启动前记 `phase=running`，作业结束由发送线程回写；进程重启时待批准 / 已批准的过期，仍在发送的记为结果未知，均不重放。
+- `ApprovalService`（`crates/laser-api/src/approval.rs`，严格模式检查、桌面会话与重启处理在 `approval/` 子模块）管理审批生命周期，数据在 SQLite `approvals` 表（schema v4/v5）；创建、批准、执行与审计在同一事务中，审计写不进去就拒绝。经审批的发送在启动前记 `phase=running`，作业结束由发送线程回写；进程重启时待批准 / 已批准的过期，仍在发送的记为结果未知，均不重放。
 - 桌面审批接口 `/v1/approvals*` 只接受桌面会话；会话值由 Tauri 壳启动时生成（`get_desktop_session`），独立 `moss-host serve` 没有桌面会话，严格模式下只能拒绝或等待过期。
 - 小智接入点按 `laser_contracts::tool_risk` 分级：严格模式下 R4 与未分级工具直接拒绝，R3 交给执行层生成审批。前端全局审批卡见 [前端行为契约](frontend-behavior.md) §8。
 
 ## 4b. 语音中心（P4，仅桌面端）
 
-- crate `crates/moss-voice` 不依赖 Tauri，只由 `apps/desktop/src-tauri` 在非 Android / iOS 目标引入（`src/voice.rs`，Tauri 命令见 [接口契约](api-contracts.md) §5）；`laser-api`、`moss-host`、Android 不包含进程管理代码。
+- crate `crates/moss-voice` 不依赖 Tauri，由 `apps/desktop/src-tauri` 在非 Android / iOS 目标引入（`src/voice.rs`，Tauri 命令见 [接口契约](api-contracts.md) §5）；`laser-host` 的 `external_mcp`（同样限非移动目标）与 `moss-agent`、`moss-home`、`moss-usb-provision` 只用其设置读写；`laser-api`、`moss-host`、Android 不包含进程管理代码。
 - `VoiceCenter` 编排页面操作；MOSS 后端的能力经 `HostHooks` 交入：严格模式开关（`ApiService::set_strict_mode`，`.env` 开启的不能被关掉）、小智桥重连（`HostApplication::restart_mcp_bridge`：先停旧桥、等待其退出，再按 `settings.json` 接新桥）、桥连接状态、设备会话数（写 `laser_contracts::global_voice_telemetry`，`/api/system/info` 的 `voice.device_sessions` 读取）。
 - 链路切换：官方 / 自建互斥；切到自建先开严格模式，再一次写入 `settings.json` 的 `voice` 与 `mcp_endpoint`（备份官方地址），再重连桥；任一步失败恢复设置、严格模式与原来的桥。宿主启动时 `voice.mode = self_hosted` 也会开启严格模式。
 - 服务端进程：`Supervisor` 单实例、端口探测识别外部实例、停止先正常退出 5 秒后强制、Windows Job Object（随 MOSS 关闭结束进程树；用户退出时选择保留则解除）、崩溃不自动重启；输出脱敏后写 `logs/xiaozhi-server.log`。
@@ -78,10 +92,10 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 - 音频（NV2，`moss-voice-server/src/audio/`）：上行 Opus 解码（opus2 + 官方 libopus，随源码编译，构建需要 CMake；n94 起，原纯 Rust 后端 mousiki 在语音模式下与设备不兼容）；自动拾音模式用 `Vad` 接口判停（当前为进程内双阈值能量检测，静音 250 ms 即交给识别与大模型抢跑，开口前按句子是否说完再等 0–1 秒（技术书 n86）；Silero 随 NV6 本地模型辅助程序接入同一接口）；下行 24 kHz，经线性重采样与 `PlaybackPump` 编码，`tts start` 后留 180 ms 保护间隔，再按设备端缓冲余量（目标 5 帧）发送、稳态每 60 ms 一帧，供不上时不发帧；设备 `abort` 或新的 `listen start` 立即停播并丢弃未播内容。
 - 对话模式（NV3，`moss-voice-server/src/conversation.rs` + `crates/moss-voice-providers`）：每轮对话一个 tokio 任务——识别 → 大模型（OpenAI 兼容，流式，可调用工具，最多 5 轮）→ 切句 → 逐句合成；每句音频带文字标记进节奏泵，播到时发 `sentence_start`；打断即中止任务。历史每台设备一份，按长度截断，随会话结束丢弃。唤醒问候、退出词与空闲再见。提供方错误不含地址与密钥。
 - 工具（NV4）：MOSS 工具经 `moss_voice_server::HostTools`（宿主实现 `ToolHost`，桌面端调用 `laser_host::voice_tool_call`，身份 `CallerContext::Voice`）；`approval_required` 的结果直接朗读固定话术，不交给模型改写。设备声明 `features.mcp` 时，会话经同一 WebSocket 做 `initialize`、分页 `tools/list`，设备工具以 `device__<名称>` 提供给模型（`.` 等字符换成 `_`，调用时换回原名）。
-- 本地模型（NV6 / n93）：`apps/moss-voice-local`（GPL-3.0，独立工作区）运行 sherpa-onnx 的判停（Silero / TEN-VAD）、前端降噪（GTCRN，`denoise` 默认 `false`）、识别（SenseVoice / Qwen3-ASR / FireRedASR2-CTC 约 0.5 秒周期增量重认 + 整段 / X-ASR 原生流式）、合成（Kokoro / Matcha / ZipVoice-Distill），另外 Qwen3-TTS 0.6B（`qwen3_tts_0_6b`）经按需下载且 SHA-256 校验的独立 `speech.cpp v0.10.1` 进程运行（`moss_voice::speech_cpp` / `moss_voice_providers::speech_cpp`），SmartTurn v3 尾音语义判停（`turn` 默认 `false`）由独立 `TurnHelper` 进程（单次 250 ms 软超时）与 `moss_voice_server::TurnEndPredictor` 并发估算且永不延迟 `is_stop` / `TurnGate`；MOSS 经标准输入输出协议 6（`crates/moss-voice-local-proto`）调用，客户端 `moss_voice_providers::local`（`streaming` 支持的本地识别均经 `LocalStreamingAsr` 接入边说边识别，`LocalAsr` 作整段兜底）；判停经 `moss_voice_server::VadFactory` / `LocalVad` 接入，出错退回能量判停。模型由 `moss_voice::local_models`（`CATALOG` 24 项）下载到运行目录 `models/` 并校验 SHA-256。辅助程序与 `moss-desktop.exe` 同目录，崩溃不影响 MOSS 主进程与急停。
+- 本地模型（NV6 / n93）：`apps/moss-voice-local`（GPL-3.0，独立工作区）运行 sherpa-onnx 的判停（Silero / TEN-VAD）、前端降噪（GTCRN，`denoise` 默认 `false`）、命令词抗噪（关键词检测 zipformer，随判停流运行，`kws` 默认 `false`，协议 7 / n101）、识别（SenseVoice / Qwen3-ASR / FireRedASR2-CTC 约 0.5 秒周期增量重认 + 整段 / X-ASR 原生流式）、合成（Kokoro / Matcha / ZipVoice-Distill），另外 Qwen3-TTS 0.6B（`qwen3_tts_0_6b`）经按需下载且 SHA-256 校验的独立 `speech.cpp v0.10.1` 进程运行（`moss_voice::speech_cpp` / `moss_voice_providers::speech_cpp`），SmartTurn v3 尾音语义判停（`turn` 默认 `false`）由独立 `TurnHelper` 进程（单次 250 ms 软超时）与 `moss_voice_server::TurnEndPredictor` 并发估算且永不延迟 `is_stop` / `TurnGate`；MOSS 经标准输入输出协议 6（`crates/moss-voice-local-proto`）调用，客户端 `moss_voice_providers::local`（`streaming` 支持的本地识别均经 `LocalStreamingAsr` 接入边说边识别，`LocalAsr` 作整段兜底）；判停经 `moss_voice_server::VadFactory` / `LocalVad` 接入，出错退回能量判停。模型由 `moss_voice::local_models`（`CATALOG` 26 项）下载到运行目录 `models/` 并校验 SHA-256。辅助程序与 `moss-desktop.exe` 同目录，崩溃不影响 MOSS 主进程与急停。
 - 流式云厂商（NV7，`moss_voice_providers::doubao`）：豆包流式识别实现 `StreamingAsr`——会话在开始说话时建立 WebSocket、边说边送 16 kHz 音频，说完只等最后结果（失败退回整段识别）；豆包双向流式合成实现 `Tts::synthesize_stream`——每句第一段音频到达即播放，连接在句与句之间复用。帧协议移植自 univoice（MIT），WebSocket 与 axum 共用 tokio-tungstenite 0.29，TLS 为 rustls。
 - 接入点增强（NV8）：小智桥每个接入点一条线程（主接入点 `mcp_endpoint` + `mcp_extra_endpoints` 最多 4 个，自建模式下附加接入点暂停），30 秒心跳、90 秒无数据判定断线，遥测按接入点记录状态（`McpTelemetrySnapshot::endpoints`）。工具开关 `mcp_disabled_tools` 由 `ApiService` 持有，经 `HostBackend::tool_disabled` 在 `tools/list` 与调用两处生效，接入点与内置语音共用；`laser_safe_action_tool` 不可关闭。`dispatch_tool_call_with` 统一计入调用统计（`tool_stats`，内存）。
-- 桌面端（NV5，`apps/desktop/src-tauri/src/voice_builtin.rs` 保留 Tauri 命令与来源校验，其余按职责在 `voice_builtin/imp/`，其中 `usb_provision.rs` 通过 `espflash` + `moss_xiaozhi_proto::nvs` 实现 `voice_usb_provision` 串口读/写小智 `0x9000` NVS 分区与预签设备密钥）：模型地址等存 `settings.json` 的 `voice.builtin_models`，密钥存 `app_secrets`（`voice.llm.main` / `voice.asr.main` / `voice.tts.main`）；三项都配置时以对话模式启动（OpenAI 兼容提供方 + `DesktopToolHost` 调用 `laser_host::voice_tool_call`），否则回声模式。语音链路 `builtin`（`moss_voice::VoiceMode::Builtin`）时随 MOSS 后台启动；语音中心切换链路经 `HostHooks::builtin_start / builtin_stop`，启动失败整体回滚。设备会话数经 `DeviceRegistry::sessions_changed` 写入 `global_voice_telemetry`，`/api/system/info` 的 `voice.mode` 为 `builtin` 时据此报告。
+- 桌面端（NV5，`apps/desktop/src-tauri/src/voice_builtin.rs` 保留 Tauri 命令与来源校验，其余按职责在 `voice_builtin/imp/`，其中 `usb_provision.rs` 只做 `voice_usb_provision` 的并发锁、激光串口判断与诊断记录，串口读/写小智 `0x9000` NVS 分区与预签设备密钥在 `crates/moss-usb-provision`）：模型地址等存 `settings.json` 的 `voice.builtin_models`，密钥存 `app_secrets`（`voice.llm.main` / `voice.asr.main` / `voice.tts.main`）；三项都配置时以对话模式启动（OpenAI 兼容提供方 + `DesktopToolHost` 调用 `laser_host::voice_tool_call`），否则回声模式。语音链路 `builtin`（`moss_voice::VoiceMode::Builtin`）时随 MOSS 后台启动；语音中心切换链路经 `HostHooks::builtin_start / builtin_stop`，启动失败整体回滚。设备会话数经 `DeviceRegistry::sessions_changed` 写入 `global_voice_telemetry`，`/api/system/info` 的 `voice.mode` 为 `builtin` 时据此报告。
 
 ## 5. 设备层与发送链路
 
@@ -105,7 +119,7 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 ## 6. 存储与运行目录
 
 - 运行目录由 `RuntimeRoot::resolve` 决定：显式参数 → 可执行文件同级 `.runtime/` → 系统用户数据目录（Windows `%APPDATA%\moss`、macOS `~/Library/Application Support/moss`、Linux `$XDG_DATA_HOME/moss` 或 `~/.local/share/moss`）→ 当前目录 `.runtime/`。宿主与桌面端都传 `(None, None)`，因此各桌面平台均写入当前用户数据目录；程序目录只放程序文件，安装与卸载规则见 [安装包与卸载规范](packaging-install.md)。目录内有 `uploads/`、`previews/`、`generated_assets/`、`moss.sqlite`、`settings.json`、`moss.lock`（`fs4` 独占锁，第二个实例初始化失败）。
-- SQLite 打开时启用 WAL、5 秒 `busy_timeout`、`synchronous=NORMAL`、`secure_delete=ON`，并执行 schema 迁移（当前版本 18，`laser_runtime::SCHEMA_VERSION`）；文件库下另由 `RuntimeDb::open_readonly` 打开独立只读连接分流高频轮询。启动时 `recover_after_restart` 把残留活动态记录标为 `failed`（列与记录正文同时更新），`prune_historical_records` 定额清理超上限旧记录，`prune_orphan_generated_files` 清理 `generated_assets/` 与 `previews/` 内超 7 天且无数据库引用的自动生成孤儿产物（保留 `uploads/`）；随后审批服务处理遗留审批（§4a）。退出时 `abort_active_records_on_shutdown` 同步更新列与正文状态，并执行 `PRAGMA optimize` 与限时 WAL 截断归并。
+- SQLite 打开时启用 WAL、5 秒 `busy_timeout`、`synchronous=NORMAL`、`secure_delete=ON`，并执行 schema 迁移（当前版本 19，`laser_runtime::SCHEMA_VERSION`）；文件库下另由 `RuntimeDb::open_readonly` 打开独立只读连接分流高频轮询。启动时 `recover_after_restart` 把残留活动态记录标为 `failed`（列与记录正文同时更新），`prune_historical_records` 定额清理超上限旧记录，`prune_orphan_generated_files` 清理 `generated_assets/` 与 `previews/` 内超 7 天且无数据库引用的自动生成孤儿产物（保留 `uploads/`）；随后审批服务处理遗留审批（§4a）。退出时 `abort_active_records_on_shutdown` 同步更新列与正文状态，并执行 `PRAGMA optimize` 与限时 WAL 截断归并。
 - `RuntimeStore` 作用于 `Workflow`、`TextTask`、`Job`、`Calibration` 四种记录（生产环境经 `SplitSqliteStore` 读写分流）；材料库通过 `RuntimeDb::import_material_json` / `export_material_library`（固定 3 次预编译查询）读写。运行时实际写入的记录类型是 workflow 与 calibration；`approvals` 与 `audit_log` 由审批服务写入；`uploads`、`jobs`、`text_tasks` 只由迁移器写入（7 张从未使用过的旧表 `ai_state`、`gui_calibration`、`auth_pairings` 及 4 张通用 `_history` 已在 schema v18 删除）。表结构见 [数据库结构](db-schema.md)。
 - 材料库：`LASER_MATERIAL_PARAMS_FILE` 未设置时使用 `builtin_material_library`，保存操作写入 SQLite；设置后另写该 JSON 文件并生成 `.bak` 备份。
 
@@ -114,8 +128,8 @@ apps/moss-host / Tauri ──► laser-host ──► laser-api ──► laser-
 以下各项与早期规划或常见假设不同，以本节为准：
 
 - 仓库根目录现在有 `Cargo.toml` 并声明统一 workspace，成员包括 `apps/moss-host`、`apps/desktop/src-tauri` 与 `crates/*`；根级 `Cargo.lock` 和 `target/` 承载 workspace 的统一测试与构建（仅独立 GPL 工作区 `apps/moss-voice-local` 保留独立 `Cargo.lock`，其余子目录不再保留陈旧锁文件；`apps/desktop/src-tauri` 保留 `gen/android` 等 Tauri 子工程生成骨架）。`AGENTS.md`、`README.md`、CI 与 `scripts/start.bat` 中的 `cargo test --workspace`、`cargo build -p …` 均以根 workspace 清单为准。
-- 没有 tokio、axum、tower、clap、tracing、uuid、ab_glyph 或 rmcp；HTTP 服务与 MCP 桥为同步实现。`laser-api` 的 Jev/OpenRouter 反馈客户端使用阻塞式 `reqwest`，判断结果只用于建议，失败时回退本地规则，不直接控制设备；前端 E2E 使用 Playwright。
-- `/v1/events` 不是持续事件流；没有 WebSocket 服务端。
+- 激光主链路（`laser-api` HTTP 服务与 `laser-mcp` 桥）不用 tokio、axum、tower、clap、tracing、uuid、ab_glyph 或 rmcp，为同步实现；tokio 用于内置语音（`moss-voice-server`、`moss-voice-providers`）、`moss-agent`、`moss-mcp-client` 与 `laser-host::external_mcp`，axum 只在 `moss-voice-server`（设备 OTA / WebSocket），rmcp 只在 `moss-mcp-client`。`laser-api` 的 Jev/OpenRouter 反馈客户端使用阻塞式 `reqwest`，判断结果只用于建议，失败时回退本地规则，不直接控制设备；前端 E2E 使用 Playwright。
+- `/v1/events` 不是持续事件流；`laser-api` 没有 WebSocket 服务端（小智设备 WebSocket 只在内置语音服务，§4c）。
 - `laser-api` 直接依赖 `rusqlite`（规格要求禁止）。
 - `laser-tools` 是单文件 crate，不是 16 个模块；`apps/mobile/` 不存在，Android 工程在 `apps/desktop/src-tauri/gen/android`。
 - `moss-host` 只有 `serve` 与 `migrate` 两个子命令。

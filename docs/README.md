@@ -5,11 +5,12 @@
 ## 用户
 
 - [快速开始](user/quick-start.md)：Windows 上启动桌面端或无界面宿主、`.env` 配置、运行目录、局域网配对、第一次雕刻的安全流程、常见问题。
+- [FluidNC 烧录后测试清单](user/fluidnc-moss-烧录后测试清单.md)：刷完固件后与 MOSS 联调的逐项检查。
 
 ## 开发者
 
 - [架构总览](developer/architecture.md)：进程与入口、crate 分层与依赖方向、HTTP/SSE/MCP 桥、设备层、存储、退出与急停路径、与早期规划稿的已知偏差。
-- [安装包与卸载规范](developer/packaging-install.md)：通用 Windows NSIS 已实施；自定义安装目录、快捷方式、升级和可选保留数据。签名、干净 VM 验收及 NV18 原生依赖许可仍未完成，普通 NSIS 与语音 helper 专用包分别验收。
+- [安装包与卸载规范](developer/packaging-install.md)：通用 Windows NSIS 已实施；自定义安装目录、快捷方式、升级和可选保留数据。签名、干净 VM 验收及 NV18 原生依赖许可 2026-11-15 决定不再排期。
 - [开发规范](developer/standards.md)：目录职责、代码约定、文档约定、PR 检查清单。
 - [构建回执](developer/build-receipts.md)：阶段收尾与交付构建的时间、大小、SHA-256。
 - [安全入口](developer/safety.md)：改高风险代码前必读。运行时现实、高风险类别、完整发送链路的每一道门禁、已知未接线项、测试与提示词同步要求。
@@ -17,6 +18,7 @@
 - [数据库结构](developer/db-schema.md)：SQLite 表、schema 版本、材料库 JSON 冻结格式、旧数据迁移流程。
 - [前端行为契约](developer/frontend-behavior.md)：路由、状态词表与发送覆盖层映射、`localStorage` 键、必须保留的交互行为。
 - [功能字典](developer/feature-glossary.md)：面向非技术读者的功能白话说明，按模块列出用途、逻辑与风险。
+- [语音 helper 源码与许可审计](developer/voice-helper-license-audit.md)：NV18 专用安装包的源码对应、包内容核查与原生依赖许可阻塞项（未闭环前不得对外分发）。
 
 ## 激光硬件与固件
 
@@ -32,7 +34,12 @@
 - [融合实施 TODO](integration/moss-fusion-implementation-todo.md)：**唯一进度记录**，先看这里。
 - [实机验证顺序与操作手册](integration/moss-hardware-acceptance-plan.md)：从单电脑到三件套的六个阶段，每档的目的、准备、操作与判据。接设备前先看这个。
 - [融合技术书](integration/moss-desktop-fusion-technical-spec.md)：外部自建链路、审批、CORS、语音中心、安装、导出、手机连接的设计。
-- [内置语音技术书](integration/moss-native-voice-spec.md)：内置语音总体设计与安全边界（含 NV19 规划）。
+- [内置语音技术书](integration/moss-native-voice-spec.md)：内置语音总体设计与安全边界（含 NV19 长期记忆与智能上下文）。
 - [NV10～NV19 实施细则](integration/moss-native-voice-implementation.md)：各 NV 的模块、接口、安全与验收标准。
-- [外部链路实施细则](integration/moss-self-hosted-extension-implementation.md)：P2b / P3 / P5。
+- [外部小智服务端版本与模型验证](integration/self-hosted-model-bench.md)：上游源码版本固定与已完成的离线核验记录（外部链路后续联调 2026-11-15 起不再排期）。
+- [第三方 MCP](integration/moss-external-mcp.md)：NV9 语音中心接入 stdio / Streamable HTTP 服务的用法与契约。
+- [语音中心敏感 ACL](integration/voice-private-acl.md)：声纹、记忆、固件等敏感命令的窗口与来源校验。
+- [本机 Agent Docker 隔离](integration/agent-sandbox-docker-security.md)：NV13 隔离测试证据与模型 API 代理方案。
+- [声纹登记](integration/speaker-enrollment.md)：NV16 本地声纹模型、协议与验收边界。
+- [可信下载协议候选](integration/authenticated-download-contract.md)：NV17 小智设备固件下载签名协议（尚无生产路由）。
 - [提示词归档](integration/xiaozhi-prompts/README.md)：控制台提示词与知识库文本的唯一维护处；`latest.md` 为当前版本，`history/` 为日期快照。

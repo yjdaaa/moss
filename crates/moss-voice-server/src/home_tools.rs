@@ -148,6 +148,10 @@ fn parse_arguments(name: &str, text: &str) -> Result<Value, Value> {
     Ok(v)
 }
 impl ToolExecutor for HomeTools {
+    fn trusted_read_only(&self, name: &str) -> bool {
+        !is_home_tool(name) && self.original.trusted_read_only(name)
+    }
+
     fn tools(&self) -> Vec<ToolSpec> {
         let mut result = self.original.tools();
         // Reserved even when disabled, so a third-party tool never impersonates HA.

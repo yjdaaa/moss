@@ -13,6 +13,7 @@
 //! 协议 5（n89）：新增请求取消 `Op::Cancel`，流式合成中途放弃时通知辅助程序停止排队与后续分段。
 //! 协议 6（n93）：新增 `AsrEngine::Qwen3Asr` / `AsrEngine::FireRedAsr2Ctc`、`TtsEngine::ZipVoice`、
 //! `GTCRN` 前端语音降噪（`Op::LoadDenoiser`）及 `SmartTurn v3` 尾音语义判停（`Op::LoadSmartTurn` / `Op::SmartTurnPredict`）。
+//! 协议 7（n101）：流式合成可选 `short_opener`（快机器上短开场白先合成）；判停流可附带关键词检测（`Op::LoadKws`、`Reply::VadEvents::keywords`）。
 //! 辅助程序与桌面程序须一起升级，旧协议在握手时拒绝。
 
 use std::io::{self, Read, Write};
@@ -20,7 +21,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// 协议版本：辅助程序与 MOSS 不一致时拒绝使用。
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// NV16 fixed official CampPlus ONNX, acquired and hashed on 2026-10-11.
 /// ModelScope iic/speech_campplus_sv_zh-cn_16k-common v1.0.0: Apache-2.0.
@@ -245,6 +246,14 @@ pub enum Op {
     LoadSmartTurn {
         model: String,
     },
+    /// 加载命令词检测模型（协议 7；sherpa-onnx 关键词检测 zipformer 目录，空路径表示卸载）。
+    /// 加载后每一路判停流顺带检测 `keywords`（每行“拼音声母韵母 @显示文字”，见 [`command_keywords_text`]），
+    /// 检测到的词随 [`Reply::VadEvents`] 的 `keywords` 返回。只在本地判停流上运行，送入原始音频（不降噪）。
+    LoadKws {
+        dir: String,
+        #[serde(default)]
+        keywords: String,
+    },
     /// 打开一路判停流（每个设备会话一路），只支持 16 kHz
     VadOpen {
         stream: u64,
@@ -292,6 +301,10 @@ pub enum Op {
         /// 机器慢或刚开口时才切小段（尽快出声、不断流）。
         #[serde(default)]
         first_max_chars: u32,
+        /// 允许把很短的开场白（“好的，”这类第一个逗号前的分句）单独先合成（协议 7）：
+        /// 只在这台机器合成足够快、下一段能在开场白播完前算好时由调用方打开，开口能早 0.3–0.4 秒。
+        #[serde(default)]
+        short_opener: bool,
     },
     /// 放弃编号为 `target` 的合成请求（协议 5）：还在排队的不再合成，正在合成的尽快停下。
     /// 对话被打断或合并重来时，作废的句子不再占着合成线程，新回答的第一句不用排在它们后面。
@@ -332,6 +345,8 @@ pub enum Reply {
         denoiser: bool,
         #[serde(default)]
         smart_turn: bool,
+        #[serde(default)]
+        kws: bool,
     },
     Loaded {
         sample_rate: Option<u32>,
@@ -356,6 +371,9 @@ pub enum Reply {
     Done,
     VadEvents {
         events: Vec<VadEventKind>,
+        /// 这段音频里检测到的命令词（显示文字，协议 7）
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keywords: Vec<String>,
     },
     Text {
         text: String,
@@ -444,6 +462,45 @@ pub fn bytes_to_pcm(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
+/// 命令词的类别：停止类走急停快路径，退出类道别后回到待命。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandKeyword {
+    Stop,
+    Exit,
+}
+
+/// 命令词表（协议 7，n101）：拼音按关键词模型的建模单元（声母 + 带调韵母）写，“一”按变调写。
+/// 只收短促、在噪声里通用识别容易听错、又必须可靠的说法（同一说法可写多种读音）；显示文字与 `fast::is_stop` /
+/// 退出词表里的说法一致，会话据此把识别结果纠正回命令。
+pub const COMMAND_KEYWORDS: &[(&str, &str, CommandKeyword)] = &[
+    ("t íng", "停", CommandKeyword::Stop),
+    ("t íng x ià", "停下", CommandKeyword::Stop),
+    ("t íng zh ǐ", "停止", CommandKeyword::Stop),
+    ("j í t íng", "急停", CommandKeyword::Stop),
+    ("z àn t íng", "暂停", CommandKeyword::Stop),
+    ("t uì x ià", "退下", CommandKeyword::Exit),
+    // “一”按字典读音（yī）与变调（yí）各写一条：模型按 wenetspeech 的字典读音训练，实测只写变调认不出
+    ("t uì y ī x ià", "退一下", CommandKeyword::Exit),
+    ("t uì y í x ià", "退一下", CommandKeyword::Exit),
+    ("z ài j iàn", "再见", CommandKeyword::Exit),
+];
+
+/// 交给关键词检测模型的命令词表（每行“拼音 @显示文字”）。
+pub fn command_keywords_text() -> String {
+    COMMAND_KEYWORDS
+        .iter()
+        .map(|(tokens, label, _)| format!("{tokens} @{label}\n"))
+        .collect()
+}
+
+/// 检测结果（显示文字）属于哪一类命令。
+pub fn command_keyword_kind(label: &str) -> Option<CommandKeyword> {
+    COMMAND_KEYWORDS
+        .iter()
+        .find(|(_, known, _)| *known == label)
+        .map(|(_, _, kind)| *kind)
+}
+
 /// 本地流式合成按停顿分段：首段在首个满 10 字的逗号/句末处切出以降低首包延迟；
 /// 后续分句优先在句末标点或较长分句（≥22 字）处切分，保护千分位数字与词组连贯韵律，避免每 8 字切碎导致机械跳调。
 pub fn synthesis_segments(text: &str) -> Vec<String> {
@@ -453,6 +510,16 @@ pub fn synthesis_segments(text: &str) -> Vec<String> {
 /// 同 [`synthesis_segments`]，但第一段的长度上限至少放宽到 `first_max_chars`（之后仍逐段放大 1.5 倍）。
 /// 上限越大切得越少；足够大时只在句号处分段，一句话整句合成。
 pub fn synthesis_segments_from(text: &str, first_max_chars: u32) -> Vec<String> {
+    synthesis_segments_with(text, first_max_chars, false)
+}
+
+/// 同 [`synthesis_segments_from`]；`short_opener` 时第一个逗号前的分句再短（≥2 字）也单独成段，
+/// 第二段相应收短（6–10 字），保证快机器上它能在开场白播完前算好、中间不断。
+pub fn synthesis_segments_with(
+    text: &str,
+    first_max_chars: u32,
+    short_opener: bool,
+) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let widen = |index: usize, (floor, cap): (usize, usize)| -> (usize, usize) {
         let wanted = (first_max_chars as f64 * 1.5f64.powi(index as i32)).min(72.0) as usize;
@@ -484,7 +551,9 @@ pub fn synthesis_segments_from(text: &str, first_max_chars: u32) -> Vec<String> 
         let (min_comma_len, max_len) = widen(
             index,
             match index {
+                0 if short_opener => (2, 14),
                 0 => (8, 14),
+                1 if short_opener => (6, 10),
                 1 => (12, 20),
                 2 => (18, 30),
                 _ => (22, 45),
@@ -601,13 +670,34 @@ mod tests {
             id: 1,
             reply: Reply::VadEvents {
                 events: vec![VadEventKind::SpeechStart],
+                keywords: Vec::new(),
             },
         })
         .unwrap();
+        // 没检测到命令词时不带 keywords 字段（与协议 6 的负载一致）
         assert_eq!(
             value,
             serde_json::json!({"id": 1, "kind": "vad_events", "events": ["speech_start"]})
         );
+        // 协议 7：命令词随判停事件返回；旧辅助程序的回复（没有 keywords）读作空
+        let with_keyword: Response = serde_json::from_value(serde_json::json!(
+            {"id": 2, "kind": "vad_events", "events": [], "keywords": ["退下"]}
+        ))
+        .unwrap();
+        assert_eq!(
+            with_keyword.reply,
+            Reply::VadEvents {
+                events: Vec::new(),
+                keywords: vec!["退下".into()],
+            }
+        );
+        // 命令词表：每行“拼音 @显示文字”，显示文字能映射回类别
+        let table = command_keywords_text();
+        assert!(table.lines().any(|line| line == "t uì y ī x ià @退一下"));
+        assert_eq!(table.lines().count(), COMMAND_KEYWORDS.len());
+        assert_eq!(command_keyword_kind("急停"), Some(CommandKeyword::Stop));
+        assert_eq!(command_keyword_kind("再见"), Some(CommandKeyword::Exit));
+        assert_eq!(command_keyword_kind("问一下"), None);
         let value = serde_json::to_value(Request {
             id: 2,
             op: Op::LoadAsr {
@@ -651,8 +741,8 @@ mod tests {
             VadParams::default()
         );
         assert_eq!(VadParams::for_engine(VadEngine::Ten).min_speech_ms, 100);
-        // 协议 6 新增变体往返验证
-        assert_eq!(PROTOCOL_VERSION, 6);
+        // 协议 6 新增变体往返验证（协议 7 起仍兼容这些请求）
+        assert_eq!(PROTOCOL_VERSION, 7);
         let qwen_asr: Request = serde_json::from_value(serde_json::json!({
             "id": 5,
             "op": "load_asr",
@@ -762,6 +852,16 @@ mod tests {
             "{relaxed:?}"
         );
         assert_eq!(synthesis_segments_from(long, 0), pieces);
+        // 快机器上允许短开场白单独先合成：“好的，”先出声，第二段收短；关掉时与原来一致
+        assert_eq!(
+            synthesis_segments_with("好的，激光机现在空闲。", 0, true),
+            vec!["好的，".to_owned(), "激光机现在空闲。".to_owned()]
+        );
+        assert_eq!(
+            synthesis_segments_with("好的，激光机现在空闲。", 0, false),
+            vec!["好的，激光机现在空闲。".to_owned()]
+        );
+        assert_eq!(synthesis_segments_with(long, 0, false), pieces);
         let num_text = "当前雕刻速度为 1,200 毫米每分钟，功率已设好，随时可以开始。";
         let num_segments = synthesis_segments(num_text);
         assert_eq!(num_segments.concat(), num_text);

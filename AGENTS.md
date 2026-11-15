@@ -9,7 +9,7 @@
 MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版），面向 FluidNC/GRBL 与 ESP32 下位机。
 
 - 激光主链路：`crates/laser-*`（contracts、core、device、runtime、tools、mcp、api、host）。
-- 内置语音：`crates/moss-voice*`、`moss-xiaozhi-proto`、`moss-mcp-client`；本地模型 helper `apps/moss-voice-local` 是 GPL 独立工作区。
+- 内置语音：`crates/moss-voice*`、`moss-xiaozhi-proto`、`moss-mcp-client`、`moss-usb-provision`（USB 配网）；跨域扩展 `moss-agent`（本机 Agent）、`moss-home`（家居）由桌面壳组装；本地模型 helper `apps/moss-voice-local` 是 GPL 独立工作区。
 - 宿主：`apps/desktop`（Tauri 2 桌面/Android）、`apps/moss-host`（HTTP/WS）；前端 `frontend/`（React + Vite）。
 - 文档入口 [`docs/README.md`](docs/README.md)；实施进度只看 [实施 TODO](docs/integration/moss-fusion-implementation-todo.md)。结构以代码为准。
 
@@ -36,6 +36,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 ## 开发约束
 
 - 激光 MCP 工具在 `laser_tools::ToolCatalog` 登记，由 `laser_mcp::dispatch_tool_call_with` 分发；启动编排在 `laser-host`。
+- crate 依赖只向下、激光域与语音域互不依赖（分层表见 [`architecture.md`](docs/developer/architecture.md) §2），新增 crate 先在 `scripts/check-crate-layers.mjs` 登记；脚本与文档按用途命名，任务代号只写正文。
 - 改变契约、默认值、工具注册、提示词或用户可见行为时，同一次改动内同步实现、测试和 `docs/`。
 - 用户在对话中确认的设计决定，写入对应技术书的修订记录并注明日期，后续以此为准。
 
@@ -46,7 +47,7 @@ MOSS 是小智 AI 生态中枢与激光数控雕刻上位机（Rust 重构版）
 | 时机 | 必须执行 |
 | --- | --- |
 | 每次代码改动（修复或新增功能） | `cargo fmt --all`，`cargo clippy --workspace --all-targets -- -D warnings` 零警告，改前端加 `cd frontend; npm run lint` 零 error（CI 同样把关，2026-11-07）；受影响范围的测试；跨模块、注册、运行时或安全改动跑 `cargo test --workspace`；改前端跑 `cd frontend; npm test` 和 `npm run build`；**验证通过后必须执行 `powershell -File scripts/quick-update-desktop.ps1`（改 `apps/moss-voice-local` 加 `-WithVoiceHelper`，改 `moss-host` 加 `-WithHost`），把最新正式版 `moss-desktop.exe` 编译并原地同步到本机正式程序**（2026-11-01 用户决定；跳过 NSIS 重压包，MOSS 运行时不强杀，自动将旧文件改名挪开并写入新版，用户关掉重开即生效）；macOS 上执行 `bash scripts/quick-update-desktop.sh`（对应参数 `--with-voice-helper` / `--with-host`，原地替换 `/Applications/MOSS.app` 内的程序并重新 ad-hoc 签名，2026-11-05） |
-| 改 HTTP 行为、前端或发送链路 | `cd frontend; npm run test:e2e`（API 链路 + 工作台界面，使用回环 GRBL 模拟器；`moss-host` 编译时内嵌 `frontend/dist`，须先 `npm run build` 再构建 release `moss-host`；界面用例需本机 Edge） |
+| 改 HTTP 行为、前端或发送链路 | `cd frontend; npm run test:e2e`（API 链路 + 工作台界面，使用回环 GRBL 模拟器；`moss-host` 编译时内嵌 `frontend/dist`，须先 `npm run build` 再构建 release `moss-host`；界面用例在 Windows 上用本机 Edge，其他系统用 Playwright 自带 Chromium，可用 `PLAYWRIGHT_CHANNEL` 指定） |
 | 改 `apps/moss-voice-local`（独立工作区） | 在该目录 `cargo test`，并在快更时加 `-WithVoiceHelper`；根工作区测试不覆盖它 |
 | 阶段收尾、交付 | 以上全部，加三端完整 release 安装包构建（见下） |
 

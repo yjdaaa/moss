@@ -1,6 +1,6 @@
 # MOSS 融合实施 TODO
 
-实施进度的**唯一记录处**。设计看 [融合技术书](moss-desktop-fusion-technical-spec.md)、[内置语音技术书](moss-native-voice-spec.md)；NV10～NV19 步骤看 [实施细则](moss-native-voice-implementation.md)，P2b/P3/P5 看 [外部链路实施细则](moss-self-hosted-extension-implementation.md)。规则、验证与结果状态见 [`AGENTS.md`](../../AGENTS.md)。
+实施进度的**唯一记录处**。设计看 [融合技术书](moss-desktop-fusion-technical-spec.md)、[内置语音技术书](moss-native-voice-spec.md)；NV10～NV19 步骤看 [实施细则](moss-native-voice-implementation.md)。规则、验证与结果状态见 [`AGENTS.md`](../../AGENTS.md)。
 
 ## 0. 开工前
 
@@ -11,45 +11,24 @@
 5. 完成一步就勾选，并在 §9 追加一行。
 
 标记：`[ ]` 未开始　`[~]` 进行中　`[x]` 完成　`[!]` 阻塞（§9 写原因）　`[-]` 不做（写原因）。
-子步骤写“软件完成”时，`[x]` 只覆盖实现和自动检查；实机、真人、真实账号、安装验收统一放 §10，未测前保持 `unverified`。
+子步骤写“软件完成”时，`[x]` 只覆盖实现和自动检查，不代表实机、真人、真实账号或安装已验收。
 
-## 1. 当前状态（2026-10-14）
+## 1. 当前状态（2026-11-15）
 
-阶段顺序：S1、S2 → P0 → P2a → P1 → P3 → P4 → P2b（可选）→ P5；UI-2、PKG、EXP、LINK 独立。正式外部链路为 MCP 接入点。
+**2026-11-15 用户决定清空待办**：实际已完成的项一律勾选；下列不再排期并从本清单删除——外部自建链路的前置验证与联调（P0-01～04、P0-09、P2a-01～04/06、P2b、P3）、可选项（VO-2、VO-3、P5）、全部实机验收（原 §2a HW-01～21 与 §10 FINAL-01～05，以及 S1-09、UI-4 桌面验收、P1-13、NV8b-1、各 NV 的 -5 实机子项）、PKG-06 签名、PKG-07 干净机验收、NV18-3 原生依赖许可闭环与 NV18-4 安装验收。自建链路代码（P4）保留可用。以后要做实机验证，按 [MOSS 实机验证顺序与操作手册](moss-hardware-acceptance-plan.md) 另起任务；设备运动、出光、急停实测、刷写等仍按 `AGENTS.md` 安全边界逐次取得同意。
 
-| 工作包 | 软件 | 真实验收 | 阻塞 / 下一步 |
-| --- | --- | --- | --- |
-| S1 CORS 与来源校验 | 完成 | Android 实机来源待测（HW-03） | — |
-| S2 顶栏真实状态 | 完成 | 待测（HW-05） | — |
-| UI-2 前端改版 | 完成（UI-02 静态内联样式已迁移，2026-10-13） | 待测（HW-01/02/06/13） | — |
-| UI-3 语音中心分组与分组保存 | 完成（2026-10-14） | 待测（HW-15） | — |
-| UI-4 隐私与家居任务入口 | 软件已实现（2026-10-18），本次构建和检查见回执 | 私密 WebView 实际点击及设备行为待测（HW-15/17/18） | 不以模拟页面代替真实权限验收 |
-| PKG 安装包 | 5/7 | 未做 | PKG-06 签名、PKG-07 干净 VM 验收 |
-| EXP 导出目录 | 完成 | Android 待测（HW-04） | — |
-| LINK 手机连接电脑 | 完成（本清单未单独复核） | 待测（HW-12） | — |
-| P0 前置验证 | 2/9 | — | 云端模型能力、延迟、固件、部署位置未验证 |
-| P2a 接入点零代码验证 | 1/6 | — | 需授权部署服务端与接入点 |
-| P1 调用方上下文与审批 | 12/13（P1-05 不做） | 待测（HW-07） | P1-13 首次实机出光需另行授权 |
-| P2b 网关（可选） | 未开始 | — | 仅在需要审批播报或接入点不兼容时启用 |
-| P3 自有云端模型 | 未开始 | — | 依赖 P0 |
-| P4 语音中心 | 代码完成；P4-06 上游加载器离线校验已过（2026-10-13）；P4-08 页面浏览器测试已补（2026-10-14） | 待测（HW-11，依赖 P2a） | 未与真实 xiaozhi-server 联调 |
-| NV0～NV9 内置语音基础 | 代码完成 | 待真实设备（HW-08/09/10） | — |
-| NV10 记忆 | 软件完成 | GUI、真实模型待 FINAL | — |
-| NV11 信息插件 | 11-1/11-3 完成；NV11-4 跨存储原子性已修（2026-10-13） | 真实账号待 FINAL | NV11-4 真实 WebView2 操作待验 |
-| NV12 视觉 | 软件完成（配置卡 ACL 2026-10-13 修复） | 真实设备/模型待 FINAL；配置卡待测（HW-14） | — |
-| NV13 Claude Code / Codex | 已落地（2026-10-15 用户决定：用户开启 + 每次运行桌面批准 + 只在严格模式运行；可运行时停止） | — | 实机待测（HW-19）；依赖用户自己已登录的官方 CLI |
-| NV14 音乐 | 软件完成（配置卡 ACL 2026-10-13 修复） | 听音待 FINAL；配置卡待测（HW-14） | — |
-| NV15 Home Assistant | 软件完成；2026-10-14 起由用户在私密窗口同意后开启（每个动作逐次桌面批准） | 未用真实 HA 验收（HW-18） | 建议先用一盏灯试用 |
-| NV16 声纹 | 登记已接入；2026-10-14 起简易标定通过后开放识别与按人记忆 | 未真人标定（HW-18） | 需至少两人登记并录测试音 |
-| NV17 固件下发 | 已落地（2026-10-15：私密窗口导入 ESP32 应用固件、逐台确认推送、一次性令牌下载、设备上报版本才算升级） | — | 实机待测（HW-20）；真实刷写需单独授权 |
-| NV18 收尾 | 构建与源码收集完成 | 未安装 | 原生依赖对应审核、ORT 传递许可闭环 |
-| NV19 长期记忆 | 软件完成（NV19-01～08，2026-10-15；三端 release 构建通过，见构建回执） | 待测（HW-17） | 真实 GUI、模型、设备与资料验收 |
-| VO-1～3、P5 | 未决定 | — | — |
-| FINAL-01～05 | — | 未开始 | 软件全部完成后按[实机验证顺序](moss-hardware-acceptance-plan.md)执行 |
+| 工作包 | 状态 |
+| --- | --- |
+| S1 来源校验、S2 顶栏状态、UI-2 / UI-3 / UI-4、EXP 导出、LINK 手机连接 | 软件完成 |
+| PKG 安装包 | PKG-01～05 完成；Android release 已接签名，Windows 代码签名不做 |
+| P0 前置验证 | P0-05～08 完成（固件与 OTA、部署位置已定），其余删除 |
+| P2a / P2b / P3 外部自建链路 | 只保留已完成的 P2a-05 提示词，其余删除 |
+| P1 调用方上下文与审批 | 完成（P1-05 不做） |
+| P4 语音中心 | 完成 |
+| NV0～NV19 内置语音 | 软件完成 |
+| VO-1 语义判停 | 已实现（n86、n93）；VO-2、VO-3 不做 |
 
-最近一次全量结果与产物见 §9 末行及 [构建回执](../developer/build-receipts.md)。
-
-实机验证的顺序、安全前提、操作与判据见 [MOSS 实机验证顺序与操作手册](moss-hardware-acceptance-plan.md)（单电脑 → 单小智 → 单激光 → 电脑+小智 → 电脑+激光 → 三件套）。
+2026-10-16 以后的功能变更未逐条补记到本清单，以 [CHANGELOG](../../CHANGELOG.md) 与内置语音技术书修订记录为准。最近的交付构建见 [构建回执](../developer/build-receipts.md)。
 
 ---
 
@@ -58,34 +37,6 @@
 按 [`AGENTS.md`](../../AGENTS.md)“验证”执行：每个代码步骤跑受影响测试，阶段收尾跑三端 release 构建；改契约、表、工具、提示词时按融合技术书 §13 同步文档。
 
 ---
-
-## 2a. 待实机测试（需要设备或真机，留到后面统一测）
-
-以下项目代码已完成、自动测试已过，但必须在真实设备上验证。**未测之前一律视为 `unverified`**，不得写成通过。测试会让激光机运动或出光的项目，必须确认材料放好、有人在旁、随时能按硬件急停，并先在对话中得到用户同意。
-
-| ID | 来源 | 需要 | 操作 | 期望 | 状态 |
-| --- | --- | --- | --- | --- | --- |
-| HW-01 | UI-05 重复发送防呆 | 激光机通电、材料放好 | 创作画板生成预览并发送一次；**不重新生成**再点“确认发送” | 确认弹窗出现“我已移动 / 更换材料”勾选框，不勾选不能发送 | 待测 |
-| HW-02 | UI-03 顶栏常驻急停 | 激光机通电、正在下发任务 | 雕刻工作台与创作画板各发送一次，发送中点顶栏红色“急停 0x18” | 任务停止，效果与页面内急停 / “取消”相同；无任务时弹窗提示用硬件急停 | 待测 |
-| HW-03 | S1-09 Android 来源 | Android 手机 | 安装 ACL 修复后重新打包的 APK，打开各页面 | 能进主页、各页面数据正常加载（后端收到的来源为 `http://tauri.localhost`） | 待测 |
-| HW-04 | 导出（Android） | Android 手机 | 创作画板导出 PNG / 场景、材料库导出 | 提示保存路径且文件存在；若落在应用私有目录，记录实际路径 | 待测 |
-| HW-05 | S2 小智真实状态 | 可用的小智接入点 | 在偏好设置填写接入点并重启；断开网络再恢复 | 顶栏依次显示“未连接 → 已连接”，控制台“小智网关”页的客户端、消息数为真实值 | 待测 |
-| HW-06 | UI-03 背景性能 | 目标 Windows 电脑 | 打开桌面端 5 分钟，看任务管理器 GPU / CPU；同时下发一次任务 | 界面流畅，背景不影响下发节奏 | 待测 |
-| HW-08 | NV1 / NV2 内置语音回声 | 小智设备、同一局域网；改设备 OTA 地址需用户同意 | 语音中心启动内置服务，设备 OTA 改为卡片上的地址并重启；在电脑上允许后再重启；自动模式（唤醒词或单击 BOOT）说一句话，播放中再唤醒一次；按住说话模式实战派默认未开启，回声模式下无法开启，可跳过 | 未允许时设备提示“等待允许”；允许后能连上；自动模式停顿约 0.25–0.4 秒播回；回声无断音跳字（事件“供流中断 0 次”）；播放中唤醒立即停 | 待测 |
-| HW-07 | P1-09 审批卡真实流程 | 激光机通电（或断电只看界面）、小智接入点或手机“连接电脑”模式 | 临时开启 `MOSS_FUSION_STRICT=true`；由小智或手机发起开始加工 | 桌面任意页面弹出审批卡，未勾选现场确认不可批准；批准后进入四步发送覆盖层且急停可用；拒绝 / 稍后处理 / 过期行为符合 §9.5.2；测试后关闭严格模式 | 待测 |
-| HW-09 | NV8a 各环节耗时与体验优化 | 小智设备、内置服务对话模式；云端或本地模型；激光机通电（只测停止，不出光） | 用真人语音分别测几种模型组合（本地快组合、NV6 默认组合、云端 / 豆包），每种说 5 句以上；任务运行中（可用空跑）喊“停”；问“现在什么状态”；说含材料名与参数的句子；让它说一段长回答 | 语音中心“各环节耗时”有每轮数据，记录各组合的判停、识别、大模型首字、首段合成、首帧耗时；本地识别链路可用且设备局域网仍连通时，断开外网喊“停”仍发出停止请求且不经过大模型；云端识别组合不宣称离线可用；状态问题不经过大模型；热词开启后材料名识别正确率提高；长回答边合成边播、无断音（供流中断 0 次） | 待测 |
-| HW-10 | NV8b 自然打断 | 小智设备（ES8311 + ES7210，MIC3 回采）；固件开启设备端回声消除（重新编译 / 刷写需用户同意）；内置服务对话模式 | 语音中心打开“说话时可直接插话”；让 MOSS 说一段长回答，中途直接说“等一下，换成亚克力”；安静环境下让它连续说 10 段长回答、不说话；打开风扇 / 气泵 / 排风再重复；MOSS 说话时直接说“停” | 插话后约 0.5 秒内停播，整句（含开头“等一下”）识别完整；不说话时 0 次误打断，记录噪声环境下的误打断次数并据此调插话时长；直接说“停”触发急停；事件中有每次插话的时长 | 待测 |
-| HW-11 | P4 语音中心外部服务端 | 已按 P2a 部署的 xiaozhi-server（部署需用户授权） | 语音中心切到自建模式、三栏模型配置测试并保存、启停服务端 | 写出的 `data/.config.yaml` 能被上游正常加载；切换与回滚符合 A-60/A-61 | 待测 |
-| HW-12 | LINK 手机连接电脑 | Android 手机与电脑同一局域网 | 电脑开启局域网访问并生成配对码，手机远程模式填地址配对，浏览各页面 | 配对成功、各页数据正常；参考数据只读；不发送桌面会话（A-89..A-96）。2026-10-14 已修 Android CSP 拦截局域网请求（`tauri.android.conf.json`），须用新 APK 测 | 待测 |
-| HW-13 | UI-04～07 功能对照（A-80） | 目标 Windows 电脑，激光机可断电 | 按 H1–H26、D1–D21、L1–L15、S1–S9、A1–A3、C1、O1 逐项操作 | 每项功能与改版前一致，记录不一致项 | 待测 |
-| HW-14 | 主窗口语音配置卡 ACL（2026-10-13 修复） | 目标 Windows 电脑，新构建的桌面 App | 语音中心打开视觉、音乐、Agent 配置卡并保存一次；改一项内置语音设置并保存 | 无 “not allowed” / `voice_acl_denied` 报错，设置保存生效 | 通过（用户 2026-10-13 实测，未见报错） |
-| HW-15 | UI-3 / n29 / n30 语音中心分组与分组保存 | 目标 Windows 电脑，新构建的桌面 App；不接激光机 | 三种链路下各看一遍顶栏标签（官方 5 个标签，自建/内置 6 个标签；未配置自建路径时也可先切到“自建服务”查看卡片）；任选两组各改一项并保存，另改一组不保存后切换标签再回来 | 只渲染当前链路用得到的标签与设置卡片；按钮写明保存对象，保存结果显示在按钮旁且设置生效；未保存的组与标签有标记、切换后填写仍在 | 待测 |
-| HW-16 | 功能真实性审查修复（2026-10-14） | 激光机通电、材料放好、人在旁；FluidNC 网口与串口各一（串口可选） | ①画板宽填 50 mm 生成预览并发送，量实物尺寸；②轮廓模式画一个实心方块，确认只沿边缘走线；③走边框默认不出光、勾选弱光后出微光，走边框中点顶栏急停能停；④未启用 HashFS 的固件选 SD 脱机，应被拒绝且不执行；⑤串口连接时从画板发送一次 | 实物尺寸与填写一致（误差在光斑范围内）；轮廓不填充；急停后机器停止、记录为待确认停止；SD 拒绝执行 | 待测 |
-| HW-17 | NV19 长期记忆设置（2026-10-15，n28 改为主页面就地展开） | 目标 Windows 电脑，新构建的桌面 App；可不接激光机 | 在语音中心“隐私与家居”标签点“长期记忆”卡片就地展开（或独立安全设置窗口）：开关检索与提取（提取前出现确认）、设当前项目、添加一个只含 md 文本的资料文件夹、新增 / 确认 / 删除一条记忆、保存恢复摘要；再用小智问一个和资料相关的问题 | 两个开关默认关闭；各操作结果显示在本区域且无 ACL 报错；资料只出现目录名不出现完整路径；关闭检索后语音不再带出记忆 | 待测 |
-| HW-18 | 家居控制与声纹改为用户开启（2026-10-14，n28 支持主页面就地展开） | 小智设备、内置服务对话模式；HTTPS 的 Home Assistant 和一盏可控的灯；至少两个人 | ①在语音中心“隐私与家居”就地展开（或私密窗口）填 HA 地址与令牌、勾选那盏灯、开启家居语音控制，对小智说“打开台灯”；②全局审批卡出现后点“去私密窗口审批”并批准；③两人登记声纹，各录三段测试音，计算阈值，开启按人记忆后各说几句 | ①未批准前灯不动，批准后只执行一次；拒绝或过期不执行；②标定结果显示零误认，本人多数被认出；一人说话时不会读到另一人的个人记忆 | 待测 |
- | HW-19 | NV13 本机 Agent 真实执行（2026-10-15） | 目标 Windows 电脑、用户自己已登录的官方 `codex.exe` 或 `claude.exe`、一个可公开给模型的工作目录；不接激光机 | ①`.env` 设 `MOSS_FUSION_STRICT=1` 重启后，在语音中心打开开关但不填工作目录（应提示并挡住保存）；②填好工作目录与 CLI 保存，看分组摘要与每个 CLI 的可用情况；③去掉严格模式重启，确认提示“Agent 不会运行”且工具列表里没有 `agent_codex`；④恢复严格模式，由小智说一句话发起任务，检查审批卡（不勾现场确认不能批准）、批准后运行、记录与输出；⑤运行中点“停止”并确认，看是否记为已停止且保留输出；⑥再发起一次，运行中改配置或撤销设备授权，确认任务被停 | ①②③④⑤⑥ 与期望一致；失败或超时有短错误码；结果未知不重放 | **部分实测（2026-10-16）**：生产 `JobRunner` 已用本机 `codex-cli 0.162.0-alpha.17.2` 真跑通一次 31.4 秒任务并取回回答，8 秒处的停止在 8.03 秒取消且无残留进程；同时修掉“运行器环境白名单比计划少 4 个键 → 真实 CLI 一律 `agent_run_failed`”的缺陷（见 CHANGELOG 2026-10-16、§NV13 2026-10-16 条）。**未过**：本机 codex 的 `.sandbox-bin` 缺 `codex-code-mode-host.exe`，模型能回答但不能执行工具（改文件失败，属 CLI 安装问题）；本机 Claude Code 因组织禁用订阅返回 403；①②③④⑤⑥ 的桌面与语音链路（审批卡、严格模式开关、语音发起、运行中改配置即停、界面“停止”按钮）仍未在真实窗口与真实设备上操作。手动探针用法见[实机验证手册](moss-hardware-acceptance-plan.md)阶段 1 |
-| HW-21 | n61 设备唤醒词（2026-11-06） | ESP32-S3、16 MB 闪存、小智固件 2.0.2 以上（v2 分区表）的设备与电脑同一局域网；往设备闪存写资源包需用户同意，最好能串口重刷兜底 | ①私密窗口“设备唤醒词”保存“你好 MOSS / ni hao mo si”；②不导入基础包，对一台在线设备确认推送，看设备重启、屏幕显示下载进度；③装好后说“你好 MOSS”能否唤醒、日常说话是否误唤醒，必要时调阈值重推；④导入官方生成器导出的 assets.bin 再推送，确认字体与表情保留；⑤“恢复你好小智”；⑥对 8 MB 闪存或旧固件设备推送（应拒收或显示不支持，原内容不变） | 资源包可被设备接受；自定义唤醒词能唤醒；恢复默认可用；不支持的设备不受影响 | 待测 |
-| HW-20 | NV17 固件 OTA 推送与升级（2026-10-15） | 小智设备与电脑同一局域网、自己编译的 ESP32 应用固件 `.bin`；真实刷写需单独授权且能串口重刷兜底 | ①私密窗口导入固件（先试整片烧录包，应被拒绝）；②对一台已允许设备确认推送；③重启设备让它检查更新并刷写；④刷写后确认记录变为“已升级”；⑤推送后未下载前取消推送；⑥推送后关掉 MOSS 再启动，看中断的下载是否记为结果未知且不自动重试；⑦对未允许设备或不比设备新的版本尝试推送（应被拒绝） | 固件头校验、逐台推送、一次性令牌下载、只认设备上报的新版本才算升级；下载完成不等于刷写成功；取消与中断不重放 | 待测 |
 
 ## 3. S1 CORS 收紧与来源校验（独立于融合，默认始终生效）
 
@@ -117,9 +68,6 @@
 - [x] **S1-08 前端与 E2E 核对**
   - 做：确认前端请求后端的方式（Tauri 内嵌页经 `get_backend_origin`、同源页、Vite 开发页）都在允许范围；运行 E2E。
   - 检查：`npm test`、`npm run test:e2e` 通过；若 E2E 使用其他端口或来源，把它加入允许规则并记录原因。
-- [~] **S1-09 实测 Tauri 来源（Android 实机 Origin 未验证）**
-  - 做：构建 Windows App 与 Android APK 后，在应用内确认后端收到的 `Origin` 实际值（可临时日志，验证后删除）。
-  - 检查：桌面端与 Android 端页面功能正常；实际来源与 S1-03 列表一致（不一致则修正列表并补测试）。Android 实机安装需用户授权，未安装则标 `unverified`。
 - [x] **S1-10 文档与 CHANGELOG**
   - 做：`CHANGELOG.md` 新增条目（标注破坏性变更；写清现象与影响、根因、修复、验证、关联、默认值、升级动作：自定义前端来源需配置 `MOSS_ALLOWED_ORIGINS`）；更新 `docs/developer/api-contracts.md` §1 与 §5、`docs/developer/safety.md` §2 局域网访问、`docs/user/quick-start.md` 排障。
   - 检查：文档中所有 `*` 描述已改；文档不含真实地址。
@@ -152,18 +100,18 @@
   - 做：更新 api-contracts 的 `/api/system/info` 字段；CHANGELOG 写明“此前小智状态显示不可信”的现象、根因、修复、验证。
   - 检查：§2 全部检查。
 
-## 3b. UI-2 前端整体改版（技术书 §9.5.5；已按确认版实施，实机验收见§2a）
+## 3b. UI-2 前端整体改版（技术书 §9.5.5；已按确认版实施）
 
-前置条件：用户确认最终原型版本。原型：`frontend/ui-preview-forge-v2.html`（曜石设计 + 流浪地球太空舱背景）。只改样式与布局，不改任何业务行为。
+前置条件：用户确认最终原型版本。原型：`frontend/prototypes/forge-v2.html`（曜石设计 + 流浪地球太空舱背景）。只改样式与布局，不改任何业务行为。
 
-- [x] **UI-01 设计定稿**（2026-10-06 用户确认：按技术书 §9.5.5 与原型 `ui-preview-forge-v2.html` 实施，背景为等离子流体）：确认记录和实现已同步§9及技术书；后续新设计需另行明确范围，不重复把已确认事项记为待定。
+- [x] **UI-01 设计定稿**（2026-10-06 用户确认：按技术书 §9.5.5 与原型 `frontend/prototypes/forge-v2.html` 实施，背景为等离子流体）：确认记录和实现已同步§9及技术书；后续新设计需另行明确范围，不重复把已确认事项记为待定。
 - [x] **UI-02 令牌与基础组件**（2026-10-13 完成：299 处纯静态 `style={{…}}` 迁为 217 个类，按组件分段追加在 `styles.css` 末尾；其中 90 个与已有更高优先级选择器冲突的类重复书写以保持原内联效果。剩余 29 处依赖运行时值（进度宽度、按状态着色、传入样式变量）按设计保留内联。验证：新旧两版在同一浏览器、1440×900 下逐元素比对计算样式，12 个界面状态中迁移相关差异为 0，余下差异均为呼吸灯动画与导航/标签过渡时序；`LogPanel` 未被任何页面引用、`CloseConfirmModal`/导出设置仅 Tauri 显示，这些未渲染部分依赖机械转换与优先级分析，未逐元素实测）：`styles.css` 令牌（色彩、圆角、阴影、字体）、按钮、输入、分段、卡片聚光、表格（加粗表头 / 斑马纹 / 悬停）、胶囊、弹窗；把 `Navbar.jsx` 等组件的内联样式迁移为类名。检查：旧样式无残留冲突；hover / disabled / focus 清晰。
 - [x] **UI-03 外壳与背景（软件）**：`SideNav.jsx`左侧导航、`Navbar.jsx`标题/硬件/小智四态/同一`0x18`常驻急停、`CyberBackground.jsx`的WebGL等离子流体及Geist/OFL本地字体已实现；字体固定来源与实际加载见§9。背景采用静态层离屏预渲染、WebGL半分辨率、40fps限制、低帧率降级与WebGL不可用回退；reduced-motion和窄屏规则已有软件检查。前端/FakeGrbl/Windows/Android已有阶段A回执，后续代码须以本次新构建为准。目标电脑实际显卡帧率/CPU及加工中表现仍留HW-06，不能用软件构建代替。
 - [x] **UI-04 雕刻工作台改版**（三栏已完成：①通信链路 ②加工内容 ③材质与参数 / ④加工监视舱 / 加工反馈 + 控制台；待按 H1–H26 逐项真机核对）：三栏布局，按功能对照清单 H1–H26 逐项核对。检查：A-80 对应项。
 - [x] **UI-05 创作画板改版**（左侧大画布 + 右侧 材料与尺寸 / 设备 / 预览与发送 三卡已完成；待按 D1–D21 真机核对）：D1–D21 逐项核对；重复发送防呆不变。检查：A-80 对应项。
 - [x] **UI-06 材料实验室改版**（材料库改为表格 + 厚度胶囊，三栏版面已完成；待按 L1–L15 真机核对）：材料库表格化，L1–L15 逐项核对；`BroadcastChannel` 同步不变。检查：A-80 对应项。
 - [x] **UI-07 弹窗改版**（弹窗统一曜石样式；待逐个核对 S1–S9、A1–A3、C1、O1）：偏好设置、配对、关闭窗口、材料编辑、确认发送、发送覆盖层（`STAGE_MAP` 不变）。检查：S1–S9、A1–A3、C1、O1。
-- [x] **UI-08 验收与构建**（视觉基线已生成于 `frontend/tests/visual-baseline/`；用户本机测试与构建通过；需实机的 HW-01、HW-02 见 §2a）：更新 `frontend/tests/visual-baseline/`；E2E 不改断言通过；三端构建；CHANGELOG。检查：A-79、A-80、§2 全部检查。
+- [x] **UI-08 验收与构建**（视觉基线已生成于 `frontend/tests/visual-baseline/`；用户本机测试与构建通过；需实机的 HW-01、HW-02 见[实机验证手册](moss-hardware-acceptance-plan.md)，2026-11-15 不再排期）：更新 `frontend/tests/visual-baseline/`；E2E 不改断言通过；三端构建；CHANGELOG。检查：A-79、A-80、§2 全部检查。
 
 ---
 
@@ -176,19 +124,16 @@
 ## 3b3. UI-4 隐私与家居任务入口（技术书 n25）
 
 - [x] **UI-4 页面收敛**（2026-10-18）：语音中心增加“隐私与家居”，主窗口四个入口只负责打开已打包的私密页面对应任务；固件入口归“服务与设备”。私密页默认只显示四个任务，按需渲染表单并在切换任务时保留未保存草稿；信息服务只显示当前选择的服务，记忆高级项及家居备份/只读同步收进次级入口。没有为普通主窗口增加敏感读取或控制权限。
-- [ ] **UI-4 实际桌面验收**：在本次构建的 Windows 应用中逐个点击四个入口、返回、编辑后切换检查草稿，再从“服务与设备”打开固件；核对 private URL 与 ACL，无真实令牌或硬件操作。模拟浏览器测试不能替代此项。真实 HA、声纹与 OTA 仍分别由 HW-18/20 和明确授权控制。
 
 ## 3c. PKG 安装包与卸载（技术书 §9.6；规范 docs/developer/packaging-install.md）
 
 前置条件：用户确认开始做分发；建议在 UI-2 前端改版之后、对外分发之前。需要一台干净的 Windows 虚拟机做验收。
 
-- [x] **PKG-01 打包配置（软件）**：`tauri.conf.json`配置NSIS、both安装范围、中文语言、MOSS开始菜单和embedBootstrapper，普通`cargo tauri build`已有实际EXE/NSIS回执，见§9。本次新代码仍须最新重建。正式发布者/签名信息待用户提供，安装实测归PKG-07。
+- [x] **PKG-01 打包配置（软件）**：`tauri.conf.json`配置NSIS、both安装范围、中文语言、MOSS开始菜单和embedBootstrapper，普通`cargo tauri build`已有实际EXE/NSIS回执，见§9。本次新代码仍须最新重建。正式发布者/签名信息待用户提供；安装实测原归PKG-07，2026-11-15 不再排期。
 - [x] **PKG-02 安装版配置读取（软件）**（2026-10-06 用户确认安装版运行目录`.env`生效）：`config.rs::load_env_files`先启动目录再运行目录且不覆盖已有变量，`RuntimeRoot::default_base()`与migrate默认目标已实现。相关4项单测包含在workspace回归，release moss-host已重新构建，见§9；本次未安装程序，干净环境快捷方式启动仍归PKG-07/PK-04。
 - [x] **PKG-03 安装/卸载钩子**（已写 `installer/hooks.nsh`；待 PK-06/07/08 实测）：`installer/hooks.nsh`——安装、升级、卸载前按进程名检测 `moss-desktop.exe`、`moss-host.exe`、`moss-voice-local.exe`（helper 于 2026-10-13 补；原计划的 `moss.lock` 检测未采用），运行中只提示退出不强杀；卸载复选框“同时删除我的数据”默认不勾，勾选才删固定路径 `%APPDATA%\moss`（`APPDATA` 为空跳过）；不碰外部服务端目录。检查：PK-06、PK-07、PK-08。
 - [x] **PKG-04 安装器图片**（已生成 header / sidebar；待安装界面人工确认）：横幅与侧栏图按新前端视觉制作。检查：安装界面观感人工确认。
 - [x] **PKG-05 交付流程（软件文档完成）**（2026-10-11 用户授权按顺序完成非实机待办）：AGENTS 增加本轮普通 NSIS 非空、时间/大小/SHA-256 检查，并与 NV18 专用包分别记录；README 链接安装与卸载入口，文档索引对齐已实施现状。签名及干净机验收仍归 PKG-06/07。
-- [ ] **PKG-06 签名**（正式分发前）：exe 与安装包代码签名；Android release APK 签名。检查：PK-10、PK-11。
-- [ ] **PKG-07 验收**：干净 Windows 虚拟机执行 PK-01..PK-09（自定义目录含中文空格、两种安装范围、快捷方式、默认卸载保留数据、勾选删除数据、运行中保护、覆盖升级）。检查：结果记入 §9 日志，未做的标 `unverified`。
 
 ---
 
@@ -209,33 +154,18 @@
 
 前置条件：无（可与 S1 并行）。产出写入 `docs/integration/self-hosted-model-bench.md`（只写占位地址，**不写密钥**）。
 
-- [ ] **P0-01 云端大模型能力**
-  - 做：用户提供（或自己在对话外测试）OpenAI 协议地址；确认 `/chat/completions` 支持 `tools` 函数调用、流式输出、中文。
-  - 检查：一次带 1 个工具定义的请求能返回 `tool_calls`；记录模型名、首包延迟、整句延迟。
-- [ ] **P0-02 云端语音识别（ASR）**
-  - 做：确认云端是否提供 OpenAI 协议 `/audio/transcriptions`；支持的音频格式与采样率。
-  - 检查：一段中文录音能识别；记录延迟。若没有该接口：在 xiaozhi-server 其他 ASR provider 中选替代并记录。
-- [ ] **P0-03 云端语音合成（TTS）**
-  - 做：确认是否提供 `/audio/speech`；可用的 `model`、`voice`、输出格式。
-  - 检查：能合成一句中文并可播放；记录延迟。没有则选替代 provider 并记录。
-- [ ] **P0-04 整轮延迟预算**
-  - 做：ASR + LLM + TTS 延迟相加。
-  - 检查：与用户确认可接受的上限（建议 <8 s）。
 - [x] **P0-05 锁定上游源码版本（不代表已部署）**
   - xiaozhi-esp32-server：`87c6df77b0220ddbd8fc804f984f83f69f3225e5`，MIT；mcp-endpoint-server：`0f9302f327100fb976c7bdea6e4ebbb8ebdb5787`，MIT，2026-10-11 官方仓库公开提交/许可核对。
   - 检查：固定版本与许可链接写入 [bench 文档](self-hosted-model-bench.md)；未检出/安装/启动服务，运行兼容仍留 P2a。xiaozhi-client 属 P0-09/P5 可选范围，未决定时不作为本项硬前置。
-- [ ] **P0-06 设备固件与 OTA 地址**
+- [x] **P0-06 设备固件与 OTA 地址**（已定：立创实战派 ESP32-S3 用官方固件，OTA 地址经 USB 一键配网写入，技术书 n52、n96）
   - 做：查明实战派 ESP32-S3 当前小智固件版本，以及修改 OTA 接口地址的方式（配网页面或重新编译）。
   - 检查：写出操作步骤；**实际刷写/修改需用户授权**。
 - [x] **P0-07 上游插件与接入点资料**（2026-10-05 源码阅读完成，结论见技术书 §2“上游源码核实”；运行验证留给 P2a）
   - 做：阅读上游 `plugins_func` 插件写法（入参、返回、能否异步播报）、`Intent: function_call` 配置、MCP 接入点部署方式；并为语音中心确认：源码启动命令与入口脚本、用户覆盖配置文件名及 ASR/LLM/TTS 字段名、服务端监听端口、是否有设备在线状态接口。
   - 检查：P2a、P2b、P4 所需信息齐全，写入 bench 文档。
-- [ ] **P0-08 部署位置**
+- [x] **P0-08 部署位置**（已定：语音服务内置在 MOSS 桌面端，见内置语音技术书）
   - 做：与用户确定 xiaozhi-server 运行在哪（推荐与 MOSS 同一台电脑、源码部署）。
   - 检查：若用 Docker，记录防火墙限制方案（技术书 §9.1）。
-- [ ] **P0-09 是否做 P5**
-  - 做：与用户决定海门、xiaozhi-client 是否纳入。
-  - 检查：结论写入 §9。
 
 ---
 
@@ -243,24 +173,9 @@
 
 前置条件：P0-01..P0-08 完成。**本阶段禁止任何真实发送和 R3 动作**（严格模式未上线，模型可自行确认）。建议激光机断电或不连接。
 
-- [ ] **P2a-01 部署服务端**（需用户授权）
-  - 做：最简化部署——在 `main/xiaozhi-server` 下用 Python 3.10 安装依赖，复制 `config_from_api.yaml` 为 `data/.config.yaml` 并按单模块教程修改，`python app.py` 启动；`selected_module` 先用默认 provider 隔离变量；`Intent: function_call`。
-  - 检查：启动日志打印 OTA 地址（端口 8003，`/xiaozhi/ota/`）与 WebSocket 地址（端口 8000，`/xiaozhi/v1/`）；浏览器访问 OTA 地址有返回。
-- [ ] **P2a-02 设备连上自建服务端**（需用户授权）
-  - 做：按 P0-06 修改 OTA 地址。
-  - 检查：A-01 设备在线可对话；A-03 能播报。
-- [ ] **P2a-03 部署接入点并接 MOSS**（需用户授权）
-  - 做：部署 `xinnan-tech/mcp-endpoint-server`（Docker 或源码，默认端口 8004）；从其日志取“单模块部署 MCP 接入点”地址（Docker 部署需把容器内 IP 换成电脑局域网 IP）；把该地址同时填入 xiaozhi-server `data/.config.yaml` 顶层 `mcp_endpoint` 与 MOSS 设置的 `mcp_endpoint`（先备份 MOSS 原值，只记录在本机，不写进文档）。
-  - 检查：访问接入点 `health` 地址返回 `tool_connections ≥ 1`（MOSS 桥）且设备对话时 `robot_connections ≥ 1`；`/api/system/info` 显示 MCP 已连接；服务端日志显示拿到 19 个工具。
-- [ ] **P2a-04 语音测 R0/R1**
-  - 做：语音测试“检查激光机连没连上”“现在状态”“帮我在 3 毫米椴木板上刻你好（只预览）”“推荐参数”。
-  - 检查：A-14——预览生成成功，MOSS 中无任何 `sending` 记录；记录每个工具的耗时，确认都在接入点 30 秒超时内。
 - [x] **P2a-05 自建系统提示词（文档完成，未部署）**
   - 做：编写自建服务端系统提示（路由表、“开始加工需到电脑确认”、“停”只映射 `cancel`/`emergency_stop`）；存 `docs/integration/xiaozhi-prompts/history/<日期>-self-hosted.md`，在 `latest.md` 注明官方/自建两套的适用范围。
   - 检查：2026-10-11 自建文本已保存至 `history/2026-10-11-self-hosted.md`，latest 区分官方/自建适用范围；预算和链接检查后记录 §9。真实工具发现、播报与延迟仍未验，不写入外部配置。
-- [ ] **P2a-06 记录差异**
-  - 做：记录工具描述是否被截断、函数调用格式问题、超时。
-  - 检查：写入 §9；若接入点实测不兼容，标 `[-]` 写原因，把 P2b 网关 + 插件升为必做。
 
 ---
 
@@ -294,8 +209,8 @@
 - [x] **P1-08 审计**（2026-10-06 用户本机测试与构建通过）
   - 做：审批各状态、删除 `confirmed`、R4 拒绝、严格模式拦截写 `audit_log`；写入失败时 R3 拒绝、R2 照常。
   - 检查：A-34。
-- [x] **P1-09 前端**（2026-10-06 用户本机测试与构建通过；真实流程见 §2a HW-07；E2E 未加入——现有 `test_app_buttons.mjs` 依赖真实后端且无法在测试中开启严格模式与桌面会话，改用预览桩脚本验证）
-  - 做：全局审批卡（技术书 §9.5.2）——挂在 `App` 根组件；每 4 秒轮询 `/v1/approvals?status=pending`；显示刀路预览、材料、功率/速度/遍数、目标设备（不显示 IP）、来源、摘要、120 秒倒计时；勾选现场确认后才能批准；`approval_mismatch` / `approval_expired` 在卡内显示原因；批准后接现有 `SendOverlay`（`STAGE_MAP` 不变），急停始终可见；顶栏“审批”按钮带红色数量角标。参照原型 `frontend/ui-preview-voice-center.html` 的 TC-01..TC-04。
+- [x] **P1-09 前端**（2026-10-06 用户本机测试与构建通过；真实流程见[实机验证手册](moss-hardware-acceptance-plan.md) HW-07（2026-11-15 不再排期）；E2E 未加入——现有 `test_app_buttons.mjs` 依赖真实后端且无法在测试中开启严格模式与桌面会话，改用预览桩脚本验证）
+  - 做：全局审批卡（技术书 §9.5.2）——挂在 `App` 根组件；每 4 秒轮询 `/v1/approvals?status=pending`；显示刀路预览、材料、功率/速度/遍数、目标设备（不显示 IP）、来源、摘要、120 秒倒计时；勾选现场确认后才能批准；`approval_mismatch` / `approval_expired` 在卡内显示原因；批准后接现有 `SendOverlay`（`STAGE_MAP` 不变），急停始终可见；顶栏“审批”按钮带红色数量角标。参照原型 `frontend/prototypes/voice-center.html` 的 TC-01..TC-04。
   - 检查：`npm test`、E2E 覆盖批准、拒绝、过期、摘要不一致；A-70、A-71、A-74。
 - [x] **P1-10 故障场景**（2026-10-06 修复启动恢复后用户本机测试通过）
   - 做：补齐 A-31、A-33 集成测试（FakeGrbl）。
@@ -317,30 +232,16 @@
   - A-35：`blank_serial_port_without_default_requires_target`；A-36：`caller_context_is_built_by_entry_never_from_body`
   - A-40：`strict_mode_off_keeps_existing_behavior`、`non_strict_bridge_behavior_is_unchanged` 与全量回归、E2E
   - A-41：`schema_v4_*`、`schema_v5_*`、`newer_schema_is_opened_without_changes`
-  - A-70 / A-71 / A-74：`tests/approvalState.test.mjs` + 预览桩脚本；真实流程见 §2a HW-07
+  - A-70 / A-71 / A-74：`tests/approvalState.test.mjs` + 预览桩脚本；真实流程见[实机验证手册](moss-hardware-acceptance-plan.md) HW-07（不再排期）
   - A-75 / A-76：`tests/authSession.test.mjs` 桌面会话用例、`approval_routes_require_desktop_session`
   - A-50：Android APK 构建与 E2E（用户本机）
   - 检查：§2 全部检查；A-10..A-28、A-35、A-36、A-40、A-41 通过；A-50 Android 构建。
-- [ ] **P1-13**（需用户另行授权）首次经接入点 + 桌面审批的实机出光：低功率、小图案、人在旁。检查：结果如实记录，未做则标 `unverified`。
 
 ---
 
-## 7. P2b、P3、P4、P5
+## 7. P4 语音中心与内置语音
 
-**P2b 网关与插件（可选增强）**（前置：P1 执行层门禁完成；仅需结果语音播报、会话级幂等/审计或 P2a 实测不兼容且用户决定替代链路时做；[六项技术细则 s1](moss-self-hosted-extension-implementation.md#p2b)，未授权部署）
 
-- [ ] **P2b-00 网关/令牌/幂等**：新路由、Gateway 身份、当前 schema 下一版迁移、令牌哈希/轮换、幂等与执行结果未知；保留 R2、R3、R4 执行层门禁。检查：A-10..A-13、重复请求/冲突/崩溃/审计失败/限流 fake 测试。
-- [ ] **P2b-01 上游插件**：锁定上游接口后，在用户授权的 xiaozhi-server 目录添加 `moss_tool`（`ToolType.SYSTEM_CTL`，异步）；动态工具目录、只读审批轮询与 `speak_txt` 播报。检查：假网关测试拒绝、过期、结果未知、会话切换不串播，不在代码或日志存令牌。
-- [ ] **P2b-02 提示词**：仅补自建网关模式话术；模型 `confirmed` 无授权力，“停”只映射 `cancel`/`emergency_stop`。检查：历史版本保留，提示词不含私有地址和密钥。
-- [ ] **P2b-03 真实服务联调（需授权）**：确认服务端/接入点版本、令牌和安全网络范围，先 fake 再真实服务端。检查：A-12、A-13 与播报结果；无真实验收标 `unverified`。
-- [ ] **P2b-04 并存回归**：网关/接入点都必须经同一 R3 门禁，不能双发、不自动重试结果未知的物理动作。检查：A-25、`FakeGrbl`、三端发布构建与 CHANGELOG；真实加工另获授权。
-
-**P3 切换到自有云端模型**（[六项技术细则 s1](moss-self-hosted-extension-implementation.md#p3)；前置：P0 模型接口、P2a 接入点实测与 P1；P2b 只在接入点不兼容且明确采用替代链路时成为前置。本组**仅外部 xiaozhi-server**，不改内置语音配置）
-
-- [ ] **P3-01 ASR**：核实完整 `/audio/transcriptions`、中文与采样/格式，先测试后仅更新 `ASR.MossASR`，失败恢复原分区。检查：A-01..A-04、A-14，延迟/错误码与无密钥日志记录。
-- [ ] **P3-02 TTS**：核实完整 `/audio/speech`、模型/音色/输出，先测试再更新 `TTS.MossTTS`。检查：中文播报、打断/延迟，失败不覆盖 ASR 或其他 YAML 键。
-- [ ] **P3-03 LLM**：核实流式 `/chat/completions` 和 `tool_calls`，再更新 `LLM.MossLLM`；固定中文样本记录当前模型可见工具的选择/参数准确率，未达标按白名单缩小可见集。检查：R3 只能经桌面审批、R4 拒绝、不改变安全门禁。
-- [ ] **P3-04 凭据/配置/回归**：密钥只进外部服务端 `data/.config.yaml`，按分区备份、原子写及失败回滚；`manager-api.url` 模式仅测试不改；切换官方/内置模式不受影响。检查：fake 与真实契约分开记录，真实账号/设备未测为 `unverified`。
 **P4 语音中心**（前置：P1 已完成、P2a 已验证接入点及外部服务端配置；若 P2a 实测不兼容且用户选择 P2b 替代链路，则先完成相应 P2b 验证；**P2b 不是默认硬前置**。设计见技术书 §9.4）
 
 - [x] **P4-01 设置项与模式备份**（代码完成：`crates/moss-voice/src/settings.rs`；官方接入点也改在语音中心编辑；待用户本机 `cargo test --workspace`）
@@ -383,80 +284,72 @@
 **NV 内置语音服务**（技术书 [moss-native-voice-spec.md](moss-native-voice-spec.md) n19；决定 V1–V4 已于 2026-10-07 确认：密钥存 `app_secrets`；范围含第三方 MCP、记忆、插件（天气 / 新闻 / 农历 / 搜索 / RAGFlow / 音乐 / Home Assistant）、视觉、Claude Code·Codex、声纹、固件下发；端口 8000 / 8003；保留外部服务端链路）
 
 - [x] **NV0 前置**（2026-10-07 完成：依赖核实见技术书 §11.1；V5 已确认，本地模型放独立 GPL 辅助程序；本机实测见 §11.3——编译通过、Opus 默认纯 Rust 后端、SenseVoice 一句约 0.2 秒、Kokoro 首段 0.4–1.2 秒、辅助程序约 20 MB；`THIRD_PARTY_NOTICES.md`、`tools/nv0-probe` 已入库）
-- [~] **NV1 协议与 OTA**（2026-10-07 代码完成，见技术书 §13.1；本机 `cargo test --workspace`、`npm test` 已通过；待真实设备验收 HW-08）：`moss-xiaozhi-proto`、`moss-voice-server` 骨架、设备允许流程、token、回声模式。检查：真实设备 OTA 指向 MOSS 后连上并听到回声；未允许设备被拒。
-- [~] **NV2 音频**（2026-10-07 代码完成，见技术书 §13.2；Silero 随 NV6 接入，NV2 用能量 VAD；待真实设备验收 HW-08）：Opus、播放节奏泵、VAD、设备打断。检查：无断音跳字；200 ms 静音判停；打断立即停播。
-- [~] **NV3 云端对话**（2026-10-07 代码完成，见技术书 §13.3；用假模型与假 HTTP 服务测试；桌面端启用随 NV5；待真实模型与设备验收）：OpenAI 兼容 ASR / LLM（流式 + 工具调用）/ TTS、切句聚合、历史截断、唤醒 / 退出 / 空闲。检查：完整对话走通并记录首句延迟（事件“首句延迟”已提供）。
-- [~] **NV4 工具与审批**（2026-10-07 代码完成；当前规则见技术书 §5.2、§13.6，取代 §13.4 的始终严格规则；待真实设备验收）：统一工具路由、`CallerContext::Voice`、设备 MCP 中继；R3 跟随全局严格模式，开启时审批卡 + 语音提示，关闭时沿用现有 confirmed 契约与提示词口头确认；R4 始终拒绝。检查：按当前两档规则复测，不能继续以“始终严格”为预期。
-- [~] **NV5 语音中心与密钥**（2026-10-07 代码完成，见技术书 §13.5；待真实模型与设备验收）：链路三选一、内置服务启停与状态、设备允许列表、提供商配置、密钥存 `app_secrets`。检查：密钥不出现在 `settings.json`、日志与接口响应（自动测试已覆盖）。
-- [~] **NV6 本地模型**（2026-10-07 代码完成，见技术书 §13.7；真实模型端到端测试本机通过；安装包加入辅助程序留到 NV18；待真实设备）：辅助程序 `moss-voice-local.exe`（GPL-3.0）、Silero VAD（接入 NV2 的 `Vad` 接口）、sherpa-onnx ASR / TTS、模型下载与 SHA-256 校验。2026-10-08 起判停、识别、合成各有可选模型（技术书 §13.10）。检查：断网可用（识别、合成、判停全在本机；大模型仍需云端或本机 Ollama）。
-- [~] **NV7 流式云厂商**（2026-10-08 代码完成，见技术书 §13.8；用假密钥验证了真实地址的 TLS 与鉴权；待真实豆包账号与设备验收首句延迟）：豆包流式 ASR / TTS。
-- [~] **NV8 接入点增强**（2026-10-08 代码完成，见内置语音技术书 §13.9；待真实小智接入点验收多接入点、心跳与断网恢复）：多接入点、断线重连、工具开关（列表与调用都校验）、调用统计、接入点身份。
-- [~] **NV8a 语音体验优化**（软件停止通道已按用户中间结果规则完成，本轮回归/三端/helper证据见§9；实机见HW-09）：
+- [x] **NV1 协议与 OTA**（2026-10-07 代码完成，见技术书 §13.1；本机 `cargo test --workspace`、`npm test` 已通过；待真实设备验收 HW-08）：`moss-xiaozhi-proto`、`moss-voice-server` 骨架、设备允许流程、token、回声模式。检查：真实设备 OTA 指向 MOSS 后连上并听到回声；未允许设备被拒。
+- [x] **NV2 音频**（2026-10-07 代码完成，见技术书 §13.2；Silero 随 NV6 接入，NV2 用能量 VAD；待真实设备验收 HW-08）：Opus、播放节奏泵、VAD、设备打断。检查：无断音跳字；200 ms 静音判停；打断立即停播。
+- [x] **NV3 云端对话**（2026-10-07 代码完成，见技术书 §13.3；用假模型与假 HTTP 服务测试；桌面端启用随 NV5；待真实模型与设备验收）：OpenAI 兼容 ASR / LLM（流式 + 工具调用）/ TTS、切句聚合、历史截断、唤醒 / 退出 / 空闲。检查：完整对话走通并记录首句延迟（事件“首句延迟”已提供）。
+- [x] **NV4 工具与审批**（2026-10-07 代码完成；当前规则见技术书 §5.2、§13.6，取代 §13.4 的始终严格规则；待真实设备验收）：统一工具路由、`CallerContext::Voice`、设备 MCP 中继；R3 跟随全局严格模式，开启时审批卡 + 语音提示，关闭时沿用现有 confirmed 契约与提示词口头确认；R4 始终拒绝。检查：按当前两档规则复测，不能继续以“始终严格”为预期。
+- [x] **NV5 语音中心与密钥**（2026-10-07 代码完成，见技术书 §13.5；待真实模型与设备验收）：链路三选一、内置服务启停与状态、设备允许列表、提供商配置、密钥存 `app_secrets`。检查：密钥不出现在 `settings.json`、日志与接口响应（自动测试已覆盖）。
+- [x] **NV6 本地模型**（2026-10-07 代码完成，见技术书 §13.7；真实模型端到端测试本机通过；安装包加入辅助程序留到 NV18；待真实设备）：辅助程序 `moss-voice-local.exe`（GPL-3.0）、Silero VAD（接入 NV2 的 `Vad` 接口）、sherpa-onnx ASR / TTS、模型下载与 SHA-256 校验。2026-10-08 起判停、识别、合成各有可选模型（技术书 §13.10）。检查：断网可用（识别、合成、判停全在本机；大模型仍需云端或本机 Ollama）。
+- [x] **NV7 流式云厂商**（2026-10-08 代码完成，见技术书 §13.8；用假密钥验证了真实地址的 TLS 与鉴权；待真实豆包账号与设备验收首句延迟）：豆包流式 ASR / TTS。
+- [x] **NV8 接入点增强**（2026-10-08 代码完成，见内置语音技术书 §13.9；待真实小智接入点验收多接入点、心跳与断网恢复）：多接入点、断线重连、工具开关（列表与调用都校验）、调用统计、接入点身份。
+- [x] **NV8a 语音体验优化**（软件停止通道已按用户中间结果规则完成，本轮回归/三端/helper证据见§9；实机见HW-09）：
   - [x] **NV8a-1 停止类指令本地快速通道（软件）**：会话`select!`监听`AsrStream::next_interim`，整句停止词进入单次`FastStop`，不等待最终文本或声纹；`interim_whole_stop_executes_without_waiting_for_final_and_once`及本轮workspace/三端构建通过。临时“停止”随后补成“停止之后怎么办”仍可能提前停机（用户接受的取舍），不宣称消除误停；完整否定句若未经临时单句命中仍交普通识别。使用可信语音身份与原有`laser_safe_action_tool emergency_stop`通路；真实0x18/噪声仍归HW-09。
   - [x] **NV8a-2 常用只读指令本地匹配（软件完成）**：固定句式直接调用 R0 工具并用本地模板回答；不确定时交给大模型；默认开、可关闭；失败不编造。证据：技术书 §13.11、§9 联合验证记录。
-  - [~] **NV8a-3 识别热词**：X-ASR beam search、云端请求字段、行业/自定义词、SenseVoice 不支持提示和 greedy 选项已有软件验证；真实热词识别率及相对 greedy 速度尚待记录，归 HW-09。
-  - [~] **NV8a-4 本地合成边合成边播**：协议已升 3，分段返回和旧版握手拒绝已有自动验证及 helper 构建；真实模型长句首段耗时、设备无断音尚待 HW-09。分段返回不等于模型内部逐采样推理。
+  - [x] **NV8a-3 识别热词**：X-ASR beam search、云端请求字段、行业/自定义词、SenseVoice 不支持提示和 greedy 选项已有软件验证；真实热词识别率及相对 greedy 速度尚待记录，归 HW-09。
+  - [x] **NV8a-4 本地合成边合成边播**：协议已升 3，分段返回和旧版握手拒绝已有自动验证及 helper 构建；真实模型长句首段耗时、设备无断音尚待 HW-09。分段返回不等于模型内部逐采样推理。
   - [x] **NV8a-5 各环节耗时记录（软件完成）**：最近 20 轮内存耗时、模型和字段白名单复制已接线/自动验证，不保存识别/回答正文；真实数字采集另归 HW-09。
-- [~] **NV8b 自然打断（设备端回声消除）**（软件实现、7 项专项测试及发布构建见 §13.12/§9；设备 AEC 与真人噪声未验，整体 partial）：
-  - [~] **NV8b-1 固件核实**：§8.3 已记录上游 AEC/实时协议依据和板子参考通道；所用设备实际固件编译选项、播放上传和 abort 行为仍待核对，不从板子型号推定 AEC 已开启；本次不刷固件。
+- [x] **NV8b 自然打断（设备端回声消除）**（软件实现、7 项专项测试及发布构建见 §13.12/§9；设备 AEC 与真人噪声未验，整体 partial）：
   - [x] **NV8b-2 插话检测（软件完成）**：realtime、默认 400 ms、300 ms 开播保护、问候/告别保护、保留开头和 auto 模式不变已有假设备测试；真人效果归 HW-10。
   - [x] **NV8b-3 历史只记已开始播放的句子（软件完成）**：以已发 `sentence_start` 为准，未开始尾句不进入历史；这不证明用户实际听完该句。
   - [x] **NV8b-4 设置与事件（软件完成）**：默认关、时长 300～600 ms、设置往返与界面测试已有记录；真实插话事件与噪声误触发归 HW-10。
-- [~] **NV9 第三方 MCP**（2026-10-10 四段集成已落地；发布构建见最新日志，真实服务未验证）：
+- [x] **NV9 第三方 MCP**（2026-10-10 四段集成已落地；发布构建见最新日志，真实服务未验证）：
   - [x] 桌面配置与凭据保存：主窗口及来源校验、配置版本、独立凭据引用、空白保留／移除字段删除、原配置保护。
   - [x] 连接维护：stdio / Streamable HTTP、独立有界队列、心跳／清单刷新、1–60 秒退避、故障不重放、全局预算和冲突提示。
   - [x] 持久审批与审计：external_tool、真实会话及当前目标／schema／凭据／参数校验、单次消费、配置变更及撤销失效、结果未知和审计失败路径。
   - [x] 语音聚合和统计页面：只进入内置语音、三档策略、参数审批卡、内存调用统计、持久审计；1280/960 像素假桥页面操作通过。
-  - [ ] 真实第三方服务、账号与真人语音验收；软件发布构建状态以 §9 日志为准。
-- [~] **NV10 记忆**（[六项实施细则](moss-native-voice-implementation.md#nv10)；软件功能与发布构建已完成，实际 GUI/真实语音模型/设备留 FINAL）：
+- [x] **NV10 记忆**（[六项实施细则](moss-native-voice-implementation.md#nv10)；软件功能与发布构建已完成，实际 GUI/真实语音模型/设备留 FINAL）：
   - [x] **NV10-1** schema v7、记忆表/CRUD、revision 条件更新、迁移与并发测试通过。
   - [x] **NV10-2** 已接入按设备摘要注入、会话断开后的有界后台总结，fake LLM 和过滤测试通过；真实模型质量另验。
   - [x] **NV10-3** 开关 generation、设备撤销 epoch、编辑/清空乐观锁，fake 竞态和隔离测试通过，旧结果不会覆盖清空。
-  - [~] **NV10-4** 桌面记忆卡片、开关/列表/编辑/清空、主窗口专用 Tauri capability 均已开发；Rust 工作区 485/485、前端单测/构建、FakeGrbl E2E 32/32、Windows release/NSIS 与 Android release APK 构建通过。实际 GUI 按钮操作需 FINAL 验收，本项在此之前仍 partial。
-  - [ ] **NV10-5** 真实模型摘要质量、真实小智会话及长期记忆体验测试；统一留到 §10 FINAL，不阻塞独立软件任务。
-- [~] **NV11 信息插件**（[六项实施细则](moss-native-voice-implementation.md#nv11)；五种插件软件已接线，未完成项和真实环境留 FINAL）：
+  - [x] **NV10-4** 桌面记忆卡片、开关/列表/编辑/清空、主窗口专用 Tauri capability 均已开发；Rust 工作区 485/485、前端单测/构建、FakeGrbl E2E 32/32、Windows release/NSIS 与 Android release APK 构建通过。实际 GUI 按钮操作需 FINAL 验收，本项在此之前仍 partial。
+- [x] **NV11 信息插件**（[六项实施细则](moss-native-voice-implementation.md#nv11)；五种插件软件已接线，未完成项和真实环境留 FINAL）：
   - [x] **NV11-1（供应商软件验收）** 六类供应商固定依据/合成fixture、本机真实TLS请求响应、鉴权/额度/头与正文超时/跳转/有长度和chunked上限/准确1MiB/缺字段/空结果/缓存失效去重已补；HTTP3秒连接/10秒总时限/1MiB、转义后外层2000字符、禁跳转及自动重试；原急停raw保留。定向33 PASS、最终workspace710/7 ignored及本次三端通过，见§9；真实提供方另留NV11-5。
-  - [~] **NV11-2** 和风当前天气（配置地址/坐标、API Key/Bearer）和本机农历（1900～2100、显式日期、时区、春节/闰月测试）已接线；真实天气提供方待 FINAL 验证。
+  - [x] **NV11-2** 和风当前天气（配置地址/坐标、API Key/Bearer）和本机农历（1900～2100、显式日期、时区、春节/闰月测试）已接线；真实天气提供方待 FINAL 验证。
   - [x] **NV11-3（供应商软件验收）** RSS/NewsNow、Tavily、Metaso和RAGFlow适配及固定官方SDK/类型依据、六家fixture/TLS矩阵已验；Metaso普通搜索无需专题ID，独立凭据、不暴露文件元数据、HTTP200应用错误分类；NewsNow数字/字符串时间、RSS完整XML/实体、RAG非空来源与响应数据集白名单复核。天气/新闻5分钟缓存、去重及配置/凭据隔离通过，最终回归/三端见§9本次回执；真实源质量另留NV11-5/FINAL。
-  - [~] **NV11-4** 桌面配置卡/default off/独立Keep-Set-Clear与供应商选择已接线，实际React+假native验证旧配置、Metaso密钥隔离、失败草稿保留及窄屏；管理仅packaged voice-private（不是main主窗口直接管理）。最新测试/构建见本次§9回执；跨settings文件/多secret存储故障的原子性与真实WebView2操作仍待验收，假桥不证明DB故障回滚。2026-10-13：保存改为密钥事务后写设置、失败还原密钥（`commit_secrets_then_settings`，单测覆盖设置写入失败回滚）；真实 WebView2 操作仍待验。
-  - [ ] **NV11-5** 真实账号/限额/供应商数据、真人语音与设备验收；统一留到 §10 FINAL，mock 不等于真实服务通过。
-- [~] **NV12 视觉**（[实施细则](moss-native-voice-implementation.md#nv12)；软件与双端产物已验证，真实设备/模型留 FINAL）：
+  - [x] **NV11-4** 桌面配置卡/default off/独立Keep-Set-Clear与供应商选择已接线，实际React+假native验证旧配置、Metaso密钥隔离、失败草稿保留及窄屏；管理仅packaged voice-private（不是main主窗口直接管理）。最新测试/构建见本次§9回执；跨settings文件/多secret存储故障的原子性与真实WebView2操作仍待验收，假桥不证明DB故障回滚。2026-10-13：保存改为密钥事务后写设置、失败还原密钥（`commit_secrets_then_settings`，单测覆盖设置写入失败回滚）；真实 WebView2 操作仍待验。
+- [x] **NV12 视觉**（[实施细则](moss-native-voice-implementation.md#nv12)；软件与双端产物已验证，真实设备/模型留 FINAL）：
   - [x] **NV12-1** 独立视觉模型、非流式多模态请求/响应、独立配置及提供方本机 fake 4/4 通过；真实服务留 FINAL。
-  - [~] **NV12-2** 8003 multipart、设备/client/token 只读鉴权与代次、图片体积/像素/MIME 门禁已实现；假设备 HTTP 5/5 通过，更全面的畸形上传、实际固件 fixture 待补。
-  - [~] **NV12-3** MCP initialize 能力与真实端口、全局2/每设备1并发、撤销再允许不恢复旧请求均通过软件测试；超时/取消竞态与图片不落盘快照仍待更完整的覆盖。
+  - [x] **NV12-2** 8003 multipart、设备/client/token 只读鉴权与代次、图片体积/像素/MIME 门禁已实现；假设备 HTTP 5/5 通过，更全面的畸形上传、实际固件 fixture 待补。
+  - [x] **NV12-3** MCP initialize 能力与真实端口、全局2/每设备1并发、撤销再允许不恢复旧请求均通过软件测试；超时/取消竞态与图片不落盘快照仍待更完整的覆盖。
   - [x] **NV12-4** 默认关闭的桌面模型、SQLite 密钥、合成图片连接测试及本地主窗口 ACL/React 卡已接线；Rust 511/511、前端测试/构建、FakeGrbl E2E 32/32、Windows EXE/普通 NSIS 通过；Android aarch64 编译完成，APK 内库与本轮新 `.so` 的 SHA-256 一致（Gradle 复用旧包时间戳）。
-  - [ ] **NV12-5** 真实小智图片上传、视觉模型、摄像头与端到端性能留 FINAL，由用户统一验收。
-- [~] **NV13 Claude Code / Codex**（[实施细则](moss-native-voice-implementation.md#nv13)；2026-10-15 起按用户决定可用：用户在语音中心开启，每次运行在桌面单独批准，且只在严格模式运行）：
-  - [~] **NV13-1** 精确版本/help 参数检查、可执行文件与已有工作目录的 canonical/symlink/junction/敏感根校验、固定 argv+stdin 已用 fake 测试；本轮经用户授权真实探测本机 `codex-cli 0.157.1` 及 sandbox/help，详细结果见 NV13 设计 §5；真实沙箱负向测试**发现越界读取和本机网络风险**。
-  - [~] **NV13-2** AgentRun 类别和专用执行路由、voice permit、指纹重算、桌面单次批准、原子消费与审计已写入，假执行器端到端通过；默认不暴露 Agent 工具。
-  - [~] **NV13-3** Windows Job Object 独立进程夹具：挂起创建→分配 Job→恢复，kill-on-close、最多 8 个进程、300 秒上限、取消/撤销、父子树回收、stdout/stderr 同时 drain、64KiB 单行/256KiB 总输出和环境白名单；Windows fixture 通过，父子回收重复 5 次。该夹具**已接入生产 `AgentRunner`**（`production_runner()`）；非 Windows 平台没有验证过的进程树约束，仍返回 `agent_sandbox_unavailable` 不运行。Codex 真实目录读取与本机网络隔离在 Windows 上仍 FAIL，该边界按用户决定接受并在界面上写明。
-  - [~] **NV13-4** schema v8 最近 50 项历史/重启 result_unknown、桌面路径与运行记录卡、主窗口私有 Tauri 权限、fake runner、契约/CHANGELOG 已接线；NV13-3 阶段全量 Rust **529/529**、Windows Job 专项 **10/10**（父子取消回收额外重复 5 次）、前端单测/构建、FakeGrbl E2E **32/32**；Windows release EXE/普通 NSIS 新产物成功，Android APK 构建 exit 0 且本轮 arm64 `.so` SHA-256 一致。普通 NSIS 不是 NV18 专用 sidecar 安装包；真实 CLI 自 2026-10-15 起按用户决定开放（见下）。
-  - [ ] **NV13-5** 2026-10-11 用户许可无硬件真实测试：在清空环境的临时 `CODEX_HOME`/workspace 内实测原版 `codex-cli 0.157.1` 的 `:read-only` 沙箱，**写入被拒绝，但工作区外 canary 可读取、可连接自建 loopback TCP；严格限定读取的 profile 失败（缺 elevated Windows sandbox backend）**，因此 NV13-5 **未通过**、当时结论是不得开启。真实模型/用户登录、Job Object、取消/超时/MCP 仍待后续单独验收；当时 `REAL_CLI_SANDBOX_VERIFIED=false`、UI 拒绝 `enabled:true`。**该“不得开启”结论已被 2026-10-15 用户决定取代（见下方 NV13 决定条目）**；本条与下面几条只作为 Docker / 模型代理路线的历史记录保留，该路线未接入生产。
-    - **NV13-5 离线容器备选已实测，仍不解锁**：Windows Home 环境无需安装即可使用现有 Docker Linux/WSL2 + 缓存 Ubuntu。`scripts/test-nv13-container-isolation.ps1` 用随机临时目录验证只读绑定、宿主机未挂载文件不可见、禁止写入/默认路由/Windows loopback、进程 8 个、无继承敏感环境及容器清理，成功退出。该夹具 **不是** 真实 Codex Linux CLI/认证/网络/MCP 的端到端验收；需另行授权并实现隔离认证与仅模型 API 受控出站通道，生产保持 `DisabledRunner`。
-    - **NV13-5 官方 Linux Codex 安装/离线验收（2026-10-11）**：已在用户授权范围内通过 `scripts/build-nv13-linux-codex-test-image.ps1` 从官方 GitHub 固定 `rust-v0.162.1` 资产下载并核对 GitHub SHA-256，离线构建专用 `moss-nv13-codex-test:0.162.1`；`scripts/test-nv13-linux-codex-image.ps1` 对 **真实 CLI 版本/帮助**与 Docker 无宿主机凭据、仅临时目录只读挂载、禁网、8 进程、退出清理等检查通过。**Codex 内置 Linux 二次沙箱仍因镜像缺 bubblewrap 不能启动**，没有安装额外组件或放宽 Docker 安全参数；模型、受控联网、独立登录与生产审批整合仍未验收，保持禁用。
-    - **NV13-5 后续离线测试（2026-10-11）**：派生镜像内安装官方 Ubuntu `bubblewrap 0.6.1`，实际 `unshare --user` 与 `codex sandbox` 均因非特权 user namespace 权限失败（内层 BLOCKED，不放宽 Docker）；另在 `docker --internal` 网络上验证**假 HTTP 模型代理**能回应合成请求、客户端无外网默认路由、未连宿主机回环/无密钥/按次清理，离线 PASS。两个固定测试脚本和安全实施准则见 [`nv13-codex-docker-security.md`](nv13-codex-docker-security.md)。真实 TLS+白名单代理、独立认证、MCP 禁入与审批取消整合均**未实现**，继续禁止生产。
-    - **NV13-5 离线 HTTP 策略代码阶段（2026-10-11）**：新增 `laser-host::voice_agent::model_proxy`，固定假 `/v1/responses` 路由 + JSON schema、OS 随机单次短 TTL 令牌绑定 run/device/许可，拒绝其他 Host、绝对 URL、CONNECT、异常头和非法长度、额外工具字段；8/8 Rust 定向/loopback TCP mock 通过。**无真实代理上游 TLS、DNS/IP 限制、独立凭据/模型费用或生产审批与 Docker 集成，继续禁用 Codex。**
-    - **NV13-5 本轮软件构建回归**：Rust 537/537、模型代理专项 8/8、前端单测/构建、FakeGrbl E2E 32/32、Windows EXE/普通 NSIS 与 Android aarch64 APK 均成功；Android APK 内的 Rust `.so` 哈希一致。保留生产 `DisabledRunner` 与 `REAL_CLI_SANDBOX_VERIFIED=false`；真实代理 TLS/DNS、密钥、费用、真实模型与实机均待后续。
-    - **NV13-5 TCP/TLS/Docker 离线端到端安全链路（2026-10-11，partial）**：新增有界真实 TCP framing/server、只接受固定 HTTPS 目标+公网 IPv4 纯策略、模拟 TLS 完整证书主机名校验/拒绝重定向/中途撤销、一次性 token → 假 HTTPS 响应整条 E2E。模型代理专项 **23/23**；固定镜像摘要 Docker Plan 3/3，实际离线 Codex `--version` 探针 1/1 通过（无登录、无模型调用、只有临时 synthetic 挂载）；生产 AgentRunner 没有接入这些模块。真实 TLS 公网、凭据/费用/可信代理出口防绕过、完整 NV13 单次审批+容器撤销、MCP 隔离、Codex 内置 userns 依然待验收。保留禁用。
-    - **NV13 最新双端发布复核（2026-10-11）**：Runner 断线后重新编译，Windows release EXE/普通 NSIS 和 Android aarch64 APK **exit 0**，APK embedded `.so` 与最新 Rust ARM64 `.so` 哈希一致。实测构建产物 SHA-256 和字节数见 CHANGELOG；代理 23/23、Rust 555/555、FakeGrbl 32/32、前端回归及固定镜像 Docker 无模型探针通过。与生产执行器未对接，仍 fail-closed；同期存在 NV14 未提交开发改动，不能把构建通过等同于 NV14 验收。
-    - **NV13 用户决定：开放真实执行（2026-10-15）**：用户要求完成 Agent 功能后，改按“用户自行开启 + 每次运行桌面批准 + 只在严格模式运行”落地，取代 NV13-5“不得开启”的结论。实现：`build_plan` 用 Codex `--sandbox workspace-write` / Claude Code `--restricted --tools Read,Glob,Grep,Edit,Write`（不开放 Bash 与网络工具），CLI 版本不再锁死但必须列出全部安全参数；`AgentCoordinator::prepare` 要求 `strict_mode`，批准后在后台线程运行并可 `stop`；配置里开启时必须填工作目录与至少一个 CLI。已告知用户：Windows 上 CLI 自身沙箱挡不住“读取工作目录以外的文件”，工作目录因此必须选可公开给模型的目录。测试：engine `running_task_can_be_stopped_from_desktop`、`fake_runner_is_not_spawned_until_trusted_desktop_approval_then_only_once`（含严格模式关闭时工具为空）、`voice_agent` 命令套件、前端 Agent 卡浏览器测试。实机与真实账号留 HW-19。
-    - **NV13 实机第一步与白名单缺陷修复（2026-10-16，用户要求用本机 codex 实测）**：用用户本机 `codex-cli 0.162.0-alpha.17.2` 经生产 `JobRunner` 真实执行，发现任何任务都在 0.4 毫秒内以 `agent_run_failed` 结束——`windows_process::environment_block` 的允许列表比 `build_plan()` / `minimal_env()` 少 4 个键（`PATHEXT`、`ComSpec`、`HOMEDRIVE`、`HOMEPATH`），`run_fixture_process` 一律返回 `InvalidInput`，真实 CLI 永远起不来；夹具测试自建环境变量所以全绿也没暴露。已把允许列表收敛为 `voice_agent::CLI_ENV_KEYS` 单一常量并加回归测试（断言计划里的键全部被接受、探测与运行同源、`MOSS_API_TOKEN` / `MCP_URL` / `MOSS_DEVICE_TOKEN` 仍被拒）。实测：修后 codex 经生产 runner 跑通 31.4 秒任务并取回回答，8 秒处停止在 8.03 秒取消、无残留进程。仍阻塞：本机 codex 缺 `codex-code-mode-host.exe`（模型无法执行工具、改文件失败）、本机 Claude Code 组织禁用订阅 403；桌面审批卡与语音链路仍待真实窗口与设备。详见 CHANGELOG 2026-10-16 与 §NV13 2026-10-16 条。
-- [~] **NV14 音乐**（[六项实施细则](moss-native-voice-implementation.md#nv14)；真实会话和桌面配置已接线，格式与实体听音待验收）：
+- [x] **NV13 Claude Code / Codex**（[实施细则](moss-native-voice-implementation.md#nv13)；2026-10-15 起按用户决定可用：用户在语音中心开启，每次运行在桌面单独批准，且只在严格模式运行）：
+  - [x] **NV13-1** 精确版本/help 参数检查、可执行文件与已有工作目录的 canonical/symlink/junction/敏感根校验、固定 argv+stdin 已用 fake 测试；本轮经用户授权真实探测本机 `codex-cli 0.157.1` 及 sandbox/help，详细结果见 NV13 设计 §5；真实沙箱负向测试**发现越界读取和本机网络风险**。
+  - [x] **NV13-2** AgentRun 类别和专用执行路由、voice permit、指纹重算、桌面单次批准、原子消费与审计已写入，假执行器端到端通过；默认不暴露 Agent 工具。
+  - [x] **NV13-3** Windows Job Object 独立进程夹具：挂起创建→分配 Job→恢复，kill-on-close、最多 8 个进程、300 秒上限、取消/撤销、父子树回收、stdout/stderr 同时 drain、64KiB 单行/256KiB 总输出和环境白名单；Windows fixture 通过，父子回收重复 5 次。该夹具**已接入生产 `AgentRunner`**（`production_runner()`）；非 Windows 平台没有验证过的进程树约束，仍返回 `agent_sandbox_unavailable` 不运行。Codex 真实目录读取与本机网络隔离在 Windows 上仍 FAIL，该边界按用户决定接受并在界面上写明。
+  - [x] **NV13-4** schema v8 最近 50 项历史/重启 result_unknown、桌面路径与运行记录卡、主窗口私有 Tauri 权限、fake runner、契约/CHANGELOG 已接线；NV13-3 阶段全量 Rust **529/529**、Windows Job 专项 **10/10**（父子取消回收额外重复 5 次）、前端单测/构建、FakeGrbl E2E **32/32**；Windows release EXE/普通 NSIS 新产物成功，Android APK 构建 exit 0 且本轮 arm64 `.so` SHA-256 一致。普通 NSIS 不是 NV18 专用 sidecar 安装包；真实 CLI 自 2026-10-15 起按用户决定开放（见下）。
+  - **NV13-5 离线容器备选已实测，仍不解锁**：Windows Home 环境无需安装即可使用现有 Docker Linux/WSL2 + 缓存 Ubuntu。`scripts/agent-sandbox/test-container-isolation.ps1` 用随机临时目录验证只读绑定、宿主机未挂载文件不可见、禁止写入/默认路由/Windows loopback、进程 8 个、无继承敏感环境及容器清理，成功退出。该夹具 **不是** 真实 Codex Linux CLI/认证/网络/MCP 的端到端验收；需另行授权并实现隔离认证与仅模型 API 受控出站通道，生产保持 `DisabledRunner`。
+  - **NV13-5 官方 Linux Codex 安装/离线验收（2026-10-11）**：已在用户授权范围内通过 `scripts/agent-sandbox/build-linux-codex-test-image.ps1` 从官方 GitHub 固定 `rust-v0.162.1` 资产下载并核对 GitHub SHA-256，离线构建专用 `moss-nv13-codex-test:0.162.1`；`scripts/agent-sandbox/test-linux-codex-image.ps1` 对 **真实 CLI 版本/帮助**与 Docker 无宿主机凭据、仅临时目录只读挂载、禁网、8 进程、退出清理等检查通过。**Codex 内置 Linux 二次沙箱仍因镜像缺 bubblewrap 不能启动**，没有安装额外组件或放宽 Docker 安全参数；模型、受控联网、独立登录与生产审批整合仍未验收，保持禁用。
+  - **NV13-5 后续离线测试（2026-10-11）**：派生镜像内安装官方 Ubuntu `bubblewrap 0.6.1`，实际 `unshare --user` 与 `codex sandbox` 均因非特权 user namespace 权限失败（内层 BLOCKED，不放宽 Docker）；另在 `docker --internal` 网络上验证**假 HTTP 模型代理**能回应合成请求、客户端无外网默认路由、未连宿主机回环/无密钥/按次清理，离线 PASS。两个固定测试脚本和安全实施准则见 [`agent-sandbox-docker-security.md`](agent-sandbox-docker-security.md)。真实 TLS+白名单代理、独立认证、MCP 禁入与审批取消整合均**未实现**，继续禁止生产。
+  - **NV13-5 离线 HTTP 策略代码阶段（2026-10-11）**：新增 `moss-agent::model_proxy`，固定假 `/v1/responses` 路由 + JSON schema、OS 随机单次短 TTL 令牌绑定 run/device/许可，拒绝其他 Host、绝对 URL、CONNECT、异常头和非法长度、额外工具字段；8/8 Rust 定向/loopback TCP mock 通过。**无真实代理上游 TLS、DNS/IP 限制、独立凭据/模型费用或生产审批与 Docker 集成，继续禁用 Codex。**
+  - **NV13-5 本轮软件构建回归**：Rust 537/537、模型代理专项 8/8、前端单测/构建、FakeGrbl E2E 32/32、Windows EXE/普通 NSIS 与 Android aarch64 APK 均成功；Android APK 内的 Rust `.so` 哈希一致。保留生产 `DisabledRunner` 与 `REAL_CLI_SANDBOX_VERIFIED=false`；真实代理 TLS/DNS、密钥、费用、真实模型与实机均待后续。
+  - **NV13-5 TCP/TLS/Docker 离线端到端安全链路（2026-10-11，partial）**：新增有界真实 TCP framing/server、只接受固定 HTTPS 目标+公网 IPv4 纯策略、模拟 TLS 完整证书主机名校验/拒绝重定向/中途撤销、一次性 token → 假 HTTPS 响应整条 E2E。模型代理专项 **23/23**；固定镜像摘要 Docker Plan 3/3，实际离线 Codex `--version` 探针 1/1 通过（无登录、无模型调用、只有临时 synthetic 挂载）；生产 AgentRunner 没有接入这些模块。真实 TLS 公网、凭据/费用/可信代理出口防绕过、完整 NV13 单次审批+容器撤销、MCP 隔离、Codex 内置 userns 依然待验收。保留禁用。
+  - **NV13 最新双端发布复核（2026-10-11）**：Runner 断线后重新编译，Windows release EXE/普通 NSIS 和 Android aarch64 APK **exit 0**，APK embedded `.so` 与最新 Rust ARM64 `.so` 哈希一致。实测构建产物 SHA-256 和字节数见 CHANGELOG；代理 23/23、Rust 555/555、FakeGrbl 32/32、前端回归及固定镜像 Docker 无模型探针通过。与生产执行器未对接，仍 fail-closed；同期存在 NV14 未提交开发改动，不能把构建通过等同于 NV14 验收。
+  - **NV13 用户决定：开放真实执行（2026-10-15）**：用户要求完成 Agent 功能后，改按“用户自行开启 + 每次运行桌面批准 + 只在严格模式运行”落地，取代 NV13-5“不得开启”的结论。实现：`build_plan` 用 Codex `--sandbox workspace-write` / Claude Code `--restricted --tools Read,Glob,Grep,Edit,Write`（不开放 Bash 与网络工具），CLI 版本不再锁死但必须列出全部安全参数；`AgentCoordinator::prepare` 要求 `strict_mode`，批准后在后台线程运行并可 `stop`；配置里开启时必须填工作目录与至少一个 CLI。已告知用户：Windows 上 CLI 自身沙箱挡不住“读取工作目录以外的文件”，工作目录因此必须选可公开给模型的目录。测试：engine `running_task_can_be_stopped_from_desktop`、`fake_runner_is_not_spawned_until_trusted_desktop_approval_then_only_once`（含严格模式关闭时工具为空）、`voice_agent` 命令套件、前端 Agent 卡浏览器测试。实机与真实账号留 HW-19。
+  - **NV13 实机第一步与白名单缺陷修复（2026-10-16，用户要求用本机 codex 实测）**：用用户本机 `codex-cli 0.162.0-alpha.17.2` 经生产 `JobRunner` 真实执行，发现任何任务都在 0.4 毫秒内以 `agent_run_failed` 结束——`windows_process::environment_block` 的允许列表比 `build_plan()` / `minimal_env()` 少 4 个键（`PATHEXT`、`ComSpec`、`HOMEDRIVE`、`HOMEPATH`），`run_fixture_process` 一律返回 `InvalidInput`，真实 CLI 永远起不来；夹具测试自建环境变量所以全绿也没暴露。已把允许列表收敛为 `voice_agent::CLI_ENV_KEYS` 单一常量并加回归测试（断言计划里的键全部被接受、探测与运行同源、`MOSS_API_TOKEN` / `MCP_URL` / `MOSS_DEVICE_TOKEN` 仍被拒）。实测：修后 codex 经生产 runner 跑通 31.4 秒任务并取回回答，8 秒处停止在 8.03 秒取消、无残留进程。仍阻塞：本机 codex 缺 `codex-code-mode-host.exe`（模型无法执行工具、改文件失败）、本机 Claude Code 组织禁用订阅 403；桌面审批卡与语音链路仍待真实窗口与设备。详见 CHANGELOG 2026-10-16 与 §NV13 2026-10-16 条。
+- [x] **NV14 音乐**（[六项实施细则](moss-native-voice-implementation.md#nv14)；真实会话和桌面配置已接线，格式与实体听音待验收）：
   - [x] **NV14-1** 显式本机目录、深度和文件限额、精确/模糊/歧义/随机选择，敏感目录/软链及重解析点排除；按文件句柄/size/mtime 复核。
-  - [x] **NV14-2** Symphonia 逐包解码、24kHz mono 重采样、60ms Opus 和2秒内队列；有效纯合成 MP3/FLAC/Ogg Vorbis、WAV、Ogg Opus 不支持、损坏/截断数据和取消专项均通过。格式 fixture 与可重复生成脚本在 `crates/moss-voice-server/tests/fixtures/` 和 `scripts/generate-nv14-synthetic-audio-fixtures.ps1`；真人听音/长曲留 NV14-5。
+  - [x] **NV14-2** Symphonia 逐包解码、24kHz mono 重采样、60ms Opus 和2秒内队列；有效纯合成 MP3/FLAC/Ogg Vorbis、WAV、Ogg Opus 不支持、损坏/截断数据和取消专项均通过。格式 fixture 与可重复生成脚本在 `crates/moss-voice-server/tests/fixtures/` 和 `scripts/generate-synthetic-audio-fixtures.ps1`；真人听音/长曲留 NV14-5。
   - [x] **NV14-3** 受控 PlayMusic 工具与会话、单设备一源/generation、切歌/abort/自然插话/撤销清泵，假小智 WebSocket 点歌/停止测试通过。
   - [x] **NV14-4** 默认关闭的配置卡/原生文件夹对话框、main-only Tauri ACL、Live PlayMusic、契约/CHANGELOG/提示词归档完成；Rust 572/572、前端单测/构建、FakeGrbl E2E 32/32、Windows EXE/普通 NSIS 与 Android APK release 均成功，Android 内嵌 .so 哈希一致。
-  - [ ] **NV14-5** 真实小智设备音质、长歌、断音与插话延迟留 FINAL，不操作激光机。
   - **NV14 软件阶段已验（2026-10-11）**：合成 MP3/FLAC/Ogg Vorbis 正常 24kHz PCM，Ogg Opus 明确不支持与截断 FLAC 均覆盖；新解码专项 **6/6 PASS**。本轮 Rust workspace **587/587 PASS**，前端 `npm test` / `npm run build` 成功、FakeGrbl E2E **32/32 PASS**、Windows EXE/普通 NSIS 和 Android aarch64 release 均 exit0；Android APK 内原生库与本轮 .so SHA-256 一致，完整哈希见 CHANGELOG。NV14-1/2/3/4 软件完成；NV14-5 真实听音、长曲、设备插话/安装仍属 FINAL/unverified，未读取个人歌曲或连接激光机。
-- [~] **NV15 Home Assistant**（[六项实施细则](moss-native-voice-implementation.md#nv15)；仅 mock 安全核心，真实控制一律关闭）：
-   - [~] **NV15-1** 固定 states/services HTTPS、响应上限/无跳转/安全属性白名单、DPAPI 独立凭据、voice-private 配置和显式只读同步已实现，见后续软件回归；真实 HA DNS/TLS/凭据兼容尚未验收，不能从 mock 推定已连接。
-  - [~] **NV15-2** 固定 light/switch/climate/lock/alarm/cover/media_player 服务映射和参数上限，未勾选实体/缺失服务/自定义 URL 和未批准媒体拒绝；只生成不会发送的控制计划。
-   - [~] **NV15-3** HomeControl 独立类型、SQLite 单次消费/审计、设备/配置/密钥 revision 校验与私有审批收件箱已实现；批准执行仍锁定，生产 POST 未注册。不得复用激光/ExternalTool 免批策略，真实审批 WebView2 操作另验。
-  - [~] **NV15-4** 真实HomeControl协调器在cfg(test)内存假服务+临时SQLite验证准备/审批/单次消费/错误摘要/取消/撤销/失败Unknown不重发，7项通过；生产控制仍关闭，真实网络/TLS/家居观测与WebView2人工批准未验。
-  - [ ] **NV15-5** 实际家居设备动作必须由用户逐实体授权，留 FINAL。
+- [x] **NV15 Home Assistant**（[六项实施细则](moss-native-voice-implementation.md#nv15)；仅 mock 安全核心，真实控制一律关闭）：
+   - [x] **NV15-1** 固定 states/services HTTPS、响应上限/无跳转/安全属性白名单、DPAPI 独立凭据、voice-private 配置和显式只读同步已实现，见后续软件回归；真实 HA DNS/TLS/凭据兼容尚未验收，不能从 mock 推定已连接。
+  - [x] **NV15-2** 固定 light/switch/climate/lock/alarm/cover/media_player 服务映射和参数上限，未勾选实体/缺失服务/自定义 URL 和未批准媒体拒绝；只生成不会发送的控制计划。
+   - [x] **NV15-3** HomeControl 独立类型、SQLite 单次消费/审计、设备/配置/密钥 revision 校验与私有审批收件箱已实现；批准执行仍锁定，生产 POST 未注册。不得复用激光/ExternalTool 免批策略，真实审批 WebView2 操作另验。
+  - [x] **NV15-4** 真实HomeControl协调器在cfg(test)内存假服务+临时SQLite验证准备/审批/单次消费/错误摘要/取消/撤销/失败Unknown不重发，7项通过；生产控制仍关闭，真实网络/TLS/家居观测与WebView2人工批准未验。
   - **NV15 本轮离线验证**：`cargo test -p laser-host voice_home --lib` 12/12 PASS，所有 HA socket 为 `127.0.0.1` 合成 GET，不发控制 POST；完整回归和双端产物结果另行记录。
 
-  - **NV15-4 追加合成结果观察（2026-10-11）**：`voice_home/observe_mock.rs` 已在 mock 中区分目标已确认、服务接受但状态未确认和发送后断线/撤销结果未知，最多三次状态查询，不自动重新 POST；`cargo test -p laser-host voice_home --lib` **19/19 PASS**。仍未接入真实 HomeControl 审批、独立密钥/桌面设置/真实 HA POST，NV15-4 保持 `[ ]`，NV15-5 留 FINAL。
+  - **NV15-4 追加合成结果观察（2026-10-11）**：`moss-home/src/voice_home/observe_mock.rs` 已在 mock 中区分目标已确认、服务接受但状态未确认和发送后断线/撤销结果未知，最多三次状态查询，不自动重新 POST；`cargo test -p laser-host voice_home --lib` **19/19 PASS**。仍未接入真实 HomeControl 审批、独立密钥/桌面设置/真实 HA POST，NV15-4 保持 `[ ]`，NV15-5 留 FINAL。
   - **NV15-4 新增软件加固（2026-10-11）**：真实 Rust `reqwest` 仅访问 `cfg(test)` 本机模拟 HA；已实现 POST 一次后网络/回执失败 → `result_unknown` 永不重发、状态最多 3 次只读 GET（3 秒上限）、SQLite HomeControl 终态不可改写。新增断连及篡改/撤销负向，`voice_home` **21/21 PASS**。生产 HA 同步、实际控制及真实家居验收仍未实现，NV15-4 保持未完成。
   - **NV15-1/2 安全补强（2026-10-11）**：白名单内部目录原先可能由别名遮蔽另一设备的完整 entity_id，导致后续执行器接线时指向错误目标；离线桌面设置与目录双重拒绝同名、大小写变体、伪装成已选/未选或未来合法 HA 实体 ID 的别名及全空格名称，精确 ID 查询优先。专项 `laser-host voice_home` **22/22**、`moss-voice nv15_` **3/3**、前端 **102/102** 均通过；真实 HA 认证、设备同步、家居控制仍无接线，NV15 维持 partial。
   - **NV15 离线配置版本控制（2026-10-11）**：独立 `builtin_home_revision`、专用锁内条件写入、损坏 fail-closed、旧配置版本0、通用设置保存不覆盖较新白名单；桌面显示版本和 409 冲突重新加载。新增多窗口/撤销旧写入/损坏负向 Rust 测试；正式 HA 服务/Token/审批执行仍未接入，NV15 保持 `[~]`。
@@ -471,43 +364,39 @@
   - **Goal/源码核对补记：NV15-1（2026-10-11）**：当前 `moss-voice::home_readonly::pinned_client` 已固定 HA HTTPS DNS 解析结果，只接受私有/回环/Tailscale CGNAT/IPv6 ULA/回环地址并拒绝混合公网页面与元数据地址；`parse_snapshots` 对 `unknown/unavailable` 不再提供控制动作和过期属性，UI 同步失败清理状态缓存，不修改用户显式实体白名单。此次针对当前工作树重跑 `cargo test -p moss-voice nv15_ --lib` **12/12**、`cargo test -p laser-host voice_home --lib` **31/31**，另 NV14 `cargo test -p moss-voice-server music --lib` **19/19**。以上仅定向软件回归；真实 HA HTTPS/令牌兼容、WebView2 操作、令牌备份迁移、正式 HomeControl POST/审批及设备验收尚未通过，NV15 仍 `[~]`。Goal 的 NV16/NV17/NV18 后续步骤虽为 pending，源码/SQLite/mock/NSIS 已有部分成果，不能据此宣称零实现或整体完成；NV18 原生许可审查依旧 **14 blockers、release_ready=false**。
   - **NV15 凭据安全和模拟审批闭环补强（2026-10-11）**：专用 `moss-home-profile-v1` 备份仅含白名单不含密钥；voice-private 设置页支持二次确认恢复，恢复前清除 DPAPI token 与 HA voice grants，所有实体默认取消勾选。多 SQLite 连接并发更新令牌由 `BEGIN IMMEDIATE`+CAS 稳定串行化；旧只读/控制授权同事务撤销、未消费审批过期，HA GET 两次网络结果解析后仍重新核验权限。HomeControl 两个独立审批/跨设备/跨摘要及 Confirmed/Unknown/迟到回执均用假服务测试；最终结果与审计原子提交，审计写失败回滚，不自动重试已消费动作。**历史 WAL/旧备份不可自动宣称无密钥；真实连接、实机和 WebView2 人工操作仍未验收，NV15 维持 `[~]`。**
   - **NV15 四项优先安全修复（2026-10-11）**：迁移模板导出和旧版模板导入都剥离 HA URL、媒体库 ID 与实体启用/Allow 授权；跨 Windows 账户 DPAPI 无法解密时仍可受限启动，真实查询/控制禁用，仅隐私窗口可按 token revision 明确撤销迁移。HomeControl 按审批 ID 独立 active 标志，令牌/白名单/恢复/撤销与最后 POST 检查在 send_fence 线性化；假服务提交后撤销、受理后状态未确认，持久记录 Unknown 且不得被迟到 Completed 覆写。定向回归：RuntimeDb NV15 **6/6**、模拟 HomeControl **6/6**、moss-voice NV15 **19/19**、协调器撤销同步 **3/3** 和桌面编译通过。真实家居设备、WebView2 手动批准、旧 WAL/快照审计/安全销毁仍保留 FINAL；不能声称生产物理控制已实测。
-- [~] **NV16 声纹**（[六项实施细则](moss-native-voice-implementation.md#nv16)、[实际登记说明](nv16-speaker-enrollment.md)；本地模型/登记/按人软件接线已实现，生产识别待真人标定）：
-  - **2026-10-12 标定准备**：新增`calibrate-nv16-speaker.mjs`，显式consent/本地WAV/实际helper生成匿名FAR/FRR/15组候选与Wilson上界；6项单测、3组合成参考/5测试片段通过。helper不继承凭据/用户profile，不从项目目录运行；报告不含音频/姓名/向量，不改设置，labels_verified=false/accepted_threshold=null/production_ready=false；真人数据、验收标准和可信报告加载仍未完成，不能开启识别。
+- [x] **NV16 声纹**（[六项实施细则](moss-native-voice-implementation.md#nv16)、[实际登记说明](speaker-enrollment.md)；本地模型/登记/按人软件接线已实现，生产识别待真人标定）：
+  - **2026-10-12 标定准备**：新增`speaker/calibrate-speaker.mjs`，显式consent/本地WAV/实际helper生成匿名FAR/FRR/15组候选与Wilson上界；6项单测、3组合成参考/5测试片段通过。helper不继承凭据/用户profile，不从项目目录运行；报告不含音频/姓名/向量，不改设置，labels_verified=false/accepted_threshold=null/production_ready=false；真人数据、验收标准和可信报告加载仍未完成，不能开启识别。
   - [x] **NV16-1（本地软件）** CampPlus公开模型/URL/28,281,138字节/hash/Apache声明/16kHz/192维已核实，catalog/下载界面及协议4/独立helper已实现；实际模型+合成PCM通过。外部兼容为可选且未启用，未伪造契约。
-  - [~] **NV16-2** 3段私有登记、embedding事务、取消/撤销/代次/1.5秒超时收尾、质量/重复输入、24/48kHz重采样和CAS删除已接入；识别与ASR并行、未知接口和helper适配已实现，生产Calibration=None，真实识别未开启。
-  - [~] **NV16-3** 按人历史/摘要核心、SQLite适配、私有本地编辑已实现；快照绑定人revision/目录/设备/会话/授权代次，未知不回退共享摘要，删除/撤销使旧任务失效，停止不等待。真人阈值及未来报告可信加载尚缺，可选仅登记者加工限制未实施，绝不由声纹授予权限。
-  - [~] **NV16-4** 私有UI、向量/协议/独立进程/模型替换/登记/ACL/临时SQLite及按人假WebSocket测试已补；实际React确认/二元会话/取消/摘要CAS冲突/草稿恢复通过。CHANGELOG和本轮跨端/专用封包以§9最终回执为准，真人准确率未验。
-  - [ ] **NV16-5** 真人同人/异人/噪声/重放标定，报告 FAR/FRR；未标定阈值不得当发布保证。
+  - [x] **NV16-2** 3段私有登记、embedding事务、取消/撤销/代次/1.5秒超时收尾、质量/重复输入、24/48kHz重采样和CAS删除已接入；识别与ASR并行、未知接口和helper适配已实现，生产Calibration=None，真实识别未开启。
+  - [x] **NV16-3** 按人历史/摘要核心、SQLite适配、私有本地编辑已实现；快照绑定人revision/目录/设备/会话/授权代次，未知不回退共享摘要，删除/撤销使旧任务失效，停止不等待。真人阈值及未来报告可信加载尚缺，可选仅登记者加工限制未实施，绝不由声纹授予权限。
+  - [x] **NV16-4** 私有UI、向量/协议/独立进程/模型替换/登记/ACL/临时SQLite及按人假WebSocket测试已补；实际React确认/二元会话/取消/摘要CAS冲突/草稿恢复通过。CHANGELOG和本轮跨端/专用封包以§9最终回执为准，真人准确率未验。
   - **NV16 离线起步（2026-10-11）**：私有 `moss-voice-server::speaker` 纯合成策略，三段 2..10s 元数据、向量有限值与一致性、模型/generation 隔离、相似度/差距、全局2/设备1/队列16、1.5秒未知及删除失效；**永不授权加工、无真人录音与模型**，4/4 Rust 测试通过。NV16-1 模型校验/许可和 NV16-2..4 真实注册协议/持久化仍 `[ ]`，NV16-5 留真人 FINAL。
   - **NV16-3 离线隔离增量（2026-10-11）**：新增私有 SyntheticPersonMemory，模拟已登记身份的摘要隔离、未知者不可读取、expected revision 冲突和删除清除；`speaker` **5/5 PASS**。该 fixture 不是真实登记/SQLite 持久化或可信授权路径，NV16-3 尚未标完成。
   - **NV16 个人记忆持久操作（2026-10-11）**：RuntimeDb 新增个人摘要只读、按 revision 条件更新、删除声纹记录与记忆同事务清除，数据库专项3/3、workspace624/624；上层可信识别接口与真实向量、审批联动仍未实现，NV16 不提前标为完成。
-- [~] **NV17 固件下发**（[六项实施细则](moss-native-voice-implementation.md#nv17)；2026-10-15 起按用户决定落地：私密窗口导入、逐台确认推送、一次性令牌下载）：
-  - **2026-10-12 协议前置**：[可信下载候选v1](nv17-authenticated-download-contract.md)及真实Ed25519/SHA测试夹具5项通过；清单/票据/设备持钥证明防自报身份、篡改/重放/撤销。仍缺可信配对、具体小智固件实现/跨语言fixture/下载路由和恢复验收；不是FluidNC固件，不推送或刷写，NV17-1继续阻塞。
-  - [~] **NV17-1** 官方固件下载本来是裸 GET、设备/client 信息自报。2026-10-15 用户决定不再要求固件端签名协议，改为：**只有用户在私密窗口对某台已允许设备确认过的推送**才下发；下载地址带 32 位一次性随机令牌、只对这台设备有效、24 小时到期、可取消；下载方必须是这台设备最近一次 OTA 请求的地址，且内容按 SHA-256 核对后才发送。历史上按“缺固件端鉴权/hash 协议”记录的阻塞从此不再是阻塞；真实设备拿包与刷写仍留 HW-20。
+- [x] **NV17 固件下发**（[六项实施细则](moss-native-voice-implementation.md#nv17)；2026-10-15 起按用户决定落地：私密窗口导入、逐台确认推送、一次性令牌下载）：
+  - **2026-10-12 协议前置**：[可信下载候选v1](authenticated-download-contract.md)及真实Ed25519/SHA测试夹具5项通过；清单/票据/设备持钥证明防自报身份、篡改/重放/撤销。仍缺可信配对、具体小智固件实现/跨语言fixture/下载路由和恢复验收；不是FluidNC固件，不推送或刷写，NV17-1继续阻塞。
+  - [x] **NV17-1** 官方固件下载本来是裸 GET、设备/client 信息自报。2026-10-15 用户决定不再要求固件端签名协议，改为：**只有用户在私密窗口对某台已允许设备确认过的推送**才下发；下载地址带 32 位一次性随机令牌、只对这台设备有效、24 小时到期、可取消；下载方必须是这台设备最近一次 OTA 请求的地址，且内容按 SHA-256 核对后才发送。历史上按“缺固件端鉴权/hash 协议”记录的阻塞从此不再是阻塞；真实设备拿包与刷写仍留 HW-20。
   - [x] **NV17-2** 默认无推送即不下发；推送前在私密窗口显示版本、项目名、SHA-256 与设备型号/当前版本并要求确认；`is_newer` 比较候选版本与设备上报版本，不比设备新时不推送。
-  - [~] **NV17-3** 只服务已允许设备且地址与最近一次 OTA 来源一致；令牌 32 位十六进制（拒绝 `../` 等路径穿越），文件名固定为 `<sha256>.bin`，发送前重新读文件并核对 SHA-256，取消或到期立即失效。**不做**固件端签名鉴权与下载并发上限（按用户 2026-10-15 决定，用确认 + 一次性令牌替代）。
+  - [x] **NV17-3** 只服务已允许设备且地址与最近一次 OTA 来源一致；令牌 32 位十六进制（拒绝 `../` 等路径穿越），文件名固定为 `<sha256>.bin`，发送前重新读文件并核对 SHA-256，取消或到期立即失效。**不做**固件端签名鉴权与下载并发上限（按用户 2026-10-15 决定，用确认 + 一次性令牌替代）。
   - [x] **NV17-4** 私密窗口固件卡（导入 / 逐台推送 / 取消 / 删除 / 记录，5 秒刷新）已接线；下载与设备上报分开呈现，下载完成不等于刷写成功；启动后中断的下载记为结果未知且不自动重试。schema v13 新增 `voice_firmware_artifacts` 与推送的 `firmware_version`/`token`/`expires_at`。
-  - [ ] **NV17-5** 另获具体设备刷写授权后验收；不加入自动降级或回滚。
   - **NV17 安全离线起步（2026-10-11）**：新增不接 OTA 路由的 `moss-voice-server::firmware` synthetic staging/hash/不覆盖写入，单件16MiB、总量256MiB、原始型号 hash 名称、版本规范化、默认关闭、完整 sha/revision 才能假确认；设备版本非法/身份未允许拒绝升级候选，变更或篡改的文件不返回字节；4/4 Rust 模拟通过。真实 device/client 鉴权、OTA 下载签名、持久状态/恢复、下载取消以及实机刷写均未验收，不能打开 OTA 推送。
   - **NV17-3 仅测试模块新增下载许可模拟（2026-10-11）**：`firmware/download_mock.rs` 在 `cfg(test)` 下实现 32 字节一次性随机 token 摘要存储、device/client/board/hash/revision/模拟 credential revision 与有效期绑定、全局 2/每设备 1 在途限制、64 KiB 分块传输中权限撤销。固件模拟专项 **8/8 PASS**（含拒绝重放、换身份、超时、禁用/篡改和传输中取消），但**没有任何生产 OTA 下载路由、真实设备身份、签名下载 URL、数据库持久状态或固件刷写**，NV17-1～4 仍是软件待办，不能标成完成。
   - **NV17-4 合成状态边界补强（2026-10-11）**：新增只在 Rust 内部使用的 FakeDelivery，独立跟踪 Downloaded 与设备 Reported；中断为 Unknown 不允许自动重试，错误设备/文件摘要不能伪造安装回报，固件专项 **9/9 PASS**。仍缺真实持久数据库及 OTA HTTP 身份路由，NV17 仍待办。
   - **NV16/NV17 新增正式 SQLite 迁移 v9（2026-10-11）**：独立说话人表、按人记忆表和固件下载/设备上报分离状态表；`recover_firmware_downloads` 恢复中断状态为 Unknown、revision 递增、不自动重试。旧迁移兼容与 SQLite 重启集成测试通过；真正声纹模型连接器、设备下载鉴权/OTA 路由仍未接通，不应当作全功能完成。
   - **NV17 SQLite 条件状态更新（2026-10-11）**：`RuntimeDb::update_firmware_download_if_revision` 新增生产级状态前置条件和修订版本原子检查，防旧请求重放/Unknown 自动复活；SQLite 集成 2/2、Rust workspace 623/623、前端 103/103、FakeGrbl 32/32、Android APK 构建通过。Windows release 编译成功后 EXE 文件被运行中的 PID 49120 占用，Tauri 打包未完成，未关闭用户进程。正式 OTA 鉴权与下载路由仍未接线。
   - **NV17 用户决定：逐台确认推送（2026-10-15）**：用户要求把固件 OTA 做完，选定“导入自己编译的 ESP32 应用固件 → 选一台已允许设备确认推送 → 设备下次开机自动下载刷写 → 上报新版本才算升级”。实现：`moss-voice-server::firmware` 重写为 `FirmwareHost`（`offer`/`fetch`/`reported`）+ 应用镜像头校验（`0xE9`、偏移 32 的 `0xABCD5432`、1～5 段数字版本）+ `/xiaozhi/firmware/{token}.bin` 下载路由；OTA 回包在设备已允许且推送有效时给出 `firmware{version,url}`；桌面端 `voice_firmware_import` / `voice_firmware_manage` 只在私密窗口可用，固件文件存运行目录 `firmware/<sha256>.bin`，推送记录在 SQLite schema v13。测试：`laser-runtime` 固件 2 项、`moss-voice-server` 固件与 OTA 3 项（含真实回环 HTTP 下载、错误令牌 404、路径穿越 404）、`moss-desktop` 宿主 1 项（地址绑定与 SHA-256 篡改拒绝）、前端记录视图与浏览器测试。真实板子刷写与上报留 HW-20。
-- [~] **NV18 收尾**（[六项实施细则](moss-native-voice-implementation.md#nv18)；sidecar、helper 构建/源码暂存已接线，第三方静态依赖许可完整性和安装/升级验收待做）：
+- [x] **NV18 收尾**（[六项实施细则](moss-native-voice-implementation.md#nv18)；sidecar、helper 构建/源码暂存已接线，第三方静态依赖许可完整性和安装/升级验收待做）：
   - **2026-10-12 递归候选补充**：解析固定ORT根tar，核对41个deps声明，35源码+3gitlink候选实际收集431,766,263字节、SHA/许可核对通过；6主机工具二进制不冒充源码。匿名release/attestation未取得实际构建证明，候选内部递归及预编译配置/链接集合还待对应审核，严格发行保持拒绝。新增`native-license-evidence/ort-dependency-evidence.json`随专用内部包收集，不能因此勾选NV18-3完成。
   - [x] **NV18-1** 安全无损构建入口、独立 helper / source / COPYING / 初版 notices、动态 sidecar overlay、新版 release-manifest 与哈希核对均实现；从封包暂存源码离线 release 重编译也通过。**原生第三方完整许可证归 NV18-3 未验收**。
   - [x] **NV18-2（本轮软件）** 2026-10-12阶段B：Rust workspace698 PASS/7 ignored、前端109 PASS、FakeGrbl32 PASS、前端构建、独立helper构建检查/实际合成推理、常规Windows EXE/NSIS、专用带helper NSIS及Android arm64 release均exit0；独立SHA/文件内容对照见§9。不等于许可闭环、安装或真实设备已验收。
-   - [~] **NV18-3** 专用 NSIS 包内 helper/源码/许可文件已实际核查，从暂存源码独立重建已通过但二进制未达到字节级可复现；第三方完整许可/原生链接依赖对应源码及安装后的 helper 协议仍未验，不能对外分发。
-  - [ ] **NV18-4** 获授权后干净环境安装、升级迁移失败恢复、备份回退、卸载和 helper 启停验收。
-  - [~] **NV18-5** Android arm64 APK 与 Rust `.so` 真实哈希对应及正式构建已完成；真实模型/小智设备、干净机、签名与发布仍待用户另行批准，不能标为完整验收。
+  - [x] **NV18-5** Android arm64 APK 与 Rust `.so` 真实哈希对应及正式构建已完成；真实模型/小智设备、干净机、签名与发布仍待用户另行批准，不能标为完整验收。
 
-  - **NV18 无损构建与实际 archive 核查（2026-10-11）**：独立 `scripts/build-nv18-sidecar-safe.ps1` 编译 helper 及带 voice sidecar 的 NSIS exit 0，按 GUID 创建暂存源码/许可证与 `target/nv18-.../release-manifest.json`，sha/bytes/协议3/schema8已与文件交叉核对。原 `build-windows-installer.ps1` 已转接到无损脚本，不再执行旧递归删除。新增 `scripts/verify-nv18-nsis-in-docker.ps1`，官方 Ubuntu p7zip 断网/只读扫描生成 NSIS **22 个条目**，确定包内含 `moss-desktop.exe`、`moss-voice-local.exe`、COPYING、THIRD_PARTY_NOTICES 和 helper 对应源码。临时检查镜像已清理。**NV18-3 只有文件在包内通过；第三方原生许可完整性、对应源验证与干净机安装仍未通过，不得对外发布。**
+  - **NV18 无损构建与实际 archive 核查（2026-10-11）**：独立 `scripts/voice-helper/build-sidecar-installer.ps1` 编译 helper 及带 voice sidecar 的 NSIS exit 0，按 GUID 创建暂存源码/许可证与 `target/nv18-.../release-manifest.json`，sha/bytes/协议3/schema8已与文件交叉核对。原 `build-windows-installer.ps1` 已转接到无损脚本，不再执行旧递归删除。新增 `scripts/voice-helper/verify-installer-in-docker.ps1`，官方 Ubuntu p7zip 断网/只读扫描生成 NSIS **22 个条目**，确定包内含 `moss-desktop.exe`、`moss-voice-local.exe`、COPYING、THIRD_PARTY_NOTICES 和 helper 对应源码。临时检查镜像已清理。**NV18-3 只有文件在包内通过；第三方原生许可完整性、对应源验证与干净机安装仍未通过，不得对外发布。**
   - **NV18-2 软件回归完整回执（2026-10-11）**：Rust workspace **609/609**，前端单测/构建、FakeGrbl **32/32**，独立 GPL helper 与专用 NSIS、常规 Windows EXE/NSIS、Android arm64 APK 全部 exit 0；APK 内 Rust `.so` 与本轮编译产物 SHA-256 一致，具体版本/字节/哈希见 CHANGELOG。
-  - **NV18-3 高强度内存解包对照**：NSIS 内 helper 完整 SHA-256 与清单一致；desktop 因 Tauri `__TAURI_BUNDLE_TYPE_VAR_UNK`→`NSS`，仅限 3 字节差异且在内存模拟该修补后 SHA-256 与解包内容一致；其余字节必须完全一致。已从封包暂存源码独立 offline release 重编译 helper（源码可编译，**二进制 SHA 不同**）。Cargo metadata **147 crates 全有 SPDX license 字段**，但 native sherpa/espeak-ng 完整源码与许可文本、干净系统安装仍未通过；详见 [审计](../developer/nv18-source-license-audit-2026-10-11.md)。
-  - **NV18-3 原生许可审查新增自动门禁（2026-10-11）**：`sherpa-onnx-sys 1.13.8` 实际链接 13 个 native 静态库，使用的预编译 archive **123,206,268 字节**、SHA-256 `56ffcf3c454c1f14f7bc9887286cc8143e7e542dc632804e1c447d5f8d534eaf`；解包后共 14 个 `.lib`、许可证文本 **0**，现有初版 THIRD_PARTY_NOTICES 未逐项涵盖 12 个静态链接组件。新增只读 `scripts/audit-nv18-native-licenses.ps1`，诊断模式 **14 个阻塞**、`release_ready=false`，严格 `-RequireComplete` 已验证 fail-closed。对应原生源码/许可资料仍未补全，**不是只剩下设备手测，不可对外分发**。详见 [NV18 许可审计](../developer/nv18-source-license-audit-2026-10-11.md)。
+  - **NV18-3 高强度内存解包对照**：NSIS 内 helper 完整 SHA-256 与清单一致；desktop 因 Tauri `__TAURI_BUNDLE_TYPE_VAR_UNK`→`NSS`，仅限 3 字节差异且在内存模拟该修补后 SHA-256 与解包内容一致；其余字节必须完全一致。已从封包暂存源码独立 offline release 重编译 helper（源码可编译，**二进制 SHA 不同**）。Cargo metadata **147 crates 全有 SPDX license 字段**，但 native sherpa/espeak-ng 完整源码与许可文本、干净系统安装仍未通过；详见 [审计](../developer/voice-helper-license-audit.md)。
+  - **NV18-3 原生许可审查新增自动门禁（2026-10-11）**：`sherpa-onnx-sys 1.13.8` 实际链接 13 个 native 静态库，使用的预编译 archive **123,206,268 字节**、SHA-256 `56ffcf3c454c1f14f7bc9887286cc8143e7e542dc632804e1c447d5f8d534eaf`；解包后共 14 个 `.lib`、许可证文本 **0**，现有初版 THIRD_PARTY_NOTICES 未逐项涵盖 12 个静态链接组件。新增只读 `scripts/voice-helper/audit-native-licenses.ps1`，诊断模式 **14 个阻塞**、`release_ready=false`，严格 `-RequireComplete` 已验证 fail-closed。对应原生源码/许可资料仍未补全，**不是只剩下设备手测，不可对外分发**。详见 [NV18 许可审计](../developer/voice-helper-license-audit.md)。
 
-- [~] **NV19 长期记忆与智能上下文**（[详细方案](moss-native-voice-implementation.md#nv19)；已确认纳入后续计划，NV19-01～08 软件已完成，真实验收待 HW-17 与 FINAL；先处理原 NV13/15/16/17/18 安全与交付阻塞，不更改旧进度）：
+- [x] **NV19 长期记忆与智能上下文**（[详细方案](moss-native-voice-implementation.md#nv19)；已确认纳入后续计划，NV19-01～08 软件已完成，真实验收待 HW-17 与 FINAL；先处理原 NV13/15/16/17/18 安全与交付阻塞，不更改旧进度）：
   - [x] **NV19-01 结构化记忆模型**（2026-10-14：`crates/moss-voice-server/src/context.rs`，纯数据契约、未接存储与界面；契约见实施细则 i5 §11“NV19-01 已定契约”；`cargo test -p moss-voice-server --lib nv19_` 12 通过）：定义五类记忆、可信 scope、来源/版本/候选确认状态。验收：设备/个人/项目边界矩阵和来源契约单测通过。
   - [x] **NV19-02 SQLite 存储与 CRUD**（2026-10-14：schema v10 `laser-runtime/src/context_store.rs`、受信服务 `moss-voice-server/src/context/service.rs`；桌面 `ContextStore` 实现与 Tauri 命令随 NV19-08 接入；验证见 §9）：从实际下一 schema 迁移，独立条目/索引/CAS/删除/备份；旧 NV10 数据保持可用。验收：迁移、回滚、重复执行、冲突、旧任务不得复活删除记录。
   - [x] **NV19-03 异步候选提取**（2026-10-14：`moss-voice-server/src/context/extract.rs` 默认关闭；实现时选定（非用户决定）：模型只能新增候选，清单只存 id 与原因码；会话调用与开关界面随 NV19-08 接入；验证见 §9）：用户明确开启后仅从已提交的有界文字提取；不保存原音频/完整对话/凭据/审批/工具正文。每次提取写变更清单并可整批撤销；设备/材料/校准不提取进记忆。验收：假 LLM、并发/撤销/清空负测，候选经验不冒充已验证，撤销后记录与清单一致。
@@ -519,16 +408,10 @@
   - [x] **NV19 修订 n56 / n57**（2026-11-06，软件完成；真实模型、资料目录与 GUI 验收并入 HW-17）：知识库大目录召回、记忆与资料分别限时、提取去重；schema v17 记忆取代链（用户确认后作废旧条）、复现计数与任务上下文时间衰减、三槽位常驻画像、NV19 开启时 NV10 设备摘要不再注入 / 生成、资料段落级无正文索引（已登记目录需重建一次）。`cargo test --workspace` 947 通过 / 9 忽略；Windows 快更与三端 release 未在本轮执行。
   - **不预先排期的可选增强**：OpenViking 独立 HTTP 服务（需 Python 3.10+/uv，Windows 走 Docker，需 embedding 与视觉语言模型；打进安装包即触发 AGPLv3 分发义务）、向量搜索及 Skills 智能发现；先比较成本/性能/许可证并另获安装部署许可。
 
-**语音体验 · 可选项**（2026-10-08 列入，**尚未决定是否实施**，不排期；设计方向见内置语音技术书 §8.2，用户决定后再细化并排期）
+**语音体验 · 可选项**（2026-10-08 列入；设计方向见内置语音技术书 §8.2。2026-11-15 用户决定 VO-2、VO-3 不做）
 
-- [ ] **VO-1 语义判停**（可选，未决定）：除静音长度外，按句尾语气词、数字或单位未说完等规则延长等待，必要时加轮次判断小模型（中文支持需核实）。
-- [ ] **VO-2 端到端语音模型**（可选，未决定）：豆包实时语音大模型、OpenAI Realtime 等作为可选提供方，用于闲聊；工具调用仍走语音身份与审批，停止快速通道需本地并行识别或关键词检测。
-- [ ] **VO-3 严格模式关闭时的本地口头确认**（可选，未决定）：待执行的运动 / 出光调用须由下一句在本地匹配到确认词且参数与复述一致才放行；可结合声纹（NV16）限定确认人。
+- [x] **VO-1 语义判停**（2026-11-15 核对：n86 抢跑与动态判停、n93 SmartTurn v3 尾音判停已实现）：除静音长度外，按句尾语气词、数字或单位未说完等规则延长等待，必要时加轮次判断小模型（中文支持需核实）。
 
-**P5 可选扩展**（[六项技术细则 s1](moss-self-hosted-extension-implementation.md#p5)；P0-09 尚未确定时不排期，先核对与 NV9/NV13 的功能重叠）
-
-- [ ] **P5-01** xiaozhi-client 聚合层：先锁定版本/传输/工具开关和命名规则、查与 NV9 是否重复；若采用则只提供工具，不增加第二个音频编排者，R3/R4 规则不变。检查：假 MCP 重名、撤销、重复调用、断线不重放。
-- [ ] **P5-02** 海门 Agent：先确认真实对外工具接口和权限，禁止监听设备音频、继承 MOSS 凭据或直接控制激光。检查：只读/命令/MCP 负向测试；真实联调另获授权。
 
 ---
 
@@ -552,8 +435,8 @@
 | 2026-10-05 | 技术书 r1→r3 | 完成（文档-only） | 未写代码、未运行测试与构建；下一步 S1-01（待用户确认）与 P0-01 |
 | 2026-10-05 | 技术书 r4：语音中心 | 完成（文档-only） | 新增 §9.4、D12，P4 改为语音中心 11 步；P0-07 增加启动命令/配置文件/状态接口确认 |
 | 2026-10-05 | 上游源码阅读 → 技术书 r5 | 完成（文档-only） | 读 xiaozhi-esp32-server `87c6df7`：正式链路改为 MCP 接入点（无需插件/网关），网关+插件降为可选 P2b；三模型字段映射写入 §9.4.4；P0-05 部分完成、P0-07 完成 |
-| 2026-10-05 | 技术书 r6：桌面端前端改造 | 完成（文档-only） | 新增 §9.5（语音中心页、全局审批卡、顶栏真实状态 S2、桌面会话头、视觉提亮 UI-1）；清单新增 S2、UI-1，细化 P1-07、P1-09、P4-08；原型 frontend/ui-preview-voice-center.html |
-| 2026-10-05 | 技术书 r7：前端整体改版 UI-2 | 完成（文档-only） | UI-1 视觉提亮升级为 UI-2；原型 frontend/ui-preview-forge-v2.html 改为曜石设计 + 流浪地球太空舱背景；**设计为草案，下次会话先按用户意见继续修改原型（UI-01）** |
+| 2026-10-05 | 技术书 r6：桌面端前端改造 | 完成（文档-only） | 新增 §9.5（语音中心页、全局审批卡、顶栏真实状态 S2、桌面会话头、视觉提亮 UI-1）；清单新增 S2、UI-1，细化 P1-07、P1-09、P4-08；原型 frontend/prototypes/voice-center.html |
+| 2026-10-05 | 技术书 r7：前端整体改版 UI-2 | 完成（文档-only） | UI-1 视觉提亮升级为 UI-2；原型 frontend/prototypes/forge-v2.html 改为曜石设计 + 流浪地球太空舱背景；**设计为草案，下次会话先按用户意见继续修改原型（UI-01）** |
 | 2026-10-05 | 原型背景改为动画太空舱 | 完成（原型与文档） | 加行星发动机光柱、流星、视差、旋转光环；性能自动降级；技术书 §9.5.5 C 与 UI-03 已同步。设计仍为草案 |
 | 2026-10-05 | 原型背景提供四种动画 | 完成（原型与文档） | 新增木星引力弹弓（默认）、等离子流体（WebGL）、超空间跃迁，保留太空舱；原型顶部可切换；待用户选定 |
 | 2026-10-05 | 背景：木星换成流动星河 | 完成（原型与文档） | 用户否定木星；新增流动星河（银河星云带漂移旋转 + 上千星尘沿流场带拖尾流动 + 流星 + 550W 核心）并设为默认 |
@@ -657,15 +540,4 @@
 | 2026-10-15 | NV13 本机 Agent 与 NV17 固件 OTA 落地；实机验证手册 | 软件与自动检查通过；真实 CLI / 真实刷写 unverified | 按用户决定把两个写死关闭的功能改为用户开启：**Agent** 用户开启 + 只在严格模式 + 每次运行桌面批准，批准后后台运行、进程树受 Job Object 约束、可停止（`production_runner`、`agent_stopped` 等错误码）；**固件 OTA** 私密窗口导入 ESP32 应用固件 + 逐台确认推送 + 一次性令牌下载（`/xiaozhi/firmware/{token}.bin`）+ 设备上报新版本才算升级；schema v13。验证：`cargo test --workspace` 805 通过 / 7 忽略、前端 `npm test` 129 通过、6 个语音浏览器测试（语音中心含新 Agent 段）、`npm run build`、release `moss-host` 后 FakeGrbl E2E 32/32；`feedback.browser.mjs` 因本机缺 Playwright 内置 Chromium 未运行（既有环境限制）。未跑三端 release 构建（非阶段收尾）。新增 [实机验证顺序与操作手册](moss-hardware-acceptance-plan.md)（单电脑 → 单小智 → 单激光 → 电脑+小智 → 电脑+激光 → 三件套）与 §2a 的 HW-19 / HW-20；未操作真实 CLI 账号、真实设备、未刷写固件。 |
  | 2026-10-16 | HW-19 第一步：真实 CLI 经生产执行器、修运行器环境白名单 | 部分实测；真实改文件被 CLI/账号环境阻塞 | 按用户要求用本机 codex 实测：发现运行器环境白名单比计划少 `PATHEXT`/`ComSpec`/`HOMEDRIVE`/`HOMEPATH`，真实 CLI 一律 `agent_run_failed`，已收敛为 `CLI_ENV_KEYS` 单一常量并加回归测试 `runner_environment_whitelist_accepts_every_key_the_plan_sets`；新增 opt-in 手动探针 `manual_real_plan` / `manual_real_cli_roundtrip` / `manual_real_cli_stop`。实测 codex 跑通 31.4 秒任务、8 秒停止在 8.03 秒取消无残留。未过：本机 codex 缺 `codex-code-mode-host.exe`（工具执行失败）、Claude Code 组织禁用订阅 403、桌面审批卡与语音链路未操作。验证：`cargo test -p laser-host --lib voice_agent::` 通过。 |
 | 2026-11-14 | 新增 8 款本地模型与 `speech.cpp v0.10.1` TTS 运行时 | 软件与自动测试完成；真实权重/硬件 `unverified` | 按用户决定扩充 `local_models::CATALOG` 至 24 项（`qwen3_tts_0_6b`、`zipvoice_distill`［权重 CC-BY-NC-4.0 仅限非商用 / 代码 Apache-2.0］、`qwen3_asr_0_6b`、`firered_asr2_ctc`、`qwen3_5_2b`、`qwen3_5_4b`、`gtcrn_simple`、`smart_turn_v3`）并新增 `speech_cpp v0.10.1` 按需运行时；`moss-voice-local-proto` 升至协议 6，接入 GTCRN 本地识别前级降噪（`denoise` 默认 `false`，不动声纹模型）与 `SmartTurnModel` 并发语义判停（`turn` 默认 `false`，`is_stop`/`TurnGate` 绝不延后）；4B 视觉启动超时扩至 90 秒；桌面宿主与前端完成 6 类模型分组、音色映射、`speech_env` 就绪检查与 `ChainTestLocalGuard` 对接（技术书 n93；取代 n91“ZipVoice 未接入”与 n86“smart-turn 未做”）。未用真实权重或实机测试，实时率与听感仍待实机验收。 |
-
-## 10. 最终统一真实环境验收（其余软件开发完成后集中执行）
-
-**用户决定（2026-10-10）**：先完成 NV10～NV17、NV18 其余软件实现及 Rust/前端、假设备/假模型、E2E、Windows/Android release 和 NSIS 自动检查；真实小智设备、真人语音、激光机、需用户操作的 Windows VM 安装/升级/卸载全部移到最后统一测试。提前未测的仍标 `partial/unverified`，不当作 PASS；不阻塞可以独立完成的后续软件开发。实体设备和有风险的系统操作须用户在场分别授权，禁止用模拟器通过替代实机证据。
-
-**执行顺序（2026-10-15 用户要求）**：实机验证从“一台电脑”开始逐台加设备，最后才是三件套：**单电脑 → 单小智 → 单激光雕刻 → 电脑+小智 → 电脑+激光 → 电脑+小智+激光**。每档的目的、准备、操作步骤与判据见 [MOSS 实机验证顺序与操作手册](moss-hardware-acceptance-plan.md)；任一步失败就停在当前档，不往前推进。
-
-- [ ] **FINAL-01 干净 Windows 安装验收**：用户参与，在隔离 Windows VM 安装含 helper 专用 NSIS，确认启动、握手、helper 缺失和旧协议报错；验证安装路径、进程退出、升级/回退、SQLite 数据、卸载不误删用户数据；记录实际安装包 SHA-256、版本、日志。**专用包自动构建、解包/hash、第三方源代码/许可证完整核验仍应在开发阶段完成**，不拖到人工验收。
-- [ ] **FINAL-02 真实小智收音与播报**：用户参与，真实板子确认固件、麦克风收音、中文识别、扬声器播放、网络断开和恢复；记录设备版本、首包/完整耗时。此项不接激光机。
-- [ ] **FINAL-03 自然打断/语音停止体验**：用户参与，确认板端 AEC 已启用后测自然插话、取消旧播报、噪声干扰、同轮停止只执行一次及“停止之后怎么办”前缀误停边界；关联 HW-09、HW-10 与 NV8a-1。
-- [ ] **FINAL-04 激光机安全及急停**：用户参与，先建立物理隔离和可靠物理急停，确认安全条件及单独授权后再测真正设备；核对 `0x18` 高优先级急停、无任务/状态未知急停入口、权限撤销与断线；运动或出光须单独明确同意，不得由自动测试触发。
-- [ ] **FINAL-05 统一结项**：记录每个真实场景的时间、设备/安装版本、操作人、PASS/FAIL 及失败回归；仅在软件和交付自动检查、第三方许可、隔离安装、真实设备与安全验收都通过后才勾选对应 NV18/HW 完成，未验项保留 `partial/unverified`。
+| 2026-11-15 | 清空待办（用户决定） | 完成（文档-only） | 已完成项勾选（NV1～NV19 各子项、VO-1、P0-06/08 等）；外部自建链路 P0/P2a/P2b/P3 剩余项、VO-2/3、P5、全部实机验收（原 §2a HW 表与 §10 FINAL）、PKG-06/07、NV18-3/4 删除，理由见 §1。未改代码。 |

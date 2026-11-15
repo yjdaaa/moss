@@ -2722,7 +2722,6 @@ dependencies = [
 name = "laser-host"
 version = "0.3.7"
 dependencies = [
- "getrandom 0.3.4",
  "laser-api",
  "laser-contracts",
  "laser-core",
@@ -2730,18 +2729,13 @@ dependencies = [
  "laser-mcp",
  "laser-runtime",
  "laser-tools",
- "libc",
  "moss-mcp-client",
  "moss-voice",
- "rcgen",
- "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3120,11 +3114,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "moss-agent"
+version = "0.3.7"
+dependencies = [
+ "getrandom 0.3.4",
+ "laser-api",
+ "laser-contracts",
+ "laser-runtime",
+ "libc",
+ "moss-voice",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "moss-desktop"
 version = "0.3.7"
 dependencies = [
  "base64 0.22.1",
- "espflash",
  "flate2",
  "getrandom 0.3.4",
  "image",
@@ -3133,8 +3147,10 @@ dependencies = [
  "laser-contracts",
  "laser-host",
  "laser-runtime",
- "md-5",
  "minisign-verify",
+ "moss-agent",
+ "moss-home",
+ "moss-usb-provision",
  "moss-voice",
  "moss-voice-providers",
  "moss-voice-server",
@@ -3143,7 +3159,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "serialport",
  "tar",
  "tauri",
  "tauri-build",
@@ -3151,6 +3166,25 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "moss-home"
+version = "0.3.7"
+dependencies = [
+ "getrandom 0.3.4",
+ "laser-api",
+ "laser-contracts",
+ "laser-host",
+ "laser-runtime",
+ "moss-voice",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
@@ -3175,6 +3209,23 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "moss-usb-provision"
+version = "0.3.7"
+dependencies = [
+ "espflash",
+ "getrandom 0.3.4",
+ "laser-runtime",
+ "md-5",
+ "moss-voice",
+ "moss-voice-providers",
+ "moss-xiaozhi-proto",
+ "serde",
+ "serde_json",
+ "serialport",
+ "tempfile",
 ]
 
 [[package]]
@@ -3238,6 +3289,7 @@ dependencies = [
  "laser-runtime",
  "lunar_rust",
  "mdns-sd",
+ "moss-voice",
  "moss-voice-local-proto",
  "moss-voice-providers",
  "moss-xiaozhi-proto",

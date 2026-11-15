@@ -135,6 +135,10 @@ fn default_asr_model() -> String {
 fn default_tts_model() -> String {
     "kokoro".into()
 }
+fn default_kws_model() -> String {
+    "kws_zipformer_zh".into()
+}
+
 fn default_denoise_model() -> String {
     "gtcrn_simple".into()
 }
@@ -514,6 +518,12 @@ pub const BUILTIN_ASR_CORRECTIONS: &[(&str, &str)] = &[
     ("牛皮指", "牛皮纸"),
     ("胶合版", "胶合板"),
     ("走边筐", "走边框"),
+    // 2026-11-15 整链实测里 SenseVoice / FireRed 的高频错字；“公寓”是正常词，只在后接“调到”时纠正；
+    // 不收“工率”（会把“开工率”“加工率”改错）
+    ("公率", "功率"),
+    ("攻率", "功率"),
+    ("公寓调到", "功率调到"),
+    ("激光鸡", "激光机"),
 ];
 
 const PROTECTED_STOP_WORDS: &[&str] = &[
@@ -530,6 +540,7 @@ const PROTECTED_STOP_WORDS: &[&str] = &[
     "再见",
     "拜拜",
     "退下",
+    "退一下",
     "关闭对话",
     "确认",
     "开始",
@@ -741,6 +752,10 @@ pub struct BuiltinLocal {
     pub screen_pack_auto_keep: bool,
     #[serde(default = "default_on")]
     pub job_done_announce: bool,
+    /// 旁人说话不接话（2026-11-15 n100 / n101，默认开）：自动 / 实时拾音时允许大模型判断“这句不是对小智说的”
+    /// 而不回应（说话中被插话时让暂停的回答接着说）；关掉则每句都回应
+    #[serde(default = "default_on")]
+    pub ignore_bystanders: bool,
     /// n81 保存语音对话记录（说了什么、调了什么工具、回了什么，落盘到本机 `voice_chat_logs` 最多 500 条；2026-11-12 用户决定默认开）
     #[serde(default = "default_on")]
     pub chat_log_enabled: bool,
@@ -786,6 +801,11 @@ pub struct BuiltinLocal {
     pub denoise: bool,
     #[serde(default = "default_denoise_model")]
     pub denoise_model: String,
+    /// 命令词抗噪（n101，默认关）：随本地判停检测停止 / 退出命令词，识别把短命令听错时按命令执行
+    #[serde(default)]
+    pub kws: bool,
+    #[serde(default = "default_kws_model")]
+    pub kws_model: String,
     /// 尾音语义判停开关（Smart Turn v3.2，默认关闭，开启后在声学静音后辅助判断是否说完，n87）
     #[serde(default)]
     pub turn: bool,
@@ -819,6 +839,7 @@ impl Default for BuiltinLocal {
             screen_card_style: default_screen_card_style(),
             screen_pack_auto_keep: false,
             job_done_announce: true,
+            ignore_bystanders: true,
             chat_log_enabled: true,
             llm_fast_reply: true,
             jev_filter_enabled: false,
@@ -835,6 +856,8 @@ impl Default for BuiltinLocal {
             tts_model: default_tts_model(),
             denoise: false,
             denoise_model: default_denoise_model(),
+            kws: false,
+            kws_model: default_kws_model(),
             turn: false,
             turn_model: default_turn_model(),
             tts_speaker: default_speaker(),
@@ -846,7 +869,7 @@ impl Default for BuiltinLocal {
 
 impl BuiltinLocal {
     pub fn any(&self) -> bool {
-        self.asr || self.tts || self.vad || self.denoise || self.turn
+        self.asr || self.tts || self.vad || self.denoise || self.turn || self.kws
     }
 
     pub fn is_default(&self) -> bool {
@@ -860,6 +883,7 @@ impl BuiltinLocal {
             ModelKind::Asr => (self.asr, self.asr_model.as_str()),
             ModelKind::Tts => (self.tts, self.tts_model.as_str()),
             ModelKind::Denoise => (self.denoise, self.denoise_model.as_str()),
+            ModelKind::Kws => (self.kws, self.kws_model.as_str()),
             ModelKind::Turn => (self.turn, self.turn_model.as_str()),
             ModelKind::Jev => {
                 let canonical = canonical_local_jev_model(&self.jev_model);
@@ -2790,6 +2814,27 @@ mod tests {
             "东北椴木"
         );
         assert!(merged.iter().any(|(w, r)| w == "亚克立" && r == "亚克力"));
+        // 整链实测补充的纠错：“公寓”本身是正常词，只纠“公寓调到”；“切口”是激光行业词，不纠
+        assert!(merged.iter().any(|(w, r)| w == "公率" && r == "功率"));
+        assert!(merged.iter().any(|(w, _)| w == "公寓调到"));
+        assert!(
+            !merged
+                .iter()
+                .any(|(w, _)| w == "公寓" || w.contains("切口"))
+        );
+        // 纠错不能改坏正常词（审查修正：“工率”规则会把“开工率”“加工率”改错，已去掉）
+        for normal in ["开工率", "加工率", "公寓楼", "切口很齐"] {
+            assert!(
+                !merged.iter().any(|(w, _)| normal.contains(w.as_str())),
+                "{normal}"
+            );
+        }
+        // 按错词长度降序：长规则先于短规则生效
+        assert!(
+            merged
+                .windows(2)
+                .all(|pair| pair[0].0.chars().count() >= pair[1].0.chars().count())
+        );
 
         assert_eq!(
             validate_talk_mode("press_to_talk").unwrap(),

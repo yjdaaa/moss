@@ -1,5 +1,5 @@
 use super::*;
-use laser_host::voice_agent::Provider;
+use moss_agent::Provider;
 use moss_voice::models::ProviderKind;
 use moss_voice::settings::{BuiltinAgents, BuiltinModels, BuiltinMusic, BuiltinProvider};
 

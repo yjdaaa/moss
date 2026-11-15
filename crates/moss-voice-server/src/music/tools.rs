@@ -20,6 +20,10 @@ impl MusicTools {
     }
 }
 impl ToolExecutor for MusicTools {
+    fn trusted_read_only(&self, name: &str) -> bool {
+        name != PLAY && self.underlying.trusted_read_only(name)
+    }
+
     fn tools(&self) -> Vec<ToolSpec> {
         let mut list = self.underlying.tools();
         list.retain(|tool| tool.name != PLAY);
