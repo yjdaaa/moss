@@ -1,0 +1,309 @@
+/* ============================================================
+   MOSS 前端样式 · 曜石 Obsidian（技术书 §9.5.5，UI-2）
+   顶部为设计令牌；旧变量名映射到新令牌，供组件内联样式过渡使用。
+   ============================================================ */
+
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/fonts/GeistMono-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  /* ===== 曜石 Obsidian 令牌（技术书 §9.5.5 C，UI-2 定稿 2026-10-06） ===== */
+  --ob-bg: #09090b;
+  --ob-panel: rgba(12, 12, 18, 0.42);
+  --ob-panel-2: rgba(20, 20, 28, 0.36);
+  --ob-raise: rgba(255, 255, 255, 0.045);
+  --ob-raise-2: rgba(255, 255, 255, 0.075);
+  --ob-well: rgba(8, 8, 14, 0.36);
+  --ob-line: rgba(255, 255, 255, 0.08);
+  --ob-line-2: rgba(255, 255, 255, 0.14);
+  --ob-line-3: rgba(255, 255, 255, 0.22);
+  --ob-ink: #fafafa;
+  --ob-ink-2: #b4b4bd;
+  --ob-ink-3: #7a7a85;
+  --ob-accent: #8b7bff;
+  --ob-accent-2: #b7acff;
+  --ob-accent-bg: rgba(139, 123, 255, 0.14);
+  --ob-grad: linear-gradient(135deg, #a78bfa 0%, #7c6cff 45%, #5b8cff 100%);
+  --ob-red: #ff3b5c;
+  --ob-red-2: #ff7a90;
+  --ob-red-bg: rgba(255, 59, 92, 0.12);
+  --ob-green: #34d399;
+  --ob-green-2: #6ee7b7;
+  --ob-green-bg: rgba(52, 211, 153, 0.12);
+  --ob-amber: #fbbf24;
+  --ob-amber-bg: rgba(251, 191, 36, 0.12);
+  --ob-amber-bd: rgba(251, 191, 36, 0.45);
+  --ob-radius: 16px;
+  --ob-side-w: 224px;
+  --ob-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 字体随包自托管；中文字符由系统字体回退，不依赖外网。 */
+  --ob-font: "Geist", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --ob-font-display: "Geist", "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --ob-mono: "Geist Mono", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+
+  /* ===== 旧变量名映射到新令牌（组件内联样式仍在引用，逐步迁移为类名） ===== */
+  --bg-0: var(--ob-bg);
+  --bg-1: #0e0e12;
+  --bg-2: #141418;
+  --panel: var(--ob-panel);
+  --panel-strong: rgba(24, 24, 27, 0.94);
+  --panel-border: var(--ob-line-2);
+  --panel-glow: rgba(139, 123, 255, 0.14);
+  --ink: var(--ob-ink);
+  --ink-dim: var(--ob-ink-2);
+  --ink-faint: var(--ob-ink-3);
+  --laser: var(--ob-accent);
+  --laser-2: var(--ob-accent-2);
+  --laser-glow: rgba(139, 123, 255, 0.6);
+  --laser-cyan: var(--ob-accent);
+  --accent-cyan: var(--ob-accent);
+  --laser-green: var(--ob-green);
+  --laser-red: var(--ob-red);
+  --moss-red: var(--ob-red);
+  --moss-red-glow: rgba(255, 59, 92, 0.6);
+  --magenta: #c084fc;
+  --gold: var(--ob-amber);
+  --gold-glow: rgba(251, 191, 36, 0.45);
+  --green: var(--ob-green);
+  --green-glow: rgba(52, 211, 153, 0.45);
+  --danger: var(--ob-red);
+  --danger-glow: rgba(255, 59, 92, 0.6);
+  --red: var(--ob-red);
+  --text-muted: var(--ob-ink-3);
+  --line: var(--ob-line-2);
+  --line-bright: var(--ob-line-3);
+  --font-mono: var(--ob-mono);
+  --font-display: var(--ob-font);
+  --ease-out: var(--ob-ease);
+  --ease-snap: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* 吸顶顶栏（.ob-top）动态写入 --ob-top-h；根滚动口预留顶部安全间距，防止焦点跳转与自动滚入视口时按钮被顶栏盖住 */
+html {
+  scroll-padding-top: calc(var(--ob-top-h, 64px) + 12px);
+}
+html:has(.ob-top--compact) {
+  scroll-padding-top: 56px;
+}
+
+body {
+  background: var(--bg-0);
+  color: var(--ink);
+  font-family: var(--ob-font);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(139, 123, 255, 0.38);
+  color: #ffffff;
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 123, 255, 0.45);
+  background-clip: padding-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ob-accent-2);
+  outline-offset: 2px;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--laser);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+a:hover {
+  color: var(--laser-2);
+}
+
+/* ============================================================
+   MOSS 等离子流体背景 (CyberBackground)
+   技术书 §9.5.5 C：WebGL 等离子流体 + 星点 + 暗角 + 细噪点（固定空间锚点，无鼠标偏移）；纯装饰，不拦截交互
+   ============================================================ */
+.cyber-background-container {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  contain: strict;
+  /* WebGL 不可用或首帧前的静态底色，与等离子主色一致 */
+  background:
+    radial-gradient(900px 600px at 70% 25%, rgba(124, 108, 255, 0.28), transparent 65%),
+    radial-gradient(800px 560px at 25% 75%, rgba(255, 59, 92, 0.16), transparent 62%),
+    radial-gradient(700px 500px at 85% 85%, rgba(59, 115, 255, 0.16), transparent 60%),
+    #06050d;
+}
+
+.plasma-bg__fluid,
+.plasma-bg__stars {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* 着色器以低分辨率渲染，由浏览器平滑放大 */
+.plasma-bg__fluid {
+  image-rendering: auto;
+  filter: saturate(1.15);
+}
+
+.plasma-bg--fallback .plasma-bg__fluid {
+  display: none;
+}
+
+/* 四周压暗，保证前景文字对比度 */
+.plasma-bg__vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 120% 90% at 50% 40%, transparent 45%, rgba(3, 3, 8, 0.55) 100%);
+}
+
+.cyber-noise-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ============================================================
+   全局容器与太空舱 HUD 结构
+   ============================================================ */
+.laser-app-root {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.main-content-viewport {
+  flex: 1;
+  position: relative;
+  z-index: 2;
+}
+
+/* 顶栏 Header */
+
+/* MOSS 经典单眼红光指示器 */
+.moss-eye-sensor {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffffff 10%, #ff3b5c 45%, #990c1e 80%, #2a0005 100%);
+  border: 1.5px solid rgba(255, 70, 90, 0.9);
+  box-shadow: 0 0 12px #ff3b5c, 0 0 22px rgba(255, 59, 92, 0.5), inset 0 0 4px rgba(255, 255, 255, 0.9);
+  animation: mossEyePulse 2.8s ease-in-out infinite;
+  display: inline-block;
+}
+
+@keyframes mossEyePulse {
+  0%, 100% {
+    box-shadow: 0 0 10px #ff3b5c, 0 0 18px rgba(255, 59, 92, 0.45);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 18px #ff3b5c, 0 0 32px rgba(255, 59, 92, 0.85);
+    transform: scale(1.12);
+  }
+}
+
+/* 卡片：半透明玻璃 + 光标聚光 + 渐变描边（曜石设计）。--mx/--my 由 spotlight.js 写入 */
+.hud-card {
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(180deg, var(--ob-panel-2), var(--ob-panel)) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid var(--ob-line) !important;
+  border-radius: var(--ob-radius);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 24px 52px -28px rgba(0, 0, 0, 0.65);
+  transition: border-color 0.3s var(--ob-ease);
+}
+.hud-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  z-index: -1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s var(--ob-ease);
+  background: radial-gradient(520px circle at var(--mx, 50%) var(--my, 0%), rgba(139, 123, 255, 0.10), transparent 42%);
+}
+.hud-card::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s var(--ob-ease);
+  background: radial-gradient(360px circle at var(--mx, 50%) var(--my, 0%), rgba(183, 172, 255, 0.55), transparent 45%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+.hud-card:hover::before,
+.hud-card:hover::after {
+  opacity: 1;
+}
+
+/* 旧 HUD 四角准星：曜石设计不使用，保留类名以免影响结构 */
+

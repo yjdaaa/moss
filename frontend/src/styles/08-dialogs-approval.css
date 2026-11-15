@@ -1,0 +1,356 @@
+/* ============================================================
+   UI-2 弹窗（UI-07）：偏好设置、配对、关闭窗口、材料编辑、确认发送、应用对话框
+   ============================================================ */
+.mat-modal-backdrop,
+.modal-backdrop,
+.app-dialog-backdrop {
+  background: rgba(4, 4, 10, 0.52) !important;
+  backdrop-filter: blur(14px) saturate(130%) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(130%) !important;
+}
+.app-dialog-backdrop {
+  z-index: 150;
+}
+.mat-modal,
+.send-confirm-dialog,
+.app-dialog {
+  border: 1px solid var(--ob-line-2) !important;
+  border-radius: 20px !important;
+  background: linear-gradient(180deg, rgba(22, 22, 32, 0.62), rgba(12, 12, 20, 0.54)) !important;
+  backdrop-filter: blur(24px) saturate(150%) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(150%) !important;
+  box-shadow: 0 36px 96px -20px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(255, 255, 255, 0.05) inset !important;
+}
+.mat-modal-head,
+.confirm-heading {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--ob-line);
+  background: transparent;
+}
+.mat-modal-head h3,
+.mat-modal-head h2,
+.confirm-heading h2 {
+  font-family: var(--ob-font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.mat-modal-body {
+  padding: 18px 22px;
+}
+.mat-modal-foot {
+  padding: 16px 22px;
+  border-top: 1px solid var(--ob-line);
+  background: transparent;
+}
+.mat-modal-close,
+.send-confirm-dialog .icon-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--ob-raise);
+  border: 1px solid var(--ob-line-2);
+  color: var(--ob-ink-2);
+}
+.mat-modal-close:hover {
+  color: #fff;
+}
+.send-ring .track {
+  stroke: rgba(255, 255, 255, 0.08);
+}
+.send-ring .arc {
+  stroke: var(--ob-accent);
+  filter: drop-shadow(0 0 8px rgba(139, 123, 255, 0.8));
+}
+
+/* ============================================================
+   可折叠卡片与设置分区（FoldHeader）：收起时只隐藏、不卸载内容
+   ============================================================ */
+.ob-fold-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.ob-card-h .ob-fold-title {
+  font-family: var(--ob-font-display);
+  font-size: 15.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ob-ink);
+}
+.ob-fold-h {
+  margin-bottom: 8px;
+}
+.ob-fold-h .ob-fold-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ob-ink);
+}
+.ob-fold-icon {
+  color: var(--ob-accent);
+  flex: none;
+}
+.ob-fold-spacer {
+  flex: 1;
+}
+.ob-fold-chevron {
+  flex: none;
+  color: var(--ob-ink-3);
+  transition: transform 0.25s var(--ob-ease), color 0.2s;
+}
+.ob-fold-toggle:hover .ob-fold-chevron {
+  color: #fff;
+}
+[data-open="false"] > .ob-fold-toggle .ob-fold-chevron {
+  transform: rotate(-90deg);
+}
+.ob-card:has(> .ob-card-h[data-open="false"]) > :not(.ob-card-h),
+.wb-card-body:has(> .ob-card-h[data-open="false"]) > :not(.ob-card-h),
+.wb-card-content:has(> .ob-card-h[data-open="false"]) > :not(.ob-card-h),
+.ob-fold:has(> .ob-fold-h[data-open="false"]) > :not(.ob-fold-h) {
+  display: none !important;
+}
+.wb-card-body:has(.ob-card-h[data-open="false"]),
+.ob-card[data-wb-collapsed="true"] > .wb-card-body {
+  overflow: hidden !important;
+}
+.ob-card[data-wb-collapsed="true"] {
+  overflow: hidden !important;
+}
+.ob-fold:has(> .ob-fold-h[data-open="false"]) {
+  padding-bottom: 10px !important;
+  margin-bottom: 10px !important;
+}
+.ob-fold:has(> .ob-fold-h[data-open="false"]) > .ob-fold-h {
+  margin-bottom: 0;
+}
+
+/* 偏好设置 → 导出 */
+.ob-export-path {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--ob-line);
+  border-radius: 11px;
+  background: var(--ob-well);
+  font-size: 12.5px;
+}
+.ob-export-label {
+  color: var(--ob-ink-3);
+  font-size: 11.5px;
+}
+.ob-export-path .mono {
+  font-family: var(--ob-mono);
+  color: var(--ob-ink);
+  overflow-wrap: anywhere;
+}
+.ob-export-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ob-amber);
+  font-size: 12px;
+}
+
+/* ============================================================
+   全局审批卡（技术书 §9.5.2，实施清单 P1-09）
+   ============================================================ */
+.approval-card {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+}
+.approval-card .mat-modal-body {
+  overflow-y: auto;
+  min-height: 0;
+}
+.approval-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 16px;
+}
+.approval-title svg {
+  color: var(--ob-red);
+}
+.approval-tag {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--ob-red-2);
+  background: var(--ob-red-bg);
+  border: 1px solid rgba(255, 59, 92, 0.35);
+  white-space: nowrap;
+}
+.approval-queue {
+  margin-bottom: 12px;
+  font-size: 12.5px;
+  color: var(--ob-amber);
+}
+.approval-grid {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+}
+@media (max-width: 560px) {
+  .approval-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .approval-preview {
+    width: min(160px, 100%);
+    justify-self: center;
+  }
+}
+.approval-preview {
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  border: 1px solid var(--ob-line-2);
+  background: #f2ebe0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: #5b4a36;
+  font-size: 12px;
+  text-align: center;
+  padding: 6px;
+}
+.approval-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.approval-kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+.approval-kv dt {
+  color: var(--ob-ink-3);
+  white-space: nowrap;
+}
+.approval-kv dd {
+  margin: 0;
+  color: var(--ob-ink);
+  overflow-wrap: anywhere;
+}
+.approval-kv .mono,
+.approval-timer .mono {
+  font-family: var(--ob-mono);
+}
+.approval-ruler {
+  display: block;
+  margin-top: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.approval-ruler i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--ob-amber), var(--ob-red));
+}
+.approval-summary {
+  margin: 14px 0 0;
+  font-size: 12.5px;
+  color: var(--ob-ink-2);
+}
+.approval-timer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--ob-ink-3);
+}
+.approval-timer .mono {
+  color: var(--ob-ink);
+  min-width: 40px;
+}
+.approval-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.approval-bar i {
+  display: block;
+  height: 100%;
+  background: var(--ob-accent);
+  transition: width 0.9s linear;
+}
+.approval-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--ob-amber-bd);
+  background: var(--ob-amber-bg);
+  font-size: 13px;
+  color: var(--ob-ink);
+  cursor: pointer;
+}
+.approval-check input {
+  margin-top: 2px;
+}
+.approval-error {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 59, 92, 0.4);
+  background: var(--ob-red-bg);
+  color: var(--ob-red-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.approval-pill {
+  position: relative;
+}
+.approval-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--ob-red);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
+  box-shadow: 0 0 12px rgba(255, 59, 92, 0.8);
+}
+.send-badge {
+  margin-left: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  vertical-align: middle;
+  color: var(--ob-accent-2);
+  background: var(--ob-accent-bg);
+  border: 1px solid rgba(139, 123, 255, 0.3);
+}
+.send-estop-note {
+  margin-top: 10px;
+  max-width: 360px;
+  text-align: center;
+  color: var(--ob-ink-3);
+}
+

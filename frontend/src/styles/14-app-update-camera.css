@@ -1,0 +1,400 @@
+/* 应用内更新进度与顶栏提示条（2026-11-07） */
+.app-update-banner {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-width: 0; max-width: 100%;
+  padding: 3px 4px 3px 12px; border-radius: 999px;
+  border: 1px solid rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.1);
+  font-size: 12px; color: var(--ob-ink); white-space: nowrap;
+}
+.app-update-banner-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.app-update-banner-text strong { color: var(--gold); font-weight: 600; }
+.app-update-banner-btn {
+  padding: 3px 10px; min-height: 24px; border-radius: 999px; border: 0;
+  background: var(--gold, #fbbf24); color: #1a1405; font: inherit; font-weight: 700; cursor: pointer;
+}
+.app-update-banner-dismiss {
+  width: 22px; height: 22px; border-radius: 50%; border: 0; background: transparent;
+  color: var(--ink-dim); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.app-update-banner-dismiss:hover { background: rgba(255, 255, 255, 0.08); color: var(--ob-ink); }
+.app-update-install { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.app-update-install .settings-btn { align-self: flex-start; }
+.app-update-progress { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-dim); }
+.app-update-progress[data-phase="error"] { color: var(--danger); }
+.app-update-bar { position: relative; height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.08); }
+.app-update-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--ob-grad); transition: width 0.3s ease; }
+.app-update-bar[data-indeterminate="true"] > span { width: 35%; animation: app-update-slide 1.2s ease-in-out infinite; }
+@keyframes app-update-slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+.spin { animation: app-update-spin 1s linear infinite; }
+@keyframes app-update-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .app-update-bar[data-indeterminate="true"] > span, .spin { animation: none; }
+}
+
+/* 桌面端左侧栏「摄像头」页（2026-11-07） */
+.camera-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 22px 32px;
+  max-width: 1440px;
+  margin: 0 auto;
+  width: 100%;
+}
+.camera-jump-voice {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  font-size: 12px;
+}
+.camera-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 18px;
+  border: 1px solid var(--ob-amber-bd);
+  border-radius: var(--ob-radius);
+  background: var(--ob-amber-bg);
+}
+.camera-banner--info {
+  border-color: rgba(139, 123, 255, 0.38);
+  background: var(--ob-accent-bg);
+}
+.camera-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--ob-ink);
+}
+.camera-grid {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.camera-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+.camera-sidebar .camera-device-list,
+.camera-sidebar .camera-empty-devices {
+  flex: 1;
+  align-content: start;
+}
+.camera-section-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ob-ink-2);
+}
+.camera-service-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--ob-line);
+}
+.camera-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.camera-empty-devices {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px dashed var(--ob-line-2);
+  background: var(--ob-well);
+}
+.camera-empty-devices p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ob-ink);
+}
+.camera-empty-devices small {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ob-ink-3);
+}
+.camera-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.camera-device-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 11px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--ob-line-2);
+  background: var(--ob-raise);
+  color: var(--ob-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.camera-device-item:hover {
+  border-color: var(--ob-line-3);
+  background: var(--ob-raise-2);
+}
+.camera-device-item.is-selected {
+  border-color: var(--ob-accent);
+  background: var(--ob-accent-bg);
+}
+.camera-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.camera-device-row strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.camera-device-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11.5px;
+  font-family: var(--ob-mono);
+  color: var(--ob-ink-3);
+}
+.camera-capture-btn,
+.camera-auto-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.camera-capture-btn {
+  min-width: 108px;
+}
+.camera-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.camera-toolbar-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.camera-toolbar-tools {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--ob-raise);
+  border: 1px solid var(--ob-line);
+}
+.camera-icon-btn {
+  width: 32px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ob-ink-2);
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.camera-icon-btn:hover:not(:disabled) {
+  background: var(--ob-raise-2);
+  color: var(--ob-ink);
+}
+.camera-icon-btn.is-on {
+  background: var(--ob-accent-bg);
+  border-color: rgba(139, 123, 255, 0.45);
+  color: var(--ob-ink);
+}
+.camera-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.camera-icon-btn:focus-visible {
+  outline: 2px solid var(--ob-accent);
+  outline-offset: 1px;
+}
+.camera-hint {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.camera-hint--warn {
+  background: var(--ob-amber-bg);
+  color: var(--ob-amber);
+}
+.camera-hint--info {
+  background: var(--ob-accent-bg);
+  color: var(--ob-accent-2);
+}
+.camera-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  /* 2026-11-07 用户反馈“布局还长了”：撤回按窗口撑满，恢复固定最小高度，一屏放得下不出滚动条 */
+  min-height: 560px;
+}
+.camera-meta-chip {
+  font-size: 11.5px;
+  font-family: var(--ob-mono);
+  color: var(--ob-ink-2);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(10, 10, 14, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+}
+.camera-overlay {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+.camera-overlay--top {
+  top: 12px;
+  justify-content: space-between;
+}
+.camera-overlay--bottom {
+  bottom: 12px;
+}
+.camera-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 59, 92, 0.38);
+  background: var(--ob-red-bg);
+  color: var(--ob-red-2);
+  font-size: 12.5px;
+}
+.camera-viewport {
+  position: relative;
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 440px;
+  border-radius: 14px;
+  border: 1px solid var(--ob-line-2);
+  background: radial-gradient(circle at 50% 35%, rgba(139, 123, 255, 0.07), rgba(9, 9, 11, 0.96) 72%);
+  overflow: hidden;
+  padding: 48px 12px;
+}
+.camera-frame-img {
+  max-width: 100%;
+  max-height: 68vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  transition: transform 0.18s var(--ob-ease);
+}
+/* 换帧淡入（2026-11-09）：新旧两张叠在同一格，新图淡入后旧图移除 */
+.camera-frame-stack {
+  display: grid;
+  place-items: center;
+  max-width: 100%;
+}
+.camera-frame-stack > .camera-frame-img {
+  grid-area: 1 / 1;
+}
+.camera-frame-img.is-entering {
+  animation: cameraFrameIn 0.18s ease-out;
+}
+@keyframes cameraFrameIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .camera-frame-img.is-entering { animation: none; }
+}
+.camera-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+  text-align: center;
+  padding: 28px 18px;
+  color: var(--ob-ink-3);
+}
+.camera-placeholder strong {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ob-ink);
+}
+.camera-placeholder span {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ob-ink-3);
+}
+.camera-voice-qa {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--ob-line-2);
+  background: var(--ob-raise);
+}
+.camera-qa-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.camera-qa-label {
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ob-accent-2);
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--ob-accent-bg);
+}
+.camera-qa-row p {
+  margin: 0;
+  color: var(--ob-ink);
+  line-height: 1.5;
+}
+@media (max-width: 980px) {
+  .camera-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .camera-viewport {
+    min-height: 300px;
+  }
+}
+

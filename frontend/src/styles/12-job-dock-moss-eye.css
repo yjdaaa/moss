@@ -1,0 +1,431 @@
+/* 激光任务进度浮层（2026-11-02 用户决定）：App 级固定在右下角，任何页面都能看见雕刻进度；
+   可收成小胶囊；不遮挡顶栏急停。 */
+.job-dock {
+  position: fixed; right: 16px; bottom: 16px; z-index: 60;
+  width: min(360px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--ob-line-2);
+  background: rgba(14, 14, 22, 0.56);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.72), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+  font-size: 12px; color: inherit;
+}
+.job-dock-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.job-dock-title { font-weight: 700; font-size: 12.5px; }
+.job-dock-icon { display: inline-flex; align-items: center; padding: 2px; border: 0; border-radius: 6px; background: none; color: var(--ob-ink-3); cursor: pointer; }
+.job-dock-item { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--ob-line); }
+.job-dock-item-h { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.job-dock-percent { font-size: 18px; font-weight: 800; }
+.job-dock-phase { color: var(--ob-ink-3); }
+.job-dock-bar { height: 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.job-dock-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #35d0a5, #4d9bff); transition: width 0.4s ease; }
+.job-dock-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--ob-ink-3); }
+.job-dock-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.job-dock-actions .btn { display: inline-flex; align-items: center; gap: 5px; }
+.job-dock-warn { margin: 0; color: #ffb038; }
+.job-dock-note { margin: 0; color: var(--ob-ink-3); }
+.job-dock--pill { flex-direction: row; align-items: center; gap: 4px; width: auto; padding: 4px 6px; border-radius: 999px; }
+.job-dock-pill-main { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 0; background: none; color: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.job-dock-pill-dot { width: 8px; height: 8px; border-radius: 999px; background: #35d0a5; box-shadow: 0 0 0 4px rgba(53, 208, 165, 0.18); }
+.job-dock-pill-estop { display: inline-flex; align-items: center; padding: 4px 8px; border: 1px solid rgba(255, 140, 160, 0.45); border-radius: 999px; background: rgba(214, 18, 58, 0.18); color: #ff7d92; cursor: pointer; }
+.job-dock-pill-estop:disabled { opacity: 0.5; cursor: not-allowed; }
+@media (max-width: 720px) { .job-dock { right: 8px; bottom: 8px; width: calc(100vw - 16px); } }
+
+/* ============================================================
+   MOSS 全息语音孪生舱与全局机械眼多态联动（2026-11-03）
+   ============================================================ */
+/* 统一 MossEye 像素点阵（2026-11-06 用户在候选页选定方案 5）：导航眼（sm）与孪生舱（lg）同一组件。
+   外圈 + 7×7 LED 点阵，每个状态一段逐帧小图标（待命笑脸眨眼 / 聆听麦克风 / 思考转圈 / 播报声波柱 /
+   雕刻激光十字 / 警戒闪烁“!”），离线沿用“闭眼睡觉 + z”。导航眼外圈颜色表示激光机硬件状态。 */
+.ob-eye.moss-eye-sensor {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  animation: none;
+  transition: transform 0.25s var(--ob-ease);
+}
+.ob-logo:hover .ob-eye.moss-eye-sensor { transform: scale(1.08) rotate(-6deg); }
+.ob-eye-svg {
+  width: 40px;
+  height: 40px;
+  display: block;
+}
+.moss-eye { overflow: visible; }
+.moss-eye-halo {
+  transform-origin: 50px 50px;
+  opacity: calc(0.45 + var(--eye-level, 0) * 0.55);
+  transform: scale(calc(0.92 + var(--eye-level, 0) * 0.12));
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.moss-eye-hw {
+  stroke: transparent;
+  transform-origin: 50px 50px;
+  transition: stroke 0.3s ease;
+}
+.moss-eye-hw--online .moss-eye-hw { stroke: #34d399; }
+.moss-eye-hw--engraving .moss-eye-hw { stroke: #34d399; stroke-dasharray: 14 8; animation: moss-eye-spin 1.6s linear infinite; }
+.moss-eye-hw--fault .moss-eye-hw { stroke: #fbbf24; stroke-dasharray: 6 6; }
+.moss-eye-socket {
+  fill: #121218;
+  stroke: var(--eye-accent);
+  transition: stroke 0.3s ease;
+}
+.moss-eye-px { transform-origin: 50px 50px; }
+.moss-eye-px-off { fill: #1f1f26; }
+.moss-eye-px-on { fill: var(--eye-accent); }
+.moss-eye-px-tail { fill: var(--eye-accent); opacity: 0.45; }
+.moss-eye-px-base { fill: var(--eye-accent); opacity: 0.18; }
+/* 亮点层随指针轻微偏移（不足半个点距，点阵不会错位） */
+.moss-eye-px-lit {
+  transform: translate(calc(var(--eye-gaze-x, 0) * 1.5px), calc(var(--eye-gaze-y, 0) * 1.5px));
+  transition: transform 0.25s var(--ob-ease);
+}
+/* 逐帧：第 k 帧只在第 k 段可见，帧数决定关键帧（周期与相位由组件内联变量给出） */
+.moss-eye-px-frame {
+  animation-duration: var(--px-t, 1s);
+  animation-delay: var(--px-d, 0s);
+  animation-timing-function: step-end;
+  animation-iteration-count: infinite;
+}
+.moss-eye-pf--2 { animation-name: moss-eye-pf2; }
+.moss-eye-pf--3 { animation-name: moss-eye-pf3; }
+.moss-eye-pf--6 { animation-name: moss-eye-pf6; }
+.moss-eye-pf--8 { animation-name: moss-eye-pf8; }
+.moss-eye-sleep path { stroke: #cbd5e1; }
+.moss-eye-z { font: 700 18px var(--ob-font); fill: #cbd5e1; animation: moss-eye-snooze 2.8s ease-in-out infinite; }
+
+.moss-eye--offline .moss-eye-halo { opacity: 0.25; }
+.moss-eye--idle .moss-eye-halo { animation: moss-eye-breathe 3.2s ease-in-out infinite; }
+.moss-eye--listening .moss-eye-halo { animation: moss-eye-breathe 1.4s ease-in-out infinite; }
+.moss-eye--speaking .moss-eye-halo { animation: moss-eye-breathe 0.8s ease-in-out infinite; }
+.moss-eye--alert .moss-eye-px { animation: moss-eye-wobble 0.5s ease-in-out infinite; }
+
+@keyframes moss-eye-spin { to { transform: rotate(360deg); } }
+@keyframes moss-eye-breathe {
+  0%, 100% { opacity: 0.42; transform: scale(0.92); }
+  50% { opacity: 0.9; transform: scale(1); }
+}
+@keyframes moss-eye-wobble {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-6deg); }
+  75% { transform: rotate(6deg); }
+}
+@keyframes moss-eye-snooze {
+  0% { opacity: 0; transform: translate(0, 4px); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: translate(7px, -9px); }
+}
+@keyframes moss-eye-pf2 { 0% { opacity: 1; } 50% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes moss-eye-pf3 { 0% { opacity: 1; } 33.333% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes moss-eye-pf6 { 0% { opacity: 1; } 16.667% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes moss-eye-pf8 { 0% { opacity: 1; } 12.5% { opacity: 0; } 100% { opacity: 0; } }
+
+.moss-twin {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(240px circle at 84px 50%, rgba(255, 59, 92, 0.12), transparent 72%),
+    linear-gradient(180deg, rgba(20, 20, 28, 0.36), rgba(12, 12, 18, 0.28));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 0.25s ease, background 0.3s ease, box-shadow 0.25s ease;
+}
+.moss-twin--listening {
+  border-color: rgba(56, 189, 248, 0.38);
+  background:
+    radial-gradient(260px circle at 84px 50%, rgba(56, 189, 248, 0.18), transparent 72%),
+    linear-gradient(180deg, rgba(14, 24, 36, 0.9), rgba(11, 14, 22, 0.95));
+}
+.moss-twin--speaking {
+  border-color: rgba(255, 59, 92, 0.46);
+  background:
+    radial-gradient(280px circle at 84px 50%, rgba(255, 59, 92, 0.22), transparent 74%),
+    linear-gradient(180deg, rgba(28, 16, 22, 0.9), rgba(14, 11, 15, 0.95));
+}
+.moss-twin--thinking,
+.moss-twin--pulse {
+  border-color: rgba(167, 139, 250, 0.42);
+  background:
+    radial-gradient(260px circle at 84px 50%, rgba(168, 85, 247, 0.18), transparent 72%),
+    linear-gradient(180deg, rgba(22, 16, 34, 0.9), rgba(12, 11, 18, 0.95));
+}
+.moss-twin--alert {
+  border-color: rgba(245, 158, 11, 0.52);
+  background:
+    radial-gradient(260px circle at 84px 50%, rgba(245, 158, 11, 0.2), transparent 72%),
+    linear-gradient(180deg, rgba(30, 20, 14, 0.9), rgba(15, 11, 10, 0.95));
+}
+
+.moss-twin-ocular {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.moss-twin-lens-wrap {
+  width: 112px;
+  height: 112px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.25s var(--ob-ease);
+}
+.moss-twin-lens-wrap:hover { transform: scale(1.04) rotate(-3deg); }
+.moss-twin-svg {
+  width: 112px;
+  height: 112px;
+}
+/* 戳一下：果冻回弹 */
+.moss-twin--focus-pulse .moss-twin-svg { animation: mossTwinBoop 0.5s var(--ob-ease); }
+@keyframes mossTwinBoop {
+  0% { transform: scale(1); }
+  35% { transform: scale(0.86, 1.1); }
+  70% { transform: scale(1.08, 0.94); }
+  100% { transform: scale(1); }
+}
+
+.moss-twin-wave {
+  width: 136px;
+  height: 22px;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  align-items: end;
+  gap: 3px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.moss-twin-bar {
+  display: block;
+  width: 100%;
+  height: var(--bar-h, 12%);
+  min-height: 2px;
+  border-radius: 999px;
+  transform-origin: bottom center;
+  background: linear-gradient(180deg, #ff758f, #ff3b5c);
+  animation: mossTwinBarIdle 2.4s ease-in-out infinite;
+  animation-delay: calc(var(--bar-idx, 0) * -0.14s);
+  transition: height 0.12s ease, background 0.2s ease;
+}
+.moss-twin--listening .moss-twin-bar {
+  background: linear-gradient(180deg, #7dd3fc, #38bdf8);
+  animation: mossTwinBarActive 0.72s ease-in-out infinite;
+  animation-delay: calc(var(--bar-idx, 0) * -0.09s);
+}
+.moss-twin--speaking .moss-twin-bar {
+  background: linear-gradient(180deg, #fda4af, #ff2a52);
+  animation: mossTwinBarActive 0.62s ease-in-out infinite;
+  animation-delay: calc(var(--bar-idx, 0) * -0.08s);
+}
+.moss-twin--thinking .moss-twin-bar,
+.moss-twin--pulse .moss-twin-bar {
+  background: linear-gradient(180deg, #c4b5fd, #8b5cf6);
+  animation: mossTwinBarNeural 1.05s ease-in-out infinite;
+  animation-delay: calc(var(--bar-idx, 0) * -0.1s);
+}
+.moss-twin--alert .moss-twin-bar {
+  background: linear-gradient(180deg, #fcd34d, #f59e0b);
+  animation: mossTwinBarActive 0.55s ease-in-out infinite;
+  animation-delay: calc(var(--bar-idx, 0) * -0.07s);
+}
+.moss-twin--offline .moss-twin-bar {
+  background: rgba(251, 113, 133, 0.26);
+  animation: mossTwinBarDormant 4.2s ease-in-out infinite;
+  animation-delay: calc(var(--bar-idx, 0) * -0.22s);
+}
+
+@keyframes mossTwinBarIdle {
+  0%, 100% { transform: scaleY(0.82); opacity: 0.75; }
+  50% { transform: scaleY(1.22); opacity: 1; }
+}
+@keyframes mossTwinBarActive {
+  0%, 100% { transform: scaleY(0.72); opacity: 0.85; }
+  50% { transform: scaleY(1.18); opacity: 1; }
+}
+@keyframes mossTwinBarNeural {
+  0%, 100% { transform: scaleY(0.64); opacity: 0.72; }
+  50% { transform: scaleY(1.16); opacity: 1; }
+}
+@keyframes mossTwinBarDormant {
+  0%, 100% { transform: scaleY(0.85); opacity: 0.45; }
+  50% { transform: scaleY(1.35); opacity: 0.75; }
+}
+
+.moss-twin-hud {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.moss-twin-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.moss-twin-state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  background: rgba(255, 59, 92, 0.12);
+  border: 1px solid rgba(255, 59, 92, 0.32);
+  color: #ffd6de;
+}
+.moss-twin-state-pill small {
+  font-size: 10px;
+  color: var(--ob-ink-3);
+}
+.moss-twin-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff3b5c;
+  box-shadow: 0 0 8px #ff3b5c;
+}
+.moss-twin--listening .moss-twin-state-pill {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: #bae6fd;
+}
+.moss-twin--listening .moss-twin-dot {
+  background: #38bdf8;
+  box-shadow: 0 0 8px #38bdf8;
+}
+.moss-twin--thinking .moss-twin-state-pill,
+.moss-twin--pulse .moss-twin-state-pill {
+  background: rgba(139, 92, 246, 0.14);
+  border-color: rgba(167, 139, 250, 0.38);
+  color: #ddd6fe;
+}
+.moss-twin--thinking .moss-twin-dot,
+.moss-twin--pulse .moss-twin-dot {
+  background: #a78bfa;
+  box-shadow: 0 0 8px #a78bfa;
+}
+.moss-twin--alert .moss-twin-state-pill {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.42);
+  color: #fde68a;
+}
+.moss-twin--alert .moss-twin-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 8px #f59e0b;
+}
+.moss-twin--offline .moss-twin-state-pill {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--ob-ink-3);
+}
+.moss-twin--offline .moss-twin-dot {
+  background: rgba(251, 113, 133, 0.55);
+  box-shadow: 0 0 6px rgba(251, 113, 133, 0.4);
+}
+
+.moss-twin-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ob-ink-3);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.moss-twin-source b {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ob-ink-2);
+}
+.moss-twin-headline {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ob-ink-1, #f4f4f5);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.moss-twin-subline {
+  font-size: 11.5px;
+  color: var(--ob-ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+}
+.moss-twin-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+}
+.moss-twin-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 0;
+}
+.moss-twin-metric-k {
+  font-size: 10.5px;
+  color: var(--ob-ink-3);
+}
+.moss-twin-metric-v {
+  font-size: 11.5px;
+  color: var(--ob-ink-1, #f4f4f5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 900px) {
+  .moss-twin {
+    grid-template-columns: 1fr;
+    justify-items: stretch;
+  }
+  .moss-twin-ocular {
+    flex-direction: row;
+    justify-content: space-between;
+  }
+  .moss-twin-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .moss-twin *,
+  .moss-eye,
+  .moss-eye *,
+  .ob-eye.moss-eye-sensor {
+    animation: none !important;
+    transition: none !important;
+  }
+  .moss-eye-px-lit,
+  .moss-twin-lens-wrap,
+  .ob-eye.moss-eye-sensor {
+    transform: none !important;
+  }
+  /* 动画关闭后只留第一帧，避免所有帧叠在一起 */
+  .moss-eye-px-frame ~ .moss-eye-px-frame { display: none; }
+}
+

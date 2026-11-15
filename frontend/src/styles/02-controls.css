@@ -1,0 +1,458 @@
+/* ============================================================
+   按钮（曜石设计）：次要 = 深色渐变细描边；主 = 白底黑字；开始加工 = 绿色渐变 + 外扩光环；危险 = 红色渐变
+   ============================================================ */
+.btn {
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  border-radius: 11px;
+  padding: 9px 16px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: transform 0.2s var(--ob-ease), box-shadow 0.2s, border-color 0.2s, filter 0.2s, background 0.2s;
+  border: 1px solid var(--ob-line-2);
+  background: linear-gradient(180deg, var(--ob-raise-2), var(--ob-raise));
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--ob-ink);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 6px 16px -8px rgba(0, 0, 0, 0.55);
+  user-select: none;
+  position: relative;
+  white-space: nowrap;
+}
+.btn:hover {
+  border-color: rgba(139, 123, 255, 0.45);
+  background: linear-gradient(180deg, rgba(139, 123, 255, 0.14), rgba(139, 123, 255, 0.06));
+  transform: translateY(-1px);
+}
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn-ghost,
+.secondary-button,
+.ghost-button {
+  background: linear-gradient(180deg, var(--ob-raise-2), var(--ob-raise)) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--ob-ink) !important;
+  border: 1px solid var(--ob-line-2) !important;
+}
+.btn-ghost:hover,
+.secondary-button:hover,
+.ghost-button:hover {
+  background: linear-gradient(180deg, rgba(139, 123, 255, 0.14), rgba(139, 123, 255, 0.06)) !important;
+  border-color: rgba(139, 123, 255, 0.45) !important;
+  color: #fff !important;
+  transform: translateY(-1px);
+}
+.btn-ghost:active {
+  transform: translateY(0);
+}
+
+.btn-hud-primary,
+.btn-primary,
+.primary-button {
+  background: linear-gradient(180deg, #ffffff, #dcdce4) !important;
+  color: #0a0a0c !important;
+  font-weight: 700 !important;
+  border: 1px solid #ffffff !important;
+  box-shadow: 0 10px 28px -10px rgba(255, 255, 255, 0.55), inset 0 -1px 0 rgba(0, 0, 0, 0.12) !important;
+}
+.btn-hud-primary:hover,
+.btn-primary:hover,
+.primary-button:hover {
+  filter: brightness(1.04);
+  transform: translateY(-1px);
+}
+.btn-hud-primary:active,
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+.btn-hud-fire {
+  background: linear-gradient(180deg, #5eead4, #22c55e) !important;
+  color: #03140a !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(167, 243, 208, 0.8) !important;
+  box-shadow: 0 12px 32px -10px rgba(52, 211, 153, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.5) !important;
+}
+.btn-hud-fire:not(:disabled)::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 14px;
+  border: 1px solid rgba(110, 231, 183, 0.5);
+  pointer-events: none;
+  animation: obFireRing 2.4s var(--ob-ease) infinite;
+}
+.btn-hud-fire:hover {
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+}
+@keyframes obFireRing {
+  0% { opacity: 0.9; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.08); }
+}
+
+.btn-danger,
+.danger-button {
+  background: linear-gradient(180deg, #ff4d6b, #d6123a) !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+  border: 1px solid rgba(255, 140, 160, 0.5) !important;
+  box-shadow: 0 12px 30px -10px rgba(255, 59, 92, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.btn-danger:hover,
+.danger-button:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+
+button:disabled,
+.btn:disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  box-shadow: none !important;
+  transform: none !important;
+  animation: none !important;
+  filter: grayscale(0.4);
+}
+
+/* ============================================================
+   输入控件与曜石自定义下拉框（Obsidian Select & Popover）
+   ============================================================ */
+input:not([type]),
+input[type="text"],
+input[type="number"],
+input[type="password"],
+input[type="search"],
+textarea,
+.text-input:not(select) {
+  background: var(--ob-well) !important;
+  border: 1px solid var(--ob-line-2) !important;
+  border-radius: 10px;
+  color: var(--ob-ink) !important;
+  padding: 9px 12px;
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+select,
+select.text-input,
+.select-input {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background-color: rgba(16, 16, 24, 0.36) !important;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239b9ba8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0) 100%) !important;
+  background-repeat: no-repeat, no-repeat !important;
+  background-position: right 11px center, 0 0 !important;
+  background-size: 14px 14px, 100% 100% !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  border-radius: 10px;
+  color: var(--ob-ink) !important;
+  padding: 9px 34px 9px 12px !important;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  cursor: pointer;
+  outline: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 6px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.18s var(--ob-ease), box-shadow 0.18s var(--ob-ease), background-color 0.18s var(--ob-ease);
+}
+
+input:not([type]):hover,
+input[type="text"]:hover,
+input[type="number"]:hover,
+textarea:hover,
+.text-input:not(select):hover {
+  border-color: var(--ob-line-3) !important;
+}
+
+select:hover:not(:disabled),
+select.text-input:hover:not(:disabled),
+.select-input:hover:not(:disabled) {
+  background-color: rgba(139, 123, 255, 0.12) !important;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23c4b5fd' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"),
+    linear-gradient(180deg, rgba(139, 123, 255, 0.09) 0%, rgba(255, 255, 255, 0) 100%) !important;
+  border-color: rgba(139, 123, 255, 0.45) !important;
+}
+
+select[data-ob-open="true"],
+select.text-input[data-ob-open="true"],
+.select-input[data-ob-open="true"] {
+  background-color: rgba(139, 123, 255, 0.16) !important;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23b7acff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m18 15-6-6-6 6'/%3E%3C/svg%3E"),
+    linear-gradient(180deg, rgba(139, 123, 255, 0.14) 0%, rgba(255, 255, 255, 0.02) 100%) !important;
+  border-color: var(--ob-accent) !important;
+  box-shadow: 0 0 0 3px rgba(139, 123, 255, 0.22), 0 8px 20px rgba(0, 0, 0, 0.35) !important;
+}
+
+select:disabled,
+select.text-input:disabled,
+.select-input:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+select option,
+select optgroup {
+  background-color: #121218;
+  color: var(--ob-ink);
+  padding: 8px 10px;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #5c5c66;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+.text-input:focus,
+.select-input:focus {
+  border-color: var(--ob-accent) !important;
+  box-shadow: 0 0 0 4px rgba(139, 123, 255, 0.18) !important;
+}
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--ob-accent);
+}
+
+/* 曜石自定义下拉浮层（ObsidianSelectHost） */
+@keyframes obSelectPopIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.ob-select-popover {
+  position: fixed;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid rgba(139, 123, 255, 0.34);
+  background: rgba(14, 14, 22, 0.68);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  box-shadow:
+    0 20px 48px rgba(0, 0, 0, 0.58),
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    0 0 28px rgba(139, 123, 255, 0.14);
+  overflow: hidden;
+  animation: obSelectPopIn 0.14s var(--ob-ease);
+}
+.ob-select-popover-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  overflow-y: auto;
+  max-height: inherit;
+}
+.ob-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ob-ink-2);
+  font-family: var(--ob-font);
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.ob-select-option:hover:not(:disabled),
+.ob-select-option.is-active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.065);
+  color: var(--ob-ink);
+}
+.ob-select-option.is-selected {
+  background: linear-gradient(90deg, rgba(139, 123, 255, 0.2) 0%, rgba(139, 123, 255, 0.08) 100%);
+  border-color: rgba(139, 123, 255, 0.42);
+  color: #ffffff;
+  font-weight: 600;
+}
+.ob-select-option:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ob-select-option-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.ob-select-option-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ob-select-option-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ob-ink-3);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+.ob-select-option-badge--accent {
+  background: rgba(139, 123, 255, 0.16);
+  color: var(--ob-accent-2);
+  border-color: rgba(139, 123, 255, 0.32);
+}
+.ob-select-option-badge--ok {
+  background: rgba(52, 211, 153, 0.13);
+  color: var(--ob-green-2);
+  border-color: rgba(52, 211, 153, 0.3);
+}
+.ob-select-option-badge--warn {
+  background: rgba(251, 191, 36, 0.13);
+  color: var(--ob-amber);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+.ob-select-option-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--ob-accent-2);
+}
+
+/* ============================================================
+   HUD 模式选择卡片 (Tool Selector Cards)
+   ============================================================ */
+.hud-tool-card {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--ink-dim);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  background: rgba(30, 30, 33, 0.65);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+.hud-tool-card:hover {
+  background: rgba(139, 123, 255, 0.10);
+  border-color: rgba(139, 123, 255, 0.5);
+  transform: translateY(-2px);
+}
+.hud-tool-card.active {
+  background: rgba(139, 123, 255, 0.16) !important;
+  border-color: var(--laser) !important;
+  box-shadow: 0 0 20px rgba(139, 123, 255, 0.35), inset 0 0 14px rgba(139, 123, 255, 0.15);
+}
+.hud-tool-card:focus-visible {
+  outline: 2px solid var(--laser);
+  outline-offset: 2px;
+}
+.hud-tool-label {
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.hud-tool-sub {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--ink-faint);
+}
+.hud-tool-card.active { color: var(--ink); }
+.hud-tool-card.active .hud-tool-sub { color: var(--laser); }
+.hud-tool-card .tool-icon { color: var(--ink-dim); }
+.hud-tool-card.active .tool-icon {
+  color: var(--laser-2);
+  filter: drop-shadow(0 0 10px var(--laser));
+}
+
+/* ============================================================
+   全息加工舱监视器 (Holographic Chamber Viewport)
+   ============================================================ */
+.chamber-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 380px;
+  background: radial-gradient(circle at 50% 50%, rgba(28, 28, 31, 0.45) 0%, rgba(13, 13, 16, 0.65) 100%) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(139, 123, 255, 0.35);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.6), 0 0 20px rgba(139, 123, 255, 0.08);
+}
+
+/* 激光雷达坐标网格背景 */
+.chamber-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(139, 123, 255, 0.10) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(139, 123, 255, 0.10) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+}
+
+/* 中心十字激光准星 (Crosshair) */
+
+/* ============================================================
+   HUD 标签与状态胶囊
+   ============================================================ */
+
+.conn-pill.online {
+  border-color: rgba(52, 211, 153, 0.45) !important;
+  background: rgba(52, 211, 153, 0.1) !important;
+  color: var(--green) !important;
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.3) !important;
+}
+.conn-pill.online span:first-child {
+  box-shadow: 0 0 10px #34d399;
+  animation: ledPulse 2s ease-in-out infinite;
+}
+
+@keyframes ledPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.85); }
+}
+

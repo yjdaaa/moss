@@ -10,8 +10,14 @@ import { createServer } from "vite";
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = path.resolve(TEST_DIR, "../src");
 
+// styles.css 是按层叠顺序 @import 各分片（src/styles/*.css）的入口：按同样顺序内联回完整样式表再断言。
+function readStylesheet(file) {
+  const css = fs.readFileSync(file, "utf8");
+  return css.replace(/^@import\s+["']([^"']+)["'];[ \t]*\r?\n?/gm, (_, rel) => readStylesheet(path.resolve(path.dirname(file), rel)));
+}
+
 test("吸顶栏滚动避让与通用模态框视口限高样式契约", () => {
-  const css = fs.readFileSync(path.join(SRC_DIR, "styles.css"), "utf8");
+  const css = readStylesheet(path.join(SRC_DIR, "styles.css"));
   assert.match(
     css,
     /html\s*\{[^}]*scroll-padding-top:\s*calc\(var\(--ob-top-h,\s*64px\)\s*\+\s*12px\)/,

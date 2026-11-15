@@ -1,0 +1,351 @@
+/* ============================================================
+   发送覆盖层 (Send Overlay)
+   ============================================================ */
+.send-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(7, 7, 10, 0.92);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.send-overlay.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.send-ring {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  margin-bottom: 24px;
+}
+.send-ring svg {
+  position: absolute;
+  inset: 0;
+  transform: rotate(-90deg);
+}
+.send-ring .track {
+  stroke: rgba(140, 175, 255, 0.14);
+}
+.send-ring .arc {
+  stroke: var(--laser);
+  stroke-linecap: round;
+  stroke-dasharray: 402.12;
+  stroke-dashoffset: 402.12;
+  transition: stroke-dashoffset 0.35s ease;
+  filter: drop-shadow(0 0 14px rgba(139, 123, 255, 0.9));
+}
+.send-ring .arc.indeterminate {
+  stroke-dasharray: 116 286;
+  stroke-dashoffset: 0;
+  animation: sendRingSpin 1.45s linear infinite;
+}
+@keyframes sendRingSpin {
+  to { transform: rotate(360deg); }
+}
+
+.send-ring .core {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 26px;
+  color: var(--laser-2);
+  text-shadow: 0 0 14px rgba(139, 123, 255, 0.8);
+}
+
+.send-title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  text-shadow: 0 0 20px rgba(255, 255, 255, 0.25);
+}
+
+.send-desc {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+}
+.send-desc .pct {
+  color: var(--laser);
+  font-weight: 700;
+  text-shadow: 0 0 10px rgba(139, 123, 255, 0.7);
+}
+
+.send-stage {
+  margin-top: 28px;
+  display: flex;
+  gap: 20px;
+  align-items: center;
+}
+.send-stage .st {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--ink-faint);
+}
+.send-stage .st.done {
+  color: var(--green);
+  text-shadow: 0 0 10px rgba(52, 211, 153, 0.7);
+}
+.send-stage .st.active {
+  color: var(--laser);
+  text-shadow: 0 0 10px rgba(139, 123, 255, 0.9);
+}
+.send-stage .st.failed {
+  color: var(--danger);
+  text-shadow: 0 0 10px rgba(255, 59, 92, 0.9);
+}
+.send-stage .st-line {
+  width: 40px;
+  height: 2px;
+  background: var(--line);
+  position: relative;
+}
+.send-stage .st-line.done {
+  background: var(--laser);
+  box-shadow: 0 0 10px var(--laser);
+}
+
+.send-cancel {
+  margin-top: 24px;
+  padding: 8px 26px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.send-cancel:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  box-shadow: 0 0 16px rgba(255, 59, 92, 0.4);
+}
+
+/* ============================================================
+   模态框体系 (Modals)
+   ============================================================ */
+.mat-modal-backdrop,
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  background: rgba(7, 7, 10, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.mat-modal,
+.send-confirm-dialog {
+  width: min(460px, 100%);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(139, 123, 255, 0.35) !important;
+  border-radius: 12px;
+  background: rgba(20, 20, 23, 0.96) !important;
+  backdrop-filter: blur(24px);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.9), 0 0 35px rgba(139, 123, 255, 0.15) !important;
+  overflow: hidden;
+}
+
+.send-confirm-dialog {
+  display: block;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.settings-modal {
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+}
+
+.mat-modal-head,
+.confirm-heading {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mat-modal-body {
+  padding: 20px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.mat-modal-foot {
+  flex-shrink: 0;
+}
+
+.settings-modal .mat-modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139, 123, 255, 0.55) rgba(255, 255, 255, 0.04);
+}
+
+.settings-modal .mat-modal-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.settings-modal .mat-modal-body::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.settings-modal .mat-modal-body::-webkit-scrollbar-thumb {
+  background: rgba(139, 123, 255, 0.55);
+  border-radius: 4px;
+}
+
+.settings-modal .mat-modal-head,
+.settings-modal .mat-modal-foot {
+  flex-shrink: 0;
+}
+
+.mat-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.mat-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  transition: color 0.15s;
+}
+.mat-modal-close:hover {
+  color: var(--laser);
+}
+
+/* ---- 应用内对话框 (AppDialog, 替代原生 alert/confirm) ---- */
+.app-dialog {
+  width: min(440px, 100%);
+  animation: appDialogIn 0.22s var(--ease-out) both;
+}
+@keyframes appDialogIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.app-dialog-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  min-width: 0;
+}
+.app-dialog-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-dialog-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  color: var(--laser);
+  background: rgba(139, 123, 255, 0.10);
+  border: 1px solid rgba(139, 123, 255, 0.35);
+  box-shadow: 0 0 14px rgba(139, 123, 255, 0.25);
+}
+.app-dialog-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: var(--laser);
+  border: 1px solid rgba(139, 123, 255, 0.35);
+  background: rgba(139, 123, 255, 0.08);
+  flex-shrink: 0;
+}
+.app-dialog-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--ink-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.app-dialog-body {
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+}
+
+.app-dialog--error {
+  border-color: rgba(255, 59, 92, 0.55) !important;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.9), 0 0 35px rgba(255, 59, 92, 0.22) !important;
+}
+.app-dialog--error .app-dialog-icon,
+.app-dialog--error .app-dialog-tag {
+  color: var(--danger);
+  border-color: rgba(255, 59, 92, 0.45);
+  background: rgba(255, 59, 92, 0.10);
+  box-shadow: 0 0 14px rgba(255, 59, 92, 0.25);
+}
+.app-dialog--warning {
+  border-color: rgba(255, 170, 0, 0.5) !important;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.9), 0 0 35px rgba(255, 170, 0, 0.18) !important;
+}
+.app-dialog--warning .app-dialog-icon,
+.app-dialog--warning .app-dialog-tag {
+  color: var(--gold);
+  border-color: rgba(255, 170, 0, 0.45);
+  background: rgba(255, 170, 0, 0.10);
+  box-shadow: 0 0 14px rgba(255, 170, 0, 0.22);
+}
+.app-dialog--success {
+  border-color: rgba(52, 211, 153, 0.5) !important;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.9), 0 0 35px rgba(52, 211, 153, 0.18) !important;
+}
+.app-dialog--success .app-dialog-icon,
+.app-dialog--success .app-dialog-tag {
+  color: var(--green);
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.10);
+  box-shadow: 0 0 14px rgba(52, 211, 153, 0.22);
+}
+

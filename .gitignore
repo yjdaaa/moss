@@ -38,3 +38,6 @@ apps/moss-voice-local/rust-license-evidence/
 !/.birdview/project.html
 !/.birdview/project.sources.html
 frontend/ui-prototype-*.html
+
+# Vite 在仓库根目录运行时留下的依赖预构建临时目录
+.vite/
