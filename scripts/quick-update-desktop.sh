@@ -150,6 +150,12 @@ resolve_effective_version() {
   echo "$best"
 }
 
+# 2026-11-14 n94: Built-in voice Opus codec uses bundled libopus (compiled from C source) and requires CMake.
+if ! command -v cmake >/dev/null 2>&1 && [[ -z "${CMAKE:-}" ]]; then
+  echo "CMake not found: required to build libopus for the built-in voice service. Install it with \"brew install cmake\"." >&2
+  exit 1
+fi
+
 EFFECTIVE_VERSION="$(resolve_effective_version "$VERSION_OVERRIDE")"
 if [[ -n "$EFFECTIVE_VERSION" ]]; then
   export MOSS_RELEASE_VERSION="$EFFECTIVE_VERSION"

@@ -22,6 +22,7 @@ const SENSITIVE_COMMANDS = [
   "voice_context_manage", "voice_context_pick_folder",
   "voice_firmware_status", "voice_firmware_import", "voice_firmware_manage",
   "voice_wakeword_status", "voice_wakeword_import_base", "voice_wakeword_manage",
+  "voice_usb_provision",
 ];
 
 test("n67：独立安全窗口已取消，页面、入口与打开窗口的命令都不存在", () => {
@@ -84,8 +85,10 @@ test("n67 / n69：唤醒词卡与固件卡都挂在主窗口语音中心“设�
   assert.doesNotMatch(page, /<VoiceTabPanel tab="wake"/, "“唤醒词与音量”标签已并入设备标签");
   // n69 音量去重：扬声器音量只在“已连接设备”的快捷控制里调，仍走主窗口设备即时请求 set_volume
   assert.match(devices, /<BuiltinDevicesPanel builtin=\{builtin\} \/>/);
-  const builtinCard = frontend("src/components/VoiceBuiltinCard.jsx");
-  const devicesPanel = builtinCard.split("export function BuiltinDevicesPanel")[1].split("\nexport function ")[0];
+  // 2026-11-13 拆分：BuiltinDevicesPanel 实现搬到 voice-builtin/，VoiceBuiltinCard.jsx 只做转导出
+  assert.match(frontend("src/components/VoiceBuiltinCard.jsx"), /export \{ BuiltinDevicesPanel \} from "\.\/voice-builtin\/BuiltinDevicesPanel\.jsx"/);
+  const builtinCard = frontend("src/components/voice-builtin/BuiltinDevicesPanel.jsx");
+  const devicesPanel =builtinCard.split("export function BuiltinDevicesPanel")[1].split("\nexport function ")[0];
   assert.match(devicesPanel, /sendDeviceControl\(device, "set_volume", \{ volume: volVal \}/);
   assert.match(devicesPanel, /voiceApi\.deviceRequest\(device\.device_id, request, value\)/);
   const wake = frontend("src/components/VoiceWakeWordCard.jsx");

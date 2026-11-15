@@ -20,7 +20,8 @@ test("语音中心本地合成模型包名称可点击打开语言包与本机�
     "voiceApi 须通过已授权的 voice_builtin_models_test('local_tts') 读取或生成本机试听 WAV",
   );
 
-  const cardSrc = fs.readFileSync(path.join(SRC_DIR, "components/VoiceBuiltinCard.jsx"), "utf8");
+  // LocalModelsGroup 实现在 voice-builtin/ 下（2026-11-13 从 VoiceBuiltinCard.jsx 原样搬出）
+  const cardSrc = fs.readFileSync(path.join(SRC_DIR, "components/voice-builtin/LocalModelsGroup.jsx"), "utf8");
   assert.match(
     cardSrc,
     /className="voice-tts-model-trigger"[\s\S]*?onClick=\{\(\)\s*=>\s*setTtsVoicesModalModel\(model\)\}/,

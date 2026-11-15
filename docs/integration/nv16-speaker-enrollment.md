@@ -6,7 +6,7 @@
 
 - 模型 `campplus_sv_zh_cn_16k_common` 对应 [官方模型卡](https://modelscope.cn/models/iic/speech_campplus_sv_zh-cn_16k-common) v1.0.0，卡片声明 Apache License 2.0。
 - 官方文件 `speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx`（recongition为上游拼写）；实际28,281,138字节、SHA-256 `f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11`。
-- 16kHz单声道i16 PCM、2～10秒；实际输出192维有限、非零f32le向量。协议4必须核对模型、采样率、维度、代次和编码；旧helper握手拒绝，须与MOSS一起升级。
+- 16kHz单声道i16 PCM、2～10秒；实际输出192维有限、非零f32le向量。协议6（与 `moss-voice-local-proto::PROTOCOL_VERSION` 同步）必须核对模型、采样率、维度、代次和编码；旧helper握手拒绝，须与MOSS一起升级。
 - `SpeakerHelper`持有专用进程，1.5秒超时只作废声纹进程，不终止ASR/TTS/VAD或等待快速停止。
 - Windows加载保持模型及规范化祖先目录只读句柄，禁止写入/删除共享；哈希后原生打开和模型存活期间不能替换。其他平台声纹安全加载尚未验收，明确拒绝。
 
@@ -43,7 +43,7 @@
 
 ### 2026-10-12 标定诊断入口（不开放识别）
 
-新增`scripts/calibrate-nv16-speaker.mjs`：仅在操作者明确传入`--consent`时读取本地选定的数据集及同目录WAV，要求固定模型hash、协议4、192维，16kHz/单声道/i16、2～10秒；拒绝路径穿越/链接、重复的非重放片段与无效向量。实际helper独立运行，每请求1.5秒上限；工作目录为模型目录，环境只保留Windows必要SystemRoot/WINDIR/TEMP/TMP，不继承账号密钥、MOSS配置或用户profile。原始PCM和向量只在内存，报告不包含姓名、文件路径、录音或向量。该工具不修改数据库/设置，不启动设备录音，不调用云模型。
+新增`scripts/calibrate-nv16-speaker.mjs`：仅在操作者明确传入`--consent`时读取本地选定的数据集及同目录WAV，要求固定模型hash、当前辅助程序协议（协议6）、192维，16kHz/单声道/i16、2～10秒；拒绝路径穿越/链接、重复的非重放片段与无效向量。实际helper独立运行，每请求1.5秒上限；工作目录为模型目录，环境只保留Windows必要SystemRoot/WINDIR/TEMP/TMP，不继承账号密钥、MOSS配置或用户profile。原始PCM和向量只在内存，报告不包含姓名、文件路径、录音或向量。该工具不修改数据库/设置，不启动设备录音，不调用云模型。
 
 数据集格式为`schema=1`、`source_class=synthetic|human_claimed`、至少3个`people`（每个含匿名`id`和3个`references`文件名）、`cases`（含`kind=genuine|impostor|noise|replay`、`expected`匿名ID或null、`file`）。未知/噪声/重放的expected必须null。真正不同人的已登记语音应使用各自正确ID，错误身份另计wrong_person；不能把正确识别另一位登记者当未知者。
 

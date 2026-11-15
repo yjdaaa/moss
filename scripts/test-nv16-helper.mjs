@@ -6,6 +6,9 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 const [exe, root] = process.argv.slice(2);
 if (!exe || !root) throw new Error('Usage: node scripts/test-nv16-helper.mjs <helper.exe> <task-owned-model-root>');
+const protoSrc = fs.readFileSync(new URL('../crates/moss-voice-local-proto/src/lib.rs', import.meta.url), 'utf8');
+const PROTOCOL = Number(protoSrc.match(/pub const PROTOCOL_VERSION:\s*u32\s*=\s*(\d+);/)?.[1]);
+assert(Number.isInteger(PROTOCOL) && PROTOCOL >= 1, 'Missing PROTOCOL_VERSION in moss-voice-local-proto');
 const file=path.join(root,'3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx');
 const bytes=fs.readFileSync(file);
 assert.equal(bytes.length,28281138);
@@ -36,7 +39,7 @@ function call(op,payload=Buffer.alloc(0)){
 }
 const model_id='campplus_sv_zh_cn_16k_common';
 try{
-  assert.equal((await call({op:'hello'})).reply.protocol,4);
+  assert.equal((await call({op:'hello'})).reply.protocol,PROTOCOL);
   assert.equal((await call({op:'load_speaker',model_id:'untrusted',models_root:root})).reply.kind,'error');
   const loaded=await call({op:'load_speaker',model_id,models_root:root});
   assert.equal(loaded.reply.kind,'speaker_loaded');assert.equal(loaded.reply.dimension,192);assert.equal(loaded.reply.sample_rate,16000);
@@ -54,5 +57,5 @@ try{
   let norm=0;for(let i=0;i<192;i++){const v=result.payload.readFloatLE(i*4);assert(Number.isFinite(v));norm+=v*v;}assert(norm>1e-16);
   assert.equal((await call({op:'speaker_embed',model_id,sample_rate:24000,utterance_generation:18},pcm)).reply.kind,'error');
   assert.equal((await call({op:'speaker_embed',model_id,sample_rate:16000,utterance_generation:19},Buffer.alloc(100))).reply.kind,'error');
-  console.log(JSON.stringify({protocol:4,model_id,sha256:'f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11',dimension:192,payload_bytes:768,synthetic_inference_ms:Math.round(performance.now()-start),valid_embedding:true,negative_requests_rejected:true,real_speaker_accuracy:'unverified'}));
+  console.log(JSON.stringify({protocol:PROTOCOL,model_id,sha256:'f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11',dimension:192,payload_bytes:768,synthetic_inference_ms:Math.round(performance.now()-start),valid_embedding:true,negative_requests_rejected:true,real_speaker_accuracy:'unverified'}));
 }finally{child.stdin.end();if(child.exitCode===null)child.kill();}

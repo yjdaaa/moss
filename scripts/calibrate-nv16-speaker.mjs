@@ -6,6 +6,9 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 export const MODEL='campplus_sv_zh_cn_16k_common';
 export const MODEL_SHA='f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11';
+const PROTO_SRC=fs.readFileSync(new URL('../crates/moss-voice-local-proto/src/lib.rs',import.meta.url),'utf8');
+export const PROTOCOL=Number(PROTO_SRC.match(/pub const PROTOCOL_VERSION:\s*u32\s*=\s*(\d+);/)?.[1]);
+if(!Number.isInteger(PROTOCOL)||PROTOCOL<1)throw Error('nv16_protocol_invalid');
 export function helperEnvironment(){const env={};for(const key of ['SystemRoot','WINDIR','TEMP','TMP'])if(process.env[key])env[key]=process.env[key];return env;}
 const fail=()=>{throw Error('nv16_input_invalid');};
 export function normalize(v){
@@ -45,7 +48,7 @@ export function evaluate(people,cases,sourceClass){
     }
     candidates.push({threshold,margin,genuine_trials:genuine.length,negative_trials:negative.length,false_accepts:falseAccept,false_rejects:falseReject,wrong_person:wrongPerson,FAR:negative.length?falseAccept/negative.length:null,FRR:genuine.length?falseReject/genuine.length:null,FAR_wilson95_upper:wilsonUpper(falseAccept,negative.length),negative_categories:byKind});
   }
-  return {schema:1,model_id:MODEL,model_sha256:MODEL_SHA,protocol:4,dimension:192,source_class:sourceClass,labels_verified:false,coverage,candidates,accepted_threshold:null,production_ready:false,real_speaker_accuracy:'unverified'};
+  return {schema:1,model_id:MODEL,model_sha256:MODEL_SHA,protocol:PROTOCOL,dimension:192,source_class:sourceClass,labels_verified:false,coverage,candidates,accepted_threshold:null,production_ready:false,real_speaker_accuracy:'unverified'};
 }
 function readSelected(root,name){
   if(typeof name!=='string'||!/^[-a-zA-Z0-9_.]{1,180}\.wav$/.test(name)||name.includes('..'))fail();
@@ -78,7 +81,7 @@ async function main(){
     if(reply.kind!=='embedding'||reply.model_id!==MODEL||reply.dimension!==192||reply.sample_rate!==16000||reply.utterance_generation!==generation||reply.format!=='f32le'||payload.length!==768)fail();return normalize(Array.from({length:192},(_,i)=>payload.readFloatLE(i*4)));
   }
   try{
-    if((await call({op:'hello'})).reply.protocol!==4)fail();const loaded=(await call({op:'load_speaker',model_id:MODEL,models_root:path.resolve(opts['--model-root'])})).reply;if(loaded.kind!=='speaker_loaded'||loaded.dimension!==192||loaded.sample_rate!==16000)fail();
+    if((await call({op:'hello'})).reply.protocol!==PROTOCOL)fail();const loaded=(await call({op:'load_speaker',model_id:MODEL,models_root:path.resolve(opts['--model-root'])})).reply;if(loaded.kind!=='speaker_loaded'||loaded.dimension!==192||loaded.sample_rate!==16000)fail();
     const people=[];for(const p of dataset.people){if(p.references?.length!==3)fail();const references=[];for(const file of p.references)references.push(await embedding(file));people.push({id:p.id,references});}
     const cases=[];for(const c of dataset.cases)cases.push({...c,vector:await embedding(c.file,c.kind==='replay')});
     const report=evaluate(people,cases,dataset.source_class);fs.writeFileSync(path.resolve(opts['--report']),JSON.stringify(report,null,2)+'\n',{flag:'wx'});console.log(JSON.stringify({status:'diagnostic_report_written',samples:cases.length,production_ready:false}));

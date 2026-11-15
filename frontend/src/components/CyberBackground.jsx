@@ -1,40 +1,41 @@
 import React, { useEffect, useRef } from "react";
 
 /**
- * MOSS 等离子流体背景（技术书 §9.5.5 C · 背景方案「等离子流体」）
+ * MOSS 等离子流体背景（固定空间锚点版，无鼠标视差偏移）
  *
- * - WebGL 片元着色器：多层域扭曲噪声，紫 / 赤红 / 蓝等离子缓慢流动，随鼠标轻微偏移。
- * - 叠加一层 2D 星点（闪烁），以及静态暗角与细噪点。
- * - 性能：着色器以 50% 分辨率渲染后由 CSS 放大；限帧约 40 fps；页面隐藏或窗口不在前台（切到别的应用、
+ * - WebGL 片元着色器：多层域扭曲噪声，紫 / 赤红 / 蓝等离子在原地缓慢流动；移除指针偏移保持空间稳定不眩晕。
+ * - 叠加一层 2D 星点（原位闪烁与极缓漂移），以及静态暗角与细噪点。
+ * - 性能与合规：着色器以 50% 分辨率渲染后由 CSS 放大；限帧约 40 fps；页面隐藏或窗口不在前台（切到别的应用、
  *   最小化、收进托盘）时暂停，回到前台继续，并给 <html> 标 `data-app-active="false"` 让页面 CSS 循环动画
- *   一起暂停（2026-11-08，此前窗口开着就一直占约 25% CPU）；
- *   启动 2 秒内自测帧率，低于 28 fps 自动降到 33% 分辨率并减少星点。
- * - WebGL 不可用时退回 CSS 静态渐变（不报错、不影响业务）。
- * - prefers-reduced-motion：只绘制一帧静态画面。
+ *   一起暂停；启动 2 秒内自测帧率，低于 28 fps 自动降到 33% 分辨率并减少星点；绝不调用 `gl.clear`。
+ * - WebGL 不可用时退回 CSS 静态渐变（不报错、不影响业务）；prefers-reduced-motion 只绘制一帧静态画面。
  * - 纯装饰：aria-hidden、pointer-events: none，不参与任何业务逻辑。
  */
 
-const VERTEX_SHADER = "attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}";
+const VERTEX_SHADER = "attribute vec2 a;void main(){gl_Position=vec4(a,0.0,1.0);}";
 
-const FRAGMENT_SHADER = `precision mediump float;
-uniform vec2 r;uniform float t;uniform vec2 m;
+function buildFragmentShader(highPrecision) {
+  const precision = highPrecision ? "precision highp float;" : "precision mediump float;";
+  return `${precision}
+uniform vec2 r;uniform float t;
 float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
-float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
-  return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y);}
-float fbm(vec2 p){float v=0.,a=.5;mat2 R=mat2(.8,.6,-.6,.8);
-  for(int i=0;i<5;i++){v+=a*n(p);p=R*p*2.02;a*=.5;}return v;}
+float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
+  return mix(mix(h(i),h(i+vec2(1.0,0.0)),f.x),mix(h(i+vec2(0.0,1.0)),h(i+vec2(1.0,1.0)),f.x),f.y);}
+float fbm(vec2 p){float v=0.0,a=0.5;mat2 R=mat2(0.8,0.6,-0.6,0.8);
+  for(int i=0;i<5;i++){v+=a*n(p);p=R*p*2.02;a*=0.5;}return v;}
 void main(){
-  vec2 p=(gl_FragCoord.xy-.5*r)/r.y;p+=m*.08;
-  vec2 q=vec2(fbm(p*1.6+t*.04),fbm(p*1.6+vec2(5.2,1.3)-t*.035));
-  vec2 w=vec2(fbm(p*1.6+3.8*q+vec2(1.7,9.2)+t*.07),fbm(p*1.6+3.8*q+vec2(8.3,2.8)-t*.05));
-  float f=fbm(p*1.6+4.*w);
-  vec3 c=mix(vec3(.02,.015,.05),vec3(.33,.22,.95),clamp(f*f*2.2,0.,1.));
-  c=mix(c,vec3(1.,.23,.36),clamp(length(q)*.95-.38,0.,1.)*.85);
-  c=mix(c,vec3(.23,.45,1.),clamp(w.y*w.y*1.2,0.,1.)*.55);
-  c+=pow(clamp(f,0.,1.),5.)*vec3(1.,.82,.92)*1.6;
-  c*=smoothstep(1.5,.15,length(p-vec2(.15,.1)))*.78;
-  gl_FragColor=vec4(c,1.);
+  vec2 p=(gl_FragCoord.xy-0.5*r)/max(r.y,1.0);
+  vec2 q=vec2(fbm(p*1.6+t*0.04),fbm(p*1.6+vec2(5.2,1.3)-t*0.035));
+  vec2 w=vec2(fbm(p*1.6+3.8*q+vec2(1.7,9.2)+t*0.07),fbm(p*1.6+3.8*q+vec2(8.3,2.8)-t*0.05));
+  float f=fbm(p*1.6+4.0*w);
+  vec3 c=mix(vec3(0.02,0.015,0.05),vec3(0.33,0.22,0.95),clamp(f*f*2.2,0.0,1.0));
+  c=mix(c,vec3(1.0,0.23,0.36),clamp(length(q)*0.95-0.38,0.0,1.0)*0.85);
+  c=mix(c,vec3(0.23,0.45,1.0),clamp(w.y*w.y*1.2,0.0,1.0)*0.55);
+  c+=pow(clamp(f,0.0,1.0),5.0)*vec3(1.0,0.82,0.92)*1.6;
+  c*=(1.0-smoothstep(0.15,1.5,length(p-vec2(0.15,0.1))))*0.78;
+  gl_FragColor=vec4(c,1.0);
 }`;
+}
 
 const FRAME_INTERVAL_MS = 24; // ≈ 40 fps
 const PROBE_WINDOW_MS = 2000;
@@ -45,18 +46,38 @@ function createPlasma(canvas) {
   if (!gl) return null;
   const compile = (type, source) => {
     const shader = gl.createShader(type);
+    if (!shader) return null;
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
-    return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null;
+    if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return shader;
+    gl.deleteShader(shader);
+    return null;
   };
   const vs = compile(gl.VERTEX_SHADER, VERTEX_SHADER);
-  const fs = compile(gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
-  if (!vs || !fs) return null;
+  if (!vs) return null;
+  const highpFmt = gl.getShaderPrecisionFormat?.(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+  const preferHighp = Boolean(highpFmt && highpFmt.precision > 0);
+  const fs = (preferHighp ? compile(gl.FRAGMENT_SHADER, buildFragmentShader(true)) : null)
+    || compile(gl.FRAGMENT_SHADER, buildFragmentShader(false));
+  if (!fs) {
+    gl.deleteShader(vs);
+    return null;
+  }
   const program = gl.createProgram();
+  if (!program) {
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return null;
+  }
   gl.attachShader(program, vs);
   gl.attachShader(program, fs);
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    gl.deleteProgram(program);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return null;
+  }
   gl.useProgram(program);
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -66,10 +87,17 @@ function createPlasma(canvas) {
   gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
   return {
     gl,
+    dispose() {
+      gl.deleteBuffer(buffer);
+      gl.deleteProgram(program);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      const lose = gl.getExtension("WEBGL_lose_context");
+      if (lose) lose.loseContext();
+    },
     uniforms: {
       r: gl.getUniformLocation(program, "r"),
       t: gl.getUniformLocation(program, "t"),
-      m: gl.getUniformLocation(program, "m"),
     },
   };
 }
@@ -94,15 +122,15 @@ export function CyberBackground() {
     let focused = typeof document.hasFocus === "function" ? document.hasFocus() : true;
     let isVisible = !document.hidden && focused;
     let lowPower = false;
+    let builtLowPower = null;
     let lastFrame = 0;
+    let lastDrawTime = 0;
     let probeStart = 0;
     let probeFrames = 0;
     let dpr = 1;
     let W = 0;
     let H = 0;
     let stars = [];
-    const mouse = { x: 0, y: 0 };
-    const smooth = { x: 0, y: 0 };
 
     const buildStars = () => {
       const density = lowPower ? 0.15 : 0.35;
@@ -119,41 +147,53 @@ export function CyberBackground() {
     };
 
     const resize = () => {
-      dpr = Math.min(window.devicePixelRatio || 1, 1.25);
-      W = starCanvas.width = Math.round(window.innerWidth * dpr);
-      H = starCanvas.height = Math.round(window.innerHeight * dpr);
+      const nextDpr = Math.min(window.devicePixelRatio || 1, 1.25);
+      const nextW = Math.max(1, Math.round(window.innerWidth * nextDpr));
+      const nextH = Math.max(1, Math.round(window.innerHeight * nextDpr));
+      let changed = builtLowPower !== lowPower;
+      builtLowPower = lowPower;
+      if (W !== nextW || H !== nextH || starCanvas.width !== nextW || starCanvas.height !== nextH || dpr !== nextDpr) {
+        dpr = nextDpr;
+        W = starCanvas.width = nextW;
+        H = starCanvas.height = nextH;
+        changed = true;
+      }
       if (plasma) {
         const scale = lowPower ? 0.33 : 0.5;
-        plasmaCanvas.width = Math.max(1, Math.round(window.innerWidth * scale));
-        plasmaCanvas.height = Math.max(1, Math.round(window.innerHeight * scale));
-        plasma.gl.viewport(0, 0, plasmaCanvas.width, plasmaCanvas.height);
+        const nextPW = Math.max(1, Math.round(window.innerWidth * scale));
+        const nextPH = Math.max(1, Math.round(window.innerHeight * scale));
+        if (plasmaCanvas.width !== nextPW || plasmaCanvas.height !== nextPH) {
+          plasmaCanvas.width = nextPW;
+          plasmaCanvas.height = nextPH;
+          plasma.gl.viewport(0, 0, nextPW, nextPH);
+          changed = true;
+        }
       }
+      if (!changed) return false;
+      lastFrame = 0;
       buildStars();
+      return true;
     };
 
-    const drawFrame = (time) => {
-      smooth.x += (mouse.x - smooth.x) * 0.04;
-      smooth.y += (mouse.y - smooth.y) * 0.04;
+    const drawFrame = (time, advance = true) => {
+      if (advance) lastDrawTime = time;
       if (plasma) {
         const { gl, uniforms } = plasma;
         gl.uniform2f(uniforms.r, plasmaCanvas.width, plasmaCanvas.height);
         gl.uniform1f(uniforms.t, time / 1000);
-        gl.uniform2f(uniforms.m, smooth.x, -smooth.y);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
       }
       if (ctx) {
         ctx.clearRect(0, 0, W, H);
         for (const s of stars) {
-          if (!reduceMotion) {
+          if (!reduceMotion && advance) {
             s.x -= 0.01 * s.depth * dpr;
             if (s.x < -5) s.x = W + 5;
           }
           const alpha = 0.3 + 0.7 * Math.abs(Math.sin(s.phase + (time / 1000) * s.speed));
-          const x = s.x - smooth.x * 40 * s.depth * dpr;
-          const y = s.y - smooth.y * 30 * s.depth * dpr;
           ctx.fillStyle = `rgba(${s.color},${alpha})`;
           ctx.beginPath();
-          ctx.arc(x, y, s.r, 0, Math.PI * 2);
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
           ctx.fill();
         }
       }
@@ -175,17 +215,13 @@ export function CyberBackground() {
         }
         probeStart = -1;
       }
-      if (time - lastFrame >= FRAME_INTERVAL_MS) {
+      if (lastFrame === 0 || time - lastFrame >= FRAME_INTERVAL_MS) {
         lastFrame = time;
-        drawFrame(time);
+        drawFrame(time, true);
       }
       animId = requestAnimationFrame(loop);
     };
 
-    const onPointerMove = (e) => {
-      mouse.x = e.clientX / window.innerWidth - 0.5;
-      mouse.y = e.clientY / window.innerHeight - 0.5;
-    };
     const markState = () => {
       root.dataset.state = reduceMotion ? "static" : isVisible ? "running" : "paused";
       // 整个应用在后台时，页面上的 CSS 循环动画也一起暂停（styles.css `[data-app-active="false"]`）
@@ -198,7 +234,10 @@ export function CyberBackground() {
         probeStart = 0;
         probeFrames = 0;
       }
-      if (isVisible && !reduceMotion && !animId) animId = requestAnimationFrame(loop);
+      if (isVisible) {
+        lastFrame = 0;
+        if (!reduceMotion && !animId) animId = requestAnimationFrame(loop);
+      }
       markState();
     };
     const onFocus = () => {
@@ -210,8 +249,8 @@ export function CyberBackground() {
       onVisibility();
     };
     const onResize = () => {
-      resize();
-      if (reduceMotion) drawFrame(0);
+      if (!resize()) return;
+      drawFrame(lastDrawTime, false);
     };
 
     resize();
@@ -221,24 +260,21 @@ export function CyberBackground() {
     window.addEventListener("blur", onBlur);
     markState();
     if (reduceMotion) {
-      drawFrame(0);
+      drawFrame(0, false);
     } else {
-      window.addEventListener("pointermove", onPointerMove, { passive: true });
       // 启动时不在前台也先画一帧，窗口出现时不是空白
       if (isVisible) animId = requestAnimationFrame(loop);
-      else drawFrame(0);
+      else drawFrame(0, false);
     }
 
     return () => {
       if (animId) cancelAnimationFrame(animId);
       window.removeEventListener("resize", onResize);
-      window.removeEventListener("pointermove", onPointerMove);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("blur", onBlur);
       delete document.documentElement.dataset.appActive;
-      const lose = plasma?.gl.getExtension("WEBGL_lose_context");
-      if (lose) lose.loseContext();
+      plasma?.dispose();
     };
   }, []);
 

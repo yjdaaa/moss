@@ -32,16 +32,40 @@ export function gotoVoiceGroup(tab, group, target = "") {
   globalThis.dispatchEvent?.(new CustomEvent(VOICE_GOTO_EVENT, { detail: { tab, group, target } }));
 }
 
+function scrollAndFocusTarget(element, shouldFocus) {
+  if (!element) return;
+  if (typeof element.scrollIntoView === "function") element.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (!shouldFocus) return;
+  if (!element.disabled && typeof element.focus === "function") {
+    element.focus({ preventScroll: true });
+    return;
+  }
+  // 目标控件暂处于禁用态（如 lazy 分组首次挂载正扫描设备）时，先将焦点带入所属卡片容器
+  const fallback = typeof element.closest === "function" ? element.closest("[tabindex]") : null;
+  if (fallback && typeof fallback.focus === "function") {
+    fallback.focus({ preventScroll: true });
+  }
+}
+
 /** 展开分组（已展开则不动）并滚动到分组或其中某个元素；目标是表单控件时顺便聚焦。 */
 export function focusVoiceGroup(group, target = "") {
   if (group) {
     const header = document.querySelector(`#voice-group-${group} > .voice-group-h`);
     if (header && header.getAttribute("aria-expanded") !== "true") header.click();
   }
-  const element = document.getElementById(target || `voice-group-${group}`);
-  if (!element) return;
-  if (typeof element.scrollIntoView === "function") element.scrollIntoView({ behavior: "smooth", block: "center" });
-  if (target && typeof element.focus === "function") element.focus({ preventScroll: true });
+  const targetEl = target ? document.getElementById(target) : null;
+  if (targetEl) {
+    scrollAndFocusTarget(targetEl, true);
+    return;
+  }
+  const groupEl = group ? document.getElementById(`voice-group-${group}`) : null;
+  scrollAndFocusTarget(groupEl, false);
+  // lazy 分组首次展开时子元素在下次提交后挂载，下一帧补一次精确滚动与聚焦
+  if (target && typeof globalThis.requestAnimationFrame === "function") {
+    globalThis.requestAnimationFrame(() => {
+      scrollAndFocusTarget(document.getElementById(target), true);
+    });
+  }
 }
 
 /** 向页面上报“本分组有未保存改动”；卸载时自动清除。 */

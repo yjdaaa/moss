@@ -118,8 +118,23 @@ try {
   const idleAgain = await clearsDuring(1500);
   assert.ok(idleAgain <= 10, `重新进入后静止时也不应持续重画（1.5 秒内 clear ${idleAgain} 次）`);
 
-  // 5. 动态背景：窗口失去焦点暂停，回到前台继续
-  const bgState = () => page.locator(".plasma-bg").getAttribute("data-state");
+  // 5. 动态背景：原版流动等离子与星点画布正常绘制（未退回 fallback）、失焦暂停回前台继续
+  const bg = page.locator(".plasma-bg");
+  const bgState = () => bg.getAttribute("data-state");
+  const hasFallback = await bg.evaluate((el) => el.classList.contains("plasma-bg--fallback"));
+  assert.equal(hasFallback, false, "动态背景 WebGL 着色器须正常编译生效，不能静默退回 CSS fallback");
+  const bgLayers = await bg.evaluate((el) => {
+    const fluid = el.querySelector(".plasma-bg__fluid");
+    const stars = el.querySelector(".plasma-bg__stars");
+    return {
+      fluidW: fluid?.width ?? 0,
+      fluidH: fluid?.height ?? 0,
+      starsW: stars?.width ?? 0,
+      starsH: stars?.height ?? 0,
+    };
+  });
+  assert.ok(bgLayers.fluidW > 0 && bgLayers.fluidH > 0, `.plasma-bg__fluid 须具备非零像素尺寸: ${JSON.stringify(bgLayers)}`);
+  assert.ok(bgLayers.starsW > 0 && bgLayers.starsH > 0, `.plasma-bg__stars 须具备非零像素尺寸: ${JSON.stringify(bgLayers)}`);
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   assert.equal(await bgState(), "running");
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));

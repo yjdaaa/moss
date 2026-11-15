@@ -88,6 +88,11 @@ try {
       timings: [{ session_id: "s-dev1", device_id: "aa:bb:cc:11:22:33", at_ms: 1_790_000_003_000, turn: 2, outcome: "ignored", models: ["fake-asr"], stages: { recording_start: 0, final_asr: 320 }, tools: [] }],
       devices: [{ device_id: "aa:bb:cc:11:22:33", name: "立创实战派小智", model: "lichuang-dev", firmware_version: "2.2.0", status: "allowed", last_seen: 1_790_000_000, status_json: JSON.stringify({ audio_speaker: { volume: 65 }, screen: { brightness: 80, theme: "dark" } }) }],
     },
+    usbPorts: [
+      { port_name: "/dev/cu.usbserial-LASER", description: "FluidNC", vid: 0x1a86, pid: 0x7523, serial_number: "L1", is_usb: true, is_laser_port: true, is_likely_esp: true },
+      { port_name: "/dev/cu.usbmodem14201", description: "ESP32-S3 USB JTAG", vid: 0x303a, pid: 0x1001, serial_number: "XZ01", is_usb: true, is_laser_port: false, is_likely_esp: true },
+      { port_name: "/dev/cu.usbserial-ALT2", description: "USB-SERIAL CH340", vid: 0x1a86, pid: 0x7523, serial_number: "ALT2", is_usb: true, is_laser_port: false, is_likely_esp: false },
+    ],
     agent: {
       settings: { enabled: false, workspace: "", codex_executable: "", claude_executable: "" },
       strict_mode: false, providers: [], runs: [],
@@ -333,6 +338,50 @@ try {
       }
       return { requested: request };
     },
+    voice_usb_provision: ({ input }) => {
+      switch (input?.action) {
+        case "ports":
+          return { ports: structuredClone(state.usbPorts), laser_busy: false };
+        case "inspect":
+          assert.equal(input.port, "/dev/cu.usbmodem14201");
+          return {
+            device: { chip: "esp32s3", mac_address: "dc:da:0c:11:22:33", flash_size: "16MB" },
+            partition: { label: "nvs", offset: "0x9000", size: 20480 },
+            known_device: null,
+            nvs: {
+              wifi_slots: [{ slot: 0, ssid: "HomeNet", has_password: true, channel: 6 }],
+              ota_url: state.builtin.ota_url,
+              max_tx_power: 0,
+              remember_bssid: false,
+              sleep_mode: false,
+              sleep_dim_min: 0,
+              sleep_off_min: 0,
+            },
+          };
+        case "write":
+          assert.equal(input.confirmed, true, "写入板子前必须完成内联确认");
+          assert.equal(input.expected_mac, "dc:da:0c:11:22:33");
+          return {
+            device: { chip: "esp32s3", mac_address: "dc:da:0c:11:22:33", flash_size: "16MB" },
+            partition: { label: "nvs", offset: "0x9000", size: 20480 },
+            known_device: { device_id: "dc:da:0c:11:22:33", name: "ESP32-S3", status: "allowed", model: "esp32s3", firmware_version: "usb" },
+            nvs: {
+              wifi_slots: [
+                ...(input.patch?.new_wifi?.ssid ? [{ slot: 1, ssid: input.patch.new_wifi.ssid, has_password: Boolean(input.patch.new_wifi.password), channel: null }] : []),
+                { slot: 0, ssid: "HomeNet", has_password: true, channel: 6 },
+              ],
+              ota_url: input.patch?.ota_url ?? state.builtin.ota_url,
+              max_tx_power: input.patch?.max_tx_power ?? 0,
+              remember_bssid: Boolean(input.patch?.remember_bssid),
+              sleep_mode: Boolean(input.patch?.sleep_mode),
+              sleep_dim_min: input.patch?.sleep_dim_min ?? 0,
+              sleep_off_min: input.patch?.sleep_off_min ?? 0,
+            },
+          };
+        default:
+          throw new Error(`Unexpected voice_usb_provision action: ${input?.action}`);
+      }
+    },
   };
   await page.exposeFunction("__fakeInvoke", async (command, args = {}) => {
     calls.push({ command, args: structuredClone(args) });
@@ -381,6 +430,7 @@ try {
   assert.match(await page.locator("#voice-wake-volume-mode-hint").innerText(), /页面顶部“语音链路”/, "非内置链路提示到顶部语音链路卡片切换");
   assert.equal(await page.locator("#voice-group-wake-word").count(), 0, "非内置链路只提示切换，不渲染唤醒词入口");
   assert.equal(await page.locator("#voice-group-builtin-devices").count(), 0, "非内置链路不渲染内置设备列表");
+  assert.equal(await page.locator("#voice-group-device-usb-provision").count(), 0, "非内置链路不渲染 USB 一键配网");
   await tab("服务").click();
   assert.equal(await page.getByRole("tab", { name: /^模型/ }).count(), 0, "官方链路的模型在小智控制台配置");
   assert.equal(await page.getByRole("tab", { name: /^隐私与家居/ }).count(), 0, "非内置链路不显示隐私与家居标签");
@@ -801,9 +851,10 @@ try {
   if (process.env.VOICE_QA_DIR) await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-privacy-tab-open.png") });
   await memoryItem.locator("> summary").click();
   assert.equal(await memoryItem.evaluate((el) => el.open), false, "再点收起");
-  // n67：固件升级在“设备”标签，收起时不挂载（不后台轮询），展开后就地显示固件卡
+  // n67：固件升级与 USB 一键配网在“设备”标签，收起时不挂载（不后台轮询/扫串口），展开后就地显示
   await tab("设备").click();
   assert.equal(calls.filter((call) => call.command === "voice_firmware_status").length, 0, "固件组收起时不查询");
+  assert.equal(calls.filter((call) => call.command === "voice_usb_provision").length, 0, "USB 配网组收起时不扫描串口");
   await openGroup("device-firmware");
   await page.locator("#voice-group-device-firmware #voice-firmware-card").waitFor();
   assert.ok(calls.some((call) => call.command === "voice_firmware_status"), "展开后在主窗口直接读取固件状态");
@@ -874,9 +925,78 @@ try {
   await page.locator("#voice-settings-save-builtinMqtt").click();
   await mqttGroup.getByText(/小智要再重启一次/).waitFor();
   assert.deepEqual(last("voice_save_settings").args.settings, { builtin_mqtt_enabled: true, builtin_mqtt_port: 1883, builtin_udp_port: 8888 });
-  await tab("设备").click();
+  // 服务页“USB 一键配网写地址”无弹窗跳转：自动切到“设备”标签、展开 USB 折叠栏、完成读取与内联两步确认写入
+  assert.equal(await page.locator("#voice-devices-usb-provision").count(), 0, "已连接设备内不再重复放 USB 配网按钮");
+  await page.locator("#voice-builtin-usb-provision").click();
+  await page.locator("#voice-page-tab-devices[aria-selected=true]").waitFor();
+  await page.locator("#xiaozhi-usb-card").waitFor();
+  assert.equal(await page.locator('[role="dialog"], [role="alertdialog"], .modal-backdrop').count(), 0, "USB 配网卡片无模态弹窗");
+  const usbTheme = await page.evaluate(() => {
+    const card = document.querySelector("#xiaozhi-usb-card");
+    const step1 = card?.querySelector(".xiaozhi-usb-serial-bar");
+    const body = card?.parentElement;
+    const bodyStyle = body ? getComputedStyle(body) : null;
+    const innerW = body && bodyStyle
+      ? body.clientWidth - parseFloat(bodyStyle.paddingLeft) - parseFloat(bodyStyle.paddingRight)
+      : 0;
+    return {
+      cardBg: card ? getComputedStyle(card).backgroundColor : "",
+      step1Bg: step1 ? getComputedStyle(step1).backgroundColor : "",
+      cardW: card ? Math.round(card.getBoundingClientRect().width) : 0,
+      innerW: Math.round(innerW),
+    };
+  });
+  assert.notEqual(usbTheme.cardBg, "rgb(255, 255, 255)", "USB 配网卡片不用突兀白底，融入深色背景");
+  assert.notEqual(usbTheme.step1Bg, "rgb(245, 247, 250)", "步骤条使用 MOSS 曜石暗色半透明表面");
+  assert.ok(Math.abs(usbTheme.cardW - usbTheme.innerW) <= 4, `USB 配网卡片铺满分组宽度与上方卡片对齐 (${usbTheme.cardW} vs ${usbTheme.innerW})`);
+  await page.waitForFunction(() => document.querySelector("#xiaozhi-usb-port-select")?.value === "/dev/cu.usbmodem14201");
+  await page.waitForFunction(() => document.activeElement?.id === "xiaozhi-usb-port-select");
   const deviceOrder = await page.locator("#voice-devices-panel > .voice-group").evaluateAll((els) => els.map((el) => el.id));
-  assert.deepEqual(deviceOrder, ["voice-group-builtin-devices", "voice-group-wake-word", "voice-group-screen-preview", "voice-group-device-firmware"], "设备标签：已连接设备 → 唤醒词 → 副屏预览 → 固件升级");
+  assert.deepEqual(deviceOrder, ["voice-group-builtin-devices", "voice-group-wake-word", "voice-group-screen-preview", "voice-group-device-firmware", "voice-group-device-usb-provision"], "设备标签：已连接设备 → 唤醒词 → 副屏预览 → 固件升级 → USB 一键配网写地址");
+  await page.locator("#xiaozhi-usb-inspect").click();
+  await page.locator("#xiaozhi-usb-card .xiaozhi-usb-board-chip").getByText("esp32s3").waitFor();
+  await page.locator("#xiaozhi-usb-card").getByText("HomeNet").waitFor();
+  if (process.env.VOICE_QA_DIR) {
+    await page.locator("#xiaozhi-usb-card").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(process.env.VOICE_QA_DIR, "voice-usb-inline-inspected.png") });
+  }
+  // 删除一条已存 Wi-Fi 再切换串口，应连带清空上一块板子的已保存列表与“恢复读取前顺序”
+  await page.getByRole("button", { name: "删除 HomeNet" }).click();
+  await page.locator("#xiaozhi-usb-card").getByRole("button", { name: "恢复读取前顺序" }).waitFor();
+  await page.locator("#xiaozhi-usb-port-select").selectOption("/dev/cu.usbserial-ALT2");
+  assert.equal(await page.locator("#xiaozhi-usb-card .xiaozhi-usb-board-chip").count(), 0, "切换串口后清空旧板子芯片信息");
+  assert.equal(await page.locator("#xiaozhi-usb-card .xz-saved-item").count(), 0, "切换串口后清空旧板子已存 Wi-Fi 列表");
+  assert.equal(await page.locator("#xiaozhi-usb-card").getByRole("button", { name: "恢复读取前顺序" }).count(), 0, "切换串口后不再显示“恢复读取前顺序”死按钮");
+  await page.locator("#xiaozhi-usb-port-select").selectOption("/dev/cu.usbmodem14201");
+  await page.locator("#xiaozhi-usb-inspect").click();
+  await page.locator("#xiaozhi-usb-card .xiaozhi-usb-board-chip").getByText("esp32s3").waitFor();
+  await page.locator("#xiaozhi-wifi-ssid").fill("StudioNet");
+  const writeCountBefore = calls.filter((c) => c.command === "voice_usb_provision" && c.args?.input?.action === "write").length;
+  await page.locator("#xiaozhi-usb-write-wifi").click();
+  await page.locator("#xiaozhi-usb-confirm-box").waitFor();
+  assert.equal(await page.locator('[role="dialog"], [role="alertdialog"], .modal-backdrop').count(), 0, "写入确认走卡片内联确认条，不弹框");
+  assert.equal(calls.filter((c) => c.command === "voice_usb_provision" && c.args?.input?.action === "write").length, writeCountBefore, "展开内联确认前未直接写 Flash");
+  await page.locator("#xiaozhi-usb-cancel-write").click();
+  assert.equal(await page.locator("#xiaozhi-usb-confirm-box").count(), 0, "点击内联取消按钮可撤回待确认状态");
+  await page.locator("#xiaozhi-usb-write-wifi").click();
+  await page.locator("#xiaozhi-usb-confirm-box").waitFor();
+  await page.locator("#xiaozhi-wifi-ssid").fill("StudioNet5G");
+  assert.equal(await page.locator("#xiaozhi-usb-confirm-box").count(), 0, "修改表单字段自动撤销待确认状态");
+  await page.locator("#xiaozhi-usb-write-wifi").click();
+  await page.locator("#xiaozhi-usb-confirm-write").click();
+  await page.locator('#xiaozhi-usb-card [role="status"]').getByText(/已写入 NVS 并重启小智板子/).waitFor();
+  const writeArgs = last("voice_usb_provision").args.input;
+  assert.equal(writeArgs.action, "write");
+  assert.equal(writeArgs.confirmed, true);
+  assert.equal(writeArgs.expected_mac, "dc:da:0c:11:22:33");
+  assert.equal(writeArgs.patch.new_wifi.ssid, "StudioNet5G");
+  assert.equal(await page.locator('[role="dialog"], [role="alertdialog"], .modal-backdrop').count(), 0, "整个 USB 配网写入过程零弹窗");
+  // 收起后再直接点开 USB 折叠栏标题，同样原地展开且扫描完成后自动选中串口
+  await page.locator("#voice-group-device-usb-provision > .voice-group-h").click();
+  await page.locator("#xiaozhi-usb-card").waitFor({ state: "detached" });
+  await page.locator("#voice-group-device-usb-provision > .voice-group-h").click();
+  await page.locator("#xiaozhi-usb-card").waitFor();
+  await page.waitForFunction(() => document.querySelector("#xiaozhi-usb-port-select")?.value === "/dev/cu.usbmodem14201");
   await page.locator("#voice-builtin-devices").getByRole("button", { name: "控制与信息" }).click();
   const ctrlBox = page.locator("#voice-device-controls-aa\\:bb\\:cc\\:11\\:22\\:33");
   await ctrlBox.waitFor();

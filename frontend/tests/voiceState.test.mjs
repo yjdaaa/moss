@@ -73,7 +73,9 @@ import {
   localModelDeleteText,
   selectLocalModel,
   selectedVoices,
+  VOICE_TIMING_STAGES,
   voiceTimingReport,
+  pipelineTestPlan,
   localSettingsForm,
   localSettingsError,
   localSettingsPayload,
@@ -305,7 +307,8 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.equal(localModelView(null).text, "未下载");
   const form = localSettingsForm({ asr: true, tts_speaker: 3, tts_speed: 1.2 });
   assert.deepEqual(form, {
-    asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
+    asr: true, tts: false, vad: false, denoise: false, turn: false,
+    vad_model: "silero_vad", denoise_model: "gtcrn_simple", turn_model: "smart_turn_v3", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: "",
     asr_homophone_fix: true, custom_asr_corrections: "", persona_style: "workshop", persona_risk_notes: false, persona_prompt: "", custom_personas: "[]", screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
@@ -317,7 +320,8 @@ test("NV6: 本地模型状态、设置表单与校验", () => {
   assert.match(localSettingsError({ ...form, tts_speed: "3" }), /0.5/);
   assert.match(localSettingsError({ ...form, mirror: "ftp://x" }), /http/);
   assert.deepEqual(localSettingsPayload({ ...form, mirror: " https://m.test/x " }), {
-    asr: true, tts: false, vad: false, vad_model: "silero_vad", asr_model: "sense_voice", tts_model: "kokoro",
+    asr: true, tts: false, vad: false, denoise: false, turn: false,
+    vad_model: "silero_vad", denoise_model: "gtcrn_simple", turn_model: "smart_turn_v3", asr_model: "sense_voice", tts_model: "kokoro",
     read_only_shortcuts: true, asr_beam_search: true, job_done_announce: true, llm_fast_reply: true, custom_hotwords: [],
     asr_homophone_fix: true, custom_asr_corrections: [], persona_style: "workshop", persona_risk_notes: false, persona_prompt: "", custom_personas: [], screen_preview_sync: true, screen_card_style: "moss_hud",
     jev_filter_enabled: false, jev_model: "typesafe/jev-1.14", jev_unfinished_hold: true, jev_fast_route: true, jev_tool_prune: true, jev_memory_filter: true,
@@ -358,21 +362,27 @@ test("本地模型可选：分组、改选合成模型换默认音色、按模�
   const models = [
     { id: "silero_vad", kind: "vad" },
     { id: "ten_vad", kind: "vad" },
+    { id: "gtcrn_simple", kind: "denoise" },
+    { id: "smart_turn_v3", kind: "turn" },
     { id: "sense_voice", kind: "asr" },
     { id: "x_asr_streaming", kind: "asr", streaming: true },
     { id: "kokoro", kind: "tts", voices: { default: 50, max: 53, hint: "45–48 中文女声" } },
     { id: "kokoro_v11", kind: "tts", voices: { default: 3, max: 102, hint: "3–57 中文女声" } },
     { id: "matcha_zh_en", kind: "tts" },
+    { id: "qwen3_tts_0_6b", kind: "tts", voices: { default: 0, max: 8, hint: "0 Vivian" } },
+    { id: "zipvoice_distill", kind: "tts", voices: { default: 0, max: 1, hint: "0 标准" } },
     { id: "qwen3_vl_2b", kind: "vision" },
   ];
   const groups = localModelGroups(models);
   assert.deepEqual(groups.map((group) => [group.kind, group.models.map((model) => model.id)]), [
     ["vad", ["silero_vad", "ten_vad"]],
+    ["denoise", ["gtcrn_simple"]],
+    ["turn", ["smart_turn_v3"]],
     ["asr", ["sense_voice", "x_asr_streaming"]],
-    ["tts", ["kokoro", "kokoro_v11", "matcha_zh_en"]],
+    ["tts", ["kokoro", "kokoro_v11", "matcha_zh_en", "qwen3_tts_0_6b", "zipvoice_distill"]],
     ["vision", ["qwen3_vl_2b"]],
   ]);
-  assert.deepEqual(localModelGroups(null).map((group) => group.models.length), [0, 0, 0, 0], "判停 / 识别 / 合成 / 视觉理解四组");
+  assert.deepEqual(localModelGroups(null).map((group) => group.models.length), [0, 0, 0, 0, 0, 0], "判停 / 降噪 / 语义判停 / 识别 / 合成 / 视觉理解六组");
 
   const form = localSettingsForm({ tts: true, tts_speaker: 50 });
   // 识别、判停改选不动音色
@@ -382,6 +392,15 @@ test("本地模型可选：分组、改选合成模型换默认音色、按模�
   const v11 = selectLocalModel(form, models, "tts", "kokoro_v11");
   assert.deepEqual([v11.tts_model, v11.tts_speaker], ["kokoro_v11", "3"]);
   assert.equal(selectLocalModel(v11, models, "tts", "kokoro_v11").tts_speaker, "3");
+  // 切到 Qwen3-TTS / ZipVoice 且原音色超限时自动归位默认音色 0
+  const qwenTts = selectLocalModel(form, models, "tts", "qwen3_tts_0_6b");
+  assert.deepEqual([qwenTts.tts_model, qwenTts.tts_speaker], ["qwen3_tts_0_6b", "0"]);
+  const qwenOutOfRange = selectLocalModel({ ...qwenTts, tts_speaker: "50" }, models, "tts", "qwen3_tts_0_6b");
+  assert.equal(qwenOutOfRange.tts_speaker, "0");
+  const zipTts = selectLocalModel({ ...qwenTts, tts_speaker: "8" }, models, "tts", "zipvoice_distill");
+  assert.deepEqual([zipTts.tts_model, zipTts.tts_speaker], ["zipvoice_distill", "0"]);
+  assert.equal(localSettingsError({ ...zipTts, tts_speaker: "1" }, models), "");
+  assert.match(localSettingsError({ ...zipTts, tts_speaker: "2" }, models), /0 ~ 1/);
   // 单音色模型：保留编号（后端忽略），不检查范围
   const matcha = selectLocalModel(v11, models, "tts", "matcha_zh_en");
   assert.deepEqual([matcha.tts_model, matcha.tts_speaker], ["matcha_zh_en", "3"]);
@@ -392,6 +411,30 @@ test("本地模型可选：分组、改选合成模型换默认音色、按模�
   assert.match(localSettingsError({ ...v11, tts_speaker: "103" }, models), /0 ~ 102/);
   assert.match(localSettingsError({ ...form, tts_speaker: "54" }, models), /0 ~ 53/);
   assert.equal(selectedVoices(form, models).default, 50);
+
+  // denoise / turn 开关默认值与往返、LOCAL_MODEL_KEYS、删除文案、Qwen3-TTS 自带引擎自检放行与耗时阶段
+  assert.equal(form.denoise, false);
+  assert.equal(form.turn, false);
+  const dtPayload = localSettingsPayload({ ...form, denoise: true, turn: true });
+  assert.equal(dtPayload.denoise, true);
+  assert.equal(dtPayload.turn, true);
+  assert.equal(dtPayload.denoise_model, "gtcrn_simple");
+  assert.equal(dtPayload.turn_model, "smart_turn_v3");
+  assert.ok(LOCAL_MODEL_KEYS.includes("denoise"));
+  assert.ok(LOCAL_MODEL_KEYS.includes("turn"));
+  assert.equal(VOICE_TIMING_STAGES.smart_turn, "语义判停");
+  assert.match(localModelDeleteText({ id: "qwen3_tts_0_6b", label: "Qwen3-TTS" }, models, {}), /speech/);
+
+  const testSteps = pipelineTestPlan({
+    models: { asr: { configured: true }, llm: { configured: true }, tts: { configured: true } },
+    local: {
+      helper_found: false,
+      settings: { vad: false, asr: false, tts: true, tts_model: "qwen3_tts_0_6b" },
+      models: [{ id: "qwen3_tts_0_6b", kind: "tts", label: "Qwen3-TTS", installed: true }],
+    },
+  });
+  const ttsStep = testSteps.find((s) => s.key === "tts");
+  assert.equal(ttsStep.ok, true, "Qwen3-TTS 使用独立 speech 运行时，不因缺 moss-voice-local 报错");
 });
 
 test("NV7: 豆包流式的表单、校验与指纹", () => {
@@ -1770,4 +1813,31 @@ test("整链连贯测试视图与麦克风单声道 WAV 打包编码（2026-11-1
   const errView = chainTestPipelineView(null, new Error("后台未启动"));
   assert.equal(errView.summary.ok, false);
   assert.match(errView.summary.text, /后台未启动/);
+});
+
+test("pipelineTestPlan 检查 Qwen3-TTS 本地 speech_env 就绪状态（n93）", async () => {
+  const { pipelineTestPlan } = await import("../src/voiceState.js");
+  const baseStatus = {
+    local: {
+      helper_found: false,
+      settings: { tts: true, tts_model: "qwen3_tts_0_6b" },
+      models: [{ id: "qwen3_tts_0_6b", kind: "tts", label: "Qwen3-TTS 0.6B", installed: true }],
+    },
+  };
+  const notReady = Object.fromEntries(
+    pipelineTestPlan({
+      ...baseStatus,
+      local: { ...baseStatus.local, speech_env: { ready: false, summary: "尚未下载 speech.cpp 运行时" } },
+    }).map((s) => [s.key, s]),
+  );
+  assert.equal(notReady.tts.ok, false);
+  assert.match(notReady.tts.detail, /speech\.cpp/);
+
+  const ready = Object.fromEntries(
+    pipelineTestPlan({
+      ...baseStatus,
+      local: { ...baseStatus.local, speech_env: { ready: true, summary: "Apple Metal 就绪" } },
+    }).map((s) => [s.key, s]),
+  );
+  assert.equal(ready.tts.ok, true);
 });

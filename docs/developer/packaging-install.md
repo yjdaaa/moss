@@ -63,7 +63,7 @@
 | --- | --- |
 | helper EXE 收集 | `scripts/build-windows-installer.ps1` 已独立构建 Windows helper，复制为 `binaries/moss-voice-local-x86_64-pc-windows-msvc.exe`；overlay `tauri.voice-sidecar.conf.json` 已声明 externalBin。配置/脚本存在不证明成品含该文件 |
 | 常规与专用构建 | 常规 `cargo tauri build` 不自动构建/收集独立 GPL helper；带 helper NSIS 必须走专用脚本和 overlay。专用脚本已统一将 helper 输出写入根 `target/<triple>/release`，但原项目要求的 `target/release` 常规发布构建仍独立验收；专用 triple 产物与项目要求的 `target/release/moss-desktop.exe` 常规产物分别记录 |
-| 安装位置与启动 | 成品应将 `moss-voice-local.exe` 放在 `moss-desktop.exe` 同目录，宿主按 current_exe 父目录寻找并做 hello 协议校验；不回退任意 PATH 同名程序。`apps/moss-voice-local/build.rs`（以及独立后端 `apps/moss-host/build.rs`）在 Windows MSVC 下与 `moss-desktop.exe` 一致静态链接 `libvcruntime` / `libcmt`，干净 Windows 新机无需预装 Visual C++ 运行库即可启动；老版 Win10 缺 WebView2 时由 `tauri.conf.json` 的 `embedBootstrapper` 在安装期间自动联网下载补齐。当前协议 4 |
+| 安装位置与启动 | 成品应将 `moss-voice-local.exe` 放在 `moss-desktop.exe` 同目录，宿主按 current_exe 父目录寻找并做 hello 协议校验；不回退任意 PATH 同名程序。`apps/moss-voice-local/build.rs`（以及独立后端 `apps/moss-host/build.rs`）在 Windows MSVC 下与 `moss-desktop.exe` 一致静态链接 `libvcruntime` / `libcmt`，干净 Windows 新机无需预装 Visual C++ 运行库即可启动；老版 Win10 缺 WebView2 时由 `tauri.conf.json` 的 `embedBootstrapper` 在安装期间自动联网下载补齐。当前协议 6 |
 | 源码与许可 | 脚本已暂存 helper 源码、path 依赖 `moss-voice-local-proto`、Cargo.lock、COPYING 和初版 THIRD_PARTY_NOTICES；overlay 已配置 `bundle.resources` 至 `licenses/voice-local/`。**上游 sherpa-onnx/espeak-ng 等静态依赖的完整分发所需对应源码/许可证和洁净机安装内资源验收尚待完成**，不能把初版 notices 当成合规证明 |
 | 成品验证 | 脚本新增发布清单生成，但本次构建进程状态丢失时清单尚未产出，不能把新 NSIS 文件出现视为构建通过；须复测同一构建的产物与源码/许可资源。后续补组件版本、协议、schema、大小/hash；解包检查 helper/资源并验证源码构建；经授权在干净系统完成新安装、升级、错误 helper、正常退出和卸载。缺这类证据仍为 partial/unverified |
 

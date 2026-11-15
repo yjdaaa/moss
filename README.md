@@ -99,6 +99,7 @@ Prerequisites:
 - **Rust** `1.98+` (`rustup` stable toolchain)
 - **Node.js** `20+` and `npm`
 - **Platform SDKs**: WebView2 on Windows, Xcode Command Line Tools on macOS (`11.0+`), and Android SDK/NDK if building the Android APK
+- **CMake** `3.x` for desktop builds: the built-in voice service compiles the official libopus from source (`winget install Kitware.CMake` / `brew install cmake`; on Windows the copy bundled with Visual Studio's C++ workload is detected automatically by `scripts/quick-update-desktop.ps1`)
 
 ```bash
 # Clone the repository

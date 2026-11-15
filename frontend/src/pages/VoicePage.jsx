@@ -15,6 +15,7 @@ import {
   LiveDebugTraces,
   LocalModelsGroup,
   PrivateSettingsEntry,
+  XiaozhiUsbProvisionCard,
   useBuiltinStatus,
 } from "../components/VoiceBuiltinCard.jsx";
 import VoiceMusicCard from "../components/VoiceMusicCard.jsx";
@@ -898,6 +899,19 @@ export function VoicePage({ mcpStatus = null, approvalCount = 0 }) {
               <VoiceGroup id="device-firmware" title="固件升级" summary="导入自己编译的固件，逐台确认推送" lazy>
                 <VoiceFirmwareCard />
               </VoiceGroup>
+              {mode === "builtin" && (
+                <VoiceGroup
+                  id="device-usb-provision"
+                  title="USB 一键配网写地址"
+                  summary="插线直写小智 Wi-Fi、本机地址与设备密钥（免手机热点）"
+                  lazy
+                >
+                  <XiaozhiUsbProvisionCard
+                    serviceStatus={builtin.status}
+                    onSetStatus={builtin.setStatus}
+                  />
+                </VoiceGroup>
+              )}
             </div>
           </VoiceTabPanel>
 

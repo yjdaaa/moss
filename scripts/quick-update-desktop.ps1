@@ -253,6 +253,24 @@ function Resolve-EffectiveMossVersion([string]$explicitVer, [string]$defaultVer)
     return $best
 }
 
+# 2026-11-14 n94: Built-in voice Opus codec uses bundled libopus (compiled from C source) and requires CMake.
+# When cmake.exe is not in PATH, fall back to Visual Studio's bundled CMake before failing with install instructions.
+function Ensure-CMake {
+    if ($env:CMAKE -and (Test-Path $env:CMAKE)) { return }
+    if (Get-Command cmake.exe -CommandType Application -ErrorAction SilentlyContinue) { return }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path $vswhere) {
+        $found = @(& $vswhere -latest -products * -find 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' 2>$null) | Select-Object -First 1
+        if ($found -and (Test-Path $found)) {
+            $env:CMAKE = $found
+            Write-Host "[MOSS QuickUpdate] Using Visual Studio bundled CMake: $found" -ForegroundColor Cyan
+            return
+        }
+    }
+    throw 'CMake not found: required to build libopus for the built-in voice service. Install it with "winget install Kitware.CMake" (or add the "C++ CMake tools for Windows" component in Visual Studio Installer), then reopen the terminal.'
+}
+Ensure-CMake
+
 $effectiveVersion = Resolve-EffectiveMossVersion $Version $confVersion
 $activeHelperSource = $null
 $startedAt = (Get-Date).AddSeconds(-2)

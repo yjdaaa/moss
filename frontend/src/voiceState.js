@@ -1206,6 +1206,8 @@ export function localModelDeleteText(model, models, local) {
   let extra = "";
   if (model?.id === "laya_multilingual" && local?.laya_env?.managed) {
     extra = "会同时删除 MOSS 自动创建的 Laya Python 运行环境（含 PyTorch，可能有几 GB），下次使用时重新准备。";
+  } else if (model?.id === "qwen3_tts_0_6b") {
+    extra = "会同时删除 MOSS 自动下载的语音推理引擎 speech。";
   } else if (model?.kind === "jev" && model?.id !== "laya_multilingual") {
     const otherOneJev = (Array.isArray(models) ? models : []).some(
       (item) => item.kind === "jev" && item.id !== "laya_multilingual" && item.id !== model.id && (item.installed || LOCAL_BUSY_STATES.has(item.progress?.state)),
@@ -1217,9 +1219,11 @@ export function localModelDeleteText(model, models, local) {
   return `删除本地模型“${label}”？${extra}需要时可以重新下载。`;
 }
 
-/** 本地模型的三个类别与默认模型（开关与选用统一由顶部四栏下拉框控制）。 */
+/** 本地模型的六个类别与默认模型（判停 / 识别 / 合成由顶部下拉框控制；降噪与语义判停在本地模型表按需开启）。 */
 export const LOCAL_KINDS = [
   { kind: "vad", title: "拾音判停", fallback: "silero_vad" },
+  { kind: "denoise", title: "前端降噪", fallback: "gtcrn_simple" },
+  { kind: "turn", title: "语义判停", fallback: "smart_turn_v3" },
   { kind: "asr", title: "语音识别", fallback: "sense_voice" },
   { kind: "tts", title: "语音合成", fallback: "kokoro" },
   { kind: "vision", title: "视觉理解", fallback: "qwen3_vl_2b" },
@@ -1259,7 +1263,11 @@ export function localSettingsForm(settings) {
     screen_card_style: value.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud",
     tts: Boolean(value.tts),
     vad: Boolean(value.vad),
+    denoise: Boolean(value.denoise),
+    turn: Boolean(value.turn),
     vad_model: value.vad_model || "silero_vad",
+    denoise_model: value.denoise_model || "gtcrn_simple",
+    turn_model: value.turn_model || "smart_turn_v3",
     asr_model: value.asr_model || "sense_voice",
     tts_model: value.tts_model || "kokoro",
     tts_speaker: String(value.tts_speaker ?? 50),
@@ -1268,7 +1276,7 @@ export function localSettingsForm(settings) {
   };
 }
 
-/** 改选某类模型；改选多音色合成模型或原音色落在非中文区间时，音色编号自动换成该模型的默认中文音色。 */
+/** 改选某类模型；改选多音色合成模型或原音色落在非中文区间 / 超出上限时，音色编号自动换成该模型的默认中文音色。 */
 export function selectLocalModel(form, models, kind, id) {
   const next = { ...form, [`${kind}_model`]: id };
   const model = (Array.isArray(models) ? models : []).find((item) => item.id === id);
@@ -1276,7 +1284,8 @@ export function selectLocalModel(form, models, kind, id) {
     const spk = Number(form?.tts_speaker);
     const outOfChineseRange =
       (id === "kokoro" && !(Number.isInteger(spk) && spk >= 45 && spk <= 52)) ||
-      (id === "kokoro_v11" && !(Number.isInteger(spk) && spk >= 3 && spk <= 102));
+      (id === "kokoro_v11" && !(Number.isInteger(spk) && spk >= 3 && spk <= 102)) ||
+      (Boolean(model?.voices) && (!Number.isInteger(spk) || spk < 0 || spk > model.voices.max));
     if ((id !== form.tts_model || outOfChineseRange) && model?.voices) {
       next.tts_speaker = String(model.voices.default);
     } else if (outOfChineseRange) {
@@ -1390,7 +1399,11 @@ export function localSettingsPayload(form) {
     screen_card_style: form.screen_card_style === "goggle_bot" ? "goggle_bot" : "moss_hud",
     tts: Boolean(form.tts),
     vad: Boolean(form.vad),
+    denoise: Boolean(form.denoise),
+    turn: Boolean(form.turn),
     vad_model: form.vad_model,
+    denoise_model: form.denoise_model || "gtcrn_simple",
+    turn_model: form.turn_model || "smart_turn_v3",
     asr_model: form.asr_model,
     tts_model: form.tts_model,
     tts_speaker: Number(form.tts_speaker),
@@ -1401,7 +1414,7 @@ export function localSettingsPayload(form) {
 
 export const VOICE_TIMING_STAGES = {
   barge_in: "自然插话确认",
-  recording_start: "开始拾音", vad_start: "VAD 确认开始", vad_end: "VAD 判停", utterance_end: "说完 / 松开",
+  recording_start: "开始拾音", vad_start: "VAD 确认开始", vad_end: "VAD 判停", utterance_end: "说完 / 松开", smart_turn: "语义判停",
   interim_stop: "中间结果命中停止", final_asr: "最终识别", jev_filter: "Jev 筛选分流", fast_route: "快捷路由",
   first_llm_delta: "模型首字", first_sentence: "第一句切出", first_synthesis_start: "首次合成开始",
   first_synthesis_ready: "首段音频就绪", first_audio_frame: "首帧发给设备", turn_end: "本轮结束",
@@ -1729,7 +1742,7 @@ export function settingsGroupPayload(group, form) {
  * n69（2026-11-07）：`screen_card_style` 只在“设备 › 副屏预览”点选即存，`jev_filter_enabled` 只由“模型”标签顶部第 3 栏切换，
  * 两者都不再属于对话体验组的草稿与保存载荷（避免两处编辑同一个键）。
  */
-export const LOCAL_MODEL_KEYS = ["vad", "vad_model", "asr", "asr_model", "tts", "tts_model", "tts_speaker", "tts_speed", "mirror"];
+export const LOCAL_MODEL_KEYS = ["vad", "vad_model", "denoise", "denoise_model", "turn", "turn_model", "asr", "asr_model", "tts", "tts_model", "tts_speaker", "tts_speed", "mirror"];
 export const EXPERIENCE_KEYS = [
   "read_only_shortcuts",
   "asr_beam_search",
@@ -2984,7 +2997,16 @@ export function pipelineTestPlan(status) {
     if (!model?.installed) {
       return { key, kind: "static", ok: false, detail: `本地${label}模型“${model?.label || "未选择"}”还没下载：到下方“本地模型”下载，或在上方改回${key === "vad" ? "内置能量判停" : "云端"}` };
     }
-    if (!helperFound) {
+    if (model.id === "qwen3_tts_0_6b" && status?.local?.speech_env?.ready === false) {
+      const summary = String(status?.local?.speech_env?.summary || "").trim();
+      return {
+        key,
+        kind: "static",
+        ok: false,
+        detail: summary ? `Qwen3-TTS 本地运行时尚未就绪：${summary}` : "找不到 Qwen3-TTS 本地运行时 speech，本地合成无法运行",
+      };
+    }
+    if (!helperFound && model.id !== "qwen3_tts_0_6b") {
       return { key, kind: "static", ok: false, detail: "找不到本地模型程序 moss-voice-local（应与 MOSS 放在同一目录），本地模型无法运行" };
     }
     return { key, kind: "static", ok: true, detail: `本地 ${model.label} 已下载（本地模型只检查是否就绪，不做试跑）` };

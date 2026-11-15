@@ -173,7 +173,8 @@ test("断点续雕二次确认文案、异步 showPrompt 输入弹窗与前端�
   const homeSrc = readFileSync(new URL("../src/pages/HomePage.jsx", import.meta.url), "utf8");
   const drawSrc = readFileSync(new URL("../src/pages/DrawPage.jsx", import.meta.url), "utf8");
   const appDialogSrc = readFileSync(new URL("../src/components/AppDialog.jsx", import.meta.url), "utf8");
-  const voiceBuiltinSrc = readFileSync(new URL("../src/components/VoiceBuiltinCard.jsx", import.meta.url), "utf8");
+  // Colab 联动栏实现在 voice-builtin/ 下（2026-11-13 从 VoiceBuiltinCard.jsx 原样搬出）
+  const voiceBuiltinSrc = readFileSync(new URL("../src/components/voice-builtin/ColabBridgeSection.jsx", import.meta.url), "utf8");
   assert.doesNotMatch(homeSrc, /window\.prompt\b/, "工作台不得使用阻塞式 window.prompt");
   assert.doesNotMatch(drawSrc, /window\.prompt\b/, "创作画板不得使用阻塞式 window.prompt");
   assert.match(homeSrc, /selectEl\.value = serialPort \|\| ""/, "取消手动输入串口后原生 select 必须立即回退避免卡在 __custom__");

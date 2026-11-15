@@ -45,6 +45,8 @@ export const voiceApi = {
   wakewordStatus: () => invokeVoice("voice_wakeword_status"),
   wakewordImportBase: () => invokeVoice("voice_wakeword_import_base"),
   wakewordManage: (input) => invokeVoice("voice_wakeword_manage", { input }),
+  // USB 串口一键给小智配网写地址（仅打包私密窗口）
+  usbProvision: (input) => invokeVoice("voice_usb_provision", { input }),
   mcpStatus: () => invokeVoice("voice_mcp_status"),
   mcpSave: (input) => invokeVoice("voice_mcp_save", { input }),
   mcpDelete: (name, revision, confirmed) => invokeVoice("voice_mcp_delete", { name, revision, confirmed }),

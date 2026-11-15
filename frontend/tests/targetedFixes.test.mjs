@@ -361,7 +361,8 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
   const matLab = readFileSync(path.join(srcRoot, "pages/MaterialLabPage.jsx"), "utf8");
   assert.match(matLab, /<option value="__custom__">✎ 手动输入串口…<\/option>/, "材料实验室串口下拉须支持手动输入串口号");
 
-  const builtinCard = readFileSync(path.join(srcRoot, "components/VoiceBuiltinCard.jsx"), "utf8");
+  // 顶部混搭栏与录真话测实现在 voice-builtin/ 下（2026-11-13 从 VoiceBuiltinCard.jsx 原样搬出）
+  const builtinCard = readFileSync(path.join(srcRoot, "components/voice-builtin/BuiltinModelGroups.jsx"), "utf8");
   assert.match(builtinCard, /if \(micOpeningRef\.current\)/, "录真话测在系统授权弹窗期间须防双击重入");
   assert.match(builtinCard, /ctx\.state === "suspended"[\s\S]{0,80}ctx\.resume\(\)/, "新建 AudioContext 处于挂起态时须调用 resume()");
   assert.match(builtinCard, /stopMicSession\(true\)/, "切换模型来源与卸载时须中止在途录音与麦克风授权");
