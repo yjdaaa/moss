@@ -24,7 +24,9 @@ import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import {
   actualParamsText,
+  DEFAULT_IMAGE_EXTRAS,
   IMAGE_MODE_OPTIONS,
+  imageModeFields,
   imageParamsPayload,
   isWorkbenchPreviewStale,
   MANUAL_LIMITS,
@@ -142,6 +144,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [imageWidthMm, setImageWidthMm] = useState("");
   const [imageHeightMm, setImageHeightMm] = useState("");
   const [imageMode, setImageMode] = useState("auto");
+  // 2026-11-16（r38）LightBurn 对齐的图片高级项：反相、直通、点宽补偿、网点网格 / 角度、灰度最小功率
+  const [imageExtras, setImageExtras] = useState(DEFAULT_IMAGE_EXTRAS);
+  const setImageExtra = (key, value) => setImageExtras((prev) => ({ ...prev, [key]: value }));
+  const imageFields = imageModeFields(imageMode);
 
   const [uploadedGcodePath, setUploadedGcodePath] = useState("");
   const [uploadedGcodeName, setUploadedGcodeName] = useState("");
@@ -197,6 +203,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     imageWidthMm,
     imageHeightMm,
     imageMode,
+    imageExtras,
     uploadedGcodePath,
     selectedMaterial,
     selectedThickness,
@@ -614,9 +621,10 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           widthMm: imageWidthMm,
           heightMm: imageHeightMm,
           imageMode,
+          extras: imageExtras,
         });
         if (imgExtra.error) {
-          showAlert(imgExtra.error, { title: "图片尺寸填写有误", tone: "warning" });
+          showAlert(imgExtra.error, { title: "图片参数填写有误", tone: "warning" });
           setBusy(false);
           return;
         }
@@ -1399,7 +1407,94 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                       ))}
                     </select>
                   </label>
+                  {imageFields.halftone && (
+                    <>
+                      <label>
+                        <span>网点网格 mm</span>
+                        <input
+                          id="wb-image-halftone-cell"
+                          type="number"
+                          inputMode="decimal"
+                          min={0.1}
+                          max={10}
+                          step={0.05}
+                          placeholder="自动"
+                          value={imageExtras.halftoneCellMm}
+                          onChange={(e) => setImageExtra("halftoneCellMm", e.target.value)}
+                          className="text-input"
+                        />
+                      </label>
+                      <label>
+                        <span>网点角度 °</span>
+                        <input
+                          id="wb-image-halftone-angle"
+                          type="number"
+                          inputMode="decimal"
+                          min={-90}
+                          max={90}
+                          placeholder="45"
+                          value={imageExtras.halftoneAngleDeg}
+                          onChange={(e) => setImageExtra("halftoneAngleDeg", e.target.value)}
+                          className="text-input"
+                        />
+                      </label>
+                    </>
+                  )}
+                  {imageFields.grayscale && (
+                    <label title="最黑处用本次功率（推荐或自定义），最浅处用这里的最小功率；纯白不出光">
+                      <span>灰度最小功率 %</span>
+                      <input
+                        id="wb-image-gray-min"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        max={99}
+                        placeholder="0"
+                        value={imageExtras.grayMinPowerPercent}
+                        onChange={(e) => setImageExtra("grayMinPowerPercent", e.target.value)}
+                        className="text-input"
+                      />
+                    </label>
+                  )}
+                  <label title="每段出光两端各缩短一半，抵消光斑直径；须小于行间距">
+                    <span>点宽补偿 mm</span>
+                    <input
+                      id="wb-image-dot-width"
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      max={0.5}
+                      step={0.01}
+                      placeholder="不补偿"
+                      value={imageExtras.dotWidthMm}
+                      onChange={(e) => setImageExtra("dotWidthMm", e.target.value)}
+                      className="text-input"
+                    />
+                  </label>
                 </div>
+                <div className="wb-image-switches">
+                  <label className="wb-params-switch" title="明暗对调，适合石板、玻璃等刻痕发白的材料">
+                    <input
+                      id="wb-image-negative"
+                      type="checkbox"
+                      checked={imageExtras.negative}
+                      onChange={(e) => setImageExtra("negative", e.target.checked)}
+                    />
+                    <span>反相（石板 / 玻璃）</span>
+                  </label>
+                  <label className="wb-params-switch" title="不重采样，按原图像素逐点雕刻；行间距 = 成品宽度 ÷ 原图像素宽">
+                    <input
+                      id="wb-image-pass-through"
+                      type="checkbox"
+                      checked={imageExtras.passThrough}
+                      onChange={(e) => setImageExtra("passThrough", e.target.checked)}
+                    />
+                    <span>直通（不重采样）</span>
+                  </label>
+                </div>
+                {imageFields.grayscale && (
+                  <div className="wb-params-hint">灰度变功率适合二极管激光；最黑处用本次功率，可在下方“这次自定义功率和速度”里调最大功率。</div>
+                )}
               </div>
             )}
 

@@ -655,6 +655,136 @@ fn oversized_image_is_fitted_and_oversized_gcode_is_refused_before_sending() {
     assert_eq!(send["detail"]["error_code"], "job_exceeds_travel", "{send}");
 }
 
+/// 2026-11-16（技术书 r38）：图片模式对齐 LightBurn Image Mode——新字段生效、在产物中回显、非法值中文 400。
+#[test]
+fn image_preview_supports_lightburn_image_modes() {
+    let temp = tempfile::tempdir().unwrap();
+    let gen_dir = temp.path().join("generated");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    image::GrayImage::from_fn(200, 100, |x, _| image::Luma([(x * 255 / 199) as u8]))
+        .save(gen_dir.join("ramp.png"))
+        .unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_store(std::sync::Arc::new(laser_runtime::MemoryStore::new()))
+    .with_generated_root(gen_dir.clone())
+    .with_preview_roots(vec![gen_dir.clone()]);
+    let preview = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({
+            "action": "preview", "source_type": "image", "image_file": "ramp.png",
+            "material": "椴木", "thickness_mm": 3,
+            "manual_params": {"power_percent": 60, "feed_rate": 1500, "passes": 1}
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post_json(&service, "/api/workflow", &body)
+    };
+    let gcode_of = |res: &serde_json::Value| {
+        std::fs::read_to_string(
+            gen_dir.join(res["result"]["artifacts"]["gcode_file"].as_str().unwrap()),
+        )
+        .unwrap()
+    };
+    let s_values = |gcode: &str| -> std::collections::BTreeSet<i64> {
+        gcode
+            .lines()
+            .filter(|l| l.starts_with("G1 "))
+            .filter_map(|l| l.split_whitespace().find_map(|t| t.strip_prefix('S')))
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    };
+
+    // 默认请求：旧行为不变，只多回显三个关闭的开关
+    let plain = preview(serde_json::json!({}));
+    assert_eq!(plain["success"], true, "{plain}");
+    let artifacts = &plain["result"]["artifacts"];
+    assert_eq!(artifacts["image_mode"], "dither");
+    assert_eq!(artifacts["negative"], false);
+    assert_eq!(artifacts["pass_through"], false);
+    assert_eq!(artifacts["dot_width_mm"], 0.0);
+    assert!(artifacts.get("gray_levels").is_none() && artifacts.get("halftone_cell_mm").is_none());
+    assert_eq!(s_values(&gcode_of(&plain)), [0, 600].into());
+
+    // 灰度：S 值有界、级数受限、最大功率 = 本次功率
+    let gray = preview(serde_json::json!({
+        "image_mode": "grayscale", "gray_levels": 8, "gray_min_power_percent": 20
+    }));
+    assert_eq!(gray["success"], true, "{gray}");
+    let artifacts = &gray["result"]["artifacts"];
+    assert_eq!(artifacts["image_mode"], "grayscale");
+    assert_eq!(artifacts["gray_levels"], 8);
+    assert_eq!(artifacts["gray_min_power"], 200);
+    assert_eq!(artifacts["gray_max_power"], 600);
+    let gcode = gcode_of(&gray);
+    assert!(gcode.contains("; Raster mode: grayscale variable power (8 levels)"));
+    let powers = s_values(&gcode);
+    assert!(powers.len() <= 8 && powers.len() > 3, "{powers:?}");
+    assert!(powers.iter().all(|p| *p == 0 || (200..=600).contains(p)));
+    assert!(powers.contains(&600));
+
+    // 网点：LPI 换算成网格并回显；反相、点宽补偿、直通同时回显
+    let halftone = preview(serde_json::json!({
+        "image_mode": "halftone", "halftone_lpi": 25.4, "halftone_angle_deg": 30,
+        "negative": true, "dot_width_mm": 0.04
+    }));
+    assert_eq!(halftone["success"], true, "{halftone}");
+    let artifacts = &halftone["result"]["artifacts"];
+    assert_eq!(artifacts["halftone_cell_mm"], 1.0);
+    assert_eq!(artifacts["halftone_angle_deg"], 30.0);
+    assert_eq!(artifacts["negative"], true);
+    assert_eq!(artifacts["dot_width_mm"], 0.04);
+    let through = preview(serde_json::json!({
+        "image_mode": "jarvis", "pass_through": true, "width_mm": 50
+    }));
+    assert_eq!(through["success"], true, "{through}");
+    assert_eq!(through["result"]["artifacts"]["pass_through"], true);
+    assert_eq!(through["result"]["artifacts"]["pixel_size_mm"], 0.25);
+    for mode in ["stucki", "atkinson", "ordered", "newsprint", "sketch"] {
+        let res = preview(serde_json::json!({ "image_mode": mode }));
+        assert_eq!(res["success"], true, "{mode}: {res}");
+        assert_eq!(res["result"]["artifacts"]["image_mode"], mode);
+    }
+
+    // 非法输入：中文 400，不生成产物
+    for (extra, needle) in [
+        (
+            serde_json::json!({"image_mode": "pencil"}),
+            "image_mode 只能是",
+        ),
+        (
+            serde_json::json!({"image_mode": "halftone", "halftone_lpi": 50, "halftone_cell_mm": 1}),
+            "只能给一个",
+        ),
+        (
+            serde_json::json!({"image_mode": "halftone", "halftone_cell_mm": 0.1}),
+            "网点网格",
+        ),
+        (serde_json::json!({"dot_width_mm": 0.1}), "必须小于行间距"),
+        (serde_json::json!({"dot_width_mm": -1}), "不能为负数"),
+        (serde_json::json!({"negative": "yes"}), "true 或 false"),
+        (
+            serde_json::json!({"image_mode": "grayscale", "gray_min_power_percent": 60}),
+            "必须小于本次最大功率",
+        ),
+        (
+            serde_json::json!({"image_mode": "grayscale", "gray_levels": 100}),
+            "gray_levels",
+        ),
+        (
+            serde_json::json!({"pass_through": true, "width_mm": 5}),
+            "直通模式",
+        ),
+    ] {
+        let res = preview(extra.clone());
+        assert_eq!(res["success"], false, "{extra}: {res}");
+        let message = res["result"].as_str().unwrap_or_default();
+        assert!(message.contains(needle), "{extra}: {res}");
+    }
+}
+
 #[test]
 fn text_larger_than_the_machine_is_refused_at_preview() {
     let temp = tempfile::tempdir().unwrap();

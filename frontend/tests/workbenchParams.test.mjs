@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   actualParamsText,
+  DEFAULT_IMAGE_EXTRAS,
+  IMAGE_MODE_OPTIONS,
+  imageModeFields,
   imageParamsPayload,
   isWorkbenchPreviewStale,
   manualParamsPayload,
@@ -67,6 +70,76 @@ test("图片尺寸与转换方式校验：留空自动推算，非法宽高直�
   });
   assert.match(imageParamsPayload({ widthMm: "0", heightMm: "" }).error, /成品宽度/);
   assert.match(imageParamsPayload({ widthMm: "50", heightMm: "1500" }).error, /成品高度/);
+});
+
+test("LightBurn 对齐的图片模式：选项与后端一致，高级项只在相关模式下发送", () => {
+  assert.deepEqual(
+    IMAGE_MODE_OPTIONS.map((opt) => opt.value),
+    ["auto", "dither", "threshold", "jarvis", "stucki", "atkinson", "ordered", "halftone", "newsprint", "sketch", "grayscale"],
+  );
+  // 空白高级项不改变旧请求
+  assert.deepEqual(imageParamsPayload({ imageMode: "jarvis", extras: DEFAULT_IMAGE_EXTRAS }), { image_mode: "jarvis" });
+  const extras = {
+    ...DEFAULT_IMAGE_EXTRAS,
+    negative: true,
+    passThrough: true,
+    dotWidthMm: "0.05",
+    halftoneCellMm: "0.8",
+    halftoneAngleDeg: "30",
+    grayMinPowerPercent: "15",
+  };
+  assert.deepEqual(imageParamsPayload({ imageMode: "halftone", extras }), {
+    image_mode: "halftone", negative: true, pass_through: true, dot_width_mm: 0.05,
+    halftone_cell_mm: 0.8, halftone_angle_deg: 30,
+  });
+  assert.deepEqual(imageParamsPayload({ imageMode: "grayscale", extras }), {
+    image_mode: "grayscale", negative: true, pass_through: true, dot_width_mm: 0.05,
+    gray_min_power_percent: 15,
+  });
+  assert.deepEqual(imageModeFields("halftone"), { halftone: true, grayscale: false });
+  assert.deepEqual(imageModeFields("dither"), { halftone: false, grayscale: false });
+  assert.match(imageParamsPayload({ imageMode: "halftone", extras: { halftoneCellMm: "20" } }).error, /网点网格/);
+  assert.match(imageParamsPayload({ imageMode: "halftone", extras: { halftoneAngleDeg: "120" } }).error, /网点角度/);
+  assert.match(imageParamsPayload({ imageMode: "grayscale", extras: { grayMinPowerPercent: "100" } }).error, /灰度最小功率/);
+  assert.match(imageParamsPayload({ imageMode: "auto", extras: { dotWidthMm: "-0.1" } }).error, /点宽补偿/);
+  // 隐藏模式的无效输入不拦截当前模式
+  assert.deepEqual(imageParamsPayload({ imageMode: "dither", extras: { halftoneCellMm: "abc" } }), { image_mode: "dither" });
+  assert.equal(imageParamsPayload({ imageMode: "bogus" }).image_mode, "auto");
+});
+
+test("图片高级项改动使预览过期，隐藏模式的输入不影响签名", () => {
+  const base = {
+    activeTool: "image",
+    uploadedImagePath: "a.png",
+    imageMode: "halftone",
+    imageExtras: { ...DEFAULT_IMAGE_EXTRAS },
+    selectedMaterial: "椴木",
+    selectedThickness: "3",
+  };
+  const sig = workbenchInputSignature(base);
+  const changed = (patch) =>
+    isWorkbenchPreviewStale(sig, workbenchInputSignature({ ...base, imageExtras: { ...base.imageExtras, ...patch } }));
+  assert.equal(changed({}), false);
+  assert.equal(changed({ negative: true }), true, "反相");
+  assert.equal(changed({ passThrough: true }), true, "直通");
+  assert.equal(changed({ dotWidthMm: "0.05" }), true, "点宽补偿");
+  assert.equal(changed({ halftoneCellMm: "0.8" }), true, "网点网格");
+  assert.equal(changed({ halftoneAngleDeg: "30" }), true, "网点角度");
+  assert.equal(changed({ grayMinPowerPercent: "10" }), false, "网点模式下灰度最小功率不生效");
+  assert.equal(
+    isWorkbenchPreviewStale(sig, workbenchInputSignature({ ...base, imageMode: "grayscale" })),
+    true,
+    "换模式",
+  );
+  const graySig = workbenchInputSignature({ ...base, imageMode: "grayscale" });
+  assert.equal(
+    isWorkbenchPreviewStale(
+      graySig,
+      workbenchInputSignature({ ...base, imageMode: "grayscale", imageExtras: { ...base.imageExtras, grayMinPowerPercent: "10" } }),
+    ),
+    true,
+    "灰度最小功率",
+  );
 });
 
 test("左侧输入或参数修改后，预览签名立即判定为已过期以防误刻旧刀路", () => {

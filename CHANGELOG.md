@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 图片转换方式对齐 LightBurn Image Mode：新增 Jarvis / Stucki / 有序抖动、网点、素描、灰度变功率、反相、点宽补偿与直通（2026-11-16）
+
+- **现象**：图片只有自动 / Floyd–Steinberg 抖动 / 阈值三种处理，没有 LightBurn 对照片推荐的 Jarvis，也没有网点、素描、二极管常用的灰度变功率；石板、玻璃这类刻痕发白的材料无法反相；光斑比像素宽时每段线都偏长，没有点宽补偿；已在别的软件处理好的图片也会被重采样一次。
+- **根因与修复**：`laser_core::raster` 新增 `JarvisJudiceNinke` / `Stucki` 误差扩散核（统一由 `diffusion_kernel` 给出）、`ordered_dither`（8×8 Bayer）、`halftone_screen`（每格平均灰度画面积对应的圆点 / 逐像素报纸网点）、`sketch_edges`（Sobel 高通 + Otsu）、`quantize_levels` 与 `grayscale_power_table`；`image_job::ToneMode` 增加 `ordered`、`atkinson`、`jarvis`、`stucki`、`newsprint`、`halftone`、`sketch`、`grayscale`，`ImageRasterOptions` 增加反相、网点网格 / 角度、灰度级数与直通；`gcode::RasterWriterOptions` 增加 `dot_width_mm`（每段两端各缩短一半，须小于行间距），新增 `write_grayscale_raster`（同功率像素合并为一段、功率变化直接换 S，S 值受本次功率与 `$30` 标尺约束，发送时照旧按 `$30/1000` 换算）。`/api/workflow` 图片预览新增可选字段 `image_mode` 扩展值、`negative`、`pass_through`、`dot_width_mm`、`halftone_cell_mm` / `halftone_lpi`、`halftone_angle_deg`、`gray_levels`（2～64，默认 16）、`gray_min_power_percent`，均校验并以中文 400 拒绝非法值，产物回显实际值；灰度模式最大功率即本次功率（材料库推荐 / 自定义 / 采用的调参建议），纯白不出光。工作台 `#wb-image-mode` 增加对应选项与只在相关模式显示的输入，改动这些项会让预览过期。**默认值与旧请求的输出不变**；产物新增 `negative` / `pass_through` / `dot_width_mm` 三个回显字段。画板栅格不受影响。
+- **验证**：`laser-core` 新增 14 项（各算法二值且确定、Jarvis / Stucki 核归一、网点密度随灰度单调、素描只刻边缘、灰度级与 S 值有界单调、反相互补、点宽补偿缩短线段并拒绝 ≥ 行间距、直通保留原像素、灰度写出器逐行输出），`laser-api` 新增 1 项（全部模式生成、回显、9 种非法输入 400），前端新增 2 项（选项与请求字段、签名过期）并扩展预览提示 1 项。未实机出光，网点 / 灰度 / 点宽的实际效果未在材料上验证。
+- **关联**：`crates/laser-core/src/{raster,image_job,gcode}.rs`、`crates/laser-api/src/generation.rs`（`ImageModeExtras`）、`frontend/src/workbenchParams.js`（`imageParamsPayload`、`imageModeFields`、`workbenchInputSignature`）、`frontend/src/pages/HomePage.jsx`、`frontend/src/aiPreviewState.js`。
+
 ### 工时按机器加速度估算，新增橡皮筋走边框与画板“只刻选中的图形”（2026-11-16）
 
 - **现象**：预计时间按每段指令速度匀速走满计算，扫描填充这类大量短行、来回掉头的刀路明显偏短，加了过扫描后误差更大；机器的加速度与最大速度（`$110/$111/$120/$121`）没有读取；走边框只能走外接矩形，异形图案对位不直观；画板只能整幅一起刻，补刻 / 重刻其中一部分时没法保持原位置。

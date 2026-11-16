@@ -100,6 +100,11 @@ test("preview notes explain auto-fit and dithering", () => {
     "照片按灰度抖动雕刻",
   ]);
   assert.deepEqual(aiPreviewNotes({ artifacts: { image_mode: "threshold" } }), []);
+  assert.deepEqual(aiPreviewNotes({ artifacts: { image_mode: "grayscale", negative: true } }), [
+    "灰度变功率雕刻：越黑功率越高",
+    "已反相：原图浅色处出光",
+  ]);
+  assert.deepEqual(aiPreviewNotes({ artifacts: { image_mode: "jarvis", negative: false } }), []);
   assert.deepEqual(aiPreviewNotes(null), []);
 });
 

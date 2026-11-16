@@ -582,6 +582,7 @@ pub(crate) fn generate_draw_artifacts(
                 material: Some(material.to_string()),
                 safety_note: None,
                 power_scale: None,
+                dot_width_mm: 0.0,
             },
         )
         .map_err(|e| e.to_string())?
@@ -1072,6 +1073,79 @@ pub(crate) fn draw_target_size_mm(
     Ok((target_w, target_h, auto_fitted))
 }
 
+/// 图片预览里对齐 LightBurn Image Mode 的可选字段（2026-11-16，技术书 r38）。
+/// 值域在这里先校验；与像素间距相关的（网点网格、点宽补偿）在得到实际行间距后再查。
+struct ImageModeExtras {
+    negative: bool,
+    pass_through: bool,
+    halftone_cell_mm: Option<f64>,
+    halftone_angle_deg: f64,
+    gray_levels: u8,
+    gray_min_power_percent: f64,
+    dot_width_mm: f64,
+}
+
+impl ImageModeExtras {
+    fn parse(
+        object: &serde_json::Map<String, serde_json::Value>,
+        number: &dyn Fn(&str) -> Result<Option<f64>, String>,
+    ) -> Result<Self, String> {
+        let flag = |key: &str| match object.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(false),
+            Some(serde_json::Value::Bool(value)) => Ok(*value),
+            Some(_) => Err(format!("{key} 必须是 true 或 false")),
+        };
+        let halftone_cell_mm = match (number("halftone_cell_mm")?, number("halftone_lpi")?) {
+            (Some(_), Some(_)) => {
+                return Err("halftone_cell_mm 与 halftone_lpi 只能给一个".into());
+            }
+            (Some(cell), None) if cell > 0.0 => Some(cell),
+            (Some(_), None) => return Err("halftone_cell_mm 必须大于 0".into()),
+            (None, Some(lpi)) if (2.54..=508.0).contains(&lpi) => Some(25.4 / lpi),
+            (None, Some(_)) => return Err("halftone_lpi 必须在 2.54 ~ 508 之间".into()),
+            (None, None) => None,
+        };
+        let gray_levels = match number("gray_levels")? {
+            None => laser_core::image_job::DEFAULT_GRAY_LEVELS,
+            Some(value)
+                if value.fract() == 0.0
+                    && (f64::from(laser_core::image_job::MIN_GRAY_LEVELS)
+                        ..=f64::from(laser_core::image_job::MAX_GRAY_LEVELS))
+                        .contains(&value) =>
+            {
+                value as u8
+            }
+            Some(_) => {
+                return Err(format!(
+                    "gray_levels 必须是 {} ~ {} 的整数",
+                    laser_core::image_job::MIN_GRAY_LEVELS,
+                    laser_core::image_job::MAX_GRAY_LEVELS
+                ));
+            }
+        };
+        let gray_min_power_percent = match number("gray_min_power_percent")? {
+            None => 0.0,
+            Some(value) if (0.0..100.0).contains(&value) => value,
+            Some(_) => return Err("gray_min_power_percent 必须在 0 ~ 100 之间（不含 100）".into()),
+        };
+        let dot_width_mm = match number("dot_width_mm")? {
+            None => 0.0,
+            Some(value) if value >= 0.0 => value,
+            Some(_) => return Err("dot_width_mm 不能为负数".into()),
+        };
+        Ok(Self {
+            negative: flag("negative")?,
+            pass_through: flag("pass_through")?,
+            halftone_cell_mm,
+            halftone_angle_deg: number("halftone_angle_deg")?
+                .unwrap_or(laser_core::image_job::DEFAULT_HALFTONE_ANGLE_DEG),
+            gray_levels,
+            gray_min_power_percent,
+            dot_width_mm,
+        })
+    }
+}
+
 pub(crate) fn generate_image_or_gcode_artifacts(
     object: &serde_json::Map<String, serde_json::Value>,
     upload_root: Option<&std::path::Path>,
@@ -1203,6 +1277,8 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             Some(v) if (0.0..=255.0).contains(&v) => Some(v.round() as u8),
             Some(_) => return Err("threshold 必须在 0 ~ 255 之间".into()),
         };
+        // 2026-11-16（技术书 r38）对齐 LightBurn Image Mode 的可选项，全部缺省时与旧行为一致
+        let extras = ImageModeExtras::parse(object, &optional_number)?;
         let raster_options = laser_core::image_job::ImageRasterOptions {
             pixel_size_mm: optional_number("pixel_size_mm")?.unwrap_or(material_pixel),
             width_mm: optional_number("width_mm")?,
@@ -1216,35 +1292,62 @@ pub(crate) fn generate_image_or_gcode_artifacts(
                 object.get("image_mode").and_then(|v| v.as_str()),
             )?,
             threshold,
+            negative: extras.negative,
+            halftone_cell_mm: extras.halftone_cell_mm,
+            halftone_angle_deg: extras.halftone_angle_deg,
+            gray_levels: extras.gray_levels,
+            pass_through: extras.pass_through,
         };
         let prepared = laser_core::image_job::prepare_raster(&luma_img, &raster_options)?;
         let (img_w, img_h) = (prepared.grid_width, prepared.grid_height);
-
-        let plan = laser_core::raster::raster_plan_with_direction(
-            &prepared.bitmap,
-            "horizontal",
-            "scanline",
-        )
-        .map_err(|e| e.to_string())?;
-        let gcode_str = laser_core::gcode::write_raster(
-            &plan,
-            img_w as usize,
-            img_h as usize,
-            &laser_core::gcode::RasterWriterOptions {
-                pixel_size_mm: raster_options.pixel_size_mm,
-                overscan_mm: IMAGE_OVERSCAN_MM,
-                work_area_width_mm: raster_options.work_area_width_mm,
-                work_area_height_mm: raster_options.work_area_height_mm,
-                power,
-                feed_rate,
-                laser_mode: "M4",
-                snake_scan: true,
-                material: Some(material.to_string()),
-                safety_note: None,
-                power_scale: None,
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        let pixel_size_mm = prepared.pixel_size_mm;
+        if extras.dot_width_mm >= pixel_size_mm {
+            return Err(format!(
+                "dot_width_mm（点宽补偿）必须小于行间距 {pixel_size_mm:.3} mm，收到 {:.3} mm",
+                extras.dot_width_mm
+            ));
+        }
+        let writer_options = laser_core::gcode::RasterWriterOptions {
+            pixel_size_mm,
+            overscan_mm: IMAGE_OVERSCAN_MM,
+            work_area_width_mm: raster_options.work_area_width_mm,
+            work_area_height_mm: raster_options.work_area_height_mm,
+            power,
+            feed_rate,
+            laser_mode: "M4",
+            snake_scan: true,
+            material: Some(material.to_string()),
+            safety_note: None,
+            power_scale: None,
+            dot_width_mm: extras.dot_width_mm,
+        };
+        let mut gray_power = None;
+        let gcode_str = if let (Some(levels), Some(count)) =
+            (&prepared.levels, prepared.gray_levels)
+        {
+            // 灰度模式：最大功率 = 本次功率（材料库推荐 / 自定义 / 采用的调参建议），最小功率由请求给出
+            let min_power = (extras.gray_min_power_percent * 10.0).round() as i32;
+            if min_power >= power {
+                return Err(format!(
+                    "gray_min_power_percent（灰度最小功率）{}% 必须小于本次最大功率 {:.1}%",
+                    extras.gray_min_power_percent,
+                    f64::from(power) / 10.0
+                ));
+            }
+            let table = laser_core::raster::grayscale_power_table(count, min_power, power);
+            gray_power = Some((min_power, power));
+            laser_core::gcode::write_grayscale_raster(levels, &table, &writer_options)
+                .map_err(|e| e.to_string())?
+        } else {
+            let plan = laser_core::raster::raster_plan_with_direction(
+                &prepared.bitmap,
+                "horizontal",
+                "scanline",
+            )
+            .map_err(|e| e.to_string())?;
+            laser_core::gcode::write_raster(&plan, img_w as usize, img_h as usize, &writer_options)
+                .map_err(|e| e.to_string())?
+        };
 
         let id = format!("img-{}-{}-{}", unix_seconds(), nanos, std::process::id());
         let gcode_str = feedback::repeat_generated(&gcode_str, params.passes);
@@ -1286,16 +1389,37 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             "source_image_file".into(),
             serde_json::Value::String(source_name),
         );
-        res.insert(
-            "pixel_size_mm".into(),
-            serde_json::json!(raster_options.pixel_size_mm),
-        );
+        res.insert("pixel_size_mm".into(), serde_json::json!(pixel_size_mm));
         res.insert(
             "image_mode".into(),
             serde_json::json!(prepared.mode.as_str()),
         );
         if let Some(value) = prepared.threshold {
             res.insert("threshold".into(), serde_json::json!(value));
+        }
+        res.insert("negative".into(), serde_json::json!(prepared.negative));
+        res.insert(
+            "pass_through".into(),
+            serde_json::json!(prepared.pass_through),
+        );
+        res.insert(
+            "dot_width_mm".into(),
+            serde_json::json!(extras.dot_width_mm),
+        );
+        if let (Some(cell), Some(angle)) = (prepared.halftone_cell_mm, prepared.halftone_angle_deg)
+        {
+            res.insert("halftone_cell_mm".into(), serde_json::json!(cell));
+            res.insert("halftone_lpi".into(), serde_json::json!(25.4 / cell));
+            res.insert("halftone_angle_deg".into(), serde_json::json!(angle));
+        }
+        if let (Some(count), Some((min_power, max_power))) = (prepared.gray_levels, gray_power) {
+            res.insert("gray_levels".into(), serde_json::json!(count));
+            res.insert("gray_min_power".into(), serde_json::json!(min_power));
+            res.insert("gray_max_power".into(), serde_json::json!(max_power));
+            res.insert(
+                "gray_min_power_percent".into(),
+                serde_json::json!(extras.gray_min_power_percent),
+            );
         }
         res.insert(
             "auto_fitted".into(),

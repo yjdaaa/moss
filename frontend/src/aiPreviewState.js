@@ -103,6 +103,8 @@ export function aiPreviewNotes(record) {
   if (TEXT_FILL_LABEL[artifacts.text_fill]) notes.push(`刻法：${TEXT_FILL_LABEL[artifacts.text_fill]}`);
   if (artifacts.auto_fitted && typeof artifacts.fit_note === "string") notes.push(artifacts.fit_note);
   if (artifacts.image_mode === "dither") notes.push("照片按灰度抖动雕刻");
+  if (artifacts.image_mode === "grayscale") notes.push("灰度变功率雕刻：越黑功率越高");
+  if (artifacts.negative === true) notes.push("已反相：原图浅色处出光");
   return notes;
 }
 

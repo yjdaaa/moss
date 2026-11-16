@@ -147,6 +147,7 @@ fn main() {
                     material: Some("basswood".into()),
                     safety_note: Some("test".into()),
                     power_scale: None,
+                    dot_width_mm: 0.0,
                 },
             )
             .unwrap();

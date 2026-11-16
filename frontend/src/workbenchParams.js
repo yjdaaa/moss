@@ -22,11 +22,74 @@ export const TEXT_ORIGIN_OPTIONS = [
   { value: "lower_left", label: "左下角" },
 ];
 
+// 2026-11-16（技术书 r38）对齐 LightBurn Image Mode；值与后端 `laser_core::image_job::TONE_MODES` 一致。
 export const IMAGE_MODE_OPTIONS = [
   { value: "auto", label: "自动识别" },
   { value: "dither", label: "照片灰度抖动" },
   { value: "threshold", label: "清晰黑白线条" },
+  { value: "jarvis", label: "Jarvis 抖动（照片推荐）" },
+  { value: "stucki", label: "Stucki 抖动" },
+  { value: "atkinson", label: "Atkinson 抖动" },
+  { value: "ordered", label: "有序抖动（大面积色块）" },
+  { value: "halftone", label: "网点（可调网格与角度）" },
+  { value: "newsprint", label: "报纸网点" },
+  { value: "sketch", label: "素描（只刻边缘）" },
+  { value: "grayscale", label: "灰度变功率（二极管）" },
 ];
+
+/** 图片高级项的空白初值；值均为输入框原始字符串 / 勾选状态。 */
+export const DEFAULT_IMAGE_EXTRAS = {
+  negative: false,
+  passThrough: false,
+  dotWidthMm: "",
+  halftoneCellMm: "",
+  halftoneAngleDeg: "",
+  grayMinPowerPercent: "",
+};
+
+/** 当前转换方式需要显示哪些专属输入。 */
+export function imageModeFields(imageMode) {
+  return {
+    halftone: imageMode === "halftone",
+    grayscale: imageMode === "grayscale",
+  };
+}
+
+function normalizeImageMode(imageMode) {
+  return IMAGE_MODE_OPTIONS.some((opt) => opt.value === imageMode) ? imageMode : "auto";
+}
+
+/** 高级项 → 请求字段；只带当前模式相关、且用户填写过的字段，填错返回 { error }。 */
+function imageExtrasPayload(imageMode, extras = {}) {
+  const payload = {};
+  const fields = imageModeFields(imageMode);
+  const parse = (raw, check, message) => {
+    const trimmed = String(raw ?? "").trim();
+    if (!trimmed) return { empty: true };
+    const val = Number(trimmed);
+    if (!Number.isFinite(val) || !check(val)) return { error: message };
+    return { value: Math.round(val * 1000) / 1000 };
+  };
+  if (extras.negative) payload.negative = true;
+  if (extras.passThrough) payload.pass_through = true;
+  const dot = parse(extras.dotWidthMm, (v) => v >= 0 && v < 1, "点宽补偿要是 0 ~ 1 mm 的数字，且须小于行间距（留空不补偿）");
+  if (dot.error) return { error: dot.error };
+  if (!dot.empty && dot.value > 0) payload.dot_width_mm = dot.value;
+  if (fields.halftone) {
+    const cell = parse(extras.halftoneCellMm, (v) => v > 0 && v <= 10, "网点网格要是大于 0、不超过 10 mm 的数字（留空自动）");
+    if (cell.error) return { error: cell.error };
+    if (!cell.empty) payload.halftone_cell_mm = cell.value;
+    const angle = parse(extras.halftoneAngleDeg, (v) => v >= -90 && v <= 90, "网点角度要在 -90 ~ 90 度之间（留空为 45°）");
+    if (angle.error) return { error: angle.error };
+    if (!angle.empty) payload.halftone_angle_deg = angle.value;
+  }
+  if (fields.grayscale) {
+    const min = parse(extras.grayMinPowerPercent, (v) => v >= 0 && v < 100, "灰度最小功率要在 0 ~ 100% 之间，且小于本次功率（留空为 0）");
+    if (min.error) return { error: min.error };
+    if (!min.empty) payload.gray_min_power_percent = min.value;
+  }
+  return payload;
+}
 
 const TEXT_FILL_LABELS = {
   outline: "轮廓描边",
@@ -62,10 +125,16 @@ export function materialRecommendationModes({ activeTool, textStyle }) {
   };
 }
 
-/** 图片预览可选尺寸与算法 -> `/api/workflow` preview 字段；留空不传尺寸，填错返回 `{ error }`。 */
-export function imageParamsPayload({ widthMm = "", heightMm = "", imageMode = "auto" } = {}) {
-  const mode = IMAGE_MODE_OPTIONS.some((opt) => opt.value === imageMode) ? imageMode : "auto";
+/**
+ * 图片预览可选尺寸、算法与高级项（反相、直通、点宽补偿、网点网格 / 角度、灰度最小功率）
+ * -> `/api/workflow` preview 字段；留空不传，填错返回 `{ error }`。
+ */
+export function imageParamsPayload({ widthMm = "", heightMm = "", imageMode = "auto", extras = {} } = {}) {
+  const mode = normalizeImageMode(imageMode);
   const payload = { image_mode: mode };
+  const extra = imageExtrasPayload(mode, extras);
+  if (extra.error) return { error: extra.error };
+  Object.assign(payload, extra);
   const parseDim = (raw, label) => {
     const trimmed = String(raw ?? "").trim();
     if (!trimmed) return { empty: true };
@@ -134,6 +203,7 @@ export function workbenchInputSignature({
   imageWidthMm = "",
   imageHeightMm = "",
   imageMode = "auto",
+  imageExtras = DEFAULT_IMAGE_EXTRAS,
   uploadedGcodePath = "",
   selectedMaterial = "",
   selectedThickness = "",
@@ -170,7 +240,9 @@ export function workbenchInputSignature({
       image: String(uploadedImagePath || ""),
       widthMm: String(imageWidthMm || "").trim(),
       heightMm: String(imageHeightMm || "").trim(),
-      imageMode: IMAGE_MODE_OPTIONS.some((opt) => opt.value === imageMode) ? imageMode : "auto",
+      imageMode: normalizeImageMode(imageMode),
+      // 反相、直通、点宽补偿与当前模式的专属项（隐藏的其他模式输入不影响签名）
+      extras: imageExtrasSignature(normalizeImageMode(imageMode), imageExtras),
     });
   }
   if (activeTool === "gcode") {
@@ -182,6 +254,18 @@ export function workbenchInputSignature({
     });
   }
   return JSON.stringify(base);
+}
+
+function imageExtrasSignature(imageMode, extras = {}) {
+  const fields = imageModeFields(imageMode);
+  const text = (value) => String(value ?? "").trim();
+  return [
+    extras.negative ? "neg" : "",
+    extras.passThrough ? "pass" : "",
+    text(extras.dotWidthMm),
+    fields.halftone ? `${text(extras.halftoneCellMm)}@${text(extras.halftoneAngleDeg)}` : "",
+    fields.grayscale ? text(extras.grayMinPowerPercent) : "",
+  ].join("|");
 }
 
 /** 判断已生成的预览相对当前左侧表单是否已过期。 */
