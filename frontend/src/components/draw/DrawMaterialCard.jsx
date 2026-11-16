@@ -1,0 +1,271 @@
+import React from "react";
+import { RefreshCw } from "lucide-react";
+import { isRemoteMode } from "../../authSession.js";
+import { materialLayerHint } from "../../fillOptions.js";
+import { CUSTOM_OPTION_LABEL, CUSTOM_OPTION_VALUE, findMaterialOption } from "../../materialSelectState.js";
+import { MANUAL_LIMITS } from "../../workbenchParams.js";
+import FillOptionsPanel from "../FillOptionsPanel.jsx";
+import { FoldHeader } from "../FoldHeader.jsx";
+import { WbCard } from "../WorkbenchCanvas.jsx";
+
+/** 创意画板 ① 材料与尺寸卡：材料库 / 自定义材料、厚度、尺寸、生成策略、填充设置与这次自定义功率速度。原样搬自 pages/DrawPage.jsx（2026-11-16 按职责拆分） */
+export function DrawMaterialCard({
+  form,
+  updateForm,
+  materialLibrary,
+  materialMode,
+  materialSelectValue,
+  handleMaterialSelectChange,
+  handleThicknessSelectChange,
+  handleReturnToLibrary,
+  materialRefreshBusy,
+  refreshMaterialLibrary,
+  selectedOnly,
+  setSelectedOnly,
+  selectionKey,
+  fillSettings,
+  updateFillSettings,
+  materialApplied,
+  materialLayer,
+  saveFillToMaterial,
+  hasRec,
+  recPowerPct,
+  recFeedMpm,
+  recPasses,
+  customParams,
+  setCustomParams,
+  customPower,
+  setCustomPower,
+  customFeed,
+  setCustomFeed,
+  customPasses,
+  setCustomPasses,
+}) {
+  return (
+    <WbCard id="draw-material" className="hud-card ob-card control-panel" label="材料与尺寸">
+      <FoldHeader id="draw-material" title="材料与尺寸" k="MATERIAL" n={1} />
+      <div className="material-library-label">
+        <span>材料库</span>
+        <div className="material-library-row">
+          <select
+            value={materialSelectValue}
+            onChange={(event) => handleMaterialSelectChange(event.target.value)}
+          >
+            {materialLibrary.map((item) => (
+              <option key={item.name} value={item.name}>
+                {item.name}
+              </option>
+            ))}
+            <option value={CUSTOM_OPTION_VALUE}>{CUSTOM_OPTION_LABEL}</option>
+          </select>
+          <button
+            type="button"
+            className="ghost-button icon-button"
+            title="刷新材料库"
+            aria-label="刷新材料库"
+            disabled={materialRefreshBusy}
+            onClick={refreshMaterialLibrary}
+          >
+            <RefreshCw size={16} />
+          </button>
+        </div>
+      </div>
+
+      {materialMode === "custom" ? (
+        <label>
+          材料名称
+          <input
+            value={form.material}
+            onChange={(event) => updateForm("material", event.target.value)}
+          />
+        </label>
+      ) : null}
+
+      {materialMode === "library" && findMaterialOption(materialLibrary, form.material) ? (
+        <label>
+          厚度 mm
+          <select
+            value={form.thickness_mm}
+            onChange={(event) => handleThicknessSelectChange(event.target.value)}
+          >
+            {findMaterialOption(materialLibrary, form.material).thicknesses.map((value) => (
+              <option key={String(value)} value={String(value)}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <label>
+          厚度 mm
+          <input
+            type="number"
+            min="0"
+            step="0.1"
+            value={form.thickness_mm}
+            onChange={(event) => updateForm("thickness_mm", event.target.value)}
+          />
+        </label>
+      )}
+
+      {materialMode === "custom" && materialLibrary.length > 0 ? (
+        <button type="button" className="ghost-button" onClick={handleReturnToLibrary}>
+          返回材料库
+        </button>
+      ) : null}
+
+      <div className="dimension-grid">
+        <label>
+          宽 mm
+          <input
+            type="number"
+            min="0"
+            max="100"
+            step="0.1"
+            value={form.width_mm}
+            onChange={(event) => updateForm("width_mm", event.target.value)}
+            placeholder="自动 (≤100)"
+          />
+        </label>
+        <label>
+          高 mm
+          <input
+            type="number"
+            min="0"
+            max="100"
+            step="0.1"
+            value={form.height_mm}
+            onChange={(event) => updateForm("height_mm", event.target.value)}
+            placeholder="自动 (≤100)"
+          />
+        </label>
+      </div>
+
+      <label>
+        生成策略
+        <select value={form.mode} onChange={(event) => updateForm("mode", event.target.value)}>
+          <option value="vector">矢量（直接用画板图形规划路线，推荐）</option>
+          <option value="raster">光栅填充（逐行扫描填满，适合插入的照片）</option>
+          <option value="outline">轮廓描边（先转图片再描深色边缘）</option>
+        </select>
+      </label>
+
+      {form.mode === "vector" ? (
+        <>
+          <label
+            className="checkbox-row draw-label"
+            title="只刻画布上选中的图形，位置保持在整幅画里的位置（补刻、重刻某一部分时能对上）"
+          >
+            <input
+              type="checkbox"
+              id="draw-selected-only"
+              checked={selectedOnly}
+              onChange={(event) => setSelectedOnly(event.target.checked)}
+            />
+            只刻选中的图形（位置与整幅一致）
+            {selectedOnly ? `：已选 ${selectionKey ? selectionKey.split(",").length : 0} 个` : ""}
+          </label>
+          <FillOptionsPanel
+            idPrefix="draw"
+            settings={fillSettings}
+            onChange={updateFillSettings}
+            materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
+            materialEntryLabel={materialLayer?.label || ""}
+            onSaveToMaterial={!isRemoteMode() && materialLayer ? saveFillToMaterial : null}
+          />
+        </>
+      ) : null}
+
+      {form.mode === "outline" ? (
+        <label>
+          轮廓平滑度（0.25 精细 ～ 8 简化）
+          <input
+            type="number"
+            min="0.25"
+            max="8"
+            step="0.05"
+            value={form.vector_simplify_factor}
+            onChange={(event) => updateForm("vector_simplify_factor", event.target.value)}
+            placeholder="默认 3"
+          />
+        </label>
+      ) : null}
+
+      <div className="wb-params" id="draw-params">
+        <label className="wb-params-switch checkbox-row draw-label">
+          <input
+            type="checkbox"
+            id="draw-custom-params"
+            checked={customParams}
+            onChange={(event) => {
+              const on = event.target.checked;
+              setCustomParams(on);
+              if (on) {
+                setCustomPower(String(recPowerPct));
+                setCustomFeed(String(recFeedMpm));
+                setCustomPasses(String(Math.max(1, Math.min(MANUAL_LIMITS.passes.max, recPasses))));
+              }
+            }}
+          />
+          <span>这次自定义功率和速度</span>
+        </label>
+        {customParams ? (
+          <>
+            <div className="wb-params-grid">
+              <label>
+                <span>功率 %</span>
+                <input
+                  className="text-input"
+                  id="draw-custom-power"
+                  type="number"
+                  inputMode="decimal"
+                  min={MANUAL_LIMITS.power.min}
+                  max={MANUAL_LIMITS.power.max}
+                  value={customPower}
+                  onChange={(e) => setCustomPower(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>速度 mm/min</span>
+                <input
+                  className="text-input"
+                  id="draw-custom-feed"
+                  type="number"
+                  inputMode="numeric"
+                  step="10"
+                  min={MANUAL_LIMITS.feed.min}
+                  max={MANUAL_LIMITS.feed.max}
+                  value={customFeed}
+                  onChange={(e) => setCustomFeed(e.target.value)}
+                />
+              </label>
+              <label>
+                <span>遍数</span>
+                <input
+                  className="text-input"
+                  id="draw-custom-passes"
+                  type="number"
+                  inputMode="numeric"
+                  min={MANUAL_LIMITS.passes.min}
+                  max={MANUAL_LIMITS.passes.max}
+                  value={customPasses}
+                  onChange={(e) => setCustomPasses(e.target.value)}
+                />
+              </label>
+            </div>
+            <div className="wb-params-hint">只影响这一次生成，不写回材料库；重新生成预览后生效。</div>
+          </>
+        ) : hasRec ? (
+          <div className="wb-params-hint" id="draw-params-recommended">
+            材料库推荐：功率 {recPowerPct}% · 速度 {recFeedMpm} mm/min · {recPasses} 遍
+          </div>
+        ) : (
+          <div className="wb-params-hint" id="draw-params-recommended">
+            材料库推荐：暂无匹配参数（可勾选自定义，或前往材料实验室补充）
+          </div>
+        )}
+      </div>
+
+    </WbCard>
+  );
+}

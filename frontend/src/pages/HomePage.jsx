@@ -1,20 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
-  Cpu,
-  Download,
-  Flame,
-  PauseCircle,
-  RefreshCw,
-  Sliders,
-  Square,
   Type,
   FileCode,
   Image as ImageIcon,
   PenTool,
-  AlertTriangle,
-  Clock,
-  Ruler,
-  Box,
 } from "lucide-react";
 import { getJson, postJson, fetchPreviewBlobUrl, fetchPreviewText, resolveApiUrl } from "../api/client.js";
 import { isRemoteMode } from "../authSession.js";
@@ -23,38 +12,26 @@ import { ConsoleDrawer } from "../components/ConsoleDrawer.jsx";
 import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { extractWorkflowInfo, TERMINAL_STATUSES } from "../state/statusNormalize.js";
 import {
-  actualParamsText,
   DEFAULT_IMAGE_EXTRAS,
-  IMAGE_INTERVAL_SCALE_LIMITS,
-  IMAGE_MODE_OPTIONS,
-  imageAdvancedSummary,
   imageModeFields,
   imageParamsPayload,
   isWorkbenchPreviewStale,
-  MANUAL_LIMITS,
   manualParamsPayload,
   materialRecommendationModes,
   resolveTextStyle,
-  TEXT_ORIGIN_OPTIONS,
-  TEXT_STYLE_OPTIONS,
   workbenchConfirmSendPrompt,
   workbenchInputSignature,
   workbenchResumeSendPrompt,
-  workbenchStatusLabel,
 } from "../workbenchParams.js";
-import { framingRequest, framingShapeText, readFramingShape, writeFramingShape } from "../aiPreviewState.js";
+import { framingRequest, framingShapeText, readFramingShape } from "../aiPreviewState.js";
 import { drawConnectionPayload, drawTargetLabel, drawTargetReady } from "../drawConnection.js";
 import { exportFile } from "../saveFile.js";
-import { showAlert, showConfirm, showPrompt } from "../appDialog.js";
-import { canResumeJob, formatResumeActionLabel } from "../estopResumeState.js";
+import { showAlert, showConfirm } from "../appDialog.js";
 import { estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
-import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
-import QualityPresetBar from "../components/QualityPresetBar.jsx";
-import { IMAGE_PRESET_HINTS, applyImagePreset, detectImagePreset } from "../qualityPresets.js";
-import RegistrationPanel from "../components/RegistrationPanel.jsx";
+import { applyImagePreset } from "../qualityPresets.js";
 import {
   applyMaterialLayer,
   fillResultNote,
@@ -64,19 +41,22 @@ import {
   machineMotionFromLimits,
   machineMotionPayload,
   materialLayerFromRecommendation,
-  materialLayerHint,
   materialLayerPayload,
   materialLayerSaveRequest,
   readFillSettings,
   readMachineMotion,
-  timeEstimateNote,
   writeFillSettings,
   writeMachineMotion,
 } from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
-import { defaultSerialPortHint } from "../platform.js";
+import { WorkbenchLinkCard } from "../components/workbench/WorkbenchLinkCard.jsx";
+import { WorkbenchTextTool } from "../components/workbench/WorkbenchTextTool.jsx";
+import { WorkbenchImageTool } from "../components/workbench/WorkbenchImageTool.jsx";
+import { WorkbenchGcodeTool } from "../components/workbench/WorkbenchGcodeTool.jsx";
+import { WorkbenchMaterialCard } from "../components/workbench/WorkbenchMaterialCard.jsx";
+import { WorkbenchMonitorCard } from "../components/workbench/WorkbenchMonitorCard.jsx";
 import { MATERIAL_LIBRARY_CHANNEL, notifyMaterialsUpdated, pickThicknessForMaterial } from "../materialSelectState.js";
-import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
+import { discoveryOutcome } from "../controllerDiscovery.js";
 
 export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
   if (!imageFile) return "";
@@ -1178,145 +1158,26 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     <div className="home-page ob-page">
       {/* 左窄右宽双栏：左 ①②③ 输入（16 列）；右 ④ 加工监视舱 + 加工反馈（32 列）；底部 控制台抽屉 */}
       <WorkbenchCanvas>
-        <WbCard id="link" className="hud-card ob-card" label="通信链路">
-          <FoldHeader id="wb-link" title="通信链路" k="LINK" n={1} />
-        {/* Connection Bar */}
-        <div
-          className="connection-bar wb-row"
-        >
-          <div className="wb-row-2">
-            <span className="wb-text-2">连接方式</span>
-            <select
-              value={connectionMode}
-              onChange={(e) => setConnectionMode(e.target.value)}
-              className="select-input wb-field"
-            >
-              <option value="network">网络 (Telnet/TCP)</option>
-              <option value="serial">串口 (USB/Serial)</option>
-            </select>
-          </div>
-
-          {connectionMode === "serial" ? (
-            <div className="wb-row-2">
-              <select
-                value={serialPort}
-                onChange={async (e) => {
-                  const selectEl = e.target;
-                  const chosen = selectEl.value;
-                  if (chosen === "__custom__") {
-                    selectEl.value = serialPort || "";
-                    const serialHint = defaultSerialPortHint();
-                    const custom = await showPrompt(serialHint.prompt, {
-                      title: "手动输入串口号",
-                      defaultValue: serialPort || serialHint.fallback,
-                      placeholder: serialHint.fallback,
-                    });
-                    if (custom && custom.trim()) {
-                      const p = custom.trim();
-                      if (!serialPorts.includes(p)) {
-                        setSerialPorts((prev) => [...prev, p]);
-                      }
-                      setSerialPort(p);
-                    }
-                  } else {
-                    setSerialPort(chosen);
-                  }
-                }}
-                className="select-input"
-              >
-                {serialPort && !serialPorts.includes(serialPort) ? (
-                  <option value={serialPort}>{serialPort}</option>
-                ) : null}
-                {serialPorts.length === 0 && !serialPort ? (
-                  <option value="" disabled>未检测到可用串口 (请点击右侧刷新)</option>
-                ) : (
-                  serialPorts.map((p) => (
-                    <option key={p} value={p}>{p}</option>
-                  ))
-                )}
-                <option value="__custom__">✎ 手动输入串口…</option>
-              </select>
-              <select
-                value={baudrate}
-                onChange={(e) => setBaudrate(Number(e.target.value))}
-                className="select-input"
-              >
-                <option value={9600}>9600 波特率</option>
-                <option value={19200}>19200 波特率</option>
-                <option value={38400}>38400 波特率</option>
-                <option value={57600}>57600 波特率</option>
-                <option value={115200}>115200 波特率 (默认)</option>
-                <option value={230400}>230400 波特率</option>
-                <option value={250000}>250000 波特率</option>
-                <option value={460800}>460800 波特率</option>
-                <option value={921600}>921600 波特率</option>
-              </select>
-              <button className="btn btn-ghost" onClick={() => loadSerialPorts(true)} title="如同串口助手立即重新扫描系统串口">
-                <RefreshCw size={13} />
-              </button>
-            </div>
-          ) : (
-            <div className="wb-row-2">
-              <input
-                type="text"
-                placeholder="控制器 IP (例 192.168.1.10)"
-                value={networkHost}
-                onChange={(e) => setNetworkHost(e.target.value)}
-                className="text-input wb-field-2"
-              />
-              <span className="wb-text-2">端口</span>
-              <input
-                type="number"
-                value={telnetPort}
-                onChange={(e) => setTelnetPort(Number(e.target.value))}
-                className="text-input wb-field-3"
-              />
-            </div>
-          )}
-          {connectionMode === "network" && discoveredChoices.length > 1 && (
-            <div className="wb-row-2">
-              <span className="wb-text-2">选择雕刻机:</span>
-              <select
-                className="select-input wb-field"
-                id="wb-discovered-controllers"
-                value={discoveredChoices.find((c) => c.ip === networkHost && c.telnet_port === telnetPort) ? `${networkHost}:${telnetPort}` : ""}
-                onChange={(e) => {
-                  const picked = discoveredChoices.find((c) => `${c.ip}:${c.telnet_port}` === e.target.value);
-                  if (picked) pickController(picked);
-                }}
-              >
-                <option value="" disabled>找到 {discoveredChoices.length} 台，请选择…</option>
-                {discoveredChoices.map((c) => (
-                  <option key={`${c.ip}:${c.telnet_port}`} value={`${c.ip}:${c.telnet_port}`}>{controllerLabel(c)}</option>
-                ))}
-              </select>
-            </div>
-          )}
-          {connectionMode === "serial" && (
-            <p className="wb-hint" id="wb-serial-probe-hint">
-              点“握手探测”会打开所选串口确认是不是雕刻机；部分 ESP32 / Arduino 板子打开串口时会自动重启，加工中不要探测别的串口。
-            </p>
-          )}
-
-          <div className={`wb-link-actions${connectionMode === "network" ? " is-dual" : ""}`}>
-            {connectionMode === "network" && (
-              <button
-                className="btn btn-ghost"
-                onClick={discoverControllers}
-                disabled={discovering}
-                title="查找局域网里的设备（mDNS 广播 + 本网段 23 端口），逐台发送只读的状态查询，只列出按 GRBL / FluidNC 回应的雕刻机"
-              >
-                <RefreshCw size={13} className="wb-icon" />
-                <span>{discovering ? "扫描中…" : "扫描局域网"}</span>
-              </button>
-            )}
-            <button className="btn btn-ghost wb-btn" onClick={handleTestConnection}>
-              <RefreshCw size={13} className="wb-icon" />
-              <span>握手探测</span>
-            </button>
-          </div>
-        </div>
-        </WbCard>
+        <WorkbenchLinkCard
+          connectionMode={connectionMode}
+          setConnectionMode={setConnectionMode}
+          serialPort={serialPort}
+          setSerialPort={setSerialPort}
+          serialPorts={serialPorts}
+          setSerialPorts={setSerialPorts}
+          baudrate={baudrate}
+          setBaudrate={setBaudrate}
+          loadSerialPorts={loadSerialPorts}
+          networkHost={networkHost}
+          setNetworkHost={setNetworkHost}
+          telnetPort={telnetPort}
+          setTelnetPort={setTelnetPort}
+          discoveredChoices={discoveredChoices}
+          pickController={pickController}
+          discovering={discovering}
+          discoverControllers={discoverControllers}
+          handleTestConnection={handleTestConnection}
+        />
 
         <WbCard id="source" className="hud-card ob-card" label="加工内容">
           <FoldHeader id="wb-source" title="加工内容" k="SOURCE" n={2} />
@@ -1348,805 +1209,113 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
 
             {/* Tool specific parameters */}
             {activeTool === "text" && (
-              <div className="tool-body wb-spacer">
-                <div className="wb-spacer-2">
-                  <div className="wb-row-3">
-                    <label className="wb-label">
-                      输入文本内容
-                    </label>
-                    <span style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: textContent.length > 20 ? "var(--gold)" : "var(--ink-dim)" }}>
-                      {textContent.length} / 24 字符
-                    </span>
-                  </div>
-                  <input
-                    type="text"
-                    maxLength={24}
-                    value={textContent}
-                    onChange={(e) => setTextContent(e.target.value)}
-                    className="text-input wb-field-4"
-                    placeholder="输入要雕刻的字符..."
-                  />
-                </div>
-                <div className="wb-params-grid">
-                  <label>
-                    <span>字高 (mm)</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={fontSizeMm}
-                      onChange={(e) => setFontSizeMm(Number(e.target.value))}
-                      className="text-input wb-field-5"
-                    />
-                  </label>
-                  <label>
-                    <span>刻法模式</span>
-                    <select
-                      id="wb-text-style"
-                      value={textStyle}
-                      onChange={(e) => setTextStyle(e.target.value)}
-                      className="select-input wb-compact-select"
-                    >
-                      {TEXT_STYLE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    <span>对刀起点</span>
-                    <select
-                      id="wb-text-origin"
-                      value={textOrigin}
-                      onChange={(e) => setTextOrigin(e.target.value)}
-                      className="select-input wb-compact-select"
-                    >
-                      {TEXT_ORIGIN_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <FillOptionsPanel
-                  idPrefix="wb"
-                  settings={fillSettings}
-                  onChange={updateFillSettings}
-                  withFill={textUsesFill}
-                  withCut={textIsCut}
-                  materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
-                  materialEntryLabel={materialLayer?.label || ""}
-                  onSaveToMaterial={!isRemoteMode() && materialLayer && (textUsesFill || textIsCut) ? saveFillToMaterial : null}
-                />
-              </div>
+              <WorkbenchTextTool
+                textContent={textContent}
+                setTextContent={setTextContent}
+                fontSizeMm={fontSizeMm}
+                setFontSizeMm={setFontSizeMm}
+                textStyle={textStyle}
+                setTextStyle={setTextStyle}
+                textOrigin={textOrigin}
+                setTextOrigin={setTextOrigin}
+                fillSettings={fillSettings}
+                updateFillSettings={updateFillSettings}
+                textUsesFill={textUsesFill}
+                textIsCut={textIsCut}
+                materialApplied={materialApplied}
+                materialLayer={materialLayer}
+                saveFillToMaterial={saveFillToMaterial}
+              />
             )}
 
             {activeTool === "image" && (
-              <div className="tool-body wb-spacer">
-                <div className="wb-spacer-2">
-                  <label className="wb-label-2">
-                    上传图像文件 (PNG / JPG / BMP / GIF / WebP)
-                  </label>
-                  <input
-                    type="file"
-                    accept=".png,.jpg,.jpeg,.bmp,.gif,.webp"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      e.target.value = "";
-                      if (!file) return;
-                      if (file.size > 14 * 1024 * 1024) {
-                        showAlert("图片文件过大（上限 14 MB，Base64 传输请求体限 20 MB），请先压缩分辨率后再上传。", {
-                          title: "图片超出大小限制",
-                          tone: "warning",
-                        });
-                        return;
-                      }
-                      addLog("FILE", `正在读取素材: ${file.name}...`, "info");
-                      const reader = new FileReader();
-                      reader.onload = async () => {
-                        const dataUrl = typeof reader.result === "string" ? reader.result : "";
-                        try {
-                          const res = await postJson("/api/upload", {
-                            filename: file.name,
-                            content_base64: dataUrl,
-                          });
-                          if (res.ok && res.data?.success) {
-                            setUploadedImagePath(res.data.result?.file_path || file.name);
-                            setUploadedImageName(file.name);
-                            setUploadedImageThumb(dataUrl);
-                            addLog("FILE", `已保存至工作区: ${file.name}`, "ok");
-                          } else {
-                            const err = res.data?.result || "上传失败";
-                            addLog("FILE", `图片上传失败: ${err}`, "error");
-                            showAlert(err, { title: "图片上传失败", tone: "error" });
-                          }
-                        } catch (err) {
-                          addLog("FILE", `网络或系统异常: ${err.message}`, "error");
-                          showAlert(err.message, { title: "上传异常", tone: "error" });
-                        }
-                      };
-                      reader.onerror = () => {
-                        addLog("FILE", "本地文件读取失败", "error");
-                      };
-                      reader.readAsDataURL(file);
-                    }}
-                    className="file-input wb-field-6"
-                  />
-                  {uploadedImagePath && (
-                    <div className="wb-box-2 wb-image-thumb-row" id="wb-image-selected">
-                      {uploadedImageThumb && (
-                        <img src={uploadedImageThumb} alt="已选原图缩略图" className="wb-image-thumb" />
-                      )}
-                      <span className="wb-image-name">✓ 已选原图: {uploadedImageName || uploadedImagePath}</span>
-                    </div>
-                  )}
-                </div>
-                <QualityPresetBar
-                  id="wb-image-preset"
-                  value={detectImagePreset(imageMode, imageExtras.intervalScale)}
-                  hints={IMAGE_PRESET_HINTS}
-                  onSelect={applyImageQualityPreset}
-                />
-                <div className="wb-params-grid">
-                  <label>
-                    <span>成品宽 mm</span>
-                    <input
-                      id="wb-image-width"
-                      type="number"
-                      inputMode="decimal"
-                      min={1}
-                      max={1000}
-                      placeholder="自动"
-                      value={imageWidthMm}
-                      onChange={(e) => setImageWidthMm(e.target.value)}
-                      className="text-input"
-                    />
-                  </label>
-                  <label>
-                    <span>成品高 mm</span>
-                    <input
-                      id="wb-image-height"
-                      type="number"
-                      inputMode="decimal"
-                      min={1}
-                      max={1000}
-                      placeholder="自动"
-                      value={imageHeightMm}
-                      onChange={(e) => setImageHeightMm(e.target.value)}
-                      className="text-input"
-                    />
-                  </label>
-                </div>
-                <details className="fill-options" id="wb-image-advanced">
-                  <summary>
-                    <span className="fill-options-title">高级设置</span>
-                    <span className="fill-options-summary">{imageAdvancedSummary(imageMode, imageExtras)}</span>
-                  </summary>
-                  <div className="wb-params-grid">
-                    <label>
-                      <span>转换方式</span>
-                      <select
-                        id="wb-image-mode"
-                        value={imageMode}
-                        onChange={(e) => setImageMode(e.target.value)}
-                        className="select-input wb-compact-select"
-                      >
-                        {IMAGE_MODE_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>{opt.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label title="行间距 = 材料推荐线距 × 倍数；大于 1 更快更粗，小于 1 更细更深（直通模式不用）">
-                      <span>行间距倍数</span>
-                      <input
-                        id="wb-image-interval-scale"
-                        type="number"
-                        inputMode="decimal"
-                        min={IMAGE_INTERVAL_SCALE_LIMITS.min}
-                        max={IMAGE_INTERVAL_SCALE_LIMITS.max}
-                        step={0.1}
-                        placeholder="1"
-                        value={imageExtras.intervalScale}
-                        onChange={(e) => setImageExtra("intervalScale", e.target.value)}
-                        className="text-input"
-                      />
-                    </label>
-                    {imageFields.halftone && (
-                      <>
-                        <label>
-                          <span>网点网格 mm</span>
-                          <input
-                            id="wb-image-halftone-cell"
-                            type="number"
-                            inputMode="decimal"
-                            min={0.1}
-                            max={10}
-                            step={0.05}
-                            placeholder="自动"
-                            value={imageExtras.halftoneCellMm}
-                            onChange={(e) => setImageExtra("halftoneCellMm", e.target.value)}
-                            className="text-input"
-                          />
-                        </label>
-                        <label>
-                          <span>网点角度 °</span>
-                          <input
-                            id="wb-image-halftone-angle"
-                            type="number"
-                            inputMode="decimal"
-                            min={-90}
-                            max={90}
-                            placeholder="45"
-                            value={imageExtras.halftoneAngleDeg}
-                            onChange={(e) => setImageExtra("halftoneAngleDeg", e.target.value)}
-                            className="text-input"
-                          />
-                        </label>
-                      </>
-                    )}
-                    {imageFields.grayscale && (
-                      <label title="最黑处用本次功率（推荐或自定义），最浅处用这里的最小功率；纯白不出光">
-                        <span>灰度最小功率 %</span>
-                        <input
-                          id="wb-image-gray-min"
-                          type="number"
-                          inputMode="decimal"
-                          min={0}
-                          max={99}
-                          placeholder="0"
-                          value={imageExtras.grayMinPowerPercent}
-                          onChange={(e) => setImageExtra("grayMinPowerPercent", e.target.value)}
-                          className="text-input"
-                        />
-                      </label>
-                    )}
-                    <label title="每段出光两端各缩短一半，抵消光斑直径；须小于行间距">
-                      <span>点宽补偿 mm</span>
-                      <input
-                        id="wb-image-dot-width"
-                        type="number"
-                        inputMode="decimal"
-                        min={0}
-                        max={0.5}
-                        step={0.01}
-                        placeholder="不补偿"
-                        value={imageExtras.dotWidthMm}
-                        onChange={(e) => setImageExtra("dotWidthMm", e.target.value)}
-                        className="text-input"
-                      />
-                    </label>
-                  </div>
-                  <div className="wb-image-switches">
-                    <label className="wb-params-switch" title="明暗对调，适合石板、玻璃等刻痕发白的材料">
-                      <input
-                        id="wb-image-negative"
-                        type="checkbox"
-                        checked={imageExtras.negative}
-                        onChange={(e) => setImageExtra("negative", e.target.checked)}
-                      />
-                      <span>反相（石板 / 玻璃）</span>
-                    </label>
-                    <label className="wb-params-switch" title="不重采样，按原图像素逐点雕刻；行间距 = 成品宽度 ÷ 原图像素宽">
-                      <input
-                        id="wb-image-pass-through"
-                        type="checkbox"
-                        checked={imageExtras.passThrough}
-                        onChange={(e) => setImageExtra("passThrough", e.target.checked)}
-                      />
-                      <span>直通（不重采样）</span>
-                    </label>
-                  </div>
-                  {imageFields.grayscale && (
-                    <div className="wb-params-hint">灰度变功率适合二极管激光；最黑处用本次功率，可在下方“这次自定义功率和速度”里调最大功率。</div>
-                  )}
-                </details>
-              </div>
+              <WorkbenchImageTool
+                addLog={addLog}
+                uploadedImagePath={uploadedImagePath}
+                setUploadedImagePath={setUploadedImagePath}
+                uploadedImageName={uploadedImageName}
+                setUploadedImageName={setUploadedImageName}
+                uploadedImageThumb={uploadedImageThumb}
+                setUploadedImageThumb={setUploadedImageThumb}
+                imageMode={imageMode}
+                setImageMode={setImageMode}
+                imageExtras={imageExtras}
+                setImageExtra={setImageExtra}
+                imageFields={imageFields}
+                applyImageQualityPreset={applyImageQualityPreset}
+                imageWidthMm={imageWidthMm}
+                setImageWidthMm={setImageWidthMm}
+                imageHeightMm={imageHeightMm}
+                setImageHeightMm={setImageHeightMm}
+              />
             )}
 
             {activeTool === "gcode" && (
-              <div className="tool-body wb-spacer">
-                <div className="wb-spacer-2">
-                  <label className="wb-label-2">
-                    导入现有 G-code / NC 刀路文件 (.gcode / .nc)
-                  </label>
-                  <input
-                    type="file"
-                    accept=".gcode,.nc"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      e.target.value = "";
-                      if (!file) return;
-                      if (file.size > 14 * 1024 * 1024) {
-                        showAlert("G-code 刀路文件过大（在线上传上限 14 MB，请求体限 20 MB）。", {
-                          title: "刀路超出大小限制",
-                          tone: "warning",
-                        });
-                        return;
-                      }
-                      addLog("FILE", `正在读取刀路文件: ${file.name}...`, "info");
-                      const reader = new FileReader();
-                      reader.onload = async () => {
-                        try {
-                          const res = await postJson("/api/upload", {
-                            filename: file.name,
-                            content_base64: reader.result,
-                          });
-                          if (res.ok && res.data?.success) {
-                            setUploadedGcodePath(res.data.result?.file_path || file.name);
-                            setUploadedGcodeName(file.name);
-                            addLog("FILE", `已载入 G-code 刀路: ${file.name}`, "ok");
-                          } else {
-                            const err = res.data?.result || "载入失败";
-                            addLog("FILE", `G-code 载入失败: ${err}`, "error");
-                            showAlert(err, { title: "G-code 载入失败", tone: "error" });
-                          }
-                        } catch (err) {
-                          addLog("FILE", `网络或系统异常: ${err.message}`, "error");
-                          showAlert(err.message, { title: "载入异常", tone: "error" });
-                        }
-                      };
-                      reader.onerror = () => {
-                        addLog("FILE", "本地刀路读取失败", "error");
-                      };
-                      reader.readAsDataURL(file);
-                    }}
-                    className="file-input wb-field-6"
-                  />
-                  {uploadedGcodePath && (
-                    <div className="wb-box-2" id="wb-gcode-selected">
-                      ✓ 载入刀路: {uploadedGcodeName || uploadedGcodePath}
-                    </div>
-                  )}
-                </div>
-              </div>
+              <WorkbenchGcodeTool
+                addLog={addLog}
+                uploadedGcodePath={uploadedGcodePath}
+                setUploadedGcodePath={setUploadedGcodePath}
+                uploadedGcodeName={uploadedGcodeName}
+                setUploadedGcodeName={setUploadedGcodeName}
+              />
             )}
         </WbCard>
 
-        <WbCard id="material" className="hud-card ob-card" label="材质与参数">
-          <FoldHeader id="wb-material" title="材质与参数" k="MATERIAL" n={3} />
-            {/* Material & Specs selection Deck */}
-            <div
-              className="wb-box-6"
-            >
-              <div className="wb-row-5">
-                <span className="wb-row-6">
-                  <span className="wb-text-3" />
-                  加工材质与物理参数联动
-                </span>
-                {!isRemoteMode() && (
-                  <button
-                    className="btn btn-ghost wb-btn-3"
-                    onClick={async () => {
-                      const recMode = materialRecommendationModes({ activeTool, textStyle });
-                      let existingThicknesses;
-                      let fullThickList = availableThicknesses;
-                      try {
-                        const exportRes = await getJson("/api/material-lab/export");
-                        const mats = exportRes.data?.result?.library?.materials;
-                        if (!exportRes.ok || !exportRes.data?.success || !mats || typeof mats !== "object") {
-                          showAlert("读取材料库完整规格失败，请稍后重试", { title: "读取失败", tone: "warning" });
-                          return;
-                        }
-                        const matEntry = mats[selectedMaterial];
-                        if (matEntry?.thicknesses && typeof matEntry.thicknesses === "object") {
-                          existingThicknesses = matEntry.thicknesses;
-                          const keys = Object.keys(matEntry.thicknesses);
-                          if (keys.length > 0) {
-                            fullThickList = keys;
-                          }
-                        } else {
-                          existingThicknesses = {};
-                        }
-                      } catch (err) {
-                        showAlert(`读取材料库异常：${err.message}`, { title: "读取失败", tone: "warning" });
-                        return;
-                      }
-                      setMaterialModalData({
-                        name: selectedMaterial,
-                        thicknesses: fullThickList,
-                        power_percent: powerPercent,
-                        speed_mms: speedMms,
-                        feed_rate: recommendedFeedRate,
-                        passes: recommendedPasses,
-                        laser_mode: recMode.laserMode,
-                        engraving_mode: recMode.engravingMode || "cut",
-                        existing_thicknesses: existingThicknesses,
-                        target_thickness: selectedThickness,
-                      });
-                      setShowMaterialModal(true);
-                    }}
-                  >
-                    <Sliders size={12} className="wb-icon" />
-                    调整库内参数
-                  </button>
-                )}
-              </div>
+        <WorkbenchMaterialCard
+          activeTool={activeTool}
+          textStyle={textStyle}
+          materials={materials}
+          selectedMaterial={selectedMaterial}
+          setSelectedMaterial={setSelectedMaterial}
+          selectedThickness={selectedThickness}
+          setSelectedThickness={setSelectedThickness}
+          availableThicknesses={availableThicknesses}
+          powerPercent={powerPercent}
+          speedMms={speedMms}
+          recommendedFeedRate={recommendedFeedRate}
+          recommendedPasses={recommendedPasses}
+          hasRecommendation={hasRecommendation}
+          setMaterialModalData={setMaterialModalData}
+          setShowMaterialModal={setShowMaterialModal}
+          customParams={customParams}
+          setCustomParams={setCustomParams}
+          customPower={customPower}
+          setCustomPower={setCustomPower}
+          customFeed={customFeed}
+          setCustomFeed={setCustomFeed}
+          customPasses={customPasses}
+          setCustomPasses={setCustomPasses}
+        />
 
-              <div className="wb-grid-2">
-                <div>
-                  <label className="wb-label-3">
-                    材料类型
-                  </label>
-                  <select
-                    value={selectedMaterial}
-                    onChange={(e) => {
-                      const nextMat = e.target.value;
-                      setSelectedMaterial(nextMat);
-                      const matObj = materials.find((m) => m.name === nextMat);
-                      if (matObj) {
-                        setSelectedThickness(pickThicknessForMaterial(matObj, selectedThickness));
-                      }
-                    }}
-                    className="select-input wb-field-7"
-                  >
-                    {materials.length === 0 ? (
-                      <option value={selectedMaterial}>{selectedMaterial || "暂无库内材质"}</option>
-                    ) : (
-                      materials.map((m) => (
-                        <option key={m.name} value={m.name}>{m.name}</option>
-                      ))
-                    )}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="wb-label-3">
-                    厚度规格
-                  </label>
-                  <select
-                    value={selectedThickness}
-                    onChange={(e) => setSelectedThickness(e.target.value)}
-                    className="select-input wb-field-8"
-                  >
-                    {availableThicknesses.map((th) => (
-                      <option key={th} value={String(th)}>{th} mm</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="wb-params" id="wb-params">
-                <label className="wb-params-switch">
-                  <input
-                    type="checkbox"
-                    id="wb-custom-params"
-                    checked={customParams}
-                    disabled={activeTool === "gcode"}
-                    onChange={(e) => {
-                      const on = e.target.checked;
-                      setCustomParams(on);
-                      if (on) {
-                        setCustomPower(String(Math.round(powerPercent)));
-                        setCustomFeed(String(Math.round(recommendedFeedRate)));
-                        setCustomPasses(String(Math.max(1, Math.min(MANUAL_LIMITS.passes.max, recommendedPasses))));
-                      }
-                    }}
-                  />
-                  <span>这次自定义功率和速度</span>
-                </label>
-                {activeTool === "gcode" ? (
-                  <div className="wb-params-hint">上传的刀路文件按文件里的参数加工，这里不生效。</div>
-                ) : customParams ? (
-                  <>
-                    <div className="wb-params-grid">
-                      <label>
-                        <span>功率 %</span>
-                        <input className="text-input" id="wb-custom-power" type="number" inputMode="decimal"
-                          min={MANUAL_LIMITS.power.min} max={MANUAL_LIMITS.power.max} value={customPower}
-                          onChange={(e) => setCustomPower(e.target.value)} />
-                      </label>
-                      <label>
-                        <span>速度 mm/min</span>
-                        <input className="text-input" id="wb-custom-feed" type="number" inputMode="numeric" step="10"
-                          min={MANUAL_LIMITS.feed.min} max={MANUAL_LIMITS.feed.max} value={customFeed}
-                          onChange={(e) => setCustomFeed(e.target.value)} />
-                      </label>
-                      <label>
-                        <span>遍数</span>
-                        <input className="text-input" id="wb-custom-passes" type="number" inputMode="numeric"
-                          min={MANUAL_LIMITS.passes.min} max={MANUAL_LIMITS.passes.max} value={customPasses}
-                          onChange={(e) => setCustomPasses(e.target.value)} />
-                      </label>
-                    </div>
-                    <div className="wb-params-hint">只用于这一次生成，不会改材料库；重新计算轨迹后生效，发送前仍要你确认。</div>
-                  </>
-                ) : hasRecommendation ? (
-                  <div className="wb-params-hint" id="wb-params-recommended">
-                    材料库推荐：功率 {Math.round(powerPercent)}% · 速度 {Math.round(recommendedFeedRate)} mm/min · {recommendedPasses} 遍
-                  </div>
-                ) : (
-                  <div className="wb-params-hint" id="wb-params-recommended">
-                    材料库推荐：当前材质/厚度暂无该模式参数（可勾选自定义，或前往材料实验室补充）
-                  </div>
-                )}
-              </div>
-            </div>
-
-        </WbCard>
-
-        <WbCard id="monitor" className="hud-card ob-card ob-monitor" label="加工监视舱">
-          <FoldHeader id="wb-monitor" title="加工监视舱" k="MONITOR" n={4} />
-            <div className="chamber-viewport">
-              {/* 坐标雷达网格背景 */}
-              <div className="chamber-grid" />
-
-              {previewUrl ? (
-                <div className={`wb-row-7${previewStale ? " is-stale" : ""}`}>
-                  <img
-                    src={previewUrl}
-                    alt="加工轨迹预览"
-                    onError={(e) => {
-                      const imgFile = currentWorkflow?.artifacts?.image_file;
-                      if (imgFile && !e.currentTarget.dataset.retried) {
-                        e.currentTarget.dataset.retried = "true";
-                        e.currentTarget.src = resolveApiUrl(`/preview?path=${encodeURIComponent(imgFile)}&t=${Date.now()}`);
-                      }
-                    }}
-                    className="wb-box-7"
-                  />
-                  <div
-                    className={`wb-box-8${previewStale ? " is-stale" : ""}`}
-                    id="wb-preview-badge"
-                  >
-                    {previewStale
-                      ? "参数已改动 · 需重新生成轨迹"
-                      : `刀路预览就绪${currentWorkflow?.artifacts?.origin === "center" ? " · 中心起点" : currentWorkflow?.artifacts?.origin === "lower_left" ? " · 左下角起点" : ""}`}
-                  </div>
-                </div>
-              ) : (
-                <div className="wb-box-9">
-                  <div
-                    className="wb-grid-4"
-                  >
-                    <Cpu size={28} className="wb-icon-2" />
-                  </div>
-                  <div className="wb-box-10">
-                    加工监视舱就绪
-                  </div>
-                  <div className="wb-box-11">
-                    请在左侧设定参数后点击【计算加工轨迹】
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="job-dispatch-card">
-              {/* 刀路摘要：尺寸、行数、耗时、物理文件指纹集中一行（2026-11-07 合并原先重复的两组统计） */}
-              <div className="toolpath-capsule" id="wb-toolpath-stats">
-                <div className="toolpath-item">
-                  <span className="toolpath-label"><Ruler size={11} aria-hidden="true" /> 轮廓尺寸</span>
-                  <span className="toolpath-value">
-                    {dimensions ? `${dimensions.width.toFixed(1)} × ${dimensions.height.toFixed(1)} mm` : "—"}
-                  </span>
-                </div>
-                <div className="toolpath-item">
-                  <span className="toolpath-label">刀路总行数</span>
-                  <span className="toolpath-value">
-                    {sendProgress?.total
-                      ? `${sendProgress.total.toLocaleString()} 行`
-                      : currentWorkflow?.artifacts?.total_lines
-                      ? `${currentWorkflow.artifacts.total_lines.toLocaleString()} 行`
-                      : gcodeLineCount > 0
-                      ? `${gcodeLineCount.toLocaleString()} 行`
-                      : "—"}
-                  </span>
-                </div>
-                <div className="toolpath-item">
-                  <span className="toolpath-label"><Clock size={11} aria-hidden="true" /> 预估耗时</span>
-                  <span className="toolpath-value wb-text-5">
-                    {timeEstimate ? `${timeEstimate.estimated_seconds}s（${timeEstimate.estimated_minutes} 分钟）` : "—"}
-                  </span>
-                </div>
-                <div className="toolpath-item">
-                  <span className="toolpath-label">物理 SHA-256</span>
-                  <span className="toolpath-value wb-text-4">
-                    {currentWorkflow?.confirmation_snapshot?.gcode_sha256
-                      ? `${currentWorkflow.confirmation_snapshot.gcode_sha256.slice(0, 10)}...`
-                      : currentWorkflow?.artifacts?.gcode_sha256
-                      ? `${currentWorkflow.artifacts.gcode_sha256.slice(0, 10)}...`
-                      : "待计算比对"}
-                  </span>
-                </div>
-              </div>
-              {previewStale && (
-                <div className="wb-stale-notice" id="wb-stale-notice" role="status">
-                  左侧内容或参数已改动，当前预览仍是上一轮旧刀路；请先点「重新生成轨迹」后再走边框或开刻。
-                </div>
-              )}
-              {actualParamsText(currentWorkflow) && (
-                <div className="wb-origin-note" id="wb-actual-params">加工参数：{actualParamsText(currentWorkflow)}</div>
-              )}
-              {dimensions?.originNote && (
-                <div className="wb-origin-note" id="wb-origin-note">{dimensions.originNote}</div>
-              )}
-              {fitNote && (
-                <div className="wb-origin-note" id="wb-fit-note">{fitNote}</div>
-              )}
-              {fillNote && (
-                <div className="wb-origin-note" id="wb-fill-note">刀路：{fillNote}</div>
-              )}
-              {timeEstimateNote(timeEstimate) && (
-                <div className="wb-origin-note" id="wb-time-note">耗时：{timeEstimateNote(timeEstimate)}</div>
-              )}
-
-              {/* 生成与下发按钮放在监视舱刀路摘要下方，与孪生入口同一行 */}
-              <div className="wb-dispatch-actions" id="wb-dispatch-actions" role="toolbar" aria-label="生成与下发">
-                <button type="button" className="btn btn-hud-primary" onClick={handleGeneratePreview} disabled={busy || framingBusy}>
-                  <Cpu size={15} aria-hidden="true" />
-                  <span>{busy ? "正在解算..." : currentWorkflow ? "重新生成轨迹" : "计算加工轨迹"}</span>
-                </button>
-                {(() => {
-                  const isActiveSend = overlayStatus === "running" || overlayStatus === "sending" || overlayStatus === "preparing";
-                  const canResume = !previewStale && canResumeJob(sendProgress, overlayStatus);
-                  const canFire = Boolean(currentWorkflow) && !previewStale && !isActiveSend;
-                  return (
-                    <button
-                      type="button"
-                      id="wb-btn-send"
-                      className={`btn ${canFire ? "btn-hud-fire" : "btn-ghost"}${canResume ? " btn-resume" : ""}`}
-                      onClick={canResume ? handleResumeSend : handleConfirmSend}
-                      disabled={busy || framingBusy || !currentWorkflow || previewStale || isActiveSend}
-                    >
-                      <Flame size={16} aria-hidden="true" />
-                      <span>
-                        {isActiveSend
-                          ? "正在雕刻…"
-                          : canResume
-                          ? formatResumeActionLabel(sendProgress)
-                          : previewStale
-                          ? "参数已改 · 请先重算"
-                          : currentWorkflow
-                          ? "开始雕刻"
-                          : "请先计算轨迹"}
-                      </span>
-                    </button>
-                  );
-                })()}
-                <button
-                  type="button"
-                  className="btn btn-ghost twin-jump-btn"
-                  onClick={() => onNavigate("/twin")}
-                  id="btn-open-twin"
-                  title="进入 3D 数字孪生舱（刀路仿真 / 实机遥测）"
-                >
-                  <Box size={14} aria-hidden="true" />
-                  <span>3D 孪生</span>
-                </button>
-              </div>
-
-              {/* 辅助操作条（仅在已生成预览时出现，不增加默认空态高度）：先走边框 · 导出 G-code · 温和取消 */}
-              {currentWorkflow?.workflow_id && (
-                <div className="wb-secondary-actions" id="wb-secondary-actions">
-                  <button
-                    type="button"
-                    id="wb-btn-framing"
-                    className="btn btn-ghost wb-sec-btn"
-                    onClick={handleFraming}
-                    disabled={
-                      busy
-                      || framingBusy
-                      || previewStale
-                      || !currentWorkflow?.artifacts?.frame_mm
-                      || overlayStatus === "running"
-                      || overlayStatus === "sending"
-                    }
-                    title={
-                      !currentWorkflow?.artifacts?.frame_mm
-                        ? "外部导入刀路起点由文件自身决定，不支持相对当前位置走边框"
-                        : "激光头沿刀路外框绕一圈（默认不出光），核对木牌摆放位置"
-                    }
-                  >
-                    <Square size={13} aria-hidden="true" />
-                    <span>{framingBusy ? "走边框中…" : "先走边框"}</span>
-                  </button>
-                  <label
-                    className="checkbox-row wb-framing-shape"
-                    title="勾选后沿图形外轮廓（橡皮筋）走，而不是外接矩形；带圆弧的外部刀路自动退回矩形"
-                  >
-                    <input
-                      type="checkbox"
-                      id="wb-framing-hull"
-                      checked={framingShape === "hull"}
-                      onChange={(e) => {
-                        const next = e.target.checked ? "hull" : "box";
-                        setFramingShape(next);
-                        writeFramingShape(next);
-                      }}
-                    />
-                    <span>沿外轮廓</span>
-                  </label>
-                  <button
-                    type="button"
-                    id="wb-btn-export-gcode"
-                    className="btn btn-ghost wb-sec-btn"
-                    onClick={handleExportGcode}
-                    disabled={!gcodeText}
-                    title="将当前生成的 G-code 刀路保存到本地"
-                  >
-                    <Download size={13} aria-hidden="true" />
-                    <span>导出 G-code</span>
-                  </button>
-                  {(overlayStatus === "running" || overlayStatus === "sending") && (
-                    <button
-                      type="button"
-                      id="wb-btn-cancel"
-                      className="btn btn-ghost wb-sec-btn is-warn"
-                      onClick={handleCancelJob}
-                      title="温和停止后续刀路下发并记录已完成行数，停稳后可断点续雕"
-                    >
-                      <PauseCircle size={13} aria-hidden="true" />
-                      <span>暂停取消（记断点）</span>
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* 两点对位（2026-11-16，对齐 LightBurn Print and Cut）：默认收起，只在已生成预览时出现 */}
-              {currentWorkflow?.workflow_id && (
-                <RegistrationPanel
-                  workflow={currentWorkflow}
-                  connectionForm={connectionForm}
-                  machineMotion={motionPayload.machine_motion}
-                  disabled={
-                    busy
-                    || framingBusy
-                    || previewStale
-                    || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)
-                  }
-                  onLog={addLog}
-                  onRegistered={(workflow) => adoptDerivedWorkflow(workflow, "对位预览")}
-                />
-              )}
-
-              {/* 大号醒目急停安全制动按钮 */}
-              <button
-                type="button"
-                className="btn-estop-large"
-                onClick={handleEStop}
-                title="向控制器请求 0x18 软件复位；不能替代硬件急停"
-                id="btn-estop-trigger"
-              >
-                <AlertTriangle size={16} />
-                <span>0x18 软件复位 · 紧急停止请求</span>
-              </button>
-
-              {/* 雕刻下发进度 */}
-              <div className="streaming-progress-group">
-                <div className="streaming-progress-header">
-                  <span>雕刻下发进度</span>
-                  <span className="wb-text-6">
-                    {sendProgress && sendProgress.total > 0
-                      ? `${Math.min(100, Math.round((sendProgress.sent / sendProgress.total) * 100))}%`
-                      : "0%"}
-                  </span>
-                </div>
-
-                <div className="streaming-progress-track">
-                  <div
-                    className={`streaming-progress-bar ${
-                      overlayStatus === "running" || overlayStatus === "sending" ? "active" : ""
-                    }`}
-                    style={{
-                      width: `${
-                        sendProgress && sendProgress.total > 0
-                          ? Math.min(100, Math.round((sendProgress.sent / sendProgress.total) * 100))
-                          : 0
-                      }%`,
-                    }}
-                  />
-                </div>
-
-                <div className="streaming-progress-footer">
-                  <span>
-                    {sendProgress && sendProgress.total > 0
-                      ? `${sendProgress.sent.toLocaleString()} / ${sendProgress.total.toLocaleString()} 行`
-                      : "0 / 0 行"}
-                  </span>
-                  <span id="wb-progress-status">
-                    {workbenchStatusLabel(overlayStatus, sendProgress?.phase, Boolean(currentWorkflow?.workflow_id))}
-                  </span>
-                </div>
-              </div>
-            </div>
-        </WbCard>
+        <WorkbenchMonitorCard
+          onNavigate={onNavigate}
+          previewUrl={previewUrl}
+          previewStale={previewStale}
+          currentWorkflow={currentWorkflow}
+          dimensions={dimensions}
+          sendProgress={sendProgress}
+          gcodeLineCount={gcodeLineCount}
+          gcodeText={gcodeText}
+          timeEstimate={timeEstimate}
+          fitNote={fitNote}
+          fillNote={fillNote}
+          busy={busy}
+          framingBusy={framingBusy}
+          overlayStatus={overlayStatus}
+          framingShape={framingShape}
+          setFramingShape={setFramingShape}
+          connectionForm={connectionForm}
+          motionPayload={motionPayload}
+          addLog={addLog}
+          adoptDerivedWorkflow={adoptDerivedWorkflow}
+          handleGeneratePreview={handleGeneratePreview}
+          handleConfirmSend={handleConfirmSend}
+          handleResumeSend={handleResumeSend}
+          handleFraming={handleFraming}
+          handleExportGcode={handleExportGcode}
+          handleCancelJob={handleCancelJob}
+          handleEStop={handleEStop}
+        />
 
         <WbCard id="feedback" className="hud-card ob-card" label="加工反馈">
           <FoldHeader id="wb-feedback" title="加工反馈" k="FEEDBACK" />

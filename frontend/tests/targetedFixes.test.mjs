@@ -5,12 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { formatFramingStatus } from "../src/drawConnection.js";
+import { readPageSource } from "./pageSource.mjs";
 
 const testsDir = path.dirname(fileURLToPath(import.meta.url));
 const srcRoot = path.resolve(testsDir, "../src");
 
 test("DrawPage 统一复用 client.js postJson 契约，走边框成功不再误报未知错误", () => {
-  const drawSource = readFileSync(path.join(srcRoot, "pages/DrawPage.jsx"), "utf8");
+  const drawSource = readPageSource("pages/DrawPage.jsx");
   assert.doesNotMatch(drawSource, /async\s+function\s+postJson\s*\(/, "不得再维护重复解包版 postJson");
   assert.match(drawSource, /import\s*\{[^}]*\bpostJson\b[^}]*\}\s*from\s*["']\.\.\/api\/client\.js["']/);
 
@@ -285,7 +286,7 @@ test("VoiceAgentCard 5 秒轮询保脏、VoicePage 链路提示、HomePage 预�
 });
 
 test("工作台预览：不伪造 SHA-256、不跳过 HTTP 状态检查，统一走 fetchPreviewText", () => {
-  const home = readFileSync(path.join(srcRoot, "pages/HomePage.jsx"), "utf8");
+  const home = readPageSource("pages/HomePage.jsx");
   assert.doesNotMatch(home, /d8f2b1a9/, "不得用假摘要兜底");
   assert.doesNotMatch(home, /preview\?path=\$\{encodeURIComponent\(artifacts\.gcode_file\)\}/, "G-code 预览统一走 fetchPreviewText");
   assert.match(home, /fetchPreviewText\(artifacts\.gcode_file\)/);
@@ -297,23 +298,23 @@ test("工作台预览：不伪造 SHA-256、不跳过 HTTP 状态检查，统一
 
 test("四个页面共用 usePageEmergencyStop 两段式急停；走边框与标定矩阵发送先确认，急停路径不加确认", () => {
   for (const file of ["pages/HomePage.jsx", "pages/DrawPage.jsx", "pages/TwinPage.jsx", "pages/MaterialLabPage.jsx"]) {
-    const source = readFileSync(path.join(srcRoot, file), "utf8");
+    const source = readPageSource(file);
     assert.match(source, /usePageEmergencyStop\(/, `${file} 必须复用共享页面急停`);
     assert.doesNotMatch(source, /onEmergencyStop\(/, `${file} 不得自行再注册一份急停监听`);
   }
-  const matLab = readFileSync(path.join(srcRoot, "pages/MaterialLabPage.jsx"), "utf8");
+  const matLab = readPageSource("pages/MaterialLabPage.jsx");
   const sendMatrix = matLab.slice(matLab.indexOf("const handleSendMatrix = async () =>"), matLab.indexOf("const startMatrixPolling"));
   assert.ok(sendMatrix.indexOf("showConfirm(") > 0 && sendMatrix.indexOf("showConfirm(") < sendMatrix.indexOf('postJson("/api/material-lab/send"'), "标定矩阵发送必须先确认再出光");
   const hook = readFileSync(path.join(srcRoot, "usePageEstop.js"), "utf8");
   assert.doesNotMatch(hook, /showConfirm/, "急停路径不得增加确认框");
-  const draw = readFileSync(path.join(srcRoot, "pages/DrawPage.jsx"), "utf8");
+  const draw = readPageSource("pages/DrawPage.jsx");
   const framing = draw.slice(draw.indexOf("async function runFraming()"), draw.indexOf("async function testConnection()"));
   assert.ok(framing.indexOf("showConfirm(") > 0 && framing.indexOf("showConfirm(") < framing.indexOf('postJson("/api/device/framing"'), "走边框必须先确认再下发");
   assert.match(framing, /if \(!confirmed\)/);
   assert.match(framing, /buildDrawFramingPayload\(/, "画板走边框必须经 buildDrawFramingPayload 附带 relative_to_head");
   assert.doesNotMatch(draw, /function\s+cacheBust\s*\(/, "PreviewImage 渲染期不得拼 Date.now() 导致敲字时反复重拉大图");
   assert.match(draw, /const \[offlineSdChoice, setOfflineSd\] = React\.useState\(false\)/, "画板确认弹窗默认走在线流式发送，不得默认强勾 SD 脱机");
-  const home = readFileSync(path.join(srcRoot, "pages/HomePage.jsx"), "utf8");
+  const home = readPageSource("pages/HomePage.jsx");
   const wbFraming = home.slice(home.indexOf("const handleFraming = async () =>"), home.indexOf("const handleExportGcode = async () =>"));
   assert.ok(wbFraming.indexOf("showConfirm(") > 0 && wbFraming.indexOf("showConfirm(") < wbFraming.indexOf('postJson("/api/device/framing"'), "工作台走边框必须先确认再下发");
   assert.match(wbFraming, /if \(!confirmed\)/);
@@ -350,7 +351,7 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
   const twinStage = readFileSync(path.join(srcRoot, "components/TwinStage3D.jsx"), "utf8");
   assert.match(twinStage, /isDirectHardwareCoord/, "实机遥测 MPos/WPos 坐标不得二次叠加虚拟木牌偏置与缩放");
 
-  const home = readFileSync(path.join(srcRoot, "pages/HomePage.jsx"), "utf8");
+  const home = readPageSource("pages/HomePage.jsx");
   const editMatBlock = home.slice(home.indexOf("加工材质与物理参数联动"), home.indexOf("调整库内参数") + 50);
   assert.match(editMatBlock, /\/api\/material-lab\/export/, "工作台调整库内参数须拉取完整各厚度参数传入 existing_thicknesses");
   assert.match(editMatBlock, /existing_thicknesses:\s*existingThicknesses/);
@@ -358,7 +359,7 @@ test("全局浮层、语音子卡、摄像头与 3D 视口边界回归（防轮�
   const matModal = readFileSync(path.join(srcRoot, "components/MaterialModal.jsx"), "utf8");
   assert.match(matModal, /if \(isEditing && !resolvedExistingThicknesses\)/, "MaterialModal 编辑缺省 existing_thicknesses 时须兜底拉取防覆盖");
 
-  const matLab = readFileSync(path.join(srcRoot, "pages/MaterialLabPage.jsx"), "utf8");
+  const matLab = readPageSource("pages/MaterialLabPage.jsx");
   assert.match(matLab, /<option value="__custom__">✎ 手动输入串口…<\/option>/, "材料实验室串口下拉须支持手动输入串口号");
 
   // 顶部混搭栏与录真话测实现在 voice-builtin/ 下（2026-11-13 从 VoiceBuiltinCard.jsx 原样搬出）

@@ -17,6 +17,7 @@ import {
 } from "../src/workbenchParams.js";
 import { getCurrentDialog, resetDialogs, resolveDialog, showPrompt, subscribe } from "../src/appDialog.js";
 import { readFileSync } from "node:fs";
+import { readPageSource } from "./pageSource.mjs";
 
 test("n73 工作台自定义参数：没开不提交，填对转成 manual_params，越界给出原因", () => {
   assert.equal(manualParamsPayload({ enabled: false, powerPercent: 60, feedRate: 1200, passes: 1 }), null);
@@ -243,8 +244,8 @@ test("断点续雕二次确认文案、异步 showPrompt 输入弹窗与前端�
     unsub();
   }
 
-  const homeSrc = readFileSync(new URL("../src/pages/HomePage.jsx", import.meta.url), "utf8");
-  const drawSrc = readFileSync(new URL("../src/pages/DrawPage.jsx", import.meta.url), "utf8");
+  const homeSrc = readPageSource("pages/HomePage.jsx");
+  const drawSrc = readPageSource("pages/DrawPage.jsx");
   const appDialogSrc = readFileSync(new URL("../src/components/AppDialog.jsx", import.meta.url), "utf8");
   // Colab 联动栏实现在 voice-builtin/ 下（2026-11-13 从 VoiceBuiltinCard.jsx 原样搬出）
   const voiceBuiltinSrc = readFileSync(new URL("../src/components/voice-builtin/ColabBridgeSection.jsx", import.meta.url), "utf8");

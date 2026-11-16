@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 按职责拆分 G-code、矢量规划、切割、预览生成、材料实验室与三个前端大页面（行为不变，2026-11-16）
+
+- **现象**：`laser-core` 的 `gcode.rs`（2598 行）、`vector_plan.rs`（1403 行）、`cut.rs`（1290 行），`laser-api` 的 `generation.rs`（1867 行）、`material_lab.rs`（1181 行），以及前端 `HomePage.jsx`（2190 行）、`DrawPage.jsx`（1853 行）、`MaterialLabPage.jsx`（1715 行）各自混着多块职责，改一处要在两三千行里找，评审也难聚焦（用户 2026-11-16“代码健康也完成一下吧”）。
+- **根因与修复**：按行号原样搬移，只新增 `mod` / `use` / `pub use`、`impl ApiService` 外壳与最小可见性修饰（`gcode::parse` 的 `words`、`MotionSegment`（含字段）、`motion_segments` 与 `generation::options` 的三个回显 / 解析函数改为 `pub(super)`）。`gcode/` 拆成写出 `writer`、光栅 `raster`、走边框 `framing`、解析 `parse`、预览 `preview`、工时 `estimate`；`vector_plan/` 拆成扫描填充 `scan` 与路线规划 `planner`；`cut/` 拆成切缝补偿 `offset` 与后处理 `postprocess`；三者测试原样移到各自 `tests.rs`。`generation/` 拆成 `text`、`draw`、`image_upload`、`options`，幅面换算与 `next_workflow_id` 留在 `mod.rs`；`material_lab/` 拆成 `preview` 与发送 / 选格 `dispatch`。前端三页的状态、副作用与处理函数原样留在页面，卡片界面搬到 `components/workbench/`、`components/draw/`、`components/material-lab/`，只经 props 传值，元素 id、类名、测试标识与可见文字不变。对外路径 `laser_core::gcode::*`、`laser_core::vector_plan::*`、`laser_core::cut::*` 与 crate 内函数名不变；默认值、契约、门禁、G-code 输出均不变，无破坏性变更。
+- **验证**：`cargo test --workspace` 拆分前后通过数相同；临时用例对 23 组文字（填充 / 描边 / 光栅 / 切割含桥位引线）、画板（光栅 / 描边 / 矢量含选中与填充）、图片（5 种模式）、G-code 上传与材料矩阵预览比对 G-code、预览图与回显 JSON 的 SHA-256，拆分前后逐字节一致；前端三页服务端渲染 HTML 拆分前后逐字节一致；读页面源码的单测改用 `tests/pageSource.mjs` 按 import 顺序拼接分片，断言字符串不变。clippy 零警告，前端 lint 0 error、`npm test` 321 项与 `npm run build` 通过。未跑 E2E 与实机。
+- **关联**：`crates/laser-core/src/{gcode,vector_plan,cut}/`、`crates/laser-api/src/{generation,material_lab}/`、`frontend/src/pages/{HomePage,DrawPage,MaterialLabPage}.jsx`、`frontend/src/components/{workbench,draw,material-lab}/`、`frontend/tests/pageSource.mjs`。
+
 ### 新增首次标定向导，填充 / 切割设置随材料库条目保存，工时预估按实际用时自校准（2026-11-16）
 
 - **现象**：第一次用新机器或新材料时，线距、功率速度、双向扫描偏移、过扫描、切缝补偿要分别去不同地方摸索，没有成套的引导；扫描角度、过扫描、切缝补偿、桥位等只存在本机一份，换材料不跟着换；工时预估只按加速度模型算，与这台机器的实际用时长期有固定偏差。

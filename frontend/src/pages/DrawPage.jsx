@@ -2,40 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Excalidraw, exportToBlob } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
   Download,
-  Eye,
   FileJson,
   Home,
-  RefreshCw,
-  Ruler,
-  Save,
-  Send,
-  Settings2,
-  ShieldAlert,
-  Square,
   Upload,
-  UploadCloud,
-  Wifi,
-  X,
 } from "lucide-react";
 import { prepareRasterExportElements } from "../rasterInkElements.js";
 import {
-  sendBadgeLabel,
   summaryAllowsConfirmSend,
-  summaryDisplayWarnings,
-  thicknessDisplayRows,
 } from "../jobSummaryView.js";
 import {
-  CUSTOM_OPTION_LABEL,
   CUSTOM_OPTION_VALUE,
   MATERIAL_LIBRARY_CHANNEL,
   applyMaterialLibraryRefresh,
   applyMaterialSelectChange,
-  findMaterialOption,
   loadUiMaterialOptions,
   notifyMaterialsUpdated,
   restoreMaterialSelectState,
@@ -50,28 +30,22 @@ import {
   requiresMovedMaterialAcknowledgement,
   setMovedMaterialAcknowledged,
 } from "../repeatSendGuard.js";
-import { isRemoteMode, resolveApiUrl } from "../authSession.js";
-import { apiFetch, fetchPreviewBlobUrl, getJson, postJson } from "../api/client.js";
-import { showAlert, showConfirm, showPrompt } from "../appDialog.js";
+import { apiFetch, getJson, postJson } from "../api/client.js";
+import { showAlert, showConfirm } from "../appDialog.js";
 import { exportFile, savedMessage } from "../saveFile.js";
-import { FeedbackPanel } from "../components/FeedbackPanel.jsx";
 import { estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { TERMINAL_STATUSES } from "../state/statusNormalize.js";
-import { MANUAL_LIMITS, manualParamsPayload } from "../workbenchParams.js";
-import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
-import { defaultSerialPortHint } from "../platform.js";
+import { manualParamsPayload } from "../workbenchParams.js";
+import { discoveryOutcome } from "../controllerDiscovery.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
-import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
-import RegistrationPanel from "../components/RegistrationPanel.jsx";
 import {
-  REGISTRATION_DRAW_SESSION_KEY,
   adoptRegisteredDrawRecord,
   drawFramingExtent,
   drawOriginNote,
 } from "../registrationState.js";
-import { framingOutline, readFramingShape, writeFramingShape } from "../aiPreviewState.js";
+import { framingOutline, readFramingShape } from "../aiPreviewState.js";
 import {
   applyMaterialLayer,
   fillResultNote,
@@ -81,7 +55,6 @@ import {
   machineMotionFromLimits,
   machineMotionPayload,
   materialLayerFromRecommendation,
-  materialLayerHint,
   materialLayerPayload,
   materialLayerSaveRequest,
   readFillSettings,
@@ -91,6 +64,10 @@ import {
   writeMachineMotion,
 } from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
+import { DrawMaterialCard } from "../components/draw/DrawMaterialCard.jsx";
+import { DrawDeviceCard } from "../components/draw/DrawDeviceCard.jsx";
+import { DrawSendCard } from "../components/draw/DrawSendCard.jsx";
+import { SendConfirmDialog } from "../components/draw/SendConfirmDialog.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
 import {
   DRAW_MODE_VERSION,
@@ -105,7 +82,6 @@ import {
   drawTargetReady,
   formatFramingStatus,
   framingConfirmText,
-  isDrawConnectionOk,
   isDrawPreviewStale,
   isSerial,
   parseImportedSceneJson,
@@ -1026,6 +1002,18 @@ export function DrawPage({ onNavigate }) {
     }
   }
 
+  // 采用加工反馈的调参建议：换成新生成的预览任务，尚未发送
+  const adoptFeedbackWorkflow = (workflow) => {
+    pollingCleanupRef.current?.();
+    pollingCleanupRef.current = null;
+    setWorkflowId(workflow.workflow_id);
+    setResult({ success: true, result: workflow });
+    setPreviewSnap({ sceneRev, formSig: currentFormSig });
+    setConfirmOpen(false);
+    setRepeatSend((current) => applyPreviewFingerprintSuccess(current, workflow.draw_lab?.content_fingerprint || ""));
+    setStatus("调参预览已生成，尚未发送");
+  };
+
   return (
     <main className="app-shell ob-page ob-draw-page">
 
@@ -1091,512 +1079,84 @@ export function DrawPage({ onNavigate }) {
           </div>
         </WbCard>
 
-        <WbCard id="draw-material" className="hud-card ob-card control-panel" label="材料与尺寸">
-          <FoldHeader id="draw-material" title="材料与尺寸" k="MATERIAL" n={1} />
-          <div className="material-library-label">
-            <span>材料库</span>
-            <div className="material-library-row">
-              <select
-                value={materialSelectValue}
-                onChange={(event) => handleMaterialSelectChange(event.target.value)}
-              >
-                {materialLibrary.map((item) => (
-                  <option key={item.name} value={item.name}>
-                    {item.name}
-                  </option>
-                ))}
-                <option value={CUSTOM_OPTION_VALUE}>{CUSTOM_OPTION_LABEL}</option>
-              </select>
-              <button
-                type="button"
-                className="ghost-button icon-button"
-                title="刷新材料库"
-                aria-label="刷新材料库"
-                disabled={materialRefreshBusy}
-                onClick={refreshMaterialLibrary}
-              >
-                <RefreshCw size={16} />
-              </button>
-            </div>
-          </div>
+        <DrawMaterialCard
+          form={form}
+          updateForm={updateForm}
+          materialLibrary={materialLibrary}
+          materialMode={materialMode}
+          materialSelectValue={materialSelectValue}
+          handleMaterialSelectChange={handleMaterialSelectChange}
+          handleThicknessSelectChange={handleThicknessSelectChange}
+          handleReturnToLibrary={handleReturnToLibrary}
+          materialRefreshBusy={materialRefreshBusy}
+          refreshMaterialLibrary={refreshMaterialLibrary}
+          selectedOnly={selectedOnly}
+          setSelectedOnly={setSelectedOnly}
+          selectionKey={selectionKey}
+          fillSettings={fillSettings}
+          updateFillSettings={updateFillSettings}
+          materialApplied={materialApplied}
+          materialLayer={materialLayer}
+          saveFillToMaterial={saveFillToMaterial}
+          hasRec={hasRec}
+          recPowerPct={recPowerPct}
+          recFeedMpm={recFeedMpm}
+          recPasses={recPasses}
+          customParams={customParams}
+          setCustomParams={setCustomParams}
+          customPower={customPower}
+          setCustomPower={setCustomPower}
+          customFeed={customFeed}
+          setCustomFeed={setCustomFeed}
+          customPasses={customPasses}
+          setCustomPasses={setCustomPasses}
+        />
 
-          {materialMode === "custom" ? (
-            <label>
-              材料名称
-              <input
-                value={form.material}
-                onChange={(event) => updateForm("material", event.target.value)}
-              />
-            </label>
-          ) : null}
+        <DrawDeviceCard
+          form={form}
+          updateForm={updateForm}
+          busy={busy}
+          serialPorts={serialPorts}
+          setSerialPorts={setSerialPorts}
+          loadSerialPorts={loadSerialPorts}
+          discoveredChoices={discoveredChoices}
+          pickDiscoveredController={pickDiscoveredController}
+          discovering={discovering}
+          discoverControllers={discoverControllers}
+          connectionBusy={connectionBusy}
+          testConnection={testConnection}
+          connectionResult={connectionResult}
+          saveConfiguration={saveConfiguration}
+        />
 
-          {materialMode === "library" && findMaterialOption(materialLibrary, form.material) ? (
-            <label>
-              厚度 mm
-              <select
-                value={form.thickness_mm}
-                onChange={(event) => handleThicknessSelectChange(event.target.value)}
-              >
-                {findMaterialOption(materialLibrary, form.material).thicknesses.map((value) => (
-                  <option key={String(value)} value={String(value)}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : (
-            <label>
-              厚度 mm
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={form.thickness_mm}
-                onChange={(event) => updateForm("thickness_mm", event.target.value)}
-              />
-            </label>
-          )}
-
-          {materialMode === "custom" && materialLibrary.length > 0 ? (
-            <button type="button" className="ghost-button" onClick={handleReturnToLibrary}>
-              返回材料库
-            </button>
-          ) : null}
-
-          <div className="dimension-grid">
-            <label>
-              宽 mm
-              <input
-                type="number"
-                min="0"
-                max="100"
-                step="0.1"
-                value={form.width_mm}
-                onChange={(event) => updateForm("width_mm", event.target.value)}
-                placeholder="自动 (≤100)"
-              />
-            </label>
-            <label>
-              高 mm
-              <input
-                type="number"
-                min="0"
-                max="100"
-                step="0.1"
-                value={form.height_mm}
-                onChange={(event) => updateForm("height_mm", event.target.value)}
-                placeholder="自动 (≤100)"
-              />
-            </label>
-          </div>
-
-          <label>
-            生成策略
-            <select value={form.mode} onChange={(event) => updateForm("mode", event.target.value)}>
-              <option value="vector">矢量（直接用画板图形规划路线，推荐）</option>
-              <option value="raster">光栅填充（逐行扫描填满，适合插入的照片）</option>
-              <option value="outline">轮廓描边（先转图片再描深色边缘）</option>
-            </select>
-          </label>
-
-          {form.mode === "vector" ? (
-            <>
-              <label
-                className="checkbox-row draw-label"
-                title="只刻画布上选中的图形，位置保持在整幅画里的位置（补刻、重刻某一部分时能对上）"
-              >
-                <input
-                  type="checkbox"
-                  id="draw-selected-only"
-                  checked={selectedOnly}
-                  onChange={(event) => setSelectedOnly(event.target.checked)}
-                />
-                只刻选中的图形（位置与整幅一致）
-                {selectedOnly ? `：已选 ${selectionKey ? selectionKey.split(",").length : 0} 个` : ""}
-              </label>
-              <FillOptionsPanel
-                idPrefix="draw"
-                settings={fillSettings}
-                onChange={updateFillSettings}
-                materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
-                materialEntryLabel={materialLayer?.label || ""}
-                onSaveToMaterial={!isRemoteMode() && materialLayer ? saveFillToMaterial : null}
-              />
-            </>
-          ) : null}
-
-          {form.mode === "outline" ? (
-            <label>
-              轮廓平滑度（0.25 精细 ～ 8 简化）
-              <input
-                type="number"
-                min="0.25"
-                max="8"
-                step="0.05"
-                value={form.vector_simplify_factor}
-                onChange={(event) => updateForm("vector_simplify_factor", event.target.value)}
-                placeholder="默认 3"
-              />
-            </label>
-          ) : null}
-
-          <div className="wb-params" id="draw-params">
-            <label className="wb-params-switch checkbox-row draw-label">
-              <input
-                type="checkbox"
-                id="draw-custom-params"
-                checked={customParams}
-                onChange={(event) => {
-                  const on = event.target.checked;
-                  setCustomParams(on);
-                  if (on) {
-                    setCustomPower(String(recPowerPct));
-                    setCustomFeed(String(recFeedMpm));
-                    setCustomPasses(String(Math.max(1, Math.min(MANUAL_LIMITS.passes.max, recPasses))));
-                  }
-                }}
-              />
-              <span>这次自定义功率和速度</span>
-            </label>
-            {customParams ? (
-              <>
-                <div className="wb-params-grid">
-                  <label>
-                    <span>功率 %</span>
-                    <input
-                      className="text-input"
-                      id="draw-custom-power"
-                      type="number"
-                      inputMode="decimal"
-                      min={MANUAL_LIMITS.power.min}
-                      max={MANUAL_LIMITS.power.max}
-                      value={customPower}
-                      onChange={(e) => setCustomPower(e.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>速度 mm/min</span>
-                    <input
-                      className="text-input"
-                      id="draw-custom-feed"
-                      type="number"
-                      inputMode="numeric"
-                      step="10"
-                      min={MANUAL_LIMITS.feed.min}
-                      max={MANUAL_LIMITS.feed.max}
-                      value={customFeed}
-                      onChange={(e) => setCustomFeed(e.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>遍数</span>
-                    <input
-                      className="text-input"
-                      id="draw-custom-passes"
-                      type="number"
-                      inputMode="numeric"
-                      min={MANUAL_LIMITS.passes.min}
-                      max={MANUAL_LIMITS.passes.max}
-                      value={customPasses}
-                      onChange={(e) => setCustomPasses(e.target.value)}
-                    />
-                  </label>
-                </div>
-                <div className="wb-params-hint">只影响这一次生成，不写回材料库；重新生成预览后生效。</div>
-              </>
-            ) : hasRec ? (
-              <div className="wb-params-hint" id="draw-params-recommended">
-                材料库推荐：功率 {recPowerPct}% · 速度 {recFeedMpm} mm/min · {recPasses} 遍
-              </div>
-            ) : (
-              <div className="wb-params-hint" id="draw-params-recommended">
-                材料库推荐：暂无匹配参数（可勾选自定义，或前往材料实验室补充）
-              </div>
-            )}
-          </div>
-
-        </WbCard>
-
-        <WbCard id="draw-device" className="hud-card ob-card control-panel" label="设备">
-          <FoldHeader id="draw-device" title="设备" k="DEVICE" n={2} />
-          <label>
-            连接方式
-            <select value={form.connection_mode} onChange={(event) => updateForm("connection_mode", event.target.value)}>
-              <option value="network">网络 (Telnet/TCP)</option>
-              <option value="serial">串口 (USB/Serial)</option>
-            </select>
-          </label>
-
-          {isSerial(form) ? (
-            <>
-              <label>
-                串口
-                <span className="draw-inline">
-                  <select
-                    value={form.port}
-                    onChange={async (event) => {
-                      const selectEl = event.target;
-                      const chosen = selectEl.value;
-                      if (chosen === "__custom__") {
-                        selectEl.value = form.port || "";
-                        const hint = defaultSerialPortHint();
-                        const custom = await showPrompt(hint.prompt, {
-                          title: "手动输入串口号",
-                          defaultValue: form.port || hint.fallback,
-                          placeholder: hint.fallback,
-                        });
-                        if (custom && custom.trim()) {
-                          const p = custom.trim();
-                          if (!serialPorts.includes(p)) setSerialPorts((prev) => [...prev, p]);
-                          updateForm("port", p);
-                        }
-                      } else {
-                        updateForm("port", chosen);
-                      }
-                    }}
-                  >
-                    {form.port && !serialPorts.includes(form.port) ? <option value={form.port}>{form.port}</option> : null}
-                    {serialPorts.length === 0 && !form.port ? <option value="">未检测到串口，请点刷新</option> : null}
-                    {serialPorts.map((port) => (
-                      <option key={port} value={port}>
-                        {port}
-                      </option>
-                    ))}
-                    <option value="__custom__">✎ 手动输入串口…</option>
-                  </select>
-                  <button type="button" className="ghost-button" onClick={loadSerialPorts} disabled={busy}>
-                    <RefreshCw size={15} /> 刷新
-                  </button>
-                </span>
-              </label>
-              <label>
-                波特率
-                <select value={form.baudrate} onChange={(event) => updateForm("baudrate", event.target.value)}>
-                  {["9600", "19200", "38400", "57600", "115200", "230400", "250000", "460800", "921600"].map((rate) => (
-                    <option key={rate} value={rate}>
-                      {rate}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </>
-          ) : (
-            <>
-              <label>
-                控制器 IP / 地址
-                <input
-                  value={form.network_host}
-                  onChange={(event) => updateForm("network_host", event.target.value)}
-                  placeholder="例如 192.168.1.10 或 laser.local"
-                />
-              </label>
-
-              <label>
-                Telnet 端口
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={form.network_telnet_port}
-                  onChange={(event) => updateForm("network_telnet_port", event.target.value)}
-                />
-              </label>
-
-              {discoveredChoices.length > 1 ? (
-                <label>
-                  选择发现的雕刻机
-                  <select
-                    id="draw-discovered-controllers"
-                    value={
-                      discoveredChoices.find((c) => c.ip === form.network_host && String(c.telnet_port) === String(form.network_telnet_port))
-                        ? `${form.network_host}:${form.network_telnet_port}`
-                        : ""
-                    }
-                    onChange={(event) => {
-                      const picked = discoveredChoices.find((c) => `${c.ip}:${c.telnet_port}` === event.target.value);
-                      if (picked) pickDiscoveredController(picked);
-                    }}
-                  >
-                    <option value="" disabled>找到 {discoveredChoices.length} 台，请选择…</option>
-                    {discoveredChoices.map((c) => (
-                      <option key={`${c.ip}:${c.telnet_port}`} value={`${c.ip}:${c.telnet_port}`}>
-                        {controllerLabel(c)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
-
-              <button
-                type="button"
-                id="draw-discover-btn"
-                className="secondary-button"
-                onClick={discoverControllers}
-                disabled={busy || discovering || connectionBusy}
-                title="查找局域网里的雕刻机并逐台只读确认"
-              >
-                <RefreshCw size={16} />
-                {discovering ? "扫描局域网中..." : "扫描局域网"}
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={testConnection}
-            disabled={busy || connectionBusy}
-          >
-            <Wifi size={17} />
-            {connectionBusy ? "测试中..." : "测试连接"}
-          </button>
-          <ConnectionStatus form={form} result={connectionResult} />
-
-          <button type="button" className="secondary-button" onClick={saveConfiguration} disabled={busy} title="各项修改会自动记住，也可点此立即核验本地存储">
-            <Save size={17} />
-            保存配置
-          </button>
-
-        </WbCard>
-
-        <WbCard id="draw-send" className="hud-card ob-card control-panel result-panel" label="预览与发送">
-          <FoldHeader id="draw-send" title="预览与发送" k="PREVIEW · SEND" n={3} />
-          <div className="action-stack">
-            <button type="button" className="primary-button" onClick={generatePreview} disabled={busy || !excalidrawAPI}>
-              <UploadCloud size={18} />
-              {busy ? "正在解算..." : workflowId ? "重新生成预览" : "生成预览"}
-            </button>
-            <button type="button" id="draw-confirm-send-btn" className="danger-button" onClick={openSendConfirmation} disabled={busy || !canConfirmSend}>
-              <Send size={18} />
-              {previewStale ? "画布或参数已改 · 请先重算" : "确认发送"}
-            </button>
-            <button
-              type="button"
-              id="draw-framing-btn"
-              className="secondary-button draw-btn"
-              onClick={runFraming}
-              disabled={busy || previewStale || !hostReady || !jobSummary?.actual_width_mm}
-              title="从激光头当前位置（左下角起点）沿作品外框绕一圈对位；默认不出光"
-            >
-              <Eye size={18} />
-              先走边框
-            </button>
-            <label className="checkbox-row draw-label" title="勾选后走边框时以 S1（约 0.1% 功率）出极弱的光，便于在材料上看到边框">
-              <input type="checkbox" checked={framingLight} onChange={(event) => setFramingLight(event.target.checked)} />
-              走边框时弱光指示（默认不出光）
-            </label>
-            <label className="checkbox-row draw-label" title="勾选后沿图形外轮廓（橡皮筋）走，而不是外接矩形">
-              <input
-                type="checkbox"
-                id="draw-framing-hull"
-                checked={framingShape === "hull"}
-                onChange={(event) => {
-                  const next = event.target.checked ? "hull" : "box";
-                  setFramingShape(next);
-                  writeFramingShape(next);
-                }}
-              />
-              走边框沿图形外轮廓（橡皮筋）
-            </label>
-            {previewStale && (
-              <div className="wb-stale-notice" id="draw-stale-notice" role="status">
-                画布图形或左侧参数已改动，当前预览仍是上一版旧图；请先点「重新生成预览」后再走边框或发送。
-              </div>
-            )}
-            {canActOnWorkflow && !previewStale && (
-              <div className="wb-origin-note" id="draw-origin-note">
-                {drawOriginNote(result?.result)}
-              </div>
-            )}
-            {canActOnWorkflow && !hostReady && <div className="inline-hint">{drawTargetMissingText(form)}后再发送</div>}
-            {canActOnWorkflow && !previewStale && hostReady && !summaryAllowsSend && (
-              <div className="inline-hint">当前不可发送：请检查精确厚度参数与服务端确认权限</div>
-            )}
-            <div className="split-actions">
-              <button type="button" onClick={() => workflowAction("status")} disabled={busy || !canActOnWorkflow}>
-                <Activity size={17} />
-                刷新状态
-              </button>
-              <button type="button" onClick={() => workflowAction("cancel")} disabled={busy || !canActOnWorkflow}>
-                <Square size={17} />
-                取消任务
-              </button>
-            </div>
-          </div>
-
-          {/* 两点对位（2026-11-16，画板入口）：默认收起；对位结果是新的画板任务，发送仍走本页确认框 */}
-          {canActOnWorkflow && (
-            <RegistrationPanel
-              workflow={result?.result}
-              connectionForm={form}
-              machineMotion={motionPayload.machine_motion}
-              disabled={
-                busy
-                || previewStale
-                || ["sending", "running", "preparing", "awaiting_completion"].includes(result?.result?.status)
-              }
-              onLog={(_tag, text) => setStatus(text)}
-              onRegistered={adoptRegistered}
-              idPrefix="draw-reg"
-              rootId="draw-registration"
-              sessionKey={REGISTRATION_DRAW_SESSION_KEY}
-            />
-          )}
-
-          <div className="workflow-chip">
-            <RefreshCw size={16} />
-            <span>
-              {workflowId
-                ? (previewStale ? `预览已过期 · ${workflowId}` : `当前任务 · ${workflowId}`)
-                : "等待生成预览"}
-            </span>
-          </div>
-
-          <JobSummaryCard summary={jobSummary} />
-          <FeedbackPanel workflowId={workflowId} origin={result?.result?.feedback_origin}
-            disabled={busy || ["sending", "running", "preparing", "awaiting_completion"].includes(result?.result?.status)}
-            onAdopt={(workflow) => {
-              pollingCleanupRef.current?.();
-              pollingCleanupRef.current = null;
-              setWorkflowId(workflow.workflow_id);
-              setResult({ success: true, result: workflow });
-              setPreviewSnap({ sceneRev, formSig: currentFormSig });
-              setConfirmOpen(false);
-              setRepeatSend((current) => applyPreviewFingerprintSuccess(current, workflow.draw_lab?.content_fingerprint || ""));
-              setStatus("调参预览已生成，尚未发送");
-            }} />
-          <PreviewImage title="素材预览" url={web.material_preview_url || web.uploaded_image_url} stale={previewStale} />
-          <PreviewImage title="路径预览" url={web.gcode_preview_url || web.image_preview_url} stale={previewStale} />
-          <div className="link-list">
-            {web.gcode_download_url && (
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => downloadFromUrl(web.gcode_download_url, "laser-job.gcode", "G-code ")}
-              >
-                <Save size={16} />
-                下载 G-code
-              </button>
-            )}
-            {web.scene_download_url && (
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => downloadFromUrl(web.scene_download_url, "excalidraw-laser-lab.excalidraw.json", "场景 JSON ")}
-              >
-                <FileJson size={16} />
-                下载场景 JSON
-              </button>
-            )}
-          </div>
-          <details className="diagnostics">
-            <summary className="diagnostics-title">
-              <AlertTriangle size={16} />
-              诊断输出
-            </summary>
-            <pre>{rawText || "等待预览结果..."}</pre>
-          </details>
-        </WbCard>
+        <DrawSendCard
+          form={form}
+          busy={busy}
+          excalidrawAPI={excalidrawAPI}
+          workflowId={workflowId}
+          result={result}
+          web={web}
+          rawText={rawText}
+          jobSummary={jobSummary}
+          previewStale={previewStale}
+          hostReady={hostReady}
+          canActOnWorkflow={canActOnWorkflow}
+          canConfirmSend={canConfirmSend}
+          summaryAllowsSend={summaryAllowsSend}
+          framingLight={framingLight}
+          setFramingLight={setFramingLight}
+          framingShape={framingShape}
+          setFramingShape={setFramingShape}
+          motionPayload={motionPayload}
+          setStatus={setStatus}
+          generatePreview={generatePreview}
+          openSendConfirmation={openSendConfirmation}
+          runFraming={runFraming}
+          workflowAction={workflowAction}
+          adoptRegistered={adoptRegistered}
+          adoptFeedbackWorkflow={adoptFeedbackWorkflow}
+          downloadFromUrl={downloadFromUrl}
+        />
         </WorkbenchCanvas>
       </section>
 
@@ -1621,195 +1181,6 @@ export function DrawPage({ onNavigate }) {
   );
 }
 
-function JobSummaryCard({ summary, compact = false }) {
-  if (!summary) {
-    return (
-      <section className="job-summary-card muted-summary">
-        <div className="summary-heading">
-          <Settings2 size={17} />
-          <h2>作业摘要</h2>
-        </div>
-        <p>生成预览后显示材料、尺寸、参数和预计时间。</p>
-      </section>
-    );
-  }
-
-  const displayWarnings = summaryDisplayWarnings(summary, formatWithUnit);
-  const thicknessRows = thicknessDisplayRows(summary);
-  const sizeText =
-    summary.actual_width_mm && summary.actual_height_mm
-      ? `${formatMm(summary.actual_width_mm)} x ${formatMm(summary.actual_height_mm)}`
-      : "自动";
-
-  return (
-    <section className={`job-summary-card ${compact ? "compact" : ""}`}>
-      <div className="summary-heading">
-        <Settings2 size={17} />
-        <h2>作业摘要</h2>
-        <span className={summary.can_send ? "summary-badge ok" : "summary-badge warn"}>
-          {sendBadgeLabel(summary)}
-        </span>
-      </div>
-      <div className="summary-grid">
-        <SummaryItem label="材料" value={summary.material || "未识别"} />
-        {thicknessRows.map((row) => (
-          <SummaryItem key={row.label} label={row.label} value={formatWithUnit(summary[row.valueKey], "mm")} />
-        ))}
-        <SummaryItem label="策略" value={modeLabel(summary.mode, summary.task_type)} />
-        <SummaryItem label="尺寸" value={sizeText} icon={<Ruler size={15} />} />
-        <SummaryItem label="预计时间" value={summary.estimated_display || "待估算"} icon={<Clock size={15} />} />
-        <SummaryItem label="功率" value={summary.power ? `S${summary.power}` : "材料库默认"} />
-        <SummaryItem label="速度" value={summary.speed ? `F${summary.speed}` : "材料库默认"} />
-        <SummaryItem label="次数" value={summary.passes || "默认"} />
-        <SummaryItem label="点距" value={formatWithUnit(summary.pixel_size_mm, "mm")} />
-      </div>
-      {summary.size_note && <p className="size-note">{summary.size_note}</p>}
-      {displayWarnings.length > 0 && (
-        <div className="warning-list">
-          <ShieldAlert size={16} />
-          <span>{displayWarnings.join("；")}</span>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function SummaryItem({ label, value, icon = null }) {
-  return (
-    <div className="summary-item">
-      <span>{label}</span>
-      <strong>
-        {icon}
-        {value || "未知"}
-      </strong>
-    </div>
-  );
-}
-
-function ConnectionStatus({ form, result }) {
-  if (!result) return null;
-  const payload = result.result && typeof result.result === "object" ? result.result : {};
-  const connected = isDrawConnectionOk(form, result);
-  const text = payload.summary || result.result || "连接检查失败";
-  return (
-    <div className={`connection-status ${connected ? "ok" : "warn"}`}>
-      {connected ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-      <span>{text}</span>
-    </div>
-  );
-}
-
-function SendConfirmDialog({
-  summary,
-  originNote = "",
-  target,
-  sdAvailable = true,
-  busy,
-  sendAllowed = false,
-  onCancel,
-  onConfirm,
-  requireMovedAck = false,
-  movedAcknowledged = false,
-  onMovedAckChange,
-}) {
-  // 默认走在线流式发送（与雕刻工作台一致），避免未插 SD 卡或固件未开 HashFS 时默认脱机直接报错失败
-  const [offlineSdChoice, setOfflineSd] = React.useState(false);
-  // SD 脱机只能经网口上传；串口只能逐行发送
-  const offlineSd = sdAvailable && offlineSdChoice;
-  const canConfirm = !requireMovedAck || movedAcknowledged;
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="send-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="send-confirm-title">
-        <div className="confirm-heading">
-          <div>
-            <Send size={18} />
-            <h2 id="send-confirm-title">确认开始雕刻</h2>
-          </div>
-          <button type="button" className="icon-button" onClick={onCancel} aria-label="关闭确认面板">
-            <X size={18} />
-          </button>
-        </div>
-        <JobSummaryCard summary={summary} compact />
-        <div className="wb-origin-note" id="draw-confirm-origin">
-          对刀起点：{originNote || "开刻前请把激光头对准作品左下角"}
-        </div>
-        <div className="confirm-device">
-          <Wifi size={17} />
-          <span>设备：{target}</span>
-        </div>
-        {sdAvailable ? (
-          <label className="checkbox-row confirm-moved-ack draw-label">
-            <input
-              type="checkbox"
-              checked={offlineSd}
-              onChange={(e) => setOfflineSd(e.target.checked)}
-            />
-            改用 SD 卡脱机离线加工（需机器插卡且固件启用 HashFS）
-          </label>
-        ) : null}
-        {requireMovedAck ? (
-          <label className="checkbox-row confirm-moved-ack">
-            <input
-              type="checkbox"
-              checked={Boolean(movedAcknowledged)}
-              onChange={(event) => onMovedAckChange?.(event.target.checked)}
-            />
-            已移动材料或原点（相同图案再次发送前必须勾选）
-          </label>
-        ) : null}
-        <div className="confirm-actions">
-          <button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>
-            取消
-          </button>
-          <button
-            type="button"
-            className="danger-button"
-            onClick={() => onConfirm(offlineSd)}
-            disabled={busy || !target || !sendAllowed || !canConfirm}
-          >
-            <Send size={18} />
-            {busy ? "发送中..." : (offlineSd ? "离线脱机发送" : "在线流式发送")}
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function PreviewImage({ title, url, stale = false }) {
-  // 连接电脑时 <img> 直链不带配对 token，改为经鉴权取回 blob 再显示；
-  // 本机模式直接使用唯一文件名 URL（不再在 render 期拼 Date.now() 导致敲字时反复重拉闪烁）
-  const remote = isRemoteMode();
-  const [blobUrl, setBlobUrl] = useState("");
-  useEffect(() => {
-    if (!remote || !url) {
-      setBlobUrl("");
-      return undefined;
-    }
-    let cancelled = false;
-    let created = "";
-    fetchPreviewBlobUrl(url).then((value) => {
-      created = value;
-      if (cancelled) {
-        if (value) URL.revokeObjectURL(value);
-      } else {
-        setBlobUrl(value);
-      }
-    });
-    return () => {
-      cancelled = true;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [remote, url]);
-  const src = remote ? blobUrl : (url ? resolveApiUrl(url) : "");
-  return (
-    <div className={`preview-box${stale ? " is-stale" : ""}`}>
-      <div className="preview-title">{title}{stale && src ? "（旧图 · 需重新生成）" : ""}</div>
-      {src ? <img src={src} alt={title} /> : <div className="preview-empty">暂无</div>}
-    </div>
-  );
-}
-
 function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1829,25 +1200,4 @@ function fileNameFromUrl(url, fallback) {
   } catch (_error) {
     return fallback;
   }
-}
-
-function modeLabel(mode, taskType) {
-  if (mode === "vector") return "矢量";
-  if (mode === "raster" || taskType === "engrave_photo") return "光栅填充";
-  if (mode === "outline" || taskType === "engrave_logo") return "轮廓描边";
-  if (taskType === "cut_contour") return "轮廓切割";
-  return mode || taskType || "自动";
-}
-
-function formatMm(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "未知";
-  return `${Number(number.toFixed(2)).toString()} mm`;
-}
-
-function formatWithUnit(value, unit) {
-  if (value === undefined || value === null || value === "") return "默认";
-  const number = Number(value);
-  if (!Number.isFinite(number)) return String(value);
-  return `${Number(number.toFixed(3)).toString()} ${unit}`;
 }

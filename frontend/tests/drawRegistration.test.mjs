@@ -20,6 +20,7 @@ import {
   writeRegistrationSession,
 } from "../src/registrationState.js";
 import { buildDrawFramingPayload, framingConfirmText } from "../src/drawConnection.js";
+import { readPageSource } from "./pageSource.mjs";
 
 const srcRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "../src");
 const form = { connection_mode: "network", network_host: "<device-ip>", network_telnet_port: "23" };
@@ -143,7 +144,7 @@ test("点射默认关闭、先确认再请求；画板复用对位面板并单�
   assert.match(fire, /if \(!confirmed\) return;/);
   assert.match(fire, /pointerFireRequest\(/, "请求体经 pointerFireRequest 卡上限");
 
-  const draw = readFileSync(path.join(srcRoot, "pages/DrawPage.jsx"), "utf8");
+  const draw = readPageSource("pages/DrawPage.jsx");
   assert.match(draw, /<RegistrationPanel[\s\S]*?sessionKey=\{REGISTRATION_DRAW_SESSION_KEY\}/);
   assert.match(draw, /idPrefix="draw-reg"/);
   assert.match(draw, /onRegistered=\{adoptRegistered\}/);
