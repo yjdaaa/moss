@@ -10,6 +10,12 @@ import {
   normalizeFillSettings,
   readFillSettings,
   writeFillSettings,
+  MACHINE_MOTION_KEY,
+  machineMotionFromLimits,
+  machineMotionPayload,
+  readMachineMotion,
+  timeEstimateNote,
+  writeMachineMotion,
 } from "../src/fillOptions.js";
 import { workbenchInputSignature } from "../src/workbenchParams.js";
 import { drawGenerationSignature } from "../src/drawConnection.js";
@@ -89,4 +95,38 @@ test("预览结果说明：实际过扫描与去重条数", () => {
   );
   assert.equal(fillResultNote({ grouping: "individual", bidirectional: false, overscan_mm: 0 }), "逐块填充，单向，无过扫描");
   assert.equal(fillResultNote(null, 0), "");
+});
+
+test("机器运动参数：握手读到的加速度记在本机并随预览转发，手填加速度优先", () => {
+  const limits = { x_travel_mm: 100, x_accel_mm_s2: 800, y_accel_mm_s2: 600, x_max_rate_mm_per_min: 6000, y_max_rate_mm_per_min: null, junction_deviation_mm: 0.01 };
+  const motion = machineMotionFromLimits(limits);
+  assert.deepEqual(motion, { x_accel_mm_s2: 800, y_accel_mm_s2: 600, x_max_rate_mm_per_min: 6000, junction_deviation_mm: 0.01 });
+  assert.equal(machineMotionFromLimits({ x_travel_mm: 100 }), null, "只有行程时不算运动参数");
+  assert.equal(machineMotionFromLimits(null), null);
+
+  const store = memoryStore();
+  writeMachineMotion(limits, store);
+  assert.deepEqual(readMachineMotion(store), motion);
+  store.data[MACHINE_MOTION_KEY] = "{bad";
+  assert.equal(readMachineMotion(store), null);
+
+  assert.deepEqual(machineMotionPayload(DEFAULT_FILL_SETTINGS, motion), { machine_motion: motion });
+  assert.deepEqual(machineMotionPayload(DEFAULT_FILL_SETTINGS, null), {}, "都没有时交给后端默认值");
+  const manual = machineMotionPayload({ ...DEFAULT_FILL_SETTINGS, accelerationMmS2: "2500" }, motion);
+  assert.equal(manual.machine_motion.x_accel_mm_s2, 2500);
+  assert.equal(manual.machine_motion.y_accel_mm_s2, 2500);
+  assert.equal(manual.machine_motion.x_max_rate_mm_per_min, 6000, "手填只覆盖加速度");
+});
+
+test("工时说明写明按多大加速度估算、来自哪里", () => {
+  assert.equal(
+    timeEstimateNote({ model: "acceleration", acceleration_mm_s2: { x: 1000, y: 1000 }, acceleration_source: "default" }),
+    "按默认加速度 1000 mm/s² 估算加减速（连接机器后自动读取实际值）",
+  );
+  assert.equal(
+    timeEstimateNote({ model: "acceleration", acceleration_mm_s2: { x: 800, y: 600 }, acceleration_source: "machine" }),
+    "按机器加速度 X 800 / Y 600 mm/s² 估算加减速",
+  );
+  assert.equal(timeEstimateNote({ estimated_seconds: 3 }), "");
+  assert.equal(timeEstimateNote(null), "");
 });

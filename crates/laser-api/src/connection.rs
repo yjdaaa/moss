@@ -459,6 +459,11 @@ impl ApiService {
                 "x_travel_mm": lim.x_travel_mm,
                 "y_travel_mm": lim.y_travel_mm,
                 "z_travel_mm": lim.z_travel_mm,
+                "x_max_rate_mm_per_min": lim.x_max_rate_mm_per_min,
+                "y_max_rate_mm_per_min": lim.y_max_rate_mm_per_min,
+                "x_accel_mm_s2": lim.x_accel_mm_s2,
+                "y_accel_mm_s2": lim.y_accel_mm_s2,
+                "junction_deviation_mm": lim.junction_deviation_mm,
             })),
             "features": machine_features.map(|feat| serde_json::json!({
                 "has_air_assist": feat.has_air_assist,

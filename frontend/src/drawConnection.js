@@ -61,7 +61,7 @@ export function isDrawConnectionOk(form, result) {
  * 构造创作画板走边框请求载荷：统一附带 `relative_to_head: true`，
  * 与画板正式雕刻刀路开头的 `G92 X0 Y0 Z0`（以激光头当前位置为左下角起点）保持同一参照系。
  */
-export function buildDrawFramingPayload(form, width, height, framingLight = false) {
+export function buildDrawFramingPayload(form, width, height, framingLight = false, outline = null) {
   return {
     ...drawConnectionPayload(form),
     relative_to_head: true,
@@ -71,6 +71,8 @@ export function buildDrawFramingPayload(form, width, height, framingLight = fals
     max_y: Number(height) || 100,
     feed_rate: 2000,
     power: framingLight ? 1 : 0,
+    // 2026-11-16 橡皮筋走边框：沿出光点外轮廓走（来自预览 frame_hull_mm）
+    ...(Array.isArray(outline) && outline.length >= 3 ? { outline } : {}),
   };
 }
 
@@ -142,12 +144,14 @@ export function safeBrowserStorage() {
 /**
  * 走边框确认文案（2026-11-05 用户决定：走边框会移动机器，必须先确认；勾选弱光时说明会低功率出光）。
  */
-export function framingConfirmText(form, width, height, framingLight) {
-  const size = `${Number(width).toFixed(1)} × ${Number(height).toFixed(1)} mm`;
+export function framingConfirmText(form, width, height, framingLight, outlinePoints = 0) {
+  const size = outlinePoints >= 3
+    ? `图形外轮廓（${outlinePoints} 个点，范围 ${Number(width).toFixed(1)} × ${Number(height).toFixed(1)} mm）`
+    : `${Number(width).toFixed(1)} × ${Number(height).toFixed(1)} mm 的边框`;
   const light = framingLight
     ? "已勾选“弱光指示”：走边框期间激光会以 S1（约 0.1%）低功率出光，请佩戴护目镜、确认材料与周围无易燃物。"
     : "激光保持关闭，只移动激光头。";
-  return `将连接 ${drawTargetLabel(form)}，机器会实际移动，从激光头当前位置（左下角起点）沿 ${size} 的边框走一圈再回到原处。${light}\n请确认行程内无遮挡、手已离开机台；随时可按顶栏急停。`;
+  return `将连接 ${drawTargetLabel(form)}，机器会实际移动，从激光头当前位置（左下角起点）沿 ${size}走一圈再回到原处。${light}\n请确认行程内无遮挡、手已离开机台；随时可按顶栏急停。`;
 }
 
 /** 计算当前 Excalidraw 画布有效元素的轻量修订签名，用于感知增删改笔迹而无需整图重导出。 */
@@ -178,6 +182,16 @@ export function drawGenerationSignature(form, custom = {}) {
         ? `preset:${custom.presetParams}`
         : "preset",
   });
+}
+
+/**
+ * 只刻选中的图形（2026-11-16，对齐 LightBurn“只加工选中图形”）：Excalidraw `appState.selectedElementIds`
+ * 里为 true 的 id，排序后返回；没有选中时返回空数组。
+ */
+export function selectedElementIds(appState) {
+  const map = appState?.selectedElementIds;
+  if (!map || typeof map !== "object") return [];
+  return Object.keys(map).filter((id) => map[id] === true && id).sort();
 }
 
 /** 判断已生成的画板预览是否因画布重画或参数修改而过期。 */

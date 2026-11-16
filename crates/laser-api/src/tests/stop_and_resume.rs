@@ -549,6 +549,61 @@ fn framing_defaults_to_laser_off_and_requires_idle_preflight() {
     );
 }
 
+/// 2026-11-16 橡皮筋走边框：带 `outline` 时沿多边形走（默认仍不出光），非法轮廓在打开设备前 400 拒绝。
+#[test]
+fn outline_framing_traces_the_polygon_and_rejects_bad_outlines_before_touching_the_device() {
+    let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_transport_factory(status_transport_factory("Idle", written.clone()));
+    let body = |outline: serde_json::Value| {
+        serde_json::json!({
+            "connection_mode": "network", "network_host": "127.0.0.1", "relative_to_head": true,
+            "min_x": -10, "max_x": 10, "min_y": -10, "max_y": 5, "outline": outline
+        })
+    };
+    let ok = post_json(
+        &service,
+        "/api/device/framing",
+        &body(serde_json::json!([[-10, -10], [10, -10], [0, 5]])),
+    );
+    assert_eq!(ok["success"], true, "{ok}");
+    let lines = written.lock().unwrap().clone();
+    assert!(
+        lines.iter().any(|l| l.starts_with("G0 X-10.000 Y-10.000")),
+        "{lines:?}"
+    );
+    let lit_moves: Vec<&String> = lines.iter().filter(|l| l.starts_with("G1 ")).collect();
+    assert_eq!(lit_moves.len(), 3, "三角形三条边：{lines:?}");
+    assert!(lit_moves[1].starts_with("G1 X0.000 Y5.000"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.starts_with("M4")), "默认不出光");
+
+    for bad in [
+        serde_json::json!([[0, 0], [1, 1]]),
+        serde_json::json!([[0, 0], [50, 0], [0, 1]]),
+        serde_json::json!([[0, 0], ["a", 0], [0, 1]]),
+        serde_json::json!("triangle"),
+    ] {
+        written.lock().unwrap().clear();
+        let refused = post_json(&service, "/api/device/framing", &body(bad.clone()));
+        assert_eq!(
+            refused["detail"]["error_code"], "framing_params_invalid",
+            "{bad} → {refused}"
+        );
+        assert!(written.lock().unwrap().is_empty(), "非法轮廓不能碰设备");
+    }
+    assert!(
+        crate::safe_action::framing_approval_summary(
+            body(serde_json::json!([[-10, -10], [10, -10], [0, 5]]))
+                .as_object()
+                .unwrap()
+        )
+        .contains("沿图形外轮廓 3 个点")
+    );
+}
+
 /// 走边框的 `power` / `feed_rate` 必须是范围内整数：溢出不能回绕（4294968096 曾变成 S800），
 /// 越界与非整数在打开设备前 400 拒绝；合法值原样写进 G-code（2026-11-05）。
 #[test]

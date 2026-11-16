@@ -3,6 +3,14 @@ pub struct MachineLimits {
     pub x_travel_mm: Option<f64>,
     pub y_travel_mm: Option<f64>,
     pub z_travel_mm: Option<f64>,
+    /// X/Y 最大速度（mm/min）：GRBL `$110/$111`，FluidNC `max_rate_mm_per_min`（2026-11-16，工时估算用）
+    pub x_max_rate_mm_per_min: Option<f64>,
+    pub y_max_rate_mm_per_min: Option<f64>,
+    /// X/Y 加速度（mm/s²）：GRBL `$120/$121`，FluidNC `acceleration_mm_per_sec2`（工时估算与自动过扫描用）
+    pub x_accel_mm_s2: Option<f64>,
+    pub y_accel_mm_s2: Option<f64>,
+    /// 转角偏差（mm）：GRBL `$11`，FluidNC `junction_deviation_mm`
+    pub junction_deviation_mm: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -303,7 +311,11 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
             continue;
         }
         if current_section == "axes" && indent <= 4 && trimmed.ends_with(':') {
-            current_axis = trimmed.trim_end_matches(':').trim();
+            // 只认轴名（x / y / z / a / b / c）；`homing:`、`motor0:` 这类子段不改当前轴
+            let name = trimmed.trim_end_matches(':').trim();
+            if matches!(name, "x" | "y" | "z" | "a" | "b" | "c") {
+                current_axis = name;
+            }
             continue;
         }
 
@@ -346,6 +358,26 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
                     _ => {}
                 }
             }
+            let positive = || {
+                val.parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+            };
+            if key == "max_rate_mm_per_min" || key == "acceleration_mm_per_sec2" {
+                let rate = key == "max_rate_mm_per_min";
+                match (current_axis, rate) {
+                    ("x", true) => limits.x_max_rate_mm_per_min = positive(),
+                    ("y", true) => limits.y_max_rate_mm_per_min = positive(),
+                    ("x", false) => limits.x_accel_mm_s2 = positive(),
+                    ("y", false) => limits.y_accel_mm_s2 = positive(),
+                    _ => {}
+                }
+                continue;
+            }
+            if key == "junction_deviation_mm" {
+                limits.junction_deviation_mm = positive();
+                continue;
+            }
             if key == "max_travel_mm" {
                 if let Ok(num) = val.parse::<f64>() {
                     match current_axis {
@@ -373,10 +405,27 @@ pub fn parse_fluidnc_yaml(yaml: &str) -> (MachineLimits, MachineFeatures) {
     (limits, features)
 }
 
-/// 从标准 GRBL $$ 设置行中提取 X/Y 行程（$130 为 X 行程，$131 为 Y 行程）
+/// 从标准 GRBL $$ 设置行中提取 X/Y 行程（$130 为 X 行程，$131 为 Y 行程），
+/// 以及 `$110/$111` 最大速度、`$120/$121` 加速度、`$11` 转角偏差（2026-11-16）
 pub fn parse_grbl_settings_limits(settings: &[String]) -> MachineLimits {
     let mut limits = MachineLimits::default();
     for line in settings {
+        let positive = |prefix: &str| {
+            line.strip_prefix(prefix)
+                .and_then(|val| val.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0)
+        };
+        for (prefix, slot) in [
+            ("$110=", &mut limits.x_max_rate_mm_per_min),
+            ("$111=", &mut limits.y_max_rate_mm_per_min),
+            ("$120=", &mut limits.x_accel_mm_s2),
+            ("$121=", &mut limits.y_accel_mm_s2),
+            ("$11=", &mut limits.junction_deviation_mm),
+        ] {
+            if line.starts_with(prefix) {
+                *slot = positive(prefix);
+            }
+        }
         if let Some(val) = line.strip_prefix("$130=") {
             limits.x_travel_mm = val
                 .trim()
@@ -410,9 +459,16 @@ mod tests {
 axes:
   x:
     steps_per_mm: 80.000
+    max_rate_mm_per_min: 6000.000
+    acceleration_mm_per_sec2: 800.000
     max_travel_mm: 300.000
+    homing:
+      cycle: 2
+    motor0:
+      limit_neg_pin: gpio.17
   y:
     steps_per_mm: 80.000
+    acceleration_mm_per_sec2: 600.000
     max_travel_mm: 200.000
   z:
     max_travel_mm: 50.000
@@ -427,6 +483,9 @@ control:
         assert_eq!(limits.x_travel_mm, Some(300.0));
         assert_eq!(limits.y_travel_mm, Some(200.0));
         assert_eq!(limits.z_travel_mm, Some(50.0));
+        assert_eq!(limits.x_max_rate_mm_per_min, Some(6000.0));
+        assert_eq!(limits.x_accel_mm_s2, Some(800.0));
+        assert_eq!(limits.y_accel_mm_s2, Some(600.0));
         assert_eq!(features.speed_map.as_deref(), Some("0=0% 1000=100%"));
         assert!(features.has_air_assist);
         assert!(features.has_door);
@@ -435,8 +494,19 @@ control:
             "$130=280.000".to_string(),
             "$131=180.000".to_string(),
             "$132=45.000".to_string(),
+            "$11=0.010".to_string(),
+            "$110=5000.000".to_string(),
+            "$111=4000.000".to_string(),
+            "$120=1500.000".to_string(),
+            "$121=1200.000".to_string(),
+            "$1=25".to_string(),
         ];
         let grbl_limits = parse_grbl_settings_limits(&grbl_settings);
+        assert_eq!(grbl_limits.x_max_rate_mm_per_min, Some(5000.0));
+        assert_eq!(grbl_limits.y_max_rate_mm_per_min, Some(4000.0));
+        assert_eq!(grbl_limits.x_accel_mm_s2, Some(1500.0));
+        assert_eq!(grbl_limits.y_accel_mm_s2, Some(1200.0));
+        assert_eq!(grbl_limits.junction_deviation_mm, Some(0.01));
         assert_eq!(grbl_limits.x_travel_mm, Some(280.0));
         assert_eq!(grbl_limits.y_travel_mm, Some(180.0));
         assert_eq!(grbl_limits.z_travel_mm, Some(45.0));

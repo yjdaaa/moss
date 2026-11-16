@@ -184,7 +184,9 @@ impl ApiService {
         std::fs::write(&gcode_path, gcode.as_bytes())
             .map_err(|e| (500, failure(format!("写入标定 G-code 失败: {e}"), None)))?;
         let gcode_sha = hex::encode(Sha256::digest(gcode.as_bytes()));
-        let estimate = laser_core::gcode::estimate_time(&gcode, 3000.0);
+        let motion =
+            crate::generation::parse_machine_motion(object).map_err(|e| (400, failure(e, None)))?;
+        let estimate = laser_core::gcode::estimate_time_with(&gcode, &motion.profile);
         let cells_json = cells
             .iter()
             .enumerate()
@@ -232,12 +234,7 @@ impl ApiService {
             "gcode_sha256": gcode_sha,
             "artifacts": {"gcode_file": gcode_name, "gcode_sha256": gcode_sha},
             "confirmation_snapshot": {"gcode_file": gcode_name, "gcode_sha256": gcode_sha, "material": material, "thickness_mm": thickness_mm},
-            "time_estimate": {
-                "estimated_seconds": estimate.estimated_seconds,
-                "estimated_minutes": estimate.estimated_minutes,
-                "laser_seconds": estimate.laser_seconds,
-                "non_laser_seconds": estimate.non_laser_seconds,
-            },
+            "time_estimate": crate::generation::time_estimate_json(&estimate, &motion),
             "web": {"gcode_download_url": format!("/preview?path={gcode_name}&download=1")},
             "next_actions": ["send", "select_cell"],
             "created_at": now,

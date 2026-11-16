@@ -63,12 +63,25 @@ import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
 import { defaultSerialPortHint } from "../platform.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
-import { fillResultNote, fillSettingsPayload, fillSettingsSignature, readFillSettings, writeFillSettings } from "../fillOptions.js";
+import { framingOutline, readFramingShape, writeFramingShape } from "../aiPreviewState.js";
+import {
+  fillResultNote,
+  fillSettingsPayload,
+  fillSettingsSignature,
+  machineMotionFromLimits,
+  machineMotionPayload,
+  readFillSettings,
+  readMachineMotion,
+  timeEstimateNote,
+  writeFillSettings,
+  writeMachineMotion,
+} from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
 import {
   DRAW_MODE_VERSION,
   buildDrawFramingPayload,
+  selectedElementIds,
   computeSceneRevision,
   drawConnectionPayload,
   drawGenerationSignature,
@@ -134,12 +147,20 @@ export function DrawPage({ onNavigate }) {
     setFillSettings(next);
     writeFillSettings(next);
   };
+  // 握手读到的机器加速度 / 最大速度（与工作台共用本机记录）：工时估算与自动过扫描用
+  const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
+  const motionPayload = machineMotionPayload(fillSettings, machineMotion);
   const [customPower, setCustomPower] = useState("40");
   const [customFeed, setCustomFeed] = useState("1500");
   const [customPasses, setCustomPasses] = useState("1");
   const [repeatSend, setRepeatSend] = useState(() => createRepeatSendState(safeBrowserStorage()));
   const [serialPorts, setSerialPorts] = useState([]);
   const [framingLight, setFramingLight] = useState(false);
+  // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与工作台共用
+  const [framingShape, setFramingShape] = useState(() => readFramingShape());
+  // 只刻选中的图形（矢量模式）：选区变化计入预览签名
+  const [selectedOnly, setSelectedOnly] = useState(false);
+  const [selectionKey, setSelectionKey] = useState("");
   const materialLibraryRef = useRef(materialLibrary);
   const materialModeRef = useRef(materialMode);
   const formRef = useRef(form);
@@ -228,7 +249,8 @@ export function DrawPage({ onNavigate }) {
     feed: customFeed,
     passes: customPasses,
     presetParams: hasRec ? `${recPowerPct}/${recFeedMpm}/${recPasses}` : "",
-    fill: fillSettingsSignature(fillSettings),
+    fill: fillSettingsSignature(fillSettings) + JSON.stringify(motionPayload)
+      + (selectedOnly && form.mode === "vector" ? `|sel:${selectionKey}` : ""),
   });
   const previewStale = Boolean(workflowId) && isDrawPreviewStale(previewSnap, {
     sceneRev,
@@ -599,6 +621,17 @@ export function DrawPage({ onNavigate }) {
 
     const formSigSnapshot = currentFormSig;
     const fillPayload = form.mode === "vector" ? fillSettingsPayload(fillSettings) : {};
+    const selection = selectedOnly && form.mode === "vector"
+      ? selectedElementIds(excalidrawAPI?.getAppState?.())
+      : [];
+    if (selectedOnly && form.mode === "vector" && selection.length === 0) {
+      setStatus("请先在画布上选中要刻的图形，或取消“只刻选中的图形”");
+      void showAlert("请先在画布上选中要刻的图形（可框选或按住 Shift 多选），或取消勾选“只刻选中的图形”。", {
+        title: "没有选中图形",
+        tone: "warning",
+      });
+      return;
+    }
     if (fillPayload.error) {
       setStatus(`填充设置有误：${fillPayload.error}`);
       void showAlert(fillPayload.error, { title: "填充设置不对", tone: "warning" });
@@ -621,6 +654,8 @@ export function DrawPage({ onNavigate }) {
         height_mm: drawSizeValue(form.height_mm),
         mode: form.mode,
         ...fillPayload,
+        ...motionPayload,
+        ...(selection.length ? { selected_element_ids: selection } : {}),
         ...drawConnectionPayload(form),
         ...(manual ? { manual_params: manual } : {}),
       };
@@ -648,7 +683,9 @@ export function DrawPage({ onNavigate }) {
           data.result?.speech || "预览已生成",
           artifacts.fit_note,
           artifacts.vector_note,
+          artifacts.selection_note,
           fillResultNote(artifacts.fill_options, artifacts.removed_duplicates),
+          timeEstimateNote(artifacts.time_estimate),
         ].filter(Boolean).join("；"));
       } else {
         setPreviewSnap(null);
@@ -749,7 +786,8 @@ export function DrawPage({ onNavigate }) {
     const height = jobSummary?.actual_height_mm || 100;
     // 走边框会实际移动机器（勾选弱光时还会低功率出光），单击不得直接执行（2026-11-05 用户决定）
     const lightOn = framingLight;
-    const confirmed = await showConfirm(framingConfirmText(form, width, height, lightOn), {
+    const outline = framingShape === "hull" ? framingOutline(result?.result?.artifacts) : null;
+    const confirmed = await showConfirm(framingConfirmText(form, width, height, lightOn, outline?.length || 0), {
       title: lightOn ? "确认走边框（弱光出光）" : "确认走边框（机器将移动）",
       tone: "warning",
       danger: lightOn,
@@ -764,7 +802,7 @@ export function DrawPage({ onNavigate }) {
     setStatus(lightOn ? "正在走边框（弱光指示）…顶栏急停可随时停止" : "正在走边框（激光关闭，只移动激光头）…顶栏急停可随时停止");
     try {
       // 默认不出光；附带 relative_to_head: true 以当前激光头位置为左下角起点（与正式雕刻同一参照）
-      const res = await postJson("/api/device/framing", buildDrawFramingPayload(form, width, height, lightOn));
+      const res = await postJson("/api/device/framing", buildDrawFramingPayload(form, width, height, lightOn, outline));
       setStatus(formatFramingStatus(res, width, height, lightOn));
     } catch (e) {
       setStatus(`走边框请求失败：${e.message || e}`);
@@ -790,6 +828,11 @@ export function DrawPage({ onNavigate }) {
       });
       const data = res.data || { success: false, result: `HTTP ${res.status}` };
       setConnectionResult(data);
+      const motion = res.ok && data.success ? machineMotionFromLimits(data.result?.machine_limits) : null;
+      if (motion) {
+        writeMachineMotion(motion);
+        setMachineMotion(motion);
+      }
       setStatus(
         res.ok && data.success
           ? data.result?.summary || "连接检查完成"
@@ -958,9 +1001,11 @@ export function DrawPage({ onNavigate }) {
               excalidrawAPI={setExcalidrawAPI}
               theme="dark"
               langCode={EXCALIDRAW_LANG_CODE}
-              onChange={(elements) => {
+              onChange={(elements, appState) => {
                 const nextRev = computeSceneRevision(elements);
                 setSceneRev((prev) => (prev === nextRev ? prev : nextRev));
+                const nextSelection = selectedElementIds(appState).join(",");
+                setSelectionKey((prev) => (prev === nextSelection ? prev : nextSelection));
               }}
             />
           </div>
@@ -1075,7 +1120,22 @@ export function DrawPage({ onNavigate }) {
           </label>
 
           {form.mode === "vector" ? (
-            <FillOptionsPanel idPrefix="draw" settings={fillSettings} onChange={updateFillSettings} />
+            <>
+              <label
+                className="checkbox-row draw-label"
+                title="只刻画布上选中的图形，位置保持在整幅画里的位置（补刻、重刻某一部分时能对上）"
+              >
+                <input
+                  type="checkbox"
+                  id="draw-selected-only"
+                  checked={selectedOnly}
+                  onChange={(event) => setSelectedOnly(event.target.checked)}
+                />
+                只刻选中的图形（位置与整幅一致）
+                {selectedOnly ? `：已选 ${selectionKey ? selectionKey.split(",").length : 0} 个` : ""}
+              </label>
+              <FillOptionsPanel idPrefix="draw" settings={fillSettings} onChange={updateFillSettings} />
+            </>
           ) : null}
 
           {form.mode === "outline" ? (
@@ -1337,6 +1397,19 @@ export function DrawPage({ onNavigate }) {
             <label className="checkbox-row draw-label" title="勾选后走边框时以 S1（约 0.1% 功率）出极弱的光，便于在材料上看到边框">
               <input type="checkbox" checked={framingLight} onChange={(event) => setFramingLight(event.target.checked)} />
               走边框时弱光指示（默认不出光）
+            </label>
+            <label className="checkbox-row draw-label" title="勾选后沿图形外轮廓（橡皮筋）走，而不是外接矩形">
+              <input
+                type="checkbox"
+                id="draw-framing-hull"
+                checked={framingShape === "hull"}
+                onChange={(event) => {
+                  const next = event.target.checked ? "hull" : "box";
+                  setFramingShape(next);
+                  writeFramingShape(next);
+                }}
+              />
+              走边框沿图形外轮廓（橡皮筋）
             </label>
             {previewStale && (
               <div className="wb-stale-notice" id="draw-stale-notice" role="status">

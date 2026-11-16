@@ -5,6 +5,8 @@ pub(crate) fn generate_text_artifacts(
     generated_root: Option<&std::path::Path>,
     library: &laser_contracts::MaterialLibrary,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    // 2026-11-16：工时按机器加速度估算（请求 `machine_motion`，缺省按默认值）
+    let motion = parse_machine_motion(object)?;
     let text = object
         .get("text")
         .and_then(|value| value.as_str())
@@ -108,7 +110,7 @@ pub(crate) fn generate_text_artifacts(
         },
     );
     // 填充扫描设置（2026-11-16 对齐 LightBurn）：过扫描默认按速度自动算
-    let fill = parse_fill_options(object, params.feed)?;
+    let fill = parse_fill_options(object, params.feed, motion.overscan_accel())?;
     let spec = laser_core::TextTaskSpec {
         text,
         font_path,
@@ -158,7 +160,7 @@ pub(crate) fn generate_text_artifacts(
         ));
     }
     let gcode = feedback::repeat_generated(&artifacts.gcode, params.passes);
-    let estimate = laser_core::gcode::estimate_time(&gcode, 3000.0);
+    let estimate = laser_core::gcode::estimate_time_with(&gcode, &motion.profile);
 
     let root = generated_root.ok_or("生成目录未配置")?;
     std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
@@ -204,16 +206,12 @@ pub(crate) fn generate_text_artifacts(
             "min_y": artifacts.frame.min_y,
             "max_y": artifacts.frame.max_y
         },
+        "frame_hull_mm": frame_hull_json(&gcode),
         "glyphs": artifacts.glyphs,
         "path_optimization": artifacts.path_optimization,
         "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, fill.auto)),
         "removed_duplicates": artifacts.removed_duplicates,
-        "time_estimate": {
-            "estimated_seconds": estimate.estimated_seconds,
-            "estimated_minutes": estimate.estimated_minutes,
-            "laser_seconds": estimate.laser_seconds,
-            "non_laser_seconds": estimate.non_laser_seconds
-        }
+        "time_estimate": time_estimate_json(&estimate, &motion)
     }).as_object().cloned().unwrap_or_default())
 }
 
@@ -222,6 +220,8 @@ pub(crate) fn generate_draw_artifacts(
     generated_root: Option<&std::path::Path>,
     library: &laser_contracts::MaterialLibrary,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    // 2026-11-16：工时按机器加速度估算（请求 `machine_motion`，缺省按默认值）
+    let motion = parse_machine_motion(object)?;
     let image_data_url = object
         .get("image_data_url")
         .and_then(|value| value.as_str())
@@ -246,16 +246,59 @@ pub(crate) fn generate_draw_artifacts(
         .and_then(|v| v.as_str())
         .unwrap_or("raster");
     // 2026-11-16：矢量模式直接用画板里的图形规划路线；场景里有插入的图片（矢量刻不了）或没带场景时改用光栅
-    let sketch = if requested_mode == "vector" {
+    // 同日：`selected_element_ids` 只刻选中的图形（对齐 LightBurn“只加工选中图形”，不用选区原点）：
+    // 排版仍按整幅画计算，选中的部分刻在它在整幅画里的位置，补刻 / 重刻能对上
+    let selection: Option<std::collections::HashSet<String>> =
+        match object.get("selected_element_ids") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Array(ids)) => {
+                let ids: Option<std::collections::HashSet<String>> = ids
+                    .iter()
+                    .map(|id| {
+                        id.as_str()
+                            .filter(|s| !s.is_empty() && s.len() <= 128)
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                match ids {
+                    Some(ids) if !ids.is_empty() && ids.len() <= 10_000 => Some(ids),
+                    _ => return Err("selected_element_ids 必须是 1 ~ 10000 个非空字符串".into()),
+                }
+            }
+            Some(_) => return Err("selected_element_ids 必须是字符串数组".into()),
+        };
+    if selection.is_some() && requested_mode != "vector" {
+        return Err("只刻选中的图形需要“矢量”生成策略".into());
+    }
+    let (sketch, layout_sketch) = if requested_mode == "vector" {
         match object.get("scene_json") {
-            Some(scene) => Some(crate::sketch::sketch_from_scene(
-                scene,
-                &laser_core::font::find_system_font_for_text,
-            )?),
-            None => None,
+            Some(scene) => {
+                let font = &laser_core::font::find_system_font_for_text;
+                let full = crate::sketch::sketch_from_scene(scene, font)?;
+                match &selection {
+                    Some(ids) => {
+                        let picked = crate::sketch::sketch_from_scene(
+                            &crate::sketch::select_elements(scene, ids),
+                            font,
+                        )?;
+                        if picked.has_image {
+                            return Err("选中的图形里有插入的图片，矢量刻不了；请取消选中图片或改用光栅刻整幅".into());
+                        }
+                        if picked.is_empty() {
+                            return Err("选中的图形里没有可刻的线条或填充".into());
+                        }
+                        (Some(picked), Some(full))
+                    }
+                    None => (Some(full), None),
+                }
+            }
+            None if selection.is_some() => {
+                return Err("只刻选中的图形需要画板场景数据".into());
+            }
+            None => (None, None),
         }
     } else {
-        None
+        (None, None)
     };
     let vector_fallback = match (&sketch, requested_mode) {
         (_, mode) if mode != "vector" => None,
@@ -379,9 +422,10 @@ pub(crate) fn generate_draw_artifacts(
     let mut path_optimization = None;
     let mut vector_details = None;
     let gcode_str = if let (Some(sketch), "vector") = (&sketch, mode) {
-        let fill = parse_fill_options(object, feed_rate as f64)?;
+        let fill = parse_fill_options(object, feed_rate as f64, motion.overscan_accel())?;
         let planned = plan_sketch(
             sketch,
+            layout_sketch.as_ref().unwrap_or(sketch),
             width_mm,
             height_mm,
             laser_core::vector_plan::FillOptions {
@@ -547,7 +591,7 @@ pub(crate) fn generate_draw_artifacts(
     let gcode_path = root.join(format!("{id}.gcode"));
     std::fs::write(&gcode_path, gcode_str.as_bytes()).map_err(|error| error.to_string())?;
 
-    let estimate = laser_core::gcode::estimate_time(&gcode_str, 3000.0);
+    let estimate = laser_core::gcode::estimate_time_with(&gcode_str, &motion.profile);
 
     let img_name = format!("{id}.png");
     let gcode_name = format!("{id}.gcode");
@@ -585,6 +629,13 @@ pub(crate) fn generate_draw_artifacts(
     if let Some(note) = vector_fallback {
         res_map.insert("vector_note".into(), serde_json::json!(note));
     }
+    if let (Some(ids), "vector") = (&selection, mode) {
+        res_map.insert("selected_only".into(), serde_json::json!(true));
+        res_map.insert(
+            "selection_note".into(),
+            serde_json::json!(format!("只刻选中的 {} 个图形，位置与整幅画一致", ids.len())),
+        );
+    }
     if let Some(stats) = path_optimization {
         res_map.insert("path_optimization".into(), serde_json::json!(stats));
     }
@@ -611,14 +662,10 @@ pub(crate) fn generate_draw_artifacts(
             "max_y": height_mm,
         }),
     );
+    res_map.insert("frame_hull_mm".into(), frame_hull_json(&gcode_str));
     res_map.insert(
         "time_estimate".into(),
-        serde_json::json!({
-            "estimated_seconds": estimate.estimated_seconds,
-            "estimated_minutes": estimate.estimated_minutes,
-            "laser_seconds": estimate.laser_seconds,
-            "non_laser_seconds": estimate.non_laser_seconds,
-        }),
+        time_estimate_json(&estimate, &motion),
     );
     res_map.insert("fingerprint".into(), serde_json::Value::String(fingerprint));
 
@@ -631,6 +678,8 @@ pub(crate) fn generate_draw_artifacts(
 /// 关光滑行也不越出成品范围（激光头起点在左下角，不往负方向走）。
 fn plan_sketch(
     sketch: &crate::sketch::SketchGeometry,
+    // 排版（缩放、居中、过扫描留边）按它算：只刻选中图形时是整幅画，否则就是 `sketch`
+    layout: &crate::sketch::SketchGeometry,
     width_mm: f64,
     height_mm: f64,
     fill: laser_core::vector_plan::FillOptions,
@@ -638,8 +687,8 @@ fn plan_sketch(
 ) -> Result<laser_core::vector_plan::Planned, String> {
     use laser_core::vector_plan::{FillOptions, FillRule, Unit, plan_layers, scan_fill};
     const PADDING: f64 = 16.0;
-    let (x0, y0, x1, y1) = sketch.bounds().ok_or("画板里没有可刻的图形")?;
-    let (reach_x, reach_y) = if sketch.has_fills() {
+    let (x0, y0, x1, y1) = layout.bounds().ok_or("画板里没有可刻的图形")?;
+    let (reach_x, reach_y) = if layout.has_fills() {
         fill.extension_mm()
     } else {
         (0.0, 0.0)
@@ -690,6 +739,106 @@ fn plan_sketch(
     plan_layers(vec![fills, strokes], (0.0, height_mm), path_options).map_err(|e| e.to_string())
 }
 
+/// 请求里的机器运动参数（`machine_motion`，键名与 `/api/connection/check` 的 `machine_limits` 相同，
+/// 前端可原样转发握手读到的值，或用用户填的加速度覆盖）：`x_accel_mm_s2`、`y_accel_mm_s2`、
+/// `x_max_rate_mm_per_min`、`y_max_rate_mm_per_min`、`junction_deviation_mm`，全部可省略。
+pub(crate) struct MachineMotion {
+    pub(crate) profile: laser_core::gcode::MotionProfile,
+    /// `machine`：请求带了加速度；`default`：按默认 1000 mm/s² 估算
+    pub(crate) source: &'static str,
+}
+
+impl MachineMotion {
+    /// 自动过扫描用的加速度：两轴取小（扫描方向不定时保守）。
+    pub(crate) fn overscan_accel(&self) -> f64 {
+        self.profile.accel_x_mm_s2.min(self.profile.accel_y_mm_s2)
+    }
+}
+
+pub(crate) fn parse_machine_motion(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<MachineMotion, String> {
+    use laser_core::gcode::MotionProfile;
+    let empty = serde_json::Map::new();
+    let motion = match object.get("machine_motion") {
+        None | Some(serde_json::Value::Null) => &empty,
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err("machine_motion 必须是对象".into()),
+    };
+    let number = |key: &str, max: f64| -> Result<Option<f64>, String> {
+        match motion.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(value) => value
+                .as_f64()
+                .filter(|v| v.is_finite() && *v > 0.0 && *v <= max)
+                .map(Some)
+                .ok_or_else(|| format!("machine_motion.{key} 必须是 0 ~ {max} 之间的数字")),
+        }
+    };
+    let ax = number("x_accel_mm_s2", 100_000.0)?;
+    let ay = number("y_accel_mm_s2", 100_000.0)?;
+    let rx = number("x_max_rate_mm_per_min", 1_000_000.0)?;
+    let ry = number("y_max_rate_mm_per_min", 1_000_000.0)?;
+    let jd = number("junction_deviation_mm", 10.0)?;
+    let defaults = MotionProfile::default();
+    // GRBL 的 G0 按各轴最大速度走；知道最大速度时快移取两轴中较大的，再按方向逐轴封顶
+    let rapid = match (rx, ry) {
+        (Some(x), Some(y)) => x.max(y),
+        (Some(v), None) | (None, Some(v)) => v,
+        (None, None) => defaults.rapid_mm_per_min,
+    };
+    // 只给了一个轴的加速度时另一个轴用同一个值
+    let (accel_x, accel_y) = match (ax, ay) {
+        (Some(x), Some(y)) => (x, y),
+        (Some(v), None) | (None, Some(v)) => (v, v),
+        (None, None) => (defaults.accel_x_mm_s2, defaults.accel_y_mm_s2),
+    };
+    Ok(MachineMotion {
+        profile: MotionProfile {
+            rapid_mm_per_min: rapid,
+            accel_x_mm_s2: accel_x,
+            accel_y_mm_s2: accel_y,
+            max_rate_x_mm_per_min: rx,
+            max_rate_y_mm_per_min: ry,
+            junction_deviation_mm: jd.unwrap_or(defaults.junction_deviation_mm),
+        },
+        source: if ax.is_some() || ay.is_some() {
+            "machine"
+        } else {
+            "default"
+        },
+    })
+}
+
+/// 结果里的工时估算：按加速度的规划器模型，并写明用了多大的加速度、来自哪里。
+pub(crate) fn time_estimate_json(
+    estimate: &laser_core::gcode::TimeEstimate,
+    motion: &MachineMotion,
+) -> serde_json::Value {
+    serde_json::json!({
+        "estimated_seconds": estimate.estimated_seconds,
+        "estimated_minutes": estimate.estimated_minutes,
+        "laser_seconds": estimate.laser_seconds,
+        "non_laser_seconds": estimate.non_laser_seconds,
+        "model": "acceleration",
+        "acceleration_mm_s2": {"x": motion.profile.accel_x_mm_s2, "y": motion.profile.accel_y_mm_s2},
+        "acceleration_source": motion.source,
+    })
+}
+
+/// 走边框“橡皮筋”轮廓（2026-11-16）：出光点的凸包，以激光头起点为原点，`[[x, y], …]`；
+/// 含圆弧或出光点不足时为 null，前端退回外接矩形。
+fn frame_hull_json(gcode: &str) -> serde_json::Value {
+    laser_core::gcode::burn_hull(gcode).map_or(serde_json::Value::Null, |hull| {
+        let round = |v: f64| (v * 1000.0).round() / 1000.0;
+        serde_json::json!(
+            hull.iter()
+                .map(|p| [round(p.0), round(p.1)])
+                .collect::<Vec<_>>()
+        )
+    })
+}
+
 /// 请求里的 `fill_options` 解析结果；`auto` 表示过扫描按速度与加速度自动算。
 struct ParsedFill {
     options: laser_core::vector_plan::FillOptions,
@@ -703,6 +852,7 @@ struct ParsedFill {
 fn parse_fill_options(
     object: &serde_json::Map<String, serde_json::Value>,
     feed_mm_per_min: f64,
+    fallback_accel_mm_s2: f64,
 ) -> Result<ParsedFill, String> {
     use laser_core::vector_plan::{
         FillGrouping, FillOptions, FillRule, MAX_OVERSCAN_MM, auto_overscan_mm,
@@ -740,7 +890,8 @@ fn parse_fill_options(
         .and_then(|v| v.as_str())
         .is_some_and(|t| t.trim().is_empty() || t.trim().eq_ignore_ascii_case("auto"));
     let overscan = if auto {
-        let accel = number("acceleration_mm_s2")?.unwrap_or(f64::NAN);
+        // 加速度：fill_options 里填的 > 机器读到的（两轴取小）> 默认 1000
+        let accel = number("acceleration_mm_s2")?.unwrap_or(fallback_accel_mm_s2);
         auto_overscan_mm(feed_mm_per_min, accel)
     } else {
         let value = number("overscan_mm")?.unwrap_or(0.0);
@@ -928,6 +1079,8 @@ pub(crate) fn generate_image_or_gcode_artifacts(
     preview_roots: &[std::path::PathBuf],
     library: &laser_contracts::MaterialLibrary,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+    // 2026-11-16：工时按机器加速度估算（请求 `machine_motion`，缺省按默认值）
+    let motion = parse_machine_motion(object)?;
     let source_type = object
         .get("source_type")
         .and_then(|v| v.as_str())
@@ -1110,7 +1263,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
             .save(root.join(&source_name))
             .map_err(|e| e.to_string())?;
 
-        let estimate = laser_core::gcode::estimate_time(&gcode_str, 3000.0);
+        let estimate = laser_core::gcode::estimate_time_with(&gcode_str, &motion.profile);
         let (width_mm, height_mm) = (prepared.width_mm, prepared.height_mm);
 
         let img_name = format!("{id}.png");
@@ -1157,6 +1310,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
         res.insert("frame_mm".into(), serde_json::json!({
             "min_x": 0.0, "max_x": width_mm + 2.0 * IMAGE_OVERSCAN_MM, "min_y": 0.0, "max_y": height_mm
         }));
+        res.insert("frame_hull_mm".into(), frame_hull_json(&gcode_str));
         if prepared.auto_fitted {
             res.insert("fit_note".into(), serde_json::json!(format!(
                 "原图按 {:.2} mm/像素会超出机器幅面，已等比缩小到 {width_mm:.1} × {height_mm:.1} mm",
@@ -1165,12 +1319,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
         }
         res.insert(
             "time_estimate".into(),
-            serde_json::json!({
-                "estimated_seconds": estimate.estimated_seconds,
-                "estimated_minutes": estimate.estimated_minutes,
-                "laser_seconds": estimate.laser_seconds,
-                "non_laser_seconds": estimate.non_laser_seconds,
-            }),
+            time_estimate_json(&estimate, &motion),
         );
         return Ok(Some(res));
     } else if source_type == "gcode" {
@@ -1203,7 +1352,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
         let fingerprint = hex::encode(hasher.finalize());
 
         let moves = laser_core::gcode::parse_moves(&gcode_str);
-        let estimate = laser_core::gcode::estimate_time(&gcode_str, 3000.0);
+        let estimate = laser_core::gcode::estimate_time_with(&gcode_str, &motion.profile);
 
         let mut min_x = f64::INFINITY;
         let mut min_y = f64::INFINITY;
@@ -1292,12 +1441,7 @@ pub(crate) fn generate_image_or_gcode_artifacts(
         res.insert("height_mm".into(), serde_json::json!(height_mm));
         res.insert(
             "time_estimate".into(),
-            serde_json::json!({
-                "estimated_seconds": estimate.estimated_seconds,
-                "estimated_minutes": estimate.estimated_minutes,
-                "laser_seconds": estimate.laser_seconds,
-                "non_laser_seconds": estimate.non_laser_seconds,
-            }),
+            time_estimate_json(&estimate, &motion),
         );
         return Ok(Some(res));
     }

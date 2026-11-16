@@ -146,6 +146,30 @@ fn arrow_head(from: Point, tip: Point, length: f64) -> [Vec<Point>; 2] {
 }
 
 /// 场景（`{"elements": [...]}` 或直接是元素数组）转成矢量几何。`font_for` 为文字找可用字体。
+/// 只留选中的元素（2026-11-16，对齐 LightBurn“只加工选中图形”）：`id` 在选中集合里，
+/// 或绑在选中容器上的文字（`containerId`）。其余字段原样保留。
+pub(crate) fn select_elements(scene: &Value, ids: &std::collections::HashSet<String>) -> Value {
+    let keep = |element: &Value| {
+        let field = |key: &str| element.get(key).and_then(Value::as_str);
+        field("id").is_some_and(|id| ids.contains(id))
+            || field("containerId").is_some_and(|id| ids.contains(id))
+    };
+    let filter = |elements: &Vec<Value>| -> Vec<Value> {
+        elements.iter().filter(|e| keep(e)).cloned().collect()
+    };
+    match scene {
+        Value::Array(elements) => Value::Array(filter(elements)),
+        Value::Object(map) => {
+            let mut out = map.clone();
+            if let Some(Value::Array(elements)) = map.get("elements") {
+                out.insert("elements".into(), Value::Array(filter(elements)));
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
 pub(crate) fn sketch_from_scene(
     scene: &Value,
     font_for: &dyn Fn(&str) -> Option<std::path::PathBuf>,

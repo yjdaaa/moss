@@ -115,6 +115,8 @@ pub(crate) fn framing_digest_facts(object: &Map<String, Value>) -> Map<String, V
         "feed_rate",
         "power",
         "relative_to_head",
+        // 2026-11-16 橡皮筋走边框：实际走的多边形进入摘要，批准的就是要走的
+        "outline",
     ] {
         if let Some(value) = object.get(key).filter(|value| !value.is_null()) {
             facts.insert(key.into(), value.clone());

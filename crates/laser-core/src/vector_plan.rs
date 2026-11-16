@@ -26,7 +26,7 @@ use laser_contracts::geometry::{PathOptimizationStats, Paths, Point};
 /// 单次填充的出光线段上限：再多说明尺寸或线距不合理（100 mm 见方、0.05 mm 线距约 2000 行）。
 pub const MAX_FILL_SEGMENTS: usize = 400_000;
 /// 自动过扫描默认假设的加速度（mm/s²）；请求可传机器实际值（GRBL `$120/$121`）。
-pub const DEFAULT_ACCELERATION_MM_S2: f64 = 1000.0;
+pub use crate::gcode::DEFAULT_ACCELERATION_MM_S2;
 /// 自动过扫描下限与上限（mm）。
 pub const MIN_AUTO_OVERSCAN_MM: f64 = 1.0;
 pub const MAX_OVERSCAN_MM: f64 = 20.0;

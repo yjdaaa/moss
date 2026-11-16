@@ -6,8 +6,13 @@ import {
   aiWorkflowStarted,
   canStartAiPreview,
   connectionView,
+  framingOutline,
   framingRequest,
+  framingShapeText,
   isAiOrigin,
+  FRAMING_SHAPE_KEY,
+  readFramingShape,
+  writeFramingShape,
   originNote,
   pendingAiPreviews,
   savedConnectionForm,
@@ -123,4 +128,31 @@ test("origin note, fill label and head-relative framing request", () => {
   assert.equal(framingRequest(record, null), null, "没有设备目标不走边框");
   assert.equal(framingRequest({ artifacts: {} }, target), null, "没有范围不猜");
   assert.equal(framingRequest({ artifacts: { frame_mm: { min_x: 0, max_x: 0, min_y: 0, max_y: 5 } } }, target), null);
+});
+
+test("橡皮筋走边框：选了沿外轮廓且预览给了轮廓才带 outline，否则仍走外接矩形", () => {
+  const target = { connection_mode: "network", network_host: "<device-ip>", network_telnet_port: 23 };
+  const artifacts = {
+    frame_mm: { min_x: -10, max_x: 10, min_y: -10, max_y: 5 },
+    frame_hull_mm: [[-10, -10], [10, -10], [0.12345, 5]],
+  };
+  const hull = framingRequest({ artifacts }, target, { shape: "hull" });
+  assert.deepEqual(hull.outline, [[-10, -10], [10, -10], [0.123, 5]]);
+  assert.equal(framingShapeText(hull), "沿图形外轮廓（3 个点）");
+  const box = framingRequest({ artifacts }, target);
+  assert.equal(box.outline, undefined, "默认外接矩形");
+  assert.equal(framingShapeText(box), "沿 20 × 15 mm 的外接矩形");
+  // 没有轮廓（含圆弧的外部刀路）时退回矩形
+  const noHull = framingRequest({ artifacts: { ...artifacts, frame_hull_mm: null } }, target, { shape: "hull" });
+  assert.equal(noHull.outline, undefined);
+  assert.equal(framingOutline({ frame_hull_mm: [[0, 0], [1, "x"], [2, 2]] }), null);
+  assert.equal(framingOutline({ frame_hull_mm: [[0, 0], [1, 1]] }), null);
+
+  const data = {};
+  const store = { getItem: (k) => data[k] ?? null, setItem: (k, v) => { data[k] = v; } };
+  assert.equal(readFramingShape(store), "box");
+  writeFramingShape("hull", store);
+  assert.equal(data[FRAMING_SHAPE_KEY], "hull");
+  assert.equal(readFramingShape(store), "hull");
+  assert.equal(readFramingShape({ getItem() { throw new Error("denied"); } }), "box");
 });

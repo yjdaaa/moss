@@ -413,6 +413,88 @@ fn draw_vector_mode_plans_scene_shapes_and_falls_back_for_images() {
     );
 }
 
+/// 2026-11-16 只刻选中的图形（对齐 LightBurn“只加工选中图形”，不用选区原点）：
+/// 选中的部分刻在它在整幅画里的位置；只刻矢量；选中图片或空选区报错。
+#[test]
+fn draw_vector_can_burn_only_the_selected_shapes_at_their_place_in_the_whole_drawing() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let scene = serde_json::json!({"elements": [
+        {"id": "left", "type": "rectangle", "x": 0, "y": 0, "width": 40, "height": 40, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "strokeWidth": 2},
+        {"id": "right", "type": "rectangle", "x": 160, "y": 0, "width": 40, "height": 40, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "strokeWidth": 2},
+        {"id": "photo", "type": "image", "x": 300, "y": 300, "width": 10, "height": 10},
+    ]});
+    let post = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({"image_data_url": draw_test_png(), "material": "椴木",
+            "thickness_mm": 3.0, "mode": "vector", "width_mm": 60, "height_mm": 60, "scene_json": scene});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post_json(&service, "/api/draw/preview", &body)
+    };
+    // 出光范围（不含从起点出发的空走）：取出光点凸包的 x 范围
+    let burn_x = |response: &serde_json::Value| {
+        let hull = response["result"]["artifacts"]["frame_hull_mm"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let xs: Vec<f64> = hull.iter().map(|p| p[0].as_f64().unwrap()).collect();
+        (
+            xs.iter().cloned().fold(f64::INFINITY, f64::min),
+            xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        )
+    };
+    // 不选图片：只刻右边那个方块，位置在整幅（两个方块）排版里的右侧
+    let right = post(serde_json::json!({"selected_element_ids": ["right"]}));
+    assert_eq!(right["success"], true, "{right}");
+    let artifacts = &right["result"]["artifacts"];
+    assert_eq!(artifacts["mode"], "vector", "{artifacts}");
+    assert_eq!(artifacts["selected_only"], true);
+    assert!(
+        artifacts["selection_note"]
+            .as_str()
+            .unwrap()
+            .contains("1 个")
+    );
+    let (min_x, _) = burn_x(&right);
+    assert!(
+        min_x > 30.0,
+        "选中的右侧方块应在整幅画的右半边，而不是被挪到左下角：{min_x}"
+    );
+    let left = post(serde_json::json!({"selected_element_ids": ["left"]}));
+    assert!(burn_x(&left).1 < 30.0);
+
+    for (bad, why) in [
+        (
+            serde_json::json!({"selected_element_ids": ["photo"]}),
+            "图片",
+        ),
+        (
+            serde_json::json!({"selected_element_ids": ["nothing"]}),
+            "没有可刻",
+        ),
+        (
+            serde_json::json!({"selected_element_ids": []}),
+            "selected_element_ids",
+        ),
+        (
+            serde_json::json!({"selected_element_ids": ["right"], "mode": "raster"}),
+            "矢量",
+        ),
+    ] {
+        let response = post(bad.clone());
+        assert_eq!(response["success"], false, "{bad} → {response}");
+        assert!(
+            response["result"].as_str().unwrap_or("").contains(why),
+            "{bad} → {response}"
+        );
+    }
+}
+
 #[test]
 fn material_safety_gate_rejects_pvc_and_unknown_plastic() {
     assert!(validate_material_safety("PVC").unwrap_err().contains("PVC"));
@@ -456,7 +538,7 @@ fn job_travel_check_compares_extents_with_firmware_travel() {
     let limits = laser_device::MachineLimits {
         x_travel_mm: Some(100.0),
         y_travel_mm: Some(100.0),
-        z_travel_mm: None,
+        ..Default::default()
     };
     assert!(check_job_fits_machine("G92 X0 Y0\nG1 X100 Y60 S300", &limits).is_ok());
     let err = check_job_fits_machine("G92 X0 Y0\nG1 X200 Y60 S300", &limits).unwrap_err();
@@ -798,6 +880,97 @@ fn text_fill_options_follow_lightburn_and_are_echoed() {
         serde_json::json!({"fill_options": {"bidirectional": "yes"}}),
         serde_json::json!({"fill_options": "fast"}),
         serde_json::json!({"path_options": {"prefer_corners": 1}}),
+    ] {
+        let response = base(bad.clone());
+        assert_eq!(response["success"], false, "{bad} → {response}");
+    }
+}
+
+/// 2026-11-16：工时按机器加速度估算（`machine_motion` 与握手 `machine_limits` 同键名），
+/// 自动过扫描也跟着机器加速度走。
+#[test]
+fn time_estimate_and_auto_overscan_follow_machine_motion() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let font = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fonts/geometry.ttf"
+    );
+    let base = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({"text": "AB", "font_path": font, "material": "椴木",
+            "thickness_mm": 3, "font_size_mm": 10, "text_fill": "fill"});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post_json(&service, "/api/text-task/generate", &body)
+    };
+    let default = base(serde_json::json!({}));
+    let estimate = &default["result"]["artifacts"]["time_estimate"];
+    assert_eq!(estimate["model"], "acceleration", "{estimate}");
+    assert_eq!(estimate["acceleration_source"], "default");
+    assert_eq!(estimate["acceleration_mm_s2"]["x"], 1000.0);
+    // 橡皮筋走边框轮廓：出光点凸包，都在 frame_mm 范围内
+    let artifacts = &default["result"]["artifacts"];
+    let hull = artifacts["frame_hull_mm"]
+        .as_array()
+        .expect("文字应有外轮廓");
+    assert!(hull.len() >= 3, "{hull:?}");
+    let frame = &artifacts["frame_mm"];
+    for point in hull {
+        let (x, y) = (point[0].as_f64().unwrap(), point[1].as_f64().unwrap());
+        assert!(
+            x >= frame["min_x"].as_f64().unwrap() - 0.01
+                && x <= frame["max_x"].as_f64().unwrap() + 0.01
+        );
+        assert!(
+            y >= frame["min_y"].as_f64().unwrap() - 0.01
+                && y <= frame["max_y"].as_f64().unwrap() + 0.01
+        );
+    }
+
+    // 加速度低的机器：工时更长，自动过扫描更长
+    let slow =
+        base(serde_json::json!({"machine_motion": {"x_accel_mm_s2": 200, "y_accel_mm_s2": 200}}));
+    assert_eq!(slow["success"], true, "{slow}");
+    let slow_artifacts = &slow["result"]["artifacts"];
+    assert_eq!(
+        slow_artifacts["time_estimate"]["acceleration_source"],
+        "machine"
+    );
+    assert!(
+        slow_artifacts["time_estimate"]["estimated_seconds"]
+            .as_f64()
+            .unwrap()
+            > estimate["estimated_seconds"].as_f64().unwrap(),
+        "{slow_artifacts}"
+    );
+    assert!(
+        slow_artifacts["fill_options"]["overscan_mm"]
+            .as_f64()
+            .unwrap()
+            >= default["result"]["artifacts"]["fill_options"]["overscan_mm"]
+                .as_f64()
+                .unwrap(),
+        "{slow_artifacts}"
+    );
+    // 填充设置里显式填的加速度优先于机器读到的
+    let explicit = base(serde_json::json!({
+        "machine_motion": {"x_accel_mm_s2": 200},
+        "fill_options": {"acceleration_mm_s2": 5000}
+    }));
+    assert_eq!(
+        explicit["result"]["artifacts"]["fill_options"]["overscan_mm"], 1.0,
+        "{explicit}"
+    );
+
+    for bad in [
+        serde_json::json!({"machine_motion": "fast"}),
+        serde_json::json!({"machine_motion": {"x_accel_mm_s2": -5}}),
+        serde_json::json!({"machine_motion": {"junction_deviation_mm": "a"}}),
     ] {
         let response = base(bad.clone());
         assert_eq!(response["success"], false, "{bad} → {response}");

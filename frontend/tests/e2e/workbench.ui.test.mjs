@@ -182,8 +182,10 @@ test("[UI-04] 工作台: 实心扫描填充真实生效 + 先走边框二次确�
     await page.getByTestId("app-dialog").locator("button.btn", { hasText: "取消" }).click();
     assert.equal(rec.events.slice(beforeCancel).includes("line"), false, "取消走边框不得驱动机器移动");
 
-    // 再次点走边框并确认，机器真实收到移动指令
+    // 再次点走边框并确认，机器真实收到移动指令；这次勾选“沿外轮廓”（橡皮筋，2026-11-16）
+    await page.locator("#wb-framing-hull").check();
     await framingBtn.click();
+    await page.getByTestId("app-dialog").filter({ hasText: /沿图形外轮廓（\d+ 个点）/ }).waitFor({ timeout: 5000 });
     await page.getByTestId("app-dialog").getByRole("button", { name: "开始走边框", exact: true }).click();
     await waitFor(() => rec.events.slice(beforeCancel).includes("line"), "确认走边框后设备必须收到移动指令");
     await page.getByText(/走边框完成/).first().waitFor({ timeout: STEP_TIMEOUT_MS });

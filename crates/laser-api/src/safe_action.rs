@@ -360,9 +360,20 @@ impl ApiService {
             Err(error) => return framing_params_invalid(error),
         };
 
-        let framing_gcode = match laser_core::gcode::generate_framing_gcode(
-            min_x, min_y, max_x, max_y, feed_rate, power,
-        ) {
+        // 2026-11-16 橡皮筋走边框（对齐 LightBurn）：带 `outline` 时沿多边形走，否则走外接矩形
+        let outline = match framing_outline(object, (min_x, min_y, max_x, max_y)) {
+            Ok(outline) => outline,
+            Err(error) => return framing_params_invalid(error),
+        };
+        let generated = match &outline {
+            Some(points) => {
+                laser_core::gcode::generate_outline_framing_gcode(points, feed_rate, power)
+            }
+            None => laser_core::gcode::generate_framing_gcode(
+                min_x, min_y, max_x, max_y, feed_rate, power,
+            ),
+        };
+        let framing_gcode = match generated {
             Ok(g) => g,
             Err(e) => return http_json(400, failure(format!("生成走边框 G-code 失败: {e}"), None)),
         };
@@ -648,6 +659,45 @@ pub(crate) fn framing_feed_and_power(
     Ok((feed_rate, power))
 }
 
+/// 校验走边框多边形：3 ~ 256 个 `[x, y]` 有限数字，且都在给出的矩形范围内（容差 0.01 mm），
+/// 这样审批摘要里的范围与实际运动一致。没带或为 null 时走矩形。
+pub(crate) fn framing_outline(
+    object: &serde_json::Map<String, serde_json::Value>,
+    (min_x, min_y, max_x, max_y): (f64, f64, f64, f64),
+) -> Result<Option<Vec<(f64, f64)>>, String> {
+    let Some(value) = object.get("outline").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let items = value.as_array().ok_or("outline 必须是 [[x, y], …] 数组")?;
+    let max = laser_core::gcode::MAX_FRAMING_OUTLINE_POINTS;
+    if items.len() < 3 || items.len() > max {
+        return Err(format!("outline 须有 3 ~ {max} 个点"));
+    }
+    const TOLERANCE: f64 = 0.01;
+    items
+        .iter()
+        .map(|item| {
+            let pair = item.as_array().filter(|pair| pair.len() == 2);
+            let point = pair.and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)));
+            match point {
+                Some((x, y))
+                    if x.is_finite()
+                        && y.is_finite()
+                        && x >= min_x - TOLERANCE
+                        && x <= max_x + TOLERANCE
+                        && y >= min_y - TOLERANCE
+                        && y <= max_y + TOLERANCE =>
+                {
+                    Ok((x, y))
+                }
+                Some(_) => Err("outline 的点超出了 min_x..max_x / min_y..max_y 范围".to_owned()),
+                None => Err("outline 的每个点必须是 [x, y] 数字".to_owned()),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 pub(crate) fn framing_params_invalid(error: String) -> Vec<u8> {
     http_json(
         400,
@@ -667,8 +717,14 @@ pub(crate) fn framing_approval_summary(
             .map(|v| v.to_string())
             .unwrap_or_else(|| default.to_owned())
     };
+    let shape = facts
+        .get("outline")
+        .and_then(|v| v.as_array())
+        .map_or("外接矩形".to_owned(), |points| {
+            format!("沿图形外轮廓 {} 个点", points.len())
+        });
     format!(
-        "走边框：X {}..{}，Y {}..{} mm；速度 {}，功率 {}",
+        "走边框（{shape}）：X {}..{}，Y {}..{} mm；速度 {}，功率 {}",
         value("min_x", "0"),
         value("max_x", "100"),
         value("min_y", "0"),

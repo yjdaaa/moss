@@ -15,6 +15,8 @@ import {
   canStartAiPreview,
   connectionView,
   framingRequest,
+  framingShapeText,
+  readFramingShape,
   originNote,
   pendingAiPreviews,
   savedConnectionForm,
@@ -232,10 +234,10 @@ export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange
     if (liveConn.label !== connection.label || liveConn.ready !== connection.ready) {
       setConnection(liveConn);
     }
-    const request = shown ? framingRequest(shown, liveConn.payload) : null;
+    const request = shown ? framingRequest(shown, liveConn.payload, { shape: readFramingShape() }) : null;
     if (!request || busy) return;
     const ok = await showConfirm(
-      `目标设备：${liveConn.label}\n激光头会从当前位置出发，沿 ${Math.round((request.max_x - request.min_x) * 10) / 10} × ${Math.round((request.max_y - request.min_y) * 10) / 10} mm 的范围绕一圈再回到原处，不出光。请确认机器周围没有障碍。`,
+      `目标设备：${liveConn.label}\n激光头会从当前位置出发，${framingShapeText(request)}绕一圈再回到原处，不出光。请确认机器周围没有障碍。`,
       { title: "先走边框", confirmText: "开始走边框", cancelText: "取消" },
     );
     if (!ok) return;

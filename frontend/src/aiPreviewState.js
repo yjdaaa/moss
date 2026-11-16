@@ -116,7 +116,45 @@ export function originNote(record) {
  * “先走边框”的请求：以激光头当前位置为原点（与即将开刻的任务同一参照），沿预览返回的 `frame_mm`
  * 绕一圈后回到起点；默认不出光。没有范围或没有设备目标时返回 null（绝不猜）。
  */
-export function framingRequest(record, connectionPayload) {
+// 2026-11-16 橡皮筋走边框（对齐 LightBurn Rubber Band Framing）：沿出光点的外轮廓（凸包）走，
+// 而不是外接矩形；偏好存在本机，工作台、AI 预览窗与画板共用。默认外接矩形。
+export const FRAMING_SHAPE_KEY = "moss.framingShape.v1";
+
+export function readFramingShape(storage = globalThis.localStorage) {
+  try {
+    return storage?.getItem(FRAMING_SHAPE_KEY) === "hull" ? "hull" : "box";
+  } catch {
+    return "box";
+  }
+}
+
+export function writeFramingShape(shape, storage = globalThis.localStorage) {
+  try {
+    storage?.setItem(FRAMING_SHAPE_KEY, shape === "hull" ? "hull" : "box");
+  } catch {
+    // 存储被禁用时只是不记住
+  }
+}
+
+/** 预览结果里的外轮廓 `frame_hull_mm`：3 ~ 256 个数字点，否则 null（退回外接矩形）。 */
+export function framingOutline(artifacts) {
+  const hull = artifacts?.frame_hull_mm;
+  if (!Array.isArray(hull) || hull.length < 3 || hull.length > 256) return null;
+  const round = (value) => Math.round(Number(value) * 1000) / 1000;
+  const points = hull.map((p) => (Array.isArray(p) && p.length === 2 ? [Number(p[0]), Number(p[1])] : null));
+  if (points.some((p) => !p || !Number.isFinite(p[0]) || !Number.isFinite(p[1]))) return null;
+  return points.map(([x, y]) => [round(x), round(y)]);
+}
+
+/** 确认框里的走法说明。 */
+export function framingShapeText(request) {
+  if (Array.isArray(request?.outline)) return `沿图形外轮廓（${request.outline.length} 个点）`;
+  const w = Math.round((Number(request?.max_x) - Number(request?.min_x)) * 10) / 10;
+  const h = Math.round((Number(request?.max_y) - Number(request?.min_y)) * 10) / 10;
+  return `沿 ${w} × ${h} mm 的外接矩形`;
+}
+
+export function framingRequest(record, connectionPayload, { shape = "box" } = {}) {
   const frame = record?.artifacts?.frame_mm;
   const keys = ["min_x", "max_x", "min_y", "max_y"];
   if (!connectionPayload || !frame || !keys.every((key) => Number.isFinite(Number(frame[key])))) return null;
@@ -131,5 +169,6 @@ export function framingRequest(record, connectionPayload) {
     max_y: round(frame.max_y),
     feed_rate: 2000,
     power: 0,
+    ...(shape === "hull" && framingOutline(record?.artifacts) ? { outline: framingOutline(record.artifacts) } : {}),
   };
 }

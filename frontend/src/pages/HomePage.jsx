@@ -38,7 +38,7 @@ import {
   workbenchResumeSendPrompt,
   workbenchStatusLabel,
 } from "../workbenchParams.js";
-import { framingRequest } from "../aiPreviewState.js";
+import { framingRequest, framingShapeText, readFramingShape, writeFramingShape } from "../aiPreviewState.js";
 import { drawConnectionPayload, drawTargetLabel, drawTargetReady } from "../drawConnection.js";
 import { exportFile } from "../saveFile.js";
 import { showAlert, showConfirm, showPrompt } from "../appDialog.js";
@@ -48,7 +48,18 @@ import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
-import { fillResultNote, fillSettingsPayload, fillSettingsSignature, readFillSettings, writeFillSettings } from "../fillOptions.js";
+import {
+  fillResultNote,
+  fillSettingsPayload,
+  fillSettingsSignature,
+  machineMotionFromLimits,
+  machineMotionPayload,
+  readFillSettings,
+  readMachineMotion,
+  timeEstimateNote,
+  writeFillSettings,
+  writeMachineMotion,
+} from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { defaultSerialPortHint } from "../platform.js";
 import { MATERIAL_LIBRARY_CHANNEL, pickThicknessForMaterial } from "../materialSelectState.js";
@@ -119,6 +130,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     writeFillSettings(next);
   };
   const textUsesFill = resolveTextStyle(textStyle).textFill !== "outline";
+  // 握手读到的机器加速度 / 最大速度：工时估算与自动过扫描用（2026-11-16）
+  const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
+  // 走边框走法：外接矩形 / 沿外轮廓（橡皮筋），与 AI 预览窗、画板共用
+  const [framingShape, setFramingShape] = useState(() => readFramingShape());
+  const motionPayload = machineMotionPayload(fillSettings, machineMotion);
 
   const [uploadedImagePath, setUploadedImagePath] = useState("");
   const [uploadedImageName, setUploadedImageName] = useState("");
@@ -174,7 +190,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     fontSizeMm,
     textStyle,
     textOrigin,
-    fillSignature: fillSettingsSignature(fillSettings, { withFill: textUsesFill }),
+    // 自动过扫描随机器加速度变，读到新的加速度后填充文字的旧预览也算过期
+    fillSignature: fillSettingsSignature(fillSettings, { withFill: textUsesFill })
+      + (textUsesFill ? JSON.stringify(motionPayload) : ""),
     uploadedImagePath,
     imageWidthMm,
     imageHeightMm,
@@ -453,6 +471,11 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         const isConnected =
           connectionMode === "serial" ? result.serial_connected : result.network_connected;
         setConnectionStatus({ connected: isConnected, summary: result.summary, checkedAt: Date.now() });
+        const motion = machineMotionFromLimits(result.machine_limits);
+        if (motion) {
+          writeMachineMotion(motion);
+          setMachineMotion(motion);
+        }
         if (isConnected) {
           addLog("DEVICE", `硬件握手通过: ${result.summary || "控制器已连接 ($32=1 就绪)"}；语音和 AI 发送时没指定串口或 IP 就用这个连接`, "ok");
         } else if (!silent) {
@@ -578,6 +601,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           text_fill: spec.textFill,
           origin: textOrigin,
           ...fillPayload,
+          ...motionPayload,
           ...manualField,
         });
       } else if (activeTool === "image") {
@@ -605,6 +629,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           laser_mode: "engrave",
           engraving_mode: "raster",
           ...imgExtra,
+          ...motionPayload,
           ...manualField,
         });
       } else if (activeTool === "gcode") {
@@ -619,6 +644,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           thickness_mm: Number(selectedThickness),
           source_type: "gcode",
           gcode_file: uploadedGcodePath,
+          ...motionPayload,
         });
       }
 
@@ -704,7 +730,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       );
       return;
     }
-    const req = framingRequest(currentWorkflow, drawConnectionPayload(connectionForm));
+    const req = framingRequest(currentWorkflow, drawConnectionPayload(connectionForm), { shape: framingShape });
     if (!req) {
       showAlert("当前刀路没有相对起点的边框范围（外部导入刀路起点由文件自身决定），无法直接走边框。", {
         title: "不支持走边框",
@@ -716,7 +742,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     const h = Math.round((req.max_y - req.min_y) * 10) / 10;
     const targetName = drawTargetLabel(connectionForm);
     const confirmed = await showConfirm(
-      `目标设备：${targetName}\n激光头将从当前位置出发，沿 ${w} × ${h} mm 的范围绕一圈再回到原处（默认不出光）。\n请确认机器周围无障碍物；运行期间顶栏急停可随时停止。`,
+      `目标设备：${targetName}\n激光头将从当前位置出发，${framingShapeText(req)}绕一圈再回到原处（默认不出光）。\n请确认机器周围无障碍物；运行期间顶栏急停可随时停止。`,
       {
         title: "确认先走边框（机器将移动）",
         tone: "warning",
@@ -1699,6 +1725,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
               {fillNote && (
                 <div className="wb-origin-note" id="wb-fill-note">刀路：{fillNote}</div>
               )}
+              {timeEstimateNote(timeEstimate) && (
+                <div className="wb-origin-note" id="wb-time-note">耗时：{timeEstimateNote(timeEstimate)}</div>
+              )}
 
               {/* 生成与下发按钮放在监视舱刀路摘要下方，与孪生入口同一行 */}
               <div className="wb-dispatch-actions" id="wb-dispatch-actions" role="toolbar" aria-label="生成与下发">
@@ -1770,6 +1799,22 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                     <Square size={13} aria-hidden="true" />
                     <span>{framingBusy ? "走边框中…" : "先走边框"}</span>
                   </button>
+                  <label
+                    className="checkbox-row wb-framing-shape"
+                    title="勾选后沿图形外轮廓（橡皮筋）走，而不是外接矩形；带圆弧的外部刀路自动退回矩形"
+                  >
+                    <input
+                      type="checkbox"
+                      id="wb-framing-hull"
+                      checked={framingShape === "hull"}
+                      onChange={(e) => {
+                        const next = e.target.checked ? "hull" : "box";
+                        setFramingShape(next);
+                        writeFramingShape(next);
+                      }}
+                    />
+                    <span>沿外轮廓</span>
+                  </label>
                   <button
                     type="button"
                     id="wb-btn-export-gcode"

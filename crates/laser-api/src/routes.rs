@@ -1056,6 +1056,19 @@ impl ApiService {
             if let Err(error) = framing_feed_and_power(&object) {
                 return framing_params_invalid(error);
             }
+            // 橡皮筋轮廓同样先校验，非法时不创建审批（与 run_framing 用同一套默认范围）
+            let number = |key: &str, default: f64| {
+                object.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+            };
+            let bounds = (
+                number("min_x", 0.0),
+                number("min_y", 0.0),
+                number("max_x", 100.0),
+                number("max_y", 100.0),
+            );
+            if let Err(error) = crate::safe_action::framing_outline(&object, bounds) {
+                return framing_params_invalid(error);
+            }
             // 严格模式检查点（技术书 §6.2）：走边框真实驱动机器
             let framing_facts = approval::framing_digest_facts(&object);
             let framing_summary = framing_approval_summary(&framing_facts);

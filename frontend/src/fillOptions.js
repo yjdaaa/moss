@@ -139,3 +139,63 @@ export function fillResultNote(fill, removedDuplicates = 0) {
   if (Number(removedDuplicates) > 0) notes.push(`去掉 ${Number(removedDuplicates)} 条重复线`);
   return notes.join("；");
 }
+
+// ---- 机器运动参数（2026-11-16，按加速度估算工时）----
+// 握手（/api/connection/check）读到的 `machine_limits` 里的加速度 / 最大速度记在本机，生成预览时原样转发为
+// `machine_motion`；填充设置里手填的“机器加速度”优先（两轴都用它）。
+
+export const MACHINE_MOTION_KEY = "moss.machineMotion.v1";
+const MOTION_KEYS = ["x_accel_mm_s2", "y_accel_mm_s2", "x_max_rate_mm_per_min", "y_max_rate_mm_per_min", "junction_deviation_mm"];
+
+/** 从握手结果的 `machine_limits` 取出运动参数；一个都没有时返回 null。 */
+export function machineMotionFromLimits(limits) {
+  if (!limits || typeof limits !== "object") return null;
+  const motion = {};
+  for (const key of MOTION_KEYS) {
+    const value = Number(limits[key]);
+    if (limits[key] !== null && limits[key] !== undefined && Number.isFinite(value) && value > 0) motion[key] = value;
+  }
+  return Object.keys(motion).length ? motion : null;
+}
+
+export function readMachineMotion(storage = globalThis.localStorage) {
+  try {
+    const raw = storage?.getItem(MACHINE_MOTION_KEY);
+    return raw ? machineMotionFromLimits(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeMachineMotion(motion, storage = globalThis.localStorage) {
+  const clean = machineMotionFromLimits(motion);
+  if (!clean) return;
+  try {
+    storage?.setItem(MACHINE_MOTION_KEY, JSON.stringify(clean));
+  } catch {
+    // 存储被禁用时只是不记住
+  }
+}
+
+/** 提交给后端的 `machine_motion`；没有任何值时返回空对象（后端按默认 1000 mm/s² 估算）。 */
+export function machineMotionPayload(settings, stored) {
+  const manual = Number(String(normalizeFillSettings(settings).accelerationMmS2 ?? "").trim() || NaN);
+  const motion = { ...(machineMotionFromLimits(stored) || {}) };
+  if (Number.isFinite(manual) && manual >= 10 && manual <= 100000) {
+    motion.x_accel_mm_s2 = manual;
+    motion.y_accel_mm_s2 = manual;
+  }
+  return Object.keys(motion).length ? { machine_motion: motion } : {};
+}
+
+/** 工时估算说明：用了多大的加速度、来自哪里。 */
+export function timeEstimateNote(estimate) {
+  if (!estimate || estimate.model !== "acceleration") return "";
+  const x = Number(estimate.acceleration_mm_s2?.x);
+  const y = Number(estimate.acceleration_mm_s2?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return "";
+  const accel = x === y ? `${x}` : `X ${x} / Y ${y}`;
+  return estimate.acceleration_source === "machine"
+    ? `按机器加速度 ${accel} mm/s² 估算加减速`
+    : `按默认加速度 ${accel} mm/s² 估算加减速（连接机器后自动读取实际值）`;
+}

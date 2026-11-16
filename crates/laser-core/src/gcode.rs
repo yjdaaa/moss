@@ -1006,7 +1006,27 @@ pub fn estimate_time_seconds(text: &str, rapid_mm_per_minute: f64) -> f64 {
     estimate_time(text, rapid_mm_per_minute).estimated_seconds
 }
 
-pub fn estimate_time(text: &str, rapid_rate: f64) -> TimeEstimate {
+/// 一段运动（时间估算用）。
+#[derive(Debug, Clone, Copy)]
+struct MotionSegment {
+    /// 起点（以开始时激光头位置为原点，已计入 G92）
+    start: (f64, f64),
+    /// 圆弧（G2/G3）：只记了端点
+    arc: bool,
+    dx: f64,
+    dy: f64,
+    length: f64,
+    /// 指令速度（mm/min，已按快移速度封顶）
+    rate: f64,
+    laser: bool,
+    /// 这一段开始前机器必须停住（M3/M4/M5 切换、G4 停顿）
+    stop_before: bool,
+    /// G4 停顿秒数（长度为 0 的停顿段）
+    dwell: f64,
+}
+
+/// 逐行解析出运动段（模态 G0/G1/G2/G3、G90/G91、G92、M3/M4/M5、F、S、G4）。
+fn motion_segments(text: &str, rapid_rate: f64) -> Vec<MotionSegment> {
     let mut x = 0.0;
     let mut y = 0.0;
     let mut feed = 0.0;
@@ -1016,10 +1036,8 @@ pub fn estimate_time(text: &str, rapid_rate: f64) -> TimeEstimate {
     let mut absolute = true;
     let mut ox = 0.0;
     let mut oy = 0.0;
-    let mut laser_seconds = 0.0;
-    let mut non_laser_seconds = 0.0;
-    let mut laser_distance = 0.0;
-    let mut non_laser_distance = 0.0;
+    let mut pending_stop = false;
+    let mut out = Vec::new();
     for line in text.lines() {
         let ws = words(line);
         if ws.is_empty() {
@@ -1036,7 +1054,13 @@ pub fn estimate_time(text: &str, rapid_rate: f64) -> TimeEstimate {
                 }
                 'G' if v.round() == 90.0 => absolute = true,
                 'G' if v.round() == 91.0 => absolute = false,
-                'M' if (3.0..=5.0).contains(&v) => spindle = v as i32,
+                'M' if (3.0..=5.0).contains(&v) => {
+                    // GRBL 在主轴 / 激光状态切换时强制停住
+                    if v as i32 != spindle {
+                        pending_stop = true;
+                    }
+                    spindle = v as i32
+                }
                 'F' => feed = v,
                 'S' => power = v,
                 _ => {}
@@ -1067,7 +1091,18 @@ pub fn estimate_time(text: &str, rapid_rate: f64) -> TimeEstimate {
                 .rev()
                 .find(|(l, _)| *l == 'P' || *l == 'S')
                 .map_or(0.0, |(_, v)| *v);
-            non_laser_seconds += pause;
+            out.push(MotionSegment {
+                start: (x, y),
+                arc: false,
+                dx: 0.0,
+                dy: 0.0,
+                length: 0.0,
+                rate: 0.0,
+                laser: false,
+                stop_before: true,
+                dwell: pause,
+            });
+            pending_stop = true;
             continue;
         }
         let mut distance = (x - px).hypot(y - py);
@@ -1112,15 +1147,27 @@ pub fn estimate_time(text: &str, rapid_rate: f64) -> TimeEstimate {
         if rate <= 0.0 {
             continue;
         }
-        let seconds = distance / rate * 60.0;
-        if power > 0.0 && (spindle == 3 || (spindle == 4 && motion != 0)) {
-            laser_seconds += seconds;
-            laser_distance += distance;
-        } else {
-            non_laser_seconds += seconds;
-            non_laser_distance += distance;
-        }
+        out.push(MotionSegment {
+            start: (px, py),
+            arc: motion == 2 || motion == 3,
+            dx: x - px,
+            dy: y - py,
+            length: distance,
+            rate,
+            laser: power > 0.0 && (spindle == 3 || (spindle == 4 && motion != 0)),
+            stop_before: std::mem::take(&mut pending_stop),
+            dwell: 0.0,
+        });
     }
+    out
+}
+
+fn summarize(
+    laser_seconds: f64,
+    non_laser_seconds: f64,
+    laser_distance: f64,
+    non_laser_distance: f64,
+) -> TimeEstimate {
     let total = laser_seconds + non_laser_seconds;
     TimeEstimate {
         estimated_seconds: (total * 10.0).round() / 10.0,
@@ -1130,6 +1177,272 @@ pub fn estimate_time(text: &str, rapid_rate: f64) -> TimeEstimate {
         laser_distance_mm: (laser_distance * 1000.0).round() / 1000.0,
         non_laser_distance_mm: (non_laser_distance * 1000.0).round() / 1000.0,
     }
+}
+
+/// 走边框“橡皮筋”轮廓（2026-11-16，对齐 LightBurn Rubber Band Framing）：所有出光段端点的凸包，
+/// 坐标以开始时激光头位置为原点（已计入 `G92`），关光的过扫描与空走不算。
+/// 含圆弧（G2/G3，只知道端点、凸包会漏掉弧的外凸）或出光点不足 3 个时返回 `None`，由调用方退回外接矩形。
+/// 点太多时按 0.1 mm 容差简化，最多 [`MAX_FRAMING_OUTLINE_POINTS`] 个点。
+pub fn burn_hull(text: &str) -> Option<Vec<(f64, f64)>> {
+    let segments = motion_segments(text, 3000.0);
+    if segments.iter().any(|seg| seg.laser && seg.arc) {
+        return None;
+    }
+    let mut points: Vec<(f64, f64)> = segments
+        .iter()
+        .filter(|seg| seg.laser && seg.length > 0.0)
+        .flat_map(|seg| [seg.start, (seg.start.0 + seg.dx, seg.start.1 + seg.dy)])
+        .collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
+    if points.len() < 3 {
+        return None;
+    }
+    // 单调链凸包（逆时针，不含共线点）
+    let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let mut hull: Vec<(f64, f64)> = Vec::with_capacity(points.len() * 2);
+    for pass in 0..2 {
+        let start = hull.len();
+        let iter: Box<dyn Iterator<Item = &(f64, f64)>> = if pass == 0 {
+            Box::new(points.iter())
+        } else {
+            Box::new(points.iter().rev())
+        };
+        for &p in iter {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 1e-12
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    if hull.len() < 3 {
+        return None;
+    }
+    if hull.len() > MAX_FRAMING_OUTLINE_POINTS {
+        let mut closed = hull.clone();
+        closed.push(hull[0]);
+        let simplified = crate::trace::simplify_closed(&closed, 0.1).ok()?;
+        hull = simplified[..simplified.len() - 1].to_vec();
+        if hull.len() > MAX_FRAMING_OUTLINE_POINTS || hull.len() < 3 {
+            return None;
+        }
+    }
+    Some(hull)
+}
+
+/// 走边框轮廓最多几个点。
+pub const MAX_FRAMING_OUTLINE_POINTS: usize = 256;
+
+/// 沿多边形走边框（橡皮筋）：从第一个点出发绕一圈回到起点，结尾回到 (0,0)。`power` 0 不出光。
+pub fn generate_outline_framing_gcode(
+    points: &[(f64, f64)],
+    feed_rate: i32,
+    power: i32,
+) -> Result<String, &'static str> {
+    if points.len() < 3 || points.len() > MAX_FRAMING_OUTLINE_POINTS {
+        return Err("framing outline needs 3..=256 points");
+    }
+    if points.iter().any(|p| !p.0.is_finite() || !p.1.is_finite()) {
+        return Err("framing coordinates must be finite");
+    }
+    if feed_rate < 1 || power < 0 {
+        return Err("invalid framing parameters");
+    }
+    let mut lines = vec![
+        "; Generated by laser-core (Framing Preview, outline)".to_owned(),
+        "G21".into(),
+        "G90".into(),
+        "G94".into(),
+        "G17".into(),
+        "M5 S0".into(),
+        format!("G0 X{:.3} Y{:.3} F3000", points[0].0, points[0].1),
+    ];
+    if power > 0 {
+        lines.push(format!("M4 S{power}"));
+    }
+    for (index, p) in points
+        .iter()
+        .skip(1)
+        .chain(std::iter::once(&points[0]))
+        .enumerate()
+    {
+        if index == 0 {
+            lines.push(format!("G1 X{:.3} Y{:.3} F{feed_rate}", p.0, p.1));
+        } else {
+            lines.push(format!("G1 X{:.3} Y{:.3}", p.0, p.1));
+        }
+    }
+    lines.push("M5 S0".into());
+    lines.push("G0 X0 Y0 F3000".into());
+    lines.push("M2".into());
+    Ok(lines.join("\n") + "\n")
+}
+
+/// 匀速估算：每段按指令速度走满全程（不计加减速，与 Python 版一致）。
+pub fn estimate_time(text: &str, rapid_rate: f64) -> TimeEstimate {
+    let (mut laser_s, mut other_s, mut laser_d, mut other_d) = (0.0, 0.0, 0.0, 0.0);
+    for seg in motion_segments(text, rapid_rate) {
+        if seg.length == 0.0 {
+            other_s += seg.dwell;
+            continue;
+        }
+        let seconds = seg.length / seg.rate * 60.0;
+        if seg.laser {
+            laser_s += seconds;
+            laser_d += seg.length;
+        } else {
+            other_s += seconds;
+            other_d += seg.length;
+        }
+    }
+    summarize(laser_s, other_s, laser_d, other_d)
+}
+
+/// 机器运动参数（2026-11-16，对齐 LightBurn 按加速度估算工时）：GRBL `$110/$111`（最大速度）、
+/// `$120/$121`（加速度）、`$11`（转角偏差），或 FluidNC `max_rate_mm_per_min` / `acceleration_mm_per_sec2`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionProfile {
+    /// `G0` 快移速度（mm/min）
+    pub rapid_mm_per_min: f64,
+    pub accel_x_mm_s2: f64,
+    pub accel_y_mm_s2: f64,
+    /// 各轴最大速度（mm/min），没有时不限
+    pub max_rate_x_mm_per_min: Option<f64>,
+    pub max_rate_y_mm_per_min: Option<f64>,
+    /// 转角偏差（mm，GRBL `$11`，默认 0.01）
+    pub junction_deviation_mm: f64,
+}
+
+/// 没读到机器参数时假设的加速度（mm/s²），与自动过扫描一致。
+pub const DEFAULT_ACCELERATION_MM_S2: f64 = 1000.0;
+
+impl Default for MotionProfile {
+    fn default() -> Self {
+        Self {
+            rapid_mm_per_min: 3000.0,
+            accel_x_mm_s2: DEFAULT_ACCELERATION_MM_S2,
+            accel_y_mm_s2: DEFAULT_ACCELERATION_MM_S2,
+            max_rate_x_mm_per_min: None,
+            max_rate_y_mm_per_min: None,
+            junction_deviation_mm: 0.01,
+        }
+    }
+}
+
+/// 按 GRBL 规划器估算工时：每段梯形加减速，相邻两段的衔接速度按转角偏差公式限速，
+/// 前后两遍扫描保证每段都能在下一段的限速前减下来；M3/M4/M5 切换与 G4 处停住。
+/// 扫描填充这种大量短行、来回掉头的刀路，匀速估算会明显偏短。
+pub fn estimate_time_with(text: &str, profile: &MotionProfile) -> TimeEstimate {
+    let positive = |v: f64, fallback: f64| {
+        if v.is_finite() && v > 0.0 {
+            v
+        } else {
+            fallback
+        }
+    };
+    let ax = positive(profile.accel_x_mm_s2, DEFAULT_ACCELERATION_MM_S2);
+    let ay = positive(profile.accel_y_mm_s2, DEFAULT_ACCELERATION_MM_S2);
+    let jd = positive(profile.junction_deviation_mm, 0.01);
+    let rapid = positive(profile.rapid_mm_per_min, 3000.0);
+    let segments = motion_segments(text, rapid);
+    let n = segments.len();
+    // 每段：单位方向、加速度、巡航速度（mm/s）
+    let mut unit = Vec::with_capacity(n);
+    let mut accel = Vec::with_capacity(n);
+    let mut cruise = Vec::with_capacity(n);
+    for seg in &segments {
+        if seg.length == 0.0 {
+            unit.push((0.0, 0.0));
+            accel.push(ax.min(ay));
+            cruise.push(0.0);
+            continue;
+        }
+        let chord = seg.dx.hypot(seg.dy);
+        let u = if chord > 0.0 {
+            (seg.dx / chord, seg.dy / chord)
+        } else {
+            (1.0, 0.0)
+        };
+        let limit = |a_axis: f64, component: f64| {
+            if component.abs() > 1e-9 {
+                a_axis / component.abs()
+            } else {
+                f64::INFINITY
+            }
+        };
+        let a = limit(ax, u.0).min(limit(ay, u.1));
+        let mut v = seg.rate / 60.0;
+        if let Some(max) = profile.max_rate_x_mm_per_min.filter(|m| *m > 0.0) {
+            v = v.min(limit(max / 60.0, u.0));
+        }
+        if let Some(max) = profile.max_rate_y_mm_per_min.filter(|m| *m > 0.0) {
+            v = v.min(limit(max / 60.0, u.1));
+        }
+        unit.push(u);
+        accel.push(if a.is_finite() { a } else { ax.min(ay) });
+        cruise.push(v);
+    }
+    // 每段入口的最大速度：衔接转角限速、两段巡航速度都不能超
+    let mut entry = vec![0.0_f64; n + 1];
+    for i in 1..n {
+        if segments[i].stop_before || segments[i].length == 0.0 || segments[i - 1].length == 0.0 {
+            continue;
+        }
+        let (u0, u1) = (unit[i - 1], unit[i]);
+        let cos_theta = -(u0.0 * u1.0 + u0.1 * u1.1);
+        let junction = if cos_theta > 0.999_999 {
+            0.0
+        } else if cos_theta < -0.999_999 {
+            f64::INFINITY
+        } else {
+            let sin_half = (0.5 * (1.0 - cos_theta)).sqrt();
+            (accel[i].min(accel[i - 1]) * jd * sin_half / (1.0 - sin_half)).sqrt()
+        };
+        entry[i] = junction.min(cruise[i]).min(cruise[i - 1]);
+    }
+    if n > 0 && segments[0].stop_before {
+        entry[0] = 0.0;
+    }
+    // 倒着扫：每段入口速度不能高到在本段内减不到出口速度（最后停住）
+    for i in (0..n).rev() {
+        let reachable = (entry[i + 1].powi(2) + 2.0 * accel[i] * segments[i].length).sqrt();
+        entry[i] = entry[i].min(reachable);
+    }
+    // 正着扫：每段出口速度不能高过从入口加速所能达到的
+    for i in 0..n {
+        let reachable = (entry[i].powi(2) + 2.0 * accel[i] * segments[i].length).sqrt();
+        entry[i + 1] = entry[i + 1].min(reachable);
+    }
+    let (mut laser_s, mut other_s, mut laser_d, mut other_d) = (0.0, 0.0, 0.0, 0.0);
+    for (i, seg) in segments.iter().enumerate() {
+        if seg.length == 0.0 {
+            other_s += seg.dwell;
+            continue;
+        }
+        let (v0, v1, vc, a, len) = (entry[i], entry[i + 1], cruise[i], accel[i], seg.length);
+        let accel_d = (vc * vc - v0 * v0) / (2.0 * a);
+        let decel_d = (vc * vc - v1 * v1) / (2.0 * a);
+        let seconds = if accel_d + decel_d <= len {
+            (vc - v0) / a + (vc - v1) / a + (len - accel_d - decel_d) / vc
+        } else {
+            // 到不了巡航速度：三角形速度曲线
+            let peak = ((2.0 * a * len + v0 * v0 + v1 * v1) / 2.0).sqrt();
+            (peak - v0) / a + (peak - v1) / a
+        };
+        if seg.laser {
+            laser_s += seconds;
+            laser_d += len;
+        } else {
+            other_s += seconds;
+            other_d += len;
+        }
+    }
+    summarize(laser_s, other_s, laser_d, other_d)
 }
 
 /// 检测 G-code 中声明的功率标尺（默认为 1000.0）
@@ -1501,6 +1814,112 @@ M5
 
         options.overscan_mm = f64::NAN;
         assert!(write_raster(&plan, 2, 4, &options).is_err());
+    }
+
+    #[test]
+    fn acceleration_aware_estimate_is_slower_for_short_back_and_forth_rows() {
+        // 一行 100 mm 长直线：加减速只占两头，与匀速估算接近
+        let long = "G21 G90 M4 S0\nG1 X100 Y0 S500 F6000\nM5";
+        // 快移 6000 mm/min（GRBL 里加工速度也不能超过它）
+        let flat = estimate_time(long, 6000.0);
+        let profile = MotionProfile {
+            rapid_mm_per_min: 6000.0,
+            ..MotionProfile::default()
+        };
+        let planned = estimate_time_with(long, &profile);
+        assert!((flat.estimated_seconds - 1.0).abs() < 0.05, "{flat:?}");
+        // 100 mm/s、a=1000：加速与减速各 0.1 s、各 5 mm，巡航 90 mm 0.9 s，共 1.1 s
+        assert!(
+            (planned.estimated_seconds - 1.1).abs() < 0.05,
+            "{planned:?}"
+        );
+
+        // 100 行 2 mm 的来回扫描：每行都要掉头停住，匀速估算严重偏短
+        let mut rows = String::from("G21 G90 M4 S0\n");
+        for i in 0..100 {
+            let x = if i % 2 == 0 { 2 } else { 0 };
+            rows.push_str(&format!(
+                "G1 X{x} Y{} S500 F6000\nG0 Y{}\n",
+                i as f64 * 0.1,
+                (i + 1) as f64 * 0.1
+            ));
+        }
+        rows.push_str("M5\n");
+        let flat = estimate_time(&rows, 6000.0);
+        let planned = estimate_time_with(&rows, &profile);
+        assert!(
+            planned.estimated_seconds > flat.estimated_seconds * 2.0,
+            "{flat:?} vs {planned:?}"
+        );
+        // 出光距离两者相同
+        assert_eq!(flat.laser_distance_mm, planned.laser_distance_mm);
+
+        // 加速度越大越快；轴最大速度封顶会变慢
+        let fast = estimate_time_with(
+            &rows,
+            &MotionProfile {
+                accel_x_mm_s2: 5000.0,
+                accel_y_mm_s2: 5000.0,
+                ..profile
+            },
+        );
+        assert!(fast.estimated_seconds < planned.estimated_seconds);
+        let capped = estimate_time_with(
+            long,
+            &MotionProfile {
+                max_rate_x_mm_per_min: Some(3000.0),
+                ..profile
+            },
+        );
+        assert!(
+            capped.estimated_seconds > estimate_time_with(long, &profile).estimated_seconds * 1.5,
+            "{capped:?}"
+        );
+
+        // 直线上连续的共线小段不减速；90° 转角要减速
+        let straight = "G21 G90 M4 S0\nG1 X50 Y0 S500 F6000\nG1 X100 Y0\nM5";
+        assert!((estimate_time_with(straight, &profile).estimated_seconds - 1.1).abs() < 0.05);
+        let corner = "G21 G90 M4 S0\nG1 X50 Y0 S500 F6000\nG1 X50 Y50\nM5";
+        assert!(estimate_time_with(corner, &profile).estimated_seconds > 1.15);
+
+        // 停顿照算
+        let dwell = "G21 G90 M4 S0\nG4 P2\nM5";
+        assert_eq!(estimate_time_with(dwell, &profile).estimated_seconds, 2.0);
+    }
+
+    #[test]
+    fn burn_hull_follows_lit_moves_only_and_outline_framing_closes() {
+        // 一个三角形出光，两头还有关光的过扫描滑行：凸包只取出光点，以激光头起点为原点（G92）
+        let text = "G21\nG90\nG92 X10 Y10 Z0\nM4 S0\nG0 X-5 Y0\nG1 X0 Y0 S0 F1000\nG1 X20 Y0 S500\nG1 X10 Y15 S500\nG1 X0 Y0 S500\nG1 X-5 Y0 S0\nM5\nM2\n";
+        let hull = burn_hull(text).unwrap();
+        assert_eq!(hull.len(), 3, "{hull:?}");
+        for corner in [(-10.0, -10.0), (10.0, -10.0), (0.0, 5.0)] {
+            assert!(
+                hull.iter()
+                    .any(|p| (p.0 - corner.0).abs() < 1e-9 && (p.1 - corner.1).abs() < 1e-9),
+                "{hull:?} 缺 {corner:?}"
+            );
+        }
+        // 圆弧只知道端点：不给轮廓，退回矩形
+        assert!(burn_hull("G21\nM4 S0\nG1 X10 Y0 S500 F600\nG2 X0 Y0 I-5 J0\nM5").is_none());
+        assert!(
+            burn_hull("G21\nM4 S0\nG1 X10 Y0 S500 F600\nM5").is_none(),
+            "一条线没有面积"
+        );
+
+        let framing = generate_outline_framing_gcode(&hull, 2000, 0).unwrap();
+        let moves: Vec<&str> = framing.lines().filter(|l| l.starts_with("G1 ")).collect();
+        assert_eq!(moves.len(), 3, "{framing}");
+        assert!(moves[0].contains("F2000"));
+        assert!(!framing.contains("M4"), "功率 0 不出光");
+        assert!(framing.trim_end().ends_with("G0 X0 Y0 F3000\nM2"));
+        let lit = generate_outline_framing_gcode(&hull, 2000, 10).unwrap();
+        assert!(lit.contains("M4 S10"));
+        assert!(generate_outline_framing_gcode(&hull[..2], 2000, 0).is_err());
+        assert!(
+            generate_outline_framing_gcode(&[(0.0, 0.0), (f64::NAN, 1.0), (1.0, 1.0)], 2000, 0)
+                .is_err()
+        );
     }
 
     #[test]

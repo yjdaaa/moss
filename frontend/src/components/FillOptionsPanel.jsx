@@ -80,7 +80,7 @@ export default function FillOptionsPanel({ idPrefix, settings, onChange, withFil
             </label>
             {s.overscanAuto ? (
               <label>
-                <span>机器加速度（mm/s²，留空按 1000）</span>
+                <span>机器加速度（mm/s²，留空用连接时读到的值）</span>
                 <input
                   id={id("fill-accel")}
                   type="number"
@@ -90,7 +90,7 @@ export default function FillOptionsPanel({ idPrefix, settings, onChange, withFil
                   value={s.accelerationMmS2}
                   placeholder="1000"
                   onChange={(e) => set("accelerationMmS2", e.target.value)}
-                  title="GRBL 的 $120 / $121；越小需要的过扫描越长"
+                  title="GRBL 的 $120 / $121，也用于估算工时；留空时用连接检查读到的值，都没有按 1000"
                 />
               </label>
             ) : (

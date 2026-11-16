@@ -15,6 +15,7 @@ import {
   normalizeDrawMode,
   parseImportedSceneJson,
   readDrawDefaultForm,
+  selectedElementIds,
 } from "../src/drawConnection.js";
 
 test("画板连接：网口与串口各自只带本方式的字段", () => {
@@ -101,6 +102,11 @@ test("走边框确认文案与载荷：统一附带 relative_to_head 与正式�
   assert.equal(payload.relative_to_head, true, "画板走边框必须与 G92 X0 Y0 正式雕刻共用当前激光头起点");
   assert.equal(payload.power, 0);
   assert.equal(buildDrawFramingPayload(form, 80, 50, true).power, 1);
+  // 橡皮筋：带轮廓时附带 outline，确认文案写明沿外轮廓
+  const outline = [[0, 0], [80, 0], [40, 50]];
+  assert.deepEqual(buildDrawFramingPayload(form, 80, 50, false, outline).outline, outline);
+  assert.equal(buildDrawFramingPayload(form, 80, 50, false, null).outline, undefined);
+  assert.match(framingConfirmText(form, 80, 50, false, 3), /图形外轮廓（3 个点/);
 
   const serialForm = { connection_mode: "serial", port: "COM5", baudrate: "115200" };
   assert.equal(
@@ -149,4 +155,10 @@ test("画板预览过期检测与场景 JSON 导入校验", () => {
   assert.equal(ok.error, undefined);
   assert.equal(ok.elements.length, 1);
   assert.deepEqual(ok.appState, { gridSize: 20, viewBackgroundColor: "#ffffff" });
+});
+
+test("只刻选中的图形：取 Excalidraw 选区里为 true 的 id，排序去空", () => {
+  assert.deepEqual(selectedElementIds({ selectedElementIds: { b: true, a: true, c: false, "": true } }), ["a", "b"]);
+  assert.deepEqual(selectedElementIds({}), []);
+  assert.deepEqual(selectedElementIds(null), []);
 });
