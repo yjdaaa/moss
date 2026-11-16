@@ -410,8 +410,21 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | network_transport | string | 否 | `telnet` |
 | network_http_port、network_telnet_port、network_timeout | int、int、float | 否 | 设置默认 |
 | wait_for_response、run_in_background | bool | 否 | true |
+| test_type | string | 否 | `matrix`（默认，对齐 LightBurn Material Test）/ `interval`（对齐 Interval Test）；其他值 400 `invalid_test_type`。2026-11-16 起 |
+| x_axis、y_axis | string | 否 | 列 / 行参数：`power`（默认列）、`speed`（默认行）、`interval`、`passes`；两轴相同或非法值 400 `invalid_axis`；`interval` 只用于光栅填充（`laser_mode=engrave` 且 `engraving_mode=raster`），否则 400 `axis_not_supported`。`test_type=interval` 时忽略 |
+| interval_min_mm、interval_max_mm | float | 否 | 0.08、0.16；线距轴或线距测试使用，须在 0.01..2 且 min ≤ max |
+| passes_min、passes_max | int | 否 | `passes`、`passes`+2（不超过 10）；遍数轴使用，须在 1..10 且 min ≤ max |
+| power、speed | int | 否 | 不在轴上时的固定功率（0..1000）/ 速度（>0）；默认材料推荐值（无推荐 400 / 1500） |
+| line_interval_mm | float | 否 | 不在轴上时的填充线距（0.01..2）；光栅填充默认取材料推荐的 `pixel_size_mm`，轮廓 / 切割不用 |
+| run_order | string | 否 | `risk`（默认，从烧蚀风险最低到最高）/ `grid`（旧的网格顺序）；其他值 400 |
+| labels | bool | 否 | true：用内置单线字体刻行列参数值与轴标题 |
+| label_power、label_speed、label_height_mm | int、int、float | 否 | 默认风险最低那格的功率（不超过 300）、该格速度（不低于 1500 mm/min）、3 mm（线距测试 2.5 mm）；功率 0..1000、速度 >0、字高 1..10，否则 400 |
+| cell_size_mm、cell_gap_mm | float | 否 | 12、4（线距测试 8、4）；1..50、0..50（上表 Python 时代的 `cell_size_mm/gap_mm` 默认值已不适用） |
+| surface | bool | 否 | 为“表面通用”条目标定（只允许雕刻，切割 400）；记录 `surface_entry=true`，选格时写回 `surface` 条目 |
 
-Rust 实现：只生成不出光。区间字段缺省或为 -1 时以材料推荐参数为中心取 ±40%；`rows/columns` 限 1..25。成功 `result` 为完整 calibration 记录：`calibration_id`（`cal-<ts>-<seq>`）、`status=prepared`、`cells[]`（`cell_number/id/row/column/x_mm/y_mm/size_mm/power/speed/passes`）、`cell_count`、`gcode_file`、`gcode_sha256`、`confirmation_snapshot`、`time_estimate`、`web.gcode_download_url`。记录写入 `calibrations` 表（无 SQLite 时写内存表）。
+Rust 实现：只生成不出光。区间字段缺省或为 -1 时以材料推荐参数为中心取 ±40%；`rows/columns` 限 1..25（线距测试固定 `rows=1`，`columns` 为方块数 2..20、默认 9，传其他 `rows` 400）。成功 `result` 为完整 calibration 记录：`calibration_id`（`cal-<ts>-<seq>`）、`status=prepared`、`cells[]`（`cell_number/id/row/column/x_mm/y_mm/size_mm/power/speed/passes/pixel_size_mm/line_interval_mm`，2026-11-16 起另有 `run_index`（第几个加工）、`x_label`/`y_label`（刻在样板上的值，功率为百分比））、`cell_count`、`width_mm`/`height_mm`（含标注的整体外框）、`gcode_file`、`gcode_sha256`、`confirmation_snapshot`、`time_estimate`、`web.gcode_download_url`，以及 `test_type`、`x_axis`、`y_axis`、`axes{x,y:{param,count,min,max,unit}}`、`fixed{power,speed,passes,line_interval_mm}`、`interval_min_mm/max`、`passes_min/max`、`cell_size_mm`、`cell_gap_mm`、`run_order`、`run_sequence`（按加工顺序的 `cell_number`）、`labels{enabled,height_mm,power,speed}`、`surface_entry`。`power_min/max`、`speed_min/max` 在该参数不在轴上时等于固定值。记录写入 `calibrations` 表（无 SQLite 时写内存表）。
+
+**材料测试 / 线距测试（2026-11-16，用户决定对齐 LightBurn，“直接一起修改完在git推送”）**：`laser_core::material::material_test_cells` 按 `MaterialTestSpec` 生成单元格（`cell_number` 仍按行优先，`select-cell` 不变），`risk_order` 按单位面积能量 功率 × 遍数 ÷（速度 × 线距）从低到高排加工顺序（高速、低功率、宽线距、少遍数先刻），`layout_material_test` 在网格上方刻列值与列标题、左侧刻行值与竖排行标题（只标多于 1 格的方向），整体以激光头位置为左下角、坐标全 ≥ 0；`build_material_test_gcode` 先刻标注再逐格加工，单元格刀路写法与旧版相同，刀路超过 200 万行 400。`run_order=grid, labels=false` 时切割 / 轮廓矩阵的 G-code 与旧版逐字节相同；光栅矩阵的填充线距改为材料推荐值（旧版固定 0.2 mm）。线距测试是一排 8 mm 填充方块（默认 0.08 ~ 0.16 mm、9 块），每块上方刻线距值，目标是相邻扫描线刚好相接。确认、存储、发送门禁与普通矩阵完全相同。
 
 ### 3.8 `/api/material-lab/send`
 
@@ -430,7 +443,7 @@ Rust 实现：与 `/api/workflow confirm_send` 同一套门禁——记录不存
 
 `calibration_id` 必填；`cell_number` int 默认 0；`thickness_mm` float 默认 0.0；`material`、`laser_mode`、`engraving_mode`、`notes` string 默认 ""。
 
-Rust 实现：`cell_number` 必须在 1..cell_count；缺省的 material/thickness/laser_mode/engraving_mode 从 calibration 记录回填；把单元格的 `power→laser_max_power`、`speed→feed_rate`、`passes`（及 `pixel_size_mm`）以 `source=calibration` 经 `manage(save)` 写入材料库文件与 SQLite，并在记录上写 `selected_cell`。成功 `result`：`{calibration_id, cell_number, selected_cell, materials, speech}`。
+Rust 实现：`cell_number` 必须在 1..cell_count；缺省的 material/thickness/laser_mode/engraving_mode 从 calibration 记录回填；把单元格的 `power→laser_max_power`、`speed→feed_rate`、`passes`（及线距 `line_interval_mm`→`pixel_size_mm`，材料库里 `pixel_size_mm` 即填充扫描线距 / 光栅点距）以 `source=calibration`（线距测试为 `interval_test`）经 `manage(save)` 写入材料库文件与 SQLite，并在记录上写 `selected_cell`（2026-11-16 起含 `line_interval_mm`、`surface`）。2026-11-16 起可选 `title`（条目标题，同 `manage(save)`）与 `surface`（写回表面通用条目；缺省时跟随记录的 `surface_entry`，切割 400）；默认 `notes` 写明测试类型与该格功率、速度、遍数、线距。成功 `result`：`{calibration_id, cell_number, selected_cell, materials, speech}`。
 
 ### 3.10 `/api/material-lab/manage`
 
@@ -440,8 +453,19 @@ Rust 实现：`cell_number` 必须在 1..cell_count；缺省的 material/thickne
 |---|---|---|
 | export | 无 | 工具透传；`version` 恒为整数 1，`materials` 含内置预设（db-schema.md §3.6.1、§3.6.2） |
 | import | `library_json \| params_json`（支持直接库对象或 `{library}` 导出包装）、`import_mode`（`replace` 默认 / `merge` 合并保留现有其他材料） | 工具 result + `materials` 全量快照 + `backup_path` + `import_mode`。`version` 校验严格：只接受 JSON 数值 `1`/`1.0`；入库前对材料名与别名执行 `validate_material_safety`、校验厚度 >0 与 `ParamCell::validate(1000, 100)`，并将非 1000 `power_scale`（如 255）等比折算归一为 1000 标尺。`backup_path` 只返回文件名 |
-| delete | `material` 必填、`thickness_mm` float（数值等价匹配 `"2"` / `"2.0"`；缺省或 `0` 删除整材料）、`laser_mode` 默认 engrave、`engraving_mode` 默认 raster、`confirmed` **必须 true** 否则 400 `删除当前参数需要 confirmed=true` | 工具 result + `materials` |
-| save | delete 的字段 + `laser_min_power` 0、`laser_max_power` 800、`feed_rate` 1200、`travel_rate` 设置默认、`pixel_size_mm` 0.1、`threshold` -1、`passes` 1（数值字段在入库边界统一转为数字，无法转换或越界返回 400；材料名与别名均经 `validate_material_safety` 校验）、`aliases`（数组或中英文逗号分隔，Overwrite 时同步清理已移除旧别名）、`notes`、`source` 默认 manual、`prune_missing_thicknesses`（可选布尔，编辑多厚度规格对象时同步删除未在本次列表中的旧厚度）。**原子批量扩展（D9 已拍板）**：除单厚度参数外，允许传入 `thicknesses` 对象/列表进行多厚度一次性原子保存，后端在单个数据库事务内完成全部更新，失败整体回滚；禁止前端通过循环发送 N 次 HTTP 请求进行多厚度保存 | 工具 result + `materials` |
+| delete | `material` 必填、`thickness_mm` float（数值等价匹配 `"2"` / `"2.0"`；缺省或 `0` 删除整材料；`surface:true` 或 `thickness_mm:"surface"` 只删表面通用条目，没有时 400）、`laser_mode` 默认 engrave、`engraving_mode` 默认 raster、`confirmed` **必须 true** 否则 400 `删除当前参数需要 confirmed=true` | 工具 result + `materials` |
+| save | delete 的字段 + `surface`（bool，2026-11-16：存进表面通用条目 `thicknesses.surface`，忽略 `thickness_mm`，只允许雕刻，切割 400；`thickness_mm:"surface"` 等价）+ `title`（可选条目标题，字符串、去首尾空白后 ≤ 60 字，否则 400）+ `laser_min_power` 0、`laser_max_power` 800、`feed_rate` 1200、`travel_rate` 设置默认、`pixel_size_mm` 0.1、`threshold` -1、`passes` 1（数值字段在入库边界统一转为数字，无法转换或越界返回 400；材料名与别名均经 `validate_material_safety` 校验）、`aliases`（数组或中英文逗号分隔，Overwrite 时同步清理已移除旧别名）、`notes`、`source` 默认 manual、`prune_missing_thicknesses`（可选布尔，编辑多厚度规格对象时同步删除未在本次列表中的旧厚度）。**原子批量扩展（D9 已拍板）**：除单厚度参数外，允许传入 `thicknesses` 对象/列表进行多厚度一次性原子保存，后端在单个数据库事务内完成全部更新，失败整体回滚；禁止前端通过循环发送 N 次 HTTP 请求进行多厚度保存 | 工具 result + `materials` |
+
+**材料库与 LightBurn Material Library 对照（2026-11-16）**：
+
+| LightBurn | MOSS | 说明 |
+|---|---|---|
+| 材料 → 厚度条目（带 Description） | 材料 → 厚度键 → `engrave.raster` / `engrave.outline` / `cut` 参数格，每格可带 `title`（条目标题，存于参数格 `extra.title`）与 `notes` | 旧库 JSON 与 SQLite 无需迁移，`title` 走现有 `extra` 列 |
+| No thickness 条目（表面雕刻） | 厚度键 `surface`（`laser_contracts::SURFACE_THICKNESS_KEY`），只存雕刻参数 | 雕刻推荐：同厚度有该模式参数 > 表面条目 > 最近厚度；切割仍要求真实厚度。`/api/ui/material-recommendation` 命中时 `match="surface"`、带 `title`；`/api/ui/material-options` 对有表面条目的材料加 `surface:true`（厚度列表不变，只有表面条目的材料在工作台下拉里不出现，需至少保存一个真实厚度） |
+| 材料测试结果写回 | `select-cell` 写回功率、速度、遍数与线距（`pixel_size_mm`） | 线距即 LightBurn Interval |
+| Load / Save / Merge `.clb` | JSON 导出、导入（`replace` / `merge`） | **不支持 `.clb`**：LightBurn 私有 XML，单位与字段（mm/s、百分比功率、图层模式）需人工换算，未做导入器 |
+| Assign（复制设置到图层）/ Link（图层跟随库条目） | 无图层模型：每次预览按当时的材料库取推荐参数，预览后参数冻结进确认快照 | 行为接近“预览时 Link、确认后 Assign”；没有可链接的图层，故 Link **不适用** |
+| 每台设备一份材料库 | 单一材料库，参数统一按 0~1000 标尺存储、发送时按设备 `$30` 换算 | 多设备分库**暂不适用**（当前一台机器的使用方式）；不同功率机器请用不同材料名或导入 / 导出切换 |
 
 ### 3.11 `/api/material-lab/recent`
 

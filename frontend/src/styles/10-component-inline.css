@@ -329,6 +329,15 @@
 .lab-field-4.lab-field-4 { width: 100%; min-width: 0; padding: 6px 6px !important; font-family: var(--ob-mono); font-size: 12px; text-align: center; appearance: textfield; -moz-appearance: textfield; }
 .lab-field-4.lab-field-4::-webkit-outer-spin-button,
 .lab-field-4.lab-field-4::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* 材料测试类型与轴参数（2026-11-16 对齐 LightBurn Material / Interval Test） */
+.lab-test-axes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 6px; align-items: end; }
+.lab-test-axes .lab-label-3 .lab-row-10,
+.lab-test-axes .lab-label-3 > input,
+.lab-axis-select.lab-axis-select { margin-top: 4px; }
+.lab-axis-select.lab-axis-select { width: 100%; min-width: 0; padding: 6px 6px; font-size: 12px; }
+.lab-test-labels { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ob-ink-2); }
+.lab-test-hint, .lab-test-legend { font-size: 11px; color: var(--ink-dim); margin-bottom: 10px; line-height: 1.4; }
+.lab-test-legend { margin-bottom: 6px; }
 .lab-row-11.lab-row-11.lab-row-11 { display: grid; grid-template-columns: minmax(110px, 1fr) auto auto; gap: 6px; margin-bottom: 12px; align-items: center; }
 .lab-field-5.lab-field-5.lab-field-5.lab-field-5 { width: 100%; min-width: 0; padding: 7px 10px; }
 .lab-row-12.lab-row-12.lab-row-12 { flex: 1; background: rgba(0,0,0,0.3); border-radius: 4px; border: 1px solid var(--line, #242b35); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px; min-height: 220px; }

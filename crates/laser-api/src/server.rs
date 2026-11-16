@@ -393,7 +393,17 @@ impl ApiService {
                                 .filter_map(|value| value.parse::<f64>().ok())
                                 .collect::<Vec<_>>();
                             thicknesses.sort_by(f64::total_cmp);
-                            serde_json::json!({"name": name, "thicknesses": thicknesses})
+                            // 表面通用条目不分厚度：不进厚度列表，只在存在时标记 surface=true
+                            // （雕刻推荐会自动回退到它；没有时不输出该字段，旧契约不变）
+                            let mut item =
+                                serde_json::json!({"name": name, "thicknesses": thicknesses});
+                            if entry
+                                .thicknesses
+                                .contains_key(laser_contracts::SURFACE_THICKNESS_KEY)
+                            {
+                                item["surface"] = serde_json::Value::Bool(true);
+                            }
+                            item
                         })
                         .collect::<Vec<_>>();
                     (200, success(serde_json::json!({"materials": materials})))

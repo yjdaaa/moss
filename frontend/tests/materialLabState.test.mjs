@@ -9,6 +9,12 @@ import {
   buildMatrixSendRequest,
   buildMatrixConfirmPrompt,
   unwrapImportedMaterialLibrary,
+  buildMatrixPreviewPayload,
+  axisOptionsForMode,
+  validateMatrixAxes,
+  cellAxisText,
+  isSurfaceKey,
+  thicknessChipLabel,
 } from "../src/materialLabState.js";
 import {
   MATERIAL_LIBRARY_CHANNEL,
@@ -135,6 +141,91 @@ test("标定矩阵模式映射、过期签名、串口/网络发送载荷与开�
   assert.match(prompt.message, /192\.168\.1\.88:2323/);
   assert.match(prompt.message, /60\.0 × 60\.0 mm/);
   assert.match(prompt.message, /边缘切割/);
+});
+
+test("材料测试载荷：默认功率×速度不变，轴参数、线距测试与表面条目按 LightBurn 对齐", () => {
+  // 默认：参数网格、列 = 功率、行 = 速度，旧字段原样保留
+  const plain = buildMatrixPreviewPayload({ material: "椴木", thickness: "3", mode: "raster", rows: 4, cols: 4,
+    powerMin: 100, powerMax: 500, speedMin: 600, speedMax: 2400 });
+  assert.deepEqual(plain.payload, {
+    material: "椴木", thickness_mm: 3, laser_mode: "engrave", engraving_mode: "raster", matrix_kind: "engrave",
+    labels: true, rows: 4, columns: 4, power_min: 100, power_max: 500, speed_min: 600, speed_max: 2400,
+    x_axis: "power", y_axis: "speed",
+  });
+
+  // 线距 × 遍数：只在用到时带对应区间
+  const axes = buildMatrixPreviewPayload({ material: "椴木", thickness: "3", mode: "raster", xAxis: "interval",
+    yAxis: "passes", intervalMin: 0.06, intervalMax: 0.12, passesMin: 1, passesMax: 3, labels: false });
+  assert.equal(axes.payload.interval_min_mm, 0.06);
+  assert.equal(axes.payload.passes_max, 3);
+  assert.equal(axes.payload.labels, false);
+  assert.equal("passes_min" in plain.payload, false);
+
+  // 两轴相同、线距用于切割都在前端就拦下
+  assert.match(buildMatrixPreviewPayload({ material: "椴木", xAxis: "speed", yAxis: "speed" }).error, /不同/);
+  assert.match(buildMatrixPreviewPayload({ material: "椴木", mode: "cut", xAxis: "interval" }).error, /线距/);
+  assert.deepEqual(axisOptionsForMode("cut").map((a) => a.id), ["power", "speed", "passes"]);
+  assert.equal(validateMatrixAxes({ xAxis: "passes", yAxis: "power", mode: "outline" }).xAxis, "passes");
+
+  // 线距测试：固定 1 行，方块数走 columns
+  const interval = buildMatrixPreviewPayload({ material: "椴木", thickness: "3", mode: "raster", testType: "interval",
+    intervalMin: 0.08, intervalMax: 0.16, intervalCount: 9 });
+  assert.equal(interval.payload.test_type, "interval");
+  assert.equal(interval.payload.rows, 1);
+  assert.equal(interval.payload.columns, 9);
+  assert.equal("x_axis" in interval.payload, false);
+  assert.match(buildMatrixPreviewPayload({ material: "椴木", mode: "outline", testType: "interval" }).error, /光栅/);
+  assert.match(buildMatrixPreviewPayload({ material: "椴木", testType: "interval", intervalMin: 0.2, intervalMax: 0.1 }).error, /线距区间/);
+
+  // 表面通用条目：带 surface=true，厚度用材料已有的数字厚度兜底；切割不允许
+  const surface = buildMatrixPreviewPayload({ material: "椴木", thickness: "surface", fallbackThickness: 5 });
+  assert.equal(surface.payload.surface, true);
+  assert.equal(surface.payload.thickness_mm, 5);
+  assert.ok(buildMatrixPreviewPayload({ material: "椴木", thickness: "surface", mode: "cut" }).error);
+  assert.equal(thicknessChipLabel("surface"), "表面通用");
+  assert.equal(thicknessChipLabel("3"), "3 mm");
+  assert.equal(isSurfaceKey(" surface "), true);
+
+  // 轴参数变化让旧矩阵过期
+  const sigA = matrixInputSignature({ material: "椴木", thickness: "3" });
+  const sigB = matrixInputSignature({ material: "椴木", thickness: "3", xAxis: "interval" });
+  assert.equal(isMatrixStale(sigA, sigB), true);
+  assert.equal(isMatrixStale(sigA, matrixInputSignature({ material: "椴木", thickness: "3" })), false);
+
+  // 单元格显示与后端刻在样板上的标注一致
+  assert.equal(cellAxisText({ x_label: "40" }, "power", "x"), "40%");
+  assert.equal(cellAxisText({ y_label: "0.10" }, "interval", "y"), "0.10");
+  assert.equal(cellAxisText({ speed: 1200 }, "speed", "x"), "F1200");
+  assert.equal(cellAxisText({ passes: 2 }, "passes", "y"), "2遍");
+
+  // 开刻确认写明轴参数、加工顺序与标注参数
+  const prompt = buildMatrixConfirmPrompt({
+    preview: { material: "椴木", thickness_mm: 3, x_axis: "interval", y_axis: "passes", run_order: "risk",
+      labels: { enabled: true, power: 200, speed: 3000 }, cell_count: 9 },
+    mode: "raster",
+    targetLabel: "<device-ip>:23",
+  });
+  assert.match(prompt.message, /列 = 线距，行 = 遍数/);
+  assert.match(prompt.message, /烧蚀风险最低/);
+  assert.match(prompt.message, /S200 · 速度 F3000/);
+  const intervalPrompt = buildMatrixConfirmPrompt({
+    preview: { test_type: "interval", interval_min_mm: 0.08, interval_max_mm: 0.16, surface_entry: true },
+    mode: "raster",
+  });
+  assert.match(intervalPrompt.message, /0\.08 ~ 0\.16 mm/);
+  assert.match(intervalPrompt.message, /表面通用/);
+});
+
+test("条目标题随参数编辑器读取，未保存时为空", () => {
+  const withTitle = resolveCellEditorValues(
+    { 椴木: { thicknesses: { surface: { engrave: { raster: { laser_max_power: 260, feed_rate: 2400, title: "浅色照片" } } } } } },
+    "椴木",
+    "surface",
+    "raster",
+  );
+  assert.equal(withTitle.title, "浅色照片");
+  assert.equal(withTitle.hasSavedCell, true);
+  assert.equal(resolveCellEditorValues({}, "", "", "raster").title, "");
 });
 
 test("导入 JSON 解包与 BroadcastChannel 跨页同步通知", () => {

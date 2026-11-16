@@ -782,8 +782,9 @@ impl ApiService {
             let Some(recommendation) = recommendation else {
                 return http_json(400, failure("读取材料推荐失败", None));
             };
-            let match_name = if (recommendation.requested_thickness_mm
-                - recommendation.matched_thickness_mm)
+            let match_name = if recommendation.surface {
+                "surface"
+            } else if (recommendation.requested_thickness_mm - recommendation.matched_thickness_mm)
                 .abs()
                 < 1e-9
             {
@@ -801,6 +802,9 @@ impl ApiService {
                 "feed_rate": recommendation.params.feed_rate,
                 "passes": recommendation.params.passes,
             });
+            if let Some(title) = recommendation.params.title() {
+                result["title"] = serde_json::Value::String(title.to_owned());
+            }
             if let Some(mode) = recommendation.engraving_mode {
                 result["engraving_mode"] = serde_json::Value::String(mode);
             }

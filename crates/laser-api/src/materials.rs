@@ -153,8 +153,68 @@ fn normalize_and_validate_cell(
     if cell_scale != 1000 {
         *cell = cell.rescaled_to(1000.0);
     }
+    validate_entry_title(cell, material, thickness_key)?;
     cell.validate(1000, 100)
         .map_err(|err| format!("材料 {material} ({thickness_key}mm) 参数超出允许范围: {err}"))
+}
+
+/// 条目标题（`extra.title`）只能是不超过 60 字的字符串；空串视为没有标题。
+fn validate_entry_title(
+    cell: &mut laser_contracts::ParamCell,
+    material: &str,
+    thickness_key: &str,
+) -> Result<(), String> {
+    match cell.extra.get("title") {
+        None | Some(serde_json::Value::Null) => {
+            cell.extra.remove("title");
+            Ok(())
+        }
+        Some(serde_json::Value::String(raw)) => {
+            let trimmed = raw.trim().to_owned();
+            if trimmed.chars().count() > laser_contracts::MATERIAL_ENTRY_TITLE_MAX_CHARS {
+                return Err(format!(
+                    "材料 {material} ({thickness_key}) 的条目标题不能超过 {} 个字",
+                    laser_contracts::MATERIAL_ENTRY_TITLE_MAX_CHARS
+                ));
+            }
+            cell.set_title(Some(&trimmed));
+            Ok(())
+        }
+        Some(_) => Err(format!(
+            "材料 {material} ({thickness_key}) 的条目标题必须是文字"
+        )),
+    }
+}
+
+/// 请求是否指向“表面通用”条目：`surface=true`，或 `thickness_mm` 直接写 `"surface"`。
+pub(crate) fn is_surface_request(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    parse_bool(object.get("surface"), false)
+        || object
+            .get("thickness_mm")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|v| v.trim() == laser_contracts::SURFACE_THICKNESS_KEY)
+}
+
+/// 厚度键：大于 0 的数字，或“表面通用”键 `surface`（只能存雕刻参数）。
+fn validate_thickness_key(
+    material: &str,
+    key: &str,
+    entry: &laser_contracts::ThicknessEntry,
+) -> Result<Option<f64>, String> {
+    if key == laser_contracts::SURFACE_THICKNESS_KEY {
+        if entry.cut.is_some() {
+            return Err(format!(
+                "材料 {material} 的表面通用条目只能存雕刻参数，切割必须按真实厚度保存"
+            ));
+        }
+        return Ok(None);
+    }
+    match key.trim().parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => Ok(Some(value)),
+        _ => Err(format!(
+            "材料 {material} 的厚度 `{key}` 必须是大于 0 的数字（或 surface 表示表面通用条目）"
+        )),
+    }
 }
 
 fn normalize_and_validate_library(
@@ -176,16 +236,7 @@ fn normalize_and_validate_library(
             validate_material_safety(alias)?;
         }
         for (thick_key, thick_entry) in &mut entry.thicknesses {
-            let Ok(thick_val) = thick_key.trim().parse::<f64>() else {
-                return Err(format!(
-                    "材料 {trimmed} 的厚度 `{thick_key}` 必须是大于 0 的数字"
-                ));
-            };
-            if !thick_val.is_finite() || thick_val <= 0.0 {
-                return Err(format!(
-                    "材料 {trimmed} 的厚度 `{thick_key}` 必须是大于 0 的数字"
-                ));
-            }
+            validate_thickness_key(trimmed, thick_key, thick_entry)?;
             if let Some(cut) = &mut thick_entry.cut {
                 normalize_and_validate_cell(cut, lib_scale, trimmed, thick_key)?;
             }
@@ -492,13 +543,30 @@ pub(crate) fn handle_material_manage(
                 .get("material")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
+            let surface = is_surface_request(object);
             let thickness = object.get("thickness_mm").and_then(|value| value.as_f64());
             let thickness_key = thickness.map(|value| value.to_string()).unwrap_or_default();
             let Some(entry) = library.materials.get_mut(material) else {
                 return http_json(400, failure("材料不存在", None));
             };
             let mut removed_keys = Vec::new();
-            let remove_whole_material = if thickness.is_none() || thickness == Some(0.0) {
+            let remove_whole_material = if surface {
+                // 只删表面通用条目；不能因为没带数字厚度就误删整个材料
+                if entry
+                    .thicknesses
+                    .remove(laser_contracts::SURFACE_THICKNESS_KEY)
+                    .is_none()
+                {
+                    return http_json(400, failure("该材料没有表面通用条目", None));
+                }
+                removed_keys.push(laser_contracts::SURFACE_THICKNESS_KEY.to_owned());
+                if entry.thicknesses.is_empty() {
+                    library.materials.remove(material);
+                    true
+                } else {
+                    false
+                }
+            } else if thickness.is_none() || thickness == Some(0.0) {
                 library.materials.remove(material);
                 true
             } else {
@@ -628,25 +696,11 @@ pub(crate) fn handle_material_manage(
                 };
                 let mut incoming_nums = Vec::with_capacity(parsed_thicknesses.len());
                 for (k, v) in &mut parsed_thicknesses {
-                    let Ok(num) = k.trim().parse::<f64>() else {
-                        return http_json(
-                            400,
-                            failure(
-                                format!("材料 {material} 的厚度 `{k}` 必须是大于 0 的数字"),
-                                None,
-                            ),
-                        );
-                    };
-                    if !num.is_finite() || num <= 0.0 {
-                        return http_json(
-                            400,
-                            failure(
-                                format!("材料 {material} 的厚度 `{k}` 必须是大于 0 的数字"),
-                                None,
-                            ),
-                        );
+                    match validate_thickness_key(material, k, v) {
+                        Ok(Some(num)) => incoming_nums.push(num),
+                        Ok(None) => {}
+                        Err(error) => return http_json(400, failure(error, None)),
                     }
-                    incoming_nums.push(num);
                     if let Some(cut) = &mut v.cut
                         && let Err(err) = normalize_and_validate_cell(cut, 1000, material, k)
                     {
@@ -676,7 +730,9 @@ pub(crate) fn handle_material_manage(
                         .thicknesses
                         .keys()
                         .filter(|existing_k| {
-                            !parsed_thicknesses.contains_key(*existing_k)
+                            // 表面通用条目不属于厚度列表，编辑厚度规格时不随之删除
+                            existing_k.as_str() != laser_contracts::SURFACE_THICKNESS_KEY
+                                && !parsed_thicknesses.contains_key(*existing_k)
                                 && !existing_k.trim().parse::<f64>().is_ok_and(|ev| {
                                     incoming_nums.iter().any(|nv| (ev - nv).abs() <= 1e-9)
                                 })
@@ -772,15 +828,18 @@ pub(crate) fn handle_material_manage(
                         .collect()
                 })
                 .unwrap_or_default();
-            let target_thicknesses = if !array_thicknesses.is_empty() {
-                array_thicknesses
+            let to_surface = is_surface_request(object);
+            let target_thicknesses: Vec<String> = if to_surface {
+                vec![laser_contracts::SURFACE_THICKNESS_KEY.to_owned()]
+            } else if !array_thicknesses.is_empty() {
+                array_thicknesses.iter().map(f64::to_string).collect()
             } else {
                 let thickness = parse_float(object.get("thickness_mm"), "thickness_mm", 0.0).ok();
                 let Some(thickness) = thickness.filter(|value| value.is_finite() && *value > 0.0)
                 else {
                     return http_json(400, failure("thickness_mm 必须是大于 0 的数字", None));
                 };
-                vec![thickness]
+                vec![thickness.to_string()]
             };
             let mode = object
                 .get("laser_mode")
@@ -840,6 +899,15 @@ pub(crate) fn handle_material_manage(
                 updated_at: Some(unix_seconds() as f64),
                 extra: std::collections::BTreeMap::new(),
             };
+            let mut cell = cell;
+            match object.get("title") {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(title)) => cell.set_title(Some(title)),
+                Some(_) => return http_json(400, failure("title 必须是文字", None)),
+            }
+            if let Err(error) = validate_entry_title(&mut cell, material, "-") {
+                return http_json(400, failure(error, None));
+            }
             if cell.validate(1000, 100).is_err() {
                 return http_json(400, failure("材料参数超出允许范围", None));
             }
@@ -848,8 +916,14 @@ pub(crate) fn handle_material_manage(
             {
                 return http_json(400, failure("laser_mode 或 engraving_mode 无效", None));
             }
+            if to_surface && mode == "cut" {
+                return http_json(
+                    400,
+                    failure("表面通用条目只能存雕刻参数，切割必须按真实厚度保存", None),
+                );
+            }
             for th in target_thicknesses {
-                let thickness_entry = entry.thicknesses.entry(th.to_string()).or_default();
+                let thickness_entry = entry.thicknesses.entry(th).or_default();
                 if mode == "cut" {
                     thickness_entry.cut = Some(cell.clone());
                 } else if engraving == "outline" {

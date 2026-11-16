@@ -2,6 +2,7 @@ use super::*;
 
 mod golden;
 mod material_routes;
+mod material_test_routes;
 mod preview;
 mod registration;
 mod send_gate;

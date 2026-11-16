@@ -20,6 +20,11 @@ pub use approval::{
 
 pub const MATERIAL_LIBRARY_VERSION: u32 = 1;
 pub const DEFAULT_POWER_SCALE: u32 = 1000;
+/// 材料库里不分厚度的“表面通用”条目键（2026-11-16，对齐 LightBurn 的 No thickness 条目）：
+/// 只存雕刻参数，任何厚度在同厚度没有该模式参数时优先用它；切割必须按真实厚度。
+pub const SURFACE_THICKNESS_KEY: &str = "surface";
+/// 参数条目标题（对齐 LightBurn 条目的 Description / Title）的最大字符数。
+pub const MATERIAL_ENTRY_TITLE_MAX_CHARS: usize = 60;
 
 /// 进程内共享的 `settings.json` 读-改-写互斥锁（`laser-api` 与 `moss-voice` 共用），
 /// 避免 `/api/settings` 与语音中心并发保存时互相覆盖对方刚写入的字段。
@@ -503,6 +508,29 @@ impl ParamCell {
             notes: None,
             updated_at: None,
             extra: BTreeMap::new(),
+        }
+    }
+
+    /// 条目标题（LightBurn 条目的 Description / Title，例如“深色雕刻”）。存放在 `extra["title"]`，
+    /// 这样旧材料库 JSON 与 SQLite `extra` 列不需要任何迁移就能读写。
+    pub fn title(&self) -> Option<&str> {
+        self.extra
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    }
+
+    /// 设置或清除条目标题（去首尾空白，空串即清除）。
+    pub fn set_title(&mut self, title: Option<&str>) {
+        match title.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => {
+                self.extra
+                    .insert("title".into(), serde_json::Value::String(t.to_owned()));
+            }
+            None => {
+                self.extra.remove("title");
+            }
         }
     }
 

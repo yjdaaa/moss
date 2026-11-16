@@ -82,11 +82,67 @@ impl ApiService {
                 .unwrap_or("raster")
                 .to_ascii_lowercase()
         };
-        let rows = parse_int(object.get("rows"), "rows", 5)
-            .map_err(|e| (400, failure(e.to_string(), None)))?;
-        let columns = parse_int(object.get("columns"), "columns", 5)
-            .map_err(|e| (400, failure(e.to_string(), None)))?;
-        if !(1..=25).contains(&rows) || !(1..=25).contains(&columns) {
+        // 测试类型（2026-11-16 对齐 LightBurn）：matrix = Material Test 参数网格（默认），
+        // interval = Interval Test 一排不同线距的小填充方块
+        let test_type = object
+            .get("test_type")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("matrix")
+            .to_ascii_lowercase();
+        let is_interval_test = match test_type.as_str() {
+            "matrix" => false,
+            "interval" => true,
+            _ => {
+                return Err((
+                    400,
+                    failure(
+                        "test_type 只能是 matrix 或 interval",
+                        Some(serde_json::json!({"error_code": "invalid_test_type"})),
+                    ),
+                ));
+            }
+        };
+        if is_interval_test && (laser_mode != "engrave" || engraving_mode != "raster") {
+            return Err((
+                400,
+                failure(
+                    "线距测试只用于光栅 / 填充雕刻（laser_mode=engrave、engraving_mode=raster）",
+                    Some(serde_json::json!({"error_code": "axis_not_supported"})),
+                ),
+            ));
+        }
+        let surface_entry = crate::materials::is_surface_request(object);
+        if surface_entry && laser_mode == "cut" {
+            return Err((
+                400,
+                failure("表面通用条目只能存雕刻参数，切割标定必须按真实厚度", None),
+            ));
+        }
+        let rows = parse_int(
+            object.get("rows"),
+            "rows",
+            if is_interval_test { 1 } else { 5 },
+        )
+        .map_err(|e| (400, failure(e.to_string(), None)))?;
+        let columns = parse_int(
+            object.get("columns"),
+            "columns",
+            if is_interval_test { 9 } else { 5 },
+        )
+        .map_err(|e| (400, failure(e.to_string(), None)))?;
+        if is_interval_test {
+            if rows != 1 || !(2..=20).contains(&columns) {
+                return Err((
+                    400,
+                    failure(
+                        "线距测试固定 1 行，columns（方块数）必须在 2..20 之间",
+                        None,
+                    ),
+                ));
+            }
+        } else if !(1..=25).contains(&rows) || !(1..=25).contains(&columns) {
             return Err((400, failure("rows/columns 必须在 1..25 之间", None)));
         }
         // 区间缺省（-1 或缺失）时以材料推荐参数为中心取 ±40% 区间
@@ -151,16 +207,6 @@ impl ApiService {
                 failure("功率/速度区间无效：min 必须 ≤ max 且为正数", None),
             ));
         }
-        let cells = laser_core::material::calibration_matrix(
-            rows as usize,
-            columns as usize,
-            power_min,
-            power_max,
-            speed_min,
-            speed_max,
-            passes,
-        )
-        .map_err(|e| (400, failure(format!("标定矩阵参数无效: {e}"), None)))?;
         let task_type = if laser_mode == "cut" {
             "cut_contour"
         } else if engraving_mode == "outline" {
@@ -168,8 +214,232 @@ impl ApiService {
         } else {
             "engrave_logo"
         };
-        let gcode = laser_core::material::build_calibration_gcode(material, task_type, &cells)
-            .map_err(|e| (500, failure(format!("标定 G-code 生成失败: {e}"), None)))?;
+        let invalid = |message: String| (400, failure(message, None));
+        let float_field = |key: &str, fallback: f64| {
+            parse_float(object.get(key), key, fallback).map_err(|e| invalid(e.to_string()))
+        };
+        let int_field = |key: &str, fallback: i64| {
+            parse_int(object.get(key), key, fallback).map_err(|e| invalid(e.to_string()))
+        };
+        // 两个轴各选一个参数（对齐 LightBurn Material Test）；默认列 = 功率、行 = 速度
+        let axis_field = |key: &str, fallback: TestAxis| -> Result<TestAxis, _> {
+            match object.get(key).and_then(|v| v.as_str()).map(str::trim) {
+                None | Some("") => Ok(fallback),
+                Some(raw) => TestAxis::parse(raw).ok_or_else(|| {
+                    (
+                        400,
+                        failure(
+                            format!("{key} 只能是 power / speed / interval / passes"),
+                            Some(serde_json::json!({"error_code": "invalid_axis"})),
+                        ),
+                    )
+                }),
+            }
+        };
+        use laser_core::material::TestAxis;
+        let (x_axis, y_axis) = if is_interval_test {
+            (TestAxis::Interval, TestAxis::Speed)
+        } else {
+            (
+                axis_field("x_axis", TestAxis::Power)?,
+                axis_field("y_axis", TestAxis::Speed)?,
+            )
+        };
+        if !is_interval_test && x_axis == y_axis {
+            return Err((
+                400,
+                failure(
+                    "x_axis 与 y_axis 必须是两个不同的参数",
+                    Some(serde_json::json!({"error_code": "invalid_axis"})),
+                ),
+            ));
+        }
+        let uses = |axis: TestAxis| x_axis == axis || y_axis == axis;
+        if uses(TestAxis::Interval) && task_type != "engrave_logo" {
+            return Err((
+                400,
+                failure(
+                    "线距轴只用于光栅 / 填充雕刻；轮廓与切割没有扫描线距",
+                    Some(serde_json::json!({"error_code": "axis_not_supported"})),
+                ),
+            ));
+        }
+        let recommended_interval = recommendation
+            .as_ref()
+            .map(|r| r.params.pixel_size_mm)
+            .filter(|v| {
+                v.is_finite()
+                    && (laser_core::material::TEST_INTERVAL_RANGE_MM.0
+                        ..=laser_core::material::TEST_INTERVAL_RANGE_MM.1)
+                        .contains(v)
+            });
+        // 不在轴上的线距：填充类测试默认用材料推荐线距（与实际雕刻一致），可用 line_interval_mm 覆盖
+        let fixed_interval_mm = if task_type == "engrave_logo" {
+            match object.get("line_interval_mm") {
+                None | Some(serde_json::Value::Null) => recommended_interval,
+                Some(_) => Some(float_field("line_interval_mm", 0.0)?),
+            }
+        } else {
+            None
+        };
+        let fixed_power = int_field("power", base_power as i64)? as i32;
+        let fixed_speed = int_field("speed", base_speed as i64)? as i32;
+        if !(0..=1000).contains(&fixed_power) || fixed_speed <= 0 {
+            return Err(invalid("power 必须在 0..1000，speed 必须为正数".to_owned()));
+        }
+        let interval_min_mm = float_field("interval_min_mm", 0.08)?;
+        let interval_max_mm = float_field("interval_max_mm", 0.16)?;
+        let passes_min = int_field("passes_min", passes as i64)? as i32;
+        let passes_max = int_field(
+            "passes_max",
+            (passes_min as i64 + 2).min(laser_core::material::TEST_PASSES_RANGE.1 as i64),
+        )? as i32;
+        let defaults = if is_interval_test {
+            laser_core::material::MaterialTestSpec::interval_test(
+                columns as usize,
+                (interval_min_mm, interval_max_mm),
+                fixed_power,
+                fixed_speed,
+                passes,
+            )
+        } else {
+            laser_core::material::MaterialTestSpec::power_speed(
+                rows as usize,
+                columns as usize,
+                (power_min, power_max),
+                (speed_min, speed_max),
+                passes,
+            )
+        };
+        let spec = laser_core::material::MaterialTestSpec {
+            x_axis,
+            y_axis,
+            power: if is_interval_test {
+                defaults.power
+            } else {
+                (power_min, power_max)
+            },
+            speed: if is_interval_test {
+                defaults.speed
+            } else {
+                (speed_min, speed_max)
+            },
+            interval_mm: (interval_min_mm, interval_max_mm),
+            passes: if uses(TestAxis::Passes) {
+                (passes_min, passes_max)
+            } else {
+                (passes, passes)
+            },
+            fixed_power,
+            fixed_speed,
+            fixed_interval_mm,
+            fixed_passes: passes,
+            cell_size_mm: float_field("cell_size_mm", defaults.cell_size_mm)?,
+            gap_mm: float_field("cell_gap_mm", defaults.gap_mm)?,
+            ..defaults
+        };
+        let cells = laser_core::material::material_test_cells(&spec)
+            .map_err(|e| invalid(format!("标定矩阵参数无效: {e}")))?;
+        // 加工顺序：默认从烧蚀风险最低到最高（高速、低功率、宽线距、少遍数先刻）
+        let run_order = object
+            .get("run_order")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("risk")
+            .to_ascii_lowercase();
+        let order: Vec<usize> = match run_order.as_str() {
+            "risk" => laser_core::material::risk_order(&cells),
+            "grid" => (0..cells.len()).collect(),
+            _ => return Err(invalid("run_order 只能是 risk 或 grid".to_owned())),
+        };
+        // 行列标注（默认开）：单线字体，默认用风险最低那格的功率（不超过 30%）与不低于 1500 mm/min 的速度
+        let labels_enabled = parse_bool(object.get("labels"), true);
+        let lowest = &cells[order[0]];
+        let label_power = int_field("label_power", lowest.power.min(300) as i64)? as i32;
+        let label_speed = int_field("label_speed", lowest.speed.max(1500) as i64)? as i32;
+        let label_height_mm =
+            float_field("label_height_mm", if is_interval_test { 2.5 } else { 3.0 })?;
+        if labels_enabled && (!(0..=1000).contains(&label_power) || label_speed <= 0) {
+            return Err(invalid(
+                "label_power 必须在 0..1000，label_speed 必须为正数".to_owned(),
+            ));
+        }
+        let label_spec = laser_core::material::TestLabels {
+            height_mm: label_height_mm,
+            power: label_power,
+            speed: label_speed,
+        };
+        let layout = laser_core::material::layout_material_test(
+            cells,
+            x_axis,
+            y_axis,
+            labels_enabled.then_some(&label_spec),
+        )
+        .map_err(|e| invalid(format!("标定标注参数无效: {e}")))?;
+        let cells = layout.cells;
+        let gcode = laser_core::material::build_material_test_gcode(
+            material,
+            task_type,
+            &cells,
+            &order,
+            labels_enabled.then_some(laser_core::material::LabelBurn {
+                paths: &layout.labels,
+                power: label_power,
+                speed: label_speed,
+            }),
+        )
+        .map_err(|e| invalid(format!("标定 G-code 生成失败: {e}")))?;
+        let mut run_index = vec![0usize; cells.len()];
+        for (position, &index) in order.iter().enumerate() {
+            run_index[index] = position + 1;
+        }
+        // 记录里的功率 / 速度区间按实际单元格取值（参数不在轴上时 min = max = 固定值）
+        let extent = |values: Vec<i32>| {
+            (
+                values.iter().copied().min().unwrap_or(0),
+                values.iter().copied().max().unwrap_or(0),
+            )
+        };
+        let (power_min, power_max) = if uses(TestAxis::Power) && !is_interval_test {
+            (power_min, power_max)
+        } else {
+            extent(cells.iter().map(|c| c.power).collect())
+        };
+        let (speed_min, speed_max) = if uses(TestAxis::Speed) && !is_interval_test {
+            (speed_min, speed_max)
+        } else {
+            extent(cells.iter().map(|c| c.speed).collect())
+        };
+        let axis_json = |axis: TestAxis, count: usize| {
+            let (min, max, unit) = match axis {
+                TestAxis::Power => (
+                    serde_json::json!(spec.power.0),
+                    serde_json::json!(spec.power.1),
+                    "S (0-1000)",
+                ),
+                TestAxis::Speed => (
+                    serde_json::json!(spec.speed.0),
+                    serde_json::json!(spec.speed.1),
+                    "mm/min",
+                ),
+                TestAxis::Interval => (
+                    serde_json::json!(spec.interval_mm.0),
+                    serde_json::json!(spec.interval_mm.1),
+                    "mm",
+                ),
+                TestAxis::Passes => (
+                    serde_json::json!(spec.passes.0),
+                    serde_json::json!(spec.passes.1),
+                    "passes",
+                ),
+            };
+            serde_json::json!({"param": axis.as_str(), "count": count, "min": min, "max": max, "unit": unit})
+        };
+        let axes = serde_json::json!({
+            "x": axis_json(x_axis, columns as usize),
+            "y": axis_json(y_axis, rows as usize),
+        });
 
         let root = self
             .generated_root
@@ -204,13 +474,46 @@ impl ApiService {
                     "passes": cell.passes,
                     "pixel_size_mm": cell.pixel_size_mm,
                     "line_interval_mm": cell.line_interval_mm,
+                    "run_index": run_index[index],
+                    "x_label": x_axis.value_label(cell),
+                    "y_label": y_axis.value_label(cell),
                 })
             })
             .collect::<Vec<_>>();
-        let width_mm = (columns as f64 - 1.0) * 16.0 + 12.0;
-        let height_mm = (rows as f64 - 1.0) * 16.0 + 12.0;
+        let run_sequence: Vec<usize> = order.iter().map(|&index| index + 1).collect();
+        let round_mm = |v: f64| (v * 1000.0).round() / 1000.0;
+        let width_mm = round_mm(layout.width_mm);
+        let height_mm = round_mm(layout.height_mm);
         let now = unix_seconds();
-        let record = serde_json::json!({
+        // 2026-11-16 新增的测试描述字段（分开构造，避免单个 json! 宏递归过深）
+        let test_meta = serde_json::json!({
+            "test_type": test_type,
+            "x_axis": x_axis.as_str(),
+            "y_axis": y_axis.as_str(),
+            "axes": axes,
+            "fixed": {
+                "power": fixed_power,
+                "speed": fixed_speed,
+                "passes": passes,
+                "line_interval_mm": fixed_interval_mm,
+            },
+            "interval_min_mm": spec.interval_mm.0,
+            "interval_max_mm": spec.interval_mm.1,
+            "passes_min": spec.passes.0,
+            "passes_max": spec.passes.1,
+            "cell_size_mm": spec.cell_size_mm,
+            "cell_gap_mm": spec.gap_mm,
+            "run_order": run_order,
+            "run_sequence": run_sequence,
+            "labels": {
+                "enabled": labels_enabled && !layout.labels.is_empty(),
+                "height_mm": label_height_mm,
+                "power": label_power,
+                "speed": label_speed,
+            },
+            "surface_entry": surface_entry,
+        });
+        let mut record = serde_json::json!({
             "calibration_id": calibration_id,
             "status": "prepared",
             "material": material,
@@ -240,6 +543,9 @@ impl ApiService {
             "created_at": now,
             "updated_at": now,
         });
+        if let (Some(map), serde_json::Value::Object(meta)) = (record.as_object_mut(), test_meta) {
+            map.extend(meta);
+        }
         self.save_calibration(&record)
             .map_err(|e| (500, failure(format!("保存标定矩阵失败: {e}"), None)))?;
         Ok(record)
@@ -518,13 +824,42 @@ impl ApiService {
         let power = cell.get("power").and_then(|v| v.as_i64()).unwrap_or(0);
         let speed = cell.get("speed").and_then(|v| v.as_i64()).unwrap_or(0);
         let passes = cell.get("passes").and_then(|v| v.as_i64()).unwrap_or(1);
+        // 线距（LightBurn Interval）在材料库里就是 pixel_size_mm：填充扫描线距 / 光栅点距
+        let line_interval_mm = cell
+            .get("line_interval_mm")
+            .and_then(|v| v.as_f64())
+            .or_else(|| cell.get("pixel_size_mm").and_then(|v| v.as_f64()))
+            .filter(|v| v.is_finite() && *v > 0.0);
+        // 表面通用条目：请求显式指定，或生成矩阵时已标记
+        let to_surface = crate::materials::is_surface_request(object)
+            || (!object.contains_key("surface")
+                && record.get("surface_entry").and_then(|v| v.as_bool()) == Some(true));
+        if to_surface && laser_mode == "cut" {
+            return Err((
+                400,
+                failure("表面通用条目只能存雕刻参数，切割必须按真实厚度保存", None),
+            ));
+        }
+        let is_interval_test = record.get("test_type").and_then(|v| v.as_str()) == Some("interval");
+        let test_label = if is_interval_test {
+            "线距测试"
+        } else {
+            "标定矩阵"
+        };
         let notes = object
             .get("notes")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("标定矩阵 {calibration_id} 单元格 #{cell_number}"));
+            .unwrap_or_else(|| {
+                let interval = line_interval_mm
+                    .map(|v| format!("，线距 {v} mm"))
+                    .unwrap_or_default();
+                format!(
+                    "{test_label} {calibration_id} 单元格 #{cell_number}（功率 S{power}、速度 {speed} mm/min、{passes} 遍{interval}）"
+                )
+            });
         let mut save = serde_json::Map::new();
         save.insert("action".into(), serde_json::Value::String("save".into()));
         save.insert(
@@ -543,12 +878,25 @@ impl ApiService {
         save.insert("laser_max_power".into(), serde_json::json!(power));
         save.insert("feed_rate".into(), serde_json::json!(speed));
         save.insert("passes".into(), serde_json::json!(passes.max(1)));
-        if let Some(pixel) = cell.get("pixel_size_mm").and_then(|v| v.as_f64()) {
-            save.insert("pixel_size_mm".into(), serde_json::json!(pixel));
+        if let Some(interval) = line_interval_mm {
+            save.insert("pixel_size_mm".into(), serde_json::json!(interval));
+        }
+        if to_surface {
+            save.insert("surface".into(), serde_json::Value::Bool(true));
+        }
+        if let Some(title) = object.get("title") {
+            save.insert("title".into(), title.clone());
         }
         save.insert(
             "source".into(),
-            serde_json::Value::String("calibration".into()),
+            serde_json::Value::String(
+                if is_interval_test {
+                    "interval_test"
+                } else {
+                    "calibration"
+                }
+                .into(),
+            ),
         );
         save.insert("notes".into(), serde_json::Value::String(notes));
         let response = handle_material_manage(
@@ -586,6 +934,8 @@ impl ApiService {
                     "power": power,
                     "speed": speed,
                     "passes": passes,
+                    "line_interval_mm": line_interval_mm,
+                    "surface": to_surface,
                     "material": material,
                     "thickness_mm": thickness_mm,
                     "laser_mode": laser_mode,
@@ -606,7 +956,10 @@ impl ApiService {
             "selected_cell": record.get("selected_cell").cloned().unwrap_or(serde_json::Value::Null),
             "cell_number": cell_number,
             "materials": saved.get("result").and_then(|r| r.get("materials")).cloned().unwrap_or(serde_json::Value::Null),
-            "speech": format!("已将单元格 #{cell_number} 的功率 {power} / 速度 {speed} 保存为推荐参数"),
+            "speech": match line_interval_mm {
+                Some(interval) => format!("已将单元格 #{cell_number} 的功率 {power} / 速度 {speed} / {passes} 遍 / 线距 {interval} mm 保存为推荐参数"),
+                None => format!("已将单元格 #{cell_number} 的功率 {power} / 速度 {speed} 保存为推荐参数"),
+            },
         }))
     }
 

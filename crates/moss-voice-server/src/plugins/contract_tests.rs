@@ -122,7 +122,17 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
         let mut raw = Vec::new();
         let mut packet = [0; 4096];
         loop {
-            let count = stream.read(&mut packet).unwrap();
+            let count = match stream.read(&mut packet) {
+                Ok(count) => count,
+                // A deadline test whose client already gave up (e.g. the
+                // handshake itself was slow under load) must not panic here;
+                // the test below asserts the request arrived in full instead.
+                Err(_) if deadline_test => return raw,
+                Err(e) => panic!("fixture read: {e}"),
+            };
+            if count == 0 && deadline_test {
+                return raw;
+            }
             assert!(count > 0);
             raw.extend_from_slice(&packet[..count]);
             assert!(raw.len() <= 65536);
@@ -141,7 +151,7 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
             }
         }
         if reply.delay_headers {
-            thread::sleep(Duration::from_millis(900));
+            wait_for_client_to_give_up(&mut stream);
         }
         let mut headers = format!(
             "HTTP/1.1 {} Fixture\r\nConnection: close\r\nContent-Type: application/json\r\n",
@@ -159,7 +169,7 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
         let _ = stream.write_all(headers.as_bytes());
         let _ = stream.flush();
         if reply.delay_body {
-            thread::sleep(Duration::from_millis(900));
+            wait_for_client_to_give_up(&mut stream);
         }
         if reply.chunked {
             let _ = write!(stream, "{:x}\r\n", reply.body.len());
@@ -178,7 +188,7 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
         .resolve(HOST, addr)
         .add_root_certificate(reqwest::Certificate::from_der(&der).unwrap())
         .timeout(if deadline_test {
-            Duration::from_millis(600)
+            DEADLINE_TEST_TIMEOUT
         } else {
             Duration::from_secs(3)
         })
@@ -186,7 +196,28 @@ fn exchange(provider: Provider, reply: Reply) -> (Result<Value, FetchError>, Vec
         .unwrap();
     let base = format!("https://{HOST}:{}/feed.xml", addr.port());
     let result = provider.invoke(&client, &base);
+    // Dropping the client closes any connection it still holds, which is what
+    // releases a deadline fixture waiting in `wait_for_client_to_give_up`.
+    drop(client);
     (result, server.join().unwrap())
+}
+
+/// TEST-ONLY total client deadline for the header/body timeout cases.
+const DEADLINE_TEST_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Stall the reply until the client closes the connection (bounded by the
+/// socket read timeout). Unlike a fixed sleep this cannot lose the race against
+/// the client deadline when the workspace runs many tests in parallel: the
+/// server only continues after the client has already timed out.
+fn wait_for_client_to_give_up(stream: &mut StreamOwned<ServerConnection, std::net::TcpStream>) {
+    let mut sink = [0u8; 256];
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        match stream.read(&mut sink) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => continue,
+        }
+    }
 }
 #[test]
 fn all_provider_requests_and_success_fixtures_roundtrip_over_verified_tls() {
@@ -335,10 +366,17 @@ fn each_provider_maps_header_and_body_deadlines_to_timeout() {
             let mut reply = Reply::body(provider.fixture());
             reply.delay_headers = !body_timeout;
             reply.delay_body = body_timeout;
+            let (result, raw) = exchange(provider, reply);
             assert_eq!(
-                exchange(provider, reply).0.unwrap_err(),
+                result.unwrap_err(),
                 FetchError::Timeout,
                 "{provider:?}/{body_timeout}"
+            );
+            // The deadline must have fired while waiting for the reply, i.e.
+            // after the complete request reached the fixture.
+            assert!(
+                raw.windows(4).any(|w| w == b"\r\n\r\n"),
+                "{provider:?}/{body_timeout}: request did not reach the fixture before the deadline"
             );
         }
     }

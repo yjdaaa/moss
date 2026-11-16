@@ -23,6 +23,7 @@ export function defaultCellValues(mode = "raster") {
       pixelSize: 0.1,
       threshold: 128,
       notes: "",
+      title: "",
     };
   }
   if (mode === "outline") {
@@ -35,6 +36,7 @@ export function defaultCellValues(mode = "raster") {
       pixelSize: 0.1,
       threshold: -1,
       notes: "",
+      title: "",
     };
   }
   return {
@@ -46,6 +48,7 @@ export function defaultCellValues(mode = "raster") {
     pixelSize: 0.1,
     threshold: -1,
     notes: "",
+    title: "",
   };
 }
 
@@ -127,6 +130,7 @@ export function resolveCellEditorValues(materialsMap, materialName, thicknessKey
     pixelSize: cell.pixel_size_mm ?? defaults.pixelSize,
     threshold: cell.threshold ?? defaults.threshold,
     notes: cell.notes ?? "",
+    title: typeof cell.title === "string" ? cell.title : "",
     aliases,
     hasSavedCell: true,
   };
@@ -161,6 +165,155 @@ export function resolveMatrixModeParams(mode = "raster") {
   };
 }
 
+/** 材料库里不分厚度的“表面通用”条目键（对齐 LightBurn No thickness 条目，只存雕刻参数）。 */
+export const SURFACE_THICKNESS_KEY = "surface";
+
+export function isSurfaceKey(key) {
+  return String(key ?? "").trim() === SURFACE_THICKNESS_KEY;
+}
+
+/** 厚度标签：表面通用条目显示“表面通用”，其余显示“N mm”。 */
+export function thicknessChipLabel(key) {
+  return isSurfaceKey(key) ? "表面通用" : `${key} mm`;
+}
+
+/** 测试类型（2026-11-16 对齐 LightBurn Material Test / Interval Test）。 */
+export const TEST_TYPE_OPTIONS = [
+  { id: "matrix", label: "参数网格" },
+  { id: "interval", label: "线距测试" },
+];
+
+/** 网格轴可选参数；线距只对光栅 / 填充雕刻有意义。 */
+export const TEST_AXIS_OPTIONS = [
+  { id: "power", label: "功率", unit: "%" },
+  { id: "speed", label: "速度", unit: "mm/min" },
+  { id: "interval", label: "线距", unit: "mm" },
+  { id: "passes", label: "遍数", unit: "遍" },
+];
+
+export function axisOptionsForMode(mode = "raster") {
+  return TEST_AXIS_OPTIONS.filter((axis) => axis.id !== "interval" || mode === "raster");
+}
+
+function axisInfo(axis) {
+  return TEST_AXIS_OPTIONS.find((item) => item.id === axis) || TEST_AXIS_OPTIONS[0];
+}
+
+/** 单元格在某个轴上的显示值（后端给了 x_label / y_label 时优先用它们，与刻在样板上的一致）。 */
+export function cellAxisText(cell, axis, which) {
+  const fromBackend = which === "x" ? cell?.x_label : which === "y" ? cell?.y_label : undefined;
+  const info = axisInfo(axis);
+  if (fromBackend != null && fromBackend !== "") {
+    return info.id === "power" ? `${fromBackend}%` : info.id === "passes" ? `${fromBackend}遍` : String(fromBackend);
+  }
+  if (info.id === "power") return `${Math.round(Number(cell?.power) || 0) / 10}%`;
+  if (info.id === "speed") return `F${cell?.speed ?? "-"}`;
+  if (info.id === "interval") {
+    const v = Number(cell?.line_interval_mm);
+    return Number.isFinite(v) ? v.toFixed(2) : "-";
+  }
+  return `${cell?.passes ?? 1}遍`;
+}
+
+/**
+ * 校验并规整两个轴：两轴不能相同；线距轴只能用于光栅模式。
+ * 返回 `{ xAxis, yAxis }` 或 `{ error }`。
+ */
+export function validateMatrixAxes({ xAxis = "power", yAxis = "speed", mode = "raster" } = {}) {
+  const allowed = axisOptionsForMode(mode).map((axis) => axis.id);
+  if (!allowed.includes(xAxis) || !allowed.includes(yAxis)) {
+    return { error: "线距只能用于光栅雕刻的填充测试，请换一个轴参数" };
+  }
+  if (xAxis === yAxis) {
+    return { error: "列和行必须选两个不同的参数" };
+  }
+  return { xAxis, yAxis };
+}
+
+/**
+ * 构造 /api/material-lab/preview 请求体。默认（参数网格、列 = 功率、行 = 速度）与改版前完全相同，
+ * 只多了 x_axis / y_axis / labels 字段；非默认轴才带对应区间。错误时返回 `{ error }`。
+ */
+export function buildMatrixPreviewPayload({
+  material = "",
+  thickness = "",
+  fallbackThickness = 3,
+  mode = "raster",
+  testType = "matrix",
+  rows = 5,
+  cols = 5,
+  powerMin = 100,
+  powerMax = 600,
+  speedMin = 500,
+  speedMax = 2500,
+  xAxis = "power",
+  yAxis = "speed",
+  intervalMin = 0.08,
+  intervalMax = 0.16,
+  intervalCount = 9,
+  passesMin = 1,
+  passesMax = 3,
+  labels = true,
+} = {}) {
+  const modeInfo = resolveMatrixModeParams(mode);
+  const surface = isSurfaceKey(thickness);
+  if (surface && modeInfo.laser_mode === "cut") {
+    return { error: "表面通用条目只存雕刻参数，切割标定请选择真实厚度" };
+  }
+  const thicknessNumber = surface ? Number(fallbackThickness) || 3 : Number(thickness) || 3;
+  const payload = {
+    material,
+    thickness_mm: thicknessNumber,
+    laser_mode: modeInfo.laser_mode,
+    engraving_mode: modeInfo.engraving_mode,
+    matrix_kind: modeInfo.matrix_kind,
+    labels: Boolean(labels),
+  };
+  if (surface) payload.surface = true;
+  if (testType === "interval") {
+    if (modeInfo.mode !== "raster") {
+      return { error: "线距测试只用于光栅雕刻（填充）" };
+    }
+    const min = Number(intervalMin);
+    const max = Number(intervalMax);
+    if (!(min > 0) || !(max >= min)) {
+      return { error: "线距区间无效：起始值必须大于 0 且不大于结束值" };
+    }
+    return {
+      payload: {
+        ...payload,
+        test_type: "interval",
+        rows: 1,
+        columns: Number(intervalCount),
+        interval_min_mm: min,
+        interval_max_mm: max,
+      },
+    };
+  }
+  const axes = validateMatrixAxes({ xAxis, yAxis, mode: modeInfo.mode });
+  if (axes.error) return axes;
+  Object.assign(payload, {
+    rows: Number(rows),
+    columns: Number(cols),
+    power_min: Number(powerMin),
+    power_max: Number(powerMax),
+    speed_min: Number(speedMin),
+    speed_max: Number(speedMax),
+    x_axis: axes.xAxis,
+    y_axis: axes.yAxis,
+  });
+  const uses = (axis) => axes.xAxis === axis || axes.yAxis === axis;
+  if (uses("interval")) {
+    payload.interval_min_mm = Number(intervalMin);
+    payload.interval_max_mm = Number(intervalMax);
+  }
+  if (uses("passes")) {
+    payload.passes_min = Number(passesMin);
+    payload.passes_max = Number(passesMax);
+  }
+  return { payload };
+}
+
 /** 标定矩阵生成输入快照签名，用于判定修改参数后矩阵预览是否已过期。 */
 export function matrixInputSignature({
   material = "",
@@ -172,6 +325,15 @@ export function matrixInputSignature({
   powerMax = 600,
   speedMin = 500,
   speedMax = 2500,
+  testType = "matrix",
+  xAxis = "power",
+  yAxis = "speed",
+  intervalMin = 0.08,
+  intervalMax = 0.16,
+  intervalCount = 9,
+  passesMin = 1,
+  passesMax = 3,
+  labels = true,
 } = {}) {
   return JSON.stringify([
     String(material).trim(),
@@ -183,6 +345,15 @@ export function matrixInputSignature({
     Number(powerMax),
     Number(speedMin),
     Number(speedMax),
+    testType === "interval" ? "interval" : "matrix",
+    String(xAxis),
+    String(yAxis),
+    Number(intervalMin),
+    Number(intervalMax),
+    Number(intervalCount),
+    Number(passesMin),
+    Number(passesMax),
+    Boolean(labels),
   ]);
 }
 
@@ -270,16 +441,31 @@ export function buildMatrixConfirmPrompt({
   const pMax = preview?.power_max ?? "-";
   const sMin = preview?.speed_min ?? "-";
   const sMax = preview?.speed_max ?? "-";
+  const isInterval = preview?.test_type === "interval";
+  const axisLine = isInterval
+    ? `线距测试：${preview?.interval_min_mm ?? "-"} ~ ${preview?.interval_max_mm ?? "-"} mm，目标是相邻扫描线刚好相接`
+    : preview?.x_axis
+      ? `网格轴：列 = ${axisInfo(preview.x_axis).label}，行 = ${axisInfo(preview.y_axis).label}`
+      : "";
+  const orderLine = preview?.run_order === "grid"
+    ? "加工顺序：按网格顺序"
+    : preview?.run_order
+      ? "加工顺序：从烧蚀风险最低（高速、低功率、宽线距、少遍数）到最高"
+      : "";
+  const labelLine = preview?.labels?.enabled
+    ? `行列标注：单线文字，功率 S${preview.labels.power} · 速度 F${preview.labels.speed}`
+    : "";
   return {
     title: "确认下发标定矩阵出光测试",
     confirmText: "确认开刻测试",
     message: [
       `目标设备：${targetLabel || "未指定"}`,
-      `标定对象：${mat} · ${thick} mm（${modeInfo.label}）`,
+      `标定对象：${mat} · ${preview?.surface_entry ? "表面通用" : `${thick} mm`}（${modeInfo.label}）`,
       `矩阵规格：${cellCount} 格 · 外框尺寸 ${sizeText}`,
       `参数区间：功率 S${pMin}~S${pMax} · 速度 F${sMin}~F${sMax} mm/min`,
+      ...[axisLine, orderLine, labelLine].filter(Boolean),
       "",
-      "注意：标定刀路以当前激光头位置为左下角起点（G92 X0 Y0）。请确认样板已放稳、排风开启并已佩戴护目镜。",
+      "注意：标定刀路以当前激光头位置为左下角起点（G92 X0 Y0），行列标注也在这个范围内。请确认样板已放稳、排风开启并已佩戴护目镜。",
     ].join("\n"),
   };
 }

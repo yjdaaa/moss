@@ -34,8 +34,17 @@ import {
   isMatrixStale,
   buildMatrixSendRequest,
   buildMatrixConfirmPrompt,
+  buildMatrixPreviewPayload,
   unwrapImportedMaterialLibrary,
+  TEST_TYPE_OPTIONS,
+  TEST_AXIS_OPTIONS,
+  axisOptionsForMode,
+  cellAxisText,
+  isSurfaceKey,
+  thicknessChipLabel,
 } from "../materialLabState.js";
+
+const TEST_AXIS_LABELS = Object.fromEntries(TEST_AXIS_OPTIONS.map((a) => [a.id, `${a.label} ${a.unit}`]));
 
 function readLocalSafe(key, fallback = "") {
   try {
@@ -86,6 +95,7 @@ export function MaterialLabPage({ onNavigate }) {
   const [pixelSize, setPixelSize] = useState(0.1);
   const [threshold, setThreshold] = useState(-1);
   const [notes, setNotes] = useState("");
+  const [entryTitle, setEntryTitle] = useState("");
   const [aliases, setAliases] = useState("");
   const [editorStatus, setEditorStatus] = useState("");
 
@@ -97,6 +107,16 @@ export function MaterialLabPage({ onNavigate }) {
   const [matrixPowerMax, setMatrixPowerMax] = useState(600);
   const [matrixSpeedMin, setMatrixSpeedMin] = useState(500);
   const [matrixSpeedMax, setMatrixSpeedMax] = useState(2500);
+  // 2026-11-16 对齐 LightBurn：测试类型、两个轴的参数、线距 / 遍数区间与行列标注
+  const [matrixTestType, setMatrixTestType] = useState("matrix");
+  const [matrixXAxis, setMatrixXAxis] = useState("power");
+  const [matrixYAxis, setMatrixYAxis] = useState("speed");
+  const [matrixIntervalMin, setMatrixIntervalMin] = useState(0.08);
+  const [matrixIntervalMax, setMatrixIntervalMax] = useState(0.16);
+  const [matrixIntervalCount, setMatrixIntervalCount] = useState(9);
+  const [matrixPassesMin, setMatrixPassesMin] = useState(1);
+  const [matrixPassesMax, setMatrixPassesMax] = useState(3);
+  const [matrixLabels, setMatrixLabels] = useState(true);
   const [connectionMode, setConnectionMode] = useState(() => readLocalSafe("laser-forge-conn-mode", "network") || "network");
   const [matrixHost, setMatrixHost] = useState(() => readLocalSafe("laser-forge-host", ""));
   const [telnetPort, setTelnetPort] = useState(() => readLocalSafe("laser-forge-telnet-port", "23") || "23");
@@ -122,6 +142,15 @@ export function MaterialLabPage({ onNavigate }) {
     powerMax: matrixPowerMax,
     speedMin: matrixSpeedMin,
     speedMax: matrixSpeedMax,
+    testType: matrixTestType,
+    xAxis: matrixXAxis,
+    yAxis: matrixYAxis,
+    intervalMin: matrixIntervalMin,
+    intervalMax: matrixIntervalMax,
+    intervalCount: matrixIntervalCount,
+    passesMin: matrixPassesMin,
+    passesMax: matrixPassesMax,
+    labels: matrixLabels,
   });
   const matrixStale = Boolean(matrixId) && isMatrixStale(matrixSignature, currentMatrixSig);
 
@@ -135,6 +164,7 @@ export function MaterialLabPage({ onNavigate }) {
     setPixelSize(resolved.pixelSize);
     setThreshold(resolved.threshold);
     setNotes(resolved.notes);
+    setEntryTitle(resolved.title || "");
     setAliases(resolved.aliases);
     setHasSavedCell(resolved.hasSavedCell);
   }, []);
@@ -234,9 +264,19 @@ export function MaterialLabPage({ onNavigate }) {
     applyEditorState(materials, matName, thickKey, activeMode);
   };
 
+  // 切换标定模式：线距只对光栅填充有意义，离开光栅时把线距测试 / 线距轴换回默认
+  const changeMatrixMode = (mode) => {
+    setMatrixMode(mode);
+    if (mode !== "raster") {
+      setMatrixTestType("matrix");
+      setMatrixXAxis((axis) => (axis === "interval" ? (matrixYAxis === "power" ? "speed" : "power") : axis));
+      setMatrixYAxis((axis) => (axis === "interval" ? (matrixXAxis === "speed" ? "power" : "speed") : axis));
+    }
+  };
+
   const handleModeChange = (mode) => {
     setActiveMode(mode);
-    setMatrixMode(mode);
+    changeMatrixMode(mode);
     applyEditorState(materials, selectedMaterial, selectedThickness, mode);
   };
 
@@ -251,14 +291,20 @@ export function MaterialLabPage({ onNavigate }) {
   };
 
   // Save current parameter cell
-  const handleSaveParams = async () => {
+  // toSurface=true：存为不分厚度的“表面通用”条目（LightBurn No thickness 条目，只存雕刻参数）
+  const handleSaveParams = async (toSurface = false) => {
     const trimmedMat = String(selectedMaterial || "").trim();
+    const surface = toSurface === true || isSurfaceKey(selectedThickness);
     const thickNum = Number(selectedThickness);
     if (!trimmedMat) {
       setEditorStatus("保存失败: 请先新建或选择材料");
       return;
     }
-    if (!Number.isFinite(thickNum) || thickNum <= 0) {
+    if (surface && activeMode === "cut") {
+      setEditorStatus("保存失败: 表面通用条目只存雕刻参数，切割请按真实厚度保存");
+      return;
+    }
+    if (!surface && (!Number.isFinite(thickNum) || thickNum <= 0)) {
       setEditorStatus("保存失败: 厚度必须大于 0");
       return;
     }
@@ -267,7 +313,8 @@ export function MaterialLabPage({ onNavigate }) {
     const payload = {
       action: "save",
       material: trimmedMat,
-      thickness_mm: thickNum,
+      ...(surface ? { surface: true } : { thickness_mm: thickNum }),
+      title: entryTitle.trim(),
       laser_mode: activeMode === "cut" ? "cut" : "engrave",
       engraving_mode: activeMode === "cut" ? "" : activeMode,
       laser_min_power: Number(minPower),
@@ -284,10 +331,14 @@ export function MaterialLabPage({ onNavigate }) {
     try {
       const res = await postJson("/api/material-lab/manage", payload);
       if (res.ok && res.data?.success) {
-        setEditorStatus("参数已成功保存！");
+        setEditorStatus(surface ? "参数已成功保存为表面通用条目！" : "参数已成功保存！");
         setTimeout(() => setEditorStatus(""), 3000);
         notifyMaterialsUpdated();
-        await loadBootstrap({ material: trimmedMat, thickness: String(thickNum), mode: activeMode });
+        await loadBootstrap({
+          material: trimmedMat,
+          thickness: surface ? "surface" : String(thickNum),
+          mode: activeMode,
+        });
       } else {
         setEditorStatus(`保存失败: ${res.data?.result || "未知错误"}`);
       }
@@ -299,8 +350,10 @@ export function MaterialLabPage({ onNavigate }) {
   // Delete current thickness (only when material has multiple thicknesses)
   const handleDeleteCurrentThickness = async () => {
     if (!selectedMaterial || !selectedThickness) return;
+    const surface = isSurfaceKey(selectedThickness);
+    const thicknessLabel = thicknessChipLabel(selectedThickness);
     const confirmed = await showConfirm(
-      `确定删除「${selectedMaterial}」的 ${selectedThickness} mm 厚度规格及该厚度下的全部参数吗？`,
+      `确定删除「${selectedMaterial}」的 ${thicknessLabel} ${surface ? "条目" : "厚度规格"}及其下的全部参数吗？`,
       {
         title: "删除当前厚度",
         tone: "warning",
@@ -315,11 +368,11 @@ export function MaterialLabPage({ onNavigate }) {
       const res = await postJson("/api/material-lab/manage", {
         action: "delete",
         material: selectedMaterial,
-        thickness_mm: Number(selectedThickness),
+        ...(surface ? { surface: true } : { thickness_mm: Number(selectedThickness) }),
         confirmed: true,
       });
       if (res.ok && res.data?.success) {
-        setEditorStatus(`已移除 ${selectedThickness} mm 厚度`);
+        setEditorStatus(`已移除 ${thicknessLabel}`);
         setTimeout(() => setEditorStatus(""), 3000);
         notifyMaterialsUpdated();
         await loadBootstrap({ material: selectedMaterial, mode: activeMode });
@@ -344,7 +397,7 @@ export function MaterialLabPage({ onNavigate }) {
         setSelectedMaterial(nextMat);
         setSelectedThickness(nextThick);
         setActiveMode(mode);
-        setMatrixMode(mode);
+        changeMatrixMode(mode);
         const existingAliases = materials[nextMat]?.aliases;
         setAliases(Array.isArray(existingAliases) ? existingAliases.join(", ") : "");
         setNotes("");
@@ -463,21 +516,38 @@ export function MaterialLabPage({ onNavigate }) {
     }
     const modeInfo = resolveMatrixModeParams(matrixMode);
     const sigSnapshot = currentMatrixSig;
-    setMatrixBusy(true);
-    setMatrixStatus(`正在生成「${modeInfo.label}」标定矩阵 G-code 与预览...`);
-    const payload = {
+    const numericThickness = Object.keys(materials[selectedMaterial]?.thicknesses || {})
+      .map(Number)
+      .find((value) => Number.isFinite(value) && value > 0);
+    const built = buildMatrixPreviewPayload({
       material: selectedMaterial,
-      thickness_mm: Number(selectedThickness) || 3,
-      laser_mode: modeInfo.laser_mode,
-      engraving_mode: modeInfo.engraving_mode,
-      matrix_kind: modeInfo.matrix_kind,
-      rows: Number(matrixRows),
-      columns: Number(matrixCols),
-      power_min: Number(matrixPowerMin),
-      power_max: Number(matrixPowerMax),
-      speed_min: Number(matrixSpeedMin),
-      speed_max: Number(matrixSpeedMax),
-    };
+      thickness: selectedThickness,
+      fallbackThickness: numericThickness || 3,
+      mode: matrixMode,
+      testType: matrixTestType,
+      rows: matrixRows,
+      cols: matrixCols,
+      powerMin: matrixPowerMin,
+      powerMax: matrixPowerMax,
+      speedMin: matrixSpeedMin,
+      speedMax: matrixSpeedMax,
+      xAxis: matrixXAxis,
+      yAxis: matrixYAxis,
+      intervalMin: matrixIntervalMin,
+      intervalMax: matrixIntervalMax,
+      intervalCount: matrixIntervalCount,
+      passesMin: matrixPassesMin,
+      passesMax: matrixPassesMax,
+      labels: matrixLabels,
+    });
+    if (built.error) {
+      setMatrixStatus(`生成失败: ${built.error}`);
+      return;
+    }
+    const payload = built.payload;
+    const testLabel = matrixTestType === "interval" ? "线距测试" : `「${modeInfo.label}」标定矩阵`;
+    setMatrixBusy(true);
+    setMatrixStatus(`正在生成${testLabel} G-code 与预览...`);
 
     try {
       const res = await postJson("/api/material-lab/preview", payload);
@@ -494,7 +564,7 @@ export function MaterialLabPage({ onNavigate }) {
           ? `，外框 ${Number(resData.width_mm).toFixed(0)}×${Number(resData.height_mm).toFixed(0)} mm`
           : "";
         setMatrixStatus(
-          `${modeInfo.label}矩阵已生成（${resData.cell_count || 0} 格${sizeStr}${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；发送实机测试后点选最佳格`,
+          `${resData.test_type === "interval" ? "线距测试" : `${modeInfo.label}矩阵`}已生成（${resData.cell_count || 0} 格${sizeStr}${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；发送实机测试后点选最佳格`,
         );
       } else if (res.ok && res.data?.success) {
         setMatrixStatus("生成失败: 后端未返回 calibration_id，请更新 moss-host");
@@ -647,12 +717,15 @@ export function MaterialLabPage({ onNavigate }) {
         engraving_mode: targetEngravingMode,
       });
       if (res.ok && res.data?.success) {
-        setMatrixStatus(`已将单元格 #${cellNumber} 保存为「${targetMat} ${targetThick}mm」推荐参数！`);
+        const savedSurface = res.data.result?.selected_cell?.surface === true;
+        setMatrixStatus(
+          `已将单元格 #${cellNumber} 保存为「${targetMat} ${savedSurface ? "表面通用" : `${targetThick}mm`}」推荐参数！`,
+        );
         setActiveMode(targetUiMode);
         notifyMaterialsUpdated();
         await loadBootstrap({
           material: targetMat,
-          thickness: String(targetThick),
+          thickness: savedSurface ? "surface" : String(targetThick),
           mode: targetUiMode,
         });
       } else {
@@ -801,7 +874,7 @@ export function MaterialLabPage({ onNavigate }) {
                                   handleSelectMaterialAndThick(matName, th);
                                 }}
                               >
-                                {th} mm
+                                {thicknessChipLabel(th)}
                               </button>
                             ))}
                           </div>
@@ -820,7 +893,7 @@ export function MaterialLabPage({ onNavigate }) {
           <FoldHeader id="lab-params" title="材料参数" k="PARAMS" n={2} />
           <div className="lab-row-5">
             <h3 className="lab-heading">
-              <span>{selectedMaterial ? `${selectedMaterial} · ${selectedThickness} mm` : "未选择材料"}</span>
+              <span>{selectedMaterial ? `${selectedMaterial} · ${thicknessChipLabel(selectedThickness)}` : "未选择材料"}</span>
               <small className="lab-heading-tag">
                 {readOnly ? "只读参数" : hasSavedCell ? "已存参数" : "该模式未存（初始值）"}
               </small>
@@ -840,7 +913,7 @@ export function MaterialLabPage({ onNavigate }) {
                   type="button"
                   className="btn btn-ghost lab-btn-2"
                   onClick={handleDeleteCurrentThickness}
-                  title={`仅删除 ${selectedThickness} mm 厚度档位`}
+                  title={`仅删除 ${thicknessChipLabel(selectedThickness)} 档位`}
                 >
                   <Trash2 size={12} />
                   <span>删此厚度</span>
@@ -969,8 +1042,8 @@ export function MaterialLabPage({ onNavigate }) {
             </div>
 
             <div>
-              <label className="lab-label-2">
-                点距 / 像素尺寸 (mm)
+              <label className="lab-label-2" title="填充扫描线距 / 光栅点距，对应 LightBurn 的 Interval；可用线距测试标定">
+                线距 / 点距 (mm)
               </label>
               <input
                 type="number"
@@ -1014,6 +1087,21 @@ export function MaterialLabPage({ onNavigate }) {
 
             <div className="lab-box-3">
               <label className="lab-label-2">
+                条目标题（可选）
+              </label>
+              <input
+                type="text"
+                maxLength={60}
+                value={entryTitle}
+                onChange={(e) => setEntryTitle(e.target.value)}
+                readOnly={readOnly}
+                className="text-input lab-field-3"
+                placeholder="例如：深色照片、浅色文字"
+              />
+            </div>
+
+            <div className="lab-box-3">
+              <label className="lab-label-2">
                 工艺与材质备注
               </label>
               <input
@@ -1038,6 +1126,17 @@ export function MaterialLabPage({ onNavigate }) {
                 <Save size={14} className="lab-icon" />
                 保存到材料库
               </button>
+              {activeMode !== "cut" && !isSurfaceKey(selectedThickness) && (
+                <button
+                  type="button"
+                  className="btn btn-ghost lab-btn-3"
+                  onClick={() => handleSaveParams(true)}
+                  disabled={!selectedMaterial}
+                  title="存为不分厚度的表面雕刻条目：任何厚度在没有同厚度参数时都用它（切割仍按真实厚度）"
+                >
+                  存为表面通用
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1047,11 +1146,11 @@ export function MaterialLabPage({ onNavigate }) {
           <FoldHeader id="lab-matrix" title="校准矩阵" k="MATRIX" n={3} />
           <div className="lab-row-9">
             <h3 className="lab-heading-2">
-              {selectedMaterial ? `${selectedMaterial} · ${selectedThickness} mm · ${matrixModeInfo.label}` : "生成校准矩阵并实机测试"}
+              {selectedMaterial ? `${selectedMaterial} · ${thicknessChipLabel(selectedThickness)} · ${matrixModeInfo.label}` : "生成校准矩阵并实机测试"}
             </h3>
             <select
               value={matrixMode}
-              onChange={(e) => setMatrixMode(e.target.value)}
+              onChange={(e) => changeMatrixMode(e.target.value)}
               className="select-input lab-matrix-mode-select"
               aria-label="标定矩阵加工模式"
             >
@@ -1129,6 +1228,155 @@ export function MaterialLabPage({ onNavigate }) {
                 />
               </div>
             </div>
+          </div>
+
+          {/* 测试类型与轴参数（2026-11-16 对齐 LightBurn Material Test / Interval Test）。
+              放在 .lab-grid-2 之外，保持上面区间与行列输入框的顺序不变 */}
+          <div className="lab-test-axes">
+            <label className="lab-label-3">
+              测试类型
+              <select
+                value={matrixTestType}
+                onChange={(e) => setMatrixTestType(e.target.value)}
+                className="select-input lab-axis-select"
+                aria-label="测试类型"
+              >
+                {TEST_TYPE_OPTIONS.filter((t) => t.id !== "interval" || matrixMode === "raster").map((t) => (
+                  <option key={t.id} value={t.id}>{t.label}</option>
+                ))}
+              </select>
+            </label>
+            {matrixTestType === "interval" ? (
+              <>
+                <label className="lab-label-3">
+                  线距起止 (mm)
+                  <span className="lab-row-10">
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      value={matrixIntervalMin}
+                      onChange={(e) => setMatrixIntervalMin(Number(e.target.value))}
+                      className="text-input lab-field-4"
+                      aria-label="起始线距"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      value={matrixIntervalMax}
+                      onChange={(e) => setMatrixIntervalMax(Number(e.target.value))}
+                      className="text-input lab-field-4"
+                      aria-label="结束线距"
+                    />
+                  </span>
+                </label>
+                <label className="lab-label-3">
+                  方块数
+                  <input
+                    type="number"
+                    min={2}
+                    max={20}
+                    value={matrixIntervalCount}
+                    onChange={(e) => setMatrixIntervalCount(Number(e.target.value))}
+                    className="text-input lab-field-4"
+                    aria-label="线距测试方块数"
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                <label className="lab-label-3">
+                  列参数
+                  <select
+                    value={matrixXAxis}
+                    onChange={(e) => setMatrixXAxis(e.target.value)}
+                    className="select-input lab-axis-select"
+                    aria-label="网格列参数"
+                  >
+                    {axisOptionsForMode(matrixMode).map((a) => (
+                      <option key={a.id} value={a.id}>{a.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="lab-label-3">
+                  行参数
+                  <select
+                    value={matrixYAxis}
+                    onChange={(e) => setMatrixYAxis(e.target.value)}
+                    className="select-input lab-axis-select"
+                    aria-label="网格行参数"
+                  >
+                    {axisOptionsForMode(matrixMode).map((a) => (
+                      <option key={a.id} value={a.id}>{a.label}</option>
+                    ))}
+                  </select>
+                </label>
+                {(matrixXAxis === "interval" || matrixYAxis === "interval") && (
+                  <label className="lab-label-3">
+                    线距区间 (mm)
+                    <span className="lab-row-10">
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        value={matrixIntervalMin}
+                        onChange={(e) => setMatrixIntervalMin(Number(e.target.value))}
+                        className="text-input lab-field-4"
+                        aria-label="线距下限"
+                      />
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        value={matrixIntervalMax}
+                        onChange={(e) => setMatrixIntervalMax(Number(e.target.value))}
+                        className="text-input lab-field-4"
+                        aria-label="线距上限"
+                      />
+                    </span>
+                  </label>
+                )}
+                {(matrixXAxis === "passes" || matrixYAxis === "passes") && (
+                  <label className="lab-label-3">
+                    遍数区间
+                    <span className="lab-row-10">
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={matrixPassesMin}
+                        onChange={(e) => setMatrixPassesMin(Number(e.target.value))}
+                        className="text-input lab-field-4"
+                        aria-label="遍数下限"
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={matrixPassesMax}
+                        onChange={(e) => setMatrixPassesMax(Number(e.target.value))}
+                        className="text-input lab-field-4"
+                        aria-label="遍数上限"
+                      />
+                    </span>
+                  </label>
+                )}
+              </>
+            )}
+            <label className="lab-test-labels">
+              <input
+                type="checkbox"
+                checked={matrixLabels}
+                onChange={(e) => setMatrixLabels(e.target.checked)}
+              />
+              刻行列标注
+            </label>
+          </div>
+          <div className="lab-test-hint">
+            {matrixTestType === "interval"
+              ? "线距测试：一排填充小方块，每块线距不同、旁边刻数值；选扫描线刚好相接、没有缝也不重叠的那块（建议从 0.08~0.16 mm 起）。"
+              : "按烧蚀风险从低到高加工：高速、低功率、宽线距、少遍数的格子先刻。"}
           </div>
 
           {/* Device Connection Row（支持网络与 USB 串口） */}
@@ -1292,8 +1540,16 @@ export function MaterialLabPage({ onNavigate }) {
                 <div className="lab-box-5">
                   {readOnly
                     ? "校准结果（保存最佳单元格请在电脑上操作）："
-                    : `点击下方单元格将最佳效果存为「${matrixPreview.material || selectedMaterial} ${matrixPreview.thickness_mm ?? selectedThickness}mm」推荐参数：`}
+                    : `点击下方单元格将最佳效果存为「${matrixPreview.material || selectedMaterial} ${
+                      matrixPreview.surface_entry ? "表面通用" : `${matrixPreview.thickness_mm ?? selectedThickness}mm`
+                    }」推荐参数：`}
                 </div>
+                {matrixPreview.test_type !== "interval" && matrixPreview.x_axis ? (
+                  <div className="lab-test-legend">
+                    列：{TEST_AXIS_LABELS[matrixPreview.x_axis] || matrixPreview.x_axis} · 行：
+                    {TEST_AXIS_LABELS[matrixPreview.y_axis] || matrixPreview.y_axis}（预览第一行即样板最下面一行 A）
+                  </div>
+                ) : null}
                 <div
                   style={{
                     display: "grid",
@@ -1321,11 +1577,15 @@ export function MaterialLabPage({ onNavigate }) {
                         borderRadius: "2px",
                         border: "1px solid rgba(255,255,255,0.1)",
                       }}
-                      title={`#${i + 1} ${cell.id}: S${cell.power} F${cell.speed} × ${cell.passes}`}
+                      title={`#${i + 1} ${cell.id}: S${cell.power} F${cell.speed} × ${cell.passes}${
+                        cell.line_interval_mm != null ? ` · 线距 ${cell.line_interval_mm} mm` : ""
+                      }${cell.run_index ? ` · 第 ${cell.run_index} 个加工` : ""}`}
                     >
                       <span className="lab-text-2">{i + 1}</span>
-                      <span>S{cell.power}</span>
-                      <span>F{cell.speed}</span>
+                      <span>{cellAxisText(cell, matrixPreview.x_axis || "power", "x")}</span>
+                      {matrixPreview.test_type === "interval" ? null : (
+                        <span>{cellAxisText(cell, matrixPreview.y_axis || "speed", "y")}</span>
+                      )}
                     </div>
                   ))}
                 </div>
