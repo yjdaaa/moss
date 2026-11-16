@@ -177,7 +177,7 @@ Python 版把内置 `DEFAULT_MATERIAL_PARAMS`（椴木 3mm、亚克力 3mm、皮
 | 模式节点 `cut` | 直接是参数格 |
 | 墓碑 | 导出不出现 `null` 或 `{}` 的模式节点或格；导入与迁移遇到 `null`/`{}` 视为该格不存在（§3.6.1 第 3 条） |
 | 参数格必填 | `laser_min_power`、`laser_max_power`、`feed_rate`、`travel_rate`、`threshold`、`passes` 整数；`pixel_size_mm` 数值。范围与 Python `_normalize_params` 一致：功率 0..S_MAX，`feed_rate`/`travel_rate` ≥1，`threshold` -1..255（-1 自动），`passes` 1..max_passes，`pixel_size_mm` >0。`manage(save)` 缺失按 api-contracts.md §3.10 默认值补齐；导入/迁移不补默认值，缺失存 NULL、导出省略该键（保真）；数值字段入库统一转为数字，无法转换返回 400 |
-| 参数格可选 | `source`、`notes` 字符串，`updated_at` REAL；缺失存 NULL，导出省略该键；`notes` 为 `""` 时保留空串。`revision`、`history`、`machine_profile_id`、`confidence`、`evidence` 及未知键进 `extra` JSON，导出原样回填 |
+| 参数格可选 | `source`、`notes` 字符串，`updated_at` REAL；缺失存 NULL，导出省略该键；`notes` 为 `""` 时保留空串。`revision`、`history`、`machine_profile_id`、`confidence`、`evidence` 及未知键进 `extra` JSON，导出原样回填。2026-11-16 起 `extra` 里另有条目标题 `title`，r40 起雕刻格可带 `fill_options`、切割格可带 `cut_options`（随材料保存的图层设置，见 api-contracts.md §3.10），均无需迁移 |
 | 删除语义 | 删格即删行；一个厚度下无任何格时删除该厚度键；材料无任何厚度时删除材料及其别名（Python 对非内置材料的行为，A1 后对内置材料同样适用） |
 
 `material_params_history`：与 `material_params` 同列，另加 `replaced_at`、`reason`（import_overwrite / manual_edit / calibration_select）。覆盖前把旧行拷进去。

@@ -22,6 +22,8 @@ import { showAlert, showChoice, showConfirm, showPrompt } from "../appDialog.js"
 import { defaultSerialPortHint } from "../platform.js";
 import { exportFile, savedMessage } from "../saveFile.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
+import { CalibrationWizard } from "../components/CalibrationWizard.jsx";
+import { markWizardStep, readWizardState, wizardMaterialKey, writeWizardState } from "../calibrationWizard.js";
 import { estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { MATERIAL_LIBRARY_CHANNEL, notifyMaterialsUpdated } from "../materialSelectState.js";
@@ -131,6 +133,12 @@ export function MaterialLabPage({ onNavigate }) {
   const [matrixBusy, setMatrixBusy] = useState(false);
   const [matrixSendState, setMatrixSendState] = useState(null); // {status, lines_sent, total_lines, error}
   const matrixPollRef = useRef(null);
+  // 首次标定向导进度（r40）：存本机，跟材料的步骤按“材料|厚度”分开
+  const [wizard, setWizard] = useState(() => readWizardState());
+  const updateWizard = (next) => {
+    setWizard(next);
+    writeWizardState(next);
+  };
 
   const currentMatrixSig = matrixInputSignature({
     material: selectedMaterial,
@@ -152,7 +160,8 @@ export function MaterialLabPage({ onNavigate }) {
     passesMax: matrixPassesMax,
     labels: matrixLabels,
   });
-  const matrixStale = Boolean(matrixId) && isMatrixStale(matrixSignature, currentMatrixSig);
+  // 向导测试图案不受矩阵输入框影响（它绑定生成时的材料与厚度，记录里自带）
+  const matrixStale = Boolean(matrixId) && !matrixPreview?.wizard_pattern && isMatrixStale(matrixSignature, currentMatrixSig);
 
   const applyEditorState = useCallback((allMats, matName, thickKey, mode) => {
     const resolved = resolveCellEditorValues(allMats, matName, thickKey, mode);
@@ -621,7 +630,7 @@ export function MaterialLabPage({ onNavigate }) {
       preview: matrixPreview,
       material: selectedMaterial,
       thickness: selectedThickness,
-      mode: matrixMode,
+      mode: matrixPreview?.wizard_pattern ? (matrixPreview.laser_mode === "cut" ? "cut" : "raster") : matrixMode,
       targetLabel: built.targetLabel,
     });
     const confirmed = await showConfirm(prompt.message, {
@@ -722,6 +731,17 @@ export function MaterialLabPage({ onNavigate }) {
           `已将单元格 #${cellNumber} 保存为「${targetMat} ${savedSurface ? "表面通用" : `${targetThick}mm`}」推荐参数！`,
         );
         setActiveMode(targetUiMode);
+        // 向导的线距 / 矩阵步骤：光栅选格写回成功即算完成
+        if (targetLaserMode !== "cut" && targetEngravingMode === "raster") {
+          const wizardStep = matrixPreview?.test_type === "interval" ? "interval" : "matrix";
+          const cell = matrixPreview?.cells?.[cellIndex] || {};
+          updateWizard(markWizardStep(readWizardState(), wizardStep, "done", {
+            materialKey: wizardMaterialKey(targetMat, savedSurface ? "surface" : String(targetThick)),
+            note: wizardStep === "interval"
+              ? `线距 ${cell.line_interval_mm ?? "-"} mm（#${cellNumber}）`
+              : `功率 S${cell.power ?? "-"} · 速度 ${cell.speed ?? "-"} mm/min（#${cellNumber}）`,
+          }));
+        }
         notifyMaterialsUpdated();
         await loadBootstrap({
           material: targetMat,
@@ -733,6 +753,56 @@ export function MaterialLabPage({ onNavigate }) {
       }
     } catch (e) {
       setMatrixStatus(`保存单元格网络异常: ${e.message}`);
+    }
+  };
+
+  // 向导：把右侧矩阵面板设成线距测试 / 功率 × 速度矩阵（光栅），由用户照常生成、确认发送、选格
+  const prepareWizardMatrix = (kind) => {
+    handleModeChange("raster");
+    setMatrixTestType(kind === "interval" ? "interval" : "matrix");
+    if (kind !== "interval") {
+      setMatrixXAxis("power");
+      setMatrixYAxis("speed");
+    }
+    setMatrixStatus(
+      kind === "interval"
+        ? "向导：已设为线距测试，点【生成矩阵】→【发送测试】（会先确认），刻完点选最好的方块"
+        : "向导：已设为功率 × 速度矩阵（用材料库线距），点【生成矩阵】→【发送测试】，刻完点选最好的格子",
+    );
+    try {
+      document.getElementById("lab-matrix-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch {
+      // 滚动失败不影响设置
+    }
+  };
+
+  // 向导测试图案（双向扫描偏移 / 过扫描 / 切缝）：只生成并显示在矩阵面板，发送仍走【发送测试】的确认框
+  const generateWizardPattern = async (payload) => {
+    setMatrixBusy(true);
+    setMatrixStatus("正在生成向导测试刀路...");
+    try {
+      const res = await postJson("/api/material-lab/preview", payload);
+      if (res.ok && res.data?.success && res.data.result?.calibration_id) {
+        const record = res.data.result;
+        matrixPollRef.current?.();
+        setMatrixId(record.calibration_id);
+        setMatrixPreview(record);
+        setMatrixSignature(currentMatrixSig);
+        setSelectedCellNum(null);
+        setMatrixSendState(null);
+        const est = record.time_estimate?.estimated_minutes;
+        setMatrixStatus(
+          `向导测试已生成（${record.cell_count || 0} 块，外框 ${Number(record.width_mm || 0).toFixed(0)}×${Number(record.height_mm || 0).toFixed(0)} mm${typeof est === "number" ? `，约 ${est.toFixed(1)} 分钟` : ""}）；放好样板后点【发送测试】`,
+        );
+        return record;
+      }
+      setMatrixStatus(`生成失败: ${res.data?.result || res.error || "校验未通过"}`);
+      return null;
+    } catch (e) {
+      setMatrixStatus(`生成网络异常: ${e.message}`);
+      return null;
+    } finally {
+      setMatrixBusy(false);
     }
   };
 
@@ -798,6 +868,21 @@ export function MaterialLabPage({ onNavigate }) {
           )}
         </div>
       </div>
+
+      <CalibrationWizard
+        wizard={wizard}
+        onWizardChange={updateWizard}
+        material={selectedMaterial}
+        thickness={selectedThickness}
+        readOnly={readOnly}
+        onPrepareMatrix={prepareWizardMatrix}
+        onGeneratePattern={generateWizardPattern}
+        patternPreview={matrixPreview}
+        patternStale={matrixStale}
+        busy={matrixBusy}
+        running={isMatrixRunning}
+        onSend={handleSendMatrix}
+      />
 
       {/* 三栏：材料库表格、材料参数、校准矩阵（技术书 §9.5.5 B） */}
       <div className="ob-lab">
@@ -1142,7 +1227,7 @@ export function MaterialLabPage({ onNavigate }) {
         </div>
 
         {/* Right Column: Calibration Grid Matrix */}
-        <div className="hud-card ob-card lab-row-4">
+        <div className="hud-card ob-card lab-row-4" id="lab-matrix-card">
           <FoldHeader id="lab-matrix" title="校准矩阵" k="MATRIX" n={3} />
           <div className="lab-row-9">
             <h3 className="lab-heading-2">
@@ -1538,13 +1623,15 @@ export function MaterialLabPage({ onNavigate }) {
             {matrixPreview ? (
               <div className="lab-box-4">
                 <div className="lab-box-5">
-                  {readOnly
+                  {matrixPreview.wizard_pattern
+                    ? "标定向导的测试图案：刻完后在上方向导里填写测量结果（不按格选参数）"
+                    : readOnly
                     ? "校准结果（保存最佳单元格请在电脑上操作）："
                     : `点击下方单元格将最佳效果存为「${matrixPreview.material || selectedMaterial} ${
                       matrixPreview.surface_entry ? "表面通用" : `${matrixPreview.thickness_mm ?? selectedThickness}mm`
                     }」推荐参数：`}
                 </div>
-                {matrixPreview.test_type !== "interval" && matrixPreview.x_axis ? (
+                {matrixPreview.test_type !== "interval" && !matrixPreview.wizard_pattern && matrixPreview.x_axis ? (
                   <div className="lab-test-legend">
                     列：{TEST_AXIS_LABELS[matrixPreview.x_axis] || matrixPreview.x_axis} · 行：
                     {TEST_AXIS_LABELS[matrixPreview.y_axis] || matrixPreview.y_axis}（预览第一行即样板最下面一行 A）
@@ -1561,7 +1648,7 @@ export function MaterialLabPage({ onNavigate }) {
                   {(matrixPreview.cells || []).map((cell, i) => (
                     <div
                       key={cell.id || i}
-                      onClick={readOnly ? undefined : () => handleSaveBestCell(i)}
+                      onClick={readOnly || matrixPreview.wizard_pattern ? undefined : () => handleSaveBestCell(i)}
                       style={{
                         width: "44px",
                         height: "44px",
@@ -1573,7 +1660,7 @@ export function MaterialLabPage({ onNavigate }) {
                         justifyContent: "center",
                         fontSize: "9px",
                         lineHeight: 1.15,
-                        cursor: readOnly ? "default" : "pointer",
+                        cursor: readOnly || matrixPreview.wizard_pattern ? "default" : "pointer",
                         borderRadius: "2px",
                         border: "1px solid rgba(255,255,255,0.1)",
                       }}
@@ -1582,8 +1669,10 @@ export function MaterialLabPage({ onNavigate }) {
                       }${cell.run_index ? ` · 第 ${cell.run_index} 个加工` : ""}`}
                     >
                       <span className="lab-text-2">{i + 1}</span>
-                      <span>{cellAxisText(cell, matrixPreview.x_axis || "power", "x")}</span>
-                      {matrixPreview.test_type === "interval" ? null : (
+                      <span>
+                        {matrixPreview.wizard_pattern ? cell.x_label : cellAxisText(cell, matrixPreview.x_axis || "power", "x")}
+                      </span>
+                      {matrixPreview.test_type === "interval" || matrixPreview.wizard_pattern ? null : (
                         <span>{cellAxisText(cell, matrixPreview.y_axis || "speed", "y")}</span>
                       )}
                     </div>

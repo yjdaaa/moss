@@ -13,8 +13,19 @@ import QualityPresetBar from "./QualityPresetBar.jsx";
  * 填充与走刀设置（2026-11-16，对齐 LightBurn）：默认折叠，一行摘要；
  * `withFill=false` 时只显示走刀选项（描边 / 切割没有扫描填充）；
  * `withCut=true`（工作台文字“外框切割”）时多一段切割设置：切缝补偿、桥位、引入 / 引出线、过切（默认全关）。
+ * r40：`materialHint` 非空时显示“来自材料库”提示；给了 `onSaveToMaterial` 时显示“保存到材料库”按钮
+ * （扫描角度、过扫描、切割设置等随材料保存，扫描偏移与加速度仍只存本机）。
  */
-function FillOptionsDetails({ idPrefix, settings, onChange, withFill = true, withCut = false }) {
+function FillOptionsDetails({
+  idPrefix,
+  settings,
+  onChange,
+  withFill = true,
+  withCut = false,
+  materialHint = "",
+  materialEntryLabel = "",
+  onSaveToMaterial = null,
+}) {
   const s = normalizeFillSettings(settings);
   const set = (key, value) => onChange({ ...s, [key]: value });
   const id = (name) => `${idPrefix}-${name}`;
@@ -39,9 +50,28 @@ function FillOptionsDetails({ idPrefix, settings, onChange, withFill = true, wit
     <details className="fill-options" id={id("fill-options")}>
       <summary>
         <span className="fill-options-title">{withFill ? `高级设置 · ${title}` : title}</span>
-        <span className="fill-options-summary">{fillSettingsSummary(s, { withFill, withCut })}</span>
+        <span className="fill-options-summary">
+          {fillSettingsSummary(s, { withFill, withCut })}
+          {materialHint ? " · 来自材料库" : ""}
+        </span>
       </summary>
       <div className="fill-options-body">
+        {materialHint || onSaveToMaterial ? (
+          <div className="fill-options-wide fill-options-material" id={id("material-layer")}>
+            <span>{materialHint || `材料库「${materialEntryLabel || "当前条目"}」还没有存这组设置（用的是本机上次的值）`}</span>
+            {onSaveToMaterial ? (
+              <button
+                type="button"
+                className="btn-ghost"
+                id={id("material-save")}
+                onClick={onSaveToMaterial}
+                title="把扫描角度、过扫描、切割设置等存进当前材料条目；扫描偏移与机器加速度跟机器走，不存进材料库"
+              >
+                保存到材料库
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {withCut ? (
           <>
             <div className="fill-options-wide fill-options-section">切割设置（对齐 LightBurn，全部为 0 时与以前完全相同）</div>

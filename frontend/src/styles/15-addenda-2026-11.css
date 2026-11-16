@@ -454,3 +454,22 @@ button.conn-pill:hover {
 .quality-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; min-width: 0; }
 .quality-presets-label { font-size: 12px; font-weight: 600; color: var(--ob-ink-2); }
 .quality-presets .quality-preset-custom { cursor: default; }
+/* r40：随材料保存的填充 / 切割设置提示与“保存到材料库” */
+.fill-options-material { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; color: var(--ob-ink-2); }
+.fill-options-material > span { min-width: 0; overflow-wrap: anywhere; }
+/* r40：材料实验室首次标定向导 */
+.lab-wizard { margin-bottom: 14px; padding: 10px 14px; }
+.lab-wizard > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; cursor: pointer; }
+.lab-wizard-title { font-weight: 600; }
+.lab-wizard-progress { font-size: 11px; color: var(--ink-dim); }
+.lab-wizard-steps { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lab-wizard-step { border: 1px solid var(--ob-line, rgba(255, 255, 255, 0.1)); border-radius: 4px; }
+.lab-wizard-step.on { border-color: var(--ob-line-2, rgba(140, 175, 255, 0.55)); }
+.lab-wizard-step.done .lab-wizard-step-head span { color: var(--ok, #4ade80); }
+.lab-wizard-step-head { width: 100%; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; padding: 6px 10px; background: none; border: 0; color: inherit; text-align: left; cursor: pointer; }
+.lab-wizard-step-head span { font-size: 11px; color: var(--ink-dim); }
+.lab-wizard-body { padding: 0 10px 10px; font-size: 12px; line-height: 1.5; }
+.lab-wizard-body p { margin: 6px 0; }
+.lab-wizard-summary, .lab-wizard-status { font-size: 11px; color: var(--ink-dim); }
+.lab-wizard-actions, .lab-wizard-measure { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 6px; }
+.lab-wizard-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; min-width: 0; flex: 1 1 160px; }

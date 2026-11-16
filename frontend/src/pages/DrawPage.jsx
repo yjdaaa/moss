@@ -37,6 +37,7 @@ import {
   applyMaterialSelectChange,
   findMaterialOption,
   loadUiMaterialOptions,
+  notifyMaterialsUpdated,
   restoreMaterialSelectState,
   returnToLibrary,
 } from "../materialSelectState.js";
@@ -72,11 +73,17 @@ import {
 } from "../registrationState.js";
 import { framingOutline, readFramingShape, writeFramingShape } from "../aiPreviewState.js";
 import {
+  applyMaterialLayer,
   fillResultNote,
   fillSettingsPayload,
   fillSettingsSignature,
+  localSettingsToStore,
   machineMotionFromLimits,
   machineMotionPayload,
+  materialLayerFromRecommendation,
+  materialLayerHint,
+  materialLayerPayload,
+  materialLayerSaveRequest,
   readFillSettings,
   readMachineMotion,
   timeEstimateNote,
@@ -150,9 +157,13 @@ export function DrawPage({ onNavigate }) {
   const [customParams, setCustomParams] = useState(false);
   // 2026-11-16：矢量模式的填充与走刀设置（对齐 LightBurn），与工作台文字共用一份本机设置
   const [fillSettings, setFillSettings] = useState(() => readFillSettings());
+  // r40：当前材料条目随材料保存的填充设置（矢量模式用轮廓条目），可改，“保存到材料库”写回
+  const [materialLayer, setMaterialLayer] = useState(null);
+  const [materialApplied, setMaterialApplied] = useState([]);
+  const materialLayerKeyRef = useRef("");
   const updateFillSettings = (next) => {
     setFillSettings(next);
-    writeFillSettings(next);
+    writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
   };
   // 握手读到的机器加速度 / 最大速度（与工作台共用本机记录）：工时估算与自动过扫描用
   const [machineMotion, setMachineMotion] = useState(() => readMachineMotion());
@@ -237,6 +248,12 @@ export function DrawPage({ onNavigate }) {
       if (cancelled) return;
       if (!res.ok || !res.data?.success || !res.data.result) {
         setHasRec(false);
+        setMaterialLayer(null);
+        if (materialLayerKeyRef.current) {
+          materialLayerKeyRef.current = "";
+          setFillSettings(readFillSettings());
+          setMaterialApplied([]);
+        }
         return;
       }
       const rec = res.data.result;
@@ -244,11 +261,43 @@ export function DrawPage({ onNavigate }) {
       if (rec.feed_rate != null) setRecFeedMpm(Math.round(rec.feed_rate));
       setRecPasses(Math.max(1, Math.round(rec.passes || 1)));
       setHasRec(true);
+      const layer = materialLayerFromRecommendation(rec);
+      setMaterialLayer(layer);
+      if (layer && layer.key !== materialLayerKeyRef.current) {
+        materialLayerKeyRef.current = layer.key;
+        const next = applyMaterialLayer(readFillSettings(), layer);
+        setFillSettings(next.settings);
+        setMaterialApplied(next.applied);
+      }
     });
     return () => {
       cancelled = true;
     };
   }, [form.material, form.thickness_mm, form.mode, recRefreshTick]);
+
+  // r40：把当前填充设置存进材料库条目（只改图层设置；扫描偏移与机器加速度不随材料保存）
+  const saveFillToMaterial = async () => {
+    if (!materialLayer) return;
+    const payload = materialLayerPayload(fillSettings, { withFill: true });
+    if (payload.error) {
+      showAlert(payload.error, { title: "填充设置不对", tone: "warning" });
+      return;
+    }
+    const ok = await showConfirm(
+      `把当前填充设置存进材料库「${materialLayer.label}」？\n以后选这个材料会自动带出；双向扫描偏移与机器加速度跟机器走，不随材料保存。`,
+      { title: "保存到材料库", confirmText: "保存", cancelText: "取消" },
+    );
+    if (!ok) return;
+    const res = await postJson("/api/material-lab/manage", materialLayerSaveRequest(materialLayer, payload));
+    if (res.ok && res.data?.success) {
+      setStatus(`已把填充设置存进材料库「${materialLayer.label}」`);
+      notifyMaterialsUpdated();
+      materialLayerKeyRef.current = "";
+      setRecRefreshTick((tick) => tick + 1);
+    } else {
+      showAlert(res.data?.result || res.error || "保存失败", { title: "保存到材料库失败", tone: "error" });
+    }
+  };
 
   const currentFormSig = drawGenerationSignature(form, {
     enabled: customParams,
@@ -1165,7 +1214,14 @@ export function DrawPage({ onNavigate }) {
                 只刻选中的图形（位置与整幅一致）
                 {selectedOnly ? `：已选 ${selectionKey ? selectionKey.split(",").length : 0} 个` : ""}
               </label>
-              <FillOptionsPanel idPrefix="draw" settings={fillSettings} onChange={updateFillSettings} />
+              <FillOptionsPanel
+                idPrefix="draw"
+                settings={fillSettings}
+                onChange={updateFillSettings}
+                materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
+                materialEntryLabel={materialLayer?.label || ""}
+                onSaveToMaterial={!isRemoteMode() && materialLayer ? saveFillToMaterial : null}
+              />
             </>
           ) : null}
 

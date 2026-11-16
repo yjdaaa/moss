@@ -136,9 +136,12 @@ pub fn is_reference_data_write(method: &str, route: &str, body: &[u8]) -> bool {
     }
     match route {
         // select-cell 会把校准单元格保存为材料推荐参数
-        "/api/settings" | "/api/jev/test" | "/api/jev/reveal" | "/api/material-lab/select-cell" => {
-            true
-        }
+        // time-calibration 只有清除（reset）一种写操作（r40）
+        "/api/settings"
+        | "/api/jev/test"
+        | "/api/jev/reveal"
+        | "/api/material-lab/select-cell"
+        | "/api/time-calibration" => true,
         "/api/material-lab/manage" => {
             let action = serde_json::from_slice::<serde_json::Value>(body)
                 .ok()

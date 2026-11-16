@@ -1,5 +1,6 @@
 use super::*;
 
+mod calibration_wizard;
 mod golden;
 mod material_routes;
 mod material_test_routes;

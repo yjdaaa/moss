@@ -265,6 +265,7 @@ export function cutResultNote(cut) {
   if (leads > 0) parts.push(`引线 ${leads} 条`);
   const overcut = Number(report.overcut_mm) || 0;
   if (overcut > 0) parts.push(`过切共 ${overcut.toFixed(1)} mm`);
+  if (Array.isArray(cut.from_material) && cut.from_material.length) parts.push("部分设置取自材料库");
   if (typeof cut.note === "string" && cut.note) parts.push(cut.note);
   return parts.join("，");
 }
@@ -282,6 +283,7 @@ export function fillResultNote(fill, removedDuplicates = 0, cut = null) {
     if (fill.scan_offset_source === "table" && Number.isFinite(offset)) {
       line += `，扫描偏移 ${offset.toFixed(3)} mm（按速度表）`;
     }
+    if (Array.isArray(fill.from_material) && fill.from_material.length) line += "，部分设置取自材料库";
     notes.push(line);
   }
   const cutNote = cutResultNote(cut);
@@ -338,14 +340,194 @@ export function machineMotionPayload(settings, stored) {
   return Object.keys(motion).length ? { machine_motion: motion } : {};
 }
 
-/** 工时估算说明：用了多大的加速度、来自哪里。 */
+/** 工时自校准说明（r40）：`time_estimate.calibration` 存在时返回“已按最近 N 次实际用时校准”。 */
+export function timeCalibrationNote(estimate) {
+  const cal = estimate && typeof estimate === "object" ? estimate.calibration : null;
+  const samples = Number(cal?.samples);
+  const factor = Number(cal?.factor);
+  if (!cal || !Number.isFinite(samples) || samples <= 0 || !Number.isFinite(factor)) return "";
+  const raw = Number(estimate.raw_estimated_seconds);
+  const rawText = Number.isFinite(raw) ? `，原估 ${Math.round(raw)} 秒` : "";
+  return `已按最近 ${samples} 次实际用时校准（×${factor.toFixed(2)}${rawText}）`;
+}
+
+/** 工时估算说明：用了多大的加速度、来自哪里；校准过时再加一句。 */
 export function timeEstimateNote(estimate) {
   if (!estimate || estimate.model !== "acceleration") return "";
   const x = Number(estimate.acceleration_mm_s2?.x);
   const y = Number(estimate.acceleration_mm_s2?.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return "";
   const accel = x === y ? `${x}` : `X ${x} / Y ${y}`;
-  return estimate.acceleration_source === "machine"
+  const base = estimate.acceleration_source === "machine"
     ? `按机器加速度 ${accel} mm/s² 估算加减速`
     : `按默认加速度 ${accel} mm/s² 估算加减速（连接机器后自动读取实际值）`;
+  const cal = timeCalibrationNote(estimate);
+  return cal ? `${base}；${cal}` : base;
+}
+
+// ---- 随材料保存的填充 / 切割设置（r40，2026-11-16，对齐 LightBurn 库条目保存整套图层设置）----
+// 扫描角度、分组、交叉、双向、过扫描与切割设置跟着材料走，存进材料库条目；
+// 双向扫描偏移（含速度表）、机器加速度与走刀偏好跟机器 / 本人走，仍只存在本机。
+
+export const MATERIAL_FILL_SETTING_KEYS = Object.freeze(["grouping", "angleDeg", "crossHatch", "bidirectional", "overscanAuto", "overscanMm"]);
+export const MATERIAL_CUT_SETTING_KEYS = Object.freeze([...CUT_KEYS]);
+
+const SETTING_LABELS = {
+  grouping: "填充分组",
+  angleDeg: "扫描角度",
+  crossHatch: "交叉排线",
+  bidirectional: "双向扫描",
+  overscanAuto: "过扫描",
+  overscanMm: "过扫描",
+  kerfMm: "切缝补偿",
+  tabMode: "桥位",
+  tabCount: "桥位",
+  tabSpacingMm: "桥位",
+  tabWidthMm: "桥位宽度",
+  tabsSkipInner: "孔不加桥位",
+  leadInMm: "引入线",
+  leadOutMm: "引出线",
+  leadAngleDeg: "引线角度",
+  overcutMm: "过切",
+};
+
+const isObj = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const finite = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+
+/** 材料库条目回显的 `fill_options` / `cut_options`（后端字段名）→ 面板设置的部分值。 */
+export function settingsFromMaterialLayer(layer) {
+  const out = {};
+  const fill = isObj(layer?.fill_options) ? layer.fill_options : null;
+  const cut = isObj(layer?.cut_options) ? layer.cut_options : null;
+  if (fill) {
+    if (FILL_GROUPING_OPTIONS.some((opt) => opt.value === fill.grouping)) out.grouping = fill.grouping;
+    if (finite(fill.angle_deg)) out.angleDeg = String(fill.angle_deg);
+    if (typeof fill.cross_hatch === "boolean") out.crossHatch = fill.cross_hatch;
+    if (typeof fill.bidirectional === "boolean") out.bidirectional = fill.bidirectional;
+    if (typeof fill.overscan_mm === "string" && fill.overscan_mm.trim().toLowerCase() === "auto") {
+      out.overscanAuto = true;
+    } else if (finite(fill.overscan_mm)) {
+      out.overscanAuto = false;
+      out.overscanMm = String(fill.overscan_mm);
+    }
+  }
+  if (cut) {
+    if (finite(cut.kerf_mm)) out.kerfMm = String(cut.kerf_mm);
+    if (finite(cut.tab_count) && Number(cut.tab_count) > 0) {
+      out.tabMode = "count";
+      out.tabCount = String(cut.tab_count);
+    } else if (finite(cut.tab_spacing_mm) && Number(cut.tab_spacing_mm) > 0) {
+      out.tabMode = "spacing";
+      out.tabSpacingMm = String(cut.tab_spacing_mm);
+    } else if (finite(cut.tab_count) || finite(cut.tab_spacing_mm)) {
+      out.tabMode = "off";
+    }
+    if (finite(cut.tab_width_mm)) out.tabWidthMm = String(cut.tab_width_mm);
+    if (typeof cut.tabs_skip_inner === "boolean") out.tabsSkipInner = cut.tabs_skip_inner;
+    if (finite(cut.lead_in_mm)) out.leadInMm = String(cut.lead_in_mm);
+    if (finite(cut.lead_out_mm)) out.leadOutMm = String(cut.lead_out_mm);
+    if (finite(cut.lead_angle_deg)) out.leadAngleDeg = String(cut.lead_angle_deg);
+    if (finite(cut.overcut_mm)) out.overcutMm = String(cut.overcut_mm);
+  }
+  return out;
+}
+
+/**
+ * 把材料库条目里的设置盖到本机设置上：返回 `{ settings, applied }`，`applied` 是取自材料库的面板键。
+ * 条目没有图层设置时原样返回（applied 为空）。用户之后仍可改，改动只影响本次生成。
+ */
+export function applyMaterialLayer(base, layer) {
+  const partial = settingsFromMaterialLayer(layer);
+  return { settings: normalizeFillSettings({ ...normalizeFillSettings(base), ...partial }), applied: Object.keys(partial) };
+}
+
+/** “来自材料库”提示：列出载入了哪些项；没有时返回空串。 */
+export function materialLayerHint(applied, entryLabel = "") {
+  if (!Array.isArray(applied) || !applied.length) return "";
+  const names = [...new Set(applied.map((key) => SETTING_LABELS[key]).filter(Boolean))];
+  return `来自材料库${entryLabel ? `「${entryLabel}」` : ""}：${names.join("、")}（可改，只影响这次生成）`;
+}
+
+/**
+ * “保存到材料库”要提交的值：雕刻条目存 `fill_options`（不含扫描偏移与加速度），切割条目存 `cut_options`
+ * （不加桥位时记 `tab_count: 0`，载入时据此关掉桥位）。填写有误返回 `{ error }`。
+ */
+export function materialLayerPayload(settings, { withFill = true, withCut = false } = {}) {
+  const s = normalizeFillSettings(settings);
+  if (withCut) {
+    const cut = cutOptionsPayload(s);
+    if (cut.error) return { error: cut.error };
+    const cut_options = { ...cut.value };
+    if (s.tabMode === "off") cut_options.tab_count = 0;
+    return { cut_options };
+  }
+  if (!withFill) return { error: "当前刻法没有可存进材料库的填充或切割设置" };
+  const angle = numberField(s.angleDeg, "扫描角度", { min: -360, max: 360 });
+  if (angle.error) return { error: angle.error };
+  const fill_options = {
+    grouping: s.grouping,
+    angle_deg: angle.value,
+    cross_hatch: s.crossHatch,
+    bidirectional: s.bidirectional,
+  };
+  if (s.overscanAuto) {
+    fill_options.overscan_mm = "auto";
+  } else {
+    const over = numberField(s.overscanMm, "过扫描距离", { min: 0, max: 20 });
+    if (over.error) return { error: over.error };
+    fill_options.overscan_mm = over.value;
+  }
+  return { fill_options };
+}
+
+/**
+ * 推荐接口（`/api/ui/material-recommendation`）结果 → 面板用的材料库条目信息；
+ * `key` 变了才需要重新载入（同一条目刷新不打断用户正在改的值）。
+ */
+export function materialLayerFromRecommendation(rec) {
+  if (!isObj(rec) || !rec.material) return null;
+  const surface = rec.match === "surface";
+  const thickness = Number(rec.matched_thickness_mm ?? rec.thickness_mm);
+  const laserMode = rec.laser_mode === "cut" ? "cut" : "engrave";
+  const engravingMode = laserMode === "cut" ? "" : rec.engraving_mode === "outline" ? "outline" : "raster";
+  const modeLabel = laserMode === "cut" ? "切割" : engravingMode === "outline" ? "轮廓" : "光栅";
+  const layer = {
+    material: rec.material,
+    thicknessMm: Number.isFinite(thickness) ? thickness : null,
+    surface,
+    laserMode,
+    engravingMode,
+    label: `${rec.material} ${surface ? "表面通用" : `${Number.isFinite(thickness) ? thickness : "?"}mm`} ${modeLabel}`,
+    fill_options: isObj(rec.fill_options) ? rec.fill_options : null,
+    cut_options: isObj(rec.cut_options) ? rec.cut_options : null,
+  };
+  layer.key = JSON.stringify([layer.label, layer.fill_options, layer.cut_options]);
+  return layer;
+}
+
+/** `save_layer_options` 请求体（材料实验室管理接口）。 */
+export function materialLayerSaveRequest(layer, payload) {
+  return {
+    action: "save_layer_options",
+    material: layer.material,
+    ...(layer.surface ? { surface: true } : { thickness_mm: layer.thicknessMm }),
+    laser_mode: layer.laserMode,
+    engraving_mode: layer.engravingMode,
+    ...payload,
+  };
+}
+
+/**
+ * 用户改设置时写进本机存储的值：取自材料库的那些键保留本机原来的值（改动只影响这次生成，
+ * 换到没有存设置的材料时仍回到自己上次的习惯值）；其余键照常记住。
+ */
+export function localSettingsToStore(next, stored, applied) {
+  const keep = Array.isArray(applied) ? applied : [];
+  if (!keep.length) return normalizeFillSettings(next);
+  const base = normalizeFillSettings(stored);
+  const out = { ...normalizeFillSettings(next) };
+  for (const key of keep) {
+    if (key in base) out[key] = base[key];
+  }
+  return out;
 }

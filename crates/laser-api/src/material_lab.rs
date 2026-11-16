@@ -6,7 +6,7 @@ impl ApiService {
     }
 
     /// 写入标定矩阵记录（SQLite 优先，否则内存兼容表）。
-    fn save_calibration(&self, record: &serde_json::Value) -> Result<(), String> {
+    pub(crate) fn save_calibration(&self, record: &serde_json::Value) -> Result<(), String> {
         let calibration_id = record
             .get("calibration_id")
             .and_then(|v| v.as_str())
@@ -91,6 +91,10 @@ impl ApiService {
             .filter(|v| !v.is_empty())
             .unwrap_or("matrix")
             .to_ascii_lowercase();
+        // 首次标定向导的测试图案（r40）：双向扫描偏移、过扫描检查、切缝，另行生成
+        if crate::material_lab_patterns::WIZARD_PATTERN_TEST_TYPES.contains(&test_type.as_str()) {
+            return self.material_lab_pattern_preview(object, material, thickness_mm, &test_type);
+        }
         let is_interval_test = match test_type.as_str() {
             "matrix" => false,
             "interval" => true,
@@ -98,7 +102,7 @@ impl ApiService {
                 return Err((
                     400,
                     failure(
-                        "test_type 只能是 matrix 或 interval",
+                        "test_type 只能是 matrix、interval、scan_offset、overscan 或 kerf",
                         Some(serde_json::json!({"error_code": "invalid_test_type"})),
                     ),
                 ));
@@ -546,6 +550,7 @@ impl ApiService {
         if let (Some(map), serde_json::Value::Object(meta)) = (record.as_object_mut(), test_meta) {
             map.extend(meta);
         }
+        self.apply_time_calibration(record.get_mut("time_estimate"), object);
         self.save_calibration(&record)
             .map_err(|e| (500, failure(format!("保存标定矩阵失败: {e}"), None)))?;
         Ok(record)
@@ -838,6 +843,19 @@ impl ApiService {
             return Err((
                 400,
                 failure("表面通用条目只能存雕刻参数，切割必须按真实厚度保存", None),
+            ));
+        }
+        if record
+            .get("test_type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| crate::material_lab_patterns::WIZARD_PATTERN_TEST_TYPES.contains(&t))
+        {
+            return Err((
+                400,
+                failure(
+                    "这是标定向导的测试图案，不按格选参数；请量好结果后在向导里填写保存",
+                    Some(serde_json::json!({"error_code": "pattern_not_selectable"})),
+                ),
             ));
         }
         let is_interval_test = record.get("test_type").and_then(|v| v.as_str()) == Some("interval");

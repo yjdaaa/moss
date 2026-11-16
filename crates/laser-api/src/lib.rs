@@ -20,6 +20,7 @@ mod generation;
 mod http;
 mod jobs;
 mod material_lab;
+mod material_lab_patterns;
 mod materials;
 mod registration;
 mod resume;
@@ -30,6 +31,7 @@ mod server;
 mod service;
 mod settings;
 mod sketch;
+mod time_calibration;
 mod update;
 mod workflow;
 

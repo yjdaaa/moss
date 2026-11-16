@@ -805,6 +805,15 @@ impl ApiService {
             if let Some(title) = recommendation.params.title() {
                 result["title"] = serde_json::Value::String(title.to_owned());
             }
+            // r40：随条目保存的填充 / 切割设置，工作台与画板据此预填设置面板（没有就不带这两个键）
+            for key in [
+                laser_contracts::MATERIAL_FILL_OPTIONS_KEY,
+                laser_contracts::MATERIAL_CUT_OPTIONS_KEY,
+            ] {
+                if let Some(options) = recommendation.params.layer_options(key) {
+                    result[key] = serde_json::Value::Object(options.clone());
+                }
+            }
             if let Some(mode) = recommendation.engraving_mode {
                 result["engraving_mode"] = serde_json::Value::String(mode);
             }
@@ -859,7 +868,8 @@ impl ApiService {
                         .or(self.upload_root.as_deref()),
                     &effective_library,
                 ) {
-                    Ok(artifacts) => {
+                    Ok(mut artifacts) => {
+                        self.apply_time_calibration(artifacts.get_mut("time_estimate"), &object);
                         object.insert("_artifacts".into(), serde_json::Value::Object(artifacts));
                     }
                     Err(error) => return http_json(400, failure(error, None)),
@@ -891,7 +901,11 @@ impl ApiService {
                             &self.preview_roots,
                             &effective_library,
                         ) {
-                            Ok(Some(artifacts)) => {
+                            Ok(Some(mut artifacts)) => {
+                                self.apply_time_calibration(
+                                    artifacts.get_mut("time_estimate"),
+                                    &object,
+                                );
                                 object.insert(
                                     "_artifacts".into(),
                                     serde_json::Value::Object(artifacts),
@@ -1160,7 +1174,7 @@ impl ApiService {
                     );
                 }
             };
-            let artifacts = match generate_draw_artifacts(
+            let mut artifacts = match generate_draw_artifacts(
                 &object,
                 self.generated_root
                     .as_deref()
@@ -1170,6 +1184,7 @@ impl ApiService {
                 Ok(a) => a,
                 Err(error) => return http_json(400, failure(error, None)),
             };
+            self.apply_time_calibration(artifacts.get_mut("time_estimate"), &object);
             let workflow_id = format!("draw-{}", next_workflow_id());
             let material = artifacts
                 .get("material")
@@ -1370,6 +1385,32 @@ impl ApiService {
                 &self.material_write_lock,
                 &object,
             );
+        }
+        // 工时自校准（r40）：查看各台机器的校准系数，或清除（局域网只读，见 is_reference_data_write）
+        if route == "/api/time-calibration" {
+            if method == "GET" {
+                return http_json(200, success(self.time_calibration_status()));
+            }
+            if method == "POST" {
+                let object = match parse_json_object(&body[..content_length], 4 * 1024) {
+                    Ok(value) => value,
+                    Err(error) => return http_json(400, failure(error, None)),
+                };
+                if object.get("action").and_then(|v| v.as_str()) != Some("reset") {
+                    return http_json(400, failure("action 只能是 reset", None));
+                }
+                let target = object
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+                return match self.reset_time_calibration(target) {
+                    Ok(()) => http_json(200, success(self.time_calibration_status())),
+                    Err(error) => {
+                        http_json(500, failure(format!("清除工时校准失败：{error}"), None))
+                    }
+                };
+            }
         }
         let response = self.handle(method, route, &body[..content_length]);
         http_json(response.status, response.body)

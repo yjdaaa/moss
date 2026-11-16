@@ -142,6 +142,7 @@ fn normalize_and_validate_cell(
     default_scale: u32,
     material: &str,
     thickness_key: &str,
+    is_cut: bool,
 ) -> Result<(), String> {
     let cell_scale = cell.power_scale.unwrap_or(default_scale as i32);
     if !(1..=100_000).contains(&cell_scale) {
@@ -154,6 +155,7 @@ fn normalize_and_validate_cell(
         *cell = cell.rescaled_to(1000.0);
     }
     validate_entry_title(cell, material, thickness_key)?;
+    validate_layer_options(cell, is_cut, material, thickness_key)?;
     cell.validate(1000, 100)
         .map_err(|err| format!("材料 {material} ({thickness_key}mm) 参数超出允许范围: {err}"))
 }
@@ -184,6 +186,73 @@ fn validate_entry_title(
             "材料 {material} ({thickness_key}) 的条目标题必须是文字"
         )),
     }
+}
+
+/// 随条目保存的图层设置（r40，2026-11-16）：雕刻条目只能带 `fill_options`、切割条目只能带 `cut_options`；
+/// 只收 `MATERIAL_FILL_OPTION_KEYS` / `MATERIAL_CUT_OPTION_KEYS` 里的键（扫描偏移与加速度跟机器走，
+/// 不存进材料库），值的范围与生成请求相同（复用同一个解析函数）。null 值去掉，空对象等于没有。
+pub(crate) fn validate_layer_options(
+    cell: &mut laser_contracts::ParamCell,
+    is_cut: bool,
+    material: &str,
+    thickness_key: &str,
+) -> Result<(), String> {
+    use laser_contracts::{
+        MATERIAL_CUT_OPTION_KEYS, MATERIAL_CUT_OPTIONS_KEY, MATERIAL_FILL_OPTION_KEYS,
+        MATERIAL_FILL_OPTIONS_KEY,
+    };
+    for (key, allowed, label, allowed_here) in [
+        (
+            MATERIAL_FILL_OPTIONS_KEY,
+            MATERIAL_FILL_OPTION_KEYS,
+            "填充设置",
+            !is_cut,
+        ),
+        (
+            MATERIAL_CUT_OPTIONS_KEY,
+            MATERIAL_CUT_OPTION_KEYS,
+            "切割设置",
+            is_cut,
+        ),
+    ] {
+        let map = match cell.extra.remove(key) {
+            None | Some(serde_json::Value::Null) => continue,
+            Some(serde_json::Value::Object(map)) => map,
+            Some(_) => {
+                return Err(format!(
+                    "材料 {material} ({thickness_key}) 的{label}（{key}）必须是对象"
+                ));
+            }
+        };
+        let map: serde_json::Map<String, serde_json::Value> =
+            map.into_iter().filter(|(_, v)| !v.is_null()).collect();
+        if map.is_empty() {
+            continue;
+        }
+        if !allowed_here {
+            return Err(format!(
+                "材料 {material} ({thickness_key}) 的{label}只能存在{}条目里",
+                if is_cut { "雕刻" } else { "切割" }
+            ));
+        }
+        if let Some(bad) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
+            return Err(format!(
+                "材料 {material} ({thickness_key}) 的{label}不能包含 `{bad}`（可存：{}；双向扫描偏移与机器加速度跟机器走，不存进材料库）",
+                allowed.join("、")
+            ));
+        }
+        let value = serde_json::Value::Object(map);
+        let checked = if is_cut {
+            parse_cut_options(Some(&value)).map(|_| ())
+        } else {
+            parse_fill_options(Some(&value), 1000.0, 1000.0).map(|_| ())
+        };
+        checked.map_err(|e| format!("材料 {material} ({thickness_key}) 的{label}无效：{e}"))?;
+        if let serde_json::Value::Object(map) = value {
+            cell.set_layer_options(key, Some(map));
+        }
+    }
+    Ok(())
 }
 
 /// 请求是否指向“表面通用”条目：`surface=true`，或 `thickness_mm` 直接写 `"surface"`。
@@ -238,14 +307,14 @@ fn normalize_and_validate_library(
         for (thick_key, thick_entry) in &mut entry.thicknesses {
             validate_thickness_key(trimmed, thick_key, thick_entry)?;
             if let Some(cut) = &mut thick_entry.cut {
-                normalize_and_validate_cell(cut, lib_scale, trimmed, thick_key)?;
+                normalize_and_validate_cell(cut, lib_scale, trimmed, thick_key, true)?;
             }
             if let Some(engrave) = &mut thick_entry.engrave {
                 if let Some(raster) = &mut engrave.raster {
-                    normalize_and_validate_cell(raster, lib_scale, trimmed, thick_key)?;
+                    normalize_and_validate_cell(raster, lib_scale, trimmed, thick_key, false)?;
                 }
                 if let Some(outline) = &mut engrave.outline {
-                    normalize_and_validate_cell(outline, lib_scale, trimmed, thick_key)?;
+                    normalize_and_validate_cell(outline, lib_scale, trimmed, thick_key, false)?;
                 }
             }
         }
@@ -702,19 +771,20 @@ pub(crate) fn handle_material_manage(
                         Err(error) => return http_json(400, failure(error, None)),
                     }
                     if let Some(cut) = &mut v.cut
-                        && let Err(err) = normalize_and_validate_cell(cut, 1000, material, k)
+                        && let Err(err) = normalize_and_validate_cell(cut, 1000, material, k, true)
                     {
                         return http_json(400, failure(err, None));
                     }
                     if let Some(engrave) = &mut v.engrave {
                         if let Some(raster) = &mut engrave.raster
-                            && let Err(err) = normalize_and_validate_cell(raster, 1000, material, k)
+                            && let Err(err) =
+                                normalize_and_validate_cell(raster, 1000, material, k, false)
                         {
                             return http_json(400, failure(err, None));
                         }
                         if let Some(outline) = &mut engrave.outline
                             && let Err(err) =
-                                normalize_and_validate_cell(outline, 1000, material, k)
+                                normalize_and_validate_cell(outline, 1000, material, k, false)
                         {
                             return http_json(400, failure(err, None));
                         }
@@ -922,21 +992,47 @@ pub(crate) fn handle_material_manage(
                     failure("表面通用条目只能存雕刻参数，切割必须按真实厚度保存", None),
                 );
             }
+            // 随条目保存的图层设置（r40）：请求带了 fill_options / cut_options 就用请求的（null 清除）；
+            // 没带就沿用该位置原有条目里的，改功率、速度或选格写回不会把它们丢掉
+            let layer_key = if mode == "cut" {
+                laser_contracts::MATERIAL_CUT_OPTIONS_KEY
+            } else {
+                laser_contracts::MATERIAL_FILL_OPTIONS_KEY
+            };
+            for key in [
+                laser_contracts::MATERIAL_FILL_OPTIONS_KEY,
+                laser_contracts::MATERIAL_CUT_OPTIONS_KEY,
+            ] {
+                if let Some(value) = object.get(key).filter(|v| !v.is_null()) {
+                    cell.extra.insert(key.to_owned(), value.clone());
+                }
+            }
+            if let Err(error) = validate_layer_options(&mut cell, mode == "cut", material, "-") {
+                return http_json(400, failure(error, None));
+            }
+            let keep_existing_layer = !object.contains_key(layer_key);
             for th in target_thicknesses {
                 let thickness_entry = entry.thicknesses.entry(th).or_default();
-                if mode == "cut" {
-                    thickness_entry.cut = Some(cell.clone());
+                let slot = if mode == "cut" {
+                    &mut thickness_entry.cut
                 } else if engraving == "outline" {
-                    thickness_entry
+                    &mut thickness_entry
                         .engrave
                         .get_or_insert_with(Default::default)
-                        .outline = Some(cell.clone());
+                        .outline
                 } else {
-                    thickness_entry
+                    &mut thickness_entry
                         .engrave
                         .get_or_insert_with(Default::default)
-                        .raster = Some(cell.clone());
+                        .raster
+                };
+                let mut next = cell.clone();
+                if keep_existing_layer
+                    && let Some(existing) = slot.as_ref().and_then(|c| c.layer_options(layer_key))
+                {
+                    next.set_layer_options(layer_key, Some(existing.clone()));
                 }
+                *slot = Some(next);
             }
             match persist_material_library(settings, db, &library, || {
                 sync_library_to_db(db, &library)
@@ -951,9 +1047,188 @@ pub(crate) fn handle_material_manage(
                 ),
             }
         }
+        "save_layer_options" => save_layer_options(settings, db, &mut library, object),
         _ => http_json(
             400,
-            failure("action 必须是 save、delete、import 或 export", None),
+            failure(
+                "action 必须是 save、save_layer_options、delete、import 或 export",
+                None,
+            ),
+        ),
+    }
+}
+
+/// `save_layer_options`（r40，2026-11-16）：只改已有条目随材料保存的填充 / 切割设置，不碰功率、速度等参数。
+/// 雕刻条目收 `fill_options`，切割条目收 `cut_options`；`merge=true` 时把给出的键并进原有设置
+/// （值为 null 的键删除），否则整体替换；对象为 null 或空等于清除。条目不存在时拒绝（先保存参数）。
+fn save_layer_options(
+    settings: &laser_runtime::LaserSettings,
+    db: Option<&std::sync::Arc<std::sync::Mutex<laser_runtime::RuntimeDb>>>,
+    library: &mut laser_contracts::MaterialLibrary,
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<u8> {
+    let requested = object
+        .get("material")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if requested.is_empty() {
+        return http_json(400, failure("material 不能为空", None));
+    }
+    let laser_mode = object
+        .get("laser_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("engrave")
+        .to_ascii_lowercase();
+    let engraving = object
+        .get("engraving_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("raster")
+        .to_ascii_lowercase();
+    let is_cut = laser_mode == "cut";
+    if !is_cut && !(laser_mode == "engrave" && matches!(engraving.as_str(), "raster" | "outline")) {
+        return http_json(400, failure("laser_mode 或 engraving_mode 无效", None));
+    }
+    let (layer_key, other_key) = if is_cut {
+        (
+            laser_contracts::MATERIAL_CUT_OPTIONS_KEY,
+            laser_contracts::MATERIAL_FILL_OPTIONS_KEY,
+        )
+    } else {
+        (
+            laser_contracts::MATERIAL_FILL_OPTIONS_KEY,
+            laser_contracts::MATERIAL_CUT_OPTIONS_KEY,
+        )
+    };
+    if object.get(other_key).is_some_and(|v| !v.is_null()) {
+        return http_json(
+            400,
+            failure(
+                if is_cut {
+                    "切割条目只能存 cut_options"
+                } else {
+                    "雕刻条目只能存 fill_options"
+                },
+                None,
+            ),
+        );
+    }
+    let Some(incoming) = object.get(layer_key) else {
+        return http_json(400, failure(format!("缺少 {layer_key}"), None));
+    };
+    let incoming = match incoming {
+        serde_json::Value::Null => serde_json::Map::new(),
+        serde_json::Value::Object(map) => map.clone(),
+        _ => return http_json(400, failure(format!("{layer_key} 必须是对象"), None)),
+    };
+    let Some(material) = library
+        .materials
+        .iter()
+        .find(|(name, entry)| {
+            name.eq_ignore_ascii_case(requested)
+                || entry
+                    .aliases
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(requested))
+        })
+        .map(|(name, _)| name.clone())
+    else {
+        return http_json(400, failure("材料不存在", None));
+    };
+    let surface = is_surface_request(object);
+    if surface && is_cut {
+        return http_json(
+            400,
+            failure("表面通用条目只能存雕刻参数，切割必须按真实厚度保存", None),
+        );
+    }
+    let entry = library
+        .materials
+        .get_mut(&material)
+        .expect("material found above");
+    let thickness_key = if surface {
+        Some(laser_contracts::SURFACE_THICKNESS_KEY.to_owned())
+    } else {
+        let Some(target) = parse_float(object.get("thickness_mm"), "thickness_mm", 0.0)
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0)
+        else {
+            return http_json(400, failure("thickness_mm 必须是大于 0 的数字", None));
+        };
+        entry
+            .thicknesses
+            .keys()
+            .find(|k| {
+                k.trim()
+                    .parse::<f64>()
+                    .is_ok_and(|v| (v - target).abs() <= 1e-9)
+            })
+            .cloned()
+    };
+    let slot_cell = thickness_key.as_ref().and_then(|key| {
+        let modes = entry.thicknesses.get_mut(key)?;
+        if is_cut {
+            modes.cut.as_mut()
+        } else if engraving == "outline" {
+            modes.engrave.as_mut()?.outline.as_mut()
+        } else {
+            modes.engrave.as_mut()?.raster.as_mut()
+        }
+    });
+    let Some(cell) = slot_cell else {
+        return http_json(
+            400,
+            failure(
+                "材料库里还没有这一档参数，请先在材料实验室保存功率、速度后再保存图层设置",
+                Some(serde_json::json!({"error_code": "material_entry_missing"})),
+            ),
+        );
+    };
+    let thickness_key = thickness_key.unwrap_or_default();
+    let mut next = cell.clone();
+    let merged = if parse_bool(object.get("merge"), false) {
+        let mut base = cell.layer_options(layer_key).cloned().unwrap_or_default();
+        for (key, value) in incoming {
+            if value.is_null() {
+                base.remove(&key);
+            } else {
+                base.insert(key, value);
+            }
+        }
+        base
+    } else {
+        incoming
+    };
+    next.extra
+        .insert(layer_key.to_owned(), serde_json::Value::Object(merged));
+    if let Err(error) = validate_layer_options(&mut next, is_cut, &material, &thickness_key) {
+        return http_json(400, failure(error, None));
+    }
+    next.updated_at = Some(unix_seconds() as f64);
+    let saved = next.layer_options(layer_key).cloned();
+    *cell = next;
+    match persist_material_library(settings, db, library, || sync_library_to_db(db, library)) {
+        Ok(_) => http_json(
+            200,
+            success(serde_json::json!({
+                "material": material,
+                "thickness_key": thickness_key,
+                "laser_mode": laser_mode,
+                "engraving_mode": if is_cut { serde_json::Value::Null } else { serde_json::json!(engraving) },
+                layer_key: saved,
+                "materials": library,
+            })),
+        ),
+        Err(error) => http_json(
+            500,
+            failure(
+                "保存材料库失败",
+                Some(serde_json::json!({ "error": error })),
+            ),
         ),
     }
 }

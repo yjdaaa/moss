@@ -56,11 +56,17 @@ import QualityPresetBar from "../components/QualityPresetBar.jsx";
 import { IMAGE_PRESET_HINTS, applyImagePreset, detectImagePreset } from "../qualityPresets.js";
 import RegistrationPanel from "../components/RegistrationPanel.jsx";
 import {
+  applyMaterialLayer,
   fillResultNote,
   fillSettingsPayload,
   fillSettingsSignature,
+  localSettingsToStore,
   machineMotionFromLimits,
   machineMotionPayload,
+  materialLayerFromRecommendation,
+  materialLayerHint,
+  materialLayerPayload,
+  materialLayerSaveRequest,
   readFillSettings,
   readMachineMotion,
   timeEstimateNote,
@@ -69,7 +75,7 @@ import {
 } from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { defaultSerialPortHint } from "../platform.js";
-import { MATERIAL_LIBRARY_CHANNEL, pickThicknessForMaterial } from "../materialSelectState.js";
+import { MATERIAL_LIBRARY_CHANNEL, notifyMaterialsUpdated, pickThicknessForMaterial } from "../materialSelectState.js";
 import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
 
 export async function loadWorkbenchPreviewUrl(imageFile, { remote, fetchBlobUrl, resolveUrl }) {
@@ -132,9 +138,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [textOrigin, setTextOrigin] = useState("center");
   // 2026-11-16：矢量填充与走刀设置（对齐 LightBurn），与创意画板共用一份本机设置
   const [fillSettings, setFillSettings] = useState(() => readFillSettings());
+  // r40：当前材料条目随材料保存的填充 / 切割设置（选材料、厚度、刻法后载入，可改，“保存到材料库”写回）
+  const [materialLayer, setMaterialLayer] = useState(null);
+  const [materialApplied, setMaterialApplied] = useState([]);
+  const materialLayerKeyRef = useRef("");
   const updateFillSettings = (next) => {
     setFillSettings(next);
-    writeFillSettings(next);
+    writeFillSettings(localSettingsToStore(next, readFillSettings(), materialApplied));
   };
   const textUsesFill = resolveTextStyle(textStyle).textFill !== "outline";
   // 外框切割另带切割设置（切缝补偿、桥位、引线、过切，2026-11-16 对齐 LightBurn）
@@ -457,8 +467,23 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         }
         setRecommendedPasses(Math.max(1, Math.round(rec.passes || 1)));
         setHasRecommendation(true);
+        // 条目变了（或它存的设置变了）才重新载入，同一条目刷新不打断正在改的值
+        const layer = materialLayerFromRecommendation(rec);
+        setMaterialLayer(layer);
+        if (layer && layer.key !== materialLayerKeyRef.current) {
+          materialLayerKeyRef.current = layer.key;
+          const next = applyMaterialLayer(readFillSettings(), layer);
+          setFillSettings(next.settings);
+          setMaterialApplied(next.applied);
+        }
       } else {
         setHasRecommendation(false);
+        setMaterialLayer(null);
+        if (materialLayerKeyRef.current) {
+          materialLayerKeyRef.current = "";
+          setFillSettings(readFillSettings());
+          setMaterialApplied([]);
+        }
       }
     }
     syncMaterialRecommendation();
@@ -466,6 +491,33 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       cancelled = true;
     };
   }, [selectedMaterial, selectedThickness, activeTool, textStyle, recRefreshTick]);
+
+  // r40：把当前填充 / 切割设置存进材料库条目（只改图层设置，不动功率速度；扫描偏移与加速度不随材料保存）
+  const saveFillToMaterial = async () => {
+    if (!materialLayer) {
+      showAlert("还没读到当前材料与厚度的材料库条目，请先在材料实验室保存参数", { title: "无法保存", tone: "warning" });
+      return;
+    }
+    const payload = materialLayerPayload(fillSettings, { withFill: textUsesFill && !textIsCut, withCut: textIsCut });
+    if (payload.error) {
+      showAlert(payload.error, { title: "设置不对", tone: "warning" });
+      return;
+    }
+    const ok = await showConfirm(
+      `把当前${textIsCut ? "切割" : "填充"}设置存进材料库「${materialLayer.label}」？\n以后选这个材料会自动带出；双向扫描偏移与机器加速度跟机器走，不随材料保存。`,
+      { title: "保存到材料库", confirmText: "保存", cancelText: "取消" },
+    );
+    if (!ok) return;
+    const res = await postJson("/api/material-lab/manage", materialLayerSaveRequest(materialLayer, payload));
+    if (res.ok && res.data?.success) {
+      addLog("MATERIAL", `已把${textIsCut ? "切割" : "填充"}设置存进材料库「${materialLayer.label}」`, "ok");
+      notifyMaterialsUpdated();
+      materialLayerKeyRef.current = "";
+      setRecRefreshTick((tick) => tick + 1);
+    } else {
+      showAlert(res.data?.result || res.error || "保存失败", { title: "保存到材料库失败", tone: "error" });
+    }
+  };
 
   // Switch material -> update thickness list
   const currentMaterialObj = materials.find((m) => m.name === selectedMaterial);
@@ -1360,6 +1412,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                   onChange={updateFillSettings}
                   withFill={textUsesFill}
                   withCut={textIsCut}
+                  materialHint={materialLayerHint(materialApplied, materialLayer?.label)}
+                  materialEntryLabel={materialLayer?.label || ""}
+                  onSaveToMaterial={!isRemoteMode() && materialLayer && (textUsesFill || textIsCut) ? saveFillToMaterial : null}
                 />
               </div>
             )}

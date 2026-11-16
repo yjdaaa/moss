@@ -14,6 +14,7 @@ pub mod safety;
 pub mod stroke_font;
 pub mod trace;
 pub mod vector_plan;
+pub mod wizard_patterns;
 
 pub use engine::{TextTaskArtifacts, TextTaskEngine, TextTaskSpec};
 pub use laser_contracts;

@@ -109,10 +109,30 @@ pub(crate) fn generate_text_artifacts(
             0.1
         },
     );
-    // 填充扫描设置（2026-11-16 对齐 LightBurn）：过扫描默认按速度自动算
-    let fill = parse_fill_options(object, params.feed, motion.overscan_accel())?;
-    // 切割质量（2026-11-16 对齐 LightBurn）：只用于外框切割，默认全关
-    let cut = parse_cut_options(object)?;
+    // 填充扫描设置（2026-11-16 对齐 LightBurn）：过扫描默认按速度自动算；请求没写的键取材料库条目
+    // 随材料保存的值（r40，对齐 LightBurn 库条目保存整套图层设置）
+    let (fill_request, fill_from_material) = merge_layer_options(
+        object.get("fill_options"),
+        recommendation
+            .params
+            .layer_options(laser_contracts::MATERIAL_FILL_OPTIONS_KEY),
+        laser_contracts::MATERIAL_FILL_OPTION_KEYS,
+    );
+    let mut fill = parse_fill_options(fill_request.as_ref(), params.feed, motion.overscan_accel())?;
+    fill.from_material = fill_from_material;
+    // 切割质量（2026-11-16 对齐 LightBurn）：只用于外框切割，默认全关；切割时同样回落到材料库条目
+    let (cut_request, cut_from_material) = if is_cut {
+        merge_layer_options(
+            object.get("cut_options"),
+            recommendation
+                .params
+                .layer_options(laser_contracts::MATERIAL_CUT_OPTIONS_KEY),
+            laser_contracts::MATERIAL_CUT_OPTION_KEYS,
+        )
+    } else {
+        (object.get("cut_options").cloned(), Vec::new())
+    };
+    let cut = parse_cut_options(cut_request.as_ref())?;
     if !is_cut && cut.is_active() {
         return Err("cut_options（切缝补偿、桥位、引线、过切）只用于外框切割（laser_mode=cut），雕刻任务请去掉".into());
     }
@@ -216,7 +236,7 @@ pub(crate) fn generate_text_artifacts(
         "glyphs": artifacts.glyphs,
         "path_optimization": artifacts.path_optimization,
         "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, &fill)),
-        "cut_options": is_cut.then(|| cut_options_json(&spec.cut, artifacts.cut_report.as_ref())),
+        "cut_options": is_cut.then(|| cut_options_json(&spec.cut, artifacts.cut_report.as_ref(), &cut_from_material)),
         "removed_duplicates": artifacts.removed_duplicates,
         "time_estimate": time_estimate_json(&estimate, &motion)
     }).as_object().cloned().unwrap_or_default())
@@ -438,7 +458,20 @@ pub(crate) fn generate_draw_artifacts(
     let mut path_optimization = None;
     let mut vector_details = None;
     let gcode_str = if let (Some(sketch), "vector") = (&sketch, mode) {
-        let fill = parse_fill_options(object, feed_rate as f64, motion.overscan_accel())?;
+        let (fill_request, fill_from_material) = merge_layer_options(
+            object.get("fill_options"),
+            recommendation.as_ref().and_then(|r| {
+                r.params
+                    .layer_options(laser_contracts::MATERIAL_FILL_OPTIONS_KEY)
+            }),
+            laser_contracts::MATERIAL_FILL_OPTION_KEYS,
+        );
+        let mut fill = parse_fill_options(
+            fill_request.as_ref(),
+            feed_rate as f64,
+            motion.overscan_accel(),
+        )?;
+        fill.from_material = fill_from_material;
         let planned = plan_sketch(
             sketch,
             layout_sketch.as_ref().unwrap_or(sketch),
@@ -858,10 +891,58 @@ pub(crate) fn frame_hull_json(gcode: &str) -> serde_json::Value {
 
 /// 请求里的 `fill_options` 解析结果；`auto` 表示过扫描按速度与加速度自动算；
 /// `offset_table` 为排好序的“速度 → 偏移”表（给了表时 `options.scan_offset_mm` 是在加工速度处插值的结果）。
-struct ParsedFill {
-    options: laser_core::vector_plan::FillOptions,
-    auto: bool,
-    offset_table: Option<Vec<(f64, f64)>>,
+pub(crate) struct ParsedFill {
+    pub(crate) options: laser_core::vector_plan::FillOptions,
+    pub(crate) auto: bool,
+    pub(crate) offset_table: Option<Vec<(f64, f64)>>,
+    /// 取自材料库条目的键（请求没写、由材料库补上的，r40）
+    pub(crate) from_material: Vec<String>,
+}
+
+/// 请求里的图层设置与材料库条目随材料保存的值合并（r40，2026-11-16）：请求写了（非 null、非空串）的键优先，
+/// 其余键取材料库条目（只取 `allowed` 里的键）。返回合并后的值与取自材料库的键（排好序）。
+/// 请求的值不是对象时原样返回，交给解析函数报错。桥位个数 / 间距二选一：请求写了任一个，
+/// 材料库里的两个都不用，避免拼出“两个都填”。
+pub(crate) fn merge_layer_options(
+    request: Option<&serde_json::Value>,
+    material: Option<&serde_json::Map<String, serde_json::Value>>,
+    allowed: &[&str],
+) -> (Option<serde_json::Value>, Vec<String>) {
+    let request_map = match request {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(map)) => Some(map),
+        Some(other) => return (Some(other.clone()), Vec::new()),
+    };
+    let Some(material) = material else {
+        return (request.cloned(), Vec::new());
+    };
+    let given = |key: &str| {
+        request_map
+            .and_then(|map| map.get(key))
+            .is_some_and(|value| match value {
+                serde_json::Value::Null => false,
+                serde_json::Value::String(text) => !text.trim().is_empty(),
+                _ => true,
+            })
+    };
+    let tabs_given = given("tab_count") || given("tab_spacing_mm");
+    let mut merged = request_map.cloned().unwrap_or_default();
+    let mut from_material = Vec::new();
+    for (key, value) in material {
+        if !allowed.contains(&key.as_str()) || value.is_null() || given(key) {
+            continue;
+        }
+        if tabs_given && matches!(key.as_str(), "tab_count" | "tab_spacing_mm") {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+        from_material.push(key.clone());
+    }
+    from_material.sort();
+    if merged.is_empty() && request_map.is_none() {
+        return (None, from_material);
+    }
+    (Some(serde_json::Value::Object(merged)), from_material)
 }
 
 /// 解析 `fill_options`（2026-11-16，对齐 LightBurn Fill 模式；全部可省略）：
@@ -869,8 +950,8 @@ struct ParsedFill {
 /// `overscan_mm`（省略或 "auto" 按 v²/2a 自动；0 关闭；上限 20）、`acceleration_mm_s2`（自动过扫描用，默认 1000）、
 /// `scan_offset_mm`（双向扫描错位补偿，±2）、`scan_offset_table`（`[[速度 mm/min, 偏移 mm], …]`，≤32 行，
 /// 按加工速度线性插值、两端取端点值，给了就覆盖 `scan_offset_mm`）。线距与填充规则由调用方按刻法填。
-fn parse_fill_options(
-    object: &serde_json::Map<String, serde_json::Value>,
+pub(crate) fn parse_fill_options(
+    value: Option<&serde_json::Value>,
     feed_mm_per_min: f64,
     fallback_accel_mm_s2: f64,
 ) -> Result<ParsedFill, String> {
@@ -878,7 +959,7 @@ fn parse_fill_options(
         FillGrouping, FillOptions, FillRule, MAX_OVERSCAN_MM, auto_overscan_mm,
     };
     let empty = serde_json::Map::new();
-    let fill = match object.get("fill_options") {
+    let fill = match value {
         None | Some(serde_json::Value::Null) => &empty,
         Some(serde_json::Value::Object(map)) => map,
         Some(_) => return Err("fill_options 必须是对象".into()),
@@ -948,6 +1029,7 @@ fn parse_fill_options(
         },
         auto,
         offset_table,
+        from_material: Vec::new(),
     })
 }
 
@@ -1005,15 +1087,15 @@ fn parse_scan_offset_table(
 /// `tab_spacing_mm`（每隔多少 mm 一个，1 ~ 1000，二选一）、`tab_width_mm`（默认 0.5，0.05 ~ 10）、
 /// `tabs_skip_inner`（默认 true，内部图形不加桥位）、`lead_in_mm` / `lead_out_mm`（0 ~ 10）、
 /// `lead_angle_deg`（1 ~ 90，默认 90 垂直）、`overcut_mm`（0 ~ 10）。
-fn parse_cut_options(
-    object: &serde_json::Map<String, serde_json::Value>,
+pub(crate) fn parse_cut_options(
+    value: Option<&serde_json::Value>,
 ) -> Result<laser_core::cut::CutOptions, String> {
     use laser_core::cut::{
         CutOptions, MAX_KERF_MM, MAX_LEAD_MM, MAX_OVERCUT_MM, MAX_TAB_COUNT, MAX_TAB_SPACING_MM,
         MAX_TAB_WIDTH_MM, MIN_TAB_SPACING_MM, MIN_TAB_WIDTH_MM, TabMode,
     };
     let empty = serde_json::Map::new();
-    let cut = match object.get("cut_options") {
+    let cut = match value {
         None | Some(serde_json::Value::Null) => &empty,
         Some(serde_json::Value::Object(map)) => map,
         Some(_) => return Err("cut_options 必须是对象".into()),
@@ -1076,6 +1158,7 @@ fn parse_cut_options(
 fn cut_options_json(
     options: &laser_core::cut::CutOptions,
     report: Option<&laser_core::cut::CutReport>,
+    from_material: &[String],
 ) -> serde_json::Value {
     use laser_core::cut::TabMode;
     let (tab_mode, tab_count, tab_spacing) = match options.tabs {
@@ -1129,6 +1212,7 @@ fn cut_options_json(
             "overcut_mm": report.overcut_mm,
         },
         "note": notes.join("；"),
+        "from_material": from_material,
     })
 }
 
@@ -1179,6 +1263,7 @@ fn fill_options_json(
         "scan_offset_mm": options.scan_offset_mm,
         "scan_offset_source": if table.is_some() { "table" } else { "fixed" },
         "scan_offset_table": table,
+        "from_material": parsed.from_material,
     })
 }
 

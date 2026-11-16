@@ -25,6 +25,32 @@ pub const DEFAULT_POWER_SCALE: u32 = 1000;
 pub const SURFACE_THICKNESS_KEY: &str = "surface";
 /// 参数条目标题（对齐 LightBurn 条目的 Description / Title）的最大字符数。
 pub const MATERIAL_ENTRY_TITLE_MAX_CHARS: usize = 60;
+/// 材料库条目里随材料保存的图层设置（2026-11-16，对齐 LightBurn 库条目保存整套图层设置）：
+/// 雕刻条目可带 `fill_options`，切割条目可带 `cut_options`，都放在 `ParamCell::extra`，
+/// 旧材料库 JSON 与 SQLite `extra` 列不需要迁移。
+pub const MATERIAL_FILL_OPTIONS_KEY: &str = "fill_options";
+pub const MATERIAL_CUT_OPTIONS_KEY: &str = "cut_options";
+/// 随材料保存的填充设置键（与请求里的 `fill_options` 同名）。双向扫描偏移（`scan_offset_mm` /
+/// `scan_offset_table`）与机器加速度（`acceleration_mm_s2`）跟机器走，不存进材料库。
+pub const MATERIAL_FILL_OPTION_KEYS: &[&str] = &[
+    "grouping",
+    "angle_deg",
+    "cross_hatch",
+    "bidirectional",
+    "overscan_mm",
+];
+/// 随材料保存的切割设置键（与请求里的 `cut_options` 同名）。
+pub const MATERIAL_CUT_OPTION_KEYS: &[&str] = &[
+    "kerf_mm",
+    "tab_count",
+    "tab_spacing_mm",
+    "tab_width_mm",
+    "tabs_skip_inner",
+    "lead_in_mm",
+    "lead_out_mm",
+    "lead_angle_deg",
+    "overcut_mm",
+];
 
 /// 进程内共享的 `settings.json` 读-改-写互斥锁（`laser-api` 与 `moss-voice` 共用），
 /// 避免 `/api/settings` 与语音中心并发保存时互相覆盖对方刚写入的字段。
@@ -530,6 +556,32 @@ impl ParamCell {
             }
             None => {
                 self.extra.remove("title");
+            }
+        }
+    }
+
+    /// 随条目保存的图层设置（`MATERIAL_FILL_OPTIONS_KEY` / `MATERIAL_CUT_OPTIONS_KEY`）；
+    /// 没有或为空对象时返回 `None`。
+    pub fn layer_options(&self, key: &str) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.extra
+            .get(key)
+            .and_then(serde_json::Value::as_object)
+            .filter(|map| !map.is_empty())
+    }
+
+    /// 设置或清除随条目保存的图层设置（空对象即清除）。
+    pub fn set_layer_options(
+        &mut self,
+        key: &str,
+        options: Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
+        match options.filter(|map| !map.is_empty()) {
+            Some(map) => {
+                self.extra
+                    .insert(key.to_owned(), serde_json::Value::Object(map));
+            }
+            None => {
+                self.extra.remove(key);
             }
         }
     }
@@ -1169,6 +1221,49 @@ mod telemetry_tests {
         assert_eq!((stat.calls, stat.failures, stat.denied), (3, 1, 1));
         assert_eq!(stat.last_caller, "mcp");
         assert!(stat.last_at > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod layer_options_tests {
+    use super::*;
+
+    #[test]
+    fn layer_options_round_trip_through_extra_and_old_json_still_loads() {
+        // 旧条目没有图层设置：照常读，序列化后也不多出字段
+        let old = r#"{"laser_min_power":0,"laser_max_power":420,"feed_rate":1800,"travel_rate":3000,"threshold":-1,"passes":1,"pixel_size_mm":0.1}"#;
+        let cell: ParamCell = serde_json::from_str(old).unwrap();
+        assert!(cell.layer_options(MATERIAL_FILL_OPTIONS_KEY).is_none());
+        let back = serde_json::to_value(&cell).unwrap();
+        assert!(back.get("fill_options").is_none());
+
+        let mut cell = cell;
+        let mut fill = serde_json::Map::new();
+        fill.insert("angle_deg".into(), serde_json::json!(45));
+        fill.insert("overscan_mm".into(), serde_json::json!(2.5));
+        cell.set_layer_options(MATERIAL_FILL_OPTIONS_KEY, Some(fill));
+        let text = serde_json::to_string(&cell).unwrap();
+        let reloaded: ParamCell = serde_json::from_str(&text).unwrap();
+        assert_eq!(reloaded, cell);
+        assert_eq!(
+            reloaded.layer_options(MATERIAL_FILL_OPTIONS_KEY).unwrap()["angle_deg"],
+            serde_json::json!(45)
+        );
+        // 重算功率标尺不丢图层设置
+        assert!(
+            reloaded
+                .rescaled_to(255.0)
+                .layer_options(MATERIAL_FILL_OPTIONS_KEY)
+                .is_some()
+        );
+        // 空对象等于清除
+        let mut cleared = reloaded;
+        cleared.set_layer_options(MATERIAL_FILL_OPTIONS_KEY, Some(serde_json::Map::new()));
+        assert!(!cleared.extra.contains_key(MATERIAL_FILL_OPTIONS_KEY));
+        // 机器级设置不在材料键表里
+        for key in ["scan_offset_mm", "scan_offset_table", "acceleration_mm_s2"] {
+            assert!(!MATERIAL_FILL_OPTION_KEYS.contains(&key));
+        }
     }
 }
 

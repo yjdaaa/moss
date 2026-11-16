@@ -503,6 +503,14 @@ impl ApiService {
         };
         drop(cleared_uncertain);
         drop(transport);
+        // 工时自校准（r40）：预览时的原始估算，作业正常完成后与实际用时比较（只读持久化存储，不碰内存表）
+        let raw_estimate = self
+            .store
+            .as_ref()
+            .and_then(|store| store.get(kind, workflow_id).ok().flatten())
+            .and_then(|record| crate::time_calibration::record_raw_estimate(&record.payload));
+        let runtime_path_for_thread = self.runtime_path.clone();
+        let resumed = start_from_line > 0;
         let store = self.store.clone();
         let workflows = self.workflows.clone();
         let calibrations = self.calibrations.clone();
@@ -663,6 +671,22 @@ impl ApiService {
                 }
                 if let (Some(raw), Some(map)) = (last_status_report, send_result.as_object_mut()) {
                     map.insert("last_status_report".into(), serde_json::json!(raw));
+                }
+                if status == "completed" {
+                    let note = crate::time_calibration::record_job_timing(
+                        runtime_path_for_thread.as_deref(),
+                        &target,
+                        &crate::time_calibration::JobTiming {
+                            status,
+                            resumed,
+                            sd_offline: is_offline_sd,
+                            actual_seconds: elapsed_ms as f64 / 1000.0,
+                            estimated_seconds: raw_estimate,
+                        },
+                    );
+                    if let Some(map) = send_result.as_object_mut() {
+                        map.insert("time_calibration".into(), note);
+                    }
                 }
                 if let Some(hook) = on_terminal {
                     hook(status, &send_result);

@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 新增首次标定向导，填充 / 切割设置随材料库条目保存，工时预估按实际用时自校准（2026-11-16）
+
+- **现象**：第一次用新机器或新材料时，线距、功率速度、双向扫描偏移、过扫描、切缝补偿要分别去不同地方摸索，没有成套的引导；扫描角度、过扫描、切缝补偿、桥位等只存在本机一份，换材料不跟着换；工时预估只按加速度模型算，与这台机器的实际用时长期有固定偏差。
+- **根因与修复**：材料实验室新增“首次标定向导”（`CalibrationWizard`，六步、可跳过、进度存本机），线距 / 矩阵复用现有矩阵与选格，`/api/material-lab/preview` 新增 `test_type` `scan_offset` / `overscan` / `kerf`（`laser_core::wizard_patterns`：双向横扫方块、过扫描对照方块、20 mm 切缝方块，`kerf_offset_mm = (设计 − 实测) / 2`），生成后仍只能经【发送测试】确认框与完整门禁发送，`select-cell` 对这三种返回 `pattern_not_selectable`。材料库参数格可带 `fill_options` / `cut_options`（存 `extra`，无需迁移，导入 / 保存时按生成请求同一解析函数校验，扫描偏移与加速度拒收），新增 `manage(save_layer_options)`，`manage(save)` 不带时沿用原值；文字与画板生成对请求没写的键回落到推荐条目并回显 `from_material`，推荐接口带出这两项，工作台 / 画板面板自动载入、标“来自材料库”、可保存回材料库。发送线程在作业正常完成后按机器记“实际 / 预估”比值到 `settings.json` 的 `laser_time_calibration`（最近 10 次、最多 8 台），满 2 次后中位数（0.5～3）校准之后各类预览的 `estimated_seconds`，原始值保留在 `raw_estimated_seconds`，新增 `GET/POST /api/time-calibration`（清除为局域网只读写操作）。**契约变化**：`time_estimate.estimated_seconds` 在有校准时为校准后的值；`send_result` 新增 `time_calibration`；默认无校准、无材料图层设置时行为与输出不变。
+- **验证**：`laser-contracts` 新增 1 项（图层设置随 `extra` 往返、旧 JSON 兼容）；`laser-core` 新增 4 项（扫描方块方向与偏移、过扫描关光且坐标非负、切缝方块、切缝公式）；`laser-api` 新增 5 项（图层设置保存 / 校验 / 编辑参数不丢 / merge / 条目缺失 / 导入校验，生成回落与 `from_material`，向导图案生成与禁止选格，校准比值排除规则 / 中位数限幅 / 样本与机器上限 / 不叠乘，持久化、按机器套用、清除）；前端新增 11 项（向导状态、切缝与偏移换算、确认文案、向导与面板渲染、材料图层载入 / 保存 / 本机值保护、工时说明）。未实机出光：向导图案的实际刻痕、切缝公式在真实材料上的精度、工时校准的长期效果均未在设备上验证。
+- **关联**：`crates/laser-core/src/wizard_patterns.rs`、`crates/laser-api/src/{material_lab_patterns,time_calibration,materials,generation,send,material_lab,routes,access}.rs`、`crates/laser-contracts/src/lib.rs`（`MATERIAL_FILL_OPTION_KEYS`、`ParamCell::layer_options`）、`frontend/src/{calibrationWizard,fillOptions,materialLabState}.js`、`frontend/src/components/{CalibrationWizard,FillOptionsPanel}.jsx`、`frontend/src/pages/{MaterialLabPage,HomePage,DrawPage}.jsx`。
 ### 两点对位补齐画板入口与低功率点射：画板任务可对位后照常确认发送，没有红光点的机器可原地点射对准标记（2026-11-16）
 
 - **现象**：两点对位只在工作台可用，画板作品无法对上材料上的标记；对位结果没有画板视图，画板页的作业摘要、发送按钮与重复发送防呆都认不出它，走边框也按左下角起点而不是第 2 个标记点。没有红光指示的机器只能目测激光头对准标记，误差大。

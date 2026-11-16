@@ -405,6 +405,7 @@ impl ApiService {
             Ok(None) => return http_json(500, failure("对位预览生成失败", None)),
             Err(error) => return http_json(400, failure(error, None)),
         };
+        self.apply_time_calibration(artifacts.get_mut("time_estimate"), &generate);
         let new_sha = artifacts
             .get("gcode_sha256")
             .and_then(|v| v.as_str())

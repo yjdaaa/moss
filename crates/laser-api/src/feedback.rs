@@ -677,7 +677,7 @@ impl ApiService {
         input.remove("manual_params");
         input.insert("feedback_params".into(), params.json());
         let effective_library = self.effective_material_library()?;
-        let artifacts = match workflow["source_type"].as_str() {
+        let mut artifacts = match workflow["source_type"].as_str() {
             Some("text") => {
                 generate_text_artifacts(&input, self.generated_root.as_deref(), &effective_library)?
             }
@@ -739,6 +739,7 @@ impl ApiService {
             }
             _ => return Err("已有 G-code 不能自动改写，请重新生成素材任务".into()),
         };
+        self.apply_time_calibration(artifacts.get_mut("time_estimate"), &input);
         let new_id = next_workflow_id();
         let name = artifacts
             .get("gcode_file")

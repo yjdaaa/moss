@@ -420,6 +420,24 @@ export function buildMatrixSendRequest({
   };
 }
 
+/** 标定向导测试图案（r40：scan_offset / overscan / kerf）在确认框里的说明；不是向导图案时返回空串。 */
+export function wizardPatternLine(preview) {
+  if (!preview?.wizard_pattern) return "";
+  const cells = Array.isArray(preview.cells) ? preview.cells : [];
+  if (preview.test_type === "scan_offset") {
+    return `双向扫描偏移测试：${cells.length} 个实心方块，速度 ${cells.map((c) => c.speed).join(" / ")} mm/min，偏移 0、过扫描按速度自动`;
+  }
+  if (preview.test_type === "overscan") {
+    const over = Number(cells[1]?.overscan_mm);
+    return `过扫描检查：左块不过扫描，右块过扫描 ${Number.isFinite(over) ? over.toFixed(1) : "-"} mm（当前设置）`;
+  }
+  if (preview.test_type === "kerf") {
+    const cell = cells[0] || {};
+    return `切缝测试：按切割参数 S${cell.power ?? "-"} · F${cell.speed ?? "-"} × ${cell.passes ?? 1} 遍切一个 ${preview.square_mm ?? 20} mm 方块（不做切缝补偿），会切穿材料`;
+  }
+  return "";
+}
+
 /** 构造发送标定矩阵前的二次安全确认文案。 */
 export function buildMatrixConfirmPrompt({
   preview,
@@ -442,7 +460,10 @@ export function buildMatrixConfirmPrompt({
   const sMin = preview?.speed_min ?? "-";
   const sMax = preview?.speed_max ?? "-";
   const isInterval = preview?.test_type === "interval";
-  const axisLine = isInterval
+  const patternLine = wizardPatternLine(preview);
+  const axisLine = patternLine
+    ? patternLine
+    : isInterval
     ? `线距测试：${preview?.interval_min_mm ?? "-"} ~ ${preview?.interval_max_mm ?? "-"} mm，目标是相邻扫描线刚好相接`
     : preview?.x_axis
       ? `网格轴：列 = ${axisInfo(preview.x_axis).label}，行 = ${axisInfo(preview.y_axis).label}`
