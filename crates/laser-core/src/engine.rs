@@ -1,16 +1,17 @@
 //! 文字雕刻任务（2026-11-06 修订：填充方式、多行排版、按木牌尺寸自动适配、激光头起点约定）。
 //!
-//! - 刻法 [`TextFill`]：`Outline` 只描字的轮廓（默认，用户决定）；`Fill` 把字形转成黑白位图逐行扫描填满
-//!   （小字、中文在木头上最清楚）；`Hatch` 用矢量平行线填满并描边（大字更快）。填充按非零环绕规则计算，
-//!   “口”“O”这类字的内孔不会被填上。
+//! - 刻法 [`TextFill`]：`Outline` 只描字的轮廓（默认，用户决定）；`Fill` 用矢量密排扫描线填满再描边
+//!   （2026-11-16 起不再转位图；扫描线距取材料像素间距）；`Hatch` 线距放宽到 3 倍（线条可见、更快）。
+//!   填充按非零环绕规则计算，“口”“O”这类字的内孔不会被填上；扫描设置（过扫描、分组、角度、交叉、
+//!   双向、偏移）与走刀顺序见 [`crate::vector_plan`]。
 //! - 排版：文字里的换行即分行，按 [`TextAlignment`] 对齐。给了木牌尺寸（宽 / 高，可只给一边）时，
 //!   未指定字号就自动取能放下的最大字号（四周各留 `margin_mm`）；指定了字号但放不下直接报错，不悄悄缩小。
 //! - 起点 [`TextOrigin`]：任务以开始时激光头所在位置为参照。`Center`（默认，用户决定）= 激光头对准
 //!   木牌 / 图案中心；`LowerLeft` = 对准木牌左下角（没给木牌时为文字左下角）。实现上只改开头的
 //!   `G92`（声明激光头在图案坐标中的位置），刀路本身不变；结束时激光头关光回到起点。
 
-use crate::{font, gcode, path_opt, raster};
-use image::{GrayImage, Luma, RgbaImage};
+use crate::{font, gcode, vector_plan};
+use image::RgbaImage;
 use laser_contracts::geometry::{PathOptimizationStats, Paths};
 
 pub use font::TextAlignment;
@@ -97,11 +98,17 @@ pub struct TextTaskSpec<'a> {
     pub margin_mm: f64,
     /// 有木牌尺寸且未指定字号：自动取能放下的最大字号
     pub auto_size: bool,
-    /// 扫描填充的像素间距 / 排线间距（mm）
+    /// 实心填充的线距（mm，取材料的像素间距）；排线填充为它的 [`HATCH_SPACING_FACTOR`] 倍
     pub pixel_size_mm: f64,
-    /// 扫描填充每侧过扫描（mm）
-    pub overscan_mm: f64,
+    /// 填充的扫描设置（分组、角度按机器 / 预览视角逆时针、交叉排线、双向、过扫描、扫描偏移）；
+    /// 其中 `spacing` 与 `rule` 不用，由刻法决定（线距见上，字体一律非零环绕）
+    pub scan: vector_plan::FillOptions,
+    /// 走刀顺序选项；切割时 `inside_first` 须为 true（外框先切断，里面的孔会移位）
+    pub plan: vector_plan::PlanOptions,
 }
+
+/// 排线填充的线距是实心填充的几倍（线条可见、更快）。
+pub const HATCH_SPACING_FACTOR: f64 = 3.0;
 
 /// 以开始时激光头位置为原点的范围（mm），走边框用。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -126,8 +133,12 @@ pub struct TextTaskArtifacts {
     pub font_size_mm: f64,
     pub fill: TextFill,
     pub origin: TextOrigin,
-    /// 文字笔画相对激光头起点的范围
+    /// 文字笔画相对激光头起点的范围（不含过扫描）
     pub frame: HeadRelativeBox,
+    /// 实际使用的填充设置（只描轮廓时为 `None`）
+    pub fill_options: Option<vector_plan::FillOptions>,
+    /// 去掉的重复轮廓条数
+    pub removed_duplicates: usize,
 }
 
 pub struct TextTaskEngine;
@@ -175,83 +186,6 @@ fn layout(
     Ok((paths, x1 - x0, y1 - y0, layout.glyphs))
 }
 
-/// 一条水平扫描线（y 向下坐标）与全部闭合笔画的交点，按非零环绕规则返回需要填充的区间。
-fn scanline_spans(paths: &Paths, y: f64) -> Vec<(f64, f64)> {
-    let mut crossings: Vec<(f64, i32)> = Vec::new();
-    for path in paths {
-        if path.len() < 3 {
-            continue;
-        }
-        for i in 0..path.len() {
-            let (a, b) = (path[i], path[(i + 1) % path.len()]);
-            if (a.1 <= y && b.1 > y) || (b.1 <= y && a.1 > y) {
-                let t = (y - a.1) / (b.1 - a.1);
-                crossings.push((a.0 + t * (b.0 - a.0), if b.1 > a.1 { 1 } else { -1 }));
-            }
-        }
-    }
-    crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut spans = Vec::new();
-    let mut winding = 0;
-    let mut start = 0.0;
-    for (x, dir) in crossings {
-        let was_inside = winding != 0;
-        winding += dir;
-        if !was_inside && winding != 0 {
-            start = x;
-        } else if was_inside && winding == 0 && x > start {
-            spans.push((start, x));
-        }
-    }
-    spans
-}
-
-fn cols_width_mm(width: f64, pixel: f64) -> f64 {
-    (((width / pixel).ceil() as usize).max(1) as f64) * pixel
-}
-
-/// 字形转黑白位图（0 = 出光），行 0 在上。
-fn rasterize(paths: &Paths, width: f64, height: f64, pixel: f64) -> Vec<Vec<u8>> {
-    let cols = ((width / pixel).ceil() as usize).max(1);
-    let rows = ((height / pixel).ceil() as usize).max(1);
-    (0..rows)
-        .map(|row| {
-            let mut line = vec![255_u8; cols];
-            for (a, b) in scanline_spans(paths, (row as f64 + 0.5) * pixel) {
-                let from = (a / pixel - 0.5).ceil().max(0.0) as usize;
-                let to = ((b / pixel - 0.5).floor() as isize).min(cols as isize - 1);
-                for col in from as isize..=to {
-                    line[col as usize] = 0;
-                }
-            }
-            line
-        })
-        .collect()
-}
-
-/// 矢量排线：每隔 `spacing` 一条水平线段，逐行换向，减少空走。
-fn hatch_lines(paths: &Paths, height: f64, spacing: f64) -> Paths {
-    let mut out = Vec::new();
-    let mut y = spacing / 2.0;
-    let mut forward = true;
-    while y < height {
-        let mut spans = scanline_spans(paths, y);
-        if !forward {
-            spans.reverse();
-        }
-        for (a, b) in spans {
-            out.push(if forward {
-                vec![(a, y), (b, y)]
-            } else {
-                vec![(b, y), (a, y)]
-            });
-        }
-        forward = !forward;
-        y += spacing;
-    }
-    out
-}
-
 /// 把开头的 `G92 X0 Y0 Z0` 改成激光头在图案坐标中的位置，并在结束前关光回到起点。
 fn place_at_head(gcode: &str, start_x: f64, start_y: f64) -> Result<String, String> {
     const ORIGIN: &str = "G92 X0 Y0 Z0";
@@ -288,26 +222,24 @@ impl TextTaskEngine {
         };
         let board_w = positive(spec.board_width_mm, "木牌宽度")?;
         let board_h = positive(spec.board_height_mm, "木牌高度")?;
-        let margin_x = if spec.fill == TextFill::Fill {
-            spec.margin_mm.max(spec.overscan_mm)
+        // 填充的过扫描让扫描线越出笔画：放进木牌时两侧留边至少容得下它（与旧位图扫描一致）
+        let fills = matches!(spec.fill, TextFill::Fill | TextFill::Hatch);
+        let (over_x, over_y) = if fills {
+            spec.scan.extension_mm()
         } else {
-            spec.margin_mm
+            (0.0, 0.0)
         };
+        let margin_x = spec.margin_mm.max(over_x);
+        let margin_y = spec.margin_mm.max(over_y);
         let avail_w = board_w.map(|b| b - 2.0 * margin_x);
-        let avail_h = board_h.map(|b| b - 2.0 * spec.margin_mm);
+        let avail_h = board_h.map(|b| b - 2.0 * margin_y);
         if avail_w.is_some_and(|v| v <= 0.0) || avail_h.is_some_and(|v| v <= 0.0) {
             return Err("木牌尺寸小于两侧留边，放不下任何文字".into());
         }
 
         let mut size = spec.font_size_mm;
         let (mut paths, mut width, mut height, mut glyphs) = layout(&data, spec, size)?;
-        let effective_w = |w: f64| {
-            if spec.fill == TextFill::Fill {
-                cols_width_mm(w, spec.pixel_size_mm)
-            } else {
-                w
-            }
-        };
+        let effective_w = |w: f64| w;
         let fits = |w: f64, h: f64| {
             avail_w.is_none_or(|a| effective_w(w) <= a + 1e-6)
                 && avail_h.is_none_or(|a| h <= a + 1e-6)
@@ -350,101 +282,71 @@ impl TextTaskEngine {
         // 激光头起点在图案坐标（y 向上，笔画范围 0..width × 0..height）中的位置
         let (start_x, start_y) = match spec.origin {
             TextOrigin::Center => (width / 2.0, height / 2.0),
+            // 没给木牌时激光头在过扫描范围的左下角，扫描线不会往起点的负方向越界
             TextOrigin::LowerLeft => (
-                -board_w.map_or(0.0, |b| (b - width) / 2.0),
-                -board_h.map_or(0.0, |b| (b - height) / 2.0),
+                -board_w.map_or(over_x, |b| (b - width) / 2.0),
+                -board_h.map_or(over_y, |b| (b - height) / 2.0),
             ),
         };
-        let grid_w = cols_width_mm(width, spec.pixel_size_mm);
-        let raster_start_x = match spec.origin {
-            TextOrigin::Center => start_x + spec.overscan_mm,
-            TextOrigin::LowerLeft => match board_w {
-                None => 0.0,
-                Some(b) => (spec.overscan_mm - (b - grid_w) / 2.0).min(0.0),
-            },
-        };
-        let frame = if spec.fill == TextFill::Fill {
-            let sweep_w = grid_w + 2.0 * spec.overscan_mm;
-            HeadRelativeBox {
-                min_x: -raster_start_x,
-                max_x: sweep_w - raster_start_x,
-                min_y: -start_y,
-                max_y: height - start_y,
-            }
-        } else {
-            HeadRelativeBox {
-                min_x: -start_x,
-                max_x: width - start_x,
-                min_y: -start_y,
-                max_y: height - start_y,
-            }
+        let frame = HeadRelativeBox {
+            min_x: -start_x,
+            max_x: width - start_x,
+            min_y: -start_y,
+            max_y: height - start_y,
         };
 
-        let optimized = path_opt::optimize_with_threshold(&paths, width.max(height).max(1.0))
-            .map_err(|e| e.to_string())?;
-        let stats = optimized.stats;
-        let (gcode, preview) = match spec.fill {
-            TextFill::Outline | TextFill::Hatch => {
-                let mut all = optimized.paths;
-                if spec.fill == TextFill::Hatch {
-                    all.extend(hatch_lines(&paths, height, spec.pixel_size_mm));
-                }
-                let options = gcode::WriterOptions {
-                    width_mm: width.max(1e-3),
-                    height_mm: height.max(1e-3),
-                    power: spec.power,
-                    feed_rate: spec.feed_rate,
-                    auto_close: true,
-                    laser_mode: "M4",
-                    power_scale: None,
-                };
-                let written = gcode::write_outline(&all, &options)?;
-                let preview = gcode::preview_outline_rgba(
-                    &all,
-                    spec.preview_width_px,
-                    spec.preview_height_px,
-                    options.width_mm,
-                    options.height_mm,
-                )?;
-                (place_at_head(&written, start_x, start_y)?, preview)
-            }
-            TextFill::Fill => {
-                let bitmap = rasterize(&paths, width, height, spec.pixel_size_mm);
-                let rows = bitmap.len();
-                let cols = bitmap[0].len();
-                let plan = raster::raster_plan_with_direction(&bitmap, "horizontal", "scanline")
-                    .map_err(|e| e.to_string())?;
-                let written = gcode::write_raster(
-                    &plan,
-                    cols,
-                    rows,
-                    &gcode::RasterWriterOptions {
-                        pixel_size_mm: spec.pixel_size_mm,
-                        overscan_mm: spec.overscan_mm,
-                        work_area_width_mm: cols as f64 * spec.pixel_size_mm
-                            + 2.0 * spec.overscan_mm
-                            + 1.0,
-                        work_area_height_mm: rows as f64 * spec.pixel_size_mm + 1.0,
-                        power: spec.power,
-                        feed_rate: spec.feed_rate,
-                        laser_mode: "M4",
-                        snake_scan: true,
-                        material: None,
-                        safety_note: None,
-                        power_scale: None,
+        // 矢量规划（2026-11-16 用户决定：文字一律转矢量再规划路线；同日对齐 LightBurn：先扫描填充、再描轮廓）。
+        // 笔画坐标 y 向下，激光头在 (start_x, height - start_y)；扫描角度按机器视角逆时针，y 向下时取反
+        let head = (start_x, height - start_y);
+        let contours: Vec<vector_plan::Unit> = paths
+            .iter()
+            .cloned()
+            .map(vector_plan::Unit::Closed)
+            .collect();
+        let fill_options = fills.then(|| vector_plan::FillOptions {
+            spacing: if spec.fill == TextFill::Fill {
+                spec.pixel_size_mm
+            } else {
+                spec.pixel_size_mm * HATCH_SPACING_FACTOR
+            },
+            rule: vector_plan::FillRule::NonZero,
+            ..spec.scan
+        });
+        let layers = match fill_options {
+            None => vec![contours],
+            Some(options) => {
+                let fill = vector_plan::scan_fill(
+                    &paths,
+                    &vector_plan::FillOptions {
+                        angle_deg: -options.angle_deg,
+                        ..options
                     },
                 )
                 .map_err(|e| e.to_string())?;
-                let gray = GrayImage::from_fn(cols as u32, rows as u32, |x, y| {
-                    Luma([bitmap[y as usize][x as usize]])
-                });
-                // 栅格写出器把图案右移一个过扫描距离；左下角起点与图片任务一致，不向负 X 回退过扫描
-                (
-                    place_at_head(&written, raster_start_x, start_y)?,
-                    image::DynamicImage::ImageLuma8(gray).to_rgba8(),
-                )
+                vec![fill, contours]
             }
         };
+        let planned =
+            vector_plan::plan_layers(layers, head, &spec.plan).map_err(|e| e.to_string())?;
+        let options = gcode::WriterOptions {
+            width_mm: width.max(1e-3),
+            height_mm: height.max(1e-3),
+            power: spec.power,
+            feed_rate: spec.feed_rate,
+            auto_close: false,
+            laser_mode: "M4",
+            power_scale: None,
+        };
+        let written = gcode::write_steps(&planned.steps, &options)?;
+        let preview = gcode::preview_outline_rgba_with_options(
+            &planned.paths,
+            spec.preview_width_px,
+            spec.preview_height_px,
+            options.width_mm,
+            options.height_mm,
+            false,
+        )?;
+        let gcode = place_at_head(&written, start_x, start_y)?;
         let estimate = gcode::estimate_time(&gcode, 3000.0);
         Ok(TextTaskArtifacts {
             gcode,
@@ -452,12 +354,14 @@ impl TextTaskEngine {
             width_mm: width,
             height_mm: height,
             glyphs,
-            path_optimization: stats,
+            path_optimization: planned.stats,
             estimate,
             font_size_mm: size,
             fill: spec.fill,
             origin: spec.origin,
             frame,
+            fill_options,
+            removed_duplicates: planned.removed_duplicates,
         })
     }
 }
@@ -489,7 +393,11 @@ mod tests {
             margin_mm: 2.0,
             auto_size: false,
             pixel_size_mm: 0.1,
-            overscan_mm: 1.0,
+            scan: vector_plan::FillOptions {
+                overscan_mm: 1.0,
+                ..vector_plan::FillOptions::new(0.1, vector_plan::FillRule::NonZero)
+            },
+            plan: vector_plan::PlanOptions::default(),
         }
     }
 
@@ -598,38 +506,48 @@ mod tests {
     }
 
     #[test]
-    fn fill_scans_inside_the_strokes_and_keeps_holes_empty() {
-        // 一个带方孔的方块（外圈逆时针、内圈顺时针，同 TrueType 约定）
-        let square = vec![
-            vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
-            vec![(3.0, 3.0), (3.0, 7.0), (7.0, 7.0), (7.0, 3.0)],
-        ];
-        let spans = scanline_spans(&square, 5.0);
-        assert_eq!(spans, vec![(0.0, 3.0), (7.0, 10.0)]);
-        let bitmap = rasterize(&square, 10.0, 10.0, 1.0);
-        assert_eq!(bitmap[5], vec![0, 0, 0, 255, 255, 255, 255, 0, 0, 0]);
-        assert_eq!(bitmap[0], vec![0; 10]);
-        // 两个重叠笔画按非零规则合并，不会在重叠处留白
-        let overlap = vec![
-            vec![(0.0, 0.0), (6.0, 0.0), (6.0, 2.0), (0.0, 2.0)],
-            vec![(4.0, 0.0), (10.0, 0.0), (10.0, 2.0), (4.0, 2.0)],
-        ];
-        assert_eq!(scanline_spans(&overlap, 1.0), vec![(0.0, 10.0)]);
-
+    fn fill_is_vector_scanning_with_overscan_outside_the_strokes() {
+        // 2026-11-16 起实心填充是矢量扫描线；对齐 LightBurn，每行两头各多走 1 mm 关光过扫描
         let filled = TextTaskEngine::generate(&TextTaskSpec {
             fill: TextFill::Fill,
             ..spec("AB")
         })
         .unwrap();
-        let burns = filled.gcode.lines().filter(|l| l.contains(" S420")).count();
         let outline = TextTaskEngine::generate(&spec("AB")).unwrap();
-        assert!(burns > 20, "扫描填充应有大量出光段：{burns}");
-        // 过扫描不改变激光头相对图案中心的位置
-        let e = extents(&filled.gcode);
-        assert!(((e.min_x + e.max_x) / 2.0).abs() < 0.2, "{e:?}");
+        let burns = filled.gcode.lines().filter(|l| l.contains(" S420")).count();
+        assert!(burns > 100, "实心填充应有大量出光段：{burns}");
+        assert!(
+            filled
+                .gcode
+                .lines()
+                .any(|l| l.starts_with("G1 ") && l.contains(" S0")),
+            "过扫描是 G1 S0 匀速滑行，不是 G0"
+        );
+        let (ef, eo) = (extents(&filled.gcode), extents(&outline.gcode));
+        assert!(
+            (eo.min_x - ef.min_x - 1.0).abs() < 0.01 && (ef.max_x - eo.max_x - 1.0).abs() < 0.01,
+            "横扫的过扫描只往 x 两侧各伸 1 mm：{ef:?} vs {eo:?}"
+        );
+        assert!((ef.min_y - eo.min_y).abs() < 0.01 && (ef.max_y - eo.max_y).abs() < 0.01);
+        assert_eq!(filled.frame, outline.frame);
         assert!(filled.width_mm == outline.width_mm);
+        assert!(!filled.gcode.contains("; raster"), "不再生成位图扫描");
+        assert_eq!(filled.fill_options.unwrap().overscan_mm, 1.0);
 
-        // 左下角起点下扫描填充不得往负 X 越界（回零机器在 (0,0) 触发软限位），且走边框覆盖两侧过扫描行程
+        // 不过扫描时范围与轮廓完全相同
+        let tight = TextTaskEngine::generate(&TextTaskSpec {
+            fill: TextFill::Fill,
+            scan: vector_plan::FillOptions {
+                overscan_mm: 0.0,
+                ..spec("AB").scan
+            },
+            ..spec("AB")
+        })
+        .unwrap();
+        let et = extents(&tight.gcode);
+        assert!((et.min_x - eo.min_x).abs() < 0.01 && (et.max_x - eo.max_x).abs() < 0.01);
+
+        // 左下角起点：激光头在过扫描范围左下角，不往负方向越界
         let filled_ll = TextTaskEngine::generate(&TextTaskSpec {
             fill: TextFill::Fill,
             origin: TextOrigin::LowerLeft,
@@ -638,15 +556,9 @@ mod tests {
         .unwrap();
         let e_ll = extents(&filled_ll.gcode);
         assert!(e_ll.min_x >= -1e-6 && e_ll.min_y >= -1e-6, "{e_ll:?}");
-        assert!(filled_ll.gcode.contains("G92 X0.000 Y0.000 Z0"));
-        assert_eq!(filled_ll.frame.min_x, 0.0);
-        assert!(
-            (filled_ll.frame.max_x - e_ll.max_x).abs() < 0.2,
-            "frame={:?}, extents={e_ll:?}",
-            filled_ll.frame
-        );
+        assert!((filled_ll.frame.min_x - 1.0).abs() < 1e-9);
 
-        // 木牌 margin_mm=0 且自动适配字号时，扫描填充两侧仍须预留 overscan_mm，既不负向越界也不越过木牌右边缘
+        // 木牌留边为 0、自动适配字号时，过扫描也留在木牌内
         let filled_board = TextTaskEngine::generate(&TextTaskSpec {
             fill: TextFill::Fill,
             origin: TextOrigin::LowerLeft,
@@ -660,12 +572,48 @@ mod tests {
         let e_board = extents(&filled_board.gcode);
         assert!(
             e_board.min_x >= -1e-6 && e_board.max_x <= 50.0 + 1e-6,
-            "木牌 [0, 50] 边界内应包含全部过扫描行程: {e_board:?}"
+            "{e_board:?}"
         );
+        // 规划减少了空走
         assert!(
-            ((e_board.min_x + e_board.max_x) / 2.0 - 25.0).abs() < 0.2,
-            "扫描中心应对齐木牌中点 25mm: {e_board:?}"
+            filled.path_optimization.travel_distance_after
+                <= filled.path_optimization.travel_distance_before,
+            "{:?}",
+            filled.path_optimization
         );
+
+        // 竖扫（90°）：过扫描改往 y 两侧伸
+        let vertical = TextTaskEngine::generate(&TextTaskSpec {
+            fill: TextFill::Fill,
+            scan: vector_plan::FillOptions {
+                angle_deg: 90.0,
+                ..spec("AB").scan
+            },
+            ..spec("AB")
+        })
+        .unwrap();
+        let ev = extents(&vertical.gcode);
+        assert!((eo.min_y - ev.min_y - 1.0).abs() < 0.01, "{ev:?} vs {eo:?}");
+        assert!((ev.min_x - eo.min_x).abs() < 0.01);
+    }
+
+    #[test]
+    fn cut_text_cuts_inner_contours_first() {
+        // “A”的三角形内孔要先于外轮廓切
+        let job = TextTaskEngine::generate(&TextTaskSpec {
+            plan: vector_plan::PlanOptions {
+                inside_first: true,
+                ..vector_plan::PlanOptions::default()
+            },
+            ..spec("A")
+        })
+        .unwrap();
+        assert!(
+            job.path_optimization
+                .strategy
+                .starts_with("nearest_neighbor")
+        );
+        assert!(job.gcode.contains(" S420"));
     }
 
     #[test]
@@ -678,6 +626,14 @@ mod tests {
         })
         .unwrap();
         assert!(hatch.gcode.lines().count() > outline.gcode.lines().count() * 2);
+        // 排线线距是实心的 3 倍：出光段少得多
+        let filled = TextTaskEngine::generate(&TextTaskSpec {
+            fill: TextFill::Fill,
+            pixel_size_mm: 0.2,
+            ..spec("A")
+        })
+        .unwrap();
+        assert!(filled.gcode.lines().count() > hatch.gcode.lines().count() * 2);
         assert!(TextFill::parse(Some("solid")).is_err());
         assert!(TextOrigin::parse(Some("top")).is_err());
         assert!(parse_alignment(Some("justify")).is_err());

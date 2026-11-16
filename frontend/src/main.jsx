@@ -18,6 +18,7 @@ import { backendStartupErrorText, hasDesktopSession, initializeBackendOrigin, is
 import { ApprovalCenter } from "./components/ApprovalCenter.jsx";
 import { AiPreviewCenter } from "./components/AiPreviewCenter.jsx";
 import { JobProgressDock } from "./components/JobProgressDock.jsx";
+import { VoiceActivityDock } from "./components/VoiceActivityDock.jsx";
 import { clearRemoteOrigin } from "./remoteHost.js";
 import { HomePage } from "./pages/HomePage.jsx";
 import { VoiceErrorBoundary } from "./components/VoiceErrorBoundary.jsx";
@@ -131,6 +132,10 @@ function App() {
   const [approvalCount, setApprovalCount] = useState(0);
   const [pendingApprovalTargets, setPendingApprovalTargets] = useState(null);
   const approvalsEnabled = hasDesktopSession();
+  // 全局“小智 · 雕刻同步”小窗（2026-11-16）：被“稍后再看”收起的 AI 预览数，与重新弹出预览的信号
+  const [aiPreviewWaiting, setAiPreviewWaiting] = useState(0);
+  const [aiPreviewReopen, setAiPreviewReopen] = useState(0);
+  const reopenAiPreview = useCallback(() => setAiPreviewReopen((n) => n + 1), []);
   const openApprovals = useCallback(() => {
     if (approvalCount > 0) {
       setApprovalOpen(true);
@@ -521,9 +526,25 @@ function App() {
         onPendingTargetsChange={setPendingApprovalTargets}
       />
 
-      <AiPreviewCenter pendingApprovalTargets={pendingApprovalTargets} />
+      <AiPreviewCenter
+        pendingApprovalTargets={pendingApprovalTargets}
+        onWaitingChange={setAiPreviewWaiting}
+        reopenNonce={aiPreviewReopen}
+      />
 
-      <JobProgressDock onJobsChange={setActiveJobs} />
+      {/* 右下角浮层堆叠：小智雕刻同步小窗在上，雕刻任务浮层在下，互不遮挡 */}
+      <div className="float-dock-stack">
+        <VoiceActivityDock
+          voiceEnabled={voiceEnabled}
+          voiceStatus={voiceStatus}
+          jobs={activeJobs}
+          previewWaiting={aiPreviewWaiting}
+          onOpenPreview={reopenAiPreview}
+          approvalWaiting={approvalOpen ? 0 : approvalCount}
+          onOpenApprovals={openApprovals}
+        />
+        <JobProgressDock onJobsChange={setActiveJobs} />
+      </div>
 
       <ObsidianSelectHost />
 

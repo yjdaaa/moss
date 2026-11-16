@@ -47,8 +47,8 @@ pub(crate) fn generate_text_artifacts(
         .filter(|s| !s.is_empty());
     let is_cut = raw_engraving_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"))
         || raw_laser_mode.is_some_and(|m| m.eq_ignore_ascii_case("cut"));
-    // 文字刻法（2026-11-06）：默认只描轮廓（用户决定）；fill 扫描填充用材料库 raster 参数，
-    // outline / hatch 是矢量走线，用 outline 参数（此前一律取 engraving_mode，即工作台默认的 raster）
+    // 文字刻法（2026-11-06）：默认只描轮廓（用户决定）；fill 实心填充用材料库 raster 参数
+    // （2026-11-16 起改为矢量密排线，行距、速度与扫描填充同档），outline / hatch 用 outline 参数
     let text_fill =
         laser_core::engine::TextFill::parse(object.get("text_fill").and_then(|v| v.as_str()))?;
     let (rec_laser_mode, rec_engraving_mode) = if is_cut {
@@ -107,6 +107,8 @@ pub(crate) fn generate_text_artifacts(
             0.1
         },
     );
+    // 填充扫描设置（2026-11-16 对齐 LightBurn）：过扫描默认按速度自动算
+    let fill = parse_fill_options(object, params.feed)?;
     let spec = laser_core::TextTaskSpec {
         text,
         font_path,
@@ -129,7 +131,12 @@ pub(crate) fn generate_text_artifacts(
             .unwrap_or(TEXT_BOARD_MARGIN_MM),
         auto_size: !explicit_font_size,
         pixel_size_mm: pixel_size,
-        overscan_mm: IMAGE_OVERSCAN_MM,
+        scan: fill.options,
+        // 切割时闭合轮廓先内后外
+        plan: laser_core::vector_plan::PlanOptions {
+            inside_first: is_cut,
+            ..parse_path_options(object)?
+        },
     };
     let artifacts = laser_core::TextTaskEngine::generate(&spec)?;
     // 文字成品超出机器幅面时在预览阶段就拒绝，AI / 界面能立即提示改小字号（2026-11-06）
@@ -199,6 +206,8 @@ pub(crate) fn generate_text_artifacts(
         },
         "glyphs": artifacts.glyphs,
         "path_optimization": artifacts.path_optimization,
+        "fill_options": artifacts.fill_options.map(|options| fill_options_json(&options, fill.auto)),
+        "removed_duplicates": artifacts.removed_duplicates,
         "time_estimate": {
             "estimated_seconds": estimate.estimated_seconds,
             "estimated_minutes": estimate.estimated_minutes,
@@ -232,10 +241,40 @@ pub(crate) fn generate_draw_artifacts(
         return Err("thickness_mm 必须是大于 0 的数字".into());
     }
 
-    let mode = object
+    let requested_mode = object
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("raster");
+    // 2026-11-16：矢量模式直接用画板里的图形规划路线；场景里有插入的图片（矢量刻不了）或没带场景时改用光栅
+    let sketch = if requested_mode == "vector" {
+        match object.get("scene_json") {
+            Some(scene) => Some(crate::sketch::sketch_from_scene(
+                scene,
+                &laser_core::font::find_system_font_for_text,
+            )?),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let vector_fallback = match (&sketch, requested_mode) {
+        (_, mode) if mode != "vector" => None,
+        (None, _) => Some("没有收到画板的矢量数据，已按光栅生成"),
+        (Some(sketch), _) if sketch.has_image => {
+            Some("画板里有插入的图片，矢量模式刻不了图片，已按光栅生成")
+        }
+        (Some(sketch), _) if sketch.is_empty() => {
+            return Err("画板里没有可刻的图形（线条颜色是透明的？）".into());
+        }
+        _ => None,
+    };
+    let mode = if requested_mode == "vector" && vector_fallback.is_some() {
+        "raster"
+    } else {
+        requested_mode
+    };
+    // 矢量走线与轮廓描边用同一档材料参数
+    let recommend_mode = if mode == "vector" { "outline" } else { mode };
 
     let data_part = if let Some((_, b64)) = image_data_url.split_once(',') {
         b64
@@ -286,7 +325,11 @@ pub(crate) fn generate_draw_artifacts(
         material,
         thickness,
         if mode == "cut" { "cut" } else { "engrave" },
-        if mode == "cut" { None } else { Some(mode) },
+        if mode == "cut" {
+            None
+        } else {
+            Some(recommend_mode)
+        },
         1000.0,
     );
     let power = recommendation
@@ -314,7 +357,7 @@ pub(crate) fn generate_draw_artifacts(
             .unwrap_or(MACHINE_WORK_AREA_MM)
     };
     let (area_w, area_h) = (area("work_area_width_mm"), area("work_area_height_mm"));
-    let usable_w = if mode == "outline" {
+    let usable_w = if mode == "outline" || mode == "vector" {
         area_w
     } else {
         area_w - 2.0 * IMAGE_OVERSCAN_MM
@@ -328,7 +371,62 @@ pub(crate) fn generate_draw_artifacts(
         (area_w, area_h),
     )?;
     let path_preview_name = format!("{id}.path.png");
-    let gcode_str = if mode == "outline" {
+    let fill_spacing = recommendation
+        .as_ref()
+        .map(|r| r.params.pixel_size_mm)
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(DRAW_PIXEL_MM);
+    let mut path_optimization = None;
+    let mut vector_details = None;
+    let gcode_str = if let (Some(sketch), "vector") = (&sketch, mode) {
+        let fill = parse_fill_options(object, feed_rate as f64)?;
+        let planned = plan_sketch(
+            sketch,
+            width_mm,
+            height_mm,
+            laser_core::vector_plan::FillOptions {
+                spacing: fill_spacing,
+                ..fill.options
+            },
+            &parse_path_options(object)?,
+        )?;
+        path_optimization = Some(planned.stats.clone());
+        vector_details = Some((
+            sketch.has_fills().then(|| {
+                fill_options_json(
+                    &laser_core::vector_plan::FillOptions {
+                        spacing: fill_spacing,
+                        ..fill.options
+                    },
+                    fill.auto,
+                )
+            }),
+            planned.removed_duplicates,
+        ));
+        let preview_scale = (1024.0 / width_mm.max(height_mm)).max(1.0);
+        laser_core::gcode::preview_outline_rgba_with_options(
+            &planned.paths,
+            (width_mm * preview_scale).ceil() as u32,
+            (height_mm * preview_scale).ceil() as u32,
+            width_mm,
+            height_mm,
+            false,
+        )?
+        .save(root.join(&path_preview_name))
+        .map_err(|e| e.to_string())?;
+        laser_core::gcode::write_steps(
+            &planned.steps,
+            &laser_core::gcode::WriterOptions {
+                width_mm,
+                height_mm,
+                power,
+                feed_rate,
+                auto_close: false,
+                laser_mode: "M4",
+                power_scale: None,
+            },
+        )?
+    } else if mode == "outline" {
         // 轮廓雕刻：深色区域描边（与 Python 版相同的灰度描摹、简化与点数预算），按成品尺寸缩放
         let gray: Vec<Vec<u8>> = (0..img_h)
             .map(|y| (0..img_w).map(|x| luma_img.get_pixel(x, y).0[0]).collect())
@@ -484,12 +582,22 @@ pub(crate) fn generate_draw_artifacts(
         );
     }
     res_map.insert("mode".into(), serde_json::Value::String(mode.to_string()));
+    if let Some(note) = vector_fallback {
+        res_map.insert("vector_note".into(), serde_json::json!(note));
+    }
+    if let Some(stats) = path_optimization {
+        res_map.insert("path_optimization".into(), serde_json::json!(stats));
+    }
+    if let Some((fill, removed)) = vector_details {
+        res_map.insert("fill_options".into(), serde_json::json!(fill));
+        res_map.insert("removed_duplicates".into(), serde_json::json!(removed));
+    }
     res_map.insert("origin".into(), serde_json::json!("lower_left"));
     res_map.insert(
         "origin_note".into(),
         serde_json::json!("开刻前把激光头移到图案左下角"),
     );
-    let frame_max_x = if mode == "outline" {
+    let frame_max_x = if mode == "outline" || mode == "vector" {
         width_mm
     } else {
         width_mm + 2.0 * IMAGE_OVERSCAN_MM
@@ -515,6 +623,196 @@ pub(crate) fn generate_draw_artifacts(
     res_map.insert("fingerprint".into(), serde_json::Value::String(fingerprint));
 
     Ok(res_map)
+}
+
+/// 画板矢量几何换算到成品尺寸（毫米，y 向下、左下角为激光头起点）并规划路线：
+/// 先把有填充色的图形与文字扫描填满，再从填充结束处描所有轮廓与笔画（同 LightBurn 先 Fill 层后 Line 层）。
+/// 留边与光栅导出一致（四周 16 个画板单位），等比放进成品尺寸并居中；有填充时四周再让出过扫描的距离，
+/// 关光滑行也不越出成品范围（激光头起点在左下角，不往负方向走）。
+fn plan_sketch(
+    sketch: &crate::sketch::SketchGeometry,
+    width_mm: f64,
+    height_mm: f64,
+    fill: laser_core::vector_plan::FillOptions,
+    path_options: &laser_core::vector_plan::PlanOptions,
+) -> Result<laser_core::vector_plan::Planned, String> {
+    use laser_core::vector_plan::{FillOptions, FillRule, Unit, plan_layers, scan_fill};
+    const PADDING: f64 = 16.0;
+    let (x0, y0, x1, y1) = sketch.bounds().ok_or("画板里没有可刻的图形")?;
+    let (reach_x, reach_y) = if sketch.has_fills() {
+        fill.extension_mm()
+    } else {
+        (0.0, 0.0)
+    };
+    let (inner_w, inner_h) = (width_mm - 2.0 * reach_x, height_mm - 2.0 * reach_y);
+    if inner_w <= 0.0 || inner_h <= 0.0 {
+        return Err("成品尺寸太小，放不下过扫描，请加大尺寸或调小过扫描".into());
+    }
+    let (frame_w, frame_h) = ((x1 - x0) + 2.0 * PADDING, (y1 - y0) + 2.0 * PADDING);
+    let scale = (inner_w / frame_w).min(inner_h / frame_h);
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("画板图形尺寸无效".into());
+    }
+    let (ox, oy) = (
+        (width_mm - frame_w * scale) / 2.0,
+        (height_mm - frame_h * scale) / 2.0,
+    );
+    let mm = sketch.map(|(x, y)| {
+        (
+            (x - x0 + PADDING) * scale + ox,
+            (y - y0 + PADDING) * scale + oy,
+        )
+    });
+    // 扫描角度按机器视角逆时针，画板坐标 y 向下时取反
+    let options = |rule| FillOptions {
+        rule,
+        angle_deg: -fill.angle_deg,
+        ..fill
+    };
+    let mut fills = Vec::new();
+    for shape in &mm.filled_shapes {
+        fills.extend(
+            scan_fill(std::slice::from_ref(shape), &options(FillRule::EvenOdd))
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    for glyphs in &mm.filled_text {
+        fills.extend(scan_fill(glyphs, &options(FillRule::NonZero)).map_err(|e| e.to_string())?);
+    }
+    let strokes: Vec<Unit> = mm
+        .closed
+        .iter()
+        .cloned()
+        .map(Unit::Closed)
+        .chain(mm.open.iter().cloned().map(Unit::Open))
+        .collect();
+    // 激光头起点在左下角：y 向下坐标里是 (0, height)；规划内部自检出光总长度不变
+    plan_layers(vec![fills, strokes], (0.0, height_mm), path_options).map_err(|e| e.to_string())
+}
+
+/// 请求里的 `fill_options` 解析结果；`auto` 表示过扫描按速度与加速度自动算。
+struct ParsedFill {
+    options: laser_core::vector_plan::FillOptions,
+    auto: bool,
+}
+
+/// 解析 `fill_options`（2026-11-16，对齐 LightBurn Fill 模式；全部可省略）：
+/// `grouping`（all 默认 / individual）、`angle_deg`（0 横扫）、`cross_hatch`、`bidirectional`（默认 true）、
+/// `overscan_mm`（省略或 "auto" 按 v²/2a 自动；0 关闭；上限 20）、`acceleration_mm_s2`（自动过扫描用，默认 1000）、
+/// `scan_offset_mm`（双向扫描错位补偿，±2）。线距与填充规则由调用方按刻法填。
+fn parse_fill_options(
+    object: &serde_json::Map<String, serde_json::Value>,
+    feed_mm_per_min: f64,
+) -> Result<ParsedFill, String> {
+    use laser_core::vector_plan::{
+        FillGrouping, FillOptions, FillRule, MAX_OVERSCAN_MM, auto_overscan_mm,
+    };
+    let empty = serde_json::Map::new();
+    let fill = match object.get("fill_options") {
+        None | Some(serde_json::Value::Null) => &empty,
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err("fill_options 必须是对象".into()),
+    };
+    let number = |key: &str| -> Result<Option<f64>, String> {
+        match fill.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(None),
+            Some(value) => value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|t| t.trim().parse().ok()))
+                .filter(|v: &f64| v.is_finite())
+                .map(Some)
+                .ok_or_else(|| format!("fill_options.{key} 必须是数字")),
+        }
+    };
+    let flag = |key: &str, default: bool| -> Result<bool, String> {
+        match fill.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(default),
+            Some(serde_json::Value::Bool(value)) => Ok(*value),
+            Some(_) => Err(format!("fill_options.{key} 必须是 true / false")),
+        }
+    };
+    let auto = matches!(
+        fill.get("overscan_mm"),
+        None | Some(serde_json::Value::Null)
+    ) || fill
+        .get("overscan_mm")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t.trim().is_empty() || t.trim().eq_ignore_ascii_case("auto"));
+    let overscan = if auto {
+        let accel = number("acceleration_mm_s2")?.unwrap_or(f64::NAN);
+        auto_overscan_mm(feed_mm_per_min, accel)
+    } else {
+        let value = number("overscan_mm")?.unwrap_or(0.0);
+        if !(0.0..=MAX_OVERSCAN_MM).contains(&value) {
+            return Err(format!(
+                "fill_options.overscan_mm 须在 0 ~ {MAX_OVERSCAN_MM} mm"
+            ));
+        }
+        value
+    };
+    let angle = number("angle_deg")?.unwrap_or(0.0);
+    if !(-360.0..=360.0).contains(&angle) {
+        return Err("fill_options.angle_deg 须在 -360 ~ 360 度".into());
+    }
+    let offset = number("scan_offset_mm")?.unwrap_or(0.0);
+    if offset.abs() > 2.0 {
+        return Err("fill_options.scan_offset_mm 须在 -2 ~ 2 mm".into());
+    }
+    Ok(ParsedFill {
+        options: FillOptions {
+            grouping: FillGrouping::parse(fill.get("grouping").and_then(|v| v.as_str()))?,
+            angle_deg: angle,
+            cross_hatch: flag("cross_hatch", false)?,
+            bidirectional: flag("bidirectional", true)?,
+            overscan_mm: overscan,
+            scan_offset_mm: offset,
+            ..FillOptions::new(0.1, FillRule::NonZero)
+        },
+        auto,
+    })
+}
+
+/// 解析 `path_options`（对齐 LightBurn 优化设置）：`prefer_corners`（起刀点放尖角，默认 true）、
+/// `remove_overlaps`（去重复线，默认 true）。切割先内后外由刻法决定，不在这里开关。
+fn parse_path_options(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<laser_core::vector_plan::PlanOptions, String> {
+    let empty = serde_json::Map::new();
+    let path = match object.get("path_options") {
+        None | Some(serde_json::Value::Null) => &empty,
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err("path_options 必须是对象".into()),
+    };
+    let flag = |key: &str| -> Result<bool, String> {
+        match path.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(true),
+            Some(serde_json::Value::Bool(value)) => Ok(*value),
+            Some(_) => Err(format!("path_options.{key} 必须是 true / false")),
+        }
+    };
+    Ok(laser_core::vector_plan::PlanOptions {
+        inside_first: false,
+        prefer_corners: flag("prefer_corners")?,
+        remove_overlaps: flag("remove_overlaps")?,
+    })
+}
+
+/// 结果里回显实际使用的填充设置。
+fn fill_options_json(
+    options: &laser_core::vector_plan::FillOptions,
+    overscan_auto: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "spacing_mm": options.spacing,
+        "grouping": options.grouping.as_str(),
+        "angle_deg": options.angle_deg,
+        "cross_hatch": options.cross_hatch,
+        "bidirectional": options.bidirectional,
+        "overscan_mm": options.overscan_mm,
+        "overscan_auto": overscan_auto,
+        "scan_offset_mm": options.scan_offset_mm,
+    })
 }
 
 /// 画板光栅每像素对应的物理尺寸与工作区上限（见 safety.md §4）。

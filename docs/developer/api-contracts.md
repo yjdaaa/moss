@@ -299,12 +299,14 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | 字段 | 类型 | 必填 | 规则 |
 |---|---|---|---|
 | image_data_url | string | 是 | `data:image/…;base64,` 图片；解码并校验为图片，尺寸为 0 时 400 |
-| scene_json | object 或 JSON 字符串 | 否 | 存为 `<image>.excalidraw.json` |
+| scene_json | object 或 JSON 字符串 | 否 | 存为 `<image>.scene.json`；`mode=vector` 时据此直接生成矢量刀路（缺省时改用光栅并在 `vector_note` 说明） |
 | material | string | 是 | |
 | thickness_mm | float | 是 | >0 |
-| mode | string | 否 | `raster`（默认，按 0.1 mm 点距逐行扫描）或 `outline`（沿深色区域描边，`trace_grayscale` + 路径优化 + `write_outline`）；其他值按 `raster` |
+| mode | string | 否 | `vector`（2026-11-16 起前端默认）直接把场景元素转成刀路：手绘笔画按中心线一笔、不闭合，直线 / 箭头 / 矩形 / 菱形 / 椭圆按形状描边，有填充色的闭合图形与文字元素用矢量扫描线填满（`laser_core::vector_plan::scan_fill`，设置见 `fill_options`），先填充、再描轮廓与笔画，2-opt 缩短空走；场景含用户插入（上传）到画板的图片时改用 `raster` 并返回 `vector_note`，结果另含 `path_optimization`、`fill_options`（有填充时为实际设置，否则 null）、`removed_duplicates`；`raster`（按 0.1 mm 点距逐行扫描）；`outline`（导出图沿深色区域描边，`trace_grayscale` + 路径优化 + `write_outline`）；未传按 `raster` |
 | width_mm、height_mm | 可选正数 | 否 | 成品尺寸（2026-10-14 起生效，此前被忽略）：都填时锁定比例放进该框；只填一边按比例算另一边；缺省、空串、null 或 0 按导出图每像素 0.1 mm。2026-11-06 起按机器幅面（默认 100 × 100 mm，可用 `work_area_width_mm` / `work_area_height_mm` 覆盖；光栅模式宽度另留两侧各 1 mm 过扫描）而不是 400 mm 画布：填写的尺寸超出返回 400；没填且按 0.1 mm/像素超出时等比缩小并返回 `auto_fitted=true` 与 `fit_note` |
 | vector_simplify_factor | 可选数字 | 否 | 仅 `outline`：0.25 ~ 8，默认 3 |
+| fill_options | object | 否 | 仅 `vector`，用于有填充色的图形与文字元素（线距取材料像素间距）；有填充时成品四周再让出过扫描距离，关光滑行也不越出成品范围。2026-11-16 对齐 LightBurn Fill 模式，全部可省略：`grouping`（`all` 默认，每行横穿所有图形、图形之间 `G1 S0` 匀速滑过 / `individual` 一块块蛇形扫完）、`angle_deg`（扫描角度，按机器视角逆时针，0 横扫，±360 内）、`cross_hatch`（再转 90° 扫一遍，默认 false）、`bidirectional`（默认 true；false 时回程不出光）、`overscan_mm`（每行两头关光多走的距离；省略、null 或 `"auto"` 按 v²/(2a) 自动、取 0.1 mm 整、限 1 ~ 20；数字 0 ~ 20，0 关闭）、`acceleration_mm_s2`（自动过扫描用，默认 1000）、`scan_offset_mm`（双向扫描错位补偿 ±2，每行逆着行进方向挪一半）；越界或类型不对 400 |
+| path_options | object | 否 | 仅 `vector`。2026-11-16 对齐 LightBurn 优化设置：`prefer_corners`（闭合轮廓起刀点优先放在转角 > 45° 的尖角，默认 true）、`remove_overlaps`（整条重复的轮廓 / 线段只刻一遍，容差 0.01 mm，默认 true）；切割先内后外由刻法决定，不能在这里关 |
 | 连接字段 | 见 §1.5 | 否 | 只记录，不连接设备 |
 
 后端直接生成光栅或轮廓 G-code（`generate_draw_artifacts`），写入运行目录 `generated_assets/`，创建 `source_type="draw"` 的 workflow 并冻结 `confirmation_snapshot`。
@@ -334,12 +336,14 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | text、material | string | 是 | `text 不能为空` |
 | thickness_mm | float | 是 | >0，否则 400 `thickness_mm 必须是大于 0 的数字` |
 | engraving_mode | string | 否 | 只用于判断是否切割（`cut`）；不再决定文字刻法（此前写 `raster` 也只描轮廓） |
-| text_fill | string | 否 | `outline`（默认，2026-11-06 用户决定）只描字的轮廓，取材料库 outline 参数；`fill` 把字形按 `pixel_size_mm` 转黑白位图逐行扫描填满，取 raster 参数；`hatch` 矢量平行线填满并描边，取 outline 参数。填充按非零环绕规则，字内孔不填 |
+| text_fill | string | 否 | `outline`（默认，2026-11-06 用户决定）只描字的轮廓，取材料库 outline 参数；`fill` 实心填充：2026-11-16 起改为矢量扫描线（线距 `pixel_size_mm`，从轮廓精确求交，不经过位图；扫描设置见 `fill_options`，默认一次填完、双向、过扫描自动；最后描一遍轮廓），取 raster 参数；`hatch` 排线填充，线距为 `pixel_size_mm` 的 3 倍并描边，取 outline 参数；切割（`laser_mode` / `engraving_mode` 为 `cut`）时闭合轮廓先内后外。填充按非零环绕规则，字内孔不填 |
 | text_align | string | 否 | `center`（默认）/ `left` / `right`；文字里的换行即分行 |
 | origin | string | 否 | `center`（默认，用户决定）开刻前激光头对准木牌（图案）中心；`lower_left` 对准木牌左下角（无木牌为文字左下角）。只改开头 `G92` 声明的激光头位置，结束时关光回到起点 |
 | width_mm / height_mm（别名 board_width_mm / board_height_mm） | float | 否 | 木牌尺寸，可只给一边；没给 `font_size_mm` 时自动取能放下的最大字号并居中，给了字号但放不下 400 `…放不进 … 的木牌` |
 | safe_margin_mm（别名 margin_mm） | float | 否 | 2；放进木牌时四周留边 |
 | pixel_size_mm | float | 否 | 材料库对应参数（0.05～1）；`fill` 的扫描行距与 `hatch` 的排线间距 |
+| fill_options | object | 否 | 只对 `fill` / `hatch` 有效。过扫描让扫描线越出笔画：放进木牌时两侧留边至少为过扫描距离；`lower_left` 且没给木牌时激光头在过扫描范围的左下角（`frame_mm.min_x` = 过扫描距离），运动不往起点负方向越界。2026-11-16 对齐 LightBurn Fill 模式，全部可省略：`grouping`（`all` 默认，每行横穿所有图形、图形之间 `G1 S0` 匀速滑过 / `individual` 一块块蛇形扫完）、`angle_deg`（扫描角度，按机器视角逆时针，0 横扫，±360 内）、`cross_hatch`（再转 90° 扫一遍，默认 false）、`bidirectional`（默认 true；false 时回程不出光）、`overscan_mm`（每行两头关光多走的距离；省略、null 或 `"auto"` 按 v²/(2a) 自动、取 0.1 mm 整、限 1 ~ 20；数字 0 ~ 20，0 关闭）、`acceleration_mm_s2`（自动过扫描用，默认 1000）、`scan_offset_mm`（双向扫描错位补偿 ±2，每行逆着行进方向挪一半）；越界或类型不对 400 |
+| path_options | object | 否 | 2026-11-16 对齐 LightBurn 优化设置：`prefer_corners`（闭合轮廓起刀点优先放在转角 > 45° 的尖角，默认 true）、`remove_overlaps`（整条重复的轮廓 / 线段只刻一遍，容差 0.01 mm，默认 true）；切割先内后外由刻法决定，不能在这里关 |
 | font_size_mm | float | 否 | 10.0；给了木牌尺寸且没填时自动适配 |
 | letter_spacing_mm | float | 否 | 0.5 |
 | font_path | string | 否 | 缺省使用内置字体 |
@@ -348,7 +352,7 @@ Rust 实现复刻这些规则（`parse_bool` / `parse_float` / `parse_int`），
 | 连接字段 | 见 §1.5 | 否 | 只记录 |
 
 后端用材料库推荐参数（或 `manual_params`）生成 G-code 与预览 PNG（运行目录 `generated_assets/`），创建 `source_type="text"` 的 workflow 并冻结快照。
-成功 `result` 含 `workflow_id`、`status=preview_ready`、`gcode_file`、`gcode_sha256`、`image_file`、`font_path`、`material`、`thickness_mm`、`width_mm`、`height_mm`（笔画实际范围）、`font_size_mm`（实际字号）、`text_fill`、`origin`、`origin_note`（开刻前激光头放哪）、`board_width_mm`、`board_height_mm`、`frame_mm:{min_x,max_x,min_y,max_y}`（笔画相对激光头起点的范围，供走边框）、`glyphs`、`path_optimization`、`time_estimate:{estimated_seconds, estimated_minutes, laser_seconds, non_laser_seconds}` 与 §1.4 的 `web`。
+成功 `result` 含 `workflow_id`、`status=preview_ready`、`gcode_file`、`gcode_sha256`、`image_file`、`font_path`、`material`、`thickness_mm`、`width_mm`、`height_mm`（笔画实际范围）、`font_size_mm`（实际字号）、`text_fill`、`origin`、`origin_note`（开刻前激光头放哪）、`board_width_mm`、`board_height_mm`、`frame_mm:{min_x,max_x,min_y,max_y}`（笔画相对激光头起点的范围，不含过扫描，供走边框）、`glyphs`、`path_optimization`、`fill_options`（实际使用的 `{spacing_mm, grouping, angle_deg, cross_hatch, bidirectional, overscan_mm, overscan_auto, scan_offset_mm}`，只描轮廓时为 null）、`removed_duplicates`、`time_estimate:{estimated_seconds, estimated_minutes, laser_seconds, non_laser_seconds}` 与 §1.4 的 `web`。
 材料安全门：后端调用 `laser_core::safety::evaluate_material`；PVC、聚氯乙烯及明确危险材料返回 400 `material_safety_blocked`，仅写“塑料”等成分不明描述时同样返回 400 并要求澄清。MCP 工具 `generate_text_laser_task_tool` / `generate_text_image_gcode_tool` / `ai_laser_gcode_tool` 与 `laser_workflow_tool preview`（带 `text`）都转发到本路由；工具的 `font_size` 按 `32px≈1mm` 折算为 `font_size_mm` 并限制在 3～80。
 
 ### 3.5 `/api/text-task/send`

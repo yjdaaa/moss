@@ -424,3 +424,14 @@ button.conn-pill:hover {
   align-items: center;
   gap: 6px;
 }
+
+/* 2026-11-16 填充与走刀设置（对齐 LightBurn）：工作台文字与画板矢量模式共用 */
+.fill-options { margin-top: 10px; border: 1px solid var(--ob-line, rgba(127, 127, 127, 0.25)); border-radius: 8px; padding: 6px 10px; }
+.fill-options > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12px; font-weight: 600; color: var(--ob-ink-2); }
+.fill-options-summary { font-weight: 400; font-size: 11px; opacity: 0.8; min-width: 0; overflow-wrap: anywhere; }
+.fill-options-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.fill-options-body label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--ob-ink-2); min-width: 0; }
+.fill-options-body label.checkbox-row { flex-direction: row; align-items: center; gap: 6px; grid-column: 1 / -1; }
+.fill-options-body .fill-options-wide { grid-column: 1 / -1; }
+.fill-options-body input[type="number"], .fill-options-body select { width: 100%; min-width: 0; }
+@media (max-width: 520px) { .fill-options-body { grid-template-columns: minmax(0, 1fr); } }

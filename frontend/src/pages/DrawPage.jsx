@@ -62,9 +62,12 @@ import { MANUAL_LIMITS, manualParamsPayload } from "../workbenchParams.js";
 import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
 import { defaultSerialPortHint } from "../platform.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
+import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
+import { fillResultNote, fillSettingsPayload, fillSettingsSignature, readFillSettings, writeFillSettings } from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { DRAW_DEFAULT_LAYOUT, DRAW_STORAGE_KEY } from "../workbenchLayout.js";
 import {
+  DRAW_MODE_VERSION,
   buildDrawFramingPayload,
   computeSceneRevision,
   drawConnectionPayload,
@@ -125,6 +128,12 @@ export function DrawPage({ onNavigate }) {
   const [hasRec, setHasRec] = useState(true);
   const [recRefreshTick, setRecRefreshTick] = useState(0);
   const [customParams, setCustomParams] = useState(false);
+  // 2026-11-16：矢量模式的填充与走刀设置（对齐 LightBurn），与工作台文字共用一份本机设置
+  const [fillSettings, setFillSettings] = useState(() => readFillSettings());
+  const updateFillSettings = (next) => {
+    setFillSettings(next);
+    writeFillSettings(next);
+  };
   const [customPower, setCustomPower] = useState("40");
   const [customFeed, setCustomFeed] = useState("1500");
   const [customPasses, setCustomPasses] = useState("1");
@@ -194,7 +203,7 @@ export function DrawPage({ onNavigate }) {
       material: mat,
       thickness_mm: thick,
       laser_mode: "engrave",
-      engraving_mode: form.mode === "outline" ? "outline" : "raster",
+      engraving_mode: form.mode === "outline" || form.mode === "vector" ? "outline" : "raster",
     });
     getJson(`/api/ui/material-recommendation?${query.toString()}`).then((res) => {
       if (cancelled) return;
@@ -219,6 +228,7 @@ export function DrawPage({ onNavigate }) {
     feed: customFeed,
     passes: customPasses,
     presetParams: hasRec ? `${recPowerPct}/${recFeedMpm}/${recPasses}` : "",
+    fill: fillSettingsSignature(fillSettings),
   });
   const previewStale = Boolean(workflowId) && isDrawPreviewStale(previewSnap, {
     sceneRev,
@@ -407,6 +417,7 @@ export function DrawPage({ onNavigate }) {
         persistedRef.current[key] = str;
         storage.setItem(`laserLab.${key}`, str);
       });
+      storage.setItem("laserLab.mode_version", DRAW_MODE_VERSION);
       setStatus("配置已保存");
     } catch (error) {
       setStatus(`配置保存失败：${error?.message || error}（本次设置仍可使用，但不会被记住）`);
@@ -587,6 +598,12 @@ export function DrawPage({ onNavigate }) {
     }
 
     const formSigSnapshot = currentFormSig;
+    const fillPayload = form.mode === "vector" ? fillSettingsPayload(fillSettings) : {};
+    if (fillPayload.error) {
+      setStatus(`填充设置有误：${fillPayload.error}`);
+      void showAlert(fillPayload.error, { title: "填充设置不对", tone: "warning" });
+      return;
+    }
     setBusy(true);
     setStatus("导出画板中...");
     try {
@@ -603,6 +620,7 @@ export function DrawPage({ onNavigate }) {
         width_mm: drawSizeValue(form.width_mm),
         height_mm: drawSizeValue(form.height_mm),
         mode: form.mode,
+        ...fillPayload,
         ...drawConnectionPayload(form),
         ...(manual ? { manual_params: manual } : {}),
       };
@@ -625,8 +643,13 @@ export function DrawPage({ onNavigate }) {
         const fingerprint = data?.result?.draw_lab?.content_fingerprint || "";
         setRepeatSend((current) => applyPreviewFingerprintSuccess(current, fingerprint));
         // 未填尺寸且超出机器幅面时后端会等比缩小，并说明缩到多大（2026-11-06）
-        const fitNote = data.result?.artifacts?.fit_note;
-        setStatus([data.result?.speech || "预览已生成", fitNote].filter(Boolean).join("；"));
+        const artifacts = data.result?.artifacts || {};
+        setStatus([
+          data.result?.speech || "预览已生成",
+          artifacts.fit_note,
+          artifacts.vector_note,
+          fillResultNote(artifacts.fill_options, artifacts.removed_duplicates),
+        ].filter(Boolean).join("；"));
       } else {
         setPreviewSnap(null);
         setStatus((typeof data.result === "string" && data.result) || "预览失败");
@@ -1045,10 +1068,15 @@ export function DrawPage({ onNavigate }) {
           <label>
             生成策略
             <select value={form.mode} onChange={(event) => updateForm("mode", event.target.value)}>
-              <option value="raster">光栅填充（逐行扫描填满）</option>
-              <option value="outline">轮廓描边（沿深色图形边缘走线）</option>
+              <option value="vector">矢量（直接用画板图形规划路线，推荐）</option>
+              <option value="raster">光栅填充（逐行扫描填满，适合插入的照片）</option>
+              <option value="outline">轮廓描边（先转图片再描深色边缘）</option>
             </select>
           </label>
+
+          {form.mode === "vector" ? (
+            <FillOptionsPanel idPrefix="draw" settings={fillSettings} onChange={updateFillSettings} />
+          ) : null}
 
           {form.mode === "outline" ? (
             <label>
@@ -1621,6 +1649,7 @@ function fileNameFromUrl(url, fallback) {
 }
 
 function modeLabel(mode, taskType) {
+  if (mode === "vector") return "矢量";
   if (mode === "raster" || taskType === "engrave_photo") return "光栅填充";
   if (mode === "outline" || taskType === "engrave_logo") return "轮廓描边";
   if (taskType === "cut_contour") return "轮廓切割";

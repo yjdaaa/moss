@@ -47,6 +47,8 @@ import { estopTargetArgs } from "../globalEstop.js";
 import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
+import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
+import { fillResultNote, fillSettingsPayload, fillSettingsSignature, readFillSettings, writeFillSettings } from "../fillOptions.js";
 import { WbCard, WorkbenchCanvas } from "../components/WorkbenchCanvas.jsx";
 import { defaultSerialPortHint } from "../platform.js";
 import { MATERIAL_LIBRARY_CHANNEL, pickThicknessForMaterial } from "../materialSelectState.js";
@@ -110,6 +112,13 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     () => resolveTextStyle(readLocal("laser-forge-text-style", "outline")).style
   );
   const [textOrigin, setTextOrigin] = useState("center");
+  // 2026-11-16：矢量填充与走刀设置（对齐 LightBurn），与创意画板共用一份本机设置
+  const [fillSettings, setFillSettings] = useState(() => readFillSettings());
+  const updateFillSettings = (next) => {
+    setFillSettings(next);
+    writeFillSettings(next);
+  };
+  const textUsesFill = resolveTextStyle(textStyle).textFill !== "outline";
 
   const [uploadedImagePath, setUploadedImagePath] = useState("");
   const [uploadedImageName, setUploadedImageName] = useState("");
@@ -155,6 +164,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
   const [timeEstimate, setTimeEstimate] = useState(null);
   const [dimensions, setDimensions] = useState(null);
   const [fitNote, setFitNote] = useState("");
+  const [fillNote, setFillNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [framingBusy, setFramingBusy] = useState(false);
 
@@ -164,6 +174,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
     fontSizeMm,
     textStyle,
     textOrigin,
+    fillSignature: fillSettingsSignature(fillSettings, { withFill: textUsesFill }),
     uploadedImagePath,
     imageWidthMm,
     imageHeightMm,
@@ -551,6 +562,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           return;
         }
         const spec = resolveTextStyle(textStyle);
+        const fillPayload = fillSettingsPayload(fillSettings, { withFill: spec.textFill !== "outline" });
+        if (fillPayload.error) {
+          showAlert(fillPayload.error, { title: "填充设置不对", tone: "warning" });
+          setBusy(false);
+          return;
+        }
         res = await postJson("/api/text-task/generate", {
           text: textContent.trim(),
           material: selectedMaterial,
@@ -560,6 +577,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
           engraving_mode: spec.engravingMode,
           text_fill: spec.textFill,
           origin: textOrigin,
+          ...fillPayload,
           ...manualField,
         });
       } else if (activeTool === "image") {
@@ -654,6 +672,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
         }
         setTimeEstimate(artifacts.time_estimate || null);
         setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
+        setFillNote(fillResultNote(artifacts.fill_options, artifacts.removed_duplicates));
         if (artifacts.width_mm && artifacts.height_mm) {
           // 2026-11-06：文字默认以激光头对准中心为起点、图片以左下角为起点，开刻前提示放哪
           setDimensions({ width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" });
@@ -1243,6 +1262,12 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                     </select>
                   </label>
                 </div>
+                <FillOptionsPanel
+                  idPrefix="wb"
+                  settings={fillSettings}
+                  onChange={updateFillSettings}
+                  withFill={textUsesFill}
+                />
               </div>
             )}
 
@@ -1670,6 +1695,9 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
               )}
               {fitNote && (
                 <div className="wb-origin-note" id="wb-fit-note">{fitNote}</div>
+              )}
+              {fillNote && (
+                <div className="wb-origin-note" id="wb-fill-note">刀路：{fillNote}</div>
               )}
 
               {/* 生成与下发按钮放在监视舱刀路摘要下方，与孪生入口同一行 */}

@@ -28,6 +28,7 @@ mod send;
 mod server;
 mod service;
 mod settings;
+mod sketch;
 mod update;
 mod workflow;
 

@@ -12,8 +12,8 @@ export const IMAGE_DIMENSION_LIMIT_MM = 1000;
 
 export const TEXT_STYLE_OPTIONS = [
   { value: "outline", label: "轮廓描边" },
-  { value: "fill", label: "实心扫描填充" },
-  { value: "hatch", label: "矢量排线填充" },
+  { value: "fill", label: "实心填充（矢量密排线）" },
+  { value: "hatch", label: "排线填充（线距更宽、更快）" },
   { value: "cut", label: "外框切割" },
 ];
 
@@ -39,9 +39,9 @@ export function resolveTextStyle(rawStyle) {
   const normalized = rawStyle === "raster" ? "fill" : rawStyle;
   switch (normalized) {
     case "fill":
-      return { style: "fill", label: "实心扫描填充", laserMode: "engrave", engravingMode: "raster", textFill: "fill" };
+      return { style: "fill", label: "实心填充（矢量密排线）", laserMode: "engrave", engravingMode: "raster", textFill: "fill" };
     case "hatch":
-      return { style: "hatch", label: "矢量排线填充", laserMode: "engrave", engravingMode: "outline", textFill: "hatch" };
+      return { style: "hatch", label: "排线填充（线距更宽、更快）", laserMode: "engrave", engravingMode: "outline", textFill: "hatch" };
     case "cut":
       return { style: "cut", label: "外框切割", laserMode: "cut", engravingMode: "cut", textFill: "outline" };
     case "outline":
@@ -129,6 +129,7 @@ export function workbenchInputSignature({
   fontSizeMm = 12,
   textStyle = "outline",
   textOrigin = "center",
+  fillSignature = "",
   uploadedImagePath = "",
   imageWidthMm = "",
   imageHeightMm = "",
@@ -160,6 +161,7 @@ export function workbenchInputSignature({
       fontSizeMm: Number(fontSizeMm) || 0,
       textStyle: resolveTextStyle(textStyle).style,
       textOrigin: textOrigin === "lower_left" ? "lower_left" : "center",
+      fill: String(fillSignature || ""),
     });
   }
   if (activeTool === "image") {

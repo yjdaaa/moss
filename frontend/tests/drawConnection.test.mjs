@@ -39,9 +39,17 @@ test("画板尺寸：留空为自动（null），不再用 1 mm 兜底；旧的 
   assert.equal(drawSizeValue("-5"), null);
   assert.equal(drawSizeValue("50"), 50);
   assert.equal(drawSizeValue("12.5"), 12.5);
-  assert.equal(normalizeDrawMode("auto"), "raster");
-  assert.equal(normalizeDrawMode(null), "raster");
+  // 2026-11-16 起默认矢量
+  assert.equal(normalizeDrawMode("auto"), "vector");
+  assert.equal(normalizeDrawMode(null), "vector");
   assert.equal(normalizeDrawMode("outline"), "outline");
+  assert.equal(normalizeDrawMode("raster"), "raster");
+  // 旧版本存下的光栅迁移一次改成矢量；按新版本保存过的光栅（用户自己选的）保留
+  const store = (entries) => ({ getItem: (key) => entries[key] ?? null });
+  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "raster" })).mode, "vector");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "raster", "laserLab.mode_version": "2" })).mode, "raster");
+  assert.equal(readDrawDefaultForm(store({ "laserLab.mode": "outline" })).mode, "outline");
+  assert.equal(readDrawDefaultForm(store({})).mode, "vector");
 });
 
 test("画板默认表单：存储被禁用时退回默认值；未存画板设备时自动复用工作台连接", () => {
@@ -52,7 +60,7 @@ test("画板默认表单：存储被禁用时退回默认值；未存画板设�
   assert.equal(form.connection_mode, "network");
   assert.equal(form.network_telnet_port, "23");
   assert.equal(form.baudrate, "115200");
-  assert.equal(form.mode, "raster");
+  assert.equal(form.mode, "vector", "2026-11-16 起画板默认矢量");
   assert.equal(form.output_format, "gcode");
   assert.deepEqual(readDrawDefaultForm(null), form);
 

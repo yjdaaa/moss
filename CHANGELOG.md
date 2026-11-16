@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### 矢量填充与走刀对齐 LightBurn：恢复过扫描，新增一次填完 / 逐块、扫描角度、交叉排线、单双向、双向偏移、尖角起刀与去重复线（2026-11-16）
+
+- **现象**：上一条改成矢量填充后，扫描线两头不再过扫描，GRBL 机器在线头减速、掉头时仍在出光，字边与每行两端容易烧深；填充只能逐块走，不能像 LightBurn 默认那样每行横穿所有图形匀速扫；扫描角度、交叉排线、单向扫描、双向错位补偿都没有；闭合轮廓起刀点落在离得最近的曲线中间，重复画的线会刻两遍。
+- **根因与修复**：`laser_core::vector_plan` 改为 `scan_fill(contours, &FillOptions)`：按角度把轮廓转到局部坐标求精确交段，`FillGrouping::AllAtOnce`（默认）整块按行蛇形、同一行图形之间关光匀速滑过，`Individually` 沿用原区块；每行两头按 `overscan_mm` 关光多走，双向时按 `scan_offset_mm` 逆着行进方向挪半个偏移，可交叉排线、单向扫描。规划输出改为步骤（`gcode::Step::{Travel,Coast,Burn}`），新增 `gcode::write_steps`：过扫描与图形间空白写成 `G1 … S0`（不切 M3/M4/M5，GRBL 不停顿）。`plan` / `plan_layers` 接 `PlanOptions{inside_first, prefer_corners, remove_overlaps}`：闭合轮廓起刀点优先放转角 > 45° 的尖角，整条重复的轮廓 / 线段（容差 0.01 mm，可换起点、可反向）只刻一遍，出光长度自检移到规划内部；单向扫描区块倒走不对称时不做 2-opt。文字：`TextTaskSpec` 以 `scan` / `plan` 取代 `overscan_mm` / `cut`，有填充时木牌两侧留边至少为过扫描距离、`lower_left` 无木牌时激光头在过扫描范围左下角。画板矢量：有填充时成品四周让出过扫描距离。接口：`/api/text-task/generate` 与 `/api/draw/preview`（`mode=vector`）新增可选 `fill_options`（`grouping`、`angle_deg`、`cross_hatch`、`bidirectional`、`overscan_mm`（省略 / `auto` 按 v²/(2a) 自动，默认加速度 1000 mm/s²，限 1 ~ 20 mm）、`acceleration_mm_s2`、`scan_offset_mm`）与 `path_options`（`prefer_corners`、`remove_overlaps`），越界 400，结果回显 `fill_options` 与 `removed_duplicates`；MCP 文字工具同步加入这两个可选参数。前端新增共用的折叠面板 `FillOptionsPanel`（工作台文字、画板矢量模式），设置存 `moss.fillSettings.v1`，改动即让旧预览过期，预览后显示实际过扫描与去重条数。**行为变更**：实心 / 排线文字与画板填充默认改为“一次填完 + 自动过扫描（≥1 mm）”，G-code 范围比笔画两侧各宽一个过扫描距离（关光）；描边、切割刀路只变起刀点（尖角优先）与重复线；安全门禁、确认与 SHA 校验不变。
+- **验证**：`vector_plan` 15 项（一次填完带过扫描的逐步输出、逐块、内孔、单向、偏移、角度与交叉、尖角起刀、去重、先内后外、分层衔接、自动过扫描、非法输入等）、`write_steps` 1 项、文字引擎用例（过扫描范围、木牌留边、左下角不越界、竖扫）、接口 2 项（`fill_options` 默认 / 自定义 / 回显 / 6 种非法输入，画板过扫描不越界）、前端 `tests/fillOptions.test.mjs` 5 项。未实机出光：过扫描自动距离按假设加速度 1000 mm/s² 计算，一次填完与逐块在真机上的速度与观感、双向偏移的合适数值都待实测（unverified）。
+- **关联**：`crates/laser-core/src/{vector_plan,gcode,engine}.rs`、`crates/laser-api/src/{generation,sketch}.rs`（`parse_fill_options`、`parse_path_options`、`plan_sketch`）、`crates/laser-api/src/tests/preview.rs`、`crates/laser-mcp/src/lib.rs`、`frontend/src/{fillOptions,workbenchParams,drawConnection}.js`、`frontend/src/components/FillOptionsPanel.jsx`、`frontend/src/pages/{HomePage,DrawPage}.jsx`、`frontend/src/styles/15-addenda-2026-11.css`、`frontend/tests/fillOptions.test.mjs`、`docs/developer/{api-contracts,frontend-behavior,feature-glossary}.md`、融合技术书 r34。
+
+### 文字与画板改为先转矢量再规划路线：新增矢量填充与 2-opt 路径规划，画板默认直接用画板图形（2026-11-16）
+
+- **现象**：文字“实心扫描填充”走位图逐行扫描；“矢量排线填充”每一行在整行所有字之间来回空走；路径规划只在“按行排序 / 贪心最近”之间二选一；切割不区分先内后外；创意画板先把画布导出成图片再描边，一笔手绘被描成两条边，画板本身的矢量数据（`scene_json`）只存不用；G-code 写出会把三点以上的开放线段自动补成闭合。
+- **根因与修复**：新增 `laser_core::vector_plan`：`region_fill` 按非零 / 奇偶规则逐行求交段（轮廓先补闭合边），把上下一对一相邻的交段连成区块，每块蛇形走完再去下一块；`plan` 把闭合轮廓（任选起刀顶点）、开放线段与填充区块（可反向）先贪心最近、再 2-opt（最多 40 轮、0.4 秒）缩短空走，按新顺序重选起刀点，`inside_first` 时闭合轮廓先内后外，前后出光长度自检不一致即拒绝生成。文字：实心填充改为矢量密排线（线距 = 材料像素间距）+ 描轮廓，排线填充线距为 3 倍（`HATCH_SPACING_FACTOR`），切割先内后外（`TextTaskSpec.cut`），删去位图扫描与过扫描（`rasterize`、`hatch_lines` 等）。画板：新增 `mode=vector`（`laser-api/src/sketch.rs`）直接把 Excalidraw 元素转成刀路——手绘按中心线一笔不闭合、直线 / 箭头（含箭头头部）、矩形 / 菱形 / 椭圆描边、填充色排线填满、文字元素用系统字体转轮廓填满，元素旋转一并换算，留边与光栅导出一致；含插入图片时改光栅并返回 `vector_note`；写出时 `auto_close: false`。前端画板“生成策略”默认矢量，旧版本存下的“光栅”迁移一次；文字刻法改名“实心填充（矢量密排线）”“排线填充（线距更宽、更快）”。**行为变更**：实心文字的 G-code 由逐行扫描变为矢量线段，范围不再含两侧过扫描；画板默认刀路改变（光栅 / 轮廓描边仍可选）。安全门禁、确认与 SHA 校验不变。
+- **验证**：`vector_plan` 7 项（内孔不填、区块逐个走完、规划不丢出光且空走变短、起刀点、先内后外、未闭合轮廓、非法输入）、`sketch` 3 项、画板矢量接口 1 项（笔画不闭合、填充排线、图片改光栅），文字引擎用例按矢量语义更新（实心无过扫描、切割、排线线距）；激光 4 个 crate 318 项通过，前端 276 项通过。未实机出光，未对比实际雕刻效果（矢量密排线在木头上的观感与位图扫描的差异待实测）。
+- **关联**：`crates/laser-core/src/{vector_plan,engine,lib}.rs`、`crates/laser-api/src/{sketch,generation,lib}.rs`、`crates/laser-api/src/tests/preview.rs`、`frontend/src/{drawConnection,workbenchParams}.js`、`frontend/src/pages/DrawPage.jsx`、`docs/developer/{api-contracts,frontend-behavior,feature-glossary}.md`。
+
+### 新增全局“小智 · 雕刻同步”悬浮小窗，语音操作雕刻在任何页面都能看见（2026-11-16）
+
+- **现象**：用户用小智语音让 MOSS 生成预览、开刻、停止时，桌面端只有语音中心能看到状态，在其他页面看不到小智正在做什么。
+- **根因与修复**：新增 App 级悬浮小窗（右下角，可收成小胶囊，折叠状态记在本机），只显示与雕刻相关的内容：小智待命 / 在听 / 思考 / 回答、正在或刚才调用的激光工具（中文名，非激光工具不显示）、当前雕刻进度，以及被“稍后再看”收起的 AI 预览和待批准请求的入口（只把既有预览窗 / 审批卡叫回前台，不重复确认与发送）。语音阶段复用 `/api/system/info` 的轮询；工具名只在小智非空闲时每 1.5 s 读一次 `voice_builtin_status`（lite），只取 `sessions[].state` 和 `active_tool`；进度复用 `JobProgressDock` 的 `/api/jobs/stop-targets`。不显示识别原文或回复。只在桌面端、内置语音链路且有小智在线时显示语音部分；浏览器 / 局域网模式和只有雕刻任务时不显示（任务浮层已覆盖）。小窗与雕刻任务浮层改为同一个右下角堆叠容器，上下排开不重叠；`AiPreviewCenter` 新增 `onWaitingChange` / `reopenNonce` 两个可选属性。没有新增后端接口，默认行为与安全门禁不变。
+- **验证**：`tests/voiceDockState.test.mjs` 7 项；`tests/voice-dock.browser.mjs`（模拟 Tauri 与后端）；`job-dock`、`ai-preview`、`shell-chrome` 浏览器测试复跑通过；前端单测、lint 0 error、build 通过。未用真实小智设备验证（unverified）。
+- **关联**：`frontend/src/components/VoiceActivityDock.jsx`、`frontend/src/voiceDockState.js`（`voiceDockView`、`laserToolLabel`、`activeLaserTool`）、`frontend/src/main.jsx`、`frontend/src/components/AiPreviewCenter.jsx`、`frontend/src/styles/12-job-dock-moss-eye.css`（`.float-dock-stack`、`.voice-dock*`）。
+
 ### 回答快 0.4 秒，新增命令词抗噪、“旁人说话不接话”开关与第三方只读工具转后台，辅助程序协议升为 7（2026-11-15）
 
 - **现象**：① 说完到听见回答约 1.8 秒，其中第一句整句合成要 0.55 秒（“好的，激光机现在空闲。”），首个逗号前的短开场白也不单独先合成；② 噪声里通用识别常把单独的“停 / 退下 / 退一下 / 再见”听错（“跪下 / 会一下 / 待见 / 天下”），命令没执行；③ “不是对小智说的”判断默认开、没有开关；④ 只有联网搜索、天气、新闻、知识库能转后台，用户设为“允许”的第三方只读工具慢了也只能干等。

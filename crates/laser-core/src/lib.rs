@@ -10,6 +10,7 @@ pub mod pycompat;
 pub mod raster;
 pub mod safety;
 pub mod trace;
+pub mod vector_plan;
 
 pub use engine::{TextTaskArtifacts, TextTaskEngine, TextTaskSpec};
 pub use laser_contracts;

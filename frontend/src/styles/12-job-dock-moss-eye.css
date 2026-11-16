@@ -33,6 +33,59 @@
 .job-dock-pill-estop:disabled { opacity: 0.5; cursor: not-allowed; }
 @media (max-width: 720px) { .job-dock { right: 8px; bottom: 8px; width: calc(100vw - 16px); } }
 
+/* 右下角浮层堆叠（2026-11-16）：小智雕刻同步小窗在上、雕刻任务浮层在下，按内容高度自然排开不重叠；
+   z-index 低于审批卡 / AI 预览 / 对话框（120~150），弹窗始终压在上面。空容器不拦截点击。 */
+.float-dock-stack {
+  position: fixed; right: 16px; bottom: 16px; z-index: 60;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+}
+.float-dock-stack > * { pointer-events: auto; }
+.float-dock-stack .job-dock { position: relative; right: auto; bottom: auto; }
+@media (max-width: 720px) { .float-dock-stack { right: 8px; bottom: 8px; max-width: calc(100vw - 16px); } }
+
+/* 小智 · 雕刻同步小窗：沿用雕刻任务浮层的曜石玻璃底，只显示状态，不显示对话内容 */
+.voice-dock {
+  width: min(260px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; border-radius: 12px;
+  border: 1px solid var(--ob-line-2);
+  background: rgba(14, 14, 22, 0.56);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.72), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+  font-size: 12px; color: inherit;
+  --voice-dock-tone: var(--ob-green);
+}
+.voice-dock[data-phase="listening"] { --voice-dock-tone: #38bdf8; }
+.voice-dock[data-phase="thinking"] { --voice-dock-tone: var(--ob-amber); }
+.voice-dock[data-phase="speaking"] { --voice-dock-tone: var(--ob-accent-2); }
+.voice-dock[data-phase="none"] { --voice-dock-tone: var(--ob-ink-3); }
+.voice-dock--pill[data-attention="true"] { --voice-dock-tone: var(--ob-amber); border-color: var(--ob-amber-bd); }
+.voice-dock-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.voice-dock-title { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; font-size: 12.5px; }
+.voice-dock-icon { display: inline-flex; align-items: center; padding: 2px; border: 0; border-radius: 6px; background: none; color: var(--ob-ink-3); cursor: pointer; }
+.voice-dock-row { display: flex; align-items: center; gap: 7px; }
+.voice-dock-dot { flex: none; width: 8px; height: 8px; border-radius: 999px; background: var(--voice-dock-tone); box-shadow: 0 0 0 4px color-mix(in srgb, var(--voice-dock-tone) 20%, transparent); }
+.voice-dock-phase { font-weight: 700; color: var(--voice-dock-tone); }
+.voice-dock-meta { margin-left: auto; color: var(--ob-ink-3); }
+.voice-dock-tool { color: var(--ob-ink-2); }
+.voice-dock-tool.is-active { color: var(--ob-ink); font-weight: 600; }
+.voice-dock-job { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px dashed var(--ob-line); color: var(--ob-ink-2); }
+.voice-dock-bar { display: block; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.voice-dock-bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #35d0a5, #4d9bff); transition: width 0.4s ease; }
+.voice-dock-link {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 5px 8px; border: 1px solid var(--ob-amber-bd); border-radius: 8px;
+  background: var(--ob-amber-bg); color: var(--ob-amber); font-size: 12px; text-align: left; cursor: pointer;
+}
+.voice-dock-link > span { flex: 1; min-width: 0; }
+.voice-dock-link > b { flex: none; font-weight: 700; }
+.voice-dock--pill { flex-direction: row; align-items: center; width: auto; max-width: 100%; padding: 4px 6px; border-radius: 999px; }
+.voice-dock-pill-main { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 4px 8px; border: 0; background: none; color: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.voice-dock-pill-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ============================================================
    MOSS 全息语音孪生舱与全局机械眼多态联动（2026-11-03）
    ============================================================ */

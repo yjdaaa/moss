@@ -41,12 +41,12 @@ test("文字刻法映射对齐后端 text_fill，且切换图片时材料推荐�
     style: "outline", label: "轮廓描边", laserMode: "engrave", engravingMode: "outline", textFill: "outline",
   });
   assert.deepEqual(resolveTextStyle("fill"), {
-    style: "fill", label: "实心扫描填充", laserMode: "engrave", engravingMode: "raster", textFill: "fill",
+    style: "fill", label: "实心填充（矢量密排线）", laserMode: "engrave", engravingMode: "raster", textFill: "fill",
   });
   // 兼容旧版 localStorage 里残留的 raster，自动归一为真实的 fill 实心填充
   assert.equal(resolveTextStyle("raster").textFill, "fill");
   assert.deepEqual(resolveTextStyle("hatch"), {
-    style: "hatch", label: "矢量排线填充", laserMode: "engrave", engravingMode: "outline", textFill: "hatch",
+    style: "hatch", label: "排线填充（线距更宽、更快）", laserMode: "engrave", engravingMode: "outline", textFill: "hatch",
   });
   assert.deepEqual(resolveTextStyle("cut"), {
     style: "cut", label: "外框切割", laserMode: "cut", engravingMode: "cut", textFill: "outline",

@@ -32,7 +32,9 @@ import { applyJobPoll, markStopRequested, jobSafetyNotice, startJobPolling } fro
  * 严格模式下 AI 口头确认只会生成审批，此时由全局审批卡处理，本窗口不重复弹出。
  * 只在桌面端（有桌面会话）工作。
  */
-export function AiPreviewCenter({ pendingApprovalTargets = null } = {}) {
+// `onWaitingChange(n)`：被“稍后再看”收起、当前不在屏幕上的待确认预览数（供全局悬浮小窗显示入口）；
+// `reopenNonce` 变化时重新弹出被收起的预览。确认与发送仍只在本窗口完成。
+export function AiPreviewCenter({ pendingApprovalTargets = null, onWaitingChange = null, reopenNonce = 0 } = {}) {
   const [pending, setPending] = useState([]);
   const [shown, setShown] = useState(null);
   const [hidden, setHidden] = useState(false);
@@ -311,6 +313,16 @@ export function AiPreviewCenter({ pendingApprovalTargets = null } = {}) {
       }),
     [],
   );
+
+  // 告诉全局悬浮小窗有几个预览被收起在后台；它只负责把本窗口重新叫出来
+  const waitingCount = pending.length > 0 && hidden && !job ? pending.length : 0;
+  useEffect(() => {
+    if (typeof onWaitingChange === "function") onWaitingChange(waitingCount);
+  }, [waitingCount, onWaitingChange]);
+
+  useEffect(() => {
+    if (reopenNonce > 0) setHidden(false);
+  }, [reopenNonce]);
 
   if (!enabled) return null;
   const details = shown ? workflowDetails(shown) : null;

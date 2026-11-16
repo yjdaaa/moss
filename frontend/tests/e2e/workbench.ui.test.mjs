@@ -171,6 +171,8 @@ test("[UI-04] 工作台: 实心扫描填充真实生效 + 先走边框二次确�
     await page.getByRole("button", { name: "计算加工轨迹", exact: true }).click();
 
     await page.locator("#wb-actual-params").filter({ hasText: "实心填充" }).waitFor({ timeout: STEP_TIMEOUT_MS });
+    // 2026-11-16 对齐 LightBurn：默认一次填完、双向、过扫描按速度自动，预览后显示实际设置
+    await page.locator("#wb-fill-note").filter({ hasText: /一次填完，双向，过扫描 \d+\.\d mm（按速度自动）/ }).waitFor({ timeout: STEP_TIMEOUT_MS });
     const framingBtn = page.locator("#wb-btn-framing");
     await framingBtn.waitFor({ timeout: STEP_TIMEOUT_MS });
 
@@ -185,6 +187,13 @@ test("[UI-04] 工作台: 实心扫描填充真实生效 + 先走边框二次确�
     await page.getByTestId("app-dialog").getByRole("button", { name: "开始走边框", exact: true }).click();
     await waitFor(() => rec.events.slice(beforeCancel).includes("line"), "确认走边框后设备必须收到移动指令");
     await page.getByText(/走边框完成/).first().waitFor({ timeout: STEP_TIMEOUT_MS });
+
+    // 改填充设置（交叉排线）同样立即让旧预览过期
+    await page.locator("#wb-fill-options > summary").click();
+    await page.locator("#wb-fill-cross").check();
+    await page.locator("#wb-stale-notice").waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#wb-btn-send").isDisabled(), true, "改填充设置后必须禁用旧刀路下发");
+    await page.locator("#wb-fill-cross").uncheck();
 
     // 修改左侧文字，监视舱立即标记预览已过期并禁用开刻与走边框，拦截误刻旧刀路
     await page.getByPlaceholder("输入要雕刻的字符...").fill("NEW");

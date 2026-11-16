@@ -338,6 +338,81 @@ fn draw_preview_honors_target_size_and_outline_mode() {
     );
 }
 
+/// 2026-11-16：画板矢量模式直接用场景里的图形规划路线——手绘笔画按中心线一笔、不闭合，填充色用矢量排线填满；
+/// 场景里有插入的图片时改用光栅并说明原因。
+#[test]
+fn draw_vector_mode_plans_scene_shapes_and_falls_back_for_images() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let png = draw_test_png();
+    let scene = serde_json::json!({"elements": [
+        {"type": "freedraw", "x": 0, "y": 0, "points": [[0, 0], [40, 20], [80, 0]], "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "strokeWidth": 2},
+        {"type": "rectangle", "x": 100, "y": 0, "width": 40, "height": 40, "strokeColor": "#1e1e1e", "backgroundColor": "#ffc9c9", "strokeWidth": 2},
+    ]});
+    let body = serde_json::json!({"image_data_url": png, "material": "椴木", "thickness_mm": 3.0, "mode": "vector", "width_mm": 40, "scene_json": scene});
+    let vector = post_json(&service, "/api/draw/preview", &body);
+    assert_eq!(vector["success"], true, "{vector}");
+    let artifacts = &vector["result"]["artifacts"];
+    assert_eq!(artifacts["mode"], "vector", "{artifacts}");
+    assert!(artifacts.get("vector_note").is_none());
+    assert!(
+        artifacts["path_optimization"]["strategy"].is_string(),
+        "{artifacts}"
+    );
+    let gcode =
+        std::fs::read_to_string(temp.path().join(artifacts["gcode_file"].as_str().unwrap()))
+            .unwrap();
+    let burns = gcode.lines().filter(|line| line.starts_with("G1")).count();
+    assert!(burns > 20, "矩形填充应有大量排线：{burns}");
+    let (max_x, max_y) = gcode_max_xy(&gcode);
+    assert!(
+        max_x <= 40.0 + 1e-6 && max_y <= 40.0 + 1e-6,
+        "{max_x} {max_y}"
+    );
+    // 填充有过扫描（G1 S0 关光滑行），且整段运动不往激光头起点的负方向走、不越出成品范围
+    assert!(
+        gcode
+            .lines()
+            .any(|l| l.starts_with("G1 ") && l.ends_with(" S0")),
+        "矩形填充应有过扫描"
+    );
+    let extents = laser_core::gcode::motion_extents(&gcode).unwrap().unwrap();
+    assert!(
+        extents.min_x >= -1e-6 && extents.min_y >= -1e-6,
+        "{extents:?}"
+    );
+    assert_eq!(
+        artifacts["fill_options"]["overscan_auto"], true,
+        "{artifacts}"
+    );
+    // 笔画是开放线段：手绘那一笔的两个端点之间不会补一条闭合线（笔画只有 2 段）
+    let stroke_moves = gcode
+        .split("S0\n")
+        .filter(|chunk| chunk.matches("G1 ").count() == 2)
+        .count();
+    assert!(stroke_moves >= 1, "手绘笔画按中心线两段刻、不闭合");
+
+    // 场景里有图片：改用光栅并写明原因
+    let mut with_image = body.clone();
+    with_image["scene_json"]["elements"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"type": "image", "x": 0, "y": 0, "width": 10, "height": 10}));
+    let fallback = post_json(&service, "/api/draw/preview", &with_image);
+    assert_eq!(fallback["success"], true, "{fallback}");
+    assert_eq!(fallback["result"]["artifacts"]["mode"], "raster");
+    assert!(
+        fallback["result"]["artifacts"]["vector_note"]
+            .as_str()
+            .unwrap()
+            .contains("图片")
+    );
+}
+
 #[test]
 fn material_safety_gate_rejects_pvc_and_unknown_plastic() {
     assert!(validate_material_safety("PVC").unwrap_err().contains("PVC"));
@@ -642,6 +717,91 @@ fn text_board_fill_and_origin_options_reach_the_engine() {
         0.0,
         "{corner}"
     );
+}
+
+/// 2026-11-16：文字填充的扫描设置对齐 LightBurn，经 `fill_options` / `path_options` 传入并在结果里回显。
+#[test]
+fn text_fill_options_follow_lightburn_and_are_echoed() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = ApiService::new(
+        test_loopback_settings(),
+        laser_contracts::builtin_material_library(),
+    )
+    .with_generated_root(temp.path().to_path_buf());
+    let font = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fonts/geometry.ttf"
+    );
+    let base = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({"text": "AB", "font_path": font, "material": "椴木",
+            "thickness_mm": 3, "font_size_mm": 10, "text_fill": "fill"});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post_json(&service, "/api/text-task/generate", &body)
+    };
+    let gcode_of = |response: &serde_json::Value| {
+        std::fs::read_to_string(
+            temp.path().join(
+                response["result"]["artifacts"]["gcode_file"]
+                    .as_str()
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+    };
+
+    // 默认：一次填完、横扫、双向、过扫描按速度自动算（至少 1 mm），以 G1 S0 匀速滑行
+    let default = base(serde_json::json!({}));
+    assert_eq!(default["success"], true, "{default}");
+    let fill = &default["result"]["artifacts"]["fill_options"];
+    assert_eq!(fill["grouping"], "all", "{fill}");
+    assert_eq!(fill["bidirectional"], true);
+    assert_eq!(fill["overscan_auto"], true);
+    assert!(fill["overscan_mm"].as_f64().unwrap() >= 1.0, "{fill}");
+    assert!(
+        gcode_of(&default)
+            .lines()
+            .any(|l| l.starts_with("G1 ") && l.ends_with(" S0")),
+        "过扫描用 G1 S0"
+    );
+
+    // 手动：逐块、关过扫描、竖扫、交叉、单向、偏移，不去重
+    let custom = base(serde_json::json!({
+        "fill_options": {"grouping": "individual", "overscan_mm": 0, "angle_deg": 90,
+            "cross_hatch": true, "bidirectional": false, "scan_offset_mm": 0.1},
+        "path_options": {"prefer_corners": false, "remove_overlaps": false}
+    }));
+    assert_eq!(custom["success"], true, "{custom}");
+    let fill = &custom["result"]["artifacts"]["fill_options"];
+    assert_eq!(fill["grouping"], "individual", "{fill}");
+    assert_eq!(fill["overscan_mm"], 0.0);
+    assert_eq!(fill["overscan_auto"], false);
+    assert_eq!(fill["cross_hatch"], true);
+    assert_eq!(fill["bidirectional"], false);
+    assert_eq!(custom["result"]["artifacts"]["removed_duplicates"], 0);
+    assert!(
+        !gcode_of(&custom)
+            .lines()
+            .any(|l| l.starts_with("G1 ") && l.ends_with(" S0")),
+        "关掉过扫描后逐块填充没有关光滑行"
+    );
+
+    // 描边没有填充设置
+    let outline = base(serde_json::json!({"text_fill": "outline"}));
+    assert!(outline["result"]["artifacts"]["fill_options"].is_null());
+
+    for bad in [
+        serde_json::json!({"fill_options": {"grouping": "zigzag"}}),
+        serde_json::json!({"fill_options": {"overscan_mm": 50}}),
+        serde_json::json!({"fill_options": {"scan_offset_mm": 5}}),
+        serde_json::json!({"fill_options": {"bidirectional": "yes"}}),
+        serde_json::json!({"fill_options": "fast"}),
+        serde_json::json!({"path_options": {"prefer_corners": 1}}),
+    ] {
+        let response = base(bad.clone());
+        assert_eq!(response["success"], false, "{bad} → {response}");
+    }
 }
 
 #[test]

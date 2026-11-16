@@ -161,7 +161,28 @@ pub fn tools_list_json(developer_mode: bool) -> serde_json::Value {
                 let props = &mut tool["inputSchema"]["properties"];
                 props["text_fill"] = serde_json::json!({
                     "type": "string", "enum": ["outline", "fill", "hatch"], "default": "outline",
-                    "description": "文字刻法：outline 只描轮廓（默认）；fill 扫描填满（小字、中文更清楚）；hatch 平行线填满并描边（大字更快）"
+                    "description": "文字刻法：outline 只描轮廓（默认）；fill 矢量扫描线密排填满（小字、中文更清楚）；hatch 线距放宽的排线填满并描边（大字更快）"
+                });
+                // 2026-11-16 填充扫描与走刀选项（对齐 LightBurn），全部可省略
+                props["fill_options"] = serde_json::json!({
+                    "type": "object",
+                    "description": "填充扫描设置（只对 fill / hatch 有效，一般不用传）",
+                    "properties": {
+                        "grouping": {"type": "string", "enum": ["all", "individual"], "default": "all", "description": "all 每行横穿所有字（默认，速度均匀）；individual 一块块扫完（空白多时更快）"},
+                        "angle_deg": {"type": "number", "default": 0, "description": "扫描角度，0 横扫，90 竖扫"},
+                        "cross_hatch": {"type": "boolean", "default": false, "description": "再转 90° 扫一遍，更实更深"},
+                        "bidirectional": {"type": "boolean", "default": true, "description": "来回都出光；false 只单向出光（更齐、更慢）"},
+                        "overscan_mm": {"type": ["number", "string"], "description": "每行两头关光多走的距离 mm；省略或 auto 按速度自动算，0 关闭"},
+                        "scan_offset_mm": {"type": "number", "default": 0, "description": "双向扫描错位补偿 mm（-2 ~ 2）"}
+                    }
+                });
+                props["path_options"] = serde_json::json!({
+                    "type": "object",
+                    "description": "走刀顺序选项（一般不用传）",
+                    "properties": {
+                        "prefer_corners": {"type": "boolean", "default": true, "description": "轮廓起刀点尽量放在尖角"},
+                        "remove_overlaps": {"type": "boolean", "default": true, "description": "重复的线只刻一遍"}
+                    }
                 });
                 props["text_align"] = serde_json::json!({
                     "type": "string", "enum": ["left", "center", "right"], "default": "center",
