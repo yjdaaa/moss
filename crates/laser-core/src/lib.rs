@@ -8,6 +8,7 @@ pub mod material;
 pub mod path_opt;
 pub mod pycompat;
 pub mod raster;
+pub mod registration;
 pub mod safety;
 pub mod trace;
 pub mod vector_plan;

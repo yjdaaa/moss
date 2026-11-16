@@ -3,6 +3,7 @@ use super::*;
 mod golden;
 mod material_routes;
 mod preview;
+mod registration;
 mod send_gate;
 mod stop_and_resume;
 mod strict_mode;

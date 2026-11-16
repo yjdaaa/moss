@@ -829,7 +829,7 @@ pub(crate) fn time_estimate_json(
 
 /// 走边框“橡皮筋”轮廓（2026-11-16）：出光点的凸包，以激光头起点为原点，`[[x, y], …]`；
 /// 含圆弧或出光点不足时为 null，前端退回外接矩形。
-fn frame_hull_json(gcode: &str) -> serde_json::Value {
+pub(crate) fn frame_hull_json(gcode: &str) -> serde_json::Value {
     laser_core::gcode::burn_hull(gcode).map_or(serde_json::Value::Null, |hull| {
         let round = |v: f64| (v * 1000.0).round() / 1000.0;
         serde_json::json!(

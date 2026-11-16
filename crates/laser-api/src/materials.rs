@@ -59,7 +59,7 @@ pub(crate) fn validate_material_safety(material: &str) -> Result<(), String> {
     }
 }
 
-fn material_from_payload(payload: &serde_json::Value) -> Option<&str> {
+pub(crate) fn material_from_payload(payload: &serde_json::Value) -> Option<&str> {
     payload
         .get("material")
         .and_then(serde_json::Value::as_str)

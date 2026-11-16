@@ -919,6 +919,15 @@ impl ApiService {
                 )
             });
         }
+        // 两点对位（2026-11-16）：读位置只发状态查询；生成对位预览是新的 preview_ready workflow，发送照常确认
+        if method == "POST"
+            && matches!(
+                route,
+                "/api/registration/read-position" | "/api/registration/preview"
+            )
+        {
+            return self.handle_registration_route(route, &body[..content_length], &ctx);
+        }
         if method == "POST" && route == "/api/safe-action" {
             let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
                 Ok(value) => value,

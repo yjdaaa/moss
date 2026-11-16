@@ -50,6 +50,7 @@ import { usePageEmergencyStop } from "../usePageEstop.js";
 import { applyJobPoll, startJobPolling } from "../approvalJobMonitor.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
+import RegistrationPanel from "../components/RegistrationPanel.jsx";
 import {
   fillResultNote,
   fillSettingsPayload,
@@ -722,6 +723,47 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
       setBusy(false);
       addLog("PREVIEW", `网络或内部异常: ${e.message}`, "error");
     }
+  };
+
+  // 采用调参建议、两点对位生成的新预览：都是独立的新 workflow（新 SHA），换成当前任务、尚未发送
+  const adoptDerivedWorkflow = async (workflow, label) => {
+    if (pollIntervalId) pollIntervalId();
+    setPollIntervalId(null);
+    setCurrentWorkflow(workflow);
+    setPreviewSignature(currentSignature);
+    setOverlayStatus("pending");
+    setSendProgress(null);
+    setPollSafetyNotice("");
+    const artifacts = workflow.artifacts || {};
+    applyPreviewUrl(
+      await loadWorkbenchPreviewUrl(artifacts.image_file, {
+        remote: isRemoteMode(),
+        fetchBlobUrl: fetchPreviewBlobUrl,
+        resolveUrl: resolveApiUrl,
+      }),
+    );
+    setGcodeText("");
+    if (artifacts.gcode_file) {
+      const preview = await fetchPreviewText(artifacts.gcode_file);
+      if (preview.ok) {
+        setGcodeText(preview.text);
+      } else {
+        addLog("PREVIEW", `${label}已生成，但刀路资源加载失败（${preview.error}），请重新打开任务`, "error");
+      }
+    }
+    if (artifacts.actual_params) {
+      setPowerPercent(artifacts.actual_params.laser_max_power / artifacts.actual_params.power_scale * 100);
+      setSpeedMms(artifacts.actual_params.feed_rate / 60);
+    }
+    setTimeEstimate(artifacts.time_estimate || null);
+    setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
+    setDimensions(
+      artifacts.width_mm && artifacts.height_mm
+        ? { width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" }
+        : null,
+    );
+    addLog("PREVIEW", `${label}已生成：${workflow.workflow_id}，尚未发送`, "ok");
+    if (artifacts.origin_note) addLog("HOST", artifacts.origin_note, "warn");
   };
 
   // 先走边框（会真实驱动激光头移动，单击不得直接执行，须先经 showConfirm 二次确认）
@@ -1936,6 +1978,23 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
                 </div>
               )}
 
+              {/* 两点对位（2026-11-16，对齐 LightBurn Print and Cut）：默认收起，只在已生成预览时出现 */}
+              {currentWorkflow?.workflow_id && (
+                <RegistrationPanel
+                  workflow={currentWorkflow}
+                  connectionForm={connectionForm}
+                  machineMotion={motionPayload.machine_motion}
+                  disabled={
+                    busy
+                    || framingBusy
+                    || previewStale
+                    || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)
+                  }
+                  onLog={addLog}
+                  onRegistered={(workflow) => adoptDerivedWorkflow(workflow, "对位预览")}
+                />
+              )}
+
               {/* 大号醒目急停安全制动按钮 */}
               <button
                 type="button"
@@ -1996,44 +2055,7 @@ export function HomePage({ onNavigate, connectionStatus, setConnectionStatus, mc
             {/* 数控中控台与实时调参反馈卡片 */}
             <FeedbackPanel workflowId={currentWorkflow?.workflow_id} origin={currentWorkflow?.feedback_origin}
               disabled={busy || ["running", "sending", "preparing", "awaiting_completion"].includes(overlayStatus)}
-              onAdopt={async (workflow) => {
-                if (pollIntervalId) pollIntervalId();
-                setPollIntervalId(null);
-                setCurrentWorkflow(workflow);
-                setPreviewSignature(currentSignature);
-                setOverlayStatus("pending");
-                setSendProgress(null);
-                setPollSafetyNotice("");
-                const artifacts = workflow.artifacts || {};
-                applyPreviewUrl(
-                  await loadWorkbenchPreviewUrl(artifacts.image_file, {
-                    remote: isRemoteMode(),
-                    fetchBlobUrl: fetchPreviewBlobUrl,
-                    resolveUrl: resolveApiUrl,
-                  }),
-                );
-                setGcodeText("");
-                if (artifacts.gcode_file) {
-                  const preview = await fetchPreviewText(artifacts.gcode_file);
-                  if (preview.ok) {
-                    setGcodeText(preview.text);
-                  } else {
-                    addLog("PREVIEW", `调参预览已生成，但刀路资源加载失败（${preview.error}），请重新打开任务`, "error");
-                  }
-                }
-                if (artifacts.actual_params) {
-                  setPowerPercent(artifacts.actual_params.laser_max_power / artifacts.actual_params.power_scale * 100);
-                  setSpeedMms(artifacts.actual_params.feed_rate / 60);
-                }
-                setTimeEstimate(artifacts.time_estimate || null);
-                setFitNote(typeof artifacts.fit_note === "string" ? artifacts.fit_note : "");
-                setDimensions(
-                  artifacts.width_mm && artifacts.height_mm
-                    ? { width: artifacts.width_mm, height: artifacts.height_mm, originNote: artifacts.origin_note || "" }
-                    : null,
-                );
-                addLog("PREVIEW", `调参预览已生成：${workflow.workflow_id}，尚未发送`, "ok");
-              }} />
+              onAdopt={(workflow) => adoptDerivedWorkflow(workflow, "调参预览")} />
         </WbCard>
 
       </WorkbenchCanvas>

@@ -21,6 +21,7 @@ mod http;
 mod jobs;
 mod material_lab;
 mod materials;
+mod registration;
 mod resume;
 mod routes;
 mod safe_action;

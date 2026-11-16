@@ -437,3 +437,11 @@ button.conn-pill:hover {
 .fill-options-body .fill-options-wide { grid-column: 1 / -1; }
 .fill-options-body input[type="number"], .fill-options-body select { width: 100%; min-width: 0; }
 @media (max-width: 520px) { .fill-options-body { grid-template-columns: minmax(0, 1fr); } }
+
+/* 2026-11-16 两点对位（对齐 LightBurn Print and Cut）：复用填充设置的折叠框样式 */
+.registration-panel .registration-custom { display: flex; gap: 6px; }
+.registration-panel .registration-jog,
+.registration-panel .registration-actions,
+.registration-panel .registration-point { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.registration-panel .registration-jog select { width: auto; }
+.registration-panel .registration-result { margin: 0; padding-left: 18px; }

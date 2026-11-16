@@ -32,6 +32,7 @@
 | POST | `/api/material-lab/preview` / `send` / `status` / `select-cell` / `manage` | 材料实验室 | §3.7～3.10 |
 | POST | `/api/device/framing` | 走边框 | §3.12 |
 | POST | `/api/safe-action` | 受控安全动作 | §3.13 |
+| POST | `/api/registration/read-position`、`/api/registration/preview` | 两点对位：只读当前位置（状态查询）、按两对参考点生成旋转平移后的新预览 | §3.13a |
 | POST | `/api/settings` | 保存监听端口等设置 | §3.15 |
 | GET | `/api/jev/status` | Jev 配置状态（Key 只给掩码） | §3.14 |
 | POST | `/api/jev/reveal`、`/api/jev/test` | 取完整 Key、测试 Jev 连接 | §3.14 |
@@ -457,6 +458,27 @@ GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflo
 2026-10-10：HTTP 停止/查询请求可另带 `job_id`，仅限 `emergency_stop`、`soft_reset`、`status`，按登记任务使用其连接；编号未知或与显式目标不一致时失败，不改用其他设备。无编号时优先匹配显式连接目标；多个活动任务且无目标时拒绝随意选择。无活动任务且无编号时仍可通过明确的连接配置发送停止，不能依赖任务列表存在。`dry_run=true` 不写入活动任务的实时字节。成功只证明请求发送，不保证设备物理停止。
 
 2026-11-05：`action` 先去首尾空白再转小写后匹配（与 `laser_tools::execute_laser_safe_action_with_gate`、`safe_action_requires_approval` 一致），包括 `job_id` 允许的动作检查；`Emergency_Stop`、`EMERGENCY_STOP` 在作业运行中同样走原任务通道写出实时 0x18。
+
+### 3.13a 两点对位 `/api/registration/*`（2026-11-16，对齐 LightBurn Print and Cut，无摄像头）
+
+用户决定（2026-11-16）：对齐 LightBurn / 业界做法，“直接一起修改完在git推送”。流程：材料上已有两个实物标记（印好的十字、木牌两个角等）→ 工作台点动激光头（红光点）对准第 1 个标记 → 记录 → 对准第 2 个 → 记录 → 生成对位预览 → 照常走边框与确认发送。与 LightBurn 不同，MOSS 的任务都相对开刻时激光头位置（`G92`），不使用机床坐标，因此**新任务的开始位置固定为第 2 个标记点**（记录第 2 点时激光头就停在那里），不需要先记录或回到原来的起点。
+
+**`POST /api/registration/read-position`**：请求体为 §1.5 连接字段（也接受 `/api/safe-action` 的 `host` / `telnet_port` / `port` 写法）；内部按 `/api/safe-action {action:"status"}` 执行，**只写实时字节 `?`，不发任何 G-code 行、运动或出光**，请求里夹带的 `x`、`y`、`confirmed` 等字段一律丢弃。非 R3，严格模式下不需要审批。成功 `result`：`{state, frame:"mpos"|"wpos", position:{x,y}, mpos:{x,y,z}|null, wpos:{x,y,z}|null, raw}`（优先 `MPos`；固件只报 `WPos` 时用 `WPos`，两点必须同一种）。失败：409 `registration_device_busy`（该设备正在加工或上一任务停机未确认）、409 `registration_not_idle`（不是 `Idle`，如点动还没停）、400 `registration_status_failed`（连不上、无响应）、400 `registration_position_unavailable`（没有坐标字段）。
+
+**`POST /api/registration/preview`**：
+
+| 字段 | 类型 | 规则 |
+|---|---|---|
+| workflow_id | string | 必填，原任务（任何带刀路文件的 workflow，含导入 G-code）；正在加工 409 `registration_source_busy` |
+| design_points | `[{x,y},{x,y}]` | 必填，设计上的两个参考点，坐标与预览 `frame_mm` 相同（相对原任务开刻时激光头位置，mm） |
+| measured_points | `[{x,y},{x,y}]` | 必填，记录到的两个标记点位置（`read-position` 的 `position`），第 2 个即新任务开始位置 |
+| position_frame | string | 可选 `mpos`（默认）/ `wpos`，只记录 |
+| allow_scale | bool | 可选，默认 `false`：只旋转平移；`true` 时另按实测距离等比缩放 |
+| machine_motion | object | 可选，同 §3.4，只影响工时估算 |
+
+算法（`laser_core::registration`）：`fit_two_point` 求相似变换（不含镜像）；两点相距不足 10 mm 400 `registration_points_too_close`；不允许缩放时实测距离与设计距离相差超过 5% 400 `registration_scale_mismatch`（多半点错了标记），按中点对中点做最小二乘，残差为距离差的一半；允许缩放时比例须在 0.8 ~ 1.25，否则 400 `registration_scale_out_of_range`；坐标缺失或非数字 400 `registration_points_invalid`。原任务刀路先按冻结的 SHA-256 重算比对（不一致 400 `send_gate_rejected`，不拿来变换），材料安全门同预览（`material_safety_blocked`）。`transform_gcode` 跟踪 `G90/G91`、`G92` 原点与模态，把每条移动换成绝对坐标并同时写 X、Y，圆弧 I/J 随之旋转缩放、`R` 乘缩放比例，方向不变；F、S、M、Z 原样保留；开头写 `G21` / `G90` / `G92 X0 Y0`，原文件的 `G92` 行只用于跟踪、不输出。以下情况 400 `registration_gcode_unsupported` 并写明行号：`G20` 英制、`G53` `G28` `G30` `G10` `G54`~`G59`、`G18` `G19` 等其他 G 代码、额外轴或 `K`、`$` 系统命令（含 `$J=`）、变量与表达式、相对模式下或改过 Z 原点后的 Z 移动、没有任何 X/Y 移动。扫描填充、光栅也按同一几何变换（整行连同两头过扫描一起旋转），扫描方向随之倾斜。
+
+成功 `result` 是**新的** workflow 记录（原任务与原文件不变）：`workflow_id`（新）、`status=preview_ready`、`source_type="gcode"`、`registered_from`（原任务）、`registration{source_workflow_id, source_gcode_file, source_gcode_sha256, design_points, measured_points, position_frame, start_point:"mark_2", allow_scale, rotation_deg（逆时针为正）, scale, scale_applied, design_distance_mm, measured_distance_mm, distance_ratio, residual_mm, offset_mm{x,y}（原起点落在第 2 个标记点的哪里）, moves, arcs}`（同时写入 `artifacts.registration`）、`artifacts`（新文件 `reg-….gcode` 的 `gcode_file` / `gcode_sha256` / 预览图 / `time_estimate`，另加按变换后刀路算的 `frame_mm`、`frame_hull_mm`，原任务的 `actual_params`，`origin="registration_mark_2"` 与 `origin_note`）、`confirmation_snapshot`（新文件与新 SHA）、`origin`（发起方）与 `web`。发送走 §3.6 `confirm_send` 全部门禁：必须 `confirmed=true`，物理文件 SHA-256 重算、握手、预检、行程复核（`job_exceeds_travel`）照旧，严格模式下按 R3 授权。生成本身不连接设备、不算 R3。
 
 ### 3.14 `/api/jev/status`、`/api/jev/reveal`、`/api/jev/test`、`/api/jev/feedback`
 
