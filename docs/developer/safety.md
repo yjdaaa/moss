@@ -15,7 +15,7 @@
 
 以下改动默认按高风险处理，先读本页第 3 节，再读对应源码与测试：
 
-- 完整发送链路：`laser-api` 的 `launch_send_job_for`、workflow `confirm_send`、材料矩阵 `send`、`/api/device/framing`。
+- 完整发送链路：`laser-api` 的 `launch_send_job_for`、workflow `confirm_send`、材料矩阵 `send`、`/api/device/framing`、`/api/device/pointer-fire`（低功率点射，与走边框共用 `run_short_device_job`）。
 - 设备层：`laser-device` 的握手、预检、`JobWorker` 流控、实时字节、S 值换算、SD 脱机上传与监控。
 - 安全动作：`laser_tools::execute_laser_safe_action` 与 `/api/safe-action`，包括 `unlock`、`home`、`set_origin`、`laser_off`、`absolute_move`、`relative_move`、`emergency_stop`、`soft_reset` 与进给/功率倍率。
 - 退出路径：`laser_host::ShutdownCoordinator`、panic 钩子、控制台关闭钩子、Tauri 关闭事件（含 macOS `RunEvent::Exit`）与托盘/菜单栏退出。
@@ -29,7 +29,7 @@
 
 顺序与错误码以 `launch_send_job_for` 为准，任一失败都不写入加工指令：
 
-0. **严格模式授权**（`MOSS_FUSION_STRICT=true` 时，技术书 §6.2；默认关闭，关闭时本步不读取任何数据、不改变判定）：**开关在语音中心顶部（n27，n28 修订，2026-10-18）**——点开需二次确认；开启与关闭都立即生效，并把值写入运行目录 `.env` 的 `MOSS_FUSION_STRICT`（保留其他行与注释，原子写）。关闭会同时更新启动快照与运行时值（`set_strict_from_env` + `set_strict_mode`），所以不存在“要重启才生效”的中间态；**自建链路仍强制开启，命令与界面双重拒绝关闭**（`strict_mode_locked`），切换到自建链路时 `moss-voice` 会重新强制开启。唯一检查点 `require_r3_authority`（`crates/laser-api/src/approval/strict.rs`）。桌面会话放行；小智桥接 / 局域网配对 / 网关只创建审批并返回 HTTP 202 `approval_required`，不连接设备；本机回环无凭据返回 403 `strict_mode_blocked`；以审批身份执行时（不论严格模式开关）按当前要素与审批保存的连接重算摘要并单次消费，执行使用审批保存的连接参数。无本地数据库时 503 `approval_unavailable`（失败即拒绝）。同一检查点也接在 `/api/safe-action` 的 R3 动作（`laser_contracts::safe_action_requires_approval`：除查询、急停、软复位、关激光、倍率复位与降低外一律视为 R3）与 `/api/device/framing`。停止类动作永不追加条件。
+0. **严格模式授权**（`MOSS_FUSION_STRICT=true` 时，技术书 §6.2；默认关闭，关闭时本步不读取任何数据、不改变判定）：**开关在语音中心顶部（n27，n28 修订，2026-10-18）**——点开需二次确认；开启与关闭都立即生效，并把值写入运行目录 `.env` 的 `MOSS_FUSION_STRICT`（保留其他行与注释，原子写）。关闭会同时更新启动快照与运行时值（`set_strict_from_env` + `set_strict_mode`），所以不存在“要重启才生效”的中间态；**自建链路仍强制开启，命令与界面双重拒绝关闭**（`strict_mode_locked`），切换到自建链路时 `moss-voice` 会重新强制开启。唯一检查点 `require_r3_authority`（`crates/laser-api/src/approval/strict.rs`）。桌面会话放行；小智桥接 / 局域网配对 / 网关只创建审批并返回 HTTP 202 `approval_required`，不连接设备；本机回环无凭据返回 403 `strict_mode_blocked`；以审批身份执行时（不论严格模式开关）按当前要素与审批保存的连接重算摘要并单次消费，执行使用审批保存的连接参数。无本地数据库时 503 `approval_unavailable`（失败即拒绝）。同一检查点也接在 `/api/safe-action` 的 R3 动作（`laser_contracts::safe_action_requires_approval`：除查询、急停、软复位、关激光、倍率复位与降低外一律视为 R3）与 `/api/device/framing`。`/api/device/pointer-fire` 不进审批，严格模式下只放行桌面会话（`require_desktop_when_strict`，见 §3 其他固定规则）。停止类动作永不追加条件。
 1. HTTP 层要求 `confirmed=true`，否则 400；`laser-mcp` 在转发前同样检查。
 2. `authorize_send`：记录处于 `pending`；重新读取物理 G-code 文件计算 SHA-256 并与冻结值比对；存在有效 workflow 快照或 calibration SHA。改材料、厚度、文件、策略、参数或连接目标后必须重新预览。
 3. 同一设备已有在途作业：409 `device_busy`。
@@ -45,7 +45,8 @@
 
 - 生成、预览、推荐参数、反馈调参、走边框预览 G-code 都不等于启动机器。例外是 `/api/device/framing`：它真实驱动机器沿外接矩形运动，改动时按发送链路对待。2026-10-14 起默认 `power=0` 不出光（弱光需显式传 `power`），与完整发送相同做同设备占用检查、握手与 Idle 预检，运行期间登记为活动作业 `framing-…`，顶栏急停与带 `job_id` 的 `emergency_stop` 可停止；失败或被停止后保留为“待确认停止”目标。
 - `laser_safe_action_tool` 中 `status` 与进给/功率倍率不需要确认；其余动作必须 `confirmed=true`（或 `dry_run=true` 只返回计划）。
-- 两点对位（2026-11-16，[api-contracts.md](api-contracts.md) §3.13a）：`/api/registration/read-position` 只走 `status`（实时 `?`），丢弃请求里的运动字段，不得改成会发 G-code 行的实现；点动沿用 `/api/safe-action relative_move` 与其确认 / R3 授权。`/api/registration/preview` 只生成：原刀路先按冻结 SHA-256 核对，变换结果是新文件、新 SHA 的 `preview_ready` workflow，发送走完整门禁；变换器遇到机床坐标、坐标系切换、英制、非 XY 平面、`$` 命令等一律拒绝而不是猜测。新任务以第 2 个标记点为开始位置（`G92 X0 Y0`），前端生成前复核激光头仍在该点，软件无法保证开刻时激光头没被挪动，确认框的“对刀起点”写明这一点。
+- 两点对位（2026-11-16，[api-contracts.md](api-contracts.md) §3.13a）：`/api/registration/read-position` 只走 `status`（实时 `?`），丢弃请求里的运动字段，不得改成会发 G-code 行的实现；点动沿用 `/api/safe-action relative_move` 与其确认 / R3 授权。`/api/registration/preview` 只生成：原刀路先按冻结 SHA-256 核对，变换结果是新文件、新 SHA 的 `preview_ready` workflow，发送走完整门禁；变换器遇到机床坐标、坐标系切换、英制、非 XY 平面、`$` 命令等一律拒绝而不是猜测。新任务以第 2 个标记点为开始位置（`G92 X0 Y0`），前端生成前复核激光头仍在该点，软件无法保证开刻时激光头没被挪动，确认框的“对刀起点”写明这一点。画板任务同样可对位（2026-11-16，技术书 r42）：结果带画板视图，发送仍走画板确认框、`confirmed=true` 与全部门禁，内容指纹换成新刀路 SHA，不绕过重复发送防呆。
+- 低功率点射（2026-11-16，技术书 r42，[api-contracts.md](api-contracts.md) §3.13b）：`/api/device/pointer-fire` 会真实出光。不变量：① 只接受工作台身份，语音 / MCP 桥 / 网关 / 审批重放不论严格模式一律 403 `pointer_fire_not_allowed`，不得加进 `ToolCatalog`、`laser_safe_action_tool` 或任何语音工具；② 严格模式下只有桌面会话可用，不创建审批；③ 功率上限 S10（0~1000 标尺 1%，按 `$30` 换算）、时长上限 200 ms，越界拒绝不截断，必须 `confirmed=true`；④ 与走边框相同的占用检查、握手、Idle 预检与活动作业登记（`pointer-…`），失败或取消补发 0x18 并保留为待确认停止目标；⑤ 必须用 `M3`（`M4` 原地不出光），关光行 `M5 S0` 与开光行一起写入控制器缓冲区，不得拆成两次请求或改成“等用户松手再关”。前端默认关闭，每次点射都弹确认框，本页第一次附护目镜与反光提醒。不得把上限放宽来“看得更清楚”。
 - 网络完整任务只走 Telnet；SD 脱机模式的 HTTP 只用于把文件上传到 SD 卡。
 - SD 上传后核对固件返回的文件哈希；固件不返回哈希（未启用 HashFS）时**拒绝 `$SD/Run`**，任务记为 failed（2026-10-14 用户决定，此前为继续执行并警告）。软件比对通过也不能当作实机验收。
 - 不猜串口号、设备 host、文件名、材料、厚度、密码、token 或用户私有路径；`resolve_connection_spec` 只在参数缺失时回退到 `GRBL_DEFAULT_PORT` / `LASER_NETWORK_HOST`，且忽略含 `<` 的占位值。

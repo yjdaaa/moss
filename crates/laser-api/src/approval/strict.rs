@@ -248,6 +248,37 @@ impl crate::ApiService {
         Err(approval_required_response(&record))
     }
 
+    /// 只允许人在桌面当场操作的即时 R3 动作（点射，2026-11-16）：严格模式关闭时不追加条件；
+    /// 开启时只有桌面会话放行，其他来源一律 403 `strict_mode_blocked` 并尽力记审计，
+    /// **不创建审批**——事后批准的一次点射对“此刻对准标记”没有意义。
+    pub(crate) fn require_desktop_when_strict(
+        &self,
+        ctx: &CallerContext,
+        target_record: &str,
+    ) -> Result<(), HttpFailure> {
+        if !self.strict_mode() || matches!(ctx, CallerContext::Desktop) {
+            return Ok(());
+        }
+        if let Some(service) = self.approvals.as_deref() {
+            let entry = AuditEntry {
+                at: (service.clock)(),
+                client: laser_contracts::audit_client(ctx),
+                action: AuditAction::StrictModeBlocked,
+                target: target_record.to_owned(),
+                result: AuditResult::Denied,
+                detail: AuditDetail {
+                    kind: Some(ApprovalKind::SafeAction),
+                    error_code: Some("strict_mode_blocked".into()),
+                    ..AuditDetail::default()
+                },
+            };
+            if let Err(error) = service.audit(&entry) {
+                eprintln!("[laser-api] {}", error.message());
+            }
+        }
+        Err(strict_blocked())
+    }
+
     /// 记一条审计（R4 拒绝等由接入点发生的事件）。没有本地数据库时返回错误，调用方自行决定是否忽略。
     pub fn record_audit(&self, entry: &AuditEntry) -> Result<(), String> {
         match self.approvals.as_deref() {

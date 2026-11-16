@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 两点对位补齐画板入口与低功率点射：画板任务可对位后照常确认发送，没有红光点的机器可原地点射对准标记（2026-11-16）
+
+- **现象**：两点对位只在工作台可用，画板作品无法对上材料上的标记；对位结果没有画板视图，画板页的作业摘要、发送按钮与重复发送防呆都认不出它，走边框也按左下角起点而不是第 2 个标记点。没有红光指示的机器只能目测激光头对准标记，误差大。
+- **根因与修复**：`/api/registration/preview` 在原任务 `source_type="draw"` 时给结果加 `draw_lab`（沿用原作业摘要，尺寸 / 工时换成变换后刀路，`content_fingerprint` 为新刀路 SHA-256，`registered_from` 指回画板任务）并带上原任务预览链接；画板“预览与发送”卡复用 `RegistrationPanel`（`idPrefix="draw-reg"`，进度另存 `moss-registration-draw-v1`），`DrawPage.adoptRegistered` 经 `adoptRegisteredDrawRecord` 换上新任务并换指纹，走边框经 `drawFramingExtent` 取变换后 `frame_mm`，确认框与提示写明激光头须停在第 2 个标记点。新增 `POST /api/device/pointer-fire`（对齐 LightBurn “Fire”）：`power` 1..=10（S 标尺 ≤1%，按 `$30` 换算）、`duration_ms` 10..=200，越界 400 `pointer_fire_params_invalid` 不截断，须 `confirmed=true`；下发 `M5 S0` / `G1 F100` / `M3 S<p>` / `G4 P<s>` / `M5 S0` / `G0`——用 `M3` 是因为 `M4` 动态功率原地不出光，关光行与开光行同批进入控制器缓冲区；走边框的占用检查、握手、Idle 预检、活动作业登记与失败 / 取消补发 0x18 抽成 `run_short_device_job` 两者共用（走边框行为与错误码不变），点射作业编号 `pointer-…`、错误码 `pointer_fire_failed` / `pointer_fire_cancelled`。**安全门禁**：语音、MCP 桥、网关、审批重放一律 403 `pointer_fire_not_allowed`，不在 `ToolCatalog` / `laser_safe_action_tool` 中；严格模式下只放行桌面会话（`require_desktop_when_strict`，其他来源 403 `strict_mode_blocked`、不创建审批）。前端点射默认关闭、不记忆，每次都 `showConfirm`，本页第一次附护目镜与反光提醒。**契约**：新增路由与错误码 `pointer_fire_not_allowed` / `pointer_fire_params_invalid` / `confirmation_required` / `pointer_fire_failed` / `pointer_fire_cancelled`，画板来源的对位结果新增 `draw_lab` 与三个 `web` 链接；其他来源不变，默认行为不变。
+- **验证**：`laser-api` 新增 6 项（画板对位带画板视图且仍须确认；点射默认 / 低功率 / `$30=255` 换算后的逐行内容与 M5 必发、忽略运动字段；11 种越界参数与 3 种未确认在连接前拒绝、5 种非 Idle 状态不出光；写出中断补发 0x18 并保留待确认停止目标；运行中登记为活动作业、急停按编号可停、同设备 409；严格模式与语音 / MCP / 网关 / 审批来源拒绝、不建审批、`laser_safe_action_tool` 与 MCP 工具清单无点射），原有走边框测试全部照过；前端新增 `tests/drawRegistration.test.mjs` 7 项。未实机出光：点射在真实 GRBL / FluidNC 上的 M3 原地出光、可见度与画板对位实际精度均未验证。
+- **关联**：`crates/laser-api/src/safe_action.rs`（`run_pointer_fire`、`run_short_device_job`、`pointer_fire_params`、`pointer_fire_lines`）、`crates/laser-api/src/approval/strict.rs`（`require_desktop_when_strict`）、`crates/laser-api/src/registration.rs`（`registered_draw_view`）、`crates/laser-api/src/routes.rs`、`frontend/src/components/RegistrationPanel.jsx`、`frontend/src/registrationState.js`、`frontend/src/drawConnection.js`、`frontend/src/pages/DrawPage.jsx`。
 ### 新增质量预设“快速 / 均衡 / 精细”，语音工具开放材料测试参数，G-code 预览画出圆弧（2026-11-16）
 
 - **现象**：填充与图片的细项（分组、双向、交叉排线、转换方式等）一字排开，新手不知道怎么选；语音说“做一次线距测试”时工具清单里没有 `test_type` / 测试轴，说“用 Jarvis 刻这张照片”也没有引导；上传的 G-code 预览只连 G2/G3 的端点，圆被画成一个点或一条弦，尺寸也算错，且不写 G 的模态行、G91 / G20 都被忽略。

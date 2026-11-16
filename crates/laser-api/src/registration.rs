@@ -50,6 +50,49 @@ fn round3(value: f64) -> f64 {
     if rounded == 0.0 { 0.0 } else { rounded }
 }
 
+/// 画板任务对位后的画板视图：沿用原任务的作业摘要（材料、功率、速度、遍数、能否发送），
+/// 尺寸与工时换成变换后的刀路；内容指纹用新刀路的 SHA-256（与原画板图案不同，同一份对位结果
+/// 再次发送时照常要求勾选“已移动材料或原点”）。
+fn registered_draw_view(
+    source: &serde_json::Value,
+    source_id: &str,
+    artifacts: &serde_json::Map<String, serde_json::Value>,
+    frame: Option<(f64, f64, f64, f64)>,
+    new_sha: &str,
+) -> serde_json::Value {
+    let mut summary = source
+        .pointer("/draw_lab/job_summary")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some((min_x, max_x, min_y, max_y)) = frame {
+        summary["actual_width_mm"] = serde_json::json!(round3(max_x - min_x));
+        summary["actual_height_mm"] = serde_json::json!(round3(max_y - min_y));
+    }
+    if let Some(seconds) = artifacts
+        .get("time_estimate")
+        .and_then(|t| t.get("estimated_seconds"))
+        .and_then(serde_json::Value::as_f64)
+    {
+        summary["estimated_display"] = serde_json::json!(format!("{seconds:.1} 秒"));
+    }
+    summary["registered"] = serde_json::json!(true);
+    let source_lab = source.get("draw_lab");
+    let field = |key: &str| {
+        source_lab
+            .and_then(|lab| lab.get(key))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    serde_json::json!({
+        "job_summary": summary,
+        "content_fingerprint": new_sha,
+        "registered_from": source_id,
+        "uploaded_image_file": field("uploaded_image_file"),
+        "scene_file": field("scene_file"),
+    })
+}
+
 impl ApiService {
     pub(crate) fn handle_registration_route(
         &self,
@@ -447,7 +490,26 @@ impl ApiService {
             .unwrap_or("")
             .to_owned();
         let workflow_id = next_workflow_id();
-        let record = serde_json::json!({
+        let mut web = serde_json::json!({
+            "gcode_preview_url": format!("/preview?path={image_name}"),
+            "image_preview_url": format!("/preview?path={image_name}"),
+            "gcode_download_url": format!("/preview?path={gcode_name}&download=1"),
+        });
+        // 画板任务对位（2026-11-16）：带上画板视图，画板页沿用自己的作业摘要、重复发送防呆与确认框
+        let draw_lab =
+            (source.get("source_type").and_then(|v| v.as_str()) == Some("draw")).then(|| {
+                for key in [
+                    "material_preview_url",
+                    "uploaded_image_url",
+                    "scene_download_url",
+                ] {
+                    if let Some(url) = source.pointer(&format!("/web/{key}")) {
+                        web[key] = url.clone();
+                    }
+                }
+                registered_draw_view(&source, source_id, &artifacts, frame, &new_sha)
+            });
+        let mut record = serde_json::json!({
             "workflow_id": workflow_id,
             "status": "preview_ready",
             "source_type": "gcode",
@@ -468,15 +530,14 @@ impl ApiService {
             "registered_from": source_id,
             "registration": registration,
             "origin": ctx.label(),
-            "web": {
-                "gcode_preview_url": format!("/preview?path={image_name}"),
-                "image_preview_url": format!("/preview?path={image_name}"),
-                "gcode_download_url": format!("/preview?path={gcode_name}&download=1"),
-            },
+            "web": web,
             "next_actions": ["status", "cancel", "confirm_send"],
             "created_at": unix_seconds(),
             "updated_at": unix_seconds(),
         });
+        if let Some(view) = draw_lab {
+            record["draw_lab"] = view;
+        }
         let stored = laser_runtime::StoredRecord {
             kind: laser_runtime::RecordKind::Workflow,
             id: workflow_id,

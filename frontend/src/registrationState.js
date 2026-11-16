@@ -3,6 +3,8 @@
 // 实测点是状态查询读到的机器坐标（MPos，固件只报 WPos 时用 WPos，两点必须同一种）。
 
 export const REGISTRATION_SESSION_KEY = "moss-registration-v1";
+/** 画板的对位进度单独存，和工作台互不清掉对方的记录点。 */
+export const REGISTRATION_DRAW_SESSION_KEY = "moss-registration-draw-v1";
 /** 两个参考点至少相距多少毫米（与后端 `MIN_POINT_DISTANCE_MM` 一致）。 */
 export const MIN_POINT_DISTANCE_MM = 10;
 /** 生成对位预览前复核：激光头离第 2 个标记点超过这个距离就拒绝（mm）。 */
@@ -136,9 +138,9 @@ export function registrationSummary(registration) {
 }
 
 /** 会话内记住对位进度（关闭页面即清空）；存储不可用时只在当前页面生效。 */
-export function readRegistrationSession(storage = globalThis.sessionStorage) {
+export function readRegistrationSession(storage = globalThis.sessionStorage, key = REGISTRATION_SESSION_KEY) {
   try {
-    const raw = storage?.getItem(REGISTRATION_SESSION_KEY);
+    const raw = storage?.getItem(key);
     if (!raw) return null;
     const value = JSON.parse(raw);
     return value && typeof value === "object" ? value : null;
@@ -147,12 +149,101 @@ export function readRegistrationSession(storage = globalThis.sessionStorage) {
   }
 }
 
-export function writeRegistrationSession(value, storage = globalThis.sessionStorage) {
+export function writeRegistrationSession(value, storage = globalThis.sessionStorage, key = REGISTRATION_SESSION_KEY) {
   try {
-    if (value) storage?.setItem(REGISTRATION_SESSION_KEY, JSON.stringify(value));
-    else storage?.removeItem(REGISTRATION_SESSION_KEY);
+    if (value) storage?.setItem(key, JSON.stringify(value));
+    else storage?.removeItem(key);
     return true;
   } catch {
     return false;
   }
+}
+
+// ── 低功率点射（2026-11-16，对齐 LightBurn “Fire”）：没有红光点的机器对准标记时用 ──
+// 默认关闭；每次点射都弹确认框（第一次附护目镜等安全提醒）；后端另把功率 / 时长卡死在上限内。
+
+/** 点射功率上限：S10（0~1000 标尺的 1%），与后端 `POINTER_FIRE_MAX_POWER` 一致。 */
+export const POINTER_MAX_POWER = 10;
+/** 点射时长上限（毫秒），与后端 `POINTER_FIRE_MAX_DURATION_MS` 一致。 */
+export const POINTER_MAX_DURATION_MS = 200;
+export const POINTER_POWER_OPTIONS = [
+  { value: 3, label: "0.3%（S3）" },
+  { value: 5, label: "0.5%（S5）" },
+  { value: 10, label: "1%（S10）" },
+];
+export const POINTER_DURATION_OPTIONS = [50, 100, 200];
+
+/** 点射请求体；功率 / 时长不是选项内的整数或超出上限时返回 null（不截断）。 */
+export function pointerFireRequest(target, power, durationMs) {
+  if (!target) return null;
+  const p = Number(power);
+  const d = Number(durationMs);
+  if (!Number.isInteger(p) || p < 1 || p > POINTER_MAX_POWER) return null;
+  if (!Number.isInteger(d) || d < 10 || d > POINTER_MAX_DURATION_MS) return null;
+  return { ...target, confirmed: true, power: p, duration_ms: d };
+}
+
+/** 点射确认框文案；`first` 为本页第一次点射，附完整安全提醒。 */
+export function pointerFireConfirm({ targetLabel, power, durationMs, first }) {
+  const pct = (Number(power) / 10).toFixed(1);
+  const what = `目标设备：${targetLabel}\n激光将在当前位置以 ${pct}% 功率（S${power}）出光 ${durationMs} ms，然后自动关闭（激光头不移动）。`;
+  if (first) {
+    return {
+      title: "第一次点射：请先做好防护",
+      message: `${what}\n\n这是真实出光：即使功率很低，直视或经反光照到眼睛也会造成伤害。\n· 戴好对应激光波长的护目镜，周围的人也要戴或离开；\n· 确认激光头下方是要雕刻的材料，没有镜面、金属反光物或易燃物；\n· 机器状态必须是空闲（Idle），否则后端会拒绝；顶栏急停随时可用。`,
+      confirmText: "已戴护目镜，点射",
+    };
+  }
+  return {
+    title: "确认点射（会出光）",
+    message: `${what}\n请确认已戴好护目镜。`,
+    confirmText: "点射",
+  };
+}
+
+// ── 画板入口（2026-11-16）：对位结果沿用画板的作业摘要、确认框与重复发送防呆 ──
+
+/** 画板“开始雕刻”确认框与提示里的对刀起点文字。 */
+export function drawOriginNote(record) {
+  if (record?.registration) {
+    return typeof record?.artifacts?.origin_note === "string" && record.artifacts.origin_note
+      ? record.artifacts.origin_note
+      : "开刻前激光头必须停在第 2 个对位标记上（记录第 2 点时的位置）";
+  }
+  return "开刻前把激光头移到作品左下角（走边框与正式开刻共用该起点）";
+}
+
+/**
+ * 画板走边框范围：普通画板任务以激光头为左下角、宽高取作业摘要；对位结果相对第 2 个标记点，
+ * 范围取变换后的 `frame_mm`（可为负）。拿不到时返回 null。
+ */
+export function drawFramingExtent(record) {
+  if (record?.registration) {
+    const frame = record?.artifacts?.frame_mm;
+    const keys = ["min_x", "max_x", "min_y", "max_y"];
+    if (!frame || !keys.every((key) => finite(frame[key]) !== null)) return null;
+    const box = Object.fromEntries(keys.map((key) => [key, Math.round(Number(frame[key]) * 1000) / 1000]));
+    if (box.max_x <= box.min_x || box.max_y <= box.min_y) return null;
+    return { frame: box, width: box.max_x - box.min_x, height: box.max_y - box.min_y };
+  }
+  const summary = record?.draw_lab?.job_summary;
+  return { frame: null, width: Number(summary?.actual_width_mm) || 100, height: Number(summary?.actual_height_mm) || 100 };
+}
+
+/**
+ * 画板采用对位结果：后端返回的新 workflow 必须带画板视图（`draw_lab`，指回原画板任务）。
+ * 返回画板页要换上的状态；不是画板任务的对位结果时返回 `{error}`。
+ */
+export function adoptRegisteredDrawRecord(record, sourceWorkflowId) {
+  if (!record?.workflow_id || !record?.registration) return { error: "对位结果无效" };
+  if (!record.draw_lab?.job_summary) return { error: "对位结果缺少画板视图，请重新生成画板预览后再对位" };
+  if (sourceWorkflowId && record.registered_from !== sourceWorkflowId) {
+    return { error: "对位结果不是当前画板任务生成的" };
+  }
+  return {
+    workflowId: record.workflow_id,
+    result: { success: true, result: record },
+    fingerprint: record.draw_lab.content_fingerprint || "",
+    status: `对位预览已生成：${record.workflow_id}，尚未发送；${drawOriginNote(record)}`,
+  };
 }

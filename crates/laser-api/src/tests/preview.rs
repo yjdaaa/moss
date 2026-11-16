@@ -255,7 +255,7 @@ fn draw_preview_generates_real_gcode_and_confirm_send_succeeds() {
 }
 
 /// 200×100 像素、中间一块黑色矩形的 PNG data URL。
-fn draw_test_png() -> String {
+pub(super) fn draw_test_png() -> String {
     use base64::Engine;
     let mut img = image::GrayImage::from_pixel(200, 100, image::Luma([255]));
     for y in 25..75 {

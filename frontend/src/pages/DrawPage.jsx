@@ -63,6 +63,13 @@ import { controllerLabel, discoveryOutcome } from "../controllerDiscovery.js";
 import { defaultSerialPortHint } from "../platform.js";
 import { FoldHeader } from "../components/FoldHeader.jsx";
 import FillOptionsPanel from "../components/FillOptionsPanel.jsx";
+import RegistrationPanel from "../components/RegistrationPanel.jsx";
+import {
+  REGISTRATION_DRAW_SESSION_KEY,
+  adoptRegisteredDrawRecord,
+  drawFramingExtent,
+  drawOriginNote,
+} from "../registrationState.js";
 import { framingOutline, readFramingShape, writeFramingShape } from "../aiPreviewState.js";
 import {
   fillResultNote,
@@ -782,12 +789,18 @@ export function DrawPage({ onNavigate }) {
       setStatus(drawTargetMissingText(form));
       return;
     }
-    const width = jobSummary?.actual_width_mm || 100;
-    const height = jobSummary?.actual_height_mm || 100;
+    // 两点对位结果的范围相对第 2 个标记点（frame_mm，可为负）；普通画板任务以激光头为左下角
+    const extent = drawFramingExtent(result?.result);
+    if (!extent) {
+      setStatus("当前任务没有可走的边框范围");
+      return;
+    }
+    const { width, height, frame } = extent;
+    const registered = Boolean(result?.result?.registration);
     // 走边框会实际移动机器（勾选弱光时还会低功率出光），单击不得直接执行（2026-11-05 用户决定）
     const lightOn = framingLight;
     const outline = framingShape === "hull" ? framingOutline(result?.result?.artifacts) : null;
-    const confirmed = await showConfirm(framingConfirmText(form, width, height, lightOn, outline?.length || 0), {
+    const confirmed = await showConfirm(framingConfirmText(form, width, height, lightOn, outline?.length || 0, registered), {
       title: lightOn ? "确认走边框（弱光出光）" : "确认走边框（机器将移动）",
       tone: "warning",
       danger: lightOn,
@@ -802,7 +815,7 @@ export function DrawPage({ onNavigate }) {
     setStatus(lightOn ? "正在走边框（弱光指示）…顶栏急停可随时停止" : "正在走边框（激光关闭，只移动激光头）…顶栏急停可随时停止");
     try {
       // 默认不出光；附带 relative_to_head: true 以当前激光头位置为左下角起点（与正式雕刻同一参照）
-      const res = await postJson("/api/device/framing", buildDrawFramingPayload(form, width, height, lightOn, outline));
+      const res = await postJson("/api/device/framing", buildDrawFramingPayload(form, width, height, lightOn, outline, frame));
       setStatus(formatFramingStatus(res, width, height, lightOn));
     } catch (e) {
       setStatus(`走边框请求失败：${e.message || e}`);
@@ -873,6 +886,24 @@ export function DrawPage({ onNavigate }) {
       void showAlert(message, { title: outcome.kind === "sent" ? "已发送急停" : "急停未确认", tone: outcome.kind === "sent" ? "warning" : "error" });
     },
   );
+
+  // 两点对位生成的新任务（带画板视图、指回原画板任务）：换成当前任务，画布与参数快照不变，
+  // 改了画布或参数照样判为过期；尚未发送，发送仍走本页确认框与重复发送防呆
+  function adoptRegistered(record) {
+    const adopted = adoptRegisteredDrawRecord(record);
+    if (adopted.error) {
+      setStatus(adopted.error);
+      void showAlert(adopted.error, { title: "对位结果不能用于画板", tone: "warning" });
+      return;
+    }
+    pollingCleanupRef.current?.();
+    pollingCleanupRef.current = null;
+    setWorkflowId(adopted.workflowId);
+    setResult(adopted.result);
+    setConfirmOpen(false);
+    setRepeatSend((current) => applyPreviewFingerprintSuccess(current, adopted.fingerprint));
+    setStatus(adopted.status);
+  }
 
   async function workflowAction(action) {
     if (!workflowId) return;
@@ -1418,7 +1449,7 @@ export function DrawPage({ onNavigate }) {
             )}
             {canActOnWorkflow && !previewStale && (
               <div className="wb-origin-note" id="draw-origin-note">
-                开刻前把激光头移到作品左下角（走边框与正式开刻共用该起点）
+                {drawOriginNote(result?.result)}
               </div>
             )}
             {canActOnWorkflow && !hostReady && <div className="inline-hint">{drawTargetMissingText(form)}后再发送</div>}
@@ -1436,6 +1467,25 @@ export function DrawPage({ onNavigate }) {
               </button>
             </div>
           </div>
+
+          {/* 两点对位（2026-11-16，画板入口）：默认收起；对位结果是新的画板任务，发送仍走本页确认框 */}
+          {canActOnWorkflow && (
+            <RegistrationPanel
+              workflow={result?.result}
+              connectionForm={form}
+              machineMotion={motionPayload.machine_motion}
+              disabled={
+                busy
+                || previewStale
+                || ["sending", "running", "preparing", "awaiting_completion"].includes(result?.result?.status)
+              }
+              onLog={(_tag, text) => setStatus(text)}
+              onRegistered={adoptRegistered}
+              idPrefix="draw-reg"
+              rootId="draw-registration"
+              sessionKey={REGISTRATION_DRAW_SESSION_KEY}
+            />
+          )}
 
           <div className="workflow-chip">
             <RefreshCw size={16} />
@@ -1497,6 +1547,7 @@ export function DrawPage({ onNavigate }) {
       {confirmOpen && (
         <SendConfirmDialog
           summary={jobSummary}
+          originNote={result?.result?.registration ? drawOriginNote(result.result) : ""}
           target={hostReady ? drawTargetLabel(form) : ""}
           sdAvailable={!isSerial(form)}
           busy={busy}
@@ -1594,6 +1645,7 @@ function ConnectionStatus({ form, result }) {
 
 function SendConfirmDialog({
   summary,
+  originNote = "",
   target,
   sdAvailable = true,
   busy,
@@ -1622,7 +1674,9 @@ function SendConfirmDialog({
           </button>
         </div>
         <JobSummaryCard summary={summary} compact />
-        <div className="wb-origin-note">对刀起点：开刻前请把激光头对准作品左下角</div>
+        <div className="wb-origin-note" id="draw-confirm-origin">
+          对刀起点：{originNote || "开刻前请把激光头对准作品左下角"}
+        </div>
         <div className="confirm-device">
           <Wifi size={17} />
           <span>设备：{target}</span>

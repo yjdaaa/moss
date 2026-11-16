@@ -33,6 +33,7 @@
 | POST | `/api/device/framing` | 走边框 | §3.12 |
 | POST | `/api/safe-action` | 受控安全动作 | §3.13 |
 | POST | `/api/registration/read-position`、`/api/registration/preview` | 两点对位：只读当前位置（状态查询）、按两对参考点生成旋转平移后的新预览 | §3.13a |
+| POST | `/api/device/pointer-fire` | 低功率点射（≤ S10、≤ 200 ms，`M3` 原地出光后关光），只给界面上的人用 | §3.13b |
 | POST | `/api/settings` | 保存监听端口等设置 | §3.15 |
 | GET | `/api/jev/status` | Jev 配置状态（Key 只给掩码） | §3.14 |
 | POST | `/api/jev/reveal`、`/api/jev/test` | 取完整 Key、测试 Jev 连接 | §3.14 |
@@ -506,6 +507,38 @@ GET 与 POST 都接受；忽略请求体（仍受 64 KiB 限制）。从 workflo
 算法（`laser_core::registration`）：`fit_two_point` 求相似变换（不含镜像）；两点相距不足 10 mm 400 `registration_points_too_close`；不允许缩放时实测距离与设计距离相差超过 5% 400 `registration_scale_mismatch`（多半点错了标记），按中点对中点做最小二乘，残差为距离差的一半；允许缩放时比例须在 0.8 ~ 1.25，否则 400 `registration_scale_out_of_range`；坐标缺失或非数字 400 `registration_points_invalid`。原任务刀路先按冻结的 SHA-256 重算比对（不一致 400 `send_gate_rejected`，不拿来变换），材料安全门同预览（`material_safety_blocked`）。`transform_gcode` 跟踪 `G90/G91`、`G92` 原点与模态，把每条移动换成绝对坐标并同时写 X、Y，圆弧 I/J 随之旋转缩放、`R` 乘缩放比例，方向不变；F、S、M、Z 原样保留；开头写 `G21` / `G90` / `G92 X0 Y0`，原文件的 `G92` 行只用于跟踪、不输出。以下情况 400 `registration_gcode_unsupported` 并写明行号：`G20` 英制、`G53` `G28` `G30` `G10` `G54`~`G59`、`G18` `G19` 等其他 G 代码、额外轴或 `K`、`$` 系统命令（含 `$J=`）、变量与表达式、相对模式下或改过 Z 原点后的 Z 移动、没有任何 X/Y 移动。扫描填充、光栅也按同一几何变换（整行连同两头过扫描一起旋转），扫描方向随之倾斜。
 
 成功 `result` 是**新的** workflow 记录（原任务与原文件不变）：`workflow_id`（新）、`status=preview_ready`、`source_type="gcode"`、`registered_from`（原任务）、`registration{source_workflow_id, source_gcode_file, source_gcode_sha256, design_points, measured_points, position_frame, start_point:"mark_2", allow_scale, rotation_deg（逆时针为正）, scale, scale_applied, design_distance_mm, measured_distance_mm, distance_ratio, residual_mm, offset_mm{x,y}（原起点落在第 2 个标记点的哪里）, moves, arcs}`（同时写入 `artifacts.registration`）、`artifacts`（新文件 `reg-….gcode` 的 `gcode_file` / `gcode_sha256` / 预览图 / `time_estimate`，另加按变换后刀路算的 `frame_mm`、`frame_hull_mm`，原任务的 `actual_params`，`origin="registration_mark_2"` 与 `origin_note`）、`confirmation_snapshot`（新文件与新 SHA）、`origin`（发起方）与 `web`。发送走 §3.6 `confirm_send` 全部门禁：必须 `confirmed=true`，物理文件 SHA-256 重算、握手、预检、行程复核（`job_exceeds_travel`）照旧，严格模式下按 R3 授权。生成本身不连接设备、不算 R3。
+
+**画板任务对位**（2026-11-16，技术书 r42）：原任务 `source_type="draw"`（`/api/draw/preview` 生成）时，结果另带 `draw_lab{job_summary, content_fingerprint, registered_from, uploaded_image_file, scene_file}`：`job_summary` 沿用原画板任务的作业摘要（材料、功率、速度、遍数、`can_send`），`actual_width_mm` / `actual_height_mm` 换成变换后 `frame_mm` 的宽高、`estimated_display` 换成新工时，另加 `registered:true`；`content_fingerprint` 是新刀路的 SHA-256（与原画板图案不同；同一份对位结果再次发送时画板页照常要求勾选“已移动材料或原点”）。`web` 另带原任务的 `material_preview_url`、`uploaded_image_url`、`scene_download_url`。其他来源的结果不带 `draw_lab`，字段与上文一致。
+
+### 3.13b 低功率点射 `POST /api/device/pointer-fire`（2026-11-16，对齐 LightBurn “Fire”，技术书 r42）
+
+用户决定（2026-11-16）：“二、值得做的优化（按收益排序）帮我优化一下吧，代码健康也完成一下吧”——补齐两点对位，没有红光指示的机器在对准标记时可以原地打一个极弱的点看清激光头位置。**会真实出光**，按发送链路对待。
+
+| 字段 | 类型 | 规则 |
+|---|---|---|
+| confirmed | bool | 必须是 JSON `true`，否则 400 `confirmation_required` |
+| power | int | 可选，默认 `10`；G-code S 标尺 0~1000 上的 **1..=10**（≤1%），下发时按设备 `$30/1000` 换算（`$30=255` 时 S10 → S3） |
+| duration_ms | int | 可选，默认 `100`；**10..=200** 毫秒 |
+| 连接字段 | — | §1.5 |
+
+`power` / `duration_ms` 必须是范围内的 JSON 整数，越界、小数、字符串、溢出一律在连接设备之前 400 `pointer_fire_params_invalid`，不截断；请求里的 `x`、`y`、`feed_rate` 等运动字段被忽略，激光头不移动。
+
+调用方：只接受工作台身份（桌面会话、本机回环、局域网配对）。内置语音、小智接入点 / MCP 桥、网关与审批重放（`CallerContext::Voice` / `McpBridge` / `Gateway` / `Approval`）**不论严格模式开关一律 403 `pointer_fire_not_allowed`**，不连接设备；`ToolCatalog` 与 `laser_safe_action_tool` 都没有点射动作。严格模式开启时只有桌面会话放行，本机回环与局域网配对 403 `strict_mode_blocked`（尽力记审计，类别记为 `safe_action`），**不创建审批**——事后批准的一次点射对“此刻对准标记”没有意义。
+
+下发的 G-code（`safe_action::pointer_fire_lines`，以 S10、100 ms 为例）：
+
+```
+M5 S0
+G1 F100
+M3 S10
+G4 P0.100
+M5 S0
+G0
+```
+
+`G1 F100` 不带坐标、不运动，只把模态切到直线：GRBL / FluidNC 激光模式（`$32=1`，握手要求）只在 G1/G2/G3 模态下让激光输出，G0 模态下 `M3` 不出光。必须用 **`M3` 恒定功率**：`M4` 动态功率按实际速度折算，原地不动时输出为 0，打不出点。`G4` 停留后 `M5 S0` 关光，最后 `G0` 把模态切回快速移动。这几行不到 50 字节，字符计数流控会在 `M3` 生效前把关光行一并写进控制器接收缓冲区，所以主机在点射中途断线也不会让激光一直亮着；之后照常 `G4 P0` 同步并等 Idle。
+
+流程与 §3.12 走边框相同（共用 `run_short_device_job`）：同设备在途作业 409 `device_busy` → 打开传输 → 握手 → `$CD` → Idle 预检（Alarm / Run / Jog / Hold / Door 等 400 `device_preflight_failed`，不出光）→ 登记为活动作业 `pointer-…`（`/api/jobs/stop-targets` 可见，顶栏急停、`/api/safe-action` 带 `job_id` 可停）→ `JobWorker::send_lines`。成功 `result`：`{message:"点射完成，激光已关闭", job_id, power, duration_ms}`；500 `pointer_fire_failed`（执行中出错，已补发实时 0x18）、409 `pointer_fire_cancelled`（被急停或取消）；后两种保留为“待确认停止”目标。0x18 软复位会关掉激光输出，但软件急停不代表物理停机，界面提示必要时按实体急停。未用真实机器验证点射的可见度与 M3 原地出光行为。
 
 ### 3.14 `/api/jev/status`、`/api/jev/reveal`、`/api/jev/test`、`/api/jev/feedback`
 

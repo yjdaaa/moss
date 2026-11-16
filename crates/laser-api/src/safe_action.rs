@@ -340,7 +340,6 @@ impl ApiService {
         object: &serde_json::Map<String, serde_json::Value>,
         ctx: &laser_contracts::CallerContext,
     ) -> Vec<u8> {
-        use std::sync::atomic::Ordering;
         let permit = match self.voice_permit(ctx) {
             Ok(permit) => permit,
             Err((status, body)) => return http_json(status, body),
@@ -389,16 +388,126 @@ impl ApiService {
             Ok(p) => p.lines,
             Err(e) => return http_json(400, failure(format!("走边框 G-code 校验失败: {e}"), None)),
         };
+        let job = ShortDeviceJob {
+            label: "走边框",
+            id_prefix: "framing-",
+            failed_code: "framing_failed",
+            cancelled_code: "framing_cancelled",
+            travel_check: Some(&framing_gcode),
+        };
+        let job_id = match self.run_short_device_job(object, permit, lines, &job) {
+            Ok(job_id) => job_id,
+            Err(response) => return response,
+        };
+        let bounds =
+            serde_json::json!({ "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y });
+        http_json(
+            200,
+            success(serde_json::json!({
+                "message": "走边框完成",
+                "job_id": job_id,
+                "laser_on": power > 0,
+                "bounds": bounds,
+            })),
+        )
+    }
 
-        let spec = match self.connection_spec_from_request(object) {
-            Ok(s) => s,
-            Err(e) => {
+    /// 低功率点射（2026-11-16，对齐 LightBurn “Fire”）：没有红光指示的机器在两点对位时，
+    /// 以极低功率原地打一个点看清激光头位置。只给工作台 / 画板界面的人手动用：
+    /// 语音、小智 MCP、网关与审批重放一律 403；严格模式下只有桌面会话可用（点射不进审批队列）。
+    /// 功率 S1..=10（0~1000 标尺，下发时按 `$30` 换算）、时长 10..=200 ms，越界拒绝不截断；
+    /// 必须 `confirmed=true`。走与走边框相同的设备占用、握手、Idle 预检与活动作业登记（`pointer-…`），
+    /// 关光行 `M5 S0` 与开光行一起进入控制器缓冲区；失败或取消时补发实时 0x18。
+    pub(crate) fn run_pointer_fire(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+        ctx: &laser_contracts::CallerContext,
+    ) -> Vec<u8> {
+        if !matches!(
+            ctx,
+            laser_contracts::CallerContext::Desktop
+                | laser_contracts::CallerContext::Loopback
+                | laser_contracts::CallerContext::Lan { .. }
+        ) {
+            return http_json(
+                403,
+                failure(
+                    "点射只能在工作台或画板界面由人手动操作，语音与 AI 工具不能出光",
+                    Some(serde_json::json!({"error_code": "pointer_fire_not_allowed"})),
+                ),
+            );
+        }
+        let (power, duration_ms) = match pointer_fire_params(object) {
+            Ok(values) => values,
+            Err(error) => {
                 return http_json(
                     400,
                     failure(
-                        format!("连接参数无效: {e}"),
-                        Some(serde_json::json!({"error_code": "connection_params_invalid"})),
+                        format!("点射参数无效：{error}"),
+                        Some(serde_json::json!({"error_code": "pointer_fire_params_invalid"})),
                     ),
+                );
+            }
+        };
+        if object.get("confirmed").and_then(|v| v.as_bool()) != Some(true) {
+            return http_json(
+                400,
+                failure(
+                    "点射会出光，请先确认（confirmed=true）",
+                    Some(serde_json::json!({"error_code": "confirmation_required"})),
+                ),
+            );
+        }
+        if let Err((status, body)) = self.require_desktop_when_strict(ctx, "pointer_fire") {
+            return http_json(status, body);
+        }
+        let lines = pointer_fire_lines(power, duration_ms);
+        let job = ShortDeviceJob {
+            label: "点射",
+            id_prefix: "pointer-",
+            failed_code: "pointer_fire_failed",
+            cancelled_code: "pointer_fire_cancelled",
+            travel_check: None,
+        };
+        match self.run_short_device_job(object, None, lines, &job) {
+            Ok(job_id) => http_json(
+                200,
+                success(serde_json::json!({
+                    "message": "点射完成，激光已关闭",
+                    "job_id": job_id,
+                    "power": power,
+                    "duration_ms": duration_ms,
+                })),
+            ),
+            Err(response) => response,
+        }
+    }
+
+    /// 走边框与点射共用的短作业执行：同设备占用检查、打开传输、有界握手、Idle 预检、
+    /// （可选）行程复核，登记为活动作业后流式发送；完成后解除占用，失败或取消时补发 0x18
+    /// 并原子转为“待确认停止”。成功返回作业编号，失败返回完整 HTTP 响应。
+    fn run_short_device_job(
+        &self,
+        object: &serde_json::Map<String, serde_json::Value>,
+        permit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        lines: Vec<String>,
+        job_spec: &ShortDeviceJob<'_>,
+    ) -> Result<String, Vec<u8>> {
+        use std::sync::atomic::Ordering;
+        let label = job_spec.label;
+        let failed = |status: u16, message: String, code: &str| {
+            Err(http_json(
+                status,
+                failure(message, Some(serde_json::json!({"error_code": code}))),
+            ))
+        };
+        let spec = match self.connection_spec_from_request(object) {
+            Ok(s) => s,
+            Err(e) => {
+                return failed(
+                    400,
+                    format!("连接参数无效: {e}"),
+                    "connection_params_invalid",
                 );
             }
         };
@@ -406,15 +515,13 @@ impl ApiService {
         if let Ok(jobs) = self.active_jobs.lock()
             && let Some(job) = jobs.values().find(|job| job.target == target)
         {
-            return http_json(
+            return failed(
                 409,
-                failure(
-                    format!(
-                        "设备 {target} 正在执行 {}，请等待完成或先取消",
-                        job.workflow_id
-                    ),
-                    Some(serde_json::json!({"error_code": "device_busy"})),
+                format!(
+                    "设备 {target} 正在执行 {}，请等待完成或先取消",
+                    job.workflow_id
                 ),
+                "device_busy",
             );
         }
         let transport: std::sync::Arc<dyn laser_device::DeviceTransport> = {
@@ -426,24 +533,20 @@ impl ApiService {
             match (self.transport_factory)(&spec) {
                 Ok(t) => std::sync::Arc::from(t),
                 Err(e) => {
-                    return http_json(
+                    return failed(
                         400,
-                        failure(
-                            format!("设备连接失败 ({target}): {e}"),
-                            Some(serde_json::json!({"error_code": "device_unreachable"})),
-                        ),
+                        format!("设备连接失败 ({target}): {e}"),
+                        "device_unreachable",
                     );
                 }
             }
         };
         let mut device = laser_device::DeviceConnection::new(transport.clone());
         if let Err(e) = device.handshake_with_deadline(std::time::Duration::from_secs(3)) {
-            return http_json(
+            return failed(
                 400,
-                failure(
-                    format!("设备握手失败 ({target}): {e}"),
-                    Some(serde_json::json!({"error_code": "device_not_ready"})),
-                ),
+                format!("设备握手失败 ({target}): {e}"),
+                "device_not_ready",
             );
         }
         device.load_features(std::time::Duration::from_secs(3));
@@ -451,35 +554,27 @@ impl ApiService {
         {
             Ok(scale) => scale,
             Err(e) => {
-                return http_json(
+                return failed(
                     400,
-                    failure(
-                        format!("走边框前检查未通过 ({target}): {e}"),
-                        Some(serde_json::json!({"error_code": "device_preflight_failed"})),
-                    ),
+                    format!("{label}前检查未通过 ({target}): {e}"),
+                    "device_preflight_failed",
                 );
             }
         };
-        if let Err(error) = check_job_fits_machine(&framing_gcode, &device.travel_limits) {
-            return http_json(
-                400,
-                failure(
-                    format!("{error}（{target}）"),
-                    Some(serde_json::json!({"error_code": "job_exceeds_travel"})),
-                ),
-            );
+        if let Some(gcode) = job_spec.travel_check
+            && let Err(error) = check_job_fits_machine(gcode, &device.travel_limits)
+        {
+            return failed(400, format!("{error}（{target}）"), "job_exceeds_travel");
         }
         if permit.as_ref().is_some_and(|p| !p.load(Ordering::Acquire)) {
-            return http_json(
+            return failed(
                 403,
-                failure(
-                    "预检期间设备授权已撤销，未开始走边框",
-                    Some(serde_json::json!({"error_code":"voice_session_revoked"})),
-                ),
+                format!("预检期间设备授权已撤销，未开始{label}"),
+                "voice_session_revoked",
             );
         }
 
-        let job_id = next_workflow_id().replacen("wf-", "framing-", 1);
+        let job_id = next_workflow_id().replacen("wf-", job_spec.id_prefix, 1);
         let progress = std::sync::Arc::new(laser_device::JobProgress::default());
         progress.total_lines.store(lines.len(), Ordering::Relaxed);
         let cancel = laser_device::CancellationToken::default();
@@ -498,15 +593,13 @@ impl ApiService {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(busy) = jobs.values().find(|j| j.target == target) {
-                return http_json(
+                return failed(
                     409,
-                    failure(
-                        format!(
-                            "设备 {target} 正在执行 {}，请等待完成或先取消",
-                            busy.workflow_id
-                        ),
-                        Some(serde_json::json!({"error_code": "device_busy"})),
+                    format!(
+                        "设备 {target} 正在执行 {}，请等待完成或先取消",
+                        busy.workflow_id
                     ),
+                    "device_busy",
                 );
             }
             let mut uncertain = self
@@ -532,22 +625,12 @@ impl ApiService {
                     .with_scale_factor(device_scale / 1000.0);
             worker.send_lines(lines)
         };
-        let bounds =
-            serde_json::json!({ "min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y });
         match outcome {
             Ok(_) if !cancel.is_cancelled() => {
                 if let Ok(mut jobs) = self.active_jobs.lock() {
                     jobs.remove(&job_id);
                 }
-                http_json(
-                    200,
-                    success(serde_json::json!({
-                        "message": "走边框完成",
-                        "job_id": job_id,
-                        "laser_on": power > 0,
-                        "bounds": bounds,
-                    })),
-                )
+                Ok(job_id)
             }
             result => {
                 // 取消或失败都不能证明机器已停：在同锁对内原子完成 active -> uncertain 交接，杜绝急停空窗。
@@ -581,28 +664,88 @@ impl ApiService {
                 drop(job);
                 drop(transport);
                 match result {
-                    Err(e) if !cancel.is_cancelled() => http_json(
+                    Err(e) if !cancel.is_cancelled() => Err(http_json(
                         500,
                         failure(
-                            format!("走边框执行失败，已发送急停 0x18，请到设备旁确认: {e}"),
+                            format!("{label}执行失败，已发送急停 0x18，请到设备旁确认: {e}"),
                             Some(
-                                serde_json::json!({"error_code": "framing_failed", "job_id": job_id}),
+                                serde_json::json!({"error_code": job_spec.failed_code, "job_id": job_id}),
                             ),
                         ),
-                    ),
-                    _ => http_json(
+                    )),
+                    _ => Err(http_json(
                         409,
                         failure(
-                            "走边框已取消，急停 0x18 已发送，请到设备旁确认机器已停",
+                            format!("{label}已取消，急停 0x18 已发送，请到设备旁确认机器已停"),
                             Some(
-                                serde_json::json!({"error_code": "framing_cancelled", "job_id": job_id}),
+                                serde_json::json!({"error_code": job_spec.cancelled_code, "job_id": job_id}),
                             ),
                         ),
-                    ),
+                    )),
                 }
             }
         }
     }
+}
+
+/// 走边框 / 点射这类短作业的标签与错误码。
+pub(crate) struct ShortDeviceJob<'a> {
+    /// 出现在错误文案里的动作名
+    pub label: &'a str,
+    /// 活动作业编号前缀（`framing-` / `pointer-`），急停与停止目标列表据此显示
+    pub id_prefix: &'a str,
+    pub failed_code: &'a str,
+    pub cancelled_code: &'a str,
+    /// 需要按固件行程复核范围的 G-code（点射不运动，不复核）
+    pub travel_check: Option<&'a str>,
+}
+
+/// 点射功率上限：S10，即 0~1000 标尺的 1%（下发时按设备 `$30` 等比换算）。
+pub(crate) const POINTER_FIRE_MAX_POWER: i32 = 10;
+/// 点射时长上限（毫秒）。
+pub(crate) const POINTER_FIRE_MAX_DURATION_MS: i32 = 200;
+const POINTER_FIRE_MIN_DURATION_MS: i32 = 10;
+const POINTER_FIRE_DEFAULT_DURATION_MS: i32 = 100;
+
+/// 读取点射的 `power`（缺省上限 S10）与 `duration_ms`（缺省 100）。必须是 JSON 整数，
+/// `power` 1..=10、`duration_ms` 10..=200；越界、小数、字符串一律拒绝，不截断。
+pub(crate) fn pointer_fire_params(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(i32, i32), String> {
+    let read = |key: &str, default: i32, min: i32, max: i32| {
+        let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
+            return Ok(default);
+        };
+        value
+            .as_i64()
+            .and_then(|raw| i32::try_from(raw).ok())
+            .filter(|parsed| (min..=max).contains(parsed))
+            .ok_or_else(|| format!("{key} 必须是 {min}..={max} 的整数，收到 {value}"))
+    };
+    let power = read("power", POINTER_FIRE_MAX_POWER, 1, POINTER_FIRE_MAX_POWER)?;
+    let duration_ms = read(
+        "duration_ms",
+        POINTER_FIRE_DEFAULT_DURATION_MS,
+        POINTER_FIRE_MIN_DURATION_MS,
+        POINTER_FIRE_MAX_DURATION_MS,
+    )?;
+    Ok((power, duration_ms))
+}
+
+/// 点射的 G-code：先确保关光；`G1 F100`（不带坐标，不运动）切到直线模态——GRBL / FluidNC 激光模式
+/// （`$32=1`）只在 G1/G2/G3 模态下让激光输出，G0 模态下 M3 不出光；用 `M3` 恒定功率而不是 `M4`：
+/// M4 动态功率按实际速度折算，原地不动时输出为 0，打不出点。`G4` 停留指定毫秒后 `M5 S0` 关光，
+/// 最后 `G0` 把模态切回快速移动。这几行一共不到 50 字节，字符计数流控会在 `M3` 生效前把
+/// 关光行一并写进控制器接收缓冲区。
+pub(crate) fn pointer_fire_lines(power: i32, duration_ms: i32) -> Vec<String> {
+    vec![
+        "M5 S0".to_owned(),
+        "G1 F100".to_owned(),
+        format!("M3 S{power}"),
+        format!("G4 P{:.3}", f64::from(duration_ms) / 1000.0),
+        "M5 S0".to_owned(),
+        "G0".to_owned(),
+    ]
 }
 
 pub(crate) fn safe_action_approval_summary(

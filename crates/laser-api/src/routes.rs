@@ -923,6 +923,15 @@ impl ApiService {
                 )
             });
         }
+        // 低功率点射（2026-11-16）：只给界面上的人用，语音 / MCP / 网关 / 审批重放一律拒绝
+        if method == "POST" && route == "/api/device/pointer-fire" {
+            let mut object = match parse_json_object(&body[..content_length], 64 * 1024) {
+                Ok(value) => value,
+                Err(error) => return http_json(400, failure(error, None)),
+            };
+            strip_identity_fields(&mut object);
+            return self.run_pointer_fire(&object, &ctx);
+        }
         // 两点对位（2026-11-16）：读位置只发状态查询；生成对位预览是新的 preview_ready workflow，发送照常确认
         if method == "POST"
             && matches!(
